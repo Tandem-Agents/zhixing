@@ -53,6 +53,7 @@ import type {
   ControlResult,
   DispatchConflictProof,
   DispatchRejectionProof,
+  InteractionMirrorBatch,
   MutationBatch,
   SupersedeProof,
 } from "./records.js";
@@ -113,6 +114,7 @@ export interface WireSchemaMap {
   SupersedeProof: SupersedeProof;
   CancelProofBody: CancelProofBody;
   AssignmentRecord: AssignmentRecord;
+  InteractionMirrorBatch: InteractionMirrorBatch;
   MutationBatch: MutationBatch;
   LedgerSnapshot: LedgerSnapshot;
   LedgerEvidencePage: LedgerEvidencePage;

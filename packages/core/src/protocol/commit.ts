@@ -9,6 +9,7 @@ import type {
   TranscriptRunRecord,
 } from "../contracts/index.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
+import { validateMessages } from "./values.js";
 
 type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
 type ConversationSealedBundle = SealedBundle & { body: ConversationCommitBundle };
@@ -62,6 +63,19 @@ export function validateMutationBatch(value: MutationBatch): MutationBatch {
     throw new TypeError("Mutation batch digest does not match its payload");
   }
   return snapshot(value, "Mutation batch");
+}
+
+/**
+ * Validates one staged-mutation record without revalidating its assignment
+ * prefix. Sequence continuity and request-id uniqueness remain the caller's
+ * projection responsibility; the closed mutation union is validated here once.
+ */
+export function validateStagedMutationRecord(
+  value: unknown,
+): StagedMutationRecord {
+  const record = snapshot(value, "Staged mutation") as StagedMutationRecord;
+  validateStagedMutationShape(record);
+  return record;
 }
 
 export function mutationBatchArtifact(batch: MutationBatch): ArtifactValue<MutationBatch> {
@@ -206,7 +220,7 @@ export function validateTranscriptRunRecord(
   if (value.messages.length === 0) {
     throw new TypeError("Transcript run messages must contain the originating user message");
   }
-  validateTranscriptMessages(value.messages);
+  validateMessages(value.messages, "Transcript run messages");
   if (value.messages[0]?.role !== "user") {
     throw new TypeError("Transcript run must begin with the originating user message");
   }
@@ -241,89 +255,6 @@ export function validateTranscriptRunRecord(
     assertPositiveInteger(value.perspectives.perspectiveCount, "Perspective count");
   }
   return snapshot(value, "Transcript run record");
-}
-
-function validateTranscriptMessages(messages: readonly unknown[]): void {
-  for (const message of messages) {
-    assertPlainObject(message, "Transcript message");
-    assertExactKeys(message, ["content", "role"], "Transcript message");
-    if (message.role !== "user" && message.role !== "assistant") {
-      throw new TypeError("Transcript message role is invalid");
-    }
-    if (!Array.isArray(message.content)) {
-      throw new TypeError("Transcript message content must be an array");
-    }
-    for (const block of message.content) validateTranscriptContentBlock(block);
-  }
-}
-
-function validateTranscriptContentBlock(value: unknown): void {
-  assertPlainObject(value, "Transcript content block");
-  switch (value.type) {
-    case "text":
-      assertExactKeys(value, ["text", "type"], "Transcript text block");
-      assertString(value.text, "Transcript text");
-      return;
-    case "image":
-      assertExactKeys(value, ["source", "type"], "Transcript image block");
-      assertPlainObject(value.source, "Transcript image source");
-      if (value.source.type === "base64") {
-        assertExactKeys(
-          value.source,
-          ["data", "mediaType", "type"],
-          "Transcript base64 image source",
-        );
-        assertString(value.source.mediaType, "Transcript image media type");
-        assertString(value.source.data, "Transcript image data");
-        return;
-      }
-      if (value.source.type === "url") {
-        assertExactKeys(value.source, ["type", "url"], "Transcript URL image source");
-        assertString(value.source.url, "Transcript image URL");
-        return;
-      }
-      throw new TypeError("Transcript image source type is invalid");
-    case "tool_use":
-      assertExactKeys(value, ["id", "input", "name", "type"], "Transcript tool-use block");
-      assertIdentifier(value.id, "Transcript tool-use id");
-      assertIdentifier(value.name, "Transcript tool name");
-      assertPlainObject(value.input, "Transcript tool input");
-      snapshot(value.input, "Transcript tool input");
-      return;
-    case "tool_result":
-      assertExactKeys(
-        value,
-        ["content", "isError", "toolUseId", "type"],
-        "Transcript tool-result block",
-        true,
-      );
-      if (!("content" in value) || !("toolUseId" in value)) {
-        throw new TypeError("Transcript tool-result block is incomplete");
-      }
-      assertIdentifier(value.toolUseId, "Transcript tool-result id");
-      assertString(value.content, "Transcript tool-result content");
-      if (value.isError !== undefined && typeof value.isError !== "boolean") {
-        throw new TypeError("Transcript tool-result error flag must be boolean");
-      }
-      return;
-    case "thinking":
-      assertExactKeys(
-        value,
-        ["signature", "thinking", "type"],
-        "Transcript thinking block",
-        true,
-      );
-      if (!("thinking" in value)) {
-        throw new TypeError("Transcript thinking block is incomplete");
-      }
-      assertString(value.thinking, "Transcript thinking content");
-      if (value.signature !== undefined) {
-        assertString(value.signature, "Transcript thinking signature");
-      }
-      return;
-    default:
-      throw new TypeError("Transcript content block type is invalid");
-  }
 }
 
 function validateTranscriptUsage(value: unknown): void {
@@ -363,41 +294,46 @@ function validateStagedMutations(
   let expectedSeq = 1;
   const requestIds = new Set<string>();
   for (const record of records) {
-    assertPlainObject(record, "Staged mutation");
-    assertExactKeys(
-      record,
-      ["domain", "expected", "mutation", "requestId", "seq", "t", "v"],
-      "Staged mutation",
-      true,
-    );
-    if (record.v !== 1 || record.t !== "staged-mutation") {
-      throw new TypeError("Mutation batch contains a non-staged record");
-    }
+    validateStagedMutationShape(record);
     if (record.seq !== expectedSeq) {
       throw new TypeError("Staged mutation sequence must be contiguous from one");
     }
     expectedSeq += 1;
-    assertIdentifier(record.requestId, "Staged mutation requestId");
     if (requestIds.has(record.requestId)) {
       throw new TypeError("Staged mutation requestId must be unique within an assignment");
     }
     requestIds.add(record.requestId);
-    assertPlainObject(record.mutation, "Staged mutation payload");
-    if (record.domain === "session") {
-      if (record.expected !== undefined) {
-        throw new TypeError("Session staged mutation cannot declare anchor authority");
-      }
-      validateSessionStagedMutation(record.mutation);
-    } else if (record.domain === "global") {
-      assertPlainObject(record.expected, "Global staged mutation authority");
-      assertExactKeys(record.expected, ["anchorEpoch"], "Global staged mutation authority");
-      assertNonNegativeInteger(record.expected.anchorEpoch, "Global anchor epoch");
-      validateGlobalStagedMutation(record.mutation);
-    } else {
-      throw new TypeError("Staged mutation domain is invalid");
-    }
   }
   void assignmentId;
+}
+
+function validateStagedMutationShape(record: StagedMutationRecord): void {
+  assertPlainObject(record, "Staged mutation");
+  assertExactKeys(
+    record,
+    ["domain", "expected", "mutation", "requestId", "seq", "t", "v"],
+    "Staged mutation",
+    true,
+  );
+  if (record.v !== 1 || record.t !== "staged-mutation") {
+    throw new TypeError("Mutation batch contains a non-staged record");
+  }
+  assertPositiveInteger(record.seq, "Staged mutation sequence");
+  assertIdentifier(record.requestId, "Staged mutation requestId");
+  assertPlainObject(record.mutation, "Staged mutation payload");
+  if (record.domain === "session") {
+    if (record.expected !== undefined) {
+      throw new TypeError("Session staged mutation cannot declare anchor authority");
+    }
+    validateSessionStagedMutation(record.mutation);
+  } else if (record.domain === "global") {
+    assertPlainObject(record.expected, "Global staged mutation authority");
+    assertExactKeys(record.expected, ["anchorEpoch"], "Global staged mutation authority");
+    assertNonNegativeInteger(record.expected.anchorEpoch, "Global anchor epoch");
+    validateGlobalStagedMutation(record.mutation);
+  } else {
+    throw new TypeError("Staged mutation domain is invalid");
+  }
 }
 
 function validateSessionStagedMutation(mutation: StagedMutationRecord["mutation"]): void {
@@ -514,7 +450,7 @@ function validateGlobalStagedMutation(mutation: StagedMutationRecord["mutation"]
         true,
       );
       assertString(mutation.name, "Workscene name");
-      if (mutation.workspace) validateWorkspace(mutation.workspace);
+      if (mutation.workspace !== undefined) validateWorkspace(mutation.workspace);
       return;
     case "workscene-rename":
       assertExactKeys(
@@ -799,7 +735,7 @@ function assertConversationBody(
       throw new TypeError("Conversation content assets must be sorted by digest");
     }
   }
-  if (value.mutationBatch) {
+  if (value.mutationBatch !== undefined) {
     assertExactKeys(
       value.mutationBatch,
       ["globalCount", "ref", "sessionCount"],

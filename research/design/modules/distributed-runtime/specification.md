@@ -26,12 +26,12 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 
 - 规范化：wire 与签名输入采用 UTF-8 的 RFC 8785（JCS）规范化 JSON；uint64 一律以规范十进制字符串上 wire，避免跨语言精度分歧。
 - 签名输入固定为 `"zhixing:<schemaId>:v<version>" + 0x00 + canonicalPayload`，覆盖除 `signature` 外的全部字段；`schemaId + version` 与 DTO 顶层版本一致（域分离，杜绝跨类型/版本重放）。
-- 验证端拒绝未知字段；字段演进只经顶层 `v` 升版（本文全部跨 wire DTO 顶层带 `v: 1`，行文省略不重复标注）。
+- 验证端对完整对象图递归拒绝未知字段与错误类型；字段演进只经顶层 `v` 升版（本文全部跨 wire DTO 顶层带 `v: 1`，行文省略不重复标注）。所有嵌套判别联合、数组元素、可选对象均复用其唯一版本化 validator；“字段存在”只按 `!== undefined` 判定，禁止以 truthy/falsy 绕过对象校验。
 - 摘要域单源：`D(schemaId, v, payload) = H(UTF8("zhixing:" + schemaId + ":v" + v) || 0x00 || JCS(payload))`；原始内容摘要记为 `B(bytes) = H(bytes)`。两者输出均为 §1.1 `Digest`。`D` 用于协议对象/子对象身份，`B` 只用于不可变原始字节；禁止以裸 `H(JCS(...))` 新造协议摘要。
 - 有密钥认证域单源：`K(schemaId,v,key,payload) = MAC(key, UTF8("zhixing:" + schemaId + ":v" + v) || 0x00 || JCS(payload))`，输出 §1.1 `KeyConfirmation`；字段自身及同层 finished/authenticator 集合不得进入 payload。当前仅注册 `PairingJoin.confirmation` 与 `PairingFinished.*.keyConfirm`，不得以 `Digest` 代替或把无密钥 `D` 当作密钥确认。
 - **自摘要**：先从完整对象排除 `signature` 与正在计算的自摘要字段，再计算 `D`；随后签名覆盖**含已计算摘要**在内、仅排除 `signature` 的完整对象。当前自摘要注册表唯一包含：`TrustRuleSnapshot.digest`、`ResourceLease.digest`、`UsageReport.digest`、`ConfigAssetRecord.digest`、`CommitEnvelope.envelopeDigest`、`MutationBatch.digest`、`ExecutionManifest.digest`、`JobCommitFence.digest`、`SealedBundle.digest`、`CheckpointEnvelope.digest`。未登记的字段不得被解释为“包含它的对象之摘要”。
-- **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SourceFreezeProof` 与 `PermissionSnapshotLease`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
-- **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
+- **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SourceFreezeProof`、`PermissionSnapshotLease` 与 `InteractionMirrorBatch`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`、mirror 耐久请求身份 = `D("InteractionMirrorBatch",1,InteractionMirrorBatch 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
+- **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。interaction 审计链固定 `M0 = D("InteractionMirrorSeed",1,{assignmentId})`，每个 `interaction-finished` 按完成次序分配连续 ordinal，并计算 `Mn = D("InteractionMirrorStep",1,{previous:M(n-1),entry:{ordinal,seq,requestId,kind,outcome}})`；`at` 由批次签名绑定但不进入链步（共享 assignment reducer 无需日志 envelope 时间即可复算）。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
 - **内容与引用摘要**：`ArtifactRef.digest`、`ContentAssetRef.digest`、`CheckpointEnvelope.chunks[].digest`、`EvidenceRequest.items[].digestHint`、证据 `contentDigest`、副作用 `resultDigest`、投递回执 `receipt.digest` 与恢复验证 `nonceDigest` 恒为各自所指不可变原始字节的 `B(bytes)`；`PairingOffer.issuer.keyFingerprint = B(规范公钥字节)`。`manifestDigest / snapshotDigest / parentDigest / reportDigest / envelopeDigest / requestDigest` 等引用字段必须等于目标对象按本表得到的摘要，不得对引用字段所在对象再哈希。`FinalOutboxRecord.digest / FinalFrame.digest` 固定引用 `SealedBundle.digest`；`AssetIndexEntry.digest` 固定引用对应资产 artifact 的 `ArtifactRef.digest`。
 - **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution 摘要、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
 - 引用目标注册表（同名字段按所在 DTO 取对应行，禁止按名字猜）：
@@ -48,7 +48,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
   | `baseDigest / targetDigest`；`JobCommitFence.deliveryPlanDigest` | `D("WindowSnapshot",1,{windowEpoch,messages})`；`TaskDefinitionBody.deliveryPlan.planDigest`（同一 occurrence 两字段必须相等） |
   | `FinalOutboxRecord.digest / FinalFrame.digest / AssetIndexEntry.digest` | `SealedBundle.digest / SealedBundle.digest / 对应 ArtifactRef.digest` |
 
-- 验证边界：任何会改变耐久状态或激活能力的消费者，必须依序完成 DTO/version/未知字段校验 → 按注册类别复算摘要 → 验签（如有）→ 逐项核对引用目标；未知摘要域、缺摘要、前像缺字段、复算不等或引用错目标均在落盘、激活、CAS、对账或恢复前 fail-closed，禁止按字段名猜测或兼容性回退。
+- 验证边界：任何会改变耐久状态或激活能力的消费者，必须依序完成 DTO/version/未知字段校验 → 按注册类别复算摘要 → 验签（如有）→ 逐项核对引用目标；未知摘要域、缺摘要、前像缺字段、复算不等或引用错目标均在落盘、激活、CAS、对账或恢复前 fail-closed，禁止按字段名猜测或兼容性回退。`Message.tool_use.input` 虽是开放 JSON 子树，仍必须递归满足规范 JSON（plain object / dense array / JSON primitive；禁止 accessor、Date、BigInt、undefined、稀疏数组及非规范数值），进程内、耐久重放与 mesh 共用同一验证器。
 - 验收：同一 payload 经进程内与 mesh adapter 得到同一摘要；逐字段篡改、错误纳入自身摘要或 `signature`、漏字段、跨 schema/version 重放全部拒绝；每个 `Digest` 类型字段在上述注册表恰命中一类，`KeyConfirmation` 不得命中。随 S2 建立跨语言固定向量，后续节点复用。
 
 ### 1.3 外部符号引用表（引用不复制；字段级定义住权威模块，本文 contracts 以 `import type` 按符号消费）
@@ -335,8 +335,10 @@ type AuthorityCapability =
       anchorEpoch: number; methods: AssignmentMethodId[]; resources: ResourceSelector[];
       assignmentId: string; issuedAt: IsoTime; expiry: IsoTime; signature: Signature };
 // 激活：签名本身只产生候选；owner 侧 guard 查本地 run / job `assigned`，executor 侧 guard 查 assignment 流 `received.activation` 的 owner 签名证明；
-// 两者都只在 capId 被激活清单收录且 assignmentId / executorId / scope 全等时放行。事实/证明不存在、未列 capId或已 superseded / revoked 均拒绝。
-// 吊销：owner 在对应流写 `capability-revoked`（按 capId / assignmentId）并推送通告，guard 立即拒绝；
+// 两者都只在 capId 被激活清单收录且 assignmentId / executorId / scope 全等时放行。事实/证明不存在、未列 capId 或已 superseded / revoked 均不得取得新的活跃写权。
+// 吊销：owner 在对应流写 `capability-revoked`（按 capId / assignmentId）并推送通告，guard 立即拒绝 active 调用；
+// RunSubmissionPort 的 settlement / durable-replay / durable-rejection 不是恢复活跃写权，而是由 owner 在同一串行前缀先证明“当前 attempt 的可信终结证据只会收窄状态”“请求已被耐久事实完全吸收、零追加”或“耐久栅栏决定零写入拒绝”后，
+// 仅以原 capability 验历史 assignment/executor/method/scope 身份；其严格边界见 §3.7，禁止 adapter/调用方自报模式或把该例外用于 session/global/resource 新写。
 // 推送不可达由短 TTL 兜底——与 DataPlaneTicket 吊销同构。重派 / 取消 / 提交 / uncertain 用户裁决关闭旧 assignment 即吊销其全部 capability。
 
 type AdmissionClass = "interactive"|"advancement"|"scheduler"|"orchestration";
@@ -734,27 +736,37 @@ interface RunExecutorPort {
 
 owner 只在当前仍为上述未 ACK dispatched assignment 时消费 conflict：先验 executor / assignment / signature / received 前缀链，要求 accepted / conflicting 两份 ActivationPayload 摘要不等，再要求 proof.conflictingDispatchRef / conflictingActivationDigest 等于本次实际发送二元组。随后从本地耐久 assigned + 所指 CommitEnvelope / DispatchEnvelope 重算期望 acceptedDispatchRef / acceptedActivationDigest：① accepted 侧全等期望，证明 executor 已接收原权威派发——同一 CommitEnvelope 写 `dispatch-conflict(acked-original) + dispatch-acked`，停止 outbox；② accepted 侧任一不等，说明 executor 接收事实与 owner 权威派发不一致——同一 CommitEnvelope 原子写 `dispatch-conflict(opened-uncertain) + state(uncertain) + UncertainResolutionFact(cause=dispatch-conflict) + cancel-fence + assigned.capIds / 活跃 tickets 的 revoked 记录`，停止派发 outbox与该 assignment 的 ControlLease 续期；fsync 后以该 cancel-fence 重驱 executor 止损，禁止仅凭 conflict proof 自动提交迟到 bundle或重派。资源租约此时不提前 settle / release（世界副作用与最终 usage 尚未证实），只在取得既有终结证明或用户裁决时按 §十收束。proof 无效、两侧摘要相等、conflicting 侧不对应本次发送或 response.error 的 code / retryable 与 proof.error 不等时零写入，走既有超时 / fence 路径；assignment 已 ACK、已离开 dispatched 或已终态时，迟到 conflict 不得再改变权威状态。`DispatchConflictProof` 永非 `AssignmentTerminationProof`，任何分支都不能据它重派。
 
-`dispatch-conflict` 止损 outbox 的唯一谓词为：存在当前打开的 `dispatch-conflict(opened-uncertain)` 与其同 envelope `cancel-fence`，且尚无同 openFactDigest 的 `dispatch-conflict-contained`、`assignment-superseded` 或用户 resolution。满足时按有界退避并在 executor 重连时重发**同一 fence**（每次可重签短期 OwnerControlGrant，不得换 requestId / fenceSeq）；executor 必须先在 assignment 流 fsync `halted(proof)` 再调用 `submitCancelProof`，同 fence 重入若已存在 halted 则读取并重提同一规范 proof、零追加。RPC 成功本身不停止，只有 owner 全验 proof 并耐久上述停止事实才停止，因此 executor 写 proof 后、提交前或响应前崩溃均可收敛。`not-started` proof 是总纲“事后证实未启动”的终结证明：同一 CommitEnvelope 写 contained + resolution(`proven-not-started-redispatched`) + assignment-superseded + 旧租约终结并转 queued，之后才可建新 assignment；`halted` proof 只写 contained、停止止损 outbox并作为用户核验与 usage 对账证据，状态仍 uncertain，禁止伪装成 cancelled。无 proof 时义务不丢弃、仅有界退避；capability / ticket 吊销仍由各自 revoked 记录重驱并以短 TTL 兜底。
+`dispatch-conflict` 止损 outbox 的唯一谓词为：存在当前打开的 `dispatch-conflict(opened-uncertain)` 与其同 envelope `cancel-fence`，且尚无同 openFactDigest 的 `dispatch-conflict-contained`、`assignment-superseded` 或用户 resolution。满足时按有界退避并在 executor 重连时重发**同一 fence**（每次可重签短期 OwnerControlGrant，不得换 requestId / fenceSeq）；executor 若因取消新结束 pending interaction 或已有 finished 尚未镜像，必须先以 §3.7 的签名连续审计批次在该耐久 cancel-fence 下完成 audit-only settlement，再重入同一取消原因形成唯一 `halted(proof)`，最后调用 `submitCancelProof`。该 mirror 例外只推进 owner 审计前缀，绝不恢复 revoked capability 的 started/bundle/session/global/resource 写权。任一取消源重入若已存在 halted 则读取并重提最先耐久的同一规范 proof、零追加。owner 必须接受严格后继 conflict received 前缀的两类 CancelProof：owner-fence proof 绑定当前耐久 fence；abort-ticket proof 在在线接收时重新鉴权 ticket、落入 owner 日志后由其签名 assignment / executor / epoch 绑定机械重放。不得要求 executor 为后到的 owner fence 生成第二个终态或替换先到的 abort-ticket proof。RPC 成功本身不停止，只有 owner 全验 proof 并耐久上述停止事实才停止，因此 executor 写 proof 后、提交前或响应前崩溃均可收敛。`not-started` proof 是总纲“事后证实未启动”的终结证明：CancelProof(not-started) 或已有 `supersede-requested` 所绑定的 SupersedeProof(not-started-fenced) 只在账本链严格后继于 conflict 的 received 前缀时，才可同一 CommitEnvelope 写**携同一规范 proof**的 contained + resolution(`proven-not-started-redispatched`) + assignment-superseded + 旧租约终结并转 queued；任一项缺失或 proof 不同均拒绝，之后才可建新 assignment。DispatchRejectionProof 只证明本次发送未接收，不能否定 conflict 已证明的另一 received 前缀，故不得解析该 conflict。`halted` proof 只写 contained、停止止损 outbox并作为用户核验与 usage 对账证据，状态仍 uncertain，禁止伪装成 cancelled。无 proof 时义务不丢弃、仅有界退避；capability / ticket 吊销仍由各自 revoked 记录重驱并以短 TTL 兜底。
 
-首次接收在写 `received` 前校验失败才先写 `dispatch-rejected`，再返回 `rejected-before-received + DispatchRejectionProof`，响应 error 必须与 proof.error 全等。响应丢失时 owner 仅据上述 outbox 谓词重发；supersede fence 必须先写 `supersede-fenced`（无 received 时即耐久 tombstone）再返回证明。`SupersedeProof(already-started)` 等价于可信 started 上报，owner 转 running 并保留原 assignment，不得写 superseded。owner 只有持 `AssignmentTerminationProof` 才可在同一 CommitEnvelope 写 `assignment-superseded`、吊销该 assignment 全部 capability 与未 revoked ticket、终结根租约并创建下一 assignment；query 快照、DispatchConflictProof 或超时本身绝不授权重派。
+首次接收在写 `received` 前校验失败才先写 `dispatch-rejected`，再返回 `rejected-before-received + DispatchRejectionProof`，响应 error 必须与 proof.error 全等。响应丢失时 owner 仅据上述 outbox 谓词重发；supersede fence 必须先写 `supersede-fenced`（无 received 时即耐久 tombstone）再返回证明。`SupersedeProof(already-started)` 在正常 dispatched 态等价于可信 started 上报，owner 转 running 并保留原 assignment，不得写 superseded；若同一 supersede 请求在响应丢失期间已因其他证据进入 uncertain，outbox 仍以原 fence 重驱，not-started 终结证明按既有原子解析转 queued，already-started 则写 `supersede-started-observed` 并保持 uncertain，重启后以该记录停止重驱，禁止降格回 running。owner 只有持 `AssignmentTerminationProof` 才可在同一 CommitEnvelope 写 `assignment-superseded`、吊销该 assignment 全部 capability 与未 revoked ticket、终结根租约并创建下一 assignment；query 快照、DispatchConflictProof 或超时本身绝不授权重派。
+
+正常取消从 dispatched / running / cancel-requested 进入 cancelled 时，owner 必须在同一 CommitEnvelope 写 `cancel-proof-accepted + capability/ticket revoked + state(cancelled) + 租约终结`；`cancel-proof-accepted` 保留完整规范 CancelProofBody，是 owner 侧证明身份、usageFinal 对账与机械重放守卫。相同签名载荷（signature 可重签）幂等回放，异载荷不得被“已经 cancelled”短路为成功；queued 取消、用户 uncertain 裁决及 assignment-superseded 收束不伪造本记录。
+
+取消与在途派发终结竞态按既有终结证明收束：若 owner 已耐久 `supersede-requested` 或 executor 已耐久 `dispatch-rejected` 后用户 cancel，cancel 不得覆盖或遗失该事实；supersede outbox 在 `cancel-requested` 中继续重驱，同 fence 的 not-started 证明原子写 `assignment-superseded + capability/ticket revoked + state(cancelled)`，already-started 则写 `supersede-started-observed` 停止 supersede outbox并继续原 cancel fence。executor 对已 `supersede-fenced` / `dispatch-rejected` 的 cancel 幂等零写入；owner 恢复看到 `dispatch-rejected` 时只重放同一耐久派发以取回原 `DispatchRejectionProof`，不得重新执行，随后按取消意图转 cancelled。这样任一响应丢失与两种调用顺序均有耐久出口。
+
+owner 的取消恢复先读取一份 `LedgerSnapshot` 冻结 `lastSeq`，再从 1 起按每页至多 256 条流式读取 `LedgerEvidencePage`：每页严格校验 version / 未知字段 / assignment / executor / 连续范围 / 签名，artifact-ref 必须回读规范 JSON 并校验引用；逐条深验 `AssignmentEntry` 后，必须与 executor 重放共用同一个增量账本状态机推进器（记录顺序、交互/写入身份、effect 闭合、abort、halt/seal/ack 迁移全部同构），同时从 `AssignmentLedgerSeed` 复算完整链，页末摘要与冻结尾序均须闭合。记录正文缓冲上界为一页；跨页只保留精确验证投影（计数、水位、未闭合 effect 与唯一身份集合），不保留历史正文。冻结前缀已见 `abort-requested`、且无可接受 `halted` / `bundle_sealed` 时才写 `UncertainResolutionFact(cause=cancel-unproven) + state(uncertain)`；任一分页、签名、引用、迁移、链或快照矛盾均零写入。已进入 uncertain 的 assignment 不重复扫描同一证据前缀。**durable-started 是全部 AssignmentTerminationProof 的共同禁重派不变量**：当前/历史入边为 running，或已有 `supersede-started-observed`，任一 DispatchRejection / Supersede(not-started-fenced) / Cancel(not-started) 均不得写 assignment-superseded。首次矛盾时同 envelope 写 `not-started-rejected(proof)` + open resolution（Cancel 为 cancel-unproven，其余为 ledger-unknown）+ state(uncertain)；已 uncertain 时只幂等补写停止锚。停止锚的幂等键为 `(assignmentId, proofKind)`，三类 proof 各自只停止对应 cancel / supersede / dispatch-recovery 生产源，禁止一类矛盾误杀另一条仍可收敛的恢复链；相同 kind 异载荷拒绝。
 
 ### 3.7 RunSubmissionPort（executor → owner；run 闭环的提交入口，进程内与 mesh adapter 同一接口同一 guard）
 
 ```ts
-interface InteractionMirrorEntry { seq: number; requestId: string; kind: "allow-once";
+interface InteractionMirrorEntry { ordinal: number; seq: number; requestId: string; kind: "allow-once";
   outcome: { t: "answered";      authority: InteractionAnswerAuthority; decision: { allowed: boolean; reason?: string }; by: string }
          | { t: "auto-resolved"; decision: "denied"; reason: "no-interactive-surface"|"policy-fail-closed" }
          | { t: "cancelled";     via: "cancel-fence"|"abort-ticket"|"run-end"|"backpressure" }
          | { t: "expired" };                     // 镜像 = finished 终态投影（审计面与账本同构，四类终结路径一致）
   at: IsoTime }
+interface InteractionMirrorBatch { v: 1; assignmentId: string; executorId: string;
+  previousDigest: Digest; entries: InteractionMirrorEntry[]; mirrorDigest: Digest; signature: Signature }
+// entries 非空且至多 256 条，ordinal 连续、seq 严格递增；previousDigest / mirrorDigest 按 §1.2 M 链首尾闭合。
+// signature 覆盖含 at 的完整批次；批次去 signature 的对象身份是 owner 侧 exact durable-request 幂等键。
 
 interface RunSubmissionPort {
   reportStarted(assignmentId: string, ctx: AuthorityCallContext): Promise<void>;   // 幂等
   submitBundle(bundle: SealedBundle, ctx: AuthorityCallContext):
     Promise<{ committed: true; commitRevision: number } | { committed: false; error: AuthorityError }>;  // CAS；重复 / 迟到按幂等键返回原 revision
   submitCancelProof(assignmentId: string, proof: CancelProofBody, ctx: AuthorityCallContext): Promise<void>;  // 幂等
-  mirrorInteractions(assignmentId: string, entries: InteractionMirrorEntry[], ctx: AuthorityCallContext):
-    Promise<{ mirroredUpTo: number }>;   // 审计镜像（至少一次）；应答权威恒在 executor 侧 assignment 流
+  mirrorInteractions(assignmentId: string, batch: InteractionMirrorBatch, ctx: AuthorityCallContext):
+    Promise<{ mirroredUpTo: number; ordinal: number; mirrorDigest: Digest }>;   // 审计镜像（至少一次）；应答权威恒在 executor 侧 assignment 流
 }
 
 // 治理域自己的上报面（与 run 提交解耦——evidence 等无 assignment 负载同一入口）：
@@ -764,6 +776,15 @@ interface ResourceUsageIntake {
     Promise<{ ackedThroughSeq: number }>;   // 只推进无缺口水位；usageId 幂等，重发回放原 ack
 }
 ```
+
+提交面先做两级守卫，再在 owner journal 的串行投影前缀内按结果能力分四类，分类权只在 owner-kernel，wire 调用方与 adapter 不携也不得自报。第一级 `authenticate` 只验 capability 签名、方法、scope、assignment/executor 静态身份，必须先于 owner 状态读取、payload 深验和 ArtifactStore 访问；随后 owner 立即要求该 capability 确由对应耐久 assigned 激活。无 ArtifactStore 的 submission-guard 投影只消费 run 流内联事实：完整 assigned 记录快照（含 ownerEpoch / baseRevision / dispatchDigest 权威域三元组与 manifest / permissionLease / dispatchRef / capIds / reservation）及其提交身份（lsn / envelopeDigest / at，用于零读取重建 activation 与各历史栅栏）、attempt 当前映射与状态、dispatch acknowledgement、dispatch-conflict 的"已见"与"打开"两态、supersede request 与 started observation、cancel fence、accepted cancel proof、resolution 打开/关闭事实、durable-started（running 入边与 started observation 的单调并集）、capability revocation，以及 committed ref/revision 与同 envelope 状态/吊销/内容索引/final/publish sidecar 的紧凑绑定；授权相关记录在本投影内执行与完整 reducer 同一份共享谓词，仅做数据闭包适配；capId 是已验签 capability 的不可变身份，完整业务投影仍在 active/settlement 事务决定时复核 dispatch 中的规范 capability。`submitBundle` 先仅以 capability.assignmentId 和该 guard 做零 payload preflight：过期 ownerEpoch、历史/终态 attempt、打开的 dispatch-conflict 可直接稳定拒绝；已 committed 只解析 bundle artifact identity 并核对其内联 sidecar 绑定后判断 exact replay，冷启动亦不得解引用 dispatch/bundle closure 或其他 ArtifactStore 内容。
+
+- **active**：请求可能产生新的非终态事实；必须是当前 `assignmentByRun/jobRun` 所指 attempt，capability 签名、当前 ownerEpoch、时限、激活、方法、scope、assignment/executor 绑定全部有效且未 revoked。
+- **settlement**：只允许已完整验签/验摘要并绑定**当前 attempt** 的 `submitCancelProof`、非 dispatch-conflict uncertain 的合法迟到 `submitBundle`，以及当前已耐久 cancel-fence 下严格续接 owner 审计链的 `InteractionMirrorBatch`；事务决定已证明载荷只能 contained / cancelled / committed / 安全重派或推进 audit-only 前缀。它仍校验 capability 签名、当前 ownerEpoch、方法与全部身份绑定，但允许该 attempt 因进入 uncertain/止损而已 revoked；mirror settlement 不得用于 started/bundle/session/global/resource 新写，也不得在无 cancel-fence 或历史 attempt 上建立 fresh 批次。
+- **durable-replay**：仅当同一规范 proof、bundle artifact、完整 mirror batch 对象身份已与 owner 耐久请求事实精确全等，或 started 通知已被同 assignment 的 running/committed 状态吸收时成立；必须零追加并返回原结果/ordinal/digest/revision。此时 capability 只证明该 assigned epoch 的历史调用身份，允许已 revoked/expired/旧 ownerEpoch，但签名、方法、scope、assignment/executor 与耐久 assigned 仍须全验；旧 epoch 不得因此恢复 active/settlement。结果水位覆盖、entries 子集、跨批拼接、异载荷、无耐久匹配、旧 A1 对 A2 的 fresh 请求均不得借此模式通过。
+- **durable-rejection**：仅当 owner 已有的旧 ownerEpoch、attempt 当前性/终态栅栏或打开的 dispatch-conflict 已足以在不消费 payload 的前提下决定 `submitBundle` 必为 `fence-rejected` 时成立；必须零追加、不得泄露后继 attempt 内容。它允许已 revoked/expired/旧 ownerEpoch 的原 capability 取得该稳定拒绝，但绝不恢复写权，也不得覆盖异载荷对既有 committed bundle 的冲突校验。
+
+`mirrorInteractions` 的 fresh batch 在 dispatched/running 走 active；在 current cancel-requested/uncertain 且存在该 attempt 的耐久 cancel-fence 时只可走上述 audit-only settlement，其他状态一律拒绝；生产决定与 replay reducer 必须执行同一状态/fence 守卫。owner 只接受 `previousDigest == 当前 mirrorDigest`、首 ordinal = 当前 ordinal+1 且批内连续、seq 严格递增、requestId 在该 assignment 全部已镜像批次中唯一的完整签名批次，并以批次对象身份耐久去重；回执三字段必须全等批次末项，executor 的 `mirrored` 记录也必须先命中对应 finished checkpoint。若合法旧批回执到达时后继连续水位已耐久覆盖它，则幂等 no-op；错 ordinal/seq/digest 仍拒绝，禁止稀疏水位越过旧结果。executor 的 `halted` / `bundle_sealed` 必须要求全部 `interaction-finished` 已被 owner 镜像并写入对应 `mirrored` 事实；正常 run-end 必先把 pending interaction 耐久结束为 cancelled/run-end，完成 mirror 后才可封包，封包事务本身不得再隐式生成 interaction 结果；取消若新产出 cancelled interaction，先只耐久 abort + finished，镜像成功后重入同一取消原因再形成唯一 proof。响应丢失重发原签名批次（可重签、对象身份不变），owner exact replay 零追加；executor 可用后继批次的累计 ordinal/digest 回执一次确认此前已耐久连续前缀。
 
 ## 四、耐久存储模型
 
@@ -786,6 +807,8 @@ interface LogicalRecord  { stream: string;
 ```
 
 **原子性规则**：一次逻辑提交 = 一条 CommitEnvelope、一次 fsync——"applied + 权威变更决定 + 响应"与"CAS 权威件全集"各自恒在同一 envelope 内落定。transcript 分片、conversation meta、内容资产索引、终态推送、mutation 物化、HomeTrustRecord 快照全部是**可由 log 幂等重建的投影**（重启按 lsn 重放未投影段）。坏尾 envelope 截断隔离。带 state 字段的记录（final-outbox / exposure / intent）以**追加新记录**表达状态推进，投影按键 latest-wins。
+
+`publish` 与 `final-outbox` 是物理共享流，但其恢复热点必须按 `conversationId` 分区：`publish-decision` 从同 envelope 的 committed bundle 机械取得 conversation 绑定，待发布集合不得跨会话枚举；FinalOutbox 的 revision 唯一性与单调水位均为 `(conversationId, commitRevision)` 作用域，禁止把不同会话的同 revision 当冲突。终态压缩可丢弃 batch / decision 正文，但必须保留 assignment 身份 tombstone，防止历史 assignmentId 被二次接纳。
 
 ### 4.2 ArtifactStore（内容寻址，每设备一个）
 
@@ -815,7 +838,7 @@ type ControlResultBody =        // 回放载体：重复请求原样返回。all
   | { t: "global-write"; revision: number }
   | { t: "job-run"; jobRunId: string }
   | { t: "job-cancel"; runState: JobRunState }
-  | { t: "uncertain-resolve"; state: ConversationRunState | JobRunState }
+  | { t: "uncertain-resolve"; state: ConversationRunState | JobRunState; factDigest: Digest }
   | { t: "delivery-resolve"; applied: boolean };
 type ControlResult = { status: "ok"; body: ControlResultBody } | { status: "rejected"; error: AuthorityError };
 
@@ -823,13 +846,18 @@ interface DispatchConflictRecord { t: "dispatch-conflict"; assignmentId: string;
   handling: "acked-original"|"opened-uncertain" }
 // owner 流内幂等键 = (assignmentId, proof.conflictingActivationDigest)；同键且 DispatchConflictPayload 全等则回放首条记录（signature 可不同），异载荷拒绝。
 interface DispatchConflictContainmentRecord { t: "dispatch-conflict-contained"; assignmentId: string;
-  openFactDigest: Digest; proof: CancelProofBody }
-// 每个 openFactDigest 至多一条 contained；proof 必须全验、绑定当前 assignment / executor / epoch，并在账本链上严格后继于 conflict 所证 received 前缀。
+  openFactDigest: Digest; proof: CancelProofBody | Extract<SupersedeProof,{decision:"not-started-fenced"}> }
+// 每个 openFactDigest 至多一条 contained；proof 必须全验、绑定当前 assignment / executor / epoch 或 durable supersede-requested，
+// CancelProof(owner-fence) 绑定当前耐久 fence，CancelProof(abort-ticket) 在线重新鉴权 ticket；二者均须在账本链上严格后继于
+// conflict 所证 received 前缀；not-started 分支必须与同 proof 的 resolution + assignment-superseded 原子出现。
 
 type RunJournalRecord =
   | { t: "admitted"; ingressKey: string; runId: string; input: UserTurnInput | { ref: ArtifactRef };
       ingress: IngressContext; queuedPosition: number }   // 来源上下文随准入耐久化——票据签发（原始 surface）、final / 渠道路由的权威数据源
-  | { t: "assigned"; runId: string; assignmentId: string; executorId: string; manifestDigest: Digest;
+  | { t: "assigned"; runId: string; assignmentId: string; executorId: string;
+      ownerEpoch: number; baseRevision: number;     // 派发时权威域快照（由已验 DispatchEnvelope 派生，reducer 反绑 artifact 全等）——
+      dispatchDigest: Digest;                       // 使无 ArtifactStore 的 submission guard 能零读取机械复算 activation、DispatchRejection 与 committed 的完整历史栅栏
+      manifestDigest: Digest;
       dispatchRef: ArtifactRef;                     // 指向已先行 fsync 的 DispatchEnvelope artifact——**耐久 assigned 驱动至少一次发送**：
                                                     // 发送器严格按 §3.6 outbox 谓词重驱，绝无"无日志执行"或 uncertain 后继续发送
       permissionLeaseDigest: PermissionLeaseDigest; // 唯一激活的权限租约实例；不得以同 assignment 的另一张有效租约替换
@@ -838,13 +866,31 @@ type RunJournalRecord =
   | { t: "dispatch-acked"; assignmentId: string }                 // accepted=true 或 conflict 的 accepted 侧全等 assigned；写入即停止 outbox
   | DispatchConflictRecord
   | DispatchConflictContainmentRecord
+  | { t: "cancel-contained"; assignmentId: string; openFactDigest: Digest; proof: CancelProofBody }
+      // 非 conflict uncertain（ledger-unknown / cancel-unproven）收到 halted CancelProof 的耐久证据锚：停止 cancel 止损 outbox、
+      // 保留打开 fact 待用户裁决——与 dispatch-conflict-contained 同构，每 openFactDigest 至多一条；not-started proof 不落此记录，
+      // 直接走 resolution(proven-not-started-redispatched) + assignment-superseded 原子收束
+  | { t: "cancel-proof-accepted"; assignmentId: string; proof: CancelProofBody }
+      // 正常 CancelProof 驱动 assigned run 转 cancelled 的 owner 侧耐久锚；必须与 cap/ticket revoked、state(cancelled)
+      // 及租约终结同 envelope，按去 signature 的规范 proof 载荷精确幂等，供重放守卫与 usageFinal 对账。
+  | { t: "not-started-rejected"; assignmentId: string; proof: AssignmentTerminationProof }
+      // owner 已耐久见 started（或 DispatchRejection 与 conflict 的 received 事实矛盾）时的耐久停止锚：首次与 open fact/state 原子写，
+      // 已 uncertain 时幂等补写；键=(assignmentId,proofKind)，每类只停止自己的恢复源，不覆盖其他 proofKind。
+  | { t: "supersede-requested"; assignmentId: string; fenceSeq: number; requestId: string }
+      // owner 侧重派栅栏的耐久载体：先记再下发（与 cancel-fence 同构）；outbox 恒以同一 fence 重驱，不得换 requestId / fenceSeq（§3.6）；
+      // 仅 state=dispatched 时可记，每 assignment 至多一条
+  | { t: "supersede-started-observed"; assignmentId: string; proof: Extract<SupersedeProof,{decision:"already-started"}> }
+      // supersede 响应丢失期间 run 已因其他证据进入 uncertain 或用户 cancel 进入 cancel-requested 时，仍以原 supersede-requested
+      // fence 重驱；迟到 already-started 不得把 uncertain 降格回 running，也不得覆盖 cancel，须耐久本停止锚并保持当前状态。
+      // 每 assignment 至多一条，重启后据此停止 supersede outbox。
   | { t: "assignment-superseded"; assignmentId: string; proof: AssignmentTerminationProof }   // 重派前置：同 envelope 吊销能力/活跃票据、终结旧租约
   | { t: "cancel-fence"; assignmentId: string; fenceSeq: number; requestId: string }
+      // fence 序单源：cancel-fence / supersede-requested 的 fenceSeq = 本记录所在 CommitEnvelope 的 lsn（owner 日志单调序，天然防回退）
   | { t: "ticket-issued"; ticket: DataPlaneTicket }              // owner 重启后仍可枚举、续期与吊销全部活跃票据
   | { t: "ticket-revoked"; ticketId: string }
   | { t: "capability-revoked"; capId: string; assignmentId: string }   // §2.2 capability 吊销的耐久落点
-  | { t: "interaction-mirror"; assignmentId: string; entries: InteractionMirrorEntry[] }   // 审计镜像落点
-  | { t: "state"; runId: string; state: ConversationRunState; statusRevision: number }
+  | { t: "interaction-mirror"; assignmentId: string; batch: InteractionMirrorBatch }   // 签名连续审计批次；去 signature 的对象身份是 exact replay 键
+  | { t: "state"; runId: string; assignmentId?: string; state: ConversationRunState; statusRevision: number }
   | { t: "committed"; runId: string; assignmentId: string; bundle: { ref: ArtifactRef }; commitRevision: number }
   | { t: "resolution"; runId: string; fact: UncertainResolutionFact }
   | ConversationChannelChallengeRecord;   // conversation 渠道确认的 challenge outbox（重启按 prepared−closed 重驱渠道消息，语义与 job relay 同构）
@@ -875,22 +921,31 @@ type JobJournalRecord =    // 键位 (taskId, jobRunId)
   | { t: "system-started"; jobRunId: string; fence: SystemJobFence }   // 6.2b 行 2 的耐久落点（system job 无 assignment，fence 落本流）
   | { t: "admitted"; jobRunId: string; taskId: string; scheduledFor: IsoTime;
       ingress?: IngressContext }   // 手动 job-run 携发起 surface（interact 票据签发依据）；定时触发无
-  | { t: "assigned"; jobRunId: string; assignmentId: string; executorId: string; manifestDigest: Digest;
+  | { t: "assigned"; jobRunId: string; assignmentId: string; executorId: string;
+      anchorEpoch: number; baseRevision: number; dispatchDigest: Digest;   // 与 run 流同构的权威域快照（job 侧权威纪元为 anchorEpoch）
+      manifestDigest: Digest;
       dispatchRef: ArtifactRef; permissionLeaseDigest: PermissionLeaseDigest; capIds: string[];
       reservation: { reservationId: string; attempt: number } }   // 与 run 流同构：capability 激活清单 + 同 envelope reserve 的租约激活锚
   | { t: "dispatch-acked"; assignmentId: string }
   | DispatchConflictRecord
   | DispatchConflictContainmentRecord
+  | { t: "cancel-contained"; assignmentId: string; openFactDigest: Digest; proof: CancelProofBody }   // 与 run 流同构（语义见 run 流注释）
+  | { t: "cancel-proof-accepted"; assignmentId: string; proof: CancelProofBody }                     // 与 run 流同构：正常 proof→cancelled 的耐久锚
+  | { t: "not-started-rejected"; assignmentId: string; proof: AssignmentTerminationProof } // 与 run 流同构：按 proofKind 隔离的 started 矛盾停止锚
+  | { t: "supersede-requested"; assignmentId: string; fenceSeq: number; requestId: string }           // 与 run 流同构（fenceSeq = envelope lsn）
+  | { t: "supersede-started-observed"; assignmentId: string; proof: Extract<SupersedeProof,{decision:"already-started"}> } // 与 run 流同构：uncertain 中的耐久停止锚
   | { t: "assignment-superseded"; assignmentId: string; proof: AssignmentTerminationProof }
   | { t: "cancel-fence"; assignmentId: string; fenceSeq: number; requestId: string }
   | { t: "ticket-issued"; ticket: DataPlaneTicket }
   | { t: "ticket-revoked"; ticketId: string }                     // 手动 job-run 的 interact / abort 票据吊销，与 run 流同构
   | { t: "capability-revoked"; capId: string; assignmentId: string }   // 与 run 流同构：job assignment 的 capability 吊销落点
-  | { t: "interaction-mirror"; assignmentId: string; entries: InteractionMirrorEntry[] }
-  | { t: "state"; jobRunId: string; state: JobRunState; statusRevision: number }
+  | { t: "interaction-mirror"; assignmentId: string; batch: InteractionMirrorBatch }
+  | { t: "state"; jobRunId: string; assignmentId?: string; state: JobRunState; statusRevision: number }
   | { t: "committed"; jobRunId: string; assignmentId: string; bundle: { ref: ArtifactRef }; jobRevision: number }
   | { t: "resolution"; jobRunId: string; fact: UncertainResolutionFact }
   | ChannelInteractionRelayRecord;
+
+`state.assignmentId` 是 attempt 栅栏而非诊断字段：从无状态进入 queued，以及 queued 在尚无 assignment 时被取消/失败/过期，字段必须省略；queued→dispatched 及其后所有由 assignment 触发的 running/cancel-requested/uncertain/committed/cancelled/failed/queued 转换必须携触发该转换的 assignmentId。reducer 必须要求它等于该 run/job 当前反向索引；若同 envelope 的 resolution/assignment-superseded 已先关闭并删除索引，只允许携同一 closing assignmentId 的后续 state 记录。旧 A1 的任意迟到事件在 A2 建立后不得写出绑定 A2 的无身份 state，也不得借同 runId 改变 A2；run/job 两流同构执行。
 
 // relay 记录约束：每个 (assignmentId, interactionRequestId) 恰有一个 prepared / challengeId；conversation 以 prepared.frameSeq 作为 ACK 水位，
 // job 的 cursor 只增不减且不得越过尚未同 envelope 耐久接管的帧；delivered 可重放更新回执但不改变 challenge；granted 每 challenge 至多一条，写入后重复 callback 回放同一 grant；
@@ -958,7 +1013,7 @@ type AssignmentRecord =    // executor 设备域
   | { t: "halted"; proof: CancelProofBody }
   | { t: "bundle_sealed"; bundle: { ref: ArtifactRef }; mutationBatch?: { ref: ArtifactRef } }   // = completed；封包胜负点
   | { t: "acked"; commitRevision: number }
-  | { t: "mirrored"; upTo: number };
+  | { t: "mirrored"; upTo: number; ordinal: number; mirrorDigest: Digest };
 type CancelProofCommon = {
   assignmentId: string; executorId: string; authority: AuthorityEpochRef;
   lastRecordSeq: number; usageFinal: { reportDigest: Digest; upToUsageSeq: number };   // 取消路径的扣账对账锚（§十终结表）
@@ -978,7 +1033,7 @@ type CancelProofBody = NotStartedCancelProof | HaltedCancelProof;               
 // owner 恢复：6.1 行 28-33 / 6.2 行 30-35），任一不符即拒。
 ```
 
-副作用起止纪律：每次真实副作用必为配对的 `side-effect-started / side-effect-completed`（同 effectSeq）；`halted` 与 `bundle_sealed` 之前全部 effect 必已闭合（completed，status 可为 aborted）；崩溃恢复发现未闭合 effect 时**不得补写** `halted`，只能如实上报账本 → owner 判 uncertain，未闭合 effect 即证据链。
+终态闭合纪律：每次真实副作用必为配对的 `side-effect-started / side-effect-completed`（同 effectSeq）；`halted` 与 `bundle_sealed` 之前全部 effect 必已闭合（completed，status 可为 aborted），pending interaction 必先结束，全部 `interaction-finished` 也必须已由 owner 耐久镜像并以 `mirrored` 水位确认。崩溃恢复发现未闭合 effect 时**不得补写** `halted`，只能如实上报账本 → owner 判 uncertain，未闭合 effect 即证据链；仅有 pending / 未镜像 interaction 时先完成确定性的终结结果并按 §3.7 重驱同一 mirror batch，成功后才允许重入形成终态。
 
 ```ts
 type PublishRecord =       // mutation 发布进度（owner 侧）
@@ -1100,6 +1155,8 @@ type UncertainResolutionFact =                    // 工作域、主体与 cause
       openedAt: IsoTime; cause: "ledger-unknown"|"job-cancel-unknown"|"dispatch-conflict"; openFactDigest: Digest;
       resolution?: UncertainResolutionOutcome };
 // openFactDigest = D("UncertainOpenFact",1,{subject,openedAt,cause})；裁决请求绑定本摘要，resolution 不入摘要域。
+// resolution.factDigest = D("UncertainResolutionDecision",1,{openFactDigest,kind,by,at})——纯决定字段、重放可机械复算；
+// 解析证据（迟到 bundle / 终结 proof）不入本摘要，其绑定由 resolution 与 committed / superseded 记录的同 envelope 原子性承载。
 interface DeferredGlobalIntent {         // 本地域离线期间的全局写候选（非事实）；落本地域 owner 的 intent:<convId> 流（§3.2b，随对话收编转移）
   intentId: string; localDomainId: string; conversationId: string;
   mutation: ScheduleWriteMutation
@@ -1487,7 +1544,7 @@ type ConversationRunState = "queued"|"dispatched"|"running"|"cancel-requested"
 | 20 | cancel-requested | bundle_sealed 先于全部已观察 abort-requested（owner-fence / abort-ticket） | 账本 recordSeq 可证 | committed | 封包赢，照常提交 |
 | 21 | cancel-requested | 证明与 cancel-requested 入边历史矛盾 / 超时 / 失联 | — | uncertain | cause: cancel-unproven |
 | 22 | uncertain | 迟到合法 bundle 到达 | CAS 全验（打开的 dispatch-conflict fact 会 fence-rejected，故不属于本行“合法”） | committed | 自动解析，与总纲“合法 bundle 自动提交”一致 |
-| 23 | uncertain | 事后取得 `AssignmentTerminationProof` | 证明验签并绑定当前 assignment / executor / dispatch digest、supersede fence 或 cancel fence/ticket 及账本链头；若来自 dispatch-conflict 的 CancelProof，账本链必须严格后继于该 conflict 的 received 前缀 | queued | 同 envelope superseded + 吊销全部 capability / ticket + 终结旧租约；dispatch-conflict 分支另写 contained + resolution(`proven-not-started-redispatched`)；自动重派（新 assignment） |
+| 23 | uncertain | 事后取得 `AssignmentTerminationProof` | 证明验签并绑定当前 assignment / executor / dispatch digest、supersede fence 或 cancel fence/ticket 及账本链头；owner 全部 durable-started 投影均为 false；dispatch-conflict 仅接受严格后继 received 前缀的 Cancel(not-started) / Supersede(not-started-fenced)，拒绝 DispatchRejection | queued | 同 envelope superseded + 吊销全部 capability / ticket + 终结旧租约；dispatch-conflict 分支另写携同一 proof 的 contained + resolution(`proven-not-started-redispatched`)；自动重派（新 assignment） |
 | 24 | uncertain | 用户裁决：已核验副作用 | 经 `uncertain-resolve` 控制请求（§5.5：已认证用户 + epoch + openFactDigest 全验，重复回放） | failed | 同 envelope 记 fact、以 `fact.subject.assignmentId` 关闭旧提交栅栏、吊销其 capability/ticket、终结租约、转状态并 applied；解锁对话 |
 | 25 | uncertain | 用户裁决：放弃本次 | 同 24 | cancelled | 同 24 收束旧 assignment，解锁对话 |
 | 26 | uncertain | 用户裁决：明示风险后重试 | 同 24 | queued | 同 24 收束旧 assignment 后，才以新 attempt 创建 assignment |
@@ -1500,9 +1557,9 @@ type ConversationRunState = "queued"|"dispatched"|"running"|"cancel-requested"
 | 33 | running | owner 恢复，账本见 abort-requested 但无可接受 halted | abort / sealed 序不可证或存在未闭合 effect | uncertain | cause: cancel-unproven（sealed 先于 abort 则走行 12 照常提交——封包赢） |
 | 34 | dispatched | 收到 `DispatchConflictProof` | proof 全验；conflicting 侧全等本次发送；accepted 侧全等本地 assigned 重算值 | dispatched | 同一 CommitEnvelope 写 `dispatch-conflict(acked-original) + dispatch-acked`；停止 outbox，原 assignment 继续；重复 proof 幂等回放 |
 | 35 | dispatched | 收到 `DispatchConflictProof` | proof 全验；conflicting 侧全等本次发送；accepted 侧与本地 assigned 重算值任一不等 | uncertain | 同一 CommitEnvelope 写 conflict + uncertain fact/state + cancel-fence + cap/ticket revoked；停止派发与 ControlLease 续期，fsync 后重驱 cancel/吊销止损；通知用户，仅凭 conflict proof 禁止提交/重派；后续 not-started 证明或用户裁决按行 23–26 收束 |
-| 36 | uncertain | dispatch-conflict 止损取得 `CancelProof(halted)` | proof 全验并绑定当前 fence；账本链严格后继于 conflict 的 received 前缀；全部 effect 闭合 | uncertain | 写 `dispatch-conflict-contained`，停止 cancel outbox；保留打开 fact 与提交 fence，向用户呈现证据，租约待裁决时按 §十收束 |
+| 36 | uncertain | dispatch-conflict 止损取得 `CancelProof(halted)` | proof 全验并绑定当前 fence 或有效 abort-ticket；账本链严格后继于 conflict 的 received 前缀；全部 interaction / effect 闭合，finished interaction 已按 §3.7 签名连续批次完成 audit settlement | uncertain | 写 `dispatch-conflict-contained`，停止 cancel outbox；保留打开 fact 与提交 fence，向用户呈现证据，租约待裁决时按 §十收束 |
 
-附加规则：uncertain 存在未裁决 → 该对话禁止正常续跑（行 22/23 的自动解析除外）。
+附加规则：uncertain 存在未裁决 → 该对话禁止正常续跑（行 22/23 的自动解析除外）。行 8/9/15/17/23/28/32 的任何 not-started 证据一旦与 owner durable-started 投影矛盾，统一留在 uncertain 并写按 proofKind 隔离的 `not-started-rejected`，不得因恢复重放降格为 queued/cancelled。
 
 ### 6.2 job run（本表仅适用 `TaskDefinitionBody.kind:"user"`；system 任务走 6.2b，两表互斥）
 
@@ -1537,7 +1594,7 @@ type JobRunState = "queued"|"dispatched"|"running"|"cancel-requested"
 | 22 | cancel-requested | bundle_sealed 先于全部已观察 abort-requested（owner-fence / abort-ticket） | 账本 recordSeq 可证 | committed | 封包赢，照常提交 |
 | 23 | cancel-requested | 证明与 cancel-requested 入边历史矛盾 / 超时 / 失联 | — | uncertain | cause: job-cancel-unknown；暂停该 task 触发 |
 | 24 | uncertain | 迟到合法 bundle 到达 | CAS 全验（打开的 dispatch-conflict fact 会 fence-rejected） | committed | 自动解析，恢复该 task 触发；与总纲“合法 bundle 自动提交”一致 |
-| 25 | uncertain | 事后取得 `AssignmentTerminationProof` | 证明验签并绑定当前 assignment / executor / dispatch digest、supersede fence 或 cancel fence/ticket 及账本链头；若来自 dispatch-conflict 的 CancelProof，账本链必须严格后继于该 conflict 的 received 前缀 | queued | 同 envelope superseded + 吊销全部 capability / ticket + 终结旧租约；dispatch-conflict 分支另写 contained + resolution(`proven-not-started-redispatched`)；自动重派 |
+| 25 | uncertain | 事后取得 `AssignmentTerminationProof` | 证明验签并绑定当前 assignment / executor / dispatch digest、supersede fence 或 cancel fence/ticket 及账本链头；锚点全部 durable-started 投影均为 false；dispatch-conflict 仅接受严格后继 received 前缀的 Cancel(not-started) / Supersede(not-started-fenced)，拒绝 DispatchRejection | queued | 同 envelope superseded + 吊销全部 capability / ticket + 终结旧租约；dispatch-conflict 分支另写携同一 proof 的 contained + resolution(`proven-not-started-redispatched`)；自动重派 |
 | 26 | uncertain | 用户裁决：已核验副作用 | 经 `uncertain-resolve` 控制请求（§5.5，同 6.1 行 24 守卫） | failed | 同 envelope 记 fact、以 `fact.subject.assignmentId` 关闭旧提交栅栏、吊销其 capability/ticket、终结租约并 applied；恢复触发 |
 | 27 | uncertain | 用户裁决：放弃本次 | 同 26 | cancelled | 同 26 收束旧 assignment；恢复触发 |
 | 28 | uncertain | 用户裁决：明示风险后重试 | 同 26 | queued | 同 26 收束旧 assignment 后，才以新 attempt 创建 assignment；恢复触发 |
@@ -1550,9 +1607,9 @@ type JobRunState = "queued"|"dispatched"|"running"|"cancel-requested"
 | 35 | running | 锚点恢复，账本见 abort-requested 但无可接受 halted | abort / sealed 序不可证或有未闭合 effect | uncertain | cause: job-cancel-unknown（sealed 先于 abort 走行 13 照常提交） |
 | 36 | dispatched | 收到 `DispatchConflictProof` | proof 全验；conflicting 侧全等本次发送；accepted 侧全等本地 assigned 重算值 | dispatched | 同一 CommitEnvelope 写 `dispatch-conflict(acked-original) + dispatch-acked`；停止 outbox，原 job 继续；重复 proof 幂等回放 |
 | 37 | dispatched | 收到 `DispatchConflictProof` | proof 全验；conflicting 侧全等本次发送；accepted 侧与本地 assigned 重算值任一不等 | uncertain | 同一 CommitEnvelope 写 conflict + uncertain fact/state + cancel-fence + cap/ticket revoked；停止派发与 ControlLease 续期，fsync 后重驱 cancel/吊销止损；暂停 task、维护通知；仅凭 conflict proof 禁止提交/重派，后续 not-started 证明或用户裁决按行 25–28 收束 |
-| 38 | uncertain | dispatch-conflict 止损取得 `CancelProof(halted)` | proof 全验并绑定当前 fence；账本链严格后继于 conflict 的 received 前缀；全部 effect 闭合 | uncertain | 写 `dispatch-conflict-contained`，停止 cancel outbox；保留打开 fact 与提交 fence，向用户呈现证据，租约待裁决时按 §十收束 |
+| 38 | uncertain | dispatch-conflict 止损取得 `CancelProof(halted)` | proof 全验并绑定当前 fence 或有效 abort-ticket；账本链严格后继于 conflict 的 received 前缀；全部 interaction / effect 闭合，finished interaction 已按 §3.7 签名连续批次完成 audit settlement | uncertain | 写 `dispatch-conflict-contained`，停止 cancel outbox；保留打开 fact 与提交 fence，向用户呈现证据，租约待裁决时按 §十收束 |
 
-任务定义规则：更新只影响后续 occurrence；旧 occurrence 永不覆盖或复活 TaskDefinition。uncertain 解析前该 task 持续暂停，期间到期只记 missed。
+任务定义规则：更新只影响后续 occurrence；旧 occurrence 永不覆盖或复活 TaskDefinition。uncertain 解析前该 task 持续暂停，期间到期只记 missed。行 9/10/17/19/25/30/34 的任何 not-started 证据一旦与锚点 durable-started 投影矛盾，统一留在 uncertain 并写按 proofKind 隔离的 `not-started-rejected`，不得自动重派或取消。
 
 ### 6.2b system job（`kind:"system"` 内置维护任务——锚点本地执行，不进派发协议 / 数据面 / uncertain 三分）
 

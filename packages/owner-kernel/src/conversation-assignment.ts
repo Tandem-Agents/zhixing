@@ -1,73 +1,152 @@
 import { Buffer } from "node:buffer";
-import { isNonEmptyUserTurnInput } from "@zhixing/core";
 import {
   AuthorityStorageError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   collectArtifactRefs,
   type ArtifactStore,
   type AuthorityCommitLog,
+  type ProjectionCursor,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
+  AssignmentEntry,
   AssignmentRecord,
+  AssignmentTerminationProof,
   AssignmentActivationProof,
   AuthorityCallContext,
   ConversationRunState,
   ConversationStatusNotice,
+  ControlResult,
   FinalFrame,
   FinalOutboxRecord,
   GlobalStagedMutation,
   DispatchResult,
+  DispatchConflictProof,
+  DispatchRejectionProof,
   IngressContext,
   IsoTime,
   LedgerSnapshot,
+  LedgerEvidencePage,
   LogicalRecord,
   MutationBatch,
   PublishRecord,
   PublishConflictNotice,
   SealedBundle,
+  SupersedeProof,
+  CancelProofBody,
   SessionInternalRecord,
   SessionStagedMutation,
   TranscriptRunRecord,
   UserTurnInput,
+  UncertainResolutionFact,
 } from "@zhixing/core/contracts";
 import {
+  applyValidatedAssignmentEntry,
   buildConversationActivationPayload,
+  buildConversationActivationPayloadFromBinding,
+  assignmentActivationDigest,
+  byteDigest,
   canonicalize,
   conversationBundleRoots,
+  createAssignmentLedgerValidationState,
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
+  dispatchEnvelopeDigest,
+  interactionMirrorBatchDigest,
+  interactionMirrorSeed,
   permissionSnapshotLeaseDigest,
+  protocolDigest,
   sealedBundleArtifact,
   signConversationActivation,
+  validateConversationActivation,
   validateConversationEnvelope,
+  validateCancelProof,
   validateConversationSealedBundle,
   validateConversationInteractionMirrorEntry,
+  validateConversationInteractionMirrorBatch,
+  validateDispatchConflictProof,
+  validateDispatchRejectionProof,
+  validateDispatchResult,
+  validateAssignmentEntry,
+  validateLedgerEvidencePage,
+  validateLedgerSnapshot,
+  validateIngressContext,
   validateMutationBatch,
+  validateNonEmptyUserTurnInput,
+  validateSupersedeProof,
   validateTranscriptRunRecord,
-  type ConversationInteractionMirrorEntry,
+  type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
+import { SerialTaskQueue } from "@zhixing/core/persistence";
+import type {
+  ControlAdmissionJournal,
+  ControlAdmissionOutcome,
+  ConversationControlEnvelope,
+  TrustedControlSource,
+} from "./control-admission.js";
+import {
+  assertAdmissionReplayContract,
+  assertCancelFenceReplayContract,
+  assertCancelProofAcceptedReplayContract,
+  assertArtifactReference,
+  assertConversationResolutionBinding,
+  assertConversationRunInternalRecord,
+  assertConversationRunRecord,
+  assertAssignmentReplayContract,
+  assertAssignmentSupersededReplayContract,
+  assertCapabilityRevocationReplayContract,
+  assertCommittedReplayContract,
+  assertDigest,
+  assertDispatchAcknowledgementReplayContract,
+  assertDispatchConflictHandlingReplayContract,
+  assertDispatchConflictReplayContract,
+  assertExactRecordKeys,
+  assertHistoricalBundleFence,
+  assertIdentifier,
+  assertNonNegativeSafeInteger,
+  assertPlainRecord,
+  assertPositiveSafeInteger,
+  assertResolutionClosureReplayContract,
+  assertResolutionCloseAtomicReplayContract,
+  assertResolutionOpenReplayContract,
+  assertStateAtomicReplayContract,
+  assertStateReplayContract,
+  assertSupersedeRequestReplayContract,
+  assertSupersedeStartedObservationReplayContract,
+  assignmentTerminationProofKind,
+  corruptRunJournal,
+  historicalBundleFenceMatches,
+  nextActiveRunIdForReplay,
+  resolutionFactDigest,
+  resolutionTargetState,
+  terminationProofBindsDurableSource,
+  type AssignmentTerminationProofKind,
+  type ConversationRunInternalRecord,
+  type ConversationRunJournalRecord,
+  type DurableSourceBoundProof,
+  type Stored,
+} from "./conversation-run-contracts.js";
 
-type Stored<T> = T | { readonly ref: ArtifactRef };
-type AssignmentRecordLike = Extract<AssignmentRecord, { t: "staged-mutation" }>;
+export type { ConversationRunJournalRecord } from "./conversation-run-contracts.js";
+type ConversationUncertainResolutionFact = Extract<
+  UncertainResolutionFact,
+  { subject: { execution: "conversation" } }
+>;
 
 type ConversationCommitLogRecord =
   | ConversationRunJournalRecord
-  | ConversationProjectionRecord
+  | ConversationRunInternalRecord
   | PublishRecord
   | FinalOutboxRecord;
 
-interface ConversationProjectionRecord {
-  readonly kind: "conversation-commit-projection";
-  readonly assignmentId: string;
-  readonly runId: string;
-  readonly commitRevision: number;
-  readonly digest: string;
-}
+type ConversationProjectionRecord = Extract<
+  ConversationRunInternalRecord,
+  { kind: "conversation-commit-projection" }
+>;
 
 interface PublishProjection {
   readonly decisions: Map<
@@ -80,6 +159,20 @@ interface PublishProjection {
     string,
     Extract<PublishRecord, { t: "publish-progress" }>
   >;
+  readonly domainPlans: Map<string, PublishDomainPlan>;
+  readonly conversationByAssignment: Map<string, string>;
+  readonly pendingAssignmentsByConversation: Map<string, Set<string>>;
+  readonly completedAssignments: Set<string>;
+  readonly conflictsByAssignment: Map<
+    string,
+    PublishConflictNotice["conflicts"]
+  >;
+}
+
+interface PublishDomainPlan {
+  readonly grantedSeqs: number[];
+  readonly grantedIndexBySeq: Map<number, number>;
+  readonly terminalSeq: number;
 }
 
 interface FinalOutboxProjectionEntry {
@@ -87,59 +180,73 @@ interface FinalOutboxProjectionEntry {
   readonly at: IsoTime;
 }
 
-type FinalOutboxProjection = Map<string, FinalOutboxProjectionEntry>;
+interface FinalOutboxProjection {
+  readonly entries: Map<string, FinalOutboxProjectionEntry>;
+  readonly activeKeyByConversationRevision: Map<string, string>;
+  readonly pendingByConversation: Map<string, Map<string, FinalOutboxProjectionEntry>>;
+  readonly publishedByConversation: Map<string, Map<string, FinalOutboxProjectionEntry>>;
+  readonly lastPendingRevisionByConversation: Map<string, number>;
+}
+
+interface StatusHistoryEntry {
+  readonly state: ConversationRunState;
+  readonly statusRevision: number;
+  readonly at: IsoTime;
+}
 
 const FINAL_OUTBOX_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
-export type ConversationRunJournalRecord =
-  | {
-      readonly t: "admitted";
-      readonly ingressKey: string;
-      readonly runId: string;
-      readonly input: Stored<UserTurnInput>;
-      readonly ingress: IngressContext;
-      readonly queuedPosition: number;
-    }
-  | {
-      readonly t: "assigned";
-      readonly runId: string;
-      readonly assignmentId: string;
-      readonly executorId: string;
-      readonly manifestDigest: string;
-      readonly dispatchRef: ArtifactRef;
-      readonly permissionLeaseDigest: string;
-      readonly capIds: string[];
-      readonly reservation: { readonly reservationId: string; readonly attempt: number };
-    }
-  | { readonly t: "dispatch-acked"; readonly assignmentId: string }
-  | {
-      readonly t: "interaction-mirror";
-      readonly assignmentId: string;
-      readonly entries: ConversationInteractionMirrorEntry[];
-    }
-  | {
-      readonly t: "state";
-      readonly runId: string;
-      readonly state: ConversationRunState;
-      readonly statusRevision: number;
-    }
-  | {
-      readonly t: "committed";
-      readonly runId: string;
-      readonly assignmentId: string;
-      readonly bundle: { readonly ref: ArtifactRef };
-      readonly commitRevision: number;
-    }
-  | SessionInternalRecord;
+export type AssignmentSubmissionMethod =
+  | "submission.reportStarted"
+  | "submission.mirrorInteractions"
+  | "submission.submitBundle"
+  | "submission.submitCancelProof";
 
-export interface AssignmentSubmissionAuthorizer {
-  authorize(
-    context: AuthorityCallContext,
-    method:
+export interface AssignmentSubmissionIdentity {
+  readonly method: AssignmentSubmissionMethod;
+  readonly assignmentId: string;
+}
+
+export type AssignmentSubmissionAuthorization =
+  | {
+      readonly mode: "active";
+      readonly method: AssignmentSubmissionMethod;
+      readonly assignmentId: string;
+    }
+  | {
+      /** A validated terminal payload may only narrow the current attempt. */
+      readonly mode: "settlement";
+      readonly method:
+        | "submission.mirrorInteractions"
+        | "submission.submitBundle"
+        | "submission.submitCancelProof";
+      readonly assignmentId: string;
+    }
+  | {
+      /** The request is already subsumed by durable authority state and will append nothing. */
+      readonly mode: "durable-replay";
+      readonly method:
       | "submission.reportStarted"
       | "submission.mirrorInteractions"
-      | "submission.submitBundle",
-    assignmentId: string,
+      | "submission.submitBundle"
+        | "submission.submitCancelProof";
+      readonly assignmentId: string;
+    }
+  | {
+      /** A durable fence determines a zero-write rejection before payload processing. */
+      readonly mode: "durable-rejection";
+      readonly method: "submission.submitBundle";
+      readonly assignmentId: string;
+    };
+
+export interface AssignmentSubmissionAuthorizer {
+  authenticate(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): void;
+  authorize(
+    context: AuthorityCallContext,
+    authorization: AssignmentSubmissionAuthorization,
   ): void;
 }
 
@@ -154,6 +261,17 @@ export interface ConversationRunJournalOptions {
   readonly authority: ConversationCommitAuthority;
   readonly projection: ConversationCommitProjection;
   readonly publisher?: ConversationMutationPublisher;
+  readonly clock?: () => string;
+  readonly abortTickets?: ConversationAbortTicketAuthorizer;
+}
+
+export interface ConversationAbortTicketAuthorizer {
+  authorize(input: {
+    readonly assignmentId: string;
+    readonly executorId: string;
+    readonly ticketDigest: string;
+    readonly surfacePrincipal: string;
+  }): void;
 }
 
 export interface ConversationCommitDecisionInput {
@@ -249,6 +367,11 @@ export interface PendingConversationDispatch {
   readonly activation: AssignmentActivationProof<"conversation">;
 }
 
+export interface PendingConversationFence {
+  readonly assignmentId: string;
+  readonly fence: { readonly fenceSeq: number; readonly requestId: string };
+}
+
 export interface ConversationDispatchPort {
   dispatch(
     envelope: PendingConversationDispatch["envelope"],
@@ -260,6 +383,16 @@ export interface ConversationDispatchPort {
     ctx: AuthorityCallContext,
     range?: { fromSeq: number; limit: number },
   ): Promise<import("@zhixing/core/contracts").LedgerSnapshot | import("@zhixing/core/contracts").LedgerEvidencePage>;
+  cancel(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<void>;
+  supersede(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<SupersedeProof>;
 }
 
 interface AdmittedProjection {
@@ -284,15 +417,147 @@ interface RunProjection {
     string,
     { readonly state: ConversationRunState; readonly statusRevision: number }
   >;
-  readonly mirroredUpTo: Map<string, number>;
-  readonly mirroredEntries: Map<string, Map<number, ConversationInteractionMirrorEntry>>;
+  readonly queuedRunByPosition: Map<number, string>;
+  readonly queuedPositionHeap: number[];
+  readonly queuedPositionHeapIndex: Map<number, number>;
+  activeRunId?: string;
+  readonly mirrorStateByAssignment: Map<
+    string,
+    {
+      ordinal: number;
+      mirrorDigest: string;
+      mirroredUpTo: number;
+      readonly requestIds: Set<string>;
+    }
+  >;
+  readonly mirrorBatches: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "interaction-mirror" }>
+  >;
   readonly committedByAssignment: Map<
     string,
     Extract<ConversationRunJournalRecord, { t: "committed" }>
   >;
   readonly commits: Array<Extract<ConversationRunJournalRecord, { t: "committed" }>>;
+  readonly assignmentByCommitRevision: Map<number, string>;
   readonly contentByRevision: Map<number, readonly import("@zhixing/core/contracts").ContentAssetRef[]>;
   readonly projectedByAssignment: Map<string, ConversationProjectionRecord>;
+  readonly pendingCommitProjections: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "committed" }>
+  >;
+  readonly conflicts: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "dispatch-conflict" }>
+  >;
+  readonly conflictByAssignment: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "dispatch-conflict" }>
+  >;
+  readonly containedFacts: Set<string>;
+  readonly containmentByAssignment: Map<
+    string,
+    | Extract<ConversationRunJournalRecord, { t: "dispatch-conflict-contained" }>
+    | Extract<ConversationRunJournalRecord, { t: "cancel-contained" }>
+  >;
+  readonly superseded: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "assignment-superseded" }>
+  >;
+  readonly supersedeRequests: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "supersede-requested" }>
+  >;
+  readonly supersedeStartedObservations: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "supersede-started-observed" }>
+  >;
+  readonly cancelFences: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "cancel-fence" }>
+  >;
+  readonly cancelOrigins: Map<string, "dispatched" | "running">;
+  readonly acceptedCancellations: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "cancel-proof-accepted" }>
+  >;
+  readonly rejectedNotStarted: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "not-started-rejected" }>
+  >;
+  readonly uncertainOrigins: Map<
+    string,
+    "dispatched" | "running" | "cancel-requested"
+  >;
+  readonly revokedCapabilities: Set<string>;
+  readonly resolutionsByRun: Map<string, ConversationUncertainResolutionFact>;
+  readonly statusHistoryByRun: Map<string, StatusHistoryEntry[]>;
+  readonly closedAssignments: Set<string>;
+}
+
+interface SubmissionGuardProjection {
+  readonly admittedByRun: Map<
+    string,
+    { readonly ingressKey: string; readonly queuedPosition: number }
+  >;
+  readonly runByIngress: Map<string, string>;
+  readonly queuedRunByPosition: Map<number, string>;
+  readonly queuedPositionHeap: number[];
+  readonly queuedPositionHeapIndex: Map<number, number>;
+  readonly assignedById: Map<
+    string,
+    {
+      readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
+      readonly commit: {
+        readonly lsn: number;
+        readonly envelopeDigest: string;
+        readonly at: string;
+      };
+      readonly capIds: ReadonlySet<string>;
+      acked: boolean;
+    }
+  >;
+  readonly assignmentByRun: Map<string, string>;
+  readonly stateByRun: Map<
+    string,
+    { readonly state: ConversationRunState; readonly statusRevision: number }
+  >;
+  readonly conflictAssignments: Set<string>;
+  readonly openConflictAssignments: Set<string>;
+  readonly supersedeRequests: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "supersede-requested" }>
+  >;
+  readonly supersedeStartedAssignments: Set<string>;
+  readonly cancelFences: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "cancel-fence" }>
+  >;
+  readonly acceptedCancellations: Set<string>;
+  readonly durableStartedAssignments: Set<string>;
+  readonly resolutionsByRun: Map<string, ConversationUncertainResolutionFact>;
+  readonly committedByAssignment: Map<
+    string,
+    {
+      readonly bundle: { readonly ref: ArtifactRef };
+      readonly commitRevision: number;
+      readonly sidecars: SubmissionCommitSidecars;
+    }
+  >;
+  readonly closedAssignments: Set<string>;
+  readonly revokedCapabilities: Set<string>;
+  activeRunId: string | undefined;
+}
+
+interface SubmissionCommitSidecars {
+  readonly contentAssetsDigest: string;
+  readonly finalDigest: string;
+  readonly publish?: {
+    readonly batch: { readonly ref: ArtifactRef };
+    readonly sessionCount: number;
+    readonly globalCount: number;
+    readonly pendingDomains: ReadonlySet<"session" | "global">;
+  };
 }
 
 interface PreparedStored<T> {
@@ -307,16 +572,50 @@ interface AssignDecision {
 export interface InProcessDispatchContextFactory {
   create(
     assignmentId: string,
-    method: "executor.dispatch" | "executor.queryLedger",
+    method:
+      | "executor.dispatch"
+      | "executor.cancel"
+      | "executor.supersede"
+      | "executor.queryLedger",
   ): AuthorityCallContext;
 }
 
-export interface InProcessConversationDispatcherOptions {
-  readonly enabled: boolean;
+interface InProcessConversationDispatcherBaseOptions {
   readonly journal: ConversationRunJournal;
   readonly executor: ConversationDispatchPort;
   readonly contexts: InProcessDispatchContextFactory;
 }
+
+export interface InProcessCancellationSubmission {
+  submitCancellation(assignmentId: string): Promise<boolean>;
+}
+
+export type InProcessConversationDispatcherOptions =
+  InProcessConversationDispatcherBaseOptions &
+    (
+      | {
+          readonly enabled: false;
+          readonly cancellationSubmission?: InProcessCancellationSubmission;
+        }
+      | {
+          readonly enabled: true;
+          readonly cancellationSubmission: InProcessCancellationSubmission;
+        }
+    );
+
+export interface ConversationCancelRequest {
+  readonly runId: string;
+  readonly requestId: string;
+}
+
+export type ConversationCancelResult =
+  | { readonly state: "cancelled"; readonly assignmentId?: string }
+  | {
+      readonly state: "cancel-requested";
+      readonly assignmentId: string;
+      readonly fence: { readonly fenceSeq: number; readonly requestId: string };
+    }
+  | { readonly state: Exclude<ConversationRunState, "cancelled" | "cancel-requested"> };
 
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
 export class ConversationRunJournal {
@@ -330,6 +629,21 @@ export class ConversationRunJournal {
   readonly #authority: ConversationCommitAuthority;
   readonly #projection: ConversationCommitProjection;
   readonly #publisher: ConversationMutationPublisher | undefined;
+  readonly #clock: () => string;
+  readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
+  readonly #operations = new SerialTaskQueue();
+  #runProjection:
+    | { readonly state: RunProjection; readonly cursor: ProjectionCursor }
+    | undefined;
+  #submissionGuardProjection:
+    | { readonly state: SubmissionGuardProjection; readonly cursor: ProjectionCursor }
+    | undefined;
+  #publishProjection:
+    | { readonly state: PublishProjection; readonly cursor: ProjectionCursor }
+    | undefined;
+  #finalProjection:
+    | { readonly state: FinalOutboxProjection; readonly cursor: ProjectionCursor }
+    | undefined;
 
   constructor(options: ConversationRunJournalOptions) {
     assertIdentifier(options.conversationId, "Conversation id");
@@ -344,6 +658,8 @@ export class ConversationRunJournal {
     this.#authority = options.authority;
     this.#projection = options.projection;
     this.#publisher = options.publisher;
+    this.#clock = options.clock ?? (() => new Date().toISOString());
+    this.#abortTickets = options.abortTickets;
   }
 
   async admit(input: {
@@ -355,14 +671,12 @@ export class ConversationRunJournal {
   }): Promise<void> {
     assertIdentifier(input.ingressKey, "Ingress key");
     assertIdentifier(input.runId, "Run id");
-    if (!isNonEmptyUserTurnInput(input.userInput)) {
-      throw new TypeError("Run admission requires non-empty user input");
-    }
+    validateNonEmptyUserTurnInput(input.userInput);
     if (!Number.isSafeInteger(input.queuedPosition) || input.queuedPosition < 0) {
       throw new TypeError("Queued position must be a non-negative safe integer");
     }
     const userInput = snapshot(input.userInput, "Run input");
-    const ingress = snapshot(input.ingress, "Run ingress");
+    const ingress = validateIngressContext(input.ingress);
     const prepared = await prepareStored(userInput, this.#artifacts);
     const admitted: Extract<ConversationRunJournalRecord, { t: "admitted" }> = {
       t: "admitted",
@@ -389,13 +703,8 @@ export class ConversationRunJournal {
           }
           return { kind: "return", value: undefined };
         }
-        for (const [runId, admitted] of state.admittedByRun) {
-          if (
-            state.stateByRun.get(runId)?.state === "queued" &&
-            admitted.record.queuedPosition === input.queuedPosition
-          ) {
-            throw new Error("Queued position already belongs to an active run");
-          }
+        if (state.queuedRunByPosition.has(input.queuedPosition)) {
+          throw new Error("Queued position already belongs to an active run");
         }
         return {
           kind: "append",
@@ -429,13 +738,19 @@ export class ConversationRunJournal {
       this.#signer,
       this.#verifier,
     );
-    const currentState = await this.#read();
-    const currentAssignmentId = currentState.assignmentByRun.get(
-      envelope.work.runId,
-    );
-    const currentAssignment = currentAssignmentId
-      ? currentState.assignedById.get(currentAssignmentId)
-      : undefined;
+    const existingState = await this.#select((state) => {
+      const currentAssignmentId = state.assignmentByRun.get(envelope.work.runId);
+      const currentAssignment = currentAssignmentId
+        ? state.assignedById.get(currentAssignmentId)
+        : undefined;
+      return {
+        currentAssignment: currentAssignment
+          ? snapshot(currentAssignment, "Current assignment")
+          : undefined,
+        assignmentIdInUse: state.assignedById.has(envelope.assignmentId),
+      };
+    });
+    const currentAssignment = existingState.currentAssignment;
     if (currentAssignment) {
       if (
         currentAssignment.record.assignmentId !== envelope.assignmentId ||
@@ -446,7 +761,7 @@ export class ConversationRunJournal {
       }
       return this.#materializeDispatch(currentAssignment);
     }
-    if (currentState.assignedById.has(envelope.assignmentId)) {
+    if (existingState.assignmentIdInUse) {
       throw new Error("Assignment id already belongs to a different run");
     }
     const envelopeReferences = await assertArtifactsPresent(envelope, this.#artifacts);
@@ -484,21 +799,10 @@ export class ConversationRunJournal {
         if (current?.state !== "queued") {
           throw new Error("Only the current queued run can be assigned");
         }
-        for (const [runId, runState] of state.stateByRun) {
-          if (
-            runId !== envelope.work.runId &&
-            (runState.state === "dispatched" || runState.state === "running")
-          ) {
-            throw new Error("Conversation already has an active assignment");
-          }
+        if (state.activeRunId !== undefined && state.activeRunId !== envelope.work.runId) {
+          throw new Error("Conversation already has an active assignment");
         }
-        const earlierQueued = [...state.admittedByRun.entries()].some(
-          ([runId, candidate]) =>
-            runId !== envelope.work.runId &&
-            state.stateByRun.get(runId)?.state === "queued" &&
-            candidate.record.queuedPosition < admitted.record.queuedPosition,
-        );
-        if (earlierQueued) {
+        if (state.queuedPositionHeap[0] !== admitted.record.queuedPosition) {
           throw new Error("Only the earliest queued run can be assigned");
         }
         const assigned: Extract<ConversationRunJournalRecord, { t: "assigned" }> = {
@@ -506,6 +810,9 @@ export class ConversationRunJournal {
           runId: envelope.work.runId,
           assignmentId: envelope.assignmentId,
           executorId: envelope.executorId,
+          ownerEpoch: envelope.work.ownerEpoch,
+          baseRevision: envelope.work.baseRevision,
+          dispatchDigest: dispatchEnvelopeDigest(envelope),
           manifestDigest: envelope.manifest.digest,
           dispatchRef: artifact.ref,
           permissionLeaseDigest: permissionSnapshotLeaseDigest(envelope),
@@ -522,6 +829,7 @@ export class ConversationRunJournal {
             runRecord(this.#conversationId, {
               t: "state",
               runId: envelope.work.runId,
+              assignmentId: envelope.assignmentId,
               state: "dispatched",
               statusRevision: (current?.statusRevision ?? 0) + 1,
             }),
@@ -533,32 +841,36 @@ export class ConversationRunJournal {
     );
     const assigned = transaction.state.assignedById.get(transaction.value.assignmentId);
     if (!assigned) throw new Error("Assigned commit did not rebuild its outbox fact");
-    return this.#materializeDispatch(assigned);
+    return this.#materializeDispatch(
+      snapshot(assigned, "Assigned outbox projection"),
+    );
   }
 
   async pendingDispatches(): Promise<PendingConversationDispatch[]> {
-    const state = await this.#read();
-    return Promise.all(
-      [...state.assignedById.values()]
-        .filter(
-          (assigned) =>
-            !assigned.acked &&
-            state.stateByRun.get(assigned.record.runId)?.state === "dispatched",
-        )
-        .map((assigned) => this.#materializeDispatch(assigned)),
+    const assigned = await this.#select((state) =>
+      selectActiveAssignment(state, (candidate, current) =>
+        current === "dispatched" &&
+        !candidate.acked &&
+        !state.superseded.has(candidate.record.assignmentId) &&
+        !state.closedAssignments.has(candidate.record.assignmentId)
+          ? snapshot(candidate, "Pending dispatch")
+          : undefined,
+      ),
     );
+    return assigned ? [await this.#materializeDispatch(assigned)] : [];
   }
 
   async dispatchesAwaitingStarted(): Promise<PendingConversationDispatch[]> {
-    const state = await this.#read();
-    return Promise.all(
-      [...state.assignedById.values()]
-        .filter(
-          (assigned) =>
-            state.stateByRun.get(assigned.record.runId)?.state === "dispatched",
-        )
-        .map((assigned) => this.#materializeDispatch(assigned)),
+    const assigned = await this.#select((state) =>
+      selectActiveAssignment(state, (candidate, current) =>
+        current === "dispatched" &&
+        !state.superseded.has(candidate.record.assignmentId) &&
+        !state.closedAssignments.has(candidate.record.assignmentId)
+          ? snapshot(candidate, "Dispatch awaiting started")
+          : undefined,
+      ),
     );
+    return assigned ? [await this.#materializeDispatch(assigned)] : [];
   }
 
   async acknowledgeDispatch(assignmentId: string): Promise<void> {
@@ -566,6 +878,9 @@ export class ConversationRunJournal {
       const assigned = state.assignedById.get(assignmentId);
       if (!assigned) throw new Error("Cannot acknowledge an unknown assignment");
       if (assigned.acked) return { kind: "return", value: undefined };
+      if (state.assignmentByRun.get(assigned.record.runId) !== assignmentId) {
+        throw new Error("Cannot acknowledge a historical assignment");
+      }
       return {
         kind: "append",
         entries: [
@@ -576,27 +891,751 @@ export class ConversationRunJournal {
     });
   }
 
-  async reportStarted(
+  async requestSupersede(
     assignmentId: string,
-    ctx: AuthorityCallContext,
+    requestId: string,
+  ): Promise<PendingConversationFence["fence"]> {
+    assertIdentifier(assignmentId, "Superseded assignment id");
+    assertIdentifier(requestId, "Supersede request id");
+    const transaction = await this.#transact<PendingConversationFence["fence"]>(
+      (state, authorityPrefix) => {
+        const assigned = state.assignedById.get(assignmentId);
+        const existing = state.supersedeRequests.get(assignmentId);
+        if (existing) {
+          if (existing.requestId !== requestId) {
+            throw new Error("Assignment already has a different supersede request");
+          }
+          return {
+            kind: "return",
+            value: { fenceSeq: existing.fenceSeq, requestId: existing.requestId },
+          };
+        }
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        if (
+          !assigned ||
+          !current ||
+          current.state !== "dispatched" ||
+          state.assignmentByRun.get(assigned.record.runId) !== assignmentId
+        ) {
+          throw new Error("Only a dispatched assignment can be superseded");
+        }
+        const fence = { fenceSeq: authorityPrefix.nextLsn, requestId };
+        return {
+          kind: "append",
+          entries: [
+            runRecord(this.#conversationId, {
+              t: "supersede-requested",
+              assignmentId,
+              ...fence,
+            }),
+          ],
+          value: fence,
+        };
+      },
+    );
+    return transaction.value;
+  }
+
+  async pendingSupersedes(): Promise<PendingConversationFence[]> {
+    const pending = await this.#select((state) =>
+      selectActiveAssignment(state, (assigned, current) => {
+        const request = state.supersedeRequests.get(assigned.record.assignmentId);
+        return request &&
+          (current === "dispatched" || current === "cancel-requested" || current === "uncertain") &&
+          !state.superseded.has(request.assignmentId) &&
+          !state.closedAssignments.has(request.assignmentId) &&
+          !state.supersedeStartedObservations.has(request.assignmentId) &&
+          !hasRejectedNotStarted(state, request.assignmentId, "supersede")
+          ? {
+              assignmentId: request.assignmentId,
+              fence: { fenceSeq: request.fenceSeq, requestId: request.requestId },
+            }
+          : undefined;
+      }),
+    );
+    return pending ? [pending] : [];
+  }
+
+  async pendingCancellations(): Promise<PendingConversationFence[]> {
+    const pending = await this.#select((state) =>
+      selectActiveAssignment(state, (assigned, current) => {
+        const fence = state.cancelFences.get(assigned.record.assignmentId);
+        if (
+          !fence ||
+          state.superseded.has(fence.assignmentId) ||
+          hasRejectedNotStarted(state, fence.assignmentId, "cancel")
+        ) {
+          return undefined;
+        }
+        const open = state.resolutionsByRun.get(assigned.record.runId);
+        return (current === "cancel-requested" || current === "uncertain") &&
+          !(open && state.containedFacts.has(open.openFactDigest))
+          ? {
+              assignmentId: fence.assignmentId,
+              fence: { fenceSeq: fence.fenceSeq, requestId: fence.requestId },
+            }
+          : undefined;
+      }),
+    );
+    return pending ? [pending] : [];
+  }
+
+  async cancelRun(input: ConversationCancelRequest): Promise<ConversationCancelResult> {
+    assertIdentifier(input.runId, "Cancelled run id");
+    assertIdentifier(input.requestId, "Cancellation request id");
+    const transaction = await this.#transact<ConversationCancelResult>(
+      (state, authorityPrefix) =>
+        decideConversationCancel(
+          this.#conversationId,
+          state,
+          input,
+          authorityPrefix.nextLsn,
+        ),
+    );
+    return transaction.value;
+  }
+
+  async applyControl(input: {
+    readonly admission: ControlAdmissionJournal;
+    readonly envelope: ConversationControlEnvelope;
+    readonly source: TrustedControlSource;
+  }): Promise<ControlAdmissionOutcome> {
+    return input.admission.applyAuthority<RunProjection>({
+      envelope: input.envelope,
+      source: input.source,
+      stream: runStream(this.#conversationId),
+      initial: emptyProjection(this.#conversationId),
+      reducer: (state, record, commit) =>
+        this.#reduce(
+          state,
+          record as LogicalRecord<ConversationCommitLogRecord>,
+          commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+        ),
+      decide: (state, context) => {
+        const body = input.envelope.body;
+        if (body.t === "cancel") {
+          if (
+            body.conversationId !== this.#conversationId ||
+            body.ownerEpoch !== this.#ownerEpoch
+          ) {
+            return {
+              result: rejectedControl(
+                "epoch-stale",
+                "Cancel request does not bind the current conversation owner",
+              ),
+            };
+          }
+          const current = state.stateByRun.get(body.runId);
+          if (
+            !current ||
+            (current.state !== "queued" &&
+              current.state !== "dispatched" &&
+              current.state !== "running")
+          ) {
+            return {
+              result: rejectedControl(
+                "fence-rejected",
+                "Cancel request targets a closed or non-cancellable run",
+              ),
+            };
+          }
+          const decision = decideConversationCancel(
+            this.#conversationId,
+            state,
+            { runId: body.runId, requestId: context.canonicalRequestId },
+            context.authorityPrefix.nextLsn,
+          );
+          if (decision.kind !== "append") {
+            throw corruptRunJournal("Fresh cancel control did not produce an authority change");
+          }
+          return {
+            result: {
+              v: 1,
+              status: "ok",
+              body: { t: "cancel", runState: decision.value.state },
+            },
+            authorityEntries: decision.entries,
+          };
+        }
+
+        if (
+          body.ref.execution !== "conversation" ||
+          body.ref.conversationId !== this.#conversationId ||
+          body.ref.ownerEpoch !== this.#ownerEpoch
+        ) {
+          return {
+            result: rejectedControl(
+              "epoch-stale",
+              "Uncertain resolution does not bind the current conversation owner",
+            ),
+          };
+        }
+        const current = state.stateByRun.get(body.ref.runId);
+        const open = state.resolutionsByRun.get(body.ref.runId);
+        const assignmentId = open?.subject.assignmentId;
+        const assigned = assignmentId
+          ? state.assignedById.get(assignmentId)
+          : undefined;
+        if (
+          !current ||
+          current.state !== "uncertain" ||
+          !open ||
+          open.resolution !== undefined ||
+          open.openFactDigest !== body.openFactDigest ||
+          !assigned ||
+          assigned.record.runId !== body.ref.runId
+        ) {
+          return {
+            result: rejectedControl(
+              "fence-rejected",
+              "Uncertain resolution targets a closed or different fact",
+            ),
+          };
+        }
+        const nextState =
+          body.decision === "user-verified-side-effects"
+            ? "failed"
+            : body.decision === "user-abandoned"
+              ? "cancelled"
+              : "queued";
+        const fact = closeResolution(
+          open,
+          body.decision,
+          input.envelope.principal.surfacePrincipal,
+          input.envelope.at,
+        );
+        return {
+          result: {
+            v: 1,
+            status: "ok",
+            body: {
+              t: "uncertain-resolve",
+              state: nextState,
+              factDigest: fact.resolution!.factDigest,
+            },
+          },
+          authorityEntries: [
+            runRecord(this.#conversationId, {
+              t: "resolution",
+              runId: body.ref.runId,
+              fact,
+            }),
+            ...capabilityRevocations(this.#conversationId, state, assigned),
+            runRecord(this.#conversationId, {
+              t: "state",
+              runId: body.ref.runId,
+              assignmentId,
+              state: nextState,
+              statusRevision: current.statusRevision + 1,
+            }),
+          ],
+        };
+      },
+    });
+  }
+
+  async closeQueuedRun(
+    runId: string,
+    outcome: "failed" | "expired",
   ): Promise<void> {
-    this.#submission.authorize(ctx, "submission.reportStarted", assignmentId);
+    assertIdentifier(runId, "Queued run id");
+    if (outcome !== "failed" && outcome !== "expired") {
+      throw new TypeError("Queued run outcome is invalid");
+    }
     await this.#transact<void>((state) => {
-      const assigned = state.assignedById.get(assignmentId);
-      if (!assigned) throw new Error("Started report names an unknown assignment");
-      const current = state.stateByRun.get(assigned.record.runId);
-      if (current?.state === "running" || current?.state === "committed") {
-        return { kind: "return", value: undefined };
-      }
-      if (current?.state !== "dispatched") {
-        throw new Error("Started report is invalid for the current run state");
+      const current = state.stateByRun.get(runId);
+      if (current?.state === outcome) return { kind: "return", value: undefined };
+      if (current?.state !== "queued" || state.assignmentByRun.has(runId)) {
+        throw new Error("Only an unassigned queued run can be closed");
       }
       return {
         kind: "append",
         entries: [
           runRecord(this.#conversationId, {
             t: "state",
+            runId,
+            state: outcome,
+            statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: undefined,
+      };
+    });
+  }
+
+  async assignmentsAwaitingRecovery(): Promise<
+    Array<{
+      readonly assignmentId: string;
+      readonly state: "dispatched" | "running" | "cancel-requested" | "uncertain";
+      readonly dispatch: PendingConversationDispatch;
+    }>
+  > {
+    const candidate = await this.#select((state) =>
+      selectActiveAssignment(state, (assigned, current) => {
+        const assignmentId = assigned.record.assignmentId;
+        if (
+          state.superseded.has(assignmentId) ||
+          state.closedAssignments.has(assignmentId) ||
+          hasRejectedNotStarted(state, assignmentId, "cancel") ||
+          hasRejectedNotStarted(state, assignmentId, "dispatch-rejection")
+        ) {
+          return undefined;
+        }
+        const open = state.resolutionsByRun.get(assigned.record.runId);
+        return !open || !state.containedFacts.has(open.openFactDigest)
+          ? {
+              assignmentId,
+              state: current as "dispatched" | "running" | "cancel-requested" | "uncertain",
+              assigned: snapshot(assigned, "Recoverable assignment"),
+            }
+          : undefined;
+      }),
+    );
+    if (!candidate) return [];
+    const { assigned, ...result } = candidate;
+    return [{ ...result, dispatch: await this.#materializeDispatch(assigned) }];
+  }
+
+  async markAssignmentUncertain(
+    assignmentId: string,
+    cause: "ledger-unknown" | "cancel-unproven",
+  ): Promise<UncertainResolutionFact> {
+    assertIdentifier(assignmentId, "Uncertain assignment id");
+    const openedAt = this.#clock();
+    const transaction = await this.#transact<UncertainResolutionFact>((state) => {
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned) throw new Error("Cannot mark an unknown assignment uncertain");
+      const current = state.stateByRun.get(assigned.record.runId);
+      if (!current) throw corruptRunJournal("Assigned run has no state");
+      if (state.assignmentByRun.get(assigned.record.runId) !== assignmentId) {
+        throw new Error("Cannot reopen uncertainty for a historical assignment");
+      }
+      const existing = state.resolutionsByRun.get(assigned.record.runId);
+      if (current.state === "uncertain" && existing && !existing.resolution) {
+        return { kind: "return", value: existing };
+      }
+      if (
+        current.state !== "dispatched" &&
+        current.state !== "running" &&
+        current.state !== "cancel-requested"
+      ) {
+        throw new Error("Run state cannot enter uncertain");
+      }
+      const fact = createOpenResolutionFact(assigned, cause, openedAt);
+      return {
+        kind: "append",
+        entries: [
+          runRecord(this.#conversationId, {
+            t: "resolution",
             runId: assigned.record.runId,
+            fact,
+          }),
+          runRecord(this.#conversationId, {
+            t: "state",
+            runId: assigned.record.runId,
+            assignmentId,
+            state: "uncertain",
+            statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: fact,
+      };
+    });
+    return transaction.value;
+  }
+
+  validateExecutorDispatchResult(input: unknown): DispatchResult {
+    return validateDispatchResult(input, this.#verifier);
+  }
+
+  validateExecutorLedgerSnapshot(input: unknown): LedgerSnapshot {
+    return validateLedgerSnapshot(input, this.#verifier);
+  }
+
+  async reconcileCancellationEvidence(
+    assignmentId: string,
+    rawSnapshot: LedgerSnapshot,
+    pages: AsyncIterable<LedgerEvidencePage>,
+  ): Promise<boolean> {
+    assertIdentifier(assignmentId, "Recovered assignment id");
+    const snapshotValue = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    if (
+      snapshotValue.assignmentId !== assignmentId ||
+      snapshotValue.lastSeq <= 0 ||
+      snapshotValue.cancelProof !== undefined ||
+      snapshotValue.sealedBundleRef !== undefined ||
+      snapshotValue.phase === "halted" ||
+      snapshotValue.phase === "sealed" ||
+      snapshotValue.phase === "acked"
+    ) {
+      throw new TypeError("Ledger snapshot is not an unresolved cancellation prefix");
+    }
+
+    const current = await this.#select((state) => {
+      const assigned = state.assignedById.get(assignmentId);
+      return assigned
+        ? {
+            assigned: snapshot(assigned, "Ledger evidence assignment"),
+            runState: state.stateByRun.get(assigned.record.runId)?.state,
+            isCurrent:
+              state.assignmentByRun.get(assigned.record.runId) === assignmentId,
+          }
+        : undefined;
+    });
+    if (!current) throw new Error("Ledger evidence names an unknown assignment");
+    const { assigned, runState, isCurrent } = current;
+    if (!isCurrent) throw new Error("Ledger evidence belongs to a historical assignment");
+    if (runState === "uncertain") return false;
+    if (
+      runState !== "dispatched" &&
+      runState !== "running" &&
+      runState !== "cancel-requested"
+    ) {
+      throw new Error("Ledger evidence is late for the current run state");
+    }
+
+    let expectedSeq = 1;
+    const validation = createAssignmentLedgerValidationState(assignmentId);
+    for await (const rawPage of pages) {
+      const page = validateLedgerEvidencePage(rawPage, this.#verifier);
+      if (
+        page.assignmentId !== assignmentId ||
+        page.executorId !== assigned.record.executorId ||
+        page.fromSeq !== expectedSeq ||
+        page.toSeq > snapshotValue.lastSeq
+      ) {
+        throw new TypeError("Ledger evidence page does not bind the frozen assignment prefix");
+      }
+      for (const rawEntry of page.entries) {
+        let body: AssignmentRecord;
+        if ("ref" in rawEntry.body) {
+          const bytes = await this.#artifacts.get(rawEntry.body.ref);
+          const text = Buffer.from(bytes).toString("utf8");
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch (error) {
+            throw new TypeError("Ledger evidence artifact is not valid JSON", { cause: error });
+          }
+          if (canonicalize(parsed) !== text) {
+            throw new TypeError("Ledger evidence artifact is not canonical");
+          }
+          body = validateAssignmentEntry(
+            { recordSeq: rawEntry.recordSeq, body: parsed },
+            this.#verifier,
+          ).body;
+        } else {
+          body = validateAssignmentEntry(rawEntry, this.#verifier).body;
+        }
+        const entry: AssignmentEntry = { recordSeq: rawEntry.recordSeq, body };
+        switch (body.t) {
+          case "received": {
+            const activation = validateConversationActivation({
+              envelope: assigned.envelope,
+              activation: body.activation as AssignmentActivationProof<"conversation">,
+              dispatchRef: assigned.record.dispatchRef,
+              verifier: this.#verifier,
+            });
+            const expectedActivation = buildConversationActivationPayload({
+              envelope: assigned.envelope,
+              dispatchRef: assigned.record.dispatchRef,
+              commit: {
+                lsn: assigned.commit.lsn,
+                envelopeDigest: assigned.commit.envelopeDigest,
+              },
+              issuedAt: assigned.commit.at,
+            });
+            if (
+              canonicalize(body.envelope.ref) !== canonicalize(assigned.record.dispatchRef) ||
+              canonicalize(activation) !== canonicalize(expectedActivation)
+            ) {
+              throw new TypeError("Received ledger evidence does not bind the durable assignment");
+            }
+            break;
+          }
+        }
+        applyValidatedAssignmentEntry(validation, entry);
+        expectedSeq += 1;
+      }
+      if (page.chainDigest !== validation.chainDigest) {
+        throw new TypeError("Ledger evidence page chain digest is invalid");
+      }
+    }
+    if (
+      expectedSeq !== snapshotValue.lastSeq + 1 ||
+      validation.lastSeq !== snapshotValue.lastSeq ||
+      validation.phase !== snapshotValue.phase
+    ) {
+      throw new TypeError("Ledger evidence does not close the frozen snapshot prefix");
+    }
+    if (validation.aborts.size === 0) return false;
+    await this.markAssignmentUncertain(assignmentId, "cancel-unproven");
+    return true;
+  }
+
+  async recordDispatchConflict(
+    sent: PendingConversationDispatch,
+    result: Extract<DispatchResult, { accepted: false; outcome: "conflicting-redelivery" }>,
+  ): Promise<"acked-original" | "opened-uncertain"> {
+    const validatedResult = validateDispatchResult(result, this.#verifier);
+    if (validatedResult.accepted || validatedResult.outcome !== "conflicting-redelivery") {
+      throw new TypeError("Expected a conflicting dispatch result");
+    }
+    const proof = validateDispatchConflictProof(validatedResult.proof, this.#verifier);
+    const sentDispatchRef = dispatchEnvelopeArtifact(sent.envelope).ref;
+    const sentActivationDigest = assignmentActivationDigest(withoutSignature(sent.activation));
+    if (
+      proof.assignmentId !== sent.assignmentId ||
+      canonicalize(proof.conflictingDispatchRef) !== canonicalize(sentDispatchRef) ||
+      proof.conflictingActivationDigest !== sentActivationDigest
+    ) {
+      throw new TypeError("Dispatch conflict proof does not bind the attempted dispatch");
+    }
+    const expectedAssigned = await this.#select((state) => {
+      const assigned = state.assignedById.get(sent.assignmentId);
+      return assigned ? snapshot(assigned, "Expected assigned dispatch") : undefined;
+    });
+    if (!expectedAssigned) throw new Error("Dispatch conflict names an unknown assignment");
+    const expected = await this.#materializeDispatch(expectedAssigned);
+    const expectedDispatchRef = dispatchEnvelopeArtifact(expected.envelope).ref;
+    const expectedActivationDigest = assignmentActivationDigest(
+      withoutSignature(expected.activation),
+    );
+    const acceptedMatches =
+      canonicalize(proof.acceptedDispatchRef) === canonicalize(expectedDispatchRef) &&
+      proof.acceptedActivationDigest === expectedActivationDigest;
+    const openedAt = this.#clock();
+    const transaction = await this.#transact<"acked-original" | "opened-uncertain">(
+      (state, authorityPrefix) => {
+        const assigned = state.assignedById.get(sent.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const key = dispatchConflictKey(proof);
+        const existing = state.conflicts.get(key);
+        if (existing) {
+          if (
+            canonicalize(withoutSignature(existing.proof)) !==
+            canonicalize(withoutSignature(proof))
+          ) {
+            throw new Error("Dispatch conflict identity has conflicting payloads");
+          }
+          return { kind: "return", value: existing.handling };
+        }
+        if (!assigned || !current || current.state !== "dispatched" || assigned.acked) {
+          throw new Error("Dispatch conflict is late for the current assignment");
+        }
+        if (state.assignmentByRun.get(assigned.record.runId) !== sent.assignmentId) {
+          throw new Error("Dispatch conflict belongs to a historical assignment");
+        }
+        if (acceptedMatches) {
+          return {
+            kind: "append",
+            entries: [
+              runRecord(this.#conversationId, {
+                t: "dispatch-conflict",
+                assignmentId: sent.assignmentId,
+                proof,
+                handling: "acked-original",
+              }),
+              runRecord(this.#conversationId, {
+                t: "dispatch-acked",
+                assignmentId: sent.assignmentId,
+              }),
+            ],
+            value: "acked-original",
+          };
+        }
+        const fact = createOpenResolutionFact(assigned, "dispatch-conflict", openedAt);
+        const fence = {
+          fenceSeq: authorityPrefix.nextLsn,
+          requestId: `dispatch-conflict:${proof.conflictingActivationDigest}`,
+        };
+        return {
+          kind: "append",
+          entries: [
+            runRecord(this.#conversationId, {
+              t: "dispatch-conflict",
+              assignmentId: sent.assignmentId,
+              proof,
+              handling: "opened-uncertain",
+            }),
+            runRecord(this.#conversationId, {
+              t: "resolution",
+              runId: assigned.record.runId,
+              fact,
+            }),
+            runRecord(this.#conversationId, {
+              t: "cancel-fence",
+              assignmentId: sent.assignmentId,
+              ...fence,
+            }),
+            ...capabilityRevocations(this.#conversationId, state, assigned),
+            runRecord(this.#conversationId, {
+              t: "state",
+              runId: assigned.record.runId,
+              assignmentId: sent.assignmentId,
+              state: "uncertain",
+              statusRevision: current.statusRevision + 1,
+            }),
+          ],
+          value: "opened-uncertain",
+        };
+      },
+      [proof.acceptedDispatchRef, proof.conflictingDispatchRef],
+    );
+    return transaction.value;
+  }
+
+  async acceptDispatchRejection(
+    response: Extract<DispatchResult, { accepted: false; outcome: "rejected-before-received" }>,
+  ): Promise<void> {
+    const validatedResult = validateDispatchResult(response, this.#verifier);
+    if (validatedResult.accepted || validatedResult.outcome !== "rejected-before-received") {
+      throw new TypeError("Expected a rejected-before-received dispatch result");
+    }
+    const proof = validateDispatchRejectionProof(validatedResult.proof, this.#verifier);
+    await this.#acceptNotStartedTermination(proof);
+  }
+
+  async acceptSupersedeProof(rawProof: SupersedeProof): Promise<void> {
+    const proof = validateSupersedeProof(rawProof, this.#verifier);
+    // Durable-source binding is judged once inside each transaction by the shared
+    // predicate; this entry point only routes on the signed decision.
+    if (proof.decision === "not-started-fenced") {
+      await this.#acceptNotStartedTermination(proof);
+      return;
+    }
+    await this.#transact<void>((state) => {
+      const assigned = state.assignedById.get(proof.assignmentId);
+      if (
+        !assigned ||
+        !terminationProofBindsDurableSource({
+          proof,
+          assignmentId: proof.assignmentId,
+          executorId: assigned.record.executorId,
+          conversationId: this.#conversationId,
+          ownerEpoch: assigned.record.ownerEpoch,
+          dispatchDigest: assigned.record.dispatchDigest,
+          supersedeRequest: state.supersedeRequests.get(proof.assignmentId),
+        })
+      ) {
+        throw new Error("Supersede proof does not bind a durable assignment");
+      }
+      const observed = state.supersedeStartedObservations.get(proof.assignmentId);
+      if (observed) {
+        if (
+          canonicalize(withoutSignature(observed.proof)) !==
+          canonicalize(withoutSignature(proof))
+        ) {
+          throw new Error("Supersede already-started observation has conflicting payloads");
+        }
+        return { kind: "return", value: undefined };
+      }
+      const current = state.stateByRun.get(assigned.record.runId);
+      if (!current) throw corruptRunJournal("Assigned run has no state");
+      if (state.assignmentByRun.get(assigned.record.runId) !== proof.assignmentId) {
+        throw new Error("Supersede proof belongs to a historical assignment");
+      }
+      if (
+        current.state === "running" ||
+        current.state === "committed" ||
+        current.state === "cancelled"
+      ) {
+        return { kind: "return", value: undefined };
+      }
+      if (current.state === "uncertain" || current.state === "cancel-requested") {
+        return {
+          kind: "append",
+          entries: [
+            runRecord(this.#conversationId, {
+              t: "supersede-started-observed",
+              assignmentId: proof.assignmentId,
+              proof,
+            }),
+          ],
+          value: undefined,
+        };
+      }
+      if (current.state !== "dispatched") {
+        throw new Error("Already-started proof is late for the current run state");
+      }
+      return {
+        kind: "append",
+        entries: [
+          ...(!assigned.acked
+            ? [
+                runRecord(this.#conversationId, {
+                  t: "dispatch-acked" as const,
+                  assignmentId: proof.assignmentId,
+                }),
+              ]
+            : []),
+          runRecord(this.#conversationId, {
+            t: "state",
+            runId: assigned.record.runId,
+            assignmentId: proof.assignmentId,
+            state: "running",
+            statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: undefined,
+      };
+    });
+  }
+
+  async reportStarted(
+    assignmentId: string,
+    ctx: AuthorityCallContext,
+  ): Promise<void> {
+    this.#authenticateSubmission(ctx, {
+      method: "submission.reportStarted",
+      assignmentId,
+    });
+    await this.#loadSubmissionGuard(ctx, {
+      method: "submission.reportStarted",
+      assignmentId,
+    });
+    await this.#transact<void>((state) => {
+      this.#assertActivatedSubmissionCapability(state, ctx, {
+        method: "submission.reportStarted",
+        assignmentId,
+      });
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned) throw new Error("Started report names an unknown assignment");
+      const current = state.stateByRun.get(assigned.record.runId);
+      if (
+        (state.assignmentByRun.get(assigned.record.runId) === assignmentId &&
+          (current?.state === "running" || current?.state === "committed")) ||
+        hasDurableStartedObservation(state, assignmentId)
+      ) {
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-replay",
+          method: "submission.reportStarted",
+          assignmentId,
+        });
+        return { kind: "return", value: undefined };
+      }
+      if (
+        current?.state !== "dispatched" ||
+        state.assignmentByRun.get(assigned.record.runId) !== assignmentId
+      ) {
+        throw new Error("Started report is invalid for the current run state");
+      }
+      this.#authorizeSubmission(state, ctx, {
+        mode: "active",
+        method: "submission.reportStarted",
+        assignmentId,
+      });
+      return {
+        kind: "append",
+        entries: [
+          runRecord(this.#conversationId, {
+            t: "state",
+            runId: assigned.record.runId,
+            assignmentId,
             state: "running",
             statusRevision: current.statusRevision + 1,
           }),
@@ -608,8 +1647,9 @@ export class ConversationRunJournal {
 
   async reconcileStarted(
     assignmentId: string,
-    snapshot: LedgerSnapshot,
+    rawSnapshot: LedgerSnapshot,
   ): Promise<void> {
+    const snapshot = validateLedgerSnapshot(rawSnapshot, this.#verifier);
     if (
       snapshot.assignmentId !== assignmentId ||
       (snapshot.phase !== "started" &&
@@ -622,10 +1662,17 @@ export class ConversationRunJournal {
       const assigned = state.assignedById.get(assignmentId);
       if (!assigned) throw new Error("Ledger snapshot names an unknown assignment");
       const current = state.stateByRun.get(assigned.record.runId);
-      if (current?.state === "running" || current?.state === "committed") {
+      if (
+        (state.assignmentByRun.get(assigned.record.runId) === assignmentId &&
+          (current?.state === "running" || current?.state === "committed")) ||
+        hasDurableStartedObservation(state, assignmentId)
+      ) {
         return { kind: "return", value: undefined };
       }
-      if (current?.state !== "dispatched") {
+      if (
+        current?.state !== "dispatched" ||
+        state.assignmentByRun.get(assigned.record.runId) !== assignmentId
+      ) {
         throw new Error("Ledger snapshot is invalid for the current run state");
       }
       return {
@@ -642,6 +1689,7 @@ export class ConversationRunJournal {
           runRecord(this.#conversationId, {
             t: "state",
             runId: assigned.record.runId,
+            assignmentId,
             state: "running",
             statusRevision: current.statusRevision + 1,
           }),
@@ -653,53 +1701,120 @@ export class ConversationRunJournal {
 
   async mirrorInteractions(
     assignmentId: string,
-    entries: readonly ConversationInteractionMirrorEntry[],
+    rawBatch: ConversationInteractionMirrorBatch,
     ctx: AuthorityCallContext,
-  ): Promise<{ readonly mirroredUpTo: number }> {
-    this.#submission.authorize(ctx, "submission.mirrorInteractions", assignmentId);
-    const incoming = entries.map(validateConversationInteractionMirrorEntry);
-    const transaction = await this.#transact<{ mirroredUpTo: number }>((state) => {
-      if (!state.assignedById.has(assignmentId)) {
-        throw new Error("Interaction mirror names an unknown assignment");
+  ): Promise<{
+    readonly mirroredUpTo: number;
+    readonly ordinal: number;
+    readonly mirrorDigest: string;
+  }> {
+    this.#authenticateSubmission(ctx, {
+      method: "submission.mirrorInteractions",
+      assignmentId,
+    });
+    await this.#loadSubmissionGuard(ctx, {
+      method: "submission.mirrorInteractions",
+      assignmentId,
+    });
+    if (
+      Buffer.byteLength(
+        canonicalize({ t: "interaction-mirror", assignmentId, batch: rawBatch }),
+        "utf8",
+      ) > MAX_INLINE_LOGICAL_RECORD_BYTES
+    ) {
+      throw new TypeError("Interaction mirror batch exceeds the durable record limit");
+    }
+    const batch = validateConversationInteractionMirrorBatch(
+      rawBatch,
+      this.#verifier,
+    );
+    if (batch.assignmentId !== assignmentId) {
+      throw new TypeError("Interaction mirror batch names a different assignment");
+    }
+    const batchDigest = interactionMirrorBatchDigest(batch);
+    const transaction = await this.#transact<{
+      mirroredUpTo: number;
+      ordinal: number;
+      mirrorDigest: string;
+    }>((state) => {
+      const assigned = state.assignedById.get(assignmentId);
+      this.#assertActivatedSubmissionCapability(state, ctx, {
+        method: "submission.mirrorInteractions",
+        assignmentId,
+      });
+      if (!assigned || assigned.record.executorId !== batch.executorId) {
+        throw new Error("Interaction mirror does not bind the durable assignment");
       }
-      const previous = state.mirroredUpTo.get(assignmentId) ?? 0;
-      const durableEntries = state.mirroredEntries.get(assignmentId);
-      if (!durableEntries) {
+      const existingBatch = state.mirrorBatches.get(batchDigest);
+      if (existingBatch) {
+        if (
+          canonicalize(withoutSignature(existingBatch.batch)) !==
+          canonicalize(withoutSignature(batch))
+        ) {
+          throw new Error("Interaction mirror batch identity has conflicting payloads");
+        }
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-replay",
+          method: "submission.mirrorInteractions",
+          assignmentId,
+        });
+        const last = existingBatch.batch.entries.at(-1)!;
+        return {
+          kind: "return",
+          value: {
+            mirroredUpTo: last.seq,
+            ordinal: last.ordinal,
+            mirrorDigest: existingBatch.batch.mirrorDigest,
+          },
+        };
+      }
+      const mirrorState = state.mirrorStateByAssignment.get(assignmentId);
+      if (!mirrorState) {
         throw new Error("Interaction mirror projection is missing its assignment");
       }
-      const seen = new Map(durableEntries);
-      let lastInput = 0;
-      let last = previous;
-      const fresh: ConversationInteractionMirrorEntry[] = [];
-      for (const entry of incoming) {
-        if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) {
-          throw new Error("Interaction mirror sequence must be a positive safe integer");
-        }
-        if (entry.seq <= lastInput) {
-          throw new Error("Interaction mirror sequence must increase");
-        }
-        lastInput = entry.seq;
-        const durable = seen.get(entry.seq);
-        if (durable) {
-          if (canonicalize(durable) !== canonicalize(entry)) {
-            throw new Error("Interaction mirror sequence has conflicting payloads");
-          }
-          continue;
-        }
-        if (entry.seq <= previous) {
-          throw new Error("Interaction mirror watermark has no matching durable entry");
-        }
-        fresh.push(entry);
-        seen.set(entry.seq, entry);
-        last = entry.seq;
+      const first = batch.entries[0]!;
+      const last = batch.entries.at(-1)!;
+      if (
+        batch.previousDigest !== mirrorState.mirrorDigest ||
+        first.ordinal !== mirrorState.ordinal + 1 ||
+        first.seq <= mirrorState.mirroredUpTo
+      ) {
+        throw new Error("Interaction mirror batch does not continue the durable audit prefix");
       }
-      if (fresh.length === 0) {
-        return { kind: "return", value: { mirroredUpTo: previous } };
+      const batchRequestIds = new Set<string>();
+      for (const entry of batch.entries) {
+        if (
+          mirrorState.requestIds.has(entry.requestId) ||
+          batchRequestIds.has(entry.requestId)
+        ) {
+          throw new Error("Interaction mirror batch repeats a durable request identity");
+        }
+        batchRequestIds.add(entry.requestId);
       }
+      const current = state.stateByRun.get(assigned.record.runId)?.state;
+      if (
+        state.assignmentByRun.get(assigned.record.runId) !== assignmentId ||
+        state.closedAssignments.has(assignmentId) ||
+        (current !== "dispatched" && current !== "running" &&
+          !(
+            (current === "cancel-requested" || current === "uncertain") &&
+            state.cancelFences.has(assignmentId)
+          ))
+      ) {
+        throw new Error("New interaction mirror belongs to a historical assignment");
+      }
+      this.#authorizeSubmission(state, ctx, {
+        mode:
+          current === "cancel-requested" || current === "uncertain"
+            ? "settlement"
+            : "active",
+        method: "submission.mirrorInteractions",
+        assignmentId,
+      });
       const mirrorRecord: Extract<ConversationRunJournalRecord, { t: "interaction-mirror" }> = {
         t: "interaction-mirror",
         assignmentId,
-        entries: fresh,
+        batch,
       };
       if (
         Buffer.byteLength(canonicalize(mirrorRecord), "utf8") >
@@ -710,10 +1825,240 @@ export class ConversationRunJournal {
       return {
         kind: "append",
         entries: [runRecord(this.#conversationId, mirrorRecord)],
-        value: { mirroredUpTo: last },
+        value: {
+          mirroredUpTo: last.seq,
+          ordinal: last.ordinal,
+          mirrorDigest: batch.mirrorDigest,
+        },
       };
     });
     return transaction.value;
+  }
+
+  async submitCancelProof(
+    assignmentId: string,
+    rawProof: CancelProofBody,
+    ctx: AuthorityCallContext,
+  ): Promise<void> {
+    assertIdentifier(assignmentId, "Cancelled assignment id");
+    this.#authenticateSubmission(ctx, {
+      method: "submission.submitCancelProof",
+      assignmentId,
+    });
+    await this.#loadSubmissionGuard(ctx, {
+      method: "submission.submitCancelProof",
+      assignmentId,
+    });
+    const proof = validateCancelProof(rawProof, this.#verifier);
+    if (proof.assignmentId !== assignmentId) {
+      throw new TypeError("Cancel proof names a different assignment");
+    }
+    const at = this.#clock();
+    await this.#transact<void>((state) => {
+      this.#assertActivatedSubmissionCapability(state, ctx, {
+        method: "submission.submitCancelProof",
+        assignmentId,
+      });
+      const assigned = state.assignedById.get(assignmentId);
+      if (
+        !assigned ||
+        !terminationProofBindsDurableSource({
+          proof,
+          assignmentId,
+          executorId: assigned.record.executorId,
+          conversationId: this.#conversationId,
+          ownerEpoch: assigned.record.ownerEpoch,
+          dispatchDigest: assigned.record.dispatchDigest,
+          cancelFence: state.cancelFences.get(assignmentId),
+        })
+      ) {
+        throw new Error("Cancel proof does not bind the durable assignment authority");
+      }
+      const current = state.stateByRun.get(assigned.record.runId);
+      if (!current) throw corruptRunJournal("Cancelled assignment has no run state");
+      const accepted = state.acceptedCancellations.get(assignmentId);
+      const prior = state.superseded.get(assignmentId);
+      const containment = state.containmentByAssignment.get(assignmentId);
+      const rejectedNotStarted = state.rejectedNotStarted.get(
+        rejectedNotStartedKey(assignmentId, "cancel"),
+      );
+      const durableProofs = [
+        accepted?.proof,
+        prior?.proof,
+        containment?.proof,
+        rejectedNotStarted?.proof,
+      ].filter((candidate): candidate is AssignmentTerminationProof | CancelProofBody =>
+        candidate !== undefined,
+      );
+      if (durableProofs.length > 0) {
+        if (
+          durableProofs.some(
+            (candidate) =>
+              canonicalize(withoutSignature(candidate)) !==
+              canonicalize(withoutSignature(proof)),
+          )
+        ) {
+          throw new Error("Assignment already has a different durable termination proof");
+        }
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-replay",
+          method: "submission.submitCancelProof",
+          assignmentId,
+        });
+        return { kind: "return", value: undefined };
+      }
+      if (state.assignmentByRun.get(assigned.record.runId) !== assignmentId) {
+        throw new Error("Cancel proof belongs to a historical assignment");
+      }
+      if (current.state === "cancelled" || current.state === "committed") {
+        throw new Error("Cancel proof has no matching durable terminal fact");
+      }
+      if (proof.cause === "abort-ticket") {
+        if (!this.#abortTickets) {
+          throw new Error("Abort-ticket validation is not configured");
+        }
+        this.#abortTickets.authorize({
+          assignmentId,
+          executorId: proof.executorId,
+          ticketDigest: proof.ticketDigest,
+          surfacePrincipal: proof.surfacePrincipal,
+        });
+      }
+      this.#authorizeSubmission(state, ctx, {
+        mode: "settlement",
+        method: "submission.submitCancelProof",
+        assignmentId,
+      });
+
+      const open = state.resolutionsByRun.get(assigned.record.runId);
+      const contradictoryNotStarted =
+        proof.decision === "not-started" &&
+        hasDurableStartedObservation(state, assignmentId);
+      if (contradictoryNotStarted) {
+        const rejectionKey = rejectedNotStartedKey(assignmentId, "cancel");
+        const existingRejection = state.rejectedNotStarted.get(rejectionKey);
+        if (existingRejection) {
+          throw corruptRunJournal("Rejected not-started proof was not replayed durably");
+        }
+        const rejection = runRecord(this.#conversationId, {
+          t: "not-started-rejected",
+          assignmentId,
+          proof,
+        });
+        if (current.state === "uncertain") {
+          return { kind: "append", entries: [rejection], value: undefined };
+        }
+        const fact = createOpenResolutionFact(assigned, "cancel-unproven", at);
+        return {
+          kind: "append",
+          entries: [
+            rejection,
+            runRecord(this.#conversationId, {
+              t: "resolution",
+              runId: assigned.record.runId,
+              fact,
+            }),
+            ...capabilityRevocations(this.#conversationId, state, assigned),
+            runRecord(this.#conversationId, {
+              t: "state",
+              runId: assigned.record.runId,
+              assignmentId,
+              state: "uncertain",
+              statusRevision: current.statusRevision + 1,
+            }),
+          ],
+          value: undefined,
+        };
+      }
+      if (current.state === "uncertain") {
+        if (!open || open.resolution) {
+          throw corruptRunJournal("Uncertain cancellation has no open resolution fact");
+        }
+        const conflict = open.cause === "dispatch-conflict";
+        if (conflict) {
+          const conflictRecord = state.conflictByAssignment.get(assignmentId);
+          if (
+            !conflictRecord ||
+            proof.lastRecordSeq <= conflictRecord.proof.receivedRecordSeq
+          ) {
+            throw new Error("Conflict containment proof does not follow the received prefix");
+          }
+        }
+        const requiresContainment = conflict || proof.decision === "halted";
+        if (requiresContainment && state.containedFacts.has(open.openFactDigest)) {
+          throw corruptRunJournal("Contained cancel proof was not replayed durably");
+        }
+        const containment = requiresContainment
+          ? runRecord(this.#conversationId, {
+              t: conflict ? "dispatch-conflict-contained" : "cancel-contained",
+              assignmentId,
+              openFactDigest: open.openFactDigest,
+              proof,
+            })
+          : undefined;
+        if (proof.decision === "halted") {
+          return { kind: "append", entries: [containment!], value: undefined };
+        }
+        const resolved = closeResolution(
+          open,
+          "proven-not-started-redispatched",
+          proof.executorId,
+          at,
+        );
+        return {
+          kind: "append",
+          entries: [
+            ...(containment ? [containment] : []),
+            runRecord(this.#conversationId, {
+              t: "assignment-superseded",
+              assignmentId,
+              proof,
+            }),
+            runRecord(this.#conversationId, {
+              t: "resolution",
+              runId: assigned.record.runId,
+              fact: resolved,
+            }),
+            ...capabilityRevocations(this.#conversationId, state, assigned),
+            runRecord(this.#conversationId, {
+              t: "state",
+              runId: assigned.record.runId,
+              assignmentId,
+              state: "queued",
+              statusRevision: current.statusRevision + 1,
+            }),
+          ],
+          value: undefined,
+        };
+      }
+
+      if (
+        current.state !== "cancel-requested" &&
+        current.state !== "dispatched" &&
+        current.state !== "running"
+      ) {
+        throw new Error("Cancel proof is late for the current run state");
+      }
+      return {
+        kind: "append",
+        entries: [
+          runRecord(this.#conversationId, {
+            t: "cancel-proof-accepted",
+            assignmentId,
+            proof,
+          }),
+          ...capabilityRevocations(this.#conversationId, state, assigned),
+          runRecord(this.#conversationId, {
+            t: "state",
+            runId: assigned.record.runId,
+            assignmentId,
+            state: "cancelled",
+            statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: undefined,
+      };
+    });
   }
 
   async submitBundle(
@@ -726,13 +2071,236 @@ export class ConversationRunJournal {
         readonly error: import("@zhixing/core/contracts").AuthorityError;
       }
   > {
+    if (ctx.principal.kind !== "assignment") {
+      throw new Error("Bundle submission requires an assignment capability");
+    }
+    const assignmentId = ctx.principal.capability.assignmentId;
+    this.#authenticateSubmission(ctx, {
+      method: "submission.submitBundle",
+      assignmentId,
+    });
+    const guard = await this.#loadSubmissionGuard(ctx, {
+      method: "submission.submitBundle",
+      assignmentId,
+    });
+    const guardAssigned = guard.assignedById.get(assignmentId);
+    if (!guardAssigned) {
+      throw new Error("Bundle capability is not activated by a durable assignment");
+    }
+    const guardCommitted = guard.committedByAssignment.get(assignmentId);
+    if (!guardCommitted) {
+      const guardState = guard.stateByRun.get(guardAssigned.record.runId)?.state;
+      const rejectionMessage = !this.#hasCurrentSubmissionAuthorityEpoch(ctx)
+        ? "Bundle capability belongs to a stale owner epoch"
+        : guard.assignmentByRun.get(guardAssigned.record.runId) !== assignmentId
+          ? "Bundle belongs to a historical assignment"
+          : guard.openConflictAssignments.has(assignmentId)
+            ? "Bundle is blocked by an open dispatch conflict"
+            : guardState !== "dispatched" &&
+                guardState !== "running" &&
+                guardState !== "cancel-requested" &&
+                guardState !== "uncertain"
+              ? "Bundle is late for the current run state"
+              : undefined;
+      if (rejectionMessage) {
+        this.#authorizeGuardSubmission(guard, ctx, {
+          mode: "durable-rejection",
+          method: "submission.submitBundle",
+          assignmentId,
+        });
+        return rejected("fence-rejected", rejectionMessage, false);
+      }
+      this.#authorizeGuardSubmission(guard, ctx, {
+        mode: guardState === "uncertain" ? "settlement" : "active",
+        method: "submission.submitBundle",
+        assignmentId,
+      });
+    }
+
     let bundle: ReturnType<typeof validateConversationSealedBundle>;
     try {
       bundle = validateConversationSealedBundle(rawBundle);
     } catch (error) {
       return rejected("invalid", error instanceof Error ? error.message : "Invalid bundle", false);
     }
-    this.#submission.authorize(ctx, "submission.submitBundle", bundle.assignmentId);
+    if (bundle.assignmentId !== assignmentId) {
+      return rejected(
+        "fence-rejected",
+        "Bundle does not bind the authenticated assignment",
+        false,
+      );
+    }
+    const artifact = sealedBundleArtifact(bundle);
+    if (guardCommitted) {
+      if (canonicalize(guardCommitted.bundle.ref) !== canonicalize(artifact.ref)) {
+        this.#authorizeGuardSubmission(guard, ctx, {
+          mode: "active",
+          method: "submission.submitBundle",
+          assignmentId,
+        });
+        return rejected(
+          "fence-rejected",
+          "Assignment already committed another bundle",
+          false,
+        );
+      }
+      if (!submissionCommitSidecarsMatch(guardCommitted.sidecars, bundle)) {
+        throw corruptRunJournal("Committed bundle does not match its durable sidecars");
+      }
+      const capability = ctx.principal.capability;
+      if (
+        capability.scope.execution !== "conversation" ||
+        !("ownerEpoch" in capability) ||
+        capability.ownerEpoch !== guardAssigned.record.ownerEpoch ||
+        bundle.body.conversationId !== this.#conversationId ||
+        bundle.body.runId !== guardAssigned.record.runId ||
+        !historicalBundleFenceMatches({
+          assignedExecutorId: guardAssigned.record.executorId,
+          assignedOwnerEpoch: guardAssigned.record.ownerEpoch,
+          assignedBaseRevision: guardAssigned.record.baseRevision,
+          bundleExecutorId: bundle.executorId,
+          bundleOwnerEpoch: bundle.body.ownerEpoch,
+          bundleBaseRevision: bundle.body.baseRevision,
+          conflictOpen: guard.openConflictAssignments.has(assignmentId),
+        }) ||
+        bundle.body.baseRevision + 1 !== guardCommitted.commitRevision
+      ) {
+        throw corruptRunJournal(
+          "Committed bundle does not match its durable assignment fence",
+        );
+      }
+      this.#authorizeGuardSubmission(guard, ctx, {
+        mode: "durable-replay",
+        method: "submission.submitBundle",
+        assignmentId,
+      });
+      return { committed: true, commitRevision: guardCommitted.commitRevision };
+    }
+
+    const preflight = await this.#select((state) => {
+      this.#assertActivatedSubmissionCapability(state, ctx, {
+        method: "submission.submitBundle",
+        assignmentId,
+      });
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned) {
+        throw new Error("Bundle capability is not activated by a durable assignment");
+      }
+      const committed = state.committedByAssignment.get(assignmentId);
+      if (committed) {
+        if (canonicalize(committed.bundle.ref) !== canonicalize(artifact.ref)) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "active",
+            method: "submission.submitBundle",
+            assignmentId,
+          });
+          return {
+            kind: "return" as const,
+            value: rejected(
+              "fence-rejected",
+              "Assignment already committed another bundle",
+              false,
+            ),
+          };
+        }
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-replay",
+          method: "submission.submitBundle",
+          assignmentId,
+        });
+        return {
+          kind: "return" as const,
+          value: { committed: true as const, commitRevision: committed.commitRevision },
+        };
+      }
+      if (state.assignmentByRun.get(assigned.record.runId) !== assignmentId) {
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-rejection",
+          method: "submission.submitBundle",
+          assignmentId,
+        });
+        return {
+          kind: "return" as const,
+          value: rejected(
+            "fence-rejected",
+            "Bundle belongs to a historical assignment",
+            false,
+          ),
+        };
+      }
+      const currentRunState = state.stateByRun.get(assigned.record.runId)?.state;
+      const openResolution = state.resolutionsByRun.get(assigned.record.runId);
+      if (
+        currentRunState === "uncertain" &&
+        openResolution?.cause === "dispatch-conflict" &&
+        !openResolution.resolution
+      ) {
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-rejection",
+          method: "submission.submitBundle",
+          assignmentId,
+        });
+        return {
+          kind: "return" as const,
+          value: rejected(
+            "fence-rejected",
+            "Bundle is blocked by an open dispatch conflict",
+            false,
+          ),
+        };
+      }
+      if (
+        currentRunState !== "dispatched" &&
+        currentRunState !== "running" &&
+        currentRunState !== "cancel-requested" &&
+        currentRunState !== "uncertain"
+      ) {
+        this.#authorizeSubmission(state, ctx, {
+          mode: "durable-rejection",
+          method: "submission.submitBundle",
+          assignmentId,
+        });
+        return {
+          kind: "return" as const,
+          value: rejected(
+            "fence-rejected",
+            "Bundle is late for the current run state",
+            false,
+          ),
+        };
+      }
+      this.#authorizeSubmission(state, ctx, {
+        mode: currentRunState === "uncertain" ? "settlement" : "active",
+        method: "submission.submitBundle",
+        assignmentId,
+      });
+      return {
+        kind: "proceed" as const,
+        assigned: snapshot(assigned, "Bundle preflight assignment"),
+      };
+    });
+    if (preflight.kind === "return") return preflight.value;
+    const preflightBody = bundle.body;
+    if (
+      preflightBody.conversationId !== this.#conversationId ||
+      preflightBody.runId !== preflight.assigned.record.runId ||
+      preflightBody.ownerEpoch !== this.#ownerEpoch ||
+      !historicalBundleFenceMatches({
+        assignedExecutorId: preflight.assigned.record.executorId,
+        assignedOwnerEpoch: preflight.assigned.record.ownerEpoch,
+        assignedBaseRevision: preflight.assigned.record.baseRevision,
+        bundleExecutorId: bundle.executorId,
+        bundleOwnerEpoch: preflightBody.ownerEpoch,
+        bundleBaseRevision: preflightBody.baseRevision,
+        conflictOpen: false,
+      })
+    ) {
+      return rejected(
+        "fence-rejected",
+        "Bundle fence does not match the durable assignment",
+        false,
+      );
+    }
     let closure: ValidatedConversationBundleClosure;
     try {
       closure = await validateConversationBundleClosure(bundle, this.#artifacts);
@@ -742,7 +2310,15 @@ export class ConversationRunJournal {
       }
       throw error;
     }
-    const { artifact, batch, references, runRecord: committedRunRecord } = closure;
+    const {
+      artifact: closedArtifact,
+      batch,
+      references,
+      runRecord: committedRunRecord,
+    } = closure;
+    if (canonicalize(closedArtifact.ref) !== canonicalize(artifact.ref)) {
+      throw new Error("Bundle closure changed its artifact identity");
+    }
     if (batch && !this.#publisher) {
       return rejected("capability-gap", "Staged mutation publisher is not configured", false);
     }
@@ -755,10 +2331,19 @@ export class ConversationRunJournal {
           }
       >(
         (state, authorityPrefix) => {
+        this.#assertActivatedSubmissionCapability(state, ctx, {
+          method: "submission.submitBundle",
+          assignmentId,
+        });
         const assigned = state.assignedById.get(bundle.assignmentId);
         const committed = state.committedByAssignment.get(bundle.assignmentId);
         if (committed) {
           if (canonicalize(committed.bundle.ref) !== canonicalize(artifact.ref)) {
+            this.#authorizeSubmission(state, ctx, {
+              mode: "active",
+              method: "submission.submitBundle",
+              assignmentId: bundle.assignmentId,
+            });
             return {
               kind: "return",
               value: rejected(
@@ -768,27 +2353,62 @@ export class ConversationRunJournal {
               ),
             };
           }
+          this.#authorizeSubmission(state, ctx, {
+            mode: "durable-replay",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
           return {
             kind: "return",
             value: { committed: true, commitRevision: committed.commitRevision },
           };
         }
         if (!assigned) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "active",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
           return {
             kind: "return",
             value: rejected("fence-rejected", "Bundle names an unknown assignment", false),
           };
         }
-        const dispatch = assigned.envelope;
         const body = bundle.body;
+        if (state.assignmentByRun.get(assigned.record.runId) !== bundle.assignmentId) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "durable-rejection",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
+          return {
+            kind: "return",
+            value: rejected(
+              "fence-rejected",
+              "Bundle belongs to a historical assignment",
+              false,
+            ),
+          };
+        }
         if (
           body.conversationId !== this.#conversationId ||
           body.runId !== assigned.record.runId ||
           body.ownerEpoch !== this.#ownerEpoch ||
-          body.ownerEpoch !== dispatch.work.ownerEpoch ||
-          body.baseRevision !== dispatch.work.baseRevision ||
-          bundle.executorId !== assigned.record.executorId
+          !historicalBundleFenceMatches({
+            assignedExecutorId: assigned.record.executorId,
+            assignedOwnerEpoch: assigned.record.ownerEpoch,
+            assignedBaseRevision: assigned.record.baseRevision,
+            bundleExecutorId: bundle.executorId,
+            bundleOwnerEpoch: body.ownerEpoch,
+            bundleBaseRevision: body.baseRevision,
+            conflictOpen: false,
+          })
         ) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "active",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
           return {
             kind: "return",
             value: rejected(
@@ -799,12 +2419,47 @@ export class ConversationRunJournal {
           };
         }
         const currentRunState = state.stateByRun.get(body.runId)?.state;
-        if (currentRunState !== "dispatched" && currentRunState !== "running") {
+        const openResolution = state.resolutionsByRun.get(body.runId);
+        if (
+          currentRunState === "uncertain" &&
+          openResolution?.cause === "dispatch-conflict" &&
+          !openResolution.resolution
+        ) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "durable-rejection",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
+          return {
+            kind: "return",
+            value: rejected(
+              "fence-rejected",
+              "Bundle is blocked by an open dispatch conflict",
+              false,
+            ),
+          };
+        }
+        if (
+          currentRunState !== "dispatched" &&
+          currentRunState !== "running" &&
+          currentRunState !== "cancel-requested" &&
+          currentRunState !== "uncertain"
+        ) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "active",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
           return {
             kind: "return",
             value: rejected("fence-rejected", "Bundle is late for the current run state", false),
           };
         }
+        this.#authorizeSubmission(state, ctx, {
+          mode: currentRunState === "uncertain" ? "settlement" : "active",
+          method: "submission.submitBundle",
+          assignmentId: bundle.assignmentId,
+        });
         const sessionRecords = (batch?.records ?? [])
           .filter((record) => record.domain === "session")
           .map((record) => ({
@@ -891,14 +2546,33 @@ export class ConversationRunJournal {
             kind: "content-asset-index",
             entries: body.contentAssets,
           }),
+          ...capabilityRevocations(this.#conversationId, state, assigned),
           runRecord(this.#conversationId, {
             t: "state",
             runId: body.runId,
+            assignmentId: bundle.assignmentId,
             state: "committed",
             statusRevision:
               (state.stateByRun.get(body.runId)?.statusRevision ?? 0) + 1,
           }),
         ];
+        if (currentRunState === "uncertain") {
+          if (!openResolution || openResolution.resolution) {
+            throw corruptRunJournal("Uncertain run has no open resolution fact");
+          }
+          entries.push(
+            runRecord(this.#conversationId, {
+              t: "resolution",
+              runId: body.runId,
+              fact: closeResolution(
+                openResolution,
+                "late-bundle-committed",
+                bundle.executorId,
+                this.#clock(),
+              ),
+            }),
+          );
+        }
         if (batch && body.mutationBatch) {
           entries.push({
             stream: "publish",
@@ -966,10 +2640,13 @@ export class ConversationRunJournal {
 
   /** Rebuild every missing post-commit projection from durable committed facts. */
   async resumeCommittedProjections(): Promise<number> {
-    const state = await this.#read();
+    const pending = await this.#select((state) =>
+      [...state.pendingCommitProjections.values()].map((committed) =>
+        snapshot(committed, "Pending commit projection"),
+      ),
+    );
     let projected = 0;
-    for (const committed of state.commits) {
-      if (state.projectedByAssignment.has(committed.assignmentId)) continue;
+    for (const committed of pending) {
       const bytes = await this.#artifacts.get(committed.bundle.ref);
       const bundle = validateConversationSealedBundle(
         JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
@@ -1010,72 +2687,104 @@ export class ConversationRunJournal {
 
   async resumePublishing(assignmentId: string): Promise<number> {
     assertIdentifier(assignmentId, "Assignment id");
-    const [projection, runState] = await Promise.all([
-      this.#readPublishProjection(),
-      this.#read(),
+    const [projection, committed] = await Promise.all([
+      this.#selectPublish((state) => {
+        const decision = state.decisions.get(assignmentId);
+        if (!decision) return undefined;
+        const batch = state.batches.get(assignmentId);
+        if (!batch) {
+          throw corruptRunJournal("Publish decision has no validated mutation batch");
+        }
+        // Decision, batch, and domain plans are immutable after insertion; settlement
+        // only removes their map entries. Returning these internal references avoids
+        // cloning and rescanning the entire batch on every crash-recovery attempt.
+        return {
+          decision,
+          batch,
+          domains: (["session", "global"] as const).map((domain) => {
+            const key = `${assignmentId}\0${domain}`;
+            const progress = state.progress.get(key);
+            return {
+              domain,
+              plan: state.domainPlans.get(key),
+              progress: progress
+                ? { state: progress.state, upToSeq: progress.upToSeq }
+                : undefined,
+            };
+          }),
+        };
+      }),
+      this.#select((state) => state.committedByAssignment.has(assignmentId)),
     ]);
-    const decision = projection.decisions.get(assignmentId);
-    if (!decision) return 0;
-    if (!runState.committedByAssignment.has(assignmentId)) {
+    if (!projection) return 0;
+    const { decision, batch } = projection;
+    if (!committed) {
       throw corruptRunJournal("Publish decision has no committed assignment");
     }
     if (!this.#publisher) {
       throw new Error("Staged mutation publisher is not configured");
     }
-    const batchBytes = await this.#artifacts.get(decision.batch.ref);
-    const batch = validateMutationBatch(
-      JSON.parse(Buffer.from(batchBytes).toString("utf8")) as MutationBatch,
-    );
     let applied = 0;
-    for (const domain of ["session", "global"] as const) {
-      let watermark = projection.progress.get(`${assignmentId}\0${domain}`)?.upToSeq ?? 0;
-      const granted = decision.outcomes
-        .filter((item) => item.outcome.t === "granted")
-        .map((item) => ({
-          record: batch.records.find((record) => record.seq === item.seq),
-          outcome: item.outcome as Extract<typeof item.outcome, { t: "granted" }>,
-        }))
-        .filter((item) => item.record?.domain === domain)
-        .map((item) => ({
-          record: item.record as AssignmentRecordLike,
-          outcome: item.outcome,
-        }))
-        .sort((left, right) => left.record.seq - right.record.seq);
-      for (let index = 0; index < granted.length; index += 1) {
-        const item = granted[index]!;
-        if (item.record.seq <= watermark) continue;
+    for (const { domain, plan, progress } of projection.domains) {
+      const domainCount =
+        domain === "session" ? decision.sessionCount : decision.globalCount;
+      if (domainCount === 0) continue;
+      if (!plan || !progress) {
+        throw corruptRunJournal(
+          "Publish decision has no durable domain recovery plan",
+        );
+      }
+      if (progress.state === "settled") continue;
+      const currentIndex =
+        progress.upToSeq === 0
+          ? undefined
+          : plan.grantedIndexBySeq.get(progress.upToSeq);
+      if (progress.upToSeq !== 0 && currentIndex === undefined) {
+        throw corruptRunJournal(
+          "Publish progress is outside its domain recovery plan",
+        );
+      }
+      const startIndex = currentIndex === undefined ? 0 : currentIndex + 1;
+      for (let index = startIndex; index < plan.grantedSeqs.length; index += 1) {
+        const seq = plan.grantedSeqs[index]!;
+        const record = batch.records[seq - 1];
+        const decided = decision.outcomes[seq - 1];
+        if (
+          !record ||
+          record.seq !== seq ||
+          record.domain !== domain ||
+          !decided ||
+          decided.seq !== seq ||
+          decided.outcome.t !== "granted"
+        ) {
+          throw corruptRunJournal("Publish domain recovery plan is inconsistent");
+        }
         await this.#publisher.apply({
           assignmentId,
-          seq: item.record.seq,
+          seq,
           domain,
-          mutation: item.record.mutation as SessionStagedMutation | GlobalStagedMutation,
-          requestId: item.record.requestId,
-          targetRevision: item.outcome.targetRevision,
+          mutation: record.mutation as SessionStagedMutation | GlobalStagedMutation,
+          requestId: record.requestId,
+          targetRevision: decided.outcome.targetRevision,
         });
-        watermark = item.record.seq;
-        const settled = index === granted.length - 1;
+        const settled = index === plan.grantedSeqs.length - 1;
         await this.#appendPublishProgress({
           t: "publish-progress",
           assignmentId,
           domain,
-          upToSeq: watermark,
+          upToSeq: seq,
           state: settled ? "settled" : "pending",
         });
         applied += 1;
       }
-      if (granted.length === 0) {
-        const domainSeqs = batch.records
-          .filter((record) => record.domain === domain)
-          .map((record) => record.seq);
-        if (domainSeqs.length > 0 && projection.progress.get(`${assignmentId}\0${domain}`)?.state !== "settled") {
-          await this.#appendPublishProgress({
-            t: "publish-progress",
-            assignmentId,
-            domain,
-            upToSeq: Math.max(...domainSeqs),
-            state: "settled",
-          });
-        }
+      if (plan.grantedSeqs.length === 0) {
+        await this.#appendPublishProgress({
+          t: "publish-progress",
+          assignmentId,
+          domain,
+          upToSeq: plan.terminalSeq,
+          state: "settled",
+        });
       }
     }
     return applied;
@@ -1083,48 +2792,42 @@ export class ConversationRunJournal {
 
   /** Resume every committed publish decision that is not settled, without caller memory. */
   async resumePendingPublishing(): Promise<number> {
-    const [projection, runState] = await Promise.all([
-      this.#readPublishProjection(),
-      this.#read(),
-    ]);
+    const assignments = await this.#selectPublish((state) =>
+      [...(state.pendingAssignmentsByConversation.get(this.#conversationId) ?? [])],
+    );
     let applied = 0;
-    for (const committed of runState.commits) {
-      const decision = projection.decisions.get(committed.assignmentId);
-      if (!decision) continue;
-      const pending = (["session", "global"] as const).some((domain) => {
-        const count = domain === "session" ? decision.sessionCount : decision.globalCount;
-        return (
-          count > 0 &&
-          projection.progress.get(`${committed.assignmentId}\0${domain}`)?.state !== "settled"
-        );
-      });
-      if (pending) applied += await this.resumePublishing(committed.assignmentId);
+    for (const assignmentId of assignments) {
+      applied += await this.resumePublishing(assignmentId);
     }
     return applied;
   }
 
   async pendingFinalFrames(): Promise<FinalFrame[]> {
-    const [projection, runState, publishState] = await Promise.all([
-      this.#readFinalOutbox(),
-      this.#read(),
-      this.#readPublishProjection(),
-    ]);
-    const assignmentByRevision = new Map(
-      runState.commits.map((record) => [record.commitRevision, record.assignmentId]),
+    const pending = await this.#selectFinal((state) =>
+      [...(state.pendingByConversation.get(this.#conversationId)?.values() ?? [])]
+        .map((entry) => snapshot(entry, "Pending final frame"))
+        .sort((left, right) => left.record.commitRevision - right.record.commitRevision),
     );
-    return [...projection.values()]
-      .filter(
-        ({ record }) =>
-          record.conversationId === this.#conversationId && record.state === "pending",
-      )
-      .sort((left, right) => left.record.commitRevision - right.record.commitRevision)
-      .map(({ record }) => {
-        const assignmentId = assignmentByRevision.get(record.commitRevision);
-        const conflictCount = assignmentId
-          ? publishConflictCount(publishState, assignmentId)
-          : 0;
-        return finalFrame(record, conflictCount);
-      });
+    const assignmentByRevision = await this.#select((state) =>
+      new Map(
+        pending.flatMap(({ record }) => {
+          const assignmentId = state.assignmentByCommitRevision.get(record.commitRevision);
+          return assignmentId ? [[record.commitRevision, assignmentId] as const] : [];
+        }),
+      ),
+    );
+    const conflictCount = await this.#selectPublish((state) =>
+      new Map(
+        [...assignmentByRevision.values()].map((assignmentId) => [
+          assignmentId,
+          state.conflictsByAssignment.get(assignmentId)?.length ?? 0,
+        ]),
+      ),
+    );
+    return pending.map(({ record }) => {
+      const assignmentId = assignmentByRevision.get(record.commitRevision);
+      return finalFrame(record, assignmentId ? conflictCount.get(assignmentId) ?? 0 : 0);
+    });
   }
 
   async publishPendingFinals(
@@ -1140,13 +2843,16 @@ export class ConversationRunJournal {
 
   async expirePublishedFinals(now: IsoTime): Promise<number> {
     const cutoff = canonicalTime(now, "Final outbox sweep time") - FINAL_OUTBOX_RETENTION_MS;
-    const projection = await this.#readFinalOutbox();
+    const projection = await this.#selectFinal((state) =>
+      [...(state.publishedByConversation.get(this.#conversationId)?.values() ?? [])].map(
+        (entry) => snapshot(entry, "Published final frame"),
+      ),
+    );
     let expired = 0;
-    for (const { record, at } of [...projection.values()].sort(
+    for (const { record, at } of projection.sort(
       (left, right) => left.record.commitRevision - right.record.commitRevision,
     )) {
       if (
-        record.conversationId !== this.#conversationId ||
         record.state !== "published" ||
         canonicalTime(at, "Final outbox record time") > cutoff
       ) {
@@ -1165,33 +2871,26 @@ export class ConversationRunJournal {
   ): Promise<ConversationStatusNotice[]> {
     assertIdentifier(runId, "Run id");
     assertNonNegativeSafeInteger(afterStatusRevision, "Last-seen status revision");
-    const records = await this.#log.readStream<ConversationCommitLogRecord>(
-      runStream(this.#conversationId),
+    const records = await this.#select((state) =>
+      (state.statusHistoryByRun.get(runId) ?? [])
+        .slice(afterStatusRevision)
+        .map((record) => snapshot(record, "Run status history")),
     );
     const notices: ConversationStatusNotice[] = [];
     for (const record of records) {
-      const body = record.body as ConversationRunJournalRecord;
-      if (
-        !("t" in body) ||
-        body.t !== "state" ||
-        body.runId !== runId ||
-        body.statusRevision <= afterStatusRevision ||
-        body.state === "committed"
-      ) {
-        continue;
-      }
+      if (record.state === "committed") continue;
       const ref = {
         execution: "conversation" as const,
         conversationId: this.#conversationId,
         runId,
         ownerEpoch: this.#ownerEpoch,
       };
-      if (body.state === "uncertain") {
+      if (record.state === "uncertain") {
         notices.push({
           v: 1,
           ref,
-          state: body.state,
-          statusRevision: body.statusRevision,
+          state: record.state,
+          statusRevision: record.statusRevision,
           actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
           at: record.at,
         });
@@ -1199,8 +2898,8 @@ export class ConversationRunJournal {
         notices.push({
           v: 1,
           ref,
-          state: body.state,
-          statusRevision: body.statusRevision,
+          state: record.state,
+          statusRevision: record.statusRevision,
           actions: [],
           at: record.at,
         });
@@ -1211,34 +2910,17 @@ export class ConversationRunJournal {
 
   async publishConflicts(assignmentId: string): Promise<PublishConflictNotice | undefined> {
     assertIdentifier(assignmentId, "Assignment id");
-    const [runState, publishState] = await Promise.all([
-      this.#read(),
-      this.#readPublishProjection(),
+    const [committed, conflicts] = await Promise.all([
+      this.#select((state) => {
+        const record = state.committedByAssignment.get(assignmentId);
+        return record ? snapshot(record, "Committed assignment") : undefined;
+      }),
+      this.#selectPublish((state) => {
+        const records = state.conflictsByAssignment.get(assignmentId);
+        return records ? snapshot(records, "Publish conflicts") : undefined;
+      }),
     ]);
-    const committed = runState.committedByAssignment.get(assignmentId);
-    const decision = publishState.decisions.get(assignmentId);
-    if (!committed || !decision) return undefined;
-    const bytes = await this.#artifacts.get(decision.batch.ref);
-    const batch = validateMutationBatch(
-      JSON.parse(Buffer.from(bytes).toString("utf8")) as MutationBatch,
-    );
-    if (batch.assignmentId !== assignmentId) {
-      throw corruptRunJournal("Publish decision batch belongs to another assignment");
-    }
-    const conflicts: PublishConflictNotice["conflicts"] = [];
-    for (const item of decision.outcomes) {
-      if (item.outcome.t !== "conflicted") continue;
-      const record = batch.records.find((candidate) => candidate.seq === item.seq);
-      if (!record || record.domain !== "global") {
-        throw corruptRunJournal("Publish conflict has no global staged mutation");
-      }
-      conflicts.push({
-        seq: item.seq,
-        mutation: record.mutation as GlobalStagedMutation,
-        error: item.outcome.error,
-      });
-    }
-    if (conflicts.length === 0) return undefined;
+    if (!committed || !conflicts || conflicts.length === 0) return undefined;
     return {
       conversationId: this.#conversationId,
       runId: committed.runId,
@@ -1249,18 +2931,27 @@ export class ConversationRunJournal {
 
   async finalHistory(afterCommitRevision: number): Promise<CommittedConversationResult[]> {
     assertNonNegativeSafeInteger(afterCommitRevision, "Last-seen commit revision");
-    const [state, publishState] = await Promise.all([
-      this.#read(),
-      this.#readPublishProjection(),
-    ]);
+    const commits = await this.#select((state) => {
+      const start = firstCommitIndexAfter(state.commits, afterCommitRevision);
+      return state.commits
+        .slice(start)
+        .map((committed) => snapshot(committed, "Final history commit"));
+    });
+    const conflictCounts = await this.#selectPublish((state) =>
+      new Map(
+        commits.map((committed) => [
+          committed.assignmentId,
+          state.conflictsByAssignment.get(committed.assignmentId)?.length ?? 0,
+        ]),
+      ),
+    );
     const output: CommittedConversationResult[] = [];
-    for (const committed of state.commits) {
-      if (committed.commitRevision <= afterCommitRevision) continue;
+    for (const committed of commits) {
       const bytes = await this.#artifacts.get(committed.bundle.ref);
       const bundle = validateConversationSealedBundle(
         JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
       );
-      const conflictCount = publishConflictCount(publishState, committed.assignmentId);
+      const conflictCount = conflictCounts.get(committed.assignmentId) ?? 0;
       output.push({
         frame: {
           v: 1,
@@ -1277,7 +2968,179 @@ export class ConversationRunJournal {
   }
 
   async currentState(runId: string): Promise<ConversationRunState | undefined> {
-    return (await this.#read()).stateByRun.get(runId)?.state;
+    return this.#select((state) => state.stateByRun.get(runId)?.state);
+  }
+
+  async currentResolution(
+    runId: string,
+  ): Promise<ConversationUncertainResolutionFact | undefined> {
+    return this.#select((state) => {
+      const resolution = state.resolutionsByRun.get(runId);
+      return resolution ? snapshot(resolution, "Current resolution") : undefined;
+    });
+  }
+
+  async #acceptNotStartedTermination(
+    proof: DispatchRejectionProof | Extract<SupersedeProof, { decision: "not-started-fenced" }>,
+  ): Promise<void> {
+    const at = this.#clock();
+    await this.#transact<void>((state) => {
+      const assigned = state.assignedById.get(proof.assignmentId);
+      if (
+        !assigned ||
+        !terminationProofBindsDurableSource({
+          proof,
+          assignmentId: proof.assignmentId,
+          executorId: assigned.record.executorId,
+          conversationId: this.#conversationId,
+          ownerEpoch: assigned.record.ownerEpoch,
+          dispatchDigest: assigned.record.dispatchDigest,
+          supersedeRequest: state.supersedeRequests.get(proof.assignmentId),
+        })
+      ) {
+        throw new Error("Termination proof does not bind a durable assignment");
+      }
+      const prior = state.superseded.get(proof.assignmentId);
+      if (prior) {
+        if (
+          canonicalize(withoutSignature(prior.proof)) !==
+          canonicalize(withoutSignature(proof))
+        ) {
+          throw new Error("Assignment already has a different termination proof");
+        }
+        return { kind: "return", value: undefined };
+      }
+      const current = state.stateByRun.get(assigned.record.runId);
+      if (!current) throw corruptRunJournal("Terminated assignment has no run state");
+      if (state.assignmentByRun.get(assigned.record.runId) !== proof.assignmentId) {
+        throw new Error("Termination proof belongs to a historical assignment");
+      }
+      const open = state.resolutionsByRun.get(assigned.record.runId);
+      const kind = assignmentTerminationProofKind(proof);
+      const conflictsWithReceived =
+        kind === "dispatch-rejection" && open?.cause === "dispatch-conflict";
+      if (
+        hasDurableStartedObservation(state, proof.assignmentId) ||
+        conflictsWithReceived
+      ) {
+        const rejectionKey = rejectedNotStartedKey(proof.assignmentId, kind);
+        const existing = state.rejectedNotStarted.get(rejectionKey);
+        if (existing) {
+          if (
+            canonicalize(withoutSignature(existing.proof)) !==
+            canonicalize(withoutSignature(proof))
+          ) {
+            throw new Error("Assignment already rejected a different not-started proof");
+          }
+          return { kind: "return", value: undefined };
+        }
+        const rejection = runRecord(this.#conversationId, {
+          t: "not-started-rejected",
+          assignmentId: proof.assignmentId,
+          proof,
+        });
+        if (current.state === "uncertain") {
+          if (!open || open.resolution) {
+            throw corruptRunJournal("Uncertain run has no open resolution fact");
+          }
+          return { kind: "append", entries: [rejection], value: undefined };
+        }
+        if (
+          current.state !== "dispatched" &&
+          current.state !== "running" &&
+          current.state !== "cancel-requested"
+        ) {
+          throw new Error("Termination proof is late for the current run state");
+        }
+        const fact = createOpenResolutionFact(assigned, "ledger-unknown", at);
+        return {
+          kind: "append",
+          entries: [
+            rejection,
+            runRecord(this.#conversationId, {
+              t: "resolution",
+              runId: assigned.record.runId,
+              fact,
+            }),
+            ...capabilityRevocations(this.#conversationId, state, assigned),
+            runRecord(this.#conversationId, {
+              t: "state",
+              runId: assigned.record.runId,
+              assignmentId: proof.assignmentId,
+              state: "uncertain",
+              statusRevision: current.statusRevision + 1,
+            }),
+          ],
+          value: undefined,
+        };
+      }
+      if (
+        current.state !== "dispatched" &&
+        current.state !== "uncertain" &&
+        current.state !== "cancel-requested"
+      ) {
+        throw new Error("Termination proof is late for the current run state");
+      }
+      if (current.state === "uncertain" && (!open || open.resolution)) {
+        throw corruptRunJournal("Uncertain run has no open resolution fact");
+      }
+      let containment: LogicalRecord<ConversationCommitLogRecord> | undefined;
+      if (open?.cause === "dispatch-conflict") {
+        if (kind !== "supersede") {
+          throw new Error("Dispatch rejection cannot resolve a received dispatch conflict");
+        }
+        const containmentProof = proof as Extract<
+          SupersedeProof,
+          { decision: "not-started-fenced" }
+        >;
+        const conflict = state.conflictByAssignment.get(containmentProof.assignmentId);
+        if (
+          !conflict ||
+          containmentProof.lastRecordSeq <= conflict.proof.receivedRecordSeq
+        ) {
+          throw new Error("Conflict containment proof does not follow the received prefix");
+        }
+        containment = runRecord(this.#conversationId, {
+          t: "dispatch-conflict-contained",
+          assignmentId: containmentProof.assignmentId,
+          openFactDigest: open.openFactDigest,
+          proof: containmentProof,
+        });
+      }
+      const entries: LogicalRecord<ConversationCommitLogRecord>[] = [
+        ...(containment ? [containment] : []),
+        runRecord(this.#conversationId, {
+          t: "assignment-superseded",
+          assignmentId: proof.assignmentId,
+          proof,
+        }),
+        ...capabilityRevocations(this.#conversationId, state, assigned),
+      ];
+      if (open && !open.resolution) {
+        entries.push(
+          runRecord(this.#conversationId, {
+            t: "resolution",
+            runId: assigned.record.runId,
+            fact: closeResolution(
+              open,
+              "proven-not-started-redispatched",
+              proof.executorId,
+              at,
+            ),
+          }),
+        );
+      }
+      entries.push(
+        runRecord(this.#conversationId, {
+          t: "state",
+          runId: assigned.record.runId,
+          assignmentId: proof.assignmentId,
+          state: current.state === "cancel-requested" ? "cancelled" : "queued",
+          statusRevision: current.statusRevision + 1,
+        }),
+      );
+      return { kind: "append", entries, value: undefined };
+    });
   }
 
   async #materializeDispatch(
@@ -1304,18 +3167,35 @@ export class ConversationRunJournal {
     };
   }
 
-  async #read(): Promise<RunProjection> {
-    const transaction = await this.#log.transactProjection<
-      RunProjection,
-      ConversationCommitLogRecord,
-      void
-    >(
-      emptyProjection(this.#conversationId),
-      this.#reduce,
-      () => ({ kind: "return", value: undefined }),
-      { stream: runStream(this.#conversationId) },
-    );
-    return transaction.state;
+  async #select<Value>(select: (state: RunProjection) => Value): Promise<Value> {
+    return this.#operations.run(async () => {
+      const cached = this.#runProjection;
+      const transaction = await (async () => {
+        try {
+          return await this.#log.transactProjection<
+            RunProjection,
+            ConversationCommitLogRecord,
+            void
+          >(
+            cached?.state ?? emptyProjection(this.#conversationId),
+            this.#reduce,
+            () => ({ kind: "return", value: undefined }),
+            {
+              stream: runStream(this.#conversationId),
+              ...(cached ? { cursor: cached.cursor } : {}),
+            },
+          );
+        } catch (error) {
+          this.#runProjection = undefined;
+          throw error;
+        }
+      })();
+      this.#runProjection = {
+        state: transaction.state,
+        cursor: transaction.cursor,
+      };
+      return select(transaction.state);
+    });
   }
 
   readonly #reduce = async (
@@ -1331,16 +3211,8 @@ export class ConversationRunJournal {
       "Run journal record",
     );
     if ("kind" in body) {
+      assertConversationRunInternalRecord(body);
       if (body.kind === "conversation-commit-projection") {
-        assertExactRecordKeys(
-          body,
-          ["assignmentId", "commitRevision", "digest", "kind", "runId"],
-          "Conversation commit projection",
-        );
-        assertIdentifier(body.assignmentId, "Projection assignment id");
-        assertIdentifier(body.runId, "Projection run id");
-        assertPositiveSafeInteger(body.commitRevision, "Projection commit revision");
-        assertDigest(body.digest, "Projection bundle digest");
         const committed = state.committedByAssignment.get(body.assignmentId);
         if (
           !committed ||
@@ -1358,12 +3230,9 @@ export class ConversationRunJournal {
           throw corruptRunJournal("Projection progress digest does not match its bundle");
         }
         state.projectedByAssignment.set(body.assignmentId, body);
+        state.pendingCommitProjections.delete(body.assignmentId);
         return state;
       }
-      if (body.kind !== "content-asset-index") {
-        throw corruptRunJournal("Run journal contains an unknown internal record");
-      }
-      assertExactRecordKeys(body, ["entries", "kind"], "Content asset index");
       const committed = state.commits.at(-1);
       if (
         !committed ||
@@ -1385,16 +3254,26 @@ export class ConversationRunJournal {
       );
       return state;
     }
+    assertConversationRunRecord(body, this.#verifier);
     switch (body.t) {
       case "admitted": {
-        if (
-          state.admittedByRun.has(body.runId) ||
-          state.runByIngress.has(body.ingressKey)
-        ) {
-          throw corruptRunJournal("Run admission identity is duplicated");
-        }
+        assertAdmissionReplayContract({
+          runAlreadyAdmitted: state.admittedByRun.has(body.runId),
+          ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
+          queuedPositionAlreadyUsed: state.queuedRunByPosition.has(body.queuedPosition),
+          hasAtomicQueuedState: envelopeHasRunState(
+            envelope,
+            this.#conversationId,
+            body.runId,
+            "queued",
+            1,
+            undefined,
+          ),
+        });
         const input = await loadStored(body.input, this.#artifacts);
-        if (!isNonEmptyUserTurnInput(input)) {
+        try {
+          validateNonEmptyUserTurnInput(input);
+        } catch {
           throw corruptRunJournal("Run journal contains invalid user input");
         }
         state.admittedByRun.set(body.runId, { record: body, input });
@@ -1403,12 +3282,28 @@ export class ConversationRunJournal {
       }
       case "assigned": {
         const admitted = state.admittedByRun.get(body.runId);
-        if (
-          !admitted ||
-          state.assignmentByRun.has(body.runId) ||
-          state.assignedById.has(body.assignmentId)
-        ) {
-          throw corruptRunJournal("Run assignment has no unique admitted run");
+        const current = state.stateByRun.get(body.runId);
+        assertAssignmentReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          runAlreadyAssigned: state.assignmentByRun.has(body.runId),
+          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
+          isEarliestQueuedRun:
+            admitted !== undefined &&
+            state.queuedPositionHeap[0] === admitted.record.queuedPosition,
+          hasAtomicDispatchedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              body.runId,
+              "dispatched",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        if (!admitted) {
+          throw corruptRunJournal("Run assignment is not the earliest admitted run");
         }
         const bytes = await this.#artifacts.get(body.dispatchRef);
         const dispatch = validateConversationEnvelope(
@@ -1416,7 +3311,12 @@ export class ConversationRunJournal {
           this.#verifier,
         );
         await assertArtifactsPresent(dispatch, this.#artifacts);
-        assertAssignedMatchesDispatch(body, dispatch, admitted.record.ingress);
+        assertAssignedMatchesDispatch(
+          body,
+          dispatch,
+          admitted.record.ingress,
+          this.#conversationId,
+        );
         state.assignedById.set(body.assignmentId, {
           record: body,
           envelope: dispatch,
@@ -1428,76 +3328,908 @@ export class ConversationRunJournal {
           acked: false,
         });
         state.assignmentByRun.set(body.runId, body.assignmentId);
-        state.mirroredEntries.set(body.assignmentId, new Map());
+        state.mirrorStateByAssignment.set(body.assignmentId, {
+          ordinal: 0,
+          mirrorDigest: interactionMirrorSeed(body.assignmentId),
+          mirroredUpTo: 0,
+          requestIds: new Set(),
+        });
         return state;
       }
       case "dispatch-acked": {
         const assigned = state.assignedById.get(body.assignmentId);
-        if (!assigned || assigned.acked) {
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertDispatchAcknowledgementReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.superseded.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+        });
+        if (!assigned) {
           throw corruptRunJournal("Dispatch acknowledgement is missing or duplicated");
         }
         assigned.acked = true;
         return state;
       }
+      case "supersede-requested": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeRequestReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+        });
+        state.supersedeRequests.set(body.assignmentId, body);
+        return state;
+      }
+      case "supersede-started-observed": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeStartedObservationReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            terminationProofBindsDurableSource({
+              proof,
+              assignmentId: body.assignmentId,
+              executorId: assigned.record.executorId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+              dispatchDigest: assigned.record.dispatchDigest,
+              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
+              cancelFence: state.cancelFences.get(body.assignmentId),
+            }),
+          observationAlreadyExists: state.supersedeStartedObservations.has(
+            body.assignmentId,
+          ),
+        });
+        state.supersedeStartedObservations.set(body.assignmentId, body);
+        return state;
+      }
+      case "dispatch-conflict": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const key = dispatchConflictKey(proof);
+        assertDispatchConflictReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsAssignment:
+            assigned !== undefined &&
+            proof.assignmentId === body.assignmentId &&
+            proof.executorId === assigned.record.executorId,
+          handling: body.handling,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.superseded.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+          conflictAlreadySeen: state.conflictByAssignment.has(body.assignmentId),
+        });
+        if (!assigned || !current || state.conflicts.has(key)) {
+          throw corruptRunJournal("Dispatch conflict record is invalid or duplicated");
+        }
+        const expectedActivation = buildConversationActivationPayload({
+          envelope: assigned.envelope,
+          dispatchRef: assigned.record.dispatchRef,
+          commit: {
+            lsn: assigned.commit.lsn,
+            envelopeDigest: assigned.commit.envelopeDigest,
+          },
+          issuedAt: assigned.commit.at,
+        });
+        const expectedActivationDigest = assignmentActivationDigest(expectedActivation);
+        const acceptedMatches =
+          canonicalize(proof.acceptedDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          proof.acceptedActivationDigest === expectedActivationDigest;
+        const conflictingMatches =
+          canonicalize(proof.conflictingDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          proof.conflictingActivationDigest === expectedActivationDigest;
+        const atomicHandling =
+          body.handling === "acked-original"
+            ? envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "dispatch-acked" &&
+                  candidate.assignmentId === body.assignmentId,
+              )
+            : envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "resolution" &&
+                  candidate.runId === assigned.record.runId &&
+                  candidate.fact.subject.execution === "conversation" &&
+                  candidate.fact.subject.assignmentId === body.assignmentId &&
+                  candidate.fact.cause === "dispatch-conflict" &&
+                  candidate.fact.resolution === undefined,
+              ) &&
+              envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "cancel-fence" &&
+                  candidate.assignmentId === body.assignmentId,
+              ) &&
+              envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                assigned.record.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                body.assignmentId,
+              ) &&
+              envelopeRevokesRemainingCapabilities(
+                envelope,
+                this.#conversationId,
+                state,
+                assigned,
+              );
+        assertDispatchConflictHandlingReplayContract({
+          handling: body.handling,
+          acceptedMatches,
+          conflictingMatches,
+          atomicHandling,
+        });
+        state.conflicts.set(key, body);
+        state.conflictByAssignment.set(body.assignmentId, body);
+        return state;
+      }
+      case "dispatch-conflict-contained": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        const conflict = state.conflictByAssignment.get(body.assignmentId);
+        const cancelProof = "cause" in proof ? proof : undefined;
+        const supersedeProof =
+          "decision" in proof && proof.decision === "not-started-fenced"
+            ? proof
+            : undefined;
+        const terminatesForRedispatch =
+          cancelProof?.decision === "not-started" || supersedeProof !== undefined;
+        if (
+          !assigned ||
+          current?.state !== "uncertain" ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          !open ||
+          open.resolution !== undefined ||
+          open.cause !== "dispatch-conflict" ||
+          open.openFactDigest !== body.openFactDigest ||
+          state.containedFacts.has(body.openFactDigest) ||
+          !conflict ||
+          (!cancelProof && !supersedeProof) ||
+          !terminationProofBindsDurableSource({
+            proof,
+            assignmentId: body.assignmentId,
+            executorId: assigned.record.executorId,
+            conversationId: this.#conversationId,
+            ownerEpoch: assigned.record.ownerEpoch,
+            dispatchDigest: assigned.record.dispatchDigest,
+            supersedeRequest: state.supersedeRequests.get(body.assignmentId),
+            cancelFence: state.cancelFences.get(body.assignmentId),
+          }) ||
+          (terminatesForRedispatch &&
+            (!envelopeHasResolution(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              open.openFactDigest,
+              true,
+            ) ||
+              !envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                assigned.record.runId,
+                "queued",
+                current.statusRevision + 1,
+                body.assignmentId,
+              ) ||
+              !envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "assignment-superseded" &&
+                  candidate.assignmentId === body.assignmentId &&
+                  sameTerminationProof(
+                    candidate.proof,
+                    proof as AssignmentTerminationProof,
+                  ),
+              ))) ||
+          proof.lastRecordSeq <= conflict.proof.receivedRecordSeq
+        ) {
+          throw corruptRunJournal("Dispatch conflict containment is invalid or duplicated");
+        }
+        state.containedFacts.add(body.openFactDigest);
+        state.containmentByAssignment.set(body.assignmentId, body);
+        return state;
+      }
+      case "cancel-contained": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        if (
+          !assigned ||
+          current?.state !== "uncertain" ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          !open ||
+          open.resolution !== undefined ||
+          open.cause === "dispatch-conflict" ||
+          open.openFactDigest !== body.openFactDigest ||
+          state.containedFacts.has(body.openFactDigest) ||
+          proof.decision !== "halted" ||
+          !terminationProofBindsDurableSource({
+            proof,
+            assignmentId: body.assignmentId,
+            executorId: assigned.record.executorId,
+            conversationId: this.#conversationId,
+            ownerEpoch: assigned.record.ownerEpoch,
+            dispatchDigest: assigned.record.dispatchDigest,
+            cancelFence: state.cancelFences.get(body.assignmentId),
+          })
+        ) {
+          throw corruptRunJournal("Cancellation containment is invalid or duplicated");
+        }
+        state.containedFacts.add(body.openFactDigest);
+        state.containmentByAssignment.set(body.assignmentId, body);
+        return state;
+      }
+      case "cancel-proof-accepted": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertCancelProofAcceptedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
+          durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
+          proofDecision: proof.decision,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            terminationProofBindsDurableSource({
+              proof,
+              assignmentId: body.assignmentId,
+              executorId: assigned.record.executorId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+              dispatchDigest: assigned.record.dispatchDigest,
+              cancelFence: state.cancelFences.get(body.assignmentId),
+            }),
+          hasAtomicCancelledState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              "cancelled",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesRemainingCapabilities(
+              envelope,
+              this.#conversationId,
+              state,
+              assigned,
+            ),
+        });
+        state.acceptedCancellations.set(body.assignmentId, body);
+        return state;
+      }
+      case "not-started-rejected": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const kind = assignmentTerminationProofKind(proof);
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        const contradictory =
+          hasDurableStartedObservation(state, body.assignmentId) ||
+          (kind === "dispatch-rejection" && open?.cause === "dispatch-conflict");
+        const proofBindsSource =
+          assigned !== undefined &&
+          terminationProofBindsDurableSource({
+            proof,
+            assignmentId: body.assignmentId,
+            executorId: assigned.record.executorId,
+            conversationId: this.#conversationId,
+            ownerEpoch: assigned.record.ownerEpoch,
+            dispatchDigest: assigned.record.dispatchDigest,
+            supersedeRequest: state.supersedeRequests.get(body.assignmentId),
+            cancelFence: state.cancelFences.get(body.assignmentId),
+          });
+        const rejectionKey = rejectedNotStartedKey(body.assignmentId, kind);
+        if (
+          !assigned ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          !proofBindsSource ||
+          !contradictory ||
+          (current?.state !== "uncertain" &&
+            (!current ||
+              !envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "resolution" &&
+                  candidate.runId === assigned.record.runId &&
+                  candidate.fact.subject.execution === "conversation" &&
+                  candidate.fact.subject.assignmentId === body.assignmentId &&
+                  candidate.fact.cause ===
+                    (kind === "cancel" ? "cancel-unproven" : "ledger-unknown") &&
+                  candidate.fact.resolution === undefined,
+              ) ||
+              !envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                assigned.record.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                body.assignmentId,
+              ) ||
+              !envelopeRevokesRemainingCapabilities(
+                envelope,
+                this.#conversationId,
+                state,
+                assigned,
+              ))) ||
+          state.rejectedNotStarted.has(rejectionKey)
+        ) {
+          throw corruptRunJournal(
+            "Rejected not-started proof is invalid or duplicated",
+          );
+        }
+        state.rejectedNotStarted.set(rejectionKey, body);
+        return state;
+      }
+      case "assignment-superseded": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const proof = body.proof;
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const kind = assignmentTerminationProofKind(proof);
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        assertAssignmentSupersededReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          assignmentAlreadyClosed: state.superseded.has(body.assignmentId),
+          currentState: current?.state,
+          durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            terminationProofBindsDurableSource({
+              proof,
+              assignmentId: body.assignmentId,
+              executorId: assigned.record.executorId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+              dispatchDigest: assigned.record.dispatchDigest,
+              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
+              cancelFence: state.cancelFences.get(body.assignmentId),
+            }),
+          proofKind: kind,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              current.state === "cancel-requested" ? "cancelled" : "queued",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesRemainingCapabilities(
+              envelope,
+              this.#conversationId,
+              state,
+              assigned,
+            ),
+          hasAtomicResolutionClose:
+            assigned !== undefined &&
+            open !== undefined &&
+            envelopeHasResolution(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              open.openFactDigest,
+              true,
+            ),
+          conflictOpen:
+            open !== undefined &&
+            open.cause === "dispatch-conflict" &&
+            open.resolution === undefined,
+          hasAtomicConflictContainment:
+            open !== undefined &&
+            envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict-contained" &&
+                candidate.assignmentId === body.assignmentId &&
+                candidate.openFactDigest === open.openFactDigest &&
+                sameTerminationProof(candidate.proof, proof),
+            ),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
+        }
+        state.superseded.set(body.assignmentId, body);
+        if (state.assignmentByRun.get(assigned.record.runId) === body.assignmentId) {
+          state.assignmentByRun.delete(assigned.record.runId);
+        }
+        state.closedAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "cancel-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const opensConflict = envelopeHasRunRecord(
+          envelope,
+          this.#conversationId,
+          (candidate) =>
+            candidate.t === "dispatch-conflict" &&
+            candidate.assignmentId === body.assignmentId &&
+            candidate.handling === "opened-uncertain",
+        );
+        const targetState = opensConflict ? "uncertain" : "cancel-requested";
+        assertCancelFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              targetState,
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        if (!assigned || !current) {
+          throw corruptRunJournal("Cancel fence is invalid or duplicated");
+        }
+        state.cancelOrigins.set(
+          body.assignmentId,
+          current.state as "dispatched" | "running",
+        );
+        state.cancelFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "capability-revoked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const key = `${body.assignmentId}\0${body.capId}`;
+        assertCapabilityRevocationReplayContract({
+          assignmentExists: assigned !== undefined,
+          capabilityBelongsToAssignment: assigned?.record.capIds.includes(body.capId) ?? false,
+          alreadyRevoked: state.revokedCapabilities.has(key),
+        });
+        state.revokedCapabilities.add(key);
+        return state;
+      }
       case "interaction-mirror": {
-        if (!state.assignedById.has(body.assignmentId)) {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const batch = body.batch;
+        const batchDigest = interactionMirrorBatchDigest(batch);
+        if (
+          !assigned ||
+          batch.assignmentId !== body.assignmentId ||
+          batch.executorId !== assigned.record.executorId ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          state.closedAssignments.has(body.assignmentId) ||
+          state.mirrorBatches.has(batchDigest)
+        ) {
           throw corruptRunJournal("Interaction mirror has no assignment");
         }
-        const previous = state.mirroredUpTo.get(body.assignmentId) ?? 0;
-        const durableEntries = state.mirroredEntries.get(body.assignmentId);
-        if (!durableEntries || body.entries.length === 0) {
+        const mirrorState = state.mirrorStateByAssignment.get(body.assignmentId);
+        if (!mirrorState || batch.entries.length === 0) {
           throw corruptRunJournal("Interaction mirror has no durable entries");
         }
-        let last = previous;
-        for (const rawEntry of body.entries) {
+        const current = state.stateByRun.get(assigned.record.runId)?.state;
+        if (
+          current !== "dispatched" &&
+          current !== "running" &&
+          !(
+            (current === "cancel-requested" || current === "uncertain") &&
+            state.cancelFences.has(body.assignmentId)
+          )
+        ) {
+          throw corruptRunJournal("Interaction mirror is outside its authorized state");
+        }
+        if (
+          batch.previousDigest !== mirrorState.mirrorDigest ||
+          batch.entries[0]!.ordinal !== mirrorState.ordinal + 1
+        ) {
+          throw corruptRunJournal("Interaction mirror does not continue its audit prefix");
+        }
+        let lastSeq = mirrorState.mirroredUpTo;
+        let lastOrdinal = mirrorState.ordinal;
+        const batchRequestIds = new Set<string>();
+        for (const rawEntry of batch.entries) {
           const entry = validateConversationInteractionMirrorEntry(rawEntry);
           if (
-            !Number.isSafeInteger(entry.seq) ||
-            entry.seq <= last ||
-            durableEntries.has(entry.seq)
+            entry.ordinal !== lastOrdinal + 1 ||
+            entry.seq <= lastSeq ||
+            mirrorState.requestIds.has(entry.requestId) ||
+            batchRequestIds.has(entry.requestId)
           ) {
-            throw corruptRunJournal("Interaction mirror sequence is not increasing");
+            throw corruptRunJournal(
+              "Interaction mirror sequence or request identity is invalid",
+            );
           }
-          durableEntries.set(entry.seq, entry);
-          last = entry.seq;
+          lastSeq = entry.seq;
+          lastOrdinal = entry.ordinal;
+          batchRequestIds.add(entry.requestId);
         }
-        state.mirroredUpTo.set(body.assignmentId, last);
+        mirrorState.ordinal = lastOrdinal;
+        mirrorState.mirrorDigest = batch.mirrorDigest;
+        mirrorState.mirroredUpTo = lastSeq;
+        for (const requestId of batchRequestIds) mirrorState.requestIds.add(requestId);
+        state.mirrorBatches.set(batchDigest, body);
         return state;
       }
       case "state": {
-        if (!state.admittedByRun.has(body.runId)) {
+        const admitted = state.admittedByRun.get(body.runId);
+        if (!admitted) {
           throw corruptRunJournal("Run state has no admitted run");
         }
         const current = state.stateByRun.get(body.runId);
-        if (body.statusRevision !== (current?.statusRevision ?? 0) + 1) {
-          throw corruptRunJournal("Run status revision is not contiguous");
-        }
-        assertRunStateTransition(current?.state, body.state);
-        if (body.state === "committed") {
-          const committed = state.commits.at(-1);
+        const mappedAssignmentId = state.assignmentByRun.get(body.runId);
+        const closedEarlierInEnvelope =
+          body.assignmentId !== undefined &&
+          mappedAssignmentId === undefined &&
+          state.closedAssignments.has(body.assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            this.#conversationId,
+            body.runId,
+            body.assignmentId,
+          );
+        assertStateReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          nextState: body.state,
+          nextRevision: body.statusRevision,
+          assignmentId: body.assignmentId,
+          assignmentBindingValid:
+            mappedAssignmentId === body.assignmentId || closedEarlierInEnvelope,
+          unassignedBindingValid: mappedAssignmentId === undefined,
+          hasAtomicAssignment:
+            current?.state !== "queued" ||
+            body.state !== "dispatched" ||
+            envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "assigned" &&
+                candidate.runId === body.runId &&
+                candidate.assignmentId === body.assignmentId,
+            ),
+        });
+        const committed = state.commits.at(-1);
+        assertStateAtomicReplayContract({
+          currentState: current?.state,
+          nextState: body.state,
+          hasAtomicCancelFence: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "cancel-fence" &&
+              candidate.assignmentId === body.assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId ===
+                body.runId,
+          ),
+          hasAtomicOpenResolution: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === body.runId &&
+              candidate.fact.subject.assignmentId === body.assignmentId &&
+              candidate.fact.resolution === undefined,
+          ),
+          hasAtomicSupersede: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "assignment-superseded" &&
+              candidate.assignmentId === body.assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId ===
+                body.runId,
+          ),
+          hasAtomicTermination: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              (candidate.t === "cancel-proof-accepted" ||
+                candidate.t === "assignment-superseded") &&
+              candidate.assignmentId === body.assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId ===
+                body.runId,
+          ),
+          hasAtomicResolutionClose: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === body.runId &&
+              candidate.fact.subject.assignmentId === body.assignmentId &&
+              candidate.fact.resolution !== undefined,
+          ),
+          hasAtomicCommit:
+            committed !== undefined &&
+            committed.runId === body.runId &&
+            committed.assignmentId === body.assignmentId &&
+            envelopeContainsCommit(envelope, this.#conversationId, committed),
+        });
+        if (body.state === "uncertain" && current?.state !== "uncertain") {
+          const assignmentId = state.assignmentByRun.get(body.runId);
           if (
-            !committed ||
-            committed.runId !== body.runId ||
-            !envelopeContainsCommit(envelope, this.#conversationId, committed)
+            !assignmentId ||
+            (current?.state !== "dispatched" &&
+              current?.state !== "running" &&
+              current?.state !== "cancel-requested")
           ) {
-            throw corruptRunJournal("Committed state is not atomic with its committed run fact");
+            throw corruptRunJournal("Uncertain state has no durable active origin");
           }
+          state.uncertainOrigins.set(assignmentId, current.state);
         }
+        const nextActiveRunId = nextActiveRunIdForReplay({
+          activeRunId: state.activeRunId,
+          runId: body.runId,
+          currentState: current?.state,
+          nextState: body.state,
+        });
+        if (current?.state === "queued") {
+          removeQueuedRun(state, admitted.record.queuedPosition, body.runId);
+        }
+        if (body.state === "queued") {
+          addQueuedRun(state, admitted.record.queuedPosition, body.runId);
+        }
+        state.activeRunId = nextActiveRunId;
         state.stateByRun.set(body.runId, {
           state: body.state,
           statusRevision: body.statusRevision,
         });
+        const history = state.statusHistoryByRun.get(body.runId) ?? [];
+        if (history.length + 1 !== body.statusRevision) {
+          throw corruptRunJournal("Run status history index is not contiguous");
+        }
+        history.push({
+          state: body.state,
+          statusRevision: body.statusRevision,
+          at: envelope.at,
+        });
+        state.statusHistoryByRun.set(body.runId, history);
+        return state;
+      }
+      case "resolution": {
+        const fact = snapshot(body.fact, "Uncertain resolution fact");
+        const conversationFact = fact as ConversationUncertainResolutionFact;
+        const assigned = state.assignedById.get(conversationFact.subject.assignmentId);
+        // Subject identity self-consistency (openFactDigest over subject/openedAt/cause)
+        // is enforced by the shared record validator; this predicate binds the subject
+        // to the durable authority (conversation, run, owner epoch).
+        assertConversationResolutionBinding({
+          execution: fact.subject.execution,
+          conversationId:
+            fact.subject.execution === "conversation"
+              ? fact.subject.conversationId
+              : undefined,
+          subjectRunId:
+            fact.subject.execution === "conversation" ? fact.subject.runId : undefined,
+          recordRunId: body.runId,
+          authorityConversationId: this.#conversationId,
+          subjectOwnerEpoch:
+            fact.subject.execution === "conversation"
+              ? fact.subject.ownerEpoch
+              : undefined,
+          authorityOwnerEpoch: assigned?.record.ownerEpoch,
+        });
+        const currentAssignmentId = state.assignmentByRun.get(body.runId);
+        const closesEarlierInEnvelope =
+          currentAssignmentId === undefined &&
+          state.closedAssignments.has(conversationFact.subject.assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            this.#conversationId,
+            body.runId,
+            conversationFact.subject.assignmentId,
+          );
+        if (!assigned) {
+          throw corruptRunJournal("Uncertain resolution fact has no durable assignment");
+        }
+        const existing = state.resolutionsByRun.get(body.runId);
+        const current = state.stateByRun.get(body.runId);
+        if (!conversationFact.resolution) {
+          assertResolutionOpenReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned.record.runId === body.runId,
+            assignmentIsCurrent:
+              currentAssignmentId === conversationFact.subject.assignmentId,
+            currentState: current?.state,
+            alreadyOpen: existing !== undefined,
+            cause: conversationFact.cause,
+            hasAtomicUncertainState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                body.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                conversationFact.subject.assignmentId,
+              ),
+            hasAtomicDispatchConflict: envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict" &&
+                candidate.assignmentId === conversationFact.subject.assignmentId &&
+                candidate.handling === "opened-uncertain",
+            ),
+          });
+        } else {
+          assertResolutionClosureReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned.record.runId === body.runId,
+            assignmentIsCurrentOrAtomicallyClosed:
+              currentAssignmentId === conversationFact.subject.assignmentId ||
+              closesEarlierInEnvelope,
+            conflictOpen: conversationFact.cause === "dispatch-conflict",
+            resolutionKind: conversationFact.resolution.kind,
+          });
+          const nextState = resolutionTargetState(conversationFact.resolution.kind);
+          assertResolutionCloseAtomicReplayContract({
+            cause: conversationFact.cause,
+            kind: conversationFact.resolution.kind,
+            existingOpenMatches:
+              existing?.openFactDigest === conversationFact.openFactDigest &&
+              existing.resolution === undefined,
+            hasAtomicTargetState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                body.runId,
+                nextState,
+                current.statusRevision + (current.state === "uncertain" ? 1 : 0),
+                conversationFact.subject.assignmentId,
+              ),
+            allCapabilitiesRevoked: envelopeRevokesRemainingCapabilities(
+              envelope,
+              this.#conversationId,
+              state,
+              assigned,
+            ),
+            hasRequiredCompanion:
+              (conversationFact.resolution.kind !==
+                "proven-not-started-redispatched" ||
+                envelopeHasRunRecord(
+                  envelope,
+                  this.#conversationId,
+                  (candidate) =>
+                    candidate.t === "assignment-superseded" &&
+                    candidate.assignmentId === conversationFact.subject.assignmentId,
+                )) &&
+              (!conversationFact.resolution.kind.startsWith("user-") ||
+                envelopeHasSuccessfulUncertainControl(
+                  envelope,
+                  nextState,
+                  conversationFact.resolution.factDigest,
+                )),
+          });
+        }
+        state.resolutionsByRun.set(body.runId, conversationFact);
+        if (conversationFact.resolution) {
+          state.closedAssignments.add(conversationFact.subject.assignmentId);
+          if (state.assignmentByRun.get(body.runId) === conversationFact.subject.assignmentId) {
+            state.assignmentByRun.delete(body.runId);
+          }
+        }
         return state;
       }
       case "committed": {
         const assigned = state.assignedById.get(body.assignmentId);
-        if (
-          !assigned ||
-          assigned.record.runId !== body.runId ||
-          state.committedByAssignment.has(body.assignmentId) ||
-          body.commitRevision !== assigned.envelope.work.baseRevision + 1
-        ) {
-          throw corruptRunJournal("Committed run does not match a unique assignment fence");
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const openResolution = state.resolutionsByRun.get(body.runId);
+        assertCommittedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentBindsRun: assigned?.record.runId === body.runId,
+          assignmentIsCurrent: state.assignmentByRun.get(body.runId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyCommitted: state.committedByAssignment.has(body.assignmentId),
+          conflictOpen:
+            openResolution?.cause === "dispatch-conflict" && !openResolution.resolution,
+          commitRevisionMatchesAssignedBase:
+            assigned !== undefined &&
+            body.commitRevision === assigned.record.baseRevision + 1,
+          hasAtomicCommittedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              body.runId,
+              "committed",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesRemainingCapabilities(
+              envelope,
+              this.#conversationId,
+              state,
+              assigned,
+            ),
+        });
+        if (!assigned || !current) {
+          throw corruptRunJournal(
+            "Committed run does not match a complete unique assignment closure",
+          );
         }
         const previous = state.commits.at(-1);
         if (previous && body.commitRevision <= previous.commitRevision) {
@@ -1507,6 +4239,17 @@ export class ConversationRunJournal {
         const bundle = validateConversationSealedBundle(
           JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
         );
+        assertHistoricalBundleFence({
+          assignedExecutorId: assigned.record.executorId,
+          assignedOwnerEpoch: assigned.record.ownerEpoch,
+          assignedBaseRevision: assigned.record.baseRevision,
+          bundleExecutorId: bundle.executorId,
+          bundleOwnerEpoch: bundle.body.ownerEpoch,
+          bundleBaseRevision: bundle.body.baseRevision,
+          conflictOpen:
+            openResolution?.cause === "dispatch-conflict" &&
+            openResolution.resolution === undefined,
+        });
         if (
           canonicalize(sealedBundleArtifact(bundle).ref) !== canonicalize(body.bundle.ref) ||
           bundle.assignmentId !== body.assignmentId ||
@@ -1525,12 +4268,919 @@ export class ConversationRunJournal {
               : "Committed bundle closure is invalid",
           );
         }
+        if (
+          !envelopeHasConversationCommitSidecars(
+            envelope,
+            this.#conversationId,
+            body,
+            bundle,
+          )
+        ) {
+          throw corruptRunJournal(
+            "Committed run is missing its content, publish, or final sidecars",
+          );
+        }
         state.committedByAssignment.set(body.assignmentId, body);
         state.commits.push(body);
+        state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
+        state.pendingCommitProjections.set(body.assignmentId, body);
         return state;
       }
     }
   };
+
+  readonly #reduceSubmissionGuard = async (
+    state: SubmissionGuardProjection,
+    record: LogicalRecord<ConversationCommitLogRecord>,
+    envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  ): Promise<SubmissionGuardProjection> => {
+    if (record.stream !== runStream(this.#conversationId)) {
+      throw corruptRunJournal("Submission guard projection received a different stream");
+    }
+    const body = record.body as unknown;
+    assertPlainRecord(body, "Submission guard record");
+    if ("kind" in body) {
+      assertConversationRunInternalRecord(body);
+      return state;
+    }
+    assertConversationRunRecord(body, this.#verifier);
+    switch (body.t) {
+      case "admitted": {
+        assertAdmissionReplayContract({
+          runAlreadyAdmitted: state.admittedByRun.has(body.runId),
+          ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
+          queuedPositionAlreadyUsed: state.queuedRunByPosition.has(body.queuedPosition),
+          hasAtomicQueuedState: envelopeHasRunState(
+            envelope,
+            this.#conversationId,
+            body.runId,
+            "queued",
+            1,
+            undefined,
+          ),
+        });
+        state.admittedByRun.set(body.runId, {
+          ingressKey: body.ingressKey,
+          queuedPosition: body.queuedPosition,
+        });
+        state.runByIngress.set(body.ingressKey, body.runId);
+        return state;
+      }
+      case "assigned": {
+        const capIds = new Set(body.capIds);
+        const runId = body.runId;
+        const assignmentId = body.assignmentId;
+        const admitted = state.admittedByRun.get(runId);
+        const current = state.stateByRun.get(runId);
+        assertAssignmentReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          runAlreadyAssigned: state.assignmentByRun.has(runId),
+          assignmentAlreadyKnown: state.assignedById.has(assignmentId),
+          isEarliestQueuedRun:
+            admitted !== undefined &&
+            state.queuedPositionHeap[0] === admitted.queuedPosition,
+          hasAtomicDispatchedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              runId,
+              "dispatched",
+              current.statusRevision + 1,
+              assignmentId,
+            ),
+        });
+        if (!admitted) {
+          throw corruptRunJournal("Run assignment is not the earliest admitted run");
+        }
+        state.assignedById.set(assignmentId, {
+          record: body,
+          commit: {
+            lsn: envelope.lsn,
+            envelopeDigest: envelope.envelopeDigest,
+            at: envelope.at,
+          },
+          capIds,
+          acked: false,
+        });
+        state.assignmentByRun.set(runId, assignmentId);
+        return state;
+      }
+      case "dispatch-acked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertDispatchAcknowledgementReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Dispatch acknowledgement is missing or duplicated");
+        }
+        assigned.acked = true;
+        return state;
+      }
+      case "dispatch-conflict": {
+        const assignmentId = body.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        const proof = body.proof;
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertDispatchConflictReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === assignmentId,
+          currentState: current?.state,
+          proofBindsAssignment:
+            assigned !== undefined &&
+            proof.assignmentId === assignmentId &&
+            proof.executorId === assigned.record.executorId,
+          handling: body.handling,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.closedAssignments.has(assignmentId),
+          assignmentClosed: state.closedAssignments.has(assignmentId),
+          conflictAlreadySeen: state.conflictAssignments.has(assignmentId),
+        });
+        if (!assigned || !current) {
+          throw corruptRunJournal("Dispatch conflict record is invalid or duplicated");
+        }
+        const expectedActivation = buildConversationActivationPayloadFromBinding({
+          binding: {
+            runId: assigned.record.runId,
+            conversationId: this.#conversationId,
+            ownerEpoch: assigned.record.ownerEpoch,
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            dispatchRef: assigned.record.dispatchRef,
+            manifestDigest: assigned.record.manifestDigest,
+            permissionLeaseDigest: assigned.record.permissionLeaseDigest,
+            capIds: assigned.record.capIds,
+            reservation: assigned.record.reservation,
+          },
+          commit: {
+            lsn: assigned.commit.lsn,
+            envelopeDigest: assigned.commit.envelopeDigest,
+          },
+          issuedAt: assigned.commit.at,
+        });
+        const expectedActivationDigest = assignmentActivationDigest(expectedActivation);
+        const acceptedMatches =
+          canonicalize(proof.acceptedDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          proof.acceptedActivationDigest === expectedActivationDigest;
+        const conflictingMatches =
+          canonicalize(proof.conflictingDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          proof.conflictingActivationDigest === expectedActivationDigest;
+        const atomicHandling =
+          body.handling === "acked-original"
+            ? envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "dispatch-acked" &&
+                  candidate.assignmentId === assignmentId,
+              )
+            : envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "resolution" &&
+                  candidate.runId === assigned.record.runId &&
+                  candidate.fact.subject.execution === "conversation" &&
+                  candidate.fact.subject.assignmentId === assignmentId &&
+                  candidate.fact.cause === "dispatch-conflict" &&
+                  candidate.fact.resolution === undefined,
+              ) &&
+              envelopeHasRunRecord(
+                envelope,
+                this.#conversationId,
+                (candidate) =>
+                  candidate.t === "cancel-fence" &&
+                  candidate.assignmentId === assignmentId,
+              ) &&
+              envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                assigned.record.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                assignmentId,
+              ) &&
+              envelopeRevokesCapabilities(
+                envelope,
+                this.#conversationId,
+                state.revokedCapabilities,
+                assignmentId,
+                assigned.capIds,
+              );
+        assertDispatchConflictHandlingReplayContract({
+          handling: body.handling,
+          acceptedMatches,
+          conflictingMatches,
+          atomicHandling,
+        });
+        state.conflictAssignments.add(assignmentId);
+        if (body.handling === "opened-uncertain") {
+          state.openConflictAssignments.add(assignmentId);
+        }
+        return state;
+      }
+      case "supersede-requested": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeRequestReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+        });
+        state.supersedeRequests.set(body.assignmentId, body);
+        return state;
+      }
+      case "supersede-started-observed": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeStartedObservationReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            terminationProofBindsDurableSource({
+              proof,
+              assignmentId: body.assignmentId,
+              executorId: assigned.record.executorId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+              dispatchDigest: assigned.record.dispatchDigest,
+              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
+              cancelFence: state.cancelFences.get(body.assignmentId),
+            }),
+          observationAlreadyExists: state.supersedeStartedAssignments.has(
+            body.assignmentId,
+          ),
+        });
+        state.supersedeStartedAssignments.add(body.assignmentId);
+        state.durableStartedAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "cancel-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const opensConflict = envelopeHasRunRecord(
+          envelope,
+          this.#conversationId,
+          (candidate) =>
+            candidate.t === "dispatch-conflict" &&
+            candidate.assignmentId === body.assignmentId &&
+            candidate.handling === "opened-uncertain",
+        );
+        assertCancelFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              opensConflict ? "uncertain" : "cancel-requested",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        state.cancelFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "cancel-proof-accepted": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertCancelProofAcceptedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
+          durableStartedObserved: state.durableStartedAssignments.has(body.assignmentId),
+          proofDecision: proof.decision,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            terminationProofBindsDurableSource({
+              proof,
+              assignmentId: body.assignmentId,
+              executorId: assigned.record.executorId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+              dispatchDigest: assigned.record.dispatchDigest,
+              cancelFence: state.cancelFences.get(body.assignmentId),
+            }),
+          hasAtomicCancelledState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              "cancelled",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesCapabilities(
+              envelope,
+              this.#conversationId,
+              state.revokedCapabilities,
+              body.assignmentId,
+              assigned.capIds,
+            ),
+        });
+        state.acceptedCancellations.add(body.assignmentId);
+        return state;
+      }
+      case "assignment-superseded": {
+        const assignmentId = body.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        const proof = body.proof;
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const kind = assignmentTerminationProofKind(proof);
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        assertAssignmentSupersededReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === assignmentId,
+          assignmentAlreadyClosed: state.closedAssignments.has(assignmentId),
+          currentState: current?.state,
+          durableStartedObserved: state.durableStartedAssignments.has(assignmentId),
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            terminationProofBindsDurableSource({
+              proof,
+              assignmentId,
+              executorId: assigned.record.executorId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+              dispatchDigest: assigned.record.dispatchDigest,
+              supersedeRequest: state.supersedeRequests.get(assignmentId),
+              cancelFence: state.cancelFences.get(assignmentId),
+            }),
+          proofKind: kind,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              current.state === "cancel-requested" ? "cancelled" : "queued",
+              current.statusRevision + 1,
+              assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesCapabilities(
+              envelope,
+              this.#conversationId,
+              state.revokedCapabilities,
+              assignmentId,
+              assigned.capIds,
+            ),
+          hasAtomicResolutionClose:
+            assigned !== undefined &&
+            open !== undefined &&
+            envelopeHasResolution(
+              envelope,
+              this.#conversationId,
+              assigned.record.runId,
+              open.openFactDigest,
+              true,
+            ),
+          conflictOpen:
+            open !== undefined &&
+            open.cause === "dispatch-conflict" &&
+            open.resolution === undefined,
+          hasAtomicConflictContainment:
+            open !== undefined &&
+            envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict-contained" &&
+                candidate.assignmentId === assignmentId &&
+                candidate.openFactDigest === open.openFactDigest &&
+                sameTerminationProof(candidate.proof, proof),
+            ),
+        });
+        if (!assigned) throw corruptRunJournal("Submission guard supersede has no assignment");
+        state.assignmentByRun.delete(assigned.record.runId);
+        state.closedAssignments.add(assignmentId);
+        state.openConflictAssignments.delete(assignmentId);
+        return state;
+      }
+      case "resolution": {
+        const fact = body.fact as ConversationUncertainResolutionFact;
+        const runId = body.runId;
+        const assignmentId = fact.subject.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        assertConversationResolutionBinding({
+          execution: body.fact.subject.execution,
+          conversationId:
+            body.fact.subject.execution === "conversation"
+              ? body.fact.subject.conversationId
+              : undefined,
+          subjectRunId:
+            body.fact.subject.execution === "conversation"
+              ? body.fact.subject.runId
+              : undefined,
+          recordRunId: body.runId,
+          authorityConversationId: this.#conversationId,
+          subjectOwnerEpoch:
+            fact.subject.execution === "conversation"
+              ? fact.subject.ownerEpoch
+              : undefined,
+          authorityOwnerEpoch: assigned?.record.ownerEpoch,
+        });
+        const currentAssignmentId = state.assignmentByRun.get(runId);
+        const closesEarlierInEnvelope =
+          currentAssignmentId === undefined &&
+          state.closedAssignments.has(assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            this.#conversationId,
+            runId,
+            assignmentId,
+          );
+        const current = state.stateByRun.get(runId);
+        const existing = state.resolutionsByRun.get(runId);
+        if (!fact.resolution) {
+          assertResolutionOpenReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.runId === runId,
+            assignmentIsCurrent: currentAssignmentId === assignmentId,
+            currentState: current?.state,
+            alreadyOpen: existing !== undefined,
+            cause: fact.cause,
+            hasAtomicUncertainState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                runId,
+                "uncertain",
+                current.statusRevision + 1,
+                assignmentId,
+              ),
+            hasAtomicDispatchConflict: envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict" &&
+                candidate.assignmentId === assignmentId &&
+                candidate.handling === "opened-uncertain",
+            ),
+          });
+        } else {
+          assertResolutionClosureReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.runId === runId,
+            assignmentIsCurrentOrAtomicallyClosed:
+              currentAssignmentId === assignmentId || closesEarlierInEnvelope,
+            conflictOpen: fact.cause === "dispatch-conflict",
+            resolutionKind: fact.resolution.kind,
+          });
+          const nextState = resolutionTargetState(fact.resolution.kind);
+          assertResolutionCloseAtomicReplayContract({
+            cause: fact.cause,
+            kind: fact.resolution.kind,
+            existingOpenMatches:
+              existing?.openFactDigest === fact.openFactDigest &&
+              existing.resolution === undefined,
+            hasAtomicTargetState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                this.#conversationId,
+                runId,
+                nextState,
+                current.statusRevision + (current.state === "uncertain" ? 1 : 0),
+                assignmentId,
+              ),
+            allCapabilitiesRevoked:
+              assigned !== undefined &&
+              envelopeRevokesCapabilities(
+                envelope,
+                this.#conversationId,
+                state.revokedCapabilities,
+                assignmentId,
+                assigned.capIds,
+              ),
+            hasRequiredCompanion:
+              (fact.resolution.kind !== "proven-not-started-redispatched" ||
+                envelopeHasRunRecord(
+                  envelope,
+                  this.#conversationId,
+                  (candidate) =>
+                    candidate.t === "assignment-superseded" &&
+                    candidate.assignmentId === assignmentId,
+                )) &&
+              (!fact.resolution.kind.startsWith("user-") ||
+                envelopeHasSuccessfulUncertainControl(
+                  envelope,
+                  nextState,
+                  fact.resolution.factDigest,
+                )),
+          });
+        }
+        state.resolutionsByRun.set(runId, fact);
+        if (fact.resolution) {
+          state.assignmentByRun.delete(runId);
+          state.closedAssignments.add(assignmentId);
+          state.openConflictAssignments.delete(assignmentId);
+        }
+        return state;
+      }
+      case "capability-revoked": {
+        const assignmentId = body.assignmentId;
+        const capId = body.capId;
+        const assigned = state.assignedById.get(assignmentId);
+        const key = `${assignmentId}\0${capId}`;
+        assertCapabilityRevocationReplayContract({
+          assignmentExists: assigned !== undefined,
+          capabilityBelongsToAssignment: assigned?.capIds.has(capId) ?? false,
+          alreadyRevoked: state.revokedCapabilities.has(key),
+        });
+        state.revokedCapabilities.add(key);
+        return state;
+      }
+      case "state": {
+        const runId = body.runId;
+        const admitted = state.admittedByRun.get(runId);
+        if (!admitted) {
+          throw corruptRunJournal("Submission guard state has no admitted run");
+        }
+        const current = state.stateByRun.get(runId);
+        const next = body.state;
+        const assignmentId = body.assignmentId;
+        const assigned = assignmentId
+          ? state.assignedById.get(assignmentId)
+          : undefined;
+        const mappedAssignmentId = state.assignmentByRun.get(runId);
+        const closedEarlierInEnvelope =
+          assignmentId !== undefined &&
+          mappedAssignmentId === undefined &&
+          state.closedAssignments.has(assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            this.#conversationId,
+            runId,
+            assignmentId,
+          );
+        assertStateReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          nextState: next,
+          nextRevision: body.statusRevision,
+          assignmentId,
+          assignmentBindingValid:
+            assigned?.record.runId === runId &&
+            (mappedAssignmentId === assignmentId || closedEarlierInEnvelope),
+          unassignedBindingValid: mappedAssignmentId === undefined,
+          hasAtomicAssignment:
+            current?.state !== "queued" ||
+            next !== "dispatched" ||
+            envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "assigned" &&
+                candidate.runId === runId &&
+                candidate.assignmentId === assignmentId,
+            ),
+        });
+        assertStateAtomicReplayContract({
+          currentState: current?.state,
+          nextState: next,
+          hasAtomicCancelFence: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "cancel-fence" &&
+              candidate.assignmentId === assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
+          ),
+          hasAtomicOpenResolution: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === runId &&
+              candidate.fact.subject.assignmentId === assignmentId &&
+              candidate.fact.resolution === undefined,
+          ),
+          hasAtomicSupersede: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "assignment-superseded" &&
+              candidate.assignmentId === assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
+          ),
+          hasAtomicTermination: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              (candidate.t === "cancel-proof-accepted" ||
+                candidate.t === "assignment-superseded") &&
+              candidate.assignmentId === assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
+          ),
+          hasAtomicResolutionClose: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === runId &&
+              candidate.fact.subject.assignmentId === assignmentId &&
+              candidate.fact.resolution !== undefined,
+          ),
+          hasAtomicCommit: envelopeHasRunRecord(
+            envelope,
+            this.#conversationId,
+            (candidate) =>
+              candidate.t === "committed" &&
+              candidate.runId === runId &&
+              candidate.assignmentId === assignmentId,
+          ),
+        });
+        const nextActiveRunId = nextActiveRunIdForReplay({
+          activeRunId: state.activeRunId,
+          runId,
+          currentState: current?.state,
+          nextState: next,
+        });
+        if (current?.state === "queued") {
+          removeQueuedRun(state, admitted.queuedPosition, runId);
+        }
+        if (next === "queued") {
+          addQueuedRun(state, admitted.queuedPosition, runId);
+        }
+        state.activeRunId = nextActiveRunId;
+        state.stateByRun.set(runId, {
+          state: next,
+          statusRevision: body.statusRevision,
+        });
+        if (next === "running" && assignmentId !== undefined) {
+          state.durableStartedAssignments.add(assignmentId);
+        }
+        return state;
+      }
+      case "committed": {
+        const runId = body.runId;
+        const assignmentId = body.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        const current = state.stateByRun.get(runId);
+        assertCommittedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentBindsRun: assigned?.record.runId === runId,
+          assignmentIsCurrent: state.assignmentByRun.get(runId) === assignmentId,
+          currentState: current?.state,
+          alreadyCommitted: state.committedByAssignment.has(assignmentId),
+          conflictOpen: state.openConflictAssignments.has(assignmentId),
+          commitRevisionMatchesAssignedBase:
+            assigned !== undefined &&
+            body.commitRevision === assigned.record.baseRevision + 1,
+          hasAtomicCommittedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              this.#conversationId,
+              runId,
+              "committed",
+              current.statusRevision + 1,
+              assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesCapabilities(
+              envelope,
+              this.#conversationId,
+              state.revokedCapabilities,
+              assignmentId,
+              assigned.capIds,
+            ),
+        });
+        state.committedByAssignment.set(assignmentId, {
+          bundle: body.bundle,
+          commitRevision: body.commitRevision,
+          sidecars: submissionCommitSidecars(
+            envelope,
+            this.#conversationId,
+            {
+              t: "committed",
+              runId,
+              assignmentId,
+              bundle: body.bundle,
+              commitRevision: body.commitRevision,
+            },
+          ),
+        });
+        return state;
+      }
+      default:
+        return state;
+    }
+  };
+
+  async #loadSubmissionGuard(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): Promise<SubmissionGuardProjection> {
+    this.#assertSubmissionContextIdentity(context, identity);
+    return this.#operations.run(async () => {
+      const cached = this.#submissionGuardProjection;
+      const transaction = await (async () => {
+        try {
+          return await this.#log.transactProjection<
+            SubmissionGuardProjection,
+            ConversationCommitLogRecord,
+            void
+          >(
+            cached?.state ?? emptySubmissionGuardProjection(),
+            this.#reduceSubmissionGuard,
+            () => ({ kind: "return", value: undefined }),
+            {
+              stream: runStream(this.#conversationId),
+              ...(cached ? { cursor: cached.cursor } : {}),
+            },
+          );
+        } catch (error) {
+          this.#submissionGuardProjection = undefined;
+          throw error;
+        }
+      })();
+      this.#submissionGuardProjection = {
+        state: transaction.state,
+        cursor: transaction.cursor,
+      };
+      if (context.principal.kind !== "assignment") return transaction.state;
+      const capability = context.principal.capability;
+      const assigned = transaction.state.assignedById.get(identity.assignmentId);
+      if (
+        !assigned ||
+        !assigned.capIds.has(capability.capId) ||
+        assigned.record.executorId !== capability.executorId ||
+        capability.scope.execution !== "conversation" ||
+        capability.scope.conversationId !== this.#conversationId
+      ) {
+        throw new Error("Assignment capability is not activated by the durable assignment");
+      }
+      return transaction.state;
+    });
+  }
+
+  #hasCurrentSubmissionAuthorityEpoch(context: AuthorityCallContext): boolean {
+    if (context.principal.kind !== "assignment") return false;
+    const capability = context.principal.capability;
+    return (
+      capability.scope.execution === "conversation" &&
+      "ownerEpoch" in capability &&
+      capability.ownerEpoch === this.#ownerEpoch
+    );
+  }
+
+  #authenticateSubmission(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): void {
+    this.#submission.authenticate(context, identity);
+    this.#assertSubmissionContextIdentity(context, identity);
+  }
+
+  #assertSubmissionContextIdentity(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): void {
+    if (
+      context.principal.kind !== "assignment" ||
+      context.principal.capability.assignmentId !== identity.assignmentId ||
+      !context.principal.capability.methods.includes(identity.method)
+    ) {
+      throw new Error("Assignment submission identity does not bind the call");
+    }
+  }
+
+  #assertActivatedSubmissionCapability(
+    state: RunProjection,
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): void {
+    this.#assertSubmissionContextIdentity(context, identity);
+    if (context.principal.kind !== "assignment") return;
+    const capability = context.principal.capability;
+    const assigned = state.assignedById.get(identity.assignmentId);
+    const activated = assigned?.envelope.capabilities.find(
+      (candidate) => candidate.capId === capability.capId,
+    );
+    if (!activated || canonicalize(activated) !== canonicalize(capability)) {
+      throw new Error("Assignment capability is not activated by the durable assignment");
+    }
+  }
+
+  #authorizeSubmission(
+    state: RunProjection,
+    context: AuthorityCallContext,
+    authorization: AssignmentSubmissionAuthorization,
+  ): void {
+    this.#authorizeAuthenticatedSubmission(context, authorization);
+    this.#assertActivatedSubmissionCapability(state, context, authorization);
+    this.#assertActiveSubmissionCapabilityNotRevoked(
+      state.revokedCapabilities,
+      context,
+      authorization,
+    );
+  }
+
+  #authorizeGuardSubmission(
+    state: SubmissionGuardProjection,
+    context: AuthorityCallContext,
+    authorization: AssignmentSubmissionAuthorization,
+  ): void {
+    this.#authorizeAuthenticatedSubmission(context, authorization);
+    this.#assertActiveSubmissionCapabilityNotRevoked(
+      state.revokedCapabilities,
+      context,
+      authorization,
+    );
+  }
+
+  #assertActiveSubmissionCapabilityNotRevoked(
+    revokedCapabilities: ReadonlySet<string>,
+    context: AuthorityCallContext,
+    authorization: AssignmentSubmissionAuthorization,
+  ): void {
+    if (context.principal.kind !== "assignment") return;
+    const capability = context.principal.capability;
+    if (
+      authorization.mode === "active" &&
+      revokedCapabilities.has(`${authorization.assignmentId}\0${capability.capId}`)
+    ) {
+      throw new Error("revoked capability cannot perform an active submission");
+    }
+  }
+
+  #authorizeAuthenticatedSubmission(
+    context: AuthorityCallContext,
+    authorization: AssignmentSubmissionAuthorization,
+  ): void {
+    this.#submission.authorize(context, authorization);
+    this.#assertSubmissionContextIdentity(context, authorization);
+    if (
+      (authorization.mode === "active" || authorization.mode === "settlement") &&
+      !this.#hasCurrentSubmissionAuthorityEpoch(context)
+    ) {
+      throw new Error("Assignment capability belongs to a stale owner epoch");
+    }
+  }
 
   async #transact<Value>(
     decide: (
@@ -1539,75 +5189,141 @@ export class ConversationRunJournal {
     ) => ProjectionTransactionDecision<ConversationCommitLogRecord, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
-    return this.#log.transactProjection<
-      RunProjection,
-      ConversationCommitLogRecord,
-      Value
-    >(emptyProjection(this.#conversationId), this.#reduce, decide, {
-      stream: runStream(this.#conversationId),
-      candidateReferences,
+    return this.#operations.run(async () => {
+      try {
+        const cached = this.#runProjection;
+        const transaction = await this.#log.transactProjection<
+          RunProjection,
+          ConversationCommitLogRecord,
+          Value
+        >(cached?.state ?? emptyProjection(this.#conversationId), this.#reduce, decide, {
+          stream: runStream(this.#conversationId),
+          ...(cached ? { cursor: cached.cursor } : {}),
+          candidateReferences,
+        });
+        this.#runProjection = {
+          state: transaction.state,
+          cursor: transaction.cursor,
+        };
+        return transaction;
+      } catch (error) {
+        this.#runProjection = undefined;
+        throw error;
+      }
     });
   }
 
   async #appendPublishProgress(progress: Extract<PublishRecord, { t: "publish-progress" }>) {
-    await this.#log.transactProjection<PublishProjection, PublishRecord, void>(
-      emptyPublishProjection(),
-      (state, record, envelope) =>
-        reducePublishRecord(state, record, envelope, this.#artifacts),
-      (state) => {
-        const key = `${progress.assignmentId}\0${progress.domain}`;
-        const current = state.progress.get(key);
-        if (
-          current &&
-          (current.upToSeq > progress.upToSeq ||
-            current.state === "settled" ||
-            (current.upToSeq === progress.upToSeq && current.state === progress.state))
-        ) {
-          return { kind: "return", value: undefined };
-        }
-        return {
-          kind: "append",
-          entries: [{ stream: "publish", body: progress }],
-          value: undefined,
+    await this.#operations.run(async () => {
+      try {
+        const cached = this.#publishProjection;
+        const transaction = await this.#log.transactProjection<
+          PublishProjection,
+          PublishRecord,
+          void
+        >(
+          cached?.state ?? emptyPublishProjection(),
+          (state, record, envelope) =>
+            reducePublishRecord(state, record, envelope, this.#artifacts),
+          (state) => {
+            const key = `${progress.assignmentId}\0${progress.domain}`;
+            const current = state.progress.get(key);
+            if (
+              current &&
+              (current.upToSeq > progress.upToSeq ||
+                current.state === "settled" ||
+                (current.upToSeq === progress.upToSeq && current.state === progress.state))
+            ) {
+              return { kind: "return", value: undefined };
+            }
+            return {
+              kind: "append",
+              entries: [{ stream: "publish", body: progress }],
+              value: undefined,
+            };
+          },
+          {
+            stream: "publish",
+            ...(cached ? { cursor: cached.cursor } : {}),
+          },
+        );
+        this.#publishProjection = {
+          state: transaction.state,
+          cursor: transaction.cursor,
         };
-      },
-      { stream: "publish" },
-    );
+      } catch (error) {
+        this.#publishProjection = undefined;
+        throw error;
+      }
+    });
   }
 
-  async #readPublishProjection(): Promise<PublishProjection> {
-    const state = emptyPublishProjection();
-    for (const envelope of await this.#log.readAll<ConversationCommitLogRecord>()) {
-      for (const entry of envelope.entries) {
-        if (entry.stream === "publish") {
-          await reducePublishRecord(
-            state,
-            entry as LogicalRecord<PublishRecord>,
-            envelope,
-            this.#artifacts,
-          );
-        }
+  async #selectPublish<Value>(select: (state: PublishProjection) => Value): Promise<Value> {
+    return this.#operations.run(async () => {
+      try {
+        const cached = this.#publishProjection;
+        const transaction = await this.#log.transactProjection<
+          PublishProjection,
+          PublishRecord,
+          void
+        >(
+          cached?.state ?? emptyPublishProjection(),
+          (state, record, envelope) =>
+            reducePublishRecord(state, record, envelope, this.#artifacts),
+          () => ({ kind: "return", value: undefined }),
+          {
+            stream: "publish",
+            ...(cached ? { cursor: cached.cursor } : {}),
+          },
+        );
+        this.#publishProjection = {
+          state: transaction.state,
+          cursor: transaction.cursor,
+        };
+        return select(transaction.state);
+      } catch (error) {
+        this.#publishProjection = undefined;
+        throw error;
       }
-    }
-    return state;
+    });
   }
 
-  async #readFinalOutbox(): Promise<FinalOutboxProjection> {
-    const projection: FinalOutboxProjection = new Map();
-    for (const envelope of await this.#log.readAll<ConversationCommitLogRecord>()) {
-      for (const entry of envelope.entries) {
-        if (entry.stream === "final-outbox") {
-          await applyFinalRecord(
-            projection,
-            entry.body as FinalOutboxRecord,
-            envelope.at,
-            envelope,
-            this.#artifacts,
-          );
-        }
+  async #selectFinal<Value>(select: (state: FinalOutboxProjection) => Value): Promise<Value> {
+    return this.#operations.run(async () => {
+      try {
+        const cached = this.#finalProjection;
+        const transaction = await this.#log.transactProjection<
+          FinalOutboxProjection,
+          FinalOutboxRecord,
+          void
+        >(
+          cached?.state ?? emptyFinalProjection(),
+          async (projection, record, envelope) => {
+            await applyFinalRecord(
+              projection,
+              record.body,
+              envelope.at,
+              envelope,
+              this.#artifacts,
+            );
+            return projection;
+          },
+          () => ({ kind: "return", value: undefined }),
+          {
+            stream: "final-outbox",
+            ...(cached ? { cursor: cached.cursor } : {}),
+          },
+        );
+        this.#finalProjection = {
+          state: transaction.state,
+          cursor: transaction.cursor,
+        };
+        return select(transaction.state);
+      } catch (error) {
+        this.#finalProjection = undefined;
+        throw error;
       }
-    }
-    return projection;
+    });
   }
 
   async #transitionFinal(
@@ -1617,44 +5333,56 @@ export class ConversationRunJournal {
     notAfter?: number,
   ): Promise<boolean> {
     const key = finalKey(frame);
-    const result = await this.#log.transactProjection<
-      FinalOutboxProjection,
-      FinalOutboxRecord,
-      boolean
-    >(
-      new Map(),
-      async (projection, record, envelope) => {
-        await applyFinalRecord(
-          projection,
-          record.body,
-          envelope.at,
-          envelope,
-          this.#artifacts,
+    return this.#operations.run(async () => {
+      try {
+        const cached = this.#finalProjection;
+        const result = await this.#log.transactProjection<
+          FinalOutboxProjection,
+          FinalOutboxRecord,
+          boolean
+        >(
+          cached?.state ?? emptyFinalProjection(),
+          async (projection, record, envelope) => {
+            await applyFinalRecord(
+              projection,
+              record.body,
+              envelope.at,
+              envelope,
+              this.#artifacts,
+            );
+            return projection;
+          },
+          (projection) => {
+            const current = projection.entries.get(key);
+            if (
+              !current ||
+              current.record.state !== expectedState ||
+              current.record.digest !== frame.digest ||
+              (notAfter !== undefined &&
+                canonicalTime(current.at, "Final outbox record time") > notAfter)
+            ) {
+              return { kind: "return", value: false };
+            }
+            return {
+              kind: "append",
+              entries: [
+                { stream: "final-outbox", body: { ...current.record, state } },
+              ],
+              value: true,
+            };
+          },
+          {
+            stream: "final-outbox",
+            ...(cached ? { cursor: cached.cursor } : {}),
+          },
         );
-        return projection;
-      },
-      (projection) => {
-        const current = projection.get(key);
-        if (
-          !current ||
-          current.record.state !== expectedState ||
-          current.record.digest !== frame.digest ||
-          (notAfter !== undefined &&
-            canonicalTime(current.at, "Final outbox record time") > notAfter)
-        ) {
-          return { kind: "return", value: false };
-        }
-        return {
-          kind: "append",
-          entries: [
-            { stream: "final-outbox", body: { ...current.record, state } },
-          ],
-          value: true,
-        };
-      },
-      { stream: "final-outbox" },
-    );
-    return result.value;
+        this.#finalProjection = { state: result.state, cursor: result.cursor };
+        return result.value;
+      } catch (error) {
+        this.#finalProjection = undefined;
+        throw error;
+      }
+    });
   }
 }
 
@@ -1664,12 +5392,14 @@ export class InProcessConversationDispatcher {
   readonly #journal: ConversationRunJournal;
   readonly #executor: ConversationDispatchPort;
   readonly #contexts: InProcessDispatchContextFactory;
+  readonly #cancellationSubmission: InProcessCancellationSubmission | undefined;
 
   constructor(options: InProcessConversationDispatcherOptions) {
     this.#enabled = options.enabled;
     this.#journal = options.journal;
     this.#executor = options.executor;
     this.#contexts = options.contexts;
+    this.#cancellationSubmission = options.cancellationSubmission;
   }
 
   async dispatchPending(): Promise<readonly DispatchResult[]> {
@@ -1677,14 +5407,20 @@ export class InProcessConversationDispatcher {
     const pending = await this.#journal.pendingDispatches();
     const outcomes: DispatchResult[] = [];
     for (const item of pending) {
-      const outcome = await this.#executor.dispatch(
-        item.envelope,
-        item.activation,
-        this.#contexts.create(item.assignmentId, "executor.dispatch"),
+      const outcome = this.#journal.validateExecutorDispatchResult(
+        await this.#executor.dispatch(
+          item.envelope,
+          item.activation,
+          this.#contexts.create(item.assignmentId, "executor.dispatch"),
+        ),
       );
       outcomes.push(outcome);
       if (outcome.accepted) {
         await this.#journal.acknowledgeDispatch(item.assignmentId);
+      } else if (outcome.outcome === "rejected-before-received") {
+        await this.#journal.acceptDispatchRejection(outcome);
+      } else {
+        await this.#journal.recordDispatchConflict(item, outcome);
       }
     }
     return outcomes;
@@ -1695,10 +5431,12 @@ export class InProcessConversationDispatcher {
     const pending = await this.#journal.dispatchesAwaitingStarted();
     let recovered = 0;
     for (const item of pending) {
-      const snapshot = (await this.#executor.queryLedger(
-        item.assignmentId,
-        this.#contexts.create(item.assignmentId, "executor.queryLedger"),
-      )) as LedgerSnapshot;
+      const snapshot = this.#journal.validateExecutorLedgerSnapshot(
+        await this.#executor.queryLedger(
+          item.assignmentId,
+          this.#contexts.create(item.assignmentId, "executor.queryLedger"),
+        ),
+      );
       if (
         snapshot.phase === "started" ||
         snapshot.phase === "sealed" ||
@@ -1710,6 +5448,153 @@ export class InProcessConversationDispatcher {
     }
     return recovered;
   }
+
+  async cancelRun(input: ConversationCancelRequest): Promise<ConversationCancelResult> {
+    const result = await this.#journal.cancelRun(input);
+    if (!this.#enabled || result.state !== "cancel-requested") return result;
+    await this.#executor.cancel(
+      result.assignmentId,
+      result.fence,
+      this.#contexts.create(result.assignmentId, "executor.cancel"),
+    );
+    if (!(await this.#submitCancellation(result.assignmentId))) {
+      await this.#executor.cancel(
+        result.assignmentId,
+        result.fence,
+        this.#contexts.create(result.assignmentId, "executor.cancel"),
+      );
+      await this.#submitCancellation(result.assignmentId);
+    }
+    return result;
+  }
+
+  async recoverCancellations(): Promise<number> {
+    if (!this.#enabled) return 0;
+    const pending = await this.#journal.pendingCancellations();
+    for (const item of pending) {
+      await this.#executor.cancel(
+        item.assignmentId,
+        item.fence,
+        this.#contexts.create(item.assignmentId, "executor.cancel"),
+      );
+      if (!(await this.#submitCancellation(item.assignmentId))) {
+        await this.#executor.cancel(
+          item.assignmentId,
+          item.fence,
+          this.#contexts.create(item.assignmentId, "executor.cancel"),
+        );
+        await this.#submitCancellation(item.assignmentId);
+      }
+    }
+    return pending.length;
+  }
+
+  async recoverCancellationProofs(): Promise<number> {
+    if (!this.#enabled) return 0;
+    const assignments = await this.#journal.assignmentsAwaitingRecovery();
+    let recovered = 0;
+    for (const candidate of assignments) {
+      const ledger = this.#journal.validateExecutorLedgerSnapshot(
+        await this.#executor.queryLedger(
+          candidate.assignmentId,
+          this.#contexts.create(candidate.assignmentId, "executor.queryLedger"),
+        ),
+      );
+      if (ledger.phase === "dispatch-rejected") {
+        const outcome = this.#journal.validateExecutorDispatchResult(
+          await this.#executor.dispatch(
+            candidate.dispatch.envelope,
+            candidate.dispatch.activation,
+            this.#contexts.create(candidate.assignmentId, "executor.dispatch"),
+          ),
+        );
+        if (outcome.accepted || outcome.outcome !== "rejected-before-received") {
+          throw new Error("Dispatch rejection terminal did not replay its original proof");
+        }
+        await this.#journal.acceptDispatchRejection(outcome);
+        recovered += 1;
+        continue;
+      }
+      if (ledger.cancelProof) {
+        if (!(await this.#submitCancellation(candidate.assignmentId))) {
+          throw new Error("Durable cancel proof disappeared before submission");
+        }
+        recovered += 1;
+        continue;
+      }
+      if (
+        candidate.state === "uncertain" ||
+        ledger.lastSeq <= 0 ||
+        ledger.sealedBundleRef !== undefined
+      ) {
+        continue;
+      }
+      const assignmentId = candidate.assignmentId;
+      const executor = this.#executor;
+      const contexts = this.#contexts;
+      const pages = (async function* (): AsyncGenerator<LedgerEvidencePage> {
+        let fromSeq = 1;
+        while (fromSeq <= ledger.lastSeq) {
+          const page = await executor.queryLedger(
+            assignmentId,
+            contexts.create(assignmentId, "executor.queryLedger"),
+            { fromSeq, limit: Math.min(256, ledger.lastSeq - fromSeq + 1) },
+          );
+          if (!("entries" in page)) {
+            throw new TypeError("Executor returned a snapshot for an evidence page query");
+          }
+          yield page;
+          fromSeq = page.toSeq + 1;
+        }
+      })();
+      if (
+        await this.#journal.reconcileCancellationEvidence(
+          assignmentId,
+          ledger,
+          pages,
+        )
+      ) {
+        recovered += 1;
+      }
+    }
+    return recovered;
+  }
+
+  async supersede(
+    assignmentId: string,
+    requestId: string,
+  ): Promise<SupersedeProof> {
+    if (!this.#enabled) throw new Error("In-process dispatch is disabled");
+    const fence = await this.#journal.requestSupersede(assignmentId, requestId);
+    const proof = await this.#executor.supersede(
+      assignmentId,
+      fence,
+      this.#contexts.create(assignmentId, "executor.supersede"),
+    );
+    await this.#journal.acceptSupersedeProof(proof);
+    return proof;
+  }
+
+  async recoverSupersedes(): Promise<number> {
+    if (!this.#enabled) return 0;
+    const pending = await this.#journal.pendingSupersedes();
+    for (const item of pending) {
+      const proof = await this.#executor.supersede(
+        item.assignmentId,
+        item.fence,
+        this.#contexts.create(item.assignmentId, "executor.supersede"),
+      );
+      await this.#journal.acceptSupersedeProof(proof);
+    }
+    return pending.length;
+  }
+
+  async #submitCancellation(assignmentId: string): Promise<boolean> {
+    if (!this.#cancellationSubmission) {
+      throw new Error("In-process cancellation submission is not configured");
+    }
+    return this.#cancellationSubmission.submitCancellation(assignmentId);
+  }
 }
 
 function emptyProjection(conversationId: string): RunProjection {
@@ -1720,13 +5605,241 @@ function emptyProjection(conversationId: string): RunProjection {
     assignedById: new Map(),
     assignmentByRun: new Map(),
     stateByRun: new Map(),
-    mirroredUpTo: new Map(),
-    mirroredEntries: new Map(),
+    queuedRunByPosition: new Map(),
+    queuedPositionHeap: [],
+    queuedPositionHeapIndex: new Map(),
+    mirrorStateByAssignment: new Map(),
+    mirrorBatches: new Map(),
     committedByAssignment: new Map(),
     commits: [],
+    assignmentByCommitRevision: new Map(),
     contentByRevision: new Map(),
     projectedByAssignment: new Map(),
+    pendingCommitProjections: new Map(),
+    conflicts: new Map(),
+    conflictByAssignment: new Map(),
+    containedFacts: new Set(),
+    containmentByAssignment: new Map(),
+    superseded: new Map(),
+    supersedeRequests: new Map(),
+    supersedeStartedObservations: new Map(),
+    cancelFences: new Map(),
+    cancelOrigins: new Map(),
+    acceptedCancellations: new Map(),
+    rejectedNotStarted: new Map(),
+    uncertainOrigins: new Map(),
+    revokedCapabilities: new Set(),
+    resolutionsByRun: new Map(),
+    statusHistoryByRun: new Map(),
+    closedAssignments: new Set(),
   };
+}
+
+function emptySubmissionGuardProjection(): SubmissionGuardProjection {
+  return {
+    admittedByRun: new Map(),
+    runByIngress: new Map(),
+    queuedRunByPosition: new Map(),
+    queuedPositionHeap: [],
+    queuedPositionHeapIndex: new Map(),
+    assignedById: new Map(),
+    assignmentByRun: new Map(),
+    stateByRun: new Map(),
+    conflictAssignments: new Set(),
+    openConflictAssignments: new Set(),
+    supersedeRequests: new Map(),
+    supersedeStartedAssignments: new Set(),
+    cancelFences: new Map(),
+    acceptedCancellations: new Set(),
+    durableStartedAssignments: new Set(),
+    resolutionsByRun: new Map(),
+    committedByAssignment: new Map(),
+    closedAssignments: new Set(),
+    revokedCapabilities: new Set(),
+    activeRunId: undefined,
+  };
+}
+
+function decideConversationCancel(
+  conversationId: string,
+  state: RunProjection,
+  input: ConversationCancelRequest,
+  nextLsn: number,
+): ProjectionTransactionDecision<ConversationCommitLogRecord, ConversationCancelResult> {
+  const current = state.stateByRun.get(input.runId);
+  if (!current) throw new Error("Cannot cancel an unknown run");
+  const assignmentId = state.assignmentByRun.get(input.runId);
+  if (current.state === "queued") {
+    return {
+      kind: "append",
+      entries: [
+        runRecord(conversationId, {
+          t: "state",
+          runId: input.runId,
+          state: "cancelled",
+          statusRevision: current.statusRevision + 1,
+        }),
+      ],
+      value: { state: "cancelled", ...(assignmentId ? { assignmentId } : {}) },
+    };
+  }
+  if (current.state === "cancel-requested") {
+    if (!assignmentId) throw corruptRunJournal("Cancelling run has no assignment");
+    const durableFence = state.cancelFences.get(assignmentId);
+    if (!durableFence) throw corruptRunJournal("Cancelling run has no durable fence");
+    return {
+      kind: "return",
+      value: {
+        state: "cancel-requested",
+        assignmentId,
+        fence: {
+          fenceSeq: durableFence.fenceSeq,
+          requestId: durableFence.requestId,
+        },
+      },
+    };
+  }
+  if (current.state !== "dispatched" && current.state !== "running") {
+    return { kind: "return", value: { state: current.state } };
+  }
+  if (!assignmentId) throw corruptRunJournal("Active run has no assignment");
+  if (!state.assignedById.has(assignmentId)) {
+    throw corruptRunJournal("Active assignment is missing");
+  }
+  const fence = { fenceSeq: nextLsn, requestId: input.requestId };
+  return {
+    kind: "append",
+    entries: [
+      runRecord(conversationId, {
+        t: "cancel-fence",
+        assignmentId,
+        ...fence,
+      }),
+      runRecord(conversationId, {
+        t: "state",
+        runId: input.runId,
+        assignmentId,
+        state: "cancel-requested",
+        statusRevision: current.statusRevision + 1,
+      }),
+    ],
+    value: { state: "cancel-requested", assignmentId, fence },
+  };
+}
+
+function rejectedControl(
+  code: import("@zhixing/core/contracts").AuthorityError["code"],
+  message: string,
+): Extract<ControlResult, { status: "rejected" }> {
+  return {
+    v: 1,
+    status: "rejected",
+    error: { code, message, retryable: false },
+  };
+}
+
+function capabilityRevocations(
+  conversationId: string,
+  state: RunProjection,
+  assigned: AssignedProjection,
+): LogicalRecord<ConversationCommitLogRecord>[] {
+  return assigned.record.capIds
+    .filter(
+      (capId) =>
+        !state.revokedCapabilities.has(
+          `${assigned.record.assignmentId}\0${capId}`,
+        ),
+    )
+    .map((capId) =>
+      runRecord(conversationId, {
+        t: "capability-revoked",
+        capId,
+        assignmentId: assigned.record.assignmentId,
+      }),
+    );
+}
+
+function createOpenResolutionFact(
+  assigned: AssignedProjection,
+  cause: ConversationUncertainResolutionFact["cause"],
+  openedAt: string,
+): ConversationUncertainResolutionFact {
+  const subject = {
+    execution: "conversation" as const,
+    runId: assigned.record.runId,
+    conversationId: assigned.envelope.work.conversationId,
+    ownerEpoch: assigned.envelope.work.ownerEpoch,
+    assignmentId: assigned.record.assignmentId,
+  };
+  const openFactDigest = protocolDigest("UncertainOpenFact", 1, {
+    subject,
+    openedAt,
+    cause,
+  });
+  return { subject, openedAt, cause, openFactDigest };
+}
+
+function closeResolution(
+  fact: ConversationUncertainResolutionFact,
+  kind: NonNullable<UncertainResolutionFact["resolution"]>["kind"],
+  by: string,
+  at: string,
+): ConversationUncertainResolutionFact {
+  return snapshot(
+    {
+      ...fact,
+      resolution: {
+        kind,
+        by,
+        at,
+        factDigest: resolutionFactDigest(fact.openFactDigest, kind, by, at),
+      },
+    },
+    "Uncertain resolution fact",
+  );
+}
+
+function dispatchConflictKey(proof: DispatchConflictProof): string {
+  return `${proof.assignmentId}\0${proof.conflictingActivationDigest}`;
+}
+
+function rejectedNotStartedKey(
+  assignmentId: string,
+  kind: AssignmentTerminationProofKind,
+): string {
+  return `${assignmentId}\0${kind}`;
+}
+
+function hasRejectedNotStarted(
+  state: RunProjection,
+  assignmentId: string,
+  kind: AssignmentTerminationProofKind,
+): boolean {
+  return state.rejectedNotStarted.has(rejectedNotStartedKey(assignmentId, kind));
+}
+
+function hasDurableStartedObservation(
+  state: RunProjection,
+  assignmentId: string,
+): boolean {
+  const assigned = state.assignedById.get(assignmentId);
+  const currentState =
+    assigned && state.assignmentByRun.get(assigned.record.runId) === assignmentId
+      ? state.stateByRun.get(assigned.record.runId)?.state
+      : undefined;
+  return (
+    currentState === "running" ||
+    state.cancelOrigins.get(assignmentId) === "running" ||
+    state.uncertainOrigins.get(assignmentId) === "running" ||
+    state.supersedeStartedObservations.has(assignmentId)
+  );
+}
+
+function sameTerminationProof(
+  left: DurableSourceBoundProof,
+  right: DurableSourceBoundProof,
+): boolean {
+  return canonicalize(withoutSignature(left)) === canonicalize(withoutSignature(right));
 }
 
 function runRecord(
@@ -1739,6 +5852,179 @@ function runRecord(
 function runStream(conversationId: string): string {
   return `run:${conversationId}`;
 }
+
+function envelopeHasRunRecord(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  predicate: (
+    body: Exclude<ConversationRunJournalRecord, SessionInternalRecord>,
+  ) => boolean,
+): boolean {
+  return envelope.entries.some((entry) => {
+    if (entry.stream !== runStream(conversationId)) return false;
+    const body = entry.body as ConversationRunJournalRecord;
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      "t" in body &&
+      predicate(
+        body as Exclude<ConversationRunJournalRecord, SessionInternalRecord>,
+      )
+    );
+  });
+}
+
+function envelopeHasRunState(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  runId: string,
+  state: ConversationRunState,
+  statusRevision: number,
+  assignmentId: string | undefined,
+): boolean {
+  return envelopeHasRunRecord(
+    envelope,
+    conversationId,
+    (body) =>
+      body.t === "state" &&
+      body.runId === runId &&
+      body.assignmentId === assignmentId &&
+      body.state === state &&
+      body.statusRevision === statusRevision,
+  );
+}
+
+function envelopeClosesAssignment(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  runId: string,
+  assignmentId: string,
+): boolean {
+  return envelopeHasRunRecord(
+    envelope,
+    conversationId,
+    (body) =>
+      (body.t === "assignment-superseded" &&
+        body.assignmentId === assignmentId) ||
+      (body.t === "resolution" &&
+        body.runId === runId &&
+        body.fact.subject.assignmentId === assignmentId &&
+        body.fact.resolution !== undefined),
+  );
+}
+
+function envelopeHasResolution(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  runId: string,
+  openFactDigest: string,
+  resolved: boolean,
+): boolean {
+  return envelopeHasRunRecord(
+    envelope,
+    conversationId,
+    (body) =>
+      body.t === "resolution" &&
+      body.runId === runId &&
+      body.fact.openFactDigest === openFactDigest &&
+      (body.fact.resolution !== undefined) === resolved,
+  );
+}
+
+function envelopeRevokesRemainingCapabilities(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  state: RunProjection,
+  assigned: AssignedProjection,
+): boolean {
+  return envelopeRevokesCapabilities(
+    envelope,
+    conversationId,
+    state.revokedCapabilities,
+    assigned.record.assignmentId,
+    assigned.record.capIds,
+  );
+}
+
+function envelopeRevokesCapabilities(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  revokedCapabilities: ReadonlySet<string>,
+  assignmentId: string,
+  capIds: Iterable<string>,
+): boolean {
+  return [...capIds].every((capId) => {
+    const key = `${assignmentId}\0${capId}`;
+    return (
+      revokedCapabilities.has(key) ||
+      envelopeHasRunRecord(
+        envelope,
+        conversationId,
+        (body) =>
+          body.t === "capability-revoked" &&
+          body.assignmentId === assignmentId &&
+          body.capId === capId,
+      )
+    );
+  });
+}
+
+function envelopeHasSuccessfulUncertainControl(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  state: ConversationRunState,
+  factDigest: string,
+): boolean {
+  return envelope.entries.some((entry) => {
+    if (
+      entry.stream !== "control" ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    const applied = entry.body as {
+      readonly t?: unknown;
+      readonly authorityRevision?: unknown;
+      readonly result?: unknown;
+    };
+    if (
+      applied.t !== "applied" ||
+      applied.authorityRevision !== envelope.lsn ||
+      typeof applied.result !== "object" ||
+      applied.result === null
+    ) {
+      return false;
+    }
+    const result = applied.result as {
+      readonly v?: unknown;
+      readonly status?: unknown;
+      readonly body?: unknown;
+    };
+    if (
+      result.v !== 1 ||
+      result.status !== "ok" ||
+      typeof result.body !== "object" ||
+      result.body === null
+    ) {
+      return false;
+    }
+    const body = result.body as {
+      readonly t?: unknown;
+      readonly state?: unknown;
+      readonly factDigest?: unknown;
+    };
+    return (
+      body.t === "uncertain-resolve" &&
+      body.state === state &&
+      body.factDigest === factDigest
+    );
+  });
+}
+
+// Cancel/supersede/rejection proof binding is single-sourced in
+// conversation-run-contracts.ts (terminationProofBindsDurableSource); abort-ticket
+// ownership itself is checked before the owner appends the authority fact, so replay
+// only re-checks the signed executor/assignment/epoch binding carried by the proof.
 
 interface ValidatedConversationBundleClosure {
   readonly artifact: ReturnType<typeof sealedBundleArtifact>;
@@ -1866,6 +6152,263 @@ function envelopeContainsCommit(
   );
 }
 
+function envelopeHasConversationCommitSidecars(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
+  bundle: ReturnType<typeof validateConversationSealedBundle>,
+): boolean {
+  const hasContentIndex = envelope.entries.some((entry) => {
+    if (
+      entry.stream !== runStream(conversationId) ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    const body = entry.body as { readonly kind?: unknown; readonly entries?: unknown };
+    return (
+      body.kind === "content-asset-index" &&
+      canonicalize(body.entries) === canonicalize(bundle.body.contentAssets)
+    );
+  });
+  const hasFinal = envelope.entries.some((entry) => {
+    if (
+      entry.stream !== "final-outbox" ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    const body = entry.body as Partial<FinalOutboxRecord>;
+    return (
+      body.t === "final" &&
+      body.conversationId === conversationId &&
+      body.runId === committed.runId &&
+      body.commitRevision === committed.commitRevision &&
+      body.digest === bundle.digest &&
+      body.state === "pending"
+    );
+  });
+  if (!hasContentIndex || !hasFinal) return false;
+
+  const mutationBatch = bundle.body.mutationBatch;
+  if (!mutationBatch) return true;
+  const hasDecision = envelope.entries.some((entry) => {
+    if (
+      entry.stream !== "publish" ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    const body = entry.body as Partial<
+      Extract<PublishRecord, { t: "publish-decision" }>
+    >;
+    return (
+      body.t === "publish-decision" &&
+      body.assignmentId === committed.assignmentId &&
+      canonicalize(body.batch) === canonicalize({ ref: mutationBatch.ref }) &&
+      body.sessionCount === mutationBatch.sessionCount &&
+      body.globalCount === mutationBatch.globalCount
+    );
+  });
+  if (!hasDecision) return false;
+  return (["session", "global"] as const).every((domain) => {
+    const count =
+      domain === "session" ? mutationBatch.sessionCount : mutationBatch.globalCount;
+    if (count === 0) return true;
+    return envelope.entries.some((entry) => {
+      if (
+        entry.stream !== "publish" ||
+        typeof entry.body !== "object" ||
+        entry.body === null
+      ) {
+        return false;
+      }
+      const body = entry.body as Partial<
+        Extract<PublishRecord, { t: "publish-progress" }>
+      >;
+      return (
+        body.t === "publish-progress" &&
+        body.assignmentId === committed.assignmentId &&
+        body.domain === domain &&
+        body.upToSeq === 0 &&
+        body.state === "pending"
+      );
+    });
+  });
+}
+
+function submissionCommitSidecars(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
+): SubmissionCommitSidecars {
+  const contentRecords = envelope.entries.filter((entry) => {
+    if (
+      entry.stream !== runStream(conversationId) ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    return (entry.body as { readonly kind?: unknown }).kind === "content-asset-index";
+  });
+  if (contentRecords.length !== 1) {
+    throw corruptRunJournal("Submission guard commit has no unique content sidecar");
+  }
+  const content = contentRecords[0]!.body as unknown;
+  assertConversationRunInternalRecord(content);
+  if (content.kind !== "content-asset-index") {
+    throw corruptRunJournal("Submission guard commit has an invalid content sidecar");
+  }
+
+  const finalRecords = envelope.entries.filter((entry) => {
+    if (
+      entry.stream !== "final-outbox" ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    const body = entry.body as Partial<FinalOutboxRecord>;
+    return (
+      body.t === "final" &&
+      body.conversationId === conversationId &&
+      body.runId === committed.runId &&
+      body.commitRevision === committed.commitRevision
+    );
+  });
+  if (finalRecords.length !== 1) {
+    throw corruptRunJournal("Submission guard commit has no unique final sidecar");
+  }
+  const final = finalRecords[0]!.body as unknown;
+  assertPlainRecord(final, "Submission guard final sidecar");
+  assertExactRecordKeys(
+    final,
+    ["commitRevision", "conversationId", "digest", "runId", "state", "t"],
+    "Submission guard final sidecar",
+  );
+  assertDigest(final.digest, "Submission guard final digest");
+  if (final.state !== "pending") {
+    throw corruptRunJournal("Submission guard final sidecar is not pending");
+  }
+
+  const publishRecords = envelope.entries.filter((entry) => {
+    if (
+      entry.stream !== "publish" ||
+      typeof entry.body !== "object" ||
+      entry.body === null
+    ) {
+      return false;
+    }
+    const body = entry.body as { readonly assignmentId?: unknown; readonly t?: unknown };
+    return body.assignmentId === committed.assignmentId;
+  });
+  const decisionRecords = publishRecords.filter(
+    (entry) => (entry.body as { readonly t?: unknown }).t === "publish-decision",
+  );
+  const progressRecords = publishRecords.filter(
+    (entry) => (entry.body as { readonly t?: unknown }).t === "publish-progress",
+  );
+  if (
+    decisionRecords.length + progressRecords.length !== publishRecords.length ||
+    decisionRecords.length > 1
+  ) {
+    throw corruptRunJournal("Submission guard commit has duplicate publish decisions");
+  }
+  let publish: SubmissionCommitSidecars["publish"];
+  if (decisionRecords.length === 1) {
+    const decision = decisionRecords[0]!.body as unknown;
+    assertPlainRecord(decision, "Submission guard publish decision");
+    assertExactRecordKeys(
+      decision,
+      ["assignmentId", "batch", "globalCount", "outcomes", "sessionCount", "t"],
+      "Submission guard publish decision",
+    );
+    assertPlainRecord(decision.batch, "Submission guard publish batch");
+    assertExactRecordKeys(decision.batch, ["ref"], "Submission guard publish batch");
+    assertArtifactReference(decision.batch.ref, "Submission guard publish batch ref");
+    assertNonNegativeSafeInteger(
+      decision.sessionCount as number,
+      "Submission guard session mutation count",
+    );
+    assertNonNegativeSafeInteger(
+      decision.globalCount as number,
+      "Submission guard global mutation count",
+    );
+    if (!Array.isArray(decision.outcomes)) {
+      throw corruptRunJournal("Submission guard publish outcomes must be an array");
+    }
+    const pendingDomains = new Set<"session" | "global">();
+    for (const record of progressRecords) {
+      const progress = record.body as unknown;
+      assertPlainRecord(progress, "Submission guard publish progress");
+      assertExactRecordKeys(
+        progress,
+        ["assignmentId", "domain", "state", "t", "upToSeq"],
+        "Submission guard publish progress",
+      );
+      if (
+        (progress.domain !== "session" && progress.domain !== "global") ||
+        progress.state !== "pending" ||
+        progress.upToSeq !== 0 ||
+        pendingDomains.has(progress.domain)
+      ) {
+        throw corruptRunJournal("Submission guard publish progress is invalid");
+      }
+      pendingDomains.add(progress.domain);
+    }
+    publish = {
+      batch: { ref: decision.batch.ref as ArtifactRef },
+      sessionCount: decision.sessionCount as number,
+      globalCount: decision.globalCount as number,
+      pendingDomains,
+    };
+  } else if (progressRecords.length > 0) {
+    throw corruptRunJournal("Submission guard publish progress has no decision");
+  }
+  return {
+    contentAssetsDigest: byteDigest(
+      Buffer.from(canonicalize(content.entries), "utf8"),
+    ),
+    finalDigest: final.digest as string,
+    ...(publish ? { publish } : {}),
+  };
+}
+
+function submissionCommitSidecarsMatch(
+  sidecars: SubmissionCommitSidecars,
+  bundle: ReturnType<typeof validateConversationSealedBundle>,
+): boolean {
+  if (
+    sidecars.contentAssetsDigest !==
+      byteDigest(Buffer.from(canonicalize(bundle.body.contentAssets), "utf8")) ||
+    sidecars.finalDigest !== bundle.digest
+  ) {
+    return false;
+  }
+  const mutationBatch = bundle.body.mutationBatch;
+  if (!mutationBatch) return sidecars.publish === undefined;
+  const publish = sidecars.publish;
+  if (
+    !publish ||
+    canonicalize(publish.batch) !== canonicalize({ ref: mutationBatch.ref }) ||
+    publish.sessionCount !== mutationBatch.sessionCount ||
+    publish.globalCount !== mutationBatch.globalCount
+  ) {
+    return false;
+  }
+  const expectedDomains = new Set<"session" | "global">();
+  if (mutationBatch.sessionCount > 0) expectedDomains.add("session");
+  if (mutationBatch.globalCount > 0) expectedDomains.add("global");
+  return (
+    publish.pendingDomains.size === expectedDomains.size &&
+    [...expectedDomains].every((domain) => publish.pendingDomains.has(domain))
+  );
+}
+
 interface CommittedBundleBinding {
   readonly committed: Extract<ConversationRunJournalRecord, { t: "committed" }>;
   readonly bundle: ReturnType<typeof validateConversationSealedBundle>;
@@ -1972,12 +6515,17 @@ function assertAssignedMatchesDispatch(
   assigned: Extract<ConversationRunJournalRecord, { t: "assigned" }>,
   dispatch: PendingConversationDispatch["envelope"],
   ingress: IngressContext,
+  conversationId: string,
 ): void {
   const artifact = dispatchEnvelopeArtifact(dispatch);
   if (
     assigned.runId !== dispatch.work.runId ||
+    dispatch.work.conversationId !== conversationId ||
     assigned.assignmentId !== dispatch.assignmentId ||
     assigned.executorId !== dispatch.executorId ||
+    assigned.ownerEpoch !== dispatch.work.ownerEpoch ||
+    assigned.baseRevision !== dispatch.work.baseRevision ||
+    assigned.dispatchDigest !== dispatchEnvelopeDigest(dispatch) ||
     assigned.manifestDigest !== dispatch.manifest.digest ||
     canonicalize(assigned.dispatchRef) !== canonicalize(artifact.ref) ||
     assigned.permissionLeaseDigest !== permissionSnapshotLeaseDigest(dispatch) ||
@@ -1991,43 +6539,112 @@ function assertAssignedMatchesDispatch(
   }
 }
 
-function assertRunStateTransition(
-  current: ConversationRunState | undefined,
-  next: ConversationRunState,
-): void {
-  if (
-    (current === undefined && next === "queued") ||
-    (current === "queued" && next === "dispatched") ||
-    (current === "dispatched" && next === "running") ||
-    (current === "dispatched" && next === "committed") ||
-    (current === "running" && next === "committed")
-  ) {
+function isActiveRunState(state: ConversationRunState): boolean {
+  return (
+    state === "dispatched" ||
+    state === "running" ||
+    state === "cancel-requested" ||
+    state === "uncertain"
+  );
+}
+
+function selectActiveAssignment<Value>(
+  state: RunProjection,
+  select: (assigned: AssignedProjection, current: ConversationRunState) => Value | undefined,
+): Value | undefined {
+  const runId = state.activeRunId;
+  if (runId === undefined) return undefined;
+  const current = state.stateByRun.get(runId)?.state;
+  const assignmentId = state.assignmentByRun.get(runId);
+  const assigned = assignmentId ? state.assignedById.get(assignmentId) : undefined;
+  if (!current || !isActiveRunState(current) || !assigned) {
+    throw corruptRunJournal("Active run index has no durable assignment state");
+  }
+  return select(assigned, current);
+}
+
+type QueuedRunIndex = Pick<
+  RunProjection,
+  | "queuedRunByPosition"
+  | "queuedPositionHeap"
+  | "queuedPositionHeapIndex"
+>;
+
+function addQueuedRun(state: QueuedRunIndex, position: number, runId: string): void {
+  const existing = state.queuedRunByPosition.get(position);
+  if (existing !== undefined || state.queuedPositionHeapIndex.has(position)) {
+    throw corruptRunJournal("Queued position belongs to more than one run");
+  }
+  state.queuedRunByPosition.set(position, runId);
+  const heap = state.queuedPositionHeap;
+  const indexes = state.queuedPositionHeapIndex;
+  let index = heap.length;
+  heap.push(position);
+  indexes.set(position, index);
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (heap[parent]! <= heap[index]!) break;
+    swapQueuedHeap(heap, indexes, parent, index);
+    index = parent;
+  }
+}
+
+function removeQueuedRun(state: QueuedRunIndex, position: number, runId: string): void {
+  if (state.queuedRunByPosition.get(position) !== runId) {
+    throw corruptRunJournal("Queued run index does not match the durable state");
+  }
+  const index = state.queuedPositionHeapIndex.get(position);
+  if (index === undefined) {
+    throw corruptRunJournal("Queued run heap is missing its durable position");
+  }
+  state.queuedRunByPosition.delete(position);
+  const heap = state.queuedPositionHeap;
+  const indexes = state.queuedPositionHeapIndex;
+  const last = heap.length - 1;
+  if (index !== last) swapQueuedHeap(heap, indexes, index, last);
+  heap.pop();
+  indexes.delete(position);
+  if (index >= heap.length) return;
+  let cursor = index;
+  const parent = Math.floor((cursor - 1) / 2);
+  if (cursor > 0 && heap[cursor]! < heap[parent]!) {
+    while (cursor > 0) {
+      const nextParent = Math.floor((cursor - 1) / 2);
+      if (heap[nextParent]! <= heap[cursor]!) break;
+      swapQueuedHeap(heap, indexes, nextParent, cursor);
+      cursor = nextParent;
+    }
     return;
   }
-  throw corruptRunJournal(`Run state transition ${current ?? "none"} -> ${next} is invalid`);
+  while (true) {
+    const left = cursor * 2 + 1;
+    const right = left + 1;
+    let smallest = cursor;
+    if (left < heap.length && heap[left]! < heap[smallest]!) smallest = left;
+    if (right < heap.length && heap[right]! < heap[smallest]!) smallest = right;
+    if (smallest === cursor) return;
+    swapQueuedHeap(heap, indexes, cursor, smallest);
+    cursor = smallest;
+  }
+}
+
+function swapQueuedHeap(
+  heap: number[],
+  indexes: Map<number, number>,
+  left: number,
+  right: number,
+): void {
+  const leftValue = heap[left]!;
+  const rightValue = heap[right]!;
+  heap[left] = rightValue;
+  heap[right] = leftValue;
+  indexes.set(leftValue, right);
+  indexes.set(rightValue, left);
 }
 
 function withoutSignature<T extends { signature: unknown }>(value: T): Omit<T, "signature"> {
   const { signature: _, ...payload } = value;
   return payload;
-}
-
-function assertIdentifier(value: string, label: string): void {
-  if (typeof value !== "string" || value.length === 0 || value.length > 480) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
-  }
-}
-
-function assertPositiveSafeInteger(value: number, label: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`${label} must be a positive safe integer`);
-  }
-}
-
-function assertNonNegativeSafeInteger(value: number, label: string): void {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new TypeError(`${label} must be a non-negative safe integer`);
-  }
 }
 
 function canonicalTime(value: IsoTime, label: string): number {
@@ -2036,44 +6653,6 @@ function canonicalTime(value: IsoTime, label: string): number {
     throw new TypeError(`${label} must be a canonical ISO timestamp`);
   }
   return timestamp;
-}
-
-function assertPlainRecord(
-  value: unknown,
-  label: string,
-): asserts value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw corruptRunJournal(`${label} must be a plain object`);
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw corruptRunJournal(`${label} must be a plain object`);
-  }
-}
-
-function assertExactRecordKeys(
-  value: unknown,
-  keys: readonly string[],
-  label: string,
-): asserts value is Record<string, unknown> {
-  assertPlainRecord(value, label);
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (canonicalize(actual) !== canonicalize(expected)) {
-    throw corruptRunJournal(`${label} fields are incomplete or unknown`);
-  }
-}
-
-function assertDigest(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
-    throw corruptRunJournal(`${label} must be a canonical SHA-256 digest`);
-  }
-}
-
-function assertArtifactReference(value: unknown, label: string): void {
-  assertExactRecordKeys(value, ["bytes", "digest"], label);
-  assertDigest(value.digest, `${label} digest`);
-  assertNonNegativeSafeInteger(value.bytes as number, `${label} byte count`);
 }
 
 function validateAuthorityError(value: unknown): void {
@@ -2146,10 +6725,6 @@ function validateGlobalPublishOutcome(value: GlobalPublishOutcome): GlobalPublis
   throw new TypeError("Global publish outcome kind is invalid");
 }
 
-function corruptRunJournal(message: string): AuthorityStorageError {
-  return new AuthorityStorageError("invalid-authority-record", message);
-}
-
 function rejected(
   code: import("@zhixing/core/contracts").AuthorityError["code"],
   message: string,
@@ -2167,6 +6742,21 @@ function emptyPublishProjection(): PublishProjection {
     batches: new Map(),
     commitRevisions: new Map(),
     progress: new Map(),
+    domainPlans: new Map(),
+    conversationByAssignment: new Map(),
+    pendingAssignmentsByConversation: new Map(),
+    completedAssignments: new Set(),
+    conflictsByAssignment: new Map(),
+  };
+}
+
+function emptyFinalProjection(): FinalOutboxProjection {
+  return {
+    entries: new Map(),
+    activeKeyByConversationRevision: new Map(),
+    pendingByConversation: new Map(),
+    publishedByConversation: new Map(),
+    lastPendingRevisionByConversation: new Map(),
   };
 }
 
@@ -2192,6 +6782,10 @@ async function reducePublishRecord(
     ) {
       throw corruptRunJournal("Publish decision does not bind its committed mutation batch");
     }
+    state.conversationByAssignment.set(
+      record.body.assignmentId,
+      binding.bundle.body.conversationId,
+    );
     state.batches.set(record.body.assignmentId, binding.closure.batch);
     state.commitRevisions.set(record.body.assignmentId, binding.committed.commitRevision);
   }
@@ -2234,7 +6828,10 @@ function reducePublishBody(
         throw corruptRunJournal("Publish outcome kind is invalid");
       }
     }
-    if (state.decisions.has(body.assignmentId)) {
+    if (
+      state.decisions.has(body.assignmentId) ||
+      state.completedAssignments.has(body.assignmentId)
+    ) {
       throw corruptRunJournal("Publish decision is duplicated");
     }
     const batch = state.batches.get(body.assignmentId);
@@ -2275,6 +6872,50 @@ function reducePublishBody(
       throw corruptRunJournal("Publish decision is not atomic with its committed run fact");
     }
     state.decisions.set(body.assignmentId, body);
+    const conflicts: PublishConflictNotice["conflicts"] = [];
+    for (const item of body.outcomes) {
+      if (item.outcome.t !== "conflicted") continue;
+      const mutation = batch.records[item.seq - 1];
+      if (!mutation || mutation.domain !== "global") {
+        throw corruptRunJournal("Publish conflict has no global staged mutation");
+      }
+      conflicts.push({
+        seq: item.seq,
+        mutation: snapshot(mutation.mutation, "Publish conflict mutation") as GlobalStagedMutation,
+        error: snapshot(item.outcome.error, "Publish conflict error"),
+      });
+    }
+    if (conflicts.length > 0) {
+      state.conflictsByAssignment.set(body.assignmentId, conflicts);
+    }
+    for (const domain of ["session", "global"] as const) {
+      const domainRecords = batch.records.filter((record) => record.domain === domain);
+      if (domainRecords.length === 0) continue;
+      const grantedSeqs = body.outcomes
+        .filter(
+          (item) =>
+            item.outcome.t === "granted" &&
+            batch.records[item.seq - 1]?.domain === domain,
+        )
+        .map((item) => item.seq);
+      state.domainPlans.set(`${body.assignmentId}\0${domain}`, {
+        grantedSeqs,
+        grantedIndexBySeq: new Map(
+          grantedSeqs.map((seq, index) => [seq, index]),
+        ),
+        terminalSeq:
+          grantedSeqs.at(-1) ?? domainRecords.at(-1)!.seq,
+      });
+    }
+    const conversationId = state.conversationByAssignment.get(body.assignmentId);
+    if (!conversationId) {
+      throw corruptRunJournal("Publish decision has no conversation binding");
+    }
+    if (body.sessionCount > 0 || body.globalCount > 0) {
+      pendingPublishAssignments(state, conversationId).add(body.assignmentId);
+    } else {
+      compactSettledPublish(state, body.assignmentId);
+    }
     return;
   }
   assertExactRecordKeys(
@@ -2300,32 +6941,23 @@ function reducePublishBody(
   ) {
     throw corruptRunJournal("Publish progress names an empty domain");
   }
-  const batch = state.batches.get(body.assignmentId);
-  if (!batch) throw corruptRunJournal("Publish progress has no validated mutation batch");
-  const domainRecords = batch.records.filter((record) => record.domain === body.domain);
-  const grantedSeqs = decision.outcomes
-    .filter(
-      (item) =>
-        item.outcome.t === "granted" &&
-        domainRecords.some((record) => record.seq === item.seq),
-    )
-    .map((item) => item.seq);
-  const terminalSeq =
-    grantedSeqs.length > 0
-      ? Math.max(...grantedSeqs)
-      : Math.max(...domainRecords.map((record) => record.seq));
   const key = `${body.assignmentId}\0${body.domain}`;
+  const plan = state.domainPlans.get(key);
+  if (!plan) throw corruptRunJournal("Publish progress has no domain plan");
   const current = state.progress.get(key);
-  const nextGrantedSeq = grantedSeqs.find((seq) => seq > (current?.upToSeq ?? 0));
+  const nextGrantedIndex = current
+    ? (plan.grantedIndexBySeq.get(current.upToSeq) ?? -1) + 1
+    : 0;
+  const nextGrantedSeq = plan.grantedSeqs[nextGrantedIndex];
   const validProgress =
     (body.upToSeq === 0 && body.state === "pending" && !current) ||
     (current?.state === "pending" &&
       nextGrantedSeq !== undefined &&
       body.upToSeq === nextGrantedSeq &&
-      body.state === (body.upToSeq === terminalSeq ? "settled" : "pending")) ||
+      body.state === (body.upToSeq === plan.terminalSeq ? "settled" : "pending")) ||
     (current?.state === "pending" &&
-      grantedSeqs.length === 0 &&
-      body.upToSeq === terminalSeq &&
+      plan.grantedSeqs.length === 0 &&
+      body.upToSeq === plan.terminalSeq &&
       body.state === "settled");
   if (!validProgress) {
     throw corruptRunJournal("Publish progress skips or misstates a decided mutation");
@@ -2341,10 +6973,107 @@ function reducePublishBody(
     throw corruptRunJournal("Publish progress does not advance monotonically");
   }
   state.progress.set(key, body);
+  const conversationId = state.conversationByAssignment.get(body.assignmentId);
+  if (!conversationId) {
+    throw corruptRunJournal("Publish progress has no conversation binding");
+  }
+  if (publishAssignmentPending(state, body.assignmentId)) {
+    pendingPublishAssignments(state, conversationId).add(body.assignmentId);
+  } else {
+    removePendingPublishAssignment(state, conversationId, body.assignmentId);
+    compactSettledPublish(state, body.assignmentId);
+  }
+}
+
+function compactSettledPublish(
+  state: PublishProjection,
+  assignmentId: string,
+): void {
+  const conversationId = state.conversationByAssignment.get(assignmentId);
+  if (conversationId) {
+    removePendingPublishAssignment(state, conversationId, assignmentId);
+  }
+  state.decisions.delete(assignmentId);
+  state.batches.delete(assignmentId);
+  state.commitRevisions.delete(assignmentId);
+  state.conversationByAssignment.delete(assignmentId);
+  state.completedAssignments.add(assignmentId);
+  for (const domain of ["session", "global"] as const) {
+    const key = `${assignmentId}\0${domain}`;
+    state.progress.delete(key);
+    state.domainPlans.delete(key);
+  }
+}
+
+function pendingPublishAssignments(
+  state: PublishProjection,
+  conversationId: string,
+): Set<string> {
+  const current = state.pendingAssignmentsByConversation.get(conversationId);
+  if (current) return current;
+  const created = new Set<string>();
+  state.pendingAssignmentsByConversation.set(conversationId, created);
+  return created;
+}
+
+function removePendingPublishAssignment(
+  state: PublishProjection,
+  conversationId: string,
+  assignmentId: string,
+): void {
+  const pending = state.pendingAssignmentsByConversation.get(conversationId);
+  if (!pending) return;
+  pending.delete(assignmentId);
+  if (pending.size === 0) {
+    state.pendingAssignmentsByConversation.delete(conversationId);
+  }
+}
+
+function publishAssignmentPending(
+  state: PublishProjection,
+  assignmentId: string,
+): boolean {
+  const decision = state.decisions.get(assignmentId);
+  if (!decision) return false;
+  return (["session", "global"] as const).some((domain) => {
+    const count = domain === "session" ? decision.sessionCount : decision.globalCount;
+    return (
+      count > 0 &&
+      state.progress.get(`${assignmentId}\0${domain}`)?.state !== "settled"
+    );
+  });
 }
 
 function finalKey(value: Pick<FinalFrame, "conversationId" | "runId" | "commitRevision">): string {
   return `${value.conversationId}\0${value.runId}\0${value.commitRevision}`;
+}
+
+function finalRevisionKey(
+  value: Pick<FinalFrame, "conversationId" | "commitRevision">,
+): string {
+  return `${value.conversationId}\0${value.commitRevision}`;
+}
+
+function finalEntriesByConversation(
+  index: Map<string, Map<string, FinalOutboxProjectionEntry>>,
+  conversationId: string,
+): Map<string, FinalOutboxProjectionEntry> {
+  const current = index.get(conversationId);
+  if (current) return current;
+  const created = new Map<string, FinalOutboxProjectionEntry>();
+  index.set(conversationId, created);
+  return created;
+}
+
+function removeFinalEntry(
+  index: Map<string, Map<string, FinalOutboxProjectionEntry>>,
+  conversationId: string,
+  key: string,
+): void {
+  const entries = index.get(conversationId);
+  if (!entries) return;
+  entries.delete(key);
+  if (entries.size === 0) index.delete(conversationId);
 }
 
 function finalFrame(record: FinalOutboxRecord, publishConflicts = 0): FinalFrame {
@@ -2381,9 +7110,17 @@ async function applyFinalRecord(
   }
   canonicalTime(at, "Final outbox record time");
   const key = finalKey(body);
-  const current = projection.get(key);
+  const revisionKey = finalRevisionKey(body);
+  const current = projection.entries.get(key);
   if (!current) {
-    if (body.state !== "pending") {
+    const lastPendingRevision = projection.lastPendingRevisionByConversation.get(
+      body.conversationId,
+    );
+    if (
+      body.state !== "pending" ||
+      (lastPendingRevision !== undefined && body.commitRevision <= lastPendingRevision) ||
+      projection.activeKeyByConversationRevision.has(revisionKey)
+    ) {
       throw corruptRunJournal("Final outbox must begin pending");
     }
     const binding = await loadCommittedBundleBinding(
@@ -2399,7 +7136,17 @@ async function applyFinalRecord(
     ) {
       throw corruptRunJournal("Final outbox does not bind its committed bundle");
     }
-    projection.set(key, { record: body, at });
+    const entry = { record: body, at };
+    projection.lastPendingRevisionByConversation.set(
+      body.conversationId,
+      body.commitRevision,
+    );
+    projection.entries.set(key, entry);
+    projection.activeKeyByConversationRevision.set(revisionKey, key);
+    finalEntriesByConversation(projection.pendingByConversation, body.conversationId).set(
+      key,
+      entry,
+    );
     return;
   }
   const validTransition =
@@ -2415,15 +7162,33 @@ async function applyFinalRecord(
   ) {
     throw corruptRunJournal("Final outbox transition is invalid");
   }
-  projection.set(key, { record: body, at });
+  const entry = { record: body, at };
+  removeFinalEntry(projection.pendingByConversation, body.conversationId, key);
+  removeFinalEntry(projection.publishedByConversation, body.conversationId, key);
+  if (body.state === "published") {
+    projection.entries.set(key, entry);
+    finalEntriesByConversation(projection.publishedByConversation, body.conversationId).set(
+      key,
+      entry,
+    );
+  } else {
+    projection.entries.delete(key);
+    projection.activeKeyByConversationRevision.delete(revisionKey);
+  }
 }
 
-function publishConflictCount(state: PublishProjection, assignmentId: string): number {
-  return (
-    state.decisions
-      .get(assignmentId)
-      ?.outcomes.filter((item) => item.outcome.t === "conflicted").length ?? 0
-  );
+function firstCommitIndexAfter(
+  commits: readonly Extract<ConversationRunJournalRecord, { t: "committed" }>[],
+  revision: number,
+): number {
+  let low = 0;
+  let high = commits.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (commits[middle]!.commitRevision <= revision) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 function snapshot<T>(value: T, label: string): T {

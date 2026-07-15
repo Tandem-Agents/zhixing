@@ -42,7 +42,7 @@ import type {
   CancelProofBody,
   DispatchConflictProof,
   DispatchRejectionProof,
-  InteractionMirrorEntry,
+  InteractionMirrorBatch,
   SupersedeProof,
 } from "./records.js";
 import type {
@@ -298,9 +298,9 @@ export interface RunSubmissionPort {
   ): Promise<void>;
   mirrorInteractions(
     assignmentId: string,
-    entries: InteractionMirrorEntry[],
+    batch: InteractionMirrorBatch,
     ctx: AuthorityCallContext,
-  ): Promise<{ mirroredUpTo: number }>;
+  ): Promise<{ mirroredUpTo: number; ordinal: number; mirrorDigest: Digest }>;
 }
 
 export interface ResourceUsageIntake {

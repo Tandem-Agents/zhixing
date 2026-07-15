@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { isNonEmptyUserTurnInput } from "@zhixing/core";
 import {
   AuthorityStorageError,
   collectArtifactRefs,
@@ -20,20 +19,38 @@ import type {
   IngressContext,
   LogicalRecord,
 } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import {
+  canonicalize,
+  protocolDigest,
+  validateChannelResponderRef,
+  validateIngressContext,
+  validateNonEmptyUserTurnInput,
+} from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 
 const MAX_CONTROL_IDENTIFIER_BYTES = 480;
 const MAX_CONTROL_MESSAGE_BYTES = 4 * 1024;
+const MAX_AUTHORITY_PROJECTION_CACHES = 8;
 
 type InitialControlRequest = Extract<
   ControlRequest,
   { t: "input" | "session-create" }
 >;
+type ConversationControlRequest = Extract<
+  ControlRequest,
+  { t: "cancel" | "uncertain-resolve" }
+>;
+type AdmittedControlRequest = InitialControlRequest | ConversationControlRequest;
 
 export type InitialControlEnvelope = Omit<ControlEnvelope, "body"> & {
   readonly body: InitialControlRequest;
 };
+export type ConversationControlEnvelope = Omit<ControlEnvelope, "body"> & {
+  readonly body: ConversationControlRequest;
+};
+type AdmittedControlEnvelope =
+  | InitialControlEnvelope
+  | ConversationControlEnvelope;
 
 export interface TrustedControlSource {
   readonly principal: ControlEnvelope["principal"];
@@ -46,13 +63,23 @@ export interface ControlApplicationPlan {
   readonly authorityEntries?: readonly LogicalRecord<unknown>[];
 }
 
-type InitialControlRequestType = InitialControlRequest["t"];
+export interface AtomicControlApplicationPlan {
+  readonly result: ControlResult;
+  readonly authorityEntries?: readonly LogicalRecord<unknown>[];
+}
+
+export interface AtomicControlApplicationContext {
+  readonly canonicalRequestId: string;
+  readonly authorityPrefix: { readonly lastLsn: number; readonly nextLsn: number };
+}
+
+type AdmittedControlRequestType = AdmittedControlRequest["t"];
 
 type StoredControlAdmissionValue =
   | {
       readonly kind: "applied" | "replayed";
       readonly canonicalRequestId: string;
-      readonly requestType: InitialControlRequestType;
+      readonly requestType: AdmittedControlRequestType;
       readonly storedResult: Stored<ControlResult>;
       readonly authorityRevision: number;
     }
@@ -70,7 +97,7 @@ type ControlTransactionValue =
   | {
       readonly kind: "alias";
       readonly canonicalRequestId: string;
-      readonly requestType: InitialControlRequestType;
+      readonly requestType: AdmittedControlRequestType;
       readonly storedResult: Stored<ControlResult>;
       readonly authorityRevision: number;
     };
@@ -98,7 +125,7 @@ interface PreparedStored<T> {
 
 interface RequestProjection {
   readonly requestId: string;
-  readonly requestType: InitialControlRequestType;
+  readonly requestType: AdmittedControlRequestType;
   readonly payloadDigest: string;
   readonly surfacePrincipal: string;
   readonly ingressKey?: string;
@@ -148,14 +175,52 @@ export function createInitialControlEnvelope(
     at,
     body,
   };
-  const validated = snapshotInitialControlEnvelope(envelope);
+  const validated = snapshotAdmittedControlEnvelope(envelope);
+  if (!isInitialControlEnvelope(validated)) {
+    throw new TypeError("Initial control envelope requires input or session-create");
+  }
+  assertTrustedSourceMatches(validated, source);
+  return validated;
+}
+
+export interface CreateConversationControlEnvelopeInput {
+  readonly requestId: string;
+  readonly source: TrustedControlSource;
+  readonly body: ConversationControlRequest;
+  readonly at?: string;
+}
+
+export function createConversationControlEnvelope(
+  input: CreateConversationControlEnvelopeInput,
+): ConversationControlEnvelope {
+  const source = snapshotTrustedSource(input.source);
+  if (source.ingress !== undefined) {
+    throw new TypeError("Conversation control requests do not accept ingress context");
+  }
+  const body = snapshot(input.body, "Conversation control request");
+  const at = input.at ?? new Date().toISOString();
+  const envelope = {
+    v: 1 as const,
+    requestId: input.requestId,
+    principal: source.principal,
+    dependencyArtifacts: [],
+    payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
+      body,
+      dependencyArtifacts: [],
+    }),
+    at,
+    body,
+  };
+  const validated = snapshotAdmittedControlEnvelope(envelope);
+  if (!isConversationControlEnvelope(validated)) {
+    throw new TypeError("Conversation control envelope requires cancel or uncertain-resolve");
+  }
   assertTrustedSourceMatches(validated, source);
   return validated;
 }
 
 export function channelSurfacePrincipal(responder: ChannelResponderRef): string {
-  const value = snapshot(responder, "Channel responder");
-  assertChannelResponder(value);
+  const value = validateChannelResponderRef(responder);
   return `channel:${protocolDigest("ChannelResponderRef", 1, value)}`;
 }
 
@@ -170,6 +235,14 @@ export class ControlAdmissionJournal {
   readonly #operations = new SerialTaskQueue();
   #projection = emptyProjection();
   #projectionCursor: ProjectionCursor | undefined;
+  readonly #authorityProjections = new Map<
+    string,
+    {
+      readonly control: ControlProjection;
+      readonly target: unknown;
+      readonly cursor: ProjectionCursor;
+    }
+  >();
 
   constructor(log: AuthorityCommitLog, artifacts: ArtifactStore) {
     this.#log = log;
@@ -184,14 +257,215 @@ export class ControlAdmissionJournal {
       readonly canonicalRequestId: string;
     }) => ControlApplicationPlan | Promise<ControlApplicationPlan>;
   }): Promise<ControlAdmissionOutcome> {
-    const envelope = snapshotInitialControlEnvelope(input.envelope);
+    const envelope = snapshotAdmittedControlEnvelope(input.envelope);
+    if (!isInitialControlEnvelope(envelope)) {
+      throw new TypeError("Initial control application rejects conversation control requests");
+    }
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
     return this.#operations.run(() => this.#apply(envelope, input.prepare));
   }
 
+  async applyAuthority<State>(input: {
+    readonly envelope: ConversationControlEnvelope;
+    readonly source: TrustedControlSource;
+    readonly stream: string;
+    readonly initial: State;
+    readonly reducer: (
+      state: State,
+      record: LogicalRecord<unknown>,
+      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    ) => State | Promise<State>;
+    readonly decide: (
+      state: State,
+      context: AtomicControlApplicationContext,
+    ) => AtomicControlApplicationPlan;
+    readonly candidateReferences?: readonly ArtifactRef[];
+  }): Promise<ControlAdmissionOutcome> {
+    const envelope = snapshotAdmittedControlEnvelope(input.envelope);
+    if (!isConversationControlEnvelope(envelope)) {
+      throw new TypeError("Atomic authority application requires a conversation control request");
+    }
+    const source = snapshotTrustedSource(input.source);
+    assertTrustedSourceMatches(envelope, source);
+    assertIdentifier(input.stream, "Authority control target stream");
+    if (input.stream === "control") {
+      throw new TypeError("Authority control target stream cannot be control");
+    }
+    return this.#operations.run(async () => {
+      const preparedEnvelope = await prepareEnvelope(envelope, this.#artifacts);
+      const receipt = await this.#transact(
+        (state) =>
+          decideControlReceipt({
+            state,
+            envelope,
+            storedEnvelope: preparedEnvelope.stored,
+          }),
+        preparedEnvelope.references,
+      );
+      if (receipt.value.kind === "rejected") return receipt.value;
+      if (receipt.value.kind === "replayed") {
+        return materializeOutcome(receipt.value, this.#artifacts);
+      }
+      if (receipt.value.kind !== "pending") {
+        throw invalidControlRecord("Conversation control receipt is not pending");
+      }
+      return this.#completeAuthority({
+        ...input,
+        envelope,
+        preparedEnvelope,
+        canonicalRequestId: receipt.value.canonicalRequestId,
+      });
+    });
+  }
+
+  async #completeAuthority<State>(input: {
+    readonly envelope: ConversationControlEnvelope;
+    readonly preparedEnvelope: PreparedStored<AdmittedControlEnvelope>;
+    readonly canonicalRequestId: string;
+    readonly stream: string;
+    readonly initial: State;
+    readonly reducer: (
+      state: State,
+      record: LogicalRecord<unknown>,
+      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    ) => State | Promise<State>;
+    readonly decide: (
+      state: State,
+      context: AtomicControlApplicationContext,
+    ) => AtomicControlApplicationPlan;
+    readonly candidateReferences?: readonly ArtifactRef[];
+  }): Promise<ControlAdmissionOutcome> {
+    type CombinedProjection = {
+      readonly control: ControlProjectionDraft;
+      target: State;
+    };
+    const cached = this.#takeAuthorityProjection(input.stream) as
+      | {
+          readonly control: ControlProjection;
+          readonly target: State;
+          readonly cursor: ProjectionCursor;
+        }
+      | undefined;
+    const initial: CombinedProjection = {
+      control: beginProjectionDraft(cached?.control ?? emptyProjection()),
+      target: cached?.target ?? input.initial,
+    };
+    try {
+      const transaction = await this.#log.transactProjection<
+        CombinedProjection,
+        unknown,
+        StoredControlAdmissionValue
+      >(
+        initial,
+        async (state, record, commit) => {
+          if (record.stream === "control") {
+            await reduceControlProjection(
+              state.control,
+              record,
+              this.#artifacts,
+            );
+          } else if (record.stream === input.stream) {
+            state.target = await input.reducer(state.target, record, commit);
+          }
+          return state;
+        },
+        (state, authorityPrefix) => {
+          const request = getRequest(state.control, input.canonicalRequestId);
+          if (!request) {
+            throw invalidControlRecord("Atomic control request has no received record");
+          }
+          if (!sameRequestBinding(request, input.envelope)) {
+            throw invalidControlRecord("Atomic control request changed its durable binding");
+          }
+          if (request.storedResult) return replayWithoutAppend(request);
+
+          const plan = snapshot(
+            input.decide(state.target, {
+              canonicalRequestId: input.canonicalRequestId,
+              authorityPrefix,
+            }),
+            "Atomic control application plan",
+          );
+          const result = snapshotControlResult(plan.result, input.envelope.body.t);
+          const authorityEntries = snapshotAuthorityEntries(
+            plan.authorityEntries ?? [],
+          );
+          if (authorityEntries.some((entry) => entry.stream !== input.stream)) {
+            throw new TypeError("Atomic control plan may only append its target stream");
+          }
+          const authorityRevision = authorityPrefix.nextLsn;
+          return {
+            kind: "append",
+            entries: [
+              ...authorityEntries,
+              appliedRecord(input.canonicalRequestId, result, authorityRevision),
+            ],
+            value: {
+              kind: "applied",
+              canonicalRequestId: input.canonicalRequestId,
+              requestType: input.envelope.body.t,
+              storedResult: result,
+              authorityRevision,
+            },
+          };
+        },
+        {
+          ...(cached ? { cursor: cached.cursor } : {}),
+          candidateReferences: collectArtifactRefs([
+            ...input.preparedEnvelope.references,
+            ...(input.candidateReferences ?? []),
+          ]),
+        },
+      );
+      const control = commitProjectionDraft(transaction.state.control);
+      this.#cacheAuthorityProjection(input.stream, {
+        control,
+        target: transaction.state.target,
+        cursor: transaction.cursor,
+      });
+      return materializeOutcome(
+        transaction.value,
+        this.#artifacts,
+        transaction.commit?.lsn,
+      );
+    } catch (error) {
+      this.#authorityProjections.delete(input.stream);
+      throw error;
+    }
+  }
+
+  #takeAuthorityProjection(stream: string):
+    | {
+        readonly control: ControlProjection;
+        readonly target: unknown;
+        readonly cursor: ProjectionCursor;
+      }
+    | undefined {
+    const cached = this.#authorityProjections.get(stream);
+    if (!cached) return undefined;
+    this.#authorityProjections.delete(stream);
+    return cached;
+  }
+
+  #cacheAuthorityProjection(
+    stream: string,
+    cached: {
+      readonly control: ControlProjection;
+      readonly target: unknown;
+      readonly cursor: ProjectionCursor;
+    },
+  ): void {
+    this.#authorityProjections.set(stream, cached);
+    while (this.#authorityProjections.size > MAX_AUTHORITY_PROJECTION_CACHES) {
+      const oldest = this.#authorityProjections.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.#authorityProjections.delete(oldest);
+    }
+  }
+
   async #apply(
-    envelope: InitialControlEnvelope,
+    envelope: AdmittedControlEnvelope,
     prepare: (context: {
       readonly canonicalRequestId: string;
     }) => ControlApplicationPlan | Promise<ControlApplicationPlan>,
@@ -265,8 +539,8 @@ export class ControlAdmissionJournal {
   }
 
   async #appendAlias(
-    envelope: InitialControlEnvelope,
-    preparedEnvelope: PreparedStored<InitialControlEnvelope>,
+    envelope: AdmittedControlEnvelope,
+    preparedEnvelope: PreparedStored<AdmittedControlEnvelope>,
     alias: Extract<ControlTransactionValue, { kind: "alias" }>,
   ): Promise<ControlAdmissionOutcome> {
     const transaction = await this.#transact(
@@ -302,23 +576,30 @@ export class ControlAdmissionJournal {
     candidateReferences: readonly ArtifactRef[],
   ) {
     const draft = beginProjectionDraft(this.#projection);
-    const transaction = await this.#log.transactProjection<
-      ControlProjectionDraft,
-      unknown,
-      ControlTransactionValue
-    >(
-      draft,
-      (state, record) => reduceControlProjection(state, record, this.#artifacts),
-      decide,
-      {
-        stream: "control",
-        ...(this.#projectionCursor ? { cursor: this.#projectionCursor } : {}),
-        candidateReferences,
-      },
-    );
-    commitProjectionDraft(transaction.state);
-    this.#projectionCursor = transaction.cursor;
-    return transaction;
+    try {
+      const transaction = await this.#log.transactProjection<
+        ControlProjectionDraft,
+        unknown,
+        ControlTransactionValue
+      >(
+        draft,
+        (state, record) => reduceControlProjection(state, record, this.#artifacts),
+        decide,
+        {
+          stream: "control",
+          ...(this.#projectionCursor ? { cursor: this.#projectionCursor } : {}),
+          candidateReferences,
+        },
+      );
+      this.#projection = commitProjectionDraft(transaction.state);
+      this.#projectionCursor = transaction.cursor;
+      return transaction;
+    } catch (error) {
+      this.#projection = emptyProjection();
+      this.#projectionCursor = undefined;
+      this.#authorityProjections.clear();
+      throw error;
+    }
   }
 }
 
@@ -330,9 +611,14 @@ function beginProjectionDraft(base: ControlProjection): ControlProjectionDraft {
   return { base, requests: new Map(), ingresses: new Map() };
 }
 
-function commitProjectionDraft(draft: ControlProjectionDraft): void {
-  for (const [key, value] of draft.requests) draft.base.requests.set(key, value);
-  for (const [key, value] of draft.ingresses) draft.base.ingresses.set(key, value);
+function commitProjectionDraft(draft: ControlProjectionDraft): ControlProjection {
+  for (const [requestId, request] of draft.requests) {
+    draft.base.requests.set(requestId, request);
+  }
+  for (const [key, ingress] of draft.ingresses) {
+    draft.base.ingresses.set(key, ingress);
+  }
+  return draft.base;
 }
 
 function getRequest(
@@ -375,8 +661,8 @@ async function reduceControlProjection(
   if (body.t === "received") {
     assertExactKeys(body, ["envelope", "requestId", "t"], "received record");
     assertIdentifier(body.requestId, "Control received requestId");
-    const storedEnvelope = snapshotStored<InitialControlEnvelope>(body.envelope);
-    const envelope = snapshotInitialControlEnvelope(
+    const storedEnvelope = snapshotStored<AdmittedControlEnvelope>(body.envelope);
+    const envelope = snapshotAdmittedControlEnvelope(
       await loadStored(storedEnvelope, artifacts, "ControlEnvelope"),
     );
     if (envelope.requestId !== body.requestId) {
@@ -439,8 +725,8 @@ async function reduceControlProjection(
 
 function decideControlReceipt(input: {
   readonly state: ControlProjectionDraft;
-  readonly envelope: InitialControlEnvelope;
-  readonly storedEnvelope: Stored<InitialControlEnvelope>;
+  readonly envelope: AdmittedControlEnvelope;
+  readonly storedEnvelope: Stored<AdmittedControlEnvelope>;
 }) {
   const byRequest = getRequest(input.state, input.envelope.requestId);
   if (byRequest) {
@@ -481,8 +767,8 @@ function decideControlReceipt(input: {
 
 function decideControlCompletion(input: {
   readonly state: ControlProjectionDraft;
-  readonly envelope: InitialControlEnvelope;
-  readonly storedEnvelope: Stored<InitialControlEnvelope>;
+  readonly envelope: AdmittedControlEnvelope;
+  readonly storedEnvelope: Stored<AdmittedControlEnvelope>;
   readonly canonicalRequestId: string;
   readonly storedResult: Stored<ControlResult>;
   readonly authorityRevision: number;
@@ -532,8 +818,8 @@ function decideControlCompletion(input: {
 
 function decideAppliedAlias(input: {
   readonly state: ControlProjectionDraft;
-  readonly envelope: InitialControlEnvelope;
-  readonly storedEnvelope: Stored<InitialControlEnvelope>;
+  readonly envelope: AdmittedControlEnvelope;
+  readonly storedEnvelope: Stored<AdmittedControlEnvelope>;
   readonly canonicalRequestId: string;
 }) {
   const byRequest = getRequest(input.state, input.envelope.requestId);
@@ -567,7 +853,7 @@ function decideAppliedAlias(input: {
 
 function receivedRecord(
   requestId: string,
-  envelope: Stored<InitialControlEnvelope>,
+  envelope: Stored<AdmittedControlEnvelope>,
 ): LogicalRecord<ControlRecord> {
   return { stream: "control", body: { t: "received", requestId, envelope } };
 }
@@ -647,7 +933,7 @@ function ingressProjection(request: RequestProjection): IngressProjection {
   };
 }
 
-function requestProjection(envelope: InitialControlEnvelope): RequestProjection {
+function requestProjection(envelope: AdmittedControlEnvelope): RequestProjection {
   const key = ingressKey(envelope);
   return {
     requestId: envelope.requestId,
@@ -658,7 +944,7 @@ function requestProjection(envelope: InitialControlEnvelope): RequestProjection 
   };
 }
 
-function ingressKey(envelope: InitialControlEnvelope): string | undefined {
+function ingressKey(envelope: AdmittedControlEnvelope): string | undefined {
   if (envelope.body.t !== "input") return undefined;
   return canonicalize([
     envelope.principal.surfacePrincipal,
@@ -668,7 +954,7 @@ function ingressKey(envelope: InitialControlEnvelope): string | undefined {
 
 function sameRequestBinding(
   left: RequestProjection,
-  right: InitialControlEnvelope,
+  right: AdmittedControlEnvelope,
 ): boolean {
   return (
     left.payloadDigest === right.payloadDigest &&
@@ -678,7 +964,7 @@ function sameRequestBinding(
 
 function sameIngressBinding(
   indexed: IngressProjection,
-  envelope: InitialControlEnvelope,
+  envelope: AdmittedControlEnvelope,
 ): boolean {
   return (
     indexed.payloadDigest === envelope.payloadDigest &&
@@ -698,7 +984,7 @@ function sameIngressProjection(
 
 function assertCompletionTargetsCanonical(
   canonical: RequestProjection,
-  envelope: InitialControlEnvelope,
+  envelope: AdmittedControlEnvelope,
 ): void {
   if (envelope.requestId === canonical.requestId) {
     if (!sameRequestBinding(canonical, envelope)) {
@@ -737,9 +1023,9 @@ async function materializeOutcome(
 }
 
 async function prepareEnvelope(
-  envelope: InitialControlEnvelope,
+  envelope: AdmittedControlEnvelope,
   artifacts: ArtifactStore,
-): Promise<PreparedStored<InitialControlEnvelope>> {
+): Promise<PreparedStored<AdmittedControlEnvelope>> {
   const inline: ControlRecord = {
     t: "received",
     requestId: envelope.requestId,
@@ -799,7 +1085,7 @@ async function loadStored<T>(
   return parsed as T;
 }
 
-function snapshotInitialControlEnvelope(value: unknown): InitialControlEnvelope {
+function snapshotAdmittedControlEnvelope(value: unknown): AdmittedControlEnvelope {
   const envelope = snapshot(value, "Control envelope");
   assertPlainRecord(envelope, "Control envelope");
   assertExactKeys(
@@ -828,9 +1114,9 @@ function snapshotInitialControlEnvelope(value: unknown): InitialControlEnvelope 
   assertIdentifier(envelope.principal.deviceId, "deviceId");
   assertIdentifier(envelope.principal.connectionId, "connectionId");
   if (!Array.isArray(envelope.dependencyArtifacts) || envelope.dependencyArtifacts.length > 0) {
-    throw new TypeError("Initial control requests cannot declare dependency artifacts");
+    throw new TypeError("Admitted control requests cannot declare dependency artifacts");
   }
-  assertInitialControlRequest(envelope.body);
+  assertAdmittedControlRequest(envelope.body);
   if (
     typeof envelope.payloadDigest !== "string" ||
     envelope.payloadDigest !==
@@ -841,7 +1127,19 @@ function snapshotInitialControlEnvelope(value: unknown): InitialControlEnvelope 
   ) {
     throw new TypeError("Control envelope payload digest is invalid");
   }
-  return envelope as unknown as InitialControlEnvelope;
+  return envelope as unknown as AdmittedControlEnvelope;
+}
+
+function isInitialControlEnvelope(
+  envelope: AdmittedControlEnvelope,
+): envelope is InitialControlEnvelope {
+  return envelope.body.t === "input" || envelope.body.t === "session-create";
+}
+
+function isConversationControlEnvelope(
+  envelope: AdmittedControlEnvelope,
+): envelope is ConversationControlEnvelope {
+  return envelope.body.t === "cancel" || envelope.body.t === "uncertain-resolve";
 }
 
 function snapshotTrustedSource(value: TrustedControlSource): TrustedControlSource {
@@ -857,12 +1155,12 @@ function snapshotTrustedSource(value: TrustedControlSource): TrustedControlSourc
   assertIdentifier(source.principal.surfacePrincipal, "surfacePrincipal");
   assertIdentifier(source.principal.deviceId, "deviceId");
   assertIdentifier(source.principal.connectionId, "connectionId");
-  if (source.ingress !== undefined) assertIngressContext(source.ingress);
+  if (source.ingress !== undefined) validateIngressContext(source.ingress);
   return source as unknown as TrustedControlSource;
 }
 
 function assertTrustedSourceMatches(
-  envelope: InitialControlEnvelope,
+  envelope: AdmittedControlEnvelope,
   source: TrustedControlSource,
 ): void {
   if (canonicalize(envelope.principal) !== canonicalize(source.principal)) {
@@ -871,6 +1169,12 @@ function assertTrustedSourceMatches(
   if (envelope.body.t === "session-create") {
     if (source.ingress !== undefined) {
       throw new TypeError("session-create does not accept an input ingress context");
+    }
+    return;
+  }
+  if (envelope.body.t === "cancel" || envelope.body.t === "uncertain-resolve") {
+    if (source.ingress !== undefined) {
+      throw new TypeError("Conversation control requests do not accept ingress context");
     }
     return;
   }
@@ -886,7 +1190,7 @@ function assertTrustedSourceMatches(
   }
 }
 
-function assertInitialControlRequest(value: unknown): void {
+function assertAdmittedControlRequest(value: unknown): void {
   assertPlainRecord(value, "Control request");
   if (value.t === "session-create") {
     assertAllowedKeys(
@@ -900,8 +1204,58 @@ function assertInitialControlRequest(value: unknown): void {
     if (value.sceneId !== undefined) assertIdentifier(value.sceneId, "sceneId");
     return;
   }
+  if (value.t === "cancel") {
+    assertExactKeys(
+      value,
+      ["conversationId", "ownerEpoch", "runId", "t"],
+      "cancel request",
+    );
+    assertIdentifier(value.conversationId, "cancel conversationId");
+    assertIdentifier(value.runId, "cancel runId");
+    if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
+      throw new TypeError("cancel ownerEpoch must be a non-negative safe integer");
+    }
+    return;
+  }
+  if (value.t === "uncertain-resolve") {
+    assertExactKeys(
+      value,
+      ["decision", "openFactDigest", "ref", "t"],
+      "uncertain-resolve request",
+    );
+    assertPlainRecord(value.ref, "uncertain-resolve ref");
+    assertExactKeys(
+      value.ref,
+      ["conversationId", "execution", "ownerEpoch", "runId"],
+      "uncertain-resolve ref",
+    );
+    if (value.ref.execution !== "conversation") {
+      throw new TypeError("Control admission only accepts conversation uncertain resolution");
+    }
+    assertIdentifier(value.ref.conversationId, "uncertain-resolve conversationId");
+    assertIdentifier(value.ref.runId, "uncertain-resolve runId");
+    if (!Number.isSafeInteger(value.ref.ownerEpoch) || (value.ref.ownerEpoch as number) < 0) {
+      throw new TypeError("uncertain-resolve ownerEpoch must be a non-negative safe integer");
+    }
+    if (
+      typeof value.openFactDigest !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/u.test(value.openFactDigest)
+    ) {
+      throw new TypeError("uncertain-resolve openFactDigest is invalid");
+    }
+    if (
+      value.decision !== "user-verified-side-effects" &&
+      value.decision !== "user-abandoned" &&
+      value.decision !== "user-retry-acknowledged"
+    ) {
+      throw new TypeError("uncertain-resolve decision is invalid");
+    }
+    return;
+  }
   if (value.t !== "input") {
-    throw new TypeError("Control admission currently accepts input or session-create");
+    throw new TypeError(
+      "Control admission accepts input, session-create, cancel, or uncertain-resolve",
+    );
   }
   assertExactKeys(
     value,
@@ -922,135 +1276,12 @@ function assertInitialControlRequest(value: unknown): void {
   if (value.ingress.source !== "first-party" && value.ingress.source !== "channel") {
     throw new TypeError("Control input source is invalid");
   }
-  assertUserTurnInput(value.input);
-}
-
-function assertUserTurnInput(value: unknown): void {
-  if (!isNonEmptyUserTurnInput(value)) {
-    throw new TypeError("Control input must contain a non-empty user turn");
-  }
-  const input = value as unknown as Record<string, unknown>;
-  assertExactKeys(input, ["parts"], "User turn input");
-  for (const part of value.parts) {
-    const record = part as unknown as Record<string, unknown>;
-    if (part.type === "text") {
-      assertExactKeys(record, ["text", "type"], "User input text part");
-      continue;
-    }
-    assertAllowedKeys(
-      record,
-      ["mimeType", "name", "size", "source", "type"],
-      "User input image part",
-    );
-    if (part.name !== undefined) {
-      assertNonEmptyString(part.name, "User input image name");
-    }
-    if (part.mimeType !== undefined) {
-      assertNonEmptyString(part.mimeType, "User input image mimeType");
-    }
-    if (
-      part.size !== undefined &&
-      (!Number.isSafeInteger(part.size) || part.size < 0)
-    ) {
-      throw new TypeError("User input image size must be a non-negative safe integer");
-    }
-    const source = part.source as unknown as Record<string, unknown>;
-    if (part.source.type === "base64") {
-      assertExactKeys(source, ["data", "mediaType", "type"], "Base64 image source");
-    } else {
-      assertExactKeys(source, ["type", "url"], "URL image source");
-    }
-  }
-}
-
-function assertIngressContext(value: unknown): asserts value is IngressContext {
-  assertPlainRecord(value, "Ingress context");
-  const common = [
-    "deviceId",
-    "ingressId",
-    "kind",
-    "receivedAt",
-    "surfacePrincipal",
-    "turnOrigin",
-  ];
-  if (value.kind === "first-party") {
-    assertAllowedKeys(value, common, "First-party ingress context");
-  } else if (value.kind === "channel") {
-    assertAllowedKeys(
-      value,
-      [...common, "replyTarget", "responder"],
-      "Channel ingress context",
-    );
-    assertChannelResponder(value.responder);
-    assertDeliveryTarget(value.replyTarget);
-    if (value.surfacePrincipal !== channelSurfacePrincipal(value.responder)) {
-      throw new TypeError("Channel surfacePrincipal is not derived from its responder");
-    }
-  } else {
-    throw new TypeError("Ingress context kind is invalid");
-  }
-  assertIdentifier(value.surfacePrincipal, "Ingress surfacePrincipal");
-  assertIdentifier(value.deviceId, "Ingress deviceId");
-  assertIdentifier(value.ingressId, "Ingress ingressId");
-  assertCanonicalTime(value.receivedAt, "Ingress receivedAt");
-  if (value.turnOrigin !== undefined) assertTurnOrigin(value.turnOrigin);
-}
-
-function assertChannelResponder(value: unknown): asserts value is ChannelResponderRef {
-  assertPlainRecord(value, "Channel responder");
-  assertAllowedKeys(
-    value,
-    ["channelId", "platformSubject", "tenant"],
-    "Channel responder",
-  );
-  assertIdentifier(value.channelId, "Channel responder channelId");
-  assertIdentifier(value.platformSubject, "Channel responder platformSubject");
-  if (value.tenant !== undefined) assertIdentifier(value.tenant, "Channel tenant");
-}
-
-function assertDeliveryTarget(value: unknown): void {
-  assertPlainRecord(value, "Delivery target");
-  assertAllowedKeys(value, ["channelId", "threadId", "to"], "Delivery target");
-  assertIdentifier(value.channelId, "Delivery channelId");
-  assertIdentifier(value.to, "Delivery recipient");
-  if (value.threadId !== undefined) assertIdentifier(value.threadId, "threadId");
-}
-
-function assertTurnOrigin(value: unknown): void {
-  assertPlainRecord(value, "Turn origin");
-  assertAllowedKeys(
-    value,
-    ["channel", "surface", "target", "triggeredBy"],
-    "Turn origin",
-  );
-  assertIdentifier(value.channel, "Turn origin channel");
-  if (value.target !== undefined) assertDeliveryTarget(value.target);
-  if (value.triggeredBy !== undefined) {
-    assertIdentifier(value.triggeredBy, "Turn origin triggeredBy");
-  }
-  if (value.surface !== undefined) {
-    assertPlainRecord(value.surface, "Turn origin surface");
-    assertAllowedKeys(value.surface, ["capabilities"], "Turn origin surface");
-    if (value.surface.capabilities !== undefined) {
-      assertPlainRecord(value.surface.capabilities, "Surface capabilities");
-      assertAllowedKeys(
-        value.surface.capabilities,
-        ["postTurnControl"],
-        "Surface capabilities",
-      );
-      if (
-        value.surface.capabilities.postTurnControl !== undefined &&
-        typeof value.surface.capabilities.postTurnControl !== "boolean"
-      ) {
-        throw new TypeError("postTurnControl capability must be boolean");
-      }
-    }
-  }
+  validateNonEmptyUserTurnInput(value.input);
 }
 
 function snapshotControlResult(
   value: ControlResult,
-  requestType: InitialControlRequest["t"],
+  requestType: AdmittedControlRequest["t"],
 ): ControlResult {
   const result = snapshot(value, "Control result");
   assertPlainRecord(result, "Control result");
@@ -1073,7 +1304,7 @@ function snapshotControlResult(
       throw new TypeError("session-create requires a matching result body");
     }
     assertIdentifier(result.body.conversationId, "Result conversationId");
-  } else {
+  } else if (requestType === "input") {
     assertExactKeys(
       result.body,
       ["queuedPosition", "runId", "t"],
@@ -1088,6 +1319,28 @@ function snapshotControlResult(
       (result.body.queuedPosition as number) < 0
     ) {
       throw new TypeError("queuedPosition must be a non-negative safe integer");
+    }
+  } else if (requestType === "cancel") {
+    assertExactKeys(result.body, ["runState", "t"], "cancel result");
+    if (result.body.t !== "cancel") {
+      throw new TypeError("cancel requires a matching result body");
+    }
+    assertConversationRunState(result.body.runState, "cancel runState");
+  } else {
+    assertExactKeys(
+      result.body,
+      ["factDigest", "state", "t"],
+      "uncertain-resolve result",
+    );
+    if (result.body.t !== "uncertain-resolve") {
+      throw new TypeError("uncertain-resolve requires a matching result body");
+    }
+    assertConversationRunState(result.body.state, "uncertain-resolve state");
+    if (
+      typeof result.body.factDigest !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/u.test(result.body.factDigest)
+    ) {
+      throw new TypeError("uncertain-resolve factDigest is invalid");
     }
   }
   return result as unknown as ControlResult;
@@ -1165,6 +1418,23 @@ function isStoredReference(value: unknown): value is StoredReference {
 function assertAuthorityRevision(value: unknown): asserts value is number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new TypeError("authorityRevision must be a non-negative safe integer");
+  }
+}
+
+function assertConversationRunState(value: unknown, label: string): void {
+  const states = new Set([
+    "queued",
+    "dispatched",
+    "running",
+    "cancel-requested",
+    "committed",
+    "cancelled",
+    "failed",
+    "expired",
+    "uncertain",
+  ]);
+  if (typeof value !== "string" || !states.has(value)) {
+    throw new TypeError(`${label} is invalid`);
   }
 }
 

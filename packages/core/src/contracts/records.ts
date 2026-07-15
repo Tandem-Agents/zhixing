@@ -29,7 +29,11 @@ export type ControlResultBody =
   | { t: "global-write"; revision: number }
   | { t: "job-run"; jobRunId: string }
   | { t: "job-cancel"; runState: JobRunState }
-  | { t: "uncertain-resolve"; state: ConversationRunState | JobRunState }
+  | {
+      t: "uncertain-resolve";
+      state: ConversationRunState | JobRunState;
+      factDigest: Digest;
+    }
   | { t: "delivery-resolve"; applied: boolean };
 
 export type ControlResult = WireSchemaV1<"ControlResult"> &
@@ -149,6 +153,7 @@ export type AssignmentTerminationProof =
   | NotStartedCancelProof;
 
 export interface InteractionMirrorEntry {
+  ordinal: number;
   seq: number;
   requestId: string;
   kind: "allow-once";
@@ -171,6 +176,19 @@ export interface InteractionMirrorEntry {
     | { t: "expired" };
   at: IsoTime;
 }
+
+export interface InteractionMirrorBatchPayload
+  extends WireSchemaV1<"InteractionMirrorBatch"> {
+  assignmentId: string;
+  executorId: string;
+  previousDigest: Digest;
+  entries: InteractionMirrorEntry[];
+  mirrorDigest: Digest;
+}
+
+export type InteractionMirrorBatch = InteractionMirrorBatchPayload & {
+  signature: Signature;
+};
 
 export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
   (
@@ -259,7 +277,7 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
         mutationBatch?: { ref: ArtifactRef };
       }
     | { t: "acked"; commitRevision: number }
-    | { t: "mirrored"; upTo: number }
+    | { t: "mirrored"; upTo: number; ordinal: number; mirrorDigest: Digest }
   );
 
 export interface AssignmentEntry {

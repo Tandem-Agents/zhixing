@@ -5,6 +5,7 @@ import {
   collectArtifactRefs,
   type ArtifactStore,
   type AuthorityCommitLog,
+  type ProjectionCursor,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
@@ -14,7 +15,9 @@ import type {
   AssignmentEntry,
   AssignmentRecord,
   AuthorityCallContext,
+  AuthorityEpochRef,
   AuthorityError,
+  CancelProofBody,
   DispatchConflictProof,
   DispatchRejectionProof,
   DispatchResult,
@@ -22,6 +25,7 @@ import type {
   LedgerSnapshot,
   LogicalRecord,
   SealedBundle,
+  SupersedeProof,
   SessionStagedMutation,
   GlobalStagedMutation,
   TranscriptRunRecord,
@@ -30,28 +34,43 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   advanceAssignmentLedger,
+  advanceInteractionMirrorDigest,
+  applyValidatedAssignmentEntry,
   assignmentActivationDigest,
   assignmentLedgerSeed,
   canonicalize,
   conversationBundleRoots,
   createConversationSealedBundle,
   createMutationBatch,
+  createAssignmentLedgerValidationState,
+  createSignedConversationInteractionMirrorBatch,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   mutationBatchArtifact,
+  interactionMirrorSeed,
+  protocolDigest,
   sealedBundleArtifact,
+  signCancelProof,
+  signDispatchConflictProof,
+  signSupersedeProof,
+  validateAssignmentEntry,
   validateConversationSealedBundle,
   validateMutationBatch,
+  validateStagedMutationRecord,
   validateTranscriptRunRecord,
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionOutcome,
   validateConversationActivation,
   validateConversationEnvelope,
+  validateCancelProof,
   type ConversationInteractionMirrorEntry,
+  type ConversationInteractionMirrorBatch,
   type ConversationInteractionOutcome,
+  type AssignmentLedgerValidationState,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
+import { SerialTaskQueue } from "@zhixing/core/persistence";
 
 type ConversationEnvelope = Extract<
   import("@zhixing/core/contracts").DispatchEnvelope,
@@ -69,12 +88,26 @@ export type ConversationDispatchPort = {
     ctx: AuthorityCallContext,
     range?: { fromSeq: number; limit: number },
   ): Promise<LedgerSnapshot | LedgerEvidencePage>;
+  cancel(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<void>;
+  supersede(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<SupersedeProof>;
 };
 
 export interface OwnerControlAuthorizer {
   authorize(
     context: AuthorityCallContext,
-    method: "executor.dispatch" | "executor.queryLedger",
+    method:
+      | "executor.dispatch"
+      | "executor.cancel"
+      | "executor.supersede"
+      | "executor.queryLedger",
     assignmentId: string,
   ): void;
 }
@@ -87,16 +120,23 @@ export interface AssignmentLedgerOptions {
   readonly verifier: ProtocolSignatureVerifier;
   readonly ownerControl: OwnerControlAuthorizer;
   readonly clock?: () => string;
+  readonly usageFinal?: (
+    assignmentId: string,
+  ) => { readonly reportDigest: string; readonly upToUsageSeq: number };
+  readonly surfaceAbort?: {
+    authorize(assignmentId: string, input: SurfaceAbortInput): void;
+  };
   readonly maxPendingInteractions?: number;
+  readonly maxCachedAssignments?: number;
 }
 
 export interface ConversationSubmissionPort {
   reportStarted(assignmentId: string, ctx: AuthorityCallContext): Promise<void>;
   mirrorInteractions(
     assignmentId: string,
-    entries: readonly ConversationInteractionMirrorEntry[],
+    batch: ConversationInteractionMirrorBatch,
     ctx: AuthorityCallContext,
-  ): Promise<{ readonly mirroredUpTo: number }>;
+  ): Promise<InteractionMirrorReceipt>;
   submitBundle(
     bundle: SealedBundle,
     ctx: AuthorityCallContext,
@@ -104,6 +144,11 @@ export interface ConversationSubmissionPort {
     | { readonly committed: true; readonly commitRevision: number }
     | { readonly committed: false; readonly error: AuthorityError }
   >;
+  submitCancelProof(
+    assignmentId: string,
+    proof: CancelProofBody,
+    ctx: AuthorityCallContext,
+  ): Promise<void>;
 }
 
 export interface InProcessAssignmentSubmissionOptions {
@@ -118,6 +163,12 @@ export interface InteractionRequestInput {
   readonly issuedAt: string;
   readonly ttlMs: number;
   readonly expiresAt: string;
+}
+
+export interface InteractionMirrorReceipt {
+  readonly mirroredUpTo: number;
+  readonly ordinal: number;
+  readonly mirrorDigest: string;
 }
 
 export type InteractionOutcome = ConversationInteractionOutcome;
@@ -156,14 +207,34 @@ export interface InteractionRecoveryResult {
   readonly resolved: readonly ConversationInteractionMirrorEntry[];
 }
 
+export interface SideEffectInput {
+  readonly kind: "tool-mutation" | "external-call";
+  readonly toolName: string;
+  readonly summary: string;
+  readonly target: "workspace-file" | "external-service" | "device-system";
+}
+
+export interface SurfaceAbortInput {
+  readonly ticketDigest: string;
+  readonly surfacePrincipal: string;
+}
+
 interface FinishedInteraction {
   readonly body: Extract<AssignmentRecord, { t: "interaction-finished" }>;
   readonly recordSeq: number;
   readonly at: string;
+  readonly ordinal: number;
+  readonly mirrorDigest: string;
+}
+
+interface RequestedInteraction {
+  readonly body: Extract<AssignmentRecord, { t: "interaction-requested" }>;
+  readonly recordSeq: number;
 }
 
 interface LedgerProjection {
   readonly assignmentId: string;
+  readonly validation: AssignmentLedgerValidationState;
   lastSeq: number;
   chainDigest: string;
   phase: LedgerSnapshot["phase"];
@@ -178,16 +249,39 @@ interface LedgerProjection {
     readonly recordSeq: number;
     readonly ledgerDigest: string;
   };
+  started?: { readonly recordSeq: number; readonly ledgerDigest: string };
+  supersedeFence?: {
+    readonly body: Extract<AssignmentRecord, { t: "supersede-fenced" }>;
+    readonly recordSeq: number;
+    readonly ledgerDigest: string;
+  };
+  aborts: Array<Extract<AssignmentRecord, { t: "abort-requested" }>>;
+  halted?: CancelProofBody;
+  readonly sideEffects: Map<
+    number,
+    {
+      readonly started: Extract<AssignmentRecord, { t: "side-effect-started" }>;
+      completed?: Extract<AssignmentRecord, { t: "side-effect-completed" }>;
+    }
+  >;
   readonly entries: AssignmentEntry[];
   readonly ledgerBySeq: string[];
-  readonly requested: Map<
-    string,
-    Extract<AssignmentRecord, { t: "interaction-requested" }>
-  >;
+  readonly requested: Map<string, RequestedInteraction>;
+  readonly pendingRequests: Map<string, RequestedInteraction>;
   readonly finished: Map<string, FinishedInteraction>;
+  readonly finishedOrder: FinishedInteraction[];
+  readonly finishedIndexBySeq: Map<number, number>;
   readonly stagedMutations: Array<Extract<AssignmentRecord, { t: "staged-mutation" }>>;
   readonly mutationRequestIds: Set<string>;
+  readonly stagedMutationByRequestId: Map<
+    string,
+    Extract<AssignmentRecord, { t: "staged-mutation" }>
+  >;
   mirroredUpTo: number;
+  mirroredFinishedCount: number;
+  mirroredInteractionOrdinal: number;
+  mirroredInteractionDigest: string;
+  acknowledgedCommitRevision?: number;
 }
 
 type DispatchDecision =
@@ -204,8 +298,21 @@ type DispatchDecision =
       readonly received: NonNullable<LedgerProjection["received"]>;
     };
 
+type AbortCause =
+  | {
+      readonly cause: "owner-fence";
+      readonly fence: { readonly fenceSeq: number; readonly requestId: string };
+      readonly authority: AuthorityEpochRef;
+    }
+  | {
+      readonly cause: "abort-ticket";
+      readonly ticketDigest: string;
+      readonly surfacePrincipal: string;
+    };
+
 const MAX_LEDGER_PAGE = 256;
 const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
+const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 
 /** Durable executor-side conversation assignment protocol; it has no listener or topology side effects. */
@@ -217,7 +324,15 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #ownerControl: OwnerControlAuthorizer;
   readonly #clock: () => string;
+  readonly #usageFinal: NonNullable<AssignmentLedgerOptions["usageFinal"]>;
+  readonly #surfaceAbort: AssignmentLedgerOptions["surfaceAbort"];
   readonly #maxPendingInteractions: number;
+  readonly #maxCachedAssignments: number;
+  readonly #operations = new SerialTaskQueue();
+  readonly #projections = new Map<
+    string,
+    { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
+  >();
 
   constructor(options: AssignmentLedgerOptions) {
     assertIdentifier(options.executorId, "Executor id");
@@ -228,6 +343,20 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     this.#verifier = options.verifier;
     this.#ownerControl = options.ownerControl;
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    // Placeholder until the resource governor lands (spec §十, S4): a real
+    // deployment must inject `usageFinal` so cancel proofs carry the digest of
+    // an actual signed UsageReport. The default derives a recognizable
+    // zero-usage digest that can never collide with a UsageReport digest.
+    this.#usageFinal =
+      options.usageFinal ??
+      ((assignmentId) => ({
+        reportDigest: protocolDigest("AssignmentUsageFinal", 1, {
+          assignmentId,
+          upToUsageSeq: 0,
+        }),
+        upToUsageSeq: 0,
+      }));
+    this.#surfaceAbort = options.surfaceAbort;
     this.#maxPendingInteractions =
       options.maxPendingInteractions ?? DEFAULT_MAX_PENDING_INTERACTIONS;
     if (
@@ -235,6 +364,14 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       this.#maxPendingInteractions <= 0
     ) {
       throw new TypeError("Maximum pending interactions must be a positive safe integer");
+    }
+    this.#maxCachedAssignments =
+      options.maxCachedAssignments ?? DEFAULT_MAX_CACHED_ASSIGNMENTS;
+    if (
+      !Number.isSafeInteger(this.#maxCachedAssignments) ||
+      this.#maxCachedAssignments <= 0
+    ) {
+      throw new TypeError("Maximum cached assignments must be a positive safe integer");
     }
   }
 
@@ -279,6 +416,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     const transaction = await this.#transact<DispatchDecision>(
       assignmentId,
       (state) => {
+        if (state.supersedeFence || state.aborts.length > 0 || state.halted) {
+          throw new Error("Assignment is durably fenced and rejects late dispatch");
+        }
         if (state.rejection) {
           return {
             kind: "return",
@@ -342,39 +482,145 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   ): Promise<LedgerSnapshot | LedgerEvidencePage> {
     assertIdentifier(assignmentId, "Assignment id");
     this.#ownerControl.authorize(ctx, "executor.queryLedger", assignmentId);
-    const state = await this.#read(assignmentId);
-    if (!range) return ledgerSnapshot(state);
     if (
-      !Number.isSafeInteger(range.fromSeq) ||
-      range.fromSeq <= 0 ||
-      !Number.isSafeInteger(range.limit) ||
-      range.limit <= 0 ||
-      range.limit > MAX_LEDGER_PAGE
+      range &&
+      (!Number.isSafeInteger(range.fromSeq) ||
+        range.fromSeq <= 0 ||
+        !Number.isSafeInteger(range.limit) ||
+        range.limit <= 0 ||
+        range.limit > MAX_LEDGER_PAGE)
     ) {
       throw new RangeError(`Ledger evidence range must be within 1..${MAX_LEDGER_PAGE}`);
     }
-    const entries = state.entries.slice(
-      range.fromSeq - 1,
-      range.fromSeq - 1 + range.limit,
-    );
-    if (entries.length === 0) {
-      throw new RangeError("Ledger evidence range starts beyond the durable ledger");
+    return this.#select(assignmentId, (state) => {
+      if (!range) return snapshot(ledgerSnapshot(state), "Ledger snapshot");
+      const entries = state.entries.slice(
+        range.fromSeq - 1,
+        range.fromSeq - 1 + range.limit,
+      );
+      if (entries.length === 0) {
+        throw new RangeError("Ledger evidence range starts beyond the durable ledger");
+      }
+      const payload = {
+        v: 1 as const,
+        assignmentId,
+        fromSeq: entries[0]!.recordSeq,
+        toSeq: entries.at(-1)!.recordSeq,
+        entries: snapshot(entries, "Ledger evidence entries"),
+        chainDigest: state.ledgerBySeq[entries.at(-1)!.recordSeq - 1]!,
+        executorId: this.#executorId,
+      };
+      return snapshot(
+        {
+          ...payload,
+          signature: this.#signer.sign("LedgerEvidencePage", 1, payload),
+        },
+        "Ledger evidence page",
+      );
+    });
+  }
+
+  async cancel(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<void> {
+    assertFence(fence, "Cancel fence");
+    this.#ownerControl.authorize(ctx, "executor.cancel", assignmentId);
+    if (ctx.principal.kind !== "owner-control") {
+      throw new Error("Cancellation requires an owner-control principal");
     }
-    const payload = {
-      v: 1 as const,
-      assignmentId,
-      fromSeq: entries[0]!.recordSeq,
-      toSeq: entries.at(-1)!.recordSeq,
-      entries: snapshot(entries, "Ledger evidence entries"),
-      chainDigest: state.ledgerBySeq[entries.at(-1)!.recordSeq - 1]!,
-      executorId: this.#executorId,
-    };
-    return snapshot(
+    await this.#requestAbort(assignmentId, {
+      cause: "owner-fence",
+      fence: snapshot(fence, "Cancel fence"),
+      authority: snapshot(ctx.principal.grant.scope, "Cancel authority"),
+    });
+  }
+
+  async abortFromSurface(
+    assignmentId: string,
+    input: SurfaceAbortInput,
+  ): Promise<void> {
+    assertDigest(input.ticketDigest, "Abort ticket digest");
+    assertIdentifier(input.surfacePrincipal, "Abort surface principal");
+    if (!this.#surfaceAbort) {
+      throw new Error("Surface abort authorization is not configured");
+    }
+    this.#surfaceAbort.authorize(assignmentId, input);
+    await this.#requestAbort(assignmentId, {
+      cause: "abort-ticket",
+      ticketDigest: input.ticketDigest,
+      surfacePrincipal: input.surfacePrincipal,
+    });
+  }
+
+  async supersede(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<SupersedeProof> {
+    assertFence(fence, "Supersede fence");
+    this.#ownerControl.authorize(ctx, "executor.supersede", assignmentId);
+    const transaction = await this.#transact<{
+      readonly decision: SupersedeProof["decision"];
+      readonly recordSeq: number;
+      readonly ledgerDigest: string;
+    }>(assignmentId, (state) => {
+      if (state.supersedeFence) {
+        if (canonicalize(state.supersedeFence.body) !== canonicalize({
+          v: 1,
+          t: "supersede-fenced",
+          ...fence,
+        })) {
+          throw new Error("Assignment already has a different supersede fence");
+        }
+        return {
+          kind: "return",
+          value: {
+            decision: "not-started-fenced",
+            recordSeq: state.supersedeFence.recordSeq,
+            ledgerDigest: state.supersedeFence.ledgerDigest,
+          },
+        };
+      }
+      if (state.started) {
+        return {
+          kind: "return",
+          value: {
+            decision: "already-started",
+            recordSeq: state.started.recordSeq,
+            ledgerDigest: state.started.ledgerDigest,
+          },
+        };
+      }
+      if (state.phase === "dispatch-rejected" || state.phase === "halted") {
+        throw new Error("Terminated assignment cannot be superseded through a new fence");
+      }
+      if (state.aborts.length > 0) {
+        throw new Error("Cancelling assignment cannot accept a supersede fence");
+      }
+      const entry = nextEntry(state, { v: 1, t: "supersede-fenced", ...fence });
+      return {
+        kind: "append",
+        entries: [assignmentRecord(assignmentId, entry)],
+        value: {
+          decision: "not-started-fenced",
+          recordSeq: entry.recordSeq,
+          ledgerDigest: advanceAssignmentLedger(state.chainDigest, entry),
+        },
+      };
+    });
+    return signSupersedeProof(
       {
-        ...payload,
-        signature: this.#signer.sign("LedgerEvidencePage", 1, payload),
+        v: 1,
+        assignmentId,
+        executorId: this.#executorId,
+        fence: snapshot(fence, "Supersede fence"),
+        decision: transaction.value.decision,
+        lastRecordSeq: transaction.value.recordSeq,
+        ledgerDigest: transaction.value.ledgerDigest,
       },
-      "Ledger evidence page",
+      this.#signer,
     );
   }
 
@@ -382,6 +628,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     const transaction = await this.#transact<{ started: boolean }>(
       assignmentId,
       (state) => {
+        if (state.aborts.length > 0 || state.supersedeFence) {
+          throw new Error("Assignment is fenced and cannot start");
+        }
         if (state.phase === "received") {
           return {
             kind: "append",
@@ -402,6 +651,91 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     return transaction.value;
   }
 
+  async startSideEffect(
+    assignmentId: string,
+    input: SideEffectInput,
+  ): Promise<{ readonly effectSeq: number }> {
+    assertIdentifier(input.toolName, "Side-effect tool name");
+    assertBoundedText(input.summary, "Side-effect summary");
+    if (input.kind !== "tool-mutation" && input.kind !== "external-call") {
+      throw new TypeError("Side-effect kind is invalid");
+    }
+    if (
+      input.target !== "workspace-file" &&
+      input.target !== "external-service" &&
+      input.target !== "device-system"
+    ) {
+      throw new TypeError("Side-effect target is invalid");
+    }
+    const transaction = await this.#transact<{ effectSeq: number }>(
+      assignmentId,
+      (state) => {
+        if (state.phase !== "started" || state.aborts.length > 0) {
+          throw new Error("Side effects require an active, unfenced assignment");
+        }
+        const effectSeq = state.sideEffects.size + 1;
+        return {
+          kind: "append",
+          entries: [
+            assignmentRecord(
+              assignmentId,
+              nextEntry(state, {
+                v: 1,
+                t: "side-effect-started",
+                effectSeq,
+                ...snapshot(input, "Side-effect input"),
+              }),
+            ),
+          ],
+          value: { effectSeq },
+        };
+      },
+    );
+    return transaction.value;
+  }
+
+  async completeSideEffect(
+    assignmentId: string,
+    effectSeq: number,
+    result: {
+      readonly status: "ok" | "failed" | "aborted";
+      readonly resultDigest?: string;
+    },
+  ): Promise<void> {
+    assertPositiveSafeInteger(effectSeq, "Side-effect sequence");
+    if (result.status !== "ok" && result.status !== "failed" && result.status !== "aborted") {
+      throw new TypeError("Side-effect completion status is invalid");
+    }
+    if (result.resultDigest !== undefined) {
+      assertDigest(result.resultDigest, "Side-effect result digest");
+    }
+    await this.#transact<void>(assignmentId, (state) => {
+      const effect = state.sideEffects.get(effectSeq);
+      if (!effect) throw new Error("Side-effect completion has no durable start");
+      const body = snapshot(
+        {
+          v: 1 as const,
+          t: "side-effect-completed" as const,
+          effectSeq,
+          status: result.status,
+          ...(result.resultDigest ? { resultDigest: result.resultDigest } : {}),
+        },
+        "Side-effect completion",
+      );
+      if (effect.completed) {
+        if (canonicalize(effect.completed) !== canonicalize(body)) {
+          throw new Error("Side effect already has a different terminal result");
+        }
+        return { kind: "return", value: undefined };
+      }
+      return {
+        kind: "append",
+        entries: [assignmentRecord(assignmentId, nextEntry(state, body))],
+        value: undefined,
+      };
+    });
+  }
+
   async requestInteraction(
     assignmentId: string,
     input: InteractionRequestInput,
@@ -412,25 +746,17 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       (state) => {
         const existing = state.requested.get(body.requestId);
         if (existing) {
-          if (canonicalize(existing) !== canonicalize(body)) {
+          if (canonicalize(existing.body) !== canonicalize(body)) {
             throw new Error("Interaction requestId has conflicting durable payloads");
           }
-          const record = state.entries.find(
-            (entry) =>
-              entry.body.t === "interaction-requested" &&
-              entry.body.requestId === body.requestId,
-          )!;
-          return { kind: "return", value: { recordSeq: record.recordSeq } };
+          return { kind: "return", value: { recordSeq: existing.recordSeq } };
         }
-        if (state.phase !== "started") {
+        if (state.phase !== "started" || state.aborts.length > 0) {
           throw new Error("Interactions can only be requested by a started assignment");
         }
         const entry = nextEntry(state, body);
-        const pendingCount = [...state.requested.keys()].filter(
-          (requestId) => !state.finished.has(requestId),
-        ).length;
         const entries = [entry];
-        if (pendingCount >= this.#maxPendingInteractions) {
+        if (state.pendingRequests.size >= this.#maxPendingInteractions) {
           entries.push({
             recordSeq: entry.recordSeq + 1,
             body: {
@@ -469,10 +795,12 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       },
       "Interaction result",
     );
-    assertFinishedInteractionFits(assignmentId, body);
+    assertFinishedInteractionFits(assignmentId, this.#executorId, body);
     const transaction = await this.#transact<{
       readonly existing?: FinishedInteraction;
       readonly recordSeq?: number;
+      readonly ordinal?: number;
+      readonly mirrorDigest?: string;
     }>(assignmentId, (state) => {
       const requested = state.requested.get(requestId);
       if (!requested) throw new Error("Interaction result has no durable request");
@@ -483,17 +811,32 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         }
         return { kind: "return", value: { existing } };
       }
+      if (state.aborts.length > 0) {
+        throw new Error("Interaction result cannot overtake a durable cancellation");
+      }
       const entry = nextEntry(state, body);
+      const ordinal = state.finishedOrder.length + 1;
+      const mirrorDigest = advanceInteractionMirrorDigest(
+        state.validation.interactionMirrorDigest,
+        {
+          ordinal,
+          seq: entry.recordSeq,
+          requestId,
+          kind: "allow-once",
+          outcome: validatedOutcome,
+        },
+      );
       return {
         kind: "append",
         entries: [assignmentRecord(assignmentId, entry)],
-        value: { recordSeq: entry.recordSeq },
+        value: { recordSeq: entry.recordSeq, ordinal, mirrorDigest },
       };
     });
     if (transaction.value.existing) {
       return mirrorEntry(transaction.value.existing);
     }
     return validateConversationInteractionMirrorEntry({
+      ordinal: transaction.value.ordinal!,
       seq: transaction.value.recordSeq!,
       requestId,
       kind: "allow-once",
@@ -505,48 +848,74 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   async pendingInteractionMirrors(
     assignmentId: string,
   ): Promise<ConversationInteractionMirrorEntry[]> {
-    const state = await this.#read(assignmentId);
-    const candidates = [...state.finished.values()]
-      .filter((finished) => finished.recordSeq > state.mirroredUpTo)
-      .sort((left, right) => left.recordSeq - right.recordSeq)
-      .map(mirrorEntry);
-    const batch: ConversationInteractionMirrorEntry[] = [];
-    for (const candidate of candidates) {
-      const next = [...batch, candidate];
-      const bytes = Buffer.byteLength(
-        canonicalize({ t: "interaction-mirror", assignmentId, entries: next }),
-        "utf8",
-      );
-      if (bytes > MAX_INLINE_LOGICAL_RECORD_BYTES) {
-        if (batch.length === 0) {
-          throw new Error("A durable interaction outcome cannot fit in a mirror batch");
-        }
-        break;
-      }
-      batch.push(candidate);
+    return this.#select(assignmentId, (state) =>
+      selectPendingInteractionMirrors(state, assignmentId, this.#executorId),
+    );
+  }
+
+  async pendingInteractionMirrorBatch(
+    assignmentId: string,
+  ): Promise<ConversationInteractionMirrorBatch | undefined> {
+    const selected = await this.#select(assignmentId, (state) => ({
+      previousDigest: state.mirroredInteractionDigest,
+      entries: selectPendingInteractionMirrors(
+        state,
+        assignmentId,
+        this.#executorId,
+      ),
+    }));
+    if (selected.entries.length === 0) return undefined;
+    const batch = createSignedConversationInteractionMirrorBatch({
+      assignmentId,
+      executorId: this.#executorId,
+      previousDigest: selected.previousDigest,
+      entries: selected.entries,
+      signer: this.#signer,
+    });
+    if (interactionMirrorRecordBytes(assignmentId, batch) > MAX_INLINE_LOGICAL_RECORD_BYTES) {
+      throw new Error("Signed interaction mirror batch exceeded its capacity proof");
     }
     return batch;
   }
 
   async markInteractionsMirrored(
     assignmentId: string,
-    upTo: number,
+    receipt: InteractionMirrorReceipt,
   ): Promise<void> {
-    if (!Number.isSafeInteger(upTo) || upTo <= 0) {
+    if (!Number.isSafeInteger(receipt.mirroredUpTo) || receipt.mirroredUpTo <= 0) {
       throw new TypeError("Interaction mirror watermark must be a positive safe integer");
     }
+    if (!Number.isSafeInteger(receipt.ordinal) || receipt.ordinal <= 0) {
+      throw new TypeError("Interaction mirror ordinal must be a positive safe integer");
+    }
     await this.#transact<void>(assignmentId, (state) => {
-      if (upTo <= state.mirroredUpTo) return { kind: "return", value: undefined };
-      const lastFinished = Math.max(0, ...[...state.finished.values()].map((item) => item.recordSeq));
-      if (upTo > lastFinished) {
+      const finishedIndex = state.finishedIndexBySeq.get(receipt.mirroredUpTo);
+      const finished =
+        finishedIndex === undefined ? undefined : state.finishedOrder[finishedIndex];
+      if (
+        finishedIndex === undefined ||
+        !finished ||
+        finished.ordinal !== receipt.ordinal ||
+        finished.mirrorDigest !== receipt.mirrorDigest ||
+        receipt.ordinal !== finishedIndex + 1
+      ) {
         throw new Error("Interaction mirror watermark exceeds durable finished records");
+      }
+      if (receipt.ordinal <= state.mirroredInteractionOrdinal) {
+        return { kind: "return", value: undefined };
       }
       return {
         kind: "append",
         entries: [
           assignmentRecord(
             assignmentId,
-            nextEntry(state, { v: 1, t: "mirrored", upTo }),
+            nextEntry(state, {
+              v: 1,
+              t: "mirrored",
+              upTo: receipt.mirroredUpTo,
+              ordinal: receipt.ordinal,
+              mirrorDigest: receipt.mirrorDigest,
+            }),
           ),
         ],
         value: undefined,
@@ -565,11 +934,10 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         requestId: string;
         outcome: InteractionOutcome;
         recordSeq: number;
+        ordinal: number;
       }>;
     }>(assignmentId, (state) => {
-      const pending = [...state.requested.values()].filter(
-        (request) => !state.finished.has(request.requestId),
-      );
+      const pending = [...state.pendingRequests.values()].map((request) => request.body);
       const terminal = state.phase === "sealed" || state.phase === "acked";
       const toResolve = pending.filter(
         (request) => terminal || canonicalTime(request.expiresAt, "Interaction expiry") < nowMs,
@@ -582,12 +950,14 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         };
       }
       let nextSeq = state.lastSeq;
+      let ordinal = state.finishedOrder.length;
       const appended = toResolve.map((request) => {
         const outcome: InteractionOutcome = terminal
           ? { t: "cancelled", via: "run-end" }
           : { t: "expired" };
         nextSeq += 1;
-        return { requestId: request.requestId, outcome, recordSeq: nextSeq };
+        ordinal += 1;
+        return { requestId: request.requestId, outcome, recordSeq: nextSeq, ordinal };
       });
       return {
         kind: "append",
@@ -611,6 +981,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       resolved.push(
         ...transaction.value.appended.map((item) =>
           validateConversationInteractionMirrorEntry({
+            ordinal: item.ordinal,
             seq: item.recordSeq,
             requestId: item.requestId,
             kind: "allow-once",
@@ -623,19 +994,45 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     return { pending: transaction.value.pending, resolved };
   }
 
+  /** Close every still-pending interaction before a successful run is sealed. */
+  async closePendingInteractionsForRunEnd(
+    assignmentId: string,
+  ): Promise<number> {
+    const transaction = await this.#transact<number>(assignmentId, (state) => {
+      if (state.phase !== "started" || state.aborts.length > 0) {
+        throw new Error("Run-end interaction closure requires an active started assignment");
+      }
+      if (state.pendingRequests.size === 0) {
+        return { kind: "return", value: 0 };
+      }
+      let nextSeq = state.lastSeq;
+      const entries = [...state.pendingRequests.values()].map((request) => ({
+        recordSeq: ++nextSeq,
+        body: {
+          v: 1 as const,
+          t: "interaction-finished" as const,
+          requestId: request.body.requestId,
+          kind: "allow-once" as const,
+          outcome: { t: "cancelled" as const, via: "run-end" as const },
+        },
+      }));
+      return {
+        kind: "append",
+        entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+        value: entries.length,
+      };
+    });
+    return transaction.value;
+  }
+
   async stageMutation(
     assignmentId: string,
     input: StagedConversationMutationInput,
   ): Promise<{ readonly seq: number }> {
     const candidate = snapshot(input, "Staged mutation input");
     const transaction = await this.#transact<{ seq: number }>(assignmentId, (state) => {
-      if (state.phase !== "started") {
-        throw new Error("Assignment can stage mutations only while started");
-      }
       if (state.mutationRequestIds.has(candidate.requestId)) {
-        const existing = state.stagedMutations.find(
-          (record) => record.requestId === candidate.requestId,
-        );
+        const existing = state.stagedMutationByRequestId.get(candidate.requestId);
         if (
           !existing ||
           canonicalize({
@@ -649,13 +1046,16 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         }
         return { kind: "return", value: { seq: existing.seq } };
       }
+      if (state.phase !== "started" || state.aborts.length > 0) {
+        throw new Error("Assignment can stage mutations only while started");
+      }
       const staged = {
         v: 1 as const,
         t: "staged-mutation" as const,
         seq: state.stagedMutations.length + 1,
         ...candidate,
       } as Extract<AssignmentRecord, { t: "staged-mutation" }>;
-      createMutationBatch(assignmentId, [...state.stagedMutations, staged]);
+      validateStagedMutationRecord(staged);
       return {
         kind: "append",
         entries: [assignmentRecord(assignmentId, nextEntry(state, staged))],
@@ -669,7 +1069,15 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     assignmentId: string,
     input: ConversationSealInput,
   ): Promise<ReturnType<typeof validateConversationSealedBundle>> {
-    const state = await this.#read(assignmentId);
+    const state = await this.#select(assignmentId, (current) => ({
+      phase: current.phase,
+      received: current.received
+        ? snapshot(current.received, "Received seal projection")
+        : undefined,
+      stagedMutations: current.stagedMutations.map((record) =>
+        snapshot(record, "Staged seal mutation"),
+      ),
+    }));
     if (
       (state.phase !== "started" && state.phase !== "sealed" && state.phase !== "acked") ||
       !state.received
@@ -759,11 +1167,19 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   }
 
   async sealedBundle(assignmentId: string): Promise<SealedBundle> {
-    const state = await this.#read(assignmentId);
-    if (state.phase !== "sealed" && state.phase !== "acked") {
-      throw new Error("Assignment has no sealed bundle");
-    }
-    return this.#loadSealedBundle(state);
+    const sealed = await this.#select(assignmentId, (state) => {
+      if ((state.phase !== "sealed" && state.phase !== "acked") || !state.sealed) {
+        throw new Error("Assignment has no sealed bundle");
+      }
+      return snapshot(state.sealed, "Sealed record");
+    });
+    return this.#loadSealedBundle(assignmentId, sealed);
+  }
+
+  async cancelProof(assignmentId: string): Promise<CancelProofBody | undefined> {
+    return this.#select(assignmentId, (state) =>
+      state.halted ? snapshot(state.halted, "Cancel proof") : undefined,
+    );
   }
 
   async #recordSealedBundle(
@@ -799,8 +1215,21 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
           }
           return { kind: "return", value: undefined };
         }
-        if (state.phase !== "started") {
+        if (state.phase !== "started" || state.aborts.length > 0) {
           throw new Error("Assignment cannot seal a bundle before started");
+        }
+        if ([...state.sideEffects.values()].some((effect) => !effect.completed)) {
+          throw new Error("Assignment cannot seal a bundle with an open side effect");
+        }
+        if (state.pendingRequests.size > 0) {
+          throw new Error(
+            "Assignment cannot seal a bundle before every pending interaction is closed",
+          );
+        }
+        if (state.mirroredFinishedCount !== state.finishedOrder.length) {
+          throw new Error(
+            "Assignment cannot seal a bundle before every finished interaction is mirrored",
+          );
         }
         if (!state.received) {
           throw corruptLedger("Started assignment has no received record");
@@ -831,27 +1260,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
             throw new Error("Sealed bundle mutation batch is not the current staged prefix");
           }
         }
-        let nextSeq = state.lastSeq;
-        const entries: AssignmentEntry[] = [];
-        for (const request of state.requested.values()) {
-          if (state.finished.has(request.requestId)) continue;
-          nextSeq += 1;
-          entries.push({
-            recordSeq: nextSeq,
-            body: {
-              v: 1,
-              t: "interaction-finished",
-              requestId: request.requestId,
-              kind: "allow-once",
-              outcome: { t: "cancelled", via: "run-end" },
-            },
-          });
-        }
-        nextSeq += 1;
-        entries.push({ recordSeq: nextSeq, body: sealed });
         return {
           kind: "append",
-          entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+          entries: [assignmentRecord(assignmentId, nextEntry(state, sealed))],
           value: undefined,
         };
       },
@@ -865,8 +1276,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     }
     await this.#transact<void>(assignmentId, (state) => {
       if (state.phase === "acked") {
-        const ack = state.entries.find((entry) => entry.body.t === "acked")!;
-        if (ack.body.t !== "acked" || ack.body.commitRevision !== commitRevision) {
+        if (state.acknowledgedCommitRevision !== commitRevision) {
           throw new Error("Assignment already acknowledged a different commit revision");
         }
         return { kind: "return", value: undefined };
@@ -992,13 +1402,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       receivedLedgerDigest: received.ledgerDigest,
       error: { code: "idempotency-conflict" as const, retryable: false as const },
     };
-    const proof: DispatchConflictProof = snapshot(
-      {
-        ...payload,
-        signature: this.#signer.sign("DispatchConflictProof", 1, payload),
-      },
-      "Dispatch conflict proof",
-    );
+    const proof: DispatchConflictProof = signDispatchConflictProof(payload, this.#signer);
     return {
       v: 1,
       accepted: false,
@@ -1012,18 +1416,164 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     };
   }
 
-  async #read(assignmentId: string): Promise<LedgerProjection> {
-    const transaction = await this.#log.transactProjection<
-      LedgerProjection,
-      AssignmentEntry,
-      void
-    >(
-      emptyProjection(assignmentId),
-      this.#reduce,
-      () => ({ kind: "return", value: undefined }),
-      { stream: assignmentStream(assignmentId) },
+  async #requestAbort(
+    assignmentId: string,
+    cause: AbortCause,
+  ): Promise<CancelProofBody | undefined> {
+    const transaction = await this.#transact<CancelProofBody | undefined>(
+      assignmentId,
+      (state) => {
+        if (state.halted) return { kind: "return", value: state.halted };
+        if (state.phase === "sealed" || state.phase === "acked") {
+          return { kind: "return", value: undefined };
+        }
+        if (state.phase === "dispatch-rejected" || state.supersedeFence) {
+          return { kind: "return", value: undefined };
+        }
+
+        const receivedRef = state.received?.body.activation.ref;
+        if (receivedRef && receivedRef.execution !== "conversation") {
+          throw corruptLedger("Cancellation reached a non-conversation assignment");
+        }
+        const receivedAuthority = receivedRef
+          ? {
+              execution: "conversation" as const,
+              conversationId: receivedRef.conversationId,
+              ownerEpoch: receivedRef.ownerEpoch,
+            }
+          : undefined;
+        const authority =
+          cause.cause === "owner-fence" ? cause.authority : receivedAuthority;
+        if (!authority || authority.execution !== "conversation") {
+          throw new Error("Cancellation has no conversation authority binding");
+        }
+        if (
+          receivedAuthority &&
+          canonicalize(receivedAuthority) !== canonicalize(authority)
+        ) {
+          throw new Error("Cancellation authority does not bind the received assignment");
+        }
+
+        let recordSeq = state.lastSeq;
+        let ledgerDigest = state.chainDigest;
+        const entries: AssignmentEntry[] = [];
+        const append = (body: AssignmentRecord) => {
+          const entry = {
+            recordSeq: ++recordSeq,
+            body: snapshot(body, "Cancellation record"),
+          };
+          ledgerDigest = advanceAssignmentLedger(ledgerDigest, entry);
+          entries.push(entry);
+        };
+        const via = cause.cause === "owner-fence" ? "owner-fence" : "abort-ticket";
+        const refId =
+          cause.cause === "owner-fence" ? cause.fence.requestId : cause.ticketDigest;
+        if (!state.aborts.some((abort) => abort.via === via && abort.refId === refId)) {
+          append({ v: 1, t: "abort-requested", via, refId });
+        }
+        for (const request of state.pendingRequests.values()) {
+          append({
+            v: 1,
+            t: "interaction-finished",
+            requestId: request.body.requestId,
+            kind: "allow-once",
+            outcome: {
+              t: "cancelled",
+              via: cause.cause === "owner-fence" ? "cancel-fence" : "abort-ticket",
+            },
+          });
+        }
+        const openEffect = [...state.sideEffects.values()].some(
+          (effect) => !effect.completed,
+        );
+        const hasUnmirroredInteraction =
+          state.mirroredFinishedCount !== state.finishedOrder.length ||
+          state.pendingRequests.size > 0;
+        if (openEffect || hasUnmirroredInteraction) {
+          return {
+            kind: entries.length === 0 ? "return" : "append",
+            ...(entries.length === 0
+              ? { value: undefined }
+              : {
+                  entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+                  value: undefined,
+                }),
+          } as ProjectionTransactionDecision<AssignmentEntry, CancelProofBody | undefined>;
+        }
+        const usageFinal = snapshot(this.#usageFinal(assignmentId), "Final usage report");
+        assertDigest(usageFinal.reportDigest, "Final usage report digest");
+        assertNonNegativeSafeInteger(usageFinal.upToUsageSeq, "Final usage sequence");
+        const decision = state.started ? "halted" : "not-started";
+        const proof = signCancelProof(
+          {
+            v: 1,
+            assignmentId,
+            executorId: this.#executorId,
+            authority,
+            lastRecordSeq: recordSeq,
+            usageFinal,
+            ledgerDigest,
+            issuedAt: this.#clock(),
+            ...(cause.cause === "owner-fence"
+              ? { cause: "owner-fence" as const, fence: cause.fence }
+              : {
+                  cause: "abort-ticket" as const,
+                  ticketDigest: cause.ticketDigest,
+                  surfacePrincipal: cause.surfacePrincipal,
+                }),
+            ...(decision === "halted"
+              ? {
+                  decision: "halted" as const,
+                  lastEffectSeq: Math.max(0, ...state.sideEffects.keys()),
+                }
+              : { decision: "not-started" as const }),
+          },
+          this.#signer,
+        );
+        append({ v: 1, t: "halted", proof });
+        return {
+          kind: "append",
+          entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+          value: proof,
+        };
+      },
     );
-    return transaction.state;
+    return transaction.value;
+  }
+
+  async #select<Value>(
+    assignmentId: string,
+    select: (state: LedgerProjection) => Value,
+  ): Promise<Value> {
+    assertIdentifier(assignmentId, "Assignment id");
+    return this.#operations.run(async () => {
+      const cached = this.#takeCachedProjection(assignmentId);
+      let state: LedgerProjection;
+      try {
+        const transaction = await this.#log.transactProjection<
+          LedgerProjection,
+          AssignmentEntry,
+          void
+        >(
+          cached?.state ?? emptyProjection(assignmentId),
+          this.#reduce,
+          () => ({ kind: "return", value: undefined }),
+          {
+            stream: assignmentStream(assignmentId),
+            ...(cached ? { cursor: cached.cursor } : {}),
+          },
+        );
+        this.#cacheProjection(assignmentId, {
+          state: transaction.state,
+          cursor: transaction.cursor,
+        });
+        state = transaction.state;
+      } catch (error) {
+        this.#projections.delete(assignmentId);
+        throw error;
+      }
+      return select(state);
+    });
   }
 
   async #transact<Value>(
@@ -1034,15 +1584,54 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
     assertIdentifier(assignmentId, "Assignment id");
-    return this.#log.transactProjection<LedgerProjection, AssignmentEntry, Value>(
-      emptyProjection(assignmentId),
-      this.#reduce,
-      decide,
-      {
-        stream: assignmentStream(assignmentId),
-        candidateReferences,
-      },
-    );
+    return this.#operations.run(async () => {
+      const cached = this.#takeCachedProjection(assignmentId);
+      try {
+        const transaction = await this.#log.transactProjection<
+          LedgerProjection,
+          AssignmentEntry,
+          Value
+        >(
+          cached?.state ?? emptyProjection(assignmentId),
+          this.#reduce,
+          decide,
+          {
+            stream: assignmentStream(assignmentId),
+            ...(cached ? { cursor: cached.cursor } : {}),
+            candidateReferences,
+          },
+        );
+        this.#cacheProjection(assignmentId, {
+          state: transaction.state,
+          cursor: transaction.cursor,
+        });
+        return transaction;
+      } catch (error) {
+        this.#projections.delete(assignmentId);
+        throw error;
+      }
+    });
+  }
+
+  #takeCachedProjection(
+    assignmentId: string,
+  ): { readonly state: LedgerProjection; readonly cursor: ProjectionCursor } | undefined {
+    const cached = this.#projections.get(assignmentId);
+    if (!cached) return undefined;
+    this.#projections.delete(assignmentId);
+    return cached;
+  }
+
+  #cacheProjection(
+    assignmentId: string,
+    cached: { readonly state: LedgerProjection; readonly cursor: ProjectionCursor },
+  ): void {
+    this.#projections.set(assignmentId, cached);
+    while (this.#projections.size > this.#maxCachedAssignments) {
+      const oldest = this.#projections.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.#projections.delete(oldest);
+    }
   }
 
   readonly #reduce = async (
@@ -1053,7 +1642,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     if (record.stream !== assignmentStream(state.assignmentId)) {
       throw corruptLedger("Assignment projection received a different stream");
     }
-    const entry = snapshot(record.body, "Assignment entry");
+    const entry = validateAssignmentEntry(record.body, this.#verifier);
     if (entry.recordSeq !== state.lastSeq + 1) {
       throw corruptLedger("Assignment record sequence is not contiguous");
     }
@@ -1080,10 +1669,36 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         verifier: this.#verifier,
       });
     }
-    const digest = advanceAssignmentLedger(state.chainDigest, entry);
+    if (entry.body.t === "halted") {
+      const proof = validateCancelProof(entry.body.proof, this.#verifier);
+      if (proof.executorId !== this.#executorId) {
+        throw corruptLedger("Cancel proof names a different executor");
+      }
+      if (state.received) {
+        const ref = state.received.body.activation.ref;
+        if (ref.execution !== "conversation") {
+          throw corruptLedger("Cancel proof binds a non-conversation assignment");
+        }
+        if (
+          proof.authority.execution !== "conversation" ||
+          proof.authority.conversationId !== ref.conversationId ||
+          proof.authority.ownerEpoch !== ref.ownerEpoch
+        ) {
+          throw corruptLedger("Cancel proof authority does not bind the received assignment");
+        }
+      }
+    }
+    const digest = applyValidatedAssignmentEntry(state.validation, entry);
     applyEntry(state, entry, digest, commit.at);
     state.lastSeq = entry.recordSeq;
     state.chainDigest = digest;
+    if (
+      state.validation.lastSeq !== state.lastSeq ||
+      state.validation.chainDigest !== state.chainDigest ||
+      state.validation.phase !== state.phase
+    ) {
+      throw corruptLedger("Assignment validation and executor projection diverged");
+    }
     state.entries.push(entry);
     state.ledgerBySeq.push(digest);
     return state;
@@ -1102,32 +1717,32 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   }
 
   async #loadSealedBundle(
-    state: LedgerProjection,
+    assignmentId: string,
+    sealed: Extract<AssignmentRecord, { t: "bundle_sealed" }>,
   ): Promise<ReturnType<typeof validateConversationSealedBundle>> {
-    if (!state.sealed) throw corruptLedger("Sealed phase has no bundle reference");
-    const bytes = await this.#artifacts.get(state.sealed.bundle.ref);
+    const bytes = await this.#artifacts.get(sealed.bundle.ref);
     const bundle = validateConversationSealedBundle(
       JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
     );
     const artifact = sealedBundleArtifact(bundle);
-    if (canonicalize(artifact.ref) !== canonicalize(state.sealed.bundle.ref)) {
+    if (canonicalize(artifact.ref) !== canonicalize(sealed.bundle.ref)) {
       throw corruptLedger("Sealed bundle artifact reference is inconsistent");
     }
-    if (state.sealed.mutationBatch) {
+    if (sealed.mutationBatch) {
       if (!bundle.body.mutationBatch) {
         throw corruptLedger("Ledger mutation batch reference is absent from the bundle");
       }
       if (
-        canonicalize(state.sealed.mutationBatch.ref) !==
+        canonicalize(sealed.mutationBatch.ref) !==
         canonicalize(bundle.body.mutationBatch.ref)
       ) {
         throw corruptLedger("Ledger mutation batch reference conflicts with the bundle");
       }
-      const batchBytes = await this.#artifacts.get(state.sealed.mutationBatch.ref);
+      const batchBytes = await this.#artifacts.get(sealed.mutationBatch.ref);
       const batch = validateMutationBatch(
         JSON.parse(Buffer.from(batchBytes).toString("utf8")) as import("@zhixing/core/contracts").MutationBatch,
       );
-      if (batch.assignmentId !== state.assignmentId) {
+      if (batch.assignmentId !== assignmentId) {
         throw corruptLedger("Mutation batch belongs to a different assignment");
       }
     } else if (bundle.body.mutationBatch) {
@@ -1140,16 +1755,26 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
 function emptyProjection(assignmentId: string): LedgerProjection {
   return {
     assignmentId,
+    validation: createAssignmentLedgerValidationState(assignmentId),
     lastSeq: 0,
     chainDigest: assignmentLedgerSeed(assignmentId),
     phase: "unknown",
     entries: [],
     ledgerBySeq: [],
     requested: new Map(),
+    pendingRequests: new Map(),
     finished: new Map(),
+    finishedOrder: [],
+    finishedIndexBySeq: new Map(),
+    aborts: [],
+    sideEffects: new Map(),
     stagedMutations: [],
     mutationRequestIds: new Set(),
+    stagedMutationByRequestId: new Map(),
     mirroredUpTo: 0,
+    mirroredFinishedCount: 0,
+    mirroredInteractionOrdinal: 0,
+    mirroredInteractionDigest: interactionMirrorSeed(assignmentId),
   };
 }
 
@@ -1162,79 +1787,88 @@ function applyEntry(
   const body = entry.body;
   switch (body.t) {
     case "received":
-      if (state.phase !== "unknown") throw corruptLedger("received is not the first record");
       state.phase = "received";
       state.received = { body, recordSeq: entry.recordSeq, ledgerDigest };
       return;
     case "dispatch-rejected":
-      if (state.phase !== "unknown") {
-        throw corruptLedger("dispatch-rejected is not the first record");
-      }
       state.phase = "dispatch-rejected";
       state.rejection = { body, recordSeq: entry.recordSeq, ledgerDigest };
       return;
+    case "supersede-fenced":
+      state.phase = "supersede-fenced";
+      state.supersedeFence = { body, recordSeq: entry.recordSeq, ledgerDigest };
+      return;
     case "started":
-      if (state.phase !== "received") throw corruptLedger("started has no received prefix");
       state.phase = "started";
+      state.started = { recordSeq: entry.recordSeq, ledgerDigest };
       return;
     case "interaction-requested":
-      if (state.phase !== "started") {
-        throw corruptLedger("interaction request is outside a started assignment");
-      }
-      if (state.requested.has(body.requestId)) {
-        throw corruptLedger("interaction requestId is duplicated");
-      }
-      validateInteractionRequest(body);
-      state.requested.set(body.requestId, body);
+      const requested = { body, recordSeq: entry.recordSeq };
+      state.requested.set(body.requestId, requested);
+      state.pendingRequests.set(body.requestId, requested);
       return;
     case "interaction-finished":
-      if (!state.requested.has(body.requestId) || state.finished.has(body.requestId)) {
-        throw corruptLedger("interaction result is missing or duplicated");
+      const checkpoint = state.validation.unmirroredFinished.get(entry.recordSeq);
+      if (!checkpoint) {
+        throw corruptLedger("Validated interaction projection lost its mirror checkpoint");
       }
-      validateConversationInteractionOutcome(body.outcome);
-      assertFinishedInteractionFits(state.assignmentId, body);
-      state.finished.set(body.requestId, { body, recordSeq: entry.recordSeq, at });
+      const finished = {
+        body,
+        recordSeq: entry.recordSeq,
+        at,
+        ordinal: checkpoint.ordinal,
+        mirrorDigest: checkpoint.mirrorDigest,
+      };
+      if (!state.pendingRequests.delete(body.requestId)) {
+        throw corruptLedger("Validated interaction projection lost its pending request");
+      }
+      state.finished.set(body.requestId, finished);
+      state.finishedIndexBySeq.set(entry.recordSeq, state.finishedOrder.length);
+      state.finishedOrder.push(finished);
       return;
     case "staged-mutation":
-      if (state.phase !== "started") {
-        throw corruptLedger("staged mutation is outside a started assignment");
-      }
-      if (
-        body.seq !== state.stagedMutations.length + 1 ||
-        state.mutationRequestIds.has(body.requestId)
-      ) {
-        throw corruptLedger("staged mutation identity is not contiguous and unique");
-      }
-      createMutationBatch(state.assignmentId, [...state.stagedMutations, body]);
       state.stagedMutations.push(body);
       state.mutationRequestIds.add(body.requestId);
+      state.stagedMutationByRequestId.set(body.requestId, body);
       return;
+    case "side-effect-started":
+      state.sideEffects.set(body.effectSeq, { started: body });
+      return;
+    case "side-effect-completed": {
+      const effect = state.sideEffects.get(body.effectSeq);
+      if (!effect) throw corruptLedger("Validated side effect projection is missing its start");
+      effect.completed = body;
+      return;
+    }
+    case "abort-requested":
+      state.aborts.push(body);
+      return;
+    case "halted": {
+      const proof = body.proof;
+      state.phase = "halted";
+      state.halted = proof;
+      return;
+    }
     case "bundle_sealed":
-      if (state.phase !== "started") {
-        throw corruptLedger("bundle_sealed has no started prefix");
-      }
       state.phase = "sealed";
       state.sealed = body;
       return;
     case "acked":
-      if (state.phase !== "sealed") throw corruptLedger("acked has no sealed prefix");
       state.phase = "acked";
+      state.acknowledgedCommitRevision = body.commitRevision;
       return;
     case "mirrored":
-      if (body.upTo <= state.mirroredUpTo) {
-        throw corruptLedger("mirrored watermark must increase");
-      }
-      if (
-        ![...state.finished.values()].some(
-          (finished) => finished.recordSeq === body.upTo,
-        )
-      ) {
-        throw corruptLedger("mirrored watermark has no finished interaction");
+      const finishedIndex = state.finishedIndexBySeq.get(body.upTo);
+      if (finishedIndex === undefined) {
+        throw corruptLedger("Validated mirror projection has no finished interaction");
       }
       state.mirroredUpTo = body.upTo;
+      state.mirroredFinishedCount = finishedIndex + 1;
+      state.mirroredInteractionOrdinal = body.ordinal;
+      state.mirroredInteractionDigest = body.mirrorDigest;
       return;
     default:
-      throw corruptLedger(`Unsupported assignment record in this protocol stage: ${body.t}`);
+      throw corruptLedger("Unsupported assignment record in this protocol stage");
   }
 }
 
@@ -1278,15 +1912,19 @@ export class InProcessAssignmentSubmission {
   ): Promise<number> {
     let mirrored = 0;
     while (true) {
-      const pending = await this.#ledger.pendingInteractionMirrors(assignmentId);
-      if (pending.length === 0) return mirrored;
-      const result = await this.#owner.mirrorInteractions(assignmentId, pending, ctx);
-      const sentUpTo = pending.at(-1)!.seq;
-      if (result.mirroredUpTo !== sentUpTo) {
-        throw new Error("Owner returned a mirror watermark outside the submitted batch");
+      const batch = await this.#ledger.pendingInteractionMirrorBatch(assignmentId);
+      if (!batch) return mirrored;
+      const result = await this.#owner.mirrorInteractions(assignmentId, batch, ctx);
+      const last = batch.entries.at(-1)!;
+      if (
+        result.mirroredUpTo !== last.seq ||
+        result.ordinal !== last.ordinal ||
+        result.mirrorDigest !== batch.mirrorDigest
+      ) {
+        throw new Error("Owner returned a mirror receipt outside the submitted batch");
       }
-      await this.#ledger.markInteractionsMirrored(assignmentId, result.mirroredUpTo);
-      mirrored += pending.length;
+      await this.#ledger.markInteractionsMirrored(assignmentId, result);
+      mirrored += batch.entries.length;
     }
   }
 
@@ -1304,6 +1942,37 @@ export class InProcessAssignmentSubmission {
     }
     return result;
   }
+
+  async prepareForRunEnd(
+    assignmentId: string,
+    ctx: AuthorityCallContext,
+  ): Promise<{ readonly closed: number; readonly mirrored: number }> {
+    const closed = await this.#ledger.closePendingInteractionsForRunEnd(assignmentId);
+    const mirrored = await this.flushInteractionMirrors(assignmentId, ctx);
+    return { closed, mirrored };
+  }
+
+  async submitCancellation(
+    assignmentId: string,
+    ctx: AuthorityCallContext,
+  ): Promise<boolean> {
+    await this.flushInteractionMirrors(assignmentId, ctx);
+    const proof = await this.#ledger.cancelProof(assignmentId);
+    if (!proof) return false;
+    await this.#owner.submitCancelProof(assignmentId, proof, ctx);
+    return true;
+  }
+
+  async abortFromSurfaceAndSubmit(
+    assignmentId: string,
+    input: SurfaceAbortInput,
+    ctx: AuthorityCallContext,
+  ): Promise<boolean> {
+    await this.#ledger.abortFromSurface(assignmentId, input);
+    if (await this.submitCancellation(assignmentId, ctx)) return true;
+    await this.#ledger.abortFromSurface(assignmentId, input);
+    return this.submitCancellation(assignmentId, ctx);
+  }
 }
 
 function ledgerSnapshot(state: LedgerProjection): LedgerSnapshot {
@@ -1320,6 +1989,7 @@ function ledgerSnapshot(state: LedgerProjection): LedgerSnapshot {
           ),
         }
       : {}),
+    ...(state.halted ? { cancelProof: snapshot(state.halted, "Cancel proof") } : {}),
   };
 }
 
@@ -1402,12 +2072,79 @@ function validateInteractionRequest(
 
 function mirrorEntry(finished: FinishedInteraction): ConversationInteractionMirrorEntry {
   return validateConversationInteractionMirrorEntry({
+    ordinal: finished.ordinal,
     seq: finished.recordSeq,
     requestId: finished.body.requestId,
     kind: "allow-once",
     outcome: snapshot(finished.body.outcome, "Interaction outcome"),
     at: finished.at,
   });
+}
+
+function selectPendingInteractionMirrors(
+  state: LedgerProjection,
+  assignmentId: string,
+  executorId: string,
+): ConversationInteractionMirrorEntry[] {
+  const entries: ConversationInteractionMirrorEntry[] = [];
+  for (
+    let index = state.mirroredFinishedCount;
+    index < state.finishedOrder.length;
+    index += 1
+  ) {
+    if (entries.length === 256) break;
+    const finished = state.finishedOrder[index]!;
+    const candidate = mirrorEntry(finished);
+    const nextEntries = [...entries, candidate];
+    const nextBytes = interactionMirrorRecordCapacityBytes({
+      assignmentId,
+      executorId,
+      previousDigest: state.mirroredInteractionDigest,
+      entries: nextEntries,
+      mirrorDigest: finished.mirrorDigest,
+    });
+    if (nextBytes > MAX_INLINE_LOGICAL_RECORD_BYTES) {
+      if (entries.length === 0) {
+        throw new Error("A durable interaction outcome cannot fit in a mirror batch");
+      }
+      break;
+    }
+    entries.push(candidate);
+  }
+  return entries;
+}
+
+function interactionMirrorRecordBytes(
+  assignmentId: string,
+  batch: ConversationInteractionMirrorBatch,
+): number {
+  return Buffer.byteLength(
+    canonicalize({ t: "interaction-mirror", assignmentId, batch }),
+    "utf8",
+  );
+}
+
+function interactionMirrorRecordCapacityBytes(input: {
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly previousDigest: string;
+  readonly entries: readonly ConversationInteractionMirrorEntry[];
+  readonly mirrorDigest: string;
+}): number {
+  const maxWidthIdentifier = "\0".repeat(480);
+  return interactionMirrorRecordBytes(input.assignmentId, {
+    v: 1,
+    assignmentId: input.assignmentId,
+    executorId: input.executorId,
+    previousDigest: input.previousDigest,
+    entries: [...input.entries],
+    mirrorDigest: input.mirrorDigest,
+    signature: {
+      alg: maxWidthIdentifier,
+      keyId: maxWidthIdentifier,
+      sig: maxWidthIdentifier,
+    },
+  } as ConversationInteractionMirrorBatch);
 }
 
 function assertInteractionRecordSize(value: unknown, label: string): void {
@@ -1425,26 +2162,28 @@ function assertInteractionRecordSize(value: unknown, label: string): void {
 
 function assertFinishedInteractionFits(
   assignmentId: string,
+  executorId: string,
   body: Extract<AssignmentRecord, { t: "interaction-finished" }>,
 ): void {
   assertInteractionRecordSize(body, "Interaction result");
-  const singleEntryMirrorRecord = {
-    t: "interaction-mirror",
+  const digest = interactionMirrorSeed(assignmentId);
+  const bytes = interactionMirrorRecordCapacityBytes({
     assignmentId,
+    executorId,
+    previousDigest: digest,
     entries: [
       {
+        ordinal: Number.MAX_SAFE_INTEGER,
         seq: Number.MAX_SAFE_INTEGER,
         requestId: body.requestId,
         kind: "allow-once",
-        outcome: body.outcome,
+        outcome: body.outcome as ConversationInteractionOutcome,
         at: MAX_WIDTH_CANONICAL_TIME,
       },
     ],
-  };
-  if (
-    Buffer.byteLength(canonicalize(singleEntryMirrorRecord), "utf8") >
-    MAX_INLINE_LOGICAL_RECORD_BYTES
-  ) {
+    mirrorDigest: digest,
+  });
+  if (bytes > MAX_INLINE_LOGICAL_RECORD_BYTES) {
     throw new TypeError("Interaction result cannot fit in a durable mirror record");
   }
 }
@@ -1523,6 +2262,44 @@ function assertIdentifier(value: unknown, label: string): asserts value is strin
   if (typeof value !== "string" || value.length === 0 || value.length > 480) {
     throw new TypeError(`${label} must be a non-empty bounded string`);
   }
+}
+
+function assertBoundedText(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.length > 4_096) {
+    throw new TypeError(`${label} must be a bounded string`);
+  }
+}
+
+function assertDigest(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError(`${label} must be a canonical SHA-256 digest`);
+  }
+}
+
+function assertPositiveSafeInteger(value: unknown, label: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+}
+
+function assertNonNegativeSafeInteger(
+  value: unknown,
+  label: string,
+): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new TypeError(`${label} must be a non-negative safe integer`);
+  }
+}
+
+function assertFence(
+  value: { readonly fenceSeq: number; readonly requestId: string },
+  label: string,
+): void {
+  if (Object.keys(value).sort().join("\0") !== "fenceSeq\0requestId") {
+    throw new TypeError(`${label} fields are incomplete or unknown`);
+  }
+  assertPositiveSafeInteger(value.fenceSeq, `${label} sequence`);
+  assertIdentifier(value.requestId, `${label} requestId`);
 }
 
 function corruptLedger(message: string): AuthorityStorageError {

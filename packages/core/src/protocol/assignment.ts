@@ -4,12 +4,30 @@ import type {
   AssignmentActivationPayload,
   AssignmentActivationProof,
   AssignmentEntry,
+  AssignmentRecord,
+  AssignmentTerminationProof,
+  CancelProofBody,
+  ChannelResponderRef,
+  DispatchConflictProof,
   DispatchEnvelope,
+  DispatchRejectionProof,
+  DispatchResult,
   Digest,
+  ExecutionKind,
+  InteractionMirrorBatch,
   InteractionMirrorEntry,
+  IngressContext,
+  LedgerEvidencePage,
+  LedgerSnapshot,
   Signature,
+  SupersedeProof,
 } from "../contracts/index.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
+import { validateStagedMutationRecord } from "./commit.js";
+import {
+  validateEnvironmentRequirement,
+  validateMessages,
+} from "./values.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 
@@ -17,6 +35,34 @@ type ConversationEnvelope = Extract<
   DispatchEnvelope,
   { execution: "conversation" }
 >;
+
+export interface ConversationActivationBinding {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly ownerEpoch: number;
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly dispatchRef: ArtifactRef;
+  readonly manifestDigest: Digest;
+  readonly permissionLeaseDigest: Digest;
+  readonly capIds: readonly string[];
+  readonly reservation: {
+    readonly reservationId: string;
+    readonly attempt: number;
+  };
+}
+
+type UnsignedSupersedeProof = SupersedeProof extends infer Proof
+  ? Proof extends unknown
+    ? Omit<Proof, "signature">
+    : never
+  : never;
+
+type UnsignedCancelProof = CancelProofBody extends infer Proof
+  ? Proof extends unknown
+    ? Omit<Proof, "signature">
+    : never
+  : never;
 
 export type UnsignedConversationEnvelope = Omit<
   ConversationEnvelope,
@@ -37,6 +83,11 @@ export type ConversationInteractionMirrorEntry = Omit<
   "outcome"
 > & { readonly outcome: ConversationInteractionOutcome };
 
+export type ConversationInteractionMirrorBatch = Omit<
+  InteractionMirrorBatch,
+  "entries"
+> & { readonly entries: ConversationInteractionMirrorEntry[] };
+
 export interface ProtocolSigner {
   sign(schemaId: string, version: number, payload: unknown): Signature;
 }
@@ -53,6 +104,56 @@ export interface ProtocolSignatureVerifier {
 export interface DispatchEnvelopeArtifact {
   readonly bytes: Uint8Array;
   readonly ref: ArtifactRef;
+}
+
+export interface AssignmentLedgerValidationState {
+  readonly assignmentId: string;
+  lastSeq: number;
+  chainDigest: Digest;
+  phase: LedgerSnapshot["phase"];
+  received: boolean;
+  started: boolean;
+  readonly aborts: Set<string>;
+  readonly requestedInteractions: Set<string>;
+  readonly pendingInteractions: Set<string>;
+  readonly unmirroredFinished: Map<
+    number,
+    { readonly ordinal: number; readonly mirrorDigest: Digest }
+  >;
+  finishedInteractionCount: number;
+  interactionMirrorDigest: Digest;
+  mirroredInteractionOrdinal: number;
+  stagedMutationCount: number;
+  readonly mutationRequestIds: Set<string>;
+  sideEffectCount: number;
+  readonly openSideEffects: Set<number>;
+  mirroredUpTo: number;
+}
+
+export function createAssignmentLedgerValidationState(
+  assignmentId: string,
+): AssignmentLedgerValidationState {
+  assertIdentifier(assignmentId, "Assignment id");
+  return {
+    assignmentId,
+    lastSeq: 0,
+    chainDigest: assignmentLedgerSeed(assignmentId),
+    phase: "unknown",
+    received: false,
+    started: false,
+    aborts: new Set(),
+    requestedInteractions: new Set(),
+    pendingInteractions: new Set(),
+    unmirroredFinished: new Map(),
+    finishedInteractionCount: 0,
+    interactionMirrorDigest: interactionMirrorSeed(assignmentId),
+    mirroredInteractionOrdinal: 0,
+    stagedMutationCount: 0,
+    mutationRequestIds: new Set(),
+    sideEffectCount: 0,
+    openSideEffects: new Set(),
+    mirroredUpTo: 0,
+  };
 }
 
 export function createSignedConversationEnvelope(
@@ -117,28 +218,57 @@ export function buildConversationActivationPayload(input: {
   readonly issuedAt: string;
 }): AssignmentActivationPayload<"conversation"> {
   const { envelope } = input;
+  const payload = buildConversationActivationPayloadFromBinding({
+    binding: {
+      runId: envelope.work.runId,
+      conversationId: envelope.work.conversationId,
+      ownerEpoch: envelope.work.ownerEpoch,
+      assignmentId: envelope.assignmentId,
+      executorId: envelope.executorId,
+      dispatchRef: input.dispatchRef,
+      manifestDigest: envelope.manifest.digest,
+      permissionLeaseDigest: permissionSnapshotLeaseDigest(envelope),
+      capIds: envelope.capabilities.map((capability) => capability.capId),
+      reservation: {
+        reservationId: envelope.resourceLease.reservationId,
+        attempt: envelope.resourceLease.workload.attempt,
+      },
+    },
+    commit: input.commit,
+    issuedAt: input.issuedAt,
+  });
+  assertActivationPayload(payload, envelope, input.dispatchRef);
+  return payload;
+}
+
+export function buildConversationActivationPayloadFromBinding(input: {
+  readonly binding: ConversationActivationBinding;
+  readonly commit: { readonly lsn: number; readonly envelopeDigest: Digest };
+  readonly issuedAt: string;
+}): AssignmentActivationPayload<"conversation"> {
+  const { binding } = input;
   const payload: AssignmentActivationPayload<"conversation"> = {
     v: 1,
     ref: {
       execution: "conversation",
-      runId: envelope.work.runId,
-      conversationId: envelope.work.conversationId,
-      ownerEpoch: envelope.work.ownerEpoch,
+      runId: binding.runId,
+      conversationId: binding.conversationId,
+      ownerEpoch: binding.ownerEpoch,
     },
-    assignmentId: envelope.assignmentId,
-    executorId: envelope.executorId,
-    dispatchRef: snapshot(input.dispatchRef, "Dispatch reference"),
-    manifestDigest: envelope.manifest.digest,
-    permissionLeaseDigest: permissionSnapshotLeaseDigest(envelope),
-    capIds: envelope.capabilities.map((capability) => capability.capId),
+    assignmentId: binding.assignmentId,
+    executorId: binding.executorId,
+    dispatchRef: snapshot(binding.dispatchRef, "Dispatch reference"),
+    manifestDigest: binding.manifestDigest,
+    permissionLeaseDigest: binding.permissionLeaseDigest,
+    capIds: [...binding.capIds],
     reservation: {
-      reservationId: envelope.resourceLease.reservationId,
-      attempt: envelope.resourceLease.workload.attempt,
+      reservationId: binding.reservation.reservationId,
+      attempt: binding.reservation.attempt,
     },
     commit: snapshot(input.commit, "Assignment commit"),
     issuedAt: input.issuedAt,
   };
-  assertActivationPayload(payload, envelope, input.dispatchRef);
+  assertActivationPayloadShape(payload);
   return snapshot(payload, "Assignment activation payload");
 }
 
@@ -199,8 +329,8 @@ export function validateConversationActivation(input: {
   return snapshot(payload, "Assignment activation payload");
 }
 
-export function assignmentActivationDigest(
-  payload: AssignmentActivationPayload,
+export function assignmentActivationDigest<E extends ExecutionKind>(
+  payload: AssignmentActivationPayload<E>,
 ): Digest {
   return protocolDigest("AssignmentActivationPayload", 1, payload);
 }
@@ -208,6 +338,149 @@ export function assignmentActivationDigest(
 export function assignmentLedgerSeed(assignmentId: string): Digest {
   assertIdentifier(assignmentId, "Assignment id");
   return protocolDigest("AssignmentLedgerSeed", 1, { assignmentId });
+}
+
+export function interactionMirrorSeed(assignmentId: string): Digest {
+  assertIdentifier(assignmentId, "Interaction mirror assignment id");
+  return protocolDigest("InteractionMirrorSeed", 1, { assignmentId });
+}
+
+export function advanceInteractionMirrorDigest(
+  previous: Digest,
+  entry: Omit<ConversationInteractionMirrorEntry, "at">,
+): Digest {
+  assertDigest(previous, "Previous interaction mirror digest");
+  assertPositiveInteger(entry.ordinal, "Interaction mirror ordinal");
+  assertPositiveInteger(entry.seq, "Interaction mirror record sequence");
+  assertIdentifier(entry.requestId, "Interaction mirror requestId");
+  if (entry.kind !== "allow-once") {
+    throw new TypeError("Conversation interaction kind must be allow-once");
+  }
+  validateConversationInteractionOutcome(entry.outcome);
+  return protocolDigest("InteractionMirrorStep", 1, {
+    previous,
+    entry: snapshot(entry, "Interaction mirror chain entry"),
+  });
+}
+
+export function createSignedConversationInteractionMirrorBatch(input: {
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly previousDigest: Digest;
+  readonly entries: readonly ConversationInteractionMirrorEntry[];
+  readonly signer: ProtocolSigner;
+}): ConversationInteractionMirrorBatch {
+  assertIdentifier(input.assignmentId, "Interaction mirror assignment id");
+  assertIdentifier(input.executorId, "Interaction mirror executor id");
+  assertDigest(input.previousDigest, "Previous interaction mirror digest");
+  if (input.entries.length === 0 || input.entries.length > 256) {
+    throw new TypeError("Interaction mirror batch must contain between 1 and 256 entries");
+  }
+  const entries = input.entries.map(validateConversationInteractionMirrorEntry);
+  let mirrorDigest = input.previousDigest;
+  let previousOrdinal = entries[0]!.ordinal - 1;
+  let previousSeq = 0;
+  for (const entry of entries) {
+    if (entry.ordinal !== previousOrdinal + 1 || entry.seq <= previousSeq) {
+      throw new TypeError("Interaction mirror batch is not contiguous and increasing");
+    }
+    mirrorDigest = advanceInteractionMirrorDigest(
+      mirrorDigest,
+      withoutField(entry, "at"),
+    );
+    previousOrdinal = entry.ordinal;
+    previousSeq = entry.seq;
+  }
+  const payload = snapshot(
+    {
+      v: 1 as const,
+      assignmentId: input.assignmentId,
+      executorId: input.executorId,
+      previousDigest: input.previousDigest,
+      entries,
+      mirrorDigest,
+    },
+    "Interaction mirror batch payload",
+  );
+  const signature = input.signer.sign("InteractionMirrorBatch", 1, payload);
+  assertSignature(signature, "Interaction mirror batch signature");
+  return snapshot(
+    {
+      ...payload,
+      signature,
+    },
+    "Signed interaction mirror batch",
+  ) as ConversationInteractionMirrorBatch;
+}
+
+export function validateConversationInteractionMirrorBatch(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): ConversationInteractionMirrorBatch {
+  assertObject(input, "Interaction mirror batch");
+  if (Array.isArray(input.entries) && input.entries.length > 256) {
+    throw new TypeError("Interaction mirror batch exceeds the 256-entry protocol limit");
+  }
+  const batch = snapshot(input, "Interaction mirror batch") as Record<string, unknown>;
+  assertExactKeys(
+    batch,
+    [
+      "assignmentId",
+      "entries",
+      "executorId",
+      "mirrorDigest",
+      "previousDigest",
+      "signature",
+      "v",
+    ],
+    "Interaction mirror batch",
+  );
+  assertVersion(batch.v as number, "Interaction mirror batch");
+  assertIdentifier(batch.assignmentId, "Interaction mirror assignment id");
+  assertIdentifier(batch.executorId, "Interaction mirror executor id");
+  assertDigest(batch.previousDigest as string, "Previous interaction mirror digest");
+  assertDigest(batch.mirrorDigest as string, "Interaction mirror digest");
+  assertSignature(batch.signature as Signature, "Interaction mirror batch signature");
+  if (!Array.isArray(batch.entries) || batch.entries.length === 0) {
+    throw new TypeError("Interaction mirror batch must contain between 1 and 256 entries");
+  }
+  const entries = batch.entries.map(validateConversationInteractionMirrorEntry);
+  let mirrorDigest = batch.previousDigest as Digest;
+  let previousOrdinal = entries[0]!.ordinal - 1;
+  let previousSeq = 0;
+  for (const entry of entries) {
+    if (entry.ordinal !== previousOrdinal + 1 || entry.seq <= previousSeq) {
+      throw new TypeError("Interaction mirror batch is not contiguous and increasing");
+    }
+    mirrorDigest = advanceInteractionMirrorDigest(
+      mirrorDigest,
+      withoutField(entry, "at"),
+    );
+    previousOrdinal = entry.ordinal;
+    previousSeq = entry.seq;
+  }
+  if (mirrorDigest !== batch.mirrorDigest) {
+    throw new TypeError("Interaction mirror batch digest is invalid");
+  }
+  const normalized = { ...batch, entries } as unknown as ConversationInteractionMirrorBatch;
+  const payload = withoutField(normalized, "signature");
+  verifier.verify(
+    "InteractionMirrorBatch",
+    1,
+    payload,
+    batch.signature as Signature,
+  );
+  return { ...payload, signature: batch.signature } as ConversationInteractionMirrorBatch;
+}
+
+export function interactionMirrorBatchDigest(
+  batch: ConversationInteractionMirrorBatch,
+): Digest {
+  return protocolDigest(
+    "InteractionMirrorBatch",
+    1,
+    withoutField(batch, "signature"),
+  );
 }
 
 export function advanceAssignmentLedger(
@@ -222,6 +495,536 @@ export function advanceAssignmentLedger(
     previous,
     entry: snapshot(entry, "Assignment entry"),
   });
+}
+
+export function validateAssignmentEntry(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): AssignmentEntry {
+  const entry = snapshot(input, "Assignment entry") as AssignmentEntry;
+  assertExactKeys(entry, ["body", "recordSeq"], "Assignment entry");
+  assertPositiveInteger(entry.recordSeq, "Assignment record sequence");
+  assertAssignmentRecord(entry.body, verifier);
+  return entry;
+}
+
+/**
+ * Advances the canonical assignment-ledger state machine after the caller has
+ * completed entry validation and any local artifact/authority binding checks.
+ * Both executor replay and owner evidence recovery use this exact transition
+ * function, so a signed evidence prefix cannot describe a state the executor
+ * reducer itself would reject.
+ */
+export function applyValidatedAssignmentEntry(
+  state: AssignmentLedgerValidationState,
+  entry: AssignmentEntry,
+): Digest {
+  if (entry.recordSeq !== state.lastSeq + 1) {
+    throw new TypeError("Assignment record sequence is not contiguous");
+  }
+  const body = entry.body;
+  switch (body.t) {
+    case "received":
+      if (state.phase !== "unknown" || state.aborts.size > 0) {
+        throw new TypeError("received is not the first record");
+      }
+      state.phase = "received";
+      state.received = true;
+      break;
+    case "dispatch-rejected":
+      if (state.phase !== "unknown" || state.aborts.size > 0) {
+        throw new TypeError("dispatch-rejected is not the first record");
+      }
+      state.phase = "dispatch-rejected";
+      break;
+    case "supersede-fenced":
+      if (
+        (state.phase !== "unknown" && state.phase !== "received") ||
+        state.aborts.size > 0
+      ) {
+        throw new TypeError("supersede-fenced is not before assignment start");
+      }
+      state.phase = "supersede-fenced";
+      break;
+    case "started":
+      if (state.phase !== "received" || state.aborts.size > 0) {
+        throw new TypeError("started has no unfenced received prefix");
+      }
+      state.phase = "started";
+      state.started = true;
+      break;
+    case "interaction-requested":
+      if (state.phase !== "started" || state.aborts.size > 0) {
+        throw new TypeError("interaction request is outside a started assignment");
+      }
+      if (state.requestedInteractions.has(body.requestId)) {
+        throw new TypeError("interaction requestId is duplicated");
+      }
+      state.requestedInteractions.add(body.requestId);
+      state.pendingInteractions.add(body.requestId);
+      break;
+    case "interaction-finished":
+      if (!state.pendingInteractions.delete(body.requestId)) {
+        throw new TypeError("interaction result is missing or duplicated");
+      }
+      state.finishedInteractionCount += 1;
+      state.interactionMirrorDigest = advanceInteractionMirrorDigest(
+        state.interactionMirrorDigest,
+        {
+          ordinal: state.finishedInteractionCount,
+          seq: entry.recordSeq,
+          requestId: body.requestId,
+          kind: body.kind,
+          outcome: body.outcome as ConversationInteractionOutcome,
+        },
+      );
+      state.unmirroredFinished.set(entry.recordSeq, {
+        ordinal: state.finishedInteractionCount,
+        mirrorDigest: state.interactionMirrorDigest,
+      });
+      break;
+    case "staged-mutation":
+      if (state.phase !== "started" || state.aborts.size > 0) {
+        throw new TypeError("staged mutation is outside a started assignment");
+      }
+      if (
+        body.seq !== state.stagedMutationCount + 1 ||
+        state.mutationRequestIds.has(body.requestId)
+      ) {
+        throw new TypeError("staged mutation identity is not contiguous and unique");
+      }
+      state.stagedMutationCount = body.seq;
+      state.mutationRequestIds.add(body.requestId);
+      break;
+    case "side-effect-started":
+      if (
+        state.phase !== "started" ||
+        state.aborts.size > 0 ||
+        body.effectSeq !== state.sideEffectCount + 1
+      ) {
+        throw new TypeError("side-effect-started is outside the active effect sequence");
+      }
+      state.sideEffectCount = body.effectSeq;
+      state.openSideEffects.add(body.effectSeq);
+      break;
+    case "side-effect-completed":
+      if (!state.openSideEffects.delete(body.effectSeq)) {
+        throw new TypeError("side-effect-completed is missing or duplicated");
+      }
+      break;
+    case "abort-requested": {
+      if (
+        state.phase !== "unknown" &&
+        state.phase !== "received" &&
+        state.phase !== "started"
+      ) {
+        throw new TypeError("abort-requested is outside a cancellable assignment");
+      }
+      const key = `${body.via}\0${body.refId}`;
+      if (state.aborts.has(key)) {
+        throw new TypeError("abort request is duplicated");
+      }
+      state.aborts.add(key);
+      break;
+    }
+    case "halted": {
+      const proof = body.proof;
+      const matchingAbort =
+        proof.cause === "owner-fence"
+          ? state.aborts.has(`owner-fence\0${proof.fence.requestId}`)
+          : state.aborts.has(`abort-ticket\0${proof.ticketDigest}`);
+      const closesCancellablePhase =
+        proof.decision === "not-started"
+          ? !state.started && (state.phase === "unknown" || state.phase === "received")
+          : state.started && state.phase === "started";
+      if (
+        state.aborts.size === 0 ||
+        !matchingAbort ||
+        !closesCancellablePhase ||
+        state.pendingInteractions.size > 0 ||
+        state.unmirroredFinished.size > 0 ||
+        state.openSideEffects.size > 0 ||
+        proof.assignmentId !== state.assignmentId ||
+        proof.lastRecordSeq !== entry.recordSeq - 1 ||
+        proof.ledgerDigest !== state.chainDigest ||
+        (proof.decision === "halted" &&
+          proof.lastEffectSeq !== state.sideEffectCount)
+      ) {
+        throw new TypeError("halted does not close the durable cancellation prefix");
+      }
+      state.phase = "halted";
+      break;
+    }
+    case "bundle_sealed":
+      if (
+        state.phase !== "started" ||
+        state.aborts.size > 0 ||
+        state.pendingInteractions.size > 0 ||
+        state.unmirroredFinished.size > 0 ||
+        state.openSideEffects.size > 0
+      ) {
+        throw new TypeError("bundle_sealed has no started prefix");
+      }
+      state.phase = "sealed";
+      break;
+    case "acked":
+      if (state.phase !== "sealed") {
+        throw new TypeError("acked has no sealed prefix");
+      }
+      state.phase = "acked";
+      break;
+    case "mirrored":
+      const checkpoint = state.unmirroredFinished.get(body.upTo);
+      if (
+        body.upTo <= state.mirroredUpTo ||
+        body.ordinal <= state.mirroredInteractionOrdinal ||
+        !checkpoint ||
+        checkpoint.ordinal !== body.ordinal ||
+        checkpoint.mirrorDigest !== body.mirrorDigest
+      ) {
+        throw new TypeError("mirrored watermark has no new finished interaction");
+      }
+      let released = 0;
+      for (const [seq, candidate] of state.unmirroredFinished) {
+        if (candidate.ordinal <= body.ordinal) {
+          state.unmirroredFinished.delete(seq);
+          released += 1;
+        }
+      }
+      if (released !== body.ordinal - state.mirroredInteractionOrdinal) {
+        throw new TypeError("mirrored watermark skips an interaction result");
+      }
+      state.mirroredUpTo = body.upTo;
+      state.mirroredInteractionOrdinal = body.ordinal;
+      break;
+    default:
+      throw new TypeError("Assignment record kind is invalid");
+  }
+  const digest = advanceAssignmentLedger(state.chainDigest, entry);
+  state.lastSeq = entry.recordSeq;
+  state.chainDigest = digest;
+  return digest;
+}
+
+export function validateLedgerEvidencePage(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): LedgerEvidencePage {
+  const page = snapshot(input, "Ledger evidence page") as LedgerEvidencePage;
+  assertExactKeys(
+    page,
+    [
+      "assignmentId",
+      "chainDigest",
+      "entries",
+      "executorId",
+      "fromSeq",
+      "signature",
+      "toSeq",
+      "v",
+    ],
+    "Ledger evidence page",
+  );
+  assertVersion(page.v, "Ledger evidence page");
+  assertIdentifier(page.assignmentId, "Ledger evidence assignmentId");
+  assertIdentifier(page.executorId, "Ledger evidence executorId");
+  assertPositiveInteger(page.fromSeq, "Ledger evidence fromSeq");
+  assertPositiveInteger(page.toSeq, "Ledger evidence toSeq");
+  if (page.toSeq < page.fromSeq || page.entries.length !== page.toSeq - page.fromSeq + 1) {
+    throw new TypeError("Ledger evidence page range is not a non-empty contiguous prefix");
+  }
+  if (page.entries.length > 256) {
+    throw new TypeError("Ledger evidence page exceeds the 256-entry protocol limit");
+  }
+  page.entries.forEach((entry, index) => {
+    assertExactKeys(entry, ["body", "recordSeq"], "Ledger evidence entry");
+    if (entry.recordSeq !== page.fromSeq + index) {
+      throw new TypeError("Ledger evidence entries are not contiguous");
+    }
+    if (isArtifactRecordReference(entry.body)) {
+      assertExactKeys(entry.body, ["ref"], "Ledger evidence artifact entry");
+      assertArtifactRef(entry.body.ref, "Ledger evidence artifact reference");
+    }
+  });
+  assertDigest(page.chainDigest, "Ledger evidence chain digest");
+  assertSignature(page.signature, "Ledger evidence signature");
+  verifier.verify(
+    "LedgerEvidencePage",
+    1,
+    withoutField(page, "signature"),
+    page.signature,
+  );
+  for (const entry of page.entries) {
+    if (!isArtifactRecordReference(entry.body)) {
+      validateAssignmentEntry(entry, verifier);
+    }
+  }
+  return page;
+}
+
+export function signDispatchConflictProof(
+  input: Omit<DispatchConflictProof, "signature">,
+  signer: ProtocolSigner,
+): DispatchConflictProof {
+  const payload = snapshot(input, "Dispatch conflict payload");
+  assertDispatchConflictPayload(payload);
+  return snapshot(
+    {
+      ...payload,
+      signature: signer.sign("DispatchConflictProof", 1, payload),
+    },
+    "Dispatch conflict proof",
+  );
+}
+
+export function validateDispatchConflictProof(
+  input: DispatchConflictProof,
+  verifier: ProtocolSignatureVerifier,
+): DispatchConflictProof {
+  const proof = snapshot(input, "Dispatch conflict proof");
+  assertExactKeys(
+    proof,
+    [
+      "acceptedActivationDigest",
+      "acceptedDispatchRef",
+      "assignmentId",
+      "conflictingActivationDigest",
+      "conflictingDispatchRef",
+      "error",
+      "executorId",
+      "receivedLedgerDigest",
+      "receivedRecordSeq",
+      "signature",
+      "v",
+    ],
+    "Dispatch conflict proof",
+  );
+  assertSignature(proof.signature, "Dispatch conflict signature");
+  const payload = withoutField(proof, "signature");
+  assertDispatchConflictPayload(payload);
+  verifier.verify("DispatchConflictProof", 1, payload, proof.signature);
+  return proof;
+}
+
+export function validateDispatchRejectionProof(
+  input: DispatchRejectionProof,
+  verifier: ProtocolSignatureVerifier,
+): DispatchRejectionProof {
+  const proof = snapshot(input, "Dispatch rejection proof");
+  assertExactKeys(
+    proof,
+    [
+      "assignmentId",
+      "dispatchDigest",
+      "error",
+      "executorId",
+      "lastRecordSeq",
+      "ledgerDigest",
+      "signature",
+      "v",
+    ],
+    "Dispatch rejection proof",
+  );
+  assertVersion(proof.v, "Dispatch rejection proof");
+  assertIdentifier(proof.assignmentId, "Dispatch rejection assignmentId");
+  assertIdentifier(proof.executorId, "Dispatch rejection executorId");
+  assertDigest(proof.dispatchDigest, "Dispatch rejection dispatch digest");
+  assertAuthorityError(proof.error, "Dispatch rejection error");
+  assertPositiveInteger(proof.lastRecordSeq, "Dispatch rejection record sequence");
+  assertDigest(proof.ledgerDigest, "Dispatch rejection ledger digest");
+  assertSignature(proof.signature, "Dispatch rejection signature");
+  const payload = withoutField(proof, "signature");
+  verifier.verify("DispatchRejectionProof", 1, payload, proof.signature);
+  return proof;
+}
+
+export function validateDispatchResult(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): DispatchResult {
+  const result = snapshot(input, "Dispatch result") as DispatchResult;
+  assertObject(result, "Dispatch result");
+  assertVersion(result.v, "Dispatch result");
+  if (result.accepted === true) {
+    assertExactKeys(result, ["accepted", "v"], "Accepted dispatch result");
+    return result;
+  }
+  if (result.accepted !== false) {
+    throw new TypeError("Dispatch result accepted flag is invalid");
+  }
+  assertExactKeys(
+    result,
+    ["accepted", "error", "outcome", "proof", "v"],
+    "Rejected dispatch result",
+  );
+  assertAuthorityError(result.error, "Dispatch result error");
+  if (result.outcome === "rejected-before-received") {
+    const proof = validateDispatchRejectionProof(result.proof, verifier);
+    if (canonicalize(result.error) !== canonicalize(proof.error)) {
+      throw new TypeError("Dispatch rejection response does not match its proof");
+    }
+    return result;
+  }
+  if (result.outcome === "conflicting-redelivery") {
+    const proof = validateDispatchConflictProof(result.proof, verifier);
+    if (
+      result.error.code !== proof.error.code ||
+      result.error.retryable !== proof.error.retryable
+    ) {
+      throw new TypeError("Dispatch conflict response does not match its proof");
+    }
+    return result;
+  }
+  throw new TypeError("Dispatch result outcome is invalid");
+}
+
+export function validateLedgerSnapshot(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): LedgerSnapshot {
+  const value = snapshot(input, "Ledger snapshot") as LedgerSnapshot;
+  assertObject(value, "Ledger snapshot");
+  assertExactKeys(
+    value,
+    [
+      "assignmentId",
+      ...(value.cancelProof === undefined ? [] : ["cancelProof"]),
+      "lastSeq",
+      "phase",
+      ...(value.sealedBundleRef === undefined ? [] : ["sealedBundleRef"]),
+      "v",
+    ],
+    "Ledger snapshot",
+  );
+  assertVersion(value.v, "Ledger snapshot");
+  assertIdentifier(value.assignmentId, "Ledger snapshot assignmentId");
+  assertNonNegativeInteger(value.lastSeq, "Ledger snapshot lastSeq");
+  const phases: ReadonlySet<LedgerSnapshot["phase"]> = new Set([
+    "unknown",
+    "received",
+    "dispatch-rejected",
+    "supersede-fenced",
+    "started",
+    "halted",
+    "sealed",
+    "acked",
+  ]);
+  if (!phases.has(value.phase)) {
+    throw new TypeError("Ledger snapshot phase is invalid");
+  }
+  if (value.lastSeq === 0 && value.phase !== "unknown") {
+    throw new TypeError("Ledger snapshot phase and record sequence are inconsistent");
+  }
+  const isSealed = value.phase === "sealed" || value.phase === "acked";
+  if (isSealed !== (value.sealedBundleRef !== undefined)) {
+    throw new TypeError("Ledger snapshot sealed phase is missing its bundle reference");
+  }
+  if (value.sealedBundleRef !== undefined) {
+    assertArtifactRef(value.sealedBundleRef, "Ledger snapshot sealed bundle reference");
+  }
+  if ((value.phase === "halted") !== (value.cancelProof !== undefined)) {
+    throw new TypeError("Ledger snapshot halted phase is missing its cancel proof");
+  }
+  if (value.cancelProof !== undefined) {
+    const proof = validateCancelProof(value.cancelProof, verifier);
+    if (proof.assignmentId !== value.assignmentId) {
+      throw new TypeError("Ledger snapshot cancel proof names a different assignment");
+    }
+  }
+  return value;
+}
+
+export function signSupersedeProof(
+  input: UnsignedSupersedeProof,
+  signer: ProtocolSigner,
+): SupersedeProof {
+  const payload = snapshot(input, "Supersede payload");
+  assertSupersedePayload(payload);
+  return snapshot(
+    {
+      ...payload,
+      signature: signer.sign("SupersedeProof", 1, payload),
+    },
+    "Supersede proof",
+  ) as SupersedeProof;
+}
+
+export function validateSupersedeProof(
+  input: SupersedeProof,
+  verifier: ProtocolSignatureVerifier,
+): SupersedeProof {
+  const proof = snapshot(input, "Supersede proof");
+  assertExactKeys(
+    proof,
+    [
+      "assignmentId",
+      "decision",
+      "executorId",
+      "fence",
+      "lastRecordSeq",
+      "ledgerDigest",
+      "signature",
+      "v",
+    ],
+    "Supersede proof",
+  );
+  assertSignature(proof.signature, "Supersede signature");
+  const payload = withoutField(proof, "signature");
+  assertSupersedePayload(payload);
+  verifier.verify("SupersedeProof", 1, payload, proof.signature);
+  return proof;
+}
+
+export function signCancelProof(
+  input: UnsignedCancelProof,
+  signer: ProtocolSigner,
+): CancelProofBody {
+  const payload = snapshot(input, "Cancel proof payload");
+  assertCancelProofPayload(payload);
+  return snapshot(
+    {
+      ...payload,
+      signature: signer.sign("CancelProofBody", 1, payload),
+    },
+    "Cancel proof",
+  ) as CancelProofBody;
+}
+
+export function validateCancelProof(
+  input: CancelProofBody,
+  verifier: ProtocolSignatureVerifier,
+): CancelProofBody {
+  const proof = snapshot(input, "Cancel proof");
+  assertSignature(proof.signature, "Cancel proof signature");
+  const payload = withoutField(proof, "signature") as UnsignedCancelProof;
+  assertCancelProofPayload(payload);
+  verifier.verify("CancelProofBody", 1, payload, proof.signature);
+  return proof;
+}
+
+/** Validates the closed union of proofs that can terminate an assignment before start. */
+export function validateAssignmentTerminationProof(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): AssignmentTerminationProof {
+  assertObject(input, "Assignment termination proof");
+  if ("dispatchDigest" in input) {
+    return validateDispatchRejectionProof(
+      input as unknown as DispatchRejectionProof,
+      verifier,
+    );
+  }
+  if (input.decision === "not-started-fenced") {
+    return validateSupersedeProof(input as unknown as SupersedeProof, verifier) as Extract<
+      SupersedeProof,
+      { decision: "not-started-fenced" }
+    >;
+  }
+  const proof = validateCancelProof(input as unknown as CancelProofBody, verifier);
+  if (proof.decision !== "not-started") {
+    throw new TypeError("Halted cancel proof cannot terminate an assignment for redispatch");
+  }
+  return proof;
 }
 
 export function validateConversationInteractionOutcome(
@@ -310,9 +1113,12 @@ export function validateConversationInteractionMirrorEntry(
   assertObject(entry, "Conversation interaction mirror entry");
   assertExactKeys(
     entry,
-    ["at", "kind", "outcome", "requestId", "seq"],
+    ["at", "kind", "ordinal", "outcome", "requestId", "seq"],
     "Conversation interaction mirror entry",
   );
+  if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal as number) <= 0) {
+    throw new TypeError("Interaction mirror ordinal must be a positive safe integer");
+  }
   if (!Number.isSafeInteger(entry.seq) || (entry.seq as number) <= 0) {
     throw new TypeError("Interaction mirror sequence must be a positive safe integer");
   }
@@ -323,6 +1129,190 @@ export function validateConversationInteractionMirrorEntry(
   validateConversationInteractionOutcome(entry.outcome);
   assertCanonicalTime(entry.at, "Interaction mirror time");
   return entry as ConversationInteractionMirrorEntry;
+}
+
+function assertAssignmentRecord(
+  value: AssignmentRecord,
+  verifier: ProtocolSignatureVerifier,
+): void {
+  assertObject(value, "Assignment record");
+  assertVersion(value.v, "Assignment record");
+  switch (value.t) {
+    case "received":
+      assertExactKeys(value, ["activation", "envelope", "t", "v"], "received record");
+      assertExactKeys(value.envelope, ["ref"], "received envelope");
+      assertArtifactRef(value.envelope.ref, "received envelope reference");
+      assertObject(value.activation, "received activation");
+      assertExactKeys(
+        value.activation,
+        [
+          "assignmentId",
+          "capIds",
+          "commit",
+          "dispatchRef",
+          "executorId",
+          "issuedAt",
+          "manifestDigest",
+          "permissionLeaseDigest",
+          "ref",
+          "reservation",
+          "signature",
+          "v",
+        ],
+        "received activation",
+      );
+      assertVersion(value.activation.v, "received activation");
+      assertIdentifier(value.activation.assignmentId, "received activation assignmentId");
+      assertIdentifier(value.activation.executorId, "received activation executorId");
+      assertArtifactRef(value.activation.dispatchRef, "received activation dispatchRef");
+      assertDigest(value.activation.manifestDigest, "received activation manifest digest");
+      assertDigest(
+        value.activation.permissionLeaseDigest,
+        "received activation permission digest",
+      );
+      assertSignature(value.activation.signature, "received activation signature");
+      verifier.verify(
+        "AssignmentActivationProof",
+        1,
+        withoutField(value.activation, "signature"),
+        value.activation.signature,
+      );
+      return;
+    case "dispatch-rejected":
+      assertExactKeys(value, ["dispatchDigest", "reason", "t", "v"], "dispatch-rejected record");
+      assertDigest(value.dispatchDigest, "dispatch rejection digest");
+      assertAuthorityError(value.reason, "dispatch rejection reason");
+      return;
+    case "supersede-fenced":
+      assertExactKeys(value, ["fenceSeq", "requestId", "t", "v"], "supersede-fenced record");
+      assertPositiveInteger(value.fenceSeq, "supersede fence sequence");
+      assertIdentifier(value.requestId, "supersede requestId");
+      return;
+    case "started":
+      assertExactKeys(value, ["t", "v"], "started record");
+      return;
+    case "interaction-requested":
+      assertExactKeys(
+        value,
+        ["display", "expiresAt", "issuedAt", "kind", "requestId", "t", "toolName", "ttlMs", "v"],
+        "interaction-requested record",
+      );
+      assertIdentifier(value.requestId, "interaction requestId");
+      assertIdentifier(value.toolName, "interaction toolName");
+      if (value.kind !== "allow-once") throw new TypeError("Interaction kind is invalid");
+      assertObject(value.display, "interaction display");
+      assertExactKeys(value.display, ["lines", "title"], "interaction display");
+      if (typeof value.display.title !== "string" || !Array.isArray(value.display.lines)) {
+        throw new TypeError("Interaction display is invalid");
+      }
+      for (const line of value.display.lines) {
+        if (typeof line !== "string") throw new TypeError("Interaction display line is invalid");
+      }
+      assertCanonicalTime(value.issuedAt, "interaction issuedAt");
+      assertCanonicalTime(value.expiresAt, "interaction expiresAt");
+      assertPositiveInteger(value.ttlMs, "interaction ttlMs");
+      if (
+        value.display.title.length === 0 ||
+        Date.parse(value.expiresAt) - Date.parse(value.issuedAt) !== value.ttlMs
+      ) {
+        throw new TypeError("Interaction request timing or display is invalid");
+      }
+      return;
+    case "interaction-finished":
+      assertExactKeys(value, ["kind", "outcome", "requestId", "t", "v"], "interaction-finished record");
+      assertIdentifier(value.requestId, "finished interaction requestId");
+      if (value.kind !== "allow-once") throw new TypeError("Finished interaction kind is invalid");
+      validateConversationInteractionOutcome(value.outcome);
+      return;
+    case "staged-mutation":
+      assertExactKeys(
+        value,
+        ["domain", ...(value.expected === undefined ? [] : ["expected"]), "mutation", "requestId", "seq", "t", "v"],
+        "staged-mutation record",
+      );
+      validateStagedMutationRecord(value);
+      return;
+    case "side-effect-started":
+      assertExactKeys(
+        value,
+        ["effectSeq", "kind", "summary", "t", "target", "toolName", "v"],
+        "side-effect-started record",
+      );
+      assertPositiveInteger(value.effectSeq, "side effect sequence");
+      assertIdentifier(value.toolName, "side effect toolName");
+      if (typeof value.summary !== "string" || value.summary.length > 4_096) {
+        throw new TypeError("Side effect summary is invalid");
+      }
+      if (value.kind !== "tool-mutation" && value.kind !== "external-call") {
+        throw new TypeError("Side effect kind is invalid");
+      }
+      if (
+        value.target !== "workspace-file" &&
+        value.target !== "external-service" &&
+        value.target !== "device-system"
+      ) {
+        throw new TypeError("Side effect target is invalid");
+      }
+      return;
+    case "side-effect-completed":
+      assertExactKeys(
+        value,
+        ["effectSeq", ...(value.resultDigest === undefined ? [] : ["resultDigest"]), "status", "t", "v"],
+        "side-effect-completed record",
+      );
+      assertPositiveInteger(value.effectSeq, "side effect completion sequence");
+      if (value.status !== "ok" && value.status !== "failed" && value.status !== "aborted") {
+        throw new TypeError("Side effect completion status is invalid");
+      }
+      if (value.resultDigest !== undefined) assertDigest(value.resultDigest, "side effect result digest");
+      return;
+    case "abort-requested":
+      assertExactKeys(value, ["refId", "t", "v", "via"], "abort-requested record");
+      assertIdentifier(value.refId, "abort request reference");
+      if (value.via !== "owner-fence" && value.via !== "abort-ticket") {
+        throw new TypeError("Abort request source is invalid");
+      }
+      return;
+    case "halted":
+      assertExactKeys(value, ["proof", "t", "v"], "halted record");
+      validateCancelProof(value.proof, verifier);
+      return;
+    case "bundle_sealed":
+      assertExactKeys(
+        value,
+        ["bundle", ...(value.mutationBatch === undefined ? [] : ["mutationBatch"]), "t", "v"],
+        "bundle_sealed record",
+      );
+      assertExactKeys(value.bundle, ["ref"], "sealed bundle container");
+      assertArtifactRef(value.bundle.ref, "sealed bundle reference");
+      if (value.mutationBatch !== undefined) {
+        assertExactKeys(value.mutationBatch, ["ref"], "mutation batch container");
+        assertArtifactRef(value.mutationBatch.ref, "mutation batch reference");
+      }
+      return;
+    case "acked":
+      assertExactKeys(value, ["commitRevision", "t", "v"], "acked record");
+      assertNonNegativeInteger(value.commitRevision, "commit revision");
+      return;
+    case "mirrored":
+      assertExactKeys(
+        value,
+        ["mirrorDigest", "ordinal", "t", "upTo", "v"],
+        "mirrored record",
+      );
+      assertPositiveInteger(value.upTo, "mirrored watermark");
+      assertPositiveInteger(value.ordinal, "mirrored ordinal");
+      assertDigest(value.mirrorDigest, "mirrored digest");
+      return;
+    default:
+      throw new TypeError("Assignment record kind is invalid");
+  }
+}
+
+function isArtifactRecordReference(
+  value: AssignmentRecord | { readonly ref: ArtifactRef },
+): value is { readonly ref: ArtifactRef } {
+  return "ref" in value;
 }
 
 function assertConversationEnvelope(
@@ -454,27 +1444,9 @@ function assertManifest(manifest: ConversationEnvelope["manifest"]): void {
   for (const value of Object.values(manifest.requires)) {
     assertNonNegativeInteger(value, "Manifest requirement revision");
   }
-  assertExactKeys(
-    manifest.environment,
-    ["credentialBindings", "deviceId", "evidenceKinds", "workspace"],
-    "Manifest environment",
-    true,
-  );
-  if (manifest.environment.deviceId !== undefined) {
-    assertIdentifier(manifest.environment.deviceId, "Environment deviceId");
-  }
-  if (manifest.environment.workspace !== undefined) {
-    assertExactKeys(
-      manifest.environment.workspace,
-      ["bindingRef", "deviceId", "workspaceBindingRevision"],
-      "Manifest workspace",
-    );
-    assertIdentifier(manifest.environment.workspace.deviceId, "Workspace deviceId");
-    assertIdentifier(manifest.environment.workspace.bindingRef, "Workspace bindingRef");
-    assertNonNegativeInteger(
-      manifest.environment.workspace.workspaceBindingRevision,
-      "Workspace binding revision",
-    );
+  validateEnvironmentRequirement(manifest.environment);
+  if (!Array.isArray(manifest.credentialBindings)) {
+    throw new TypeError("Manifest credential bindings must be an array");
   }
   for (const binding of manifest.credentialBindings) {
     assertExactKeys(binding, ["bindingId", "revision", "service"], "Credential binding");
@@ -489,6 +1461,112 @@ function assertManifest(manifest: ConversationEnvelope["manifest"]): void {
   );
   if (manifest.digest !== expected) {
     throw new TypeError("Execution manifest digest is invalid");
+  }
+}
+
+export function validateIngressContext(input: unknown): IngressContext {
+  const ingress = snapshot(input, "Ingress context") as IngressContext;
+  assertIngressContext(ingress);
+  return ingress;
+}
+
+export function validateChannelResponderRef(input: unknown): ChannelResponderRef {
+  const responder = snapshot(input, "Channel responder") as ChannelResponderRef;
+  assertChannelResponder(responder);
+  return responder;
+}
+
+function assertIngressContext(ingress: IngressContext): void {
+  assertObject(ingress, "Ingress context");
+  const common = [
+    "deviceId",
+    "ingressId",
+    "kind",
+    "receivedAt",
+    "surfacePrincipal",
+    "turnOrigin",
+  ];
+  if (ingress.kind === "first-party") {
+    assertExactKeys(ingress, common, "First-party ingress context", true);
+  } else if (ingress.kind === "channel") {
+    assertExactKeys(
+      ingress,
+      [...common, "replyTarget", "responder"],
+      "Channel ingress context",
+      true,
+    );
+    assertChannelResponder(ingress.responder);
+    assertDeliveryTarget(ingress.replyTarget);
+    const expectedPrincipal = `channel:${protocolDigest(
+      "ChannelResponderRef",
+      1,
+      ingress.responder,
+    )}`;
+    if (ingress.surfacePrincipal !== expectedPrincipal) {
+      throw new TypeError("Channel surfacePrincipal is not derived from its responder");
+    }
+  } else {
+    throw new TypeError("Ingress context kind is invalid");
+  }
+  assertIdentifier(ingress.surfacePrincipal, "Ingress surfacePrincipal");
+  assertIdentifier(ingress.deviceId, "Ingress deviceId");
+  assertIdentifier(ingress.ingressId, "Ingress ingressId");
+  assertCanonicalTime(ingress.receivedAt, "Ingress receivedAt");
+  if (ingress.turnOrigin !== undefined) assertTurnOrigin(ingress.turnOrigin);
+}
+
+function assertChannelResponder(value: unknown): void {
+  assertObject(value, "Channel responder");
+  assertExactKeys(
+    value,
+    ["channelId", "platformSubject", "tenant"],
+    "Channel responder",
+    true,
+  );
+  assertIdentifier(value.channelId, "Channel responder channelId");
+  assertIdentifier(value.platformSubject, "Channel responder platformSubject");
+  if (value.tenant !== undefined) assertIdentifier(value.tenant, "Channel tenant");
+}
+
+function assertDeliveryTarget(value: unknown): void {
+  assertObject(value, "Delivery target");
+  assertExactKeys(value, ["channelId", "threadId", "to"], "Delivery target", true);
+  assertIdentifier(value.channelId, "Delivery channelId");
+  assertIdentifier(value.to, "Delivery recipient");
+  if (value.threadId !== undefined) assertIdentifier(value.threadId, "Delivery threadId");
+}
+
+function assertTurnOrigin(value: unknown): void {
+  assertObject(value, "Turn origin");
+  assertExactKeys(
+    value,
+    ["channel", "surface", "target", "triggeredBy"],
+    "Turn origin",
+    true,
+  );
+  assertIdentifier(value.channel, "Turn origin channel");
+  if (value.target !== undefined) assertDeliveryTarget(value.target);
+  if (value.triggeredBy !== undefined) {
+    assertIdentifier(value.triggeredBy, "Turn origin triggeredBy");
+  }
+  if (value.surface !== undefined) {
+    assertObject(value.surface, "Turn origin surface");
+    assertExactKeys(value.surface, ["capabilities"], "Turn origin surface", true);
+    if (value.surface.capabilities !== undefined) {
+      assertObject(value.surface.capabilities, "Surface capabilities");
+      assertExactKeys(
+        value.surface.capabilities,
+        ["postTurnControl"],
+        "Surface capabilities",
+        true,
+      );
+      if (
+        value.surface.capabilities.postTurnControl !== undefined &&
+        typeof value.surface.capabilities.postTurnControl !== "boolean"
+      ) {
+        throw new TypeError("postTurnControl capability must be boolean");
+      }
+    }
   }
 }
 
@@ -511,52 +1589,13 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
   assertIdentifier(work.conversationId, "Dispatch conversationId");
   assertNonNegativeInteger(work.ownerEpoch, "Dispatch ownerEpoch");
   assertNonNegativeInteger(work.baseRevision, "Dispatch baseRevision");
-  const ingressKeys =
-    work.ingress.kind === "channel"
-      ? [
-          "deviceId",
-          "ingressId",
-          "kind",
-          "receivedAt",
-          "replyTarget",
-          "responder",
-          "surfacePrincipal",
-          "turnOrigin",
-        ]
-      : [
-          "deviceId",
-          "ingressId",
-          "kind",
-          "receivedAt",
-          "surfacePrincipal",
-          "turnOrigin",
-        ];
-  assertExactKeys(work.ingress, ingressKeys, "Dispatch ingress", true);
-  if (work.ingress.kind !== "first-party" && work.ingress.kind !== "channel") {
-    throw new TypeError("Dispatch ingress kind is invalid");
-  }
-  assertIdentifier(work.ingress.surfacePrincipal, "Ingress surfacePrincipal");
-  assertIdentifier(work.ingress.deviceId, "Ingress deviceId");
-  assertIdentifier(work.ingress.ingressId, "Ingress ingressId");
-  assertCanonicalTime(work.ingress.receivedAt, "Ingress receivedAt");
-  if (work.ingress.kind === "channel") {
-    assertExactKeys(
-      work.ingress.responder,
-      ["channelId", "platformSubject", "tenant"],
-      "Channel responder",
-      true,
-    );
-    assertExactKeys(
-      work.ingress.replyTarget,
-      ["channelId", "threadId", "to"],
-      "Channel reply target",
-      true,
-    );
-  }
+  assertIngressContext(work.ingress);
   if (work.windowInput.t === "full") {
     assertExactKeys(work.windowInput, ["messages", "t", "windowEpoch"], "Full window");
     assertNonNegativeInteger(work.windowInput.windowEpoch, "Window epoch");
-    if (!Array.isArray(work.windowInput.messages)) {
+    if (Array.isArray(work.windowInput.messages)) {
+      validateMessages(work.windowInput.messages, "Full window messages");
+    } else {
       assertExactKeys(work.windowInput.messages, ["ref"], "Window artifact container");
       assertArtifactRef(work.windowInput.messages.ref, "Window artifact");
     }
@@ -570,8 +1609,12 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
     assertNonNegativeInteger(work.windowInput.targetEpoch, "Window target epoch");
     assertDigest(work.windowInput.baseDigest, "Window base digest");
     assertDigest(work.windowInput.targetDigest, "Window target digest");
+    validateMessages(work.windowInput.appended, "Delta window messages");
   } else {
     throw new TypeError("Window input kind is invalid");
+  }
+  if (!Array.isArray(work.controlContext)) {
+    throw new TypeError("Control context must be an array");
   }
   for (const block of work.controlContext) {
     assertExactKeys(block, ["block", "source"], "Control context block");
@@ -726,21 +1769,7 @@ function assertActivationPayload(
   envelope: ConversationEnvelope,
   dispatchRef: ArtifactRef,
 ): void {
-  assertVersion(payload.v, "Assignment activation payload");
-  assertExactKeys(
-    payload.ref,
-    ["conversationId", "execution", "ownerEpoch", "runId"],
-    "Activation execution reference",
-  );
-  assertArtifactRef(payload.dispatchRef, "Activation dispatchRef");
-  assertExactKeys(payload.commit, ["envelopeDigest", "lsn"], "Activation commit");
-  assertExactKeys(payload.reservation, ["attempt", "reservationId"], "Activation reservation");
-  assertCanonicalTime(payload.issuedAt, "Activation issuedAt");
-  assertDigest(payload.commit.envelopeDigest, "Activation commit digest");
-  if (!Number.isSafeInteger(payload.commit.lsn) || payload.commit.lsn <= 0) {
-    throw new TypeError("Activation commit LSN must be a positive safe integer");
-  }
-  assertSortedUnique(payload.capIds, "Activation capability ids");
+  assertActivationPayloadShape(payload);
   const expectedRef = {
     execution: "conversation" as const,
     runId: envelope.work.runId,
@@ -762,6 +1791,211 @@ function assertActivationPayload(
     payload.reservation.attempt !== envelope.resourceLease.workload.attempt
   ) {
     throw new TypeError("Assignment activation payload does not bind the dispatch");
+  }
+}
+
+function assertActivationPayloadShape(
+  payload: AssignmentActivationPayload<"conversation">,
+): void {
+  assertVersion(payload.v, "Assignment activation payload");
+  assertExactKeys(
+    payload.ref,
+    ["conversationId", "execution", "ownerEpoch", "runId"],
+    "Activation execution reference",
+  );
+  assertArtifactRef(payload.dispatchRef, "Activation dispatchRef");
+  assertExactKeys(payload.commit, ["envelopeDigest", "lsn"], "Activation commit");
+  assertExactKeys(payload.reservation, ["attempt", "reservationId"], "Activation reservation");
+  assertCanonicalTime(payload.issuedAt, "Activation issuedAt");
+  assertDigest(payload.commit.envelopeDigest, "Activation commit digest");
+  if (!Number.isSafeInteger(payload.commit.lsn) || payload.commit.lsn <= 0) {
+    throw new TypeError("Activation commit LSN must be a positive safe integer");
+  }
+  assertSortedUnique(payload.capIds, "Activation capability ids");
+}
+
+function assertDispatchConflictPayload(
+  payload: Omit<DispatchConflictProof, "signature">,
+): void {
+  assertExactKeys(
+    payload,
+    [
+      "acceptedActivationDigest",
+      "acceptedDispatchRef",
+      "assignmentId",
+      "conflictingActivationDigest",
+      "conflictingDispatchRef",
+      "error",
+      "executorId",
+      "receivedLedgerDigest",
+      "receivedRecordSeq",
+      "v",
+    ],
+    "Dispatch conflict payload",
+  );
+  assertVersion(payload.v, "Dispatch conflict proof");
+  assertIdentifier(payload.assignmentId, "Dispatch conflict assignmentId");
+  assertIdentifier(payload.executorId, "Dispatch conflict executorId");
+  assertArtifactRef(payload.acceptedDispatchRef, "Accepted dispatch reference");
+  assertArtifactRef(payload.conflictingDispatchRef, "Conflicting dispatch reference");
+  assertDigest(payload.acceptedActivationDigest, "Accepted activation digest");
+  assertDigest(payload.conflictingActivationDigest, "Conflicting activation digest");
+  if (payload.acceptedActivationDigest === payload.conflictingActivationDigest) {
+    throw new TypeError("Dispatch conflict activation digests must differ");
+  }
+  assertPositiveInteger(payload.receivedRecordSeq, "Received record sequence");
+  assertDigest(payload.receivedLedgerDigest, "Received ledger digest");
+  assertExactKeys(payload.error, ["code", "retryable"], "Dispatch conflict error");
+  if (payload.error.code !== "idempotency-conflict" || payload.error.retryable !== false) {
+    throw new TypeError("Dispatch conflict error must be a non-retryable idempotency conflict");
+  }
+}
+
+function assertSupersedePayload(payload: UnsignedSupersedeProof): void {
+  assertExactKeys(
+    payload,
+    [
+      "assignmentId",
+      "decision",
+      "executorId",
+      "fence",
+      "lastRecordSeq",
+      "ledgerDigest",
+      "v",
+    ],
+    "Supersede payload",
+  );
+  assertVersion(payload.v, "Supersede proof");
+  assertIdentifier(payload.assignmentId, "Supersede assignmentId");
+  assertIdentifier(payload.executorId, "Supersede executorId");
+  assertExactKeys(payload.fence, ["fenceSeq", "requestId"], "Supersede fence");
+  assertPositiveInteger(payload.fence.fenceSeq, "Supersede fence sequence");
+  assertIdentifier(payload.fence.requestId, "Supersede requestId");
+  if (
+    payload.decision !== "not-started-fenced" &&
+    payload.decision !== "already-started"
+  ) {
+    throw new TypeError("Supersede decision is invalid");
+  }
+  assertPositiveInteger(payload.lastRecordSeq, "Supersede record sequence");
+  assertDigest(payload.ledgerDigest, "Supersede ledger digest");
+}
+
+function assertCancelProofPayload(
+  payload: UnsignedCancelProof,
+): void {
+  const causeKeys =
+    payload.cause === "owner-fence"
+      ? ["fence"]
+      : payload.cause === "abort-ticket"
+        ? ["surfacePrincipal", "ticketDigest"]
+        : [];
+  const decisionKeys = payload.decision === "halted" ? ["lastEffectSeq"] : [];
+  assertExactKeys(
+    payload,
+    [
+      "assignmentId",
+      "authority",
+      "cause",
+      "decision",
+      "executorId",
+      "issuedAt",
+      "lastRecordSeq",
+      "ledgerDigest",
+      ...causeKeys,
+      ...decisionKeys,
+      "usageFinal",
+      "v",
+    ],
+    "Cancel proof payload",
+  );
+  assertVersion(payload.v, "Cancel proof");
+  assertIdentifier(payload.assignmentId, "Cancel proof assignmentId");
+  assertIdentifier(payload.executorId, "Cancel proof executorId");
+  assertAuthorityEpoch(payload.authority);
+  assertPositiveInteger(payload.lastRecordSeq, "Cancel proof record sequence");
+  assertExactKeys(
+    payload.usageFinal,
+    ["reportDigest", "upToUsageSeq"],
+    "Cancel proof usage final",
+  );
+  assertDigest(payload.usageFinal.reportDigest, "Cancel proof usage digest");
+  assertNonNegativeInteger(payload.usageFinal.upToUsageSeq, "Cancel proof usage sequence");
+  assertDigest(payload.ledgerDigest, "Cancel proof ledger digest");
+  assertCanonicalTime(payload.issuedAt, "Cancel proof issuedAt");
+  if (payload.cause === "owner-fence") {
+    assertExactKeys(payload.fence, ["fenceSeq", "requestId"], "Cancel fence");
+    assertPositiveInteger(payload.fence.fenceSeq, "Cancel fence sequence");
+    assertIdentifier(payload.fence.requestId, "Cancel fence requestId");
+  } else if (payload.cause === "abort-ticket") {
+    assertDigest(payload.ticketDigest, "Abort ticket digest");
+    assertIdentifier(payload.surfacePrincipal, "Abort surface principal");
+  } else {
+    throw new TypeError("Cancel proof cause is invalid");
+  }
+  if (payload.decision === "not-started") return;
+  if (payload.decision === "halted") {
+    assertNonNegativeInteger(payload.lastEffectSeq, "Cancel proof last effect sequence");
+    return;
+  }
+  throw new TypeError("Cancel proof decision is invalid");
+}
+
+function assertAuthorityEpoch(
+  value: CancelProofBody["authority"],
+): void {
+  if (value.execution === "conversation") {
+    assertExactKeys(
+      value,
+      ["conversationId", "execution", "ownerEpoch"],
+      "Conversation authority epoch",
+    );
+    assertIdentifier(value.conversationId, "Authority conversationId");
+    assertNonNegativeInteger(value.ownerEpoch, "Authority owner epoch");
+    return;
+  }
+  if (value.execution === "job") {
+    assertExactKeys(value, ["anchorEpoch", "execution", "taskId"], "Job authority epoch");
+    assertIdentifier(value.taskId, "Authority taskId");
+    assertNonNegativeInteger(value.anchorEpoch, "Authority anchor epoch");
+    return;
+  }
+  throw new TypeError("Cancel proof authority kind is invalid");
+}
+
+function assertAuthorityError(
+  value: DispatchRejectionProof["error"],
+  label: string,
+): void {
+  assertExactKeys(value, ["code", "message", "retryable"], label);
+  const codes = new Set([
+    "unauthorized",
+    "capability-expired",
+    "epoch-stale",
+    "revision-conflict",
+    "fence-rejected",
+    "busy",
+    "not-found",
+    "invalid",
+    "lease-exhausted",
+    "missing-base",
+    "typed-stale",
+    "capability-gap",
+    "unavailable-offline",
+    "idempotency-conflict",
+  ]);
+  if (!codes.has(value.code)) throw new TypeError(`${label} code is invalid`);
+  if (typeof value.message !== "string" || value.message.length > 4_096) {
+    throw new TypeError(`${label} message must be a bounded string`);
+  }
+  if (typeof value.retryable !== "boolean") {
+    throw new TypeError(`${label} retryable must be boolean`);
+  }
+}
+
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
   }
 }
 
