@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   channelSurfacePrincipal,
   ControlAdmissionJournal,
+  createConversationControlEnvelope,
   createInitialControlEnvelope,
   type TrustedControlSource,
 } from "../control-admission.js";
@@ -144,6 +145,64 @@ function inputResult(runId: string, queuedPosition = 0): ControlResult {
 }
 
 describe("ControlAdmissionJournal", () => {
+  it.each(["missed", "committed"])(
+    "rejects %s as a replayed uncertain-resolution control result",
+    async (state) => {
+      const { log, journal } = await createHarness();
+      const source = sessionSource();
+      const requestId = `invalid-resolution-${state}`;
+      const openFactDigest = `sha256:${"a".repeat(64)}`;
+      const envelope = createConversationControlEnvelope({
+        requestId,
+        source,
+        at: NOW,
+        body: {
+          t: "uncertain-resolve",
+          ref: {
+            execution: "conversation",
+            conversationId: "conversation-1",
+            runId: "run-1",
+            ownerEpoch: 1,
+          },
+          openFactDigest,
+          decision: "user-abandoned",
+        },
+      });
+      await log.append([
+        {
+          stream: "control",
+          body: { t: "received", requestId, envelope },
+        },
+        {
+          stream: "control",
+          body: {
+            t: "applied",
+            requestId,
+            authorityRevision: 1,
+            result: {
+              v: 1,
+              status: "ok",
+              body: { t: "uncertain-resolve", state, factDigest: openFactDigest },
+            },
+          },
+        },
+      ]);
+
+      await expect(
+        journal.applyAuthority({
+          envelope,
+          source,
+          stream: "run:conversation-1",
+          initial: {},
+          reducer: (projection) => projection,
+          decide: () => {
+            throw new Error("invalid result must fail during replay");
+          },
+        }),
+      ).rejects.toThrow("uncertain-resolve state is invalid");
+    },
+  );
+
   it("linearizes concurrent request retries and commits one authority change", async () => {
     const { artifacts, log } = await createHarness();
     const peerLog = new FileAuthorityCommitLog(log.rootDir, artifacts, {

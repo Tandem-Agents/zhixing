@@ -11,6 +11,7 @@ export default defineConfig({
     "src/confirmation-hub.ts",
     "src/control-admission.ts",
     "src/conversation-assignment.ts",
+    "src/job-assignment.ts",
   ],
   format: ["esm"],
   dts: true,

@@ -6,12 +6,21 @@ import type {
   ConversationRunState,
   DispatchConflictProof,
   IngressContext,
+  JobRunState,
   SessionInternalRecord,
   SupersedeProof,
   UncertainResolutionFact,
   UserTurnInput,
 } from "@zhixing/core/contracts";
+
+/**
+ * Shared replay predicates compare literal state values only, so the
+ * conversation and job authority families execute one predicate source;
+ * states outside a predicate's accepted set simply fail its checks.
+ */
+export type SharedRunState = ConversationRunState | JobRunState;
 import {
+  canonicalize,
   protocolDigest,
   validateAssignmentTerminationProof,
   validateCancelProof,
@@ -111,6 +120,12 @@ export type ConversationRunJournalRecord =
       readonly bundle: { readonly ref: ArtifactRef };
       readonly commitRevision: number;
     }
+  | {
+      readonly t: "bundle-ack-observed";
+      readonly assignmentId: string;
+      readonly bundleRef: ArtifactRef;
+      readonly commitRevision: number;
+    }
   | { readonly t: "resolution"; readonly runId: string; readonly fact: UncertainResolutionFact }
   | {
       readonly t: "cancel-contained";
@@ -193,6 +208,9 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
   committed: {
     required: ["assignmentId", "bundle", "commitRevision", "runId", "t"],
   },
+  "bundle-ack-observed": {
+    required: ["assignmentId", "bundleRef", "commitRevision", "t"],
+  },
   resolution: { required: ["fact", "runId", "t"] },
   "cancel-contained": {
     required: ["assignmentId", "openFactDigest", "proof", "t"],
@@ -216,6 +234,7 @@ const RUN_STATES = new Set<ConversationRunState>([
 const RESOLUTION_CAUSES = new Set<UncertainResolutionFact["cause"]>([
   "ledger-unknown",
   "cancel-unproven",
+  "job-cancel-unknown",
   "dispatch-conflict",
 ]);
 
@@ -224,6 +243,7 @@ const RESOLUTION_KINDS = new Set<
 >([
   "late-bundle-committed",
   "proven-not-started-redispatched",
+  "proven-not-started-cancelled",
   "user-verified-side-effects",
   "user-abandoned",
   "user-retry-acknowledged",
@@ -367,6 +387,17 @@ export function validateConversationRunRecord(
         assertExactRecordKeys(value.bundle, ["ref"], "Committed bundle");
         assertArtifactReference(value.bundle.ref, "Committed bundle reference");
         break;
+      case "bundle-ack-observed":
+        assertIdentifier(value.assignmentId, "Bundle acknowledgement assignment id");
+        assertArtifactReference(
+          value.bundleRef,
+          "Bundle acknowledgement bundle reference",
+        );
+        assertPositiveSafeInteger(
+          value.commitRevision,
+          "Bundle acknowledgement commit revision",
+        );
+        break;
       case "resolution":
         assertIdentifier(value.runId, "Resolution run id");
         validateResolutionFact(value.fact);
@@ -477,6 +508,12 @@ export function validateResolutionFact(value: unknown): UncertainResolutionFact 
   } else {
     throw corruptRunJournal("Uncertain resolution execution is invalid");
   }
+  if (
+    (execution === "conversation" && value.cause === "job-cancel-unknown") ||
+    (execution === "job" && value.cause === "cancel-unproven")
+  ) {
+    throw corruptRunJournal("Uncertain resolution cause does not match its execution kind");
+  }
   assertIdentifier(value.subject.assignmentId, "Resolution assignment id");
   if (execution === "conversation") {
     assertPositiveSafeInteger(value.subject.ownerEpoch, "Resolution owner epoch");
@@ -507,6 +544,14 @@ export function validateResolutionFact(value: unknown): UncertainResolutionFact 
       )
     ) {
       throw corruptRunJournal("Uncertain resolution decision kind is invalid");
+    }
+    if (
+      execution !== "job" &&
+      value.resolution.kind === "proven-not-started-cancelled"
+    ) {
+      throw corruptRunJournal(
+        "Task-state cancellation resolution belongs only to job execution",
+      );
     }
     if (
       value.resolution.factDigest !==
@@ -571,7 +616,7 @@ export function assertAdmissionReplayContract(input: {
 }
 
 export function assertAssignmentReplayContract(input: {
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly currentRevision: number | undefined;
   readonly runAlreadyAssigned: boolean;
   readonly assignmentAlreadyKnown: boolean;
@@ -592,10 +637,24 @@ export function assertAssignmentReplayContract(input: {
   }
 }
 
+export function bundleAcknowledgementBindsCommitted(input: {
+  readonly observedBundleRef: ArtifactRef | undefined;
+  readonly observedCommitRevision: number | undefined;
+  readonly expectedBundleRef: ArtifactRef;
+  readonly expectedCommitRevision: number;
+}): boolean {
+  return (
+    input.observedBundleRef !== undefined &&
+    input.observedCommitRevision !== undefined &&
+    canonicalize(input.observedBundleRef) === canonicalize(input.expectedBundleRef) &&
+    input.observedCommitRevision === input.expectedCommitRevision
+  );
+}
+
 export function assertDispatchAcknowledgementReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly alreadyAcknowledged: boolean;
   readonly assignmentSuperseded: boolean;
   readonly assignmentClosed: boolean;
@@ -620,7 +679,7 @@ export function assertDispatchAcknowledgementReplayContract(input: {
 export function assertDispatchConflictReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly proofBindsAssignment: boolean;
   readonly handling: unknown;
   readonly assignmentAcknowledged: boolean;
@@ -665,7 +724,7 @@ export function assertDispatchConflictHandlingReplayContract(input: {
 export function assertSupersedeRequestReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly requestAlreadyExists: boolean;
   readonly fenceSeq: number;
   readonly envelopeLsn: number;
@@ -685,7 +744,7 @@ export function assertSupersedeRequestReplayContract(input: {
 export function assertSupersedeStartedObservationReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly proofBindsDurableSource: boolean;
   readonly observationAlreadyExists: boolean;
 }): void {
@@ -743,12 +802,10 @@ export function assignmentTerminationProofKind(
   return "cancel";
 }
 
-export function terminationProofBindsDurableSource(input: {
+type DurableSourceBinding = {
   readonly proof: DurableSourceBoundProof;
   readonly assignmentId: string;
   readonly executorId: string;
-  readonly conversationId: string;
-  readonly ownerEpoch: number;
   readonly dispatchDigest: string;
   readonly supersedeRequest?: {
     readonly fenceSeq: number;
@@ -758,7 +815,14 @@ export function terminationProofBindsDurableSource(input: {
     readonly fenceSeq: number;
     readonly requestId: string;
   };
-}): boolean {
+} & (
+  | { readonly execution?: "conversation"; readonly conversationId: string; readonly ownerEpoch: number }
+  | { readonly execution: "job"; readonly taskId: string; readonly anchorEpoch: number }
+);
+
+export function terminationProofBindsDurableSource(
+  input: DurableSourceBinding,
+): boolean {
   const { proof } = input;
   if (proof.assignmentId !== input.assignmentId || proof.executorId !== input.executorId) {
     return false;
@@ -777,11 +841,14 @@ export function terminationProofBindsDurableSource(input: {
     );
   }
   const cancelProof = proof as CancelProofBody;
-  if (
-    cancelProof.authority.execution !== "conversation" ||
-    cancelProof.authority.conversationId !== input.conversationId ||
-    cancelProof.authority.ownerEpoch !== input.ownerEpoch
-  ) {
+  const authorityMatches = input.execution === "job"
+    ? cancelProof.authority.execution === "job" &&
+      cancelProof.authority.taskId === input.taskId &&
+      cancelProof.authority.anchorEpoch === input.anchorEpoch
+    : cancelProof.authority.execution === "conversation" &&
+      cancelProof.authority.conversationId === input.conversationId &&
+      cancelProof.authority.ownerEpoch === input.ownerEpoch;
+  if (!authorityMatches) {
     return false;
   }
   if (cancelProof.cause === "abort-ticket") return true;
@@ -796,7 +863,7 @@ export function assertAssignmentSupersededReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentIsCurrent: boolean;
   readonly assignmentAlreadyClosed: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly durableStartedObserved: boolean;
   readonly proofBindsDurableSource: boolean;
   readonly proofKind: AssignmentTerminationProofKind;
@@ -833,7 +900,7 @@ export function assertAssignmentSupersededReplayContract(input: {
 export function assertCancelProofAcceptedReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly acceptanceAlreadyExists: boolean;
   readonly durableStartedObserved: boolean;
   readonly proofDecision: CancelProofBody["decision"];
@@ -904,8 +971,8 @@ export function assertStateReplayContract(input: {
 }
 
 export function assertStateAtomicReplayContract(input: {
-  readonly currentState: ConversationRunState | undefined;
-  readonly nextState: ConversationRunState;
+  readonly currentState: SharedRunState | undefined;
+  readonly nextState: SharedRunState;
   readonly hasAtomicCancelFence: boolean;
   readonly hasAtomicOpenResolution: boolean;
   readonly hasAtomicSupersede: boolean;
@@ -992,11 +1059,17 @@ export function assertConversationResolutionBinding(input: {
   }
 }
 
+export function isOpenResolutionFact(
+  fact: UncertainResolutionFact | undefined,
+): fact is UncertainResolutionFact & { readonly resolution?: undefined } {
+  return fact !== undefined && fact.resolution === undefined;
+}
+
 export function assertResolutionOpenReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentBindsRun: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly alreadyOpen: boolean;
   readonly cause: UncertainResolutionFact["cause"];
   readonly hasAtomicUncertainState: boolean;
@@ -1021,12 +1094,14 @@ export function assertResolutionOpenReplayContract(input: {
 
 export function resolutionTargetState(
   kind: NonNullable<UncertainResolutionFact["resolution"]>["kind"],
-): ConversationRunState {
+): "committed" | "queued" | "cancelled" | "failed" {
   if (kind === "late-bundle-committed") return "committed";
   if (kind === "proven-not-started-redispatched" || kind === "user-retry-acknowledged") {
     return "queued";
   }
-  if (kind === "user-abandoned") return "cancelled";
+  if (kind === "proven-not-started-cancelled" || kind === "user-abandoned") {
+    return "cancelled";
+  }
   return "failed";
 }
 
@@ -1075,7 +1150,7 @@ export function assertCommittedReplayContract(input: {
   readonly assignmentExists: boolean;
   readonly assignmentBindsRun: boolean;
   readonly assignmentIsCurrent: boolean;
-  readonly currentState: ConversationRunState | undefined;
+  readonly currentState: SharedRunState | undefined;
   readonly alreadyCommitted: boolean;
   readonly conflictOpen: boolean;
   readonly commitRevisionMatchesAssignedBase: boolean;

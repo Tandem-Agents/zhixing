@@ -24,6 +24,8 @@ import type {
 } from "../contracts/index.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateStagedMutationRecord } from "./commit.js";
+import { validateJobCommitFence } from "./job.js";
+import { assertResourceLeaseBaseContract } from "./resource-lease.js";
 import {
   validateEnvironmentRequirement,
   validateMessages,
@@ -36,10 +38,28 @@ type ConversationEnvelope = Extract<
   { execution: "conversation" }
 >;
 
+type JobEnvelope = Extract<DispatchEnvelope, { execution: "job" }>;
+
 export interface ConversationActivationBinding {
   readonly runId: string;
   readonly conversationId: string;
   readonly ownerEpoch: number;
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly dispatchRef: ArtifactRef;
+  readonly manifestDigest: Digest;
+  readonly permissionLeaseDigest: Digest;
+  readonly capIds: readonly string[];
+  readonly reservation: {
+    readonly reservationId: string;
+    readonly attempt: number;
+  };
+}
+
+export interface JobActivationBinding {
+  readonly jobRunId: string;
+  readonly taskId: string;
+  readonly anchorEpoch: number;
   readonly assignmentId: string;
   readonly executorId: string;
   readonly dispatchRef: ArtifactRef;
@@ -68,6 +88,8 @@ export type UnsignedConversationEnvelope = Omit<
   ConversationEnvelope,
   "signature"
 >;
+
+export type UnsignedJobEnvelope = Omit<JobEnvelope, "signature">;
 
 export type ConversationInteractionOutcome =
   | {
@@ -183,8 +205,35 @@ export function validateConversationEnvelope(
   return envelope;
 }
 
+export function createSignedJobEnvelope(
+  input: UnsignedJobEnvelope,
+  signer: ProtocolSigner,
+  verifier: ProtocolSignatureVerifier,
+): JobEnvelope {
+  const unsigned = snapshot(input, "Dispatch envelope");
+  assertJobEnvelope(unsigned, verifier, false);
+  const envelope = snapshot(
+    {
+      ...unsigned,
+      signature: signer.sign("DispatchEnvelope", 1, unsigned),
+    },
+    "Signed dispatch envelope",
+  ) as JobEnvelope;
+  assertJobEnvelope(envelope, verifier, true);
+  return envelope;
+}
+
+export function validateJobEnvelope(
+  input: JobEnvelope,
+  verifier: ProtocolSignatureVerifier,
+): JobEnvelope {
+  const envelope = snapshot(input, "Dispatch envelope") as JobEnvelope;
+  assertJobEnvelope(envelope, verifier, true);
+  return envelope;
+}
+
 export function dispatchEnvelopeArtifact(
-  envelope: ConversationEnvelope,
+  envelope: DispatchEnvelope,
 ): DispatchEnvelopeArtifact {
   const bytes = Buffer.from(canonicalize(envelope), "utf8");
   return {
@@ -193,7 +242,7 @@ export function dispatchEnvelopeArtifact(
   };
 }
 
-export function dispatchEnvelopeDigest(envelope: ConversationEnvelope): Digest {
+export function dispatchEnvelopeDigest(envelope: DispatchEnvelope): Digest {
   return protocolDigest(
     "DispatchEnvelope",
     1,
@@ -202,7 +251,7 @@ export function dispatchEnvelopeDigest(envelope: ConversationEnvelope): Digest {
 }
 
 export function permissionSnapshotLeaseDigest(
-  envelope: ConversationEnvelope,
+  envelope: DispatchEnvelope,
 ): Digest {
   return protocolDigest(
     "PermissionSnapshotLease",
@@ -210,6 +259,7 @@ export function permissionSnapshotLeaseDigest(
     withoutField(envelope.permissionLease, "signature"),
   );
 }
+
 
 export function buildConversationActivationPayload(input: {
   readonly envelope: ConversationEnvelope;
@@ -326,6 +376,124 @@ export function validateConversationActivation(input: {
     activation.signature,
   );
   assertActivationPayload(payload, input.envelope, input.dispatchRef);
+  return snapshot(payload, "Assignment activation payload");
+}
+
+export function buildJobActivationPayload(input: {
+  readonly envelope: JobEnvelope;
+  readonly dispatchRef: ArtifactRef;
+  readonly commit: { readonly lsn: number; readonly envelopeDigest: Digest };
+  readonly issuedAt: string;
+}): AssignmentActivationPayload<"job"> {
+  const { envelope } = input;
+  const payload = buildJobActivationPayloadFromBinding({
+    binding: {
+      jobRunId: envelope.work.jobRunId,
+      taskId: envelope.work.taskId,
+      anchorEpoch: envelope.work.fence.anchorEpoch,
+      assignmentId: envelope.assignmentId,
+      executorId: envelope.executorId,
+      dispatchRef: input.dispatchRef,
+      manifestDigest: envelope.manifest.digest,
+      permissionLeaseDigest: permissionSnapshotLeaseDigest(envelope),
+      capIds: envelope.capabilities.map((capability) => capability.capId),
+      reservation: {
+        reservationId: envelope.resourceLease.reservationId,
+        attempt: envelope.resourceLease.workload.attempt,
+      },
+    },
+    commit: input.commit,
+    issuedAt: input.issuedAt,
+  });
+  assertJobActivationPayload(payload, envelope, input.dispatchRef);
+  return payload;
+}
+
+export function buildJobActivationPayloadFromBinding(input: {
+  readonly binding: JobActivationBinding;
+  readonly commit: { readonly lsn: number; readonly envelopeDigest: Digest };
+  readonly issuedAt: string;
+}): AssignmentActivationPayload<"job"> {
+  const { binding } = input;
+  const payload: AssignmentActivationPayload<"job"> = {
+    v: 1,
+    ref: {
+      execution: "job",
+      jobRunId: binding.jobRunId,
+      taskId: binding.taskId,
+      anchorEpoch: binding.anchorEpoch,
+    },
+    assignmentId: binding.assignmentId,
+    executorId: binding.executorId,
+    dispatchRef: snapshot(binding.dispatchRef, "Dispatch reference"),
+    manifestDigest: binding.manifestDigest,
+    permissionLeaseDigest: binding.permissionLeaseDigest,
+    capIds: [...binding.capIds],
+    reservation: {
+      reservationId: binding.reservation.reservationId,
+      attempt: binding.reservation.attempt,
+    },
+    commit: snapshot(input.commit, "Assignment commit"),
+    issuedAt: input.issuedAt,
+  };
+  assertJobActivationPayloadShape(payload);
+  return snapshot(payload, "Assignment activation payload");
+}
+
+export function signJobActivation(
+  payload: AssignmentActivationPayload<"job">,
+  signer: ProtocolSigner,
+): AssignmentActivationProof<"job"> {
+  const canonicalPayload = snapshot(payload, "Assignment activation payload");
+  return snapshot(
+    {
+      ...canonicalPayload,
+      signature: signer.sign("AssignmentActivationProof", 1, canonicalPayload),
+    },
+    "Assignment activation proof",
+  );
+}
+
+export function validateJobActivation(input: {
+  readonly envelope: JobEnvelope;
+  readonly activation: AssignmentActivationProof<"job">;
+  readonly dispatchRef: ArtifactRef;
+  readonly verifier: ProtocolSignatureVerifier;
+}): AssignmentActivationPayload<"job"> {
+  const activation = snapshot(
+    input.activation,
+    "Assignment activation proof",
+  ) as AssignmentActivationProof<"job">;
+  assertExactKeys(
+    activation,
+    [
+      "assignmentId",
+      "capIds",
+      "commit",
+      "dispatchRef",
+      "executorId",
+      "issuedAt",
+      "manifestDigest",
+      "permissionLeaseDigest",
+      "ref",
+      "reservation",
+      "signature",
+      "v",
+    ],
+    "Assignment activation proof",
+  );
+  assertSignature(activation.signature, "Assignment activation signature");
+  const payload = withoutField(
+    activation,
+    "signature",
+  ) as AssignmentActivationPayload<"job">;
+  input.verifier.verify(
+    "AssignmentActivationProof",
+    1,
+    payload,
+    activation.signature,
+  );
+  assertJobActivationPayload(payload, input.envelope, input.dispatchRef);
   return snapshot(payload, "Assignment activation payload");
 }
 
@@ -888,6 +1056,9 @@ export function validateLedgerSnapshot(
     value,
     [
       "assignmentId",
+      ...(value.acknowledgedCommitRevision === undefined
+        ? []
+        : ["acknowledgedCommitRevision"]),
       ...(value.cancelProof === undefined ? [] : ["cancelProof"]),
       "lastSeq",
       "phase",
@@ -921,6 +1092,20 @@ export function validateLedgerSnapshot(
   }
   if (value.sealedBundleRef !== undefined) {
     assertArtifactRef(value.sealedBundleRef, "Ledger snapshot sealed bundle reference");
+  }
+  if (
+    (value.phase === "acked") !==
+    (value.acknowledgedCommitRevision !== undefined)
+  ) {
+    throw new TypeError(
+      "Ledger snapshot acknowledged phase is missing its commit revision",
+    );
+  }
+  if (value.acknowledgedCommitRevision !== undefined) {
+    assertNonNegativeInteger(
+      value.acknowledgedCommitRevision,
+      "Ledger snapshot acknowledged commit revision",
+    );
   }
   if ((value.phase === "halted") !== (value.cancelProof !== undefined)) {
     throw new TypeError("Ledger snapshot halted phase is missing its cancel proof");
@@ -1411,23 +1596,170 @@ function assertConversationEnvelope(
   }
 }
 
-function assertManifest(manifest: ConversationEnvelope["manifest"]): void {
+function assertJobEnvelope(
+  envelope: UnsignedJobEnvelope | JobEnvelope,
+  verifier: ProtocolSignatureVerifier,
+  verifyEnvelopeSignature: boolean,
+): asserts envelope is JobEnvelope {
+  assertExactKeys(
+    envelope,
+    [
+      "assignmentId",
+      "capabilities",
+      "dependencyArtifacts",
+      "execution",
+      "executorId",
+      "issuedAt",
+      "manifest",
+      "permissionLease",
+      "resourceLease",
+      ...(verifyEnvelopeSignature ? ["signature"] : []),
+      "v",
+      "work",
+    ],
+    "Dispatch envelope",
+  );
+  assertVersion(envelope.v, "Dispatch envelope");
+  if (envelope.execution !== "job" || envelope.work.t !== "job") {
+    throw new TypeError("Dispatch envelope must contain job work");
+  }
+  assertIdentifier(envelope.assignmentId, "Dispatch assignmentId");
+  assertIdentifier(envelope.executorId, "Dispatch executorId");
+  assertCanonicalTime(envelope.issuedAt, "Dispatch issuedAt");
+  assertManifest(envelope.manifest);
+  assertJobWork(envelope.work);
+  assertPermissionLease(envelope.permissionLease, verifier);
+  assertCapabilities(envelope.capabilities, verifier);
+  assertResourceLease(envelope.resourceLease, verifier);
+  assertArtifactRefs(envelope.dependencyArtifacts, "Dispatch dependencies");
+
+  const work = envelope.work;
+  if (
+    envelope.manifest.baseRef.execution !== "job" ||
+    envelope.manifest.baseRef.taskId !== work.taskId ||
+    envelope.manifest.baseRef.jobRunId !== work.jobRunId ||
+    envelope.manifest.baseRef.taskRevision !== work.fence.taskRevision
+  ) {
+    throw new TypeError("Dispatch manifest does not bind the job occurrence");
+  }
+  const permission = envelope.permissionLease;
+  if (
+    permission.binding.execution !== "job" ||
+    permission.binding.jobRunId !== work.jobRunId ||
+    permission.binding.taskId !== work.taskId ||
+    permission.binding.anchorEpoch !== work.fence.anchorEpoch ||
+    permission.assignmentId !== envelope.assignmentId ||
+    permission.executorId !== envelope.executorId
+  ) {
+    throw new TypeError("Permission lease does not bind the dispatch");
+  }
+  for (const capability of envelope.capabilities) {
+    if (
+      capability.scope.execution !== "job" ||
+      capability.scope.taskId !== work.taskId ||
+      capability.anchorEpoch !== work.fence.anchorEpoch ||
+      capability.assignmentId !== envelope.assignmentId ||
+      capability.executorId !== envelope.executorId
+    ) {
+      throw new TypeError("Authority capability does not bind the dispatch");
+    }
+  }
+  const lease = envelope.resourceLease;
+  if (
+    lease.workload.kind !== "job" ||
+    lease.workload.id !== work.jobRunId ||
+    lease.scopeBinding.kind !== "job" ||
+    lease.scopeBinding.taskId !== work.taskId ||
+    lease.scopeBinding.anchorEpoch !== work.fence.anchorEpoch ||
+    lease.domain.kind !== "anchor" ||
+    lease.domain.anchorEpoch !== work.fence.anchorEpoch ||
+    lease.audience.executorId !== envelope.executorId ||
+    lease.activation.kind !== "assignment" ||
+    lease.activation.assignmentId !== envelope.assignmentId
+  ) {
+    throw new TypeError("Resource lease does not bind the dispatch");
+  }
+  if (
+    work.fence.assignmentId !== envelope.assignmentId ||
+    work.fence.executorId !== envelope.executorId ||
+    work.fence.taskId !== work.taskId ||
+    work.fence.jobRunId !== work.jobRunId
+  ) {
+    throw new TypeError("Job commit fence does not bind the dispatch");
+  }
+  assertSortedUnique(
+    envelope.capabilities.map((capability) => capability.capId),
+    "Dispatch capability ids",
+  );
+
+  if (verifyEnvelopeSignature) {
+    const signed = envelope as JobEnvelope;
+    assertSignature(signed.signature, "Dispatch signature");
+    verifier.verify(
+      "DispatchEnvelope",
+      1,
+      withoutField(signed, "signature"),
+      signed.signature,
+    );
+  }
+}
+
+function assertJobWork(work: JobEnvelope["work"]): void {
+  assertExactKeys(work, ["fence", "instruction", "jobRunId", "t", "taskId"], "Job dispatch");
+  assertIdentifier(work.jobRunId, "Dispatch jobRunId");
+  assertIdentifier(work.taskId, "Dispatch taskId");
+  validateJobCommitFence(work.fence);
+  assertExactKeys(
+    work.instruction,
+    ["kind", "model", "prompt", "tools"],
+    "Job execution instruction",
+    true,
+  );
+  if (work.instruction.kind !== "agent-turn") {
+    throw new TypeError("Job execution instruction kind must be agent-turn");
+  }
+  if (
+    typeof work.instruction.prompt !== "string" ||
+    work.instruction.prompt.length === 0 ||
+    work.instruction.prompt.length > 65_536
+  ) {
+    throw new TypeError("Job execution prompt must be a non-empty bounded string");
+  }
+  if (work.instruction.model !== undefined) {
+    assertIdentifier(work.instruction.model, "Job execution model");
+  }
+  if (work.instruction.tools !== undefined) {
+    assertUniqueIdentifiers(work.instruction.tools, "Job execution tools");
+  }
+}
+
+function assertManifest(manifest: DispatchEnvelope["manifest"]): void {
   assertExactKeys(
     manifest,
     ["baseRef", "credentialBindings", "digest", "environment", "requires", "v"],
     "Execution manifest",
   );
   assertVersion(manifest.v, "Execution manifest");
-  assertExactKeys(
-    manifest.baseRef,
-    ["baseRevision", "conversationId", "execution"],
-    "Manifest base reference",
-  );
-  if (manifest.baseRef.execution !== "conversation") {
-    throw new TypeError("Manifest base reference must be a conversation");
+  if (manifest.baseRef.execution === "conversation") {
+    assertExactKeys(
+      manifest.baseRef,
+      ["baseRevision", "conversationId", "execution"],
+      "Manifest base reference",
+    );
+    assertIdentifier(manifest.baseRef.conversationId, "Manifest conversationId");
+    assertNonNegativeInteger(manifest.baseRef.baseRevision, "Manifest baseRevision");
+  } else if (manifest.baseRef.execution === "job") {
+    assertExactKeys(
+      manifest.baseRef,
+      ["execution", "jobRunId", "taskId", "taskRevision"],
+      "Manifest base reference",
+    );
+    assertIdentifier(manifest.baseRef.jobRunId, "Manifest jobRunId");
+    assertIdentifier(manifest.baseRef.taskId, "Manifest taskId");
+    assertPositiveInteger(manifest.baseRef.taskRevision, "Manifest taskRevision");
+  } else {
+    throw new TypeError("Manifest base reference execution kind is invalid");
   }
-  assertIdentifier(manifest.baseRef.conversationId, "Manifest conversationId");
-  assertNonNegativeInteger(manifest.baseRef.baseRevision, "Manifest baseRevision");
   assertExactKeys(
     manifest.requires,
     [
@@ -1626,7 +1958,7 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
 }
 
 function assertPermissionLease(
-  lease: ConversationEnvelope["permissionLease"],
+  lease: DispatchEnvelope["permissionLease"],
   verifier: ProtocolSignatureVerifier,
 ): void {
   assertExactKeys(
@@ -1646,11 +1978,21 @@ function assertPermissionLease(
     "Permission snapshot lease",
   );
   assertVersion(lease.v, "Permission snapshot lease");
-  assertExactKeys(
-    lease.binding,
-    ["conversationId", "execution", "ownerEpoch", "runId"],
-    "Permission binding",
-  );
+  if (lease.binding.execution === "conversation") {
+    assertExactKeys(
+      lease.binding,
+      ["conversationId", "execution", "ownerEpoch", "runId"],
+      "Permission binding",
+    );
+  } else if (lease.binding.execution === "job") {
+    assertExactKeys(
+      lease.binding,
+      ["anchorEpoch", "execution", "jobRunId", "taskId"],
+      "Permission binding",
+    );
+  } else {
+    throw new TypeError("Permission binding execution kind is invalid");
+  }
   assertNonNegativeInteger(lease.snapshotVersion, "Permission snapshotVersion");
   assertDigest(lease.snapshotDigest, "Permission snapshotDigest");
   assertIdentifier(lease.controlLeaseId, "Permission controlLeaseId");
@@ -1666,13 +2008,19 @@ function assertPermissionLease(
 }
 
 function assertCapabilities(
-  capabilities: ConversationEnvelope["capabilities"],
+  capabilities: DispatchEnvelope["capabilities"],
   verifier: ProtocolSignatureVerifier,
 ): void {
   if (capabilities.length === 0) {
     throw new TypeError("Dispatch must carry at least one authority capability");
   }
   for (const capability of capabilities) {
+    const epochKey = capability.scope.execution === "conversation"
+      ? "ownerEpoch"
+      : capability.scope.execution === "job"
+        ? "anchorEpoch"
+        : undefined;
+    if (!epochKey) throw new TypeError("Capability execution kind is invalid");
     assertExactKeys(
       capability,
       [
@@ -1682,7 +2030,7 @@ function assertCapabilities(
         "expiry",
         "issuedAt",
         "methods",
-        "ownerEpoch",
+        epochKey,
         "resources",
         "scope",
         "signature",
@@ -1691,7 +2039,13 @@ function assertCapabilities(
       "Authority capability",
     );
     assertVersion(capability.v, "Authority capability");
-    assertExactKeys(capability.scope, ["conversationId", "execution"], "Capability scope");
+    assertExactKeys(
+      capability.scope,
+      capability.scope.execution === "conversation"
+        ? ["conversationId", "execution"]
+        : ["execution", "taskId"],
+      "Capability scope",
+    );
     assertIdentifier(capability.capId, "Capability capId");
     assertCanonicalTime(capability.issuedAt, "Capability issuedAt");
     assertCanonicalTime(capability.expiry, "Capability expiry");
@@ -1708,7 +2062,7 @@ function assertCapabilities(
 }
 
 function assertResourceLease(
-  lease: ConversationEnvelope["resourceLease"],
+  lease: DispatchEnvelope["resourceLease"],
   verifier: ProtocolSignatureVerifier,
 ): void {
   assertExactKeys(
@@ -1733,35 +2087,21 @@ function assertResourceLease(
     true,
   );
   assertVersion(lease.v, "Assignment resource lease");
-  assertExactKeys(lease.workload, ["attempt", "id", "kind"], "Lease workload");
-  assertExactKeys(
-    lease.scopeBinding,
-    ["conversationId", "kind", "ownerEpoch"],
-    "Lease scope binding",
-  );
-  assertExactKeys(lease.audience, ["executorId", "model", "provider"], "Lease audience", true);
-  assertExactKeys(lease.budget, ["maxCalls", "maxCostMinor", "maxTokens"], "Lease budget", true);
-  assertExactKeys(lease.activation, ["assignmentId", "kind"], "Lease activation");
-  assertIdentifier(lease.reservationId, "Lease reservationId");
-  assertNonNegativeInteger(lease.workload.attempt, "Lease workload attempt");
-  assertCanonicalTime(lease.issuedAt, "Lease issuedAt");
-  assertCanonicalTime(lease.expiry, "Lease expiry");
-  assertDigest(lease.digest, "Lease digest");
-  const expected = protocolDigest(
-    "ResourceLease",
-    1,
-    withoutFields(lease, ["digest", "signature"]),
-  );
-  if (lease.digest !== expected) {
-    throw new TypeError("Assignment resource lease digest is invalid");
+  assertResourceLeaseBaseContract(lease, verifier, "Lease");
+  if (lease.workload.kind !== "run" && lease.workload.kind !== "job") {
+    throw new TypeError("Lease workload kind is invalid");
   }
-  assertSignature(lease.signature, "Lease signature");
-  verifier.verify(
-    "ResourceLease",
-    1,
-    withoutField(lease, "signature"),
-    lease.signature,
-  );
+  if (
+    lease.scopeBinding.kind !== "conversation" &&
+    lease.scopeBinding.kind !== "job"
+  ) {
+    throw new TypeError("Lease scope binding kind is invalid");
+  }
+  assertExactKeys(lease.activation, ["assignmentId", "kind"], "Lease activation");
+  if (lease.activation.kind !== "assignment") {
+    throw new TypeError("Lease activation kind is invalid");
+  }
+  assertIdentifier(lease.activation.assignmentId, "Lease activation assignmentId");
 }
 
 function assertActivationPayload(
@@ -1806,6 +2146,68 @@ function assertActivationPayloadShape(
   assertArtifactRef(payload.dispatchRef, "Activation dispatchRef");
   assertExactKeys(payload.commit, ["envelopeDigest", "lsn"], "Activation commit");
   assertExactKeys(payload.reservation, ["attempt", "reservationId"], "Activation reservation");
+  assertCanonicalTime(payload.issuedAt, "Activation issuedAt");
+  assertDigest(payload.commit.envelopeDigest, "Activation commit digest");
+  if (!Number.isSafeInteger(payload.commit.lsn) || payload.commit.lsn <= 0) {
+    throw new TypeError("Activation commit LSN must be a positive safe integer");
+  }
+  assertSortedUnique(payload.capIds, "Activation capability ids");
+}
+
+function assertJobActivationPayload(
+  payload: AssignmentActivationPayload<"job">,
+  envelope: JobEnvelope,
+  dispatchRef: ArtifactRef,
+): void {
+  assertJobActivationPayloadShape(payload);
+  const expectedRef = {
+    execution: "job" as const,
+    jobRunId: envelope.work.jobRunId,
+    taskId: envelope.work.taskId,
+    anchorEpoch: envelope.work.fence.anchorEpoch,
+  };
+  if (canonicalize(payload.ref) !== canonicalize(expectedRef)) {
+    throw new TypeError("Activation execution reference does not bind the dispatch");
+  }
+  if (
+    payload.assignmentId !== envelope.assignmentId ||
+    payload.executorId !== envelope.executorId ||
+    canonicalize(payload.dispatchRef) !== canonicalize(dispatchRef) ||
+    payload.manifestDigest !== envelope.manifest.digest ||
+    payload.permissionLeaseDigest !== permissionSnapshotLeaseDigest(envelope) ||
+    canonicalize(payload.capIds) !==
+      canonicalize(envelope.capabilities.map((capability) => capability.capId)) ||
+    payload.reservation.reservationId !== envelope.resourceLease.reservationId ||
+    payload.reservation.attempt !== envelope.resourceLease.workload.attempt
+  ) {
+    throw new TypeError("Assignment activation payload does not bind the dispatch");
+  }
+}
+
+function assertJobActivationPayloadShape(
+  payload: AssignmentActivationPayload<"job">,
+): void {
+  assertVersion(payload.v, "Assignment activation payload");
+  assertExactKeys(
+    payload.ref,
+    ["anchorEpoch", "execution", "jobRunId", "taskId"],
+    "Activation execution reference",
+  );
+  if (payload.ref.execution !== "job") {
+    throw new TypeError("Activation execution reference must be a job");
+  }
+  assertIdentifier(payload.ref.jobRunId, "Activation jobRunId");
+  assertIdentifier(payload.ref.taskId, "Activation taskId");
+  assertPositiveInteger(payload.ref.anchorEpoch, "Activation anchorEpoch");
+  assertIdentifier(payload.assignmentId, "Activation assignmentId");
+  assertIdentifier(payload.executorId, "Activation executorId");
+  assertDigest(payload.manifestDigest, "Activation manifest digest");
+  assertDigest(payload.permissionLeaseDigest, "Activation permission lease digest");
+  assertArtifactRef(payload.dispatchRef, "Activation dispatchRef");
+  assertExactKeys(payload.commit, ["envelopeDigest", "lsn"], "Activation commit");
+  assertExactKeys(payload.reservation, ["attempt", "reservationId"], "Activation reservation");
+  assertIdentifier(payload.reservation.reservationId, "Activation reservationId");
+  assertNonNegativeInteger(payload.reservation.attempt, "Activation reservation attempt");
   assertCanonicalTime(payload.issuedAt, "Activation issuedAt");
   assertDigest(payload.commit.envelopeDigest, "Activation commit digest");
   if (!Number.isSafeInteger(payload.commit.lsn) || payload.commit.lsn <= 0) {
@@ -2123,15 +2525,6 @@ function withoutField<T extends object, K extends keyof T>(
 ): Omit<T, K> {
   const output = { ...value };
   delete output[field];
-  return output;
-}
-
-function withoutFields<T extends object, K extends keyof T>(
-  value: T,
-  fields: readonly K[],
-): Omit<T, K> {
-  const output = { ...value };
-  for (const field of fields) delete output[field];
   return output;
 }
 

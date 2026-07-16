@@ -462,6 +462,7 @@ export type UncertainResolutionOutcome = {
   kind:
     | "late-bundle-committed"
     | "proven-not-started-redispatched"
+    | "proven-not-started-cancelled"
     | "user-verified-side-effects"
     | "user-abandoned"
     | "user-retry-acknowledged";

@@ -40,7 +40,13 @@ type ConversationControlRequest = Extract<
   ControlRequest,
   { t: "cancel" | "uncertain-resolve" }
 >;
-type AdmittedControlRequest = InitialControlRequest | ConversationControlRequest;
+type JobControlRequest = Extract<
+  ControlRequest,
+  { t: "job-run" | "job-cancel" | "uncertain-resolve" }
+>;
+type CreateJobControlRequest = JobControlRequest;
+type AuthorityControlRequest = ConversationControlRequest | JobControlRequest;
+type AdmittedControlRequest = InitialControlRequest | AuthorityControlRequest;
 
 export type InitialControlEnvelope = Omit<ControlEnvelope, "body"> & {
   readonly body: InitialControlRequest;
@@ -48,9 +54,15 @@ export type InitialControlEnvelope = Omit<ControlEnvelope, "body"> & {
 export type ConversationControlEnvelope = Omit<ControlEnvelope, "body"> & {
   readonly body: ConversationControlRequest;
 };
+export type JobControlEnvelope = Omit<ControlEnvelope, "body"> & {
+  readonly body: JobControlRequest;
+};
+export type AuthorityControlEnvelope =
+  | ConversationControlEnvelope
+  | JobControlEnvelope;
 type AdmittedControlEnvelope =
   | InitialControlEnvelope
-  | ConversationControlEnvelope;
+  | AuthorityControlEnvelope;
 
 export interface TrustedControlSource {
   readonly principal: ControlEnvelope["principal"];
@@ -68,9 +80,13 @@ export interface AtomicControlApplicationPlan {
   readonly authorityEntries?: readonly LogicalRecord<unknown>[];
 }
 
-export interface AtomicControlApplicationContext {
+export interface AtomicControlApplicationContext<
+  Envelope extends AuthorityControlEnvelope = AuthorityControlEnvelope,
+> {
   readonly canonicalRequestId: string;
   readonly authorityPrefix: { readonly lastLsn: number; readonly nextLsn: number };
+  readonly envelope: Envelope;
+  readonly ingress?: IngressContext;
 }
 
 type AdmittedControlRequestType = AdmittedControlRequest["t"];
@@ -128,6 +144,8 @@ interface RequestProjection {
   readonly requestType: AdmittedControlRequestType;
   readonly payloadDigest: string;
   readonly surfacePrincipal: string;
+  readonly envelope: AdmittedControlEnvelope;
+  readonly ingress?: IngressContext;
   readonly ingressKey?: string;
   storedResult?: Stored<ControlResult>;
   authorityRevision?: number;
@@ -219,6 +237,44 @@ export function createConversationControlEnvelope(
   return validated;
 }
 
+export interface CreateJobControlEnvelopeInput {
+  readonly requestId: string;
+  readonly source: TrustedControlSource;
+  readonly body: CreateJobControlRequest;
+  readonly at?: string;
+}
+
+export function createJobControlEnvelope(
+  input: CreateJobControlEnvelopeInput,
+): JobControlEnvelope {
+  const source = snapshotTrustedSource(input.source);
+  const body = snapshot(input.body, "Job control request");
+  if (body.t === "job-run") {
+    validateIngressContext(source.ingress ?? failMissingJobIngress());
+  } else if (source.ingress !== undefined) {
+    throw new TypeError("Only job-run control requests accept ingress context");
+  }
+  const at = input.at ?? new Date().toISOString();
+  const envelope = {
+    v: 1 as const,
+    requestId: input.requestId,
+    principal: source.principal,
+    dependencyArtifacts: [],
+    payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
+      body,
+      dependencyArtifacts: [],
+    }),
+    at,
+    body,
+  };
+  const validated = snapshotAdmittedControlEnvelope(envelope);
+  if (!isJobControlEnvelope(validated)) {
+    throw new TypeError("Job control envelope requires a job authority request");
+  }
+  assertTrustedSourceMatches(validated, source);
+  return validated;
+}
+
 export function channelSurfacePrincipal(responder: ChannelResponderRef): string {
   const value = validateChannelResponderRef(responder);
   return `channel:${protocolDigest("ChannelResponderRef", 1, value)}`;
@@ -263,11 +319,16 @@ export class ControlAdmissionJournal {
     }
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
-    return this.#operations.run(() => this.#apply(envelope, input.prepare));
+    return this.#operations.run(() =>
+      this.#apply(envelope, source.ingress, input.prepare)
+    );
   }
 
-  async applyAuthority<State>(input: {
-    readonly envelope: ConversationControlEnvelope;
+  async applyAuthority<
+    State,
+    Envelope extends AuthorityControlEnvelope,
+  >(input: {
+    readonly envelope: Envelope;
     readonly source: TrustedControlSource;
     readonly stream: string;
     readonly initial: State;
@@ -278,13 +339,13 @@ export class ControlAdmissionJournal {
     ) => State | Promise<State>;
     readonly decide: (
       state: State,
-      context: AtomicControlApplicationContext,
+      context: AtomicControlApplicationContext<Envelope>,
     ) => AtomicControlApplicationPlan;
     readonly candidateReferences?: readonly ArtifactRef[];
   }): Promise<ControlAdmissionOutcome> {
-    const envelope = snapshotAdmittedControlEnvelope(input.envelope);
-    if (!isConversationControlEnvelope(envelope)) {
-      throw new TypeError("Atomic authority application requires a conversation control request");
+    const envelope = snapshotAdmittedControlEnvelope(input.envelope) as Envelope;
+    if (!isAuthorityControlEnvelope(envelope)) {
+      throw new TypeError("Atomic authority application requires an authority control request");
     }
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
@@ -293,12 +354,17 @@ export class ControlAdmissionJournal {
       throw new TypeError("Authority control target stream cannot be control");
     }
     return this.#operations.run(async () => {
-      const preparedEnvelope = await prepareEnvelope(envelope, this.#artifacts);
+      const preparedEnvelope = await prepareEnvelope(
+        envelope,
+        source.ingress,
+        this.#artifacts,
+      );
       const receipt = await this.#transact(
         (state) =>
           decideControlReceipt({
             state,
             envelope,
+            ingress: source.ingress,
             storedEnvelope: preparedEnvelope.stored,
           }),
         preparedEnvelope.references,
@@ -319,8 +385,11 @@ export class ControlAdmissionJournal {
     });
   }
 
-  async #completeAuthority<State>(input: {
-    readonly envelope: ConversationControlEnvelope;
+  async #completeAuthority<
+    State,
+    Envelope extends AuthorityControlEnvelope,
+  >(input: {
+    readonly envelope: Envelope;
     readonly preparedEnvelope: PreparedStored<AdmittedControlEnvelope>;
     readonly canonicalRequestId: string;
     readonly stream: string;
@@ -332,7 +401,7 @@ export class ControlAdmissionJournal {
     ) => State | Promise<State>;
     readonly decide: (
       state: State,
-      context: AtomicControlApplicationContext,
+      context: AtomicControlApplicationContext<Envelope>,
     ) => AtomicControlApplicationPlan;
     readonly candidateReferences?: readonly ArtifactRef[];
   }): Promise<ControlAdmissionOutcome> {
@@ -380,14 +449,18 @@ export class ControlAdmissionJournal {
           }
           if (request.storedResult) return replayWithoutAppend(request);
 
+          const canonicalEnvelope = request.envelope as Envelope;
+
           const plan = snapshot(
             input.decide(state.target, {
               canonicalRequestId: input.canonicalRequestId,
               authorityPrefix,
+              envelope: canonicalEnvelope,
+              ...(request.ingress === undefined ? {} : { ingress: request.ingress }),
             }),
             "Atomic control application plan",
           );
-          const result = snapshotControlResult(plan.result, input.envelope.body.t);
+          const result = snapshotControlResult(plan.result, canonicalEnvelope.body.t);
           const authorityEntries = snapshotAuthorityEntries(
             plan.authorityEntries ?? [],
           );
@@ -404,7 +477,7 @@ export class ControlAdmissionJournal {
             value: {
               kind: "applied",
               canonicalRequestId: input.canonicalRequestId,
-              requestType: input.envelope.body.t,
+              requestType: canonicalEnvelope.body.t,
               storedResult: result,
               authorityRevision,
             },
@@ -466,16 +539,22 @@ export class ControlAdmissionJournal {
 
   async #apply(
     envelope: AdmittedControlEnvelope,
+    ingress: IngressContext | undefined,
     prepare: (context: {
       readonly canonicalRequestId: string;
     }) => ControlApplicationPlan | Promise<ControlApplicationPlan>,
   ): Promise<ControlAdmissionOutcome> {
-    const preparedEnvelope = await prepareEnvelope(envelope, this.#artifacts);
+    const preparedEnvelope = await prepareEnvelope(
+      envelope,
+      ingress,
+      this.#artifacts,
+    );
     const receipt = await this.#transact(
       (state) =>
         decideControlReceipt({
           state,
           envelope,
+          ingress,
           storedEnvelope: preparedEnvelope.stored,
         }),
       preparedEnvelope.references,
@@ -487,6 +566,7 @@ export class ControlAdmissionJournal {
     if (receipt.value.kind === "alias") {
       return this.#appendAlias(
         envelope,
+        ingress,
         preparedEnvelope,
         receipt.value,
       );
@@ -509,6 +589,7 @@ export class ControlAdmissionJournal {
         decideControlCompletion({
           state,
           envelope,
+          ingress,
           storedEnvelope: preparedEnvelope.stored,
           canonicalRequestId,
           storedResult: preparedResult.stored,
@@ -524,6 +605,7 @@ export class ControlAdmissionJournal {
     if (completion.value.kind === "alias") {
       return this.#appendAlias(
         envelope,
+        ingress,
         preparedEnvelope,
         completion.value,
       );
@@ -540,6 +622,7 @@ export class ControlAdmissionJournal {
 
   async #appendAlias(
     envelope: AdmittedControlEnvelope,
+    ingress: IngressContext | undefined,
     preparedEnvelope: PreparedStored<AdmittedControlEnvelope>,
     alias: Extract<ControlTransactionValue, { kind: "alias" }>,
   ): Promise<ControlAdmissionOutcome> {
@@ -548,6 +631,7 @@ export class ControlAdmissionJournal {
         decideAppliedAlias({
           state,
           envelope,
+          ingress,
           storedEnvelope: preparedEnvelope.stored,
           canonicalRequestId: alias.canonicalRequestId,
         }),
@@ -659,7 +743,10 @@ async function reduceControlProjection(
   }
 
   if (body.t === "received") {
-    assertExactKeys(body, ["envelope", "requestId", "t"], "received record");
+    assertAllowedKeys(body, ["envelope", "ingress", "requestId", "t"], "received record");
+    for (const key of ["envelope", "requestId", "t"] as const) {
+      if (!(key in body)) throw invalidControlRecord("Control received record is incomplete");
+    }
     assertIdentifier(body.requestId, "Control received requestId");
     const storedEnvelope = snapshotStored<AdmittedControlEnvelope>(body.envelope);
     const envelope = snapshotAdmittedControlEnvelope(
@@ -668,6 +755,10 @@ async function reduceControlProjection(
     if (envelope.requestId !== body.requestId) {
       throw invalidControlRecord("Control received requestId does not match its envelope");
     }
+    const ingress = body.ingress === undefined
+      ? undefined
+      : validateIngressContext(body.ingress as IngressContext);
+    assertDurableIngressMatches(envelope, ingress);
     const existing = getRequest(state, envelope.requestId);
     if (existing) {
       if (!sameRequestBinding(existing, envelope)) {
@@ -676,7 +767,7 @@ async function reduceControlProjection(
       return state;
     }
 
-    const request = requestProjection(envelope);
+    const request = requestProjection(envelope, ingress);
     state.requests.set(envelope.requestId, request);
     const key = ingressKey(envelope);
     if (key) {
@@ -726,6 +817,7 @@ async function reduceControlProjection(
 function decideControlReceipt(input: {
   readonly state: ControlProjectionDraft;
   readonly envelope: AdmittedControlEnvelope;
+  readonly ingress?: IngressContext;
   readonly storedEnvelope: Stored<AdmittedControlEnvelope>;
 }) {
   const byRequest = getRequest(input.state, input.envelope.requestId);
@@ -757,7 +849,13 @@ function decideControlReceipt(input: {
 
   return {
     kind: "append" as const,
-    entries: [receivedRecord(input.envelope.requestId, input.storedEnvelope)],
+    entries: [
+      receivedRecord(
+        input.envelope.requestId,
+        input.storedEnvelope,
+        input.ingress,
+      ),
+    ],
     value: {
       kind: "pending" as const,
       canonicalRequestId: input.envelope.requestId,
@@ -768,6 +866,7 @@ function decideControlReceipt(input: {
 function decideControlCompletion(input: {
   readonly state: ControlProjectionDraft;
   readonly envelope: AdmittedControlEnvelope;
+  readonly ingress?: IngressContext;
   readonly storedEnvelope: Stored<AdmittedControlEnvelope>;
   readonly canonicalRequestId: string;
   readonly storedResult: Stored<ControlResult>;
@@ -797,7 +896,11 @@ function decideControlCompletion(input: {
       ),
       ...(alias
         ? [
-            receivedRecord(input.envelope.requestId, input.storedEnvelope),
+            receivedRecord(
+              input.envelope.requestId,
+              input.storedEnvelope,
+              input.ingress,
+            ),
             appliedRecord(
               input.envelope.requestId,
               input.storedResult,
@@ -819,6 +922,7 @@ function decideControlCompletion(input: {
 function decideAppliedAlias(input: {
   readonly state: ControlProjectionDraft;
   readonly envelope: AdmittedControlEnvelope;
+  readonly ingress?: IngressContext;
   readonly storedEnvelope: Stored<AdmittedControlEnvelope>;
   readonly canonicalRequestId: string;
 }) {
@@ -840,7 +944,11 @@ function decideAppliedAlias(input: {
   return {
     kind: "append" as const,
     entries: [
-      receivedRecord(input.envelope.requestId, input.storedEnvelope),
+      receivedRecord(
+        input.envelope.requestId,
+        input.storedEnvelope,
+        input.ingress,
+      ),
       appliedRecord(
         input.envelope.requestId,
         canonical.storedResult,
@@ -854,8 +962,17 @@ function decideAppliedAlias(input: {
 function receivedRecord(
   requestId: string,
   envelope: Stored<AdmittedControlEnvelope>,
+  ingress?: IngressContext,
 ): LogicalRecord<ControlRecord> {
-  return { stream: "control", body: { t: "received", requestId, envelope } };
+  return {
+    stream: "control",
+    body: {
+      t: "received",
+      requestId,
+      envelope,
+      ...(ingress === undefined ? {} : { ingress }),
+    },
+  };
 }
 
 function appliedRecord(
@@ -933,13 +1050,18 @@ function ingressProjection(request: RequestProjection): IngressProjection {
   };
 }
 
-function requestProjection(envelope: AdmittedControlEnvelope): RequestProjection {
+function requestProjection(
+  envelope: AdmittedControlEnvelope,
+  ingress?: IngressContext,
+): RequestProjection {
   const key = ingressKey(envelope);
   return {
     requestId: envelope.requestId,
     requestType: envelope.body.t,
     payloadDigest: envelope.payloadDigest,
     surfacePrincipal: envelope.principal.surfacePrincipal,
+    envelope: snapshot(envelope, "Control request envelope"),
+    ...(ingress === undefined ? {} : { ingress: snapshot(ingress, "Control ingress") }),
     ...(key ? { ingressKey: key } : {}),
   };
 }
@@ -957,6 +1079,7 @@ function sameRequestBinding(
   right: AdmittedControlEnvelope,
 ): boolean {
   return (
+    left.requestType === right.body.t &&
     left.payloadDigest === right.payloadDigest &&
     left.surfacePrincipal === right.principal.surfacePrincipal
   );
@@ -1024,14 +1147,20 @@ async function materializeOutcome(
 
 async function prepareEnvelope(
   envelope: AdmittedControlEnvelope,
+  ingress: IngressContext | undefined,
   artifacts: ArtifactStore,
 ): Promise<PreparedStored<AdmittedControlEnvelope>> {
   const inline: ControlRecord = {
     t: "received",
     requestId: envelope.requestId,
     envelope,
+    ...(ingress === undefined ? {} : { ingress }),
   };
-  return prepareStored(envelope, inline, artifacts);
+  const prepared = await prepareStored(envelope, inline, artifacts);
+  assertControlRecordFits(
+    receivedRecord(envelope.requestId, prepared.stored, ingress).body,
+  );
+  return prepared;
 }
 
 async function prepareResult(
@@ -1139,7 +1268,28 @@ function isInitialControlEnvelope(
 function isConversationControlEnvelope(
   envelope: AdmittedControlEnvelope,
 ): envelope is ConversationControlEnvelope {
-  return envelope.body.t === "cancel" || envelope.body.t === "uncertain-resolve";
+  return (
+    envelope.body.t === "cancel" ||
+    (envelope.body.t === "uncertain-resolve" &&
+      envelope.body.ref.execution === "conversation")
+  );
+}
+
+function isJobControlEnvelope(
+  envelope: AdmittedControlEnvelope,
+): envelope is JobControlEnvelope {
+  return (
+    envelope.body.t === "job-run" ||
+    envelope.body.t === "job-cancel" ||
+    (envelope.body.t === "uncertain-resolve" &&
+      envelope.body.ref.execution === "job")
+  );
+}
+
+function isAuthorityControlEnvelope(
+  envelope: AdmittedControlEnvelope,
+): envelope is AuthorityControlEnvelope {
+  return isConversationControlEnvelope(envelope) || isJobControlEnvelope(envelope);
 }
 
 function snapshotTrustedSource(value: TrustedControlSource): TrustedControlSource {
@@ -1172,9 +1322,26 @@ function assertTrustedSourceMatches(
     }
     return;
   }
-  if (envelope.body.t === "cancel" || envelope.body.t === "uncertain-resolve") {
+  if (envelope.body.t === "job-run") {
+    const ingress = source.ingress;
+    if (!ingress) {
+      throw new TypeError("job-run requires owner-derived ingress context");
+    }
+    if (
+      ingress.surfacePrincipal !== envelope.principal.surfacePrincipal ||
+      ingress.deviceId !== envelope.principal.deviceId
+    ) {
+      throw new TypeError("job-run does not match its owner-derived ingress context");
+    }
+    return;
+  }
+  if (
+    envelope.body.t === "cancel" ||
+    envelope.body.t === "job-cancel" ||
+    envelope.body.t === "uncertain-resolve"
+  ) {
     if (source.ingress !== undefined) {
-      throw new TypeError("Conversation control requests do not accept ingress context");
+      throw new TypeError("Authority control requests do not accept ingress context");
     }
     return;
   }
@@ -1217,6 +1384,31 @@ function assertAdmittedControlRequest(value: unknown): void {
     }
     return;
   }
+  if (value.t === "job-run") {
+    assertExactKeys(
+      value,
+      ["anchorEpoch", "t", "taskId"],
+      "job-run request",
+    );
+    assertIdentifier(value.taskId, "job-run taskId");
+    if (!Number.isSafeInteger(value.anchorEpoch) || (value.anchorEpoch as number) < 0) {
+      throw new TypeError("job-run anchorEpoch must be a non-negative safe integer");
+    }
+    return;
+  }
+  if (value.t === "job-cancel") {
+    assertExactKeys(
+      value,
+      ["anchorEpoch", "jobRunId", "t", "taskId"],
+      "job-cancel request",
+    );
+    assertIdentifier(value.taskId, "job-cancel taskId");
+    assertIdentifier(value.jobRunId, "job-cancel jobRunId");
+    if (!Number.isSafeInteger(value.anchorEpoch) || (value.anchorEpoch as number) < 0) {
+      throw new TypeError("job-cancel anchorEpoch must be a non-negative safe integer");
+    }
+    return;
+  }
   if (value.t === "uncertain-resolve") {
     assertExactKeys(
       value,
@@ -1224,18 +1416,30 @@ function assertAdmittedControlRequest(value: unknown): void {
       "uncertain-resolve request",
     );
     assertPlainRecord(value.ref, "uncertain-resolve ref");
-    assertExactKeys(
-      value.ref,
-      ["conversationId", "execution", "ownerEpoch", "runId"],
-      "uncertain-resolve ref",
-    );
-    if (value.ref.execution !== "conversation") {
-      throw new TypeError("Control admission only accepts conversation uncertain resolution");
-    }
-    assertIdentifier(value.ref.conversationId, "uncertain-resolve conversationId");
-    assertIdentifier(value.ref.runId, "uncertain-resolve runId");
-    if (!Number.isSafeInteger(value.ref.ownerEpoch) || (value.ref.ownerEpoch as number) < 0) {
-      throw new TypeError("uncertain-resolve ownerEpoch must be a non-negative safe integer");
+    if (value.ref.execution === "conversation") {
+      assertExactKeys(
+        value.ref,
+        ["conversationId", "execution", "ownerEpoch", "runId"],
+        "conversation uncertain-resolve ref",
+      );
+      assertIdentifier(value.ref.conversationId, "uncertain-resolve conversationId");
+      assertIdentifier(value.ref.runId, "uncertain-resolve runId");
+      if (!Number.isSafeInteger(value.ref.ownerEpoch) || (value.ref.ownerEpoch as number) < 0) {
+        throw new TypeError("uncertain-resolve ownerEpoch must be a non-negative safe integer");
+      }
+    } else if (value.ref.execution === "job") {
+      assertExactKeys(
+        value.ref,
+        ["anchorEpoch", "execution", "jobRunId", "taskId"],
+        "job uncertain-resolve ref",
+      );
+      assertIdentifier(value.ref.taskId, "uncertain-resolve taskId");
+      assertIdentifier(value.ref.jobRunId, "uncertain-resolve jobRunId");
+      if (!Number.isSafeInteger(value.ref.anchorEpoch) || (value.ref.anchorEpoch as number) < 0) {
+        throw new TypeError("uncertain-resolve anchorEpoch must be a non-negative safe integer");
+      }
+    } else {
+      throw new TypeError("uncertain-resolve execution is invalid");
     }
     if (
       typeof value.openFactDigest !== "string" ||
@@ -1254,7 +1458,7 @@ function assertAdmittedControlRequest(value: unknown): void {
   }
   if (value.t !== "input") {
     throw new TypeError(
-      "Control admission accepts input, session-create, cancel, or uncertain-resolve",
+      "Control admission does not accept this control request type",
     );
   }
   assertExactKeys(
@@ -1326,6 +1530,18 @@ function snapshotControlResult(
       throw new TypeError("cancel requires a matching result body");
     }
     assertConversationRunState(result.body.runState, "cancel runState");
+  } else if (requestType === "job-run") {
+    assertExactKeys(result.body, ["jobRunId", "t"], "job-run result");
+    if (result.body.t !== "job-run") {
+      throw new TypeError("job-run requires a matching result body");
+    }
+    assertIdentifier(result.body.jobRunId, "Result jobRunId");
+  } else if (requestType === "job-cancel") {
+    assertExactKeys(result.body, ["runState", "t"], "job-cancel result");
+    if (result.body.t !== "job-cancel") {
+      throw new TypeError("job-cancel requires a matching result body");
+    }
+    assertJobRunState(result.body.runState, "job-cancel runState");
   } else {
     assertExactKeys(
       result.body,
@@ -1335,7 +1551,10 @@ function snapshotControlResult(
     if (result.body.t !== "uncertain-resolve") {
       throw new TypeError("uncertain-resolve requires a matching result body");
     }
-    assertConversationRunState(result.body.state, "uncertain-resolve state");
+    assertUncertainResolutionTargetState(
+      result.body.state,
+      "uncertain-resolve state",
+    );
     if (
       typeof result.body.factDigest !== "string" ||
       !/^sha256:[a-f0-9]{64}$/u.test(result.body.factDigest)
@@ -1438,11 +1657,76 @@ function assertConversationRunState(value: unknown, label: string): void {
   }
 }
 
+function assertJobRunState(value: unknown, label: string): void {
+  const states = new Set([
+    "queued",
+    "dispatched",
+    "running",
+    "cancel-requested",
+    "committed",
+    "cancelled",
+    "failed",
+    "expired",
+    "missed",
+    "uncertain",
+  ]);
+  if (typeof value !== "string" || !states.has(value)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+}
+
+function assertUncertainResolutionTargetState(value: unknown, label: string): void {
+  if (value !== "queued" && value !== "cancelled" && value !== "failed") {
+    throw new TypeError(`${label} is invalid`);
+  }
+}
+
 function assertCanonicalTime(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string") throw new TypeError(`${label} must be an ISO timestamp`);
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
     throw new TypeError(`${label} must be a canonical ISO timestamp`);
+  }
+}
+
+function failMissingJobIngress(): never {
+  throw new TypeError("job-run requires owner-derived ingress context");
+}
+
+function assertDurableIngressMatches(
+  envelope: AdmittedControlEnvelope,
+  ingress: IngressContext | undefined,
+): void {
+  const requiresIngress = envelope.body.t === "input" || envelope.body.t === "job-run";
+  if (requiresIngress !== (ingress !== undefined)) {
+    throw invalidControlRecord(
+      requiresIngress
+        ? "Control received record is missing its owner-derived ingress"
+        : "Control received record carries ingress for a request that forbids it",
+    );
+  }
+  if (!ingress) return;
+  if (
+    ingress.surfacePrincipal !== envelope.principal.surfacePrincipal ||
+    ingress.deviceId !== envelope.principal.deviceId
+  ) {
+    throw invalidControlRecord("Control received ingress does not match its principal");
+  }
+  if (
+    envelope.body.t === "input" &&
+    (ingress.ingressId !== envelope.body.ingress.ingressId ||
+      ingress.kind !== envelope.body.ingress.source)
+  ) {
+    throw invalidControlRecord("Control received ingress does not match its input identity");
+  }
+}
+
+function assertControlRecordFits(record: ControlRecord): void {
+  if (
+    Buffer.byteLength(canonicalize(record), "utf8") >
+    MAX_INLINE_LOGICAL_RECORD_BYTES
+  ) {
+    throw new TypeError("Control record exceeds the durable record limit");
   }
 }
 

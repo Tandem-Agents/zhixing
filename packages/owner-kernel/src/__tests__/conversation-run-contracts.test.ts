@@ -4,6 +4,7 @@ import {
   assertAdmissionReplayContract,
   assertAssignmentReplayContract,
   assertAssignmentSupersededReplayContract,
+  bundleAcknowledgementBindsCommitted,
   assertCancelFenceReplayContract,
   assertCancelProofAcceptedReplayContract,
   assertCapabilityRevocationReplayContract,
@@ -32,333 +33,9 @@ import {
   type ConversationRunRecordType,
 } from "../conversation-run-contracts.js";
 
-const CONTRACT_IDS = [
-  "record.closed-structure",
-  "record.nested-protocol-validation",
-  "admission.atomic-queued",
-  "assignment.atomic-current-head",
-  "ack.current-active-binding",
-  "conflict.current-assignment-binding",
-  "conflict.handling-authority-truth",
-  "supersede.current-assignment-binding",
-  "supersede.request-fence-lsn",
-  "supersede.started-observation-binding",
-  "cancel.fence-lsn-atomic-target",
-  "cancel.accepted-proof-binding",
-  "termination.durable-source-binding",
-  "capability.assignment-binding",
-  "state.transition-assignment-binding",
-  "state.atomic-companions",
-  "state.single-active-run",
-  "resolution.authority-binding",
-  "resolution.open-lifecycle",
-  "resolution.close-lifecycle",
-  "commit.atomic-closure",
-  "bundle.historical-assignment-fence",
-  "internal.closed-structure",
-  "producer.authoritative-envelope",
-  "reducer.shared-contract-predicate",
-  "guard.inline-fact-projection",
-  "recovery.same-authoritative-reducer",
-  "test.parameterized-adversarial",
-] as const;
-
-type ContractId = (typeof CONTRACT_IDS)[number];
-type CoverageRecordType =
-  | ConversationRunRecordType
-  | ConversationRunInternalRecord["kind"];
-type MatrixColumn =
-  | "onlineProducer"
-  | "fullReducer"
-  | "lightweightGuard"
-  | "recoveryConsumer"
-  | "adversarialTest";
-type MatrixCell =
-  | {
-      readonly status: "implemented";
-      readonly contracts: readonly ContractId[];
-      readonly evidence: string;
-    }
-  | { readonly status: "not-applicable"; readonly reason: string };
-type MatrixRow = Readonly<Record<MatrixColumn, MatrixCell>>;
-
-const implemented = (
-  contracts: readonly ContractId[],
-  evidence: string,
-): MatrixCell => ({ status: "implemented", contracts, evidence });
-const notApplicable = (reason: string): MatrixCell => ({
-  status: "not-applicable",
-  reason,
-});
-
-const guardStructural = implemented(
-  ["record.closed-structure", "guard.inline-fact-projection"],
-  "submission guard validates the shared record structure; this record never mutates the guard authorization projection",
-);
-
-const guardSemantic = (
-  contracts: readonly ContractId[],
-  evidence: string,
-): MatrixCell =>
-  implemented(
-    ["record.closed-structure", "guard.inline-fact-projection", ...contracts],
-    evidence,
-  );
-
-function runRecordRow(
-  contracts: readonly ContractId[],
-  lightweightGuard: MatrixCell,
-): MatrixRow {
-  return {
-    onlineProducer: implemented(
-      ["producer.authoritative-envelope", ...contracts],
-      "authoritative transaction emits the record in one CommitEnvelope",
-    ),
-    fullReducer: implemented(
-      ["record.closed-structure", "reducer.shared-contract-predicate", ...contracts],
-      "full run reducer applies shared structure and applicable semantic predicates",
-    ),
-    lightweightGuard,
-    recoveryConsumer: implemented(
-      ["recovery.same-authoritative-reducer", ...contracts],
-      "restart replay uses the same full reducer and shared predicates",
-    ),
-    adversarialTest: implemented(
-      ["test.parameterized-adversarial", "record.closed-structure", ...contracts],
-      "this matrix test plus assignment-ledger replay corruption scenarios",
-    ),
-  };
-}
-
-const CONTRACT_EXECUTION_MATRIX = {
-  admitted: runRecordRow(
-    ["admission.atomic-queued"],
-    guardSemantic(
-      ["admission.atomic-queued"],
-      "guard reducer applies the shared admission predicate over inline queue facts",
-    ),
-  ),
-  assigned: runRecordRow(
-    ["assignment.atomic-current-head"],
-    guardSemantic(
-      ["assignment.atomic-current-head"],
-      "guard reducer applies the shared assignment predicate and keeps the full assigned snapshot (ownerEpoch/baseRevision/dispatchDigest) for zero-artifact fences",
-    ),
-  ),
-  "dispatch-acked": runRecordRow(
-    ["ack.current-active-binding"],
-    guardSemantic(
-      ["ack.current-active-binding"],
-      "guard reducer applies the shared acknowledgement predicate and records the acked flag",
-    ),
-  ),
-  "dispatch-conflict": runRecordRow(
-    [
-      "record.nested-protocol-validation",
-      "conflict.current-assignment-binding",
-      "conflict.handling-authority-truth",
-    ],
-    guardSemantic(
-      [
-        "conflict.current-assignment-binding",
-        "conflict.handling-authority-truth",
-      ],
-      "guard reducer rebuilds the expected activation from the assigned snapshot binding and applies both shared conflict predicates without artifact reads",
-    ),
-  ),
-  "dispatch-conflict-contained": runRecordRow(
-    ["record.nested-protocol-validation", "termination.durable-source-binding"],
-    guardStructural,
-  ),
-  "assignment-superseded": runRecordRow(
-    [
-      "record.nested-protocol-validation",
-      "supersede.current-assignment-binding",
-      "termination.durable-source-binding",
-    ],
-    guardSemantic(
-      [
-        "supersede.current-assignment-binding",
-        "termination.durable-source-binding",
-      ],
-      "guard reducer verifies durable-started, proof source binding and atomic closure before dropping the current mapping",
-    ),
-  ),
-  "supersede-requested": runRecordRow(
-    ["supersede.request-fence-lsn"],
-    guardSemantic(
-      ["supersede.request-fence-lsn"],
-      "guard reducer applies the shared request predicate and keeps the fence for proof binding",
-    ),
-  ),
-  "supersede-started-observed": runRecordRow(
-    [
-      "record.nested-protocol-validation",
-      "supersede.started-observation-binding",
-      "termination.durable-source-binding",
-    ],
-    guardSemantic(
-      [
-        "supersede.started-observation-binding",
-        "termination.durable-source-binding",
-      ],
-      "guard reducer applies the shared observation predicate and marks the durable started fact",
-    ),
-  ),
-  "cancel-fence": runRecordRow(
-    ["cancel.fence-lsn-atomic-target"],
-    guardSemantic(
-      ["cancel.fence-lsn-atomic-target"],
-      "guard reducer applies the shared fence predicate and keeps the fence for proof binding",
-    ),
-  ),
-  "capability-revoked": runRecordRow(
-    ["capability.assignment-binding"],
-    guardSemantic(
-      ["capability.assignment-binding"],
-      "guard reducer applies the shared revocation predicate over its inline capability set",
-    ),
-  ),
-  "interaction-mirror": runRecordRow(
-    ["record.nested-protocol-validation"],
-    guardStructural,
-  ),
-  state: runRecordRow(
-    [
-      "state.transition-assignment-binding",
-      "state.atomic-companions",
-      "state.single-active-run",
-    ],
-    guardSemantic(
-      [
-        "state.transition-assignment-binding",
-        "state.atomic-companions",
-        "state.single-active-run",
-      ],
-      "guard reducer applies all shared state predicates and accumulates the durable started set",
-    ),
-  ),
-  committed: runRecordRow(
-    ["commit.atomic-closure", "bundle.historical-assignment-fence"],
-    guardSemantic(
-      ["commit.atomic-closure"],
-      "guard reducer applies the shared committed predicate; the historical bundle fence is replayed by the cold exact submission path from the assigned snapshot",
-    ),
-  ),
-  resolution: runRecordRow(
-    [
-      "resolution.authority-binding",
-      "resolution.open-lifecycle",
-      "resolution.close-lifecycle",
-    ],
-    guardSemantic(
-      [
-        "resolution.authority-binding",
-        "resolution.open-lifecycle",
-        "resolution.close-lifecycle",
-      ],
-      "guard reducer applies all shared resolution predicates over inline facts",
-    ),
-  ),
-  "cancel-contained": runRecordRow(
-    ["record.nested-protocol-validation", "termination.durable-source-binding"],
-    guardStructural,
-  ),
-  "cancel-proof-accepted": runRecordRow(
-    [
-      "record.nested-protocol-validation",
-      "cancel.accepted-proof-binding",
-      "termination.durable-source-binding",
-    ],
-    guardSemantic(
-      ["cancel.accepted-proof-binding", "termination.durable-source-binding"],
-      "guard reducer applies the shared acceptance predicate against its fence, durable-started and revocation facts",
-    ),
-  ),
-  "not-started-rejected": runRecordRow(
-    ["record.nested-protocol-validation", "termination.durable-source-binding"],
-    guardStructural,
-  ),
-  "content-asset-index": {
-    onlineProducer: implemented(
-      ["producer.authoritative-envelope", "internal.closed-structure"],
-      "commit transaction emits the content index sidecar",
-    ),
-    fullReducer: implemented(
-      ["internal.closed-structure", "reducer.shared-contract-predicate"],
-      "full reducer validates structure and binds entries to the sealed bundle",
-    ),
-    lightweightGuard: implemented(
-      ["internal.closed-structure", "guard.inline-fact-projection"],
-      "guard validates and fingerprints the inline commit sidecar without artifact reads",
-    ),
-    recoveryConsumer: implemented(
-      ["internal.closed-structure", "recovery.same-authoritative-reducer"],
-      "restart commit projection consumes the same validated sidecar",
-    ),
-    adversarialTest: implemented(
-      ["internal.closed-structure", "test.parameterized-adversarial"],
-      "parameterized internal-record corruption cases",
-    ),
-  },
-  "conversation-commit-projection": {
-    onlineProducer: notApplicable(
-      "record is emitted only by the durable recovery projector after commit replay",
-    ),
-    fullReducer: implemented(
-      ["internal.closed-structure", "reducer.shared-contract-predicate"],
-      "full reducer validates and binds one unprojected committed bundle",
-    ),
-    lightweightGuard: implemented(
-      ["internal.closed-structure", "guard.inline-fact-projection"],
-      "guard validates the internal record and intentionally makes no authorization mutation",
-    ),
-    recoveryConsumer: implemented(
-      ["internal.closed-structure", "recovery.same-authoritative-reducer"],
-      "pending commit projection recovery is both producer and consumer",
-    ),
-    adversarialTest: implemented(
-      ["internal.closed-structure", "test.parameterized-adversarial"],
-      "parameterized internal-record corruption cases",
-    ),
-  },
-} as const satisfies Record<CoverageRecordType, MatrixRow>;
-
 const verifier: ProtocolSignatureVerifier = { verify: () => undefined };
 
-describe("conversation run contract execution matrix", () => {
-  it("closes every record type across every execution point without pending cells", () => {
-    const expectedTypes = [
-      ...Object.keys(CONVERSATION_RUN_RECORD_SHAPES),
-      ...CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
-    ].sort();
-    expect(Object.keys(CONTRACT_EXECUTION_MATRIX).sort()).toEqual(expectedTypes);
-
-    const columns: readonly MatrixColumn[] = [
-      "onlineProducer",
-      "fullReducer",
-      "lightweightGuard",
-      "recoveryConsumer",
-      "adversarialTest",
-    ];
-    const knownContracts = new Set<string>(CONTRACT_IDS);
-    for (const [recordType, row] of Object.entries(CONTRACT_EXECUTION_MATRIX)) {
-      expect(Object.keys(row).sort(), recordType).toEqual([...columns].sort());
-      for (const column of columns) {
-        const cell = row[column];
-        if (cell.status === "not-applicable") {
-          expect(cell.reason.length, `${recordType}.${column}`).toBeGreaterThan(20);
-          continue;
-        }
-        expect(cell.contracts.length, `${recordType}.${column}`).toBeGreaterThan(0);
-        expect(cell.evidence.length, `${recordType}.${column}`).toBeGreaterThan(20);
-        for (const contract of cell.contracts) {
-          expect(knownContracts.has(contract), `${recordType}.${column}.${contract}`).toBe(true);
-        }
-      }
-    }
-  });
-
+describe("conversation record shape registry", () => {
   it.each(Object.keys(CONVERSATION_RUN_RECORD_SHAPES) as ConversationRunRecordType[])(
     "rejects an unknown field for %s through the shared structural validator",
     (recordType) => {
@@ -1067,6 +744,48 @@ describe("shared conversation run semantic predicates", () => {
   it.each(cases)("accepts and rejects the same $name predicate", ({ accept, reject }) => {
     expect(accept).not.toThrow();
     expect(reject).toThrow();
+  });
+
+  it("binds bundle acknowledgement identity across both execution domains", () => {
+    const expectedBundleRef = {
+      digest: `sha256:${"4".repeat(64)}`,
+      bytes: 128,
+    };
+    expect(
+      bundleAcknowledgementBindsCommitted({
+        observedBundleRef: expectedBundleRef,
+        observedCommitRevision: 7,
+        expectedBundleRef,
+        expectedCommitRevision: 7,
+      }),
+    ).toBe(true);
+    expect(
+      bundleAcknowledgementBindsCommitted({
+        observedBundleRef: {
+          digest: `sha256:${"5".repeat(64)}`,
+          bytes: 128,
+        },
+        observedCommitRevision: 7,
+        expectedBundleRef,
+        expectedCommitRevision: 7,
+      }),
+    ).toBe(false);
+    expect(
+      bundleAcknowledgementBindsCommitted({
+        observedBundleRef: expectedBundleRef,
+        observedCommitRevision: 8,
+        expectedBundleRef,
+        expectedCommitRevision: 7,
+      }),
+    ).toBe(false);
+    expect(
+      bundleAcknowledgementBindsCommitted({
+        observedBundleRef: undefined,
+        observedCommitRevision: undefined,
+        expectedBundleRef,
+        expectedCommitRevision: 7,
+      }),
+    ).toBe(false);
   });
 
   it("binds every termination proof kind to its durable source", () => {

@@ -218,6 +218,7 @@ export interface LedgerSnapshot extends WireSchemaV1<"LedgerSnapshot"> {
     | "sealed"
     | "acked";
   sealedBundleRef?: import("./foundation.js").ArtifactRef;
+  acknowledgedCommitRevision?: number;
   cancelProof?: CancelProofBody;
 }
 

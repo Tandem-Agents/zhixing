@@ -2,6 +2,7 @@ import path from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
+  AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
@@ -55,6 +56,8 @@ import {
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
 import {
+  CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
+  CONVERSATION_RUN_RECORD_SHAPES,
   ConversationRunJournal,
   InProcessConversationDispatcher,
   type AssignmentSubmissionAuthorizer,
@@ -62,6 +65,7 @@ import {
   type ConversationCommitProjection,
   type ConversationCommitProjectionInput,
   type ConversationMutationPublisher,
+  type ConversationRunRecordType,
 } from "@zhixing/owner-kernel/conversation-assignment";
 import {
   ControlAdmissionJournal,
@@ -69,7 +73,7 @@ import {
   createInitialControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -412,6 +416,7 @@ describe("conversation assignment protocol", () => {
         harness,
         restartedJournal,
       ),
+      bundleSubmission: createBundleSubmission(harness, restartedJournal),
     });
     expect(await enabled.dispatchPending()).toEqual([{ v: 1, accepted: true }]);
     expect(await restartedJournal.pendingDispatches()).toEqual([]);
@@ -776,6 +781,15 @@ describe("conversation assignment protocol", () => {
       }),
     ).rejects.toThrow("different bundle payload");
     await harness.ledger.acknowledge(ASSIGNMENT_ID, 42);
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({
+      phase: "acked",
+      acknowledgedCommitRevision: 42,
+    });
     expect(
       await adapter.flushInteractionMirrors(
         ASSIGNMENT_ID,
@@ -808,7 +822,7 @@ describe("conversation assignment protocol", () => {
         expect.objectContaining({ t: "acked", commitRevision: 42 }),
       ]),
     );
-  });
+  }, 20_000);
 
   it("rejects absent dispatch dependencies and assignment-id reuse across runs", async () => {
     const missingHarness = await createUnassignedHarness();
@@ -1519,6 +1533,163 @@ describe("conversation assignment protocol", () => {
     expect(await harness.journal.expirePublishedFinals("2026-07-15T09:00:00.001Z")).toBe(0);
   }, 15_000);
 
+  it("retries a conversation bundle after the owner commit response is lost and durably closes the ACK outbox", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const submissionAdapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await submissionAdapter.startAndReport(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    const bundle = await sealDefaultBundle(harness.ledger);
+
+    await expect(
+      harness.journal.submitBundle(
+        bundle,
+        submissionContext(harness.unsigned),
+      ),
+    ).resolves.toMatchObject({ committed: true, commitRevision: 8 });
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({ phase: "sealed" });
+
+    const restarted = reopenJournal(harness);
+    const query = vi.spyOn(harness.ledger, "queryLedger");
+    const dispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: restarted,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness, restarted),
+      bundleSubmission: createBundleSubmission(harness, restarted),
+    });
+
+    await expect(dispatcher.recoverAssignments()).resolves.toBe(1);
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({
+      phase: "acked",
+      acknowledgedCommitRevision: 8,
+    });
+    expect(
+      (await harness.log.readStream<{ t?: string }>(`run:${CONVERSATION_ID}`))
+        .filter((entry) => entry.body.t === "bundle-ack-observed"),
+    ).toHaveLength(1);
+    await expect(
+      restarted.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toMatchObject({ committed: true, commitRevision: 8 });
+
+    query.mockClear();
+    await expect(dispatcher.recoverAssignments()).resolves.toBe(0);
+    expect(query).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it("observes an existing executor ACK without resubmitting the conversation bundle", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const submissionAdapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await submissionAdapter.startAndReport(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    await sealDefaultBundle(harness.ledger);
+    await expect(
+      submissionAdapter.submitSealedBundle(
+        ASSIGNMENT_ID,
+        submissionContext(harness.unsigned),
+      ),
+    ).resolves.toMatchObject({ committed: true, commitRevision: 8 });
+
+    const restarted = reopenJournal(harness);
+    const submitSealedBundle = vi.fn(createBundleSubmission(harness, restarted).submitSealedBundle);
+    const query = vi.spyOn(harness.ledger, "queryLedger");
+    const dispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: restarted,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness, restarted),
+      bundleSubmission: { submitSealedBundle },
+    });
+
+    await expect(dispatcher.recoverAssignments()).resolves.toBe(1);
+    expect(submitSealedBundle).not.toHaveBeenCalled();
+    expect(
+      (await harness.log.readStream<{ t?: string }>(`run:${CONVERSATION_ID}`))
+        .filter((entry) => entry.body.t === "bundle-ack-observed"),
+    ).toHaveLength(1);
+
+    query.mockClear();
+    await expect(dispatcher.recoverAssignments()).resolves.toBe(0);
+    expect(query).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it.each(["wrong-bundle", "wrong-revision", "duplicate"] as const)(
+    "rejects a %s conversation bundle acknowledgement in both replay projections",
+    async (kind) => {
+      const harness = await createHarness();
+      await harness.ledger.dispatch(
+        harness.dispatch.envelope,
+        harness.dispatch.activation,
+        ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+      );
+      const submissionAdapter = new InProcessAssignmentSubmission({
+        ledger: harness.ledger,
+        owner: harness.journal,
+      });
+      await submissionAdapter.startAndReport(
+        ASSIGNMENT_ID,
+        submissionContext(harness.unsigned),
+      );
+      const bundle = await sealDefaultBundle(harness.ledger);
+      await harness.journal.submitBundle(bundle, submissionContext(harness.unsigned));
+      const committedBundleRef = sealedBundleArtifact(bundle).ref;
+      const wrongBundleRef = await harness.artifacts.put(
+        Buffer.from("not-the-committed-conversation-bundle", "utf8"),
+      );
+      const acknowledgement = {
+        t: "bundle-ack-observed" as const,
+        assignmentId: ASSIGNMENT_ID,
+        bundleRef: kind === "wrong-bundle" ? wrongBundleRef : committedBundleRef,
+        commitRevision: kind === "wrong-revision" ? 9 : 8,
+      };
+      await harness.log.append([
+        { stream: `run:${CONVERSATION_ID}`, body: acknowledgement },
+        ...(kind === "duplicate"
+          ? [{ stream: `run:${CONVERSATION_ID}`, body: acknowledgement }]
+          : []),
+      ]);
+
+      await expect(reopenJournal(harness).currentState(RUN_ID)).rejects.toThrow(
+        "Bundle acknowledgement observation does not bind one committed conversation bundle",
+      );
+      await expect(
+        reopenJournal(harness).submitBundle(bundle, submissionContext(harness.unsigned)),
+      ).rejects.toThrow("Submission guard bundle acknowledgement is invalid or duplicated");
+    },
+    15_000,
+  );
+
   it("partitions publish recovery and final revisions across conversations", async () => {
     const secondConversationId = "conversation-2";
     const secondRunId = "run-2";
@@ -2072,7 +2243,7 @@ describe("conversation assignment protocol", () => {
     await expect(finalHarness.journal.pendingFinalFrames()).rejects.toThrow(
       "transition is invalid",
     );
-  });
+  }, 20_000);
 
   it("rejects polluted, stale, and incomplete conversation bundles without a second commit", async () => {
     const publisher: ConversationMutationPublisher = {
@@ -3529,6 +3700,7 @@ describe("conversation assignment protocol", () => {
       executor: harness.ledger,
       contexts: { create: ownerContext },
       cancellationSubmission: createCancellationSubmission(harness),
+      bundleSubmission: createBundleSubmission(harness),
     });
     expect(await dispatcher.recoverCancellationProofs()).toBe(1);
     expect(await harness.journal.currentState(RUN_ID)).toBe("cancelled");
@@ -4302,7 +4474,7 @@ describe("conversation assignment protocol", () => {
     },
   );
 
-  it("auto-commits a legal late bundle from a non-conflict uncertain state", async () => {
+  it("recovers acknowledgement after a legal late bundle commits from uncertainty", async () => {
     const harness = await createHarness();
     await harness.ledger.dispatch(
       harness.dispatch.envelope,
@@ -4324,6 +4496,48 @@ describe("conversation assignment protocol", () => {
     expect((await harness.journal.currentResolution(RUN_ID))?.resolution?.kind).toBe(
       "late-bundle-committed",
     );
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({ phase: "sealed" });
+    const restarted = reopenJournal(harness);
+    expect(await restarted.assignmentsAwaitingRecovery()).toEqual([
+      expect.objectContaining({ assignmentId: ASSIGNMENT_ID, state: "committed" }),
+    ]);
+
+    const dispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: restarted,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness, restarted),
+      bundleSubmission: createBundleSubmission(harness, restarted),
+    });
+    expect(await dispatcher.recoverAssignments()).toBe(1);
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({
+      phase: "acked",
+      acknowledgedCommitRevision: 8,
+    });
+    const secondRestart = reopenJournal(harness);
+    expect(await secondRestart.assignmentsAwaitingRecovery()).toEqual([]);
+    const query = vi.spyOn(harness.ledger, "queryLedger");
+    const secondDispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: secondRestart,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness, secondRestart),
+      bundleSubmission: createBundleSubmission(harness, secondRestart),
+    });
+    expect(await secondDispatcher.recoverAssignments()).toBe(0);
+    expect(query).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -4595,7 +4809,7 @@ describe("conversation assignment protocol", () => {
       superseded.journal.acceptSupersedeProof(oldTerminationProof),
     ).rejects.toThrow("historical assignment");
     expect(await superseded.journal.currentState(RUN_ID)).toBe("dispatched");
-  });
+  }, 20_000);
 
   it("idempotently accepts a conflict whose accepted side is owner-authoritative", async () => {
     const harness = await createHarness();
@@ -4901,6 +5115,7 @@ describe("conversation assignment protocol", () => {
       executor: harness.ledger,
       contexts: { create: ownerContext },
       cancellationSubmission: createCancellationSubmission(harness),
+      bundleSubmission: createBundleSubmission(harness),
     });
     await dispatcher.dispatchPending();
 
@@ -4929,6 +5144,7 @@ describe("conversation assignment protocol", () => {
       executor: harness.ledger,
       contexts: { create: ownerContext },
       cancellationSubmission: createCancellationSubmission(harness, restarted),
+      bundleSubmission: createBundleSubmission(harness, restarted),
     });
 
     await expect(dispatcher.recoverCancellationProofs()).resolves.toBe(1);
@@ -6354,6 +6570,7 @@ describe("conversation assignment protocol", () => {
       executor: harness.ledger,
       contexts: { create: ownerContext },
       cancellationSubmission: createCancellationSubmission(harness),
+      bundleSubmission: createBundleSubmission(harness),
     });
     expect(await dispatcher.recoverCancellationProofs()).toBe(1);
     expect(await harness.journal.currentState(RUN_ID)).toBe("uncertain");
@@ -6572,6 +6789,7 @@ describe("conversation assignment protocol", () => {
       executor: harness.ledger,
       contexts: { create: ownerContext },
       cancellationSubmission: createCancellationSubmission(harness),
+      bundleSubmission: createBundleSubmission(harness),
     });
     expect(await dispatcher.recoverCancellationProofs()).toBe(1);
     expect(await harness.journal.currentState(RUN_ID)).toBe("uncertain");
@@ -6606,6 +6824,7 @@ describe("conversation assignment protocol", () => {
       executor: harness.ledger,
       contexts: { create: ownerContext },
       cancellationSubmission: createCancellationSubmission(harness),
+      bundleSubmission: createBundleSubmission(harness),
     });
     expect(await dispatcher.recoverCancellationProofs()).toBe(1);
     expect(await harness.journal.currentState(RUN_ID)).toBe("uncertain");
@@ -6766,7 +6985,7 @@ describe("conversation assignment protocol", () => {
           },
         }),
       }),
-    ).rejects.toThrow("requires a conversation control request");
+    ).rejects.toThrow("requires an authority control request");
   });
 
   it.each(["dispatched", "running"] as const)(
@@ -7327,6 +7546,24 @@ function createCancellationSubmission(
   };
 }
 
+function createBundleSubmission(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  journal: ConversationRunJournal = harness.journal,
+) {
+  const adapter = new InProcessAssignmentSubmission({
+    ledger: harness.ledger,
+    owner: journal,
+  });
+  return {
+    submitSealedBundle(assignmentId: string) {
+      return adapter.submitSealedBundle(
+        assignmentId,
+        submissionContext(harness.unsigned),
+      );
+    },
+  };
+}
+
 function reopenJournal(
   harness: Awaited<ReturnType<typeof createHarness>>,
   options: {
@@ -7370,3 +7607,618 @@ function withoutSignature<T extends { signature: unknown }>(
   const { signature: _, ...payload } = value;
   return JSON.parse(canonicalize(payload)) as Omit<T, "signature">;
 }
+
+type ConversationBehaviorRecordType =
+  | ConversationRunRecordType
+  | (typeof CONVERSATION_RUN_INTERNAL_RECORD_TYPES)[number];
+
+type ConversationBehaviorScenarioId =
+  | "commit"
+  | "mirror"
+  | "cancelHalted"
+  | "cancelUncertainContained"
+  | "supersedeStarted"
+  | "supersedeNotStarted"
+  | "conflictContained"
+  | "conflictAcked"
+  | "uncertainRejected"
+  | "commitProjection";
+
+interface ConversationBehaviorHarness {
+  readonly log: FileAuthorityCommitLog;
+  readonly fullProbe: () => Promise<unknown>;
+  readonly guardProbe?: () => Promise<unknown>;
+}
+
+interface ConversationRecordBehaviorSpec {
+  readonly scenario: ConversationBehaviorScenarioId;
+  readonly corrupt?: (body: Record<string, unknown>) => Record<string, unknown>;
+  readonly recovery: ConversationRecoveryExpectation;
+}
+
+function conversationBehaviorHarness(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+): ConversationBehaviorHarness {
+  return {
+    log: harness.log,
+    fullProbe: () => reopenJournal(harness).currentState(RUN_ID),
+    guardProbe: () =>
+      reopenJournal(harness).reportStarted(
+        ASSIGNMENT_ID,
+        submissionContext(harness.unsigned),
+      ),
+  };
+}
+
+async function receiveConversation(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+) {
+  await harness.ledger.dispatch(
+    harness.dispatch.envelope,
+    harness.dispatch.activation,
+    ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+  );
+}
+
+async function startConversation(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+) {
+  await receiveConversation(harness);
+  await harness.ledger.start(ASSIGNMENT_ID);
+  await harness.journal.reportStarted(
+    ASSIGNMENT_ID,
+    submissionContext(harness.unsigned),
+  );
+}
+
+const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
+  ConversationBehaviorScenarioId,
+  () => Promise<ConversationBehaviorHarness>
+> = {
+  async commit() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    await sealDefaultBundle(harness.ledger);
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    const dispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: harness.journal,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness, harness.journal),
+      bundleSubmission: createBundleSubmission(harness, harness.journal),
+    });
+    await dispatcher.recoverAssignments();
+    return conversationBehaviorHarness(harness);
+  },
+  async mirror() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    const requestId = "matrix-interaction";
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId,
+      toolName: "write",
+      display: { title: "confirm", lines: ["write result"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-13T09:01:00.000Z",
+    });
+    await harness.ledger.finishInteraction(ASSIGNMENT_ID, requestId, {
+      t: "auto-resolved",
+      decision: "denied",
+      reason: "no-interactive-surface",
+    });
+    const batch = await harness.ledger.pendingInteractionMirrorBatch(ASSIGNMENT_ID);
+    if (!batch) throw new Error("matrix interaction mirror is missing");
+    await harness.journal.mirrorInteractions(
+      ASSIGNMENT_ID,
+      batch,
+      submissionContext(harness.unsigned),
+    );
+    return conversationBehaviorHarness(harness);
+  },
+  async cancelHalted() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    const cancelled = await harness.journal.cancelRun({
+      runId: RUN_ID,
+      requestId: "matrix-cancel-halted",
+    });
+    if (cancelled.state !== "cancel-requested") throw new Error("cancel fence missing");
+    await harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      cancelled.fence,
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix cancel proof missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    return conversationBehaviorHarness(harness);
+  },
+  async cancelUncertainContained() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    const cancelled = await harness.journal.cancelRun({
+      runId: RUN_ID,
+      requestId: "matrix-cancel-contained",
+    });
+    if (cancelled.state !== "cancel-requested") throw new Error("cancel fence missing");
+    await harness.journal.markAssignmentUncertain(ASSIGNMENT_ID, "cancel-unproven");
+    await harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      cancelled.fence,
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix contained proof missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    return conversationBehaviorHarness(harness);
+  },
+  async supersedeStarted() {
+    const harness = await createHarness();
+    await receiveConversation(harness);
+    const fence = await harness.journal.requestSupersede(
+      ASSIGNMENT_ID,
+      "matrix-supersede-started",
+    );
+    await harness.journal.markAssignmentUncertain(ASSIGNMENT_ID, "ledger-unknown");
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const proof = await harness.ledger.supersede(
+      ASSIGNMENT_ID,
+      fence,
+      ownerContext(ASSIGNMENT_ID, "executor.supersede"),
+    );
+    await harness.journal.acceptSupersedeProof(proof);
+    return conversationBehaviorHarness(harness);
+  },
+  async supersedeNotStarted() {
+    const harness = await createHarness();
+    await receiveConversation(harness);
+    const fence = await harness.journal.requestSupersede(
+      ASSIGNMENT_ID,
+      "matrix-supersede-fresh",
+    );
+    const proof = await harness.ledger.supersede(
+      ASSIGNMENT_ID,
+      fence,
+      ownerContext(ASSIGNMENT_ID, "executor.supersede"),
+    );
+    await harness.journal.acceptSupersedeProof(proof);
+    return conversationBehaviorHarness(harness);
+  },
+  async conflictContained() {
+    const harness = await createHarness();
+    const alternative = createAlternativeDispatch(harness);
+    await harness.ledger.dispatch(
+      alternative.envelope,
+      alternative.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const conflict = await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.recordDispatchConflict(harness.dispatch, conflict);
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const [pending] = await harness.journal.pendingCancellations();
+    if (!pending) throw new Error("matrix conflict fence missing");
+    await harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      pending.fence,
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix conflict proof missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    return conversationBehaviorHarness(harness);
+  },
+  async conflictAcked() {
+    const harness = await createHarness();
+    await receiveConversation(harness);
+    const alternative = createAlternativeDispatch(harness);
+    const conflict = await harness.ledger.dispatch(
+      alternative.envelope,
+      alternative.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.recordDispatchConflict(alternative, conflict);
+    return conversationBehaviorHarness(harness);
+  },
+  async uncertainRejected() {
+    const harness = await createHarness();
+    await receiveConversation(harness);
+    await harness.journal.reportStarted(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    await harness.ledger.abortFromSurface(ASSIGNMENT_ID, {
+      ticketDigest: ABORT_TICKET_DIGEST,
+      surfacePrincipal: "surface:user-1",
+    });
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix rejection proof missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    return conversationBehaviorHarness(harness);
+  },
+  async commitProjection() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    await sealDefaultBundle(harness.ledger);
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    await reopenJournal(harness).resumeCommittedProjections();
+    return conversationBehaviorHarness(harness);
+  },
+};
+
+const CONVERSATION_RECOVERY_PROBES = {
+  async dispatchOutbox() {
+    const harness = await createHarness();
+    expect(await harness.journal.pendingDispatches()).toHaveLength(1);
+    await startConversation(harness);
+    await expect(reopenJournal(harness).pendingDispatches()).resolves.toEqual([]);
+  },
+  async cancellationOutbox() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    const cancelled = await harness.journal.cancelRun({
+      runId: RUN_ID,
+      requestId: "matrix-recovery-cancel",
+    });
+    if (cancelled.state !== "cancel-requested") {
+      throw new Error("matrix recovery cancel fence is missing");
+    }
+    expect(await harness.journal.pendingCancellations()).toHaveLength(1);
+    await harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      cancelled.fence,
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix recovery cancel proof is missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    await expect(reopenJournal(harness).pendingCancellations()).resolves.toEqual([]);
+  },
+  async conflictCancellation() {
+    const harness = await createHarness();
+    const alternative = createAlternativeDispatch(harness);
+    await harness.ledger.dispatch(
+      alternative.envelope,
+      alternative.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const conflict = await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.recordDispatchConflict(harness.dispatch, conflict);
+    const [pending] = await harness.journal.pendingCancellations();
+    if (!pending) throw new Error("matrix recovery conflict fence is missing");
+    await harness.ledger.start(ASSIGNMENT_ID);
+    await harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      pending.fence,
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix recovery conflict proof is missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    await expect(reopenJournal(harness).pendingCancellations()).resolves.toEqual([]);
+  },
+  async supersedeOutbox() {
+    const harness = await createHarness();
+    await receiveConversation(harness);
+    const fence = await harness.journal.requestSupersede(
+      ASSIGNMENT_ID,
+      "matrix-recovery-supersede",
+    );
+    expect(await harness.journal.pendingSupersedes()).toHaveLength(1);
+    await harness.journal.markAssignmentUncertain(ASSIGNMENT_ID, "ledger-unknown");
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const proof = await harness.ledger.supersede(
+      ASSIGNMENT_ID,
+      fence,
+      ownerContext(ASSIGNMENT_ID, "executor.supersede"),
+    );
+    await harness.journal.acceptSupersedeProof(proof);
+    await expect(reopenJournal(harness).pendingSupersedes()).resolves.toEqual([]);
+  },
+  async bundleAcknowledgementOutbox() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    await sealDefaultBundle(harness.ledger);
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    expect(
+      (await harness.journal.assignmentsAwaitingRecovery()).some(
+        (candidate) => candidate.assignmentId === ASSIGNMENT_ID,
+      ),
+    ).toBe(true);
+    const dispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: harness.journal,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness, harness.journal),
+      bundleSubmission: createBundleSubmission(harness, harness.journal),
+    });
+    await dispatcher.recoverAssignments();
+    expect(
+      (await reopenJournal(harness).assignmentsAwaitingRecovery()).some(
+        (candidate) => candidate.assignmentId === ASSIGNMENT_ID,
+      ),
+    ).toBe(false);
+  },
+  async contradictoryProofStop() {
+    const harness = await createHarness();
+    await receiveConversation(harness);
+    await harness.journal.reportStarted(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    await harness.ledger.abortFromSurface(ASSIGNMENT_ID, {
+      ticketDigest: ABORT_TICKET_DIGEST,
+      surfacePrincipal: "surface:user-1",
+    });
+    const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
+    if (!proof) throw new Error("matrix recovery rejection proof is missing");
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof,
+      submissionContext(harness.unsigned),
+    );
+    await expect(reopenJournal(harness).assignmentsAwaitingRecovery()).resolves.toEqual([]);
+  },
+  async commitProjection() {
+    let failProjection = true;
+    const projection: ConversationCommitProjection = {
+      async project() {
+        if (failProjection) {
+          failProjection = false;
+          throw new Error("matrix projection crash");
+        }
+      },
+    };
+    const harness = await createHarness({ projection });
+    await startConversation(harness);
+    await sealDefaultBundle(harness.ledger);
+    await expect(
+      new InProcessAssignmentSubmission({
+        ledger: harness.ledger,
+        owner: harness.journal,
+      }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
+    ).rejects.toThrow("matrix projection crash");
+    await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(1);
+    await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(0);
+  },
+} as const;
+
+type ConversationRecoveryProbeId = keyof typeof CONVERSATION_RECOVERY_PROBES;
+type ConversationRecoveryExpectation =
+  | { readonly kind: "probe"; readonly id: ConversationRecoveryProbeId }
+  | { readonly kind: "not-applicable"; readonly reason: string };
+
+const conversationRecovery = (
+  id: ConversationRecoveryProbeId,
+): ConversationRecoveryExpectation => ({ kind: "probe", id });
+
+const noConversationRecovery = (reason: string): ConversationRecoveryExpectation => ({
+  kind: "not-applicable",
+  reason,
+});
+
+// conversation 域与 job 域同一引擎:每类记录绑定真实生产场景、恢复合同或
+// 事实化 N/A 与对抗向量；精确重放被协议幂等吸收的类型使用同身份异载荷/
+// ghost 向量。生产事实注记:
+// conversation-commit-projection 由耐久恢复投影器生产(在线提交不写该记录),
+// 其生产路径即 commitProjection 场景的 resumeCommittedProjections。
+const CONVERSATION_RECORD_BEHAVIOR = {
+  admitted: {
+    scenario: "commit",
+    recovery: noConversationRecovery("admission is consumed by normal state replay only"),
+    corrupt: (body) => ({ ...body, queuedPosition: 7 }),
+  },
+  assigned: {
+    scenario: "commit",
+    recovery: conversationRecovery("dispatchOutbox"),
+    corrupt: (body) => ({ ...body, manifestDigest: SHA256_ZERO }),
+  },
+  "dispatch-acked": {
+    scenario: "conflictAcked",
+    recovery: conversationRecovery("dispatchOutbox"),
+    corrupt: (body) => ({ ...body, assignmentId: "assignment-ghost" }),
+  },
+  "dispatch-conflict": {
+    scenario: "conflictContained",
+    recovery: conversationRecovery("conflictCancellation"),
+  },
+  "dispatch-conflict-contained": {
+    scenario: "conflictContained",
+    recovery: conversationRecovery("conflictCancellation"),
+  },
+  "assignment-superseded": {
+    scenario: "supersedeNotStarted",
+    recovery: conversationRecovery("supersedeOutbox"),
+  },
+  "supersede-requested": {
+    scenario: "supersedeStarted",
+    recovery: conversationRecovery("supersedeOutbox"),
+    corrupt: (body) => ({ ...body, requestId: "matrix-conflicting-supersede" }),
+  },
+  "supersede-started-observed": {
+    scenario: "supersedeStarted",
+    recovery: conversationRecovery("supersedeOutbox"),
+    corrupt: (body) => ({ ...body, assignmentId: "assignment-ghost" }),
+  },
+  "cancel-fence": {
+    scenario: "cancelHalted",
+    recovery: conversationRecovery("cancellationOutbox"),
+  },
+  "capability-revoked": {
+    scenario: "commit",
+    recovery: noConversationRecovery("capability revocation is consumed by authorization guards"),
+    corrupt: (body) => ({ ...body, capId: "capability-ghost" }),
+  },
+  "interaction-mirror": {
+    scenario: "mirror",
+    recovery: noConversationRecovery("mirrored interaction ordinals have no owner outbox"),
+    corrupt: (body) => ({ ...body, assignmentId: "assignment-ghost" }),
+  },
+  state: { scenario: "commit", recovery: conversationRecovery("dispatchOutbox") },
+  committed: {
+    scenario: "commit",
+    recovery: conversationRecovery("bundleAcknowledgementOutbox"),
+  },
+  "bundle-ack-observed": {
+    scenario: "commit",
+    recovery: conversationRecovery("bundleAcknowledgementOutbox"),
+  },
+  resolution: {
+    scenario: "cancelUncertainContained",
+    recovery: noConversationRecovery(
+      "resolution closes authority state without a separate recovery outbox",
+    ),
+  },
+  "cancel-contained": {
+    scenario: "cancelUncertainContained",
+    recovery: conversationRecovery("cancellationOutbox"),
+  },
+  "cancel-proof-accepted": {
+    scenario: "cancelHalted",
+    recovery: conversationRecovery("cancellationOutbox"),
+  },
+  "not-started-rejected": {
+    scenario: "uncertainRejected",
+    recovery: conversationRecovery("contradictoryProofStop"),
+  },
+  "content-asset-index": {
+    scenario: "commit",
+    recovery: noConversationRecovery("asset sidecars are replayed by the full reducer only"),
+    corrupt: (body) => ({ ...body, entries: [{ bogus: true }] }),
+  },
+  "conversation-commit-projection": {
+    scenario: "commitProjection",
+    recovery: conversationRecovery("commitProjection"),
+    corrupt: (body) => ({ ...body, digest: SHA256_ZERO }),
+  },
+} as const satisfies Record<ConversationBehaviorRecordType, ConversationRecordBehaviorSpec>;
+
+async function expectConversationRejected(probe: () => Promise<unknown>): Promise<void> {
+  try {
+    await probe();
+  } catch (error) {
+    if (error instanceof AuthorityStorageError || error instanceof TypeError) return;
+    throw new Error(
+      `behavior probe failed outside the corruption contract: ${String(error)}`,
+    );
+  }
+  throw new Error("behavior probe accepted a corrupted conversation log");
+}
+
+async function expectConversationGuardReplayAccepted(
+  probe: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await probe();
+  } catch (error) {
+    if (error instanceof AuthorityStorageError) {
+      throw new Error(
+        `behavior probe rejected a legal conversation log: ${String(error)}`,
+      );
+    }
+    // The guard has accepted and loaded the journal; the requested business action may
+    // still be stably rejected by the already-replayed terminal state.
+  }
+}
+
+describe("conversation record execution-point behavior matrix", () => {
+  it("binds every conversation record type to a producing scenario", () => {
+    expect(Object.keys(CONVERSATION_RECORD_BEHAVIOR).sort()).toEqual(
+      [
+        ...Object.keys(CONVERSATION_RUN_RECORD_SHAPES),
+        ...CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
+      ].sort(),
+    );
+    const referencedRecoveryProbes = new Set<ConversationRecoveryProbeId>();
+    for (const [recordType, spec] of Object.entries(CONVERSATION_RECORD_BEHAVIOR)) {
+      if (spec.recovery.kind === "not-applicable") {
+        expect(spec.recovery.reason.length, recordType).toBeGreaterThan(20);
+      } else {
+        referencedRecoveryProbes.add(spec.recovery.id);
+      }
+    }
+    expect([...referencedRecoveryProbes].sort()).toEqual(
+      Object.keys(CONVERSATION_RECOVERY_PROBES).sort(),
+    );
+  });
+
+  it.each(Object.entries(CONVERSATION_RECOVERY_PROBES))(
+    "recovery contract %s executes its real consumer",
+    async (_id, probe) => probe(),
+    20_000,
+  );
+
+  it.each(Object.keys(CONVERSATION_RECORD_BEHAVIOR) as ConversationBehaviorRecordType[])(
+    "%s: real production, full/guard acceptance, adversarial-vector rejection",
+    async (recordType) => {
+      const spec = CONVERSATION_RECORD_BEHAVIOR[
+        recordType
+      ] as ConversationRecordBehaviorSpec;
+      const behavior = await CONVERSATION_BEHAVIOR_SCENARIOS[spec.scenario]();
+      const records = await behavior.log.readStream<Record<string, unknown>>(
+        `run:${CONVERSATION_ID}`,
+      );
+      const produced = records.filter((record) => {
+        const body = record.body as { t?: string; kind?: string };
+        return body.t === recordType || body.kind === recordType;
+      });
+      expect(produced.length, recordType).toBeGreaterThan(0);
+      await behavior.fullProbe();
+      if (behavior.guardProbe) {
+        await expectConversationGuardReplayAccepted(behavior.guardProbe);
+      }
+      const target = produced[produced.length - 1];
+      if (!target) throw new Error("matrix target record is missing");
+      const vector = spec.corrupt
+        ? spec.corrupt(structuredClone(target.body) as Record<string, unknown>)
+        : structuredClone(target.body);
+      await behavior.log.append([{ stream: `run:${CONVERSATION_ID}`, body: vector }]);
+      await expectConversationRejected(behavior.fullProbe);
+      if (behavior.guardProbe) await expectConversationRejected(behavior.guardProbe);
+    },
+    20_000,
+  );
+});

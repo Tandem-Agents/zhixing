@@ -94,7 +94,11 @@ export type ControlRequest =
       anchorEpoch: number;
       domainRevision: number;
     }
-  | { t: "job-run"; taskId: string; anchorEpoch: number }
+  | {
+      t: "job-run";
+      taskId: string;
+      anchorEpoch: number;
+    }
   | { t: "job-cancel"; taskId: string; jobRunId: string; anchorEpoch: number }
   | {
       t: "allow-once";

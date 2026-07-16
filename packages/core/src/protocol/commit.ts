@@ -4,15 +4,18 @@ import type {
   AssignmentRecord,
   ConversationCommitBundle,
   ContentAssetRef,
+  JobCommitBundle,
   MutationBatch,
   SealedBundle,
   TranscriptRunRecord,
 } from "../contracts/index.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
+import { validateJobCommitFence } from "./job.js";
 import { validateMessages } from "./values.js";
 
 type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
 type ConversationSealedBundle = SealedBundle & { body: ConversationCommitBundle };
+type JobSealedBundle = SealedBundle & { body: JobCommitBundle };
 
 export interface ArtifactValue<T> {
   readonly value: T;
@@ -65,6 +68,13 @@ export function validateMutationBatch(value: MutationBatch): MutationBatch {
   return snapshot(value, "Mutation batch");
 }
 
+/** Validates the closed staged-write surface available to a job assignment. */
+export function validateJobMutationBatch(value: MutationBatch): MutationBatch {
+  const batch = validateMutationBatch(value);
+  for (const record of batch.records) validateJobStagedMutationRecord(record);
+  return batch;
+}
+
 /**
  * Validates one staged-mutation record without revalidating its assignment
  * prefix. Sequence continuity and request-id uniqueness remain the caller's
@@ -75,6 +85,27 @@ export function validateStagedMutationRecord(
 ): StagedMutationRecord {
   const record = snapshot(value, "Staged mutation") as StagedMutationRecord;
   validateStagedMutationShape(record);
+  return record;
+}
+
+/**
+ * Jobs have no turn origin. This predicate is shared by producer, replay and
+ * owner trust boundaries so the TypeScript-only job union cannot be bypassed
+ * by deserialized protocol data.
+ */
+export function validateJobStagedMutationRecord(
+  value: unknown,
+): StagedMutationRecord {
+  const record = validateStagedMutationRecord(value);
+  if (record.domain !== "global") {
+    throw new TypeError("Job mutation batch cannot contain session mutations");
+  }
+  if (
+    record.mutation.kind === "delivery-enqueue" &&
+    record.mutation.request.target.kind !== "explicit"
+  ) {
+    throw new TypeError("Job assignments require an explicit staged delivery target");
+  }
   return record;
 }
 
@@ -123,6 +154,58 @@ export function createConversationSealedBundle(
 export function validateConversationSealedBundle(
   value: SealedBundle,
 ): ConversationSealedBundle {
+  assertSealedBundle(value);
+  assertConversationBody(value.body);
+  const rootDigests = new Set(conversationBundleRoots(value.body).map((ref) => ref.digest));
+  assertNoRepeatedRoots(value.dependencyArtifacts, rootDigests);
+  return snapshot(value, "Sealed bundle") as ConversationSealedBundle;
+}
+
+export function createJobSealedBundle(
+  input: Omit<JobSealedBundle, "v" | "digest">,
+): JobSealedBundle {
+  assertPlainObject(input, "Sealed bundle input");
+  assertExactKeys(
+    input,
+    [
+      "assignmentId",
+      "body",
+      "dependencyArtifacts",
+      "executorId",
+      "streamFinal",
+      "usage",
+      "usageFinal",
+    ],
+    "Sealed bundle input",
+  );
+  const payload = snapshot(
+    {
+      v: 1 as const,
+      assignmentId: input.assignmentId,
+      executorId: input.executorId,
+      streamFinal: input.streamFinal,
+      usage: input.usage,
+      usageFinal: input.usageFinal,
+      dependencyArtifacts: input.dependencyArtifacts,
+      body: input.body,
+    },
+    "Sealed bundle payload",
+  );
+  return validateJobSealedBundle({
+    ...payload,
+    digest: protocolDigest("SealedBundle", 1, payload),
+  });
+}
+
+export function validateJobSealedBundle(value: SealedBundle): JobSealedBundle {
+  assertSealedBundle(value);
+  assertJobBody(value.body);
+  const rootDigests = new Set(jobBundleRoots(value.body).map((ref) => ref.digest));
+  assertNoRepeatedRoots(value.dependencyArtifacts, rootDigests);
+  return snapshot(value, "Sealed bundle") as JobSealedBundle;
+}
+
+function assertSealedBundle(value: SealedBundle): void {
   assertPlainObject(value, "Sealed bundle");
   assertExactKeys(
     value,
@@ -161,29 +244,47 @@ export function validateConversationSealedBundle(
   assertDigest(value.usageFinal.reportDigest, "Usage report digest");
   assertNonNegativeInteger(value.usageFinal.upToUsageSeq, "Usage final sequence");
   assertSortedUniqueRefs(value.dependencyArtifacts, "Bundle dependencies");
-  assertConversationBody(value.body);
-  const rootDigests = new Set(conversationBundleRoots(value.body).map((ref) => ref.digest));
-  for (const dependency of value.dependencyArtifacts) {
-    if (rootDigests.has(dependency.digest)) {
-      throw new TypeError("Bundle dependencies must not repeat direct body roots");
-    }
-  }
   const { digest, ...payload } = value;
   if (digest !== protocolDigest("SealedBundle", 1, payload)) {
     throw new TypeError("Sealed bundle digest does not match its payload");
   }
-  return snapshot(value, "Sealed bundle") as ConversationSealedBundle;
 }
 
 export function sealedBundleArtifact(
+  bundle: ConversationSealedBundle,
+): ArtifactValue<ConversationSealedBundle>;
+export function sealedBundleArtifact(
+  bundle: JobSealedBundle,
+): ArtifactValue<JobSealedBundle>;
+export function sealedBundleArtifact(
   bundle: SealedBundle,
-): ArtifactValue<ConversationSealedBundle> {
-  const value = validateConversationSealedBundle(bundle);
+): ArtifactValue<SealedBundle>;
+export function sealedBundleArtifact(
+  bundle: SealedBundle,
+): ArtifactValue<SealedBundle> {
+  const value = bundle.body.t === "conversation"
+    ? validateConversationSealedBundle(bundle)
+    : validateJobSealedBundle(bundle);
   return artifactValue(value);
 }
 
 export function conversationBundleRoots(body: ConversationCommitBundle): ArtifactRef[] {
   return deduplicateRefs(collectEmbeddedArtifactRefs(body));
+}
+
+export function jobBundleRoots(body: JobCommitBundle): ArtifactRef[] {
+  return deduplicateRefs(collectEmbeddedArtifactRefs(body));
+}
+
+function assertNoRepeatedRoots(
+  dependencies: readonly ArtifactRef[],
+  roots: ReadonlySet<string>,
+): void {
+  for (const dependency of dependencies) {
+    if (roots.has(dependency.digest)) {
+      throw new TypeError("Bundle dependencies must not repeat direct body roots");
+    }
+  }
 }
 
 export function validateTranscriptRunRecord(
@@ -750,6 +851,78 @@ function assertConversationBody(
   }
   if (value.windowCompact !== undefined) {
     validateWindowCompact(value.windowCompact);
+  }
+}
+
+function assertJobBody(
+  value: SealedBundle["body"],
+): asserts value is JobCommitBundle {
+  assertPlainObject(value, "Job commit bundle");
+  if (value.t !== "job") {
+    throw new TypeError("Sealed bundle must contain a job commit body");
+  }
+  assertExactKeys(
+    value,
+    [
+      "contentAssets",
+      "fence",
+      "jobRunId",
+      "mutationBatch",
+      "outcome",
+      "t",
+      "taskId",
+    ],
+    "Job commit bundle",
+    true,
+  );
+  assertIdentifier(value.jobRunId, "Job commit jobRunId");
+  assertIdentifier(value.taskId, "Job commit taskId");
+  validateJobCommitFence(value.fence);
+  if (
+    value.fence.jobRunId !== value.jobRunId ||
+    value.fence.taskId !== value.taskId
+  ) {
+    throw new TypeError("Job commit fence does not bind its bundle");
+  }
+  assertPlainObject(value.outcome, "Job outcome");
+  assertExactKeys(value.outcome, ["status", "summary"], "Job outcome");
+  if (value.outcome.status !== "completed" && value.outcome.status !== "failed") {
+    throw new TypeError("Job outcome status is invalid");
+  }
+  assertString(value.outcome.summary, "Job outcome summary");
+  if (!Array.isArray(value.contentAssets)) {
+    throw new TypeError("Job content assets must be an array");
+  }
+  const assets = value.contentAssets as ContentAssetRef[];
+  const seenAssets = new Set<string>();
+  for (let index = 0; index < assets.length; index += 1) {
+    const asset = assets[index]!;
+    assertPlainObject(asset, "Job content asset");
+    assertExactKeys(asset, ["bytes", "digest", "kind"], "Job content asset");
+    assertDigest(asset.digest, "Job content asset digest");
+    assertNonNegativeInteger(asset.bytes, "Job content asset bytes");
+    if (!CONTENT_KINDS.has(asset.kind)) {
+      throw new TypeError("Job content asset kind is invalid");
+    }
+    if (seenAssets.has(asset.digest)) {
+      throw new TypeError("Job content assets must not contain duplicates");
+    }
+    seenAssets.add(asset.digest);
+    if (index > 0 && assets[index - 1]!.digest >= asset.digest) {
+      throw new TypeError("Job content assets must be sorted by digest");
+    }
+  }
+  if (value.mutationBatch !== undefined) {
+    assertExactKeys(
+      value.mutationBatch,
+      ["globalCount", "ref", "sessionCount"],
+      "Mutation batch summary",
+    );
+    assertArtifactRef(value.mutationBatch.ref);
+    if (value.mutationBatch.sessionCount !== 0) {
+      throw new TypeError("Job mutation batch cannot contain session mutations");
+    }
+    assertPositiveInteger(value.mutationBatch.globalCount, "Global mutation count");
   }
 }
 

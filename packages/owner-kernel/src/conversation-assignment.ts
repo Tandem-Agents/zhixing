@@ -15,6 +15,7 @@ import type {
   AssignmentTerminationProof,
   AssignmentActivationProof,
   AuthorityCallContext,
+  AuthorityError,
   ConversationRunState,
   ConversationStatusNotice,
   ControlResult,
@@ -117,6 +118,8 @@ import {
   assertStateReplayContract,
   assertSupersedeRequestReplayContract,
   assertSupersedeStartedObservationReplayContract,
+  bundleAcknowledgementBindsCommitted,
+  isOpenResolutionFact,
   assignmentTerminationProofKind,
   corruptRunJournal,
   historicalBundleFenceMatches,
@@ -438,6 +441,12 @@ interface RunProjection {
     string,
     Extract<ConversationRunJournalRecord, { t: "committed" }>
   >;
+  readonly bundleAcknowledgements: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "bundle-ack-observed" }>
+  >;
+  readonly recoveryAssignments: Set<string>;
+  readonly bundleAcknowledgementOutbox: Set<string>;
   readonly commits: Array<Extract<ConversationRunJournalRecord, { t: "committed" }>>;
   readonly assignmentByCommitRevision: Map<number, string>;
   readonly contentByRevision: Map<number, readonly import("@zhixing/core/contracts").ContentAssetRef[]>;
@@ -544,6 +553,10 @@ interface SubmissionGuardProjection {
       readonly sidecars: SubmissionCommitSidecars;
     }
   >;
+  readonly bundleAcknowledgements: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "bundle-ack-observed" }>
+  >;
   readonly closedAssignments: Set<string>;
   readonly revokedCapabilities: Set<string>;
   activeRunId: string | undefined;
@@ -590,16 +603,25 @@ export interface InProcessCancellationSubmission {
   submitCancellation(assignmentId: string): Promise<boolean>;
 }
 
+export interface InProcessBundleSubmission {
+  submitSealedBundle(assignmentId: string): Promise<
+    | { readonly committed: true; readonly commitRevision: number }
+    | { readonly committed: false; readonly error: AuthorityError }
+  >;
+}
+
 export type InProcessConversationDispatcherOptions =
   InProcessConversationDispatcherBaseOptions &
     (
       | {
           readonly enabled: false;
           readonly cancellationSubmission?: InProcessCancellationSubmission;
+          readonly bundleSubmission?: InProcessBundleSubmission;
         }
       | {
           readonly enabled: true;
           readonly cancellationSubmission: InProcessCancellationSubmission;
+          readonly bundleSubmission: InProcessBundleSubmission;
         }
     );
 
@@ -1002,7 +1024,10 @@ export class ConversationRunJournal {
     readonly envelope: ConversationControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
-    return input.admission.applyAuthority<RunProjection>({
+    return input.admission.applyAuthority<
+      RunProjection,
+      ConversationControlEnvelope
+    >({
       envelope: input.envelope,
       source: input.source,
       stream: runStream(this.#conversationId),
@@ -1014,7 +1039,7 @@ export class ConversationRunJournal {
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
       decide: (state, context) => {
-        const body = input.envelope.body;
+        const body = context.envelope.body;
         if (body.t === "cancel") {
           if (
             body.conversationId !== this.#conversationId ||
@@ -1103,8 +1128,8 @@ export class ConversationRunJournal {
         const fact = closeResolution(
           open,
           body.decision,
-          input.envelope.principal.surfacePrincipal,
-          input.envelope.at,
+          context.envelope.principal.surfacePrincipal,
+          context.envelope.at,
         );
         return {
           result: {
@@ -1168,34 +1193,141 @@ export class ConversationRunJournal {
   async assignmentsAwaitingRecovery(): Promise<
     Array<{
       readonly assignmentId: string;
-      readonly state: "dispatched" | "running" | "cancel-requested" | "uncertain";
+      readonly state:
+        | "dispatched"
+        | "running"
+        | "cancel-requested"
+        | "uncertain"
+        | "committed";
       readonly dispatch: PendingConversationDispatch;
     }>
   > {
-    const candidate = await this.#select((state) =>
-      selectActiveAssignment(state, (assigned, current) => {
-        const assignmentId = assigned.record.assignmentId;
+    type RecoveryCandidate = {
+      readonly assignmentId: string;
+      readonly state:
+        | "dispatched"
+        | "running"
+        | "cancel-requested"
+        | "uncertain"
+        | "committed";
+      readonly assigned: AssignedProjection;
+    };
+    const candidates = await this.#select((state): RecoveryCandidate[] =>
+      [...new Set([
+        ...state.recoveryAssignments,
+        ...state.bundleAcknowledgementOutbox,
+      ])].flatMap<RecoveryCandidate>((assignmentId) => {
+        const assigned = state.assignedById.get(assignmentId);
+        if (!assigned) {
+          throw corruptRunJournal("Recovery outbox names an unknown assignment");
+        }
+        const current = state.stateByRun.get(assigned.record.runId)?.state;
+        const committed = state.committedByAssignment.get(assignmentId);
+        if (state.bundleAcknowledgementOutbox.has(assignmentId)) {
+          if (
+            current !== "committed" ||
+            committed?.runId !== assigned.record.runId ||
+            state.bundleAcknowledgements.has(assignmentId)
+          ) {
+            throw corruptRunJournal(
+              "Bundle acknowledgement outbox does not bind one pending committed assignment",
+            );
+          }
+          return [{
+            assignmentId,
+            state: current,
+            assigned: snapshot(assigned, "Recoverable committed assignment"),
+          }];
+        }
+        const isCurrent = state.assignmentByRun.get(assigned.record.runId) === assignmentId;
         if (
+          !isCurrent ||
           state.superseded.has(assignmentId) ||
           state.closedAssignments.has(assignmentId) ||
           hasRejectedNotStarted(state, assignmentId, "cancel") ||
-          hasRejectedNotStarted(state, assignmentId, "dispatch-rejection")
+          hasRejectedNotStarted(state, assignmentId, "dispatch-rejection") ||
+          (current !== "dispatched" &&
+            current !== "running" &&
+            current !== "cancel-requested" &&
+            current !== "uncertain")
         ) {
-          return undefined;
+          return [];
         }
         const open = state.resolutionsByRun.get(assigned.record.runId);
-        return !open || !state.containedFacts.has(open.openFactDigest)
-          ? {
-              assignmentId,
-              state: current as "dispatched" | "running" | "cancel-requested" | "uncertain",
-              assigned: snapshot(assigned, "Recoverable assignment"),
-            }
-          : undefined;
+        if (open && state.containedFacts.has(open.openFactDigest)) return [];
+        return [{
+          assignmentId,
+          state: current,
+          assigned: snapshot(assigned, "Recoverable assignment"),
+        }];
       }),
     );
-    if (!candidate) return [];
-    const { assigned, ...result } = candidate;
-    return [{ ...result, dispatch: await this.#materializeDispatch(assigned) }];
+    return Promise.all(
+      candidates.map(async ({ assigned, ...candidate }) => ({
+        ...candidate,
+        dispatch: await this.#materializeDispatch(assigned),
+      })),
+    );
+  }
+
+  async observeBundleAcknowledgement(
+    assignmentId: string,
+    rawSnapshot: LedgerSnapshot,
+  ): Promise<void> {
+    const ledger = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    if (
+      ledger.assignmentId !== assignmentId ||
+      ledger.phase !== "acked" ||
+      ledger.sealedBundleRef === undefined ||
+      ledger.acknowledgedCommitRevision === undefined
+    ) {
+      throw new TypeError(
+        "Ledger snapshot does not prove acknowledgement of the committed conversation bundle",
+      );
+    }
+    const preflight = await this.#select((state) => {
+      const committed = state.committedByAssignment.get(assignmentId);
+      if (!committed) {
+        throw new Error("Bundle acknowledgement names an uncommitted conversation assignment");
+      }
+      return {
+        expected: conversationBundleAcknowledgementRecord(assignmentId, committed),
+        existing: state.bundleAcknowledgements.get(assignmentId),
+      };
+    });
+    assertLedgerAcknowledgesCommittedConversationBundle(ledger, preflight.expected);
+    if (preflight.existing) {
+      if (canonicalize(preflight.existing) !== canonicalize(preflight.expected)) {
+        throw corruptRunJournal("Bundle acknowledgement observation is inconsistent");
+      }
+      return;
+    }
+    await this.#transact<void>((state) => {
+      const committed = state.committedByAssignment.get(assignmentId);
+      const existing = state.bundleAcknowledgements.get(assignmentId);
+      if (!committed) {
+        throw new Error("Bundle acknowledgement names an uncommitted conversation assignment");
+      }
+      const expected = conversationBundleAcknowledgementRecord(
+        assignmentId,
+        committed,
+      );
+      if (canonicalize(expected) !== canonicalize(preflight.expected)) {
+        throw corruptRunJournal("Committed bundle acknowledgement binding changed");
+      }
+      assertLedgerAcknowledgesCommittedConversationBundle(ledger, expected);
+      if (existing) {
+        if (canonicalize(existing) !== canonicalize(expected)) {
+          throw corruptRunJournal("Bundle acknowledgement observation is inconsistent");
+        }
+        return { kind: "return", value: undefined };
+      }
+      return {
+        kind: "append",
+        entries: [runRecord(this.#conversationId, expected)],
+        value: undefined,
+      };
+    }, [preflight.expected.bundleRef]);
   }
 
   async markAssignmentUncertain(
@@ -1213,7 +1345,7 @@ export class ConversationRunJournal {
         throw new Error("Cannot reopen uncertainty for a historical assignment");
       }
       const existing = state.resolutionsByRun.get(assigned.record.runId);
-      if (current.state === "uncertain" && existing && !existing.resolution) {
+      if (current.state === "uncertain" && isOpenResolutionFact(existing)) {
         return { kind: "return", value: existing };
       }
       if (
@@ -3328,6 +3460,7 @@ export class ConversationRunJournal {
           acked: false,
         });
         state.assignmentByRun.set(body.runId, body.assignmentId);
+        state.recoveryAssignments.add(body.assignmentId);
         state.mirrorStateByAssignment.set(body.assignmentId, {
           ordinal: 0,
           mirrorDigest: interactionMirrorSeed(body.assignmentId),
@@ -3572,6 +3705,7 @@ export class ConversationRunJournal {
         }
         state.containedFacts.add(body.openFactDigest);
         state.containmentByAssignment.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
         return state;
       }
       case "cancel-contained": {
@@ -3607,6 +3741,7 @@ export class ConversationRunJournal {
         }
         state.containedFacts.add(body.openFactDigest);
         state.containmentByAssignment.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
         return state;
       }
       case "cancel-proof-accepted": {
@@ -3656,6 +3791,7 @@ export class ConversationRunJournal {
             ),
         });
         state.acceptedCancellations.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
         return state;
       }
       case "not-started-rejected": {
@@ -3806,6 +3942,7 @@ export class ConversationRunJournal {
           throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
         }
         state.superseded.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
         if (state.assignmentByRun.get(assigned.record.runId) === body.assignmentId) {
           state.assignmentByRun.delete(assigned.record.runId);
         }
@@ -4052,6 +4189,15 @@ export class ConversationRunJournal {
           state: body.state,
           statusRevision: body.statusRevision,
         });
+        if (
+          body.assignmentId !== undefined &&
+          (body.state === "queued" ||
+            body.state === "cancelled" ||
+            body.state === "failed" ||
+            body.state === "expired")
+        ) {
+          state.recoveryAssignments.delete(body.assignmentId);
+        }
         const history = state.statusHistoryByRun.get(body.runId) ?? [];
         if (history.length + 1 !== body.statusRevision) {
           throw corruptRunJournal("Run status history index is not contiguous");
@@ -4109,7 +4255,7 @@ export class ConversationRunJournal {
             assignmentIsCurrent:
               currentAssignmentId === conversationFact.subject.assignmentId,
             currentState: current?.state,
-            alreadyOpen: existing !== undefined,
+            alreadyOpen: isOpenResolutionFact(existing),
             cause: conversationFact.cause,
             hasAtomicUncertainState:
               current !== undefined &&
@@ -4281,9 +4427,32 @@ export class ConversationRunJournal {
           );
         }
         state.committedByAssignment.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        state.bundleAcknowledgementOutbox.add(body.assignmentId);
         state.commits.push(body);
         state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
         state.pendingCommitProjections.set(body.assignmentId, body);
+        return state;
+      }
+      case "bundle-ack-observed": {
+        const committed = state.committedByAssignment.get(body.assignmentId);
+        if (
+          !committed ||
+          state.bundleAcknowledgements.has(body.assignmentId) ||
+          !bundleAcknowledgementBindsCommitted({
+            observedBundleRef: body.bundleRef,
+            observedCommitRevision: body.commitRevision,
+            expectedBundleRef: committed.bundle.ref,
+            expectedCommitRevision: committed.commitRevision,
+          })
+        ) {
+          throw corruptRunJournal(
+            "Bundle acknowledgement observation does not bind one committed conversation bundle",
+          );
+        }
+        state.bundleAcknowledgements.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        state.bundleAcknowledgementOutbox.delete(body.assignmentId);
         return state;
       }
     }
@@ -4758,7 +4927,7 @@ export class ConversationRunJournal {
             assignmentBindsRun: assigned?.record.runId === runId,
             assignmentIsCurrent: currentAssignmentId === assignmentId,
             currentState: current?.state,
-            alreadyOpen: existing !== undefined,
+            alreadyOpen: isOpenResolutionFact(existing),
             cause: fact.cause,
             hasAtomicUncertainState:
               current !== undefined &&
@@ -5024,6 +5193,25 @@ export class ConversationRunJournal {
             },
           ),
         });
+        return state;
+      }
+      case "bundle-ack-observed": {
+        const committed = state.committedByAssignment.get(body.assignmentId);
+        if (
+          !committed ||
+          state.bundleAcknowledgements.has(body.assignmentId) ||
+          !bundleAcknowledgementBindsCommitted({
+            observedBundleRef: body.bundleRef,
+            observedCommitRevision: body.commitRevision,
+            expectedBundleRef: committed.bundle.ref,
+            expectedCommitRevision: committed.commitRevision,
+          })
+        ) {
+          throw corruptRunJournal(
+            "Submission guard bundle acknowledgement is invalid or duplicated",
+          );
+        }
+        state.bundleAcknowledgements.set(body.assignmentId, body);
         return state;
       }
       default:
@@ -5393,6 +5581,7 @@ export class InProcessConversationDispatcher {
   readonly #executor: ConversationDispatchPort;
   readonly #contexts: InProcessDispatchContextFactory;
   readonly #cancellationSubmission: InProcessCancellationSubmission | undefined;
+  readonly #bundleSubmission: InProcessBundleSubmission | undefined;
 
   constructor(options: InProcessConversationDispatcherOptions) {
     this.#enabled = options.enabled;
@@ -5400,6 +5589,7 @@ export class InProcessConversationDispatcher {
     this.#executor = options.executor;
     this.#contexts = options.contexts;
     this.#cancellationSubmission = options.cancellationSubmission;
+    this.#bundleSubmission = options.bundleSubmission;
   }
 
   async dispatchPending(): Promise<readonly DispatchResult[]> {
@@ -5489,7 +5679,7 @@ export class InProcessConversationDispatcher {
     return pending.length;
   }
 
-  async recoverCancellationProofs(): Promise<number> {
+  async recoverAssignments(): Promise<number> {
     if (!this.#enabled) return 0;
     const assignments = await this.#journal.assignmentsAwaitingRecovery();
     let recovered = 0;
@@ -5522,10 +5712,47 @@ export class InProcessConversationDispatcher {
         recovered += 1;
         continue;
       }
+      if (ledger.phase === "acked") {
+        if (candidate.state === "dispatched") {
+          await this.#journal.reconcileStarted(candidate.assignmentId, ledger);
+        }
+        await this.#journal.observeBundleAcknowledgement(
+          candidate.assignmentId,
+          ledger,
+        );
+        recovered += 1;
+        continue;
+      }
+      if (ledger.phase === "sealed") {
+        let progressed = false;
+        if (candidate.state === "dispatched") {
+          await this.#journal.reconcileStarted(candidate.assignmentId, ledger);
+          progressed = true;
+        }
+        const result = await this.#submitSealedBundle(candidate.assignmentId);
+        if (result.committed) {
+          const acknowledged = this.#journal.validateExecutorLedgerSnapshot(
+            await this.#executor.queryLedger(
+              candidate.assignmentId,
+              this.#contexts.create(
+                candidate.assignmentId,
+                "executor.queryLedger",
+              ),
+            ),
+          );
+          await this.#journal.observeBundleAcknowledgement(
+            candidate.assignmentId,
+            acknowledged,
+          );
+          progressed = true;
+        }
+        if (progressed) recovered += 1;
+        continue;
+      }
       if (
         candidate.state === "uncertain" ||
-        ledger.lastSeq <= 0 ||
-        ledger.sealedBundleRef !== undefined
+        candidate.state === "committed" ||
+        ledger.lastSeq <= 0
       ) {
         continue;
       }
@@ -5558,6 +5785,10 @@ export class InProcessConversationDispatcher {
       }
     }
     return recovered;
+  }
+
+  async recoverCancellationProofs(): Promise<number> {
+    return this.recoverAssignments();
   }
 
   async supersede(
@@ -5595,6 +5826,18 @@ export class InProcessConversationDispatcher {
     }
     return this.#cancellationSubmission.submitCancellation(assignmentId);
   }
+
+  async #submitSealedBundle(
+    assignmentId: string,
+  ): Promise<
+    | { readonly committed: true; readonly commitRevision: number }
+    | { readonly committed: false; readonly error: AuthorityError }
+  > {
+    if (!this.#bundleSubmission) {
+      throw new Error("In-process bundle submission is not configured");
+    }
+    return this.#bundleSubmission.submitSealedBundle(assignmentId);
+  }
 }
 
 function emptyProjection(conversationId: string): RunProjection {
@@ -5611,6 +5854,9 @@ function emptyProjection(conversationId: string): RunProjection {
     mirrorStateByAssignment: new Map(),
     mirrorBatches: new Map(),
     committedByAssignment: new Map(),
+    bundleAcknowledgements: new Map(),
+    recoveryAssignments: new Set(),
+    bundleAcknowledgementOutbox: new Set(),
     commits: [],
     assignmentByCommitRevision: new Map(),
     contentByRevision: new Map(),
@@ -5654,6 +5900,7 @@ function emptySubmissionGuardProjection(): SubmissionGuardProjection {
     durableStartedAssignments: new Set(),
     resolutionsByRun: new Map(),
     committedByAssignment: new Map(),
+    bundleAcknowledgements: new Map(),
     closedAssignments: new Set(),
     revokedCapabilities: new Set(),
     activeRunId: undefined,
@@ -5759,6 +6006,40 @@ function capabilityRevocations(
     );
 }
 
+function conversationBundleAcknowledgementRecord(
+  assignmentId: string,
+  committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
+): Extract<ConversationRunJournalRecord, { t: "bundle-ack-observed" }> {
+  return {
+    t: "bundle-ack-observed",
+    assignmentId,
+    bundleRef: committed.bundle.ref,
+    commitRevision: committed.commitRevision,
+  };
+}
+
+function assertLedgerAcknowledgesCommittedConversationBundle(
+  ledger: Pick<
+    LedgerSnapshot,
+    "sealedBundleRef" | "acknowledgedCommitRevision"
+  >,
+  expected: Extract<
+    ConversationRunJournalRecord,
+    { t: "bundle-ack-observed" }
+  >,
+): void {
+  if (!bundleAcknowledgementBindsCommitted({
+    observedBundleRef: ledger.sealedBundleRef,
+    observedCommitRevision: ledger.acknowledgedCommitRevision,
+    expectedBundleRef: expected.bundleRef,
+    expectedCommitRevision: expected.commitRevision,
+  })) {
+    throw new Error(
+      "Bundle acknowledgement does not bind the committed conversation revision",
+    );
+  }
+}
+
 function createOpenResolutionFact(
   assigned: AssignedProjection,
   cause: ConversationUncertainResolutionFact["cause"],
@@ -5852,6 +6133,14 @@ function runRecord(
 function runStream(conversationId: string): string {
   return `run:${conversationId}`;
 }
+
+// 权威记录注册表随公开 conversation 模块再导出:执行点行为矩阵按它做
+// 类型级闭合,新增记录类型缺行即编译失败。
+export {
+  CONVERSATION_RUN_RECORD_SHAPES,
+  CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
+  type ConversationRunRecordType,
+} from "./conversation-run-contracts.js";
 
 function envelopeHasRunRecord(
   envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,

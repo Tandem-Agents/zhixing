@@ -40,6 +40,10 @@
     "./conversation-assignment": {
       "types": "./dist/conversation-assignment.d.ts",
       "import": "./dist/conversation-assignment.js"
+    },
+    "./job-assignment": {
+      "types": "./dist/job-assignment.d.ts",
+      "import": "./dist/job-assignment.js"
     }
   },
   "files": ["dist"],

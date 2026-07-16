@@ -19,7 +19,9 @@ import type {
   JobGlobalStagedMutation,
   SessionStagedMutation,
 } from "./state.js";
-import type { ControlEnvelope } from "./protocol.js";
+import type { ControlEnvelope, IngressContext } from "./protocol.js";
+
+export type UncertainResolutionTargetState = "queued" | "cancelled" | "failed";
 
 export type ControlResultBody =
   | { t: "input"; runId: string; queuedPosition: number }
@@ -31,7 +33,7 @@ export type ControlResultBody =
   | { t: "job-cancel"; runState: JobRunState }
   | {
       t: "uncertain-resolve";
-      state: ConversationRunState | JobRunState;
+      state: UncertainResolutionTargetState;
       factDigest: Digest;
     }
   | { t: "delivery-resolve"; applied: boolean };
@@ -47,6 +49,7 @@ export type ControlRecord =
       t: "received";
       requestId: string;
       envelope: ControlEnvelope | { ref: ArtifactRef };
+      ingress?: IngressContext;
     }
   | {
       t: "applied";

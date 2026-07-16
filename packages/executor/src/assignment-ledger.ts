@@ -31,6 +31,10 @@ import type {
   TranscriptRunRecord,
   WindowCompactInstruction,
   ContentAssetRef,
+  JobCommitFence,
+  JobGlobalStagedMutation,
+  RunDispatchArguments,
+  RunExecutorPort,
 } from "@zhixing/core/contracts";
 import {
   advanceAssignmentLedger,
@@ -40,12 +44,14 @@ import {
   assignmentLedgerSeed,
   canonicalize,
   conversationBundleRoots,
+  createJobSealedBundle,
   createConversationSealedBundle,
   createMutationBatch,
   createAssignmentLedgerValidationState,
   createSignedConversationInteractionMirrorBatch,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
+  jobBundleRoots,
   mutationBatchArtifact,
   interactionMirrorSeed,
   protocolDigest,
@@ -55,6 +61,8 @@ import {
   signSupersedeProof,
   validateAssignmentEntry,
   validateConversationSealedBundle,
+  validateJobMutationBatch,
+  validateJobStagedMutationRecord,
   validateMutationBatch,
   validateStagedMutationRecord,
   validateTranscriptRunRecord,
@@ -62,6 +70,9 @@ import {
   validateConversationInteractionOutcome,
   validateConversationActivation,
   validateConversationEnvelope,
+  validateJobActivation,
+  validateJobEnvelope,
+  validateJobSealedBundle,
   validateCancelProof,
   type ConversationInteractionMirrorEntry,
   type ConversationInteractionMirrorBatch,
@@ -76,6 +87,17 @@ type ConversationEnvelope = Extract<
   import("@zhixing/core/contracts").DispatchEnvelope,
   { execution: "conversation" }
 >;
+type JobEnvelope = Extract<
+  import("@zhixing/core/contracts").DispatchEnvelope,
+  { execution: "job" }
+>;
+type AssignmentEnvelope = ConversationEnvelope | JobEnvelope;
+type AnyAssignmentActivationProof =
+  | AssignmentActivationProof<"conversation">
+  | AssignmentActivationProof<"job">;
+type AnyAssignmentActivationPayload =
+  | AssignmentActivationPayload<"conversation">
+  | AssignmentActivationPayload<"job">;
 
 export type ConversationDispatchPort = {
   dispatch(
@@ -130,7 +152,7 @@ export interface AssignmentLedgerOptions {
   readonly maxCachedAssignments?: number;
 }
 
-export interface ConversationSubmissionPort {
+export interface AssignmentSubmissionPort {
   reportStarted(assignmentId: string, ctx: AuthorityCallContext): Promise<void>;
   mirrorInteractions(
     assignmentId: string,
@@ -151,9 +173,11 @@ export interface ConversationSubmissionPort {
   ): Promise<void>;
 }
 
+export type ConversationSubmissionPort = AssignmentSubmissionPort;
+
 export interface InProcessAssignmentSubmissionOptions {
   readonly ledger: ConversationAssignmentLedger;
-  readonly owner: ConversationSubmissionPort;
+  readonly owner: AssignmentSubmissionPort;
 }
 
 export interface InteractionRequestInput {
@@ -198,6 +222,26 @@ export interface ConversationSealInput {
     readonly toolCalls: number;
   };
   readonly usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number };
+}
+
+export interface JobSealInput {
+  readonly fence: JobCommitFence;
+  readonly outcome: { readonly status: "completed" | "failed"; readonly summary: string };
+  readonly contentAssets: readonly ContentAssetRef[];
+  readonly streamFinal: { readonly finalSeq: number; readonly streamDigest: string };
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly toolCalls: number;
+  };
+  readonly usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number };
+}
+
+export interface StagedJobMutationInput {
+  readonly domain: "global";
+  readonly mutation: JobGlobalStagedMutation;
+  readonly requestId: string;
+  readonly expected: { readonly anchorEpoch: number };
 }
 
 export interface InteractionRecoveryResult {
@@ -315,8 +359,8 @@ const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
 const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 
-/** Durable executor-side conversation assignment protocol; it has no listener or topology side effects. */
-export class ConversationAssignmentLedger implements ConversationDispatchPort {
+/** Durable executor-side assignment protocol shared by conversation and job execution. */
+export class ConversationAssignmentLedger implements ConversationDispatchPort, RunExecutorPort {
   readonly #log: AuthorityCommitLog;
   readonly #artifacts: ArtifactStore;
   readonly #executorId: string;
@@ -343,10 +387,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     this.#verifier = options.verifier;
     this.#ownerControl = options.ownerControl;
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    // Placeholder until the resource governor lands (spec §十, S4): a real
-    // deployment must inject `usageFinal` so cancel proofs carry the digest of
-    // an actual signed UsageReport. The default derives a recognizable
-    // zero-usage digest that can never collide with a UsageReport digest.
+    // A missing usage reporter is represented explicitly as zero-usage evidence.
+    // When a reporter is configured, its signed UsageReport digest replaces this
+    // domain-separated fallback in cancel proofs.
     this.#usageFinal =
       options.usageFinal ??
       ((assignmentId) => ({
@@ -376,21 +419,31 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   }
 
   async dispatch(
-    rawEnvelope: ConversationEnvelope,
-    rawActivation: AssignmentActivationProof<"conversation">,
+    envelope: ConversationEnvelope,
+    activation: AssignmentActivationProof<"conversation">,
     ctx: AuthorityCallContext,
+  ): Promise<DispatchResult>;
+  async dispatch(
+    envelope: JobEnvelope,
+    activation: AssignmentActivationProof<"job">,
+    ctx: AuthorityCallContext,
+  ): Promise<DispatchResult>;
+  async dispatch(
+    ...[rawEnvelope, rawActivation, ctx]: RunDispatchArguments
   ): Promise<DispatchResult> {
     const assignmentId = assertDispatchIdentity(rawEnvelope, this.#executorId);
     this.#ownerControl.authorize(ctx, "executor.dispatch", assignmentId);
     const artifact = dispatchEnvelopeArtifact(rawEnvelope);
     const dispatchDigest = dispatchEnvelopeDigest(rawEnvelope);
 
-    let envelope: ConversationEnvelope;
+    let envelope: AssignmentEnvelope;
     let envelopeReferences: ArtifactRef[];
-    let activation: AssignmentActivationProof<"conversation">;
-    let activationPayload: AssignmentActivationPayload<"conversation">;
+    let activation: AnyAssignmentActivationProof;
+    let activationPayload: AnyAssignmentActivationPayload;
     try {
-      envelope = validateConversationEnvelope(rawEnvelope, this.#verifier);
+      envelope = rawEnvelope.execution === "conversation"
+        ? validateConversationEnvelope(rawEnvelope, this.#verifier)
+        : validateJobEnvelope(rawEnvelope, this.#verifier);
       if (
         (await this.#artifacts.put(artifact.bytes)).digest !== artifact.ref.digest
       ) {
@@ -398,12 +451,19 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       }
       envelopeReferences = await this.#assertEnvelopeArtifactsPresent(envelope);
       activation = snapshot(rawActivation, "Assignment activation proof");
-      activationPayload = validateConversationActivation({
-        envelope,
-        activation,
-        dispatchRef: artifact.ref,
-        verifier: this.#verifier,
-      });
+      activationPayload = envelope.execution === "conversation"
+        ? validateConversationActivation({
+            envelope,
+            activation: activation as AssignmentActivationProof<"conversation">,
+            dispatchRef: artifact.ref,
+            verifier: this.#verifier,
+          })
+        : validateJobActivation({
+            envelope,
+            activation: activation as AssignmentActivationProof<"job">,
+            dispatchRef: artifact.ref,
+            verifier: this.#verifier,
+          });
     } catch (error) {
       const authorityError = invalidDispatchError(error);
       return this.#rejectBeforeReceived(
@@ -444,7 +504,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
           v: 1,
           t: "received",
           envelope: { ref: artifact.ref },
-          activation: activation as AssignmentActivationProof,
+          activation: activation as unknown as AssignmentActivationProof,
         });
         return {
           kind: "append",
@@ -1027,7 +1087,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
 
   async stageMutation(
     assignmentId: string,
-    input: StagedConversationMutationInput,
+    input: StagedConversationMutationInput | StagedJobMutationInput,
   ): Promise<{ readonly seq: number }> {
     const candidate = snapshot(input, "Staged mutation input");
     const transaction = await this.#transact<{ seq: number }>(assignmentId, (state) => {
@@ -1049,13 +1109,19 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       if (state.phase !== "started" || state.aborts.length > 0) {
         throw new Error("Assignment can stage mutations only while started");
       }
+      const execution = state.received?.body.activation.ref.execution;
+      if (!execution) throw new Error("Assignment has no durable activation");
       const staged = {
         v: 1 as const,
         t: "staged-mutation" as const,
         seq: state.stagedMutations.length + 1,
         ...candidate,
       } as Extract<AssignmentRecord, { t: "staged-mutation" }>;
-      validateStagedMutationRecord(staged);
+      if (execution === "job") {
+        validateJobStagedMutationRecord(staged);
+      } else {
+        validateStagedMutationRecord(staged);
+      }
       return {
         kind: "append",
         entries: [assignmentRecord(assignmentId, nextEntry(state, staged))],
@@ -1166,14 +1232,117 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     return bundle;
   }
 
+  async sealJobBundle(
+    assignmentId: string,
+    input: JobSealInput,
+  ): Promise<ReturnType<typeof createJobSealedBundle>> {
+    const state = await this.#select(assignmentId, (current) => ({
+      phase: current.phase,
+      received: current.received
+        ? snapshot(current.received, "Received seal projection")
+        : undefined,
+      stagedMutations: current.stagedMutations.map((record) =>
+        snapshot(record, "Staged seal mutation"),
+      ),
+    }));
+    if (
+      (state.phase !== "started" && state.phase !== "sealed" && state.phase !== "acked") ||
+      !state.received
+    ) {
+      throw new Error("Assignment cannot seal a job result before started");
+    }
+    const envelopeBytes = await this.#artifacts.get(state.received.body.envelope.ref);
+    const envelope = validateJobEnvelope(
+      JSON.parse(Buffer.from(envelopeBytes).toString("utf8")) as JobEnvelope,
+      this.#verifier,
+    );
+    if (canonicalize(input.fence) !== canonicalize(envelope.work.fence)) {
+      throw new TypeError("Job seal fence does not match the durable dispatch");
+    }
+    const staged = state.stagedMutations;
+    if (staged.some((record) => record.domain !== "global")) {
+      throw corruptLedger("Job assignment contains a session mutation");
+    }
+    let batchValue: import("@zhixing/core/contracts").MutationBatch | undefined;
+    let batchSummary:
+      | { readonly ref: ArtifactRef; readonly sessionCount: 0; readonly globalCount: number }
+      | undefined;
+    if (staged.length > 0) {
+      batchValue = createMutationBatch(assignmentId, staged);
+      const batchArtifact = mutationBatchArtifact(batchValue);
+      const stored = await this.#artifacts.put(batchArtifact.bytes);
+      if (canonicalize(stored) !== canonicalize(batchArtifact.ref)) {
+        throw new Error("Mutation batch store returned a different reference");
+      }
+      batchSummary = {
+        ref: batchArtifact.ref,
+        sessionCount: 0,
+        globalCount: staged.length,
+      };
+    }
+    const body = {
+      t: "job" as const,
+      jobRunId: envelope.work.jobRunId,
+      taskId: envelope.work.taskId,
+      fence: snapshot(input.fence, "Job commit fence"),
+      outcome: snapshot(input.outcome, "Job outcome"),
+      contentAssets: [...input.contentAssets].sort((left, right) =>
+        left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0,
+      ),
+      ...(batchSummary ? { mutationBatch: batchSummary } : {}),
+    };
+    const rootRefs = jobBundleRoots(body);
+    const rootDigests = new Set(rootRefs.map((ref) => ref.digest));
+    const dependencyArtifacts = collectArtifactRefs(staged)
+      .filter((ref) => !rootDigests.has(ref.digest))
+      .sort((left, right) =>
+        left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0,
+      );
+    const bundle = createJobSealedBundle({
+      assignmentId,
+      executorId: this.#executorId,
+      streamFinal: input.streamFinal,
+      usage: input.usage,
+      usageFinal: input.usageFinal,
+      dependencyArtifacts,
+      body,
+    });
+    const artifact = sealedBundleArtifact(bundle);
+    const stored = await this.#artifacts.put(artifact.bytes);
+    if (canonicalize(stored) !== canonicalize(artifact.ref)) {
+      throw new Error("Sealed bundle store returned a different reference");
+    }
+    for (const ref of [...jobBundleRoots(bundle.body), ...bundle.dependencyArtifacts]) {
+      if (!(await this.#artifacts.has(ref))) {
+        throw new Error(`Sealed bundle dependency is not present: ${ref.digest}`);
+      }
+    }
+    await this.#recordSealedBundle(
+      assignmentId,
+      bundle,
+      artifact.ref,
+      batchValue,
+    );
+    return bundle;
+  }
+
   async sealedBundle(assignmentId: string): Promise<SealedBundle> {
-    const sealed = await this.#select(assignmentId, (state) => {
+    const projection = await this.#select(assignmentId, (state) => {
       if ((state.phase !== "sealed" && state.phase !== "acked") || !state.sealed) {
         throw new Error("Assignment has no sealed bundle");
       }
-      return snapshot(state.sealed, "Sealed record");
+      const execution = state.received?.body.activation.ref.execution;
+      if (!execution) throw corruptLedger("Sealed assignment has no received activation");
+      return {
+        sealed: snapshot(state.sealed, "Sealed record"),
+        execution,
+      };
     });
-    return this.#loadSealedBundle(assignmentId, sealed);
+    return this.#loadSealedBundle(
+      assignmentId,
+      projection.sealed,
+      projection.execution,
+    );
   }
 
   async cancelProof(assignmentId: string): Promise<CancelProofBody | undefined> {
@@ -1184,14 +1353,16 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
 
   async #recordSealedBundle(
     assignmentId: string,
-    bundle: ReturnType<typeof validateConversationSealedBundle>,
+    bundle: SealedBundle,
     bundleRef: ArtifactRef,
     mutationBatch?: import("@zhixing/core/contracts").MutationBatch,
   ): Promise<void> {
     const mutationBatchRef = mutationBatchArtifactReference(mutationBatch);
     const references = [
       bundleRef,
-      ...conversationBundleRoots(bundle.body),
+      ...(bundle.body.t === "conversation"
+        ? conversationBundleRoots(bundle.body)
+        : jobBundleRoots(bundle.body)),
       ...bundle.dependencyArtifacts,
       ...(mutationBatchRef ? [mutationBatchRef] : []),
     ];
@@ -1235,12 +1406,17 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
           throw corruptLedger("Started assignment has no received record");
         }
         const activationRef = state.received.body.activation.ref;
+        const bodyMatches = activationRef.execution === "conversation"
+          ? bundle.body.t === "conversation" &&
+            bundle.body.runId === activationRef.runId &&
+            bundle.body.conversationId === activationRef.conversationId
+          : bundle.body.t === "job" &&
+            bundle.body.jobRunId === activationRef.jobRunId &&
+            bundle.body.taskId === activationRef.taskId;
         if (
-          activationRef.execution !== "conversation" ||
+          !bodyMatches ||
           bundle.assignmentId !== assignmentId ||
-          bundle.executorId !== this.#executorId ||
-          bundle.body.runId !== activationRef.runId ||
-          bundle.body.conversationId !== activationRef.conversationId
+          bundle.executorId !== this.#executorId
         ) {
           throw new Error("Sealed bundle does not bind the received assignment");
         }
@@ -1384,7 +1560,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   #conflictResult(
     assignmentId: string,
     conflictingDispatchRef: ArtifactRef,
-    conflictingPayload: AssignmentActivationPayload<"conversation">,
+    conflictingPayload: AnyAssignmentActivationPayload,
     received: NonNullable<LedgerProjection["received"]>,
   ): DispatchResult {
     const acceptedPayload = withoutSignature(received.body.activation);
@@ -1432,20 +1608,23 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         }
 
         const receivedRef = state.received?.body.activation.ref;
-        if (receivedRef && receivedRef.execution !== "conversation") {
-          throw corruptLedger("Cancellation reached a non-conversation assignment");
-        }
         const receivedAuthority = receivedRef
-          ? {
-              execution: "conversation" as const,
-              conversationId: receivedRef.conversationId,
-              ownerEpoch: receivedRef.ownerEpoch,
-            }
+          ? receivedRef.execution === "conversation"
+            ? {
+                execution: "conversation" as const,
+                conversationId: receivedRef.conversationId,
+                ownerEpoch: receivedRef.ownerEpoch,
+              }
+            : {
+                execution: "job" as const,
+                taskId: receivedRef.taskId,
+                anchorEpoch: receivedRef.anchorEpoch,
+              }
           : undefined;
         const authority =
           cause.cause === "owner-fence" ? cause.authority : receivedAuthority;
-        if (!authority || authority.execution !== "conversation") {
-          throw new Error("Cancellation has no conversation authority binding");
+        if (!authority) {
+          throw new Error("Cancellation has no authority binding");
         }
         if (
           receivedAuthority &&
@@ -1648,8 +1827,10 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     }
     if (entry.body.t === "received") {
       const bytes = await this.#artifacts.get(entry.body.envelope.ref);
-      const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as ConversationEnvelope;
-      const envelope = validateConversationEnvelope(raw, this.#verifier);
+      const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
+      const envelope = raw.execution === "conversation"
+        ? validateConversationEnvelope(raw, this.#verifier)
+        : validateJobEnvelope(raw, this.#verifier);
       const artifact = dispatchEnvelopeArtifact(envelope);
       if (canonicalize(artifact.ref) !== canonicalize(entry.body.envelope.ref)) {
         throw corruptLedger("received dispatch artifact reference is inconsistent");
@@ -1661,13 +1842,22 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         throw corruptLedger("received dispatch targets a different assignment or executor");
       }
       await this.#assertEnvelopeArtifactsPresent(envelope);
-      validateConversationActivation({
-        envelope,
-        activation:
-          entry.body.activation as AssignmentActivationProof<"conversation">,
-        dispatchRef: artifact.ref,
-        verifier: this.#verifier,
-      });
+      if (envelope.execution === "conversation") {
+        validateConversationActivation({
+          envelope,
+          activation:
+            entry.body.activation as AssignmentActivationProof<"conversation">,
+          dispatchRef: artifact.ref,
+          verifier: this.#verifier,
+        });
+      } else {
+        validateJobActivation({
+          envelope,
+          activation: entry.body.activation as AssignmentActivationProof<"job">,
+          dispatchRef: artifact.ref,
+          verifier: this.#verifier,
+        });
+      }
     }
     if (entry.body.t === "halted") {
       const proof = validateCancelProof(entry.body.proof, this.#verifier);
@@ -1676,17 +1866,23 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
       }
       if (state.received) {
         const ref = state.received.body.activation.ref;
-        if (ref.execution !== "conversation") {
-          throw corruptLedger("Cancel proof binds a non-conversation assignment");
-        }
-        if (
-          proof.authority.execution !== "conversation" ||
-          proof.authority.conversationId !== ref.conversationId ||
-          proof.authority.ownerEpoch !== ref.ownerEpoch
-        ) {
+        const authorityMatches = ref.execution === "conversation"
+          ? proof.authority.execution === "conversation" &&
+            proof.authority.conversationId === ref.conversationId &&
+            proof.authority.ownerEpoch === ref.ownerEpoch
+          : proof.authority.execution === "job" &&
+            proof.authority.taskId === ref.taskId &&
+            proof.authority.anchorEpoch === ref.anchorEpoch;
+        if (!authorityMatches) {
           throw corruptLedger("Cancel proof authority does not bind the received assignment");
         }
       }
+    }
+    if (
+      entry.body.t === "staged-mutation" &&
+      state.received?.body.activation.ref.execution === "job"
+    ) {
+      validateJobStagedMutationRecord(entry.body);
     }
     const digest = applyValidatedAssignmentEntry(state.validation, entry);
     applyEntry(state, entry, digest, commit.at);
@@ -1705,7 +1901,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   };
 
   async #assertEnvelopeArtifactsPresent(
-    envelope: ConversationEnvelope,
+    envelope: AssignmentEnvelope,
   ): Promise<ArtifactRef[]> {
     const references = collectArtifactRefs(envelope);
     for (const ref of references) {
@@ -1719,12 +1915,19 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
   async #loadSealedBundle(
     assignmentId: string,
     sealed: Extract<AssignmentRecord, { t: "bundle_sealed" }>,
-  ): Promise<ReturnType<typeof validateConversationSealedBundle>> {
+    expectedExecution: "conversation" | "job",
+  ): Promise<SealedBundle> {
     const bytes = await this.#artifacts.get(sealed.bundle.ref);
-    const bundle = validateConversationSealedBundle(
-      JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
-    );
-    const artifact = sealedBundleArtifact(bundle);
+    const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle;
+    const bundle = raw.body.t === "conversation"
+      ? validateConversationSealedBundle(raw)
+      : validateJobSealedBundle(raw);
+    if (bundle.body.t !== expectedExecution) {
+      throw corruptLedger("Sealed bundle execution kind differs from its activation");
+    }
+    const artifact = bundle.body.t === "conversation"
+      ? sealedBundleArtifact(bundle)
+      : sealedBundleArtifact(bundle);
     if (canonicalize(artifact.ref) !== canonicalize(sealed.bundle.ref)) {
       throw corruptLedger("Sealed bundle artifact reference is inconsistent");
     }
@@ -1739,9 +1942,12 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         throw corruptLedger("Ledger mutation batch reference conflicts with the bundle");
       }
       const batchBytes = await this.#artifacts.get(sealed.mutationBatch.ref);
-      const batch = validateMutationBatch(
-        JSON.parse(Buffer.from(batchBytes).toString("utf8")) as import("@zhixing/core/contracts").MutationBatch,
-      );
+      const candidate = JSON.parse(
+        Buffer.from(batchBytes).toString("utf8"),
+      ) as import("@zhixing/core/contracts").MutationBatch;
+      const batch = expectedExecution === "job"
+        ? validateJobMutationBatch(candidate)
+        : validateMutationBatch(candidate);
       if (batch.assignmentId !== assignmentId) {
         throw corruptLedger("Mutation batch belongs to a different assignment");
       }
@@ -1989,6 +2195,9 @@ function ledgerSnapshot(state: LedgerProjection): LedgerSnapshot {
           ),
         }
       : {}),
+    ...(state.phase === "acked"
+      ? { acknowledgedCommitRevision: state.acknowledgedCommitRevision }
+      : {}),
     ...(state.halted ? { cancelProof: snapshot(state.halted, "Cancel proof") } : {}),
   };
 }
@@ -2225,7 +2434,7 @@ function assertExactKeys(
 }
 
 function assertDispatchIdentity(
-  envelope: ConversationEnvelope,
+  envelope: AssignmentEnvelope,
   executorId: string,
 ): string {
   assertIdentifier(envelope?.assignmentId, "Dispatch assignmentId");
@@ -2313,3 +2522,5 @@ function snapshot<T>(value: T, label: string): T {
     throw new TypeError(`${label} is not canonical protocol data`, { cause: error });
   }
 }
+
+export { ConversationAssignmentLedger as AssignmentLedger };
