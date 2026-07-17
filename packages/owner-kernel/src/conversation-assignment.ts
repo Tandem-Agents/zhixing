@@ -6,6 +6,7 @@ import {
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
+  type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
@@ -16,6 +17,7 @@ import type {
   AssignmentActivationProof,
   AuthorityCallContext,
   AuthorityError,
+  ConversationUncertainClosure,
   ConversationRunState,
   ConversationStatusNotice,
   ControlResult,
@@ -77,12 +79,19 @@ import {
   validateNonEmptyUserTurnInput,
   validateSupersedeProof,
   validateTranscriptRunRecord,
+  validateAuthorityError as validateAuthorityErrorContract,
+  validatePublishDecisionRecord,
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
+import {
+  compileDeliveryContent,
+  DeliveryContentValidationError,
+  type CompiledDeliveryContent,
+} from "@zhixing/core";
 import type {
   ControlAdmissionJournal,
   ControlAdmissionOutcome,
@@ -124,6 +133,8 @@ import {
   corruptRunJournal,
   historicalBundleFenceMatches,
   nextActiveRunIdForReplay,
+  conversationUncertainClosure,
+  projectUncertainStatusTransition,
   resolutionFactDigest,
   resolutionTargetState,
   terminationProofBindsDurableSource,
@@ -133,6 +144,11 @@ import {
   type DurableSourceBoundProof,
   type Stored,
 } from "./conversation-run-contracts.js";
+import type {
+  ConversationDeliveryCommitInput,
+  ConversationDeliveryParticipant,
+  ConversationStatusDeliveryInput,
+} from "./delivery-participant.js";
 
 export type { ConversationRunJournalRecord } from "./conversation-run-contracts.js";
 type ConversationUncertainResolutionFact = Extract<
@@ -191,11 +207,16 @@ interface FinalOutboxProjection {
   readonly lastPendingRevisionByConversation: Map<string, number>;
 }
 
-interface StatusHistoryEntry {
+type StatusHistoryEntry = {
   readonly state: ConversationRunState;
   readonly statusRevision: number;
   readonly at: IsoTime;
-}
+} & (
+  | { readonly uncertainTransition?: undefined }
+  | { readonly uncertainTransition: "opened"; readonly openFactDigest: string }
+  | ({ readonly uncertainTransition: "closed"; readonly openFactDigest: string } &
+      ConversationUncertainClosure)
+);
 
 const FINAL_OUTBOX_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
@@ -264,6 +285,7 @@ export interface ConversationRunJournalOptions {
   readonly authority: ConversationCommitAuthority;
   readonly projection: ConversationCommitProjection;
   readonly publisher?: ConversationMutationPublisher;
+  readonly delivery: ConversationDeliveryParticipant;
   readonly clock?: () => string;
   readonly abortTickets?: ConversationAbortTicketAuthorizer;
 }
@@ -507,7 +529,11 @@ interface RunProjection {
 interface SubmissionGuardProjection {
   readonly admittedByRun: Map<
     string,
-    { readonly ingressKey: string; readonly queuedPosition: number }
+    {
+      readonly ingressKey: string;
+      readonly queuedPosition: number;
+      readonly ingress: IngressContext;
+    }
   >;
   readonly runByIngress: Map<string, string>;
   readonly queuedRunByPosition: Map<number, string>;
@@ -651,9 +677,13 @@ export class ConversationRunJournal {
   readonly #authority: ConversationCommitAuthority;
   readonly #projection: ConversationCommitProjection;
   readonly #publisher: ConversationMutationPublisher | undefined;
+  readonly #delivery: ConversationDeliveryParticipant;
   readonly #clock: () => string;
   readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
   readonly #operations = new SerialTaskQueue();
+  readonly #statusListeners = new Set<
+    (notice: ConversationStatusNotice) => void | Promise<void>
+  >();
   #runProjection:
     | { readonly state: RunProjection; readonly cursor: ProjectionCursor }
     | undefined;
@@ -680,8 +710,16 @@ export class ConversationRunJournal {
     this.#authority = options.authority;
     this.#projection = options.projection;
     this.#publisher = options.publisher;
+    this.#delivery = options.delivery;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#abortTickets = options.abortTickets;
+  }
+
+  onStatus(
+    listener: (notice: ConversationStatusNotice) => void | Promise<void>,
+  ): () => void {
+    this.#statusListeners.add(listener);
+    return () => this.#statusListeners.delete(listener);
   }
 
   async admit(input: {
@@ -1024,7 +1062,7 @@ export class ConversationRunJournal {
     readonly envelope: ConversationControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
-    return input.admission.applyAuthority<
+    return this.#delivery.coordinate(() => input.admission.applyAuthority<
       RunProjection,
       ConversationControlEnvelope
     >({
@@ -1038,6 +1076,28 @@ export class ConversationRunJournal {
           record as LogicalRecord<ConversationCommitLogRecord>,
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
+      companionStreams: ["delivery"],
+      prepareCompanions: (state, context, plan) => {
+        const statuses = conversationStatusDeliveryInputs(
+          this.#conversationId,
+          state,
+          plan.authorityEntries ?? [],
+          context.authorityPrefix.at,
+        );
+        const prepared = this.#delivery.prepareConversationStatuses(statuses);
+        if (!prepared.accepted) throw corruptRunJournal(prepared.error.message);
+        return prepared.records;
+      },
+      onCommitted: (state, commit) => {
+        this.#publishStatusNotices(
+          conversationStatusNoticesForCommit(
+            state,
+            commit,
+            this.#conversationId,
+            this.#ownerEpoch,
+          ),
+        );
+      },
       decide: (state, context) => {
         const body = context.envelope.body;
         if (body.t === "cancel") {
@@ -1158,7 +1218,7 @@ export class ConversationRunJournal {
           ],
         };
       },
-    });
+    }));
   }
 
   async closeQueuedRun(
@@ -2219,6 +2279,8 @@ export class ConversationRunJournal {
     if (!guardAssigned) {
       throw new Error("Bundle capability is not activated by a durable assignment");
     }
+    const guardIngress = guard.admittedByRun.get(guardAssigned.record.runId)?.ingress;
+    if (!guardIngress) throw new Error("Bundle assignment has no durable ingress");
     const guardCommitted = guard.committedByAssignment.get(assignmentId);
     if (!guardCommitted) {
       const guardState = guard.stateByRun.get(guardAssigned.record.runId)?.state;
@@ -2451,9 +2513,21 @@ export class ConversationRunJournal {
     if (canonicalize(closedArtifact.ref) !== canonicalize(artifact.ref)) {
       throw new Error("Bundle closure changed its artifact identity");
     }
-    if (batch && !this.#publisher) {
-      return rejected("capability-gap", "Staged mutation publisher is not configured", false);
+    if (
+      batch?.records.some(
+        (record) =>
+          record.domain === "global" && record.mutation.kind !== "delivery-enqueue",
+      ) &&
+      !this.#publisher
+    ) {
+      return rejected("capability-gap", "Global staged mutation publisher is not configured", false);
     }
+    const compiledDelivery = await compileConversationDeliveryContents(
+      committedRunRecord,
+      batch,
+      this.#artifacts,
+      guardIngress,
+    );
 
     const transaction = await this.#transact<
         | { readonly committed: true; readonly commitRevision: number }
@@ -2612,7 +2686,7 @@ export class ConversationRunJournal {
           "Conversation commit authority decision",
         );
         if (!authorityDecision.committed) {
-          validateAuthorityError(authorityDecision.error);
+          validateAuthorityErrorContract(authorityDecision.error);
           return { kind: "return", value: authorityDecision };
         }
         const commitRevision = authorityDecision.commitRevision;
@@ -2632,9 +2706,37 @@ export class ConversationRunJournal {
           };
         }
         const outcomes: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"] = [];
+        const admitted = state.admittedByRun.get(body.runId);
+        if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
+        const deliveryInput: ConversationDeliveryCommitInput = {
+          at: authorityPrefix.at,
+          conversationId: this.#conversationId,
+          runId: body.runId,
+          assignmentId: bundle.assignmentId,
+          commitRevision,
+          ingress: admitted.record.ingress,
+          runRecord: committedRunRecord,
+          ...(batch ? { mutationBatch: batch } : {}),
+          ...(compiledDelivery.final
+            ? { finalContent: compiledDelivery.final.content }
+            : {}),
+          stagedContents: compiledDelivery.stagedContents,
+          stagedContentErrors: compiledDelivery.stagedContentErrors,
+        };
+        const deliveryDecision = this.#delivery.prepareConversationCommit(deliveryInput);
+        if (!deliveryDecision.accepted) {
+          return {
+            kind: "return",
+            value: { committed: false as const, error: deliveryDecision.error },
+          };
+        }
         if (batch) {
           const globalRecords = batch.records
-            .filter((record) => record.domain === "global")
+            .filter(
+              (record) =>
+                record.domain === "global" &&
+                record.mutation.kind !== "delivery-enqueue",
+            )
             .map((record) => ({
               seq: record.seq,
               mutation: record.mutation as GlobalStagedMutation,
@@ -2659,7 +2761,20 @@ export class ConversationRunJournal {
                 outcome: { t: "granted", targetRevision: commitRevision },
               });
             } else {
-              const outcome = globalOutcomes.get(record.seq);
+              const outcome =
+                record.mutation.kind === "delivery-enqueue"
+                  ? deliveryDecision.stagedRevisions.has(record.seq)
+                    ? {
+                        t: "granted" as const,
+                        targetRevision: deliveryDecision.stagedRevisions.get(record.seq)!,
+                      }
+                    : deliveryDecision.stagedConflicts.has(record.seq)
+                      ? {
+                          t: "conflicted" as const,
+                          error: deliveryDecision.stagedConflicts.get(record.seq)!,
+                        }
+                      : undefined
+                  : globalOutcomes.get(record.seq);
               if (!outcome) throw new TypeError("Global publish batch omitted a mutation");
               outcomes.push({ seq: record.seq, outcome });
             }
@@ -2672,7 +2787,7 @@ export class ConversationRunJournal {
           bundle: { ref: artifact.ref },
           commitRevision,
         };
-        const entries: LogicalRecord<ConversationCommitLogRecord>[] = [
+        const entries: LogicalRecord<unknown>[] = [
           runRecord(this.#conversationId, committedRecord),
           runRecord(this.#conversationId, {
             kind: "content-asset-index",
@@ -2687,6 +2802,7 @@ export class ConversationRunJournal {
             statusRevision:
               (state.stateByRun.get(body.runId)?.statusRevision ?? 0) + 1,
           }),
+          ...deliveryDecision.records,
         ];
         if (currentRunState === "uncertain") {
           if (!openResolution || openResolution.resolution) {
@@ -2705,7 +2821,11 @@ export class ConversationRunJournal {
             }),
           );
         }
-        if (batch && body.mutationBatch) {
+        if (
+          batch &&
+          body.mutationBatch &&
+          publishDecisionRequired(batch.records, outcomes)
+        ) {
           entries.push({
             stream: "publish",
             body: {
@@ -2718,7 +2838,9 @@ export class ConversationRunJournal {
             },
           });
           for (const domain of ["session", "global"] as const) {
-            if (batch.records.some((record) => record.domain === domain)) {
+            if (
+              domainPublishDecisionRequired(batch.records, outcomes, domain)
+            ) {
               entries.push({
                 stream: "publish",
                 body: {
@@ -2749,7 +2871,7 @@ export class ConversationRunJournal {
           value: { committed: true, commitRevision },
         };
         },
-        references,
+        [...references, ...compiledDelivery.references],
       ).catch((error: unknown) => {
         if (error instanceof AuthorityStorageError && error.code === "artifact-missing") {
           return undefined;
@@ -3003,41 +3125,19 @@ export class ConversationRunJournal {
   ): Promise<ConversationStatusNotice[]> {
     assertIdentifier(runId, "Run id");
     assertNonNegativeSafeInteger(afterStatusRevision, "Last-seen status revision");
-    const records = await this.#select((state) =>
+    return this.#select((state) =>
       (state.statusHistoryByRun.get(runId) ?? [])
-        .slice(afterStatusRevision)
-        .map((record) => snapshot(record, "Run status history")),
+        .filter((record) => record.statusRevision > afterStatusRevision)
+        .map((record) =>
+          conversationStatusNotice(
+            this.#conversationId,
+            this.#ownerEpoch,
+            runId,
+            record,
+          ),
+        )
+        .filter((notice): notice is ConversationStatusNotice => notice !== undefined),
     );
-    const notices: ConversationStatusNotice[] = [];
-    for (const record of records) {
-      if (record.state === "committed") continue;
-      const ref = {
-        execution: "conversation" as const,
-        conversationId: this.#conversationId,
-        runId,
-        ownerEpoch: this.#ownerEpoch,
-      };
-      if (record.state === "uncertain") {
-        notices.push({
-          v: 1,
-          ref,
-          state: record.state,
-          statusRevision: record.statusRevision,
-          actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
-          at: record.at,
-        });
-      } else {
-        notices.push({
-          v: 1,
-          ref,
-          state: record.state,
-          statusRevision: record.statusRevision,
-          actions: [],
-          at: record.at,
-        });
-      }
-    }
-    return notices;
   }
 
   async publishConflicts(assignmentId: string): Promise<PublishConflictNotice | undefined> {
@@ -3306,7 +3406,7 @@ export class ConversationRunJournal {
         try {
           return await this.#log.transactProjection<
             RunProjection,
-            ConversationCommitLogRecord,
+            unknown,
             void
           >(
             cached?.state ?? emptyProjection(this.#conversationId),
@@ -3332,12 +3432,13 @@ export class ConversationRunJournal {
 
   readonly #reduce = async (
     state: RunProjection,
-    record: LogicalRecord<ConversationCommitLogRecord>,
-    envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+    record: LogicalRecord<unknown>,
+    rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
   ): Promise<RunProjection> => {
     if (record.stream !== runStream(this.#conversationId)) {
-      throw corruptRunJournal("Run projection received a different stream");
+      return state;
     }
+    const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
     const body = snapshot(
       record.body as ConversationRunJournalRecord | ConversationProjectionRecord,
       "Run journal record",
@@ -4071,6 +4172,27 @@ export class ConversationRunJournal {
         if (!admitted) {
           throw corruptRunJournal("Run state has no admitted run");
         }
+        try {
+          this.#delivery.assertConversationStatuses(
+            [
+              {
+                at: envelope.at,
+                conversationId: this.#conversationId,
+                runId: body.runId,
+                state: body.state,
+                statusRevision: body.statusRevision,
+                ingress: admitted.record.ingress,
+              },
+            ],
+            envelope,
+          );
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error
+              ? `Conversation status delivery is invalid: ${error.message}`
+              : "Conversation status delivery is invalid",
+          );
+        }
         const current = state.stateByRun.get(body.runId);
         const mappedAssignmentId = state.assignmentByRun.get(body.runId);
         const closedEarlierInEnvelope =
@@ -4202,10 +4324,35 @@ export class ConversationRunJournal {
         if (history.length + 1 !== body.statusRevision) {
           throw corruptRunJournal("Run status history index is not contiguous");
         }
+        const uncertainStatus = projectUncertainStatusTransition({
+          currentState: current?.state,
+          nextState: body.state,
+          resolutionFacts: conversationResolutionFactsInEnvelope(
+            envelope,
+            this.#conversationId,
+            body.runId,
+          ),
+        });
         history.push({
           state: body.state,
           statusRevision: body.statusRevision,
           at: envelope.at,
+          ...(uncertainStatus.kind === "opened"
+            ? {
+                uncertainTransition: "opened" as const,
+                openFactDigest: uncertainStatus.openFactDigest,
+              }
+            : uncertainStatus.kind === "closed"
+              ? {
+                  uncertainTransition: "closed" as const,
+                  openFactDigest: uncertainStatus.openFactDigest,
+                  ...conversationUncertainClosure(
+                    requireConversationResolutionKind(
+                      uncertainStatus.resolutionKind,
+                    ),
+                  ),
+                }
+              : {}),
         });
         state.statusHistoryByRun.set(body.runId, history);
         return state;
@@ -4405,8 +4552,9 @@ export class ConversationRunJournal {
         ) {
           throw corruptRunJournal("Committed bundle does not bind its run journal fact");
         }
+        let closure: ValidatedConversationBundleClosure;
         try {
-          await validateConversationBundleClosure(bundle, this.#artifacts);
+          closure = await validateConversationBundleClosure(bundle, this.#artifacts);
         } catch (error) {
           throw corruptRunJournal(
             error instanceof Error
@@ -4420,10 +4568,34 @@ export class ConversationRunJournal {
             this.#conversationId,
             body,
             bundle,
+            closure.batch,
           )
         ) {
           throw corruptRunJournal(
             "Committed run is missing its content, publish, or final sidecars",
+          );
+        }
+        const admitted = state.admittedByRun.get(body.runId);
+        if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
+        try {
+          this.#delivery.assertConversationCommit(
+            {
+              at: envelope.at,
+              conversationId: this.#conversationId,
+              runId: body.runId,
+              assignmentId: body.assignmentId,
+              commitRevision: body.commitRevision,
+              ingress: admitted.record.ingress,
+              runRecord: closure.runRecord,
+              ...(closure.batch ? { mutationBatch: closure.batch } : {}),
+            },
+            envelope,
+          );
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error
+              ? `Committed delivery companions are invalid: ${error.message}`
+              : "Committed delivery companions are invalid",
           );
         }
         state.committedByAssignment.set(body.assignmentId, body);
@@ -4491,6 +4663,7 @@ export class ConversationRunJournal {
         state.admittedByRun.set(body.runId, {
           ingressKey: body.ingressKey,
           queuedPosition: body.queuedPosition,
+          ingress: body.ingress,
         });
         state.runByIngress.set(body.ingressKey, body.runId);
         return state;
@@ -5373,32 +5546,75 @@ export class ConversationRunJournal {
   async #transact<Value>(
     decide: (
       state: RunProjection,
-      authorityPrefix: { readonly lastLsn: number; readonly nextLsn: number },
-    ) => ProjectionTransactionDecision<ConversationCommitLogRecord, Value>,
+      authorityPrefix: ProjectionTransactionContext,
+    ) => ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
     return this.#operations.run(async () => {
       try {
         const cached = this.#runProjection;
-        const transaction = await this.#log.transactProjection<
+        const transaction = await this.#delivery.coordinate(() =>
+          this.#log.transactProjection<
           RunProjection,
-          ConversationCommitLogRecord,
+          unknown,
           Value
-        >(cached?.state ?? emptyProjection(this.#conversationId), this.#reduce, decide, {
-          stream: runStream(this.#conversationId),
-          ...(cached ? { cursor: cached.cursor } : {}),
-          candidateReferences,
-        });
+        >(
+          cached?.state ?? emptyProjection(this.#conversationId),
+          this.#reduce,
+          (state, context) => {
+            const decision = decide(state, context);
+            if (decision.kind !== "append") return decision;
+            const statuses = conversationStatusDeliveryInputs(
+              this.#conversationId,
+              state,
+              decision.entries,
+              context.at,
+            );
+            const prepared = this.#delivery.prepareConversationStatuses(statuses);
+            if (!prepared.accepted) {
+              throw corruptRunJournal(prepared.error.message);
+            }
+            return {
+              ...decision,
+              entries: [...decision.entries, ...prepared.records],
+            };
+          },
+          {
+            stream: runStream(this.#conversationId),
+            ...(cached ? { cursor: cached.cursor } : {}),
+            candidateReferences,
+          },
+        ));
         this.#runProjection = {
           state: transaction.state,
           cursor: transaction.cursor,
         };
+        if (transaction.commit) {
+          this.#publishStatusNotices(
+            conversationStatusNoticesForCommit(
+              transaction.state,
+              transaction.commit,
+              this.#conversationId,
+              this.#ownerEpoch,
+            ),
+          );
+        }
         return transaction;
       } catch (error) {
         this.#runProjection = undefined;
         throw error;
       }
     });
+  }
+
+  #publishStatusNotices(notices: readonly ConversationStatusNotice[]): void {
+    for (const notice of notices) {
+      for (const listener of this.#statusListeners) {
+        void Promise.resolve()
+          .then(() => listener(notice))
+          .catch(() => undefined);
+      }
+    }
   }
 
   async #appendPublishProgress(progress: Extract<PublishRecord, { t: "publish-progress" }>) {
@@ -6134,6 +6350,49 @@ function runStream(conversationId: string): string {
   return `run:${conversationId}`;
 }
 
+function conversationStatusDeliveryInputs(
+  conversationId: string,
+  state: RunProjection,
+  entries: readonly LogicalRecord<unknown>[],
+  at: string,
+): ConversationStatusDeliveryInput[] {
+  const admittedInEnvelope = new Map<string, IngressContext>();
+  for (const entry of entries) {
+    if (entry.stream !== runStream(conversationId)) continue;
+    const body = entry.body as Partial<ConversationRunJournalRecord>;
+    if ("t" in body && body.t === "admitted" && "runId" in body && "ingress" in body) {
+      admittedInEnvelope.set(body.runId as string, body.ingress as IngressContext);
+    }
+  }
+  const result: ConversationStatusDeliveryInput[] = [];
+  for (const entry of entries) {
+    if (entry.stream !== runStream(conversationId)) continue;
+    const body = entry.body as Partial<ConversationRunJournalRecord>;
+    if (
+      !("t" in body) ||
+      body.t !== "state" ||
+      !("runId" in body) ||
+      !("state" in body) ||
+      !("statusRevision" in body)
+    ) {
+      continue;
+    }
+    const runId = body.runId as string;
+    const ingress =
+      admittedInEnvelope.get(runId) ?? state.admittedByRun.get(runId)?.record.ingress;
+    if (!ingress) throw corruptRunJournal("Run state has no durable ingress for status delivery");
+    result.push({
+      at,
+      conversationId,
+      runId,
+      state: body.state as ConversationRunState,
+      statusRevision: body.statusRevision as number,
+      ingress,
+    });
+  }
+  return result;
+}
+
 // 权威记录注册表随公开 conversation 模块再导出:执行点行为矩阵按它做
 // 类型级闭合,新增记录类型缺行即编译失败。
 export {
@@ -6161,6 +6420,115 @@ function envelopeHasRunRecord(
       )
     );
   });
+}
+
+function conversationResolutionFactsInEnvelope(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  runId: string,
+): ConversationUncertainResolutionFact[] {
+  return envelope.entries.flatMap((entry) => {
+    if (entry.stream !== runStream(conversationId)) return [];
+    const body = entry.body as ConversationRunJournalRecord;
+    return "t" in body && body.t === "resolution" && body.runId === runId
+      ? [body.fact as ConversationUncertainResolutionFact]
+      : [];
+  });
+}
+
+function requireConversationResolutionKind(
+  kind: NonNullable<UncertainResolutionFact["resolution"]>["kind"],
+): Exclude<
+  NonNullable<UncertainResolutionFact["resolution"]>["kind"],
+  "proven-not-started-cancelled"
+> {
+  if (kind === "proven-not-started-cancelled") {
+    throw corruptRunJournal("Conversation uncertainty uses a job-only closure kind");
+  }
+  return kind;
+}
+
+function conversationStatusNotice(
+  conversationId: string,
+  ownerEpoch: number,
+  runId: string,
+  entry: StatusHistoryEntry,
+): ConversationStatusNotice | undefined {
+  const ref = {
+    execution: "conversation" as const,
+    conversationId,
+    runId,
+    ownerEpoch,
+  };
+  if (entry.uncertainTransition === "opened") {
+    if (entry.state !== "uncertain") {
+      throw corruptRunJournal("Uncertain opening notice has a non-uncertain state");
+    }
+    return {
+      v: 1,
+      ref,
+      state: "uncertain",
+      statusRevision: entry.statusRevision,
+      actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
+      at: entry.at,
+      openFactDigest: entry.openFactDigest,
+    };
+  }
+  if (entry.uncertainTransition === "closed") {
+    if (entry.resultingState !== entry.state) {
+      throw corruptRunJournal("Uncertain closure notice has a mismatched successor state");
+    }
+    return {
+      v: 1,
+      ref,
+      state: "uncertain-closed",
+      statusRevision: entry.statusRevision,
+      actions: [],
+      at: entry.at,
+      openFactDigest: entry.openFactDigest,
+      closedBy: entry.closedBy,
+      resultingState: entry.resultingState,
+    } as ConversationStatusNotice;
+  }
+  if (entry.state === "committed") return undefined;
+  if (entry.state === "uncertain") {
+    throw corruptRunJournal("Uncertain state has no durable open fact identity");
+  }
+  return {
+    v: 1,
+    ref,
+    state: entry.state,
+    statusRevision: entry.statusRevision,
+    actions: [],
+    at: entry.at,
+  };
+}
+
+function conversationStatusNoticesForCommit(
+  state: RunProjection,
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+  conversationId: string,
+  ownerEpoch: number,
+): ConversationStatusNotice[] {
+  const notices: ConversationStatusNotice[] = [];
+  for (const record of envelope.entries) {
+    if (record.stream !== runStream(conversationId)) continue;
+    const candidate = record.body as ConversationRunJournalRecord;
+    if (!("t" in candidate) || candidate.t !== "state") continue;
+    const body = candidate;
+    const entry = state.statusHistoryByRun
+      .get(body.runId)
+      ?.find((candidate) => candidate.statusRevision === body.statusRevision);
+    if (!entry) throw corruptRunJournal("Committed run status has no history projection");
+    const notice = conversationStatusNotice(
+      conversationId,
+      ownerEpoch,
+      body.runId,
+      entry,
+    );
+    if (notice) notices.push(notice);
+  }
+  return notices;
 }
 
 function envelopeHasRunState(
@@ -6441,11 +6809,113 @@ function envelopeContainsCommit(
   );
 }
 
+function mutationNeedsExternalPublish(
+  record: MutationBatch["records"][number],
+): boolean {
+  return record.domain === "session" || record.mutation.kind !== "delivery-enqueue";
+}
+
+function publishDecisionRequired(
+  records: MutationBatch["records"],
+  _outcomes: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"],
+): boolean {
+  return records.length > 0;
+}
+
+function domainPublishDecisionRequired(
+  records: MutationBatch["records"],
+  outcomes: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"],
+  domain: "session" | "global",
+): boolean {
+  return records.some(
+    (record, index) =>
+      record.domain === domain &&
+      (mutationNeedsExternalPublish(record) ||
+        outcomes[index]?.outcome.t === "conflicted"),
+  );
+}
+
+interface CompiledConversationDeliveryContents {
+  readonly final?: CompiledDeliveryContent;
+  readonly stagedContents: ReadonlyMap<
+    number,
+    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+  >;
+  readonly stagedContentErrors: ReadonlyMap<number, AuthorityError>;
+  readonly references: readonly ArtifactRef[];
+}
+
+async function compileConversationDeliveryContents(
+  runRecord: TranscriptRunRecord,
+  batch: MutationBatch | undefined,
+  artifacts: ArtifactStore,
+  ingress: IngressContext,
+): Promise<CompiledConversationDeliveryContents> {
+  const final =
+    ingress.kind === "channel"
+      ? await compileDeliveryContent(transcriptFinalAssistantText(runRecord), artifacts)
+      : undefined;
+  const stagedContents = new Map<
+    number,
+    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+  >();
+  const stagedContentErrors = new Map<number, AuthorityError>();
+  const references: ArtifactRef[] = [...(final?.references ?? [])];
+  for (const record of batch?.records ?? []) {
+    if (record.mutation.kind !== "delivery-enqueue") continue;
+    if (
+      record.mutation.request.target.kind === "turn-origin" &&
+      ingress.kind !== "channel"
+    ) {
+      continue;
+    }
+    try {
+      const compiled = await compileDeliveryContent(
+        record.mutation.request.content,
+        artifacts,
+      );
+      stagedContents.set(record.seq, compiled.content);
+      references.push(...compiled.references);
+    } catch (error) {
+      if (!(error instanceof DeliveryContentValidationError)) throw error;
+      stagedContentErrors.set(record.seq, {
+        code: "invalid",
+        message: "Delivery content is invalid or unavailable",
+        retryable: false,
+      });
+    }
+  }
+  return {
+    final,
+    stagedContents,
+    stagedContentErrors,
+    references,
+  };
+}
+
+function transcriptFinalAssistantText(record: TranscriptRunRecord): string {
+  for (let index = record.messages.length - 1; index >= 0; index -= 1) {
+    const message = record.messages[index]!;
+    if (message.role !== "assistant") continue;
+    return message.content
+      .filter(
+        (block): block is Extract<
+          (typeof message.content)[number],
+          { type: "text" }
+        > => block.type === "text",
+      )
+      .map((block) => block.text)
+      .join("");
+  }
+  return "";
+}
+
 function envelopeHasConversationCommitSidecars(
   envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
   conversationId: string,
   committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
   bundle: ReturnType<typeof validateConversationSealedBundle>,
+  batch?: MutationBatch,
 ): boolean {
   const hasContentIndex = envelope.entries.some((entry) => {
     if (
@@ -6483,7 +6953,8 @@ function envelopeHasConversationCommitSidecars(
 
   const mutationBatch = bundle.body.mutationBatch;
   if (!mutationBatch) return true;
-  const hasDecision = envelope.entries.some((entry) => {
+  if (!batch) return true;
+  const decision = envelope.entries.find((entry) => {
     if (
       entry.stream !== "publish" ||
       typeof entry.body !== "object" ||
@@ -6501,12 +6972,14 @@ function envelopeHasConversationCommitSidecars(
       body.sessionCount === mutationBatch.sessionCount &&
       body.globalCount === mutationBatch.globalCount
     );
-  });
-  if (!hasDecision) return false;
+  })?.body as Extract<PublishRecord, { t: "publish-decision" }> | undefined;
+  const needsDecision = batch.records.length > 0;
+  if (!needsDecision) return decision === undefined;
+  if (!decision) return false;
   return (["session", "global"] as const).every((domain) => {
-    const count =
-      domain === "session" ? mutationBatch.sessionCount : mutationBatch.globalCount;
-    if (count === 0) return true;
+    if (!domainPublishDecisionRequired(batch.records, decision.outcomes, domain)) {
+      return true;
+    }
     return envelope.entries.some((entry) => {
       if (
         entry.stream !== "publish" ||
@@ -6944,33 +7417,6 @@ function canonicalTime(value: IsoTime, label: string): number {
   return timestamp;
 }
 
-function validateAuthorityError(value: unknown): void {
-  assertExactRecordKeys(value, ["code", "message", "retryable"], "Authority error");
-  const codes = new Set([
-    "unauthorized",
-    "capability-expired",
-    "epoch-stale",
-    "revision-conflict",
-    "fence-rejected",
-    "busy",
-    "not-found",
-    "invalid",
-    "lease-exhausted",
-    "missing-base",
-    "typed-stale",
-    "capability-gap",
-    "unavailable-offline",
-    "idempotency-conflict",
-  ]);
-  if (
-    !codes.has(String(value.code)) ||
-    typeof value.message !== "string" ||
-    typeof value.retryable !== "boolean"
-  ) {
-    throw corruptRunJournal("Authority error value is invalid");
-  }
-}
-
 type GlobalPublishBatch = ReturnType<
   ConversationMutationPublisher["decideGlobalBatchAtPrefix"]
 >;
@@ -7008,7 +7454,7 @@ function validateGlobalPublishOutcome(value: GlobalPublishOutcome): GlobalPublis
   }
   if (outcome.t === "conflicted") {
     assertExactRecordKeys(outcome, ["error", "t"], "Conflicted publish outcome");
-    validateAuthorityError(outcome.error);
+    validateAuthorityErrorContract(outcome.error);
     return outcome as GlobalPublishOutcome;
   }
   throw new TypeError("Global publish outcome kind is invalid");
@@ -7090,32 +7536,10 @@ function reducePublishBody(
   const body = snapshot(raw, "Publish record");
   assertPlainRecord(body, "Publish record");
   if (body.t === "publish-decision") {
-    assertExactRecordKeys(
-      body,
-      ["assignmentId", "batch", "globalCount", "outcomes", "sessionCount", "t"],
-      "Publish decision",
-    );
-    assertIdentifier(body.assignmentId, "Publish assignment id");
-    assertPlainRecord(body.batch, "Publish mutation batch");
-    assertArtifactReference(body.batch.ref, "Publish mutation batch");
-    assertNonNegativeSafeInteger(body.sessionCount, "Publish session count");
-    assertNonNegativeSafeInteger(body.globalCount, "Publish global count");
-    if (!Array.isArray(body.outcomes)) {
-      throw corruptRunJournal("Publish decision outcomes must be an array");
-    }
-    for (const item of body.outcomes) {
-      assertExactRecordKeys(item, ["outcome", "seq"], "Publish outcome");
-      assertPositiveSafeInteger(item.seq, "Publish outcome sequence");
-      assertPlainRecord(item.outcome, "Publish outcome value");
-      if (item.outcome.t === "granted") {
-        assertExactRecordKeys(item.outcome, ["t", "targetRevision"], "Granted outcome");
-        assertPositiveSafeInteger(item.outcome.targetRevision, "Granted target revision");
-      } else if (item.outcome.t === "conflicted") {
-        assertExactRecordKeys(item.outcome, ["error", "t"], "Conflicted outcome");
-        validateAuthorityError(item.outcome.error);
-      } else {
-        throw corruptRunJournal("Publish outcome kind is invalid");
-      }
+    try {
+      validatePublishDecisionRecord(body);
+    } catch {
+      throw corruptRunJournal("Publish decision structure is invalid");
     }
     if (
       state.decisions.has(body.assignmentId) ||
@@ -7127,11 +7551,8 @@ function reducePublishBody(
     if (!batch || batch.assignmentId !== body.assignmentId) {
       throw corruptRunJournal("Publish decision has no validated mutation batch");
     }
-    if (
-      body.outcomes.length !== body.sessionCount + body.globalCount ||
-      body.outcomes.some((item, index) => item.seq !== index + 1)
-    ) {
-      throw corruptRunJournal("Publish decision outcomes do not cover the mutation batch");
+    if (!publishDecisionRequired(batch.records, body.outcomes)) {
+      throw corruptRunJournal("Publish decision has no externally published mutation");
     }
     for (const [index, item] of body.outcomes.entries()) {
       const mutation = batch.records[index];
@@ -7178,13 +7599,18 @@ function reducePublishBody(
       state.conflictsByAssignment.set(body.assignmentId, conflicts);
     }
     for (const domain of ["session", "global"] as const) {
-      const domainRecords = batch.records.filter((record) => record.domain === domain);
+      const domainRecords = batch.records.filter((record, index) =>
+        record.domain === domain &&
+        (mutationNeedsExternalPublish(record) ||
+          body.outcomes[index]?.outcome.t === "conflicted"),
+      );
       if (domainRecords.length === 0) continue;
       const grantedSeqs = body.outcomes
         .filter(
           (item) =>
             item.outcome.t === "granted" &&
-            batch.records[item.seq - 1]?.domain === domain,
+            batch.records[item.seq - 1]?.domain === domain &&
+            mutationNeedsExternalPublish(batch.records[item.seq - 1]!),
         )
         .map((item) => item.seq);
       state.domainPlans.set(`${body.assignmentId}\0${domain}`, {
@@ -7200,7 +7626,11 @@ function reducePublishBody(
     if (!conversationId) {
       throw corruptRunJournal("Publish decision has no conversation binding");
     }
-    if (body.sessionCount > 0 || body.globalCount > 0) {
+    if (
+      [...state.domainPlans.keys()].some((key) =>
+        key.startsWith(`${body.assignmentId}\0`),
+      )
+    ) {
       pendingPublishAssignments(state, conversationId).add(body.assignmentId);
     } else {
       compactSettledPublish(state, body.assignmentId);
@@ -7322,13 +7752,11 @@ function publishAssignmentPending(
   state: PublishProjection,
   assignmentId: string,
 ): boolean {
-  const decision = state.decisions.get(assignmentId);
-  if (!decision) return false;
+  if (!state.decisions.has(assignmentId)) return false;
   return (["session", "global"] as const).some((domain) => {
-    const count = domain === "session" ? decision.sessionCount : decision.globalCount;
+    const key = `${assignmentId}\0${domain}`;
     return (
-      count > 0 &&
-      state.progress.get(`${assignmentId}\0${domain}`)?.state !== "settled"
+      state.domainPlans.has(key) && state.progress.get(key)?.state !== "settled"
     );
   });
 }

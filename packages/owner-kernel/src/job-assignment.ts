@@ -7,6 +7,7 @@ import {
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
+  type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
@@ -22,11 +23,15 @@ import type {
   DispatchResult,
   JobOccurrence,
   JobRunState,
+  JobStatusNotice,
+  JobUncertainClosure,
   InteractionMirrorBatch,
   IngressContext,
   LedgerEvidencePage,
   LedgerSnapshot,
   LogicalRecord,
+  MutationBatch,
+  PublishRecord,
   RunExecutorPort,
   SealedBundle,
   SupersedeProof,
@@ -38,6 +43,7 @@ import type {
   UncertainResolutionFact,
 } from "@zhixing/core/contracts";
 import {
+  assertProtocolIdentifier as assertIdentifier,
   buildJobActivationPayload,
   buildJobActivationPayloadFromBinding,
   applyValidatedAssignmentEntry,
@@ -81,6 +87,11 @@ import {
   type UnsignedJobEnvelope,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
+import {
+  compileDeliveryContent,
+  DeliveryContentValidationError,
+  type CompiledDeliveryContent,
+} from "@zhixing/core";
 import type {
   AssignmentSubmissionAuthorizer,
   AssignmentSubmissionAuthorization,
@@ -107,6 +118,8 @@ import {
   assignmentTerminationProofKind,
   bundleAcknowledgementBindsCommitted,
   isOpenResolutionFact,
+  jobUncertainClosure,
+  projectUncertainStatusTransition,
   resolutionFactDigest,
   resolutionTargetState,
   terminationProofBindsDurableSource,
@@ -141,6 +154,10 @@ import {
   type NotStartedProofKind,
   type TaskRevisionReplayViolation,
 } from "./job-run-contracts.js";
+import type {
+  JobStatusDeliveryInput,
+  JobDeliveryParticipant,
+} from "./delivery-participant.js";
 // 权威记录注册表随公开 job 模块再导出:执行点行为矩阵(生产/full/guard/
 // 恢复/对抗)按它做类型级闭合,新增记录类型缺行即编译失败。
 export {
@@ -177,6 +194,15 @@ interface JobStateEntry {
   readonly statusRevision: number;
 }
 
+type JobStatusHistoryEntry = JobStateEntry & {
+  readonly at: string;
+} & (
+    | { readonly uncertainTransition?: undefined }
+    | { readonly uncertainTransition: "opened"; readonly openFactDigest: string }
+    | ({ readonly uncertainTransition: "closed"; readonly openFactDigest: string } &
+        JobUncertainClosure)
+  );
+
 /**
  * Zero-ArtifactStore submission guard projection (RunSubmissionPort
  * submission contract): consumes job-stream
@@ -196,6 +222,7 @@ interface JobSubmissionGuardProjection {
       readonly scheduledFor: string;
       readonly taskRevision: number;
       readonly deliveryPlanDigest: string;
+      readonly deliveryRequired: boolean;
     }
   >;
   readonly states: Map<string, JobStateEntry>;
@@ -283,6 +310,7 @@ interface JobProjection {
     Extract<JobJournalRecord, { t: "dispatch-conflict-contained" | "cancel-contained" }>
   >;
   readonly resolutions: Map<string, JobResolutionFact>;
+  readonly statusHistoryByRun: Map<string, JobStatusHistoryEntry[]>;
   readonly committed: Map<string, Extract<JobJournalRecord, { t: "committed" }>>;
   readonly bundleAcknowledgements: Map<
     string,
@@ -350,9 +378,16 @@ export interface JobCommitParticipant {
     readonly authorityPrefixLsn: number;
     readonly occurrence: JobOccurrence;
     readonly bundle: JobBundle;
-    readonly mutationBatch?: import("@zhixing/core/contracts").MutationBatch;
+    readonly mutationBatch: MutationBatch;
   }):
-    | { readonly accepted: true; readonly records: readonly LogicalRecord[] }
+    | {
+        readonly accepted: true;
+        readonly records: readonly LogicalRecord[];
+        readonly outcomes: ReadonlyMap<
+          number,
+          Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"]
+        >;
+      }
     | { readonly accepted: false; readonly error: AuthorityError };
 }
 
@@ -423,6 +458,7 @@ export interface JobJournalOptions {
   /** Owner-side re-authorization of executor abort tickets; required for online receipt, fail-closed when absent. */
   readonly abortTickets?: ConversationAbortTicketAuthorizer;
   readonly compatibility?: JobCompatibilityProjection;
+  readonly delivery: JobDeliveryParticipant;
   readonly commitParticipant?: JobCommitParticipant;
   readonly systemResources?: SystemJobResourceCoordinator;
   readonly systemHandlers?: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
@@ -450,11 +486,15 @@ export class JobJournal {
   readonly #ingress: JobIngressAuthorizer;
   readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
   readonly #compatibility: JobCompatibilityProjection | undefined;
+  readonly #delivery: JobDeliveryParticipant;
   readonly #commitParticipant: JobCommitParticipant | undefined;
   readonly #systemResources: SystemJobResourceCoordinator | undefined;
   readonly #systemHandlers: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
   readonly #clock: () => string;
   readonly #operations = new SerialTaskQueue();
+  readonly #statusListeners = new Set<
+    (notice: JobStatusNotice) => void | Promise<void>
+  >();
   readonly #systemRuns = new Map<string, Promise<"committed" | "failed">>();
   #projection: { readonly state: JobProjection; readonly cursor: ProjectionCursor } | undefined;
   #submissionGuard:
@@ -477,10 +517,16 @@ export class JobJournal {
     this.#ingress = options.ingress;
     this.#abortTickets = options.abortTickets;
     this.#compatibility = options.compatibility;
+    this.#delivery = options.delivery;
     this.#commitParticipant = options.commitParticipant;
     this.#systemResources = options.systemResources;
     this.#systemHandlers = options.systemHandlers ?? new Map();
     this.#clock = options.clock ?? (() => new Date().toISOString());
+  }
+
+  onStatus(listener: (notice: JobStatusNotice) => void | Promise<void>): () => void {
+    this.#statusListeners.add(listener);
+    return () => this.#statusListeners.delete(listener);
   }
 
   async define(definition: TaskDefinition, context: AuthorityCallContext): Promise<void> {
@@ -1458,7 +1504,7 @@ export class JobJournal {
     readonly envelope: JobControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
-    const outcome = await input.admission.applyAuthority<
+    const outcome = await this.#delivery.coordinate(() => input.admission.applyAuthority<
       JobProjection,
       JobControlEnvelope
     >({
@@ -1467,6 +1513,28 @@ export class JobJournal {
       stream: jobStream(this.#taskId),
       initial: emptyProjection(),
       reducer: (state, record, commit) => this.#reduce(state, record, commit),
+      companionStreams: ["delivery"],
+      prepareCompanions: (state, context, plan) => {
+        const statuses = jobStatusDeliveryInputs(
+          this.#taskId,
+          state,
+          plan.authorityEntries ?? [],
+          context.authorityPrefix.at,
+        );
+        const prepared = this.#delivery.prepareJobStatuses(statuses);
+        if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
+        return prepared.records;
+      },
+      onCommitted: (state, commit) => {
+        this.#publishStatusNotices(
+          jobStatusNoticesForCommit(
+            state,
+            commit,
+            this.#taskId,
+            this.#anchorEpoch,
+          ),
+        );
+      },
       decide: (state, context) => {
         const body = context.envelope.body;
         const definition = state.definition;
@@ -1712,7 +1780,7 @@ export class JobJournal {
           ],
         };
       },
-    });
+    }));
     await this.resumeCompatibilityProjection();
     return outcome;
   }
@@ -2298,6 +2366,8 @@ export class JobJournal {
     if (!guardAssigned) {
       throw new Error("Bundle capability is not activated by a durable job assignment");
     }
+    const guardOccurrence = guard.occurrences.get(guardAssigned.record.jobRunId);
+    if (!guardOccurrence) throw new Error("Bundle assignment has no durable occurrence");
     const guardCommitted = guard.committedByAssignment.get(assignmentId);
     if (!guardCommitted) {
       const guardState = guard.states.get(guardAssigned.record.jobRunId)?.state;
@@ -2395,6 +2465,12 @@ export class JobJournal {
       throw error;
     }
     const { artifact } = closure;
+    const compiledDelivery = await compileJobDeliveryContents(
+      bundle,
+      closure.batch,
+      this.#artifacts,
+      guardOccurrence.deliveryRequired,
+    );
     const transaction = await this.#transact<
       | { readonly committed: true; readonly commitRevision: number }
       | { readonly committed: false; readonly error: AuthorityError }
@@ -2470,41 +2546,98 @@ export class JobJournal {
           assignmentId,
         });
         const mutationBatch = closure.batch;
-        const participant = this.#commitParticipant?.prepare({
-          authorityPrefixLsn: prefix.lastLsn,
+        const definition = requireDefinitionRevision(state, occurrence.taskRevision);
+        const delivery = this.#delivery.prepareJobCommit({
+          at: prefix.at,
           occurrence,
+          definition,
           bundle,
           ...(mutationBatch ? { mutationBatch } : {}),
+          ...(compiledDelivery.result
+            ? { resultContent: compiledDelivery.result.content }
+            : {}),
+          stagedContents: compiledDelivery.stagedContents,
+          stagedContentErrors: compiledDelivery.stagedContentErrors,
         });
-        if (!participant) {
-          if (
-            occurrence.deliveryPlan.delivery.kind !== "none" ||
-            mutationBatch !== undefined
-          ) {
+        if (!delivery.accepted) {
+          return {
+            kind: "return",
+            value: { committed: false as const, error: delivery.error },
+          };
+        }
+        if (delivery.records.length > 0) {
+          assertForeignRecords(
+            delivery.records,
+            jobStream(this.#taskId),
+            "Job delivery participant",
+          );
+        }
+        const requiresMutationParticipant =
+          mutationBatch?.records.some(
+            (record) => record.mutation.kind !== "delivery-enqueue",
+          ) === true;
+        let mutationRecords: readonly LogicalRecord<unknown>[] = [];
+        let mutationOutcomes: ReadonlyMap<
+          number,
+          Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"]
+        > = new Map();
+        if (requiresMutationParticipant) {
+          if (!mutationBatch || !this.#commitParticipant) {
             return {
               kind: "return",
               value: rejected(
                 "capability-gap",
-                "Job commit participant is required for delivery or staged mutations",
+                "Job staged mutation requires its owning commit participant",
                 false,
               ),
             };
           }
-        } else if (!participant.accepted) {
-          return {
-            kind: "return",
-            value: { committed: false as const, error: participant.error },
-          };
-        }
-        const requiresParticipantRecords =
-          occurrence.deliveryPlan.delivery.kind !== "none" ||
-          mutationBatch !== undefined;
-        if (participant?.accepted && requiresParticipantRecords) {
+          const prepared = this.#commitParticipant.prepare({
+            authorityPrefixLsn: prefix.lastLsn,
+            occurrence,
+            bundle,
+            mutationBatch,
+          });
+          if (!prepared.accepted) {
+            return {
+              kind: "return",
+              value: { committed: false as const, error: prepared.error },
+            };
+          }
           assertForeignRecords(
-            participant.records,
+            prepared.records,
             jobStream(this.#taskId),
-            "Job commit participant",
+            "Job mutation commit participant",
           );
+          if (prepared.records.some((record) => record.stream === "delivery")) {
+            throw new Error("Job mutation commit participant cannot write the delivery stream");
+          }
+          mutationRecords = prepared.records;
+          mutationOutcomes = prepared.outcomes;
+        }
+        const publishOutcomes: Extract<
+          PublishRecord,
+          { t: "publish-decision" }
+        >["outcomes"] = [];
+        for (const record of mutationBatch?.records ?? []) {
+          const outcome =
+            record.mutation.kind === "delivery-enqueue"
+              ? delivery.stagedRevisions.has(record.seq)
+                ? {
+                    t: "granted" as const,
+                    targetRevision: delivery.stagedRevisions.get(record.seq)!,
+                  }
+                : delivery.stagedConflicts.has(record.seq)
+                  ? {
+                      t: "conflicted" as const,
+                      error: delivery.stagedConflicts.get(record.seq)!,
+                    }
+                  : undefined
+              : mutationOutcomes.get(record.seq);
+          if (!outcome) {
+            throw new Error("Job publish decision omitted a staged mutation");
+          }
+          publishOutcomes.push({ seq: record.seq, outcome });
         }
         const jobRevision = state.nextJobRevision;
         const entries: LogicalRecord<unknown>[] = [
@@ -2523,8 +2656,22 @@ export class JobJournal {
             current.statusRevision + 1,
             assignmentId,
           ),
-          ...(participant?.accepted ? participant.records : []),
+          ...delivery.records,
+          ...mutationRecords,
         ];
+        if (mutationBatch && bundle.body.mutationBatch) {
+          entries.push({
+            stream: "publish",
+            body: {
+              t: "publish-decision",
+              assignmentId,
+              batch: { ref: bundle.body.mutationBatch.ref },
+              sessionCount: 0,
+              globalCount: bundle.body.mutationBatch.globalCount,
+              outcomes: publishOutcomes,
+            } satisfies Extract<PublishRecord, { t: "publish-decision" }>,
+          });
+        }
         if (current.state === "uncertain") {
           if (!open || open.resolution) throw corruptJobJournal("Uncertain job has no open fact");
           entries.push(jobRecord(this.#taskId, {
@@ -2544,7 +2691,7 @@ export class JobJournal {
           value: { committed: true, commitRevision: jobRevision },
         };
       },
-      closure.references,
+      [...closure.references, ...compiledDelivery.references],
     );
     if (transaction.value.committed) await this.resumeCompatibilityProjection();
     return transaction.value;
@@ -2933,6 +3080,24 @@ export class JobJournal {
 
   async currentState(jobRunId: string): Promise<JobRunState | undefined> {
     return this.#select((state) => state.states.get(jobRunId)?.state);
+  }
+
+  async statusHistory(
+    jobRunId: string,
+    afterStatusRevision: number,
+  ): Promise<JobStatusNotice[]> {
+    assertIdentifier(jobRunId, "Job run id");
+    if (!Number.isSafeInteger(afterStatusRevision) || afterStatusRevision < 0) {
+      throw new TypeError("Last-seen job status revision must be non-negative");
+    }
+    return this.#select((state) =>
+      (state.statusHistoryByRun.get(jobRunId) ?? [])
+        .filter((entry) => entry.statusRevision > afterStatusRevision)
+        .map((entry) =>
+          jobStatusNotice(this.#taskId, this.#anchorEpoch, jobRunId, entry),
+        )
+        .filter((notice): notice is JobStatusNotice => notice !== undefined),
+    );
   }
 
   async currentResolution(jobRunId: string): Promise<JobResolutionFact | undefined> {
@@ -3326,28 +3491,54 @@ export class JobJournal {
   async #transact<Value>(
     decide: (
       state: JobProjection,
-      prefix: { readonly lastLsn: number; readonly nextLsn: number },
+      prefix: ProjectionTransactionContext,
     ) => ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
     return this.#operations.run(async () => {
       const cached = this.#projection;
       try {
-        const transaction = await this.#log.transactProjection<
+        const transaction = await this.#delivery.coordinate(() =>
+          this.#log.transactProjection<
           JobProjection,
           unknown,
           Value
         >(
           cached?.state ?? emptyProjection(),
           this.#reduce,
-          decide,
+          (state, context) => {
+            const decision = decide(state, context);
+            if (decision.kind !== "append") return decision;
+            const statuses = jobStatusDeliveryInputs(
+              this.#taskId,
+              state,
+              decision.entries,
+              context.at,
+            );
+            const prepared = this.#delivery.prepareJobStatuses(statuses);
+            if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
+            return {
+              ...decision,
+              entries: [...decision.entries, ...prepared.records],
+            };
+          },
           {
             stream: jobStream(this.#taskId),
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
           },
-        );
+        ));
         this.#projection = { state: transaction.state, cursor: transaction.cursor };
+        if (transaction.commit) {
+          this.#publishStatusNotices(
+            jobStatusNoticesForCommit(
+              transaction.state,
+              transaction.commit,
+              this.#taskId,
+              this.#anchorEpoch,
+            ),
+          );
+        }
         return transaction;
       } catch (error) {
         this.#projection = undefined;
@@ -3356,13 +3547,23 @@ export class JobJournal {
     });
   }
 
+  #publishStatusNotices(notices: readonly JobStatusNotice[]): void {
+    for (const notice of notices) {
+      for (const listener of this.#statusListeners) {
+        void Promise.resolve()
+          .then(() => listener(notice))
+          .catch(() => undefined);
+      }
+    }
+  }
+
   readonly #reduce = async (
     state: JobProjection,
     raw: LogicalRecord<unknown>,
     envelope: CommitEnvelope<unknown>,
   ): Promise<JobProjection> => {
     if (raw.stream !== jobStream(this.#taskId)) {
-      throw corruptJobJournal("Job projection received a different stream");
+      return state;
     }
     const body = validateJobJournalRecord(raw.body, this.#verifier);
     const envelopeRecords = envelope.entries
@@ -3450,6 +3651,12 @@ export class JobJournal {
           state: body.occ.state,
           statusRevision: 1,
         });
+        if (state.statusHistoryByRun.has(body.occ.jobRunId)) {
+          throw corruptJobJournal("Job occurrence duplicates its status history");
+        }
+        state.statusHistoryByRun.set(body.occ.jobRunId, [
+          { state: body.occ.state, statusRevision: 1, at: envelope.at },
+        ]);
         if (body.occ.state === "queued") state.activeJobRunId = body.occ.jobRunId;
         state.pendingSystemMissedJobRunId = registerPendingSystemMiss({
           currentPendingJobRunId: state.pendingSystemMissedJobRunId,
@@ -4176,15 +4383,20 @@ export class JobJournal {
           const closure = await validateJobBundleClosure(bundle, this.#artifacts);
           if (
             canonicalize(closure.artifact.ref) !== canonicalize(body.bundle.ref) ||
-            !jobBundleBindsAssignedOccurrence(bundle, assigned, occurrence) ||
-            ((occurrence.deliveryPlan.delivery.kind !== "none" ||
-              closure.batch !== undefined) &&
-              !envelope.entries.some(
-                (record) => record.stream !== jobStream(this.#taskId),
-              ))
+            !jobBundleBindsAssignedOccurrence(bundle, assigned, occurrence)
           ) {
-            throw new Error("bundle identity or atomic companions do not match");
+            throw new Error("bundle identity does not match");
           }
+          this.#delivery.assertJobCommit(
+            {
+              at: envelope.at,
+              occurrence,
+              definition: requireDefinitionRevision(state, occurrence.taskRevision),
+              bundle,
+              ...(closure.batch ? { mutationBatch: closure.batch } : {}),
+            },
+            envelope,
+          );
         } catch (error) {
           throw corruptJobJournal(
             error instanceof Error
@@ -4300,6 +4512,27 @@ export class JobJournal {
         if (!previous || !occurrence) {
           throw corruptJobJournal("Job state transition is invalid");
         }
+        const definition = requireDefinitionRevision(state, occurrence.taskRevision);
+        try {
+          this.#delivery.assertJobStatuses(
+            [
+              {
+                at: envelope.at,
+                occurrence,
+                definition,
+                state: body.state,
+                statusRevision: body.statusRevision,
+              },
+            ],
+            envelope,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error
+              ? `Job status delivery is invalid: ${error.message}`
+              : "Job status delivery is invalid",
+          );
+        }
         const assigned = body.assignmentId
           ? state.assignedById.get(body.assignmentId)
           : undefined;
@@ -4314,9 +4547,7 @@ export class JobJournal {
             assigned.record.jobRunId === body.jobRunId &&
             state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
           systemFencePresent: state.systemFences.has(body.jobRunId),
-          definitionKind:
-            requireDefinitionRevision(state, occurrence.taskRevision).definition
-              .kind,
+          definitionKind: definition.definition.kind,
           hasAtomicAssignment:
             body.state !== "dispatched" ||
             envelopeRecords.some(
@@ -4380,6 +4611,36 @@ export class JobJournal {
         state.states.set(body.jobRunId, {
           state: body.state,
           statusRevision: body.statusRevision,
+        });
+        const history = state.statusHistoryByRun.get(body.jobRunId);
+        if (!history || history.length + 1 !== body.statusRevision) {
+          throw corruptJobJournal("Job status history index is not contiguous");
+        }
+        const uncertainStatus = projectUncertainStatusTransition({
+          currentState: previous.state,
+          nextState: body.state,
+          resolutionFacts: envelopeRecords.flatMap((record) =>
+            record.t === "resolution" && record.jobRunId === body.jobRunId
+              ? [record.fact]
+              : [],
+          ),
+        });
+        history.push({
+          state: body.state,
+          statusRevision: body.statusRevision,
+          at: envelope.at,
+          ...(uncertainStatus.kind === "opened"
+            ? {
+                uncertainTransition: "opened" as const,
+                openFactDigest: uncertainStatus.openFactDigest,
+              }
+            : uncertainStatus.kind === "closed"
+              ? {
+                  uncertainTransition: "closed" as const,
+                  openFactDigest: uncertainStatus.openFactDigest,
+                  ...jobUncertainClosure(uncertainStatus.resolutionKind),
+                }
+              : {}),
         });
         if (body.state === "running" && body.assignmentId) {
           state.durableStarted.add(body.assignmentId);
@@ -4558,6 +4819,7 @@ export class JobJournal {
           scheduledFor: body.occ.scheduledFor,
           taskRevision: body.occ.taskRevision,
           deliveryPlanDigest: body.occ.deliveryPlan.planDigest,
+          deliveryRequired: body.occ.deliveryPlan.delivery.kind !== "none",
         });
         state.states.set(body.occ.jobRunId, {
           state: body.occ.state,
@@ -5682,6 +5944,7 @@ function emptyProjection(): JobProjection {
     interactionMirrorBatches: new Set(),
     containments: new Map(),
     resolutions: new Map(),
+    statusHistoryByRun: new Map(),
     committed: new Map(),
     bundleAcknowledgements: new Map(),
     recoveryAssignments: new Set(),
@@ -5692,8 +5955,141 @@ function emptyProjection(): JobProjection {
   };
 }
 
+function jobStatusNotice(
+  taskId: string,
+  anchorEpoch: number,
+  jobRunId: string,
+  entry: JobStatusHistoryEntry,
+): JobStatusNotice | undefined {
+  const ref = { execution: "job" as const, taskId, jobRunId, anchorEpoch };
+  if (entry.uncertainTransition === "opened") {
+    if (entry.state !== "uncertain") {
+      throw corruptJobJournal("Job uncertainty opening has a non-uncertain state");
+    }
+    return {
+      v: 1,
+      ref,
+      state: "uncertain",
+      statusRevision: entry.statusRevision,
+      actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
+      at: entry.at,
+      openFactDigest: entry.openFactDigest,
+    };
+  }
+  if (entry.uncertainTransition === "closed") {
+    if (entry.resultingState !== entry.state) {
+      throw corruptJobJournal("Job uncertainty closure has a mismatched successor state");
+    }
+    return {
+      v: 1,
+      ref,
+      state: "uncertain-closed",
+      statusRevision: entry.statusRevision,
+      actions: [],
+      at: entry.at,
+      openFactDigest: entry.openFactDigest,
+      closedBy: entry.closedBy,
+      resultingState: entry.resultingState,
+    } as JobStatusNotice;
+  }
+  if (entry.state === "committed") return undefined;
+  if (entry.state === "uncertain") {
+    throw corruptJobJournal("Job uncertainty has no durable open fact identity");
+  }
+  return {
+    v: 1,
+    ref,
+    state: entry.state,
+    statusRevision: entry.statusRevision,
+    actions: [],
+    at: entry.at,
+  };
+}
+
+function jobStatusNoticesForCommit(
+  state: JobProjection,
+  envelope: CommitEnvelope<unknown>,
+  taskId: string,
+  anchorEpoch: number,
+): JobStatusNotice[] {
+  const notices: JobStatusNotice[] = [];
+  for (const record of envelope.entries) {
+    if (record.stream !== jobStream(taskId)) continue;
+    const body = record.body as JobJournalRecord;
+    const identity =
+      body.t === "occurrence"
+        ? { jobRunId: body.occ.jobRunId, statusRevision: 1 }
+        : body.t === "state"
+          ? { jobRunId: body.jobRunId, statusRevision: body.statusRevision }
+          : undefined;
+    if (!identity) continue;
+    const entry = state.statusHistoryByRun
+      .get(identity.jobRunId)
+      ?.find((candidate) => candidate.statusRevision === identity.statusRevision);
+    if (!entry) throw corruptJobJournal("Committed job status has no history projection");
+    const notice = jobStatusNotice(
+      taskId,
+      anchorEpoch,
+      identity.jobRunId,
+      entry,
+    );
+    if (notice) notices.push(notice);
+  }
+  return notices;
+}
+
 function jobStream(taskId: string): string {
   return `job:${taskId}`;
+}
+
+function jobStatusDeliveryInputs(
+  taskId: string,
+  state: JobProjection,
+  entries: readonly LogicalRecord<unknown>[],
+  at: string,
+): JobStatusDeliveryInput[] {
+  const result: JobStatusDeliveryInput[] = [];
+  for (const entry of entries) {
+    if (entry.stream !== jobStream(taskId)) continue;
+    const body = entry.body as Partial<JobJournalRecord>;
+    if (
+      body.t !== "state" ||
+      !("jobRunId" in body) ||
+      !("state" in body) ||
+      !("statusRevision" in body)
+    ) {
+      continue;
+    }
+    const jobRunId = body.jobRunId as string;
+    const occurrence = state.occurrences.get(jobRunId) ?? occurrenceInEntries(entries, taskId, jobRunId);
+    if (!occurrence) throw corruptJobJournal("Job state has no occurrence for status delivery");
+    const definition = state.definitions.get(occurrence.taskRevision);
+    if (!definition) throw corruptJobJournal("Job status delivery has no task definition");
+    result.push({
+      at,
+      occurrence,
+      definition,
+      state: body.state as JobRunState,
+      statusRevision: body.statusRevision as number,
+    });
+  }
+  return result;
+}
+
+function occurrenceInEntries(
+  entries: readonly LogicalRecord<unknown>[],
+  taskId: string,
+  jobRunId: string,
+): JobOccurrence | undefined {
+  for (const entry of entries) {
+    if (entry.stream !== jobStream(taskId)) continue;
+    const body = entry.body as Partial<JobJournalRecord>;
+    if (body.t === "occurrence" && "occ" in body) {
+      const occurrence = body.occ as JobOccurrence;
+      if (occurrence.jobRunId === jobRunId) return occurrence;
+    }
+  }
+  return undefined;
 }
 
 function jobRecord(
@@ -6415,6 +6811,52 @@ async function assertArtifactsPresent(
   return references;
 }
 
+interface CompiledJobDeliveryContents {
+  readonly result?: CompiledDeliveryContent;
+  readonly stagedContents: ReadonlyMap<
+    number,
+    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+  >;
+  readonly stagedContentErrors: ReadonlyMap<number, AuthorityError>;
+  readonly references: readonly ArtifactRef[];
+}
+
+async function compileJobDeliveryContents(
+  bundle: JobBundle,
+  batch: MutationBatch | undefined,
+  artifacts: ArtifactStore,
+  deliveryRequired: boolean,
+): Promise<CompiledJobDeliveryContents> {
+  const result = deliveryRequired
+    ? await compileDeliveryContent(bundle.body.outcome.summary, artifacts)
+    : undefined;
+  const stagedContents = new Map<
+    number,
+    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+  >();
+  const stagedContentErrors = new Map<number, AuthorityError>();
+  const references: ArtifactRef[] = [...(result?.references ?? [])];
+  for (const record of batch?.records ?? []) {
+    if (record.mutation.kind !== "delivery-enqueue") continue;
+    try {
+      const compiled = await compileDeliveryContent(
+        record.mutation.request.content,
+        artifacts,
+      );
+      stagedContents.set(record.seq, compiled.content);
+      references.push(...compiled.references);
+    } catch (error) {
+      if (!(error instanceof DeliveryContentValidationError)) throw error;
+      stagedContentErrors.set(record.seq, {
+        code: "invalid",
+        message: "Delivery content is invalid or unavailable",
+        retryable: false,
+      });
+    }
+  }
+  return { result, stagedContents, stagedContentErrors, references };
+}
+
 async function validateJobBundleClosure(
   bundle: JobBundle,
   artifacts: ArtifactStore,
@@ -6585,12 +7027,6 @@ function assertLedgerAcknowledgesCommittedBundle(
     expectedCommitRevision: expected.jobRevision,
   })) {
     throw new Error("Bundle acknowledgement does not bind the committed job revision");
-  }
-}
-
-function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 4_096) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
   }
 }
 

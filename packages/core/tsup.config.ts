@@ -21,6 +21,7 @@ export default defineConfig({
     "src/protocol/index.ts",
     "src/persistence/index.ts",
     "src/authority/index.ts",
+    "src/delivery/index.ts",
   ],
   format: ["esm"],
   dts: true,

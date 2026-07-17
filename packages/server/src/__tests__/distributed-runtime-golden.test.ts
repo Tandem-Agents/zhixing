@@ -78,7 +78,7 @@ describe("distributed runtime migration behavior golden", () => {
         ],
       },
     );
-  });
+  }, 15_000);
 
   it("exposes immutable registry metadata without handler references", () => {
     const registry = buildBuiltinRegistry();

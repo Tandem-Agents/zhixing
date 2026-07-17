@@ -1,5 +1,6 @@
 import type { ResourceLease } from "../contracts/authorization.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
+import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const ADMISSION_CLASSES = new Set([
@@ -185,12 +186,6 @@ function assertExactKeys(
   }
   if (canonicalize(keys) !== canonicalize(allowed)) {
     throw new TypeError(`${label} fields are incomplete or unknown`);
-  }
-}
-
-function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 4_096) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
   }
 }
 

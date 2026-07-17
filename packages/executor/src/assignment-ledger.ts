@@ -37,6 +37,7 @@ import type {
   RunExecutorPort,
 } from "@zhixing/core/contracts";
 import {
+  assertProtocolIdentifier as assertIdentifier,
   advanceAssignmentLedger,
   advanceInteractionMirrorDigest,
   applyValidatedAssignmentEntry,
@@ -1127,7 +1128,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         entries: [assignmentRecord(assignmentId, nextEntry(state, staged))],
         value: { seq: staged.seq },
       };
-    });
+    }, collectArtifactRefs(candidate));
     return transaction.value;
   }
 
@@ -2465,12 +2466,6 @@ function canonicalTime(value: string, label: string): number {
     throw new TypeError(`${label} must be a canonical ISO timestamp`);
   }
   return timestamp;
-}
-
-function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 480) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
-  }
 }
 
 function assertBoundedText(value: unknown, label: string): asserts value is string {

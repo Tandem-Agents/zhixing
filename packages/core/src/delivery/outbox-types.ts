@@ -9,6 +9,7 @@
  */
 
 import type {
+  DeliveryAdapterSendMeta,
   DeliveryResult,
   DeliveryTarget,
   OutboundContent,
@@ -57,6 +58,8 @@ export interface OutboxEntry {
   readonly target: DeliveryTarget;
   readonly content: OutboundContent;
   readonly source: EmissionSource;
+  /** Present for every entry originating from the durable delivery stream. */
+  readonly idempotencyKey?: string;
   /**
    * 因果依赖（Phase 3 启用）：若指定，drain 时必须等待 slotId 进入终态后才发送。
    * Phase 1 阶段忽略此字段，仅保留类型面以避免 Phase 3 时破坏调用方。
@@ -172,6 +175,7 @@ export interface OutboxLogger {
 export type OutboxDoSend = (
   target: DeliveryTarget,
   content: OutboundContent,
+  meta?: DeliveryAdapterSendMeta,
 ) => Promise<DeliveryResult>;
 
 // ─── 配置 ───
@@ -199,6 +203,7 @@ export interface PostEntryInput {
   readonly target: DeliveryTarget;
   readonly content: OutboundContent;
   readonly source: EmissionSource;
+  readonly idempotencyKey?: string;
   readonly afterSlot?: TurnSlotId;
 }
 

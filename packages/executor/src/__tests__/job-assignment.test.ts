@@ -4,7 +4,10 @@ import {
   AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
+  MAX_INLINE_LOGICAL_RECORD_BYTES,
+  type ArtifactStore,
 } from "@zhixing/core/authority";
+import { DeliveryAuthority } from "@zhixing/core";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -14,6 +17,7 @@ import type {
   PermissionSnapshotLease,
   Signature,
   SystemJobResourceLease,
+  TaskDeliveryDto,
   TaskDefinition,
 } from "@zhixing/core/contracts";
 import {
@@ -46,6 +50,7 @@ import {
   ControlAdmissionJournal,
   createJobControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
+import { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
 import {
   InProcessJobDispatcher,
   JOB_JOURNAL_RECORD_SHAPES,
@@ -57,7 +62,7 @@ import {
   type SystemJobResourceCoordinator,
 } from "@zhixing/owner-kernel/job-assignment";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -71,6 +76,12 @@ const ASSIGNMENT_ID = "assignment-1";
 const EXECUTOR_ID = "executor-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+
+function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticipant {
+  return new OwnerDeliveryParticipant({
+    authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
+  });
+}
 
 class TestProtocolIdentity implements ProtocolSigner, ProtocolSignatureVerifier {
   readonly #key = Buffer.from("unit-14-protocol-identity", "utf8");
@@ -175,6 +186,56 @@ function userDefinition(
   };
 }
 
+class WriteCountingArtifactStore implements ArtifactStore {
+  readonly #delegate: ArtifactStore;
+  writes = 0;
+
+  constructor(delegate: ArtifactStore) {
+    this.#delegate = delegate;
+  }
+
+  put(bytes: Uint8Array) {
+    this.writes += 1;
+    return this.#delegate.put(bytes);
+  }
+
+  get(ref: Parameters<ArtifactStore["get"]>[0]) {
+    return this.#delegate.get(ref);
+  }
+
+  has(ref: Parameters<ArtifactStore["has"]>[0]) {
+    return this.#delegate.has(ref);
+  }
+
+  reset(): void {
+    this.writes = 0;
+  }
+}
+
+class FaultingArtifactStore implements ArtifactStore {
+  readonly #delegate: ArtifactStore;
+  failDigest?: string;
+
+  constructor(delegate: ArtifactStore) {
+    this.#delegate = delegate;
+  }
+
+  put(bytes: Uint8Array) {
+    return this.#delegate.put(bytes);
+  }
+
+  get(ref: Parameters<ArtifactStore["get"]>[0]) {
+    if (ref.digest === this.failDigest) {
+      throw new Error("simulated transient delivery content read failure");
+    }
+    return this.#delegate.get(ref);
+  }
+
+  has(ref: Parameters<ArtifactStore["has"]>[0]) {
+    return this.#delegate.has(ref);
+  }
+}
+
 function systemDefinition(revision = 1, state: TaskDefinition["state"] = "enabled"): TaskDefinition {
   return {
     taskId: TASK_ID,
@@ -189,7 +250,12 @@ function systemDefinition(revision = 1, state: TaskDefinition["state"] = "enable
 }
 
 async function createUserHarness(
-  options: { assign?: boolean; definition?: TaskDefinition; trigger?: boolean } = {},
+  options: {
+    assign?: boolean;
+    definition?: TaskDefinition;
+    trigger?: boolean;
+    ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
+  } = {},
 ) {
   const root = await createTempDir("job-assignment");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
@@ -200,6 +266,7 @@ async function createUserHarness(
     lockWaitMs: 2_000,
   });
   const identity = new TestProtocolIdentity();
+  const ownerArtifacts = options.ownerArtifacts?.(artifacts) ?? artifacts;
   const compatibilityFacts: Array<{ definition: TaskDefinition; occurrences: unknown[] }> = [];
   const compatibility: JobCompatibilityProjection = {
     async project(input) {
@@ -214,9 +281,10 @@ async function createUserHarness(
     taskId: TASK_ID,
     anchorEpoch: 3,
     log,
-    artifacts,
+    artifacts: ownerArtifacts,
     signer: identity,
     verifier: identity,
+    delivery: deliveryParticipant(log),
     submission,
     compatibility,
     ingress: {
@@ -262,8 +330,14 @@ async function createUserHarness(
       },
     },
   });
-  await journal.define(options.definition ?? userDefinition(), surfaceContext("define-user"));
-  const unsigned = createUnsignedJob(identity);
+  const definition = options.definition ?? userDefinition();
+  await journal.define(definition, surfaceContext("define-user"));
+  const unsigned = createUnsignedJob(identity, {
+    delivery:
+      definition.definition.kind === "user"
+        ? definition.definition.spec.delivery ?? { kind: "none" }
+        : { kind: "none" },
+  });
   let dispatch: PendingJobDispatch | undefined;
   if (options.trigger !== false) {
     await journal.trigger({
@@ -298,6 +372,7 @@ async function receive(harness: Awaited<ReturnType<typeof createUserHarness>>) {
 
 function reopenUserJournal(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
+  artifacts: ArtifactStore = harness.artifacts,
 ): JobJournal {
   return new JobJournal({
     taskId: TASK_ID,
@@ -306,9 +381,10 @@ function reopenUserJournal(
       clock: () => NOW,
       lockWaitMs: 2_000,
     }),
-    artifacts: harness.artifacts,
+    artifacts,
     signer: harness.identity,
     verifier: harness.identity,
+    delivery: deliveryParticipant(harness.log),
     submission,
     ingress: { authorize() {} },
     clock: () => NOW,
@@ -355,10 +431,13 @@ async function start(harness: Awaited<ReturnType<typeof createUserHarness>>) {
   await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
 }
 
-async function seal(harness: Awaited<ReturnType<typeof createUserHarness>>) {
+async function seal(
+  harness: Awaited<ReturnType<typeof createUserHarness>>,
+  summary = "done",
+) {
   return harness.ledger.sealJobBundle(ASSIGNMENT_ID, {
     fence: harness.unsigned.work.fence,
-    outcome: { status: "completed", summary: "done" },
+    outcome: { status: "completed", summary },
     contentAssets: [],
     streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
     usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
@@ -693,7 +772,7 @@ describe("user job durable protocol", () => {
       ASSIGNMENT_ID,
       "disable-uncertain",
     );
-    await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
+    const fact = await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
     const disabled = userDefinition(2, "perform scheduled work", "disabled");
     await harness.journal.define(disabled, surfaceContext("disable-uncertain"));
     const proof = await harness.ledger.supersede(
@@ -706,7 +785,13 @@ describe("user job durable protocol", () => {
     expect((await harness.journal.currentResolution(JOB_RUN_ID))?.resolution?.kind).toBe(
       "proven-not-started-cancelled",
     );
-  });
+    expect((await harness.journal.statusHistory(JOB_RUN_ID, 0)).at(-1)).toMatchObject({
+      state: "uncertain-closed",
+      openFactDigest: fact.openFactDigest,
+      closedBy: "proven-not-started-cancelled",
+      resultingState: "cancelled",
+    });
+  }, 15_000);
 
   it("keeps uncertain retry closed while the task remains disabled", async () => {
     const harness = await createUserHarness();
@@ -727,6 +812,282 @@ describe("user job durable protocol", () => {
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 1 });
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
+  });
+
+  it("atomically derives result and staged deliveries without intermediate status noise", async () => {
+    const base = userDefinition();
+    if (base.definition.kind !== "user") throw new Error("fixture definition is not user-owned");
+    const definition: TaskDefinition = {
+      ...base,
+      definition: {
+        ...base.definition,
+        origin: { channelId: "feishu", to: "chat-1" },
+        spec: {
+          ...base.definition.spec,
+          delivery: { kind: "channel", channel: "feishu", to: "chat-1" },
+        },
+      },
+    };
+    const harness = await createUserHarness({ definition });
+    await start(harness);
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "deliver-job-staged-result",
+      expected: { anchorEpoch: 3 },
+      mutation: {
+        kind: "delivery-enqueue",
+        request: {
+          target: {
+            kind: "explicit",
+            target: { channelId: "feishu", to: "chat-2" },
+          },
+          content: "staged result",
+        },
+      },
+    });
+    const bundle = await seal(harness);
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 1 });
+
+    const commits = await harness.log.readAll();
+    const committed = commits.find((commit) =>
+      commit.entries.some(
+        (entry) =>
+          entry.stream === `job:${TASK_ID}` &&
+          (entry.body as { readonly t?: string }).t === "committed",
+      ),
+    );
+    const commitDeliveryKinds = committed?.entries
+      .filter((entry) => entry.stream === "delivery")
+      .map(
+        (entry) =>
+          (entry.body as { readonly keyBody: { readonly kind: string } }).keyBody.kind,
+      );
+    expect(commitDeliveryKinds).toEqual(["job-result-delivery", "staged-delivery"]);
+    expect(
+      commits.some((commit) =>
+        commit.entries.some(
+          (entry) =>
+            entry.stream === "delivery" &&
+            (entry.body as { readonly keyBody?: { readonly kind?: string } }).keyBody
+              ?.kind === "job-status-delivery",
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not write delivery content for a none plan or during committed replay", async () => {
+    let counted: WriteCountingArtifactStore | undefined;
+    const noDelivery = await createUserHarness({
+      ownerArtifacts(store) {
+        counted = new WriteCountingArtifactStore(store);
+        return counted;
+      },
+    });
+    await start(noDelivery);
+    const noneBundle = await seal(
+      noDelivery,
+      "x".repeat(MAX_INLINE_LOGICAL_RECORD_BYTES),
+    );
+    counted!.reset();
+    await expect(
+      noDelivery.journal.submitBundle(
+        noneBundle,
+        submissionContext(noDelivery.unsigned),
+      ),
+    ).resolves.toEqual({ committed: true, commitRevision: 1 });
+    expect(counted!.writes).toBe(0);
+
+    const base = userDefinition();
+    if (base.definition.kind !== "user") throw new Error("fixture definition is not user-owned");
+    const definition: TaskDefinition = {
+      ...base,
+      definition: {
+        ...base.definition,
+        spec: {
+          ...base.definition.spec,
+          delivery: { kind: "channel", channel: "feishu", to: "chat-1" },
+        },
+      },
+    };
+    const routed = await createUserHarness({ definition });
+    await start(routed);
+    const routedBundle = await seal(
+      routed,
+      "y".repeat(MAX_INLINE_LOGICAL_RECORD_BYTES),
+    );
+    await routed.journal.submitBundle(
+      routedBundle,
+      submissionContext(routed.unsigned),
+    );
+    counted = new WriteCountingArtifactStore(routed.artifacts);
+    counted.reset();
+    await expect(reopenUserJournal(routed, counted).currentState(JOB_RUN_ID)).resolves.toBe(
+      "committed",
+    );
+    expect(counted.writes).toBe(0);
+  }, 15_000);
+
+  it("retries a job commit after transient staged-content storage failure", async () => {
+    let faulting: FaultingArtifactStore | undefined;
+    const harness = await createUserHarness({
+      ownerArtifacts(store) {
+        faulting = new FaultingArtifactStore(store);
+        return faulting;
+      },
+    });
+    await start(harness);
+    const content = await harness.artifacts.put(
+      Buffer.from(canonicalize({ text: "staged", markdown: "staged" }), "utf8"),
+    );
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "transient-job-staged-content",
+      expected: { anchorEpoch: 3 },
+      mutation: {
+        kind: "delivery-enqueue",
+        request: {
+          target: {
+            kind: "explicit",
+            target: { channelId: "feishu", to: "chat-2" },
+          },
+          content: { ref: content },
+        },
+      },
+    });
+    const bundle = await seal(harness);
+    const before = (await harness.log.readAll()).length;
+    faulting!.failDigest = content.digest;
+
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).rejects.toThrow("simulated transient delivery content read failure");
+    expect((await harness.log.readAll()).length).toBe(before);
+
+    faulting!.failDigest = undefined;
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 1 });
+  }, 15_000);
+
+  it("bounds long task names in job result and status delivery records", async () => {
+    const base = userDefinition();
+    if (base.definition.kind !== "user") throw new Error("fixture definition is not user-owned");
+    const definition: TaskDefinition = {
+      ...base,
+      definition: {
+        ...base.definition,
+        origin: { channelId: "feishu", to: "chat-1" },
+        spec: {
+          ...base.definition.spec,
+          name: "任".repeat(40_000),
+          delivery: { kind: "channel", channel: "feishu", to: "chat-1" },
+        },
+      },
+    };
+    const resultHarness = await createUserHarness({ definition });
+    await start(resultHarness);
+    await resultHarness.journal.submitBundle(
+      await seal(resultHarness),
+      submissionContext(resultHarness.unsigned),
+    );
+    const resultRecord = (await resultHarness.log.readAll())
+      .flatMap((envelope) => envelope.entries)
+      .find(
+        (entry) =>
+          entry.stream === "delivery" &&
+          (entry.body as { readonly keyBody?: { readonly kind?: string } }).keyBody?.kind ===
+            "job-result-delivery",
+      );
+    expect(resultRecord).toBeDefined();
+    expect(
+      (resultRecord!.body as { readonly intent: { readonly source: { readonly taskName: string } } })
+        .intent.source.taskName,
+    ).toHaveLength(480);
+    expect(Buffer.byteLength(canonicalize(resultRecord), "utf8")).toBeLessThan(
+      MAX_INLINE_LOGICAL_RECORD_BYTES,
+    );
+
+    const statusHarness = await createUserHarness({ definition, assign: false });
+    await statusHarness.journal.expireQueued(JOB_RUN_ID);
+    const statusRecord = (await statusHarness.log.readAll())
+      .flatMap((envelope) => envelope.entries)
+      .find(
+        (entry) =>
+          entry.stream === "delivery" &&
+          (entry.body as { readonly keyBody?: { readonly kind?: string } }).keyBody?.kind ===
+            "job-status-delivery",
+      );
+    expect(statusRecord).toBeDefined();
+    expect(
+      (statusRecord!.body as { readonly intent: { readonly source: { readonly taskName: string } } })
+        .intent.source.taskName,
+    ).toHaveLength(480);
+    expect(Buffer.byteLength(canonicalize(statusRecord), "utf8")).toBeLessThan(
+      MAX_INLINE_LOGICAL_RECORD_BYTES,
+    );
+  }, 20_000);
+
+  it("commits a job while durably conflicting one invalid staged delivery", async () => {
+    const harness = await createUserHarness();
+    await start(harness);
+    const invalidContent = await harness.artifacts.put(
+      Buffer.from("not canonical delivery content", "utf8"),
+    );
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "invalid-job-staged-content",
+      expected: { anchorEpoch: 3 },
+      mutation: {
+        kind: "delivery-enqueue",
+        request: {
+          target: {
+            kind: "explicit",
+            target: { channelId: "feishu", to: "chat-2" },
+          },
+          content: { ref: invalidContent },
+        },
+      },
+    });
+    const bundle = await seal(harness);
+
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 1 });
+    const commit = (await harness.log.readAll()).find((envelope) =>
+      envelope.entries.some(
+        (entry) =>
+          entry.stream === `job:${TASK_ID}` &&
+          (entry.body as { readonly t?: string }).t === "committed",
+      ),
+    );
+    expect(
+      commit?.entries.filter(
+        (entry) =>
+          entry.stream === "delivery" &&
+          (entry.body as { readonly keyBody?: { readonly kind?: string } }).keyBody
+            ?.kind === "staged-delivery",
+      ),
+    ).toEqual([]);
+    expect(
+      commit?.entries.find(
+        (entry) =>
+          entry.stream === "publish" &&
+          (entry.body as { readonly t?: string }).t === "publish-decision",
+      )?.body,
+    ).toMatchObject({
+      assignmentId: ASSIGNMENT_ID,
+      outcomes: [
+        {
+          seq: 1,
+          outcome: {
+            t: "conflicted",
+            error: { code: "invalid", retryable: false },
+          },
+        },
+      ],
+    });
   });
 
   it("rejects a turn-origin delivery mutation at every job trust boundary", async () => {
@@ -841,6 +1202,7 @@ describe("user job durable protocol", () => {
       artifacts: harness.artifacts,
       signer: harness.identity,
       verifier: harness.identity,
+      delivery: deliveryParticipant(harness.log),
       submission,
       ingress: {
         authorize(context) {
@@ -955,11 +1317,21 @@ describe("user job durable protocol", () => {
     await harness.ledger.abortFromSurface(ASSIGNMENT_ID, surfaceAbortInput());
     const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
     if (!proof) throw new Error("test ledger did not produce a cancel proof");
-    await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
+    const fact = await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
     const context = submissionContext(harness.unsigned);
     await harness.journal.submitCancelProof(ASSIGNMENT_ID, proof, context);
     await harness.journal.submitCancelProof(ASSIGNMENT_ID, proof, context);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
+    const closures = (await harness.journal.statusHistory(JOB_RUN_ID, 0)).filter(
+      (notice) => notice.state === "uncertain-closed",
+    );
+    expect(closures).toEqual([
+      expect.objectContaining({
+        openFactDigest: fact.openFactDigest,
+        closedBy: "proven-not-started-redispatched",
+        resultingState: "queued",
+      }),
+    ]);
   });
 
   it("accepts a lost started response replay after the job commits", async () => {
@@ -1033,10 +1405,36 @@ describe("user job durable protocol", () => {
       ["user-retry-acknowledged", "queued"],
     ] as const) {
       const harness = await createUserHarness();
-      await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
+      const liveNotices: Awaited<ReturnType<typeof harness.journal.statusHistory>> = [];
+      harness.journal.onStatus(() => {
+        throw new Error("simulated status consumer failure");
+      });
+      harness.journal.onStatus((notice) => {
+        liveNotices.push(notice);
+      });
+      const fact = await harness.journal.markUncertain(
+        ASSIGNMENT_ID,
+        "ledger-unknown",
+      );
       const result = await resolve(harness, decision);
       expect(result.kind).toBe("applied");
       expect(await harness.journal.currentState(JOB_RUN_ID)).toBe(state);
+      const uncertainNotices = (await harness.journal.statusHistory(JOB_RUN_ID, 0)).filter(
+        (notice) => notice.state === "uncertain" || notice.state === "uncertain-closed",
+      );
+      expect(uncertainNotices).toEqual([
+        expect.objectContaining({
+          state: "uncertain",
+          openFactDigest: fact.openFactDigest,
+        }),
+        expect.objectContaining({
+          state: "uncertain-closed",
+          openFactDigest: fact.openFactDigest,
+          closedBy: decision,
+          resultingState: state,
+        }),
+      ]);
+      await vi.waitFor(() => expect(liveNotices).toEqual(uncertainNotices));
     }
   }, 20_000);
 
@@ -1112,7 +1510,7 @@ describe("user job durable protocol", () => {
       firstAdmission.applyAuthority({
         envelope: firstEnvelope,
         source: firstSource,
-        stream: "probe:job-control",
+        stream: `job:${TASK_ID}`,
         initial: 0,
         reducer: (state) => state,
         decide: () => {
@@ -1143,7 +1541,7 @@ describe("user job durable protocol", () => {
     const outcome = await restarted.applyAuthority({
       envelope: retryEnvelope,
       source: retrySource,
-      stream: "probe:job-control",
+      stream: `job:${TASK_ID}`,
       initial: 0,
       reducer: (state) => state,
       decide: (_state, context) => {
@@ -1274,7 +1672,7 @@ describe("user job durable protocol", () => {
     const harness = await createUserHarness();
     await start(harness);
     const bundle = await seal(harness);
-    await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
+    const fact = await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
     await expect(
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 1 });
@@ -1284,7 +1682,16 @@ describe("user job durable protocol", () => {
         ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
       ),
     ).resolves.toMatchObject({ phase: "sealed" });
+    expect((await harness.journal.statusHistory(JOB_RUN_ID, 0)).at(-1)).toMatchObject({
+      state: "uncertain-closed",
+      openFactDigest: fact.openFactDigest,
+      closedBy: "late-bundle-committed",
+      resultingState: "committed",
+    });
     const restarted = reopenUserJournal(harness);
+    await expect(restarted.statusHistory(JOB_RUN_ID, 0)).resolves.toEqual(
+      await harness.journal.statusHistory(JOB_RUN_ID, 0),
+    );
     expect(await restarted.assignmentsAwaitingRecovery()).toEqual([
       expect.objectContaining({ assignmentId: ASSIGNMENT_ID, state: "committed" }),
     ]);
@@ -2233,6 +2640,7 @@ describe("job submission guard preflight", () => {
       artifacts: harness.artifacts,
       signer: harness.identity,
       verifier: harness.identity,
+      delivery: deliveryParticipant(harness.log),
       submission,
       ingress: {
         authorize() {},
@@ -2552,6 +2960,7 @@ describe("job abort ticket authorization", () => {
       artifacts: harness.artifacts,
       signer: harness.identity,
       verifier: harness.identity,
+      delivery: deliveryParticipant(harness.log),
       submission,
       ingress: {
         authorize() {},
@@ -3062,6 +3471,7 @@ async function createSystemHarness(
       artifacts,
       signer: identity,
       verifier: identity,
+      delivery: deliveryParticipant(log),
       submission,
       ingress: {
         authorize(context) {
@@ -3105,6 +3515,7 @@ function createUnsignedJob(
     reservationId?: string;
     capabilityId?: string;
     issuedAt?: string;
+    delivery?: TaskDeliveryDto;
   } = {},
 ): UnsignedJobEnvelope {
   const assignmentId = ids.assignmentId ?? ASSIGNMENT_ID;
@@ -3200,7 +3611,7 @@ function createUnsignedJob(
     jobRunId: JOB_RUN_ID,
     scheduledFor: NOW,
     taskRevision: 1,
-    deliveryPlanDigest: jobDeliveryPlanDigest({ kind: "none" }),
+    deliveryPlanDigest: jobDeliveryPlanDigest(ids.delivery ?? { kind: "none" }),
     anchorEpoch: 3,
     assignmentId,
     executorId: EXECUTOR_ID,

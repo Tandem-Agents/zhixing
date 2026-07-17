@@ -1,7 +1,19 @@
 import type {
+  ArtifactRef,
+  DeliveryEndpointDto,
+  DeliveryEnqueueKeyBody,
+  DeliveryFailure,
+  DeliveryIntentDto,
+  DeliveryItemState,
+  DeliveryResolutionFact,
+  DeliveryStatusNotice,
+  DeliveryStreamRecord,
+} from "../contracts/index.js";
+import type {
   DeliveryResult,
   DeliveryTarget,
   OutboundContent,
+  OutboundContentDto,
 } from "../channels/types.js";
 import type { EventMap } from "../events/index.js";
 
@@ -84,6 +96,8 @@ export interface DeliveryEventMap extends EventMap {
 export interface DeliverySendMeta {
   readonly source?: DeliverySource;
   readonly itemId?: string;
+  readonly idempotencyKey?: string;
+  readonly attempt?: number;
 }
 
 export interface DeliverySender {
@@ -111,4 +125,143 @@ export interface IDeliveryPipeline {
   enqueue(params: EnqueueParams): Promise<string>;
   flush(): Promise<void>;
   stats(): DeliveryStats;
+}
+
+// ─── 权威投递流的只读投影与执行适配 ───
+
+export interface DeliveryOpenFact {
+  readonly itemId: string;
+  readonly attempt: number;
+  readonly openedAnchorEpoch: number;
+  readonly startedAt: string;
+  readonly unknownOutcome: Extract<
+    DeliveryStreamRecord,
+    { t: "attempt-started" }
+  >["unknownOutcome"];
+  readonly idempotencyKey: string;
+  readonly openFactDigest: string;
+}
+
+export interface AuthorityDeliveryItem {
+  readonly id: string;
+  readonly idempotencyKey: string;
+  readonly keyBody: DeliveryEnqueueKeyBody;
+  readonly intentDigest: string;
+  readonly endpoint: DeliveryEndpointDto;
+  readonly content: OutboundContentDto | { readonly ref: ArtifactRef };
+  readonly priority: DeliveryPriority;
+  readonly source?: DeliverySource;
+  readonly createdAt: string;
+  readonly maxAttempts: number;
+  readonly state: DeliveryItemState;
+  readonly statusRevision: number;
+  readonly attempts: number;
+  readonly currentAttempt: number;
+  readonly automaticAttemptsUsed: number;
+  readonly pendingManualRetryFactDigest?: string;
+  readonly nextAttemptAt?: string;
+  readonly lastError?: DeliveryFailure;
+  readonly receiptDigest?: string;
+  readonly openFact?: DeliveryOpenFact;
+  readonly resolution?: DeliveryResolutionFact;
+}
+
+export interface AuthorityDeliveryStats {
+  readonly pending: number;
+  readonly queued: number;
+  readonly attempting: number;
+  readonly delivered: number;
+  readonly failed: number;
+  readonly retrying: number;
+  readonly uncertain: number;
+}
+
+export interface AuthorityDeliveryEventMap extends EventMap {
+  "delivery:notice": { notice: DeliveryStatusNotice };
+  "delivery:success": {
+    itemId: string;
+    endpoint: DeliveryEndpointDto;
+    attempts: number;
+  };
+  "delivery:failed": {
+    itemId: string;
+    endpoint: DeliveryEndpointDto;
+    error: string;
+    attempts: number;
+    statusRevision: number;
+  };
+  "delivery:retry": {
+    itemId: string;
+    endpoint: DeliveryEndpointDto;
+    attempt: number;
+    nextAttemptAt: string;
+  };
+  "delivery:uncertain": {
+    itemId: string;
+    endpoint: DeliveryEndpointDto;
+    attempt: number;
+    openFactDigest: string;
+    statusRevision: number;
+  };
+  "delivery:resolved": {
+    itemId: string;
+    attempt: number;
+    decision: DeliveryResolutionFact["decision"];
+    statusRevision: number;
+  };
+}
+
+export interface AuthorityDeliverySendMeta extends DeliverySendMeta {
+  readonly itemId: string;
+  readonly idempotencyKey: string;
+  readonly attempt: number;
+}
+
+export interface DeliveryTransport {
+  /** Captures one ready adapter for the whole attempt preparation/send boundary. */
+  resolve(endpoint: DeliveryEndpointDto): DeliveryEndpointTransport | undefined;
+}
+
+export interface DeliveryEndpointTransport {
+  readonly endpointKind: DeliveryEndpointDto["kind"];
+  send(
+    endpoint: DeliveryEndpointDto,
+    content: OutboundContent,
+    meta: AuthorityDeliverySendMeta,
+  ): Promise<DeliveryResult>;
+  isReady(endpoint: DeliveryEndpointDto): boolean;
+  outcomePolicy(endpoint: DeliveryEndpointDto):
+    | { readonly kind: "manual-resolution" }
+    | { readonly kind: "idempotent-redrive"; readonly windowMs: number };
+}
+
+export interface DeliveryEnqueueInput {
+  readonly keyBody: DeliveryEnqueueKeyBody;
+  readonly intent: DeliveryIntentDto;
+}
+
+export type DeliveryEnqueueResult =
+  | {
+      readonly accepted: true;
+      readonly records: readonly DeliveryStreamRecord[];
+      readonly items: ReadonlyArray<{
+        readonly itemId: string;
+        readonly state: DeliveryItemState;
+        readonly statusRevision: number;
+      }>;
+    }
+  | {
+      readonly accepted: false;
+      readonly error: {
+        readonly code: "idempotency-conflict";
+        readonly message: string;
+        readonly retryable: false;
+      };
+    };
+
+export interface AuthorityDeliveryLogger {
+  info(msg: string, data?: Record<string, unknown>): void;
+  warn(msg: string, data?: Record<string, unknown>): void;
+  error(msg: string, data?: Record<string, unknown>): void;
+  debug(msg: string, data?: Record<string, unknown>): void;
 }

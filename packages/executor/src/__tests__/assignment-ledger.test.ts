@@ -8,6 +8,7 @@ import {
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type ArtifactStore,
 } from "@zhixing/core/authority";
+import { DeliveryAuthority } from "@zhixing/core";
 import type {
   AssignmentActivationPayload,
   AssignmentActivationProof,
@@ -18,6 +19,7 @@ import type {
   DispatchEnvelope,
   LedgerEvidencePage,
   LedgerSnapshot,
+  IngressContext,
   PermissionSnapshotLease,
   Signature,
   TranscriptRunRecord,
@@ -69,9 +71,11 @@ import {
 } from "@zhixing/owner-kernel/conversation-assignment";
 import {
   ControlAdmissionJournal,
+  channelSurfacePrincipal,
   createConversationControlEnvelope,
   createInitialControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
+import { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -89,6 +93,12 @@ const RUN_ID = "run-1";
 const ASSIGNMENT_ID = "assignment-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+
+function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticipant {
+  return new OwnerDeliveryParticipant({
+    authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
+  });
+}
 
 type ConversationEnvelope = Extract<
   DispatchEnvelope,
@@ -134,6 +144,7 @@ class TestProtocolIdentity implements ProtocolSigner, ProtocolSignatureVerifier 
 
 class CountingArtifactStore implements ArtifactStore {
   readonly #delegate: ArtifactStore;
+  puts = 0;
   gets = 0;
   hasChecks = 0;
 
@@ -142,6 +153,7 @@ class CountingArtifactStore implements ArtifactStore {
   }
 
   put(bytes: Uint8Array) {
+    this.puts += 1;
     return this.#delegate.put(bytes);
   }
 
@@ -160,8 +172,40 @@ class CountingArtifactStore implements ArtifactStore {
     this.hasChecks = 0;
   }
 
+  resetWrites(): void {
+    this.puts = 0;
+  }
+
   get reads(): number {
     return this.gets + this.hasChecks;
+  }
+
+  get writes(): number {
+    return this.puts;
+  }
+}
+
+class FaultingArtifactStore implements ArtifactStore {
+  readonly #delegate: ArtifactStore;
+  failDigest?: string;
+
+  constructor(delegate: ArtifactStore) {
+    this.#delegate = delegate;
+  }
+
+  put(bytes: Uint8Array) {
+    return this.#delegate.put(bytes);
+  }
+
+  get(ref: Parameters<ArtifactStore["get"]>[0]) {
+    if (ref.digest === this.failDigest) {
+      throw new Error("simulated transient delivery content read failure");
+    }
+    return this.#delegate.get(ref);
+  }
+
+  has(ref: Parameters<ArtifactStore["has"]>[0]) {
+    return this.#delegate.has(ref);
   }
 }
 
@@ -250,6 +294,7 @@ async function createUnassignedHarness(
     publisher?: ConversationMutationPublisher;
     submission?: AssignmentSubmissionAuthorizer;
     ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
+    ingress?: IngressContext;
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
@@ -300,6 +345,7 @@ async function createUnassignedHarness(
     artifacts: ownerArtifacts,
     signer: identity,
     verifier: identity,
+    delivery: deliveryParticipant(log),
     submission: options.submission ?? submission,
     authority,
     projection,
@@ -342,10 +388,13 @@ async function createUnassignedHarness(
     ingressKey: "surface:user-1/ingress-1",
     runId: RUN_ID,
     userInput: { parts: [{ type: "text", text: "hello" }] },
-    ingress: ingress(),
+    ingress: options.ingress ?? ingress(),
     queuedPosition: 0,
   });
-  const unsigned = createUnsignedEnvelope(identity);
+  const unsigned = createUnsignedEnvelope(
+    identity,
+    options.ingress ? { ingress: options.ingress } : {},
+  );
   return {
     root,
     artifacts,
@@ -370,6 +419,7 @@ async function createHarness(
     publisher?: ConversationMutationPublisher;
     submission?: AssignmentSubmissionAuthorizer;
     ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
+    ingress?: IngressContext;
   } = {},
 ) {
   const harness = await createUnassignedHarness(options);
@@ -379,6 +429,268 @@ async function createHarness(
 }
 
 describe("conversation assignment protocol", () => {
+  it("atomically derives final and staged deliveries without intermediate status noise", async () => {
+    const responder = {
+      channelId: "feishu",
+      platformSubject: "user-1",
+      tenant: "tenant-1",
+    };
+    const channelIngress: IngressContext = {
+      kind: "channel",
+      surfacePrincipal: channelSurfacePrincipal(responder),
+      responder,
+      replyTarget: { channelId: "feishu", to: "chat-1" },
+      deviceId: "device-1",
+      ingressId: "ingress-channel-1",
+      receivedAt: NOW,
+    };
+    const harness = await createHarness({ ingress: channelIngress });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "deliver-staged-result",
+      expected: { anchorEpoch: 3 },
+      mutation: {
+        kind: "delivery-enqueue",
+        request: { target: { kind: "turn-origin" }, content: "staged result" },
+      },
+    });
+    const bundle = await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [
+          { role: "user", content: [{ type: "text", text: "work" }] },
+          { role: "assistant", content: [{ type: "text", text: "done" }] },
+        ],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+
+    const commits = await harness.log.readAll();
+    const committed = commits.find((commit) =>
+      commit.entries.some(
+        (entry) =>
+          entry.stream === `run:${CONVERSATION_ID}` &&
+          (entry.body as { readonly t?: string }).t === "committed",
+      ),
+    );
+    const commitDeliveryKinds = committed?.entries
+      .filter((entry) => entry.stream === "delivery")
+      .map(
+        (entry) =>
+          (entry.body as { readonly keyBody: { readonly kind: string } }).keyBody.kind,
+      );
+    expect(commitDeliveryKinds).toEqual([
+      "conversation-final-delivery",
+      "staged-delivery",
+    ]);
+    expect(
+      committed?.entries.some(
+        (entry) =>
+          entry.stream === "publish" &&
+          (entry.body as { readonly t?: string }).t === "publish-decision",
+      ),
+    ).toBe(true);
+    expect(
+      committed?.entries.some(
+        (entry) =>
+          entry.stream === "publish" &&
+          (entry.body as { readonly t?: string }).t === "publish-progress",
+      ),
+    ).toBe(false);
+    expect(
+      commits.some((commit) =>
+        commit.entries.some(
+          (entry) =>
+            entry.stream === "delivery" &&
+            (entry.body as { readonly keyBody?: { readonly kind?: string } }).keyBody
+              ?.kind === "conversation-status-delivery",
+        ),
+      ),
+    ).toBe(false);
+  }, 15_000);
+
+  it("does not write delivery content for an unroutable final or during committed replay", async () => {
+    let counted: CountingArtifactStore | undefined;
+    const firstParty = await createHarness({
+      ownerArtifacts(store) {
+        counted = new CountingArtifactStore(store);
+        return counted;
+      },
+    });
+    await firstParty.ledger.dispatch(
+      firstParty.dispatch.envelope,
+      firstParty.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await new InProcessAssignmentSubmission({
+      ledger: firstParty.ledger,
+      owner: firstParty.journal,
+    }).startAndReport(ASSIGNMENT_ID, submissionContext(firstParty.unsigned));
+    const unroutable = await sealDefaultBundle(
+      firstParty.ledger,
+      "x".repeat(MAX_INLINE_LOGICAL_RECORD_BYTES),
+    );
+    counted!.resetWrites();
+    await expect(
+      firstParty.journal.submitBundle(
+        unroutable,
+        submissionContext(firstParty.unsigned),
+      ),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    expect(counted!.writes).toBe(0);
+
+    const channel = await createHarness({
+      ingress: {
+        kind: "channel",
+        surfacePrincipal: channelSurfacePrincipal({
+          channelId: "feishu",
+          platformSubject: "user-1",
+        }),
+        responder: { channelId: "feishu", platformSubject: "user-1" },
+        replyTarget: { channelId: "feishu", to: "chat-1" },
+        deviceId: "device-1",
+        ingressId: "ingress-replay",
+        receivedAt: NOW,
+      },
+    });
+    await channel.ledger.dispatch(
+      channel.dispatch.envelope,
+      channel.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await new InProcessAssignmentSubmission({
+      ledger: channel.ledger,
+      owner: channel.journal,
+    }).startAndReport(ASSIGNMENT_ID, submissionContext(channel.unsigned));
+    const routed = await sealDefaultBundle(
+      channel.ledger,
+      "y".repeat(MAX_INLINE_LOGICAL_RECORD_BYTES),
+    );
+    await channel.journal.submitBundle(routed, submissionContext(channel.unsigned));
+    counted = new CountingArtifactStore(channel.artifacts);
+    const cold = reopenJournal(channel, { artifacts: counted });
+    counted.resetWrites();
+    await expect(cold.currentState(RUN_ID)).resolves.toBe("committed");
+    expect(counted.writes).toBe(0);
+  }, 15_000);
+
+  it("retries a conversation commit after transient staged-content storage failure", async () => {
+    let faulting: FaultingArtifactStore | undefined;
+    const harness = await createHarness({
+      ownerArtifacts(store) {
+        faulting = new FaultingArtifactStore(store);
+        return faulting;
+      },
+    });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    const content = await harness.artifacts.put(
+      Buffer.from(canonicalize({ text: "staged", markdown: "staged" }), "utf8"),
+    );
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "transient-conversation-staged-content",
+      expected: { anchorEpoch: 3 },
+      mutation: {
+        kind: "delivery-enqueue",
+        request: {
+          target: {
+            kind: "explicit",
+            target: { channelId: "feishu", to: "chat-2" },
+          },
+          content: { ref: content },
+        },
+      },
+    });
+    const bundle = await sealDefaultBundle(harness.ledger);
+    const before = (await harness.log.readAll()).length;
+    faulting!.failDigest = content.digest;
+
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).rejects.toThrow("simulated transient delivery content read failure");
+    expect((await harness.log.readAll()).length).toBe(before);
+
+    faulting!.failDigest = undefined;
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+  }, 15_000);
+
+  it("commits and cold-replays a conversation with invalid staged delivery content", async () => {
+    const harness = await createHarness({
+      publisher: {
+        decideGlobalBatchAtPrefix() {
+          throw new Error("global decision is not expected");
+        },
+        async apply() {},
+      },
+    });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    const invalid = await harness.artifacts.put(
+      Buffer.from("not canonical delivery content", "utf8"),
+    );
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "invalid-conversation-staged-content",
+      expected: { anchorEpoch: 3 },
+      mutation: {
+        kind: "delivery-enqueue",
+        request: {
+          target: {
+            kind: "explicit",
+            target: { channelId: "feishu", to: "chat-2" },
+          },
+          content: { ref: invalid },
+        },
+      },
+    });
+
+    await expect(
+      harness.journal.submitBundle(
+        await sealDefaultBundle(harness.ledger),
+        submissionContext(harness.unsigned),
+      ),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    await expect(reopenJournal(harness).currentState(RUN_ID)).resolves.toBe(
+      "committed",
+    );
+  }, 15_000);
+
   it("requires durable receipt before start and recovers a lost started report", async () => {
     const harness = await createHarness();
     const disabled = new InProcessConversationDispatcher({
@@ -402,6 +714,7 @@ describe("conversation assignment protocol", () => {
       artifacts: harness.artifacts,
       signer: harness.identity,
       verifier: harness.identity,
+      delivery: deliveryParticipant(harness.log),
       submission,
       authority: harness.authority,
       projection: harness.projection,
@@ -1457,6 +1770,7 @@ describe("conversation assignment protocol", () => {
       artifacts: harness.artifacts,
       signer: harness.identity,
       verifier: harness.identity,
+      delivery: deliveryParticipant(harness.log),
       submission,
       authority: harness.authority,
       projection: harness.projection,
@@ -1759,6 +2073,7 @@ describe("conversation assignment protocol", () => {
       artifacts: first.artifacts,
       signer: first.identity,
       verifier: first.identity,
+      delivery: deliveryParticipant(first.log),
       submission,
       authority: secondAuthority,
       projection: secondProjection,
@@ -2014,6 +2329,7 @@ describe("conversation assignment protocol", () => {
       artifacts: staleArtifacts,
       signer: wrongIndex.identity,
       verifier: wrongIndex.identity,
+      delivery: deliveryParticipant(wrongIndex.log),
       submission,
       authority: wrongIndex.authority,
       projection: wrongIndex.projection,
@@ -2815,7 +3131,7 @@ describe("conversation assignment protocol", () => {
     await expect(bareSupersede.journal.currentState(RUN_ID)).rejects.toThrow(
       "Assignment supersede replay contract",
     );
-  });
+  }, 15_000);
 
   it("rejects non-atomic initial facts, cross-conversation dispatches, and non-head assignments", async () => {
     const admittedOnly = await createUnassignedHarness();
@@ -4476,6 +4792,13 @@ describe("conversation assignment protocol", () => {
 
   it("recovers acknowledgement after a legal late bundle commits from uncertainty", async () => {
     const harness = await createHarness();
+    const liveNotices: Awaited<ReturnType<typeof harness.journal.statusHistory>> = [];
+    harness.journal.onStatus(() => {
+      throw new Error("simulated status consumer failure");
+    });
+    harness.journal.onStatus((notice) => {
+      liveNotices.push(notice);
+    });
     await harness.ledger.dispatch(
       harness.dispatch.envelope,
       harness.dispatch.activation,
@@ -4487,7 +4810,10 @@ describe("conversation assignment protocol", () => {
       submissionContext(harness.unsigned),
     );
     const bundle = await sealDefaultBundle(harness.ledger);
-    await harness.journal.markAssignmentUncertain(ASSIGNMENT_ID, "ledger-unknown");
+    const fact = await harness.journal.markAssignmentUncertain(
+      ASSIGNMENT_ID,
+      "ledger-unknown",
+    );
 
     await expect(
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
@@ -4496,6 +4822,29 @@ describe("conversation assignment protocol", () => {
     expect((await harness.journal.currentResolution(RUN_ID))?.resolution?.kind).toBe(
       "late-bundle-committed",
     );
+    const uncertainNotices = (await harness.journal.statusHistory(RUN_ID, 0)).filter(
+      (notice) => notice.state === "uncertain" || notice.state === "uncertain-closed",
+    );
+    expect(uncertainNotices).toEqual([
+      expect.objectContaining({
+        state: "uncertain",
+        openFactDigest: fact.openFactDigest,
+      }),
+      expect.objectContaining({
+        state: "uncertain-closed",
+        openFactDigest: fact.openFactDigest,
+        closedBy: "late-bundle-committed",
+        resultingState: "committed",
+      }),
+    ]);
+    await vi.waitFor(() =>
+      expect(
+        liveNotices.filter(
+          (notice) =>
+            notice.state === "uncertain" || notice.state === "uncertain-closed",
+        ),
+      ).toEqual(uncertainNotices),
+    );
     await expect(
       harness.ledger.queryLedger(
         ASSIGNMENT_ID,
@@ -4503,6 +4852,9 @@ describe("conversation assignment protocol", () => {
       ),
     ).resolves.toMatchObject({ phase: "sealed" });
     const restarted = reopenJournal(harness);
+    await expect(restarted.statusHistory(RUN_ID, 0)).resolves.toEqual(
+      await harness.journal.statusHistory(RUN_ID, 0),
+    );
     expect(await restarted.assignmentsAwaitingRecovery()).toEqual([
       expect.objectContaining({ assignmentId: ASSIGNMENT_ID, state: "committed" }),
     ]);
@@ -4546,6 +4898,10 @@ describe("conversation assignment protocol", () => {
     ["user-retry-acknowledged", "queued"],
   ] as const)("applies uncertain decision %s exactly once", async (decision, state) => {
     const harness = await createHarness();
+    const liveNotices: Awaited<ReturnType<typeof harness.journal.statusHistory>> = [];
+    harness.journal.onStatus((notice) => {
+      liveNotices.push(notice);
+    });
     const fact = await harness.journal.markAssignmentUncertain(
       ASSIGNMENT_ID,
       "ledger-unknown",
@@ -4565,6 +4921,22 @@ describe("conversation assignment protocol", () => {
       },
     });
     expect(await harness.journal.currentState(RUN_ID)).toBe(state);
+    const uncertainNotices = (await harness.journal.statusHistory(RUN_ID, 0)).filter(
+      (notice) => notice.state === "uncertain" || notice.state === "uncertain-closed",
+    );
+    expect(uncertainNotices).toEqual([
+      expect.objectContaining({
+        state: "uncertain",
+        openFactDigest: fact.openFactDigest,
+      }),
+      expect.objectContaining({
+        state: "uncertain-closed",
+        openFactDigest: fact.openFactDigest,
+        closedBy: decision,
+        resultingState: state,
+      }),
+    ]);
+    await vi.waitFor(() => expect(liveNotices).toEqual(uncertainNotices));
 
     const atomic = (await harness.log.readAll()).find((commit) =>
       commit.entries.some(
@@ -4895,6 +5267,8 @@ describe("conversation assignment protocol", () => {
       throw new Error("expected dispatch conflict");
     }
     await harness.journal.recordDispatchConflict(harness.dispatch, result);
+    const open = await harness.journal.currentResolution(RUN_ID);
+    if (!open || open.resolution) throw new Error("dispatch conflict did not open uncertainty");
     const [pending] = await harness.journal.pendingCancellations();
     await harness.ledger.cancel(
       ASSIGNMENT_ID,
@@ -4910,6 +5284,12 @@ describe("conversation assignment protocol", () => {
     expect((await harness.journal.currentResolution(RUN_ID))?.resolution?.kind).toBe(
       "proven-not-started-redispatched",
     );
+    expect((await harness.journal.statusHistory(RUN_ID, 0)).at(-1)).toMatchObject({
+      state: "uncertain-closed",
+      openFactDigest: open.openFactDigest,
+      closedBy: "proven-not-started-redispatched",
+      resultingState: "queued",
+    });
   });
 
   it.each([
@@ -5097,6 +5477,7 @@ describe("conversation assignment protocol", () => {
         artifacts: harness.artifacts,
         signer: harness.identity,
         verifier: harness.identity,
+        delivery: deliveryParticipant(harness.log),
         submission,
         authority: harness.authority,
         projection: harness.projection,
@@ -7125,6 +7506,7 @@ function createUnsignedEnvelope(
     readonly runId?: string;
     readonly assignmentId?: string;
     readonly conversationId?: string;
+    readonly ingress?: IngressContext;
   } = {},
 ): UnsignedConversationEnvelope {
   const runId = ids.runId ?? RUN_ID;
@@ -7240,7 +7622,7 @@ function createUnsignedEnvelope(
       conversationId,
       ownerEpoch: 3,
       baseRevision: 7,
-      ingress: ingress(),
+      ingress: ids.ingress ?? ingress(),
       windowInput: { t: "full", windowEpoch: 1, messages: [] },
       controlContext: [],
     },
@@ -7486,14 +7868,22 @@ async function appendCompleteConversationCommit(
   ]);
 }
 
-async function sealDefaultBundle(ledger: ConversationAssignmentLedger) {
+async function sealDefaultBundle(
+  ledger: ConversationAssignmentLedger,
+  assistantText?: string,
+) {
   return ledger.sealConversationBundle(ASSIGNMENT_ID, {
     runRecord: {
       type: "run",
       runId: RUN_ID,
       runIndex: 8,
       timestamp: NOW,
-      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        ...(assistantText === undefined
+          ? []
+          : [{ role: "assistant" as const, content: [{ type: "text" as const, text: assistantText }] }]),
+      ],
     },
     contentAssets: [],
     streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
@@ -7583,6 +7973,7 @@ function reopenJournal(
     artifacts,
     signer: harness.identity,
     verifier: harness.identity,
+    delivery: deliveryParticipant(harness.log),
     submission: options.submission ?? submission,
     authority: harness.authority,
     projection: harness.projection,

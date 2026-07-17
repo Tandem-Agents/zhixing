@@ -38,6 +38,10 @@ import {
   type SlotTerminalState,
   type TurnSlotId,
 } from "./outbox-types.js";
+import {
+  authorityDeliveryFailure,
+  normalizeAuthorityDeliveryResult,
+} from "./transport-contract.js";
 
 // ─── 内部队列项（绑定 promise 回调） ───
 
@@ -265,6 +269,7 @@ export class Outbox {
       target: input.target,
       content: input.content,
       source: input.source,
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       afterSlot: input.afterSlot,
       enqueuedAt: new Date(this.now()).toISOString(),
     };
@@ -456,8 +461,12 @@ export class Outbox {
       this.lastActivityAt = this.now();
 
       const startedAt = this.now();
+      const authorityOrigin = item.entry.idempotencyKey !== undefined;
       try {
-        const result = await this.sendWithTimeout(item.entry);
+        const rawResult = await this.sendWithTimeout(item.entry);
+        const result = authorityOrigin
+          ? normalizeAuthorityDeliveryResult(rawResult)
+          : rawResult;
         const latency = this.now() - startedAt;
 
         if (!result.success) {
@@ -487,8 +496,11 @@ export class Outbox {
         }
         item.resolve(result);
       } catch (err) {
-        const error =
-          err instanceof Error ? err : new Error(String(err));
+        const error = authorityOrigin
+          ? authorityDeliveryFailure()
+          : err instanceof Error
+            ? err
+            : new Error(String(err));
         this.emit({
           type: "entry:failed",
           key: this.key,
@@ -509,8 +521,13 @@ export class Outbox {
   // ─── 内部：带超时的 send ───
 
   private sendWithTimeout(entry: OutboxEntry): Promise<DeliveryResult> {
+    const meta = entry.idempotencyKey
+      ? { idempotencyKey: entry.idempotencyKey }
+      : undefined;
     if (this.sendTimeoutMs <= 0) {
-      return this.doSend(entry.target, entry.content);
+      return meta
+        ? this.doSend(entry.target, entry.content, meta)
+        : this.doSend(entry.target, entry.content);
     }
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -527,7 +544,9 @@ export class Outbox {
     });
 
     return Promise.race([
-      this.doSend(entry.target, entry.content),
+      meta
+        ? this.doSend(entry.target, entry.content, meta)
+        : this.doSend(entry.target, entry.content),
       timeout,
     ]).finally(() => {
       if (timer) clearTimeout(timer);

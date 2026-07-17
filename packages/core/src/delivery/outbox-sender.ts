@@ -44,6 +44,9 @@ export function createOutboxSender(
       return outbox.post({
         target,
         content,
+        ...(meta?.idempotencyKey
+          ? { idempotencyKey: meta.idempotencyKey }
+          : {}),
         source: mapSource(meta?.source),
         afterSlot: deriveAfterSlot(meta?.source),
       });

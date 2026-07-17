@@ -22,10 +22,12 @@ import type {
   Signature,
   SupersedeProof,
 } from "../contracts/index.js";
+import { validateAuthorityError as validateAuthorityErrorContract } from "./contract-validation.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateStagedMutationRecord } from "./commit.js";
 import { validateJobCommitFence } from "./job.js";
 import { assertResourceLeaseBaseContract } from "./resource-lease.js";
+import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import {
   validateEnvironmentRequirement,
   validateMessages,
@@ -2369,30 +2371,7 @@ function assertAuthorityError(
   value: DispatchRejectionProof["error"],
   label: string,
 ): void {
-  assertExactKeys(value, ["code", "message", "retryable"], label);
-  const codes = new Set([
-    "unauthorized",
-    "capability-expired",
-    "epoch-stale",
-    "revision-conflict",
-    "fence-rejected",
-    "busy",
-    "not-found",
-    "invalid",
-    "lease-exhausted",
-    "missing-base",
-    "typed-stale",
-    "capability-gap",
-    "unavailable-offline",
-    "idempotency-conflict",
-  ]);
-  if (!codes.has(value.code)) throw new TypeError(`${label} code is invalid`);
-  if (typeof value.message !== "string" || value.message.length > 4_096) {
-    throw new TypeError(`${label} message must be a bounded string`);
-  }
-  if (typeof value.retryable !== "boolean") {
-    throw new TypeError(`${label} retryable must be boolean`);
-  }
+  validateAuthorityErrorContract(value, label);
 }
 
 function assertPositiveInteger(value: number, label: string): void {
@@ -2436,12 +2415,6 @@ function assertSignature(value: Signature, label: string): void {
 
 function assertVersion(value: number, label: string): void {
   if (value !== 1) throw new TypeError(`${label} version must be 1`);
-}
-
-function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 480) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
-  }
 }
 
 function assertObject(

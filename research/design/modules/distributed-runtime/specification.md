@@ -18,6 +18,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 ```
 
 - id 前缀规则：`run- / asg- / jobrun- / req- / rsv- / use- / xfer- / cap- / tkt- / grt- / ich- / dlv- / int- / offer-` + Ulid。conversationId 沿既有；本地域对话恒为 `local-<deviceId 前 8 位>-<Ulid>`。
+- 协议标识符统一为非空且不超过 480 个 UTF-16 code unit；所有生产端、wire validator、耐久 reducer 与恢复投影复用同一判定。自由文本和原始字节使用各自字段合同，不套用标识符上界。
 - epoch 规则（uint64、单调、永不回退）：`anchorEpoch`（迁居 / 换代 +1）、`trustEpoch`（issuer-transition +1）、`ownerEpoch`（对话权威转移 +1）、`localGovernorEpoch`（设备级治理域 epoch，仅本地域整体重置时 +1；单个对话被收编不改变它，对话级 fencing 由该对话自己的 `ownerEpoch` 承担）、`streamEpoch`（assignment 数据面重连 +1）。`localDomainId = "local:"+deviceId`。
 - 时钟：协议时间戳恒为签发者时钟；跨设备只用 `issuedAt + TTL` 换算单调 deadline；`maxClockSkewMs = 120_000`（初值，S2 标定）。
 - 幂等键单源表：入口 `(surfacePrincipal, ingressId)`；控制写 `requestId`；allow-once 应答 `(assignmentId, interactionRequestId)`；渠道 challenge 外发 / grant `challengeId`；提交 `(conversationId, runId)` / `(taskId, jobRunId)`；派发 `assignmentId`；扣账 `usageId`；结算 `reservationId + 动作`。DeliveryOutbox 入队键统一为 `D("DeliveryEnqueueKeyBody",1,keyBody)`，`keyBody` 的唯一字段合同是 §4.3 `DeliveryEnqueueKeyBody`；同一权威事实重放必须复用原键，不得以当前 epoch、attempt 或投递目标另造身份；同键仅在 `intentDigest` 相同时回放原 item，否则拒绝为 `idempotency-conflict`。
@@ -33,7 +34,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 - **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SourceFreezeProof`、`PermissionSnapshotLease` 与 `InteractionMirrorBatch`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`、mirror 耐久请求身份 = `D("InteractionMirrorBatch",1,InteractionMirrorBatch 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
 - **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。interaction 审计链固定 `M0 = D("InteractionMirrorSeed",1,{assignmentId})`，每个 `interaction-finished` 按完成次序分配连续 ordinal，并计算 `Mn = D("InteractionMirrorStep",1,{previous:M(n-1),entry:{ordinal,seq,requestId,kind,outcome}})`；`at` 由批次签名绑定但不进入链步（共享 assignment reducer 无需日志 envelope 时间即可复算）。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
 - **内容与引用摘要**：`ArtifactRef.digest`、`ContentAssetRef.digest`、`CheckpointEnvelope.chunks[].digest`、`EvidenceRequest.items[].digestHint`、证据 `contentDigest`、副作用 `resultDigest`、投递回执 `receipt.digest` 与恢复验证 `nonceDigest` 恒为各自所指不可变原始字节的 `B(bytes)`；`PairingOffer.issuer.keyFingerprint = B(规范公钥字节)`。`manifestDigest / snapshotDigest / parentDigest / reportDigest / envelopeDigest / requestDigest` 等引用字段必须等于目标对象按本表得到的摘要，不得对引用字段所在对象再哈希。`FinalOutboxRecord.digest / FinalFrame.digest` 固定引用 `SealedBundle.digest`；`AssetIndexEntry.digest` 固定引用对应资产 artifact 的 `ArtifactRef.digest`。
-- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution 摘要、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
+- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution / responseBinding 摘要、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `DeliveryResponseBinding = D("DeliveryResponseBinding",1,{itemId,attempt,startedAt})`——transport 响应归属绑定，不含 anchorEpoch、迁居不变；delivery 的 open / resolution 摘要含 epoch、仅用于 uncertain 裁决 fencing，与响应绑定不得混用。`PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
 - 引用目标注册表（同名字段按所在 DTO 取对应行，禁止按名字猜）：
 
   | 引用字段 | 唯一目标 |
@@ -72,7 +73,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 | `MemoryEntry` / `PersonEntry` / `JournalEntry` | 现有同名 @ `packages/core/src/memory/` | 记忆域实体（读结果载体） |
 | `MemoryCategory` / `PersonMeta` | 现有同名 @ `packages/core/src/memory/`（进程内领域类型，**不上 wire**——wire 用 §1.3b `MemoryCategoryDto` / `PersonMetaDto` 快照） | 记忆分类与人物元数据 |
 | `DeliveryItem` | 现有同名 @ `packages/core/src/delivery/types.ts:31`（由 delivery 流投影生成，不上权威日志） | 渠道发送器兼容投影 |
-| `EnqueueParams` / `IDeliveryPipeline.enqueue` | 现有同名 @ `packages/core/src/delivery/types.ts:100 / :110`；现实现于 `pipeline.ts:199`，唯一生产调用 @ `scheduler.ts:519` | S3 删除公开生产入口；改由五类权威生产者内部构造 enqueued |
+| `EnqueueParams` / `IDeliveryPipeline.enqueue` | 现有同名 @ `packages/core/src/delivery/types.ts:100 / :110`；现实现于 `pipeline.ts:199`，唯一生产调用 @ `scheduler.ts:519` | 目标态由五类权威生产者内部构造 enqueued；公开生产入口保留至 scheduler 接入 JobJournal 后随旧路径整体退役（执行计划第 26 项） |
 | `SkillUsageRecord` | 本文冻结（§1.3b；现有 `SkillUsage` @ `packages/core/src/skills/types.ts:35` 无 skillId，adapter 自 store 的 map 键补齐） | 技能使用记录 |
 | `SkillRecord` / `SkillState` / `SkillMode` | 现有同名 @ `packages/core/src/skills/types.ts` | 技能管理载体（进程内领域类型，**不上 wire**——wire 写面用 §3.2 `SkillWriteDto` / `SkillStatePatch`（mode 用 §1.3b `SkillModeDto`），id / revision / createdAt 等权威字段锚点生成） |
 | `EvidenceKind` | ≙ 现有 `ObjectiveSignalKind` @ `packages/core/src/advancement/types.ts` | 证据类型 |
@@ -137,6 +138,7 @@ interface AuthorityError {
       | "capability-gap" | "unavailable-offline" | "idempotency-conflict";
   message: string; retryable: boolean;
 }
+// message 为非空 UTF-8 文本且至多 4KiB；code、message、retryable 的 accepted-domain 由生产端、wire、日志 reducer 与 companion 投影共用同一结构谓词。
 type DispatchConflictError = Omit<AuthorityError, "code"|"retryable"> &
   { code: "idempotency-conflict"; retryable: false };
 ```
@@ -282,7 +284,7 @@ interface ChannelChallengeTokenBase<R extends ExecutionRef> {   // owner 预签�
 type ConversationChannelChallengeToken = ChannelChallengeTokenBase<Extract<ExecutionRef, { execution: "conversation" }>>;
 type JobChannelChallengeToken = ChannelChallengeTokenBase<Extract<ExecutionRef, { execution: "job" }>>;
 type ChannelChallengeToken = ConversationChannelChallengeToken | JobChannelChallengeToken;
-interface ChannelMessageRef { channelId: string; messageId: string; threadId?: string } // 平台发送回执，仅审计 / 展示，不充当授权
+interface ChannelMessageRef { channelId: string; messageId: string; threadId?: string } // 各字段为 ≤480 UTF-16 code unit 的非空标识；平台发送回执仅审计 / 展示，不充当授权
 interface ChannelInteractionGrant {                    // 定时 job 的单次应答凭证；只由 job owner（锚点）签发；
   grantId: string; ref: Extract<ExecutionRef, { execution: "job" }>;
   assignmentId: string; interactionRequestId: string; challengeToken: JobChannelChallengeToken;   // conversation challenge 在类型层不可进入 grant
@@ -1096,6 +1098,7 @@ interface DeliveryIntentDto {                        // enqueued 的不可变权
          | { kind: "agent"; conversationId: string }
          | { kind: "system"; reason: string };
   createdAt: IsoTime; maxAttempts: number }           // createdAt = 产生该 intent 的权威 CommitEnvelope.at；重放读取原值，禁止取当前时间
+// inline content 的规范 JSON 必须 ≤8KiB，超限先外置；scheduler taskName 是冻结 spec.name 的 Unicode-safe 有界展示投影：≤480 UTF-16 code unit，超限以“…”结尾。
 interface DeliveryFailure { code: string; message: string /* 脱敏文案，禁止响应体 / URL / header */; retryable: boolean }
 interface DeliveryResolutionFact {
   itemId: string; attempt: number; openedAnchorEpoch: number; resolvedAnchorEpoch: number; openFactDigest: Digest;
@@ -1105,8 +1108,10 @@ type DeliveryItemState = "queued"|"attempting"|"retry-wait"|"uncertain"
   | "sent"|"failed"|"verified-sent"|"abandoned";  // sent=外部回执；verified-sent=用户核验，二者绝不混写
 type DeliveryStreamRecord =                      // delivery 流 = 投递生命周期的**唯一事实源**；现有 DeliveryItem / 队列文件均为可重建投影
   | { t: "enqueued";        itemId: string; keyBody: DeliveryEnqueueKeyBody; idempotencyKey: string; intentDigest: Digest;
-      intent: DeliveryIntentDto; statusRevision: number } // itemId=`dlv-...` 与 idempotencyKey 仅此处分配；intentDigest=`D("DeliveryIntentDto",1,intent)`
-  | { t: "attempt-started"; itemId: string; attempt: number; startedAt: IsoTime;
+      intent: DeliveryIntentDto; statusRevision: number } // itemId=`dlv-<Ulid>` 以本 envelope.at 与域分离熵在首次权威提交时生成并耐久；重放读取原值，不从 key 重造。idempotencyKey 仅此处分配；intentDigest=`D("DeliveryIntentDto",1,intent)`
+  | { t: "attempt-started"; itemId: string; attempt: number;
+      authorization: { kind: "automatic" } | { kind: "manual"; resolutionFactDigest: Digest };
+      startedAt: IsoTime;
       unknownOutcome: { kind: "idempotent-redrive"; redriveUntil: IsoTime } | { kind: "manual-resolution" };
       statusRevision: number }                    // **发送前先 fsync**；adapter 能力与有界 redrive 截止点一并冻结
   | { t: "sent";            itemId: string; attempt: number; receipt?: { digest: Digest; platformMessage?: ChannelMessageRef }; statusRevision: number }  // 外部回执事实，非用户核验
@@ -1119,10 +1124,13 @@ type DeliveryStreamRecord =                      // delivery 流 = 投递生命�
 // 以 D("DeliveryEnqueueKeyBody",1,keyBody) 生成 idempotencyKey，以 D("DeliveryIntentDto",1,intent) 生成 intentDigest；
 // committed 结果与非 committed 状态使用不同 kind，后者以 journal.statusRevision 定位；迁居 / 重放不改键，不同 revision 不得合并为同一 item。
 // priority：staged/维护通知默认 normal；job 取冻结 task priority，urgent 映射 high。maxAttempts 是**自动发送次数上限**，取锚点当时版本化投递策略
-// 并冻结为正整数；幂等 redrive 的 deadline 同由该策略在 attempt-started 时冻结。用户每次 retry-risk-ack 可额外授权恰一次 attempt，不修改 maxAttempts，后续配置变化也不改旧 item。
+// 并冻结为正整数；幂等 redrive 的 deadline 同由该策略在 attempt-started 时冻结。attempt 序号、automaticAttemptsUsed 与待消费手动授权分别投影；
+// 用户每次 retry-risk-ack 可额外授权恰一次 next attempt，该 attempt 以 resolutionFactDigest 耐久绑定且不消耗自动预算，不修改 maxAttempts，后续配置变化也不改旧 item。
 // openFactDigest = D("DeliveryOpenFact",1,{itemId,attempt,openedAnchorEpoch,startedAt,unknownOutcome,idempotencyKey})；迁居不改写打开事实。
+// transport 响应（成功 / 失败 / 迟到）归属"当前开放 attempt"恒以 D("DeliveryResponseBinding",1,{itemId,attempt,startedAt}) 绑定——
+// 不含 anchorEpoch、迁居不变，anchor 迁居后合法迟到响应仍归属原开放 attempt；openFactDigest 仅用于 uncertain 用户裁决的 fencing，二者不得混用。
 // resolution.factDigest = D("DeliveryResolutionFact",1,{itemId,attempt,openedAnchorEpoch,resolvedAnchorEpoch,openFactDigest,decision,by,at})。resolvedAnchorEpoch 必为提交时当前 epoch，
-// by 只取已认证 principal；重复响应 / 旧裁决按 itemId+attempt 幂等吸收或拒绝。
+// by 只取已认证 principal；完整重放须将 fact 的 itemId / attempt / resolvedAnchorEpoch / openFactDigest / decision / by 与成功 applied 所属的耐久 delivery-resolve 请求及认证 principal 逐字段绑定；重复响应 / 旧裁决按 itemId+attempt 幂等吸收或拒绝。
 // DeliveryItem adapter 只从 enqueued intent + 后续事实投影 id / attempts / nextAttemptAt / lastError；这些可变字段不得反写权威流。
 type IntentStreamRecord   = { t: "intent"; intent: DeferredGlobalIntent };
 type RecoveryActivationPlan =
@@ -1185,16 +1193,16 @@ interface DeferredGlobalIntent {         // 本地域离线期间的全局写候
 | # | 当前态 | 触发 | 守卫 | 次态 | 动作 |
 |---|---|---|---|---|---|
 | 1 | —（无 item） | conversation committed CAS / job committed CAS / staged publish / conversation 状态入队 / job 状态入队 | 按对应权威事实（含其 `CommitEnvelope.at`）复算 keyBody、idempotencyKey 与 intentDigest；intent 引用全在场；原子唯一索引确认 key 不存在 | queued | 同一 CommitEnvelope 写 `enqueued(statusRevision=1)` |
-| 2 | queued | drain 取得发送资格 | endpoint ready；nextAttempt=1 或 prior+1；nextAttempt≤maxAttempts，或存在尚未消费的前一 attempt `retry-risk-ack` | attempting | **外部调用前** fsync `attempt-started(nextAttempt, unknownOutcome, statusRevision+1)`；幂等 endpoint 冻结 redriveUntil，非幂等用 manual-resolution；消费手动授权（若有）后发送 |
+| 2 | queued | drain 取得发送资格 | endpoint ready；存在尚未消费的前一 attempt `retry-risk-ack`，否则 automaticAttemptsUsed<maxAttempts | attempting | **外部调用前** fsync `attempt-started(nextAttempt, authorization, unknownOutcome, statusRevision+1)`；有手动授权时 authorization 绑定其 resolutionFactDigest 且不增加 automaticAttemptsUsed，否则记 automatic 并加一；幂等 endpoint 冻结 redriveUntil，非幂等用 manual-resolution |
 | 3 | attempting | 外部返回成功 | 响应属于当前开放 attempt | sent | 写 `sent(statusRevision+1)`；回执仅作外部事实 |
-| 4 | attempting | 外部返回明确失败 | retryable 且 attempt<maxAttempts | retry-wait | 写 `retry-scheduled(retryAt, error, statusRevision+1)` |
-| 5 | attempting | 外部返回明确失败 | 非 retryable 或 attempt≥maxAttempts | failed | 写 `failed(statusRevision+1)`，终态 |
+| 4 | attempting | 外部返回明确失败 | retryable 且 automaticAttemptsUsed<maxAttempts | retry-wait | 写 `retry-scheduled(retryAt, error, statusRevision+1)` |
+| 5 | attempting | 外部返回明确失败 | 非 retryable 或 automaticAttemptsUsed≥maxAttempts | failed | 写 `failed(statusRevision+1)`，终态 |
 | 6 | attempting | 恢复发现 started 无结果 | unknownOutcome=idempotent-redrive 且 now≤redriveUntil | attempting | 由原 started 记录有界重驱**同一 attempt / idempotencyKey**；不追加 lifecycle 记录、不增 revision |
 | 7 | attempting | 恢复发现 started 无结果 | unknownOutcome=manual-resolution，或幂等 redrive 已过 redriveUntil | uncertain | 写 `delivery-uncertain(openFactDigest, statusRevision+1)`；禁止盲发或无限重驱 |
-| 8 | retry-wait | retryAt 到期 | 当前记录仍是该 item 最新非终态，且 attempt+1≤maxAttempts | attempting | fsync `attempt-started(attempt+1, unknownOutcome, statusRevision+1)` 后复用原 idempotencyKey 发送 |
+| 8 | retry-wait | retryAt 到期 | 当前记录仍是该 item 最新非终态，且 automaticAttemptsUsed<maxAttempts | attempting | fsync 自动授权的 `attempt-started(attempt+1, authorization, unknownOutcome, statusRevision+1)` 后复用原 idempotencyKey 发送 |
 | 9 | uncertain | 当前 attempt 的迟到成功回执 | openFactDigest 仍打开且响应可验证 | sent | 写 `sent(statusRevision+1)`，自动关闭 uncertain；不伪造用户裁决 |
-| 10 | uncertain | 当前 attempt 的迟到明确失败 | openFactDigest 仍打开；retryable 且 attempt<maxAttempts | retry-wait | 写 `retry-scheduled(statusRevision+1)`，自动关闭 uncertain |
-| 11 | uncertain | 当前 attempt 的迟到明确失败 | openFactDigest 仍打开；非 retryable 或 attempt≥maxAttempts | failed | 写 `failed(statusRevision+1)`，自动关闭 uncertain |
+| 10 | uncertain | 当前 attempt 的迟到明确失败 | openFactDigest 仍打开；retryable 且 automaticAttemptsUsed<maxAttempts | retry-wait | 写 `retry-scheduled(statusRevision+1)`，自动关闭 uncertain |
+| 11 | uncertain | 当前 attempt 的迟到明确失败 | openFactDigest 仍打开；非 retryable 或 automaticAttemptsUsed≥maxAttempts | failed | 写 `failed(statusRevision+1)`，自动关闭 uncertain |
 | 12 | uncertain | 用户裁决 user-verified-sent | 已认证用户 + 当前 anchorEpoch + itemId/attempt/openFactDigest 全验 | verified-sent | 同 envelope 写 `delivery-resolved(openedAnchorEpoch, resolvedAnchorEpoch=当前值)` + control applied；该事实绝不投影成外部 `sent` |
 | 13 | uncertain | 用户裁决 abandon | 同 12 | abandoned | 同 envelope 写 `delivery-resolved` + control applied，终态 |
 | 14 | uncertain | 用户裁决 retry-risk-ack | 同 12 | queued | 同 envelope 写 `delivery-resolved` + control applied；产生仅供 nextAttempt 消费一次的手动授权 |
@@ -1210,7 +1218,11 @@ interface DeferredGlobalIntent {         // 本地域离线期间的全局写候
 | 时间与策略重放稳定 | `DeliveryIntentDto.createdAt = CommitEnvelope.at`、冻结 `maxAttempts`；重放读取原 enqueued |
 | 查重、来源事实与入队零半提交 | §4.1 单 envelope / 单 fsync + 本节串行唯一索引；生命周期表行 1 只承载“无 key → queued” |
 
-投影纪律：每次 lifecycle append 都以 `(itemId, currentAnchorEpoch, latestState, statusRevision, currentAttempt)` 做 CAS，失败即重读；迁居只换 currentAnchorEpoch、不换 itemId / revision 序，故同一 item 任一时刻至多一个开放 attempt。`delivery-resolved(user-verified-sent)` → verified-sent，`abandon` → abandoned，`retry-risk-ack` → queued；只有 `sent` 记录投影外部 sent。任何不属于**当前开放 attempt** 的响应均拒绝且不得追加 lifecycle 记录或改变状态，即使 item 因 retry-risk-ack 已回到 queued（非权威诊断日志可选）。每次表内实际状态转移严格写 `statusRevision+1`；幂等回放与行 15 不增号。验收从空日志重建状态，并在 enqueued / started / 外部调用 / 结果落盘 / retryAt / 三种裁决及 anchor 迁居前后逐点崩溃注入，断言零静默丢失、可证明路径零重复、maxAttempts 与单次手动授权不越界、旧 epoch 拒绝、unknown 零永久悬空。
+投影纪律：每次 lifecycle append 都以 `(itemId, currentAnchorEpoch, latestState, statusRevision, currentAttempt, automaticAttemptsUsed, pendingManualAuthorization)` 做 CAS，失败即重读；迁居只换 currentAnchorEpoch、不换 itemId / revision 序，故同一 item 任一时刻至多一个开放 attempt。`delivery-resolved(user-verified-sent)` → verified-sent，`abandon` → abandoned，`retry-risk-ack` → queued；只有 `sent` 记录投影外部 sent。任何不属于**当前开放 attempt** 的响应均拒绝且不得追加 lifecycle 记录或改变状态，即使 item 因 retry-risk-ack 已回到 queued（非权威诊断日志可选）。每次表内实际状态转移严格写 `statusRevision+1`；幂等回放与行 15 不增号。验收从空日志重建状态，并在 enqueued / started / 外部调用 / 结果落盘 / retryAt / 三种裁决及 anchor 迁居前后逐点崩溃注入，断言零静默丢失、可证明路径零重复、maxAttempts 与单次手动授权不越界、旧 epoch 拒绝、unknown 零永久悬空。
+
+内存投影与其日志 cursor 是一个原子快照：增量重放和事务决定只在隔离副本上执行，成功后整体发布；任一校验、reducer、append 或 cursor 故障保留最后已知良好快照，需要全量重建时从全新空投影开始，禁止把旧投影与空 cursor 组合。
+
+发送前资格纪律：一次 drain 只解析一次已 ready 的 endpoint adapter，并以该稳定快照完成 outcome policy 与 send；registry 后续变化只影响尚未取得资格的 attempt。新 attempt 在 fsync 前先物化内容：瞬态本地 I/O 失败零追加、零 attempt；已确认的永久内容错误以同一 CommitEnvelope 原子写 `attempt-started + failed`，不得暴露中间开放 attempt。指数退避与 redrive window 统一在 canonical timestamp 定义域内做饱和运算，合法策略值不得因时间溢出改写明确结果分类。
 
 ### 4.4 MutationBatch 与发布收敛
 
@@ -1437,25 +1449,57 @@ RunJournal 为最终事实源；FinalOutbox 是"权威提交 → 实时通知"�
 type ResolutionActionSet = ["verify-side-effects", "abandon", "retry-risk-ack"];
 interface StatusNoticeBase<R, S, A extends [] | ResolutionActionSet> {
   ref: R; state: S; reason?: string; statusRevision: number; actions: A; at: IsoTime }
+type ConversationUncertainClosure =
+  | { closedBy: "late-bundle-committed"; resultingState: "committed" }
+  | { closedBy: "proven-not-started-redispatched"; resultingState: "queued" }
+  | { closedBy: "user-verified-side-effects"; resultingState: "failed" }
+  | { closedBy: "user-abandoned"; resultingState: "cancelled" }
+  | { closedBy: "user-retry-acknowledged"; resultingState: "queued" };
+type JobUncertainClosure = ConversationUncertainClosure
+  | { closedBy: "proven-not-started-cancelled"; resultingState: "cancelled" };
 type ConversationStatusNotice =
-  | StatusNoticeBase<Extract<ExecutionRef, { execution: "conversation" }>, "uncertain", ResolutionActionSet>
+  | (StatusNoticeBase<Extract<ExecutionRef, { execution: "conversation" }>, "uncertain", ResolutionActionSet> &
+     { openFactDigest: Digest })
+  | (StatusNoticeBase<Extract<ExecutionRef, { execution: "conversation" }>, "uncertain-closed", []> &
+     { openFactDigest: Digest } & ConversationUncertainClosure)
   | StatusNoticeBase<Extract<ExecutionRef, { execution: "conversation" }>, Exclude<ConversationRunState, "committed"|"uncertain">, []>;
 type JobStatusNotice =
-  | StatusNoticeBase<Extract<ExecutionRef, { execution: "job" }>, "uncertain", ResolutionActionSet>
+  | (StatusNoticeBase<Extract<ExecutionRef, { execution: "job" }>, "uncertain", ResolutionActionSet> &
+     { openFactDigest: Digest })
+  | (StatusNoticeBase<Extract<ExecutionRef, { execution: "job" }>, "uncertain-closed", []> &
+     { openFactDigest: Digest } & JobUncertainClosure)
   | StatusNoticeBase<Extract<ExecutionRef, { execution: "job" }>, Exclude<JobRunState, "committed"|"uncertain">, []>;
 type DeliveryStatusRef = { execution: "delivery"; itemId: string }; // attempt / anchorEpoch 均不参与身份；迁居前后 revision 序属于同一稳定 item
 type DeliveryStatusNotice =
-  | (StatusNoticeBase<DeliveryStatusRef, "delivery-uncertain", ResolutionActionSet> & { attempt: number; anchorEpoch: number })
+  | (StatusNoticeBase<DeliveryStatusRef, "delivery-uncertain", ResolutionActionSet> &
+     { attempt: number; anchorEpoch: number; openFactDigest: Digest })
   | (StatusNoticeBase<DeliveryStatusRef, "delivery-failed", []> & { attempt: number; anchorEpoch: number })
   | (StatusNoticeBase<DeliveryStatusRef, "delivery-resolved", []> & {
-      attempt: number; anchorEpoch: number; decision: DeliveryResolutionFact["decision"] });
+      attempt: number; anchorEpoch: number; openFactDigest: Digest; decision: DeliveryResolutionFact["decision"] })
+  | (StatusNoticeBase<DeliveryStatusRef, "delivery-uncertain-closed", []> &
+     { attempt: number; anchorEpoch: number; openFactDigest: Digest } &
+     ({ closedBy: "late-sent" | "late-retry-scheduled" }
+      | { closedBy: "late-failed"; error: DeliveryFailure })); // 迟到结果自动关闭 uncertain（4.3 行 9/10/11）——撤销裁决号召；纯投影，由 sent / retry-scheduled / failed 权威记录确定性投影，零新增权威记录。late-failed 独家承载终态与脱敏失败信息（error = failed 记录的 error），不另发 delivery-failed
 type ExecutionStatusNotice = ConversationStatusNotice | JobStatusNotice | DeliveryStatusNotice;
 ```
 
-- **实时**：状态转移落 journal 的同一 CommitEnvelope 内写可确定投影 notice 的全部字段；run/job 为渠道来源时，同 envelope 按 §1.1 的 conversation/job status 分支以本次 `statusRevision` 向原渠道 DeliveryOutbox 入队，surface 经 owner 控制事件收 notice。delivery 自身失败/unknown 不递归向同一 item 入队，而是推送当前已认证维护 surface 并由 server.info 持久补读；因此通知路径失败不会制造第二个投递事实。
-- **版本**：每个 `ExecutionRef` 的 run / job journal `state.statusRevision` 与每个稳定 `DeliveryStatusRef(itemId)` 的 `statusRevision` 均从 1 开始、每次实际状态转移严格 `+1`；初始 queued 与 admitted / occurrence、delivery enqueued 与其权威输入各在同一 envelope 写入。attempt 与 anchorEpoch 变化均不换 delivery revision 序；notice 另携当前 anchorEpoch 供控制请求 fencing。幂等重放同一转移不增号，notice 与补读投影只能取该耐久值，不得另行计数。
+- **实时**：状态转移落 journal 的同一 CommitEnvelope 内写可确定投影 notice 的全部字段；surface 经 owner 控制事件收全部状态 notice。run/job 为渠道来源时，仅**非 committed 终态与 uncertain 挂起态**的转移在同 envelope 按 §1.1 的 conversation/job status 分支以本次 `statusRevision` 向原渠道 DeliveryOutbox 入队——committed 由结果投递承载，queued / dispatched / running / cancel-requested 等中间转移不外发渠道（仅 surface 可见）；job `missed` 虽为终态亦不逐条外发，由 scheduler 接入时的 missed 汇总通知承载（执行计划第 26 项）。delivery 自身失败/unknown 不递归向同一 item 入队，而是推送当前已认证维护 surface 并由 server.info 持久补读；因此通知路径失败不会制造第二个投递事实。
+- **版本**：每个 `ExecutionRef` 的 run / job journal `state.statusRevision` 与每个稳定 `DeliveryStatusRef(itemId)` 的 `statusRevision` 均从 1 开始、每次实际状态转移严格 `+1`；初始 queued 与 admitted / occurrence、delivery enqueued 与其权威输入各在同一 envelope 写入。attempt 与 anchorEpoch 变化均不换 delivery revision 序；notice 另携当前 anchorEpoch 供控制请求 fencing。幂等重放同一转移不增号，notice 与补读投影只能取该耐久值，不得另行计数；每条状态转移恒投影至多一条 notice（同一 `statusRevision` 不得产生多条），保证标量 last-seen 游标补读与实时等价、零跳失。
 - **补读**：`server.info` 与历史查询按 `statusRevision` 提供状态投影——断线重连以 last-seen statusRevision 对账，与 FinalFrame 补读同构。
 - **裁决**：`uncertain-resolve` / `delivery-resolve` 控制请求（§5.1）由对应工作权威处理；guard 验已认证用户 + 当前 epoch + subject / attempt + `openFactDigest` 等于打开中的 fact 摘要——重复请求回放原结果，旧 epoch / 旧 fact / 已关闭 fact 拒绝；resolution fact、状态转移与 control `applied` 合入同一原子提交（6.1 行 24-26 / 6.2 行 26-28 / delivery 流的 wire 承载）。
+
+- **可执行通知**：携 `ResolutionActionSet` 的 notice 必须独立提供对应控制请求除新建 `requestId` 与已认证 principal 外的全部字段；conversation / job 从 `ref` 取得主体与当前 epoch，delivery 从 `ref + attempt + anchorEpoch` 取得，三域均直接携当前打开 fact 的 `openFactDigest`，surface 不得查询私有投影或自行复算摘要。action 到 decision 的映射固定为：conversation / job 的 `verify-side-effects / abandon / retry-risk-ack` → `user-verified-side-effects / user-abandoned / user-retry-acknowledged`；delivery 的同三 action → `user-verified-sent / abandon / retry-risk-ack`。
+- **run / job 关闭配对**：uncertain 的任一合法出边均以同一 `openFactDigest` 产生恰一 `uncertain-closed` notice；`closedBy` 取耐久 resolution kind，`resultingState` 取同 envelope 的权威后继状态。该 notice 替代该 revision 的普通状态 notice，故每个 `statusRevision` 仍至多一条；即使后继为 committed 也不得因 committed 平时由 FinalFrame / 结果投递承载而省略本关闭通知。history 与 live 必须从同一耐久 resolution + state 事实投影。
+- **关闭配对**：`delivery-uncertain` 打开的 fact 一旦关闭，恰产生一个关闭通知——用户裁决产生 `delivery-resolved`，迟到结果自动关闭产生 `delivery-uncertain-closed`（`closedBy` 指明去向）；未裁决且无迟到结果的 fact 合法地保持打开（§4.5 不回收）。`sent` / `retry-scheduled` / `failed` 记录的 notice 投影判定单源：关闭打开中 uncertain 的（4.3 行 9/10/11）投影为对应 `closedBy` 的 `delivery-uncertain-closed`（`late-failed` 独家承载脱敏失败信息）；非关闭路径中 `failed`（行 5）投影 `delivery-failed`，`sent` / `retry-scheduled`（行 3/4）零 notice——送达以消息本体为通知、内部重试不打扰用户。同一 `statusRevision` 恒至多一条 notice，标量 last-seen 游标补读零跳失。补读以 `openFactDigest` 配对打开与关闭；收到关闭通知后对应裁决动作作废，迟到裁决请求按旧 fact 拒绝（既有裁决 guard 承载）。
+
+**渠道外发文案模板（冻结；外发状态必须在本表有模板行，新增状态先补表后外发）**：`{reason}` 取 notice.reason 的脱敏摘要、缺失时省略整个冒号子句；`{taskName}` 取冻结任务定义 spec.name 的上述有界展示投影；模板为最终产品文案，实现不得另造或改写。
+
+| 外发状态 | conversation 渠道文案 | job 渠道文案 |
+|---|---|---|
+| cancelled | 本次运行已取消。 | 定时任务「{taskName}」已取消。 |
+| failed | 本次运行失败：{reason}。 | 定时任务「{taskName}」运行失败：{reason}。 |
+| expired | 本次请求未能开始执行，已过期。你可以重新发送。 | 定时任务「{taskName}」本次未能开始执行，已过期；后续计划不受影响。 |
+| uncertain | 本次运行结果不确定，需要你裁决处理方式。 | 定时任务「{taskName}」结果不确定，需要你裁决处理方式。 |
 
 ### 5.6 run stream
 
@@ -1813,7 +1857,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 10 | 单元：matchManifest × inventory 失配矩阵；validateDispatchBinding 类型测试 + wire 逐字段污染（空 / 双 base、跨域、错基线 / epoch / assignment / executor、`resourceLease.audience.executorId` 或 `activation.assignmentId` 缺失 / 错值、混入异域 capability）；ReservableResourceLease 类型负例（裸 run/job、根带 parent、child 冒充 run/job）；AssignmentActivationProof 逐字段篡改、错 owner/epoch、permissionLeaseDigest 缺失 / 错值、capIds 少列/多列/乱序/重复、错 commit 摘要；同 payload 的另一份有效签名；已 received 后重投异载荷，逐字段篡改 / 重放错对象 / 两侧摘要相等的 DispatchConflictProof；以同 assignment / executor 下除 signature 外任一签名载荷字段不同的另一张合法权限租约替换 | 首次坏载荷耐久拒收；同 payload 重签幂等回放原结果；conflict code 恒 idempotency-conflict、retryable 恒 false 且与 response 对齐，message 变化不改变 proof 身份；accepted 侧匹配 assigned 时原子 conflict+ACK、有限次停止派发 outbox；不匹配时 conflict+uncertain+cancel-fence+revocations 原子全有或全无，派发/ControlLease 立即停止；cancel 按同 fence 有界退避至 contained / assignment 关闭，not-started 原子解析并重派，halted 只停止损且保留用户裁决；租约不早释、打开 conflict 时迟到 bundle 不自动提交；无效 proof 零写入并走超时/fence；ConflictProof 永不授权重派；非法组合类型层不可构造；conversation / job 在两种 adapter 下各跑合法派发 |
 | 11 | 双拓扑测试套：同套件跑单机 / 分布式 | 全绿 |
 | 12 | 结构：AST / 依赖图规则（领域内核零拓扑模式读取）+ 同一 contract conformance 套件分别驱动进程内与 mesh adapter | 规则零违例；两种 adapter 下权威状态与外部事件等价 |
-| 13 | 类型 + 集成：ExecutionStatusNotice 非法 ref/state/actions 组合；final 前后 UI；逐个 run/job 非 committed 入边与 delivery failed / uncertain / resolved；attempt / anchor 迁移；五类入队生产者；同一 execution 连续 statusRevision 与 committed 结果交错重放；同 key 注入相同 / 不同 intent；并发同 key；唯一索引查验前 / 查验后 fsync 前 / fsync 后响应前崩溃；重放时推进本地时钟；wire 注入六个禁止自报字段 | 非法组合无法构造；provisional 标注恒在、final 后转正；notice 实时 + 稳定 item statusRevision 单调补读、原渠道唯一投递；五类 keyBody 跨 kind / revision 零碰撞且可由 enqueued 独立复算；createdAt 保持来源 envelope 原值；同 key 同 digest 只回放原 item 当前态、异 digest 返回 idempotency-conflict 且整个来源 envelope 零写入；并发 / 崩溃后恰一 item；自报字段全拒；两类 uncertain 三选恰一次生效（重放 / 旧 epoch / 旧 fact 拒） |
+| 13 | 类型 + 集成：ExecutionStatusNotice 非法 ref/state/actions 组合；final 前后 UI；逐个 run/job 非 committed 入边（白名单内原渠道恰一次投递且按冻结文案模板、白名单外零投递、notice 全量可补读）；run / job / delivery 的 actionable uncertain notice 均能独立构造对应 resolve 请求，全部自动与用户关闭出边携同一 openFactDigest 且每个打开 fact 恰一关闭（含 run/job committed 后继）；delivery failed / uncertain / resolved / uncertain-closed；迟到裁决按旧 fact 拒、每 statusRevision 至多一条 notice 且断线重连补读零跳失；attempt / anchor 迁移（迁居后迟到响应按 DeliveryResponseBinding 仍归属原开放 attempt）；五类入队生产者；同一 execution 连续 statusRevision 与 committed 结果交错重放；同 key 注入相同 / 不同 intent；并发同 key；唯一索引查验前 / 查验后 fsync 前 / fsync 后响应前崩溃；重放时推进本地时钟；wire 注入六个禁止自报字段 | 非法组合无法构造；provisional 标注恒在、final 后转正；notice 实时 + 稳定 item statusRevision 单调补读、原渠道唯一投递；仅凭 notice + 新 requestId 即可提交当前裁决，旧 epoch / 旧 fact / 已关闭 fact 拒绝；五类 keyBody 跨 kind / revision 零碰撞且可由 enqueued 独立复算；createdAt 保持来源 envelope 原值；同 key 同 digest 只回放原 item 当前态、异 digest 返回 idempotency-conflict 且整个来源 envelope 零写入；并发 / 崩溃后恰一 item；自报字段全拒；两类 uncertain 三选恰一次生效（重放 / 旧 epoch / 旧 fact 拒） |
 | 14 | 依赖图 lint | server ↔ executor 零互 import |
 | 15 | 集成：staged 写后 run 失败 / 取消 / uncertain | 外界零可见、零残留；崩溃注入下 publish 可续 |
 | 16 | 对抗：越权方法 / 资源 / 过期 capability；五类 principal 各自越权（含非 owner 设备伪造 owner-control、伪造 usage-reporter）；owner-relay 错 authority / lease；渠道 token / grant 伪签、错 challenge / responder / route / assignment / interaction / displayDigest、改 decision、过期与跨域重放；EnvironmentControlGrant 越设备 / 绑定 / 时限 | 全部 unauthorized，进程内同 guard；token / grant 审计记录可独立验签，重复 callback 只回放原结果 |
@@ -1828,12 +1872,12 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 |---|---|---|
 | transcript-persistence-and-attention-window-architecture.md | S3 | TranscriptRunRecord（现 RunRecord）增 runId 唯一键；接受协议改 SealedBundle 整包；windowCompact 明确为幂等缓存指令；写路径经对话 owner 的 AuthorityCommitLog，分片文件成为可由 log 幂等重建的投影（append-only 与"原文唯一权威"性质不变，原子性单元下移一层） |
 | 同上 | S7 | MemoryFlush 挂点改为权威提交后经 GlobalStatePort 发布 |
-| scheduler-architecture.md（及实现 spec） | S3/S7 | TaskDefinition / JobOccurrence 拆分（definition 分 user 白名单 Dto / system host-only 两族；webhook endpoint 整体 SecretRef；origin / interactionResponder / createdInTurn / system 恒锚点生成）、JobCommitFence（绑 deliveryPlanDigest）、派发用去敏 JobExecutionInstruction、system 任务与投递恒锚点本地执行、job uncertain 暂停语义、定时 job 的 owner-relay / channel challenge outbox、手动触发走 job-run 控制请求；删除 Scheduler 对 IDeliveryPipeline.enqueue 的直接生产依赖，job 结果只由锚点 CAS 写 delivery 流 |
+| scheduler-architecture.md（及实现 spec） | S3/S7 | TaskDefinition / JobOccurrence 拆分（definition 分 user 白名单 Dto / system host-only 两族；webhook endpoint 整体 SecretRef；origin / interactionResponder / createdInTurn / system 恒锚点生成）、JobCommitFence（绑 deliveryPlanDigest）、派发用去敏 JobExecutionInstruction、system 任务与投递恒锚点本地执行、job uncertain 暂停语义、定时 job 的 owner-relay / channel challenge outbox、手动触发走 job-run 控制请求；S7 随 scheduler 接入 JobJournal 删除其对 IDeliveryPipeline.enqueue 的直接生产依赖（在此之前旧投递路径保持行为不变），job 结果此后只由锚点 CAS 写 delivery 流 |
 | workscene-management-architecture.md | S7 | workdir 升级为稳定设备域引用 `{deviceId, bindingRef}`；每次派发由 ExecutionManifest 冻结当次 `workspaceBindingRevision`（不回写 workscene）；目录探测在目标 executor（WorkspaceProbeRequest / EnvironmentControlGrant 协议）；enter / exit 定性为会话域绑定（session-meta sceneId），注册管理留锚点 |
 | task-advancement-rubric-architecture.md | S7 | EvidenceRequest / EvidenceBundle / ObservationToken 替换第一级取证实现描述；裁判经 ControlCompletionPort；review 子 lease；AdvancementSnapshot / AdvancementControlEvent 类型化落点；契约确认拆"快照采用（会话域）/ 库沉淀（全局写，离线转 DeferredGlobalIntent）"两半——confirmDraft 的 saveOwn / updateOwn 归后者。**类型合同（目标形态在此冻结，S7 按此改型）**：`ConfirmedRubricSnapshot` 的库身份改判别 `source: { kind: "library"; rubricId; rubricVersion } \| { kind: "local-draft"; snapshotId: Ulid; contentDigest: Digest }`——现类型（advancement/types.ts:143）强制 rubricId / rubricVersion，离线确认在类型层不可实现；local-draft 分支使契约不依赖全局 id 即可生效，收编沉淀成功后经修订 link 回库 |
 | unified-core-and-access-surfaces.md | S1 | 宿主内部拓扑更新为角色装配（五包抽取） |
 | message-outbox.md（顺序层） | S3 | delivery-origin OutboxEntry 必带 delivery 流既有 idempotencyKey（其他非耐久消息仍可选），只承接 per-target 顺序，不再承担权威去重 / 生命周期；同 item 重驱复用原键 |
-| persistent-service.md（delivery 模块） | S3 | 删除公开生产接口 `IDeliveryPipeline.enqueue(EnqueueParams)`；`packages/core/src/delivery/{types,index,queue,pipeline}` 改为 AuthorityCommitLog delivery 流的投影 / drain adapter，落实 keyBody/key/intentDigest、串行唯一索引与十五行状态机；同步事件、stats、server RuntimeControlAdapter、CLI setup-delivery、现有 queue/pipeline 测试；旧 JSON 队列不再是事实源 |
+| persistent-service.md（delivery 模块） | S3/S7 | S3 新增 AuthorityCommitLog delivery 流的权威投影 / drain 组件（与既有 queue/pipeline 并存，conversation 域切换后承接渠道回复与状态通知），落实 keyBody/key/intentDigest、串行唯一索引与十五行状态机，同步事件、stats、server RuntimeControlAdapter、CLI setup-delivery 与测试；S7 随 scheduler 接入删除公开生产接口 `IDeliveryPipeline.enqueue(EnqueueParams)` 并退役旧 queue/pipeline——旧 JSON 队列至此退出事实源 |
 | agent-runtime-lifecycle.md | S3/S7 | 生命周期写类钩子生效时点对齐"权威提交后触发" |
 | 权限模块（permission-architecture-evolution.md） | S4 | TrustRule / TrustRuleSnapshot 类型落地（自现有 PermissionRule 演化）、资产化分发、PermissionSnapshotLease、fail-closed 语义 |
 | **本文** | S6 | 回填：用户内容资产的数据面消费协议（surface 下载授权、断点续传、生命周期治理）与 **surface 预上传授权**（control 写依赖闭包的上传半边，绑定 requestId——assignment 域传输已在 §4.2 随 S5 落定）及验收项（含嵌套引用、root / dependency 跨层重复、非规范顺序、少列 / 多列、断点续传、缺件拒绝） |
@@ -1869,6 +1913,15 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 
 执行纪律：同一 S 节点需要多个提交时，前置提交只能增加未启用的纯合同、基础设施或兼容适配，既有生产路径保持单一且行为不变；只有该节点的权威链、异常链、安全守卫、消费者和验收全部闭环后，才在节点最后一个提交切换能力开关。任何提交不得把“旧路径已拆、新路径未闭环”作为可合并状态。
 
+**S3→S4 过渡授权合同（锚点本征签发）**：conversation 域生产切换（第 15B 项）发生在 S4 正式治理（第 16~18 项）之前，而派发 wire 合同已强制 Manifest、AuthorityCapability、PermissionSnapshotLease、ResourceLease 完整在场且签名有效。过渡期授权不是旁路，而是终态签发权的保守子集，按以下不变量执行：
+
+- **签发者恒为锚点**：单机装配中全部派发凭证由锚点以设备密钥真实签发；凭证结构、摘要、签名、激活与吊销记录走与终态完全相同的 wire validator 与权威日志——零测试票据、零验证豁免、零旁路 authorizer。
+- **保守固定值域**：admissionClass 按签发入口派生（既有合同）；budget 取锚点版本化资源策略的默认上限（正整数，禁无限）；audience 恒绑定本机 executorId；不签发 delegation 子租约；lease 时效随 assignment 生命周期终结。ExecutionManifest 以锚点自身 inventory 快照构造，进程内 executor 恒匹配。
+- **凭证来源冻结（执行者零安全裁量）**：AuthorityCapability 的 methods 取该 assignment 派发与执行账本合同所需方法的最小闭包、resources 限定该 assignment 的 conversation/run 域，per-assignment 签发；PermissionSnapshotLease 取锚点当时权限规则配置的版本化快照；ExecutionManifest 的 inventory 取锚点进程自身的包版本与已装配能力清单，派发时快照；签发密钥取 S2 设备身份密钥（经 SecretStore），不新建密钥体系；expiry 随派发时冻结的 assignment 生命周期上限（禁无限）；过渡期不提供独立吊销入口——凭证收束完全走 assignment 终结、取消与 uncertain 裁决的既有路径，零新增机制。
+- **唯一签发接缝**：过渡签发器实现与 S4 治理相同的签发端口，是装配期唯一注入点；第 16~18 单元启用 = 同端口替换实现（签发前增加 matchManifest、principal×方法矩阵与 ResourceGovernor 裁决），wire 合同、验证面、日志形态与重放语义不变，历史凭证零迁移。启用后过渡签发器整体移除，不得双路径并存。
+- **S4 切换栅栏**：治理签发器替换以“零活跃过渡凭证”为前置——先停止新派发，在途过渡 assignment 按既有终结、取消与 uncertain 裁决路径自然收束（不夺权、不静默失效），确认零活跃后原子替换签发器再恢复派发；禁止建立凭证迁移机制，禁止两代签发器并行签发。
+- **不跨机**：过渡凭证仅对进程内 executor 有效（由 audience 绑定承载）；跨机派发属 S5，届时 S4 治理已在场。
+
 本模块提交边界必须守住以下不变量（§十二的 18 条机械口径全部继续适用）：
 
 - 单机与分布式共用同一 contracts、状态机与执行内核；单机只是 anchor + executor 同进程装配，不得产生第二套业务路径。
@@ -1900,10 +1953,11 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 12（S3） | conversation 提交、staged 发布与最终性 | 落 SealedBundle、conversation 栅栏 CAS、MutationBatch/publish-decision、内容索引、FinalOutbox、状态通知与历史补读；提交后投影替换旧写路径 | CAS 字段污染、重复/迟到提交、artifact 缺件、publish 崩溃续做、final 响应丢失和 provisional→final 测试通过；旧新提交结果逐条等价 |
 | 13（S3） | 取消、重派与 uncertain 收束 | 一次落完整 cancel-requested、双取消源、SupersedeProof、DispatchConflictProof、containment、三分续跑和用户三选裁决；不得先开放自动重派 | 6.1 全 36 行及三方竞态、各 fsync 崩溃点、未闭合副作用、无证明禁重派、迟到合法 bundle 自动提交测试通过 |
 | 14（S3） | user/system job 耐久协议 | 落 TaskDefinition/Occurrence、JobJournal、JobCommitFence、user job 同构派发与 system job 锚点本地幂等路径；旧 scheduler 只作兼容投影 | 6.2 全 38 行、6.2b 全 6 行、任务更新/删除/错过/暂停与 system handler 重驱测试通过；system 入口不可由 surface 构造 |
-| 15（S3） | delivery 权威流与 S3 切换 | 落五类 keyBody、唯一索引、十五行 delivery 生命周期、用户裁决、现有 DeliveryItem/queue 投影；删除公开生产入口并将 conversation/job 结果原子入流，最后切换进程内耐久协议 | delivery 15 行、五类生产者、并发同键、外部调用前后崩溃、unknown 三选与投影重建通过；全量测试/build 通过；S3 到此才接管单机生产路径 |
+| 15A（S3） | delivery 权威流合同 | 落五类 keyBody、唯一索引、十五行 delivery 生命周期、用户裁决、权威投影与 drain 消费（作为并存新组件），以及 conversation/job 结果原子入流的 owner 接线与测试；新权威流零生产流量，既有 DeliveryPipeline/queue 与生产路径（渠道回复、scheduler 投递）原样不动，公开生产入口保留 | delivery 15 行、五类生产者、并发同键、外部调用前后崩溃、unknown 三选与投影重建通过；全量测试/build 通过；既有投递行为逐字节等价，旧路径仍是唯一生产路径 |
+| 15B（S3） | conversation 域耐久协议切换 | 按“S3→S4 过渡授权合同”装配锚点签发器；cli 组合根装配控制准入、conversation owner journal 与执行账本、delivery participant 与 delivery 控制面，将 conversation 执行路径（控制准入、run journal、派发、提交、final）整体切换到进程内耐久协议——含渠道回复经权威流耐久投递、状态通知按 §5.5 经权威流入队，并接通恢复链。scheduler 投递显式保留旧路径且行为不变（接管与退役归 scheduler 接入 JobJournal 的那次提交，见第 26 项） | 外部可观察对话行为（RPC 流、事件序、确认往返）按第 1 项 golden 等价，提交与持久化结果按第 10~12 项影子/逐条等价基线核对；渠道回复零丢失、零重复、零变形；状态通知按 §5.5 外发白名单与冻结文案模板验收（白名单外零投递、零占位文案上线）；崩溃恢复续投；conversation 旧直连路径零残留调用；过渡凭证全走统一 validator；全量测试/build 通过；S3 到此接管 conversation 域单机生产路径 |
 | 16（S4） | Manifest、能力描述与最小资产同步 | 落 ExecutionManifest、CapabilityDescriptor、VersionInventory、CredentialBindingDescriptor、EnvironmentRequirement、`matchManifest`，以及配置/资产/权限快照的最小版本同步 | 版本/能力失配矩阵、秘密扫描、快照版本回退和同机/跨机 matcher conformance 通过；失配只排队/拒收、不产生 assignment 候选 |
 | 17（S4） | AuthorityCapability 与权限租约激活 | 落五类 principal×方法矩阵、统一 guard、AuthorityCapability、PermissionSnapshotLease、assigned/received 双侧激活与吊销重驱 | 全方法×principal 允许/拒绝矩阵、错 scope/resource/epoch/assignment/executor、候选未激活、替换租约和离线验权测试通过 |
-| 18（S4） | ResourceGovernor 与资源租约闭环 | 落 anchor/executor 双半边、根/子租约、WDRR、consume/settle/release/reclaim、delegation、UsageReport 连续水位；将全部工作入口接入治理 | 不变量 18 对抗矩阵、全 workload kind、重复 usageId、超额/越 delegation、无水位 reclaim、满载公平性和双拓扑测试通过；S4 能力整体启用 |
+| 18（S4） | ResourceGovernor 与资源租约闭环 | 落 anchor/executor 双半边、根/子租约、WDRR、consume/settle/release/reclaim、delegation、UsageReport 连续水位；将全部工作入口接入治理，并以同端口替换 S3 过渡签发器（wire 合同与既有凭证日志不变） | 不变量 18 对抗矩阵、全 workload kind、重复 usageId、超额/越 delegation、无水位 reclaim、满载公平性和双拓扑测试通过；过渡签发器零残留；S4 能力整体启用 |
 | 19（S5） | assignment 资产传输与 mesh adapter | 落 owner↔executor 的 WindowInput/Dispatch/MutationBatch/SealedBundle 及依赖闭包按摘要推拉、断点续传、去重；实现 RunExecutorPort/RunSubmissionPort mesh adapter | root/dependency 少列、多列、乱序、跨层重复、缺件、断点和错 assignment 授权全部拒绝；进程内/mesh contract conformance 等价 |
 | 20（S5） | 跨机控制面启用 | 将派发、started、提交、cancel/supersede/queryLedger、usage intake 上网格；以完整 S3/S4 守卫和 assigned outbox 为唯一远端入口，最后开放跨机执行 | 双拓扑复跑 6.1/6.2/6.2b、断网/重连/重投/owner 与 executor 崩溃矩阵全绿；跨机零无日志执行、零双活；S5 到此才启用业务 mesh |
 | 21（S6） | run stream、spool 与摘要链 | 落统一 StreamFrame、assignment 级 seq、streamEpoch fencing、数据帧摘要链、provisional-final、耐久 spool、逐消费方 ACK/回收和背压 | 直连/中继路径切换、空流、逐字段篡改、final 三值核对、ACK 丢失、慢 observer 隔离、崩溃续流零丢零重 |
@@ -1911,7 +1965,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 23（S6） | surface 内容资产数据面 | 回填并实现 surface 预上传授权、下载授权、断点续传、生命周期治理；control 写与 committed 内容都执行依赖闭包在场检查 | S6 回填验收全部通过；缺件不得 control apply/CAS；上传中断可续、重复 digest 去重、越 requestId/assignment 拒绝 |
 | 24（S6） | 中继、渠道确认与最终性整合 | 落 job owner-relay 水位、conversation/job challenge outbox、token/grant、status/final 合并和路径降级；最后启用无损数据面 | 不变量 7、13、16 对应集成/对抗用例全绿；prepared/cursor/ACK/发送各崩溃点可收敛；渠道与第一方确认能力等价；S6 到此启用 |
 | 25（S7） | Environment 与 workscene 接入 | 落 EnvironmentPort、WorkspaceProbeRequest/Grant、设备域 workspace 引用及 revision 复验；workscene 注册留锚点、进出留会话 owner | 目录五态、路径不出 wire、错设备/绑定/revision、远程 setWorkdir、离线能力矩阵和现有 workscene 回归通过 |
-| 26（S7） | scheduler 与 job 产品闭环 | 将 scheduler CRUD/run/cancel/定时触发、冻结 delivery plan、渠道来源与维护通知接入 JobJournal/Delivery 流；移除旧生产依赖 | 任务定义/occurrence 隔离、线程路由保真、job uncertain 暂停/missed 汇总、投递唯一性、system 不进用户视图测试通过 |
+| 26（S7） | scheduler 与 job 产品闭环 | 将 scheduler CRUD/run/cancel/定时触发、冻结 delivery plan、渠道来源与维护通知接入 JobJournal/Delivery 流；随后排空旧队列残留投递，删除公开生产入口与旧 DeliveryPipeline/queue 组件——旧投递生产路径至此整体退役 | 任务定义/occurrence 隔离、线程路由保真、job uncertain 暂停/missed 汇总、投递唯一性、system 不进用户视图测试通过；旧生产入口与旧队列零残留调用 |
 | 27（S7） | advancement 与独立取证 | 接入 AdvancementSnapshot/Event、ControlCompletion/Reviewer、review 子租约、EvidenceRequest/Bundle/ObservationToken、local-draft rubric 快照 | stale 有限重试、缺证据不判通过、PathGuard/binding revision、离线契约立即生效与全局沉淀延后测试通过 |
 | 28（S7） | 编排、memory、技能与生命周期接入 | 编排节点使用父 run 子租约；memory/skill/workscene/task-list/segment 的所有写按落点矩阵进入 staged/control；写类 lifecycle 只在权威提交后触发 | 各模块既有测试 + 双拓扑 adapter 套件通过；failed/cancelled/uncertain 零外泄；executor 零全局 Store 写实例 |
 | 29（S7） | 入口覆盖 lint 与模块文档同步 | 建机器可读“registry/命令→落点行或排除项”单源，补齐 §十三列出的模块文档与公开契约，清除旧入口和兼容适配 | 每个 RPC、命令、渠道、生命周期钩子和执行侧写工具恰命中一次；无映射/双映射失败；依赖 lint、全量测试/build 通过 |

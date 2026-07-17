@@ -6,11 +6,11 @@ import {
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
+  type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
-  AuthorityError,
   ChannelResponderRef,
   ControlEnvelope,
   ControlRecord,
@@ -21,15 +21,21 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  assertProtocolIdentifier,
+  MAX_PROTOCOL_IDENTIFIER_LENGTH,
   protocolDigest,
   validateChannelResponderRef,
   validateIngressContext,
   validateNonEmptyUserTurnInput,
+  validateAuthorityError,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
+import {
+  assertDeliveryEnvelopeCompanions,
+  assertDeliveryItemId,
+  deliveryResolutionFactBindsRequest,
+} from "@zhixing/core/delivery";
 
-const MAX_CONTROL_IDENTIFIER_BYTES = 480;
-const MAX_CONTROL_MESSAGE_BYTES = 4 * 1024;
 const MAX_AUTHORITY_PROJECTION_CACHES = 8;
 
 type InitialControlRequest = Extract<
@@ -44,8 +50,12 @@ type JobControlRequest = Extract<
   ControlRequest,
   { t: "job-run" | "job-cancel" | "uncertain-resolve" }
 >;
+type DeliveryControlRequest = Extract<ControlRequest, { t: "delivery-resolve" }>;
 type CreateJobControlRequest = JobControlRequest;
-type AuthorityControlRequest = ConversationControlRequest | JobControlRequest;
+type AuthorityControlRequest =
+  | ConversationControlRequest
+  | JobControlRequest
+  | DeliveryControlRequest;
 type AdmittedControlRequest = InitialControlRequest | AuthorityControlRequest;
 
 export type InitialControlEnvelope = Omit<ControlEnvelope, "body"> & {
@@ -57,9 +67,13 @@ export type ConversationControlEnvelope = Omit<ControlEnvelope, "body"> & {
 export type JobControlEnvelope = Omit<ControlEnvelope, "body"> & {
   readonly body: JobControlRequest;
 };
+export type DeliveryControlEnvelope = Omit<ControlEnvelope, "body"> & {
+  readonly body: DeliveryControlRequest;
+};
 export type AuthorityControlEnvelope =
   | ConversationControlEnvelope
-  | JobControlEnvelope;
+  | JobControlEnvelope
+  | DeliveryControlEnvelope;
 type AdmittedControlEnvelope =
   | InitialControlEnvelope
   | AuthorityControlEnvelope;
@@ -84,7 +98,7 @@ export interface AtomicControlApplicationContext<
   Envelope extends AuthorityControlEnvelope = AuthorityControlEnvelope,
 > {
   readonly canonicalRequestId: string;
-  readonly authorityPrefix: { readonly lastLsn: number; readonly nextLsn: number };
+  readonly authorityPrefix: ProjectionTransactionContext;
   readonly envelope: Envelope;
   readonly ingress?: IngressContext;
 }
@@ -275,6 +289,42 @@ export function createJobControlEnvelope(
   return validated;
 }
 
+export interface CreateDeliveryControlEnvelopeInput {
+  readonly requestId: string;
+  readonly source: TrustedControlSource;
+  readonly body: DeliveryControlRequest;
+  readonly at?: string;
+}
+
+export function createDeliveryControlEnvelope(
+  input: CreateDeliveryControlEnvelopeInput,
+): DeliveryControlEnvelope {
+  const source = snapshotTrustedSource(input.source);
+  if (source.ingress !== undefined) {
+    throw new TypeError("Delivery control requests do not accept ingress context");
+  }
+  const body = snapshot(input.body, "Delivery control request");
+  const at = input.at ?? new Date().toISOString();
+  const envelope = {
+    v: 1 as const,
+    requestId: input.requestId,
+    principal: source.principal,
+    dependencyArtifacts: [],
+    payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
+      body,
+      dependencyArtifacts: [],
+    }),
+    at,
+    body,
+  };
+  const validated = snapshotAdmittedControlEnvelope(envelope);
+  if (!isDeliveryControlEnvelope(validated)) {
+    throw new TypeError("Delivery control envelope requires delivery-resolve");
+  }
+  assertTrustedSourceMatches(validated, source);
+  return validated;
+}
+
 export function channelSurfacePrincipal(responder: ChannelResponderRef): string {
   const value = validateChannelResponderRef(responder);
   return `channel:${protocolDigest("ChannelResponderRef", 1, value)}`;
@@ -342,6 +392,20 @@ export class ControlAdmissionJournal {
       context: AtomicControlApplicationContext<Envelope>,
     ) => AtomicControlApplicationPlan;
     readonly candidateReferences?: readonly ArtifactRef[];
+    readonly companionStreams?: readonly string[];
+    readonly observe?: (
+      record: LogicalRecord<unknown>,
+      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    ) => void | Promise<void>;
+    readonly prepareCompanions?: (
+      state: State,
+      context: AtomicControlApplicationContext<Envelope>,
+      plan: AtomicControlApplicationPlan,
+    ) => readonly LogicalRecord<unknown>[];
+    readonly onCommitted?: (
+      state: State,
+      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    ) => void;
   }): Promise<ControlAdmissionOutcome> {
     const envelope = snapshotAdmittedControlEnvelope(input.envelope) as Envelope;
     if (!isAuthorityControlEnvelope(envelope)) {
@@ -352,6 +416,12 @@ export class ControlAdmissionJournal {
     assertIdentifier(input.stream, "Authority control target stream");
     if (input.stream === "control") {
       throw new TypeError("Authority control target stream cannot be control");
+    }
+    for (const stream of input.companionStreams ?? []) {
+      assertIdentifier(stream, "Authority control companion stream");
+      if (stream === "control" || stream === input.stream) {
+        throw new TypeError("Authority control companion stream must be distinct");
+      }
     }
     return this.#operations.run(async () => {
       const preparedEnvelope = await prepareEnvelope(
@@ -404,6 +474,20 @@ export class ControlAdmissionJournal {
       context: AtomicControlApplicationContext<Envelope>,
     ) => AtomicControlApplicationPlan;
     readonly candidateReferences?: readonly ArtifactRef[];
+    readonly companionStreams?: readonly string[];
+    readonly observe?: (
+      record: LogicalRecord<unknown>,
+      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    ) => void | Promise<void>;
+    readonly prepareCompanions?: (
+      state: State,
+      context: AtomicControlApplicationContext<Envelope>,
+      plan: AtomicControlApplicationPlan,
+    ) => readonly LogicalRecord<unknown>[];
+    readonly onCommitted?: (
+      state: State,
+      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    ) => void;
   }): Promise<ControlAdmissionOutcome> {
     type CombinedProjection = {
       readonly control: ControlProjectionDraft;
@@ -432,10 +516,14 @@ export class ControlAdmissionJournal {
             await reduceControlProjection(
               state.control,
               record,
+              commit,
               this.#artifacts,
             );
-          } else if (record.stream === input.stream) {
-            state.target = await input.reducer(state.target, record, commit);
+          } else {
+            await input.observe?.(record, commit);
+            if (record.stream === input.stream) {
+              state.target = await input.reducer(state.target, record, commit);
+            }
           }
           return state;
         },
@@ -451,21 +539,32 @@ export class ControlAdmissionJournal {
 
           const canonicalEnvelope = request.envelope as Envelope;
 
+          const context: AtomicControlApplicationContext<Envelope> = {
+            canonicalRequestId: input.canonicalRequestId,
+            authorityPrefix,
+            envelope: canonicalEnvelope,
+            ...(request.ingress === undefined ? {} : { ingress: request.ingress }),
+          };
           const plan = snapshot(
-            input.decide(state.target, {
-              canonicalRequestId: input.canonicalRequestId,
-              authorityPrefix,
-              envelope: canonicalEnvelope,
-              ...(request.ingress === undefined ? {} : { ingress: request.ingress }),
-            }),
+            input.decide(state.target, context),
             "Atomic control application plan",
           );
           const result = snapshotControlResult(plan.result, canonicalEnvelope.body.t);
-          const authorityEntries = snapshotAuthorityEntries(
+          const primaryEntries = snapshotAuthorityEntries(
             plan.authorityEntries ?? [],
           );
-          if (authorityEntries.some((entry) => entry.stream !== input.stream)) {
-            throw new TypeError("Atomic control plan may only append its target stream");
+          const companionEntries = snapshotAuthorityEntries(
+            input.prepareCompanions?.(state.target, context, plan) ?? [],
+          );
+          const authorityEntries = [...primaryEntries, ...companionEntries];
+          const allowedStreams = new Set([
+            input.stream,
+            ...(input.companionStreams ?? []),
+          ]);
+          if (authorityEntries.some((entry) => !allowedStreams.has(entry.stream))) {
+            throw new TypeError(
+              "Atomic control plan may only append its target or declared companion streams",
+            );
           }
           const authorityRevision = authorityPrefix.nextLsn;
           return {
@@ -484,6 +583,7 @@ export class ControlAdmissionJournal {
           };
         },
         {
+          streams: ["control", input.stream],
           ...(cached ? { cursor: cached.cursor } : {}),
           candidateReferences: collectArtifactRefs([
             ...input.preparedEnvelope.references,
@@ -497,6 +597,13 @@ export class ControlAdmissionJournal {
         target: transaction.state.target,
         cursor: transaction.cursor,
       });
+      if (transaction.commit) {
+        try {
+          input.onCommitted?.(transaction.state.target, transaction.commit);
+        } catch {
+          // The authority commit is already durable; observer failure cannot change its result.
+        }
+      }
       return materializeOutcome(
         transaction.value,
         this.#artifacts,
@@ -667,7 +774,8 @@ export class ControlAdmissionJournal {
         ControlTransactionValue
       >(
         draft,
-        (state, record) => reduceControlProjection(state, record, this.#artifacts),
+        (state, record, commit) =>
+          reduceControlProjection(state, record, commit, this.#artifacts),
         decide,
         {
           stream: "control",
@@ -735,8 +843,10 @@ function getIngress(
 async function reduceControlProjection(
   state: ControlProjectionDraft,
   record: LogicalRecord<unknown>,
+  commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
   artifacts: ArtifactStore,
 ): Promise<ControlProjectionDraft> {
+  const deliveryResolution = assertDeliveryEnvelopeCompanions(commit);
   const body = record.body;
   if (!isPlainRecord(body) || (body.t !== "received" && body.t !== "applied")) {
     throw invalidControlRecord("Control stream contains an unknown record");
@@ -797,10 +907,34 @@ async function reduceControlProjection(
     throw invalidControlRecord("Control request has more than one applied record");
   }
   const storedResult = snapshotStored<ControlResult>(body.result);
-  snapshotControlResult(
+  const appliedResult = snapshotControlResult(
     await loadStored(storedResult, artifacts, "ControlResult"),
     request.requestType,
   );
+  if (
+    request.requestType === "delivery-resolve" &&
+    appliedResult.status === "ok" &&
+    appliedResult.body.t === "delivery-resolve" &&
+    appliedResult.body.applied
+  ) {
+    const resolutionRequest = request.envelope.body;
+    if (
+      resolutionRequest.t !== "delivery-resolve" ||
+      !deliveryResolution ||
+      !deliveryResolutionFactBindsRequest(deliveryResolution.fact, {
+        itemId: resolutionRequest.itemId,
+        attempt: resolutionRequest.attempt,
+        anchorEpoch: resolutionRequest.anchorEpoch,
+        openFactDigest: resolutionRequest.openFactDigest,
+        decision: resolutionRequest.decision,
+        by: request.envelope.principal.surfacePrincipal,
+      })
+    ) {
+      throw invalidControlRecord(
+        "Delivery resolution does not bind its durable control request",
+      );
+    }
+  }
   request.storedResult = storedResult;
   request.authorityRevision = body.authorityRevision;
 
@@ -1169,7 +1303,7 @@ async function prepareResult(
 ): Promise<PreparedStored<ControlResult>> {
   const inline: ControlRecord = {
     t: "applied",
-    requestId: "x".repeat(MAX_CONTROL_IDENTIFIER_BYTES),
+    requestId: "\u0800".repeat(MAX_PROTOCOL_IDENTIFIER_LENGTH),
     result,
     authorityRevision: 0,
   };
@@ -1286,10 +1420,20 @@ function isJobControlEnvelope(
   );
 }
 
+function isDeliveryControlEnvelope(
+  envelope: AdmittedControlEnvelope,
+): envelope is DeliveryControlEnvelope {
+  return envelope.body.t === "delivery-resolve";
+}
+
 function isAuthorityControlEnvelope(
   envelope: AdmittedControlEnvelope,
 ): envelope is AuthorityControlEnvelope {
-  return isConversationControlEnvelope(envelope) || isJobControlEnvelope(envelope);
+  return (
+    isConversationControlEnvelope(envelope) ||
+    isJobControlEnvelope(envelope) ||
+    isDeliveryControlEnvelope(envelope)
+  );
 }
 
 function snapshotTrustedSource(value: TrustedControlSource): TrustedControlSource {
@@ -1338,7 +1482,8 @@ function assertTrustedSourceMatches(
   if (
     envelope.body.t === "cancel" ||
     envelope.body.t === "job-cancel" ||
-    envelope.body.t === "uncertain-resolve"
+    envelope.body.t === "uncertain-resolve" ||
+    envelope.body.t === "delivery-resolve"
   ) {
     if (source.ingress !== undefined) {
       throw new TypeError("Authority control requests do not accept ingress context");
@@ -1456,6 +1601,39 @@ function assertAdmittedControlRequest(value: unknown): void {
     }
     return;
   }
+  if (value.t === "delivery-resolve") {
+    assertExactKeys(
+      value,
+      ["anchorEpoch", "attempt", "decision", "itemId", "openFactDigest", "t"],
+      "delivery-resolve request",
+    );
+    assertDeliveryItemId(value.itemId, "delivery-resolve itemId");
+    if (!Number.isSafeInteger(value.attempt) || (value.attempt as number) <= 0) {
+      throw new TypeError("delivery-resolve attempt must be a positive safe integer");
+    }
+    if (
+      !Number.isSafeInteger(value.anchorEpoch) ||
+      (value.anchorEpoch as number) <= 0
+    ) {
+      throw new TypeError(
+        "delivery-resolve anchorEpoch must be a positive safe integer",
+      );
+    }
+    if (
+      typeof value.openFactDigest !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/u.test(value.openFactDigest)
+    ) {
+      throw new TypeError("delivery-resolve openFactDigest is invalid");
+    }
+    if (
+      value.decision !== "user-verified-sent" &&
+      value.decision !== "abandon" &&
+      value.decision !== "retry-risk-ack"
+    ) {
+      throw new TypeError("delivery-resolve decision is invalid");
+    }
+    return;
+  }
   if (value.t !== "input") {
     throw new TypeError(
       "Control admission does not accept this control request type",
@@ -1492,7 +1670,7 @@ function snapshotControlResult(
   if (result.v !== 1) throw new TypeError("Control result version must be 1");
   if (result.status === "rejected") {
     assertExactKeys(result, ["error", "status", "v"], "Rejected control result");
-    assertAuthorityError(result.error);
+    validateAuthorityError(result.error);
     return result as unknown as ControlResult;
   }
   if (result.status !== "ok") throw new TypeError("Control result status is invalid");
@@ -1542,7 +1720,7 @@ function snapshotControlResult(
       throw new TypeError("job-cancel requires a matching result body");
     }
     assertJobRunState(result.body.runState, "job-cancel runState");
-  } else {
+  } else if (requestType === "uncertain-resolve") {
     assertExactKeys(
       result.body,
       ["factDigest", "state", "t"],
@@ -1561,40 +1739,16 @@ function snapshotControlResult(
     ) {
       throw new TypeError("uncertain-resolve factDigest is invalid");
     }
+  } else {
+    assertExactKeys(result.body, ["applied", "t"], "delivery-resolve result");
+    if (result.body.t !== "delivery-resolve") {
+      throw new TypeError("delivery-resolve requires a matching result body");
+    }
+    if (typeof result.body.applied !== "boolean") {
+      throw new TypeError("delivery-resolve applied must be boolean");
+    }
   }
   return result as unknown as ControlResult;
-}
-
-function assertAuthorityError(value: unknown): asserts value is AuthorityError {
-  assertPlainRecord(value, "Authority error");
-  assertExactKeys(value, ["code", "message", "retryable"], "Authority error");
-  const codes: ReadonlySet<AuthorityError["code"]> = new Set([
-    "unauthorized",
-    "capability-expired",
-    "epoch-stale",
-    "revision-conflict",
-    "fence-rejected",
-    "busy",
-    "not-found",
-    "invalid",
-    "lease-exhausted",
-    "missing-base",
-    "typed-stale",
-    "capability-gap",
-    "unavailable-offline",
-    "idempotency-conflict",
-  ]);
-  if (typeof value.code !== "string" || !codes.has(value.code as AuthorityError["code"])) {
-    throw new TypeError("Authority error code is invalid");
-  }
-  assertBoundedNonEmptyString(
-    value.message,
-    "Authority error message",
-    MAX_CONTROL_MESSAGE_BYTES,
-  );
-  if (typeof value.retryable !== "boolean") {
-    throw new TypeError("Authority error retryable must be boolean");
-  }
 }
 
 function snapshotAuthorityEntries(
@@ -1786,24 +1940,8 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   }
 }
 
-function assertBoundedNonEmptyString(
-  value: unknown,
-  label: string,
-  maxBytes: number,
-): asserts value is string {
-  assertNonEmptyString(value, label);
-  if (Buffer.byteLength(value, "utf8") > maxBytes) {
-    throw new TypeError(`${label} exceeds the ${maxBytes}-byte limit`);
-  }
-}
-
 function assertIdentifier(value: unknown, label: string): asserts value is string {
-  assertNonEmptyString(value, label);
-  if (Buffer.byteLength(value, "utf8") > MAX_CONTROL_IDENTIFIER_BYTES) {
-    throw new TypeError(
-      `${label} exceeds the ${MAX_CONTROL_IDENTIFIER_BYTES}-byte limit`,
-    );
-  }
+  assertProtocolIdentifier(value, label);
 }
 
 function invalidControlRecord(message: string): AuthorityStorageError {

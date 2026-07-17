@@ -6,6 +6,7 @@ import type {
 } from "../types/messages.js";
 import type { UserTurnInput } from "../types/user-input.js";
 import { canonicalize } from "./canonical.js";
+import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 
 const EVIDENCE_KINDS = new Set([
   "file-diff",
@@ -240,12 +241,6 @@ function assertString(value: unknown, label: string): asserts value is string {
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || value.length === 0) {
     throw new TypeError(`${label} must be a non-empty string`);
-  }
-}
-
-function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 480) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
   }
 }
 

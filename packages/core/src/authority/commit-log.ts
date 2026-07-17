@@ -37,6 +37,7 @@ import type {
   ProjectionReplayOptions,
   ProjectionReducer,
   ProjectionCursor,
+  ProjectionTransactionContext,
   ProjectionTransactionDecision,
   ProjectionTransactionOptions,
   ProjectionTransactionResult,
@@ -164,9 +165,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     reducer: ProjectionReducer<State, Body>,
     options: ProjectionReplayOptions = {},
   ): Promise<State> {
-    const { stream } = options;
+    const selectedStreams = validateProjectionStreams(options);
     const afterLsn = options.afterLsn ?? 0;
-    if (stream !== undefined) assertStream(stream);
     assertReplayLsn(afterLsn);
     return this.#withLogLock(async () => {
       const lastLsn = await this.#readAndRecover();
@@ -182,7 +182,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await this.#scanLog((envelope) => {
         if (envelope.lsn <= afterLsn) return;
         for (const record of envelope.entries) {
-          if (stream === undefined || record.stream === stream) {
+          if (selectedStreams === undefined || selectedStreams.has(record.stream)) {
             state = reducer(
               state,
               record as LogicalRecord<Body>,
@@ -200,11 +200,11 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     reducer: ProjectionTransactionReducer<State, Body>,
     decide: (
       state: State,
-      context: { readonly lastLsn: number; readonly nextLsn: number },
+      context: ProjectionTransactionContext,
     ) => ProjectionTransactionDecision<Body, Value>,
     options: ProjectionTransactionOptions = {},
   ): Promise<ProjectionTransactionResult<State, Body, Value>> {
-    const { stream } = options;
+    const selectedStreams = validateProjectionStreams(options);
     if (
       options.cursor !== undefined &&
       options.afterLsn !== undefined &&
@@ -213,7 +213,6 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       throw new TypeError("Projection cursor and afterLsn must identify the same prefix");
     }
     const afterLsn = options.cursor?.lsn ?? options.afterLsn ?? 0;
-    if (stream !== undefined) assertStream(stream);
     assertReplayLsn(afterLsn);
 
     const candidateReferences = collectArtifactRefs(
@@ -234,7 +233,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           (rawEnvelope) => {
           const envelope = rawEnvelope as unknown as CommitEnvelope<Body>;
           for (const record of envelope.entries) {
-            if (stream === undefined || record.stream === stream) {
+            if (selectedStreams === undefined || selectedStreams.has(record.stream)) {
               replay.push({ record, envelope });
             }
           }
@@ -252,9 +251,12 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         for (const item of replay) {
           state = await reducer(state, item.record, item.envelope);
         }
+        const at = this.#clock();
+        assertCanonicalTime(at);
         const decision = decide(state, {
           lastLsn,
           nextLsn: lastLsn + 1,
+          at,
         });
         if (decision.kind === "return") {
           return {
@@ -270,9 +272,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           collectArtifactRefs(entries),
           candidateDigests,
         );
-        const commit = await this.#append(entries);
+        const commit = await this.#append(entries, at);
         for (const record of commit.entries) {
-          if (stream === undefined || record.stream === stream) {
+          if (selectedStreams === undefined || selectedStreams.has(record.stream)) {
             state = await reducer(state, record, commit);
           }
         }
@@ -319,6 +321,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
 
   async #append<Body>(
     entries: Array<LogicalRecord<Body>>,
+    committedAt?: IsoTime,
   ): Promise<CommitEnvelope<Body>> {
     const previousLsn = await this.#loadLastLsn();
     const lsn = previousLsn + 1;
@@ -328,7 +331,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         "Commit log LSN exhausted the safe integer range",
       );
     }
-    const at = this.#clock();
+    const at = committedAt ?? this.#clock();
     assertCanonicalTime(at);
     const payload = { v: 1 as const, lsn, at, entries };
     const envelope: CommitEnvelope<Body> = {
@@ -601,6 +604,29 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       }
     });
   }
+}
+
+function validateProjectionStreams(
+  options: ProjectionReplayOptions,
+): ReadonlySet<string> | undefined {
+  if (options.stream !== undefined && options.streams !== undefined) {
+    throw new TypeError("Projection stream and streams options are mutually exclusive");
+  }
+  const values = options.streams ??
+    (options.stream === undefined ? undefined : [options.stream]);
+  if (values === undefined) return undefined;
+  if (values.length === 0) {
+    throw new TypeError("Projection streams cannot be empty");
+  }
+  const unique = new Set<string>();
+  for (const stream of values) {
+    assertStream(stream);
+    if (unique.has(stream)) {
+      throw new TypeError("Projection streams cannot contain duplicates");
+    }
+    unique.add(stream);
+  }
+  return unique;
 }
 
 function retainReference(

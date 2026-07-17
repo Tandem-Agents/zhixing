@@ -44,6 +44,10 @@
     "./job-assignment": {
       "types": "./dist/job-assignment.d.ts",
       "import": "./dist/job-assignment.js"
+    },
+    "./delivery": {
+      "types": "./dist/delivery.d.ts",
+      "import": "./dist/delivery.js"
     }
   },
   "files": ["dist"],

@@ -15,6 +15,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  isProtocolIdentifier,
   systemJobParamsDigest,
   validateAssignmentTerminationProof,
   validateCancelProof,
@@ -547,7 +548,7 @@ function assertKeys(
 }
 
 function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 4_096) {
+  if (!isProtocolIdentifier(value)) {
     throw corruptJobJournal(`${label} must be a non-empty bounded string`);
   }
 }

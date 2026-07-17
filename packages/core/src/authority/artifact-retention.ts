@@ -1,12 +1,16 @@
 import { Buffer } from "node:buffer";
 import type { ArtifactRef, LogicalRecord, MutationBatch, SealedBundle } from "../contracts/index.js";
+import type { OutboundContentDto } from "../channels/types.js";
 import {
   canonicalize,
+  isProtocolIdentifier,
   validateConversationSealedBundle,
   validateMutationBatch,
 } from "../protocol/index.js";
 import { assertArtifactRef, collectArtifactRefs } from "./artifact-references.js";
 import { AuthorityStorageError } from "./errors.js";
+import { validateOutboundContentDto } from "../delivery/content-schema.js";
+import { isDeliveryItemId } from "../delivery/validation.js";
 
 type ExecutionKind = "conversation" | "job";
 
@@ -26,6 +30,11 @@ export type RegisteredArtifactRoot =
       readonly schema: "MutationBatch";
       readonly ref: ArtifactRef;
       readonly assignmentId: string;
+    }
+  | {
+      readonly schema: "DeliveryContent";
+      readonly ref: ArtifactRef;
+      readonly itemId: string;
     };
 
 export function collectRegisteredArtifactRoots(
@@ -34,6 +43,18 @@ export function collectRegisteredArtifactRoots(
   const roots: RegisteredArtifactRoot[] = [];
   for (const record of records) {
     const body = plainRecord(record.body);
+    if (record.stream === "delivery" && body?.t === "enqueued") {
+      const intent = plainRecord(body.intent);
+      const content = plainRecord(intent?.content);
+      if (content?.ref !== undefined) {
+        roots.push({
+          schema: "DeliveryContent",
+          ref: requiredArtifactRef(content.ref, "Delivery content ref"),
+          itemId: requiredDeliveryItemId(body.itemId),
+        });
+      }
+      continue;
+    }
     if (record.stream.startsWith("run:") || record.stream.startsWith("job:")) {
       if (body?.t === "assigned") {
         roots.push({
@@ -120,6 +141,10 @@ export function collectRegisteredArtifactReferences(
 
   const envelope = plainRecord(value);
   try {
+    if (root.schema === "DeliveryContent") {
+      validateOutboundContentDto(value);
+      return collectArtifactRefs(value as OutboundContentDto);
+    }
     if (root.schema === "SealedBundle") {
       const bundle = validateConversationSealedBundle(value as SealedBundle);
       if (bundle.assignmentId !== root.assignmentId) {
@@ -167,10 +192,20 @@ function requiredArtifactRef(value: unknown, label: string): ArtifactRef {
 }
 
 function requiredString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) {
+  if (!isProtocolIdentifier(value)) {
     throw new AuthorityStorageError(
       "invalid-authority-record",
-      `${label} must be a non-empty string`,
+      `${label} must be a non-empty bounded string`,
+    );
+  }
+  return value;
+}
+
+function requiredDeliveryItemId(value: unknown): string {
+  if (!isDeliveryItemId(value)) {
+    throw new AuthorityStorageError(
+      "invalid-authority-record",
+      "Delivery item id must be dlv-<Ulid>",
     );
   }
   return value;

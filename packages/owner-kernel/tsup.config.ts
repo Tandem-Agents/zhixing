@@ -12,6 +12,7 @@ export default defineConfig({
     "src/control-admission.ts",
     "src/conversation-assignment.ts",
     "src/job-assignment.ts",
+    "src/delivery.ts",
   ],
   format: ["esm"],
   dts: true,

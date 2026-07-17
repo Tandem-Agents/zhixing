@@ -633,15 +633,17 @@ async function runServerProcess(
   });
 
   // ============================================================================
-  // 核心 Scheduler —— 吃 ctx.deliveryStack（delivery 构造期 readonly 不能 late-bind）。
-  // schedule 档 ctx.deliveryStack 为 undefined → 无投递。
+  // Scheduler 在 job owner 正式接管前继续经耐久兼容队列投递结果，
+  // 避免旧能力先下线。接管时由同一次切换移除该兼容路径。
   // ============================================================================
   const scheduler = new Scheduler({
     store: new JsonTaskStore(),
     eventBus: schedulerEventBus,
     runAgentTurn,
     systemHandlers,
-    delivery: ctx.deliveryStack?.delivery,
+    ...(ctx.deliveryStack
+      ? { delivery: ctx.deliveryStack.delivery }
+      : {}),
     logger: {
       info: (msg, data) => console.log(chalk.dim(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
       warn: (msg, data) => console.warn(chalk.yellow(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
@@ -742,16 +744,48 @@ async function runServerProcess(
     confirmationHub,
     runRegistry,
     runtimeControl: {
-      deliveryStats: () => ctx.deliveryStack?.delivery.stats() ?? {
-        queued: 0,
-        delivered: 0,
-        failed: 0,
-        retrying: 0,
+      deliveryStats: () => {
+        if (!ctx.deliveryStack) {
+          return {
+            pending: 0,
+            queued: 0,
+            attempting: 0,
+            delivered: 0,
+            failed: 0,
+            retrying: 0,
+            uncertain: 0,
+          };
+        }
+        const authority = ctx.deliveryStack.authorityDelivery.stats();
+        const legacy = ctx.deliveryStack.delivery.stats();
+        return { ...authority, pending: authority.pending + legacy.queued };
+      },
+      deliveryStatus: (afterByItem) =>
+        ctx.deliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
+      resolveDelivery: async (input) => {
+        if (!ctx.deliveryStack) throw new Error("Delivery stack is unavailable");
+        return ctx.deliveryStack.resolve({
+          requestId: input.requestId,
+          source: { principal: input.principal },
+          body: {
+            t: "delivery-resolve",
+            itemId: input.itemId,
+            attempt: input.attempt,
+            anchorEpoch: input.anchorEpoch,
+            openFactDigest: input.openFactDigest,
+            decision: input.decision,
+          },
+        });
       },
       flushDelivery: async () => {
         await ctx.deliveryStack?.delivery.flush();
+        await ctx.deliveryStack?.authorityDelivery.flush();
       },
     },
+  });
+
+  ctx.deliveryStack?.onStatus((notice) => {
+    serverCtx.broadcastAll?.("delivery.status", notice);
   });
 
   // runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）

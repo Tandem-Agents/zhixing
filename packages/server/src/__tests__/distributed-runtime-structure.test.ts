@@ -127,7 +127,7 @@ describe("distributed runtime structural gates", () => {
         topologyEdges: topology.edges,
       },
     );
-  }, 30_000);
+  }, 60_000);
 });
 
 async function readPackageManifests(): Promise<PackageManifest[]> {

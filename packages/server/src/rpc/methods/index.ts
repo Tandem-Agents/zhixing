@@ -52,6 +52,7 @@ import {
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
+  buildDeliveryResolveMethod,
   buildLlmCompleteMethod,
 } from "./server.js";
 import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
@@ -126,6 +127,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     // server.*（控制面：shutdown / info）+ llm 轻推理通道(可信面)
     buildServerShutdownMethod(),
     buildServerInfoMethod(),
+    buildDeliveryResolveMethod(),
     buildLlmCompleteMethod(),
     // trust.*（信任规则管理面）
     buildTrustListMethod(),

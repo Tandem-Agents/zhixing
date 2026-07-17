@@ -33,6 +33,7 @@ import type {
 } from "./authorization.js";
 import type {
   ContentAssetRef,
+  DeliveryFailure,
   DeliveryResolutionFact,
   GlobalControlMutation,
   SessionControlMutation,
@@ -379,8 +380,31 @@ export interface StatusNoticeBase<R, S, A extends [] | ResolutionActionSet>
   at: IsoTime;
 }
 
+export type ConversationUncertainClosure =
+  | { closedBy: "late-bundle-committed"; resultingState: "committed" }
+  | {
+      closedBy: "proven-not-started-redispatched";
+      resultingState: "queued";
+    }
+  | { closedBy: "user-verified-side-effects"; resultingState: "failed" }
+  | { closedBy: "user-abandoned"; resultingState: "cancelled" }
+  | { closedBy: "user-retry-acknowledged"; resultingState: "queued" };
+
+export type JobUncertainClosure =
+  | ConversationUncertainClosure
+  | {
+      closedBy: "proven-not-started-cancelled";
+      resultingState: "cancelled";
+    };
+
 export type ConversationStatusNotice =
-  | StatusNoticeBase<ExecutionRefFor<"conversation">, "uncertain", ResolutionActionSet>
+  | (StatusNoticeBase<
+      ExecutionRefFor<"conversation">,
+      "uncertain",
+      ResolutionActionSet
+    > & { openFactDigest: Digest })
+  | (StatusNoticeBase<ExecutionRefFor<"conversation">, "uncertain-closed", []> &
+      { openFactDigest: Digest } & ConversationUncertainClosure)
   | StatusNoticeBase<
       ExecutionRefFor<"conversation">,
       Exclude<ConversationRunState, "committed" | "uncertain">,
@@ -388,7 +412,11 @@ export type ConversationStatusNotice =
     >;
 
 export type JobStatusNotice =
-  | StatusNoticeBase<ExecutionRefFor<"job">, "uncertain", ResolutionActionSet>
+  | (StatusNoticeBase<ExecutionRefFor<"job">, "uncertain", ResolutionActionSet> & {
+      openFactDigest: Digest;
+    })
+  | (StatusNoticeBase<ExecutionRefFor<"job">, "uncertain-closed", []> &
+      { openFactDigest: Digest } & JobUncertainClosure)
   | StatusNoticeBase<
       ExecutionRefFor<"job">,
       Exclude<JobRunState, "committed" | "uncertain">,
@@ -402,7 +430,7 @@ export type DeliveryStatusNotice =
       DeliveryStatusRef,
       "delivery-uncertain",
       ResolutionActionSet
-    > & { attempt: number; anchorEpoch: number })
+    > & { attempt: number; anchorEpoch: number; openFactDigest: Digest })
   | (StatusNoticeBase<DeliveryStatusRef, "delivery-failed", []> & {
       attempt: number;
       anchorEpoch: number;
@@ -410,8 +438,17 @@ export type DeliveryStatusNotice =
   | (StatusNoticeBase<DeliveryStatusRef, "delivery-resolved", []> & {
       attempt: number;
       anchorEpoch: number;
+      openFactDigest: Digest;
       decision: DeliveryResolutionFact["decision"];
-    });
+    })
+  | (StatusNoticeBase<DeliveryStatusRef, "delivery-uncertain-closed", []> & {
+      attempt: number;
+      anchorEpoch: number;
+      openFactDigest: Digest;
+    } & (
+      | { closedBy: "late-sent" | "late-retry-scheduled" }
+      | { closedBy: "late-failed"; error: DeliveryFailure }
+    ));
 
 export type ExecutionStatusNotice = WireSchemaV1<"ExecutionStatusNotice"> &
   (ConversationStatusNotice | JobStatusNotice | DeliveryStatusNotice);

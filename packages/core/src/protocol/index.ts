@@ -1,5 +1,17 @@
 export { byteDigest, canonicalize, protocolBytes, protocolDigest } from "./canonical.js";
 export {
+  assertProtocolIdentifier,
+  assertPrefixedUlid,
+  isPrefixedUlid,
+  isProtocolIdentifier,
+  MAX_PROTOCOL_IDENTIFIER_LENGTH,
+} from "./validation.js";
+export {
+  MAX_AUTHORITY_ERROR_MESSAGE_BYTES,
+  validateAuthorityError,
+  validatePublishDecisionRecord,
+} from "./contract-validation.js";
+export {
   validateEnvironmentRequirement,
   validateMessage,
   validateMessages,

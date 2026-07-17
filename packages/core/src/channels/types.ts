@@ -73,8 +73,15 @@ export interface OutboundContentDto {
 export interface DeliveryResult {
   success: boolean;
   messageId?: string;
+  /** Exact immutable receipt bytes returned by the external service. */
+  receiptBytes?: Uint8Array;
   error?: string;
   retryable: boolean;
+}
+
+export interface DeliveryAdapterSendMeta {
+  /** Stable across every redrive of the same durable delivery item. */
+  idempotencyKey?: string;
 }
 
 // ─── 通道配置 ───
@@ -151,7 +158,11 @@ export interface ChannelAdapter {
 
   connect(ctx: ChannelContext): Promise<void>;
   disconnect(): Promise<void>;
-  send(target: DeliveryTarget, content: OutboundContent): Promise<DeliveryResult>;
+  send(
+    target: DeliveryTarget,
+    content: OutboundContent,
+    meta?: DeliveryAdapterSendMeta,
+  ): Promise<DeliveryResult>;
 
   bindingPolicy?: ChannelBindingPolicy;
 }

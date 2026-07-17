@@ -419,6 +419,9 @@ export type DeliveryStreamRecord =
       t: "attempt-started";
       itemId: string;
       attempt: number;
+      authorization:
+        | { kind: "automatic" }
+        | { kind: "manual"; resolutionFactDigest: Digest };
       startedAt: IsoTime;
       unknownOutcome:
         | { kind: "idempotent-redrive"; redriveUntil: IsoTime }

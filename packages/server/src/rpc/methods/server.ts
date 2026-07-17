@@ -13,6 +13,8 @@
  */
 
 import { isInternal } from "@zhixing/core";
+import { isDeliveryItemId } from "@zhixing/core/delivery";
+import { isProtocolIdentifier } from "@zhixing/core/protocol";
 import { RpcAppError, RpcErrors, type MethodEntry } from "../handlers.js";
 import {
   PROTOCOL_VERSION,
@@ -115,9 +117,12 @@ export function buildServerInfoMethod(): MethodEntry {
     // 状态视图含 workspace 路径 / 会话规模等运维信息——要求认证;
     // 握手前的协议兼容判定由 auth 响应自带的 protocol / version 覆盖。
     requiresAuth: true,
-    handler(_params, ctx) {
+    async handler(params, ctx) {
       const conversations = ctx.server.conversations?.list() ?? [];
       const runtimeControl = buildRuntimeControlSnapshot(ctx);
+      const deliveryStatusAfter = parseDeliveryStatusAfter(params);
+      const deliveryStatus =
+        (await ctx.server.runtimeControl?.deliveryStatus?.(deliveryStatusAfter)) ?? [];
       return {
         version: ctx.server.version,
         protocol: PROTOCOL_VERSION,
@@ -144,9 +149,115 @@ export function buildServerInfoMethod(): MethodEntry {
         activeWork: runtimeControl.activeWork,
         deferredWork: runtimeControl.deferredWork,
         keepAliveWork: runtimeControl.keepAliveWork,
+        deliveryStatus,
       };
     },
   };
+}
+
+export function buildDeliveryResolveMethod(): MethodEntry {
+  return {
+    name: "delivery.resolve",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = parseDeliveryResolveParams(rawParams);
+      const resolve = ctx.server.runtimeControl?.resolveDelivery;
+      if (!resolve) throw RpcErrors.internal("delivery resolution is not available");
+      const clientId = ctx.connection.clientInfo?.id ?? "client";
+      const surfacePrincipal =
+        typeof clientId === "string" ? `rpc:${clientId}` : undefined;
+      const connectionId = String(ctx.connection.id);
+      if (
+        !isProtocolIdentifier(surfacePrincipal) ||
+        !isProtocolIdentifier(connectionId)
+      ) {
+        throw RpcErrors.invalidParams("authenticated delivery identity is invalid");
+      }
+      return resolve({
+        ...params,
+        principal: {
+          surfacePrincipal,
+          deviceId: surfacePrincipal,
+          connectionId,
+        },
+      });
+    },
+  };
+}
+
+function parseDeliveryResolveParams(raw: unknown): {
+  requestId: string;
+  itemId: string;
+  attempt: number;
+  anchorEpoch: number;
+  openFactDigest: string;
+  decision: "user-verified-sent" | "abandon" | "retry-risk-ack";
+} {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw RpcErrors.invalidParams("delivery.resolve params must be an object");
+  }
+  const value = raw as Record<string, unknown>;
+  const fields = [
+    "requestId",
+    "itemId",
+    "attempt",
+    "anchorEpoch",
+    "openFactDigest",
+    "decision",
+  ];
+  if (
+    Object.keys(value).some((key) => !fields.includes(key)) ||
+    fields.some((key) => !(key in value)) ||
+    !isProtocolIdentifier(value.requestId) ||
+    !isDeliveryItemId(value.itemId) ||
+    !Number.isSafeInteger(value.attempt) ||
+    (value.attempt as number) <= 0 ||
+    !Number.isSafeInteger(value.anchorEpoch) ||
+    (value.anchorEpoch as number) <= 0 ||
+    typeof value.openFactDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/u.test(value.openFactDigest) ||
+    !new Set(["user-verified-sent", "abandon", "retry-risk-ack"]).has(
+      String(value.decision),
+    )
+  ) {
+    throw RpcErrors.invalidParams("delivery.resolve params are invalid");
+  }
+  return value as ReturnType<typeof parseDeliveryResolveParams>;
+}
+
+function parseDeliveryStatusAfter(
+  params: unknown,
+): Readonly<Record<string, number>> {
+  if (params === undefined || params === null) return {};
+  if (typeof params !== "object" || Array.isArray(params)) {
+    throw RpcErrors.invalidParams("server.info params must be an object");
+  }
+  const value = params as Record<string, unknown>;
+  if (Object.keys(value).some((key) => key !== "deliveryStatusAfter")) {
+    throw RpcErrors.invalidParams("server.info params contain unknown fields");
+  }
+  if (value.deliveryStatusAfter === undefined) return {};
+  if (
+    value.deliveryStatusAfter === null ||
+    typeof value.deliveryStatusAfter !== "object" ||
+    Array.isArray(value.deliveryStatusAfter)
+  ) {
+    throw RpcErrors.invalidParams("deliveryStatusAfter must be an object");
+  }
+  const result: Record<string, number> = {};
+  for (const [itemId, revision] of Object.entries(
+    value.deliveryStatusAfter as Record<string, unknown>,
+  )) {
+    if (
+      !isDeliveryItemId(itemId) ||
+      !Number.isSafeInteger(revision) ||
+      (revision as number) < 0
+    ) {
+      throw RpcErrors.invalidParams("deliveryStatusAfter is invalid");
+    }
+    result[itemId] = revision as number;
+  }
+  return result;
 }
 
 function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {
@@ -258,7 +369,7 @@ function buildRuntimeControlSnapshot(
 
   const deferredWork: RuntimeControlWorkItem[] = [];
   const deliveryStats = ctx.server.runtimeControl?.deliveryStats?.();
-  const deferredCount = deliveryStats === undefined ? 0 : Math.max(0, deliveryStats.queued);
+  const deferredCount = deliveryStats === undefined ? 0 : Math.max(0, deliveryStats.pending);
   if (deferredCount > 0) {
     deferredWork.push({
       id: "delivery:queue",

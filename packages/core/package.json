@@ -75,6 +75,10 @@
     "./authority": {
       "types": "./dist/authority/index.d.ts",
       "import": "./dist/authority/index.js"
+    },
+    "./delivery": {
+      "types": "./dist/delivery/index.d.ts",
+      "import": "./dist/delivery/index.js"
     }
   },
   "files": [

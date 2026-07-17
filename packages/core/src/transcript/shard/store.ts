@@ -41,6 +41,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { toSafePathSegment } from "../../paths.js";
+import { isProtocolIdentifier } from "../../protocol/validation.js";
 import { recoverOrphanTmp, writeAtomic } from "../serializer.js";
 import {
   DEFAULT_MAX_SHARD_BYTES,
@@ -195,9 +196,7 @@ export class ShardedTranscriptStore {
   ): Promise<AppendCommittedRunResult> {
     if (
       input.type !== "run" ||
-      typeof input.runId !== "string" ||
-      input.runId.length === 0 ||
-      input.runId.length > 480 ||
+      !isProtocolIdentifier(input.runId) ||
       !Number.isSafeInteger(input.runIndex) ||
       input.runIndex < 0
     ) {

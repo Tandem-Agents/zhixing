@@ -3,10 +3,12 @@ import type {
   ArtifactRef,
   AssignmentTerminationProof,
   CancelProofBody,
+  ConversationUncertainClosure,
   ConversationRunState,
   DispatchConflictProof,
   IngressContext,
   JobRunState,
+  JobUncertainClosure,
   SessionInternalRecord,
   SupersedeProof,
   UncertainResolutionFact,
@@ -20,6 +22,7 @@ import type {
  */
 export type SharedRunState = ConversationRunState | JobRunState;
 import {
+  assertProtocolIdentifier,
   canonicalize,
   protocolDigest,
   validateAssignmentTerminationProof,
@@ -1105,6 +1108,87 @@ export function resolutionTargetState(
   return "failed";
 }
 
+export type UncertainStatusTransition =
+  | { readonly kind: "ordinary" }
+  | { readonly kind: "opened"; readonly openFactDigest: string }
+  | {
+      readonly kind: "closed";
+      readonly openFactDigest: string;
+      readonly resolutionKind: NonNullable<
+        UncertainResolutionFact["resolution"]
+      >["kind"];
+    };
+
+export function projectUncertainStatusTransition(input: {
+  readonly currentState: SharedRunState | undefined;
+  readonly nextState: SharedRunState;
+  readonly resolutionFacts: readonly UncertainResolutionFact[];
+}): UncertainStatusTransition {
+  const opens = input.resolutionFacts.filter((fact) => fact.resolution === undefined);
+  const closes = input.resolutionFacts.filter((fact) => fact.resolution !== undefined);
+  if (input.nextState === "uncertain" && input.currentState !== "uncertain") {
+    if (opens.length !== 1 || closes.length !== 0) {
+      throw corruptRunJournal(
+        "Uncertain status opening does not bind exactly one durable open fact",
+      );
+    }
+    return { kind: "opened", openFactDigest: opens[0]!.openFactDigest };
+  }
+  if (input.currentState === "uncertain" && input.nextState !== "uncertain") {
+    if (closes.length !== 1 || opens.length !== 0) {
+      throw corruptRunJournal(
+        "Uncertain status closure does not bind exactly one durable resolution",
+      );
+    }
+    const fact = closes[0]!;
+    const resolution = fact.resolution!;
+    if (resolutionTargetState(resolution.kind) !== input.nextState) {
+      throw corruptRunJournal(
+        "Uncertain status closure does not match its durable successor state",
+      );
+    }
+    return {
+      kind: "closed",
+      openFactDigest: fact.openFactDigest,
+      resolutionKind: resolution.kind,
+    };
+  }
+  if (input.resolutionFacts.length !== 0) {
+    throw corruptRunJournal(
+      "Uncertain resolution fact does not bind an uncertainty state edge",
+    );
+  }
+  return { kind: "ordinary" };
+}
+
+export function conversationUncertainClosure(
+  kind: Exclude<
+    NonNullable<UncertainResolutionFact["resolution"]>["kind"],
+    "proven-not-started-cancelled"
+  >,
+): ConversationUncertainClosure {
+  switch (kind) {
+    case "late-bundle-committed":
+      return { closedBy: kind, resultingState: "committed" };
+    case "proven-not-started-redispatched":
+    case "user-retry-acknowledged":
+      return { closedBy: kind, resultingState: "queued" };
+    case "user-abandoned":
+      return { closedBy: kind, resultingState: "cancelled" };
+    case "user-verified-side-effects":
+      return { closedBy: kind, resultingState: "failed" };
+  }
+}
+
+export function jobUncertainClosure(
+  kind: NonNullable<UncertainResolutionFact["resolution"]>["kind"],
+): JobUncertainClosure {
+  if (kind === "proven-not-started-cancelled") {
+    return { closedBy: kind, resultingState: "cancelled" };
+  }
+  return conversationUncertainClosure(kind);
+}
+
 export function assertResolutionCloseAtomicReplayContract(input: {
   readonly cause: UncertainResolutionFact["cause"];
   readonly kind: NonNullable<UncertainResolutionFact["resolution"]>["kind"];
@@ -1260,9 +1344,7 @@ function isActiveRunState(state: ConversationRunState): boolean {
 }
 
 export function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 480) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
-  }
+  assertProtocolIdentifier(value, label);
 }
 
 export function assertPositiveSafeInteger(value: unknown, label: string): asserts value is number {

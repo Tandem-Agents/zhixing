@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
+  buildDeliveryResolveMethod,
   buildLlmCompleteMethod,
 } from "../server.js";
 import type { HandlerContext } from "../../handlers.js";
@@ -132,7 +133,7 @@ describe("server.shutdown", () => {
 });
 
 describe("server.info", () => {
-  it("返回宿主状态权威视图(要求认证——含 workspace / 会话规模等运维信息)", () => {
+  it("返回宿主状态权威视图(要求认证——含 workspace / 会话规模等运维信息)", async () => {
     const ctx = mkCtx({
       listenAddr: { port: 18900, host: "127.0.0.1" },
       requestShutdown: () => {},
@@ -140,7 +141,7 @@ describe("server.info", () => {
     const entry = buildServerInfoMethod();
     expect(entry.requiresAuth).toBe(true);
 
-    const result = entry.handler({}, ctx) as any;
+    const result = await entry.handler({}, ctx) as any;
     expect(result.version).toBe("0.1.0-test");
     expect(result.pid).toBe(process.pid);
     expect(result.port).toBe(18900);
@@ -155,7 +156,7 @@ describe("server.info", () => {
     expect(result.connectionCount).toBe(0);
   });
 
-  it("叠加活跃会话 / 连接数 / 宿主装配信息(workspace / logPath)", () => {
+  it("叠加活跃会话 / 连接数 / 宿主装配信息(workspace / logPath)", async () => {
     const ctx = mkCtx({
       conversations: {
         list: () => [{ busy: true }, { busy: false }],
@@ -163,7 +164,7 @@ describe("server.info", () => {
       connectionCount: () => 3,
       hostInfo: { workspace: "/ws", logPath: "/log/host.log" },
     });
-    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    const result = await buildServerInfoMethod().handler({}, ctx) as any;
     expect(result.activeConversations).toBe(2);
     expect(result.busyConversations).toBe(1);
     expect(result.connectionCount).toBe(3);
@@ -171,7 +172,7 @@ describe("server.info", () => {
     expect(result.logPath).toBe("/log/host.log");
   });
 
-  it("叠加 MCP 状态快照", () => {
+  it("叠加 MCP 状态快照", async () => {
     const ctx = mkCtx({
       mcpStatuses: () => [
         {
@@ -182,7 +183,7 @@ describe("server.info", () => {
         },
       ],
     });
-    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    const result = await buildServerInfoMethod().handler({}, ctx) as any;
     expect(result.mcpServers).toEqual([
       {
         serverId: "github",
@@ -193,7 +194,7 @@ describe("server.info", () => {
     ]);
   });
 
-  it("叠加通道状态快照", () => {
+  it("叠加通道状态快照", async () => {
     const ctx = mkCtx({
       channels: {
         listStatuses: () => [
@@ -204,7 +205,7 @@ describe("server.info", () => {
         ],
       } as never,
     });
-    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    const result = await buildServerInfoMethod().handler({}, ctx) as any;
     expect(result.channels).toEqual([
       {
         channelId: "feishu",
@@ -213,7 +214,7 @@ describe("server.info", () => {
     ]);
   });
 
-  it("叠加运行控制投影", () => {
+  it("叠加运行控制投影", async () => {
     const ctx = {
       ...mkCtx({
         conversations: {
@@ -235,10 +236,13 @@ describe("server.info", () => {
         } as never,
         runtimeControl: {
           deliveryStats: () => ({
+            pending: 3,
             queued: 3,
+            attempting: 0,
             delivered: 0,
             failed: 0,
             retrying: 1,
+            uncertain: 0,
           }),
         },
         channels: {
@@ -252,7 +256,7 @@ describe("server.info", () => {
       connection: { id: 7, authenticated: true } as never,
     };
 
-    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    const result = await buildServerInfoMethod().handler({}, ctx) as any;
 
     expect(result.accessSurfaces.otherRpcConnections).toBe(1);
     expect(result.accessSurfaces.liveChannels).toEqual([
@@ -271,15 +275,129 @@ describe("server.info", () => {
     ]);
   });
 
-  it("marks shutdownAvailable=false when requestShutdown not wired", () => {
+  it("marks shutdownAvailable=false when requestShutdown not wired", async () => {
     const ctx = mkCtx({ requestShutdown: undefined });
-    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    const result = await buildServerInfoMethod().handler({}, ctx) as any;
     expect(result.shutdownAvailable).toBe(false);
+  });
+
+  it("returns delivery history after each caller's durable revision", async () => {
+    const deliveryStatus = vi.fn(async () => [{
+      v: 1,
+      ref: { execution: "delivery", itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN" },
+      state: "delivery-failed",
+      statusRevision: 4,
+      actions: [],
+      at: "2026-07-17T02:00:00.000Z",
+      attempt: 1,
+      anchorEpoch: 2,
+    }]);
+    const ctx = mkCtx({ runtimeControl: { deliveryStatus } });
+
+    const result = await buildServerInfoMethod().handler({
+      deliveryStatusAfter: { "dlv-01KXPWTM80BYB4SH423EJT1CVN": 3 },
+    }, ctx) as any;
+
+    expect(deliveryStatus).toHaveBeenCalledWith({
+      "dlv-01KXPWTM80BYB4SH423EJT1CVN": 3,
+    });
+    expect(result.deliveryStatus).toHaveLength(1);
+  });
+
+  it("rejects a delivery cursor outside the protocol identifier domain", async () => {
+    const ctx = mkCtx({ runtimeControl: { deliveryStatus: vi.fn() } });
+    await expect(
+      buildServerInfoMethod().handler({
+        deliveryStatusAfter: { ["i".repeat(481)]: 0 },
+      }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
   });
 
   // silence lint on unused import
   it("RpcAppError is a class", () => {
     expect(typeof RpcAppError).toBe("function");
+  });
+});
+
+describe("delivery.resolve", () => {
+  it("forwards a validated decision with the authenticated surface identity", async () => {
+    const resolveDelivery = vi.fn(async () => ({ status: "ok" }));
+    const ctx = {
+      ...mkCtx({ runtimeControl: { resolveDelivery } }),
+      connection: {
+        id: 7,
+        authenticated: true,
+        clientInfo: { id: "desktop" },
+      } as never,
+    };
+    const params = {
+      requestId: "resolution-1",
+      itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN",
+      attempt: 1,
+      anchorEpoch: 2,
+      openFactDigest: `sha256:${"a".repeat(64)}`,
+      decision: "abandon",
+    } as const;
+
+    await expect(buildDeliveryResolveMethod().handler(params, ctx)).resolves.toEqual({
+      status: "ok",
+    });
+    expect(resolveDelivery).toHaveBeenCalledWith({
+      ...params,
+      principal: {
+        surfacePrincipal: "rpc:desktop",
+        deviceId: "rpc:desktop",
+        connectionId: "7",
+      },
+    });
+  });
+
+  it("rejects incomplete or unknown decision fields", async () => {
+    const entry = buildDeliveryResolveMethod();
+    await expect(entry.handler({ decision: "abandon" }, mkCtx())).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+    });
+  });
+
+  it("rejects invalid request, item, and derived surface identifiers", async () => {
+    const resolveDelivery = vi.fn();
+    const entry = buildDeliveryResolveMethod();
+    const valid = {
+      requestId: "resolution-1",
+      itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN",
+      attempt: 1,
+      anchorEpoch: 2,
+      openFactDigest: `sha256:${"a".repeat(64)}`,
+      decision: "abandon",
+    };
+    const ctx = {
+      ...mkCtx({ runtimeControl: { resolveDelivery } }),
+      connection: { id: 7, authenticated: true, clientInfo: { id: "desktop" } },
+    } as never;
+
+    await expect(
+      entry.handler({ ...valid, requestId: "r".repeat(481) }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      entry.handler({ ...valid, itemId: "i".repeat(481) }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      entry.handler({ ...valid, itemId: "item-01KXPWTM80BYB4SH423EJT1CVN" }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      entry.handler({ ...valid, itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVI" }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      entry.handler(valid, {
+        ...ctx,
+        connection: {
+          id: 7,
+          authenticated: true,
+          clientInfo: { id: "c".repeat(477) },
+        },
+      } as never),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(resolveDelivery).not.toHaveBeenCalled();
   });
 });
 

@@ -11,6 +11,7 @@ import type {
 } from "../contracts/index.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateJobCommitFence } from "./job.js";
+import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
 
 type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
@@ -1074,12 +1075,6 @@ function assertExactKeys(
   }
   if (canonicalize(keys) !== canonicalize(allowed)) {
     throw new TypeError(`${label} fields are incomplete or unknown`);
-  }
-}
-
-function assertIdentifier(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 480) {
-    throw new TypeError(`${label} must be a non-empty bounded string`);
   }
 }
 

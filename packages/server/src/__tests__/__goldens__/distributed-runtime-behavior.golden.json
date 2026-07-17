@@ -292,6 +292,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "delivery.resolve",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "health",
       "outcome": {
         "kind": "result",
@@ -445,6 +458,7 @@
           "channels": [],
           "connectionCount": "number",
           "deferredWork": [],
+          "deliveryStatus": [],
           "host": "string",
           "keepAliveWork": [],
           "mcpServers": [],

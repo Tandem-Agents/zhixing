@@ -1273,7 +1273,13 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 1,
+      "sourceZone": "core/transcript",
+      "target": "core/protocol"
+    },
+    {
+      "kind": "import",
+      "references": 3,
       "sourceZone": "executor",
       "target": "package:@zhixing/core"
     },
@@ -1351,13 +1357,13 @@
     },
     {
       "kind": "import",
-      "references": 9,
+      "references": 22,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 9,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
@@ -1495,7 +1501,7 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 4,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
     },

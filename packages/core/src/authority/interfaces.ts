@@ -36,6 +36,7 @@ export type ProjectionTransactionReducer<State, Body> = (
 
 export interface ProjectionReplayOptions {
   readonly stream?: string;
+  readonly streams?: readonly string[];
   readonly afterLsn?: number;
 }
 
@@ -53,6 +54,8 @@ export interface ProjectionTransactionOptions extends ProjectionReplayOptions {
 export interface ProjectionTransactionContext {
   readonly lastLsn: number;
   readonly nextLsn: number;
+  /** Timestamp that will be written to the envelope if this decision appends. */
+  readonly at: IsoTime;
 }
 
 export type ProjectionTransactionDecision<Body, Value> =

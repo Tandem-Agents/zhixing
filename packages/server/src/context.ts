@@ -10,7 +10,8 @@ import type {
   ChannelRegistry,
   RunRegistry,
   TaskListState,
-  DeliveryStats,
+  AuthorityDeliveryStats,
+  DeliveryStatusNotice,
 } from "@zhixing/core";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import type {
@@ -34,7 +35,23 @@ import type {
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
 export interface RuntimeControlAdapter {
-  deliveryStats?: () => DeliveryStats;
+  deliveryStats?: () => AuthorityDeliveryStats;
+  deliveryStatus?: (
+    afterByItem: Readonly<Record<string, number>>,
+  ) => Promise<readonly DeliveryStatusNotice[]>;
+  resolveDelivery?: (input: {
+    readonly requestId: string;
+    readonly itemId: string;
+    readonly attempt: number;
+    readonly anchorEpoch: number;
+    readonly openFactDigest: string;
+    readonly decision: "user-verified-sent" | "abandon" | "retry-risk-ack";
+    readonly principal: {
+      readonly surfacePrincipal: string;
+      readonly deviceId: string;
+      readonly connectionId: string;
+    };
+  }) => Promise<unknown>;
   flushDelivery?: () => Promise<void>;
 }
 
