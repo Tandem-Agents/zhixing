@@ -58,7 +58,12 @@ export type StartupMode = "repl" | "host";
  * - non-tty：缺字段且非交互终端（exit 2）
  */
 export type StartupCheckResult =
-  | { kind: "ready"; config: ZhixingConfig; credentials: ZhixingCredentials }
+  | {
+      kind: "ready";
+      config: ZhixingConfig;
+      credentials: ZhixingCredentials;
+      secretStore: SecretStorePort & CredentialStoreCoordinator;
+    }
   | { kind: "cancelled" }
   | { kind: "schema-error"; filePath: string; message: string }
   | { kind: "secret-store-error"; filePath: string; message: string }
@@ -148,7 +153,7 @@ export async function runStartupCheck(
   }
 
   if (missingSections.length === 0) {
-    return { kind: "ready", config, credentials };
+    return { kind: "ready", config, credentials, secretStore };
   }
 
   // 3. 缺失 + 非 TTY → fail-fast
@@ -192,7 +197,12 @@ export async function runStartupCheck(
         homeDir: credentialsHomeDir,
       })
     ).credentials;
-    return { kind: "ready", config: updatedConfig, credentials: updatedCredentials };
+    return {
+      kind: "ready",
+      config: updatedConfig,
+      credentials: updatedCredentials,
+      secretStore,
+    };
   }
 
   if (editorResult.kind === "cancelled") {

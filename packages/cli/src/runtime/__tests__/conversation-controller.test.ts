@@ -26,6 +26,8 @@ function makeFakes() {
   const handlers = {
     delta: [] as Handler<never>[],
     complete: [] as Handler<never>[],
+    final: [] as Handler<never>[],
+    status: [] as Handler<never>[],
     activity: [] as Handler<never>[],
     intent: [] as Handler<never>[],
   };
@@ -34,6 +36,7 @@ function makeFakes() {
       conversationId: "conv-1",
       sessionId: "conv-1",
       turnId,
+      runId: `run:${turnId}`,
     })),
     confirmAdvancement: vi.fn(async (_id: string, _advancementSessionId: string) => ({
       conversationId: "conv-1",
@@ -87,6 +90,14 @@ function makeFakes() {
       handlers.complete.push(h);
       return () => {};
     },
+    onFinal: (h: Handler<never>) => {
+      handlers.final.push(h);
+      return () => {};
+    },
+    onStatus: (h: Handler<never>) => {
+      handlers.status.push(h);
+      return () => {};
+    },
     onActivity: (h: Handler<never>) => {
       handlers.activity.push(h);
       return () => {};
@@ -109,6 +120,9 @@ function makeFakes() {
     })),
     subscribe: vi.fn(async () => true),
     unsubscribe: vi.fn(async () => {}),
+    abort: vi.fn(async () => {}),
+    history: vi.fn(async () => ({ runs: [], hasMore: false })),
+    statusHistory: vi.fn(async () => ({ notices: [], next: [] })),
   };
   const workscene = {
     enter: vi.fn(async (sceneId: string) => ({
@@ -125,6 +139,8 @@ function makeFakes() {
   const emit = {
     delta: (p: unknown) => handlers.delta.forEach((h) => h(p as never)),
     complete: (p: unknown) => handlers.complete.forEach((h) => h(p as never)),
+    final: (p: unknown) => handlers.final.forEach((h) => h(p as never)),
+    status: (p: unknown) => handlers.status.forEach((h) => h(p as never)),
     activity: (p: unknown) => handlers.activity.forEach((h) => h(p as never)),
     intent: (p: unknown) => handlers.intent.forEach((h) => h(p as never)),
   };
@@ -180,6 +196,22 @@ function rubricDraft(turnId: string) {
       ],
     },
     createdAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function statusNotice(
+  runId: string,
+  statusRevision: number,
+  state: "running" | "failed",
+) {
+  return {
+    v: 1 as const,
+    ref: { execution: "conversation" as const, conversationId: "conv-1", runId },
+    state,
+    ...(state === "failed" ? { reason: "durable failure" } : {}),
+    statusRevision,
+    actions: [] as [],
+    at: "2026-07-18T00:00:00.000Z",
   };
 }
 
@@ -300,6 +332,292 @@ describe("ConversationController", () => {
     expect(f.conversation.subscribe).toHaveBeenCalledTimes(2);
     expect(f.conversation.subscribe).toHaveBeenNthCalledWith(1, "conv-1");
     expect(f.conversation.subscribe).toHaveBeenNthCalledWith(2, "conv-1");
+  });
+
+  it("uses the authority run id for an explicit durable abort", async () => {
+    const f = makeFakes();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        runId: "authority-run-1",
+      }),
+    );
+    const { controller } = makeController(f);
+
+    const accepted = await controller.beginTurn("long task");
+    await controller.abort();
+
+    expect(f.conversation.abort).toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringMatching(/^cancel:turn_/u),
+      "authority-run-1",
+    );
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: accepted.turnId,
+      result: { reason: "aborted" },
+    });
+    await accepted.outcome;
+  });
+
+  it("defers abort until the send response supplies the authority run id", async () => {
+    const f = makeFakes();
+    let release!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => {
+        await responseGate;
+        return {
+          conversationId: "conv-1",
+          sessionId: "conv-1",
+          turnId,
+          runId: "authority-run-delayed",
+        };
+      },
+    );
+    const { controller } = makeController(f);
+
+    const accepting = controller.beginTurn("cancel before response");
+    await vi.waitFor(() => expect(f.conversation.send).toHaveBeenCalledOnce());
+    const aborting = controller.abort();
+    expect(f.conversation.abort).not.toHaveBeenCalled();
+
+    release();
+    const accepted = await accepting;
+    await aborting;
+    expect(f.conversation.abort).toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringMatching(/^cancel:turn_/u),
+      "authority-run-delayed",
+    );
+
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: accepted.turnId,
+      result: { reason: "aborted" },
+    });
+    await accepted.outcome;
+  });
+
+  it("settles a queued abort when durable admission fails before returning a run id", async () => {
+    const f = makeFakes();
+    let rejectSend!: (error: unknown) => void;
+    f.conversation.send.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const { controller } = makeController(f);
+
+    const accepting = controller.beginTurn("admission fails");
+    await vi.waitFor(() => expect(f.conversation.send).toHaveBeenCalledOnce());
+    const aborting = controller.abort();
+    rejectSend(new Error("admission rejected"));
+
+    await expect(accepting).rejects.toThrow("admission rejected");
+    await expect(aborting).resolves.toBeUndefined();
+    expect(f.conversation.abort).not.toHaveBeenCalled();
+  });
+
+  it("binds a final received before the send response to the returned authority run", async () => {
+    const f = makeFakes();
+    let release!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => {
+        await responseGate;
+        return {
+          conversationId: "conv-1",
+          sessionId: "conv-1",
+          turnId,
+          runId: "authority-run-final",
+        };
+      },
+    );
+    f.conversation.history.mockResolvedValue({
+      runs: [
+        {
+          shardId: "shard-1",
+          record: {
+            runId: "authority-run-final",
+            runIndex: 1,
+            timestamp: "2026-07-18T00:00:00.000Z",
+            messages: [
+              { role: "assistant", content: [{ type: "text", text: "durable final" }] },
+            ],
+            usage: { inputTokens: 2, outputTokens: 3 },
+          },
+        },
+      ],
+      hasMore: false,
+    });
+    const { controller } = makeController(f);
+
+    const accepting = controller.beginTurn("response may be lost");
+    await vi.waitFor(() => expect(f.conversation.send).toHaveBeenCalledOnce());
+    f.emit.final({
+      v: 1,
+      conversationId: "conv-1",
+      runId: "authority-run-final",
+      commitRevision: 1,
+      digest: `sha256:${"a".repeat(64)}`,
+    });
+    release();
+    const accepted = await accepting;
+
+    await expect(accepted.outcome).resolves.toMatchObject({
+      result: {
+        reason: "completed",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "durable final" }],
+        },
+        usage: { inputTokens: 2, outputTokens: 3 },
+      },
+    });
+  });
+
+  it("reconciles a replayed committed run even when its live final was missed", async () => {
+    const f = makeFakes();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        runId: "authority-run-replayed",
+      }),
+    );
+    f.conversation.history.mockResolvedValue({
+      runs: [
+        {
+          shardId: "shard-1",
+          record: {
+            runId: "authority-run-replayed",
+            runIndex: 1,
+            timestamp: "2026-07-18T00:00:00.000Z",
+            messages: [
+              { role: "assistant", content: [{ type: "text", text: "already committed" }] },
+            ],
+            usage: { inputTokens: 1, outputTokens: 2 },
+          },
+        },
+      ],
+      hasMore: false,
+    });
+    const { controller } = makeController(f);
+
+    const accepted = await controller.beginTurn("retry after response loss");
+
+    await expect(accepted.outcome).resolves.toMatchObject({
+      result: {
+        reason: "completed",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "already committed" }],
+        },
+      },
+    });
+  });
+
+  it("retries final history after transient projection misses and link failure", async () => {
+    const f = makeFakes();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        runId: "authority-run-lagging-history",
+      }),
+    );
+    f.conversation.history
+      .mockRejectedValueOnce(new Error("projection unavailable"))
+      .mockResolvedValueOnce({ runs: [], hasMore: false })
+      .mockResolvedValueOnce({
+        runs: [
+          {
+            shardId: "shard-1",
+            record: {
+              runId: "authority-run-lagging-history",
+              runIndex: 1,
+              timestamp: "2026-07-18T00:00:00.000Z",
+              messages: [
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "projection caught up" }],
+                },
+              ],
+              usage: { inputTokens: 1, outputTokens: 2 },
+            },
+          },
+        ],
+        hasMore: false,
+      });
+    const { controller } = makeController(f);
+
+    const accepted = await controller.beginTurn("wait for projection");
+    f.emit.final({
+      v: 1,
+      conversationId: "conv-1",
+      runId: "authority-run-lagging-history",
+      commitRevision: 1,
+      digest: `sha256:${"b".repeat(64)}`,
+    });
+
+    await expect(accepted.outcome).resolves.toMatchObject({
+      result: {
+        reason: "completed",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "projection caught up" }],
+        },
+      },
+    });
+    expect(f.conversation.history).toHaveBeenCalledTimes(3);
+  });
+
+  it("consumes every paged status notice after reconnect", async () => {
+    const f = makeFakes();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        runId: "authority-run-status",
+      }),
+    );
+    f.conversation.statusHistory
+      .mockResolvedValueOnce({
+        notices: [statusNotice("authority-run-status", 1, "running")],
+        next: [
+          {
+            conversationId: "conv-1",
+            runId: "authority-run-status",
+            afterStatusRevision: 1,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        notices: [statusNotice("authority-run-status", 2, "failed")],
+        next: [],
+      });
+    const { controller } = makeController(f);
+    const accepted = await controller.beginTurn("reconnect me");
+
+    await controller.reattachActiveObserver();
+
+    await expect(accepted.outcome).resolves.toMatchObject({
+      result: { reason: "error", error: { name: "RunFailed" } },
+    });
+    expect(f.conversation.statusHistory).toHaveBeenCalledTimes(2);
   });
 
   it("sendTurn:等待该对话 complete 落定;意图先于 complete 到达、随 outcome 带出", async () => {

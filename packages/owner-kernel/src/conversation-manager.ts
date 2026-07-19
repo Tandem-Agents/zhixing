@@ -31,6 +31,7 @@ import {
   type WindowCompact,
   type WindowFoldOutcome,
 } from "@zhixing/core";
+import type { ConversationInvocation } from "@zhixing/core/contracts";
 import type {
   AbortResult,
   ConversationBootstrap,
@@ -46,6 +47,20 @@ import type {
   ConversationCommitProjection,
   ConversationCommitProjectionInput,
 } from "./conversation-assignment.js";
+import type {
+  DurableConversationAdmissionInput,
+  DurableConversationCancelInput,
+  DurableConversationCancellationResult,
+  DurableConversationControlPrincipal,
+  DurableConversationIngressRun,
+  DurableConversationResolutionResult,
+  DurableConversationResolveInput,
+  DurableConversationSessionProjectionInput,
+  DurableConversationSessionWriteInput,
+  DurableConversationSessionWriteResult,
+  DurableConversationTurnExecutor,
+  DurableInteractionOutcome,
+} from "./run-turn.js";
 
 // 空 set 复用，避免每次 getObserverConnectionIds 返回新对象
 const EMPTY_OBSERVER_SET: ReadonlySet<string> = new Set();
@@ -211,6 +226,8 @@ export interface ConversationManagerCallbacks {
    * 钩子失败绝不影响已完成的持久化与窗口推进。
    */
   onTurnCommitted?: (info: TurnCommittedInfo) => void;
+  /** Enables the durable owner protocol for every turn admitted by this manager. */
+  durableTurnExecutor?: DurableConversationTurnExecutor;
 }
 
 /** onTurnCommitted 的入参——本次 turn 落定后的会话事实快照 */
@@ -241,9 +258,26 @@ export interface RecordTurnOptions {
 
 export interface PendingTask {
   source?: TurnSource;
+  /** Durable run identity used to stop one authoritative run without touching siblings. */
+  durableRunId?: string;
   execute: () => Promise<void>;
   cancel: () => void;
+  /** Local cleanup after the durable cancellation fact already exists. */
+  cancelLocally?: () => void;
+  /** Closes a durable admission that never entered the scheduler. */
+  cancelDurably?: () => Promise<void>;
   abort?: (reason?: AbortReason) => boolean;
+}
+
+export interface TurnPreAdmissionResult {
+  readonly shouldEnqueue: boolean;
+  readonly runId?: string;
+  /** Transfers the durable scheduling claim after this manager accepted the task. */
+  readonly onScheduled?: () => void;
+  /** Transfers an accepted run back to durable recovery when local scheduling cannot finish. */
+  readonly onDeferred?: () => void;
+  /** Called when an admitted task is removed before execution. */
+  readonly onCancelled?: () => void | Promise<void>;
 }
 
 type ConversationExists = () => Promise<boolean>;
@@ -254,6 +288,13 @@ export type TurnAdmissionResult =
       conversationId: string;
       managed: ManagedSession;
       task: PendingTask;
+      runId?: string;
+    }
+  | {
+      status: "replayed";
+      conversationId: string;
+      managed: ManagedSession;
+      runId?: string;
     }
   | { status: "full"; conversationId: string }
   | { status: "not-found"; conversationId: string };
@@ -350,6 +391,7 @@ export class ConversationManager implements ConversationCommitProjection {
   ) => Promise<void>;
   private readonly confirmationHub?: ConfirmationHub;
   private readonly onTurnCommitted?: (info: TurnCommittedInfo) => void;
+  private readonly durableTurnExecutorCb?: DurableConversationTurnExecutor;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
   /**
@@ -383,6 +425,7 @@ export class ConversationManager implements ConversationCommitProjection {
       this.writeSnapshotCb = callbacksOrOnRelease.writeSnapshot;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
       this.onTurnCommitted = callbacksOrOnRelease.onTurnCommitted;
+      this.durableTurnExecutorCb = callbacksOrOnRelease.durableTurnExecutor;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
     }
@@ -403,6 +446,102 @@ export class ConversationManager implements ConversationCommitProjection {
     }
 
     this.startIdleReaper(config?.idleCheckIntervalMs ?? DEFAULT_IDLE_CHECK_INTERVAL_MS);
+  }
+
+  durableTurnExecutor(): DurableConversationTurnExecutor | undefined {
+    return this.durableTurnExecutorCb;
+  }
+
+  usesDurableTurnProtocol(): boolean {
+    return this.durableTurnExecutorCb !== undefined;
+  }
+
+  // 耐久协议的启用/缺席只看 executor 整体在场与否;在场即能力完整
+  // (端口全方法必需),不存在按方法降级的中间态。缺席时:preadmission 与
+  // final 发布保持 legacy 语义,其余耐久控制一律 fail-closed 拒绝。
+
+  async admitDurableTurn(
+    input: DurableConversationAdmissionInput,
+  ): Promise<TurnPreAdmissionResult> {
+    const executor = this.durableTurnExecutorCb;
+    if (!executor) return { shouldEnqueue: true };
+    const admission = await executor.admit(input);
+    return {
+      shouldEnqueue: admission.shouldSchedule,
+      runId: admission.runId,
+      onScheduled: () =>
+        executor.confirmScheduled(input.conversationId, admission.runId),
+      onDeferred: () =>
+        executor.deferScheduling(input.conversationId, admission.runId),
+      onCancelled: () =>
+        executor.cancelAdmitted(input.conversationId, admission.runId),
+    };
+  }
+
+  async cancelDurableRuns(
+    input: DurableConversationCancelInput,
+  ): Promise<DurableConversationCancellationResult> {
+    return this.#requireDurableExecutor("cancellation").cancel(input);
+  }
+
+  async findDurableRunByIngress(
+    conversationId: string,
+    ingressId: string,
+    source: ConversationInvocation["source"],
+  ): Promise<DurableConversationIngressRun | undefined> {
+    return this.#requireDurableExecutor("ingress ownership lookup").findRunByIngress(
+      conversationId,
+      ingressId,
+      source,
+    );
+  }
+
+  async findDurableInteractionOutcome(
+    conversationId: string,
+    requestId: string,
+  ): Promise<DurableInteractionOutcome | undefined> {
+    return this.#requireDurableExecutor("interaction outcome lookup")
+      .findInteractionOutcome(conversationId, requestId);
+  }
+
+  async resolveDurableUncertain(
+    input: DurableConversationResolveInput,
+  ): Promise<DurableConversationResolutionResult> {
+    return this.#requireDurableExecutor("resolution").resolveUncertain(input);
+  }
+
+  async writeDurableSession(
+    input: DurableConversationSessionWriteInput,
+  ): Promise<DurableConversationSessionWriteResult> {
+    return this.#requireDurableExecutor("lifecycle write").writeSession(input);
+  }
+
+  async projectDurableSession(
+    input: DurableConversationSessionProjectionInput,
+  ): Promise<void> {
+    await this.#requireDurableExecutor("lifecycle projection").projectSession(input);
+  }
+
+  durableControlPrincipal(input: {
+    readonly surfacePrincipal: string;
+    readonly connectionId: string;
+  }): DurableConversationControlPrincipal {
+    return this.#requireDurableExecutor("control identity").controlPrincipal(input);
+  }
+
+  publishPendingFinals(conversationId: string): Promise<number> {
+    // legacy 无耐久 final,零待发布是经确认的真实语义而非缺能力兜底。
+    const executor = this.durableTurnExecutorCb;
+    if (!executor) return Promise.resolve(0);
+    return executor.publishPendingFinals(conversationId);
+  }
+
+  #requireDurableExecutor(capability: string): DurableConversationTurnExecutor {
+    const executor = this.durableTurnExecutorCb;
+    if (!executor) {
+      throw new Error(`Durable conversation ${capability} is not available`);
+    }
+    return executor;
   }
 
   /**
@@ -542,16 +681,39 @@ export class ConversationManager implements ConversationCommitProjection {
     createConversation?: () => Promise<string>;
     exists?: ConversationExists;
     connectionId?: string;
+    source?: TurnSource;
+    /** Work already counted by the durable journal; requeue must not consume admission twice. */
+    capacityReserved?: boolean;
+    beforeEnqueue?: (managed: ManagedSession) => Promise<TurnPreAdmissionResult>;
     makeTask: (managed: ManagedSession) => PendingTask;
   }): Promise<TurnAdmissionResult> {
     if (input.conversationId) {
       const active = this.sessions.get(input.conversationId);
       if (active) {
         this.assertNotQuiescing(input.conversationId);
-        return this.admitTurnForSession(
-          active,
-          input.connectionId,
-          input.makeTask,
+        if (!input.beforeEnqueue) {
+          return this.admitTurnForSession(
+            active,
+            input.connectionId,
+            input.source,
+            input.capacityReserved ?? false,
+            undefined,
+            input.makeTask,
+            false,
+          );
+        }
+        const reservedImmediate = !active.busy;
+        if (reservedImmediate) active.busy = true;
+        return this.withIdLock(active.conversationId, () =>
+          this.admitTurnForSession(
+            active,
+            input.connectionId,
+            input.source,
+            input.capacityReserved ?? false,
+            input.beforeEnqueue,
+            input.makeTask,
+            reservedImmediate,
+          ),
         );
       }
     }
@@ -567,22 +729,154 @@ export class ConversationManager implements ConversationCommitProjection {
       };
     }
 
-    return this.admitTurnForSession(managed, input.connectionId, input.makeTask);
+    if (!input.beforeEnqueue) {
+      return this.admitTurnForSession(
+        managed,
+        input.connectionId,
+        input.source,
+        input.capacityReserved ?? false,
+        undefined,
+        input.makeTask,
+        false,
+      );
+    }
+    const reservedImmediate = !managed.busy;
+    if (reservedImmediate) managed.busy = true;
+    return this.withIdLock(managed.conversationId, () =>
+      this.admitTurnForSession(
+        managed,
+        input.connectionId,
+        input.source,
+        input.capacityReserved ?? false,
+        input.beforeEnqueue,
+        input.makeTask,
+        reservedImmediate,
+      ),
+    );
   }
 
-  private admitTurnForSession(
+  private async admitTurnForSession(
     managed: ManagedSession,
     connectionId: string | undefined,
+    source: TurnSource | undefined,
+    capacityReserved: boolean,
+    beforeEnqueue: ((managed: ManagedSession) => Promise<TurnPreAdmissionResult>) | undefined,
     makeTask: (managed: ManagedSession) => PendingTask,
-  ): TurnAdmissionResult {
+    reservedImmediate: boolean,
+  ): Promise<TurnAdmissionResult> {
     this.assertNotQuiescing(managed.conversationId);
     managed.lastActiveAt = new Date().toISOString();
     this.clearGraceTimer(managed.conversationId);
-    const task = makeTask(managed);
-    const status = this.enqueue(managed.conversationId, task);
-    if (status === "busy") {
+    if (
+      !reservedImmediate &&
+      !capacityReserved &&
+      this.turnAdmissionCapacity(managed, source) === "full"
+    ) {
+      return { status: "full", conversationId: managed.conversationId };
+    }
+    let preAdmission: TurnPreAdmissionResult | undefined;
+    try {
+      if (beforeEnqueue) preAdmission = await beforeEnqueue(managed);
+    } catch (error) {
+      if (reservedImmediate) this.setBusy(managed.conversationId, false);
+      throw error;
+    }
+    if (preAdmission && !preAdmission.shouldEnqueue) {
+      if (reservedImmediate) this.setBusy(managed.conversationId, false);
+      if (connectionId) this.addObserver(managed.conversationId, connectionId);
+      return {
+        status: "replayed",
+        conversationId: managed.conversationId,
+        managed,
+        ...(preAdmission.runId ? { runId: preAdmission.runId } : {}),
+      };
+    }
+    let createdTask: PendingTask;
+    try {
+      createdTask = makeTask(managed);
+    } catch (error) {
+      if (preAdmission?.runId) {
+        preAdmission.onDeferred?.();
+        if (reservedImmediate) this.setBusy(managed.conversationId, false);
+        if (connectionId) this.addObserver(managed.conversationId, connectionId);
+        return {
+          status: "replayed",
+          conversationId: managed.conversationId,
+          managed,
+          runId: preAdmission.runId,
+        };
+      }
+      if (reservedImmediate) this.setBusy(managed.conversationId, false);
+      throw error;
+    }
+    const task = preAdmission
+      ? {
+          ...createdTask,
+          ...(preAdmission.runId ? { durableRunId: preAdmission.runId } : {}),
+          cancelLocally: createdTask.cancel,
+          cancel: createdTask.cancel,
+          ...(preAdmission.onCancelled
+            ? {
+                cancelDurably: async () => {
+                  await preAdmission.onCancelled?.();
+                },
+              }
+            : {}),
+        }
+      : createdTask;
+    if (reservedImmediate) {
       try {
-        task.cancel();
+        this.assertNotQuiescing(managed.conversationId);
+      } catch (error) {
+        if (preAdmission?.runId) {
+          preAdmission.onDeferred?.();
+          this.setBusy(managed.conversationId, false);
+          if (connectionId) this.addObserver(managed.conversationId, connectionId);
+          return {
+            status: "replayed",
+            conversationId: managed.conversationId,
+            managed,
+            runId: preAdmission.runId,
+          };
+        }
+        try {
+          await task.cancelDurably?.();
+        } finally {
+          try {
+            (task.cancelLocally ?? task.cancel)();
+          } finally {
+            this.setBusy(managed.conversationId, false);
+          }
+        }
+        throw error;
+      }
+      this.setBusy(managed.conversationId, true, task.source);
+      this.activeTasks.set(managed.conversationId, task);
+      preAdmission?.onScheduled?.();
+      if (connectionId) this.addObserver(managed.conversationId, connectionId);
+      return {
+        status: "immediate",
+        conversationId: managed.conversationId,
+        managed,
+        task,
+        ...(task.durableRunId ? { runId: task.durableRunId } : {}),
+      };
+    }
+    const status = this.enqueue(managed.conversationId, task, { capacityReserved });
+    if (status === "busy") {
+      if (preAdmission?.runId) {
+        preAdmission.onDeferred?.();
+        if (connectionId) this.addObserver(managed.conversationId, connectionId);
+        return {
+          status: "replayed",
+          conversationId: managed.conversationId,
+          managed,
+          runId: preAdmission.runId,
+        };
+      }
+      await task.cancelDurably?.();
+      try {
+        (task.cancelLocally ?? task.cancel)();
       } catch {
         // 与其它取消路径一致:task 还未交给队列,取消失败不影响 BUSY 语义。
       }
@@ -591,6 +885,21 @@ export class ConversationManager implements ConversationCommitProjection {
       );
     }
     if (status === "full") {
+      if (preAdmission?.runId) {
+        preAdmission.onDeferred?.();
+        if (connectionId) this.addObserver(managed.conversationId, connectionId);
+        return {
+          status: "replayed",
+          conversationId: managed.conversationId,
+          managed,
+          runId: preAdmission.runId,
+        };
+      }
+      try {
+        await task.cancelDurably?.();
+      } finally {
+        (task.cancelLocally ?? task.cancel)();
+      }
       return { status: "full", conversationId: managed.conversationId };
     }
 
@@ -599,13 +908,27 @@ export class ConversationManager implements ConversationCommitProjection {
       this.setBusy(managed.conversationId, true, task.source);
       this.activeTasks.set(managed.conversationId, task);
     }
+    preAdmission?.onScheduled?.();
 
     return {
       status,
       conversationId: managed.conversationId,
       managed,
       task,
+      ...(task.durableRunId ? { runId: task.durableRunId } : {}),
     };
+  }
+
+  private turnAdmissionCapacity(
+    managed: ManagedSession,
+    source: TurnSource | undefined,
+  ): "immediate" | "queued" | "full" {
+    if (!managed.busy) return "immediate";
+    const queue = this.pendingQueues.get(managed.conversationId) ?? [];
+    if (source === "advancement") return "queued";
+    return queue.filter((item) => item.source !== "advancement").length >= this.maxPending
+      ? "full"
+      : "queued";
   }
 
   // ─── ConfirmationHub 接入 ───
@@ -956,6 +1279,52 @@ export class ConversationManager implements ConversationCommitProjection {
   }
 
   /**
+   * Applies the in-memory stop corresponding to an already durable cancellation fact.
+   * A run-specific request never aborts or removes another run from the same conversation.
+   */
+  applyDurableCancellation(
+    conversationId: string,
+    runId: string | undefined,
+    reason?: AbortReason,
+  ): AbortResult {
+    const session = this.sessions.get(conversationId);
+    if (!session) return { abortedInFlight: false, cancelledPending: 0 };
+
+    const active = this.activeTasks.get(conversationId);
+    const activeMatches =
+      active !== undefined &&
+      (runId === undefined || active.durableRunId === runId);
+    const runtimeAborted = activeMatches ? session.runtime.abort(reason) : false;
+    const taskAborted = activeMatches
+      ? this.abortActiveTask(conversationId, reason)
+      : false;
+    const abortedInFlight = runtimeAborted || taskAborted;
+
+    const queue = this.pendingQueues.get(conversationId);
+    if (!queue) return { abortedInFlight, cancelledPending: 0 };
+    const remaining: PendingTask[] = [];
+    let cancelledPending = 0;
+    for (const task of queue) {
+      if (runId !== undefined && task.durableRunId !== runId) {
+        remaining.push(task);
+        continue;
+      }
+      try {
+        (task.cancelLocally ?? task.cancel)();
+      } catch {
+        // Local cleanup is isolated per task; the durable cancellation is already final.
+      }
+      cancelledPending += 1;
+    }
+    if (remaining.length > 0) {
+      this.pendingQueues.set(conversationId, remaining);
+    } else {
+      this.pendingQueues.delete(conversationId);
+    }
+    return { abortedInFlight, cancelledPending };
+  }
+
+  /**
    * 关停链路用,与单 session `abort` 行为对称:同步 fire 各 session in-flight +
    * 同步清各 pending queue 触发各 cancel hook。
    *
@@ -996,7 +1365,85 @@ export class ConversationManager implements ConversationCommitProjection {
    * graceful shutdown 必须有上限,接受"30s 之后强行进下一步"的工程妥协。
    */
   async abortAllAndWait(reason: AbortReason, timeoutMs = 30_000): Promise<number> {
-    const aborted = this.abortAll(reason);
+    const startedAt = Date.now();
+    const claimedPending = [...this.pendingQueues.entries()].flatMap(
+      ([conversationId, queue]) =>
+        queue.map((task) => ({ conversationId, task })),
+    );
+    this.pendingQueues.clear();
+    const active = [...this.activeTasks.entries()].map(([conversationId, task]) => ({
+      conversationId,
+      task,
+    }));
+    const targets = [...claimedPending, ...active];
+    const pendingTasks = new Set(claimedPending.map(({ task }) => task));
+    const durableState = new Map<PendingTask, "pending" | "fulfilled" | "rejected">(
+      targets.map(({ task }) => [task, "pending"]),
+    );
+    let aborted = 0;
+    let firstDurableError: unknown;
+    const durableSettlements = Promise.all(
+      targets.map(async ({ conversationId, task }) => {
+        try {
+          await task.cancelDurably?.();
+          durableState.set(task, "fulfilled");
+          const local = this.applyDurableCancellation(
+            conversationId,
+            task.durableRunId,
+            reason,
+          );
+          if (pendingTasks.has(task) && local.cancelledPending === 0) {
+            try {
+              (task.cancelLocally ?? task.cancel)();
+            } catch {
+              // The durable cancellation is final; local cleanup is best effort.
+            }
+          }
+          if (local.abortedInFlight) aborted += 1;
+        } catch (error) {
+          durableState.set(task, "rejected");
+          firstDurableError ??= error;
+        }
+      }),
+    ).then(() => true);
+    const trackedActiveConversations = new Set(
+      active.map(({ conversationId }) => conversationId),
+    );
+    for (const [conversationId, session] of this.sessions) {
+      if (!session.busy || trackedActiveConversations.has(conversationId)) continue;
+      if (this.abortInFlight(conversationId, reason)) aborted += 1;
+    }
+    let durableTimer: ReturnType<typeof setTimeout> | undefined;
+    const durableBudget = new Promise<false>((resolve) => {
+      durableTimer = setTimeout(() => resolve(false), timeoutMs);
+      durableTimer.unref?.();
+    });
+    let durableFinished: boolean;
+    try {
+      durableFinished = await Promise.race([durableSettlements, durableBudget]);
+    } finally {
+      if (durableTimer) clearTimeout(durableTimer);
+    }
+    const unsettledPending = new Map<
+      string,
+      Array<(typeof claimedPending)[number]>
+    >();
+    for (const claimed of claimedPending) {
+      if (durableState.get(claimed.task) === "fulfilled") continue;
+      const group = unsettledPending.get(claimed.conversationId) ?? [];
+      group.push(claimed);
+      unsettledPending.set(claimed.conversationId, group);
+    }
+    for (const [conversationId, claimed] of unsettledPending) {
+      const current = this.pendingQueues.get(conversationId) ?? [];
+      this.pendingQueues.set(conversationId, [
+        ...claimed.map(({ task }) => task),
+        ...current,
+      ]);
+    }
+    if (durableFinished && firstDurableError !== undefined) {
+      throw firstDurableError;
+    }
     if (this.sessionsAllIdle()) return aborted;
 
     const drained = new Promise<void>((resolve) => {
@@ -1004,7 +1451,7 @@ export class ConversationManager implements ConversationCommitProjection {
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
+      timer = setTimeout(resolve, Math.max(0, timeoutMs - (Date.now() - startedAt)));
     });
     try {
       await Promise.race([drained, timeout]);
@@ -1624,6 +2071,7 @@ export class ConversationManager implements ConversationCommitProjection {
   enqueue(
     conversationId: string,
     task: PendingTask,
+    options?: { readonly capacityReserved?: boolean },
   ): "immediate" | "queued" | "full" | "busy" {
     if (this.findQuiescingPrefix(conversationId)) return "busy";
     const session = this.sessions.get(conversationId);
@@ -1636,7 +2084,11 @@ export class ConversationManager implements ConversationCommitProjection {
     const queue = this.pendingQueues.get(conversationId) ?? [];
     const userPendingCount = queue.filter((item) => item.source !== "advancement")
       .length;
-    if (task.source !== "advancement" && userPendingCount >= this.maxPending) {
+    if (
+      !options?.capacityReserved &&
+      task.source !== "advancement" &&
+      userPendingCount >= this.maxPending
+    ) {
       return "full";
     }
 
@@ -1649,29 +2101,37 @@ export class ConversationManager implements ConversationCommitProjection {
     return this.pendingQueues.get(conversationId)?.length ?? 0;
   }
 
-  cancelPendingBySource(conversationId: string, source: TurnSource): number {
+  async cancelPendingBySource(
+    conversationId: string,
+    source: TurnSource,
+  ): Promise<number> {
     const queue = this.pendingQueues.get(conversationId);
     if (!queue) return 0;
-    const remaining: PendingTask[] = [];
-    let cancelled = 0;
-    for (const task of queue) {
-      if (task.source !== source) {
-        remaining.push(task);
-        continue;
-      }
-      try {
-        task.cancel();
-      } catch {
-        // 与 abort 路径一致：单个取消钩子失败不影响其它待处理任务。
-      }
-      cancelled++;
-    }
+    const cancelled = queue.filter((task) => task.source === source);
+    if (cancelled.length === 0) return 0;
+    const remaining = queue.filter((task) => task.source !== source);
     if (remaining.length > 0) {
       this.pendingQueues.set(conversationId, remaining);
     } else {
       this.pendingQueues.delete(conversationId);
     }
-    return cancelled;
+    let completed = 0;
+    for (const task of cancelled) {
+      try {
+        await task.cancelDurably?.();
+        (task.cancelLocally ?? task.cancel)();
+        completed += 1;
+      } catch (error) {
+        const unfinished = new Set(cancelled.slice(completed));
+        const restored = queue.filter(
+          (candidate) =>
+            candidate.source !== source || unfinished.has(candidate),
+        );
+        this.pendingQueues.set(conversationId, restored);
+        throw error;
+      }
+    }
+    return completed;
   }
 
   private dequeueNext(conversationId: string): void {
@@ -1694,7 +2154,10 @@ export class ConversationManager implements ConversationCommitProjection {
     this.activeTasks.set(conversationId, task);
     session.lastActiveAt = new Date().toISOString();
     this.clearGraceTimer(conversationId);
-    void task.execute();
+    void task.execute().catch((error) => {
+      console.error("[ConversationManager] queued task failed:", error);
+      this.setBusy(conversationId, false);
+    });
   }
 
   private abortActiveTask(conversationId: string, reason?: AbortReason): boolean {

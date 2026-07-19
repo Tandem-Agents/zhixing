@@ -13,6 +13,7 @@ import type {
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
 } from "@zhixing/core";
+import type { ConversationStatusNotice } from "@zhixing/core/contracts";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import type {
   AdvancementController,
@@ -39,6 +40,20 @@ export interface RuntimeControlAdapter {
   deliveryStatus?: (
     afterByItem: Readonly<Record<string, number>>,
   ) => Promise<readonly DeliveryStatusNotice[]>;
+  conversationStatus?: (
+    after: readonly {
+      readonly conversationId: string;
+      readonly runId: string;
+      readonly afterStatusRevision: number;
+    }[],
+  ) => Promise<{
+    readonly notices: readonly ConversationStatusNotice[];
+    readonly next: readonly {
+      readonly conversationId: string;
+      readonly runId: string;
+      readonly afterStatusRevision: number;
+    }[];
+  }>;
   resolveDelivery?: (input: {
     readonly requestId: string;
     readonly itemId: string;

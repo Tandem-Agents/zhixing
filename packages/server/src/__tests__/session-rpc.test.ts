@@ -1746,9 +1746,7 @@ describe("session.* RPC (S2.D)", () => {
       created.result as { conversationId: string }
     ).conversationId;
 
-    const deleteResp = await client.request("session.delete", {
-      conversationId,
-    });
+    const deleteResp = await client.request("session.delete", { conversationId });
     expect(isSuccessResponse(deleteResp)).toBe(true);
 
     const sendResp = await client.request("session.send", {

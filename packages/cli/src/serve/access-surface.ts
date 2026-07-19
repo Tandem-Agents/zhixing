@@ -30,9 +30,11 @@ import type {
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
+import type { SecretStorePort } from "@zhixing/core/contracts";
 import type {
   ConversationDirectory,
   InboundRouter,
+  PerspectivesController,
   RunningServer,
   CleanupRegistry,
   TextConfirmationRenderer,
@@ -51,7 +53,12 @@ import type {
   AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
 import type { McpHub } from "@zhixing/mcp";
-import type { DeliveryStack } from "../setup-delivery.js";
+import type {
+  AuthorityRuntimeStack,
+  DeliveryStack,
+} from "../setup-delivery.js";
+import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
+import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -68,6 +75,9 @@ export interface AssemblyContext {
   readonly profile: ServerProfile;
   readonly config: ZhixingConfig;
   readonly zhixingHome: string;
+  readonly secretStore: SecretStorePort;
+  readonly durableInteractions: DurableConversationInteractionObserver;
+  readonly perspectives: PerspectivesController;
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;
@@ -109,6 +119,8 @@ export interface AssemblyContext {
   advancement?: AdvancementController;
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
+  authorityRuntime?: AuthorityRuntimeStack;
+  conversationProtocol?: ConversationProtocolRuntime;
   deliveryStack?: DeliveryStack;
   textRenderer?: TextConfirmationRenderer;
 

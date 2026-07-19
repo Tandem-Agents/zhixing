@@ -5,6 +5,7 @@ import {
   collectArtifactRefs,
   type ArtifactStore,
   type AuthorityCommitLog,
+  type AuthorityLogSnapshot,
   type ProjectionCursor,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
@@ -20,7 +21,9 @@ import type {
   ConversationUncertainClosure,
   ConversationRunState,
   ConversationStatusNotice,
+  ConversationInvocation,
   ControlResult,
+  ControlResultBody,
   FinalFrame,
   FinalOutboxRecord,
   GlobalStagedMutation,
@@ -68,6 +71,7 @@ import {
   validateConversationSealedBundle,
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionMirrorBatch,
+  validateConversationInvocation,
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
   validateDispatchResult,
@@ -96,6 +100,7 @@ import type {
   ControlAdmissionJournal,
   ControlAdmissionOutcome,
   ConversationControlEnvelope,
+  InitialControlEnvelope,
   TrustedControlSource,
 } from "./control-admission.js";
 import {
@@ -145,6 +150,7 @@ import {
   type Stored,
 } from "./conversation-run-contracts.js";
 import type {
+  ConversationControlResponseInput,
   ConversationDeliveryCommitInput,
   ConversationDeliveryParticipant,
   ConversationStatusDeliveryInput,
@@ -211,6 +217,7 @@ type StatusHistoryEntry = {
   readonly state: ConversationRunState;
   readonly statusRevision: number;
   readonly at: IsoTime;
+  readonly reason?: string;
 } & (
   | { readonly uncertainTransition?: undefined }
   | { readonly uncertainTransition: "opened"; readonly openFactDigest: string }
@@ -343,6 +350,17 @@ export interface ConversationCommitProjection {
   project(input: ConversationCommitProjectionInput): Promise<void>;
 }
 
+export interface ConversationLifecycleProjectionInput {
+  readonly conversationId: string;
+  readonly mutation: "clear" | "delete";
+  readonly domainRevision: number;
+  readonly requestId: string;
+}
+
+export type ConversationLifecycleProjection = (
+  input: ConversationLifecycleProjectionInput,
+) => Promise<void>;
+
 export interface ConversationMutationPublisher {
   /**
    * Pure batch decision over this AuthorityCommitLog projected through authorityPrefixLsn.
@@ -392,6 +410,22 @@ export interface PendingConversationDispatch {
   readonly activation: AssignmentActivationProof<"conversation">;
 }
 
+export interface PendingConversationInput {
+  readonly runId: string;
+  readonly input: UserTurnInput;
+  readonly ingress: IngressContext;
+  readonly invocation: ConversationInvocation;
+  readonly queuedPosition: number;
+}
+
+export interface ConversationRunControlDescriptor {
+  readonly runId: string;
+  readonly state: ConversationRunState;
+  readonly source: ConversationInvocation["source"];
+  /** Stable ingress identity used to bind source-specific projections. */
+  readonly ingressId: string;
+}
+
 export interface PendingConversationFence {
   readonly assignmentId: string;
   readonly fence: { readonly fenceSeq: number; readonly requestId: string };
@@ -434,6 +468,17 @@ interface AssignedProjection {
 
 interface RunProjection {
   readonly conversationId: string;
+  domainRevision: number;
+  deleted: boolean;
+  readonly lifecycleByRequest: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "session-lifecycle" }>
+  >;
+  readonly pendingLifecycleProjections: Map<
+    number,
+    Extract<ConversationRunJournalRecord, { t: "session-lifecycle" }>
+  >;
+  readonly projectedLifecycleRevisions: Set<number>;
   readonly admittedByRun: Map<string, AdmittedProjection>;
   readonly runByIngress: Map<string, string>;
   readonly assignedById: Map<string, AssignedProjection>;
@@ -715,6 +760,164 @@ export class ConversationRunJournal {
     this.#abortTickets = options.abortTickets;
   }
 
+  async primeRecoverySnapshot(
+    snapshot: AuthorityLogSnapshot<unknown>,
+  ): Promise<void> {
+    await this.#operations.run(async () => {
+      let run = emptyProjection(this.#conversationId);
+      let submission = emptySubmissionGuardProjection();
+      let publish = emptyPublishProjection();
+      let final = emptyFinalProjection();
+      const assignments = new Set<string>();
+      for (const envelope of snapshot.commits) {
+        for (const record of envelope.entries) {
+          if (record.stream === runStream(this.#conversationId)) {
+            run = await this.#reduce(run, record, envelope);
+            const assignmentId = (
+              record.body && typeof record.body === "object" && !Array.isArray(record.body)
+                ? (record.body as { assignmentId?: unknown }).assignmentId
+                : undefined
+            );
+            if (typeof assignmentId === "string") assignments.add(assignmentId);
+            submission = await this.#reduceSubmissionGuard(
+              submission,
+              record as LogicalRecord<ConversationCommitLogRecord>,
+              envelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+            );
+          } else if (
+            record.stream === "publish" &&
+            record.body &&
+            typeof record.body === "object" &&
+            !Array.isArray(record.body) &&
+            typeof (record.body as { assignmentId?: unknown }).assignmentId === "string" &&
+            assignments.has((record.body as { assignmentId: string }).assignmentId)
+          ) {
+            publish = await reducePublishRecord(
+              publish,
+              record as LogicalRecord<PublishRecord>,
+              envelope as import("@zhixing/core/contracts").CommitEnvelope<PublishRecord>,
+              this.#artifacts,
+            );
+          } else if (
+            record.stream === "final-outbox" &&
+            record.body &&
+            typeof record.body === "object" &&
+            !Array.isArray(record.body) &&
+            (record.body as { conversationId?: unknown }).conversationId ===
+              this.#conversationId
+          ) {
+            await applyFinalRecord(
+              final,
+              record.body as FinalOutboxRecord,
+              envelope.at,
+              envelope as import("@zhixing/core/contracts").CommitEnvelope<FinalOutboxRecord>,
+              this.#artifacts,
+            );
+          }
+        }
+      }
+      this.#runProjection = { state: run, cursor: snapshot.cursor };
+      this.#submissionGuardProjection = {
+        state: submission,
+        cursor: snapshot.cursor,
+      };
+      this.#publishProjection = { state: publish, cursor: snapshot.cursor };
+      this.#finalProjection = { state: final, cursor: snapshot.cursor };
+    });
+  }
+
+  async authorityState(): Promise<{
+    readonly domainRevision: number;
+    readonly commitRevision: number;
+    readonly deleted: boolean;
+    readonly hasDurableIdentity: boolean;
+    readonly pendingLifecycleProjections: number;
+  }> {
+    return this.#select((state) => ({
+      domainRevision: state.domainRevision,
+      commitRevision: state.commits.at(-1)?.commitRevision ?? 0,
+      deleted: state.deleted,
+      hasDurableIdentity:
+        state.admittedByRun.size > 0 || state.lifecycleByRequest.size > 0,
+      pendingLifecycleProjections: state.pendingLifecycleProjections.size,
+    }));
+  }
+
+  async lifecycleRequest(
+    requestId: string,
+  ): Promise<ConversationLifecycleProjectionInput | undefined> {
+    assertIdentifier(requestId, "Session lifecycle request id");
+    return this.#select((state) => {
+      const record = state.lifecycleByRequest.get(requestId);
+      return record
+        ? {
+            conversationId: this.#conversationId,
+            mutation: record.mutation,
+            domainRevision: record.domainRevision,
+            requestId: record.requestId,
+          }
+        : undefined;
+    });
+  }
+
+  async completeLifecycleProjection(
+    input: Omit<ConversationLifecycleProjectionInput, "conversationId">,
+  ): Promise<boolean> {
+    assertIdentifier(input.requestId, "Session lifecycle request id");
+    const transaction = await this.#transact<boolean>((state) => {
+      const pending = state.pendingLifecycleProjections.get(input.domainRevision);
+      if (!pending) {
+        const durable = state.lifecycleByRequest.get(input.requestId);
+        if (
+          durable?.domainRevision === input.domainRevision &&
+          durable.mutation === input.mutation &&
+          state.projectedLifecycleRevisions.has(input.domainRevision)
+        ) {
+          return { kind: "return", value: false };
+        }
+        throw corruptRunJournal("Lifecycle projection acknowledgement is not pending");
+      }
+      if (pending.requestId !== input.requestId || pending.mutation !== input.mutation) {
+        throw corruptRunJournal("Lifecycle projection acknowledgement does not bind its fact");
+      }
+      return {
+        kind: "append",
+        entries: [
+          runRecord(this.#conversationId, {
+            kind: "conversation-lifecycle-projection",
+            mutation: input.mutation,
+            domainRevision: input.domainRevision,
+            requestId: input.requestId,
+          }),
+        ],
+        value: true,
+      };
+    });
+    return transaction.value;
+  }
+
+  async resumeLifecycleProjections(
+    project: ConversationLifecycleProjection,
+  ): Promise<number> {
+    const pending = await this.#select((state) =>
+      [...state.pendingLifecycleProjections.values()]
+        .sort((left, right) => left.domainRevision - right.domainRevision)
+        .map((record) => snapshot(record, "Pending lifecycle projection")),
+    );
+    let projected = 0;
+    for (const record of pending) {
+      const input = {
+        conversationId: this.#conversationId,
+        mutation: record.mutation,
+        domainRevision: record.domainRevision,
+        requestId: record.requestId,
+      } as const;
+      await project(input);
+      if (await this.completeLifecycleProjection(input)) projected += 1;
+    }
+    return projected;
+  }
+
   onStatus(
     listener: (notice: ConversationStatusNotice) => void | Promise<void>,
   ): () => void {
@@ -727,6 +930,7 @@ export class ConversationRunJournal {
     readonly runId: string;
     readonly userInput: UserTurnInput;
     readonly ingress: IngressContext;
+    readonly invocation: ConversationInvocation;
     readonly queuedPosition: number;
   }): Promise<void> {
     assertIdentifier(input.ingressKey, "Ingress key");
@@ -737,6 +941,7 @@ export class ConversationRunJournal {
     }
     const userInput = snapshot(input.userInput, "Run input");
     const ingress = validateIngressContext(input.ingress);
+    const invocation = validateConversationInvocation(input.invocation);
     const prepared = await prepareStored(userInput, this.#artifacts);
     const admitted: Extract<ConversationRunJournalRecord, { t: "admitted" }> = {
       t: "admitted",
@@ -744,6 +949,7 @@ export class ConversationRunJournal {
       runId: input.runId,
       input: prepared.stored,
       ingress,
+      invocation,
       queuedPosition: input.queuedPosition,
     };
 
@@ -757,6 +963,7 @@ export class ConversationRunJournal {
             ingressRun !== input.runId ||
             canonicalize(byRun.record.ingress) !== canonicalize(ingress) ||
             canonicalize(byRun.input) !== canonicalize(userInput) ||
+            canonicalize(byRun.record.invocation) !== canonicalize(invocation) ||
             byRun.record.queuedPosition !== input.queuedPosition
           ) {
             throw new Error("Run admission identity has conflicting durable payloads");
@@ -782,6 +989,168 @@ export class ConversationRunJournal {
       },
       prepared.references,
     );
+  }
+
+  /** Atomically admits an input control request and creates its queued run. */
+  async applyInputControl(input: {
+    readonly admission: ControlAdmissionJournal;
+    readonly envelope: InitialControlEnvelope;
+    readonly source: TrustedControlSource;
+    readonly runId: string;
+  }): Promise<ControlAdmissionOutcome> {
+    assertIdentifier(input.runId, "Run id");
+    const body = input.envelope.body;
+    if (body.t !== "input") {
+      throw new TypeError("Conversation input admission requires an input request");
+    }
+    validateNonEmptyUserTurnInput(body.input);
+    const userInput = snapshot(body.input, "Run input");
+    const invocation = validateConversationInvocation(body.invocation);
+    const prepared = await prepareStored(userInput, this.#artifacts);
+    return this.#delivery.coordinate(() => input.admission.applyAuthority<
+      RunProjection,
+      InitialControlEnvelope
+    >({
+      envelope: input.envelope,
+      source: input.source,
+      stream: runStream(this.#conversationId),
+      initial: emptyProjection(this.#conversationId),
+      reducer: (state, record, commit) =>
+        this.#reduce(
+          state,
+          record as LogicalRecord<ConversationCommitLogRecord>,
+          commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+        ),
+      candidateReferences: prepared.references,
+      companionStreams: ["delivery"],
+      prepareCompanions: (state, context, plan) => {
+        const statuses = conversationStatusDeliveryInputs(
+          this.#conversationId,
+          state,
+          plan.authorityEntries ?? [],
+          context.authorityPrefix.at,
+        );
+        const delivery = this.#delivery.prepareConversationStatuses(statuses);
+        if (!delivery.accepted) throw corruptRunJournal(delivery.error.message);
+        return delivery.records;
+      },
+      onCommitted: (state, commit) => {
+        this.#publishStatusNotices(
+          conversationStatusNoticesForCommit(
+            state,
+            commit,
+            this.#conversationId,
+            this.#ownerEpoch,
+          ),
+        );
+      },
+      decide: (state, context) => {
+        const request = context.envelope.body;
+        if (request.t !== "input") {
+          return {
+            result: rejectedControl(
+              "invalid",
+              "Conversation input admission requires an input request",
+            ),
+          };
+        }
+        if (state.deleted) {
+          return {
+            result: rejectedControl(
+              "fence-rejected",
+              "Conversation has been durably deleted",
+            ),
+          };
+        }
+        const ingress = context.ingress;
+        if (
+          request.conversationId !== this.#conversationId ||
+          request.ownerEpoch !== this.#ownerEpoch ||
+          !ingress ||
+          request.ingress.ingressId !== ingress.ingressId ||
+          request.ingress.source !== ingress.kind
+        ) {
+          return {
+            result: rejectedControl(
+              "epoch-stale",
+              "Input request does not bind the current conversation owner and ingress",
+            ),
+          };
+        }
+        const ingressKey = `${ingress.surfacePrincipal}/${ingress.ingressId}`;
+        const existingRunId = state.runByIngress.get(ingressKey);
+        if (existingRunId) {
+          const existing = state.admittedByRun.get(existingRunId);
+          if (
+            existingRunId !== input.runId ||
+            !existing ||
+            canonicalize(existing.input) !== canonicalize(userInput) ||
+            canonicalize(existing.record.ingress) !== canonicalize(ingress) ||
+            canonicalize(existing.record.invocation) !== canonicalize(invocation)
+          ) {
+            return {
+              result: rejectedControl(
+                "idempotency-conflict",
+                "Ingress already belongs to a different run payload",
+              ),
+            };
+          }
+          return {
+            result: {
+              v: 1,
+              status: "ok",
+              body: {
+                t: "input",
+                runId: existingRunId,
+                queuedPosition: existing.record.queuedPosition,
+              },
+            },
+          };
+        }
+        if (state.pendingLifecycleProjections.size > 0) {
+          return {
+            result: rejectedControl(
+              "fence-rejected",
+              "Conversation lifecycle projection must finish before new input",
+            ),
+          };
+        }
+        const queuedPosition = context.authorityPrefix.nextLsn;
+        if (state.admittedByRun.has(input.runId)) {
+          return {
+            result: rejectedControl(
+              "idempotency-conflict",
+              "Run id already belongs to a different ingress",
+            ),
+          };
+        }
+        const admitted: Extract<ConversationRunJournalRecord, { t: "admitted" }> = {
+          t: "admitted",
+          ingressKey,
+          runId: input.runId,
+          input: prepared.stored,
+          ingress,
+          invocation,
+          queuedPosition,
+        };
+        return {
+          result: {
+            v: 1,
+            status: "ok",
+            body: { t: "input", runId: input.runId, queuedPosition },
+          },
+          authorityEntries: [
+            runRecord(this.#conversationId, admitted),
+            runRecord(this.#conversationId, {
+              t: "state",
+              runId: input.runId,
+              state: "queued",
+              statusRevision: 1,
+            }),
+          ],
+        };
+      },
+    }));
   }
 
   async assign(
@@ -918,6 +1287,131 @@ export class ConversationRunJournal {
       ),
     );
     return assigned ? [await this.#materializeDispatch(assigned)] : [];
+  }
+
+  /** Inputs that are durably admitted but have no active assignment, in FIFO order. */
+  async pendingInputs(): Promise<PendingConversationInput[]> {
+    return this.#select((state) =>
+      state.queuedPositionHeap.map((queuedPosition) => {
+        const runId = state.queuedRunByPosition.get(queuedPosition);
+        const admitted = runId ? state.admittedByRun.get(runId) : undefined;
+        const current = runId ? state.stateByRun.get(runId) : undefined;
+        if (
+          !runId ||
+          !admitted ||
+          current?.state !== "queued" ||
+          state.assignmentByRun.has(runId) ||
+          admitted.record.queuedPosition !== queuedPosition
+        ) {
+          throw corruptRunJournal("Queued input projection is inconsistent");
+        }
+        return {
+          runId,
+          input: snapshot(admitted.input, "Pending conversation input"),
+          ingress: snapshot(admitted.record.ingress, "Pending conversation ingress"),
+          invocation: snapshot(
+            admitted.record.invocation,
+            "Pending conversation invocation",
+          ),
+          queuedPosition,
+        };
+      }),
+    );
+  }
+
+  /** Runs accepted by the user cancellation control plane, in scheduler order. */
+  async cancellableRunIds(): Promise<string[]> {
+    return (await this.cancellableRuns()).map((run) => run.runId);
+  }
+
+  /** Exact durable identity and source for each currently cancellable run. */
+  async cancellableRuns(): Promise<ConversationRunControlDescriptor[]> {
+    return this.#select((state) => cancellableRunDescriptors(state));
+  }
+
+  async runControlDescriptor(
+    runId: string,
+  ): Promise<ConversationRunControlDescriptor | undefined> {
+    assertIdentifier(runId, "Run id");
+    return this.#select((state) => {
+      const current = state.stateByRun.get(runId)?.state;
+      const admitted = state.admittedByRun.get(runId);
+      return current && admitted
+          ? {
+              runId,
+              state: current,
+              source: admitted.record.invocation.source,
+              ingressId: admitted.record.ingress.ingressId,
+            }
+        : undefined;
+    });
+  }
+
+  /**
+   * 已终结交互的耐久 outcome——单源自权威日志的 interaction mirror 投影,
+   * 供 surface 对写后丢响应/重启后的同请求重试回放原结果。耐久 resolve
+   * 成功恒先于 mirror 落盘,故"查得到"与"resolve 曾成功返回"一致。
+   */
+  async interactionOutcome(
+    requestId: string,
+  ): Promise<{ t: "answered"; decisionDigest: string } | { t: "closed" } | undefined> {
+    assertIdentifier(requestId, "Interaction request id");
+    return this.#select((state) => {
+      for (const batch of state.mirrorBatches.values()) {
+        for (const entry of batch.batch.entries) {
+          if (entry.requestId !== requestId) continue;
+          return entry.outcome.t === "answered"
+            ? { t: "answered" as const, decisionDigest: entry.outcome.decisionDigest }
+            : { t: "closed" as const };
+        }
+      }
+      return undefined;
+    });
+  }
+
+  async runByIngress(
+    ingressId: string,
+    source: ConversationInvocation["source"],
+  ): Promise<{ readonly runId: string; readonly state: ConversationRunState } | undefined> {
+    assertIdentifier(ingressId, "Ingress id");
+    return this.#select((state) => {
+      let match:
+        | { readonly runId: string; readonly state: ConversationRunState }
+        | undefined;
+      for (const [runId, admitted] of state.admittedByRun) {
+        if (
+          admitted.record.ingress.ingressId !== ingressId ||
+          admitted.record.invocation.source !== source
+        ) {
+          continue;
+        }
+        const current = state.stateByRun.get(runId)?.state;
+        if (!current) {
+          throw corruptRunJournal("Ingress-bound run has no durable state");
+        }
+        if (match && match.runId !== runId) {
+          throw corruptRunJournal("Ingress identity is bound to multiple durable runs");
+        }
+        match = { runId, state: current };
+      }
+      return match;
+    });
+  }
+
+  async nextAssignmentAttempt(runId: string): Promise<number> {
+    assertIdentifier(runId, "Run id");
+    return this.#select((state) => {
+      let latest = 0;
+      for (const assigned of state.assignedById.values()) {
+        if (assigned.record.runId === runId) {
+          latest = Math.max(latest, assigned.record.reservation.attempt);
+        }
+      }
+      if (latest >= Number.MAX_SAFE_INTEGER) {
+        throw new RangeError("Conversation assignment attempt is exhausted");
+      }
+      return latest + 1;
+    });
   }
 
   async dispatchesAwaitingStarted(): Promise<PendingConversationDispatch[]> {
@@ -1086,7 +1580,20 @@ export class ConversationRunJournal {
         );
         const prepared = this.#delivery.prepareConversationStatuses(statuses);
         if (!prepared.accepted) throw corruptRunJournal(prepared.error.message);
-        return prepared.records;
+        const controlResponses = conversationControlResponseDeliveryInputs(
+          this.#conversationId,
+          context.envelope,
+          plan,
+          context.canonicalRequestId,
+          context.authorityPrefix.at,
+        );
+        if (controlResponses.length === 0) return prepared.records;
+        const preparedResponses =
+          this.#delivery.prepareConversationControlResponses(controlResponses);
+        if (!preparedResponses.accepted) {
+          throw corruptRunJournal(preparedResponses.error.message);
+        }
+        return [...prepared.records, ...preparedResponses.records];
       },
       onCommitted: (state, commit) => {
         this.#publishStatusNotices(
@@ -1100,6 +1607,88 @@ export class ConversationRunJournal {
       },
       decide: (state, context) => {
         const body = context.envelope.body;
+        if (body.t === "session-write") {
+          if (
+            body.conversationId !== this.#conversationId ||
+            body.ownerEpoch !== this.#ownerEpoch
+          ) {
+            return {
+              result: rejectedControl(
+                "epoch-stale",
+                "Session write does not bind the current conversation owner",
+              ),
+            };
+          }
+          if (body.domainRevision !== state.domainRevision) {
+            return {
+              result: rejectedControl(
+                "revision-conflict",
+                "Session write domain revision is stale",
+              ),
+            };
+          }
+          if (state.deleted) {
+            return {
+              result: rejectedControl(
+                "not-found",
+                "Conversation has been durably deleted",
+              ),
+            };
+          }
+          if (state.pendingLifecycleProjections.size > 0) {
+            return {
+              result: rejectedControl(
+                "busy",
+                "A prior session lifecycle projection is still pending",
+              ),
+            };
+          }
+          const mutation =
+            body.mutation.kind === "window-op" && body.mutation.op === "clear"
+              ? "clear"
+              : body.mutation.kind === "conversation-delete"
+                ? "delete"
+                : undefined;
+          if (!mutation) {
+            return {
+              result: rejectedControl(
+                "invalid",
+                "Session write mutation is not implemented by this owner",
+              ),
+            };
+          }
+          const hasOpenRun = [...state.stateByRun.values()].some(({ state: runState }) =>
+            runState === "queued" ||
+            runState === "dispatched" ||
+            runState === "running" ||
+            runState === "cancel-requested" ||
+            runState === "uncertain"
+          );
+          if (hasOpenRun) {
+            return {
+              result: rejectedControl(
+                "busy",
+                "Session write requires a quiescent conversation",
+              ),
+            };
+          }
+          const revision = state.domainRevision + 1;
+          return {
+            result: {
+              v: 1,
+              status: "ok",
+              body: { t: "session-write", revision },
+            },
+            authorityEntries: [
+              runRecord(this.#conversationId, {
+                t: "session-lifecycle",
+                mutation,
+                domainRevision: revision,
+                requestId: context.canonicalRequestId,
+              }),
+            ],
+          };
+        }
         if (body.t === "cancel") {
           if (
             body.conversationId !== this.#conversationId ||
@@ -1142,6 +1731,50 @@ export class ConversationRunJournal {
               body: { t: "cancel", runState: decision.value.state },
             },
             authorityEntries: decision.entries,
+          };
+        }
+        if (body.t === "cancel-batch") {
+          if (
+            body.conversationId !== this.#conversationId ||
+            body.ownerEpoch !== this.#ownerEpoch
+          ) {
+            return {
+              result: rejectedControl(
+                "epoch-stale",
+                "Batch cancel request does not bind the current conversation owner",
+              ),
+            };
+          }
+          // 候选集在本线性化点内以单源谓词冻结;逐 run 决定与聚合结果同属
+          // 这一个权威决定,重放消费 applied 结果、零重新枚举。
+          const candidates = cancellableRunDescriptors(state);
+          const entries: LogicalRecord<ConversationCommitLogRecord>[] = [];
+          const runs: Extract<
+            ControlResultBody,
+            { t: "cancel-batch" }
+          >["runs"] = [];
+          for (const candidate of candidates) {
+            const decision = decideConversationCancel(
+              this.#conversationId,
+              state,
+              { runId: candidate.runId, requestId: context.canonicalRequestId },
+              context.authorityPrefix.nextLsn + entries.length,
+            );
+            if (decision.kind === "append") entries.push(...decision.entries);
+            runs.push({
+              runId: candidate.runId,
+              runState: decision.value.state,
+              source: candidate.source,
+              ingressId: candidate.ingressId,
+            });
+          }
+          return {
+            result: {
+              v: 1,
+              status: "ok",
+              body: { t: "cancel-batch", conversationId: this.#conversationId, runs },
+            },
+            authorityEntries: entries,
           };
         }
 
@@ -1243,6 +1876,42 @@ export class ConversationRunJournal {
             runId,
             state: outcome,
             statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: undefined,
+      };
+    });
+  }
+
+  async failAssignedRun(runId: string, assignmentId: string, reason?: string): Promise<void> {
+    assertIdentifier(runId, "Failed run id");
+    assertIdentifier(assignmentId, "Failed assignment id");
+    const boundedReason = reason === undefined
+      ? undefined
+      : truncateUtf8(reason, 512);
+    await this.#transact<void>((state) => {
+      const current = state.stateByRun.get(runId);
+      if (current?.state === "failed") return { kind: "return", value: undefined };
+      const assigned = state.assignedById.get(assignmentId);
+      if (
+        !assigned ||
+        assigned.record.runId !== runId ||
+        state.assignmentByRun.get(runId) !== assignmentId ||
+        (current?.state !== "dispatched" && current?.state !== "running")
+      ) {
+        throw new Error("Only the current active assignment may report execution failure");
+      }
+      return {
+        kind: "append",
+        entries: [
+          ...capabilityRevocations(this.#conversationId, state, assigned),
+          runRecord(this.#conversationId, {
+            t: "state",
+            runId,
+            assignmentId,
+            state: "failed",
+            statusRevision: current.statusRevision + 1,
+            ...(boundedReason ? { reason: boundedReason } : {}),
           }),
         ],
         value: undefined,
@@ -2661,6 +3330,25 @@ export class ConversationRunJournal {
             value: rejected("fence-rejected", "Bundle is late for the current run state", false),
           };
         }
+        const previousCommit = state.commits.at(-1);
+        if (
+          previousCommit &&
+          body.baseRevision !== previousCommit.commitRevision
+        ) {
+          this.#authorizeSubmission(state, ctx, {
+            mode: "active",
+            method: "submission.submitBundle",
+            assignmentId: bundle.assignmentId,
+          });
+          return {
+            kind: "return",
+            value: rejected(
+              "revision-conflict",
+              "Conversation base revision does not follow the durable commit chain",
+              false,
+            ),
+          };
+        }
         this.#authorizeSubmission(state, ctx, {
           mode: currentRunState === "uncertain" ? "settlement" : "active",
           method: "submission.submitBundle",
@@ -2885,10 +3573,9 @@ export class ConversationRunJournal {
         true,
       );
     }
-    if (transaction.value.committed) {
-      await this.resumeCommittedProjections();
-      if (batch) await this.resumePublishing(bundle.assignmentId);
-    }
+    // The CAS result is authoritative. Transcript and staged-mutation
+    // materialization are durable projections redriven by the runtime; their
+    // failure must never reclassify an already committed run.
     return transaction.value;
   }
 
@@ -3123,21 +3810,59 @@ export class ConversationRunJournal {
     runId: string,
     afterStatusRevision: number,
   ): Promise<ConversationStatusNotice[]> {
-    assertIdentifier(runId, "Run id");
-    assertNonNegativeSafeInteger(afterStatusRevision, "Last-seen status revision");
+    return (await this.statusHistoryBatch([{ runId, afterStatusRevision }]))[0]!.notices;
+  }
+
+  async statusHistoryBatch(
+    requests: readonly {
+      readonly runId: string;
+      readonly afterStatusRevision: number;
+    }[],
+  ): Promise<
+    Array<{
+      readonly notices: ConversationStatusNotice[];
+      readonly nextAfterStatusRevision?: number;
+    }>
+  > {
+    if (requests.length > 64) {
+      throw new RangeError("A status history batch may contain at most 64 cursors");
+    }
+    for (const request of requests) {
+      assertIdentifier(request.runId, "Run id");
+      assertNonNegativeSafeInteger(
+        request.afterStatusRevision,
+        "Last-seen status revision",
+      );
+    }
     return this.#select((state) =>
-      (state.statusHistoryByRun.get(runId) ?? [])
-        .filter((record) => record.statusRevision > afterStatusRevision)
-        .map((record) =>
-          conversationStatusNotice(
-            this.#conversationId,
-            this.#ownerEpoch,
-            runId,
-            record,
-          ),
-        )
-        .filter((notice): notice is ConversationStatusNotice => notice !== undefined),
+      requests.map(({ runId, afterStatusRevision }) => {
+        const page = (state.statusHistoryByRun.get(runId) ?? [])
+          .filter((record) => record.statusRevision > afterStatusRevision)
+          .slice(0, 65);
+        const selected = page.slice(0, 64);
+        const notices = selected
+          .map((record) =>
+            conversationStatusNotice(
+              this.#conversationId,
+              this.#ownerEpoch,
+              runId,
+              record,
+            ),
+          )
+          .filter((notice): notice is ConversationStatusNotice => notice !== undefined);
+        return {
+          notices,
+          ...(page.length > selected.length && selected.length > 0
+            ? { nextAfterStatusRevision: selected.at(-1)!.statusRevision }
+            : {}),
+        };
+      }),
     );
+  }
+
+  async runState(runId: string): Promise<ConversationRunState | undefined> {
+    assertIdentifier(runId, "Run id");
+    return this.#select((state) => state.stateByRun.get(runId)?.state);
   }
 
   async publishConflicts(assignmentId: string): Promise<PublishConflictNotice | undefined> {
@@ -3197,6 +3922,34 @@ export class ConversationRunJournal {
       });
     }
     return output;
+  }
+
+  /** Materialize one committed run for exact control-request replay without re-execution. */
+  async committedRun(
+    runId: string,
+  ): Promise<ConversationCommitProjectionInput | undefined> {
+    assertIdentifier(runId, "Run id");
+    const committed = await this.#select((state) => {
+      const record = state.commits.find((candidate) => candidate.runId === runId);
+      return record ? snapshot(record, "Committed run replay") : undefined;
+    });
+    if (!committed) return undefined;
+    const bytes = await this.#artifacts.get(committed.bundle.ref);
+    const bundle = validateConversationSealedBundle(
+      JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
+    );
+    const closure = await validateConversationBundleClosure(bundle, this.#artifacts);
+    return {
+      assignmentId: committed.assignmentId,
+      conversationId: this.#conversationId,
+      commitRevision: committed.commitRevision,
+      digest: bundle.digest,
+      runRecord: closure.runRecord,
+      ...(bundle.body.windowCompact
+        ? { windowCompact: bundle.body.windowCompact }
+        : {}),
+      contentAssets: bundle.body.contentAssets,
+    };
   }
 
   async currentState(runId: string): Promise<ConversationRunState | undefined> {
@@ -3440,7 +4193,7 @@ export class ConversationRunJournal {
     }
     const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
     const body = snapshot(
-      record.body as ConversationRunJournalRecord | ConversationProjectionRecord,
+      record.body as ConversationRunJournalRecord | ConversationRunInternalRecord,
       "Run journal record",
     );
     if ("kind" in body) {
@@ -3466,6 +4219,22 @@ export class ConversationRunJournal {
         state.pendingCommitProjections.delete(body.assignmentId);
         return state;
       }
+      if (body.kind === "conversation-lifecycle-projection") {
+        const pending = state.pendingLifecycleProjections.get(body.domainRevision);
+        if (
+          !pending ||
+          pending.mutation !== body.mutation ||
+          pending.requestId !== body.requestId ||
+          state.projectedLifecycleRevisions.has(body.domainRevision)
+        ) {
+          throw corruptRunJournal(
+            "Lifecycle projection progress does not name one pending lifecycle fact",
+          );
+        }
+        state.projectedLifecycleRevisions.add(body.domainRevision);
+        state.pendingLifecycleProjections.delete(body.domainRevision);
+        return state;
+      }
       const committed = state.commits.at(-1);
       if (
         !committed ||
@@ -3489,7 +4258,24 @@ export class ConversationRunJournal {
     }
     assertConversationRunRecord(body, this.#verifier);
     switch (body.t) {
+      case "session-lifecycle": {
+        if (
+          body.domainRevision !== state.domainRevision + 1 ||
+          state.deleted ||
+          state.lifecycleByRequest.has(body.requestId)
+        ) {
+          throw corruptRunJournal("Session lifecycle revision or terminal state is invalid");
+        }
+        state.domainRevision = body.domainRevision;
+        state.lifecycleByRequest.set(body.requestId, body);
+        state.pendingLifecycleProjections.set(body.domainRevision, body);
+        if (body.mutation === "delete") state.deleted = true;
+        return state;
+      }
       case "admitted": {
+        if (state.deleted) {
+          throw corruptRunJournal("Deleted conversation contains a later admitted run");
+        }
         assertAdmissionReplayContract({
           runAlreadyAdmitted: state.admittedByRun.has(body.runId),
           ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
@@ -4282,6 +5068,18 @@ export class ConversationRunJournal {
             committed.assignmentId === body.assignmentId &&
             envelopeContainsCommit(envelope, this.#conversationId, committed),
         });
+        if (
+          body.state === "failed" &&
+          body.assignmentId !== undefined &&
+          !envelopeRevokesRemainingCapabilities(
+            envelope,
+            this.#conversationId,
+            state,
+            state.assignedById.get(body.assignmentId)!,
+          )
+        ) {
+          throw corruptRunJournal("Assigned failure is not atomic with capability revocation");
+        }
         if (body.state === "uncertain" && current?.state !== "uncertain") {
           const assignmentId = state.assignmentByRun.get(body.runId);
           if (
@@ -4311,6 +5109,10 @@ export class ConversationRunJournal {
           state: body.state,
           statusRevision: body.statusRevision,
         });
+        if (body.state === "failed" && body.assignmentId !== undefined) {
+          state.assignmentByRun.delete(body.runId);
+          state.closedAssignments.add(body.assignmentId);
+        }
         if (
           body.assignmentId !== undefined &&
           (body.state === "queued" ||
@@ -4337,6 +5139,7 @@ export class ConversationRunJournal {
           state: body.state,
           statusRevision: body.statusRevision,
           at: envelope.at,
+          ...(body.reason ? { reason: body.reason } : {}),
           ...(uncertainStatus.kind === "opened"
             ? {
                 uncertainTransition: "opened" as const,
@@ -4525,8 +5328,11 @@ export class ConversationRunJournal {
           );
         }
         const previous = state.commits.at(-1);
-        if (previous && body.commitRevision <= previous.commitRevision) {
-          throw corruptRunJournal("Committed run revision does not advance authority state");
+        if (
+          previous &&
+          body.commitRevision !== previous.commitRevision + 1
+        ) {
+          throw corruptRunJournal("Committed run revision is not contiguous");
         }
         const bytes = await this.#artifacts.get(body.bundle.ref);
         const bundle = validateConversationSealedBundle(
@@ -4646,6 +5452,8 @@ export class ConversationRunJournal {
     }
     assertConversationRunRecord(body, this.#verifier);
     switch (body.t) {
+      case "session-lifecycle":
+        return state;
       case "admitted": {
         assertAdmissionReplayContract({
           runAlreadyAdmitted: state.admittedByRun.has(body.runId),
@@ -6059,6 +6867,11 @@ export class InProcessConversationDispatcher {
 function emptyProjection(conversationId: string): RunProjection {
   return {
     conversationId,
+    domainRevision: 0,
+    deleted: false,
+    lifecycleByRequest: new Map(),
+    pendingLifecycleProjections: new Map(),
+    projectedLifecycleRevisions: new Set(),
     admittedByRun: new Map(),
     runByIngress: new Map(),
     assignedById: new Map(),
@@ -6121,6 +6934,47 @@ function emptySubmissionGuardProjection(): SubmissionGuardProjection {
     revokedCapabilities: new Set(),
     activeRunId: undefined,
   };
+}
+
+/**
+ * 用户取消控制面的候选枚举——投影查询与 cancel-batch 权威决定共用的
+ * 单源谓词;两处对"什么算可取消"的判定不允许分叉。
+ */
+function cancellableRunDescriptors(
+  state: RunProjection,
+): ConversationRunControlDescriptor[] {
+  const runs: ConversationRunControlDescriptor[] = state.queuedPositionHeap.map((position) => {
+    const runId = state.queuedRunByPosition.get(position);
+    const current = runId ? state.stateByRun.get(runId)?.state : undefined;
+    const admitted = runId ? state.admittedByRun.get(runId) : undefined;
+    if (!runId || current !== "queued" || !admitted) {
+      throw corruptRunJournal("Queued cancellation projection is inconsistent");
+    }
+    return {
+      runId,
+      state: current,
+      source: admitted.record.invocation.source,
+      ingressId: admitted.record.ingress.ingressId,
+    };
+  });
+  if (state.activeRunId !== undefined) {
+    const current = state.stateByRun.get(state.activeRunId)?.state;
+    const admitted = state.admittedByRun.get(state.activeRunId);
+    if (
+      admitted &&
+      (current === "dispatched" ||
+        current === "running" ||
+        current === "cancel-requested")
+    ) {
+      runs.unshift({
+        runId: state.activeRunId,
+        state: current,
+        source: admitted.record.invocation.source,
+        ingressId: admitted.record.ingress.ingressId,
+      });
+    }
+  }
+  return runs;
 }
 
 function decideConversationCancel(
@@ -6341,13 +7195,26 @@ function sameTerminationProof(
 
 function runRecord(
   conversationId: string,
-  body: ConversationRunJournalRecord | ConversationProjectionRecord,
+  body: ConversationRunJournalRecord | ConversationRunInternalRecord,
 ): LogicalRecord<ConversationCommitLogRecord> {
   return { stream: runStream(conversationId), body };
 }
 
 function runStream(conversationId: string): string {
   return `run:${conversationId}`;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
 }
 
 function conversationStatusDeliveryInputs(
@@ -6387,10 +7254,43 @@ function conversationStatusDeliveryInputs(
       runId,
       state: body.state as ConversationRunState,
       statusRevision: body.statusRevision as number,
+      ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
       ingress,
     });
   }
   return result;
+}
+
+/**
+ * 空批次 cancel-batch 的唯一回执 item:非空批次的用户反馈由逐 run 权威
+ * cancelled 投递单源承担;仅当批量决定命中零候选且请求携带渠道回执绑定时,
+ * 同一权威决定产出一条以 canonical requestId 幂等的回执。
+ */
+function conversationControlResponseDeliveryInputs(
+  conversationId: string,
+  envelope: ConversationControlEnvelope,
+  plan: { readonly result: ControlResult },
+  canonicalRequestId: string,
+  at: string,
+): ConversationControlResponseInput[] {
+  const body = envelope.body;
+  if (body.t !== "cancel-batch" || body.response === undefined) return [];
+  if (
+    plan.result.status !== "ok" ||
+    plan.result.body.t !== "cancel-batch" ||
+    plan.result.body.runs.length > 0
+  ) {
+    return [];
+  }
+  return [
+    {
+      at,
+      conversationId,
+      requestId: canonicalRequestId,
+      replyTarget: body.response.replyTarget,
+      response: "empty-cancel-batch",
+    },
+  ];
 }
 
 // 权威记录注册表随公开 conversation 模块再导出:执行点行为矩阵按它做
@@ -6501,6 +7401,7 @@ function conversationStatusNotice(
     statusRevision: entry.statusRevision,
     actions: [],
     at: entry.at,
+    ...(entry.reason ? { reason: entry.reason } : {}),
   };
 }
 

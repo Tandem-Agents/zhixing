@@ -33,6 +33,7 @@ import type {
   ContentAssetRef,
   JobCommitFence,
   JobGlobalStagedMutation,
+  InteractionDisplay,
   RunDispatchArguments,
   RunExecutorPort,
 } from "@zhixing/core/contracts";
@@ -55,7 +56,9 @@ import {
   jobBundleRoots,
   mutationBatchArtifact,
   interactionMirrorSeed,
+  materializeInteractionDisplay,
   protocolDigest,
+  prepareInteractionDisplay,
   sealedBundleArtifact,
   signCancelProof,
   signDispatchConflictProof,
@@ -74,6 +77,7 @@ import {
   validateJobActivation,
   validateJobEnvelope,
   validateJobSealedBundle,
+  validateInteractionDisplay,
   validateCancelProof,
   type ConversationInteractionMirrorEntry,
   type ConversationInteractionMirrorBatch,
@@ -188,6 +192,12 @@ export interface InteractionRequestInput {
   readonly issuedAt: string;
   readonly ttlMs: number;
   readonly expiresAt: string;
+}
+
+export interface InteractionRequestDisposition {
+  readonly recordSeq: number;
+  readonly accepted: boolean;
+  readonly display: InteractionDisplay;
 }
 
 export interface InteractionMirrorReceipt {
@@ -800,9 +810,10 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   async requestInteraction(
     assignmentId: string,
     input: InteractionRequestInput,
-  ): Promise<{ readonly recordSeq: number }> {
-    const body = interactionRequested(input);
-    const transaction = await this.#transact<{ recordSeq: number }>(
+  ): Promise<InteractionRequestDisposition> {
+    const prepared = await interactionRequested(input, this.#artifacts);
+    const body = prepared.body;
+    const transaction = await this.#transact<InteractionRequestDisposition>(
       assignmentId,
       (state) => {
         const existing = state.requested.get(body.requestId);
@@ -810,7 +821,18 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
           if (canonicalize(existing.body) !== canonicalize(body)) {
             throw new Error("Interaction requestId has conflicting durable payloads");
           }
-          return { kind: "return", value: { recordSeq: existing.recordSeq } };
+          const finished = state.finished.get(body.requestId);
+          const rejectedByBackpressure =
+            finished?.body.outcome.t === "cancelled" &&
+            finished.body.outcome.via === "backpressure";
+          return {
+            kind: "return",
+            value: {
+              recordSeq: existing.recordSeq,
+              accepted: !rejectedByBackpressure,
+              display: existing.body.display,
+            },
+          };
         }
         if (state.phase !== "started" || state.aborts.length > 0) {
           throw new Error("Interactions can only be requested by a started assignment");
@@ -832,9 +854,14 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         return {
           kind: "append",
           entries: entries.map((item) => assignmentRecord(assignmentId, item)),
-          value: { recordSeq: entry.recordSeq },
+          value: {
+            recordSeq: entry.recordSeq,
+            accepted: entries.length === 1,
+            display: body.display,
+          },
         };
       },
+      prepared.references,
     );
     return transaction.value;
   }
@@ -1721,6 +1748,12 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     return transaction.value;
   }
 
+  async hasOpenSideEffects(assignmentId: string): Promise<boolean> {
+    return this.#select(assignmentId, (state) =>
+      [...state.sideEffects.values()].some((effect) => !effect.completed),
+    );
+  }
+
   async #select<Value>(
     assignmentId: string,
     select: (state: LedgerProjection) => Value,
@@ -1884,6 +1917,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       state.received?.body.activation.ref.execution === "job"
     ) {
       validateJobStagedMutationRecord(entry.body);
+    }
+    if (entry.body.t === "interaction-requested") {
+      await materializeInteractionDisplay(entry.body.display, this.#artifacts);
     }
     const digest = applyValidatedAssignmentEntry(state.validation, entry);
     applyEntry(state, entry, digest, commit.at);
@@ -2145,7 +2181,13 @@ export class InProcessAssignmentSubmission {
     const bundle = await this.#ledger.sealedBundle(assignmentId);
     const result = await this.#owner.submitBundle(bundle, ctx);
     if (result.committed) {
-      await this.#ledger.acknowledge(assignmentId, result.commitRevision);
+      try {
+        await this.#ledger.acknowledge(assignmentId, result.commitRevision);
+      } catch {
+        // The owner CAS is already irreversible. Leaving the ledger sealed keeps
+        // the durable acknowledgement outbox recoverable without changing the
+        // committed disposition returned to the calling surface.
+      }
     }
     return result;
   }
@@ -2221,9 +2263,15 @@ function assignmentStream(assignmentId: string): string {
   return `assignment:${assignmentId}`;
 }
 
-function interactionRequested(
+async function interactionRequested(
   input: InteractionRequestInput,
-): Extract<AssignmentRecord, { t: "interaction-requested" }> {
+  artifacts: ArtifactStore,
+): Promise<{
+  readonly body: Extract<AssignmentRecord, { t: "interaction-requested" }>;
+  readonly references: readonly ArtifactRef[];
+}> {
+  const prepared = await prepareInteractionDisplay(input.display, artifacts);
+  const display = prepared.display;
   const body = snapshot(
     {
       v: 1 as const,
@@ -2231,7 +2279,7 @@ function interactionRequested(
       requestId: input.requestId,
       kind: "allow-once" as const,
       toolName: input.toolName,
-      display: { title: input.display.title, lines: [...input.display.lines] },
+      display,
       issuedAt: input.issuedAt,
       ttlMs: input.ttlMs,
       expiresAt: input.expiresAt,
@@ -2239,7 +2287,10 @@ function interactionRequested(
     "Interaction request",
   );
   validateInteractionRequest(body);
-  return body;
+  return {
+    body,
+    references: prepared.references,
+  };
 }
 
 function validateInteractionRequest(
@@ -2267,16 +2318,7 @@ function validateInteractionRequest(
   if (expiresAt - issuedAt !== body.ttlMs) {
     throw new TypeError("Interaction expiresAt must equal issuedAt plus ttlMs");
   }
-  assertPlainObject(body.display, "Interaction display");
-  assertExactKeys(body.display, ["lines", "title"], "Interaction display");
-  if (
-    typeof body.display.title !== "string" ||
-    !Array.isArray(body.display.lines) ||
-    body.display.lines.some((line) => typeof line !== "string") ||
-    body.display.title.length === 0
-  ) {
-    throw new TypeError("Interaction display exceeds its bounded projection");
-  }
+  validateInteractionDisplay(body.display);
   assertInteractionRecordSize(body, "Interaction request");
 }
 

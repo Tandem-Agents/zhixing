@@ -23,6 +23,8 @@ import { applyDeliveryResolutionControl } from "../delivery-control.js";
 
 const NOW = "2026-07-17T02:00:00.000Z";
 
+vi.setConfig({ testTimeout: 15_000 });
+
 async function createHarness() {
   const root = await createTempDir("delivery-control");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));

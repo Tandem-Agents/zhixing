@@ -1302,6 +1302,76 @@ describe("delivery unique index and replay", () => {
     ).toThrow("exactly one matching authority source fact");
   });
 
+  it("only a successful empty cancel-batch applied fact may source a control response", () => {
+    const responseInput: DeliveryEnqueueInput = {
+      ...deliveryInput(),
+      keyBody: {
+        kind: "conversation-control-response-delivery",
+        conversationId: "conversation-1",
+        requestId: "cancel:batch-1",
+      },
+    };
+    const prepared = prepareDeliveryEnqueues(
+      emptyDeliveryProjection(),
+      [responseInput],
+      FIRST,
+    );
+    if (!prepared.accepted) throw new Error("fixture prepare failed");
+    const enqueue = deliveryRecord(prepared.records[0]!);
+    const applied = (result: unknown, requestId = "cancel:batch-1") => ({
+      stream: "control",
+      body: { t: "applied", requestId, result, authorityRevision: 5 },
+    });
+    const emptyBatch = {
+      v: 1,
+      status: "ok",
+      body: { t: "cancel-batch", conversationId: "conversation-1", runs: [] },
+    };
+
+    // 合法:成功的空 cancel-batch applied
+    expect(() =>
+      assertDeliveryEnvelopeCompanions({
+        entries: [applied(emptyBatch), enqueue],
+      } as unknown as CommitEnvelope<unknown>),
+    ).not.toThrow();
+
+    // 其他控制类型、非空批次、外置 result、requestId 失配一律不得冒充回执来源
+    const impostors = [
+      applied({ v: 1, status: "ok", body: { t: "session-write", revision: 3 } }),
+      applied({
+        v: 1,
+        status: "ok",
+        body: {
+          t: "cancel-batch",
+          conversationId: "conversation-1",
+          runs: [
+            {
+              runId: "run-1",
+              runState: "cancelled",
+              source: "interactive",
+              ingressId: "ingress-1",
+            },
+          ],
+        },
+      }),
+      applied({ v: 1, status: "rejected", error: { code: "busy", message: "x", retryable: false } }),
+      applied({ ref: { digest: `sha256:${"b".repeat(64)}`, bytes: 64 } }),
+      applied(emptyBatch, "cancel:another-request"),
+      applied({
+        v: 1,
+        status: "ok",
+        body: { t: "cancel-batch", conversationId: "conversation-2", runs: [] },
+      }),
+    ];
+    for (const impostor of impostors) {
+      expect(() =>
+        assertDeliveryEnvelopeCompanions({
+          entries: [impostor, enqueue],
+        } as unknown as CommitEnvelope<unknown>),
+      ).toThrow("exactly one matching authority source fact");
+    }
+  });
+
   it("validates a transport outcome before appending it", async () => {
     const fixture = await harness();
     const claim = requireSend(await fixture.authority.claim({

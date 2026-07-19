@@ -1,5 +1,5 @@
 import type { ArtifactRef, AuthorityError } from "../contracts/foundation.js";
-import type { PublishRecord } from "../contracts/records.js";
+import type { ControlResultBody, PublishRecord } from "../contracts/records.js";
 import { assertProtocolIdentifier } from "./validation.js";
 
 export const MAX_AUTHORITY_ERROR_MESSAGE_BYTES = 4 * 1024;
@@ -88,6 +88,52 @@ export function validatePublishDecisionRecord(
     }
   }
   return value as unknown as Extract<PublishRecord, { t: "publish-decision" }>;
+}
+
+export function validateCancelBatchControlResultBody(
+  value: unknown,
+): Extract<ControlResultBody, { t: "cancel-batch" }> {
+  assertPlainRecord(value, "Cancel-batch result");
+  assertExactKeys(value, ["conversationId", "runs", "t"], "Cancel-batch result");
+  if (value.t !== "cancel-batch") {
+    throw new TypeError("Cancel-batch result type is invalid");
+  }
+  assertProtocolIdentifier(value.conversationId, "Cancel-batch conversation id");
+  if (!Array.isArray(value.runs)) {
+    throw new TypeError("Cancel-batch runs must be an array");
+  }
+  for (const run of value.runs) {
+    assertPlainRecord(run, "Cancel-batch run disposition");
+    assertExactKeys(
+      run,
+      ["ingressId", "runId", "runState", "source"],
+      "Cancel-batch run disposition",
+    );
+    assertProtocolIdentifier(run.runId, "Cancel-batch run id");
+    assertProtocolIdentifier(run.ingressId, "Cancel-batch ingress id");
+    if (
+      run.runState !== "queued" &&
+      run.runState !== "dispatched" &&
+      run.runState !== "running" &&
+      run.runState !== "cancel-requested" &&
+      run.runState !== "cancelled" &&
+      run.runState !== "committed" &&
+      run.runState !== "failed" &&
+      run.runState !== "expired" &&
+      run.runState !== "uncertain"
+    ) {
+      throw new TypeError("Cancel-batch run state is invalid");
+    }
+    if (
+      run.source !== "interactive" &&
+      run.source !== "scheduler" &&
+      run.source !== "channel" &&
+      run.source !== "advancement"
+    ) {
+      throw new TypeError("Cancel-batch run source is invalid");
+    }
+  }
+  return value as unknown as Extract<ControlResultBody, { t: "cancel-batch" }>;
 }
 
 function validateArtifactReference(value: unknown, label: string): ArtifactRef {

@@ -68,6 +68,7 @@ import type {
   ToolDefinition,
   ToolExecutionContext,
   ToolResult,
+  ToolSideEffectObserver,
 } from "../types/tools.js";
 import type {
   AgentLoopDeps,
@@ -92,6 +93,7 @@ interface ExecuteToolCallsParams {
    * 可选——缺省时工具调对应角色不发思考参数（安全兜底）。
    */
   roleThinking?: ResolvedRoleThinking;
+  sideEffects?: ToolSideEffectObserver;
 }
 
 type PlannedToolCall =
@@ -234,7 +236,13 @@ async function* runSerialBatch(
     };
 
     try {
-      const rawResult = await deps.executeTool(tool, call.input, context);
+      const rawResult = await executeObservedTool(
+        deps,
+        tool,
+        call.input,
+        context,
+        params.sideEffects,
+      );
       const duration = Date.now() - startTime;
 
       // 管线步骤：结果截断
@@ -418,7 +426,7 @@ async function* runParallelBatch(
         llm: llmRoles,
         roleThinking,
       };
-      return deps.executeTool(tool!, call.input, ctx);
+      return executeObservedTool(deps, tool!, call.input, ctx, params.sideEffects);
     }),
   );
   const settledAt = performance.now();
@@ -530,6 +538,37 @@ async function* runParallelBatch(
     unexecutedToolUses,
     abortedDuringToolAt,
   };
+}
+
+async function executeObservedTool(
+  deps: AgentLoopDeps,
+  tool: ToolDefinition,
+  input: Record<string, unknown>,
+  context: ToolExecutionContext,
+  observer?: ToolSideEffectObserver,
+): Promise<ToolResult> {
+  if (tool.isReadOnly === true || !observer) {
+    return deps.executeTool(tool, input, context);
+  }
+  const token = await observer.start(tool, input);
+  let result: ToolResult | undefined;
+  let toolError: unknown;
+  let toolFailed = false;
+  let completion: { status: "ok" | "failed" | "aborted" };
+  try {
+    result = await deps.executeTool(tool, input, context);
+    completion = { status: result.isError ? "failed" : "ok" };
+  } catch (error) {
+    toolFailed = true;
+    toolError = error;
+    completion = {
+      status: context.abortSignal?.aborted ? "aborted" : "failed",
+    };
+  }
+  await observer.finish(token, completion);
+  if (toolFailed) throw toolError;
+  if (!result) throw new Error("Observed tool completed without a result");
+  return result;
 }
 
 // ─── 常量 ───

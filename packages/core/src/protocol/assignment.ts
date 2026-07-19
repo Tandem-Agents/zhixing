@@ -8,6 +8,7 @@ import type {
   AssignmentTerminationProof,
   CancelProofBody,
   ChannelResponderRef,
+  ConversationInvocation,
   DispatchConflictProof,
   DispatchEnvelope,
   DispatchRejectionProof,
@@ -22,10 +23,13 @@ import type {
   Signature,
   SupersedeProof,
 } from "../contracts/index.js";
+import type { ConfirmationDecision } from "../confirmation/types.js";
+import { MAX_CONVERSATION_QUESTION_BYTES } from "../contracts/protocol.js";
 import { validateAuthorityError as validateAuthorityErrorContract } from "./contract-validation.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateStagedMutationRecord } from "./commit.js";
 import { validateJobCommitFence } from "./job.js";
+import { validateInteractionDisplay } from "./interaction-display.js";
 import { assertResourceLeaseBaseContract } from "./resource-lease.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import {
@@ -98,6 +102,7 @@ export type ConversationInteractionOutcome =
       readonly t: "answered";
       readonly authority: { readonly via: "surface-ticket"; readonly ticketId: string };
       readonly decision: { readonly allowed: boolean; readonly reason?: string };
+      readonly decisionDigest: Digest;
       readonly by: string;
     }
   | Exclude<InteractionMirrorEntry["outcome"], { t: "answered" }>;
@@ -114,6 +119,14 @@ export type ConversationInteractionMirrorBatch = Omit<
 
 export interface ProtocolSigner {
   sign(schemaId: string, version: number, payload: unknown): Signature;
+}
+
+export function confirmationDecisionDigest(
+  requestId: string,
+  decision: ConfirmationDecision,
+): Digest {
+  assertIdentifier(requestId, "Confirmation request id");
+  return protocolDigest("ConfirmationDecision", 1, { requestId, decision });
 }
 
 export interface ProtocolSignatureVerifier {
@@ -1226,7 +1239,7 @@ export function validateConversationInteractionOutcome(
     case "answered": {
       assertExactKeys(
         outcome,
-        ["authority", "by", "decision", "t"],
+        ["authority", "by", "decision", "decisionDigest", "t"],
         "Answered interaction outcome",
       );
       assertObject(outcome.authority, "Interaction answer authority");
@@ -1253,6 +1266,7 @@ export function validateConversationInteractionOutcome(
           throw new TypeError("Interaction decision reason must be a string");
         }
       }
+      assertDigest(outcome.decisionDigest as string, "Interaction decision digest");
       assertIdentifier(outcome.by, "Interaction responder");
       break;
     }
@@ -1387,19 +1401,11 @@ function assertAssignmentRecord(
       assertIdentifier(value.requestId, "interaction requestId");
       assertIdentifier(value.toolName, "interaction toolName");
       if (value.kind !== "allow-once") throw new TypeError("Interaction kind is invalid");
-      assertObject(value.display, "interaction display");
-      assertExactKeys(value.display, ["lines", "title"], "interaction display");
-      if (typeof value.display.title !== "string" || !Array.isArray(value.display.lines)) {
-        throw new TypeError("Interaction display is invalid");
-      }
-      for (const line of value.display.lines) {
-        if (typeof line !== "string") throw new TypeError("Interaction display line is invalid");
-      }
+      validateInteractionDisplay(value.display);
       assertCanonicalTime(value.issuedAt, "interaction issuedAt");
       assertCanonicalTime(value.expiresAt, "interaction expiresAt");
       assertPositiveInteger(value.ttlMs, "interaction ttlMs");
       if (
-        value.display.title.length === 0 ||
         Date.parse(value.expiresAt) - Date.parse(value.issuedAt) !== value.ttlMs
       ) {
         throw new TypeError("Interaction request timing or display is invalid");
@@ -1802,6 +1808,98 @@ export function validateIngressContext(input: unknown): IngressContext {
   const ingress = snapshot(input, "Ingress context") as IngressContext;
   assertIngressContext(ingress);
   return ingress;
+}
+
+export function validateConversationInvocation(
+  input: unknown,
+): ConversationInvocation {
+  const invocation = snapshot(
+    input,
+    "Conversation invocation",
+  ) as ConversationInvocation;
+  assertObject(invocation, "Conversation invocation");
+  if (invocation.kind === "agent") {
+    assertExactKeys(
+      invocation,
+      ["advancement", "kind", "source"],
+      "Agent conversation invocation",
+      true,
+    );
+    assertTurnSource(invocation.source, "Agent invocation source");
+    if (invocation.source === "advancement") {
+      assertAdvancementMetadata(invocation.advancement);
+    } else if (invocation.advancement !== undefined) {
+      throw new TypeError(
+        "Only advancement conversation invocations accept advancement metadata",
+      );
+    }
+    return invocation;
+  }
+  if (invocation.kind === "perspectives") {
+    assertExactKeys(
+      invocation,
+      ["kind", "question", "source"],
+      "Perspectives conversation invocation",
+    );
+    if (invocation.source !== "interactive" && invocation.source !== "channel") {
+      throw new TypeError("Perspectives invocation source is invalid");
+    }
+    if (
+      typeof invocation.question !== "string" ||
+      invocation.question.trim().length === 0 ||
+      Buffer.byteLength(invocation.question, "utf8") > MAX_CONVERSATION_QUESTION_BYTES
+    ) {
+      throw new TypeError(
+        "Perspectives invocation question is empty or exceeds its UTF-8 budget",
+      );
+    }
+    return invocation;
+  }
+  throw new TypeError("Conversation invocation kind is invalid");
+}
+
+function assertTurnSource(
+  value: unknown,
+  label: string,
+): asserts value is import("../transcript/types.js").TurnSource {
+  if (
+    value !== "interactive" &&
+    value !== "scheduler" &&
+    value !== "channel" &&
+    value !== "advancement"
+  ) {
+    throw new TypeError(`${label} is invalid`);
+  }
+}
+
+function assertAdvancementMetadata(
+  value: unknown,
+): asserts value is import("../transcript/types.js").RunRecordAdvancementMetadata {
+  assertObject(value, "Advancement invocation metadata");
+  assertExactKeys(
+    value,
+    [
+      "proxyMessageId",
+      "reviewId",
+      "rubricFailureHandlingId",
+      "sessionId",
+    ],
+    "Advancement invocation metadata",
+    true,
+  );
+  assertIdentifier(value.sessionId, "Advancement sessionId");
+  if (value.proxyMessageId !== undefined) {
+    assertIdentifier(value.proxyMessageId, "Advancement proxyMessageId");
+  }
+  if (value.reviewId !== undefined) {
+    assertIdentifier(value.reviewId, "Advancement reviewId");
+  }
+  if (value.rubricFailureHandlingId !== undefined) {
+    assertIdentifier(
+      value.rubricFailureHandlingId,
+      "Advancement rubricFailureHandlingId",
+    );
+  }
 }
 
 export function validateChannelResponderRef(input: unknown): ChannelResponderRef {

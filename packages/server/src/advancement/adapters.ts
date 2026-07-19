@@ -38,6 +38,23 @@ export function createAdvancementProxyTurnPort(
     isRunning(conversationId) {
       return options.manager.getBusySource(conversationId) === "advancement";
     },
+    async inspectDurableClaim(conversationId, proxyMessageId) {
+      if (!options.manager.usesDurableTurnProtocol()) {
+        // legacy 无耐久 run 日志:耐久 claim 确定不存在,是显式判定而非缺能力兜底。
+        return { status: "unclaimed" };
+      }
+      const durable = await options.manager.findDurableRunByIngress(
+        conversationId,
+        proxyMessageId,
+        "advancement",
+      );
+      if (!durable) return { status: "unclaimed" };
+      return durable.state === "cancelled" ||
+        durable.state === "failed" ||
+        durable.state === "expired"
+        ? { status: "closed", runId: durable.runId }
+        : { status: "owned", runId: durable.runId };
+    },
     async schedule(request) {
       const conversationId = request.conversationId;
       let taskSettled = false;
@@ -54,6 +71,22 @@ export function createAdvancementProxyTurnPort(
           exists: options.conversationExists
             ? () => options.conversationExists!(conversationId)
             : undefined,
+          source: "advancement",
+          beforeEnqueue: (managed) =>
+            options.manager.admitDurableTurn({
+              conversationId: managed.conversationId,
+              input: request.input,
+              invocation: {
+                kind: "agent",
+                source: "advancement",
+                advancement: request.advancement,
+              },
+              options: {
+                turnContext: request.turnContext,
+                source: "advancement",
+                advancement: request.advancement,
+              },
+            }),
           makeTask: (managed) => ({
             source: "advancement",
             execute: async () => {
@@ -95,7 +128,9 @@ export function createAdvancementProxyTurnPort(
       if (admission.status === "immediate") {
         void admission.task.execute();
       }
-      return { status: admission.status };
+      return {
+        status: admission.status === "replayed" ? "queued" : admission.status,
+      };
     },
   };
 }

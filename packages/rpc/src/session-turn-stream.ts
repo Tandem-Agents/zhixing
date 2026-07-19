@@ -79,6 +79,11 @@ export async function projectSessionTurn(
           turnId: opts.turnId,
           result: toWireAgentResult(runResult.agentResult),
         } satisfies SessionCompletePayload);
+        try {
+          await opts.manager.publishPendingFinals(conversationId);
+        } catch (error) {
+          opts.hooks?.onFinalPublishFailure?.(error, runResult);
+        }
         return { kind: "settled", runResult };
       }
 

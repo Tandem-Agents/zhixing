@@ -256,6 +256,7 @@ async function runChildAgentInner(
       parentBrokerId: opts.parentBroker.id,
       sourceAgentId: subAgentId,
       nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
+      lifecycleObserver: opts.parentBroker.lifecycleObserver,
     });
 
     const profile = subAgentProfile({ subAgentId });

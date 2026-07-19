@@ -30,6 +30,7 @@ import {
   assignmentLedgerSeed,
   buildConversationActivationPayload,
   canonicalize,
+  confirmationDecisionDigest,
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
@@ -93,6 +94,10 @@ const RUN_ID = "run-1";
 const ASSIGNMENT_ID = "assignment-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+
+function allowOnceDecisionDigest(requestId: string): string {
+  return confirmationDecisionDigest(requestId, { kind: "allow-once" });
+}
 
 function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticipant {
   return new OwnerDeliveryParticipant({
@@ -389,6 +394,7 @@ async function createUnassignedHarness(
     runId: RUN_ID,
     userInput: { parts: [{ type: "text", text: "hello" }] },
     ingress: options.ingress ?? ingress(),
+    invocation: { kind: "agent", source: "interactive" },
     queuedPosition: 0,
   });
   const unsigned = createUnsignedEnvelope(
@@ -1001,6 +1007,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "ticket-1" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("interaction-1"),
         by: "surface:user-1",
       },
       submissionContext(harness.unsigned),
@@ -1015,6 +1022,16 @@ describe("conversation assignment protocol", () => {
         submissionContext(harness.unsigned),
       ),
     ).toEqual(mirrorReceipt(exactBatch));
+    // mirror 已耐久即回放可查:surface 丢响应/重启后按此单源回放原结果
+    await expect(
+      harness.journal.interactionOutcome("interaction-1"),
+    ).resolves.toEqual({
+      t: "answered",
+      decisionDigest: allowOnceDecisionDigest("interaction-1"),
+    });
+    await expect(
+      harness.journal.interactionOutcome("interaction-never-finished"),
+    ).resolves.toBeUndefined();
     const conflictingBatch = signedMirrorBatch(harness.identity, [
       { ...finished, outcome: { t: "expired" } },
     ]);
@@ -1157,6 +1174,7 @@ describe("conversation assignment protocol", () => {
       runId: secondRunId,
       userInput: { parts: [{ type: "text", text: "second" }] },
       ingress: ingress(),
+      invocation: { kind: "agent", source: "interactive" },
       queuedPosition: 1,
     });
     await expect(
@@ -1307,6 +1325,7 @@ describe("conversation assignment protocol", () => {
       runId: "run-2",
       userInput: { parts: [{ type: "text", text: "second" }] },
       ingress: ingress(),
+      invocation: { kind: "agent", source: "interactive" },
       queuedPosition: 1,
     });
     await expect(
@@ -1323,12 +1342,66 @@ describe("conversation assignment protocol", () => {
         runId: "run-3",
         userInput: { parts: [{ type: "text", text: "third" }] },
         ingress: ingress(),
+        invocation: { kind: "agent", source: "interactive" },
         queuedPosition: 1,
       }),
     ).rejects.toThrow("Queued position already belongs to an active run");
     await expect(harness.journal.assign(harness.unsigned)).resolves.toMatchObject({
       assignmentId: ASSIGNMENT_ID,
     });
+  });
+
+  it("externalizes an oversized interaction display and replays its artifact", async () => {
+    const harness = await createHarness({ maxPendingInteractions: 16 });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const disposition = await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+        requestId: "oversized",
+        toolName: "write-file",
+        display: {
+          title: "Write",
+          lines: Array.from({ length: 20 }, () => "x".repeat(1_800)),
+        },
+        issuedAt: NOW,
+        ttlMs: 60_000,
+        expiresAt: "2026-07-13T09:01:00.000Z",
+      });
+    expect(disposition).toMatchObject({ accepted: true });
+    const requested = (await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`))
+      .find((entry) => entry.body.body.t === "interaction-requested");
+    expect(requested?.body.body).toMatchObject({
+      t: "interaction-requested",
+      display: { ref: { bytes: expect.any(Number), digest: expect.stringMatching(/^sha256:/u) } },
+    });
+    expect(disposition.display).toEqual(requested?.body.body.display);
+    const recovered = await harness.ledger.recoverInteractions(ASSIGNMENT_ID, NOW);
+    expect(recovered.pending[0]?.display).toEqual(requested?.body.body.display);
+    const display = recovered.pending[0]?.display;
+    if (!display || !("ref" in display)) throw new Error("expected externalized display");
+    const materialized = JSON.parse(
+      Buffer.from(await harness.artifacts.get(display.ref)).toString("utf8"),
+    ) as { readonly lines: readonly string[] };
+    expect(materialized.lines).toHaveLength(20);
+
+    await rm(harness.artifacts.pathFor(display.ref), { force: true });
+    const restarted = new ConversationAssignmentLedger({
+      log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+    });
+    await expect(
+      restarted.recoverInteractions(ASSIGNMENT_ID, NOW),
+    ).rejects.toThrow(/artifact/i);
   });
 
   it("bounds interaction records and backlog while draining mirrors in finite batches", async () => {
@@ -1339,25 +1412,6 @@ describe("conversation assignment protocol", () => {
       ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
     );
     await harness.ledger.start(ASSIGNMENT_ID);
-    const beforeOversized = (
-      await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)
-    ).length;
-    await expect(
-      harness.ledger.requestInteraction(ASSIGNMENT_ID, {
-        requestId: "oversized",
-        toolName: "write-file",
-        display: {
-          title: "Write",
-          lines: Array.from({ length: 20 }, () => "x".repeat(1_800)),
-        },
-        issuedAt: NOW,
-        ttlMs: 60_000,
-        expiresAt: "2026-07-13T09:01:00.000Z",
-      }),
-    ).rejects.toThrow("exceeds the durable protocol limit");
-    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(
-      beforeOversized,
-    );
 
     for (let index = 0; index < 17; index += 1) {
       await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
@@ -1380,6 +1434,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "channel-grant", grant: {} },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("bounded-0"),
         by: "channel:test",
       } as unknown as InteractionOutcome),
     ).rejects.toThrow("Interaction answer authority");
@@ -1390,6 +1445,7 @@ describe("conversation assignment protocol", () => {
       t: "answered" as const,
       authority: { via: "surface-ticket" as const, ticketId: "ticket-edge" },
       decision: { allowed: true, reason: "" },
+      decisionDigest: allowOnceDecisionDigest("bounded-0"),
       by: "surface:user-1",
     };
     const executorOnlyBody = {
@@ -1421,6 +1477,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "ticket-oversized" },
         decision: { allowed: true, reason: "r".repeat(40_000) },
+        decisionDigest: allowOnceDecisionDigest("bounded-0"),
         by: "surface:user-1",
       }),
     ).rejects.toThrow("exceeds the durable protocol limit");
@@ -1433,6 +1490,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: `ticket-${index}` },
         decision: { allowed: true, reason: "r".repeat(2_000) },
+        decisionDigest: allowOnceDecisionDigest(`bounded-${index}`),
         by: "surface:user-1",
       });
     }
@@ -1457,6 +1515,7 @@ describe("conversation assignment protocol", () => {
               ticketId: `oversized-ticket-${index}`,
             },
             decision: { allowed: true, reason: "r".repeat(2_000) },
+            decisionDigest: allowOnceDecisionDigest(`oversized-mirror-${index}`),
             by: "surface:user-1",
           },
           at: NOW,
@@ -1507,6 +1566,7 @@ describe("conversation assignment protocol", () => {
           t: "answered",
           authority: { via: "surface-ticket", ticketId: `indexed-ticket-${index}` },
           decision: { allowed: true },
+          decisionDigest: allowOnceDecisionDigest(requestId),
           by: "surface:user-1",
         }),
       );
@@ -1565,6 +1625,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "indexed-ticket-after-restart" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("indexed-after-restart"),
         by: "surface:user-1",
       },
     );
@@ -1745,14 +1806,9 @@ describe("conversation assignment protocol", () => {
     expect(await harness.journal.pendingFinalFrames()).toEqual([]);
     await expect(
       adapter.submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
-    ).rejects.toThrow("simulated publish crash");
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
     expect(await harness.journal.currentState(RUN_ID)).toBe("committed");
-    expect(harness.projected.get(ASSIGNMENT_ID)).toMatchObject({
-      conversationId: CONVERSATION_ID,
-      commitRevision: 8,
-      digest: bundle.digest,
-      runRecord,
-    });
+    expect(harness.projected.get(ASSIGNMENT_ID)).toBeUndefined();
     expect(await harness.journal.pendingFinalFrames()).toEqual([
       {
         v: 1,
@@ -1776,6 +1832,16 @@ describe("conversation assignment protocol", () => {
       projection: harness.projection,
       publisher,
     });
+    await expect(recoveredJournal.resumeCommittedProjections()).resolves.toBe(1);
+    expect(harness.projected.get(ASSIGNMENT_ID)).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      commitRevision: 8,
+      digest: bundle.digest,
+      runRecord,
+    });
+    await expect(recoveredJournal.resumePendingPublishing()).rejects.toThrow(
+      "simulated publish crash",
+    );
     await expect(recoveredJournal.resumePendingPublishing()).resolves.toBe(1);
     await expect(recoveredJournal.resumePendingPublishing()).resolves.toBe(0);
     expect(applied).toEqual([
@@ -1911,6 +1977,65 @@ describe("conversation assignment protocol", () => {
     expect(query).not.toHaveBeenCalled();
   }, 15_000);
 
+  it("returns the committed disposition when the executor ACK write fails and recovers the ACK outbox", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const submissionAdapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await submissionAdapter.startAndReport(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    await sealDefaultBundle(harness.ledger);
+
+    const acknowledge = vi
+      .spyOn(harness.ledger, "acknowledge")
+      .mockRejectedValueOnce(new Error("simulated executor ACK write failure"));
+    await expect(
+      submissionAdapter.submitSealedBundle(
+        ASSIGNMENT_ID,
+        submissionContext(harness.unsigned),
+      ),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    expect(await harness.journal.currentState(RUN_ID)).toBe("committed");
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({ phase: "sealed" });
+    await expect(harness.journal.assignmentsAwaitingRecovery()).resolves.toEqual([
+      expect.objectContaining({ assignmentId: ASSIGNMENT_ID, state: "committed" }),
+    ]);
+
+    const dispatcher = new InProcessConversationDispatcher({
+      enabled: true,
+      journal: harness.journal,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: createCancellationSubmission(harness),
+      bundleSubmission: createBundleSubmission(harness),
+    });
+    await expect(dispatcher.recoverAssignments()).resolves.toBe(1);
+    expect(acknowledge).toHaveBeenCalledTimes(2);
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({
+      phase: "acked",
+      acknowledgedCommitRevision: 8,
+    });
+    await expect(harness.journal.assignmentsAwaitingRecovery()).resolves.toEqual([]);
+  }, 15_000);
+
   it("observes an existing executor ACK without resubmitting the conversation bundle", async () => {
     const harness = await createHarness();
     await harness.ledger.dispatch(
@@ -2041,7 +2166,7 @@ describe("conversation assignment protocol", () => {
     const firstBundle = await sealDefaultBundle(first.ledger);
     await expect(
       firstAdapter.submitSealedBundle(ASSIGNMENT_ID, submissionContext(first.unsigned)),
-    ).rejects.toThrow("hold publish recovery open");
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
 
     const secondAuthority: ConversationCommitAuthority = {
       decideAtPrefix(input) {
@@ -2084,6 +2209,7 @@ describe("conversation assignment protocol", () => {
       runId: secondRunId,
       userInput: { parts: [{ type: "text", text: "second" }] },
       ingress: ingress(),
+      invocation: { kind: "agent", source: "interactive" },
       queuedPosition: 0,
     });
     const secondUnsigned = createUnsignedEnvelope(first.identity, {
@@ -2140,7 +2266,7 @@ describe("conversation assignment protocol", () => {
         secondAssignmentId,
         submissionContext(secondUnsigned),
       ),
-    ).rejects.toThrow("hold publish recovery open");
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
 
     await expect(first.journal.pendingFinalFrames()).resolves.toEqual([
       expect.objectContaining({
@@ -2383,8 +2509,11 @@ describe("conversation assignment protocol", () => {
     });
     await expect(
       adapter.submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
-    ).rejects.toThrow("simulated projection crash");
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
     expect(await harness.journal.currentState(RUN_ID)).toBe("committed");
+    await expect(harness.journal.resumeCommittedProjections()).rejects.toThrow(
+      "simulated projection crash",
+    );
     await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(1);
     await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(0);
     expect(projected.get(ASSIGNMENT_ID)?.runRecord.runId).toBe(RUN_ID);
@@ -2441,7 +2570,7 @@ describe("conversation assignment protocol", () => {
     });
     await expect(
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
-    ).rejects.toThrow("pause before publish progress");
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
     await harness.log.append([
       {
         stream: "publish",
@@ -3144,6 +3273,7 @@ describe("conversation assignment protocol", () => {
           runId: "run-split-admission",
           input: { parts: [{ type: "text", text: "split" }] },
           ingress: ingress(),
+          invocation: { kind: "agent", source: "interactive" },
           queuedPosition: 1,
         },
       },
@@ -3201,6 +3331,7 @@ describe("conversation assignment protocol", () => {
       runId: "run-second",
       userInput: { parts: [{ type: "text", text: "second" }] },
       ingress: ingress(),
+      invocation: { kind: "agent", source: "interactive" },
       queuedPosition: 1,
     });
     const secondUnsigned = createUnsignedEnvelope(nonHead.identity, {
@@ -3255,6 +3386,7 @@ describe("conversation assignment protocol", () => {
           runId: "run-invalid",
           input: { parts: [{ type: "text", text: "invalid" }] },
           ingress: ingress(),
+          invocation: { kind: "agent", source: "interactive" },
           queuedPosition: "1",
         } as never,
       },
@@ -3268,6 +3400,7 @@ describe("conversation assignment protocol", () => {
         runId: "run-invalid-source",
         userInput: { parts: [{ type: "text", text: "invalid" }] },
         ingress: { ...ingress(), receivedAt: "not-a-time" },
+        invocation: { kind: "agent", source: "interactive" },
         queuedPosition: 2,
       }),
     ).rejects.toThrow("canonical ISO timestamp");
@@ -3292,6 +3425,7 @@ describe("conversation assignment protocol", () => {
         runId: "run-polluted-input",
         userInput: pollutedInput as never,
         ingress: ingress(),
+        invocation: { kind: "agent", source: "interactive" },
         queuedPosition: 2,
       }),
     ).rejects.toThrow("unknown");
@@ -4100,6 +4234,7 @@ describe("conversation assignment protocol", () => {
       t: "answered" as const,
       authority: { via: "surface-ticket" as const, ticketId: "ticket-before-cancel" },
       decision: { allowed: true },
+      decisionDigest: allowOnceDecisionDigest("interaction-before-cancel"),
       by: "surface:user-1",
     };
     const finished = await harness.ledger.finishInteraction(
@@ -4297,6 +4432,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "seal-ticket" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("unmirrored-at-seal"),
         by: "surface:user-1",
       },
     );
@@ -4344,6 +4480,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "halt-ticket" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("unmirrored-at-halt"),
         by: "surface:user-1",
       },
     );
@@ -5003,6 +5140,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "historical-ticket" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("historical-interaction"),
         by: "surface:user-1",
       },
     );
@@ -5761,6 +5899,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "terminal-ticket" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("mirrored-before-terminal"),
         by: "surface:user-1",
       },
       submissionContext(terminal.unsigned),
@@ -5897,6 +6036,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: "finished-ticket" },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("finished-before-conflict"),
         by: "surface:user-1",
       },
     );
@@ -5977,6 +6117,7 @@ describe("conversation assignment protocol", () => {
         t: "answered",
         authority: { via: "surface-ticket", ticketId: `chain-ticket-${index}` },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest(requestId),
         by: "surface:user-1",
       });
     }
@@ -6083,6 +6224,7 @@ describe("conversation assignment protocol", () => {
         t: "answered" as const,
         authority: { via: "surface-ticket" as const, ticketId: `${requestId}-ticket` },
         decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest(requestId),
         by: "surface:user-1",
       },
       at: NOW,
@@ -6353,6 +6495,7 @@ describe("conversation assignment protocol", () => {
           t: "answered",
           authority: { via: "surface-ticket", ticketId: "old-epoch-ticket" },
           decision: { allowed: true },
+          decisionDigest: allowOnceDecisionDigest("old-epoch-mirror"),
           by: "surface:user-1",
         },
         at: NOW,
@@ -7317,6 +7460,98 @@ describe("conversation assignment protocol", () => {
     });
   });
 
+  it("freezes the cancel-batch candidate set and replays the original batch without re-enumeration", async () => {
+    const harness = await createUnassignedHarness();
+    const source = trustedControlSource();
+    const applyBatch = (
+      requestId: string,
+      response?: { replyTarget: { channelId: string; to: string } },
+    ) =>
+      harness.journal.applyControl({
+        admission: harness.control,
+        envelope: createConversationControlEnvelope({
+          requestId,
+          source,
+          at: NOW,
+          body: {
+            t: "cancel-batch",
+            conversationId: CONVERSATION_ID,
+            ownerEpoch: 3,
+            ...(response ? { response } : {}),
+          },
+        }),
+        source,
+      });
+
+    // 首次批量:queued run 被冻结进候选并直接终态 cancelled
+    const first = await applyBatch("cancel-batch-populated");
+    expect(first).toMatchObject({
+      kind: "applied",
+      result: {
+        status: "ok",
+        body: {
+          t: "cancel-batch",
+          runs: [
+            {
+              runId: RUN_ID,
+              runState: "cancelled",
+              source: "interactive",
+              ingressId: "ingress-1",
+            },
+          ],
+        },
+      },
+    });
+
+    // 候选已空:第二个批量决定携带渠道回执绑定,产出唯一 control-response item
+    const empty = await applyBatch("cancel-batch-empty", {
+      replyTarget: { channelId: "feishu", to: "chat-1" },
+    });
+    expect(empty).toMatchObject({
+      kind: "applied",
+      result: {
+        status: "ok",
+        body: { t: "cancel-batch", conversationId: CONVERSATION_ID, runs: [] },
+      },
+    });
+    const afterEmpty = await harness.log.readAll();
+    const responseEnqueues = afterEmpty.flatMap((envelope) =>
+      envelope.entries.filter((entry) => {
+        const body = entry.body as { t?: string; keyBody?: { kind?: string } };
+        return (
+          entry.stream === "delivery" &&
+          body.t === "enqueued" &&
+          body.keyBody?.kind === "conversation-control-response-delivery"
+        );
+      }),
+    );
+    expect(responseEnqueues).toHaveLength(1);
+
+    // 同 requestId 重投:exact replay 返回原批次,零重新枚举、零追加
+    const emptyReplay = await applyBatch("cancel-batch-empty", {
+      replyTarget: { channelId: "feishu", to: "chat-1" },
+    });
+    expect(emptyReplay).toMatchObject({
+      kind: "replayed",
+      result: {
+        status: "ok",
+        body: { t: "cancel-batch", conversationId: CONVERSATION_ID, runs: [] },
+      },
+    });
+    const populatedReplay = await applyBatch("cancel-batch-populated");
+    expect(populatedReplay).toMatchObject({
+      kind: "replayed",
+      result: {
+        status: "ok",
+        body: {
+          t: "cancel-batch",
+          runs: [{ runId: RUN_ID, runState: "cancelled" }],
+        },
+      },
+    });
+    expect(await harness.log.readAll()).toHaveLength(afterEmpty.length);
+  });
+
   it("rejects runtime attempts to cross the initial and atomic control entrypoints", async () => {
     const harness = await createHarness();
     const source = trustedControlSource();
@@ -7366,7 +7601,7 @@ describe("conversation assignment protocol", () => {
           },
         }),
       }),
-    ).rejects.toThrow("requires an authority control request");
+    ).rejects.toThrow("rejects session-create control requests");
   });
 
   it.each(["dispatched", "running"] as const)(
@@ -8005,6 +8240,7 @@ type ConversationBehaviorRecordType =
 
 type ConversationBehaviorScenarioId =
   | "commit"
+  | "sessionLifecycle"
   | "mirror"
   | "cancelHalted"
   | "cancelUncertainContained"
@@ -8066,6 +8302,38 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async sessionLifecycle() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    await sealDefaultBundle(harness.ledger);
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    const source = trustedControlSource();
+    const authority = await harness.journal.authorityState();
+    const outcome = await harness.journal.applyControl({
+      admission: harness.control,
+      envelope: createConversationControlEnvelope({
+        requestId: "matrix-session-clear",
+        source,
+        at: NOW,
+        body: {
+          t: "session-write",
+          conversationId: CONVERSATION_ID,
+          mutation: { kind: "window-op", op: "clear" },
+          ownerEpoch: 3,
+          domainRevision: authority.domainRevision,
+        },
+      }),
+      source,
+    });
+    if (outcome.kind !== "applied" || outcome.result.status !== "ok") {
+      throw new Error("matrix session lifecycle control was rejected");
+    }
+    await harness.journal.resumeLifecycleProjections(async () => undefined);
+    return conversationBehaviorHarness(harness);
+  },
   async commit() {
     const harness = await createHarness();
     await startConversation(harness);
@@ -8411,9 +8679,57 @@ const CONVERSATION_RECOVERY_PROBES = {
         ledger: harness.ledger,
         owner: harness.journal,
       }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
-    ).rejects.toThrow("matrix projection crash");
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    await expect(harness.journal.resumeCommittedProjections()).rejects.toThrow(
+      "matrix projection crash",
+    );
     await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(1);
     await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(0);
+  },
+  async lifecycleProjection() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    await sealDefaultBundle(harness.ledger);
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    const source = trustedControlSource();
+    const authority = await harness.journal.authorityState();
+    const outcome = await harness.journal.applyControl({
+      admission: harness.control,
+      envelope: createConversationControlEnvelope({
+        requestId: "matrix-lifecycle-recovery",
+        source,
+        at: NOW,
+        body: {
+          t: "session-write",
+          conversationId: CONVERSATION_ID,
+          mutation: { kind: "window-op", op: "clear" },
+          ownerEpoch: 3,
+          domainRevision: authority.domainRevision,
+        },
+      }),
+      source,
+    });
+    if (outcome.kind !== "applied" || outcome.result.status !== "ok") {
+      throw new Error("matrix lifecycle recovery control was rejected");
+    }
+    let failProjection = true;
+    await expect(
+      harness.journal.resumeLifecycleProjections(async () => {
+        if (failProjection) {
+          failProjection = false;
+          throw new Error("matrix lifecycle projection crash");
+        }
+      }),
+    ).rejects.toThrow("matrix lifecycle projection crash");
+    await expect(
+      reopenJournal(harness).resumeLifecycleProjections(async () => undefined),
+    ).resolves.toBe(1);
+    await expect(
+      reopenJournal(harness).resumeLifecycleProjections(async () => undefined),
+    ).resolves.toBe(0);
   },
 } as const;
 
@@ -8434,9 +8750,13 @@ const noConversationRecovery = (reason: string): ConversationRecoveryExpectation
 // conversation 域与 job 域同一引擎:每类记录绑定真实生产场景、恢复合同或
 // 事实化 N/A 与对抗向量；精确重放被协议幂等吸收的类型使用同身份异载荷/
 // ghost 向量。生产事实注记:
-// conversation-commit-projection 由耐久恢复投影器生产(在线提交不写该记录),
-// 其生产路径即 commitProjection 场景的 resumeCommittedProjections。
+// commit/lifecycle projection 均由耐久恢复投影器生产；其生产场景显式执行
+// 对应 resume 消费者，不以在线提交副作用冒充耐久生产路径。
 const CONVERSATION_RECORD_BEHAVIOR = {
+  "session-lifecycle": {
+    scenario: "sessionLifecycle",
+    recovery: conversationRecovery("lifecycleProjection"),
+  },
   admitted: {
     scenario: "commit",
     recovery: noConversationRecovery("admission is consumed by normal state replay only"),
@@ -8524,6 +8844,11 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     scenario: "commitProjection",
     recovery: conversationRecovery("commitProjection"),
     corrupt: (body) => ({ ...body, digest: SHA256_ZERO }),
+  },
+  "conversation-lifecycle-projection": {
+    scenario: "sessionLifecycle",
+    recovery: conversationRecovery("lifecycleProjection"),
+    corrupt: (body) => ({ ...body, requestId: "matrix-lifecycle-ghost" }),
   },
 } as const satisfies Record<ConversationBehaviorRecordType, ConversationRecordBehaviorSpec>;
 

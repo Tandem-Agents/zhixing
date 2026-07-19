@@ -16,6 +16,7 @@ export type {
   ArtifactGarbageCollectionResult,
   ArtifactStore,
   AuthorityCommitLog,
+  AuthorityLogSnapshot,
   AuthorityGarbageCollectionOptions,
   ProjectionReplayOptions,
   ProjectionReducer,

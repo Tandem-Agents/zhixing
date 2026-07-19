@@ -98,6 +98,8 @@ export function createOwnerRuntimeAdapter(
             queue.push({ kind: "yield", value: event });
             wakeOne();
           },
+          onProtocolEvent: options?.onProtocolEvent,
+          toolSideEffectObserver: options?.toolSideEffectObserver,
         })
         .then(
           (runResult) => {

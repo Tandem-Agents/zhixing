@@ -24,6 +24,7 @@ import { SerialTaskQueue } from "../persistence/index.js";
 import {
   canonicalize,
   protocolDigest,
+  validateCancelBatchControlResultBody,
   validatePublishDecisionRecord,
 } from "../protocol/index.js";
 import type {
@@ -1118,6 +1119,27 @@ function deliverySourceMatches(
         body.jobRunId === key.jobRunId &&
         body.statusRevision === key.statusRevision
       );
+    case "conversation-control-response-delivery": {
+      // 回执只允许伴随"成功的空 cancel-batch"applied 事实:除 canonical
+      // requestId 外还必须校验结果结构——其他控制类型的 applied 不得冒充
+      // 回执来源。空批次 result 极小恒 inline,外置 ref 形态一律拒绝。
+      if (
+        candidate.stream !== "control" ||
+        body.t !== "applied" ||
+        body.requestId !== key.requestId ||
+        !isPlainObject(body.result)
+      ) {
+        return false;
+      }
+      const result = body.result;
+      if (result.status !== "ok" || !isPlainObject(result.body)) return false;
+      return validatesCompanion(() => {
+        const cancelBatch = validateCancelBatchControlResultBody(result.body);
+        if (cancelBatch.conversationId !== key.conversationId || cancelBatch.runs.length !== 0) {
+          throw new TypeError("Control response does not bind its conversation and empty batch");
+        }
+      });
+    }
     case "staged-delivery":
       return false;
   }
@@ -1377,6 +1399,11 @@ export function validateDeliveryEnqueueKeyBody(value: unknown): asserts value is
       assertIdentifier(value.jobRunId, "Delivery job run id");
       assertPositiveInteger(value.statusRevision, "Delivery status revision");
       return;
+    case "conversation-control-response-delivery":
+      assertExactKeys(value, ["conversationId", "kind", "requestId"]);
+      assertIdentifier(value.conversationId, "Delivery conversation id");
+      assertIdentifier(value.requestId, "Delivery control request id");
+      return;
     default:
       throw new TypeError("Delivery enqueue key kind is invalid");
   }
@@ -1437,8 +1464,11 @@ function validateSource(value: unknown): void {
     return;
   }
   if (value.kind === "agent") {
-    assertExactKeys(value, ["conversationId", "kind"]);
+    assertExactKeys(value, ["conversationId", "kind", "turnSlotId"], true);
     assertIdentifier(value.conversationId, "Delivery source conversation id");
+    if (value.turnSlotId !== undefined) {
+      assertIdentifier(value.turnSlotId, "Delivery source turn slot id");
+    }
     return;
   }
   if (value.kind === "system") {

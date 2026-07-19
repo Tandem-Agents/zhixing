@@ -1,3 +1,5 @@
+import type { ArtifactRef } from "../types/distributed.js";
+
 export type {
   ArtifactRef,
   Digest,
@@ -14,6 +16,11 @@ export type { Message } from "../types/messages.js";
 export type { UserTurnInput } from "../types/user-input.js";
 export type { AgentYield } from "../loop/types.js";
 export type { TurnOrigin } from "../types/tools.js";
+
+/** Canonical durable representation shared by interaction journals and stream frames. */
+export type InteractionDisplay =
+  | { readonly title: string; readonly lines: readonly string[] }
+  | { readonly ref: ArtifactRef };
 export type {
   AgentEventMap,
   ProjectedPassthroughEvent,
@@ -45,6 +52,10 @@ export type {
 } from "../scheduler/types.js";
 export type { DeliveryTargetDto, OutboundContentDto } from "../channels/types.js";
 export type { TranscriptRunRecord } from "../transcript/shard/types.js";
+export type {
+  RunRecordAdvancementMetadata,
+  TurnSource,
+} from "../transcript/types.js";
 export type { WindowCompactInstruction } from "../context/window/types.js";
 
 export interface AuthorityError {

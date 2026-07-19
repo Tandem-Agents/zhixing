@@ -304,11 +304,64 @@ describe("server.info", () => {
     expect(result.deliveryStatus).toHaveLength(1);
   });
 
+  it("returns conversation status history after each run cursor", async () => {
+    const conversationStatus = vi.fn(async () => ({
+      notices: [{
+        v: 1,
+        ref: {
+          execution: "conversation",
+          conversationId: "conversation-1",
+          runId: "run-1",
+          ownerEpoch: 1,
+        },
+        state: "uncertain",
+        statusRevision: 4,
+        actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
+        at: "2026-07-18T02:00:00.000Z",
+        openFactDigest: `sha256:${"a".repeat(64)}`,
+      }],
+      next: [{
+        conversationId: "conversation-1",
+        runId: "run-1",
+        afterStatusRevision: 4,
+      }],
+    }));
+    const ctx = mkCtx({ runtimeControl: { conversationStatus } });
+    const cursor = {
+      conversationId: "conversation-1",
+      runId: "run-1",
+      afterStatusRevision: 3,
+    };
+
+    const result = await buildServerInfoMethod().handler({
+      conversationStatusAfter: [cursor],
+    }, ctx) as any;
+
+    expect(conversationStatus).toHaveBeenCalledWith([cursor]);
+    expect(result.conversationStatus).toHaveLength(1);
+    expect(result.conversationStatusNext).toEqual([
+      { conversationId: "conversation-1", runId: "run-1", afterStatusRevision: 4 },
+    ]);
+  });
+
   it("rejects a delivery cursor outside the protocol identifier domain", async () => {
     const ctx = mkCtx({ runtimeControl: { deliveryStatus: vi.fn() } });
     await expect(
       buildServerInfoMethod().handler({
         deliveryStatusAfter: { ["i".repeat(481)]: 0 },
+      }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+  });
+
+  it("rejects malformed conversation status cursors", async () => {
+    const ctx = mkCtx({ runtimeControl: { conversationStatus: vi.fn() } });
+    await expect(
+      buildServerInfoMethod().handler({
+        conversationStatusAfter: [{
+          conversationId: "conversation-1",
+          runId: "run-1",
+          afterStatusRevision: -1,
+        }],
       }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
   });
@@ -323,7 +376,15 @@ describe("delivery.resolve", () => {
   it("forwards a validated decision with the authenticated surface identity", async () => {
     const resolveDelivery = vi.fn(async () => ({ status: "ok" }));
     const ctx = {
-      ...mkCtx({ runtimeControl: { resolveDelivery } }),
+      ...mkCtx({
+        runtimeControl: { resolveDelivery },
+        conversations: {
+          durableControlPrincipal: (input: {
+            surfacePrincipal: string;
+            connectionId: string;
+          }) => ({ ...input, deviceId: "anchor-device" }),
+        } as never,
+      }),
       connection: {
         id: 7,
         authenticated: true,
@@ -345,8 +406,8 @@ describe("delivery.resolve", () => {
     expect(resolveDelivery).toHaveBeenCalledWith({
       ...params,
       principal: {
-        surfacePrincipal: "rpc:desktop",
-        deviceId: "rpc:desktop",
+        surfacePrincipal: "rpc:owner",
+        deviceId: "anchor-device",
         connectionId: "7",
       },
     });
@@ -371,7 +432,15 @@ describe("delivery.resolve", () => {
       decision: "abandon",
     };
     const ctx = {
-      ...mkCtx({ runtimeControl: { resolveDelivery } }),
+      ...mkCtx({
+        runtimeControl: { resolveDelivery },
+        conversations: {
+          durableControlPrincipal: (input: {
+            surfacePrincipal: string;
+            connectionId: string;
+          }) => ({ ...input, deviceId: "anchor-device" }),
+        } as never,
+      }),
       connection: { id: 7, authenticated: true, clientInfo: { id: "desktop" } },
     } as never;
 
@@ -391,9 +460,9 @@ describe("delivery.resolve", () => {
       entry.handler(valid, {
         ...ctx,
         connection: {
-          id: 7,
+          id: "c".repeat(481),
           authenticated: true,
-          clientInfo: { id: "c".repeat(477) },
+          clientInfo: { id: "desktop" },
         },
       } as never),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });

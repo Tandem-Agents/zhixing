@@ -31,11 +31,13 @@ export const PROFILES: Record<ServerProfile, ProfileSpec> = {
   full: {
     surfaces: [
       "mcp",
+      "authority-runtime",
       "conversation",
       "channel",
       "delivery",
       "text-renderer",
       "confirmation-bridge",
+      "conversation-recovery",
     ],
   },
 };

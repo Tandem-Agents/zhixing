@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 import {
   createEventBus,
   type AgentEventMap,
@@ -107,6 +108,86 @@ describe("PerspectivesController", () => {
     expect(record.messages[0]).not.toHaveProperty("perspectives");
     expect(manager.getHistory("conv-1")).toEqual(record.messages);
     expect(observedEvents).toEqual([PERSPECTIVES_DELIBERATION_DEFINITION_ID]);
+    await manager.disposeAll();
+  });
+
+  it("keeps a perspective committed when final publication is temporarily unavailable", async () => {
+    const appendRun = appendRunSpy();
+    const durableRuns: RunRecordInput[] = [];
+    const durableInvocations: unknown[] = [];
+    const publishPendingFinals = vi.fn(async () => {
+      throw new Error("observer temporarily unavailable");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let insideDurableAssignment = false;
+    const manager = new ConversationManager(createFactory(), managerConfig, {
+      appendRun,
+      durableTurnExecutor: stubDurableTurnExecutor({
+        async *run(input) {
+          durableInvocations.push(input.invocation);
+          insideDurableAssignment = true;
+          try {
+            const generator = input.runtime.run(input.messages, input.options);
+            while (true) {
+              const item = await generator.next();
+              if (item.done) {
+                durableRuns.push(item.value.runRecord);
+                return item.value;
+              }
+              yield item.value;
+            }
+          } finally {
+            insideDurableAssignment = false;
+          }
+        },
+        publishPendingFinals,
+      }),
+    });
+    const managed = await manager.getOrCreate("conv-durable");
+    const controller = new PerspectivesController({
+      now: () => new Date("2026-07-03T00:00:00.000Z"),
+      allocationStrategy: {
+        async allocate() {
+          expect(insideDurableAssignment).toBe(true);
+          return allocation(3);
+        },
+      },
+      orchestrationExecutor: completedExecutor("耐久最终版本", {
+        inputTokens: 4,
+        outputTokens: 2,
+      }),
+    });
+
+    const result = await controller.runPerspectiveTurn({
+      manager,
+      managed,
+      originalInput: "@ 使用耐久协议",
+      question: "使用耐久协议",
+      turnContext: { turnId: "turn-durable-perspective" },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(appendRun).not.toHaveBeenCalled();
+    expect(durableRuns).toHaveLength(1);
+    expect(durableInvocations).toEqual([
+      {
+        kind: "perspectives",
+        source: "interactive",
+        question: "使用耐久协议",
+      },
+    ]);
+    expect(durableRuns[0]).toMatchObject({
+      perspectives: {
+        definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+        perspectiveCount: 3,
+      },
+    });
+    expect(publishPendingFinals).toHaveBeenCalledWith("conv-durable");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("durable result committed"),
+      expect.objectContaining({ message: "observer temporarily unavailable" }),
+    );
+    warn.mockRestore();
     await manager.disposeAll();
   });
 

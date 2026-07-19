@@ -34,7 +34,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 - **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SourceFreezeProof`、`PermissionSnapshotLease` 与 `InteractionMirrorBatch`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`、mirror 耐久请求身份 = `D("InteractionMirrorBatch",1,InteractionMirrorBatch 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
 - **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。interaction 审计链固定 `M0 = D("InteractionMirrorSeed",1,{assignmentId})`，每个 `interaction-finished` 按完成次序分配连续 ordinal，并计算 `Mn = D("InteractionMirrorStep",1,{previous:M(n-1),entry:{ordinal,seq,requestId,kind,outcome}})`；`at` 由批次签名绑定但不进入链步（共享 assignment reducer 无需日志 envelope 时间即可复算）。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
 - **内容与引用摘要**：`ArtifactRef.digest`、`ContentAssetRef.digest`、`CheckpointEnvelope.chunks[].digest`、`EvidenceRequest.items[].digestHint`、证据 `contentDigest`、副作用 `resultDigest`、投递回执 `receipt.digest` 与恢复验证 `nonceDigest` 恒为各自所指不可变原始字节的 `B(bytes)`；`PairingOffer.issuer.keyFingerprint = B(规范公钥字节)`。`manifestDigest / snapshotDigest / parentDigest / reportDigest / envelopeDigest / requestDigest` 等引用字段必须等于目标对象按本表得到的摘要，不得对引用字段所在对象再哈希。`FinalOutboxRecord.digest / FinalFrame.digest` 固定引用 `SealedBundle.digest`；`AssetIndexEntry.digest` 固定引用对应资产 artifact 的 `ArtifactRef.digest`。
-- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution / responseBinding 摘要、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `DeliveryResponseBinding = D("DeliveryResponseBinding",1,{itemId,attempt,startedAt})`——transport 响应归属绑定，不含 anchorEpoch、迁居不变；delivery 的 open / resolution 摘要含 epoch、仅用于 uncertain 裁决 fencing，与响应绑定不得混用。`PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
+- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution / responseBinding 摘要、confirmation `decisionDigest`、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `ConfirmationDecisionDigest = D("ConfirmationDecision",1,{requestId,decision})`，绑定一次确认操作的完整规范决定；`DeliveryResponseBinding = D("DeliveryResponseBinding",1,{itemId,attempt,startedAt})`——transport 响应归属绑定，不含 anchorEpoch、迁居不变；delivery 的 open / resolution 摘要含 epoch、仅用于 uncertain 裁决 fencing，与响应绑定不得混用。`PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
 - 引用目标注册表（同名字段按所在 DTO 取对应行，禁止按名字猜）：
 
   | 引用字段 | 唯一目标 |
@@ -73,7 +73,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 | `MemoryEntry` / `PersonEntry` / `JournalEntry` | 现有同名 @ `packages/core/src/memory/` | 记忆域实体（读结果载体） |
 | `MemoryCategory` / `PersonMeta` | 现有同名 @ `packages/core/src/memory/`（进程内领域类型，**不上 wire**——wire 用 §1.3b `MemoryCategoryDto` / `PersonMetaDto` 快照） | 记忆分类与人物元数据 |
 | `DeliveryItem` | 现有同名 @ `packages/core/src/delivery/types.ts:31`（由 delivery 流投影生成，不上权威日志） | 渠道发送器兼容投影 |
-| `EnqueueParams` / `IDeliveryPipeline.enqueue` | 现有同名 @ `packages/core/src/delivery/types.ts:100 / :110`；现实现于 `pipeline.ts:199`，唯一生产调用 @ `scheduler.ts:519` | 目标态由五类权威生产者内部构造 enqueued；公开生产入口保留至 scheduler 接入 JobJournal 后随旧路径整体退役（执行计划第 26 项） |
+| `EnqueueParams` / `IDeliveryPipeline.enqueue` | 现有同名 @ `packages/core/src/delivery/types.ts:100 / :110`；现实现于 `pipeline.ts:199`，唯一生产调用 @ `scheduler.ts:519` | 目标态由六类权威生产者内部构造 enqueued；公开生产入口保留至 scheduler 接入 JobJournal 后随旧路径整体退役（执行计划第 26 项） |
 | `SkillUsageRecord` | 本文冻结（§1.3b；现有 `SkillUsage` @ `packages/core/src/skills/types.ts:35` 无 skillId，adapter 自 store 的 map 键补齐） | 技能使用记录 |
 | `SkillRecord` / `SkillState` / `SkillMode` | 现有同名 @ `packages/core/src/skills/types.ts` | 技能管理载体（进程内领域类型，**不上 wire**——wire 写面用 §3.2 `SkillWriteDto` / `SkillStatePatch`（mode 用 §1.3b `SkillModeDto`），id / revision / createdAt 等权威字段锚点生成） |
 | `EvidenceKind` | ≙ 现有 `ObjectiveSignalKind` @ `packages/core/src/advancement/types.ts` | 证据类型 |
@@ -754,7 +754,7 @@ sealed bundle 提交 outbox 只保留尚未取得 executor ACK 耐久回执的 a
 
 ```ts
 interface InteractionMirrorEntry { ordinal: number; seq: number; requestId: string; kind: "allow-once";
-  outcome: { t: "answered";      authority: InteractionAnswerAuthority; decision: { allowed: boolean; reason?: string }; by: string }
+  outcome: { t: "answered";      authority: InteractionAnswerAuthority; decision: { allowed: boolean; reason?: string }; decisionDigest: Digest; by: string }
          | { t: "auto-resolved"; decision: "denied"; reason: "no-interactive-surface"|"policy-fail-closed" }
          | { t: "cancelled";     via: "cancel-fence"|"abort-ticket"|"run-end"|"backpressure" }
          | { t: "expired" };                     // 镜像 = finished 终态投影（审计面与账本同构，四类终结路径一致）
@@ -763,6 +763,9 @@ interface InteractionMirrorBatch { v: 1; assignmentId: string; executorId: strin
   previousDigest: Digest; entries: InteractionMirrorEntry[]; mirrorDigest: Digest; signature: Signature }
 // entries 非空且至多 256 条，ordinal 连续、seq 严格递增；previousDigest / mirrorDigest 按 §1.2 M 链首尾闭合。
 // signature 覆盖含 at 的完整批次；批次去 signature 的对象身份是 owner 侧 exact durable-request 幂等键。
+// surface 对已终结确认的同请求重试(丢响应/重启)按 owner 侧 mirror 投影回放——单一事实源,禁止另建内存已终结账本;
+// answered.decisionDigest 必须等于 D("ConfirmationDecision",1,{requestId,decision})；同一完整决定回放成功，任一 kind/pattern/note/reason/modifiedInput 差异稳定冲突；
+// cancelled/expired/auto-resolved 非用户决策、不回放,保持 already-resolved-or-not-found。
 
 interface RunSubmissionPort {
   reportStarted(assignmentId: string, ctx: AuthorityCallContext): Promise<void>;   // 幂等
@@ -838,6 +841,7 @@ type ControlResultBody =        // 回放载体：重复请求原样返回。all
                                 // 终态权威与幂等回放归 executor assignment 流 interaction-finished 记录（重复 (assignmentId, interactionRequestId) 回放原 outcome）
   | { t: "input"; runId: string; queuedPosition: number }
   | { t: "cancel"; runState: ConversationRunState }
+  | { t: "cancel-batch"; conversationId: string; runs: Array<{ runId: string; runState: ConversationRunState; source: TurnSource; ingressId: string }> }
   | { t: "session-write"; revision: number }
   | { t: "session-create"; conversationId: string }
   | { t: "global-write"; revision: number }
@@ -857,8 +861,11 @@ interface DispatchConflictContainmentRecord { t: "dispatch-conflict-contained"; 
 // conflict 所证 received 前缀；not-started 分支必须与同 proof 的 resolution + assignment-superseded 原子出现。
 
 type RunJournalRecord =
+  | { t: "session-lifecycle"; mutation: "clear"|"delete"; domainRevision: number; requestId: string }
+      // clear/delete 的 owner 权威事实；同 requestId 精确回放原 revision，异载荷拒绝。事实产生后禁止新 input，直到对应投影进度确认。
   | { t: "admitted"; ingressKey: string; runId: string; input: UserTurnInput | { ref: ArtifactRef };
-      ingress: IngressContext; queuedPosition: number }   // 来源上下文随准入耐久化——票据签发（原始 surface）、final / 渠道路由的权威数据源
+      ingress: IngressContext; invocation: ConversationInvocation; queuedPosition: number }
+      // 来源与执行语义随准入一起耐久化：重启后普通、推进代理与多视角任务不得互相降级或变形；ingress 仍是票据签发、final / 渠道路由的权威数据源
   | { t: "assigned"; runId: string; assignmentId: string; executorId: string;
       ownerEpoch: number; baseRevision: number;     // 派发时权威域快照（由已验 DispatchEnvelope 派生，reducer 反绑 artifact 全等）——
       dispatchDigest: Digest;                       // 使无 ArtifactStore 的 submission guard 能零读取机械复算 activation、DispatchRejection 与 committed 的完整历史栅栏
@@ -900,6 +907,13 @@ type RunJournalRecord =
   | { t: "bundle-ack-observed"; assignmentId: string; bundleRef: ArtifactRef; commitRevision: number }
   | { t: "resolution"; runId: string; fact: UncertainResolutionFact }
   | ConversationChannelChallengeRecord;   // conversation 渠道确认的 challenge outbox（重启按 prepared−closed 重驱渠道消息，语义与 job relay 同构）
+
+type ConversationProjectionProgressRecord =
+  | { kind: "conversation-commit-projection"; assignmentId: string; runId: string; commitRevision: number; digest: Digest }
+  | { kind: "conversation-lifecycle-projection"; mutation: "clear"|"delete"; domainRevision: number; requestId: string };
+// 进度记录与其权威事实同属 run 逻辑流，只能由幂等投影消费者在真实物化成功后追加；重放必须逐字段反绑唯一待办。
+// clear 完成 transcript/视图/内存窗口换代，delete 完成目录和运行时投影清理。普通缓存驱逐不得删除待办、恢复代际、能力或 scheduler claim；
+// 只有进度确认或 delete 权威终结且投影收束后才能退休。启动 readiness 与运行期持续恢复共用同一消费者。
 
 type ConversationChannelChallengePreparedRecord =
   { t: "channel-challenge-prepared"; ref: Extract<ExecutionRef, { execution: "conversation" }>; assignmentId: string; frameSeq: number;
@@ -1000,11 +1014,11 @@ type AssignmentRecord =    // executor 设备域
                                                           // fence 先于 dispatch 到达时本记录即该 assignment 流首记录 = tombstone，迟到 dispatch 永久拒
   | { t: "started" }
   | { t: "interaction-requested"; requestId: string; kind: "allow-once"; toolName: string;
-      display: { title: string; lines: string[] };    // 脱敏且足以决策的结构化展示载荷（≙ 现 ConfirmationDisplay 投影）
+      display: { title: string; lines: string[] } | { ref: ArtifactRef }; // 规范 JSON ≤8KiB；超限外置，重放必须解析并校验引用内容
       issuedAt: IsoTime; ttlMs: number; expiresAt: IsoTime } // executor 时钟，expiresAt = issuedAt + ttlMs（不等即拒）；恢复按 expiresAt，跨机按 issuedAt + TTL
                                                        // pending = requested 无同 requestId 的 finished
   | { t: "interaction-finished"; requestId: string; kind: "allow-once";
-      outcome: { t: "answered";      authority: InteractionAnswerAuthority; decision: { allowed: boolean; reason?: string }; by: string }
+      outcome: { t: "answered";      authority: InteractionAnswerAuthority; decision: { allowed: boolean; reason?: string }; decisionDigest: Digest; by: string }
              | { t: "auto-resolved"; decision: "denied"; reason: "no-interactive-surface"|"policy-fail-closed" }  // 非交互兜底恒 deny（不降防御）
              | { t: "cancelled";     via: "cancel-fence"|"abort-ticket"|"run-end"|"backpressure" }
                // 取消栅栏 / abort 止损 / run 终止（含 halted / sealed）/ 队列满即拒（≙ 现 broker.ts:173 backpressure 语义）连带收束
@@ -1085,12 +1099,15 @@ type ExposureStreamRecord = { t: "exposure"; record: CredentialExposureRecord };
 type DeliveryEndpointDto =
   | { kind: "channel"; target: DeliveryTargetDto }
   | { kind: "webhook"; endpoint: SecretRef };       // endpoint 仍只含引用，发送时由锚点 SecretStore 解引用
-type DeliveryEnqueueKeyBody =                         // idempotencyKey 的唯一字段单源；持久化后可独立复算，五域组合在类型层封死
+type DeliveryEnqueueKeyBody =                         // idempotencyKey 的唯一字段单源；持久化后可独立复算，六域组合在类型层封死
   | { kind: "job-result-delivery"; taskId: string; jobRunId: string; planDigest: Digest }
   | { kind: "staged-delivery"; assignmentId: string; mutationSeq: number }
   | { kind: "conversation-final-delivery"; conversationId: string; runId: string; commitRevision: number }
   | { kind: "conversation-status-delivery"; conversationId: string; runId: string; statusRevision: number }
-  | { kind: "job-status-delivery"; taskId: string; jobRunId: string; statusRevision: number };
+  | { kind: "job-status-delivery"; taskId: string; jobRunId: string; statusRevision: number }
+  | { kind: "conversation-control-response-delivery"; conversationId: string; requestId: string };
+                                                      // 控制回执：一个控制决定恰一条回执 item，以 canonical requestId 幂等；
+                                                      // 伴随断言逐字段绑定同 envelope 的 applied cancel-batch 事实（requestId + result.conversationId）；当前唯一生产者 = 空批次渠道回执
 interface DeliveryIntentDto {                        // enqueued 的不可变权威输入；不携任何生命周期字段
   endpoint: DeliveryEndpointDto; content: OutboundContentDto | { ref: ArtifactRef };
   priority: "low"|"normal"|"high";
@@ -1119,7 +1136,7 @@ type DeliveryStreamRecord =                      // delivery 流 = 投递生命�
   | { t: "failed";          itemId: string; attempt: number; error: DeliveryFailure; statusRevision: number }            // 永久失败（可重试类走 retry-scheduled）
   | { t: "delivery-uncertain"; itemId: string; attempt: number; openedAnchorEpoch: number; openedAt: IsoTime; openFactDigest: Digest; statusRevision: number }
   | { t: "delivery-resolved"; fact: DeliveryResolutionFact; statusRevision: number };                                   // 用户裁决不可变，**绝不伪造外部 sent**
-// enqueued 只能由五类权威生产者的内部构造器生成；目标态删除公开生产接口 IDeliveryPipeline.enqueue(EnqueueParams)（现状字段见 §1.3 源码引用），wire DTO 与 mutation
+// enqueued 只能由六类权威生产者的内部构造器生成；目标态删除公开生产接口 IDeliveryPipeline.enqueue(EnqueueParams)（现状字段见 §1.3 源码引用），wire DTO 与 mutation
 // 均不得携 itemId / keyBody / idempotencyKey / intentDigest / createdAt / maxAttempts，反序列化遇这些自报字段即拒绝。内部构造器从同 envelope 的权威事实派生 keyBody，
 // 以 D("DeliveryEnqueueKeyBody",1,keyBody) 生成 idempotencyKey，以 D("DeliveryIntentDto",1,intent) 生成 intentDigest；
 // committed 结果与非 committed 状态使用不同 kind，后者以 journal.statusRevision 定位；迁居 / 重放不改键，不同 revision 不得合并为同一 item。
@@ -1212,7 +1229,7 @@ interface DeferredGlobalIntent {         // 本地域离线期间的全局写候
 
 | 入队承诺 | 唯一承载 |
 |---|---|
-| 五类身份及字段组合不可混用 | `DeliveryEnqueueKeyBody` 判别联合；`enqueued.keyBody / idempotencyKey` |
+| 六类身份及字段组合不可混用 | `DeliveryEnqueueKeyBody` 判别联合；`enqueued.keyBody / idempotencyKey` |
 | 同键载荷必须一致 | `enqueued.intent / intentDigest`；前置裁决的同 digest 回放、异 digest 拒绝 |
 | 调用方不能自报权威字段 | `DeliveryRequestDto` / `JobCommitBundle` 白名单 + enqueued 内部构造器规则 |
 | 时间与策略重放稳定 | `DeliveryIntentDto.createdAt = CommitEnvelope.at`、冻结 `maxAttempts`；重放读取原 enqueued |
@@ -1261,10 +1278,21 @@ type IngressContext =                            // **owner 派生**的耐久来
       deviceId: string /* 渠道宿主所在设备 = 锚点 */; ingressId: string;
       turnOrigin?: TurnOrigin; receivedAt: IsoTime };
 
+type ConversationInvocation =                    // 排队任务的耐久执行快照；进入 input 摘要与 admitted，响应丢失、重启与三选重试均复用原值
+  | { kind: "agent"; source: TurnSource; advancement?: RunRecordAdvancementMetadata }
+  | { kind: "perspectives"; source: "interactive"|"channel"; question: string };
+// agent 仅在 source="advancement" 时允许且必须携 advancement；perspectives.question 必须非空、UTF-8 ≤8KiB，且不得使用 scheduler / advancement 来源。
+// interaction 应答中的 note/reason UTF-8 ≤8KiB；所有入口、wire validator、账本与重放共用该预算。
+
 type ControlRequest =
   | { t: "input";      conversationId: string; ingress: { ingressId: string; source: IngressContext["kind"] };
-      input: UserTurnInput; ownerEpoch: number }   // 完整 IngressContext 由 owner 派生（channel 分支的 responder / replyTarget 取自渠道认证事实）
+      input: UserTurnInput; invocation: ConversationInvocation; ownerEpoch: number }
+      // 完整 IngressContext 由 owner 派生（channel 分支的 responder / replyTarget 取自渠道认证事实）；同 ingress / requestId 改写 invocation 必须 idempotency-conflict
+      // 调度前预准入必须有稳定 ingressId；后续执行只可消费 input + invocation 全等的同一准入，禁止以内存准备态把另一调用挂到已耐久 run
   | { t: "cancel";     conversationId: string; runId: string; ownerEpoch: number }
+  | { t: "cancel-batch"; conversationId: string; ownerEpoch: number;     // 批量取消的唯一线性化点：候选集在权威 apply 时刻由 owner 以
+      response?: { replyTarget: DeliveryTargetDto } }                    // 取消控制面的单源谓词冻结；结果携逐 run 终态；重放消费 applied 原批次、零重新枚举。
+                                                                         // response 为渠道回执绑定——空批次时同一权威决定产出恰一条 control-response 投递 item
   | { t: "session-create"; requestedName?: string; sceneId?: string }    // 路由到目标 owner（默认锚点；离线本地新会话就地）
   | { t: "session-write"; conversationId: string; mutation: SessionControlMutation; ownerEpoch: number; domainRevision: number }
   | { t: "global-write";  mutation: GlobalControlMutation; anchorEpoch: number; domainRevision: number }
@@ -1279,7 +1307,11 @@ type ControlRequest =
       decision: "user-verified-sent"|"abandon"|"retry-risk-ack" };
 ```
 
-路由由 `t` 静态决定：`input / cancel / session-create / session-write` → 对话 owner；`global-write / job-run / job-cancel / delivery-resolve` → 锚点；`uncertain-resolve` 按 `ref.execution` → conversation owner / 锚点。job-run / job-cancel 的 guard 校验目标 task：`TaskDefinitionBody.kind:"system"` 一律 unauthorized——system 任务的触发与取消只属锚点时钟与 host principal（6.2b 行 1）。两类 resolve 均验已认证用户、当前 epoch、仍打开的 subject / attempt 与 `openFactDigest`，重复 requestId 回放原结果，旧 fact / 已关闭 fact 拒绝。`allow-once` → executor 的 assignment 事务域：surface 分支验 run-interact 票据的 assignment / surfacePrincipal，channel 分支对 grant 与其内嵌 challenge token 分别验锚点签名，并验 job ref、assignment / interaction / challenge、route / responder、decision 与 expiry 全绑定，且 channel grant 禁用于 conversation / 手动 surface；成功后记录的 authority / decision / by 全由已验凭证派生，镜像 owner 仅审计。配对与秘密录入不走本信封（mesh / SecretStore 专用流程）。非法组合（字段与 `t` 不匹配）在反序列化层拒绝。
+路由由 `t` 静态决定：`input / cancel / cancel-batch / session-create / session-write` → 对话 owner；`global-write / job-run / job-cancel / delivery-resolve` → 锚点；`uncertain-resolve` 按 `ref.execution` → conversation owner / 锚点。job-run / job-cancel 的 guard 校验目标 task：`TaskDefinitionBody.kind:"system"` 一律 unauthorized——system 任务的触发与取消只属锚点时钟与 host principal（6.2b 行 1）。两类 resolve 均验已认证用户、当前 epoch、仍打开的 subject / attempt 与 `openFactDigest`，重复 requestId 回放原结果，旧 fact / 已关闭 fact 拒绝。`allow-once` → executor 的 assignment 事务域：surface 分支验 run-interact 票据的 assignment / surfacePrincipal，channel 分支对 grant 与其内嵌 challenge token 分别验锚点签名，并验 job ref、assignment / interaction / challenge、route / responder、decision 与 expiry 全绑定，且 channel grant 禁用于 conversation / 手动 surface；成功后记录的 authority / decision / by 全由已验凭证派生，镜像 owner 仅审计。配对与秘密录入不走本信封（mesh / SecretStore 专用流程）。非法组合（字段与 `t` 不匹配）在反序列化层拒绝。
+
+**准入与本地调度交接**：`input` 已耐久后即返回稳定 runId；在线 scheduler 以显式 `scheduling → accepted/active` claim 接管，只有真实入队/占位成功才确认接纳并消费恢复代际。任务构造、排队或进程内竞态失败时，原 owner 必须先把该 run 交还持续恢复再释放容量，禁止以普通拒绝否定已成立的准入，也禁止布尔 claim 吞掉恢复唤醒。取消以 runId 逐项线性化：每个权威取消后立即停止同一 run 的本地任务并返回含 runId、原 invocation source、稳定 ingressId 与本地处置的结构化结果；第一方 RPC 强制明确 runId。批量取消是一个以外层 surface requestId 线性化的 `cancel-batch` 权威决定：候选选择、逐 run 裁决与空批次回执 item 在同一 authority apply 内定格，候选谓词与 `cancellableRuns` 投影单源，重放消费 applied 原批次、零重新枚举、零追加；非空批次的用户反馈由逐 run 权威状态投递单源承担，运行时按耐久结果逐 run 幂等止损。控制写发生响应丢失时，调用端必须以同一信封精确重放；已成立的取消、uncertain 裁决或 session-write 不得被后置调度、投影或通知失败改写。advancement 代理只可由 ingressId 与当前 outstanding proxy 身份全等的取消结果收束，禁止仅凭 source 推断；恢复调度前必须按 `(source, ingressId)` 查询耐久 run 所有权，仅无 claim 时建立新任务，非关闭 run 保留原 owner，cancelled / failed / expired 才幂等关闭代理待办。无关通知投影在本地止损之后；关停总预算从开始计时，单项 I/O 不得绕过。
+
+**会话生命周期交接**：clear/delete 的成功回执必须等待 `session-lifecycle` 对应旧存储与内存视图完成并追加投影进度；同 conversation 的在线与恢复消费者共用一项覆盖“物化→进度确认”的 claim，禁止在确认前释放或重复并发物化。新 requestId 仅在 owner 已有耐久身份或旧目录/活动会话确实存在时写入；精确 request replay 直接复用原事实，不依赖已被 delete 清除的派生存在性。权威事实之后的投影失败只保留待办并由同进程/重启恢复重驱，不得回滚权威 revision。delete 的权威 tombstone 可先成立，但目录与运行时资源仅在投影完成后对外确认并退休。
 
 ### 5.2 派发（conversation / job 分支）
 
@@ -1435,13 +1467,15 @@ interface JobCommitBundle { t: "job"; jobRunId: string; taskId: string; fence: J
 type ContentAssetRef = ArtifactRef & { kind: "image"|"file"|"tool-output"|"window-snapshot" };
 ```
 
-- **conversation CAS**：先按 §1.2 复算 `SealedBundle.digest` 与全部引用目标，再验栅栏全字段（ownerEpoch / assignmentId / baseRevision / executorId / digest）；该 assignment 有打开的 `dispatch-conflict(opened-uncertain)` fact 则 fence-rejected（不属于“合法 bundle”）→ 按 §4.2 提取并验 `rootArtifacts ∪ dependencyArtifacts` 全闭包已耐久在场（缺件拒绝）→ 同一 CommitEnvelope 原子写入：run 流 `committed`、会话元数据变更、内容资产索引、`publish-decision`、`FinalOutboxRecord(pending)`；仅当本 run 的耐久 `ingress.kind === "channel"` 时，再构造 `DeliveryIntentDto.endpoint = { kind: "channel", target: ingress.replyTarget }`，向 delivery 流写一条使用 §1.1 `conversation-final-delivery` 键的 `enqueued`。CAS 后应用 `windowCompact` 于窗口 / 快照，失败即弃、由 transcript 重建，不回滚已提交结果。
+- **conversation CAS**：先按 §1.2 复算 `SealedBundle.digest` 与全部引用目标，再验栅栏全字段（ownerEpoch / assignmentId / baseRevision / executorId / digest）；该 assignment 有打开的 `dispatch-conflict(opened-uncertain)` fact 则 fence-rejected（不属于“合法 bundle”）→ 按 §4.2 提取并验 `rootArtifacts ∪ dependencyArtifacts` 全闭包已耐久在场（缺件拒绝）→ 同一 CommitEnvelope 原子写入：run 流 `committed`、会话元数据变更、内容资产索引、`publish-decision`、`FinalOutboxRecord(pending)`；仅当本 run 的耐久 `ingress.kind === "channel"` 时，再构造 `DeliveryIntentDto.endpoint = { kind: "channel", target: ingress.replyTarget }`，向 delivery 流写一条使用 §1.1 `conversation-final-delivery` 键的 `enqueued`。CAS 即不可回滚的返回线性化点；transcript/window、staged publishing 与实时 final 均为耐久待办驱动的派生步骤，失败不得把 committed 重分类为失败，必须进入同进程持续恢复及重启重放。final 只在 transcript 历史可读后发布；消费者仍须对历史暂未就绪和瞬时读取失败有界退避重试。`windowCompact` 投影失败由 transcript 重建。
 - **job CAS**：先按 §1.2 复算 `SealedBundle.digest`、`JobCommitFence.digest` 与全部引用目标，再验 fence 全字段（含 `deliveryPlanDigest` 与 occurrence 冻结 plan 一致）；该 assignment 有打开的 `dispatch-conflict(opened-uncertain)` fact 则 fence-rejected → 按 §4.2 验 `rootArtifacts ∪ dependencyArtifacts` 全闭包在场 → 同一 CommitEnvelope 原子写入：job 流 `committed`、任务投影变更、`delivery` 流逐项 `enqueued`——**由锚点按 occurrence 冻结的 `deliveryPlan` + bundle 结果构造不可变 `DeliveryIntentDto`，并在此唯一分配 itemId / idempotencyKey**（executor 对投递目标与生命周期零写权；job 权威与 delivery 流同属锚点物理 log，单 envelope 原子结构性成立）、`publish-decision`（仅 global 计数；conflicted 明细入该 occurrence 的观测投影并经维护通知呈现——job 无 FinalFrame 载体）。现有 DeliveryItem / 队列只由 delivery 流投影，不参与 CAS；job 不产生 FinalOutbox（结果经投递队列通知）。
 - 重复 / 迟到提交按幂等键返回原 `commitRevision` / `jobRevision`。
 
 ### 5.5 终态与状态投递
 
-RunJournal 为最终事实源；FinalOutbox 是"权威提交 → 实时通知"的有界桥：以 `(conversationId, runId, commitRevision, digest)` 向发布时刻已认证的同会话 observer 幂等推送 `FinalFrame`，不维护逐 surface 耐久确认；外部渠道按 `turnOrigin` 走 DeliveryOutbox，禁止跨渠道广播；断线重连与新 surface 以 last-seen `commitRevision` 从 owner 历史对账补终态。
+RunJournal 为最终事实源；FinalOutbox 是"权威提交 → 实时通知"的有界桥：以 `(conversationId, runId, commitRevision, digest)` 向发布时刻已认证的同会话 observer 幂等推送 `FinalFrame`，不维护逐 surface 耐久确认；外部渠道按 `turnOrigin` 走 DeliveryOutbox，禁止跨渠道广播。渠道 turn-slot 在对应权威 final/status item 耐久接管后只能由 DeliveryAuthority 的 fill 或明确空终态关闭，入口 `finally` 不得提前 abandon；从而所有 `afterSlot` 消息恒在 final/status 之后。断线重连与新 surface 以 last-seen `commitRevision` 从 owner 历史对账补终态。
+
+**第一方 RPC 耐久身份与重连合同**：客户端须在调用前分配稳定 operationId（当前 wire 的 `turnId`），响应丢失只允许以完全相同的请求参数重试；受理响应必须返回 owner 分配的权威 `runId`，后续 abort、status、final 与历史补读均以该 `runId` 为主体，禁止用 operationId 代替。连接断开只撤销 observer 与在线能力，不隐式取消已准入 run；取消只能由携新 requestId 与明确 runId 的耐久控制请求触发。重连时先恢复订阅，再从各 run 的 last-seen revision 分页补读至续读游标为空并去重；实时通知与补读共同决定本地 waiter 的唯一终态。
 
 **非 committed 状态的通知与裁决闭环**（committed 之外的每个终态 / 挂起态都可实时获知、断线补读、合法裁决恰一次）：
 
@@ -1500,6 +1534,7 @@ type ExecutionStatusNotice = ConversationStatusNotice | JobStatusNotice | Delive
 | failed | 本次运行失败：{reason}。 | 定时任务「{taskName}」运行失败：{reason}。 |
 | expired | 本次请求未能开始执行，已过期。你可以重新发送。 | 定时任务「{taskName}」本次未能开始执行，已过期；后续计划不受影响。 |
 | uncertain | 本次运行结果不确定，需要你裁决处理方式。 | 定时任务「{taskName}」结果不确定，需要你裁决处理方式。 |
+| 控制回执（空批量取消） | 当前没有正在处理的任务。 | —（job 无渠道批量取消面） |
 
 ### 5.6 run stream
 
@@ -1524,7 +1559,8 @@ type StreamFramePayload =
   | { kind: "agent-yield"; yield: AgentYield }
   | { kind: "agent-event"; event: SessionEventProjection }
   | { kind: "interaction"; event:                            // 确认交互的数据面下行——总纲"确认交互就近传输"的载体半边：
-        { t: "requested"; requestId: string; toolName: string; display: { title: string; lines: string[] };
+        { t: "requested"; requestId: string; toolName: string;
+          display: { title: string; lines: string[] } | { ref: ArtifactRef };
           issuedAt: IsoTime; ttlMs: number; expiresAt: IsoTime }
       | { t: "finished";  requestId: string; outcome: "allowed"|"denied"|"cancelled"|"expired" } }
       // assignment 流 interaction-requested / interaction-finished 落盘后的确定性投影，复用同一 seq / spool / 续流纪律；
@@ -1547,6 +1583,8 @@ interface StreamAck       { assignmentId: string; consumer: StreamConsumerAuth; 
 
 游标与回收语义（机械口径）：`seq` 在 **assignment 全生命周期绝对单调且逐帧连续**（跨重连、跨路径切换不重置）；`streamEpoch` 只作旧连接 fencing（重连 +1，旧 epoch 帧被拒），不参与去重——路径切换零丢帧零重帧由单调 seq 单独保证。`provisional-final` 是该 assignment 的最后一帧，固定占用 `seq = lastDataSeq + 1`（无数据帧时为 1），其 payload.finalSeq 必须等于自身 `StreamFrame.seq`；此后禁止再产帧。`SealedBundle.streamFinal.finalSeq` 与该值相等，ACK / 重放 / spool 水位均包含这张收尾帧。
 **streamDigest 摘要域（冻结）**：增量哈希链**只覆盖数据帧**（payload kind = agent-yield / agent-event / interaction）——`D0 = H("zhixing:stream:v1" || assignmentId)`，每个数据帧按实际 seq 计算 `Dnext = H(Dprev || JCS({ seq, payload, meta }))`（JCS 沿 §1.2）；`provisional-final` 虽占用 seq 并参与 ACK / 重放，却是**链外收尾帧**，携带最后数据帧链头（空流即 D0）、自身不入链，循环定义结构性不存在。**显式排除** `streamEpoch`、`ref`、传输层头与连接态字段——同一逻辑帧换路径 / 换 epoch 摘要不变，收尾帧与 `SealedBundle.streamFinal` 可跨端机械核对。executor 在 spool 持久保存当前链头（崩溃恢复续算不重扫）。验收：路径切换前后摘要不变、数据帧逐字段篡改必失配、空流 finalSeq=1、收尾帧 seq / payload.finalSeq / bundle.finalSeq 三者不等即拒、收尾帧 ACK 后方可回收（随 S6）。executor 先写有界耐久 event spool（上限 64 MiB / assignment，超限背压至 run 暂停产帧；初值，S6 标定）再发送；重放恒从该消费方水位 +1 起。回收：assignment 终态且全部有效 surface 票据已 ack 至 finalSeq 或已失效，并且 owner-relay 已 ack 至 finalSeq 后，进入 24h 回收窗；owner-relay 不因 ControlLease 轮换 / 短暂过期丢失逻辑水位。owner 长期不可达时，只有在 assignment 已终态、assignment 流全部 interaction 均 finished 且 24h 回收窗届满后才可关闭未完成 relay——此后 owner 以 queryLedger / interaction mirror 恢复终态，不会遗失可应答 pending。滞后超过有界窗（初值 spool 上限的 1/2，S6 标定）的 surface observer 不再续票、明确降级到 owner 终态对账（§5.5 last-seen revision 路径），**禁止拖停 run 或阻塞快 observer**。大对象不入帧、经 ArtifactRef 引用。
+
+interaction requested 的 `display` 在写 assignment 流前由共享 preparation 原语一次性确定 inline-or-ref 形态；assignment 记录、StreamFrame 与摘要链复用同一规范对象，任何执行点不得再次内联或独立重算表示。
 
 ### 5.7 取证与止损
 

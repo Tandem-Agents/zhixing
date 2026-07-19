@@ -209,6 +209,13 @@ describe("AdvancementStore", () => {
       "2026-01-01T00:04:00.000Z",
     );
     expect(session.outstandingProxyMessageId).toBeUndefined();
+    const settledReplay = await store.settleProxyMessage(
+      "conv-1",
+      "session-1",
+      "proxy-1",
+      "2026-01-01T00:04:30.000Z",
+    );
+    expect(settledReplay.outstandingProxyMessageId).toBeUndefined();
 
     session = await store.completeSession(
       "conv-1",
@@ -218,6 +225,16 @@ describe("AdvancementStore", () => {
     );
     expect(session.status).toBe("completed");
     expect(await store.loadActiveSession("conv-1")).toBeNull();
+    expect(
+      (
+        await store.settleProxyMessage(
+          "conv-1",
+          "session-1",
+          "proxy-1",
+          "2026-01-01T00:05:30.000Z",
+        )
+      ).status,
+    ).toBe("completed");
 
     const reopened = new AdvancementStore(root);
     const replayed = await reopened.loadSession("conv-1", "session-1");

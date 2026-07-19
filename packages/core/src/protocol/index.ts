@@ -1,5 +1,17 @@
 export { byteDigest, canonicalize, protocolBytes, protocolDigest } from "./canonical.js";
 export {
+  StreamDigestChain,
+  type StreamDataFramePayload,
+  type StreamFrameMeta,
+} from "./stream.js";
+export {
+  materializeInteractionDisplay,
+  prepareInteractionDisplay,
+  validateInteractionDisplay,
+  type InlineInteractionDisplay,
+  type PreparedInteractionDisplay,
+} from "./interaction-display.js";
+export {
   assertProtocolIdentifier,
   assertPrefixedUlid,
   isPrefixedUlid,
@@ -8,6 +20,7 @@ export {
 } from "./validation.js";
 export {
   MAX_AUTHORITY_ERROR_MESSAGE_BYTES,
+  validateCancelBatchControlResultBody,
   validateAuthorityError,
   validatePublishDecisionRecord,
 } from "./contract-validation.js";
@@ -56,6 +69,7 @@ export {
   buildJobActivationPayload,
   buildJobActivationPayloadFromBinding,
   createAssignmentLedgerValidationState,
+  confirmationDecisionDigest,
   createSignedConversationInteractionMirrorBatch,
   createSignedConversationEnvelope,
   createSignedJobEnvelope,
@@ -75,6 +89,7 @@ export {
   validateChannelResponderRef,
   validateConversationActivation,
   validateConversationEnvelope,
+  validateConversationInvocation,
   validateJobActivation,
   validateJobEnvelope,
   validateConversationInteractionMirrorEntry,

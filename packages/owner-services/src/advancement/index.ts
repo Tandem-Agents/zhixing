@@ -44,6 +44,7 @@ export {
 export {
   type AdvancementEventSink,
   type AdvancementPresentationEvent,
+  type AdvancementProxyDurableClaim,
   type AdvancementProxyScheduleResult,
   type AdvancementProxyTurnPort,
   type AdvancementProxyTurnRequest,

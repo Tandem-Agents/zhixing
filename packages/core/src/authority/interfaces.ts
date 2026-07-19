@@ -74,9 +74,15 @@ export interface ProjectionTransactionResult<State, Body, Value> {
   readonly commit?: CommitEnvelope<Body>;
 }
 
+export interface AuthorityLogSnapshot<Body = JsonValue> {
+  readonly commits: readonly CommitEnvelope<Body>[];
+  readonly cursor: ProjectionCursor;
+}
+
 export interface AuthorityCommitLog {
   append<Body>(entries: readonly LogicalRecord<Body>[]): Promise<CommitEnvelope<Body>>;
   readAll<Body = JsonValue>(): Promise<Array<CommitEnvelope<Body>>>;
+  readSnapshot<Body = JsonValue>(): Promise<AuthorityLogSnapshot<Body>>;
   readStream<Body = JsonValue>(
     stream: string,
   ): Promise<Array<{ lsn: number; at: IsoTime; body: Body }>>;

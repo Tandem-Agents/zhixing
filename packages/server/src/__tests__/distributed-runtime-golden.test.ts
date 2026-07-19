@@ -231,6 +231,7 @@ async function captureControlAdmissionShadow() {
         conversationId: legacySent.conversationId,
         ingress: { ingressId: ingress.ingressId, source: ingress.kind },
         input: { parts: [{ type: "text", text: "golden shadow input" }] },
+        invocation: { kind: "agent", source: "interactive" },
         ownerEpoch: 0,
       },
     });

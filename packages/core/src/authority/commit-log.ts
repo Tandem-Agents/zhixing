@@ -33,6 +33,7 @@ import { AuthorityStorageError } from "./errors.js";
 import type {
   ArtifactGarbageCollectionResult,
   AuthorityCommitLog,
+  AuthorityLogSnapshot,
   AuthorityGarbageCollectionOptions,
   ProjectionReplayOptions,
   ProjectionReducer,
@@ -132,10 +133,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   async readAll<Body = JsonValue>(): Promise<Array<CommitEnvelope<Body>>> {
+    return [...(await this.readSnapshot<Body>()).commits];
+  }
+
+  async readSnapshot<Body = JsonValue>(): Promise<AuthorityLogSnapshot<Body>> {
     return this.#withLogLock(async () => {
       const envelopes: Array<CommitEnvelope<JsonValue>> = [];
-      await this.#readAndRecover((envelope) => envelopes.push(envelope));
-      return envelopes as Array<CommitEnvelope<Body>>;
+      const lastLsn = await this.#readAndRecover((envelope) => envelopes.push(envelope));
+      return {
+        commits: envelopes as Array<CommitEnvelope<Body>>,
+        cursor: this.#projectionCursor(lastLsn),
+      };
     });
   }
 

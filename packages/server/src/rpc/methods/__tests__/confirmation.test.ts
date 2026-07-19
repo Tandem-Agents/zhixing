@@ -12,6 +12,7 @@ import {
   ConfirmationBroker,
   type ConfirmationRequest,
 } from "@zhixing/core";
+import { confirmationDecisionDigest } from "@zhixing/core/protocol";
 import { ConfirmationHub } from "@zhixing/owner-kernel";
 import type { ServerContext } from "../../../context.js";
 import type { RpcConnection } from "../../connection.js";
@@ -45,10 +46,18 @@ function makeConnection(
 
 function makeFakeConversations(
   map: Map<string, Set<string>>,
+  durable?: {
+    outcomes: Map<string, { t: "answered"; decisionDigest: string } | { t: "closed" }>;
+  },
 ): ConversationManager {
   return {
     getObserverConnectionIds: (conversationId: string) =>
       map.get(conversationId) ?? new Set<string>(),
+    usesDurableTurnProtocol: () => durable !== undefined,
+    findDurableInteractionOutcome: async (
+      _conversationId: string,
+      requestId: string,
+    ) => durable?.outcomes.get(requestId),
   } as unknown as ConversationManager;
 }
 
@@ -255,12 +264,12 @@ describe("confirmation.resolve", () => {
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationResolveMethod();
-    expect(() =>
+    await expect(
       method.handler(
         { requestId: "r1", decision: { kind: "allow-once" } },
         ctx,
       ),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
 
     // broker pending 保持不变
     expect(broker.listPending()).toHaveLength(1);
@@ -287,12 +296,12 @@ describe("confirmation.resolve", () => {
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
-    expect(() =>
+    await expect(
       buildConfirmationResolveMethod().handler(
         { requestId: "rC", decision: { kind: "allow-once" } },
         ctx,
       ),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
 
     broker.resolve("rC", { kind: "allow-once" });
     await p;
@@ -313,12 +322,12 @@ describe("confirmation.resolve", () => {
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationResolveMethod();
-    expect(() =>
+    await expect(
       method.handler(
         { requestId: "rE", decision: { kind: "allow-once" } },
         ctx,
       ),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
 
     broker.resolve("rE", { kind: "allow-once" });
     await p;
@@ -343,41 +352,123 @@ describe("confirmation.resolve", () => {
     expect(result.reason).toBe("already-resolved-or-not-found");
   });
 
-  it("已解决的 requestId（已出 hub.requestIndex）→ { ok: false }", async () => {
+  it("已终结重试按耐久 interaction outcome 回放:同决定成功、异决定稳定冲突、重启等价", async () => {
+    // hub 为空 = entry 已出索引:同进程丢响应重试与服务重启后重试的判定
+    // 完全同构——回放单源自耐久 mirror 投影,不依赖任何内存账本。
     const hub = new ConfirmationHub();
-    const broker = new ConfirmationBroker();
-    broker.onRequest(() => {});
-    hub.attach("b1", broker, { conversationId: "conv-A" });
-
-    const p = broker.requestConfirmation(makeRequest("r1"));
+    const durable = {
+      outcomes: new Map<
+        string,
+        { t: "answered"; decisionDigest: string } | { t: "closed" }
+      >([
+        [
+          "rAllowed",
+          {
+            t: "answered",
+            decisionDigest: confirmationDecisionDigest("rAllowed", { kind: "allow-once" }),
+          },
+        ],
+      ]),
+    };
     const server = {
       confirmationHub: hub,
       conversations: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
+        durable,
       ),
     } as unknown as ServerContext;
-    const ctx = makeContext(server, makeConnection(1));
-
     const method = buildConfirmationResolveMethod();
 
-    // 第一次：ok
-    const r1 = await invoke<{ ok: boolean }>(
-      method,
-      { requestId: "r1", decision: { kind: "allow-once" } },
-      ctx,
-    );
-    expect(r1.ok).toBe(true);
+    // 同一完整决定回放成功,零第二次生效;新连接照常
+    for (const connectionId of [1, 7]) {
+      const replay = await invoke<{ ok: boolean; reason?: string }>(
+        method,
+        {
+          requestId: "rAllowed",
+          decision: { kind: "allow-once" },
+          conversationId: "conv-A",
+        },
+        makeContext(server, makeConnection(connectionId)),
+      );
+      expect(replay).toEqual({ ok: true });
+    }
 
-    // 第二次：hub.findEntry 返 undefined → already-resolved
-    const r2 = await invoke<{ ok: boolean; reason?: string }>(
+    // deny 与原 allow-once 稳定冲突
+    const conflict = await invoke<{ ok: boolean; reason?: string }>(
       method,
-      { requestId: "r1", decision: { kind: "deny" } },
-      ctx,
+      {
+        requestId: "rAllowed",
+        decision: { kind: "deny" },
+        conversationId: "conv-A",
+      },
+      makeContext(server, makeConnection(1)),
     );
-    expect(r2.ok).toBe(false);
-    expect(r2.reason).toBe("already-resolved-or-not-found");
+    expect(conflict.ok).toBe(false);
+    expect(conflict.reason).toBe("decision-conflict");
 
-    await p;
+    // 同为 allowed 的持久授权仍是不同决定，不能冒充原 allow-once。
+    const scopeConflict = await invoke<{ ok: boolean; reason?: string }>(
+      method,
+      {
+        requestId: "rAllowed",
+        decision: {
+          kind: "allow-session",
+          pattern: { pattern: { tool: "Bash", argument: "*" }, label: "Bash *" },
+        },
+        conversationId: "conv-A",
+      },
+      makeContext(server, makeConnection(1)),
+    );
+    expect(scopeConflict).toEqual({ ok: false, reason: "decision-conflict" });
+
+    // 未携带 conversationId(旧客户端)与无耐久记录:稳定 not-found
+    for (const params of [
+      { requestId: "rAllowed", decision: { kind: "allow-once" } },
+      {
+        requestId: "rUnknown",
+        decision: { kind: "allow-once" },
+        conversationId: "conv-A",
+      },
+    ]) {
+      const result = await invoke<{ ok: boolean; reason?: string }>(
+        method,
+        params,
+        makeContext(server, makeConnection(1)),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("already-resolved-or-not-found");
+    }
+  });
+
+  it("非用户决策终结(cancelled/expired)不回放为用户决策 → already-resolved-or-not-found", async () => {
+    const hub = new ConfirmationHub();
+    const durable = {
+      outcomes: new Map<
+        string,
+        { t: "answered"; decisionDigest: string } | { t: "closed" }
+      >([
+        ["rClosed", { t: "closed" }],
+      ]),
+    };
+    const server = {
+      confirmationHub: hub,
+      conversations: makeFakeConversations(
+        new Map([["conv-A", new Set(["1"])]]),
+        durable,
+      ),
+    } as unknown as ServerContext;
+
+    const result = await invoke<{ ok: boolean; reason?: string }>(
+      buildConfirmationResolveMethod(),
+      {
+        requestId: "rClosed",
+        decision: { kind: "allow-once" },
+        conversationId: "conv-A",
+      },
+      makeContext(server, makeConnection(1)),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("already-resolved-or-not-found");
   });
 
   // ─── kind 白名单——按接入面信任级分级 ───
@@ -387,7 +478,7 @@ describe("confirmation.resolve", () => {
     ["allow-context", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],
     ["allow-global", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],
     ["edit-then-allow", { modifiedInput: {} }],
-  ])("非可信面(非 loopback)kind='%s' → invalid params(远程不得沉淀永久规则)", (kind, extra) => {
+  ])("非可信面(非 loopback)kind='%s' → invalid params(远程不得沉淀永久规则)", async (kind, extra) => {
     const hub = new ConfirmationHub();
     const server = {
       confirmationHub: hub,
@@ -398,15 +489,15 @@ describe("confirmation.resolve", () => {
     const ctx = makeContext(server, makeConnection(1, { loopback: false }));
 
     const method = buildConfirmationResolveMethod();
-    expect(() =>
+    await expect(
       method.handler(
         { requestId: "r1", decision: { kind, ...extra } },
         ctx,
       ),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
   });
 
-  it("可信面 kind='edit-then-allow' 同样拒绝(远程 UX 未设计,两级都不含)", () => {
+  it("可信面 kind='edit-then-allow' 同样拒绝(远程 UX 未设计,两级都不含)", async () => {
     const hub = new ConfirmationHub();
     const server = {
       confirmationHub: hub,
@@ -414,12 +505,12 @@ describe("confirmation.resolve", () => {
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
-    expect(() =>
+    await expect(
       buildConfirmationResolveMethod().handler(
         { requestId: "r1", decision: { kind: "edit-then-allow", modifiedInput: {} } },
         ctx,
       ),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
   });
 
   it("可信面持久授权缺 pattern / 坏 pattern 结构 → INVALID_PARAMS,pending 保持未解决", async () => {
@@ -445,9 +536,9 @@ describe("confirmation.resolve", () => {
       { kind: "allow-global", pattern: { pattern: { tool: "bash", argument: "ls" } } }, // 缺 label
       { kind: "deny", reason: 42 }, // reason 坏类型
     ]) {
-      expect(() =>
+      await expect(
         method.handler({ requestId: "rBad", decision }, ctx),
-      ).toThrow(RpcAppError);
+      ).rejects.toBeInstanceOf(RpcAppError);
     }
     // 坏结构全部在边界拦截——pending 未被消费
     expect(broker.listPending()).toHaveLength(1);
@@ -517,7 +608,7 @@ describe("confirmation.resolve", () => {
     }
   });
 
-  it("缺少 requestId → invalid params", () => {
+  it("缺少 requestId → invalid params", async () => {
     const hub = new ConfirmationHub();
     const server = {
       confirmationHub: hub,
@@ -526,12 +617,12 @@ describe("confirmation.resolve", () => {
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationResolveMethod();
-    expect(() =>
+    await expect(
       method.handler({ decision: { kind: "allow-once" } }, ctx),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
   });
 
-  it("缺少 decision → invalid params", () => {
+  it("缺少 decision → invalid params", async () => {
     const hub = new ConfirmationHub();
     const server = {
       confirmationHub: hub,
@@ -540,10 +631,12 @@ describe("confirmation.resolve", () => {
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationResolveMethod();
-    expect(() => method.handler({ requestId: "r1" }, ctx)).toThrow(RpcAppError);
+    await expect(method.handler({ requestId: "r1" }, ctx)).rejects.toBeInstanceOf(
+      RpcAppError,
+    );
   });
 
-  it("decision 无 kind → invalid params", () => {
+  it("decision 无 kind → invalid params", async () => {
     const hub = new ConfirmationHub();
     const server = {
       confirmationHub: hub,
@@ -552,8 +645,8 @@ describe("confirmation.resolve", () => {
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationResolveMethod();
-    expect(() =>
+    await expect(
       method.handler({ requestId: "r1", decision: {} }, ctx),
-    ).toThrow(RpcAppError);
+    ).rejects.toBeInstanceOf(RpcAppError);
   });
 });

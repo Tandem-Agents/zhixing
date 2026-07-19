@@ -23,6 +23,7 @@
 import { randomUUID } from "node:crypto";
 import type { IEventBus } from "../events/types.js";
 import { failToDenyResolver } from "./non-interactive.js";
+import { validateConfirmationDecisionText } from "./types.js";
 import type {
   BrokerSnapshot,
   BrokerUnsubscribe,
@@ -30,7 +31,9 @@ import type {
   ConfirmationDecision,
   ConfirmationEventMap,
   ConfirmationRequest,
+  ConfirmationLifecycleObserver,
   ConfirmationRequestId,
+  ConfirmationResolutionSource,
   IConfirmationBroker,
   NonInteractiveResolver,
   PendingSnapshot,
@@ -58,12 +61,26 @@ const DEFAULT_MAX_QUEUE_DEPTH = 32;
 
 interface PendingEntry {
   request: ConfirmationRequest;
-  status: "queued" | "showing";
+  status: "queued" | "showing" | "resolving";
   createdAt: number;
   /** setTimeout handle 用于超时自动 expire */
   expireTimer: ReturnType<typeof setTimeout> | null;
   /** resolve 外部 Promise 的函数 */
   resolvePromise: (decision: ConfirmationDecision) => void;
+  rejectPromise: (error: unknown) => void;
+  terminal?: TerminalAttempt;
+  deferredTerminal?: TerminalRequest;
+}
+
+interface TerminalRequest {
+  readonly decision: ConfirmationDecision;
+  readonly source: ConfirmationResolutionSource;
+  readonly emit: () => void;
+  readonly requeueOnFailure: boolean;
+}
+
+interface TerminalAttempt extends TerminalRequest {
+  readonly promise: Promise<boolean>;
 }
 
 interface ResolvedEntry {
@@ -101,6 +118,8 @@ export interface ConfirmationBrokerOptions {
    * 一致。同 parentBrokerId,纯审计透传字段,不影响 broker 行为。
    */
   sourceAgentId?: string;
+  /** Optional durable interaction boundary shared by parent and child brokers. */
+  lifecycleObserver?: ConfirmationLifecycleObserver;
 }
 
 // ─── Broker ───
@@ -129,6 +148,7 @@ export class ConfirmationBroker implements IConfirmationBroker {
 
   // 审计血缘字段 —— 构造时一次性赋值后只读
   readonly id: string;
+  readonly lifecycleObserver?: ConfirmationLifecycleObserver;
   private readonly parentBrokerId?: string;
   private readonly sourceAgentId?: string;
 
@@ -141,6 +161,7 @@ export class ConfirmationBroker implements IConfirmationBroker {
     this.id = options.id ?? randomUUID();
     this.parentBrokerId = options.parentBrokerId;
     this.sourceAgentId = options.sourceAgentId;
+    this.lifecycleObserver = options.lifecycleObserver;
   }
 
   // ─── 公共 API ───
@@ -154,10 +175,27 @@ export class ConfirmationBroker implements IConfirmationBroker {
         `ConfirmationBroker: duplicate request id "${request.id}"`,
       );
     }
+    if (this.lifecycleObserver) {
+      const disposition = await this.lifecycleObserver.beforeRequest(request);
+      if (disposition?.accepted === false) {
+        this.markResolved(request.id, disposition.decision);
+        this.emitEvent("confirmation:cancelled", {
+          requestId: request.id,
+          tool: request.tool,
+          cause: disposition.decision.cause,
+          timestamp: this.now(),
+        });
+        return disposition.decision;
+      }
+    }
 
     // 2. 无监听器 → 立即走非交互兜底
     if (this.requestListeners.length === 0) {
       const decision = this.resolver.resolve(request);
+      await this.lifecycleObserver?.afterResolved(request, decision, {
+        kind: "non-interactive",
+        resolver: this.resolver.name,
+      });
       this.emitEvent("confirmation:auto-resolved", {
         requestId: request.id,
         tool: request.tool,
@@ -171,11 +209,14 @@ export class ConfirmationBroker implements IConfirmationBroker {
     }
 
     // 3. 队列满 → backpressure 拒绝
-    if (this.queue.length >= this.maxQueueDepth) {
+    if (this.pending.size >= this.maxQueueDepth) {
       const decision: ConfirmationDecision = {
         kind: "cancelled",
         cause: "backpressure",
       };
+      await this.lifecycleObserver?.afterResolved(request, decision, {
+        kind: "backpressure",
+      });
       this.markResolved(request.id, decision);
       this.emitEvent("confirmation:cancelled", {
         requestId: request.id,
@@ -187,13 +228,14 @@ export class ConfirmationBroker implements IConfirmationBroker {
     }
 
     // 4. 正常流程：创建 entry、入队、启动超时计时器
-    return new Promise<ConfirmationDecision>((resolvePromise) => {
+    return new Promise<ConfirmationDecision>((resolvePromise, rejectPromise) => {
       const entry: PendingEntry = {
         request,
         status: "queued",
         createdAt: this.now(),
         expireTimer: null,
         resolvePromise,
+        rejectPromise,
       };
       this.pending.set(request.id, entry);
       this.queue.push(request.id);
@@ -243,28 +285,63 @@ export class ConfirmationBroker implements IConfirmationBroker {
     requestId: ConfirmationRequestId,
     decision: ConfirmationDecision,
   ): boolean {
+    validateConfirmationDecisionText(decision);
     const entry = this.pending.get(requestId);
     if (!entry) return false;
-
-    this.clearExpireTimer(entry);
-    this.pending.delete(requestId);
-    this.removeFromQueue(requestId);
-
     const durationMs = this.now() - entry.createdAt;
-    this.markResolved(requestId, decision);
-    entry.resolvePromise(decision);
-
-    this.emitEvent("confirmation:resolved", {
-      requestId,
-      tool: entry.request.tool,
+    const terminal: TerminalRequest = {
       decision,
-      durationMs,
-      timestamp: this.now(),
-    });
-
-    // 推进队列到下一个 pending
-    this.showHead();
+      source: { kind: "surface" },
+      requeueOnFailure: false,
+      emit: () => {
+        this.emitEvent("confirmation:resolved", {
+          requestId,
+          tool: entry.request.tool,
+          decision,
+          durationMs,
+          timestamp: this.now(),
+        });
+      },
+    };
+    if (!this.lifecycleObserver) {
+      this.completeImmediately(entry, terminal);
+      return true;
+    }
+    if (entry.terminal) {
+      return canonicalDecision(entry.terminal.decision) === canonicalDecision(decision);
+    }
+    void this.startTerminal(entry, terminal).catch(() => {});
     return true;
+  }
+
+  async resolveDurably(
+    requestId: ConfirmationRequestId,
+    decision: ConfirmationDecision,
+  ): Promise<boolean> {
+    validateConfirmationDecisionText(decision);
+    const entry = this.pending.get(requestId);
+    if (!entry) return false;
+    if (!this.lifecycleObserver) return this.resolve(requestId, decision);
+    if (entry.terminal) {
+      return canonicalDecision(entry.terminal.decision) === canonicalDecision(decision)
+        ? entry.terminal.promise
+        : false;
+    }
+    const durationMs = this.now() - entry.createdAt;
+    return this.startTerminal(entry, {
+      decision,
+      source: { kind: "surface" },
+      requeueOnFailure: true,
+      emit: () => {
+        this.emitEvent("confirmation:resolved", {
+          requestId,
+          tool: entry.request.tool,
+          decision,
+          durationMs,
+          timestamp: this.now(),
+        });
+      },
+    });
   }
 
   cancel(requestId: ConfirmationRequestId, cause: CancelCause): boolean {
@@ -272,26 +349,39 @@ export class ConfirmationBroker implements IConfirmationBroker {
     if (!entry) return false;
 
     const decision: ConfirmationDecision = { kind: "cancelled", cause };
-    this.clearExpireTimer(entry);
-    this.pending.delete(requestId);
-    this.removeFromQueue(requestId);
-    this.markResolved(requestId, decision);
-    entry.resolvePromise(decision);
-
-    this.emitEvent("confirmation:cancelled", {
-      requestId,
-      tool: entry.request.tool,
-      cause,
-      timestamp: this.now(),
-    });
-
-    this.showHead();
+    const terminal: TerminalRequest = {
+      decision,
+      source: { kind: "cancel", cause },
+      requeueOnFailure: false,
+      emit: () => {
+        this.emitEvent("confirmation:cancelled", {
+          requestId,
+          tool: entry.request.tool,
+          cause,
+          timestamp: this.now(),
+        });
+      },
+    };
+    if (!this.lifecycleObserver) {
+      this.completeImmediately(entry, terminal);
+      return true;
+    }
+    if (entry.terminal) {
+      if (entry.terminal.source.kind === "surface") {
+        entry.deferredTerminal ??= terminal;
+        this.clearExpireTimer(entry);
+        this.removeFromQueue(requestId);
+        return true;
+      }
+      return canonicalDecision(entry.terminal.decision) === canonicalDecision(decision);
+    }
+    void this.startTerminal(entry, terminal).catch(() => {});
     return true;
   }
 
   cancelAll(cause: CancelCause): number {
-    // 快照一份 id 列表：cancel 会修改 pending 和 queue
-    const ids = [...this.queue];
+    // pending 包含 queued/showing/resolving；关停不能漏掉正在耐久终结的请求。
+    const ids = [...this.pending.keys()];
     let cancelled = 0;
     for (const id of ids) {
       if (this.cancel(id, cause)) cancelled++;
@@ -300,14 +390,9 @@ export class ConfirmationBroker implements IConfirmationBroker {
   }
 
   listPending(): PendingSnapshot[] {
-    return this.queue.map((id) => {
-      const entry = this.pending.get(id);
-      // queue 和 pending 应严格同步；理论上永远命中
-      if (!entry) {
-        throw new Error(`invariant violation: queued id ${id} not in pending`);
-      }
-      return { request: entry.request, status: entry.status };
-    });
+    return [...this.pending.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((entry) => ({ request: entry.request, status: entry.status }));
   }
 
   snapshot(): BrokerSnapshot {
@@ -379,19 +464,98 @@ export class ConfirmationBroker implements IConfirmationBroker {
     const decision: ConfirmationDecision = { kind: "expired" };
     const durationMs = this.now() - entry.createdAt;
 
-    this.pending.delete(requestId);
-    this.removeFromQueue(requestId);
-    this.markResolved(requestId, decision);
-    entry.resolvePromise(decision);
+    const terminal: TerminalRequest = {
+      decision,
+      source: { kind: "expired" },
+      requeueOnFailure: false,
+      emit: () => {
+        this.emitEvent("confirmation:expired", {
+          requestId,
+          tool: entry.request.tool,
+          durationMs,
+          timestamp: this.now(),
+        });
+      },
+    };
+    if (!this.lifecycleObserver) {
+      this.completeImmediately(entry, terminal);
+      return;
+    }
+    if (entry.terminal) {
+      if (entry.terminal.source.kind === "surface") {
+        entry.deferredTerminal ??= terminal;
+      }
+      return;
+    }
+    void this.startTerminal(entry, terminal).catch(() => {});
+  }
 
-    this.emitEvent("confirmation:expired", {
-      requestId,
-      tool: entry.request.tool,
-      durationMs,
-      timestamp: this.now(),
-    });
-
+  private completeImmediately(
+    entry: PendingEntry,
+    terminal: TerminalRequest,
+  ): void {
+    this.clearExpireTimer(entry);
+    this.pending.delete(entry.request.id);
+    this.removeFromQueue(entry.request.id);
+    this.markResolved(entry.request.id, terminal.decision);
+    entry.resolvePromise(terminal.decision);
+    terminal.emit();
     this.showHead();
+  }
+
+  private startTerminal(
+    entry: PendingEntry,
+    terminal: TerminalRequest,
+  ): Promise<boolean> {
+    if (this.pending.get(entry.request.id) !== entry) return Promise.resolve(false);
+    if (entry.terminal) return entry.terminal.promise;
+
+    this.clearExpireTimer(entry);
+    this.removeFromQueue(entry.request.id);
+    entry.status = "resolving";
+    const promise = this.commitTerminal(entry, terminal);
+    entry.terminal = { ...terminal, promise };
+    return promise;
+  }
+
+  private async commitTerminal(
+    entry: PendingEntry,
+    terminal: TerminalRequest,
+  ): Promise<boolean> {
+    try {
+      await this.lifecycleObserver!.afterResolved(
+        entry.request,
+        terminal.decision,
+        terminal.source,
+      );
+      if (this.pending.get(entry.request.id) !== entry) return false;
+      this.pending.delete(entry.request.id);
+      entry.terminal = undefined;
+      entry.deferredTerminal = undefined;
+      this.markResolved(entry.request.id, terminal.decision);
+      entry.resolvePromise(terminal.decision);
+      terminal.emit();
+      this.showHead();
+      return true;
+    } catch (error) {
+      if (this.pending.get(entry.request.id) !== entry) throw error;
+      entry.terminal = undefined;
+      const deferred = entry.deferredTerminal;
+      entry.deferredTerminal = undefined;
+      if (deferred) {
+        void this.startTerminal(entry, deferred).catch(() => {});
+      } else if (terminal.requeueOnFailure) {
+        entry.status = "queued";
+        if (!this.queue.includes(entry.request.id)) this.queue.unshift(entry.request.id);
+        this.scheduleExpiry(entry);
+        this.showHead();
+      } else {
+        this.pending.delete(entry.request.id);
+        entry.rejectPromise(error);
+        this.showHead();
+      }
+      throw error;
+    }
   }
 
   private markResolved(
@@ -433,6 +597,14 @@ export class ConfirmationBroker implements IConfirmationBroker {
     }
   }
 
+  private scheduleExpiry(entry: PendingEntry): void {
+    const remaining = Math.max(0, entry.request.expiresAt - this.now());
+    entry.expireTimer = setTimeout(() => this.expire(entry.request.id), remaining);
+    if (typeof entry.expireTimer === "object" && entry.expireTimer !== null) {
+      (entry.expireTimer as { unref?: () => void }).unref?.();
+    }
+  }
+
   private removeFromQueue(id: ConfirmationRequestId): void {
     const idx = this.queue.indexOf(id);
     if (idx !== -1) this.queue.splice(idx, 1);
@@ -463,6 +635,10 @@ export class ConfirmationBroker implements IConfirmationBroker {
     // 用 emitSync 避免在 broker 内部 await —— 事件是通知，不是阻塞点
     this.eventBus.emitSync(event, enriched);
   }
+}
+
+function canonicalDecision(decision: ConfirmationDecision | undefined): string | undefined {
+  return decision === undefined ? undefined : JSON.stringify(decision);
 }
 
 // ─── 工厂 ───

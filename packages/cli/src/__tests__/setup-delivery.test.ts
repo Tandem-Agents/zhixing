@@ -14,8 +14,13 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ChannelRegistry } from "@zhixing/core";
+import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
-import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
+import {
+  setupAuthorityRuntime,
+  setupDelivery,
+  type DeliveryStack,
+} from "../setup-delivery.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -57,10 +62,42 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
 
   it("assembles a valid DeliveryStack with an empty channel registry", async () => {
     const channels = new ChannelRegistry();
-    stack = await setupDelivery({ channels, zhixingHome: home, logger: quietLogger });
+    const authorityRuntime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    stack = await setupDelivery({
+      channels,
+      zhixingHome: home,
+      authorityRuntime,
+      logger: quietLogger,
+    });
     expect(stack).toBeDefined();
     expect(stack.delivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
   });
 });
+
+class MemorySecretStore implements SecretStorePort {
+  readonly values = new Map<string, string>();
+  async put(ref: SecretRef, value: string) { this.values.set(secretKey(ref), value); }
+  async get(ref: SecretRef) { return this.values.get(secretKey(ref)) ?? null; }
+  async delete(ref: SecretRef) { this.values.delete(secretKey(ref)); }
+  async list(prefix: string) {
+    return [...this.values.keys()]
+      .filter((value) => value.startsWith(prefix))
+      .map((value) => {
+        const separator = value.indexOf("/");
+        return {
+          kind: value.slice(0, separator) as SecretRef["kind"],
+          bindingId: value.slice(separator + 1),
+        };
+      });
+  }
+  async unlockState() { return "unlocked" as const; }
+}
+
+function secretKey(ref: SecretRef): string {
+  return `${ref.kind}/${ref.bindingId}`;
+}

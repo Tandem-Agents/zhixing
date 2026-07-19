@@ -15,6 +15,7 @@
  */
 
 import type { ConfirmationDecision, ConfirmationRequest } from "@zhixing/core";
+import { confirmationDecisionDigest } from "@zhixing/core/protocol";
 import type { HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
@@ -118,6 +119,8 @@ export function buildConfirmationListMethod(): MethodEntry {
 interface ConfirmationResolveParams {
   requestId?: string;
   decision?: ConfirmationDecision;
+  /** 耐久回放定位:客户端从 pending 推送记住并在重试时携带。 */
+  conversationId?: string;
 }
 
 interface ConfirmationResolveResult {
@@ -129,7 +132,7 @@ export function buildConfirmationResolveMethod(): MethodEntry {
   return {
     name: "confirmation.resolve",
     requiresAuth: true,
-    handler(rawParams, ctx): ConfirmationResolveResult {
+    async handler(rawParams, ctx): Promise<ConfirmationResolveResult> {
       const params = (rawParams ?? {}) as ConfirmationResolveParams;
 
       // ── 1. 参数 shape ──
@@ -163,14 +166,14 @@ export function buildConfirmationResolveMethod(): MethodEntry {
       const hub = requireHub(ctx.server);
 
       // ── 3. 应答权——仅发起接入面可答 ──
-      //   先查 entry——未找到直接回 "already-resolved-or-not-found"。
+      //   先查 entry——未找到转入耐久回放判定(见步骤 5)。
       //   确认是可执行控制:旁观 observer 可见(list / pending 推送)不可代答,
       //   跟随权由结构保证——entry 的 turnOrigin 必须是 RPC 入口且发起连接
       //   就是 caller。渠道(飞书)turn 的确认在渠道侧应答,RPC caller 非
       //   发起面;ephemeral(定时任务)确认无 RPC 发起者,同样拒绝。
       const entry = hub.findEntry(params.requestId);
       if (!entry) {
-        return { ok: false, reason: "already-resolved-or-not-found" };
+        return replayDurableOutcome(ctx.server, params);
       }
 
       const callerId = String(ctx.connection.id);
@@ -182,13 +185,51 @@ export function buildConfirmationResolveMethod(): MethodEntry {
       }
 
       // ── 4. 实际 resolve（race：权限校验后到 resolve 之间可能已被其它路径解决） ──
-      const ok = hub.resolve(params.requestId, params.decision);
+      const ok = await hub.resolveDurably(params.requestId, params.decision);
       if (!ok) {
-        return { ok: false, reason: "already-resolved-or-not-found" };
+        return replayDurableOutcome(ctx.server, params);
       }
       return { ok: true };
     },
   };
+}
+
+/**
+ * ── 5. 耐久回放──写后丢响应/重启后的同请求重试按 owner 权威日志的
+ *   interaction mirror 投影回放原结果(单一事实源,无内存账本)。耐久结果
+ *   保留原决定摘要:同决定回放成功——零第二次生效;异决定返回稳定冲突;
+ *   非用户决策终结(cancelled/expired/auto-resolved)或无耐久记录保持
+ *   already-resolved-or-not-found。不校验发起连接:断线/重启重试必然携带
+ *   新 connectionId,回放不产生新副作用,泄露面仅"该意图已生效"。
+ */
+async function replayDurableOutcome(
+  server: ServerContext,
+  params: { requestId?: string; decision?: ConfirmationDecision; conversationId?: string },
+): Promise<ConfirmationResolveResult> {
+  const notFound: ConfirmationResolveResult = {
+    ok: false,
+    reason: "already-resolved-or-not-found",
+  };
+  const conversations = server.conversations;
+  if (
+    !conversations ||
+    !conversations.usesDurableTurnProtocol() ||
+    typeof params.conversationId !== "string" ||
+    !params.conversationId ||
+    !params.requestId ||
+    !params.decision
+  ) {
+    return notFound;
+  }
+  const outcome = await conversations.findDurableInteractionOutcome(
+    params.conversationId,
+    params.requestId,
+  );
+  if (!outcome || outcome.t !== "answered") return notFound;
+  const retryDigest = confirmationDecisionDigest(params.requestId, params.decision);
+  return outcome.decisionDigest === retryDigest
+    ? { ok: true }
+    : { ok: false, reason: "decision-conflict" };
 }
 
 // ─── 工具 ───

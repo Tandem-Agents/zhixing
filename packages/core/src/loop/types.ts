@@ -143,6 +143,7 @@ export interface AgentLoopParams {
    * 用户思考配置。可选——缺省时工具不发思考参数（安全兜底）。
    */
   roleThinking?: ResolvedRoleThinking;
+  toolSideEffectObserver?: import("../types/tools.js").ToolSideEffectObserver;
   /**
    * stream 看门狗策略 —— 控制 LLM 流 chunk 间隔的 idle-timer 行为。
    *

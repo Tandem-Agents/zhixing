@@ -186,6 +186,9 @@ function directory(exists: boolean, runs: RunRecord[] = []) {
 
 function manager() {
   return {
+    // 缺省表达 legacy(未启用耐久协议):无耐久 run 日志,claim 显式 unclaimed。
+    // durable 场景由用例覆盖 usesDurableTurnProtocol + findDurableRunByIngress。
+    usesDurableTurnProtocol: vi.fn(() => false),
     getBusySource: vi.fn(() => undefined),
     admitTurn: vi.fn(async (input: {
       conversationId: string;
@@ -252,6 +255,109 @@ describe("AdvancementRecoveryMaintenance", () => {
     expect(mgr.admitTurn).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    "queued",
+    "dispatched",
+    "running",
+    "cancel-requested",
+    "uncertain",
+    "committed",
+  ] as const)("耐久 %s run 已拥有 proxy ingress 时不建立第二个调度任务", async (state) => {
+    const store = await makeActiveStore();
+    const base = manager();
+    const mgr = {
+      ...base,
+      usesDurableTurnProtocol: vi.fn(() => true),
+      findDurableRunByIngress: vi.fn(async () => ({
+        runId: "run-durable",
+        state,
+      })),
+    };
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({ store }),
+      manager: mgr as never,
+      directory: directory(true) as never,
+    });
+
+    const result = await recovery.recoverConversation("conv-1");
+
+    expect(result).toEqual({
+      status: "durable-run-owned",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      proxyMessageId: "proxy-1",
+      runId: "run-durable",
+    });
+    expect(mgr.findDurableRunByIngress).toHaveBeenCalledWith(
+      "conv-1",
+      "proxy-1",
+      "advancement",
+    );
+    expect(mgr.admitTurn).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancelled", "failed", "expired"] as const)(
+    "耐久 %s run 已关闭时由恢复器幂等收束 outstanding proxy",
+    async (state) => {
+    const store = await makeActiveStore();
+    const base = manager();
+    const mgr = {
+      ...base,
+      usesDurableTurnProtocol: vi.fn(() => true),
+      findDurableRunByIngress: vi.fn(async () => ({
+        runId: "run-closed",
+        state,
+      })),
+    };
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({ store }),
+      manager: mgr as never,
+      directory: directory(true) as never,
+    });
+
+    const result = await recovery.recoverConversation("conv-1");
+
+    expect(result).toEqual({
+      status: "closed-run-recovered",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      proxyMessageId: "proxy-1",
+      runId: "run-closed",
+    });
+    expect((await store.loadActiveSession("conv-1"))?.outstandingProxyMessageId)
+      .toBeUndefined();
+    expect(mgr.admitTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("耐久所有权查询失败时不重复调度并返回可重试失败", async () => {
+    const store = await makeActiveStore();
+    const base = manager();
+    const mgr = {
+      ...base,
+      usesDurableTurnProtocol: vi.fn(() => true),
+      findDurableRunByIngress: vi.fn(async () => {
+        throw new Error("authority projection unavailable");
+      }),
+    };
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({ store }),
+      manager: mgr as never,
+      directory: directory(true) as never,
+    });
+
+    const result = await recovery.recoverConversation("conv-1");
+
+    expect(result).toMatchObject({
+      status: "failed",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      proxyMessageId: "proxy-1",
+      message: "authority projection unavailable",
+    });
+    expect(mgr.admitTurn).not.toHaveBeenCalled();
+  });
+
   it("恢复时必须通过目录存在性门禁，避免复活已删除对话", async () => {
     const store = await makeActiveStore();
     const mgr = manager();
@@ -278,6 +384,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const store = await makeActiveStore();
     const dir = directory(true);
     const mgr = {
+      usesDurableTurnProtocol: vi.fn(() => false),
       getBusySource: vi.fn(() => undefined),
       setBusy: vi.fn(),
       admitTurn: vi.fn(async (input: {
@@ -332,6 +439,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const dir = directory(true);
     let cancelQueued: (() => void) | undefined;
     const mgr = {
+      usesDurableTurnProtocol: vi.fn(() => false),
       getBusySource: vi.fn(() => undefined),
       admitTurn: vi.fn(async (input: {
         conversationId: string;

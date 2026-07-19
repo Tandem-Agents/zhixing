@@ -126,6 +126,7 @@ import { shouldIdleExit } from "./idle-policy.js";
 import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { createAccessSurfaces } from "./access-surfaces.js";
+import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
@@ -376,6 +377,7 @@ async function runServerProcess(
   const channelCredentials = credentials.channels
     ? { channels: credentials.channels }
     : {};
+  const durableInteractions = new DurableConversationInteractionObserver();
   const accessSurfaces = createAccessSurfaces(channelCredentials);
   const advancementController = await createServeAdvancementController({
     config,
@@ -401,6 +403,7 @@ async function runServerProcess(
       config,
       credentials: providerCredentials,
     },
+    confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
     skillStore: serveSkillStore,
     segmentDeps: serveSegmentDeps,
@@ -493,6 +496,9 @@ async function runServerProcess(
     profile,
     config,
     zhixingHome,
+    secretStore: startupResult.secretStore,
+    durableInteractions,
+    perspectives: perspectivesController,
     confirmationHub,
     mcpHub,
     transcript,
@@ -762,6 +768,9 @@ async function runServerProcess(
       },
       deliveryStatus: (afterByItem) =>
         ctx.deliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
+      conversationStatus: (after) =>
+        ctx.conversationProtocol?.statusHistory(after) ??
+        Promise.resolve({ notices: [], next: [] }),
       resolveDelivery: async (input) => {
         if (!ctx.deliveryStack) throw new Error("Delivery stack is unavailable");
         return ctx.deliveryStack.resolve({
@@ -860,7 +869,8 @@ async function runServerProcess(
 
   // 远程中断模块关停链 —— LIFO 最先执行（在 channels.dispose / scheduler.stop / server.close 之前）：
   //   1. inboundRouter.refuseNew  拒新入站，避免下游 drain 期间又来新消息
-  //   2. execution.abortAllAndWait  并行 fire abort + 等所有 in-flight 走完 cleanup
+  //   2. conversationProtocol.stopRecovery  等恢复协调器静默，禁止 drain 后再生任务
+  //   3. execution.abortAllAndWait  并行 fire abort + 等所有 in-flight 走完 cleanup
   //                                 （partial yields + RunResult + 取消反馈）
   // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
   // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
@@ -880,6 +890,13 @@ async function runServerProcess(
       ),
     ]);
   });
+
+  if (ctx.conversationProtocol) {
+    const protocol = ctx.conversationProtocol;
+    registry.register("conversationProtocol.stopRecovery", async () => {
+      await protocol.stopRecoveryLoop();
+    });
+  }
 
   if (ctx.inboundRouter) {
     const router = ctx.inboundRouter;

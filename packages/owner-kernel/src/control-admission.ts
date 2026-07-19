@@ -25,6 +25,8 @@ import {
   MAX_PROTOCOL_IDENTIFIER_LENGTH,
   protocolDigest,
   validateChannelResponderRef,
+  validateConversationInvocation,
+  validateCancelBatchControlResultBody,
   validateIngressContext,
   validateNonEmptyUserTurnInput,
   validateAuthorityError,
@@ -44,7 +46,7 @@ type InitialControlRequest = Extract<
 >;
 type ConversationControlRequest = Extract<
   ControlRequest,
-  { t: "cancel" | "uncertain-resolve" }
+  { t: "cancel" | "cancel-batch" | "session-write" | "uncertain-resolve" }
 >;
 type JobControlRequest = Extract<
   ControlRequest,
@@ -95,7 +97,7 @@ export interface AtomicControlApplicationPlan {
 }
 
 export interface AtomicControlApplicationContext<
-  Envelope extends AuthorityControlEnvelope = AuthorityControlEnvelope,
+  Envelope extends AdmittedControlEnvelope = AdmittedControlEnvelope,
 > {
   readonly canonicalRequestId: string;
   readonly authorityPrefix: ProjectionTransactionContext;
@@ -245,7 +247,9 @@ export function createConversationControlEnvelope(
   };
   const validated = snapshotAdmittedControlEnvelope(envelope);
   if (!isConversationControlEnvelope(validated)) {
-    throw new TypeError("Conversation control envelope requires cancel or uncertain-resolve");
+    throw new TypeError(
+      "Conversation control envelope requires cancel, session-write, or uncertain-resolve",
+    );
   }
   assertTrustedSourceMatches(validated, source);
   return validated;
@@ -331,9 +335,9 @@ export function channelSurfacePrincipal(responder: ChannelResponderRef): string 
 }
 
 /**
- * Durable request and ingress idempotency for the first control-plane cutover set.
- * It only appends authority effects supplied as data; execution remains on the
- * existing path until the complete durable run protocol is enabled.
+ * Durable request and ingress idempotency for the control plane.
+ * Initial requests can commit a prepared result, while domain-bound requests
+ * atomically commit their control receipt and authority records.
  */
 export class ControlAdmissionJournal {
   readonly #log: AuthorityCommitLog;
@@ -376,7 +380,7 @@ export class ControlAdmissionJournal {
 
   async applyAuthority<
     State,
-    Envelope extends AuthorityControlEnvelope,
+    Envelope extends AdmittedControlEnvelope,
   >(input: {
     readonly envelope: Envelope;
     readonly source: TrustedControlSource;
@@ -408,8 +412,10 @@ export class ControlAdmissionJournal {
     ) => void;
   }): Promise<ControlAdmissionOutcome> {
     const envelope = snapshotAdmittedControlEnvelope(input.envelope) as Envelope;
-    if (!isAuthorityControlEnvelope(envelope)) {
-      throw new TypeError("Atomic authority application requires an authority control request");
+    if (envelope.body.t === "session-create") {
+      throw new TypeError(
+        "Atomic authority application rejects session-create control requests",
+      );
     }
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
@@ -457,7 +463,7 @@ export class ControlAdmissionJournal {
 
   async #completeAuthority<
     State,
-    Envelope extends AuthorityControlEnvelope,
+    Envelope extends AdmittedControlEnvelope,
   >(input: {
     readonly envelope: Envelope;
     readonly preparedEnvelope: PreparedStored<AdmittedControlEnvelope>;
@@ -1404,6 +1410,8 @@ function isConversationControlEnvelope(
 ): envelope is ConversationControlEnvelope {
   return (
     envelope.body.t === "cancel" ||
+    envelope.body.t === "cancel-batch" ||
+    envelope.body.t === "session-write" ||
     (envelope.body.t === "uncertain-resolve" &&
       envelope.body.ref.execution === "conversation")
   );
@@ -1424,16 +1432,6 @@ function isDeliveryControlEnvelope(
   envelope: AdmittedControlEnvelope,
 ): envelope is DeliveryControlEnvelope {
   return envelope.body.t === "delivery-resolve";
-}
-
-function isAuthorityControlEnvelope(
-  envelope: AdmittedControlEnvelope,
-): envelope is AuthorityControlEnvelope {
-  return (
-    isConversationControlEnvelope(envelope) ||
-    isJobControlEnvelope(envelope) ||
-    isDeliveryControlEnvelope(envelope)
-  );
 }
 
 function snapshotTrustedSource(value: TrustedControlSource): TrustedControlSource {
@@ -1481,9 +1479,11 @@ function assertTrustedSourceMatches(
   }
   if (
     envelope.body.t === "cancel" ||
+    envelope.body.t === "cancel-batch" ||
     envelope.body.t === "job-cancel" ||
     envelope.body.t === "uncertain-resolve" ||
-    envelope.body.t === "delivery-resolve"
+    envelope.body.t === "delivery-resolve" ||
+    envelope.body.t === "session-write"
   ) {
     if (source.ingress !== undefined) {
       throw new TypeError("Authority control requests do not accept ingress context");
@@ -1528,6 +1528,66 @@ function assertAdmittedControlRequest(value: unknown): void {
       throw new TypeError("cancel ownerEpoch must be a non-negative safe integer");
     }
     return;
+  }
+  if (value.t === "cancel-batch") {
+    assertAllowedKeys(
+      value,
+      ["conversationId", "ownerEpoch", "response", "t"],
+      "cancel-batch request",
+    );
+    assertIdentifier(value.conversationId, "cancel-batch conversationId");
+    if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
+      throw new TypeError("cancel-batch ownerEpoch must be a non-negative safe integer");
+    }
+    if (value.response !== undefined) {
+      assertPlainRecord(value.response, "cancel-batch response");
+      assertExactKeys(value.response, ["replyTarget"], "cancel-batch response");
+      const target = value.response.replyTarget;
+      assertPlainRecord(target, "cancel-batch replyTarget");
+      assertAllowedKeys(
+        target,
+        ["channelId", "threadId", "to"],
+        "cancel-batch replyTarget",
+      );
+      assertIdentifier(target.channelId, "cancel-batch replyTarget channelId");
+      assertIdentifier(target.to, "cancel-batch replyTarget recipient");
+      if (target.threadId !== undefined) {
+        assertIdentifier(target.threadId, "cancel-batch replyTarget threadId");
+      }
+    }
+    return;
+  }
+  if (value.t === "session-write") {
+    assertExactKeys(
+      value,
+      ["conversationId", "domainRevision", "mutation", "ownerEpoch", "t"],
+      "session-write request",
+    );
+    assertIdentifier(value.conversationId, "session-write conversationId");
+    if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
+      throw new TypeError("session-write ownerEpoch must be a non-negative safe integer");
+    }
+    if (
+      !Number.isSafeInteger(value.domainRevision) ||
+      (value.domainRevision as number) < 0
+    ) {
+      throw new TypeError("session-write domainRevision must be a non-negative safe integer");
+    }
+    assertPlainRecord(value.mutation, "session-write mutation");
+    if (
+      value.mutation.kind === "window-op" &&
+      (value.mutation.op === "clear" || value.mutation.op === "compact") &&
+      Object.keys(value.mutation).sort().join(",") === "kind,op"
+    ) {
+      return;
+    }
+    if (
+      value.mutation.kind === "conversation-delete" &&
+      Object.keys(value.mutation).length === 1
+    ) {
+      return;
+    }
+    throw new TypeError("session-write mutation is not supported by conversation authority");
   }
   if (value.t === "job-run") {
     assertExactKeys(
@@ -1641,7 +1701,7 @@ function assertAdmittedControlRequest(value: unknown): void {
   }
   assertExactKeys(
     value,
-    ["conversationId", "ingress", "input", "ownerEpoch", "t"],
+    ["conversationId", "ingress", "input", "invocation", "ownerEpoch", "t"],
     "input request",
   );
   assertIdentifier(value.conversationId, "conversationId");
@@ -1659,6 +1719,7 @@ function assertAdmittedControlRequest(value: unknown): void {
     throw new TypeError("Control input source is invalid");
   }
   validateNonEmptyUserTurnInput(value.input);
+  validateConversationInvocation(value.invocation);
 }
 
 function snapshotControlResult(
@@ -1708,6 +1769,19 @@ function snapshotControlResult(
       throw new TypeError("cancel requires a matching result body");
     }
     assertConversationRunState(result.body.runState, "cancel runState");
+  } else if (requestType === "cancel-batch") {
+    validateCancelBatchControlResultBody(result.body);
+  } else if (requestType === "session-write") {
+    assertExactKeys(result.body, ["revision", "t"], "session-write result");
+    if (result.body.t !== "session-write") {
+      throw new TypeError("session-write requires a matching result body");
+    }
+    if (
+      !Number.isSafeInteger(result.body.revision) ||
+      (result.body.revision as number) <= 0
+    ) {
+      throw new TypeError("session-write revision must be a positive safe integer");
+    }
   } else if (requestType === "job-run") {
     assertExactKeys(result.body, ["jobRunId", "t"], "job-run result");
     if (result.body.t !== "job-run") {

@@ -23,6 +23,7 @@ import type {
 } from "../security/types.js";
 import type { SuggestedPattern } from "../security/confirmation-tracker.js";
 import type { TurnOrigin } from "../types/tools.js";
+import { MAX_INTERACTION_RESPONSE_TEXT_BYTES } from "../contracts/protocol.js";
 
 // ─── 请求标识 ───
 
@@ -219,6 +220,23 @@ export type ConfirmationDecision =
   | { kind: "expired" }
   | { kind: "cancelled"; cause: CancelCause };
 
+export function validateConfirmationDecisionText(
+  decision: ConfirmationDecision,
+): ConfirmationDecision {
+  const text = "note" in decision
+    ? decision.note
+    : "reason" in decision
+      ? decision.reason
+      : undefined;
+  if (
+    text !== undefined &&
+    new TextEncoder().encode(text).byteLength > MAX_INTERACTION_RESPONSE_TEXT_BYTES
+  ) {
+    throw new TypeError("Confirmation response text exceeds its UTF-8 budget");
+  }
+  return decision;
+}
+
 /**
  * `deny` decision 的判别辅助——自由文本拒绝（reason 非空）vs 结构化拒绝（reason 缺失）。
  *
@@ -329,7 +347,7 @@ export interface NonInteractiveResolver {
  */
 export interface PendingSnapshot {
   request: ConfirmationRequest;
-  status: "queued" | "showing";
+  status: "queued" | "showing" | "resolving";
 }
 
 /**
@@ -407,7 +425,39 @@ export interface ConfirmationRendererPort {
     requestId: ConfirmationRequestId,
     decision: ConfirmationDecision,
   ): boolean;
+
+  /** Resolves only after every configured durable lifecycle hook has committed. */
+  resolveDurably?(
+    requestId: ConfirmationRequestId,
+    decision: ConfirmationDecision,
+  ): Promise<boolean>;
 }
+
+/** Durable interaction hook: request is stored before visibility and outcome before execution resumes. */
+export type ConfirmationAdmissionDisposition =
+  | { readonly accepted: true }
+  | {
+      readonly accepted: false;
+      readonly decision: Extract<ConfirmationDecision, { kind: "cancelled" }>;
+    };
+
+export interface ConfirmationLifecycleObserver {
+  beforeRequest(
+    request: ConfirmationRequest,
+  ): Promise<void | ConfirmationAdmissionDisposition>;
+  afterResolved(
+    request: ConfirmationRequest,
+    decision: ConfirmationDecision,
+    source: ConfirmationResolutionSource,
+  ): Promise<void>;
+}
+
+export type ConfirmationResolutionSource =
+  | { readonly kind: "surface" }
+  | { readonly kind: "non-interactive"; readonly resolver: string }
+  | { readonly kind: "cancel"; readonly cause: CancelCause }
+  | { readonly kind: "backpressure" }
+  | { readonly kind: "expired" };
 
 /**
  * Broker 接口——确认交互系统的核心调度器。
@@ -423,6 +473,7 @@ export interface IConfirmationBroker extends ConfirmationRendererPort {
    * 显式注入稳定值。
    */
   readonly id: string;
+  readonly lifecycleObserver?: ConfirmationLifecycleObserver;
 
   /**
    * 注册一个确认请求。

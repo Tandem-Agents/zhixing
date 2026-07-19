@@ -77,10 +77,15 @@ describe("distributed runtime structural gates", () => {
     expect(
       Object.entries(dependencyGraph.production)
         .filter(([name, dependencies]) =>
-          name !== "@zhixing/mesh" && dependencies.includes("@zhixing/mesh"),
+          name !== "@zhixing/mesh" &&
+          name !== "@zhixing/cli" &&
+          dependencies.includes("@zhixing/mesh"),
         )
         .map(([name]) => name),
     ).toEqual([]);
+    expect(dependencyGraph.production["@zhixing/cli"]).toContain(
+      "@zhixing/mesh",
+    );
     expect(dependencyGraph.production["@zhixing/executor"]).not.toContain(
       "@zhixing/server",
     );

@@ -192,6 +192,19 @@ export class ConfirmationHub {
     return reg.broker.resolve(requestId, decision);
   }
 
+  async resolveDurably(
+    requestId: ConfirmationRequestId,
+    decision: ConfirmationDecision,
+  ): Promise<boolean> {
+    const brokerId = this.requestIndex.get(requestId);
+    if (!brokerId) return false;
+    const reg = this.brokers.get(brokerId);
+    if (!reg) return false;
+    return reg.broker.resolveDurably
+      ? reg.broker.resolveDurably(requestId, decision)
+      : reg.broker.resolve(requestId, decision);
+  }
+
   /**
    * O(1) 按 conversationId 反查 broker。
    *

@@ -61,6 +61,7 @@ describe("startup SecretStore boundary", () => {
       kind: "ready",
       config: { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
       credentials: { providers: { deepseek: { apiKey: "startup-secret" } } },
+      secretStore: store,
     });
     await expect(readFile(legacyPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });

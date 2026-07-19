@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   RPC_ERROR_CODES,
+  RpcClientClosedError,
   RpcClientError,
 } from "@zhixing/server";
 import type {
@@ -69,6 +70,81 @@ describe("RpcConversationFacade · 方法域", () => {
     ]);
   });
 
+  it("response loss reconnect reuses the exact durable send identity", async () => {
+    const fake = makeFakeHostLink();
+    let attempt = 0;
+    fake.setResponder(() => {
+      attempt += 1;
+      if (attempt <= 2) throw new RpcClientClosedError("response lost");
+      return {
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId: "turn-stable",
+        runId: "run-authority",
+      };
+    });
+    const facade = new RpcConversationFacade(fake.link);
+
+    await expect(
+      facade.send("retry safely", "conv-1", "turn-stable"),
+    ).resolves.toMatchObject({ runId: "run-authority" });
+    expect(fake.requests).toHaveLength(3);
+    expect(fake.requests[1]).toEqual(fake.requests[0]);
+    expect(fake.requests[2]).toEqual(fake.requests[0]);
+  });
+
+  it("response loss reconnect reuses the exact durable abort identity", async () => {
+    const fake = makeFakeHostLink();
+    let attempt = 0;
+    fake.setResponder(() => {
+      attempt += 1;
+      if (attempt <= 2) throw new RpcClientClosedError("response lost");
+      return {};
+    });
+    const facade = new RpcConversationFacade(fake.link);
+
+    await facade.abort("conv-1", "cancel-stable", "run-authority");
+
+    expect(fake.requests).toHaveLength(3);
+    expect(fake.requests[1]).toEqual(fake.requests[0]);
+    expect(fake.requests[2]).toEqual(fake.requests[0]);
+    expect(fake.requests[0]).toEqual({
+      method: "session.abort",
+      params: {
+        conversationId: "conv-1",
+        requestId: "cancel-stable",
+        runId: "run-authority",
+      },
+    });
+  });
+
+  it.each([
+    ["clear", "session.clear", (facade: RpcConversationFacade) => facade.clear("conv-1")],
+    ["delete", "session.delete", (facade: RpcConversationFacade) => facade.delete("conv-1")],
+  ] as const)(
+    "response loss reconnect reuses the exact durable %s identity",
+    async (_label, method, invoke) => {
+      const fake = makeFakeHostLink();
+      let attempt = 0;
+      fake.setResponder(() => {
+        attempt += 1;
+        if (attempt <= 2) throw new RpcClientClosedError("response lost");
+        return {};
+      });
+      const facade = new RpcConversationFacade(fake.link);
+
+      await invoke(facade);
+
+      expect(fake.requests).toHaveLength(3);
+      expect(fake.requests[1]).toEqual(fake.requests[0]);
+      expect(fake.requests[2]).toEqual(fake.requests[0]);
+      expect(fake.requests[0]?.method).toBe(method);
+      const params = fake.requests[0]?.params as { requestId?: string };
+      expect(typeof params.requestId).toBe("string");
+      expect(params.requestId?.length).toBeGreaterThan(0);
+    },
+  );
+
   it("list 还原 conversations 数组", async () => {
     const fake = makeFakeHostLink();
     const entry = {
@@ -110,6 +186,31 @@ describe("RpcConversationFacade · 方法域", () => {
     ]);
   });
 
+  it("statusHistory preserves the authority cursor and continuation", async () => {
+    const fake = makeFakeHostLink();
+    const cursor = {
+      conversationId: "conv-1",
+      runId: "run-1",
+      afterStatusRevision: 4,
+    };
+    fake.setResponder(() => ({
+      conversationStatus: [],
+      conversationStatusNext: [cursor],
+    }));
+    const facade = new RpcConversationFacade(fake.link);
+
+    await expect(facade.statusHistory([cursor])).resolves.toEqual({
+      notices: [],
+      next: [cursor],
+    });
+    expect(fake.requests).toEqual([
+      {
+        method: "server.info",
+        params: { conversationStatusAfter: [cursor] },
+      },
+    ]);
+  });
+
   it("rename / delete / abort / taskList / subscribe / unsubscribe 的方法名与参数", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder((method) =>
@@ -130,7 +231,7 @@ describe("RpcConversationFacade · 方法域", () => {
     expect(renamed.conversationId).toBe("ws:scene-1:conv-9");
 
     await facade.delete("conv-1");
-    await facade.abort("conv-1");
+    await facade.abort("conv-1", "abort-request-1");
     expect((await facade.taskList("conv-1")).taskList).toEqual({ items: [] });
     await facade.taskListUpdate("conv-1", { kind: "add", content: "x" });
     expect(await facade.subscribe("conv-1")).toBe(true);
@@ -145,7 +246,14 @@ describe("RpcConversationFacade · 方法域", () => {
       "session.subscribe",
       "session.unsubscribe",
     ]);
-    expect(fake.requests[1]?.params).toEqual({ conversationId: "conv-1" });
+    expect(fake.requests[1]?.params).toEqual({
+      conversationId: "conv-1",
+      requestId: expect.stringMatching(/^delete:turn_/u),
+    });
+    expect(fake.requests[2]?.params).toEqual({
+      conversationId: "conv-1",
+      requestId: "abort-request-1",
+    });
     expect(fake.requests[4]?.params).toEqual({
       conversationId: "conv-1",
       action: { kind: "add", content: "x" },
@@ -295,7 +403,13 @@ describe("RpcConversationFacade · 方法域", () => {
 
     expect(fake.requests).toEqual([
       { method: "session.new", params: undefined },
-      { method: "session.clear", params: { conversationId: "conv-1" } },
+      {
+        method: "session.clear",
+        params: {
+          conversationId: "conv-1",
+          requestId: expect.stringMatching(/^clear:turn_/u),
+        },
+      },
       { method: "session.compact", params: { conversationId: "conv-1" } },
       { method: "session.contextBudget", params: { conversationId: "conv-1" } },
       { method: "session.usage", params: { conversationId: "conv-1" } },
@@ -322,7 +436,7 @@ describe("RpcConversationFacade · 方法域", () => {
 });
 
 describe("RpcConversationFacade · 通知还原", () => {
-  it("onDelta / onComplete / onChanged / onActivity / onPostTurnControlIntent 收到原样 payload", () => {
+  it("all conversation notifications preserve their authority payload", () => {
     const fake = makeFakeHostLink();
     const facade = new RpcConversationFacade(fake.link);
 
@@ -330,9 +444,13 @@ describe("RpcConversationFacade · 通知还原", () => {
     const changes: SessionChangedPayload[] = [];
     const activities: SessionActivityPayload[] = [];
     const completes: unknown[] = [];
+    const finals: unknown[] = [];
+    const statuses: unknown[] = [];
     const intents: unknown[] = [];
     facade.onDelta((p) => deltas.push(p));
     facade.onComplete((p) => completes.push(p));
+    facade.onFinal((p) => finals.push(p));
+    facade.onStatus((p) => statuses.push(p));
     facade.onChanged((p) => changes.push(p));
     facade.onActivity((p) => activities.push(p));
     facade.onPostTurnControlIntent((p) => intents.push(p));
@@ -348,6 +466,21 @@ describe("RpcConversationFacade · 通知还原", () => {
       sessionId: "conv-1",
       turnId: "turn-1",
       result: { reason: "completed" },
+    });
+    fake.notify("session.final", {
+      v: 1,
+      conversationId: "conv-1",
+      runId: "run-1",
+      commitRevision: 1,
+      digest: `sha256:${"a".repeat(64)}`,
+    });
+    fake.notify("session.status", {
+      v: 1,
+      ref: { execution: "conversation", conversationId: "conv-1", runId: "run-1" },
+      state: "running",
+      statusRevision: 1,
+      actions: [],
+      at: "2026-07-18T00:00:00.000Z",
     });
     fake.notify("session.changed", {
       conversationId: "conv-1",
@@ -371,6 +504,8 @@ describe("RpcConversationFacade · 通知还原", () => {
     expect(deltas).toHaveLength(1);
     expect(deltas[0]?.delta).toEqual({ type: "text_delta", text: "hi" });
     expect(completes).toHaveLength(1);
+    expect(finals).toHaveLength(1);
+    expect(statuses).toHaveLength(1);
     expect(changes[0]).toEqual({
       conversationId: "conv-1",
       change: "renamed",

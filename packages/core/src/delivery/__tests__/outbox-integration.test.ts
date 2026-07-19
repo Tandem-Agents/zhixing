@@ -124,6 +124,30 @@ describe("Pipeline → Outbox 整链", () => {
     await registry.dispose();
   });
 
+  it("agent delivery atomically fills its legacy turn slot", async () => {
+    const sendCalls: SendCall[] = [];
+    const { registry, sender } = makePipelineFixture({
+      adapterSend: async (target, content) => {
+        sendCalls.push({ target, content, receivedAt: Date.now() });
+        return { success: true, retryable: false };
+      },
+    });
+    const outbox = registry.of(TARGET);
+    outbox.openSlot({ slotId: "turn-durable-final" });
+
+    await sender.send(TARGET, { text: "durable final" }, {
+      source: {
+        kind: "agent",
+        conversationId: "conversation-1",
+        turnSlotId: "turn-durable-final",
+      },
+    });
+    await outbox.waitIdle();
+
+    expect(sendCalls.map((call) => call.content.text)).toEqual(["durable final"]);
+    await registry.dispose();
+  });
+
   it("P3b: scheduler source 带 createdInTurn → entry.afterSlot + EmissionSource.createdInTurn 均透传", async () => {
     const tempDir = await createTempDir("outbox-int");
     const outboxEvents: OutboxEvent[] = [];

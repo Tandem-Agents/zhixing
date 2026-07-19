@@ -86,6 +86,7 @@ import {
   type ManagedSession,
 } from "@zhixing/owner-kernel/conversation-manager";
 import type { PerspectivesTurnResult } from "../../perspectives/index.js";
+import { isProtocolIdentifier } from "@zhixing/core/protocol";
 // ─── session.send ───
 
 interface SessionSendParams extends ConversationIdParams {
@@ -120,10 +121,14 @@ export function buildSessionSendMethod(): MethodEntry {
 
       const manager = requireConversations(ctx.server);
       const id = optionalConversationId(params, "session.send");
-      const turnId =
-        params.turnId !== undefined
-          ? validateTurnId(params.turnId)
-          : generateTurnId();
+      if (manager.usesDurableTurnProtocol() && params.turnId === undefined) {
+        throw RpcErrors.invalidParams(
+          "session.send requires a stable 'turnId' while durable execution is enabled",
+        );
+      }
+      const turnId = params.turnId !== undefined
+        ? validateTurnId(params.turnId)
+        : generateTurnId();
       const connectionId = String(ctx.connection.id);
       const broadcast = ctx.server.sessionBroadcast;
       const advancement = ctx.server.advancement;
@@ -596,6 +601,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         conversationId: admitted.conversationId,
         sessionId: admitted.conversationId,
         turnId: admitted.turnId,
+        ...(admitted.runId ? { runId: admitted.runId } : {}),
         status: "confirmed",
         advancementSessionId: confirmed.session.id,
         runStatus: admitted.runStatus,
@@ -737,6 +743,7 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
         conversationId: admitted.conversationId,
         sessionId: admitted.conversationId,
         turnId: admitted.turnId,
+        ...(admitted.runId ? { runId: admitted.runId } : {}),
         status: "direct-execution",
         advancementSessionId: cancelled.session.id,
         runStatus: admitted.runStatus,
@@ -782,7 +789,7 @@ async function prepareActiveAdvancementUserTurn(input: {
     Boolean(active.outstandingProxyMessageId) ||
     input.manager.getBusySource(input.conversationId) === "advancement";
   const interruption = advancementEngaged
-    ? interruptAdvancementProxy({
+    ? await interruptAdvancementProxy({
         manager: input.manager,
         conversationId: input.conversationId,
         outstandingProxyMessageId: active.outstandingProxyMessageId,
@@ -828,12 +835,12 @@ async function hasAwaitingAdvancementConfirmation(
   return open?.status === "awaiting-rubric-confirmation";
 }
 
-function interruptAdvancementProxy(input: {
+async function interruptAdvancementProxy(input: {
   readonly manager: ConversationManager;
   readonly conversationId: string;
   readonly outstandingProxyMessageId?: string;
-}): { readonly proxyMessageId?: string } {
-  const cancelledPending = input.manager.cancelPendingBySource(
+}): Promise<{ readonly proxyMessageId?: string }> {
+  const cancelledPending = await input.manager.cancelPendingBySource(
     input.conversationId,
     "advancement",
   );
@@ -956,6 +963,7 @@ async function sendDirectTurn(
     conversationId: admitted.conversationId,
     sessionId: admitted.conversationId,
     turnId: admitted.turnId,
+    ...(admitted.runId ? { runId: admitted.runId } : {}),
   };
 }
 
@@ -976,6 +984,7 @@ async function sendPerspectiveTurn(
     conversationId: admitted.conversationId,
     sessionId: admitted.conversationId,
     turnId: admitted.turnId,
+    ...(admitted.runId ? { runId: admitted.runId } : {}),
   };
 }
 
@@ -1002,6 +1011,7 @@ async function admitAndMaybeStartPerspectiveTurn(
 ): Promise<{
   conversationId: string;
   turnId: string;
+  runId?: string;
   runStatus: "immediate" | "queued";
 }> {
   let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
@@ -1014,6 +1024,23 @@ async function admitAndMaybeStartPerspectiveTurn(
       ),
       exists: existingConversationCheck(input.server, input.conversationId),
       connectionId: input.connectionId,
+      source: "channel",
+      beforeEnqueue: (managed) =>
+        input.manager.admitDurableTurn({
+          conversationId: managed.conversationId,
+          input: input.input,
+          invocation: {
+            kind: "perspectives",
+            source: "channel",
+            question: input.question,
+          },
+          options: {
+            turnContext: perspectiveTurnContext(input.turnId, input.connection),
+            source: "channel",
+            surfacePrincipal: rpcSurfacePrincipal(input.connection),
+          },
+          surfacePrincipal: rpcSurfacePrincipal(input.connection),
+        }),
       makeTask: (managed) => {
         const task = input.perspectives.createPendingTask({
           manager: input.manager,
@@ -1021,6 +1048,7 @@ async function admitAndMaybeStartPerspectiveTurn(
           originalInput: input.input,
           question: input.question,
           turnContext: perspectiveTurnContext(input.turnId, input.connection),
+          surfacePrincipal: rpcSurfacePrincipal(input.connection),
           source: "channel",
           onResult: (result) =>
             notifyPerspectiveTurnResult({
@@ -1062,7 +1090,7 @@ async function admitAndMaybeStartPerspectiveTurn(
   notifyLifecycleDiagnostics({
     manager: input.manager,
     conversationId: admission.conversationId,
-    runId: input.turnId,
+    runId: admission.runId ?? input.turnId,
     connection: input.connection,
     broadcast: input.broadcast,
   });
@@ -1074,7 +1102,8 @@ async function admitAndMaybeStartPerspectiveTurn(
   return {
     conversationId: admission.conversationId,
     turnId: input.turnId,
-    runStatus: admission.status,
+    ...(admission.runId ? { runId: admission.runId } : {}),
+    runStatus: admission.status === "replayed" ? "queued" : admission.status,
   };
 }
 
@@ -1083,6 +1112,7 @@ async function admitAndMaybeStartTurn(
 ): Promise<{
   conversationId: string;
   turnId: string;
+  runId?: string;
   runStatus: "immediate" | "queued";
 }> {
   let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
@@ -1092,6 +1122,23 @@ async function admitAndMaybeStartTurn(
       createConversation: input.createConversation,
       exists: input.exists,
       connectionId: input.connectionId,
+      source: "channel",
+      beforeEnqueue: (managed) =>
+        input.manager.admitDurableTurn({
+          conversationId: managed.conversationId,
+          input: input.input,
+          invocation: { kind: "agent", source: "channel" },
+          options: {
+            turnContext: rpcTurnContext(
+              input.turnId,
+              input.connection,
+              input.surfaceCapabilities,
+            ),
+            source: "channel",
+            surfacePrincipal: rpcSurfacePrincipal(input.connection),
+          },
+          surfacePrincipal: rpcSurfacePrincipal(input.connection),
+        }),
       makeTask: (managed) => ({
         source: "channel",
         execute: () =>
@@ -1136,7 +1183,7 @@ async function admitAndMaybeStartTurn(
   notifyLifecycleDiagnostics({
     manager: input.manager,
     conversationId: admission.conversationId,
-    runId: input.turnId,
+    runId: admission.runId ?? input.turnId,
     connection: input.connection,
     broadcast: input.broadcast,
   });
@@ -1148,7 +1195,8 @@ async function admitAndMaybeStartTurn(
   return {
     conversationId: admission.conversationId,
     turnId: input.turnId,
-    runStatus: admission.status,
+    ...(admission.runId ? { runId: admission.runId } : {}),
+    runStatus: admission.status === "replayed" ? "queued" : admission.status,
   };
 }
 
@@ -1357,10 +1405,8 @@ function notifyLifecycleWarningEvent(input: {
  * observer 名册全员——多端同看一个流式 turn;未回填(最小测试 ctx)退化为
  * 发起连接单播。发起连接必在名册内(send 入口已 addObserver)。
  *
- * AbortSignal 生命周期：
- * - 创建 AbortController，连接断开时自动 abort
- * - signal 传入 runtime.run()，由 runtime 实现决定如何响应
- * - 中止的 turn 不推送 complete（连接已断），不持久化
+ * 连接只拥有在线观察能力。耐久运行不随连接断开而取消；非耐久兼容
+ * 路径仍沿用连接生命周期，显式取消统一由 session.abort 提交。
  */
 async function runManagedTurn(
   managed: ManagedSession,
@@ -1379,33 +1425,24 @@ async function runManagedTurn(
     else connection.notify(method, params);
   };
   const abortController = new AbortController();
-  // typed reason 让 channel 渲染层能识别"是连接断了"(详见 abort-formatter-zh /
-  // abort-serializer 对 external{ origin: rpc-connection-close } 的处理)
-  const unsubClose = connection.onClose(() =>
-    abortWithReason(abortController, {
-      kind: "external",
-      origin: "rpc-connection-close",
-    }),
-  );
+  const unsubClose = manager.usesDurableTurnProtocol()
+    ? () => {}
+    : connection.onClose(() =>
+        abortWithReason(abortController, {
+          kind: "external",
+          origin: "rpc-connection-close",
+        }),
+      );
   const turnStartedAt = new Date().toISOString();
 
   try {
     // RPC 入口触发的 turn 无通道 target，确认请求按连接身份定向回发起端。
     // post-turn 控制能力必须由发起端声明；RPC 本身不代表有 consumer。
-    const turnContext: TurnContext = {
+    const turnContext = rpcTurnContext(
       turnId,
-      turnOrigin: {
-        channel: "rpc",
-        triggeredBy: String(connection.id),
-        ...(surfaceCapabilities.postTurnControl
-          ? {
-              surface: {
-                capabilities: { postTurnControl: true },
-              },
-            }
-          : {}),
-      },
-    };
+      connection,
+      connection.closed ? { postTurnControl: false } : surfaceCapabilities,
+    );
     await projectSessionTurn({
       manager,
       managed,
@@ -1414,6 +1451,7 @@ async function runManagedTurn(
       runOptions: {
         abortSignal: abortController.signal,
         turnContext,
+        surfacePrincipal: rpcSurfacePrincipal(connection),
         turnIndex: managed.turnCount,
         source: "channel",
       },
@@ -1456,6 +1494,32 @@ function perspectiveTurnContext(
       triggeredBy: String(connection.id),
     },
   };
+}
+
+function rpcTurnContext(
+  turnId: string,
+  connection: RpcConnection,
+  surfaceCapabilities: SessionSurfaceCapabilities,
+): TurnContext {
+  return {
+    turnId,
+    turnOrigin: {
+      channel: "rpc",
+      triggeredBy: String(connection.id),
+      ...(surfaceCapabilities.postTurnControl
+        ? {
+            surface: {
+              capabilities: { postTurnControl: true },
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+function rpcSurfacePrincipal(connection: RpcConnection): string {
+  void connection;
+  return "rpc:owner";
 }
 
 function notifyPerspectiveTurnResult(input: {
@@ -1840,6 +1904,8 @@ interface SessionAbortParams {
   conversationId?: string;
   /** @deprecated */
   sessionId?: string;
+  requestId?: unknown;
+  runId?: unknown;
 }
 
 export function buildSessionAbortMethod(): MethodEntry {
@@ -1853,28 +1919,88 @@ export function buildSessionAbortMethod(): MethodEntry {
         throw RpcErrors.invalidParams("session.abort requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
-      const activeAdvancement = await ctx.server.advancement?.loadActiveSession(id);
-      const busySource = manager.getBusySource(id);
-      const result = manager.abort(id, {
-        kind: "user-cancel",
-        source: "rpc",
-        pressedAt: Date.now(),
-      });
+      const hasRequestId = params.requestId !== undefined;
+      const hasRunId = params.runId !== undefined;
+      if (hasRunId && !hasRequestId) {
+        throw RpcErrors.invalidParams(
+          "session.abort requires 'requestId' when 'runId' is present",
+        );
+      }
+      if (manager.usesDurableTurnProtocol() && !hasRequestId) {
+        throw RpcErrors.invalidParams(
+          "session.abort requires a stable 'requestId' while durable execution is enabled",
+        );
+      }
+      if (manager.usesDurableTurnProtocol() && !hasRunId) {
+        throw RpcErrors.invalidParams(
+          "session.abort requires an authoritative 'runId' while durable execution is enabled",
+        );
+      }
       if (
-        activeAdvancement?.status === "active" &&
-        activeAdvancement.outstandingProxyMessageId &&
-        (busySource === "advancement" || result.cancelledPending > 0)
+        (hasRequestId && !isProtocolIdentifier(params.requestId)) ||
+        (hasRunId && !isProtocolIdentifier(params.runId))
       ) {
-        await ctx.server.advancement?.settleProxyMessage({
-          conversationId: id,
-          advancementSessionId: activeAdvancement.id,
-          proxyMessageId: activeAdvancement.outstandingProxyMessageId,
-        });
+        throw RpcErrors.invalidParams("session.abort control identity is invalid");
+      }
+      const abortReason = {
+        kind: "user-cancel" as const,
+        source: "rpc" as const,
+        pressedAt: Date.now(),
+      };
+      const durableCancellation = manager.usesDurableTurnProtocol()
+        ? await manager.cancelDurableRuns({
+            conversationId: id,
+            requestId: params.requestId as string,
+            runId: params.runId as string,
+            reason: abortReason,
+            principal: authenticatedConversationPrincipal(ctx),
+          })
+        : undefined;
+      const result = durableCancellation
+        ? {
+            abortedInFlight: durableCancellation.dispositions.some(
+              (item) => item.abortedInFlight,
+            ),
+            cancelledPending: durableCancellation.dispositions.reduce(
+              (sum, item) => sum + item.cancelledPending,
+              0,
+            ),
+          }
+        : manager.abort(id, abortReason);
+      const cancelledAdvancement = durableCancellation?.dispositions.find(
+        (item) => item.source === "advancement",
+      );
+      if (cancelledAdvancement) {
+        try {
+          const activeAdvancement =
+            await ctx.server.advancement?.loadActiveSession(id);
+          if (
+            activeAdvancement?.status === "active" &&
+            activeAdvancement.outstandingProxyMessageId ===
+              cancelledAdvancement.ingressId
+          ) {
+            await ctx.server.advancement?.settleProxyMessage({
+              conversationId: id,
+              advancementSessionId: activeAdvancement.id,
+              proxyMessageId: cancelledAdvancement.ingressId,
+            });
+          }
+        } catch {
+          // The exact run cancellation is already authoritative and locally
+          // effective. Auxiliary projection recovery owns this durable proxy.
+          void ctx.server.advancementRecovery
+            ?.recoverConversation(id)
+            .catch(() => {});
+        }
       }
       // RPC client 视角:in-flight 和 pending 都没动 = 没有可取消的对象 → notFound。
       // 任一维度动了 = 取消生效;细分计数 client 当前不消费(IDE 同步场景 pending 通常为 0),
       // 不暴露在 RPC schema 中,留作后续若需要时扩。
-      if (!result.abortedInFlight && result.cancelledPending === 0) {
+      if (
+        (durableCancellation?.dispositions.length ?? 0) === 0 &&
+        !result.abortedInFlight &&
+        result.cancelledPending === 0
+      ) {
         throw RpcErrors.notFound(
           `Session not found or no in-flight turn / pending message: ${id}`,
         );
@@ -1883,12 +2009,95 @@ export function buildSessionAbortMethod(): MethodEntry {
   };
 }
 
+interface SessionResolveParams {
+  requestId: unknown;
+  conversationId: unknown;
+  runId: unknown;
+  ownerEpoch: unknown;
+  openFactDigest: unknown;
+  decision: unknown;
+}
+
+export function buildSessionResolveMethod(): MethodEntry {
+  return {
+    name: "session.resolve",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = parseSessionResolveParams(rawParams);
+      return requireConversations(ctx.server).resolveDurableUncertain({
+        ...params,
+        principal: authenticatedConversationPrincipal(ctx),
+      });
+    },
+  };
+}
+
+function parseSessionResolveParams(raw: unknown): {
+  requestId: string;
+  conversationId: string;
+  runId: string;
+  ownerEpoch: number;
+  openFactDigest: string;
+  decision:
+    | "user-verified-side-effects"
+    | "user-abandoned"
+    | "user-retry-acknowledged";
+} {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw RpcErrors.invalidParams("session.resolve params must be an object");
+  }
+  const value = raw as unknown as SessionResolveParams & Record<string, unknown>;
+  const fields = [
+    "requestId",
+    "conversationId",
+    "runId",
+    "ownerEpoch",
+    "openFactDigest",
+    "decision",
+  ];
+  if (
+    Object.keys(value).some((key) => !fields.includes(key)) ||
+    fields.some((key) => !(key in value)) ||
+    !isProtocolIdentifier(value.requestId) ||
+    !isProtocolIdentifier(value.conversationId) ||
+    !isProtocolIdentifier(value.runId) ||
+    !Number.isSafeInteger(value.ownerEpoch) ||
+    (value.ownerEpoch as number) < 0 ||
+    typeof value.openFactDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/u.test(value.openFactDigest) ||
+    !new Set([
+      "user-verified-side-effects",
+      "user-abandoned",
+      "user-retry-acknowledged",
+    ]).has(String(value.decision))
+  ) {
+    throw RpcErrors.invalidParams("session.resolve params are invalid");
+  }
+  return value as ReturnType<typeof parseSessionResolveParams>;
+}
+
+function authenticatedConversationPrincipal(ctx: Parameters<MethodEntry["handler"]>[1]) {
+  const surfacePrincipal = rpcSurfacePrincipal(ctx.connection);
+  const connectionId = String(ctx.connection.id);
+  if (
+    !isProtocolIdentifier(surfacePrincipal) ||
+    !isProtocolIdentifier(connectionId)
+  ) {
+    throw RpcErrors.invalidParams("authenticated conversation identity is invalid");
+  }
+  return requireConversations(ctx.server).durableControlPrincipal({
+    surfacePrincipal,
+    connectionId,
+  });
+}
+
 // ─── session.delete ───
 
 interface SessionDeleteParams {
   conversationId?: string;
   /** @deprecated */
   sessionId?: string;
+  requestId?: unknown;
 }
 
 export function buildSessionDeleteMethod(): MethodEntry {
@@ -1902,19 +2111,52 @@ export function buildSessionDeleteMethod(): MethodEntry {
         throw RpcErrors.invalidParams("session.delete requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
+      const requestId = lifecycleRequestId(
+        params.requestId,
+        manager.usesDurableTurnProtocol(),
+        "session.delete",
+      );
+      const durableControl = manager.usesDurableTurnProtocol()
+        ? {
+            requestId,
+            principal: authenticatedConversationPrincipal(ctx),
+          }
+        : undefined;
       const directory = ctx.server.conversationDirectory;
-      // 删除 = 活跃运行时释放 + 落盘数据删除,在 manager 的 id 排他门内原子
-      // 完成(盘删与并发激活串行,busy 拒绝路径下盘不被动)。deleted 只在
-      // 删除成功后、名册清理前组播,旁观端据此停止盯已删对话。
-      const result = await manager.delete(id, {
-        removeDisk: async () => (directory ? directory.remove(id) : false),
-        onDeleted: () => {
-          ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
-            conversationId: id,
-            change: "deleted",
-          } satisfies SessionChangedPayload);
-        },
-      });
+      // Durable lifecycle materialization has one consumer shared by the online
+      // call and recovery. Legacy mode keeps the pre-authority manager path.
+      const result = durableControl
+        ? await (async () => {
+            const write = await manager.writeDurableSession({
+              conversationId: id,
+              requestId: durableControl.requestId,
+              mutation: { kind: "conversation-delete" },
+              principal: durableControl.principal,
+              conversationExists: async () =>
+                manager.has(id) || (await directory?.exists(id)) === true,
+            });
+            const revision = requireDurableLifecycleRevision(
+              write,
+              id,
+              "deleting",
+            );
+            await manager.projectDurableSession({
+              conversationId: id,
+              requestId: durableControl.requestId,
+              mutation: "delete",
+              domainRevision: revision,
+            });
+            return true;
+          })()
+        : await manager.delete(id, {
+            removeDisk: async () => (directory ? directory.remove(id) : false),
+            onDeleted: () => {
+              ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
+                conversationId: id,
+                change: "deleted",
+              } satisfies SessionChangedPayload);
+            },
+          });
       if (result === "busy") {
         throw new RpcAppError(
           RPC_ERROR_CODES.BUSY,
@@ -1924,20 +2166,25 @@ export function buildSessionDeleteMethod(): MethodEntry {
       if (!result) {
         throw RpcErrors.notFound(`Session not found: ${id}`);
       }
-      try {
-        await ctx.server.advancement?.cancelOpenConversationSession({
-          conversationId: id,
-          reason: "user-cancelled",
-          message: "原始对话已删除，推进会话已取消。",
-        });
-      } catch (err) {
-        console.error("[session.delete] advancement cleanup failed:", err);
-      }
-      // 控制日志生命周期跟随对话本体——连带删除，失败不影响主对话删除结果。
-      try {
-        await ctx.server.advancement?.removeConversationData(id);
-      } catch (err) {
-        console.error("[session.delete] advancement data removal failed:", err);
+      // 耐久路径的 advancement 级联归 lifecycle delete projector 拥有
+      // (与目录/运行时清理同一投影 claim,失败保持待办由恢复重驱);
+      // 仅非耐久兼容路径保留旧的 RPC 侧 best-effort 清理。
+      if (!durableControl) {
+        try {
+          await ctx.server.advancement?.cancelOpenConversationSession({
+            conversationId: id,
+            reason: "user-cancelled",
+            message: "原始对话已删除，推进会话已取消。",
+          });
+        } catch (err) {
+          console.error("[session.delete] advancement cleanup failed:", err);
+        }
+        // 控制日志生命周期跟随对话本体——连带删除，失败不影响主对话删除结果。
+        try {
+          await ctx.server.advancement?.removeConversationData(id);
+        } catch (err) {
+          console.error("[session.delete] advancement data removal failed:", err);
+        }
       }
     },
   };
@@ -2006,6 +2253,7 @@ export function buildSessionUnsubscribeMethod(): MethodEntry {
 
 interface SessionClearParams {
   conversationId?: string;
+  requestId?: unknown;
 }
 
 /**
@@ -2027,10 +2275,42 @@ export function buildSessionClearMethod(): MethodEntry {
       const id = params.conversationId;
       const manager = requireConversations(ctx.server);
       const directory = requireDirectory(ctx.server);
+      const requestId = lifecycleRequestId(
+        params.requestId,
+        manager.usesDurableTurnProtocol(),
+        "session.clear",
+      );
+      const durableControl = manager.usesDurableTurnProtocol()
+        ? {
+            requestId,
+            principal: authenticatedConversationPrincipal(ctx),
+          }
+        : undefined;
 
-      // 持久层清空收进 manager 的排他临界区(注入 persistClear 回调)——占用
-      // 串行点后才写盘,busy 拒绝路径下盘不被动,原子性由结构保证而非纪律。
-      const outcome = await manager.clear(id, () => directory.clear(id));
+      const outcome = durableControl
+        ? await (async () => {
+            const write = await manager.writeDurableSession({
+              conversationId: id,
+              requestId: durableControl.requestId,
+              mutation: { kind: "window-op", op: "clear" },
+              principal: durableControl.principal,
+              conversationExists: async () =>
+                manager.has(id) || await directory.exists(id),
+            });
+            const revision = requireDurableLifecycleRevision(
+              write,
+              id,
+              "clearing",
+            );
+            await manager.projectDurableSession({
+              conversationId: id,
+              requestId: durableControl.requestId,
+              mutation: "clear",
+              domainRevision: revision,
+            });
+            return "cleared" as const;
+          })()
+        : await manager.clear(id, () => directory.clear(id));
       if (outcome === "busy") {
         throw new RpcAppError(
           RPC_ERROR_CODES.BUSY,
@@ -2047,10 +2327,12 @@ export function buildSessionClearMethod(): MethodEntry {
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
       });
-      ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
-        conversationId: id,
-        change: "cleared",
-      } satisfies SessionChangedPayload);
+      if (!durableControl) {
+        ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
+          conversationId: id,
+          change: "cleared",
+        } satisfies SessionChangedPayload);
+      }
       return { cleared: true };
     },
   };
@@ -2422,12 +2704,48 @@ function validateConversationId(value: unknown, method: string): string {
 }
 
 function validateTurnId(value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  if (!isProtocolIdentifier(value) || value.trim().length === 0) {
     throw RpcErrors.invalidParams(
-      "session.send 'turnId' must be a non-empty string",
+      "session.send 'turnId' must be a non-empty bounded identifier",
     );
   }
   return value;
+}
+
+function lifecycleRequestId(
+  value: unknown,
+  durable: boolean,
+  method: "session.clear" | "session.delete",
+): string {
+  if (value === undefined) {
+    if (durable) {
+      throw RpcErrors.invalidParams(
+        `${method} requires a stable 'requestId' while durable execution is enabled`,
+      );
+    }
+    return `${method}:${generateTurnId()}`;
+  }
+  if (!isProtocolIdentifier(value) || value.trim().length === 0) {
+    throw RpcErrors.invalidParams(`${method} request identity is invalid`);
+  }
+  return value;
+}
+
+function requireDurableLifecycleRevision(
+  result: Awaited<ReturnType<ConversationManager["writeDurableSession"]>>,
+  conversationId: string,
+  operation: "clearing" | "deleting",
+): number {
+  if (result.status === "busy") {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      `Conversation has an in-flight or pending lifecycle operation; retry before ${operation}`,
+    );
+  }
+  if (result.status === "not-found") {
+    throw RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  return result.domainRevision;
 }
 
 function requireAdvancementSessionId(

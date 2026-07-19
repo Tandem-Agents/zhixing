@@ -31,9 +31,11 @@ import {
   failToDenyResolver,
   failToExpiredResolver,
 } from "../non-interactive.js";
+import { validateConfirmationDecisionText } from "../types.js";
 import type {
   ConfirmationDecision,
   ConfirmationEventMap,
+  ConfirmationLifecycleObserver,
   ConfirmationRequest,
   NonInteractiveResolver,
   RequestListener,
@@ -41,6 +43,19 @@ import type {
 } from "../types.js";
 
 // ─── 测试辅助 ───
+
+describe("confirmation decision text budget", () => {
+  it("accepts the UTF-8 boundary and rejects boundary plus one", () => {
+    const boundary = "界".repeat(2_730) + "aa";
+    expect(new TextEncoder().encode(boundary)).toHaveLength(8 * 1024);
+    expect(() =>
+      validateConfirmationDecisionText({ kind: "allow-once", note: boundary }),
+    ).not.toThrow();
+    expect(() =>
+      validateConfirmationDecisionText({ kind: "deny", reason: `${boundary}a` }),
+    ).toThrow("UTF-8 budget");
+  });
+});
 
 /**
  * 构造一个最小合法的 ConfirmationRequest。
@@ -133,6 +148,228 @@ describe("ConfirmationBroker — 基本 request/resolve", () => {
       kind: "deny",
       reason: "不要用 rm，改用 rm -i",
     });
+  });
+});
+
+describe("ConfirmationBroker — 耐久交互边界", () => {
+  it("耐久 request 写入完成前不向 surface 展示", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const observer: ConfirmationLifecycleObserver = {
+      beforeRequest: vi.fn(() => gate),
+      afterResolved: vi.fn(async () => {}),
+    };
+    const broker = new ConfirmationBroker({ lifecycleObserver: observer });
+    const shown = vi.fn();
+    broker.onRequest(shown);
+
+    const request = makeRequest({ id: "durable-request" });
+    const pending = broker.requestConfirmation(request);
+    await tick();
+    expect(shown).not.toHaveBeenCalled();
+
+    release();
+    await tick();
+    expect(shown).toHaveBeenCalledWith(request);
+    broker.resolve(request.id, { kind: "deny" });
+    await pending;
+  });
+
+  it("surface 决策耐久完成前不恢复工具调用", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const afterResolved = vi.fn(() => gate);
+    const broker = new ConfirmationBroker({
+      lifecycleObserver: {
+        beforeRequest: async () => {},
+        afterResolved,
+      },
+    });
+    broker.onRequest(() => {});
+    const request = makeRequest({ id: "durable-result" });
+    const pending = broker.requestConfirmation(request);
+    await tick();
+
+    expect(broker.resolve(request.id, { kind: "allow-once" })).toBe(true);
+    let resumed = false;
+    void pending.then(() => {
+      resumed = true;
+    });
+    await tick();
+    expect(resumed).toBe(false);
+    expect(afterResolved).toHaveBeenCalledWith(
+      request,
+      { kind: "allow-once" },
+      { kind: "surface" },
+    );
+
+    release();
+    await expect(pending).resolves.toEqual({ kind: "allow-once" });
+  });
+
+  it("durable surface acknowledgement waits for the same terminal fact", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const broker = new ConfirmationBroker({
+      lifecycleObserver: {
+        beforeRequest: async () => {},
+        afterResolved: () => gate,
+      },
+    });
+    broker.onRequest(() => {});
+    const request = makeRequest({ id: "durable-surface-ack" });
+    const pending = broker.requestConfirmation(request);
+    await tick();
+
+    let acknowledged = false;
+    const resolution = broker
+      .resolveDurably(request.id, { kind: "allow-once" })
+      .then((result) => {
+        acknowledged = result;
+      });
+    await tick();
+    expect(acknowledged).toBe(false);
+
+    release();
+    await resolution;
+    expect(acknowledged).toBe(true);
+    await expect(pending).resolves.toEqual({ kind: "allow-once" });
+  });
+
+  it.each([
+    ["allow", { kind: "allow-once" }],
+    ["deny", { kind: "deny", reason: "unsafe" }],
+  ] satisfies Array<[string, ConfirmationDecision]>) (
+    "serializes %s with a concurrent cancel and advances the successor after failure",
+    async (_label, decision) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const sources: unknown[] = [];
+      const broker = new ConfirmationBroker({
+        lifecycleObserver: {
+          beforeRequest: async () => {},
+          afterResolved: async (_request, _decision, source) => {
+            sources.push(source);
+            if (source.kind === "surface") {
+              await gate;
+              throw new Error("surface terminal write failed");
+            }
+          },
+        },
+      });
+      const shown: string[] = [];
+      broker.onRequest((request) => shown.push(request.id));
+      const firstRequest = makeRequest({ id: `racing-${_label}` });
+      const secondRequest = makeRequest({ id: `successor-${_label}` });
+      const first = broker.requestConfirmation(firstRequest);
+      const second = broker.requestConfirmation(secondRequest);
+      await tick();
+
+      const resolution = broker.resolveDurably(firstRequest.id, decision);
+      await tick();
+      expect(broker.cancel(firstRequest.id, "run-end")).toBe(true);
+      release();
+
+      await expect(resolution).rejects.toThrow("surface terminal write failed");
+      await expect(first).resolves.toEqual({ kind: "cancelled", cause: "run-end" });
+      await vi.waitFor(() => expect(shown).toEqual([firstRequest.id, secondRequest.id]));
+      expect(sources).toEqual([
+        { kind: "surface" },
+        { kind: "cancel", cause: "run-end" },
+      ]);
+      broker.cancel(secondRequest.id, "run-end");
+      await second;
+    },
+  );
+
+  it("cancelAll includes resolving entries and leaves no dangling queue head", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const broker = new ConfirmationBroker({
+      lifecycleObserver: {
+        beforeRequest: async () => {},
+        afterResolved: async (_request, _decision, source) => {
+          if (source.kind === "surface") {
+            await gate;
+            throw new Error("surface terminal write failed");
+          }
+        },
+      },
+    });
+    broker.onRequest(() => {});
+    const firstRequest = makeRequest({ id: "cancel-all-resolving" });
+    const secondRequest = makeRequest({ id: "cancel-all-queued" });
+    const first = broker.requestConfirmation(firstRequest);
+    const second = broker.requestConfirmation(secondRequest);
+    await tick();
+    const resolution = broker.resolveDurably(firstRequest.id, { kind: "allow-once" });
+    await tick();
+
+    expect(broker.cancelAll("session-end")).toBe(2);
+    release();
+
+    await expect(resolution).rejects.toThrow("surface terminal write failed");
+    await expect(first).resolves.toEqual({ kind: "cancelled", cause: "session-end" });
+    await expect(second).resolves.toEqual({ kind: "cancelled", cause: "session-end" });
+    expect(broker.listPending()).toEqual([]);
+  });
+
+  it("does not emit a second terminal fact when the first durable terminal wins", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const afterResolved = vi.fn(async () => gate);
+    const broker = new ConfirmationBroker({
+      lifecycleObserver: { beforeRequest: async () => {}, afterResolved },
+    });
+    broker.onRequest(() => {});
+    const request = makeRequest({ id: "single-terminal-owner" });
+    const pending = broker.requestConfirmation(request);
+    await tick();
+    const resolution = broker.resolveDurably(request.id, { kind: "deny" });
+    await tick();
+
+    expect(broker.cancel(request.id, "session-end")).toBe(true);
+    release();
+
+    await expect(resolution).resolves.toBe(true);
+    await expect(pending).resolves.toEqual({ kind: "deny" });
+    expect(afterResolved).toHaveBeenCalledOnce();
+  });
+
+  it("非交互与背压终结携带可区分的耐久来源", async () => {
+    const sources: unknown[] = [];
+    const observer: ConfirmationLifecycleObserver = {
+      beforeRequest: async () => {},
+      afterResolved: async (_request, _decision, source) => {
+        sources.push(source);
+      },
+    };
+    const nonInteractive = new ConfirmationBroker({ lifecycleObserver: observer });
+    await nonInteractive.requestConfirmation(makeRequest({ id: "noninteractive" }));
+
+    const backpressured = new ConfirmationBroker({
+      lifecycleObserver: observer,
+      maxQueueDepth: 0,
+    });
+    backpressured.onRequest(() => {});
+    await backpressured.requestConfirmation(makeRequest({ id: "backpressure" }));
+
+    expect(sources).toEqual([
+      { kind: "non-interactive", resolver: "fail-to-deny" },
+      { kind: "backpressure" },
+    ]);
   });
 });
 

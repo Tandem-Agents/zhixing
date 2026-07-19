@@ -10,6 +10,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type { ConfirmationRequest } from "@zhixing/core";
+import { RpcClientClosedError } from "@zhixing/server";
 import { RpcConfirmationBroker } from "../rpc-confirmation-broker.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
@@ -85,6 +86,31 @@ describe("RpcConfirmationBroker", () => {
     broker.resolve("r2", { kind: "deny" });
     await flush();
     expect(errors).toEqual([{ requestId: "r2" }]);
+
+    broker.dispose();
+  });
+
+  it("断线以同一 requestId+decision 重放,直至宿主受理;非断线错误不重试", async () => {
+    const fake = makeFakeHostLink();
+    const errors: unknown[] = [];
+    const broker = new RpcConfirmationBroker({
+      link: fake.link,
+      onResolveError: (err) => errors.push(err),
+    });
+    let attempt = 0;
+    fake.setResponder(() => {
+      attempt += 1;
+      if (attempt <= 2) throw new RpcClientClosedError("response lost");
+      return { ok: true };
+    });
+
+    expect(broker.resolve("r-retry", { kind: "allow-once" })).toBe(true);
+    await vi.waitFor(() => {
+      expect(fake.requests).toHaveLength(3);
+    });
+    expect(fake.requests[1]).toEqual(fake.requests[0]);
+    expect(fake.requests[2]).toEqual(fake.requests[0]);
+    expect(errors).toEqual([]);
 
     broker.dispose();
   });

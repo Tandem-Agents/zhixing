@@ -23,6 +23,7 @@ import type {
   RequestListener,
 } from "@zhixing/core";
 import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc";
+import { RpcClientClosedError } from "@zhixing/server";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 export interface RpcConfirmationBrokerOptions {
@@ -35,6 +36,15 @@ export interface RpcConfirmationBrokerOptions {
 export class RpcConfirmationBroker implements ConfirmationRendererPort {
   private readonly listeners = new Set<RequestListener>();
   private readonly unsubscribe: () => void;
+  /**
+   * requestId → conversationId,取自 pending 推送:重试携带它让宿主在
+   * entry 已出索引(丢响应/重启)时按耐久 interaction outcome 回放原结果。
+   * 生命周期:resolve 收敛即清、dispose 清空;用户未应答而过期的确认不再有
+   * 清理事件,以 FIFO 上限驱逐兜底——被驱逐的极端迟到重试降级为 not-found,
+   * 方向安全(零第二次生效不受影响)。
+   */
+  private readonly pendingConversations = new Map<string, string>();
+  private static readonly MAX_PENDING_CONVERSATIONS = 128;
   private disposed = false;
 
   constructor(private readonly opts: RpcConfirmationBrokerOptions) {
@@ -42,8 +52,21 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
       CONFIRMATION_NOTIFICATIONS.pending,
       (params) => {
         if (this.disposed) return;
-        const payload = params as { request?: ConfirmationRequest };
+        const payload = params as {
+          request?: ConfirmationRequest;
+          conversationId?: string;
+        };
         if (!payload.request) return;
+        if (payload.conversationId) {
+          if (
+            this.pendingConversations.size >=
+            RpcConfirmationBroker.MAX_PENDING_CONVERSATIONS
+          ) {
+            const oldest = this.pendingConversations.keys().next().value;
+            if (oldest !== undefined) this.pendingConversations.delete(oldest);
+          }
+          this.pendingConversations.set(payload.request.id, payload.conversationId);
+        }
         for (const listener of [...this.listeners]) {
           listener(payload.request);
         }
@@ -60,13 +83,40 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
 
   resolve(requestId: string, decision: ConfirmationDecision): boolean {
     if (this.disposed) return false;
-    void this.opts.link
-      .getClient()
-      .then((client) =>
-        client.request("confirmation.resolve", { requestId, decision }),
-      )
-      .catch((err) => this.opts.onResolveError?.(err, requestId));
+    void this.resolveWithReconnect(requestId, decision).catch((err) =>
+      this.opts.onResolveError?.(err, requestId),
+    );
     return true;
+  }
+
+  /**
+   * 断线以同一 requestId+decision 重放:服务端对已耐久 outcome 回放原结果
+   * (同一完整决定成功、任一字段不同则稳定冲突),重试不产生第二次生效。conversationId
+   * 供宿主在 entry 已出索引(含重启)时定位耐久 interaction outcome。
+   */
+  private async resolveWithReconnect(
+    requestId: string,
+    decision: ConfirmationDecision,
+  ): Promise<void> {
+    const conversationId = this.pendingConversations.get(requestId);
+    const params = {
+      requestId,
+      decision,
+      ...(conversationId ? { conversationId } : {}),
+    };
+    try {
+      while (!this.disposed) {
+        const client = await this.opts.link.getClient();
+        try {
+          await client.request("confirmation.resolve", params);
+          return;
+        } catch (error) {
+          if (!(error instanceof RpcClientClosedError)) throw error;
+        }
+      }
+    } finally {
+      this.pendingConversations.delete(requestId);
+    }
   }
 
   dispose(): void {
@@ -74,5 +124,6 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
     this.disposed = true;
     this.unsubscribe();
     this.listeners.clear();
+    this.pendingConversations.clear();
   }
 }

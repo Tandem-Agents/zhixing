@@ -18,8 +18,13 @@ import {
   ChannelRegistry,
   DEFAULT_CONVERSATION_ID,
 } from "@zhixing/core";
-import type { SessionRuntime, RuntimeFactory } from "@zhixing/owner-kernel";
+import type {
+  DurableConversationTurnExecutor,
+  SessionRuntime,
+  RuntimeFactory,
+} from "@zhixing/owner-kernel";
 import type { AgentYield, Message, RunResult } from "@zhixing/core";
+import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 
 // ─── Mock 工厂 ───
 
@@ -111,16 +116,23 @@ describe("InboundRouter", () => {
   function setup(options?: {
     adapter?: ChannelAdapter;
     runtime?: SessionRuntime;
+    durableTurnExecutor?: DurableConversationTurnExecutor;
     sessionBroadcast?: SessionBroadcast;
     sessionActivityBroadcast?: SessionActivityBroadcast;
   }) {
     const adapter = options?.adapter ?? createMockAdapter();
     const factory = createMockRuntimeFactory(options?.runtime);
-    const conversations = new ConversationManager(factory, {
-      graceTimeoutMs: 100_000,
-      idleTimeoutMs: 100_000,
-      idleCheckIntervalMs: 100_000,
-    });
+    const conversations = new ConversationManager(
+      factory,
+      {
+        graceTimeoutMs: 100_000,
+        idleTimeoutMs: 100_000,
+        idleCheckIntervalMs: 100_000,
+      },
+      options?.durableTurnExecutor
+        ? { durableTurnExecutor: options.durableTurnExecutor }
+        : undefined,
+    );
     const channels = new ChannelRegistry({
       eventBus,
       logger,
@@ -161,6 +173,101 @@ describe("InboundRouter", () => {
       threadId: undefined,
     });
     expect(content.text).toBe("Hello from agent");
+  });
+
+  it("durable channel turns use the inbound message identity and never send on the legacy path", async () => {
+    const seenTurnIds: string[] = [];
+    const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
+      async *run(input): AsyncGenerator<AgentYield, RunResult> {
+        seenTurnIds.push(input.options?.turnContext?.turnId ?? "");
+        const assistant: Message = {
+          role: "assistant",
+          content: [{ type: "text", text: "durable reply" }],
+        };
+        return {
+          agentResult: {
+            reason: "completed",
+            message: assistant,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+          runRecord: {
+            timestamp: "2026-07-18T00:00:00.000Z",
+            messages: [input.messages.at(-1)!, assistant],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+          newMessages: [assistant],
+          durationMs: 1,
+        };
+      },
+    });
+    const { adapter, router } = setup({ durableTurnExecutor });
+
+    await router.handleMessage({
+      ...dmMessage(),
+      messageId: "message-42",
+    });
+    await vi.waitFor(() => {
+      expect(seenTurnIds).toEqual(["channel:test-ch:message-42"]);
+    });
+
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue an already scheduled durable channel ingress", async () => {
+    const run = vi.fn();
+    const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
+      admit: vi.fn(async () => ({ runId: "run-existing", shouldSchedule: false })),
+      run: run as unknown as DurableConversationTurnExecutor["run"],
+    });
+    const { adapter, router } = setup({ durableTurnExecutor });
+
+    await router.handleMessage({ ...dmMessage(), messageId: "message-replayed" });
+
+    expect(durableTurnExecutor.admit).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  it("leaves durable non-completed turns to the authoritative status delivery", async () => {
+    const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        return {
+          agentResult: {
+            reason: "error",
+            error: { name: "Error", message: "failed" },
+            usage: { inputTokens: 1, outputTokens: 0 },
+          },
+          runRecord: {
+            timestamp: "2026-07-18T00:00:00.000Z",
+            messages: [],
+            usage: { inputTokens: 1, outputTokens: 0 },
+          },
+          newMessages: [],
+          durationMs: 1,
+        };
+      },
+    });
+    const { adapter, conversations, router } = setup({ durableTurnExecutor });
+
+    await router.handleMessage({ ...dmMessage(), messageId: "message-error" });
+    await vi.waitFor(() => {
+      expect(conversations.list()[0]?.busy).toBe(false);
+    });
+
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects durable channel admission without a stable platform message identity", async () => {
+    const run = vi.fn();
+    const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
+      run: run as unknown as DurableConversationTurnExecutor["run"],
+    });
+    const { router } = setup({ durableTurnExecutor });
+
+    await expect(router.handleMessage(dmMessage())).rejects.toThrow(
+      "Durable channel admission requires a stable platform message id",
+    );
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("routes group message with group as reply target", async () => {
@@ -311,7 +418,7 @@ describe("InboundRouter", () => {
 
   it("sends retry reply when conversation prefix is quiescing", async () => {
     const { adapter, conversations, router } = setup();
-    vi.spyOn(conversations, "enqueue").mockReturnValue("busy");
+    const release = await conversations.quiescePrefix("default");
 
     await router.handleMessage(dmMessage("test-ch", "user-1", "during switch"));
 
@@ -319,6 +426,54 @@ describe("InboundRouter", () => {
     const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(content.text).toContain("场景正在切换或目录变更");
 
+    release();
+    await conversations.disposeAll();
+  });
+
+  it("does not abandon a durable turn slot before authority delivery fills it", async () => {
+    const { OutboxRegistry } = await import("@zhixing/core");
+    const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        const assistant: Message = {
+          role: "assistant",
+          content: [{ type: "text", text: "authority-owned reply" }],
+        };
+        return {
+          agentResult: {
+            reason: "completed",
+            message: assistant,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+          runRecord: {
+            timestamp: "2026-07-18T00:00:00.000Z",
+            messages: [assistant],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+          newMessages: [assistant],
+          durationMs: 1,
+        };
+      },
+    });
+    const { conversations, router } = setup({ durableTurnExecutor });
+    const registry = new OutboxRegistry(async () => ({
+      success: true,
+      retryable: false,
+    }));
+    const outbox = registry.of({ channelId: "test-ch", to: "user-1" });
+    const abandon = vi.spyOn(outbox, "abandonSlot");
+    router.setOutboxRegistry(registry);
+
+    await router.handleMessage({
+      ...dmMessage(),
+      messageId: "message-authority-slot",
+    });
+    await vi.waitFor(() => {
+      expect(conversations.list()[0]?.busy).toBe(false);
+    });
+
+    expect(abandon).not.toHaveBeenCalled();
+
+    await registry.dispose();
     await conversations.disposeAll();
   });
 
@@ -992,6 +1147,54 @@ describe("InboundRouter", () => {
 
   // ─── Cancel intent (RM3) ───
   describe("control intent: cancel keyword", () => {
+    it("durably admits a channel cancellation before aborting the local runtime", async () => {
+      const order: string[] = [];
+      const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
+        controlPrincipal: ({ surfacePrincipal, connectionId }) => ({
+          surfacePrincipal,
+          connectionId,
+          deviceId: "device:owner",
+        }),
+        cancel: vi.fn(async () => {
+          order.push("durable");
+          order.push("local");
+          return {
+            dispositions: [
+              {
+                runId: "run-1",
+                runState: "cancelled" as const,
+                source: "channel" as const,
+                ingressId: "message-cancel-1",
+                abortedInFlight: false,
+                cancelledPending: 1,
+              },
+            ],
+          };
+        }),
+        async *run(): AsyncGenerator<AgentYield, RunResult> {
+          throw new Error("not used");
+        },
+      });
+      const { conversations, router } = setup({ durableTurnExecutor });
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+
+      await router.handleMessage({
+        ...dmMessage("test-ch", "user-1", "/cancel"),
+        messageId: "message-cancel-1",
+      });
+
+      expect(order).toEqual(["durable", "local"]);
+      expect(durableTurnExecutor.cancel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: DEFAULT_CONVERSATION_ID,
+          principal: expect.objectContaining({
+            connectionId: "channel:test-ch",
+          }),
+          reason: expect.objectContaining({ kind: "user-cancel" }),
+        }),
+      );
+    });
+
     it("/cancel 关键词 → conversations.abort 调用,reason 是 user-cancel{rpc}", async () => {
       const { adapter, conversations, router } = setup();
       // 先建一个 conversation 让 abort 有目标

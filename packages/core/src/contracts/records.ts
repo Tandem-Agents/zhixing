@@ -4,8 +4,10 @@ import type {
   ConversationRunState,
   Digest,
   IsoTime,
+  InteractionDisplay,
   JobRunState,
   Signature,
+  TurnSource,
   WireContractV1,
 } from "./foundation.js";
 import type { WireSchemaV1 } from "../types/distributed.js";
@@ -26,6 +28,18 @@ export type UncertainResolutionTargetState = "queued" | "cancelled" | "failed";
 export type ControlResultBody =
   | { t: "input"; runId: string; queuedPosition: number }
   | { t: "cancel"; runState: ConversationRunState }
+  | {
+      // 冻结的有序批次:候选选择与逐 run 终态在同一权威决定内定格,
+      // 重放消费该结果而不重新枚举候选。
+      t: "cancel-batch";
+      conversationId: string;
+      runs: Array<{
+        runId: string;
+        runState: ConversationRunState;
+        source: TurnSource;
+        ingressId: string;
+      }>;
+    }
   | { t: "session-write"; revision: number }
   | { t: "session-create"; conversationId: string }
   | { t: "global-write"; revision: number }
@@ -165,6 +179,7 @@ export interface InteractionMirrorEntry {
         t: "answered";
         authority: InteractionAnswerAuthority;
         decision: { allowed: boolean; reason?: string };
+        decisionDigest: Digest;
         by: string;
       }
     | {
@@ -212,7 +227,7 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
         requestId: string;
         kind: "allow-once";
         toolName: string;
-        display: { title: string; lines: string[] };
+        display: InteractionDisplay;
         issuedAt: IsoTime;
         ttlMs: number;
         expiresAt: IsoTime;
@@ -226,6 +241,7 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
               t: "answered";
               authority: InteractionAnswerAuthority;
               decision: { allowed: boolean; reason?: string };
+              decisionDigest: Digest;
               by: string;
             }
           | {

@@ -17,13 +17,48 @@ import {
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
+import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
 import { createAccessSurfaces } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
+import { setupAuthorityRuntime } from "../../setup-delivery.js";
+import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 
 const conversationSurface = createAccessSurfaces({}).find(
   (s) => s.name === "conversation",
 )!;
+
+class MemorySecretStore implements SecretStorePort {
+  readonly values = new Map<string, string>();
+
+  async put(ref: SecretRef, value: string): Promise<void> {
+    this.values.set(`${ref.kind}/${ref.bindingId}`, value);
+  }
+
+  async get(ref: SecretRef): Promise<string | null> {
+    return this.values.get(`${ref.kind}/${ref.bindingId}`) ?? null;
+  }
+
+  async delete(ref: SecretRef): Promise<void> {
+    this.values.delete(`${ref.kind}/${ref.bindingId}`);
+  }
+
+  async list(prefix: string): Promise<SecretRef[]> {
+    return [...this.values.keys()]
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => {
+        const separator = key.indexOf("/");
+        return {
+          kind: key.slice(0, separator) as SecretRef["kind"],
+          bindingId: key.slice(separator + 1),
+        };
+      });
+  }
+
+  async unlockState(): Promise<"unlocked"> {
+    return "unlocked";
+  }
+}
 
 function stubRuntime(sessionId: string): SessionRuntime {
   return {
@@ -60,7 +95,18 @@ async function setupCtx() {
       };
     }),
   };
+  const secretStore = new MemorySecretStore();
   const ctx = {
+    zhixingHome: tmp,
+    secretStore,
+    authorityRuntime: await setupAuthorityRuntime({
+      zhixingHome: tmp,
+      secretStore,
+    }),
+    durableInteractions: new DurableConversationInteractionObserver(),
+    perspectives: { executePerspectiveWork: vi.fn() },
+    sessionBroadcastRef: { current: null },
+    advancementRecoveryRef: { current: null },
     transcript,
     snapshots,
     config: {},

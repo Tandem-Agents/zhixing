@@ -334,10 +334,21 @@ export class AdvancementStore {
     timestamp = new Date().toISOString(),
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
-      const session = this.assertActiveSession(
+      const session = this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
       );
+      const knownProxy = session.proxyMessages.some(
+        (message) => message.id === proxyMessageId,
+      );
+      if (knownProxy && session.outstandingProxyMessageId !== proxyMessageId) {
+        return session;
+      }
+      if (session.status !== "active") {
+        throw new Error(
+          `AdvancementStore: session "${sessionId}" is not active`,
+        );
+      }
       if (session.outstandingProxyMessageId !== proxyMessageId) {
         throw new Error(
           `AdvancementStore: proxy message "${proxyMessageId}" is not outstanding`,

@@ -602,3 +602,48 @@ export type SessionEventProjection =
         tokensAfter: number;
       };
     };
+
+const PROJECTED_PASSTHROUGH_EVENTS = new Set<string>([
+  "agent:run_start", "agent:run_end", "context:tokens_snapshot",
+  "retry:attempt", "retry:success", "retry:exhausted",
+  "segment:transition_start", "segment:emergency_floor", "segment:transition_failed",
+  "interrupt:warn", "interrupt:fired", "security:steward_review",
+  "security:rule_sedimented", "lifecycle:hook_failed", "lifecycle:warning",
+  "lifecycle:prompt_rebuilt", "orchestration:validation_failed",
+  "orchestration:run_start", "orchestration:node_start", "orchestration:node_end",
+  "orchestration:run_end",
+]);
+
+/** Projects the closed wire event whitelist from the runtime event bus. */
+export function projectSessionEvent(
+  event: keyof AgentEventMap & string,
+  payload: AgentEventMap[keyof AgentEventMap],
+): SessionEventProjection | undefined {
+  if (PROJECTED_PASSTHROUGH_EVENTS.has(event)) {
+    return { event, payload } as SessionEventProjection;
+  }
+  if (event === "llm:request_start") {
+    const value = payload as AgentEventMap["llm:request_start"];
+    return {
+      event,
+      payload: {
+        model: value.model,
+        messageCount: value.messageCount,
+        hasTools: value.hasTools,
+      },
+    };
+  }
+  if (event === "segment:new_started") {
+    const value = payload as AgentEventMap["segment:new_started"];
+    return {
+      event,
+      payload: {
+        segmentId: value.segmentId,
+        bufferTurns: value.bufferTurns,
+        tokensBefore: value.tokensBefore,
+        tokensAfter: value.tokensAfter,
+      },
+    };
+  }
+  return undefined;
+}

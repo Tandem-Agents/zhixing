@@ -41,7 +41,7 @@ export function createOutboxSender(
       meta?: DeliverySendMeta,
     ): Promise<DeliveryResult> {
       const outbox = registry.of(target);
-      return outbox.post({
+      const entry = {
         target,
         content,
         ...(meta?.idempotencyKey
@@ -49,7 +49,15 @@ export function createOutboxSender(
           : {}),
         source: mapSource(meta?.source),
         afterSlot: deriveAfterSlot(meta?.source),
-      });
+      };
+      if (meta?.source?.kind === "agent" && meta.source.turnSlotId) {
+        const result = await outbox.fillSlot(meta.source.turnSlotId, entry);
+        if (!result) {
+          throw new Error("Filling an agent delivery slot did not enqueue its entry");
+        }
+        return result;
+      }
+      return outbox.post(entry);
     },
     isReady: options.isReady,
   };

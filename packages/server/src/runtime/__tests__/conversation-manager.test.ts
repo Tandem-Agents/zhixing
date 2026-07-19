@@ -612,6 +612,57 @@ describe("ConversationManager", () => {
       await mgr.disposeAll();
     });
 
+    it("requeues already durable work without consuming admission capacity twice", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        maxPending: 0,
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+      await mgr.getOrCreate("a");
+      mgr.setBusy("a", true);
+
+      expect(
+        mgr.enqueue(
+          "a",
+          { source: "channel", execute: async () => {}, cancel: () => {} },
+          { capacityReserved: true },
+        ),
+      ).toBe("queued");
+      expect(mgr.pendingCount("a")).toBe(1);
+
+      await mgr.disposeAll();
+    });
+
+    it("hands an accepted run back to durable recovery when local task construction fails", async () => {
+      await manager.getOrCreate("a");
+      const deferred = vi.fn();
+      const cancelled = vi.fn();
+
+      const admission = await manager.admitTurn({
+        conversationId: "a",
+        beforeEnqueue: async () => ({
+          shouldEnqueue: true,
+          runId: "run-deferred",
+          onDeferred: deferred,
+          onCancelled: cancelled,
+        }),
+        makeTask: () => {
+          throw new Error("local scheduler construction failed");
+        },
+      });
+
+      expect(admission).toMatchObject({
+        status: "replayed",
+        runId: "run-deferred",
+      });
+      expect(deferred).toHaveBeenCalledOnce();
+      expect(cancelled).not.toHaveBeenCalled();
+      expect(manager.list().find((entry) => entry.conversationId === "a")?.busy).toBe(
+        false,
+      );
+    });
+
     it("advancement pending 不占用户 pending 上限，但仍进入同一串行队列", async () => {
       const mgr = new ConversationManager(createMockFactory(), {
         maxPending: 1,
@@ -684,13 +735,34 @@ describe("ConversationManager", () => {
         cancel: () => { cancelled.push("user"); },
       });
 
-      expect(manager.cancelPendingBySource("a", "advancement")).toBe(1);
+      await expect(manager.cancelPendingBySource("a", "advancement")).resolves.toBe(1);
       expect(cancelled).toEqual(["proxy"]);
       expect(manager.pendingCount("a")).toBe(1);
 
       manager.setBusy("a", false);
       await vi.advanceTimersByTimeAsync(0);
       expect(executed).toEqual(["user"]);
+    });
+
+    it("keeps queued work claimed until durable cancellation succeeds", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true, "channel");
+      const local: string[] = [];
+      manager.enqueue("a", {
+        source: "advancement",
+        execute: async () => {},
+        cancel: () => local.push("fallback"),
+        cancelLocally: () => local.push("local"),
+        cancelDurably: async () => {
+          throw new Error("durable cancellation unavailable");
+        },
+      });
+
+      await expect(manager.cancelPendingBySource("a", "advancement")).rejects.toThrow(
+        "durable cancellation unavailable",
+      );
+      expect(manager.pendingCount("a")).toBe(1);
+      expect(local).toEqual([]);
     });
 
     it("abortInFlight 只中止当前运行，不清理 pending queue", async () => {
@@ -825,6 +897,75 @@ describe("ConversationManager", () => {
       expect(executed).toEqual([]);
       expect(manager.pendingCount("a")).toBe(0);
     });
+
+    it("applies a durable run cancellation without removing sibling runs", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+      const cancelled: string[] = [];
+      const duplicateDurableCancels: string[] = [];
+      manager.enqueue("a", {
+        durableRunId: "run-1",
+        execute: async () => {},
+        cancel: () => duplicateDurableCancels.push("run-1"),
+        cancelLocally: () => cancelled.push("run-1"),
+      });
+      manager.enqueue("a", {
+        durableRunId: "run-2",
+        execute: async () => {},
+        cancel: () => duplicateDurableCancels.push("run-2"),
+        cancelLocally: () => cancelled.push("run-2"),
+      });
+
+      const result = manager.applyDurableCancellation("a", "run-1", {
+        kind: "user-cancel",
+        source: "rpc",
+      });
+
+      expect(result).toEqual({ abortedInFlight: false, cancelledPending: 1 });
+      expect(cancelled).toEqual(["run-1"]);
+      expect(duplicateDurableCancels).toEqual([]);
+      expect(manager.pendingCount("a")).toBe(1);
+    });
+
+    it("applies an exact durable cancellation only to the matching active run", async () => {
+      await manager.getOrCreate("a");
+      const aborted: string[] = [];
+      const duplicateDurableCancels: string[] = [];
+      const admission = await manager.admitTurn({
+        conversationId: "a",
+        beforeEnqueue: async () => ({
+          shouldEnqueue: true,
+          runId: "run-active",
+          onCancelled: () => duplicateDurableCancels.push("run-active"),
+        }),
+        makeTask: () => ({
+          execute: async () => {},
+          cancel: () => duplicateDurableCancels.push("local"),
+          abort: () => {
+            aborted.push("run-active");
+            return true;
+          },
+        }),
+      });
+      expect(admission.status).toBe("immediate");
+
+      expect(
+        manager.applyDurableCancellation("a", "run-sibling", {
+          kind: "user-cancel",
+          source: "rpc",
+        }),
+      ).toEqual({ abortedInFlight: false, cancelledPending: 0 });
+      expect(aborted).toEqual([]);
+
+      expect(
+        manager.applyDurableCancellation("a", "run-active", {
+          kind: "user-cancel",
+          source: "rpc",
+        }),
+      ).toMatchObject({ abortedInFlight: true, cancelledPending: 0 });
+      expect(aborted).toEqual(["run-active"]);
+      expect(duplicateDurableCancels).toEqual([]);
+    });
   });
 
   // ─── AbortResult 双维度 + abortAll/abortAllAndWait ───
@@ -907,6 +1048,173 @@ describe("ConversationManager", () => {
         origin: "scheduler-shutdown",
       });
       expect(aborted).toBeGreaterThanOrEqual(0);
+    });
+
+    it("does not release queued durable work when shutdown cancellation fails", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+      const cancelLocally = vi.fn();
+      manager.enqueue("a", {
+        source: "interactive",
+        execute: async () => {},
+        cancel: cancelLocally,
+        cancelLocally,
+        cancelDurably: async () => {
+          throw new Error("durable shutdown cancellation failed");
+        },
+      });
+
+      await expect(
+        manager.abortAllAndWait({ kind: "external", origin: "scheduler-shutdown" }),
+      ).rejects.toThrow("durable shutdown cancellation failed");
+      expect(manager.pendingCount("a")).toBe(1);
+      expect(cancelLocally).not.toHaveBeenCalled();
+    });
+
+    it("applies one total shutdown budget when durable cancellation never settles", async () => {
+      vi.useRealTimers();
+      try {
+        const mgr = new ConversationManager(createMockFactory(), {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 60_000,
+        });
+        try {
+          await mgr.getOrCreate("a");
+          mgr.setBusy("a", true);
+          const cancelLocally = vi.fn();
+          mgr.enqueue("a", {
+            source: "interactive",
+            execute: async () => {},
+            cancel: cancelLocally,
+            cancelLocally,
+            cancelDurably: () => new Promise<void>(() => {}),
+          });
+
+          const startedAt = Date.now();
+          await expect(
+            mgr.abortAllAndWait(
+              { kind: "external", origin: "scheduler-shutdown" },
+              40,
+            ),
+          ).resolves.toBe(1);
+          expect(Date.now() - startedAt).toBeLessThan(500);
+          expect(mgr.pendingCount("a")).toBe(1);
+          expect(cancelLocally).not.toHaveBeenCalled();
+        } finally {
+          await mgr.disposeAll();
+        }
+      } finally {
+        vi.useFakeTimers();
+      }
+    });
+
+    it("applies a durable cancellation that settles after the shutdown budget", async () => {
+      vi.useRealTimers();
+      try {
+        const mgr = new ConversationManager(createMockFactory(), {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 60_000,
+        });
+        try {
+          await mgr.getOrCreate("a");
+          mgr.setBusy("a", true);
+          let settle!: () => void;
+          const durable = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          const cancelLocally = vi.fn();
+          mgr.enqueue("a", {
+            source: "interactive",
+            execute: async () => {},
+            cancel: cancelLocally,
+            cancelLocally,
+            cancelDurably: () => durable,
+          });
+
+          await expect(
+            mgr.abortAllAndWait(
+              { kind: "external", origin: "scheduler-shutdown" },
+              20,
+            ),
+          ).resolves.toBe(1);
+          expect(mgr.pendingCount("a")).toBe(1);
+          expect(cancelLocally).not.toHaveBeenCalled();
+
+          settle();
+          await vi.waitFor(() => {
+            expect(cancelLocally).toHaveBeenCalledOnce();
+            expect(mgr.pendingCount("a")).toBe(0);
+          });
+        } finally {
+          await mgr.disposeAll();
+        }
+      } finally {
+        vi.useFakeTimers();
+      }
+    });
+
+    it("stops a timed-out queued run even if it starts before durable cancellation settles", async () => {
+      vi.useRealTimers();
+      try {
+        const mgr = new ConversationManager(createMockFactory(), {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 60_000,
+        });
+        try {
+          await mgr.getOrCreate("a");
+          mgr.setBusy("a", true);
+          let settle!: () => void;
+          const durable = new Promise<void>((resolve) => {
+            settle = resolve;
+          });
+          let started!: () => void;
+          const startedGate = new Promise<void>((resolve) => {
+            started = resolve;
+          });
+          let finish!: () => void;
+          const executionGate = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          const abort = vi.fn(() => true);
+          const cancelLocally = vi.fn();
+          mgr.enqueue("a", {
+            source: "interactive",
+            durableRunId: "run-late",
+            execute: async () => {
+              started();
+              await executionGate;
+              mgr.setBusy("a", false);
+            },
+            abort,
+            cancel: cancelLocally,
+            cancelLocally,
+            cancelDurably: () => durable,
+          });
+
+          await expect(
+            mgr.abortAllAndWait(
+              { kind: "external", origin: "scheduler-shutdown" },
+              20,
+            ),
+          ).resolves.toBe(1);
+          mgr.setBusy("a", false);
+          await startedGate;
+          settle();
+          await vi.waitFor(() => {
+            expect(abort).toHaveBeenCalledOnce();
+            expect(cancelLocally).toHaveBeenCalledOnce();
+          });
+          finish();
+          await vi.waitFor(() => expect(mgr.getSession("a")?.busy).toBe(false));
+        } finally {
+          await mgr.disposeAll();
+        }
+      } finally {
+        vi.useFakeTimers();
+      }
     });
 
     it("有 busy session → setBusy(false) 触发 drain resolve(无需轮询)", async () => {
@@ -1736,6 +2044,72 @@ describe("ConversationManager", () => {
   //   1. 构造时部分配置（有持久化回调但无 appendRun）→ throw
   //   2. 运行时 persistent 分支无 cb → throw（defense-in-depth）
   //   3. 运行时 promote 无 cb → return false 保持 ephemeral 状态
+
+  describe("durable protocol absence is fail-closed", () => {
+    const legacyManager = () =>
+      new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+    it("缺 executor 时耐久控制一律拒绝,而非空成功", async () => {
+      const manager = legacyManager();
+      const principal = {
+        surfacePrincipal: "surface:user-1",
+        deviceId: "device-1",
+        connectionId: "conn-1",
+      };
+      await expect(
+        manager.cancelDurableRuns({
+          conversationId: "c1",
+          requestId: "cancel-legacy",
+          principal,
+        }),
+      ).rejects.toThrow("cancellation is not available");
+      await expect(
+        manager.findDurableRunByIngress("c1", "ingress-1", "advancement"),
+      ).rejects.toThrow("ingress ownership lookup is not available");
+      expect(() =>
+        manager.durableControlPrincipal({
+          surfacePrincipal: "surface:user-1",
+          connectionId: "conn-1",
+        }),
+      ).toThrow("control identity is not available");
+      await manager.disposeAll();
+    });
+
+    it("legacy 的 preadmission 与 final 发布保持既有语义", async () => {
+      const manager = legacyManager();
+      await expect(
+        manager.admitDurableTurn({
+          conversationId: "c1",
+          input: { parts: [{ type: "text", text: "hi" }] },
+          invocation: { kind: "agent", source: "interactive" },
+        }),
+      ).resolves.toEqual({ shouldEnqueue: true });
+      await expect(manager.publishPendingFinals("c1")).resolves.toBe(0);
+      await manager.disposeAll();
+    });
+
+    it("loadHistory 抛错向调用面传播且会话保持未激活", async () => {
+      const manager = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        loadHistory: async () => {
+          throw new Error("transcript shard is corrupt");
+        },
+        appendRun: async () => ({ runIndex: 0, shardId: "shard-0" }),
+      });
+      await expect(manager.getOrCreate("c-broken")).rejects.toThrow(
+        "transcript shard is corrupt",
+      );
+      expect(manager.has("c-broken")).toBe(false);
+      await manager.disposeAll();
+    });
+  });
 
   describe("configuration guards", () => {
     it("constructor throws if loadHistory is provided without appendRun", () => {

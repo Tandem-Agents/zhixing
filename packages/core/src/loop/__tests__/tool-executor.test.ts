@@ -14,6 +14,7 @@ import type { LLMProvider, LLMRole, LLMRoles } from "../../types/llm.js";
 import type {
   ToolDefinition,
   ToolExecutionContext,
+  ToolSideEffectObserver,
 } from "../../types/tools.js";
 import type { ToolUseBlock } from "../../types/messages.js";
 import type { AgentLoopDeps, AgentYield } from "../types.js";
@@ -181,6 +182,133 @@ describe("executeToolCalls · ctx.llm 注入契约", () => {
     expect(captured2.ctx!.llm).toBe(roles);
     expect(captured1.ctx!.toolCallId).toBe("c1");
     expect(captured2.ctx!.toolCallId).toBe("c2");
+  });
+});
+
+describe("executeToolCalls · durable side-effect lifecycle", () => {
+  function mutableTool(
+    call: ToolDefinition["call"],
+  ): ToolDefinition {
+    return {
+      name: "mutate",
+      description: "mutates external state",
+      inputSchema: { type: "object" as const },
+      isReadOnly: false,
+      isParallelSafe: false,
+      needsPermission: false,
+      call,
+    };
+  }
+
+  it("opens the durable effect before execution and closes it after a confirmed result", async () => {
+    const order: string[] = [];
+    const observer: ToolSideEffectObserver = {
+      start: async () => {
+        order.push("started");
+        return "effect-1";
+      },
+      finish: async (token, result) => {
+        order.push(`${String(token)}:${result.status}`);
+      },
+    };
+    const tool = mutableTool(async () => {
+      order.push("executed");
+      return { content: "ok" };
+    });
+
+    await drain(executeToolCalls({
+      toolCalls: [{ ...TOOL_CALL, name: tool.name }],
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      sideEffects: observer,
+    }));
+
+    expect(order).toEqual(["started", "executed", "effect-1:ok"]);
+  });
+
+  it("keeps the durable effect open while an aborted underlying operation is unresolved", async () => {
+    let release!: () => void;
+    const operation = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ac = new AbortController();
+    const finishes: string[] = [];
+    const observer: ToolSideEffectObserver = {
+      start: async () => "effect-2",
+      finish: async (_token, result) => {
+        finishes.push(result.status);
+      },
+    };
+    const tool = mutableTool(async () => {
+      await operation;
+      return { content: "stopped" };
+    });
+    const running = drain(executeToolCalls({
+      toolCalls: [{ ...TOOL_CALL, name: tool.name }],
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      abortSignal: ac.signal,
+      sideEffects: observer,
+    }));
+
+    await Promise.resolve();
+    ac.abort();
+    await Promise.resolve();
+    expect(finishes).toEqual([]);
+
+    release();
+    await running;
+    expect(finishes).toEqual(["ok"]);
+  });
+
+  it("does not rewrite a successful tool result when durable completion fails", async () => {
+    const finishes: string[] = [];
+    const observer: ToolSideEffectObserver = {
+      start: async () => "effect-success",
+      finish: async (_token, result) => {
+        finishes.push(result.status);
+        throw new Error("durable completion unavailable");
+      },
+    };
+    const tool = mutableTool(async () => ({ content: "world changed" }));
+
+    const result = await drainResult(executeToolCalls({
+      toolCalls: [{ ...TOOL_CALL, name: tool.name }],
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      sideEffects: observer,
+    }));
+
+    expect(finishes).toEqual(["ok"]);
+    expect(result.completedResults).toEqual([
+      expect.objectContaining({ isError: true }),
+    ]);
+  });
+
+  it("records exactly one failed terminal even when a tool throws undefined", async () => {
+    const finishes: string[] = [];
+    const observer: ToolSideEffectObserver = {
+      start: async () => "effect-undefined",
+      finish: async (_token, result) => {
+        finishes.push(result.status);
+      },
+    };
+    const tool = mutableTool(async () => {
+      throw undefined;
+    });
+
+    await drain(executeToolCalls({
+      toolCalls: [{ ...TOOL_CALL, name: tool.name }],
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      sideEffects: observer,
+    }));
+
+    expect(finishes).toEqual(["failed"]);
   });
 });
 

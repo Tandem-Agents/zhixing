@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ChannelRegistry, deliveryRecord } from "@zhixing/core";
+import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
-import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
+import {
+  setupAuthorityRuntime,
+  setupDelivery,
+  type AuthorityRuntimeStack,
+  type DeliveryStack,
+} from "../setup-delivery.js";
 
 const quietLogger = {
   info: () => {},
@@ -10,12 +16,19 @@ const quietLogger = {
   debug: () => {},
 };
 
-describe("setupDelivery authority shadow", () => {
+describe("setupDelivery authority production path", () => {
   let home: string;
   let stack: DeliveryStack | null = null;
+  let secrets: MemorySecretStore;
+  let authorityRuntime: AuthorityRuntimeStack;
 
   beforeEach(async () => {
     home = await createTempDir("delivery");
+    secrets = new MemorySecretStore();
+    authorityRuntime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: secrets,
+    });
   });
 
   afterEach(async () => {
@@ -27,7 +40,12 @@ describe("setupDelivery authority shadow", () => {
 
   it("assembles a valid DeliveryStack with an empty channel registry", async () => {
     const channels = new ChannelRegistry();
-    stack = await setupDelivery({ channels, zhixingHome: home, logger: quietLogger });
+    stack = await setupDelivery({
+      channels,
+      zhixingHome: home,
+      authorityRuntime,
+      logger: quietLogger,
+    });
     expect(stack).toBeDefined();
     expect(stack.delivery).toBeDefined();
     expect(stack.authorityDelivery).toBeDefined();
@@ -44,7 +62,12 @@ describe("setupDelivery authority shadow", () => {
 
   it("publishes a revisioned resolved notice through the production control path", async () => {
     const channels = new ChannelRegistry();
-    stack = await setupDelivery({ channels, zhixingHome: home, logger: quietLogger });
+    stack = await setupDelivery({
+      channels,
+      zhixingHome: home,
+      authorityRuntime,
+      logger: quietLogger,
+    });
     const sourceRef = await stack.artifacts.put(Buffer.from("resolution-source", "utf8"));
     const prepared = await stack.authority.coordinate(() =>
       stack!.authorityLog.transactProjection(
@@ -142,7 +165,12 @@ describe("setupDelivery authority shadow", () => {
 
   it("rebuilds queued delivery authority from the shared durable log", async () => {
     const channels = new ChannelRegistry();
-    stack = await setupDelivery({ channels, zhixingHome: home, logger: quietLogger });
+    stack = await setupDelivery({
+      channels,
+      zhixingHome: home,
+      authorityRuntime,
+      logger: quietLogger,
+    });
     const authority = stack.authority;
     const sourceRef = await stack.artifacts.put(Buffer.from("rebuild-source", "utf8"));
     const transaction = await authority.coordinate(() => stack!.authorityLog.transactProjection(
@@ -194,7 +222,39 @@ describe("setupDelivery authority shadow", () => {
     expect((await authority.get(transaction.value))?.state).toBe("queued");
 
     await stack.stop();
-    stack = await setupDelivery({ channels, zhixingHome: home, logger: quietLogger });
+    authorityRuntime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: secrets,
+    });
+    stack = await setupDelivery({
+      channels,
+      zhixingHome: home,
+      authorityRuntime,
+      logger: quietLogger,
+    });
     expect((await stack.authority.get(transaction.value))?.state).toBe("queued");
   }, 15_000);
 });
+
+class MemorySecretStore implements SecretStorePort {
+  readonly values = new Map<string, string>();
+  async put(ref: SecretRef, value: string) { this.values.set(secretKey(ref), value); }
+  async get(ref: SecretRef) { return this.values.get(secretKey(ref)) ?? null; }
+  async delete(ref: SecretRef) { this.values.delete(secretKey(ref)); }
+  async list(prefix: string) {
+    return [...this.values.keys()]
+      .filter((value) => value.startsWith(prefix))
+      .map((value) => {
+        const separator = value.indexOf("/");
+        return {
+          kind: value.slice(0, separator) as SecretRef["kind"],
+          bindingId: value.slice(separator + 1),
+        };
+      });
+  }
+  async unlockState() { return "unlocked" as const; }
+}
+
+function secretKey(ref: SecretRef): string {
+  return `${ref.kind}/${ref.bindingId}`;
+}

@@ -38,6 +38,8 @@ export type { TurnContext };
 export interface RunTurnOptions {
   abortSignal?: AbortSignal;
   turnContext?: TurnContext;
+  /** Authenticated stable surface identity; transport connection ids are not identities. */
+  surfacePrincipal?: string;
   /**
    * 本 turn 序号（进生命周期钩子上下文供观测）—— 由调用方维护的 counter 提供。
    *
@@ -54,6 +56,12 @@ export interface RunTurnOptions {
    * 推进侧代理 turn 的 run 级元数据。它只落 RunRecord，不进入模型消息。
    */
   advancement?: RunRecordAdvancementMetadata;
+  /** Closed runtime-event projection consumed by durable stream producers. */
+  onProtocolEvent?: (
+    event: import("@zhixing/core").SessionEventProjection,
+    meta: { readonly lineage?: string },
+  ) => void;
+  toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
 }
 
 export interface SessionRuntime {

@@ -358,6 +358,13 @@ export type DeliveryEnqueueKeyBody =
       taskId: string;
       jobRunId: string;
       statusRevision: number;
+    }
+  | {
+      // 控制回执:一个控制决定恰产生一个回执 item,以 canonical requestId 幂等。
+      // 当前唯一生产者是 cancel-batch 的空批次渠道回执。
+      kind: "conversation-control-response-delivery";
+      conversationId: string;
+      requestId: string;
     };
 
 export interface DeliveryIntentDto {
@@ -371,7 +378,7 @@ export interface DeliveryIntentDto {
         taskName: string;
         createdInTurn?: string;
       }
-    | { kind: "agent"; conversationId: string }
+    | { kind: "agent"; conversationId: string; turnSlotId?: string }
     | { kind: "system"; reason: string };
   createdAt: IsoTime;
   maxAttempts: number;

@@ -40,10 +40,14 @@ type OnSecurityBlockedFn = NonNullable<
 type SegmentDepsOption = CreateAgentRuntimeOptions["segmentDeps"];
 type SkillStoreOption = CreateAgentRuntimeOptions["skillStore"];
 type ProviderConfigurationOption = CreateAgentRuntimeOptions["providerConfiguration"];
+type ConfirmationLifecycleObserverOption =
+  CreateAgentRuntimeOptions["confirmationLifecycleObserver"];
 
 export interface RuntimeHostOptions {
   /** 设备本地 SecretStore 的已解密内存投影，由产品组合根持有并注入。 */
   providerConfiguration: ProviderConfigurationOption;
+  /** Durable interaction observer shared by all conversation runtime trees. */
+  confirmationLifecycleObserver?: ConfirmationLifecycleObserverOption;
   /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
   systemProtectedPaths: readonly string[];
   /** 技能库单实例——索引结构版本跨全部实例一致,任一保存全员下窗即见 */
@@ -171,6 +175,9 @@ export class RuntimeHost {
       segmentDeps: this.opts.segmentDeps,
       skillStore: this.opts.skillStore,
       runtimeKind: opts?.runtimeKind ?? "conversation",
+      ...(opts?.runtimeKind !== "ephemeral" && this.opts.confirmationLifecycleObserver
+        ? { confirmationLifecycleObserver: this.opts.confirmationLifecycleObserver }
+        : {}),
       ...(this.opts.lifecycle ? { lifecycle: this.opts.lifecycle } : {}),
     });
     this.opts.onRuntimeCreated?.(runtime);

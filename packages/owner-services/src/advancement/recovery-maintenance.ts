@@ -8,6 +8,7 @@ import type { AdvancementConversationDirectory } from "./conversation-directory-
 import type { AdvancementController } from "./controller.js";
 import type {
   AdvancementEventSink,
+  AdvancementProxyDurableClaim,
   AdvancementProxyTurnPort,
 } from "./ports.js";
 import {
@@ -36,6 +37,13 @@ export type AdvancementRecoveryResult =
       readonly conversationId: string;
       readonly advancementSessionId: string;
       readonly proxyMessageId: string;
+    }
+  | {
+      readonly status: "durable-run-owned" | "closed-run-recovered";
+      readonly conversationId: string;
+      readonly advancementSessionId: string;
+      readonly proxyMessageId: string;
+      readonly runId: string;
     }
   | {
       readonly status: "scheduled";
@@ -210,6 +218,43 @@ class DefaultAdvancementRecoveryMaintenance
         conversationId,
         advancementSessionId: session.id,
         proxyMessageId: proxyMessage.id,
+      };
+    }
+    // 调度前必须取得显式 unclaimed;查询异常 fail-closed,保留待办下轮重试。
+    let durableClaim: AdvancementProxyDurableClaim;
+    try {
+      durableClaim = await this.options.proxyTurns.inspectDurableClaim(
+        conversationId,
+        proxyMessage.id,
+      );
+    } catch (err) {
+      return this.failed(conversationId, session.id, proxyMessage.id, err);
+    }
+    if (durableClaim.status === "owned") {
+      return {
+        status: "durable-run-owned",
+        conversationId,
+        advancementSessionId: session.id,
+        proxyMessageId: proxyMessage.id,
+        runId: durableClaim.runId,
+      };
+    }
+    if (durableClaim.status === "closed") {
+      try {
+        await this.options.advancement.settleProxyMessage({
+          conversationId,
+          advancementSessionId: session.id,
+          proxyMessageId: proxyMessage.id,
+        });
+      } catch (err) {
+        return this.failed(conversationId, session.id, proxyMessage.id, err);
+      }
+      return {
+        status: "closed-run-recovered",
+        conversationId,
+        advancementSessionId: session.id,
+        proxyMessageId: proxyMessage.id,
+        runId: durableClaim.runId,
       };
     }
 

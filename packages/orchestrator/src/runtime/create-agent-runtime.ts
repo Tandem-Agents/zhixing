@@ -15,6 +15,7 @@ import {
   type EventBus,
   type WindowCompact,
   type ConfirmationFallbackStrategy,
+  type ConfirmationLifecycleObserver,
   type ContextBudget,
   type IConfirmationBroker,
   type IEventBus,
@@ -84,6 +85,7 @@ import {
   type WindowLifecycle,
   type WindowChangeReason,
   resolveModelInputCapabilities,
+  projectSessionEvent,
 } from "@zhixing/core";
 import {
   createProviderRoles,
@@ -470,6 +472,11 @@ export interface RunParams {
   /** 推进侧代理 run 的产品层元数据；不进入 Message role/content */
   advancement?: RunRecordAdvancementMetadata;
   onYield?: (event: AgentYield) => void;
+  onProtocolEvent?: (
+    event: import("@zhixing/core").SessionEventProjection,
+    meta: { readonly lineage?: string },
+  ) => void;
+  toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -558,6 +565,8 @@ export interface CreateAgentRuntimeOptions {
    * 参见 remote-confirmation-execution.md。
    */
   confirmationFallback?: ConfirmationFallbackStrategy;
+  /** Durable request/outcome boundary inherited by every broker in this runtime tree. */
+  confirmationLifecycleObserver?: ConfirmationLifecycleObserver;
   /** Per-run EventBus 装饰钩子,详见 {@link DecorateRunBusFn} */
   decorateRunBus?: DecorateRunBusFn;
   /**
@@ -866,7 +875,9 @@ export async function createAgentRuntime(
   });
 
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
-  const confirmationBroker = new ConfirmationBroker();
+  const confirmationBroker = new ConfirmationBroker({
+    lifecycleObserver: options.confirmationLifecycleObserver,
+  });
 
   // tools = baseTools + (可选 Task 工具)。Task 装配时 capture 装配期已知的
   // 共享服务 + 当前 baseTools snapshot 作为子工具池来源(子按 sub-agent
@@ -1457,6 +1468,16 @@ export async function createAgentRuntime(
       //     形成可追溯的层级链(保证 lineage 必须以父 lineage 为前缀)
       // 旧 listener 单参签名继续兼容(meta 是可选第二参,被忽略)
       const eventBus = createEventBus<AgentEventMap>({ lineage: "main" });
+      const disposeProtocolEvents = params.onProtocolEvent
+        ? eventBus.onAny((event, payload, meta) => {
+            const projected = projectSessionEvent(event, payload);
+            if (projected) {
+              params.onProtocolEvent?.(projected, {
+                ...(meta?.lineage ? { lineage: meta.lineage } : {}),
+              });
+            }
+          })
+        : undefined;
       const startTime = Date.now();
 
       // 收集本轮产生的新消息，用于 REPL 对话历史
@@ -1542,6 +1563,7 @@ export async function createAgentRuntime(
       //     warn ticker 会跨 run 累积,造成内存泄漏与重复渲染);
       //   - dispose 内部异常仅记录日志,不再次 throw,见 safeDispose 注释。
       const disposeAll = (): void => {
+        safeDispose("run.protocolEvents", () => disposeProtocolEvents?.());
         safeDispose("run.segmentAccumulator", () => segmentAccumulator.dispose());
         safeDispose("run.postTurnControlAccumulator", () =>
           postTurnControlAccumulator.dispose(),
@@ -1854,6 +1876,7 @@ export async function createAgentRuntime(
           // 各角色生效思考配置，沿 llmRoles 同路径注入到工具 ctx.roleThinking，
           // 让工具 I/O 边界调对应角色（如 WebFetch 蒸馏走 light）遵循用户配置。
           roleThinking,
+          toolSideEffectObserver: params.toolSideEffectObserver,
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,

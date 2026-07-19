@@ -501,6 +501,7 @@ export async function* runAgentLoop(
         eventBus,
         llmRoles: params.llmRoles,
         roleThinking: params.roleThinking,
+        sideEffects: params.toolSideEffectObserver,
       });
 
       // ── Tool 阶段 abort → 调 cleanup 注入 placeholder + 退出 ──

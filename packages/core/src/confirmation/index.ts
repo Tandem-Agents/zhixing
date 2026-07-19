@@ -5,15 +5,18 @@ export type {
   BrokerUnsubscribe,
   CancelCause,
   ConfirmationDecision,
+  ConfirmationAdmissionDisposition,
   ConfirmationDisplay,
   ConfirmationEventMap,
   ConfirmationFallbackStrategy,
+  ConfirmationLifecycleObserver,
   ConfirmationOption,
   ConfirmationOptionKind,
   ConfirmationRenderer,
   ConfirmationRendererPort,
   ConfirmationRequest,
   ConfirmationRequestId,
+  ConfirmationResolutionSource,
   DisplayBody,
   IConfirmationBroker,
   NonInteractiveResolver,
@@ -30,7 +33,7 @@ export {
 } from "./broker.js";
 export type { ConfirmationBrokerOptions } from "./broker.js";
 
-export { isFreeTextDeny } from "./types.js";
+export { isFreeTextDeny, validateConfirmationDecisionText } from "./types.js";
 
 export {
   failToAllowResolver,

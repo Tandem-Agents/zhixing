@@ -3,6 +3,7 @@ import type {
   ArtifactRef,
   AssignmentTerminationProof,
   CancelProofBody,
+  ConversationInvocation,
   ConversationUncertainClosure,
   ConversationRunState,
   DispatchConflictProof,
@@ -28,6 +29,7 @@ import {
   validateAssignmentTerminationProof,
   validateCancelProof,
   validateConversationInteractionMirrorBatch,
+  validateConversationInvocation,
   validateDispatchConflictProof,
   validateIngressContext,
   validateNonEmptyUserTurnInput,
@@ -40,11 +42,18 @@ export type Stored<T> = T | { readonly ref: ArtifactRef };
 
 export type ConversationRunJournalRecord =
   | {
+      readonly t: "session-lifecycle";
+      readonly mutation: "clear" | "delete";
+      readonly domainRevision: number;
+      readonly requestId: string;
+    }
+  | {
       readonly t: "admitted";
       readonly ingressKey: string;
       readonly runId: string;
       readonly input: Stored<UserTurnInput>;
       readonly ingress: IngressContext;
+      readonly invocation: ConversationInvocation;
       readonly queuedPosition: number;
     }
   | {
@@ -115,6 +124,7 @@ export type ConversationRunJournalRecord =
       readonly assignmentId?: string;
       readonly state: ConversationRunState;
       readonly statusRevision: number;
+      readonly reason?: string;
     }
   | {
       readonly t: "committed";
@@ -159,11 +169,18 @@ export type ConversationRunInternalRecord =
       readonly runId: string;
       readonly commitRevision: number;
       readonly digest: string;
+    }
+  | {
+      readonly kind: "conversation-lifecycle-projection";
+      readonly mutation: "clear" | "delete";
+      readonly domainRevision: number;
+      readonly requestId: string;
     };
 
 export const CONVERSATION_RUN_INTERNAL_RECORD_TYPES = [
   "content-asset-index",
   "conversation-commit-projection",
+  "conversation-lifecycle-projection",
 ] as const satisfies readonly ConversationRunInternalRecord["kind"][];
 
 interface RecordShape {
@@ -172,8 +189,19 @@ interface RecordShape {
 }
 
 export const CONVERSATION_RUN_RECORD_SHAPES = {
+  "session-lifecycle": {
+    required: ["domainRevision", "mutation", "requestId", "t"],
+  },
   admitted: {
-    required: ["ingress", "ingressKey", "input", "queuedPosition", "runId", "t"],
+    required: [
+      "ingress",
+      "ingressKey",
+      "input",
+      "invocation",
+      "queuedPosition",
+      "runId",
+      "t",
+    ],
   },
   assigned: {
     required: [
@@ -206,7 +234,7 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
   state: {
     required: ["runId", "state", "statusRevision", "t"],
-    optional: ["assignmentId"],
+    optional: ["assignmentId", "reason"],
   },
   committed: {
     required: ["assignmentId", "bundle", "commitRevision", "runId", "t"],
@@ -273,11 +301,22 @@ export function validateConversationRunRecord(
     assertRecordKeys(value, shape.required, shape.optional ?? [], `${type} run record`);
 
     switch (type) {
+      case "session-lifecycle":
+        if (value.mutation !== "clear" && value.mutation !== "delete") {
+          throw corruptRunJournal("Session lifecycle mutation is invalid");
+        }
+        assertPositiveSafeInteger(
+          value.domainRevision,
+          "Session lifecycle domain revision",
+        );
+        assertIdentifier(value.requestId, "Session lifecycle request id");
+        break;
       case "admitted": {
         assertIdentifier(value.ingressKey, "Admitted ingress key");
         assertIdentifier(value.runId, "Admitted run id");
         assertNonNegativeSafeInteger(value.queuedPosition, "Admitted queued position");
         validateIngressContext(value.ingress as IngressContext);
+        validateConversationInvocation(value.invocation);
         if (isStoredReference(value.input)) {
           assertArtifactReference(value.input.ref, "Admitted input reference");
         } else {
@@ -382,6 +421,14 @@ export function validateConversationRunRecord(
           throw corruptRunJournal("Run state value is invalid");
         }
         assertPositiveSafeInteger(value.statusRevision, "Run state revision");
+        if (value.reason !== undefined) {
+          if (typeof value.reason !== "string" || Buffer.byteLength(value.reason, "utf8") > 512) {
+            throw corruptRunJournal("Run state reason exceeds its durable bound");
+          }
+          if (value.state !== "failed") {
+            throw corruptRunJournal("Only failed run state may carry a reason");
+          }
+        }
         break;
       case "committed":
         assertIdentifier(value.runId, "Committed run id");
@@ -436,6 +483,22 @@ export function validateConversationRunInternalRecord(
     assertIdentifier(value.runId, "Projection run id");
     assertPositiveSafeInteger(value.commitRevision, "Projection commit revision");
     assertDigest(value.digest, "Projection bundle digest");
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "conversation-lifecycle-projection") {
+    assertExactRecordKeys(
+      value,
+      ["domainRevision", "kind", "mutation", "requestId"],
+      "Conversation lifecycle projection",
+    );
+    if (value.mutation !== "clear" && value.mutation !== "delete") {
+      throw corruptRunJournal("Conversation lifecycle projection mutation is invalid");
+    }
+    assertPositiveSafeInteger(
+      value.domainRevision,
+      "Conversation lifecycle projection domain revision",
+    );
+    assertIdentifier(value.requestId, "Conversation lifecycle projection request id");
     return value as ConversationRunInternalRecord;
   }
   if (value.kind !== "content-asset-index") {
@@ -1301,12 +1364,14 @@ export function assertRunStateTransition(
     (current === "dispatched" &&
       (next === "running" ||
         next === "committed" ||
+        next === "failed" ||
         next === "queued" ||
         next === "cancel-requested" ||
         next === "uncertain" ||
         next === "cancelled")) ||
     (current === "running" &&
       (next === "committed" ||
+        next === "failed" ||
         next === "cancel-requested" ||
         next === "uncertain" ||
         next === "cancelled")) ||

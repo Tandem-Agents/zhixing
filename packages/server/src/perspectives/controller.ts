@@ -1,5 +1,6 @@
 import {
   assistantMessage,
+  AgentError,
   createEventBus,
   emptyUsage,
   extractText,
@@ -7,13 +8,16 @@ import {
   snapshotAttentionWindowV1,
   userMessageFromTurnInput,
   type AgentEventMap,
+  type AgentYield,
   type EventBus,
   type Message,
   type OrchestrationExecutableV1,
   type OrchestrationRunResultV1,
   type OrchestrationSystemCapsV1,
   type TokenUsage,
+  type RunResult,
 } from "@zhixing/core";
+import type { ConversationManager, SessionRuntime } from "@zhixing/owner-kernel";
 import type { PendingTask } from "@zhixing/owner-kernel/conversation-manager";
 import {
   DEFAULT_PERSPECTIVE_COUNT,
@@ -65,6 +69,7 @@ export class PerspectivesController {
             question: input.question,
             abortSignal: controller.signal,
             turnContext: input.turnContext,
+            surfacePrincipal: input.surfacePrincipal,
             source: input.source,
           });
           await input.onResult?.(result);
@@ -81,6 +86,96 @@ export class PerspectivesController {
 
   async runPerspectiveTurn(
     input: PerspectivesTurnInput,
+  ): Promise<PerspectivesTurnResult> {
+    const durable = input.manager.durableTurnExecutor();
+    if (durable) {
+      return this.runDurablePerspectiveTurn(input, durable);
+    }
+    return this.runPerspectiveWork(input, true);
+  }
+
+  async executePerspectiveWork(
+    input: PerspectivesTurnInput,
+  ): Promise<{
+    readonly outcome: PerspectivesTurnResult;
+    readonly runResult: RunResult;
+  }> {
+    const outcome = await this.runPerspectiveWork(input, false);
+    return {
+      outcome,
+      runResult: perspectiveRunResult(outcome, input, this.now()),
+    };
+  }
+
+  private async runDurablePerspectiveTurn(
+    input: PerspectivesTurnInput,
+    durable: NonNullable<ReturnType<ConversationManager["durableTurnExecutor"]>>,
+  ): Promise<PerspectivesTurnResult> {
+    let outcome: PerspectivesTurnResult | undefined;
+    const controller = this;
+    const runtime: SessionRuntime = {
+      sessionId: `perspectives:${input.managed.conversationId}`,
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        const execution = await controller.executePerspectiveWork(input);
+        outcome = execution.outcome;
+        return execution.runResult;
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    try {
+      const generator = durable.run({
+        conversationId: input.managed.conversationId,
+        input: input.originalInput,
+        messages: [
+          ...input.managed.window.getMessages(),
+          userMessageFromTurnInput(input.originalInput),
+        ],
+        baseRevision: input.managed.turnCount,
+        runtime,
+        invocation: {
+          kind: "perspectives",
+          source: input.source ?? "interactive",
+          question: input.question,
+        },
+        options: {
+          ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+          ...(input.turnContext ? { turnContext: input.turnContext } : {}),
+          ...(input.surfacePrincipal
+            ? { surfacePrincipal: input.surfacePrincipal }
+            : {}),
+          turnIndex: input.managed.turnCount,
+          source: input.source ?? "interactive",
+        },
+      });
+      while (!(await generator.next()).done) {
+        // Perspective orchestration emits its provisional events through the run bus.
+      }
+      if (!outcome) {
+        throw new Error("Perspective execution returned no durable outcome");
+      }
+    } catch (error) {
+      return failed(
+        "commit",
+        `failed to commit perspective final answer: ${errorMessage(error)}`,
+      );
+    }
+    if (outcome.status === "completed") {
+      try {
+        await input.manager.publishPendingFinals(input.managed.conversationId);
+      } catch (error) {
+        console.warn(
+          "[perspectives] durable result committed; final publication will be retried",
+          error,
+        );
+      }
+    }
+    return outcome;
+  }
+
+  private async runPerspectiveWork(
+    input: PerspectivesTurnInput,
+    commitLegacy: boolean,
   ): Promise<PerspectivesTurnResult> {
     const question = input.question.trim();
     if (question.length === 0) {
@@ -171,13 +266,15 @@ export class PerspectivesController {
         userMessageFromTurnInput(input.originalInput),
         assistantMessage(finalText),
       ];
-      const committed = await this.commitTurn(
-        input,
-        messages,
-        usage,
-        assembly.allocation.perspectives.length,
-      );
-      if (!committed.ok) return committed.result;
+      if (commitLegacy) {
+        const committed = await this.commitTurn(
+          input,
+          messages,
+          usage,
+          assembly.allocation.perspectives.length,
+        );
+        if (!committed.ok) return committed.result;
+      }
 
       return {
         status: "completed",
@@ -265,6 +362,56 @@ export class PerspectivesController {
   private createRunEventBus(): EventBus<AgentEventMap> {
     return this.options.createRunEventBus?.() ?? createEventBus<AgentEventMap>();
   }
+}
+
+function perspectiveRunResult(
+  result: PerspectivesTurnResult,
+  input: PerspectivesTurnInput,
+  completedAt: Date,
+): RunResult {
+  const user = userMessageFromTurnInput(input.originalInput);
+  const usage = result.usage ?? emptyUsage();
+  if (result.status === "completed") {
+    const assistant = [...result.recordMessages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (!assistant || assistant.role !== "assistant") {
+      throw new Error("Perspective result has no assistant message");
+    }
+    return {
+      agentResult: { reason: "completed", message: assistant, usage },
+      runRecord: {
+        timestamp: completedAt.toISOString(),
+        messages: [...result.recordMessages],
+        usage,
+        source: input.source ?? "interactive",
+        perspectives: {
+          definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+          perspectiveCount: result.allocation.perspectives.length,
+        },
+      },
+      newMessages: [assistant],
+      durationMs: 0,
+    };
+  }
+  return {
+    agentResult:
+      result.status === "aborted"
+        ? { reason: "aborted", usage }
+        : {
+            reason: "error",
+            error: new AgentError(result.message, "unknown", false),
+            usage,
+          },
+    runRecord: {
+      timestamp: completedAt.toISOString(),
+      messages: [user],
+      usage,
+      source: input.source ?? "interactive",
+    },
+    newMessages: [],
+    durationMs: 0,
+  };
 }
 
 function assembleSafely(

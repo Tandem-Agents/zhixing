@@ -32,9 +32,13 @@ import {
   type ChannelCredentialProjection,
 } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
-import { setupDelivery } from "../setup-delivery.js";
+import {
+  setupAuthorityRuntime,
+  setupDelivery,
+} from "../setup-delivery.js";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
+import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type { AccessSurface } from "./access-surface.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
@@ -46,12 +50,28 @@ const mcpSurface: AccessSurface = {
   },
 };
 
+/** Durable authority substrate shared by conversation and delivery composition. */
+const authorityRuntimeSurface: AccessSurface = {
+  name: "authority-runtime",
+  phase: "pre-server",
+  async setup(ctx) {
+    ctx.authorityRuntime = await setupAuthorityRuntime({
+      zhixingHome: ctx.zhixingHome,
+      secretStore: ctx.secretStore,
+      configurationSnapshot: ctx.config,
+    });
+  },
+};
+
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 const conversationSurface: AccessSurface = {
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
     const { transcript, snapshots, config } = ctx;
+    if (!ctx.authorityRuntime) {
+      throw new Error("Conversation surface requires the durable authority runtime");
+    }
     // 装填预算按主模型能力取值（serve 会话统一用 main 模型；未知模型有保守兜底）
     const capability = resolveModelCapability(config.llm?.main?.model ?? "");
 
@@ -106,26 +126,114 @@ const conversationSurface: AccessSurface = {
         ) ?? Promise.resolve(),
     });
 
-    ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
-      loadHistory: async (conversationId) => {
-        try {
-          const s = storesFor(conversationId);
-          // 倒读自带索引自愈（分片文件在，会话就在）——计数与装填都不做
-          // 裸文件存在性短路。无任何记录（真·新对话 / 刚清空）→ undefined，
-          // 交 doCreate 按需确保持久身份（幂等）。
-          const turnCount = await countRuns(s.transcript, s.localId);
-          if (turnCount === 0) return undefined;
-          const bootstrap = await buildStartupBootstrap({
-            conversationId: s.localId,
-            store: s.transcript,
-            snapshots: s.snapshots,
-            capability: { optimalMaxTokens: capability.optimalMaxTokens },
-            estimator: createTokenEstimator(),
+    let manager: ConversationManager;
+    const protocol = new ConversationProtocolRuntime({
+      authority: ctx.authorityRuntime,
+      manager: () => manager,
+      interactions: ctx.durableInteractions,
+      executeRecoveredPerspective: async (input) => {
+        const execution = await ctx.perspectives.executePerspectiveWork(input);
+        return execution.runResult;
+      },
+      onStatus: (notice) => {
+        ctx.sessionBroadcastRef.current?.(
+          notice.ref.conversationId,
+          SESSION_NOTIFICATIONS.status,
+          notice,
+        );
+      },
+      onFinal: (frame) => {
+        ctx.sessionBroadcastRef.current?.(
+          frame.conversationId,
+          SESSION_NOTIFICATIONS.final,
+          frame,
+        );
+      },
+      projectLifecycle: async (input) => {
+        if (input.mutation === "clear") {
+          const outcome = await manager.clear(input.conversationId, async () => {
+            await ctx.conversationDirectory.ensure(input.conversationId);
+            await ctx.conversationDirectory.clear(input.conversationId);
+            return true;
           });
-          return { bootstrap, turnCount };
-        } catch {
-          return undefined;
+          if (outcome === "busy") {
+            throw new Error("Conversation lifecycle projection is busy");
+          }
+          if (outcome === "not-found") {
+            throw new Error("Conversation lifecycle projection lost its identity");
+          }
+          ctx.sessionBroadcastRef.current?.(
+            input.conversationId,
+            SESSION_NOTIFICATIONS.changed,
+            { conversationId: input.conversationId, change: "cleared" },
+          );
+          return;
         }
+        const outcome = await manager.delete(input.conversationId, {
+          removeDisk: async () => {
+            await ctx.conversationDirectory.remove(input.conversationId);
+            return true;
+          },
+          onDeleted: () => {
+            ctx.sessionBroadcastRef.current?.(
+              input.conversationId,
+              SESSION_NOTIFICATIONS.changed,
+              { conversationId: input.conversationId, change: "deleted" },
+            );
+          },
+        });
+        if (outcome === "busy") {
+          throw new Error("Conversation lifecycle projection is busy");
+        }
+        // 权威删除的全部级联消费者在同一投影 claim 内幂等完成:推进会话
+        // 取消与控制日志删除失败即抛错保持投影待办,由在线/启动恢复重驱;
+        // advancement 子系统整体缺席时无级联数据,是显式判定而非能力兜底。
+        if (ctx.advancement) {
+          await ctx.advancement.cancelOpenConversationSession({
+            conversationId: input.conversationId,
+            reason: "user-cancelled",
+            message: "原始对话已删除，推进会话已取消。",
+          });
+          await ctx.advancement.removeConversationData(input.conversationId);
+        }
+      },
+      recoverAuxiliary: async (conversationId) => {
+        const recovery = ctx.advancementRecoveryRef.current;
+        if (!recovery) return;
+        const result = await recovery.recoverConversation(conversationId);
+        if (
+          result.status === "failed" ||
+          result.status === "full" ||
+          result.status === "busy" ||
+          result.status === "not-found" ||
+          result.status === "missing-proxy"
+        ) {
+          throw new Error(
+            result.message ??
+              `Advancement recovery did not converge: ${result.status}`,
+          );
+        }
+      },
+    });
+    manager = new ConversationManager(ctx.runtimeFactory, undefined, {
+      onRelease: (conversationId) => protocol.releaseConversation(conversationId),
+      loadHistory: async (conversationId) => {
+        // 倒读自带索引自愈（分片文件在，会话就在）——计数与装填都不做
+        // 裸文件存在性短路。undefined 只表示经成功读取确认的零历史
+        // （真·新对话 / 刚清空）；任何 I/O、损坏或装填异常必须向调用面
+        // 传播并保持会话未激活——把读取失败编码成空历史会让 agent 在
+        // 缺失既有上下文时继续提交新权威结果,污染对话。
+        const s = storesFor(conversationId);
+        const turnCount = await countRuns(s.transcript, s.localId);
+        if (turnCount === 0) return undefined;
+        const bootstrap = await buildStartupBootstrap({
+          conversationId: s.localId,
+          store: s.transcript,
+          snapshots: s.snapshots,
+          capability: { optimalMaxTokens: capability.optimalMaxTokens },
+          estimator: createTokenEstimator(),
+        });
+        return { bootstrap, turnCount };
       },
       initTranscript: async (conversationId) => {
         const s = storesFor(conversationId);
@@ -153,7 +261,11 @@ const conversationSurface: AccessSurface = {
         turnMaintenance(info);
         advancementReviewMaintenance(info);
       },
+      durableTurnExecutor: protocol,
     });
+    await protocol.recoverReadinessProjections();
+    ctx.conversations = manager;
+    ctx.conversationProtocol = protocol;
   },
 };
 
@@ -164,43 +276,44 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
     phase: "pre-server",
     async setup(ctx) {
       const { conversations, config, confirmationHub } = ctx;
-    if (
-      !conversations ||
-      !config.messaging ||
-      Object.keys(config.messaging).length === 0
-    ) {
-      return;
-    }
-    const channelLogger = {
-      debug: (msg: string, ...args: unknown[]) =>
-        console.log(chalk.dim(`[channel] ${msg}`), ...args),
-      info: (msg: string, ...args: unknown[]) =>
-        console.log(chalk.dim(`[channel] ${msg}`), ...args),
-      warn: (msg: string, ...args: unknown[]) =>
-        console.warn(chalk.yellow(`[channel] ${msg}`), ...args),
-      error: (msg: string, ...args: unknown[]) =>
-        console.error(chalk.red(`[channel] ${msg}`), ...args),
-    };
-    try {
-      const result = await setupChannels({
-        entries: config.messaging,
-        credentials,
-        conversations,
-        logger: channelLogger,
-        confirmationHub,
-        cancelKeywords: config.intent?.cancelKeywords,
-        sessionBroadcast: () => ctx.sessionBroadcastRef.current,
-        sessionActivityBroadcast: () => ctx.sessionActivityBroadcastRef.current,
-      });
-      ctx.channels = result.registry;
-      ctx.inboundRouter = result.router;
-    } catch (err) {
-      console.warn(
-        chalk.yellow(
-          `[channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
-    }
+      if (
+        !conversations ||
+        !config.messaging ||
+        Object.keys(config.messaging).length === 0
+      ) {
+        return;
+      }
+      const channelLogger = {
+        debug: (msg: string, ...args: unknown[]) =>
+          console.log(chalk.dim(`[channel] ${msg}`), ...args),
+        info: (msg: string, ...args: unknown[]) =>
+          console.log(chalk.dim(`[channel] ${msg}`), ...args),
+        warn: (msg: string, ...args: unknown[]) =>
+          console.warn(chalk.yellow(`[channel] ${msg}`), ...args),
+        error: (msg: string, ...args: unknown[]) =>
+          console.error(chalk.red(`[channel] ${msg}`), ...args),
+      };
+      try {
+        const result = await setupChannels({
+          entries: config.messaging,
+          credentials,
+          conversations,
+          logger: channelLogger,
+          confirmationHub,
+          cancelKeywords: config.intent?.cancelKeywords,
+          sessionBroadcast: () => ctx.sessionBroadcastRef.current,
+          sessionActivityBroadcast: () =>
+            ctx.sessionActivityBroadcastRef.current,
+        });
+        ctx.channels = result.registry;
+        ctx.inboundRouter = result.router;
+      } catch (err) {
+        console.warn(
+          chalk.yellow(
+            `[channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
     },
   };
 }
@@ -212,9 +325,13 @@ const deliverySurface: AccessSurface = {
   async setup(ctx) {
     const { channels, config, zhixingHome } = ctx;
     if (!channels || !config.messaging) return;
+    if (!ctx.authorityRuntime) {
+      throw new Error("Delivery requires the durable authority runtime");
+    }
     const deliveryStack = await setupDelivery({
       channels,
       zhixingHome,
+      authorityRuntime: ctx.authorityRuntime,
       logger: {
         info: (msg) => console.log(chalk.dim(msg)),
         warn: (msg) => console.warn(chalk.yellow(msg)),
@@ -222,6 +339,9 @@ const deliverySurface: AccessSurface = {
       },
     });
     ctx.deliveryStack = deliveryStack;
+    ctx.conversationProtocol?.bindDeliveryDrain(() =>
+      deliveryStack.authorityDelivery.flush(),
+    );
     if (ctx.inboundRouter) {
       ctx.inboundRouter.setOutboxRegistry(deliveryStack.outboxRegistry);
     }
@@ -275,6 +395,17 @@ const confirmationBridgeSurface: AccessSurface = {
   },
 };
 
+/** Work resumption starts only after RPC, channel, delivery and confirmation consumers exist. */
+const conversationRecoverySurface: AccessSurface = {
+  name: "conversation-recovery",
+  phase: "post-server",
+  async setup(ctx) {
+    const protocol = ctx.conversationProtocol;
+    if (!protocol) return;
+    protocol.startRecoveryLoop();
+  },
+};
+
 /**
  * 全部接入面单元，按 pre-server 依赖拓扑序排列（post-server 项排最后）。
  * 新增接入面 = 在此加一个单元 + 在 access-surface.ts 的 PROFILES 对应 surfaces 集合加名字。
@@ -284,10 +415,12 @@ export function createAccessSurfaces(
 ): readonly AccessSurface[] {
   return [
     mcpSurface,
+    authorityRuntimeSurface,
     conversationSurface,
     createChannelSurface(channelCredentials),
     deliverySurface,
     textRendererSurface,
     confirmationBridgeSurface,
+    conversationRecoverySurface,
   ];
 }

@@ -20,6 +20,7 @@
     "@zhixing/core": "workspace:*",
     "@zhixing/executor": "workspace:*",
     "@zhixing/mcp": "workspace:*",
+    "@zhixing/mesh": "workspace:*",
     "@zhixing/network": "workspace:*",
     "@zhixing/orchestrator": "workspace:*",
     "@zhixing/owner-kernel": "workspace:*",

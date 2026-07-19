@@ -51,6 +51,9 @@ importers:
       '@zhixing/mcp':
         specifier: workspace:*
         version: link:../mcp
+      '@zhixing/mesh':
+        specifier: workspace:*
+        version: link:../mesh
       '@zhixing/network':
         specifier: workspace:*
         version: link:../network

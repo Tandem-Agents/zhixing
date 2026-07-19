@@ -8,7 +8,6 @@ import type {
   OrchestrationSystemCapsV1,
   TokenUsage,
   TurnContext,
-  TurnSource,
   UserTurnInputLike,
 } from "@zhixing/core";
 import type {
@@ -72,7 +71,8 @@ export interface PerspectivesTurnInput {
   readonly question: string;
   readonly abortSignal?: AbortSignal;
   readonly turnContext?: TurnContext;
-  readonly source?: TurnSource;
+  readonly surfacePrincipal?: string;
+  readonly source?: "interactive" | "channel";
 }
 
 export interface PerspectivesPendingTaskInput {
@@ -81,7 +81,8 @@ export interface PerspectivesPendingTaskInput {
   readonly originalInput: UserTurnInputLike;
   readonly question: string;
   readonly turnContext?: TurnContext;
-  readonly source?: TurnSource;
+  readonly surfacePrincipal?: string;
+  readonly source?: "interactive" | "channel";
   readonly onResult?: (result: PerspectivesTurnResult) => void | Promise<void>;
 }
 

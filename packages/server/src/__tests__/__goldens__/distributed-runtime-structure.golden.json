@@ -65,6 +65,7 @@
         "@zhixing/core",
         "@zhixing/executor",
         "@zhixing/mcp",
+        "@zhixing/mesh",
         "@zhixing/network",
         "@zhixing/orchestrator",
         "@zhixing/owner-kernel",
@@ -231,7 +232,8 @@
     {
       "definition": [
         "requestId?: string;",
-        "decision?: ConfirmationDecision;"
+        "decision?: ConfirmationDecision;",
+        "conversationId?: string;"
       ],
       "kind": "interface",
       "name": "ConfirmationResolveParams"
@@ -543,7 +545,9 @@
     {
       "definition": [
         "conversationId?: string;",
-        "sessionId?: string;"
+        "sessionId?: string;",
+        "requestId?: unknown;",
+        "runId?: unknown;"
       ],
       "kind": "interface",
       "name": "SessionAbortParams"
@@ -553,6 +557,7 @@
         "conversationId: string;",
         "sessionId: string;",
         "turnId: string;",
+        "runId?: string;",
         "advancementContinuation?: { interruptedProxy: boolean; };"
       ],
       "kind": "interface",
@@ -591,7 +596,7 @@
       "name": "SessionAdvancementCancelParams"
     },
     {
-      "definition": "| { conversationId: string; sessionId: string; status: \"cancelled\"; advancementSessionId: string; } | { conversationId: string; sessionId: string; turnId: string; status: \"direct-execution\"; advancementSessionId: string; runStatus: \"immediate\" | \"queued\"; }",
+      "definition": "| { conversationId: string; sessionId: string; status: \"cancelled\"; advancementSessionId: string; } | { conversationId: string; sessionId: string; turnId: string; runId?: string; status: \"direct-execution\"; advancementSessionId: string; runStatus: \"immediate\" | \"queued\"; }",
       "kind": "type",
       "name": "SessionAdvancementCancelResult"
     },
@@ -674,7 +679,8 @@
     },
     {
       "definition": [
-        "conversationId?: string;"
+        "conversationId?: string;",
+        "requestId?: unknown;"
       ],
       "kind": "interface",
       "name": "SessionClearParams"
@@ -755,7 +761,8 @@
     {
       "definition": [
         "conversationId?: string;",
-        "sessionId?: string;"
+        "sessionId?: string;",
+        "requestId?: unknown;"
       ],
       "kind": "interface",
       "name": "SessionDeleteParams"
@@ -849,6 +856,18 @@
       ],
       "kind": "interface",
       "name": "SessionRenameResult"
+    },
+    {
+      "definition": [
+        "requestId: unknown;",
+        "conversationId: unknown;",
+        "runId: unknown;",
+        "ownerEpoch: unknown;",
+        "openFactDigest: unknown;",
+        "decision: unknown;"
+      ],
+      "kind": "interface",
+      "name": "SessionResolveParams"
     },
     {
       "definition": [
@@ -1039,7 +1058,7 @@
     },
     {
       "kind": "import",
-      "references": 7,
+      "references": 8,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1081,13 +1100,13 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
     {
       "kind": "type-import",
-      "references": 11,
+      "references": 12,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1147,9 +1166,15 @@
     },
     {
       "kind": "import",
-      "references": 14,
+      "references": 16,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/executor"
     },
     {
       "kind": "import",
@@ -1165,7 +1190,7 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 4,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1201,7 +1226,7 @@
     },
     {
       "kind": "type-import",
-      "references": 6,
+      "references": 10,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1270,6 +1295,18 @@
       "references": 1,
       "sourceZone": "core/conversation",
       "target": "core/transcript"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "core/protocol",
+      "target": "core/authority"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "core/protocol",
+      "target": "core/authority"
     },
     {
       "kind": "import",
@@ -1357,13 +1394,13 @@
     },
     {
       "kind": "import",
-      "references": 22,
+      "references": 23,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 9,
+      "references": 12,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
@@ -1501,7 +1538,7 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
     },

@@ -69,6 +69,7 @@ export type {
   ToolExecutionContext,
   ToolPresentationArtifact,
   ToolResult,
+  ToolSideEffectObserver,
   ToolSpec,
   TurnContext,
   TurnOrigin,
@@ -122,6 +123,7 @@ export type {
   ProjectedPassthroughEvent,
   SessionEventProjection,
 } from "./agent-events.js";
+export { projectSessionEvent } from "./agent-events.js";
 
 // ─── 错误类型 ───
 export type { AgentErrorType, UserFacingError } from "./errors.js";

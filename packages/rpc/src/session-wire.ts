@@ -72,6 +72,8 @@ export function toWireAgentResult(result: AgentResult): WireAgentResult {
 export const SESSION_NOTIFICATIONS = {
   delta: "session.delta",
   complete: "session.complete",
+  final: "session.final",
+  status: "session.status",
   event: "session.event",
   changed: "session.changed",
   activity: "session.activity",
@@ -147,6 +149,8 @@ export interface SessionAcceptedSendResult {
   sessionId: string;
   /** 本次 send 对应的 turn 身份;delta/complete/postTurnControlIntent 均携同值 */
   turnId: string;
+  /** 耐久 owner 分配的权威 run 身份；取消与终态补读必须使用该值。 */
+  runId?: string;
   /**
    * active 推进会话中的输入被分类为补充继续时附带——发起端据此告知
    * 「已作为当前任务的补充继续推进」；interruptedProxy 表示为处理本次
@@ -228,6 +232,7 @@ export type SessionAdvancementCancelResult =
       conversationId: string;
       sessionId: string;
       turnId: string;
+      runId?: string;
       status: "direct-execution";
       advancementSessionId: string;
       runStatus: "immediate" | "queued";

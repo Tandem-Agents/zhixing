@@ -543,6 +543,14 @@ export interface ToolDefinition {
   ): Promise<ToolResult>;
 }
 
+export interface ToolSideEffectObserver {
+  start(tool: ToolDefinition, input: Record<string, unknown>): Promise<unknown>;
+  finish(
+    token: unknown,
+    result: { readonly status: "ok" | "failed" | "aborted" },
+  ): Promise<void>;
+}
+
 /**
  * 发送给 LLM 的工具声明（不包含实现细节）。
  * Provider 层使用此类型构造 API 请求。

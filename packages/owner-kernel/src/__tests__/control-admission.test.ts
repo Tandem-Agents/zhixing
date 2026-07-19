@@ -3,7 +3,11 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
-import type { ControlRecord, ControlResult } from "@zhixing/core/contracts";
+import type {
+  ConversationInvocation,
+  ControlRecord,
+  ControlResult,
+} from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -109,6 +113,7 @@ function inputEnvelope(
   requestId: string,
   source: TrustedControlSource,
   text = "hello",
+  invocation: ConversationInvocation = { kind: "agent", source: "interactive" },
 ) {
   if (!source.ingress) throw new Error("input source requires ingress");
   return createInitialControlEnvelope({
@@ -123,6 +128,7 @@ function inputEnvelope(
         source: source.ingress.kind,
       },
       input: { parts: [{ type: "text", text }] },
+      invocation,
       ownerEpoch: 1,
     },
   });
@@ -465,6 +471,32 @@ describe("ControlAdmissionJournal", () => {
       result: { error: { code: "idempotency-conflict", retryable: false } },
     });
     expect(await log.readAll()).toHaveLength(4);
+
+    const invocationSource = inputSource("same-invocation-ingress");
+    await journal.apply({
+      envelope: inputEnvelope(
+        "request-invocation-a",
+        invocationSource,
+        "same input",
+      ),
+      source: invocationSource,
+      prepare: () => ({ result: inputResult("run-3"), authorityRevision: 5 }),
+    });
+    const invocationConflict = await journal.apply({
+      envelope: inputEnvelope(
+        "request-invocation-b",
+        invocationSource,
+        "same input",
+        { kind: "perspectives", source: "interactive", question: "review" },
+      ),
+      source: invocationSource,
+      prepare: () => ({ result: inputResult("run-4"), authorityRevision: 6 }),
+    });
+    expect(invocationConflict).toMatchObject({
+      kind: "rejected",
+      result: { error: { code: "idempotency-conflict", retryable: false } },
+    });
+    expect(await log.readAll()).toHaveLength(6);
   });
 
   it("durably replays the original rejected result", async () => {
@@ -686,6 +718,7 @@ describe("ControlAdmissionJournal", () => {
           conversationId: "conversation-1",
           ingress: { ingressId: "message-1", source: "channel" },
           input: { parts: [{ type: "text", text: "hello" }] },
+          invocation: { kind: "agent", source: "channel" },
           ownerEpoch: 1,
         },
       }),

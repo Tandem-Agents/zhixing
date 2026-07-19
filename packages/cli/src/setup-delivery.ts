@@ -3,8 +3,8 @@
  *
  * 职责：
  * - 创建 OutboxRegistry（顺序层，per-target FIFO）
- * - 保留既有 DeliveryPipeline 生产链
- * - 组装零生产流量的权威 delivery 影子组件
+ * - 保留 scheduler 既有 DeliveryPipeline 生产链
+ * - 组装 conversation 使用的权威 delivery 生产链
  * - 两条链路共享 per-target FIFO Outbox
  *
  * 不关心通道具体类型（飞书/Slack/...），只依赖 ChannelRegistry 接口。
@@ -28,6 +28,12 @@ import {
   type DeliveryStatusNotice,
   type OutboxEvent,
 } from "@zhixing/core";
+import type { SecretStorePort } from "@zhixing/core/contracts";
+import {
+  protocolDigest,
+  type ProtocolSignatureVerifier,
+  type ProtocolSigner,
+} from "@zhixing/core/protocol";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -38,9 +44,33 @@ import {
   applyDeliveryResolutionControl,
   createDeliveryControlEnvelope,
   type CreateDeliveryControlEnvelopeInput,
+  type TransitionConversationCredentialPolicy,
 } from "@zhixing/owner-kernel";
+import {
+  DeviceKey,
+  enrollDeviceIdentity,
+  verifyDeviceSignature,
+} from "@zhixing/mesh/device-identity";
+import {
+  loadDeviceKey,
+  persistDeviceKey,
+} from "@zhixing/mesh/device-key-store";
 
 import path from "node:path";
+
+export interface AuthorityRuntimeStack {
+  readonly anchorEpoch: number;
+  readonly deviceId: string;
+  readonly signer: ProtocolSigner;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly authority: DeliveryAuthority;
+  readonly authorityLog: FileAuthorityCommitLog;
+  readonly artifacts: FileArtifactStore;
+  readonly participant: OwnerDeliveryParticipant;
+  readonly controlAdmission: ControlAdmissionJournal;
+  readonly conversationAssignmentPolicy: TransitionConversationCredentialPolicy;
+}
+
 export interface DeliveryStack {
   delivery: DeliveryPipeline;
   authorityDelivery: AuthorityDeliveryPipeline;
@@ -65,6 +95,7 @@ export interface DeliveryStack {
 export interface SetupDeliveryOptions {
   channels: ChannelRegistry;
   zhixingHome: string;
+  authorityRuntime: AuthorityRuntimeStack;
   logger: {
     info: (msg: string) => void;
     warn: (msg: string) => void;
@@ -73,7 +104,89 @@ export interface SetupDeliveryOptions {
   };
   /** 可选：观测 Outbox 事件（测试/调试；生产留空由 logger 承接） */
   onOutboxEvent?: (event: OutboxEvent) => void;
-  anchorEpoch?: number;
+}
+
+export interface SetupAuthorityRuntimeOptions {
+  readonly zhixingHome: string;
+  readonly secretStore: SecretStorePort;
+  readonly anchorEpoch?: number;
+  readonly configurationSnapshot?: unknown;
+}
+
+export async function setupAuthorityRuntime(
+  options: SetupAuthorityRuntimeOptions,
+): Promise<AuthorityRuntimeStack> {
+  const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
+  const artifacts = new FileArtifactStore(path.join(authorityRoot, "artifacts"));
+  const authorityLog = new FileAuthorityCommitLog(
+    path.join(authorityRoot, "authority"),
+    artifacts,
+  );
+  const anchorEpoch = options.anchorEpoch ?? 1;
+  const authority = new DeliveryAuthority({
+    log: authorityLog,
+    anchorEpoch,
+  });
+  const participant = new OwnerDeliveryParticipant({ authority });
+  const controlAdmission = new ControlAdmissionJournal(authorityLog, artifacts);
+  const key = await loadOrCreateDeviceKey(options.secretStore);
+  const identity = enrollDeviceIdentity(key, {
+    displayName: "local-anchor",
+    platform: process.platform === "win32"
+      ? "windows"
+      : process.platform === "darwin"
+        ? "macos"
+        : "linux",
+    enrolledAt: new Date().toISOString(),
+  });
+  const verifier: ProtocolSignatureVerifier = {
+    verify(schemaId, version, payload, signature) {
+      verifyDeviceSignature(identity, schemaId, version, payload, signature);
+    },
+  };
+  const configurationDigest = protocolDigest(
+    "LocalTransitionConfiguration",
+    1,
+    options.configurationSnapshot ?? { profile: "default" },
+  );
+  const revision = transitionRevision(configurationDigest);
+  const conversationAssignmentPolicy: TransitionConversationCredentialPolicy = {
+    credentialTtlMs: 24 * 60 * 60 * 1_000,
+    manifestRequires: {
+      runtimeConfigRev: revision,
+      modelProfileRev: revision,
+      policyRev: revision,
+      skillsRev: revision,
+      rubricsRev: revision,
+      promptAssetsRev: revision,
+      permissionSnapshotVersion: revision,
+    },
+    permissionSnapshot: {
+      version: revision,
+      digest: protocolDigest("TrustRuleSnapshot", 1, {
+        deviceId: key.deviceId,
+        configurationDigest,
+      }),
+    },
+    budget: { maxCalls: 64, maxTokens: 256_000 },
+    localGovernorEpoch: 1,
+  };
+  return {
+    anchorEpoch,
+    deviceId: key.deviceId,
+    signer: key,
+    verifier,
+    authority,
+    authorityLog,
+    artifacts,
+    participant,
+    controlAdmission,
+    conversationAssignmentPolicy,
+  };
+}
+
+function transitionRevision(digest: string): number {
+  return Number.parseInt(digest.slice("sha256:".length, "sha256:".length + 12), 16) + 1;
 }
 
 export async function setupDelivery(options: SetupDeliveryOptions): Promise<DeliveryStack> {
@@ -115,18 +228,13 @@ export async function setupDelivery(options: SetupDeliveryOptions): Promise<Deli
     },
   });
 
-  const authorityRoot = path.join(zhixingHome, "distributed-runtime");
-  const artifacts = new FileArtifactStore(path.join(authorityRoot, "artifacts"));
-  const authorityLog = new FileAuthorityCommitLog(
-    path.join(authorityRoot, "authority"),
+  const {
     artifacts,
-  );
-  const authority = new DeliveryAuthority({
-    log: authorityLog,
-    anchorEpoch: options.anchorEpoch ?? 1,
-  });
-  const participant = new OwnerDeliveryParticipant({ authority });
-  const controlAdmission = new ControlAdmissionJournal(authorityLog, artifacts);
+    authorityLog,
+    authority,
+    participant,
+    controlAdmission,
+  } = options.authorityRuntime;
 
   const delivery = new DeliveryPipeline({
     sender,
@@ -157,7 +265,7 @@ export async function setupDelivery(options: SetupDeliveryOptions): Promise<Deli
   };
   eventBus.on("delivery:notice", ({ notice }) => publishNotice(notice));
 
-  // 影子 Pipeline 只消费权威事实，不提供生产入口。
+  // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
   const authorityDelivery = new AuthorityDeliveryPipeline({
     authority,
     artifacts,
@@ -206,4 +314,21 @@ export async function setupDelivery(options: SetupDeliveryOptions): Promise<Deli
       await outboxRegistry.dispose();
     },
   };
+}
+
+async function loadOrCreateDeviceKey(store: SecretStorePort): Promise<DeviceKey> {
+  const refs = await store.list("device-key/device/v1/");
+  if (refs.length > 1) {
+    throw new Error("SecretStore contains multiple local device identities");
+  }
+  const existing = refs[0];
+  if (existing) {
+    const deviceId = existing.bindingId.slice("device/v1/".length);
+    const key = await loadDeviceKey(store, deviceId);
+    if (!key) throw new Error("SecretStore device identity disappeared during startup");
+    return key;
+  }
+  const generated = await DeviceKey.generate();
+  await persistDeviceKey(store, generated);
+  return generated;
 }

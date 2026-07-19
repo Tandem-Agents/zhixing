@@ -457,6 +457,8 @@
           "busyConversations": "number",
           "channels": [],
           "connectionCount": "number",
+          "conversationStatus": [],
+          "conversationStatusNext": [],
           "deferredWork": [],
           "deliveryStatus": [],
           "host": "string",
@@ -650,6 +652,19 @@
     {
       "emptyRequest": {},
       "method": "session.rename",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.resolve",
       "outcome": {
         "code": -32602,
         "kind": "error",

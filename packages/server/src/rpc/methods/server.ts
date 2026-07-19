@@ -120,9 +120,15 @@ export function buildServerInfoMethod(): MethodEntry {
     async handler(params, ctx) {
       const conversations = ctx.server.conversations?.list() ?? [];
       const runtimeControl = buildRuntimeControlSnapshot(ctx);
-      const deliveryStatusAfter = parseDeliveryStatusAfter(params);
+      const statusAfter = parseStatusAfter(params);
       const deliveryStatus =
-        (await ctx.server.runtimeControl?.deliveryStatus?.(deliveryStatusAfter)) ?? [];
+        (await ctx.server.runtimeControl?.deliveryStatus?.(
+          statusAfter.delivery,
+        )) ?? [];
+      const conversationStatusPage =
+        (await ctx.server.runtimeControl?.conversationStatus?.(
+          statusAfter.conversations,
+        )) ?? { notices: [], next: [] };
       return {
         version: ctx.server.version,
         protocol: PROTOCOL_VERSION,
@@ -150,6 +156,8 @@ export function buildServerInfoMethod(): MethodEntry {
         deferredWork: runtimeControl.deferredWork,
         keepAliveWork: runtimeControl.keepAliveWork,
         deliveryStatus,
+        conversationStatus: conversationStatusPage.notices,
+        conversationStatusNext: conversationStatusPage.next,
       };
     },
   };
@@ -163,9 +171,7 @@ export function buildDeliveryResolveMethod(): MethodEntry {
       const params = parseDeliveryResolveParams(rawParams);
       const resolve = ctx.server.runtimeControl?.resolveDelivery;
       if (!resolve) throw RpcErrors.internal("delivery resolution is not available");
-      const clientId = ctx.connection.clientInfo?.id ?? "client";
-      const surfacePrincipal =
-        typeof clientId === "string" ? `rpc:${clientId}` : undefined;
+      const surfacePrincipal = "rpc:owner";
       const connectionId = String(ctx.connection.id);
       if (
         !isProtocolIdentifier(surfacePrincipal) ||
@@ -173,13 +179,16 @@ export function buildDeliveryResolveMethod(): MethodEntry {
       ) {
         throw RpcErrors.invalidParams("authenticated delivery identity is invalid");
       }
+      const principal = ctx.server.conversations?.durableControlPrincipal({
+        surfacePrincipal,
+        connectionId,
+      });
+      if (!principal) {
+        throw RpcErrors.internal("durable control identity is not available");
+      }
       return resolve({
         ...params,
-        principal: {
-          surfacePrincipal,
-          deviceId: surfacePrincipal,
-          connectionId,
-        },
+        principal,
       });
     },
   };
@@ -225,39 +234,92 @@ function parseDeliveryResolveParams(raw: unknown): {
   return value as ReturnType<typeof parseDeliveryResolveParams>;
 }
 
-function parseDeliveryStatusAfter(
+function parseStatusAfter(
   params: unknown,
-): Readonly<Record<string, number>> {
-  if (params === undefined || params === null) return {};
+): {
+  readonly delivery: Readonly<Record<string, number>>;
+  readonly conversations: readonly {
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly afterStatusRevision: number;
+  }[];
+} {
+  if (params === undefined || params === null) {
+    return { delivery: {}, conversations: [] };
+  }
   if (typeof params !== "object" || Array.isArray(params)) {
     throw RpcErrors.invalidParams("server.info params must be an object");
   }
   const value = params as Record<string, unknown>;
-  if (Object.keys(value).some((key) => key !== "deliveryStatusAfter")) {
+  if (
+    Object.keys(value).some(
+      (key) => key !== "deliveryStatusAfter" && key !== "conversationStatusAfter",
+    )
+  ) {
     throw RpcErrors.invalidParams("server.info params contain unknown fields");
   }
-  if (value.deliveryStatusAfter === undefined) return {};
-  if (
-    value.deliveryStatusAfter === null ||
-    typeof value.deliveryStatusAfter !== "object" ||
-    Array.isArray(value.deliveryStatusAfter)
-  ) {
-    throw RpcErrors.invalidParams("deliveryStatusAfter must be an object");
-  }
-  const result: Record<string, number> = {};
-  for (const [itemId, revision] of Object.entries(
-    value.deliveryStatusAfter as Record<string, unknown>,
-  )) {
+  const delivery: Record<string, number> = {};
+  if (value.deliveryStatusAfter !== undefined) {
     if (
-      !isDeliveryItemId(itemId) ||
-      !Number.isSafeInteger(revision) ||
-      (revision as number) < 0
+      value.deliveryStatusAfter === null ||
+      typeof value.deliveryStatusAfter !== "object" ||
+      Array.isArray(value.deliveryStatusAfter)
     ) {
-      throw RpcErrors.invalidParams("deliveryStatusAfter is invalid");
+      throw RpcErrors.invalidParams("deliveryStatusAfter must be an object");
     }
-    result[itemId] = revision as number;
+    for (const [itemId, revision] of Object.entries(
+      value.deliveryStatusAfter as Record<string, unknown>,
+    )) {
+      if (
+        !isDeliveryItemId(itemId) ||
+        !Number.isSafeInteger(revision) ||
+        (revision as number) < 0
+      ) {
+        throw RpcErrors.invalidParams("deliveryStatusAfter is invalid");
+      }
+      delivery[itemId] = revision as number;
+    }
   }
-  return result;
+  const conversations: Array<{
+    conversationId: string;
+    runId: string;
+    afterStatusRevision: number;
+  }> = [];
+  if (value.conversationStatusAfter !== undefined) {
+    if (!Array.isArray(value.conversationStatusAfter)) {
+      throw RpcErrors.invalidParams("conversationStatusAfter must be an array");
+    }
+    if (value.conversationStatusAfter.length > 64) {
+      throw RpcErrors.invalidParams("conversationStatusAfter exceeds 64 cursors");
+    }
+    const seen = new Set<string>();
+    for (const entry of value.conversationStatusAfter) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw RpcErrors.invalidParams("conversationStatusAfter is invalid");
+      }
+      const cursor = entry as Record<string, unknown>;
+      if (
+        Object.keys(cursor).length !== 3 ||
+        !isProtocolIdentifier(cursor.conversationId) ||
+        !isProtocolIdentifier(cursor.runId) ||
+        !Number.isSafeInteger(cursor.afterStatusRevision) ||
+        (cursor.afterStatusRevision as number) < 0
+      ) {
+        throw RpcErrors.invalidParams("conversationStatusAfter is invalid");
+      }
+      const key = JSON.stringify([cursor.conversationId, cursor.runId]);
+      if (seen.has(key)) {
+        throw RpcErrors.invalidParams("conversationStatusAfter contains duplicate cursors");
+      }
+      seen.add(key);
+      conversations.push({
+        conversationId: cursor.conversationId as string,
+        runId: cursor.runId as string,
+        afterStatusRevision: cursor.afterStatusRevision as number,
+      });
+    }
+  }
+  return { delivery, conversations };
 }
 
 function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {

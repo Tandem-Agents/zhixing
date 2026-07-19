@@ -6,13 +6,16 @@ import type {
   EvidenceKind,
   EvidenceLocator,
   IsoTime,
+  InteractionDisplay,
   JobRunState,
   Message,
   ProtocolVersion,
+  RunRecordAdvancementMetadata,
   SessionEventProjection,
   Signature,
   TranscriptRunRecord,
   TurnOrigin,
+  TurnSource,
   UserTurnInput,
   WindowCompactInstruction,
   WireContractV1,
@@ -31,6 +34,10 @@ import type {
   PermissionSnapshotLease,
   ResourceLease,
 } from "./authorization.js";
+
+export const MAX_CONVERSATION_QUESTION_BYTES = 8 * 1024;
+export const MAX_INTERACTION_RESPONSE_TEXT_BYTES = 8 * 1024;
+export const MAX_INLINE_INTERACTION_DISPLAY_BYTES = 8 * 1024;
 import type {
   ContentAssetRef,
   DeliveryFailure,
@@ -72,15 +79,38 @@ export type IngressContext =
       receivedAt: IsoTime;
     };
 
+/** Durable execution semantics for an admitted conversation input. */
+export type ConversationInvocation =
+  | {
+      kind: "agent";
+      source: TurnSource;
+      advancement?: RunRecordAdvancementMetadata;
+    }
+  | {
+      kind: "perspectives";
+      source: "interactive" | "channel";
+      question: string;
+    };
+
 export type ControlRequest =
   | {
       t: "input";
       conversationId: string;
       ingress: { ingressId: string; source: IngressContext["kind"] };
       input: UserTurnInput;
+      invocation: ConversationInvocation;
       ownerEpoch: number;
     }
   | { t: "cancel"; conversationId: string; runId: string; ownerEpoch: number }
+  | {
+      // 批量取消以外层 surface 请求为唯一线性化点:候选集在权威 apply 时刻冻结,
+      // 重放返回原批次,零重新枚举、零追加。response 为渠道回执绑定,
+      // 空批次时由同一权威决定产出唯一 response delivery item。
+      t: "cancel-batch";
+      conversationId: string;
+      ownerEpoch: number;
+      response?: { replyTarget: import("./foundation.js").DeliveryTargetDto };
+    }
   | { t: "session-create"; requestedName?: string; sceneId?: string }
   | {
       t: "session-write";
@@ -463,7 +493,7 @@ export type StreamFramePayload =
             t: "requested";
             requestId: string;
             toolName: string;
-            display: { title: string; lines: string[] };
+            display: InteractionDisplay;
             issuedAt: IsoTime;
             ttlMs: number;
             expiresAt: IsoTime;

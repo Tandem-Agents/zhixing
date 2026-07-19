@@ -10,7 +10,7 @@
 /** 触发源标识 —— 落盘为 run record 的 source 字段 */
 export type TurnSource = "interactive" | "scheduler" | "channel" | "advancement";
 
-/** 推进侧代理 run 的来源元数据；属于 run record，不进入协议消息。 */
+/** 推进侧代理 run 的来源元数据；随耐久调用快照入队，最终落入 run record。 */
 export interface RunRecordAdvancementMetadata {
   readonly sessionId: string;
   readonly proxyMessageId?: string;

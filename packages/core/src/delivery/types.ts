@@ -35,7 +35,7 @@ export type DeliverySource =
        */
       createdInTurn?: string;
     }
-  | { kind: "agent"; conversationId: string }
+  | { kind: "agent"; conversationId: string; turnSlotId?: string }
   | { kind: "system"; reason: string };
 
 // ─── 投递项（队列中的单元） ───

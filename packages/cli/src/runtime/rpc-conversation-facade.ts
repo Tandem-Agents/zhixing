@@ -43,9 +43,14 @@ import type {
   SessionSendEngage,
   SessionUsageResult,
 } from "@zhixing/rpc";
-import type { UserTurnInput } from "@zhixing/core";
+import { generateTurnId, type UserTurnInput } from "@zhixing/core";
+import type {
+  ConversationStatusNotice,
+  FinalFrame,
+} from "@zhixing/core/contracts";
 import {
   RpcClientError,
+  RpcClientClosedError,
   RPC_ERROR_CODES,
 } from "@zhixing/server";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
@@ -58,20 +63,41 @@ export interface SessionHistoryOptions {
   before?: RunsPageCursor;
 }
 
+export interface ConversationStatusCursor {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly afterStatusRevision: number;
+}
+
 export class RpcConversationFacade {
   constructor(private readonly link: CoreHostLink) {}
 
   // ─── 方法域 ───
 
+  /**
+   * 变更型调用的共享重连原语:断线后以完全相同的参数(含调用前生成的稳定
+   * 操作身份)重放同一请求,由服务端 exact replay 消除响应丢失歧义。
+   * 所有第一方变更型 surface 调用必须经此发出,不得各自实现重试。
+   */
+  async #requestWithReconnect<T>(method: string, params: unknown): Promise<T> {
+    while (true) {
+      const client = await this.link.getClient();
+      try {
+        return await client.request<T>(method, params);
+      } catch (error) {
+        if (!(error instanceof RpcClientClosedError)) throw error;
+      }
+    }
+  }
+
   /** 发送一个 turn(经宿主唯一串行点入队);turnId 由发起端预分配以闭合通知竞态。 */
   async send(
     input: string | UserTurnInput,
-    conversationId?: string,
-    turnId?: string,
+    conversationId: string | undefined,
+    turnId: string,
     options: { readonly engage?: SessionSendEngage } = {},
   ): Promise<SessionSendResult> {
-    const client = await this.link.getClient();
-    return client.request<SessionSendResult>("session.send", {
+    return this.#requestWithReconnect<SessionSendResult>("session.send", {
       ...(typeof input === "string" ? { text: input } : { input }),
       conversationId,
       turnId,
@@ -109,16 +135,42 @@ export class RpcConversationFacade {
     });
   }
 
-  /** 删除对话(活跃运行时释放 + 落盘数据删除)。 */
+  /** 删除对话(活跃运行时释放 + 落盘数据删除);断线以同一 requestId 重放。 */
   async delete(conversationId: string): Promise<void> {
-    const client = await this.link.getClient();
-    await client.request("session.delete", { conversationId });
+    await this.#requestWithReconnect("session.delete", {
+      conversationId,
+      requestId: `delete:${generateTurnId()}`,
+    });
   }
 
   /** 中止当前 in-flight turn / 撤回排队项。 */
-  async abort(conversationId: string): Promise<void> {
+  async abort(
+    conversationId: string,
+    requestId: string,
+    runId?: string,
+  ): Promise<void> {
+    await this.#requestWithReconnect("session.abort", {
+      conversationId,
+      requestId,
+      ...(runId ? { runId } : {}),
+    });
+  }
+
+  async statusHistory(
+    cursors: readonly ConversationStatusCursor[],
+  ): Promise<{
+    readonly notices: readonly ConversationStatusNotice[];
+    readonly next: readonly ConversationStatusCursor[];
+  }> {
     const client = await this.link.getClient();
-    await client.request("session.abort", { conversationId });
+    const result = await client.request<{
+      readonly conversationStatus: readonly ConversationStatusNotice[];
+      readonly conversationStatusNext: readonly ConversationStatusCursor[];
+    }>("server.info", { conversationStatusAfter: cursors });
+    return {
+      notices: result.conversationStatus,
+      next: result.conversationStatusNext,
+    };
   }
 
   /**
@@ -182,10 +234,12 @@ export class RpcConversationFacade {
     return client.request<SessionNewResult>("session.new");
   }
 
-  /** 清空对话(宿主先盘后窗;busy 时 BUSY 拒绝)。 */
+  /** 清空对话(宿主先盘后窗;busy 时 BUSY 拒绝);断线以同一 requestId 重放。 */
   async clear(conversationId: string): Promise<void> {
-    const client = await this.link.getClient();
-    await client.request("session.clear", { conversationId });
+    await this.#requestWithReconnect("session.clear", {
+      conversationId,
+      requestId: `clear:${generateTurnId()}`,
+    });
   }
 
   /** 手动压缩注意力窗口(宿主执行体)。 */
@@ -298,6 +352,18 @@ export class RpcConversationFacade {
   onComplete(handler: (payload: SessionCompletePayload) => void): () => void {
     return this.link.onNotification(SESSION_NOTIFICATIONS.complete, (p) =>
       handler(p as SessionCompletePayload),
+    );
+  }
+
+  onFinal(handler: (payload: FinalFrame) => void): () => void {
+    return this.link.onNotification(SESSION_NOTIFICATIONS.final, (p) =>
+      handler(p as FinalFrame),
+    );
+  }
+
+  onStatus(handler: (payload: ConversationStatusNotice) => void): () => void {
+    return this.link.onNotification(SESSION_NOTIFICATIONS.status, (p) =>
+      handler(p as ConversationStatusNotice),
     );
   }
 

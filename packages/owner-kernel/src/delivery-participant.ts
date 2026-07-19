@@ -10,6 +10,7 @@ import {
   type AuthorityError,
   type CommitEnvelope,
   type ConversationRunState,
+  type DeliveryTargetDto,
   type IngressContext,
   type JobOccurrence,
   type JobRunState,
@@ -70,7 +71,21 @@ export interface ConversationStatusDeliveryInput {
   readonly runId: string;
   readonly state: ConversationRunState;
   readonly statusRevision: number;
+  readonly reason?: string;
   readonly ingress: IngressContext;
+}
+
+/**
+ * 控制回执投递:一个控制决定恰产生一个回执 item,以 canonical requestId
+ * 幂等。当前唯一语义是渠道 cancel-batch 的空批次反馈——非空批次的用户
+ * 反馈由逐 run 权威 cancelled 投递单源承担,不产生批级回执。
+ */
+export interface ConversationControlResponseInput {
+  readonly at: string;
+  readonly conversationId: string;
+  readonly requestId: string;
+  readonly replyTarget: DeliveryTargetDto;
+  readonly response: "empty-cancel-batch";
 }
 
 export interface JobStatusDeliveryInput {
@@ -86,6 +101,9 @@ export interface ConversationDeliveryParticipant {
   prepareConversationCommit(input: ConversationDeliveryCommitInput): DeliveryParticipantResult;
   prepareConversationStatuses(
     inputs: readonly ConversationStatusDeliveryInput[],
+  ): DeliveryParticipantResult;
+  prepareConversationControlResponses(
+    inputs: readonly ConversationControlResponseInput[],
   ): DeliveryParticipantResult;
   assertConversationCommit(
     input: ConversationDeliveryCommitInput,
@@ -115,6 +133,12 @@ const CONVERSATION_CHANNEL_STATUS_TEXT = {
   uncertain: "本次运行结果不确定，需要你裁决处理方式。",
 } as const satisfies Readonly<Partial<Record<ConversationRunState, string>>>;
 
+const CONVERSATION_CONTROL_RESPONSE_TEXT = {
+  "empty-cancel-batch": "当前没有正在处理的任务。",
+} as const satisfies Readonly<
+  Record<ConversationControlResponseInput["response"], string>
+>;
+
 function jobChannelStatusText(
   state: JobRunState,
   taskName: string,
@@ -138,6 +162,15 @@ function statusText<State extends string>(
   state: State,
 ): string | undefined {
   return messages[state];
+}
+
+function conversationStatusText(input: ConversationStatusDeliveryInput): string | undefined {
+  if (input.state !== "failed") {
+    return statusText(CONVERSATION_CHANNEL_STATUS_TEXT, input.state);
+  }
+  return input.reason
+    ? `本次运行失败：${input.reason}。`
+    : CONVERSATION_CHANNEL_STATUS_TEXT.failed;
 }
 
 /**
@@ -200,6 +233,16 @@ export class OwnerDeliveryParticipant
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
       inputs.flatMap((input) => conversationStatusInputs(input, this.#maxAttempts)),
+      requireSingleCommitTime(inputs),
+    );
+  }
+
+  prepareConversationControlResponses(
+    inputs: readonly ConversationControlResponseInput[],
+  ): DeliveryParticipantResult {
+    if (inputs.length === 0) return emptyParticipantResult();
+    return this.#prepare(
+      inputs.map((input) => conversationControlResponseInput(input, this.#maxAttempts)),
       requireSingleCommitTime(inputs),
     );
   }
@@ -481,7 +524,7 @@ function conversationCommitInputs(
   const result: DeliveryEnqueueInput[] = [];
   if (input.ingress.kind === "channel") {
     const text = finalAssistantText(input.runRecord);
-    result.push({
+    if (text.trim().length > 0) result.push({
       keyBody: {
         kind: "conversation-final-delivery",
         conversationId: input.conversationId,
@@ -492,7 +535,11 @@ function conversationCommitInputs(
         endpoint: { kind: "channel", target: input.ingress.replyTarget },
         content: input.finalContent ?? { text, markdown: text },
         priority: "normal",
-        source: { kind: "agent", conversationId: input.conversationId },
+        source: {
+          kind: "agent",
+          conversationId: input.conversationId,
+          turnSlotId: input.ingress.ingressId,
+        },
         createdAt: input.at,
         maxAttempts,
       },
@@ -623,7 +670,7 @@ function conversationStatusInputs(
   maxAttempts: number,
 ): DeliveryEnqueueInput[] {
   if (input.ingress.kind !== "channel") return [];
-  const text = statusText(CONVERSATION_CHANNEL_STATUS_TEXT, input.state);
+  const text = conversationStatusText(input);
   if (!text) return [];
   return [
     {
@@ -637,12 +684,38 @@ function conversationStatusInputs(
         endpoint: { kind: "channel", target: input.ingress.replyTarget },
         content: { text, markdown: text },
         priority: "normal",
-        source: { kind: "agent", conversationId: input.conversationId },
+        source: {
+          kind: "agent",
+          conversationId: input.conversationId,
+          turnSlotId: input.ingress.ingressId,
+        },
         createdAt: input.at,
         maxAttempts,
       },
     },
   ];
+}
+
+function conversationControlResponseInput(
+  input: ConversationControlResponseInput,
+  maxAttempts: number,
+): DeliveryEnqueueInput {
+  const text = CONVERSATION_CONTROL_RESPONSE_TEXT[input.response];
+  return {
+    keyBody: {
+      kind: "conversation-control-response-delivery",
+      conversationId: input.conversationId,
+      requestId: input.requestId,
+    },
+    intent: {
+      endpoint: { kind: "channel", target: input.replyTarget },
+      content: { text, markdown: text },
+      priority: "normal",
+      source: { kind: "agent", conversationId: input.conversationId },
+      createdAt: input.at,
+      maxAttempts,
+    },
+  };
 }
 
 function noDurableRoute(): AuthorityError {

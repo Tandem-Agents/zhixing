@@ -18,6 +18,7 @@
  */
 
 import {
+  finalAssistantMessageOf,
   generateTurnId,
   parseConversationId,
   WORKSCENE_CONVERSATION_PREFIX,
@@ -25,6 +26,10 @@ import {
   type UserTurnInput,
   type PostTurnControlOutcome,
 } from "@zhixing/core";
+import type {
+  ConversationStatusNotice,
+  FinalFrame,
+} from "@zhixing/core/contracts";
 import type {
   SessionAdvancementCancelResult,
   SessionCompactResult,
@@ -67,6 +72,7 @@ export interface TurnOutcome {
 export interface AcceptedTurn {
   readonly conversationId: string;
   readonly turnId: string;
+  readonly runId?: string;
   readonly outcome: Promise<TurnOutcome>;
   /** 输入被分类为 active 推进的补充继续时附带——接入面据此告知用户。 */
   readonly advancementContinuation?: {
@@ -186,6 +192,12 @@ export interface ObservedTurnNotification {
   turnId?: string;
 }
 
+interface DurableRunWatch {
+  readonly conversationId: string;
+  readonly turnId: string;
+  statusRevision: number;
+}
+
 /** 由全域键派生模式视图;场景名后补(enter 响应 / list 查询) */
 function deriveMode(
   conversationId: string,
@@ -245,6 +257,20 @@ export class ConversationController {
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
   private readonly pendingPostTurnControls = new Map<string, PostTurnControlOutcome>();
   private readonly localTurnsByConversation = new Map<string, string>();
+  private readonly durableRuns = new Map<string, DurableRunWatch>();
+  private readonly durableRunByTurn = new Map<string, string>();
+  private readonly pendingFinals = new Map<string, FinalFrame>();
+  private readonly pendingStatuses = new Map<string, ConversationStatusNotice>();
+  private readonly finalLookups = new Map<string, Promise<void>>();
+  private readonly pendingAbortByTurn = new Map<
+    string,
+    {
+      readonly requestId: string;
+      readonly promise: Promise<void>;
+      readonly resolve: () => void;
+      readonly reject: (error: unknown) => void;
+    }
+  >();
   private readonly localTurnAcceptances = new Map<
     string,
     (turn: { readonly conversationId: string; readonly turnId: string }) => void
@@ -283,8 +309,7 @@ export class ConversationController {
         });
       }),
       opts.conversation.onComplete((p) => {
-        const waiter = this.waiters.get(p.turnId);
-        if (!waiter) {
+        if (!this.waiters.has(p.turnId)) {
           if (
             p.conversationId === this.active.conversationId &&
             !this.isLocalTurn({
@@ -299,17 +324,13 @@ export class ConversationController {
           }
           return;
         }
-        this.waiters.delete(p.turnId);
-        const intent = this.pendingPostTurnControls.get(p.turnId);
-        this.pendingPostTurnControls.delete(p.turnId);
-        if (this.localTurnsByConversation.get(p.conversationId) === p.turnId) {
-          this.localTurnsByConversation.delete(p.conversationId);
-        }
-        this.markLocalTurnAccepted({
-          conversationId: p.conversationId,
-          turnId: p.turnId,
-        });
-        waiter({ result: p.result, postTurnControl: intent });
+        this.finishTurn(p.conversationId, p.turnId, p.result);
+      }),
+      opts.conversation.onFinal((frame) => {
+        this.consumeFinal(frame);
+      }),
+      opts.conversation.onStatus((notice) => {
+        this.consumeStatus(notice);
       }),
       opts.conversation.onActivity((p) => {
         if (p.conversationId === this.active.conversationId) return;
@@ -341,6 +362,7 @@ export class ConversationController {
   async reattachActiveObserver(): Promise<void> {
     this.observedConversationId = null;
     await this.subscribeActive();
+    await this.reconcileDurableRuns();
   }
 
   /** 切当前对话指针(纯 UI 态变更,无宿主副作用)。 */
@@ -431,12 +453,14 @@ export class ConversationController {
           advancementSessionId: sendResult.advancementSessionId,
         };
       }
+      this.registerDurableRun(target, turnId, sendResult.runId);
       this.markLocalTurnAccepted({ conversationId: target, turnId });
       return {
         kind: "accepted",
         turn: {
           conversationId: target,
           turnId,
+          ...(sendResult.runId ? { runId: sendResult.runId } : {}),
           outcome,
           ...(sendResult.advancementContinuation
             ? { advancementContinuation: sendResult.advancementContinuation }
@@ -478,9 +502,15 @@ export class ConversationController {
         );
       }
       this.observedConversationId = pending.conversationId;
+      this.registerDurableRun(
+        pending.conversationId,
+        pending.turnId,
+        result.runId,
+      );
       this.markLocalTurnAccepted({
         conversationId: pending.conversationId,
         turnId: pending.turnId,
+        ...(result.runId ? { runId: result.runId } : {}),
       });
       return {
         conversationId: pending.conversationId,
@@ -521,6 +551,11 @@ export class ConversationController {
           );
         }
         this.observedConversationId = pending.conversationId;
+        this.registerDurableRun(
+          pending.conversationId,
+          pending.turnId,
+          result.runId,
+        );
         this.markLocalTurnAccepted({
           conversationId: pending.conversationId,
           turnId: pending.turnId,
@@ -531,6 +566,7 @@ export class ConversationController {
           turn: {
             conversationId: pending.conversationId,
             turnId: pending.turnId,
+            ...(result.runId ? { runId: result.runId } : {}),
             outcome,
           },
         };
@@ -609,9 +645,18 @@ export class ConversationController {
     this.waiters.delete(turnId);
     this.pendingPostTurnControls.delete(turnId);
     this.localTurnAcceptances.delete(turnId);
+    this.resolvePendingAbort(turnId);
     if (this.localTurnsByConversation.get(conversationId) === turnId) {
       this.localTurnsByConversation.delete(conversationId);
     }
+    this.releaseDurableRun(turnId);
+  }
+
+  private resolvePendingAbort(turnId: string): void {
+    const pendingAbort = this.pendingAbortByTurn.get(turnId);
+    if (!pendingAbort) return;
+    this.pendingAbortByTurn.delete(turnId);
+    pendingAbort.resolve();
   }
 
   private markLocalTurnAccepted(turn: {
@@ -624,9 +669,226 @@ export class ConversationController {
     accept(turn);
   }
 
+  private finishTurn(
+    conversationId: string,
+    turnId: string,
+    result: WireAgentResult,
+  ): void {
+    const waiter = this.waiters.get(turnId);
+    if (!waiter) return;
+    this.waiters.delete(turnId);
+    const intent = this.pendingPostTurnControls.get(turnId);
+    this.pendingPostTurnControls.delete(turnId);
+    if (this.localTurnsByConversation.get(conversationId) === turnId) {
+      this.localTurnsByConversation.delete(conversationId);
+    }
+    this.markLocalTurnAccepted({ conversationId, turnId });
+    this.resolvePendingAbort(turnId);
+    this.releaseDurableRun(turnId);
+    waiter({ result, postTurnControl: intent });
+  }
+
+  private registerDurableRun(
+    conversationId: string,
+    turnId: string,
+    runId: string | undefined,
+  ): void {
+    const pendingAbort = this.pendingAbortByTurn.get(turnId);
+    if (pendingAbort) {
+      this.pendingAbortByTurn.delete(turnId);
+      void this.opts.conversation
+        .abort(conversationId, pendingAbort.requestId, runId)
+        .then(pendingAbort.resolve, pendingAbort.reject);
+    }
+    if (!runId || !this.waiters.has(turnId)) return;
+    this.durableRuns.set(runId, {
+      conversationId,
+      turnId,
+      statusRevision: 0,
+    });
+    this.durableRunByTurn.set(turnId, runId);
+    const status = this.pendingStatuses.get(runId);
+    if (status) {
+      this.pendingStatuses.delete(runId);
+      this.consumeStatus(status);
+    }
+    const frame = this.pendingFinals.get(runId);
+    if (frame) {
+      this.pendingFinals.delete(runId);
+      this.consumeFinal(frame);
+    }
+    void this.reconcileDurableRun(runId).catch(() => {});
+  }
+
+  private releaseDurableRun(turnId: string): void {
+    const runId = this.durableRunByTurn.get(turnId);
+    if (!runId) return;
+    this.durableRunByTurn.delete(turnId);
+    this.durableRuns.delete(runId);
+    this.pendingFinals.delete(runId);
+    this.pendingStatuses.delete(runId);
+  }
+
+  private consumeFinal(frame: FinalFrame): void {
+    const watch = this.durableRuns.get(frame.runId);
+    if (!watch) {
+      if (this.localTurnsByConversation.has(frame.conversationId)) {
+        rememberBounded(this.pendingFinals, frame.runId, frame);
+      }
+      return;
+    }
+    if (watch.conversationId !== frame.conversationId) return;
+    this.startFinalLookup(frame.runId);
+  }
+
+  private consumeStatus(notice: ConversationStatusNotice): void {
+    const runId = notice.ref.runId;
+    const watch = this.durableRuns.get(runId);
+    if (!watch) {
+      if (this.localTurnsByConversation.has(notice.ref.conversationId)) {
+        const prior = this.pendingStatuses.get(runId);
+        if (!prior || prior.statusRevision < notice.statusRevision) {
+          rememberBounded(this.pendingStatuses, runId, notice);
+        }
+      }
+      return;
+    }
+    if (
+      watch.conversationId !== notice.ref.conversationId ||
+      notice.statusRevision <= watch.statusRevision
+    ) {
+      return;
+    }
+    watch.statusRevision = notice.statusRevision;
+    const result = terminalResultForStatus(notice);
+    if (result) {
+      this.finishTurn(watch.conversationId, watch.turnId, result);
+      return;
+    }
+    if (
+      notice.state === "uncertain-closed" &&
+      notice.resultingState === "committed"
+    ) {
+      this.startFinalLookup(runId);
+    }
+  }
+
+  private startFinalLookup(runId: string): void {
+    if (this.finalLookups.has(runId)) return;
+    const lookup = this.retryCommittedRunLookup(runId).finally(() => {
+      if (this.finalLookups.get(runId) === lookup) {
+        this.finalLookups.delete(runId);
+      }
+    });
+    this.finalLookups.set(runId, lookup);
+    void lookup.catch(() => {});
+  }
+
+  private async retryCommittedRunLookup(runId: string): Promise<void> {
+    const watch = this.durableRuns.get(runId);
+    if (!watch) return;
+    let delayMs = 25;
+    while (this.durableRuns.get(runId) === watch) {
+      try {
+        if (await this.resolveCommittedRun(runId)) return;
+      } catch {
+        // History is a rebuildable projection. Final/status wakeups and this
+        // bounded backoff converge after transient projection or link failure.
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 1_000);
+    }
+  }
+
+  private async resolveCommittedRun(runId: string): Promise<boolean> {
+    const watch = this.durableRuns.get(runId);
+    if (!watch) return false;
+    let before: { shardId: string; runIndex: number } | undefined;
+    while (this.durableRuns.get(runId) === watch) {
+      const page = await this.opts.conversation.history(watch.conversationId, {
+        limit: 200,
+        ...(before ? { before } : {}),
+      });
+      const match = page.runs.find(
+        (item) => "runId" in item.record && item.record.runId === runId,
+      );
+      if (match) {
+        this.finishTurn(watch.conversationId, watch.turnId, {
+          reason: "completed",
+          message: finalAssistantMessageOf(match.record.messages),
+          usage: match.record.usage ?? { inputTokens: 0, outputTokens: 0 },
+        });
+        return true;
+      }
+      const last = page.runs.at(-1);
+      if (!page.hasMore || !last) return false;
+      before = { shardId: last.shardId, runIndex: last.record.runIndex };
+    }
+    return false;
+  }
+
+  private async reconcileDurableRuns(): Promise<void> {
+    const watches = [...this.durableRuns.entries()];
+    for (let offset = 0; offset < watches.length; offset += 64) {
+      const batch = watches.slice(offset, offset + 64);
+      let cursors = batch.map(([runId, watch]) => ({
+        conversationId: watch.conversationId,
+        runId,
+        afterStatusRevision: watch.statusRevision,
+      }));
+      while (cursors.length > 0) {
+        const history = await this.opts.conversation.statusHistory(cursors);
+        for (const notice of history.notices) this.consumeStatus(notice);
+        cursors = history.next.map((cursor) => ({ ...cursor }));
+      }
+    }
+    await Promise.all(
+      [...this.durableRuns.keys()].map((runId) => this.resolveCommittedRun(runId)),
+    );
+  }
+
+  private async reconcileDurableRun(runId: string): Promise<void> {
+    const watch = this.durableRuns.get(runId);
+    if (!watch) return;
+    let cursors = [
+      {
+        conversationId: watch.conversationId,
+        runId,
+        afterStatusRevision: watch.statusRevision,
+      },
+    ];
+    while (cursors.length > 0 && this.durableRuns.get(runId) === watch) {
+      const history = await this.opts.conversation.statusHistory(cursors);
+      for (const notice of history.notices) this.consumeStatus(notice);
+      cursors = history.next.map((cursor) => ({ ...cursor }));
+    }
+    if (this.durableRuns.get(runId) === watch) this.startFinalLookup(runId);
+  }
+
   /** 打断当前对话的 in-flight turn——complete 随宿主 cleanup 自然到达。 */
   async abort(): Promise<void> {
-    await this.opts.conversation.abort(this.active.conversationId);
+    const turnId = this.localTurnsByConversation.get(this.active.conversationId);
+    if (!turnId) return;
+    const runId = this.durableRunByTurn.get(turnId);
+    const requestId = `cancel:${generateTurnId()}`;
+    if (runId) {
+      await this.opts.conversation.abort(
+        this.active.conversationId,
+        requestId,
+        runId,
+      );
+      return;
+    }
+    const existing = this.pendingAbortByTurn.get(turnId);
+    if (existing) return existing.promise;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    this.pendingAbortByTurn.set(turnId, { requestId, promise, resolve, reject });
+    return promise;
   }
 
   // ─── 会话命令执行体(分发在 cli、执行在宿主) ───
@@ -891,11 +1153,50 @@ export class ConversationController {
 
   dispose(): void {
     for (const unsub of this.unsubscribes) unsub();
+    for (const turnId of this.pendingAbortByTurn.keys()) {
+      this.resolvePendingAbort(turnId);
+    }
     this.waiters.clear();
     this.pendingPostTurnControls.clear();
     this.localTurnsByConversation.clear();
+    this.durableRuns.clear();
+    this.durableRunByTurn.clear();
+    this.pendingFinals.clear();
+    this.pendingStatuses.clear();
+    this.finalLookups.clear();
     this.observedConversationId = null;
   }
+}
+
+function terminalResultForStatus(
+  notice: ConversationStatusNotice,
+): WireAgentResult | undefined {
+  const resultingState =
+    notice.state === "uncertain-closed" ? notice.resultingState : notice.state;
+  if (resultingState === "cancelled") {
+    return {
+      reason: "aborted",
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
+  if (resultingState === "failed" || resultingState === "expired") {
+    return {
+      reason: "error",
+      error: {
+        name: resultingState === "expired" ? "RunExpired" : "RunFailed",
+        message: notice.reason ?? `Conversation run ${resultingState}`,
+      },
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
+  return undefined;
+}
+
+function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
+  map.set(key, value);
+  if (map.size <= 64) return;
+  const oldest = map.keys().next().value as K | undefined;
+  if (oldest !== undefined) map.delete(oldest);
 }
 
 function isRpcNotFound(error: unknown): error is RpcClientError {
