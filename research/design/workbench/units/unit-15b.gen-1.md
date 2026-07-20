@@ -9,12 +9,12 @@
 
 ## 当前状态
 
-- **当前状态**:集中修复八完成——U15B-56～58 的身份保真、精确重放与验收资产漂移已闭合，等待重新冻结终审
-- **收敛进度**:约 99%——直接测试、executor 全文件与全量构建已通过，只剩最终指纹和两轮独立终审
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:否；`0223921b…` 仅作为问题发现基线，修复后须重新计算指纹并重启两轮终审
+- **当前状态**:已完成并提交（`7cf5e58`）
+- **收敛进度**:100%
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是；最终交付物已完成独立终审、架构偏离审查与提交
 - **交付物文件集**:103 个业务文件；工作台文件不计入交付物（修复六新增 server 显式完整 executor stub 与批量取消面;修复七触及 core delivery 谓词、owner mirror 查询链、confirmation 回放全链）
-- **当前交付物指纹**:待重新冻结计算（按文件路径顺序对每文件取 SHA-256，以 `相对路径=hash` 每行 LF 拼接后再取 SHA-256）
+- **当前交付物指纹**:`7cf5e58`（提交对象为最终不可变交付物）
 - **架构来源**:`research/design/modules/distributed-runtime/distributed-runtime-charter.md` 与 `research/design/modules/distributed-runtime/specification.md` 的 S3→S4 过渡授权合同、第 15B 提交边界及 conversation/delivery 状态合同
 
 ## 固定边界

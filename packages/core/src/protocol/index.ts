@@ -1,4 +1,10 @@
-export { byteDigest, canonicalize, protocolBytes, protocolDigest } from "./canonical.js";
+export {
+  byteDigest,
+  canonicalize,
+  compareCanonicalStrings,
+  protocolBytes,
+  protocolDigest,
+} from "./canonical.js";
 export {
   StreamDigestChain,
   type StreamDataFramePayload,
@@ -17,6 +23,7 @@ export {
   isPrefixedUlid,
   isProtocolIdentifier,
   MAX_PROTOCOL_IDENTIFIER_LENGTH,
+  validateProtocolVersion,
 } from "./validation.js";
 export {
   MAX_AUTHORITY_ERROR_MESSAGE_BYTES,
@@ -31,6 +38,33 @@ export {
   validateNonEmptyUserTurnInput,
   validateUserTurnInput,
 } from "./values.js";
+export {
+  acceptExecutorCapabilitySnapshot,
+  createExecutionManifest,
+  createSignedCapabilityDescriptor,
+  createSignedExecutorVersionInventory,
+  EXECUTION_PROTOCOL_VERSION,
+  matchManifest,
+  validateCapabilityDescriptor,
+  validateCredentialBindingDescriptor,
+  validateExecutionManifest,
+  validateExecutorCapabilitySnapshot,
+  validateExecutorVersionInventory,
+  ExecutorCapabilityDirectory,
+  type ExecutorCapabilitySnapshot,
+  type ExecutorSnapshotUpdateResult,
+  type ManifestMatchResult,
+  type ExecutorCapabilityDirectoryEntry,
+  type ExecutorCapabilityDirectoryOptions,
+  type ExecutorCapabilityDirectoryState,
+  type ExecutorCapabilityDirectoryStore,
+  type ExecutorCredentialBindingHistory,
+} from "./manifest.js";
+export {
+  createSignedTrustRuleSnapshot,
+  normalizeTrustRulesForSnapshot,
+  validateTrustRuleSnapshot,
+} from "./permission-snapshot.js";
 export {
   conversationBundleRoots,
   createConversationSealedBundle,

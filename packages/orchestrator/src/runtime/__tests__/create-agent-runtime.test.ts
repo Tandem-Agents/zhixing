@@ -188,6 +188,33 @@ describe("createAgentRuntime · run() lineage 契约", () => {
   });
 });
 
+describe("createAgentRuntime · execution authority facts", () => {
+  it("projects the immutable tools, MCP servers, and resolved provider identities of this runtime", async () => {
+    const probe: ToolDefinition = {
+      name: "runtime_profile_probe",
+      description: "Expose one assembled tool in the execution profile.",
+      inputSchema: { type: "object" },
+      isReadOnly: true,
+      isParallelSafe: true,
+      needsPermission: false,
+      boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
+      call: async () => ({ content: "ok" }),
+    };
+    const runtime = await createAgentRuntime({
+      extraTools: [probe],
+      executionMcpServers: ["server-b", "server-a", "server-a"],
+    });
+
+    const profile = runtime.executionProfile();
+    expect(profile.tools).toContain(probe.name);
+    expect(profile.mcpServers).toEqual(["server-a", "server-b"]);
+    expect(profile.providerIds).toEqual(["mock"]);
+
+    (profile.tools as string[]).push("tampered");
+    expect(runtime.executionProfile().tools).not.toContain("tampered");
+  });
+});
+
 // ─── 契约 2: decorateRunBus 调用时序与次数 ───
 
 describe("createAgentRuntime · decorateRunBus 调用契约", () => {

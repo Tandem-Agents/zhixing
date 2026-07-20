@@ -277,10 +277,29 @@ export interface PermissionRule {
 /** 信任规则沿用现有权限规则语义。 */
 export type TrustRule = PermissionRule;
 
+/**
+ * 跨设备签名快照中的稳定规则投影。
+ *
+ * 本机展示路径与命中统计属于存储/运行态事实，不参与授权策略身份；可选字段缺省时
+ * 必须从 wire 对象中省略。
+ */
+export interface PortableTrustRule {
+  id: string;
+  pattern: {
+    tool: string;
+    argument: string;
+  };
+  decision: PermissionDecision;
+  scope: PermissionScope;
+  createdAt: number;
+  contextId?: PermissionContextId;
+  contributors?: TrustContribution[];
+}
+
 /** 锚点签发、供执行侧验证的规则快照。 */
 export interface TrustRuleSnapshot extends WireSchemaV1<"TrustRuleSnapshot"> {
   snapshotVersion: number;
-  rules: TrustRule[];
+  rules: PortableTrustRule[];
   generatedAt: IsoTime;
   digest: Digest;
   signature: Signature;

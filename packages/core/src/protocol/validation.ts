@@ -1,5 +1,8 @@
+import type { ProtocolVersion } from "../contracts/index.js";
+
 export const MAX_PROTOCOL_IDENTIFIER_LENGTH = 480;
 const CROCKFORD_ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/u;
+const MAX_PROTOCOL_VERSION = (1n << 64n) - 1n;
 
 export function isProtocolIdentifier(value: unknown): value is string {
   return (
@@ -16,6 +19,18 @@ export function assertProtocolIdentifier(
   if (!isProtocolIdentifier(value)) {
     throw new TypeError(`${label} must be a non-empty bounded string`);
   }
+}
+
+export function validateProtocolVersion(value: unknown): ProtocolVersion {
+  if (typeof value !== "string" || !/^[1-9][0-9]{0,19}$/u.test(value)) {
+    throw new TypeError(
+      "Protocol version must be a canonical positive decimal string",
+    );
+  }
+  if (BigInt(value) > MAX_PROTOCOL_VERSION) {
+    throw new TypeError("Protocol version exceeds uint64 range");
+  }
+  return value;
 }
 
 export function isPrefixedUlid(value: unknown, prefix: string): value is string {

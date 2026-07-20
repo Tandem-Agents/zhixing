@@ -33,7 +33,11 @@ export type {
   EvidenceLocator,
 } from "../advancement/types.js";
 export type { TaskListOp, TaskListState, SegmentRecord } from "../conversation/types.js";
-export type { TrustRule, TrustRuleSnapshot } from "../security/types.js";
+export type {
+  PortableTrustRule,
+  TrustRule,
+  TrustRuleSnapshot,
+} from "../security/types.js";
 export type {
   MemoryAppendPayload,
   MemoryCategoryDto,

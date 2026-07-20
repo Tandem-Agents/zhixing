@@ -23,6 +23,7 @@ import type {
   PermissionSnapshotLease,
   Signature,
   TranscriptRunRecord,
+  TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
   advanceAssignmentLedger,
@@ -32,6 +33,7 @@ import {
   canonicalize,
   confirmationDecisionDigest,
   createSignedConversationEnvelope,
+  createSignedTrustRuleSnapshot,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   protocolBytes,
@@ -56,6 +58,7 @@ import {
   type ProtocolSigner,
   type ConversationInteractionMirrorBatch,
   type ConversationInteractionMirrorEntry,
+  type ExecutorCapabilitySnapshot,
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
 import {
@@ -82,6 +85,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
+  type AssignmentLedgerOptions,
   type InteractionOutcome,
   type OwnerControlAuthorizer,
 } from "../assignment-ledger.js";
@@ -94,6 +98,53 @@ const RUN_ID = "run-1";
 const ASSIGNMENT_ID = "assignment-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+
+function matchingSnapshotFor(executorId: string): ExecutorCapabilitySnapshot | undefined {
+  if (executorId !== EXECUTOR_ID) return undefined;
+  const signature = { alg: "test", keyId: "test", sig: "test" };
+  return {
+    descriptor: {
+      v: 1,
+      executorId,
+      revision: 1,
+      protocolVersion: "1",
+      workspaces: [],
+      tools: [],
+      mcpServers: [],
+      credentialBindings: [],
+      evidenceCapabilities: [],
+      at: NOW,
+      signature,
+    },
+    inventory: {
+      v: 1,
+      executorId,
+      inventoryRevision: 1,
+      capabilityRevision: 1,
+      configVersions: { runtimeConfigRev: 1, modelProfileRev: 1, policyRev: 1 },
+      assetVersions: {
+        skillsRev: 1,
+        rubricsRev: 1,
+        promptAssetsRev: 1,
+      },
+      permissionSnapshotHighWater: 1,
+      credentialBindingRevisions: [],
+      at: NOW,
+      signature,
+    },
+  };
+}
+
+function matchingPermissionSnapshotFor(
+  identity: TestProtocolIdentity,
+  digest: string,
+): TrustRuleSnapshot | undefined {
+  const snapshot = createSignedTrustRuleSnapshot(
+    { snapshotVersion: 1, rules: [], generatedAt: NOW },
+    identity,
+  );
+  return snapshot.digest === digest ? snapshot : undefined;
+}
 
 function allowOnceDecisionDigest(requestId: string): string {
   return confirmationDecisionDigest(requestId, { kind: "allow-once" });
@@ -300,6 +351,9 @@ async function createUnassignedHarness(
     submission?: AssignmentSubmissionAuthorizer;
     ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
     ingress?: IngressContext;
+    snapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
+    permissionSnapshotFor?: (digest: string) => TrustRuleSnapshot | undefined;
+    runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
@@ -375,6 +429,10 @@ async function createUnassignedHarness(
     signer: identity,
     verifier: identity,
     ownerControl,
+    snapshotFor: options.snapshotFor ?? matchingSnapshotFor,
+    permissionSnapshotFor: options.permissionSnapshotFor ??
+      ((digest) => matchingPermissionSnapshotFor(identity, digest)),
+    runtimeBindingGuard: options.runtimeBindingGuard,
     clock: () => NOW,
     maxPendingInteractions: options.maxPendingInteractions,
     surfaceAbort: {
@@ -426,6 +484,9 @@ async function createHarness(
     submission?: AssignmentSubmissionAuthorizer;
     ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
     ingress?: IngressContext;
+    snapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
+    permissionSnapshotFor?: (digest: string) => TrustRuleSnapshot | undefined;
+    runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
   } = {},
 ) {
   const harness = await createUnassignedHarness(options);
@@ -774,6 +835,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
     });
     const [first, duplicate] = await Promise.all([
       harness.ledger.dispatch(
@@ -860,6 +924,181 @@ describe("conversation assignment protocol", () => {
     expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(1);
   });
 
+  it("durably rejects a manifest mismatch before received", async () => {
+    const harness = await createUnassignedHarness({
+      snapshotFor(executorId) {
+        const value = matchingSnapshotFor(executorId);
+        if (!value) return undefined;
+        value.inventory.configVersions.policyRev = 2;
+        return value;
+      },
+    });
+    const dispatch = await harness.journal.assign(harness.unsigned);
+
+    const result = await harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+
+    expect(result).toMatchObject({
+      accepted: false,
+      error: { code: "revision-conflict", retryable: true },
+    });
+    expect(
+      await harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).toMatchObject({ phase: "dispatch-rejected" });
+  });
+
+  it("durably rejects a dispatch whose permission snapshot asset is unavailable", async () => {
+    const harness = await createUnassignedHarness({
+      permissionSnapshotFor: () => undefined,
+    });
+    const dispatch = await harness.journal.assign(harness.unsigned);
+
+    const result = await harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+
+    expect(result).toMatchObject({
+      accepted: false,
+      error: { code: "capability-gap", retryable: true },
+    });
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({ phase: "dispatch-rejected" });
+  });
+
+  it.each(["mismatched", "invalid-signature"] as const)(
+    "hard-rejects a %s permission snapshot before received",
+    async (kind) => {
+      const identity = new TestProtocolIdentity();
+      const harness = await createUnassignedHarness({
+        permissionSnapshotFor: (digest) => {
+          if (kind === "mismatched") {
+            return createSignedTrustRuleSnapshot(
+              { snapshotVersion: 2, rules: [], generatedAt: NOW },
+              identity,
+            );
+          }
+          const snapshot = matchingPermissionSnapshotFor(identity, digest);
+          if (snapshot === undefined) return undefined;
+          return {
+            ...snapshot,
+            signature: { ...snapshot.signature, sig: "invalid" },
+          };
+        },
+      });
+      const dispatch = await harness.journal.assign(harness.unsigned);
+
+      await expect(
+        harness.ledger.dispatch(
+          dispatch.envelope,
+          dispatch.activation,
+          ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+        ),
+      ).resolves.toMatchObject({
+        accepted: false,
+        error: { code: "invalid", retryable: false },
+      });
+      await expect(
+        harness.ledger.queryLedger(
+          ASSIGNMENT_ID,
+          ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+        ),
+      ).resolves.toMatchObject({ phase: "dispatch-rejected" });
+    },
+  );
+
+  it("durably rejects a runtime binding mismatch before received", async () => {
+    let calls = 0;
+    const harness = await createUnassignedHarness({
+      runtimeBindingGuard() {
+        calls += 1;
+        return {
+          code: "revision-conflict",
+          message: "assembled runtime changed",
+          retryable: true,
+        };
+      },
+    });
+    const dispatch = await harness.journal.assign(harness.unsigned);
+
+    await expect(
+      harness.ledger.dispatch(
+        dispatch.envelope,
+        dispatch.activation,
+        ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+      ),
+    ).resolves.toMatchObject({
+      accepted: false,
+      error: { code: "revision-conflict", retryable: true },
+    });
+    expect(calls).toBe(1);
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({ phase: "dispatch-rejected" });
+  });
+
+  it("bypasses the live runtime guard for exact durable received replay", async () => {
+    let currentError: ReturnType<NonNullable<AssignmentLedgerOptions["runtimeBindingGuard"]>>;
+    let calls = 0;
+    const harness = await createUnassignedHarness({
+      runtimeBindingGuard() {
+        calls += 1;
+        return currentError;
+      },
+    });
+    const dispatch = await harness.journal.assign(harness.unsigned);
+    const context = ownerContext(ASSIGNMENT_ID, "executor.dispatch");
+
+    await expect(
+      harness.ledger.dispatch(dispatch.envelope, dispatch.activation, context),
+    ).resolves.toEqual({ v: 1, accepted: true });
+    currentError = {
+      code: "revision-conflict",
+      message: "live runtime changed after durable receipt",
+      retryable: true,
+    };
+    await expect(
+      harness.ledger.dispatch(dispatch.envelope, dispatch.activation, context),
+    ).resolves.toEqual({ v: 1, accepted: true });
+    expect(calls).toBe(1);
+  });
+
+  it("replays an accepted dispatch after the local snapshot advances", async () => {
+    let policyRevision = 1;
+    const harness = await createUnassignedHarness({
+      snapshotFor(executorId) {
+        const value = matchingSnapshotFor(executorId);
+        if (!value) return undefined;
+        value.inventory.configVersions.policyRev = policyRevision;
+        return value;
+      },
+    });
+    const dispatch = await harness.journal.assign(harness.unsigned);
+    const context = ownerContext(ASSIGNMENT_ID, "executor.dispatch");
+
+    await expect(
+      harness.ledger.dispatch(dispatch.envelope, dispatch.activation, context),
+    ).resolves.toEqual({ v: 1, accepted: true });
+    policyRevision = 2;
+    await expect(
+      harness.ledger.dispatch(dispatch.envelope, dispatch.activation, context),
+    ).resolves.toEqual({ v: 1, accepted: true });
+  });
+
   it("invalidates a failed ledger cursor and rebuilds from authority truth", async () => {
     const harness = await createHarness();
     expect(
@@ -878,6 +1117,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
     });
     await peer.dispatch(
       harness.dispatch.envelope,
@@ -995,6 +1237,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
     });
     expect(await restarted.recoverInteractions(ASSIGNMENT_ID, NOW)).toMatchObject({
       pending: [{ requestId: "interaction-1" }],
@@ -1247,6 +1492,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
       clock: () => NOW,
     });
     await expect(
@@ -1398,6 +1646,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
     });
     await expect(
       restarted.recoverInteractions(ASSIGNMENT_ID, NOW),
@@ -1597,6 +1848,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
       clock: () => NOW,
       maxPendingInteractions: 2,
     });
@@ -1677,6 +1931,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
       clock: () => NOW,
     });
     await expect(
@@ -2225,6 +2482,9 @@ describe("conversation assignment protocol", () => {
       signer: first.identity,
       verifier: first.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(first.identity, digest),
       clock: () => NOW,
     });
     await secondLedger.dispatch(
@@ -6209,6 +6469,9 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
     });
     expect(await restarted.pendingInteractionMirrors(ASSIGNMENT_ID)).toEqual([]);
     expect(firstReceipt).toEqual(mirrorReceipt(firstBatch));
@@ -7763,6 +8026,9 @@ function createUnsignedEnvelope(
       promptAssetsRev: 1,
       permissionSnapshotVersion: 1,
     },
+    protocolVersion: "1",
+    tools: [],
+    mcpServers: [],
     environment: {},
     credentialBindings: [],
   };
@@ -7773,7 +8039,10 @@ function createUnsignedEnvelope(
   const permissionPayload = {
     v: 1 as const,
     snapshotVersion: 1,
-    snapshotDigest: protocolDigest("TrustRuleSnapshot", 1, { revision: 1 }),
+    snapshotDigest: createSignedTrustRuleSnapshot(
+      { snapshotVersion: 1, rules: [], generatedAt: NOW },
+      identity,
+    ).digest,
     binding: {
       execution: "conversation" as const,
       runId,

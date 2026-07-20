@@ -21,6 +21,7 @@ import type {
   DispatchConflictProof,
   DispatchRejectionProof,
   DispatchResult,
+  ExecutionManifest,
   LedgerEvidencePage,
   LedgerSnapshot,
   LogicalRecord,
@@ -37,6 +38,7 @@ import type {
   RunDispatchArguments,
   RunExecutorPort,
 } from "@zhixing/core/contracts";
+import type { TrustRuleSnapshot } from "@zhixing/core/security";
 import {
   assertProtocolIdentifier as assertIdentifier,
   advanceAssignmentLedger,
@@ -57,6 +59,8 @@ import {
   mutationBatchArtifact,
   interactionMirrorSeed,
   materializeInteractionDisplay,
+  matchManifest,
+  validateTrustRuleSnapshot,
   protocolDigest,
   prepareInteractionDisplay,
   sealedBundleArtifact,
@@ -83,6 +87,7 @@ import {
   type ConversationInteractionMirrorBatch,
   type ConversationInteractionOutcome,
   type AssignmentLedgerValidationState,
+  type ExecutorCapabilitySnapshot,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
@@ -146,6 +151,14 @@ export interface AssignmentLedgerOptions {
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
   readonly ownerControl: OwnerControlAuthorizer;
+  readonly snapshotFor: (
+    executorId: string,
+  ) => ExecutorCapabilitySnapshot | undefined;
+  readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
+  readonly runtimeBindingGuard?: (input: {
+    readonly assignmentId: string;
+    readonly manifest: ExecutionManifest<"conversation">;
+  }) => AuthorityError | undefined;
   readonly clock?: () => string;
   readonly usageFinal?: (
     assignmentId: string,
@@ -378,6 +391,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #ownerControl: OwnerControlAuthorizer;
+  readonly #snapshotFor: AssignmentLedgerOptions["snapshotFor"];
+  readonly #permissionSnapshotFor: AssignmentLedgerOptions["permissionSnapshotFor"];
+  readonly #runtimeBindingGuard: AssignmentLedgerOptions["runtimeBindingGuard"];
   readonly #clock: () => string;
   readonly #usageFinal: NonNullable<AssignmentLedgerOptions["usageFinal"]>;
   readonly #surfaceAbort: AssignmentLedgerOptions["surfaceAbort"];
@@ -397,6 +413,9 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     this.#signer = options.signer;
     this.#verifier = options.verifier;
     this.#ownerControl = options.ownerControl;
+    this.#snapshotFor = options.snapshotFor;
+    this.#permissionSnapshotFor = options.permissionSnapshotFor;
+    this.#runtimeBindingGuard = options.runtimeBindingGuard;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     // A missing usage reporter is represented explicitly as zero-usage evidence.
     // When a reporter is configured, its signed UsageReport digest replaces this
@@ -510,6 +529,114 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
                 kind: "return",
                 value: { kind: "conflict", received: state.received },
               };
+        }
+        const target = this.#snapshotFor(this.#executorId);
+        const compatibility = target === undefined
+          ? {
+              ok: false as const,
+              error: {
+                code: "capability-gap" as const,
+                message: "Executor capability snapshot is unavailable",
+                retryable: true,
+              },
+            }
+          : matchManifest(envelope.manifest, target.descriptor, target.inventory);
+        if (!compatibility.ok) {
+          const entry = nextEntry(state, {
+            v: 1,
+            t: "dispatch-rejected",
+            dispatchDigest,
+            reason: compatibility.error,
+          });
+          const ledgerDigest = advanceAssignmentLedger(state.chainDigest, entry);
+          return {
+            kind: "append",
+            entries: [assignmentRecord(assignmentId, entry)],
+            value: {
+              kind: "rejected",
+              dispatchDigest,
+              error: compatibility.error,
+              recordSeq: entry.recordSeq,
+              ledgerDigest,
+            },
+          };
+        }
+        const runtimeBindingError = envelope.execution === "conversation"
+          ? this.#runtimeBindingGuard?.({
+              assignmentId,
+              manifest: envelope.manifest,
+            })
+          : undefined;
+        if (runtimeBindingError !== undefined) {
+          const entry = nextEntry(state, {
+            v: 1,
+            t: "dispatch-rejected",
+            dispatchDigest,
+            reason: runtimeBindingError,
+          });
+          const ledgerDigest = advanceAssignmentLedger(state.chainDigest, entry);
+          return {
+            kind: "append",
+            entries: [assignmentRecord(assignmentId, entry)],
+            value: {
+              kind: "rejected",
+              dispatchDigest,
+              error: runtimeBindingError,
+              recordSeq: entry.recordSeq,
+              ledgerDigest,
+            },
+          };
+        }
+        const permissionSnapshot = this.#permissionSnapshotFor(
+          envelope.permissionLease.snapshotDigest,
+        );
+        let permissionError: AuthorityError | undefined;
+        if (permissionSnapshot === undefined) {
+          permissionError = {
+            code: "capability-gap",
+            message: "Permission snapshot is unavailable",
+            retryable: true,
+          };
+        } else {
+          try {
+            const validated = validateTrustRuleSnapshot(permissionSnapshot, this.#verifier);
+            if (
+              validated.digest !== envelope.permissionLease.snapshotDigest ||
+              validated.snapshotVersion !== envelope.permissionLease.snapshotVersion
+            ) {
+              permissionError = {
+                code: "invalid",
+                message: "Permission snapshot does not match its dispatch lease",
+                retryable: false,
+              };
+            }
+          } catch {
+            permissionError = {
+              code: "invalid",
+              message: "Permission snapshot is invalid",
+              retryable: false,
+            };
+          }
+        }
+        if (permissionError !== undefined) {
+          const entry = nextEntry(state, {
+            v: 1,
+            t: "dispatch-rejected",
+            dispatchDigest,
+            reason: permissionError,
+          });
+          const ledgerDigest = advanceAssignmentLedger(state.chainDigest, entry);
+          return {
+            kind: "append",
+            entries: [assignmentRecord(assignmentId, entry)],
+            value: {
+              kind: "rejected",
+              dispatchDigest,
+              error: permissionError,
+              recordSeq: entry.recordSeq,
+              ledgerDigest,
+            },
+          };
         }
         const entry = nextEntry(state, {
           v: 1,

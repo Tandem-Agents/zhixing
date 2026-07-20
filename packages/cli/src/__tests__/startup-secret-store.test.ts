@@ -55,14 +55,20 @@ describe("startup SecretStore boundary", () => {
     );
     const store = new MemoryStore();
 
-    await expect(
-      runStartupCheck({ homeDir, mode: "host", isTTY: false, secretStore: store }),
-    ).resolves.toEqual({
+    const result = await runStartupCheck({
+      homeDir,
+      mode: "host",
+      isTTY: false,
+      secretStore: store,
+    });
+    expect(result).toMatchObject({
       kind: "ready",
       config: { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
       credentials: { providers: { deepseek: { apiKey: "startup-secret" } } },
       secretStore: store,
     });
+    expect(result.kind === "ready" ? result.credentialGeneration : null)
+      .toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
     await expect(readFile(legacyPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 

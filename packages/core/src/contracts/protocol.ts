@@ -193,8 +193,8 @@ export interface ExecutorVersionInventory
     skillsRev: number;
     rubricsRev: number;
     promptAssetsRev: number;
-    permissionSnapshotVersion: number;
   };
+  permissionSnapshotHighWater: number;
   credentialBindingRevisions: Array<{ bindingId: string; revision: number }>;
   at: IsoTime;
   signature: Signature;
@@ -224,8 +224,13 @@ export interface ExecutionManifest<
   E extends ExecutionKind = ExecutionKind,
 > extends WireSchemaV1<"ExecutionManifest"> {
   baseRef: ManifestBaseRef<E>;
+  protocolVersion: ProtocolVersion;
   requires: ExecutorVersionInventory["configVersions"] &
-    ExecutorVersionInventory["assetVersions"];
+    ExecutorVersionInventory["assetVersions"] & {
+      permissionSnapshotVersion: number;
+    };
+  tools: string[];
+  mcpServers: string[];
   environment: EnvironmentRequirement;
   credentialBindings: Array<{
     service: string;

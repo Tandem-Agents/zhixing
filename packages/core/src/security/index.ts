@@ -13,6 +13,7 @@ export type {
   OperationClassifier,
   PermissionContextId,
   PermissionDecision,
+  PortableTrustRule,
   PermissionRule,
   PermissionScope,
   RiskLevel,

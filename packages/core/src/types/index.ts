@@ -148,3 +148,6 @@ export type {
 
 // ─── 可重置组件 ───
 export type { Resettable } from "./resettable.js";
+
+// ─── 已装配运行体事实 ───
+export type { RuntimeExecutionProfile } from "./runtime-execution-profile.js";

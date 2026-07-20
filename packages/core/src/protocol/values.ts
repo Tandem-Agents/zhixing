@@ -5,7 +5,7 @@ import type {
   Message,
 } from "../types/messages.js";
 import type { UserTurnInput } from "../types/user-input.js";
-import { canonicalize } from "./canonical.js";
+import { canonicalize, compareCanonicalStrings } from "./canonical.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 
 const EVIDENCE_KINDS = new Set([
@@ -107,13 +107,22 @@ export function validateEnvironmentRequirement(value: unknown): EnvironmentRequi
     );
     assertIdentifier(value.workspace.deviceId, "Workspace deviceId");
     assertIdentifier(value.workspace.bindingRef, "Workspace bindingRef");
-    assertNonNegativeInteger(
+    assertPositiveInteger(
       value.workspace.workspaceBindingRevision,
       "Workspace binding revision",
     );
+    if (
+      value.deviceId !== undefined &&
+      value.deviceId !== value.workspace.deviceId
+    ) {
+      throw new TypeError(
+        "Manifest deviceId must match the workspace target device",
+      );
+    }
   }
   if (value.credentialBindings !== undefined) {
     assertDenseArray(value.credentialBindings, "Environment credential bindings");
+    const bindingIds = new Set<string>();
     for (const binding of value.credentialBindings) {
       assertPlainRecord(binding, "Environment credential binding");
       assertExactKeys(
@@ -123,15 +132,34 @@ export function validateEnvironmentRequirement(value: unknown): EnvironmentRequi
       );
       assertIdentifier(binding.service, "Environment credential service");
       assertIdentifier(binding.bindingId, "Environment credential bindingId");
+      if (bindingIds.has(binding.bindingId)) {
+        throw new TypeError("Environment credential binding ids must be unique");
+      }
+      bindingIds.add(binding.bindingId);
     }
+    assertSorted(
+      value.credentialBindings as Array<{ service: string; bindingId: string }>,
+      (binding) => `${binding.service}\u0000${binding.bindingId}`,
+      "Environment credential bindings",
+    );
   }
   if (value.evidenceKinds !== undefined) {
     assertDenseArray(value.evidenceKinds, "Environment evidence kinds");
+    const kinds = new Set<string>();
     for (const kind of value.evidenceKinds) {
       if (typeof kind !== "string" || !EVIDENCE_KINDS.has(kind)) {
         throw new TypeError("Environment evidence kind is invalid");
       }
+      if (kinds.has(kind)) {
+        throw new TypeError("Environment evidence kinds must be unique");
+      }
+      kinds.add(kind);
     }
+    assertSorted(
+      value.evidenceKinds as string[],
+      (kind) => kind,
+      "Environment evidence kinds",
+    );
   }
   return value as unknown as EnvironmentRequirement;
 }
@@ -244,8 +272,20 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   }
 }
 
-function assertNonNegativeInteger(value: unknown, label: string): asserts value is number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new TypeError(`${label} must be a non-negative safe integer`);
+function assertPositiveInteger(value: unknown, label: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+}
+
+function assertSorted<T>(
+  values: readonly T[],
+  key: (value: T) => string,
+  label: string,
+): void {
+  for (let index = 1; index < values.length; index += 1) {
+    if (compareCanonicalStrings(key(values[index - 1]!), key(values[index]!)) > 0) {
+      throw new TypeError(`${label} must be sorted`);
+    }
   }
 }

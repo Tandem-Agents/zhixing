@@ -199,6 +199,10 @@ export function createOwnerRuntimeAdapter(
       return agentRuntime.securitySnapshot();
     },
 
+    executionProfile() {
+      return agentRuntime.executionProfile();
+    },
+
     get calibrationFactor() {
       return agentRuntime.calibrationFactor;
     },

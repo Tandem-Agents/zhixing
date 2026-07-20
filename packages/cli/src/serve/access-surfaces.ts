@@ -40,6 +40,7 @@ import { createAdvancementReviewMaintenance } from "./advancement-review-mainten
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type { AccessSurface } from "./access-surface.js";
+import { ZHIXING_CLI_VERSION } from "../version.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -58,7 +59,11 @@ const authorityRuntimeSurface: AccessSurface = {
     ctx.authorityRuntime = await setupAuthorityRuntime({
       zhixingHome: ctx.zhixingHome,
       secretStore: ctx.secretStore,
-      configurationSnapshot: ctx.config,
+      configurationSnapshot: {
+        config: ctx.config,
+        executableVersion: ZHIXING_CLI_VERSION,
+      },
+      executorReadiness: ctx.executorReadiness,
     });
   },
 };

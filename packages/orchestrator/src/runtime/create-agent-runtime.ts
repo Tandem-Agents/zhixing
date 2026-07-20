@@ -82,6 +82,7 @@ import {
   builtinIndexEntries,
   type SkillMode,
   type Resettable,
+  type RuntimeExecutionProfile,
   type WindowLifecycle,
   type WindowChangeReason,
   resolveModelInputCapabilities,
@@ -343,6 +344,8 @@ export interface AgentRuntime {
   subAgentUsages: (messages: readonly Message[]) => readonly TaskUsageEntry[];
   /** 当前运行体安全状态只读快照（/security 的宿主数据面）。 */
   securitySnapshot: () => RuntimeSecuritySnapshot;
+  /** Exact non-secret dependencies of this immutable assembled runtime. */
+  executionProfile: () => RuntimeExecutionProfile;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
   readonly calibrationFactor: number;
   /** 安全管线（用于 /trust /security 命令访问权限规则、审计日志等） */
@@ -560,6 +563,8 @@ export interface CreateAgentRuntimeOptions {
   workspace?: string | null;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: ToolDefinition[];
+  /** MCP server identities used to assemble `extraTools`; captured in the same sync turn. */
+  executionMcpServers?: readonly string[];
   /**
    * 确认超时降级策略，透传给 secure-executor。默认 "deny"。
    * 参见 remote-confirmation-execution.md。
@@ -1257,6 +1262,16 @@ export async function createAgentRuntime(
   // 安全回滚,对齐 work-mode）。createAgentRuntime 为 async,此处 await 合法。
   await openInstanceWindow("instance-start", false);
 
+  const executionProfile = freezeExecutionProfile({
+    tools: tools.map((tool) => tool.name),
+    mcpServers: options.executionMcpServers ?? [],
+    providerIds: [
+      roles.main.provider.id,
+      roles.light.provider.id,
+      roles.power.provider.id,
+    ],
+  });
+
   const buildCommittedRequestView = (messages: readonly Message[]) => {
     const prefix = authoritativeMessagePrefix;
     return {
@@ -1405,6 +1420,10 @@ export async function createAgentRuntime(
           .snapshot(),
         confirmations: securityPipeline.getConfirmationTracker().snapshot(),
       };
+    },
+
+    executionProfile(): RuntimeExecutionProfile {
+      return structuredClone(executionProfile);
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
@@ -1922,4 +1941,24 @@ export async function createAgentRuntime(
       }
     },
   };
+}
+
+function freezeExecutionProfile(
+  input: RuntimeExecutionProfile,
+): RuntimeExecutionProfile {
+  const normalize = (values: readonly string[], label: string): string[] => {
+    const unique = new Set<string>();
+    for (const value of values) {
+      if (!value || value.length > 480 || /[\0\r\n]/u.test(value)) {
+        throw new TypeError(`${label} contains an invalid identifier`);
+      }
+      unique.add(value);
+    }
+    return [...unique].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  };
+  return Object.freeze({
+    tools: Object.freeze(normalize(input.tools, "Runtime tools")),
+    mcpServers: Object.freeze(normalize(input.mcpServers, "Runtime MCP servers")),
+    providerIds: Object.freeze(normalize(input.providerIds, "Runtime providers")),
+  });
 }

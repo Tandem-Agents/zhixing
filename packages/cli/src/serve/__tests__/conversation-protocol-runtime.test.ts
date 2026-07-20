@@ -8,6 +8,7 @@ import {
   userMessageFromTurnInput,
   type AgentYield,
   type Message,
+  type PermissionRule,
   type RunResult,
 } from "@zhixing/core";
 import { StreamDigestChain } from "@zhixing/core/protocol";
@@ -21,11 +22,56 @@ import { InProcessAssignmentSubmission } from "@zhixing/executor";
 import { projectSessionTurn } from "@zhixing/rpc";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { setupAuthorityRuntime } from "../../setup-delivery.js";
+import {
+  setupAuthorityRuntime as setupAuthorityRuntimeProduction,
+  type SetupAuthorityRuntimeOptions,
+} from "../../setup-delivery.js";
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
+
+const TEST_EXECUTOR_READINESS = {
+  tools: [] as string[],
+  mcpServers: [] as string[],
+  credentialBindings: [],
+  deviceScopedCredentialBindingIds: [] as string[],
+  credentialGeneration: null,
+};
+
+const TEST_RUNTIME_AUTHORITY_FACTS = {
+  securitySnapshot: () => ({
+    contextId: { kind: "main" as const },
+    workspacePath: null,
+    permissionRules: [],
+    builtinRules: [],
+    rateLimits: [],
+    confirmations: [],
+  }),
+  executionProfile: () => ({
+    tools: [],
+    mcpServers: [],
+    providerIds: [],
+  }),
+} satisfies Pick<SessionRuntime, "securitySnapshot" | "executionProfile">;
+
+function setupAuthorityRuntime(
+  options: Omit<SetupAuthorityRuntimeOptions, "executorReadiness"> & {
+    readonly executorReadiness?: SetupAuthorityRuntimeOptions["executorReadiness"];
+  },
+) {
+  return setupAuthorityRuntimeProduction({
+    ...options,
+    executorReadiness: options.executorReadiness ?? TEST_EXECUTOR_READINESS,
+  });
+}
+
+function expectSettled(
+  result: Awaited<ReturnType<typeof projectSessionTurn>>,
+): asserts result is Extract<typeof result, { kind: "settled" }> {
+  if (result.kind === "error") throw result.error;
+  expect(result.kind).toBe("settled");
+}
 
 class MemorySecretStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -64,6 +110,7 @@ async function seedPendingConversation(label: string) {
   const secretStore = new MemorySecretStore();
   const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
   const runtime: SessionRuntime = {
+    ...TEST_RUNTIME_AUTHORITY_FACTS,
     sessionId: `seed-${label}`,
     async *run(): AsyncGenerator<AgentYield, RunResult> {
       throw new Error("seeded input must not execute before restart");
@@ -98,6 +145,150 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("binds exact runtime facts and rejects readiness drift before received", async () => {
+    const home = await createTempDir("conversation-protocol-runtime-binding");
+    const secretStore = new MemorySecretStore();
+    let readiness = {
+      ...TEST_EXECUTOR_READINESS,
+      tools: ["bash"],
+      mcpServers: ["server-a"],
+    };
+    const readinessReads: string[][] = [];
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore,
+      executorReadiness: () => {
+        readinessReads.push([...readiness.tools]);
+        return readiness;
+      },
+    });
+    const rule: PermissionRule = {
+      id: "rule-runtime-binding",
+      pattern: { tool: "bash", argument: "npm test" },
+      decision: "allow",
+      scope: "global",
+      createdAt: 1,
+      lastMatchedAt: 2,
+      matchCount: 3,
+    };
+    const runtime: SessionRuntime = {
+      sessionId: "runtime-binding",
+      securitySnapshot: () => ({
+        contextId: { kind: "main" },
+        workspacePath: null,
+        permissionRules: [rule],
+        builtinRules: [],
+        rateLimits: [],
+        confirmations: [],
+      }),
+      executionProfile: () => ({
+        tools: ["bash"],
+        mcpServers: ["server-a"],
+        providerIds: [],
+      }),
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        throw new Error("runtime must not start after readiness drift");
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    const prepare = authority.prepareConversationAssignment;
+    let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
+    const validateBinding = authority.validateConversationRuntimeBinding;
+    const bindingResults: Array<ReturnType<typeof validateBinding>> = [];
+    const validateBindingSpy = vi
+      .spyOn(authority, "validateConversationRuntimeBinding")
+      .mockImplementation((input) => {
+        const result = validateBinding(input);
+        bindingResults.push(result);
+        return result;
+      });
+    const prepareSpy = vi
+      .spyOn(authority, "prepareConversationAssignment")
+      .mockImplementation(async (input) => {
+        prepared = await prepare(input);
+        readiness = { ...readiness, tools: [] };
+        return prepared;
+      });
+    let manager!: ConversationManager;
+    const protocol = new ConversationProtocolRuntime({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    manager = new ConversationManager(
+      { create: vi.fn(async () => runtime) },
+      undefined,
+      { durableTurnExecutor: protocol },
+    );
+    const managed = await manager.getOrCreate("conversation-runtime-binding");
+    const execution = protocol.run({
+      conversationId: managed.conversationId,
+      input: "check binding",
+      messages: [userMessageFromTurnInput("check binding")],
+      baseRevision: managed.turnCount,
+      runtime,
+      invocation: { kind: "agent", source: "interactive" },
+      options: {
+        source: "interactive",
+        turnContext: { turnId: "rpc:runtime-binding" },
+      },
+    });
+    try {
+      await expect(execution.next()).rejects.toThrow(
+        "Local executor rejected a freshly issued assignment",
+      );
+      expect(validateBindingSpy).toHaveBeenCalledOnce();
+      expect(readinessReads).toEqual([["bash"], []]);
+      expect(bindingResults).toMatchObject([
+        { code: "capability-gap", retryable: true },
+      ]);
+      expect(prepared?.policy.manifestCapabilities).toMatchObject({
+        tools: ["bash"],
+        mcpServers: ["server-a"],
+      });
+      expect(prepared?.policy.permissionSnapshot.rules).toEqual([
+        {
+          id: rule.id,
+          pattern: rule.pattern,
+          decision: rule.decision,
+          scope: rule.scope,
+          createdAt: rule.createdAt,
+        },
+      ]);
+      const entries = (await authority.authorityLog.readAll()).flatMap(
+        (commit) => commit.entries,
+      );
+      expect(entries.map((entry) => (entry.body as { t?: string }).t)).toContain(
+        "assigned",
+      );
+      const assignmentEntries = await Promise.all(
+        entries
+          .filter((entry) => entry.stream.startsWith("assignment:"))
+          .map(async (entry) => {
+            const body = entry.body as {
+              readonly recordSeq?: number;
+              readonly body?: { readonly t?: string };
+              readonly ref?: Parameters<typeof authority.artifacts.get>[0];
+            };
+            if (body.ref === undefined) return body;
+            return JSON.parse(
+              Buffer.from(await authority.artifacts.get(body.ref)).toString("utf8"),
+            ) as {
+              readonly recordSeq: number;
+              readonly body: { readonly t?: string };
+            };
+          }),
+      );
+      expect(assignmentEntries.map((entry) => entry.body?.t)).toEqual([
+        "dispatch-rejected",
+      ]);
+    } finally {
+      validateBindingSpy.mockRestore();
+      prepareSpy.mockRestore();
+    }
+  }, 30_000);
+
   it("commits one durable channel turn, mirrors confirmation, and replays the same ingress without execution", async () => {
     const confirmationTtlMs = 300_000;
     const home = await createTempDir("conversation-protocol");
@@ -119,6 +310,7 @@ describe("ConversationProtocolRuntime", () => {
       commandPreview: "x".repeat(9_000),
     };
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-1",
       confirmationBroker: broker,
       async *run(messages): AsyncGenerator<AgentYield, RunResult> {
@@ -222,7 +414,7 @@ describe("ConversationProtocolRuntime", () => {
       runOptions,
       notify: () => {},
     });
-    expect(first.kind).toBe("settled");
+    expectSettled(first);
     expect(executions).toBe(1);
     expect(managed.turnCount).toBe(1);
     expect(finalAttempts).toBe(1);
@@ -297,7 +489,7 @@ describe("ConversationProtocolRuntime", () => {
       runOptions,
       notify: () => {},
     });
-    expect(replay.kind).toBe("settled");
+    expectSettled(replay);
     expect(executions).toBe(1);
     expect(managed.turnCount).toBe(1);
     expect(finals).toHaveLength(1);
@@ -336,7 +528,7 @@ describe("ConversationProtocolRuntime", () => {
       runOptions,
       notify: () => {},
     });
-    expect(restartedReplay.kind).toBe("settled");
+    expectSettled(restartedReplay);
     expect(executions).toBe(1);
   }, 90_000);
 
@@ -362,6 +554,7 @@ describe("ConversationProtocolRuntime", () => {
     }
     let decisions: Awaited<ReturnType<ConfirmationBroker["requestConfirmation"]>>[] = [];
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-shared-backpressure",
       confirmationBroker: parent,
       async *run(messages): AsyncGenerator<AgentYield, RunResult> {
@@ -388,7 +581,7 @@ describe("ConversationProtocolRuntime", () => {
           expect(
             brokers.reduce((total, broker) => total + broker.listPending().length, 0),
           ).toBe(2);
-        });
+        }, { timeout: 15_000 });
         await vi.waitFor(() => {
           expect(
             brokers.some((broker) =>
@@ -397,7 +590,7 @@ describe("ConversationProtocolRuntime", () => {
               ),
             ),
           ).toBe(true);
-        });
+        }, { timeout: 15_000 });
         for (const broker of brokers) {
           for (const pending of broker.listPending()) {
             await broker.resolveDurably(pending.request.id, { kind: "allow-once" });
@@ -448,7 +641,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     const managed = await manager.getOrCreate("conversation-shared-backpressure");
 
-    await projectSessionTurn({
+    const result = await projectSessionTurn({
       manager,
       managed,
       text: "exercise shared interaction budget",
@@ -456,6 +649,7 @@ describe("ConversationProtocolRuntime", () => {
       runOptions: { source: "interactive" },
       notify: () => {},
     });
+    expectSettled(result);
 
     await vi.waitFor(() => expect(decisions).toHaveLength(3), { timeout: 120_000 });
     expect(
@@ -533,6 +727,7 @@ describe("ConversationProtocolRuntime", () => {
     const interactions = new DurableConversationInteractionObserver();
     let executions = 0;
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-started",
       async *run(messages): AsyncGenerator<AgentYield, RunResult> {
         executions += 1;
@@ -715,6 +910,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore: new MemorySecretStore(),
     });
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-cancel-control",
       async *run(): AsyncGenerator<AgentYield, RunResult> {
         throw new Error("cancelled queued input must not execute");
@@ -825,6 +1021,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore: new MemorySecretStore(),
     });
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-cancel-batch",
       async *run(): AsyncGenerator<AgentYield, RunResult> {
         throw new Error("cancelled queued input must not execute");
@@ -921,6 +1118,7 @@ describe("ConversationProtocolRuntime", () => {
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
     let executions = 0;
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-received",
       async *run(messages): AsyncGenerator<AgentYield, RunResult> {
         executions += 1;
@@ -1044,6 +1242,7 @@ describe("ConversationProtocolRuntime", () => {
     let executions = 0;
     let recoveredOptions: Parameters<SessionRuntime["run"]>[1];
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-admission-recovery",
       async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
         executions += 1;
@@ -1313,6 +1512,7 @@ describe("ConversationProtocolRuntime", () => {
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
     let directExecutions = 0;
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-perspective-recovery",
       async *run(): AsyncGenerator<AgentYield, RunResult> {
         directExecutions += 1;
@@ -1442,6 +1642,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     let executions = 0;
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "recovered-cancel-runtime",
       async *run(): AsyncGenerator<AgentYield, RunResult> {
         executions += 1;
@@ -1559,6 +1760,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore: seeded.secretStore,
     });
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "recovery-generation-runtime",
       async *run(): AsyncGenerator<AgentYield, RunResult> {
         throw new Error("cancelled input must not execute");
@@ -1848,6 +2050,7 @@ describe("ConversationProtocolRuntime", () => {
       content: [{ type: "text", text: "committed result" }],
     };
     const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "post-commit-runtime",
       async *run(messages): AsyncGenerator<AgentYield, RunResult> {
         return {

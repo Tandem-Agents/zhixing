@@ -1,6 +1,5 @@
 import type { ProtocolVersion } from "@zhixing/core/contracts";
-
-const MAX_PROTOCOL_VERSION = (1n << 64n) - 1n;
+import { validateProtocolVersion } from "@zhixing/core/protocol";
 
 /** Inclusive range of monotonically increasing mesh protocol versions. */
 export interface MeshProtocolRange {
@@ -62,16 +61,7 @@ export function sameMeshProtocolCompatibility(
 }
 
 function parseProtocolVersion(value: ProtocolVersion): bigint {
-  if (typeof value !== "string" || !/^[1-9][0-9]{0,19}$/.test(value)) {
-    throw new TypeError(
-      "Mesh protocol versions must be canonical positive decimal strings",
-    );
-  }
-  const parsed = BigInt(value);
-  if (parsed > MAX_PROTOCOL_VERSION) {
-    throw new TypeError("Mesh protocol version exceeds uint64 range");
-  }
-  return parsed;
+  return BigInt(validateProtocolVersion(value));
 }
 
 function compareProtocolVersions(

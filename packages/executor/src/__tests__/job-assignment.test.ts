@@ -19,6 +19,7 @@ import type {
   SystemJobResourceLease,
   TaskDeliveryDto,
   TaskDefinition,
+  TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
   buildJobActivationPayload,
@@ -28,6 +29,7 @@ import {
   createJobSealedBundle,
   createSignedConversationInteractionMirrorBatch,
   createSignedJobEnvelope,
+  createSignedTrustRuleSnapshot,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   interactionMirrorSeed,
@@ -44,6 +46,7 @@ import {
   validateSystemJobResourceLease,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
+  type ExecutorCapabilitySnapshot,
   type UnsignedJobEnvelope,
 } from "@zhixing/core/protocol";
 import {
@@ -55,6 +58,7 @@ import {
   InProcessJobDispatcher,
   JOB_JOURNAL_RECORD_SHAPES,
   JobJournal,
+  type JobAssignmentPlan,
   type JobCompatibilityProjection,
   type JobJournalRecordType,
   type PendingJobDispatch,
@@ -66,6 +70,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
+  type AssignmentLedgerOptions,
 } from "../assignment-ledger.js";
 
 const NOW = "2026-07-15T09:00:00.000Z";
@@ -76,6 +81,68 @@ const ASSIGNMENT_ID = "assignment-1";
 const EXECUTOR_ID = "executor-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+
+function matchingSnapshotFor(executorId: string): ExecutorCapabilitySnapshot | undefined {
+  if (executorId !== EXECUTOR_ID) return undefined;
+  const signature = { alg: "test", keyId: "test", sig: "test" };
+  return {
+    descriptor: {
+      v: 1,
+      executorId,
+      revision: 1,
+      protocolVersion: "1",
+      workspaces: [],
+      tools: [],
+      mcpServers: [],
+      credentialBindings: [],
+      evidenceCapabilities: [],
+      at: NOW,
+      signature,
+    },
+    inventory: {
+      v: 1,
+      executorId,
+      inventoryRevision: 1,
+      capabilityRevision: 1,
+      configVersions: { runtimeConfigRev: 1, modelProfileRev: 1, policyRev: 1 },
+      assetVersions: {
+        skillsRev: 1,
+        rubricsRev: 1,
+        promptAssetsRev: 1,
+      },
+      permissionSnapshotHighWater: 1,
+      credentialBindingRevisions: [],
+      at: NOW,
+      signature,
+    },
+  };
+}
+
+function matchingPermissionSnapshotFor(
+  identity: TestProtocolIdentity,
+  digest: string,
+): TrustRuleSnapshot | undefined {
+  const snapshot = createSignedTrustRuleSnapshot(
+    { snapshotVersion: 1, rules: [], generatedAt: NOW },
+    identity,
+  );
+  return snapshot.digest === digest ? snapshot : undefined;
+}
+
+function assignmentPlan(
+  unsigned: UnsignedJobEnvelope,
+  materialize: () => UnsignedJobEnvelope = () => unsigned,
+): JobAssignmentPlan {
+  return {
+    taskId: unsigned.work.taskId,
+    jobRunId: unsigned.work.jobRunId,
+    anchorEpoch: unsigned.work.fence.anchorEpoch,
+    assignmentId: unsigned.assignmentId,
+    executorId: unsigned.executorId,
+    manifest: unsigned.manifest,
+    materialize,
+  };
+}
 
 function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticipant {
   return new OwnerDeliveryParticipant({
@@ -255,6 +322,9 @@ async function createUserHarness(
     definition?: TaskDefinition;
     trigger?: boolean;
     ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
+    ownerSnapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
+    executorSnapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
+    runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
   } = {},
 ) {
   const root = await createTempDir("job-assignment");
@@ -309,6 +379,7 @@ async function createUserHarness(
       },
     },
     clock: () => NOW,
+    snapshotFor: options.ownerSnapshotFor ?? matchingSnapshotFor,
   });
   const ledger = new ConversationAssignmentLedger({
     log,
@@ -317,6 +388,9 @@ async function createUserHarness(
     signer: identity,
     verifier: identity,
     ownerControl,
+    snapshotFor: options.executorSnapshotFor ?? matchingSnapshotFor,
+    permissionSnapshotFor: (digest) => matchingPermissionSnapshotFor(identity, digest),
+    runtimeBindingGuard: options.runtimeBindingGuard,
     clock: () => NOW,
     surfaceAbort: {
       authorize(assignmentId, input) {
@@ -346,7 +420,7 @@ async function createUserHarness(
       context: surfaceContext("trigger-user"),
       source: "user",
     });
-    if (options.assign !== false) dispatch = await journal.assign(unsigned);
+    if (options.assign !== false) dispatch = await journal.assign(assignmentPlan(unsigned));
   }
   return {
     root,
@@ -386,6 +460,7 @@ function reopenUserJournal(
     verifier: harness.identity,
     delivery: deliveryParticipant(harness.log),
     submission,
+    snapshotFor: matchingSnapshotFor,
     ingress: { authorize() {} },
     clock: () => NOW,
   });
@@ -479,6 +554,23 @@ async function resolve(
 }
 
 describe("user job durable protocol", () => {
+  it("does not apply the conversation runtime binding guard to job dispatch", async () => {
+    let calls = 0;
+    const harness = await createUserHarness({
+      runtimeBindingGuard() {
+        calls += 1;
+        return {
+          code: "revision-conflict",
+          message: "conversation runtime changed",
+          retryable: true,
+        };
+      },
+    });
+
+    await expect(receive(harness)).resolves.toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
   it("keeps the dispatched job instruction within the frozen task bound", () => {
     const identity = new TestProtocolIdentity();
     const envelope = createUnsignedJob(identity);
@@ -486,6 +578,16 @@ describe("user job durable protocol", () => {
 
     expect(() => createSignedJobEnvelope(envelope, identity, identity)).toThrow(
       "Job execution prompt must be a non-empty bounded string",
+    );
+  });
+
+  it("requires every job instruction tool to be frozen in its manifest", () => {
+    const identity = new TestProtocolIdentity();
+    const envelope = createUnsignedJob(identity);
+    envelope.work.instruction.tools = ["Read"];
+
+    expect(() => createSignedJobEnvelope(envelope, identity, identity)).toThrow(
+      "Job execution tool is not frozen in the manifest",
     );
   });
 
@@ -712,7 +814,7 @@ describe("user job durable protocol", () => {
       userDefinition(2, "new prompt applies only to future occurrences"),
       surfaceContext("update-user"),
     );
-    const dispatch = await harness.journal.assign(harness.unsigned);
+    const dispatch = await harness.journal.assign(assignmentPlan(harness.unsigned));
     expect(dispatch.envelope.work.instruction.prompt).toBe("perform scheduled work");
     expect(dispatch.envelope.work.fence.taskRevision).toBe(1);
   });
@@ -1145,6 +1247,9 @@ describe("user job durable protocol", () => {
       signer: producer.identity,
       verifier: producer.identity,
       ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(producer.identity, digest),
       clock: () => NOW,
     });
     await expect(
@@ -1204,6 +1309,7 @@ describe("user job durable protocol", () => {
       verifier: harness.identity,
       delivery: deliveryParticipant(harness.log),
       submission,
+      snapshotFor: matchingSnapshotFor,
       ingress: {
         authorize(context) {
           if (context.principal.kind !== "surface") {
@@ -1226,7 +1332,7 @@ describe("user job durable protocol", () => {
       reservationId: "reservation-2",
       capabilityId: "capability-2",
     });
-    await harness.journal.assign(second);
+    await harness.journal.assign(assignmentPlan(second));
     await expect(
       harness.journal.reportStarted(
         ASSIGNMENT_ID,
@@ -1246,7 +1352,7 @@ describe("user job durable protocol", () => {
       reservationId: "reservation-2",
       capabilityId: "capability-2",
     });
-    await harness.journal.assign(second);
+    await harness.journal.assign(assignmentPlan(second));
     await harness.journal.markUncertain("assignment-2", "ledger-unknown");
     const current = await harness.journal.currentResolution(JOB_RUN_ID);
 
@@ -1296,7 +1402,7 @@ describe("user job durable protocol", () => {
 
   it("replays assignment creation and cancellation without creating a second fact", async () => {
     const harness = await createUserHarness();
-    const replay = await harness.journal.assign(harness.unsigned);
+    const replay = await harness.journal.replayAssignment(harness.unsigned);
     expect(replay.assignmentId).toBe(ASSIGNMENT_ID);
     const first = await harness.journal.cancel({
       jobRunId: JOB_RUN_ID,
@@ -1631,6 +1737,52 @@ describe("user job durable protocol", () => {
     });
     expect(await enabled.dispatchPending()).toHaveLength(1);
     expect(await enabled.dispatchPending()).toEqual([]);
+  });
+
+  it("rejects a job manifest mismatch before durable receipt", async () => {
+    const harness = await createUserHarness({
+      executorSnapshotFor(executorId) {
+        const value = matchingSnapshotFor(executorId);
+        if (!value) return undefined;
+        value.inventory.assetVersions.skillsRev = 2;
+        return value;
+      },
+    });
+    if (!harness.dispatch) throw new Error("test harness has no assignment");
+
+    const result = await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+
+    expect(result).toMatchObject({
+      accepted: false,
+      error: { code: "revision-conflict", retryable: true },
+    });
+  });
+
+  it("keeps a mismatched job queued before signing or assigning it", async () => {
+    const harness = await createUserHarness({
+      assign: false,
+      ownerSnapshotFor(executorId) {
+        const value = matchingSnapshotFor(executorId);
+        if (!value) return undefined;
+        value.inventory.assetVersions.skillsRev = 2;
+        return value;
+      },
+    });
+
+    let materialized = false;
+    await expect(harness.journal.assign(assignmentPlan(harness.unsigned, () => {
+      materialized = true;
+      return harness.unsigned;
+    }))).rejects.toThrow(
+      "Execution snapshot revision mismatch: skillsRev",
+    );
+    expect(materialized).toBe(false);
+    await expect(harness.journal.currentState(JOB_RUN_ID)).resolves.toBe("queued");
+    await expect(harness.journal.pendingDispatches()).resolves.toEqual([]);
   });
 
   it("redrives a sealed bundle after owner commit response loss and acknowledges it", async () => {
@@ -2642,6 +2794,7 @@ describe("job submission guard preflight", () => {
       verifier: harness.identity,
       delivery: deliveryParticipant(harness.log),
       submission,
+      snapshotFor: matchingSnapshotFor,
       ingress: {
         authorize() {},
       },
@@ -2962,6 +3115,7 @@ describe("job abort ticket authorization", () => {
       verifier: harness.identity,
       delivery: deliveryParticipant(harness.log),
       submission,
+      snapshotFor: matchingSnapshotFor,
       ingress: {
         authorize() {},
       },
@@ -3473,6 +3627,7 @@ async function createSystemHarness(
       verifier: identity,
       delivery: deliveryParticipant(log),
       submission,
+      snapshotFor: matchingSnapshotFor,
       ingress: {
         authorize(context) {
           if (context.principal.kind !== "host") throw new Error("system host required");
@@ -3537,6 +3692,9 @@ function createUnsignedJob(
       promptAssetsRev: 1,
       permissionSnapshotVersion: 1,
     },
+    protocolVersion: "1",
+    tools: [],
+    mcpServers: [],
     environment: {},
     credentialBindings: [],
   };
@@ -3547,7 +3705,10 @@ function createUnsignedJob(
   const permissionPayload = {
     v: 1 as const,
     snapshotVersion: 1,
-    snapshotDigest: protocolDigest("TrustRuleSnapshot", 1, { revision: 1 }),
+    snapshotDigest: createSignedTrustRuleSnapshot(
+      { snapshotVersion: 1, rules: [], generatedAt: NOW },
+      identity,
+    ).digest,
     binding: {
       execution: "job" as const,
       jobRunId: JOB_RUN_ID,
@@ -4025,6 +4186,9 @@ function rogueLedger(
     signer: harness.identity,
     verifier: harness.identity,
     ownerControl,
+    snapshotFor: matchingSnapshotFor,
+    permissionSnapshotFor: (digest) =>
+      matchingPermissionSnapshotFor(harness.identity, digest),
     clock: () => NOW,
   });
 }

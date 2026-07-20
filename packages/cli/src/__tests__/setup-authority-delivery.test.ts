@@ -16,6 +16,14 @@ const quietLogger = {
   debug: () => {},
 };
 
+const TEST_EXECUTOR_READINESS = {
+  tools: [] as string[],
+  mcpServers: [] as string[],
+  credentialBindings: [],
+  deviceScopedCredentialBindingIds: [] as string[],
+  credentialGeneration: null,
+};
+
 describe("setupDelivery authority production path", () => {
   let home: string;
   let stack: DeliveryStack | null = null;
@@ -28,6 +36,7 @@ describe("setupDelivery authority production path", () => {
     authorityRuntime = await setupAuthorityRuntime({
       zhixingHome: home,
       secretStore: secrets,
+      executorReadiness: TEST_EXECUTOR_READINESS,
     });
   });
 
@@ -225,6 +234,7 @@ describe("setupDelivery authority production path", () => {
     authorityRuntime = await setupAuthorityRuntime({
       zhixingHome: home,
       secretStore: secrets,
+      executorReadiness: TEST_EXECUTOR_READINESS,
     });
     stack = await setupDelivery({
       channels,

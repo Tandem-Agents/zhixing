@@ -1,11 +1,18 @@
 import type {
   AdmissionClass,
+  AuthorityError,
   AuthorityCapability,
   IngressContext,
   PermissionSnapshotLease,
+  TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
+  createExecutionManifest,
+  matchManifest,
   protocolDigest,
+  validateTrustRuleSnapshot,
+  type ExecutorCapabilitySnapshot,
+  type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
@@ -22,6 +29,7 @@ export interface ConversationAssignmentIssueInput {
   readonly ingress: IngressContext;
   readonly windowInput: UnsignedConversationEnvelope["work"]["windowInput"];
   readonly controlContext?: UnsignedConversationEnvelope["work"]["controlContext"];
+  readonly policy: TransitionConversationCredentialPolicy;
 }
 
 /** Stable issuance port replaced by the governed authority without changing wire contracts. */
@@ -31,9 +39,22 @@ export interface ConversationAssignmentIssuer {
 
 export interface TransitionConversationAssignmentIssuerOptions {
   readonly signer: ProtocolSigner;
+  readonly verifier: ProtocolSignatureVerifier;
   readonly localDomainId: string;
+  readonly snapshotFor: (
+    executorId: string,
+  ) => ExecutorCapabilitySnapshot | undefined;
   readonly clock?: () => string;
-  readonly policy: TransitionConversationCredentialPolicy;
+}
+
+export class ManifestSelectionError extends Error {
+  readonly authorityError: AuthorityError;
+
+  constructor(error: AuthorityError) {
+    super(`Executor manifest mismatch (${error.code}): ${error.message}`);
+    this.name = "ManifestSelectionError";
+    this.authorityError = structuredClone(error);
+  }
 }
 
 export interface TransitionConversationCredentialPolicy {
@@ -45,12 +66,18 @@ export interface TransitionConversationCredentialPolicy {
     readonly skillsRev: number;
     readonly rubricsRev: number;
     readonly promptAssetsRev: number;
-    readonly permissionSnapshotVersion: number;
   };
-  readonly permissionSnapshot: {
-    readonly version: number;
-    readonly digest: string;
+  readonly manifestCapabilities: {
+    readonly protocolVersion: string;
+    readonly tools: readonly string[];
+    readonly mcpServers: readonly string[];
+    readonly credentialBindings: readonly {
+      readonly service: string;
+      readonly bindingId: string;
+      readonly revision: number;
+    }[];
   };
+  readonly permissionSnapshot: TrustRuleSnapshot;
   readonly budget: {
     readonly maxCalls: number;
     readonly maxTokens: number;
@@ -66,68 +93,76 @@ export class TransitionConversationAssignmentIssuer
   implements ConversationAssignmentIssuer
 {
   readonly #signer: ProtocolSigner;
+  readonly #verifier: ProtocolSignatureVerifier;
   readonly #localDomainId: string;
+  readonly #snapshotFor: TransitionConversationAssignmentIssuerOptions["snapshotFor"];
   readonly #clock: () => string;
-  readonly #policy: TransitionConversationCredentialPolicy;
 
   constructor(options: TransitionConversationAssignmentIssuerOptions) {
     this.#signer = options.signer;
+    this.#verifier = options.verifier;
     this.#localDomainId = requireIdentifier(
       options.localDomainId,
       "Local resource domain id",
     );
+    this.#snapshotFor = options.snapshotFor;
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    this.#policy = structuredClone(options.policy);
-    if (
-      !Number.isSafeInteger(this.#policy.credentialTtlMs) ||
-      this.#policy.credentialTtlMs <= 0 ||
-      !Number.isSafeInteger(this.#policy.permissionSnapshot.version) ||
-      this.#policy.permissionSnapshot.version <= 0 ||
-      !/^sha256:[a-f0-9]{64}$/u.test(this.#policy.permissionSnapshot.digest) ||
-      !Number.isSafeInteger(this.#policy.budget.maxCalls) ||
-      this.#policy.budget.maxCalls <= 0 ||
-      !Number.isSafeInteger(this.#policy.budget.maxTokens) ||
-      this.#policy.budget.maxTokens <= 0 ||
-      !Number.isSafeInteger(this.#policy.localGovernorEpoch) ||
-      this.#policy.localGovernorEpoch <= 0
-    ) {
-      throw new TypeError("Transition credential policy is invalid");
-    }
-    for (const revision of Object.values(this.#policy.manifestRequires)) {
-      if (!Number.isSafeInteger(revision) || revision <= 0) {
-        throw new TypeError("Transition manifest revisions must be positive integers");
-      }
-    }
   }
 
   issue(input: ConversationAssignmentIssueInput): UnsignedConversationEnvelope {
-    if (!Number.isSafeInteger(input.attempt) || input.attempt <= 0) {
+    const policy = validateTransitionPolicy(input.policy, this.#verifier);
+    if (
+      !Number.isSafeInteger(input.attempt) || input.attempt <= 0
+    ) {
       throw new TypeError("Assignment attempt must be a positive safe integer");
     }
     const issuedAt = canonicalTime(this.#clock(), "Credential issue time");
     const expiry = new Date(
-      Date.parse(issuedAt) + this.#policy.credentialTtlMs,
+      Date.parse(issuedAt) + policy.credentialTtlMs,
     ).toISOString();
-    const manifestPayload = {
-      v: 1 as const,
+    const target = this.#snapshotFor(input.executorId);
+    if (!target) {
+      throw new ManifestSelectionError({
+        code: "capability-gap",
+        message: "Executor capability snapshot is unavailable",
+        retryable: true,
+      });
+    }
+    const manifest = createExecutionManifest({
       baseRef: {
         execution: "conversation" as const,
         conversationId: input.conversationId,
         baseRevision: input.baseRevision,
       },
-      requires: { ...this.#policy.manifestRequires },
-      environment: {},
-      credentialBindings: [],
-    };
-    const manifest = {
-      ...manifestPayload,
-      digest: protocolDigest("ExecutionManifest", 1, manifestPayload),
-    };
+      protocolVersion: policy.manifestCapabilities.protocolVersion,
+      requires: {
+        ...policy.manifestRequires,
+        permissionSnapshotVersion: policy.permissionSnapshot.snapshotVersion,
+      },
+      tools: [...policy.manifestCapabilities.tools],
+      mcpServers: [...policy.manifestCapabilities.mcpServers],
+      environment: {
+        credentialBindings: policy.manifestCapabilities.credentialBindings.map(
+          ({ service, bindingId }) => ({ service, bindingId }),
+        ),
+      },
+      credentialBindings: policy.manifestCapabilities.credentialBindings.map(
+        (binding) => ({ ...binding }),
+      ),
+    });
+    const compatibility = matchManifest(
+      manifest,
+      target.descriptor,
+      target.inventory,
+    );
+    if (!compatibility.ok) {
+      throw new ManifestSelectionError(compatibility.error);
+    }
 
     const permissionPayload = {
       v: 1 as const,
-      snapshotVersion: this.#policy.permissionSnapshot.version,
-      snapshotDigest: this.#policy.permissionSnapshot.digest,
+      snapshotVersion: policy.permissionSnapshot.snapshotVersion,
+      snapshotDigest: policy.permissionSnapshot.digest,
       binding: {
         execution: "conversation" as const,
         runId: input.runId,
@@ -187,11 +222,11 @@ export class TransitionConversationAssignmentIssuer
         ownerEpoch: input.ownerEpoch,
       },
       audience: { executorId: input.executorId },
-      budget: { ...this.#policy.budget },
+      budget: { ...policy.budget },
       domain: {
         kind: "local" as const,
         localDomainId: this.#localDomainId,
-        localGovernorEpoch: this.#policy.localGovernorEpoch,
+        localGovernorEpoch: policy.localGovernorEpoch,
       },
       activation: { kind: "assignment" as const, assignmentId: input.assignmentId },
       issuedAt,
@@ -244,4 +279,35 @@ function requireIdentifier(value: string, label: string): string {
     throw new TypeError(`${label} is invalid`);
   }
   return value;
+}
+
+function validateTransitionPolicy(
+  input: TransitionConversationCredentialPolicy,
+  verifier: ProtocolSignatureVerifier,
+): TransitionConversationCredentialPolicy {
+  const policy = structuredClone(input);
+  if (
+    !Number.isSafeInteger(policy.credentialTtlMs) ||
+    policy.credentialTtlMs <= 0 ||
+    !Number.isSafeInteger(policy.budget.maxCalls) ||
+    policy.budget.maxCalls <= 0 ||
+    !Number.isSafeInteger(policy.budget.maxTokens) ||
+    policy.budget.maxTokens <= 0 ||
+    !Number.isSafeInteger(policy.localGovernorEpoch) ||
+    policy.localGovernorEpoch <= 0
+  ) {
+    throw new TypeError("Transition credential policy is invalid");
+  }
+  for (const revision of Object.values(policy.manifestRequires)) {
+    if (!Number.isSafeInteger(revision) || revision <= 0) {
+      throw new TypeError("Transition manifest revisions must be positive integers");
+    }
+  }
+  return {
+    ...policy,
+    permissionSnapshot: validateTrustRuleSnapshot(
+      policy.permissionSnapshot,
+      verifier,
+    ),
+  };
 }

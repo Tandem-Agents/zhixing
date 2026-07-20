@@ -71,9 +71,11 @@ import {
   InProcessAssignmentSubmission,
   type OwnerControlAuthorizer,
 } from "@zhixing/executor";
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
+import type {
+  AuthorityRuntimeStack,
+  ConversationRuntimeBinding,
+} from "../setup-delivery.js";
 
-const EXECUTOR_ID = "executor:local";
 const CONTEXT_TTL_MS = 15 * 60 * 1_000;
 
 export interface ConversationProtocolRuntimeOptions {
@@ -297,6 +299,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     string,
     AuthorityCapability<"conversation">
   >();
+  readonly #assignmentRuntimeBindings = new Map<string, ConversationRuntimeBinding>();
   readonly #schedulingRuns = new Set<string>();
   readonly #scheduledRuns = new Set<string>();
   readonly #preparedAdmissions = new Map<string, PreparedConversationAdmission>();
@@ -341,10 +344,27 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#ledger = new ConversationAssignmentLedger({
       log: options.authority.authorityLog,
       artifacts: options.authority.artifacts,
-      executorId: EXECUTOR_ID,
+      executorId: options.authority.executorId,
       signer: options.authority.signer,
       verifier: options.authority.verifier,
       ownerControl,
+      snapshotFor: (executorId) =>
+        options.authority.executorCapabilities.snapshotFor(executorId),
+      permissionSnapshotFor: options.authority.permissionSnapshotFor,
+      runtimeBindingGuard: ({ assignmentId, manifest }) => {
+        const binding = this.#assignmentRuntimeBindings.get(assignmentId);
+        if (binding === undefined) {
+          return {
+            code: "capability-gap",
+            message: "Assembled runtime binding is unavailable",
+            retryable: true,
+          };
+        }
+        return options.authority.validateConversationRuntimeBinding({
+          manifest,
+          binding,
+        });
+      },
       clock: this.#clock,
       ...(options.maxPendingInteractions === undefined
         ? {}
@@ -352,9 +372,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     });
     this.#issuer = new TransitionConversationAssignmentIssuer({
       signer: options.authority.signer,
+      verifier: options.authority.verifier,
       localDomainId: `local:${options.authority.deviceId}`,
+      snapshotFor: (executorId) =>
+        options.authority.executorCapabilities.snapshotFor(executorId),
       clock: this.#clock,
-      policy: options.authority.conversationAssignmentPolicy,
     });
     this.#contexts = createDispatchContexts({
       signer: options.authority.signer,
@@ -818,10 +840,21 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw new Error("Conversation has been durably deleted");
       }
       const attempt = await journal.nextAssignmentAttempt(runId);
+      const executionProfile = input.runtime.executionProfile?.();
+      const securitySnapshot = input.runtime.securitySnapshot?.();
+      if (executionProfile === undefined || securitySnapshot === undefined) {
+        throw new Error(
+          "Durable conversation runtime must expose execution and security snapshots",
+        );
+      }
+      const preparedAuthority = await this.#authority.prepareConversationAssignment({
+        executionProfile,
+        permissionRules: securitySnapshot.permissionRules,
+      });
       const unsigned = this.#issuer.issue({
         runId,
         assignmentId,
-        executorId: EXECUTOR_ID,
+        executorId: this.#authority.executorId,
         conversationId: input.conversationId,
         ownerEpoch: this.#authority.anchorEpoch,
         baseRevision: authority.commitRevision,
@@ -838,9 +871,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           windowEpoch: authority.commitRevision + 1,
           messages: [...input.messages],
         },
+        policy: preparedAuthority.policy,
       });
       const dispatch = await journal.assign(unsigned);
       this.#rememberAssignment(dispatch.envelope);
+      this.#assignmentRuntimeBindings.set(
+        assignmentId,
+        preparedAuthority.binding,
+      );
       const submission = new InProcessAssignmentSubmission({
         ledger: this.#ledger,
         owner: journal,
@@ -866,7 +904,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             ),
         },
       });
-      const dispatchResults = await dispatcher.dispatchPending();
+      const dispatchResults = await (async () => {
+        try {
+          return await dispatcher.dispatchPending();
+        } finally {
+          this.#assignmentRuntimeBindings.delete(assignmentId);
+        }
+      })();
       if (dispatchResults.length !== 1 || !dispatchResults[0]!.accepted) {
         throw new Error("Local executor rejected a freshly issued assignment");
       }
@@ -1335,7 +1379,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       signer: this.#authority.signer,
       verifier: this.#authority.verifier,
       submission: createSubmissionAuthorizer(
-        EXECUTOR_ID,
+        this.#authority.executorId,
         this.#authority.verifier,
         this.#clock,
       ),
@@ -1550,6 +1594,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
         abort: (reason) => managed.runtime.abort(reason),
         async dispose() {},
+        securitySnapshot: () => requireRuntimeSecuritySnapshot(managed.runtime),
+        executionProfile: () => requireRuntimeExecutionProfile(managed.runtime),
       };
       const generator = this.run({
         conversationId,
@@ -2295,4 +2341,24 @@ function streamInteractionOutcome(
   if (decision.kind === "cancelled") return "cancelled";
   if (decision.kind === "deny") return "denied";
   return "allowed";
+}
+
+function requireRuntimeSecuritySnapshot(
+  runtime: SessionRuntime,
+): ReturnType<NonNullable<SessionRuntime["securitySnapshot"]>> {
+  const snapshot = runtime.securitySnapshot?.();
+  if (snapshot === undefined) {
+    throw new Error("Recovered conversation runtime lacks a security snapshot");
+  }
+  return snapshot;
+}
+
+function requireRuntimeExecutionProfile(
+  runtime: SessionRuntime,
+): ReturnType<NonNullable<SessionRuntime["executionProfile"]>> {
+  const profile = runtime.executionProfile?.();
+  if (profile === undefined) {
+    throw new Error("Recovered conversation runtime lacks an execution profile");
+  }
+  return profile;
 }

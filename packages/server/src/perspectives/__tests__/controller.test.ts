@@ -115,6 +115,7 @@ describe("PerspectivesController", () => {
     const appendRun = appendRunSpy();
     const durableRuns: RunRecordInput[] = [];
     const durableInvocations: unknown[] = [];
+    const durableAuthorityFacts: unknown[] = [];
     const publishPendingFinals = vi.fn(async () => {
       throw new Error("observer temporarily unavailable");
     });
@@ -125,6 +126,10 @@ describe("PerspectivesController", () => {
       durableTurnExecutor: stubDurableTurnExecutor({
         async *run(input) {
           durableInvocations.push(input.invocation);
+          durableAuthorityFacts.push({
+            security: input.runtime.securitySnapshot?.(),
+            execution: input.runtime.executionProfile?.(),
+          });
           insideDurableAssignment = true;
           try {
             const generator = input.runtime.run(input.messages, input.options);
@@ -176,6 +181,21 @@ describe("PerspectivesController", () => {
         question: "使用耐久协议",
       },
     ]);
+    expect(durableAuthorityFacts).toEqual([{
+      security: {
+        contextId: { kind: "main" },
+        workspacePath: null,
+        permissionRules: [],
+        builtinRules: [],
+        rateLimits: [],
+        confirmations: [],
+      },
+      execution: {
+        tools: ["Read"],
+        mcpServers: ["filesystem"],
+        providerIds: ["main"],
+      },
+    }]);
     expect(durableRuns[0]).toMatchObject({
       perspectives: {
         definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
@@ -603,6 +623,23 @@ function createRuntime(sessionId: string): SessionRuntime {
       return false;
     },
     async dispose() {},
+    securitySnapshot() {
+      return {
+        contextId: { kind: "main" },
+        workspacePath: null,
+        permissionRules: [],
+        builtinRules: [],
+        rateLimits: [],
+        confirmations: [],
+      };
+    },
+    executionProfile() {
+      return {
+        tools: ["Read"],
+        mcpServers: ["filesystem"],
+        providerIds: ["main"],
+      };
+    },
     estimateMessagesTokens(messages: readonly Message[]) {
       return Math.max(1, messages.length * 10);
     },

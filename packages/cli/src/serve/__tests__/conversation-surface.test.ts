@@ -24,6 +24,14 @@ import type { AssemblyContext } from "../access-surface.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 
+const TEST_EXECUTOR_READINESS = {
+  tools: [] as string[],
+  mcpServers: [] as string[],
+  credentialBindings: [],
+  deviceScopedCredentialBindingIds: [] as string[],
+  credentialGeneration: null,
+};
+
 const conversationSurface = createAccessSurfaces({}).find(
   (s) => s.name === "conversation",
 )!;
@@ -102,6 +110,7 @@ async function setupCtx() {
     authorityRuntime: await setupAuthorityRuntime({
       zhixingHome: tmp,
       secretStore,
+      executorReadiness: TEST_EXECUTOR_READINESS,
     }),
     durableInteractions: new DurableConversationInteractionObserver(),
     perspectives: { executePerspectiveWork: vi.fn() },

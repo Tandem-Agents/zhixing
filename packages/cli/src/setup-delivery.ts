@@ -19,6 +19,7 @@ import {
   DEFAULT_DELIVERY_CONFIG,
   DEFAULT_AUTHORITY_DELIVERY_CONFIG,
   OutboxRegistry,
+  type RuntimeExecutionProfile,
   createEventBus,
   createOutboxSender,
   channelAuthorityDeliveryTransport,
@@ -27,13 +28,27 @@ import {
   type DeliveryEventMap,
   type DeliveryStatusNotice,
   type OutboxEvent,
+  type PermissionRule,
 } from "@zhixing/core";
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import type {
+  AuthorityError,
+  CredentialBindingDescriptor,
+  ExecutionManifest,
+  SecretStorePort,
+  TrustRuleSnapshot,
+} from "@zhixing/core/contracts";
 import {
+  canonicalize,
+  createSignedCapabilityDescriptor,
+  createSignedExecutorVersionInventory,
+  compareCanonicalStrings,
+  EXECUTION_PROTOCOL_VERSION,
+  ExecutorCapabilityDirectory,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
+import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -57,10 +72,16 @@ import {
 } from "@zhixing/mesh/device-key-store";
 
 import path from "node:path";
+import {
+  FileExecutionSnapshotVersionStore,
+  FileExecutorCapabilityDirectoryStore,
+  FileTrustRuleSnapshotCatalog,
+} from "./executor-snapshot-version-store.js";
 
 export interface AuthorityRuntimeStack {
   readonly anchorEpoch: number;
   readonly deviceId: string;
+  readonly executorId: string;
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
   readonly authority: DeliveryAuthority;
@@ -68,7 +89,26 @@ export interface AuthorityRuntimeStack {
   readonly artifacts: FileArtifactStore;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
-  readonly conversationAssignmentPolicy: TransitionConversationCredentialPolicy;
+  readonly executorCapabilities: ExecutorCapabilityDirectory;
+  readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
+  readonly prepareConversationAssignment: (input: {
+    readonly executionProfile: RuntimeExecutionProfile;
+    readonly permissionRules: readonly PermissionRule[];
+  }) => Promise<PreparedConversationAssignmentAuthority>;
+  readonly validateConversationRuntimeBinding: (input: {
+    readonly manifest: ExecutionManifest<"conversation">;
+    readonly binding: ConversationRuntimeBinding;
+  }) => AuthorityError | undefined;
+}
+
+export interface ConversationRuntimeBinding {
+  readonly executionProfile: RuntimeExecutionProfile;
+  readonly deviceDigest: string;
+}
+
+export interface PreparedConversationAssignmentAuthority {
+  readonly policy: TransitionConversationCredentialPolicy;
+  readonly binding: ConversationRuntimeBinding;
 }
 
 export interface DeliveryStack {
@@ -106,11 +146,22 @@ export interface SetupDeliveryOptions {
   onOutboxEvent?: (event: OutboxEvent) => void;
 }
 
+export interface ExecutorReadiness {
+  readonly tools: readonly string[];
+  readonly mcpServers: readonly string[];
+  readonly credentialBindings: readonly Omit<CredentialBindingDescriptor, "revision">[];
+  readonly deviceScopedCredentialBindingIds: readonly string[];
+  /** Opaque SecretStore commit generation; never published on protocol surfaces. */
+  readonly credentialGeneration: string | null;
+}
+
 export interface SetupAuthorityRuntimeOptions {
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly anchorEpoch?: number;
   readonly configurationSnapshot?: unknown;
+  readonly executorReadiness: ExecutorReadiness | (() => ExecutorReadiness);
+  readonly clock?: () => string;
 }
 
 export async function setupAuthorityRuntime(
@@ -144,36 +195,194 @@ export async function setupAuthorityRuntime(
       verifyDeviceSignature(identity, schemaId, version, payload, signature);
     },
   };
-  const configurationDigest = protocolDigest(
-    "LocalTransitionConfiguration",
-    1,
-    options.configurationSnapshot ?? { profile: "default" },
+  const clock = options.clock ?? (() => new Date().toISOString());
+  const executorId = "executor:local";
+  const capabilityDirectoryStore = new FileExecutorCapabilityDirectoryStore(
+    path.join(authorityRoot, "executor-capability-directory.json"),
   );
-  const revision = transitionRevision(configurationDigest);
-  const conversationAssignmentPolicy: TransitionConversationCredentialPolicy = {
-    credentialTtlMs: 24 * 60 * 60 * 1_000,
-    manifestRequires: {
-      runtimeConfigRev: revision,
-      modelProfileRev: revision,
-      policyRev: revision,
-      skillsRev: revision,
-      rubricsRev: revision,
-      promptAssetsRev: revision,
-      permissionSnapshotVersion: revision,
+  let capabilityDirectoryEstablished =
+    (await capabilityDirectoryStore.load()) !== undefined;
+  const versionStore = new FileExecutionSnapshotVersionStore(
+    path.join(authorityRoot, "executor-snapshot-version.json"),
+    clock,
+  );
+  await versionStore.assertCapabilityDirectoryCoherence(
+    capabilityDirectoryEstablished,
+  );
+  const permissionSnapshots = await FileTrustRuleSnapshotCatalog.open(
+    path.join(authorityRoot, "permission-snapshots"),
+    verifier,
+  );
+  const executorCapabilities = await ExecutorCapabilityDirectory.open({
+    verifier,
+    store: capabilityDirectoryStore,
+    isDeviceAuthorized: (deviceKeyId) => deviceKeyId === key.deviceId,
+    allowInitialize: !capabilityDirectoryEstablished,
+  });
+  const publicationQueue = new SerialTaskQueue();
+  const readinessSource = () => normalizeExecutorReadiness(
+    typeof options.executorReadiness === "function"
+      ? options.executorReadiness()
+      : options.executorReadiness,
+    key.deviceId,
+  );
+  const deviceDigestFor = (readiness: NormalizedExecutorReadiness) =>
+    protocolDigest("LocalTransitionConfiguration", 1, {
+      configuration: options.configurationSnapshot ?? { profile: "default" },
+      executorReadiness: {
+        tools: readiness.tools,
+        mcpServers: readiness.mcpServers,
+        credentialBindings: readiness.credentialBindings,
+        credentialGeneration: readiness.credentialGeneration,
+      },
+    });
+  const prepareConversationAssignment = (
+    input: {
+      readonly executionProfile: RuntimeExecutionProfile;
+      readonly permissionRules: readonly PermissionRule[];
     },
-    permissionSnapshot: {
-      version: revision,
-      digest: protocolDigest("TrustRuleSnapshot", 1, {
-        deviceId: key.deviceId,
-        configurationDigest,
-      }),
-    },
-    budget: { maxCalls: 64, maxTokens: 256_000 },
-    localGovernorEpoch: 1,
+  ) => publicationQueue.run(async (): Promise<PreparedConversationAssignmentAuthority> => {
+    const executionProfile = normalizeRuntimeExecutionProfile(input.executionProfile);
+    const readiness = readinessSource();
+    assertRuntimeAvailable(executionProfile, readiness);
+    const permissionPublication = await permissionSnapshots.publishRules({
+      rules: input.permissionRules,
+      signer: key,
+      generatedAt: canonicalTime(clock(), "Permission snapshot time"),
+    });
+    const deviceDigest = deviceDigestFor(readiness);
+    const inventoryDigest = protocolDigest("LocalTransitionInventory", 1, {
+      deviceDigest,
+      permissionSnapshotHighWater: permissionPublication.highWater,
+    });
+    const versionResolution = await versionStore.synchronize(
+      executorId,
+      deviceDigest,
+      inventoryDigest,
+      { allowInitialize: !capabilityDirectoryEstablished },
+    );
+    const capabilityRevision = versionResolution.deviceRevision;
+    const versionedCredentialBindings = readiness.credentialBindings.map((binding) => ({
+      ...binding,
+      revision: capabilityRevision,
+    }));
+    const requiredCredentialBindings = requiredBindingsForRuntime(
+      executionProfile,
+      versionedCredentialBindings,
+    );
+    const descriptor = createSignedCapabilityDescriptor({
+      executorId,
+      revision: capabilityRevision,
+      protocolVersion: EXECUTION_PROTOCOL_VERSION,
+      workspaces: [],
+      tools: [...readiness.tools],
+      mcpServers: [...readiness.mcpServers],
+      credentialBindings: versionedCredentialBindings,
+      evidenceCapabilities: [],
+      at: versionResolution.deviceGeneratedAt,
+    }, key);
+    const inventory = createSignedExecutorVersionInventory({
+      executorId,
+      inventoryRevision: versionResolution.inventoryRevision,
+      capabilityRevision,
+      configVersions: {
+        runtimeConfigRev: capabilityRevision,
+        modelProfileRev: capabilityRevision,
+        policyRev: capabilityRevision,
+      },
+      assetVersions: {
+        skillsRev: capabilityRevision,
+        rubricsRev: capabilityRevision,
+        promptAssetsRev: capabilityRevision,
+      },
+      permissionSnapshotHighWater: permissionPublication.highWater,
+      credentialBindingRevisions: versionedCredentialBindings.map(
+        ({ bindingId, revision }) => ({ bindingId, revision }),
+      ),
+      at: versionResolution.inventoryGeneratedAt,
+    }, key);
+    const snapshotUpdate = await executorCapabilities.accept({ descriptor, inventory });
+    if (!snapshotUpdate.ok) {
+      throw new Error(
+        `Local executor capability snapshot rejected: ${snapshotUpdate.error.message}`,
+      );
+    }
+    await versionStore.markCapabilityDirectoryEstablished({
+      executorId,
+      deviceDigest,
+      deviceRevision: versionResolution.deviceRevision,
+      inventoryDigest,
+      inventoryRevision: versionResolution.inventoryRevision,
+    });
+    capabilityDirectoryEstablished = true;
+    return {
+      policy: {
+        credentialTtlMs: 24 * 60 * 60 * 1_000,
+        manifestRequires: {
+          runtimeConfigRev: capabilityRevision,
+          modelProfileRev: capabilityRevision,
+          policyRev: capabilityRevision,
+          skillsRev: capabilityRevision,
+          rubricsRev: capabilityRevision,
+          promptAssetsRev: capabilityRevision,
+        },
+        manifestCapabilities: {
+          protocolVersion: EXECUTION_PROTOCOL_VERSION,
+          tools: executionProfile.tools,
+          mcpServers: executionProfile.mcpServers,
+          credentialBindings: requiredCredentialBindings,
+        },
+        permissionSnapshot: permissionPublication.snapshot,
+        budget: { maxCalls: 64, maxTokens: 256_000 },
+        localGovernorEpoch: 1,
+      },
+      binding: { executionProfile, deviceDigest },
+    };
+  });
+  const validateConversationRuntimeBinding = (input: {
+    readonly manifest: ExecutionManifest<"conversation">;
+    readonly binding: ConversationRuntimeBinding;
+  }): AuthorityError | undefined => {
+    try {
+      const profile = normalizeRuntimeExecutionProfile(input.binding.executionProfile);
+      const readiness = readinessSource();
+      assertRuntimeAvailable(profile, readiness);
+      if (input.binding.deviceDigest !== deviceDigestFor(readiness)) {
+        return {
+          code: "revision-conflict",
+          message: "Executor device generation changed before durable receipt",
+          retryable: true,
+        };
+      }
+      const versionedBindings = readiness.credentialBindings.map((binding) => ({
+        ...binding,
+        revision: input.manifest.requires.runtimeConfigRev,
+      }));
+      const expectedBindings = requiredBindingsForRuntime(profile, versionedBindings);
+      if (
+        canonicalize(input.manifest.tools) !== canonicalize(profile.tools) ||
+        canonicalize(input.manifest.mcpServers) !== canonicalize(profile.mcpServers) ||
+        canonicalize(input.manifest.credentialBindings) !== canonicalize(expectedBindings)
+      ) {
+        return {
+          code: "revision-conflict",
+          message: "Execution manifest does not bind the assembled runtime",
+          retryable: true,
+        };
+      }
+      return undefined;
+    } catch (error) {
+      return {
+        code: "capability-gap",
+        message: error instanceof Error ? error.message : "Runtime readiness is unavailable",
+        retryable: true,
+      };
+    }
   };
   return {
     anchorEpoch,
     deviceId: key.deviceId,
+    executorId,
     signer: key,
     verifier,
     authority,
@@ -181,12 +390,154 @@ export async function setupAuthorityRuntime(
     artifacts,
     participant,
     controlAdmission,
-    conversationAssignmentPolicy,
+    executorCapabilities,
+    permissionSnapshotFor: (digest) => permissionSnapshots.snapshotFor(digest),
+    prepareConversationAssignment,
+    validateConversationRuntimeBinding,
   };
 }
 
-function transitionRevision(digest: string): number {
-  return Number.parseInt(digest.slice("sha256:".length, "sha256:".length + 12), 16) + 1;
+interface NormalizedExecutorReadiness {
+  readonly tools: readonly string[];
+  readonly mcpServers: readonly string[];
+  readonly credentialBindings: readonly Omit<CredentialBindingDescriptor, "revision">[];
+  readonly credentialGeneration: string | null;
+}
+
+function normalizeExecutorReadiness(
+  input: ExecutorReadiness,
+  deviceId: string,
+): NormalizedExecutorReadiness {
+  const tools = normalizeIdentifiers(input.tools, "Executor tools");
+  const mcpServers = normalizeIdentifiers(input.mcpServers, "Executor MCP servers");
+  const deviceScopedBindingIds = new Set(input.deviceScopedCredentialBindingIds);
+  const logicalBindingIds = new Set<string>();
+  const credentialBindings = input.credentialBindings.map((binding) => {
+    requireIdentifier(binding.bindingId, "Executor credential binding id");
+    requireIdentifier(binding.service, "Executor credential service");
+    if (logicalBindingIds.has(binding.bindingId)) {
+      throw new TypeError("Executor credential binding ids must be unique");
+    }
+    logicalBindingIds.add(binding.bindingId);
+    const deviceScoped = deviceScopedBindingIds.delete(binding.bindingId);
+    if (deviceScoped && binding.verification !== "user-alias") {
+      throw new TypeError("Only user-alias credential bindings can be device-scoped");
+    }
+    return {
+      bindingId: deviceScoped
+        ? deviceScopedUserAliasBindingId(deviceId, binding.bindingId)
+        : binding.bindingId,
+      service: binding.service,
+      verification: binding.verification,
+      ...(binding.resource === undefined ? {} : { resource: binding.resource }),
+      ...(binding.principalFingerprint === undefined
+        ? {}
+        : { principalFingerprint: binding.principalFingerprint }),
+      ...(binding.tenant === undefined ? {} : { tenant: binding.tenant }),
+      ...(binding.scopes === undefined ? {} : { scopes: [...binding.scopes] }),
+    } satisfies Omit<CredentialBindingDescriptor, "revision">;
+  }).sort((left, right) => compareCanonicalStrings(left.bindingId, right.bindingId));
+  if (deviceScopedBindingIds.size > 0) {
+    throw new TypeError("Device-scoped executor credential binding is not published");
+  }
+  if (
+    input.credentialGeneration !== null &&
+    (typeof input.credentialGeneration !== "string" || input.credentialGeneration.length === 0)
+  ) {
+    throw new TypeError("Executor credential generation is invalid");
+  }
+  return {
+    tools,
+    mcpServers,
+    credentialBindings,
+    credentialGeneration: input.credentialGeneration,
+  };
+}
+
+function normalizeRuntimeExecutionProfile(
+  input: RuntimeExecutionProfile,
+): RuntimeExecutionProfile {
+  return {
+    tools: normalizeIdentifiers(input.tools, "Runtime tools"),
+    mcpServers: normalizeIdentifiers(input.mcpServers, "Runtime MCP servers"),
+    providerIds: normalizeIdentifiers(input.providerIds, "Runtime providers"),
+  };
+}
+
+function assertRuntimeAvailable(
+  profile: RuntimeExecutionProfile,
+  readiness: NormalizedExecutorReadiness,
+): void {
+  const tools = new Set(readiness.tools);
+  const mcpServers = new Set(readiness.mcpServers);
+  if (profile.tools.some((tool) => !tools.has(tool))) {
+    throw new Error("Assembled runtime requires an unavailable tool");
+  }
+  if (profile.mcpServers.some((server) => !mcpServers.has(server))) {
+    throw new Error("Assembled runtime requires an unavailable MCP server");
+  }
+}
+
+function requiredBindingsForRuntime(
+  profile: RuntimeExecutionProfile,
+  available: readonly CredentialBindingDescriptor[],
+): Array<{ readonly service: string; readonly bindingId: string; readonly revision: number }> {
+  const byService = new Map<string, CredentialBindingDescriptor>();
+  for (const binding of available) {
+    if (byService.has(binding.service)) {
+      throw new TypeError(`Executor publishes multiple bindings for service ${binding.service}`);
+    }
+    byService.set(binding.service, binding);
+  }
+  const required: CredentialBindingDescriptor[] = [];
+  for (const providerId of profile.providerIds) {
+    const binding = byService.get(`provider-${providerId}`);
+    if (binding === undefined) {
+      throw new Error(`Resolved provider credential is not ready: ${providerId}`);
+    }
+    required.push(binding);
+  }
+  for (const serverId of profile.mcpServers) {
+    const binding = byService.get(`mcp-${serverId}`);
+    if (binding !== undefined) required.push(binding);
+  }
+  return required
+    .map(({ service, bindingId, revision }) => ({ service, bindingId, revision }))
+    .sort((left, right) => compareCanonicalStrings(
+      `${left.service}\u0000${left.bindingId}`,
+      `${right.service}\u0000${right.bindingId}`,
+    ));
+}
+
+function normalizeIdentifiers(values: readonly string[], label: string): string[] {
+  const normalized = new Set<string>();
+  for (const value of values) {
+    requireIdentifier(value, label);
+    normalized.add(value);
+  }
+  return [...normalized].sort(compareCanonicalStrings);
+}
+
+function requireIdentifier(value: string, label: string): void {
+  if (!value || value.length > 480 || /[\0\r\n]/u.test(value)) {
+    throw new TypeError(`${label} contains an invalid identifier`);
+  }
+}
+
+function canonicalTime(value: string, label: string): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new TypeError(`${label} must be a canonical ISO timestamp`);
+  }
+  return value;
+}
+
+function deviceScopedUserAliasBindingId(deviceId: string, logicalBindingId: string): string {
+  const bindingId = `user-alias:${deviceId}:${logicalBindingId}`;
+  if (bindingId.length > 480) {
+    throw new TypeError("Device-scoped credential binding id is too long");
+  }
+  return bindingId;
 }
 
 export async function setupDelivery(options: SetupDeliveryOptions): Promise<DeliveryStack> {

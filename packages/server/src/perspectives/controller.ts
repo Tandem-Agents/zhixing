@@ -122,6 +122,20 @@ export class PerspectivesController {
       },
       abort: () => false,
       async dispose() {},
+      securitySnapshot() {
+        const snapshot = input.managed.runtime.securitySnapshot?.();
+        if (snapshot === undefined) {
+          throw new Error("Perspective runtime lacks a security snapshot");
+        }
+        return snapshot;
+      },
+      executionProfile() {
+        const profile = input.managed.runtime.executionProfile?.();
+        if (profile === undefined) {
+          throw new Error("Perspective runtime lacks an execution profile");
+        }
+        return profile;
+      },
     };
     try {
       const generator = durable.run({

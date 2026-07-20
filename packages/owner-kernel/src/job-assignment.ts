@@ -55,6 +55,7 @@ import {
   dispatchEnvelopeDigest,
   jobBundleRoots,
   jobDeliveryPlanDigest,
+  matchManifest,
   interactionMirrorBatchDigest,
   interactionMirrorSeed,
   mutationBatchArtifact,
@@ -68,6 +69,7 @@ import {
   validateCancelProof,
   validateDispatchConflictProof,
   validateDispatchResult,
+  validateExecutionManifest,
   validateJobCommitFence,
   validateJobActivation,
   validateJobEnvelope,
@@ -84,9 +86,11 @@ import {
   validateTaskDefinition,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
+  type ExecutorCapabilitySnapshot,
   type UnsignedJobEnvelope,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
+import { ManifestSelectionError } from "./conversation-transition-authority.js";
 import {
   compileDeliveryContent,
   DeliveryContentValidationError,
@@ -453,6 +457,7 @@ export interface JobJournalOptions {
   readonly artifacts: ArtifactStore;
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
+  readonly snapshotFor: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
   readonly submission: AssignmentSubmissionAuthorizer;
   readonly ingress: JobIngressAuthorizer;
   /** Owner-side re-authorization of executor abort tickets; required for online receipt, fail-closed when absent. */
@@ -463,6 +468,17 @@ export interface JobJournalOptions {
   readonly systemResources?: SystemJobResourceCoordinator;
   readonly systemHandlers?: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
   readonly clock?: () => string;
+}
+
+/** Pure assignment metadata checked before the authority is allowed to issue credentials. */
+export interface JobAssignmentPlan {
+  readonly taskId: string;
+  readonly jobRunId: string;
+  readonly anchorEpoch: number;
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly manifest: UnsignedJobEnvelope["manifest"];
+  readonly materialize: () => UnsignedJobEnvelope;
 }
 
 export type JobCancelResult =
@@ -482,6 +498,7 @@ export class JobJournal {
   readonly #artifacts: ArtifactStore;
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
+  readonly #snapshotFor: JobJournalOptions["snapshotFor"];
   readonly #submission: AssignmentSubmissionAuthorizer;
   readonly #ingress: JobIngressAuthorizer;
   readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
@@ -513,6 +530,7 @@ export class JobJournal {
     this.#artifacts = options.artifacts;
     this.#signer = options.signer;
     this.#verifier = options.verifier;
+    this.#snapshotFor = options.snapshotFor;
     this.#submission = options.submission;
     this.#ingress = options.ingress;
     this.#abortTickets = options.abortTickets;
@@ -784,39 +802,65 @@ export class JobJournal {
     return transaction.value;
   }
 
-  async assign(unsigned: UnsignedJobEnvelope): Promise<PendingJobDispatch> {
-    if (unsigned.work.taskId !== this.#taskId) {
+  async assign(plan: JobAssignmentPlan): Promise<PendingJobDispatch> {
+    if (plan.taskId !== this.#taskId) {
       throw new TypeError("Dispatch belongs to a different task journal");
     }
-    if (unsigned.work.fence.anchorEpoch !== this.#anchorEpoch) {
+    if (plan.anchorEpoch !== this.#anchorEpoch) {
       throw new TypeError("Dispatch belongs to a different anchor epoch");
     }
-    const envelope = createSignedJobEnvelope(unsigned, this.#signer, this.#verifier);
+    assertIdentifier(plan.assignmentId, "Assignment id");
+    assertIdentifier(plan.executorId, "Executor id");
+    const manifest = validateExecutionManifest(plan.manifest);
+    if (
+      manifest.baseRef.execution !== "job" ||
+      manifest.baseRef.taskId !== plan.taskId ||
+      manifest.baseRef.jobRunId !== plan.jobRunId
+    ) {
+      throw new TypeError("Assignment plan manifest does not bind the job occurrence");
+    }
     const existingState = await this.#select((state) => {
-      const currentAssignmentId = state.assignmentByJob.get(envelope.work.jobRunId);
+      const currentAssignmentId = state.assignmentByJob.get(plan.jobRunId);
       const currentAssignment = currentAssignmentId
         ? state.assignedById.get(currentAssignmentId)
         : undefined;
       return {
         currentAssignment: currentAssignment ? snapshot(currentAssignment) : undefined,
-        assignmentIdInUse: state.assignedById.has(envelope.assignmentId),
+        assignmentIdInUse: state.assignedById.has(plan.assignmentId),
       };
     });
     if (existingState.currentAssignment) {
-      if (
-        existingState.currentAssignment.record.assignmentId !== envelope.assignmentId ||
-        canonicalize(withoutSignature(existingState.currentAssignment.envelope)) !==
-          canonicalize(withoutSignature(envelope))
-      ) {
-        throw new Error("Job occurrence already has a different assignment");
-      }
-      const dispatch = materializeDispatch(existingState.currentAssignment, this.#signer);
-      await this.resumeCompatibilityProjection();
-      return dispatch;
+      throw new Error("Job occurrence is already assigned; replay its durable assignment");
     }
     if (existingState.assignmentIdInUse) {
       throw new Error("Assignment id already belongs to another occurrence");
     }
+    const target = this.#snapshotFor(plan.executorId);
+    if (target === undefined) {
+      throw new ManifestSelectionError({
+        code: "capability-gap",
+        message: "Executor capability snapshot is unavailable",
+        retryable: true,
+      });
+    }
+    const compatibility = matchManifest(
+      manifest,
+      target.descriptor,
+      target.inventory,
+    );
+    if (!compatibility.ok) throw new ManifestSelectionError(compatibility.error);
+    const unsigned = plan.materialize();
+    if (
+      unsigned.work.taskId !== plan.taskId ||
+      unsigned.work.jobRunId !== plan.jobRunId ||
+      unsigned.work.fence.anchorEpoch !== plan.anchorEpoch ||
+      unsigned.assignmentId !== plan.assignmentId ||
+      unsigned.executorId !== plan.executorId ||
+      canonicalize(unsigned.manifest) !== canonicalize(manifest)
+    ) {
+      throw new TypeError("Materialized assignment does not match its preflight plan");
+    }
+    const envelope = createSignedJobEnvelope(unsigned, this.#signer, this.#verifier);
     const references = await assertArtifactsPresent(envelope, this.#artifacts);
     const artifact = dispatchEnvelopeArtifact(envelope);
     const stored = await this.#artifacts.put(artifact.bytes);
@@ -900,6 +944,29 @@ export class JobJournal {
     if (!assigned) throw corruptJobJournal("Assigned job did not replay its outbox fact");
     await this.resumeCompatibilityProjection();
     return materializeDispatch(assigned, this.#signer);
+  }
+
+  async replayAssignment(unsigned: UnsignedJobEnvelope): Promise<PendingJobDispatch> {
+    if (unsigned.work.taskId !== this.#taskId) {
+      throw new TypeError("Dispatch belongs to a different task journal");
+    }
+    const current = await this.#select((state) => {
+      const assignmentId = state.assignmentByJob.get(unsigned.work.jobRunId);
+      const assigned = assignmentId === undefined
+        ? undefined
+        : state.assignedById.get(assignmentId);
+      return assigned === undefined ? undefined : snapshot(assigned);
+    });
+    if (
+      current === undefined ||
+      current.record.assignmentId !== unsigned.assignmentId ||
+      canonicalize(withoutSignature(current.envelope)) !== canonicalize(unsigned)
+    ) {
+      throw new Error("Durable job assignment does not match the replay request");
+    }
+    const dispatch = materializeDispatch(current, this.#signer);
+    await this.resumeCompatibilityProjection();
+    return dispatch;
   }
 
   async pendingDispatches(): Promise<PendingJobDispatch[]> {

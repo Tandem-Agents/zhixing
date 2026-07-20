@@ -96,6 +96,27 @@ class MemorySecretStore implements SecretStorePort {
 }
 
 describe("SecretStore credentials repository", () => {
+  it("loads credentials and their opaque committed generation from one coordinated snapshot", async () => {
+    const store = new MemorySecretStore();
+    const homeDir = await createTempDir("credential-snapshot");
+    await writeCredentials({ providers: { main: { apiKey: "first-secret" } } }, { store });
+    const first = await loadCredentialsWithLegacyMigration({ homeDir, store });
+    const firstGeneration = first.generation;
+    expect(first.credentials).toEqual({ providers: { main: { apiKey: "first-secret" } } });
+    expect(firstGeneration).toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
+    expect(firstGeneration).not.toContain("first-secret");
+
+    await writeCredentials({ providers: { main: { apiKey: "replacement-secret" } } }, { store });
+    const replacement = await loadCredentialsWithLegacyMigration({ homeDir, store });
+    const replacementGeneration = replacement.generation;
+    expect(replacement.credentials).toEqual({
+      providers: { main: { apiKey: "replacement-secret" } },
+    });
+    expect(replacementGeneration).toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
+    expect(replacementGeneration).not.toBe(firstGeneration);
+    expect(replacementGeneration).not.toContain("replacement-secret");
+  });
+
   it("round-trips provider, channel and MCP bindings without a plaintext file", async () => {
     const store = new MemorySecretStore();
     const credentials = {
@@ -177,6 +198,7 @@ describe("SecretStore credentials repository", () => {
     await expect(legacyCredentialsPresent(homeDir)).resolves.toBe(true);
     await expect(loadCredentialsWithLegacyMigration({ homeDir, store })).resolves.toEqual({
       credentials: {},
+      generation: null,
       migration: { migrated: false, entries: 0 },
     });
     await expect(readFile(temporary, "utf8")).rejects.toMatchObject({ code: "ENOENT" });

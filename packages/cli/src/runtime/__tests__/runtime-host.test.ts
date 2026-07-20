@@ -50,7 +50,7 @@ function makeHostOptions() {
     segmentDeps,
     extraTools: {
       taskListService: {},
-      mcpHub: {},
+      mcpHub: { catalog: vi.fn(() => []) },
       assembleTools: vi.fn((ctx: AssembledCtx) => {
         assembled.push(ctx);
         return tools;

@@ -48,6 +48,7 @@ import {
   getWorkScenesRoot,
   getWorkSceneConversationsRoot,
 } from "@zhixing/core";
+import { compareCanonicalStrings } from "@zhixing/core/protocol";
 import {
   createServerContext,
   runServer,
@@ -214,6 +215,7 @@ async function runServerProcess(
 
   const config: ZhixingConfig = startupResult.config;
   const credentials: ZhixingCredentials = startupResult.credentials;
+  const credentialGeneration = startupResult.credentialGeneration;
   const systemProtectedPaths = resolveSystemProtectedSecretPaths();
 
   // ============================================================================
@@ -461,6 +463,34 @@ async function runServerProcess(
     },
   });
   const runtimeFactory = executor.createInProcessRuntimeFactory(executorRole);
+  const executorCredentialBindings = [
+    ...Object.entries(credentials.providers ?? {})
+      .filter(([, entry]) => entry.apiKey.trim().length > 0)
+      .map(([providerId]) => ({
+        bindingId: `credential-provider-${providerId}`,
+        service: `provider-${providerId}`,
+        verification: "user-alias" as const,
+      })),
+    ...Object.entries(credentials.mcp ?? {})
+      .filter(([, entry]) => Object.values(entry).some((value) => value.trim().length > 0))
+      .map(([serverId]) => ({
+        bindingId: `credential-mcp-${serverId}`,
+        service: `mcp-${serverId}`,
+        verification: "user-alias" as const,
+      })),
+  ].sort((a, b) => compareCanonicalStrings(a.bindingId, b.bindingId));
+  const executorReadiness = () => {
+    const catalog = runtimeHost.capabilityCatalog();
+    return {
+      tools: catalog.tools,
+      mcpServers: catalog.mcpServers,
+      credentialBindings: executorCredentialBindings,
+      deviceScopedCredentialBindingIds: executorCredentialBindings.map(
+        (binding) => binding.bindingId,
+      ),
+      credentialGeneration,
+    };
+  };
 
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
   //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
@@ -504,6 +534,7 @@ async function runServerProcess(
     transcript,
     snapshots,
     runtimeFactory,
+    executorReadiness,
     convRepo,
     conversationDirectory,
     journalStore,

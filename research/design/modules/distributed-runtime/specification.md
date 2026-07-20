@@ -64,7 +64,8 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 | `TaskListOp` | 本文冻结（§1.3b；现状为整份状态替换 `updateTaskListState`，首个 op 即 set 全量） | 任务清单操作 |
 | `AdvancementControlEvent` | ≙ 现有 `AdvancementStoreEvent` @ `packages/core/src/advancement/types.ts:315`（控制日志十类事件的既有判别联合，直接 import type） | 推进控制日志事件族 |
 | `AdvancementSnapshot` | ≙ 现有 `AdvancementSession` @ `packages/core/src/advancement/types.ts`（S1 直接 import type；读结果不落 log，体量无阈值约束） | 推进状态快照 |
-| `TrustRule` | ≙ 现有 `PermissionRule` @ `packages/core/src/security/types.ts:232`（S4 如需演化走 `v` 升版，不预改） | 信任规则 |
+| `TrustRule` | ≙ 现有 `PermissionRule` @ `packages/core/src/security/types.ts:238` | 本机信任规则存储 DTO |
+| `PortableTrustRule` | 本文冻结（§1.3b）；由 `TrustRule` 显式投影，排除本机路径与可变命中统计 | 跨设备签名规则 DTO |
 | `TrustRuleSnapshot` | 本文冻结（§1.3b） | 签名规则快照 |
 | `ScheduleTaskSpec` | ≙ 现有 `TaskSpec` @ `packages/core/src/scheduler/facade.ts`（完整型 `ScheduledTask`；进程内领域类型，**不上 wire**——wire 用 §3.2 `ScheduleTaskSpecDto` 显式白名单：action 仅 agent-turn、webhook endpoint 整体 `SecretRef`、origin / system 等权威字段锚点生成） | 调度任务定义源类型（派发另用 §5.2 `JobExecutionInstruction`） |
 | `TaskSchedule` / `TaskPriority` | 现有同名 @ `packages/core/src/scheduler/types.ts`（进程内领域类型，**不上 wire**——wire 用 §1.3b `TaskScheduleDto` / `TaskPriorityDto` 快照） | 调度周期与优先级 |
@@ -92,7 +93,12 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 ```ts
 type TaskListOp = { op: "set"; state: TaskListState };   // 现状即整份替换（updateTaskListState）；增量 op 随真实需要经 v 升版
 interface SkillUsageRecord { skillId: string; lastHitAt: IsoTime; hitCount: number }   // ≙ SkillUsage + map 键提升为 skillId
-interface TrustRuleSnapshot { snapshotVersion: number; rules: TrustRule[];
+interface PortableTrustRule {
+  id: string; pattern: { tool: string; argument: string };
+  decision: PermissionDecision; scope: PermissionScope; createdAt: number;
+  contextId?: PermissionContextId; contributors?: TrustContribution[];
+} // 可选字段缺省时省略；contextPath / lastMatchedAt / matchCount 不上 wire
+interface TrustRuleSnapshot { snapshotVersion: number; rules: PortableTrustRule[];
   generatedAt: IsoTime; digest: Digest; signature: Signature }   // digest 按 §1.2 自摘要；锚点签发；PermissionSnapshotLease.snapshotDigest 指向它
 // 值域 / 小对象快照区：**新上 wire 的领域类型一律在此冻结快照**（协议基座符号如 Message / AgentYield 除外——其演进天然连动顶层 v）。
 // 裁决依据：领域类型演进不得静默扩张 wire——扩张必须显式升版；wire 侧枚举收窄使未知新值 fail-closed 拒绝而非静默通过。
@@ -734,7 +740,7 @@ interface RunExecutorPort {
 }
 ```
 
-派发回执纪律：assigned outbox 只选择“当前 state=dispatched、存在 assigned、且无 dispatch-acked / assignment-superseded”的 assignment，每次发送同一 `DispatchEnvelope` + 对同一 `AssignmentActivationPayload` 的有效签名 proof；载荷由原子提交确定性重建，重启可重新签名。executor 先按 §1.2 复算 envelope 对象身份及全部内嵌自摘要/引用摘要并验签，再验证 proof 当前 owner/epoch 签名与 `validateAssignmentActivation`（ref / assignment / executor / dispatchRef / manifestDigest / permissionLeaseDigest / capIds 全集 / reservation / commit 摘要全匹配，其中 permissionLeaseDigest 必须等于信封内确切 permissionLease 的规范摘要）、`validateDispatchBinding`、`matchManifest`，全部通过后才 fsync `received(envelope, activation)` 并返回 `accepted:true`；本地 capability / permission / resource guard 只采信该耐久 received proof，禁止在线回查 owner。重复 assignment 若 proof 签名有效且规范载荷与已耐久 `received.activation` 全等，回放原结果，signature 字节不同本身不构成冲突；若载荷不同，返回签名 `DispatchConflictProof` 与 `DispatchConflictError(retryable=false)`，不得追加 executor `dispatch-rejected`、不得改变 executor assignment 状态。该 proof 固定绑定唯一 `received` 记录的 recordSeq / 前缀链摘要与新旧 dispatch / payload 摘要，可由原账本重建，不受 started / sealed 等后续记录影响；proof.error 只含固定 code / retryable，response.error 的这两项必须全等，message 仅作诊断、不入证明身份。
+派发回执纪律：assigned outbox 只选择“当前 state=dispatched、存在 assigned、且无 dispatch-acked / assignment-superseded”的 assignment，每次发送同一 `DispatchEnvelope` + 对同一 `AssignmentActivationPayload` 的有效签名 proof；载荷由原子提交确定性重建，重启可重新签名。executor 先按 §1.2 复算 envelope 对象身份及全部内嵌自摘要/引用摘要并验签，再验证 proof 当前 owner/epoch 签名与 `validateAssignmentActivation`（ref / assignment / executor / dispatchRef / manifestDigest / permissionLeaseDigest / capIds 全集 / reservation / commit 摘要全匹配，其中 permissionLeaseDigest 必须等于信封内确切 permissionLease 的规范摘要）、`validateDispatchBinding`、`matchManifest` 与权限引用资产按 lease digest 的验签命中（§5.3 两层语义），全部通过后才 fsync `received(envelope, activation)` 并返回 `accepted:true`；本地 capability / permission / resource guard 只采信该耐久 received proof，禁止在线回查 owner。重复 assignment 若 proof 签名有效且规范载荷与已耐久 `received.activation` 全等，回放原结果，signature 字节不同本身不构成冲突；若载荷不同，返回签名 `DispatchConflictProof` 与 `DispatchConflictError(retryable=false)`，不得追加 executor `dispatch-rejected`、不得改变 executor assignment 状态。该 proof 固定绑定唯一 `received` 记录的 recordSeq / 前缀链摘要与新旧 dispatch / payload 摘要，可由原账本重建，不受 started / sealed 等后续记录影响；proof.error 只含固定 code / retryable，response.error 的这两项必须全等，message 仅作诊断、不入证明身份。
 
 owner 只在当前仍为上述未 ACK dispatched assignment 时消费 conflict：先验 executor / assignment / signature / received 前缀链，要求 accepted / conflicting 两份 ActivationPayload 摘要不等，再要求 proof.conflictingDispatchRef / conflictingActivationDigest 等于本次实际发送二元组。随后从本地耐久 assigned + 所指 CommitEnvelope / DispatchEnvelope 重算期望 acceptedDispatchRef / acceptedActivationDigest：① accepted 侧全等期望，证明 executor 已接收原权威派发——同一 CommitEnvelope 写 `dispatch-conflict(acked-original) + dispatch-acked`，停止 outbox；② accepted 侧任一不等，说明 executor 接收事实与 owner 权威派发不一致——同一 CommitEnvelope 原子写 `dispatch-conflict(opened-uncertain) + state(uncertain) + UncertainResolutionFact(cause=dispatch-conflict) + cancel-fence + assigned.capIds / 活跃 tickets 的 revoked 记录`，停止派发 outbox与该 assignment 的 ControlLease 续期；fsync 后以该 cancel-fence 重驱 executor 止损，禁止仅凭 conflict proof 自动提交迟到 bundle或重派。资源租约此时不提前 settle / release（世界副作用与最终 usage 尚未证实），只在取得既有终结证明或用户裁决时按 §十收束。proof 无效、两侧摘要相等、conflicting 侧不对应本次发送或 response.error 的 code / retryable 与 proof.error 不等时零写入，走既有超时 / fence 路径；assignment 已 ACK、已离开 dispatched 或已终态时，迟到 conflict 不得再改变权威状态。`DispatchConflictProof` 永非 `AssignmentTerminationProof`，任何分支都不能据它重派。
 
@@ -1403,7 +1409,9 @@ interface CapabilityDescriptor {         // 稳定能力，低频变化
 interface ExecutorVersionInventory {     // 高频版本清单，绑定 capabilityRevision
   executorId: string; inventoryRevision: number; capabilityRevision: number;
   configVersions: { runtimeConfigRev: number; modelProfileRev: number; policyRev: number };
-  assetVersions: { skillsRev: number; rubricsRev: number; promptAssetsRev: number; permissionSnapshotVersion: number };
+  assetVersions: { skillsRev: number; rubricsRev: number; promptAssetsRev: number };
+  permissionSnapshotHighWater: number;   // 已就绪权限快照序列的单调高水位（见下"版本匹配两层语义"）——非当前唯一权限态；
+                                         // 与 manifest 的精确引用语义不同，类型层刻意不同名，禁止并入任何等值比较谓词
   credentialBindingRevisions: Array<{ bindingId: string; revision: number }>;
   at: IsoTime; signature: Signature }
 
@@ -1414,7 +1422,13 @@ interface CredentialBindingDescriptor { bindingId: string; service: string; reso
 interface ExecutionManifest {
   baseRef: { execution: "conversation"; conversationId: string; baseRevision: number }      // 派发时刻冻结的会话基线，与 work / 提交栅栏同值
          | { execution: "job";          taskId: string; jobRunId: string; taskRevision: number };   // 判别化——空 base / 双 base 类型层不可构造
-  requires: ExecutorVersionInventory["configVersions"] & ExecutorVersionInventory["assetVersions"];
+  protocolVersion: string;
+  requires: ExecutorVersionInventory["configVersions"] & ExecutorVersionInventory["assetVersions"]
+          & { permissionSnapshotVersion: number };
+  // 六类继承字段是签发时冻结的设备当前代际，按当前值相等匹配；permissionSnapshotVersion 是本次 assignment 冻结引用的
+  // 权限快照版本（恒等于 permissionLease.snapshotVersion），按 version ≤ inventory.permissionSnapshotHighWater + digest 命中
+  // 匹配——与 inventory 侧高水位刻意不同名，类型层杜绝再次被统一进等值循环（见下"版本匹配两层语义"）
+  tools: string[]; mcpServers: string[];
   environment: EnvironmentRequirement;
   credentialBindings: Array<{ service: string; bindingId: string; revision: number }>; digest: Digest }   // digest 按 §1.2 ExecutionManifest 自摘要
 
@@ -1438,7 +1452,22 @@ interface WorkspaceProbeResult  { requestId: string; bindingRef: string; workspa
 // non_directory / inaccessible / error 硬拒），通过才提交逻辑绑定（{deviceId, bindingRef}，revision 由目标设备探测时递增维护）。
 ```
 
-**匹配函数唯一**：`matchManifest(manifest, descriptor, inventory) → ok | AuthorityError("revision-conflict"|"capability-gap")`——owner 选机用最近 inventory 预判、executor 开跑前原子复验，两处共用同一实现；任一失配拒绝执行，owner 重排或排队。职责分界：matchManifest 只管**版本与能力**匹配；派发的**域一致性**归 `validateDispatchBinding`（§5.2）。owner 为避免产生无用候选，顺序固定为 `matchManifest → 构造候选 → validateDispatchBinding → 原子激活`；executor 已收到完整信封与证明，顺序固定为 `validateAssignmentActivation → validateDispatchBinding → matchManifest → received`。两端使用同一 match/binding 函数，远端只额外验证 owner 激活证明。
+**匹配函数唯一**：`matchManifest(manifest, descriptor, inventory) → ok | AuthorityError("revision-conflict"|"capability-gap")`——owner 选机用最近 inventory 预判、executor 开跑前原子复验，两处共用同一实现；任一失配拒绝执行，owner 重排或排队。职责分界：matchManifest 只管**版本与能力**匹配；派发的**域一致性**归 `validateDispatchBinding`（§5.2）；权限引用资产的实际命中是账本步骤（见下）。owner 为避免产生无用候选，顺序固定为 `matchManifest → 构造候选 → validateDispatchBinding → 原子激活`；executor 已收到完整信封与证明，顺序固定为 `validateAssignmentActivation → validateDispatchBinding → matchManifest → 权限引用资产按 digest 验签命中 → received`。两端使用同一 match/binding 函数，远端只额外验证 owner 激活证明。
+
+**版本匹配两层语义**：matcher 按执行时真实消费的对象把 manifest 需求分为两层，归层判据唯一——执行体消费 executor **当前装配值**的字段进设备代际层，消费 assignment **自带冻结引用**的字段进引用层；未来新增版本字段必须按同一判据归层，禁止把引用层字段并入当前值相等谓词。
+
+- **设备代际层**（protocolVersion、tools、mcpServers、runtimeConfigRev、modelProfileRev、policyRev、skillsRev、rubricsRev、promptAssetsRev、workspace binding revision、凭据 binding revision）：执行体将使用 executor 当前装配的这些事实，故必须与当前 descriptor/inventory 逐项相等；任何真实变化使在途 assignment 拒收、owner 按新基线重排——这是预期 fail-safe，不是误杀。
+- **权限引用层**（`requires.permissionSnapshotVersion`）：它与 `permissionLease` 的 `snapshotVersion/snapshotDigest` 从签发时刻的同一 `TrustRuleSnapshot` 派生，标识本次 assignment 自带冻结的不可变权限资产；执行期安全判定只消费该引用资产，不消费设备"当前"权限。matcher 对它判定**引用有效**：版本不高于 `inventory.permissionSnapshotHighWater` 即通过，不要求与当前值相等；版本高于高水位判 `capability-gap`——executor 尚未就绪该资产，属可恢复缺口，排队等待资产同步或 inventory 推进后唤醒重试，不判 `revision-conflict`、不触发换基线重排。executor 在 received 前必须按 lease 的 `snapshotDigest` 实际取到本地保留的该历史快照并验签命中：资产缺失判 `capability-gap` 拒收，digest 不符或验签失败按完整性破坏硬拒。received 前的任何拒收都是 executor 账本的耐久终态——owner 据拒收证明关闭原 assignment（superseded）并重新排队，资产补齐或 inventory 推进后以**新 assignment** 重派，绝不复用已拒收的 assignment；重派是新的签发时刻，权限引用按重派时刻的当次语境快照重新投影（规则未变时经同内容幂等自然复用原引用）。
+
+由此单 executor 同时承载多个会话各自冻结的权限快照：任一会话的权限变化只发布新快照并推进高水位，既不影响其它在途 assignment 的引用有效性，也不得抬升设备代际层任何版本。
+
+**能力快照同步纪律**：`CapabilityDescriptor` 与 `ExecutorVersionInventory` 作为同一设备签名的元数据快照发布，必须同 executor、同签名设备且 `descriptor.revision === inventory.capabilityRevision`；`EnvironmentRequirement.deviceId` 与该签名设备身份匹配，不与可独立命名的 executor 身份混同。manifest 的独立 `protocolVersion`、tools、MCP、凭据与七类版本均由同一 matcher 按上述两层语义核对，协议版本为 uint64 范围内的规范正十进制字符串并与 mesh 协商共用同一校验谓词；job instruction 的 tools 必为 manifest.tools 子集。所有集合型字段按规范 JSON 字符串码元序冻结排序；credential bindingId 在每个集合内全局唯一，workspace binding revision 为正整数。
+
+owner 目录耐久绑定 executorId 与获授权设备谱系，只接受原版本语义重放或 `inventoryRevision` 严格前进的更新，拒绝同版本内容改写、任一配置/资产/权限/凭据 revision 回退。凭据 bindingId 的同 revision 语义身份不可改写，删除后保留高水位墓碑，重建必须提高 revision。目录恢复时状态缺失或损坏 fail-closed；版本源显式耐久“首次引导未完成/目录已建立”标记，只有前者可建立空目录，目录接受首份快照后才将标记推进为已建立，故任一崩溃点可恢复且已建立目录丢失绝不静默重建。查询时复核当前设备信任，撤销或角色移除立即失效，换设备只经显式谱系迁移。`at` 与签名可在语义内容不变时刷新。
+
+executor 仅在对应配置、资产与真实签名 `TrustRuleSnapshot` 已本地就绪后发布 inventory；`inventory.permissionSnapshotHighWater` 声明该 executor 已就绪权限快照序列的**单调高水位**——每份新快照由权限快照目录单调分配版本，同内容（规范化后同 digest）幂等复用已发布的版本与快照、只有规则内容变化才分配新版本；高水位只供 owner 预选粗筛，引用资产的权威判定恒是 received 前的 digest 验签命中。manifest requirement 与 `PermissionSnapshotLease` 的 version/digest 恒从签发时刻的同一快照派生，双域派发在 received 前按该 digest 实际验证引用资产。inventory 任一字段（含权限高水位）变化都必须以严格前进的 `inventoryRevision` 重发。规则按 id 规范排序并投影为 `PortableTrustRule`：缺省可选字段省略，移除本机展示路径与 `lastMatchedAt` / `matchCount` 可变命中统计；已被在途 assignment 引用的历史签名快照必须耐久保留并可在重启后按 digest 补读——本节先按全保留执行，权限租约激活登记在途引用后收敛为引用感知保留，跨机补读由资产同步协议承载。目录不承载内容与秘密，跨机内容传输仍归资产同步协议。
+
+单机最小发布器以当前非秘密运行配置、可执行版本、已装配能力与 binding 元数据及 SecretStore 当前提交代际共同形成聚合快照摘要——**权限规则不进入该摘要**：权限内容变化只经权限快照目录发布新快照并推进 `permissionSnapshotHighWater`，不得抬升设备代际层任何 revision；反之设备代际变化也不重签已发布的权限快照。凭据内容与该不透明代际必须在 SecretStore 同一协调快照内原子读取，凭据代际只是本地非秘密不透明标识，秘密内容及其摘要均不进入该摘要或任何协议面。未经服务核验的 `user-alias` bindingId 必须绑定发布设备身份；只有用户显式确认的别名映射才能建立跨设备等价。同摘要重启复用原 revision 与生成时刻，任一输入变化（包括恢复到历史内容或同 binding 下凭据轮换）均分配新的单调 revision，再以该 revision 发布当前设备代际层配置、资产与能力基线。版本源与能力目录仅允许二者均缺失的首次初始化；任一已建立而另一方缺失均 fail-closed，只有明确标记的首次建档中断可续建。后续按类别细分同步源时只细化设备代际层各字段 revision 的生产者；权限引用层合同（独立单调版本序列、高水位声明与 digest 命中判定）与 inventory、目录、matcher 的两层匹配合同保持不变。
 
 ### 5.4 提交（conversation / job 两套 CAS 事务模板，只共享栅栏验证、幂等键与 artifact 在场检查）
 

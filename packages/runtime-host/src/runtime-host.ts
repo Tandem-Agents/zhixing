@@ -26,7 +26,7 @@ import {
   type CreateAgentRuntimeOptions,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
-import { powerProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import type { SchedulerFacade, TurnOrigin, WorkScene } from "@zhixing/core";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
@@ -139,6 +139,53 @@ export class RuntimeHost {
     return this.assemble(() => null, { runtimeKind: "ephemeral" });
   }
 
+  /** Non-secret catalog derived from the same profile and extra-tool assemblers as runtime creation. */
+  capabilityCatalog(): {
+    readonly tools: readonly string[];
+    readonly mcpServers: readonly string[];
+  } {
+    const tools = new Set<string>();
+    const addProfile = (profile: ReturnType<typeof mainProfile>) => {
+      for (const tool of profile.enabledTools) tools.add(tool);
+    };
+    addProfile(mainProfile());
+    const catalogScene = {
+      id: "capability-catalog",
+      name: "capability-catalog",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      lastActiveAt: "1970-01-01T00:00:00.000Z",
+    };
+    addProfile(powerProfile(catalogScene));
+    addProfile(powerProfile({ ...catalogScene, workdir: "." }));
+    const addExtra = (input: Parameters<BuiltinExtraToolsAssembly["assembleTools"]>[0]) => {
+      for (const tool of this.opts.extraTools.assembleTools(input)) tools.add(tool.name);
+    };
+    addExtra({
+      scheduler: this.opts.scheduler,
+      scheduleOrigin: () => null,
+      worksceneDirectory: this.opts.worksceneDirectory,
+    });
+    addExtra({ scheduler: this.opts.scheduler, scheduleOrigin: () => null });
+    if (this.opts.worksceneDirectory) {
+      addExtra({
+        scheduler: this.opts.scheduler,
+        scheduleOrigin: () => null,
+        spec: {
+          kind: "workscene",
+          sceneId: "capability-catalog",
+          sceneName: "capability-catalog",
+        },
+        worksceneDirectory: this.opts.worksceneDirectory,
+      });
+    }
+    return {
+      tools: [...tools].sort(),
+      mcpServers: this.opts.extraTools.mcpHub.catalog()
+        .map(({ server }) => server.serverId)
+        .sort(),
+    };
+  }
+
   private async assemble(
     scheduleOrigin: () => ScheduleToolOrigin | null,
     opts?: {
@@ -155,6 +202,17 @@ export class RuntimeHost {
     },
   ): Promise<AgentRuntime> {
     const workscene = opts?.workscene;
+    const mcpServers = this.opts.extraTools.mcpHub.catalog()
+      .map(({ server }) => server.serverId)
+      .sort();
+    const extraTools = this.opts.extraTools.assembleTools({
+      scheduler: this.opts.scheduler,
+      scheduleOrigin,
+      spec: workscene?.spec,
+      worksceneDirectory: opts?.withWorkmodeTools
+        ? this.opts.worksceneDirectory
+        : undefined,
+    });
     const runtime = await createAgentRuntime({
       providerConfiguration: this.opts.providerConfiguration,
       systemProtectedPaths: this.opts.systemProtectedPaths,
@@ -162,14 +220,8 @@ export class RuntimeHost {
       primaryRole: workscene?.primaryRole,
       memoryScope: workscene?.memoryScope,
       profile: workscene?.profile,
-      extraTools: this.opts.extraTools.assembleTools({
-        scheduler: this.opts.scheduler,
-        scheduleOrigin,
-        spec: workscene?.spec,
-        worksceneDirectory: opts?.withWorkmodeTools
-          ? this.opts.worksceneDirectory
-          : undefined,
-      }),
+      extraTools,
+      executionMcpServers: mcpServers,
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,
       segmentDeps: this.opts.segmentDeps,

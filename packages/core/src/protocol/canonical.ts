@@ -5,6 +5,11 @@ export function canonicalize(value: unknown): string {
   return serialize(value);
 }
 
+/** Ordering used by canonical protocol collections and canonical JSON object keys. */
+export function compareCanonicalStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export function protocolBytes(
   schemaId: string,
   version: number,

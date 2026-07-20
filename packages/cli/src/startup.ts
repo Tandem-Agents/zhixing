@@ -62,6 +62,7 @@ export type StartupCheckResult =
       kind: "ready";
       config: ZhixingConfig;
       credentials: ZhixingCredentials;
+      credentialGeneration: string | null;
       secretStore: SecretStorePort & CredentialStoreCoordinator;
     }
   | { kind: "cancelled" }
@@ -99,6 +100,7 @@ export async function runStartupCheck(
   // 1. load
   let config: ZhixingConfig;
   let credentials: ZhixingCredentials;
+  let credentialGeneration: string | null;
   try {
     config = loadConfig({ homeDir: explicitHomeDir, env });
   } catch (err) {
@@ -131,6 +133,7 @@ export async function runStartupCheck(
       homeDir: credentialsHomeDir,
     });
     credentials = preparedCredentials.credentials;
+    credentialGeneration = preparedCredentials.generation;
   } catch (err) {
     if (err instanceof CredentialsSchemaError) {
       return { kind: "schema-error", filePath: err.filePath, message: err.message };
@@ -153,7 +156,7 @@ export async function runStartupCheck(
   }
 
   if (missingSections.length === 0) {
-    return { kind: "ready", config, credentials, secretStore };
+    return { kind: "ready", config, credentials, credentialGeneration, secretStore };
   }
 
   // 3. 缺失 + 非 TTY → fail-fast
@@ -191,16 +194,15 @@ export async function runStartupCheck(
       homeDir: explicitHomeDir,
       env,
     });
-    const updatedCredentials = (
-      await loadCredentialsWithLegacyMigration({
-        store: secretStore,
-        homeDir: credentialsHomeDir,
-      })
-    ).credentials;
+    const updatedCredentialSnapshot = await loadCredentialsWithLegacyMigration({
+      store: secretStore,
+      homeDir: credentialsHomeDir,
+    });
     return {
       kind: "ready",
       config: updatedConfig,
-      credentials: updatedCredentials,
+      credentials: updatedCredentialSnapshot.credentials,
+      credentialGeneration: updatedCredentialSnapshot.generation,
       secretStore,
     };
   }

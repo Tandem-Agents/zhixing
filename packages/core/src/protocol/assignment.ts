@@ -30,12 +30,10 @@ import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateStagedMutationRecord } from "./commit.js";
 import { validateJobCommitFence } from "./job.js";
 import { validateInteractionDisplay } from "./interaction-display.js";
+import { validateExecutionManifest } from "./manifest.js";
 import { assertResourceLeaseBaseContract } from "./resource-lease.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
-import {
-  validateEnvironmentRequirement,
-  validateMessages,
-} from "./values.js";
+import { validateMessages } from "./values.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 
@@ -1538,7 +1536,7 @@ function assertConversationEnvelope(
   assertIdentifier(envelope.assignmentId, "Dispatch assignmentId");
   assertIdentifier(envelope.executorId, "Dispatch executorId");
   assertCanonicalTime(envelope.issuedAt, "Dispatch issuedAt");
-  assertManifest(envelope.manifest);
+  validateExecutionManifest(envelope.manifest);
   assertConversationWork(envelope.work);
   assertPermissionLease(envelope.permissionLease, verifier);
   assertCapabilities(envelope.capabilities, verifier);
@@ -1561,7 +1559,8 @@ function assertConversationEnvelope(
     permission.binding.conversationId !== work.conversationId ||
     permission.binding.ownerEpoch !== work.ownerEpoch ||
     permission.assignmentId !== envelope.assignmentId ||
-    permission.executorId !== envelope.executorId
+    permission.executorId !== envelope.executorId ||
+    permission.snapshotVersion !== manifest.requires.permissionSnapshotVersion
   ) {
     throw new TypeError("Permission lease does not bind the dispatch");
   }
@@ -1634,7 +1633,7 @@ function assertJobEnvelope(
   assertIdentifier(envelope.assignmentId, "Dispatch assignmentId");
   assertIdentifier(envelope.executorId, "Dispatch executorId");
   assertCanonicalTime(envelope.issuedAt, "Dispatch issuedAt");
-  assertManifest(envelope.manifest);
+  validateExecutionManifest(envelope.manifest);
   assertJobWork(envelope.work);
   assertPermissionLease(envelope.permissionLease, verifier);
   assertCapabilities(envelope.capabilities, verifier);
@@ -1657,7 +1656,9 @@ function assertJobEnvelope(
     permission.binding.taskId !== work.taskId ||
     permission.binding.anchorEpoch !== work.fence.anchorEpoch ||
     permission.assignmentId !== envelope.assignmentId ||
-    permission.executorId !== envelope.executorId
+    permission.executorId !== envelope.executorId ||
+    permission.snapshotVersion !==
+      envelope.manifest.requires.permissionSnapshotVersion
   ) {
     throw new TypeError("Permission lease does not bind the dispatch");
   }
@@ -1694,6 +1695,12 @@ function assertJobEnvelope(
     work.fence.jobRunId !== work.jobRunId
   ) {
     throw new TypeError("Job commit fence does not bind the dispatch");
+  }
+  const frozenTools = new Set(envelope.manifest.tools);
+  for (const tool of work.instruction.tools ?? []) {
+    if (!frozenTools.has(tool)) {
+      throw new TypeError("Job execution tool is not frozen in the manifest");
+    }
   }
   assertSortedUnique(
     envelope.capabilities.map((capability) => capability.capId),
@@ -1738,69 +1745,6 @@ function assertJobWork(work: JobEnvelope["work"]): void {
   }
   if (work.instruction.tools !== undefined) {
     assertUniqueIdentifiers(work.instruction.tools, "Job execution tools");
-  }
-}
-
-function assertManifest(manifest: DispatchEnvelope["manifest"]): void {
-  assertExactKeys(
-    manifest,
-    ["baseRef", "credentialBindings", "digest", "environment", "requires", "v"],
-    "Execution manifest",
-  );
-  assertVersion(manifest.v, "Execution manifest");
-  if (manifest.baseRef.execution === "conversation") {
-    assertExactKeys(
-      manifest.baseRef,
-      ["baseRevision", "conversationId", "execution"],
-      "Manifest base reference",
-    );
-    assertIdentifier(manifest.baseRef.conversationId, "Manifest conversationId");
-    assertNonNegativeInteger(manifest.baseRef.baseRevision, "Manifest baseRevision");
-  } else if (manifest.baseRef.execution === "job") {
-    assertExactKeys(
-      manifest.baseRef,
-      ["execution", "jobRunId", "taskId", "taskRevision"],
-      "Manifest base reference",
-    );
-    assertIdentifier(manifest.baseRef.jobRunId, "Manifest jobRunId");
-    assertIdentifier(manifest.baseRef.taskId, "Manifest taskId");
-    assertPositiveInteger(manifest.baseRef.taskRevision, "Manifest taskRevision");
-  } else {
-    throw new TypeError("Manifest base reference execution kind is invalid");
-  }
-  assertExactKeys(
-    manifest.requires,
-    [
-      "modelProfileRev",
-      "permissionSnapshotVersion",
-      "policyRev",
-      "promptAssetsRev",
-      "rubricsRev",
-      "runtimeConfigRev",
-      "skillsRev",
-    ],
-    "Manifest requirements",
-  );
-  for (const value of Object.values(manifest.requires)) {
-    assertNonNegativeInteger(value, "Manifest requirement revision");
-  }
-  validateEnvironmentRequirement(manifest.environment);
-  if (!Array.isArray(manifest.credentialBindings)) {
-    throw new TypeError("Manifest credential bindings must be an array");
-  }
-  for (const binding of manifest.credentialBindings) {
-    assertExactKeys(binding, ["bindingId", "revision", "service"], "Credential binding");
-    assertIdentifier(binding.service, "Credential service");
-    assertIdentifier(binding.bindingId, "Credential bindingId");
-    assertNonNegativeInteger(binding.revision, "Credential binding revision");
-  }
-  const expected = protocolDigest(
-    "ExecutionManifest",
-    1,
-    withoutField(manifest, "digest"),
-  );
-  if (manifest.digest !== expected) {
-    throw new TypeError("Execution manifest digest is invalid");
   }
 }
 

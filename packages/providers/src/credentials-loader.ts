@@ -209,18 +209,20 @@ export async function loadCredentialsWithLegacyMigration(
   options: LegacyCredentialMigrationOptions,
 ): Promise<{
   readonly credentials: ZhixingCredentials;
+  readonly generation: string | null;
   readonly migration: { readonly migrated: boolean; readonly entries: number };
 }> {
   return mutationCoordinator(options).runExclusive(async () => {
     const migration = await migrateLegacyCredentialsUnlocked(options);
     const credentials = await loadCredentialsUnlocked(options);
+    const generation = await readActiveGeneration(options.store);
     if (await legacyCredentialsPresent(options.homeDir)) {
       throw new CredentialsSchemaError(
         "旧明文凭据仍然存在，设备不能进入 ready。",
         getCredentialsPath(options.homeDir),
       );
     }
-    return { credentials, migration };
+    return { credentials, generation, migration };
   });
 }
 

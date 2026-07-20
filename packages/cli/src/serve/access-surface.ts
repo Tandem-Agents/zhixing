@@ -56,6 +56,7 @@ import type { McpHub } from "@zhixing/mcp";
 import type {
   AuthorityRuntimeStack,
   DeliveryStack,
+  ExecutorReadiness,
 } from "../setup-delivery.js";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
@@ -85,6 +86,7 @@ export interface AssemblyContext {
   readonly transcript: ShardedTranscriptStore;
   readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;
+  readonly executorReadiness: () => ExecutorReadiness;
   /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */
   readonly convRepo: ConversationRepository;
   /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */

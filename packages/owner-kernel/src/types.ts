@@ -173,6 +173,8 @@ export interface SessionRuntime {
   subAgentUsages?(messages: readonly Message[]): readonly RuntimeSubAgentUsageEntry[];
   /** 查询运行体当前安全状态(/security 的宿主数据面)。 */
   securitySnapshot?(): RuntimeSecuritySnapshot;
+  /** Exact non-secret dependencies of this immutable assembled runtime. */
+  executionProfile?(): import("@zhixing/core").RuntimeExecutionProfile;
   /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
   readonly calibrationFactor?: number;
 }
