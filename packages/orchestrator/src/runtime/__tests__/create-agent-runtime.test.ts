@@ -650,6 +650,41 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     expect(lastText).toContain("synthesized response");
   });
 
+  it("propagates durable tool authority from the main run into Task child tools", async () => {
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "inspect", prompt: "read X" } },
+        ],
+      },
+      {
+        toolCalls: [
+          { id: "read1", name: "read", input: { file_path: "missing.txt" } },
+        ],
+      },
+      { text: "child observed the denied read" },
+      { text: "main completed after the child result" },
+    ]);
+    const authorizeToolExecution = vi.fn(
+      ({ toolName }: { readonly toolName: string }) => {
+        if (toolName === "read") throw new Error("durable authority expired");
+        return [];
+      },
+    );
+
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
+    const result = await runtime.run({
+      messages: [userMessage("inspect X")],
+      turnIndex: 0,
+      authorizeToolExecution,
+    });
+
+    expect(result.agentResult.reason).toBe("completed");
+    expect(authorizeToolExecution.mock.calls.some(
+      ([input]) => input.toolName === "read",
+    )).toBe(true);
+  });
+
   it("profile 含 Task:Task 不进入子 agent 工具集(防递归不变量)", async () => {
     // 不直接观察 tools 数组(runtime 不暴露),通过派 Task 让子尝试再派 Task 触发 unknown tool 路径
     // —— 子工具集由 sub-agent profile.enabledTools 决定,不含 Task
@@ -2067,6 +2102,11 @@ describe("trustContext 装配分叉", () => {
     expect(snapshot.builtinRules.length).toBeGreaterThan(0);
     expect(snapshot.rateLimits).toEqual([]);
     expect(snapshot.confirmations).toEqual([]);
+    expect(runtime.executionPermissionRules()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ scope: "builtin" }),
+      ]),
+    );
   });
 
   it("把组合根的实际秘密路径注入每个运行体并旁路免疫地阻断", async () => {

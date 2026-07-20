@@ -422,6 +422,7 @@ export interface ControlLease extends WireSchemaV1<"ControlLease"> {
   controlLeaseId: string;
   assignmentId: string;
   authority: AuthorityEpochRef;
+  renewalSeq: number;
   issuedAt: IsoTime;
   expiry: IsoTime;
   signature: Signature;
@@ -469,6 +470,8 @@ export interface OwnerControlGrant extends WireSchemaV1<"OwnerControlGrant"> {
   methods: OwnerControlMethodId[];
   callerDeviceId: string;
   requestId: string;
+  requestDigest: Digest;
+  controlLease: ControlLease;
   issuedAt: IsoTime;
   expiry: IsoTime;
   signature: Signature;

@@ -2,11 +2,15 @@ import type {
   AdmissionClass,
   AuthorityError,
   AuthorityCapability,
+  ControlLease,
   IngressContext,
   PermissionSnapshotLease,
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
+  ASSIGNMENT_SUBMISSION_METHODS,
+  MAX_CONTROL_LEASE_TTL_MS,
+  MAX_PERMISSION_LEASE_TTL_MS,
   createExecutionManifest,
   matchManifest,
   protocolDigest,
@@ -184,6 +188,32 @@ export class TransitionConversationAssignmentIssuer
       ),
     };
 
+    const renewalIntervalMs = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
+    const renewalSeq = Math.floor(Date.parse(issuedAt) / renewalIntervalMs);
+    const controlIssuedAt = new Date(
+      renewalSeq * renewalIntervalMs,
+    ).toISOString();
+    const controlExpiry = new Date(
+      renewalSeq * renewalIntervalMs + MAX_CONTROL_LEASE_TTL_MS,
+    ).toISOString();
+    const controlPayload = {
+      v: 1 as const,
+      controlLeaseId: `control-${input.assignmentId}`,
+      assignmentId: input.assignmentId,
+      authority: {
+        execution: "conversation" as const,
+        conversationId: input.conversationId,
+        ownerEpoch: input.ownerEpoch,
+      },
+      renewalSeq,
+      issuedAt: controlIssuedAt,
+      expiry: controlExpiry,
+    };
+    const controlLease: ControlLease = {
+      ...controlPayload,
+      signature: this.#signer.sign("ControlLease", 1, controlPayload),
+    };
+
     const capabilityPayload = {
       v: 1 as const,
       capId: `cap-${input.assignmentId}`,
@@ -193,12 +223,7 @@ export class TransitionConversationAssignmentIssuer
         conversationId: input.conversationId,
       },
       ownerEpoch: input.ownerEpoch,
-      methods: [
-        "submission.mirrorInteractions",
-        "submission.reportStarted",
-        "submission.submitBundle",
-        "submission.submitCancelProof",
-      ] as AuthorityCapability<"conversation">["methods"],
+      methods: [...ASSIGNMENT_SUBMISSION_METHODS],
       resources: [
         `conversation:${input.conversationId}`,
       ] as AuthorityCapability<"conversation">["resources"],
@@ -247,6 +272,7 @@ export class TransitionConversationAssignmentIssuer
       assignmentId: input.assignmentId,
       executorId: input.executorId,
       manifest,
+      controlLease,
       permissionLease,
       capabilities: [capability],
       resourceLease,
@@ -289,6 +315,7 @@ function validateTransitionPolicy(
   if (
     !Number.isSafeInteger(policy.credentialTtlMs) ||
     policy.credentialTtlMs <= 0 ||
+    policy.credentialTtlMs > MAX_PERMISSION_LEASE_TTL_MS ||
     !Number.isSafeInteger(policy.budget.maxCalls) ||
     policy.budget.maxCalls <= 0 ||
     !Number.isSafeInteger(policy.budget.maxTokens) ||

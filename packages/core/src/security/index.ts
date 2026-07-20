@@ -4,6 +4,7 @@
 export type {
   BoundaryCrossing,
   BoundaryType,
+  DurableToolExecutionAuthorizer,
   IPermissionStore,
   IPolicyEngine,
   IToolArgumentExtractor,
@@ -124,7 +125,10 @@ export { SecurityAuditor } from "./security-auditor.js";
 
 // 安全管线
 export { SecurityPipeline } from "./security-pipeline.js";
-export type { SecurityPipelineOptions } from "./security-pipeline.js";
+export type {
+  SecurityEvaluationOptions,
+  SecurityPipelineOptions,
+} from "./security-pipeline.js";
 
 // /trust 命令的 target 无关核心查询（用户可管信任规则的单一定义）
 export { listUserTrustRules } from "./trust-rules.js";

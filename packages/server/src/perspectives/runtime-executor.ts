@@ -18,6 +18,7 @@ export class RuntimePerspectivesOrchestrationExecutor
       abortSignal: input.abortSignal,
       eventBus: input.eventBus,
       parentLineage: "perspectives",
+      authorizeToolExecution: input.authorizeToolExecution,
     });
   }
 }

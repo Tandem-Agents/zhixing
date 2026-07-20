@@ -17,7 +17,7 @@ import {
 import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
-} from "./assignment.js";
+} from "./signature.js";
 import {
   assertProtocolIdentifier as assertIdentifier,
   validateProtocolVersion,

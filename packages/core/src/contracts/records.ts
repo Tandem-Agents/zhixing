@@ -14,6 +14,7 @@ import type { WireSchemaV1 } from "../types/distributed.js";
 import type {
   AssignmentActivationProof,
   AuthorityEpochRef,
+  ControlLease,
   InteractionAnswerAuthority,
 } from "./authorization.js";
 import type {
@@ -220,6 +221,7 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
         dispatchDigest: Digest;
         reason: AuthorityError;
       }
+    | { t: "control-lease-renewed"; lease: ControlLease }
     | { t: "supersede-fenced"; fenceSeq: number; requestId: string }
     | { t: "started" }
     | {

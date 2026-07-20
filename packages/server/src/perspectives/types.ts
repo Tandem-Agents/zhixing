@@ -1,5 +1,6 @@
 import type {
   AgentEventMap,
+  DurableToolExecutionAuthorizer,
   EventBus,
   Message,
   OrchestrationContextSnapshotV1,
@@ -45,6 +46,7 @@ export interface PerspectivesOrchestrationRunInput {
   readonly contextSnapshot: OrchestrationContextSnapshotV1;
   readonly abortSignal?: AbortSignal;
   readonly eventBus: EventBus<AgentEventMap>;
+  readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 export interface PerspectivesOrchestrationExecutor {
@@ -73,6 +75,7 @@ export interface PerspectivesTurnInput {
   readonly turnContext?: TurnContext;
   readonly surfacePrincipal?: string;
   readonly source?: "interactive" | "channel";
+  readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 export interface PerspectivesPendingTaskInput {

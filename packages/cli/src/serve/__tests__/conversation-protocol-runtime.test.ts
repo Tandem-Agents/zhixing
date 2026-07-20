@@ -40,6 +40,7 @@ const TEST_EXECUTOR_READINESS = {
 };
 
 const TEST_RUNTIME_AUTHORITY_FACTS = {
+  executionPermissionRules: () => [],
   securitySnapshot: () => ({
     contextId: { kind: "main" as const },
     workspacePath: null,
@@ -53,7 +54,10 @@ const TEST_RUNTIME_AUTHORITY_FACTS = {
     mcpServers: [],
     providerIds: [],
   }),
-} satisfies Pick<SessionRuntime, "securitySnapshot" | "executionProfile">;
+} satisfies Pick<
+  SessionRuntime,
+  "executionPermissionRules" | "securitySnapshot" | "executionProfile"
+>;
 
 function setupAuthorityRuntime(
   options: Omit<SetupAuthorityRuntimeOptions, "executorReadiness"> & {
@@ -173,10 +177,11 @@ describe("ConversationProtocolRuntime", () => {
     };
     const runtime: SessionRuntime = {
       sessionId: "runtime-binding",
+      executionPermissionRules: () => [rule],
       securitySnapshot: () => ({
         contextId: { kind: "main" },
         workspacePath: null,
-        permissionRules: [rule],
+        permissionRules: [],
         builtinRules: [],
         rateLimits: [],
         confirmations: [],
@@ -281,6 +286,7 @@ describe("ConversationProtocolRuntime", () => {
           }),
       );
       expect(assignmentEntries.map((entry) => entry.body?.t)).toEqual([
+        "control-lease-renewed",
         "dispatch-rejected",
       ]);
     } finally {
@@ -1247,6 +1253,10 @@ describe("ConversationProtocolRuntime", () => {
       async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
         executions += 1;
         recoveredOptions = options;
+        await options?.authorizeToolExecution?.({
+          toolName: "read",
+          toolInput: { path: "README.md" },
+        });
         const assistant: Message = {
           role: "assistant",
           content: [{ type: "text", text: "recovered" }],
@@ -1441,6 +1451,7 @@ describe("ConversationProtocolRuntime", () => {
 
     await vi.waitFor(() => {
       expect(executions).toBe(1);
+      expect(recoveredOptions?.authorizeToolExecution).toBeTypeOf("function");
       expect(committed.has(admitted.runId)).toBe(true);
       expect(
         restartedManager.list().find(

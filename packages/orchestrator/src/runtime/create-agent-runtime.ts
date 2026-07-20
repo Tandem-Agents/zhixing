@@ -127,6 +127,7 @@ import {
 } from "../security/secure-executor.js";
 import { trackMessages } from "./track-messages.js";
 import { runContextStorage } from "./run-context.js";
+import type { DurableToolExecutionAuthorizer } from "./run-context.js";
 import { createTaskTool } from "../tools/task.js";
 import {
   parseTaskUsageFromMessages,
@@ -344,6 +345,8 @@ export interface AgentRuntime {
   subAgentUsages: (messages: readonly Message[]) => readonly TaskUsageEntry[];
   /** 当前运行体安全状态只读快照（/security 的宿主数据面）。 */
   securitySnapshot: () => RuntimeSecuritySnapshot;
+  /** Complete immutable permission input captured when issuing a durable assignment. */
+  executionPermissionRules: () => readonly PermissionRule[];
   /** Exact non-secret dependencies of this immutable assembled runtime. */
   executionProfile: () => RuntimeExecutionProfile;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
@@ -414,6 +417,7 @@ export interface RunOrchestrationV1Params {
   readonly abortSignal?: AbortSignal;
   readonly eventBus: EventBus<AgentEventMap>;
   readonly parentLineage?: string;
+  readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 export interface RuntimeSecuritySnapshot {
@@ -480,6 +484,8 @@ export interface RunParams {
     meta: { readonly lineage?: string },
   ) => void;
   toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
+  /** Optional durable authority check run before the security pipeline and tool. */
+  authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -1393,6 +1399,7 @@ export async function createAgentRuntime(
         riskMaxTokens: primaryModelCapability.riskMaxTokens,
         userIntent:
           typeof params.runInput === "string" ? params.runInput : undefined,
+        authorizeToolExecution: params.authorizeToolExecution,
       });
       const runner = new OrchestrationRunnerV1({
         bus: params.eventBus,
@@ -1420,6 +1427,12 @@ export async function createAgentRuntime(
           .snapshot(),
         confirmations: securityPipeline.getConfirmationTracker().snapshot(),
       };
+    },
+
+    executionPermissionRules(): readonly PermissionRule[] {
+      return securityPipeline
+        .getPermissionStore()
+        .snapshot(securityPipeline.getContextId());
     },
 
     executionProfile(): RuntimeExecutionProfile {
@@ -1781,6 +1794,7 @@ export async function createAgentRuntime(
             lineage: "main",
             conversationId: params.conversationId,
             turnOrigin: params.turnContext?.turnOrigin,
+            authorizeToolExecution: params.authorizeToolExecution,
           },
           async (): Promise<RunResult> => {
             return await runMainLoop();
@@ -1859,6 +1873,7 @@ export async function createAgentRuntime(
           onUserDenied: options.onUserDenied,
           // per-run 事件总线 —— 启用安全审计发射（pipeline 决策事件 + 管家三态裁决事件）
           eventBus,
+          authorizeToolExecution: params.authorizeToolExecution,
         });
 
         const gen = runAgentLoop({

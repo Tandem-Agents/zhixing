@@ -578,6 +578,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         // 顶层用户意图沿子 agent 链路透传，让子 agent 工具调用时 AI 安全管家
         // 仍按顶层意图研判（子 agent 不能借助 task 文本伪装意图绕过管家）
         userIntent: ctx.userIntent,
+        authorizeToolExecution: runCtx.authorizeToolExecution,
       });
 
       return formatChildResultAsToolResult(result, description, ctx.toolCallId);

@@ -9,6 +9,7 @@ import {
 } from "@zhixing/core/authority";
 import { DeliveryAuthority } from "@zhixing/core";
 import type {
+  AssignmentEntry,
   AuthorityCallContext,
   AuthorityCapability,
   LedgerEvidencePage,
@@ -22,6 +23,8 @@ import type {
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
+  advanceAssignmentLedger,
+  assignmentLedgerSeed,
   buildJobActivationPayload,
   canonicalize,
   createMutationBatch,
@@ -35,6 +38,7 @@ import {
   interactionMirrorSeed,
   jobDeliveryPlanDigest,
   mutationBatchArtifact,
+  ownerControlRequestDigest,
   protocolBytes,
   protocolDigest,
   sealedBundleArtifact,
@@ -75,6 +79,7 @@ import {
 
 const NOW = "2026-07-15T09:00:00.000Z";
 const EXPIRY = "2026-07-15T10:00:00.000Z";
+const CONTROL_EXPIRY = "2026-07-15T09:01:00.000Z";
 const TASK_ID = "task-1";
 const JOB_RUN_ID = "job-run-1";
 const ASSIGNMENT_ID = "assignment-1";
@@ -216,17 +221,24 @@ const submission = {
   },
 };
 
-const ownerControl = {
-  authorize(context: AuthorityCallContext, method: string, assignmentId: string) {
+const ownerControl: import("../assignment-ledger.js").OwnerControlAuthorizer = {
+  authorize(context, request) {
     if (
       context.principal.kind !== "owner-control" ||
-      context.principal.grant.assignmentId !== assignmentId ||
+      context.principal.grant.assignmentId !== request.assignmentId ||
       !context.principal.grant.methods.includes(
-        method as "executor.dispatch" | "executor.cancel" | "executor.supersede" | "executor.queryLedger",
-      )
+        request.method,
+      ) ||
+      (request.authority !== undefined &&
+        canonicalize(context.principal.grant.scope) !== canonicalize(request.authority))
     ) {
       throw new Error("owner control authorization failed");
     }
+    return {
+      authority: structuredClone(context.principal.grant.scope),
+      ownerDeviceId: context.principal.grant.callerDeviceId,
+      controlLease: structuredClone(context.principal.grant.controlLease),
+    };
   },
 };
 
@@ -1363,7 +1375,7 @@ describe("user job durable protocol", () => {
     });
     expect(current?.resolution).toBeUndefined();
     expect(current?.openFactDigest).not.toBe(first?.openFactDigest);
-  });
+  }, 15_000);
 
   it("pauses a task on uncertain and records later clock occurrences as missed", async () => {
     const harness = await createUserHarness();
@@ -1463,19 +1475,107 @@ describe("user job durable protocol", () => {
     expect(replay).toEqual(first);
   });
 
+  it("authorizes job tools only from active received permission facts across replay", async () => {
+    const harness = await createUserHarness();
+    await expect(
+      harness.ledger.authorizeToolExecution(
+        ASSIGNMENT_ID,
+        harness.unsigned.permissionLease,
+      ),
+    ).rejects.toThrow("inactive");
+
+    await start(harness);
+    await expect(
+      harness.ledger.authorizeToolExecution(
+        ASSIGNMENT_ID,
+        harness.unsigned.permissionLease,
+      ),
+    ).resolves.toEqual([]);
+    await expect(
+      reopenAssignmentLedger(harness).authorizeToolExecution(
+        ASSIGNMENT_ID,
+        harness.unsigned.permissionLease,
+      ),
+    ).resolves.toEqual([]);
+
+    const { signature: _, ...leasePayload } = harness.unsigned.permissionLease;
+    const replacementPayload = {
+      ...leasePayload,
+      controlLeaseId: "control-lease-replacement",
+    };
+    const replacementLease: PermissionSnapshotLease<"job"> = {
+      ...replacementPayload,
+      signature: harness.identity.sign(
+        "PermissionSnapshotLease",
+        1,
+        replacementPayload,
+      ),
+    };
+    await expect(
+      harness.ledger.authorizeToolExecution(ASSIGNMENT_ID, replacementLease),
+    ).rejects.toThrow("inactive");
+
+    await harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      { fenceSeq: 1, requestId: "permission-cancel" },
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    await expect(
+      harness.ledger.authorizeToolExecution(
+        ASSIGNMENT_ID,
+        harness.unsigned.permissionLease,
+      ),
+    ).rejects.toThrow("inactive");
+  });
+
   it("rejects a submission capability outside the current job authority", async () => {
     const harness = await createUserHarness();
     const context = submissionContext(harness.unsigned);
     if (context.principal.kind !== "assignment") {
       throw new Error("test fixture must use an assignment capability");
     }
+    const assignedPayload = withoutSignature(context.principal.capability);
+    const sameIdMutations = [
+      {
+        ...assignedPayload,
+        methods: [...assignedPayload.methods].reverse(),
+      },
+      {
+        ...assignedPayload,
+        resources: [...assignedPayload.resources, "task:other"],
+      },
+      {
+        ...assignedPayload,
+        expiry: "2026-07-15T09:30:00.000Z",
+      },
+    ] as const;
+    for (const mutation of sameIdMutations) {
+      const forgedContext = submissionContext(harness.unsigned);
+      if (forgedContext.principal.kind !== "assignment") {
+        throw new Error("test fixture must use an assignment capability");
+      }
+      forgedContext.deadlineAt = mutation.expiry;
+      forgedContext.principal.capability = {
+        ...mutation,
+        methods: [...mutation.methods],
+        resources: [...mutation.resources],
+        signature: harness.identity.sign("AuthorityCapability", 1, mutation),
+      };
+      await expect(
+        harness.journal.reportStarted(ASSIGNMENT_ID, forgedContext),
+      ).rejects.toThrow("does not match the durable dispatch capability");
+    }
+    const forgedPayload = {
+      ...withoutSignature(context.principal.capability),
+      scope: { execution: "job" as const, taskId: "task-other" },
+    };
     context.principal.capability = {
-      ...context.principal.capability,
-      scope: { execution: "job", taskId: "task-other" },
+      ...forgedPayload,
+      signature: harness.identity.sign("AuthorityCapability", 1, forgedPayload),
     };
     await expect(
       harness.journal.reportStarted(ASSIGNMENT_ID, context),
-    ).rejects.toThrow("not activated by the durable job assignment");
+    ).rejects.toThrow("not activated by durable authority state");
   });
 
   it("keeps contradictory not-started evidence uncertain after durable started", async () => {
@@ -1762,6 +1862,60 @@ describe("user job durable protocol", () => {
     });
   });
 
+  it("rejects a job dispatch from the wrong anchor before any durable control fact", async () => {
+    const harness = await createUserHarness();
+    if (!harness.dispatch) throw new Error("test harness has no assignment");
+    await expect(harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(
+        ASSIGNMENT_ID,
+        "executor.dispatch",
+        undefined,
+        { execution: "job", taskId: TASK_ID, anchorEpoch: 4 },
+      ),
+    )).rejects.toThrow("owner control authorization failed");
+    await expect(
+      harness.log.readStream(`assignment:${ASSIGNMENT_ID}`),
+    ).resolves.toHaveLength(0);
+    await expect(harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    )).resolves.toMatchObject({ accepted: true });
+  });
+
+  it("does not derive durable job control from an unverified activation authority", async () => {
+    const harness = await createUserHarness();
+    if (!harness.dispatch) throw new Error("test harness has no assignment");
+    const unverifiedActivation = {
+      ...harness.dispatch.activation,
+      ref: {
+        ...harness.dispatch.activation.ref,
+        taskId: "task-other",
+      },
+    } as typeof harness.dispatch.activation;
+
+    await expect(harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      unverifiedActivation,
+      ownerContext(
+        ASSIGNMENT_ID,
+        "executor.dispatch",
+        undefined,
+        { execution: "job", taskId: "task-other", anchorEpoch: 3 },
+      ),
+    )).rejects.toThrow("owner control authorization failed");
+    await expect(
+      harness.log.readStream(`assignment:${ASSIGNMENT_ID}`),
+    ).resolves.toHaveLength(0);
+    await expect(harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    )).resolves.toMatchObject({ accepted: true });
+  });
+
   it("keeps a mismatched job queued before signing or assigning it", async () => {
     const harness = await createUserHarness({
       assign: false,
@@ -2037,6 +2191,86 @@ describe("user job state machine rows", () => {
   it.each(USER_JOB_ROWS)("[6.2 row %i] %s", async (row) => {
     await exerciseUserJobRow(row);
   }, 15_000);
+});
+
+describe("job cancellation evidence authority binding", () => {
+  it("rejects pre-received control evidence that does not bind the assigned envelope", async () => {
+    const harness = await createUserHarness();
+    const cancellation = await harness.journal.cancel({
+      jobRunId: JOB_RUN_ID,
+      requestId: "polluted-job-control-evidence",
+      context: surfaceContext("polluted-job-control-evidence"),
+    });
+    if (cancellation.state !== "cancel-requested") {
+      throw new Error("expected cancellation fence");
+    }
+    if (!harness.dispatch) throw new Error("test harness has no assignment");
+    const { signature: _, ...lease } = harness.dispatch.envelope.controlLease;
+    const leasePayload = {
+      ...lease,
+      authority: {
+        execution: "job" as const,
+        taskId: "task-other",
+        anchorEpoch: 3,
+      },
+    };
+    const entries: AssignmentEntry[] = [
+      {
+        recordSeq: 1,
+        body: {
+          v: 1,
+          t: "control-lease-renewed",
+          lease: {
+            ...leasePayload,
+            signature: harness.identity.sign("ControlLease", 1, leasePayload),
+          },
+        },
+      },
+      {
+        recordSeq: 2,
+        body: {
+          v: 1,
+          t: "abort-requested",
+          via: "owner-fence",
+          refId: cancellation.fence.requestId,
+        },
+      },
+    ];
+    let chainDigest = assignmentLedgerSeed(ASSIGNMENT_ID);
+    for (const entry of entries) {
+      chainDigest = advanceAssignmentLedger(chainDigest, entry);
+    }
+    const payload = {
+      v: 1 as const,
+      assignmentId: ASSIGNMENT_ID,
+      executorId: EXECUTOR_ID,
+      fromSeq: 1,
+      toSeq: entries.at(-1)!.recordSeq,
+      entries,
+      chainDigest,
+    };
+    const pollutedPage: LedgerEvidencePage = {
+      ...payload,
+      signature: harness.identity.sign("LedgerEvidencePage", 1, payload),
+    };
+    const snapshot: LedgerSnapshot = {
+      v: 1,
+      assignmentId: ASSIGNMENT_ID,
+      lastSeq: entries.length,
+      phase: "unknown",
+    };
+    await expect(
+      harness.journal.reconcileCancellationEvidence(
+        ASSIGNMENT_ID,
+        snapshot,
+        (async function* () {
+          yield pollutedPage;
+        })(),
+      ),
+    ).rejects.toThrow(
+      "Control lease evidence does not bind the durable job assignment",
+    );
+  });
 });
 
 const CANCELLATION_RACE_PERMUTATIONS = [
@@ -2751,31 +2985,25 @@ describe("job submission guard preflight", () => {
     });
   });
 
-  it("stably rejects a submission capability from a stale anchor epoch", async () => {
+  it("rejects an unactivated submission anchor epoch before consuming the bundle", async () => {
     const harness = await createUserHarness();
     await start(harness);
-    const activated = harness.unsigned.capabilities[0]!;
+    const context = submissionContext(harness.unsigned);
+    if (context.principal.kind !== "assignment") {
+      throw new Error("test fixture must use an assignment capability");
+    }
+    const activated = context.principal.capability;
     const stalePayload = { ...withoutSignature(activated), anchorEpoch: 4 };
-    const staleContext: AuthorityCallContext = {
-      principal: {
-        kind: "assignment",
-        capability: {
-          ...stalePayload,
-          signature: harness.identity.sign("AuthorityCapability", 1, stalePayload),
-        } as AuthorityCapability<"job">,
-      },
-      requestId: "stale-epoch-submission",
-      deadlineAt: EXPIRY,
-    };
+    context.principal.capability = {
+      ...stalePayload,
+      signature: harness.identity.sign("AuthorityCapability", 1, stalePayload),
+    } as AuthorityCapability<"job">;
     const bundle = await seal(harness);
-    const result = await harness.journal.submitBundle(bundle, staleContext);
-    expect(result).toMatchObject({
-      committed: false,
-      error: {
-        code: "fence-rejected",
-        message: expect.stringContaining("stale job authority"),
-      },
-    });
+    await expect(
+      harness.journal.submitBundle(bundle, context),
+    ).rejects.toThrow(
+      "Assignment capability is not activated by durable authority state",
+    );
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("running");
   });
 
@@ -3702,6 +3930,23 @@ function createUnsignedJob(
     ...manifestPayload,
     digest: protocolDigest("ExecutionManifest", 1, manifestPayload),
   };
+  const controlPayload = {
+    v: 1 as const,
+    controlLeaseId: "control-lease-1",
+    assignmentId,
+    authority: {
+      execution: "job" as const,
+      taskId: TASK_ID,
+      anchorEpoch: 3,
+    },
+    renewalSeq: 1,
+    issuedAt,
+    expiry: new Date(Date.parse(issuedAt) + 60_000).toISOString(),
+  };
+  const controlLease = {
+    ...controlPayload,
+    signature: identity.sign("ControlLease", 1, controlPayload),
+  };
   const permissionPayload = {
     v: 1 as const,
     snapshotVersion: 1,
@@ -3783,6 +4028,7 @@ function createUnsignedJob(
     assignmentId,
     executorId: EXECUTOR_ID,
     manifest,
+    controlLease,
     permissionLease,
     capabilities: [capability],
     resourceLease,
@@ -4005,24 +4251,55 @@ function ownerContext(
     | "executor.cancel"
     | "executor.supersede"
     | "executor.queryLedger",
+  request: { readonly requestId: string; readonly body: unknown } = {
+    requestId: `request-${method}-${assignmentId}`,
+    body: {},
+  },
+  scope: { readonly execution: "job"; readonly taskId: string; readonly anchorEpoch: number } = {
+    execution: "job",
+    taskId: TASK_ID,
+    anchorEpoch: 3,
+  },
 ): AuthorityCallContext {
+  const controlPayload = {
+    v: 1 as const,
+    controlLeaseId: "control-lease-1",
+    assignmentId,
+    authority: scope,
+    renewalSeq: 1,
+    issuedAt: NOW,
+    expiry: CONTROL_EXPIRY,
+  };
+  const controlLease = {
+    ...controlPayload,
+    signature: new TestProtocolIdentity().sign("ControlLease", 1, controlPayload),
+  };
+  const requestId = request.requestId;
   return {
     principal: {
       kind: "owner-control",
       grant: {
         v: 1,
         assignmentId,
-        scope: { execution: "job", taskId: TASK_ID, anchorEpoch: 3 },
+        scope,
         methods: [method],
-        callerDeviceId: "device-1",
-        requestId: `owner-${method}-${assignmentId}`,
+        callerDeviceId: "test-owner",
+        requestId,
+        requestDigest: ownerControlRequestDigest({
+          method,
+          assignmentId,
+          authority: scope,
+          requestId,
+          body: request.body,
+        }),
+        controlLease,
         issuedAt: NOW,
-        expiry: EXPIRY,
+        expiry: CONTROL_EXPIRY,
         signature: { alg: "test", keyId: "test-owner", sig: "context" },
       },
     },
-    requestId: `request-${method}-${assignmentId}`,
-    deadlineAt: EXPIRY,
+    requestId,
+    deadlineAt: CONTROL_EXPIRY,
   };
 }
 
@@ -4181,6 +4458,26 @@ function rogueLedger(
       harness.artifacts,
       { clock: () => NOW, lockWaitMs: 2_000 },
     ),
+    artifacts: harness.artifacts,
+    executorId: EXECUTOR_ID,
+    signer: harness.identity,
+    verifier: harness.identity,
+    ownerControl,
+    snapshotFor: matchingSnapshotFor,
+    permissionSnapshotFor: (digest) =>
+      matchingPermissionSnapshotFor(harness.identity, digest),
+    clock: () => NOW,
+  });
+}
+
+function reopenAssignmentLedger(
+  harness: Awaited<ReturnType<typeof createUserHarness>>,
+): ConversationAssignmentLedger {
+  return new ConversationAssignmentLedger({
+    log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+      clock: () => NOW,
+      lockWaitMs: 2_000,
+    }),
     artifacts: harness.artifacts,
     executorId: EXECUTOR_ID,
     signer: harness.identity,

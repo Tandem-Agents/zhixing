@@ -198,4 +198,22 @@ describe("TransitionConversationAssignmentIssuer", () => {
     );
     expect(signatureCount).toBe(0);
   });
+
+  it("rejects a credential policy that exceeds the permission lease TTL", () => {
+    const issuer = new TransitionConversationAssignmentIssuer({
+      signer,
+      verifier,
+      localDomainId: "local:device-test",
+      snapshotFor: snapshotFor(3),
+      clock: () => "2026-07-18T00:00:00.000Z",
+    });
+    const oversized = {
+      ...policy(3),
+      credentialTtlMs: 24 * 60 * 60 * 1_000 + 1,
+    };
+
+    expect(() => issuer.issue(issueInput("interactive", oversized))).toThrow(
+      "Transition credential policy is invalid",
+    );
+  });
 });

@@ -49,11 +49,13 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   applyValidatedAssignmentEntry,
+  assertActivatedAssignmentCapability,
   buildConversationActivationPayload,
   buildConversationActivationPayloadFromBinding,
   assignmentActivationDigest,
   byteDigest,
   canonicalize,
+  controlLeaseBindsDispatchEnvelope,
   conversationBundleRoots,
   createAssignmentLedgerValidationState,
   createSignedConversationEnvelope,
@@ -661,6 +663,10 @@ export interface InProcessDispatchContextFactory {
       | "executor.cancel"
       | "executor.supersede"
       | "executor.queryLedger",
+    request: {
+      readonly requestId: string;
+      readonly body: unknown;
+    },
   ): AuthorityCallContext;
 }
 
@@ -2191,6 +2197,14 @@ export class ConversationRunJournal {
           body = validateAssignmentEntry(rawEntry, this.#verifier).body;
         }
         const entry: AssignmentEntry = { recordSeq: rawEntry.recordSeq, body };
+        if (
+          body.t === "control-lease-renewed" &&
+          !controlLeaseBindsDispatchEnvelope(body.lease, assigned.envelope)
+        ) {
+          throw new TypeError(
+            "Control lease evidence does not bind the durable assignment",
+          );
+        }
         switch (body.t) {
           case "received": {
             const activation = validateConversationActivation({
@@ -6234,15 +6248,28 @@ export class ConversationRunJournal {
       if (context.principal.kind !== "assignment") return transaction.state;
       const capability = context.principal.capability;
       const assigned = transaction.state.assignedById.get(identity.assignmentId);
-      if (
-        !assigned ||
-        !assigned.capIds.has(capability.capId) ||
-        assigned.record.executorId !== capability.executorId ||
-        capability.scope.execution !== "conversation" ||
-        capability.scope.conversationId !== this.#conversationId
-      ) {
-        throw new Error("Assignment capability is not activated by the durable assignment");
-      }
+      assertActivatedAssignmentCapability({
+        capability,
+        activation: assigned
+          ? {
+              capIds: assigned.record.capIds,
+              assignmentId: assigned.record.assignmentId,
+              executorId: assigned.record.executorId,
+              authority: {
+                execution: "conversation",
+                conversationId: this.#conversationId,
+                ownerEpoch: assigned.record.ownerEpoch,
+              },
+            }
+          : undefined,
+        verifier: this.#verifier,
+        method: identity.method,
+        resource: `conversation:${this.#conversationId}`,
+        mode: "durable-replay",
+        revoked: false,
+        now: this.#clock(),
+        deadlineAt: context.deadlineAt,
+      });
       return transaction.state;
     });
   }
@@ -6287,11 +6314,30 @@ export class ConversationRunJournal {
     if (context.principal.kind !== "assignment") return;
     const capability = context.principal.capability;
     const assigned = state.assignedById.get(identity.assignmentId);
-    const activated = assigned?.envelope.capabilities.find(
-      (candidate) => candidate.capId === capability.capId,
-    );
-    if (!activated || canonicalize(activated) !== canonicalize(capability)) {
-      throw new Error("Assignment capability is not activated by the durable assignment");
+    assertActivatedAssignmentCapability({
+      capability,
+      activation: assigned
+        ? {
+            capIds: assigned.record.capIds,
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            authority: {
+              execution: "conversation",
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+            },
+          }
+        : undefined,
+      verifier: this.#verifier,
+      method: identity.method,
+      resource: `conversation:${this.#conversationId}`,
+      mode: "durable-replay",
+      revoked: false,
+      now: this.#clock(),
+      deadlineAt: context.deadlineAt,
+    });
+    if (assigned) {
+      assertCapabilityMatchesAssignedEnvelope(capability, assigned.envelope);
     }
   }
 
@@ -6301,8 +6347,8 @@ export class ConversationRunJournal {
     authorization: AssignmentSubmissionAuthorization,
   ): void {
     this.#authorizeAuthenticatedSubmission(context, authorization);
-    this.#assertActivatedSubmissionCapability(state, context, authorization);
-    this.#assertActiveSubmissionCapabilityNotRevoked(
+    this.#assertDurableSubmissionCapability(
+      state.assignedById.get(authorization.assignmentId),
       state.revokedCapabilities,
       context,
       authorization,
@@ -6315,25 +6361,53 @@ export class ConversationRunJournal {
     authorization: AssignmentSubmissionAuthorization,
   ): void {
     this.#authorizeAuthenticatedSubmission(context, authorization);
-    this.#assertActiveSubmissionCapabilityNotRevoked(
+    this.#assertDurableSubmissionCapability(
+      state.assignedById.get(authorization.assignmentId),
       state.revokedCapabilities,
       context,
       authorization,
     );
   }
 
-  #assertActiveSubmissionCapabilityNotRevoked(
+  #assertDurableSubmissionCapability(
+    assigned:
+      | {
+          readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
+          readonly envelope?: PendingConversationDispatch["envelope"];
+        }
+      | undefined,
     revokedCapabilities: ReadonlySet<string>,
     context: AuthorityCallContext,
     authorization: AssignmentSubmissionAuthorization,
   ): void {
     if (context.principal.kind !== "assignment") return;
     const capability = context.principal.capability;
-    if (
-      authorization.mode === "active" &&
-      revokedCapabilities.has(`${authorization.assignmentId}\0${capability.capId}`)
-    ) {
-      throw new Error("revoked capability cannot perform an active submission");
+    assertActivatedAssignmentCapability({
+      capability,
+      activation: assigned
+        ? {
+            capIds: assigned.record.capIds,
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            authority: {
+              execution: "conversation",
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+            },
+          }
+        : undefined,
+      verifier: this.#verifier,
+      method: authorization.method,
+      resource: `conversation:${this.#conversationId}`,
+      mode: authorization.mode,
+      revoked: revokedCapabilities.has(
+        `${authorization.assignmentId}\0${capability.capId}`,
+      ),
+      now: this.#clock(),
+      deadlineAt: context.deadlineAt,
+    });
+    if (assigned?.envelope) {
+      assertCapabilityMatchesAssignedEnvelope(capability, assigned.envelope);
     }
   }
 
@@ -6625,7 +6699,7 @@ export class InProcessConversationDispatcher {
         await this.#executor.dispatch(
           item.envelope,
           item.activation,
-          this.#contexts.create(item.assignmentId, "executor.dispatch"),
+          this.#dispatchContext(item),
         ),
       );
       outcomes.push(outcome);
@@ -6648,7 +6722,7 @@ export class InProcessConversationDispatcher {
       const snapshot = this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           item.assignmentId,
-          this.#contexts.create(item.assignmentId, "executor.queryLedger"),
+          this.#queryContext(item.assignmentId),
         ),
       );
       if (
@@ -6669,13 +6743,13 @@ export class InProcessConversationDispatcher {
     await this.#executor.cancel(
       result.assignmentId,
       result.fence,
-      this.#contexts.create(result.assignmentId, "executor.cancel"),
+      this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
     );
     if (!(await this.#submitCancellation(result.assignmentId))) {
       await this.#executor.cancel(
         result.assignmentId,
         result.fence,
-        this.#contexts.create(result.assignmentId, "executor.cancel"),
+        this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
       );
       await this.#submitCancellation(result.assignmentId);
     }
@@ -6689,13 +6763,13 @@ export class InProcessConversationDispatcher {
       await this.#executor.cancel(
         item.assignmentId,
         item.fence,
-        this.#contexts.create(item.assignmentId, "executor.cancel"),
+        this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
       );
       if (!(await this.#submitCancellation(item.assignmentId))) {
         await this.#executor.cancel(
           item.assignmentId,
           item.fence,
-          this.#contexts.create(item.assignmentId, "executor.cancel"),
+          this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
         );
         await this.#submitCancellation(item.assignmentId);
       }
@@ -6711,7 +6785,7 @@ export class InProcessConversationDispatcher {
       const ledger = this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           candidate.assignmentId,
-          this.#contexts.create(candidate.assignmentId, "executor.queryLedger"),
+          this.#queryContext(candidate.assignmentId),
         ),
       );
       if (ledger.phase === "dispatch-rejected") {
@@ -6719,7 +6793,7 @@ export class InProcessConversationDispatcher {
           await this.#executor.dispatch(
             candidate.dispatch.envelope,
             candidate.dispatch.activation,
-            this.#contexts.create(candidate.assignmentId, "executor.dispatch"),
+            this.#dispatchContext(candidate.dispatch),
           ),
         );
         if (outcome.accepted || outcome.outcome !== "rejected-before-received") {
@@ -6758,10 +6832,7 @@ export class InProcessConversationDispatcher {
           const acknowledged = this.#journal.validateExecutorLedgerSnapshot(
             await this.#executor.queryLedger(
               candidate.assignmentId,
-              this.#contexts.create(
-                candidate.assignmentId,
-                "executor.queryLedger",
-              ),
+              this.#queryContext(candidate.assignmentId),
             ),
           );
           await this.#journal.observeBundleAcknowledgement(
@@ -6788,7 +6859,15 @@ export class InProcessConversationDispatcher {
         while (fromSeq <= ledger.lastSeq) {
           const page = await executor.queryLedger(
             assignmentId,
-            contexts.create(assignmentId, "executor.queryLedger"),
+            contexts.create(assignmentId, "executor.queryLedger", {
+              requestId: `ledger:${assignmentId}:${fromSeq}:${Math.min(256, ledger.lastSeq - fromSeq + 1)}`,
+              body: {
+                range: {
+                  fromSeq,
+                  limit: Math.min(256, ledger.lastSeq - fromSeq + 1),
+                },
+              },
+            }),
             { fromSeq, limit: Math.min(256, ledger.lastSeq - fromSeq + 1) },
           );
           if (!("entries" in page)) {
@@ -6824,7 +6903,7 @@ export class InProcessConversationDispatcher {
     const proof = await this.#executor.supersede(
       assignmentId,
       fence,
-      this.#contexts.create(assignmentId, "executor.supersede"),
+      this.#fenceContext(assignmentId, "executor.supersede", fence),
     );
     await this.#journal.acceptSupersedeProof(proof);
     return proof;
@@ -6837,7 +6916,7 @@ export class InProcessConversationDispatcher {
       const proof = await this.#executor.supersede(
         item.assignmentId,
         item.fence,
-        this.#contexts.create(item.assignmentId, "executor.supersede"),
+        this.#fenceContext(item.assignmentId, "executor.supersede", item.fence),
       );
       await this.#journal.acceptSupersedeProof(proof);
     }
@@ -6849,6 +6928,41 @@ export class InProcessConversationDispatcher {
       throw new Error("In-process cancellation submission is not configured");
     }
     return this.#cancellationSubmission.submitCancellation(assignmentId);
+  }
+
+  #dispatchContext(item: PendingConversationDispatch): AuthorityCallContext {
+    return this.#contexts.create(item.assignmentId, "executor.dispatch", {
+      requestId: `dispatch:${item.assignmentId}`,
+      body: {
+        dispatchDigest: dispatchEnvelopeDigest(item.envelope),
+        activationDigest: assignmentActivationDigest(
+          withoutSignature(item.activation),
+        ),
+      },
+    });
+  }
+
+  #queryContext(
+    assignmentId: string,
+    range?: { readonly fromSeq: number; readonly limit: number },
+  ): AuthorityCallContext {
+    return this.#contexts.create(assignmentId, "executor.queryLedger", {
+      requestId: range
+        ? `ledger:${assignmentId}:${range.fromSeq}:${range.limit}`
+        : `ledger:${assignmentId}:snapshot`,
+      body: { range: range ?? null },
+    });
+  }
+
+  #fenceContext(
+    assignmentId: string,
+    method: "executor.cancel" | "executor.supersede",
+    fence: { readonly fenceSeq: number; readonly requestId: string },
+  ): AuthorityCallContext {
+    return this.#contexts.create(assignmentId, method, {
+      requestId: fence.requestId,
+      body: { fenceSeq: fence.fenceSeq },
+    });
   }
 
   async #submitSealedBundle(
@@ -8199,6 +8313,20 @@ function assertAssignedMatchesDispatch(
     canonicalize(ingress) !== canonicalize(dispatch.work.ingress)
   ) {
     throw corruptRunJournal("Assigned record does not match its dispatch artifact");
+  }
+}
+
+function assertCapabilityMatchesAssignedEnvelope(
+  capability: import("@zhixing/core/contracts").AuthorityCapability,
+  envelope: PendingConversationDispatch["envelope"],
+): void {
+  const assigned = envelope.capabilities.find(
+    (candidate) => candidate.capId === capability.capId,
+  );
+  if (!assigned || canonicalize(assigned) !== canonicalize(capability)) {
+    throw new TypeError(
+      "Assignment capability does not match the durable dispatch capability",
+    );
   }
 }
 

@@ -6,9 +6,11 @@ import type {
   AssignmentEntry,
   AssignmentRecord,
   AssignmentTerminationProof,
+  AuthorityEpochRef,
   CancelProofBody,
   ChannelResponderRef,
   ConversationInvocation,
+  ControlLease,
   DispatchConflictProof,
   DispatchEnvelope,
   DispatchRejectionProof,
@@ -34,6 +36,15 @@ import { validateExecutionManifest } from "./manifest.js";
 import { assertResourceLeaseBaseContract } from "./resource-lease.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
+import {
+  validateAuthorityCapability,
+  validateControlLease,
+  validatePermissionSnapshotLease,
+} from "./authority.js";
+import type {
+  ProtocolSignatureVerifier,
+  ProtocolSigner,
+} from "./signature.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 
@@ -76,6 +87,14 @@ export interface JobActivationBinding {
   };
 }
 
+export interface DispatchControlBinding {
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly authority: AuthorityEpochRef;
+  readonly ownerDeviceId: string;
+  readonly controlLease: ControlLease;
+}
+
 type UnsignedSupersedeProof = SupersedeProof extends infer Proof
   ? Proof extends unknown
     ? Omit<Proof, "signature">
@@ -115,25 +134,12 @@ export type ConversationInteractionMirrorBatch = Omit<
   "entries"
 > & { readonly entries: ConversationInteractionMirrorEntry[] };
 
-export interface ProtocolSigner {
-  sign(schemaId: string, version: number, payload: unknown): Signature;
-}
-
 export function confirmationDecisionDigest(
   requestId: string,
   decision: ConfirmationDecision,
 ): Digest {
   assertIdentifier(requestId, "Confirmation request id");
   return protocolDigest("ConfirmationDecision", 1, { requestId, decision });
-}
-
-export interface ProtocolSignatureVerifier {
-  verify(
-    schemaId: string,
-    version: number,
-    payload: unknown,
-    signature: Signature,
-  ): void;
 }
 
 export interface DispatchEnvelopeArtifact {
@@ -148,6 +154,12 @@ export interface AssignmentLedgerValidationState {
   phase: LedgerSnapshot["phase"];
   received: boolean;
   started: boolean;
+  control?: {
+    readonly authority: AuthorityEpochRef;
+    readonly ownerDeviceId: string;
+    readonly controlLeaseId: string;
+    readonly renewalSeq: number;
+  };
   readonly aborts: Set<string>;
   readonly requestedInteractions: Set<string>;
   readonly pendingInteractions: Set<string>;
@@ -245,6 +257,40 @@ export function validateJobEnvelope(
   return envelope;
 }
 
+export function validateDispatchControlBinding(
+  input: DispatchEnvelope,
+  verifier: ProtocolSignatureVerifier,
+): DispatchControlBinding {
+  const envelope = snapshot(input, "Dispatch control binding") as DispatchEnvelope;
+  assertObject(envelope, "Dispatch control binding");
+  assertIdentifier(envelope.assignmentId, "Dispatch assignmentId");
+  assertIdentifier(envelope.executorId, "Dispatch executorId");
+  assertSignature(envelope.signature, "Dispatch signature");
+  const controlLease = validateControlLease(envelope.controlLease, verifier);
+  if (
+    controlLease.assignmentId !== envelope.assignmentId ||
+    envelope.signature.keyId !== controlLease.signature.keyId
+  ) {
+    throw new TypeError("Dispatch signer does not own its control lease");
+  }
+  verifier.verify(
+    "DispatchEnvelope",
+    1,
+    withoutField(envelope, "signature"),
+    envelope.signature,
+  );
+  return snapshot(
+    {
+      assignmentId: envelope.assignmentId,
+      executorId: envelope.executorId,
+      authority: controlLease.authority,
+      ownerDeviceId: envelope.signature.keyId,
+      controlLease,
+    },
+    "Dispatch control binding",
+  );
+}
+
 export function dispatchEnvelopeArtifact(
   envelope: DispatchEnvelope,
 ): DispatchEnvelopeArtifact {
@@ -260,6 +306,18 @@ export function dispatchEnvelopeDigest(envelope: DispatchEnvelope): Digest {
     "DispatchEnvelope",
     1,
     withoutField(envelope, "signature"),
+  );
+}
+
+export function controlLeaseBindsDispatchEnvelope(
+  lease: ControlLease,
+  envelope: DispatchEnvelope,
+): boolean {
+  return (
+    lease.assignmentId === envelope.assignmentId &&
+    lease.controlLeaseId === envelope.controlLease.controlLeaseId &&
+    lease.signature.keyId === envelope.controlLease.signature.keyId &&
+    canonicalize(lease.authority) === canonicalize(envelope.controlLease.authority)
   );
 }
 
@@ -388,6 +446,9 @@ export function validateConversationActivation(input: {
     payload,
     activation.signature,
   );
+  if (activation.signature.keyId !== input.envelope.signature.keyId) {
+    throw new TypeError("Assignment activation signer does not own the dispatch");
+  }
   assertActivationPayload(payload, input.envelope, input.dispatchRef);
   return snapshot(payload, "Assignment activation payload");
 }
@@ -506,6 +567,9 @@ export function validateJobActivation(input: {
     payload,
     activation.signature,
   );
+  if (activation.signature.keyId !== input.envelope.signature.keyId) {
+    throw new TypeError("Assignment activation signer does not own the dispatch");
+  }
   assertJobActivationPayload(payload, input.envelope, input.dispatchRef);
   return snapshot(payload, "Assignment activation payload");
 }
@@ -709,21 +773,70 @@ export function applyValidatedAssignmentEntry(
       if (state.phase !== "unknown" || state.aborts.size > 0) {
         throw new TypeError("received is not the first record");
       }
+      {
+        const ref = body.activation.ref;
+        const authority: AuthorityEpochRef = ref.execution === "conversation"
+          ? {
+              execution: "conversation",
+              conversationId: ref.conversationId,
+              ownerEpoch: ref.ownerEpoch,
+            }
+          : {
+              execution: "job",
+              taskId: ref.taskId,
+              anchorEpoch: ref.anchorEpoch,
+            };
+        if (
+          state.control === undefined ||
+          canonicalize(state.control.authority) !== canonicalize(authority) ||
+          state.control.ownerDeviceId !== body.activation.signature.keyId
+        ) {
+          throw new TypeError("received does not bind durable owner control");
+        }
+      }
       state.phase = "received";
       state.received = true;
       break;
     case "dispatch-rejected":
-      if (state.phase !== "unknown" || state.aborts.size > 0) {
-        throw new TypeError("dispatch-rejected is not the first record");
+      if (
+        state.phase !== "unknown" ||
+        state.aborts.size > 0 ||
+        state.control === undefined
+      ) {
+        throw new TypeError("dispatch-rejected has no durable owner control prefix");
       }
       state.phase = "dispatch-rejected";
+      break;
+    case "control-lease-renewed":
+      // Owner-control remains renewable for exact retry and ledger recovery.
+      // Execution authority is closed independently by phase, fences and aborts.
+      if (body.lease.assignmentId !== state.assignmentId) {
+        throw new TypeError("control lease belongs to a different assignment");
+      }
+      if (
+        state.control !== undefined &&
+        (canonicalize(state.control.authority) !==
+          canonicalize(body.lease.authority) ||
+          state.control.ownerDeviceId !== body.lease.signature.keyId ||
+          state.control.controlLeaseId !== body.lease.controlLeaseId ||
+          body.lease.renewalSeq <= state.control.renewalSeq)
+      ) {
+        throw new TypeError("control lease renewal conflicts with durable authority");
+      }
+      state.control = {
+        authority: snapshot(body.lease.authority, "Control lease authority"),
+        ownerDeviceId: body.lease.signature.keyId,
+        controlLeaseId: body.lease.controlLeaseId,
+        renewalSeq: body.lease.renewalSeq,
+      };
       break;
     case "supersede-fenced":
       if (
         (state.phase !== "unknown" && state.phase !== "received") ||
-        state.aborts.size > 0
+        state.aborts.size > 0 ||
+        state.control === undefined
       ) {
-        throw new TypeError("supersede-fenced is not before assignment start");
+        throw new TypeError("supersede-fenced has no controllable assignment prefix");
       }
       state.phase = "supersede-fenced";
       break;
@@ -800,6 +913,12 @@ export function applyValidatedAssignmentEntry(
         state.phase !== "started"
       ) {
         throw new TypeError("abort-requested is outside a cancellable assignment");
+      }
+      if (
+        (body.via === "owner-fence" && state.control === undefined) ||
+        (body.via === "abort-ticket" && !state.received)
+      ) {
+        throw new TypeError("abort-requested has no durable authorization prefix");
       }
       const key = `${body.via}\0${body.refId}`;
       if (state.aborts.has(key)) {
@@ -1382,6 +1501,14 @@ function assertAssignmentRecord(
       assertDigest(value.dispatchDigest, "dispatch rejection digest");
       assertAuthorityError(value.reason, "dispatch rejection reason");
       return;
+    case "control-lease-renewed":
+      assertExactKeys(
+        value,
+        ["lease", "t", "v"],
+        "control-lease-renewed record",
+      );
+      validateControlLease(value.lease, verifier);
+      return;
     case "supersede-fenced":
       assertExactKeys(value, ["fenceSeq", "requestId", "t", "v"], "supersede-fenced record");
       assertPositiveInteger(value.fenceSeq, "supersede fence sequence");
@@ -1516,6 +1643,7 @@ function assertConversationEnvelope(
     [
       "assignmentId",
       "capabilities",
+      "controlLease",
       "dependencyArtifacts",
       "execution",
       "executorId",
@@ -1538,6 +1666,11 @@ function assertConversationEnvelope(
   assertCanonicalTime(envelope.issuedAt, "Dispatch issuedAt");
   validateExecutionManifest(envelope.manifest);
   assertConversationWork(envelope.work);
+  const authenticatedControl = verifyEnvelopeSignature
+    ? validateDispatchControlBinding(envelope as ConversationEnvelope, verifier)
+    : undefined;
+  const controlLease = authenticatedControl?.controlLease ??
+    validateControlLease(envelope.controlLease, verifier);
   assertPermissionLease(envelope.permissionLease, verifier);
   assertCapabilities(envelope.capabilities, verifier);
   assertResourceLease(envelope.resourceLease, verifier);
@@ -1560,7 +1693,13 @@ function assertConversationEnvelope(
     permission.binding.ownerEpoch !== work.ownerEpoch ||
     permission.assignmentId !== envelope.assignmentId ||
     permission.executorId !== envelope.executorId ||
-    permission.snapshotVersion !== manifest.requires.permissionSnapshotVersion
+    permission.snapshotVersion !== manifest.requires.permissionSnapshotVersion ||
+    controlLease.assignmentId !== envelope.assignmentId ||
+    controlLease.authority.execution !== "conversation" ||
+    controlLease.authority.conversationId !== work.conversationId ||
+    controlLease.authority.ownerEpoch !== work.ownerEpoch ||
+    permission.controlLeaseId !== controlLease.controlLeaseId ||
+    permission.signature.keyId !== controlLease.signature.keyId
   ) {
     throw new TypeError("Permission lease does not bind the dispatch");
   }
@@ -1591,16 +1730,6 @@ function assertConversationEnvelope(
   const capIds = envelope.capabilities.map((capability) => capability.capId);
   assertSortedUnique(capIds, "Dispatch capability ids");
 
-  if (verifyEnvelopeSignature) {
-    const signed = envelope as ConversationEnvelope;
-    assertSignature(signed.signature, "Dispatch signature");
-    verifier.verify(
-      "DispatchEnvelope",
-      1,
-      withoutField(signed, "signature"),
-      signed.signature,
-    );
-  }
 }
 
 function assertJobEnvelope(
@@ -1613,6 +1742,7 @@ function assertJobEnvelope(
     [
       "assignmentId",
       "capabilities",
+      "controlLease",
       "dependencyArtifacts",
       "execution",
       "executorId",
@@ -1635,6 +1765,11 @@ function assertJobEnvelope(
   assertCanonicalTime(envelope.issuedAt, "Dispatch issuedAt");
   validateExecutionManifest(envelope.manifest);
   assertJobWork(envelope.work);
+  const authenticatedControl = verifyEnvelopeSignature
+    ? validateDispatchControlBinding(envelope as JobEnvelope, verifier)
+    : undefined;
+  const controlLease = authenticatedControl?.controlLease ??
+    validateControlLease(envelope.controlLease, verifier);
   assertPermissionLease(envelope.permissionLease, verifier);
   assertCapabilities(envelope.capabilities, verifier);
   assertResourceLease(envelope.resourceLease, verifier);
@@ -1658,7 +1793,13 @@ function assertJobEnvelope(
     permission.assignmentId !== envelope.assignmentId ||
     permission.executorId !== envelope.executorId ||
     permission.snapshotVersion !==
-      envelope.manifest.requires.permissionSnapshotVersion
+      envelope.manifest.requires.permissionSnapshotVersion ||
+    controlLease.assignmentId !== envelope.assignmentId ||
+    controlLease.authority.execution !== "job" ||
+    controlLease.authority.taskId !== work.taskId ||
+    controlLease.authority.anchorEpoch !== work.fence.anchorEpoch ||
+    permission.controlLeaseId !== controlLease.controlLeaseId ||
+    permission.signature.keyId !== controlLease.signature.keyId
   ) {
     throw new TypeError("Permission lease does not bind the dispatch");
   }
@@ -1707,16 +1848,6 @@ function assertJobEnvelope(
     "Dispatch capability ids",
   );
 
-  if (verifyEnvelopeSignature) {
-    const signed = envelope as JobEnvelope;
-    assertSignature(signed.signature, "Dispatch signature");
-    verifier.verify(
-      "DispatchEnvelope",
-      1,
-      withoutField(signed, "signature"),
-      signed.signature,
-    );
-  }
 }
 
 function assertJobWork(work: JobEnvelope["work"]): void {
@@ -2005,50 +2136,7 @@ function assertPermissionLease(
   lease: DispatchEnvelope["permissionLease"],
   verifier: ProtocolSignatureVerifier,
 ): void {
-  assertExactKeys(
-    lease,
-    [
-      "assignmentId",
-      "binding",
-      "controlLeaseId",
-      "executorId",
-      "expiry",
-      "issuedAt",
-      "signature",
-      "snapshotDigest",
-      "snapshotVersion",
-      "v",
-    ],
-    "Permission snapshot lease",
-  );
-  assertVersion(lease.v, "Permission snapshot lease");
-  if (lease.binding.execution === "conversation") {
-    assertExactKeys(
-      lease.binding,
-      ["conversationId", "execution", "ownerEpoch", "runId"],
-      "Permission binding",
-    );
-  } else if (lease.binding.execution === "job") {
-    assertExactKeys(
-      lease.binding,
-      ["anchorEpoch", "execution", "jobRunId", "taskId"],
-      "Permission binding",
-    );
-  } else {
-    throw new TypeError("Permission binding execution kind is invalid");
-  }
-  assertNonNegativeInteger(lease.snapshotVersion, "Permission snapshotVersion");
-  assertDigest(lease.snapshotDigest, "Permission snapshotDigest");
-  assertIdentifier(lease.controlLeaseId, "Permission controlLeaseId");
-  assertCanonicalTime(lease.issuedAt, "Permission issuedAt");
-  assertCanonicalTime(lease.expiry, "Permission expiry");
-  assertSignature(lease.signature, "Permission signature");
-  verifier.verify(
-    "PermissionSnapshotLease",
-    1,
-    withoutField(lease, "signature"),
-    lease.signature,
-  );
+  validatePermissionSnapshotLease(lease, verifier);
 }
 
 function assertCapabilities(
@@ -2059,49 +2147,7 @@ function assertCapabilities(
     throw new TypeError("Dispatch must carry at least one authority capability");
   }
   for (const capability of capabilities) {
-    const epochKey = capability.scope.execution === "conversation"
-      ? "ownerEpoch"
-      : capability.scope.execution === "job"
-        ? "anchorEpoch"
-        : undefined;
-    if (!epochKey) throw new TypeError("Capability execution kind is invalid");
-    assertExactKeys(
-      capability,
-      [
-        "assignmentId",
-        "capId",
-        "executorId",
-        "expiry",
-        "issuedAt",
-        "methods",
-        epochKey,
-        "resources",
-        "scope",
-        "signature",
-        "v",
-      ],
-      "Authority capability",
-    );
-    assertVersion(capability.v, "Authority capability");
-    assertExactKeys(
-      capability.scope,
-      capability.scope.execution === "conversation"
-        ? ["conversationId", "execution"]
-        : ["execution", "taskId"],
-      "Capability scope",
-    );
-    assertIdentifier(capability.capId, "Capability capId");
-    assertCanonicalTime(capability.issuedAt, "Capability issuedAt");
-    assertCanonicalTime(capability.expiry, "Capability expiry");
-    assertUniqueIdentifiers(capability.methods, "Capability methods");
-    assertUniqueIdentifiers(capability.resources, "Capability resources");
-    assertSignature(capability.signature, "Capability signature");
-    verifier.verify(
-      "AuthorityCapability",
-      1,
-      withoutField(capability, "signature"),
-      capability.signature,
-    );
+    validateAuthorityCapability(capability, verifier);
   }
 }
 

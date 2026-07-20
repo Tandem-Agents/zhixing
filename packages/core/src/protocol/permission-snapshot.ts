@@ -10,7 +10,7 @@ import {
   compareCanonicalStrings,
   protocolDigest,
 } from "./canonical.js";
-import type { ProtocolSignatureVerifier, ProtocolSigner } from "./assignment.js";
+import type { ProtocolSignatureVerifier, ProtocolSigner } from "./signature.js";
 import { assertProtocolIdentifier } from "./validation.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;

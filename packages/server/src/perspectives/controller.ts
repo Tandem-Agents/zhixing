@@ -115,8 +115,11 @@ export class PerspectivesController {
     const controller = this;
     const runtime: SessionRuntime = {
       sessionId: `perspectives:${input.managed.conversationId}`,
-      async *run(): AsyncGenerator<AgentYield, RunResult> {
-        const execution = await controller.executePerspectiveWork(input);
+      async *run(_messages, options): AsyncGenerator<AgentYield, RunResult> {
+        const execution = await controller.executePerspectiveWork({
+          ...input,
+          authorizeToolExecution: options?.authorizeToolExecution,
+        });
         outcome = execution.outcome;
         return execution.runResult;
       },
@@ -128,6 +131,15 @@ export class PerspectivesController {
           throw new Error("Perspective runtime lacks a security snapshot");
         }
         return snapshot;
+      },
+      executionPermissionRules() {
+        const rules = input.managed.runtime.executionPermissionRules?.();
+        if (rules === undefined) {
+          throw new Error(
+            "Perspective runtime lacks an execution permission snapshot",
+          );
+        }
+        return rules;
       },
       executionProfile() {
         const profile = input.managed.runtime.executionProfile?.();
@@ -236,6 +248,7 @@ export class PerspectivesController {
           contextSnapshot: snapshot.snapshot,
           abortSignal: input.abortSignal,
           eventBus,
+          authorizeToolExecution: input.authorizeToolExecution,
         });
       } catch (err) {
         if (input.abortSignal?.aborted) {

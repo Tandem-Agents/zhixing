@@ -20,6 +20,7 @@ import type {
   AgentNodeExecutorV1,
   OrchestrationNodeExecutionContextV1,
 } from "./types.js";
+import type { DurableToolExecutionAuthorizer } from "../runtime/run-context.js";
 
 export type RunChildAgentForOrchestrationV1 = (
   options: RunChildAgentOptions,
@@ -39,6 +40,7 @@ export interface AgentNodeExecutorOptionsV1 {
   readonly parentTools: readonly ToolDefinition[];
   readonly riskMaxTokens: number;
   readonly userIntent?: string;
+  readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
   readonly runChildAgent?: RunChildAgentForOrchestrationV1;
 }
 
@@ -95,6 +97,7 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
         ? context.contextSnapshot?.messages
         : undefined,
       userIntent: this.options.userIntent,
+      authorizeToolExecution: this.options.authorizeToolExecution,
       riskMaxTokens: this.options.riskMaxTokens,
       budget: {
         maxTurns: node.policy.maxTurns,

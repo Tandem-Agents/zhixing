@@ -44,6 +44,7 @@ import type {
   OperationClass,
   OperationClassifier,
   PermissionContextId,
+  PermissionRule,
   SecurityDecision,
   SecurityMiddleware,
   SecurityMiddlewareContext,
@@ -203,6 +204,10 @@ export interface SecurityPipelineOptions {
   systemProtectedPaths?: readonly string[];
 }
 
+export interface SecurityEvaluationOptions {
+  readonly permissionRules?: readonly PermissionRule[];
+}
+
 /**
  * 安全管线 — Phase 2 实现。
  *
@@ -308,6 +313,7 @@ export class SecurityPipeline {
     toolName: string,
     toolInput: Record<string, unknown>,
     workingDirectory: string,
+    options: SecurityEvaluationOptions = {},
   ): Promise<SecurityMiddlewareResult> {
     const request: SecurityRequest = {
       tool: toolName,
@@ -324,6 +330,9 @@ export class SecurityPipeline {
       toolName,
       toolInput,
       workingDirectory,
+      ...(options.permissionRules === undefined
+        ? {}
+        : { permissionRules: options.permissionRules }),
       state: {},
     };
 

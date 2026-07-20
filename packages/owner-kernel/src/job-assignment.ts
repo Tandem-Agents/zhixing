@@ -44,10 +44,13 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   assertProtocolIdentifier as assertIdentifier,
+  assertActivatedAssignmentCapability,
+  assignmentActivationDigest,
   buildJobActivationPayload,
   buildJobActivationPayloadFromBinding,
   applyValidatedAssignmentEntry,
   canonicalize,
+  controlLeaseBindsDispatchEnvelope,
   createAssignmentLedgerValidationState,
   createJobCommitFence,
   createSignedJobEnvelope,
@@ -1242,6 +1245,14 @@ export class JobJournal {
           ).body;
         } else {
           body = validateAssignmentEntry(rawEntry, this.#verifier).body;
+        }
+        if (
+          body.t === "control-lease-renewed" &&
+          !controlLeaseBindsDispatchEnvelope(body.lease, assigned.envelope)
+        ) {
+          throw new TypeError(
+            "Control lease evidence does not bind the durable job assignment",
+          );
         }
         if (body.t === "received") {
           const activation = validateJobActivation({
@@ -3428,19 +3439,32 @@ export class JobJournal {
     if (context.principal.kind !== "assignment") return;
     const capability = context.principal.capability;
     const assigned = state.assignedById.get(authorization.assignmentId);
-    const activated = assigned?.envelope.capabilities.find(
-      (candidate) => candidate.capId === capability.capId,
-    );
-    if (!activated || canonicalize(activated) !== canonicalize(capability)) {
-      throw new Error("Assignment capability is not activated by the durable job assignment");
-    }
-    if (
-      authorization.mode === "active" &&
-      state.revokedCapabilities.has(
+    assertActivatedAssignmentCapability({
+      capability,
+      activation: assigned
+        ? {
+            capIds: assigned.record.capIds,
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            authority: {
+              execution: "job",
+              taskId: this.#taskId,
+              anchorEpoch: assigned.record.anchorEpoch,
+            },
+          }
+        : undefined,
+      verifier: this.#verifier,
+      method: authorization.method,
+      resource: `task:${this.#taskId}`,
+      mode: authorization.mode,
+      revoked: state.revokedCapabilities.has(
         revokedCapabilityKey(authorization.assignmentId, capability.capId),
-      )
-    ) {
-      throw new Error("revoked capability cannot perform an active job submission");
+      ),
+      now: this.#clock(),
+      deadlineAt: context.deadlineAt,
+    });
+    if (assigned) {
+      assertCapabilityMatchesAssignedEnvelope(capability, assigned.envelope);
     }
   }
 
@@ -4769,15 +4793,28 @@ export class JobJournal {
       if (context.principal.kind !== "assignment") return transaction.state;
       const capability = context.principal.capability;
       const assigned = transaction.state.assignedById.get(identity.assignmentId);
-      if (
-        !assigned ||
-        !assigned.capIds.has(capability.capId) ||
-        assigned.record.executorId !== capability.executorId ||
-        capability.scope.execution !== "job" ||
-        capability.scope.taskId !== this.#taskId
-      ) {
-        throw new Error("Assignment capability is not activated by the durable job assignment");
-      }
+      assertActivatedAssignmentCapability({
+        capability,
+        activation: assigned
+          ? {
+              capIds: assigned.record.capIds,
+              assignmentId: assigned.record.assignmentId,
+              executorId: assigned.record.executorId,
+              authority: {
+                execution: "job",
+                taskId: this.#taskId,
+                anchorEpoch: assigned.record.anchorEpoch,
+              },
+            }
+          : undefined,
+        verifier: this.#verifier,
+        method: identity.method,
+        resource: `task:${this.#taskId}`,
+        mode: "durable-replay",
+        revoked: false,
+        now: this.#clock(),
+        deadlineAt: context.deadlineAt,
+      });
       return transaction.state;
     });
   }
@@ -4796,17 +4833,32 @@ export class JobJournal {
       throw new Error("Assignment capability belongs to a stale job authority");
     }
     if (context.principal.kind !== "assignment") return;
-    if (
-      authorization.mode === "active" &&
-      state.revokedCapabilities.has(
-        revokedCapabilityKey(
-          authorization.assignmentId,
-          context.principal.capability.capId,
-        ),
-      )
-    ) {
-      throw new Error("revoked capability cannot perform an active job submission");
-    }
+    const capability = context.principal.capability;
+    const assigned = state.assignedById.get(authorization.assignmentId);
+    assertActivatedAssignmentCapability({
+      capability,
+      activation: assigned
+        ? {
+            capIds: assigned.record.capIds,
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            authority: {
+              execution: "job",
+              taskId: this.#taskId,
+              anchorEpoch: assigned.record.anchorEpoch,
+            },
+          }
+        : undefined,
+      verifier: this.#verifier,
+      method: authorization.method,
+      resource: `task:${this.#taskId}`,
+      mode: authorization.mode,
+      revoked: state.revokedCapabilities.has(
+        revokedCapabilityKey(authorization.assignmentId, capability.capId),
+      ),
+      now: this.#clock(),
+      deadlineAt: context.deadlineAt,
+    });
   }
 
   readonly #reduceSubmissionGuard = async (
@@ -5721,7 +5773,7 @@ export class InProcessJobDispatcher {
         await this.#executor.dispatch(
           item.envelope,
           item.activation,
-          this.#contexts.create(item.assignmentId, "executor.dispatch"),
+          this.#dispatchContext(item),
         ),
       );
       outcomes.push(outcome);
@@ -5744,7 +5796,7 @@ export class InProcessJobDispatcher {
       const ledger = this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           item.assignmentId,
-          this.#contexts.create(item.assignmentId, "executor.queryLedger"),
+          this.#queryContext(item.assignmentId),
         ),
       );
       if (
@@ -5769,13 +5821,13 @@ export class InProcessJobDispatcher {
     await this.#executor.cancel(
       result.assignmentId,
       result.fence,
-      this.#contexts.create(result.assignmentId, "executor.cancel"),
+      this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
     );
     if (!(await this.#submitCancellation(result.assignmentId))) {
       await this.#executor.cancel(
         result.assignmentId,
         result.fence,
-        this.#contexts.create(result.assignmentId, "executor.cancel"),
+        this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
       );
       await this.#submitCancellation(result.assignmentId);
     }
@@ -5789,13 +5841,13 @@ export class InProcessJobDispatcher {
       await this.#executor.cancel(
         item.assignmentId,
         item.fence,
-        this.#contexts.create(item.assignmentId, "executor.cancel"),
+        this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
       );
       if (!(await this.#submitCancellation(item.assignmentId))) {
         await this.#executor.cancel(
           item.assignmentId,
           item.fence,
-          this.#contexts.create(item.assignmentId, "executor.cancel"),
+          this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
         );
         await this.#submitCancellation(item.assignmentId);
       }
@@ -5809,7 +5861,7 @@ export class InProcessJobDispatcher {
     const proof = await this.#executor.supersede(
       assignmentId,
       fence,
-      this.#contexts.create(assignmentId, "executor.supersede"),
+      this.#fenceContext(assignmentId, "executor.supersede", fence),
     );
     await this.#journal.acceptSupersedeProof(proof);
     return proof;
@@ -5822,7 +5874,7 @@ export class InProcessJobDispatcher {
       const proof = await this.#executor.supersede(
         item.assignmentId,
         item.fence,
-        this.#contexts.create(item.assignmentId, "executor.supersede"),
+        this.#fenceContext(item.assignmentId, "executor.supersede", item.fence),
       );
       await this.#journal.acceptSupersedeProof(proof);
     }
@@ -5837,7 +5889,7 @@ export class InProcessJobDispatcher {
       const ledger = this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           candidate.assignmentId,
-          this.#contexts.create(candidate.assignmentId, "executor.queryLedger"),
+          this.#queryContext(candidate.assignmentId),
         ),
       );
       if (ledger.phase === "dispatch-rejected") {
@@ -5850,7 +5902,7 @@ export class InProcessJobDispatcher {
           await this.#executor.dispatch(
             candidate.dispatch.envelope,
             candidate.dispatch.activation,
-            this.#contexts.create(candidate.assignmentId, "executor.dispatch"),
+            this.#dispatchContext(candidate.dispatch),
           ),
         );
         if (result.accepted || result.outcome !== "rejected-before-received") {
@@ -5899,10 +5951,7 @@ export class InProcessJobDispatcher {
           const acknowledged = this.#journal.validateExecutorLedgerSnapshot(
             await this.#executor.queryLedger(
               candidate.assignmentId,
-              this.#contexts.create(
-                candidate.assignmentId,
-                "executor.queryLedger",
-              ),
+              this.#queryContext(candidate.assignmentId),
             ),
           );
           await this.#journal.observeBundleAcknowledgement(
@@ -5923,7 +5972,15 @@ export class InProcessJobDispatcher {
         while (fromSeq <= ledger.lastSeq) {
           const page = await executor.queryLedger(
             assignmentId,
-            contexts.create(assignmentId, "executor.queryLedger"),
+            contexts.create(assignmentId, "executor.queryLedger", {
+              requestId: `ledger:${assignmentId}:${fromSeq}:${Math.min(256, ledger.lastSeq - fromSeq + 1)}`,
+              body: {
+                range: {
+                  fromSeq,
+                  limit: Math.min(256, ledger.lastSeq - fromSeq + 1),
+                },
+              },
+            }),
             { fromSeq, limit: Math.min(256, ledger.lastSeq - fromSeq + 1) },
           );
           if (!("entries" in page)) {
@@ -5956,6 +6013,41 @@ export class InProcessJobDispatcher {
       throw new Error("In-process job cancellation submission is not configured");
     }
     return this.#cancellationSubmission.submitCancellation(assignmentId);
+  }
+
+  #dispatchContext(item: PendingJobDispatch): AuthorityCallContext {
+    return this.#contexts.create(item.assignmentId, "executor.dispatch", {
+      requestId: `dispatch:${item.assignmentId}`,
+      body: {
+        dispatchDigest: dispatchEnvelopeDigest(item.envelope),
+        activationDigest: assignmentActivationDigest(
+          withoutSignature(item.activation),
+        ),
+      },
+    });
+  }
+
+  #queryContext(
+    assignmentId: string,
+    range?: { readonly fromSeq: number; readonly limit: number },
+  ): AuthorityCallContext {
+    return this.#contexts.create(assignmentId, "executor.queryLedger", {
+      requestId: range
+        ? `ledger:${assignmentId}:${range.fromSeq}:${range.limit}`
+        : `ledger:${assignmentId}:snapshot`,
+      body: { range: range ?? null },
+    });
+  }
+
+  #fenceContext(
+    assignmentId: string,
+    method: "executor.cancel" | "executor.supersede",
+    fence: { readonly fenceSeq: number; readonly requestId: string },
+  ): AuthorityCallContext {
+    return this.#contexts.create(assignmentId, method, {
+      requestId: fence.requestId,
+      body: { fenceSeq: fence.fenceSeq },
+    });
   }
 
   async #submitSealedBundle(
@@ -6494,6 +6586,23 @@ function assertDispatchMatchesOccurrence(
       canonicalize(definition.definition.spec.action)
   ) {
     throw corruptJobJournal("Job dispatch does not bind its frozen occurrence");
+  }
+}
+
+function assertCapabilityMatchesAssignedEnvelope(
+  capability: import("@zhixing/core/contracts").AuthorityCapability,
+  envelope: Extract<
+    import("@zhixing/core/contracts").DispatchEnvelope,
+    { execution: "job" }
+  >,
+): void {
+  const assigned = envelope.capabilities.find(
+    (candidate) => candidate.capId === capability.capId,
+  );
+  if (!assigned || canonicalize(assigned) !== canonicalize(capability)) {
+    throw new TypeError(
+      "Assignment capability does not match the durable dispatch capability",
+    );
   }
 }
 

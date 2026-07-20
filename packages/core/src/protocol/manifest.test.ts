@@ -7,7 +7,7 @@ import type {
   TrustRuleSnapshot,
 } from "../contracts/index.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
-import type { ProtocolSignatureVerifier, ProtocolSigner } from "./assignment.js";
+import type { ProtocolSignatureVerifier, ProtocolSigner } from "./signature.js";
 import {
   acceptExecutorCapabilitySnapshot,
   createExecutionManifest,

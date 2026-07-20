@@ -15,6 +15,7 @@ import type {
   AuthorityCapability,
   AuthorityCallContext,
   CommitEnvelope,
+  ControlLease,
   ConversationStatusNotice,
   FinalFrame,
   IngressContext,
@@ -23,10 +24,15 @@ import type {
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import {
+  assertPrincipalAllowsAuthorityMethod,
+  assertAuthorizedOwnerControlGrant,
+  MAX_CONTROL_LEASE_TTL_MS,
   canonicalize,
   confirmationDecisionDigest,
+  ownerControlRequestDigest,
   protocolDigest,
   StreamDigestChain,
+  validateAuthorityCapability,
   type ConversationInteractionOutcome,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
@@ -76,7 +82,8 @@ import type {
   ConversationRuntimeBinding,
 } from "../setup-delivery.js";
 
-const CONTEXT_TTL_MS = 15 * 60 * 1_000;
+const CONTEXT_TTL_MS = MAX_CONTROL_LEASE_TTL_MS;
+const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(CONTEXT_TTL_MS / 3);
 
 export interface ConversationProtocolRuntimeOptions {
   readonly authority: AuthorityRuntimeStack;
@@ -93,6 +100,9 @@ export interface ConversationProtocolRuntimeOptions {
     readonly abortSignal?: AbortSignal;
     readonly turnContext: NonNullable<
       import("@zhixing/owner-kernel").RunTurnOptions["turnContext"]
+    >;
+    readonly authorizeToolExecution?: NonNullable<
+      import("@zhixing/owner-kernel").RunTurnOptions["authorizeToolExecution"]
     >;
   }) => Promise<RunResult>;
   readonly onStatus?: (notice: ConversationStatusNotice) => void | Promise<void>;
@@ -841,15 +851,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
       const attempt = await journal.nextAssignmentAttempt(runId);
       const executionProfile = input.runtime.executionProfile?.();
-      const securitySnapshot = input.runtime.securitySnapshot?.();
-      if (executionProfile === undefined || securitySnapshot === undefined) {
+      const permissionRules = input.runtime.executionPermissionRules?.();
+      if (executionProfile === undefined || permissionRules === undefined) {
         throw new Error(
-          "Durable conversation runtime must expose execution and security snapshots",
+          "Durable conversation runtime must expose execution and permission snapshots",
         );
       }
       const preparedAuthority = await this.#authority.prepareConversationAssignment({
         executionProfile,
-        permissionRules: securitySnapshot.permissionRules,
+        permissionRules,
       });
       const unsigned = this.#issuer.issue({
         runId,
@@ -930,6 +940,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         stream,
         streamMeta,
       };
+      const controlHeartbeat = this.#startControlHeartbeat(assignmentId);
       let runResult: RunResult;
       try {
         const generator = input.runtime.run(input.messages, {
@@ -944,6 +955,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             );
           },
           toolSideEffectObserver: this.#interactions,
+          authorizeToolExecution: () =>
+            this.#ledger.authorizeToolExecution(
+              assignmentId,
+              dispatch.envelope.permissionLease,
+            ),
         });
         while (true) {
           const item = await this.#interactions.withBinding(
@@ -959,6 +975,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           yield item.value;
         }
       } catch (error) {
+        await controlHeartbeat.stop();
         try {
           if (await this.#ledger.hasOpenSideEffects(assignmentId)) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
@@ -982,6 +999,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         }
         throw error;
       }
+      await controlHeartbeat.stop();
 
       if (runResult.agentResult.reason !== "completed") {
         if (await this.#ledger.hasOpenSideEffects(assignmentId)) {
@@ -1381,7 +1399,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       submission: createSubmissionAuthorizer(
         this.#authority.executorId,
         this.#authority.verifier,
-        this.#clock,
       ),
       authority: this.#commitAuthority(conversationId),
       projection: {
@@ -1436,6 +1453,35 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
   }
 
+  #startControlHeartbeat(assignmentId: string): {
+    stop(): Promise<void>;
+  } {
+    let inFlight: Promise<void> | undefined;
+    const timer = setInterval(() => {
+      if (inFlight) return;
+      inFlight = this.#ledger
+        .queryLedger(
+          assignmentId,
+          this.#contexts.create(assignmentId, "executor.queryLedger", {
+            requestId: `ledger:${assignmentId}:snapshot`,
+            body: { range: null },
+          }),
+        )
+        .then(() => undefined)
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = undefined;
+        });
+    }, CONTROL_RENEWAL_INTERVAL_MS);
+    timer.unref?.();
+    return {
+      async stop() {
+        clearInterval(timer);
+        await inFlight;
+      },
+    };
+  }
+
   async #reconcileAbandonedLocalAssignments(
     journal: ConversationRunJournal,
     dispatcher: InProcessConversationDispatcher,
@@ -1446,7 +1492,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const snapshot = journal.validateExecutorLedgerSnapshot(
         await this.#ledger.queryLedger(
           candidate.assignmentId,
-          this.#contexts.create(candidate.assignmentId, "executor.queryLedger"),
+          this.#contexts.create(candidate.assignmentId, "executor.queryLedger", {
+            requestId: `ledger:${candidate.assignmentId}:snapshot`,
+            body: { range: null },
+          }),
         ),
       );
       if (snapshot.phase === "received" && candidate.state === "dispatched") {
@@ -1581,7 +1630,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const execute = this.#executeRecoveredPerspective;
       const runtime: SessionRuntime = {
         sessionId: `recovered-perspectives:${conversationId}`,
-        async *run(): AsyncGenerator<AgentYield, RunResult> {
+        async *run(_messages, runtimeOptions): AsyncGenerator<AgentYield, RunResult> {
           return await execute({
             manager,
             managed,
@@ -1590,11 +1639,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             source: invocation.source,
             ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
             turnContext: options.turnContext,
+            authorizeToolExecution: runtimeOptions?.authorizeToolExecution,
           });
         },
         abort: (reason) => managed.runtime.abort(reason),
         async dispose() {},
         securitySnapshot: () => requireRuntimeSecuritySnapshot(managed.runtime),
+        executionPermissionRules: () =>
+          requireRuntimeExecutionPermissionRules(managed.runtime),
         executionProfile: () => requireRuntimeExecutionProfile(managed.runtime),
       };
       const generator = this.run({
@@ -1936,7 +1988,6 @@ function assignmentContext(
 function createSubmissionAuthorizer(
   executorId: string,
   verifier: ProtocolSignatureVerifier,
-  clock: () => string,
 ): AssignmentSubmissionAuthorizer {
   const authenticate: AssignmentSubmissionAuthorizer["authenticate"] = (
     context,
@@ -1945,9 +1996,11 @@ function createSubmissionAuthorizer(
     if (context.principal.kind !== "assignment") {
       throw new Error("Assignment submission requires an assignment capability");
     }
-    const capability = context.principal.capability;
-    const { signature, ...payload } = capability;
-    verifier.verify("AuthorityCapability", 1, payload, signature);
+    assertPrincipalAllowsAuthorityMethod("assignment", identity.method);
+    const capability = validateAuthorityCapability(
+      context.principal.capability,
+      verifier,
+    );
     if (
       capability.executorId !== executorId ||
       capability.assignmentId !== identity.assignmentId ||
@@ -1961,13 +2014,6 @@ function createSubmissionAuthorizer(
     authenticate,
     authorize(context, authorization) {
       authenticate(context, authorization);
-      if (
-        authorization.mode === "active" &&
-        context.principal.kind === "assignment" &&
-        Date.parse(context.principal.capability.expiry) < Date.parse(clock())
-      ) {
-        throw new Error("Assignment capability has expired");
-      }
     },
   };
 }
@@ -1978,22 +2024,39 @@ function createOwnerControlAuthorizer(
   clock: () => string,
 ): OwnerControlAuthorizer {
   return {
-    authorize(context, method, assignmentId) {
+    authorize(context, request) {
       if (context.principal.kind !== "owner-control") {
         throw new Error("Executor control requires an owner grant");
       }
-      const grant = context.principal.grant;
-      const { signature, ...payload } = grant;
-      verifier.verify("OwnerControlGrant", 1, payload, signature);
-      if (
-        grant.assignmentId !== assignmentId ||
-        grant.callerDeviceId !== deviceId ||
-        !grant.methods.includes(method) ||
-        Date.parse(grant.expiry) < Date.parse(clock()) ||
-        Date.parse(context.deadlineAt) > Date.parse(grant.expiry)
-      ) {
-        throw new Error("Owner grant does not authorize this executor call");
-      }
+      const authority = request.authority ?? context.principal.grant.scope;
+      const requestDigest = ownerControlRequestDigest({
+        method: request.method,
+        assignmentId: request.assignmentId,
+        authority,
+        requestId: request.requestId,
+        body: request.body,
+      });
+      const grant = assertAuthorizedOwnerControlGrant({
+        grant: context.principal.grant,
+        verifier,
+        method: request.method,
+        assignmentId: request.assignmentId,
+        callerDeviceId: deviceId,
+        authenticatedCallerDeviceId: deviceId,
+        ...(request.expectedOwnerDeviceId === undefined
+          ? {}
+          : { expectedOwnerDeviceId: request.expectedOwnerDeviceId }),
+        requestId: request.requestId,
+        requestDigest,
+        now: clock(),
+        deadlineAt: context.deadlineAt,
+        authority,
+      });
+      return {
+        authority: structuredClone(grant.scope),
+        ownerDeviceId: grant.callerDeviceId,
+        controlLease: structuredClone(grant.controlLease),
+      };
     },
   };
 }
@@ -2006,21 +2069,49 @@ function createDispatchContexts(options: {
   readonly conversationIdFor: (assignmentId: string) => string;
 }): InProcessDispatchContextFactory {
   return {
-    create(assignmentId, method) {
-      const issuedAt = options.clock();
-      const expiry = new Date(Date.parse(issuedAt) + CONTEXT_TTL_MS).toISOString();
-      const requestId = `owner:${method}:${randomUUID()}`;
+    create(assignmentId, method, request) {
+      const now = Date.parse(options.clock());
+      const renewalSeq = Math.floor(now / CONTROL_RENEWAL_INTERVAL_MS);
+      const issuedAt = new Date(
+        renewalSeq * CONTROL_RENEWAL_INTERVAL_MS,
+      ).toISOString();
+      const expiry = new Date(
+        renewalSeq * CONTROL_RENEWAL_INTERVAL_MS + CONTEXT_TTL_MS,
+      ).toISOString();
+      const scope = {
+        execution: "conversation" as const,
+        conversationId: options.conversationIdFor(assignmentId),
+        ownerEpoch: options.ownerEpoch,
+      };
+      const controlPayload = {
+        v: 1 as const,
+        controlLeaseId: `control-${assignmentId}`,
+        assignmentId,
+        authority: scope,
+        renewalSeq,
+        issuedAt,
+        expiry,
+      };
+      const controlLease: ControlLease = {
+        ...controlPayload,
+        signature: options.signer.sign("ControlLease", 1, controlPayload),
+      };
+      const requestDigest = ownerControlRequestDigest({
+        method,
+        assignmentId,
+        authority: scope,
+        requestId: request.requestId,
+        body: request.body,
+      });
       const payload = {
         v: 1 as const,
         assignmentId,
-        scope: {
-          execution: "conversation" as const,
-          conversationId: options.conversationIdFor(assignmentId),
-          ownerEpoch: options.ownerEpoch,
-        },
+        scope,
         methods: [method],
         callerDeviceId: options.deviceId,
-        requestId,
+        requestId: request.requestId,
+        requestDigest,
+        controlLease,
         issuedAt,
         expiry,
       };
@@ -2030,7 +2121,7 @@ function createDispatchContexts(options: {
       };
       return {
         principal: { kind: "owner-control", grant },
-        requestId,
+        requestId: request.requestId,
         deadlineAt: expiry,
       };
     },
@@ -2361,4 +2452,16 @@ function requireRuntimeExecutionProfile(
     throw new Error("Recovered conversation runtime lacks an execution profile");
   }
   return profile;
+}
+
+function requireRuntimeExecutionPermissionRules(
+  runtime: SessionRuntime,
+): ReturnType<NonNullable<SessionRuntime["executionPermissionRules"]>> {
+  const rules = runtime.executionPermissionRules?.();
+  if (rules === undefined) {
+    throw new Error(
+      "Recovered conversation runtime lacks an execution permission snapshot",
+    );
+  }
+  return rules;
 }

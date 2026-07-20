@@ -48,7 +48,9 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
     }
 
     const contextId = this.getContextId();
-    const matched = this.store.match(contextId, ctx.request);
+    const matched = ctx.permissionRules === undefined
+      ? this.store.match(contextId, ctx.request)
+      : this.store.matchFrozen(ctx.permissionRules, ctx.request);
 
     if (matched) {
       ctx.state.matchedPermissionRule = matched;

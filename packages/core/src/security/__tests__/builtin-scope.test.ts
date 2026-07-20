@@ -114,6 +114,34 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.scope).toBe("session");
     });
 
+    it("冻结快照保持用户池优先语义且不读取当前规则", () => {
+      const store = new PermissionStore({ rootDir: null });
+      store.registerBuiltinRules("test", [
+        makeBuiltinRule({ tool: "web_fetch", argument: "*" }, "deny"),
+      ]);
+      store.create(
+        MAIN,
+        makeRule({
+          pattern: { tool: "web_fetch", argument: "https://example.com/*" },
+          decision: "allow",
+          scope: "session",
+        }),
+      );
+      const frozen = store.snapshot(MAIN);
+
+      store.reset(MAIN);
+      store.registerBuiltinRules("test", [
+        makeBuiltinRule({ tool: "web_fetch", argument: "*" }, "allow"),
+      ]);
+
+      const result = store.matchFrozen(
+        frozen,
+        makeRequest("web_fetch", { url: "https://example.com/frozen" }),
+      );
+      expect(result?.decision).toBe("allow");
+      expect(result?.scope).toBe("session");
+    });
+
     it("用户通配 deny + builtin 高特异性 allow → user 决定（核心产品语义）", () => {
       // 这是 ADR-TPE-008 选择两阶段匹配而非合并匹配的关键场景
       const store = new PermissionStore({ rootDir: null });

@@ -274,6 +274,12 @@ export interface PermissionRule {
   contributors?: TrustContribution[];
 }
 
+/** Assignment-scoped authority evaluated before policy and real tool effects. */
+export type DurableToolExecutionAuthorizer = (input: {
+  readonly toolName: string;
+  readonly toolInput: Readonly<Record<string, unknown>>;
+}) => readonly PermissionRule[] | Promise<readonly PermissionRule[]>;
+
 /** 信任规则沿用现有权限规则语义。 */
 export type TrustRule = PermissionRule;
 
@@ -326,6 +332,12 @@ export interface IPermissionStore {
     request: SecurityRequest,
   ): PermissionRule | null;
 
+  /** Match one immutable assignment snapshot without consulting mutable runtime rules. */
+  matchFrozen(
+    rules: readonly PermissionRule[],
+    request: SecurityRequest,
+  ): PermissionRule | null;
+
   /**
    * 创建一条规则。
    * - session 作用域：不落盘
@@ -336,6 +348,13 @@ export interface IPermissionStore {
 
   /** 列出当前上下文可见的所有规则（session + 该上下文 + global） */
   list(contextId: PermissionContextId): PermissionRule[];
+
+  /**
+   * Returns the complete immutable authorization input for a new assignment.
+   * Unlike list(), this includes active builtin rules so an assignment never
+   * consults mutable runtime policy after its signed snapshot is issued.
+   */
+  snapshot(contextId: PermissionContextId): PermissionRule[];
 
   /** 撤销某条规则。返回是否找到并撤销。 */
   revoke(ruleId: string): boolean;
@@ -480,6 +499,8 @@ export interface SecurityMiddlewareContext {
   toolInput: Record<string, unknown>;
   /** 工作目录 */
   workingDirectory: string;
+  /** Assignment-scoped immutable permission rules, when durable execution is active. */
+  permissionRules?: readonly PermissionRule[];
   /**
    * 共享状态——中间件之间传递数据。
    * 例如：PolicyEvaluator 的决策结果可以被后续中间件读取。

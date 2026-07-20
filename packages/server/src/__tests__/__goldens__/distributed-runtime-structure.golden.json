@@ -1393,6 +1393,12 @@
       "target": "package:@zhixing/tools-builtin"
     },
     {
+      "kind": "type-export",
+      "references": 1,
+      "sourceZone": "orchestrator/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
       "kind": "type-import",
       "references": 6,
       "sourceZone": "orchestrator/runtime",

@@ -135,6 +135,90 @@ describe("createSecureExecuteTool", () => {
       expect(result.content).toBe("executed");
       expect(exec.callCount()).toBe(1);
     });
+
+    it("在安全策略和工具之前执行耐久授权并按失败关闭", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const evaluate = vi.spyOn(pipeline, "evaluate");
+      const authorizeToolExecution = vi.fn(() => {
+        throw new Error("assignment authority expired");
+      });
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        authorizeToolExecution,
+      });
+
+      await expect(
+        wrapped(makeTool("read"), { path: "/tmp/foo" }, makeContext()),
+      ).rejects.toThrow("assignment authority expired");
+      expect(authorizeToolExecution).toHaveBeenCalledWith({
+        toolName: "read",
+        toolInput: { path: "/tmp/foo" },
+      });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(exec.callCount()).toBe(0);
+    });
+
+    it("在实际工具副作用前重新验证耐久授权", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const authorizeToolExecution = vi
+        .fn<() => readonly PermissionRule[]>()
+        .mockReturnValueOnce([])
+        .mockImplementationOnce(() => {
+          throw new Error("assignment authority closed before tool execution");
+        });
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        authorizeToolExecution,
+      });
+
+      await expect(
+        wrapped(makeTool("read"), { path: "/tmp/foo" }, makeContext()),
+      ).rejects.toThrow("assignment authority closed before tool execution");
+      expect(authorizeToolExecution).toHaveBeenCalledTimes(2);
+      expect(exec.callCount()).toBe(0);
+    });
+
+    it("使用 assignment 冻结权限而不是运行时当前权限", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      store.create(
+        pipeline.getContextId(),
+        PermissionStore.createRule({
+          pattern: { tool: "bash", argument: "curl *" },
+          decision: "deny",
+          scope: "global",
+        }),
+      );
+      const frozenAllow = PermissionStore.createRule({
+        pattern: { tool: "bash", argument: "curl *" },
+        decision: "allow",
+        scope: "global",
+      });
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        authorizeToolExecution: () => [frozenAllow],
+      });
+
+      await expect(
+        wrapped(
+          makeTool("bash"),
+          { command: "curl https://example.com" },
+          makeContext(),
+        ),
+      ).resolves.toMatchObject({ content: "executed" });
+      expect(exec.callCount()).toBe(1);
+    });
   });
 
   describe("AI 安全管家路径", () => {

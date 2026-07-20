@@ -69,6 +69,7 @@ import {
   type WatchdogPolicy,
 } from "@zhixing/core";
 import { createSecureExecuteTool } from "../security/secure-executor.js";
+import type { DurableToolExecutionAuthorizer } from "../runtime/run-context.js";
 import { trackMessages } from "../runtime/track-messages.js";
 import type { BudgetExceededKind } from "./budget.js";
 
@@ -185,6 +186,8 @@ export interface RunSubAgentLoopOptions {
    * AI 安全管家在子链路中仍按此意图研判，杜绝子 agent 伪装意图绕过。
    */
   userIntent?: string;
+  /** Durable assignment authority inherited by this child executor. */
+  authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 // ─── 实现 ───
@@ -289,6 +292,7 @@ export async function runSubAgentLoop(
       // 子 EventBus 接通安全审计 —— 子 agent 的 pipeline 决策事件与管家裁决
       // 事件发射到子 bus，与父 bus 通过 lineage 关联（runChildAgent 派生时设置）
       eventBus: opts.eventBus,
+      authorizeToolExecution: opts.authorizeToolExecution,
     });
 
     // drain yields + 终止 result —— drainAgentLoop 收集所有 yield 直到 done

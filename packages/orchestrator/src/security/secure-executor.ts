@@ -23,6 +23,7 @@ import {
   type AgentEventMap,
   type ConfirmationDecision,
   type ConfirmationFallbackStrategy,
+  type DurableToolExecutionAuthorizer,
   type ExecutionConstraints,
   type IConfirmationBroker,
   type IEventBus,
@@ -140,6 +141,8 @@ export interface SecureExecuteToolOptions {
    * 三态裁决发射成统一的 security:* 事件流；不传则不发射（向后兼容）。
    */
   eventBus?: IEventBus<AgentEventMap>;
+  /** Durable execution authority; failure prevents policy evaluation and tool effects. */
+  authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 export function createSecureExecuteTool(
@@ -153,6 +156,7 @@ export function createSecureExecuteTool(
     onBlocked,
     onUserDenied,
     eventBus,
+    authorizeToolExecution,
   } = opts;
   // run 级审计发射器——传入 eventBus 时启用，发射 pipeline 安全事件与管家三态裁决事件
   const auditor = eventBus ? new SecurityAuditor(eventBus) : null;
@@ -162,6 +166,10 @@ export function createSecureExecuteTool(
     opts.confirmationFallback ?? "deny";
 
   return async (tool, input, context) => {
+    const permissionRules = await authorizeToolExecution?.({
+      toolName: tool.name,
+      toolInput: input,
+    });
     // ── 入口就把 turn-level 字段展开到 context ──
     //
     // 为什么在这里展开而不是在 originalExecute 里:
@@ -195,6 +203,7 @@ export function createSecureExecuteTool(
       tool.name,
       input,
       augmentedContext.workingDirectory,
+      permissionRules === undefined ? {} : { permissionRules },
     );
     if (auditor) {
       await auditor.auditEvaluation({
@@ -292,6 +301,12 @@ export function createSecureExecuteTool(
     }
 
     // 3. 执行实际工具 —— 应用 pipeline 计算的执行约束
+    // Policy evaluation or user confirmation may outlive the lease; fence again
+    // at the actual side-effect boundary instead of trusting the earlier snapshot load.
+    await authorizeToolExecution?.({
+      toolName: tool.name,
+      toolInput: input,
+    });
     return runWithConstraints({
       tool,
       input,

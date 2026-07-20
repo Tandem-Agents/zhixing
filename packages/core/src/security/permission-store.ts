@@ -412,6 +412,30 @@ export class PermissionStore implements IPermissionStore {
     return null;
   }
 
+  matchFrozen(
+    rules: readonly PermissionRule[],
+    request: SecurityRequest,
+  ): PermissionRule | null {
+    const tool = request.tool.toLowerCase();
+    const argument = this.extractArgumentFn(request);
+    const userCandidates = rules.filter((rule) =>
+      rule.scope !== "builtin" && this.ruleMatches(rule, tool, argument),
+    );
+    const candidates = userCandidates.length > 0
+      ? userCandidates
+      : rules.filter((rule) =>
+          rule.scope === "builtin" &&
+      this.ruleMatches(rule, tool, argument),
+        );
+    if (candidates.length > 0) {
+      const chosen = cloneRule(this.resolveConflict([...candidates]));
+      chosen.matchCount += 1;
+      chosen.lastMatchedAt = this.now();
+      return chosen;
+    }
+    return null;
+  }
+
   create(contextId: PermissionContextId, rule: PermissionRule): void {
     const storageKey = toStorageKey(contextId);
     switch (rule.scope) {
@@ -455,6 +479,14 @@ export class PermissionStore implements IPermissionStore {
 
     this.ensureGlobalLoaded();
     result.push(...this.globalRules);
+    return result;
+  }
+
+  snapshot(contextId: PermissionContextId): PermissionRule[] {
+    const result = this.list(contextId).map(cloneRule);
+    for (const namespaceRules of this.builtinRulesByNamespace.values()) {
+      result.push(...namespaceRules.map(cloneRule));
+    }
     return result;
   }
 

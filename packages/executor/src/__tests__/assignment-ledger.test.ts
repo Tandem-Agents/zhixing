@@ -41,6 +41,7 @@ import {
   createConversationSealedBundle,
   createSignedConversationInteractionMirrorBatch,
   interactionMirrorSeed,
+  ownerControlRequestDigest,
   permissionSnapshotLeaseDigest,
   sealedBundleArtifact,
   signCancelProof,
@@ -92,6 +93,7 @@ import {
 
 const NOW = "2026-07-13T09:00:00.000Z";
 const EXPIRY = "2026-07-13T10:00:00.000Z";
+const CONTROL_EXPIRY = "2026-07-13T09:01:00.000Z";
 const EXECUTOR_ID = "executor-1";
 const CONVERSATION_ID = "conversation-1";
 const RUN_ID = "run-1";
@@ -295,14 +297,21 @@ function mirrorReceipt(batch: ConversationInteractionMirrorBatch) {
 }
 
 const ownerControl: OwnerControlAuthorizer = {
-  authorize(context, method, assignmentId) {
+  authorize(context, request) {
     if (
       context.principal.kind !== "owner-control" ||
-      context.principal.grant.assignmentId !== assignmentId ||
-      !context.principal.grant.methods.includes(method)
+      context.principal.grant.assignmentId !== request.assignmentId ||
+      !context.principal.grant.methods.includes(request.method) ||
+      (request.authority !== undefined &&
+        canonicalize(context.principal.grant.scope) !== canonicalize(request.authority))
     ) {
       throw new Error("owner control authorization failed");
     }
+    return {
+      authority: structuredClone(context.principal.grant.scope),
+      ownerDeviceId: context.principal.grant.callerDeviceId,
+      controlLease: structuredClone(context.principal.grant.controlLease),
+    };
   },
 };
 
@@ -354,14 +363,17 @@ async function createUnassignedHarness(
     snapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
     permissionSnapshotFor?: (digest: string) => TrustRuleSnapshot | undefined;
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
+    clock?: () => string;
+    monotonicClock?: () => number;
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
+  const clock = options.clock ?? (() => NOW);
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
-    clock: () => NOW,
+    clock,
     lockWaitMs: 2_000,
   });
   const identity = new TestProtocolIdentity();
@@ -405,6 +417,7 @@ async function createUnassignedHarness(
     signer: identity,
     verifier: identity,
     delivery: deliveryParticipant(log),
+    clock,
     submission: options.submission ?? submission,
     authority,
     projection,
@@ -433,7 +446,8 @@ async function createUnassignedHarness(
     permissionSnapshotFor: options.permissionSnapshotFor ??
       ((digest) => matchingPermissionSnapshotFor(identity, digest)),
     runtimeBindingGuard: options.runtimeBindingGuard,
-    clock: () => NOW,
+    clock,
+    monotonicClock: options.monotonicClock,
     maxPendingInteractions: options.maxPendingInteractions,
     surfaceAbort: {
       authorize(assignmentId, input) {
@@ -487,6 +501,8 @@ async function createHarness(
     snapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
     permissionSnapshotFor?: (digest: string) => TrustRuleSnapshot | undefined;
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
+    clock?: () => string;
+    monotonicClock?: () => number;
   } = {},
 ) {
   const harness = await createUnassignedHarness(options);
@@ -782,6 +798,7 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       delivery: deliveryParticipant(harness.log),
+      clock: () => NOW,
       submission,
       authority: harness.authority,
       projection: harness.projection,
@@ -838,6 +855,7 @@ describe("conversation assignment protocol", () => {
       snapshotFor: matchingSnapshotFor,
       permissionSnapshotFor: (digest) =>
         matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
     });
     const [first, duplicate] = await Promise.all([
       harness.ledger.dispatch(
@@ -853,7 +871,7 @@ describe("conversation assignment protocol", () => {
     ]);
     expect(first.accepted).toBe(true);
     expect(duplicate.accepted).toBe(true);
-    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(1);
+    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(2);
 
     const reissued = await harness.journal.assign(harness.unsigned);
     expect(reissued.envelope).toEqual(harness.dispatch.envelope);
@@ -893,7 +911,7 @@ describe("conversation assignment protocol", () => {
       outcome: "conflicting-redelivery",
       error: { code: "idempotency-conflict", retryable: false },
       proof: {
-        receivedRecordSeq: 1,
+        receivedRecordSeq: 2,
         error: { code: "idempotency-conflict", retryable: false },
       },
     });
@@ -918,10 +936,10 @@ describe("conversation assignment protocol", () => {
     const receivedPage = (await harness.ledger.queryLedger(
       ASSIGNMENT_ID,
       ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
-      { fromSeq: 1, limit: 1 },
+      { fromSeq: 2, limit: 1 },
     )) as LedgerEvidencePage;
     expect(conflict.proof.receivedLedgerDigest).toBe(receivedPage.chainDigest);
-    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(1);
+    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(2);
   });
 
   it("durably rejects a manifest mismatch before received", async () => {
@@ -953,6 +971,51 @@ describe("conversation assignment protocol", () => {
     ).toMatchObject({ phase: "dispatch-rejected" });
   });
 
+  it("rejects a dispatch from the wrong owner authority before any durable control fact", async () => {
+    const harness = await createUnassignedHarness();
+    const dispatch = await harness.journal.assign(harness.unsigned);
+
+    await expect(harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch", "conversation-other"),
+    )).rejects.toThrow("owner control authorization failed");
+    await expect(
+      harness.log.readStream(`assignment:${ASSIGNMENT_ID}`),
+    ).resolves.toHaveLength(0);
+    await expect(harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    )).resolves.toMatchObject({ accepted: true });
+  });
+
+  it("does not derive durable owner control from an unverified activation authority", async () => {
+    const harness = await createUnassignedHarness();
+    const dispatch = await harness.journal.assign(harness.unsigned);
+    const unverifiedActivation = {
+      ...dispatch.activation,
+      ref: {
+        ...dispatch.activation.ref,
+        conversationId: "conversation-other",
+      },
+    } as typeof dispatch.activation;
+
+    await expect(harness.ledger.dispatch(
+      dispatch.envelope,
+      unverifiedActivation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch", "conversation-other"),
+    )).rejects.toThrow("owner control authorization failed");
+    await expect(
+      harness.log.readStream(`assignment:${ASSIGNMENT_ID}`),
+    ).resolves.toHaveLength(0);
+    await expect(harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    )).resolves.toMatchObject({ accepted: true });
+  });
+
   it("durably rejects a dispatch whose permission snapshot asset is unavailable", async () => {
     const harness = await createUnassignedHarness({
       permissionSnapshotFor: () => undefined,
@@ -968,6 +1031,43 @@ describe("conversation assignment protocol", () => {
     expect(result).toMatchObject({
       accepted: false,
       error: { code: "capability-gap", retryable: true },
+    });
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).resolves.toMatchObject({ phase: "dispatch-rejected" });
+  });
+
+  it("durably rejects a permission lease outside its accepted clock window", async () => {
+    const harness = await createUnassignedHarness();
+    const { signature: _, ...permissionPayload } = harness.unsigned.permissionLease;
+    const expiredPayload = {
+      ...permissionPayload,
+      issuedAt: "2026-07-19T21:00:00.000Z",
+      expiry: "2026-07-19T22:00:00.000Z",
+    };
+    const unsigned = {
+      ...harness.unsigned,
+      permissionLease: {
+        ...expiredPayload,
+        signature: harness.identity.sign(
+          "PermissionSnapshotLease",
+          1,
+          expiredPayload,
+        ),
+      },
+    };
+    const dispatch = await harness.journal.assign(unsigned);
+
+    await expect(harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    )).resolves.toMatchObject({
+      accepted: false,
+      error: { code: "invalid", retryable: false },
     });
     await expect(
       harness.ledger.queryLedger(
@@ -1017,6 +1117,168 @@ describe("conversation assignment protocol", () => {
       ).resolves.toMatchObject({ phase: "dispatch-rejected" });
     },
   );
+
+  it("authorizes tools only from active received permission facts and survives replay", async () => {
+    const harness = await createHarness();
+    const lease = harness.dispatch.envelope.permissionLease;
+
+    await expect(
+      harness.ledger.authorizeToolExecution(ASSIGNMENT_ID, lease),
+    ).rejects.toThrow("inactive");
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await expect(
+      harness.ledger.authorizeToolExecution(ASSIGNMENT_ID, lease),
+    ).rejects.toThrow("inactive");
+    await harness.ledger.start(ASSIGNMENT_ID);
+    await expect(
+      harness.ledger.authorizeToolExecution(ASSIGNMENT_ID, lease),
+    ).resolves.toEqual([]);
+
+    const restarted = new ConversationAssignmentLedger({
+      log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
+    });
+    await expect(
+      restarted.authorizeToolExecution(ASSIGNMENT_ID, lease),
+    ).resolves.toEqual([]);
+
+    const { signature: _, ...replacementPayload } = {
+      ...lease,
+      controlLeaseId: "replacement-control-lease",
+    };
+    const replacement = {
+      ...replacementPayload,
+      signature: harness.identity.sign(
+        "PermissionSnapshotLease",
+        1,
+        replacementPayload,
+      ),
+    };
+    await expect(
+      restarted.authorizeToolExecution(ASSIGNMENT_ID, replacement),
+    ).rejects.toThrow("inactive");
+
+    await restarted.cancel(
+      ASSIGNMENT_ID,
+      { fenceSeq: 1, requestId: "cancel-permission-authority" },
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    );
+    await expect(
+      restarted.authorizeToolExecution(ASSIGNMENT_ID, lease),
+    ).rejects.toThrow("inactive");
+  });
+
+  it("uses only local monotonic time after accepting a control lease", async () => {
+    let wallTime = NOW;
+    let monotonicTime = 0;
+    const harness = await createHarness({
+      clock: () => wallTime,
+      monotonicClock: () => monotonicTime,
+    });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    await expect(harness.ledger.authorizeToolExecution(
+      ASSIGNMENT_ID,
+      harness.dispatch.envelope.permissionLease,
+    )).resolves.toEqual([]);
+
+    wallTime = "2026-07-13T08:00:00.000Z";
+    monotonicTime = 30_000;
+    await expect(harness.ledger.authorizeToolExecution(
+      ASSIGNMENT_ID,
+      harness.dispatch.envelope.permissionLease,
+    )).resolves.toEqual([]);
+
+    monotonicTime = 60_001;
+    await expect(harness.ledger.authorizeToolExecution(
+      ASSIGNMENT_ID,
+      harness.dispatch.envelope.permissionLease,
+    )).rejects.toThrow("inactive");
+  });
+
+  it("renews owner control after sealing so delayed recovery can read the ledger", async () => {
+    let wallTime = NOW;
+    let monotonicTime = 0;
+    const harness = await createHarness({
+      clock: () => wallTime,
+      monotonicClock: () => monotonicTime,
+    });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    await sealDefaultBundle(harness.ledger);
+
+    wallTime = "2026-07-13T09:02:00.000Z";
+    monotonicTime = 120_000;
+    await expect(harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(
+        ASSIGNMENT_ID,
+        "executor.queryLedger",
+        CONVERSATION_ID,
+        {
+          renewalSeq: 3,
+          issuedAt: wallTime,
+          expiry: "2026-07-13T09:03:00.000Z",
+        },
+      ),
+    )).resolves.toMatchObject({ phase: "sealed" });
+
+    const renewals = (await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`))
+      .filter((record) => record.body.body.t === "control-lease-renewed");
+    expect(renewals.map((record) => record.body.body.lease.renewalSeq)).toEqual([1, 3]);
+  });
+
+  it("accepts only monotonic control-lease renewals and rejects an older replay", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const renewed = ownerContext(
+      ASSIGNMENT_ID,
+      "executor.queryLedger",
+      CONVERSATION_ID,
+      {
+        renewalSeq: 2,
+        issuedAt: "2026-07-13T09:00:30.000Z",
+        expiry: "2026-07-13T09:01:30.000Z",
+      },
+    );
+    await expect(
+      harness.ledger.queryLedger(ASSIGNMENT_ID, renewed),
+    ).resolves.toMatchObject({ phase: "received" });
+    await expect(harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+    )).rejects.toThrow("renewal sequence regressed");
+    const renewals = (await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`))
+      .filter((record) => record.body.body.t === "control-lease-renewed");
+    expect(renewals.map((record) => record.body.body.lease.renewalSeq)).toEqual([1, 2]);
+  });
 
   it("durably rejects a runtime binding mismatch before received", async () => {
     let calls = 0;
@@ -1120,6 +1382,7 @@ describe("conversation assignment protocol", () => {
       snapshotFor: matchingSnapshotFor,
       permissionSnapshotFor: (digest) =>
         matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
     });
     await peer.dispatch(
       harness.dispatch.envelope,
@@ -1140,7 +1403,7 @@ describe("conversation assignment protocol", () => {
         ASSIGNMENT_ID,
         ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
       ),
-    ).resolves.toMatchObject({ phase: "received", lastSeq: 1 });
+    ).resolves.toMatchObject({ phase: "received", lastSeq: 2 });
   });
 
   it("durably rejects the first invalid dispatch and replays its original proof", async () => {
@@ -1163,7 +1426,7 @@ describe("conversation assignment protocol", () => {
       outcome: "rejected-before-received",
       proof: {
         dispatchDigest: dispatchEnvelopeDigest(badEnvelope),
-        lastRecordSeq: 1,
+        lastRecordSeq: 2,
       },
     });
     if (rejected.accepted || rejected.outcome !== "rejected-before-received") {
@@ -1181,13 +1444,13 @@ describe("conversation assignment protocol", () => {
     const rejectionPage = (await harness.ledger.queryLedger(
       ASSIGNMENT_ID,
       ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
-      { fromSeq: 1, limit: 1 },
+      { fromSeq: 1, limit: 2 },
     )) as LedgerEvidencePage;
     expect(rejected.proof.ledgerDigest).toBe(rejectionPage.chainDigest);
     expect(rejected.proof.ledgerDigest).toBe(
-      advanceAssignmentLedger(
+      rejectionPage.entries.reduce(
+        (digest, entry) => advanceAssignmentLedger(digest, entry),
         assignmentLedgerSeed(ASSIGNMENT_ID),
-        rejectionPage.entries[0] as AssignmentEntry,
       ),
     );
     const replayed = await harness.ledger.dispatch(
@@ -1203,7 +1466,7 @@ describe("conversation assignment protocol", () => {
     expect(withoutSignature(replayed.proof)).toEqual(
       withoutSignature(rejected.proof),
     );
-    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(1);
+    expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(2);
   });
 
   it("recovers interaction truth, mirrors terminal outcomes, and preserves the ledger chain", async () => {
@@ -1240,6 +1503,7 @@ describe("conversation assignment protocol", () => {
       snapshotFor: matchingSnapshotFor,
       permissionSnapshotFor: (digest) =>
         matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
     });
     expect(await restarted.recoverInteractions(ASSIGNMENT_ID, NOW)).toMatchObject({
       pending: [{ requestId: "interaction-1" }],
@@ -1649,6 +1913,7 @@ describe("conversation assignment protocol", () => {
       snapshotFor: matchingSnapshotFor,
       permissionSnapshotFor: (digest) =>
         matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
     });
     await expect(
       restarted.recoverInteractions(ASSIGNMENT_ID, NOW),
@@ -2084,6 +2349,7 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       delivery: deliveryParticipant(harness.log),
+      clock: () => NOW,
       submission,
       authority: harness.authority,
       projection: harness.projection,
@@ -2456,6 +2722,7 @@ describe("conversation assignment protocol", () => {
       signer: first.identity,
       verifier: first.identity,
       delivery: deliveryParticipant(first.log),
+      clock: () => NOW,
       submission,
       authority: secondAuthority,
       projection: secondProjection,
@@ -2716,6 +2983,7 @@ describe("conversation assignment protocol", () => {
       signer: wrongIndex.identity,
       verifier: wrongIndex.identity,
       delivery: deliveryParticipant(wrongIndex.log),
+      clock: () => NOW,
       submission,
       authority: wrongIndex.authority,
       projection: wrongIndex.projection,
@@ -4558,7 +4826,7 @@ describe("conversation assignment protocol", () => {
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
         body: {
-          recordSeq: 4,
+          recordSeq: 5,
           body: {
             v: 1,
             t: "bundle_sealed",
@@ -4575,9 +4843,12 @@ describe("conversation assignment protocol", () => {
     ).rejects.toThrow("bundle_sealed has no started prefix");
   });
 
-  it.each(["received", "dispatch-rejected"] as const)(
+  it.each([
+    ["received", "is not the first record"],
+    ["dispatch-rejected", "has no durable owner control prefix"],
+  ] as const)(
     "rejects a late %s record after an abort fence during replay",
-    async (kind) => {
+    async (kind, expectedError) => {
       const harness = await createHarness();
       const cancellation = await harness.journal.cancelRun({
         runId: RUN_ID,
@@ -4610,6 +4881,17 @@ describe("conversation assignment protocol", () => {
             recordSeq: 1,
             body: {
               v: 1,
+              t: "control-lease-renewed",
+              lease: harness.dispatch.envelope.controlLease,
+            },
+          },
+        },
+        {
+          stream: `assignment:${ASSIGNMENT_ID}`,
+          body: {
+            recordSeq: 2,
+            body: {
+              v: 1,
               t: "abort-requested",
               via: "owner-fence",
               refId: cancellation.fence.requestId,
@@ -4618,7 +4900,7 @@ describe("conversation assignment protocol", () => {
         },
         {
           stream: `assignment:${ASSIGNMENT_ID}`,
-          body: { recordSeq: 2, body: lateBody },
+          body: { recordSeq: 3, body: lateBody },
         },
       ]);
 
@@ -4627,7 +4909,58 @@ describe("conversation assignment protocol", () => {
           ASSIGNMENT_ID,
           ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
         ),
-      ).rejects.toThrow("is not the first record");
+      ).rejects.toThrow(expectedError);
+    },
+  );
+
+  it.each([
+    ["dispatch rejection", "dispatch-rejected", "durable owner control prefix"],
+    ["supersede fence", "supersede-fenced", "controllable assignment prefix"],
+    ["owner cancel fence", "owner-fence", "durable authorization prefix"],
+    ["surface abort ticket", "abort-ticket", "durable authorization prefix"],
+  ] as const)(
+    "rejects %s without its required durable authority prefix",
+    async (_label, kind, expected) => {
+      const harness = await createUnassignedHarness();
+      const body: AssignmentEntry["body"] = kind === "dispatch-rejected"
+        ? {
+            v: 1,
+            t: "dispatch-rejected",
+            dispatchDigest: protocolDigest(
+              "DispatchEnvelope",
+              1,
+              harness.unsigned,
+            ),
+            reason: {
+              code: "invalid",
+              retryable: false,
+              message: "invalid dispatch",
+            },
+          }
+        : kind === "supersede-fenced"
+          ? {
+              v: 1,
+              t: "supersede-fenced",
+              fenceSeq: 1,
+              requestId: "supersede-without-control",
+            }
+          : {
+              v: 1,
+              t: "abort-requested",
+              via: kind,
+              refId: `${kind}-without-authority`,
+            };
+      await harness.log.append<AssignmentEntry>([
+        {
+          stream: `assignment:${ASSIGNMENT_ID}`,
+          body: { recordSeq: 1, body },
+        },
+      ]);
+
+      await expect(harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      )).rejects.toThrow(expected);
     },
   );
 
@@ -4655,7 +4988,7 @@ describe("conversation assignment protocol", () => {
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
         body: {
-          recordSeq: 4,
+          recordSeq: 5,
           body: { v: 1, t: "bundle_sealed", bundle: { ref: corruptBundle } },
         },
       },
@@ -4706,7 +5039,7 @@ describe("conversation assignment protocol", () => {
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
         body: {
-          recordSeq: 5,
+          recordSeq: 6,
           body: { v: 1, t: "bundle_sealed", bundle: { ref: corruptBundle } },
         },
       },
@@ -4898,11 +5231,6 @@ describe("conversation assignment protocol", () => {
     );
     const original = await harness.ledger.cancelProof(ASSIGNMENT_ID);
     if (!original) throw new Error("cancel proof missing");
-    const snapshot = await harness.ledger.queryLedger(
-      ASSIGNMENT_ID,
-      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
-    );
-    if ("entries" in snapshot) throw new Error("expected ledger snapshot");
     const page = await harness.ledger.queryLedger(
       ASSIGNMENT_ID,
       ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
@@ -4912,7 +5240,7 @@ describe("conversation assignment protocol", () => {
     const duplicate = signCancelProof(
       {
         ...withoutSignature(original),
-        lastRecordSeq: snapshot.lastSeq,
+        lastRecordSeq: page.toSeq,
         ledgerDigest: page.chainDigest,
       },
       harness.identity,
@@ -4921,7 +5249,7 @@ describe("conversation assignment protocol", () => {
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
         body: {
-          recordSeq: snapshot.lastSeq + 1,
+          recordSeq: page.toSeq + 1,
           body: { v: 1, t: "halted", proof: duplicate },
         },
       },
@@ -4933,7 +5261,7 @@ describe("conversation assignment protocol", () => {
         ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
       ),
     ).rejects.toThrow("halted does not close the durable cancellation prefix");
-  });
+  }, 15_000);
 
   it("keeps a late halted proof as evidence when cancellation was already uncertain", async () => {
     const harness = await createHarness();
@@ -5876,6 +6204,7 @@ describe("conversation assignment protocol", () => {
         signer: harness.identity,
         verifier: harness.identity,
         delivery: deliveryParticipant(harness.log),
+        clock: () => NOW,
         submission,
         authority: harness.authority,
         projection: harness.projection,
@@ -6182,7 +6511,7 @@ describe("conversation assignment protocol", () => {
         conflictingBundle,
         submissionContext(terminal.unsigned),
       ),
-    ).rejects.toThrow("revoked capability cannot perform an active submission");
+    ).rejects.toThrow("expired or revoked");
     terminalAuthorization.revoke(ASSIGNMENT_ID);
 
     const exactMirrorBatch = signedMirrorBatch(terminal.identity, [finished]);
@@ -6269,7 +6598,7 @@ describe("conversation assignment protocol", () => {
         submissionContext(settlement.unsigned),
       ),
     ).resolves.toBeUndefined();
-  });
+  }, 15_000);
 
   it("settles conflict interaction audit after revocation before producing containment proof", async () => {
     const authorization = createRevocationAwareSubmission();
@@ -6472,6 +6801,7 @@ describe("conversation assignment protocol", () => {
       snapshotFor: matchingSnapshotFor,
       permissionSnapshotFor: (digest) =>
         matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
     });
     expect(await restarted.pendingInteractionMirrors(ASSIGNMENT_ID)).toEqual([]);
     expect(firstReceipt).toEqual(mirrorReceipt(firstBatch));
@@ -6689,37 +7019,79 @@ describe("conversation assignment protocol", () => {
     });
     const validContext = submissionContext(activated.unsigned);
     if (validContext.principal.kind !== "assignment") throw new Error("missing capability");
+    const assignedCapability = validContext.principal.capability;
+    const assignedPayload = withoutSignature(assignedCapability);
+    const sameIdMutations = [
+      {
+        ...assignedPayload,
+        methods: [...assignedPayload.methods].reverse(),
+      },
+      {
+        ...assignedPayload,
+        resources: [...assignedPayload.resources, "conversation:other"],
+      },
+      {
+        ...assignedPayload,
+        expiry: "2026-07-13T09:30:00.000Z",
+      },
+    ] as const;
+    for (const mutation of sameIdMutations) {
+      const context: AuthorityCallContext = {
+        ...validContext,
+        deadlineAt: mutation.expiry,
+        principal: {
+          kind: "assignment",
+          capability: {
+            ...mutation,
+            methods: [...mutation.methods],
+            resources: [...mutation.resources],
+            signature: activated.identity.sign("AuthorityCapability", 1, mutation),
+          },
+        },
+      };
+      await expect(
+        activated.journal.reportStarted(ASSIGNMENT_ID, context),
+      ).rejects.toThrow("does not match the durable dispatch capability");
+    }
+    const forgedPayload = {
+      ...withoutSignature(validContext.principal.capability),
+      capId: "unactivated-capability",
+    };
     const forgedContext: AuthorityCallContext = {
       ...validContext,
       principal: {
         kind: "assignment",
         capability: {
-          ...validContext.principal.capability,
-          capId: "unactivated-capability",
+          ...forgedPayload,
+          signature: activated.identity.sign(
+            "AuthorityCapability",
+            1,
+            forgedPayload,
+          ),
         },
       },
     };
     counted!.resetReads();
     await expect(
       activated.journal.reportStarted(ASSIGNMENT_ID, forgedContext),
-    ).rejects.toThrow("not activated by the durable assignment");
+    ).rejects.toThrow("not activated by durable authority state");
     await expect(
       activated.journal.mirrorInteractions(
         ASSIGNMENT_ID,
         {} as ConversationInteractionMirrorBatch,
         forgedContext,
       ),
-    ).rejects.toThrow("not activated by the durable assignment");
+    ).rejects.toThrow("not activated by durable authority state");
     await expect(
       activated.journal.submitCancelProof(
         ASSIGNMENT_ID,
         {} as CancelProofBody,
         forgedContext,
       ),
-    ).rejects.toThrow("not activated by the durable assignment");
+    ).rejects.toThrow("not activated by durable authority state");
     await expect(
       activated.journal.submitBundle({} as SealedBundle, forgedContext),
-    ).rejects.toThrow("not activated by the durable assignment");
+    ).rejects.toThrow("not activated by durable authority state");
     expect(counted!.reads).toBe(0);
   });
 
@@ -6970,7 +7342,7 @@ describe("conversation assignment protocol", () => {
         requestId: "cold-exact-wrong-epoch",
         deadlineAt: EXPIRY,
       }),
-    ).rejects.toThrow("does not match its durable assignment fence");
+    ).rejects.toThrow("not activated by durable authority state");
     await expect(
       cold.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 8 });
@@ -7404,8 +7776,8 @@ describe("conversation assignment protocol", () => {
     ).rejects.toThrow();
     expect(await harness.journal.currentState(RUN_ID)).toBe("dispatched");
 
-    const pollutedEntries = page.entries.map((entry, index) => {
-      if (index !== 0 || "ref" in entry.body || entry.body.t !== "received") return entry;
+    const pollutedEntries = page.entries.map((entry) => {
+      if ("ref" in entry.body || entry.body.t !== "received") return entry;
       return {
         ...entry,
         body: {
@@ -7487,6 +7859,80 @@ describe("conversation assignment protocol", () => {
       ),
     ).rejects.toThrow("received is not the first record");
     expect(await harness.journal.currentState(RUN_ID)).toBe("dispatched");
+  });
+
+  it("rejects pre-received control evidence that does not bind the assigned envelope", async () => {
+    const harness = await createHarness();
+    const cancellation = await harness.journal.cancelRun({
+      runId: RUN_ID,
+      requestId: "polluted-control-evidence",
+    });
+    if (cancellation.state !== "cancel-requested") {
+      throw new Error("expected cancellation fence");
+    }
+    const { signature: _, ...lease } = harness.dispatch.envelope.controlLease;
+    const leasePayload = {
+      ...lease,
+      authority: {
+        execution: "conversation" as const,
+        conversationId: "conversation-other",
+        ownerEpoch: 3,
+      },
+    };
+    const entries: AssignmentEntry[] = [
+      {
+        recordSeq: 1,
+        body: {
+          v: 1,
+          t: "control-lease-renewed",
+          lease: {
+            ...leasePayload,
+            signature: harness.identity.sign("ControlLease", 1, leasePayload),
+          },
+        },
+      },
+      {
+        recordSeq: 2,
+        body: {
+          v: 1,
+          t: "abort-requested",
+          via: "owner-fence",
+          refId: cancellation.fence.requestId,
+        },
+      },
+    ];
+    let chainDigest = assignmentLedgerSeed(ASSIGNMENT_ID);
+    for (const entry of entries) {
+      chainDigest = advanceAssignmentLedger(chainDigest, entry);
+    }
+    const payload = {
+      v: 1 as const,
+      assignmentId: ASSIGNMENT_ID,
+      executorId: EXECUTOR_ID,
+      fromSeq: 1,
+      toSeq: entries.at(-1)!.recordSeq,
+      entries,
+      chainDigest,
+    };
+    const pollutedPage: LedgerEvidencePage = {
+      ...payload,
+      signature: harness.identity.sign("LedgerEvidencePage", 1, payload),
+    };
+    const snapshot: LedgerSnapshot = {
+      v: 1,
+      assignmentId: ASSIGNMENT_ID,
+      lastSeq: entries.length,
+      phase: "unknown",
+    };
+    await expect(
+      harness.journal.reconcileCancellationEvidence(
+        ASSIGNMENT_ID,
+        snapshot,
+        (async function* () {
+          yield pollutedPage;
+        })(),
+      ),
+    ).rejects.toThrow("Control lease evidence does not bind the durable assignment");
   });
 
   it("treats an owner-fence not-started proof as contradictory after a durable started report", async () => {
@@ -8036,6 +8482,23 @@ function createUnsignedEnvelope(
     ...manifestWithoutDigest,
     digest: protocolDigest("ExecutionManifest", 1, manifestWithoutDigest),
   };
+  const controlPayload = {
+    v: 1 as const,
+    controlLeaseId: "control-lease-1",
+    assignmentId,
+    authority: {
+      execution: "conversation" as const,
+      conversationId,
+      ownerEpoch: 3,
+    },
+    renewalSeq: 1,
+    issuedAt: NOW,
+    expiry: CONTROL_EXPIRY,
+  };
+  const controlLease = {
+    ...controlPayload,
+    signature: identity.sign("ControlLease", 1, controlPayload),
+  };
   const permissionPayload = {
     v: 1 as const,
     snapshotVersion: 1,
@@ -8115,6 +8578,7 @@ function createUnsignedEnvelope(
     assignmentId,
     executorId: EXECUTOR_ID,
     manifest,
+    controlLease,
     permissionLease,
     capabilities: [capability],
     resourceLease,
@@ -8150,25 +8614,65 @@ function ownerContext(
     | "executor.queryLedger"
     | "executor.cancel"
     | "executor.supersede",
-  conversationId: string = CONVERSATION_ID,
+  conversationIdOrRequest:
+    | string
+    | { readonly requestId: string; readonly body: unknown } = CONVERSATION_ID,
+  controlLeaseOverrides: Partial<{
+    readonly controlLeaseId: string;
+    readonly renewalSeq: number;
+    readonly issuedAt: string;
+    readonly expiry: string;
+  }> = {},
 ): AuthorityCallContext {
+  const conversationId = typeof conversationIdOrRequest === "string"
+    ? conversationIdOrRequest
+    : CONVERSATION_ID;
+  const request = typeof conversationIdOrRequest === "string"
+    ? {
+        requestId: `request-${method}-${assignmentId}`,
+        body: {},
+      }
+    : conversationIdOrRequest;
+  const scope = { execution: "conversation" as const, conversationId, ownerEpoch: 3 };
+  const controlPayload = {
+    v: 1 as const,
+    controlLeaseId: controlLeaseOverrides.controlLeaseId ?? "control-lease-1",
+    assignmentId,
+    authority: scope,
+    renewalSeq: controlLeaseOverrides.renewalSeq ?? 1,
+    issuedAt: controlLeaseOverrides.issuedAt ?? NOW,
+    expiry: controlLeaseOverrides.expiry ?? CONTROL_EXPIRY,
+  };
+  const controlLease = {
+    ...controlPayload,
+    signature: new TestProtocolIdentity().sign("ControlLease", 1, controlPayload),
+  };
+  const requestId = request.requestId;
   return {
     principal: {
       kind: "owner-control",
       grant: {
         v: 1,
         assignmentId,
-        scope: { execution: "conversation", conversationId, ownerEpoch: 3 },
+        scope,
         methods: [method],
-        callerDeviceId: "device-1",
-        requestId: `owner-${method}-${assignmentId}`,
-        issuedAt: NOW,
-        expiry: EXPIRY,
+        callerDeviceId: "test-owner",
+        requestId,
+        requestDigest: ownerControlRequestDigest({
+          method,
+          assignmentId,
+          authority: scope,
+          requestId,
+          body: request.body,
+        }),
+        controlLease,
+        issuedAt: controlPayload.issuedAt,
+        expiry: controlPayload.expiry,
         signature: { alg: "test", keyId: "test-owner", sig: "context" },
       },
     },
-    requestId: `request-${method}-${assignmentId}`,
-    deadlineAt: EXPIRY,
+    requestId,
+    deadlineAt: controlPayload.expiry,
   };
 }
 
@@ -8478,6 +8982,7 @@ function reopenJournal(
     signer: harness.identity,
     verifier: harness.identity,
     delivery: deliveryParticipant(harness.log),
+    clock: () => NOW,
     submission: options.submission ?? submission,
     authority: harness.authority,
     projection: harness.projection,

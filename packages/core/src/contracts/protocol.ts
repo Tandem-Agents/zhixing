@@ -27,6 +27,7 @@ import type {
   AuthorityEpochRef,
   ChannelInteractionGrant,
   ChannelResponderRef,
+  ControlLease,
   DataPlaneTicket,
   ExecutionKind,
   ExecutionRef,
@@ -349,6 +350,7 @@ type DispatchEnvelopeFor<E extends ExecutionKind> = WireContractV1 & {
   assignmentId: string;
   executorId: string;
   manifest: ExecutionManifest<E>;
+  controlLease: ControlLease;
   permissionLease: PermissionSnapshotLease<E>;
   capabilities: AuthorityCapability<E>[];
   resourceLease: AssignmentResourceLease<E>;

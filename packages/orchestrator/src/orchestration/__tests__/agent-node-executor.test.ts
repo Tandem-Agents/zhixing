@@ -30,8 +30,10 @@ describe("ChildAgentNodeExecutorV1", () => {
       captured = options;
       return childResult({ status: "completed", finalAssistantText: "{\"ok\":true}" });
     };
+    const authorizeToolExecution = () => [];
     const executor = createAgentNodeExecutorV1({
       ...createExecutorOptions(),
+      authorizeToolExecution,
       runChildAgent,
     });
 
@@ -71,6 +73,7 @@ describe("ChildAgentNodeExecutorV1", () => {
       wallClockTimeoutMs: 456,
     });
     expect(captured?.parentTools.map((tool) => tool.name)).toEqual(["read"]);
+    expect(captured?.authorizeToolExecution).toBe(authorizeToolExecution);
     expect(captured?.task).toContain("<instruction>\nReview the implementation.\n</instruction>");
     expect(captured?.task).toContain("<run_input>");
     expect(captured?.task).toContain('"ticket": "ZX-1"');

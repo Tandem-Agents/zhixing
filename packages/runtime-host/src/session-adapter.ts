@@ -100,6 +100,7 @@ export function createOwnerRuntimeAdapter(
           },
           onProtocolEvent: options?.onProtocolEvent,
           toolSideEffectObserver: options?.toolSideEffectObserver,
+          authorizeToolExecution: options?.authorizeToolExecution,
         })
         .then(
           (runResult) => {
@@ -197,6 +198,10 @@ export function createOwnerRuntimeAdapter(
 
     securitySnapshot() {
       return agentRuntime.securitySnapshot();
+    },
+
+    executionPermissionRules() {
+      return agentRuntime.executionPermissionRules();
     },
 
     executionProfile() {

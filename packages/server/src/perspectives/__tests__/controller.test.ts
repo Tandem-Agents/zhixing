@@ -111,6 +111,36 @@ describe("PerspectivesController", () => {
     await manager.disposeAll();
   });
 
+  it("passes durable tool authority into the perspectives orchestration executor", async () => {
+    const manager = new ConversationManager(createFactory(), managerConfig, {
+      appendRun: appendRunSpy(),
+    });
+    const managed = await manager.getOrCreate("conv-authority");
+    const authorizeToolExecution = vi.fn(() => []);
+    let captured: unknown;
+    const delegate = completedExecutor("最终版本", { inputTokens: 1, outputTokens: 1 });
+    const controller = new PerspectivesController({
+      allocationStrategy: fixedAllocation(allocation(3)),
+      orchestrationExecutor: {
+        run(input) {
+          captured = input.authorizeToolExecution;
+          return delegate.run(input);
+        },
+      },
+    });
+
+    await controller.runPerspectiveTurn({
+      manager,
+      managed,
+      originalInput: "@ 审查",
+      question: "审查",
+      authorizeToolExecution,
+    });
+
+    expect(captured).toBe(authorizeToolExecution);
+    await manager.disposeAll();
+  });
+
   it("keeps a perspective committed when final publication is temporarily unavailable", async () => {
     const appendRun = appendRunSpy();
     const durableRuns: RunRecordInput[] = [];
@@ -632,6 +662,9 @@ function createRuntime(sessionId: string): SessionRuntime {
         rateLimits: [],
         confirmations: [],
       };
+    },
+    executionPermissionRules() {
+      return [];
     },
     executionProfile() {
       return {

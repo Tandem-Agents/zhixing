@@ -12,6 +12,7 @@ import type {
   AgentEventMap,
   AgentYield,
   ContextBudget,
+  DurableToolExecutionAuthorizer,
   EventBus,
   IConfirmationBroker,
   Message,
@@ -62,6 +63,8 @@ export interface RunTurnOptions {
     meta: { readonly lineage?: string },
   ) => void;
   toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
+  /** Fail-closed durable authority check invoked immediately before each tool call. */
+  authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 export interface SessionRuntime {
@@ -173,6 +176,8 @@ export interface SessionRuntime {
   subAgentUsages?(messages: readonly Message[]): readonly RuntimeSubAgentUsageEntry[];
   /** 查询运行体当前安全状态(/security 的宿主数据面)。 */
   securitySnapshot?(): RuntimeSecuritySnapshot;
+  /** Complete immutable permission input for a newly issued durable assignment. */
+  executionPermissionRules?(): readonly PermissionRule[];
   /** Exact non-secret dependencies of this immutable assembled runtime. */
   executionProfile?(): import("@zhixing/core").RuntimeExecutionProfile;
   /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
@@ -186,6 +191,7 @@ export interface SessionRuntimeOrchestrationV1Params {
   readonly abortSignal?: AbortSignal;
   readonly eventBus: EventBus<AgentEventMap>;
   readonly parentLineage?: string;
+  readonly authorizeToolExecution?: NonNullable<RunTurnOptions["authorizeToolExecution"]>;
 }
 
 /** /security 的运行体只读快照——事实源仍在 SecurityPipeline,owner 只透结构。 */

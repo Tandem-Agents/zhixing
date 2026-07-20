@@ -415,7 +415,8 @@ type AuthorityEpochRef =                          // fencing 锚，与 Authority
   | { execution: "conversation"; conversationId: string; ownerEpoch: number }   // ownerEpoch 两域通用（§1.1：对话权威转移 +1；锚点域与本地域对话各有各的）
   | { execution: "job"; taskId: string; anchorEpoch: number };
 interface ControlLease { controlLeaseId: string; assignmentId: string; authority: AuthorityEpochRef;
-  issuedAt: IsoTime; expiry: IsoTime /* 短 TTL，签发 owner 经控制连接心跳滚动续签 */; signature: Signature }
+  renewalSeq: number; issuedAt: IsoTime; expiry: IsoTime /* 短 TTL，签发 owner 经控制连接心跳滚动续签 */;
+  signature: Signature }
 type ExecutionRef =                               // conversation / job 统一工作身份——主体与权威 epoch 一体判别，
   | { execution: "conversation"; runId: string; conversationId: string; ownerEpoch: number }   // "job 主体 × conversation epoch"类
   | { execution: "job"; jobRunId: string; taskId: string; anchorEpoch: number };               // 非法凭证在类型层不存在；
@@ -424,9 +425,13 @@ interface PermissionSnapshotLease { snapshotVersion: number; snapshotDigest: Dig
   binding: ExecutionRef; assignmentId: string; executorId: string;
   controlLeaseId: string;                // fail-closed 的机械判定锚：绑定的 ControlLease 过期 / 断线未续 →
                                          // 快照即失效，安全管线拒绝规则放行，仅合法 allow-once 单次授权（surface ticket / channel grant）可逐次放行
-  issuedAt: IsoTime; expiry: IsoTime; signature: Signature }
+  issuedAt: IsoTime; expiry: IsoTime; signature: Signature } // TTL 上限 24h；接收时按 §1.1 换算本地 deadline
 type PermissionLeaseDigest = Digest;      // = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)；标识确切租约实例而非其 snapshot 资产
 // 快照本体权威恒在锚点（信任规则全局域）；本地域会话使用锚点签发的最近快照缓存 + 本地域对话的 ControlLease（owner 就在本机，心跳恒可续），过期同样 fail-closed。
+// ControlLease 以 (controlLeaseId, assignmentId, authority, renewalSeq) 标识确切续期代际；executor 验签、验有界 TTL 与允许时钟偏差后，
+// 把剩余存活期换算为本地单调 deadline，并在 assignment 流耐久 control-lease-renewed。renewalSeq 只可递增；旧代、错绑定、断线未续或
+// 本地 deadline 到期均立即失效，墙钟变化不得改变进程内已接受代际的存活期。owner-control 在终态后仍可续短租约做确切请求重放与账本恢复；
+// 执行权由 received / started、fence、abort 与终态独立关闭，故终态续期不得恢复 PermissionSnapshotLease 或任何工具副作用权。
 interface AssignmentActivationProof {            // owner 在 reserve+assigned 原子提交后签发；executor 无需回查 owner 日志
   ref: ExecutionRef; assignmentId: string; executorId: string;
   dispatchRef: ArtifactRef; manifestDigest: Digest; permissionLeaseDigest: PermissionLeaseDigest;
@@ -479,12 +484,13 @@ interface OwnerControlGrant { assignmentId: string;
   scope: { execution: "conversation"; conversationId: string; ownerEpoch: number }
        | { execution: "job"; taskId: string; anchorEpoch: number };
   methods: OwnerControlMethodId[];   // 逐方法绑定（§2.2 封闭子集），跨方法重放被 guard 拒绝
-  callerDeviceId: string; requestId: string; issuedAt: IsoTime; expiry: IsoTime; signature: Signature }
+  callerDeviceId: string; requestId: string; requestDigest: Digest; controlLease: ControlLease;
+  issuedAt: IsoTime; expiry: IsoTime; signature: Signature }
 interface AuthorityCallContext { principal: AuthorityPrincipal; requestId: string;
   expectedRevision?: number; deadlineAt: IsoTime }
 ```
 
-一切权威端口调用（含读）必携 `AuthorityCallContext` 过同一 guard：assignment 验 capability 的 scope / 方法与资源 / expiry；surface 验连接认证与会话归属；host 验装配期白名单；owner-control 由 executor 验签名设备是该 assignment 的派发 owner、epoch 当前、expiry 未过；usage-reporter 由 governor 验设备连接身份与报告签名、lease 链溯根——进程内与跨机同一实现。
+一切权威端口调用（含读）必携 `AuthorityCallContext` 过同一 guard：assignment 验 capability 的 scope / 方法与资源 / expiry；surface 验连接认证与会话归属；host 验装配期白名单；owner-control 由 executor 验 grant 签名 keyId、callerDeviceId、认证连接设备与耐久派发 owner 四者全等，scope / epoch 当前，内嵌 ControlLease 有效，并要求 `requestId` 及 `requestDigest = D("OwnerControlRequest",1,{method,assignmentId,authority,requestId,body})` 全等本次调用；usage-reporter 由 governor 验设备连接身份与报告签名、lease 链溯根——进程内与跨机同一实现。
 
 ### 3.1 SessionStatePort（达对话 owner）
 
@@ -741,6 +747,8 @@ interface RunExecutorPort {
 ```
 
 派发回执纪律：assigned outbox 只选择“当前 state=dispatched、存在 assigned、且无 dispatch-acked / assignment-superseded”的 assignment，每次发送同一 `DispatchEnvelope` + 对同一 `AssignmentActivationPayload` 的有效签名 proof；载荷由原子提交确定性重建，重启可重新签名。executor 先按 §1.2 复算 envelope 对象身份及全部内嵌自摘要/引用摘要并验签，再验证 proof 当前 owner/epoch 签名与 `validateAssignmentActivation`（ref / assignment / executor / dispatchRef / manifestDigest / permissionLeaseDigest / capIds 全集 / reservation / commit 摘要全匹配，其中 permissionLeaseDigest 必须等于信封内确切 permissionLease 的规范摘要）、`validateDispatchBinding`、`matchManifest` 与权限引用资产按 lease digest 的验签命中（§5.3 两层语义），全部通过后才 fsync `received(envelope, activation)` 并返回 `accepted:true`；本地 capability / permission / resource guard 只采信该耐久 received proof，禁止在线回查 owner。重复 assignment 若 proof 签名有效且规范载荷与已耐久 `received.activation` 全等，回放原结果，signature 字节不同本身不构成冲突；若载荷不同，返回签名 `DispatchConflictProof` 与 `DispatchConflictError(retryable=false)`，不得追加 executor `dispatch-rejected`、不得改变 executor assignment 状态。该 proof 固定绑定唯一 `received` 记录的 recordSeq / 前缀链摘要与新旧 dispatch / payload 摘要，可由原账本重建，不受 started / sealed 等后续记录影响；proof.error 只含固定 code / retryable，response.error 的这两项必须全等，message 仅作诊断、不入证明身份。
+
+首次派发的控制身份采用两级门禁：只有 `validateDispatchControlBinding` 已验 envelope / ControlLease 签名、assignment / executor 及二者 owner key 绑定后，才可在 `received` 前写 `control-lease-renewed`；authority 与 owner 身份不得从未验证 activation 派生。随后完整派发校验失败仍耐久写 `dispatch-rejected`，且 ActivationProof signer 必须等于 envelope signer。
 
 owner 只在当前仍为上述未 ACK dispatched assignment 时消费 conflict：先验 executor / assignment / signature / received 前缀链，要求 accepted / conflicting 两份 ActivationPayload 摘要不等，再要求 proof.conflictingDispatchRef / conflictingActivationDigest 等于本次实际发送二元组。随后从本地耐久 assigned + 所指 CommitEnvelope / DispatchEnvelope 重算期望 acceptedDispatchRef / acceptedActivationDigest：① accepted 侧全等期望，证明 executor 已接收原权威派发——同一 CommitEnvelope 写 `dispatch-conflict(acked-original) + dispatch-acked`，停止 outbox；② accepted 侧任一不等，说明 executor 接收事实与 owner 权威派发不一致——同一 CommitEnvelope 原子写 `dispatch-conflict(opened-uncertain) + state(uncertain) + UncertainResolutionFact(cause=dispatch-conflict) + cancel-fence + assigned.capIds / 活跃 tickets 的 revoked 记录`，停止派发 outbox与该 assignment 的 ControlLease 续期；fsync 后以该 cancel-fence 重驱 executor 止损，禁止仅凭 conflict proof 自动提交迟到 bundle或重派。资源租约此时不提前 settle / release（世界副作用与最终 usage 尚未证实），只在取得既有终结证明或用户裁决时按 §十收束。proof 无效、两侧摘要相等、conflicting 侧不对应本次发送或 response.error 的 code / retryable 与 proof.error 不等时零写入，走既有超时 / fence 路径；assignment 已 ACK、已离开 dispatched 或已终态时，迟到 conflict 不得再改变权威状态。`DispatchConflictProof` 永非 `AssignmentTerminationProof`，任何分支都不能据它重派。
 
@@ -1013,11 +1021,12 @@ type AssignmentTerminationProof =
 */
 
 type AssignmentRecord =    // executor 设备域
+  | { t: "control-lease-renewed"; lease: ControlLease }       // 首次 owner-control 与每次续期的耐久绑定；可先于 received / fence
   | { t: "received"; envelope: { ref: ArtifactRef }; activation: AssignmentActivationProof }
   | { t: "dispatch-rejected"; dispatchDigest: Digest; reason: AuthorityError }   // 拒收终态——先耐久并生成 DispatchRejectionProof 再返回，
                                                           // 此后同 assignment 永不执行，owner 可安全重派
   | { t: "supersede-fenced"; fenceSeq: number; requestId: string }   // 重派栅栏：此后 started / 一切新动作拒绝；
-                                                          // fence 先于 dispatch 到达时本记录即该 assignment 流首记录 = tombstone，迟到 dispatch 永久拒
+                                                          // fence 先于 dispatch 到达时本记录即首个 assignment 状态事实（可前置 control-lease-renewed）= tombstone，迟到 dispatch 永久拒
   | { t: "started" }
   | { t: "interaction-requested"; requestId: string; kind: "allow-once"; toolName: string;
       display: { title: string; lines: string[] } | { ref: ArtifactRef }; // 规范 JSON ≤8KiB；超限外置，重放必须解析并校验引用内容
@@ -1325,6 +1334,7 @@ type ControlRequest =
 type DispatchEnvelope =                          // 按 execution 判别的**单一闭合合同**——一份派发只有一个域分支，
   | { execution: "conversation"; assignmentId: string; executorId: string;   // 主体 / 基线 / epoch / 全部凭证在类型层完全同域
       manifest: ExecutionManifest & { baseRef: { execution: "conversation" } };
+      controlLease: ControlLease & { authority: { execution: "conversation" } };
       permissionLease: PermissionSnapshotLease & { binding: { execution: "conversation" } };
       capabilities: Array<Extract<AuthorityCapability, { scope: { execution: "conversation" } }>>;
       resourceLease: Extract<AssignmentResourceLease, { workload: { kind: "run" } }>;
@@ -1333,6 +1343,7 @@ type DispatchEnvelope =                          // 按 execution 判别的**单
       issuedAt: IsoTime; signature: Signature; work: ConversationDispatch }
   | { execution: "job"; assignmentId: string; executorId: string;
       manifest: ExecutionManifest & { baseRef: { execution: "job" } };
+      controlLease: ControlLease & { authority: { execution: "job" } };
       permissionLease: PermissionSnapshotLease & { binding: { execution: "job" } };
       capabilities: Array<Extract<AuthorityCapability, { scope: { execution: "job" } }>>;
       resourceLease: Extract<AssignmentResourceLease, { workload: { kind: "job" } }>;
@@ -1340,15 +1351,15 @@ type DispatchEnvelope =                          // 按 execution 判别的**单
       issuedAt: IsoTime; signature: Signature; work: JobDispatch };
 // S1 在 contracts 以泛型参数落地上述收窄（spec 的交叉类型仅表达约束语义）；executorId 在签名域内，与全部凭证的 executorId 同值。
 // **域一致性唯一校验 `validateDispatchBinding`**——owner 派发构造器与 executor 准入 guard 共用同一实现（进程内与 mesh 同一函数）：
-// 逐字段校验 manifest.baseRef、work（runId / jobRunId、baseRevision / fence、epoch）、全部 capability 的 scope / assignmentId、
-// permissionLease.binding、resourceLease 的 workload / scopeBinding / audience.executorId / activation.assignmentId 与信封 execution / assignmentId /
+// 逐字段校验 manifest.baseRef、work（runId / jobRunId、baseRevision / fence、epoch）、ControlLease 的 authority / assignmentId、全部 capability 的 scope / assignmentId、
+// permissionLease.binding / controlLeaseId、resourceLease 的 workload / scopeBinding / audience.executorId / activation.assignmentId 与信封 execution / assignmentId /
 // executorId **同域同值**；resourceLease.domain 结构按判别联合封闭（anchor / local 逐变体 exact-keys 与值域），job 信封另须
 // domain.kind="anchor" 且 domain.anchorEpoch === scopeBinding.anchorEpoch === work.fence.anchorEpoch（类型层专型不替代 wire 运行时强制），
 // conversation 信封保留 anchor / local 两变体的结构合法性（本地域会话语义）。任何缺字段、跨域、错基线、错 epoch / assignment / executor、数组混入异域 capability →
 // executor 在写 `received`、签发数据面票据与 started **之前**以 `dispatch-rejected` 耐久拒收（禁止降级执行）；
 // owner 按既有 AssignmentTerminationProof 路径关闭旧 assignment、吊销凭证、终结租约后重排。
 // **owner 派发原子流水线（顺序冻结）**：① `matchManifest` 先行，失败不创建任何候选；② `prepareAssignmentRoot` 与凭证签发器只在内存构造
-// AssignmentResourceLease / AuthorityCapability / PermissionSnapshotLease 候选；③ 组装 DispatchEnvelope 并过 `validateDispatchBinding`；④ artifact 先 fsync；
+// AssignmentResourceLease / AuthorityCapability / ControlLease / PermissionSnapshotLease 候选；③ 组装 DispatchEnvelope 并过 `validateDispatchBinding`；④ artifact 先 fsync；
 // ⑤ AuthorityCommitLog 在一个串行临界区复验 governor 配额与 assignment 当前性，再以**同一 CommitEnvelope / 单次 fsync**写 governor `reserve` + run/job `assigned`。
 // 第⑤步是 owner 侧三类 assignment 凭证的唯一激活点：resource guard 要求 reserve 与 assigned.reservationId/attempt/activation.assignmentId 全等；capability guard
 // 要求自身 capId 位于 assigned.capIds 且 assignmentId / executorId 全等；permission guard 要求自身规范摘要等于 assigned.permissionLeaseDigest，且 assignmentId / executorId 全等。owner 随后从该 CommitEnvelope
@@ -1928,7 +1939,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 14 | 依赖图 lint | server ↔ executor 零互 import |
 | 15 | 集成：staged 写后 run 失败 / 取消 / uncertain | 外界零可见、零残留；崩溃注入下 publish 可续 |
 | 16 | 对抗：越权方法 / 资源 / 过期 capability；五类 principal 各自越权（含非 owner 设备伪造 owner-control、伪造 usage-reporter）；owner-relay 错 authority / lease；渠道 token / grant 伪签、错 challenge / responder / route / assignment / interaction / displayDigest、改 decision、过期与跨域重放；EnvironmentControlGrant 越设备 / 绑定 / 时限 | 全部 unauthorized，进程内同 guard；token / grant 审计记录可独立验签，重复 callback 只回放原结果 |
-| 17 | 集成 + 崩溃注入：重投 / 重连 / 权威重启；派发候选签发后、artifact fsync 前后、原子 `reserve+assigned`（含 permissionLeaseDigest）fsync 前后、ActivationProof 生成前后、executor `received` fsync 前后、send / ACK / rejection / conflict response / owner conflict 裁决单 envelope fsync 前后 / containment cancel 发送、executor proof fsync、owner contained / resolution 原子提交与吊销发送前后 / fence 各点，含重启后同 payload 重签、两类 conflict 响应丢失重试、fence 先到、查询后抢跑与重复 dispatch；system-job 候选与 `reserve+running+SystemJobFence` 同样逐点注入 | 原子提交前零有效凭证、零 reservation，孤立 artifact 可 GC；提交后 ActivationPayload 可由日志确定性重建且权限租约实例不漂移，重签可幂等接受；conflict 两分支重启后分别收敛到唯一 ACK 或唯一 uncertain+止损事实，派发/ControlLease 立即停止；cancel 无 proof 时义务保留且有界退避，not-started 时 contained+resolution+superseded+租约终结全有或全无并安全重派，halted 时唯一 contained、停止 cancel 且仍待用户裁决；零半提交，ConflictProof 永不授权重派；received 前 executor 本地凭证无效、received 后离线可验；reserve 与归属事实恒同时存在并由 assigned/system fence 重驱；至多一次准入、零无日志执行、零双活、零凭证 / 租约泄漏 |
+| 17 | 集成 + 崩溃注入：重投 / 重连 / 权威重启；派发候选签发后、artifact fsync 前后、原子 `reserve+assigned`（含 permissionLeaseDigest）fsync 前后、ActivationProof 生成前后、executor `control-lease-renewed / received` fsync 前后、send / ACK / rejection / conflict response / owner conflict 裁决单 envelope fsync 前后 / containment cancel 发送、executor proof fsync、owner contained / resolution 原子提交与吊销发送前后 / fence 各点，含 ControlLease 旧代 / 错绑定 / 断线未续 / 时钟偏差与墙钟回拨、OwnerControlGrant 错设备 / scope / requestId / 请求正文、重启后同 payload 重签、两类 conflict 响应丢失重试、fence 先到、查询后抢跑与重复 dispatch；system-job 候选与 `reserve+running+SystemJobFence` 同样逐点注入 | 原子提交前零有效凭证、零 reservation，孤立 artifact 可 GC；提交后 ActivationPayload 可由日志确定性重建且权限租约实例不漂移，重签可幂等接受；owner-control 只接受当前派发 owner 对确切请求的授权，控制与权限租约按本地单调 deadline 失效且不可因回拨复活；conflict 两分支重启后分别收敛到唯一 ACK 或唯一 uncertain+止损事实，派发/ControlLease 立即停止；cancel 无 proof 时义务保留且有界退避，not-started 时 contained+resolution+superseded+租约终结全有或全无并安全重派，halted 时唯一 contained、停止 cancel 且仍待用户裁决；零半提交，ConflictProof 永不授权重派；received 前 executor 本地凭证无效、received 后离线可验；reserve 与归属事实恒同时存在并由 assigned/system fence 重驱；至多一次准入、零无日志执行、零双活、零凭证 / 租约泄漏 |
 | 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决 | 未激活凭证全部拒绝，其余拒绝或幂等；executor 断开 owner 后仍凭已耐久 proof 正常验权，未要求在线回查；queued 取消零治理记录，无水位只 reclaim；WDRR 满载下各类有界获得配额，交互不被饿死 |
 
 状态机逐边测试：4.3 delivery 十五行、6.1 三十六行、6.2 三十八行、6.2b 六行、6.3 十二行、6.4 十一行——每行一用例，禁止合并；其中 6.1 行 15–21 / 6.2 行 17–23 必跑 owner-fence × abort-ticket × sealed 三方竞态排列。签名与摘要域验收（§1.2）：逐字段篡改、错误包含自摘要/signature、引用错目标、跨 schema/version 重放、进程内/mesh 固定向量一致性，随 S2。

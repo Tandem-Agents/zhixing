@@ -41,7 +41,10 @@ import {
   type ToolDefinition,
 } from "@zhixing/core";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
-import { runContextStorage } from "../runtime/run-context.js";
+import {
+  runContextStorage,
+  type DurableToolExecutionAuthorizer,
+} from "../runtime/run-context.js";
 import { subAgentProfile } from "../profile/default-profiles.js";
 import { resolveSubAgentResolver } from "../confirmation/child-broker.js";
 import { deriveChildLineage } from "./lineage.js";
@@ -158,6 +161,8 @@ export interface RunChildAgentOptions {
    * 借助自身收到的 task 文本伪装意图绕过管家）。
    */
   userIntent?: string;
+  /** Durable assignment authority inherited from the parent execution. */
+  authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** 资源预算(可选,缺省走 resolveSubAgentBudget 默认值) */
   budget?: SubAgentBudget;
   /**
@@ -337,7 +342,11 @@ async function runChildAgentInner(
   try {
     await emitChildStart(opts, subAgentId, childLineage, childBus);
     runResult = await runContextStorage.run(
-      { bus: childBus, lineage: childLineage },
+      {
+        bus: childBus,
+        lineage: childLineage,
+        authorizeToolExecution: opts.authorizeToolExecution,
+      },
       () =>
         runSubAgentLoop({
           systemPrompt,
@@ -354,6 +363,7 @@ async function runChildAgentInner(
           // 顶层用户意图沿子链路透传 —— 子 secure-executor 在 augmentedContext
           // 中展开后，孙子 agent 的工具调用仍按同一顶层意图研判
           userIntent: opts.userIntent,
+          authorizeToolExecution: opts.authorizeToolExecution,
           parentSignal: opts.parentSignal,
           maxTurns: budget.maxTurns,
           maxTokens: budget.maxTokens,

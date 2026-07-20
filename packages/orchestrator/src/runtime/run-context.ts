@@ -21,10 +21,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AgentEventMap,
+  DurableToolExecutionAuthorizer,
   EventBus,
   PostTurnControlIntent,
   TurnOrigin,
 } from "@zhixing/core";
+
+export type { DurableToolExecutionAuthorizer } from "@zhixing/core";
 
 /**
  * Per-run/per-spawn 上下文 —— 跨嵌套异步链路传递的最小集合。
@@ -53,6 +56,8 @@ export interface RunContext {
    * 远程确认或通知目标时从这里读取明确目标。
    */
   turnOrigin?: TurnOrigin;
+  /** Assignment-scoped authority inherited by every descendant tool executor. */
+  authorizeToolExecution?: DurableToolExecutionAuthorizer;
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();

@@ -6,6 +6,7 @@ import {
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
+  type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
@@ -18,6 +19,7 @@ import type {
   AuthorityEpochRef,
   AuthorityError,
   CancelProofBody,
+  ControlLease,
   DispatchConflictProof,
   DispatchRejectionProof,
   DispatchResult,
@@ -25,6 +27,7 @@ import type {
   LedgerEvidencePage,
   LedgerSnapshot,
   LogicalRecord,
+  PermissionSnapshotLease,
   SealedBundle,
   SupersedeProof,
   SessionStagedMutation,
@@ -38,15 +41,20 @@ import type {
   RunDispatchArguments,
   RunExecutorPort,
 } from "@zhixing/core/contracts";
-import type { TrustRuleSnapshot } from "@zhixing/core/security";
+import type { PermissionRule, TrustRuleSnapshot } from "@zhixing/core/security";
 import {
+  assertActivePermissionSnapshotLease,
+  acceptedRemoteIntervalRemainingMs,
+  MAX_CONTROL_LEASE_TTL_MS,
+  MAX_PERMISSION_LEASE_TTL_MS,
   assertProtocolIdentifier as assertIdentifier,
   advanceAssignmentLedger,
   advanceInteractionMirrorDigest,
   applyValidatedAssignmentEntry,
-  assignmentActivationDigest,
   assignmentLedgerSeed,
   canonicalize,
+  controlLeaseBindsDispatchEnvelope,
+  controlLeaseIdentityDigest,
   conversationBundleRoots,
   createJobSealedBundle,
   createConversationSealedBundle,
@@ -78,6 +86,7 @@ import {
   validateConversationInteractionOutcome,
   validateConversationActivation,
   validateConversationEnvelope,
+  validateDispatchControlBinding,
   validateJobActivation,
   validateJobEnvelope,
   validateJobSealedBundle,
@@ -135,13 +144,23 @@ export type ConversationDispatchPort = {
 export interface OwnerControlAuthorizer {
   authorize(
     context: AuthorityCallContext,
-    method:
-      | "executor.dispatch"
-      | "executor.cancel"
-      | "executor.supersede"
-      | "executor.queryLedger",
-    assignmentId: string,
-  ): void;
+    request: {
+      readonly method:
+        | "executor.dispatch"
+        | "executor.cancel"
+        | "executor.supersede"
+        | "executor.queryLedger";
+      readonly assignmentId: string;
+      readonly authority?: AuthorityEpochRef;
+      readonly requestId: string;
+      readonly body: unknown;
+      readonly expectedOwnerDeviceId?: string;
+    },
+  ): {
+    readonly authority: AuthorityEpochRef;
+    readonly ownerDeviceId: string;
+    readonly controlLease: ControlLease;
+  };
 }
 
 export interface AssignmentLedgerOptions {
@@ -160,6 +179,7 @@ export interface AssignmentLedgerOptions {
     readonly manifest: ExecutionManifest<"conversation">;
   }) => AuthorityError | undefined;
   readonly clock?: () => string;
+  readonly monotonicClock?: () => number;
   readonly usageFinal?: (
     assignmentId: string,
   ) => { readonly reportDigest: string; readonly upToUsageSeq: number };
@@ -306,11 +326,23 @@ interface LedgerProjection {
   lastSeq: number;
   chainDigest: string;
   phase: LedgerSnapshot["phase"];
+  control?: {
+    readonly authority: AuthorityEpochRef;
+    readonly ownerDeviceId: string;
+    readonly lease: ControlLease;
+    readonly validForMs: number;
+    readonly acceptedAt: string;
+  };
   sealed?: Extract<AssignmentRecord, { t: "bundle_sealed" }>;
   received?: {
     readonly body: Extract<AssignmentRecord, { t: "received" }>;
     readonly recordSeq: number;
     readonly ledgerDigest: string;
+    permission?: {
+      readonly controlLeaseId: string;
+      readonly validForMs: number;
+      readonly acceptedAt: string;
+    };
   };
   rejection?: {
     readonly body: Extract<AssignmentRecord, { t: "dispatch-rejected" }>;
@@ -395,6 +427,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   readonly #permissionSnapshotFor: AssignmentLedgerOptions["permissionSnapshotFor"];
   readonly #runtimeBindingGuard: AssignmentLedgerOptions["runtimeBindingGuard"];
   readonly #clock: () => string;
+  readonly #monotonicClock: () => number;
   readonly #usageFinal: NonNullable<AssignmentLedgerOptions["usageFinal"]>;
   readonly #surfaceAbort: AssignmentLedgerOptions["surfaceAbort"];
   readonly #maxPendingInteractions: number;
@@ -403,6 +436,14 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   readonly #projections = new Map<
     string,
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
+  >();
+  readonly #controlDeadlines = new Map<
+    string,
+    { readonly renewalSeq: number; readonly deadline: number }
+  >();
+  readonly #ownerControlDeadlines = new Map<
+    string,
+    { readonly renewalSeq: number; readonly deadline: number }
   >();
 
   constructor(options: AssignmentLedgerOptions) {
@@ -417,6 +458,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     this.#permissionSnapshotFor = options.permissionSnapshotFor;
     this.#runtimeBindingGuard = options.runtimeBindingGuard;
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
     // A missing usage reporter is represented explicitly as zero-usage evidence.
     // When a reporter is configured, its signed UsageReport digest replaces this
     // domain-separated fallback in cancel proofs.
@@ -461,10 +503,33 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   async dispatch(
     ...[rawEnvelope, rawActivation, ctx]: RunDispatchArguments
   ): Promise<DispatchResult> {
+    const controlBinding = validateDispatchControlBinding(rawEnvelope, this.#verifier);
     const assignmentId = assertDispatchIdentity(rawEnvelope, this.#executorId);
-    this.#ownerControl.authorize(ctx, "executor.dispatch", assignmentId);
+    if (
+      controlBinding.assignmentId !== assignmentId ||
+      controlBinding.executorId !== this.#executorId
+    ) {
+      throw new TypeError("Dispatch control binding targets a different executor");
+    }
     const artifact = dispatchEnvelopeArtifact(rawEnvelope);
     const dispatchDigest = dispatchEnvelopeDigest(rawEnvelope);
+    const rawActivationPayload = withoutSignature(rawActivation);
+    const claimedAuthority = controlBinding.authority;
+    await this.#acceptOwnerControl(ctx, {
+      method: "executor.dispatch",
+      assignmentId,
+      authority: claimedAuthority,
+      requestId: ctx.requestId,
+      body: {
+        dispatchDigest,
+        activationDigest: protocolDigest(
+          "AssignmentActivationPayload",
+          1,
+          rawActivationPayload,
+        ),
+      },
+      expectedOwnerDeviceId: controlBinding.ownerDeviceId,
+    });
 
     let envelope: AssignmentEnvelope;
     let envelopeReferences: ArtifactRef[];
@@ -474,12 +539,6 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       envelope = rawEnvelope.execution === "conversation"
         ? validateConversationEnvelope(rawEnvelope, this.#verifier)
         : validateJobEnvelope(rawEnvelope, this.#verifier);
-      if (
-        (await this.#artifacts.put(artifact.bytes)).digest !== artifact.ref.digest
-      ) {
-        throw new TypeError("Dispatch artifact store returned a different digest");
-      }
-      envelopeReferences = await this.#assertEnvelopeArtifactsPresent(envelope);
       activation = snapshot(rawActivation, "Assignment activation proof");
       activationPayload = envelope.execution === "conversation"
         ? validateConversationActivation({
@@ -503,9 +562,31 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       );
     }
 
+    if (
+      canonicalize(claimedAuthority) !==
+      canonicalize(authorityForExecutionRef(activationPayload.ref))
+    ) {
+      throw new TypeError("Dispatch authority changed during validation");
+    }
+    try {
+      if (
+        (await this.#artifacts.put(artifact.bytes)).digest !== artifact.ref.digest
+      ) {
+        throw new TypeError("Dispatch artifact store returned a different digest");
+      }
+      envelopeReferences = await this.#assertEnvelopeArtifactsPresent(envelope);
+    } catch (error) {
+      const authorityError = invalidDispatchError(error);
+      return this.#rejectBeforeReceived(
+        assignmentId,
+        dispatchDigest,
+        authorityError,
+      );
+    }
+
     const transaction = await this.#transact<DispatchDecision>(
       assignmentId,
-      (state) => {
+      (state, transactionContext) => {
         if (state.supersedeFence || state.aborts.length > 0 || state.halted) {
           throw new Error("Assignment is durably fenced and rejects late dispatch");
         }
@@ -591,7 +672,23 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
           envelope.permissionLease.snapshotDigest,
         );
         let permissionError: AuthorityError | undefined;
-        if (permissionSnapshot === undefined) {
+        try {
+          acceptedRemoteIntervalRemainingMs({
+            issuedAt: envelope.permissionLease.issuedAt,
+            expiry: envelope.permissionLease.expiry,
+            acceptedAt: transactionContext.at,
+            maxTtlMs: MAX_PERMISSION_LEASE_TTL_MS,
+          });
+        } catch {
+          permissionError = {
+            code: "invalid",
+            message: "Permission snapshot lease is outside its accepted time window",
+            retryable: false,
+          };
+        }
+        if (permissionError !== undefined) {
+          // Preserve the time error; no snapshot lookup can make this lease valid.
+        } else if (permissionSnapshot === undefined) {
           permissionError = {
             code: "capability-gap",
             message: "Permission snapshot is unavailable",
@@ -679,7 +776,6 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     range?: { fromSeq: number; limit: number },
   ): Promise<LedgerSnapshot | LedgerEvidencePage> {
     assertIdentifier(assignmentId, "Assignment id");
-    this.#ownerControl.authorize(ctx, "executor.queryLedger", assignmentId);
     if (
       range &&
       (!Number.isSafeInteger(range.fromSeq) ||
@@ -690,6 +786,12 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     ) {
       throw new RangeError(`Ledger evidence range must be within 1..${MAX_LEDGER_PAGE}`);
     }
+    await this.#acceptOwnerControl(ctx, {
+      method: "executor.queryLedger",
+      assignmentId,
+      requestId: ctx.requestId,
+      body: { range: range ?? null },
+    });
     return this.#select(assignmentId, (state) => {
       if (!range) return snapshot(ledgerSnapshot(state), "Ledger snapshot");
       const entries = state.entries.slice(
@@ -724,10 +826,15 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     ctx: AuthorityCallContext,
   ): Promise<void> {
     assertFence(fence, "Cancel fence");
-    this.#ownerControl.authorize(ctx, "executor.cancel", assignmentId);
     if (ctx.principal.kind !== "owner-control") {
       throw new Error("Cancellation requires an owner-control principal");
     }
+    await this.#acceptOwnerControl(ctx, {
+      method: "executor.cancel",
+      assignmentId,
+      requestId: fence.requestId,
+      body: { fenceSeq: fence.fenceSeq },
+    });
     await this.#requestAbort(assignmentId, {
       cause: "owner-fence",
       fence: snapshot(fence, "Cancel fence"),
@@ -758,7 +865,12 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     ctx: AuthorityCallContext,
   ): Promise<SupersedeProof> {
     assertFence(fence, "Supersede fence");
-    this.#ownerControl.authorize(ctx, "executor.supersede", assignmentId);
+    await this.#acceptOwnerControl(ctx, {
+      method: "executor.supersede",
+      assignmentId,
+      requestId: fence.requestId,
+      body: { fenceSeq: fence.fenceSeq },
+    });
     const transaction = await this.#transact<{
       readonly decision: SupersedeProof["decision"];
       readonly recordSeq: number;
@@ -1680,6 +1792,108 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     );
   }
 
+  async #acceptOwnerControl(
+    context: AuthorityCallContext,
+    request: {
+      readonly method:
+        | "executor.dispatch"
+        | "executor.cancel"
+        | "executor.supersede"
+        | "executor.queryLedger";
+      readonly assignmentId: string;
+      readonly authority?: AuthorityEpochRef;
+      readonly requestId: string;
+      readonly body: unknown;
+      readonly expectedOwnerDeviceId?: string;
+    },
+  ): Promise<void> {
+    const transaction = await this.#transact<boolean>(request.assignmentId, (state) => {
+      const durableAuthority = state.control?.authority ?? authorityForProjection(state);
+      const durableOwnerDeviceId =
+        state.control?.ownerDeviceId ??
+        state.received?.body.activation.signature.keyId;
+      const authority = durableAuthority ?? request.authority;
+      const expectedOwnerDeviceId =
+        durableOwnerDeviceId ?? request.expectedOwnerDeviceId;
+      const authorized = this.#ownerControl.authorize(context, {
+        ...request,
+        ...(authority === undefined ? {} : { authority }),
+        ...(expectedOwnerDeviceId === undefined
+          ? {}
+          : { expectedOwnerDeviceId }),
+      });
+      if (
+        (authority !== undefined &&
+          canonicalize(authorized.authority) !== canonicalize(authority)) ||
+        (expectedOwnerDeviceId !== undefined &&
+          authorized.ownerDeviceId !== expectedOwnerDeviceId)
+      ) {
+        throw new TypeError("Owner control authority changed during authorization");
+      }
+      const current = state.control;
+      if (current) {
+        if (
+          canonicalize(current.authority) !== canonicalize(authorized.authority) ||
+          current.ownerDeviceId !== authorized.ownerDeviceId ||
+          current.lease.controlLeaseId !== authorized.controlLease.controlLeaseId
+        ) {
+          throw new TypeError("Owner control grant conflicts with durable authority");
+        }
+        if (authorized.controlLease.renewalSeq < current.lease.renewalSeq) {
+          throw new TypeError("Owner control lease renewal sequence regressed");
+        }
+        if (authorized.controlLease.renewalSeq === current.lease.renewalSeq) {
+          if (
+            controlLeaseIdentityDigest(authorized.controlLease) !==
+            controlLeaseIdentityDigest(current.lease)
+          ) {
+            throw new TypeError("Owner control lease sequence was reused");
+          }
+          if (!this.#ownerControlLeaseIsActive(state)) {
+            throw new TypeError("Owner control lease is no longer active");
+          }
+          return { kind: "return", value: true };
+        }
+      }
+      const entry = nextEntry(state, {
+        v: 1,
+        t: "control-lease-renewed",
+        lease: snapshot(authorized.controlLease, "Authorized control lease"),
+      });
+      return {
+        kind: "append",
+        entries: [assignmentRecord(request.assignmentId, entry)],
+        value: true,
+      };
+    });
+    if (!transaction.value || !this.#ownerControlLeaseIsActive(transaction.state)) {
+      throw new TypeError("Owner control lease is no longer active");
+    }
+  }
+
+  #ownerControlLeaseIsActive(state: LedgerProjection): boolean {
+    const control = state.control;
+    if (!control) return false;
+    const monotonicNow = this.#monotonicClock();
+    const cached = this.#ownerControlDeadlines.get(state.assignmentId);
+    if (cached?.renewalSeq === control.lease.renewalSeq) {
+      return monotonicNow < cached.deadline;
+    }
+    const now = canonicalTime(this.#clock(), "Owner control local clock");
+    const acceptedAt = canonicalTime(
+      control.acceptedAt,
+      "Control lease local acceptance",
+    );
+    if (now < acceptedAt) return false;
+    const remaining = control.validForMs - (now - acceptedAt);
+    if (remaining <= 0) return false;
+    this.#ownerControlDeadlines.set(state.assignmentId, {
+      renewalSeq: control.lease.renewalSeq,
+      deadline: monotonicNow + remaining,
+    });
+    return true;
+  }
+
   #rejectionResult(
     assignmentId: string,
     dispatchDigest: string,
@@ -1725,9 +1939,15 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       executorId: this.#executorId,
       acceptedDispatchRef: received.body.envelope.ref,
       conflictingDispatchRef,
-      acceptedActivationDigest: assignmentActivationDigest(acceptedPayload),
-      conflictingActivationDigest: assignmentActivationDigest(
-        conflictingPayload as AssignmentActivationPayload,
+      acceptedActivationDigest: protocolDigest(
+        "AssignmentActivationPayload",
+        1,
+        acceptedPayload,
+      ),
+      conflictingActivationDigest: protocolDigest(
+        "AssignmentActivationPayload",
+        1,
+        conflictingPayload,
       ),
       receivedRecordSeq: received.recordSeq,
       receivedLedgerDigest: received.ledgerDigest,
@@ -1881,6 +2101,110 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     );
   }
 
+  /**
+   * Re-authorizes the frozen permission lease from durable executor facts before
+   * every tool call. A signed candidate is inert until `received.activation`
+   * binds it, and any fence, termination, or expiry closes it. The validated
+   * historical snapshot remains the assignment's policy for its lifetime.
+   */
+  async authorizeToolExecution(
+    assignmentId: string,
+    lease:
+      | PermissionSnapshotLease<"conversation">
+      | PermissionSnapshotLease<"job">,
+  ): Promise<readonly PermissionRule[]> {
+    return this.#select(assignmentId, (state) => {
+      const received = state.received?.body.activation;
+      const active =
+        state.phase === "started" &&
+        state.supersedeFence === undefined &&
+        state.aborts.length === 0 &&
+        state.halted === undefined;
+      const validatedLease = assertActivePermissionSnapshotLease({
+        lease,
+        verifier: this.#verifier,
+        activationDigest: received?.permissionLeaseDigest,
+        assignmentId,
+        executorId: this.#executorId,
+        active,
+        now: this.#clock(),
+        timeValid: this.#permissionControlIsActive(state, lease),
+      });
+      if (
+        received === undefined ||
+        canonicalize(validatedLease.binding) !== canonicalize(received.ref)
+      ) {
+        throw new TypeError("Permission snapshot lease does not bind received execution");
+      }
+      const snapshot = this.#permissionSnapshotFor(validatedLease.snapshotDigest);
+      if (snapshot === undefined) {
+        throw new TypeError("Permission snapshot is unavailable for active execution");
+      }
+      const validatedSnapshot = validateTrustRuleSnapshot(snapshot, this.#verifier);
+      if (
+        validatedSnapshot.snapshotVersion !== validatedLease.snapshotVersion ||
+        validatedSnapshot.digest !== validatedLease.snapshotDigest
+      ) {
+        throw new TypeError("Permission snapshot does not match the active lease");
+      }
+      return validatedSnapshot.rules.map((rule): PermissionRule => ({
+        ...rule,
+        pattern: { ...rule.pattern },
+        ...(rule.contextId === undefined
+          ? {}
+          : { contextId: structuredClone(rule.contextId) }),
+        ...(rule.contributors === undefined
+          ? {}
+          : { contributors: structuredClone(rule.contributors) }),
+        lastMatchedAt: 0,
+        matchCount: 0,
+      }));
+    });
+  }
+
+  #permissionControlIsActive(
+    state: LedgerProjection,
+    lease:
+      | PermissionSnapshotLease<"conversation">
+      | PermissionSnapshotLease<"job">,
+  ): boolean {
+    const control = state.control;
+    const permission = state.received?.permission;
+    if (
+      !control ||
+      !permission ||
+      control.lease.controlLeaseId !== lease.controlLeaseId ||
+      permission.controlLeaseId !== lease.controlLeaseId
+    ) {
+      return false;
+    }
+    const monotonicNow = this.#monotonicClock();
+    const cached = this.#controlDeadlines.get(state.assignmentId);
+    if (cached?.renewalSeq === control.lease.renewalSeq) {
+      return monotonicNow < cached.deadline;
+    }
+    const now = canonicalTime(this.#clock(), "Permission guard local clock");
+    const controlAcceptedAt = canonicalTime(
+      control.acceptedAt,
+      "Control lease local acceptance",
+    );
+    const permissionAcceptedAt = canonicalTime(
+      permission.acceptedAt,
+      "Permission lease local acceptance",
+    );
+    if (now < controlAcceptedAt || now < permissionAcceptedAt) return false;
+    const controlRemaining =
+      control.validForMs - (now - controlAcceptedAt);
+    const permissionRemaining =
+      permission.validForMs - (now - permissionAcceptedAt);
+    if (controlRemaining <= 0 || permissionRemaining <= 0) return false;
+    this.#controlDeadlines.set(state.assignmentId, {
+      renewalSeq: control.lease.renewalSeq,
+      deadline: monotonicNow + Math.min(controlRemaining, permissionRemaining),
+    });
+    return true;
+  }
+
   async #select<Value>(
     assignmentId: string,
     select: (state: LedgerProjection) => Value,
@@ -1910,6 +2234,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         state = transaction.state;
       } catch (error) {
         this.#projections.delete(assignmentId);
+        this.#controlDeadlines.delete(assignmentId);
+        this.#ownerControlDeadlines.delete(assignmentId);
         throw error;
       }
       return select(state);
@@ -1920,6 +2246,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     assignmentId: string,
     decide: (
       state: LedgerProjection,
+      context: ProjectionTransactionContext,
     ) => ProjectionTransactionDecision<AssignmentEntry, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
@@ -1948,6 +2275,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         return transaction;
       } catch (error) {
         this.#projections.delete(assignmentId);
+        this.#controlDeadlines.delete(assignmentId);
+        this.#ownerControlDeadlines.delete(assignmentId);
         throw error;
       }
     });
@@ -1971,6 +2300,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       const oldest = this.#projections.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       this.#projections.delete(oldest);
+      this.#controlDeadlines.delete(oldest);
+      this.#ownerControlDeadlines.delete(oldest);
     }
   }
 
@@ -1986,12 +2317,14 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     if (entry.recordSeq !== state.lastSeq + 1) {
       throw corruptLedger("Assignment record sequence is not contiguous");
     }
+    let receivedEnvelope: AssignmentEnvelope | undefined;
     if (entry.body.t === "received") {
       const bytes = await this.#artifacts.get(entry.body.envelope.ref);
       const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
       const envelope = raw.execution === "conversation"
         ? validateConversationEnvelope(raw, this.#verifier)
         : validateJobEnvelope(raw, this.#verifier);
+      receivedEnvelope = envelope;
       const artifact = dispatchEnvelopeArtifact(envelope);
       if (canonicalize(artifact.ref) !== canonicalize(entry.body.envelope.ref)) {
         throw corruptLedger("received dispatch artifact reference is inconsistent");
@@ -2003,6 +2336,14 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         throw corruptLedger("received dispatch targets a different assignment or executor");
       }
       await this.#assertEnvelopeArtifactsPresent(envelope);
+      const control = state.control;
+      if (
+        !control ||
+        !controlLeaseBindsDispatchEnvelope(control.lease, envelope) ||
+        envelope.permissionLease.controlLeaseId !== envelope.controlLease.controlLeaseId
+      ) {
+        throw corruptLedger("received assignment does not bind durable owner control");
+      }
       if (envelope.execution === "conversation") {
         validateConversationActivation({
           envelope,
@@ -2019,6 +2360,15 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
           verifier: this.#verifier,
         });
       }
+    }
+    if (entry.body.t === "control-lease-renewed") {
+      const lease = entry.body.lease;
+      acceptedRemoteIntervalRemainingMs({
+        issuedAt: lease.issuedAt,
+        expiry: lease.expiry,
+        acceptedAt: commit.at,
+        maxTtlMs: MAX_CONTROL_LEASE_TTL_MS,
+      });
     }
     if (entry.body.t === "halted") {
       const proof = validateCancelProof(entry.body.proof, this.#verifier);
@@ -2050,6 +2400,26 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     }
     const digest = applyValidatedAssignmentEntry(state.validation, entry);
     applyEntry(state, entry, digest, commit.at);
+    if (entry.body.t === "received" && receivedEnvelope) {
+      if (!state.received) {
+        throw corruptLedger("received projection was not materialized");
+      }
+      state.received.permission = {
+        controlLeaseId: receivedEnvelope.permissionLease.controlLeaseId,
+        validForMs: acceptedRemoteIntervalRemainingMs({
+          issuedAt: receivedEnvelope.permissionLease.issuedAt,
+          expiry: receivedEnvelope.permissionLease.expiry,
+          acceptedAt: commit.at,
+          maxTtlMs: MAX_PERMISSION_LEASE_TTL_MS,
+        }),
+        acceptedAt: commit.at,
+      };
+      this.#controlDeadlines.delete(state.assignmentId);
+    }
+    if (entry.body.t === "control-lease-renewed") {
+      this.#controlDeadlines.delete(state.assignmentId);
+      this.#ownerControlDeadlines.delete(state.assignmentId);
+    }
     state.lastSeq = entry.recordSeq;
     state.chainDigest = digest;
     if (
@@ -2058,6 +2428,20 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       state.validation.phase !== state.phase
     ) {
       throw corruptLedger("Assignment validation and executor projection diverged");
+    }
+    const projectedControl = state.control
+      ? {
+          authority: state.control.authority,
+          ownerDeviceId: state.control.ownerDeviceId,
+          controlLeaseId: state.control.lease.controlLeaseId,
+          renewalSeq: state.control.lease.renewalSeq,
+        }
+      : undefined;
+    if (
+      canonicalize(state.validation.control ?? null) !==
+      canonicalize(projectedControl ?? null)
+    ) {
+      throw corruptLedger("Owner-control validation and executor projection diverged");
     }
     state.entries.push(entry);
     state.ledgerBySeq.push(digest);
@@ -2122,6 +2506,30 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   }
 }
 
+function authorityForProjection(
+  state: LedgerProjection,
+): AuthorityEpochRef | undefined {
+  return state.received === undefined
+    ? state.control?.authority
+    : authorityForExecutionRef(state.received.body.activation.ref);
+}
+
+function authorityForExecutionRef(
+  ref: AssignmentActivationProof["ref"],
+): AuthorityEpochRef {
+  return ref.execution === "conversation"
+    ? {
+        execution: "conversation",
+        conversationId: ref.conversationId,
+        ownerEpoch: ref.ownerEpoch,
+      }
+    : {
+        execution: "job",
+        taskId: ref.taskId,
+        anchorEpoch: ref.anchorEpoch,
+      };
+}
+
 function emptyProjection(assignmentId: string): LedgerProjection {
   return {
     assignmentId,
@@ -2163,6 +2571,20 @@ function applyEntry(
     case "dispatch-rejected":
       state.phase = "dispatch-rejected";
       state.rejection = { body, recordSeq: entry.recordSeq, ledgerDigest };
+      return;
+    case "control-lease-renewed":
+      state.control = {
+        authority: snapshot(body.lease.authority, "Control lease authority"),
+        ownerDeviceId: body.lease.signature.keyId,
+        lease: snapshot(body.lease, "Control lease"),
+        validForMs: acceptedRemoteIntervalRemainingMs({
+          issuedAt: body.lease.issuedAt,
+          expiry: body.lease.expiry,
+          acceptedAt: at,
+          maxTtlMs: MAX_CONTROL_LEASE_TTL_MS,
+        }),
+        acceptedAt: at,
+      };
       return;
     case "supersede-fenced":
       state.phase = "supersede-fenced";
@@ -2622,9 +3044,9 @@ function invalidDispatchError(error: unknown): AuthorityError {
   };
 }
 
-function withoutSignature(
-  proof: AssignmentActivationProof,
-): AssignmentActivationPayload {
+function withoutSignature<T extends { readonly signature: unknown }>(
+  proof: T,
+): Omit<T, "signature"> {
   const { signature: _, ...payload } = proof;
   return snapshot(payload, "Assignment activation payload");
 }
