@@ -44,6 +44,7 @@ export {
 } from "./call-llm.js";
 export {
   createAgentRuntime,
+  meteredProviderCall,
   type AgentRuntime,
   type CreateAgentRuntimeOptions,
   type DecorateRunBusFn,
@@ -52,6 +53,7 @@ export {
   type RunOrchestrationV1Params,
   type RunParams,
   type RunResult,
+  type TextCallOptions,
 } from "./create-agent-runtime.js";
 export {
   runContextStorage,

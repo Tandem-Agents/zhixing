@@ -33,7 +33,7 @@ import { validateStagedMutationRecord } from "./commit.js";
 import { validateJobCommitFence } from "./job.js";
 import { validateInteractionDisplay } from "./interaction-display.js";
 import { validateExecutionManifest } from "./manifest.js";
-import { assertResourceLeaseBaseContract } from "./resource-lease.js";
+import { validateReservableResourceLease } from "./resource-governor.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
 import {
@@ -955,6 +955,18 @@ export function applyValidatedAssignmentEntry(
       state.phase = "halted";
       break;
     }
+    case "execution-failed":
+      if (
+        state.phase !== "started" ||
+        state.aborts.size > 0 ||
+        state.pendingInteractions.size > 0 ||
+        state.unmirroredFinished.size > 0 ||
+        state.openSideEffects.size > 0
+      ) {
+        throw new TypeError("execution-failed does not close a clean started assignment");
+      }
+      state.phase = "failed";
+      break;
     case "bundle_sealed":
       if (
         state.phase !== "started" ||
@@ -1192,6 +1204,7 @@ export function validateLedgerSnapshot(
         ? []
         : ["acknowledgedCommitRevision"]),
       ...(value.cancelProof === undefined ? [] : ["cancelProof"]),
+      ...(value.failure === undefined ? [] : ["failure"]),
       "lastSeq",
       "phase",
       ...(value.sealedBundleRef === undefined ? [] : ["sealedBundleRef"]),
@@ -1209,6 +1222,7 @@ export function validateLedgerSnapshot(
     "supersede-fenced",
     "started",
     "halted",
+    "failed",
     "sealed",
     "acked",
   ]);
@@ -1247,6 +1261,29 @@ export function validateLedgerSnapshot(
     if (proof.assignmentId !== value.assignmentId) {
       throw new TypeError("Ledger snapshot cancel proof names a different assignment");
     }
+  }
+  if ((value.phase === "failed") !== (value.failure !== undefined)) {
+    throw new TypeError("Ledger snapshot failed phase is missing its failure fact");
+  }
+  if (value.failure !== undefined) {
+    assertExactKeys(value.failure, ["reason", "usageFinal"], "Ledger failure fact");
+    if (
+      typeof value.failure.reason !== "string" ||
+      value.failure.reason.length === 0 ||
+      Buffer.byteLength(value.failure.reason, "utf8") > 512
+    ) {
+      throw new TypeError("Ledger failure reason is invalid");
+    }
+    assertExactKeys(
+      value.failure.usageFinal,
+      ["reportDigest", "upToUsageSeq"],
+      "Ledger failure final usage",
+    );
+    assertDigest(value.failure.usageFinal.reportDigest, "Ledger failure report digest");
+    assertNonNegativeInteger(
+      value.failure.usageFinal.upToUsageSeq,
+      "Ledger failure usage sequence",
+    );
   }
   return value;
 }
@@ -1594,6 +1631,30 @@ function assertAssignmentRecord(
     case "halted":
       assertExactKeys(value, ["proof", "t", "v"], "halted record");
       validateCancelProof(value.proof, verifier);
+      return;
+    case "execution-failed":
+      assertExactKeys(
+        value,
+        ["reason", "t", "usageFinal", "v"],
+        "execution-failed record",
+      );
+      if (
+        typeof value.reason !== "string" ||
+        value.reason.length === 0 ||
+        Buffer.byteLength(value.reason, "utf8") > 512
+      ) {
+        throw new TypeError("Execution failure reason is invalid");
+      }
+      assertExactKeys(
+        value.usageFinal,
+        ["reportDigest", "upToUsageSeq"],
+        "Execution failure final usage",
+      );
+      assertDigest(value.usageFinal.reportDigest, "Execution failure report digest");
+      assertNonNegativeInteger(
+        value.usageFinal.upToUsageSeq,
+        "Execution failure usage sequence",
+      );
       return;
     case "bundle_sealed":
       assertExactKeys(
@@ -2177,7 +2238,7 @@ function assertResourceLease(
     true,
   );
   assertVersion(lease.v, "Assignment resource lease");
-  assertResourceLeaseBaseContract(lease, verifier, "Lease");
+  validateReservableResourceLease(lease, verifier);
   if (lease.workload.kind !== "run" && lease.workload.kind !== "job") {
     throw new TypeError("Lease workload kind is invalid");
   }

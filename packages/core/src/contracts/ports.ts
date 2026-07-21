@@ -132,16 +132,24 @@ export interface EnvironmentPort {
   versionInventory(): Promise<ExecutorVersionInventory>;
 }
 
-export interface ReservationOrigin {
-  admissionClass: import("./authorization.js").AdmissionClass;
-  entry:
-    | "conversation-input"
-    | "advancement-control"
-    | "schedule-trigger"
-    | "orchestration";
-}
+export type ReservationOrigin =
+  | { admissionClass: "interactive"; entry: "conversation-input" }
+  | { admissionClass: "advancement"; entry: "advancement-control" }
+  | { admissionClass: "scheduler"; entry: "schedule-trigger" }
+  | { admissionClass: "orchestration"; entry: "orchestration" };
+
+export type SystemJobReservationOrigin = Extract<
+  ReservationOrigin,
+  { entry: "schedule-trigger" }
+>;
 
 export interface ResourceReservationPort {
+  enqueueRoot(
+    reservationId: string,
+    workload: import("./authorization.js").RootResourceWorkload,
+    origin: ReservationOrigin,
+    ctx: AuthorityCallContext,
+  ): Promise<void>;
   prepareAssignmentRoot<E extends ExecutionKind>(
     request: AssignmentReservationRequest<E>,
     origin: ReservationOrigin,
@@ -149,7 +157,7 @@ export interface ResourceReservationPort {
   ): Promise<AssignmentResourceLease<E>>;
   prepareSystemJobRoot(
     request: SystemJobReservationRequest,
-    origin: ReservationOrigin,
+    origin: SystemJobReservationOrigin,
     ctx: AuthorityCallContext,
   ): Promise<SystemJobResourceLease>;
   acquireRoot(
@@ -164,6 +172,16 @@ export interface ResourceReservationPort {
     budget: ResourceLease["budget"],
     ctx: AuthorityCallContext,
   ): Promise<import("./authorization.js").ChildResourceLease>;
+  reserveUsage(
+    lease: ResourceLease,
+    usage: {
+      usageId: string;
+      tokens?: number;
+      calls?: number;
+      costMinor?: number;
+    },
+    ctx: AuthorityCallContext,
+  ): Promise<void>;
   consume(
     lease: ResourceLease,
     usage: {
@@ -215,11 +233,16 @@ export interface LedgerSnapshot extends WireSchemaV1<"LedgerSnapshot"> {
     | "supersede-fenced"
     | "started"
     | "halted"
+    | "failed"
     | "sealed"
     | "acked";
   sealedBundleRef?: import("./foundation.js").ArtifactRef;
   acknowledgedCommitRevision?: number;
   cancelProof?: CancelProofBody;
+  failure?: {
+    reason: string;
+    usageFinal: { reportDigest: Digest; upToUsageSeq: number };
+  };
 }
 
 export interface LedgerEvidencePage
@@ -309,4 +332,16 @@ export interface ResourceUsageIntake {
     report: UsageReport,
     ctx: AuthorityCallContext,
   ): Promise<{ ackedThroughSeq: number }>;
+}
+
+/** Per-run bridge that durably reserves and settles every real provider call. */
+export interface ModelCallResourceMeter {
+  reserve(input: {
+    readonly callIndex: number;
+    readonly tokenUpperBound: number;
+  }): Promise<{ readonly usageId: string }>;
+  consume(input: {
+    readonly usageId: string;
+    readonly tokens: number;
+  }): Promise<void>;
 }

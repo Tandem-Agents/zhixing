@@ -311,8 +311,8 @@ type AuthorityPortMethodId =                         // 封闭字面量联合 = 
   | "session.readSessionMeta" | "session.readTranscriptTail" | "session.readTaskList" | "session.readAdvancementState" | "session.mutate"
   | "global.read" | "global.mutate"
   | "intent.record" | "intent.list" | "intent.decide"
-  | "reservation.prepareAssignmentRoot" | "reservation.prepareSystemJobRoot" | "reservation.acquireRoot"
-  | "reservation.acquireChild" | "reservation.consume" | "reservation.settle" | "reservation.release"
+  | "reservation.enqueueRoot" | "reservation.prepareAssignmentRoot" | "reservation.prepareSystemJobRoot" | "reservation.acquireRoot"
+  | "reservation.acquireChild" | "reservation.reserveUsage" | "reservation.consume" | "reservation.settle" | "reservation.release"
   | "submission.reportStarted" | "submission.submitBundle" | "submission.submitCancelProof" | "submission.mirrorInteractions"
   | "governor.submitUsageReport"
   | "executor.dispatch" | "executor.cancel" | "executor.supersede" | "executor.queryLedger";
@@ -321,7 +321,7 @@ type AuthorityPortMethodId =                         // 封闭字面量联合 = 
 type AssignmentMethodId = Extract<AuthorityPortMethodId,
   | "session.readSessionMeta" | "session.readTranscriptTail" | "session.readTaskList" | "session.readAdvancementState" | "session.mutate"
   | "global.read" | "global.mutate"
-  | "reservation.acquireChild" | "reservation.consume" | "reservation.settle" | "reservation.release"
+  | "reservation.acquireChild" | "reservation.reserveUsage" | "reservation.consume" | "reservation.settle" | "reservation.release"
   | "submission.reportStarted" | "submission.submitBundle" | "submission.submitCancelProof" | "submission.mirrorInteractions">;   // reservation 面只能操作自身 scope 与 lease 后代，不得终结根租约
 type SurfaceMethodId = Extract<AuthorityPortMethodId,
   | "session.readSessionMeta" | "session.readTranscriptTail" | "session.readTaskList" | "session.readAdvancementState" | "session.mutate"
@@ -381,12 +381,12 @@ type AssignmentResourceLease =                       // 派发根租约专型：
       activation: { kind: "assignment"; assignmentId: string } });
 type ImmediateRootWorkload = { kind: "control"; id: string; attempt: number };   // run / user-job 走 prepareAssignmentRoot；system-job 走 prepareSystemJobRoot
 type SystemJobResourceLease =                       // system job 无 assignment；以 SystemJobFence 为独立激活锚
-  Omit<ResourceLease, "parentId"|"parentDigest"|"workload"|"scopeBinding"|"domain"> & { parentId?: never; parentDigest?: never;
+  Omit<ResourceLease, "admissionClass"|"parentId"|"parentDigest"|"workload"|"scopeBinding"|"domain"> & { admissionClass: "scheduler"; parentId?: never; parentDigest?: never;
     workload: Extract<AssignmentWorkload, { kind: "job" }>;
     scopeBinding: Extract<ResourceLease["scopeBinding"], { kind: "job" }>;
     domain: Extract<ResourceLease["domain"], { kind: "anchor" }>;
     activation: { kind: "system-job"; jobRunId: string } };
-type ImmediateRootResourceLease =                   // control-class 根租约：reserve 记录即时激活
+type ImmediateRootResourceLease =                   // control-class 根租约：reserve 记录即时激活（无需第二归属事实；仍入队过公平准入，见 §十候选生命周期）
   Omit<ResourceLease, "parentId"|"parentDigest"|"workload"> & { parentId?: never; parentDigest?: never; workload: ImmediateRootWorkload };
 type ChildResourceLease =                           // 仅编排 / 取证可派生；父链字段类型层必填
   Omit<ResourceLease, "parentId"|"parentDigest"|"workload"> & { parentId: string; parentDigest: Digest;
@@ -686,17 +686,25 @@ interface EnvironmentPort {
 ### 3.4 ResourceReservationPort（达所属域 governor；只在域内进程装配，不经 mesh 暴露——跨设备只流转签名 lease 与 UsageReport。anchor 域根 lease 随派发到 executor 后，run 内 `acquireChild / consume` 由 **executor 本地 governor 凭根 lease 的 delegation 就地履约**：以设备密钥签有界子租约、扣账落本机 governor 流并防超卖，周期以签名 `UsageReport` 上报锚点账本按 `usageId` 幂等收敛——两域同一租约合同与 guard，接口在任一拓扑都可履约）
 
 ```ts
-interface ReservationOrigin { admissionClass: AdmissionClass;
-  entry: "conversation-input"|"advancement-control"|"schedule-trigger"|"orchestration" }  // 装配期注入的可信入口派生器提供
+type ReservationOrigin =
+  | { admissionClass: "interactive"; entry: "conversation-input" }
+  | { admissionClass: "advancement"; entry: "advancement-control" }
+  | { admissionClass: "scheduler"; entry: "schedule-trigger" }
+  | { admissionClass: "orchestration"; entry: "orchestration" };  // 装配期注入的可信入口派生器提供
+type SystemJobReservationOrigin = Extract<ReservationOrigin, { entry: "schedule-trigger" }>;
 interface ResourceReservationPort {
+  enqueueRoot(reservationId: string, workload: RootResourceWorkload,
+              origin: ReservationOrigin, ctx: AuthorityCallContext): Promise<void>;             // 根候选先耐久入队；独立方法身份，不借用 prepare 权限
   prepareAssignmentRoot(req: AssignmentReservationRequest,
-                        origin: ReservationOrigin, ctx: AuthorityCallContext): Promise<AssignmentResourceLease>;   // 只签候选、零日志副作用
+                        origin: ReservationOrigin, ctx: AuthorityCallContext): Promise<AssignmentResourceLease>;   // 只签候选、零租约日志副作用；排他签发权为进程内占用态，候选生命周期见 §十
   prepareSystemJobRoot(req: SystemJobReservationRequest,
-                       origin: ReservationOrigin, ctx: AuthorityCallContext): Promise<SystemJobResourceLease>;      // 只签候选；由 6.2b 原子激活
+                       origin: SystemJobReservationOrigin, ctx: AuthorityCallContext): Promise<SystemJobResourceLease>; // 只签 scheduler 候选；由 6.2b 原子激活
   acquireRoot(w: ImmediateRootWorkload, budget: ResourceLease["budget"],
               origin: ReservationOrigin, ctx: AuthorityCallContext): Promise<ImmediateRootResourceLease>;          // control 根租约即时写 reserve 后返回
   acquireChild(parent: ResourceLease, w: ChildResourceLease["workload"], budget: ResourceLease["budget"],
                ctx: AuthorityCallContext): Promise<ChildResourceLease>;
+  reserveUsage(lease: ResourceLease, usage: { usageId: string; tokens?: number; calls?: number; costMinor?: number },
+               ctx: AuthorityCallContext): Promise<void>;                                        // 真实外调前耐久预占；独立方法身份
   consume(lease: ResourceLease, usage: { usageId: string; tokens?: number; calls?: number; costMinor?: number },
           ctx: AuthorityCallContext): Promise<void>;
   settle(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void>;
@@ -722,8 +730,9 @@ interface AdvancementReviewerPort {      // 输入输出沿 advancement 模块 r
 
 ```ts
 interface LedgerSnapshot { assignmentId: string; lastSeq: number;   // = assignment 流最新 recordSeq（§4.3）
-  phase: "unknown"|"received"|"dispatch-rejected"|"supersede-fenced"|"started"|"halted"|"sealed"|"acked";
-  sealedBundleRef?: ArtifactRef; acknowledgedCommitRevision?: number; cancelProof?: CancelProofBody }
+  phase: "unknown"|"received"|"dispatch-rejected"|"supersede-fenced"|"started"|"failed"|"halted"|"sealed"|"acked";
+  sealedBundleRef?: ArtifactRef; acknowledgedCommitRevision?: number; cancelProof?: CancelProofBody;
+  failure?: { reason: string; usageFinal: { reportDigest: Digest; upToUsageSeq: number } } }
 interface LedgerEvidencePage {                   // uncertain 裁决与审计的可核验账本页；executor 签名
   assignmentId: string; fromSeq: number; toSeq: number;
   entries: Array<{ recordSeq: number; body: AssignmentRecord | { ref: ArtifactRef } }>;  // 大内容经 ArtifactRef
@@ -1053,6 +1062,8 @@ type AssignmentRecord =    // executor 设备域
   | { t: "side-effect-completed"; effectSeq: number; status: "ok"|"failed"|"aborted"; resultDigest?: Digest }
   | { t: "abort-requested"; via: "owner-fence"|"abort-ticket"; refId: string }
   | { t: "halted"; proof: CancelProofBody }
+  | { t: "execution-failed"; reason: string;
+      usageFinal: { reportDigest: Digest; upToUsageSeq: number } } // clean started 前缀的失败终态；同 envelope 收束 executor 租约
   | { t: "bundle_sealed"; bundle: { ref: ArtifactRef }; mutationBatch?: { ref: ArtifactRef } }   // = completed；封包胜负点
   | { t: "acked"; commitRevision: number }
   | { t: "mirrored"; upTo: number; ordinal: number; mirrorDigest: Digest };
@@ -1090,11 +1101,14 @@ interface FinalOutboxRecord { t: "final"; conversationId: string; runId: string;
   digest: Digest; state: "pending"|"published"|"expired" }
 
 type GovernorRecord =
-  | { t: "queued";  reservationId: string; admissionClass: AdmissionClass }   // 公平队列入队事实
+  | { t: "queued";  reservationId: string; admissionClass: AdmissionClass; workload: RootResourceWorkload }   // 公平队列入队事实；workload 是业务终态与队列项的耐久绑定
+  | { t: "dequeue"; workload: RootResourceWorkload; reason: "cancelled"|"failed"|"expired" }  // workload attempt 终态 tombstone：与同因业务终态原子提交；已有队列项即移除，无队列项也阻断同 attempt 的迟到 enqueue；已 reserve 后禁止，改走租约终结表
   | { t: "reserve"; lease: ReservableResourceLease }                          // **本记录才是租约激活事实**，仅有签名候选一律无效；assignment/system-job 还须同 envelope 存在对应 assigned/SystemJobFence
+  | { t: "usage-reserved"; rootReservationId: string; reservationId: string; usageId: string; tokens?: number; calls?: number; costMinor?: number }   // 外部调用前的耐久预占（字段值=上限）——先落盘再外调；由同 usageId 的 consume 收束（差额即释放），恢复扫描未收束预占按上限保守补 consume
   | { t: "consume"; usageSeq: number; rootReservationId: string; reservationId: string; usageId: string; tokens?: number; calls?: number; costMinor?: number }   // usageSeq 按根 reservation 连续分配——UsageReport 连续性的凭据
   | { t: "settle"|"release"|"reclaim"; reservationId: string };
-// 幂等键：reserve=reservationId；consume=usageId；settle/release/reclaim=reservationId+t（重复即幂等返回）
+// 在线预检与 anchor / executor 重放必须先调用同一运行时 validator：按 t 精确封闭顶层字段并校验嵌套 workload / lease / usage；未知判别值、缺失字段和额外字段一律 fail-closed。
+// 幂等键：reserve=reservationId；dequeue=workload(kind+id+attempt)（重复同因幂等返回，异因拒绝）；usage-reserved/consume=usageId；settle/release/reclaim=reservationId+t（重复即幂等返回）
 
 type TransferRecord =      // 物理流固定 transfer:<transferId>；prepared 后各记录校验 scope / subject / epoch 不变；源 / 目标两端各自落流
   | { t: "prepared";   transferId: string; scope: "conversation"|"anchor"; subject: string; sourceEpoch: number }
@@ -1891,16 +1905,16 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 ## 十、资源治理规格
 
 - 层级：顶层 run / job = 根 lease；编排子节点 = 父的有界子 lease（预算 ≤ 父剩余）；推进准入 / 裁判 / 收场 = 独立 control-class 根 lease；取证 = 所属 review lease 的 executor 侧子 lease（EvidenceRequest 直接携带，§5.7）。
-- 结算：`consume(usageId)` 幂等累计 → `settle` 单次结算 → `release` 归还余额；expiry 未 settle 由 governor `reclaim`（按已 consume 记账、余额归还）；全部动作落 GovernorRecord（§4.3）。
+- 结算：`consume(usageId)` 幂等累计 → `settle` 单次结算 → `release` 归还余额；expiry 未 settle 由 governor `reclaim`（按已 consume 记账、余额归还）；全部动作落 GovernorRecord（§4.3）。**计量线性化点是每次真实外部调用的响应边界**，协议冻结为"耐久预占 → 消费收束"：①外调前以稳定 `usageId` 落盘 `usage-reserved`（calls 恒占 1，tokens/cost 按请求上限；并发调用各自预占，租约剩余额度不足即拒绝调用）——外部调用是真实副作用，先落盘再外调（§6 纪律）；②每次真实响应以同 `usageId` consume 实际用量，预占差额随之归还；③结果未知（超时、崩溃恢复扫描到未收束的 `usage-reserved`）按预占上限**保守 consume 计终值**，不设事后修正通道——宁多勿少，敞口以预占上限为界。失败、abort 与非 completed 路径先落盘已知 consume 再按终结表收束；run/job 最终水位载体：committed 走 SealedBundle `usageFinal` 对账，其余终态以已落盘 consume 与 UsageReport 水位为准（无可核验水位则 reclaim）。禁止以工具调用计数替代 provider 调用计量，禁止只在成功终态汇总补记。
 - **全 workload 租约终结表**（每个 workload kind 的每个终态都有显式终结动作，正常路径零"依赖过期回收"；全部动作幂等）：
 
 | workload | 终结触发 | 动作 |
 |---|---|---|
 | run / job | committed | owner 收到 SealedBundle `usageFinal` 对账收敛后，settle + release 与 `committed` 记录同 envelope |
-| run / job | cancelled **且从未 assigned** | 零动作——queued 取消没有 reservation，禁止伪造 CancelProof 或治理记录 |
+| run / job | cancelled **且从未 assigned** | 零租约终结动作——禁止伪造 CancelProof；以 workload 为键的 `dequeue(cancelled)` 与取消记录同 envelope 落盘，移除已有队列项并阻断迟到 enqueue |
 | run / job | cancelled **且曾 assigned** | 有合法 CancelProof / usage 水位 → 对账后 settle + release；用户裁决等无可核验水位路径 → reclaim（按已上报 consume 记账、余额归还） |
-| run / job | failed / expired **且从未 assigned** | 零动作——reservation 随 `assigned` 才产生（§4.3），派发前终态无租约可终结 |
-| run / job | failed / expired **且曾 assigned** | 按已 consume 水位 settle + release（无水位可得则 reclaim） |
+| run / job | failed / expired **且从未 assigned** | 零租约终结动作——派发前无激活租约；以 workload 为键的 `dequeue(failed|expired)` 与对应终态记录同 envelope 落盘，移除已有队列项并阻断迟到 enqueue |
+| run / job | failed / expired **且曾 assigned** | executor 先以 `execution-failed + usageFinal + settle + release` 同 envelope 关闭 clean started assignment；owner 恢复读取该耐久失败事实，核验水位后原子写 capability 吊销、failed 与 anchor settle + release（无可核验水位的失联 / 旧日志才 reclaim） |
 | run / job | uncertain → committed / cancelled / failed（裁决） | 按裁决出的终态行执行；迟到 bundle / proof 有水位则对账，无可核验水位则 reclaim，禁止猜测 settle |
 | run / job | uncertain → queued（证实未 started 重派） | **旧 assignment 租约先终结**（未 consume 全额 release；失联无对账则 reclaim），新 assignment 以 attempt+1 重取新租约 |
 | run / job | uncertain 未裁决 | 挂起不终结；executor 失联超期由 `reclaim` 兜底 |
@@ -1908,8 +1922,16 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | control（准入 / 裁判 / 收场） | 调用返回（成功 / 失败 / abort） | 调用方 finally 内 settle + release——ControlCompletionPort / AdvancementReviewerPort 的调用合同 |
 | evidence | EvidenceBundle 交付 / typed-stale 保持 deferred 的终态 | executor 侧子租约 settle + release，随 intake 上报对账 |
 | orchestration-node | 节点终态（completed / failed / aborted） | 子租约终结；父租约随所属 run 的行走 |
-- 公平准入：anchor governor 按 `admissionClass` 维护加权队列，调度算法固定为加权差额轮询（WDRR），权重 interactive : advancement : scheduler : orchestration = 8 : 4 : 2 : 1（初值，S7 压测标定）；`queued / reserve` 记录承载入队与准入顺序，持续满载场景验证各类均有界获得配额、交互类恒不被自动类饿死。executor 半边做本机硬容量与背压，瞬时容量经独立短租约公告、不进 CapabilityDescriptor。
+- 启动与周期恢复按业务归属单一终结：assignment / system-job 根及其子租约只由对应业务恢复所有者在同轮收敛 anchor / executor 双半边，先把未收束预占按上限保守 consume，再写业务终态与资源终结；通用 governor 扫描只回收无业务归属的 control 根及孤儿资源。回收顺序子先于父，重复扫描零重复记账。
+- 公平准入：anchor governor 按 `admissionClass` 维护加权队列，调度算法固定为加权差额轮询（WDRR），权重 interactive : advancement : scheduler : orchestration = 8 : 4 : 2 : 1（初值，S7 压测标定）；`queued / dequeue / reserve` 记录承载入队、出队与准入顺序，持续满载场景验证各类均有界获得配额、交互类恒不被自动类饿死。executor 半边做本机硬容量与背压，瞬时容量经独立短租约公告、不进 CapabilityDescriptor。
+- **根 lease 候选生命周期**（适用 `prepareAssignmentRoot / prepareSystemJobRoot`。两者在资源端口内按调用 deadline 有界等待 WDRR 候选；瞬时 pending 只触发重试，deadline 到达则返回可识别的延期结果并保留耐久 queued，由所属 run / job 恢复重驱，绝不写业务失败或单独 dequeue。control 类 `acquireRoot` 同样入队、共用同一公平治理面——它是"排队至准入并原子激活"的便捷接口：调用方同步等待，出队即原子 `reserve` 返回激活租约，无候选阶段；排队中放弃或超时以 `dequeue(cancelled|expired)` 单独落盘（无伴随业务终态），激活后终结走 finally 行。"即时激活"仅指其 `reserve` 无需第二个归属事实，不豁免准入）：
+  1. **候选身份与重试**：签名候选恒为零权内存对象，prepare 不落租约日志、只对 WDRR 当前可调度队首授予；排他签发权是 governor 进程内**占用态** `(reservationId, 完整候选, expiry)`。同一 workload attempt 的 assignment / reservation 身份必须可稳定重建，禁止因重启或响应丢失改用随机新身份遗弃旧队列项；占用未过期时重复 prepare **幂等返回同一候选**，不重签；workload 重派提高 `attempt` 后才进入新身份。
+  2. **过期**：占用短 TTL，过期即释放签发权，队首可重新授予（新候选替换占用、旧候选随之失效）。占用态是可丢弃的调度运行态而非权威事实：reservation 端口只在域内进程装配（§3.4），候选持有者与 governor 同崩溃域、崩溃同灭，恢复 reducer 仅凭耐久流重建 `queued → reserved | dequeued` 投影。
+  3. **激活与出队竞争**：`queued` 的耐久出边恰有两条。assignment / system-job 的 `reserve` 提交必须匹配当前未过期候选；control 根在同一 governor 事务内完成队首选择、容量复验、签发和 `reserve`，不得产生候选窗口。业务终态按 workload 身份原子写 `dequeue` tombstone——队列项尚未产生时仍阻断其迟到入队，已 reserve 后则拒绝并改走租约终结表。两者由同一物理日志 append 顺序线性化，先落盘定局。
+  4. **调度语义**：占用中的队首使其 admissionClass **类内推进暂驻**、其它类照常调度；占用过期、出队或晋升后类内立即推进——TTL 有限加出队即时，机械保证队首失联后后继有界获准且不外溢阻塞他类。**公平状态（各类差额与队列内容）由 `queued / reserve / dequeue` 耐久序列确定性重建**——恢复后以重建差额继续调度即无漂移；占用暂驻等瞬时决策是运行态、不落日志也不重放（占用窗口内他类先行不消耗队首类差额，无公平损失），公平性由满载与恢复测试共同验收。
 - 分域：锚点域根 lease 由 anchor governor 签发；本地域根 lease 由设备本地耐久 governor 签发（绑 `localDomainId / localGovernorEpoch`），只消费本机额度、不授权全局预算；两域同一租约合同与 guard；收编不追认本地消费为锚点预算；双拓扑测试随 S4 / S8 验收。
+- 租约时间与重放授权：首次耐久 `reserve` 所在 envelope 的 `at` 是本地域接收时刻；接收端按 §1.1 校验签发者区间并冻结剩余 TTL，进程内只用本地单调 deadline。assignment 资源调用的 capability 同样以 `assigned / received` 所在 envelope 的 `at` 冻结单调 deadline，任一 deadline 到期即拒绝 fresh 写。重启从耐久接收时刻与剩余 TTL 恢复，墙钟回拨不得延长或复活租约/能力。exact durable replay 仍必须通过 principal×method guard、凭证签名、capId 曾在对应 `assigned / received` 中耐久接纳，以及 scope / assignment / executor / lease 静态绑定；只豁免当前激活、吊销和 deadline，命中后零追加返回原结果。
+- 状态保留：租约与 capability 的进程内单调 deadline 缓存随所属根终结清退；热投影只保留 active 状态、水位与 §4.5 保留窗内的终态幂等索引，窗外终态根及其子租约、usage、预占与 dequeue tombstone 一并压缩。冷启动与增量重放使用单份事务隔离候选，禁止逐记录复制累计投影；大量终态工作下投影有界、重放近线性，保留窗内 exact replay 语义不变。
 - 跨机对账：anchor 域工作在 executor 上的动态子租约与扣账由本地 governor 凭根 lease `delegation` 就地履约（§3.4），`usageSeq` 按根 reservation 一序、随 consume 连续分配；周期 `UsageReport` 经 `ResourceUsageIntake`（§3.7）提交、只推进无缺口水位——run / job 由 SealedBundle `usageFinal` 绑定最终水位收束，evidence 等无 assignment 负载以 intake ack 收束；`usageId` 重复上报零重复计费；delegation 上限即离线窗口的最大敞口，超限本机 guard 直接拒绝。
 
 ## 十一、产品旅程脚本（零术语，文案为验收锚）
@@ -1940,7 +1962,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 15 | 集成：staged 写后 run 失败 / 取消 / uncertain | 外界零可见、零残留；崩溃注入下 publish 可续 |
 | 16 | 对抗：越权方法 / 资源 / 过期 capability；五类 principal 各自越权（含非 owner 设备伪造 owner-control、伪造 usage-reporter）；owner-relay 错 authority / lease；渠道 token / grant 伪签、错 challenge / responder / route / assignment / interaction / displayDigest、改 decision、过期与跨域重放；EnvironmentControlGrant 越设备 / 绑定 / 时限 | 全部 unauthorized，进程内同 guard；token / grant 审计记录可独立验签，重复 callback 只回放原结果 |
 | 17 | 集成 + 崩溃注入：重投 / 重连 / 权威重启；派发候选签发后、artifact fsync 前后、原子 `reserve+assigned`（含 permissionLeaseDigest）fsync 前后、ActivationProof 生成前后、executor `control-lease-renewed / received` fsync 前后、send / ACK / rejection / conflict response / owner conflict 裁决单 envelope fsync 前后 / containment cancel 发送、executor proof fsync、owner contained / resolution 原子提交与吊销发送前后 / fence 各点，含 ControlLease 旧代 / 错绑定 / 断线未续 / 时钟偏差与墙钟回拨、OwnerControlGrant 错设备 / scope / requestId / 请求正文、重启后同 payload 重签、两类 conflict 响应丢失重试、fence 先到、查询后抢跑与重复 dispatch；system-job 候选与 `reserve+running+SystemJobFence` 同样逐点注入 | 原子提交前零有效凭证、零 reservation，孤立 artifact 可 GC；提交后 ActivationPayload 可由日志确定性重建且权限租约实例不漂移，重签可幂等接受；owner-control 只接受当前派发 owner 对确切请求的授权，控制与权限租约按本地单调 deadline 失效且不可因回拨复活；conflict 两分支重启后分别收敛到唯一 ACK 或唯一 uncertain+止损事实，派发/ControlLease 立即停止；cancel 无 proof 时义务保留且有界退避，not-started 时 contained+resolution+superseded+租约终结全有或全无并安全重派，halted 时唯一 contained、停止 cancel 且仍待用户裁决；零半提交，ConflictProof 永不授权重派；received 前 executor 本地凭证无效、received 后离线可验；reserve 与归属事实恒同时存在并由 assigned/system fence 重驱；至多一次准入、零无日志执行、零双活、零凭证 / 租约泄漏 |
-| 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决 | 未激活凭证全部拒绝，其余拒绝或幂等；executor 断开 owner 后仍凭已耐久 proof 正常验权，未要求在线回查；queued 取消零治理记录，无水位只 reclaim；WDRR 满载下各类有界获得配额，交互不被饿死 |
+| 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决 | 未激活凭证全部拒绝，其余拒绝或幂等；executor 断开 owner 后仍凭已耐久 proof 正常验权，未要求在线回查；queued 取消只写与业务终态同 envelope 的 workload dequeue tombstone、零租约终结动作，无水位只 reclaim；WDRR 满载下各类有界获得配额，交互不被饿死 |
 
 状态机逐边测试：4.3 delivery 十五行、6.1 三十六行、6.2 三十八行、6.2b 六行、6.3 十二行、6.4 十一行——每行一用例，禁止合并；其中 6.1 行 15–21 / 6.2 行 17–23 必跑 owner-fence × abort-ticket × sealed 三方竞态排列。签名与摘要域验收（§1.2）：逐字段篡改、错误包含自摘要/signature、引用错目标、跨 schema/version 重放、进程内/mesh 固定向量一致性，随 S2。
 

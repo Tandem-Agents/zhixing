@@ -1214,14 +1214,27 @@ function isValidConversationStatusSource(
     assertPlainObject(value, "Conversation delivery status source");
     assertExactKeys(
       value,
-      value.assignmentId === undefined
-        ? ["runId", "state", "statusRevision", "t"]
-        : ["assignmentId", "runId", "state", "statusRevision", "t"],
+      [
+        ...(value.assignmentId === undefined ? [] : ["assignmentId"]),
+        ...(value.reason === undefined ? [] : ["reason"]),
+        "runId",
+        "state",
+        "statusRevision",
+        "t",
+      ],
     );
     if (value.t !== "state") throw new TypeError("Conversation delivery status source type is invalid");
     assertIdentifier(value.runId, "Conversation delivery status run id");
     if (value.assignmentId !== undefined) {
       assertIdentifier(value.assignmentId, "Conversation delivery status assignment id");
+    }
+    if (
+      value.reason !== undefined &&
+      (typeof value.reason !== "string" ||
+        value.reason.length === 0 ||
+        Buffer.byteLength(value.reason, "utf8") > 512)
+    ) {
+      throw new TypeError("Conversation delivery status reason is invalid");
     }
     assertPositiveInteger(value.statusRevision, "Conversation delivery status revision");
     if (!CHANNEL_STATUS_SOURCE_STATES.has(String(value.state))) {

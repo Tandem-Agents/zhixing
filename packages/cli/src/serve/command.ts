@@ -128,6 +128,10 @@ import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { createAccessSurfaces } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
+import {
+  governControlTextCall,
+  type GovernedTextCall,
+} from "./governed-control-llm.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
@@ -384,6 +388,9 @@ async function runServerProcess(
   const advancementController = await createServeAdvancementController({
     config,
     credentials: providerCredentials,
+    // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
+    // 惰性取值；advancement 外调发生在运行期，届时必已就绪
+    governor: () => ctx.authorityRuntime?.resourceGovernor,
     // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
     // 延迟基线进 serve 日志作观测数据。
     recentContextProvider: async (conversationId) =>
@@ -763,8 +770,25 @@ async function runServerProcess(
     },
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => mcpHub.serverStatuses(),
-    // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用
-    llmComplete: (prompt, role) => ephemeralRuntime.callText(prompt, role),
+    // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；
+    // 经 control 治理边界准入计量(用户同步操作,interactive 类)。
+    // 生产装配恒有 authorityRuntime(pre-server surface 已断言)——缺失即 fail-closed,不静默绕过治理
+    llmComplete: (() => {
+      const governor = ctx.authorityRuntime?.resourceGovernor;
+      if (!governor) {
+        throw new Error("llm.complete requires the durable authority runtime");
+      }
+      const raw: GovernedTextCall = (prompt, role, opts) =>
+        ephemeralRuntime.callText(prompt, role, opts);
+      return governControlTextCall(
+        {
+          governor,
+          origin: { admissionClass: "interactive", entry: "conversation-input" },
+          workPrefix: "llm-complete",
+        },
+        raw,
+      );
+    })(),
     // /task new·done 的执行体——写单点在宿主 task_list 服务,变更经
     // taskListService.subscribe 的组播自然回流接入面视图
     taskListUpdate: (conversationId, action) =>

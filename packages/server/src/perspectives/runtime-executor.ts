@@ -19,6 +19,9 @@ export class RuntimePerspectivesOrchestrationExecutor
       eventBus: input.eventBus,
       parentLineage: "perspectives",
       authorizeToolExecution: input.authorizeToolExecution,
+      ...(input.modelCallMetering
+        ? { modelCallMetering: input.modelCallMetering }
+        : {}),
     });
   }
 }

@@ -15,6 +15,7 @@ import type {
   ConversationManager,
   ManagedSession,
 } from "@zhixing/owner-kernel/conversation-manager";
+import type { SessionRuntimeModelCallMetering } from "@zhixing/owner-kernel";
 
 export interface PerspectiveSpec {
   readonly name: string;
@@ -33,6 +34,8 @@ export interface PerspectiveAllocationInput {
   readonly defaultPerspectiveCount: number;
   readonly maxPerspectiveCount: number;
   readonly abortSignal?: AbortSignal;
+  /** durable 执行时由所属 assignment 注入——分配调用计入同一资源租约 */
+  readonly modelCallMetering?: SessionRuntimeModelCallMetering;
 }
 
 export interface PerspectiveAllocationStrategy {
@@ -47,6 +50,7 @@ export interface PerspectivesOrchestrationRunInput {
   readonly abortSignal?: AbortSignal;
   readonly eventBus: EventBus<AgentEventMap>;
   readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  readonly modelCallMetering?: SessionRuntimeModelCallMetering;
 }
 
 export interface PerspectivesOrchestrationExecutor {
@@ -76,6 +80,8 @@ export interface PerspectivesTurnInput {
   readonly surfacePrincipal?: string;
   readonly source?: "interactive" | "channel";
   readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** durable 执行时由 assignment 注入——本 turn 全部模型调用共用同一计量序列 */
+  readonly modelCallMetering?: SessionRuntimeModelCallMetering;
 }
 
 export interface PerspectivesPendingTaskInput {

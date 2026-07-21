@@ -47,6 +47,7 @@ import {
   type ToolDefinition,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
+import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
@@ -615,6 +616,39 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
 // ─── 契约 7: profile 含 Task 时装配 —— Task 可被 LLM 派调,完成端到端委派 ───
 
 describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动）", () => {
+  it("meters main and Task child provider attempts through one run sequence", async () => {
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "deep dive", prompt: "research X" } },
+        ],
+      },
+      { text: "child result" },
+      { text: "main result" },
+    ]);
+    const reserved: number[] = [];
+    const consumed: string[] = [];
+    const meter: ModelCallResourceMeter = {
+      async reserve({ callIndex }) {
+        reserved.push(callIndex);
+        return { usageId: `usage-${callIndex}` };
+      },
+      async consume({ usageId }) {
+        consumed.push(usageId);
+      },
+    };
+
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
+    await runtime.run({
+      messages: [userMessage("research X please")],
+      turnIndex: 0,
+      modelCallResourceMeter: meter,
+    });
+
+    expect(reserved).toEqual([1, 2, 3]);
+    expect(consumed).toEqual(["usage-1", "usage-2", "usage-3"]);
+  });
+
   it("profile 含 Task:LLM 调 Task → 子 agent 跑完 → 主收到 tool_result 综合输出", async () => {
     // 主 + 子共用同一 MockLLMProvider 序列(provider 实例共享),按 chat 调用顺序消费:
     //   1. 主 LLM:派 Task tool_use

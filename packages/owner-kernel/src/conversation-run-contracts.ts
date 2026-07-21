@@ -6,6 +6,7 @@ import type {
   ConversationInvocation,
   ConversationUncertainClosure,
   ConversationRunState,
+  Digest,
   DispatchConflictProof,
   IngressContext,
   JobRunState,
@@ -125,6 +126,10 @@ export type ConversationRunJournalRecord =
       readonly state: ConversationRunState;
       readonly statusRevision: number;
       readonly reason?: string;
+      readonly usageFinal?: {
+        readonly reportDigest: Digest;
+        readonly upToUsageSeq: number;
+      };
     }
   | {
       readonly t: "committed";
@@ -234,7 +239,7 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
   state: {
     required: ["runId", "state", "statusRevision", "t"],
-    optional: ["assignmentId", "reason"],
+    optional: ["assignmentId", "reason", "usageFinal"],
   },
   committed: {
     required: ["assignmentId", "bundle", "commitRevision", "runId", "t"],
@@ -428,6 +433,27 @@ export function validateConversationRunRecord(
           if (value.state !== "failed") {
             throw corruptRunJournal("Only failed run state may carry a reason");
           }
+        }
+        if (value.usageFinal !== undefined) {
+          if (value.state !== "failed" || value.assignmentId === undefined) {
+            throw corruptRunJournal(
+              "Only assigned failed run state may carry final usage",
+            );
+          }
+          assertPlainRecord(value.usageFinal, "Run failure final usage");
+          assertExactRecordKeys(
+            value.usageFinal,
+            ["reportDigest", "upToUsageSeq"],
+            "Run failure final usage",
+          );
+          assertDigest(
+            value.usageFinal.reportDigest,
+            "Run failure final usage report digest",
+          );
+          assertNonNegativeSafeInteger(
+            value.usageFinal.upToUsageSeq,
+            "Run failure final usage sequence",
+          );
         }
         break;
       case "committed":

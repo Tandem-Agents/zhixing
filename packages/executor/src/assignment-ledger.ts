@@ -15,6 +15,7 @@ import type {
   AssignmentActivationProof,
   AssignmentEntry,
   AssignmentRecord,
+  AssignmentResourceLease,
   AuthorityCallContext,
   AuthorityEpochRef,
   AuthorityError,
@@ -71,6 +72,7 @@ import {
   validateTrustRuleSnapshot,
   protocolDigest,
   prepareInteractionDisplay,
+  requiresFormalResourceCoordination,
   sealedBundleArtifact,
   signCancelProof,
   signDispatchConflictProof,
@@ -100,6 +102,7 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
+import type { ExecutorAssignmentResourceCoordinator } from "./resource-governor.js";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 
 type ConversationEnvelope = Extract<
@@ -182,7 +185,10 @@ export interface AssignmentLedgerOptions {
   readonly monotonicClock?: () => number;
   readonly usageFinal?: (
     assignmentId: string,
-  ) => { readonly reportDigest: string; readonly upToUsageSeq: number };
+  ) =>
+    | { readonly reportDigest: string; readonly upToUsageSeq: number }
+    | Promise<{ readonly reportDigest: string; readonly upToUsageSeq: number }>;
+  readonly resources?: ExecutorAssignmentResourceCoordinator;
   readonly surfaceAbort?: {
     authorize(assignmentId: string, input: SurfaceAbortInput): void;
   };
@@ -338,6 +344,7 @@ interface LedgerProjection {
     readonly body: Extract<AssignmentRecord, { t: "received" }>;
     readonly recordSeq: number;
     readonly ledgerDigest: string;
+    resourceLease?: AssignmentResourceLease;
     permission?: {
       readonly controlLeaseId: string;
       readonly validForMs: number;
@@ -377,6 +384,7 @@ interface LedgerProjection {
     string,
     Extract<AssignmentRecord, { t: "staged-mutation" }>
   >;
+  failure?: Extract<AssignmentRecord, { t: "execution-failed" }>;
   mirroredUpTo: number;
   mirroredFinishedCount: number;
   mirroredInteractionOrdinal: number;
@@ -429,6 +437,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   readonly #clock: () => string;
   readonly #monotonicClock: () => number;
   readonly #usageFinal: NonNullable<AssignmentLedgerOptions["usageFinal"]>;
+  readonly #resources: ExecutorAssignmentResourceCoordinator | undefined;
   readonly #surfaceAbort: AssignmentLedgerOptions["surfaceAbort"];
   readonly #maxPendingInteractions: number;
   readonly #maxCachedAssignments: number;
@@ -464,13 +473,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     // domain-separated fallback in cancel proofs.
     this.#usageFinal =
       options.usageFinal ??
-      ((assignmentId) => ({
-        reportDigest: protocolDigest("AssignmentUsageFinal", 1, {
-          assignmentId,
-          upToUsageSeq: 0,
-        }),
-        upToUsageSeq: 0,
-      }));
+      ((assignmentId) => zeroAssignmentUsageFinal(assignmentId));
+    this.#resources = options.resources;
     this.#surfaceAbort = options.surfaceAbort;
     this.#maxPendingInteractions =
       options.maxPendingInteractions ?? DEFAULT_MAX_PENDING_INTERACTIONS;
@@ -741,9 +745,64 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
           envelope: { ref: artifact.ref },
           activation: activation as unknown as AssignmentActivationProof,
         });
+        let resourceRecords: readonly LogicalRecord<unknown>[] = [];
+        if (requiresExecutorResourceReceipt(envelope.resourceLease)) {
+          if (!this.#resources) {
+            const error: AuthorityError = {
+              code: "capability-gap",
+              message: "Executor resource governance is unavailable",
+              retryable: true,
+            };
+            const rejected = nextEntry(state, {
+              v: 1,
+              t: "dispatch-rejected",
+              dispatchDigest,
+              reason: error,
+            });
+            return {
+              kind: "append",
+              entries: [assignmentRecord(assignmentId, rejected)],
+              value: {
+                kind: "rejected",
+                dispatchDigest,
+                error,
+                recordSeq: rejected.recordSeq,
+                ledgerDigest: advanceAssignmentLedger(state.chainDigest, rejected),
+              },
+            };
+          }
+          try {
+            resourceRecords = this.#resources.prepareReceipt(envelope.resourceLease);
+          } catch (cause) {
+            const error: AuthorityError = {
+              code: "lease-exhausted",
+              message: cause instanceof Error
+                ? cause.message
+                : "Executor resource admission failed",
+              retryable: true,
+            };
+            const rejected = nextEntry(state, {
+              v: 1,
+              t: "dispatch-rejected",
+              dispatchDigest,
+              reason: error,
+            });
+            return {
+              kind: "append",
+              entries: [assignmentRecord(assignmentId, rejected)],
+              value: {
+                kind: "rejected",
+                dispatchDigest,
+                error,
+                recordSeq: rejected.recordSeq,
+                ledgerDigest: advanceAssignmentLedger(state.chainDigest, rejected),
+              },
+            };
+          }
+        }
         return {
           kind: "append",
-          entries: [assignmentRecord(assignmentId, entry)],
+          entries: [...resourceRecords, assignmentRecord(assignmentId, entry)],
           value: { kind: "accepted" },
         };
       },
@@ -903,7 +962,11 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
           },
         };
       }
-      if (state.phase === "dispatch-rejected" || state.phase === "halted") {
+      if (
+        state.phase === "dispatch-rejected" ||
+        state.phase === "halted" ||
+        state.phase === "failed"
+      ) {
         throw new Error("Terminated assignment cannot be superseded through a new fence");
       }
       if (state.aborts.length > 0) {
@@ -950,6 +1013,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         }
         if (
           state.phase === "started" ||
+          state.phase === "failed" ||
           state.phase === "sealed" ||
           state.phase === "acked"
         ) {
@@ -1265,7 +1329,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       }>;
     }>(assignmentId, (state) => {
       const pending = [...state.pendingRequests.values()].map((request) => request.body);
-      const terminal = state.phase === "sealed" || state.phase === "acked";
+      const terminal =
+        state.phase === "failed" || state.phase === "sealed" || state.phase === "acked";
       const toResolve = pending.filter(
         (request) => terminal || canonicalTime(request.expiresAt, "Interaction expiry") < nowMs,
       );
@@ -1647,7 +1712,11 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     await this.#transact<void>(
       assignmentId,
       (state) => {
-        if (state.phase === "sealed" || state.phase === "acked") {
+        if (
+          state.phase === "failed" ||
+          state.phase === "sealed" ||
+          state.phase === "acked"
+        ) {
           if (canonicalize(state.sealed) !== canonicalize(sealed)) {
             throw new Error("Assignment already sealed a different bundle payload");
           }
@@ -1971,11 +2040,27 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     assignmentId: string,
     cause: AbortCause,
   ): Promise<CancelProofBody | undefined> {
+    const governed = await this.#select(assignmentId, (state) => {
+      const lease = state.received?.resourceLease;
+      return lease !== undefined && requiresFormalResourceCoordination(lease);
+    });
+    const finalUsage = snapshot(
+      governed
+        ? await this.#usageFinal(assignmentId)
+        : zeroAssignmentUsageFinal(assignmentId),
+      "Final usage report",
+    );
+    assertDigest(finalUsage.reportDigest, "Final usage report digest");
+    assertNonNegativeSafeInteger(finalUsage.upToUsageSeq, "Final usage sequence");
     const transaction = await this.#transact<CancelProofBody | undefined>(
       assignmentId,
       (state) => {
         if (state.halted) return { kind: "return", value: state.halted };
-        if (state.phase === "sealed" || state.phase === "acked") {
+        if (
+          state.phase === "failed" ||
+          state.phase === "sealed" ||
+          state.phase === "acked"
+        ) {
           return { kind: "return", value: undefined };
         }
         if (state.phase === "dispatch-rejected" || state.supersedeFence) {
@@ -2054,9 +2139,6 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
                 }),
           } as ProjectionTransactionDecision<AssignmentEntry, CancelProofBody | undefined>;
         }
-        const usageFinal = snapshot(this.#usageFinal(assignmentId), "Final usage report");
-        assertDigest(usageFinal.reportDigest, "Final usage report digest");
-        assertNonNegativeSafeInteger(usageFinal.upToUsageSeq, "Final usage sequence");
         const decision = state.started ? "halted" : "not-started";
         const proof = signCancelProof(
           {
@@ -2065,7 +2147,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
             executorId: this.#executorId,
             authority,
             lastRecordSeq: recordSeq,
-            usageFinal,
+            usageFinal: finalUsage,
             ledgerDigest,
             issuedAt: this.#clock(),
             ...(cause.cause === "owner-fence"
@@ -2099,6 +2181,67 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     return this.#select(assignmentId, (state) =>
       [...state.sideEffects.values()].some((effect) => !effect.completed),
     );
+  }
+
+  async failExecution(
+    assignmentId: string,
+    input: {
+      readonly reason: string;
+      readonly usageFinal: {
+        readonly reportDigest: string;
+        readonly upToUsageSeq: number;
+      };
+    },
+  ): Promise<Extract<AssignmentRecord, { t: "execution-failed" }> | undefined> {
+    assertIdentifier(assignmentId, "Failed assignment id");
+    const reason = truncateUtf8(input.reason.trim(), 512);
+    if (reason.length === 0) throw new TypeError("Execution failure reason is empty");
+    assertDigest(input.usageFinal.reportDigest, "Execution failure report digest");
+    assertNonNegativeSafeInteger(
+      input.usageFinal.upToUsageSeq,
+      "Execution failure usage sequence",
+    );
+    const failure = snapshot(
+      {
+        v: 1 as const,
+        t: "execution-failed" as const,
+        reason,
+        usageFinal: snapshot(input.usageFinal, "Execution failure final usage"),
+      },
+      "Execution failure record",
+    );
+    const transaction = await this.#transact<
+      Extract<AssignmentRecord, { t: "execution-failed" }> | undefined
+    >(assignmentId, (state) => {
+      if (state.phase === "failed") {
+        if (canonicalize(state.failure) !== canonicalize(failure)) {
+          throw new Error("Assignment already failed with a different durable result");
+        }
+        return { kind: "return", value: state.failure };
+      }
+      if (
+        state.phase === "halted" ||
+        state.phase === "sealed" ||
+        state.phase === "acked"
+      ) {
+        return { kind: "return", value: undefined };
+      }
+      if (
+        state.phase !== "started" ||
+        state.aborts.length > 0 ||
+        state.pendingRequests.size > 0 ||
+        state.mirroredFinishedCount !== state.finishedOrder.length ||
+        [...state.sideEffects.values()].some((effect) => !effect.completed)
+      ) {
+        throw new Error("Assignment execution failure has no clean started prefix");
+      }
+      return {
+        kind: "append",
+        entries: [assignmentRecord(assignmentId, nextEntry(state, failure))],
+        value: failure,
+      };
+    });
+    return transaction.value;
   }
 
   /**
@@ -2247,26 +2390,40 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     decide: (
       state: LedgerProjection,
       context: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<AssignmentEntry, Value>,
+    ) => ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
     assertIdentifier(assignmentId, "Assignment id");
     return this.#operations.run(async () => {
       const cached = this.#takeCachedProjection(assignmentId);
       try {
-        const transaction = await this.#log.transactProjection<
+        const transact = () => this.#log.transactProjection<
           LedgerProjection,
-          AssignmentEntry,
+          unknown,
           Value
         >(
           cached?.state ?? emptyProjection(assignmentId),
           this.#reduce,
-          decide,
+          (state, context) => {
+            const decision = decide(state, context);
+            if (decision.kind !== "append") return decision;
+            const resourceRecords = this.#prepareResourceTerminalRecords(
+              state,
+              decision.entries,
+            );
+            return {
+              ...decision,
+              entries: [...resourceRecords, ...decision.entries],
+            };
+          },
           {
             stream: assignmentStream(assignmentId),
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
           },
+        );
+        const transaction = await (
+          this.#resources ? this.#resources.coordinate(transact) : transact()
         );
         this.#cacheProjection(assignmentId, {
           state: transaction.state,
@@ -2280,6 +2437,38 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         throw error;
       }
     });
+  }
+
+  #prepareResourceTerminalRecords(
+    state: LedgerProjection,
+    entries: readonly LogicalRecord<unknown>[],
+  ): readonly LogicalRecord<unknown>[] {
+    const terminal = entries
+      .filter((record) => record.stream === assignmentStream(state.assignmentId))
+      .map((record) => record.body)
+      .find((raw): raw is AssignmentEntry => {
+        if (typeof raw !== "object" || raw === null || !("body" in raw)) return false;
+        const body = raw.body;
+        return (
+          typeof body === "object" &&
+          body !== null &&
+          "t" in body &&
+          (body.t === "bundle_sealed" ||
+            body.t === "halted" ||
+            body.t === "execution-failed")
+        );
+    });
+    if (!terminal) return [];
+    const lease = state.received?.resourceLease;
+    if (!lease) return [];
+    if (!requiresExecutorResourceReceipt(lease)) return [];
+    if (!this.#resources) {
+      throw corruptLedger("Governed assignment has no executor resource coordinator");
+    }
+    const mode = terminal.body.t === "halted" && terminal.body.proof.decision === "not-started"
+      ? "release"
+      : "settle-release";
+    return this.#resources.prepareTerminal({ lease, mode });
   }
 
   #takeCachedProjection(
@@ -2307,8 +2496,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
 
   readonly #reduce = async (
     state: LedgerProjection,
-    record: LogicalRecord<AssignmentEntry>,
-    commit: import("@zhixing/core/contracts").CommitEnvelope<AssignmentEntry>,
+    record: LogicalRecord<unknown>,
+    commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
   ): Promise<LedgerProjection> => {
     if (record.stream !== assignmentStream(state.assignmentId)) {
       throw corruptLedger("Assignment projection received a different stream");
@@ -2325,6 +2514,24 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         ? validateConversationEnvelope(raw, this.#verifier)
         : validateJobEnvelope(raw, this.#verifier);
       receivedEnvelope = envelope;
+      if (requiresExecutorResourceReceipt(envelope.resourceLease)) {
+        if (!this.#resources) {
+          throw corruptLedger("Governed assignment has no executor resource coordinator");
+        }
+        try {
+          this.#resources.assertReceiptRecords({
+            lease: envelope.resourceLease,
+            records: commit.entries,
+            acceptedAt: commit.at,
+          });
+        } catch (error) {
+          throw corruptLedger(
+            error instanceof Error
+              ? `Executor resource receipt is invalid: ${error.message}`
+              : "Executor resource receipt is invalid",
+          );
+        }
+      }
       const artifact = dispatchEnvelopeArtifact(envelope);
       if (canonicalize(artifact.ref) !== canonicalize(entry.body.envelope.ref)) {
         throw corruptLedger("received dispatch artifact reference is inconsistent");
@@ -2390,6 +2597,35 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       }
     }
     if (
+      entry.body.t === "halted" ||
+      entry.body.t === "bundle_sealed" ||
+      entry.body.t === "execution-failed"
+    ) {
+      const lease = state.received?.resourceLease;
+      if (lease && requiresExecutorResourceReceipt(lease)) {
+        if (!this.#resources) {
+          throw corruptLedger("Governed assignment has no executor resource coordinator");
+        }
+        const mode =
+          entry.body.t === "halted" && entry.body.proof.decision === "not-started"
+            ? "release"
+            : "settle-release";
+        try {
+          this.#resources.assertTerminalRecords({
+            reservationId: lease.reservationId,
+            mode,
+            records: commit.entries,
+          });
+        } catch (error) {
+          throw corruptLedger(
+            error instanceof Error
+              ? `Executor resource terminal is invalid: ${error.message}`
+              : "Executor resource terminal is invalid",
+          );
+        }
+      }
+    }
+    if (
       entry.body.t === "staged-mutation" &&
       state.received?.body.activation.ref.execution === "job"
     ) {
@@ -2414,6 +2650,10 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         }),
         acceptedAt: commit.at,
       };
+      state.received.resourceLease = snapshot(
+        receivedEnvelope.resourceLease,
+        "Received resource lease",
+      );
       this.#controlDeadlines.delete(state.assignmentId);
     }
     if (entry.body.t === "control-lease-renewed") {
@@ -2556,6 +2796,21 @@ function emptyProjection(assignmentId: string): LedgerProjection {
   };
 }
 
+const requiresExecutorResourceReceipt = requiresFormalResourceCoordination;
+
+function zeroAssignmentUsageFinal(assignmentId: string): {
+  readonly reportDigest: string;
+  readonly upToUsageSeq: 0;
+} {
+  return {
+    reportDigest: protocolDigest("AssignmentUsageFinal", 1, {
+      assignmentId,
+      upToUsageSeq: 0,
+    }),
+    upToUsageSeq: 0,
+  };
+}
+
 function applyEntry(
   state: LedgerProjection,
   entry: AssignmentEntry,
@@ -2641,6 +2896,10 @@ function applyEntry(
       state.halted = proof;
       return;
     }
+    case "execution-failed":
+      state.phase = "failed";
+      state.failure = body;
+      return;
     case "bundle_sealed":
       state.phase = "sealed";
       state.sealed = body;
@@ -2791,6 +3050,17 @@ function ledgerSnapshot(state: LedgerProjection): LedgerSnapshot {
       ? { acknowledgedCommitRevision: state.acknowledgedCommitRevision }
       : {}),
     ...(state.halted ? { cancelProof: snapshot(state.halted, "Cancel proof") } : {}),
+    ...(state.failure
+      ? {
+          failure: {
+            reason: state.failure.reason,
+            usageFinal: snapshot(
+              state.failure.usageFinal,
+              "Execution failure final usage",
+            ),
+          },
+        }
+      : {}),
   };
 }
 
@@ -3084,6 +3354,19 @@ function assertNonNegativeSafeInteger(
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new TypeError(`${label} must be a non-negative safe integer`);
   }
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
 }
 
 function assertFence(

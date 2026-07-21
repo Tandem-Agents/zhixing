@@ -39,6 +39,9 @@ const TEST_EXECUTOR_READINESS = {
   credentialGeneration: null,
 };
 
+const TEST_RESOURCE_CANDIDATE_TTL_MS = 60_000;
+const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
+
 const TEST_RUNTIME_AUTHORITY_FACTS = {
   executionPermissionRules: () => [],
   securitySnapshot: () => ({
@@ -67,6 +70,8 @@ function setupAuthorityRuntime(
   return setupAuthorityRuntimeProduction({
     ...options,
     executorReadiness: options.executorReadiness ?? TEST_EXECUTOR_READINESS,
+    resourceCandidateTtlMs:
+      options.resourceCandidateTtlMs ?? TEST_RESOURCE_CANDIDATE_TTL_MS,
   });
 }
 
@@ -149,6 +154,29 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("recovers expired reservations on both resource-governor halves", async () => {
+    const home = await createTempDir("conversation-protocol-resource-recovery");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    const anchorRecovery = vi.spyOn(authority.resourceGovernor, "reclaimExpired");
+    const executorRecovery = vi.spyOn(
+      authority.executorResourceGovernor,
+      "reclaimExpired",
+    );
+    const protocol = new ConversationProtocolRuntime({
+      authority,
+      manager: () => {
+        throw new Error("empty recovery must not load a conversation manager");
+      },
+      interactions: new DurableConversationInteractionObserver(),
+    });
+
+    await protocol.recover();
+
+    expect(anchorRecovery).toHaveBeenCalledOnce();
+    expect(executorRecovery).toHaveBeenCalledOnce();
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("binds exact runtime facts and rejects readiness drift before received", async () => {
     const home = await createTempDir("conversation-protocol-runtime-binding");
     const secretStore = new MemorySecretStore();
@@ -268,7 +296,8 @@ describe("ConversationProtocolRuntime", () => {
         "assigned",
       );
       const assignmentEntries = await Promise.all(
-        entries
+        (await authority.executorLog.readAll())
+          .flatMap((commit) => commit.entries)
           .filter((entry) => entry.stream.startsWith("assignment:"))
           .map(async (entry) => {
             const body = entry.body as {
@@ -293,7 +322,7 @@ describe("ConversationProtocolRuntime", () => {
       validateBindingSpy.mockRestore();
       prepareSpy.mockRestore();
     }
-  }, 30_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("commits one durable channel turn, mirrors confirmation, and replays the same ingress without execution", async () => {
     const confirmationTtlMs = 300_000;
@@ -319,8 +348,12 @@ describe("ConversationProtocolRuntime", () => {
       ...TEST_RUNTIME_AUTHORITY_FACTS,
       sessionId: "runtime-1",
       confirmationBroker: broker,
-      async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+      async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
         executions += 1;
+        const meter = options?.modelCallResourceMeter;
+        if (!meter) throw new Error("durable runtime did not inject model-call metering");
+        const reserved = await meter.reserve({ callIndex: 1, tokenUpperBound: 8 });
+        await meter.consume({ usageId: reserved.usageId, tokens: 4 });
         const now = Date.now();
         interactionCreatedAt = now;
         await broker.requestConfirmation({
@@ -352,7 +385,7 @@ describe("ConversationProtocolRuntime", () => {
             usage: { inputTokens: 3, outputTokens: 1 },
           },
           runRecord: {
-            timestamp: "2026-07-18T00:00:00.000Z",
+            timestamp: new Date(now).toISOString(),
             messages: [user, assistant],
             usage: { inputTokens: 3, outputTokens: 1 },
             source: "channel",
@@ -447,8 +480,12 @@ describe("ConversationProtocolRuntime", () => {
     if (!assignmentId || !bundleRef) throw new Error("committed bundle identity is missing");
     const bundle = JSON.parse(
       Buffer.from(await authority.artifacts.get(bundleRef)).toString("utf8"),
-    ) as { streamFinal: { finalSeq: number; streamDigest: string } };
-    const durableInteraction = (await authority.authorityLog.readAll())
+    ) as {
+      streamFinal: { finalSeq: number; streamDigest: string };
+      usageFinal: { upToUsageSeq: number };
+    };
+    expect(bundle.usageFinal.upToUsageSeq).toBe(1);
+    const durableInteraction = (await authority.executorLog.readAll())
       .flatMap((commit) => commit.entries)
       .map((entry) => entry.body as {
         body?: { t?: string; display?: { ref?: { digest: string; bytes: number } } };
@@ -536,7 +573,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     expectSettled(restartedReplay);
     expect(executions).toBe(1);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("applies one interaction backlog across parent and child brokers", async () => {
     const home = await createTempDir("conversation-protocol-shared-backpressure");
@@ -724,7 +761,7 @@ describe("ConversationProtocolRuntime", () => {
     } finally {
       responseLoss.mockRestore();
     }
-  }, 30_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("moves a locally abandoned assignment to uncertain and schedules an acknowledged retry", async () => {
     const home = await createTempDir("conversation-protocol-started-recovery");
@@ -907,7 +944,7 @@ describe("ConversationProtocolRuntime", () => {
       ),
     ).toBe(true);
     expect(executions).toBe(2);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("admits queued cancellation through the durable control plane and replays it exactly", async () => {
     const home = await createTempDir("conversation-protocol-cancel-control");
@@ -1018,7 +1055,7 @@ describe("ConversationProtocolRuntime", () => {
     expect(snapshotRead).toHaveBeenCalledTimes(1);
     expect(history.notices.some((notice) => notice.state === "cancelled")).toBe(true);
     expect(history.next).toEqual([]);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("freezes batch cancellation on the surface request id and replays the original batch", async () => {
     const home = await createTempDir("conversation-protocol-cancel-batch");
@@ -1116,7 +1153,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     expect(emptyReplay.dispositions).toEqual([]);
     expect(await countResponseEnqueues()).toBe(1);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("fences and resumes a locally abandoned received assignment with the next attempt", async () => {
     const home = await createTempDir("conversation-protocol-received-recovery");
@@ -1239,7 +1276,7 @@ describe("ConversationProtocolRuntime", () => {
         .flatMap((commit) => commit.entries)
         .some((entry) => (entry.body as { t?: string }).t === "committed"),
     ).toBe(true);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("recovers an input durably admitted before the in-memory scheduler executes it", async () => {
     const home = await createTempDir("conversation-protocol-admission-recovery");
@@ -1466,7 +1503,7 @@ describe("ConversationProtocolRuntime", () => {
         proxyMessageId: "proxy-message-1",
       },
     });
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("recovers the stable admission result when the first authority response is lost", async () => {
     const home = await createTempDir("conversation-protocol-admission-response-loss");
@@ -1515,7 +1552,7 @@ describe("ConversationProtocolRuntime", () => {
     } finally {
       apply.mockRestore();
     }
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("recovers a queued perspective with its durable question and execution kind", async () => {
     const home = await createTempDir("conversation-protocol-perspective-recovery");
@@ -1583,6 +1620,7 @@ describe("ConversationProtocolRuntime", () => {
       question: string;
       source: string;
       turnId: string;
+      metered: boolean;
     }> = [];
     let restartedManager!: ConversationManager;
     const restartedProtocol = new ConversationProtocolRuntime({
@@ -1594,6 +1632,9 @@ describe("ConversationProtocolRuntime", () => {
           question: input.question,
           source: input.source,
           turnId: input.turnContext.turnId,
+          // 恢复执行必须携带 assignment 计量序列——恢复路径外调与正常 durable 同构计费
+          metered: input.modelCallMetering !== undefined &&
+            typeof input.modelCallMetering.nextCallIndex === "function",
         });
         const user = userMessageFromTurnInput(input.originalInput);
         const assistant: Message = {
@@ -1633,6 +1674,7 @@ describe("ConversationProtocolRuntime", () => {
           question: "Which option best preserves user intent?",
           source: "channel",
           turnId: "rpc:perspective-before-schedule",
+          metered: true,
         },
       ]);
       expect(committed.has(admitted.runId)).toBe(true);
@@ -1643,7 +1685,7 @@ describe("ConversationProtocolRuntime", () => {
       ).toBe(false);
     }, { timeout: 10_000 });
     expect(directExecutions).toBe(0);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("awaits durable cancellation before removing a recovered queued task", async () => {
     const seeded = await seedPendingConversation("recovered-cancel");
@@ -1715,7 +1757,7 @@ describe("ConversationProtocolRuntime", () => {
       );
     expect(cancelled).toHaveLength(1);
     manager.setBusy(seeded.conversationId, false);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("waits for the active recovery pass and never schedules another pass after stop", async () => {
     const home = await createTempDir("conversation-protocol-stop-recovery");
@@ -1829,7 +1871,7 @@ describe("ConversationProtocolRuntime", () => {
     } finally {
       publish.mockRestore();
     }
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("keeps lifecycle projection claimed until one idempotent consumer acknowledges it", async () => {
     const home = await createTempDir("conversation-protocol-lifecycle-handoff");
@@ -1935,7 +1977,7 @@ describe("ConversationProtocolRuntime", () => {
           record.requestId === projection.requestId,
       );
     expect(lifecycleRecords).toHaveLength(1);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("recovers an unprojected delete before readiness and preserves exact replay", async () => {
     const home = await createTempDir("conversation-protocol-lifecycle-restart");
@@ -2010,7 +2052,7 @@ describe("ConversationProtocolRuntime", () => {
         conversationExists: async () => false,
       }),
     ).resolves.toEqual({ status: "not-found" });
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("rejects a new lifecycle request for an unknown conversation before authority append", async () => {
     const home = await createTempDir("conversation-protocol-lifecycle-identity");
@@ -2048,7 +2090,7 @@ describe("ConversationProtocolRuntime", () => {
       .map((entry) => entry.body as { t?: string })
       .filter((record) => record.t === "session-lifecycle");
     expect(lifecycleRecords).toHaveLength(0);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("keeps a committed run final while transcript projection is temporarily unavailable", async () => {
     const home = await createTempDir("conversation-protocol-post-commit-recovery");
@@ -2139,7 +2181,7 @@ describe("ConversationProtocolRuntime", () => {
     await protocol.recover();
     expect(committed.has(committedRecord!.runId!)).toBe(true);
     expect(finals).toHaveLength(1);
-  }, 90_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 });
 
 function secretKey(ref: SecretRef): string {

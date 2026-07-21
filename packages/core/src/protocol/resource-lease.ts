@@ -1,21 +1,14 @@
 import type { ResourceLease } from "../contracts/authorization.js";
+import {
+  ADMISSION_CLASSES,
+  RESOURCE_WORKLOAD_KINDS,
+} from "../contracts/authorization.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const ADMISSION_CLASSES = new Set([
-  "interactive",
-  "advancement",
-  "scheduler",
-  "orchestration",
-]);
-const WORKLOAD_KINDS = new Set([
-  "run",
-  "job",
-  "orchestration-node",
-  "control",
-  "evidence",
-]);
+const ADMISSION_CLASS_SET: ReadonlySet<string> = new Set(ADMISSION_CLASSES);
+const WORKLOAD_KIND_SET: ReadonlySet<string> = new Set(RESOURCE_WORKLOAD_KINDS);
 const AUDIENCE_KEYS = ["executorId", "model", "provider"] as const;
 const BUDGET_KEYS = ["maxCalls", "maxCostMinor", "maxTokens"] as const;
 
@@ -34,13 +27,13 @@ export function assertResourceLeaseBaseContract(
   label: string,
 ): void {
   assertIdentifier(lease.reservationId, `${label} reservationId`);
-  if (!ADMISSION_CLASSES.has(String(lease.admissionClass))) {
+  if (!ADMISSION_CLASS_SET.has(String(lease.admissionClass))) {
     throw new TypeError(`${label} admission class is invalid`);
   }
 
   assertPlainObject(lease.workload, `${label} workload`);
   assertExactKeys(lease.workload, ["attempt", "id", "kind"], `${label} workload`);
-  if (!WORKLOAD_KINDS.has(String(lease.workload.kind))) {
+  if (!WORKLOAD_KIND_SET.has(String(lease.workload.kind))) {
     throw new TypeError(`${label} workload kind is invalid`);
   }
   assertIdentifier(lease.workload.id, `${label} workload id`);
@@ -81,6 +74,33 @@ export function assertResourceLeaseBaseContract(
     throw new TypeError(`${label} digest is invalid`);
   }
   verifier.verify("ResourceLease", 1, unsigned, lease.signature);
+}
+
+/** Rejects a lease outside the interval in which new resource operations may start. */
+export function assertResourceLeaseActiveAt(
+  lease: ResourceLease,
+  now: string,
+  deadlineAt?: string,
+): void {
+  assertCanonicalTime(now, "Resource lease validation time");
+  if (deadlineAt !== undefined) {
+    assertCanonicalTime(deadlineAt, "Resource lease operation deadline");
+  }
+  const nowMs = Date.parse(now);
+  const issuedAtMs = Date.parse(lease.issuedAt);
+  const expiryMs = Date.parse(lease.expiry);
+  if (
+    nowMs < issuedAtMs ||
+    nowMs >= expiryMs ||
+    (deadlineAt !== undefined && Date.parse(deadlineAt) > expiryMs)
+  ) {
+    throw new TypeError("Resource lease is outside its validity interval");
+  }
+}
+
+/** scope binding 结构的唯一运行时验证——签名租约校验与准入前置验证共用。 */
+export function assertResourceScopeBinding(value: unknown, label: string): void {
+  assertScopeBinding(value, label);
 }
 
 function assertScopeBinding(value: unknown, label: string): void {
@@ -149,7 +169,8 @@ function assertIdentifierMap(
   }
 }
 
-function assertBudget(value: unknown, label: string): void {
+/** 预算结构的唯一运行时验证——签名租约校验与准入前置验证共用，禁止第二份实现。 */
+export function assertResourceLeaseBudget(value: unknown, label: string): void {
   assertPlainObject(value, label);
   assertExactKeys(value, BUDGET_KEYS, label, true);
   const present = Object.entries(value).filter(([, item]) => item !== undefined);
@@ -160,6 +181,7 @@ function assertBudget(value: unknown, label: string): void {
     assertNonNegativeInteger(item, `${label} ${key}`);
   }
 }
+const assertBudget = assertResourceLeaseBudget;
 
 function assertPlainObject(
   value: unknown,

@@ -1,6 +1,7 @@
 export type * from "./foundation.js";
 export type * from "./identity.js";
 export type * from "./authorization.js";
+export { ADMISSION_CLASSES, RESOURCE_WORKLOAD_KINDS } from "./authorization.js";
 export type * from "./state.js";
 export type * from "./protocol.js";
 export {

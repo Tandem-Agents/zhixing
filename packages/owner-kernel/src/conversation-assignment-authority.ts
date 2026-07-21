@@ -1,5 +1,5 @@
 import type {
-  AdmissionClass,
+  AssignmentResourceLease,
   AuthorityError,
   AuthorityCapability,
   ControlLease,
@@ -8,12 +8,13 @@ import type {
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
-  ASSIGNMENT_SUBMISSION_METHODS,
   MAX_CONTROL_LEASE_TTL_MS,
   MAX_PERMISSION_LEASE_TTL_MS,
+  PRINCIPAL_METHODS,
+  canonicalize,
   createExecutionManifest,
   matchManifest,
-  protocolDigest,
+  validateReservableResourceLease,
   validateTrustRuleSnapshot,
   type ExecutorCapabilitySnapshot,
   type ProtocolSignatureVerifier,
@@ -29,11 +30,11 @@ export interface ConversationAssignmentIssueInput {
   readonly ownerEpoch: number;
   readonly baseRevision: number;
   readonly attempt: number;
-  readonly admissionClass: AdmissionClass;
+  readonly resourceLease: AssignmentResourceLease<"conversation">;
   readonly ingress: IngressContext;
   readonly windowInput: UnsignedConversationEnvelope["work"]["windowInput"];
   readonly controlContext?: UnsignedConversationEnvelope["work"]["controlContext"];
-  readonly policy: TransitionConversationCredentialPolicy;
+  readonly policy: ConversationAssignmentCredentialPolicy;
 }
 
 /** Stable issuance port replaced by the governed authority without changing wire contracts. */
@@ -41,10 +42,9 @@ export interface ConversationAssignmentIssuer {
   issue(input: ConversationAssignmentIssueInput): UnsignedConversationEnvelope;
 }
 
-export interface TransitionConversationAssignmentIssuerOptions {
+export interface ConversationAssignmentAuthorityOptions {
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
-  readonly localDomainId: string;
   readonly snapshotFor: (
     executorId: string,
   ) => ExecutorCapabilitySnapshot | undefined;
@@ -61,7 +61,7 @@ export class ManifestSelectionError extends Error {
   }
 }
 
-export interface TransitionConversationCredentialPolicy {
+export interface ConversationAssignmentCredentialPolicy {
   readonly credentialTtlMs: number;
   readonly manifestRequires: {
     readonly runtimeConfigRev: number;
@@ -86,35 +86,29 @@ export interface TransitionConversationCredentialPolicy {
     readonly maxCalls: number;
     readonly maxTokens: number;
   };
-  readonly localGovernorEpoch: number;
 }
 
 /**
- * Conservative local issuer used while the formal capability and resource governors are absent.
- * It produces the final signed wire shapes and intentionally owns no alternate authorization path.
+ * Builds assignment credentials around a ResourceGovernor-issued lease.
+ * Resource authority stays outside this component, so the wire has one issuance path.
  */
-export class TransitionConversationAssignmentIssuer
+export class ConversationAssignmentAuthority
   implements ConversationAssignmentIssuer
 {
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
-  readonly #localDomainId: string;
-  readonly #snapshotFor: TransitionConversationAssignmentIssuerOptions["snapshotFor"];
+  readonly #snapshotFor: ConversationAssignmentAuthorityOptions["snapshotFor"];
   readonly #clock: () => string;
 
-  constructor(options: TransitionConversationAssignmentIssuerOptions) {
+  constructor(options: ConversationAssignmentAuthorityOptions) {
     this.#signer = options.signer;
     this.#verifier = options.verifier;
-    this.#localDomainId = requireIdentifier(
-      options.localDomainId,
-      "Local resource domain id",
-    );
     this.#snapshotFor = options.snapshotFor;
     this.#clock = options.clock ?? (() => new Date().toISOString());
   }
 
   issue(input: ConversationAssignmentIssueInput): UnsignedConversationEnvelope {
-    const policy = validateTransitionPolicy(input.policy, this.#verifier);
+    const policy = validateCredentialPolicy(input.policy, this.#verifier);
     if (
       !Number.isSafeInteger(input.attempt) || input.attempt <= 0
     ) {
@@ -223,7 +217,7 @@ export class TransitionConversationAssignmentIssuer
         conversationId: input.conversationId,
       },
       ownerEpoch: input.ownerEpoch,
-      methods: [...ASSIGNMENT_SUBMISSION_METHODS],
+      methods: [...PRINCIPAL_METHODS.assignment],
       resources: [
         `conversation:${input.conversationId}`,
       ] as AuthorityCapability<"conversation">["resources"],
@@ -236,35 +230,25 @@ export class TransitionConversationAssignmentIssuer
       signature: this.#signer.sign("AuthorityCapability", 1, capabilityPayload),
     };
 
-    const resourcePayload = {
-      v: 1 as const,
-      reservationId: `reservation-${input.assignmentId}`,
-      admissionClass: input.admissionClass,
-      workload: { kind: "run" as const, id: input.runId, attempt: input.attempt },
-      scopeBinding: {
-        kind: "conversation" as const,
-        conversationId: input.conversationId,
-        ownerEpoch: input.ownerEpoch,
-      },
-      audience: { executorId: input.executorId },
-      budget: { ...policy.budget },
-      domain: {
-        kind: "local" as const,
-        localDomainId: this.#localDomainId,
-        localGovernorEpoch: policy.localGovernorEpoch,
-      },
-      activation: { kind: "assignment" as const, assignmentId: input.assignmentId },
-      issuedAt,
-      expiry,
-    };
-    const resourceWithDigest = {
-      ...resourcePayload,
-      digest: protocolDigest("ResourceLease", 1, resourcePayload),
-    };
-    const resourceLease = {
-      ...resourceWithDigest,
-      signature: this.#signer.sign("ResourceLease", 1, resourceWithDigest),
-    };
+    const resourceLease = validateReservableResourceLease(
+      input.resourceLease,
+      this.#verifier,
+    ) as AssignmentResourceLease<"conversation">;
+    if (
+      resourceLease.parentId !== undefined ||
+      resourceLease.activation.kind !== "assignment" ||
+      resourceLease.activation.assignmentId !== input.assignmentId ||
+      resourceLease.workload.kind !== "run" ||
+      resourceLease.workload.id !== input.runId ||
+      resourceLease.workload.attempt !== input.attempt ||
+      resourceLease.scopeBinding.kind !== "conversation" ||
+      resourceLease.scopeBinding.conversationId !== input.conversationId ||
+      resourceLease.scopeBinding.ownerEpoch !== input.ownerEpoch ||
+      resourceLease.audience.executorId !== input.executorId ||
+      canonicalize(resourceLease.budget) !== canonicalize(policy.budget)
+    ) {
+      throw new TypeError("Resource lease does not bind the assignment request");
+    }
 
     return {
       v: 1,
@@ -300,17 +284,10 @@ function canonicalTime(value: string, label: string): string {
   return value;
 }
 
-function requireIdentifier(value: string, label: string): string {
-  if (!value || value.length > 256 || /[\0\r\n]/u.test(value)) {
-    throw new TypeError(`${label} is invalid`);
-  }
-  return value;
-}
-
-function validateTransitionPolicy(
-  input: TransitionConversationCredentialPolicy,
+function validateCredentialPolicy(
+  input: ConversationAssignmentCredentialPolicy,
   verifier: ProtocolSignatureVerifier,
-): TransitionConversationCredentialPolicy {
+): ConversationAssignmentCredentialPolicy {
   const policy = structuredClone(input);
   if (
     !Number.isSafeInteger(policy.credentialTtlMs) ||
@@ -319,15 +296,13 @@ function validateTransitionPolicy(
     !Number.isSafeInteger(policy.budget.maxCalls) ||
     policy.budget.maxCalls <= 0 ||
     !Number.isSafeInteger(policy.budget.maxTokens) ||
-    policy.budget.maxTokens <= 0 ||
-    !Number.isSafeInteger(policy.localGovernorEpoch) ||
-    policy.localGovernorEpoch <= 0
+    policy.budget.maxTokens <= 0
   ) {
-    throw new TypeError("Transition credential policy is invalid");
+    throw new TypeError("Conversation assignment credential policy is invalid");
   }
   for (const revision of Object.values(policy.manifestRequires)) {
     if (!Number.isSafeInteger(revision) || revision <= 0) {
-      throw new TypeError("Transition manifest revisions must be positive integers");
+      throw new TypeError("Conversation assignment manifest revisions must be positive integers");
     }
   }
   return {

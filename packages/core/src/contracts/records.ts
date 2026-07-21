@@ -16,6 +16,8 @@ import type {
   AuthorityEpochRef,
   ControlLease,
   InteractionAnswerAuthority,
+  ReservableResourceLease,
+  RootResourceWorkload,
 } from "./authorization.js";
 import type {
   GlobalStagedMutation,
@@ -293,6 +295,11 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
       }
     | { t: "halted"; proof: CancelProofBody }
     | {
+        t: "execution-failed";
+        reason: string;
+        usageFinal: { reportDigest: Digest; upToUsageSeq: number };
+      }
+    | {
         t: "bundle_sealed";
         bundle: { ref: ArtifactRef };
         mutationBatch?: { ref: ArtifactRef };
@@ -334,6 +341,40 @@ export type PublishRecord =
       upToSeq: number;
       state: "pending" | "settled";
     };
+
+export type GovernorRecord =
+  | {
+      t: "queued";
+      reservationId: string;
+      admissionClass: import("./authorization.js").AdmissionClass;
+      workload: RootResourceWorkload;
+    }
+    | {
+        t: "dequeue";
+        workload: RootResourceWorkload;
+        reason: "cancelled" | "failed" | "expired";
+      }
+  | { t: "reserve"; lease: ReservableResourceLease }
+  | {
+      t: "usage-reserved";
+      rootReservationId: string;
+      reservationId: string;
+      usageId: string;
+      tokens?: number;
+      calls?: number;
+      costMinor?: number;
+    }
+  | {
+      t: "consume";
+      usageSeq: number;
+      rootReservationId: string;
+      reservationId: string;
+      usageId: string;
+      tokens?: number;
+      calls?: number;
+      costMinor?: number;
+    }
+  | { t: "settle" | "release" | "reclaim"; reservationId: string };
 
 export interface FinalOutboxRecord {
   t: "final";

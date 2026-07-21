@@ -1292,6 +1292,42 @@ describe("delivery unique index and replay", () => {
             body: {
               t: "state",
               runId: "run-1",
+              assignmentId: "assignment-1",
+              state: "failed",
+              reason: "provider unavailable",
+              statusRevision: 2,
+            },
+          },
+          deliveryRecord(status.records[0]!),
+        ],
+      } as unknown as CommitEnvelope<unknown>),
+    ).not.toThrow();
+    expect(() =>
+      assertDeliveryEnvelopeCompanions({
+        entries: [
+          {
+            stream: "run:conversation-1",
+            body: {
+              t: "state",
+              runId: "run-1",
+              assignmentId: "assignment-1",
+              state: "failed",
+              reason: "x".repeat(513),
+              statusRevision: 2,
+            },
+          },
+          deliveryRecord(status.records[0]!),
+        ],
+      } as unknown as CommitEnvelope<unknown>),
+    ).toThrow("exactly one matching authority source fact");
+    expect(() =>
+      assertDeliveryEnvelopeCompanions({
+        entries: [
+          {
+            stream: "run:conversation-1",
+            body: {
+              t: "state",
+              runId: "run-1",
               state: "running",
               statusRevision: 2,
             },

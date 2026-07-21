@@ -7,7 +7,7 @@ import type {
   TaskDeliveryDto,
 } from "../contracts/index.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
-import { assertResourceLeaseBaseContract } from "./resource-lease.js";
+import { validateReservableResourceLease } from "./resource-governor.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -263,7 +263,7 @@ export function validateSystemJobResourceLease(
     true,
   );
   assertVersion(lease.v, "System job resource lease");
-  assertResourceLeaseBaseContract(lease, verifier, "System job resource lease");
+  validateReservableResourceLease(lease, verifier);
   if (lease.admissionClass !== "scheduler") {
     throw new TypeError("System job resource lease must use scheduler admission");
   }

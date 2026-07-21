@@ -101,6 +101,7 @@ export function createOwnerRuntimeAdapter(
           onProtocolEvent: options?.onProtocolEvent,
           toolSideEffectObserver: options?.toolSideEffectObserver,
           authorizeToolExecution: options?.authorizeToolExecution,
+          modelCallResourceMeter: options?.modelCallResourceMeter,
         })
         .then(
           (runResult) => {

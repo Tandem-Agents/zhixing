@@ -512,6 +512,55 @@ async function createHarness(
 }
 
 describe("conversation assignment protocol", () => {
+  it("closes a clean failed execution durably and replays the same failure fact", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    const usageFinal = { reportDigest: SHA256_ZERO, upToUsageSeq: 0 };
+    const failure = await harness.ledger.failExecution(ASSIGNMENT_ID, {
+      reason: "provider failed",
+      usageFinal,
+    });
+    await expect(harness.ledger.failExecution(ASSIGNMENT_ID, {
+      reason: "provider failed",
+      usageFinal,
+    })).resolves.toEqual(failure);
+    await expect(harness.ledger.failExecution(ASSIGNMENT_ID, {
+      reason: "another failure",
+      usageFinal,
+    })).rejects.toThrow("different durable result");
+    await harness.journal.failAssignedRun(
+      RUN_ID,
+      ASSIGNMENT_ID,
+      failure?.reason,
+      failure?.usageFinal,
+    );
+    await expect(harness.ledger.cancel(
+      ASSIGNMENT_ID,
+      { fenceSeq: 99, requestId: "late-cancel-after-failure" },
+      ownerContext(ASSIGNMENT_ID, "executor.cancel"),
+    )).resolves.toBeUndefined();
+
+    const failedLedger = await harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+    );
+    expect(failedLedger).toMatchObject({
+      phase: "failed",
+      failure: { reason: "provider failed", usageFinal },
+    });
+    expect(failedLedger).not.toHaveProperty("cancelProof");
+    await expect(harness.journal.runState(RUN_ID)).resolves.toBe("failed");
+  });
+
   it("atomically derives final and staged deliveries without intermediate status noise", async () => {
     const responder = {
       channelId: "feishu",

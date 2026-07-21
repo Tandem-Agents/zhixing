@@ -26,6 +26,7 @@ import type {
   PostTurnControlIntent,
   TurnOrigin,
 } from "@zhixing/core";
+import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 
 export type { DurableToolExecutionAuthorizer } from "@zhixing/core";
 
@@ -58,6 +59,11 @@ export interface RunContext {
   turnOrigin?: TurnOrigin;
   /** Assignment-scoped authority inherited by every descendant tool executor. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** One shared metering sequence for every provider attempt in this durable run tree. */
+  modelCallMetering?: {
+    readonly meter: ModelCallResourceMeter;
+    readonly nextCallIndex: () => number;
+  };
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();

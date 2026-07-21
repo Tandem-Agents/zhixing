@@ -41,6 +41,7 @@ import {
   ownerControlRequestDigest,
   protocolBytes,
   protocolDigest,
+  queuedTerminalDequeueRecord,
   sealedBundleArtifact,
   signCancelProof,
   signJobActivation,
@@ -2524,7 +2525,7 @@ describe("system job local protocol", () => {
     });
     await expect(
       harness.journal.runSystem(JOB_RUN_ID, hostContext("system-run-invalid-lease")),
-    ).rejects.toThrow("must use scheduler admission");
+    ).rejects.toThrow("System job resource root has an invalid contract combination");
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
     expect(harness.handlerCalls).toBe(0);
   });
@@ -2586,6 +2587,25 @@ describe("system job local protocol", () => {
       harness.journal.resumeSystemJobs(hostContext("system-recover")),
     ).resolves.toBe(1);
     expect(harness.recoverCalls).toBe(1);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
+  });
+
+  it("redrives a queued system occurrence after resource admission is deferred", async () => {
+    const harness = await createSystemHarness({ deferFirstPrepare: true });
+    await harness.journal.trigger({
+      jobRunId: JOB_RUN_ID,
+      scheduledFor: NOW,
+      context: hostContext("system-trigger-deferred"),
+      source: "system",
+    });
+    await expect(
+      harness.journal.runSystem(JOB_RUN_ID, hostContext("system-run-deferred")),
+    ).rejects.toThrow("admission deferred");
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
+    await expect(
+      harness.journal.resumeSystemJobs(hostContext("system-resume-deferred")),
+    ).resolves.toBe(1);
+    expect(harness.prepareCalls).toBe(2);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
   });
 
@@ -3734,6 +3754,7 @@ async function createSystemHarness(
     crashAfterStart?: boolean;
     handlerGate?: Promise<void>;
     invalidAdmission?: boolean;
+    deferFirstPrepare?: boolean;
     recovery?: "reuse" | "replace";
     invalidResourceBinding?: "activation" | "terminal";
   } = {},
@@ -3753,8 +3774,17 @@ async function createSystemHarness(
   let terminalCalls = 0;
   let handlerCalls = 0;
   const resources: SystemJobResourceCoordinator = {
+    async coordinate(operation) {
+      return operation();
+    },
+    prepareQueuedTerminal({ workload, reason }) {
+      return [queuedTerminalDequeueRecord(workload, reason)];
+    },
     async prepare(input) {
       prepareCalls += 1;
+      if (options.deferFirstPrepare && prepareCalls === 1) {
+        throw new Error("resource admission deferred");
+      }
       const lease = systemLease(identity, input.attempt);
       return {
         lease: options.invalidAdmission
@@ -3806,6 +3836,12 @@ async function createSystemHarness(
         resourceRecord("settle", lease.workload.attempt, reservationId, outcome),
         resourceRecord("release", lease.workload.attempt, reservationId, outcome),
       ];
+    },
+    preflightActivationRecords(input) {
+      resources.assertActivationRecords(input);
+    },
+    preflightTerminalRecords(input) {
+      resources.assertTerminalRecords(input);
     },
     assertActivationRecords({ previousFence, fence, records }) {
       const expected = previousFence
@@ -4687,7 +4723,7 @@ describe("job resource lease domain closure", () => {
       };
     });
     expect(() => createSignedJobEnvelope(envelope, identity, identity)).toThrow(
-      "Resource lease does not bind the dispatch",
+      "Job assignment resource root has an invalid contract combination",
     );
   });
 
@@ -4707,19 +4743,19 @@ describe("job resource lease domain closure", () => {
       payload.domain = { kind: "anchor", anchorEpoch: 3, extra: true };
     });
     expect(() => createSignedJobEnvelope(polluted, identity, identity)).toThrow(
-      "Lease domain",
+      "Resource lease domain",
     );
     const unknownKind = jobWithLease(identity, (payload) => {
       payload.domain = { kind: "galactic", anchorEpoch: 3 };
     });
     expect(() => createSignedJobEnvelope(unknownKind, identity, identity)).toThrow(
-      "Lease domain kind is invalid",
+      "Resource lease domain kind is invalid",
     );
     const missing = jobWithLease(identity, (payload) => {
       delete payload.domain;
     });
     expect(() => createSignedJobEnvelope(missing, identity, identity)).toThrow(
-      "Lease domain must be an object",
+      "Resource lease fields are incomplete or unknown",
     );
   });
 
@@ -4729,13 +4765,13 @@ describe("job resource lease domain closure", () => {
       payload.admissionClass = "bogus";
     });
     expect(() => createSignedJobEnvelope(admission, identity, identity)).toThrow(
-      "Lease admission class is invalid",
+      "Resource lease admission class is invalid",
     );
     const budget = jobWithLease(identity, (payload) => {
       payload.budget = { maxCalls: -1 };
     });
     expect(() => createSignedJobEnvelope(budget, identity, identity)).toThrow(
-      "Lease budget maxCalls",
+      "Resource lease budget maxCalls",
     );
   });
 
@@ -4745,14 +4781,14 @@ describe("job resource lease domain closure", () => {
       payload.audience = {};
     });
     expect(() => createSignedJobEnvelope(emptyAudience, identity, identity)).toThrow(
-      "Lease audience must bind at least one value",
+      "Resource lease audience must bind at least one value",
     );
 
     const emptyBudget = jobWithLease(identity, (payload) => {
       payload.budget = {};
     });
     expect(() => createSignedJobEnvelope(emptyBudget, identity, identity)).toThrow(
-      "Lease budget must contain at least one limit",
+      "Resource lease budget must contain at least one limit",
     );
 
     const emptyDelegationBudget = jobWithLease(identity, (payload) => {
@@ -4764,13 +4800,13 @@ describe("job resource lease domain closure", () => {
     });
     expect(() =>
       createSignedJobEnvelope(emptyDelegationBudget, identity, identity),
-    ).toThrow("Lease delegation budget must contain at least one limit");
+    ).toThrow("Resource lease delegation budget must contain at least one limit");
 
     const invalidWindow = jobWithLease(identity, (payload) => {
       payload.expiry = payload.issuedAt;
     });
     expect(() => createSignedJobEnvelope(invalidWindow, identity, identity)).toThrow(
-      "Lease must expire after issuance",
+      "Resource lease must expire after issuance",
     );
   });
 
@@ -4782,21 +4818,21 @@ describe("job resource lease domain closure", () => {
       payload.audience = {};
     });
     expect(() => validateSystemJobResourceLease(emptyAudience, verifier)).toThrow(
-      "System job resource lease audience must bind at least one value",
+      "Resource lease audience must bind at least one value",
     );
 
     const emptyBudget = mutateSystemLease(identity, (payload) => {
       payload.budget = {};
     });
     expect(() => validateSystemJobResourceLease(emptyBudget, verifier)).toThrow(
-      "System job resource lease budget must contain at least one limit",
+      "Resource lease budget must contain at least one limit",
     );
 
     const invalidWindow = mutateSystemLease(identity, (payload) => {
       payload.expiry = payload.issuedAt;
     });
     expect(() => validateSystemJobResourceLease(invalidWindow, verifier)).toThrow(
-      "System job resource lease must expire after issuance",
+      "Resource lease must expire after issuance",
     );
 
     const delegated = mutateSystemLease(identity, (payload) => {

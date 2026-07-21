@@ -123,10 +123,12 @@ export type AuthorityPortMethodId =
   | "intent.record"
   | "intent.list"
   | "intent.decide"
+  | "reservation.enqueueRoot"
   | "reservation.prepareAssignmentRoot"
   | "reservation.prepareSystemJobRoot"
   | "reservation.acquireRoot"
   | "reservation.acquireChild"
+  | "reservation.reserveUsage"
   | "reservation.consume"
   | "reservation.settle"
   | "reservation.release"
@@ -150,6 +152,7 @@ export type AssignmentMethodId = Extract<
   | "global.read"
   | "global.mutate"
   | "reservation.acquireChild"
+  | "reservation.reserveUsage"
   | "reservation.consume"
   | "reservation.settle"
   | "reservation.release"
@@ -240,18 +243,32 @@ export type AuthorityCapability<E extends ExecutionKind = ExecutionKind> =
           signature: Signature;
         });
 
-export type AdmissionClass =
-  | "interactive"
-  | "advancement"
-  | "scheduler"
-  | "orchestration";
+export const ADMISSION_CLASSES = [
+  "interactive",
+  "advancement",
+  "scheduler",
+  "orchestration",
+] as const;
+
+export type AdmissionClass = (typeof ADMISSION_CLASSES)[number];
+
+// 资源 workload 判别值的唯一权威集合——运行时 validator、reducer 与签发端一律由此派生，禁止私有重写
+export const RESOURCE_WORKLOAD_KINDS = [
+  "run",
+  "job",
+  "orchestration-node",
+  "control",
+  "evidence",
+] as const;
+
+export type ResourceWorkloadKind = (typeof RESOURCE_WORKLOAD_KINDS)[number];
 
 export interface ResourceLease extends WireSchemaV1<"ResourceLease"> {
   reservationId: string;
   parentId?: string;
   admissionClass: AdmissionClass;
   workload: {
-    kind: "run" | "job" | "orchestration-node" | "control" | "evidence";
+    kind: ResourceWorkloadKind;
     id: string;
     attempt: number;
   };
@@ -331,10 +348,18 @@ export type ImmediateRootWorkload = {
   attempt: number;
 };
 
+export type RootResourceWorkload = AssignmentWorkload | ImmediateRootWorkload;
+
 export type SystemJobResourceLease = Omit<
   ResourceLease,
-  "parentId" | "parentDigest" | "workload" | "scopeBinding" | "domain"
+  | "admissionClass"
+  | "parentId"
+  | "parentDigest"
+  | "workload"
+  | "scopeBinding"
+  | "domain"
 > & {
+  admissionClass: "scheduler";
   parentId?: never;
   parentDigest?: never;
   workload: Extract<AssignmentWorkload, { kind: "job" }>;

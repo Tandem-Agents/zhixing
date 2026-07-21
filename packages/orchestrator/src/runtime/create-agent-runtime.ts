@@ -24,11 +24,15 @@ import {
   type OrchestrationExecutableV1,
   type OrchestrationRunResultV1,
   type RunResult,
+  type ChatRequest,
+  type StreamEvent,
   type RunRecordAdvancementMetadata,
   type ToolResultBlock,
   type IPermissionStore,
   type IToolArgumentExtractor,
+  type LLMProvider,
   type LLMRole,
+  type LLMRoles,
   type MutableToolBoundaryRegistry,
   type PermissionContextId,
   type PermissionRule,
@@ -70,6 +74,7 @@ import {
   SecurityPipeline,
   setAgentIdentity,
   extractText,
+  getTotalInputTokens,
   userMessage,
   validateThinkingConfig,
   withRetry,
@@ -88,6 +93,7 @@ import {
   resolveModelInputCapabilities,
   projectSessionEvent,
 } from "@zhixing/core";
+import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 import {
   createProviderRoles,
   ensureWorkspaceDir,
@@ -418,6 +424,11 @@ export interface RunOrchestrationV1Params {
   readonly eventBus: EventBus<AgentEventMap>;
   readonly parentLineage?: string;
   readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** 独立编排入口的计量序列——与所属 assignment 的其余外调共用同一 usageId 空间 */
+  readonly modelCallMetering?: {
+    readonly meter: ModelCallResourceMeter;
+    readonly nextCallIndex: () => number;
+  };
 }
 
 export interface RuntimeSecuritySnapshot {
@@ -486,6 +497,8 @@ export interface RunParams {
   toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
   /** Optional durable authority check run before the security pipeline and tool. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** Durable budget pre-reservation and settlement for every provider attempt in this run. */
+  modelCallResourceMeter?: ModelCallResourceMeter;
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -700,7 +713,7 @@ function resolveRoleThinking(
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
-  const { roles, config, resolvedRoles } = createProviderRoles({
+  const { roles: baseRoles, config, resolvedRoles } = createProviderRoles({
     config: options.providerConfiguration.config,
     credentials: options.providerConfiguration.credentials,
   });
@@ -725,6 +738,11 @@ export async function createAgentRuntime(
   // roleThinking 三角色聚合
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
   const primaryRole = options.primaryRole ?? "main";
+  const roles = resourceAwareRoles(baseRoles, {
+    main: PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol].maxOutputTokens,
+    light: PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.light.resolved.protocol].maxOutputTokens,
+    power: PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.power.resolved.protocol].maxOutputTokens,
+  });
 
   // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
   // getAgentIdentity() 读取。默认 "知行"，可通过全局 config.jsonc
@@ -1221,9 +1239,11 @@ export async function createAgentRuntime(
   const makeSegmentStreamFactory = (
     bus: IEventBus<AgentEventMap>,
     watchdog: WatchdogPolicy,
+    callProvider: (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined> =
+      (request) => roles[primaryRole].provider.chat(request),
   ): SegmentStreamFactory => {
     const callWithRetry = withRetry(
-      (request) => roles[primaryRole].provider.chat(request),
+      callProvider,
       { eventBus: bus },
     );
     return (req) => {
@@ -1361,24 +1381,24 @@ export async function createAgentRuntime(
     async callText(
       prompt: string,
       role: "main" | "light" = "light",
-      opts?: { abortSignal?: AbortSignal },
+      opts?: TextCallOptions,
     ): Promise<string> {
       // 单发 LLM 文本调用入口（无对话历史，独立 ChatRequest 隔离）。按 role 复用已装配
       // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
       // 记忆提取同 light 角色）；role="main" 走主档（质量敏感的单发任务，如 MCP
       // 接入标识推断，带 mainThinking）。
       const caller = role === "main" ? mainCallLLM : lightCallLLM;
-      return caller([userMessage(prompt)], opts);
+      return runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
     },
 
     async callTextWithUsage(
       prompt: string,
       role: "main" | "light" = "light",
-      opts?: { abortSignal?: AbortSignal },
+      opts?: TextCallOptions,
     ): Promise<TextCallLLMResult> {
       const caller =
         role === "main" ? mainCallLLMWithUsage : lightCallLLMWithUsage;
-      return caller([userMessage(prompt)], opts);
+      return runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
     },
 
     async runOrchestrationV1(
@@ -1406,12 +1426,25 @@ export async function createAgentRuntime(
         nodeExecutor,
         parentLineage: params.parentLineage,
       });
-      return runner.run({
-        executable: params.executable,
-        runInput: params.runInput,
-        contextSnapshot: params.contextSnapshot,
-        abortSignal: params.abortSignal,
-      });
+      const execute = () =>
+        runner.run({
+          executable: params.executable,
+          runInput: params.runInput,
+          contextSnapshot: params.contextSnapshot,
+          abortSignal: params.abortSignal,
+        });
+      // 独立编排入口不经主 run loop——metering 经 runContext 注入，节点执行器与
+      // 其子 agent 沿既有继承链自动消费同一序列
+      return params.modelCallMetering
+        ? runContextStorage.run(
+            {
+              bus: params.eventBus,
+              lineage: params.parentLineage ?? "orchestration",
+              modelCallMetering: params.modelCallMetering,
+            },
+            execute,
+          )
+        : execute();
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {
@@ -1517,8 +1550,17 @@ export async function createAgentRuntime(
       let pendingToolResults: ToolResultBlock[] = [];
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
+      let providerCallIndex = 0;
+      const modelCallMetering = params.modelCallResourceMeter
+        ? {
+            meter: params.modelCallResourceMeter,
+            nextCallIndex: () => ++providerCallIndex,
+          }
+        : undefined;
+      const callProvider = (request: ChatRequest) =>
+        roles[primaryRole].provider.chat(request);
       const resilientCallLLM = withRetry(
-        (request) => roles[primaryRole].provider.chat(request),
+        callProvider,
         { eventBus },
       );
 
@@ -1542,6 +1584,7 @@ export async function createAgentRuntime(
       const segmentStreamFactory = makeSegmentStreamFactory(
         eventBus,
         segmentWatchdog,
+        callProvider,
       );
       const segmentManager = options.segmentDeps
         ? createSegmentManager({
@@ -1795,6 +1838,7 @@ export async function createAgentRuntime(
             conversationId: params.conversationId,
             turnOrigin: params.turnContext?.turnOrigin,
             authorizeToolExecution: params.authorizeToolExecution,
+            ...(modelCallMetering ? { modelCallMetering } : {}),
           },
           async (): Promise<RunResult> => {
             return await runMainLoop();
@@ -1955,6 +1999,118 @@ export async function createAgentRuntime(
         }
       }
     },
+  };
+}
+
+function resourceAwareRoles(
+  roles: LLMRoles,
+  defaultMaxOutputTokens: Readonly<Record<keyof LLMRoles, number>>,
+): LLMRoles {
+  const wrap = (role: LLMRole, fallback: number): LLMRole => {
+    const provider: LLMProvider = {
+      id: role.provider.id,
+      models: role.provider.models,
+      chat(request) {
+        const metering = runContextStorage.getStore()?.modelCallMetering;
+        if (!metering) return role.provider.chat(request);
+        return meteredProviderCall({
+          call: (providerRequest) => role.provider.chat(providerRequest),
+          meter: metering.meter,
+          nextCallIndex: metering.nextCallIndex,
+          defaultMaxOutputTokens: fallback,
+        })(request);
+      },
+      ...(role.provider.countTokens
+        ? {
+            countTokens: (messages, model) =>
+              role.provider.countTokens!(messages, model),
+          }
+        : {}),
+    };
+    return {
+      provider,
+      model: role.model,
+      chat: (request) => provider.chat({ ...request, model: role.model }),
+      ...(role.countTokens
+        ? { countTokens: (messages) => role.countTokens!(messages) }
+        : {}),
+    };
+  };
+  return {
+    main: wrap(roles.main, defaultMaxOutputTokens.main),
+    light: wrap(roles.light, defaultMaxOutputTokens.light),
+    power: wrap(roles.power, defaultMaxOutputTokens.power),
+  };
+}
+
+/** 单发文本调用选项——metering 存在时调用进入计量作用域，由角色通道包装层统一预占/消费 */
+export interface TextCallOptions {
+  readonly abortSignal?: AbortSignal;
+  readonly modelCallMetering?: {
+    readonly meter: ModelCallResourceMeter;
+    readonly nextCallIndex: () => number;
+  };
+}
+
+function runMeteredTextCall<Value>(
+  opts: TextCallOptions | undefined,
+  execute: () => Promise<Value>,
+): Promise<Value> {
+  const metering = opts?.modelCallMetering;
+  if (!metering) return execute();
+  return runContextStorage.run(
+    {
+      bus: createEventBus<AgentEventMap>(),
+      lineage: "text-call",
+      modelCallMetering: metering,
+    },
+    execute,
+  );
+}
+
+/** 显式参数化的 provider 流式计量包装——调用前按输入+输出上界预占，message_end 按实际用量收束（导出供组合根治理边界复用，保持计量单源） */
+export function meteredProviderCall(input: {
+  readonly call: (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined>;
+  readonly meter: ModelCallResourceMeter;
+  readonly nextCallIndex: () => number;
+  readonly defaultMaxOutputTokens: number;
+}): (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined> {
+  return async function* (request) {
+    const maxTokens = request.maxTokens ?? input.defaultMaxOutputTokens;
+    if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
+      throw new TypeError("Model call output-token limit is invalid");
+    }
+    const providerRequest: ChatRequest = { ...request, maxTokens };
+    const serializedInput = JSON.stringify({
+      model: providerRequest.model,
+      systemPrompt: providerRequest.systemPrompt,
+      messages: providerRequest.messages,
+      tools: providerRequest.tools,
+      maxTokens: providerRequest.maxTokens,
+      temperature: providerRequest.temperature,
+      stopSequences: providerRequest.stopSequences,
+      thinking: providerRequest.thinking,
+    });
+    const tokenUpperBound = Buffer.byteLength(serializedInput, "utf8") + maxTokens;
+    if (!Number.isSafeInteger(tokenUpperBound) || tokenUpperBound <= 0) {
+      throw new TypeError("Model call token upper bound is invalid");
+    }
+    const reservation = await input.meter.reserve({
+      callIndex: input.nextCallIndex(),
+      tokenUpperBound,
+    });
+    let consumed = false;
+    for await (const event of input.call(providerRequest)) {
+      if (event.type === "message_end") {
+        if (consumed) {
+          throw new TypeError("Model provider emitted more than one terminal usage event");
+        }
+        const tokens = getTotalInputTokens(event.usage) + event.usage.outputTokens;
+        await input.meter.consume({ usageId: reservation.usageId, tokens });
+        consumed = true;
+      }
+      yield event;
+    }
   };
 }
 

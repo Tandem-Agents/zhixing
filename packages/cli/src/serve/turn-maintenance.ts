@@ -34,6 +34,16 @@ export interface TurnMaintenanceDeps {
   journal: Pick<JournalStore, "expireOld" | "scan" | "condense">;
   /** 自动命名成功后的通知挂点(组播 session.changed renamed) */
   onRenamed?: (conversationId: string, name: string) => void;
+  /**
+   * control 治理包装——后台维护的每次外调经资源治理准入计量；
+   * 生产装配必须注入，缺省直通仅供未装配治理面的测试组合根
+   */
+  governCallText?: (
+    call: (
+      prompt: string,
+      role?: "main" | "light",
+    ) => Promise<string>,
+  ) => (prompt: string, role?: "main" | "light") => Promise<string>;
 }
 
 export function createTurnMaintenance(
@@ -48,7 +58,10 @@ export function createTurnMaintenance(
     if (parseConversationId(info.conversationId).scope.kind !== "user") return;
     const runtime = info.runtime;
     if (!runtime.callText) return;
-    const callText = runtime.callText.bind(runtime);
+    const rawCallText = runtime.callText.bind(runtime);
+    const callText = deps.governCallText
+      ? deps.governCallText(rawCallText)
+      : rawCallText;
 
     if (info.turnCount === 1) {
       void autoNameFirstTurn(deps, info, callText).catch(() => {});

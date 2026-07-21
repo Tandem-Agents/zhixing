@@ -42,6 +42,7 @@ import {
   createSignedCapabilityDescriptor,
   createSignedExecutorVersionInventory,
   compareCanonicalStrings,
+  createAuthorityPrincipalMethodGuard,
   EXECUTION_PROTOCOL_VERSION,
   ExecutorCapabilityDirectory,
   protocolDigest,
@@ -55,12 +56,14 @@ import {
 } from "@zhixing/core/authority";
 import {
   ControlAdmissionJournal,
+  AnchorResourceGovernor,
   OwnerDeliveryParticipant,
   applyDeliveryResolutionControl,
   createDeliveryControlEnvelope,
   type CreateDeliveryControlEnvelopeInput,
-  type TransitionConversationCredentialPolicy,
+  type ConversationAssignmentCredentialPolicy,
 } from "@zhixing/owner-kernel";
+import { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
   DeviceKey,
   enrollDeviceIdentity,
@@ -86,10 +89,13 @@ export interface AuthorityRuntimeStack {
   readonly verifier: ProtocolSignatureVerifier;
   readonly authority: DeliveryAuthority;
   readonly authorityLog: FileAuthorityCommitLog;
+  readonly executorLog: FileAuthorityCommitLog;
   readonly artifacts: FileArtifactStore;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
+  readonly resourceGovernor: AnchorResourceGovernor;
+  readonly executorResourceGovernor: ExecutorResourceGovernor;
   readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
   readonly prepareConversationAssignment: (input: {
     readonly executionProfile: RuntimeExecutionProfile;
@@ -107,7 +113,7 @@ export interface ConversationRuntimeBinding {
 }
 
 export interface PreparedConversationAssignmentAuthority {
-  readonly policy: TransitionConversationCredentialPolicy;
+  readonly policy: ConversationAssignmentCredentialPolicy;
   readonly binding: ConversationRuntimeBinding;
 }
 
@@ -161,6 +167,7 @@ export interface SetupAuthorityRuntimeOptions {
   readonly anchorEpoch?: number;
   readonly configurationSnapshot?: unknown;
   readonly executorReadiness: ExecutorReadiness | (() => ExecutorReadiness);
+  readonly resourceCandidateTtlMs?: number;
   readonly clock?: () => string;
 }
 
@@ -171,6 +178,10 @@ export async function setupAuthorityRuntime(
   const artifacts = new FileArtifactStore(path.join(authorityRoot, "artifacts"));
   const authorityLog = new FileAuthorityCommitLog(
     path.join(authorityRoot, "authority"),
+    artifacts,
+  );
+  const executorLog = new FileAuthorityCommitLog(
+    path.join(authorityRoot, "executor-authority"),
     artifacts,
   );
   const anchorEpoch = options.anchorEpoch ?? 1;
@@ -218,6 +229,54 @@ export async function setupAuthorityRuntime(
     store: capabilityDirectoryStore,
     isDeviceAuthorized: (deviceKeyId) => deviceKeyId === key.deviceId,
     allowInitialize: !capabilityDirectoryEstablished,
+  });
+  const resourceGuard = createAuthorityPrincipalMethodGuard({
+    "resource-governor": [
+      "reservation.enqueueRoot",
+      "reservation.prepareAssignmentRoot",
+      "reservation.prepareSystemJobRoot",
+      "reservation.acquireRoot",
+      "reservation.acquireChild",
+      "reservation.reserveUsage",
+      "reservation.consume",
+      "reservation.settle",
+      "reservation.release",
+    ],
+    // control 类轻推理治理边界（llm.complete / turn 后台维护）——最小方法面
+    "control-llm": [
+      "reservation.acquireRoot",
+      "reservation.reserveUsage",
+      "reservation.consume",
+      "reservation.settle",
+      "reservation.release",
+    ],
+  });
+  const resourceGovernor = new AnchorResourceGovernor({
+    log: authorityLog,
+    signer: key,
+    verifier,
+    guard: resourceGuard,
+    anchorEpoch,
+    localExecutorId: executorId,
+    reporterKeyFor: (candidateExecutorId) =>
+      executorCapabilities.snapshotFor(candidateExecutorId)?.descriptor.signature.keyId,
+    ...(options.resourceCandidateTtlMs === undefined
+      ? {}
+      : { candidateTtlMs: options.resourceCandidateTtlMs }),
+    clock,
+  });
+  const executorResourceGovernor = new ExecutorResourceGovernor({
+    log: executorLog,
+    signer: key,
+    verifier,
+    guard: resourceGuard,
+    executorId,
+    localDomainId: `local:${key.deviceId}`,
+    localGovernorEpoch: 1,
+    ...(options.resourceCandidateTtlMs === undefined
+      ? {}
+      : { candidateTtlMs: options.resourceCandidateTtlMs }),
+    clock,
   });
   const publicationQueue = new SerialTaskQueue();
   const readinessSource = () => normalizeExecutorReadiness(
@@ -334,7 +393,6 @@ export async function setupAuthorityRuntime(
         },
         permissionSnapshot: permissionPublication.snapshot,
         budget: { maxCalls: 64, maxTokens: 256_000 },
-        localGovernorEpoch: 1,
       },
       binding: { executionProfile, deviceDigest },
     };
@@ -387,10 +445,13 @@ export async function setupAuthorityRuntime(
     verifier,
     authority,
     authorityLog,
+    executorLog,
     artifacts,
     participant,
     controlAdmission,
     executorCapabilities,
+    resourceGovernor,
+    executorResourceGovernor,
     permissionSnapshotFor: (digest) => permissionSnapshots.snapshotFor(digest),
     prepareConversationAssignment,
     validateConversationRuntimeBinding,

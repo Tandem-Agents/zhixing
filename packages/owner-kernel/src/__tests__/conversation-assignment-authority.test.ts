@@ -5,13 +5,13 @@ import {
   type ExecutorCapabilitySnapshot,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
-import type { Signature } from "@zhixing/core/contracts";
+import type { AssignmentResourceLease, Signature } from "@zhixing/core/contracts";
 import {
   ManifestSelectionError,
-  TransitionConversationAssignmentIssuer,
+  ConversationAssignmentAuthority,
   type ConversationAssignmentIssueInput,
-  type TransitionConversationCredentialPolicy,
-} from "../conversation-transition-authority.js";
+  type ConversationAssignmentCredentialPolicy,
+} from "../conversation-assignment-authority.js";
 
 const signer: ProtocolSigner = {
   sign(schemaId, version, payload): Signature {
@@ -29,7 +29,7 @@ const verifier = {
   },
 };
 
-function policy(revision: number): TransitionConversationCredentialPolicy {
+function policy(revision: number): ConversationAssignmentCredentialPolicy {
   return {
     credentialTtlMs: 60_000,
     manifestRequires: {
@@ -52,7 +52,6 @@ function policy(revision: number): TransitionConversationCredentialPolicy {
       generatedAt: "2026-07-18T00:00:00.000Z",
     }, signer),
     budget: { maxCalls: revision * 10, maxTokens: revision * 1_000 },
-    localGovernorEpoch: revision,
   };
 }
 
@@ -99,18 +98,26 @@ function snapshotFor(revision: number) {
 }
 
 function issueInput(
-  admissionClass: ConversationAssignmentIssueInput["admissionClass"],
+  admissionClass: AssignmentResourceLease["admissionClass"],
   credentialPolicy = policy(3),
+  identity: { readonly assignmentId?: string; readonly attempt?: number } = {},
 ): ConversationAssignmentIssueInput {
+  const assignmentId = identity.assignmentId ?? "assignment-1";
+  const attempt = identity.attempt ?? 1;
   return {
     runId: "run-1",
-    assignmentId: "assignment-1",
+    assignmentId,
     executorId: "executor:local",
     conversationId: "conversation-1",
     ownerEpoch: 7,
     baseRevision: 3,
-    attempt: 1,
-    admissionClass,
+    attempt,
+    resourceLease: assignmentResourceLease({
+      assignmentId,
+      attempt,
+      admissionClass,
+      budget: credentialPolicy.budget,
+    }),
     ingress: {
       kind: "first-party",
       surfacePrincipal: "rpc:owner",
@@ -123,15 +130,14 @@ function issueInput(
   };
 }
 
-describe("TransitionConversationAssignmentIssuer", () => {
+describe("ConversationAssignmentAuthority", () => {
   it.each(["interactive", "advancement", "scheduler"] as const)(
     "freezes the trusted %s admission class and versioned policy snapshot",
     (admissionClass) => {
       const frozen = policy(3);
-      const issuer = new TransitionConversationAssignmentIssuer({
+      const issuer = new ConversationAssignmentAuthority({
         signer,
         verifier,
-        localDomainId: "local:device-test",
         snapshotFor: snapshotFor(3),
         clock: () => "2026-07-18T00:00:00.000Z",
       });
@@ -153,23 +159,22 @@ describe("TransitionConversationAssignmentIssuer", () => {
   );
 
   it("changes only newly issued credentials when the authority policy advances", () => {
-    const first = new TransitionConversationAssignmentIssuer({
+    const first = new ConversationAssignmentAuthority({
       signer,
       verifier,
-      localDomainId: "local:device-test",
       snapshotFor: snapshotFor(1),
       clock: () => "2026-07-18T00:00:00.000Z",
     }).issue(issueInput("interactive", policy(1)));
-    const second = new TransitionConversationAssignmentIssuer({
+    const second = new ConversationAssignmentAuthority({
       signer,
       verifier,
-      localDomainId: "local:device-test",
       snapshotFor: snapshotFor(2),
       clock: () => "2026-07-18T00:00:00.000Z",
     }).issue({
-      ...issueInput("interactive", policy(2)),
-      assignmentId: "assignment-2",
-      attempt: 2,
+      ...issueInput("interactive", policy(2), {
+        assignmentId: "assignment-2",
+        attempt: 2,
+      }),
     });
 
     expect(first.manifest.requires.policyRev).toBe(1);
@@ -180,7 +185,7 @@ describe("TransitionConversationAssignmentIssuer", () => {
 
   it("rejects an incompatible target before issuing assignment credentials", () => {
     let signatureCount = 0;
-    const issuer = new TransitionConversationAssignmentIssuer({
+    const issuer = new ConversationAssignmentAuthority({
       signer: {
         sign(schemaId, version, payload) {
           signatureCount += 1;
@@ -188,7 +193,6 @@ describe("TransitionConversationAssignmentIssuer", () => {
         },
       },
       verifier,
-      localDomainId: "local:device-test",
       snapshotFor: snapshotFor(2),
       clock: () => "2026-07-18T00:00:00.000Z",
     });
@@ -200,10 +204,9 @@ describe("TransitionConversationAssignmentIssuer", () => {
   });
 
   it("rejects a credential policy that exceeds the permission lease TTL", () => {
-    const issuer = new TransitionConversationAssignmentIssuer({
+    const issuer = new ConversationAssignmentAuthority({
       signer,
       verifier,
-      localDomainId: "local:device-test",
       snapshotFor: snapshotFor(3),
       clock: () => "2026-07-18T00:00:00.000Z",
     });
@@ -213,7 +216,45 @@ describe("TransitionConversationAssignmentIssuer", () => {
     };
 
     expect(() => issuer.issue(issueInput("interactive", oversized))).toThrow(
-      "Transition credential policy is invalid",
+      "Conversation assignment credential policy is invalid",
     );
   });
 });
+
+function assignmentResourceLease(input: {
+  readonly assignmentId: string;
+  readonly attempt: number;
+  readonly admissionClass: AssignmentResourceLease["admissionClass"];
+  readonly budget: AssignmentResourceLease["budget"];
+}): AssignmentResourceLease<"conversation"> {
+  const payload = {
+    v: 1 as const,
+    reservationId: `reservation:${input.assignmentId}`,
+    admissionClass: input.admissionClass,
+    workload: { kind: "run" as const, id: "run-1", attempt: input.attempt },
+    scopeBinding: {
+      kind: "conversation" as const,
+      conversationId: "conversation-1",
+      ownerEpoch: 7,
+    },
+    audience: { executorId: "executor:local" },
+    budget: { ...input.budget },
+    domain: { kind: "anchor" as const, anchorEpoch: 1 },
+    delegation: {
+      executorId: "executor:local",
+      maxDepth: 1,
+      maxBudget: { ...input.budget },
+    },
+    activation: { kind: "assignment" as const, assignmentId: input.assignmentId },
+    issuedAt: "2026-07-18T00:00:00.000Z",
+    expiry: "2026-07-18T00:01:00.000Z",
+  };
+  const withDigest = {
+    ...payload,
+    digest: protocolDigest("ResourceLease", 1, payload),
+  };
+  return {
+    ...withDigest,
+    signature: signer.sign("ResourceLease", 1, withDigest),
+  };
+}

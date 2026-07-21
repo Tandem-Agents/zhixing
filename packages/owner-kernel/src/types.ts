@@ -30,6 +30,7 @@ import type {
   TurnSource,
   WindowCompact,
 } from "@zhixing/core";
+import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
 // 方便 owner-kernel 及其下游从统一入口获取。
@@ -65,6 +66,8 @@ export interface RunTurnOptions {
   toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
   /** Fail-closed durable authority check invoked immediately before each tool call. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** Durable per-provider-call resource accounting for this assigned run. */
+  modelCallResourceMeter?: ModelCallResourceMeter;
 }
 
 export interface SessionRuntime {
@@ -147,12 +150,12 @@ export interface SessionRuntime {
   callText?(
     prompt: string,
     role?: "main" | "light",
-    opts?: { abortSignal?: AbortSignal },
+    opts?: SessionRuntimeTextCallOptions,
   ): Promise<string>;
   callTextWithUsage?(
     prompt: string,
     role?: "main" | "light",
-    opts?: { abortSignal?: AbortSignal },
+    opts?: SessionRuntimeTextCallOptions,
   ): Promise<TextCallLLMResult>;
   /**
    * 执行已校验的编排定义。具体装配归运行体实现方，owner 只按抽象能力调用。
@@ -184,6 +187,18 @@ export interface SessionRuntime {
   readonly calibrationFactor?: number;
 }
 
+/** assignment 域共享的模型调用计量序列——同一 run 树全部外调共用 usageId 空间 */
+export interface SessionRuntimeModelCallMetering {
+  readonly meter: ModelCallResourceMeter;
+  readonly nextCallIndex: () => number;
+}
+
+/** 单发文本调用选项——metering 存在时调用计入所属 assignment 的资源租约 */
+export interface SessionRuntimeTextCallOptions {
+  readonly abortSignal?: AbortSignal;
+  readonly modelCallMetering?: SessionRuntimeModelCallMetering;
+}
+
 export interface SessionRuntimeOrchestrationV1Params {
   readonly executable: OrchestrationExecutableV1;
   readonly runInput?: unknown;
@@ -192,6 +207,7 @@ export interface SessionRuntimeOrchestrationV1Params {
   readonly eventBus: EventBus<AgentEventMap>;
   readonly parentLineage?: string;
   readonly authorizeToolExecution?: NonNullable<RunTurnOptions["authorizeToolExecution"]>;
+  readonly modelCallMetering?: SessionRuntimeModelCallMetering;
 }
 
 /** /security 的运行体只读快照——事实源仍在 SecurityPipeline,owner 只透结构。 */

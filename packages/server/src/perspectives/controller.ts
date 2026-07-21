@@ -116,9 +116,21 @@ export class PerspectivesController {
     const runtime: SessionRuntime = {
       sessionId: `perspectives:${input.managed.conversationId}`,
       async *run(_messages, options): AsyncGenerator<AgentYield, RunResult> {
+        // durable assignment 注入的 meter——本 turn 独占该 assignment 的调用序列，
+        // 分配调用与编排子 agent 共用同一 usageId 空间
+        const meter = options?.modelCallResourceMeter;
+        let callIndex = 0;
         const execution = await controller.executePerspectiveWork({
           ...input,
           authorizeToolExecution: options?.authorizeToolExecution,
+          ...(meter
+            ? {
+                modelCallMetering: {
+                  meter,
+                  nextCallIndex: () => ++callIndex,
+                },
+              }
+            : {}),
         });
         outcome = execution.outcome;
         return execution.runResult;
@@ -249,6 +261,9 @@ export class PerspectivesController {
           abortSignal: input.abortSignal,
           eventBus,
           authorizeToolExecution: input.authorizeToolExecution,
+          ...(input.modelCallMetering
+            ? { modelCallMetering: input.modelCallMetering }
+            : {}),
         });
       } catch (err) {
         if (input.abortSignal?.aborted) {
@@ -332,6 +347,9 @@ export class PerspectivesController {
         defaultPerspectiveCount: DEFAULT_PERSPECTIVE_COUNT,
         maxPerspectiveCount: MAX_PERSPECTIVE_COUNT,
         abortSignal: input.abortSignal,
+        ...(input.modelCallMetering
+          ? { modelCallMetering: input.modelCallMetering }
+          : {}),
       });
       return { status: "ok", value: allocation };
     } catch (err) {

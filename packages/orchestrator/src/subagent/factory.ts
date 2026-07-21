@@ -341,11 +341,13 @@ async function runChildAgentInner(
 
   try {
     await emitChildStart(opts, subAgentId, childLineage, childBus);
+    const parentMetering = runContextStorage.getStore()?.modelCallMetering;
     runResult = await runContextStorage.run(
       {
         bus: childBus,
         lineage: childLineage,
         authorizeToolExecution: opts.authorizeToolExecution,
+        ...(parentMetering ? { modelCallMetering: parentMetering } : {}),
       },
       () =>
         runSubAgentLoop({

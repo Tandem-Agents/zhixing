@@ -142,6 +142,10 @@ export type JobJournalRecord =
       readonly assignmentId?: string;
       readonly state: JobRunState;
       readonly statusRevision: number;
+      readonly usageFinal?: {
+        readonly reportDigest: string;
+        readonly upToUsageSeq: number;
+      };
     }
   | {
       readonly t: "committed";
@@ -237,7 +241,7 @@ export const JOB_JOURNAL_RECORD_SHAPES = {
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
   state: {
     required: ["jobRunId", "state", "statusRevision", "t"],
-    optional: ["assignmentId"],
+    optional: ["assignmentId", "usageFinal"],
   },
   committed: {
     required: ["assignmentId", "bundle", "jobRevision", "jobRunId", "t"],
@@ -407,6 +411,27 @@ export function validateJobJournalRecord(
       if (value.assignmentId !== undefined) assertIdentifier(value.assignmentId, "Job state assignmentId");
       if (!JOB_STATES.has(value.state as JobRunState)) throw corruptJobJournal("Job state is invalid");
       assertPositive(value.statusRevision, "Job status revision");
+      if (value.usageFinal !== undefined) {
+        if (value.state !== "failed" || value.assignmentId === undefined) {
+          throw corruptJobJournal("Only assigned failed job state may carry final usage");
+        }
+        assertRecord(value.usageFinal, "Job failure final usage");
+        assertKeys(
+          value.usageFinal,
+          ["reportDigest", "upToUsageSeq"],
+          "Job failure final usage",
+        );
+        assertDigest(
+          value.usageFinal.reportDigest,
+          "Job failure final usage report digest",
+        );
+        if (
+          !Number.isSafeInteger(value.usageFinal.upToUsageSeq) ||
+          (value.usageFinal.upToUsageSeq as number) < 0
+        ) {
+          throw corruptJobJournal("Job failure final usage sequence is invalid");
+        }
+      }
       break;
     case "committed":
       assertIdentifier(value.assignmentId, "Job commit assignmentId");

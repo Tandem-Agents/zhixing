@@ -27,6 +27,7 @@ import type {
   FinalFrame,
   FinalOutboxRecord,
   GlobalStagedMutation,
+  GovernorRecord,
   DispatchResult,
   DispatchConflictProof,
   DispatchRejectionProof,
@@ -50,6 +51,7 @@ import type {
 import {
   applyValidatedAssignmentEntry,
   assertActivatedAssignmentCapability,
+  assertQueuedTerminalDequeue,
   buildConversationActivationPayload,
   buildConversationActivationPayloadFromBinding,
   assignmentActivationDigest,
@@ -65,6 +67,8 @@ import {
   interactionMirrorSeed,
   permissionSnapshotLeaseDigest,
   protocolDigest,
+  queuedTerminalDequeueRecord,
+  requiresFormalResourceCoordination,
   sealedBundleArtifact,
   signConversationActivation,
   validateConversationActivation,
@@ -157,6 +161,7 @@ import type {
   ConversationDeliveryParticipant,
   ConversationStatusDeliveryInput,
 } from "./delivery-participant.js";
+import type { AssignmentResourceCoordinator } from "./resource-governor.js";
 
 export type { ConversationRunJournalRecord } from "./conversation-run-contracts.js";
 type ConversationUncertainResolutionFact = Extract<
@@ -167,6 +172,7 @@ type ConversationUncertainResolutionFact = Extract<
 type ConversationCommitLogRecord =
   | ConversationRunJournalRecord
   | ConversationRunInternalRecord
+  | GovernorRecord
   | PublishRecord
   | FinalOutboxRecord;
 
@@ -295,6 +301,7 @@ export interface ConversationRunJournalOptions {
   readonly projection: ConversationCommitProjection;
   readonly publisher?: ConversationMutationPublisher;
   readonly delivery: ConversationDeliveryParticipant;
+  readonly resources?: AssignmentResourceCoordinator;
   readonly clock?: () => string;
   readonly abortTickets?: ConversationAbortTicketAuthorizer;
 }
@@ -729,6 +736,7 @@ export class ConversationRunJournal {
   readonly #projection: ConversationCommitProjection;
   readonly #publisher: ConversationMutationPublisher | undefined;
   readonly #delivery: ConversationDeliveryParticipant;
+  readonly #resources: AssignmentResourceCoordinator | undefined;
   readonly #clock: () => string;
   readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
   readonly #operations = new SerialTaskQueue();
@@ -762,6 +770,7 @@ export class ConversationRunJournal {
     this.#projection = options.projection;
     this.#publisher = options.publisher;
     this.#delivery = options.delivery;
+    this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#abortTickets = options.abortTickets;
   }
@@ -1257,9 +1266,17 @@ export class ConversationRunJournal {
             attempt: envelope.resourceLease.workload.attempt,
           },
         };
+        const governed = requiresFormalResourceCoordination(envelope.resourceLease);
+        const resourceRecords = governed && this.#resources
+          ? this.#resources.prepareActivation(envelope.resourceLease)
+          : [];
+        if (governed && !this.#resources) {
+          throw new Error("Anchor resource coordination is not configured");
+        }
         return {
           kind: "append",
           entries: [
+            ...resourceRecords,
             runRecord(this.#conversationId, assigned),
             runRecord(this.#conversationId, {
               t: "state",
@@ -1406,18 +1423,7 @@ export class ConversationRunJournal {
 
   async nextAssignmentAttempt(runId: string): Promise<number> {
     assertIdentifier(runId, "Run id");
-    return this.#select((state) => {
-      let latest = 0;
-      for (const assigned of state.assignedById.values()) {
-        if (assigned.record.runId === runId) {
-          latest = Math.max(latest, assigned.record.reservation.attempt);
-        }
-      }
-      if (latest >= Number.MAX_SAFE_INTEGER) {
-        throw new RangeError("Conversation assignment attempt is exhausted");
-      }
-      return latest + 1;
-    });
+    return this.#select((state) => nextConversationAssignmentAttempt(state, runId));
   }
 
   async dispatchesAwaitingStarted(): Promise<PendingConversationDispatch[]> {
@@ -1546,13 +1552,18 @@ export class ConversationRunJournal {
     assertIdentifier(input.runId, "Cancelled run id");
     assertIdentifier(input.requestId, "Cancellation request id");
     const transaction = await this.#transact<ConversationCancelResult>(
-      (state, authorityPrefix) =>
-        decideConversationCancel(
+      (state, authorityPrefix) => {
+        const resourceRecords = state.stateByRun.get(input.runId)?.state === "queued"
+          ? prepareRunQueuedTerminal(this.#resources, state, input.runId, "cancelled")
+          : [];
+        return decideConversationCancel(
           this.#conversationId,
           state,
           input,
           authorityPrefix.nextLsn,
-        ),
+          resourceRecords,
+        );
+      },
     );
     return transaction.value;
   }
@@ -1562,7 +1573,7 @@ export class ConversationRunJournal {
     readonly envelope: ConversationControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
-    return this.#delivery.coordinate(() => input.admission.applyAuthority<
+    const apply = () => this.#delivery.coordinate(() => input.admission.applyAuthority<
       RunProjection,
       ConversationControlEnvelope
     >({
@@ -1576,7 +1587,7 @@ export class ConversationRunJournal {
           record as LogicalRecord<ConversationCommitLogRecord>,
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
-      companionStreams: ["delivery"],
+      companionStreams: ["delivery", "governor"],
       prepareCompanions: (state, context, plan) => {
         const statuses = conversationStatusDeliveryInputs(
           this.#conversationId,
@@ -1593,13 +1604,19 @@ export class ConversationRunJournal {
           context.canonicalRequestId,
           context.authorityPrefix.at,
         );
-        if (controlResponses.length === 0) return prepared.records;
+        const resourceRecords = this.#prepareResourceTerminalRecords(
+          state,
+          plan.authorityEntries ?? [],
+        );
+        if (controlResponses.length === 0) {
+          return [...resourceRecords, ...prepared.records];
+        }
         const preparedResponses =
           this.#delivery.prepareConversationControlResponses(controlResponses);
         if (!preparedResponses.accepted) {
           throw corruptRunJournal(preparedResponses.error.message);
         }
-        return [...prepared.records, ...preparedResponses.records];
+        return [...resourceRecords, ...prepared.records, ...preparedResponses.records];
       },
       onCommitted: (state, commit) => {
         this.#publishStatusNotices(
@@ -1726,6 +1743,9 @@ export class ConversationRunJournal {
             state,
             { runId: body.runId, requestId: context.canonicalRequestId },
             context.authorityPrefix.nextLsn,
+            current.state === "queued"
+              ? prepareRunQueuedTerminal(this.#resources, state, body.runId, "cancelled")
+              : [],
           );
           if (decision.kind !== "append") {
             throw corruptRunJournal("Fresh cancel control did not produce an authority change");
@@ -1765,6 +1785,14 @@ export class ConversationRunJournal {
               state,
               { runId: candidate.runId, requestId: context.canonicalRequestId },
               context.authorityPrefix.nextLsn + entries.length,
+              candidate.state === "queued"
+                  ? prepareRunQueuedTerminal(
+                    this.#resources,
+                    state,
+                    candidate.runId,
+                    "cancelled",
+                  )
+                : [],
             );
             if (decision.kind === "append") entries.push(...decision.entries);
             runs.push({
@@ -1858,6 +1886,7 @@ export class ConversationRunJournal {
         };
       },
     }));
+    return this.#resources ? this.#resources.coordinate(apply) : apply();
   }
 
   async closeQueuedRun(
@@ -1877,6 +1906,7 @@ export class ConversationRunJournal {
       return {
         kind: "append",
         entries: [
+          ...prepareRunQueuedTerminal(this.#resources, state, runId, outcome),
           runRecord(this.#conversationId, {
             t: "state",
             runId,
@@ -1889,7 +1919,12 @@ export class ConversationRunJournal {
     });
   }
 
-  async failAssignedRun(runId: string, assignmentId: string, reason?: string): Promise<void> {
+  async failAssignedRun(
+    runId: string,
+    assignmentId: string,
+    reason?: string,
+    usageFinal?: { readonly reportDigest: string; readonly upToUsageSeq: number },
+  ): Promise<void> {
     assertIdentifier(runId, "Failed run id");
     assertIdentifier(assignmentId, "Failed assignment id");
     const boundedReason = reason === undefined
@@ -1918,6 +1953,9 @@ export class ConversationRunJournal {
             state: "failed",
             statusRevision: current.statusRevision + 1,
             ...(boundedReason ? { reason: boundedReason } : {}),
+            ...(usageFinal
+              ? { usageFinal: snapshot(usageFinal, "Failed run final usage") }
+              : {}),
           }),
         ],
         value: undefined,
@@ -2134,6 +2172,7 @@ export class ConversationRunJournal {
       snapshotValue.cancelProof !== undefined ||
       snapshotValue.sealedBundleRef !== undefined ||
       snapshotValue.phase === "halted" ||
+      snapshotValue.phase === "failed" ||
       snapshotValue.phase === "sealed" ||
       snapshotValue.phase === "acked"
     ) {
@@ -2874,6 +2913,7 @@ export class ConversationRunJournal {
         if (proof.decision === "halted") {
           return { kind: "append", entries: [containment!], value: undefined };
         }
+        this.#assertResourceUsageFinal(assigned.record, proof.usageFinal);
         const resolved = closeResolution(
           open,
           "proven-not-started-redispatched",
@@ -2914,6 +2954,7 @@ export class ConversationRunJournal {
       ) {
         throw new Error("Cancel proof is late for the current run state");
       }
+      this.#assertResourceUsageFinal(assigned.record, proof.usageFinal);
       return {
         kind: "append",
         entries: [
@@ -3051,6 +3092,7 @@ export class ConversationRunJournal {
         method: "submission.submitBundle",
         assignmentId,
       });
+      this.#assertResourceUsageFinal(guardAssigned.record, bundle.usageFinal);
       return { committed: true, commitRevision: guardCommitted.commitRevision };
     }
 
@@ -3344,6 +3386,7 @@ export class ConversationRunJournal {
             value: rejected("fence-rejected", "Bundle is late for the current run state", false),
           };
         }
+        this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal);
         const previousCommit = state.commits.at(-1);
         if (
           previousCommit &&
@@ -4169,7 +4212,7 @@ export class ConversationRunJournal {
   async #select<Value>(select: (state: RunProjection) => Value): Promise<Value> {
     return this.#operations.run(async () => {
       const cached = this.#runProjection;
-      const transaction = await (async () => {
+      const replay = async () => {
         try {
           return await this.#log.transactProjection<
             RunProjection,
@@ -4188,7 +4231,10 @@ export class ConversationRunJournal {
           this.#runProjection = undefined;
           throw error;
         }
-      })();
+      };
+      const transaction = await (
+        this.#resources ? this.#resources.coordinate(replay) : replay()
+      );
       this.#runProjection = {
         state: transaction.state,
         cursor: transaction.cursor,
@@ -4350,6 +4396,16 @@ export class ConversationRunJournal {
           admitted.record.ingress,
           this.#conversationId,
         );
+        if (requiresFormalResourceCoordination(dispatch.resourceLease)) {
+          if (!this.#resources) {
+            throw corruptRunJournal("Anchor assignment has no resource coordinator");
+          }
+          this.#resources.assertActivationRecords({
+            lease: dispatch.resourceLease,
+            records: envelope.entries,
+            acceptedAt: envelope.at,
+          });
+        }
         state.assignedById.set(body.assignmentId, {
           record: body,
           envelope: dispatch,
@@ -4691,6 +4747,15 @@ export class ConversationRunJournal {
               assigned,
             ),
         });
+        if (!assigned) {
+          throw corruptRunJournal("Accepted cancellation has no durable assignment");
+        }
+        this.#assertResourceUsageFinal(assigned.record, proof.usageFinal);
+        this.#assertResourceTerminalRecords(
+          assigned.record,
+          proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        );
         state.acceptedCancellations.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         return state;
@@ -4842,6 +4907,11 @@ export class ConversationRunJournal {
         if (!assigned) {
           throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
         }
+        this.#assertResourceTerminalRecords(
+          assigned.record,
+          "release",
+          envelope.entries,
+        );
         state.superseded.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         if (state.assignmentByRun.get(assigned.record.runId) === body.assignmentId) {
@@ -5026,6 +5096,26 @@ export class ConversationRunJournal {
                 candidate.assignmentId === body.assignmentId,
             ),
         });
+        if (
+          current?.state === "queued" &&
+          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "run",
+                id: body.runId,
+                attempt: nextConversationAssignmentAttempt(state, body.runId),
+              },
+              body.state,
+            );
+          } catch (error) {
+            throw corruptRunJournal(
+              error instanceof Error ? error.message : "Queued run resource dequeue is invalid",
+            );
+          }
+        }
         const committed = state.commits.at(-1);
         assertStateAtomicReplayContract({
           currentState: current?.state,
@@ -5093,6 +5183,18 @@ export class ConversationRunJournal {
           )
         ) {
           throw corruptRunJournal("Assigned failure is not atomic with capability revocation");
+        }
+        if (body.state === "failed" && body.assignmentId !== undefined) {
+          const assigned = state.assignedById.get(body.assignmentId);
+          if (!assigned) throw corruptRunJournal("Assigned failure has no assignment");
+          if (body.usageFinal) {
+            this.#assertResourceUsageFinal(assigned.record, body.usageFinal);
+          }
+          this.#assertResourceTerminalRecords(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          );
         }
         if (body.state === "uncertain" && current?.state !== "uncertain") {
           const assignmentId = state.assignmentByRun.get(body.runId);
@@ -5290,6 +5392,13 @@ export class ConversationRunJournal {
                   conversationFact.resolution.factDigest,
                 )),
           });
+          if (conversationFact.resolution.kind.startsWith("user-")) {
+            this.#assertResourceTerminalRecords(
+              assigned.record,
+              "reclaim",
+              envelope.entries,
+            );
+          }
         }
         state.resolutionsByRun.set(body.runId, conversationFact);
         if (conversationFact.resolution) {
@@ -5372,6 +5481,12 @@ export class ConversationRunJournal {
         ) {
           throw corruptRunJournal("Committed bundle does not bind its run journal fact");
         }
+        this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal);
+        this.#assertResourceTerminalRecords(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        );
         let closure: ValidatedConversationBundleClosure;
         try {
           closure = await validateConversationBundleClosure(bundle, this.#artifacts);
@@ -5794,6 +5909,15 @@ export class ConversationRunJournal {
               assigned.capIds,
             ),
         });
+        if (!assigned) {
+          throw corruptRunJournal("Submission guard cancellation has no assignment");
+        }
+        this.#assertResourceUsageFinal(assigned.record, proof.usageFinal);
+        this.#assertResourceTerminalRecords(
+          assigned.record,
+          proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        );
         state.acceptedCancellations.add(body.assignmentId);
         return state;
       }
@@ -5876,6 +6000,11 @@ export class ConversationRunJournal {
             ),
         });
         if (!assigned) throw corruptRunJournal("Submission guard supersede has no assignment");
+        this.#assertResourceTerminalRecords(
+          assigned.record,
+          "release",
+          envelope.entries,
+        );
         state.assignmentByRun.delete(assigned.record.runId);
         state.closedAssignments.add(assignmentId);
         state.openConflictAssignments.delete(assignmentId);
@@ -5994,6 +6123,13 @@ export class ConversationRunJournal {
                   fact.resolution.factDigest,
                 )),
           });
+          if (fact.resolution.kind.startsWith("user-") && assigned) {
+            this.#assertResourceTerminalRecords(
+              assigned.record,
+              "reclaim",
+              envelope.entries,
+            );
+          }
         }
         state.resolutionsByRun.set(runId, fact);
         if (fact.resolution) {
@@ -6061,6 +6197,26 @@ export class ConversationRunJournal {
                 candidate.assignmentId === assignmentId,
             ),
         });
+        if (
+          current?.state === "queued" &&
+          (next === "cancelled" || next === "failed" || next === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "run",
+                id: runId,
+                attempt: nextConversationAssignmentAttempt(state, runId),
+              },
+              next,
+            );
+          } catch (error) {
+            throw corruptRunJournal(
+              error instanceof Error ? error.message : "Queued run resource dequeue is invalid",
+            );
+          }
+        }
         assertStateAtomicReplayContract({
           currentState: current?.state,
           nextState: next,
@@ -6116,6 +6272,16 @@ export class ConversationRunJournal {
               candidate.assignmentId === assignmentId,
           ),
         });
+        if (next === "failed" && assigned) {
+          if (body.usageFinal) {
+            this.#assertResourceUsageFinal(assigned.record, body.usageFinal);
+          }
+          this.#assertResourceTerminalRecords(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          );
+        }
         const nextActiveRunId = nextActiveRunIdForReplay({
           activeRunId: state.activeRunId,
           runId,
@@ -6173,6 +6339,14 @@ export class ConversationRunJournal {
               assigned.capIds,
             ),
         });
+        if (!assigned) {
+          throw corruptRunJournal("Submission guard commit has no assignment");
+        }
+        this.#assertResourceTerminalRecords(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        );
         state.committedByAssignment.set(assignmentId, {
           bundle: body.bundle,
           commitRevision: body.commitRevision,
@@ -6221,7 +6395,7 @@ export class ConversationRunJournal {
     this.#assertSubmissionContextIdentity(context, identity);
     return this.#operations.run(async () => {
       const cached = this.#submissionGuardProjection;
-      const transaction = await (async () => {
+      const replay = async () => {
         try {
           return await this.#log.transactProjection<
             SubmissionGuardProjection,
@@ -6240,7 +6414,10 @@ export class ConversationRunJournal {
           this.#submissionGuardProjection = undefined;
           throw error;
         }
-      })();
+      };
+      const transaction = await (
+        this.#resources ? this.#resources.coordinate(replay) : replay()
+      );
       this.#submissionGuardProjection = {
         state: transaction.state,
         cursor: transaction.cursor,
@@ -6435,7 +6612,7 @@ export class ConversationRunJournal {
     return this.#operations.run(async () => {
       try {
         const cached = this.#runProjection;
-        const transaction = await this.#delivery.coordinate(() =>
+        const transact = () => this.#delivery.coordinate(() =>
           this.#log.transactProjection<
           RunProjection,
           unknown,
@@ -6456,9 +6633,13 @@ export class ConversationRunJournal {
             if (!prepared.accepted) {
               throw corruptRunJournal(prepared.error.message);
             }
+            const resourceRecords = this.#prepareResourceTerminalRecords(
+              state,
+              decision.entries,
+            );
             return {
               ...decision,
-              entries: [...decision.entries, ...prepared.records],
+              entries: [...resourceRecords, ...decision.entries, ...prepared.records],
             };
           },
           {
@@ -6467,6 +6648,9 @@ export class ConversationRunJournal {
             candidateReferences,
           },
         ));
+        const transaction = await (
+          this.#resources ? this.#resources.coordinate(transact) : transact()
+        );
         this.#runProjection = {
           state: transaction.state,
           cursor: transaction.cursor,
@@ -6487,6 +6671,124 @@ export class ConversationRunJournal {
         throw error;
       }
     });
+  }
+
+  #prepareResourceTerminalRecords(
+    state: RunProjection,
+    entries: readonly LogicalRecord<unknown>[],
+  ): readonly LogicalRecord<unknown>[] {
+    const bodies: readonly unknown[] = entries
+      .filter((entry) => entry.stream === runStream(this.#conversationId))
+      .map((entry) => entry.body);
+    const committed = bodies.find(
+      (body): body is Extract<ConversationRunJournalRecord, { t: "committed" }> =>
+        isTaggedRecord(body, "committed"),
+    );
+    const cancelled = bodies.find(
+      (body): body is Extract<ConversationRunJournalRecord, { t: "cancel-proof-accepted" }> =>
+        isTaggedRecord(body, "cancel-proof-accepted"),
+    );
+    const superseded = bodies.find(
+      (body): body is Extract<ConversationRunJournalRecord, { t: "assignment-superseded" }> =>
+        isTaggedRecord(body, "assignment-superseded"),
+    );
+    const closedResolution = bodies.find(
+      (body): body is Extract<ConversationRunJournalRecord, { t: "resolution" }> =>
+        isTaggedRecord(body, "resolution") && body.fact.resolution !== undefined,
+    );
+    const failed = bodies.find(
+      (body): body is Extract<ConversationRunJournalRecord, { t: "state" }> =>
+        isTaggedRecord(body, "state") &&
+        body.state === "failed" &&
+        body.assignmentId !== undefined,
+    );
+    const assignmentId =
+      committed?.assignmentId ??
+      cancelled?.assignmentId ??
+      superseded?.assignmentId ??
+      closedResolution?.fact.subject.assignmentId ??
+      failed?.assignmentId;
+    if (!assignmentId) return [];
+    const assigned = state.assignedById.get(assignmentId);
+    if (!assigned) throw corruptRunJournal("Resource terminal has no durable assignment");
+    const lease = assigned.envelope.resourceLease;
+    if (!requiresFormalResourceCoordination(lease)) return [];
+    if (!this.#resources) {
+      throw corruptRunJournal("Governed assignment has no resource coordinator");
+    }
+    const mode = committed
+      ? "settle-release"
+      : cancelled
+        ? cancelled.proof.decision === "not-started"
+          ? "release"
+          : "settle-release"
+        : superseded
+          ? "release"
+          : failed?.usageFinal
+            ? "settle-release"
+            : "reclaim";
+    return this.#resources.prepareTerminal({ lease, mode });
+  }
+
+  #assertResourceTerminalRecords(
+    assigned: {
+      readonly assignmentId: string;
+      readonly reservation: { readonly reservationId: string };
+    },
+    mode: "settle-release" | "release" | "reclaim",
+    records: readonly LogicalRecord<unknown>[],
+  ): void {
+    if (!requiresFormalResourceCoordination({
+      reservationId: assigned.reservation.reservationId,
+      assignmentId: assigned.assignmentId,
+    })) return;
+    if (!this.#resources) {
+      throw corruptRunJournal("Governed assignment has no resource coordinator");
+    }
+    try {
+      this.#resources.assertTerminalRecords({
+        reservationId: assigned.reservation.reservationId,
+        mode,
+        records,
+      });
+    } catch (error) {
+      throw corruptRunJournal(
+        error instanceof Error
+          ? `Assignment resource terminal is invalid: ${error.message}`
+          : "Assignment resource terminal is invalid",
+      );
+    }
+  }
+
+  #assertResourceUsageFinal(
+    assigned: {
+      readonly assignmentId: string;
+      readonly executorId: string;
+      readonly reservation: { readonly reservationId: string };
+    },
+    usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number },
+  ): void {
+    if (!requiresFormalResourceCoordination({
+      reservationId: assigned.reservation.reservationId,
+      assignmentId: assigned.assignmentId,
+    })) return;
+    if (!this.#resources) {
+      throw corruptRunJournal("Governed assignment has no resource coordinator");
+    }
+    try {
+      this.#resources.assertUsageFinal({
+        reservationId: assigned.reservation.reservationId,
+        assignmentId: assigned.assignmentId,
+        executorId: assigned.executorId,
+        usageFinal,
+      });
+    } catch (error) {
+      throw corruptRunJournal(
+        error instanceof Error
+          ? `Assignment final usage is invalid: ${error.message}`
+          : "Assignment final usage is invalid",
+      );
+    }
   }
 
   #publishStatusNotices(notices: readonly ConversationStatusNotice[]): void {
@@ -6803,6 +7105,19 @@ export class InProcessConversationDispatcher {
         recovered += 1;
         continue;
       }
+      if (ledger.phase === "failed") {
+        if (!ledger.failure) {
+          throw new Error("Failed executor assignment has no durable failure fact");
+        }
+        await this.#journal.failAssignedRun(
+          candidate.dispatch.envelope.work.runId,
+          candidate.assignmentId,
+          ledger.failure.reason,
+          ledger.failure.usageFinal,
+        );
+        recovered += 1;
+        continue;
+      }
       if (ledger.cancelProof) {
         if (!(await this.#submitCancellation(candidate.assignmentId))) {
           throw new Error("Durable cancel proof disappeared before submission");
@@ -7096,6 +7411,7 @@ function decideConversationCancel(
   state: RunProjection,
   input: ConversationCancelRequest,
   nextLsn: number,
+  queuedTerminalRecords: readonly LogicalRecord<GovernorRecord>[] = [],
 ): ProjectionTransactionDecision<ConversationCommitLogRecord, ConversationCancelResult> {
   const current = state.stateByRun.get(input.runId);
   if (!current) throw new Error("Cannot cancel an unknown run");
@@ -7104,6 +7420,7 @@ function decideConversationCancel(
     return {
       kind: "append",
       entries: [
+        ...queuedTerminalRecords,
         runRecord(conversationId, {
           t: "state",
           runId: input.runId,
@@ -7305,6 +7622,43 @@ function sameTerminationProof(
   right: DurableSourceBoundProof,
 ): boolean {
   return canonicalize(withoutSignature(left)) === canonicalize(withoutSignature(right));
+}
+
+function prepareRunQueuedTerminal(
+  coordinator: AssignmentResourceCoordinator | undefined,
+  state: RunProjection,
+  runId: string,
+  reason: "cancelled" | "failed" | "expired",
+): readonly LogicalRecord<GovernorRecord>[] {
+  return coordinator?.prepareQueuedTerminal({
+    workload: { kind: "run", id: runId, attempt: nextConversationAssignmentAttempt(state, runId) },
+    reason,
+  }) ?? [queuedTerminalDequeueRecord({
+    kind: "run",
+    id: runId,
+    attempt: nextConversationAssignmentAttempt(state, runId),
+  }, reason)];
+}
+
+function nextConversationAssignmentAttempt(
+  state: {
+    readonly assignedById: ReadonlyMap<
+      string,
+      { readonly record: { readonly runId: string; readonly reservation: { readonly attempt: number } } }
+    >;
+  },
+  runId: string,
+): number {
+  let latest = 0;
+  for (const assigned of state.assignedById.values()) {
+    if (assigned.record.runId === runId) {
+      latest = Math.max(latest, assigned.record.reservation.attempt);
+    }
+  }
+  if (latest >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Conversation assignment attempt is exhausted");
+  }
+  return latest + 1;
 }
 
 function runRecord(
@@ -8921,6 +9275,23 @@ async function applyFinalRecord(
     projection.entries.delete(key);
     projection.activeKeyByConversationRevision.delete(revisionKey);
   }
+}
+
+type TaggedConversationRunJournalRecord = Extract<
+  ConversationRunJournalRecord,
+  { t: string }
+>;
+
+function isTaggedRecord<Tag extends TaggedConversationRunJournalRecord["t"]>(
+  value: unknown,
+  tag: Tag,
+): value is Extract<TaggedConversationRunJournalRecord, { t: Tag }> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "t" in value &&
+    value.t === tag
+  );
 }
 
 function firstCommitIndexAfter(

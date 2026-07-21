@@ -38,6 +38,7 @@ import {
 } from "../setup-delivery.js";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
+import { governControlTextCall } from "./governed-control-llm.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type { AccessSurface } from "./access-surface.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
@@ -106,6 +107,17 @@ const conversationSurface: AccessSurface = {
     const turnMaintenance = createTurnMaintenance({
       convRepo: ctx.convRepo,
       journal: ctx.journalStore,
+      // turn 后台维护(自动命名/journal 凝练)是宿主维护类工作——scheduler 准入,
+      // 每次外调经 control 治理边界预占计量
+      governCallText: (call) =>
+        governControlTextCall(
+          {
+            governor: ctx.authorityRuntime!.resourceGovernor,
+            origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
+            workPrefix: "turn-maintenance",
+          },
+          call,
+        ),
       onRenamed: (conversationId, name) => {
         ctx.sessionBroadcastRef.current?.(
           conversationId,

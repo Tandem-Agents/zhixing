@@ -46,15 +46,19 @@ function runtimeAllocationTextCall(
   if (!input.managed) {
     throw new Error("perspective allocation requires runtime text call support.");
   }
+  const metering = input.modelCallMetering
+    ? { modelCallMetering: input.modelCallMetering }
+    : undefined;
 
   const callTextWithUsage = input.managed.runtime.callTextWithUsage;
   if (callTextWithUsage) {
-    return (prompt, role, opts) => callTextWithUsage(prompt, role, opts);
+    return (prompt, role, opts) =>
+      callTextWithUsage(prompt, role, { ...opts, ...metering });
   }
 
   const callText = input.managed.runtime.callText;
   if (callText) {
-    return (prompt, role, opts) => callText(prompt, role, opts);
+    return (prompt, role, opts) => callText(prompt, role, { ...opts, ...metering });
   }
 
   throw new Error("perspective allocation requires runtime text call support.");

@@ -21,6 +21,7 @@ import type {
   CancelProofBody,
   CommitEnvelope,
   DispatchResult,
+  GovernorRecord,
   JobOccurrence,
   JobRunState,
   JobStatusNotice,
@@ -32,6 +33,7 @@ import type {
   LogicalRecord,
   MutationBatch,
   PublishRecord,
+  RootResourceWorkload,
   RunExecutorPort,
   SealedBundle,
   SupersedeProof,
@@ -45,6 +47,7 @@ import type {
 import {
   assertProtocolIdentifier as assertIdentifier,
   assertActivatedAssignmentCapability,
+  assertQueuedTerminalDequeue,
   assignmentActivationDigest,
   buildJobActivationPayload,
   buildJobActivationPayloadFromBinding,
@@ -64,6 +67,8 @@ import {
   mutationBatchArtifact,
   permissionSnapshotLeaseDigest,
   protocolDigest,
+  queuedTerminalDequeueRecord,
+  requiresFormalResourceCoordination,
   sealedBundleArtifact,
   signJobActivation,
   systemJobParamsDigest,
@@ -93,7 +98,8 @@ import {
   type UnsignedJobEnvelope,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
-import { ManifestSelectionError } from "./conversation-transition-authority.js";
+import { ManifestSelectionError } from "./conversation-assignment-authority.js";
+import type { AssignmentResourceCoordinator } from "./resource-governor.js";
 import {
   compileDeliveryContent,
   DeliveryContentValidationError,
@@ -399,6 +405,11 @@ export interface JobCommitParticipant {
 }
 
 export interface SystemJobResourceCoordinator {
+  coordinate<T>(operation: () => Promise<T>): Promise<T>;
+  prepareQueuedTerminal(input: {
+    readonly workload: Extract<RootResourceWorkload, { readonly kind: "job" }>;
+    readonly reason: "cancelled" | "failed" | "expired";
+  }): readonly LogicalRecord<unknown>[];
   prepare(input: {
     readonly taskId: string;
     readonly jobRunId: string;
@@ -406,7 +417,7 @@ export interface SystemJobResourceCoordinator {
     readonly attempt: number;
   }): Promise<{
     readonly lease: SystemJobResourceLease;
-    readonly records: readonly LogicalRecord[];
+    readonly records: readonly LogicalRecord<unknown>[];
   }>;
   recover(input: {
     readonly fence: SystemJobFence;
@@ -415,13 +426,23 @@ export interface SystemJobResourceCoordinator {
     | {
         readonly kind: "replace";
         readonly lease: SystemJobResourceLease;
-        readonly records: readonly LogicalRecord[];
+        readonly records: readonly LogicalRecord<unknown>[];
       }
   >;
   terminal(input: {
     readonly lease: SystemJobResourceLease;
     readonly outcome: "committed" | "failed";
-  }): readonly LogicalRecord[];
+  }): readonly LogicalRecord<unknown>[];
+  preflightActivationRecords(input: {
+    readonly previousFence?: SystemJobFence;
+    readonly fence: SystemJobFence;
+    readonly records: readonly LogicalRecord<unknown>[];
+  }): void;
+  preflightTerminalRecords(input: {
+    readonly fence: SystemJobFence;
+    readonly outcome: "committed" | "failed";
+    readonly records: readonly LogicalRecord<unknown>[];
+  }): void;
   assertActivationRecords(input: {
     readonly previousFence?: SystemJobFence;
     readonly fence: SystemJobFence;
@@ -468,6 +489,7 @@ export interface JobJournalOptions {
   readonly compatibility?: JobCompatibilityProjection;
   readonly delivery: JobDeliveryParticipant;
   readonly commitParticipant?: JobCommitParticipant;
+  readonly resources?: AssignmentResourceCoordinator;
   readonly systemResources?: SystemJobResourceCoordinator;
   readonly systemHandlers?: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
   readonly clock?: () => string;
@@ -508,6 +530,7 @@ export class JobJournal {
   readonly #compatibility: JobCompatibilityProjection | undefined;
   readonly #delivery: JobDeliveryParticipant;
   readonly #commitParticipant: JobCommitParticipant | undefined;
+  readonly #resources: AssignmentResourceCoordinator | undefined;
   readonly #systemResources: SystemJobResourceCoordinator | undefined;
   readonly #systemHandlers: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
   readonly #clock: () => string;
@@ -540,6 +563,7 @@ export class JobJournal {
     this.#compatibility = options.compatibility;
     this.#delivery = options.delivery;
     this.#commitParticipant = options.commitParticipant;
+    this.#resources = options.resources;
     this.#systemResources = options.systemResources;
     this.#systemHandlers = options.systemHandlers ?? new Map();
     this.#clock = options.clock ?? (() => new Date().toISOString());
@@ -569,14 +593,23 @@ export class JobJournal {
       if (current && !taskCreationProvenanceMatches(current, candidate)) {
         throw new Error("Task creation provenance is immutable");
       }
-      const entries: LogicalRecord<JobJournalRecord>[] = [
+      const entries: LogicalRecord<JobJournalRecord | GovernorRecord>[] = [
         jobRecord(this.#taskId, taskRevisionRecord(candidate, prepared.stored)),
       ];
       if (taskRevisionStopsQueued(candidate) && state.activeJobRunId) {
         const active = state.states.get(state.activeJobRunId);
         const assignmentId = state.assignmentByJob.get(state.activeJobRunId);
         if (active?.state === "queued") {
+          const resourceRecords = prepareJobQueuedTerminal(
+            candidate.definition.kind === "system"
+              ? this.#systemResources
+              : this.#resources,
+            state,
+            state.activeJobRunId,
+            "cancelled",
+          );
           entries.push(
+            ...resourceRecords,
             stateRecord(
               this.#taskId,
               state.activeJobRunId,
@@ -628,7 +661,12 @@ export class JobJournal {
         ? state.states.get(activeJobRunId)
         : undefined;
       const atomicFacts = taskRevisionAtomicFacts({
-        records: entries.map((entry) => entry.body),
+        records: entries
+          .filter(
+            (entry): entry is LogicalRecord<JobJournalRecord> =>
+              entry.stream === jobStream(this.#taskId),
+          )
+          .map((entry) => entry.body),
         taskRevision: candidate.taskRevision,
         activeJobRunId,
         active,
@@ -696,7 +734,7 @@ export class JobJournal {
       }
       let occurrenceState: JobRunState = "queued";
       let effectiveActiveState: JobRunState | undefined;
-      const entries: LogicalRecord<JobJournalRecord>[] = [];
+      const entries: LogicalRecord<unknown>[] = [];
       if (state.activeJobRunId) {
         const active = state.states.get(state.activeJobRunId);
         effectiveActiveState = active?.state;
@@ -707,6 +745,12 @@ export class JobJournal {
             occurrenceState = "missed";
           } else {
             entries.push(
+              ...prepareJobQueuedTerminal(
+                this.#resources,
+                state,
+                state.activeJobRunId,
+                "expired",
+              ),
               stateRecord(
                 this.#taskId,
                 state.activeJobRunId,
@@ -926,9 +970,16 @@ export class JobJournal {
             attempt: envelope.resourceLease.workload.attempt,
           },
         };
+        const resourceRecords = requiresFormalResourceCoordination(envelope.resourceLease)
+          ? this.#resources?.prepareActivation(envelope.resourceLease)
+          : [];
+        if (requiresFormalResourceCoordination(envelope.resourceLease) && !this.#resources) {
+          throw new Error("Job assignment resource coordination is not configured");
+        }
         return {
           kind: "append",
           entries: [
+            ...(resourceRecords ?? []),
             jobRecord(this.#taskId, assigned),
             stateRecord(
               this.#taskId,
@@ -1202,6 +1253,7 @@ export class JobJournal {
       ledger.cancelProof !== undefined ||
       ledger.sealedBundleRef !== undefined ||
       ledger.phase === "halted" ||
+      ledger.phase === "failed" ||
       ledger.phase === "sealed" ||
       ledger.phase === "acked"
     ) {
@@ -1475,6 +1527,43 @@ export class JobJournal {
     return this.#closeQueued(jobRunId, "failed");
   }
 
+  async failAssigned(
+    jobRunId: string,
+    assignmentId: string,
+    usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number },
+  ): Promise<void> {
+    assertIdentifier(jobRunId, "Failed job run id");
+    assertIdentifier(assignmentId, "Failed job assignment id");
+    await this.#transact<void>((state) => {
+      const current = state.states.get(jobRunId);
+      if (current?.state === "failed") return { kind: "return", value: undefined };
+      const assigned = state.assignedById.get(assignmentId);
+      if (
+        !assigned ||
+        assigned.record.jobRunId !== jobRunId ||
+        state.assignmentByJob.get(jobRunId) !== assignmentId ||
+        (current?.state !== "dispatched" && current?.state !== "running")
+      ) {
+        throw new Error("Only the current active job assignment may report failure");
+      }
+      return {
+        kind: "append",
+        entries: [
+          ...capabilityRevocations(this.#taskId, state, assigned),
+          stateRecord(
+            this.#taskId,
+            jobRunId,
+            "failed",
+            current.statusRevision + 1,
+            assignmentId,
+            usageFinal,
+          ),
+        ],
+        value: undefined,
+      };
+    });
+  }
+
   async expireQueued(jobRunId: string): Promise<boolean> {
     return this.#closeQueued(jobRunId, "expired");
   }
@@ -1497,9 +1586,18 @@ export class JobJournal {
         if (!current) throw new Error("Cannot cancel an unknown job occurrence");
         const assignmentId = state.assignmentByJob.get(input.jobRunId);
         if (current.state === "queued") {
+          const resourceRecords = prepareJobQueuedTerminal(
+            definition.definition.kind === "system"
+              ? this.#systemResources
+              : this.#resources,
+            state,
+            input.jobRunId,
+            "cancelled",
+          );
           return {
             kind: "append",
             entries: [
+              ...resourceRecords,
               stateRecord(
                 this.#taskId,
                 input.jobRunId,
@@ -1591,7 +1689,7 @@ export class JobJournal {
       stream: jobStream(this.#taskId),
       initial: emptyProjection(),
       reducer: (state, record, commit) => this.#reduce(state, record, commit),
-      companionStreams: ["delivery"],
+      companionStreams: ["delivery", "governor"],
       prepareCompanions: (state, context, plan) => {
         const statuses = jobStatusDeliveryInputs(
           this.#taskId,
@@ -1639,7 +1737,7 @@ export class JobJournal {
           if (definition.state !== "enabled") {
             return { result: rejectedControl("fence-rejected", "Task is not enabled") };
           }
-          const replacementEntries: LogicalRecord<JobJournalRecord>[] = [];
+          const replacementEntries: LogicalRecord<unknown>[] = [];
           if (state.activeJobRunId) {
             const active = state.states.get(state.activeJobRunId);
             if (!active) {
@@ -1647,6 +1745,12 @@ export class JobJournal {
             }
             if (active.state === "queued") {
               replacementEntries.push(
+                ...prepareJobQueuedTerminal(
+                  this.#resources,
+                  state,
+                  state.activeJobRunId,
+                  "expired",
+                ),
                 stateRecord(
                   this.#taskId,
                   state.activeJobRunId,
@@ -1728,6 +1832,12 @@ export class JobJournal {
                 body: { t: "job-cancel", runState: "cancelled" },
               },
               authorityEntries: [
+                ...prepareJobQueuedTerminal(
+                  this.#resources,
+                  state,
+                  body.jobRunId,
+                  "cancelled",
+                ),
                 stateRecord(
                   this.#taskId,
                   body.jobRunId,
@@ -2262,9 +2372,11 @@ export class JobJournal {
               value: undefined,
             };
           }
+          this.#assertAssignmentUsageFinal(assigned.record, proof.usageFinal);
           return this.#acceptNotStarted(state, assigned, proof, current, fact);
         }
         if (proof.decision === "not-started") {
+          this.#assertAssignmentUsageFinal(assigned.record, proof.usageFinal);
           return this.#acceptNotStarted(state, assigned, proof, current, fact);
         }
         if (state.containedFacts.has(fact.openFactDigest)) {
@@ -2290,6 +2402,7 @@ export class JobJournal {
       ) {
         throw new Error("Cancel proof is invalid for the current job state");
       }
+      this.#assertAssignmentUsageFinal(assigned.record, proof.usageFinal);
       return this.#acceptCancellation(state, assigned, proof, current);
     });
     await this.resumeCompatibilityProjection();
@@ -2531,6 +2644,7 @@ export class JobJournal {
         method: "submission.submitBundle",
         assignmentId,
       });
+      this.#assertAssignmentUsageFinal(guardAssigned.record, bundle.usageFinal);
       return { committed: true, commitRevision: guardCommitted.jobRevision };
     }
     let closure: ValidatedJobBundleClosure;
@@ -2623,6 +2737,7 @@ export class JobJournal {
           method: "submission.submitBundle",
           assignmentId,
         });
+        this.#assertAssignmentUsageFinal(assigned.record, bundle.usageFinal);
         const mutationBatch = closure.batch;
         const definition = requireDefinitionRevision(state, occurrence.taskRevision);
         const delivery = this.#delivery.prepareJobCommit({
@@ -2897,6 +3012,10 @@ export class JobJournal {
             undefined,
           ),
         });
+        this.#systemResources!.preflightActivationRecords({
+          fence,
+          records: prepared.records,
+        });
         return {
           kind: "append",
           entries: [
@@ -2983,6 +3102,11 @@ export class JobJournal {
               current.statusRevision + 1,
               undefined,
             ),
+          });
+          this.#systemResources!.preflightActivationRecords({
+            previousFence: active.fence,
+            fence,
+            records: recovered.records,
           });
           return {
             kind: "append",
@@ -3085,6 +3209,11 @@ export class JobJournal {
           undefined,
         ),
       });
+      this.#systemResources!.preflightTerminalRecords({
+        fence,
+        outcome,
+        records: terminalRecords,
+      });
       return {
         kind: "append",
         entries: [
@@ -3099,16 +3228,20 @@ export class JobJournal {
   }
 
   async resumeSystemJobs(context: AuthorityCallContext): Promise<number> {
-    const running = await this.#select((state) =>
+    const resumable = await this.#select((state) =>
       [...state.states.entries()]
-        .filter(
-          ([jobRunId, value]) =>
-            value.state === "running" && state.systemFences.has(jobRunId),
-        )
+        .filter(([jobRunId, value]) => {
+          if (value.state === "running") return state.systemFences.has(jobRunId);
+          if (value.state !== "queued") return false;
+          const occurrence = state.occurrences.get(jobRunId);
+          if (!occurrence) return false;
+          const definition = requireDefinitionRevision(state, occurrence.taskRevision);
+          return definition.state === "enabled" && definition.definition.kind === "system";
+        })
         .map(([jobRunId]) => jobRunId),
     );
     let completed = 0;
-    for (const jobRunId of running) {
+    for (const jobRunId of resumable) {
       await this.#executeSystem(jobRunId, context, true);
       completed += 1;
     }
@@ -3227,6 +3360,7 @@ export class JobJournal {
       return {
         kind: "append",
         entries: [
+          ...prepareJobQueuedTerminal(this.#resources, state, jobRunId, target),
           stateRecord(
             this.#taskId,
             jobRunId,
@@ -3557,7 +3691,7 @@ export class JobJournal {
     return this.#operations.run(async () => {
       const cached = this.#projection;
       try {
-        const transaction = await this.#log.transactProjection<
+        const replay = () => this.#log.transactProjection<
           JobProjection,
           unknown,
           void
@@ -3569,6 +3703,9 @@ export class JobJournal {
             stream: jobStream(this.#taskId),
             ...(cached ? { cursor: cached.cursor } : {}),
           },
+        );
+        const transaction = await (
+          this.#resources ? this.#resources.coordinate(replay) : replay()
         );
         this.#projection = { state: transaction.state, cursor: transaction.cursor };
         return select(transaction.state);
@@ -3589,7 +3726,7 @@ export class JobJournal {
     return this.#operations.run(async () => {
       const cached = this.#projection;
       try {
-        const transaction = await this.#delivery.coordinate(() =>
+        const transact = () => this.#delivery.coordinate(() =>
           this.#log.transactProjection<
           JobProjection,
           unknown,
@@ -3600,6 +3737,10 @@ export class JobJournal {
           (state, context) => {
             const decision = decide(state, context);
             if (decision.kind !== "append") return decision;
+            const resourceRecords = this.#prepareAssignmentResourceTerminalRecords(
+              state,
+              decision.entries,
+            );
             const statuses = jobStatusDeliveryInputs(
               this.#taskId,
               state,
@@ -3610,7 +3751,11 @@ export class JobJournal {
             if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
             return {
               ...decision,
-              entries: [...decision.entries, ...prepared.records],
+              entries: [
+                ...resourceRecords,
+                ...decision.entries,
+                ...prepared.records,
+              ],
             };
           },
           {
@@ -3619,6 +3764,18 @@ export class JobJournal {
             candidateReferences,
           },
         ));
+        const coordinateSystem = () =>
+          this.#systemResources ? this.#systemResources.coordinate(transact) : transact();
+        const sameCoordinator =
+          this.#resources !== undefined &&
+          (this.#resources as unknown) === (this.#systemResources as unknown);
+        const transaction = await (
+          sameCoordinator
+            ? this.#resources!.coordinate(transact)
+            : this.#resources
+              ? this.#resources.coordinate(coordinateSystem)
+              : coordinateSystem()
+        );
         this.#projection = { state: transaction.state, cursor: transaction.cursor };
         if (transaction.commit) {
           this.#publishStatusNotices(
@@ -3636,6 +3793,109 @@ export class JobJournal {
         throw error;
       }
     });
+  }
+
+  #prepareAssignmentResourceTerminalRecords(
+    state: JobProjection,
+    entries: readonly LogicalRecord<unknown>[],
+  ): readonly LogicalRecord<unknown>[] {
+    const bodies = entries
+      .filter((entry) => entry.stream === jobStream(this.#taskId))
+      .map((entry) => entry.body)
+      .filter(isTaggedJobRecord);
+    const committed = bodies.find((body) => body.t === "committed");
+    const cancelled = bodies.find((body) => body.t === "cancel-proof-accepted");
+    const superseded = bodies.find((body) => body.t === "assignment-superseded");
+    const closedResolution = bodies.find(
+      (body) => body.t === "resolution" && body.fact.resolution !== undefined,
+    );
+    const failed = bodies.find(
+      (body) => body.t === "state" && body.state === "failed" && body.assignmentId !== undefined,
+    );
+    const assignmentId =
+      (committed?.t === "committed" ? committed.assignmentId : undefined) ??
+      (cancelled?.t === "cancel-proof-accepted" ? cancelled.assignmentId : undefined) ??
+      (superseded?.t === "assignment-superseded" ? superseded.assignmentId : undefined) ??
+      (closedResolution?.t === "resolution"
+        ? closedResolution.fact.subject.assignmentId
+        : undefined) ??
+      (failed?.t === "state" ? failed.assignmentId : undefined);
+    if (!assignmentId) return [];
+    const assigned = state.assignedById.get(assignmentId);
+    if (!assigned) throw corruptJobJournal("Resource terminal has no durable assignment");
+    if (!requiresFormalResourceCoordination(assigned.envelope.resourceLease)) return [];
+    if (!this.#resources) {
+      throw corruptJobJournal("Job assignment has no resource coordinator");
+    }
+    const mode = committed
+      ? "settle-release"
+      : cancelled?.t === "cancel-proof-accepted"
+        ? cancelled.proof.decision === "not-started"
+          ? "release"
+          : "settle-release"
+        : superseded
+          ? "release"
+          : failed?.t === "state" && failed.usageFinal
+            ? "settle-release"
+            : "reclaim";
+    return this.#resources.prepareTerminal({
+      lease: assigned.envelope.resourceLease,
+      mode,
+    });
+  }
+
+  #assertAssignmentResourceTerminal(
+    assigned: Extract<JobJournalRecord, { t: "assigned" }>,
+    mode: "settle-release" | "release" | "reclaim",
+    records: readonly LogicalRecord<unknown>[],
+  ): void {
+    if (!requiresFormalResourceCoordination({
+      reservationId: assigned.reservation.reservationId,
+      assignmentId: assigned.assignmentId,
+    })) return;
+    if (!this.#resources) {
+      throw corruptJobJournal("Governed job assignment has no resource coordinator");
+    }
+    try {
+      this.#resources.assertTerminalRecords({
+        reservationId: assigned.reservation.reservationId,
+        mode,
+        records,
+      });
+    } catch (error) {
+      throw corruptJobJournal(
+        error instanceof Error
+          ? `Job assignment resource terminal is invalid: ${error.message}`
+          : "Job assignment resource terminal is invalid",
+      );
+    }
+  }
+
+  #assertAssignmentUsageFinal(
+    assigned: Extract<JobJournalRecord, { t: "assigned" }>,
+    usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number },
+  ): void {
+    if (!requiresFormalResourceCoordination({
+      reservationId: assigned.reservation.reservationId,
+      assignmentId: assigned.assignmentId,
+    })) return;
+    if (!this.#resources) {
+      throw corruptJobJournal("Governed job assignment has no resource coordinator");
+    }
+    try {
+      this.#resources.assertUsageFinal({
+        reservationId: assigned.reservation.reservationId,
+        assignmentId: assigned.assignmentId,
+        executorId: assigned.executorId,
+        usageFinal,
+      });
+    } catch (error) {
+      throw corruptJobJournal(
+        error instanceof Error
+          ? `Job assignment final usage is invalid: ${error.message}`
+          : "Job assignment final usage is invalid",
+      );
+    }
   }
 
   #publishStatusNotices(notices: readonly JobStatusNotice[]): void {
@@ -3854,6 +4114,16 @@ export class JobJournal {
           requireDefinitionRevision(state, occurrence.taskRevision),
           this.#anchorEpoch,
         );
+        if (requiresFormalResourceCoordination(dispatch.resourceLease)) {
+          if (!this.#resources) {
+            throw corruptJobJournal("Job assignment has no resource coordinator");
+          }
+          this.#resources.assertActivationRecords({
+            lease: dispatch.resourceLease,
+            records: envelope.entries,
+            acceptedAt: envelope.at,
+          });
+        }
         state.assignedById.set(body.assignmentId, {
           record: body,
           envelope: dispatch,
@@ -4091,6 +4361,12 @@ export class JobJournal {
                 sameTerminationProofIdentity(record.proof, body.proof),
             ),
         });
+        if (!assigned) throw corruptJobJournal("Assignment supersede has no assignment");
+        this.#assertAssignmentResourceTerminal(
+          assigned.record,
+          "release",
+          envelope.entries,
+        );
         state.superseded.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         return state;
@@ -4206,6 +4482,13 @@ export class JobJournal {
             assigned !== undefined &&
             allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
         });
+        if (!assigned) throw corruptJobJournal("Accepted cancellation has no assignment");
+        this.#assertAssignmentUsageFinal(assigned.record, body.proof.usageFinal);
+        this.#assertAssignmentResourceTerminal(
+          assigned.record,
+          body.proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        );
         state.acceptedCancellations.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         return state;
@@ -4423,6 +4706,13 @@ export class JobJournal {
         if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
           throw corruptJobJournal("Job resolution sequence is invalid");
         }
+        if (jobFact.resolution?.kind.startsWith("user-")) {
+          this.#assertAssignmentResourceTerminal(
+            assigned.record,
+            "reclaim",
+            envelope.entries,
+          );
+        }
         state.resolutions.set(body.jobRunId, snapshot(jobFact));
         return state;
       }
@@ -4478,6 +4768,7 @@ export class JobJournal {
           ) {
             throw new Error("bundle identity does not match");
           }
+          this.#assertAssignmentUsageFinal(assigned.record, bundle.usageFinal);
           this.#delivery.assertJobCommit(
             {
               at: envelope.at,
@@ -4495,6 +4786,11 @@ export class JobJournal {
               : "Committed job bundle is invalid",
           );
         }
+        this.#assertAssignmentResourceTerminal(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        );
         state.committed.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         state.bundleAcknowledgementOutbox.add(body.assignmentId);
@@ -4658,6 +4954,26 @@ export class JobJournal {
               record.outcome === body.state,
           ),
         });
+        if (
+          previous.state === "queued" &&
+          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "job",
+                id: body.jobRunId,
+                attempt: nextJobAssignmentAttempt(state, body.jobRunId),
+              },
+              body.state,
+            );
+          } catch (error) {
+            throw corruptJobJournal(
+              error instanceof Error ? error.message : "Queued job resource dequeue is invalid",
+            );
+          }
+        }
         assertStateAtomicReplayContract({
           currentState: previous.state,
           nextState: body.state,
@@ -4699,6 +5015,19 @@ export class JobJournal {
                 record.assignmentId === body.assignmentId,
             ),
         });
+        if (body.state === "failed" && assigned) {
+          if (!allJobCapabilitiesRevoked(envelopeRecords, state, assigned)) {
+            throw corruptJobJournal("Assigned job failure is not atomic with revocation");
+          }
+          if (body.usageFinal) {
+            this.#assertAssignmentUsageFinal(assigned.record, body.usageFinal);
+          }
+          this.#assertAssignmentResourceTerminal(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          );
+        }
         state.states.set(body.jobRunId, {
           state: body.state,
           statusRevision: body.statusRevision,
@@ -4766,7 +5095,7 @@ export class JobJournal {
     this.#assertSubmissionContextIdentity(context, identity);
     return this.#operations.run(async () => {
       const cached = this.#submissionGuard;
-      const transaction = await (async () => {
+      const replay = async () => {
         try {
           return await this.#log.transactProjection<
             JobSubmissionGuardProjection,
@@ -4785,7 +5114,10 @@ export class JobJournal {
           this.#submissionGuard = undefined;
           throw error;
         }
-      })();
+      };
+      const transaction = await (
+        this.#resources ? this.#resources.coordinate(replay) : replay()
+      );
       this.#submissionGuard = {
         state: transaction.state,
         cursor: transaction.cursor,
@@ -5208,6 +5540,11 @@ export class JobJournal {
             ),
         });
         if (!assigned) throw corruptJobJournal("Assignment supersede is historical or duplicated");
+        this.#assertAssignmentResourceTerminal(
+          assigned.record,
+          "release",
+          envelope.entries,
+        );
         state.assignmentByJob.delete(assigned.record.jobRunId);
         state.closedAssignments.add(body.assignmentId);
         state.openConflictAssignments.delete(body.assignmentId);
@@ -5347,6 +5684,13 @@ export class JobJournal {
               record: assigned.record,
             }),
         });
+        if (!assigned) throw corruptJobJournal("Submission guard cancellation has no assignment");
+        this.#assertAssignmentUsageFinal(assigned.record, body.proof.usageFinal);
+        this.#assertAssignmentResourceTerminal(
+          assigned.record,
+          body.proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        );
         state.acceptedCancellations.add(body.assignmentId);
         return state;
       }
@@ -5473,6 +5817,13 @@ export class JobJournal {
         if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
           throw corruptJobJournal("Job resolution sequence is invalid");
         }
+        if (jobFact.resolution?.kind.startsWith("user-")) {
+          this.#assertAssignmentResourceTerminal(
+            assigned.record,
+            "reclaim",
+            envelope.entries,
+          );
+        }
         state.resolutions.set(body.jobRunId, snapshot(jobFact));
         if (jobFact.resolution) {
           state.assignmentByJob.delete(body.jobRunId);
@@ -5511,6 +5862,12 @@ export class JobJournal {
               record: assigned.record,
             }),
         });
+        if (!assigned) throw corruptJobJournal("Submission guard commit has no assignment");
+        this.#assertAssignmentResourceTerminal(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        );
         state.committedByAssignment.set(body.assignmentId, {
           ref: body.bundle.ref,
           jobRevision: body.jobRevision,
@@ -5649,6 +6006,26 @@ export class JobJournal {
               record.outcome === body.state,
           ),
         });
+        if (
+          previous.state === "queued" &&
+          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "job",
+                id: body.jobRunId,
+                attempt: nextJobAssignmentAttempt(state, body.jobRunId),
+              },
+              body.state,
+            );
+          } catch (error) {
+            throw corruptJobJournal(
+              error instanceof Error ? error.message : "Queued job resource dequeue is invalid",
+            );
+          }
+        }
         assertStateAtomicReplayContract({
           currentState: previous.state,
           nextState: body.state,
@@ -5690,6 +6067,19 @@ export class JobJournal {
                 record.assignmentId === body.assignmentId,
             ),
         });
+        if (body.state === "failed" && assigned) {
+          if (!allJobCapabilitiesRevoked(envelopeRecords, state, assigned)) {
+            throw corruptJobJournal("Assigned job failure is not atomic with revocation");
+          }
+          if (body.usageFinal) {
+            this.#assertAssignmentUsageFinal(assigned.record, body.usageFinal);
+          }
+          this.#assertAssignmentResourceTerminal(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          );
+        }
         state.states.set(body.jobRunId, {
           state: body.state,
           statusRevision: body.statusRevision,
@@ -5909,6 +6299,18 @@ export class InProcessJobDispatcher {
           throw new Error("Rejected job dispatch did not replay its terminal proof");
         }
         await this.#journal.acceptDispatchRejection(result);
+        recovered += 1;
+        continue;
+      }
+      if (ledger.phase === "failed") {
+        if (!ledger.failure) {
+          throw new Error("Failed executor job assignment has no durable failure fact");
+        }
+        await this.#journal.failAssigned(
+          candidate.dispatch.envelope.work.jobRunId,
+          candidate.assignmentId,
+          ledger.failure.usageFinal,
+        );
         recovered += 1;
         continue;
       }
@@ -6251,6 +6653,51 @@ function occurrenceInEntries(
   return undefined;
 }
 
+function prepareJobQueuedTerminal(
+  coordinator: AssignmentResourceCoordinator | SystemJobResourceCoordinator | undefined,
+  state: JobProjection,
+  jobRunId: string,
+  reason: "cancelled" | "failed" | "expired",
+): readonly LogicalRecord<GovernorRecord>[] {
+  return (coordinator?.prepareQueuedTerminal({
+    workload: { kind: "job", id: jobRunId, attempt: nextJobAssignmentAttempt(state, jobRunId) },
+    reason,
+  }) ?? [queuedTerminalDequeueRecord({
+    kind: "job",
+    id: jobRunId,
+    attempt: nextJobAssignmentAttempt(state, jobRunId),
+  }, reason)]) as readonly LogicalRecord<GovernorRecord>[];
+}
+
+function nextJobAssignmentAttempt(
+  state: {
+    readonly assignedById: ReadonlyMap<
+      string,
+      {
+        readonly record: {
+          readonly jobRunId: string;
+          readonly reservation: { readonly attempt: number };
+        };
+      }
+    >;
+    readonly systemFences: ReadonlyMap<string, SystemJobFence>;
+  },
+  jobRunId: string,
+): number {
+  let latest = 0;
+  for (const assigned of state.assignedById.values()) {
+    if (assigned.record.jobRunId === jobRunId) {
+      latest = Math.max(latest, assigned.record.reservation.attempt);
+    }
+  }
+  const systemFence = state.systemFences.get(jobRunId);
+  if (systemFence !== undefined) latest = Math.max(latest, systemFence.attempt);
+  if (latest >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Job assignment attempt is exhausted");
+  }
+  return latest + 1;
+}
+
 function jobRecord(
   taskId: string,
   body: JobJournalRecord,
@@ -6350,11 +6797,13 @@ function stateRecord(
   state: JobRunState,
   statusRevision: number,
   assignmentId?: string,
+  usageFinal?: { readonly reportDigest: string; readonly upToUsageSeq: number },
 ): LogicalRecord<JobJournalRecord> {
   return jobRecord(taskId, {
     t: "state",
     jobRunId,
     ...(assignmentId === undefined ? {} : { assignmentId }),
+    ...(usageFinal === undefined ? {} : { usageFinal: snapshot(usageFinal) }),
     state,
     statusRevision,
   });
@@ -7158,6 +7607,10 @@ function assertForeignRecords(
 
 function isTerminal(state: JobRunState): boolean {
   return isTerminalJobState(state);
+}
+
+function isTaggedJobRecord(value: unknown): value is JobJournalRecord {
+  return typeof value === "object" && value !== null && "t" in value;
 }
 
 function withoutSignature<T extends { signature: unknown }>(
