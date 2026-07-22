@@ -2,7 +2,8 @@ import { Buffer } from "node:buffer";
 import {
   AuthorityStorageError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
-  collectArtifactRefs,
+  resolveDispatchArtifactClosure,
+  resolveSealedBundleArtifactClosure,
   type ArtifactStore,
   type AuthorityCommitLog,
   type AuthorityLogSnapshot,
@@ -58,7 +59,6 @@ import {
   byteDigest,
   canonicalize,
   controlLeaseBindsDispatchEnvelope,
-  conversationBundleRoots,
   createAssignmentLedgerValidationState,
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
@@ -287,6 +287,13 @@ export interface AssignmentSubmissionAuthorizer {
     context: AuthorityCallContext,
     authorization: AssignmentSubmissionAuthorization,
   ): void;
+}
+
+export interface AssignmentSubmissionPreflightPort {
+  preflightSubmission(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): Promise<void>;
 }
 
 export interface ConversationRunJournalOptions {
@@ -724,7 +731,7 @@ export type ConversationCancelResult =
   | { readonly state: Exclude<ConversationRunState, "cancelled" | "cancel-requested"> };
 
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
-export class ConversationRunJournal {
+export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
   readonly #conversationId: string;
   readonly #ownerEpoch: number;
   readonly #log: AuthorityCommitLog;
@@ -1208,7 +1215,9 @@ export class ConversationRunJournal {
     if (existingState.assignmentIdInUse) {
       throw new Error("Assignment id already belongs to a different run");
     }
-    const envelopeReferences = await assertArtifactsPresent(envelope, this.#artifacts);
+    const envelopeReferences = [
+      ...(await resolveDispatchArtifactClosure(envelope, this.#artifacts)).transfer,
+    ];
     const artifact = dispatchEnvelopeArtifact(envelope);
     const stored = await this.#artifacts.put(artifact.bytes);
     if (canonicalize(stored) !== canonicalize(artifact.ref)) {
@@ -2498,6 +2507,15 @@ export class ConversationRunJournal {
         value: undefined,
       };
     });
+  }
+
+  /** Runs the submission guard before a remote adapter dereferences request assets. */
+  async preflightSubmission(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): Promise<void> {
+    this.#authenticateSubmission(context, identity);
+    await this.#loadSubmissionGuard(context, identity);
   }
 
   async reportStarted(
@@ -4389,7 +4407,7 @@ export class ConversationRunJournal {
           JSON.parse(Buffer.from(bytes).toString("utf8")) as PendingConversationDispatch["envelope"],
           this.#verifier,
         );
-        await assertArtifactsPresent(dispatch, this.#artifacts);
+        await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
         assertAssignedMatchesDispatch(
           body,
           dispatch,
@@ -8078,18 +8096,14 @@ async function validateConversationBundleClosure(
   if (!(await artifacts.has(artifact.ref))) {
     throw new BundleClosureError("missing-base", "Sealed bundle artifact is not present");
   }
-  const roots = conversationBundleRoots(bundle.body);
-  const references = [artifact.ref, ...roots, ...bundle.dependencyArtifacts];
-  for (const ref of references) {
-    if (!(await artifacts.has(ref))) {
-      throw new BundleClosureError(
-        "missing-base",
-        `Bundle artifact is not present: ${ref.digest}`,
-      );
-    }
+  let closure: Awaited<ReturnType<typeof resolveSealedBundleArtifactClosure>>;
+  try {
+    closure = await resolveSealedBundleArtifactClosure(bundle, artifacts);
+  } catch (error) {
+    throw bundleClosureReadError(error, "Invalid sealed bundle closure");
   }
+  const references = [artifact.ref, ...closure.transfer];
 
-  const runRecordDependencies: ArtifactRef[] = [];
   let runRecord: TranscriptRunRecord;
   if (isStoredReference(bundle.body.runRecord)) {
     try {
@@ -8102,7 +8116,6 @@ async function validateConversationBundleClosure(
       if (canonicalize(runRecord) !== text) {
         throw new TypeError("Transcript run record artifact is not canonical");
       }
-      runRecordDependencies.push(...collectArtifactRefs(runRecord));
     } catch (error) {
       throw bundleClosureReadError(error, "Invalid transcript run record");
     }
@@ -8136,16 +8149,6 @@ async function validateConversationBundleClosure(
     }
   }
 
-  const expectedDependencies = collectArtifactRefs([
-    runRecordDependencies,
-    ...(batch ? [batch] : []),
-  ]).filter((ref) => !roots.some((root) => root.digest === ref.digest));
-  if (canonicalize(expectedDependencies) !== canonicalize(bundle.dependencyArtifacts)) {
-    throw new BundleClosureError(
-      "invalid",
-      "Bundle dependency artifacts do not match the registered root closure",
-    );
-  }
   return { artifact, ...(batch ? { batch } : {}), runRecord, references };
 }
 
@@ -8618,19 +8621,6 @@ async function loadStored<T>(stored: Stored<T>, artifacts: ArtifactStore): Promi
     return JSON.parse(Buffer.from(await artifacts.get(stored.ref)).toString("utf8")) as T;
   }
   return snapshot(stored, "Inline run journal value");
-}
-
-async function assertArtifactsPresent(
-  value: unknown,
-  artifacts: ArtifactStore,
-): Promise<ArtifactRef[]> {
-  const references = collectArtifactRefs(value);
-  for (const ref of references) {
-    if (!(await artifacts.has(ref))) {
-      throw new TypeError(`Dispatch dependency is not present: ${ref.digest}`);
-    }
-  }
-  return references;
 }
 
 function isStoredReference<T>(value: Stored<T>): value is { readonly ref: ArtifactRef } {

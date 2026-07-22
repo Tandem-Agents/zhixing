@@ -8,7 +8,18 @@ import type {
 
 export interface ArtifactStore {
   put(bytes: Uint8Array): Promise<ArtifactRef>;
+  /**
+   * Durably imports a stream only when its complete content matches the declared reference.
+   * Content mismatches use `AuthorityStorageError("artifact-corrupt")`; retryable storage
+   * failures must remain distinguishable so callers can retain their recovery source.
+   */
+  putVerifiedStream(
+    ref: ArtifactRef,
+    chunks: AsyncIterable<Uint8Array>,
+  ): Promise<void>;
   get(ref: ArtifactRef): Promise<Uint8Array>;
+  /** Reads at most `limit` bytes without materializing the complete artifact. */
+  readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array>;
   has(ref: ArtifactRef): Promise<boolean>;
 }
 

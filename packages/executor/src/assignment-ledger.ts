@@ -3,6 +3,8 @@ import {
   AuthorityStorageError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   collectArtifactRefs,
+  resolveDispatchArtifactClosure,
+  resolveSealedBundleArtifactClosure,
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
@@ -41,6 +43,10 @@ import type {
   InteractionDisplay,
   RunDispatchArguments,
   RunExecutorPort,
+} from "@zhixing/core/contracts";
+import {
+  MAX_LEDGER_EVIDENCE_PAGE_BYTES,
+  MAX_LEDGER_EVIDENCE_PAGE_ENTRIES,
 } from "@zhixing/core/contracts";
 import type { PermissionRule, TrustRuleSnapshot } from "@zhixing/core/security";
 import {
@@ -144,26 +150,37 @@ export type ConversationDispatchPort = {
   ): Promise<SupersedeProof>;
 };
 
+export interface OwnerControlRequest {
+  readonly method:
+    | "executor.dispatch"
+    | "executor.cancel"
+    | "executor.supersede"
+    | "executor.queryLedger";
+  readonly assignmentId: string;
+  readonly authority?: AuthorityEpochRef;
+  readonly requestId: string;
+  readonly body: unknown;
+  readonly expectedOwnerDeviceId?: string;
+}
+
 export interface OwnerControlAuthorizer {
   authorize(
     context: AuthorityCallContext,
-    request: {
-      readonly method:
-        | "executor.dispatch"
-        | "executor.cancel"
-        | "executor.supersede"
-        | "executor.queryLedger";
-      readonly assignmentId: string;
-      readonly authority?: AuthorityEpochRef;
-      readonly requestId: string;
-      readonly body: unknown;
-      readonly expectedOwnerDeviceId?: string;
-    },
+    request: OwnerControlRequest,
+    authenticatedCallerDeviceId: string,
   ): {
     readonly authority: AuthorityEpochRef;
     readonly ownerDeviceId: string;
     readonly controlLease: ControlLease;
   };
+}
+
+export interface OwnerControlPreflightPort {
+  preflightOwnerControl(
+    context: AuthorityCallContext,
+    request: OwnerControlRequest,
+    authenticatedCallerDeviceId: string,
+  ): Promise<void>;
 }
 
 export interface AssignmentLedgerOptions {
@@ -418,13 +435,16 @@ type AbortCause =
       readonly surfacePrincipal: string;
     };
 
-const MAX_LEDGER_PAGE = 256;
 const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
 const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 
 /** Durable executor-side assignment protocol shared by conversation and job execution. */
-export class ConversationAssignmentLedger implements ConversationDispatchPort, RunExecutorPort {
+export class ConversationAssignmentLedger implements
+  ConversationDispatchPort,
+  RunExecutorPort,
+  OwnerControlPreflightPort
+{
   readonly #log: AuthorityCommitLog;
   readonly #artifacts: ArtifactStore;
   readonly #executorId: string;
@@ -829,6 +849,15 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     );
   }
 
+  /** Runs the same durable owner-control guard before a remote adapter dereferences payload assets. */
+  async preflightOwnerControl(
+    context: AuthorityCallContext,
+    request: OwnerControlRequest,
+    authenticatedCallerDeviceId: string,
+  ): Promise<void> {
+    await this.#acceptOwnerControl(context, request, authenticatedCallerDeviceId);
+  }
+
   async queryLedger(
     assignmentId: string,
     ctx: AuthorityCallContext,
@@ -841,9 +870,11 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
         range.fromSeq <= 0 ||
         !Number.isSafeInteger(range.limit) ||
         range.limit <= 0 ||
-        range.limit > MAX_LEDGER_PAGE)
+        range.limit > MAX_LEDGER_EVIDENCE_PAGE_ENTRIES)
     ) {
-      throw new RangeError(`Ledger evidence range must be within 1..${MAX_LEDGER_PAGE}`);
+      throw new RangeError(
+        `Ledger evidence range must be within 1..${MAX_LEDGER_EVIDENCE_PAGE_ENTRIES}`,
+      );
     }
     await this.#acceptOwnerControl(ctx, {
       method: "executor.queryLedger",
@@ -853,22 +884,43 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     });
     return this.#select(assignmentId, (state) => {
       if (!range) return snapshot(ledgerSnapshot(state), "Ledger snapshot");
-      const entries = state.entries.slice(
+      const candidates = state.entries.slice(
         range.fromSeq - 1,
         range.fromSeq - 1 + range.limit,
       );
-      if (entries.length === 0) {
+      if (candidates.length === 0) {
         throw new RangeError("Ledger evidence range starts beyond the durable ledger");
       }
-      const payload = {
-        v: 1 as const,
+      let lower = 1;
+      let upper = candidates.length;
+      let selected = 0;
+      while (lower <= upper) {
+        const count = Math.floor((lower + upper) / 2);
+        const payload = ledgerEvidencePayload(
+          assignmentId,
+          this.#executorId,
+          candidates.slice(0, count),
+          state.ledgerBySeq,
+        );
+        if (
+          Buffer.byteLength(canonicalize(payload), "utf8") <=
+          MAX_LEDGER_EVIDENCE_PAGE_BYTES
+        ) {
+          selected = count;
+          lower = count + 1;
+        } else {
+          upper = count - 1;
+        }
+      }
+      if (selected === 0) {
+        throw new RangeError("A ledger evidence entry exceeds the protocol page byte limit");
+      }
+      const payload = ledgerEvidencePayload(
         assignmentId,
-        fromSeq: entries[0]!.recordSeq,
-        toSeq: entries.at(-1)!.recordSeq,
-        entries: snapshot(entries, "Ledger evidence entries"),
-        chainDigest: state.ledgerBySeq[entries.at(-1)!.recordSeq - 1]!,
-        executorId: this.#executorId,
-      };
+        this.#executorId,
+        candidates.slice(0, selected),
+        state.ledgerBySeq,
+      );
       return snapshot(
         {
           ...payload,
@@ -1550,11 +1602,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     if (canonicalize(stored) !== canonicalize(artifact.ref)) {
       throw new Error("Sealed bundle store returned a different reference");
     }
-    for (const ref of [...conversationBundleRoots(bundle.body), ...bundle.dependencyArtifacts]) {
-      if (!(await this.#artifacts.has(ref))) {
-        throw new Error(`Sealed bundle dependency is not present: ${ref.digest}`);
-      }
-    }
+    await resolveSealedBundleArtifactClosure(bundle, this.#artifacts);
     await this.#recordSealedBundle(
       assignmentId,
       bundle,
@@ -1644,11 +1692,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     if (canonicalize(stored) !== canonicalize(artifact.ref)) {
       throw new Error("Sealed bundle store returned a different reference");
     }
-    for (const ref of [...jobBundleRoots(bundle.body), ...bundle.dependencyArtifacts]) {
-      if (!(await this.#artifacts.has(ref))) {
-        throw new Error(`Sealed bundle dependency is not present: ${ref.digest}`);
-      }
-    }
+    await resolveSealedBundleArtifactClosure(bundle, this.#artifacts);
     await this.#recordSealedBundle(
       assignmentId,
       bundle,
@@ -1863,18 +1907,8 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
 
   async #acceptOwnerControl(
     context: AuthorityCallContext,
-    request: {
-      readonly method:
-        | "executor.dispatch"
-        | "executor.cancel"
-        | "executor.supersede"
-        | "executor.queryLedger";
-      readonly assignmentId: string;
-      readonly authority?: AuthorityEpochRef;
-      readonly requestId: string;
-      readonly body: unknown;
-      readonly expectedOwnerDeviceId?: string;
-    },
+    request: OwnerControlRequest,
+    authenticatedCallerDeviceId = ownerControlCallerDeviceId(context),
   ): Promise<void> {
     const transaction = await this.#transact<boolean>(request.assignmentId, (state) => {
       const durableAuthority = state.control?.authority ?? authorityForProjection(state);
@@ -1884,13 +1918,17 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
       const authority = durableAuthority ?? request.authority;
       const expectedOwnerDeviceId =
         durableOwnerDeviceId ?? request.expectedOwnerDeviceId;
-      const authorized = this.#ownerControl.authorize(context, {
-        ...request,
-        ...(authority === undefined ? {} : { authority }),
-        ...(expectedOwnerDeviceId === undefined
-          ? {}
-          : { expectedOwnerDeviceId }),
-      });
+      const authorized = this.#ownerControl.authorize(
+        context,
+        {
+          ...request,
+          ...(authority === undefined ? {} : { authority }),
+          ...(expectedOwnerDeviceId === undefined
+            ? {}
+            : { expectedOwnerDeviceId }),
+        },
+        authenticatedCallerDeviceId,
+      );
       if (
         (authority !== undefined &&
           canonicalize(authorized.authority) !== canonicalize(authority)) ||
@@ -2691,13 +2729,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
   async #assertEnvelopeArtifactsPresent(
     envelope: AssignmentEnvelope,
   ): Promise<ArtifactRef[]> {
-    const references = collectArtifactRefs(envelope);
-    for (const ref of references) {
-      if (!(await this.#artifacts.has(ref))) {
-        throw new TypeError(`Dispatch dependency is not present: ${ref.digest}`);
-      }
-    }
-    return references;
+    return [...(await resolveDispatchArtifactClosure(envelope, this.#artifacts)).transfer];
   }
 
   async #loadSealedBundle(
@@ -2742,6 +2774,7 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort, R
     } else if (bundle.body.mutationBatch) {
       throw corruptLedger("Bundle mutation batch is absent from the ledger seal record");
     }
+    await resolveSealedBundleArtifactClosure(bundle, this.#artifacts);
     return bundle;
   }
 }
@@ -3064,6 +3097,23 @@ function ledgerSnapshot(state: LedgerProjection): LedgerSnapshot {
   };
 }
 
+function ledgerEvidencePayload(
+  assignmentId: string,
+  executorId: string,
+  entries: readonly AssignmentEntry[],
+  ledgerBySeq: readonly string[],
+) {
+  return {
+    v: 1 as const,
+    assignmentId,
+    fromSeq: entries[0]!.recordSeq,
+    toSeq: entries.at(-1)!.recordSeq,
+    entries: snapshot([...entries], "Ledger evidence entries"),
+    chainDigest: ledgerBySeq[entries.at(-1)!.recordSeq - 1]!,
+    executorId,
+  };
+}
+
 function nextEntry(
   state: LedgerProjection,
   body: AssignmentRecord,
@@ -3319,6 +3369,13 @@ function withoutSignature<T extends { readonly signature: unknown }>(
 ): Omit<T, "signature"> {
   const { signature: _, ...payload } = proof;
   return snapshot(payload, "Assignment activation payload");
+}
+
+function ownerControlCallerDeviceId(context: AuthorityCallContext): string {
+  if (context.principal.kind !== "owner-control") {
+    throw new Error("Executor control requires an owner grant");
+  }
+  return context.principal.grant.callerDeviceId;
 }
 
 function canonicalTime(value: string, label: string): number {

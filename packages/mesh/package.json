@@ -57,6 +57,10 @@
       "types": "./dist/replay-window.d.ts",
       "import": "./dist/replay-window.js"
     },
+    "./request-channel": {
+      "types": "./dist/request-channel.d.ts",
+      "import": "./dist/request-channel.js"
+    },
     "./service-registry": {
       "types": "./dist/service-registry.d.ts",
       "import": "./dist/service-registry.js"

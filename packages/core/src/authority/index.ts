@@ -1,5 +1,20 @@
 export { collectArtifactRefs } from "./artifact-references.js";
 export {
+  FileResumableArtifactReceiver,
+  assertCanonicalArtifactRefs,
+  describeDispatchArtifactClosure,
+  describeSealedBundleArtifactClosure,
+  normalizedArtifactRefs,
+  readArtifactRange,
+  resolveDispatchArtifactClosure,
+  resolveSealedBundleArtifactClosure,
+  type ArtifactReceiveProgress,
+  type AssignmentArtifactClosure,
+  type AssignmentArtifactDescriptor,
+  type AssignmentArtifactSchema,
+  type FileResumableArtifactReceiverOptions,
+} from "./assignment-artifacts.js";
+export {
   FileArtifactStore,
   type FileArtifactStoreOptions,
 } from "./artifact-store.js";

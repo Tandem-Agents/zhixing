@@ -1,4 +1,5 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   open,
   readFile,
@@ -55,7 +56,7 @@ export class FileArtifactStore implements ArtifactStore {
     return this.#withExclusive(async () => {
       const target = this.pathFor(ref);
       if (await exists(target)) {
-        await this.#readVerified(ref);
+        await this.#verifyStoredReference(ref);
         return ref;
       }
 
@@ -73,11 +74,11 @@ export class FileArtifactStore implements ArtifactStore {
           await rename(temporary, target);
         } catch (error) {
           if (!(await exists(target))) throw error;
-          await this.#readVerified(ref);
+          await this.#verifyStoredReference(ref);
           await rm(temporary, { force: true });
         }
         await syncDirectory(parent);
-        await this.#readVerified(ref);
+        await this.#verifyStoredReference(ref);
         return ref;
       } catch (error) {
         await handle?.close().catch(() => undefined);
@@ -91,10 +92,127 @@ export class FileArtifactStore implements ArtifactStore {
     return this.#readVerified(ref);
   }
 
+  async putVerifiedStream(
+    ref: ArtifactRef,
+    chunks: AsyncIterable<Uint8Array>,
+  ): Promise<void> {
+    assertArtifactRef(ref);
+    return this.#withExclusive(async () => {
+      const target = this.pathFor(ref);
+      if (await exists(target)) {
+        await this.#verifyStoredReference(ref);
+        return;
+      }
+
+      const parent = path.dirname(target);
+      await ensureDurableDirectory(parent);
+      const temporary = `${target}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+      const hash = createHash("sha256");
+      let receivedBytes = 0;
+      let handle;
+      try {
+        handle = await open(temporary, "wx", 0o600);
+        for await (const chunk of chunks) {
+          if (!(chunk instanceof Uint8Array)) {
+            throw new TypeError("Artifact stream chunks must be bytes");
+          }
+          receivedBytes += chunk.byteLength;
+          if (receivedBytes > ref.bytes) {
+            throw new AuthorityStorageError(
+              "artifact-corrupt",
+              "Artifact stream exceeds its declared byte length",
+            );
+          }
+          hash.update(chunk);
+          let written = 0;
+          while (written < chunk.byteLength) {
+            const result = await handle.write(
+              chunk,
+              written,
+              chunk.byteLength - written,
+              null,
+            );
+            if (result.bytesWritten === 0) {
+              throw new Error("Artifact stream write made no progress");
+            }
+            written += result.bytesWritten;
+          }
+        }
+        const digest = `sha256:${hash.digest("hex")}`;
+        if (receivedBytes !== ref.bytes || digest !== ref.digest) {
+          throw new AuthorityStorageError(
+            "artifact-corrupt",
+            "Artifact stream does not match its declared reference",
+          );
+        }
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        try {
+          await rename(temporary, target);
+        } catch (error) {
+          if (!(await exists(target))) throw error;
+          await this.#verifyStoredReference(ref);
+          await rm(temporary, { force: true });
+        }
+        await syncDirectory(parent);
+      } catch (error) {
+        await handle?.close().catch(() => undefined);
+        await rm(temporary, { force: true });
+        throw error;
+      }
+    });
+  }
+
+  async readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array> {
+    assertArtifactRef(ref);
+    assertNonNegativeSafeInteger(offset, "Artifact range offset");
+    assertPositiveSafeInteger(limit, "Artifact range limit");
+    if (offset > ref.bytes) {
+      throw new RangeError("Artifact range starts beyond its byte length");
+    }
+    let handle;
+    try {
+      handle = await open(this.pathFor(ref), "r");
+      const metadata = await handle.stat();
+      if (metadata.size !== ref.bytes) {
+        throw new AuthorityStorageError(
+          "artifact-corrupt",
+          `Artifact content does not match its reference: ${ref.digest}`,
+        );
+      }
+      const length = Math.min(limit, ref.bytes - offset);
+      const bytes = Buffer.allocUnsafe(length);
+      let read = 0;
+      while (read < length) {
+        const result = await handle.read(bytes, read, length - read, offset + read);
+        if (result.bytesRead === 0) {
+          throw new AuthorityStorageError(
+            "artifact-corrupt",
+            `Artifact content does not match its reference: ${ref.digest}`,
+          );
+        }
+        read += result.bytesRead;
+      }
+      return bytes;
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        throw new AuthorityStorageError(
+          "artifact-missing",
+          `Artifact is not present: ${ref.digest}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
   async has(ref: ArtifactRef): Promise<boolean> {
     assertArtifactRef(ref);
     try {
-      await this.#readVerified(ref);
+      await this.#verifyStoredReference(ref);
       return true;
     } catch (error) {
       if (error instanceof AuthorityStorageError && error.code === "artifact-missing") {
@@ -135,7 +253,34 @@ export class FileArtifactStore implements ArtifactStore {
 
   async #assertPresent(references: readonly ArtifactRef[]): Promise<void> {
     for (const ref of deduplicateReferences(references)) {
-      await this.#readVerified(ref);
+      await this.#verifyStoredReference(ref);
+    }
+  }
+
+  async #verifyStoredReference(ref: ArtifactRef): Promise<void> {
+    assertArtifactRef(ref);
+    const hash = createHash("sha256");
+    let bytes = 0;
+    try {
+      for await (const chunk of createReadStream(this.pathFor(ref))) {
+        bytes += chunk.length;
+        hash.update(chunk);
+      }
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        throw new AuthorityStorageError(
+          "artifact-missing",
+          `Artifact is not present: ${ref.digest}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    if (bytes !== ref.bytes || `sha256:${hash.digest("hex")}` !== ref.digest) {
+      throw new AuthorityStorageError(
+        "artifact-corrupt",
+        `Artifact content does not match its reference: ${ref.digest}`,
+      );
     }
   }
 
@@ -256,4 +401,16 @@ async function exists(file: string): Promise<boolean> {
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+function assertNonNegativeSafeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${label} must be a non-negative safe integer`);
+  }
+}
+
+function assertPositiveSafeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
 }

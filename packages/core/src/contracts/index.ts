@@ -8,6 +8,8 @@ export {
   MAX_CONVERSATION_QUESTION_BYTES,
   MAX_INTERACTION_RESPONSE_TEXT_BYTES,
   MAX_INLINE_INTERACTION_DISPLAY_BYTES,
+  MAX_LEDGER_EVIDENCE_PAGE_BYTES,
+  MAX_LEDGER_EVIDENCE_PAGE_ENTRIES,
 } from "./protocol.js";
 export type * from "./records.js";
 export type * from "./commit-log.js";

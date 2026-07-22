@@ -98,7 +98,12 @@ describe("mesh transport foundation", () => {
       handler: async () => new Uint8Array(),
     });
     await expect(
-      registry.dispatch("forgery-test", new Uint8Array(), forged),
+      registry.dispatch(
+        "forgery-test",
+        new Uint8Array(),
+        forged,
+        new AbortController().signal,
+      ),
     ).rejects.toThrow("Mesh operation requires an authenticated session");
 
     const forgedClose = vi.fn(async () => {});

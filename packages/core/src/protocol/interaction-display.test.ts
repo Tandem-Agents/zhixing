@@ -28,6 +28,23 @@ class MemoryArtifacts implements ArtifactStore {
     return Uint8Array.from(bytes);
   }
 
+  async putVerifiedStream(
+    ref: ArtifactRef,
+    chunks: AsyncIterable<Uint8Array>,
+  ): Promise<void> {
+    const values: Uint8Array[] = [];
+    for await (const chunk of chunks) values.push(chunk);
+    const stored = await this.put(Buffer.concat(values));
+    if (stored.digest !== ref.digest || stored.bytes !== ref.bytes) {
+      this.blobs.delete(stored.digest);
+      throw new TypeError("Artifact stream does not match its reference");
+    }
+  }
+
+  async readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array> {
+    return (await this.get(ref)).slice(offset, offset + limit);
+  }
+
   async has(ref: ArtifactRef): Promise<boolean> {
     return this.blobs.has(ref.digest);
   }

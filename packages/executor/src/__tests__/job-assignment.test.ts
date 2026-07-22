@@ -279,8 +279,17 @@ class WriteCountingArtifactStore implements ArtifactStore {
     return this.#delegate.put(bytes);
   }
 
+  putVerifiedStream(...args: Parameters<ArtifactStore["putVerifiedStream"]>) {
+    this.writes += 1;
+    return this.#delegate.putVerifiedStream(...args);
+  }
+
   get(ref: Parameters<ArtifactStore["get"]>[0]) {
     return this.#delegate.get(ref);
+  }
+
+  readRange(...args: Parameters<ArtifactStore["readRange"]>) {
+    return this.#delegate.readRange(...args);
   }
 
   has(ref: Parameters<ArtifactStore["has"]>[0]) {
@@ -304,11 +313,22 @@ class FaultingArtifactStore implements ArtifactStore {
     return this.#delegate.put(bytes);
   }
 
+  putVerifiedStream(...args: Parameters<ArtifactStore["putVerifiedStream"]>) {
+    return this.#delegate.putVerifiedStream(...args);
+  }
+
   get(ref: Parameters<ArtifactStore["get"]>[0]) {
     if (ref.digest === this.failDigest) {
       throw new Error("simulated transient delivery content read failure");
     }
     return this.#delegate.get(ref);
+  }
+
+  readRange(...args: Parameters<ArtifactStore["readRange"]>) {
+    if (args[0].digest === this.failDigest) {
+      throw new Error("simulated transient delivery content read failure");
+    }
+    return this.#delegate.readRange(...args);
   }
 
   has(ref: Parameters<ArtifactStore["has"]>[0]) {

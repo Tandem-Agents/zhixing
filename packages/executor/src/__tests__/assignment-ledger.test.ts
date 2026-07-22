@@ -26,6 +26,10 @@ import type {
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
+  MAX_LEDGER_EVIDENCE_PAGE_BYTES,
+  MAX_LEDGER_EVIDENCE_PAGE_ENTRIES,
+} from "@zhixing/core/contracts";
+import {
   advanceAssignmentLedger,
   assignmentActivationDigest,
   assignmentLedgerSeed,
@@ -215,9 +219,19 @@ class CountingArtifactStore implements ArtifactStore {
     return this.#delegate.put(bytes);
   }
 
+  putVerifiedStream(...args: Parameters<ArtifactStore["putVerifiedStream"]>) {
+    this.puts += 1;
+    return this.#delegate.putVerifiedStream(...args);
+  }
+
   get(ref: Parameters<ArtifactStore["get"]>[0]) {
     this.gets += 1;
     return this.#delegate.get(ref);
+  }
+
+  readRange(...args: Parameters<ArtifactStore["readRange"]>) {
+    this.gets += 1;
+    return this.#delegate.readRange(...args);
   }
 
   has(ref: Parameters<ArtifactStore["has"]>[0]) {
@@ -255,11 +269,22 @@ class FaultingArtifactStore implements ArtifactStore {
     return this.#delegate.put(bytes);
   }
 
+  putVerifiedStream(...args: Parameters<ArtifactStore["putVerifiedStream"]>) {
+    return this.#delegate.putVerifiedStream(...args);
+  }
+
   get(ref: Parameters<ArtifactStore["get"]>[0]) {
     if (ref.digest === this.failDigest) {
       throw new Error("simulated transient delivery content read failure");
     }
     return this.#delegate.get(ref);
+  }
+
+  readRange(...args: Parameters<ArtifactStore["readRange"]>) {
+    if (args[0].digest === this.failDigest) {
+      throw new Error("simulated transient delivery content read failure");
+    }
+    return this.#delegate.readRange(...args);
   }
 
   has(ref: Parameters<ArtifactStore["has"]>[0]) {
@@ -297,10 +322,11 @@ function mirrorReceipt(batch: ConversationInteractionMirrorBatch) {
 }
 
 const ownerControl: OwnerControlAuthorizer = {
-  authorize(context, request) {
+  authorize(context, request, authenticatedCallerDeviceId) {
     if (
       context.principal.kind !== "owner-control" ||
       context.principal.grant.assignmentId !== request.assignmentId ||
+      context.principal.grant.callerDeviceId !== authenticatedCallerDeviceId ||
       !context.principal.grant.methods.includes(request.method) ||
       (request.authority !== undefined &&
         canonicalize(context.principal.grant.scope) !== canonicalize(request.authority))
@@ -1039,6 +1065,27 @@ describe("conversation assignment protocol", () => {
     )).resolves.toMatchObject({ accepted: true });
   });
 
+  it("binds remote owner-control preflight to the authenticated mesh peer", async () => {
+    const harness = await createHarness();
+    const request = {
+      method: "executor.queryLedger" as const,
+      assignmentId: ASSIGNMENT_ID,
+      requestId: "mesh-query-1",
+      body: { range: null },
+    };
+    const context = ownerContext(ASSIGNMENT_ID, request.method, {
+      requestId: request.requestId,
+      body: request.body,
+    });
+
+    await expect(
+      harness.ledger.preflightOwnerControl(context, request, "untrusted-owner"),
+    ).rejects.toThrow("authorization failed");
+    await expect(
+      harness.ledger.preflightOwnerControl(context, request, "test-owner"),
+    ).resolves.toBeUndefined();
+  });
+
   it("does not derive durable owner control from an unverified activation authority", async () => {
     const harness = await createUnassignedHarness();
     const dispatch = await harness.journal.assign(harness.unsigned);
@@ -1712,18 +1759,92 @@ describe("conversation assignment protocol", () => {
     );
   }, 20_000);
 
+  it("returns the largest bounded ledger evidence prefix and resumes without gaps", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    for (let index = 0; index < 20; index += 1) {
+      await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+        domain: "session",
+        requestId: `large-page-mutation-${index}`,
+        mutation: {
+          kind: "task-list-op",
+          op: {
+            op: "set",
+            state: {
+              items: [{
+                id: `large-page-task-${index}`,
+                content: "x".repeat(28 * 1024),
+                status: "pending",
+              }],
+            },
+          },
+        },
+      });
+    }
+    const snapshot = await harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+    );
+    if ("entries" in snapshot) throw new Error("expected ledger snapshot");
+
+    const recordSeqs: number[] = [];
+    let fromSeq = 1;
+    let pageCount = 0;
+    while (fromSeq <= snapshot.lastSeq) {
+      const page = await harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+        { fromSeq, limit: MAX_LEDGER_EVIDENCE_PAGE_ENTRIES },
+      );
+      if (!("entries" in page)) throw new Error("expected ledger evidence page");
+      const { signature: _, ...payload } = page;
+      expect(Buffer.byteLength(canonicalize(payload), "utf8")).toBeLessThanOrEqual(
+        MAX_LEDGER_EVIDENCE_PAGE_BYTES,
+      );
+      recordSeqs.push(...page.entries.map((entry) => entry.recordSeq));
+      fromSeq = page.toSeq + 1;
+      pageCount += 1;
+    }
+    expect(recordSeqs).toEqual(
+      Array.from({ length: snapshot.lastSeq }, (_, index) => index + 1),
+    );
+    expect(pageCount).toBeGreaterThan(1);
+  }, 30_000);
+
   it("rejects absent dispatch dependencies and assignment-id reuse across runs", async () => {
     const missingHarness = await createUnassignedHarness();
     const missing = {
       digest: `sha256:${"f".repeat(64)}`,
       bytes: 23,
     } as const;
+    const windowRef = await missingHarness.artifacts.put(Buffer.from(canonicalize([{
+      role: "user",
+      content: [{
+        type: "tool_use",
+        id: "missing-input",
+        name: "read",
+        input: { attachment: missing },
+      }],
+    }]), "utf8"));
     await expect(
       missingHarness.journal.assign({
         ...missingHarness.unsigned,
         dependencyArtifacts: [missing],
+        work: {
+          ...missingHarness.unsigned.work,
+          windowInput: {
+            t: "full",
+            windowEpoch: 1,
+            messages: { ref: windowRef },
+          },
+        },
       }),
-    ).rejects.toThrow(`Dispatch dependency is not present: ${missing.digest}`);
+    ).rejects.toMatchObject({ code: "artifact-missing" });
 
     const harness = await createHarness();
     const secondRunId = "run-2";
@@ -1761,10 +1882,18 @@ describe("conversation assignment protocol", () => {
 
   it("retains the complete dispatch artifact closure from both durable roots", async () => {
     const harness = await createUnassignedHarness();
-    const windowBytes = Buffer.from("durable-window-input", "utf8");
     const dependencyBytes = Buffer.from("durable-transitive-dependency", "utf8");
-    const windowRef = await harness.artifacts.put(windowBytes);
     const dependencyRef = await harness.artifacts.put(dependencyBytes);
+    const windowBytes = Buffer.from(canonicalize([{
+      role: "user",
+      content: [{
+        type: "tool_use",
+        id: "durable-input",
+        name: "read",
+        input: { attachment: dependencyRef },
+      }],
+    }]), "utf8");
+    const windowRef = await harness.artifacts.put(windowBytes);
     const unsigned: UnsignedConversationEnvelope = {
       ...harness.unsigned,
       dependencyArtifacts: [dependencyRef],
@@ -1837,10 +1966,18 @@ describe("conversation assignment protocol", () => {
 
   it("never commits a dispatch whose nested artifacts lose a GC race", async () => {
     const harness = await createUnassignedHarness();
-    const windowRef = await harness.artifacts.put(Buffer.from("racing-window", "utf8"));
     const dependencyRef = await harness.artifacts.put(
       Buffer.from("racing-dependency", "utf8"),
     );
+    const windowRef = await harness.artifacts.put(Buffer.from(canonicalize([{
+      role: "user",
+      content: [{
+        type: "tool_use",
+        id: "racing-input",
+        name: "read",
+        input: { attachment: dependencyRef },
+      }],
+    }]), "utf8"));
     const unsigned: UnsignedConversationEnvelope = {
       ...harness.unsigned,
       dependencyArtifacts: [dependencyRef],

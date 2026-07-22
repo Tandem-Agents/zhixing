@@ -351,7 +351,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#projectLifecycle = options.projectLifecycle;
     this.#recoverAuxiliary = options.recoverAuxiliary;
     const ownerControl = createOwnerControlAuthorizer(
-      options.authority.deviceId,
       options.authority.verifier,
       this.#clock,
     );
@@ -2120,12 +2119,11 @@ function createSubmissionAuthorizer(
 }
 
 function createOwnerControlAuthorizer(
-  deviceId: string,
   verifier: ProtocolSignatureVerifier,
   clock: () => string,
 ): OwnerControlAuthorizer {
   return {
-    authorize(context, request) {
+    authorize(context, request, authenticatedCallerDeviceId) {
       if (context.principal.kind !== "owner-control") {
         throw new Error("Executor control requires an owner grant");
       }
@@ -2142,8 +2140,8 @@ function createOwnerControlAuthorizer(
         verifier,
         method: request.method,
         assignmentId: request.assignmentId,
-        callerDeviceId: deviceId,
-        authenticatedCallerDeviceId: deviceId,
+        callerDeviceId: authenticatedCallerDeviceId,
+        authenticatedCallerDeviceId,
         ...(request.expectedOwnerDeviceId === undefined
           ? {}
           : { expectedOwnerDeviceId: request.expectedOwnerDeviceId }),

@@ -7,6 +7,7 @@ import {
 export type MeshServiceHandler = (
   payload: Uint8Array,
   connection: SecureMeshConnection,
+  signal: AbortSignal,
 ) => Promise<Uint8Array>;
 
 export type MeshServiceDefinition =
@@ -63,6 +64,7 @@ export class MeshServiceRegistry {
     serviceId: string,
     payload: Uint8Array,
     connection: SecureMeshConnection,
+    signal: AbortSignal,
   ): Promise<Uint8Array> {
     assertSecureMeshConnection(connection);
     const service = this.services.get(serviceId);
@@ -81,6 +83,6 @@ export class MeshServiceRegistry {
         `Mesh service is unavailable during protocol-version skew: ${serviceId}`,
       );
     }
-    return service.handler(payload, connection);
+    return service.handler(payload, connection, signal);
   }
 }

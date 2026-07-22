@@ -96,13 +96,28 @@ describe("mutually authenticated mesh transport", () => {
       handler: async (payload) => payload,
     });
     await expect(
-      registry.dispatch("compatibility.info", Buffer.from("info"), inbound),
+      registry.dispatch(
+        "compatibility.info",
+        Buffer.from("info"),
+        inbound,
+        new AbortController().signal,
+      ),
     ).resolves.toEqual(Buffer.from("info"));
     await expect(
-      registry.dispatch("history.read", Buffer.from("history"), inbound),
+      registry.dispatch(
+        "history.read",
+        Buffer.from("history"),
+        inbound,
+        new AbortController().signal,
+      ),
     ).rejects.toMatchObject({ code: "incompatible-version" });
     await expect(
-      registry.dispatch("session.write", Buffer.from("input"), inbound),
+      registry.dispatch(
+        "session.write",
+        Buffer.from("input"),
+        inbound,
+        new AbortController().signal,
+      ),
     ).rejects.toMatchObject({ code: "incompatible-version" });
     await client.close();
   });
@@ -140,6 +155,7 @@ describe("mutually authenticated mesh transport", () => {
         "session.write",
         Buffer.from("compatible-input"),
         client,
+        new AbortController().signal,
       ),
     ).resolves.toEqual(Buffer.from("compatible-input"));
     await client.close();

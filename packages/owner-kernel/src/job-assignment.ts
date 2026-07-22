@@ -4,6 +4,8 @@ import {
   AuthorityStorageError,
   collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
+  resolveDispatchArtifactClosure,
+  resolveSealedBundleArtifactClosure,
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
@@ -59,7 +61,6 @@ import {
   createSignedJobEnvelope,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
-  jobBundleRoots,
   jobDeliveryPlanDigest,
   matchManifest,
   interactionMirrorBatchDigest,
@@ -109,6 +110,7 @@ import type {
   AssignmentSubmissionAuthorizer,
   AssignmentSubmissionAuthorization,
   AssignmentSubmissionIdentity,
+  AssignmentSubmissionPreflightPort,
   ConversationAbortTicketAuthorizer,
   InProcessBundleSubmission,
   InProcessDispatchContextFactory,
@@ -516,7 +518,7 @@ export type JobCancelResult =
   | { readonly state: Exclude<JobRunState, "cancelled" | "cancel-requested"> };
 
 /** Anchor-owned durable authority for one task and all of its immutable occurrences. */
-export class JobJournal {
+export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #taskId: string;
   readonly #anchorEpoch: number;
   readonly #log: AuthorityCommitLog;
@@ -908,7 +910,9 @@ export class JobJournal {
       throw new TypeError("Materialized assignment does not match its preflight plan");
     }
     const envelope = createSignedJobEnvelope(unsigned, this.#signer, this.#verifier);
-    const references = await assertArtifactsPresent(envelope, this.#artifacts);
+    const references = [
+      ...(await resolveDispatchArtifactClosure(envelope, this.#artifacts)).transfer,
+    ];
     const artifact = dispatchEnvelopeArtifact(envelope);
     const stored = await this.#artifacts.put(artifact.bytes);
     if (canonicalize(stored) !== canonicalize(artifact.ref)) {
@@ -1361,6 +1365,15 @@ export class JobJournal {
         value: undefined,
       };
     });
+  }
+
+  /** Runs the submission guard before a remote adapter dereferences request assets. */
+  async preflightSubmission(
+    context: AuthorityCallContext,
+    identity: AssignmentSubmissionIdentity,
+  ): Promise<void> {
+    this.#authenticateSubmission(context, identity);
+    await this.#loadSubmissionGuard(context, identity);
   }
 
   async reportStarted(
@@ -4093,6 +4106,7 @@ export class JobJournal {
           JSON.parse(Buffer.from(bytes).toString("utf8")) as JobEnvelope,
           this.#verifier,
         );
+        await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
         const dispatchArtifact = dispatchEnvelopeArtifact(dispatch);
         if (
           canonicalize(dispatchArtifact.ref) !== canonicalize(body.dispatchRef) ||
@@ -7493,20 +7507,13 @@ async function validateJobBundleClosure(
       "Sealed job bundle artifact is not present",
     );
   }
-  const roots = jobBundleRoots(bundle.body);
-  const references = collectArtifactRefs([
-    artifact.ref,
-    roots,
-    bundle.dependencyArtifacts,
-  ]);
-  for (const reference of references) {
-    if (!(await artifacts.has(reference))) {
-      throw new JobBundleClosureError(
-        "missing-base",
-        `Job bundle artifact is not present: ${reference.digest}`,
-      );
-    }
+  let closure: Awaited<ReturnType<typeof resolveSealedBundleArtifactClosure>>;
+  try {
+    closure = await resolveSealedBundleArtifactClosure(bundle, artifacts);
+  } catch (error) {
+    throw jobBundleClosureReadError(error, "Invalid sealed job bundle closure");
   }
+  const references = [artifact.ref, ...closure.transfer];
   let batch: import("@zhixing/core/contracts").MutationBatch | undefined;
   if (bundle.body.mutationBatch) {
     try {
@@ -7529,19 +7536,6 @@ async function validateJobBundleClosure(
     } catch (error) {
       throw jobBundleClosureReadError(error, "Invalid job mutation batch");
     }
-  }
-  const rootDigests = new Set(roots.map((reference) => reference.digest));
-  const expectedDependencies = collectArtifactRefs(batch ? [batch] : []).filter(
-    (reference) => !rootDigests.has(reference.digest),
-  );
-  if (
-    canonicalize(expectedDependencies) !==
-    canonicalize(bundle.dependencyArtifacts)
-  ) {
-    throw new JobBundleClosureError(
-      "invalid",
-      "Job bundle dependencies do not match the mutation closure",
-    );
   }
   return {
     artifact,

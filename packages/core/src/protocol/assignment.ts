@@ -26,7 +26,11 @@ import type {
   SupersedeProof,
 } from "../contracts/index.js";
 import type { ConfirmationDecision } from "../confirmation/types.js";
-import { MAX_CONVERSATION_QUESTION_BYTES } from "../contracts/protocol.js";
+import {
+  MAX_CONVERSATION_QUESTION_BYTES,
+  MAX_LEDGER_EVIDENCE_PAGE_BYTES,
+  MAX_LEDGER_EVIDENCE_PAGE_ENTRIES,
+} from "../contracts/protocol.js";
 import { validateAuthorityError as validateAuthorityErrorContract } from "./contract-validation.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateStagedMutationRecord } from "./commit.js";
@@ -1045,8 +1049,16 @@ export function validateLedgerEvidencePage(
   if (page.toSeq < page.fromSeq || page.entries.length !== page.toSeq - page.fromSeq + 1) {
     throw new TypeError("Ledger evidence page range is not a non-empty contiguous prefix");
   }
-  if (page.entries.length > 256) {
-    throw new TypeError("Ledger evidence page exceeds the 256-entry protocol limit");
+  if (page.entries.length > MAX_LEDGER_EVIDENCE_PAGE_ENTRIES) {
+    throw new TypeError(
+      `Ledger evidence page exceeds the ${MAX_LEDGER_EVIDENCE_PAGE_ENTRIES}-entry protocol limit`,
+    );
+  }
+  if (
+    Buffer.byteLength(canonicalize(withoutField(page, "signature")), "utf8") >
+    MAX_LEDGER_EVIDENCE_PAGE_BYTES
+  ) {
+    throw new TypeError("Ledger evidence page exceeds the protocol byte limit");
   }
   page.entries.forEach((entry, index) => {
     assertExactKeys(entry, ["body", "recordSeq"], "Ledger evidence entry");

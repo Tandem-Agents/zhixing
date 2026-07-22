@@ -10,6 +10,7 @@ export * from "./errors.js";
 export * from "./handshake.js";
 export * from "./outbound-tunnel.js";
 export * from "./replay-window.js";
+export * from "./request-channel.js";
 export * from "./service-registry.js";
 export * from "./recovery-root.js";
 export * from "./trust-chain.js";

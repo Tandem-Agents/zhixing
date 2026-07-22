@@ -39,6 +39,8 @@ import type {
 export const MAX_CONVERSATION_QUESTION_BYTES = 8 * 1024;
 export const MAX_INTERACTION_RESPONSE_TEXT_BYTES = 8 * 1024;
 export const MAX_INLINE_INTERACTION_DISPLAY_BYTES = 8 * 1024;
+export const MAX_LEDGER_EVIDENCE_PAGE_ENTRIES = 256;
+export const MAX_LEDGER_EVIDENCE_PAGE_BYTES = 512 * 1024;
 import type {
   ContentAssetRef,
   DeliveryFailure,

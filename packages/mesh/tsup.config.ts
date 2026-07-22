@@ -16,6 +16,7 @@ export default defineConfig({
     "src/outbound-tunnel.ts",
     "src/pairing-public.ts",
     "src/replay-window.ts",
+    "src/request-channel.ts",
     "src/service-registry.ts",
     "src/recovery-root.ts",
     "src/trust-chain.ts",
