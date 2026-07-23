@@ -18,6 +18,7 @@ import type {
   AssignmentEntry,
   AssignmentRecord,
   AssignmentResourceLease,
+  AuthorityCapability,
   AuthorityCallContext,
   AuthorityEpochRef,
   AuthorityError,
@@ -1719,6 +1720,105 @@ export class ConversationAssignmentLedger implements
       projection.sealed,
       projection.execution,
     );
+  }
+
+  async assignmentArtifactAuthority(assignmentId: string): Promise<{
+    readonly capability: AuthorityCapability;
+    readonly activation: AnyAssignmentActivationProof;
+  }> {
+    const received = await this.#select(assignmentId, (state) => {
+      if (!state.received) {
+        throw new Error("Assignment has no durable received activation");
+      }
+      return snapshot(state.received.body, "Received artifact authorization");
+    });
+    const bytes = await this.#artifacts.get(received.envelope.ref);
+    const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
+    const envelope = raw.execution === "conversation"
+      ? validateConversationEnvelope(raw, this.#verifier)
+      : validateJobEnvelope(raw, this.#verifier);
+    const capability = envelope.capabilities.find((candidate) =>
+      received.activation.capIds.includes(candidate.capId) &&
+      candidate.assignmentId === assignmentId &&
+      candidate.executorId === this.#executorId
+    );
+    if (!capability) {
+      throw corruptLedger("Received assignment has no activated artifact capability");
+    }
+    const activation = received.activation.ref.execution === "conversation"
+      ? received.activation as AssignmentActivationProof<"conversation">
+      : received.activation as AssignmentActivationProof<"job">;
+    return {
+      capability: snapshot(capability, "Artifact authority capability"),
+      activation: snapshot(activation, "Artifact activation proof"),
+    };
+  }
+
+  async sealedBundleForRecovery(
+    assignmentId: string,
+  ): Promise<
+    | { readonly kind: "not-sealed" }
+    | { readonly kind: "sealed"; readonly bundle: SealedBundle }
+  > {
+    const projection = await this.#select(assignmentId, (state) => {
+      if (state.phase !== "sealed" && state.phase !== "acked") {
+        return undefined;
+      }
+      if (!state.sealed) throw corruptLedger("Sealed assignment has no sealed record");
+      const execution = state.received?.body.activation.ref.execution;
+      if (!execution) throw corruptLedger("Sealed assignment has no received activation");
+      return {
+        sealed: snapshot(state.sealed, "Sealed record"),
+        execution,
+      };
+    });
+    if (!projection) return { kind: "not-sealed" };
+    return {
+      kind: "sealed",
+      bundle: await this.#loadSealedBundle(
+        assignmentId,
+        projection.sealed,
+        projection.execution,
+      ),
+    };
+  }
+
+  async sealedConversationAssignmentsAwaitingAcknowledgement(): Promise<
+    readonly ConversationEnvelope[]
+  > {
+    return this.#conversationAssignmentsInPhases(new Set(["sealed"]));
+  }
+
+  async recoverableConversationAssignments(): Promise<
+    readonly ConversationEnvelope[]
+  > {
+    return this.#conversationAssignmentsInPhases(new Set(["received", "sealed"]));
+  }
+
+  async #conversationAssignmentsInPhases(
+    phases: ReadonlySet<LedgerSnapshot["phase"]>,
+  ): Promise<readonly ConversationEnvelope[]> {
+    const assignmentIds = new Set<string>();
+    for (const commit of await this.#log.readAll<unknown>()) {
+      for (const record of commit.entries) {
+        if (!record.stream.startsWith("assignment:")) continue;
+        assignmentIds.add(record.stream.slice("assignment:".length));
+      }
+    }
+    const envelopes: ConversationEnvelope[] = [];
+    for (const assignmentId of [...assignmentIds].sort((left, right) =>
+      left.localeCompare(right, "en-US"))) {
+      const envelopeRef = await this.#select(assignmentId, (state) =>
+        phases.has(state.phase) && state.received
+          ? state.received.body.envelope.ref
+          : undefined);
+      if (!envelopeRef) continue;
+      const bytes = await this.#artifacts.get(envelopeRef);
+      const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
+      if (raw.execution !== "conversation") continue;
+      envelopes.push(validateConversationEnvelope(raw, this.#verifier));
+    }
+    return envelopes;
   }
 
   async cancelProof(assignmentId: string): Promise<CancelProofBody | undefined> {

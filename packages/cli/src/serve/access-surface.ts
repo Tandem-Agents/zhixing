@@ -30,7 +30,7 @@ import type {
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
 import type {
   ConversationDirectory,
   InboundRouter,
@@ -60,6 +60,9 @@ import type {
 } from "../setup-delivery.js";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
+import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
+import type { ExecutorRoleModule } from "./role-topology.js";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -74,6 +77,7 @@ export type SurfacePhase = "pre-server" | "post-server";
 export interface AssemblyContext {
   // ── 输入（外层准备） ──
   readonly profile: ServerProfile;
+  readonly enabledRoles: readonly DeviceRole[];
   readonly config: ZhixingConfig;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
@@ -87,6 +91,7 @@ export interface AssemblyContext {
   readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;
   readonly executorReadiness: () => ExecutorReadiness;
+  readonly executorRoleModule?: ExecutorRoleModule;
   /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */
   readonly convRepo: ConversationRepository;
   /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */
@@ -122,6 +127,8 @@ export interface AssemblyContext {
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
   authorityRuntime?: AuthorityRuntimeStack;
+  meshBootstrap: MeshRuntimeBootstrap;
+  meshRuntime?: MeshRuntimeAssembly;
   conversationProtocol?: ConversationProtocolRuntime;
   deliveryStack?: DeliveryStack;
   textRenderer?: TextConfirmationRenderer;

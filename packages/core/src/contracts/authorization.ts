@@ -489,6 +489,26 @@ export type AssignmentActivationPayload<
   E extends ExecutionKind = ExecutionKind,
 > = Omit<AssignmentActivationProof<E>, "signature">;
 
+export const MAX_ASSIGNMENT_ARTIFACT_GRANT_REFS = 256;
+export const MAX_ASSIGNMENT_ARTIFACT_GRANT_BYTES = 512 * 1024 * 1024;
+export const MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS = 60_000;
+
+export interface AssignmentArtifactTransferGrant
+  extends WireSchemaV1<"AssignmentArtifactTransferGrant"> {
+  assignmentId: string;
+  executorId: string;
+  capId: string;
+  sourceDeviceId: string;
+  targetDeviceId: string;
+  direction: "owner-to-executor" | "executor-to-owner";
+  activationDigest: Digest;
+  refs: ArtifactRef[];
+  totalBytes: number;
+  issuedAt: IsoTime;
+  expiry: IsoTime;
+  signature: Signature;
+}
+
 export interface OwnerControlGrant extends WireSchemaV1<"OwnerControlGrant"> {
   assignmentId: string;
   scope: AuthorityEpochRef;

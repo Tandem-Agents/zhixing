@@ -6,6 +6,7 @@ import type {
   ConversationTransferCommit,
   HomeTrustEvent,
   HomeTrustRecord,
+  MeshEndpointDescriptor,
   PairingAcceptance,
   PairingJoin,
   PairingOffer,
@@ -16,6 +17,7 @@ import type {
 } from "./identity.js";
 import type {
   AssignmentActivationProof,
+  AssignmentArtifactTransferGrant,
   AuthorityCapability,
   ChannelChallengeToken,
   ChannelInteractionGrant,
@@ -68,6 +70,7 @@ export interface WireSchemaMap {
   CommitEnvelope: CommitEnvelope;
   HomeTrustEvent: HomeTrustEvent;
   HomeTrustRecord: HomeTrustRecord;
+  MeshEndpointDescriptor: MeshEndpointDescriptor;
   AnchorTransferCommit: AnchorTransferCommit;
   SourceFreezeProof: SourceFreezeProof;
   ConversationTransferCommit: ConversationTransferCommit;
@@ -88,6 +91,7 @@ export interface WireSchemaMap {
   ControlLease: ControlLease;
   PermissionSnapshotLease: PermissionSnapshotLease;
   AssignmentActivationProof: AssignmentActivationProof;
+  AssignmentArtifactTransferGrant: AssignmentArtifactTransferGrant;
   OwnerControlGrant: OwnerControlGrant;
   ConfigAssetRecord: ConfigAssetRecord;
   ControlEnvelope: ControlEnvelope;

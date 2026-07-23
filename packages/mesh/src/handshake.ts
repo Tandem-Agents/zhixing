@@ -66,8 +66,9 @@ export interface MeshConnectionSecurityOptions {
 }
 
 export interface MeshClientConnectionOptions extends MeshConnectionSecurityOptions {
-  readonly host: string;
-  readonly port: number;
+  readonly host?: string;
+  readonly port?: number;
+  readonly socket?: Socket;
   readonly trustedPeer: TrustedMeshPeer;
   readonly signal?: AbortSignal;
 }
@@ -112,7 +113,7 @@ export async function connectAuthenticatedMesh(
 ): Promise<SecureMeshConnection> {
   const clientOptions = snapshotClientOptions(options);
   validateCommonOptions(clientOptions);
-  validateEndpoint(clientOptions.host, clientOptions.port);
+  validateClientTransport(clientOptions);
   const deadline = new HandshakeDeadline(
     handshakeTimeout(clientOptions),
     clientOptions.signal,
@@ -128,8 +129,9 @@ export async function connectAuthenticatedMesh(
       }),
     );
     tlsSocket = connectTls({
-      host: clientOptions.host,
-      port: clientOptions.port,
+      ...(clientOptions.socket
+        ? { socket: clientOptions.socket }
+        : { host: clientOptions.host!, port: clientOptions.port! }),
       key: credential.privateKeyPem,
       cert: credential.certificateChainPem,
       ca: trustedPeer.rootCertificatePem,
@@ -192,10 +194,52 @@ export async function connectAuthenticatedMesh(
   }
 }
 
+/** Authenticates an already-established direct or blind-relay byte channel as the server side. */
+export async function acceptAuthenticatedMeshSocket(
+  options: MeshServerOptions,
+  socket: Socket,
+): Promise<SecureMeshConnection> {
+  if (socket.destroyed) throw new TypeError("Mesh server socket is already closed");
+  return await new Promise<SecureMeshConnection>((resolve, reject) => {
+    let settled = false;
+    const finish = (
+      settle: (value: never) => void,
+      value: SecureMeshConnection | Error,
+    ) => {
+      if (settled) return;
+      settled = true;
+      settle(value as never);
+    };
+    const report = (error: Error) => {
+      reportHandshakeError(error, options.onHandshakeError);
+      finish(reject, error);
+    };
+    void createAuthenticatedMeshServerInternal(
+      { ...options, onHandshakeError: report },
+      (connection) => finish(resolve as (value: never) => void, connection),
+      false,
+    ).then(
+      (server) => server.emit("connection", socket),
+      (error: unknown) => {
+        socket.destroy();
+        finish(reject, error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
 /** Creates a mutually authenticated TLS server without binding or listening on a port. */
 export async function createAuthenticatedMeshServer(
   options: MeshServerOptions,
   onConnection: (connection: SecureMeshConnection) => void | Promise<void>,
+): Promise<TlsServer> {
+  return await createAuthenticatedMeshServerInternal(options, onConnection, true);
+}
+
+async function createAuthenticatedMeshServerInternal(
+  options: MeshServerOptions,
+  onConnection: (connection: SecureMeshConnection) => void | Promise<void>,
+  maintainCredentials: boolean,
 ): Promise<TlsServer> {
   validateCommonOptions(options);
   if (options.trustedPeers.length === 0) {
@@ -269,7 +313,9 @@ export async function createAuthenticatedMeshServer(
     if (deadline) deadline.report(normalized, serverOptions.onHandshakeError);
     else reportHandshakeError(normalized, serverOptions.onHandshakeError);
   });
-  maintainServerCredential(server, serverOptions, securityProfile, credential.expiresAt);
+  if (maintainCredentials) {
+    maintainServerCredential(server, serverOptions, securityProfile, credential.expiresAt);
+  }
   return server;
 }
 
@@ -416,6 +462,7 @@ function snapshotClientOptions(
     identity: snapshotMeshDeviceIdentity(options.identity),
     protocolRange: snapshotMeshProtocolRange(options.protocolRange),
     trustedPeer: snapshotTrustedPeer(options.trustedPeer),
+    ...(options.socket ? { socket: options.socket } : {}),
   });
 }
 
@@ -616,6 +663,19 @@ function validateEndpoint(host: string, port: number): void {
   if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) {
     throw new TypeError("Mesh port is invalid");
   }
+}
+
+function validateClientTransport(options: MeshClientConnectionOptions): void {
+  if (options.socket) {
+    if (options.host !== undefined || options.port !== undefined || options.socket.destroyed) {
+      throw new TypeError("Mesh client socket transport cannot include host or port");
+    }
+    return;
+  }
+  if (options.host === undefined || options.port === undefined) {
+    throw new TypeError("Mesh client requires a direct endpoint or an open socket");
+  }
+  validateEndpoint(options.host, options.port);
 }
 
 function encodeFrame(value: ProtocolHello | ProtocolAccepted): Uint8Array {

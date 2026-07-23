@@ -246,6 +246,14 @@ export interface AssignmentSubmissionIdentity {
   readonly assignmentId: string;
 }
 
+export type AssignmentBundleSubmissionResult =
+  | { readonly committed: true; readonly commitRevision: number }
+  | { readonly committed: false; readonly error: AuthorityError };
+
+export type AssignmentSubmissionPreflightResult =
+  | { readonly kind: "continue" }
+  | { readonly kind: "return"; readonly result: AssignmentBundleSubmissionResult };
+
 export type AssignmentSubmissionAuthorization =
   | {
       readonly mode: "active";
@@ -293,7 +301,7 @@ export interface AssignmentSubmissionPreflightPort {
   preflightSubmission(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
-  ): Promise<void>;
+  ): Promise<AssignmentSubmissionPreflightResult>;
 }
 
 export interface ConversationRunJournalOptions {
@@ -2513,9 +2521,38 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async preflightSubmission(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
-  ): Promise<void> {
+  ): Promise<AssignmentSubmissionPreflightResult> {
     this.#authenticateSubmission(context, identity);
-    await this.#loadSubmissionGuard(context, identity);
+    const guard = await this.#loadSubmissionGuard(context, identity);
+    if (identity.method !== "submission.submitBundle") {
+      return { kind: "continue" };
+    }
+    const assigned = guard.assignedById.get(identity.assignmentId);
+    if (!assigned) {
+      throw new Error("Bundle capability is not activated by a durable assignment");
+    }
+    if (!guard.admittedByRun.get(assigned.record.runId)?.ingress) {
+      throw new Error("Bundle assignment has no durable ingress");
+    }
+    if (guard.committedByAssignment.has(identity.assignmentId)) {
+      return { kind: "continue" };
+    }
+    const rejectionMessage = this.#submissionBundleRejection(
+      guard,
+      context,
+      identity.assignmentId,
+      assigned.record.runId,
+    );
+    if (!rejectionMessage) return { kind: "continue" };
+    this.#authorizeGuardSubmission(guard, context, {
+      mode: "durable-rejection",
+      method: "submission.submitBundle",
+      assignmentId: identity.assignmentId,
+    });
+    return {
+      kind: "return",
+      result: rejected("fence-rejected", rejectionMessage, false),
+    };
   }
 
   async reportStarted(
@@ -3026,18 +3063,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const guardCommitted = guard.committedByAssignment.get(assignmentId);
     if (!guardCommitted) {
       const guardState = guard.stateByRun.get(guardAssigned.record.runId)?.state;
-      const rejectionMessage = !this.#hasCurrentSubmissionAuthorityEpoch(ctx)
-        ? "Bundle capability belongs to a stale owner epoch"
-        : guard.assignmentByRun.get(guardAssigned.record.runId) !== assignmentId
-          ? "Bundle belongs to a historical assignment"
-          : guard.openConflictAssignments.has(assignmentId)
-            ? "Bundle is blocked by an open dispatch conflict"
-            : guardState !== "dispatched" &&
-                guardState !== "running" &&
-                guardState !== "cancel-requested" &&
-                guardState !== "uncertain"
-              ? "Bundle is late for the current run state"
-              : undefined;
+      const rejectionMessage = this.#submissionBundleRejection(
+        guard,
+        ctx,
+        assignmentId,
+        guardAssigned.record.runId,
+      );
       if (rejectionMessage) {
         this.#authorizeGuardSubmission(guard, ctx, {
           mode: "durable-rejection",
@@ -6479,6 +6510,27 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     );
   }
 
+  #submissionBundleRejection(
+    guard: SubmissionGuardProjection,
+    context: AuthorityCallContext,
+    assignmentId: string,
+    runId: string,
+  ): string | undefined {
+    const state = guard.stateByRun.get(runId)?.state;
+    return !this.#hasCurrentSubmissionAuthorityEpoch(context)
+      ? "Bundle capability belongs to a stale owner epoch"
+      : guard.assignmentByRun.get(runId) !== assignmentId
+        ? "Bundle belongs to a historical assignment"
+        : guard.openConflictAssignments.has(assignmentId)
+          ? "Bundle is blocked by an open dispatch conflict"
+          : state !== "dispatched" &&
+              state !== "running" &&
+              state !== "cancel-requested" &&
+              state !== "uncertain"
+            ? "Bundle is late for the current run state"
+            : undefined;
+  }
+
   #authenticateSubmission(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
@@ -8102,6 +8154,7 @@ async function validateConversationBundleClosure(
   } catch (error) {
     throw bundleClosureReadError(error, "Invalid sealed bundle closure");
   }
+
   const references = [artifact.ref, ...closure.transfer];
 
   let runRecord: TranscriptRunRecord;

@@ -36,6 +36,7 @@ import {
   setupAuthorityRuntime,
   setupDelivery,
 } from "../setup-delivery.js";
+import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
@@ -57,15 +58,60 @@ const authorityRuntimeSurface: AccessSurface = {
   name: "authority-runtime",
   phase: "pre-server",
   async setup(ctx) {
+    const bootstrap = ctx.meshBootstrap;
     ctx.authorityRuntime = await setupAuthorityRuntime({
       zhixingHome: ctx.zhixingHome,
       secretStore: ctx.secretStore,
+      deviceKey: bootstrap.deviceKey,
+      trustedIdentities: bootstrap.trustedIdentities,
+      authorizedDeviceIds: bootstrap.authorizedDeviceIds,
+      executorId: executorIdForDevice(bootstrap.deviceKey.deviceId),
       configurationSnapshot: {
         config: ctx.config,
         executableVersion: ZHIXING_CLI_VERSION,
       },
       executorReadiness: ctx.executorReadiness,
+      enableLocalExecutor: ctx.enabledRoles.includes("executor"),
     });
+  },
+};
+
+/** Authenticated mesh control plane; absent in the no-genesis single-machine topology. */
+const meshSurface: AccessSurface = {
+  name: "mesh-control",
+  phase: "pre-server",
+  async setup(ctx) {
+    const bootstrap = ctx.meshBootstrap;
+    if (!bootstrap || bootstrap.mode === "single-machine") return;
+    if (!ctx.authorityRuntime || !ctx.conversationProtocol) {
+      throw new Error("Mesh control requires authority and conversation protocol runtimes");
+    }
+    const mesh = new MeshRuntimeAssembly({
+      zhixingHome: ctx.zhixingHome,
+      trust: bootstrap.trust,
+      configuration: bootstrap.configuration,
+      endpoints: bootstrap.endpoints,
+      transportPeers: bootstrap.transportPeers,
+      bootstrapStore: bootstrap.bootstrapStore,
+      authority: ctx.authorityRuntime,
+      protocol: ctx.conversationProtocol,
+      ...(ctx.enabledRoles.includes("executor")
+        ? {
+            executor: {
+              ledger: ctx.conversationProtocol.executorLedger(),
+              runtimeFactory: ctx.runtimeFactory,
+              interactions: ctx.durableInteractions,
+              InProcessAssignmentSubmission:
+                ctx.executorRoleModule!.InProcessAssignmentSubmission,
+            },
+          }
+        : {}),
+      secretStore: ctx.secretStore,
+      ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
+      onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
+    });
+    await mesh.start();
+    ctx.meshRuntime = mesh;
   },
 };
 
@@ -146,6 +192,16 @@ const conversationSurface: AccessSurface = {
     let manager: ConversationManager;
     const protocol = new ConversationProtocolRuntime({
       authority: ctx.authorityRuntime,
+      ...(ctx.executorRoleModule
+        ? {
+            localExecutor: {
+              ConversationAssignmentLedger:
+                ctx.executorRoleModule.ConversationAssignmentLedger,
+              InProcessAssignmentSubmission:
+                ctx.executorRoleModule.InProcessAssignmentSubmission,
+            },
+          }
+        : {}),
       manager: () => manager,
       interactions: ctx.durableInteractions,
       executeRecoveredPerspective: async (input) => {
@@ -434,6 +490,7 @@ export function createAccessSurfaces(
     mcpSurface,
     authorityRuntimeSurface,
     conversationSurface,
+    meshSurface,
     createChannelSurface(channelCredentials),
     deliverySurface,
     textRendererSurface,

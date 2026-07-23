@@ -18,3 +18,7 @@ export {
   type PairingOfferRepository,
   type PairingSigner,
 } from "./pairing.js";
+export {
+  CIPHERMAN_P256_PAKE_SUITE,
+  CIPHERMAN_PAIRING_PAKE_SUITES,
+} from "./pairing-pake-cipherman.js";

@@ -1,4 +1,6 @@
 export * from "./blind-relay.js";
+export * from "./blind-rendezvous.js";
+export * from "./bootstrap.js";
 export * from "./canonical.js";
 export * from "./checkpoint.js";
 export * from "./bootstrap-authority.js";

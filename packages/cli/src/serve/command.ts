@@ -48,7 +48,6 @@ import {
   getWorkScenesRoot,
   getWorkSceneConversationsRoot,
 } from "@zhixing/core";
-import { compareCanonicalStrings } from "@zhixing/core/protocol";
 import {
   createServerContext,
   runServer,
@@ -84,14 +83,16 @@ import {
 } from "@zhixing/owner-services";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import fsp from "node:fs/promises";
-import { runStartupCheck } from "../startup.js";
 import chalk from "chalk";
 import {
   RuntimeHost,
   createBuiltinExtraToolsAssembly,
   createTransientSegmentDeps,
 } from "@zhixing/runtime-host";
-import type { ExecutorRoleModule } from "./role-topology.js";
+import type {
+  ExecutorRoleModule,
+  ServeBootstrapContext,
+} from "./role-topology.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
@@ -128,6 +129,7 @@ import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { createAccessSurfaces } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
+import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
   governControlTextCall,
   type GovernedTextCall,
@@ -149,14 +151,16 @@ export interface ServeOptions {
  */
 export async function runServeCommand(
   opts: ServeOptions,
-  executor: ExecutorRoleModule,
+  bootstrap: ServeBootstrapContext,
+  executor?: ExecutorRoleModule,
 ): Promise<void> {
-  await runServerProcess(opts, executor);
+  await runServerProcess(opts, bootstrap, executor);
 }
 
 async function runServerProcess(
   opts: ServeOptions,
-  executor: ExecutorRoleModule,
+  bootstrap: ServeBootstrapContext,
+  executor: ExecutorRoleModule | undefined,
 ): Promise<void> {
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
@@ -177,45 +181,7 @@ async function runServerProcess(
   const port = opts.port ?? homeToPort(zhixingHome);
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
-  // 启动期检查——加载 config + credentials、校验 schema,只校 model(messaging
-  // 可选,凭证不全由 channel 装配警告跳过)。缺字段且 TTY 触发配置编辑器,否则 fail-fast。
-  const startupResult = await runStartupCheck({ mode: "host" });
-
-  if (startupResult.kind !== "ready") {
-    if (startupResult.kind === "schema-error") {
-      console.error(chalk.red(`[配置错误] ${startupResult.message}`));
-      console.error(chalk.dim(`请修复或删除文件后重试：${startupResult.filePath}`));
-    } else if (startupResult.kind === "secret-store-error") {
-      console.error(chalk.red(`[秘密存储不可用] ${startupResult.message}`));
-      console.error(chalk.dim(`设备本地目录：${startupResult.filePath}`));
-    } else if (startupResult.kind === "semantic-error") {
-      console.error(
-        chalk.red(
-          `[配置错误] ${startupResult.filePath} 含 ${startupResult.issues.length} 处废弃字段：`,
-        ),
-      );
-      console.error("");
-      for (const [index, issue] of startupResult.issues.entries()) {
-        console.error(chalk.yellow(`${index + 1}. 字段：${issue.field}`));
-        console.error(chalk.dim(`   原因：${issue.reason}`));
-        console.error(chalk.dim(`   修复：${issue.fix}`));
-        console.error("");
-      }
-      console.error(chalk.dim("修复后重启 server。"));
-    } else if (startupResult.kind === "non-tty") {
-      console.error(chalk.red("Server 缺少必要配置，且当前环境非交互终端。"));
-      console.error(
-        chalk.dim("请先在交互终端运行 `zhixing` 完成基础配置。缺失项："),
-      );
-      for (const label of startupResult.missingLabels) {
-        console.error(chalk.dim(`  - ${label}`));
-      }
-    } else if (startupResult.kind === "cancelled") {
-      console.log(chalk.dim("已取消配置。"));
-      process.exit(0);
-    }
-    process.exit(2);
-  }
+  const startupResult = bootstrap.startup;
 
   const config: ZhixingConfig = startupResult.config;
   const credentials: ZhixingCredentials = startupResult.credentials;
@@ -455,7 +421,7 @@ async function runServerProcess(
   //   注：工厂内实例发放是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
   //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
-  const executorRole = executor.createExecutorRole({
+  const executorRole = executor?.createExecutorRole({
     createAgentRuntime: async (sessionId) => {
       // 对话归属编码在全域键里:ws: 前缀 → 该场景的 power 装配;其余 main。
       const { scope } = parseConversationId(sessionId);
@@ -469,35 +435,18 @@ async function runServerProcess(
       return runtimeHost.createConversationRuntime();
     },
   });
-  const runtimeFactory = executor.createInProcessRuntimeFactory(executorRole);
-  const executorCredentialBindings = [
-    ...Object.entries(credentials.providers ?? {})
-      .filter(([, entry]) => entry.apiKey.trim().length > 0)
-      .map(([providerId]) => ({
-        bindingId: `credential-provider-${providerId}`,
-        service: `provider-${providerId}`,
-        verification: "user-alias" as const,
-      })),
-    ...Object.entries(credentials.mcp ?? {})
-      .filter(([, entry]) => Object.values(entry).some((value) => value.trim().length > 0))
-      .map(([serverId]) => ({
-        bindingId: `credential-mcp-${serverId}`,
-        service: `mcp-${serverId}`,
-        verification: "user-alias" as const,
-      })),
-  ].sort((a, b) => compareCanonicalStrings(a.bindingId, b.bindingId));
-  const executorReadiness = () => {
-    const catalog = runtimeHost.capabilityCatalog();
-    return {
-      tools: catalog.tools,
-      mcpServers: catalog.mcpServers,
-      credentialBindings: executorCredentialBindings,
-      deviceScopedCredentialBindingIds: executorCredentialBindings.map(
-        (binding) => binding.bindingId,
-      ),
-      credentialGeneration,
-    };
-  };
+  const runtimeFactory = executorRole && executor
+    ? executor.createInProcessRuntimeFactory(executorRole)
+    : {
+        async create(): Promise<never> {
+          throw new Error("Local executor role is not enabled on this device");
+        },
+      };
+  const executorReadiness = createExecutorReadinessSource({
+    runtime: runtimeHost,
+    credentials,
+    credentialGeneration,
+  });
 
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
   //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
@@ -542,6 +491,7 @@ async function runServerProcess(
     snapshots,
     runtimeFactory,
     executorReadiness,
+    ...(executor ? { executorRoleModule: executor } : {}),
     convRepo,
     conversationDirectory,
     journalStore,
@@ -550,6 +500,8 @@ async function runServerProcess(
     advancementRecoveryRef,
     cleanup: registry,
     advancement: advancementController,
+    enabledRoles: bootstrap.mesh.roles,
+    meshBootstrap: bootstrap.mesh,
   };
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道门面 / 投递栈 / 文本确认渲染器。
@@ -881,6 +833,7 @@ async function runServerProcess(
     // 之前启动，还没进入 registry）。
     await registry.runAll("startup-failure").catch(() => {});
     await scheduler.stop().catch(() => {});
+    await ctx.meshRuntime?.stop().catch(() => {});
     await ctx.deliveryStack?.stop().catch(() => {});
     await ctx.channels?.dispose().catch(() => {});
     ctx.textRenderer?.stop();
@@ -919,6 +872,13 @@ async function runServerProcess(
     const renderer = ctx.textRenderer;
     registry.register("confirmationRenderer.stop", () => {
       renderer.stop();
+    });
+  }
+
+  if (ctx.meshRuntime) {
+    const mesh = ctx.meshRuntime;
+    registry.register("meshRuntime.stop", async () => {
+      await mesh.stop();
     });
   }
 

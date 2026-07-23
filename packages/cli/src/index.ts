@@ -134,6 +134,13 @@ function parseLogLineCount(value: string): number {
   }
 }
 
+function parsePairingMethod(value: string): "qr" | "short" {
+  if (value !== "qr" && value !== "short") {
+    throw new InvalidArgumentError("配对方式必须是 qr 或 short");
+  }
+  return value;
+}
+
 program
   .name("zhixing")
   .description("知行 — 智能体引擎")
@@ -201,6 +208,42 @@ program
   .description("停止知行")
   .action(handleStopAction);
 
+program
+  .command("pair")
+  .description("配对另一台知行设备")
+  .argument("[invitation]", "另一台设备显示的配对邀请")
+  .option("--method <method>", "出码方式：qr 或 short", parsePairingMethod, "qr")
+  .option("--code <code>", "加入短码配对时输入八位配对码")
+  .option("--listen <host:port>", "出码设备的临时监听地址")
+  .option("--advertise <host:port>", "邀请中公布的直连地址")
+  .option("--relay <host:port>", "盲中继会合地址")
+  .option("--relay-only", "仅通过盲中继会合")
+  .action(async (invitation: string | undefined, options: {
+    method: "qr" | "short";
+    code?: string;
+    listen?: string;
+    advertise?: string;
+    relay?: string;
+    relayOnly?: boolean;
+  }) => {
+    try {
+      const { runPairCommand } = await import("./serve/mesh-pair-command.js");
+      await runPairCommand({
+        ...(invitation ? { invitation } : {}),
+        method: options.method,
+        ...(options.code ? { shortCode: options.code } : {}),
+        ...(options.listen ? { listen: options.listen } : {}),
+        ...(options.advertise ? { advertise: options.advertise } : {}),
+        ...(options.relay ? { relay: options.relay } : {}),
+        ...(options.relayOnly ? { relayOnly: true } : {}),
+      });
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
 // ─── zhixing serve（常驻服务模式） ───
 const serveCmd = program
   .command("serve", { hidden: true })
@@ -209,10 +252,9 @@ const serveCmd = program
     try {
       await pruneRuntimeLogs();
       const {
-        DEFAULT_LOCAL_ROLE_CONFIGURATION,
         runServeCommand,
       } = await import("./serve/topology-command.js");
-      await runServeCommand({}, DEFAULT_LOCAL_ROLE_CONFIGURATION);
+      await runServeCommand({});
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

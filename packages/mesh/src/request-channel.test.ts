@@ -76,6 +76,29 @@ describe("MeshRequestChannel", () => {
     await Promise.all([left.close(), right.close()]);
   });
 
+  it("rejects unauthorized peers before invoking a service handler", async () => {
+    const [leftConnection, rightConnection] = connections();
+    let handlerCalls = 0;
+    const registry = new MeshServiceRegistry();
+    registry.register("guarded.test", {
+      access: "write",
+      availability: "negotiated-version",
+      authorize: (connection) => connection.peer.deviceId === "allowed",
+      handler: async () => {
+        handlerCalls += 1;
+        return Buffer.from("unexpected");
+      },
+    });
+    const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry());
+    const right = new MeshRequestChannel(rightConnection, registry);
+
+    await expect(left.request("guarded.test", new Uint8Array())).rejects.toMatchObject({
+      code: "unauthorized-peer",
+    });
+    expect(handlerCalls).toBe(0);
+    await Promise.all([left.close(), right.close()]);
+  });
+
   it("rejects over-limit payloads before writing to the connection", async () => {
     const [leftConnection, rightConnection] = connections();
     const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry(), {

@@ -1154,7 +1154,7 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
@@ -1166,25 +1166,31 @@
     },
     {
       "kind": "import",
-      "references": 19,
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "external:node:net"
+    },
+    {
+      "kind": "import",
+      "references": 39,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 1,
-      "sourceZone": "cli/serve",
-      "target": "package:@zhixing/executor"
-    },
-    {
-      "kind": "import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mcp"
     },
     {
       "kind": "import",
-      "references": 3,
+      "references": 28,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/mesh"
+    },
+    {
+      "kind": "import",
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/orchestrator"
     },
@@ -1202,7 +1208,7 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/providers"
     },
@@ -1220,19 +1226,25 @@
     },
     {
       "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/secrets"
+    },
+    {
+      "kind": "import",
       "references": 11,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
     {
       "kind": "type-import",
-      "references": 14,
+      "references": 30,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 9,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/executor"
     },
@@ -1244,7 +1256,7 @@
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 15,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1256,7 +1268,7 @@
     },
     {
       "kind": "type-import",
-      "references": 7,
+      "references": 10,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1268,7 +1280,7 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 6,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/providers"
     },
@@ -1376,7 +1388,7 @@
     },
     {
       "kind": "type-import",
-      "references": 12,
+      "references": 14,
       "sourceZone": "mesh",
       "target": "package:@zhixing/core"
     },

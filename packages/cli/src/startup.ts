@@ -19,6 +19,7 @@
 
 import path from "node:path";
 import type { SecretStorePort } from "@zhixing/core/contracts";
+import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import {
   ConfigSchemaError,
   CredentialsSchemaError,
@@ -110,7 +111,10 @@ export async function runStartupCheck(
       message: err instanceof Error ? err.message : "配置文件不可用",
     };
   }
-  const semanticIssues = validateConfigSemantics(config);
+  const semanticIssues = [
+    ...validateConfigSemantics(config),
+    ...validateMeshConfiguration(config),
+  ];
   if (semanticIssues.length > 0) {
     return { kind: "semantic-error", filePath: configPath, issues: semanticIssues };
   }
@@ -213,6 +217,20 @@ export async function runStartupCheck(
 
   // editorResult.kind === "non-tty"——此处理论上不到达（前面已检查 isTTY）
   return { kind: "non-tty", missingLabels };
+}
+
+function validateMeshConfiguration(config: ZhixingConfig): ConfigSemanticIssue[] {
+  if (config.mesh === undefined) return [];
+  try {
+    validateMeshRoleBootConfig(config.mesh);
+    return [];
+  } catch (error) {
+    return [{
+      field: "mesh",
+      reason: error instanceof Error ? error.message : "Mesh role configuration is invalid",
+      fix: "修正 mesh.enabledRoles 与 anchorListen / relayRegistration，使启用角色和可达性参数一致",
+    }];
+  }
 }
 
 function pickEditorTitle(mode: StartupMode, _sections: SectionId[]): string {

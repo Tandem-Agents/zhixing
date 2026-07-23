@@ -111,6 +111,7 @@ import type {
   AssignmentSubmissionAuthorization,
   AssignmentSubmissionIdentity,
   AssignmentSubmissionPreflightPort,
+  AssignmentSubmissionPreflightResult,
   ConversationAbortTicketAuthorizer,
   InProcessBundleSubmission,
   InProcessDispatchContextFactory,
@@ -1371,9 +1372,38 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   async preflightSubmission(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
-  ): Promise<void> {
+  ): Promise<AssignmentSubmissionPreflightResult> {
     this.#authenticateSubmission(context, identity);
-    await this.#loadSubmissionGuard(context, identity);
+    const guard = await this.#loadSubmissionGuard(context, identity);
+    if (identity.method !== "submission.submitBundle") {
+      return { kind: "continue" };
+    }
+    const assigned = guard.assignedById.get(identity.assignmentId);
+    if (!assigned) {
+      throw new Error("Bundle capability is not activated by a durable job assignment");
+    }
+    if (!guard.occurrences.has(assigned.record.jobRunId)) {
+      throw new Error("Bundle assignment has no durable occurrence");
+    }
+    if (guard.committedByAssignment.has(identity.assignmentId)) {
+      return { kind: "continue" };
+    }
+    const rejectionMessage = this.#submissionBundleRejection(
+      guard,
+      context,
+      identity.assignmentId,
+      assigned.record.jobRunId,
+    );
+    if (!rejectionMessage) return { kind: "continue" };
+    this.#authorizeGuardSubmission(guard, context, {
+      mode: "durable-rejection",
+      method: "submission.submitBundle",
+      assignmentId: identity.assignmentId,
+    });
+    return {
+      kind: "return",
+      result: rejected("fence-rejected", rejectionMessage, false),
+    };
   }
 
   async reportStarted(
@@ -2575,18 +2605,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     const guardCommitted = guard.committedByAssignment.get(assignmentId);
     if (!guardCommitted) {
       const guardState = guard.states.get(guardAssigned.record.jobRunId)?.state;
-      const rejectionMessage = !this.#hasCurrentSubmissionAuthority(context)
-        ? "Bundle capability belongs to a stale job authority"
-        : guard.assignmentByJob.get(guardAssigned.record.jobRunId) !== assignmentId
-          ? "Bundle belongs to a historical assignment"
-          : guard.openConflictAssignments.has(assignmentId)
-            ? "Bundle is blocked by an open dispatch conflict"
-            : guardState !== "dispatched" &&
-                guardState !== "running" &&
-                guardState !== "cancel-requested" &&
-                guardState !== "uncertain"
-              ? "Bundle is late for the current job state"
-              : undefined;
+      const rejectionMessage = this.#submissionBundleRejection(
+        guard,
+        context,
+        assignmentId,
+        guardAssigned.record.jobRunId,
+      );
       if (rejectionMessage) {
         this.#authorizeGuardSubmission(guard, context, {
           mode: "durable-rejection",
@@ -3637,6 +3661,27 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       "anchorEpoch" in capability &&
       capability.anchorEpoch === this.#anchorEpoch
     );
+  }
+
+  #submissionBundleRejection(
+    guard: JobSubmissionGuardProjection,
+    context: AuthorityCallContext,
+    assignmentId: string,
+    jobRunId: string,
+  ): string | undefined {
+    const state = guard.states.get(jobRunId)?.state;
+    return !this.#hasCurrentSubmissionAuthority(context)
+      ? "Bundle capability belongs to a stale job authority"
+      : guard.assignmentByJob.get(jobRunId) !== assignmentId
+        ? "Bundle belongs to a historical assignment"
+        : guard.openConflictAssignments.has(assignmentId)
+          ? "Bundle is blocked by an open dispatch conflict"
+          : state !== "dispatched" &&
+              state !== "running" &&
+              state !== "cancel-requested" &&
+              state !== "uncertain"
+            ? "Bundle is late for the current job state"
+            : undefined;
   }
 
   #authorizeDefinition(
@@ -7513,6 +7558,7 @@ async function validateJobBundleClosure(
   } catch (error) {
     throw jobBundleClosureReadError(error, "Invalid sealed job bundle closure");
   }
+
   const references = [artifact.ref, ...closure.transfer];
   let batch: import("@zhixing/core/contracts").MutationBatch | undefined;
   if (bundle.body.mutationBatch) {

@@ -29,6 +29,7 @@ import {
   RecoveryRoot,
   verifyRecoverySignature,
 } from "./recovery-root.js";
+import { createUlid } from "./identifiers.js";
 
 const VERIFICATION_HEADER = Buffer.from("ZXCP1", "ascii");
 const VERIFICATION_NONCE_BYTES = 32;
@@ -48,6 +49,11 @@ export interface EncryptedCheckpointChunk {
 export interface CheckpointPackage {
   readonly envelope: CheckpointEnvelope;
   readonly chunks: readonly EncryptedCheckpointChunk[];
+}
+
+/** Creates the canonical identifier used by a newly prepared checkpoint. */
+export function createCheckpointId(now = Date.now()): string {
+  return createUlid(now);
 }
 
 export function createRootActivationCheckpoint(input: {

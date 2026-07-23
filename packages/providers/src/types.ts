@@ -17,6 +17,7 @@ import type {
   ModelInputCapabilityOverride,
   ThinkingConfig,
 } from "@zhixing/core";
+import type { MeshRoleBootConfig } from "@zhixing/core/contracts";
 import type { ModelCapabilityOverride } from "./model-capability.js";
 
 // ─── 协议类型 ───
@@ -359,6 +360,8 @@ export interface LLMRoleConfig {
  *   config.messaging.<id>      ──refs──>  credentials.channels.<id>
  */
 export interface ZhixingConfig {
+  /** Device-local role selection and mesh reachability; trust authorization remains on the trust chain. */
+  mesh?: MeshRoleBootConfig;
   /**
    * LLM 角色配置（角色集单一事实源 = `role-spec.ts` 的 ROLE_SPECS）：
    * - main 必填——主对话循环、用户面对的最终输出

@@ -126,6 +126,35 @@ describe("startup SecretStore boundary", () => {
     expect(store.unlockCalls).toBe(0);
   });
 
+  it("rejects invalid mesh role configuration before touching the SecretStore", async () => {
+    const homeDir = await createTempDir("startup-mesh-semantic-error");
+    await writeFile(
+      path.join(homeDir, "config.jsonc"),
+      JSON.stringify({
+        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
+        mesh: {
+          enabledRoles: ["anchor"],
+          anchorListen: { bind: { host: "0.0.0.0", port: 7443 } },
+        },
+      }),
+      "utf8",
+    );
+    const store = new MemoryStore();
+
+    const result = await runStartupCheck({
+      homeDir,
+      mode: "host",
+      isTTY: false,
+      secretStore: store,
+    });
+
+    expect(result).toMatchObject({
+      kind: "semantic-error",
+      issues: [{ field: "mesh" }],
+    });
+    expect(store.unlockCalls).toBe(0);
+  });
+
   it("classifies SecretStore exceptions separately from public config failures", async () => {
     const homeDir = await createTempDir("startup-secret-error");
     await writeFile(

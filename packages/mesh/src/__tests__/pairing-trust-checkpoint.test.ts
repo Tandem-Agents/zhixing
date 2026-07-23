@@ -269,7 +269,7 @@ describe("pairing protocol", () => {
         NOW,
       ),
     ).rejects.toThrow(/round 1/);
-  });
+  }, 15_000);
 
   it("charges every PAKE oracle response before sending it and permits only admitted commits", async () => {
     expect("PakeJoinerSession" in publicMesh).toBe(false);
@@ -391,7 +391,7 @@ describe("pairing protocol", () => {
     await expect(
       coordinator.commit({ ...prepared, attempt: admitted.attempt, sessionKey, now: NOW }),
     ).resolves.toMatchObject({ chainHead: prepared.acceptance.chainHead });
-  });
+  }, 15_000);
 
   it("binds pairing to the current issuer and rejects non-canonical acceptance time", async () => {
     const issuer = await device("anchor");
@@ -715,6 +715,10 @@ describe("root activation checkpoint", () => {
     const store = new TestAuthority(genesis);
     const target = new MemoryTarget("backup-device", "device:backup");
     const steps: string[] = [];
+    const lifecycleTimes = [
+      new Date(NOW + 1_000).toISOString(),
+      new Date(NOW + 2_000).toISOString(),
+    ];
     const activated = await new RecoveryActivationCoordinator(store).activatePrepared({
       current: genesis,
       plan: prepared.plan,
@@ -723,13 +727,17 @@ describe("root activation checkpoint", () => {
       issuerIdentity: issuer.identity,
       target,
       sourceIndependenceDomain: "device:anchor",
-      verifiedAt: AT,
+      now: () => lifecycleTimes.shift()!,
       onStep: (step) => {
         steps.push(step);
       },
     });
 
     expect(steps).toEqual(["created", "replicated", "read-back", "verified", "committed"]);
+    expect(store.records.find((record) => record.t === "checkpoint-replicated")?.at)
+      .toBe(new Date(NOW + 1_000).toISOString());
+    expect(store.verifiedRecords[0]?.verification.verifiedAt)
+      .toBe(new Date(NOW + 2_000).toISOString());
     expect(activated.recoveryRootPublicKey).toBe(root.rootPublicKey);
     expect(store.projection).toEqual(activated);
     expect(

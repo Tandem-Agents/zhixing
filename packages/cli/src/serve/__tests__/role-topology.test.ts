@@ -3,29 +3,33 @@ import {
   UnsupportedServeRoleConfigurationError,
   planServeTopology,
   runConfiguredServeTopology,
-  type ExecutorRoleModule,
 } from "../role-topology.js";
-import { runServeCommand } from "../topology-command.js";
 
 function createLoaders() {
-  const executor = {
+  const run = vi.fn(async () => {});
+  const anchorHost = vi.fn(async () => ({ run }));
+  const executorHost = vi.fn(async () => ({ run }));
+  const executorModule = {
+    ConversationAssignmentLedger: vi.fn(),
+    ExecutorResourceGovernor: vi.fn(),
+    InProcessAssignmentSubmission: vi.fn(),
     createExecutorRole: vi.fn(),
     createInProcessRuntimeFactory: vi.fn(),
-  } as unknown as ExecutorRoleModule;
-  const run = vi.fn(async () => {});
-  const anchor = vi.fn(async () => ({ run }));
-  const loadExecutor = vi.fn(async () => executor);
+  } as never;
+  const executor = vi.fn(async () => executorModule);
   return {
-    loaders: { anchor, executor: loadExecutor },
-    anchor,
-    loadExecutor,
-    run,
+    loaders: { anchorHost, executorHost, executor },
+    anchorHost,
+    executorHost,
     executor,
+    executorModule,
+    run,
   };
 }
 
 describe("serve role topology", () => {
-  it("loads both role modules before starting the single-process topology", async () => {
+  const bootstrap = {} as never;
+  it("loads the service host once for the local role topology", async () => {
     const harness = createLoaders();
     const options = { marker: "options" };
 
@@ -33,11 +37,13 @@ describe("serve role topology", () => {
       { roles: ["anchor", "executor"] },
       harness.loaders,
       options,
+      bootstrap,
     );
 
-    expect(harness.anchor).toHaveBeenCalledOnce();
-    expect(harness.loadExecutor).toHaveBeenCalledOnce();
-    expect(harness.run).toHaveBeenCalledWith(options, harness.executor);
+    expect(harness.anchorHost).toHaveBeenCalledOnce();
+    expect(harness.executorHost).not.toHaveBeenCalled();
+    expect(harness.executor).toHaveBeenCalledOnce();
+    expect(harness.run).toHaveBeenCalledWith(options, bootstrap, harness.executorModule);
   });
 
   it.each([
@@ -46,53 +52,94 @@ describe("serve role topology", () => {
   ])("loads no service role for $roles", async (configuration) => {
     const harness = createLoaders();
 
-    await runConfiguredServeTopology(configuration, harness.loaders, {});
+    await runConfiguredServeTopology(configuration, harness.loaders, {}, bootstrap);
 
-    expect(harness.anchor).not.toHaveBeenCalled();
-    expect(harness.loadExecutor).not.toHaveBeenCalled();
+    expect(harness.anchorHost).not.toHaveBeenCalled();
+    expect(harness.executorHost).not.toHaveBeenCalled();
+    expect(harness.executor).not.toHaveBeenCalled();
     expect(harness.run).not.toHaveBeenCalled();
   });
 
   it.each([
-    { roles: ["anchor"] as const },
-    { roles: ["executor"] as const },
     { roles: ["anchor", "anchor"] as const },
     { roles: ["unknown"] as never },
   ])("rejects unsupported $roles before loading any role", async (configuration) => {
     const harness = createLoaders();
 
     await expect(
-      runConfiguredServeTopology(configuration, harness.loaders, {}),
+      runConfiguredServeTopology(configuration, harness.loaders, {}, bootstrap),
     ).rejects.toBeInstanceOf(UnsupportedServeRoleConfigurationError);
 
-    expect(harness.anchor).not.toHaveBeenCalled();
-    expect(harness.loadExecutor).not.toHaveBeenCalled();
+    expect(harness.anchorHost).not.toHaveBeenCalled();
+    expect(harness.executorHost).not.toHaveBeenCalled();
+    expect(harness.executor).not.toHaveBeenCalled();
     expect(harness.run).not.toHaveBeenCalled();
+  });
+
+  it("does not load the executor role for an anchor-only device", async () => {
+    const harness = createLoaders();
+
+    await runConfiguredServeTopology(
+      { roles: ["anchor"] },
+      harness.loaders,
+      {},
+      bootstrap,
+    );
+
+    expect(harness.anchorHost).toHaveBeenCalledOnce();
+    expect(harness.executorHost).not.toHaveBeenCalled();
+    expect(harness.executor).not.toHaveBeenCalled();
+    expect(harness.run).toHaveBeenCalledWith({}, bootstrap, undefined);
+  });
+
+  it("loads only the executor host for an executor-only device", async () => {
+    const harness = createLoaders();
+
+    await runConfiguredServeTopology(
+      { roles: ["executor"] },
+      harness.loaders,
+      {},
+      bootstrap,
+    );
+
+    expect(harness.anchorHost).not.toHaveBeenCalled();
+    expect(harness.executorHost).toHaveBeenCalledOnce();
+    expect(harness.executor).toHaveBeenCalledOnce();
+    expect(harness.run).toHaveBeenCalledWith({}, bootstrap, harness.executorModule);
+  });
+
+  it("evaluates the anchor entry without evaluating the executor package", async () => {
+    vi.doMock("@zhixing/executor", () => {
+      throw new Error("executor package was evaluated");
+    });
+
+    await expect(import("../anchor-role.js")).resolves.toMatchObject({
+      run: expect.any(Function),
+    });
+    vi.doUnmock("@zhixing/executor");
+  });
+
+  it("evaluates the executor entry without evaluating the owner runtime package", async () => {
+    vi.doMock("@zhixing/owner-kernel", () => {
+      throw new Error("owner runtime package was evaluated");
+    });
+
+    await expect(import("../executor-role.js")).resolves.toMatchObject({
+      run: expect.any(Function),
+    });
+    vi.doUnmock("@zhixing/owner-kernel");
   });
 
   it("derives topology from the role set without a second mode flag", () => {
     expect(planServeTopology({ roles: [] })).toBe("disabled");
     expect(planServeTopology({ roles: ["surface"] })).toBe("disabled");
     expect(planServeTopology({ roles: ["anchor", "executor"] })).toBe(
-      "single-process",
+      "anchor-host",
     );
     expect(planServeTopology({ roles: ["executor", "anchor"] })).toBe(
-      "single-process",
+      "anchor-host",
     );
-  });
-
-  it("the production command leaves no listening socket for a surface-only device", async () => {
-    const before = process
-      .getActiveResourcesInfo()
-      .filter((resource) => resource === "TCPServerWrap").length;
-
-    await expect(
-      runServeCommand({}, { roles: ["surface"] }),
-    ).resolves.toBeUndefined();
-
-    const after = process
-      .getActiveResourcesInfo()
-      .filter((resource) => resource === "TCPServerWrap").length;
-    expect(after).toBe(before);
+    expect(planServeTopology({ roles: ["anchor"] })).toBe("anchor-host");
+    expect(planServeTopology({ roles: ["executor"] })).toBe("executor-host");
   });
 });

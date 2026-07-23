@@ -15,6 +15,7 @@ import type {
   AssignmentEntry,
   AssignmentRecord,
   AssignmentActivationProof,
+  AssignmentArtifactTransferGrant,
   AuthorityEpochRef,
   AuthorityCallContext,
   AuthorityCapability,
@@ -26,12 +27,17 @@ import type {
   LedgerSnapshot,
   RunDispatchArguments,
   RunExecutorPort,
+  ResourceUsageIntake,
   RunSubmissionPort,
   SealedBundle,
   SupersedeProof,
+  UsageReport,
 } from "@zhixing/core/contracts";
+import { MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  assignmentActivationDigest,
+  createSignedAssignmentArtifactTransferGrant,
   dispatchEnvelopeDigest,
   dispatchEnvelopeArtifact,
   protocolDigest,
@@ -42,6 +48,9 @@ import {
   validateDispatchControlBinding,
   validateDispatchResult,
   validateAuthorityError,
+  validateAuthorityCapability,
+  validateAssignmentActivationProof,
+  validateAssignmentArtifactTransferGrant,
   validateAssignmentEntry,
   validateJobActivation,
   validateJobEnvelope,
@@ -49,7 +58,9 @@ import {
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
   validateSupersedeProof,
+  assertProtocolIdentifier,
   type ProtocolSignatureVerifier,
+  type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type {
@@ -68,10 +79,13 @@ import type {
 export const ASSIGNMENT_ARTIFACT_SERVICE = "assignment.artifacts";
 export const RUN_EXECUTOR_SERVICE = "assignment.executor";
 export const RUN_SUBMISSION_SERVICE = "assignment.submission";
+export const RESOURCE_USAGE_SERVICE = "resource.usage";
 
 export interface AssignmentArtifactAuthorization {
   readonly assignmentId: string;
   readonly capability: AuthorityCapability;
+  readonly activation: AnyAssignmentActivationProof;
+  readonly grant: AssignmentArtifactTransferGrant;
   readonly access: "read" | "write";
   readonly ref: ArtifactRef;
   readonly connection: SecureMeshConnection;
@@ -81,6 +95,7 @@ export interface AssignmentArtifactAuthorization {
 export interface AssignmentArtifactServiceOptions {
   readonly artifacts: ArtifactStore;
   readonly receiver: FileResumableArtifactReceiver;
+  readonly verifier: ProtocolSignatureVerifier;
   readonly authorize: (
     request: AssignmentArtifactAuthorization,
   ) => void | Promise<void>;
@@ -95,14 +110,28 @@ export interface AssignmentArtifactClientOptions {
   readonly chunkBytes?: number;
 }
 
+export interface AssignmentArtifactTransferAuthorization {
+  readonly capability: AuthorityCapability;
+  readonly activation: AnyAssignmentActivationProof;
+  readonly grant: AssignmentArtifactTransferGrant;
+}
+
+export interface AssignmentArtifactAuthority {
+  readonly capability: AuthorityCapability;
+  readonly activation: AnyAssignmentActivationProof;
+}
+
 export interface MeshRunExecutorPortOptions {
   readonly client: MeshServiceClient;
   readonly artifacts: ArtifactStore;
   readonly receiver: FileResumableArtifactReceiver;
   readonly verifier: ProtocolSignatureVerifier;
-  readonly capabilityFor: (
+  readonly signer: ProtocolSigner;
+  readonly localDeviceId: string;
+  readonly peerDeviceId: string;
+  readonly authorizationFor: (
     assignmentId: string,
-  ) => AuthorityCapability | Promise<AuthorityCapability>;
+  ) => AssignmentArtifactAuthority | Promise<AssignmentArtifactAuthority>;
   readonly chunkBytes?: number;
   readonly clock?: () => number;
 }
@@ -112,13 +141,34 @@ export interface RunExecutorMeshServiceOptions {
   readonly guard: OwnerControlPreflightPort;
   readonly artifacts: ArtifactStore;
   readonly verifier: ProtocolSignatureVerifier;
+  readonly signer: ProtocolSigner;
+  readonly localDeviceId: string;
+  readonly artifactAuthorizationFor: (
+    assignmentId: string,
+  ) => AssignmentArtifactAuthority | Promise<AssignmentArtifactAuthority>;
   readonly clock?: () => number;
+  readonly authorizePeer: (deviceId: string) => boolean;
+  readonly onDispatchAccepted?: (
+    envelope: DispatchEnvelope,
+    activation: AnyAssignmentActivationProof,
+    context: AuthorityCallContext,
+  ) => void | Promise<void>;
+  readonly onCancelAccepted?: (
+    assignmentId: string,
+    context: AuthorityCallContext,
+  ) => void | Promise<void>;
 }
 
 export interface MeshRunSubmissionPortOptions {
   readonly client: MeshServiceClient;
   readonly artifacts: ArtifactStore;
   readonly receiver: FileResumableArtifactReceiver;
+  readonly signer: ProtocolSigner;
+  readonly localDeviceId: string;
+  readonly peerDeviceId: string;
+  readonly authorizationFor: (
+    assignmentId: string,
+  ) => AssignmentArtifactAuthority | Promise<AssignmentArtifactAuthority>;
   readonly chunkBytes?: number;
   readonly clock?: () => number;
 }
@@ -127,7 +177,16 @@ export interface RunSubmissionMeshServiceOptions {
   readonly port: RunSubmissionPort;
   readonly guard: AssignmentSubmissionPreflightPort;
   readonly artifacts: ArtifactStore;
-  readonly clock?: () => number;
+  readonly executorIdForPeer: (deviceId: string) => string | undefined;
+}
+
+export interface MeshResourceUsageIntakeOptions {
+  readonly client: MeshServiceClient;
+}
+
+export interface ResourceUsageMeshServiceOptions {
+  readonly intake: ResourceUsageIntake;
+  readonly reporterIdForPeer: (deviceId: string) => string | undefined;
 }
 
 export type ExecutorControlPreflight = OwnerControlRequest;
@@ -139,14 +198,14 @@ type ArtifactRequest =
       readonly t: "probe";
       readonly direction: "receive" | "send";
       readonly assignmentId: string;
-      readonly capability: AuthorityCapability;
+      readonly authorization: AssignmentArtifactTransferAuthorization;
       readonly ref: ArtifactRef;
     }
   | {
       readonly v: 1;
       readonly t: "append";
       readonly assignmentId: string;
-      readonly capability: AuthorityCapability;
+      readonly authorization: AssignmentArtifactTransferAuthorization;
       readonly ref: ArtifactRef;
       readonly offset: number;
       readonly bytes: string;
@@ -155,7 +214,7 @@ type ArtifactRequest =
       readonly v: 1;
       readonly t: "read";
       readonly assignmentId: string;
-      readonly capability: AuthorityCapability;
+      readonly authorization: AssignmentArtifactTransferAuthorization;
       readonly ref: ArtifactRef;
       readonly offset: number;
       readonly limit: number;
@@ -227,7 +286,7 @@ type SubmissionRequest =
 
 const DEFAULT_CHUNK_BYTES = 64 * 1024;
 const DEFAULT_MAX_RANGE_BYTES = 256 * 1024;
-type AnyAssignmentActivationProof =
+export type AnyAssignmentActivationProof =
   | AssignmentActivationProof<"conversation">
   | AssignmentActivationProof<"job">;
 type DispatchControlPreflight = ExecutorControlPreflight & {
@@ -262,23 +321,27 @@ export function createAssignmentArtifactServiceHandler(
   return async (payload, connection, signal) => {
     signal.throwIfAborted();
     const request = decodeArtifactRequest(payload, maxRangeBytes);
+    const access = request.t === "read" ||
+      (request.t === "probe" && request.direction === "send")
+      ? "read"
+      : "write";
+    const authorization = validateArtifactTransferAuthorization(
+      request.authorization,
+      request.assignmentId,
+      request.ref,
+      options.verifier,
+      options.clock,
+    );
     const operation = linkedDeadlineSignal(
       signal,
-      request.capability.expiry,
+      authorization.grant.expiry,
       options.clock,
     );
     try {
       operation.signal.throwIfAborted();
-      const access = request.t === "read" ||
-        (request.t === "probe" && request.direction === "send")
-        ? "read"
-        : "write";
-      if (request.capability.assignmentId !== request.assignmentId) {
-        throw new TypeError("Artifact capability does not bind the requested assignment");
-      }
       await options.authorize({
         assignmentId: request.assignmentId,
-        capability: request.capability,
+        ...authorization,
         access,
         ref: request.ref,
         connection,
@@ -324,11 +387,11 @@ export class AssignmentArtifactClient {
 
   async upload(
     assignmentId: string,
-    capability: AuthorityCapability,
+    authorization: AssignmentArtifactTransferAuthorization,
     references: readonly ArtifactRef[],
     signal?: AbortSignal,
   ): Promise<void> {
-    assertCapabilityAssignment(capability, assignmentId);
+    assertArtifactAuthorizationCovers(authorization, assignmentId, references);
     for (const ref of normalizedArtifactRefs(references)) {
       signal?.throwIfAborted();
       let progress = decodeProgress(await this.#request({
@@ -336,7 +399,7 @@ export class AssignmentArtifactClient {
         t: "probe",
         direction: "receive",
         assignmentId,
-        capability,
+        authorization,
         ref,
       }, signal), ref);
       while (!progress.complete) {
@@ -346,7 +409,7 @@ export class AssignmentArtifactClient {
             v: 1,
             t: "append",
             assignmentId,
-            capability,
+            authorization,
             ref,
             offset,
             bytes: "",
@@ -365,7 +428,7 @@ export class AssignmentArtifactClient {
           v: 1,
           t: "append",
           assignmentId,
-          capability,
+          authorization,
           ref,
           offset,
           bytes: Buffer.from(chunk).toString("base64"),
@@ -380,11 +443,11 @@ export class AssignmentArtifactClient {
 
   async download(
     assignmentId: string,
-    capability: AuthorityCapability,
+    authorization: AssignmentArtifactTransferAuthorization,
     references: readonly ArtifactRef[],
     signal?: AbortSignal,
   ): Promise<void> {
-    assertCapabilityAssignment(capability, assignmentId);
+    assertArtifactAuthorizationCovers(authorization, assignmentId, references);
     for (const ref of normalizedArtifactRefs(references)) {
       signal?.throwIfAborted();
       let progress = await this.options.receiver.progress(ref);
@@ -394,7 +457,7 @@ export class AssignmentArtifactClient {
         t: "probe",
         direction: "send",
         assignmentId,
-        capability,
+        authorization,
         ref,
       }, signal), ref);
       if (!remote.complete) throw new TypeError("Remote assignment artifact is missing");
@@ -403,7 +466,7 @@ export class AssignmentArtifactClient {
           v: 1,
           t: "read",
           assignmentId,
-          capability,
+          authorization,
           ref,
           offset: progress.receivedBytes,
           limit: this.#chunkBytes,
@@ -452,18 +515,28 @@ export class MeshRunExecutorPort implements RunExecutorPort {
     const closure = await resolveDispatchArtifactClosure(envelope, this.options.artifacts);
     const stored = await this.options.artifacts.put(artifact.bytes);
     assertSameRef(stored, artifact.ref, "Dispatch artifact");
-    const capability = await this.#capability(envelope.assignmentId);
-    const signal = authorityDeadlineSignal(context, capability.expiry, this.options.clock);
+    const durableAuthorization = await this.#authorization(envelope.assignmentId);
+    const capability = durableAuthorization.capability;
     if (!envelope.capabilities.some(
       (candidate) => canonicalize(candidate) === canonicalize(capability),
-    )) {
+    ) || canonicalize(durableAuthorization.activation) !== canonicalize(activation)) {
       throw new TypeError("Artifact capability is not part of the signed dispatch envelope");
     }
+    const authorization = issueArtifactTransferAuthorization({
+      ...durableAuthorization,
+      refs: [artifact.ref, ...closure.transfer],
+      direction: "owner-to-executor",
+      sourceDeviceId: this.options.localDeviceId,
+      targetDeviceId: this.options.peerDeviceId,
+      signer: this.options.signer,
+      clock: this.options.clock,
+      notAfter: capability.expiry,
+    });
     await this.#assets.upload(
       envelope.assignmentId,
-      capability,
+      authorization,
       [artifact.ref, ...closure.transfer],
-      signal,
+      undefined,
     );
     const result = validateDispatchResult(decode(await this.options.client.request(
       RUN_EXECUTOR_SERVICE,
@@ -479,7 +552,7 @@ export class MeshRunExecutorPort implements RunExecutorPort {
         activation,
         context,
       } satisfies ExecutorRequest),
-      signal,
+      undefined,
     )), this.options.verifier);
     if (!result.accepted && result.proof.assignmentId !== envelope.assignmentId) {
       throw new TypeError("Dispatch result proof names a different assignment");
@@ -492,11 +565,9 @@ export class MeshRunExecutorPort implements RunExecutorPort {
     fence: { fenceSeq: number; requestId: string },
     context: AuthorityCallContext,
   ): Promise<void> {
-    const signal = authorityDeadlineSignal(context, undefined, this.options.clock);
     assertNull(decode(await this.options.client.request(
       RUN_EXECUTOR_SERVICE,
       encode({ v: 1, method: "cancel", assignmentId, fence, context } satisfies ExecutorRequest),
-      signal,
     )));
   }
 
@@ -505,12 +576,10 @@ export class MeshRunExecutorPort implements RunExecutorPort {
     fence: { fenceSeq: number; requestId: string },
     context: AuthorityCallContext,
   ): Promise<SupersedeProof> {
-    const capability = await this.#capability(assignmentId);
-    const signal = authorityDeadlineSignal(context, capability.expiry, this.options.clock);
+    const capability = (await this.#authorization(assignmentId)).capability;
     const proof = validateSupersedeProof(decode(await this.options.client.request(
       RUN_EXECUTOR_SERVICE,
       encode({ v: 1, method: "supersede", assignmentId, fence, context } satisfies ExecutorRequest),
-      signal,
     )) as SupersedeProof, this.options.verifier);
     if (
       proof.assignmentId !== assignmentId ||
@@ -527,9 +596,9 @@ export class MeshRunExecutorPort implements RunExecutorPort {
     context: AuthorityCallContext,
     range?: { fromSeq: number; limit: number },
   ): Promise<LedgerSnapshot | LedgerEvidencePage> {
-    const capability = await this.#capability(assignmentId);
-    const signal = authorityDeadlineSignal(context, capability.expiry, this.options.clock);
-    const value = decode(await this.options.client.request(
+    const durableAuthorization = await this.#authorization(assignmentId);
+    const capability = durableAuthorization.capability;
+    const response = decode(await this.options.client.request(
       RUN_EXECUTOR_SERVICE,
       encode({
         v: 1,
@@ -538,8 +607,33 @@ export class MeshRunExecutorPort implements RunExecutorPort {
         context,
         ...(range ? { range } : {}),
       } satisfies ExecutorRequest),
-      signal,
     ));
+    assertPlainObject(response, "Ledger query response");
+    assertExactKeys(
+      response,
+      ["result", "v", ...(response.artifactGrant === undefined ? [] : ["artifactGrant"])],
+    );
+    if (response.v !== 1) throw new TypeError("Ledger query response version is invalid");
+    const value = response.result;
+    const transferAuthorization = response.artifactGrant === undefined
+      ? undefined
+      : {
+          ...durableAuthorization,
+          grant: validateAssignmentArtifactTransferGrant(
+            response.artifactGrant,
+            this.options.verifier,
+          ),
+        };
+    if (
+      transferAuthorization &&
+      (
+        transferAuthorization.grant.sourceDeviceId !== this.options.peerDeviceId ||
+        transferAuthorization.grant.targetDeviceId !== this.options.localDeviceId ||
+        transferAuthorization.grant.direction !== "executor-to-owner"
+      )
+    ) {
+      throw new TypeError("Ledger artifact grant does not bind the queried executor");
+    }
     if (isPlainObject(value) && Array.isArray(value.entries)) {
       const page = validateLedgerEvidencePage(value, this.options.verifier);
       if (
@@ -551,7 +645,11 @@ export class MeshRunExecutorPort implements RunExecutorPort {
       ) {
         throw new TypeError("Ledger evidence page does not bind the requested range");
       }
-      await this.#downloadEvidenceArtifacts(assignmentId, capability, page.entries, signal);
+      await this.#downloadEvidenceArtifacts(
+        assignmentId,
+        transferAuthorization,
+        page.entries,
+      );
       return page;
     }
     if (range !== undefined) {
@@ -562,11 +660,13 @@ export class MeshRunExecutorPort implements RunExecutorPort {
       throw new TypeError("Ledger snapshot names a different assignment");
     }
     if (snapshot.sealedBundleRef) {
+      if (!transferAuthorization) {
+        throw new TypeError("Ledger snapshot omitted its artifact transfer grant");
+      }
       await this.#assets.download(
         assignmentId,
-        capability,
+        transferAuthorization,
         [snapshot.sealedBundleRef],
-        signal,
       );
       const bundle = await loadSealedBundle(
         snapshot.sealedBundleRef,
@@ -575,32 +675,37 @@ export class MeshRunExecutorPort implements RunExecutorPort {
       const declared = describeSealedBundleArtifactClosure(bundle);
       await this.#assets.download(
         assignmentId,
-        capability,
+        transferAuthorization,
         declared.transfer,
-        signal,
       );
       await resolveSealedBundleArtifactClosure(bundle, this.options.artifacts);
     }
     return snapshot;
   }
 
-  async #capability(assignmentId: string): Promise<AuthorityCapability> {
-    const capability = await this.options.capabilityFor(assignmentId);
-    assertCapabilityAssignment(capability, assignmentId);
-    return capability;
+  async #authorization(assignmentId: string): Promise<AssignmentArtifactAuthority> {
+    const authorization = await this.options.authorizationFor(assignmentId);
+    assertCapabilityAssignment(authorization.capability, assignmentId);
+    if (authorization.activation.assignmentId !== assignmentId) {
+      throw new TypeError("Assignment activation names a different assignment");
+    }
+    return authorization;
   }
 
   async #downloadEvidenceArtifacts(
     assignmentId: string,
-    capability: AuthorityCapability,
+    authorization: AssignmentArtifactTransferAuthorization | undefined,
     entries: LedgerEvidencePage["entries"],
-    signal: AbortSignal,
   ): Promise<void> {
+    const initialRefs = normalizedArtifactRefs(collectArtifactRefs(entries));
+    if (initialRefs.length > 0 && !authorization) {
+      throw new TypeError("Ledger evidence omitted its artifact transfer grant");
+    }
+    if (!authorization) return;
     await this.#assets.download(
       assignmentId,
-      capability,
-      normalizedArtifactRefs(collectArtifactRefs(entries)),
-      signal,
+      authorization,
+      initialRefs,
     );
     const materialized: AssignmentEntry[] = [];
     for (const entry of entries) {
@@ -615,9 +720,8 @@ export class MeshRunExecutorPort implements RunExecutorPort {
     }
     await this.#assets.download(
       assignmentId,
-      capability,
+      authorization,
       normalizedArtifactRefs(collectArtifactRefs(materialized)),
-      signal,
     );
     for (const entry of materialized) {
       if (entry.body.t === "received") {
@@ -632,7 +736,7 @@ export class MeshRunExecutorPort implements RunExecutorPort {
           this.options.verifier,
         );
         const closure = describeDispatchArtifactClosure(envelope);
-        await this.#assets.download(assignmentId, capability, closure.transfer, signal);
+        await this.#assets.download(assignmentId, authorization, closure.transfer);
         await resolveDispatchArtifactClosure(envelope, this.options.artifacts);
       } else if (entry.body.t === "bundle_sealed") {
         const bundle = await loadSealedBundle(
@@ -640,7 +744,7 @@ export class MeshRunExecutorPort implements RunExecutorPort {
           this.options.artifacts,
         );
         const closure = describeSealedBundleArtifactClosure(bundle);
-        await this.#assets.download(assignmentId, capability, closure.transfer, signal);
+        await this.#assets.download(assignmentId, authorization, closure.transfer);
         await resolveSealedBundleArtifactClosure(bundle, this.options.artifacts);
       }
     }
@@ -654,6 +758,7 @@ export function registerRunExecutorMeshService(
   return registry.register(RUN_EXECUTOR_SERVICE, {
     access: "write",
     availability: "negotiated-version",
+    authorize: (connection) => options.authorizePeer(connection.peer.deviceId),
     handler: createRunExecutorMeshServiceHandler(options),
   });
 }
@@ -668,65 +773,98 @@ export function createRunExecutorMeshServiceHandler(
   return async (payload, connection, signal) => {
     signal.throwIfAborted();
     const request = decodeExecutorRequest(payload);
-    const operation = linkedDeadlineSignal(
-      signal,
-      request.context.deadlineAt,
-      options.clock,
-    );
-    try {
-      operation.signal.throwIfAborted();
-      const preflight = executorRequestPreflight(request);
-      await options.guard.preflightOwnerControl(
-        request.context,
-        preflight,
-        connection.peer.deviceId,
+    const requestedPreflight = executorRequestPreflight(request);
+    let envelope: DispatchEnvelope | undefined;
+    let preflight = requestedPreflight;
+    if (request.method === "dispatch") {
+      envelope = await loadDispatchEnvelope(request.dispatchRef, options.artifacts);
+      validateDispatch(
+        envelope,
+        request.activation,
+        request.dispatchRef,
+        options.verifier,
       );
-      operation.signal.throwIfAborted();
-      if (request.method === "dispatch") {
-        const envelope = await loadDispatchEnvelope(request.dispatchRef, options.artifacts);
-        validateDispatch(
+      const actual = dispatchControlPreflight(
+        envelope,
+        request.activation,
+        request.context,
+        options.verifier,
+      );
+      if (canonicalize(actual) !== canonicalize(requestedPreflight)) {
+        throw new TypeError("Dispatch payload does not bind its authorized preflight identity");
+      }
+      preflight = actual;
+    }
+    await options.guard.preflightOwnerControl(
+      request.context,
+      preflight,
+      connection.peer.deviceId,
+    );
+    signal.throwIfAborted();
+    if (request.method === "dispatch") {
+      if (!envelope) throw new Error("Dispatch envelope was not loaded");
+      await resolveDispatchArtifactClosure(envelope, options.artifacts);
+      const result = await options.port.dispatch(
+        ...dispatchArguments(envelope, request.activation, request.context),
+      );
+      if (result.accepted) {
+        await options.onDispatchAccepted?.(
           envelope,
           request.activation,
-          request.dispatchRef,
-          options.verifier,
-        );
-        const actual = dispatchControlPreflight(
-          envelope,
-          request.activation,
-          request.context,
-          options.verifier,
-        );
-        if (canonicalize(actual) !== canonicalize(preflight)) {
-          throw new TypeError("Dispatch payload does not bind its authorized preflight identity");
-        }
-        await resolveDispatchArtifactClosure(envelope, options.artifacts);
-        return encode(await options.port.dispatch(
-          ...dispatchArguments(envelope, request.activation, request.context),
-        ));
-      }
-      if (request.method === "cancel") {
-        await options.port.cancel(
-          request.assignmentId,
-          request.fence,
           request.context,
         );
-        return encode(null);
       }
-      if (request.method === "supersede") {
-        return encode(await options.port.supersede(
-          request.assignmentId,
-          request.fence,
-          request.context,
-        ));
-      }
-      return encode(await options.port.queryLedger(
+      return encode(result);
+    }
+    if (request.method === "cancel") {
+      await options.port.cancel(
+        request.assignmentId,
+        request.fence,
+        request.context,
+      );
+      await options.onCancelAccepted?.(
         request.assignmentId,
         request.context,
-        request.range,
-      ));
-    } finally {
-      operation.dispose();
+      );
+      return encode(null);
     }
+    if (request.method === "supersede") {
+      return encode(await options.port.supersede(
+        request.assignmentId,
+        request.fence,
+        request.context,
+      ));
+    }
+    const rawResult = await options.port.queryLedger(
+      request.assignmentId,
+      request.context,
+      request.range,
+    );
+    const result = "entries" in rawResult
+      ? validateLedgerEvidencePage(rawResult, options.verifier)
+      : validateLedgerSnapshot(rawResult, options.verifier);
+    const refs = await collectLedgerTransferRefs(
+      result,
+      options.artifacts,
+      options.verifier,
+    );
+    const authority = await options.artifactAuthorizationFor(request.assignmentId);
+    const artifactGrant = refs.length === 0
+      ? undefined
+      : issueArtifactTransferAuthorization({
+          ...authority,
+          refs,
+          direction: "executor-to-owner",
+          sourceDeviceId: options.localDeviceId,
+          targetDeviceId: connection.peer.deviceId,
+          signer: options.signer,
+          clock: options.clock,
+        }).grant;
+    return encode({
+      v: 1,
+      result,
+      ...(artifactGrant ? { artifactGrant } : {}),
+    });
   };
 }
 
@@ -741,11 +879,9 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
     assignmentId: string,
     context: AuthorityCallContext,
   ): Promise<void> {
-    const signal = authorityDeadlineSignal(context, undefined, this.options.clock);
     assertNull(decode(await this.options.client.request(
       RUN_SUBMISSION_SERVICE,
       encode({ v: 1, method: "reportStarted", assignmentId, context } satisfies SubmissionRequest),
-      signal,
     )));
   }
 
@@ -757,20 +893,34 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
     | { committed: false; error: import("@zhixing/core/contracts").AuthorityError }
   > {
     const capability = assignmentCapabilityFromContext(context, bundle.assignmentId);
-    const signal = authorityDeadlineSignal(context, capability.expiry, this.options.clock);
+    const durableAuthorization = await this.options.authorizationFor(bundle.assignmentId);
+    if (canonicalize(durableAuthorization.capability) !== canonicalize(capability)) {
+      throw new TypeError("Bundle artifact capability differs from the durable activation");
+    }
     const validated = bundle.body.t === "conversation"
       ? validateConversationSealedBundle(bundle)
       : validateJobSealedBundle(bundle);
     const artifact = sealedBundleArtifact(validated);
-    const closure = await resolveSealedBundleArtifactClosure(validated, this.options.artifacts);
-    const stored = await this.options.artifacts.put(artifact.bytes);
-    assertSameRef(stored, artifact.ref, "Sealed bundle artifact");
-    await this.#assets.upload(
-      bundle.assignmentId,
-      capability,
-      [artifact.ref, ...closure.transfer],
-      signal,
-    );
+    if (authorityContextAllowsArtifactWrite(context, capability, this.options.clock)) {
+      const closure = await resolveSealedBundleArtifactClosure(validated, this.options.artifacts);
+      const stored = await this.options.artifacts.put(artifact.bytes);
+      assertSameRef(stored, artifact.ref, "Sealed bundle artifact");
+      const authorization = issueArtifactTransferAuthorization({
+        ...durableAuthorization,
+        refs: [artifact.ref, ...closure.transfer],
+        direction: "executor-to-owner",
+        sourceDeviceId: this.options.localDeviceId,
+        targetDeviceId: this.options.peerDeviceId,
+        signer: this.options.signer,
+        clock: this.options.clock,
+        notAfter: capability.expiry,
+      });
+      await this.#assets.upload(
+        bundle.assignmentId,
+        authorization,
+        [artifact.ref, ...closure.transfer],
+      );
+    }
     return decodeBundleResult(decode(await this.options.client.request(
       RUN_SUBMISSION_SERVICE,
       encode({
@@ -780,7 +930,6 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
         bundleRef: artifact.ref,
         context,
       } satisfies SubmissionRequest),
-      signal,
     )));
   }
 
@@ -789,7 +938,6 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
     proof: CancelProofBody,
     context: AuthorityCallContext,
   ): Promise<void> {
-    const signal = authorityDeadlineSignal(context, undefined, this.options.clock);
     assertNull(decode(await this.options.client.request(
       RUN_SUBMISSION_SERVICE,
       encode({
@@ -799,7 +947,6 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
         proof,
         context,
       } satisfies SubmissionRequest),
-      signal,
     )));
   }
 
@@ -808,7 +955,6 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
     batch: InteractionMirrorBatch,
     context: AuthorityCallContext,
   ): Promise<{ mirroredUpTo: number; ordinal: number; mirrorDigest: import("@zhixing/core/contracts").Digest }> {
-    const signal = authorityDeadlineSignal(context, undefined, this.options.clock);
     const receipt = decodeMirrorReceipt(decode(await this.options.client.request(
       RUN_SUBMISSION_SERVICE,
       encode({
@@ -818,7 +964,6 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
         batch,
         context,
       } satisfies SubmissionRequest),
-      signal,
     )));
     const last = batch.entries.at(-1);
     if (
@@ -855,44 +1000,116 @@ export function createRunSubmissionMeshServiceHandler(
     signal.throwIfAborted();
     const request = decodeSubmissionRequest(payload);
     const identity = submissionRequestPreflight(request);
-    assertSubmissionPeer(request.context, connection);
-    const operation = linkedDeadlineSignal(
-      signal,
-      submissionDeadline(request.context),
-      options.clock,
+    assertSubmissionPeer(
+      request.context,
+      connection,
+      options.executorIdForPeer,
     );
-    try {
-      operation.signal.throwIfAborted();
-      await options.guard.preflightSubmission(request.context, identity);
-      operation.signal.throwIfAborted();
-      if (request.method === "reportStarted") {
-        await options.port.reportStarted(request.assignmentId, request.context);
-        return encode(null);
+    const preflight = await options.guard.preflightSubmission(request.context, identity);
+    if (preflight.kind === "return") {
+      if (request.method !== "submitBundle") {
+        throw new TypeError("Submission preflight returned a bundle result for another method");
       }
-      if (request.method === "submitBundle") {
-        const bundle = await loadSealedBundle(request.bundleRef, options.artifacts);
-        if (bundle.assignmentId !== request.assignmentId) {
-          throw new TypeError("Sealed bundle does not bind its authorized assignment");
-        }
-        await resolveSealedBundleArtifactClosure(bundle, options.artifacts);
-        return encode(await options.port.submitBundle(bundle, request.context));
-      }
-      if (request.method === "submitCancelProof") {
-        await options.port.submitCancelProof(
-          request.assignmentId,
-          request.proof,
-          request.context,
-        );
-        return encode(null);
-      }
-      return encode(await options.port.mirrorInteractions(
-        request.assignmentId,
-        request.batch,
-        request.context,
-      ));
-    } finally {
-      operation.dispose();
+      return encode(preflight.result);
     }
+    signal.throwIfAborted();
+    if (request.method === "reportStarted") {
+      await options.port.reportStarted(request.assignmentId, request.context);
+      return encode(null);
+    }
+    if (request.method === "submitBundle") {
+      const bundle = await loadSealedBundle(request.bundleRef, options.artifacts);
+      if (bundle.assignmentId !== request.assignmentId) {
+        throw new TypeError("Sealed bundle does not bind its authorized assignment");
+      }
+      return encode(await options.port.submitBundle(bundle, request.context));
+    }
+    if (request.method === "submitCancelProof") {
+      await options.port.submitCancelProof(
+        request.assignmentId,
+        request.proof,
+        request.context,
+      );
+      return encode(null);
+    }
+    return encode(await options.port.mirrorInteractions(
+      request.assignmentId,
+      request.batch,
+      request.context,
+    ));
+  };
+}
+
+export class MeshResourceUsageIntake implements ResourceUsageIntake {
+  constructor(private readonly options: MeshResourceUsageIntakeOptions) {}
+
+  async submitUsageReport(
+    report: UsageReport,
+    context: AuthorityCallContext,
+  ): Promise<{ ackedThroughSeq: number }> {
+    const value = decode(await this.options.client.request(
+      RESOURCE_USAGE_SERVICE,
+      encode({ v: 1, report, context }),
+    ));
+    if (!isPlainRecord(value)) throw new TypeError("Usage acknowledgement must be an object");
+    assertExactKeys(value, ["ackedThroughSeq", "v"]);
+    if (
+      value.v !== 1 ||
+      !Number.isSafeInteger(value.ackedThroughSeq) ||
+      (value.ackedThroughSeq as number) < report.toUsageSeq
+    ) {
+      throw new TypeError("Usage acknowledgement does not cover the submitted report");
+    }
+    return { ackedThroughSeq: value.ackedThroughSeq as number };
+  }
+}
+
+export function registerResourceUsageMeshService(
+  registry: MeshServiceRegistry,
+  options: ResourceUsageMeshServiceOptions,
+): () => void {
+  return registry.register(RESOURCE_USAGE_SERVICE, {
+    access: "write",
+    availability: "negotiated-version",
+    handler: createResourceUsageMeshServiceHandler(options),
+  });
+}
+
+export function createResourceUsageMeshServiceHandler(
+  options: ResourceUsageMeshServiceOptions,
+): (
+  payload: Uint8Array,
+  connection: SecureMeshConnection,
+  signal: AbortSignal,
+) => Promise<Uint8Array> {
+  return async (payload, connection, signal) => {
+    signal.throwIfAborted();
+    const value = decode(payload);
+    if (!isPlainRecord(value)) throw new TypeError("Usage submission must be an object");
+    assertExactKeys(value, ["context", "report", "v"]);
+    if (value.v !== 1 || !isPlainRecord(value.context) || !isPlainRecord(value.report)) {
+      throw new TypeError("Usage submission fields are invalid");
+    }
+    const context = value.context as unknown as AuthorityCallContext;
+    const report = value.report as unknown as UsageReport;
+    const expectedReporter = options.reporterIdForPeer(connection.peer.deviceId);
+    if (
+      !expectedReporter ||
+      context.principal.kind !== "usage-reporter" ||
+      context.principal.executorId !== expectedReporter ||
+      report.reporterId !== expectedReporter
+    ) {
+      throw new TypeError("Usage report does not bind its authenticated executor peer");
+    }
+    signal.throwIfAborted();
+    const receipt = await options.intake.submitUsageReport(report, context);
+    if (
+      !Number.isSafeInteger(receipt.ackedThroughSeq) ||
+      receipt.ackedThroughSeq < report.toUsageSeq
+    ) {
+      throw new TypeError("Usage intake returned an invalid acknowledgement");
+    }
+    return encode({ v: 1, ackedThroughSeq: receipt.ackedThroughSeq });
   };
 }
 
@@ -902,24 +1119,31 @@ function decodeArtifactRequest(payload: Uint8Array, maxRangeBytes: number): Arti
   if (value.v !== 1 || (value.t !== "probe" && value.t !== "append" && value.t !== "read")) {
     throw new TypeError("Assignment artifact request kind is invalid");
   }
-  assertPlainObject(value.capability, "Artifact capability");
+  assertPlainObject(value.authorization, "Artifact authorization");
+  assertExactKeys(
+    value.authorization,
+    ["activation", "capability", "grant"],
+  );
+  assertPlainObject(value.authorization.activation, "Artifact activation");
+  assertPlainObject(value.authorization.capability, "Artifact capability");
+  assertPlainObject(value.authorization.grant, "Artifact transfer grant");
   assertArtifactRefValue(value.ref);
   if (typeof value.assignmentId !== "string" || value.assignmentId.length === 0) {
     throw new TypeError("Artifact assignmentId is invalid");
   }
   if (value.t === "probe") {
-    assertExactKeys(value, ["assignmentId", "capability", "direction", "ref", "t", "v"]);
+    assertExactKeys(value, ["assignmentId", "authorization", "direction", "ref", "t", "v"]);
     if (value.direction !== "receive" && value.direction !== "send") {
       throw new TypeError("Artifact probe direction is invalid");
     }
   } else if (value.t === "append") {
-    assertExactKeys(value, ["assignmentId", "bytes", "capability", "offset", "ref", "t", "v"]);
+    assertExactKeys(value, ["assignmentId", "authorization", "bytes", "offset", "ref", "t", "v"]);
     assertNonNegativeInteger(value.offset, "Artifact chunk offset");
     if (typeof value.bytes !== "string" || value.bytes.length > Math.ceil(maxRangeBytes / 3) * 4) {
       throw new RangeError("Artifact range encoding exceeds its limit");
     }
   } else {
-    assertExactKeys(value, ["assignmentId", "capability", "limit", "offset", "ref", "t", "v"]);
+    assertExactKeys(value, ["assignmentId", "authorization", "limit", "offset", "ref", "t", "v"]);
     assertNonNegativeInteger(value.offset, "Artifact range offset");
     assertPositiveInteger(value.limit, "Artifact range limit");
     if (value.limit > maxRangeBytes) throw new RangeError("Artifact range exceeds its limit");
@@ -931,6 +1155,9 @@ function decodeExecutorRequest(payload: Uint8Array): ExecutorRequest {
   const value = decode(payload);
   assertPlainObject(value, "Executor request");
   if (value.v !== 1) throw new TypeError("Executor request version is invalid");
+  assertProtocolIdentifier(value.assignmentId, "Executor request assignmentId");
+  assertPlainObject(value.context, "Executor request context");
+  assertProtocolIdentifier(value.context.requestId, "Executor request context requestId");
   if (value.method === "dispatch") {
     assertExactKeys(value, [
       "activation",
@@ -947,11 +1174,21 @@ function decodeExecutorRequest(payload: Uint8Array): ExecutorRequest {
     assertArtifactRefValue(value.dispatchRef);
   } else if (value.method === "cancel" || value.method === "supersede") {
     assertExactKeys(value, ["assignmentId", "context", "fence", "method", "v"]);
+    assertPlainObject(value.fence, "Executor request fence");
+    assertExactKeys(value.fence, ["fenceSeq", "requestId"]);
+    assertPositiveInteger(value.fence.fenceSeq, "Executor request fence sequence");
+    assertProtocolIdentifier(value.fence.requestId, "Executor request fence requestId");
   } else if (value.method === "queryLedger") {
     assertExactKeys(
       value,
       ["assignmentId", "context", "method", ...(value.range === undefined ? [] : ["range"]), "v"],
     );
+    if (value.range !== undefined) {
+      assertPlainObject(value.range, "Executor request range");
+      assertExactKeys(value.range, ["fromSeq", "limit"]);
+      assertPositiveInteger(value.range.fromSeq, "Executor request range start");
+      assertPositiveInteger(value.range.limit, "Executor request range limit");
+    }
   } else {
     throw new TypeError("Executor request method is invalid");
   }
@@ -1004,6 +1241,48 @@ async function loadCanonicalArtifact(ref: ArtifactRef, artifacts: ArtifactStore)
   const value = JSON.parse(text) as unknown;
   if (canonicalize(value) !== text) throw new TypeError("Assignment artifact is not canonical JSON");
   return value;
+}
+
+async function collectLedgerTransferRefs(
+  result: LedgerSnapshot | LedgerEvidencePage,
+  artifacts: ArtifactStore,
+  verifier: ProtocolSignatureVerifier,
+): Promise<ArtifactRef[]> {
+  const refs: ArtifactRef[] = [];
+  if ("entries" in result) {
+    refs.push(...collectArtifactRefs(result.entries));
+    const materialized: AssignmentEntry[] = [];
+    for (const entry of result.entries) {
+      const body = isArtifactRecordReference(entry.body)
+        ? await loadCanonicalArtifact(entry.body.ref, artifacts) as AssignmentRecord
+        : entry.body;
+      materialized.push(validateAssignmentEntry(
+        { recordSeq: entry.recordSeq, body },
+        verifier,
+      ));
+    }
+    refs.push(...collectArtifactRefs(materialized));
+    for (const entry of materialized) {
+      if (entry.body.t === "received") {
+        const envelope = await loadDispatchEnvelope(entry.body.envelope.ref, artifacts);
+        validateDispatch(
+          envelope,
+          entry.body.activation as AnyAssignmentActivationProof,
+          entry.body.envelope.ref,
+          verifier,
+        );
+        refs.push(...describeDispatchArtifactClosure(envelope).transfer);
+      } else if (entry.body.t === "bundle_sealed") {
+        const bundle = await loadSealedBundle(entry.body.bundle.ref, artifacts);
+        refs.push(...describeSealedBundleArtifactClosure(bundle).transfer);
+      }
+    }
+  } else if (result.sealedBundleRef) {
+    refs.push(result.sealedBundleRef);
+    const bundle = await loadSealedBundle(result.sealedBundleRef, artifacts);
+    refs.push(...describeSealedBundleArtifactClosure(bundle).transfer);
+  }
+  return normalizedArtifactRefs(refs);
 }
 
 function validateDispatch(
@@ -1102,10 +1381,13 @@ function submissionRequestPreflight(request: SubmissionRequest): SubmissionPrefl
 function assertSubmissionPeer(
   context: AuthorityCallContext,
   connection: SecureMeshConnection,
+  executorIdForPeer: (deviceId: string) => string | undefined,
 ): void {
+  const expectedExecutorId = executorIdForPeer(connection.peer.deviceId);
   if (
+    !expectedExecutorId ||
     context.principal.kind !== "assignment" ||
-    context.principal.capability.executorId !== connection.peer.deviceId
+    context.principal.capability.executorId !== expectedExecutorId
   ) {
     throw new TypeError("Assignment capability does not bind the authenticated executor");
   }
@@ -1137,6 +1419,103 @@ function assertCapabilityAssignment(
   if (capability.assignmentId !== assignmentId) {
     throw new TypeError("Assignment capability does not bind the artifact transfer");
   }
+}
+
+function validateArtifactTransferAuthorization(
+  input: AssignmentArtifactTransferAuthorization,
+  assignmentId: string,
+  ref: ArtifactRef,
+  verifier: ProtocolSignatureVerifier,
+  clock: () => number = Date.now,
+): AssignmentArtifactTransferAuthorization {
+  const capability = validateAuthorityCapability(input.capability, verifier);
+  const activation = input.activation as AnyAssignmentActivationProof;
+  const activationPayload = validateAssignmentActivationProof(activation, verifier);
+  const grant = validateAssignmentArtifactTransferGrant(input.grant, verifier);
+  assertCapabilityAssignment(capability, assignmentId);
+  if (
+    activationPayload.assignmentId !== assignmentId ||
+    activationPayload.assignmentId !== capability.assignmentId ||
+    activationPayload.executorId !== capability.executorId ||
+    !activationPayload.capIds.includes(capability.capId) ||
+    activation.signature.keyId !== capability.signature.keyId ||
+    grant.assignmentId !== assignmentId ||
+    grant.executorId !== capability.executorId ||
+    grant.capId !== capability.capId ||
+    grant.activationDigest !== assignmentActivationDigest(activationPayload) ||
+    !grant.refs.some((candidate) =>
+      candidate.digest === ref.digest && candidate.bytes === ref.bytes)
+  ) {
+    throw new TypeError("Assignment artifact authorization does not bind this transfer");
+  }
+  const now = clock();
+  if (now < Date.parse(grant.issuedAt) || now >= Date.parse(grant.expiry)) {
+    throw new TypeError("Assignment artifact transfer grant is outside its validity interval");
+  }
+  return { capability, activation, grant };
+}
+
+function assertArtifactAuthorizationCovers(
+  authorization: AssignmentArtifactTransferAuthorization,
+  assignmentId: string,
+  references: readonly ArtifactRef[],
+): void {
+  assertCapabilityAssignment(authorization.capability, assignmentId);
+  if (
+    authorization.activation.assignmentId !== assignmentId ||
+    authorization.grant.assignmentId !== assignmentId
+  ) {
+    throw new TypeError("Assignment artifact authorization names a different assignment");
+  }
+  const granted = new Map(
+    authorization.grant.refs.map((ref) => [ref.digest, ref.bytes] as const),
+  );
+  for (const ref of normalizedArtifactRefs(references)) {
+    if (granted.get(ref.digest) !== ref.bytes) {
+      throw new TypeError("Assignment artifact authorization does not cover the requested ref");
+    }
+  }
+}
+
+function issueArtifactTransferAuthorization(input: {
+  readonly capability: AuthorityCapability;
+  readonly activation: AnyAssignmentActivationProof;
+  readonly refs: readonly ArtifactRef[];
+  readonly direction: AssignmentArtifactTransferGrant["direction"];
+  readonly sourceDeviceId: string;
+  readonly targetDeviceId: string;
+  readonly signer: ProtocolSigner;
+  readonly clock?: () => number;
+  readonly notAfter?: string;
+}): AssignmentArtifactTransferAuthorization {
+  const now = (input.clock ?? Date.now)();
+  const issuedAt = new Date(now).toISOString();
+  const expiryMs = Math.min(
+    now + MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS,
+    input.notAfter === undefined ? Number.POSITIVE_INFINITY : Date.parse(input.notAfter),
+  );
+  if (!Number.isFinite(expiryMs) || expiryMs <= now) {
+    throw new TypeError("Assignment artifact transfer authorization is already stale");
+  }
+  const { signature: _, ...activationPayload } = input.activation;
+  const grant = createSignedAssignmentArtifactTransferGrant({
+    assignmentId: input.capability.assignmentId,
+    executorId: input.capability.executorId,
+    capId: input.capability.capId,
+    sourceDeviceId: input.sourceDeviceId,
+    targetDeviceId: input.targetDeviceId,
+    direction: input.direction,
+    activationDigest: assignmentActivationDigest(activationPayload),
+    refs: normalizedArtifactRefs(input.refs),
+    issuedAt,
+    expiry: new Date(expiryMs).toISOString(),
+    signer: input.signer,
+  });
+  return {
+    capability: input.capability,
+    activation: input.activation,
+    grant,
+  };
 }
 
 function decodeProgress(value: unknown, ref: ArtifactRef): { receivedBytes: number; complete: boolean } {
@@ -1201,32 +1580,17 @@ async function sendProgress(
   return { receivedBytes: complete ? ref.bytes : 0, complete };
 }
 
-function authorityDeadlineSignal(
+function authorityContextAllowsArtifactWrite(
   context: AuthorityCallContext,
-  capabilityExpiry?: string,
+  capability: AuthorityCapability,
   clock: () => number = Date.now,
-): AbortSignal {
-  const deadline = parseCanonicalTime(context.deadlineAt, "Authority call deadline");
-  const expiry = capabilityExpiry === undefined
-    ? deadline
-    : Math.min(deadline, parseCanonicalTime(capabilityExpiry, "Authority capability expiry"));
-  const remaining = expiry - clock();
-  if (remaining <= 0) {
-    return AbortSignal.abort(new Error("Assignment mesh operation deadline has expired"));
-  }
-  return AbortSignal.timeout(Math.min(remaining, 2_147_483_647));
-}
-
-function submissionDeadline(context: AuthorityCallContext): string {
-  if (context.principal.kind !== "assignment") {
-    throw new TypeError("Assignment submission requires an assignment capability");
-  }
+): boolean {
   const deadline = parseCanonicalTime(context.deadlineAt, "Authority call deadline");
   const capabilityExpiry = parseCanonicalTime(
-    context.principal.capability.expiry,
+    capability.expiry,
     "Authority capability expiry",
   );
-  return new Date(Math.min(deadline, capabilityExpiry)).toISOString();
+  return clock() < Math.min(deadline, capabilityExpiry);
 }
 
 function linkedDeadlineSignal(
@@ -1335,6 +1699,13 @@ function assertExactKeys(value: Record<string, unknown>, expected: readonly stri
   if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) {
     throw new TypeError("Assignment mesh payload contains missing or unknown fields");
   }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype;
 }
 
 function assertNonNegativeInteger(value: unknown, label: string): asserts value is number {

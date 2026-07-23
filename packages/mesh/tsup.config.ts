@@ -3,6 +3,8 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/blind-relay.ts",
+    "src/blind-rendezvous.ts",
+    "src/bootstrap.ts",
     "src/index.ts",
     "src/canonical.ts",
     "src/checkpoint.ts",

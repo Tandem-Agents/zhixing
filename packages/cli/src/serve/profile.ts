@@ -33,6 +33,7 @@ export const PROFILES: Record<ServerProfile, ProfileSpec> = {
       "mcp",
       "authority-runtime",
       "conversation",
+      "mesh-control",
       "channel",
       "delivery",
       "text-renderer",

@@ -18,7 +18,10 @@ import {
   type RuntimeFactory,
   type SessionRuntime,
 } from "@zhixing/owner-kernel";
-import { InProcessAssignmentSubmission } from "@zhixing/executor";
+import {
+  ConversationAssignmentLedger,
+  InProcessAssignmentSubmission,
+} from "@zhixing/executor";
 import { projectSessionTurn } from "@zhixing/rpc";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -41,6 +44,11 @@ const TEST_EXECUTOR_READINESS = {
 
 const TEST_RESOURCE_CANDIDATE_TTL_MS = 60_000;
 const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
+
+const TEST_LOCAL_EXECUTOR = {
+  ConversationAssignmentLedger,
+  InProcessAssignmentSubmission,
+};
 
 const TEST_RUNTIME_AUTHORITY_FACTS = {
   executionPermissionRules: () => [],
@@ -72,6 +80,15 @@ function setupAuthorityRuntime(
     executorReadiness: options.executorReadiness ?? TEST_EXECUTOR_READINESS,
     resourceCandidateTtlMs:
       options.resourceCandidateTtlMs ?? TEST_RESOURCE_CANDIDATE_TTL_MS,
+  });
+}
+
+function createProtocol(
+  options: ConstructorParameters<typeof ConversationProtocolRuntime>[0],
+): ConversationProtocolRuntime {
+  return new ConversationProtocolRuntime({
+    ...options,
+    localExecutor: options.localExecutor ?? TEST_LOCAL_EXECUTOR,
   });
 }
 
@@ -128,7 +145,7 @@ async function seedPendingConversation(label: string) {
     async dispose() {},
   };
   let manager!: ConversationManager;
-  const protocol = new ConversationProtocolRuntime({
+  const protocol = createProtocol({
     authority,
     manager: () => manager,
     interactions: new DurableConversationInteractionObserver(),
@@ -163,7 +180,7 @@ describe("ConversationProtocolRuntime", () => {
       authority.executorResourceGovernor,
       "reclaimExpired",
     );
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => {
         throw new Error("empty recovery must not load a conversation manager");
@@ -244,7 +261,7 @@ describe("ConversationProtocolRuntime", () => {
         return prepared;
       });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -403,7 +420,7 @@ describe("ConversationProtocolRuntime", () => {
     let finalAttempts = 0;
     const statuses: unknown[] = [];
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions,
@@ -543,7 +560,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     const restartedInteractions = new DurableConversationInteractionObserver();
     let restartedManager!: ConversationManager;
-    const restartedProtocol = new ConversationProtocolRuntime({
+    const restartedProtocol = createProtocol({
       authority: restartedAuthority,
       manager: () => restartedManager,
       interactions: restartedInteractions,
@@ -665,7 +682,7 @@ describe("ConversationProtocolRuntime", () => {
     };
     const factory: RuntimeFactory = { create: vi.fn(async () => runtime) };
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions,
@@ -711,7 +728,7 @@ describe("ConversationProtocolRuntime", () => {
       zhixingHome: home,
       secretStore: new MemorySecretStore(),
     });
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => {
         throw new Error("manager is not used by admission");
@@ -812,7 +829,7 @@ describe("ConversationProtocolRuntime", () => {
       },
     });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions,
@@ -848,7 +865,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     let restartedManager!: ConversationManager;
     const restartedStatuses: ConversationStatusNotice[] = [];
-    const restartedProtocol = new ConversationProtocolRuntime({
+    const restartedProtocol = createProtocol({
       authority: restartedAuthority,
       manager: () => restartedManager,
       interactions: new DurableConversationInteractionObserver(),
@@ -963,7 +980,7 @@ describe("ConversationProtocolRuntime", () => {
     };
     let manager!: ConversationManager;
     const recoverAuxiliary = vi.fn(async () => {});
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1073,7 +1090,7 @@ describe("ConversationProtocolRuntime", () => {
       async dispose() {},
     };
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1202,7 +1219,7 @@ describe("ConversationProtocolRuntime", () => {
       },
     });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1235,7 +1252,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore,
     });
     let restartedManager!: ConversationManager;
-    const restartedProtocol = new ConversationProtocolRuntime({
+    const restartedProtocol = createProtocol({
       authority: restartedAuthority,
       manager: () => restartedManager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1334,7 +1351,7 @@ describe("ConversationProtocolRuntime", () => {
       },
     });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1472,7 +1489,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore,
     });
     let restartedManager!: ConversationManager;
-    const restartedProtocol = new ConversationProtocolRuntime({
+    const restartedProtocol = createProtocol({
       authority: restartedAuthority,
       manager: () => restartedManager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1519,7 +1536,7 @@ describe("ConversationProtocolRuntime", () => {
         throw new Error("authority response lost after fsync");
       });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1587,7 +1604,7 @@ describe("ConversationProtocolRuntime", () => {
       },
     });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1623,7 +1640,7 @@ describe("ConversationProtocolRuntime", () => {
       metered: boolean;
     }> = [];
     let restartedManager!: ConversationManager;
-    const restartedProtocol = new ConversationProtocolRuntime({
+    const restartedProtocol = createProtocol({
       authority: restartedAuthority,
       manager: () => restartedManager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1705,7 +1722,7 @@ describe("ConversationProtocolRuntime", () => {
       async dispose() {},
     };
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1766,7 +1783,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore: new MemorySecretStore(),
     });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1822,7 +1839,7 @@ describe("ConversationProtocolRuntime", () => {
       async dispose() {},
     };
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1899,7 +1916,7 @@ describe("ConversationProtocolRuntime", () => {
         throw new Error("legacy lifecycle projection unavailable");
       }
     });
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -1984,7 +2001,7 @@ describe("ConversationProtocolRuntime", () => {
     const secretStore = new MemorySecretStore();
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -2016,7 +2033,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     const projected = vi.fn(async () => {});
     let restartedManager!: ConversationManager;
-    const restartedProtocol = new ConversationProtocolRuntime({
+    const restartedProtocol = createProtocol({
       authority: restartedAuthority,
       manager: () => restartedManager,
       interactions: new DurableConversationInteractionObserver(),
@@ -2061,7 +2078,7 @@ describe("ConversationProtocolRuntime", () => {
       secretStore: new MemorySecretStore(),
     });
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
@@ -2128,7 +2145,7 @@ describe("ConversationProtocolRuntime", () => {
     let projectionAttempts = 0;
     const finals: unknown[] = [];
     let manager!: ConversationManager;
-    const protocol = new ConversationProtocolRuntime({
+    const protocol = createProtocol({
       authority,
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),

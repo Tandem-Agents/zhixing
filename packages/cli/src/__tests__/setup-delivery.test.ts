@@ -22,6 +22,7 @@ import {
   validateTrustRuleSnapshot,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import {
   setupAuthorityRuntime,
   setupDelivery,
@@ -306,6 +307,153 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
         `user-alias:${peer.deviceId}:credential-provider-main`,
       );
       expect(peerBinding?.bindingId).not.toBe(localBinding?.bindingId);
+    } finally {
+      await rm(peerHome, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps historical verification keys separate from live device authorization", async () => {
+    const peerKey = await DeviceKey.generate();
+    const peerIdentity = enrollDeviceIdentity(peerKey, {
+      displayName: "revoked peer",
+      platform: "headless",
+      enrolledAt: new Date().toISOString(),
+    });
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      trustedIdentities: [peerIdentity],
+      authorizedDeviceIds: [],
+      executorReadiness: TEST_EXECUTOR_READINESS,
+    });
+    const payload = { historical: true };
+    const signature = peerKey.sign("HistoricalVerificationProbe", 1, payload);
+
+    expect(() => authority.verifier.verify(
+      "HistoricalVerificationProbe",
+      1,
+      payload,
+      signature,
+    )).not.toThrow();
+  });
+
+  it("constructs an executor-only authority stack without anchor owners", async () => {
+    const runtime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+      enableAnchor: false,
+      enableLocalExecutor: true,
+    });
+
+    expect(runtime.executorLog).toBeDefined();
+    expect(runtime.executorResourceGovernor).toBeDefined();
+    expect(() => runtime.authorityLog).toThrow("Anchor authority role is not enabled");
+    expect(() => runtime.authority).toThrow("Anchor authority role is not enabled");
+    expect(() => runtime.controlAdmission).toThrow("Anchor authority role is not enabled");
+    expect(() => runtime.resourceGovernor).toThrow("Anchor authority role is not enabled");
+  });
+
+  it("selects the first compatible remote executor and falls back to local capacity", async () => {
+    const incompatibleHome = await createTempDir("delivery-incompatible-executor");
+    const compatibleHome = await createTempDir("delivery-compatible-executor");
+    try {
+      const incompatible = await setupAuthorityRuntime({
+        zhixingHome: incompatibleHome,
+        secretStore: new MemorySecretStore(),
+        executorReadiness: TEST_EXECUTOR_READINESS,
+        enableAnchor: false,
+      });
+      const compatible = await setupAuthorityRuntime({
+        zhixingHome: compatibleHome,
+        secretStore: new MemorySecretStore(),
+        executorReadiness: { ...TEST_EXECUTOR_READINESS, tools: ["Read"] },
+        enableAnchor: false,
+      });
+      const anchor = await setupAuthorityRuntime({
+        zhixingHome: home,
+        secretStore: new MemorySecretStore(),
+        trustedIdentities: [incompatible.identity, compatible.identity],
+        executorReadiness: { ...TEST_EXECUTOR_READINESS, tools: ["Read"] },
+      });
+      const profile = { ...EMPTY_EXECUTION_PROFILE, tools: ["Read"] };
+      const remote = await anchor.prepareConversationAssignment({
+        executionProfile: profile,
+        permissionRules: [],
+        targets: [
+          {
+            executorId: incompatible.executorId,
+            synchronizePermission: (snapshot) =>
+              incompatible.installPermissionSnapshot(snapshot),
+          },
+          {
+            executorId: compatible.executorId,
+            synchronizePermission: (snapshot) =>
+              compatible.installPermissionSnapshot(snapshot),
+          },
+        ],
+      });
+      expect(remote.executorId).toBe(compatible.executorId);
+
+      const local = await anchor.prepareConversationAssignment({
+        executionProfile: profile,
+        permissionRules: [],
+        targets: [{
+          executorId: incompatible.executorId,
+          synchronizePermission: (snapshot) =>
+            incompatible.installPermissionSnapshot(snapshot),
+        }],
+      });
+      expect(local.executorId).toBe(anchor.executorId);
+    } finally {
+      await rm(incompatibleHome, { force: true, recursive: true });
+      await rm(compatibleHome, { force: true, recursive: true });
+    }
+  });
+
+  it("refreshes live device authorization without rebuilding the authority runtime", async () => {
+    const peerHome = await createTempDir("delivery-live-authorization-peer");
+    try {
+      const peer = await setupAuthorityRuntime({
+        zhixingHome: peerHome,
+        secretStore: new MemorySecretStore(),
+        executorReadiness: TEST_EXECUTOR_READINESS,
+      });
+      const local = await setupAuthorityRuntime({
+        zhixingHome: home,
+        secretStore: new MemorySecretStore(),
+        authorizedDeviceIds: [],
+        executorReadiness: TEST_EXECUTOR_READINESS,
+      });
+      await prepareAuthority(peer);
+      const snapshot = await peer.currentExecutorSnapshot();
+
+      await expect(local.acceptExecutorSnapshot(snapshot)).rejects.toThrow(
+        "untrusted device",
+      );
+      local.reconcileTrustedDevices([peer.identity], [peer.deviceId]);
+      await expect(local.acceptExecutorSnapshot(snapshot)).resolves.toBeUndefined();
+      local.reconcileTrustedDevices([peer.identity], []);
+      await expect(local.acceptExecutorSnapshot(snapshot)).rejects.toThrow(
+        "not currently authorized",
+      );
+      expect(() => local.verifier.verify(
+        "CapabilityDescriptor",
+        1,
+        {
+          v: snapshot.descriptor.v,
+          executorId: snapshot.descriptor.executorId,
+          revision: snapshot.descriptor.revision,
+          protocolVersion: snapshot.descriptor.protocolVersion,
+          workspaces: snapshot.descriptor.workspaces,
+          tools: snapshot.descriptor.tools,
+          mcpServers: snapshot.descriptor.mcpServers,
+          credentialBindings: snapshot.descriptor.credentialBindings,
+          evidenceCapabilities: snapshot.descriptor.evidenceCapabilities,
+          at: snapshot.descriptor.at,
+        },
+        snapshot.descriptor.signature,
+      )).not.toThrow();
     } finally {
       await rm(peerHome, { force: true, recursive: true });
     }

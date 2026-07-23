@@ -1,11 +1,15 @@
 import type { ServeOptions } from "./command.js";
-import type { ExecutorRoleModule } from "./role-topology.js";
+import type {
+  ExecutorRoleModule,
+  ServeBootstrapContext,
+} from "./role-topology.js";
 
-/** Anchor 角色入口保持无导入副作用；真正监听只在 run 调用后开始。 */
+/** 产品宿主入口保持无导入副作用；角色专属资源只在 run 调用后装配。 */
 export async function run(
   options: ServeOptions,
-  executor: ExecutorRoleModule,
+  bootstrap: ServeBootstrapContext,
+  executor?: ExecutorRoleModule,
 ): Promise<void> {
-  const anchor = await import("./command.js");
-  await anchor.runServeCommand(options, executor);
+  const host = await import("./command.js");
+  await host.runServeCommand(options, bootstrap, executor);
 }

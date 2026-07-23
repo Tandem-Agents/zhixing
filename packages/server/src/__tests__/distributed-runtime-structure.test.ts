@@ -101,6 +101,12 @@ describe("distributed runtime structural gates", () => {
     const anchorRoleRefs = await readModuleReferences(
       "packages/cli/src/serve/anchor-role.ts",
     );
+    const executorRoleRefs = await readModuleReferences(
+      "packages/cli/src/serve/executor-role.ts",
+    );
+    const executorRuntimeRefs = await readModuleReferences(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+    );
     expect(serveCommandRefs).not.toContainEqual({
       kind: "import",
       specifier: "@zhixing/executor",
@@ -120,6 +126,18 @@ describe("distributed runtime structural gates", () => {
     expect(anchorRoleRefs).not.toContainEqual({
       kind: "import",
       specifier: "./command.js",
+    });
+    expect(executorRoleRefs).toContainEqual({
+      kind: "dynamic-import",
+      specifier: "./executor-role-runtime.js",
+    });
+    expect(executorRoleRefs).not.toContainEqual({
+      kind: "import",
+      specifier: "./executor-role-runtime.js",
+    });
+    expect(executorRuntimeRefs).not.toContainEqual({
+      kind: "import",
+      specifier: "@zhixing/owner-kernel",
     });
     expect(rpcContracts.length).toBeGreaterThan(40);
     expect(findDuplicateContractNames(rpcContracts)).toEqual([]);

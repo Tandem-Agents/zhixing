@@ -1,12 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import {
   normalizeUserTurnInput,
   userMessageFromTurnInput,
   type AgentYield,
   type RunResult,
-  type ToolDefinition,
-  type ToolSideEffectObserver,
 } from "@zhixing/core";
 import type {
   AuthorityLogSnapshot,
@@ -14,38 +11,39 @@ import type {
 import type {
   AuthorityCapability,
   AuthorityCallContext,
+  AssignmentActivationProof,
   CommitEnvelope,
   ControlLease,
   ConversationStatusNotice,
   FinalFrame,
   IngressContext,
+  InteractionMirrorBatch,
   OwnerControlGrant,
   ConversationInvocation,
   AssignmentResourceLease,
+  DispatchResult,
+  LedgerEvidencePage,
+  LedgerSnapshot,
+  RunDispatchArguments,
+  RunExecutorPort,
+  RunSubmissionPort,
+  SupersedeProof,
+  TrustRuleSnapshot,
   ReservationOrigin,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import {
   assertPrincipalAllowsAuthorityMethod,
-  assertAuthorizedOwnerControlGrant,
   MAX_CONTROL_LEASE_TTL_MS,
   canonicalize,
-  confirmationDecisionDigest,
   ownerControlRequestDigest,
   protocolDigest,
   StreamDigestChain,
   validateAuthorityCapability,
-  type ConversationInteractionOutcome,
+  type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
-import type {
-  ConfirmationDecision,
-  ConfirmationAdmissionDisposition,
-  ConfirmationLifecycleObserver,
-  ConfirmationRequest,
-  ConfirmationResolutionSource,
-} from "@zhixing/core";
 import {
   ConversationRunJournal,
   InProcessConversationDispatcher,
@@ -55,6 +53,8 @@ import {
   createConversationControlEnvelope,
   createInitialControlEnvelope,
   type AssignmentSubmissionAuthorizer,
+  type AssignmentSubmissionIdentity,
+  type AssignmentSubmissionPreflightPort,
   type ConversationCommitAuthority,
   type ConversationManager,
   type ManagedSession,
@@ -75,18 +75,37 @@ import {
   type InProcessDispatchContextFactory,
 } from "@zhixing/owner-kernel";
 import { runTurnWithCommit } from "@zhixing/owner-kernel/run-turn";
-import {
+import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
-  type OwnerControlAuthorizer,
 } from "@zhixing/executor";
 import type {
   AuthorityRuntimeStack,
   ConversationRuntimeBinding,
 } from "../setup-delivery.js";
+import type { ExecutorCapabilitySnapshot } from "@zhixing/core/protocol";
+import {
+  DurableConversationInteractionObserver,
+  type DurableInteractionBinding,
+} from "./durable-conversation-interactions.js";
+import { createConversationExecutorLedger } from "./conversation-executor-ledger.js";
+import { isRetryableMeshFailure } from "./remote-obligation-failure.js";
+
+export { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 
 const CONTEXT_TTL_MS = MAX_CONTROL_LEASE_TTL_MS;
 const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(CONTEXT_TTL_MS / 3);
+
+export interface RemoteConversationExecutionTarget {
+  readonly executorId: string;
+  readonly executor: RunExecutorPort;
+  synchronizePermission(snapshot: TrustRuleSnapshot): Promise<ExecutorCapabilitySnapshot>;
+}
+
+export interface RemoteConversationExecutionDirectory {
+  candidates(): Promise<readonly RemoteConversationExecutionTarget[]>;
+  forExecutor(executorId: string): RemoteConversationExecutionTarget | undefined;
+}
 
 export interface ConversationProtocolRuntimeOptions {
   readonly authority: AuthorityRuntimeStack;
@@ -94,6 +113,10 @@ export interface ConversationProtocolRuntimeOptions {
   readonly clock?: () => string;
   readonly maxPendingInteractions?: number;
   readonly interactions: DurableConversationInteractionObserver;
+  readonly localExecutor?: {
+    readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
+    readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+  };
   readonly executeRecoveredPerspective?: (input: {
     readonly manager: ConversationManager;
     readonly managed: ManagedSession;
@@ -119,16 +142,6 @@ export interface ConversationProtocolRuntimeOptions {
   readonly recoverAuxiliary?: (conversationId: string) => Promise<void>;
 }
 
-interface DurableInteractionBinding {
-  readonly assignmentId: string;
-  readonly ledger: ConversationAssignmentLedger;
-  readonly submission: InProcessAssignmentSubmission;
-  readonly context: AuthorityCallContext;
-  readonly surfacePrincipal: string;
-  readonly stream: StreamDigestChain;
-  readonly streamMeta: { readonly turnOrigin?: NonNullable<IngressContext["turnOrigin"]> };
-}
-
 interface AppliedConversationAdmission {
   readonly runId: string;
   readonly ingress: IngressContext;
@@ -143,175 +156,25 @@ interface PreparedConversationAdmission {
   readonly invocation: ConversationInvocation;
 }
 
-export class DurableConversationInteractionObserver
-  implements ConfirmationLifecycleObserver, ToolSideEffectObserver
-{
-  readonly #bindings = new AsyncLocalStorage<DurableInteractionBinding>();
-  readonly #requests = new Map<string, DurableInteractionBinding>();
-
-  withBinding<T>(
-    binding: DurableInteractionBinding,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    return this.#bindings.run(binding, operation);
-  }
-
-  async beforeRequest(
-    request: ConfirmationRequest,
-  ): Promise<ConfirmationAdmissionDisposition> {
-    const active = this.#requireActive();
-    if (this.#requests.has(request.id)) {
-      throw new Error(`Confirmation interaction ${request.id} is already bound`);
-    }
-    const disposition = await active.ledger.requestInteraction(active.assignmentId, {
-      requestId: request.id,
-      toolName: request.tool,
-      display: {
-        title: request.display.title,
-        lines: [canonicalize(request.display.body)],
-      },
-      issuedAt: new Date(request.createdAt).toISOString(),
-      ttlMs: Math.max(0, request.expiresAt - request.createdAt),
-      expiresAt: new Date(request.expiresAt).toISOString(),
-    });
-    if (!disposition.accepted) {
-      const decision = {
-        kind: "cancelled" as const,
-        cause: "backpressure" as const,
-      };
-      await active.submission.finishAndMirror(
-        active.assignmentId,
-        request.id,
-        interactionOutcome(
-          request,
-          decision,
-          { kind: "backpressure" },
-          active.surfacePrincipal,
-        ),
-        active.context,
-      );
-      return { accepted: false, decision };
-    }
-    active.stream.append(
-      {
-        kind: "interaction",
-        event: {
-          t: "requested",
-          requestId: request.id,
-          toolName: request.tool,
-          display: disposition.display,
-          issuedAt: new Date(request.createdAt).toISOString(),
-          ttlMs: Math.max(0, request.expiresAt - request.createdAt),
-          expiresAt: new Date(request.expiresAt).toISOString(),
-        },
-      },
-      active.streamMeta,
-    );
-    this.#requests.set(request.id, active);
-    return { accepted: true };
-  }
-
-  async afterResolved(
-    request: ConfirmationRequest,
-    decision: ConfirmationDecision,
-    source: ConfirmationResolutionSource,
-  ): Promise<void> {
-    const active = this.#requests.get(request.id);
-    if (!active) {
-      throw new Error(`Confirmation interaction ${request.id} has no durable binding`);
-    }
-    await active.submission.finishAndMirror(
-      active.assignmentId,
-      request.id,
-      interactionOutcome(request, decision, source, active.surfacePrincipal),
-      active.context,
-    );
-    active.stream.append(
-      {
-        kind: "interaction",
-        event: {
-          t: "finished",
-          requestId: request.id,
-          outcome: streamInteractionOutcome(decision),
-        },
-      },
-      active.streamMeta,
-    );
-    this.#requests.delete(request.id);
-  }
-
-  releaseAssignment(assignmentId: string): void {
-    for (const [requestId, binding] of this.#requests) {
-      if (binding.assignmentId === assignmentId) this.#requests.delete(requestId);
-    }
-  }
-
-  async start(
-    tool: ToolDefinition,
-    input: Record<string, unknown>,
-  ): Promise<unknown> {
-    const active = this.#requireActive();
-    const external = tool.boundaries?.some((boundary) =>
-      boundary.boundaryType === "external-service" ||
-      boundary.boundaryType === "messaging" ||
-      boundary.boundaryType === "calendar" ||
-      boundary.boundaryType === "financial"
-    ) ?? false;
-    const started = await active.ledger.startSideEffect(active.assignmentId, {
-      kind: external ? "external-call" : "tool-mutation",
-      toolName: tool.name,
-      summary: `${tool.name}(${Object.keys(input).sort().join(",")})`,
-      target: external
-        ? "external-service"
-        : tool.name === "Write" || tool.name === "Edit"
-          ? "workspace-file"
-          : "device-system",
-    });
-    return {
-      binding: active,
-      effectSeq: started.effectSeq,
-    };
-  }
-
-  async finish(
-    token: unknown,
-    result: { readonly status: "ok" | "failed" | "aborted" },
-  ): Promise<void> {
-    if (!token || typeof token !== "object" || Array.isArray(token)) {
-      throw new TypeError("Side-effect observer token is invalid");
-    }
-    const value = token as { binding?: DurableInteractionBinding; effectSeq?: number };
-    if (!value.binding || !Number.isSafeInteger(value.effectSeq)) {
-      throw new TypeError("Side-effect observer token is incomplete");
-    }
-    await value.binding.ledger.completeSideEffect(
-      value.binding.assignmentId,
-      value.effectSeq!,
-      result,
-    );
-  }
-
-  #requireActive(): DurableInteractionBinding {
-    const active = this.#bindings.getStore();
-    if (!active) {
-      throw new Error("Confirmation interaction has no active durable assignment");
-    }
-    return active;
-  }
-}
-
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
   readonly #authority: AuthorityRuntimeStack;
   readonly #manager: () => ConversationManager;
   readonly #clock: () => string;
-  readonly #ledger: ConversationAssignmentLedger;
+  readonly #ledger: ConversationAssignmentLedger | undefined;
+  readonly #InProcessAssignmentSubmission:
+    | typeof InProcessAssignmentSubmission
+    | undefined;
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
   readonly #assignmentConversations = new Map<string, string>();
   readonly #assignmentCapabilities = new Map<
     string,
     AuthorityCapability<"conversation">
+  >();
+  readonly #assignmentActivations = new Map<
+    string,
+    AssignmentActivationProof<"conversation">
   >();
   readonly #assignmentRuntimeBindings = new Map<string, ConversationRuntimeBinding>();
   readonly #schedulingRuns = new Set<string>();
@@ -339,6 +202,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryDiscovered = false;
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
+  #remoteExecution: RemoteConversationExecutionDirectory | undefined;
 
   constructor(options: ConversationProtocolRuntimeOptions) {
     this.#authority = options.authority;
@@ -350,18 +214,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#onFinal = options.onFinal;
     this.#projectLifecycle = options.projectLifecycle;
     this.#recoverAuxiliary = options.recoverAuxiliary;
-    const ownerControl = createOwnerControlAuthorizer(
-      options.authority.verifier,
-      this.#clock,
-    );
-    this.#ledger = new ConversationAssignmentLedger({
-      log: options.authority.executorLog,
-      artifacts: options.authority.artifacts,
-      executorId: options.authority.executorId,
-      signer: options.authority.signer,
-      verifier: options.authority.verifier,
-      ownerControl,
-      resources: options.authority.executorResourceGovernor,
+    this.#InProcessAssignmentSubmission =
+      options.localExecutor?.InProcessAssignmentSubmission;
+    this.#ledger = options.localExecutor?.ConversationAssignmentLedger
+      ? createConversationExecutorLedger({
+      Constructor: options.localExecutor.ConversationAssignmentLedger,
+      authority: options.authority,
       usageFinal: (assignmentId) =>
         options.authority.executorResourceGovernor.flushAssignment(
           assignmentId,
@@ -369,17 +227,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           (report) =>
             usageReporterContext(report.reporterId, report.digest, this.#clock()),
         ),
-      snapshotFor: (executorId) =>
-        options.authority.executorCapabilities.snapshotFor(executorId),
-      permissionSnapshotFor: options.authority.permissionSnapshotFor,
       runtimeBindingGuard: ({ assignmentId, manifest }) => {
         const binding = this.#assignmentRuntimeBindings.get(assignmentId);
         if (binding === undefined) {
-          return {
-            code: "capability-gap",
-            message: "Assembled runtime binding is unavailable",
-            retryable: true,
-          };
+          return options.authority.validateLocalConversationManifest(manifest);
         }
         return options.authority.validateConversationRuntimeBinding({
           manifest,
@@ -390,7 +241,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ...(options.maxPendingInteractions === undefined
         ? {}
         : { maxPendingInteractions: options.maxPendingInteractions }),
-    });
+        })
+      : undefined;
     this.#issuer = new ConversationAssignmentAuthority({
       signer: options.authority.signer,
       verifier: options.authority.verifier,
@@ -406,6 +258,73 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       conversationIdFor: (assignmentId) =>
         this.#conversationForAssignment(assignmentId),
     });
+  }
+
+  bindRemoteExecution(directory: RemoteConversationExecutionDirectory): void {
+    if (this.#remoteExecution && this.#remoteExecution !== directory) {
+      throw new Error("Remote conversation execution is already bound");
+    }
+    this.#remoteExecution = directory;
+  }
+
+  executorMeshRole(): {
+    readonly port: RunExecutorPort;
+    readonly guard: import("@zhixing/executor").OwnerControlPreflightPort;
+  } {
+    const ledger = this.#requireLocalLedger();
+    return { port: ledger, guard: ledger };
+  }
+
+  executorLedger(): ConversationAssignmentLedger {
+    return this.#requireLocalLedger();
+  }
+
+  assignmentCapability(assignmentId: string): AuthorityCapability {
+    const capability = this.#assignmentCapabilities.get(assignmentId);
+    if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
+    return capability;
+  }
+
+  async assignmentArtifactAuthority(assignmentId: string): Promise<{
+    readonly capability: AuthorityCapability<"conversation">;
+    readonly activation: AssignmentActivationProof<"conversation">;
+  }> {
+    const capability = this.#assignmentCapabilities.get(assignmentId);
+    const activation = this.#assignmentActivations.get(assignmentId);
+    if (!capability || !activation) {
+      throw new Error(`Unknown conversation assignment ${assignmentId}`);
+    }
+    return { capability, activation };
+  }
+
+  submissionMeshRole(): {
+    readonly submission: RunSubmissionPort;
+    readonly submissionGuard: AssignmentSubmissionPreflightPort;
+  } {
+    const journalFor = (context: AuthorityCallContext) =>
+      this.#journal(conversationIdFromSubmissionContext(context));
+    return {
+      submission: {
+        reportStarted: (assignmentId, context) =>
+          journalFor(context).reportStarted(assignmentId, context),
+        submitBundle: (bundle, context) =>
+          journalFor(context).submitBundle(bundle, context),
+        submitCancelProof: (assignmentId, proof, context) =>
+          journalFor(context).submitCancelProof(assignmentId, proof, context),
+        mirrorInteractions: (assignmentId, batch, context) =>
+          journalFor(context).mirrorInteractions(
+            assignmentId,
+            asConversationMirrorBatch(batch),
+            context,
+          ),
+      },
+      submissionGuard: {
+        preflightSubmission: (
+          context: AuthorityCallContext,
+          identity: AssignmentSubmissionIdentity,
+        ) => journalFor(context).preflightSubmission(context, identity),
+      },
+    };
   }
 
   bindDeliveryDrain(drain: () => Promise<void>): void {
@@ -867,10 +786,29 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           "Durable conversation runtime must expose execution and permission snapshots",
         );
       }
+      const remoteTargets = this.#remoteExecution &&
+          supportsRemoteConversationExecution(input.invocation, executionIngress)
+        ? await this.#remoteExecution.candidates()
+        : [];
+      const localLedger = this.#ledger;
+      if (remoteTargets.length === 0 && !localLedger) {
+        throw new Error("No authorized conversation executor is currently available");
+      }
       const preparedAuthority = await this.#authority.prepareConversationAssignment({
         executionProfile,
         permissionRules,
+        targets: remoteTargets.map((target) => ({
+          executorId: target.executorId,
+          synchronizePermission: (snapshot) => target.synchronizePermission(snapshot),
+        })),
       });
+      const targetExecutorId = preparedAuthority.executorId;
+      const remoteTarget = targetExecutorId === this.#authority.executorId
+        ? undefined
+        : remoteTargets.find((target) => target.executorId === targetExecutorId);
+      if (!remoteTarget && targetExecutorId !== this.#authority.executorId) {
+        throw new Error("Selected remote executor disappeared from the candidate set");
+      }
       const origin = reservationOriginForSource(input.options?.source);
       const resourceContext = resourceHostContext(
         "reservation.prepareAssignmentRoot",
@@ -886,7 +824,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const resourceLease: AssignmentResourceLease<"conversation"> =
         await this.#authority.resourceGovernor.prepareAssignmentRoot<"conversation">({
         assignmentId,
-        executorId: this.#authority.executorId,
+        executorId: targetExecutorId,
         workload: { kind: "run", id: runId, attempt },
         scopeBinding: {
           kind: "conversation",
@@ -898,7 +836,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const unsigned = this.#issuer.issue({
         runId,
         assignmentId,
-        executorId: this.#authority.executorId,
+        executorId: targetExecutorId,
         conversationId: input.conversationId,
         ownerEpoch: this.#authority.anchorEpoch,
         baseRevision: authority.commitRevision,
@@ -913,15 +851,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         policy: preparedAuthority.policy,
       });
       const dispatch = await journal.assign(unsigned);
-      this.#rememberAssignment(dispatch.envelope);
+      this.#rememberAssignment(dispatch.envelope, dispatch.activation);
       this.#assignmentRuntimeBindings.set(
         assignmentId,
         preparedAuthority.binding,
       );
-      const submission = new InProcessAssignmentSubmission({
-        ledger: this.#ledger,
-        owner: journal,
-      });
+      const submission = remoteTarget
+        ? undefined
+        : this.#createLocalSubmission(journal);
       const submissionContext = assignmentContext(dispatch.envelope);
       const resourceSubmissionContext = assignmentResourceContext(dispatch.envelope);
       const flushResourceUsage = () =>
@@ -933,38 +870,69 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const dispatcher = new InProcessConversationDispatcher({
         enabled: true,
         journal,
-        executor: this.#ledger,
+        executor: remoteTarget?.executor ?? localLedger!,
         contexts: this.#contexts,
         cancellationSubmission: {
-          submitCancellation: (id) =>
-            submission.submitCancellation(
-              id,
-              assignmentContext(dispatch.envelope),
-            ),
+          submitCancellation: submission
+            ? (id: string) => submission.submitCancellation(
+                id,
+                assignmentContext(dispatch.envelope),
+              )
+            : async (id: string) => {
+                const snapshot = await remoteTarget!.executor.queryLedger(
+                  id,
+                  this.#contexts.create(id, "executor.queryLedger", {
+                    requestId: `ledger:${id}:cancel-proof`,
+                    body: { range: null },
+                  }),
+                );
+                if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
+                await journal.submitCancelProof(
+                  id,
+                  snapshot.cancelProof,
+                  assignmentContext(dispatch.envelope),
+                );
+                return true;
+              },
         },
         bundleSubmission: {
-          submitSealedBundle: (id) =>
-            submission.submitSealedBundle(
-              id,
-              assignmentContext(dispatch.envelope),
-            ),
+          submitSealedBundle: submission
+            ? (id: string) => submission.submitSealedBundle(
+                id,
+                assignmentContext(dispatch.envelope),
+              )
+            : async () => remoteBundleSubmissionDeferred(),
         },
       });
-      const dispatchResults = await (async () => {
-        try {
-          return await dispatcher.dispatchPending();
-        } finally {
-          this.#assignmentRuntimeBindings.delete(assignmentId);
-        }
-      })();
-      if (dispatchResults.length !== 1 || !dispatchResults[0]!.accepted) {
+      let dispatchResults: readonly DispatchResult[] | undefined;
+      try {
+        dispatchResults = await dispatcher.dispatchPending();
+      } catch (error) {
+        if (!remoteTarget || !isRetryableMeshFailure(error)) throw error;
+      } finally {
+        this.#assignmentRuntimeBindings.delete(assignmentId);
+      }
+      if (dispatchResults && (
+        dispatchResults.length !== 1 || !dispatchResults[0]!.accepted
+      )) {
         const rejection = dispatchResults[0];
         throw new Error(
           rejection && !rejection.accepted
-            ? `Local executor rejected a freshly issued assignment: ${rejection.error.message}`
-            : "Local executor did not return exactly one dispatch result",
+            ? `${remoteTarget ? "Remote" : "Local"} executor rejected a freshly issued assignment: ${rejection.error.message}`
+            : `${remoteTarget ? "Remote" : "Local"} executor did not return exactly one dispatch result`,
         );
       }
+      if (remoteTarget) {
+        return await this.#awaitRemoteConversationRun({
+          journal,
+          dispatcher,
+          executor: remoteTarget.executor,
+          conversationId: input.conversationId,
+          runId,
+          assignmentId,
+        });
+      }
+      if (!submission) throw new Error("Local assignment submission is unavailable");
       await submission.startAndReport(assignmentId, submissionContext);
 
       const stream = new StreamDigestChain(assignmentId);
@@ -974,7 +942,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       let toolCalls = 0;
       const interactionBinding: DurableInteractionBinding = {
         assignmentId,
-        ledger: this.#ledger,
+        ledger: localLedger!,
         submission,
         context: submissionContext,
         surfacePrincipal: executionIngress.surfacePrincipal,
@@ -997,7 +965,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           },
           toolSideEffectObserver: this.#interactions,
           authorizeToolExecution: () =>
-            this.#ledger.authorizeToolExecution(
+            localLedger!.authorizeToolExecution(
               assignmentId,
               dispatch.envelope.permissionLease,
             ),
@@ -1037,11 +1005,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         await controlHeartbeat.stop();
         try {
           const usageFinal = await flushResourceUsage();
-          if (await this.#ledger.hasOpenSideEffects(assignmentId)) {
+          if (await localLedger!.hasOpenSideEffects(assignmentId)) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
           } else {
             await submission.prepareForRunEnd(assignmentId, submissionContext);
-            const failure = await this.#ledger.failExecution(assignmentId, {
+            const failure = await localLedger!.failExecution(assignmentId, {
               reason: executionFailureReason(error),
               usageFinal,
             });
@@ -1070,11 +1038,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
       if (runResult.agentResult.reason !== "completed") {
         const usageFinal = await flushResourceUsage();
-        if (await this.#ledger.hasOpenSideEffects(assignmentId)) {
+        if (await localLedger!.hasOpenSideEffects(assignmentId)) {
           await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
         } else {
           await submission.prepareForRunEnd(assignmentId, submissionContext);
-          const failure = await this.#ledger.failExecution(assignmentId, {
+          const failure = await localLedger!.failExecution(assignmentId, {
             reason: runFailureReason(runResult.agentResult),
             usageFinal,
           });
@@ -1110,7 +1078,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ...(advancement ? { advancement } : {}),
       };
       const usageFinal = await flushResourceUsage();
-      await this.#ledger.sealConversationBundle(assignmentId, {
+      await localLedger!.sealConversationBundle(assignmentId, {
         runRecord: transcriptRun,
         ...(runResult.windowCompact
           ? { windowCompact: runResult.windowCompact }
@@ -1280,7 +1248,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#recoveryStopped) return 0;
     const queue = [...this.#recoveryConversations.entries()];
     let recovered = await this.#authority.resourceGovernor.reclaimExpired();
-    recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
+    if (this.#ledger) {
+      recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
+    }
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
         let count = 0;
@@ -1292,33 +1262,64 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           return 0;
         }
         for (const candidate of await journal.assignmentsAwaitingRecovery()) {
-          this.#rememberAssignment(candidate.dispatch.envelope);
+          this.#rememberAssignment(
+            candidate.dispatch.envelope,
+            candidate.dispatch.activation,
+          );
         }
         for (const candidate of await journal.pendingDispatches()) {
-          this.#rememberAssignment(candidate.envelope);
+          this.#rememberAssignment(candidate.envelope, candidate.activation);
         }
-        const submission = new InProcessAssignmentSubmission({
-          ledger: this.#ledger,
-          owner: journal,
-        });
+        const submission = this.#ledger
+          ? this.#createLocalSubmission(journal)
+          : undefined;
+        const routedExecutor = new RoutedRunExecutorPort(
+          (executorId) => this.#executorFor(executorId),
+          (assignmentId) => this.#executorForAssignment(assignmentId),
+        );
         const dispatcher = new InProcessConversationDispatcher({
           enabled: true,
           journal,
-          executor: this.#ledger,
+          executor: routedExecutor,
           contexts: this.#contexts,
           cancellationSubmission: {
-            submitCancellation: (assignmentId) =>
-              submission.submitCancellation(
+            submitCancellation: async (assignmentId) => {
+              if (this.#isLocalAssignment(assignmentId)) {
+                if (!submission) return false;
+                return submission.submitCancellation(
+                  assignmentId,
+                  this.#submissionContext(assignmentId),
+                );
+              }
+              const snapshot = await routedExecutor.queryLedger(
                 assignmentId,
+                this.#contexts.create(assignmentId, "executor.queryLedger", {
+                  requestId: `ledger:${assignmentId}:cancel-proof`,
+                  body: { range: null },
+                }),
+              );
+              if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
+              await journal.submitCancelProof(
+                assignmentId,
+                snapshot.cancelProof,
                 this.#submissionContext(assignmentId),
-              ),
+              );
+              return true;
+            },
           },
           bundleSubmission: {
-            submitSealedBundle: (assignmentId) =>
-              submission.submitSealedBundle(
+            submitSealedBundle: (assignmentId) => {
+              if (!this.#isLocalAssignment(assignmentId)) {
+                return Promise.resolve(remoteBundleSubmissionDeferred());
+              }
+              if (!submission) {
+                throw new Error("Local assignment submission is unavailable");
+              }
+              return submission.submitSealedBundle(
                 assignmentId,
                 this.#submissionContext(assignmentId),
-              ),
+              );
+            },
           },
         });
         if (this.#recoveryStopped) return count;
@@ -1334,9 +1335,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         if (this.#recoveryStopped) return count;
         count += await dispatcher.recoverSupersedes();
         if (this.#recoveryStopped) return count;
-        count += await this.#reconcileAbandonedLocalAssignments(
+        count += await this.#reconcileAbandonedAssignments(
           journal,
           dispatcher,
+          routedExecutor,
         );
         if (this.#recoveryStopped) return count;
         count += await this.#resumeQueuedInputs(conversationId, journal);
@@ -1516,6 +1518,49 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return conversationId;
   }
 
+  #requireLocalLedger(): ConversationAssignmentLedger {
+    if (!this.#ledger) {
+      throw new Error("Local executor role is not enabled on this device");
+    }
+    return this.#ledger;
+  }
+
+  #createLocalSubmission(
+    owner: ConversationRunJournal,
+  ): InProcessAssignmentSubmission {
+    const Constructor = this.#InProcessAssignmentSubmission;
+    if (!Constructor) {
+      throw new Error("Local executor submission adapter is unavailable");
+    }
+    return new Constructor({
+      ledger: this.#requireLocalLedger(),
+      owner,
+    });
+  }
+
+  #executorFor(executorId: string): RunExecutorPort {
+    if (executorId === this.#authority.executorId) {
+      return this.#requireLocalLedger();
+    }
+    const remote = this.#remoteExecution?.forExecutor(executorId);
+    if (!remote) {
+      throw new Error(`Remote conversation executor is unavailable: ${executorId}`);
+    }
+    return remote.executor;
+  }
+
+  #executorForAssignment(assignmentId: string): RunExecutorPort {
+    const capability = this.#assignmentCapabilities.get(assignmentId);
+    if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
+    return this.#executorFor(capability.executorId);
+  }
+
+  #isLocalAssignment(assignmentId: string): boolean {
+    const capability = this.#assignmentCapabilities.get(assignmentId);
+    if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
+    return capability.executorId === this.#authority.executorId;
+  }
+
   #submissionContext(assignmentId: string): AuthorityCallContext {
     const capability = this.#assignmentCapabilities.get(assignmentId);
     if (!capability) {
@@ -1528,13 +1573,48 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
   }
 
-  #startControlHeartbeat(assignmentId: string): {
+  async #awaitRemoteConversationRun(input: {
+    readonly journal: ConversationRunJournal;
+    readonly dispatcher: InProcessConversationDispatcher;
+    readonly executor: RunExecutorPort;
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly assignmentId: string;
+  }): Promise<RunResult> {
+    const heartbeat = this.#startControlHeartbeat(input.assignmentId, input.executor);
+    try {
+      while (true) {
+        const committed = await input.journal.committedRun(input.runId);
+        if (committed) {
+          this.#markRecovery(input.conversationId);
+          this.#kickDelivery();
+          return replayCommittedRun(committed.runRecord, committed.windowCompact);
+        }
+        const state = await input.journal.runState(input.runId);
+        if (state === "failed" || state === "cancelled") {
+          throw new Error(`Remote conversation run terminated in state ${state}`);
+        }
+        try {
+          await input.dispatcher.recoverStarted();
+          await input.dispatcher.recoverAssignments();
+        } catch (error) {
+          if (!isRetryableMeshFailure(error)) throw error;
+          // Durable owner and executor outboxes retain every fact while the peer is offline.
+        }
+        await delay(100);
+      }
+    } finally {
+      await heartbeat.stop();
+    }
+  }
+
+  #startControlHeartbeat(assignmentId: string, executor?: RunExecutorPort): {
     stop(): Promise<void>;
   } {
     let inFlight: Promise<void> | undefined;
     const timer = setInterval(() => {
       if (inFlight) return;
-      inFlight = this.#ledger
+      inFlight = (executor ?? this.#requireLocalLedger())
         .queryLedger(
           assignmentId,
           this.#contexts.create(assignmentId, "executor.queryLedger", {
@@ -1557,15 +1637,19 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
   }
 
-  async #reconcileAbandonedLocalAssignments(
+  async #reconcileAbandonedAssignments(
     journal: ConversationRunJournal,
     dispatcher: InProcessConversationDispatcher,
+    executor: RunExecutorPort,
   ): Promise<number> {
     let reconciled = 0;
     for (const candidate of await journal.assignmentsAwaitingRecovery()) {
-      this.#rememberAssignment(candidate.dispatch.envelope);
+      this.#rememberAssignment(
+        candidate.dispatch.envelope,
+        candidate.dispatch.activation,
+      );
       const snapshot = journal.validateExecutorLedgerSnapshot(
-        await this.#ledger.queryLedger(
+        await executor.queryLedger(
           candidate.assignmentId,
           this.#contexts.create(candidate.assignmentId, "executor.queryLedger", {
             requestId: `ledger:${candidate.assignmentId}:snapshot`,
@@ -1928,6 +2012,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       import("@zhixing/core/contracts").DispatchEnvelope,
       { execution: "conversation" }
     >,
+    activation: AssignmentActivationProof<"conversation">,
   ): void {
     const capability = envelope.capabilities[0];
     if (!capability) throw new Error("Conversation assignment has no submission capability");
@@ -1936,13 +2021,68 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       envelope.work.conversationId,
     );
     this.#assignmentCapabilities.set(envelope.assignmentId, capability);
+    this.#assignmentActivations.set(envelope.assignmentId, activation);
   }
 
   #forgetAssignment(assignmentId: string): void {
     this.#assignmentConversations.delete(assignmentId);
     this.#assignmentCapabilities.delete(assignmentId);
+    this.#assignmentActivations.delete(assignmentId);
     this.#interactions.releaseAssignment(assignmentId);
   }
+}
+
+class RoutedRunExecutorPort implements RunExecutorPort {
+  constructor(
+    private readonly forExecutor: (executorId: string) => RunExecutorPort,
+    private readonly forAssignment: (assignmentId: string) => RunExecutorPort,
+  ) {}
+
+  dispatch(...args: RunDispatchArguments): Promise<DispatchResult> {
+    return this.forExecutor(args[0].executorId).dispatch(...args);
+  }
+
+  cancel(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    context: AuthorityCallContext,
+  ): Promise<void> {
+    return this.forAssignment(assignmentId).cancel(assignmentId, fence, context);
+  }
+
+  supersede(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    context: AuthorityCallContext,
+  ): Promise<SupersedeProof> {
+    return this.forAssignment(assignmentId).supersede(assignmentId, fence, context);
+  }
+
+  queryLedger(
+    assignmentId: string,
+    context: AuthorityCallContext,
+    range?: { fromSeq: number; limit: number },
+  ): Promise<LedgerSnapshot | LedgerEvidencePage> {
+    return this.forAssignment(assignmentId).queryLedger(
+      assignmentId,
+      context,
+      range,
+    );
+  }
+}
+
+function remoteBundleSubmissionDeferred(): {
+  readonly committed: false;
+  readonly error: import("@zhixing/core/contracts").AuthorityError;
+} {
+  return {
+    committed: false,
+    error: {
+      code: "unavailable-offline",
+      message: "Remote executor owns durable bundle redelivery",
+      retryable: true,
+    },
+  };
 }
 
 function ingressForTurn(
@@ -2114,48 +2254,6 @@ function createSubmissionAuthorizer(
     authenticate,
     authorize(context, authorization) {
       authenticate(context, authorization);
-    },
-  };
-}
-
-function createOwnerControlAuthorizer(
-  verifier: ProtocolSignatureVerifier,
-  clock: () => string,
-): OwnerControlAuthorizer {
-  return {
-    authorize(context, request, authenticatedCallerDeviceId) {
-      if (context.principal.kind !== "owner-control") {
-        throw new Error("Executor control requires an owner grant");
-      }
-      const authority = request.authority ?? context.principal.grant.scope;
-      const requestDigest = ownerControlRequestDigest({
-        method: request.method,
-        assignmentId: request.assignmentId,
-        authority,
-        requestId: request.requestId,
-        body: request.body,
-      });
-      const grant = assertAuthorizedOwnerControlGrant({
-        grant: context.principal.grant,
-        verifier,
-        method: request.method,
-        assignmentId: request.assignmentId,
-        callerDeviceId: authenticatedCallerDeviceId,
-        authenticatedCallerDeviceId,
-        ...(request.expectedOwnerDeviceId === undefined
-          ? {}
-          : { expectedOwnerDeviceId: request.expectedOwnerDeviceId }),
-        requestId: request.requestId,
-        requestDigest,
-        now: clock(),
-        deadlineAt: context.deadlineAt,
-        authority,
-      });
-      return {
-        authority: structuredClone(grant.scope),
-        ownerDeviceId: grant.callerDeviceId,
-        controlLease: structuredClone(grant.controlLease),
-      };
     },
   };
 }
@@ -2505,66 +2603,6 @@ function emptyConversationSnapshot(
   return { commits: [], cursor: snapshot.cursor };
 }
 
-function interactionOutcome(
-  request: ConfirmationRequest,
-  decision: ConfirmationDecision,
-  source: ConfirmationResolutionSource,
-  surfacePrincipal: string,
-): ConversationInteractionOutcome {
-  if (source.kind === "expired" || decision.kind === "expired") {
-    return { t: "expired" };
-  }
-  if (source.kind === "non-interactive") {
-    if (decision.kind !== "deny") {
-      throw new Error("Non-interactive durable confirmations must fail closed");
-    }
-    return {
-      t: "auto-resolved",
-      decision: "denied",
-      reason: "no-interactive-surface",
-    };
-  }
-  if (source.kind === "backpressure" || source.kind === "cancel") {
-    return {
-      t: "cancelled",
-      via: source.kind === "backpressure" ? "backpressure" : "run-end",
-    };
-  }
-  if (source.kind !== "surface") {
-    throw new Error("Confirmation resolution source is invalid");
-  }
-  const allowed =
-    decision.kind === "allow-once" ||
-    decision.kind === "allow-session" ||
-    decision.kind === "allow-context" ||
-    decision.kind === "allow-global" ||
-    decision.kind === "edit-then-allow";
-  const reason = decision.kind === "deny"
-    ? decision.reason
-    : "note" in decision
-      ? decision.note
-      : undefined;
-  return {
-    t: "answered",
-    authority: {
-      via: "surface-ticket",
-      ticketId: `ticket:${request.id}`,
-    },
-    decision: { allowed, ...(reason ? { reason } : {}) },
-    decisionDigest: confirmationDecisionDigest(request.id, decision),
-    by: surfacePrincipal,
-  };
-}
-
-function streamInteractionOutcome(
-  decision: ConfirmationDecision,
-): "allowed" | "denied" | "cancelled" | "expired" {
-  if (decision.kind === "expired") return "expired";
-  if (decision.kind === "cancelled") return "cancelled";
-  if (decision.kind === "deny") return "denied";
-  return "allowed";
-}
-
 function requireRuntimeSecuritySnapshot(
   runtime: SessionRuntime,
 ): ReturnType<NonNullable<SessionRuntime["securitySnapshot"]>> {
@@ -2595,4 +2633,45 @@ function requireRuntimeExecutionPermissionRules(
     );
   }
   return rules;
+}
+
+function supportsRemoteConversationExecution(
+  invocation: ConversationInvocation,
+  ingress: IngressContext,
+): boolean {
+  // Specialized control and orchestration invocations retain their dedicated local
+  // runtime until those modules bind an equivalent remote execution contract.
+  return invocation.kind === "agent" &&
+    invocation.advancement === undefined &&
+    ((invocation.source === "interactive" && ingress.kind === "first-party") ||
+      (invocation.source === "channel" && ingress.kind === "channel"));
+}
+
+function conversationIdFromSubmissionContext(context: AuthorityCallContext): string {
+  const principal = context.principal;
+  if (
+    principal.kind !== "assignment" ||
+    principal.capability.scope.execution !== "conversation"
+  ) {
+    throw new TypeError("Conversation submission requires a conversation assignment capability");
+  }
+  return principal.capability.scope.conversationId;
+}
+
+function asConversationMirrorBatch(
+  batch: InteractionMirrorBatch,
+): ConversationInteractionMirrorBatch {
+  for (const entry of batch.entries) {
+    if (
+      entry.outcome.t === "answered" &&
+      entry.outcome.authority.via !== "surface-ticket"
+    ) {
+      throw new TypeError("Conversation interaction answer requires a surface ticket");
+    }
+  }
+  return batch as ConversationInteractionMirrorBatch;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

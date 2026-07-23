@@ -170,6 +170,7 @@ export function applyConfigPatch(
   if (patch.intent !== undefined) result.intent = patch.intent;
   if (patch.workspace !== undefined) result.workspace = patch.workspace;
   if (patch.network !== undefined) result.network = patch.network;
+  if (patch.mesh !== undefined) result.mesh = patch.mesh;
 
   if (patch.messaging !== undefined) {
     result.messaging =

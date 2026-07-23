@@ -19,6 +19,35 @@ export interface DeviceIdentity {
 
 export type DeviceRole = "anchor" | "executor" | "surface";
 
+export interface MeshRoleBootConfig {
+  enabledRoles: readonly DeviceRole[];
+  anchorListen?: {
+    bind: { host: string; port: number };
+    advertised?: ReadonlyArray<{ host: string; port: number }>;
+  };
+  relayRegistration?: { host: string; port: number };
+}
+
+export type MeshEndpointTransport =
+  | { kind: "direct"; host: string; port: number }
+  | { kind: "blind-relay"; relay: { host: string; port: number } };
+
+export interface MeshEndpointDescriptor
+  extends WireSchemaV1<"MeshEndpointDescriptor"> {
+  deviceId: string;
+  transports: readonly MeshEndpointTransport[];
+  revision: number;
+  at: IsoTime;
+}
+
+export type RendezvousKey = `rzv:${string}`;
+
+export interface BlindRendezvousHello {
+  v: 1;
+  key: RendezvousKey;
+  ttlMs: number;
+}
+
 export type HomeTrustEventBody =
   | {
       t: "genesis";
@@ -344,7 +373,7 @@ export interface CheckpointEnvelope extends WireSchemaV1<"CheckpointEnvelope"> {
 }
 
 export type SecretRef = {
-  kind: "provider" | "channel" | "mcp" | "device-key" | "webhook";
+  kind: "provider" | "channel" | "mcp" | "device-key" | "webhook" | "rendezvous";
   bindingId: string;
 };
 

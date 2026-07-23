@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type {
   ArtifactRef,
+  AssignmentArtifactTransferGrant,
   AssignmentActivationPayload,
   AssignmentActivationProof,
   AssignmentEntry,
@@ -25,6 +26,11 @@ import type {
   Signature,
   SupersedeProof,
 } from "../contracts/index.js";
+import {
+  MAX_ASSIGNMENT_ARTIFACT_GRANT_BYTES,
+  MAX_ASSIGNMENT_ARTIFACT_GRANT_REFS,
+  MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS,
+} from "../contracts/authorization.js";
 import type { ConfirmationDecision } from "../confirmation/types.js";
 import {
   MAX_CONVERSATION_QUESTION_BYTES,
@@ -411,16 +417,18 @@ export function signConversationActivation(
   );
 }
 
-export function validateConversationActivation(input: {
-  readonly envelope: ConversationEnvelope;
-  readonly activation: AssignmentActivationProof<"conversation">;
-  readonly dispatchRef: ArtifactRef;
-  readonly verifier: ProtocolSignatureVerifier;
-}): AssignmentActivationPayload<"conversation"> {
+export function validateAssignmentActivationProof(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): AssignmentActivationPayload {
   const activation = snapshot(
-    input.activation,
+    input,
     "Assignment activation proof",
-  ) as AssignmentActivationProof<"conversation">;
+  ) as AssignmentActivationProof;
+  assertObject(activation, "Assignment activation proof");
+  assertObject(activation.ref, "Activation execution reference");
+  assertObject(activation.commit, "Activation commit");
+  assertObject(activation.reservation, "Activation reservation");
   assertExactKeys(
     activation,
     [
@@ -440,16 +448,39 @@ export function validateConversationActivation(input: {
     "Assignment activation proof",
   );
   assertSignature(activation.signature, "Assignment activation signature");
-  const payload = withoutField(
-    activation,
-    "signature",
-  ) as AssignmentActivationPayload<"conversation">;
-  input.verifier.verify(
+  const payload = withoutField(activation, "signature") as AssignmentActivationPayload;
+  if (payload.ref.execution === "conversation") {
+    assertActivationPayloadShape(
+      payload as AssignmentActivationPayload<"conversation">,
+    );
+  } else if (payload.ref.execution === "job") {
+    assertJobActivationPayloadShape(payload as AssignmentActivationPayload<"job">);
+  } else {
+    throw new TypeError("Activation execution reference kind is invalid");
+  }
+  verifier.verify(
     "AssignmentActivationProof",
     1,
     payload,
     activation.signature,
   );
+  return snapshot(payload, "Assignment activation payload");
+}
+
+export function validateConversationActivation(input: {
+  readonly envelope: ConversationEnvelope;
+  readonly activation: AssignmentActivationProof<"conversation">;
+  readonly dispatchRef: ArtifactRef;
+  readonly verifier: ProtocolSignatureVerifier;
+}): AssignmentActivationPayload<"conversation"> {
+  const activation = snapshot(
+    input.activation,
+    "Assignment activation proof",
+  ) as AssignmentActivationProof<"conversation">;
+  const payload = validateAssignmentActivationProof(
+    activation,
+    input.verifier,
+  ) as AssignmentActivationPayload<"conversation">;
   if (activation.signature.keyId !== input.envelope.signature.keyId) {
     throw new TypeError("Assignment activation signer does not own the dispatch");
   }
@@ -542,35 +573,10 @@ export function validateJobActivation(input: {
     input.activation,
     "Assignment activation proof",
   ) as AssignmentActivationProof<"job">;
-  assertExactKeys(
+  const payload = validateAssignmentActivationProof(
     activation,
-    [
-      "assignmentId",
-      "capIds",
-      "commit",
-      "dispatchRef",
-      "executorId",
-      "issuedAt",
-      "manifestDigest",
-      "permissionLeaseDigest",
-      "ref",
-      "reservation",
-      "signature",
-      "v",
-    ],
-    "Assignment activation proof",
-  );
-  assertSignature(activation.signature, "Assignment activation signature");
-  const payload = withoutField(
-    activation,
-    "signature",
+    input.verifier,
   ) as AssignmentActivationPayload<"job">;
-  input.verifier.verify(
-    "AssignmentActivationProof",
-    1,
-    payload,
-    activation.signature,
-  );
   if (activation.signature.keyId !== input.envelope.signature.keyId) {
     throw new TypeError("Assignment activation signer does not own the dispatch");
   }
@@ -582,6 +588,91 @@ export function assignmentActivationDigest<E extends ExecutionKind>(
   payload: AssignmentActivationPayload<E>,
 ): Digest {
   return protocolDigest("AssignmentActivationPayload", 1, payload);
+}
+
+export function createSignedAssignmentArtifactTransferGrant(input: {
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly capId: string;
+  readonly sourceDeviceId: string;
+  readonly targetDeviceId: string;
+  readonly direction: AssignmentArtifactTransferGrant["direction"];
+  readonly activationDigest: Digest;
+  readonly refs: readonly ArtifactRef[];
+  readonly issuedAt: string;
+  readonly expiry: string;
+  readonly signer: ProtocolSigner;
+}): AssignmentArtifactTransferGrant {
+  const refs = [...input.refs].sort((left, right) =>
+    Buffer.compare(Buffer.from(left.digest, "utf8"), Buffer.from(right.digest, "utf8")) ||
+    left.bytes - right.bytes);
+  const payload: Omit<AssignmentArtifactTransferGrant, "signature"> = {
+    v: 1,
+    assignmentId: input.assignmentId,
+    executorId: input.executorId,
+    capId: input.capId,
+    sourceDeviceId: input.sourceDeviceId,
+    targetDeviceId: input.targetDeviceId,
+    direction: input.direction,
+    activationDigest: input.activationDigest,
+    refs,
+    totalBytes: refs.reduce((total, ref) => total + ref.bytes, 0),
+    issuedAt: input.issuedAt,
+    expiry: input.expiry,
+  };
+  assertAssignmentArtifactTransferGrantPayload(payload);
+  const signature = input.signer.sign("AssignmentArtifactTransferGrant", 1, payload);
+  assertSignature(signature, "Assignment artifact transfer grant signature");
+  if (signature.keyId !== input.sourceDeviceId) {
+    throw new TypeError("Assignment artifact transfer grant signer is not its source device");
+  }
+  return snapshot({
+    ...payload,
+    signature,
+  }, "Assignment artifact transfer grant");
+}
+
+export function validateAssignmentArtifactTransferGrant(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): AssignmentArtifactTransferGrant {
+  const grant = snapshot(
+    input,
+    "Assignment artifact transfer grant",
+  ) as AssignmentArtifactTransferGrant;
+  assertObject(grant, "Assignment artifact transfer grant");
+  assertExactKeys(
+    grant,
+    [
+      "activationDigest",
+      "assignmentId",
+      "capId",
+      "direction",
+      "executorId",
+      "expiry",
+      "issuedAt",
+      "refs",
+      "signature",
+      "sourceDeviceId",
+      "targetDeviceId",
+      "totalBytes",
+      "v",
+    ],
+    "Assignment artifact transfer grant",
+  );
+  assertSignature(grant.signature, "Assignment artifact transfer grant signature");
+  const payload = withoutField(grant, "signature");
+  assertAssignmentArtifactTransferGrantPayload(payload);
+  verifier.verify(
+    "AssignmentArtifactTransferGrant",
+    1,
+    payload,
+    grant.signature,
+  );
+  if (grant.signature.keyId !== grant.sourceDeviceId) {
+    throw new TypeError("Assignment artifact transfer grant signer is not its source device");
+  }
+  return grant;
 }
 
 export function assignmentLedgerSeed(assignmentId: string): Digest {
@@ -2538,6 +2629,51 @@ function assertAuthorityError(
 function assertPositiveInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`${label} must be a positive safe integer`);
+  }
+}
+
+function assertAssignmentArtifactTransferGrantPayload(
+  payload: Omit<AssignmentArtifactTransferGrant, "signature">,
+): void {
+  assertVersion(payload.v, "Assignment artifact transfer grant");
+  assertIdentifier(payload.assignmentId, "Artifact grant assignmentId");
+  assertIdentifier(payload.executorId, "Artifact grant executorId");
+  assertIdentifier(payload.capId, "Artifact grant capId");
+  assertIdentifier(payload.sourceDeviceId, "Artifact grant sourceDeviceId");
+  assertIdentifier(payload.targetDeviceId, "Artifact grant targetDeviceId");
+  if (
+    payload.direction !== "owner-to-executor" &&
+    payload.direction !== "executor-to-owner"
+  ) {
+    throw new TypeError("Assignment artifact grant direction is invalid");
+  }
+  assertDigest(payload.activationDigest, "Artifact grant activation digest");
+  if (
+    !Array.isArray(payload.refs) ||
+    payload.refs.length === 0 ||
+    payload.refs.length > MAX_ASSIGNMENT_ARTIFACT_GRANT_REFS
+  ) {
+    throw new RangeError("Assignment artifact grant reference count is out of range");
+  }
+  assertArtifactRefs(payload.refs, "Assignment artifact grant references");
+  const totalBytes = payload.refs.reduce((total, ref) => total + ref.bytes, 0);
+  if (
+    !Number.isSafeInteger(totalBytes) ||
+    totalBytes > MAX_ASSIGNMENT_ARTIFACT_GRANT_BYTES ||
+    payload.totalBytes !== totalBytes
+  ) {
+    throw new RangeError("Assignment artifact grant byte budget is invalid");
+  }
+  assertCanonicalTime(payload.issuedAt, "Artifact grant issuedAt");
+  assertCanonicalTime(payload.expiry, "Artifact grant expiry");
+  if (Date.parse(payload.expiry) <= Date.parse(payload.issuedAt)) {
+    throw new RangeError("Assignment artifact grant expiry must follow issuance");
+  }
+  if (
+    Date.parse(payload.expiry) - Date.parse(payload.issuedAt) >
+    MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS
+  ) {
+    throw new RangeError("Assignment artifact grant TTL exceeds the protocol limit");
   }
 }
 

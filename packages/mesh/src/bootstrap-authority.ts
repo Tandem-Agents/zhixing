@@ -103,7 +103,7 @@ export interface RecoveryActivationReplay {
  * in the same commit as the trust event. Checkpoint package storage and record appends are
  * content-idempotent: an exact replay is a no-op and a conflicting identity is rejected.
  */
-export interface BootstrapAuthorityPort {
+export interface PairingAuthorityPort {
   /** Appends pairing-attempt-started and enforces offer-scoped ordinal/backoff atomically. */
   beginPairingAttempt(
     offer: PairingOffer,
@@ -114,6 +114,9 @@ export interface BootstrapAuthorityPort {
   loadPairingCommit(attemptId: string): Promise<PairingCommitReplay | undefined>;
   /** Atomically consumes a started attempt with succeeded + enroll/reenroll under trust-head CAS. */
   commitPairing(input: PairingAtomicCommit): Promise<void>;
+}
+
+export interface BootstrapAuthorityPort extends PairingAuthorityPort {
   /** Persists the signed envelope and every referenced ciphertext chunk before returning its ref. */
   persistCheckpointPackage(checkpoint: CheckpointPackage): Promise<ArtifactRef>;
   loadCheckpointPackage(envelopeRef: ArtifactRef): Promise<CheckpointPackage | undefined>;
@@ -126,7 +129,7 @@ export interface BootstrapAuthorityPort {
 
 export class PairingCommitCoordinator {
   constructor(
-    private readonly authority: BootstrapAuthorityPort,
+    private readonly authority: PairingAuthorityPort,
     private readonly offers: PairingOfferRepository,
     private readonly pakeSuites?: PairingPakeSuiteRegistry,
   ) {}
@@ -467,8 +470,9 @@ export class RecoveryActivationCoordinator {
     issuerIdentity: Parameters<typeof openRootActivationCheckpoint>[0]["issuer"];
     target: RecoveryCheckpointTarget;
     sourceIndependenceDomain: string;
-    verifiedAt: string;
+    verifiedAt?: string;
     replicatedAt?: string;
+    now?: () => string;
     supersedeCheckpointIds?: readonly string[];
     onStep?: (step: RecoveryActivationStep) => void | Promise<void>;
   }): Promise<TrustProjection> {
@@ -481,16 +485,12 @@ export class RecoveryActivationCoordinator {
       throw new TypeError("Recovery checkpoint target is not independent from its source");
     }
     const envelope = input.checkpoint.envelope;
-    const replicatedAt = input.replicatedAt ?? input.verifiedAt;
     const createdTime = Date.parse(envelope.createdAt);
-    const replicatedTime = Date.parse(replicatedAt);
-    const verifiedTime = Date.parse(input.verifiedAt);
     if (
       !isCanonicalTime(envelope.createdAt) ||
-      !isCanonicalTime(replicatedAt) ||
-      !isCanonicalTime(input.verifiedAt) ||
-      replicatedTime < createdTime ||
-      verifiedTime < replicatedTime
+      (input.verifiedAt === undefined) === (input.now === undefined) ||
+      (input.verifiedAt !== undefined && !isCanonicalTime(input.verifiedAt)) ||
+      (input.replicatedAt !== undefined && !isCanonicalTime(input.replicatedAt))
     ) {
       throw new TypeError("Recovery checkpoint lifecycle times are invalid");
     }
@@ -560,6 +560,11 @@ export class RecoveryActivationCoordinator {
     await input.onStep?.("created");
 
     await input.target.writeDurable(input.checkpoint);
+    const replicatedAt = input.replicatedAt ?? input.verifiedAt ?? input.now!();
+    const replicatedTime = Date.parse(replicatedAt);
+    if (!isCanonicalTime(replicatedAt) || replicatedTime < createdTime) {
+      throw new TypeError("Recovery checkpoint replication time is invalid");
+    }
     const replicated: CheckpointStreamRecord = {
       t: "checkpoint-replicated",
       checkpointId: envelope.checkpointId,
@@ -574,6 +579,10 @@ export class RecoveryActivationCoordinator {
 
     const readBack = await input.target.read(envelope.checkpointId);
     await input.onStep?.("read-back");
+    const verifiedAt = input.verifiedAt ?? input.now!();
+    if (!isCanonicalTime(verifiedAt) || Date.parse(verifiedAt) < replicatedTime) {
+      throw new TypeError("Recovery checkpoint verification time is invalid");
+    }
     let opened: ReturnType<typeof openRootActivationCheckpoint>;
     try {
       opened = openRootActivationCheckpoint({
@@ -590,7 +599,7 @@ export class RecoveryActivationCoordinator {
         targetId: input.target.targetId,
         envelopeDigest: envelope.digest,
         reason: error instanceof Error ? error.message : "checkpoint verification failed",
-        at: input.verifiedAt,
+        at: verifiedAt,
       });
       throw error;
     }
@@ -600,7 +609,7 @@ export class RecoveryActivationCoordinator {
         envelope: readBack.envelope,
         targetId: input.target.targetId,
         verificationNonce: opened.verificationNonce,
-        verifiedAt: input.verifiedAt,
+        verifiedAt,
         recoveryRoot: input.candidateRoot,
       });
       verifyRecoveryCheckpointVerification({
@@ -630,7 +639,7 @@ export class RecoveryActivationCoordinator {
         t: "checkpoint-superseded",
         checkpointId,
         supersededBy: envelope.checkpointId,
-        at: input.verifiedAt,
+        at: verifiedAt,
       }),
     );
     await this.authority.commitRecoveryActivation({
@@ -666,7 +675,7 @@ function assertRecoveryActivationReplay(input: {
   plan: RecoveryActivationPlan;
   envelope: CheckpointPackage["envelope"];
   targetId: string;
-  verifiedAt: string;
+  verifiedAt?: string;
   supersedeCheckpointIds: readonly string[];
 }): void {
   const bounds = recoveryPlanBounds(input.plan);
@@ -689,12 +698,13 @@ function assertRecoveryActivationReplay(input: {
     verification.recipientKeyId !== input.envelope.recipientKeyId ||
     verification.envelopeDigest !== input.envelope.digest ||
     verification.targetId !== input.targetId ||
-    verification.verifiedAt !== input.verifiedAt ||
+    (input.verifiedAt !== undefined && verification.verifiedAt !== input.verifiedAt) ||
     canonicalize(verification.purpose) !== canonicalize(checkpointPurpose(input.envelope)) ||
     canonicalize(verifiedRecord) !== canonicalize(expectedVerifiedRecord) ||
     supersededRecords.some(
       (record) =>
-        record.supersededBy !== input.envelope.checkpointId || record.at !== input.verifiedAt,
+        record.supersededBy !== input.envelope.checkpointId ||
+        record.at !== verification.verifiedAt,
     ) ||
     canonicalize(supersededIds) !== canonicalize([...input.supersedeCheckpointIds].sort())
   ) {

@@ -452,7 +452,8 @@ interface SecretStorePort {
   delete(ref: SecretRef): Promise<void>; list(prefix: string): Promise<SecretRef[]>;
   unlockState(): Promise<"unlocked"|"locked"|"unavailable">;
 }
-type SecretRef = { kind: "provider"|"channel"|"mcp"|"device-key"|"webhook"; bindingId: string };
+type SecretRef = { kind: "provider"|"channel"|"mcp"|"device-key"|"webhook"|"rendezvous"; bindingId: string };
+// rendezvous：pairwise 会合秘密（§2.5），bindingId = 对端 deviceId；生命周期与删除时机由 §2.5 约束。
 ```
 
 秘密只以 `SecretRef` 出现在一切日志与协议中。`credentials.json` 迁移：检测明文 → 逐条写入 SecretStore 的版本化迁移命名空间 → 逐条回读校验 → 全部通过后**立即删除明文原文件**；回滚只能由迁移助手从 SecretStore 显式导出恢复旧格式；`ready` 预检包含"零明文残留"。
@@ -469,6 +470,52 @@ interface CredentialExposureRecord {     // 落锚点域 log 的 exposure 流；
 ```
 
 设备撤销：`revoke` 事件入 trust 链 → 该设备全部暴露记录置 `compromised` 并阻断路由 → 可达则校验本地清退、失控则逐项引导第三方轮换 → 新 binding 经 revision 核验后置 `rotated`。
+
+### 2.5 生产 mesh bootstrap 与控制面连接（S5 装配合同；身份与配对自 §2.1，传输原语自 S2 握手 / 出站隧道 / 盲中继，全部复用不改动）
+
+**角色授权与单机默认**：trust 链已建立时，设备获准承担的角色唯一来自链当前投影（§2.1 `enroll` / `role-change` / `reenroll` 的 roles 与成员 state）。设备本地启动配置只声明"启用哪些已授权角色"及其运行参数，是 ready 门槛的一部分，**不是授权事实源**：启动校验要求 `enabledRoles ⊆ 链投影授权角色` 且本设备 `active`，任一越界即**整个启动 fail-fast 失败**——配置与链脱节必须显式暴露，禁止静默剪除部分角色后部分启动；校验通过后生效角色即 `enabledRoles` 全集（不变量 5：未启用角色零加载零监听）。链上 `revoke` / 角色移除对在线连接立即断连（S2 吊销时限），对重启由同一启动校验拒绝。**链未建立（无 genesis）即单机形态**：本机以内置默认 `anchor + executor` 装配、mesh 零监听（第 6 单元既有边界），零配置零新概念；首次 `zz pair` 出码在同一引导流内先原子建链——`genesis`（issuer = 本机）与 `role-change`（本机，roles = 当前装配角色）同批耐久入链（§2.1 事件合同不改动：enroll 携配对 transcript 的守卫只约束配对入网设备，首设备角色经 role-change 承载，issuer 经 genesis 已在链上），建链成功配对流程才可继续；自此角色授权唯一来自链、内置默认永久失效。两态由"链是否存在"机械判定，无第三态。
+
+```ts
+interface MeshRoleBootConfig {           // 设备域本地配置；不上 wire、不入 trust 链、不含秘密
+  enabledRoles: DeviceRole[];            // 声明启用；必须 ⊆ 链投影授权，越界整个启动 fail-fast
+  anchorListen?: { bind: { host: string; port: number };    // 仅 anchor：直连监听（绑定地址）
+    advertised?: Array<{ host: string; port: number }> };   // 对外公布的直连地址；bind 为通配地址时必填，缺失则 descriptor 不公布 direct 项
+  relayRegistration?: { host: string; port: number };       // 仅 anchor：向盲中继保持出站注册（NAT 后可达的承载），同时作为 descriptor 公布的中继会合点
+}
+interface MeshEndpointDescriptor {       // 跨设备 wire 对象：可达性提示，非信任材料——不入签名域、不入 trust 链
+  v: 1; deviceId: string;
+  transports: Array<{ kind: "direct"; host: string; port: number }
+                  | { kind: "blind-relay"; relay: { host: string; port: number } }>;
+  revision: number; at: IsoTime }
+// 运行时校验（收发同一实现）：未知字段拒；transports 1..8 且两种形态之外类型层不存在；
+// host 1..255 字符；port 1..65535；revision 正安全整数、同 deviceId 严格递增回退拒；at 规范时间戳。
+```
+
+**配对会合（先于认证的首次传输——引导链第一环）**：配对码的带外交付物 = 一次性配对秘密（§2.1）+ **出码设备的会合信息**（direct 地址和/或 blind-relay 会合点 + **一次性高熵配对 rendezvous id**；二维码内嵌，短码场景 `zz pair` 同屏显示、新设备随码输入）。配对经中继会合时的键即该 rendezvous id（`RendezvousKey` 编码，见会合协议）——独立随机生成、只作会合标识、不参与认证；**短码只进入 PAKE，任何中继可见物不得由短码派生**（低熵值的派生物是可离线枚举的校验物，破坏 §2.1 抗离线字典合同）。新设备凭会合信息建立**未认证传输通道**（S2 socket-transport），§2.1 配对消息（offer / join / PakeRound / finished / acceptance）在该通道上交替；通道上只允许配对协议消息、其余一律拒，身份信任仅在 acceptance 后成立，MITM / 重放 / 爆破由 §2.1 既有机械拒绝点承担。**pairwise rendezvous secret 不经传输**：双方从配对已共享的会话密钥材料（short-pake 分支 = PAKE 会话密钥，qr 分支 = 高熵一次性秘密——均为 §2.1 密钥确认的既有材料）按 `"zhixing:rendezvous:pairwise:v1"` 域分离**各自独立派生**；secret 只进设备 SecretStore，引用形态 `{ kind: "rendezvous", bindingId: 对端 deviceId }`（§2.3），不入配置、trust 流、descriptor 与任何 wire / 日志。**删除时机**：acceptance 未提交的配对失败 / 超时（孤儿候选）、引导废弃、对端 `revoke` 或角色移除不再需要连接时均 `delete`；轮换为新值原子覆盖——秘密不留孤儿驻留。定性为非信任材料——泄露至多造成会合干扰与关联，身份恒由端到端握手保证，经认证连接协商轮换即收束。
+
+**引导崩溃闭环（写序与幂等续传）**：双方在提交 acceptance **之前**先完成 pairwise secret 的派生并 fsync 入 SecretStore（候选态）——acceptance 耐久提交（入链 / 消费一次性码）时，重连密钥材料必已在场，不存在"已入链却无重连密钥"的半完成态。acceptance 完成后同一通道升级为已认证配对通道，随引导流交付：双方 `MeshEndpointDescriptor` 与 `HomeTrustRecord` 签名快照（§2.1 既有投影，此后经认证连接追赶事件链、设备本地重放验证）；全部交付完成后双方各自耐久写**引导完成标记**，secret 随之转正。配对 rendezvous id 保留至引导完成标记落盘才失效：引导中任一侧崩溃或断线，重启后凭已耐久的候选 secret 与仍有效的 rendezvous（或 pairwise 键）重新会合、重新认证握手并**幂等续传**剩余交付——不重新配对、不重复入链、不重复消费配对码；acceptance 提交前崩溃则配对未成立，按 §2.1 一次性语义重新出码。
+
+**盲中继会合协议（S2 `bridgeBlindRelay` 之上的撮合合同）**：双方各自出站连接中继后先发一帧规范 hello：
+
+```ts
+type RendezvousKey = string;             // "rzv:" + 64 位小写 hex（32 字节）；独立会合令牌类型——
+                                         // 不是 Digest（不入 §1.2 六类注册表）、不是 KeyConfirmation（非密钥确认语义）；
+                                         // contracts lint 对其独立校验格式，冒用 Digest / KeyConfirmation 即失败。
+interface BlindRendezvousHello { v: 1; key: RendezvousKey; ttlMs: number }
+// 首帧；未知字段拒；ttlMs 1..3_600_000（挂起上限与初值 S5 标定）。key 两种来源、同一编码与校验：
+// 控制面 = "rzv:" + hex(MAC(pairwiseRendezvousSecret, UTF8("zhixing:rendezvous:v1") || 0x00 || UTF8(utcDate)))
+//（secret 住 SecretStore，派生见配对会合段）；配对 = 带外交付的一次性高熵配对 rendezvous id（随机生成，
+// 不由任何低熵值派生）。中继只见令牌与 IP，不见设备身份与明文；能算出 key 者（曾持 secret）至多造成
+// DoS 与关联，身份恒由隧道内端到端握手保证，secret 经认证连接轮换即收束。
+```
+
+中继按 key 撮合：首条连接挂起（时长 = min(ttlMs, 中继上限)，超时断开）；第二条同 key 到达即桥接进入 `bridgeBlindRelay` 纯转发并清除表项；挂起中第三条同 key 拒；桥接后同 key 新连接开启新一轮挂起；任一端断开即清除表项并断开对端。会合键是 pairwise 的，故锚点的 `relayRegistration` = **对 trust 链投影中每个需连接锚点的 `active` 远端 peer，同时维护当前与前一时间窗各一条挂起注册连接**（注册数量上界 = 2 × 链投影 active 成员数），每条独立走"被会合消费或断开后立即重注册"的生命周期；进入新时间窗即补注册新窗键，早于前一窗的注册即时撤销（有界清理）；peer 被 `revoke` 或角色移除即撤销其全部注册。拨号方依次尝试当前与前一时间窗——双侧各覆盖两个相邻窗口，任一方向的时钟偏差小于一个窗口长度时键必有交集，不存在窗口切换的确定性断连边界。会合成功只是取得字节通道，S2 认证握手随后在通道内端到端进行，失败即断。
+
+**端点引导（新增 bootstrap 合同；信任零新增）**：`MeshEndpointDescriptor` 是纯可达性提示——信任只来自 §2.1 设备密钥与 S2 双向认证握手，端点缺失、错误或被篡改只导致连接失败，天然 fail-closed，故不入签名域。交付与更新：① 配对引导流内经已认证配对通道交换（见上）；② 接收方按 deviceId 落设备域本地耐久，`revision` latest-wins、回退拒；③ 后续变更经任一已认证 mesh 连接以 negotiated-version 服务推送，接收方只接受 `descriptor.deviceId = 该连接认证对端` 的自述更新（任何设备不得代改他人端点）；更新不可达时旧端点保留为候选。anchor 的 descriptor：`direct` 项取 `advertised` 配置（bind 为通配地址且未配置 advertised 时不公布 direct 项），`blind-relay` 项取 `relayRegistration`。
+
+**控制面连接所有权与建立序列**：非锚点角色设备（S5 为 executor；后续 surface 同规则）是唯一拨号方，锚点恒不主动拨号——direct 监听与盲中继出站注册二者至少其一承载锚点可达性。拨号方按对方 descriptor 依序尝试：全部 `direct` → 依次经 `blind-relay` 项按上述会合协议会合（握手与 guard 仍端到端，中继零明文——S2 保密性验收覆盖）；全部失败按 `OutboundMeshTunnel` 既有退避策略有界重试。连接不可达不改变任何权威语义：派发滞留由 assigned outbox 承载、产品呈现按 §十一"目标离线→任务已排队"。连接级重连唯一归拨号方；assignment 级重驱恒由各 outbox 谓词（§3.6 / §5.5）驱动——两层解耦，互不假设对方状态。锚点接受连接的授权谓词 = 握手身份属于 trust 链投影的 `active` 成员且角色相容，别无第二来源。
+
+**验收（随第 20 单元前置提交）**：链未建立时单机默认装配零监听，首次出码 `genesis + role-change` 原子入链、建链失败配对不得继续、此后内置默认失效；本地配置声明链外角色启动即拒、链上撤销后重启拒且在线断连；descriptor 未知字段 / 越上界 / revision 回退拒，端点逐字段篡改仅致连接失败、零信任影响、零权威变更；配对在仅 direct、仅 relay 两形态下均能从码走到 acceptance，未认证通道上非配对消息拒，中继可见的配对会合键与短码统计独立（不可作离线枚举校验物）；pairwise secret 两端独立派生结果一致、零传输、只以 `{kind:"rendezvous"}` 落 SecretStore，配对失败 / 引导废弃 / 对端撤销三类删除时机零孤儿驻留；`RendezvousKey` 格式独立校验，冒用 `Digest` / `KeyConfirmation` 被 contracts lint 拒；acceptance 提交时候选 secret 必已耐久，acceptance 后、引导完成前的每个崩溃点重启均凭保留的 rendezvous / pairwise 键幂等续传（不重新配对、不重复入链、不重复消费码），引导完成标记落盘后 rendezvous 失效；会合协议的挂起超时、第三连接拒、断线清理、错 key 不撮合、注册被消费后重注册、多 executor 经各自 pairwise 键并发会合互不干扰、双向时钟偏差一窗内跨窗口切换会合不中断逐项通过；direct 不可达自动经 relay 会合且端到端认证与 guard 语义不变，双侧均 NAT 场景经 relay 建连；拨号方唯一重连、锚点零主动拨号、未启用角色零监听；全端点不可达时零权威变更，任务按排队 / 离线文案呈现。
 
 ## 三、端口接口（contracts 冻结）
 
@@ -851,6 +898,7 @@ interface ArtifactRef { digest: Digest; bytes: number }
 - **依赖闭包通用规则（跨边界引用的在场保证）**：任何跨边界消息（SealedBundle / ControlEnvelope / DispatchEnvelope）按 schema 机械划分两类引用：① `rootArtifacts` = wire body 中直接出现的全部 `ArtifactRef`（含 SealedBundle 的 runRecord / mutationBatch / contentAssets、ControlRequest mutation 内的正文引用、Dispatch work 引用），它们已在 body 的 digest / 签名域内，**不重复**写入清单；② `dependencyArtifacts` = 对每个有注册 schema 的 root artifact 解引用并递归提取得到的传递闭包，减去 rootArtifacts 后的精确集合（opaque 内容资产是叶节点，不解析内部字节）。两集合均按 `(digest, bytes)` 升序规范化且禁止重复；跨层重复、非规范顺序、少列与多列均拒，无传递依赖时必为 `[]`。接收方使用同一版本化 schema 提取器对账，先验证消息 digest / 签名，再要求 `rootArtifacts ∪ dependencyArtifacts` 全部已耐久在场，CAS / control apply / dispatch 接受前缺任一件即拒（`missing-base` 族错误）。root / dependency 只是**传输清单分类，不改变资产语义**：成功生效后，每个 ref 由引用它的权威记录接管保留与 GC（如 contentAssets 归内容索引、skill / rubric content 归对应全局资产）；未被权威记录接管的临时件才按保留窗 GC。
 - **绑定字段（payload 单源，算法统一见 §1.2）**：`ControlEnvelope.payloadDigest = D("ControlEnvelopePayload",1,{body,dependencyArtifacts})`；`DispatchEnvelope.signature` 按 §1.2 覆盖除 signature 外全部字段；`SealedBundle.digest = D("SealedBundle",1,{assignmentId,executorId,streamFinal,usage,usageFinal,dependencyArtifacts,body})`。rootArtifacts 因位于 body 已被覆盖，dependencyArtifacts 显式入域；任何集合替换、顺序变化（JCS 后）或内容篡改均失配。
 - 传输分两级：**S5 最小 assignment 域传输协议**——对象为 WindowInput 全量、SealedBundle、MutationBatch 及 `rootArtifacts ∪ dependencyArtifacts` 全闭包，在 owner ↔ executor 之间按 digest 推拉，授权凭该 assignment 的 `AuthorityCapability`（越 assignment 拒绝），支持断点（range）与去重（已有 digest 跳过），上传恒先于引用它的提交；**S6 扩展**——用户内容资产的数据面消费（surface 下载授权、断点续传、生命周期治理）与 **surface 预上传授权**（control 写的 root / dependency 上传半边，凭已认证连接按 requestId 申请上传授权，上传完成才可提交该 control 写）。
+- S5 每次资产传输还须携短时 `AssignmentArtifactTransferGrant`：以 owner 签发的 assigned/received 激活为授权根，绑定 assignment、executor、认证源/目标设备、方向、精确规范化 ref 集、聚合字节与有效期；owner→executor 由 owner 签发，executor→owner 由该激活指定的 executor 签发。接收端先验证签发权、方向、闭包与预算；已持有 assignment 的一侧还须命中本地耐久激活，资产先行的 executor 接收侧则以 owner 签名激活为可携带证明，并在 dispatch 接纳时写入 received。当前写同时要求 capability 未过期，历史读取只复用仍可证明的耐久激活。
 - GC：引用计数以 log 保留窗为准；对话删除连带其资产引用，归零后物理回收。
 
 ### 4.3 各逻辑流记录
@@ -2059,7 +2107,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 17（S4） | AuthorityCapability 与权限租约激活 | 落五类 principal×方法矩阵、统一 guard、AuthorityCapability、PermissionSnapshotLease、assigned/received 双侧激活与吊销重驱 | 全方法×principal 允许/拒绝矩阵、错 scope/resource/epoch/assignment/executor、候选未激活、替换租约和离线验权测试通过 |
 | 18（S4） | ResourceGovernor 与资源租约闭环 | 落 anchor/executor 双半边、根/子租约、WDRR、consume/settle/release/reclaim、delegation、UsageReport 连续水位；将全部工作入口接入治理，并以同端口替换 S3 过渡签发器（wire 合同与既有凭证日志不变） | 不变量 18 对抗矩阵、全 workload kind、重复 usageId、超额/越 delegation、无水位 reclaim、满载公平性和双拓扑测试通过；过渡签发器零残留；S4 能力整体启用 |
 | 19（S5） | assignment 资产传输与 mesh adapter | 落 owner↔executor 的 WindowInput/Dispatch/MutationBatch/SealedBundle 及依赖闭包按摘要推拉、断点续传、去重；实现 RunExecutorPort/RunSubmissionPort mesh adapter | root/dependency 少列、多列、乱序、跨层重复、缺件、断点和错 assignment 授权全部拒绝；进程内/mesh contract conformance 等价 |
-| 20（S5） | 跨机控制面启用 | 将派发、started、提交、cancel/supersede/queryLedger、usage intake 上网格；以完整 S3/S4 守卫和 assigned outbox 为唯一远端入口，最后开放跨机执行 | 双拓扑复跑 6.1/6.2/6.2b、断网/重连/重投/owner 与 executor 崩溃矩阵全绿；跨机零无日志执行、零双活；S5 到此才启用业务 mesh |
+| 20（S5） | 跨机控制面启用 | 先以前置提交按 §2.5 落生产 bootstrap（角色装配的链授权校验、`zz pair` 引导流、端点交付/耐久/更新、控制面连接建立与中继会合、拨号方重连所有权），生产路径保持不变；再将派发、started、提交、cancel/supersede/queryLedger、usage intake 上网格；以完整 S3/S4 守卫和 assigned outbox 为唯一远端入口，最后开放跨机执行 | §2.5 验收项全绿（单机默认→建链迁移、链外角色拒、配对两形态会合、中继撮合合同、revision 回退拒、双 NAT 建连、拨号方唯一重连）；双拓扑复跑 6.1/6.2/6.2b、断网/重连/重投/owner 与 executor 崩溃矩阵全绿；跨机零无日志执行、零双活；S5 到此才启用业务 mesh |
 | 21（S6） | run stream、spool 与摘要链 | 落统一 StreamFrame、assignment 级 seq、streamEpoch fencing、数据帧摘要链、provisional-final、耐久 spool、逐消费方 ACK/回收和背压 | 直连/中继路径切换、空流、逐字段篡改、final 三值核对、ACK 丢失、慢 observer 隔离、崩溃续流零丢零重 |
 | 22（S6） | 数据面票据与确认/止损 | 落 observe/interact/abort 票据的签发、续期、吊销；interaction 下行投影、第一方直连 allow-once、owner 失联 abort 与旁观只读 | 越权 observer、非原始 surface 应答、票据过期/吊销、交互取消竞态、断线重连和 abort 证明测试通过；pending 权威只在 assignment 流 |
 | 23（S6） | surface 内容资产数据面 | 回填并实现 surface 预上传授权、下载授权、断点续传、生命周期治理；control 写与 committed 内容都执行依赖闭包在场检查 | S6 回填验收全部通过；缺件不得 control apply/CAS；上传中断可续、重复 digest 去重、越 requestId/assignment 拒绝 |

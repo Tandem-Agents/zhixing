@@ -1,7 +1,13 @@
 export type * from "./foundation.js";
 export type * from "./identity.js";
 export type * from "./authorization.js";
-export { ADMISSION_CLASSES, RESOURCE_WORKLOAD_KINDS } from "./authorization.js";
+export {
+  ADMISSION_CLASSES,
+  MAX_ASSIGNMENT_ARTIFACT_GRANT_BYTES,
+  MAX_ASSIGNMENT_ARTIFACT_GRANT_REFS,
+  MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS,
+  RESOURCE_WORKLOAD_KINDS,
+} from "./authorization.js";
 export type * from "./state.js";
 export type * from "./protocol.js";
 export {

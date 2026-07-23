@@ -2722,6 +2722,15 @@ describe("conversation assignment protocol", () => {
     await expect(harness.journal.assignmentsAwaitingRecovery()).resolves.toEqual([
       expect.objectContaining({ assignmentId: ASSIGNMENT_ID, state: "committed" }),
     ]);
+    await expect(
+      harness.ledger.sealedConversationAssignmentsAwaitingAcknowledgement(),
+    ).resolves.toEqual([harness.dispatch.envelope]);
+    await expect(
+      harness.ledger.recoverableConversationAssignments(),
+    ).resolves.toEqual([harness.dispatch.envelope]);
+    await expect(
+      harness.ledger.sealedBundleForRecovery(ASSIGNMENT_ID),
+    ).resolves.toMatchObject({ kind: "sealed" });
 
     const dispatcher = new InProcessConversationDispatcher({
       enabled: true,
@@ -2742,8 +2751,31 @@ describe("conversation assignment protocol", () => {
       phase: "acked",
       acknowledgedCommitRevision: 8,
     });
+    await expect(
+      harness.ledger.sealedConversationAssignmentsAwaitingAcknowledgement(),
+    ).resolves.toEqual([]);
+    await expect(harness.ledger.recoverableConversationAssignments()).resolves.toEqual([]);
     await expect(harness.journal.assignmentsAwaitingRecovery()).resolves.toEqual([]);
   }, 15_000);
+
+  it("recovers received conversations only before execution starts", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+
+    await expect(harness.ledger.recoverableConversationAssignments()).resolves.toEqual([
+      harness.dispatch.envelope,
+    ]);
+    await expect(
+      harness.ledger.sealedBundleForRecovery(ASSIGNMENT_ID),
+    ).resolves.toEqual({ kind: "not-sealed" });
+
+    await expect(harness.ledger.start(ASSIGNMENT_ID)).resolves.toEqual({ started: true });
+    await expect(harness.ledger.recoverableConversationAssignments()).resolves.toEqual([]);
+  });
 
   it("observes an existing executor ACK without resubmitting the conversation bundle", async () => {
     const harness = await createHarness();

@@ -57,6 +57,14 @@
       "types": "./dist/replay-window.d.ts",
       "import": "./dist/replay-window.js"
     },
+    "./blind-rendezvous": {
+      "types": "./dist/blind-rendezvous.d.ts",
+      "import": "./dist/blind-rendezvous.js"
+    },
+    "./bootstrap": {
+      "types": "./dist/bootstrap.d.ts",
+      "import": "./dist/bootstrap.js"
+    },
     "./request-channel": {
       "types": "./dist/request-channel.d.ts",
       "import": "./dist/request-channel.js"
@@ -92,13 +100,13 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@cipherman/pake-js": "0.1.1",
     "@peculiar/webcrypto": "1.7.1",
     "@peculiar/x509": "2.0.0",
     "@zhixing/core": "workspace:*",
     "reflect-metadata": "0.2.2"
   },
   "devDependencies": {
-    "@cipherman/pake-js": "0.1.1",
     "@types/node": "^22.15.2",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",

@@ -14,11 +14,13 @@ export type MeshServiceDefinition =
   | {
       readonly access: "read";
       readonly availability: "negotiated-version" | "version-independent";
+      readonly authorize?: (connection: SecureMeshConnection) => boolean;
       readonly handler: MeshServiceHandler;
     }
   | {
       readonly access: "write";
       readonly availability: "negotiated-version";
+      readonly authorize?: (connection: SecureMeshConnection) => boolean;
       readonly handler: MeshServiceHandler;
     };
 
@@ -38,6 +40,8 @@ export class MeshServiceRegistry {
         definition.availability !== "version-independent") ||
       (definition.access === "write" &&
         definition.availability !== "negotiated-version") ||
+      (definition.authorize !== undefined &&
+        typeof definition.authorize !== "function") ||
       typeof definition.handler !== "function"
     ) {
       throw new TypeError("Mesh service definition is invalid");
@@ -48,6 +52,7 @@ export class MeshServiceRegistry {
     const service = Object.freeze({
       access: definition.access,
       availability: definition.availability,
+      ...(definition.authorize ? { authorize: definition.authorize } : {}),
       handler: definition.handler,
     }) as RegisteredMeshService;
     this.services.set(serviceId, service);
@@ -72,6 +77,12 @@ export class MeshServiceRegistry {
       throw new MeshProtocolError(
         "service-unavailable",
         `Mesh service is not registered: ${serviceId}`,
+      );
+    }
+    if (service.authorize && !service.authorize(connection)) {
+      throw new MeshProtocolError(
+        "unauthorized-peer",
+        `Mesh peer is not authorized for service: ${serviceId}`,
       );
     }
     if (
