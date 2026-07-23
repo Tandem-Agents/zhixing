@@ -16,6 +16,10 @@
     "./assignment-ledger": {
       "types": "./dist/assignment-ledger.d.ts",
       "import": "./dist/assignment-ledger.js"
+    },
+    "./assignment-stream-spool": {
+      "types": "./dist/assignment-stream-spool.d.ts",
+      "import": "./dist/assignment-stream-spool.js"
     }
   },
   "files": ["dist"],

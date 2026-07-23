@@ -168,6 +168,13 @@ import {
 const SKILL_INDEX_TOP_N = 20;
 const LIFECYCLE_DIAGNOSTIC_LIMIT = 100;
 
+class ProtocolEventConsumerError extends Error {
+  constructor(readonly originalError: unknown) {
+    super("Protocol event consumer failed");
+    this.name = "ProtocolEventConsumerError";
+  }
+}
+
 // ─── 内部辅助 ───
 
 /**
@@ -489,11 +496,11 @@ export interface RunParams {
   source?: TurnSource;
   /** 推进侧代理 run 的产品层元数据；不进入 Message role/content */
   advancement?: RunRecordAdvancementMetadata;
-  onYield?: (event: AgentYield) => void;
+  onYield?: (event: AgentYield) => void | Promise<void>;
   onProtocolEvent?: (
     event: import("@zhixing/core").SessionEventProjection,
     meta: { readonly lineage?: string },
-  ) => void;
+  ) => void | Promise<void>;
   toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
   /** Optional durable authority check run before the security pipeline and tool. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
@@ -1059,7 +1066,7 @@ export async function createAgentRuntime(
         : undefined,
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
-    reportLifecycleWarning(event) {
+    async reportLifecycleWarning(event) {
       const payload: AgentEventMap["lifecycle:warning"] = {
         hookId: input.hookId,
         phase: input.phase,
@@ -1068,7 +1075,7 @@ export async function createAgentRuntime(
         message: event.message,
       };
       if (input.eventBus) {
-        input.eventBus.emitSync("lifecycle:warning", payload);
+        await input.eventBus.emit("lifecycle:warning", payload);
       } else {
         pushLifecycleDiagnostic(payload);
       }
@@ -1532,14 +1539,26 @@ export async function createAgentRuntime(
       //   - 子 agent EventBus 通过 createEventBus({ parent, lineage: "main/<id>" })
       //     形成可追溯的层级链(保证 lineage 必须以父 lineage 为前缀)
       // 旧 listener 单参签名继续兼容(meta 是可选第二参,被忽略)
-      const eventBus = createEventBus<AgentEventMap>({ lineage: "main" });
+      const eventBus = createEventBus<AgentEventMap>({
+        lineage: "main",
+        onError: (error, eventName) => {
+          if (error instanceof ProtocolEventConsumerError) {
+            throw error.originalError;
+          }
+          console.error(`[EventBus] Error in listener for "${eventName}":`, error);
+        },
+      });
       const disposeProtocolEvents = params.onProtocolEvent
-        ? eventBus.onAny((event, payload, meta) => {
+        ? eventBus.onAny(async (event, payload, meta) => {
             const projected = projectSessionEvent(event, payload);
             if (projected) {
-              params.onProtocolEvent?.(projected, {
-                ...(meta?.lineage ? { lineage: meta.lineage } : {}),
-              });
+              try {
+                await params.onProtocolEvent?.(projected, {
+                  ...(meta?.lineage ? { lineage: meta.lineage } : {}),
+                });
+              } catch (error) {
+                throw new ProtocolEventConsumerError(error);
+              }
             }
           })
         : undefined;
@@ -1691,7 +1710,7 @@ export async function createAgentRuntime(
             try {
               await sub.onWindowClose?.(closeCtx);
             } catch (err) {
-              eventBus.emit("lifecycle:hook_failed", {
+              await eventBus.emit("lifecycle:hook_failed", {
                 hookId: sub.id,
                 phase: "onWindowClose",
                 error: lifecycleErrorMessage(err),
@@ -1735,7 +1754,7 @@ export async function createAgentRuntime(
               await sub.onWindowOpen?.(openCtx);
             } catch (err) {
               nextLocalMessagePrefixContributions.set(sub.id, null);
-              eventBus.emit("lifecycle:hook_failed", {
+              await eventBus.emit("lifecycle:hook_failed", {
                 hookId: sub.id,
                 phase: "onWindowOpen",
                 error: lifecycleErrorMessage(err),
@@ -1748,7 +1767,7 @@ export async function createAgentRuntime(
           const nextLocal = buildPrompt(localSegmentOverrides);
           if (nextLocal !== localPrompt) {
             localPrompt = nextLocal;
-            eventBus.emit("lifecycle:prompt_rebuilt", { reason });
+            await eventBus.emit("lifecycle:prompt_rebuilt", { reason });
           }
           localMessagePrefixContributions = nextLocalMessagePrefixContributions;
           localMessagePrefix = assembleMessagePrefix(
@@ -1806,7 +1825,7 @@ export async function createAgentRuntime(
         try {
           await sub.onBeforeRun?.(beforeRunCtx);
         } catch (err) {
-          eventBus.emit("lifecycle:hook_failed", {
+          await eventBus.emit("lifecycle:hook_failed", {
             hookId: sub.id,
             phase: "onBeforeRun",
             error: lifecycleErrorMessage(err),
@@ -1861,7 +1880,7 @@ export async function createAgentRuntime(
           try {
             await sub.onAfterRun?.(afterRunCtx);
           } catch (err) {
-            eventBus.emit("lifecycle:hook_failed", {
+            await eventBus.emit("lifecycle:hook_failed", {
               hookId: sub.id,
               phase: "onAfterRun",
               error: lifecycleErrorMessage(err),
@@ -1992,7 +2011,7 @@ export async function createAgentRuntime(
           }
 
           // 通知调用方（渲染用）
-          params.onYield?.(value);
+          await params.onYield?.(value);
 
           // 追踪消息以维护对话历史
           trackMessages(value, newMessages, pendingToolResults);

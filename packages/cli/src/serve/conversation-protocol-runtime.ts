@@ -89,7 +89,10 @@ import {
   type DurableInteractionBinding,
 } from "./durable-conversation-interactions.js";
 import { createConversationExecutorLedger } from "./conversation-executor-ledger.js";
-import { isRetryableMeshFailure } from "./remote-obligation-failure.js";
+import {
+  isRetryableMeshFailure,
+} from "./remote-obligation-failure.js";
+import { retryDurableObligation } from "./durable-obligation-retry.js";
 
 export { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 
@@ -954,8 +957,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       try {
         const generator = input.runtime.run(input.messages, {
           ...input.options,
-          onProtocolEvent: (event, meta) => {
-            stream.append(
+          onProtocolEvent: async (event, meta) => {
+            await stream.append(
               { kind: "agent-event", event },
               {
                 ...streamMeta,
@@ -998,7 +1001,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             break;
           }
           if (item.value.type === "tool_start") toolCalls += 1;
-          stream.append({ kind: "agent-yield", yield: item.value }, streamMeta);
+          await stream.append(
+            { kind: "agent-yield", yield: item.value },
+            streamMeta,
+          );
           yield item.value;
         }
       } catch (error) {
@@ -1008,7 +1014,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           if (await localLedger!.hasOpenSideEffects(assignmentId)) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
           } else {
-            await submission.prepareForRunEnd(assignmentId, submissionContext);
+            await this.#prepareRunEndUntilAvailable(
+              assignmentId,
+              submission,
+              submissionContext,
+              interactionBinding,
+            );
             const failure = await localLedger!.failExecution(assignmentId, {
               reason: executionFailureReason(error),
               usageFinal,
@@ -1041,7 +1052,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         if (await localLedger!.hasOpenSideEffects(assignmentId)) {
           await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
         } else {
-          await submission.prepareForRunEnd(assignmentId, submissionContext);
+          await this.#prepareRunEndUntilAvailable(
+            assignmentId,
+            submission,
+            submissionContext,
+            interactionBinding,
+          );
           const failure = await localLedger!.failExecution(assignmentId, {
             reason: runFailureReason(runResult.agentResult),
             usageFinal,
@@ -1065,7 +1081,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         return runResult;
       }
 
-      await submission.prepareForRunEnd(assignmentId, submissionContext);
+      await this.#prepareRunEndUntilAvailable(
+        assignmentId,
+        submission,
+        submissionContext,
+        interactionBinding,
+      );
       const sourceValue = runResult.runRecord.source ?? input.options?.source;
       const advancement =
         runResult.runRecord.advancement ?? input.options?.advancement;
@@ -1113,6 +1134,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#clearRunClaims(runId);
       this.#forgetAssignment(assignmentId);
     }
+  }
+
+  async #prepareRunEndUntilAvailable(
+    assignmentId: string,
+    submission: InProcessAssignmentSubmission,
+    context: AuthorityCallContext,
+    interactionBinding: DurableInteractionBinding,
+  ): Promise<void> {
+    await retryDurableObligation(async () => {
+      await submission.prepareForRunEnd(assignmentId, context);
+      await this.#interactions.drainAssignment(interactionBinding);
+    });
   }
 
   async #applyInputAdmission(

@@ -32,12 +32,19 @@ export function createZhixingGuidanceLifecycle(
       ctx.contributeMessagePrefix(null);
       if (ctx.runtimeKind === "ephemeral") return;
 
+      let warningFailure: unknown;
+      let warningDrain = Promise.resolve();
+      const reportWarning = (event: GuidanceWarningInput): void => {
+        warningDrain = warningDrain
+          .then(() => ctx.reportLifecycleWarning(event))
+          .catch((error: unknown) => {
+            warningFailure ??= error;
+          });
+      };
       const homeDir = deps.getZhixingHome();
       let workdir: string | undefined;
       if (ctx.mode === "work" && ctx.sceneId) {
-        workdir = await resolveWorkdir(ctx.sceneId, deps, (event) =>
-          ctx.reportLifecycleWarning(event),
-        );
+        workdir = await resolveWorkdir(ctx.sceneId, deps, reportWarning);
       }
       const roots: GuidanceResolvedRoots = workdir
         ? { homeDir, workdir }
@@ -47,17 +54,19 @@ export function createZhixingGuidanceLifecycle(
         const payload = await loadLayeredGuidance({
           roots,
           readGuidanceFile: deps.readGuidanceFile,
-          reportWarning: (event) => ctx.reportLifecycleWarning(event),
+          reportWarning,
         });
         ctx.contributeMessagePrefix(
           payload ? buildGuidanceMessagePair(payload) : null,
         );
       } catch (error) {
         ctx.contributeMessagePrefix(null);
-        ctx.reportLifecycleWarning({
+        reportWarning({
           message: `约定加载失败，已跳过本窗约定：${errorMessage(error)}`,
         });
       }
+      await warningDrain;
+      if (warningFailure !== undefined) throw warningFailure;
     },
   };
 }

@@ -62,7 +62,7 @@ export interface RunTurnOptions {
   onProtocolEvent?: (
     event: import("@zhixing/core").SessionEventProjection,
     meta: { readonly lineage?: string },
-  ) => void;
+  ) => void | Promise<void>;
   toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
   /** Fail-closed durable authority check invoked immediately before each tool call. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;

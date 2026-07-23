@@ -181,6 +181,32 @@ describe("wrapStreamWithWatchdog: idle-timer 触发", () => {
     expect(c.signal.aborted).toBe(true);
   });
 
+  it("warn 消费者失败会穿过结束屏障而不是成为未处理拒绝", async () => {
+    const c = createInterruptController();
+    const bus = createEventBus<AgentEventMap>({
+      onError(error) {
+        throw error;
+      },
+    });
+    bus.on("interrupt:warn", async () => {
+      throw new Error("durable warning projection failed");
+    });
+    const wrapped = wrapStreamWithWatchdog(
+      neverEndingStream(),
+      c,
+      { idleTimeoutMs: 60_000, warnThresholdRatio: 0.5 },
+      bus,
+    );
+    const consumer = drain(wrapped);
+    const observed = expect(consumer).rejects.toThrow(
+      "durable warning projection failed",
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await observed;
+  });
+
   it("chunk 在 warn 后到达 → reset, 新周期 30s 后再次 warn", async () => {
     const c = createInterruptController();
     const bus = createEventBus<AgentEventMap>();
@@ -490,7 +516,7 @@ describe("wrapStreamWithWatchdog: 容错路径", () => {
     expect(c.signal.aborted).toBe(true);
   });
 
-  it("emit 抛错 → 被 .catch swallow, stream 仍正常 abort 退出", async () => {
+  it("emit 拒绝 → 结束屏障传播失败且仍完成 abort", async () => {
     const c = createInterruptController();
     // 自制 EventBus mock: emit 永远 reject
     const bus = {
@@ -506,15 +532,14 @@ describe("wrapStreamWithWatchdog: 容错路径", () => {
       bus,
     );
     const consumer = drain(wrapped);
+    const observed = expect(consumer).rejects.toThrow("subscriber boom");
 
-    // 30s emit warn → 拒绝但被 .catch 吃掉
+    // 30s emit warn → 记录失败，60s abort 后由 drain 屏障传播。
     await vi.advanceTimersByTimeAsync(30_000);
-    // 60s abort 触发
     await vi.advanceTimersByTimeAsync(30_000);
-    await consumer;
+    await observed;
 
     expect(c.signal.aborted).toBe(true);
-    // 验证 emit 确实被调用且抛错
     expect(bus.emit).toHaveBeenCalled();
   });
 });

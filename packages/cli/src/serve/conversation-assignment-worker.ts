@@ -10,12 +10,14 @@ import {
 import type {
   AuthorityCallContext,
   DispatchEnvelope,
+  ExecutionRef,
   RunSubmissionPort,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
   StreamDigestChain,
+  type StreamFrameProducer,
 } from "@zhixing/core/protocol";
 import type { RuntimeFactory } from "@zhixing/owner-kernel";
 import type {
@@ -24,7 +26,10 @@ import type {
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
-import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
+import {
+  shouldRetryRemoteObligation,
+} from "./remote-obligation-failure.js";
+import { retryDurableObligation } from "./durable-obligation-retry.js";
 
 export interface ConversationAssignmentWorkerOptions {
   readonly ledger: ConversationAssignmentLedger;
@@ -38,10 +43,16 @@ export interface ConversationAssignmentWorkerOptions {
   readonly resourceGovernor?: ExecutorResourceGovernor;
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   readonly interactions: DurableConversationInteractionObserver;
+  readonly createStream?: (input: {
+    readonly assignmentId: string;
+    readonly ref: ExecutionRef;
+  }) => AssignmentRunStream | Promise<AssignmentRunStream>;
   readonly onError?: (assignmentId: string, error: Error) => void;
 }
 
 type ConversationEnvelope = Extract<DispatchEnvelope, { execution: "conversation" }>;
+
+export type AssignmentRunStream = StreamFrameProducer;
 
 /** Executor-owned lifecycle from durable receipt through owner acknowledgement. */
 export class ConversationAssignmentWorker {
@@ -119,15 +130,46 @@ export class ConversationAssignmentWorker {
       if (!shouldRetryRemoteObligation(error)) throw error;
     }
 
-    const stream = new StreamDigestChain(assignmentId);
+    const streamRef: ExecutionRef = {
+      execution: "conversation",
+      conversationId: envelope.work.conversationId,
+      runId: envelope.work.runId,
+      ownerEpoch: envelope.work.ownerEpoch,
+    };
     const streamMeta = envelope.work.ingress.turnOrigin
       ? { turnOrigin: envelope.work.ingress.turnOrigin }
       : {};
     let toolCalls = 0;
     let result: RunResult | undefined;
     let runtime: Awaited<ReturnType<RuntimeFactory["create"]>> | undefined;
+    let stream: AssignmentRunStream | undefined;
+    let protocolEventOrdinal = 0;
+    let yieldOrdinal = 0;
+    let interactionBinding:
+      | Parameters<DurableConversationInteractionObserver["drainAssignment"]>[0]
+      | undefined;
     let executionError: Error | undefined;
     try {
+      const activeStream = this.options.createStream
+        ? await this.options.createStream({ assignmentId, ref: streamRef })
+        : new StreamDigestChain(assignmentId);
+      stream = activeStream;
+      const activeInteractionBinding = {
+        assignmentId,
+        ledger: this.options.ledger,
+        submission: durableSubmission,
+        context,
+        surfacePrincipal: envelope.work.ingress.surfacePrincipal,
+        stream: activeStream,
+        streamMeta,
+        signal: this.#abort.signal,
+      };
+      interactionBinding = activeInteractionBinding;
+      await retryDurableObligation(
+        () =>
+          this.options.interactions.drainAssignment(activeInteractionBinding),
+        this.#abort.signal,
+      );
       runtime = await this.options.runtimeFactory.create(envelope.work.conversationId);
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
       const generator = runtime.run(messages, {
@@ -143,13 +185,18 @@ export class ConversationAssignmentWorker {
             ? { turnOrigin: envelope.work.ingress.turnOrigin }
             : {}),
         },
-        onProtocolEvent: (event, meta) => stream.append(
-          { kind: "agent-event", event },
-          {
-            ...streamMeta,
-            ...(meta.lineage ? { lineage: meta.lineage } : {}),
-          },
-        ),
+        onProtocolEvent: async (event, meta) => {
+          protocolEventOrdinal += 1;
+          await activeStream.append(
+            { kind: "agent-event", event },
+            {
+              ...streamMeta,
+              ...(meta.lineage ? { lineage: meta.lineage } : {}),
+            },
+            abortSignal,
+            `event:${protocolEventOrdinal}`,
+          );
+        },
         authorizeToolExecution: () =>
           this.options.ledger.authorizeToolExecution(
             assignmentId,
@@ -184,15 +231,7 @@ export class ConversationAssignmentWorker {
       });
       while (true) {
         const item = await this.options.interactions.withBinding(
-          {
-            assignmentId,
-            ledger: this.options.ledger,
-            submission: durableSubmission,
-            context,
-            surfacePrincipal: envelope.work.ingress.surfacePrincipal,
-            stream,
-            streamMeta,
-          },
+          interactionBinding,
           () => generator.next(),
         );
         if (item.done) {
@@ -200,7 +239,13 @@ export class ConversationAssignmentWorker {
           break;
         }
         if (item.value.type === "tool_start") toolCalls += 1;
-        stream.append({ kind: "agent-yield", yield: item.value }, streamMeta);
+        yieldOrdinal += 1;
+        await activeStream.append(
+          { kind: "agent-yield", yield: item.value },
+          streamMeta,
+          abortSignal,
+          `yield:${yieldOrdinal}`,
+        );
       }
     } catch (error) {
       executionError = asError(error);
@@ -214,7 +259,16 @@ export class ConversationAssignmentWorker {
     }
     if (executionError) {
       const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
-      await durableSubmission.prepareForRunEnd(assignmentId, context);
+      try {
+        await this.#prepareRunEndUntilAvailable(
+          assignmentId,
+          durableSubmission,
+          context,
+          interactionBinding,
+        );
+      } catch (error) {
+        executionError = asError(error);
+      }
       await this.options.ledger.failExecution(assignmentId, {
         reason: executionError.message,
         usageFinal,
@@ -231,9 +285,26 @@ export class ConversationAssignmentWorker {
       });
       throw error;
     }
+    if (!stream) {
+      throw new TypeError("Conversation runtime completed without a stream");
+    }
     const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
     if (result.agentResult.reason !== "completed") {
-      await durableSubmission.prepareForRunEnd(assignmentId, context);
+      try {
+        await this.#prepareRunEndUntilAvailable(
+          assignmentId,
+          durableSubmission,
+          context,
+          interactionBinding,
+        );
+      } catch (error) {
+        const failure = asError(error);
+        await this.options.ledger.failExecution(assignmentId, {
+          reason: failure.message,
+          usageFinal,
+        });
+        throw failure;
+      }
       await this.options.ledger.failExecution(assignmentId, {
         reason: runFailureReason(result),
         usageFinal,
@@ -250,12 +321,31 @@ export class ConversationAssignmentWorker {
       ...(source ? { source } : {}),
       ...(advancement ? { advancement } : {}),
     };
-    await durableSubmission.prepareForRunEnd(assignmentId, context);
+    let streamFinal: Awaited<ReturnType<AssignmentRunStream["final"]>>;
+    try {
+      if (!interactionBinding) {
+        throw new TypeError("Conversation runtime completed without interaction binding");
+      }
+      await this.#prepareRunEndUntilAvailable(
+        assignmentId,
+        durableSubmission,
+        context,
+        interactionBinding,
+      );
+      streamFinal = await stream.final(streamMeta, abortSignal);
+    } catch (error) {
+      const failure = asError(error);
+      await this.options.ledger.failExecution(assignmentId, {
+        reason: failure.message,
+        usageFinal,
+      });
+      throw failure;
+    }
     const bundle = await this.options.ledger.sealConversationBundle(assignmentId, {
       runRecord,
       ...(result.windowCompact ? { windowCompact: result.windowCompact } : {}),
       contentAssets: [],
-      streamFinal: stream.final(),
+      streamFinal,
       usage: {
         inputTokens: result.agentResult.usage.inputTokens,
         outputTokens: result.agentResult.usage.outputTokens,
@@ -340,6 +430,25 @@ export class ConversationAssignmentWorker {
       }
     }
     throw asError(this.#abort.signal.reason);
+  }
+
+  async #prepareRunEndUntilAvailable(
+    assignmentId: string,
+    submission: InProcessAssignmentSubmission,
+    context: AuthorityCallContext,
+    interactionBinding:
+      | Parameters<DurableConversationInteractionObserver["drainAssignment"]>[0]
+      | undefined,
+  ): Promise<void> {
+    await retryDurableObligation(
+      async () => {
+        await submission.prepareForRunEnd(assignmentId, context);
+        if (interactionBinding) {
+          await this.options.interactions.drainAssignment(interactionBinding);
+        }
+      },
+      this.#abort.signal,
+    );
   }
 }
 

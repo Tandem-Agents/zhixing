@@ -6,9 +6,27 @@ export {
   protocolDigest,
 } from "./canonical.js";
 export {
+  advanceStreamDigest,
+  assertStreamFinalReconciliation,
+  materializeStreamDataPayload,
+  prepareStreamDataPayload,
+  streamConsumerKey,
+  streamDigestSeed,
+  streamLogicalFrameDigest,
   StreamDigestChain,
+  StreamFrameVerifier,
+  validateStreamAck,
+  validateStreamConsumerAuth,
+  validateStreamDataPayload,
+  validateStreamFrame,
+  validateStreamSubscribe,
   type StreamDataFramePayload,
+  type StreamDigestCheckpoint,
   type StreamFrameMeta,
+  type StreamFrameAppender,
+  type StreamFrameProducer,
+  type PreparedStreamDataPayload,
+  type StreamVerifierCheckpoint,
 } from "./stream.js";
 export {
   materializeInteractionDisplay,

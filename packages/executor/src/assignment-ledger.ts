@@ -108,6 +108,7 @@ import {
   type ExecutorCapabilitySnapshot,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
+  type StreamDataFramePayload,
 } from "@zhixing/core/protocol";
 import type { ExecutorAssignmentResourceCoordinator } from "./resource-governor.js";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
@@ -317,6 +318,14 @@ export interface InteractionRecoveryResult {
     Extract<AssignmentRecord, { t: "interaction-requested" }>
   >;
   readonly resolved: readonly ConversationInteractionMirrorEntry[];
+}
+
+export interface DurableInteractionStreamEvent {
+  readonly recordSeq: number;
+  readonly payload: Extract<
+    StreamDataFramePayload,
+    { readonly kind: "interaction" }
+  >;
 }
 
 export interface SideEffectInput {
@@ -1286,6 +1295,48 @@ export class ConversationAssignmentLedger implements
       kind: "allow-once",
       outcome: validatedOutcome,
       at: transaction.commit!.at,
+    });
+  }
+
+  async interactionStreamEvents(
+    assignmentId: string,
+  ): Promise<readonly DurableInteractionStreamEvent[]> {
+    return this.#select(assignmentId, (state) => {
+      const events: DurableInteractionStreamEvent[] = [];
+      for (const requested of state.requested.values()) {
+        events.push({
+          recordSeq: requested.recordSeq,
+          payload: {
+            kind: "interaction",
+            event: {
+              t: "requested",
+              requestId: requested.body.requestId,
+              toolName: requested.body.toolName,
+              display: snapshot(
+                requested.body.display,
+                "Interaction stream display",
+              ),
+              issuedAt: requested.body.issuedAt,
+              ttlMs: requested.body.ttlMs,
+              expiresAt: requested.body.expiresAt,
+            },
+          },
+        });
+      }
+      for (const finished of state.finished.values()) {
+        events.push({
+          recordSeq: finished.recordSeq,
+          payload: {
+            kind: "interaction",
+            event: {
+              t: "finished",
+              requestId: finished.body.requestId,
+              outcome: streamInteractionOutcome(finished.body.outcome),
+            },
+          },
+        });
+      }
+      return events.sort((left, right) => left.recordSeq - right.recordSeq);
     });
   }
 
@@ -3469,6 +3520,24 @@ function withoutSignature<T extends { readonly signature: unknown }>(
 ): Omit<T, "signature"> {
   const { signature: _, ...payload } = proof;
   return snapshot(payload, "Assignment activation payload");
+}
+
+function streamInteractionOutcome(
+  outcome: Extract<
+    AssignmentRecord,
+    { readonly t: "interaction-finished" }
+  >["outcome"],
+): "allowed" | "denied" | "cancelled" | "expired" {
+  switch (outcome.t) {
+    case "answered":
+      return outcome.decision.allowed ? "allowed" : "denied";
+    case "auto-resolved":
+      return "denied";
+    case "cancelled":
+      return "cancelled";
+    case "expired":
+      return "expired";
+  }
 }
 
 function ownerControlCallerDeviceId(context: AuthorityCallContext): string {

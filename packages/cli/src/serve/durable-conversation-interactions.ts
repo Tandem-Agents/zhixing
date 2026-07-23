@@ -16,7 +16,7 @@ import {
   canonicalize,
   confirmationDecisionDigest,
   type ConversationInteractionOutcome,
-  type StreamDigestChain,
+  type StreamFrameAppender,
 } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
@@ -29,8 +29,10 @@ export interface DurableInteractionBinding {
   readonly submission: InProcessAssignmentSubmission;
   readonly context: AuthorityCallContext;
   readonly surfacePrincipal: string;
-  readonly stream: StreamDigestChain;
+  readonly stream: StreamFrameAppender;
   readonly streamMeta: { readonly turnOrigin?: NonNullable<IngressContext["turnOrigin"]> };
+  /** Cancels only the projection obligation owner, not the run being projected. */
+  readonly signal?: AbortSignal;
 }
 
 /** Binds confirmations and side effects to the executor ledger that owns the run. */
@@ -39,6 +41,8 @@ export class DurableConversationInteractionObserver
 {
   readonly #bindings = new AsyncLocalStorage<DurableInteractionBinding>();
   readonly #requests = new Map<string, DurableInteractionBinding>();
+  readonly #projectedRecordSeq = new Map<string, number>();
+  readonly #drains = new Map<string, Promise<void>>();
 
   withBinding<T>(
     binding: DurableInteractionBinding,
@@ -81,23 +85,10 @@ export class DurableConversationInteractionObserver
         ),
         active.context,
       );
+      await this.drainAssignment(active);
       return { accepted: false, decision };
     }
-    active.stream.append(
-      {
-        kind: "interaction",
-        event: {
-          t: "requested",
-          requestId: request.id,
-          toolName: request.tool,
-          display: disposition.display,
-          issuedAt: new Date(request.createdAt).toISOString(),
-          ttlMs: Math.max(0, request.expiresAt - request.createdAt),
-          expiresAt: new Date(request.expiresAt).toISOString(),
-        },
-      },
-      active.streamMeta,
-    );
+    await this.drainAssignment(active);
     this.#requests.set(request.id, active);
     return { accepted: true };
   }
@@ -117,24 +108,49 @@ export class DurableConversationInteractionObserver
       interactionOutcome(request, decision, source, active.surfacePrincipal),
       active.context,
     );
-    active.stream.append(
-      {
-        kind: "interaction",
-        event: {
-          t: "finished",
-          requestId: request.id,
-          outcome: streamInteractionOutcome(decision),
-        },
-      },
-      active.streamMeta,
-    );
+    await this.drainAssignment(active);
     this.#requests.delete(request.id);
+  }
+
+  async drainAssignment(binding: DurableInteractionBinding): Promise<void> {
+    const previous =
+      this.#drains.get(binding.assignmentId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.#projectAssignment(binding));
+    this.#drains.set(binding.assignmentId, current);
+    try {
+      await current;
+    } finally {
+      if (this.#drains.get(binding.assignmentId) === current) {
+        this.#drains.delete(binding.assignmentId);
+      }
+    }
+  }
+
+  async #projectAssignment(binding: DurableInteractionBinding): Promise<void> {
+    const events = await binding.ledger.interactionStreamEvents(
+      binding.assignmentId,
+    );
+    let cursor = this.#projectedRecordSeq.get(binding.assignmentId) ?? 0;
+    for (const event of events) {
+      if (event.recordSeq <= cursor) continue;
+      await binding.stream.append(
+        event.payload,
+        binding.streamMeta,
+        binding.signal,
+        `interaction:${event.recordSeq}`,
+      );
+      cursor = event.recordSeq;
+      this.#projectedRecordSeq.set(binding.assignmentId, cursor);
+    }
   }
 
   releaseAssignment(assignmentId: string): void {
     for (const [requestId, binding] of this.#requests) {
       if (binding.assignmentId === assignmentId) this.#requests.delete(requestId);
     }
+    this.#projectedRecordSeq.delete(assignmentId);
   }
 
   async start(
@@ -240,13 +256,4 @@ function interactionOutcome(
     decisionDigest: confirmationDecisionDigest(request.id, decision),
     by: surfacePrincipal,
   };
-}
-
-function streamInteractionOutcome(
-  decision: ConfirmationDecision,
-): "allowed" | "denied" | "cancelled" | "expired" {
-  if (decision.kind === "expired") return "expired";
-  if (decision.kind === "cancelled") return "cancelled";
-  if (decision.kind === "deny") return "denied";
-  return "allowed";
 }

@@ -1172,9 +1172,15 @@
     },
     {
       "kind": "import",
-      "references": 39,
+      "references": 41,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/executor"
     },
     {
       "kind": "import",
@@ -1238,7 +1244,7 @@
     },
     {
       "kind": "type-import",
-      "references": 30,
+      "references": 31,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1256,7 +1262,7 @@
     },
     {
       "kind": "type-import",
-      "references": 15,
+      "references": 17,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1316,13 +1322,13 @@
     },
     {
       "kind": "import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "core/protocol",
       "target": "core/authority"
     },
     {
       "kind": "type-import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "core/protocol",
       "target": "core/authority"
     },
@@ -1334,7 +1340,7 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 10,
       "sourceZone": "executor",
       "target": "package:@zhixing/core"
     },

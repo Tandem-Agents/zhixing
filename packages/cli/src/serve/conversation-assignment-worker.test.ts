@@ -13,7 +13,10 @@ import {
 } from "@zhixing/executor";
 import type { RuntimeFactory } from "@zhixing/owner-kernel";
 import { MeshProtocolError } from "@zhixing/mesh/errors";
-import { StreamDigestChain } from "@zhixing/core/protocol";
+import {
+  StreamDigestChain,
+  type StreamFrameMeta,
+} from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
@@ -21,6 +24,7 @@ import type { DurableConversationInteractionObserver } from "./conversation-prot
 function interactionObserver(): DurableConversationInteractionObserver {
   return {
     withBinding: vi.fn((_binding: unknown, operation: () => Promise<unknown>) => operation()),
+    drainAssignment: vi.fn(async () => undefined),
     releaseAssignment: vi.fn(),
   } as unknown as DurableConversationInteractionObserver;
 }
@@ -86,6 +90,11 @@ describe("ConversationAssignmentWorker", () => {
     const finalizeUsage = vi.fn()
       .mockRejectedValueOnce(new MeshProtocolError("service-failed", "Mesh service failed"))
       .mockResolvedValueOnce({ reportDigest: "sha256:usage", upToUsageSeq: 0 });
+    const interactions = interactionObserver();
+    const drainAssignment = vi.mocked(interactions.drainAssignment)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("temporary stream projection failure"))
+      .mockResolvedValue(undefined);
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
       ledger,
@@ -100,7 +109,7 @@ describe("ConversationAssignmentWorker", () => {
         submitCancelProof: vi.fn(),
       }),
       finalizeUsage,
-      interactions: interactionObserver(),
+      interactions,
       onError,
     });
 
@@ -112,7 +121,64 @@ describe("ConversationAssignmentWorker", () => {
       usageFinal: { reportDigest: "sha256:usage", upToUsageSeq: 0 },
     });
     expect(finalizeUsage).toHaveBeenCalledTimes(2);
+    expect(drainAssignment).toHaveBeenCalledTimes(3);
+    expect(ledger.closePendingInteractionsForRunEnd).toHaveBeenCalledTimes(2);
     expect(onError).toHaveBeenCalledWith(assignmentId, runtimeFailure);
+  });
+
+  it("durably terminates an assignment when its stream cannot be opened", async () => {
+    const assignmentId = "asg-worker-stream-open-failure";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+      work: {
+        conversationId: "conversation-worker-stream-open-failure",
+        runId: "run-worker-stream-open-failure",
+        ownerEpoch: 1,
+        ingress: { kind: "first-party" },
+      },
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const streamFailure = new Error("stream storage unavailable");
+    const failExecution = vi.fn(async () => undefined);
+    const runtimeFactory = { create: vi.fn() } as unknown as RuntimeFactory;
+    const onError = vi.fn();
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger: {
+        start: vi.fn(async () => ({ started: true })),
+        closePendingInteractionsForRunEnd: vi.fn(async () => 0),
+        pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+        failExecution,
+      } as unknown as ConversationAssignmentLedger,
+      runtimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({
+        reportStarted: vi.fn(async () => undefined),
+        mirrorInteractions: vi.fn(),
+        submitBundle: vi.fn(),
+        submitCancelProof: vi.fn(),
+      }),
+      finalizeUsage: vi.fn(async () => ({
+        reportDigest: "sha256:usage",
+        upToUsageSeq: 0,
+      })),
+      interactions: interactionObserver(),
+      createStream: vi.fn(async () => {
+        throw streamFailure;
+      }),
+      onError,
+    });
+
+    worker.accept(envelope);
+    await worker.drain();
+
+    expect(runtimeFactory.create).not.toHaveBeenCalled();
+    expect(failExecution).toHaveBeenCalledWith(assignmentId, {
+      reason: streamFailure.message,
+      usageFinal: { reportDigest: "sha256:usage", upToUsageSeq: 0 },
+    });
+    expect(onError).toHaveBeenCalledWith(assignmentId, streamFailure);
   });
 
   it("redrives sealed executor-owned bundles after restart", async () => {
@@ -302,6 +368,7 @@ describe("ConversationAssignmentWorker", () => {
       });
       return { agentResult: { reason: "aborted" } };
     });
+    const interactions = interactionObserver();
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
       ledger,
@@ -316,7 +383,7 @@ describe("ConversationAssignmentWorker", () => {
         submitCancelProof: vi.fn(),
       }),
       finalizeUsage: vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 })),
-      interactions: interactionObserver(),
+      interactions,
     });
 
     worker.accept(envelope);
@@ -329,6 +396,12 @@ describe("ConversationAssignmentWorker", () => {
       reason: "运行已中止",
       usageFinal: { reportDigest: "sha256:usage", upToUsageSeq: 0 },
     });
+    expect(interactions.drainAssignment).toHaveBeenCalledTimes(2);
+    expect(interactions.drainAssignment).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        signal: expect.objectContaining({ aborted: false }),
+      }),
+    );
   });
 
   it("retries transient sealed-bundle reads but surfaces corrupt durable state", async () => {
@@ -423,8 +496,9 @@ describe("ConversationAssignmentWorker", () => {
   it("binds turn origin to every remotely produced stream frame", async () => {
     const assignmentId = "asg-worker-turn-origin";
     const turnOrigin = {
-      channelId: "channel-test",
-      messageId: "message-test",
+      channel: "channel-test",
+      target: { channelId: "channel-test", to: "user-test" },
+      triggeredBy: "message-test",
     };
     const envelope = {
       execution: "conversation",
@@ -435,6 +509,7 @@ describe("ConversationAssignmentWorker", () => {
       work: {
         conversationId: "conversation-turn-origin",
         runId: "run-turn-origin",
+        ownerEpoch: 2,
         baseRevision: 3,
         ingress: {
           kind: "channel",
@@ -447,8 +522,25 @@ describe("ConversationAssignmentWorker", () => {
         windowInput: { t: "full", windowEpoch: 4, messages: [] },
       },
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
-    const yielded = { type: "text_delta", delta: "hello" } as never;
-    const event = { type: "model_start" } as never;
+    const yielded = { type: "text_delta", text: "hello" } as never;
+    const event = {
+      event: "agent:run_start",
+      payload: { prompt: "hello" },
+    } as never;
+    const injectedStream = new StreamDigestChain(assignmentId);
+    const final = vi.fn(
+      async (
+        _meta: StreamFrameMeta = {},
+        _signal?: AbortSignal,
+      ) => injectedStream.final(),
+    );
+    const createStream = vi.fn(async () => ({
+      append: async (
+        payload: Parameters<StreamDigestChain["append"]>[0],
+        meta?: Parameters<StreamDigestChain["append"]>[1],
+      ) => injectedStream.append(payload, meta),
+      final,
+    }));
     const sealConversationBundle = vi.fn(async () => ({ assignmentId } as SealedBundle));
     const interactions = interactionObserver();
     const ledger = {
@@ -489,6 +581,7 @@ describe("ConversationAssignmentWorker", () => {
       }),
       finalizeUsage: vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 })),
       interactions,
+      createStream,
     });
     worker.accept(envelope);
     await worker.drain();
@@ -496,9 +589,22 @@ describe("ConversationAssignmentWorker", () => {
     const expected = new StreamDigestChain(assignmentId);
     expected.append({ kind: "agent-event", event }, { turnOrigin });
     expected.append({ kind: "agent-yield", yield: yielded }, { turnOrigin });
+    expect(createStream).toHaveBeenCalledWith({
+      assignmentId,
+      ref: {
+        execution: "conversation",
+        conversationId: envelope.work.conversationId,
+        runId: envelope.work.runId,
+        ownerEpoch: envelope.work.ownerEpoch,
+      },
+    });
     expect(interactions.withBinding).toHaveBeenCalledWith(
       expect.objectContaining({ streamMeta: { turnOrigin } }),
       expect.any(Function),
+    );
+    expect(final).toHaveBeenCalledWith(
+      { turnOrigin },
+      expect.any(AbortSignal),
     );
     expect(sealConversationBundle).toHaveBeenCalledWith(
       assignmentId,

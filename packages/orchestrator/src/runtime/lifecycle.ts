@@ -93,7 +93,7 @@ export interface LifecycleContextBase {
    * 订阅者主动报告软降级诊断。订阅者只提供 message，运行体补齐 hookId /
    * phase / windowIndex / runtimeId 并投递到当前可用诊断通道。
    */
-  reportLifecycleWarning(event: LifecycleWarningInput): void;
+  reportLifecycleWarning(event: LifecycleWarningInput): Promise<void>;
 }
 
 export interface LifecycleWindowOpenContext extends LifecycleContextBase {

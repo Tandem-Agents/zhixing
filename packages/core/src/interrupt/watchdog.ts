@@ -21,8 +21,8 @@
  * - **资源回收用 try/finally**: 任何终态 (正常结束 / abort / consumer return /
  *   底层 throw) 都过 `clearTimers()`, 不允许定时器泄漏到下一轮 turn。
  *
- * - **emit fire-and-forget + .catch 防御**: EventBus emit 失败不能影响 stream
- *   消费; 订阅方报错被 swallow, 仅由 EventBus 自身的隔离机制处理。
+ * - **定时器事件有 drain 屏障**: timer callback 不能阻塞，但 generator 结束前
+ *   必须等待已触发的事件投递，避免协议消费者仍在写耐久投影时先行 final。
  *
  * 关注点分离:
  * - watchdog **不** emit `interrupt:fired` —— 那是 `emitRunEnd` 的职责 (单点收敛)
@@ -89,6 +89,8 @@ function wrapWithIdleTimer<T>(
       let lastChunkAt = Date.now();
       let warnTimer: ReturnType<typeof setTimeout> | null = null;
       let abortTimer: ReturnType<typeof setTimeout> | null = null;
+      const pendingEvents = new Set<Promise<void>>();
+      let eventFailure: unknown;
 
       const clearTimers = (): void => {
         if (warnTimer !== null) {
@@ -108,16 +110,22 @@ function wrapWithIdleTimer<T>(
         warnTimer = setTimeout(() => {
           // 仅 emit EventBus——core 不假设运行环境，由 caller 决定终点
           // (cli REPL → cliWriter / serve daemon → stdout 日志 / 测试 → mock)。
-          // emit fire-and-forget: 订阅方异常不能影响 stream 消费;
-          // EventBus 自身的 listener 隔离已做 try/catch, 此处 .catch 是双重防御
-          eventBus
-            ?.emit("interrupt:warn", {
+          const emitted = eventBus?.emit("interrupt:warn", {
               kind: "idle-timeout-warn",
               elapsedMs: Date.now() - lastChunkAt,
               timeoutMs: policy.idleTimeoutMs,
               chunksReceived,
-            })
-            .catch(() => {});
+            });
+          if (emitted) {
+            pendingEvents.add(emitted);
+            void emitted.then(
+              () => pendingEvents.delete(emitted),
+              (error) => {
+                eventFailure ??= error;
+                pendingEvents.delete(emitted);
+              },
+            );
+          }
         }, warnMs);
 
         abortTimer = setTimeout(() => {
@@ -155,6 +163,8 @@ function wrapWithIdleTimer<T>(
         // 任何终态都清理: 正常结束 / abort 退出 / consumer generator.return() /
         // 底层 throw 都过这里, 防止 timer 泄漏到下一轮 turn。
         clearTimers();
+        await Promise.all(pendingEvents);
+        if (eventFailure !== undefined) throw eventFailure;
       }
     },
   };

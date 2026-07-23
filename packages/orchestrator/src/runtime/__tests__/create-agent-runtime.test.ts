@@ -1365,9 +1365,9 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       lifecycle: [
         {
           id: "soft",
-          onBeforeRun: (ctx) => {
+          onBeforeRun: async (ctx) => {
             seenRuntimeKind = ctx.runtimeKind;
-            ctx.reportLifecycleWarning({ message: "soft degrade" });
+            await ctx.reportLifecycleWarning({ message: "soft degrade" });
           },
         },
       ],
@@ -1394,9 +1394,9 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       lifecycle: [
         {
           id: "soft-window",
-          onWindowOpen: (ctx) => {
+          onWindowOpen: async (ctx) => {
             if (ctx.reason === "clear") {
-              ctx.reportLifecycleWarning({ message: "clear degraded" });
+              await ctx.reportLifecycleWarning({ message: "clear degraded" });
             }
           },
         },
@@ -2007,6 +2007,56 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 
     expect(beforeCalled).toBe(true);
     expect(afterCalled).toBe(false);
+  });
+
+  it("awaits asynchronous yield consumers so durable backpressure reaches the producer", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime();
+    let entered!: () => void;
+    const callbackEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const callbackGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let settled = false;
+
+    const run = runtime
+      .run({
+        messages: [userMessage("hi")],
+        turnIndex: 0,
+        onYield: async () => {
+          entered();
+          await callbackGate;
+        },
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+
+    await callbackEntered;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await run;
+    expect(settled).toBe(true);
+  });
+
+  it("propagates durable protocol-event consumer failures to the run", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime();
+
+    await expect(
+      runtime.run({
+        messages: [userMessage("hi")],
+        turnIndex: 0,
+        onProtocolEvent: () => {
+          throw new Error("protocol persistence failed");
+        },
+      }),
+    ).rejects.toThrow("protocol persistence failed");
   });
 
   it("内置 skill 订阅者:索引段含 builtin 条目(双池拼装),own 同名时遮蔽", async () => {

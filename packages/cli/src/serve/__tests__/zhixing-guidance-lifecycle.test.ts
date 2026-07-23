@@ -124,6 +124,37 @@ describe("createZhixingGuidanceLifecycle", () => {
     ]);
   });
 
+  it("生命周期钩子等待异步告警投影完成", async () => {
+    const deps = makeDeps({
+      payload: "全局约定",
+      getWorksceneError: new Error("db down"),
+    });
+    let releaseWarning!: () => void;
+    const warning = new Promise<void>((resolve) => {
+      releaseWarning = resolve;
+    });
+    const reportLifecycleWarning = vi.fn(() => warning);
+    const ctx = makeWindowOpenContext({
+      mode: "work",
+      sceneId: "scene-1",
+      reportLifecycleWarning,
+    });
+
+    let completed = false;
+    const completion = createZhixingGuidanceLifecycle(deps)
+      .onWindowOpen?.(ctx)
+      .then(() => {
+        completed = true;
+      });
+    await vi.waitFor(() => expect(reportLifecycleWarning).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    releaseWarning();
+    await completion;
+    expect(completed).toBe(true);
+  });
+
   it("ephemeral runtime 只清空本窗贡献并跳过 guidance", async () => {
     const deps = makeDeps({ payload: "不应读取" });
     const ctx = makeWindowOpenContext({ runtimeKind: "ephemeral" });
@@ -174,7 +205,9 @@ function makeWindowOpenContext(
     windowIndex: 0,
     updateSystemPromptSegment: () => {},
     contributeMessagePrefix: (messages) => prefixes.push(messages),
-    reportLifecycleWarning: (event) => warnings.push(event),
+    reportLifecycleWarning: async (event) => {
+      warnings.push(event);
+    },
     prefixes,
     warnings,
     ...overrides,

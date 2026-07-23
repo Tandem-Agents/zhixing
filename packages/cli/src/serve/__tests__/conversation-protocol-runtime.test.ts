@@ -350,6 +350,17 @@ describe("ConversationProtocolRuntime", () => {
       secretStore,
     });
     const interactions = new DurableConversationInteractionObserver();
+    const originalDrain = interactions.drainAssignment.bind(interactions);
+    let drainAttempts = 0;
+    vi.spyOn(interactions, "drainAssignment").mockImplementation(
+      async (binding) => {
+        drainAttempts += 1;
+        if (drainAttempts === 3) {
+          throw new Error("temporary stream projection failure");
+        }
+        await originalDrain(binding);
+      },
+    );
     const broker = new ConfirmationBroker({ lifecycleObserver: interactions });
     broker.onRequest((request) => {
       queueMicrotask(() => broker.resolve(request.id, { kind: "allow-once" }));
@@ -480,6 +491,7 @@ describe("ConversationProtocolRuntime", () => {
     expect(finals).toHaveLength(1);
     expect(statuses.length).toBeGreaterThan(0);
     expect(drainDelivery).toHaveBeenCalledOnce();
+    expect(drainAttempts).toBe(4);
 
     const records = (await authority.authorityLog.readAll())
       .flatMap((commit) => commit.entries)
