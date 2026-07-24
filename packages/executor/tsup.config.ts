@@ -6,6 +6,7 @@ export default defineConfig({
     "src/runtime-role.ts",
     "src/assignment-ledger.ts",
     "src/assignment-stream-spool.ts",
+    "src/data-plane-ticket-registry.ts",
   ],
   format: ["esm"],
   dts: true,

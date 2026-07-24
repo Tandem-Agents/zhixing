@@ -797,6 +797,7 @@ describe("shared conversation run semantic predicates", () => {
       dispatchDigest: `sha256:${"3".repeat(64)}`,
       supersedeRequest: { fenceSeq: 7, requestId: "request-1" },
       cancelFence: { fenceSeq: 9, requestId: "request-2" },
+      abortTicketProofBindsDurableSource: false,
     } as const;
     const rejection = {
       assignmentId: "assignment-1",
@@ -869,6 +870,13 @@ describe("shared conversation run semantic predicates", () => {
     } as never;
     expect(
       terminationProofBindsDurableSource({ ...base, proof: abortTicketNotStarted }),
+    ).toBe(false);
+    expect(
+      terminationProofBindsDurableSource({
+        ...base,
+        abortTicketProofBindsDurableSource: true,
+        proof: abortTicketNotStarted,
+      }),
     ).toBe(true);
     expect(
       terminationProofBindsDurableSource({

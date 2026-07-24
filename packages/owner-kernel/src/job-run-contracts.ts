@@ -3,6 +3,7 @@ import type {
   ArtifactRef,
   AssignmentTerminationProof,
   CancelProofBody,
+  DataPlaneTicket,
   DispatchConflictProof,
   InteractionMirrorBatch,
   IngressContext,
@@ -21,6 +22,7 @@ import {
   validateCancelProof,
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
+  validateDataPlaneTicket,
   validateConversationInteractionMirrorBatch,
   validateIngressContext,
   validateJobOccurrence,
@@ -132,6 +134,13 @@ export type JobJournalRecord =
       readonly assignmentId: string;
     }
   | {
+      readonly t: "ticket-issued";
+      readonly ticket: DataPlaneTicket;
+      readonly replacesTicketId?: string;
+    }
+  | { readonly t: "ticket-revoked"; readonly ticketId: string }
+  | { readonly t: "ticket-sync-frontier"; readonly expiresThrough: string }
+  | {
       readonly t: "interaction-mirror";
       readonly assignmentId: string;
       readonly batch: InteractionMirrorBatch;
@@ -238,6 +247,12 @@ export const JOB_JOURNAL_RECORD_SHAPES = {
   "cancel-proof-accepted": { required: ["assignmentId", "proof", "t"] },
   "not-started-rejected": { required: ["assignmentId", "proof", "t"] },
   "capability-revoked": { required: ["assignmentId", "capId", "t"] },
+  "ticket-issued": {
+    required: ["t", "ticket"],
+    optional: ["replacesTicketId"],
+  },
+  "ticket-revoked": { required: ["t", "ticketId"] },
+  "ticket-sync-frontier": { required: ["expiresThrough", "t"] },
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
   state: {
     required: ["jobRunId", "state", "statusRevision", "t"],
@@ -357,6 +372,18 @@ export function validateJobJournalRecord(
       assertKeys(value.reservation, ["attempt", "reservationId"], "Assignment reservation");
       assertIdentifier(value.reservation.reservationId, "Assignment reservationId");
       assertPositive(value.reservation.attempt, "Assignment attempt");
+      break;
+    case "ticket-issued":
+      validateDataPlaneTicket(value.ticket, verifier);
+      if (value.replacesTicketId !== undefined) {
+        assertIdentifier(value.replacesTicketId, "Replaced ticket id");
+      }
+      break;
+    case "ticket-revoked":
+      assertIdentifier(value.ticketId, "Revoked ticket id");
+      break;
+    case "ticket-sync-frontier":
+      assertTime(value.expiresThrough, "Ticket sync frontier");
       break;
     case "dispatch-acked":
       assertIdentifier(value.assignmentId, "Dispatch acknowledgement assignmentId");

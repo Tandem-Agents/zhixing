@@ -4,12 +4,14 @@ import {
   type ArtifactStore,
 } from "@zhixing/core/authority";
 import {
+  type IConfirmationBroker,
   type Message,
   type RunResult,
 } from "@zhixing/core";
 import type {
   AuthorityCallContext,
   DispatchEnvelope,
+  ExecutionAbortRequest,
   ExecutionRef,
   RunSubmissionPort,
   TranscriptRunRecord,
@@ -57,7 +59,9 @@ export type AssignmentRunStream = StreamFrameProducer;
 /** Executor-owned lifecycle from durable receipt through owner acknowledgement. */
 export class ConversationAssignmentWorker {
   readonly #running = new Map<string, Promise<void>>();
+  readonly #cancellations = new Map<string, Promise<void>>();
   readonly #executionAborts = new Map<string, AbortController>();
+  readonly #confirmationBrokers = new Map<string, IConfirmationBroker>();
   readonly #abort = new AbortController();
   #closed = false;
 
@@ -87,15 +91,64 @@ export class ConversationAssignmentWorker {
     return true;
   }
 
+  async abortWithTicket(request: ExecutionAbortRequest): Promise<void> {
+    const disposition = await this.options.ledger.abortWithTicket(request);
+    if (disposition.kind === "terminal") return;
+    this.abort(request.assignmentId, new Error(request.reason));
+    const envelope = await this.options.ledger.conversationAssignmentForRecovery(
+      request.assignmentId,
+    );
+    if (!envelope) {
+      throw new Error("Ticket cancellation has no conversation assignment");
+    }
+    this.#scheduleCancellation(envelope);
+  }
+
+  async answerInteractionWithTicket(
+    input: Parameters<
+      ConversationAssignmentLedger["prepareInteractionAnswerFromSurface"]
+    >[0],
+  ): Promise<void> {
+    const prepared =
+      await this.options.ledger.prepareInteractionAnswerFromSurface(input);
+    if (prepared.kind === "replayed") return;
+    const broker = this.#confirmationBrokers.get(input.assignmentId);
+    if (!broker) {
+      throw new Error("Interaction answer has no active assignment runtime");
+    }
+    if (
+      await this.options.interactions.resolveWithSurfaceTicket(broker, {
+        assignmentId: input.assignmentId,
+        requestId: input.requestId,
+        ticketId: prepared.ticketId,
+        surfacePrincipal: prepared.surfacePrincipal,
+        decision: prepared.decision,
+      })
+    ) {
+      return;
+    }
+    const replay =
+      await this.options.ledger.prepareInteractionAnswerFromSurface(input);
+    if (replay.kind !== "replayed") {
+      throw new Error("Interaction answer did not reach a durable terminal result");
+    }
+  }
+
   async recover(): Promise<number> {
-    const pending = await this.options.ledger
-      .recoverableConversationAssignments();
+    const [pending, cancellations] = await Promise.all([
+      this.options.ledger.recoverableConversationAssignments(),
+      this.options.ledger.recoverableConversationCancellations(),
+    ]);
     for (const envelope of pending) this.accept(envelope);
-    return pending.length;
+    for (const envelope of cancellations) this.#scheduleCancellation(envelope);
+    return pending.length + cancellations.length;
   }
 
   async drain(): Promise<void> {
-    await Promise.all([...this.#running.values()]);
+    await Promise.all([
+      ...this.#running.values(),
+      ...this.#cancellations.values(),
+    ]);
   }
 
   stopAccepting(): void {
@@ -108,7 +161,11 @@ export class ConversationAssignmentWorker {
     for (const controller of this.#executionAborts.values()) {
       controller.abort(new Error("Conversation assignment worker stopped"));
     }
-    await Promise.all([...this.#running.values()].map((task) => task.catch(() => undefined)));
+    await Promise.all(
+      [...this.#running.values(), ...this.#cancellations.values()].map((task) =>
+        task.catch(() => undefined),
+      ),
+    );
   }
 
   async #execute(envelope: ConversationEnvelope, abortSignal: AbortSignal): Promise<void> {
@@ -171,6 +228,9 @@ export class ConversationAssignmentWorker {
         this.#abort.signal,
       );
       runtime = await this.options.runtimeFactory.create(envelope.work.conversationId);
+      if (runtime.confirmationBroker) {
+        this.#confirmationBrokers.set(assignmentId, runtime.confirmationBroker);
+      }
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
       const generator = runtime.run(messages, {
         abortSignal,
@@ -257,8 +317,12 @@ export class ConversationAssignmentWorker {
         executionError ??= asError(error);
       }
     }
+    this.#confirmationBrokers.delete(assignmentId);
     if (executionError) {
       const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
+      if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
+        return;
+      }
       try {
         await this.#prepareRunEndUntilAvailable(
           assignmentId,
@@ -279,6 +343,9 @@ export class ConversationAssignmentWorker {
     if (!result) {
       const error = new Error("Conversation runtime ended without a result");
       const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
+      if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
+        return;
+      }
       await this.options.ledger.failExecution(assignmentId, {
         reason: error.message,
         usageFinal,
@@ -289,6 +356,9 @@ export class ConversationAssignmentWorker {
       throw new TypeError("Conversation runtime completed without a stream");
     }
     const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
+    if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
+      return;
+    }
     if (result.agentResult.reason !== "completed") {
       try {
         await this.#prepareRunEndUntilAvailable(
@@ -354,6 +424,52 @@ export class ConversationAssignmentWorker {
       usageFinal,
     });
     await this.#submitUntilAcknowledged(bundle, submission, context);
+  }
+
+  #scheduleCancellation(envelope: ConversationEnvelope): void {
+    if (this.#cancellations.has(envelope.assignmentId)) return;
+    const running = this.#running.get(envelope.assignmentId);
+    const task = (async () => {
+      if (running) await running;
+      const owner = this.options.submissionFor(envelope);
+      const submission = new this.options.InProcessAssignmentSubmission({
+        ledger: this.options.ledger,
+        owner,
+      });
+      const context = assignmentContext(envelope);
+      await retryDurableObligation(
+        async () => {
+          await submission.flushInteractionMirrors(
+            envelope.assignmentId,
+            context,
+          );
+          const proof = await this.options.ledger.continueTicketCancellation(
+            envelope.assignmentId,
+          );
+          if (!proof) {
+            if (
+              await this.options.ledger.hasOpenSideEffects(
+                envelope.assignmentId,
+              )
+            ) {
+              throw new IncompleteCancellationProofError(
+                "Ticket cancellation retains an open side effect for owner reconciliation",
+              );
+            }
+            throw new Error("Ticket cancellation proof is not yet available");
+          }
+          await owner.submitCancelProof(envelope.assignmentId, proof, context);
+        },
+        this.#abort.signal,
+      );
+    })()
+      .catch((error) =>
+        this.options.onError?.(envelope.assignmentId, asError(error)),
+      )
+      .finally(() => {
+        this.#cancellations.delete(envelope.assignmentId);
+      });
+    this.#cancellations.set(envelope.assignmentId, task);
   }
 
   async #resumeSealedSubmission(
@@ -505,6 +621,13 @@ class StableAuthorityRejection extends Error {
   constructor(message: string) {
     super(`Conversation commit rejected: ${message}`);
     this.name = "StableAuthorityRejection";
+  }
+}
+
+class IncompleteCancellationProofError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "IncompleteCancellationProofError";
   }
 }
 

@@ -22,6 +22,7 @@ import {
   StreamHistoryUnavailableError,
   type AssignmentStreamSpool,
 } from "@zhixing/executor/assignment-stream-spool";
+import type { DataPlaneTicketRegistry } from "@zhixing/executor/data-plane-ticket-registry";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type {
   MeshServiceRegistry,
@@ -48,6 +49,33 @@ export interface AssignmentStreamServiceOptions {
   readonly authorizePeer?: (deviceId: string) => boolean;
   readonly maxFrames?: number;
   readonly maxBytes?: number;
+}
+
+export interface DataPlaneAssignmentStreamAuthorizationOptions {
+  readonly tickets: Pick<DataPlaneTicketRegistry, "authorizeSurface">;
+  readonly surfacePrincipalFor: (connection: SecureMeshConnection) => string;
+  readonly authorizeOwnerRelay: (
+    request: AssignmentStreamAuthorizationRequest,
+  ) =>
+    | { readonly expiresAt?: IsoTime }
+    | Promise<{ readonly expiresAt?: IsoTime }>;
+}
+
+export function createDataPlaneAssignmentStreamAuthorizer(
+  options: DataPlaneAssignmentStreamAuthorizationOptions,
+): AssignmentStreamServiceOptions["authorize"] {
+  return async (request) => {
+    if (request.consumer.kind === "owner-relay") {
+      return options.authorizeOwnerRelay(request);
+    }
+    const authorization = await options.tickets.authorizeSurface(
+      request.consumer.ticketId,
+      "observe",
+      request.assignmentId,
+      options.surfacePrincipalFor(request.connection),
+    );
+    return { expiresAt: authorization.expiresAt };
+  };
 }
 
 type StreamServiceRequest =

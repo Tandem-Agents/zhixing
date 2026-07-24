@@ -33,6 +33,7 @@ import {
   createSignedConversationInteractionMirrorBatch,
   createSignedJobEnvelope,
   createSignedTrustRuleSnapshot,
+  dataPlaneTicketDigest,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   interactionMirrorSeed,
@@ -87,6 +88,22 @@ const ASSIGNMENT_ID = "assignment-1";
 const EXECUTOR_ID = "executor-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+
+const legacyAbortTickets: NonNullable<
+  ConstructorParameters<typeof JobJournal>[0]["legacyAbortTickets"]
+> = {
+  authorize(input) {
+    if (
+      input.assignmentId !== ASSIGNMENT_ID ||
+      input.executorId !== EXECUTOR_ID ||
+      input.ticketDigest !== ABORT_TICKET_DIGEST ||
+      input.surfacePrincipal !== "surface:user-1"
+    ) {
+      throw new Error("abort ticket rejected");
+    }
+  },
+};
 
 function matchingSnapshotFor(executorId: string): ExecutorCapabilitySnapshot | undefined {
   if (executorId !== EXECUTOR_ID) return undefined;
@@ -358,14 +375,16 @@ async function createUserHarness(
     ownerSnapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
     executorSnapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
+    clock?: () => string;
   } = {},
 ) {
   const root = await createTempDir("job-assignment");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
+  const clock = options.clock ?? (() => NOW);
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
-    clock: () => NOW,
+    clock,
     lockWaitMs: 2_000,
   });
   const identity = new TestProtocolIdentity();
@@ -399,19 +418,8 @@ async function createUserHarness(
         }
       },
     },
-    abortTickets: {
-      authorize(input) {
-        if (
-          input.assignmentId !== ASSIGNMENT_ID ||
-          input.executorId !== EXECUTOR_ID ||
-          input.ticketDigest !== ABORT_TICKET_DIGEST ||
-          input.surfacePrincipal !== "surface:user-1"
-        ) {
-          throw new Error("abort ticket rejected");
-        }
-      },
-    },
-    clock: () => NOW,
+    legacyAbortTickets,
+    clock,
     snapshotFor: options.ownerSnapshotFor ?? matchingSnapshotFor,
   });
   const ledger = new ConversationAssignmentLedger({
@@ -424,7 +432,7 @@ async function createUserHarness(
     snapshotFor: options.executorSnapshotFor ?? matchingSnapshotFor,
     permissionSnapshotFor: (digest) => matchingPermissionSnapshotFor(identity, digest),
     runtimeBindingGuard: options.runtimeBindingGuard,
-    clock: () => NOW,
+    clock,
     surfaceAbort: {
       authorize(assignmentId, input) {
         if (
@@ -480,12 +488,13 @@ async function receive(harness: Awaited<ReturnType<typeof createUserHarness>>) {
 function reopenUserJournal(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
   artifacts: ArtifactStore = harness.artifacts,
+  clock: () => string = () => NOW,
 ): JobJournal {
   return new JobJournal({
     taskId: TASK_ID,
     anchorEpoch: 3,
     log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
-      clock: () => NOW,
+      clock,
       lockWaitMs: 2_000,
     }),
     artifacts,
@@ -495,7 +504,8 @@ function reopenUserJournal(
     submission,
     snapshotFor: matchingSnapshotFor,
     ingress: { authorize() {} },
-    clock: () => NOW,
+    legacyAbortTickets,
+    clock,
   });
 }
 
@@ -587,6 +597,201 @@ async function resolve(
 }
 
 describe("user job durable protocol", () => {
+  it("issues data-plane tickets only for a manual job's original surface", async () => {
+    const scheduled = await createUserHarness();
+    await receive(scheduled);
+    await scheduled.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    await expect(
+      scheduled.journal.issueDataPlaneTicket({
+        ticketId: "scheduled-ticket",
+        assignmentId: ASSIGNMENT_ID,
+        surfacePrincipal: "surface:user-1",
+        kind: "run-observe",
+        ttlMs: 60_000,
+      }),
+    ).rejects.toThrow("Scheduled jobs cannot receive data-plane tickets");
+
+    const manual = await createUserHarness({ assign: false });
+    await manual.journal.expireQueued(JOB_RUN_ID);
+    const source = jobRunSource(NOW, "manual-ticket-ingress");
+    const outcome = await manual.journal.applyControl({
+      admission: new ControlAdmissionJournal(manual.log, manual.artifacts),
+      envelope: createJobControlEnvelope({
+        requestId: "manual-ticket-run",
+        source,
+        at: NOW,
+        body: { t: "job-run", taskId: TASK_ID, anchorEpoch: 3 },
+      }),
+      source,
+    });
+    const jobRunId =
+      outcome.kind === "applied" && outcome.result.status === "ok"
+        ? outcome.result.body.jobRunId
+        : undefined;
+    if (!jobRunId) throw new Error("manual job-run result is missing");
+    const unsigned = createUnsignedJob(manual.identity, { jobRunId });
+    const dispatch = await manual.journal.assign(assignmentPlan(unsigned));
+    await manual.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await manual.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    await expect(
+      manual.journal.issueDataPlaneTicket({
+        ticketId: "manual-foreign-interact",
+        assignmentId: ASSIGNMENT_ID,
+        surfacePrincipal: "surface:observer-1",
+        kind: "run-interact",
+        ttlMs: 60_000,
+      }),
+    ).rejects.toThrow("restricted to the original surface");
+    const originalRequest = {
+      ticketId: "manual-interact-1",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: source.ingress.surfacePrincipal,
+      kind: "run-interact" as const,
+      ttlMs: 60_000,
+    };
+    const original =
+      await manual.journal.issueDataPlaneTicket(originalRequest);
+    await expect(
+      manual.journal.issueDataPlaneTicket(originalRequest),
+    ).resolves.toEqual(original);
+    await expect(
+      manual.journal.issueDataPlaneTicket({
+        ...originalRequest,
+        ttlMs: 30_000,
+      }),
+    ).rejects.toThrow("different grant");
+    const renewalRequest = {
+      ticketId: "manual-interact-2",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: source.ingress.surfacePrincipal,
+      kind: "run-interact" as const,
+      ttlMs: 60_000,
+      replacesTicketId: original.ticketId,
+    };
+    const renewed =
+      await manual.journal.issueDataPlaneTicket(renewalRequest);
+    await expect(
+      manual.journal.issueDataPlaneTicket(renewalRequest),
+    ).resolves.toEqual(renewed);
+    const { replacesTicketId: _, ...renewalWithoutReplacement } =
+      renewalRequest;
+    await expect(
+      manual.journal.issueDataPlaneTicket(renewalWithoutReplacement),
+    ).rejects.toThrow("different grant");
+    const abort = await manual.journal.issueDataPlaneTicket({
+      ticketId: "manual-abort",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: source.ingress.surfacePrincipal,
+      kind: "abort",
+      ttlMs: 60_000,
+    });
+    expect(await manual.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [abort, original, renewed].sort((left, right) =>
+        left.ticketId.localeCompare(right.ticketId),
+      ),
+      revokedTicketIds: [original.ticketId],
+    });
+    await expect(manual.journal.cancel({
+      jobRunId,
+      requestId: "manual-ticket-cancel",
+      context: surfaceContext("manual-ticket-cancel"),
+    })).resolves.toMatchObject({ state: "cancel-requested" });
+    expect(await manual.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [abort, original, renewed].sort((left, right) =>
+        left.ticketId.localeCompare(right.ticketId),
+      ),
+      revokedTicketIds: [
+        abort.ticketId,
+        original.ticketId,
+        renewed.ticketId,
+      ].sort(),
+    });
+    await expect(
+      manual.journal.issueDataPlaneTicket({
+        ticketId: "manual-ticket-after-cancel",
+        assignmentId: ASSIGNMENT_ID,
+        surfacePrincipal: source.ingress.surfacePrincipal,
+        kind: "run-observe",
+        ttlMs: 60_000,
+      }),
+    ).rejects.toThrow("current acknowledged assignment");
+    const abortProof = signCancelProof(
+      {
+        ...withoutSignature(contradictoryNotStartedProof(manual)),
+        ticketDigest: dataPlaneTicketDigest(abort),
+        surfacePrincipal: source.ingress.surfacePrincipal,
+      },
+      manual.identity,
+    );
+    await expect(
+      manual.journal.submitCancelProof(
+        ASSIGNMENT_ID,
+        abortProof,
+        submissionContext(unsigned),
+      ),
+    ).resolves.toBeUndefined();
+    expect(await manual.journal.currentState(jobRunId)).toBe("cancelled");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("keeps manual-job ticket synchronization behind a durable non-regressing frontier", async () => {
+    let nowMs = Date.parse(NOW);
+    const manual = await createUserHarness({
+      assign: false,
+      clock: () => new Date(nowMs).toISOString(),
+    });
+    await manual.journal.expireQueued(JOB_RUN_ID);
+    const source = jobRunSource(NOW, "manual-ticket-finite-frontier");
+    const outcome = await manual.journal.applyControl({
+      admission: new ControlAdmissionJournal(manual.log, manual.artifacts),
+      envelope: createJobControlEnvelope({
+        requestId: "manual-ticket-finite-frontier",
+        source,
+        at: NOW,
+        body: { t: "job-run", taskId: TASK_ID, anchorEpoch: 3 },
+      }),
+      source,
+    });
+    const jobRunId =
+      outcome.kind === "applied" && outcome.result.status === "ok"
+        ? outcome.result.body.jobRunId
+        : undefined;
+    if (!jobRunId) throw new Error("manual run id is missing");
+    const unsigned = createUnsignedJob(manual.identity, { jobRunId });
+    const dispatch = await manual.journal.assign(assignmentPlan(unsigned));
+    await manual.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await manual.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const ticket = await manual.journal.issueDataPlaneTicket({
+      ticketId: "manual-ticket-finite-sync-frontier",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: source.ingress.surfacePrincipal,
+      kind: "run-observe",
+      ttlMs: 60_000,
+    });
+    expect(await manual.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [ticket],
+      revokedTicketIds: [],
+    });
+
+    nowMs += 4 * 60 * 1_000;
+    expect(await manual.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [],
+      revokedTicketIds: [],
+    });
+    nowMs -= 3 * 60 * 1_000;
+    expect(await manual.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [],
+      revokedTicketIds: [],
+    });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it("does not apply the conversation runtime binding guard to job dispatch", async () => {
     let calls = 0;
     const harness = await createUserHarness({
@@ -2164,7 +2369,7 @@ describe("user job durable protocol", () => {
       context: surfaceContext("cancel-after-audit-settlement"),
     });
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 });
 
 const USER_JOB_ROWS = [
@@ -3394,7 +3599,7 @@ describe("job abort ticket authorization", () => {
         contradictoryNotStartedProof(harness),
         submissionContext(harness.unsigned),
       ),
-    ).rejects.toThrow("Abort-ticket validation is not configured");
+    ).rejects.toThrow("Abort proof does not bind an owner-issued abort ticket");
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("dispatched");
   });
 
@@ -3951,6 +4156,7 @@ function createUnsignedJob(
   identity: TestProtocolIdentity,
   ids: {
     assignmentId?: string;
+    jobRunId?: string;
     reservationId?: string;
     capabilityId?: string;
     issuedAt?: string;
@@ -3958,13 +4164,14 @@ function createUnsignedJob(
   } = {},
 ): UnsignedJobEnvelope {
   const assignmentId = ids.assignmentId ?? ASSIGNMENT_ID;
+  const jobRunId = ids.jobRunId ?? JOB_RUN_ID;
   const issuedAt = ids.issuedAt ?? NOW;
   const manifestPayload = {
     v: 1 as const,
     baseRef: {
       execution: "job" as const,
       taskId: TASK_ID,
-      jobRunId: JOB_RUN_ID,
+      jobRunId,
       taskRevision: 1,
     },
     requires: {
@@ -4012,7 +4219,7 @@ function createUnsignedJob(
     ).digest,
     binding: {
       execution: "job" as const,
-      jobRunId: JOB_RUN_ID,
+      jobRunId,
       taskId: TASK_ID,
       anchorEpoch: 3,
     },
@@ -4051,7 +4258,7 @@ function createUnsignedJob(
     v: 1 as const,
     reservationId: ids.reservationId ?? "reservation-1",
     admissionClass: "scheduler" as const,
-    workload: { kind: "job" as const, id: JOB_RUN_ID, attempt: 1 },
+    workload: { kind: "job" as const, id: jobRunId, attempt: 1 },
     scopeBinding: { kind: "job" as const, taskId: TASK_ID, anchorEpoch: 3 },
     audience: { executorId: EXECUTOR_ID },
     budget: { maxCalls: 20, maxTokens: 10_000 },
@@ -4070,7 +4277,7 @@ function createUnsignedJob(
   };
   const fence = createJobCommitFence({
     taskId: TASK_ID,
-    jobRunId: JOB_RUN_ID,
+    jobRunId,
     scheduledFor: NOW,
     taskRevision: 1,
     deliveryPlanDigest: jobDeliveryPlanDigest(ids.delivery ?? { kind: "none" }),
@@ -4092,7 +4299,7 @@ function createUnsignedJob(
     issuedAt,
     work: {
       t: "job",
-      jobRunId: JOB_RUN_ID,
+      jobRunId,
       taskId: TASK_ID,
       fence,
       instruction: { kind: "agent-turn", prompt: "perform scheduled work" },
@@ -4878,7 +5085,8 @@ type JobBehaviorScenarioId =
   | "conflictContained"
   | "uncertainRejected"
   | "system"
-  | "systemMiss";
+  | "systemMiss"
+  | "ticketLifecycle";
 
 interface JobBehaviorHarness {
   readonly log: FileAuthorityCommitLog;
@@ -4906,6 +5114,56 @@ const JOB_BEHAVIOR_SCENARIOS: Record<
   JobBehaviorScenarioId,
   () => Promise<JobBehaviorHarness>
 > = {
+  async ticketLifecycle() {
+    let nowMs = Date.parse(NOW);
+    const clock = () => new Date(nowMs).toISOString();
+    const harness = await createUserHarness({ assign: false, clock });
+    await harness.journal.expireQueued(JOB_RUN_ID);
+    const source = jobRunSource(NOW, "matrix-ticket-ingress");
+    const outcome = await harness.journal.applyControl({
+      admission: new ControlAdmissionJournal(harness.log, harness.artifacts),
+      envelope: createJobControlEnvelope({
+        requestId: "matrix-ticket-run",
+        source,
+        at: NOW,
+        body: { t: "job-run", taskId: TASK_ID, anchorEpoch: 3 },
+      }),
+      source,
+    });
+    const jobRunId =
+      outcome.kind === "applied" && outcome.result.status === "ok"
+        ? outcome.result.body.jobRunId
+        : undefined;
+    if (!jobRunId) throw new Error("matrix manual job-run result is missing");
+    const unsigned = createUnsignedJob(harness.identity, { jobRunId });
+    const dispatch = await harness.journal.assign(assignmentPlan(unsigned));
+    await harness.ledger.dispatch(
+      dispatch.envelope,
+      dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const ticket = await harness.journal.issueDataPlaneTicket({
+      ticketId: "matrix-job-observer-ticket",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:observer-1",
+      kind: "run-observe",
+      ttlMs: 60_000,
+    });
+    await harness.journal.revokeDataPlaneTicket(ticket.ticketId);
+    nowMs += 4 * 60 * 1_000;
+    await harness.journal.dataPlaneTicketFacts();
+    return {
+      log: harness.log,
+      fullProbe: () =>
+        reopenUserJournal(harness, harness.artifacts, clock).taskDefinition(),
+      guardProbe: () =>
+        reopenUserJournal(harness, harness.artifacts, clock).reportStarted(
+          ASSIGNMENT_ID,
+          submissionContext(unsigned),
+        ),
+    };
+  },
   async commit() {
     const harness = await createUserHarness();
     await start(harness);
@@ -5372,6 +5630,18 @@ const JOB_RECORD_BEHAVIOR = {
     scenario: "commit",
     recovery: noJobRecovery("capability revocation is consumed by authorization guards"),
     corrupt: (body) => ({ ...body, capId: "capability-ghost" }),
+  },
+  "ticket-issued": {
+    scenario: "ticketLifecycle",
+    recovery: noJobRecovery("ticket delivery is driven by the owner ticket-fact synchronizer"),
+  },
+  "ticket-revoked": {
+    scenario: "ticketLifecycle",
+    recovery: noJobRecovery("ticket revocation is driven by the owner ticket-fact synchronizer"),
+  },
+  "ticket-sync-frontier": {
+    scenario: "ticketLifecycle",
+    recovery: noJobRecovery("ticket synchronization advances only when facts are queried"),
   },
   "interaction-mirror": {
     scenario: "mirror",

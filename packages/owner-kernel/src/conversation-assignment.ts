@@ -23,6 +23,7 @@ import type {
   ConversationRunState,
   ConversationStatusNotice,
   ConversationInvocation,
+  DataPlaneTicket,
   ControlResult,
   ControlResultBody,
   FinalFrame,
@@ -51,6 +52,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   applyValidatedAssignmentEntry,
+  assertDataPlaneTicketTtlMs,
   assertActivatedAssignmentCapability,
   assertQueuedTerminalDequeue,
   buildConversationActivationPayload,
@@ -60,6 +62,7 @@ import {
   canonicalize,
   controlLeaseBindsDispatchEnvelope,
   createAssignmentLedgerValidationState,
+  createSignedDataPlaneTicket,
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
@@ -81,6 +84,7 @@ import {
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
   validateDispatchResult,
+  validateDataPlaneTicket,
   validateAssignmentEntry,
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
@@ -92,6 +96,7 @@ import {
   validateAuthorityError as validateAuthorityErrorContract,
   validatePublishDecisionRecord,
   type ConversationInteractionMirrorBatch,
+  type DataPlaneTicketKind,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
@@ -155,6 +160,12 @@ import {
   type DurableSourceBoundProof,
   type Stored,
 } from "./conversation-run-contracts.js";
+import { abortTicketProofBindsOwnerHistory } from "./data-plane-ticket-proof.js";
+import {
+  dataPlaneTicketIssueMatches,
+  nextDataPlaneTicketSyncFrontier,
+  ticketPrecedesSyncFrontier,
+} from "./data-plane-ticket-lifecycle.js";
 import type {
   ConversationControlResponseInput,
   ConversationDeliveryCommitInput,
@@ -318,7 +329,7 @@ export interface ConversationRunJournalOptions {
   readonly delivery: ConversationDeliveryParticipant;
   readonly resources?: AssignmentResourceCoordinator;
   readonly clock?: () => string;
-  readonly abortTickets?: ConversationAbortTicketAuthorizer;
+  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
 }
 
 export interface ConversationAbortTicketAuthorizer {
@@ -590,6 +601,11 @@ interface RunProjection {
     "dispatched" | "running" | "cancel-requested"
   >;
   readonly revokedCapabilities: Set<string>;
+  readonly ticketsById: Map<string, DataPlaneTicket>;
+  readonly ticketIdsByAssignment: Map<string, Set<string>>;
+  readonly ticketReplacementsById: Map<string, string>;
+  readonly revokedTickets: Set<string>;
+  ticketSyncFrontier: string | undefined;
   readonly resolutionsByRun: Map<string, ConversationUncertainResolutionFact>;
   readonly statusHistoryByRun: Map<string, StatusHistoryEntry[]>;
   readonly closedAssignments: Set<string>;
@@ -654,6 +670,11 @@ interface SubmissionGuardProjection {
   >;
   readonly closedAssignments: Set<string>;
   readonly revokedCapabilities: Set<string>;
+  readonly ticketsById: Map<string, DataPlaneTicket>;
+  readonly ticketIdsByAssignment: Map<string, Set<string>>;
+  readonly ticketReplacementsById: Map<string, string>;
+  readonly revokedTickets: Set<string>;
+  ticketSyncFrontier: string | undefined;
   activeRunId: string | undefined;
 }
 
@@ -729,6 +750,20 @@ export interface ConversationCancelRequest {
   readonly requestId: string;
 }
 
+export interface DataPlaneTicketIssueRequest {
+  readonly ticketId: string;
+  readonly assignmentId: string;
+  readonly surfacePrincipal: string;
+  readonly kind: DataPlaneTicketKind;
+  readonly ttlMs: number;
+  readonly replacesTicketId?: string;
+}
+
+export interface DataPlaneTicketFacts {
+  readonly issued: readonly DataPlaneTicket[];
+  readonly revokedTicketIds: readonly string[];
+}
+
 export type ConversationCancelResult =
   | { readonly state: "cancelled"; readonly assignmentId?: string }
   | {
@@ -753,7 +788,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   readonly #delivery: ConversationDeliveryParticipant;
   readonly #resources: AssignmentResourceCoordinator | undefined;
   readonly #clock: () => string;
-  readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
+  readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
     (notice: ConversationStatusNotice) => void | Promise<void>
@@ -787,7 +822,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#delivery = options.delivery;
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    this.#abortTickets = options.abortTickets;
+    this.#legacyAbortTickets = options.legacyAbortTickets;
   }
 
   async primeRecoverySnapshot(
@@ -1472,6 +1507,171 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         value: undefined,
       };
     });
+  }
+
+  async issueDataPlaneTicket(
+    input: DataPlaneTicketIssueRequest,
+  ): Promise<DataPlaneTicket> {
+    validateTicketIssueRequest(input);
+    const transaction = await this.#transact<DataPlaneTicket>(
+      (state, authorityPrefix) => {
+        const existing = state.ticketsById.get(input.ticketId);
+        if (existing) {
+          if (
+            !dataPlaneTicketIssueMatches(
+              existing,
+              state.ticketReplacementsById.get(input.ticketId),
+              input,
+            )
+          ) {
+            throw new Error("Ticket id already belongs to a different grant");
+          }
+          return {
+            kind: "return",
+            value: snapshot(existing, "Issued data-plane ticket"),
+          };
+        }
+        const assigned = state.assignedById.get(input.assignmentId);
+        const runState = assigned
+          ? state.stateByRun.get(assigned.record.runId)?.state
+          : undefined;
+        if (
+          !assigned ||
+          !assigned.acked ||
+          state.assignmentByRun.get(assigned.record.runId) !== input.assignmentId ||
+          state.closedAssignments.has(input.assignmentId) ||
+          (runState !== "dispatched" && runState !== "running") ||
+          state.cancelFences.has(input.assignmentId)
+        ) {
+          throw new Error("Ticket requires a current acknowledged assignment");
+        }
+        const admitted = state.admittedByRun.get(assigned.record.runId);
+        if (!admitted) throw corruptRunJournal("Ticket assignment has no admission");
+        if (
+          input.kind !== "run-observe" &&
+          input.surfacePrincipal !== admitted.record.ingress.surfacePrincipal
+        ) {
+          throw new Error("Interactive tickets are restricted to the original surface");
+        }
+        const replaced = input.replacesTicketId
+          ? state.ticketsById.get(input.replacesTicketId)
+          : undefined;
+        if (input.kind === "abort" && input.replacesTicketId !== undefined) {
+          throw new Error("Abort tickets are not renewable");
+        }
+        if (
+          input.replacesTicketId !== undefined &&
+          (!replaced ||
+            state.revokedTickets.has(input.replacesTicketId) ||
+            !replaced.renewable ||
+            replaced.assignmentId !== input.assignmentId ||
+            replaced.surfacePrincipal !== input.surfacePrincipal ||
+            replaced.kind !== input.kind)
+        ) {
+          throw new Error("Ticket renewal does not continue an active renewable grant");
+        }
+        const issuedAt = authorityPrefix.at;
+        const ticket = createSignedDataPlaneTicket(
+          {
+            v: 1,
+            ticketId: input.ticketId,
+            ref: {
+              execution: "conversation",
+              runId: assigned.record.runId,
+              conversationId: this.#conversationId,
+              ownerEpoch: assigned.record.ownerEpoch,
+            },
+            assignmentId: input.assignmentId,
+            surfacePrincipal: input.surfacePrincipal,
+            executorId: assigned.record.executorId,
+            issuedAt,
+            expiry: new Date(Date.parse(issuedAt) + input.ttlMs).toISOString(),
+            kind: input.kind,
+            renewable: input.kind !== "abort",
+          } as Parameters<typeof createSignedDataPlaneTicket>[0],
+          this.#signer,
+        );
+        return {
+          kind: "append",
+          entries: [
+            runRecord(this.#conversationId, {
+              t: "ticket-issued",
+              ticket,
+              ...(input.replacesTicketId === undefined
+                ? {}
+                : { replacesTicketId: input.replacesTicketId }),
+            }),
+            ...(input.replacesTicketId === undefined
+              ? []
+              : [
+                  runRecord(this.#conversationId, {
+                    t: "ticket-revoked" as const,
+                    ticketId: input.replacesTicketId,
+                  }),
+                ]),
+          ],
+          value: ticket,
+        };
+      },
+    );
+    return transaction.value;
+  }
+
+  async revokeDataPlaneTicket(ticketId: string): Promise<boolean> {
+    assertIdentifier(ticketId, "Revoked ticket id");
+    const transaction = await this.#transact<boolean>((state) => {
+      if (!state.ticketsById.has(ticketId)) {
+        throw new Error("Cannot revoke an unknown data-plane ticket");
+      }
+      if (state.revokedTickets.has(ticketId)) {
+        return { kind: "return", value: false };
+      }
+      return {
+        kind: "append",
+        entries: [
+          runRecord(this.#conversationId, { t: "ticket-revoked", ticketId }),
+        ],
+        value: true,
+      };
+    });
+    return transaction.value;
+  }
+
+  async dataPlaneTicketFacts(): Promise<DataPlaneTicketFacts> {
+    const transaction = await this.#transact<DataPlaneTicketFacts>(
+      (state, authorityPrefix) => {
+        const nextFrontier = nextDataPlaneTicketSyncFrontier(
+          state.ticketsById.values(),
+          state.ticketSyncFrontier,
+          authorityPrefix.at,
+        );
+        const frontier = nextFrontier ?? state.ticketSyncFrontier;
+        const issued = [...state.ticketsById.values()]
+          .filter((ticket) => !ticketPrecedesSyncFrontier(ticket, frontier))
+          .sort((left, right) => left.ticketId.localeCompare(right.ticketId))
+          .map((ticket) => snapshot(ticket, "Issued data-plane ticket"));
+        const retainedIds = new Set(issued.map((ticket) => ticket.ticketId));
+        const value = {
+          issued,
+          revokedTicketIds: [...state.revokedTickets]
+            .filter((ticketId) => retainedIds.has(ticketId))
+            .sort(),
+        };
+        return nextFrontier === undefined
+          ? { kind: "return", value }
+          : {
+              kind: "append",
+              entries: [
+                runRecord(this.#conversationId, {
+                  t: "ticket-sync-frontier",
+                  expiresThrough: nextFrontier,
+                }),
+              ],
+              value,
+            };
+      },
+    );
+    return transaction.value;
   }
 
   async requestSupersede(
@@ -2443,15 +2643,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const assigned = state.assignedById.get(proof.assignmentId);
       if (
         !assigned ||
-        !terminationProofBindsDurableSource({
+        !proofBindsConversationSource(
+          state,
+          assigned,
           proof,
-          assignmentId: proof.assignmentId,
-          executorId: assigned.record.executorId,
-          conversationId: this.#conversationId,
-          ownerEpoch: assigned.record.ownerEpoch,
-          dispatchDigest: assigned.record.dispatchDigest,
-          supersedeRequest: state.supersedeRequests.get(proof.assignmentId),
-        })
+          this.#conversationId,
+          this.#legacyAbortTickets,
+        )
       ) {
         throw new Error("Supersede proof does not bind a durable assignment");
       }
@@ -2829,19 +3027,23 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         assignmentId,
       });
       const assigned = state.assignedById.get(assignmentId);
-      if (
-        !assigned ||
-        !terminationProofBindsDurableSource({
-          proof,
-          assignmentId,
-          executorId: assigned.record.executorId,
-          conversationId: this.#conversationId,
-          ownerEpoch: assigned.record.ownerEpoch,
-          dispatchDigest: assigned.record.dispatchDigest,
-          cancelFence: state.cancelFences.get(assignmentId),
-        })
-      ) {
+      if (!assigned) {
         throw new Error("Cancel proof does not bind the durable assignment authority");
+      }
+      if (
+        !proofBindsConversationSource(
+          state,
+          assigned,
+          proof,
+          this.#conversationId,
+          this.#legacyAbortTickets,
+        )
+      ) {
+        throw new Error(
+          proof.cause === "abort-ticket"
+            ? "Abort proof does not bind an owner-issued abort ticket"
+            : "Cancel proof does not bind the durable assignment authority",
+        );
       }
       const current = state.stateByRun.get(assigned.record.runId);
       if (!current) throw corruptRunJournal("Cancelled assignment has no run state");
@@ -2881,17 +3083,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       }
       if (current.state === "cancelled" || current.state === "committed") {
         throw new Error("Cancel proof has no matching durable terminal fact");
-      }
-      if (proof.cause === "abort-ticket") {
-        if (!this.#abortTickets) {
-          throw new Error("Abort-ticket validation is not configured");
-        }
-        this.#abortTickets.authorize({
-          assignmentId,
-          executorId: proof.executorId,
-          ticketDigest: proof.ticketDigest,
-          surfacePrincipal: proof.surfacePrincipal,
-        });
       }
       this.#authorizeSubmission(state, ctx, {
         mode: "settlement",
@@ -4079,15 +4270,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const assigned = state.assignedById.get(proof.assignmentId);
       if (
         !assigned ||
-        !terminationProofBindsDurableSource({
+        !proofBindsConversationSource(
+          state,
+          assigned,
           proof,
-          assignmentId: proof.assignmentId,
-          executorId: assigned.record.executorId,
-          conversationId: this.#conversationId,
-          ownerEpoch: assigned.record.ownerEpoch,
-          dispatchDigest: assigned.record.dispatchDigest,
-          supersedeRequest: state.supersedeRequests.get(proof.assignmentId),
-        })
+          this.#conversationId,
+          this.#legacyAbortTickets,
+        )
       ) {
         throw new Error("Termination proof does not bind a durable assignment");
       }
@@ -4528,16 +4717,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           currentState: current?.state,
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
+            proofBindsConversationSource(
+              state,
+              assigned,
               proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+              this.#conversationId,
+              this.#legacyAbortTickets,
+            ),
           observationAlreadyExists: state.supersedeStartedObservations.has(
             body.assignmentId,
           ),
@@ -4668,16 +4854,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           state.containedFacts.has(body.openFactDigest) ||
           !conflict ||
           (!cancelProof && !supersedeProof) ||
-          !terminationProofBindsDurableSource({
+          !proofBindsConversationSource(
+            state,
+            assigned,
             proof,
-            assignmentId: body.assignmentId,
-            executorId: assigned.record.executorId,
-            conversationId: this.#conversationId,
-            ownerEpoch: assigned.record.ownerEpoch,
-            dispatchDigest: assigned.record.dispatchDigest,
-            supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-            cancelFence: state.cancelFences.get(body.assignmentId),
-          }) ||
+            this.#conversationId,
+            this.#legacyAbortTickets,
+          ) ||
           (terminatesForRedispatch &&
             (!envelopeHasResolution(
               envelope,
@@ -4733,15 +4916,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           open.openFactDigest !== body.openFactDigest ||
           state.containedFacts.has(body.openFactDigest) ||
           proof.decision !== "halted" ||
-          !terminationProofBindsDurableSource({
+          !proofBindsConversationSource(
+            state,
+            assigned,
             proof,
-            assignmentId: body.assignmentId,
-            executorId: assigned.record.executorId,
-            conversationId: this.#conversationId,
-            ownerEpoch: assigned.record.ownerEpoch,
-            dispatchDigest: assigned.record.dispatchDigest,
-            cancelFence: state.cancelFences.get(body.assignmentId),
-          })
+            this.#conversationId,
+            this.#legacyAbortTickets,
+          )
         ) {
           throw corruptRunJournal("Cancellation containment is invalid or duplicated");
         }
@@ -4767,15 +4948,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           proofDecision: proof.decision,
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
+            proofBindsConversationSource(
+              state,
+              assigned,
               proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+              this.#conversationId,
+              this.#legacyAbortTickets,
+            ),
           hasAtomicCancelledState:
             assigned !== undefined &&
             current !== undefined &&
@@ -4824,16 +5003,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           (kind === "dispatch-rejection" && open?.cause === "dispatch-conflict");
         const proofBindsSource =
           assigned !== undefined &&
-          terminationProofBindsDurableSource({
+          proofBindsConversationSource(
+            state,
+            assigned,
             proof,
-            assignmentId: body.assignmentId,
-            executorId: assigned.record.executorId,
-            conversationId: this.#conversationId,
-            ownerEpoch: assigned.record.ownerEpoch,
-            dispatchDigest: assigned.record.dispatchDigest,
-            supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-            cancelFence: state.cancelFences.get(body.assignmentId),
-          });
+            this.#conversationId,
+            this.#legacyAbortTickets,
+          );
         const rejectionKey = rejectedNotStartedKey(body.assignmentId, kind);
         if (
           !assigned ||
@@ -4897,16 +5073,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
+            proofBindsConversationSource(
+              state,
+              assigned,
               proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+              this.#conversationId,
+              this.#legacyAbortTickets,
+            ),
           proofKind: kind,
           hasAtomicTargetState:
             assigned !== undefined &&
@@ -5025,6 +5198,66 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.revokedCapabilities.add(key);
         return state;
       }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        const admitted = assigned
+          ? state.admittedByRun.get(assigned.record.runId)
+          : undefined;
+        applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          conversationId: this.#conversationId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: state.closedAssignments.has(
+            body.ticket.assignmentId,
+          ),
+          assignmentActive:
+            assigned !== undefined &&
+            (state.stateByRun.get(assigned.record.runId)?.state ===
+              "dispatched" ||
+              state.stateByRun.get(assigned.record.runId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: admitted?.record.ingress.surfacePrincipal,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          conversationId: this.#conversationId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyConversationTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
       case "interaction-mirror": {
         const assigned = state.assignedById.get(body.assignmentId);
         const batch = body.batch;
@@ -5811,6 +6044,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 state.revokedCapabilities,
                 assignmentId,
                 assigned.capIds,
+                state.ticketIdsByAssignment.get(assignmentId) ?? [],
+                state.revokedTickets,
               );
         assertDispatchConflictHandlingReplayContract({
           handling: body.handling,
@@ -5856,16 +6091,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           currentState: current?.state,
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
+            proofBindsConversationSource(
+              state,
+              assigned,
               proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+              this.#conversationId,
+              this.#legacyAbortTickets,
+            ),
           observationAlreadyExists: state.supersedeStartedAssignments.has(
             body.assignmentId,
           ),
@@ -5928,15 +6160,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           proofDecision: proof.decision,
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
+            proofBindsConversationSource(
+              state,
+              assigned,
               proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+              this.#conversationId,
+              this.#legacyAbortTickets,
+            ),
           hasAtomicCancelledState:
             assigned !== undefined &&
             current !== undefined &&
@@ -5956,6 +6186,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               state.revokedCapabilities,
               body.assignmentId,
               assigned.capIds,
+              state.ticketIdsByAssignment.get(body.assignmentId) ?? [],
+              state.revokedTickets,
             ),
         });
         if (!assigned) {
@@ -5991,16 +6223,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           durableStartedObserved: state.durableStartedAssignments.has(assignmentId),
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
+            proofBindsConversationSource(
+              state,
+              assigned,
               proof,
-              assignmentId,
-              executorId: assigned.record.executorId,
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              supersedeRequest: state.supersedeRequests.get(assignmentId),
-              cancelFence: state.cancelFences.get(assignmentId),
-            }),
+              this.#conversationId,
+              this.#legacyAbortTickets,
+            ),
           proofKind: kind,
           hasAtomicTargetState:
             assigned !== undefined &&
@@ -6021,6 +6250,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               state.revokedCapabilities,
               assignmentId,
               assigned.capIds,
+              state.ticketIdsByAssignment.get(assignmentId) ?? [],
+              state.revokedTickets,
             ),
           hasAtomicResolutionClose:
             assigned !== undefined &&
@@ -6155,6 +6386,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 state.revokedCapabilities,
                 assignmentId,
                 assigned.capIds,
+                state.ticketIdsByAssignment.get(assignmentId) ?? [],
+                state.revokedTickets,
               ),
             hasRequiredCompanion:
               (fact.resolution.kind !== "proven-not-started-redispatched" ||
@@ -6201,6 +6434,66 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.revokedCapabilities.add(key);
         return state;
       }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        const admitted = assigned
+          ? state.admittedByRun.get(assigned.record.runId)
+          : undefined;
+        applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          conversationId: this.#conversationId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: state.closedAssignments.has(
+            body.ticket.assignmentId,
+          ),
+          assignmentActive:
+            assigned !== undefined &&
+            (state.stateByRun.get(assigned.record.runId)?.state ===
+              "dispatched" ||
+              state.stateByRun.get(assigned.record.runId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: admitted?.ingress.surfacePrincipal,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeHasRunRecord(
+              envelope,
+              this.#conversationId,
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          conversationId: this.#conversationId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyConversationTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
       case "state": {
         const runId = body.runId;
         const admitted = state.admittedByRun.get(runId);
@@ -6386,6 +6679,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               state.revokedCapabilities,
               assignmentId,
               assigned.capIds,
+              state.ticketIdsByAssignment.get(assignmentId) ?? [],
+              state.revokedTickets,
             ),
         });
         if (!assigned) {
@@ -7403,6 +7698,11 @@ function emptyProjection(conversationId: string): RunProjection {
     rejectedNotStarted: new Map(),
     uncertainOrigins: new Map(),
     revokedCapabilities: new Set(),
+    ticketsById: new Map(),
+    ticketIdsByAssignment: new Map(),
+    ticketReplacementsById: new Map(),
+    revokedTickets: new Set(),
+    ticketSyncFrontier: undefined,
     resolutionsByRun: new Map(),
     statusHistoryByRun: new Map(),
     closedAssignments: new Set(),
@@ -7431,6 +7731,11 @@ function emptySubmissionGuardProjection(): SubmissionGuardProjection {
     bundleAcknowledgements: new Map(),
     closedAssignments: new Set(),
     revokedCapabilities: new Set(),
+    ticketsById: new Map(),
+    ticketIdsByAssignment: new Map(),
+    ticketReplacementsById: new Map(),
+    revokedTickets: new Set(),
+    ticketSyncFrontier: undefined,
     activeRunId: undefined,
   };
 }
@@ -7533,6 +7838,7 @@ function decideConversationCancel(
         assignmentId,
         ...fence,
       }),
+      ...dataPlaneTicketRevocations(conversationId, state, assignmentId),
       runRecord(conversationId, {
         t: "state",
         runId: input.runId,
@@ -7561,7 +7867,7 @@ function capabilityRevocations(
   state: RunProjection,
   assigned: AssignedProjection,
 ): LogicalRecord<ConversationCommitLogRecord>[] {
-  return assigned.record.capIds
+  const capabilities = assigned.record.capIds
     .filter(
       (capId) =>
         !state.revokedCapabilities.has(
@@ -7575,6 +7881,196 @@ function capabilityRevocations(
         assignmentId: assigned.record.assignmentId,
       }),
     );
+  const tickets = [
+    ...(state.ticketIdsByAssignment.get(assigned.record.assignmentId) ?? []),
+  ]
+    .filter((ticketId) => !state.revokedTickets.has(ticketId))
+    .map((ticketId) =>
+      runRecord(conversationId, {
+        t: "ticket-revoked" as const,
+        ticketId,
+      }),
+    );
+  return [...capabilities, ...tickets];
+}
+
+function dataPlaneTicketRevocations(
+  conversationId: string,
+  state: Pick<RunProjection, "ticketIdsByAssignment" | "revokedTickets">,
+  assignmentId: string,
+): LogicalRecord<ConversationCommitLogRecord>[] {
+  return [...(state.ticketIdsByAssignment.get(assignmentId) ?? [])]
+    .filter((ticketId) => !state.revokedTickets.has(ticketId))
+    .map((ticketId) =>
+      runRecord(conversationId, {
+        t: "ticket-revoked",
+        ticketId,
+      }),
+    );
+}
+
+function validateTicketIssueRequest(input: DataPlaneTicketIssueRequest): void {
+  assertIdentifier(input.ticketId, "Data-plane ticket id");
+  assertIdentifier(input.assignmentId, "Data-plane ticket assignment id");
+  assertIdentifier(
+    input.surfacePrincipal,
+    "Data-plane ticket surface principal",
+  );
+  assertDataPlaneTicketTtlMs(input.ttlMs);
+  if (input.replacesTicketId !== undefined) {
+    assertIdentifier(input.replacesTicketId, "Replaced data-plane ticket id");
+    if (input.replacesTicketId === input.ticketId) {
+      throw new TypeError("Ticket renewal requires a new ticket id");
+    }
+  }
+}
+
+function applyConversationTicketRecord(
+  input: {
+    readonly state: Pick<
+      RunProjection,
+      | "ticketsById"
+      | "ticketIdsByAssignment"
+      | "ticketReplacementsById"
+      | "revokedTickets"
+      | "ticketSyncFrontier"
+    >;
+    readonly record: Extract<
+      ConversationRunJournalRecord,
+      { t: "ticket-issued" | "ticket-revoked" }
+    >;
+    readonly verifier: ProtocolSignatureVerifier;
+    readonly envelopeAt: string;
+    readonly conversationId: string;
+    readonly assigned?: Extract<
+      ConversationRunJournalRecord,
+      { t: "assigned" }
+    >;
+    readonly assignmentIsCurrent: boolean;
+    readonly assignmentAcknowledged: boolean;
+    readonly assignmentClosed: boolean;
+    readonly assignmentActive: boolean;
+    readonly originalSurfacePrincipal?: string;
+    readonly hasAtomicReplacementRevocation?: boolean;
+  },
+): void {
+  const { state, record } = input;
+  if (record.t === "ticket-revoked") {
+    assertIdentifier(record.ticketId, "Revoked data-plane ticket id");
+    if (!state.ticketsById.has(record.ticketId)) {
+      throw corruptRunJournal("Ticket revocation names an unknown ticket");
+    }
+    if (state.revokedTickets.has(record.ticketId)) {
+      throw corruptRunJournal("Ticket is revoked more than once");
+    }
+    state.revokedTickets.add(record.ticketId);
+    return;
+  }
+
+  const ticket = validateDataPlaneTicket(record.ticket, input.verifier);
+  const assigned = input.assigned;
+  const replaced =
+    record.replacesTicketId === undefined
+      ? undefined
+      : state.ticketsById.get(record.replacesTicketId);
+  if (
+    !assigned ||
+    !input.assignmentIsCurrent ||
+    !input.assignmentAcknowledged ||
+    input.assignmentClosed ||
+    !input.assignmentActive ||
+    state.ticketsById.has(ticket.ticketId) ||
+    ticket.assignmentId !== assigned.assignmentId ||
+    ticket.executorId !== assigned.executorId ||
+    ticket.issuedAt !== input.envelopeAt ||
+    ticket.ref.execution !== "conversation" ||
+    ticket.ref.runId !== assigned.runId ||
+    ticket.ref.conversationId !== input.conversationId ||
+    ticket.ref.ownerEpoch !== assigned.ownerEpoch ||
+    ticketPrecedesSyncFrontier(ticket, state.ticketSyncFrontier) ||
+    (record.replacesTicketId !== undefined &&
+      (!replaced ||
+        !input.hasAtomicReplacementRevocation ||
+        state.revokedTickets.has(record.replacesTicketId) ||
+        !replaced.renewable ||
+        ticket.kind === "abort" ||
+        replaced.assignmentId !== ticket.assignmentId ||
+        replaced.surfacePrincipal !== ticket.surfacePrincipal ||
+        replaced.kind !== ticket.kind))
+  ) {
+    throw corruptRunJournal("Issued ticket does not bind an active acknowledged assignment");
+  }
+  if (
+    ticket.kind !== "run-observe" &&
+    ticket.surfacePrincipal !== input.originalSurfacePrincipal
+  ) {
+    throw corruptRunJournal("Interactive ticket does not bind the original surface");
+  }
+  state.ticketsById.set(ticket.ticketId, ticket);
+  if (record.replacesTicketId !== undefined) {
+    state.ticketReplacementsById.set(
+      ticket.ticketId,
+      record.replacesTicketId,
+    );
+  }
+  const byAssignment =
+    state.ticketIdsByAssignment.get(ticket.assignmentId) ?? new Set<string>();
+  byAssignment.add(ticket.ticketId);
+  state.ticketIdsByAssignment.set(ticket.assignmentId, byAssignment);
+}
+
+function applyConversationTicketSyncFrontier(
+  state: Pick<RunProjection, "ticketsById" | "ticketSyncFrontier">,
+  expiresThrough: string,
+  envelopeAt: string,
+): void {
+  const expected = nextDataPlaneTicketSyncFrontier(
+    state.ticketsById.values(),
+    state.ticketSyncFrontier,
+    envelopeAt,
+  );
+  if (expected !== expiresThrough) {
+    throw corruptRunJournal("Ticket sync frontier is not the next durable boundary");
+  }
+  state.ticketSyncFrontier = expiresThrough;
+}
+
+function proofBindsConversationSource(
+  state: Pick<
+    RunProjection,
+    | "supersedeRequests"
+    | "cancelFences"
+    | "ticketIdsByAssignment"
+    | "ticketsById"
+  >,
+  assigned: Pick<AssignedProjection, "record">,
+  proof: DurableSourceBoundProof,
+  conversationId: string,
+  legacy: ConversationAbortTicketAuthorizer | undefined,
+): boolean {
+  const assignmentId = assigned.record.assignmentId;
+  const abortTicketProofBindsDurableSource =
+    "cause" in proof && proof.cause === "abort-ticket"
+      ? abortTicketProofBindsOwnerHistory({
+          assignmentId,
+          ticketIds:
+            state.ticketIdsByAssignment.get(assignmentId) ?? new Set<string>(),
+          ticketsById: state.ticketsById,
+          proof,
+          ...(legacy ? { legacy } : {}),
+        })
+      : false;
+  return terminationProofBindsDurableSource({
+    proof,
+    assignmentId,
+    executorId: assigned.record.executorId,
+    conversationId,
+    ownerEpoch: assigned.record.ownerEpoch,
+    dispatchDigest: assigned.record.dispatchDigest,
+    supersedeRequest: state.supersedeRequests.get(assignmentId),
+    cancelFence: state.cancelFences.get(assignmentId),
+    abortTicketProofBindsDurableSource,
+  });
 }
 
 function conversationBundleAcknowledgementRecord(
@@ -8039,6 +8535,8 @@ function envelopeRevokesRemainingCapabilities(
     state.revokedCapabilities,
     assigned.record.assignmentId,
     assigned.record.capIds,
+    state.ticketIdsByAssignment.get(assigned.record.assignmentId) ?? [],
+    state.revokedTickets,
   );
 }
 
@@ -8048,8 +8546,10 @@ function envelopeRevokesCapabilities(
   revokedCapabilities: ReadonlySet<string>,
   assignmentId: string,
   capIds: Iterable<string>,
+  ticketIds: Iterable<string> = [],
+  revokedTickets: ReadonlySet<string> = new Set(),
 ): boolean {
-  return [...capIds].every((capId) => {
+  const capabilitiesRevoked = [...capIds].every((capId) => {
     const key = `${assignmentId}\0${capId}`;
     return (
       revokedCapabilities.has(key) ||
@@ -8063,6 +8563,19 @@ function envelopeRevokesCapabilities(
       )
     );
   });
+  return (
+    capabilitiesRevoked &&
+    [...ticketIds].every(
+      (ticketId) =>
+        revokedTickets.has(ticketId) ||
+        envelopeHasRunRecord(
+          envelope,
+          conversationId,
+          (body) =>
+            body.t === "ticket-revoked" && body.ticketId === ticketId,
+        ),
+    )
+  );
 }
 
 function envelopeHasSuccessfulUncertainControl(

@@ -5,6 +5,7 @@ import {
 import type {
   AuthorityCapability,
   DispatchEnvelope,
+  ExecutionAbortRequest,
   SealedBundle,
 } from "@zhixing/core/contracts";
 import {
@@ -83,6 +84,7 @@ describe("ConversationAssignmentWorker", () => {
       start: vi.fn(async () => ({ started: true })),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      hasPendingTicketCancellation: vi.fn(async () => false),
       failExecution,
     } as unknown as ConversationAssignmentLedger;
     const runtimeFailure = new Error("runtime factory unavailable");
@@ -149,6 +151,7 @@ describe("ConversationAssignmentWorker", () => {
         start: vi.fn(async () => ({ started: true })),
         closePendingInteractionsForRunEnd: vi.fn(async () => 0),
         pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+        hasPendingTicketCancellation: vi.fn(async () => false),
         failExecution,
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
@@ -192,6 +195,7 @@ describe("ConversationAssignmentWorker", () => {
     const acknowledge = vi.fn(async () => undefined);
     const ledger = {
       recoverableConversationAssignments: vi.fn(async () => [envelope]),
+      recoverableConversationCancellations: vi.fn(async () => []),
       start: vi.fn(async () => ({ started: false })),
       sealedBundleForRecovery: vi.fn(async () => ({ kind: "sealed", bundle })),
       acknowledge,
@@ -249,6 +253,7 @@ describe("ConversationAssignmentWorker", () => {
     const acknowledge = vi.fn(async () => undefined);
     const ledger = {
       recoverableConversationAssignments: vi.fn(async () => [envelope]),
+      recoverableConversationCancellations: vi.fn(async () => []),
       start: vi.fn(async () => ({ started: false })),
       sealedBundleForRecovery: vi.fn(async () => ({ kind: "sealed", bundle })),
       acknowledge,
@@ -297,6 +302,7 @@ describe("ConversationAssignmentWorker", () => {
       InProcessAssignmentSubmission,
       ledger: {
         recoverableConversationAssignments: vi.fn(async () => [envelope]),
+        recoverableConversationCancellations: vi.fn(async () => []),
         start: vi.fn(async () => ({ started: false })),
         sealedBundleForRecovery: vi.fn(async () => ({
           kind: "sealed",
@@ -354,6 +360,7 @@ describe("ConversationAssignmentWorker", () => {
       start: vi.fn(async () => ({ started: true })),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      hasPendingTicketCancellation: vi.fn(async () => false),
       failExecution,
     } as unknown as ConversationAssignmentLedger;
     let observedSignal: AbortSignal | undefined;
@@ -404,6 +411,183 @@ describe("ConversationAssignmentWorker", () => {
     );
   });
 
+  it("owns ticket cancellation from durable prefix through proof submission", async () => {
+    const assignmentId = "asg-worker-ticket-cancel";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const proof = { assignmentId, cause: "abort-ticket" } as never;
+    const abortWithTicket = vi.fn(async () => ({ kind: "accepted" as const }));
+    const continueTicketCancellation = vi.fn(async () => proof);
+    const submitCancelProof = vi.fn(async () => undefined);
+    const ledger = {
+      abortWithTicket,
+      conversationAssignmentForRecovery: vi.fn(async () => envelope),
+      pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      continueTicketCancellation,
+      hasOpenSideEffects: vi.fn(async () => false),
+    } as unknown as ConversationAssignmentLedger;
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger,
+      runtimeFactory: {} as RuntimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({
+        reportStarted: vi.fn(),
+        mirrorInteractions: vi.fn(),
+        submitBundle: vi.fn(),
+        submitCancelProof,
+      }),
+      finalizeUsage: vi.fn(),
+      interactions: interactionObserver(),
+    });
+    const request = {
+      assignmentId,
+      reason: "owner unavailable",
+    } as unknown as ExecutionAbortRequest;
+
+    await worker.abortWithTicket(request);
+    await worker.drain();
+
+    expect(abortWithTicket).toHaveBeenCalledWith(request);
+    expect(continueTicketCancellation).toHaveBeenCalledWith(assignmentId);
+    expect(submitCancelProof).toHaveBeenCalledWith(
+      assignmentId,
+      proof,
+      expect.objectContaining({
+        requestId: `submission:${assignmentId}`,
+      }),
+    );
+  });
+
+  it("routes an authorized surface answer through the active runtime broker", async () => {
+    const assignmentId = "asg-worker-ticket-answer";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+      permissionLease: {},
+      resourceLease: {},
+      work: {
+        conversationId: "conversation-worker-ticket-answer",
+        runId: "run-worker-ticket-answer",
+        ownerEpoch: 1,
+        baseRevision: 2,
+        ingress: {
+          kind: "first-party",
+          surfacePrincipal: "surface:test",
+          deviceId: "device-owner",
+          ingressId: "ingress-worker-ticket-answer",
+          receivedAt: new Date().toISOString(),
+        },
+        windowInput: { t: "full", windowEpoch: 3, messages: [] },
+      },
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const prepared = {
+      kind: "authorized" as const,
+      ticketId: "ticket-interact",
+      surfacePrincipal: "surface:test",
+      decision: { kind: "allow-once" as const },
+    };
+    const ledger = {
+      start: vi.fn(async () => ({ started: true })),
+      prepareInteractionAnswerFromSurface: vi.fn(async () => prepared),
+      closePendingInteractionsForRunEnd: vi.fn(async () => 0),
+      pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      hasPendingTicketCancellation: vi.fn(async () => false),
+      failExecution: vi.fn(async () => undefined),
+    } as unknown as ConversationAssignmentLedger;
+    const confirmationBroker = {} as never;
+    let observedSignal: AbortSignal | undefined;
+    const run = vi.fn(async function* (
+      _messages: unknown,
+      options: { abortSignal?: AbortSignal },
+    ) {
+      observedSignal = options.abortSignal;
+      await new Promise<void>((resolve) => {
+        if (options.abortSignal?.aborted) resolve();
+        else options.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { agentResult: { reason: "aborted" } };
+    });
+    const resolveWithSurfaceTicket = vi.fn(async () => true);
+    const interactions = {
+      ...interactionObserver(),
+      resolveWithSurfaceTicket,
+    } as unknown as DurableConversationInteractionObserver;
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger,
+      runtimeFactory: {
+        create: vi.fn(async () => ({
+          run,
+          confirmationBroker,
+          dispose: vi.fn(async () => undefined),
+        })),
+      } as unknown as RuntimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({
+        reportStarted: vi.fn(async () => undefined),
+        mirrorInteractions: vi.fn(),
+        submitBundle: vi.fn(),
+        submitCancelProof: vi.fn(),
+      }),
+      finalizeUsage: vi.fn(async () => ({
+        reportDigest: "sha256:usage",
+        upToUsageSeq: 0,
+      })),
+      interactions,
+    });
+
+    worker.accept(envelope);
+    await vi.waitFor(() => expect(observedSignal).toBeDefined());
+    await expect(
+      worker.answerInteractionWithTicket({
+        assignmentId,
+        requestId: "request-interact",
+        ticketId: prepared.ticketId,
+        surfacePrincipal: prepared.surfacePrincipal,
+        decision: prepared.decision,
+      }),
+    ).resolves.toBeUndefined();
+    expect(resolveWithSurfaceTicket).toHaveBeenCalledWith(
+      confirmationBroker,
+      expect.objectContaining({
+        assignmentId,
+        requestId: "request-interact",
+        ticketId: prepared.ticketId,
+        surfacePrincipal: prepared.surfacePrincipal,
+      }),
+    );
+
+    expect(worker.abort(assignmentId, new Error("test complete"))).toBe(true);
+    await worker.drain();
+  });
+
+  it("does not stop or redrive when the assignment won the terminal race", async () => {
+    const conversationAssignmentForRecovery = vi.fn();
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger: {
+        abortWithTicket: vi.fn(async () => ({ kind: "terminal" as const })),
+        conversationAssignmentForRecovery,
+      } as unknown as ConversationAssignmentLedger,
+      runtimeFactory: {} as RuntimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: vi.fn(),
+      finalizeUsage: vi.fn(),
+      interactions: interactionObserver(),
+    });
+
+    await expect(worker.abortWithTicket({
+      assignmentId: "asg-terminal-race",
+      reason: "owner unavailable",
+    } as unknown as ExecutionAbortRequest)).resolves.toBeUndefined();
+    expect(conversationAssignmentForRecovery).not.toHaveBeenCalled();
+  });
+
   it("retries transient sealed-bundle reads but surfaces corrupt durable state", async () => {
     const envelope = {
       execution: "conversation",
@@ -413,6 +597,7 @@ describe("ConversationAssignmentWorker", () => {
     const bundle = { assignmentId: envelope.assignmentId } as SealedBundle;
     const transientLedger = {
       recoverableConversationAssignments: vi.fn(async () => [envelope]),
+      recoverableConversationCancellations: vi.fn(async () => []),
       start: vi.fn(async () => ({ started: false })),
       sealedBundleForRecovery: vi.fn()
         .mockRejectedValueOnce(new Error("temporary read failure"))
@@ -448,6 +633,7 @@ describe("ConversationAssignmentWorker", () => {
       InProcessAssignmentSubmission,
       ledger: {
         recoverableConversationAssignments: vi.fn(async () => [envelope]),
+        recoverableConversationCancellations: vi.fn(async () => []),
         start: vi.fn(async () => ({ started: false })),
         sealedBundleForRecovery: vi.fn(async () => { throw corruption; }),
       } as unknown as ConversationAssignmentLedger,
@@ -548,6 +734,7 @@ describe("ConversationAssignmentWorker", () => {
       authorizeToolExecution: vi.fn(),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      hasPendingTicketCancellation: vi.fn(async () => false),
       sealConversationBundle,
       acknowledge: vi.fn(async () => undefined),
     } as unknown as ConversationAssignmentLedger;

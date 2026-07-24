@@ -174,15 +174,18 @@ describe(
       restartedSpool(prematureReclaim).snapshot("assignment-fixed"),
     ).rejects.toThrow(/reclamation record is inconsistent/);
 
-    const expiredConsumer = await createFixture();
-    await expiredConsumer.spool.qualifyConsumer({
+    const revokedConsumer = await createFixture();
+    await revokedConsumer.spool.qualifyConsumer({
       assignmentId: "assignment-fixed",
       ref,
       consumer: surface,
       expiresAt: SURFACE_EXPIRY,
     });
-    expiredConsumer.now = "2026-07-25T00:00:00.000Z";
-    await rawSpoolLog(expiredConsumer, "assignment-fixed").append([
+    await revokedConsumer.spool.revokeConsumer({
+      assignmentId: "assignment-fixed",
+      consumer: surface,
+    });
+    await rawSpoolLog(revokedConsumer, "assignment-fixed").append([
       {
         stream: "assignment:stream",
         body: {
@@ -193,7 +196,7 @@ describe(
       },
     ]);
     await expect(
-      restartedSpool(expiredConsumer).snapshot("assignment-fixed"),
+      restartedSpool(revokedConsumer).snapshot("assignment-fixed"),
     ).rejects.toThrow(/unavailable consumer/);
   });
 
@@ -294,6 +297,69 @@ describe(
       "accepted",
       "accepted",
     ]);
+  });
+
+  it("keeps a qualified surface active until the ticket registry explicitly revokes it", async () => {
+    const fixture = await createFixture();
+    await fixture.spool.qualifyConsumer({
+      assignmentId: "assignment-fixed",
+      ref,
+      consumer: surface,
+      expiresAt: SURFACE_EXPIRY,
+    });
+    const data = await fixture.spool.append({
+      assignmentId: "assignment-fixed",
+      ref,
+      payload: {
+        kind: "agent-yield",
+        yield: { type: "text_delta", text: "hello" },
+      },
+    });
+    const final = await fixture.spool.finalize({
+      assignmentId: "assignment-fixed",
+      ref,
+    });
+
+    fixture.now = "2026-07-25T00:00:00.000Z";
+    const terminal = await fixture.spool.markTerminal(
+      "assignment-fixed",
+      final.seq,
+    );
+    expect(terminal.reclaimAfter).toBeUndefined();
+    const epoch = await fixture.spool.beginConnection(
+      "assignment-fixed",
+      ref,
+      surface,
+    );
+    await expect(
+      fixture.spool.subscribe({
+        request: subscribe(surface, 0),
+        streamEpoch: epoch,
+        expiresAt: SURFACE_EXPIRY,
+      }),
+    ).resolves.toMatchObject([{ seq: data.seq }, { seq: final.seq }]);
+    await expect(
+      fixture.spool.acknowledge(
+        {
+          v: 1,
+          assignmentId: "assignment-fixed",
+          consumer: surface,
+          ackSeq: final.seq,
+        },
+        epoch,
+      ),
+    ).resolves.toMatchObject({
+      prunedThrough: final.seq,
+      reclaimAfter: expect.any(String),
+    });
+
+    await fixture.spool.revokeConsumer({
+      assignmentId: "assignment-fixed",
+      consumer: surface,
+    });
+    await expect(
+      fixture.spool.beginConnection("assignment-fixed", ref, surface),
+    ).rejects.toThrow("Stream consumer is not durably qualified");
   });
 
   it("persists cumulative ACK before reclamation and never resurrects reclaimed streams", async () => {

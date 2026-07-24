@@ -6,6 +6,25 @@ export {
   protocolDigest,
 } from "./canonical.js";
 export {
+  DATA_PLANE_TICKET_KINDS,
+  MAX_DATA_PLANE_TICKET_TTL_MS,
+  MAX_EXECUTION_ABORT_REASON_BYTES,
+  assertDataPlaneTicketActiveAt,
+  assertDataPlaneTicketBinding,
+  assertDataPlaneTicketUse,
+  assertDataPlaneTicketTtlMs,
+  createSignedDataPlaneTicket,
+  dataPlaneTicketDigest,
+  validateDataPlaneTicket,
+  validateExecutionAbortRequest,
+  validateFirstPartyInteractionDecision,
+  type DataPlaneTicketBinding,
+  type DataPlaneTicketKind,
+  type DataPlaneTicketUse,
+  type FirstPartyInteractionDecision,
+  type UnsignedDataPlaneTicket,
+} from "./data-plane-ticket.js";
+export {
   advanceStreamDigest,
   assertStreamFinalReconciliation,
   materializeStreamDataPayload,
@@ -182,6 +201,7 @@ export {
   MAX_PERMISSION_LEASE_TTL_MS,
   PRINCIPAL_METHODS,
   acceptedRemoteIntervalRemainingMs,
+  acceptedRemoteIntervalStatus,
   assertActivatedAssignmentCapability,
   assertActivePermissionSnapshotLease,
   assertAuthorizedOwnerControlGrant,

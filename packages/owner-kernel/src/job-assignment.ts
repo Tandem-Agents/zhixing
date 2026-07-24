@@ -21,6 +21,7 @@ import type {
   AuthorityCallContext,
   AuthorityError,
   CancelProofBody,
+  DataPlaneTicket,
   CommitEnvelope,
   DispatchResult,
   GovernorRecord,
@@ -48,6 +49,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   assertProtocolIdentifier as assertIdentifier,
+  assertDataPlaneTicketTtlMs,
   assertActivatedAssignmentCapability,
   assertQueuedTerminalDequeue,
   assignmentActivationDigest,
@@ -57,6 +59,7 @@ import {
   canonicalize,
   controlLeaseBindsDispatchEnvelope,
   createAssignmentLedgerValidationState,
+  createSignedDataPlaneTicket,
   createJobCommitFence,
   createSignedJobEnvelope,
   dispatchEnvelopeArtifact,
@@ -78,6 +81,7 @@ import {
   validateCancelProof,
   validateDispatchConflictProof,
   validateDispatchResult,
+  validateDataPlaneTicket,
   validateExecutionManifest,
   validateJobCommitFence,
   validateJobActivation,
@@ -113,6 +117,8 @@ import type {
   AssignmentSubmissionPreflightPort,
   AssignmentSubmissionPreflightResult,
   ConversationAbortTicketAuthorizer,
+  DataPlaneTicketFacts,
+  DataPlaneTicketIssueRequest,
   InProcessBundleSubmission,
   InProcessDispatchContextFactory,
 } from "./conversation-assignment.js";
@@ -170,6 +176,12 @@ import {
   type NotStartedProofKind,
   type TaskRevisionReplayViolation,
 } from "./job-run-contracts.js";
+import { abortTicketProofBindsOwnerHistory } from "./data-plane-ticket-proof.js";
+import {
+  dataPlaneTicketIssueMatches,
+  nextDataPlaneTicketSyncFrontier,
+  ticketPrecedesSyncFrontier,
+} from "./data-plane-ticket-lifecycle.js";
 import type {
   JobStatusDeliveryInput,
   JobDeliveryParticipant,
@@ -243,6 +255,7 @@ interface JobSubmissionGuardProjection {
   >;
   readonly states: Map<string, JobStateEntry>;
   readonly admittedJobs: Set<string>;
+  readonly ingressByJob: Map<string, IngressContext>;
   activeJobRunId: string | undefined;
   readonly assignedById: Map<
     string,
@@ -270,6 +283,11 @@ interface JobSubmissionGuardProjection {
   readonly durableStarted: Set<string>;
   readonly closedAssignments: Set<string>;
   readonly revokedCapabilities: Set<string>;
+  readonly ticketsById: Map<string, DataPlaneTicket>;
+  readonly ticketIdsByAssignment: Map<string, Set<string>>;
+  readonly ticketReplacementsById: Map<string, string>;
+  readonly revokedTickets: Set<string>;
+  ticketSyncFrontier: string | undefined;
   readonly resolutions: Map<string, JobResolutionFact>;
   readonly committedByAssignment: Map<
     string,
@@ -293,6 +311,7 @@ interface JobProjection {
     { readonly scheduledFor: string; readonly coalescedJobRunId: string }
   >;
   readonly admittedJobs: Set<string>;
+  readonly ingressByJob: Map<string, IngressContext>;
   readonly states: Map<string, JobStateEntry>;
   activeJobRunId?: string;
   pendingSystemMissedJobRunId?: string;
@@ -311,6 +330,11 @@ interface JobProjection {
   readonly rejectedNotStarted: Map<string, Extract<JobJournalRecord, { t: "not-started-rejected" }>>;
   readonly durableStarted: Set<string>;
   readonly revokedCapabilities: Set<string>;
+  readonly ticketsById: Map<string, DataPlaneTicket>;
+  readonly ticketIdsByAssignment: Map<string, Set<string>>;
+  readonly ticketReplacementsById: Map<string, string>;
+  readonly revokedTickets: Set<string>;
+  ticketSyncFrontier: string | undefined;
   readonly interactionMirrors: Map<
     string,
     {
@@ -487,8 +511,7 @@ export interface JobJournalOptions {
   readonly snapshotFor: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
   readonly submission: AssignmentSubmissionAuthorizer;
   readonly ingress: JobIngressAuthorizer;
-  /** Owner-side re-authorization of executor abort tickets; required for online receipt, fail-closed when absent. */
-  readonly abortTickets?: ConversationAbortTicketAuthorizer;
+  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
   readonly compatibility?: JobCompatibilityProjection;
   readonly delivery: JobDeliveryParticipant;
   readonly commitParticipant?: JobCommitParticipant;
@@ -529,7 +552,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #snapshotFor: JobJournalOptions["snapshotFor"];
   readonly #submission: AssignmentSubmissionAuthorizer;
   readonly #ingress: JobIngressAuthorizer;
-  readonly #abortTickets: ConversationAbortTicketAuthorizer | undefined;
+  readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
   readonly #compatibility: JobCompatibilityProjection | undefined;
   readonly #delivery: JobDeliveryParticipant;
   readonly #commitParticipant: JobCommitParticipant | undefined;
@@ -562,7 +585,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     this.#snapshotFor = options.snapshotFor;
     this.#submission = options.submission;
     this.#ingress = options.ingress;
-    this.#abortTickets = options.abortTickets;
+    this.#legacyAbortTickets = options.legacyAbortTickets;
     this.#compatibility = options.compatibility;
     this.#delivery = options.delivery;
     this.#commitParticipant = options.commitParticipant;
@@ -632,6 +655,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               fenceSeq: prefix.nextLsn,
               requestId: `task-revision:${candidate.taskRevision}`,
             }),
+            ...dataPlaneTicketRevocations(this.#taskId, state, assignmentId),
             stateRecord(
               this.#taskId,
               state.activeJobRunId,
@@ -656,6 +680,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               fenceSeq: prefix.nextLsn,
               requestId: `task-revision:${candidate.taskRevision}`,
             }),
+            ...dataPlaneTicketRevocations(this.#taskId, state, assignmentId),
           );
         }
       }
@@ -1368,6 +1393,167 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
+  async issueDataPlaneTicket(
+    input: DataPlaneTicketIssueRequest,
+  ): Promise<DataPlaneTicket> {
+    validateJobTicketIssueRequest(input);
+    const transaction = await this.#transact<DataPlaneTicket>(
+      (state, authorityPrefix) => {
+        const existing = state.ticketsById.get(input.ticketId);
+        if (existing) {
+          if (
+            !dataPlaneTicketIssueMatches(
+              existing,
+              state.ticketReplacementsById.get(input.ticketId),
+              input,
+            )
+          ) {
+            throw new Error("Ticket id already belongs to a different grant");
+          }
+          return { kind: "return", value: snapshot(existing) };
+        }
+        const assigned = state.assignedById.get(input.assignmentId);
+        const runState = assigned
+          ? state.states.get(assigned.record.jobRunId)?.state
+          : undefined;
+        if (
+          !assigned ||
+          !assigned.acked ||
+          state.assignmentByJob.get(assigned.record.jobRunId) !== input.assignmentId ||
+          (runState !== "dispatched" && runState !== "running") ||
+          state.cancelFences.has(input.assignmentId)
+        ) {
+          throw new Error("Ticket requires a current acknowledged assignment");
+        }
+        const ingress = state.ingressByJob.get(assigned.record.jobRunId);
+        if (!ingress) {
+          throw new Error("Scheduled jobs cannot receive data-plane tickets");
+        }
+        if (
+          input.kind !== "run-observe" &&
+          input.surfacePrincipal !== ingress.surfacePrincipal
+        ) {
+          throw new Error("Interactive tickets are restricted to the original surface");
+        }
+        const replaced = input.replacesTicketId
+          ? state.ticketsById.get(input.replacesTicketId)
+          : undefined;
+        if (input.kind === "abort" && input.replacesTicketId !== undefined) {
+          throw new Error("Abort tickets are not renewable");
+        }
+        if (
+          input.replacesTicketId !== undefined &&
+          (!replaced ||
+            state.revokedTickets.has(input.replacesTicketId) ||
+            !replaced.renewable ||
+            replaced.assignmentId !== input.assignmentId ||
+            replaced.surfacePrincipal !== input.surfacePrincipal ||
+            replaced.kind !== input.kind)
+        ) {
+          throw new Error("Ticket renewal does not continue an active renewable grant");
+        }
+        const issuedAt = authorityPrefix.at;
+        const ticket = createSignedDataPlaneTicket(
+          {
+            v: 1,
+            ticketId: input.ticketId,
+            ref: {
+              execution: "job",
+              jobRunId: assigned.record.jobRunId,
+              taskId: this.#taskId,
+              anchorEpoch: assigned.record.anchorEpoch,
+            },
+            assignmentId: input.assignmentId,
+            surfacePrincipal: input.surfacePrincipal,
+            executorId: assigned.record.executorId,
+            issuedAt,
+            expiry: new Date(Date.parse(issuedAt) + input.ttlMs).toISOString(),
+            kind: input.kind,
+            renewable: input.kind !== "abort",
+          } as Parameters<typeof createSignedDataPlaneTicket>[0],
+          this.#signer,
+        );
+        return {
+          kind: "append",
+          entries: [
+            jobRecord(this.#taskId, {
+              t: "ticket-issued",
+              ticket,
+              ...(input.replacesTicketId === undefined
+                ? {}
+                : { replacesTicketId: input.replacesTicketId }),
+            }),
+            ...(input.replacesTicketId === undefined
+              ? []
+              : [
+                  jobRecord(this.#taskId, {
+                    t: "ticket-revoked" as const,
+                    ticketId: input.replacesTicketId,
+                  }),
+                ]),
+          ],
+          value: ticket,
+        };
+      },
+    );
+    return transaction.value;
+  }
+
+  async revokeDataPlaneTicket(ticketId: string): Promise<boolean> {
+    assertIdentifier(ticketId, "Revoked ticket id");
+    const transaction = await this.#transact<boolean>((state) => {
+      if (!state.ticketsById.has(ticketId)) {
+        throw new Error("Cannot revoke an unknown data-plane ticket");
+      }
+      if (state.revokedTickets.has(ticketId)) {
+        return { kind: "return", value: false };
+      }
+      return {
+        kind: "append",
+        entries: [jobRecord(this.#taskId, { t: "ticket-revoked", ticketId })],
+        value: true,
+      };
+    });
+    return transaction.value;
+  }
+
+  async dataPlaneTicketFacts(): Promise<DataPlaneTicketFacts> {
+    const transaction = await this.#transact<DataPlaneTicketFacts>(
+      (state, authorityPrefix) => {
+        const nextFrontier = nextDataPlaneTicketSyncFrontier(
+          state.ticketsById.values(),
+          state.ticketSyncFrontier,
+          authorityPrefix.at,
+        );
+        const frontier = nextFrontier ?? state.ticketSyncFrontier;
+        const issued = [...state.ticketsById.values()]
+          .filter((ticket) => !ticketPrecedesSyncFrontier(ticket, frontier))
+          .sort((left, right) => left.ticketId.localeCompare(right.ticketId))
+          .map((ticket) => snapshot(ticket));
+        const retainedIds = new Set(issued.map((ticket) => ticket.ticketId));
+        const value = {
+          issued,
+          revokedTicketIds: [...state.revokedTickets]
+            .filter((ticketId) => retainedIds.has(ticketId))
+            .sort(),
+        };
+        return nextFrontier === undefined
+          ? { kind: "return", value }
+          : {
+              kind: "append",
+              entries: [
+                jobRecord(this.#taskId, {
+                  t: "ticket-sync-frontier",
+                  expiresThrough: nextFrontier,
+                }),
+              ],
+              value,
+            };
+      },
+    );
+    return transaction.value;
+  }
+
   /** Runs the submission guard before a remote adapter dereferences request assets. */
   async preflightSubmission(
     context: AuthorityCallContext,
@@ -1678,6 +1864,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
                 assignmentId,
                 ...fence,
               }),
+              ...dataPlaneTicketRevocations(this.#taskId, state, assignmentId),
               stateRecord(
                 this.#taskId,
                 input.jobRunId,
@@ -1918,6 +2105,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
                 assignmentId,
                 ...fence,
               }),
+              ...dataPlaneTicketRevocations(this.#taskId, state, assignmentId),
               stateRecord(
                 this.#taskId,
                 body.jobRunId,
@@ -2173,7 +2361,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     await this.#transact<void>((state) => {
       const assigned = state.assignedById.get(proof.assignmentId);
       if (!assigned) throw new Error("Supersede proof names an unknown assignment");
-      if (!proofBindsJobSource(state, assigned, proof, this.#anchorEpoch)) {
+      if (
+        !proofBindsJobSource(
+          state,
+          assigned,
+          proof,
+          this.#anchorEpoch,
+          this.#legacyAbortTickets,
+        )
+      ) {
         throw new Error("Supersede proof does not bind the durable fence");
       }
       const prior = state.superseded.get(proof.assignmentId);
@@ -2283,7 +2479,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       const current = state.states.get(assigned.record.jobRunId);
       if (
         state.assignmentByJob.get(assigned.record.jobRunId) !== proof.assignmentId ||
-        !proofBindsJobSource(state, assigned, proof, this.#anchorEpoch) ||
+        !proofBindsJobSource(
+          state,
+          assigned,
+          proof,
+          this.#anchorEpoch,
+          this.#legacyAbortTickets,
+        ) ||
         (current?.state !== "dispatched" && current?.state !== "uncertain")
       ) {
         throw new Error("Dispatch rejection does not bind the current assignment");
@@ -2322,11 +2524,23 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     const proof = validateCancelProof(rawProof, this.#verifier);
     await this.#transact<void>((state) => {
       const assigned = state.assignedById.get(assignmentId);
-      if (
-        !assigned ||
-        !proofBindsJobSource(state, assigned, proof, this.#anchorEpoch)
-      ) {
+      if (!assigned) {
         throw new Error("Cancel proof does not bind the job assignment authority");
+      }
+      if (
+        !proofBindsJobSource(
+          state,
+          assigned,
+          proof,
+          this.#anchorEpoch,
+          this.#legacyAbortTickets,
+        )
+      ) {
+        throw new Error(
+          proof.cause === "abort-ticket"
+            ? "Abort proof does not bind an owner-issued abort ticket"
+            : "Cancel proof does not bind the job assignment authority",
+        );
       }
       const durableProofs = [
         state.acceptedCancellations.get(assignmentId)?.proof,
@@ -2363,17 +2577,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       const current = state.states.get(assigned.record.jobRunId);
       if (!current) throw corruptJobJournal("Cancel proof target has no state");
-      if (proof.cause === "abort-ticket") {
-        if (!this.#abortTickets) {
-          throw new Error("Abort-ticket validation is not configured");
-        }
-        this.#abortTickets.authorize({
-          assignmentId,
-          executorId: proof.executorId,
-          ticketDigest: proof.ticketDigest,
-          surfacePrincipal: proof.surfacePrincipal,
-        });
-      }
       this.#authorizeSubmission(state, context, {
         mode: "settlement",
         method: "submission.submitCancelProof",
@@ -4116,6 +4319,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           ),
         });
         state.admittedJobs.add(body.jobRunId);
+        if (body.ingress) state.ingressByJob.set(body.jobRunId, body.ingress);
         return state;
       }
       case "assigned": {
@@ -4293,7 +4497,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         const open = state.resolutions.get(assigned.record.jobRunId);
         if (
           state.assignmentByJob.get(assigned.record.jobRunId) !== body.assignmentId ||
-          !proofBindsJobSource(state, assigned, body.proof, this.#anchorEpoch) ||
+          !proofBindsJobSource(
+            state,
+            assigned,
+            body.proof,
+            this.#anchorEpoch,
+            this.#legacyAbortTickets,
+          ) ||
           !open ||
           open.resolution ||
           open.openFactDigest !== body.openFactDigest ||
@@ -4378,7 +4588,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           durableStartedObserved: state.durableStarted.has(body.assignmentId),
           proofBindsDurableSource:
             assigned !== undefined &&
-            proofBindsJobSource(state, assigned, body.proof, this.#anchorEpoch),
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
           proofKind: assignmentTerminationProofKind(body.proof),
           hasAtomicTargetState:
             assigned !== undefined &&
@@ -4459,7 +4675,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             : undefined,
           proofBindsDurableSource:
             assigned !== undefined &&
-            proofBindsJobSource(state, assigned, body.proof, this.#anchorEpoch),
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
           observationAlreadyExists: state.supersedeStarted.has(body.assignmentId),
         });
         state.supersedeStarted.set(body.assignmentId, body);
@@ -4526,7 +4748,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           proofDecision: body.proof.decision,
           proofBindsDurableSource:
             assigned !== undefined &&
-            proofBindsJobSource(state, assigned, body.proof, this.#anchorEpoch),
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
           hasAtomicCancelledState:
             assigned !== undefined &&
             current !== undefined &&
@@ -4564,7 +4792,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           : "ledger-unknown";
         if (
           state.assignmentByJob.get(assigned.record.jobRunId) !== body.assignmentId ||
-          !proofBindsJobSource(state, assigned, body.proof, this.#anchorEpoch) ||
+          !proofBindsJobSource(
+            state,
+            assigned,
+            body.proof,
+            this.#anchorEpoch,
+            this.#legacyAbortTickets,
+          ) ||
           !current ||
           !contradictory ||
           (current.state !== "uncertain" &&
@@ -4610,6 +4844,61 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         state.revokedCapabilities.add(key);
         return state;
       }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: false,
+          assignmentActive:
+            assigned !== undefined &&
+            (state.states.get(assigned.record.jobRunId)?.state ===
+              "dispatched" ||
+              state.states.get(assigned.record.jobRunId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: assigned
+            ? state.ingressByJob.get(assigned.record.jobRunId)?.surfacePrincipal
+            : undefined,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeRecords.some(
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyJobTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
       case "interaction-mirror": {
         const assigned = state.assignedById.get(body.assignmentId);
         const batch = validateConversationInteractionMirrorBatch(
@@ -5382,6 +5671,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           ),
         });
         state.admittedJobs.add(body.jobRunId);
+        if (body.ingress) state.ingressByJob.set(body.jobRunId, body.ingress);
         return state;
       }
       case "assigned": {
@@ -5544,17 +5834,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           durableStartedObserved: state.durableStarted.has(body.assignmentId),
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
-              execution: "job",
-              proof: body.proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              taskId: assigned.record.taskId,
-              anchorEpoch: this.#anchorEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
           proofKind: assignmentTerminationProofKind(body.proof),
           hasAtomicTargetState:
             assigned !== undefined &&
@@ -5638,17 +5924,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             : undefined,
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
-              execution: "job",
-              proof: body.proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              taskId: assigned.record.taskId,
-              anchorEpoch: this.#anchorEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              supersedeRequest: state.supersedeRequests.get(body.assignmentId),
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
           observationAlreadyExists: state.supersedeStartedAssignments.has(
             body.assignmentId,
           ),
@@ -5717,16 +5999,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           proofDecision: body.proof.decision,
           proofBindsDurableSource:
             assigned !== undefined &&
-            terminationProofBindsDurableSource({
-              execution: "job",
-              proof: body.proof,
-              assignmentId: body.assignmentId,
-              executorId: assigned.record.executorId,
-              taskId: assigned.record.taskId,
-              anchorEpoch: this.#anchorEpoch,
-              dispatchDigest: assigned.record.dispatchDigest,
-              cancelFence: state.cancelFences.get(body.assignmentId),
-            }),
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
           hasAtomicCancelledState:
             assigned !== undefined &&
             current !== undefined &&
@@ -5764,6 +6043,63 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         state.revokedCapabilities.add(key);
         return state;
       }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: state.closedAssignments.has(
+            body.ticket.assignmentId,
+          ),
+          assignmentActive:
+            assigned !== undefined &&
+            (state.states.get(assigned.record.jobRunId)?.state ===
+              "dispatched" ||
+              state.states.get(assigned.record.jobRunId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: assigned
+            ? state.ingressByJob.get(assigned.record.jobRunId)?.surfacePrincipal
+            : undefined,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeRecords.some(
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyJobTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
       case "resolution": {
         const fact = validateResolutionFact(body.fact);
         if (fact.subject.execution !== "job") {
@@ -6174,6 +6510,7 @@ function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
     occurrences: new Map(),
     states: new Map(),
     admittedJobs: new Set(),
+    ingressByJob: new Map(),
     activeJobRunId: undefined,
     assignedById: new Map(),
     assignmentByJob: new Map(),
@@ -6186,6 +6523,11 @@ function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
     durableStarted: new Set(),
     closedAssignments: new Set(),
     revokedCapabilities: new Set(),
+    ticketsById: new Map(),
+    ticketIdsByAssignment: new Map(),
+    ticketReplacementsById: new Map(),
+    revokedTickets: new Set(),
+    ticketSyncFrontier: undefined,
     resolutions: new Map(),
     committedByAssignment: new Map(),
     bundleAcknowledgements: new Map(),
@@ -6547,6 +6889,7 @@ function emptyProjection(): JobProjection {
     occurrences: new Map(),
     systemMissAliases: new Map(),
     admittedJobs: new Set(),
+    ingressByJob: new Map(),
     states: new Map(),
     assignedById: new Map(),
     assignmentByJob: new Map(),
@@ -6560,6 +6903,11 @@ function emptyProjection(): JobProjection {
     rejectedNotStarted: new Map(),
     durableStarted: new Set(),
     revokedCapabilities: new Set(),
+    ticketsById: new Map(),
+    ticketIdsByAssignment: new Map(),
+    ticketReplacementsById: new Map(),
+    revokedTickets: new Set(),
+    ticketSyncFrontier: undefined,
     interactionMirrors: new Map(),
     interactionMirrorBatches: new Set(),
     containments: new Map(),
@@ -7193,7 +7541,7 @@ function capabilityRevocations(
   state: JobProjection,
   assigned: AssignedJob,
 ): LogicalRecord<JobJournalRecord>[] {
-  return assigned.record.capIds
+  const capabilities = assigned.record.capIds
     .filter(
       (capId) =>
         !state.revokedCapabilities.has(
@@ -7207,11 +7555,41 @@ function capabilityRevocations(
         assignmentId: assigned.record.assignmentId,
       }),
     );
+  const tickets = [
+    ...(state.ticketIdsByAssignment.get(assigned.record.assignmentId) ?? []),
+  ]
+    .filter((ticketId) => !state.revokedTickets.has(ticketId))
+    .map((ticketId) =>
+      jobRecord(taskId, {
+        t: "ticket-revoked" as const,
+        ticketId,
+      }),
+    );
+  return [...capabilities, ...tickets];
+}
+
+function dataPlaneTicketRevocations(
+  taskId: string,
+  state: Pick<JobProjection, "ticketIdsByAssignment" | "revokedTickets">,
+  assignmentId: string,
+): LogicalRecord<JobJournalRecord>[] {
+  return [...(state.ticketIdsByAssignment.get(assignmentId) ?? [])]
+    .filter((ticketId) => !state.revokedTickets.has(ticketId))
+    .map((ticketId) =>
+      jobRecord(taskId, {
+        t: "ticket-revoked",
+        ticketId,
+      }),
+    );
 }
 
 function allJobCapabilitiesRevoked(
   envelopeRecords: readonly JobJournalRecord[],
-  state: { readonly revokedCapabilities: ReadonlySet<string> },
+  state: {
+    readonly revokedCapabilities: ReadonlySet<string>;
+    readonly ticketIdsByAssignment: ReadonlyMap<string, ReadonlySet<string>>;
+    readonly revokedTickets: ReadonlySet<string>;
+  },
   assigned: {
     readonly record: {
       readonly assignmentId: string;
@@ -7230,7 +7608,136 @@ function allJobCapabilitiesRevoked(
           record.assignmentId === assigned.record.assignmentId &&
           record.capId === capId,
       ),
+  ) && [
+    ...(state.ticketIdsByAssignment.get(assigned.record.assignmentId) ?? []),
+  ].every(
+    (ticketId) =>
+      state.revokedTickets.has(ticketId) ||
+      envelopeRecords.some(
+        (record) =>
+          record.t === "ticket-revoked" && record.ticketId === ticketId,
+      ),
   );
+}
+
+function validateJobTicketIssueRequest(input: DataPlaneTicketIssueRequest): void {
+  assertIdentifier(input.ticketId, "Data-plane ticket id");
+  assertIdentifier(input.assignmentId, "Data-plane ticket assignment id");
+  assertIdentifier(
+    input.surfacePrincipal,
+    "Data-plane ticket surface principal",
+  );
+  assertDataPlaneTicketTtlMs(input.ttlMs);
+  if (input.replacesTicketId !== undefined) {
+    assertIdentifier(input.replacesTicketId, "Replaced data-plane ticket id");
+    if (input.replacesTicketId === input.ticketId) {
+      throw new TypeError("Ticket renewal requires a new ticket id");
+    }
+  }
+}
+
+function applyJobTicketRecord(input: {
+  readonly state: Pick<
+    JobProjection,
+    | "ticketsById"
+    | "ticketIdsByAssignment"
+    | "ticketReplacementsById"
+    | "revokedTickets"
+    | "ticketSyncFrontier"
+  >;
+  readonly record: Extract<
+    JobJournalRecord,
+    { t: "ticket-issued" | "ticket-revoked" }
+  >;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly envelopeAt: string;
+  readonly taskId: string;
+  readonly assigned?: Extract<JobJournalRecord, { t: "assigned" }>;
+  readonly assignmentIsCurrent: boolean;
+  readonly assignmentAcknowledged: boolean;
+  readonly assignmentClosed: boolean;
+  readonly assignmentActive: boolean;
+  readonly originalSurfacePrincipal?: string;
+  readonly hasAtomicReplacementRevocation?: boolean;
+}): void {
+  const { state, record } = input;
+  if (record.t === "ticket-revoked") {
+    assertIdentifier(record.ticketId, "Revoked data-plane ticket id");
+    if (!state.ticketsById.has(record.ticketId)) {
+      throw corruptJobJournal("Ticket revocation names an unknown ticket");
+    }
+    if (state.revokedTickets.has(record.ticketId)) {
+      throw corruptJobJournal("Ticket is revoked more than once");
+    }
+    state.revokedTickets.add(record.ticketId);
+    return;
+  }
+  const ticket = validateDataPlaneTicket(record.ticket, input.verifier);
+  const assigned = input.assigned;
+  const replaced =
+    record.replacesTicketId === undefined
+      ? undefined
+      : state.ticketsById.get(record.replacesTicketId);
+  if (
+    !assigned ||
+    !input.assignmentIsCurrent ||
+    !input.assignmentAcknowledged ||
+    input.assignmentClosed ||
+    !input.assignmentActive ||
+    state.ticketsById.has(ticket.ticketId) ||
+    ticket.assignmentId !== assigned.assignmentId ||
+    ticket.executorId !== assigned.executorId ||
+    ticket.issuedAt !== input.envelopeAt ||
+    ticket.ref.execution !== "job" ||
+    ticket.ref.jobRunId !== assigned.jobRunId ||
+    ticket.ref.taskId !== input.taskId ||
+    ticket.ref.anchorEpoch !== assigned.anchorEpoch ||
+    ticketPrecedesSyncFrontier(ticket, state.ticketSyncFrontier) ||
+    (record.replacesTicketId !== undefined &&
+      (!replaced ||
+        !input.hasAtomicReplacementRevocation ||
+        state.revokedTickets.has(record.replacesTicketId) ||
+        !replaced.renewable ||
+        ticket.kind === "abort" ||
+        replaced.assignmentId !== ticket.assignmentId ||
+        replaced.surfacePrincipal !== ticket.surfacePrincipal ||
+        replaced.kind !== ticket.kind))
+  ) {
+    throw corruptJobJournal("Issued ticket does not bind an active acknowledged assignment");
+  }
+  if (
+    ticket.kind !== "run-observe" &&
+    ticket.surfacePrincipal !== input.originalSurfacePrincipal
+  ) {
+    throw corruptJobJournal("Interactive ticket does not bind the original surface");
+  }
+  state.ticketsById.set(ticket.ticketId, ticket);
+  if (record.replacesTicketId !== undefined) {
+    state.ticketReplacementsById.set(
+      ticket.ticketId,
+      record.replacesTicketId,
+    );
+  }
+  const byAssignment =
+    state.ticketIdsByAssignment.get(ticket.assignmentId) ?? new Set<string>();
+  byAssignment.add(ticket.ticketId);
+  state.ticketIdsByAssignment.set(ticket.assignmentId, byAssignment);
+}
+
+function applyJobTicketSyncFrontier(
+  state: Pick<JobProjection, "ticketsById" | "ticketSyncFrontier">,
+  expiresThrough: string,
+  envelopeAt: string,
+): void {
+  const expected = nextDataPlaneTicketSyncFrontier(
+    state.ticketsById.values(),
+    state.ticketSyncFrontier,
+    envelopeAt,
+  );
+  if (expected !== expiresThrough) {
+    throw corruptJobJournal("Ticket sync frontier is not the next durable boundary");
+  }
+  state.ticketSyncFrontier = expiresThrough;
 }
 
 function recordsHaveJobState(
@@ -7438,21 +7945,41 @@ function terminationProofKind(
 }
 
 function proofBindsJobSource(
-  state: JobProjection,
-  assigned: AssignedJob,
+  state: Pick<
+    JobProjection,
+    | "supersedeRequests"
+    | "cancelFences"
+    | "ticketIdsByAssignment"
+    | "ticketsById"
+  >,
+  assigned: Pick<AssignedJob, "record">,
   proof: AssignmentTerminationProof | CancelProofBody | SupersedeProof,
   anchorEpoch: number,
+  legacy: ConversationAbortTicketAuthorizer | undefined,
 ): boolean {
+  const assignmentId = assigned.record.assignmentId;
+  const abortTicketProofBindsDurableSource =
+    "cause" in proof && proof.cause === "abort-ticket"
+      ? abortTicketProofBindsOwnerHistory({
+          assignmentId,
+          ticketIds:
+            state.ticketIdsByAssignment.get(assignmentId) ?? new Set<string>(),
+          ticketsById: state.ticketsById,
+          proof,
+          ...(legacy ? { legacy } : {}),
+        })
+      : false;
   return terminationProofBindsDurableSource({
     execution: "job",
     proof,
-    assignmentId: assigned.record.assignmentId,
+    assignmentId,
     executorId: assigned.record.executorId,
     taskId: assigned.record.taskId,
     anchorEpoch,
     dispatchDigest: assigned.record.dispatchDigest,
-    supersedeRequest: state.supersedeRequests.get(assigned.record.assignmentId),
-    cancelFence: state.cancelFences.get(assigned.record.assignmentId),
+    supersedeRequest: state.supersedeRequests.get(assignmentId),
+    cancelFence: state.cancelFences.get(assignmentId),
+    abortTicketProofBindsDurableSource,
   });
 }
 

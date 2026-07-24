@@ -170,7 +170,15 @@ export interface AssignmentLedgerValidationState {
     readonly controlLeaseId: string;
     readonly renewalSeq: number;
   };
-  readonly aborts: Set<string>;
+  readonly aborts: Map<
+    string,
+    | { readonly via: "owner-fence"; readonly refId: string }
+    | {
+        readonly via: "abort-ticket";
+        readonly refId: string;
+        readonly surfacePrincipal: string;
+      }
+  >;
   readonly requestedInteractions: Set<string>;
   readonly pendingInteractions: Set<string>;
   readonly unmirroredFinished: Map<
@@ -198,7 +206,7 @@ export function createAssignmentLedgerValidationState(
     phase: "unknown",
     received: false,
     started: false,
-    aborts: new Set(),
+    aborts: new Map(),
     requestedInteractions: new Set(),
     pendingInteractions: new Set(),
     unmirroredFinished: new Map(),
@@ -1019,15 +1027,33 @@ export function applyValidatedAssignmentEntry(
       if (state.aborts.has(key)) {
         throw new TypeError("abort request is duplicated");
       }
-      state.aborts.add(key);
+      state.aborts.set(
+        key,
+        body.via === "owner-fence"
+          ? { via: body.via, refId: body.refId }
+          : {
+              via: body.via,
+              refId: body.refId,
+              surfacePrincipal: body.surfacePrincipal,
+            },
+      );
       break;
     }
     case "halted": {
       const proof = body.proof;
       const matchingAbort =
         proof.cause === "owner-fence"
-          ? state.aborts.has(`owner-fence\0${proof.fence.requestId}`)
-          : state.aborts.has(`abort-ticket\0${proof.ticketDigest}`);
+          ? state.aborts.get(`owner-fence\0${proof.fence.requestId}`)?.via ===
+            "owner-fence"
+          : (() => {
+              const abort = state.aborts.get(
+                `abort-ticket\0${proof.ticketDigest}`,
+              );
+              return (
+                abort?.via === "abort-ticket" &&
+                abort.surfacePrincipal === proof.surfacePrincipal
+              );
+            })();
       const closesCancellablePhase =
         proof.decision === "not-started"
           ? !state.started && (state.phase === "unknown" || state.phase === "received")
@@ -1725,10 +1751,23 @@ function assertAssignmentRecord(
       if (value.resultDigest !== undefined) assertDigest(value.resultDigest, "side effect result digest");
       return;
     case "abort-requested":
-      assertExactKeys(value, ["refId", "t", "v", "via"], "abort-requested record");
+      assertExactKeys(
+        value,
+        [
+          "refId",
+          ...(value.via === "abort-ticket" ? ["surfacePrincipal"] : []),
+          "t",
+          "v",
+          "via",
+        ],
+        "abort-requested record",
+      );
       assertIdentifier(value.refId, "abort request reference");
       if (value.via !== "owner-fence" && value.via !== "abort-ticket") {
         throw new TypeError("Abort request source is invalid");
+      }
+      if (value.via === "abort-ticket") {
+        assertIdentifier(value.surfacePrincipal, "Abort request surface principal");
       }
       return;
     case "halted":

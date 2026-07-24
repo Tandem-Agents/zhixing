@@ -37,6 +37,7 @@ import {
   canonicalize,
   confirmationDecisionDigest,
   createSignedConversationEnvelope,
+  dataPlaneTicketDigest,
   createSignedTrustRuleSnapshot,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
@@ -94,6 +95,8 @@ import {
   type InteractionOutcome,
   type OwnerControlAuthorizer,
 } from "../assignment-ledger.js";
+import { AssignmentStreamSpool } from "../assignment-stream-spool.js";
+import { DataPlaneTicketRegistry } from "../data-plane-ticket-registry.js";
 
 const NOW = "2026-07-13T09:00:00.000Z";
 const EXPIRY = "2026-07-13T10:00:00.000Z";
@@ -104,6 +107,7 @@ const RUN_ID = "run-1";
 const ASSIGNMENT_ID = "assignment-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
 function matchingSnapshotFor(executorId: string): ExecutorCapabilitySnapshot | undefined {
   if (executorId !== EXECUTOR_ID) return undefined;
@@ -448,7 +452,7 @@ async function createUnassignedHarness(
     authority,
     projection,
     publisher: options.publisher,
-    abortTickets: {
+    legacyAbortTickets: {
       authorize(input) {
         if (
           input.assignmentId !== ASSIGNMENT_ID ||
@@ -538,6 +542,401 @@ async function createHarness(
 }
 
 describe("conversation assignment protocol", () => {
+  it("authorizes a surface abort through the owner-issued durable ticket chain", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const observerRequest = {
+      ticketId: "ticket-observer",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:observer-1",
+      kind: "run-observe" as const,
+      ttlMs: 5 * 60 * 1_000,
+    };
+    const observer =
+      await harness.journal.issueDataPlaneTicket(observerRequest);
+    await expect(
+      harness.journal.issueDataPlaneTicket(observerRequest),
+    ).resolves.toEqual(observer);
+    await expect(
+      harness.journal.issueDataPlaneTicket({
+        ...observerRequest,
+        ttlMs: 60_000,
+      }),
+    ).rejects.toThrow("different grant");
+    await expect(
+      harness.journal.issueDataPlaneTicket({
+        ticketId: "ticket-foreign-interact",
+        assignmentId: ASSIGNMENT_ID,
+        surfacePrincipal: "surface:observer-1",
+        kind: "run-interact",
+        ttlMs: 5 * 60 * 1_000,
+      }),
+    ).rejects.toThrow("restricted to the original surface");
+    const interaction = await harness.journal.issueDataPlaneTicket({
+      ticketId: "ticket-interact-1",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:user-1",
+      kind: "run-interact",
+      ttlMs: 5 * 60 * 1_000,
+    });
+    const renewalRequest = {
+      ticketId: "ticket-interact-2",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:user-1",
+      kind: "run-interact" as const,
+      ttlMs: 5 * 60 * 1_000,
+      replacesTicketId: interaction.ticketId,
+    };
+    const renewedInteraction =
+      await harness.journal.issueDataPlaneTicket(renewalRequest);
+    await expect(
+      harness.journal.issueDataPlaneTicket(renewalRequest),
+    ).resolves.toEqual(renewedInteraction);
+    const { replacesTicketId: _, ...renewalWithoutReplacement } =
+      renewalRequest;
+    await expect(
+      harness.journal.issueDataPlaneTicket(renewalWithoutReplacement),
+    ).rejects.toThrow("different grant");
+    const ticket = await harness.journal.issueDataPlaneTicket({
+      ticketId: "ticket-owner-abort",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:user-1",
+      kind: "abort",
+      ttlMs: 5 * 60 * 1_000,
+    });
+    await expect(
+      harness.journal.issueDataPlaneTicket({
+        ticketId: "ticket-abort-renewal",
+        assignmentId: ASSIGNMENT_ID,
+        surfacePrincipal: "surface:user-1",
+        kind: "abort",
+        ttlMs: 5 * 60 * 1_000,
+        replacesTicketId: ticket.ticketId,
+      }),
+    ).rejects.toThrow("not renewable");
+    expect(await harness.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [interaction, renewedInteraction, observer, ticket].sort((left, right) =>
+        left.ticketId.localeCompare(right.ticketId),
+      ),
+      revokedTicketIds: [interaction.ticketId],
+    });
+    const spool = new AssignmentStreamSpool(
+      path.join(harness.root, "ticket-spool"),
+      harness.artifacts,
+      { clock: () => NOW },
+    );
+    await spool.open(ASSIGNMENT_ID, ticket.ref);
+    const tickets = new DataPlaneTicketRegistry({
+      log: harness.log,
+      executorId: EXECUTOR_ID,
+      verifier: harness.identity,
+      assignments: harness.ledger,
+      spool,
+      clock: () => NOW,
+    });
+    await tickets.accept(ticket);
+    const guardedLedger = new ConversationAssignmentLedger({
+      log: harness.log,
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
+      dataPlaneTickets: tickets,
+      clock: () => NOW,
+    });
+
+    const abortRequest = {
+      v: 1,
+      assignmentId: ASSIGNMENT_ID,
+      ref: ticket.ref,
+      ticket,
+      reason: "owner unavailable",
+      at: NOW,
+    } as const;
+    await expect(
+      guardedLedger.abortWithTicket(abortRequest),
+    ).resolves.toEqual({ kind: "accepted" });
+    await guardedLedger.continueTicketCancellation(ASSIGNMENT_ID);
+    await expect(
+      guardedLedger.abortWithTicket(abortRequest),
+    ).resolves.toEqual({ kind: "accepted" });
+    const proof = await guardedLedger.cancelProof(ASSIGNMENT_ID);
+    expect(proof).toMatchObject({
+      cause: "abort-ticket",
+      decision: "not-started",
+      ticketDigest: dataPlaneTicketDigest(ticket),
+    });
+    await harness.journal.submitCancelProof(
+      ASSIGNMENT_ID,
+      proof!,
+      submissionContext(harness.unsigned),
+    );
+    expect(await harness.journal.currentState(RUN_ID)).toBe("cancelled");
+    expect(await harness.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [interaction, renewedInteraction, observer, ticket].sort((left, right) =>
+        left.ticketId.localeCompare(right.ticketId),
+      ),
+      revokedTicketIds: [
+        interaction.ticketId,
+        renewedInteraction.ticketId,
+        observer.ticketId,
+        ticket.ticketId,
+      ].sort(),
+    });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("revokes data-plane tickets at the owner cancellation fence", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const ticket = await harness.journal.issueDataPlaneTicket({
+      ticketId: "ticket-cancel-fence",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:user-1",
+      kind: "abort",
+      ttlMs: 5 * 60 * 1_000,
+    });
+    const spool = new AssignmentStreamSpool(
+      path.join(harness.root, "cancel-race-ticket-spool"),
+      harness.artifacts,
+      { clock: () => NOW },
+    );
+    await spool.open(ASSIGNMENT_ID, ticket.ref);
+    const tickets = new DataPlaneTicketRegistry({
+      log: harness.log,
+      executorId: EXECUTOR_ID,
+      verifier: harness.identity,
+      assignments: harness.ledger,
+      spool,
+      clock: () => NOW,
+    });
+    await tickets.accept(ticket);
+    const guardedLedger = new ConversationAssignmentLedger({
+      log: harness.log,
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
+      dataPlaneTickets: tickets,
+      clock: () => NOW,
+    });
+
+    await expect(
+      harness.journal.cancelRun({
+        runId: RUN_ID,
+        requestId: "cancel-revokes-ticket",
+      }),
+    ).resolves.toMatchObject({ state: "cancel-requested" });
+    expect(await harness.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [ticket],
+      revokedTicketIds: [ticket.ticketId],
+    });
+    await expect(
+      harness.journal.issueDataPlaneTicket({
+        ticketId: "ticket-after-cancel",
+        assignmentId: ASSIGNMENT_ID,
+        surfacePrincipal: "surface:user-1",
+        kind: "run-observe",
+        ttlMs: 60_000,
+      }),
+    ).rejects.toThrow("current acknowledged assignment");
+    const abortRequest = {
+      v: 1,
+      assignmentId: ASSIGNMENT_ID,
+      ref: ticket.ref,
+      ticket,
+      reason: "owner cancellation raced with surface abort",
+      at: NOW,
+    } as const;
+    await expect(
+      guardedLedger.abortWithTicket(abortRequest),
+    ).resolves.toEqual({ kind: "accepted" });
+    await guardedLedger.continueTicketCancellation(ASSIGNMENT_ID);
+    const proof = await guardedLedger.cancelProof(ASSIGNMENT_ID);
+    await expect(
+      harness.journal.submitCancelProof(
+        ASSIGNMENT_ID,
+        proof!,
+        submissionContext(harness.unsigned),
+      ),
+    ).resolves.toBeUndefined();
+    expect(await harness.journal.currentState(RUN_ID)).toBe("cancelled");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("keeps synchronized ticket facts behind a durable non-regressing frontier", async () => {
+    let nowMs = Date.parse(NOW);
+    const harness = await createHarness({
+      clock: () => new Date(nowMs).toISOString(),
+    });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const ticket = await harness.journal.issueDataPlaneTicket({
+      ticketId: "ticket-finite-sync-frontier",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:observer-1",
+      kind: "run-observe",
+      ttlMs: 60_000,
+    });
+    expect(await harness.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [ticket],
+      revokedTicketIds: [],
+    });
+
+    nowMs += 4 * 60 * 1_000;
+    expect(await harness.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [],
+      revokedTicketIds: [],
+    });
+    nowMs -= 3 * 60 * 1_000;
+    expect(await harness.journal.dataPlaneTicketFacts()).toEqual({
+      issued: [],
+      revokedTicketIds: [],
+    });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("accepts one-shot first-party interaction and projects its durable stream facts", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const ticket = await harness.journal.issueDataPlaneTicket({
+      ticketId: "ticket-interaction",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:user-1",
+      kind: "run-interact",
+      ttlMs: 5 * 60 * 1_000,
+    });
+    const observer = await harness.journal.issueDataPlaneTicket({
+      ticketId: "ticket-read-only",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:user-1",
+      kind: "run-observe",
+      ttlMs: 5 * 60 * 1_000,
+    });
+    const spool = new AssignmentStreamSpool(
+      path.join(harness.root, "interaction-ticket-spool"),
+      harness.artifacts,
+      { clock: () => NOW },
+    );
+    await spool.open(ASSIGNMENT_ID, ticket.ref);
+    const tickets = new DataPlaneTicketRegistry({
+      log: harness.log,
+      executorId: EXECUTOR_ID,
+      verifier: harness.identity,
+      assignments: harness.ledger,
+      spool,
+      clock: () => NOW,
+    });
+    await tickets.accept(ticket);
+    await tickets.accept(observer);
+    const ledger = new ConversationAssignmentLedger({
+      log: harness.log,
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
+      dataPlaneTickets: tickets,
+      clock: () => NOW,
+    });
+    await ledger.start(ASSIGNMENT_ID);
+    await ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId: "interaction-ticket-request",
+      toolName: "write-file",
+      display: { title: "Write file", lines: ["workspace/report.md"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-13T09:01:00.000Z",
+    });
+
+    await expect(
+      ledger.prepareInteractionAnswerFromSurface({
+        assignmentId: ASSIGNMENT_ID,
+        requestId: "interaction-ticket-request",
+        ticketId: observer.ticketId,
+        surfacePrincipal: "surface:user-1",
+        decision: { kind: "allow-once" },
+      }),
+    ).rejects.toThrow("cannot authorize interact");
+    await expect(ledger.prepareInteractionAnswerFromSurface({
+      assignmentId: ASSIGNMENT_ID,
+      requestId: "interaction-ticket-request",
+      ticketId: ticket.ticketId,
+      surfacePrincipal: "surface:user-1",
+      decision: { kind: "allow-once" },
+    })).resolves.toEqual({
+      kind: "authorized",
+      decision: { kind: "allow-once" },
+      ticketId: ticket.ticketId,
+      surfacePrincipal: "surface:user-1",
+    });
+    const answer = await ledger.finishInteraction(
+      ASSIGNMENT_ID,
+      "interaction-ticket-request",
+      {
+        t: "answered",
+        authority: { via: "surface-ticket", ticketId: ticket.ticketId },
+        decision: { allowed: true },
+        decisionDigest: allowOnceDecisionDigest("interaction-ticket-request"),
+        by: "surface:user-1",
+      },
+    );
+    await expect(
+      ledger.prepareInteractionAnswerFromSurface({
+        assignmentId: ASSIGNMENT_ID,
+        requestId: "interaction-ticket-request",
+        ticketId: ticket.ticketId,
+        surfacePrincipal: "surface:user-1",
+        decision: { kind: "allow-once" },
+      }),
+    ).resolves.toEqual({ kind: "replayed", result: answer });
+    expect(await ledger.interactionStreamEvents(ASSIGNMENT_ID)).toMatchObject([
+      {
+        payload: {
+          kind: "interaction",
+          event: { t: "requested", requestId: "interaction-ticket-request" },
+        },
+      },
+      {
+        payload: {
+          kind: "interaction",
+          event: {
+            t: "finished",
+            requestId: "interaction-ticket-request",
+            outcome: "allowed",
+          },
+        },
+      },
+    ]);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it("closes a clean failed execution durably and replays the same failure fact", async () => {
     const harness = await createHarness();
     await harness.ledger.dispatch(
@@ -1814,7 +2213,7 @@ describe("conversation assignment protocol", () => {
       Array.from({ length: snapshot.lastSeq }, (_, index) => index + 1),
     );
     expect(pageCount).toBeGreaterThan(1);
-  }, 30_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects absent dispatch dependencies and assignment-id reuse across runs", async () => {
     const missingHarness = await createUnassignedHarness();
@@ -3120,7 +3519,7 @@ describe("conversation assignment protocol", () => {
       ],
     });
     expect((await harness.journal.finalHistory(7))[0]?.frame.publishConflicts).toBe(1);
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("commits from dispatched when the started report is lost and absorbs a late report", async () => {
     const harness = await createHarness();
@@ -3575,7 +3974,7 @@ describe("conversation assignment protocol", () => {
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toMatchObject({ committed: false, error: { code: "missing-base" } });
     expect(await harness.journal.currentState(RUN_ID)).toBe("running");
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("cancels a queued run without creating assignment-side governance", async () => {
     const harness = await createUnassignedHarness();
@@ -5167,6 +5566,9 @@ describe("conversation assignment protocol", () => {
               t: "abort-requested",
               via: kind,
               refId: `${kind}-without-authority`,
+              ...(kind === "abort-ticket"
+                ? { surfacePrincipal: "surface:origin" }
+                : {}),
             };
       await harness.log.append<AssignmentEntry>([
         {
@@ -5581,6 +5983,72 @@ describe("conversation assignment protocol", () => {
       submissionContext(harness.unsigned),
     );
     expect(await harness.journal.currentState(RUN_ID)).toBe("cancelled");
+  });
+
+  it("rejects an abort-ticket halted proof bound to a different surface", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const page = await harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      { fromSeq: 1, limit: 256 },
+    );
+    if (!("entries" in page)) throw new Error("expected ledger evidence page");
+    const abort: AssignmentEntry = {
+      recordSeq: page.toSeq + 1,
+      body: {
+        v: 1,
+        t: "abort-requested",
+        via: "abort-ticket",
+        refId: ABORT_TICKET_DIGEST,
+        surfacePrincipal: "surface:user-1",
+      },
+    };
+    const abortDigest = advanceAssignmentLedger(page.chainDigest, abort);
+    const wrongSurface = signCancelProof(
+      {
+        v: 1,
+        assignmentId: ASSIGNMENT_ID,
+        executorId: EXECUTOR_ID,
+        authority: {
+          execution: "conversation",
+          conversationId: CONVERSATION_ID,
+          ownerEpoch: 3,
+        },
+        cause: "abort-ticket",
+        ticketDigest: ABORT_TICKET_DIGEST,
+        surfacePrincipal: "surface:other",
+        decision: "halted",
+        lastEffectSeq: 0,
+        lastRecordSeq: abort.recordSeq,
+        usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+        ledgerDigest: abortDigest,
+        issuedAt: NOW,
+      },
+      harness.identity,
+    );
+    await harness.log.append<AssignmentEntry>([
+      { stream: `assignment:${ASSIGNMENT_ID}`, body: abort },
+      {
+        stream: `assignment:${ASSIGNMENT_ID}`,
+        body: {
+          recordSeq: abort.recordSeq + 1,
+          body: { v: 1, t: "halted", proof: wrongSurface },
+        },
+      },
+    ]);
+
+    await expect(
+      harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    ).rejects.toThrow("halted does not close the durable cancellation prefix");
   });
 
   it("moves a contradictory not-started proof to uncertain instead of redispatching", async () => {
@@ -9186,25 +9654,27 @@ function reopenJournal(
     readonly ownerEpoch?: number;
     readonly artifacts?: ArtifactStore;
     readonly submission?: AssignmentSubmissionAuthorizer;
+    readonly clock?: () => string;
   } = {},
 ): ConversationRunJournal {
   const artifacts = options.artifacts ?? harness.artifacts;
+  const clock = options.clock ?? (() => NOW);
   return new ConversationRunJournal({
     conversationId: CONVERSATION_ID,
     ownerEpoch: options.ownerEpoch ?? 3,
     log: new FileAuthorityCommitLog(harness.log.rootDir, artifacts, {
-      clock: () => NOW,
+      clock,
       lockWaitMs: 2_000,
     }),
     artifacts,
     signer: harness.identity,
     verifier: harness.identity,
     delivery: deliveryParticipant(harness.log),
-    clock: () => NOW,
+    clock,
     submission: options.submission ?? submission,
     authority: harness.authority,
     projection: harness.projection,
-    abortTickets: {
+    legacyAbortTickets: {
       authorize(input) {
         if (
           input.assignmentId !== ASSIGNMENT_ID ||
@@ -9241,7 +9711,8 @@ type ConversationBehaviorScenarioId =
   | "conflictContained"
   | "conflictAcked"
   | "uncertainRejected"
-  | "commitProjection";
+  | "commitProjection"
+  | "ticketLifecycle";
 
 interface ConversationBehaviorHarness {
   readonly log: FileAuthorityCommitLog;
@@ -9257,12 +9728,13 @@ interface ConversationRecordBehaviorSpec {
 
 function conversationBehaviorHarness(
   harness: Awaited<ReturnType<typeof createHarness>>,
+  clock: () => string = () => NOW,
 ): ConversationBehaviorHarness {
   return {
     log: harness.log,
-    fullProbe: () => reopenJournal(harness).currentState(RUN_ID),
+    fullProbe: () => reopenJournal(harness, { clock }).currentState(RUN_ID),
     guardProbe: () =>
-      reopenJournal(harness).reportStarted(
+      reopenJournal(harness, { clock }).reportStarted(
         ASSIGNMENT_ID,
         submissionContext(harness.unsigned),
       ),
@@ -9294,6 +9766,24 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async ticketLifecycle() {
+    let nowMs = Date.parse(NOW);
+    const clock = () => new Date(nowMs).toISOString();
+    const harness = await createHarness({ clock });
+    await receiveConversation(harness);
+    await harness.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    const ticket = await harness.journal.issueDataPlaneTicket({
+      ticketId: "matrix-observer-ticket",
+      assignmentId: ASSIGNMENT_ID,
+      surfacePrincipal: "surface:observer-1",
+      kind: "run-observe",
+      ttlMs: 60_000,
+    });
+    await harness.journal.revokeDataPlaneTicket(ticket.ticketId);
+    nowMs += 4 * 60 * 1_000;
+    await harness.journal.dataPlaneTicketFacts();
+    return conversationBehaviorHarness(harness, clock);
+  },
   async sessionLifecycle() {
     const harness = await createHarness();
     await startConversation(harness);
@@ -9794,6 +10284,18 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     scenario: "commit",
     recovery: noConversationRecovery("capability revocation is consumed by authorization guards"),
     corrupt: (body) => ({ ...body, capId: "capability-ghost" }),
+  },
+  "ticket-issued": {
+    scenario: "ticketLifecycle",
+    recovery: noConversationRecovery("ticket delivery is driven by the owner ticket-fact synchronizer"),
+  },
+  "ticket-revoked": {
+    scenario: "ticketLifecycle",
+    recovery: noConversationRecovery("ticket revocation is driven by the owner ticket-fact synchronizer"),
+  },
+  "ticket-sync-frontier": {
+    scenario: "ticketLifecycle",
+    recovery: noConversationRecovery("ticket synchronization advances only when facts are queried"),
   },
   "interaction-mirror": {
     scenario: "mirror",

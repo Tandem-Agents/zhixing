@@ -55,6 +55,24 @@ describe("FileArtifactStore", () => {
 });
 
 describe("FileAuthorityCommitLog", () => {
+  it("accepts executor-scoped durable streams", async () => {
+    const { log } = await createStores();
+    const stream =
+      "executor:executor-1:data-plane-ticket-retirement-frontier";
+
+    const committed = await log.append([
+      { stream, body: { t: "retirement-frontier" } },
+    ]);
+
+    await expect(log.readStream(stream)).resolves.toEqual([
+      {
+        lsn: committed.lsn,
+        at: committed.at,
+        body: { t: "retirement-frontier" },
+      },
+    ]);
+  });
+
   it("commits multiple logical streams atomically and rebuilds projections in LSN order", async () => {
     const { log } = await createStores();
 

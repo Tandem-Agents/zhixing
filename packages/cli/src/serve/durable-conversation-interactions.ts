@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   ConfirmationAdmissionDisposition,
   ConfirmationDecision,
+  IConfirmationBroker,
   ConfirmationLifecycleObserver,
   ConfirmationRequest,
   ConfirmationResolutionSource,
@@ -18,9 +19,10 @@ import {
   type ConversationInteractionOutcome,
   type StreamFrameAppender,
 } from "@zhixing/core/protocol";
-import type {
-  ConversationAssignmentLedger,
-  InProcessAssignmentSubmission,
+import {
+  projectAssignmentInteractionStream,
+  type ConversationAssignmentLedger,
+  type InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 
 export interface DurableInteractionBinding {
@@ -43,6 +45,16 @@ export class DurableConversationInteractionObserver
   readonly #requests = new Map<string, DurableInteractionBinding>();
   readonly #projectedRecordSeq = new Map<string, number>();
   readonly #drains = new Map<string, Promise<void>>();
+  readonly #surfaceAnswers = new Map<
+    string,
+    {
+      readonly assignmentId: string;
+      readonly ticketId: string;
+      readonly surfacePrincipal: string;
+      readonly decisionDigest: string;
+      readonly completion: Promise<boolean>;
+    }
+  >();
 
   withBinding<T>(
     binding: DurableInteractionBinding,
@@ -105,11 +117,89 @@ export class DurableConversationInteractionObserver
     await active.submission.finishAndMirror(
       active.assignmentId,
       request.id,
-      interactionOutcome(request, decision, source, active.surfacePrincipal),
+      interactionOutcome(
+        request,
+        decision,
+        source,
+        active.surfacePrincipal,
+        this.#surfaceAnswers.get(request.id),
+      ),
       active.context,
     );
     await this.drainAssignment(active);
     this.#requests.delete(request.id);
+    this.#surfaceAnswers.delete(request.id);
+  }
+
+  async resolveWithSurfaceTicket(
+    broker: IConfirmationBroker,
+    input: {
+      readonly assignmentId: string;
+      readonly requestId: string;
+      readonly ticketId: string;
+      readonly surfacePrincipal: string;
+      readonly decision: Extract<
+        ConfirmationDecision,
+        { kind: "allow-once" | "deny" }
+      >;
+    },
+  ): Promise<boolean> {
+    const binding = this.#requests.get(input.requestId);
+    if (!binding || binding.assignmentId !== input.assignmentId) return false;
+    const decisionDigest = confirmationDecisionDigest(
+      input.requestId,
+      input.decision,
+    );
+    const existing = this.#surfaceAnswers.get(input.requestId);
+    if (existing) {
+      if (
+        existing.assignmentId !== input.assignmentId ||
+        existing.ticketId !== input.ticketId ||
+        existing.surfacePrincipal !== input.surfacePrincipal ||
+        existing.decisionDigest !== decisionDigest
+      ) {
+        throw new Error("Confirmation interaction already has a different surface answer");
+      }
+      return existing.completion;
+    }
+    if (!broker.resolveDurably) {
+      throw new Error("Assignment confirmation broker lacks durable resolution");
+    }
+    let resolveCompletion!: (resolved: boolean) => void;
+    let rejectCompletion!: (error: unknown) => void;
+    const completion = new Promise<boolean>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    const answer = {
+      assignmentId: input.assignmentId,
+      ticketId: input.ticketId,
+      surfacePrincipal: input.surfacePrincipal,
+      decisionDigest,
+      completion,
+    };
+    this.#surfaceAnswers.set(input.requestId, answer);
+    void (async () => {
+      try {
+        const resolved = await broker.resolveDurably!(
+          input.requestId,
+          input.decision,
+        );
+        if (
+          !resolved &&
+          this.#surfaceAnswers.get(input.requestId) === answer
+        ) {
+          this.#surfaceAnswers.delete(input.requestId);
+        }
+        resolveCompletion(resolved);
+      } catch (error) {
+        if (this.#surfaceAnswers.get(input.requestId) === answer) {
+          this.#surfaceAnswers.delete(input.requestId);
+        }
+        rejectCompletion(error);
+      }
+    })();
+    return completion;
   }
 
   async drainAssignment(binding: DurableInteractionBinding): Promise<void> {
@@ -129,26 +219,26 @@ export class DurableConversationInteractionObserver
   }
 
   async #projectAssignment(binding: DurableInteractionBinding): Promise<void> {
-    const events = await binding.ledger.interactionStreamEvents(
+    const projection = await projectAssignmentInteractionStream({
+      assignmentId: binding.assignmentId,
+      ledger: binding.ledger,
+      writer: binding.stream,
+      meta: binding.streamMeta,
+      afterRecordSeq: this.#projectedRecordSeq.get(binding.assignmentId),
+      signal: binding.signal,
+    });
+    this.#projectedRecordSeq.set(
       binding.assignmentId,
+      projection.lastRecordSeq,
     );
-    let cursor = this.#projectedRecordSeq.get(binding.assignmentId) ?? 0;
-    for (const event of events) {
-      if (event.recordSeq <= cursor) continue;
-      await binding.stream.append(
-        event.payload,
-        binding.streamMeta,
-        binding.signal,
-        `interaction:${event.recordSeq}`,
-      );
-      cursor = event.recordSeq;
-      this.#projectedRecordSeq.set(binding.assignmentId, cursor);
-    }
   }
 
   releaseAssignment(assignmentId: string): void {
     for (const [requestId, binding] of this.#requests) {
-      if (binding.assignmentId === assignmentId) this.#requests.delete(requestId);
+      if (binding.assignmentId === assignmentId) {
+        this.#requests.delete(requestId);
+        this.#surfaceAnswers.delete(requestId);
+      }
     }
     this.#projectedRecordSeq.delete(assignmentId);
   }
@@ -212,6 +302,13 @@ function interactionOutcome(
   decision: ConfirmationDecision,
   source: ConfirmationResolutionSource,
   surfacePrincipal: string,
+  surfaceAnswer?: {
+    readonly assignmentId: string;
+    readonly ticketId: string;
+    readonly surfacePrincipal: string;
+    readonly decisionDigest: string;
+    readonly completion: Promise<boolean>;
+  },
 ): ConversationInteractionOutcome {
   if (source.kind === "expired" || decision.kind === "expired") {
     return { t: "expired" };
@@ -250,10 +347,10 @@ function interactionOutcome(
     t: "answered",
     authority: {
       via: "surface-ticket",
-      ticketId: `ticket:${request.id}`,
+      ticketId: surfaceAnswer?.ticketId ?? `ticket:${request.id}`,
     },
     decision: { allowed, ...(reason ? { reason } : {}) },
     decisionDigest: confirmationDecisionDigest(request.id, decision),
-    by: surfacePrincipal,
+    by: surfaceAnswer?.surfacePrincipal ?? surfacePrincipal,
   };
 }

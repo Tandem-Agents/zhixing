@@ -494,11 +494,11 @@ export class AssignmentStreamSpool {
     await this.open(assignmentId, ref);
     const handle = this.#handle(assignmentId);
     return handle.queue.run(async () => {
-      const result = await this.#transact(handle, (state, at) => {
+      const result = await this.#transact(handle, (state) => {
         assertOpen(state);
         assertSameExecution(state, ref);
         const key = streamConsumerKey(consumer);
-        const current = requireQualifiedConsumer(state, key, at);
+        const current = requireQualifiedConsumer(state, key);
         if (current.kind !== consumer.kind) {
           throw new TypeError("Stream connection consumer kind is inconsistent");
         }
@@ -529,23 +529,16 @@ export class AssignmentStreamSpool {
     }
     if (
       input.consumer.kind === "surface-ticket" &&
-      (input.expiresAt === undefined ||
-        Date.parse(input.expiresAt) <= Date.parse(this.#clock()))
+      input.expiresAt === undefined
     ) {
-      throw new TypeError("Surface stream authorization is already expired");
+      throw new TypeError("Surface stream authorization requires a stable expiry");
     }
     const handle = this.#handle(input.assignmentId);
     return handle.queue.run(async () => {
       const key = streamConsumerKey(input.consumer);
-      const result = await this.#transact(handle, (state, at) => {
+      const result = await this.#transact(handle, (state) => {
         assertOpen(state);
         assertSameExecution(state, input.ref);
-        if (
-          input.expiresAt !== undefined &&
-          Date.parse(input.expiresAt) <= Date.parse(at)
-        ) {
-          throw new TypeError("Surface stream authorization is already expired");
-        }
         const current = state.consumers.get(key);
         if (
           current?.qualified &&
@@ -592,7 +585,7 @@ export class AssignmentStreamSpool {
       if (!current?.qualified) return snapshotOf(before);
       const projected = cloneProjection(before);
       projected.consumers.get(key)!.qualified = false;
-      const throughSeq = retentionFloor(projected, this.#clock());
+      const throughSeq = retentionFloor(projected);
       const retired = framesThrough(before, throughSeq);
       const artifacts = artifactsReleasedByFrames(before, retired);
       const result = await this.#transact(handle, () => ({
@@ -733,11 +726,11 @@ export class AssignmentStreamSpool {
     return handle.queue.run(async () => {
       await this.#assertNotReclaimed(handle);
       await this.#drainPendingDeletes(handle);
-      const selected = await this.#transact(handle, (state, at) => {
+      const selected = await this.#transact(handle, (state) => {
         assertOpen(state);
         assertSameExecution(state, request.ref);
         const key = streamConsumerKey(request.consumer);
-        const current = requireQualifiedConsumer(state, key, at);
+        const current = requireQualifiedConsumer(state, key);
         if (input.streamEpoch !== current.streamEpoch) {
           throw new TypeError("Stream subscription uses a fenced connection epoch");
         }
@@ -820,7 +813,7 @@ export class AssignmentStreamSpool {
       );
       await this.#transact(handle, (state, at) => {
         const key = streamConsumerKey(ack.consumer);
-        const consumer = requireQualifiedConsumer(state, key, at);
+        const consumer = requireQualifiedConsumer(state, key);
         if (
           consumer.kind !== ack.consumer.kind ||
           streamEpoch !== consumer.streamEpoch
@@ -839,7 +832,7 @@ export class AssignmentStreamSpool {
 
         const projected = cloneProjection(state);
         projected.consumers.get(key)!.ackSeq = ack.ackSeq;
-        const throughSeq = retentionFloor(projected, at);
+        const throughSeq = retentionFloor(projected);
         if (throughSeq > projected.prunedThrough) {
           projected.prunedThrough = throughSeq;
         }
@@ -860,7 +853,7 @@ export class AssignmentStreamSpool {
               : []),
             ...(projected.terminal &&
             projected.reclaimAfter === undefined &&
-            canArmReclaim(projected, at)
+            canArmReclaim(projected)
               ? [
                   record({
                     t: "reclaim-armed" as const,
@@ -898,7 +891,7 @@ export class AssignmentStreamSpool {
         const entries: ReturnType<typeof record>[] = [
           record({ t: "terminal", finalSeq }),
         ];
-        if (canArmReclaim(projected, at)) {
+        if (canArmReclaim(projected)) {
           entries.push(
             record({
               t: "reclaim-armed",
@@ -937,7 +930,7 @@ export class AssignmentStreamSpool {
       if (
         state.terminal &&
         state.reclaimAfter === undefined &&
-        canArmReclaim(state, now)
+        canArmReclaim(state)
       ) {
         const armed = await this.#transact(handle, (_state, at) => ({
           kind: "append",
@@ -1115,7 +1108,7 @@ export class AssignmentStreamSpool {
 
     const logicalDigest = streamLogicalFrameDigest(frame);
     const verifier = advanceVerifier(state.verifier!, frame);
-      const result = await this.#transact(handle, (current, at) => {
+    const result = await this.#transact(handle, (current) => {
       assertOpen(current);
       if (
         current.verifier!.lastSeq !== state.verifier!.lastSeq
@@ -1147,11 +1140,7 @@ export class AssignmentStreamSpool {
             : {}),
         }),
       ];
-      for (const consumer of slowSurfaceConsumers(
-        current,
-        retainedRefs,
-        at,
-      )) {
+      for (const consumer of slowSurfaceConsumers(current, retainedRefs)) {
         entries.push(record({ t: "degraded", key: consumer.key }));
       }
       return { kind: "append", entries, value: true };
@@ -1177,11 +1166,11 @@ export class AssignmentStreamSpool {
       before,
       [...before.frames.values()],
     );
-    await this.#transact(handle, (state, at) => {
+    await this.#transact(handle, (state) => {
       const projected = cloneProjection(state);
-      const degraded = slowSurfaceConsumers(projected, [], at);
+      const degraded = slowSurfaceConsumers(projected, []);
       for (const consumer of degraded) consumer.degraded = true;
-      const throughSeq = retentionFloor(projected, at);
+      const throughSeq = retentionFloor(projected);
       if (degraded.length === 0 && throughSeq <= state.prunedThrough) {
         return { kind: "return", value: undefined };
       }
@@ -1547,12 +1536,6 @@ function reduceSpoolRecord(
     }
     case "consumer-qualified": {
       assertOpen(state);
-      if (
-        body.expiresAt !== undefined &&
-        Date.parse(body.expiresAt) <= Date.parse(envelope.at)
-      ) {
-        throw corruptSpool("Stream consumer qualification is already expired");
-      }
       const current = state.consumers.get(body.key);
       if (current !== undefined && current.kind !== body.kind) {
         throw corruptSpool("Stream consumer kind changed");
@@ -1578,11 +1561,7 @@ function reduceSpoolRecord(
       return state;
     }
     case "connection": {
-      const consumer = requireReplayQualifiedConsumer(
-        state,
-        body.key,
-        envelope.at,
-      );
+      const consumer = requireReplayQualifiedConsumer(state, body.key);
       if (
         !consumer.qualified ||
         body.streamEpoch !== consumer.streamEpoch + 1
@@ -1593,11 +1572,7 @@ function reduceSpoolRecord(
       return state;
     }
     case "offered": {
-      const consumer = requireReplayQualifiedConsumer(
-        state,
-        body.key,
-        envelope.at,
-      );
+      const consumer = requireReplayQualifiedConsumer(state, body.key);
       if (
         consumer.degraded ||
         body.offeredSeq < consumer.offeredSeq ||
@@ -1609,11 +1584,7 @@ function reduceSpoolRecord(
       return state;
     }
     case "ack": {
-      const consumer = requireReplayQualifiedConsumer(
-        state,
-        body.key,
-        envelope.at,
-      );
+      const consumer = requireReplayQualifiedConsumer(state, body.key);
       if (
         body.ackSeq < consumer.ackSeq ||
         body.ackSeq > consumer.offeredSeq
@@ -1624,11 +1595,7 @@ function reduceSpoolRecord(
       return state;
     }
     case "degraded": {
-      const consumer = requireReplayQualifiedConsumer(
-        state,
-        body.key,
-        envelope.at,
-      );
+      const consumer = requireReplayQualifiedConsumer(state, body.key);
       if (
         consumer.kind !== "surface-ticket" ||
         !consumer.qualified ||
@@ -1643,7 +1610,7 @@ function reduceSpoolRecord(
       if (
         body.throughSeq <= state.prunedThrough ||
         body.throughSeq > state.verifier!.lastSeq ||
-        body.throughSeq > retentionFloor(state, envelope.at)
+        body.throughSeq > retentionFloor(state)
       ) {
         throw corruptSpool("Stream prune waterline is invalid");
       }
@@ -1697,7 +1664,7 @@ function reduceSpoolRecord(
       if (
         !state.terminal ||
         state.reclaimAfter !== undefined ||
-        !canArmReclaim(state, envelope.at) ||
+        !canArmReclaim(state) ||
         Date.parse(body.reclaimAfter) <= Date.parse(envelope.at)
       ) {
         throw corruptSpool("Stream reclamation was armed in an invalid state");
@@ -1705,11 +1672,7 @@ function reduceSpoolRecord(
       state.reclaimAfter = body.reclaimAfter;
       return state;
     case "reclaim-disarmed":
-      const disarmingConsumer = requireReplayQualifiedConsumer(
-        state,
-        body.key,
-        envelope.at,
-      );
+      const disarmingConsumer = requireReplayQualifiedConsumer(state, body.key);
       if (
         state.reclaimAfter === undefined ||
         state.verifier?.finalSeq === undefined ||
@@ -1723,7 +1686,7 @@ function reduceSpoolRecord(
     case "reclaimed":
       if (
         state.reclaimAfter === undefined ||
-        !canArmReclaim(state, envelope.at) ||
+        !canArmReclaim(state) ||
         Date.parse(envelope.at) < Date.parse(state.reclaimAfter) ||
         state.pendingDeletes.size > 0
       ) {
@@ -2028,14 +1991,13 @@ function advanceVerifier(
 function slowSurfaceConsumers(
   state: SpoolProjection,
   additionalRefs: readonly ArtifactRef[],
-  now: IsoTime,
 ): ConsumerState[] {
   if (state.capacityBytes === undefined) return [];
   const threshold = state.capacityBytes / 2;
   return [...state.consumers.values()].filter((consumer) => {
     if (
       consumer.kind !== "surface-ticket" ||
-      !consumerQualifiedAt(consumer, now) ||
+      !consumer.qualified ||
       consumer.degraded
     ) {
       return false;
@@ -2056,9 +2018,9 @@ function slowSurfaceConsumers(
   });
 }
 
-function retentionFloor(state: SpoolProjection, now: IsoTime): number {
+function retentionFloor(state: SpoolProjection): number {
   const active = [...state.consumers.values()].filter((consumer) => {
-    return consumerQualifiedAt(consumer, now) && !consumer.degraded;
+    return consumer.qualified && !consumer.degraded;
   });
   if (
     state.ref?.execution === "job" &&
@@ -2076,11 +2038,11 @@ function retentionFloor(state: SpoolProjection, now: IsoTime): number {
   );
 }
 
-function canArmReclaim(state: SpoolProjection, now: IsoTime): boolean {
+function canArmReclaim(state: SpoolProjection): boolean {
   const finalSeq = state.verifier?.finalSeq;
   if (!state.terminal || finalSeq === undefined) return false;
   const valid = [...state.consumers.values()].filter(
-    (consumer) => consumerQualifiedAt(consumer, now) && !consumer.degraded,
+    (consumer) => consumer.qualified && !consumer.degraded,
   );
   if (state.ref?.execution === "job") {
     const relay = valid.find((consumer) => consumer.kind === "owner-relay");
@@ -2278,10 +2240,9 @@ function requireConsumer(
 function requireQualifiedConsumer(
   state: SpoolProjection,
   key: string,
-  now: IsoTime,
 ): ConsumerState {
   const consumer = state.consumers.get(key);
-  if (consumer === undefined || !consumerQualifiedAt(consumer, now)) {
+  if (consumer === undefined || !consumer.qualified) {
     throw new TypeError("Stream consumer is not durably qualified");
   }
   return consumer;
@@ -2290,24 +2251,12 @@ function requireQualifiedConsumer(
 function requireReplayQualifiedConsumer(
   state: SpoolProjection,
   key: string,
-  at: IsoTime,
 ): ConsumerState {
   const consumer = state.consumers.get(key);
-  if (consumer === undefined || !consumerQualifiedAt(consumer, at)) {
+  if (consumer === undefined || !consumer.qualified) {
     throw corruptSpool("Stream record names an unavailable consumer");
   }
   return consumer;
-}
-
-function consumerQualifiedAt(
-  consumer: ConsumerState,
-  at: IsoTime,
-): boolean {
-  return (
-    consumer.qualified &&
-    (consumer.expiresAt === undefined ||
-      Date.parse(consumer.expiresAt) > Date.parse(at))
-  );
 }
 
 function record(body: SpoolRecord): {

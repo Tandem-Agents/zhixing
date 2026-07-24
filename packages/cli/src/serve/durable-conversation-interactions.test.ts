@@ -102,4 +102,117 @@ describe("DurableConversationInteractionObserver", () => {
 
     expect(append).toHaveBeenCalledTimes(1);
   });
+
+  it("persists the authorized surface ticket before waking the runtime", async () => {
+    const finishAndMirror = vi.fn(async () => undefined);
+    const binding = {
+      assignmentId: "assignment-fixed",
+      surfacePrincipal: "surface:origin",
+      ledger: {
+        requestInteraction: vi.fn(async () => ({
+          accepted: true,
+          recordSeq: 1,
+          display: { title: "Approve", lines: ["write file"] },
+        })),
+        interactionStreamEvents: vi.fn(async () => []),
+      },
+      submission: { finishAndMirror },
+      context: {},
+      stream: { append: vi.fn(async () => undefined) },
+      streamMeta: {},
+    } as unknown as DurableInteractionBinding;
+    const request = {
+      id: "request-fixed",
+      tool: "Write",
+      display: { title: "Approve", body: { path: "report.md" } },
+      createdAt: Date.parse("2026-07-23T00:00:00.000Z"),
+      expiresAt: Date.parse("2026-07-23T00:01:00.000Z"),
+    } as never;
+    const observer = new DurableConversationInteractionObserver();
+    await observer.withBinding(binding, () => observer.beforeRequest(request));
+    const broker = {
+      async resolveDurably(requestId: string, decision: { kind: "allow-once" }) {
+        await observer.afterResolved(request, decision, { kind: "surface" });
+        return requestId === request.id;
+      },
+    } as never;
+
+    await expect(observer.resolveWithSurfaceTicket(broker, {
+      assignmentId: binding.assignmentId,
+      requestId: request.id,
+      ticketId: "ticket-authorized",
+      surfacePrincipal: binding.surfacePrincipal,
+      decision: { kind: "allow-once" },
+    })).resolves.toBe(true);
+    expect(finishAndMirror).toHaveBeenCalledWith(
+      binding.assignmentId,
+      request.id,
+      expect.objectContaining({
+        authority: { via: "surface-ticket", ticketId: "ticket-authorized" },
+        by: binding.surfacePrincipal,
+      }),
+      binding.context,
+    );
+  });
+
+  it("coalesces an identical in-flight surface answer and rejects a conflicting one", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const binding = {
+      assignmentId: "assignment-concurrent",
+      surfacePrincipal: "surface:origin",
+      ledger: {
+        requestInteraction: vi.fn(async () => ({
+          accepted: true,
+          recordSeq: 1,
+          display: { title: "Approve", lines: ["write file"] },
+        })),
+        interactionStreamEvents: vi.fn(async () => []),
+      },
+      submission: { finishAndMirror: vi.fn(async () => undefined) },
+      context: {},
+      stream: { append: vi.fn(async () => undefined) },
+      streamMeta: {},
+    } as unknown as DurableInteractionBinding;
+    const request = {
+      id: "request-concurrent",
+      tool: "Write",
+      display: { title: "Approve", body: { path: "report.md" } },
+      createdAt: Date.parse("2026-07-23T00:00:00.000Z"),
+      expiresAt: Date.parse("2026-07-23T00:01:00.000Z"),
+    } as never;
+    const observer = new DurableConversationInteractionObserver();
+    await observer.withBinding(binding, () => observer.beforeRequest(request));
+    const resolveDurably = vi.fn(async (
+      _requestId: string,
+      decision: { kind: "allow-once" },
+    ) => {
+      await gate;
+      await observer.afterResolved(request, decision, { kind: "surface" });
+      return true;
+    });
+    const broker = { resolveDurably } as never;
+    const answer = {
+      assignmentId: binding.assignmentId,
+      requestId: request.id,
+      ticketId: "ticket-concurrent",
+      surfacePrincipal: binding.surfacePrincipal,
+      decision: { kind: "allow-once" as const },
+    };
+
+    const first = observer.resolveWithSurfaceTicket(broker, answer);
+    const duplicate = observer.resolveWithSurfaceTicket(broker, answer);
+    await expect(
+      observer.resolveWithSurfaceTicket(broker, {
+        ...answer,
+        decision: { kind: "deny", reason: "different" },
+      }),
+    ).rejects.toThrow("different surface answer");
+    expect(resolveDurably).toHaveBeenCalledTimes(1);
+
+    release();
+    await expect(Promise.all([first, duplicate])).resolves.toEqual([true, true]);
+  });
 });

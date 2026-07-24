@@ -290,8 +290,14 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
       }
     | {
         t: "abort-requested";
-        via: "owner-fence" | "abort-ticket";
+        via: "owner-fence";
         refId: string;
+      }
+    | {
+        t: "abort-requested";
+        via: "abort-ticket";
+        refId: string;
+        surfacePrincipal: string;
       }
     | { t: "halted"; proof: CancelProofBody }
     | {

@@ -431,12 +431,16 @@ export function ownerControlRequestDigest(input: {
   });
 }
 
-export function acceptedRemoteIntervalRemainingMs(input: {
+export type AcceptedRemoteIntervalStatus =
+  | { readonly kind: "active"; readonly remainingMs: number }
+  | { readonly kind: "expired" };
+
+export function acceptedRemoteIntervalStatus(input: {
   readonly issuedAt: string;
   readonly expiry: string;
   readonly acceptedAt: string;
   readonly maxTtlMs: number;
-}): number {
+}): AcceptedRemoteIntervalStatus {
   const issuedAt = parseCanonicalTime(input.issuedAt, "Remote interval issuedAt");
   const expiry = parseCanonicalTime(input.expiry, "Remote interval expiry");
   const acceptedAt = parseCanonicalTime(input.acceptedAt, "Remote interval acceptedAt");
@@ -450,15 +454,27 @@ export function acceptedRemoteIntervalRemainingMs(input: {
     throw new TypeError("Remote interval TTL is outside the protocol limit");
   }
   const skew = acceptedAt - issuedAt;
-  if (skew < -MAX_CLOCK_SKEW_MS || skew >= ttlMs + MAX_CLOCK_SKEW_MS) {
+  if (skew < -MAX_CLOCK_SKEW_MS) {
     throw new TypeError("Remote interval is outside the accepted clock-skew window");
   }
   const elapsedMs = Math.max(0, skew - MAX_CLOCK_SKEW_MS);
   const remainingMs = ttlMs - elapsedMs;
-  if (remainingMs <= 0) {
-    throw new TypeError("Remote interval is expired at local acceptance");
+  return remainingMs <= 0
+    ? { kind: "expired" }
+    : { kind: "active", remainingMs };
+}
+
+export function acceptedRemoteIntervalRemainingMs(input: {
+  readonly issuedAt: string;
+  readonly expiry: string;
+  readonly acceptedAt: string;
+  readonly maxTtlMs: number;
+}): number {
+  const status = acceptedRemoteIntervalStatus(input);
+  if (status.kind === "expired") {
+    throw new TypeError("Remote interval is outside the accepted clock-skew window");
   }
-  return remainingMs;
+  return status.remainingMs;
 }
 
 export function validateOwnerControlGrant(

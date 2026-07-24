@@ -1172,13 +1172,13 @@
     },
     {
       "kind": "import",
-      "references": 41,
+      "references": 42,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/executor"
     },
@@ -1244,13 +1244,13 @@
     },
     {
       "kind": "type-import",
-      "references": 31,
+      "references": 32,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 9,
+      "references": 10,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/executor"
     },
@@ -1262,7 +1262,7 @@
     },
     {
       "kind": "type-import",
-      "references": 17,
+      "references": 19,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1340,7 +1340,7 @@
     },
     {
       "kind": "import",
-      "references": 10,
+      "references": 12,
       "sourceZone": "executor",
       "target": "package:@zhixing/core"
     },
@@ -1352,7 +1352,7 @@
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 7,
       "sourceZone": "executor",
       "target": "package:@zhixing/core"
     },
@@ -1430,13 +1430,13 @@
     },
     {
       "kind": "import",
-      "references": 25,
+      "references": 27,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 15,
+      "references": 17,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },

@@ -27,6 +27,8 @@ import type {
   DispatchConflictProof,
   DispatchRejectionProof,
   DispatchResult,
+  ExecutionAbortRequest,
+  ExecutionRef,
   ExecutionManifest,
   LedgerEvidencePage,
   LedgerSnapshot,
@@ -61,6 +63,7 @@ import {
   applyValidatedAssignmentEntry,
   assignmentLedgerSeed,
   canonicalize,
+  confirmationDecisionDigest,
   controlLeaseBindsDispatchEnvelope,
   controlLeaseIdentityDigest,
   conversationBundleRoots,
@@ -71,6 +74,7 @@ import {
   createSignedConversationInteractionMirrorBatch,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
+  dataPlaneTicketDigest,
   jobBundleRoots,
   mutationBatchArtifact,
   interactionMirrorSeed,
@@ -96,6 +100,8 @@ import {
   validateConversationActivation,
   validateConversationEnvelope,
   validateDispatchControlBinding,
+  validateExecutionAbortRequest,
+  validateFirstPartyInteractionDecision,
   validateJobActivation,
   validateJobEnvelope,
   validateJobSealedBundle,
@@ -106,11 +112,13 @@ import {
   type ConversationInteractionOutcome,
   type AssignmentLedgerValidationState,
   type ExecutorCapabilitySnapshot,
+  type FirstPartyInteractionDecision,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type StreamDataFramePayload,
 } from "@zhixing/core/protocol";
 import type { ExecutorAssignmentResourceCoordinator } from "./resource-governor.js";
+import type { DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 
 type ConversationEnvelope = Extract<
@@ -211,6 +219,7 @@ export interface AssignmentLedgerOptions {
   readonly surfaceAbort?: {
     authorize(assignmentId: string, input: SurfaceAbortInput): void;
   };
+  readonly dataPlaneTickets?: Pick<DataPlaneTicketRegistry, "authorize">;
   readonly maxPendingInteractions?: number;
   readonly maxCachedAssignments?: number;
 }
@@ -339,6 +348,22 @@ export interface SurfaceAbortInput {
   readonly ticketDigest: string;
   readonly surfacePrincipal: string;
 }
+
+export type SurfaceInteractionAnswerPreparation =
+  | {
+      readonly kind: "authorized";
+      readonly decision: FirstPartyInteractionDecision;
+      readonly ticketId: string;
+      readonly surfacePrincipal: string;
+    }
+  | {
+      readonly kind: "replayed";
+      readonly result: ConversationInteractionMirrorEntry;
+    };
+
+export type SurfaceAbortDisposition =
+  | { readonly kind: "accepted" }
+  | { readonly kind: "terminal" };
 
 interface FinishedInteraction {
   readonly body: Extract<AssignmentRecord, { t: "interaction-finished" }>;
@@ -469,6 +494,7 @@ export class ConversationAssignmentLedger implements
   readonly #usageFinal: NonNullable<AssignmentLedgerOptions["usageFinal"]>;
   readonly #resources: ExecutorAssignmentResourceCoordinator | undefined;
   readonly #surfaceAbort: AssignmentLedgerOptions["surfaceAbort"];
+  readonly #dataPlaneTickets: AssignmentLedgerOptions["dataPlaneTickets"];
   readonly #maxPendingInteractions: number;
   readonly #maxCachedAssignments: number;
   readonly #operations = new SerialTaskQueue();
@@ -506,6 +532,7 @@ export class ConversationAssignmentLedger implements
       ((assignmentId) => zeroAssignmentUsageFinal(assignmentId));
     this.#resources = options.resources;
     this.#surfaceAbort = options.surfaceAbort;
+    this.#dataPlaneTickets = options.dataPlaneTickets;
     this.#maxPendingInteractions =
       options.maxPendingInteractions ?? DEFAULT_MAX_PENDING_INTERACTIONS;
     if (
@@ -980,6 +1007,64 @@ export class ConversationAssignmentLedger implements
     });
   }
 
+  async abortWithTicket(
+    input: ExecutionAbortRequest,
+  ): Promise<SurfaceAbortDisposition> {
+    const request = validateExecutionAbortRequest(input, this.#verifier);
+    const ticketDigest = dataPlaneTicketDigest(request.ticket);
+    const existing = await this.#select(request.assignmentId, (state) => ({
+      matching: state.aborts.some(
+        (abort) =>
+          abort.via === "abort-ticket" &&
+          abort.refId === ticketDigest &&
+          abort.surfacePrincipal === request.ticket.surfacePrincipal,
+      ),
+      conflicting: state.aborts.some(
+        (abort) =>
+          abort.via === "abort-ticket" &&
+          (abort.refId !== ticketDigest ||
+            abort.surfacePrincipal !== request.ticket.surfacePrincipal),
+      ),
+      terminal: surfaceOperationIsTerminal(state),
+    }));
+    if (existing.matching) return { kind: "accepted" };
+    if (existing.conflicting) {
+      throw new Error("Assignment already has a different surface abort");
+    }
+    if (existing.terminal) return { kind: "terminal" };
+    const tickets = this.#dataPlaneTickets;
+    if (!tickets) {
+      throw new Error("Data-plane ticket authorization is not configured");
+    }
+    await tickets.authorize(request.ticket.ticketId, "abort", {
+      assignmentId: request.assignmentId,
+      ref: request.ref,
+      executorId: this.#executorId,
+      surfacePrincipal: request.ticket.surfacePrincipal,
+    });
+    await this.#requestAbort(request.assignmentId, {
+      cause: "abort-ticket",
+      ticketDigest,
+      surfacePrincipal: request.ticket.surfacePrincipal,
+    }, false);
+    return this.#select(request.assignmentId, (state) => {
+      if (
+        state.aborts.some(
+          (abort) =>
+            abort.via === "abort-ticket" &&
+            abort.refId === ticketDigest &&
+            abort.surfacePrincipal === request.ticket.surfacePrincipal,
+        )
+      ) {
+        return { kind: "accepted" as const };
+      }
+      if (surfaceOperationIsTerminal(state)) {
+        return { kind: "terminal" as const };
+      }
+      throw new Error("Surface abort produced no durable disposition");
+    });
+  }
+
   async supersede(
     assignmentId: string,
     fence: { fenceSeq: number; requestId: string },
@@ -1338,6 +1423,86 @@ export class ConversationAssignmentLedger implements
       }
       return events.sort((left, right) => left.recordSeq - right.recordSeq);
     });
+  }
+
+  async prepareInteractionAnswerFromSurface(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+    readonly ticketId: string;
+    readonly surfacePrincipal: string;
+    readonly decision: Parameters<typeof validateFirstPartyInteractionDecision>[0];
+  }): Promise<SurfaceInteractionAnswerPreparation> {
+    const decision = validateFirstPartyInteractionDecision(input.decision);
+    const expectedOutcome = surfaceTicketInteractionOutcome({
+      requestId: input.requestId,
+      ticketId: input.ticketId,
+      surfacePrincipal: input.surfacePrincipal,
+      decision,
+    });
+    const existing = await this.#select(input.assignmentId, (state) =>
+      state.finished.get(input.requestId),
+    );
+    if (existing) {
+      if (
+        canonicalize(existing.body.outcome) !== canonicalize(expectedOutcome)
+      ) {
+        throw new Error(
+          "Interaction requestId already has a different terminal result",
+        );
+      }
+      return { kind: "replayed", result: mirrorEntry(existing) };
+    }
+    const tickets = this.#dataPlaneTickets;
+    if (!tickets) {
+      throw new Error("Data-plane ticket authorization is not configured");
+    }
+    const binding = await this.dataPlaneBinding(input.assignmentId);
+    if (!binding) {
+      throw new Error("Interaction answer has no durable assignment activation");
+    }
+    const authorization = await tickets.authorize(
+      input.ticketId,
+      "interact",
+      {
+        assignmentId: input.assignmentId,
+        ref: binding.ref,
+        executorId: binding.executorId,
+        surfacePrincipal: input.surfacePrincipal,
+      },
+    );
+    return {
+      kind: "authorized",
+      decision,
+      ticketId: authorization.ticket.ticketId,
+      surfacePrincipal: authorization.ticket.surfacePrincipal,
+    };
+  }
+
+  async dataPlaneBinding(
+    assignmentId: string,
+  ): Promise<
+    {
+      readonly ref: ExecutionRef;
+      readonly executorId: string;
+      readonly ownerKeyId: string;
+    } | undefined
+  > {
+    assertIdentifier(assignmentId, "Data-plane assignment id");
+    return this.#select(assignmentId, (state) =>
+      state.received &&
+      (state.phase === "received" || state.phase === "started") &&
+      state.aborts.length === 0 &&
+      !state.supersedeFence
+        ? {
+            ref: snapshot(
+              state.received.body.activation.ref,
+              "Data-plane execution reference",
+            ),
+            executorId: this.#executorId,
+            ownerKeyId: state.received.body.activation.signature.keyId,
+          }
+        : undefined,
+    );
   }
 
   async pendingInteractionMirrors(
@@ -1843,11 +2008,81 @@ export class ConversationAssignmentLedger implements
   async recoverableConversationAssignments(): Promise<
     readonly ConversationEnvelope[]
   > {
-    return this.#conversationAssignmentsInPhases(new Set(["received", "sealed"]));
+    const phases = new Set<LedgerSnapshot["phase"]>(["received", "sealed"]);
+    return this.#conversationAssignmentsMatching(
+      (state) => phases.has(state.phase) && state.aborts.length === 0,
+    );
+  }
+
+  async recoverableConversationCancellations(): Promise<
+    readonly ConversationEnvelope[]
+  > {
+    return this.#conversationAssignmentsMatching(
+      (state) =>
+        state.aborts.some((abort) => abort.via === "abort-ticket") &&
+        (state.phase === "received" ||
+          state.phase === "started" ||
+          state.phase === "halted"),
+    );
+  }
+
+  async conversationAssignmentForRecovery(
+    assignmentId: string,
+  ): Promise<ConversationEnvelope | undefined> {
+    assertIdentifier(assignmentId, "Conversation recovery assignment id");
+    const envelopeRef = await this.#select(
+      assignmentId,
+      (state) => state.received?.body.envelope.ref,
+    );
+    return envelopeRef
+      ? this.#loadConversationEnvelope(assignmentId, envelopeRef)
+      : undefined;
+  }
+
+  async hasPendingTicketCancellation(assignmentId: string): Promise<boolean> {
+    return this.#select(
+      assignmentId,
+      (state) =>
+        state.aborts.some((abort) => abort.via === "abort-ticket") &&
+        state.phase !== "failed" &&
+        state.phase !== "sealed" &&
+        state.phase !== "acked",
+    );
+  }
+
+  async continueTicketCancellation(
+    assignmentId: string,
+  ): Promise<CancelProofBody | undefined> {
+    const abort = await this.#select(assignmentId, (state) =>
+      [...state.aborts]
+        .reverse()
+        .find(
+          (
+            candidate,
+          ): candidate is Extract<
+            AssignmentRecord,
+            { t: "abort-requested"; via: "abort-ticket" }
+          > => candidate.via === "abort-ticket",
+        ),
+    );
+    if (!abort) return undefined;
+    return this.#requestAbort(assignmentId, {
+      cause: "abort-ticket",
+      ticketDigest: abort.refId,
+      surfacePrincipal: abort.surfacePrincipal,
+    });
   }
 
   async #conversationAssignmentsInPhases(
     phases: ReadonlySet<LedgerSnapshot["phase"]>,
+  ): Promise<readonly ConversationEnvelope[]> {
+    return this.#conversationAssignmentsMatching((state) =>
+      phases.has(state.phase),
+    );
+  }
+
+  async #conversationAssignmentsMatching(
+    predicate: (state: LedgerProjection) => boolean,
   ): Promise<readonly ConversationEnvelope[]> {
     const assignmentIds = new Set<string>();
     for (const commit of await this.#log.readAll<unknown>()) {
@@ -1860,16 +2095,30 @@ export class ConversationAssignmentLedger implements
     for (const assignmentId of [...assignmentIds].sort((left, right) =>
       left.localeCompare(right, "en-US"))) {
       const envelopeRef = await this.#select(assignmentId, (state) =>
-        phases.has(state.phase) && state.received
+        predicate(state) && state.received
           ? state.received.body.envelope.ref
           : undefined);
       if (!envelopeRef) continue;
-      const bytes = await this.#artifacts.get(envelopeRef);
-      const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
-      if (raw.execution !== "conversation") continue;
-      envelopes.push(validateConversationEnvelope(raw, this.#verifier));
+      const envelope = await this.#loadConversationEnvelope(
+        assignmentId,
+        envelopeRef,
+      );
+      if (envelope) envelopes.push(envelope);
     }
     return envelopes;
+  }
+
+  async #loadConversationEnvelope(
+    assignmentId: string,
+    envelopeRef: ArtifactRef,
+  ): Promise<ConversationEnvelope | undefined> {
+    const bytes = await this.#artifacts.get(envelopeRef);
+    const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
+    if (raw.assignmentId !== assignmentId) {
+      throw corruptLedger("Assignment envelope does not bind its ledger");
+    }
+    if (raw.execution !== "conversation") return undefined;
+    return validateConversationEnvelope(raw, this.#verifier);
   }
 
   async cancelProof(assignmentId: string): Promise<CancelProofBody | undefined> {
@@ -2228,76 +2477,61 @@ export class ConversationAssignmentLedger implements
   async #requestAbort(
     assignmentId: string,
     cause: AbortCause,
+    complete = true,
   ): Promise<CancelProofBody | undefined> {
-    const governed = await this.#select(assignmentId, (state) => {
-      const lease = state.received?.resourceLease;
-      return lease !== undefined && requiresFormalResourceCoordination(lease);
-    });
-    const finalUsage = snapshot(
-      governed
-        ? await this.#usageFinal(assignmentId)
-        : zeroAssignmentUsageFinal(assignmentId),
-      "Final usage report",
-    );
-    assertDigest(finalUsage.reportDigest, "Final usage report digest");
-    assertNonNegativeSafeInteger(finalUsage.upToUsageSeq, "Final usage sequence");
-    const transaction = await this.#transact<CancelProofBody | undefined>(
+    const prefix = await this.#transact<{
+      readonly proof?: CancelProofBody;
+      readonly ready: boolean;
+    }>(
       assignmentId,
       (state) => {
-        if (state.halted) return { kind: "return", value: state.halted };
+        if (state.halted) {
+          return {
+            kind: "return",
+            value: { proof: state.halted, ready: false },
+          };
+        }
         if (
           state.phase === "failed" ||
           state.phase === "sealed" ||
           state.phase === "acked"
         ) {
-          return { kind: "return", value: undefined };
+          return { kind: "return", value: { ready: false } };
         }
         if (state.phase === "dispatch-rejected" || state.supersedeFence) {
-          return { kind: "return", value: undefined };
+          return { kind: "return", value: { ready: false } };
         }
-
-        const receivedRef = state.received?.body.activation.ref;
-        const receivedAuthority = receivedRef
-          ? receivedRef.execution === "conversation"
-            ? {
-                execution: "conversation" as const,
-                conversationId: receivedRef.conversationId,
-                ownerEpoch: receivedRef.ownerEpoch,
-              }
-            : {
-                execution: "job" as const,
-                taskId: receivedRef.taskId,
-                anchorEpoch: receivedRef.anchorEpoch,
-              }
-          : undefined;
-        const authority =
-          cause.cause === "owner-fence" ? cause.authority : receivedAuthority;
-        if (!authority) {
-          throw new Error("Cancellation has no authority binding");
-        }
-        if (
-          receivedAuthority &&
-          canonicalize(receivedAuthority) !== canonicalize(authority)
-        ) {
-          throw new Error("Cancellation authority does not bind the received assignment");
-        }
+        assertAbortAuthority(state, cause);
 
         let recordSeq = state.lastSeq;
-        let ledgerDigest = state.chainDigest;
         const entries: AssignmentEntry[] = [];
         const append = (body: AssignmentRecord) => {
           const entry = {
             recordSeq: ++recordSeq,
             body: snapshot(body, "Cancellation record"),
           };
-          ledgerDigest = advanceAssignmentLedger(ledgerDigest, entry);
           entries.push(entry);
         };
         const via = cause.cause === "owner-fence" ? "owner-fence" : "abort-ticket";
         const refId =
           cause.cause === "owner-fence" ? cause.fence.requestId : cause.ticketDigest;
         if (!state.aborts.some((abort) => abort.via === via && abort.refId === refId)) {
-          append({ v: 1, t: "abort-requested", via, refId });
+          if (cause.cause === "owner-fence") {
+            append({
+              v: 1,
+              t: "abort-requested",
+              via: "owner-fence",
+              refId: cause.fence.requestId,
+            });
+          } else {
+            append({
+              v: 1,
+              t: "abort-requested",
+              via: "abort-ticket",
+              refId: cause.ticketDigest,
+              surfacePrincipal: cause.surfacePrincipal,
+            });
+          }
         }
         for (const request of state.pendingRequests.values()) {
           append({
@@ -2318,15 +2552,74 @@ export class ConversationAssignmentLedger implements
           state.mirroredFinishedCount !== state.finishedOrder.length ||
           state.pendingRequests.size > 0;
         if (openEffect || hasUnmirroredInteraction) {
+          if (entries.length === 0) {
+            return { kind: "return", value: { ready: false } };
+          }
           return {
-            kind: entries.length === 0 ? "return" : "append",
-            ...(entries.length === 0
-              ? { value: undefined }
-              : {
-                  entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
-                  value: undefined,
-                }),
-          } as ProjectionTransactionDecision<AssignmentEntry, CancelProofBody | undefined>;
+            kind: "append",
+            entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+            value: { ready: false },
+          };
+        }
+        if (entries.length === 0) {
+          return { kind: "return", value: { ready: true } };
+        }
+        return {
+          kind: "append",
+          entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+          value: { ready: true },
+        };
+      },
+    );
+    if (prefix.value.proof) return prefix.value.proof;
+    if (!complete || !prefix.value.ready) return undefined;
+    return this.#completeAbort(assignmentId, cause);
+  }
+
+  async #completeAbort(
+    assignmentId: string,
+    cause: AbortCause,
+  ): Promise<CancelProofBody | undefined> {
+    const governed = await this.#select(assignmentId, (state) => {
+      const lease = state.received?.resourceLease;
+      return lease !== undefined && requiresFormalResourceCoordination(lease);
+    });
+    const finalUsage = snapshot(
+      governed
+        ? await this.#usageFinal(assignmentId)
+        : zeroAssignmentUsageFinal(assignmentId),
+      "Final usage report",
+    );
+    assertDigest(finalUsage.reportDigest, "Final usage report digest");
+    assertNonNegativeSafeInteger(finalUsage.upToUsageSeq, "Final usage sequence");
+    const transaction = await this.#transact<CancelProofBody | undefined>(
+      assignmentId,
+      (state) => {
+        if (state.halted) return { kind: "return", value: state.halted };
+        if (
+          state.phase === "failed" ||
+          state.phase === "sealed" ||
+          state.phase === "acked" ||
+          state.phase === "dispatch-rejected" ||
+          state.supersedeFence
+        ) {
+          return { kind: "return", value: undefined };
+        }
+        const authority = assertAbortAuthority(state, cause);
+        const via = cause.cause === "owner-fence" ? "owner-fence" : "abort-ticket";
+        const refId =
+          cause.cause === "owner-fence" ? cause.fence.requestId : cause.ticketDigest;
+        if (!state.aborts.some((abort) => abort.via === via && abort.refId === refId)) {
+          return { kind: "return", value: undefined };
+        }
+        const openEffect = [...state.sideEffects.values()].some(
+          (effect) => !effect.completed,
+        );
+        const hasUnmirroredInteraction =
+          state.mirroredFinishedCount !== state.finishedOrder.length ||
+          state.pendingRequests.size > 0;
+        if (openEffect || hasUnmirroredInteraction) {
+          return { kind: "return", value: undefined };
         }
         const decision = state.started ? "halted" : "not-started";
         const proof = signCancelProof(
@@ -2335,9 +2628,9 @@ export class ConversationAssignmentLedger implements
             assignmentId,
             executorId: this.#executorId,
             authority,
-            lastRecordSeq: recordSeq,
+            lastRecordSeq: state.lastSeq,
             usageFinal: finalUsage,
-            ledgerDigest,
+            ledgerDigest: state.chainDigest,
             issuedAt: this.#clock(),
             ...(cause.cause === "owner-fence"
               ? { cause: "owner-fence" as const, fence: cause.fence }
@@ -2355,10 +2648,10 @@ export class ConversationAssignmentLedger implements
           },
           this.#signer,
         );
-        append({ v: 1, t: "halted", proof });
+        const entry = nextEntry(state, { v: 1, t: "halted", proof });
         return {
           kind: "append",
-          entries: entries.map((entry) => assignmentRecord(assignmentId, entry)),
+          entries: [assignmentRecord(assignmentId, entry)],
           value: proof,
         };
       },
@@ -3216,6 +3509,36 @@ export class InProcessAssignmentSubmission {
   }
 }
 
+function assertAbortAuthority(
+  state: LedgerProjection,
+  cause: AbortCause,
+): AuthorityEpochRef {
+  const receivedRef = state.received?.body.activation.ref;
+  const receivedAuthority = receivedRef
+    ? receivedRef.execution === "conversation"
+      ? {
+          execution: "conversation" as const,
+          conversationId: receivedRef.conversationId,
+          ownerEpoch: receivedRef.ownerEpoch,
+        }
+      : {
+          execution: "job" as const,
+          taskId: receivedRef.taskId,
+          anchorEpoch: receivedRef.anchorEpoch,
+        }
+    : undefined;
+  const authority =
+    cause.cause === "owner-fence" ? cause.authority : receivedAuthority;
+  if (!authority) throw new Error("Cancellation has no authority binding");
+  if (
+    receivedAuthority &&
+    canonicalize(receivedAuthority) !== canonicalize(authority)
+  ) {
+    throw new Error("Cancellation authority does not bind the received assignment");
+  }
+  return authority;
+}
+
 function ledgerSnapshot(state: LedgerProjection): LedgerSnapshot {
   return {
     v: 1,
@@ -3351,6 +3674,40 @@ function mirrorEntry(finished: FinishedInteraction): ConversationInteractionMirr
     outcome: snapshot(finished.body.outcome, "Interaction outcome"),
     at: finished.at,
   });
+}
+
+function surfaceTicketInteractionOutcome(input: {
+  readonly requestId: string;
+  readonly ticketId: string;
+  readonly surfacePrincipal: string;
+  readonly decision: FirstPartyInteractionDecision;
+}): ConversationInteractionOutcome {
+  const allowed = input.decision.kind === "allow-once";
+  const reason =
+    input.decision.kind === "deny"
+      ? input.decision.reason
+      : input.decision.note;
+  return validateConversationInteractionOutcome({
+    t: "answered",
+    authority: { via: "surface-ticket", ticketId: input.ticketId },
+    decision: { allowed, ...(reason ? { reason } : {}) },
+    decisionDigest: confirmationDecisionDigest(
+      input.requestId,
+      input.decision,
+    ),
+    by: input.surfacePrincipal,
+  });
+}
+
+function surfaceOperationIsTerminal(state: LedgerProjection): boolean {
+  return (
+    state.halted !== undefined ||
+    state.phase === "failed" ||
+    state.phase === "sealed" ||
+    state.phase === "acked" ||
+    state.phase === "dispatch-rejected" ||
+    state.supersedeFence !== undefined
+  );
 }
 
 function selectPendingInteractionMirrors(

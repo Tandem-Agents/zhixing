@@ -20,6 +20,10 @@
     "./assignment-stream-spool": {
       "types": "./dist/assignment-stream-spool.d.ts",
       "import": "./dist/assignment-stream-spool.js"
+    },
+    "./data-plane-ticket-registry": {
+      "types": "./dist/data-plane-ticket-registry.d.ts",
+      "import": "./dist/data-plane-ticket-registry.js"
     }
   },
   "files": ["dist"],

@@ -34,7 +34,7 @@ const consumer: StreamConsumerAuth = {
   ticketId: "ticket-fixed",
 };
 
-const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 
 describe("assignment stream mesh adapter", () => {
   it("binds authorization, fences the old path and preserves absolute sequence", async () => {

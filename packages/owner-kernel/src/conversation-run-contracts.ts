@@ -6,6 +6,7 @@ import type {
   ConversationInvocation,
   ConversationUncertainClosure,
   ConversationRunState,
+  DataPlaneTicket,
   Digest,
   DispatchConflictProof,
   IngressContext,
@@ -31,6 +32,7 @@ import {
   validateCancelProof,
   validateConversationInteractionMirrorBatch,
   validateConversationInvocation,
+  validateDataPlaneTicket,
   validateDispatchConflictProof,
   validateIngressContext,
   validateNonEmptyUserTurnInput,
@@ -113,6 +115,13 @@ export type ConversationRunJournalRecord =
       readonly capId: string;
       readonly assignmentId: string;
     }
+  | {
+      readonly t: "ticket-issued";
+      readonly ticket: DataPlaneTicket;
+      readonly replacesTicketId?: string;
+    }
+  | { readonly t: "ticket-revoked"; readonly ticketId: string }
+  | { readonly t: "ticket-sync-frontier"; readonly expiresThrough: string }
   | {
       readonly t: "interaction-mirror";
       readonly assignmentId: string;
@@ -236,6 +245,12 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
   "supersede-started-observed": { required: ["assignmentId", "proof", "t"] },
   "cancel-fence": { required: ["assignmentId", "fenceSeq", "requestId", "t"] },
   "capability-revoked": { required: ["assignmentId", "capId", "t"] },
+  "ticket-issued": {
+    required: ["t", "ticket"],
+    optional: ["replacesTicketId"],
+  },
+  "ticket-revoked": { required: ["t", "ticketId"] },
+  "ticket-sync-frontier": { required: ["expiresThrough", "t"] },
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
   state: {
     required: ["runId", "state", "statusRevision", "t"],
@@ -360,6 +375,18 @@ export function validateConversationRunRecord(
         }
         break;
       }
+      case "ticket-issued":
+        validateDataPlaneTicket(value.ticket, verifier);
+        if (value.replacesTicketId !== undefined) {
+          assertIdentifier(value.replacesTicketId, "Replaced ticket id");
+        }
+        break;
+      case "ticket-revoked":
+        assertIdentifier(value.ticketId, "Revoked ticket id");
+        break;
+      case "ticket-sync-frontier":
+        assertCanonicalTime(value.expiresThrough, "Ticket sync frontier");
+        break;
       case "dispatch-acked":
         assertIdentifier(value.assignmentId, "Dispatch acknowledgement assignment id");
         break;
@@ -899,6 +926,7 @@ type DurableSourceBinding = {
   readonly assignmentId: string;
   readonly executorId: string;
   readonly dispatchDigest: string;
+  readonly abortTicketProofBindsDurableSource: boolean;
   readonly supersedeRequest?: {
     readonly fenceSeq: number;
     readonly requestId: string;
@@ -943,7 +971,9 @@ export function terminationProofBindsDurableSource(
   if (!authorityMatches) {
     return false;
   }
-  if (cancelProof.cause === "abort-ticket") return true;
+  if (cancelProof.cause === "abort-ticket") {
+    return input.abortTicketProofBindsDurableSource;
+  }
   return (
     input.cancelFence !== undefined &&
     cancelProof.fence.fenceSeq === input.cancelFence.fenceSeq &&
