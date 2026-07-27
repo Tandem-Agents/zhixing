@@ -1,7 +1,11 @@
 import { randomBytes } from "node:crypto";
 import {
+  link,
   open,
+  readFile,
+  rename,
   stat,
+  unlink,
   type FileHandle,
 } from "node:fs/promises";
 import path from "node:path";
@@ -45,7 +49,10 @@ import type {
   ProjectionTransactionReducer,
 } from "./interfaces.js";
 import {
+  AUTHORITY_WAL_FILE_HEADER_BYTES,
   type AuthorityWalReader,
+  decodeAuthorityWalFileHeader,
+  encodeAuthorityWalFileHeader,
   encodeAuthorityWalFrame,
   scanAuthorityWalFrames,
 } from "./wal-frame.js";
@@ -53,7 +60,7 @@ import {
 export const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const STREAM_PATTERN = /^(?:control|publish|governor|final-outbox|trust|exposure|delivery|pairing|checkpoint|(?:run|job|transfer|intent|assignment|executor):[^\u0000-\u001f\u007f]{1,480})$/u;
-const EMPTY_PROJECTION_PREFIX_DIGEST = protocolDigest("AuthorityProjectionPrefix", 1, {});
+const LOG_ID_BYTES = 32;
 
 export interface FileAuthorityCommitLogOptions {
   readonly clock?: () => IsoTime;
@@ -62,6 +69,7 @@ export interface FileAuthorityCommitLogOptions {
 }
 
 interface VerifiedLogTail {
+  readonly logId: string;
   readonly device: number;
   readonly inode: number;
   readonly bytes: number;
@@ -81,6 +89,7 @@ interface ScannedLog {
 class FileProjectionCursor implements ProjectionCursor {
   constructor(
     readonly lsn: number,
+    readonly logId: string,
     readonly logPath: string,
     readonly device: number | undefined,
     readonly inode: number | undefined,
@@ -94,6 +103,7 @@ class FileProjectionCursor implements ProjectionCursor {
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly rootDir: string;
   readonly logPath: string;
+  readonly identityPath: string;
   readonly quarantineDir: string;
   readonly artifactStore: FileArtifactStore;
   readonly #lockPath: string;
@@ -102,6 +112,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #lockWaitMs: number;
   readonly #operations = new SerialTaskQueue();
   #verifiedTail: VerifiedLogTail | undefined;
+  #logId: string | undefined;
+  #logFormat: "legacy" | "versioned" | undefined;
 
   constructor(
     rootDir: string,
@@ -110,6 +122,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   ) {
     this.rootDir = path.resolve(rootDir);
     this.logPath = path.join(this.rootDir, "authority.log");
+    this.identityPath = path.join(this.rootDir, "authority.log.identity");
     this.quarantineDir = path.join(this.rootDir, "bad-tail");
     this.artifactStore = artifactStore;
     this.#lockPath = path.join(this.rootDir, ".commit-log.lock");
@@ -348,11 +361,20 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     };
     const previousPrefixDigest =
       previousLsn === 0
-        ? EMPTY_PROJECTION_PREFIX_DIGEST
+        ? emptyLogPrefix(this.#requireLogId())
         : this.#requireVerifiedPrefix(previousLsn);
-    const prefixDigest = advanceProjectionPrefix(previousPrefixDigest, envelope);
+    const prefixDigest = advanceProjectionPrefix(
+      this.#requireLogId(),
+      previousPrefixDigest,
+      envelope,
+    );
     const bytes = Buffer.from(canonicalize(envelope), "utf8");
-    const frame = encodeAuthorityWalFrame(bytes);
+    const frame = encodeAuthorityWalFrame(
+      bytes,
+      this.#requireLogFormat() === "versioned"
+        ? { lsn, prefixDigest }
+        : undefined,
+    );
 
     await ensureDurableDirectory(this.rootDir);
     const existed = await fileExists(this.logPath);
@@ -377,7 +399,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       this.#verifiedTail = undefined;
       return 0;
     }
-    if (this.#verifiedTail && tailMatches(this.#verifiedTail, metadata)) {
+    if (
+      this.#verifiedTail &&
+      tailMatches(this.#verifiedTail, metadata, this.#requireLogId())
+    ) {
       return this.#verifiedTail.lastLsn;
     }
     return this.#readAndRecover();
@@ -411,7 +436,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       return { lastLsn: 0, cursor: this.#projectionCursor(0) };
     }
 
-    if (cursor && canResumeProjectionCursor(cursor, this.logPath, metadata)) {
+    if (
+      cursor &&
+      canResumeProjectionCursor(
+        cursor,
+        this.logPath,
+        this.#requireLogId(),
+        metadata,
+      )
+    ) {
       const scanned = await this.#scanLogFrom(
         cursor.byteOffset,
         cursor.lsn,
@@ -428,11 +461,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       };
     }
 
-    let observedPrefixDigest = EMPTY_PROJECTION_PREFIX_DIGEST;
+    let observedPrefixDigest = emptyLogPrefix(this.#requireLogId());
     let prefixMatches =
-      cursor?.lsn === 0 && cursor.prefixDigest === EMPTY_PROJECTION_PREFIX_DIGEST;
+      cursor?.lsn === 0 &&
+      cursor.logId === this.#requireLogId() &&
+      cursor.prefixDigest === observedPrefixDigest;
     const lastLsn = await this.#readAndRecover((envelope) => {
-      observedPrefixDigest = advanceProjectionPrefix(observedPrefixDigest, envelope);
+      observedPrefixDigest = advanceProjectionPrefix(
+        this.#requireLogId(),
+        observedPrefixDigest,
+        envelope,
+      );
       if (cursor && envelope.lsn === cursor.lsn) {
         prefixMatches = observedPrefixDigest === cursor.prefixDigest;
       }
@@ -450,7 +489,12 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   async #scanLog(
     visit: (envelope: CommitEnvelope<JsonValue>) => void = () => undefined,
   ): Promise<ScannedLog> {
-    return this.#scanLogFrom(0, 0, EMPTY_PROJECTION_PREFIX_DIGEST, visit);
+    return this.#scanLogFrom(
+      this.#logDataStartOffset(),
+      0,
+      emptyLogPrefix(this.#requireLogId()),
+      visit,
+    );
   }
 
   async #scanLogFrom(
@@ -483,9 +527,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           "Projection cursor is beyond the end of the commit log",
         );
       }
+      const logId = this.#requireLogId();
       const scanned = await scanAuthorityWalFrames(
         fileReader(handle, metadata.size - startOffset, startOffset),
-        (payload) => {
+        (payload, offset, frameMetadata) => {
           const envelope = parseEnvelope(payload);
           if (envelope.lsn !== expectedLsn) {
             throw new AuthorityStorageError(
@@ -494,7 +539,18 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             );
           }
           expectedLsn += 1;
-          prefixDigest = advanceProjectionPrefix(prefixDigest, envelope);
+          prefixDigest = advanceProjectionPrefix(logId, prefixDigest, envelope);
+          const frameProofIsValid =
+            this.#requireLogFormat() === "versioned"
+              ? frameMetadata?.lsn === envelope.lsn &&
+                frameMetadata.prefixDigest === prefixDigest
+              : frameMetadata === undefined;
+          if (!frameProofIsValid) {
+            throw new AuthorityStorageError(
+              "commit-log-corrupt",
+              `Authority WAL frame proof is invalid at byte ${startOffset + offset}`,
+            );
+          }
           visit(envelope);
         },
       );
@@ -544,6 +600,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
     this.#verifiedTail = metadata
       ? {
+          logId: this.#requireLogId(),
           device: metadata.dev,
           inode: metadata.ino,
           bytes: metadata.size,
@@ -560,6 +617,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (tail?.lastLsn === lastLsn) {
       return new FileProjectionCursor(
         lastLsn,
+        tail.logId,
         this.logPath,
         tail.device,
         tail.inode,
@@ -572,13 +630,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (lastLsn === 0) {
       return new FileProjectionCursor(
         0,
+        this.#requireLogId(),
         this.logPath,
         undefined,
         undefined,
-        0,
+        this.#logDataStartOffset(),
         undefined,
         undefined,
-        EMPTY_PROJECTION_PREFIX_DIGEST,
+        emptyLogPrefix(this.#requireLogId()),
       );
     }
     throw new AuthorityStorageError(
@@ -597,6 +656,154 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     return this.#verifiedTail.prefixDigest;
   }
 
+  #requireLogId(): string {
+    if (this.#logId === undefined) {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Authority commit log identity is not initialized",
+      );
+    }
+    return this.#logId;
+  }
+
+  #requireLogFormat(): "legacy" | "versioned" {
+    if (this.#logFormat === undefined) {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Authority commit log format is not initialized",
+      );
+    }
+    return this.#logFormat;
+  }
+
+  #logDataStartOffset(): number {
+    return this.#requireLogFormat() === "versioned"
+      ? AUTHORITY_WAL_FILE_HEADER_BYTES
+      : 0;
+  }
+
+  async #ensureInitialized(): Promise<void> {
+    const metadata = await stat(this.logPath).catch((error: unknown) => {
+      if (isNodeError(error, "ENOENT")) return null;
+      throw error;
+    });
+    if (!metadata) {
+      await this.#installEmptyLog();
+      return;
+    }
+    if (metadata.size >= AUTHORITY_WAL_FILE_HEADER_BYTES) {
+      const handle = await open(this.logPath, "r");
+      try {
+        const header = Buffer.alloc(AUTHORITY_WAL_FILE_HEADER_BYTES);
+        const { bytesRead } = await handle.read(
+          header,
+          0,
+          header.byteLength,
+          0,
+        );
+        if (bytesRead === header.byteLength) {
+          try {
+            this.#logId = decodeAuthorityWalFileHeader(header).logId;
+            this.#logFormat = "versioned";
+            return;
+          } catch {
+            // A non-header prefix may be the supported legacy frame format.
+          }
+        }
+      } finally {
+        await handle.close();
+      }
+    }
+    this.#logId = await this.#loadOrCreateLegacyLogId();
+    this.#logFormat = "legacy";
+  }
+
+  async #installEmptyLog(): Promise<void> {
+    const orphanedIdentity = await stat(this.identityPath).catch(
+      (error: unknown) => {
+        if (isNodeError(error, "ENOENT")) return undefined;
+        throw error;
+      },
+    );
+    if (orphanedIdentity) {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Authority WAL is missing while its legacy identity remains",
+      );
+    }
+    const temporaryPath = path.join(
+      this.rootDir,
+      `.authority-${randomBytes(8).toString("hex")}.tmp`,
+    );
+    const handle = await open(temporaryPath, "wx", 0o600);
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await rename(temporaryPath, this.logPath);
+      await syncDirectory(this.rootDir);
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => undefined);
+      if (isNodeError(error, "EEXIST")) {
+        this.#logId = undefined;
+        this.#logFormat = undefined;
+        await this.#ensureInitialized();
+        return;
+      }
+      throw error;
+    }
+    this.#logId = await this.#loadOrCreateLegacyLogId();
+    this.#logFormat = "legacy";
+    await this.#recordVerifiedTail(0, emptyLogPrefix(this.#logId));
+  }
+
+  async #loadOrCreateLegacyLogId(): Promise<string> {
+    const existing = await readFile(this.identityPath).catch(
+      (error: unknown) => {
+        if (isNodeError(error, "ENOENT")) return undefined;
+        throw error;
+      },
+    );
+    if (existing) {
+      return decodeAuthorityWalFileHeader(existing).logId;
+    }
+    const logIdBytes = randomBytes(LOG_ID_BYTES);
+    const temporaryPath = path.join(
+      this.rootDir,
+      `.authority-identity-${randomBytes(8).toString("hex")}.tmp`,
+    );
+    const target = await open(temporaryPath, "wx", 0o600);
+    try {
+      await target.writeFile(encodeAuthorityWalFileHeader(logIdBytes));
+      await target.sync();
+    } catch (error) {
+      await target.close().catch(() => undefined);
+      await unlink(temporaryPath).catch(() => undefined);
+      throw error;
+    }
+    await target.close();
+    try {
+      await link(temporaryPath, this.identityPath);
+      await syncDirectory(this.rootDir);
+      return logIdBytes.toString("base64url");
+    } catch (error) {
+      if (isNodeError(error, "EEXIST")) {
+        return decodeAuthorityWalFileHeader(
+          await readFile(this.identityPath),
+        ).logId;
+      }
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Atomic legacy WAL identity publication failed",
+        { cause: error },
+      );
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+  }
+
   async #withLogLock<T>(operation: () => Promise<T>): Promise<T> {
     return this.#operations.run(async () => {
       await ensureDurableDirectory(this.rootDir);
@@ -606,6 +813,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         resourceName: "AuthorityCommitLog",
       });
       try {
+        await this.#ensureInitialized();
         return await operation();
       } finally {
         await release();
@@ -792,14 +1000,20 @@ function assertTransactionReferencesProtected(
 }
 
 function advanceProjectionPrefix(
+  logId: string,
   previousDigest: string,
   envelope: CommitEnvelope<unknown>,
 ): string {
-  return protocolDigest("AuthorityProjectionPrefix", 1, {
+  return protocolDigest("AuthorityLogPrefix", 1, {
+    logId,
     previousDigest,
     lsn: envelope.lsn,
     envelopeDigest: envelope.envelopeDigest,
   });
+}
+
+function emptyLogPrefix(logId: string): string {
+  return protocolDigest("AuthorityLogPrefix", 1, { logId });
 }
 
 function fileReader(
@@ -830,9 +1044,11 @@ function fileReader(
 function canResumeProjectionCursor(
   cursor: FileProjectionCursor,
   logPath: string,
+  logId: string,
   metadata: Awaited<ReturnType<typeof stat>>,
 ): boolean {
   return (
+    cursor.logId === logId &&
     cursor.logPath === logPath &&
     cursor.device === metadata.dev &&
     cursor.inode === metadata.ino &&
@@ -855,8 +1071,10 @@ async function fileExists(file: string): Promise<boolean> {
 function tailMatches(
   tail: VerifiedLogTail,
   metadata: Awaited<ReturnType<typeof stat>>,
+  logId: string,
 ): boolean {
   return (
+    tail.logId === logId &&
     tail.device === metadata.dev &&
     tail.inode === metadata.ino &&
     tail.bytes === metadata.size &&
