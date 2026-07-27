@@ -17,3 +17,4 @@
 | 当前低资源 Windows 开发机执行 core 全包或含多项 fsync 的耐久 I/O 整文件测试，仅出现时限超时且无功能断言失败 | 包内并发或文件内累计 I/O 负载会使批次用例越过组级时限 | 保留首次结果，只隔离超时单例；定向通过后合并两份证据判定，禁止重跑原范围 | 全包其余 2449 项与定向 1/1 通过；整文件其余 8 项与定向 1/1 通过 | 测试预算、本机资源或 Vitest 调度语义变化 |
 | Windows 后台执行 CLI 全包并重定向机器结果 | `pnpm --filter @zhixing/cli exec vitest` 可能在测试中途由包装层报 `Command "vitest" not found`，零失败断言且不生成 JSON | 从 `packages/cli` 直接用 Node 启动包内 `node_modules/vitest/vitest.mjs`，保留相同 reporter、结果路径与硬截止 | 包装层中止后，直接启动同一测试集 174 文件、2447/2447 通过 | pnpm 包装层或后台进程托管方式变化，并经 CLI 全包验证 |
 | 当前低资源 Windows 开发机执行工作区全量构建 | 180 秒外层截止会在递归构建后段关闭输出并触发 `EPIPE`，已完成包被迫面临重复构建 | 首次硬截止按近期完整耗时的两倍设置为至少 450 秒；若外层仍中止，先确认进程已结束并按产物时间识别未完成包，只按依赖顺序补建缺失包 | 递归构建已完成 15/17 包后中止，随后仅补建 executor、CLI，17 包全部成功 | 工作区包数、构建编排、本机性能或外层截止语义变化 |
+| 包内 TypeScript 类型检查 | 仓库根 `pnpm exec tsc` 可能解析到非工作区版本并产生大量伪错误 | 使用 `pnpm --filter <包> exec tsc -p tsconfig.json --noEmit`，让命令从目标包解析工作区 TypeScript | core 包过滤命令零错误通过；根命令使用旧版本产生环境型伪错误 | TypeScript 依赖布局或 pnpm 解析语义变化 |
