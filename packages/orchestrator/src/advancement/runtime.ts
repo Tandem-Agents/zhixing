@@ -22,6 +22,7 @@ import {
 } from "@zhixing/core";
 import type { AgentResult, TokenUsage } from "@zhixing/core";
 import type { EvidenceCapabilitySet } from "@zhixing/core/advancement";
+import { runWithDeviceCapacity } from "@zhixing/core/resources";
 import {
   completeMissingRequiredEvidence,
   createDefaultAdvancementEvidenceProvider,
@@ -65,14 +66,43 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
   async reviewRun(
     input: AdvancementReviewRunInput,
   ): Promise<AdvancementReviewRunOutcome> {
+    // 整个 review 的主体是裁判的多轮 LLM 往返,属于网络等待,按容量合同不占
+    // permit;真正用本机资源的只有取证那一段,容量随之下沉到那里。
+    return this.reviewRunWithCapacityAtEvidence(input);
+  }
+
+  /** 本机取证受容量治理:它读工作区文件,是这条流程里唯一的本机批次。 */
+  private async collectEvidenceUnderCapacity(
+    input: AdvancementReviewRunInput,
+  ): Promise<readonly ReviewEvidence[]> {
+    const collect = () =>
+      this.evidenceProvider.collect({
+        ...input,
+        requirements: input.rubric.content.evidenceRequirements ?? [],
+      });
+    const capacity = this.options.deviceCapacity;
+    if (!capacity) return collect();
+    return runWithDeviceCapacity(
+      capacity.arbiter,
+      {
+        serviceClass: "workload-advancement",
+        atomic: capacity.atomic,
+        preferred: capacity.preferred,
+        maxWaitMs: capacity.maxWaitMs,
+      },
+      input.abortSignal ?? new AbortController().signal,
+      collect,
+    );
+  }
+
+  private async reviewRunWithCapacityAtEvidence(
+    input: AdvancementReviewRunInput,
+  ): Promise<AdvancementReviewRunOutcome> {
     let evidence: ReviewEvidence[];
     try {
       evidence = completeMissingRequiredEvidence({
         requirements: input.rubric.content.evidenceRequirements ?? [],
-        evidence: await this.evidenceProvider.collect({
-          ...input,
-          requirements: input.rubric.content.evidenceRequirements ?? [],
-        }),
+        evidence: await this.collectEvidenceUnderCapacity(input),
       });
     } catch (error) {
       return deferredOutcome(`推进侧取证失败：${errorMessage(error)}`);

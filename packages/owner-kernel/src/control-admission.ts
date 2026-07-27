@@ -2,7 +2,10 @@ import { Buffer } from "node:buffer";
 import {
   AuthorityStorageError,
   collectArtifactRefs,
+  describeControlArtifactClosure,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
+  resolveControlArtifactClosure,
+  validateAdmittedControlEnvelope,
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
@@ -25,16 +28,13 @@ import {
   MAX_PROTOCOL_IDENTIFIER_LENGTH,
   protocolDigest,
   validateChannelResponderRef,
-  validateConversationInvocation,
   validateCancelBatchControlResultBody,
   validateIngressContext,
-  validateNonEmptyUserTurnInput,
   validateAuthorityError,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   assertDeliveryEnvelopeCompanions,
-  assertDeliveryItemId,
   deliveryResolutionFactBindsRequest,
 } from "@zhixing/core/delivery";
 
@@ -141,8 +141,21 @@ export type ControlAdmissionOutcome =
       readonly result: ControlResult;
       readonly authorityRevision: number;
       readonly commitLsn?: number;
-    }
+  }
   | Extract<StoredControlAdmissionValue, { kind: "rejected" }>;
+
+export type ControlAdmissionLookup =
+  | {
+      readonly kind: "absent";
+    }
+  | {
+      readonly kind: "received-pending";
+      readonly canonicalRequestId: string;
+    }
+  | {
+      readonly kind: "settled";
+      readonly outcome: ControlAdmissionOutcome;
+    };
 
 interface StoredReference {
   readonly ref: ArtifactRef;
@@ -196,15 +209,18 @@ export function createInitialControlEnvelope(
 ): InitialControlEnvelope {
   const source = snapshotTrustedSource(input.source);
   const body = snapshot(input.body, "Control request");
+  const dependencyArtifacts = [
+    ...describeControlArtifactClosure(body).dependencies,
+  ];
   const at = input.at ?? new Date().toISOString();
   const envelope = {
     v: 1 as const,
     requestId: input.requestId,
     principal: source.principal,
-    dependencyArtifacts: [],
+    dependencyArtifacts,
     payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
       body,
-      dependencyArtifacts: [],
+      dependencyArtifacts,
     }),
     at,
     body,
@@ -232,15 +248,18 @@ export function createConversationControlEnvelope(
     throw new TypeError("Conversation control requests do not accept ingress context");
   }
   const body = snapshot(input.body, "Conversation control request");
+  const dependencyArtifacts = [
+    ...describeControlArtifactClosure(body).dependencies,
+  ];
   const at = input.at ?? new Date().toISOString();
   const envelope = {
     v: 1 as const,
     requestId: input.requestId,
     principal: source.principal,
-    dependencyArtifacts: [],
+    dependencyArtifacts,
     payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
       body,
-      dependencyArtifacts: [],
+      dependencyArtifacts,
     }),
     at,
     body,
@@ -267,6 +286,9 @@ export function createJobControlEnvelope(
 ): JobControlEnvelope {
   const source = snapshotTrustedSource(input.source);
   const body = snapshot(input.body, "Job control request");
+  const dependencyArtifacts = [
+    ...describeControlArtifactClosure(body).dependencies,
+  ];
   if (body.t === "job-run") {
     validateIngressContext(source.ingress ?? failMissingJobIngress());
   } else if (source.ingress !== undefined) {
@@ -277,10 +299,10 @@ export function createJobControlEnvelope(
     v: 1 as const,
     requestId: input.requestId,
     principal: source.principal,
-    dependencyArtifacts: [],
+    dependencyArtifacts,
     payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
       body,
-      dependencyArtifacts: [],
+      dependencyArtifacts,
     }),
     at,
     body,
@@ -308,15 +330,18 @@ export function createDeliveryControlEnvelope(
     throw new TypeError("Delivery control requests do not accept ingress context");
   }
   const body = snapshot(input.body, "Delivery control request");
+  const dependencyArtifacts = [
+    ...describeControlArtifactClosure(body).dependencies,
+  ];
   const at = input.at ?? new Date().toISOString();
   const envelope = {
     v: 1 as const,
     requestId: input.requestId,
     principal: source.principal,
-    dependencyArtifacts: [],
+    dependencyArtifacts,
     payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
       body,
-      dependencyArtifacts: [],
+      dependencyArtifacts,
     }),
     at,
     body,
@@ -357,6 +382,57 @@ export class ControlAdmissionJournal {
   constructor(log: AuthorityCommitLog, artifacts: ArtifactStore) {
     this.#log = log;
     this.#artifacts = artifacts;
+  }
+
+  async lookup(input: {
+    readonly envelope: AdmittedControlEnvelope;
+    readonly source: TrustedControlSource;
+  }): Promise<ControlAdmissionLookup> {
+    const envelope = snapshotAdmittedControlEnvelope(input.envelope);
+    const source = snapshotTrustedSource(input.source);
+    assertTrustedSourceMatches(envelope, source);
+    return this.#operations.run(async () => {
+      const transaction = await this.#transact<
+        StoredControlAdmissionValue
+        | Extract<ControlTransactionValue, { kind: "pending" }>
+        | undefined
+      >(
+        (state) => {
+          const request = getRequest(state, envelope.requestId);
+          if (!request) {
+            return { kind: "return", value: undefined };
+          }
+          if (!sameRequestBinding(request, envelope)) {
+            return noAppendConflict(
+              "requestId is already bound to another control request",
+            );
+          }
+          return request.storedResult
+            ? replayWithoutAppend(request)
+            : {
+                kind: "return",
+                value: {
+                  kind: "pending",
+                  canonicalRequestId: request.requestId,
+                },
+              };
+        },
+        [],
+      );
+      if (transaction.value === undefined) {
+        return { kind: "absent" };
+      }
+      if (transaction.value.kind === "pending") {
+        return {
+          kind: "received-pending",
+          canonicalRequestId: transaction.value.canonicalRequestId,
+        };
+      }
+      return {
+        kind: "settled",
+        outcome: await materializeOutcome(transaction.value, this.#artifacts),
+      };
+    });
   }
 
   async apply(input: {
@@ -771,13 +847,37 @@ export class ControlAdmissionJournal {
       state: ControlProjectionDraft,
     ) => ProjectionTransactionDecision<unknown, ControlTransactionValue>,
     candidateReferences: readonly ArtifactRef[],
+  ): Promise<
+    import("@zhixing/core/authority").ProjectionTransactionResult<
+      ControlProjectionDraft,
+      unknown,
+      ControlTransactionValue
+    >
+  >;
+  async #transact<Value>(
+    decide: (
+      state: ControlProjectionDraft,
+    ) => ProjectionTransactionDecision<unknown, Value>,
+    candidateReferences: readonly ArtifactRef[],
+  ): Promise<
+    import("@zhixing/core/authority").ProjectionTransactionResult<
+      ControlProjectionDraft,
+      unknown,
+      Value
+    >
+  >;
+  async #transact<Value>(
+    decide: (
+      state: ControlProjectionDraft,
+    ) => ProjectionTransactionDecision<unknown, Value>,
+    candidateReferences: readonly ArtifactRef[],
   ) {
     const draft = beginProjectionDraft(this.#projection);
     try {
       const transaction = await this.#log.transactProjection<
         ControlProjectionDraft,
         unknown,
-        ControlTransactionValue
+        Value
       >(
         draft,
         (state, record, commit) =>
@@ -854,6 +954,17 @@ async function reduceControlProjection(
 ): Promise<ControlProjectionDraft> {
   const deliveryResolution = assertDeliveryEnvelopeCompanions(commit);
   const body = record.body;
+  if (
+    isPlainRecord(body) &&
+    (
+      body.t === "asset-grant-issued" ||
+      body.t === "asset-grant-revoked" ||
+      body.t === "authority-time-frontier"
+    )
+  ) {
+    assertSurfaceAssetControlRecord(body);
+    return state;
+  }
   if (!isPlainRecord(body) || (body.t !== "received" && body.t !== "applied")) {
     throw invalidControlRecord("Control stream contains an unknown record");
   }
@@ -1290,6 +1401,7 @@ async function prepareEnvelope(
   ingress: IngressContext | undefined,
   artifacts: ArtifactStore,
 ): Promise<PreparedStored<AdmittedControlEnvelope>> {
+  const closure = await resolveControlArtifactClosure(envelope, artifacts);
   const inline: ControlRecord = {
     t: "received",
     requestId: envelope.requestId,
@@ -1300,7 +1412,13 @@ async function prepareEnvelope(
   assertControlRecordFits(
     receivedRecord(envelope.requestId, prepared.stored, ingress).body,
   );
-  return prepared;
+  return {
+    stored: prepared.stored,
+    references: collectArtifactRefs([
+      prepared.references,
+      closure.references,
+    ]),
+  };
 }
 
 async function prepareResult(
@@ -1328,7 +1446,10 @@ async function prepareStored<T>(
     return { stored: value, references: collectArtifactRefs(value) };
   }
   const ref = await artifacts.put(Buffer.from(canonicalize(value), "utf8"));
-  return { stored: { ref }, references: [ref] };
+  return {
+    stored: { ref },
+    references: [ref, ...collectArtifactRefs(value)],
+  };
 }
 
 async function loadStored<T>(
@@ -1355,48 +1476,7 @@ async function loadStored<T>(
 }
 
 function snapshotAdmittedControlEnvelope(value: unknown): AdmittedControlEnvelope {
-  const envelope = snapshot(value, "Control envelope");
-  assertPlainRecord(envelope, "Control envelope");
-  assertExactKeys(
-    envelope,
-    [
-      "at",
-      "body",
-      "dependencyArtifacts",
-      "payloadDigest",
-      "principal",
-      "requestId",
-      "v",
-    ],
-    "Control envelope",
-  );
-  if (envelope.v !== 1) throw new TypeError("Control envelope version must be 1");
-  assertIdentifier(envelope.requestId, "Control requestId");
-  assertCanonicalTime(envelope.at, "Control envelope time");
-  assertPlainRecord(envelope.principal, "Control principal");
-  assertExactKeys(
-    envelope.principal,
-    ["connectionId", "deviceId", "surfacePrincipal"],
-    "Control principal",
-  );
-  assertIdentifier(envelope.principal.surfacePrincipal, "surfacePrincipal");
-  assertIdentifier(envelope.principal.deviceId, "deviceId");
-  assertIdentifier(envelope.principal.connectionId, "connectionId");
-  if (!Array.isArray(envelope.dependencyArtifacts) || envelope.dependencyArtifacts.length > 0) {
-    throw new TypeError("Admitted control requests cannot declare dependency artifacts");
-  }
-  assertAdmittedControlRequest(envelope.body);
-  if (
-    typeof envelope.payloadDigest !== "string" ||
-    envelope.payloadDigest !==
-      protocolDigest("ControlEnvelopePayload", 1, {
-        body: envelope.body,
-        dependencyArtifacts: envelope.dependencyArtifacts,
-      })
-  ) {
-    throw new TypeError("Control envelope payload digest is invalid");
-  }
-  return envelope as unknown as AdmittedControlEnvelope;
+  return validateAdmittedControlEnvelope(value) as AdmittedControlEnvelope;
 }
 
 function isInitialControlEnvelope(
@@ -1502,224 +1582,44 @@ function assertTrustedSourceMatches(
   }
 }
 
-function assertAdmittedControlRequest(value: unknown): void {
-  assertPlainRecord(value, "Control request");
-  if (value.t === "session-create") {
-    assertAllowedKeys(
-      value,
-      ["requestedName", "sceneId", "t"],
-      "session-create request",
-    );
-    if (value.requestedName !== undefined) {
-      assertNonEmptyString(value.requestedName, "requestedName");
-    }
-    if (value.sceneId !== undefined) assertIdentifier(value.sceneId, "sceneId");
+function assertSurfaceAssetControlRecord(
+  body: Record<string, unknown>,
+): void {
+  if (body.t === "asset-grant-issued") {
+    assertExactKeys(body, ["grant", "t"], "asset-grant-issued record");
+    assertPlainRecord(body.grant, "asset-grant-issued grant");
     return;
   }
-  if (value.t === "cancel") {
+  if (body.t === "authority-time-frontier") {
     assertExactKeys(
-      value,
-      ["conversationId", "ownerEpoch", "runId", "t"],
-      "cancel request",
+      body,
+      ["frontier", "t"],
+      "authority-time-frontier record",
     );
-    assertIdentifier(value.conversationId, "cancel conversationId");
-    assertIdentifier(value.runId, "cancel runId");
-    if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
-      throw new TypeError("cancel ownerEpoch must be a non-negative safe integer");
-    }
-    return;
-  }
-  if (value.t === "cancel-batch") {
-    assertAllowedKeys(
-      value,
-      ["conversationId", "ownerEpoch", "response", "t"],
-      "cancel-batch request",
-    );
-    assertIdentifier(value.conversationId, "cancel-batch conversationId");
-    if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
-      throw new TypeError("cancel-batch ownerEpoch must be a non-negative safe integer");
-    }
-    if (value.response !== undefined) {
-      assertPlainRecord(value.response, "cancel-batch response");
-      assertExactKeys(value.response, ["replyTarget"], "cancel-batch response");
-      const target = value.response.replyTarget;
-      assertPlainRecord(target, "cancel-batch replyTarget");
-      assertAllowedKeys(
-        target,
-        ["channelId", "threadId", "to"],
-        "cancel-batch replyTarget",
-      );
-      assertIdentifier(target.channelId, "cancel-batch replyTarget channelId");
-      assertIdentifier(target.to, "cancel-batch replyTarget recipient");
-      if (target.threadId !== undefined) {
-        assertIdentifier(target.threadId, "cancel-batch replyTarget threadId");
-      }
-    }
-    return;
-  }
-  if (value.t === "session-write") {
-    assertExactKeys(
-      value,
-      ["conversationId", "domainRevision", "mutation", "ownerEpoch", "t"],
-      "session-write request",
-    );
-    assertIdentifier(value.conversationId, "session-write conversationId");
-    if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
-      throw new TypeError("session-write ownerEpoch must be a non-negative safe integer");
-    }
     if (
-      !Number.isSafeInteger(value.domainRevision) ||
-      (value.domainRevision as number) < 0
+      typeof body.frontier !== "string" ||
+      !Number.isFinite(Date.parse(body.frontier)) ||
+      new Date(Date.parse(body.frontier)).toISOString() !== body.frontier
     ) {
-      throw new TypeError("session-write domainRevision must be a non-negative safe integer");
-    }
-    assertPlainRecord(value.mutation, "session-write mutation");
-    if (
-      value.mutation.kind === "window-op" &&
-      (value.mutation.op === "clear" || value.mutation.op === "compact") &&
-      Object.keys(value.mutation).sort().join(",") === "kind,op"
-    ) {
-      return;
-    }
-    if (
-      value.mutation.kind === "conversation-delete" &&
-      Object.keys(value.mutation).length === 1
-    ) {
-      return;
-    }
-    throw new TypeError("session-write mutation is not supported by conversation authority");
-  }
-  if (value.t === "job-run") {
-    assertExactKeys(
-      value,
-      ["anchorEpoch", "t", "taskId"],
-      "job-run request",
-    );
-    assertIdentifier(value.taskId, "job-run taskId");
-    if (!Number.isSafeInteger(value.anchorEpoch) || (value.anchorEpoch as number) < 0) {
-      throw new TypeError("job-run anchorEpoch must be a non-negative safe integer");
-    }
-    return;
-  }
-  if (value.t === "job-cancel") {
-    assertExactKeys(
-      value,
-      ["anchorEpoch", "jobRunId", "t", "taskId"],
-      "job-cancel request",
-    );
-    assertIdentifier(value.taskId, "job-cancel taskId");
-    assertIdentifier(value.jobRunId, "job-cancel jobRunId");
-    if (!Number.isSafeInteger(value.anchorEpoch) || (value.anchorEpoch as number) < 0) {
-      throw new TypeError("job-cancel anchorEpoch must be a non-negative safe integer");
-    }
-    return;
-  }
-  if (value.t === "uncertain-resolve") {
-    assertExactKeys(
-      value,
-      ["decision", "openFactDigest", "ref", "t"],
-      "uncertain-resolve request",
-    );
-    assertPlainRecord(value.ref, "uncertain-resolve ref");
-    if (value.ref.execution === "conversation") {
-      assertExactKeys(
-        value.ref,
-        ["conversationId", "execution", "ownerEpoch", "runId"],
-        "conversation uncertain-resolve ref",
-      );
-      assertIdentifier(value.ref.conversationId, "uncertain-resolve conversationId");
-      assertIdentifier(value.ref.runId, "uncertain-resolve runId");
-      if (!Number.isSafeInteger(value.ref.ownerEpoch) || (value.ref.ownerEpoch as number) < 0) {
-        throw new TypeError("uncertain-resolve ownerEpoch must be a non-negative safe integer");
-      }
-    } else if (value.ref.execution === "job") {
-      assertExactKeys(
-        value.ref,
-        ["anchorEpoch", "execution", "jobRunId", "taskId"],
-        "job uncertain-resolve ref",
-      );
-      assertIdentifier(value.ref.taskId, "uncertain-resolve taskId");
-      assertIdentifier(value.ref.jobRunId, "uncertain-resolve jobRunId");
-      if (!Number.isSafeInteger(value.ref.anchorEpoch) || (value.ref.anchorEpoch as number) < 0) {
-        throw new TypeError("uncertain-resolve anchorEpoch must be a non-negative safe integer");
-      }
-    } else {
-      throw new TypeError("uncertain-resolve execution is invalid");
-    }
-    if (
-      typeof value.openFactDigest !== "string" ||
-      !/^sha256:[a-f0-9]{64}$/u.test(value.openFactDigest)
-    ) {
-      throw new TypeError("uncertain-resolve openFactDigest is invalid");
-    }
-    if (
-      value.decision !== "user-verified-side-effects" &&
-      value.decision !== "user-abandoned" &&
-      value.decision !== "user-retry-acknowledged"
-    ) {
-      throw new TypeError("uncertain-resolve decision is invalid");
-    }
-    return;
-  }
-  if (value.t === "delivery-resolve") {
-    assertExactKeys(
-      value,
-      ["anchorEpoch", "attempt", "decision", "itemId", "openFactDigest", "t"],
-      "delivery-resolve request",
-    );
-    assertDeliveryItemId(value.itemId, "delivery-resolve itemId");
-    if (!Number.isSafeInteger(value.attempt) || (value.attempt as number) <= 0) {
-      throw new TypeError("delivery-resolve attempt must be a positive safe integer");
-    }
-    if (
-      !Number.isSafeInteger(value.anchorEpoch) ||
-      (value.anchorEpoch as number) <= 0
-    ) {
-      throw new TypeError(
-        "delivery-resolve anchorEpoch must be a positive safe integer",
+      throw invalidControlRecord(
+        "authority-time-frontier frontier is not a canonical timestamp",
       );
     }
-    if (
-      typeof value.openFactDigest !== "string" ||
-      !/^sha256:[a-f0-9]{64}$/u.test(value.openFactDigest)
-    ) {
-      throw new TypeError("delivery-resolve openFactDigest is invalid");
-    }
-    if (
-      value.decision !== "user-verified-sent" &&
-      value.decision !== "abandon" &&
-      value.decision !== "retry-risk-ack"
-    ) {
-      throw new TypeError("delivery-resolve decision is invalid");
-    }
     return;
-  }
-  if (value.t !== "input") {
-    throw new TypeError(
-      "Control admission does not accept this control request type",
-    );
   }
   assertExactKeys(
-    value,
-    ["conversationId", "ingress", "input", "invocation", "ownerEpoch", "t"],
-    "input request",
+    body,
+    ["grantId", "reason", "t"],
+    "asset-grant-revoked record",
   );
-  assertIdentifier(value.conversationId, "conversationId");
-  if (!Number.isSafeInteger(value.ownerEpoch) || (value.ownerEpoch as number) < 0) {
-    throw new TypeError("ownerEpoch must be a non-negative safe integer");
+  assertIdentifier(body.grantId, "asset-grant-revoked grantId");
+  if (
+    body.reason !== "session-deleted" &&
+    body.reason !== "surface-revoked" &&
+    body.reason !== "superseded"
+  ) {
+    throw invalidControlRecord("asset-grant-revoked reason is invalid");
   }
-  assertPlainRecord(value.ingress, "Control input ingress reference");
-  assertExactKeys(
-    value.ingress,
-    ["ingressId", "source"],
-    "Control input ingress reference",
-  );
-  assertIdentifier(value.ingress.ingressId, "ingressId");
-  if (value.ingress.source !== "first-party" && value.ingress.source !== "channel") {
-    throw new TypeError("Control input source is invalid");
-  }
-  validateNonEmptyUserTurnInput(value.input);
-  validateConversationInvocation(value.invocation);
 }
 
 function snapshotControlResult(
@@ -1909,14 +1809,6 @@ function assertUncertainResolutionTargetState(value: unknown, label: string): vo
   }
 }
 
-function assertCanonicalTime(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string") throw new TypeError(`${label} must be an ISO timestamp`);
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
-    throw new TypeError(`${label} must be a canonical ISO timestamp`);
-  }
-}
-
 function failMissingJobIngress(): never {
   throw new TypeError("job-run requires owner-derived ingress context");
 }
@@ -2005,12 +1897,6 @@ function assertAllowedKeys(
   const accepted = new Set(allowed);
   if (Object.keys(value).some((key) => !accepted.has(key))) {
     throw new TypeError(`${label} contains unknown fields`);
-  }
-}
-
-function assertNonEmptyString(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new TypeError(`${label} must be a non-empty string`);
   }
 }
 

@@ -32,6 +32,7 @@ export interface ConversationAssignmentIssueInput {
   readonly attempt: number;
   readonly resourceLease: AssignmentResourceLease<"conversation">;
   readonly ingress: IngressContext;
+  readonly contentAssets: UnsignedConversationEnvelope["work"]["contentAssets"];
   readonly windowInput: UnsignedConversationEnvelope["work"]["windowInput"];
   readonly controlContext?: UnsignedConversationEnvelope["work"]["controlContext"];
   readonly policy: ConversationAssignmentCredentialPolicy;
@@ -269,6 +270,7 @@ export class ConversationAssignmentAuthority
         ownerEpoch: input.ownerEpoch,
         baseRevision: input.baseRevision,
         ingress: input.ingress,
+        contentAssets: [...input.contentAssets],
         windowInput: input.windowInput,
         controlContext: input.controlContext ? [...input.controlContext] : [],
       },

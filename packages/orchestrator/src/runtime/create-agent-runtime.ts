@@ -92,6 +92,7 @@ import {
   type WindowChangeReason,
   resolveModelInputCapabilities,
   projectSessionEvent,
+  type AgentLoopDeps,
 } from "@zhixing/core";
 import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 import {
@@ -124,6 +125,10 @@ import {
   createLightCallLLM,
   createLightCallLLMWithUsage,
 } from "./call-llm.js";
+import {
+  governToolExecution,
+  type AgentRuntimeCapacityBinding,
+} from "./governed-agent-runtime.js";
 import { buildSystemPrompt, type SystemPromptSegment } from "./system-prompt.js";
 import { prependContextBlock } from "./user-context.js";
 import {
@@ -572,6 +577,11 @@ export class LifecycleHookError extends Error {
 }
 
 export interface CreateAgentRuntimeOptions {
+  /**
+   * 设备容量绑定。给出时工具执行经设备唯一容量裁决器准入;LLM 网络等待不占
+   * 容量,故只接在工具执行注入点上。
+   */
+  deviceCapacity?: AgentRuntimeCapacityBinding;
   /** 组合根已从设备本地 SecretStore 解出的配置投影；运行时不得自行触达持久化秘密。 */
   providerConfiguration: {
     readonly config: ZhixingConfig;
@@ -1922,9 +1932,20 @@ export async function createAgentRuntime(
         // turnContext 作为选项直接传给 secure-executor——由其在包装函数入口
         // 一次性展开到 ToolExecutionContext（保证 pipeline.evaluate /
         // handleBrokerPath / 工具调用 共享同一增强 context）。
+        // 容量治理包在安全管线之内:管线含权限判定与用户确认等待,按容量合同
+        // 用户交互不占 permit——包在外面会让一次确认对话框把设备槽位占到用户
+        // 回来为止。真正需要容量的是判定通过之后那次本机工具执行。
+        const baseExecuteTool: AgentLoopDeps["executeTool"] = (
+          tool,
+          input,
+          context,
+        ) => tool.call(input, context);
+        const executeToolWithCapacity = options.deviceCapacity
+          ? governToolExecution(baseExecuteTool, options.deviceCapacity)
+          : baseExecuteTool;
         const secureExecuteTool = createSecureExecuteTool({
           pipeline: securityPipeline,
-          originalExecute: (tool, input, context) => tool.call(input, context),
+          originalExecute: executeToolWithCapacity,
           broker: confirmationBroker,
           sessionType,
           confirmationFallback: options.confirmationFallback,
@@ -1938,6 +1959,7 @@ export async function createAgentRuntime(
           eventBus,
           authorizeToolExecution: params.authorizeToolExecution,
         });
+        const governedExecuteTool = secureExecuteTool;
 
         const gen = runAgentLoop({
           provider: roles[primaryRole].provider,
@@ -1967,7 +1989,7 @@ export async function createAgentRuntime(
           watchdog: params.watchdog ?? DEFAULT_WATCHDOG_POLICY,
           deps: {
             callLLM: resilientCallLLM,
-            executeTool: secureExecuteTool,
+            executeTool: governedExecuteTool,
           },
           llmRoles: roles,
           // 各角色生效思考配置，沿 llmRoles 同路径注入到工具 ctx.roleThinking，

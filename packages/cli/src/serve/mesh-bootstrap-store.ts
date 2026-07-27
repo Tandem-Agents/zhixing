@@ -18,6 +18,7 @@ import {
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
 import { canonicalize } from "@zhixing/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { ensureDurableDirectory, SerialTaskQueue, syncDirectory } from "@zhixing/core/persistence";
 import {
   MeshEndpointDirectory,
@@ -70,6 +71,10 @@ interface PersistedTransportTrust {
   readonly peers: readonly TrustedMeshPeer[];
 }
 
+export interface FileMeshBootstrapStoreOptions {
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+}
+
 /** Durable device-domain bootstrap state sharing the authority log's trust stream. */
 export class FileMeshBootstrapStore {
   readonly #log: FileAuthorityCommitLog;
@@ -82,12 +87,14 @@ export class FileMeshBootstrapStore {
   constructor(
     readonly rootDir: string,
     readonly issuerKey?: DeviceKey,
+    options: FileMeshBootstrapStoreOptions = {},
   ) {
     const distributedRoot = path.join(path.resolve(rootDir), "distributed-runtime");
     this.#artifacts = new FileArtifactStore(path.join(distributedRoot, "artifacts"));
     this.#log = new FileAuthorityCommitLog(
       path.join(distributedRoot, "authority"),
       this.#artifacts,
+      { storageMaintenance: options.storageMaintenance },
     );
     this.#endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
     this.#peerFile = path.join(distributedRoot, "mesh-peers.json");

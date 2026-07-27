@@ -4,12 +4,17 @@ import {
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
 import type {
+  AssignmentResourceLease,
   AuthorityCapability,
   AuthorityCallContext,
   Signature,
   UsageReport,
 } from "@zhixing/core/contracts";
 import {
+  createSignedConversationEnvelope,
+  dispatchEnvelopeArtifact,
+  dispatchEnvelopeDigest,
+  permissionSnapshotLeaseDigest,
   protocolDigest,
   ResourceAdmissionDeferredError,
   validateSystemJobResourceLease,
@@ -377,7 +382,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-2",
       "run-2",
-      [capability.capId],
+      [capability],
     );
     await fixture.governor.reserveUsage(
       lease,
@@ -466,7 +471,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-cap",
       "run-cap",
-      [active.capId],
+      [active],
     );
     await fixture.governor.reserveUsage(
       lease,
@@ -494,7 +499,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-revoked",
       "run-revoked",
-      [capability.capId],
+      [capability],
     );
     await fixture.log.append([{
       stream: "run:conversation-1",
@@ -518,7 +523,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-host",
       "run-host",
-      [capability.capId],
+      [capability],
     );
     await expect(
       fixture.governor.consume(lease, { usageId: "usage-host", calls: 1 }, hostContext),
@@ -534,7 +539,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-deadline",
       "run-deadline",
-      [capability.capId],
+      [capability],
     );
     now = "2026-07-20T00:00:00.500Z";
     const restarted = fixture.restart();
@@ -570,7 +575,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-capability-deadline",
       "run-capability-deadline",
-      [capability.capId],
+      [capability],
     );
     now = "2026-07-20T00:00:00.500Z";
     const restarted = fixture.restart();
@@ -597,7 +602,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-replay",
       "run-replay",
-      [capability.capId],
+      [capability],
     );
     const callContext = assignmentCallContext(capability);
     const workload = { kind: "orchestration-node" as const, id: "node-replay", attempt: 1 };
@@ -694,7 +699,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-expired",
       "run-expired",
-      [capability.capId],
+      [capability],
     );
     const callContext = assignmentCallContext(capability);
     await fixture.governor.reserveUsage(
@@ -750,7 +755,7 @@ describe("AnchorResourceGovernor", () => {
       fixture,
       "assignment-compact",
       "run-compact",
-      [capability.capId],
+      [capability],
     );
     const callContext = assignmentCallContext(capability);
     await fixture.governor.release(lease, callContext);
@@ -793,6 +798,7 @@ async function createHarness(
     monotonicClock,
   });
   return {
+    artifacts,
     log,
     governor: createGovernor(),
     restart: createGovernor,
@@ -803,7 +809,7 @@ async function activateAssignment(
   fixture: Awaited<ReturnType<typeof createHarness>>,
   assignmentId: string,
   runId: string,
-  capIds?: readonly string[],
+  capabilities?: readonly AuthorityCapability<"conversation">[],
 ) {
   const reservationId = assignmentReservationId(assignmentId);
   const origin = { admissionClass: "interactive", entry: "conversation-input" } as const;
@@ -824,25 +830,148 @@ async function activateAssignment(
     },
     budget: { maxCalls: 4 },
   }, origin, hostContext);
+  const assigned = capabilities
+    ? await createAssignedRecord(fixture, lease, assignmentId, runId, capabilities)
+    : undefined;
   await fixture.governor.coordinate(async () => {
     await fixture.log.append([
-      ...(capIds
+      ...(assigned
         ? [{
             stream: "run:conversation-1",
-            body: {
-              t: "assigned",
-              runId,
-              assignmentId,
-              executorId: "executor-1",
-              capIds: [...capIds],
-              reservation: { reservationId: lease.reservationId, attempt: 1 },
-            },
+            body: assigned,
           }]
         : []),
       ...fixture.governor.prepareActivation(lease),
     ]);
   });
   return lease;
+}
+
+async function createAssignedRecord(
+  fixture: Awaited<ReturnType<typeof createHarness>>,
+  lease: AssignmentResourceLease<"conversation">,
+  assignmentId: string,
+  runId: string,
+  capabilities: readonly AuthorityCapability<"conversation">[],
+) {
+  const manifestBody = {
+    v: 1 as const,
+    baseRef: {
+      execution: "conversation" as const,
+      conversationId: "conversation-1",
+      baseRevision: 0,
+    },
+    requires: {
+      runtimeConfigRev: 1,
+      modelProfileRev: 1,
+      policyRev: 1,
+      skillsRev: 1,
+      rubricsRev: 1,
+      promptAssetsRev: 1,
+      permissionSnapshotVersion: 1,
+    },
+    protocolVersion: "1",
+    tools: [],
+    mcpServers: [],
+    environment: {},
+    credentialBindings: [],
+  };
+  const manifest = {
+    ...manifestBody,
+    digest: protocolDigest("ExecutionManifest", 1, manifestBody),
+  };
+  const controlExpiry = new Date(Math.min(
+    Date.parse(lease.expiry),
+    Date.parse(NOW) + 60_000,
+  )).toISOString();
+  const controlPayload = {
+    v: 1 as const,
+    controlLeaseId: `control-${assignmentId}`,
+    assignmentId,
+    authority: {
+      execution: "conversation" as const,
+      conversationId: "conversation-1",
+      ownerEpoch: 1,
+    },
+    renewalSeq: 1,
+    issuedAt: NOW,
+    expiry: controlExpiry,
+  };
+  const controlLease = {
+    ...controlPayload,
+    signature: signer.sign("ControlLease", 1, controlPayload),
+  };
+  const permissionPayload = {
+    v: 1 as const,
+    snapshotVersion: 1,
+    snapshotDigest: protocolDigest("PermissionSnapshot", 1, {
+      assignmentId,
+      snapshotVersion: 1,
+    }),
+    binding: {
+      execution: "conversation" as const,
+      runId,
+      conversationId: "conversation-1",
+      ownerEpoch: 1,
+    },
+    assignmentId,
+    executorId: "executor-1",
+    controlLeaseId: controlPayload.controlLeaseId,
+    issuedAt: NOW,
+    expiry: lease.expiry,
+  };
+  const permissionLease = {
+    ...permissionPayload,
+    signature: signer.sign("PermissionSnapshotLease", 1, permissionPayload),
+  };
+  const envelope = createSignedConversationEnvelope({
+    v: 1,
+    execution: "conversation",
+    assignmentId,
+    executorId: "executor-1",
+    manifest,
+    controlLease,
+    permissionLease,
+    capabilities: [...capabilities].sort((left, right) =>
+      left.capId.localeCompare(right.capId)
+    ),
+    resourceLease: lease,
+    dependencyArtifacts: [],
+    issuedAt: NOW,
+    work: {
+      t: "conversation",
+      runId,
+      conversationId: "conversation-1",
+      ownerEpoch: 1,
+      baseRevision: 0,
+      ingress: {
+        kind: "first-party",
+        surfacePrincipal: "surface:user-1",
+        deviceId: "device-1",
+        ingressId: `ingress-${assignmentId}`,
+        receivedAt: NOW,
+      },
+      windowInput: { t: "full", windowEpoch: 1, messages: [] },
+      contentAssets: [],
+      controlContext: [],
+    },
+  }, signer, verifier);
+  const artifact = dispatchEnvelopeArtifact(envelope);
+  await fixture.artifacts.put(artifact.bytes);
+  return {
+    t: "assigned" as const,
+    runId,
+    assignmentId,
+    executorId: "executor-1",
+    ownerEpoch: 1,
+    baseRevision: 0,
+    dispatchDigest: dispatchEnvelopeDigest(envelope),
+    manifestDigest: manifest.digest,
+    dispatchRef: artifact.ref,
+    permissionLeaseDigest: permissionSnapshotLeaseDigest(envelope),
+    capIds: envelope.capabilities.map((capability) => capability.capId),
+    reservation: { reservationId: lease.reservationId, attempt: 1 },
+  };
 }
 
 function assignmentCapability(

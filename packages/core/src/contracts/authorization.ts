@@ -59,6 +59,47 @@ export type DataPlaneTicket = WireSchemaV1<"DataPlaneTicket"> &
     | (DataPlaneTicketBase & { kind: "abort"; renewable: false })
   );
 
+export const MAX_SURFACE_ASSET_GRANT_REFS = 64;
+export const MAX_SURFACE_ASSET_BYTES = 64 * 1024 * 1024;
+export const MAX_SURFACE_ASSET_GRANT_BYTES = 256 * 1024 * 1024;
+export const MAX_SURFACE_ASSET_GRANT_TTL_MS = 60 * 60 * 1_000;
+export const MAX_SURFACE_ASSET_SCOPE_BYTES = 1024 * 1024 * 1024;
+export const MAX_SURFACE_ASSET_DEVICE_BYTES = 4 * 1024 * 1024 * 1024;
+
+export type SurfaceAssetScope =
+  | {
+      domain: "conversation";
+      conversationId: string;
+      ownerEpoch: number;
+    }
+  | {
+      domain: "global";
+      anchorEpoch: number;
+    };
+
+interface SurfaceAssetGrantBase {
+  grantId: string;
+  scope: SurfaceAssetScope;
+  surfacePrincipal: string;
+  requestId: string;
+  assets: ArtifactRef[];
+  issuedAt: IsoTime;
+  expiry: IsoTime;
+  signature: Signature;
+}
+
+export type SurfaceAssetGrant = WireSchemaV1<"SurfaceAssetGrant"> &
+  (
+    | (SurfaceAssetGrantBase & {
+        kind: "asset-upload";
+        payloadDigest: Digest;
+      })
+    | (SurfaceAssetGrantBase & {
+        kind: "asset-download";
+        payloadDigest?: never;
+      })
+  );
+
 export interface ChannelResponderRef {
   channelId: string;
   platformSubject: string;

@@ -13,6 +13,7 @@ import {
   type MeshEndpointDirectory,
 } from "@zhixing/mesh/bootstrap";
 import { canonicalize } from "@zhixing/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
@@ -45,13 +46,18 @@ export type MeshRuntimeBootstrap =
 export async function prepareMeshRuntimeBootstrap(input: {
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly configuration?: MeshRoleBootConfig;
 }): Promise<MeshRuntimeBootstrap> {
   const configuration = input.configuration === undefined
     ? undefined
     : validateMeshRoleBootConfig(input.configuration);
   const deviceKey = await loadOrCreateDeviceKey(input.secretStore);
-  const bootstrapStore = new FileMeshBootstrapStore(input.zhixingHome, deviceKey);
+  const bootstrapStore = new FileMeshBootstrapStore(
+    input.zhixingHome,
+    deviceKey,
+    { storageMaintenance: input.storageMaintenance },
+  );
   const trust = await bootstrapStore.loadTrustRecord();
   const effective = resolveEffectiveMeshRoles({
     localDeviceId: deviceKey.deviceId,

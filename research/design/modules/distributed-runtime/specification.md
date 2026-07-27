@@ -20,8 +20,8 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 - id 前缀规则：`run- / asg- / jobrun- / req- / rsv- / use- / xfer- / cap- / tkt- / grt- / ich- / dlv- / int- / offer-` + Ulid。conversationId 沿既有；本地域对话恒为 `local-<deviceId 前 8 位>-<Ulid>`。
 - 协议标识符统一为非空且不超过 480 个 UTF-16 code unit；所有生产端、wire validator、耐久 reducer 与恢复投影复用同一判定。自由文本和原始字节使用各自字段合同，不套用标识符上界。
 - epoch 规则（uint64、单调、永不回退）：`anchorEpoch`（迁居 / 换代 +1）、`trustEpoch`（issuer-transition +1）、`ownerEpoch`（对话权威转移 +1）、`localGovernorEpoch`（设备级治理域 epoch，仅本地域整体重置时 +1；单个对话被收编不改变它，对话级 fencing 由该对话自己的 `ownerEpoch` 承担）、`streamEpoch`（assignment 数据面重连 +1）。`localDomainId = "local:"+deviceId`。
-- 时钟：协议时间戳恒为签发者时钟；跨设备只用 `issuedAt + TTL` 换算单调 deadline；`maxClockSkewMs = 120_000`（初值，S2 标定）。
-- 幂等键单源表：入口 `(surfacePrincipal, ingressId)`；控制写 `requestId`；allow-once 应答 `(assignmentId, interactionRequestId)`；渠道 challenge 外发 / grant `challengeId`；提交 `(conversationId, runId)` / `(taskId, jobRunId)`；派发 `assignmentId`；扣账 `usageId`；结算 `reservationId + 动作`。DeliveryOutbox 入队键统一为 `D("DeliveryEnqueueKeyBody",1,keyBody)`，`keyBody` 的唯一字段合同是 §4.3 `DeliveryEnqueueKeyBody`；同一权威事实重放必须复用原键，不得以当前 epoch、attempt 或投递目标另造身份；同键仅在 `intentDigest` 相同时回放原 item，否则拒绝为 `idempotency-conflict`。
+- 时钟：协议时间戳恒为签发者时钟；跨设备只用 `issuedAt + TTL` 换算单调 deadline；`maxClockSkewMs = 120_000`（初值，S2 标定）。权威侧时间判定恒用**不可回退有效时钟** `max(本地墙钟, 锚定时间 + 单调流逝, 该权威日志重放出的时间前沿)`——锚定时间为进程内任一次有效时钟观测值与其单调时钟读数的配对，流逝由单调时钟承载，故回拨既不能回退、也不能冻结在线时间；跨重启的停机流逝无法自证，由前沿粘滞与短 TTL 兜底。"已过期"是权威观测后不可逆的事实，墙钟回拨不得使任何已过期身份或授权复活；executor 票据 retirement 前沿、owner 票据 expiry 前沿与 surface 授权时间前沿（§2.2）都是同一不变量的实例，各归其权威日志，不另建时间存储。
+- 幂等键单源表：入口 `(surfacePrincipal, ingressId)`；控制写 `requestId`；allow-once 应答 `(assignmentId, interactionRequestId)`；渠道 challenge 外发 / grant `challengeId`；提交 `(conversationId, runId)` / `(taskId, jobRunId)`；派发 `assignmentId`；扣账 `usageId`；结算 `reservationId + 动作`；surface 资产授权申请 `(scope, surfacePrincipal, requestId)`（§2.2，由所落 control 流唯一索引）。DeliveryOutbox 入队键统一为 `D("DeliveryEnqueueKeyBody",1,keyBody)`，`keyBody` 的唯一字段合同是 §4.3 `DeliveryEnqueueKeyBody`；同一权威事实重放必须复用原键，不得以当前 epoch、attempt 或投递目标另造身份；同键仅在 `intentDigest` 相同时回放原 item，否则拒绝为 `idempotency-conflict`。
 
 ### 1.2 规范化字节与签名域分离（全部签名 / digest 对象共用）
 
@@ -31,7 +31,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 - 摘要域单源：`D(schemaId, v, payload) = H(UTF8("zhixing:" + schemaId + ":v" + v) || 0x00 || JCS(payload))`；原始内容摘要记为 `B(bytes) = H(bytes)`。两者输出均为 §1.1 `Digest`。`D` 用于协议对象/子对象身份，`B` 只用于不可变原始字节；禁止以裸 `H(JCS(...))` 新造协议摘要。
 - 有密钥认证域单源：`K(schemaId,v,key,payload) = MAC(key, UTF8("zhixing:" + schemaId + ":v" + v) || 0x00 || JCS(payload))`，输出 §1.1 `KeyConfirmation`；字段自身及同层 finished/authenticator 集合不得进入 payload。当前仅注册 `PairingJoin.confirmation` 与 `PairingFinished.*.keyConfirm`，不得以 `Digest` 代替或把无密钥 `D` 当作密钥确认。
 - **自摘要**：先从完整对象排除 `signature` 与正在计算的自摘要字段，再计算 `D`；随后签名覆盖**含已计算摘要**在内、仅排除 `signature` 的完整对象。当前自摘要注册表唯一包含：`TrustRuleSnapshot.digest`、`ResourceLease.digest`、`UsageReport.digest`、`ConfigAssetRecord.digest`、`CommitEnvelope.envelopeDigest`、`MutationBatch.digest`、`ExecutionManifest.digest`、`JobCommitFence.digest`、`SealedBundle.digest`、`CheckpointEnvelope.digest`。未登记的字段不得被解释为“包含它的对象之摘要”。
-- **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SourceFreezeProof`、`PermissionSnapshotLease` 与 `InteractionMirrorBatch`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`、mirror 耐久请求身份 = `D("InteractionMirrorBatch",1,InteractionMirrorBatch 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
+- **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SurfaceAssetGrant`、`SourceFreezeProof`、`PermissionSnapshotLease` 与 `InteractionMirrorBatch`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`、mirror 耐久请求身份 = `D("InteractionMirrorBatch",1,InteractionMirrorBatch 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
 - **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。interaction 审计链固定 `M0 = D("InteractionMirrorSeed",1,{assignmentId})`，每个 `interaction-finished` 按完成次序分配连续 ordinal，并计算 `Mn = D("InteractionMirrorStep",1,{previous:M(n-1),entry:{ordinal,seq,requestId,kind,outcome}})`；`at` 由批次签名绑定但不进入链步（共享 assignment reducer 无需日志 envelope 时间即可复算）。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
 - **内容与引用摘要**：`ArtifactRef.digest`、`ContentAssetRef.digest`、`CheckpointEnvelope.chunks[].digest`、`EvidenceRequest.items[].digestHint`、证据 `contentDigest`、副作用 `resultDigest`、投递回执 `receipt.digest` 与恢复验证 `nonceDigest` 恒为各自所指不可变原始字节的 `B(bytes)`；`PairingOffer.issuer.keyFingerprint = B(规范公钥字节)`。`manifestDigest / snapshotDigest / parentDigest / reportDigest / envelopeDigest / requestDigest` 等引用字段必须等于目标对象按本表得到的摘要，不得对引用字段所在对象再哈希。`FinalOutboxRecord.digest / FinalFrame.digest` 固定引用 `SealedBundle.digest`；`AssetIndexEntry.digest` 固定引用对应资产 artifact 的 `ArtifactRef.digest`。
 - **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution / responseBinding 摘要、confirmation `decisionDigest`、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `ConfirmationDecisionDigest = D("ConfirmationDecision",1,{requestId,decision})`，绑定一次确认操作的完整规范决定；`DeliveryResponseBinding = D("DeliveryResponseBinding",1,{itemId,attempt,startedAt})`——transport 响应归属绑定，不含 anchorEpoch、迁居不变；delivery 的 open / resolution 摘要含 epoch、仅用于 uncertain 裁决 fencing，与响应绑定不得混用。`PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
@@ -48,6 +48,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
   | `checkpointDigest / checkpointEnvelopeDigest / authorityCatalogDigest` | 对应导出检查点 artifact 的 `ArtifactRef.digest` / `CheckpointEnvelope.digest` / `D("AuthorityCatalog",1,catalog)` |
   | `baseDigest / targetDigest`；`JobCommitFence.deliveryPlanDigest` | `D("WindowSnapshot",1,{windowEpoch,messages})`；`TaskDefinitionBody.deliveryPlan.planDigest`（同一 occurrence 两字段必须相等） |
   | `FinalOutboxRecord.digest / FinalFrame.digest / AssetIndexEntry.digest` | `SealedBundle.digest / SealedBundle.digest / 对应 ArtifactRef.digest` |
+  | `SurfaceAssetGrant.payloadDigest` | 对应 control 写的 `ControlEnvelope.payloadDigest` |
 
 - 验证边界：任何会改变耐久状态或激活能力的消费者，必须依序完成 DTO/version/未知字段校验 → 按注册类别复算摘要 → 验签（如有）→ 逐项核对引用目标；未知摘要域、缺摘要、前像缺字段、复算不等或引用错目标均在落盘、激活、CAS、对账或恢复前 fail-closed，禁止按字段名猜测或兼容性回退。`Message.tool_use.input` 虽是开放 JSON 子树，仍必须递归满足规范 JSON（plain object / dense array / JSON primitive；禁止 accessor、Date、BigInt、undefined、稀疏数组及非规范数值），进程内、耐久重放与 mesh 共用同一验证器。
 - 验收：同一 payload 经进程内与 mesh adapter 得到同一摘要；逐字段篡改、错误纳入自身摘要或 `signature`、漏字段、跨 schema/version 重放全部拒绝；每个 `Digest` 类型字段在上述注册表恰命中一类，`KeyConfirmation` 不得命中。随 S2 建立跨语言固定向量，后续节点复用。
@@ -300,7 +301,32 @@ interface ChannelInteractionGrant {                    // 定时 job 的单次�
 type InteractionAnswerAuthority =
   | { via: "surface-ticket"; ticketId: string }
   | { via: "channel-grant"; grant: ChannelInteractionGrant };  // grant 全文随 assignment 记录耐久化，审计可独立验签
+
+type SurfaceAssetScope =                               // 判别式权威作用域：一套协议覆盖两域，签发者 = 该域权威
+  | { domain: "conversation"; conversationId: string; ownerEpoch: number }   // 会话域：该会话当前 owner 签发
+  | { domain: "global"; anchorEpoch: number };                                // 全局域（skill / rubric 等 global-write 资产）：锚点签发
+interface SurfaceAssetGrantBase {                      // surface ↔ 权威的资产数据面授权（S6，第 23 单元）；非秘密，可入日志
+  grantId: string;                                     // `grt-<Ulid>`（§1.1）；首次 `asset-grant-issued` 固定，重试凭申请键回放同一 grant
+  scope: SurfaceAssetScope;
+  surfacePrincipal: string; requestId: string;         // 耐久申请键 = (scope, surfacePrincipal, requestId)，由所落 control 流建立唯一索引
+  assets: ArtifactRef[];                               // 精确资产集：(digest,bytes) 升序去重，1..64 项；单资产 / Σ 字节上界初值 64 MiB / 256 MiB，S6 标定
+  issuedAt: IsoTime; expiry: IsoTime; signature: Signature }   // TTL 上界初值 1h（S6 标定）；不可续期，过期重新申请新 grant
+type SurfaceAssetGrant =
+  | SurfaceAssetGrantBase & { kind: "asset-upload";   payloadDigest: Digest }   // 绑定确切 control 写（§4.2 payloadDigest 单源）
+  | SurfaceAssetGrantBase & { kind: "asset-download"; payloadDigest?: never };
 ```
+
+**surface 资产授权（第 23 单元回填的字段级合同）**：签发者恒为 `scope` 所指权威（会话域 = 该会话当前 owner，全局域 = 锚点），验证者即签发者进程的资产服务——时效与全部在线判定唯一以签发权威的不可回退有效时钟（§1.1）单轴，结构性不存在跨设备时钟比较。
+
+- **作用域**：判别式覆盖全部携资产的 control 写——会话域 = `input.attachments`（§5.1）；全局域 = `global-write` mutation 中的 `ArtifactRef`（skill / rubric content 等既有字段）。同一套协议、同一 grant 类型按 `scope` 判别，不为任何域另造第二套上传协议。
+- **签发与幂等（两 kind 同规则）**：surface 凭已认证连接申请，耐久申请键 = `(scope, surfacePrincipal, requestId)`——scope 决定所落 control 流，流内唯一即全局唯一。`grantId` 为普通 `grt-<Ulid>`，随首次 `asset-grant-issued` 固定；签发先查 §4.1 耐久派生索引的申请键：命中时校验索引值携带的原签名 grant、源日志位置与 envelope 摘要，完整请求全等即回放原对象，任一字段不等即 `idempotency-conflict`；仅在相关 checkpoint 已追平且键缺失时才进入 fresh 签发，禁止全流扫描或部分字段比对。upload 的 `payloadDigest` 复用既有 `ControlEnvelope.payloadDigest` 单源摘要，`assets` 必须等于该 control 载荷 `rootArtifacts ∪ dependencyArtifacts` 的声明清单——签发不解引用、不做闭包对账，闭包在场检查仍唯一发生在 control 提交（`missing-base`，§4.2）。
+- **准入配额（与物理占用对齐，按 distinct digest 计费，两层上界）**：受计集合 = 在途 upload grant 的有效预留 ∪ 已落盘但未接管、未回收的临时资产，按去重 digest 求字节和；**scope 级公平上界**（初值 1 GiB / scope）与**设备级总上界**（全部 scope 受计集合之并，初值 4 GiB；均 S6 标定）任一超出即拒签——scope 数量不设限，故仅 per-scope 上界不构成总量边界。出账按预留与物理占用分层：grant 到期 / 吊销只释放其**尚未落盘**的预留部分；已落盘临时资产持续计费，仅在 digest 被权威记录接管、或按 §4.2 谓词**实际回收完成**（物理删除 fsync 确认，删除失败不出账）后释放——"申请 → 上传 → 等过期 → 再申请"与"多会话摊薄"均不得绕过配额。
+- **配额线性化与恢复（每 ArtifactStore 恰一个资产配额协调器）**：设备级与 scope 级准入判定唯一经该协调器的串行段——各 scope 权威签发前先追平索引覆盖层并取得配额裁决，再按 §4.1 为本次 envelope 纯计算并预留全部索引 delta；容量不足、索引未追平或 compaction 背压均发生在权威 fsync 前。issued fsync 后仅发布已预留的 delta 即可返回，跨 scope 并发签发不可越额且不为派生索引增加提交 fsync。协调器的权威输入仍是全部 scope 的 issued / revoked / 接管记录与 ArtifactStore 临时区；正常恢复校验 §4.1 checkpoint、只追各流增量尾部并与临时区对账，索引不可用时才全量重建。活跃授权、到期队列与候选均驻磁盘索引并有界分页，内存只保留有界覆盖层、当前事务、在途 pin 与固定批次；download 与零字节 upload 不另设妨碍正常使用的数量配额。
+- **耐久生命周期**：`asset-grant-issued` / `asset-grant-revoked` 按 `scope` 落对应权威的 `control` 流（会话域 = 会话 owner，全局域 = 锚点；记录字段、幂等键与写序见 §4.3）：issued fsync 先于 grant 下发与任何按其接受的上传；吊销原因限 `session-deleted` / `surface-revoked` / `superseded`，短 TTL 兜底。§4.1 耐久派生索引至少维护申请键、活跃 grant / expiry、临时占用、内容叶所有权与 releaseId；它只加速权威记录重放和 ArtifactStore 对账，不新增业务事实。授权时间前沿 = 该 `control` 流全部 CommitEnvelope `at` ∪ 显式 `authority-time-frontier` 记录（§4.3）重放取最大值，构成 §1.1 有效时钟的耐久输入——正常写入由 envelope `at` 顺带推进、零额外记录；凡依据"已过期"作出不可逆动作（跨重启粘滞的过期拒绝、§4.2 回收）前，耐久前沿低于观测时间的必须先 fsync 一条显式前沿推进，同批过期共享一次推进；自然过期不写逐 grant 记录、不占用吊销原因；签发时间与全部在线时效判定同取有效时钟，历史申请键的全等回放不依赖它。
+- **download 可见性**：唯一权威 = scope 资产可见集——会话域为 committed 内容资产索引条目 ∪ 已 applied control 写引用的资产（用户输入附件由此可见），全局域为已接管的全局资产（skill / rubric content 等权威记录引用）；均为可由 log 重建的派生投影，不新增记录类型。访问权 = 该 surface 持有经 S2 认证的当前连接（单 home 内已认证 surface 均可访问，无逐会话 ACL）；仅当 `assets ⊆ 可见集` 才签发。
+- **传输**：完全复用 S5 的 probe / append / read 与可续传接收器原语（断点、去重、摘要终验语义全同），仅授权载体由 `AuthorityCapability` 换为 `SurfaceAssetGrant`——服务端逐请求验 grant 签名、时效、连接身份 = `surfacePrincipal`、`ref ∈ grant.assets`、操作方向与 kind 匹配，越集 / 越权 / 过期 fail-closed。
+- **验收**：越 grant 资产集、错 surface、错 scope、过期与吊销全拒；中断续传、重复 digest 去重；同申请键（含 scope）全等回放原 grantId、异载荷冲突；同 digest 多 grant 只计一次配额，scope 级与设备级任一超限拒签，跨 scope 并发签发不可越总额；grant 到期 / 吊销仅释放未落盘预留，已落盘临时资产持续计费至接管或实际回收（删除 fsync 确认）出账，删除失败不释放占用，"过期再申请"与"多会话摊薄"均不得绕过；协调器崩溃恢复后配额与物理占用精确一致；已接管资产不受 grant 过期影响，未接管临时件按 §4.2 谓词回收；attachments 随 admitted 耐久、恢复与重新派发零丢失；下载仅可见集内资产；两域 grant 经同一验证器、跨 scope 使用拒；attachments 越上界或非规范序拒；时效不可回退也不冻结——推进越过 expiry 后回拨，同进程与重启后使用均拒、已过期 grant 不复活；TTL 中途回拨不延长剩余有效期（单调流逝承载前进）；回收与跨重启的过期拒绝生效前先耐久前沿推进，配额与 GC 在回拨下只保守延迟、不提前释放占用或删除。
+- **索引与规模验收**：以十万历史申请和内容叶验证正常启动只读耐久 checkpoint 与有界尾部，定点回放的 segment 探测数有固定上界，到期/回收只随定位深度与返回批次增长，内存不随历史线性增长；单条所有权事实只更新有界 Merkle 路径，不得物化该 digest 的历史事实全集。覆盖旧日志迁移各崩溃点、合法追加后从 checkpoint 直接追尾、错误日志身份、伪造边界、截断及坏尾、索引落后、manifest/segment 损坏、重建时新增尾部、覆盖层/compaction 背压；提交链覆盖 delta 计算/容量预留失败（零追加）、权威 fsync 后至覆盖层发布前崩溃、同 envelope 多索引发布、响应丢失与同键并发重试，证明提交后无可失败派生工作、调用方不会收到“未提交”的假阴性、exact replay 恰一事实。分页覆盖并发写、flush、compaction 与快照淘汰，证明零漏项零重项或显式 stale；重建以有界内存流式发布并与全日志重放等价，跨日志任意交错产生相同 releaseId。
 
 票据时序（签发 → 续期 → 失效闭环）：assignment 落 `assigned` 记录且 executor `received` 后，owner 先在对应 run / job 流 fsync `ticket-issued`，再经各 surface 既有控制连接下发票据——向当前同会话 observer 签 `run-observe`，仅向原始 surface（admitted 记录 `IngressContext.surfacePrincipal` 所指）签 `run-interact`，并同时预签 `abort`（expiry 覆盖 assignment 存续，owner 失联止损由此成立）；发送失败按未 revoked 的 issued 记录幂等重驱。`ticketId` 的幂等身份包含 assignment、surface、kind、TTL 与被替换 ticketId；仅完整请求全等可回放原票据，任一异载荷稳定拒绝。续期的 `ticket-issued` 记录显式携被替换 ticketId，并与对应 `ticket-revoked` 同 envelope。后加入的 observer 订阅时只取 observe；原始 surface 断线重连经 owner 重认证后才续 interact，续期同样先记 issued。续期恒经 owner 控制通道（surface ↔ owner），executor 不签发不续期。失效：重派 / 取消 / 提交 / uncertain 用户裁决关闭旧 assignment 任一发生，owner 在对应 run 流写 `ticket-revoked` 并向 executor 推送吊销通告，executor 立即断开该票据的连接并在验证层拒绝后续使用；surface 失权（连接注销 / 设备撤销）同此路径；推送不可达时由短 TTL 兜底。
 executor 接收票据时必须从耐久 `received.activation` 冻结 `{ref,executorId,ownerKeyId}` 与本地剩余有效期；接收记录的 `acceptedAt + validForMs` 同时冻结为下游 consumer fence 的唯一 `expiresAt`，在线接收、耐久重放、恢复和每次使用逐字复用，禁止按当前墙钟重算。单调 deadline 决定在线使用资格，要求票据由该 activation 的 owner key 签发且当前 assignment 仍处于可用激活态；stream spool 只消费 registry 给出的资格与显式撤销，不得按 consumer fence 和当前墙钟建立第二套在线资格。远端时间只在接收时按允许偏差换算本地期限，abort 请求时间与 executor proof 时间不得跨设备参与有效期比较；自然过期的历史 issued 事实按 inactive 幂等收敛，不得阻断后继 active / revoked 同步。过期、吊销或激活失效统一转成有界 retirement，保留至 `maxTicketTtl + maxClockSkew` 后，由 `executor:<executorId>:data-plane-ticket-retirement-frontier` 流中与同一 executor 绑定的耐久、不可回退前沿回收；墙钟回拨不得恢复已退出前沿的身份。owner 的跨端事实同步同样以耐久、不可回退的 expiry frontier 排除历史 issued/revoked，禁止每次查询按当前墙钟重新扩张集合。
@@ -308,7 +334,7 @@ executor 接收票据时必须从耐久 `received.activation` 冻结 `{ref,execu
 **job 域时序**：手动 job-run——`admitted.ingress` 所指发起 surface 获 interact + abort 票据，语义与上同构；定时 job——**不签数据面票据**（渠道用户不持设备连接，无票据可用的 principal），由 job owner 以 §5.6 `owner-relay` 身份耐久续流。收到 `interaction.requested` 后，锚点在同一 CommitEnvelope 写 `channel-challenge-prepared + channel-relay-cursor`，再 ACK executor；prepared 内的 owner 签名 `JobChannelChallengeToken` 随互动消息下发，token.displayDigest 必须等于实际渲染的 toolName + display，发送按 challengeId 幂等重试。平台 callback 必须原样带回 token，渠道适配器先验证平台身份，锚点再验 token 签名 / expiry / displayDigest、challenge 仍 pending、route 以及结构化 `ChannelResponderRef` 与任务创建时耐久化的 `interactionResponder` 全等；通过后先耐久写含完整 grant 的 `channel-challenge-granted`，再由 host principal 转交 executor。executor 对 grant 与内嵌 token **分别验签**，并逐字段要求 ref / assignment / interaction / challenge / route 一致、token.displayDigest 等于 assignment 流 pending request 的 `D("InteractionDisplay",1,{toolName,display})`、grant.expiry 不晚于 token.expiry，再验证 responder / decision；任一不符拒绝。成功后以 `(assignmentId, interactionRequestId)` 单次幂等落 `interaction-finished`；审计 `by` 只能由 grant.responder 派生，禁止采信转发方自报。重复 callback 回放原 grant / 原结果；origin、interactionResponder 任一缺失，token 不可回传或任一校验失败、渠道不可达或授权过期 → 不存在合法应答，走 `auto-resolved(no-interactive-surface)` fail-closed。
 
 ```ts
-type AuthorityPortMethodId =                         // 封闭字面量联合 = §三全部携 AuthorityCallContext 的端口方法，contracts 冻结；
+type AuthorityPortMethodId =                         // 封闭字面量联合 = §三中需要 AuthorityCallContext 的权威端口方法，contracts 冻结；
   | "session.readSessionMeta" | "session.readTranscriptTail" | "session.readTaskList" | "session.readAdvancementState" | "session.mutate"
   | "global.read" | "global.mutate"
   | "intent.record" | "intent.list" | "intent.decide"
@@ -760,6 +786,94 @@ interface ResourceReservationPort {
 }   // 全部方法携 ctx 过同一 guard——"每次权威端口调用必验权"无例外
 ```
 
+### 3.4b DeviceCapacityArbiterPort / StorageMaintenanceGovernorPort（第 23 项回填；设备本地、进程内注入；不是业务授权端口）
+
+```ts
+type StorageMaintenanceKind =
+  | "log-migration"
+  | "projection-flush" | "projection-rebuild" | "projection-scrub" | "projection-compaction"
+  | "lifecycle-reconcile" | "asset-gc";
+type StorageMaintenanceUrgency = "foreground" | "recovery" | "background";
+type StorageMaintenanceObligation = "pre-commit" | "committed";
+type DeviceCapacityDimension =
+  | "memoryReservationBytes" | "temporaryBytes" | "slots"
+  | "readBytes" | "writeBytes" | "ioOperations";
+type DeviceCapacityClass =
+  | "workload-interactive" | "workload-advancement"
+  | "workload-scheduler" | "workload-orchestration"
+  | "storage-foreground" | "storage-recovery" | "storage-background";
+interface DeviceCapacityBudget {
+  occupancy: { memoryReservationBytes: number; temporaryBytes: number; slots: number };
+  quantum: { readBytes: number; writeBytes: number; ioOperations: number };
+}
+interface DeviceCapacityRequest {
+  admissionId: string; serviceClass: DeviceCapacityClass;
+  atomic: DeviceCapacityBudget; preferred: DeviceCapacityBudget; maxWaitMs: number;
+}
+interface DeviceCapacityStepPermit {
+  complete(): void;
+}
+interface DeviceCapacityPermit {
+  readonly granted: DeviceCapacityBudget;
+  tryBegin(stepBound: DeviceCapacityBudget): DeviceCapacityStepPermit | undefined;
+  release(): void;
+}
+type DeviceCapacityAdmission =
+  | { kind: "granted"; permit: DeviceCapacityPermit }
+  | { kind: "backpressured"; blockedBy: DeviceCapacityDimension; retryAfterMs: number }
+  | { kind: "capacity-gap"; blockedBy: DeviceCapacityDimension; required: number; available: number }
+  | { kind: "cancelled" };
+interface DeviceCapacityDiagnostics {
+  occupancyCapacity: DeviceCapacityBudget["occupancy"];
+  occupancyInUse: DeviceCapacityBudget["occupancy"];
+  quantumAvailable: DeviceCapacityBudget["quantum"];
+  devicePressure: {
+    cpuBusyRatio: number; availableMemoryBytes: number; processRssBytes: number;
+  };
+  queued: Partial<Record<DeviceCapacityClass, number>>;
+  blockedBy?: DeviceCapacityDimension;
+  lastViolation?: {
+    admissionId: string; dimension: DeviceCapacityDimension;
+    limit: number; requested: number;
+  };
+}
+interface DeviceCapacityArbiterPort {
+  acquire(request: DeviceCapacityRequest, abort: AbortSignal): Promise<DeviceCapacityAdmission>;
+  snapshot(): DeviceCapacityDiagnostics;
+}
+interface StorageMaintenanceRequest {
+  workKey: Digest; kind: StorageMaintenanceKind;
+  urgency: StorageMaintenanceUrgency; obligation: StorageMaintenanceObligation;
+  atomic: DeviceCapacityBudget; preferred: DeviceCapacityBudget;
+  maxWaitMs: number;
+}
+interface StorageMaintenanceDiagnostics {
+  queued: Partial<Record<StorageMaintenanceKind, number>>;
+  inFlight: Partial<Record<StorageMaintenanceKind, number>>;
+  estimatedDebt: DeviceCapacityBudget;
+  capacity: DeviceCapacityDiagnostics;
+  oldestWaitMs?: number;
+  blockedBy?: DeviceCapacityDimension;
+  lastError?: { kind: StorageMaintenanceKind; at: IsoTime; code: string };
+}
+interface StorageMaintenanceGovernorPort {
+  acquire(request: StorageMaintenanceRequest, abort: AbortSignal): Promise<DeviceCapacityAdmission>;
+  snapshot(): StorageMaintenanceDiagnostics;
+}
+```
+
+`DeviceCapacityArbiterPort` 及默认实现归 `@zhixing/core` 的中立资源基础层，`StorageMaintenanceGovernorPort` 归其存储层；CLI 组合根只创建和注入，每个设备运行时恰一 arbiter、一 storage governor。只有 arbiter 持有本机容量预留与 I/O 额度；ResourceGovernor 可继续维护耐久业务配额与并发上限，但不得把它们当成第二份设备准入真相。`ResourceLease` 只证明业务授权，不持有本地 permit；run / job / control / evidence / orchestration-node 在每个实际本机执行批次开始前，由其本机执行所有者按可信 `AdmissionClass` 与版本化 executor 策略派生 class、atomic 和 preferred，批次结束即释放，禁止采信业务载荷自报成本。网络等待、用户交互和闲置 lease 不占 permit。重启不恢复可丢 permit；恢复的 workload 在继续执行前重新申请。arbiter 的 `temporaryBytes` 可用量取当前文件系统余量减安全保留与进程内预留，崩溃残留文件自然占用余量，禁止依赖已丢 permit 还原磁盘占用。
+
+`occupancy` 是 permit 存续期间独占并在释放时归还的准入预留：`memoryReservationBytes` 只表示由可信策略按显式缓冲区和有界工作集推导的保守上界，不等同于无法可靠归因的进程 RSS；`temporaryBytes` 与 `slots` 分别预留临时空间和并发槽位。`quantum` 是按本地单调时间补充、在资源操作前扣减的 I/O 额度，未使用部分在释放时归还，已使用部分不得归还。CPU 压力只作为设备级准入信号和诊断，执行公平性由 class 队列、槽位及有界原子步骤保证，不按进程级采样结果给单个 permit 定罪；`cpuBusyRatio` 是同一可注入设备探针在固定采样窗内得到的 `[0,1]` 聚合值，内存诊断同样来自该探针，禁止由调用任务自报。`atomic` 是一个不可再切分、完成后可安全检查点化的步骤成本上界，也是最小可用授权；每个可执行任务的 `atomic.occupancy.slots ≥ 1`，禁止全零成本绕过治理。`preferred` 是本批期望上界。arbiter 逐维验证 `atomic ≤ preferred`：atomic 超过设备策略与当前持久占用所决定、且不能仅靠已授 permit 释放而恢复的可用上限时立即返回 `capacity-gap`；只因其他 permit 暂时占用则等待或返回 `backpressured`。准入成功只可授予 `atomic ≤ granted ≤ preferred`。请求中的全部数值字段均为非负安全整数。
+
+取得 permit 后，每个不可分步骤必须先以 `tryBegin(stepBound)` 预留额度，且 `stepBound ≤ atomic`；同一 permit 同时至多存在一个未完成步骤，并行度通过多个独立 permit 表达。`occupancy` 只校验该步骤上界不超过 permit 已独占的 granted occupancy，多个串行步骤复用同一预留；`quantum` 从 permit 剩余额度按声明上界预扣。任一校验不足时返回 `undefined`，任务在当前安全检查点释放并重新申请，禁止先执行再补账。受治理的缓冲区、临时文件和 I/O 包装器必须在副作用前核对本步骤累计资源请求不超过 stepBound；越界请求零副作用拒绝，记录 `lastViolation` 并封闭 permit。`DeviceCapacityStepPermit.complete()` 只在步骤结束的 `finally` 中恰一次关闭该预留，不接收无法可靠归因的事后 actual；外层 permit 的 `release()` 同样恰一次调用。由此 arbiter 对预留与资源请求提供可机械验收的硬边界，设备级 CPU/RSS 观测只参与新准入和诊断。
+
+`maxWaitMs` 只限制一次物理准入尝试：workload 取外层操作剩余期限与策略上限的较小值，storage 取任务所有者的有界调度片；它不代替 single-flight 等待者各自的调用期限。期限内暂时无容量返回 `backpressured`，本次设备状态或策略下不能靠等待容纳 atomic 返回 `capacity-gap`；传给 storage governor 的 `AbortSignal` 是共享任务信号，只在进程停机或全部 `pre-commit` 等待者离开时取消，单个等待者不得直接传入。`admissionId` 每次进程内申请唯一，仅用于容量占用和诊断；arbiter 不解释业务任务身份、不做语义去重。
+
+single-flight 归维护义务的唯一任务所有者：AuthorityCommitLog 拥有 log migration，DurableProjectionIndex 拥有 projection 四类任务，ArtifactLifecycleIndex 拥有 lifecycle reconcile，锚点资产维护器拥有 asset GC。`workKey = D("StorageMaintenanceWork",1,{kind,resourceId,inputIdentity})`：日志使用逻辑日志身份与源格式，投影使用 projectionId 与 frozen manifest/checkpoint，生命周期使用 ArtifactStore 身份与源 checkpoint 集，GC 使用 ArtifactStore 身份与候选游标/release 前沿。键覆盖“复核义务 → 申请容量 → 执行 → 步骤计量 → permit 释放”的完整生命周期；新输入必须生成新键，禁止用资源名吞并不同代工作。
+
+并发同键等待者加入同一个完成 promise，不另行申请 permit；每个等待者以自身调用期限等待，完成后再核对自己的提交前提。单个等待者超时或取消只解除自身等待，并向该调用返回对应结果；仅当全部等待者离开且义务仍为 `pre-commit` 时，任务所有者才触发共享任务信号并在安全检查点取消。进程停机可在安全检查点暂停任何任务；`committed` 来源无论失败或零等待者都不得清除，下次启动或触发仍从耐久事实重试。
+
 ### 3.5 ControlCompletionPort / AdvancementReviewerPort（达 owner 设备模型运行时）
 
 ```ts
@@ -886,6 +1000,17 @@ interface LogicalRecord  { stream: string;
 
 **原子性规则**：一次逻辑提交 = 一条 CommitEnvelope、一次 fsync——"applied + 权威变更决定 + 响应"与"CAS 权威件全集"各自恒在同一 envelope 内落定。transcript 分片、conversation meta、内容资产索引、终态推送、mutation 物化、HomeTrustRecord 快照全部是**可由 log 幂等重建的投影**（重启按 lsn 重放未投影段）。坏尾 envelope 截断隔离。带 state 字段的记录（final-outbox / exposure / intent）以**追加新记录**表达状态推进，投影按键 latest-wins。
 
+**耐久派生索引（跨域通用原语，不是第二事实源）**：需要按键定位、有序分页或跨重启增量恢复的投影，统一实现 `DurableProjectionIndex`，禁止各消费者自造全历史内存表或文件数据库。AuthorityCommitLog 仍是唯一业务事实源；索引只保存可由日志确定性重建的派生 mutation（put / tombstone），删除索引不得丢失业务事实。端口固定提供 exact `get`、带逻辑快照 continuation 的有界 `scan(range, limit)` 与批量 checkpoint；默认本地实现采用 copy-on-write manifest 管理耐久不可变 base segments、至多一个 frozen flush batch、一个 active overlay。查询合并三层时恒以 active → frozen → 新 base 的投影序覆盖旧 mutation，tombstone 与值同等参与覆盖，禁止 compaction 复活旧值；存储实现可替换但语义不得分叉。
+
+- **记录身份绑定**：每条 put 记录必须同时绑定实际物理键，并在值中携带足以重算规范 exact 键、扫描前缀与排序字段的业务身份；标量成员记录也不得省略身份。写入与读取复用同一类型化 codec，任何消费者或 reducer 都须在产生业务效果前验证“物理键 = 值所重算键”及查询身份全等。同一逻辑事实存在多个定位键时，完整载荷只存于规范主记录，二级记录只保存自身身份与主记录定位；消费二级记录必须回解主记录并验证关系全等。checksum 正确但键值错绑或主次分叉仍属派生索引损坏，必须进入该投影唯一的一次重建边界；重建后仍不一致即 fail-closed，禁止消费者另行重建或容错使用。
+- **日志身份与耐久游标**：每个 AuthorityCommitLog 文件以不可变 header 耐久保存 `{formatVersion,logId}`，其中 `logId = B(随机 256-bit 原始字节)`、空日志前缀固定为 `D("AuthorityLogPrefix",1,{logId})`。服务开放业务写前，先以“临时 header 文件 fsync → 原子安装 → 目录 fsync”完成空日志初始化；业务提交永不负责创建日志文件，因而稳态仍严格是一条 envelope、一次文件 fsync。独立新建或分叉的日志生成新 `logId`，同一逻辑日志的格式迁移、精确复制与恢复保留原身份。每个物理 WAL frame 在同一次写入中保存结束 `lsn` 与累计 `prefixDigest = D("AuthorityLogPrefix",1,{logId,previousPrefixDigest,lsn,envelopeDigest})`；payload 仍由 `CommitEnvelope.envelopeDigest` 自校验，frame 结构完整性覆盖边界元数据。`DurableLogCheckpoint = (logId, lsn, frameEndOffset, prefixDigest)` 只能由日志在完整验证至 header 后或某个 frame 末尾时签发；`readTail(checkpoint)` 只读 header 与该边界的定长 trailer，验证同一已验前缀的身份、边界、LSN 与累计摘要后从下一 frame 追尾。错误身份、越界、截断、边界或链失配立即拒绝，坏尾按既有规则隔离；常数级续读证明的是“仍连接到同一已验边界”，不替代首次打开、显式 scrub 或重建时的全文件内容校验。进程内 `ProjectionCursor` 不得充当跨重启证明。
+- **旧格式迁移**：既有无 header / 前缀链日志首次打开时先完整验真，再写同目录新格式临时文件并按“文件 fsync → 原子替换 → 目录 fsync”一次迁移；迁移生成并固定该逻辑日志首个 `logId`。任一点失败保留唯一可回退的旧文件，不开放写入；切换后仅新格式生效并使旧索引失效重建，禁止双格式长期共存或双写。
+- **提交协议（准备 → 唯一提交 → 不可失败发布）**：提交协调器以固定顺序持有权威日志及受影响索引的写栅栏，先把索引追平至当前已验证 head，再由纯、确定性 reducer 对候选 envelope 计算不可变 `PreparedProjectionDelta`（规范 mutation/tombstone、源位置与 reducerVersion），完成全部校验并为本次 delta 的确切条数/字节预留内存。达到 overlay 阈值先旋转；单个合法 delta 超过常规批阈值时独占一批并受既有请求/资源预算约束，不得另造业务数量上限。任一 reducer、版本、容量或资源准入失败都发生在权威写入前，日志零追加。随后权威 envelope 的一次 fsync 是唯一提交点；fsync 成功后只把实际 checkpoint 写入已预留槽位，并以无 I/O、无 reducer、无新分配且不可抛错的内存指针交换发布。一个 envelope 影响多个索引时，单索引读取或跨索引查询捕获 read-view 集都须经过同一提交栅栏，只能看见全部发布前或全部发布后，不能看见半套派生状态。
+- **提交后失败语义**：权威 fsync 后不得再运行可能失败的业务或派生逻辑，也不得返回“未提交”或可安全重试的假阴性。进程在内存发布前崩溃时，重启从日志 checkpoint 追尾；若不可恢复的进程故障使正常响应无法送达，则关闭请求并 fence 该权威实例，调用方只得到传输不确定，随后以耐久幂等键 exact replay 原提交，绝不另写第二份事实。派生 checkpoint/segment 的后台失败只令索引 lagging 并触发重试或相关新写 fail-closed，不改变已提交结果。
+- **覆盖层、发布与重建**：active overlay 按条数和字节双阈值有界；触发发布时在协调器内把它与精确源 checkpoint 集原子旋转为 frozen，后续提交进入新 active。后台把 frozen 写成 segment，再按“segment fsync → manifest fsync → generation 指针原子替换与目录 fsync”发布：成功只移除该 frozen，失败原样保留，绝不清除之后的 active；无读者引用的旧 generation 与孤儿临时 segment 才可清理。已有 frozen 且 active 无法容纳已准备 delta 时，必须在对应权威写入前完成 flush/compaction 或背压。manifest 绑定 `projectionId`、`reducerVersion` 与各输入日志 checkpoint；正常启动只追未覆盖尾部，缺失、损坏、版本或日志证明失配时，锁定输入 head、流式重放并按同一阈值生成 segments，最终 copy-on-write 发布后再追尾，重建全过程内存不随历史增长，完成前相关新写 fail-closed。
+- **并发、确定性与分页**：每个索引以 `manifestGeneration` 串行提交或 CAS，跨日志追尾不得覆盖其他输入已发布的 checkpoint 或 segment。reducer 对同一 key 的单日志事实按源顺序收敛；多日志可触及同一 key 时必须使用集合/单调合并或规范源序，且对日志交错做排列测试，禁止让线程到达顺序改变结果。每次 scan 创建有界、可回收的 `IndexReadView`，固定 manifest、frozen 身份、active 的最大投影序与源 checkpoint 集；当前调用完成前 view 不可淘汰，continuation 绑定该 view 与末键，页间租约过期或受 ResourceGovernor 回收后显式 stale。由此并发写、flush 与 compaction 只能产生一致旧快照或一致新快照，不能静默漏项或重复。
+- **复杂度与资源治理**：默认实现采用有界层级 compaction，限制每层重叠 run 数；exact get 的 segment 探测数有固定上界，scan 工作量只随定位深度与返回 `limit` 增长，正常启动只随输入日志数与未 checkpoint 尾部增长。历史驻磁盘，内存只保留覆盖层、固定页、固定批次、受限读视图与有界缓存；compaction 不得删除仍承担幂等或生命周期证明的键。flush、重建、scrub、compaction 与索引磁盘成本统一经 §3.4b / §10.1 的 storage governor 准入，并与 workload governor 共用设备唯一容量裁决器；资源不足时按提交边界背压或保留可恢复欠账，不以任意业务数量上限制造用户可见失败。
+
 `publish` 与 `final-outbox` 是物理共享流，但其恢复热点必须按 `conversationId` 分区：`publish-decision` 从同 envelope 的 committed bundle 机械取得 conversation 绑定，待发布集合不得跨会话枚举；FinalOutbox 的 revision 唯一性与单调水位均为 `(conversationId, commitRevision)` 作用域，禁止把不同会话的同 revision 当冲突。终态压缩可丢弃 batch / decision 正文，但必须保留 assignment 身份 tombstone，防止历史 assignmentId 被二次接纳。
 
 ### 4.2 ArtifactStore（内容寻址，每设备一个）
@@ -898,9 +1023,12 @@ interface ArtifactRef { digest: Digest; bytes: number }
 - 写序纪律：artifact 先 fsync 落定，引用它的 log entry 后写——log 内引用恒指向已耐久对象。
 - **依赖闭包通用规则（跨边界引用的在场保证）**：任何跨边界消息（SealedBundle / ControlEnvelope / DispatchEnvelope）按 schema 机械划分两类引用：① `rootArtifacts` = wire body 中直接出现的全部 `ArtifactRef`（含 SealedBundle 的 runRecord / mutationBatch / contentAssets、ControlRequest mutation 内的正文引用、Dispatch work 引用），它们已在 body 的 digest / 签名域内，**不重复**写入清单；② `dependencyArtifacts` = 对每个有注册 schema 的 root artifact 解引用并递归提取得到的传递闭包，减去 rootArtifacts 后的精确集合（opaque 内容资产是叶节点，不解析内部字节）。两集合均按 `(digest, bytes)` 升序规范化且禁止重复；跨层重复、非规范顺序、少列与多列均拒，无传递依赖时必为 `[]`。接收方使用同一版本化 schema 提取器对账，先验证消息 digest / 签名，再要求 `rootArtifacts ∪ dependencyArtifacts` 全部已耐久在场，CAS / control apply / dispatch 接受前缺任一件即拒（`missing-base` 族错误）。root / dependency 只是**传输清单分类，不改变资产语义**：成功生效后，每个 ref 由引用它的权威记录接管保留与 GC（如 contentAssets 归内容索引、skill / rubric content 归对应全局资产）；未被权威记录接管的临时件才按保留窗 GC。
 - **绑定字段（payload 单源，算法统一见 §1.2）**：`ControlEnvelope.payloadDigest = D("ControlEnvelopePayload",1,{body,dependencyArtifacts})`；`DispatchEnvelope.signature` 按 §1.2 覆盖除 signature 外全部字段；`SealedBundle.digest = D("SealedBundle",1,{assignmentId,executorId,streamFinal,usage,usageFinal,dependencyArtifacts,body})`。rootArtifacts 因位于 body 已被覆盖，dependencyArtifacts 显式入域；任何集合替换、顺序变化（JCS 后）或内容篡改均失配。
-- 传输分两级：**S5 最小 assignment 域传输协议**——对象为 WindowInput 全量、SealedBundle、MutationBatch 及 `rootArtifacts ∪ dependencyArtifacts` 全闭包，在 owner ↔ executor 之间按 digest 推拉，授权凭该 assignment 的 `AuthorityCapability`（越 assignment 拒绝），支持断点（range）与去重（已有 digest 跳过），上传恒先于引用它的提交；**S6 扩展**——用户内容资产的数据面消费（surface 下载授权、断点续传、生命周期治理）与 **surface 预上传授权**（control 写的 root / dependency 上传半边，凭已认证连接按 requestId 申请上传授权，上传完成才可提交该 control 写）。
+- 传输分两级：**S5 最小 assignment 域传输协议**——对象为 WindowInput 全量、SealedBundle、MutationBatch 及 `rootArtifacts ∪ dependencyArtifacts` 全闭包，在 owner ↔ executor 之间按 digest 推拉，授权凭该 assignment 的 `AuthorityCapability`（越 assignment 拒绝），支持断点（range）与去重（已有 digest 跳过），上传恒先于引用它的提交；**S6 扩展**——surface ↔ scope 权威的用户内容资产数据面：上传 / 下载授权、绑定、幂等与生命周期的字段级合同见 §2.2 `SurfaceAssetGrant`；传输复用本级 probe / append / read 与可续传接收器原语，上传恒先于引用它的 control 提交。
+- **surface 临时件治理**：资产生效即由引用它的权威记录接管；未接管临时件按 digest 回收，唯一谓词 = 未被任何权威记录引用 ∧ 引用该 digest 的**全部** upload grant 均已过期 ∧ 自其中最晚 expiry 起超保留窗（初值 24h，S6 标定）。
+- **所有权与释放身份**：每条接管/删除事实以 `(logId, lsn, entryIndex)` 唯一标识。生命周期索引按 digest 保存规范 `ArtifactRef`、live owner、稳定 `releasedAt`、reclaimed releaseId 与 owner→digest 反向键；同时分别维护所有接管事实与删除事实的规范稀疏 Merkle-set root。集合键为事实 id 的域分离摘要，逻辑树形、空节点摘要和节点摘要算法固定；物理节点允许路径压缩，但必须产生同一规范根且节点数只随事实数增长。由此新增单条事实只更新摘要位数范围内的路径，不得读取或排序该 digest 的历史事实全集。一个生命周期索引只组合当前 ArtifactStore 所在设备、同一有效时钟域内的本地权威日志；组合根必须向这些日志注入同一不可回退有效时钟，远端事实则先作为本地接收 envelope 落定，禁止直接比较远端墙钟。全部 owner 均有 tombstone 时，`releasedAt = max(本地 tombstone envelope.at)`，`releaseId = D("ArtifactRelease",1,{ref,ownershipFactsRoot,retirementFactsRoot,releasedAt})`；新增接管或删除事实改变对应根并淘汰旧候选。
+- **删除收敛**：物理删除成功或对象已缺失均把当前 releaseId 标为 reclaimed；后续同 digest 重新出现时，只有新的权威事实改变集合根后才能形成新候选，崩溃重放不得复活旧候选。判定事实仍只来自 issued/revoked、接管/删除记录与 ArtifactStore；Merkle 节点、releaseId 与 reclaimed 状态均为可重建索引数据，不是第二事实源。
 - S5 每次资产传输还须携短时 `AssignmentArtifactTransferGrant`：以 owner 签发的 assigned/received 激活为授权根，绑定 assignment、executor、认证源/目标设备、方向、精确规范化 ref 集、聚合字节与有效期；owner→executor 由 owner 签发，executor→owner 由该激活指定的 executor 签发。接收端先验证签发权、方向、闭包与预算；已持有 assignment 的一侧还须命中本地耐久激活，资产先行的 executor 接收侧则以 owner 签名激活为可携带证明，并在 dispatch 接纳时写入 received。当前写同时要求 capability 未过期，历史读取只复用仍可证明的耐久激活。
-- GC：引用计数以 log 保留窗为准；对话删除连带其资产引用，归零后物理回收。
+- GC：引用计数以 log 保留窗为准；对话删除连带其资产引用，归零后物理回收。保留引用按记录语义分两类且分类点单源——**重放依赖**（外置容器、注册 root、闭包与依赖清单）无条件保留；**内容叶**（附件与内容资产本体：`input.attachments`、内容索引条目、dispatch / bundle 的 `contentAssets`）按会话所有权计数保留，`session-lifecycle delete` 是所有权的唯一削除事实——该 tombstone 单源在会话权威日志，不持有它的日志（executor 侧）以独立 checkpoint 进入同一生命周期索引。GC 只按 `releasedAt` 有序索引读取固定批次，在同一 ArtifactStore 删除锁内重新核对跨日志零引用后物理回收并推进 reclaimed；不得在锁内重放日志、物化全量保留集或扫描全部候选。未在分类点登记叶位置的记录默认无条件保留（缺省保守不误删）；全局域内容当前无删除事实，恒按无条件保留。
 
 ### 4.3 各逻辑流记录
 
@@ -908,7 +1036,14 @@ interface ArtifactRef { digest: Digest; bytes: number }
 type ControlRecord =
   | { t: "received"; requestId: string; envelope: ControlEnvelope | { ref: ArtifactRef };
       ingress?: IngressContext } // 仅 input/job-run 必有：owner 首次接收事实与稳定请求摘要分层；received→applied 重试恒复用首次值
-  | { t: "applied";  requestId: string; result: ControlResult | { ref: ArtifactRef }; authorityRevision: number };
+  | { t: "applied";  requestId: string; result: ControlResult | { ref: ArtifactRef }; authorityRevision: number }
+  | { t: "asset-grant-issued";  grant: SurfaceAssetGrant }   // 按 grant.scope 落对应权威的 control 流（会话域 = 会话 owner，全局域 = 锚点）；
+                                                             // 耐久申请键 (scope, surfacePrincipal, requestId) 流内唯一索引，重试回放原 grant（§2.2）；
+                                                             // fsync 先于 grant 下发与任何按其接受的上传
+  | { t: "asset-grant-revoked"; grantId: string; reason: "session-deleted" | "surface-revoked" | "superseded" }
+  | { t: "authority-time-frontier"; frontier: IsoTime };     // 权威时间前沿显式推进（§1.1 有效时钟 / §2.2）：仅当严格大于当前前沿时写入，
+                                                             // 重放与全部 CommitEnvelope `at` 一并取最大值；在"已过期"生效为不可逆动作前 fsync
+      // 配额与临时件事实 = issued / revoked / applied（接管）记录 ∪ ArtifactStore；可建 §4.1 可重建耐久派生索引，不建第二业务流
 type ControlResultBody =        // 回放载体：重复请求原样返回。allow-once 不在此联合——它不落 owner control 流，
                                 // 终态权威与幂等回放归 executor assignment 流 interaction-finished 记录（重复 (assignmentId, interactionRequestId) 回放原 outcome）
   | { t: "input"; runId: string; queuedPosition: number }
@@ -936,6 +1071,7 @@ type RunJournalRecord =
   | { t: "session-lifecycle"; mutation: "clear"|"delete"; domainRevision: number; requestId: string }
       // clear/delete 的 owner 权威事实；同 requestId 精确回放原 revision，异载荷拒绝。事实产生后禁止新 input，直到对应投影进度确认。
   | { t: "admitted"; ingressKey: string; runId: string; input: UserTurnInput | { ref: ArtifactRef };
+      attachments?: ContentAssetRef[];               // 与 §5.1 input.attachments 同一集合随准入耐久化；窗口构造与消息投影唯一消费此处，恢复 / 重新派发零丢失
       ingress: IngressContext; invocation: ConversationInvocation; queuedPosition: number }
       // 来源与执行语义随准入一起耐久化：重启后普通、推进代理与多视角任务不得互相降级或变形；ingress 仍是票据签发、final / 渠道路由的权威数据源
   | { t: "assigned"; runId: string; assignmentId: string; executorId: string;
@@ -1368,7 +1504,10 @@ type ConversationInvocation =                    // 排队任务的耐久执行�
 
 type ControlRequest =
   | { t: "input";      conversationId: string; ingress: { ingressId: string; source: IngressContext["kind"] };
-      input: UserTurnInput; invocation: ConversationInvocation; ownerEpoch: number }
+      input: UserTurnInput; attachments?: ContentAssetRef[]; invocation: ConversationInvocation; ownerEpoch: number }
+      // attachments：资产型用户输入（图片 / 文件），1..16 项、(digest,bytes) 升序去重，即该 input 的 rootArtifacts（§4.2 闭包规则）；
+      // 在 payloadDigest 签名域内；准入时与 input 同为 admitted 记录的耐久字段（§4.3——窗口构造与消息投影唯一消费该耐久集合），
+      // applied 后由 owner 并入消息投影与会话资产可见集（§2.2 SurfaceAssetGrant）
       // 完整 IngressContext 由 owner 派生（channel 分支的 responder / replyTarget 取自渠道认证事实）；同 ingress / requestId 改写 invocation 必须 idempotency-conflict
       // 调度前预准入必须有稳定 ingressId；后续执行只可消费 input + invocation 全等的同一准入，禁止以内存准备态把另一调用挂到已耐久 run
   | { t: "cancel";     conversationId: string; runId: string; ownerEpoch: number }
@@ -1976,7 +2115,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | evidence | EvidenceBundle 交付 / typed-stale 保持 deferred 的终态 | executor 侧子租约 settle + release，随 intake 上报对账 |
 | orchestration-node | 节点终态（completed / failed / aborted） | 子租约终结；父租约随所属 run 的行走 |
 - 启动与周期恢复按业务归属单一终结：assignment / system-job 根及其子租约只由对应业务恢复所有者在同轮收敛 anchor / executor 双半边，先把未收束预占按上限保守 consume，再写业务终态与资源终结；通用 governor 扫描只回收无业务归属的 control 根及孤儿资源。回收顺序子先于父，重复扫描零重复记账。
-- 公平准入：anchor governor 按 `admissionClass` 维护加权队列，调度算法固定为加权差额轮询（WDRR），权重 interactive : advancement : scheduler : orchestration = 8 : 4 : 2 : 1（初值，S7 压测标定）；`queued / dequeue / reserve` 记录承载入队、出队与准入顺序，持续满载场景验证各类均有界获得配额、交互类恒不被自动类饿死。executor 半边做本机硬容量与背压，瞬时容量经独立短租约公告、不进 CapabilityDescriptor。
+- 公平准入：anchor governor 按 `admissionClass` 维护加权队列，调度算法固定为加权差额轮询（WDRR），权重 interactive : advancement : scheduler : orchestration = 8 : 4 : 2 : 1（初值，S7 压测标定）；`queued / dequeue / reserve` 记录承载入队、出队与准入顺序，持续满载场景验证各类均有界获得配额、交互类恒不被自动类饿死。executor 半边维护耐久 workload 并发配额与背压，实际本机执行批次按 §3.4b / §10.1 取得物理 permit；对外瞬时容量公告取自同一 arbiter 的有界快照、不进 CapabilityDescriptor。
 - **根 lease 候选生命周期**（适用 `prepareAssignmentRoot / prepareSystemJobRoot`。两者在资源端口内按调用 deadline 有界等待 WDRR 候选；瞬时 pending 只触发重试，deadline 到达则返回可识别的延期结果并保留耐久 queued，由所属 run / job 恢复重驱，绝不写业务失败或单独 dequeue。control 类 `acquireRoot` 同样入队、共用同一公平治理面——它是"排队至准入并原子激活"的便捷接口：调用方同步等待，出队即原子 `reserve` 返回激活租约，无候选阶段；排队中放弃或超时以 `dequeue(cancelled|expired)` 单独落盘（无伴随业务终态），激活后终结走 finally 行。"即时激活"仅指其 `reserve` 无需第二个归属事实，不豁免准入）：
   1. **候选身份与重试**：签名候选恒为零权内存对象，prepare 不落租约日志、只对 WDRR 当前可调度队首授予；排他签发权是 governor 进程内**占用态** `(reservationId, 完整候选, expiry)`。同一 workload attempt 的 assignment / reservation 身份必须可稳定重建，禁止因重启或响应丢失改用随机新身份遗弃旧队列项；占用未过期时重复 prepare **幂等返回同一候选**，不重签；workload 重派提高 `attempt` 后才进入新身份。
   2. **过期**：占用短 TTL，过期即释放签发权，队首可重新授予（新候选替换占用、旧候选随之失效）。占用态是可丢弃的调度运行态而非权威事实：reservation 端口只在域内进程装配（§3.4），候选持有者与 governor 同崩溃域、崩溃同灭，恢复 reducer 仅凭耐久流重建 `queued → reserved | dequeued` 投影。
@@ -1986,6 +2125,17 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 - 租约时间与重放授权：首次耐久 `reserve` 所在 envelope 的 `at` 是本地域接收时刻；接收端按 §1.1 校验签发者区间并冻结剩余 TTL，进程内只用本地单调 deadline。assignment 资源调用的 capability 同样以 `assigned / received` 所在 envelope 的 `at` 冻结单调 deadline，任一 deadline 到期即拒绝 fresh 写。重启从耐久接收时刻与剩余 TTL 恢复，墙钟回拨不得延长或复活租约/能力。exact durable replay 仍必须通过 principal×method guard、凭证签名、capId 曾在对应 `assigned / received` 中耐久接纳，以及 scope / assignment / executor / lease 静态绑定；只豁免当前激活、吊销和 deadline，命中后零追加返回原结果。
 - 状态保留：租约与 capability 的进程内单调 deadline 缓存随所属根终结清退；热投影只保留 active 状态、水位与 §4.5 保留窗内的终态幂等索引，窗外终态根及其子租约、usage、预占与 dequeue tombstone 一并压缩。冷启动与增量重放使用单份事务隔离候选，禁止逐记录复制累计投影；大量终态工作下投影有界、重放近线性，保留窗内 exact replay 语义不变。
 - 跨机对账：anchor 域工作在 executor 上的动态子租约与扣账由本地 governor 凭根 lease `delegation` 就地履约（§3.4），`usageSeq` 按根 reservation 一序、随 consume 连续分配；周期 `UsageReport` 经 `ResourceUsageIntake`（§3.7）提交、只推进无缺口水位——run / job 由 SealedBundle `usageFinal` 绑定最终水位收束，evidence 等无 assignment 负载以 intake ack 收束；`usageId` 重复上报零重复计费；delegation 上限即离线窗口的最大敞口，超限本机 guard 直接拒绝。
+
+### 10.1 设备本地存储维护治理
+
+- **双平面、单容量真相**：ResourceGovernor 负责业务授权、耐久配额和计费，storage governor 负责本机存储义务；二者状态机分离，但实际本机执行的并发槽位、显式工作内存预留、磁盘 I/O 与临时空间只能经同一 `DeviceCapacityArbiterPort` 准入。workload 的四类 `AdmissionClass` 与 storage 的三类 `urgency` 分别机械映射到七个 `DeviceCapacityClass`，禁止调用方自报或把两类压成同一优先级。arbiter 使用同一版本化策略、预留账、I/O 额度和诊断快照，禁止静态物理配额各算一份或任一平面绕过；CPU 与进程 RSS 只作设备级压力信号，不作任务级硬扣账。
+- **装配与所有权**：arbiter 与 storage governor 先于任何存储打开或迁移，在每个设备运行时各创建一次并注入全部日志、投影、生命周期索引和资产维护器。未启用相关存储的角色不创建任务；可选 mesh、channel 或 surface 组件不得成为权威维护义务的唯一任务所有者。
+- **容量与工作量**：`occupancy` 的显式工作内存预留、临时空间和槽位在 permit 存续期间独占；`quantum` 的读写字节和 I/O 次数按单调时间补充并在操作前按上界预扣。每类任务按 §3.4b 声明可安全检查点化的 atomic 上界，页、segment、GC、scrub 与重建按此拆步；arbiter 只授予可容纳 atomic 的批次，受治理资源包装器在副作用前核对本步骤累计请求额度，越界零副作用拒绝并封闭 permit。CPU 竞争由公平队列、并发槽位和有界检查点治理，不以进程级采样冒充任务实际用量。迁移在改写源文件前取得完整临时空间；`capacity-gap` 与暂时性 `backpressured` 必须分型，前者不得永久排队。
+- **分类与准入**：`obligation` 只表示任务能否随未提交候选一起消失：仅服务该候选、取消后无需续做为 `pre-commit`；由 WAL、manifest、checkpoint、写意图或生命周期事实独立证明、调用消失后仍须完成为 `committed`。`urgency` 只由阻塞关系决定：当前用户或权威操作等待它为 `foreground`，恢复可用性但无当前调用等待为 `recovery`，其余预防与回收为 `background`；不得由外部输入或调用方偏好提级。每个等待者独立接收 `backpressured` / `capacity-gap` / `cancelled`，不得借取消终结共享 committed 义务；候选业务写依赖的维护未完成时权威日志零追加。
+- **耐久真相与恢复**：governor 队列、permit 和统计都是可丢运行态，且不得依赖受治理存储。flush/compaction 义务来自 manifest/frozen batch，重建/scrub 来自 checkpoint 与日志，迁移来自格式状态与迁移凭据，生命周期与 GC 来自权威记录、索引游标、候选和写意图；§3.4b 列明的任务所有者按规范 workKey 管理 single-flight、等待者和重试，governor 与 arbiter 均不另写业务事实。`committed` 工作预算不足时不得改写既有业务结果，重启后从上述来源恢复并重新申请 permit；workload 同样不恢复旧 permit，只在恢复执行前重新申请。
+- **公平与锁序**：设备 arbiter 为七个 class 都保留正份额，其中 workload-interactive 与阻塞当前操作的 storage-foreground 具有低延迟保证，workload-advancement / scheduler / orchestration、storage-recovery / background 在持续满载下也不得永久饥饿；空闲容量可借用但不得侵占保留份额。等待容量时不得持 authority、manifest、projection 或 ArtifactStore 锁；取得 permit 后按固定锁序复核前提，失效即零副作用释放。阻塞写入的恢复任务按 storage-foreground 重新准入，禁止长期停留在低优先级队列扩大 fail-closed 窗口。
+- **停机与诊断**：停止时拒绝新申请；未开始批次由下次启动从耐久来源重建，在途批次只在安全检查点结束并释放 permit。诊断按 maintenance kind 与七类容量 class 暴露排队、在途、预留占用、I/O 额度、设备级 CPU/RSS 压力、估算欠账、最老等待、阻塞维度、`capacity-gap`、越界请求和最近错误；仅在影响 readiness 或用户操作时提供可行动的存储繁忙/空间不足提示。
+- **落点与验收**：AuthorityCommitLog 迁移，DurableProjectionIndex 的 flush/rebuild/scrub/compaction，ArtifactLifecycleIndex 的恢复/对账及 surface 资产 GC 全部经 storage governor；全部本机 workload 执行批次与它们共用唯一 arbiter。验收覆盖耐久 workload 配额与可丢物理 permit 分离、恢复前重新申请、崩溃残留计入磁盘余量、双平面预留不超卖、零 permit 旁路、`atomic ≤ granted ≤ preferred`、资源操作前预扣与越界零副作用、类型化背压/容量缺口/取消、提交前零追加、提交后欠账恢复、规范 workKey、同键加入与逐等待者取消、失败后耐久重试、重启/停机、锁序、满载公平、阻塞恢复提级及临时空间不足保持源文件。
 
 ## 十一、产品旅程脚本（零术语，文案为验收锚）
 
@@ -2015,7 +2165,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 15 | 集成：staged 写后 run 失败 / 取消 / uncertain | 外界零可见、零残留；崩溃注入下 publish 可续 |
 | 16 | 对抗：越权方法 / 资源 / 过期 capability；五类 principal 各自越权（含非 owner 设备伪造 owner-control、伪造 usage-reporter）；owner-relay 错 authority / lease；渠道 token / grant 伪签、错 challenge / responder / route / assignment / interaction / displayDigest、改 decision、过期与跨域重放；EnvironmentControlGrant 越设备 / 绑定 / 时限 | 全部 unauthorized，进程内同 guard；token / grant 审计记录可独立验签，重复 callback 只回放原结果 |
 | 17 | 集成 + 崩溃注入：重投 / 重连 / 权威重启；派发候选签发后、artifact fsync 前后、原子 `reserve+assigned`（含 permissionLeaseDigest）fsync 前后、ActivationProof 生成前后、executor `control-lease-renewed / received` fsync 前后、send / ACK / rejection / conflict response / owner conflict 裁决单 envelope fsync 前后 / containment cancel 发送、executor proof fsync、owner contained / resolution 原子提交与吊销发送前后 / fence 各点，含 ControlLease 旧代 / 错绑定 / 断线未续 / 时钟偏差与墙钟回拨、OwnerControlGrant 错设备 / scope / requestId / 请求正文、重启后同 payload 重签、两类 conflict 响应丢失重试、fence 先到、查询后抢跑与重复 dispatch；system-job 候选与 `reserve+running+SystemJobFence` 同样逐点注入 | 原子提交前零有效凭证、零 reservation，孤立 artifact 可 GC；提交后 ActivationPayload 可由日志确定性重建且权限租约实例不漂移，重签可幂等接受；owner-control 只接受当前派发 owner 对确切请求的授权，控制与权限租约按本地单调 deadline 失效且不可因回拨复活；conflict 两分支重启后分别收敛到唯一 ACK 或唯一 uncertain+止损事实，派发/ControlLease 立即停止；cancel 无 proof 时义务保留且有界退避，not-started 时 contained+resolution+superseded+租约终结全有或全无并安全重派，halted 时唯一 contained、停止 cancel 且仍待用户裁决；零半提交，ConflictProof 永不授权重派；received 前 executor 本地凭证无效、received 后离线可验；reserve 与归属事实恒同时存在并由 assigned/system fence 重驱；至多一次准入、零无日志执行、零双活、零凭证 / 租约泄漏 |
-| 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决 | 未激活凭证全部拒绝，其余拒绝或幂等；executor 断开 owner 后仍凭已耐久 proof 正常验权，未要求在线回查；queued 取消只写与业务终态同 envelope 的 workload dequeue tombstone、零租约终结动作，无水位只 reclaim；WDRR 满载下各类有界获得配额，交互不被饿死 |
+| 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决。设备容量面另跑全部 workload / maintenance kind 的零 permit 旁路、七类并发、workload 恢复重取、atomic/granted/step/actual、背压/容量缺口/取消、规范 workKey、同键加入与逐等待者取消、提交前后、崩溃残留、重启/停机、锁序及满载公平矩阵 | 未激活 workload 凭证全部拒绝，其余拒绝或幂等；重试不重复计费、租约单次结算；executor 断开 owner 后仍凭已耐久 proof 正常验权；queued 取消只写与业务终态同 envelope 的 workload dequeue tombstone、零租约终结动作，无水位只 reclaim。ResourceLease 与物理 permit 生命周期分离，workload/storage 共用唯一设备容量真相且并发不超卖；逐步预留保证正常 actual 不超 granted，违约可诊断，不能容纳 atomic 时返回 capacity-gap 而不永久排队；提交前不足零追加，提交后欠账可恢复；单个等待者取消不使同键调用提前继续或丢失 committed 义务，七类均不永久饥饿 |
 
 状态机逐边测试：4.3 delivery 十五行、6.1 三十六行、6.2 三十八行、6.2b 六行、6.3 十二行、6.4 十一行——每行一用例，禁止合并；其中 6.1 行 15–21 / 6.2 行 17–23 必跑 owner-fence × abort-ticket × sealed 三方竞态排列。签名与摘要域验收（§1.2）：逐字段篡改、错误包含自摘要/signature、引用错目标、跨 schema/version 重放、进程内/mesh 固定向量一致性，随 S2。
 
@@ -2041,7 +2191,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 1. **行为快照（golden）基线先行**：S1 第一个交付物是 golden 生成器与比较器——对当前代码采集并规范化（剔除时间戳 / 随机 id）：RPC 全部方法的请求 / 响应形态、`session.delta / session.complete / session.event` 事件序列、确认往返（pending / resolved）、transcript 分片 / snapshot / conversation meta 持久化产物、取消路径、生命周期触发顺序、`server.shutdown` 三策略收束。迁移前生成、每步迁移后比对零差异。
 2. **符号导出前置**：按 §1.3b 冻结合同建立纯类型导出（TaskListOp、TrustRuleSnapshot、MemoryAppendPayload、SkillUsageRecord、SessionEventProjection——字段全部已冻结，S1 零字段发明）；`AdvancementControlEvent ≙ AdvancementStoreEvent`、`AdvancementSnapshot ≙ AdvancementSession`、`SegmentRecord ≙ SegmentMeta`、`TrustRule ≙ PermissionRule` 为现有类型的别名导出；contracts 独立 typecheck 作门禁。
 3. **建包骨架**：contracts（core 内模块）、rpc、mesh（占位）、owner-kernel、owner-services、runtime-host、executor；依赖图 lint（不变量 14）与 AST 拓扑规则脚手架（不变量 12）先行。
-4. **contracts 落地**：§三全部端口 + §一 / §二 / §五全部 DTO（纯类型零实现，外部符号按 §1.3 引用）。
+4. **contracts 落地**：§三端口（不含第 23 项显式回填的 §3.4b）+ §一 / §二 / §五全部 DTO（纯类型零实现，外部符号按 §1.3 引用）。
 5. **按逐依赖迁移表等价抽取**（内核 → adapter → 组合根，每步过 golden）：
 
    | 组件（现址） | 去向 |
@@ -2093,7 +2243,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 提交 | 边界 | 目标 | 验收 |
 |---|---|---|---|
 | 1（S1） | 行为 golden 与结构门禁 | 建立 RPC 请求/响应、事件序列、确认往返、持久化产物、取消和三类 shutdown 的规范化 golden；同时建立依赖图与拓扑 AST 门禁 | 当前全量测试通过；迁移前 golden 可重复生成；随机 id / 时间剔除后结果稳定；门禁只报告现状、不改变运行行为 |
-| 2（S1） | contracts 与冻结符号 | 按 §1.3b 建唯一类型导出；落 §一/§二/§五 DTO、§三端口及其传递依赖；建立 contracts 独立 typecheck 与 schema/version lint | contracts 独立编译；外部符号全部来自一手导出；冻结区零业务 `unknown`；现有运行路径与 golden 不变 |
+| 2（S1） | contracts 与冻结符号 | 按 §1.3b 建唯一类型导出；落 §一/§二/§五 DTO、§三端口（不含第 23 项显式回填的 §3.4b）及其传递依赖；建立 contracts 独立 typecheck 与 schema/version lint | contracts 独立编译；外部符号全部来自一手导出；冻结区零业务 `unknown`；现有运行路径与 golden 不变 |
 | 3（S1） | owner-kernel 与 rpc 等价抽取 | 将 ConversationManager、run-turn、ephemeral buffer、ConfirmationHub 抽入 owner-kernel，将 session stream/broadcast/events/confirmation bridge 抽入 rpc；旧入口只作兼容转发 | server、cli 定向测试与 golden 全绿；同一 owner 实例、observer、确认和持久化行为不分叉；回滚只需恢复旧装配引用 |
 | 4（S1） | owner-services 与 runtime-host 等价抽取 | 将 advancement 控制服务抽入 owner-services，将 RuntimeHost、工具与 session adapter 抽入 runtime-host；明确 runtime-host ↔ owner-kernel 正式端口边界 | core/orchestrator/server/cli 定向测试通过；完整 runtime 能力不降级；owner-services 不持全局拓扑分支；golden 零差异 |
 | 5（S1） | 角色组合与双拓扑骨架 | cli 组合根按配置装配 anchor + executor；单机使用进程内 adapter；建立同一 conformance 套件的单机拓扑基线，移除迁移期兼容转发 | `pnpm build` 与全量测试通过；不变量 5/12/14 门禁生效；未启用角色零加载零监听；单机 golden 零差异；S1 到此才启用新装配 |
@@ -2115,7 +2265,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 20（S5） | 跨机控制面启用 | 先以前置提交按 §2.5 落生产 bootstrap（角色装配的链授权校验、`zz pair` 引导流、端点交付/耐久/更新、控制面连接建立与中继会合、拨号方重连所有权），生产路径保持不变；再将派发、started、提交、cancel/supersede/queryLedger、usage intake 上网格；以完整 S3/S4 守卫和 assigned outbox 为唯一远端入口，最后开放跨机执行 | §2.5 验收项全绿（单机默认→建链迁移、链外角色拒、配对两形态会合、中继撮合合同、revision 回退拒、双 NAT 建连、拨号方唯一重连）；双拓扑复跑 6.1/6.2/6.2b、断网/重连/重投/owner 与 executor 崩溃矩阵全绿；跨机零无日志执行、零双活；S5 到此才启用业务 mesh |
 | 21（S6） | run stream、spool 与摘要链 | 落统一 StreamFrame、assignment 级 seq、streamEpoch fencing、数据帧摘要链、provisional-final、耐久 spool、逐消费方 ACK/回收和背压 | 直连/中继路径切换、空流、逐字段篡改、final 三值核对、ACK 丢失、慢 observer 隔离、崩溃续流零丢零重 |
 | 22（S6） | 数据面票据与确认/止损 | 落 observe/interact/abort 票据的签发、续期、吊销；interaction 下行投影、第一方直连 allow-once、owner 失联 abort 与旁观只读 | 越权 observer、非原始 surface 应答、票据过期/吊销、交互取消竞态、断线重连和 abort 证明测试通过；pending 权威只在 assignment 流 |
-| 23（S6） | surface 内容资产数据面 | 回填并实现 surface 预上传授权、下载授权、断点续传、生命周期治理；control 写与 committed 内容都执行依赖闭包在场检查 | S6 回填验收全部通过；缺件不得 control apply/CAS；上传中断可续、重复 digest 去重、越 requestId/assignment 拒绝 |
+| 23（S6） | surface 内容资产数据面 | 回填并实现 surface 预上传授权、下载授权、断点续传、生命周期治理；control 写与 committed 内容都执行依赖闭包在场检查；以 §4.1 耐久派生索引承载幂等、到期与 releaseId；按 §3.4b/§10.1 在 core 建共享容量原语、在 CLI 组合根装配，并接入 core 存储维护及 executor/owner-services/orchestrator/runtime-host 的实际本机 workload 批次，本单元一次启用双平面唯一容量裁决 | S6 回填验收全部通过；缺件不得 control apply/CAS；上传中断可续、重复 digest 去重、越 requestId/assignment 拒绝；十万历史下正常启动只追尾、定点回放与 GC 固定分页，索引落后/损坏可从权威日志重建；存储维护与 workload 零旁路、双平面预留不超卖、越界请求零副作用，预算不足时提交前零追加、提交后欠账可恢复续跑，满载无饥饿且诊断可核对 |
 | 24（S6） | 中继、渠道确认与最终性整合 | 落 job owner-relay 水位、conversation/job challenge outbox、token/grant、status/final 合并和路径降级；最后启用无损数据面 | 不变量 7、13、16 对应集成/对抗用例全绿；prepared/cursor/ACK/发送各崩溃点可收敛；渠道与第一方确认能力等价；S6 到此启用 |
 | 25（S7） | Environment 与 workscene 接入 | 落 EnvironmentPort、WorkspaceProbeRequest/Grant、设备域 workspace 引用及 revision 复验；workscene 注册留锚点、进出留会话 owner | 目录五态、路径不出 wire、错设备/绑定/revision、远程 setWorkdir、离线能力矩阵和现有 workscene 回归通过 |
 | 26（S7） | scheduler 与 job 产品闭环 | 将 scheduler CRUD/run/cancel/定时触发、冻结 delivery plan、渠道来源与维护通知接入 JobJournal/Delivery 流；随后排空旧队列残留投递，删除公开生产入口与旧 DeliveryPipeline/queue 组件——旧投递生产路径至此整体退役 | 任务定义/occurrence 隔离、线程路由保真、job uncertain 暂停/missed 汇总、投递唯一性、system 不进用户视图测试通过；旧生产入口与旧队列零残留调用 |

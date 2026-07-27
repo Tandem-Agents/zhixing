@@ -55,6 +55,7 @@ import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
 } from "./signature.js";
+import { validateContentAssetRefs } from "./surface-asset-grant.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 
@@ -2285,6 +2286,7 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
     work,
     [
       "baseRevision",
+      "contentAssets",
       "controlContext",
       "conversationId",
       "ingress",
@@ -2300,6 +2302,10 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
   assertNonNegativeInteger(work.ownerEpoch, "Dispatch ownerEpoch");
   assertNonNegativeInteger(work.baseRevision, "Dispatch baseRevision");
   assertIngressContext(work.ingress);
+  validateContentAssetRefs(work.contentAssets, {
+    allowEmpty: true,
+    label: "Conversation dispatch content assets",
+  });
   if (work.windowInput.t === "full") {
     assertExactKeys(work.windowInput, ["messages", "t", "windowEpoch"], "Full window");
     assertNonNegativeInteger(work.windowInput.windowEpoch, "Window epoch");

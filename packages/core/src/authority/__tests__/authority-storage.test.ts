@@ -1,6 +1,7 @@
 import {
   appendFile,
   copyFile,
+  mkdir,
   readFile,
   readdir,
   rename,
@@ -9,21 +10,88 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { Buffer } from "node:buffer";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
+import type {
+  ArtifactRef,
+  ContentAssetRef,
+  ControlRecord,
+  Signature,
+} from "../../contracts/index.js";
+import {
+  byteDigest,
+  canonicalize,
+  createJobCommitFence,
+  createJobSealedBundle,
+  createSignedSurfaceAssetGrant,
+  jobDeliveryPlanDigest,
+  protocolDigest,
+  sealedBundleArtifact,
+  type ProtocolSigner,
+} from "../../protocol/index.js";
 import {
   AuthorityStorageError,
+  bindDurableProjectionMutations,
   collectArtifactRefs,
+  durableProjectionDirectoryName,
   FileArtifactStore,
   FileAuthorityCommitLog,
+  FileDurableProjectionIndex,
 } from "../index.js";
 import {
+  AUTHORITY_WAL_FILE_HEADER_BYTES,
   AUTHORITY_WAL_HEADER_BYTES,
   AUTHORITY_WAL_TRAILER_BYTES,
+  encodeAuthorityWalFileHeader,
+  encodeAuthorityWalFrame,
+  scanAuthorityWalFrames,
 } from "../wal-frame.js";
 
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+
+const signer: ProtocolSigner = {
+  sign(schemaId, version, payload): Signature {
+    return {
+      alg: "test-sha256",
+      keyId: "device:test-anchor",
+      sig: protocolDigest(schemaId, version, payload),
+    };
+  },
+};
+
+function inputControlEnvelope(
+  requestId: string,
+  attachment: ContentAssetRef,
+) {
+  const body = {
+    t: "input" as const,
+    conversationId: "conversation-external",
+    ingress: { ingressId: "ingress-external", source: "first-party" as const },
+    input: { parts: [{ type: "text" as const, text: "inspect" }] },
+    attachments: [attachment],
+    invocation: { kind: "agent" as const, source: "interactive" as const },
+    ownerEpoch: 1,
+  };
+  const dependencyArtifacts: ArtifactRef[] = [];
+  return {
+    v: 1 as const,
+    requestId,
+    principal: {
+      surfacePrincipal: "surface:user-external",
+      deviceId: "device-external",
+      connectionId: "connection-external",
+    },
+    at: "2026-07-24T00:00:00.000Z",
+    dependencyArtifacts,
+    body,
+    payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
+      body,
+      dependencyArtifacts,
+    }),
+  };
+}
 
 async function createStores() {
   const root = await createTempDir("authority-storage");
@@ -34,6 +102,32 @@ async function createStores() {
     lockWaitMs: 2_000,
   });
   return { root, artifacts, log };
+}
+
+async function replaceRetainedProjectionValue(
+  log: FileAuthorityCommitLog,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  const index = new FileDurableProjectionIndex({
+    rootDir: path.join(
+      log.rootDir,
+      "projections",
+      durableProjectionDirectoryName("authority-retained-references"),
+    ),
+    projectionId: "authority-retained-references",
+    reducerVersion: 3,
+  });
+  await index.initialize({ authority: await log.originCheckpoint() });
+  const prepared = await index.prepare(
+    bindDurableProjectionMutations([{
+      kind: "put",
+      key,
+      value: JSON.parse(canonicalize(value)),
+    }]),
+  );
+  index.publish(prepared, index.checkpoints());
+  await index.flush();
 }
 
 describe("FileArtifactStore", () => {
@@ -52,9 +146,629 @@ describe("FileArtifactStore", () => {
       code: "artifact-corrupt",
     });
   });
+
+  it("deletes only after checking every authority log under the store lock", async () => {
+    const { root, artifacts, log } = await createStores();
+    const peerLog = new FileAuthorityCommitLog(
+      path.join(root, "peer-log"),
+      artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    const retained = await artifacts.put(Buffer.from("peer-retained", "utf8"));
+    const orphan = await artifacts.put(Buffer.from("unreferenced", "utf8"));
+    const authorizedBytes = Buffer.from("authorized-but-not-adopted", "utf8");
+    const authorizedOnly = {
+      digest: byteDigest(authorizedBytes),
+      bytes: authorizedBytes.byteLength,
+    };
+    await peerLog.append([
+      { stream: "publish", body: { t: "asset", content: retained } },
+    ]);
+    await log.append<ControlRecord>([
+      {
+        stream: "control",
+        body: {
+          t: "asset-grant-issued",
+          grant: createSignedSurfaceAssetGrant(
+            {
+              v: 1,
+              grantId: "grt-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              scope: { domain: "global", anchorEpoch: 1 },
+              surfacePrincipal: "surface:test",
+              requestId: "request-authorized-only",
+              kind: "asset-upload",
+              assets: [authorizedOnly],
+              payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {}),
+              issuedAt: "2026-07-24T00:00:00.000Z",
+              expiry: "2026-07-24T01:00:00.000Z",
+            },
+            signer,
+          ),
+        },
+      },
+    ]);
+    await expect(artifacts.has(authorizedOnly)).resolves.toBe(false);
+    await expect(artifacts.put(authorizedBytes)).resolves.toEqual(
+      authorizedOnly,
+    );
+    let retainedLoads = 0;
+    const retainedCandidates: ArtifactRef[][] = [];
+    const loadRetained = async (candidates: readonly ArtifactRef[]) => {
+      retainedLoads += 1;
+      retainedCandidates.push([...candidates]);
+      return {
+        status: "current" as const,
+        retained: [
+          ...(await log.retainedArtifactReferences(candidates)),
+          ...(await peerLog.retainedArtifactReferences(candidates)),
+        ],
+      };
+    };
+
+    await expect(
+      artifacts.deleteIfUnreferencedBatch(
+        [retained, orphan, authorizedOnly],
+        loadRetained,
+      ),
+    ).resolves.toEqual([
+      { ref: retained, disposition: "retained" },
+      { ref: orphan, disposition: "deleted" },
+      { ref: authorizedOnly, disposition: "deleted" },
+    ]);
+    expect(retainedLoads).toBe(1);
+    expect(retainedCandidates).toEqual([
+      [retained, orphan, authorizedOnly],
+    ]);
+    await expect(artifacts.has(retained)).resolves.toBe(true);
+    await expect(artifacts.has(orphan)).resolves.toBe(false);
+    await expect(artifacts.has(authorizedOnly)).resolves.toBe(false);
+
+    const appendedLater = await artifacts.put(
+      Buffer.from("retained-after-first-projection", "utf8"),
+    );
+    await peerLog.append([
+      { stream: "publish", body: { t: "asset", content: appendedLater } },
+    ]);
+    await expect(
+      artifacts.deleteIfUnreferencedBatch([appendedLater], loadRetained),
+    ).resolves.toEqual([
+      { ref: appendedLater, disposition: "retained" },
+    ]);
+    expect(retainedLoads).toBe(2);
+    expect(retainedCandidates[1]).toEqual([appendedLater]);
+  });
+
+  it("defers deletion without probing primary storage when retention is unknown", async () => {
+    const { artifacts } = await createStores();
+    const temporaryOnly = {
+      digest: `sha256:${"e".repeat(64)}`,
+      bytes: 31,
+    };
+
+    await expect(
+      artifacts.deleteIfUnreferencedBatch(
+        [temporaryOnly],
+        async () => ({ status: "deferred" }),
+      ),
+    ).resolves.toEqual([
+      { ref: temporaryOnly, disposition: "deferred" },
+    ]);
+  });
+
+  it("releases conversation leaf retention only after every owning session is deleted", async () => {
+    const { root, artifacts, log } = await createStores();
+    const executorLog = new FileAuthorityCommitLog(
+      path.join(root, "executor-log"),
+      artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    const leaf = await artifacts.put(
+      Buffer.from("conversation-attachment", "utf8"),
+    );
+    const leafAsset = { digest: leaf.digest, bytes: leaf.bytes, kind: "file" };
+
+    // 会话 A 与 B 各以 admitted 附件持有同一内容叶。
+    await log.append([
+      {
+        stream: "run:conv-a",
+        body: { t: "admitted", runId: "run-a", attachments: [leafAsset] },
+      },
+      {
+        stream: "run:conv-b",
+        body: { t: "admitted", runId: "run-b", attachments: [leafAsset] },
+      },
+    ]);
+    // executor 侧账本经注册 root(DispatchEnvelope)解引用同样引用该叶。
+    const envelopeBytes = Buffer.from(
+      canonicalize({
+        v: 1,
+        assignmentId: "asg-leaf",
+        execution: "conversation",
+        dependencyArtifacts: [],
+        work: {
+          conversationId: "conv-a",
+          contentAssets: [leafAsset],
+        },
+      }),
+      "utf8",
+    );
+    const envelopeRef = await artifacts.put(envelopeBytes);
+    await executorLog.append([
+      {
+        stream: "assignment:asg-leaf",
+        body: {
+          body: {
+            t: "received",
+            envelope: { ref: envelopeRef },
+            activation: { ref: { execution: "conversation" } },
+          },
+        },
+      },
+    ]);
+
+    await expect(log.retainedArtifactReferences([leaf])).resolves.toEqual([
+      leaf,
+    ]);
+    await expect(
+      executorLog.retainedArtifactReferences([leaf]),
+    ).resolves.toEqual([leaf]);
+
+    // 删除会话 A:会话 B 仍持有,叶继续保留。
+    await log.append([
+      {
+        stream: "run:conv-a",
+        body: { t: "session-lifecycle", mutation: "delete" },
+      },
+    ]);
+    await expect(log.retainedArtifactReferences([leaf])).resolves.toEqual([
+      leaf,
+    ]);
+    await expect(log.releasedLeafReferences()).resolves.toEqual([]);
+
+    // 删除会话 B:会话权威日志不再保留该叶,且它进入已死叶集合。
+    await log.append([
+      {
+        stream: "run:conv-b",
+        body: { t: "session-lifecycle", mutation: "delete" },
+      },
+    ]);
+    await expect(log.retainedArtifactReferences([leaf])).resolves.toEqual([]);
+    await expect(log.releasedLeafReferences()).resolves.toEqual([leaf]);
+
+    // executor 日志不持有删除事实,自身查询仍保留;由调用方传入
+    // 会话权威的 tombstone 并集后,死会话的叶不再被任何日志保留。
+    await expect(
+      executorLog.retainedArtifactReferences([leaf]),
+    ).resolves.toEqual([leaf]);
+    const deadConversations = await log.deadConversations();
+    expect([...deadConversations].sort()).toEqual(["conv-a", "conv-b"]);
+    await expect(
+      executorLog.retainedArtifactReferences([leaf], { deadConversations }),
+    ).resolves.toEqual([]);
+
+    // 重放依赖(外置 dispatch envelope 容器)不随会话删除而释放。
+    await expect(
+      executorLog.retainedArtifactReferences([envelopeRef], {
+        deadConversations,
+      }),
+    ).resolves.toEqual([envelopeRef]);
+
+    // 重启重建(新实例、无内存投影)得到相同结论。
+    const reopened = new FileAuthorityCommitLog(
+      path.join(root, "log"),
+      artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    await expect(
+      reopened.retainedArtifactReferences([leaf]),
+    ).resolves.toEqual([]);
+    await expect(reopened.deadConversations()).resolves.toEqual(
+      deadConversations,
+    );
+  });
+
+  it(
+    "rebuilds retained exact, leaf, and tombstone records misbound to another identity",
+    async () => {
+      const { artifacts, log } = await createStores();
+      const first = await artifacts.put(Buffer.from("retained-first"));
+      const second = await artifacts.put(Buffer.from("retained-second"));
+      await log.append([
+        {
+          stream: "run:conversation-first",
+          body: {
+            t: "admitted",
+            runId: "run-first",
+            attachments: [{ ...first, kind: "file" }],
+          },
+        },
+        {
+          stream: "run:conversation-second",
+          body: {
+            t: "admitted",
+            runId: "run-second",
+            attachments: [{ ...second, kind: "file" }],
+          },
+        },
+      ]);
+      await expect(log.retainedArtifactReferences([first])).resolves.toEqual([
+        first,
+      ]);
+      const reopen = () =>
+        new FileAuthorityCommitLog(log.rootDir, artifacts, {
+          lockWaitMs: 2_000,
+        });
+      await replaceRetainedProjectionValue(
+        log,
+        `retention/reference/${first.digest}`,
+        second,
+      );
+      let recovered = reopen();
+      await expect(
+        recovered.retainedArtifactReferences([first]),
+      ).resolves.toEqual([first]);
+
+      await replaceRetainedProjectionValue(
+        recovered,
+        `retention/leaf/${first.digest}/${
+          Buffer.from("conversation-first", "utf8").toString("base64url")
+        }`,
+        {
+          digest: second.digest,
+          conversationId: "conversation-second",
+        },
+      );
+      recovered = reopen();
+      await expect(
+        recovered.retainedArtifactReferences([first]),
+      ).resolves.toEqual([first]);
+
+      await recovered.append([
+        {
+          stream: "run:conversation-first",
+          body: { t: "session-lifecycle", mutation: "delete" },
+        },
+        {
+          stream: "run:conversation-second",
+          body: { t: "session-lifecycle", mutation: "delete" },
+        },
+      ]);
+      recovered = reopen();
+      await expect(recovered.deadConversations()).resolves.toEqual(
+        new Set(["conversation-first", "conversation-second"]),
+      );
+      await replaceRetainedProjectionValue(
+        recovered,
+        `retention/dead/${
+          Buffer.from("conversation-first", "utf8").toString("base64url")
+        }`,
+        { conversationId: "conversation-second" },
+      );
+      await expect(reopen().deadConversations()).resolves.toEqual(
+        new Set(["conversation-first", "conversation-second"]),
+      );
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it("classifies inline and external control attachments identically", async () => {
+    const external = await createStores();
+    const inline = await createStores();
+    const bytes = Buffer.from("external control attachment");
+    const externalLeaf = await external.artifacts.put(bytes);
+    const inlineLeaf = await inline.artifacts.put(bytes);
+    const externalAsset: ContentAssetRef = {
+      ...externalLeaf,
+      kind: "file",
+    };
+    const inlineAsset: ContentAssetRef = { ...inlineLeaf, kind: "file" };
+    const externalEnvelope = inputControlEnvelope(
+      "request-external",
+      externalAsset,
+    );
+    const inlineEnvelope = inputControlEnvelope("request-inline", inlineAsset);
+    const envelopeRef = await external.artifacts.put(
+      Buffer.from(canonicalize(externalEnvelope)),
+    );
+
+    await external.log.append([
+      {
+        stream: "control",
+        body: {
+          t: "received",
+          requestId: externalEnvelope.requestId,
+          envelope: { ref: envelopeRef },
+        },
+      },
+    ]);
+    await inline.log.append([
+      {
+        stream: "control",
+        body: {
+          t: "received",
+          requestId: inlineEnvelope.requestId,
+          envelope: inlineEnvelope,
+        },
+      },
+    ]);
+
+    await expect(
+      external.log.retainedArtifactReferences([externalLeaf]),
+    ).resolves.toEqual([externalLeaf]);
+    await expect(
+      inline.log.retainedArtifactReferences([inlineLeaf]),
+    ).resolves.toEqual([inlineLeaf]);
+
+    await external.log.append([
+      {
+        stream: "run:conversation-external",
+        body: { t: "session-lifecycle", mutation: "delete" },
+      },
+    ]);
+    await inline.log.append([
+      {
+        stream: "run:conversation-external",
+        body: { t: "session-lifecycle", mutation: "delete" },
+      },
+    ]);
+    await expect(
+      external.log.retainedArtifactReferences([externalLeaf]),
+    ).resolves.toEqual([]);
+    await expect(
+      inline.log.retainedArtifactReferences([inlineLeaf]),
+    ).resolves.toEqual([]);
+    await expect(
+      external.log.retainedArtifactReferences([envelopeRef]),
+    ).resolves.toEqual([envelopeRef]);
+  });
+
+  it("rejects a corrupt external control root before commit", async () => {
+    const { artifacts, log } = await createStores();
+    const leaf = await artifacts.put(Buffer.from("corrupt-root-leaf"));
+    const envelope = {
+      ...inputControlEnvelope("request-corrupt", { ...leaf, kind: "file" }),
+      payloadDigest: `sha256:${"0".repeat(64)}`,
+    };
+    const envelopeRef = await artifacts.put(
+      Buffer.from(canonicalize(envelope)),
+    );
+    await expect(
+      log.append([
+        {
+          stream: "control",
+          body: {
+            t: "received",
+            requestId: envelope.requestId,
+            envelope: { ref: envelopeRef },
+          },
+        },
+      ]),
+    ).rejects.toMatchObject({ code: "invalid-authority-record" });
+    await expect(log.readAll()).resolves.toEqual([]);
+  });
+
+  it("accepts job sealed roots and rejects a mismatched execution record", async () => {
+    const { root, artifacts, log } = await createStores();
+    const content = await artifacts.put(Buffer.from("job retained content"));
+    const bundle = createJobSealedBundle({
+      assignmentId: "assignment-job",
+      executorId: "executor-job",
+      streamFinal: {
+        finalSeq: 1,
+        streamDigest: `sha256:${"1".repeat(64)}`,
+      },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: {
+        reportDigest: `sha256:${"1".repeat(64)}`,
+        upToUsageSeq: 0,
+      },
+      dependencyArtifacts: [],
+      body: {
+        t: "job",
+        taskId: "task-job",
+        jobRunId: "job-run-1",
+        fence: createJobCommitFence({
+          taskId: "task-job",
+          jobRunId: "job-run-1",
+          scheduledFor: "2026-07-24T00:00:00.000Z",
+          taskRevision: 1,
+          deliveryPlanDigest: jobDeliveryPlanDigest({ kind: "none" }),
+          anchorEpoch: 1,
+          assignmentId: "assignment-job",
+          executorId: "executor-job",
+        }),
+        outcome: { status: "completed", summary: "done" },
+        contentAssets: [{ ...content, kind: "file" }],
+      },
+    });
+    const bundleArtifact = sealedBundleArtifact(bundle);
+    await expect(artifacts.put(bundleArtifact.bytes)).resolves.toEqual(
+      bundleArtifact.ref,
+    );
+    await log.append([
+      {
+        stream: "job:task-job",
+        body: {
+          t: "committed",
+          assignmentId: bundle.assignmentId,
+          bundle: { ref: bundleArtifact.ref },
+        },
+      },
+    ]);
+    await expect(
+      log.retainedArtifactReferences([content, bundleArtifact.ref]),
+    ).resolves.toEqual([content, bundleArtifact.ref]);
+
+    const executorLog = new FileAuthorityCommitLog(
+      path.join(root, "executor-log"),
+      artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    await executorLog.append([
+      {
+        stream: `assignment:${bundle.assignmentId}`,
+        body: {
+          body: {
+            t: "bundle_sealed",
+            bundle: { ref: bundleArtifact.ref },
+          },
+        },
+      },
+    ]);
+    await expect(
+      executorLog.retainedArtifactReferences([content, bundleArtifact.ref]),
+    ).resolves.toEqual([content, bundleArtifact.ref]);
+
+    const mismatched = new FileAuthorityCommitLog(
+      path.join(root, "mismatched-log"),
+      artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    await expect(
+      mismatched.append([
+        {
+          stream: "run:conversation-job-mismatch",
+          body: {
+            t: "committed",
+            assignmentId: bundle.assignmentId,
+            bundle: { ref: bundleArtifact.ref },
+          },
+        },
+      ]),
+    ).rejects.toMatchObject({ code: "invalid-authority-record" });
+    await expect(mismatched.readAll()).resolves.toEqual([]);
+  });
 });
 
 describe("FileAuthorityCommitLog", () => {
+  it("keeps the compatibility bridge on legacy frames with a stable sidecar identity", async () => {
+    const { artifacts, log } = await createStores();
+    // 兼容桥服务的是旧版本创建的日志:新建日志现在默认写带版本头的格式,
+    // 因此必须先放一个无文件头的空日志,才能驱动 legacy 分支。
+    await mkdir(path.dirname(log.logPath), { recursive: true });
+    await writeFile(log.logPath, Buffer.alloc(0), { flag: "wx" });
+    await log.append([{ stream: "control", body: { t: "legacy-one" } }]);
+    const firstBytes = await readFile(log.logPath);
+    const firstCheckpoint = await log.checkpoint();
+
+    expect(firstBytes.readUInt16BE(4)).toBe(1);
+    expect((await stat(log.identityPath)).size).toBe(
+      AUTHORITY_WAL_FILE_HEADER_BYTES,
+    );
+
+    const reopened = new FileAuthorityCommitLog(log.rootDir, artifacts, {
+      lockWaitMs: 2_000,
+    });
+    expect(await reopened.checkpoint()).toEqual(firstCheckpoint);
+    await reopened.append([
+      { stream: "control", body: { t: "legacy-two" } },
+    ]);
+
+    const reopenedBytes = await readFile(log.logPath);
+    expect(reopenedBytes.subarray(0, firstBytes.byteLength)).toEqual(firstBytes);
+    const metadata: unknown[] = [];
+    const scanned = await scanAuthorityWalFrames(
+      bufferWalReader(reopenedBytes),
+      (_payload, _offset, frameMetadata) => {
+        metadata.push(frameMetadata);
+      },
+    );
+    expect(scanned.frameCount).toBe(2);
+    expect(metadata).toEqual([undefined, undefined]);
+  });
+
+  it("dual-reads and continues an already-versioned WAL", async () => {
+    const root = await createTempDir("authority-versioned-wal");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
+      lockWaitMs: 2_000,
+    });
+    const logRoot = path.join(root, "log");
+    await mkdir(logRoot, { recursive: true });
+    const logIdBytes = Buffer.alloc(32, 0x17);
+    const logId = logIdBytes.toString("base64url");
+    const at = "2026-07-27T00:00:00.000Z";
+    const entries = [{ stream: "control", body: { t: "versioned-one" } }];
+    const payload = { v: 1 as const, lsn: 1, at, entries };
+    const envelope = {
+      ...payload,
+      envelopeDigest: protocolDigest("CommitEnvelope", 1, payload),
+    };
+    const prefixDigest = protocolDigest("AuthorityLogPrefix", 1, {
+      logId,
+      previousDigest: protocolDigest("AuthorityLogPrefix", 1, { logId }),
+      lsn: 1,
+      envelopeDigest: envelope.envelopeDigest,
+    });
+    await writeFile(
+      path.join(logRoot, "authority.log"),
+      Buffer.concat([
+        encodeAuthorityWalFileHeader(logIdBytes),
+        encodeAuthorityWalFrame(
+          Buffer.from(canonicalize(envelope), "utf8"),
+          { lsn: 1, prefixDigest },
+        ),
+      ]),
+    );
+
+    const log = new FileAuthorityCommitLog(logRoot, artifacts, {
+      lockWaitMs: 2_000,
+    });
+    await expect(log.readAll()).resolves.toEqual([envelope]);
+    await log.append([
+      { stream: "control", body: { t: "versioned-two" } },
+    ]);
+
+    const bytes = await readFile(log.logPath);
+    const frameMetadata: unknown[] = [];
+    const scanned = await scanAuthorityWalFrames(
+      bufferWalReader(bytes.subarray(AUTHORITY_WAL_FILE_HEADER_BYTES)),
+      (_payload, _offset, metadata) => {
+        frameMetadata.push(metadata);
+      },
+    );
+    expect(scanned.frameCount).toBe(2);
+    expect(frameMetadata).toMatchObject([
+      { lsn: 1, prefixDigest },
+      { lsn: 2 },
+    ]);
+  });
+
+  it("fails closed when a legacy WAL and its sidecar identity diverge", async () => {
+    const corrupted = await createStores();
+    // 同上:sidecar identity 只在 legacy 日志上存在。
+    await mkdir(path.dirname(corrupted.log.logPath), { recursive: true });
+    await writeFile(corrupted.log.logPath, Buffer.alloc(0), { flag: "wx" });
+    await corrupted.log.append([
+      { stream: "control", body: { t: "stable" } },
+    ]);
+    await writeFile(corrupted.log.identityPath, Buffer.from("corrupt"));
+    const reopened = new FileAuthorityCommitLog(
+      corrupted.log.rootDir,
+      corrupted.artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    await expect(reopened.readAll()).rejects.toMatchObject({
+      code: "commit-log-corrupt",
+    });
+
+    const missing = await createStores();
+    // sidecar identity 是 legacy 日志的产物,孤儿检查也只对它成立。
+    await mkdir(path.dirname(missing.log.logPath), { recursive: true });
+    await writeFile(missing.log.logPath, Buffer.alloc(0), { flag: "wx" });
+    await missing.log.append([
+      { stream: "control", body: { t: "stable" } },
+    ]);
+    await rm(missing.log.logPath);
+    const missingLog = new FileAuthorityCommitLog(
+      missing.log.rootDir,
+      missing.artifacts,
+      { lockWaitMs: 2_000 },
+    );
+    await expect(missingLog.readAll()).rejects.toMatchObject({
+      code: "commit-log-corrupt",
+    });
+  });
+
   it("accepts executor-scoped durable streams", async () => {
     const { log } = await createStores();
     const stream =
@@ -81,7 +795,7 @@ describe("FileAuthorityCommitLog", () => {
       { stream: "run:conv-1", body: { t: "queued", runId: "run-1" } },
     ]);
     const second = await log.append([
-      { stream: "run:conv-1", body: { t: "committed", runId: "run-1" } },
+      { stream: "run:conv-1", body: { t: "finished", runId: "run-1" } },
     ]);
 
     expect(first.lsn).toBe(1);
@@ -96,14 +810,14 @@ describe("FileAuthorityCommitLog", () => {
         (state, record) => [...state, record.body.t],
         { stream: "run:conv-1" },
       ),
-    ).resolves.toEqual(["queued", "committed"]);
+    ).resolves.toEqual(["queued", "finished"]);
     await expect(
       log.rebuildProjection<string[]>(
         ["queued"],
         (state, record) => [...state, record.body.t],
         { stream: "run:conv-1", afterLsn: first.lsn },
       ),
-    ).resolves.toEqual(["queued", "committed"]);
+    ).resolves.toEqual(["queued", "finished"]);
     await expect(
       log.rebuildProjection([], (state) => state, { afterLsn: second.lsn + 1 }),
     ).rejects.toMatchObject({ code: "commit-log-corrupt" });
@@ -514,7 +1228,7 @@ describe("FileAuthorityCommitLog", () => {
     await corruptHeader.log.append([{ stream: "control", body: { t: "two" } }]);
     await corruptHeader.log.append([{ stream: "control", body: { t: "three" } }]);
     const bytes = await readFile(corruptHeader.log.logPath);
-    const second = frameBounds(bytes, 0).nextOffset;
+    const second = frameBounds(bytes, walDataOffset(bytes)).nextOffset;
     bytes[second + 12] ^= 0xff;
     await writeFile(corruptHeader.log.logPath, bytes);
     await expect(corruptHeader.log.readAll()).rejects.toBeInstanceOf(
@@ -563,7 +1277,7 @@ describe("FileAuthorityCommitLog", () => {
 
 async function corruptFrame(file: string, frameIndex: number): Promise<void> {
   const bytes = await readFile(file);
-  let offset = 0;
+  let offset = walDataOffset(bytes);
   for (let index = 0; index <= frameIndex; index += 1) {
     const bounds = frameBounds(bytes, offset);
     if (index === frameIndex) {
@@ -582,9 +1296,26 @@ function frameBounds(bytes: Buffer, offset: number): {
   nextOffset: number;
 } {
   const payloadBytes = bytes.readUInt32BE(offset + 8);
+  const version = bytes.readUInt16BE(offset + 4);
   const payloadEnd = offset + AUTHORITY_WAL_HEADER_BYTES + payloadBytes;
   return {
     payloadEnd,
-    nextOffset: payloadEnd + AUTHORITY_WAL_TRAILER_BYTES,
+    nextOffset:
+      payloadEnd + (version === 1 ? 12 : AUTHORITY_WAL_TRAILER_BYTES),
+  };
+}
+
+function walDataOffset(bytes: Buffer): number {
+  return bytes.byteLength >= AUTHORITY_WAL_FILE_HEADER_BYTES &&
+    bytes.readUInt32BE(0) === 0x5a584148
+    ? AUTHORITY_WAL_FILE_HEADER_BYTES
+    : 0;
+}
+
+function bufferWalReader(bytes: Buffer) {
+  return {
+    size: bytes.byteLength,
+    read: (offset: number, length: number) =>
+      Promise.resolve(bytes.subarray(offset, offset + length)),
   };
 }

@@ -4,6 +4,7 @@ import {
 } from "@zhixing/core/authority";
 import type {
   AuthorityCallContext,
+  DeviceRole,
   HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
@@ -37,6 +38,7 @@ import {
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
+import { registerSurfaceAssetMeshService } from "./surface-asset-mesh.js";
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
@@ -162,6 +164,19 @@ export class MeshRuntimeAssembly {
       ));
     }
 
+    if (roles.has("anchor")) {
+      this.#disposers.push(
+        registerSurfaceAssetMeshService(this.services, {
+          coordinator: options.authority.surfaceAssets,
+          verifier: options.authority.verifier,
+          surfacePrincipalFor: (connection) =>
+            `surface:device:${connection.peer.deviceId}`,
+          authorizePeer: (deviceId) =>
+            this.#peerHasRole(deviceId, "surface"),
+        }),
+      );
+    }
+
     this.#control = new ProductionMeshControlPlane({
       localIdentity: options.authority.identityKey,
       trust: options.trust,
@@ -173,13 +188,25 @@ export class MeshRuntimeAssembly {
       services: this.services,
       connections: this.connections,
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
-      onTrustReconciled: (record) => {
+      onTrustReconciled: async (record) => {
         options.authority.reconcileTrustedDevices(
           record.members.map((member) => member.device),
           record.members
             .filter((member) => member.state === "active")
             .map((member) => member.device.deviceId),
         );
+        if (roles.has("anchor")) {
+          for (const member of record.members) {
+            if (
+              member.state !== "active" ||
+              !member.roles.includes("surface")
+            ) {
+              await options.authority.surfaceAssets.revokeSurface(
+                `surface:device:${member.device.deviceId}`,
+              );
+            }
+          }
+        }
       },
       onConnection: async (connection) => {
         await fulfillConnectionLifetimeObligation({
@@ -395,7 +422,8 @@ export class MeshRuntimeAssembly {
     await continuations.clear(offerId);
   }
 
-  #peerHasRole(deviceId: string, role: "anchor" | "executor"): boolean {
+
+  #peerHasRole(deviceId: string, role: DeviceRole): boolean {
     return this.#control.currentTrust().members.some((member) =>
       member.device.deviceId === deviceId &&
       member.state === "active" &&

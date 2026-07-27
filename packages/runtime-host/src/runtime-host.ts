@@ -22,6 +22,7 @@ import {
   createAgentRuntime,
   runContextStorage,
   type AgentRuntime,
+  type AgentRuntimeCapacityBinding,
   type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
   type RuntimeKind,
@@ -54,6 +55,11 @@ export interface RuntimeHostOptions {
   skillStore: SkillStoreOption;
   /** 段切换外部依赖——注意力窗口的段保护对一切运行体生效 */
   segmentDeps: SegmentDepsOption;
+  /** 设备唯一容量裁决器派生的可信 workload 准入；生产组合根必须提供。 */
+  deviceCapacity?: {
+    readonly interactive: AgentRuntimeCapacityBinding;
+    readonly scheduler: AgentRuntimeCapacityBinding;
+  };
   /** extra tools 装配单例(含 task_list service 与 MCP hub) */
   extraTools: BuiltinExtraToolsAssembly;
   /** 调度门面 getter——惰性求值解装配顺序依赖 */
@@ -213,7 +219,14 @@ export class RuntimeHost {
         ? this.opts.worksceneDirectory
         : undefined,
     });
+    // 临时运行时按调度类计费,常驻会话按交互类:两者的公平份额不同,且容量
+    // 绑定必须在构造时就位——工具执行的注入点在运行时内部,事后包装拿不到。
+    const capacityBinding =
+      opts?.runtimeKind === "ephemeral"
+        ? this.opts.deviceCapacity?.scheduler
+        : this.opts.deviceCapacity?.interactive;
     const runtime = await createAgentRuntime({
+      ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
       providerConfiguration: this.opts.providerConfiguration,
       systemProtectedPaths: this.opts.systemProtectedPaths,
       workspace: workscene ? workscene.workspace : undefined,

@@ -4,6 +4,10 @@ const harness = vi.hoisted(() => ({
   order: [] as string[],
   secretStore: { marker: "secret-store" },
   startup: vi.fn(),
+  deviceCapacity: {
+    marker: "device-capacity",
+    storage: { marker: "storage-maintenance" },
+  },
   prepareMesh: vi.fn(),
   runTopology: vi.fn(),
   writer: {
@@ -25,6 +29,12 @@ vi.mock("../startup.js", () => ({
 }));
 vi.mock("./mesh-runtime-bootstrap.js", () => ({
   prepareMeshRuntimeBootstrap: (...args: unknown[]) => harness.prepareMesh(...args),
+}));
+vi.mock("./device-capacity-runtime.js", () => ({
+  createDeviceCapacityRuntime: () => {
+    harness.order.push("capacity");
+    return harness.deviceCapacity;
+  },
 }));
 vi.mock("./role-topology.js", () => ({
   DEFAULT_LOCAL_ROLE_CONFIGURATION: { roles: ["anchor", "executor"] },
@@ -68,17 +78,23 @@ describe("serve topology command", () => {
 
     await runServeCommand({}, harness.writer);
 
-    expect(harness.order).toEqual(["startup", "mesh", "roles"]);
+    expect(harness.order).toEqual(["startup", "capacity", "mesh", "roles"]);
     expect(harness.prepareMesh).toHaveBeenCalledWith(expect.objectContaining({
       zhixingHome: "test-home",
       secretStore: harness.secretStore,
+      storageMaintenance: harness.deviceCapacity.storage,
       configuration: startup.config.mesh,
     }));
     expect(harness.runTopology).toHaveBeenCalledWith(
       { roles: mesh.roles },
       expect.any(Object),
       {},
-      { mesh, secretStore: harness.secretStore, startup },
+      {
+        mesh,
+        deviceCapacity: harness.deviceCapacity,
+        secretStore: harness.secretStore,
+        startup,
+      },
     );
   });
 
@@ -92,6 +108,7 @@ describe("serve topology command", () => {
     try {
       await runServeCommand({}, harness.writer);
       expect(exit).toHaveBeenCalledWith(2);
+      expect(harness.order).toEqual([]);
       expect(harness.prepareMesh).not.toHaveBeenCalled();
       expect(harness.runTopology).not.toHaveBeenCalled();
       expect(harness.writer.line).toHaveBeenCalledWith(expect.stringContaining("配置错误"));

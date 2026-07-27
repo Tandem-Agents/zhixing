@@ -130,6 +130,7 @@ import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { createAccessSurfaces } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
+import { StartupRollback } from "./startup-rollback.js";
 import {
   governControlTextCall,
   type GovernedTextCall,
@@ -162,8 +163,13 @@ async function runServerProcess(
   bootstrap: ServeBootstrapContext,
   executor: ExecutorRoleModule | undefined,
 ): Promise<void> {
+  const startupRollback = new StartupRollback();
+  let startupRegistry: CleanupRegistry | undefined;
+  let runner: RunningServer | undefined;
+  try {
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
+  const deviceCapacity = bootstrap.deviceCapacity;
   const isChild = isDaemonChild();
   const daemonLogPath = isChild ? getDefaultLogPath() : undefined;
   const serverLogLifecycle = isChild
@@ -174,6 +180,11 @@ async function runServerProcess(
             console.error(chalk.red(`[server-log] ${msg}`), err instanceof Error ? err.message : err),
         },
       })
+    : undefined;
+  const serverLogCleanup = serverLogLifecycle
+    ? startupRollback.register("serverLogLifecycle.stop", () =>
+        serverLogLifecycle.stop(),
+      )
     : undefined;
   await serverLogLifecycle?.start();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
@@ -357,6 +368,7 @@ async function runServerProcess(
     // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
     // 惰性取值；advancement 外调发生在运行期，届时必已就绪
     governor: () => ctx.authorityRuntime?.resourceGovernor,
+    deviceCapacity: deviceCapacity.workload("workload-advancement"),
     // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
     // 延迟基线进 serve 日志作观测数据。
     recentContextProvider: async (conversationId) =>
@@ -382,6 +394,10 @@ async function runServerProcess(
     systemProtectedPaths,
     skillStore: serveSkillStore,
     segmentDeps: serveSegmentDeps,
+    deviceCapacity: {
+      interactive: deviceCapacity.workload("workload-interactive"),
+      scheduler: deviceCapacity.workload("workload-scheduler"),
+    },
     extraTools: builtinExtraTools,
     scheduler: getSchedulerFacade,
     // 推进闭环 active 期间把契约验收条件注入执行侧发送视图——订阅者按
@@ -457,10 +473,9 @@ async function runServerProcess(
         console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
     },
   });
+  startupRegistry = registry;
   if (serverLogLifecycle) {
-    registry.register("serverLogLifecycle.stop", () => {
-      serverLogLifecycle.stop();
-    });
+    registry.register("serverLogLifecycle.stop", () => serverLogCleanup!.run());
   }
 
   // 4a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
@@ -477,6 +492,7 @@ async function runServerProcess(
   // ============================================================================
   // journal 域仓——turn 后维护(conversation 接入面)与系统维护任务共用。
   const journalStore = new JournalStore();
+  const startupCleanups: AssemblyContext["startupCleanups"] = {};
 
   const ctx: AssemblyContext = {
     profile,
@@ -485,6 +501,7 @@ async function runServerProcess(
     secretStore: startupResult.secretStore,
     durableInteractions,
     perspectives: perspectivesController,
+    storageMaintenance: deviceCapacity.storage,
     confirmationHub,
     mcpHub,
     transcript,
@@ -499,6 +516,8 @@ async function runServerProcess(
     sessionActivityBroadcastRef,
     advancementRecoveryRef,
     cleanup: registry,
+    startupRollback,
+    startupCleanups,
     advancement: advancementController,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
@@ -647,6 +666,10 @@ async function runServerProcess(
       debug: () => {},
     },
   });
+  const schedulerCleanup = startupRollback.register(
+    "scheduler.stop",
+    () => scheduler.stop(),
+  );
   schedulerRef = scheduler;
   // LocalSchedulerFacade —— 在恒定核心装配点实例化一次（绑核心 Scheduler、与执行面正交）：
   // 后台宿主内会话执行面 / ephemeralRuntime 的 schedule 工具经 getSchedulerFacade 共用它，
@@ -808,9 +831,7 @@ async function runServerProcess(
   registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
 
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
-  let runner: RunningServer;
-  try {
-    runner = await runServer({
+  runner = await runServer({
       context: serverCtx,
       scheduler,
       schedulerEventBus,
@@ -826,19 +847,6 @@ async function runServerProcess(
         error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
       },
     });
-  } catch (err) {
-    // runServer 抛错（startServer / acquireLock 冲突）—— server 未运行。
-    // 清理策略：先跑 registry.runAll（已注册的 tail 项对未完成 acquire 场景全 no-op 安全）
-    // → 再手动清理 registry 未感知的资源（scheduler / 接入面产物在 registerCoreCleanup
-    // 之前启动，还没进入 registry）。
-    await registry.runAll("startup-failure").catch(() => {});
-    await scheduler.stop().catch(() => {});
-    await ctx.meshRuntime?.stop().catch(() => {});
-    await ctx.deliveryStack?.stop().catch(() => {});
-    await ctx.channels?.dispose().catch(() => {});
-    ctx.textRenderer?.stop();
-    throw err;
-  }
 
   // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
   sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
@@ -857,6 +865,12 @@ async function runServerProcess(
     channels: ctx.channels,
     deliveryStack: ctx.deliveryStack,
     mcpHub: builtinExtraTools.mcpHub,
+    startupCleanups: {
+      scheduler: schedulerCleanup,
+      channels: startupCleanups.channels,
+      deliveryStack: startupCleanups.deliveryStack,
+      mcp: startupCleanups.mcp,
+    },
   });
 
   // post-server 接入面：confirmationBridge（依赖 runner.server.connections，在自己 setup 内
@@ -869,16 +883,20 @@ async function runServerProcess(
 
   // 文本确认渲染器停订阅（防 shutdown 期间还有 confirmation 派发到即将断开的 channel）。
   if (ctx.textRenderer) {
-    const renderer = ctx.textRenderer;
     registry.register("confirmationRenderer.stop", () => {
-      renderer.stop();
+      return startupCleanups.textRenderer!.run();
     });
   }
 
   if (ctx.meshRuntime) {
-    const mesh = ctx.meshRuntime;
     registry.register("meshRuntime.stop", async () => {
-      await mesh.stop();
+      await startupCleanups.meshRuntime!.run();
+    });
+  }
+
+  if (ctx.assetMaintenance) {
+    registry.register("assetMaintenance.stop", async () => {
+      await startupCleanups.assetMaintenance!.run();
     });
   }
 
@@ -919,6 +937,9 @@ async function runServerProcess(
       router.refuseNewMessages();
     });
   }
+
+  // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
+  startupRollback.commit();
 
   if (advancementRecovery) {
     try {
@@ -1009,7 +1030,7 @@ async function runServerProcess(
     const IDLE_CHECK_MS = 60_000;
     const idleTimer = setInterval(() => {
       const exit = shouldIdleExit({
-        connectionCount: runner.server.connections.size,
+        connectionCount: runner!.server.connections.size,
         channelStates:
           ctx.channels?.listStatuses().map((s) => s.state) ?? [],
         hasUserPendingWork: scheduler
@@ -1026,4 +1047,20 @@ async function runServerProcess(
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
   await runner.waitForShutdown();
+  } catch (error) {
+    if (runner) {
+      await runner.shutdown("startup-error").catch(() => {});
+    } else {
+      await startupRegistry?.runAll("startup-failure").catch(() => {});
+    }
+    await startupRollback.rollback().catch((rollbackError) => {
+      console.error(
+        chalk.red("[startup] rollback failed:"),
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : String(rollbackError),
+      );
+    });
+    throw error;
+  }
 }

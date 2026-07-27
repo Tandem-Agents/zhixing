@@ -156,6 +156,12 @@ export function validateConversationSealedBundle(
   value: SealedBundle,
 ): ConversationSealedBundle {
   assertSealedBundle(value);
+  return validateConversationSealedBundleBody(value);
+}
+
+function validateConversationSealedBundleBody(
+  value: SealedBundle,
+): ConversationSealedBundle {
   assertConversationBody(value.body);
   const rootDigests = new Set(conversationBundleRoots(value.body).map((ref) => ref.digest));
   assertNoRepeatedRoots(value.dependencyArtifacts, rootDigests);
@@ -200,10 +206,29 @@ export function createJobSealedBundle(
 
 export function validateJobSealedBundle(value: SealedBundle): JobSealedBundle {
   assertSealedBundle(value);
+  return validateJobSealedBundleBody(value);
+}
+
+function validateJobSealedBundleBody(value: SealedBundle): JobSealedBundle {
   assertJobBody(value.body);
   const rootDigests = new Set(jobBundleRoots(value.body).map((ref) => ref.digest));
   assertNoRepeatedRoots(value.dependencyArtifacts, rootDigests);
   return snapshot(value, "Sealed bundle") as JobSealedBundle;
+}
+
+/** Validates the complete discriminated SealedBundle union. */
+export function validateSealedBundle(
+  value: SealedBundle,
+): ConversationSealedBundle | JobSealedBundle {
+  assertSealedBundle(value);
+  assertPlainObject(value.body, "Sealed bundle body");
+  if (value.body.t === "conversation") {
+    return validateConversationSealedBundleBody(value);
+  }
+  if (value.body.t === "job") {
+    return validateJobSealedBundleBody(value);
+  }
+  throw new TypeError("Sealed bundle execution kind is invalid");
 }
 
 function assertSealedBundle(value: SealedBundle): void {
@@ -263,9 +288,7 @@ export function sealedBundleArtifact(
 export function sealedBundleArtifact(
   bundle: SealedBundle,
 ): ArtifactValue<SealedBundle> {
-  const value = bundle.body.t === "conversation"
-    ? validateConversationSealedBundle(bundle)
-    : validateJobSealedBundle(bundle);
+  const value = validateSealedBundle(bundle);
   return artifactValue(value);
 }
 

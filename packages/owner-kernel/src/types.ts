@@ -30,7 +30,10 @@ import type {
   TurnSource,
   WindowCompact,
 } from "@zhixing/core";
-import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
+import type {
+  ContentAssetRef,
+  ModelCallResourceMeter,
+} from "@zhixing/core/contracts";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
 // 方便 owner-kernel 及其下游从统一入口获取。
@@ -42,6 +45,8 @@ export interface RunTurnOptions {
   turnContext?: TurnContext;
   /** Authenticated stable surface identity; transport connection ids are not identities. */
   surfacePrincipal?: string;
+  /** Durable content assets bound to this input control request. */
+  attachments?: readonly ContentAssetRef[];
   /**
    * 本 turn 序号（进生命周期钩子上下文供观测）—— 由调用方维护的 counter 提供。
    *

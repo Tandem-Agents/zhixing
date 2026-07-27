@@ -40,6 +40,10 @@
       "types": "./dist/advancement/index.d.ts",
       "import": "./dist/advancement/index.js"
     },
+    "./resources": {
+      "types": "./dist/resources/index.d.ts",
+      "import": "./dist/resources/index.js"
+    },
     "./memory": {
       "types": "./dist/memory/index.d.ts",
       "import": "./dist/memory/index.js"

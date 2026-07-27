@@ -3,6 +3,7 @@ import { createMcpHub, mapServerTools, type McpHub } from "@zhixing/mcp";
 import {
   createAgentRuntime,
   type AgentRuntime,
+  type AgentRuntimeCapacityBinding,
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile } from "@zhixing/orchestrator/profile";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
@@ -41,6 +42,8 @@ export async function runExecutorRole(
   }
 
   const startup = bootstrap.startup;
+  const zhixingHome = getZhixingHome();
+  const deviceCapacity = bootstrap.deviceCapacity;
   const providerCredentials = startup.credentials.providers
     ? { providers: startup.credentials.providers }
     : {};
@@ -60,9 +63,10 @@ export async function runExecutorRole(
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions,
+      deviceCapacity: deviceCapacity.workload("workload-interactive"),
     });
     const authority = await setupAuthorityRuntime({
-      zhixingHome: getZhixingHome(),
+      zhixingHome,
       secretStore: bootstrap.secretStore,
       deviceKey: bootstrap.mesh.deviceKey,
       trustedIdentities: bootstrap.mesh.trustedIdentities,
@@ -79,6 +83,7 @@ export async function runExecutorRole(
       }),
       enableAnchor: false,
       enableLocalExecutor: true,
+      storageMaintenance: deviceCapacity.storage,
     });
     const ledger = createConversationExecutorLedger({
       Constructor: executor.ConversationAssignmentLedger,
@@ -93,7 +98,7 @@ export async function runExecutorRole(
     });
     const runtimeFactory = executor.createInProcessRuntimeFactory(role);
     mesh = new MeshRuntimeAssembly({
-      zhixingHome: getZhixingHome(),
+      zhixingHome,
       trust: bootstrap.mesh.trust,
       configuration: bootstrap.mesh.configuration,
       endpoints: bootstrap.mesh.endpoints,
@@ -124,11 +129,13 @@ class ExecutorRuntimeSubstrate {
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
+    readonly deviceCapacity: AgentRuntimeCapacityBinding;
   }) {}
 
   createConversationRuntime(): Promise<AgentRuntime> {
     const catalog = this.options.mcpHub.catalog();
     return createAgentRuntime({
+      deviceCapacity: this.options.deviceCapacity,
       providerConfiguration: {
         config: this.options.config,
         credentials: this.options.credentials,

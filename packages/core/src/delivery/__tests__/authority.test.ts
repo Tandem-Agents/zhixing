@@ -9,6 +9,7 @@ import type {
   DeliveryStreamRecord,
   CommitEnvelope,
   LogicalRecord,
+  PublishRecord,
 } from "../../contracts/index.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -30,7 +31,10 @@ import {
   type DeliveryProjection,
   type DeliveryResolutionDecision,
 } from "../index.js";
-import { deliverySourceRecords } from "./delivery-test-harness.js";
+import {
+  createDeliverySourceFixture,
+  deliverySourceRecords,
+} from "./delivery-test-harness.js";
 import { MAX_INLINE_DELIVERY_CONTENT_BYTES } from "../content-schema.js";
 
 vi.setConfig({ testTimeout: 15_000 });
@@ -95,7 +99,7 @@ async function enqueue(
   authority: DeliveryAuthority,
   input: DeliveryEnqueueInput,
 ): Promise<DeliveryEnqueueResult> {
-  const sourceRef = await artifacts.put(Buffer.from("delivery-authority-source", "utf8"));
+  const source = await createDeliverySourceFixture(artifacts, input.keyBody);
   return authority.coordinate(async () => (
     await log.transactProjection<Record<string, never>, unknown, DeliveryEnqueueResult>(
       {},
@@ -108,17 +112,13 @@ async function enqueue(
         return {
           kind: "append",
           entries: [
-            ...deliverySourceRecords(
-              input.keyBody,
-              sourceRef,
-              decision.items[0]!.statusRevision,
-            ),
+            ...source.records(decision.items[0]!.statusRevision),
             ...decision.records.map(deliveryRecord),
           ],
           value: decision,
         };
       },
-      { candidateReferences: [sourceRef] },
+      { candidateReferences: source.references },
     )
   ).value);
 }
@@ -883,29 +883,27 @@ describe("delivery unique index and replay", () => {
     };
     const prepared = authority.prepareEnqueues([input], FIRST);
     if (!prepared.accepted) throw new Error("fixture prepare failed");
-    const sourceRef = await artifacts.put(Buffer.from("staged-source", "utf8"));
+    const source = await createDeliverySourceFixture(artifacts, input.keyBody);
+    const mismatchedSource = source.records(1).map((record) => {
+      if (record.stream !== "publish") return record;
+      const body = record.body as Extract<PublishRecord, { t: "publish-decision" }>;
+      return {
+        ...record,
+        body: {
+          ...body,
+          outcomes: body.outcomes.map((entry) =>
+            entry.seq === input.keyBody.mutationSeq
+              ? {
+                  ...entry,
+                  outcome: { t: "granted" as const, targetRevision: 2 },
+                }
+              : entry,
+          ),
+        },
+      };
+    });
     await log.append([
-      {
-        stream: "run:conversation-1",
-        body: {
-          t: "committed",
-          runId: "run-1",
-          assignmentId: "assignment-1",
-          bundle: { ref: sourceRef },
-          commitRevision: 1,
-        },
-      },
-      {
-        stream: "publish",
-        body: {
-          t: "publish-decision",
-          assignmentId: "assignment-1",
-          batch: { ref: sourceRef },
-          sessionCount: 0,
-          globalCount: 1,
-          outcomes: [{ seq: 1, outcome: { t: "granted", targetRevision: 1 } }],
-        },
-      },
+      ...mismatchedSource,
       ...prepared.records.map(deliveryRecord),
     ]);
 

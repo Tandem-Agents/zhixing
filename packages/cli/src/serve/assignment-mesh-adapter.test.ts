@@ -2510,6 +2510,7 @@ function createUnsignedEnvelope(
         ingressId: "ingress-1",
         receivedAt: NOW,
       },
+      contentAssets: [],
       windowInput: { t: "full", windowEpoch: 1, messages: { ref: windowRef } },
       controlContext: [],
     },

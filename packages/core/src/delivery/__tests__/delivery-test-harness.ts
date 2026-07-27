@@ -9,7 +9,18 @@ import type {
   DeliveryEnqueueKeyBody,
   DeliveryIntentDto,
   LogicalRecord,
+  TranscriptRunRecord,
 } from "../../contracts/index.js";
+import {
+  canonicalize,
+  createConversationSealedBundle,
+  createJobCommitFence,
+  createJobSealedBundle,
+  createMutationBatch,
+  jobDeliveryPlanDigest,
+  mutationBatchArtifact,
+  sealedBundleArtifact,
+} from "../../protocol/index.js";
 import {
   DeliveryAuthority,
   deliveryRecord,
@@ -18,6 +29,7 @@ import {
 } from "../index.js";
 
 export const DELIVERY_TEST_TIME = "2026-07-17T02:00:00.000Z";
+const FIXTURE_DIGEST = `sha256:${"0".repeat(64)}` as const;
 
 export async function createDeliveryTestHarness() {
   let now = DELIVERY_TEST_TIME;
@@ -75,7 +87,7 @@ export async function enqueueDelivery(
   authority: DeliveryAuthority,
   input: DeliveryEnqueueInput,
 ): Promise<DeliveryEnqueueResult> {
-  const sourceRef = await artifacts.put(Buffer.from("delivery-test-source", "utf8"));
+  const source = await createDeliverySourceFixture(artifacts, input.keyBody);
   return authority.coordinate(async () => (
     await log.transactProjection<Record<string, never>, unknown, DeliveryEnqueueResult>(
       {},
@@ -88,17 +100,13 @@ export async function enqueueDelivery(
         return {
           kind: "append",
           entries: [
-            ...deliverySourceRecords(
-              input.keyBody,
-              sourceRef,
-              decision.items[0]!.statusRevision,
-            ),
+            ...source.records(decision.items[0]!.statusRevision),
             ...decision.records.map(deliveryRecord),
           ],
           value: decision,
         };
       },
-      { candidateReferences: [sourceRef] },
+      { candidateReferences: source.references },
     )
   ).value);
 }
@@ -107,6 +115,7 @@ export function deliverySourceRecords(
   key: DeliveryEnqueueKeyBody,
   ref: ArtifactRef,
   targetRevision = 1,
+  batchRef = ref,
 ): LogicalRecord<unknown>[] {
   switch (key.kind) {
     case "conversation-final-delivery":
@@ -168,17 +177,149 @@ export function deliverySourceRecords(
           body: {
             t: "publish-decision",
             assignmentId: key.assignmentId,
-            batch: { ref },
+            batch: { ref: batchRef },
             sessionCount: 0,
-            globalCount: 1,
-            outcomes: [
-              {
-                seq: key.mutationSeq,
-                outcome: { t: "granted", targetRevision },
-              },
-            ],
+            globalCount: key.mutationSeq,
+            outcomes: Array.from({ length: key.mutationSeq }, (_, index) => ({
+              seq: index + 1,
+              outcome: { t: "granted" as const, targetRevision },
+            })),
           },
         },
       ];
   }
+}
+
+export async function createDeliverySourceFixture(
+  artifacts: FileArtifactStore,
+  key: DeliveryEnqueueKeyBody,
+): Promise<{
+  readonly records: (targetRevision?: number) => LogicalRecord<unknown>[];
+  readonly references: readonly ArtifactRef[];
+}> {
+  if (key.kind === "conversation-status-delivery" || key.kind === "job-status-delivery") {
+    return {
+      records: (targetRevision) =>
+        deliverySourceRecords(key, { digest: FIXTURE_DIGEST, bytes: 0 }, targetRevision),
+      references: [],
+    };
+  }
+
+  if (key.kind === "job-result-delivery") {
+    const bundle = createJobSealedBundle({
+      assignmentId: "assignment-source",
+      executorId: "executor-source",
+      streamFinal: { finalSeq: 1, streamDigest: FIXTURE_DIGEST },
+      usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+      usageFinal: { reportDigest: FIXTURE_DIGEST, upToUsageSeq: 0 },
+      dependencyArtifacts: [],
+      body: {
+        t: "job",
+        taskId: key.taskId,
+        jobRunId: key.jobRunId,
+        fence: createJobCommitFence({
+          taskId: key.taskId,
+          jobRunId: key.jobRunId,
+          scheduledFor: DELIVERY_TEST_TIME,
+          taskRevision: 1,
+          deliveryPlanDigest: jobDeliveryPlanDigest({ kind: "none" }),
+          anchorEpoch: 1,
+          assignmentId: "assignment-source",
+          executorId: "executor-source",
+        }),
+        outcome: { status: "completed", summary: "delivery fixture" },
+        contentAssets: [],
+      },
+    });
+    const artifact = sealedBundleArtifact(bundle);
+    await artifacts.put(artifact.bytes);
+    return {
+      records: (targetRevision) =>
+        deliverySourceRecords(key, artifact.ref, targetRevision),
+      references: [artifact.ref],
+    };
+  }
+
+  const assignmentId =
+    key.kind === "staged-delivery" ? key.assignmentId : "assignment-source";
+  const runId =
+    key.kind === "conversation-final-delivery" ? key.runId : "run:test-source";
+  const conversationId =
+    key.kind === "conversation-final-delivery"
+      ? key.conversationId
+      : "test-source";
+  const runRecord: TranscriptRunRecord = {
+    type: "run",
+    runId,
+    runIndex: 1,
+    timestamp: DELIVERY_TEST_TIME,
+    messages: [],
+  };
+  const runRecordRef = await artifacts.put(
+    Buffer.from(canonicalize(runRecord), "utf8"),
+  );
+  const batchArtifact =
+    key.kind === "staged-delivery"
+      ? mutationBatchArtifact(
+          createMutationBatch(
+            assignmentId,
+            Array.from({ length: key.mutationSeq }, (_, index) => ({
+              v: 1 as const,
+              t: "staged-mutation" as const,
+              seq: index + 1,
+              domain: "global" as const,
+              requestId: `delivery-source-${index + 1}`,
+              expected: { anchorEpoch: 1 },
+              mutation: {
+                kind: "workscene-create" as const,
+                name: `Delivery source ${index + 1}`,
+              },
+            })),
+          ),
+        )
+      : undefined;
+  if (batchArtifact) await artifacts.put(batchArtifact.bytes);
+  const bundle = createConversationSealedBundle({
+    assignmentId,
+    executorId: "executor-source",
+    streamFinal: { finalSeq: 1, streamDigest: FIXTURE_DIGEST },
+    usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+    usageFinal: { reportDigest: FIXTURE_DIGEST, upToUsageSeq: 0 },
+    dependencyArtifacts: [],
+    body: {
+      t: "conversation",
+      runId,
+      conversationId,
+      ownerEpoch: 1,
+      baseRevision: 0,
+      runRecord: { ref: runRecordRef },
+      contentAssets: [],
+      ...(batchArtifact
+        ? {
+            mutationBatch: {
+              ref: batchArtifact.ref,
+              sessionCount: 0,
+              globalCount: key.kind === "staged-delivery" ? key.mutationSeq : 0,
+            },
+          }
+        : {}),
+    },
+  });
+  const bundleArtifact = sealedBundleArtifact(bundle);
+  await artifacts.put(bundleArtifact.bytes);
+  const references = [
+    runRecordRef,
+    ...(batchArtifact ? [batchArtifact.ref] : []),
+    bundleArtifact.ref,
+  ];
+  return {
+    records: (targetRevision) =>
+      deliverySourceRecords(
+        key,
+        bundleArtifact.ref,
+        targetRevision,
+        batchArtifact?.ref,
+      ),
+    references,
+  };
 }

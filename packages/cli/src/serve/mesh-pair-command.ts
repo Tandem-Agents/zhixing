@@ -67,6 +67,7 @@ import { loadConfig, writeConfig } from "@zhixing/providers";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import {
   FileMeshPairingContinuationStore,
   type DurablePairingInvitation,
@@ -167,7 +168,12 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     throw new Error("Device SecretStore must be unlocked before pairing");
   }
   const key = await loadOrCreateDeviceKey(secretStore);
-  const store = new FileMeshBootstrapStore(zhixingHome, key);
+  const deviceCapacity = createDeviceCapacityRuntime(
+    `${zhixingHome}/distributed-runtime/capacity`,
+  );
+  const store = new FileMeshBootstrapStore(zhixingHome, key, {
+    storageMaintenance: deviceCapacity.storage,
+  });
   const continuations = new FileMeshPairingContinuationStore(zhixingHome);
   const writeLine: (line: string) => void =
     options.writeLine ?? createStdoutWriter().line;

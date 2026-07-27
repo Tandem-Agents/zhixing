@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ChannelRegistry, deliveryRecord } from "@zhixing/core";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type {
+  SecretRef,
+  SecretStorePort,
+  TranscriptRunRecord,
+} from "@zhixing/core/contracts";
+import {
+  byteDigest,
+  canonicalize,
+  createConversationSealedBundle,
+  sealedBundleArtifact,
+} from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import {
   setupAuthorityRuntime,
@@ -23,6 +33,55 @@ const TEST_EXECUTOR_READINESS = {
   deviceScopedCredentialBindingIds: [] as string[],
   credentialGeneration: null,
 };
+
+async function putConversationBundle(
+  artifacts: DeliveryStack["artifacts"],
+  input: {
+    assignmentId: string;
+    runId: string;
+    conversationId: string;
+  },
+) {
+  const runRecord: TranscriptRunRecord = {
+    type: "run",
+    runId: input.runId,
+    runIndex: 1,
+    timestamp: "2026-07-25T00:00:00.000Z",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "prepare delivery" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "delivery ready" }],
+      },
+    ],
+  };
+  const runRecordRef = await artifacts.put(
+    Buffer.from(canonicalize(runRecord), "utf8"),
+  );
+  const emptyDigest = byteDigest(Buffer.alloc(0));
+  const bundle = createConversationSealedBundle({
+    assignmentId: input.assignmentId,
+    executorId: "executor-test",
+    streamFinal: { finalSeq: 1, streamDigest: emptyDigest },
+    usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+    usageFinal: { reportDigest: emptyDigest, upToUsageSeq: 0 },
+    dependencyArtifacts: [],
+    body: {
+      t: "conversation",
+      runId: input.runId,
+      conversationId: input.conversationId,
+      ownerEpoch: 1,
+      baseRevision: 0,
+      runRecord: { ref: runRecordRef },
+      contentAssets: [],
+    },
+  });
+  const artifact = sealedBundleArtifact(bundle);
+  return artifacts.put(artifact.bytes);
+}
 
 describe("setupDelivery authority production path", () => {
   let home: string;
@@ -77,7 +136,11 @@ describe("setupDelivery authority production path", () => {
       authorityRuntime,
       logger: quietLogger,
     });
-    const sourceRef = await stack.artifacts.put(Buffer.from("resolution-source", "utf8"));
+    const sourceRef = await putConversationBundle(stack.artifacts, {
+      assignmentId: "assignment-resolution",
+      runId: "run-resolution",
+      conversationId: "conversation-resolution",
+    });
     const prepared = await stack.authority.coordinate(() =>
       stack!.authorityLog.transactProjection(
         {},
@@ -181,7 +244,11 @@ describe("setupDelivery authority production path", () => {
       logger: quietLogger,
     });
     const authority = stack.authority;
-    const sourceRef = await stack.artifacts.put(Buffer.from("rebuild-source", "utf8"));
+    const sourceRef = await putConversationBundle(stack.artifacts, {
+      assignmentId: "assignment-1",
+      runId: "run-1",
+      conversationId: "conversation-1",
+    });
     const transaction = await authority.coordinate(() => stack!.authorityLog.transactProjection(
       {},
       (state) => state,

@@ -26,6 +26,7 @@ import type {
   OwnerControlGrant,
   PermissionSnapshotLease,
   ResourceLease,
+  SurfaceAssetGrant,
   UsageReport,
 } from "./authorization.js";
 import type { ConfigAssetRecord } from "./state.js";
@@ -83,6 +84,7 @@ export interface WireSchemaMap {
   CheckpointEnvelope: CheckpointEnvelope;
   TrustRuleSnapshot: TrustRuleSnapshot;
   DataPlaneTicket: DataPlaneTicket;
+  SurfaceAssetGrant: SurfaceAssetGrant;
   ChannelChallengeToken: ChannelChallengeToken;
   ChannelInteractionGrant: ChannelInteractionGrant;
   AuthorityCapability: AuthorityCapability;

@@ -13,7 +13,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ChannelRegistry, type PermissionRule } from "@zhixing/core";
+import {
+  AuthorityDeliveryPipeline,
+  ChannelRegistry,
+  DeliveryPipeline,
+  OutboxRegistry,
+  type PermissionRule,
+} from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import {
   createExecutionManifest,
@@ -29,6 +35,7 @@ import {
   type DeliveryStack,
 } from "../setup-delivery.js";
 import { FileExecutionSnapshotVersionStore } from "../executor-snapshot-version-store.js";
+import { StartupRollback } from "../serve/startup-rollback.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -114,6 +121,54 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(stack.delivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
+  });
+
+  it("rolls back every partially acquired delivery resource when later startup fails", async () => {
+    const order: string[] = [];
+    const authorityStart = vi
+      .spyOn(AuthorityDeliveryPipeline.prototype, "start")
+      .mockRejectedValueOnce(new Error("authority delivery failed"));
+    const authorityStop = vi
+      .spyOn(AuthorityDeliveryPipeline.prototype, "stop")
+      .mockImplementationOnce(async () => {
+        order.push("authority");
+      });
+    const deliveryStop = vi
+      .spyOn(DeliveryPipeline.prototype, "stop")
+      .mockImplementationOnce(async () => {
+        order.push("delivery");
+      });
+    const outboxStop = vi
+      .spyOn(OutboxRegistry.prototype, "dispose")
+      .mockImplementationOnce(async () => {
+        order.push("outbox");
+      });
+    try {
+      const authorityRuntime = await setupAuthorityRuntime({
+        zhixingHome: home,
+        secretStore: new MemorySecretStore(),
+        executorReadiness: TEST_EXECUTOR_READINESS,
+      });
+      await expect(
+        setupDelivery({
+          channels: new ChannelRegistry(),
+          zhixingHome: home,
+          authorityRuntime,
+          logger: quietLogger,
+          startupRollback: new StartupRollback(),
+        }),
+      ).rejects.toThrow("authority delivery failed");
+
+      expect(order).toEqual(["authority", "delivery", "outbox"]);
+      expect(authorityStop).toHaveBeenCalledTimes(1);
+      expect(deliveryStop).toHaveBeenCalledTimes(1);
+      expect(outboxStop).toHaveBeenCalledTimes(1);
+    } finally {
+      authorityStart.mockRestore();
+      authorityStop.mockRestore();
+      deliveryStop.mockRestore();
+      outboxStop.mockRestore();
+    }
   });
 
   it("publishes one durable monotonic execution snapshot revision", async () => {

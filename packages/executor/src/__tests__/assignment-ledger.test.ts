@@ -44,6 +44,8 @@ import {
   protocolBytes,
   protocolDigest,
   createConversationSealedBundle,
+  createMutationBatch,
+  mutationBatchArtifact,
   createSignedConversationInteractionMirrorBatch,
   interactionMirrorSeed,
   ownerControlRequestDigest,
@@ -2355,12 +2357,17 @@ describe("conversation assignment protocol", () => {
 
     const orphan = await harness.artifacts.put(Buffer.from("eligible-orphan", "utf8"));
     await rm(harness.artifacts.pathFor(dependencyRef));
+    // 保留关系改由耐久派生索引在 append 期建立,GC 不再为了求闭包去读工件,
+    // 因此物理缺失的引用不会再把整轮 GC 打断。要守住的性质不是"缺件即中止",
+    // 而是"缺件不得导致任何仍被保留的工件被删":缺的那个不在扫描集里,
+    // 真正被删的只有确实无人引用的孤儿。
     await expect(
       harness.log.collectGarbage({
         unreferencedBefore: "2099-01-01T00:00:00.000Z",
       }),
-    ).rejects.toMatchObject({ code: "artifact-missing" });
-    await expect(harness.artifacts.has(orphan)).resolves.toBe(true);
+    ).resolves.toEqual({ scanned: 3, retained: 2, deleted: 1 });
+    await expect(harness.artifacts.has(orphan)).resolves.toBe(false);
+    await expect(harness.artifacts.has(windowRef)).resolves.toBe(true);
   });
 
   it("never commits a dispatch whose nested artifacts lose a GC race", async () => {
@@ -3772,13 +3779,28 @@ describe("conversation assignment protocol", () => {
       publishBundle,
       submissionContext(publishHarness.unsigned),
     );
+    // 注册根校验会在 append 期按 schema 解引用 `batch.ref`,拿 bundle 顶替过不去;
+    // 这里要验的是 resume 期“必须恰好绑定一次已提交 run”,因此给一份内容合法、
+    // 但不绑定该已提交 run 的真实 MutationBatch。
+    const unboundBatch = mutationBatchArtifact(
+      createMutationBatch(ASSIGNMENT_ID, [{
+        v: 1 as const,
+        t: "staged-mutation" as const,
+        seq: 1,
+        domain: "global" as const,
+        requestId: "unbound-publish-batch",
+        expected: { anchorEpoch: 1 },
+        mutation: { kind: "workscene-create" as const, name: "Unbound" },
+      }]),
+    );
+    await publishHarness.artifacts.put(unboundBatch.bytes);
     await publishHarness.log.append([
       {
         stream: "publish",
         body: {
           t: "publish-decision" as const,
           assignmentId: ASSIGNMENT_ID,
-          batch: { ref: sealedBundleArtifact(publishBundle).ref },
+          batch: { ref: unboundBatch.ref },
           sessionCount: 1,
           globalCount: 0,
           outcomes: [{ seq: 1, outcome: { t: "granted" as const, targetRevision: 8 } }],
@@ -5438,7 +5460,7 @@ describe("conversation assignment protocol", () => {
       "open side effect",
     );
 
-    const corruptBundle = await harness.artifacts.put(Buffer.from("corrupt-bundle"));
+    const corruptBundle = await putRealSealedBundleRef(harness);
     await harness.log.append<AssignmentEntry>([
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
@@ -5603,7 +5625,7 @@ describe("conversation assignment protocol", () => {
     await expect(sealDefaultBundle(harness.ledger)).rejects.toThrow(
       "before every pending interaction is closed",
     );
-    const corruptBundle = await harness.artifacts.put(Buffer.from("pending-bundle"));
+    const corruptBundle = await putRealSealedBundleRef(harness);
     await harness.log.append<AssignmentEntry>([
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
@@ -5652,9 +5674,7 @@ describe("conversation assignment protocol", () => {
     await expect(sealDefaultBundle(sealHarness.ledger)).rejects.toThrow(
       "before every finished interaction is mirrored",
     );
-    const corruptBundle = await sealHarness.artifacts.put(
-      Buffer.from("unmirrored-bundle"),
-    );
+    const corruptBundle = await putRealSealedBundleRef(sealHarness);
     await sealHarness.log.append<AssignmentEntry>([
       {
         stream: `assignment:${ASSIGNMENT_ID}`,
@@ -9278,6 +9298,7 @@ function createUnsignedEnvelope(
       baseRevision: 7,
       ingress: ids.ingress ?? ingress(),
       windowInput: { t: "full", windowEpoch: 1, messages: [] },
+      contentAssets: [],
       controlContext: [],
     },
   };
@@ -9560,6 +9581,34 @@ async function appendCompleteConversationCommit(
       },
     },
   ]);
+}
+
+/**
+ * 真实且规范的 SealedBundle 工件引用。
+ *
+ * 注册根校验在 append 期就会把 `bundle_sealed` 的引用解出来、按注册 schema 核对,
+ * 占位字节过不去。但下面这些用例要验的是重放顺序与前缀约束,与 bundle 内容无关,
+ * 所以走生产路径真封一份,连同它引用的 run record 一起搬进目标存储。
+ */
+async function putRealSealedBundleRef(
+  target: Awaited<ReturnType<typeof createHarness>>,
+): Promise<ArtifactRef> {
+  const source = await createHarness();
+  await source.ledger.dispatch(
+    source.dispatch.envelope,
+    source.dispatch.activation,
+    ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+  );
+  await source.ledger.start(ASSIGNMENT_ID);
+  const bundle = await sealDefaultBundle(source.ledger);
+  const artifact = sealedBundleArtifact(bundle);
+  // run record 小到一定阈值会内联,只有外置时才需要一起搬。
+  const runRecord = bundle.body.runRecord as { ref?: ArtifactRef };
+  if (runRecord.ref !== undefined) {
+    await target.artifacts.put(await source.artifacts.get(runRecord.ref));
+  }
+  await target.artifacts.put(artifact.bytes);
+  return artifact.ref;
 }
 
 async function sealDefaultBundle(

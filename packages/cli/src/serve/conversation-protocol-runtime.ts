@@ -148,6 +148,7 @@ export interface ConversationProtocolRuntimeOptions {
 interface AppliedConversationAdmission {
   readonly runId: string;
   readonly ingress: IngressContext;
+  readonly attachments: PendingConversationInput["attachments"];
   readonly replayed: boolean;
 }
 
@@ -156,6 +157,7 @@ interface PreparedConversationAdmission {
   readonly surfacePrincipal: string;
   readonly admission: AppliedConversationAdmission;
   readonly input: PendingConversationInput["input"];
+  readonly attachments: PendingConversationInput["attachments"];
   readonly invocation: ConversationInvocation;
 }
 
@@ -419,6 +421,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         surfacePrincipal: admission.ingress.surfacePrincipal,
         admission,
         input: normalizeUserTurnInput(input.input),
+        attachments: [...(input.attachments ?? [])],
         invocation: input.invocation,
       });
       this.#markRecovery(input.conversationId);
@@ -739,6 +742,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       prepared &&
       (canonicalize(prepared.input) !==
         canonicalize(normalizeUserTurnInput(input.input)) ||
+        canonicalize(prepared.attachments) !==
+          canonicalize(input.attachments ?? []) ||
         canonicalize(prepared.invocation) !== canonicalize(input.invocation))
     ) {
       throw new Error("Prepared conversation admission does not bind this invocation");
@@ -846,6 +851,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         attempt,
         resourceLease,
         ingress: executionIngress,
+        contentAssets: [...appliedAdmission.attachments],
         windowInput: {
           t: "full",
           windowEpoch: authority.commitRevision + 1,
@@ -1104,7 +1110,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ...(runResult.windowCompact
           ? { windowCompact: runResult.windowCompact }
           : {}),
-        contentAssets: [],
+        contentAssets: [...appliedAdmission.attachments],
         streamFinal: stream.final(),
         usage: {
           inputTokens: runResult.agentResult.usage.inputTokens,
@@ -1166,13 +1172,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       if (
         canonicalize(durablePending.input) !==
           canonicalize(normalizeUserTurnInput(input.input)) ||
+        canonicalize(durablePending.attachments) !==
+          canonicalize(input.attachments ?? []) ||
         canonicalize(durablePending.invocation) !== canonicalize(input.invocation)
       ) {
         throw new Error("Conversation ingress is already bound to another invocation");
       }
+      await this.#authority.surfaceAssets.markAdopted(durablePending.attachments);
       return {
         runId: durablePending.runId,
         ingress: durablePending.ingress,
+        attachments: durablePending.attachments,
         replayed: true,
       };
     }
@@ -1186,24 +1196,73 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ingress,
     };
     const journal = this.#journal(input.conversationId);
+    const envelope = createInitialControlEnvelope({
+      requestId,
+      source,
+      at,
+      body: {
+        t: "input",
+        conversationId: input.conversationId,
+        ingress: { ingressId: ingress.ingressId, source: ingress.kind },
+        input: normalizeUserTurnInput(input.input),
+        ...(input.attachments && input.attachments.length > 0
+          ? { attachments: [...input.attachments] }
+          : {}),
+        invocation: input.invocation,
+        ownerEpoch: this.#authority.anchorEpoch,
+      },
+    });
     const control = {
       admission: this.#authority.controlAdmission,
-      envelope: createInitialControlEnvelope({
-        requestId,
-        source,
-        at,
-        body: {
-          t: "input",
-          conversationId: input.conversationId,
-          ingress: { ingressId: ingress.ingressId, source: ingress.kind },
-          input: normalizeUserTurnInput(input.input),
-          invocation: input.invocation,
-          ownerEpoch: this.#authority.anchorEpoch,
-        },
-      }),
+      envelope,
       source,
       runId: `run:${randomUUID()}`,
     } as const;
+    const admissionState = await this.#authority.controlAdmission.lookup({
+      envelope,
+      source,
+    });
+    if (admissionState.kind === "settled") {
+      const appliedReplay = admissionState.outcome;
+      if (appliedReplay.kind === "rejected") {
+        throw new Error(
+          `Conversation input was rejected: ${appliedReplay.result.error.message}`,
+        );
+      }
+      if (appliedReplay.result.status === "rejected") {
+        throw new Error(
+          `Conversation input was rejected: ${appliedReplay.result.error.message}`,
+        );
+      }
+      if (appliedReplay.result.body.t !== "input") {
+        throw new Error("Conversation input admission returned another control result");
+      }
+      const replayedAttachments = [...(input.attachments ?? [])];
+      await this.#authority.surfaceAssets.markAdopted(replayedAttachments);
+      return {
+        runId: appliedReplay.result.body.runId,
+        ingress,
+        attachments: replayedAttachments,
+        replayed: true,
+      };
+    }
+    if (
+      admissionState.kind === "absent"
+      && input.attachments
+      && input.attachments.length > 0
+    ) {
+      await this.#authority.surfaceAssets.assertUploadAdoption({
+        scope: {
+          domain: "conversation",
+          conversationId: input.conversationId,
+          ownerEpoch: this.#authority.anchorEpoch,
+        },
+        surfacePrincipal: ingress.surfacePrincipal,
+        requestId,
+        assets: input.attachments,
+        payloadDigest: envelope.payloadDigest,
+      });
+    }
     let admission: Awaited<ReturnType<ConversationRunJournal["applyInputControl"]>>;
     try {
       admission = await journal.applyInputControl(control);
@@ -1231,16 +1290,22 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Conversation input admission returned another control result");
     }
     let durableIngress = ingress;
+    let durableAttachments = [...(input.attachments ?? [])];
     const admittedRunId = admission.result.body.runId;
     if (admission.kind === "replayed") {
       const pending = (await journal.pendingInputs()).find(
         (candidate) => candidate.runId === admittedRunId,
       );
-      if (pending) durableIngress = pending.ingress;
+      if (pending) {
+        durableIngress = pending.ingress;
+        durableAttachments = [...pending.attachments];
+      }
     }
+    await this.#authority.surfaceAssets.markAdopted(durableAttachments);
     return {
       runId: admittedRunId,
       ingress: durableIngress,
+      attachments: durableAttachments,
       replayed: admission.kind === "replayed",
     };
   }
@@ -1855,6 +1920,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const generator = this.run({
         conversationId,
         input: pending.input,
+        attachments: pending.attachments,
         messages: [
           ...managed.window.getMessages(),
           userMessageFromTurnInput(pending.input),
@@ -1872,7 +1938,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         manager,
         conversationId,
         pending.input,
-        { ...options, turnIndex: managed.turnCount },
+        {
+          ...options,
+          attachments: pending.attachments,
+          turnIndex: managed.turnCount,
+        },
       );
       while (!(await generator.next()).done) {
         // Provisional observers do not survive restart. Durable final and delivery
@@ -1954,6 +2024,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Durable conversation lifecycle projection is not configured");
     }
     const projected = await journal.resumeLifecycleProjections(async (input) => {
+      if (input.mutation === "delete") {
+        await this.#authority.surfaceAssets.revokeConversation(
+          input.conversationId,
+        );
+      }
       await this.#projectLifecycle!(input);
     });
     const after = await journal.authorityState();

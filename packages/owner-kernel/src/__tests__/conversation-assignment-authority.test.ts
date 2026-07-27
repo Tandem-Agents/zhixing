@@ -125,6 +125,7 @@ function issueInput(
       ingressId: "turn-1",
       receivedAt: "2026-07-18T00:00:00.000Z",
     },
+    contentAssets: [],
     windowInput: { t: "full", windowEpoch: 4, messages: [] },
     policy: credentialPolicy,
   };

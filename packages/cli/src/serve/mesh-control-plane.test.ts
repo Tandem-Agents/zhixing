@@ -95,7 +95,7 @@ describe("production mesh control plane", () => {
     })).toBeNull();
   });
 
-  it("activates a newly paired executor without restarting the anchor process", async () => {
+  it("reconciles initial trust and activates a newly paired surface without restart", async () => {
     const [anchor, executor] = await Promise.all([
       createDevice("online-anchor"),
       createDevice("online-executor"),
@@ -120,11 +120,11 @@ describe("production mesh control plane", () => {
       services: new MeshServiceRegistry(),
       onTrustReconciled,
     });
-    const joinedTrust = trustRecord(anchor.identity, executor.identity);
+    const joinedTrust = trustRecord(anchor.identity, executor.identity, "surface");
     const executorControl = new ProductionMeshControlPlane({
       localIdentity: executor.key,
       trust: joinedTrust,
-      configuration: { enabledRoles: ["executor"] },
+      configuration: { enabledRoles: ["surface"] },
       endpoints: new MeshEndpointDirectory([{
         v: 1,
         deviceId: anchor.identity.deviceId,
@@ -150,8 +150,20 @@ describe("production mesh control plane", () => {
       executorControl.connections.has(anchor.identity.deviceId));
 
     expect(executorControl.connections.has(anchor.identity.deviceId)).toBe(true);
-    expect(onTrustReconciled).toHaveBeenCalledOnce();
-    expect(onTrustReconciled).toHaveBeenCalledWith(joinedTrust);
+    expect(onTrustReconciled).toHaveBeenCalledTimes(2);
+    expect(onTrustReconciled).toHaveBeenNthCalledWith(1, initialTrust);
+    expect(onTrustReconciled).toHaveBeenNthCalledWith(2, joinedTrust);
+
+    await anchorControl.reconcileTrust({
+      ...joinedTrust,
+      chainHead: { seq: 3, eventDigest: `sha256:${"3".repeat(64)}` },
+      members: joinedTrust.members.map((member) =>
+        member.device.deviceId === executor.identity.deviceId
+          ? { ...member, roles: [] }
+          : member),
+    });
+    await waitFor(() => !anchorControl.connections.has(executor.identity.deviceId));
+    expect(onTrustReconciled).toHaveBeenCalledTimes(3);
   });
 
   it("retries a durable endpoint update after a transient receiver failure", async () => {
@@ -284,7 +296,7 @@ describe("production mesh control plane", () => {
     ])).resolves.toBeUndefined();
   });
 
-  it("falls back from an unreachable direct endpoint to an authenticated blind relay", async () => {
+  it("lets a surface fall back from direct transport to an authenticated blind relay", async () => {
     const [anchor, executor] = await Promise.all([
       createDevice("relay-anchor"),
       createDevice("relay-executor"),
@@ -320,7 +332,7 @@ describe("production mesh control plane", () => {
       { kind: "rendezvous", bindingId: anchor.identity.deviceId },
       pairwiseSecret,
     );
-    const trust = trustRecord(anchor.identity, executor.identity);
+    const trust = trustRecord(anchor.identity, executor.identity, "surface");
     const unreachablePort = await freePort();
     const relayEndpoint = { host: "127.0.0.1", port: relayAddress.port };
     const connectionErrors: string[] = [];
@@ -343,7 +355,7 @@ describe("production mesh control plane", () => {
     const executorControl = new ProductionMeshControlPlane({
       localIdentity: executor.key,
       trust,
-      configuration: { enabledRoles: ["executor"] },
+      configuration: { enabledRoles: ["surface"] },
       endpoints: new MeshEndpointDirectory([{
         v: 1,
         deviceId: anchor.identity.deviceId,
@@ -397,6 +409,7 @@ async function createDevice(name: string) {
 function trustRecord(
   anchor: DeviceIdentity,
   executor: DeviceIdentity,
+  peerRole: "executor" | "surface" = "executor",
 ): HomeTrustRecord {
   return {
     v: 1,
@@ -407,7 +420,7 @@ function trustRecord(
     chainHead: { seq: 2, eventDigest: `sha256:${"1".repeat(64)}` },
     members: [
       { device: anchor, roles: ["anchor"], state: "active" },
-      { device: executor, roles: ["executor"], state: "active" },
+      { device: executor, roles: [peerRole], state: "active" },
     ],
     signature: { alg: "ed25519", keyId: anchor.deviceId, sig: "test" },
   };

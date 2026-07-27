@@ -13,6 +13,7 @@ import {
   runConfiguredServeTopology,
   type ServeRoleConfiguration,
 } from "./role-topology.js";
+import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -36,9 +37,13 @@ export async function runServeCommand(
     process.exit(startup.kind === "cancelled" ? 0 : 2);
     return;
   }
+  const deviceCapacity = createDeviceCapacityRuntime(
+    `${zhixingHome}/distributed-runtime/capacity`,
+  );
   const mesh = await prepareMeshRuntimeBootstrap({
     zhixingHome,
     secretStore,
+    storageMaintenance: deviceCapacity.storage,
     ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
   });
   await runConfiguredServeTopology(
@@ -49,7 +54,7 @@ export async function runServeCommand(
       executor: () => import("@zhixing/executor"),
     },
     options,
-    { mesh, secretStore, startup },
+    { mesh, deviceCapacity, secretStore, startup },
   );
 }
 

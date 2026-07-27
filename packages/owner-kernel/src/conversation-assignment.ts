@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import {
   AuthorityStorageError,
+  collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   resolveDispatchArtifactClosure,
   resolveSealedBundleArtifactClosure,
@@ -23,6 +24,7 @@ import type {
   ConversationRunState,
   ConversationStatusNotice,
   ConversationInvocation,
+  ContentAssetRef,
   DataPlaneTicket,
   ControlResult,
   ControlResultBody,
@@ -81,6 +83,7 @@ import {
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionMirrorBatch,
   validateConversationInvocation,
+  validateContentAssetRefs,
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
   validateDispatchResult,
@@ -448,6 +451,7 @@ export interface PendingConversationDispatch {
 export interface PendingConversationInput {
   readonly runId: string;
   readonly input: UserTurnInput;
+  readonly attachments: readonly ContentAssetRef[];
   readonly ingress: IngressContext;
   readonly invocation: ConversationInvocation;
   readonly queuedPosition: number;
@@ -994,6 +998,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly ingressKey: string;
     readonly runId: string;
     readonly userInput: UserTurnInput;
+    readonly attachments?: readonly ContentAssetRef[];
     readonly ingress: IngressContext;
     readonly invocation: ConversationInvocation;
     readonly queuedPosition: number;
@@ -1007,12 +1012,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const userInput = snapshot(input.userInput, "Run input");
     const ingress = validateIngressContext(input.ingress);
     const invocation = validateConversationInvocation(input.invocation);
+    const attachments = validateContentAssetRefs(input.attachments ?? [], {
+      allowEmpty: true,
+      label: "Run admission attachments",
+    });
     const prepared = await prepareStored(userInput, this.#artifacts);
     const admitted: Extract<ConversationRunJournalRecord, { t: "admitted" }> = {
       t: "admitted",
       ingressKey: input.ingressKey,
       runId: input.runId,
       input: prepared.stored,
+      ...(attachments.length > 0 ? { attachments } : {}),
       ingress,
       invocation,
       queuedPosition: input.queuedPosition,
@@ -1028,6 +1038,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ingressRun !== input.runId ||
             canonicalize(byRun.record.ingress) !== canonicalize(ingress) ||
             canonicalize(byRun.input) !== canonicalize(userInput) ||
+            canonicalize(byRun.record.attachments ?? []) !==
+              canonicalize(attachments) ||
             canonicalize(byRun.record.invocation) !== canonicalize(invocation) ||
             byRun.record.queuedPosition !== input.queuedPosition
           ) {
@@ -1052,7 +1064,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: undefined,
         };
       },
-      prepared.references,
+      collectArtifactRefs([prepared.references, attachments]),
     );
   }
 
@@ -1071,6 +1083,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     validateNonEmptyUserTurnInput(body.input);
     const userInput = snapshot(body.input, "Run input");
     const invocation = validateConversationInvocation(body.invocation);
+    const attachments = validateContentAssetRefs(body.attachments ?? [], {
+      allowEmpty: true,
+      label: "Control input attachments",
+    });
     const prepared = await prepareStored(userInput, this.#artifacts);
     return this.#delivery.coordinate(() => input.admission.applyAuthority<
       RunProjection,
@@ -1150,6 +1166,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             existingRunId !== input.runId ||
             !existing ||
             canonicalize(existing.input) !== canonicalize(userInput) ||
+            canonicalize(existing.record.attachments ?? []) !==
+              canonicalize(attachments) ||
             canonicalize(existing.record.ingress) !== canonicalize(ingress) ||
             canonicalize(existing.record.invocation) !== canonicalize(invocation)
           ) {
@@ -1194,6 +1212,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ingressKey,
           runId: input.runId,
           input: prepared.stored,
+          ...(attachments.length > 0 ? { attachments } : {}),
           ingress,
           invocation,
           queuedPosition,
@@ -1383,6 +1402,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return {
           runId,
           input: snapshot(admitted.input, "Pending conversation input"),
+          attachments: snapshot(
+            admitted.record.attachments ?? [],
+            "Pending conversation attachments",
+          ),
           ingress: snapshot(admitted.record.ingress, "Pending conversation ingress"),
           invocation: snapshot(
             admitted.record.invocation,

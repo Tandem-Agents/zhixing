@@ -18,6 +18,7 @@ import type {
   InteractionAnswerAuthority,
   ReservableResourceLease,
   RootResourceWorkload,
+  SurfaceAssetGrant,
 } from "./authorization.js";
 import type {
   GlobalStagedMutation,
@@ -73,6 +74,19 @@ export type ControlRecord =
       requestId: string;
       result: ControlResult | { ref: ArtifactRef };
       authorityRevision: number;
+    }
+  | {
+      t: "asset-grant-issued";
+      grant: SurfaceAssetGrant;
+    }
+  | {
+      t: "asset-grant-revoked";
+      grantId: string;
+      reason: "session-deleted" | "surface-revoked" | "superseded";
+    }
+  | {
+      t: "authority-time-frontier";
+      frontier: IsoTime;
     };
 
 export interface DispatchRejectionProof

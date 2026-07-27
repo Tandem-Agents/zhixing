@@ -42,6 +42,7 @@ export const MAX_INLINE_INTERACTION_DISPLAY_BYTES = 8 * 1024;
 export const MAX_INLINE_STREAM_ITEM_BYTES = 32 * 1024;
 export const MAX_LEDGER_EVIDENCE_PAGE_ENTRIES = 256;
 export const MAX_LEDGER_EVIDENCE_PAGE_BYTES = 512 * 1024;
+export const MAX_CONTROL_INPUT_ATTACHMENTS = 16;
 import type {
   ContentAssetRef,
   DeliveryFailure,
@@ -102,6 +103,7 @@ export type ControlRequest =
       conversationId: string;
       ingress: { ingressId: string; source: IngressContext["kind"] };
       input: UserTurnInput;
+      attachments?: ContentAssetRef[];
       invocation: ConversationInvocation;
       ownerEpoch: number;
     }
@@ -298,6 +300,7 @@ export interface ConversationDispatch {
   ownerEpoch: number;
   baseRevision: number;
   ingress: IngressContext;
+  contentAssets: ContentAssetRef[];
   windowInput: WindowInput;
   controlContext: Array<{ source: string; block: string }>;
 }

@@ -26,6 +26,7 @@ import type {
 import type { ChannelRegistry, Scheduler } from "@zhixing/core";
 import type { McpHub } from "@zhixing/mcp";
 import type { DeliveryStack } from "../setup-delivery.js";
+import type { StartupCleanupHandle } from "./startup-rollback.js";
 
 /**
  * 资源引用包。使用 `{ current: ... }` 结构给 heartbeat timer 这种"注册时未存在，
@@ -43,6 +44,12 @@ export interface ShutdownChainResources {
   deliveryStack?: DeliveryStack;
   /** MCP 连接层 hub —— 关闭所有 MCP server 连接 / stdio 子进程。 */
   mcpHub?: McpHub;
+  startupCleanups?: {
+    readonly scheduler?: StartupCleanupHandle;
+    readonly channels?: StartupCleanupHandle;
+    readonly deliveryStack?: StartupCleanupHandle;
+    readonly mcp?: StartupCleanupHandle;
+  };
   /** PID 锁路径。必须与 runServer 的 lockPaths 同一引用（见接口注释） */
   lockPaths?: ProcessLockPaths;
 }
@@ -114,12 +121,16 @@ export function registerCoreCleanup(
   });
   if (resources.deliveryStack) {
     registry.register("deliveryStack.stop", async () => {
-      await resources.deliveryStack!.stop();
+      const cleanup = resources.startupCleanups?.deliveryStack;
+      if (cleanup) await cleanup.run();
+      else await resources.deliveryStack!.stop();
     });
   }
   if (resources.channels) {
     registry.register("channels.dispose", async () => {
-      await resources.channels!.dispose();
+      const cleanup = resources.startupCleanups?.channels;
+      if (cleanup) await cleanup.run();
+      else await resources.channels!.dispose();
     });
   }
   if (resources.mcpHub) {
@@ -127,12 +138,16 @@ export function registerCoreCleanup(
     // 新 turn）→ 关 MCP 连接 / 子进程。in-flight turn 已由 graceful shutdown 等待
     // 完成，此刻关 hub 不会切断进行中的 MCP 调用。
     registry.register("mcpHub.dispose", async () => {
-      await resources.mcpHub!.dispose();
+      const cleanup = resources.startupCleanups?.mcp;
+      if (cleanup) await cleanup.run();
+      else await resources.mcpHub!.dispose();
     });
   }
   if (resources.scheduler) {
     registry.register("scheduler.stop", async () => {
-      await resources.scheduler!.stop();
+      const cleanup = resources.startupCleanups?.scheduler;
+      if (cleanup) await cleanup.run();
+      else await resources.scheduler!.stop();
     });
   }
   if (resources.stateFile) {

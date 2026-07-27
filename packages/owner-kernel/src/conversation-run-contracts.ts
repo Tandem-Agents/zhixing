@@ -6,6 +6,7 @@ import type {
   ConversationInvocation,
   ConversationUncertainClosure,
   ConversationRunState,
+  ContentAssetRef,
   DataPlaneTicket,
   Digest,
   DispatchConflictProof,
@@ -32,6 +33,7 @@ import {
   validateCancelProof,
   validateConversationInteractionMirrorBatch,
   validateConversationInvocation,
+  validateContentAssetRefs,
   validateDataPlaneTicket,
   validateDispatchConflictProof,
   validateIngressContext,
@@ -55,6 +57,7 @@ export type ConversationRunJournalRecord =
       readonly ingressKey: string;
       readonly runId: string;
       readonly input: Stored<UserTurnInput>;
+      readonly attachments?: ContentAssetRef[];
       readonly ingress: IngressContext;
       readonly invocation: ConversationInvocation;
       readonly queuedPosition: number;
@@ -216,6 +219,7 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
       "runId",
       "t",
     ],
+    optional: ["attachments"],
   },
   assigned: {
     required: [
@@ -341,6 +345,11 @@ export function validateConversationRunRecord(
           assertArtifactReference(value.input.ref, "Admitted input reference");
         } else {
           validateNonEmptyUserTurnInput(value.input as UserTurnInput);
+        }
+        if (value.attachments !== undefined) {
+          validateContentAssetRefs(value.attachments, {
+            label: "Admitted attachments",
+          });
         }
         break;
       }

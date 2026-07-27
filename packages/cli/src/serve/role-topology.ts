@@ -1,6 +1,7 @@
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
 import type { StartupCheckResult } from "../startup.js";
+import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type {
   ConversationAssignmentLedger,
@@ -44,6 +45,7 @@ export interface ExecutorRoleModule {
 
 export interface ServeBootstrapContext {
   readonly mesh: MeshRuntimeBootstrap;
+  readonly deviceCapacity: DeviceCapacityRuntime;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
   readonly startup: Extract<StartupCheckResult, { readonly kind: "ready" }>;
 }

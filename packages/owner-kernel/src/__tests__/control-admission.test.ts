@@ -1,13 +1,22 @@
+import { Buffer } from "node:buffer";
 import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
+import { DeliveryAuthority } from "@zhixing/core/delivery";
 import type {
+  ContentAssetRef,
   ConversationInvocation,
   ControlRecord,
   ControlResult,
+  Signature,
 } from "@zhixing/core/contracts";
+import {
+  protocolDigest,
+  type ProtocolSignatureVerifier,
+  type ProtocolSigner,
+} from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -17,8 +26,26 @@ import {
   createInitialControlEnvelope,
   type TrustedControlSource,
 } from "../control-admission.js";
+import { ConversationRunJournal } from "../conversation-assignment.js";
+import { OwnerDeliveryParticipant } from "../delivery.js";
 
 const NOW = "2026-07-13T08:00:00.000Z";
+
+const signer: ProtocolSigner = {
+  sign(schemaId, version, payload): Signature {
+    return {
+      alg: "test-sha256",
+      keyId: "device:test-owner",
+      sig: protocolDigest(schemaId, version, payload),
+    };
+  },
+};
+
+const verifier: ProtocolSignatureVerifier = {
+  verify(schemaId, version, payload, signature) {
+    expect(signature).toEqual(signer.sign(schemaId, version, payload));
+  },
+};
 
 async function createHarness() {
   const root = await createTempDir("control-admission");
@@ -114,6 +141,7 @@ function inputEnvelope(
   source: TrustedControlSource,
   text = "hello",
   invocation: ConversationInvocation = { kind: "agent", source: "interactive" },
+  attachments: readonly ContentAssetRef[] = [],
 ) {
   if (!source.ingress) throw new Error("input source requires ingress");
   return createInitialControlEnvelope({
@@ -128,6 +156,7 @@ function inputEnvelope(
         source: source.ingress.kind,
       },
       input: { parts: [{ type: "text", text }] },
+      ...(attachments.length > 0 ? { attachments: [...attachments] } : {}),
       invocation,
       ownerEpoch: 1,
     },
@@ -151,6 +180,48 @@ function inputResult(runId: string, queuedPosition = 0): ControlResult {
 }
 
 describe("ControlAdmissionJournal", () => {
+  it("distinguishes absent, durable pending and settled admission states", async () => {
+    const { log, journal } = await createHarness();
+    const source = sessionSource();
+    const envelope = sessionEnvelope("request-admission-state", source);
+    await expect(journal.lookup({ envelope, source })).resolves.toEqual({
+      kind: "absent",
+    });
+    await log.append<ControlRecord>([
+      {
+        stream: "control",
+        body: {
+          t: "received",
+          requestId: envelope.requestId,
+          envelope,
+        },
+      },
+    ]);
+    await expect(journal.lookup({ envelope, source })).resolves.toEqual({
+      kind: "received-pending",
+      canonicalRequestId: envelope.requestId,
+    });
+    await log.append<ControlRecord>([
+      {
+        stream: "control",
+        body: {
+          t: "applied",
+          requestId: envelope.requestId,
+          result: sessionResult("conversation-state"),
+          authorityRevision: 1,
+        },
+      },
+    ]);
+    await expect(journal.lookup({ envelope, source })).resolves.toMatchObject({
+      kind: "settled",
+      outcome: {
+        kind: "replayed",
+        canonicalRequestId: envelope.requestId,
+        result: sessionResult("conversation-state"),
+      },
+    });
+  });
+
   it.each(["missed", "committed"])(
     "rejects %s as a replayed uncertain-resolution control result",
     async (state) => {
@@ -662,6 +733,227 @@ describe("ControlAdmissionJournal", () => {
       authorityRevision: 5,
     });
     expect(await log.readAll()).toHaveLength(2);
+  });
+
+  it("retains attachments from a received-only external envelope until recovery applies it", async () => {
+    const { artifacts, log, journal } = await createHarness();
+    const stored = await artifacts.put(
+      Buffer.from("received-only external attachment"),
+    );
+    const attachment: ContentAssetRef = { ...stored, kind: "file" };
+    const source = inputSource("large-pending-input");
+    const envelope = inputEnvelope(
+      "request-large-pending",
+      source,
+      "x".repeat(40 * 1024),
+      { kind: "agent", source: "interactive" },
+      [attachment],
+    );
+
+    await expect(
+      journal.apply({
+        envelope,
+        source,
+        prepare: () => {
+          throw new Error("crash after external receipt");
+        },
+      }),
+    ).rejects.toThrow("crash after external receipt");
+    const records = await log.readStream<ControlRecord>("control");
+    expect(records).toHaveLength(1);
+    expect(records[0]!.body).toMatchObject({
+      t: "received",
+      envelope: { ref: { digest: expect.stringMatching(/^sha256:/u) } },
+    });
+    await expect(
+      artifacts.deleteIfUnreferencedBatch([stored], async (candidates) => ({
+        status: "current",
+        retained: await log.retainedArtifactReferences(candidates),
+      })),
+    ).resolves.toEqual([{ ref: stored, disposition: "retained" }]);
+
+    const prepare = vi.fn(() => ({
+      result: inputResult("run-large-pending"),
+      authorityRevision: 9,
+      authorityEntries: [
+        {
+          stream: "run:conversation-1",
+          body: {
+            t: "shadow-admitted",
+            runId: "run-large-pending",
+            attachments: [attachment],
+          },
+        },
+      ],
+    }));
+    const restarted = new ControlAdmissionJournal(
+      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+      artifacts,
+    );
+    await expect(
+      restarted.apply({ envelope, source, prepare }),
+    ).resolves.toMatchObject({
+      kind: "applied",
+      result: inputResult("run-large-pending"),
+    });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(
+      (await log.readStream<ControlRecord>("control")).map(
+        (entry) => entry.body.t,
+      ),
+    ).toEqual(["received", "applied"]);
+  });
+
+  it("admits input attachments only after every referenced asset is present", async () => {
+    const { artifacts, log, journal } = await createHarness();
+    const bytes = Buffer.from("surface attachment");
+    const stored = await artifacts.put(bytes);
+    const attachment: ContentAssetRef = { ...stored, kind: "file" };
+    const source = inputSource("attachment-ingress");
+    const envelope = inputEnvelope(
+      "request-attachment",
+      source,
+      "inspect the attachment",
+      { kind: "agent", source: "interactive" },
+      [attachment],
+    );
+
+    await expect(
+      journal.apply({
+        envelope,
+        source,
+        prepare: () => ({
+          result: inputResult("run-attachment"),
+          authorityRevision: 7,
+        }),
+      }),
+    ).resolves.toMatchObject({
+      kind: "applied",
+      result: inputResult("run-attachment"),
+    });
+    expect(await log.readAll()).toHaveLength(2);
+
+    const missing = {
+      digest: `sha256:${"f".repeat(64)}`,
+      bytes: 8,
+      kind: "file",
+    } as const;
+    await expect(
+      journal.apply({
+        envelope: inputEnvelope(
+          "request-missing-attachment",
+          inputSource("missing-attachment-ingress"),
+          "missing",
+          { kind: "agent", source: "interactive" },
+          [missing],
+        ),
+        source: inputSource("missing-attachment-ingress"),
+        prepare: () => ({
+          result: inputResult("run-missing"),
+          authorityRevision: 8,
+        }),
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("protects attachments admitted through the public run journal", async () => {
+    const { artifacts, log } = await createHarness();
+    const journal = new ConversationRunJournal({
+      conversationId: "conversation-1",
+      ownerEpoch: 1,
+      log,
+      artifacts,
+      signer,
+      verifier,
+      submission: {
+        authenticate() {},
+        authorize() {},
+      },
+      authority: {
+        decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
+      },
+      projection: { async project() {} },
+      delivery: new OwnerDeliveryParticipant({
+        authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
+      }),
+      clock: () => NOW,
+    });
+    const stored = await artifacts.put(Buffer.from("public attachment"));
+    const attachment: ContentAssetRef = { ...stored, kind: "file" };
+    const source = inputSource("public-attachment-ingress");
+    if (!source.ingress) throw new Error("Expected first-party ingress");
+
+    await expect(
+      journal.admit({
+        ingressKey: "surface:user-1/public-attachment-ingress",
+        runId: "run-public-attachment",
+        userInput: { parts: [{ type: "text", text: "inspect" }] },
+        attachments: [attachment],
+        ingress: source.ingress,
+        invocation: { kind: "agent", source: "interactive" },
+        queuedPosition: 0,
+      }),
+    ).resolves.toBeUndefined();
+    expect(await log.readStream("run:conversation-1")).toHaveLength(2);
+
+    const missingSource = inputSource("public-missing-ingress");
+    if (!missingSource.ingress) throw new Error("Expected first-party ingress");
+    await expect(
+      journal.admit({
+        ingressKey: "surface:user-1/public-missing-ingress",
+        runId: "run-public-missing",
+        userInput: { parts: [{ type: "text", text: "inspect" }] },
+        attachments: [
+          {
+            digest: `sha256:${"e".repeat(64)}`,
+            bytes: 8,
+            kind: "file",
+          },
+        ],
+        ingress: missingSource.ingress,
+        invocation: { kind: "agent", source: "interactive" },
+        queuedPosition: 1,
+      }),
+    ).rejects.toThrow();
+    expect(await log.readStream("run:conversation-1")).toHaveLength(2);
+  });
+
+  it("rejects dependencies outside the exact control root closure", async () => {
+    const { artifacts, journal } = await createHarness();
+    const attachmentBytes = Buffer.from("surface attachment");
+    const stored = await artifacts.put(attachmentBytes);
+    const dependency = await artifacts.put(Buffer.from("unrelated dependency"));
+    const attachment: ContentAssetRef = { ...stored, kind: "file" };
+    const source = inputSource("extra-dependency-ingress");
+    const base = inputEnvelope(
+      "request-extra-dependency",
+      source,
+      "inspect the attachment",
+      { kind: "agent", source: "interactive" },
+      [attachment],
+    );
+    const envelope = {
+      ...base,
+      dependencyArtifacts: [dependency],
+      payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
+        body: base.body,
+        dependencyArtifacts: [dependency],
+      }),
+    };
+
+    await expect(
+      journal.apply({
+        envelope,
+        source,
+        prepare: () => ({
+          result: inputResult("run-extra-dependency"),
+          authorityRevision: 9,
+        }),
+      }),
+    ).rejects.toThrow("exact root closure");
   });
 
   it("rejects caller-reported identity and enforces channel principal derivation", async () => {

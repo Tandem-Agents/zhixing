@@ -26,6 +26,7 @@ function allSurfaces(calls: string[]): AccessSurface[] {
   return [
     mockSurface("mcp", "pre-server", calls),
     mockSurface("authority-runtime", "pre-server", calls),
+    mockSurface("asset-maintenance", "pre-server", calls),
     mockSurface("conversation", "pre-server", calls),
     mockSurface("mesh-control", "pre-server", calls),
     mockSurface("channel", "pre-server", calls),
@@ -49,6 +50,7 @@ describe("access-surface 数据驱动装配", () => {
     expect(calls).toEqual([
       "mcp",
       "authority-runtime",
+      "asset-maintenance",
       "conversation",
       "mesh-control",
       "channel",
@@ -60,6 +62,7 @@ describe("access-surface 数据驱动装配", () => {
     expect(calls).toEqual([
       "mcp",
       "authority-runtime",
+      "asset-maintenance",
       "conversation",
       "mesh-control",
       "channel",

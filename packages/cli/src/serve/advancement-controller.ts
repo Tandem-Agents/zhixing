@@ -29,6 +29,7 @@ import {
 import {
   createLightCallLLM,
   createMainCallLLM,
+  type AgentRuntimeCapacityBinding,
 } from "@zhixing/orchestrator/runtime";
 import { PROTOCOL_BUDGET_DEFAULTS } from "@zhixing/providers";
 import {
@@ -46,6 +47,7 @@ export interface ServeAdvancementControllerDeps {
    * 缺失即 fail-closed，不允许静默绕过治理）。
    */
   readonly governor: () => ControlLlmGovernor | undefined;
+  readonly deviceCapacity?: AgentRuntimeCapacityBinding;
   /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */
   readonly recentContextProvider?: (
     conversationId: string,
@@ -119,6 +121,8 @@ export async function createServeAdvancementController(
     roles.light,
     config.llm?.light?.thinking,
   );
+  // 推进的两个单发调用是纯 LLM 网络往返,按容量合同不占 permit:等待响应期间
+  // 持有设备槽位会挡住真正要用本机资源的工作,而自己什么也没在算。
   const mainCall = createMainCallLLM(roles, mainThinking);
   const lightCall = createLightCallLLM(roles, lightThinking);
   const workspace = resolveWorkspace(config, {
@@ -172,6 +176,9 @@ export async function createServeAdvancementController(
       provider: roles.main.provider,
       model: roles.main.model,
       thinking: mainThinking,
+      ...(deps.deviceCapacity
+        ? { deviceCapacity: deps.deviceCapacity }
+        : {}),
       workingDirectory: workspacePath,
       ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
       ...(workspacePath

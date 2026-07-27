@@ -6,7 +6,10 @@ import type { ArtifactRef, TranscriptRunRecord } from "../contracts/index.js";
 import {
   canonicalize,
   createConversationSealedBundle,
+  createJobCommitFence,
+  createJobSealedBundle,
   createMutationBatch,
+  jobDeliveryPlanDigest,
   protocolDigest,
 } from "../protocol/index.js";
 import { FileArtifactStore } from "./artifact-store.js";
@@ -92,6 +95,46 @@ describe("assignment artifact closure", () => {
       dependencies: [],
       transfer: [fixture.runRecordRef, fixture.nestedRef].sort((left, right) =>
         left.digest.localeCompare(right.digest)),
+    });
+  });
+
+  it("resolves job bundles through the shared discriminated-union validator", async () => {
+    const artifacts = new FileArtifactStore(
+      path.join(await temporaryRoot(), "job-artifacts"),
+    );
+    const content = await artifacts.put(Buffer.from("job content"));
+    const bundle = createJobSealedBundle({
+      assignmentId: "assignment-job",
+      executorId: "executor-job",
+      streamFinal: { finalSeq: 1, streamDigest: DIGEST },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: DIGEST, upToUsageSeq: 0 },
+      dependencyArtifacts: [],
+      body: {
+        t: "job",
+        taskId: "task-job",
+        jobRunId: "job-run-1",
+        fence: createJobCommitFence({
+          taskId: "task-job",
+          jobRunId: "job-run-1",
+          scheduledFor: "2026-07-21T00:00:00.000Z",
+          taskRevision: 1,
+          deliveryPlanDigest: jobDeliveryPlanDigest({ kind: "none" }),
+          anchorEpoch: 1,
+          assignmentId: "assignment-job",
+          executorId: "executor-job",
+        }),
+        outcome: { status: "completed", summary: "done" },
+        contentAssets: [{ ...content, kind: "file" }],
+      },
+    });
+
+    await expect(
+      resolveSealedBundleArtifactClosure(bundle, artifacts),
+    ).resolves.toEqual({
+      roots: [content],
+      dependencies: [],
+      transfer: [content],
     });
   });
 

@@ -98,7 +98,7 @@ describe("delivery content compiler", () => {
     await expect(store.has(orphan)).resolves.toBe(false);
   }, 15_000);
 
-  it("fails GC closed when a registered delivery content root is not valid content", async () => {
+  it("rejects a registered delivery content root that is not valid content", async () => {
     const root = await createTempDir("delivery-content-gc-invalid");
     const store = new FileArtifactStore(path.join(root, "artifacts"));
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), store, {
@@ -107,14 +107,13 @@ describe("delivery content compiler", () => {
     const invalid = await store.put(
       Buffer.from(canonicalize({ arbitrary: "payload" }), "utf8"),
     );
-    await appendDelivery(log, { ref: invalid }, [invalid]);
-
     await expect(
-      log.collectGarbage({ unreferencedBefore: "2099-01-01T00:00:00.000Z" }),
+      appendDelivery(log, { ref: invalid }, [invalid]),
     ).rejects.toMatchObject({ code: "invalid-authority-record" });
+    await expect(log.readAll()).resolves.toEqual([]);
   }, 15_000);
 
-  it("fails GC closed when a registered delivery root has an overlong identity", async () => {
+  it("rejects a registered delivery root with an overlong identity", async () => {
     const root = await createTempDir("delivery-content-gc-identity");
     const store = new FileArtifactStore(path.join(root, "artifacts"));
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), store, {
@@ -123,16 +122,15 @@ describe("delivery content compiler", () => {
     const content = await store.put(
       Buffer.from(canonicalize({ text: "retained" }), "utf8"),
     );
-    await appendDelivery(
-      log,
-      { ref: content },
-      [content],
-      "i".repeat(MAX_PROTOCOL_IDENTIFIER_LENGTH + 1),
-    );
-
     await expect(
-      log.collectGarbage({ unreferencedBefore: "2099-01-01T00:00:00.000Z" }),
+      appendDelivery(
+        log,
+        { ref: content },
+        [content],
+        "i".repeat(MAX_PROTOCOL_IDENTIFIER_LENGTH + 1),
+      ),
     ).rejects.toMatchObject({ code: "invalid-authority-record" });
+    await expect(log.readAll()).resolves.toEqual([]);
   }, 15_000);
 });
 

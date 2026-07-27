@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Digest } from "../types/distributed.js";
 
+export interface ByteDigestAccumulator {
+  update(bytes: Uint8Array): void;
+  digest(): Digest;
+}
+
 export function canonicalize(value: unknown): string {
   return serialize(value);
 }
@@ -34,7 +39,29 @@ export function protocolDigest(
 }
 
 export function byteDigest(bytes: Uint8Array): Digest {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  const accumulator = createByteDigestAccumulator();
+  accumulator.update(bytes);
+  return accumulator.digest();
+}
+
+export function createByteDigestAccumulator(): ByteDigestAccumulator {
+  const hash = createHash("sha256");
+  let finalized = false;
+  return {
+    update(bytes) {
+      if (finalized) {
+        throw new Error("Byte digest accumulator is already finalized");
+      }
+      hash.update(bytes);
+    },
+    digest() {
+      if (finalized) {
+        throw new Error("Byte digest accumulator is already finalized");
+      }
+      finalized = true;
+      return `sha256:${hash.digest("hex")}`;
+    },
+  };
 }
 
 function assertSchema(schemaId: string, version: number): void {

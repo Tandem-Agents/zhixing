@@ -28,6 +28,7 @@ import type { RunTurnOptions, SessionRuntime } from "./types.js";
 import type {
   ConversationInvocation,
   ConversationRunState,
+  ContentAssetRef,
   SessionControlMutation,
 } from "@zhixing/core/contracts";
 
@@ -56,6 +57,7 @@ export interface RunTurnHooks {
 export interface DurableConversationTurnInput {
   readonly conversationId: string;
   readonly input: UserTurnInputLike;
+  readonly attachments?: readonly ContentAssetRef[];
   readonly messages: readonly Message[];
   readonly baseRevision: number;
   readonly runtime: SessionRuntime;
@@ -68,6 +70,7 @@ export interface DurableConversationTurnInput {
 export interface DurableConversationAdmissionInput {
   readonly conversationId: string;
   readonly input: UserTurnInputLike;
+  readonly attachments?: readonly ContentAssetRef[];
   readonly invocation: ConversationInvocation;
   readonly options?: RunTurnOptions;
   /** Stable authenticated surface identity when transport routing identity is ephemeral. */
@@ -265,6 +268,7 @@ export async function* runTurnWithCommit(
     return yield* durable.run({
       conversationId,
       input,
+      ...(options?.attachments ? { attachments: options.attachments } : {}),
       messages,
       baseRevision: session.turnCount,
       runtime: session.runtime,

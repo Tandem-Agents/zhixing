@@ -414,7 +414,7 @@ export class ConversationAssignmentWorker {
     const bundle = await this.options.ledger.sealConversationBundle(assignmentId, {
       runRecord,
       ...(result.windowCompact ? { windowCompact: result.windowCompact } : {}),
-      contentAssets: [],
+      contentAssets: [...envelope.work.contentAssets],
       streamFinal,
       usage: {
         inputTokens: result.agentResult.usage.inputTokens,

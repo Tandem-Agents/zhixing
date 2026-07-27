@@ -1,25 +1,23 @@
 import { Buffer } from "node:buffer";
-import {
-  mkdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { canonicalize, protocolDigest } from "../../protocol/index.js";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import {
   AUTHORITY_WAL_FILE_HEADER_BYTES,
-  type AuthorityWalReader,
-  encodeAuthorityWalFileHeader,
-  encodeAuthorityWalFrame,
-  scanAuthorityWalFrames,
+  decodeAuthorityWalFileHeader,
 } from "../wal-frame.js";
 
+/**
+ * 帧格式 × 读取入口的往返矩阵。
+ *
+ * 引入第二种帧布局后,写侧按格式分支写了两种 trailer,而读侧的精确定位入口只
+ * 实现了其中一种,legacy 日志上按 checkpoint 回读必然把 payload 中段当 trailer。
+ * 这里对两种格式各跑一遍"写入 → 按自身 checkpoint 回读",把该类缺口钉在最小
+ * 可复现的层面上。
+ */
 async function newLog(root: string): Promise<FileAuthorityCommitLog> {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   return new FileAuthorityCommitLog(path.join(root, "authority-log"), artifacts, {
@@ -27,116 +25,67 @@ async function newLog(root: string): Promise<FileAuthorityCommitLog> {
   });
 }
 
-describe("authority WAL compatibility bridge", () => {
-  it("keeps new logs on legacy frames with a stable sidecar identity", async () => {
-    const root = await createTempDir("wal-bridge-legacy");
+describe("authority WAL format roundtrip", () => {
+  it("reads back an envelope at its own checkpoint on a freshly created log", async () => {
+    const root = await createTempDir("wal-roundtrip-versioned");
     const log = await newLog(root);
-    await log.append([{ stream: "control", body: { t: "legacy-one" } }]);
-    const firstBytes = await readFile(log.logPath);
-    const firstIdentity = await readFile(log.identityPath);
+    await log.append([{ stream: "control", body: { t: "probe", value: 1 } }]);
+    const checkpoint = await log.checkpoint();
 
-    expect(firstBytes.readUInt16BE(4)).toBe(1);
-    expect(firstIdentity).toHaveLength(AUTHORITY_WAL_FILE_HEADER_BYTES);
-
-    const reopened = await newLog(root);
-    await expect(reopened.readAll()).resolves.toHaveLength(1);
-    await reopened.append([
-      { stream: "control", body: { t: "legacy-two" } },
-    ]);
-    expect(await readFile(log.identityPath)).toEqual(firstIdentity);
-
-    const metadata: unknown[] = [];
-    const scanned = await scanAuthorityWalFrames(
-      bufferReader(await readFile(log.logPath)),
-      (_payload, _offset, frameMetadata) => {
-        metadata.push(frameMetadata);
-      },
-    );
-    expect(scanned.frameCount).toBe(2);
-    expect(metadata).toEqual([undefined, undefined]);
+    const envelope = await log.readEnvelopeAt(checkpoint);
+    expect(envelope.entries.length).toBe(1);
+    expect(envelope.lsn).toBe(checkpoint.lsn);
   });
 
-  it("dual-reads and continues an already-versioned WAL", async () => {
-    const root = await createTempDir("wal-bridge-versioned");
-    const logRoot = path.join(root, "authority-log");
-    await mkdir(logRoot, { recursive: true });
-    const logIdBytes = Buffer.alloc(32, 0x17);
-    const logId = logIdBytes.toString("base64url");
-    const entries = [{ stream: "control", body: { t: "versioned-one" } }];
-    const payload = {
-      v: 1 as const,
-      lsn: 1,
-      at: "2026-07-24T00:00:00.000Z",
-      entries,
-    };
-    const envelope = {
-      ...payload,
-      envelopeDigest: protocolDigest("CommitEnvelope", 1, payload),
-    };
-    const prefixDigest = protocolDigest("AuthorityLogPrefix", 1, {
-      logId,
-      previousDigest: protocolDigest("AuthorityLogPrefix", 1, { logId }),
-      lsn: 1,
-      envelopeDigest: envelope.envelopeDigest,
-    });
-    const logPath = path.join(logRoot, "authority.log");
-    await writeFile(
-      logPath,
-      Buffer.concat([
-        encodeAuthorityWalFileHeader(logIdBytes),
-        encodeAuthorityWalFrame(
-          Buffer.from(canonicalize(envelope), "utf8"),
-          { lsn: 1, prefixDigest },
-        ),
-      ]),
-    );
+  it("reads back an envelope at its own checkpoint on a pre-existing legacy log", async () => {
+    const root = await createTempDir("wal-roundtrip-legacy");
+    // 旧版本创建的日志没有文件头:直接落一个空文件即可让实现判定为 legacy。
+    const logPath = path.join(root, "authority-log", "authority.log");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    await (await open(path.join(root, "authority-log"), "r").catch(() => null))
+      ?.close();
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(path.dirname(logPath), { recursive: true });
+    const handle = await open(logPath, "wx", 0o600);
+    await handle.close();
 
-    const log = await newLog(root);
-    await expect(log.readAll()).resolves.toEqual([envelope]);
-    await log.append([
-      { stream: "control", body: { t: "versioned-two" } },
-    ]);
-
-    const metadata: unknown[] = [];
-    const bytes = await readFile(logPath);
-    const scanned = await scanAuthorityWalFrames(
-      bufferReader(bytes.subarray(AUTHORITY_WAL_FILE_HEADER_BYTES)),
-      (_payload, _offset, frameMetadata) => {
-        metadata.push(frameMetadata);
-      },
+    const log = new FileAuthorityCommitLog(
+      path.join(root, "authority-log"),
+      artifacts,
+      { clock: () => "2026-07-24T00:00:00.000Z" },
     );
-    expect(scanned.frameCount).toBe(2);
-    expect(metadata).toMatchObject([
-      { lsn: 1, prefixDigest },
-      { lsn: 2 },
-    ]);
+    await log.append([{ stream: "control", body: { t: "probe", value: 2 } }]);
+    const checkpoint = await log.checkpoint();
+
+    // legacy 帧没有帧级 lsn 与前缀摘要,回读只能靠信封自身身份收敛,但必须成立。
+    const envelope = await log.readEnvelopeAt(checkpoint);
+    expect(envelope.entries.length).toBe(1);
+    expect(envelope.lsn).toBe(checkpoint.lsn);
   });
 
-  it("fails closed when a legacy WAL and its sidecar identity diverge", async () => {
-    const root = await createTempDir("wal-bridge-corrupt-identity");
-    const log = await newLog(root);
-    await log.append([{ stream: "control", body: { t: "stable" } }]);
-    await writeFile(log.identityPath, Buffer.from("corrupt"));
-    await expect((await newLog(root)).readAll()).rejects.toMatchObject({
-      code: "commit-log-corrupt",
-    });
+  it("keeps a pre-existing legacy log in its original format", async () => {
+    const root = await createTempDir("wal-roundtrip-no-migration");
+    const logPath = path.join(root, "authority-log", "authority.log");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(path.dirname(logPath), { recursive: true });
+    const created = await open(logPath, "wx", 0o600);
+    await created.close();
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(
+      path.join(root, "authority-log"),
+      artifacts,
+      { clock: () => "2026-07-24T00:00:00.000Z" },
+    );
+    await log.append([{ stream: "control", body: { t: "probe", value: 3 } }]);
 
-    const missingRoot = await createTempDir("wal-bridge-missing-log");
-    const missing = await newLog(missingRoot);
-    await missing.append([{ stream: "control", body: { t: "stable" } }]);
-    expect((await stat(missing.identityPath)).isFile()).toBe(true);
-    await rm(missing.logPath);
-    await expect((await newLog(missingRoot)).readAll()).rejects.toMatchObject({
-      code: "commit-log-corrupt",
-    });
+    // 不主动迁移:旧二进制必须能继续读它自己创建的日志,因此开头不得出现文件头。
+    const reader = await open(logPath, "r");
+    try {
+      const head = Buffer.alloc(AUTHORITY_WAL_FILE_HEADER_BYTES);
+      await reader.read(head, 0, head.byteLength, 0);
+      expect(() => decodeAuthorityWalFileHeader(head)).toThrow();
+    } finally {
+      await reader.close();
+    }
   });
 });
-
-function bufferReader(bytes: Buffer): AuthorityWalReader {
-  return {
-    size: bytes.byteLength,
-    async read(offset, length) {
-      return bytes.subarray(offset, offset + length);
-    },
-  };
-}

@@ -13,15 +13,12 @@
  * - post-server：runServer 之后装（confirmationBridge，依赖 server.connections）。
  * 核心 Scheduler 排在 pre-server 接入面之后构造（读 ctx.deliveryStack）。
  *
- * teardown 不进本单元体系——它已由 shutdown-chain.ts 数据驱动管理（registerCoreCleanup
- * 接收资源包、LIFO 精心排序），且接入面 teardown 有时序硬约束：必须在 server.close 之前
- * 执行（= runServer 之后注册），而 pre-server 接入面 setup 在 runServer 之前，若在 setup
- * 内注册 teardown 会落到 LIFO 末尾、跑在 server.close 之后造成双重 dispose。故 pre-server
- * 接入面只 setup（产物写回 ctx，供 runServer 后的 shutdown-chain 用 ctx 产物注册清理）；
- * 仅 post-server 接入面（本就在 runServer 后）可在 setup 内自注册 teardown 到 ctx.cleanup。
+ * pre-server 资源取得后立即进入启动回滚事务；runServer 成功后再把同一幂等清理 handle
+ * 按既有 LIFO 时序登记到正常停机链。启动补偿与正常停机各自决定顺序，但不会双重释放。
  */
 
 import { PROFILES, type ServerProfile } from "./profile.js";
+import type { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import type { ZhixingConfig } from "@zhixing/providers";
 import type {
   ChannelRegistry,
@@ -31,6 +28,7 @@ import type {
   SnapshotStore,
 } from "@zhixing/core";
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
   ConversationDirectory,
   InboundRouter,
@@ -63,9 +61,22 @@ import type { ConversationProtocolRuntime } from "./conversation-protocol-runtim
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
+import type {
+  StartupCleanupHandle,
+  StartupRollback,
+} from "./startup-rollback.js";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
+
+export interface AssemblyStartupCleanups {
+  mcp?: StartupCleanupHandle;
+  assetMaintenance?: StartupCleanupHandle;
+  meshRuntime?: StartupCleanupHandle;
+  channels?: StartupCleanupHandle;
+  deliveryStack?: StartupCleanupHandle;
+  textRenderer?: StartupCleanupHandle;
+}
 
 /**
  * 装配期共享上下文 —— 接入面 setup 从这里读依赖、把产物写回，后续接入面 / 核心再读。
@@ -83,6 +94,7 @@ export interface AssemblyContext {
   readonly secretStore: SecretStorePort;
   readonly durableInteractions: DurableConversationInteractionObserver;
   readonly perspectives: PerspectivesController;
+  readonly storageMaintenance: StorageMaintenanceGovernorPort;
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;
@@ -120,6 +132,8 @@ export interface AssemblyContext {
    * 注册（时序约束见文件头）；仅 post-server 接入面在自己 setup 内注册到这里。
    */
   readonly cleanup: CleanupRegistry;
+  readonly startupRollback: StartupRollback;
+  readonly startupCleanups: AssemblyStartupCleanups;
 
   // ── 接入面产物（surface.setup 写回） ──
   conversations?: ConversationManager;
@@ -129,6 +143,7 @@ export interface AssemblyContext {
   authorityRuntime?: AuthorityRuntimeStack;
   meshBootstrap: MeshRuntimeBootstrap;
   meshRuntime?: MeshRuntimeAssembly;
+  assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
   deliveryStack?: DeliveryStack;
   textRenderer?: TextConfirmationRenderer;
@@ -140,7 +155,7 @@ export interface AssemblyContext {
 /**
  * 接入面单元 —— 把"某个接入面的装配"封成自包含单元：条件（如 channel 判 messaging 配置）、
  * 失败处理、对 ctx 的依赖读取与产物写回，全内聚在 setup 内；主干不再有它的 if。
- * teardown 见文件头说明（pre-server 走 shutdown-chain，post-server 在 setup 内自注册）。
+ * teardown 见文件头说明。
  */
 export interface AccessSurface {
   readonly name: string;

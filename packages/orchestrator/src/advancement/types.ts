@@ -15,6 +15,7 @@ import type {
   ThinkingConfig,
   UserTurnInput,
 } from "@zhixing/core";
+import type { AgentRuntimeCapacityBinding } from "../runtime/governed-agent-runtime.js";
 
 /**
  * 一次验收的结果——结论与挂起是两种语义，不用异常做控制流：
@@ -55,6 +56,7 @@ export interface AdvancementRuntimeOptions {
   readonly workingDirectory?: string;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
+  readonly deviceCapacity?: AgentRuntimeCapacityBinding;
 }
 
 export interface AdvancementContextWindowOptions {

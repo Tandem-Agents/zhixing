@@ -352,6 +352,7 @@ describe("ConversationAssignmentWorker", () => {
           ingressId: "ingress-worker-cancel",
           receivedAt: new Date().toISOString(),
         },
+        contentAssets: [],
         windowInput: { t: "full", windowEpoch: 3, messages: [] },
       },
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
@@ -482,6 +483,7 @@ describe("ConversationAssignmentWorker", () => {
           ingressId: "ingress-worker-ticket-answer",
           receivedAt: new Date().toISOString(),
         },
+        contentAssets: [],
         windowInput: { t: "full", windowEpoch: 3, messages: [] },
       },
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
@@ -705,6 +707,7 @@ describe("ConversationAssignmentWorker", () => {
           replyTarget: { channelId: "channel-test", to: "user-test" },
           turnOrigin,
         },
+        contentAssets: [],
         windowInput: { t: "full", windowEpoch: 4, messages: [] },
       },
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;

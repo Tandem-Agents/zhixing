@@ -1,9 +1,11 @@
+import { Buffer } from "node:buffer";
 import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
 import type {
+  ArtifactRef,
   AssignmentResourceLease,
   AuthorityCapability,
   AuthorityCallContext,
@@ -12,6 +14,7 @@ import type {
   UsageReport,
 } from "@zhixing/core/contracts";
 import {
+  canonicalize,
   protocolDigest,
   ResourceAdmissionDeferredError,
   type ProtocolSigner,
@@ -771,6 +774,7 @@ async function createHarness(
   });
   return {
     log,
+    artifacts,
     governor: createGovernor(),
     restart: createGovernor,
   };
@@ -792,11 +796,39 @@ async function createHarness(
   }
 }
 
+/**
+ * 最小但合法的 DispatchEnvelope 工件。注册根校验只核对 `v`、`assignmentId`、
+ * `execution`、`dependencyArtifacts` 与 `work` 的形状,不验签,因此这里不必
+ * 走完整签发链;但字段少一个就会 fail-closed。
+ */
+async function putDispatchEnvelopeArtifact(
+  fixture: Awaited<ReturnType<typeof createHarness>>,
+  assignmentId: string,
+): Promise<ArtifactRef> {
+  const bytes = Buffer.from(
+    canonicalize({
+      v: 1,
+      assignmentId,
+      execution: "conversation",
+      dependencyArtifacts: [],
+      work: { conversationId: "conversation-1", contentAssets: [] },
+    }),
+    "utf8",
+  );
+  return fixture.artifacts.put(bytes);
+}
+
 async function accept(
   fixture: Awaited<ReturnType<typeof createHarness>>,
   lease: AssignmentResourceLease,
   capIds?: readonly string[],
 ) {
+  // `received` 记录是注册根:追加时会解引用 `envelope.ref` 并按 DispatchEnvelope
+  // 的注册 schema 核对,`activation.ref.execution` 也必须在场。夹具只有 capIds
+  // 而没有这两处,append 就会被 fail-closed 拦下。
+  const envelopeRef = capIds
+    ? await putDispatchEnvelopeArtifact(fixture, lease.activation.assignmentId)
+    : undefined;
   await fixture.governor.coordinate(async () => {
     const records = fixture.governor.prepareReceipt(lease);
     fixture.governor.assertReceiptRecords({ lease, records });
@@ -810,10 +842,12 @@ async function accept(
               body: {
                 v: 1,
                 t: "received",
+                envelope: { ref: envelopeRef },
                 activation: {
                   assignmentId: lease.activation.assignmentId,
                   executorId: lease.audience.executorId,
                   reservation: { reservationId: lease.reservationId, attempt: 1 },
+                  ref: { execution: "conversation" },
                   capIds: [...capIds],
                 },
               },

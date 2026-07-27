@@ -11,6 +11,7 @@ export default defineConfig({
     "src/session/index.ts",
     "src/rubrics/index.ts",
     "src/advancement/index.ts",
+    "src/resources/index.ts",
     "src/memory/index.ts",
     "src/security/index.ts",
     "src/confirmation/index.ts",

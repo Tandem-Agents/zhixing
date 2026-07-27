@@ -54,8 +54,13 @@ import {
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
+  runInMaintenanceContext,
+  type StorageMaintenanceGovernorPort,
+} from "@zhixing/core/resources";
+import {
   FileArtifactStore,
   FileAuthorityCommitLog,
+  type SurfaceAssetCoordinator,
 } from "@zhixing/core/authority";
 import type {
   ControlAdmissionJournal,
@@ -80,6 +85,11 @@ import {
   FileTrustRuleSnapshotCatalog,
 } from "./executor-snapshot-version-store.js";
 import { loadOrCreateDeviceKey } from "./serve/mesh-device-key.js";
+import { createSurfaceAssetAuthority } from "./serve/surface-asset-authority.js";
+import {
+  StartupRollback,
+  type StartupCleanupHandle,
+} from "./serve/startup-rollback.js";
 
 export interface AuthorityRuntimeStack {
   readonly anchorEpoch: number;
@@ -93,6 +103,7 @@ export interface AuthorityRuntimeStack {
   readonly authorityLog: FileAuthorityCommitLog;
   readonly executorLog: FileAuthorityCommitLog;
   readonly artifacts: FileArtifactStore;
+  readonly surfaceAssets: SurfaceAssetCoordinator;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
@@ -158,6 +169,7 @@ export interface DeliveryStack {
   resolve: (
     input: CreateDeliveryControlEnvelopeInput,
   ) => ReturnType<typeof applyDeliveryResolutionControl>;
+  startupCleanup: StartupCleanupHandle;
   stop: () => Promise<void>;
 }
 
@@ -173,6 +185,7 @@ export interface SetupDeliveryOptions {
   };
   /** 可选：观测 Outbox 事件（测试/调试；生产留空由 logger 承接） */
   onOutboxEvent?: (event: OutboxEvent) => void;
+  startupRollback?: StartupRollback;
 }
 
 export interface ExecutorReadiness {
@@ -198,6 +211,7 @@ export interface SetupAuthorityRuntimeOptions {
   readonly enableLocalExecutor?: boolean;
   readonly resourceCandidateTtlMs?: number;
   readonly clock?: () => string;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
 }
 
 export async function setupAuthorityRuntime(
@@ -208,8 +222,9 @@ export async function setupAuthorityRuntime(
   const anchorEnabled = options.enableAnchor ?? true;
   const authorityLog = anchorEnabled
     ? new FileAuthorityCommitLog(
-        path.join(authorityRoot, "authority"),
-        artifacts,
+      path.join(authorityRoot, "authority"),
+      artifacts,
+      { storageMaintenance: options.storageMaintenance },
       )
     : undefined;
   const localExecutorEnabled = options.enableLocalExecutor ?? true;
@@ -221,8 +236,9 @@ export async function setupAuthorityRuntime(
     : undefined;
   const executorLog = localExecutorEnabled
     ? new FileAuthorityCommitLog(
-        path.join(authorityRoot, "executor-authority"),
-        artifacts,
+      path.join(authorityRoot, "executor-authority"),
+      artifacts,
+      { storageMaintenance: options.storageMaintenance },
       )
     : undefined;
   const anchorEpoch = options.anchorEpoch ?? 1;
@@ -263,6 +279,27 @@ export async function setupAuthorityRuntime(
     },
   };
   const clock = options.clock ?? (() => new Date().toISOString());
+  const surfaceAssets = authorityLog
+    ? createSurfaceAssetAuthority({
+        authorityRoot,
+        log: authorityLog,
+        retentionLogs: [
+          authorityLog,
+          ...(executorLog ? [executorLog] : []),
+        ],
+        artifacts,
+        signer: key,
+        verifier,
+        anchorEpoch,
+        storageMaintenance: options.storageMaintenance,
+        clock,
+      })
+    : undefined;
+  // 启动恢复没有任何调用在等它,但它决定权威何时可用:按恢复档准入,既不与
+  // 小时级回收同档竞争,也不冒充前台抢占正在服务的请求。
+  if (surfaceAssets) {
+    await runInMaintenanceContext("recovery", () => surfaceAssets.recover());
+  }
   const executorId = options.executorId ?? "executor:local";
   const capabilityDirectoryStore = new FileExecutorCapabilityDirectoryStore(
     path.join(authorityRoot, "executor-capability-directory.json"),
@@ -615,6 +652,10 @@ export async function setupAuthorityRuntime(
       return executorLog;
     },
     artifacts,
+    get surfaceAssets() {
+      if (!surfaceAssets) throw new Error("Anchor authority role is not enabled");
+      return surfaceAssets;
+    },
     get participant() {
       if (!participant) throw new Error("Anchor authority role is not enabled");
       return participant;
@@ -836,99 +877,112 @@ export async function setupDelivery(options: SetupDeliveryOptions): Promise<Deli
       },
     },
   );
-
-  // 2. Sender — outbox-bound，Pipeline 的 drain 现在经 Outbox
-  const sender = createOutboxSender(outboxRegistry, {
-    isReady: (channelId) => {
-      const status = channels.getStatus(channelId);
-      return status?.state === "connected";
-    },
-  });
-
-  const {
-    artifacts,
-    authorityLog,
-    authority,
-    participant,
-    controlAdmission,
-  } = options.authorityRuntime;
-
-  const delivery = new DeliveryPipeline({
-    sender,
-    eventBus: createEventBus<DeliveryEventMap>(),
-    config: {
-      ...DEFAULT_DELIVERY_CONFIG,
-      queueFilePath: path.join(zhixingHome, "delivery-queue.json"),
-    },
-    logger: {
-      debug: () => {},
-      info: (msg: string) => logger.info(`[delivery] ${msg}`),
-      warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
-      error: (msg: string) => logger.error(`[delivery] ${msg}`),
-    },
-  });
-  await delivery.start();
-
-  const transports = new DeliveryTransportRegistry();
-  transports.register(channelAuthorityDeliveryTransport(sender));
-  const eventBus = createEventBus<AuthorityDeliveryEventMap>();
   const statusListeners = new Set<
     (notice: DeliveryStatusNotice) => void | Promise<void>
   >();
-  const publishNotice = async (notice: DeliveryStatusNotice) => {
-    await Promise.allSettled(
-      [...statusListeners].map(async (listener) => listener(notice)),
-    );
-  };
-  eventBus.on("delivery:notice", ({ notice }) => publishNotice(notice));
-
-  // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
-  const authorityDelivery = new AuthorityDeliveryPipeline({
-    authority,
-    artifacts,
-    transport: transports,
-    eventBus,
-    config: {
-      ...DEFAULT_AUTHORITY_DELIVERY_CONFIG,
-    },
-    logger: {
-      debug: () => {},
-      info: (msg: string) => logger.info(`[delivery] ${msg}`),
-      warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
-      error: (msg: string) => logger.error(`[delivery] ${msg}`),
-    },
-  });
-  await authorityDelivery.start();
-
-  return {
-    delivery,
-    authorityDelivery,
-    authority,
-    authorityLog,
-    artifacts,
-    participant,
-    controlAdmission,
-    outboxRegistry,
-    statusHistory: (afterByItem = {}) => authority.statusNotices(afterByItem),
-    onStatus: (listener) => {
-      statusListeners.add(listener);
-      return () => statusListeners.delete(listener);
-    },
-    resolve: (input) => {
-      const envelope = createDeliveryControlEnvelope(input);
-      return applyDeliveryResolutionControl({
-        admission: controlAdmission,
-        authority,
-        envelope,
-        source: input.source,
-        onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),
-      });
-    },
-    stop: async () => {
+  let delivery: DeliveryPipeline | undefined;
+  let authorityDelivery: AuthorityDeliveryPipeline | undefined;
+  const startupRollback = options.startupRollback ?? new StartupRollback();
+  const startupCleanup = startupRollback.register(
+    "deliveryStack.stop",
+    async () => {
       statusListeners.clear();
-      await authorityDelivery.stop();
-      await delivery.stop();
+      await authorityDelivery?.stop();
+      await delivery?.stop();
       await outboxRegistry.dispose();
     },
-  };
+  );
+
+  try {
+    // 2. Sender — outbox-bound，Pipeline 的 drain 现在经 Outbox
+    const sender = createOutboxSender(outboxRegistry, {
+      isReady: (channelId) => {
+        const status = channels.getStatus(channelId);
+        return status?.state === "connected";
+      },
+    });
+
+    const {
+      artifacts,
+      authorityLog,
+      authority,
+      participant,
+      controlAdmission,
+    } = options.authorityRuntime;
+
+    delivery = new DeliveryPipeline({
+      sender,
+      eventBus: createEventBus<DeliveryEventMap>(),
+      config: {
+        ...DEFAULT_DELIVERY_CONFIG,
+        queueFilePath: path.join(zhixingHome, "delivery-queue.json"),
+      },
+      logger: {
+        debug: () => {},
+        info: (msg: string) => logger.info(`[delivery] ${msg}`),
+        warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
+        error: (msg: string) => logger.error(`[delivery] ${msg}`),
+      },
+    });
+    await delivery.start();
+
+    const transports = new DeliveryTransportRegistry();
+    transports.register(channelAuthorityDeliveryTransport(sender));
+    const eventBus = createEventBus<AuthorityDeliveryEventMap>();
+    const publishNotice = async (notice: DeliveryStatusNotice) => {
+      await Promise.allSettled(
+        [...statusListeners].map(async (listener) => listener(notice)),
+      );
+    };
+    eventBus.on("delivery:notice", ({ notice }) => publishNotice(notice));
+
+    // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
+    authorityDelivery = new AuthorityDeliveryPipeline({
+      authority,
+      artifacts,
+      transport: transports,
+      eventBus,
+      config: {
+        ...DEFAULT_AUTHORITY_DELIVERY_CONFIG,
+      },
+      logger: {
+        debug: () => {},
+        info: (msg: string) => logger.info(`[delivery] ${msg}`),
+        warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
+        error: (msg: string) => logger.error(`[delivery] ${msg}`),
+      },
+    });
+    await authorityDelivery.start();
+
+    return {
+      delivery,
+      authorityDelivery,
+      authority,
+      authorityLog,
+      artifacts,
+      participant,
+      controlAdmission,
+      outboxRegistry,
+      statusHistory: (afterByItem = {}) => authority.statusNotices(afterByItem),
+      onStatus: (listener) => {
+        statusListeners.add(listener);
+        return () => statusListeners.delete(listener);
+      },
+      resolve: (input) => {
+        const envelope = createDeliveryControlEnvelope(input);
+        return applyDeliveryResolutionControl({
+          admission: controlAdmission,
+          authority,
+          envelope,
+          source: input.source,
+          onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),
+        });
+      },
+      startupCleanup,
+      stop: () => startupCleanup.run(),
+    };
+  } catch (error) {
+    await startupCleanup.run().catch(() => undefined);
+    throw error;
+  }
 }

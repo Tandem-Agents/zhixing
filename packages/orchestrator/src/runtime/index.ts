@@ -56,6 +56,10 @@ export {
   type TextCallOptions,
 } from "./create-agent-runtime.js";
 export {
+  governToolExecution,
+  type AgentRuntimeCapacityBinding,
+} from "./governed-agent-runtime.js";
+export {
   runContextStorage,
   emitPostTurnControlIntent,
   hasPostTurnControlCapability,

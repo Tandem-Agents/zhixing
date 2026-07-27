@@ -23,3 +23,4 @@ export * from "./interrupt/index.js";
 export * from "./skills/index.js";
 export * from "./rubrics/index.js";
 export * from "./advancement/index.js";
+export * from "./resources/index.js";

@@ -5,6 +5,10 @@ import type {
   JsonValue,
   LogicalRecord,
 } from "../contracts/index.js";
+import type {
+  DurableProjectionDefinition,
+  RebuildableDurableProjectionIndex,
+} from "./durable-projection-index.js";
 
 export interface ArtifactStore {
   put(bytes: Uint8Array): Promise<ArtifactRef>;
@@ -22,6 +26,46 @@ export interface ArtifactStore {
   readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array>;
   has(ref: ArtifactRef): Promise<boolean>;
 }
+
+export interface ArtifactReferenceCursor {
+  next(limit: number): Promise<{
+    readonly references: readonly ArtifactRef[];
+    readonly done: boolean;
+  }>;
+  close(): Promise<void>;
+}
+
+/** Artifact store with durable targeted removal for unadopted temporary assets. */
+export interface MutableArtifactStore extends ArtifactStore {
+  delete(ref: ArtifactRef): Promise<boolean>;
+  /**
+   * Removes a disposable copy by declared path without re-reading its content.
+   * Callers must not use this for the authority's retained primary copy.
+   */
+  discard(ref: ArtifactRef): Promise<boolean>;
+  /** Visits stored references without materializing the complete namespace. */
+  visitReferences(
+    visitor: (ref: ArtifactRef) => void | Promise<void>,
+  ): Promise<void>;
+  /**
+   * Opens a bounded physical scan. Cursor progress is process-local; every
+   * returned reference is independently recoverable from the store.
+   */
+  openReferenceCursor(): ArtifactReferenceCursor;
+  list(): Promise<readonly ArtifactRef[]>;
+}
+
+export interface ArtifactDeletionResult {
+  readonly ref: ArtifactRef;
+  readonly disposition: "deleted" | "missing" | "retained" | "deferred";
+}
+
+export type ArtifactRetentionSnapshot =
+  | {
+    readonly status: "current";
+    readonly retained: readonly ArtifactRef[];
+  }
+  | { readonly status: "deferred" };
 
 export interface ArtifactGarbageCollectionResult {
   readonly scanned: number;
@@ -54,6 +98,14 @@ export interface ProjectionReplayOptions {
 /** Opaque, process-local proof that a projection has verified a log prefix. */
 export interface ProjectionCursor {
   readonly lsn: number;
+}
+
+/** Durable proof of an exact verified AuthorityCommitLog frame boundary. */
+export interface DurableLogCheckpoint {
+  readonly logId: string;
+  readonly lsn: number;
+  readonly frameEndOffset: number;
+  readonly prefixDigest: string;
 }
 
 export interface ProjectionTransactionOptions extends ProjectionReplayOptions {
@@ -97,6 +149,22 @@ export interface AuthorityCommitLog {
   readStream<Body = JsonValue>(
     stream: string,
   ): Promise<Array<{ lsn: number; at: IsoTime; body: Body }>>;
+  readTail<Body = JsonValue>(
+    checkpoint: DurableLogCheckpoint,
+    limit: number,
+  ): Promise<{
+    readonly commits: readonly CommitEnvelope<Body>[];
+    readonly checkpoint: DurableLogCheckpoint;
+    readonly hasMore: boolean;
+  }>;
+  readEnvelopeAt<Body = JsonValue>(
+    checkpoint: DurableLogCheckpoint,
+  ): Promise<CommitEnvelope<Body>>;
+  originCheckpoint(): Promise<DurableLogCheckpoint>;
+  checkpoint(): Promise<DurableLogCheckpoint>;
+  durableProjection<Body = JsonValue>(
+    definition: DurableProjectionDefinition<Body>,
+  ): RebuildableDurableProjectionIndex;
   rebuildProjection<State, Body = JsonValue>(
     initial: State,
     reducer: ProjectionReducer<State, Body>,

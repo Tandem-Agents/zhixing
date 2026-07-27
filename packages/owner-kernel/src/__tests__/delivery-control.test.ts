@@ -12,6 +12,10 @@ import {
   reduceDeliveryAuthorityRecord,
   type DeliveryEnqueueInput,
 } from "@zhixing/core/delivery";
+import {
+  createConversationSealedBundle,
+  sealedBundleArtifact,
+} from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -22,6 +26,7 @@ import {
 import { applyDeliveryResolutionControl } from "../delivery-control.js";
 
 const NOW = "2026-07-17T02:00:00.000Z";
+const FIXTURE_DIGEST = `sha256:${"0".repeat(64)}` as const;
 
 vi.setConfig({ testTimeout: 15_000 });
 
@@ -51,7 +56,35 @@ async function createHarness() {
       maxAttempts: 3,
     },
   };
-  const sourceRef = await artifacts.put(Buffer.from("delivery-control-source", "utf8"));
+  const source = sealedBundleArtifact(createConversationSealedBundle({
+    assignmentId: "assignment-1",
+    executorId: "executor-1",
+    streamFinal: { finalSeq: 1, streamDigest: FIXTURE_DIGEST },
+    usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+    usageFinal: { reportDigest: FIXTURE_DIGEST, upToUsageSeq: 0 },
+    dependencyArtifacts: [],
+    body: {
+      t: "conversation",
+      runId: "run-1",
+      conversationId: "conversation-1",
+      ownerEpoch: 1,
+      baseRevision: 0,
+      runRecord: {
+        type: "run",
+        runId: "run-1",
+        runIndex: 1,
+        timestamp: NOW,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "deliver the completed run" }],
+          },
+        ],
+      },
+      contentAssets: [],
+    },
+  }));
+  const sourceRef = await artifacts.put(source.bytes);
   const created = await authority.coordinate(async () => (
     await log.transactProjection<Record<string, never>, unknown, ReturnType<DeliveryAuthority["prepareEnqueues"]>>(
       {},

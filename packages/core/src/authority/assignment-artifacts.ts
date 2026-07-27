@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createReadStream } from "node:fs";
-import { open, readdir, rm, stat } from "node:fs/promises";
+import type { Dir } from "node:fs";
+import { open, opendir, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type {
   ArtifactRef,
@@ -11,19 +12,26 @@ import type {
 } from "../contracts/index.js";
 import {
   canonicalize,
-  validateJobSealedBundle,
   validateMessages,
   validateMutationBatch,
+  validateSealedBundle,
   validateTranscriptRunRecord,
 } from "../protocol/index.js";
-import { validateConversationSealedBundle } from "../protocol/commit.js";
-import { ensureDurableDirectory, syncDirectory } from "../persistence/index.js";
+import {
+  durablyRemoveFile,
+  ensureDurableDirectory,
+  syncDirectory,
+} from "../persistence/index.js";
+import { claimDeviceCapacity } from "../resources/index.js";
 import {
   assertArtifactRef,
   artifactDigestHex,
   collectArtifactRefs,
 } from "./artifact-references.js";
-import type { ArtifactStore } from "./interfaces.js";
+import type {
+  ArtifactReferenceCursor,
+  ArtifactStore,
+} from "./interfaces.js";
 import { AuthorityStorageError } from "./errors.js";
 
 export type AssignmentArtifactSchema =
@@ -53,7 +61,7 @@ export interface FileResumableArtifactReceiverOptions {
   readonly maxChunkBytes?: number;
 }
 
-const DEFAULT_MAX_CHUNK_BYTES = 256 * 1024;
+export const DEFAULT_ARTIFACT_CHUNK_BYTES = 256 * 1024;
 
 export async function resolveDispatchArtifactClosure(
   envelope: DispatchEnvelope,
@@ -98,9 +106,7 @@ export function describeSealedBundleArtifactClosure(
 }
 
 function validatedSealedBundle(value: SealedBundle): SealedBundle {
-  return value.body.t === "conversation"
-    ? validateConversationSealedBundle(value)
-    : validateJobSealedBundle(value);
+  return validateSealedBundle(value);
 }
 
 function dispatchRootDescriptors(
@@ -197,6 +203,52 @@ export async function readArtifactRange(
   };
 }
 
+export function validateArtifactReceiveProgress(
+  input: unknown,
+  ref: ArtifactRef,
+): ArtifactReceiveProgress {
+  assertArtifactRef(ref);
+  assertPlainRecord(input, "Artifact progress");
+  assertExactKeys(input, ["complete", "receivedBytes"], "Artifact progress");
+  if (
+    typeof input.complete !== "boolean" ||
+    typeof input.receivedBytes !== "number" ||
+    !Number.isSafeInteger(input.receivedBytes) ||
+    input.receivedBytes < 0 ||
+    input.receivedBytes > ref.bytes ||
+    (input.complete && input.receivedBytes !== ref.bytes)
+  ) {
+    throw new TypeError("Artifact progress is invalid");
+  }
+  return {
+    complete: input.complete,
+    receivedBytes: input.receivedBytes,
+  };
+}
+
+export function validateArtifactReadResponse(
+  bytes: unknown,
+  ref: ArtifactRef,
+  offset: number,
+  limit: number,
+): Uint8Array {
+  assertArtifactRef(ref);
+  assertRangeInteger(offset, "Artifact range offset");
+  assertRangeInteger(limit, "Artifact range limit", false);
+  if (offset > ref.bytes) {
+    throw new RangeError("Artifact range starts beyond its byte length");
+  }
+  if (
+    !(bytes instanceof Uint8Array) ||
+    bytes.byteLength > limit ||
+    bytes.byteLength > ref.bytes - offset ||
+    (offset < ref.bytes && bytes.byteLength === 0)
+  ) {
+    throw new TypeError("Artifact range response is invalid");
+  }
+  return bytes;
+}
+
 export class FileResumableArtifactReceiver {
   readonly #maxArtifactBytes: number;
   readonly #maxChunkBytes: number;
@@ -208,7 +260,8 @@ export class FileResumableArtifactReceiver {
     options: FileResumableArtifactReceiverOptions,
   ) {
     this.#maxArtifactBytes = options.maxArtifactBytes;
-    this.#maxChunkBytes = options.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES;
+    this.#maxChunkBytes =
+      options.maxChunkBytes ?? DEFAULT_ARTIFACT_CHUNK_BYTES;
     assertRangeInteger(this.#maxArtifactBytes, "Maximum artifact bytes");
     assertRangeInteger(this.#maxChunkBytes, "Maximum artifact chunk bytes", false);
   }
@@ -313,17 +366,71 @@ export class FileResumableArtifactReceiver {
       const digest = match[1]!;
       await this.#serial(digest, async () => {
         const partialPath = path.join(this.rootDir, entry.name);
+        let metadata;
         try {
-          if ((await stat(partialPath)).mtimeMs >= cutoffMs) return;
-          await rm(partialPath, { force: true });
-          removed += 1;
+          metadata = await stat(partialPath);
         } catch (error) {
-          if (!isMissingFile(error)) throw error;
+          if (isMissingFile(error)) return;
+          throw error;
         }
+        if (metadata.mtimeMs >= cutoffMs) return;
+        if (await this.#removePartial(partialPath)) removed += 1;
       });
     }
-    if (removed > 0) await syncDirectory(this.rootDir);
     return removed;
+  }
+
+  async partialReferences(): Promise<readonly ArtifactRef[]> {
+    const references: ArtifactRef[] = [];
+    await this.visitPartialReferences((ref) => {
+      references.push(ref);
+    });
+    return references;
+  }
+
+  async visitPartialReferences(
+    visitor: (ref: ArtifactRef) => void | Promise<void>,
+  ): Promise<void> {
+    let entries;
+    try {
+      entries = await opendir(this.rootDir);
+    } catch (error) {
+      if (isMissingFile(error)) return;
+      throw error;
+    }
+    for await (const entry of entries) {
+      const match = /^([a-f0-9]{64})\.([0-9]+)\.part$/u.exec(entry.name);
+      if (!entry.isFile() || !match) continue;
+      const bytes = Number(match[2]);
+      if (!Number.isSafeInteger(bytes) || bytes < 0) {
+        throw new AuthorityStorageError(
+          "artifact-corrupt",
+          "Artifact partial declares an invalid byte count",
+        );
+      }
+      const size = (await stat(path.join(this.rootDir, entry.name))).size;
+      if (size > bytes) {
+        throw new AuthorityStorageError(
+          "artifact-corrupt",
+          "Artifact partial exceeds its declared byte count",
+        );
+      }
+      await visitor({
+        digest: `sha256:${match[1]}`,
+        bytes,
+      });
+    }
+  }
+
+  openPartialReferenceCursor(): ArtifactReferenceCursor {
+    return new FilePartialReferenceCursor(this.rootDir);
+  }
+
+  async discard(ref: ArtifactRef): Promise<boolean> {
+    this.#assertAcceptable(ref);
+    return this.#serial(ref.digest, async () =>
+      this.#removePartial(this.#partialPath(ref))
+    );
   }
 
   #assertAcceptable(ref: ArtifactRef): void {
@@ -367,9 +474,8 @@ export class FileResumableArtifactReceiver {
     return { receivedBytes: ref.bytes, complete: true };
   }
 
-  async #removePartial(partialPath: string): Promise<void> {
-    await rm(partialPath, { force: true });
-    await syncDirectory(this.rootDir);
+  async #removePartial(partialPath: string): Promise<boolean> {
+    return durablyRemoveFile(partialPath);
   }
 
   async #serial<T>(key: string, operation: () => Promise<T>): Promise<T> {
@@ -387,6 +493,78 @@ export class FileResumableArtifactReceiver {
       release();
       if (this.#operations.get(key) === queued) this.#operations.delete(key);
     }
+  }
+}
+
+class FilePartialReferenceCursor implements ArtifactReferenceCursor {
+  #entries: Dir | undefined;
+  #done = false;
+
+  constructor(private readonly rootDir: string) {}
+
+  async next(limit: number): Promise<{
+    readonly references: readonly ArtifactRef[];
+    readonly done: boolean;
+  }> {
+    assertRangeInteger(limit, "Partial reference cursor limit", false);
+    if (this.#done) return { references: [], done: true };
+    const references: ArtifactRef[] = [];
+    if (!this.#entries) {
+      claimDeviceCapacity("ioOperations", 1);
+      try {
+        this.#entries = await opendir(this.rootDir);
+      } catch (error) {
+        if (!isMissingFile(error)) throw error;
+        this.#done = true;
+        return { references, done: true };
+      }
+    }
+    let inspected = 0;
+    while (inspected < limit) {
+      claimDeviceCapacity("ioOperations", 1);
+      const entry = await this.#entries.read();
+      inspected += 1;
+      if (!entry) {
+        await this.#entries.close();
+        this.#entries = undefined;
+        this.#done = true;
+        break;
+      }
+      const match = /^([a-f0-9]{64})\.([0-9]+)\.part$/u.exec(entry.name);
+      if (!entry.isFile() || !match) continue;
+      const bytes = Number(match[2]);
+      if (!Number.isSafeInteger(bytes) || bytes < 0) {
+        throw new AuthorityStorageError(
+          "artifact-corrupt",
+          "Artifact partial declares an invalid byte count",
+        );
+      }
+      claimDeviceCapacity("ioOperations", 1);
+      let metadata;
+      try {
+        metadata = await stat(path.join(this.rootDir, entry.name));
+      } catch (error) {
+        if (isMissingFile(error)) continue;
+        throw error;
+      }
+      if (metadata.size > bytes) {
+        throw new AuthorityStorageError(
+          "artifact-corrupt",
+          "Artifact partial exceeds its declared byte count",
+        );
+      }
+      references.push({
+        digest: `sha256:${match[1]}`,
+        bytes,
+      });
+    }
+    return { references, done: this.#done };
+  }
+
+  async close(): Promise<void> {
+    this.#done = true;
+    await this.#entries?.close().catch(() => undefined);
+    this.#entries = undefined;
   }
 }
 
@@ -526,6 +704,33 @@ function compareArtifactRefs(left: ArtifactRef, right: ArtifactRef): number {
 function assertRangeInteger(value: number, label: string, allowZero = true): void {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
     throw new TypeError(`${label} must be a ${allowZero ? "non-negative" : "positive"} integer`);
+  }
+}
+
+function assertPlainRecord(
+  value: unknown,
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new TypeError(`${label} must be a plain object`);
+  }
+}
+
+function assertExactKeys(
+  value: object,
+  expected: readonly string[],
+  label: string,
+): void {
+  if (
+    canonicalize(Object.keys(value).sort()) !==
+    canonicalize([...expected].sort())
+  ) {
+    throw new TypeError(`${label} fields are incomplete or unknown`);
   }
 }
 

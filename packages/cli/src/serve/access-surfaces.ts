@@ -37,6 +37,7 @@ import {
   setupDelivery,
 } from "../setup-delivery.js";
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
+import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
@@ -49,6 +50,10 @@ const mcpSurface: AccessSurface = {
   name: "mcp",
   phase: "pre-server",
   async setup(ctx) {
+    ctx.startupCleanups.mcp ??= ctx.startupRollback.register(
+      "mcpHub.dispose",
+      () => ctx.mcpHub.dispose(),
+    );
     await ctx.mcpHub.connectAll();
   },
 };
@@ -72,7 +77,39 @@ const authorityRuntimeSurface: AccessSurface = {
       },
       executorReadiness: ctx.executorReadiness,
       enableLocalExecutor: ctx.enabledRoles.includes("executor"),
+      storageMaintenance: ctx.storageMaintenance,
     });
+  },
+};
+
+/**
+ * 会话内容资产的周期回收。
+ *
+ * 持有者必须在全部拓扑下都存在:回收是锚点权威的生命周期治理义务,不能挂在只于
+ * 多机拓扑创建的 mesh 控制面上,否则默认单机锚点永不回收临时件与已释放叶。
+ */
+const assetMaintenanceSurface: AccessSurface = {
+  name: "asset-maintenance",
+  phase: "pre-server",
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("anchor")) return;
+    const authority = ctx.authorityRuntime;
+    if (!authority) {
+      throw new Error("Asset maintenance requires the authority runtime");
+    }
+    // 治理端口注入协调器而非调度器:容量在协调器内部的叶级物理步骤取得,
+    // 调度器只声明这轮回收的阻塞关系。
+    const maintenance = new SurfaceAssetMaintenance({
+      surfaceAssets: authority.surfaceAssets,
+      onError: (error) =>
+        console.warn(chalk.yellow(`[assets] ${error.message}`)),
+    });
+    ctx.startupCleanups.assetMaintenance = ctx.startupRollback.register(
+      "assetMaintenance.stop",
+      () => maintenance.stop(),
+    );
+    await maintenance.start();
+    ctx.assetMaintenance = maintenance;
   },
 };
 
@@ -110,8 +147,13 @@ const meshSurface: AccessSurface = {
       ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
       onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
     });
+    const cleanup = ctx.startupRollback.register(
+      "meshRuntime.stop",
+      () => mesh.stop(),
+    );
     await mesh.start();
     ctx.meshRuntime = mesh;
+    ctx.startupCleanups.meshRuntime = cleanup;
   },
 };
 
@@ -380,6 +422,10 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         });
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
+        ctx.startupCleanups.channels = ctx.startupRollback.register(
+          "channels.dispose",
+          () => result.registry.dispose(),
+        );
       } catch (err) {
         console.warn(
           chalk.yellow(
@@ -405,6 +451,7 @@ const deliverySurface: AccessSurface = {
       channels,
       zhixingHome,
       authorityRuntime: ctx.authorityRuntime,
+      startupRollback: ctx.startupRollback,
       logger: {
         info: (msg) => console.log(chalk.dim(msg)),
         warn: (msg) => console.warn(chalk.yellow(msg)),
@@ -412,6 +459,7 @@ const deliverySurface: AccessSurface = {
       },
     });
     ctx.deliveryStack = deliveryStack;
+    ctx.startupCleanups.deliveryStack = deliveryStack.startupCleanup;
     ctx.conversationProtocol?.bindDeliveryDrain(() =>
       deliveryStack.authorityDelivery.flush(),
     );
@@ -442,6 +490,10 @@ const textRendererSurface: AccessSurface = {
           console.error(chalk.red(`[confirm] ${msg}`), ...args),
       },
     });
+    ctx.startupCleanups.textRenderer = ctx.startupRollback.register(
+      "confirmationRenderer.stop",
+      () => textRenderer.stop(),
+    );
     textRenderer.start();
     ctx.textRenderer = textRenderer;
   },
@@ -490,6 +542,7 @@ export function createAccessSurfaces(
     mcpSurface,
     authorityRuntimeSurface,
     conversationSurface,
+    assetMaintenanceSurface,
     meshSurface,
     createChannelSurface(channelCredentials),
     deliverySurface,

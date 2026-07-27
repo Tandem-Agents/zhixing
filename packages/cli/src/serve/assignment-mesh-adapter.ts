@@ -9,6 +9,8 @@ import {
   readArtifactRange,
   resolveDispatchArtifactClosure,
   resolveSealedBundleArtifactClosure,
+  validateArtifactReadResponse,
+  validateArtifactReceiveProgress,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
@@ -44,7 +46,6 @@ import {
   sealedBundleArtifact,
   validateConversationActivation,
   validateConversationEnvelope,
-  validateConversationSealedBundle,
   validateDispatchControlBinding,
   validateDispatchResult,
   validateAuthorityError,
@@ -54,9 +55,9 @@ import {
   validateAssignmentEntry,
   validateJobActivation,
   validateJobEnvelope,
-  validateJobSealedBundle,
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
+  validateSealedBundle,
   validateSupersedeProof,
   assertProtocolIdentifier,
   type ProtocolSignatureVerifier,
@@ -462,15 +463,16 @@ export class AssignmentArtifactClient {
       }, signal), ref);
       if (!remote.complete) throw new TypeError("Remote assignment artifact is missing");
       while (!progress.complete) {
+        const offset = progress.receivedBytes;
         const range = decodeRange(await this.#request({
           v: 1,
           t: "read",
           assignmentId,
           authorization,
           ref,
-          offset: progress.receivedBytes,
+          offset,
           limit: this.#chunkBytes,
-        }, signal), this.#chunkBytes);
+        }, signal), ref, offset, this.#chunkBytes);
         if (range.bytes.byteLength === 0 && !range.complete) {
           throw new TypeError("Artifact download returned an empty non-final range");
         }
@@ -897,9 +899,7 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
     if (canonicalize(durableAuthorization.capability) !== canonicalize(capability)) {
       throw new TypeError("Bundle artifact capability differs from the durable activation");
     }
-    const validated = bundle.body.t === "conversation"
-      ? validateConversationSealedBundle(bundle)
-      : validateJobSealedBundle(bundle);
+    const validated = validateSealedBundle(bundle);
     const artifact = sealedBundleArtifact(validated);
     if (authorityContextAllowsArtifactWrite(context, capability, this.options.clock)) {
       const closure = await resolveSealedBundleArtifactClosure(validated, this.options.artifacts);
@@ -1230,9 +1230,7 @@ async function loadSealedBundle(
   artifacts: ArtifactStore,
 ): Promise<SealedBundle> {
   const value = await loadCanonicalArtifact(ref, artifacts) as SealedBundle;
-  return value.body?.t === "conversation"
-    ? validateConversationSealedBundle(value)
-    : validateJobSealedBundle(value);
+  return validateSealedBundle(value);
 }
 
 async function loadCanonicalArtifact(ref: ArtifactRef, artifacts: ArtifactStore): Promise<unknown> {
@@ -1521,21 +1519,28 @@ function issueArtifactTransferAuthorization(input: {
 function decodeProgress(value: unknown, ref: ArtifactRef): { receivedBytes: number; complete: boolean } {
   assertPlainObject(value, "Artifact progress");
   assertExactKeys(value, ["complete", "receivedBytes"]);
-  assertNonNegativeInteger(value.receivedBytes, "Artifact received bytes");
-  if (typeof value.complete !== "boolean" || value.receivedBytes > ref.bytes) {
-    throw new TypeError("Artifact progress is invalid");
-  }
-  if (value.complete && value.receivedBytes !== ref.bytes) {
-    throw new TypeError("Completed artifact progress does not match its byte length");
-  }
-  return value as { receivedBytes: number; complete: boolean };
+  return validateArtifactReceiveProgress(value, ref);
 }
 
-function decodeRange(value: unknown, maxBytes: number): { bytes: Uint8Array; complete: boolean } {
+function decodeRange(
+  value: unknown,
+  ref: ArtifactRef,
+  offset: number,
+  maxBytes: number,
+): { bytes: Uint8Array; complete: boolean } {
   assertPlainObject(value, "Artifact range");
   assertExactKeys(value, ["bytes", "complete"]);
   if (typeof value.complete !== "boolean") throw new TypeError("Artifact range completion is invalid");
-  return { bytes: decodeBase64(value.bytes, maxBytes), complete: value.complete };
+  const bytes = validateArtifactReadResponse(
+    decodeBase64(value.bytes, maxBytes),
+    ref,
+    offset,
+    maxBytes,
+  );
+  if (value.complete !== (offset + bytes.byteLength === ref.bytes)) {
+    throw new TypeError("Artifact range completion does not match the declared reference");
+  }
+  return { bytes, complete: value.complete };
 }
 
 function decodeBundleResult(value: unknown):

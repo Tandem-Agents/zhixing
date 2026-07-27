@@ -34,6 +34,7 @@ export const PROFILES: Record<ServerProfile, ProfileSpec> = {
       "authority-runtime",
       "conversation",
       "mesh-control",
+      "asset-maintenance",
       "channel",
       "delivery",
       "text-renderer",

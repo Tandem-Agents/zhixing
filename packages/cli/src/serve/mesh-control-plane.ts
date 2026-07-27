@@ -5,6 +5,7 @@ import {
   type Socket,
 } from "node:net";
 import type {
+  DeviceRole,
   HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
@@ -95,6 +96,7 @@ export class ProductionMeshControlPlane {
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
+    await this.options.onTrustReconciled?.(this.#trust);
     if (this.#roles.has("anchor")) {
       await this.#startAnchor();
     } else if (this.#roles.has("executor") || this.#roles.has("surface")) {
@@ -146,11 +148,12 @@ export class ProductionMeshControlPlane {
       await this.#disable(new Error("Local mesh role authorization was revoked"));
       return;
     }
-    const requiredPeerRole = this.#roles.has("anchor") ? "executor" : "anchor";
+    const requiredPeerRoles = this.#compatiblePeerRoles();
     const active = new Set(
       record.members
         .filter((member) =>
-          member.state === "active" && member.roles.includes(requiredPeerRole))
+          member.state === "active" &&
+          requiredPeerRoles.some((role) => member.roles.includes(role)))
         .map((member) => member.device.deviceId),
     );
     for (const peerId of this.#peers.keys()) {
@@ -166,7 +169,7 @@ export class ProductionMeshControlPlane {
     const requiredPeers = record.members.filter((member) =>
       member.state === "active" &&
       member.device.deviceId !== this.options.localIdentity.deviceId &&
-      member.roles.includes(requiredPeerRole));
+      requiredPeerRoles.some((role) => member.roles.includes(role)));
     if (requiredPeers.some((member) => !this.#peers.has(member.device.deviceId))) {
       return;
     }
@@ -233,12 +236,12 @@ export class ProductionMeshControlPlane {
   }
 
   async #startAnchor(): Promise<void> {
-    const trustedExecutors = this.#authorizedPeers("executor");
-    if (trustedExecutors.length === 0) return;
+    const trustedPeers = this.#authorizedPeers(["executor", "surface"]);
+    if (trustedPeers.length === 0) return;
     const listen = this.options.configuration.anchorListen;
     if (listen) {
       const server = await createAuthenticatedMeshServer(
-        this.#serverSecurity(trustedExecutors),
+        this.#serverSecurity(trustedPeers),
         (connection) => this.#accept(connection),
       );
       this.#directServer = server;
@@ -247,7 +250,7 @@ export class ProductionMeshControlPlane {
     }
     const relay = this.options.configuration.relayRegistration;
     if (!relay) return;
-    for (const peer of trustedExecutors) {
+    for (const peer of trustedPeers) {
       const secret = await this.options.secretStore.get({
         kind: "rendezvous",
         bindingId: peer.identity.deviceId,
@@ -295,7 +298,7 @@ export class ProductionMeshControlPlane {
   }
 
   #startDialer(): void {
-    const anchors = this.#authorizedPeers("anchor");
+    const anchors = this.#authorizedPeers(["anchor"]);
     const issuerId = this.options.trust.issuer.deviceId;
     const anchor = anchors.find((candidate) => candidate.identity.deviceId === issuerId);
     if (!anchor) throw new Error("Mesh executor has no active issuer anchor peer");
@@ -337,7 +340,7 @@ export class ProductionMeshControlPlane {
             trustedPeer: anchor,
             identity: this.options.localIdentity,
             protocolRange: PROTOCOL_RANGE,
-            authorizePeer: (identity) => this.#isAuthorized(identity.deviceId, "anchor"),
+            authorizePeer: (identity) => this.#isAuthorized(identity.deviceId, ["anchor"]),
             signal,
           });
         }
@@ -354,7 +357,7 @@ export class ProductionMeshControlPlane {
               trustedPeer: anchor,
               identity: this.options.localIdentity,
               protocolRange: PROTOCOL_RANGE,
-              authorizePeer: (identity) => this.#isAuthorized(identity.deviceId, "anchor"),
+              authorizePeer: (identity) => this.#isAuthorized(identity.deviceId, ["anchor"]),
               signal,
             });
           } catch (error) {
@@ -369,7 +372,7 @@ export class ProductionMeshControlPlane {
   }
 
   async #accept(connection: SecureMeshConnection): Promise<void> {
-    if (!this.#isAuthorized(connection.peer.deviceId)) {
+    if (!this.#isAuthorized(connection.peer.deviceId, this.#compatiblePeerRoles())) {
       await connection.close(new Error("Mesh peer is no longer authorized"));
       return;
     }
@@ -393,29 +396,29 @@ export class ProductionMeshControlPlane {
     await this.options.onConnection?.(connection);
   }
 
-  #authorizedPeers(role: "anchor" | "executor"): TrustedMeshPeer[] {
+  #authorizedPeers(roles: readonly DeviceRole[]): TrustedMeshPeer[] {
     const authorized = this.#trust.members.filter((member) =>
         member.state === "active" &&
         member.device.deviceId !== this.options.localIdentity.deviceId &&
-        member.roles.includes(role));
+        roles.some((role) => member.roles.includes(role)));
     return authorized.map((member) => {
       const peer = this.#peers.get(member.device.deviceId);
       if (!peer) {
         throw new Error(
-          `Active ${role} ${member.device.deviceId} has no authenticated transport identity`,
+          `Active compatible peer ${member.device.deviceId} has no authenticated transport identity`,
         );
       }
       return peer;
     });
   }
 
-  #isAuthorized(deviceId: string, requiredRole?: "anchor" | "executor"): boolean {
+  #isAuthorized(deviceId: string, requiredRoles?: readonly DeviceRole[]): boolean {
     const member = this.#trust.members.find((candidate) =>
       candidate.device.deviceId === deviceId);
     return Boolean(
       member &&
       member.state === "active" &&
-      (!requiredRole || member.roles.includes(requiredRole)),
+      (!requiredRoles || requiredRoles.some((role) => member.roles.includes(role))),
     );
   }
 
@@ -426,9 +429,13 @@ export class ProductionMeshControlPlane {
       trustedPeers,
       replayWindow: this.#replayWindow,
       authorizePeer: (identity: { deviceId: string }) =>
-        this.#isAuthorized(identity.deviceId, "executor"),
+        this.#isAuthorized(identity.deviceId, ["executor", "surface"]),
       onHandshakeError: (error: Error) => this.#report(error),
     };
+  }
+
+  #compatiblePeerRoles(): readonly DeviceRole[] {
+    return this.#roles.has("anchor") ? ["executor", "surface"] : ["anchor"];
   }
 
   #track(task: Promise<void>): void {

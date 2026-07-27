@@ -11,10 +11,11 @@ import {
   type PermissionRule,
   type RunResult,
 } from "@zhixing/core";
-import { StreamDigestChain } from "@zhixing/core/protocol";
+import { StreamDigestChain, protocolDigest } from "@zhixing/core/protocol";
 import {
   ConversationManager,
   ConversationRunJournal,
+  createInitialControlEnvelope,
   type RuntimeFactory,
   type SessionRuntime,
 } from "@zhixing/owner-kernel";
@@ -92,6 +93,54 @@ function createProtocol(
   });
 }
 
+async function registerActiveConversation(
+  authority: Awaited<ReturnType<typeof setupAuthorityRuntime>>,
+  conversationId: string,
+  at: string,
+  surfacePrincipal = "rpc:owner",
+): Promise<void> {
+  const source = {
+    principal: {
+      surfacePrincipal,
+      deviceId: authority.deviceId,
+      connectionId: `connection:create:${conversationId}`,
+    },
+  };
+  const envelope = createInitialControlEnvelope({
+    requestId: `session-create:${conversationId}`,
+    source,
+    at,
+    body: { t: "session-create", requestedName: conversationId },
+  });
+  await authority.controlAdmission.apply({
+    envelope,
+    source,
+    prepare: () => ({
+      result: {
+        v: 1,
+        status: "ok",
+        body: { t: "session-create", conversationId },
+      },
+      authorityRevision: 1,
+    }),
+  });
+}
+
+async function getOrCreateActiveConversation(
+  authority: Awaited<ReturnType<typeof setupAuthorityRuntime>>,
+  manager: ConversationManager,
+  conversationId: string,
+  at = new Date().toISOString(),
+) {
+  const managed = await manager.getOrCreate(conversationId);
+  await registerActiveConversation(
+    authority,
+    managed.conversationId,
+    at,
+  );
+  return managed;
+}
+
 function expectSettled(
   result: Awaited<ReturnType<typeof projectSessionTurn>>,
 ): asserts result is Extract<typeof result, { kind: "settled" }> {
@@ -156,7 +205,7 @@ async function seedPendingConversation(label: string) {
     { durableTurnExecutor: protocol },
   );
   const conversationId = `conversation-${label}`;
-  await manager.getOrCreate(conversationId);
+  await getOrCreateActiveConversation(authority, manager, conversationId);
   const admission = await protocol.admit({
     conversationId,
     input: `pending ${label}`,
@@ -171,6 +220,232 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("requires the matching upload grant before admitting attachments", async () => {
+    let now = new Date().toISOString();
+    const home = await createTempDir("conversation-protocol-attachments");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      clock: () => now,
+    });
+    const protocol = createProtocol({
+      authority,
+      manager: () => {
+        throw new Error("manager is not used by admission");
+      },
+      clock: () => now,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    const stored = await authority.artifacts.put(
+      Buffer.from("surface attachment"),
+    );
+    const attachment = { ...stored, kind: "file" as const };
+    const conversationId = "conversation-attachments";
+    const turnId = "rpc:attachment";
+    const surfacePrincipal = "rpc:owner";
+    const ingress = {
+      kind: "first-party" as const,
+      surfacePrincipal,
+      deviceId: authority.deviceId,
+      ingressId: turnId,
+      receivedAt: now,
+    };
+    const requestId = `input:${protocolDigest("ConversationInputIdentity", 1, {
+      surfacePrincipal,
+      ingressId: turnId,
+    })}`;
+    const invocation = { kind: "agent" as const, source: "interactive" as const };
+    const envelope = createInitialControlEnvelope({
+      requestId,
+      source: {
+        principal: {
+          surfacePrincipal,
+          deviceId: authority.deviceId,
+          connectionId: "connection:local",
+        },
+        ingress,
+      },
+      at: now,
+      body: {
+        t: "input",
+        conversationId,
+        ingress: { ingressId: turnId, source: "first-party" },
+        input: { parts: [{ type: "text", text: "inspect attachment" }] },
+        attachments: [attachment],
+        invocation,
+        ownerEpoch: authority.anchorEpoch,
+      },
+    });
+    const issueRequest = {
+      kind: "asset-upload" as const,
+      scope: {
+        domain: "conversation" as const,
+        conversationId,
+        ownerEpoch: authority.anchorEpoch,
+      },
+      surfacePrincipal,
+      requestId,
+      assets: [stored],
+      payloadDigest: envelope.payloadDigest,
+    };
+    await expect(authority.surfaceAssets.issue(issueRequest)).rejects.toThrow(
+      "not owned",
+    );
+    await registerActiveConversation(authority, conversationId, now);
+    await expect(
+      authority.surfaceAssets.issue({
+        ...issueRequest,
+        scope: {
+          ...issueRequest.scope,
+          ownerEpoch: authority.anchorEpoch + 1,
+        },
+      }),
+    ).rejects.toThrow("not owned");
+    await authority.surfaceAssets.issue({
+      ...issueRequest,
+    });
+    const input = {
+      conversationId,
+      input: "inspect attachment",
+      attachments: [attachment],
+      invocation,
+      options: {
+        source: "interactive" as const,
+        turnContext: { turnId },
+      },
+      surfacePrincipal,
+    };
+
+    const first = await protocol.admit(input);
+    expect(first).toMatchObject({
+      shouldSchedule: true,
+    });
+    await expect(
+      authority.surfaceAssets.issue({
+        kind: "asset-download",
+        scope: {
+          domain: "conversation",
+          conversationId,
+          ownerEpoch: authority.anchorEpoch,
+        },
+        surfacePrincipal,
+        requestId: "request-download-adopted",
+        assets: [stored],
+      }),
+    ).resolves.toMatchObject({ kind: "asset-download" });
+    now = new Date(Date.parse(now) + 2 * 60 * 60 * 1_000).toISOString();
+    await expect(protocol.admit(input)).resolves.toMatchObject({
+      runId: first.runId,
+      shouldSchedule: false,
+    });
+    await expect(
+      protocol.admit({
+        ...input,
+        options: {
+          ...input.options,
+          turnContext: { turnId: "rpc:attachment-without-grant" },
+        },
+      }),
+    ).rejects.toThrow(/upload grant is unknown/);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("continues a durable receipt after its upload grant expires", async () => {
+    let now = new Date().toISOString();
+    const home = await createTempDir("conversation-protocol-pending-attachment");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      clock: () => now,
+    });
+    const protocol = createProtocol({
+      authority,
+      manager: () => {
+        throw new Error("manager is not used by admission");
+      },
+      clock: () => now,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    const stored = await authority.artifacts.put(Buffer.from("pending attachment"));
+    const attachment = { ...stored, kind: "file" as const };
+    const conversationId = "conversation-pending-attachment";
+    const turnId = "rpc:pending-attachment";
+    const surfacePrincipal = "rpc:owner";
+    const ingress = {
+      kind: "first-party" as const,
+      surfacePrincipal,
+      deviceId: authority.deviceId,
+      ingressId: turnId,
+      receivedAt: now,
+    };
+    const requestId = `input:${protocolDigest("ConversationInputIdentity", 1, {
+      surfacePrincipal,
+      ingressId: turnId,
+    })}`;
+    const invocation = { kind: "agent" as const, source: "interactive" as const };
+    const source = {
+      principal: {
+        surfacePrincipal,
+        deviceId: authority.deviceId,
+        connectionId: "connection:local",
+      },
+      ingress,
+    };
+    const envelope = createInitialControlEnvelope({
+      requestId,
+      source,
+      at: now,
+      body: {
+        t: "input",
+        conversationId,
+        ingress: { ingressId: turnId, source: "first-party" },
+        input: { parts: [{ type: "text", text: "resume pending attachment" }] },
+        attachments: [attachment],
+        invocation,
+        ownerEpoch: authority.anchorEpoch,
+      },
+    });
+    await registerActiveConversation(authority, conversationId, now);
+    await authority.surfaceAssets.issue({
+      kind: "asset-upload",
+      scope: {
+        domain: "conversation",
+        conversationId,
+        ownerEpoch: authority.anchorEpoch,
+      },
+      surfacePrincipal,
+      requestId,
+      assets: [stored],
+      payloadDigest: envelope.payloadDigest,
+    });
+    await authority.authorityLog.append([
+      {
+        stream: "control",
+        body: { t: "received", requestId, envelope, ingress },
+      },
+    ]);
+    const adoption = vi.spyOn(authority.surfaceAssets, "assertUploadAdoption");
+    now = new Date(Date.parse(now) + 2 * 60 * 60 * 1_000).toISOString();
+
+    await expect(
+      protocol.admit({
+        conversationId,
+        input: "resume pending attachment",
+        attachments: [attachment],
+        invocation,
+        options: {
+          source: "interactive",
+          turnContext: { turnId },
+        },
+        surfacePrincipal,
+      }),
+    ).resolves.toMatchObject({ shouldSchedule: true });
+    expect(adoption).not.toHaveBeenCalled();
+    const records = (await authority.authorityLog.readStream("control"))
+      .map((entry) => entry.body as { t?: string; requestId?: string })
+      .filter((record) => record.requestId === requestId);
+    expect(records.map((record) => record.t)).toEqual(["received", "applied"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("recovers expired reservations on both resource-governor halves", async () => {
     const home = await createTempDir("conversation-protocol-resource-recovery");
     const secretStore = new MemorySecretStore();
@@ -271,7 +546,11 @@ describe("ConversationProtocolRuntime", () => {
       undefined,
       { durableTurnExecutor: protocol },
     );
-    const managed = await manager.getOrCreate("conversation-runtime-binding");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-runtime-binding",
+    );
     const execution = protocol.run({
       conversationId: managed.conversationId,
       input: "check binding",
@@ -459,7 +738,11 @@ describe("ConversationProtocolRuntime", () => {
       },
       durableTurnExecutor: protocol,
     });
-    const managed = await manager.getOrCreate("conversation-1");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-1",
+    );
     const runOptions = {
       source: "channel" as const,
       turnContext: {
@@ -711,7 +994,11 @@ describe("ConversationProtocolRuntime", () => {
       }),
       durableTurnExecutor: protocol,
     });
-    const managed = await manager.getOrCreate("conversation-shared-backpressure");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-shared-backpressure",
+    );
 
     const result = await projectSessionTurn({
       manager,
@@ -757,6 +1044,11 @@ describe("ConversationProtocolRuntime", () => {
       },
       surfacePrincipal: "rpc:owner",
     };
+    await registerActiveConversation(
+      authority,
+      input.conversationId,
+      new Date().toISOString(),
+    );
     const admitted = await protocol.admit(input);
     expect(admitted.shouldSchedule).toBe(true);
 
@@ -850,7 +1142,11 @@ describe("ConversationProtocolRuntime", () => {
       ...managerOptions(),
       durableTurnExecutor: protocol,
     });
-    const managed = await manager.getOrCreate("conversation-started");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-started",
+    );
     const generator = protocol.run({
       conversationId: managed.conversationId,
       input: "hello",
@@ -1003,7 +1299,11 @@ describe("ConversationProtocolRuntime", () => {
       undefined,
       { durableTurnExecutor: protocol },
     );
-    await manager.getOrCreate("conversation-cancel");
+    await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-cancel",
+    );
     const admitted = await protocol.admit({
       conversationId: "conversation-cancel",
       input: "cancel me",
@@ -1112,7 +1412,11 @@ describe("ConversationProtocolRuntime", () => {
       undefined,
       { durableTurnExecutor: protocol },
     );
-    await manager.getOrCreate("conversation-batch");
+    await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-batch",
+    );
     const admitted = await protocol.admit({
       conversationId: "conversation-batch",
       input: "cancel us all",
@@ -1240,7 +1544,11 @@ describe("ConversationProtocolRuntime", () => {
       ...callbacks(),
       durableTurnExecutor: protocol,
     });
-    const managed = await manager.getOrCreate("conversation-received");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-received",
+    );
     const crash = vi
       .spyOn(InProcessAssignmentSubmission.prototype, "startAndReport")
       .mockRejectedValueOnce(new Error("simulated process loss after received"));
@@ -1372,7 +1680,11 @@ describe("ConversationProtocolRuntime", () => {
       ...callbacks(),
       durableTurnExecutor: protocol,
     });
-    const managed = await manager.getOrCreate("conversation-admitted");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-admitted",
+    );
     const admitted = await protocol.admit({
       conversationId: "conversation-admitted",
       input: "survive restart",
@@ -1559,6 +1871,11 @@ describe("ConversationProtocolRuntime", () => {
       { durableTurnExecutor: protocol },
     );
     try {
+      await registerActiveConversation(
+        authority,
+        "conversation-admission-response-loss",
+        new Date().toISOString(),
+      );
       const admission = await protocol.admit({
         conversationId: "conversation-admission-response-loss",
         input: "recover the response",
@@ -1625,7 +1942,11 @@ describe("ConversationProtocolRuntime", () => {
       ...callbacks(),
       durableTurnExecutor: protocol,
     });
-    await manager.getOrCreate("conversation-perspective");
+    await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-perspective",
+    );
     const admitted = await protocol.admit({
       conversationId: "conversation-perspective",
       input: "compare the options",
@@ -2030,6 +2351,29 @@ describe("ConversationProtocolRuntime", () => {
       surfacePrincipal: "rpc:owner",
       connectionId: "connection:lifecycle-restart",
     });
+    const lifecycleAsset = await authority.artifacts.put(
+      Buffer.from("lifecycle attachment"),
+    );
+    const lifecyclePayload = protocolDigest("LifecycleSurfacePayload", 1, {
+      conversationId: "conversation-delete-restart",
+    });
+    await registerActiveConversation(
+      authority,
+      "conversation-delete-restart",
+      "2026-07-24T00:00:00.000Z",
+    );
+    const lifecycleGrant = await authority.surfaceAssets.issue({
+      kind: "asset-upload",
+      scope: {
+        domain: "conversation",
+        conversationId: "conversation-delete-restart",
+        ownerEpoch: authority.anchorEpoch,
+      },
+      surfacePrincipal: "rpc:owner",
+      requestId: "lifecycle:asset:1",
+      assets: [lifecycleAsset],
+      payloadDigest: lifecyclePayload,
+    });
     const write = await protocol.writeSession({
       conversationId: "conversation-delete-restart",
       requestId: "lifecycle:delete:1",
@@ -2063,6 +2407,47 @@ describe("ConversationProtocolRuntime", () => {
       mutation: "delete",
       domainRevision: 1,
     });
+    await expect(
+      restartedAuthority.surfaceAssets.assertUploadAdoption({
+        scope: {
+          domain: "conversation",
+          conversationId: "conversation-delete-restart",
+          ownerEpoch: restartedAuthority.anchorEpoch,
+        },
+        surfacePrincipal: "rpc:owner",
+        requestId: "lifecycle:asset:1",
+        assets: [lifecycleAsset],
+        payloadDigest: lifecyclePayload,
+      }),
+    ).rejects.toThrow("unknown or revoked");
+    await expect(
+      restartedAuthority.surfaceAssets.issue({
+        kind: "asset-upload",
+        scope: {
+          domain: "conversation",
+          conversationId: "conversation-delete-restart",
+          ownerEpoch: restartedAuthority.anchorEpoch,
+        },
+        surfacePrincipal: "rpc:owner",
+        requestId: "lifecycle:asset:1",
+        assets: [lifecycleAsset],
+        payloadDigest: lifecyclePayload,
+      }),
+    ).resolves.toEqual(lifecycleGrant);
+    await expect(
+      restartedAuthority.surfaceAssets.issue({
+        kind: "asset-upload",
+        scope: {
+          domain: "conversation",
+          conversationId: "conversation-delete-restart",
+          ownerEpoch: restartedAuthority.anchorEpoch,
+        },
+        surfacePrincipal: "rpc:owner",
+        requestId: "lifecycle:asset:after-delete",
+        assets: [lifecycleAsset],
+        payloadDigest: lifecyclePayload,
+      }),
+    ).rejects.toThrow("not owned");
     await expect(
       restartedProtocol.writeSession({
         conversationId: "conversation-delete-restart",
@@ -2186,7 +2571,11 @@ describe("ConversationProtocolRuntime", () => {
         durableTurnExecutor: protocol,
       },
     );
-    const managed = await manager.getOrCreate("conversation-post-commit");
+    const managed = await getOrCreateActiveConversation(
+      authority,
+      manager,
+      "conversation-post-commit",
+    );
     const result = await projectSessionTurn({
       manager,
       managed,

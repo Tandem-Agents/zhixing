@@ -2,9 +2,11 @@ export {
   byteDigest,
   canonicalize,
   compareCanonicalStrings,
+  createByteDigestAccumulator,
   protocolBytes,
   protocolDigest,
 } from "./canonical.js";
+export type { ByteDigestAccumulator } from "./canonical.js";
 export {
   DATA_PLANE_TICKET_KINDS,
   MAX_DATA_PLANE_TICKET_TTL_MS,
@@ -24,6 +26,19 @@ export {
   type FirstPartyInteractionDecision,
   type UnsignedDataPlaneTicket,
 } from "./data-plane-ticket.js";
+export {
+  assertSurfaceAssetGrantIssueBinding,
+  assertSurfaceAssetGrantUse,
+  createSignedSurfaceAssetGrant,
+  surfaceAssetGrantDigest,
+  validateContentAssetRefs,
+  validateSurfaceAssetGrant,
+  validateSurfaceAssetGrantIssueBinding,
+  type SurfaceAssetGrantIssueBinding,
+  type SurfaceAssetGrantOperationBinding,
+  type SurfaceAssetGrantUse,
+  type UnsignedSurfaceAssetGrant,
+} from "./surface-asset-grant.js";
 export {
   advanceStreamDigest,
   assertStreamFinalReconciliation,
@@ -115,6 +130,7 @@ export {
   validateJobSealedBundle,
   validateJobStagedMutationRecord,
   validateMutationBatch,
+  validateSealedBundle,
   validateStagedMutationRecord,
   validateTranscriptRunRecord,
   type ArtifactValue,
