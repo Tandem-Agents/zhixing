@@ -10,7 +10,10 @@ import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
-import { setupAuthorityRuntime } from "../setup-delivery.js";
+import {
+  type AuthorityRuntimeStack,
+  setupAuthorityRuntime,
+} from "../setup-delivery.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { createConversationExecutorLedger } from "./conversation-executor-ledger.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
@@ -55,6 +58,7 @@ export async function runExecutorRole(
   const writer = createStdoutWriter();
 
   let mesh: MeshRuntimeAssembly | undefined;
+  let authority: AuthorityRuntimeStack | undefined;
   try {
     const interactions = new DurableConversationInteractionObserver();
     const runtime = new ExecutorRuntimeSubstrate({
@@ -65,7 +69,7 @@ export async function runExecutorRole(
       interactions,
       deviceCapacity: deviceCapacity.workload("workload-interactive"),
     });
-    const authority = await setupAuthorityRuntime({
+    authority = await setupAuthorityRuntime({
       zhixingHome,
       secretStore: bootstrap.secretStore,
       deviceKey: bootstrap.mesh.deviceKey,
@@ -118,6 +122,7 @@ export async function runExecutorRole(
     await waitForRoleShutdown();
   } finally {
     await mesh?.stop();
+    authority?.stopStorageMaintenance();
     await mcpHub.dispose();
   }
 }

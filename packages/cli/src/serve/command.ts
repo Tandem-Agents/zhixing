@@ -861,11 +861,13 @@ async function runServerProcess(
   registerCoreCleanup(registry, {
     stateFile,
     heartbeatTimerRef,
+    authorityRuntime: ctx.authorityRuntime,
     scheduler,
     channels: ctx.channels,
     deliveryStack: ctx.deliveryStack,
     mcpHub: builtinExtraTools.mcpHub,
     startupCleanups: {
+      authorityRuntime: startupCleanups.authorityRuntime,
       scheduler: schedulerCleanup,
       channels: startupCleanups.channels,
       deliveryStack: startupCleanups.deliveryStack,

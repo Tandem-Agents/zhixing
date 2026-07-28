@@ -42,7 +42,8 @@ import type {
 import {
   maintenanceRetryDelayMs,
   runInMaintenanceContext,
-  runStorageMaintenanceTask,
+  runStorageMaintenanceStep,
+  storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
   waitForMaintenanceRetry,
@@ -53,6 +54,7 @@ const DEFAULT_UNADOPTED_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const MAX_SURFACE_ASSET_COLLECTION_REFS = 64;
 /** 启动恢复在段外重试背压的总时限;超过即按容量缺口 fail-closed。 */
 const RECOVERY_ADMISSION_DEADLINE_MS = 5_000;
+const COLLECTION_NEVER_ABORT = new AbortController().signal;
 
 type IssuedRecord = Extract<ControlRecord, { t: "asset-grant-issued" }>;
 type RevokedRecord = Extract<ControlRecord, { t: "asset-grant-revoked" }>;
@@ -122,6 +124,8 @@ export interface SurfaceAssetGrantLedger {
   ): Promise<readonly ArtifactTemporaryCandidate[]>;
   adoptedTemporary(limit: number): Promise<readonly ArtifactRef[]>;
   markTemporaryRemoved(ref: ArtifactRef): Promise<boolean>;
+  /** 进程停机时停止本账本拥有的存储维护任务。 */
+  stopStorageMaintenance?(): void;
 }
 
 export type SurfaceAssetGrantIssueRequest = SurfaceAssetGrantIssueBinding & {
@@ -211,14 +215,16 @@ export class SurfaceAssetCoordinator {
   readonly #deviceQuotaBytes: number;
   readonly #retentionMs: number;
   readonly #grantTtlMs: number;
-  readonly #maintenanceRunner: StorageMaintenanceTaskRunner | undefined;
+  readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #maintenanceResourceId: string;
   #recovered = false;
 
   private constructor(private readonly options: SurfaceAssetCoordinatorOptions) {
-    this.#maintenanceRunner = options.storageMaintenance
-      ? new StorageMaintenanceTaskRunner(options.storageMaintenance)
-      : undefined;
+    this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
+      options.storageMaintenance,
+    );
+    this.#storageMaintenance = options.storageMaintenance;
     this.#maintenanceResourceId =
       options.maintenanceResourceId ?? "surface-assets";
     this.#time = new NonRegressingAuthorityClock(
@@ -552,13 +558,30 @@ export class SurfaceAssetCoordinator {
           throw new Error("Adopted surface asset is not retained by authority");
         }
       }
-      await this.#drainAdoptedCleanup(MAX_SURFACE_ASSET_COLLECTION_REFS);
+      // 接管只确认耐久归属。临时副本已经由 lifecycle 候选事实持续追踪，
+      // 物理清理由锚点 GC owner 统一驱动，业务入口不得临时充当维护所有者。
     });
   }
 
-  async collectExpiredTemporaryAssets(): Promise<SurfaceAssetCollectionResult> {
+  async collectExpiredTemporaryAssets(
+    waiterAbort: AbortSignal = COLLECTION_NEVER_ABORT,
+  ): Promise<SurfaceAssetCollectionResult> {
     try {
-      return await this.#collectLocked();
+      // 一轮完整回收是一份义务:候选游标 = 本轮的淘汰时间前沿,同前沿触发
+      // 合流为一次执行,更强等待者提级。义务层不持任何容量 permit;
+      // 物理删除在设施串行区内各自准入。
+      const now = this.#time.observe();
+      const cutoff = new Date(now.ms - this.#retentionMs).toISOString();
+      return await this.#maintenanceRunner.run(
+        storageMaintenanceObligation(
+          "asset-gc",
+          this.#maintenanceResourceId,
+          { cutoff },
+          { owner: "anchor-asset-maintainer", obligation: "committed" },
+        ),
+        waiterAbort,
+        () => this.#collectLocked(now),
+      );
     } catch (error) {
       if (maintenanceRetryDelayMs(error) === undefined) throw error;
       // 串行段内的准入是零等待的,容量紧张时立刻拿到背压。回收整体幂等,
@@ -568,9 +591,21 @@ export class SurfaceAssetCoordinator {
     }
   }
 
-  async #collectLocked(): Promise<SurfaceAssetCollectionResult> {
+  /** 停止周期回收拥有的 GC 义务，不提前截断其下游账本所有者。 */
+  stopCollectionMaintenance(): void {
+    this.#maintenanceRunner.stop();
+  }
+
+  /** 进程存储层停机时，按所有权层级停止 GC、账本、投影和日志义务。 */
+  stopStorageMaintenance(): void {
+    this.stopCollectionMaintenance();
+    this.options.ledger.stopStorageMaintenance?.();
+  }
+
+  async #collectLocked(now: {
+    readonly ms: number;
+  }): Promise<SurfaceAssetCollectionResult> {
     return this.#runRecoveredIn(async () => {
-      const now = this.#time.observe();
       await this.#retireExpired(now.ms);
       const cleanup = await this.#drainAdoptedCleanup(
         MAX_SURFACE_ASSET_COLLECTION_REFS,
@@ -632,7 +667,7 @@ export class SurfaceAssetCoordinator {
       const results = await this.options.deleteUnreferencedArtifacts(
         selectedRefs,
         (operation) =>
-          this.#underCollectionPermit(
+          this.#admitGcStep(
             { step: "delete-unreferenced", count: selectedRefs.length },
             operation,
           ),
@@ -684,15 +719,15 @@ export class SurfaceAssetCoordinator {
   }
 
   /**
-   * 回收的叶级物理步骤统一经此取得容量:每个步骤只做 unlink,不查保留关系、
-   * 不更新权威状态,因此 permit 内不会再触发第二次治理准入。
+   * 回收物理删除步骤的容量准入。调用点必须已持有所属设施的串行权或排他锁:
+   * 先拿锁、后取容量、完成即释放——顺序反过来就是持 permit 等锁。
    */
-  async #underCollectionPermit<T>(
+  async #admitGcStep<T>(
     inputIdentity: unknown,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return runStorageMaintenanceTask(
-      this.#maintenanceRunner,
+    return runStorageMaintenanceStep(
+      this.#storageMaintenance,
       storageMaintenanceRequest(
         "asset-gc",
         this.#maintenanceResourceId,
@@ -703,18 +738,27 @@ export class SurfaceAssetCoordinator {
     );
   }
 
-  /** 临时区的物理删除 —— partial 与完整临时件一并清除。 */
+  /** 临时区的物理删除 —— partial 与完整临时件各自在设施串行区内准入后清除。 */
   async #discardTemporary(
     ref: ArtifactRef,
   ): Promise<{ readonly partial: boolean; readonly complete: boolean }> {
-    return this.#underCollectionPermit(
-      { step: "discard-temporary", digest: ref.digest },
-      async () => {
-        const partial = await this.options.receiver.discard(ref);
-        const complete = await this.options.temporaryArtifacts.discard(ref);
-        return { partial, complete };
-      },
+    const partial = await this.options.receiver.discard(
+      ref,
+      (operation) =>
+        this.#admitGcStep(
+          { step: "discard-partial", digest: ref.digest },
+          operation,
+        ),
     );
+    const complete = await this.options.temporaryArtifacts.discard(
+      ref,
+      (operation) =>
+        this.#admitGcStep(
+          { step: "discard-temporary", digest: ref.digest },
+          operation,
+        ),
+    );
+    return { partial, complete };
   }
 
   async #withGrantOperation<T>(
@@ -801,7 +845,8 @@ export class SurfaceAssetCoordinator {
     this.#time.reset(snapshot.durableTime);
     await this.options.ledger.synchronize();
     await this.#retireExpired(this.#time.observe().ms);
-    await this.#drainRecoveryAdoptedCleanup();
+    // 恢复只重建耐久状态。锚点维护器会在启动时立即执行首轮 GC，
+    // adopted cleanup 不得绕过其义务协调器落到恢复串行段内。
     this.#recovered = true;
   }
 
@@ -907,25 +952,26 @@ export class SurfaceAssetCoordinator {
     let hasMore = candidates.length === limit;
     for (const ref of candidates) {
       if (this.#hasPin(ref.digest)) continue;
-      const partial = await this.options.receiver.discard(ref);
-      const complete = await this.options.temporaryArtifacts.discard(ref);
-      if (partial || complete) removed += 1;
-      if (!(await this.options.ledger.markTemporaryRemoved(ref))) {
-        hasMore = true;
+      try {
+        // 与过期临时件走同一条受治理删除路径。同一类物理删除在同一个文件里分成
+        // 受治理与不受治理两条,正是本单元反复裁决的合同分叉。
+        const discarded = await this.#discardTemporary(ref);
+        // 记账紧跟物理副作用:出账晚于下一步,而下一步(权威状态更新)自己也会
+        // 取容量、也会背压,那个插点上文件已经删了、报告却说没删。
+        if (discarded.partial || discarded.complete) removed += 1;
+        if (!(await this.options.ledger.markTemporaryRemoved(ref))) {
+          hasMore = true;
+        }
+      } catch (error) {
+        // 顺带清理是可推迟的维护:候选来自耐久的 adopted 集合,本轮不做,下一轮
+        // GC 会捡起。把容量背压上抛会让接管与 pin 释放这些业务路径因为一次维护
+        // 拿不到容量而失败。判据复用单源实现,不在这里重写。
+        if (maintenanceRetryDelayMs(error) === undefined) throw error;
+        return { processed, removed, hasMore: true };
       }
       processed += 1;
     }
     return { processed, removed, hasMore };
-  }
-
-  async #drainRecoveryAdoptedCleanup(): Promise<void> {
-    while (true) {
-      const result = await this.#drainAdoptedCleanup(
-        MAX_SURFACE_ASSET_COLLECTION_REFS,
-      );
-      if (!result.hasMore || result.processed === 0) return;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
   }
 
   async #appendLedger(
@@ -950,8 +996,8 @@ export class SurfaceAssetCoordinator {
   }
 
   async #finishPin(pin: OperationPin): Promise<void> {
-    if (!this.#pins.delete(pin.id)) return;
-    await this.#drainAdoptedCleanup(MAX_SURFACE_ASSET_COLLECTION_REFS);
+    // pin 释放只改变 GC 的资格；耐久候选留给唯一 GC owner 在下一轮消费。
+    this.#pins.delete(pin.id);
   }
 
   #hasPin(digest: string): boolean {

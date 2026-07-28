@@ -13,7 +13,9 @@ import type {
 import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
-  runStorageMaintenanceTask,
+  currentMaintenanceAbortSignal,
+  runStorageMaintenanceStep,
+  storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
   type StorageMaintenanceGovernorPort,
@@ -44,6 +46,7 @@ import type {
   ArtifactRetentionSnapshot,
   DurableLogCheckpoint,
   MutableArtifactStore,
+  PhysicalStorageStepRunner,
 } from "./interfaces.js";
 import type { FileAuthorityCommitLog } from "./commit-log.js";
 import type { FileResumableArtifactReceiver } from "./assignment-artifacts.js";
@@ -102,6 +105,8 @@ export interface ArtifactLifecycleIndexOptions {
     "progress" | "visitPartialReferences" | "openPartialReferenceCursor"
   >;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  /** 规范维护身份中的物理 ArtifactStore 标识；生产装配必须传真实存储根。 */
+  readonly maintenanceResourceId?: string;
 }
 
 export interface ArtifactQuotaSnapshot {
@@ -125,6 +130,10 @@ interface LifecycleSource {
   readonly log: FileAuthorityCommitLog;
   readonly origin: DurableLogCheckpoint;
 }
+
+type LifecycleSourceHeads = Readonly<
+  Record<string, DurableLogCheckpoint>
+>;
 
 interface LifecycleDigestState {
   readonly ref: ArtifactRef;
@@ -229,6 +238,7 @@ interface TemporaryReconciliationSession {
   presence?: TemporaryPresenceReconciliationCursor;
   references?: ArtifactReferenceCursor;
   readonly queued: ArtifactRef[];
+  referencePage: number;
   current?: ArtifactRef;
 }
 
@@ -239,6 +249,9 @@ interface TemporaryReconciliationSession {
  */
 export class ArtifactLifecycleIndex {
   readonly #queue = new SerialTaskQueue();
+  readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
+  readonly #maintenanceResourceId: string;
   readonly #index: FileDurableProjectionIndex;
   readonly #records: DurableProjectionReadContext;
   readonly #artifacts: ArtifactStore;
@@ -249,8 +262,6 @@ export class ArtifactLifecycleIndex {
     "progress" | "visitPartialReferences" | "openPartialReferenceCursor"
   >;
   readonly #logs: readonly FileAuthorityCommitLog[];
-  readonly #maintenanceRunner: StorageMaintenanceTaskRunner | undefined;
-  readonly #maintenanceResourceId: string;
   #sources: readonly LifecycleSource[] | undefined;
   #retentionRebuildRequired = false;
   #temporaryReconciliation: TemporaryReconciliationSession | undefined;
@@ -264,36 +275,56 @@ export class ArtifactLifecycleIndex {
     this.#temporaryArtifacts = options.temporaryArtifacts;
     this.#temporaryPresence = options.temporaryPresence;
     this.#receiver = options.receiver;
-    this.#maintenanceRunner = options.storageMaintenance
-      ? new StorageMaintenanceTaskRunner(options.storageMaintenance)
-      : undefined;
-    this.#maintenanceResourceId = path.resolve(options.rootDir);
+    this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
+      options.storageMaintenance,
+    );
+    this.#storageMaintenance = options.storageMaintenance;
+    this.#maintenanceResourceId = path.resolve(
+      options.maintenanceResourceId ?? options.rootDir,
+    );
     this.#index = new FileDurableProjectionIndex({
       rootDir: path.join(options.rootDir, "artifact-lifecycle"),
       projectionId: "artifact-lifecycle",
       reducerVersion: 3,
+      // 内部投影必须拿到同一个 governor:它的 flush/compaction/rebuild 是本索引
+      // 唯一的耐久写叶,不注入就等于这些写永远不进设备容量裁决。
+      storageMaintenance: options.storageMaintenance,
+      // 只包数据读取本身；投影退休清理由投影 owner 在该 permit 释放后独立准入，
+      // 否则 lifecycle-reconcile 与 projection-compaction 会形成容量嵌套。
+      runReadStep: (inputIdentity, operation) =>
+        this.#runLifecycleStep(inputIdentity, operation),
     });
     this.#records = createBoundDurableProjectionReadContext(this.#index);
   }
 
   async synchronize(): Promise<void> {
-    let more = true;
-    while (more) {
-      const checkpoints = await Promise.all(
-        this.#logs.map((log) => log.checkpoint()),
-      );
-      more = await runStorageMaintenanceTask(
-        this.#maintenanceRunner,
-        storageMaintenanceRequest(
-          "lifecycle-reconcile",
-          this.#maintenanceResourceId,
-          checkpoints,
-          { obligation: "committed" },
-        ),
-        () => this.#synchronizeBounded(),
-      );
-      if (more) await yieldToEventLoop();
-    }
+    // 完整 reconcile 的身份只取触发时冻结的源日志头；派生索引同步位会随每页
+    // 发布变化，不能进入义务键，否则同一目标在推进途中会裂成多个任务。
+    const sources = await this.#initialize();
+    const sourceHeads = await this.#captureSourceHeads(sources);
+    await this.#maintenanceRunner.run(
+      storageMaintenanceObligation(
+        "lifecycle-reconcile",
+        this.#maintenanceResourceId,
+        { sourceHeads },
+        { owner: "artifact-lifecycle-index", obligation: "committed" },
+      ),
+      currentMaintenanceAbortSignal(),
+      async () => {
+        let more = true;
+        while (more) {
+          more = await this.#synchronizeBounded(sourceHeads);
+          if (more) await yieldToEventLoop();
+        }
+      },
+    );
+  }
+
+  /** 进程停机时取消生命周期、内部投影及源日志拥有的维护义务。 */
+  stopStorageMaintenance(): void {
+    this.#maintenanceRunner.stop();
+    this.#index.stopStorageMaintenance();
+    for (const log of this.#logs) log.stopStorageMaintenance();
   }
 
   async #runSynchronized<T>(operation: () => Promise<T>): Promise<T> {
@@ -310,22 +341,58 @@ export class ArtifactLifecycleIndex {
     }
   }
 
-  async #synchronizeBounded(): Promise<boolean> {
-    return this.#queue.run(async () => {
-      const sources = await this.#initialize();
-      if (this.#retentionRebuildRequired) {
-        await this.#reset(sources);
-        this.#retentionRebuildRequired = false;
-        return true;
-      }
-      try {
-        return await this.#advanceBounded(sources);
-      } catch (error) {
-        if (!isRebuildableProjectionFailure(error)) throw error;
-        await this.#reset(sources);
-        return true;
-      }
-    });
+  async #synchronizeBounded(
+    sourceHeads: LifecycleSourceHeads,
+  ): Promise<boolean> {
+    return this.#queue.run(() => this.#synchronizeBoundedLocked(sourceHeads));
+  }
+
+  #runLifecycleStep<T>(
+    inputIdentity: unknown,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return runStorageMaintenanceStep(
+      this.#storageMaintenance,
+      storageMaintenanceRequest(
+        "lifecycle-reconcile",
+        this.#maintenanceResourceId,
+        inputIdentity,
+        { obligation: "committed" },
+      ),
+      operation,
+    );
+  }
+
+  #referencePageRunner(
+    session: TemporaryReconciliationSession,
+    phase: "legacy" | "partial",
+  ): PhysicalStorageStepRunner {
+    return (operation) => {
+      const page = session.referencePage;
+      session.referencePage = page + 1;
+      return this.#runLifecycleStep(
+        { step: "temporary-reference-page", phase, page },
+        operation,
+      );
+    };
+  }
+
+  async #synchronizeBoundedLocked(
+    sourceHeads: LifecycleSourceHeads,
+  ): Promise<boolean> {
+    const sources = await this.#initialize();
+    if (this.#retentionRebuildRequired) {
+      await this.#reset(sources);
+      this.#retentionRebuildRequired = false;
+      return true;
+    }
+    try {
+      return await this.#advanceBounded(sources, sourceHeads);
+    } catch (error) {
+      if (!isRebuildableProjectionFailure(error)) throw error;
+      await this.#reset(sources);
+      return true;
+    }
   }
 
   async releasedBefore(
@@ -615,9 +682,14 @@ export class ArtifactLifecycleIndex {
           "Temporary cleanup",
         );
         const lifecycle = await this.#state(indexed.digest);
-        if (!lifecycle || !isRetained(lifecycle)) {
+        // cleanup 记录只反绑主状态存在,不要求仍被保留:接管后、清扫前会话即
+        // 删除的叶子会以"已释放 + cleanup 未清"的组合存在,其临时副本照样要清
+        // ——主字节的保留窗管的是正式存储,与临时副本的物理清理无关。若这里
+        // 要求 isRetained,该组合会永久抛投影损坏,重建后从日志重放得到同一
+        // 状态再抛,GC 从此停摆。
+        if (!lifecycle) {
           throw invalidLifecycleProjection(
-            "Temporary cleanup has no retained canonical state",
+            "Temporary cleanup has no canonical state",
           );
         }
         references.push(lifecycle.ref);
@@ -784,8 +856,12 @@ export class ArtifactLifecycleIndex {
 
   async #advanceBounded(
     sources: readonly LifecycleSource[],
+    sourceHeads: LifecycleSourceHeads,
   ): Promise<boolean> {
-    const sourcesLagging = await this.#synchronizeSources(sources);
+    const sourcesLagging = await this.#synchronizeSources(
+      sources,
+      sourceHeads,
+    );
     let maintenanceLagging = false;
     for (let turn = 0; turn < MAX_SYNCHRONIZATION_TURNS; turn += 1) {
       const retirementLagging = await this.#drainRetirementJobs();
@@ -822,11 +898,16 @@ export class ArtifactLifecycleIndex {
       phase: "presence",
       presence: this.#temporaryPresence.openReconciliationCursor(),
       queued: [],
+      referencePage: 0,
     };
     if (session.phase === "presence") {
       const page = await session.presence!.next(SOURCE_PAGE_SIZE);
       for (const { ref, scopeIdentity } of page.entries) {
-        const progress = await this.#receiver.progress(ref);
+        const progress = await this.#receiver.progress(
+          ref,
+          (identity, operation) =>
+            this.#runLifecycleStep(identity, operation),
+        );
         if (!hasDurableTemporary(progress)) {
           await this.#temporaryPresence.remove(ref, scopeIdentity);
           continue;
@@ -837,7 +918,10 @@ export class ArtifactLifecycleIndex {
         await session.presence!.close();
         session.presence = undefined;
         session.phase = "legacy";
-        session.references = this.#temporaryArtifacts.openReferenceCursor();
+        session.references = this.#temporaryArtifacts.openReferenceCursor(
+          this.#referencePageRunner(session, "legacy"),
+        );
+        session.referencePage = 0;
       }
       return true;
     }
@@ -862,7 +946,10 @@ export class ArtifactLifecycleIndex {
     session.references = undefined;
     if (session.phase === "legacy") {
       session.phase = "partial";
-      session.references = this.#receiver.openPartialReferenceCursor();
+      session.referencePage = 0;
+      session.references = this.#receiver.openPartialReferenceCursor(
+        this.#referencePageRunner(session, "partial"),
+      );
       return true;
     }
     const buffer = new MutationBuffer(this.#records);
@@ -904,9 +991,11 @@ export class ArtifactLifecycleIndex {
         "Temporary cleanup",
       );
       const lifecycle = await this.#state(cleanup.digest);
-      if (!lifecycle || !isRetained(lifecycle)) {
+      // 同 `adoptedTemporary`:cleanup 只要求主状态存在。恢复扫描撞见"已释放 +
+      // cleanup 未清"的叶子是合法中间态,不是损坏。
+      if (!lifecycle) {
         throw invalidLifecycleProjection(
-          "Temporary cleanup has no retained canonical state",
+          "Temporary cleanup has no canonical state",
         );
       }
       assertCompatibleReference(lifecycle.ref, ref);
@@ -1037,7 +1126,11 @@ export class ArtifactLifecycleIndex {
         entry.key,
         "Temporary artifact intent",
       );
-      const progress = await this.#receiver.progress(intent.ref);
+      const progress = await this.#receiver.progress(
+        intent.ref,
+        (identity, operation) =>
+          this.#runLifecycleStep(identity, operation),
+      );
       if (!hasDurableTemporary(progress)) {
         await this.#temporaryPresence.remove(
           intent.ref,
@@ -1066,9 +1159,14 @@ export class ArtifactLifecycleIndex {
 
   async #synchronizeSources(
     sources: readonly LifecycleSource[],
+    sourceHeads: LifecycleSourceHeads,
   ): Promise<boolean> {
     let hasMore = false;
     for (const source of sources) {
+      const sourceHead = sourceHeads[source.id];
+      if (!sourceHead || sourceHead.logId !== source.id) {
+        throw new Error("Artifact lifecycle source head is invalid");
+      }
       for (
         let pageIndex = 0;
         pageIndex < MAX_SYNCHRONIZATION_TURNS;
@@ -1076,11 +1174,36 @@ export class ArtifactLifecycleIndex {
       ) {
         const checkpoints = this.#index.checkpoints();
         const checkpoint = checkpoints[source.id] ?? source.origin;
+        if (checkpoint.lsn >= sourceHead.lsn) {
+          if (
+            checkpoint.lsn === sourceHead.lsn &&
+            !sameCheckpoint(checkpoint, sourceHead)
+          ) {
+            throw new Error(
+              "Artifact lifecycle source head disagrees with its checkpoint",
+            );
+          }
+          break;
+        }
+        const remaining = sourceHead.lsn - checkpoint.lsn;
         const page = await source.log.readTail<JsonValue>(
           checkpoint,
-          SOURCE_PAGE_SIZE,
+          Math.min(SOURCE_PAGE_SIZE, remaining),
+          (operation) =>
+            this.#runLifecycleStep(
+              {
+                step: "source-tail",
+                source: source.id,
+                checkpoint,
+              },
+              operation,
+            ),
         );
-        if (page.commits.length === 0) break;
+        if (page.commits.length === 0) {
+          throw new Error(
+            "Artifact lifecycle source ended before its frozen head",
+          );
+        }
         const buffer = new MutationBuffer(this.#records);
         for (const envelope of page.commits) {
           await this.#applyEnvelope(source.id, envelope, buffer);
@@ -1089,13 +1212,27 @@ export class ArtifactLifecycleIndex {
           ...checkpoints,
           [source.id]: page.checkpoint,
         });
-        if (!page.hasMore) break;
+        if (page.checkpoint.lsn >= sourceHead.lsn) break;
         if (pageIndex === MAX_SYNCHRONIZATION_TURNS - 1) {
           hasMore = true;
         }
       }
     }
     return hasMore;
+  }
+
+  async #captureSourceHeads(
+    sources: readonly LifecycleSource[],
+  ): Promise<LifecycleSourceHeads> {
+    const entries: Array<readonly [string, DurableLogCheckpoint]> = [];
+    for (const source of sources) {
+      const checkpoint = await source.log.checkpoint();
+      if (checkpoint.logId !== source.id) {
+        throw new Error("Artifact lifecycle source identity changed");
+      }
+      entries.push([source.id, checkpoint]);
+    }
+    return Object.fromEntries(entries);
   }
 
   async #applyEnvelope(

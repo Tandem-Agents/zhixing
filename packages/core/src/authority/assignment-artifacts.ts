@@ -22,7 +22,10 @@ import {
   ensureDurableDirectory,
   syncDirectory,
 } from "../persistence/index.js";
-import { claimDeviceCapacity } from "../resources/index.js";
+import {
+  claimDeviceCapacity,
+  runHoldingMaintenanceExclusion,
+} from "../resources/index.js";
 import {
   assertArtifactRef,
   artifactDigestHex,
@@ -31,6 +34,7 @@ import {
 import type {
   ArtifactReferenceCursor,
   ArtifactStore,
+  PhysicalStorageStepRunner,
 } from "./interfaces.js";
 import { AuthorityStorageError } from "./errors.js";
 
@@ -55,6 +59,11 @@ export interface ArtifactReceiveProgress {
   readonly receivedBytes: number;
   readonly complete: boolean;
 }
+
+type IdentifiedPhysicalStepRunner = <T>(
+  inputIdentity: unknown,
+  operation: () => Promise<T>,
+) => Promise<T>;
 
 export interface FileResumableArtifactReceiverOptions {
   readonly maxArtifactBytes: number;
@@ -266,17 +275,31 @@ export class FileResumableArtifactReceiver {
     assertRangeInteger(this.#maxChunkBytes, "Maximum artifact chunk bytes", false);
   }
 
-  async progress(ref: ArtifactRef): Promise<ArtifactReceiveProgress> {
+  async progress(
+    ref: ArtifactRef,
+    runPhysicalStep: IdentifiedPhysicalStepRunner = (_identity, operation) =>
+      operation(),
+  ): Promise<ArtifactReceiveProgress> {
     this.#assertAcceptable(ref);
     return this.#serial(ref.digest, async () => {
-      if (await this.store.has(ref)) {
-        return { receivedBytes: ref.bytes, complete: true };
+      const progress = await runPhysicalStep(
+        { step: "temporary-progress-probe", digest: ref.digest, bytes: ref.bytes },
+        async () => {
+          if (await this.store.has(ref)) {
+            return { receivedBytes: ref.bytes, complete: true };
+          }
+          const receivedBytes = await this.#partialSize(ref);
+          return { receivedBytes, complete: false };
+        },
+      );
+      if (
+        !progress.complete &&
+        ref.bytes > 0 &&
+        progress.receivedBytes === ref.bytes
+      ) {
+        return this.#finalizePartial(ref, runPhysicalStep);
       }
-      const receivedBytes = await this.#partialSize(ref);
-      if (ref.bytes > 0 && receivedBytes === ref.bytes) {
-        return this.#finalizePartial(ref);
-      }
-      return { receivedBytes, complete: false };
+      return progress;
     });
   }
 
@@ -422,14 +445,21 @@ export class FileResumableArtifactReceiver {
     }
   }
 
-  openPartialReferenceCursor(): ArtifactReferenceCursor {
-    return new FilePartialReferenceCursor(this.rootDir);
+  openPartialReferenceCursor(
+    runPhysicalStep: PhysicalStorageStepRunner = (operation) => operation(),
+  ): ArtifactReferenceCursor {
+    return new FilePartialReferenceCursor(this.rootDir, runPhysicalStep);
   }
 
-  async discard(ref: ArtifactRef): Promise<boolean> {
+  async discard(
+    ref: ArtifactRef,
+    runPhysicalStep: PhysicalStorageStepRunner = (operation) => operation(),
+  ): Promise<boolean> {
     this.#assertAcceptable(ref);
+    // 先取得按 digest 的串行权,再在真正的 unlink 前执行调用方给的准入包装——
+    // 顺序不可反:反过来会先持容量等串行段,单槽设备上形成自锁。
     return this.#serial(ref.digest, async () =>
-      this.#removePartial(this.#partialPath(ref))
+      runPhysicalStep(() => this.#removePartial(this.#partialPath(ref))),
     );
   }
 
@@ -457,20 +487,38 @@ export class FileResumableArtifactReceiver {
     return path.join(this.rootDir, `${artifactDigestHex(ref)}.${ref.bytes}.part`);
   }
 
-  async #finalizePartial(ref: ArtifactRef): Promise<ArtifactReceiveProgress> {
+  async #finalizePartial(
+    ref: ArtifactRef,
+    runPhysicalStep: IdentifiedPhysicalStepRunner = (_identity, operation) =>
+      operation(),
+  ): Promise<ArtifactReceiveProgress> {
     const partialPath = this.#partialPath(ref);
     try {
-      await this.store.putVerifiedStream(ref, readFileChunks(partialPath));
+      await this.store.putVerifiedStream(
+        ref,
+        readFileChunks(partialPath),
+        (operation) =>
+          runPhysicalStep(
+            { step: "temporary-finalize", digest: ref.digest, bytes: ref.bytes },
+            operation,
+          ),
+      );
     } catch (error) {
       if (
         error instanceof AuthorityStorageError &&
         error.code === "artifact-corrupt"
       ) {
-        await this.#removePartial(partialPath);
+        await runPhysicalStep(
+          { step: "temporary-remove-corrupt-partial", digest: ref.digest },
+          () => this.#removePartial(partialPath),
+        );
       }
       throw error;
     }
-    await this.#removePartial(partialPath);
+    await runPhysicalStep(
+      { step: "temporary-remove-finalized-partial", digest: ref.digest },
+      () => this.#removePartial(partialPath),
+    );
     return { receivedBytes: ref.bytes, complete: true };
   }
 
@@ -488,7 +536,9 @@ export class FileResumableArtifactReceiver {
     this.#operations.set(key, queued);
     await previous;
     try {
-      return await operation();
+      // 按 digest 的串行段同样是互斥区:段内的容量准入必须零等待,谓词由建立
+      // 互斥的原语单点给出,不依赖调用方恰好已在别的互斥区里。
+      return await runHoldingMaintenanceExclusion(operation);
     } finally {
       release();
       if (this.#operations.get(key) === queued) this.#operations.delete(key);
@@ -500,7 +550,10 @@ class FilePartialReferenceCursor implements ArtifactReferenceCursor {
   #entries: Dir | undefined;
   #done = false;
 
-  constructor(private readonly rootDir: string) {}
+  constructor(
+    private readonly rootDir: string,
+    private readonly runPhysicalStep: PhysicalStorageStepRunner,
+  ) {}
 
   async next(limit: number): Promise<{
     readonly references: readonly ArtifactRef[];
@@ -508,57 +561,59 @@ class FilePartialReferenceCursor implements ArtifactReferenceCursor {
   }> {
     assertRangeInteger(limit, "Partial reference cursor limit", false);
     if (this.#done) return { references: [], done: true };
-    const references: ArtifactRef[] = [];
-    if (!this.#entries) {
-      claimDeviceCapacity("ioOperations", 1);
-      try {
-        this.#entries = await opendir(this.rootDir);
-      } catch (error) {
-        if (!isMissingFile(error)) throw error;
-        this.#done = true;
-        return { references, done: true };
+    return this.runPhysicalStep(async () => {
+      const references: ArtifactRef[] = [];
+      if (!this.#entries) {
+        claimDeviceCapacity("ioOperations", 1);
+        try {
+          this.#entries = await opendir(this.rootDir);
+        } catch (error) {
+          if (!isMissingFile(error)) throw error;
+          this.#done = true;
+          return { references, done: true };
+        }
       }
-    }
-    let inspected = 0;
-    while (inspected < limit) {
-      claimDeviceCapacity("ioOperations", 1);
-      const entry = await this.#entries.read();
-      inspected += 1;
-      if (!entry) {
-        await this.#entries.close();
-        this.#entries = undefined;
-        this.#done = true;
-        break;
+      let inspected = 0;
+      while (inspected < limit) {
+        claimDeviceCapacity("ioOperations", 1);
+        const entry = await this.#entries.read();
+        inspected += 1;
+        if (!entry) {
+          await this.#entries.close();
+          this.#entries = undefined;
+          this.#done = true;
+          break;
+        }
+        const match = /^([a-f0-9]{64})\.([0-9]+)\.part$/u.exec(entry.name);
+        if (!entry.isFile() || !match) continue;
+        const bytes = Number(match[2]);
+        if (!Number.isSafeInteger(bytes) || bytes < 0) {
+          throw new AuthorityStorageError(
+            "artifact-corrupt",
+            "Artifact partial declares an invalid byte count",
+          );
+        }
+        claimDeviceCapacity("ioOperations", 1);
+        let metadata;
+        try {
+          metadata = await stat(path.join(this.rootDir, entry.name));
+        } catch (error) {
+          if (isMissingFile(error)) continue;
+          throw error;
+        }
+        if (metadata.size > bytes) {
+          throw new AuthorityStorageError(
+            "artifact-corrupt",
+            "Artifact partial exceeds its declared byte count",
+          );
+        }
+        references.push({
+          digest: `sha256:${match[1]}`,
+          bytes,
+        });
       }
-      const match = /^([a-f0-9]{64})\.([0-9]+)\.part$/u.exec(entry.name);
-      if (!entry.isFile() || !match) continue;
-      const bytes = Number(match[2]);
-      if (!Number.isSafeInteger(bytes) || bytes < 0) {
-        throw new AuthorityStorageError(
-          "artifact-corrupt",
-          "Artifact partial declares an invalid byte count",
-        );
-      }
-      claimDeviceCapacity("ioOperations", 1);
-      let metadata;
-      try {
-        metadata = await stat(path.join(this.rootDir, entry.name));
-      } catch (error) {
-        if (isMissingFile(error)) continue;
-        throw error;
-      }
-      if (metadata.size > bytes) {
-        throw new AuthorityStorageError(
-          "artifact-corrupt",
-          "Artifact partial exceeds its declared byte count",
-        );
-      }
-      references.push({
-        digest: `sha256:${match[1]}`,
-        bytes,
-      });
-    }
-    return { references, done: this.#done };
+      return { references, done: this.#done };
+    });
   }
 
   async close(): Promise<void> {

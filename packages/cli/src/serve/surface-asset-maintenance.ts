@@ -57,6 +57,7 @@ export class SurfaceAssetMaintenance {
   async stop(): Promise<void> {
     this.#stopped = true;
     this.#abort.abort();
+    this.options.surfaceAssets.stopCollectionMaintenance?.();
     if (this.#timer) {
       clearInterval(this.#timer);
       this.#timer = undefined;
@@ -84,7 +85,9 @@ export class SurfaceAssetMaintenance {
       // 权威状态更新,外层持 permit 会让内层的生命周期准入嵌套在自己之内,单槽
       // 设备上直接自锁。容量在叶级物理步骤各自取得。
       const result = await runInMaintenanceContext("background", () =>
-        this.options.surfaceAssets.collectExpiredTemporaryAssets(),
+        this.options.surfaceAssets.collectExpiredTemporaryAssets(
+          this.#abort.signal,
+        ),
       );
       if (
         shouldContinueSurfaceAssetCollection(result) &&
@@ -98,6 +101,7 @@ export class SurfaceAssetMaintenance {
         this.#continuation.unref();
       }
     } catch (error) {
+      if (this.#stopped) return;
       this.options.onError?.(
         error instanceof Error ? error : new Error(String(error)),
       );

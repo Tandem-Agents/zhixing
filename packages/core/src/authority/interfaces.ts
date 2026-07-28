@@ -10,6 +10,10 @@ import type {
   RebuildableDurableProjectionIndex,
 } from "./durable-projection-index.js";
 
+export type PhysicalStorageStepRunner = <T>(
+  operation: () => Promise<T>,
+) => Promise<T>;
+
 export interface ArtifactStore {
   put(bytes: Uint8Array): Promise<ArtifactRef>;
   /**
@@ -20,6 +24,7 @@ export interface ArtifactStore {
   putVerifiedStream(
     ref: ArtifactRef,
     chunks: AsyncIterable<Uint8Array>,
+    runPhysicalStep?: PhysicalStorageStepRunner,
   ): Promise<void>;
   get(ref: ArtifactRef): Promise<Uint8Array>;
   /** Reads at most `limit` bytes without materializing the complete artifact. */
@@ -41,8 +46,14 @@ export interface MutableArtifactStore extends ArtifactStore {
   /**
    * Removes a disposable copy by declared path without re-reading its content.
    * Callers must not use this for the authority's retained primary copy.
+   * The physical removal step is wrapped by the caller-supplied runner so
+   * capacity admission happens inside the store's exclusive section, never
+   * while waiting for it.
    */
-  discard(ref: ArtifactRef): Promise<boolean>;
+  discard(
+    ref: ArtifactRef,
+    runPhysicalStep?: PhysicalStorageStepRunner,
+  ): Promise<boolean>;
   /** Visits stored references without materializing the complete namespace. */
   visitReferences(
     visitor: (ref: ArtifactRef) => void | Promise<void>,
@@ -51,7 +62,9 @@ export interface MutableArtifactStore extends ArtifactStore {
    * Opens a bounded physical scan. Cursor progress is process-local; every
    * returned reference is independently recoverable from the store.
    */
-  openReferenceCursor(): ArtifactReferenceCursor;
+  openReferenceCursor(
+    runPhysicalStep?: PhysicalStorageStepRunner,
+  ): ArtifactReferenceCursor;
   list(): Promise<readonly ArtifactRef[]>;
 }
 

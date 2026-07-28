@@ -13,8 +13,17 @@ import type { StorageMaintenanceUrgency } from "./storage-maintenance.js";
  * 因为"自己是恢复逻辑"就恒定报恢复。
  */
 export interface MaintenanceExecutionContext {
-  /** 当前有用户或权威操作在等它为前台;恢复可用性但无调用等待为恢复;其余为后台 */
-  readonly urgency: StorageMaintenanceUrgency;
+  /**
+   * 读取当前紧急度。以函数承载而不是快照值:义务级维护任务在同键合流后仍可被
+   * 更强等待者提级,其内部叶步骤的准入必须读到提级后的值,静态快照会把整段
+   * 义务锁死在启动时的优先级上。静态声明点一律包成常量函数。
+   */
+  readonly urgency: () => StorageMaintenanceUrgency;
+  /**
+   * 当前完整维护义务的共享取消信号。叶级容量排队和步骤开始前的安全检查点
+   * 必须读取这一信号；它不代表单个等待者，也不携带或继承任何容量 permit。
+   */
+  readonly abort: AbortSignal;
   /**
    * 当前调用栈是否持有文件锁或处于串行段。持有时准入必须零等待:
    * 排队等待会把锁的持有时间拉长到准入超时,阻塞所有其他持锁者。
@@ -23,6 +32,7 @@ export interface MaintenanceExecutionContext {
 }
 
 const maintenanceContext = new AsyncLocalStorage<MaintenanceExecutionContext>();
+const neverAbortMaintenance = new AbortController().signal;
 
 /**
  * 声明这段调用的真实阻塞关系,互斥标记继承。
@@ -39,7 +49,48 @@ export function runInMaintenanceContext<T>(
 ): Promise<T> {
   return maintenanceContext.run(
     {
+      urgency: () => urgency,
+      abort: maintenanceContext.getStore()?.abort ?? neverAbortMaintenance,
+      holdingExclusion: maintenanceContext.getStore()?.holdingExclusion ?? false,
+    },
+    operation,
+  );
+}
+
+/**
+ * 为延后执行且已经转交给耐久维护 owner 的工作建立全新语境。
+ *
+ * Node 会把 AsyncLocalStorage 传播进 timer；直接在 timer 中继续会错误继承
+ * 原调用者的紧急度、取消信号和互斥标记。只有具备独立耐久重试凭据、且由
+ * 自身 owner 接管生命周期的后台续跑可以使用本原语。
+ */
+export function runDetachedMaintenanceContext<T>(
+  urgency: StorageMaintenanceUrgency,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return maintenanceContext.run(
+    {
+      urgency: () => urgency,
+      abort: neverAbortMaintenance,
+      holdingExclusion: false,
+    },
+    operation,
+  );
+}
+
+/**
+ * 声明一段调用内的紧急度可随同键提级变化。仅供义务级协调层使用:义务的
+ * 有效紧急度 = 当前最强等待者,叶级准入读取时必须看到最新值。
+ */
+export function runWithMaintenanceUrgency<T>(
+  urgency: () => StorageMaintenanceUrgency,
+  abort: AbortSignal,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return maintenanceContext.run(
+    {
       urgency,
+      abort,
       holdingExclusion: maintenanceContext.getStore()?.holdingExclusion ?? false,
     },
     operation,
@@ -54,7 +105,8 @@ export function runHoldingMaintenanceExclusion<T>(
 ): Promise<T> {
   return maintenanceContext.run(
     {
-      urgency: maintenanceContext.getStore()?.urgency ?? "background",
+      urgency: maintenanceContext.getStore()?.urgency ?? (() => "background"),
+      abort: maintenanceContext.getStore()?.abort ?? neverAbortMaintenance,
       holdingExclusion: true,
     },
     operation,
@@ -69,7 +121,12 @@ export function runHoldingMaintenanceExclusion<T>(
  * 保证,且不可观测。错误代价不对称,默认取可观测的那一侧。
  */
 export function currentMaintenanceUrgency(): StorageMaintenanceUrgency {
-  return maintenanceContext.getStore()?.urgency ?? "background";
+  return maintenanceContext.getStore()?.urgency() ?? "background";
+}
+
+/** 叶级容量排队与安全检查点读取当前完整维护义务的共享取消信号。 */
+export function currentMaintenanceAbortSignal(): AbortSignal {
+  return maintenanceContext.getStore()?.abort ?? neverAbortMaintenance;
 }
 
 /** 叶级准入点判断是否必须零等待。 */

@@ -46,16 +46,20 @@ export async function runServeCommand(
     storageMaintenance: deviceCapacity.storage,
     ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
   });
-  await runConfiguredServeTopology(
-    { roles: mesh.roles },
-    {
-      anchorHost: () => import("./anchor-role.js"),
-      executorHost: () => import("./executor-role.js"),
-      executor: () => import("@zhixing/executor"),
-    },
-    options,
-    { mesh, deviceCapacity, secretStore, startup },
-  );
+  try {
+    await runConfiguredServeTopology(
+      { roles: mesh.roles },
+      {
+        anchorHost: () => import("./anchor-role.js"),
+        executorHost: () => import("./executor-role.js"),
+        executor: () => import("@zhixing/executor"),
+      },
+      options,
+      { mesh, deviceCapacity, secretStore, startup },
+    );
+  } finally {
+    mesh.bootstrapStore.stopStorageMaintenance();
+  }
 }
 
 function renderStartupFailure(

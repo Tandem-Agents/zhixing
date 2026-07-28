@@ -34,6 +34,7 @@ import type {
   ArtifactReferenceCursor,
   ArtifactRetentionSnapshot,
   MutableArtifactStore,
+  PhysicalStorageStepRunner,
 } from "./interfaces.js";
 
 export interface ArtifactGarbageCollectionOptions {
@@ -109,9 +110,10 @@ export class FileArtifactStore implements MutableArtifactStore {
   async putVerifiedStream(
     ref: ArtifactRef,
     chunks: AsyncIterable<Uint8Array>,
+    runPhysicalStep: PhysicalStorageStepRunner = (operation) => operation(),
   ): Promise<void> {
     assertArtifactRef(ref);
-    return this.#withExclusive(async () => {
+    return this.#withExclusive(() => runPhysicalStep(async () => {
       const target = this.pathFor(ref);
       if (await exists(target)) {
         await this.#verifyStoredReference(ref);
@@ -175,7 +177,7 @@ export class FileArtifactStore implements MutableArtifactStore {
         await rm(temporary, { force: true });
         throw error;
       }
-    });
+    }));
   }
 
   async readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array> {
@@ -273,9 +275,16 @@ export class FileArtifactStore implements MutableArtifactStore {
     });
   }
 
-  async discard(ref: ArtifactRef): Promise<boolean> {
+  async discard(
+    ref: ArtifactRef,
+    runPhysicalStep: PhysicalStorageStepRunner = (operation) => operation(),
+  ): Promise<boolean> {
     assertArtifactRef(ref);
-    return this.#withExclusive(async () => durablyRemoveFile(this.pathFor(ref)));
+    // 先取得排他段,再在真正的 unlink 前执行调用方给的准入包装——顺序不可反:
+    // 反过来会先持容量等锁,单槽设备上形成"占着容量等锁、持锁者等容量"。
+    return this.#withExclusive(async () =>
+      runPhysicalStep(() => durablyRemoveFile(this.pathFor(ref))),
+    );
   }
 
   async list(): Promise<readonly ArtifactRef[]> {
@@ -319,10 +328,13 @@ export class FileArtifactStore implements MutableArtifactStore {
     });
   }
 
-  openReferenceCursor(): ArtifactReferenceCursor {
+  openReferenceCursor(
+    runPhysicalStep: PhysicalStorageStepRunner = (operation) => operation(),
+  ): ArtifactReferenceCursor {
     return new FileArtifactReferenceCursor(
       path.join(this.rootDir, "sha256"),
       (operation) => this.#withExclusive(operation),
+      runPhysicalStep,
     );
   }
 
@@ -577,6 +589,7 @@ class FileArtifactReferenceCursor implements ArtifactReferenceCursor {
     private readonly runExclusive: <T>(
       operation: () => Promise<T>,
     ) => Promise<T>,
+    private readonly runPhysicalStep: PhysicalStorageStepRunner,
   ) {}
 
   async next(limit: number): Promise<{
@@ -585,7 +598,7 @@ class FileArtifactReferenceCursor implements ArtifactReferenceCursor {
   }> {
     assertPositiveSafeInteger(limit, "Artifact reference cursor limit");
     if (this.#done) return { references: [], done: true };
-    return this.runExclusive(async () => {
+    return this.runExclusive(() => this.runPhysicalStep(async () => {
       const references: ArtifactRef[] = [];
       let inspected = 0;
       if (!this.#prefixes) {
@@ -649,7 +662,7 @@ class FileArtifactReferenceCursor implements ArtifactReferenceCursor {
         }
       }
       return { references, done: this.#done };
-    });
+    }));
   }
 
   async close(): Promise<void> {

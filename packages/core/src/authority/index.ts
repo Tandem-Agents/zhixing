@@ -30,6 +30,7 @@ export {
 export {
   FileArtifactTemporaryPresenceStore,
   type ArtifactTemporaryPresenceStore,
+  type FileArtifactTemporaryPresenceStoreOptions,
 } from "./artifact-temporary-presence.js";
 export {
   ArtifactLifecycleIndex,

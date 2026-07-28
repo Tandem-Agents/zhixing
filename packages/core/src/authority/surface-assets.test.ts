@@ -35,7 +35,9 @@ import {
 } from "./surface-assets.js";
 
 const payloadDigest = `sha256:${"a".repeat(64)}` as Digest;
-const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+// 重 IO 组级预算:本机上单条耐久用例真实耗时可达 20-30 秒,30 秒档会被临界
+// 抖动随机击穿;对齐 runbook 已验证的 120 秒档,断言失败仍立即终止。
+const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 const scope: SurfaceAssetScope = {
   domain: "conversation",
   conversationId: "conversation-1",
@@ -337,6 +339,12 @@ class MemoryLedger implements SurfaceAssetGrantLedger {
     }
     const scopes = current?.scopes ?? new Set<string>();
     for (const grant of grants) scopes.add(canonicalize(grant.scope));
+    // 接管是耐久单向跳变(真实 reducer 把 temporary 记录一次性转成 cleanup 记录,
+    // 释放不会把它变回"过期临时"):落地时已接管的直接进 cleanup,不进 temporary。
+    if (this.#isAdopted(reference.digest)) {
+      this.#temporaryCleanup.set(reference.digest, reference);
+      return;
+    }
     this.#temporary.set(reference.digest, {
       ref: reference,
       latestExpiry: later(
@@ -345,9 +353,13 @@ class MemoryLedger implements SurfaceAssetGrantLedger {
       ),
       scopes,
     });
-    if (this.#isAdopted(reference.digest)) {
-      this.#temporaryCleanup.set(reference.digest, reference);
-    }
+  }
+
+  /** 接管的耐久跳变:temporary → cleanup,一次性、不随所有权回撤复原。 */
+  recordAdoption(reference: ReturnType<typeof ref>) {
+    if (!this.#temporary.has(reference.digest)) return;
+    this.#temporary.delete(reference.digest);
+    this.#temporaryCleanup.set(reference.digest, reference);
   }
 
   async temporaryBefore(before: string, limit: number) {
@@ -369,6 +381,8 @@ class MemoryLedger implements SurfaceAssetGrantLedger {
   async adoptedTemporary(limit: number) {
     for (const { ref: reference } of this.#temporary.values()) {
       if (this.#isAdopted(reference.digest)) {
+        // 与 recordAdoption 同一跳变:移动而非复制,释放后不得退回过期临时。
+        this.#temporary.delete(reference.digest);
         this.#temporaryCleanup.set(reference.digest, reference);
       }
     }
@@ -543,6 +557,9 @@ async function fixture(options: {
     },
     adopt(reference: ReturnType<typeof ref>) {
       adopted.set(reference.digest, reference);
+      // 接管的耐久事实落账:临时记录随即转入 cleanup 集合,与真实 reducer 的
+      // 单向跳变同形,释放不会把它变回过期临时。
+      ledger.recordAdoption(reference);
     },
     unadopt(reference: ReturnType<typeof ref>) {
       adopted.delete(reference.digest);
@@ -804,7 +821,7 @@ describe("surface asset coordinator", () => {
     expect(state.ledger.synchronizeCalls).toBe(2);
   });
 
-  it("drains every progressable adopted cleanup page before publishing recovery", async () => {
+  it("leaves adopted cleanup to the GC owner during recovery", async () => {
     const state = await fixture();
     const adopted = Array.from(
       { length: 65 },
@@ -821,11 +838,16 @@ describe("surface asset coordinator", () => {
 
     await state.coordinator.recover();
 
-    expect(markTemporaryRemoved).toHaveBeenCalledTimes(adopted.length);
-    await expect(state.ledger.adoptedTemporary(1)).resolves.toEqual([]);
+    expect(markTemporaryRemoved).not.toHaveBeenCalled();
+    await expect(state.ledger.adoptedTemporary(66)).resolves.toHaveLength(65);
+
+    await state.coordinator.collectExpiredTemporaryAssets();
+
+    expect(markTemporaryRemoved).toHaveBeenCalledTimes(64);
+    await expect(state.ledger.adoptedTemporary(2)).resolves.toHaveLength(1);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
-  it("keeps online adopted cleanup to one bounded page", async () => {
+  it("routes online adopted cleanup through one GC-owner page", async () => {
     const state = await fixture();
     await state.coordinator.recover();
     const adopted = Array.from(
@@ -842,6 +864,11 @@ describe("surface asset coordinator", () => {
     );
 
     await state.coordinator.markAdopted([adopted[0]!]);
+
+    expect(markTemporaryRemoved).not.toHaveBeenCalled();
+    await expect(state.ledger.adoptedTemporary(66)).resolves.toHaveLength(65);
+
+    await state.coordinator.collectExpiredTemporaryAssets();
 
     expect(markTemporaryRemoved).toHaveBeenCalledTimes(64);
     await expect(state.ledger.adoptedTemporary(2)).resolves.toHaveLength(1);
@@ -1431,6 +1458,10 @@ describe("surface asset coordinator", () => {
       complete: true,
     });
     await expect(state.artifacts.has(asset)).resolves.toBe(true);
+    await expect(state.temporaryArtifacts.has(asset)).resolves.toBe(true);
+
+    await state.coordinator.collectExpiredTemporaryAssets();
+
     await expect(state.temporaryArtifacts.has(asset)).resolves.toBe(false);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
@@ -1909,11 +1940,13 @@ describe("surface asset coordinator", () => {
     await expect(state.artifacts.has(asset)).resolves.toBe(true);
 
     // 会话删除使资产失去全部所有权:进入回收候选并从释放时刻起算保留窗。
+    // 接管时不再顺带清扫(物理清理唯一 owner 是锚点 GC),临时副本留到本轮 GC
+    // 才清:processed/removed 记的是临时副本的清扫,正式字节仍在保留窗内。
     state.setNow("2026-07-24T00:00:00.010Z");
     state.unadopt(asset);
     await expect(
       state.coordinator.collectExpiredTemporaryAssets(),
-    ).resolves.toEqual({ processed: 0, removed: 0, hasMore: false });
+    ).resolves.toEqual({ processed: 1, removed: 1, hasMore: false });
     await expect(state.artifacts.has(asset)).resolves.toBe(true);
 
     state.setNow("2026-07-24T00:00:00.020Z");
@@ -1963,10 +1996,11 @@ describe("surface asset coordinator", () => {
     state.releaseLeaf(asset);
     const restarted = state.restart();
     state.setNow("2026-07-24T00:00:00.030Z");
-    // 稳定释放时刻早已越过保留窗，重启不得重置期限。
+    // 稳定释放时刻早已越过保留窗，重启不得重置期限。本轮同时完成两件事:
+    // 清扫接管遗留的临时副本(cleanup 集合跨重启耐久),回收越过保留窗的正式字节。
     await expect(
       restarted.coordinator.collectExpiredTemporaryAssets(),
-    ).resolves.toEqual({ processed: 1, removed: 1, hasMore: false });
+    ).resolves.toEqual({ processed: 2, removed: 2, hasMore: false });
     await expect(restarted.artifacts.has(asset)).resolves.toBe(false);
   });
 });
@@ -2072,6 +2106,74 @@ describe("surface asset collection capacity", () => {
     });
     await expect(temporaryArtifacts.has(asset)).resolves.toBe(false);
   });
+
+  it("routes adopted cleanup permits through the collection owner", async () => {
+    const { governor, acquired } = singleSlotGovernor();
+    const state = await fixture({
+      storageMaintenance:
+        governor as unknown as SurfaceAssetCoordinatorOptions[
+          "storageMaintenance"
+        ],
+    });
+    const adopted = ref(Buffer.from("adopted-governed"));
+    state.adopt(adopted);
+    state.ledger.seedTemporary(adopted);
+    acquired.length = 0;
+
+    await state.coordinator.markAdopted([adopted]);
+
+    expect(acquired.filter((kind) => kind === "asset-gc")).toHaveLength(0);
+    await expect(state.ledger.adoptedTemporary(1)).resolves.toHaveLength(1);
+
+    await state.coordinator.collectExpiredTemporaryAssets();
+
+    // partial 与完整临时件是两个独立物理步骤，各自在设施串行区内准入。
+    expect(acquired.filter((kind) => kind === "asset-gc")).toHaveLength(2);
+    await expect(state.ledger.adoptedTemporary(1)).resolves.toEqual([]);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("counts a discarded temporary even if the ledger update is backpressured", async () => {
+    const { governor } = singleSlotGovernor();
+    // 用真实上传造出真实临时件:没有文件就删不掉,出账自然是 0,那样的用例
+    // 证明不了记账与物理副作用是否同步。
+    const state = await expiredTemporaryAsset(governor);
+    state.adopt(state.asset);
+    state.ledger.seedTemporary(state.asset);
+    // 权威状态更新经生命周期索引自取容量,在串行段内零等待,确实会背压——
+    // 而它的插点恰好在物理删除之后。
+    state.ledger.markTemporaryRemoved = async () => {
+      throw new StorageMaintenanceAdmissionError({
+        kind: "backpressured",
+        blockedBy: "slots",
+        retryAfterMs: 1,
+      });
+    };
+
+    const result = await state.coordinator.collectExpiredTemporaryAssets();
+
+    // 报告值必须跟得上真实物理效果:文件已经删了,出账就不能说没删。
+    expect(result.removed).toBeGreaterThanOrEqual(1);
+    expect(result.hasMore).toBe(true);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("does not make adoption wait on cleanup capacity", async () => {
+    const { governor } = backpressureGovernor(Number.MAX_SAFE_INTEGER);
+    const state = await fixture({
+      storageMaintenance:
+        governor as unknown as SurfaceAssetCoordinatorOptions[
+          "storageMaintenance"
+        ],
+    });
+    const adopted = ref(Buffer.from("adopted-backpressured"));
+    state.adopt(adopted);
+    state.ledger.seedTemporary(adopted);
+
+    // 接管只确认耐久归属，不进入容量治理或执行物理回收。
+    await expect(state.coordinator.markAdopted([adopted])).resolves
+      .toBeUndefined();
+    // 候选来自耐久集合，由下一轮 GC owner 消费，义务不丢。
+    await expect(state.ledger.adoptedTemporary(1)).resolves.toHaveLength(1);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   /** 一律背压的 governor:用来验证拿不到容量时的真实行为,而不是只验请求参数。 */
   function backpressureGovernor(grantAfter: number) {
@@ -2252,4 +2354,95 @@ describe("surface asset collection capacity", () => {
     expect(acquired.filter((kind) => kind === "asset-gc").length)
       .toBeGreaterThan(0);
   });
+
+  it("coalesces concurrent collections of the same frontier into one pass", async () => {
+    const { governor } = singleSlotGovernor();
+    const state = await expiredTemporaryAsset(governor);
+    state.deletionBatches.length = 0;
+
+    const [first, second] = await Promise.all([
+      state.coordinator.collectExpiredTemporaryAssets(),
+      state.coordinator.collectExpiredTemporaryAssets(),
+    ]);
+
+    // 同一淘汰时间前沿的两个触发是同一份工作:合流为一轮,而不是各跑一轮。
+    expect(first).toEqual(second);
+    expect(state.deletionBatches).toHaveLength(1);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("holds no capacity permit while a discard waits for the store lock", async () => {
+    const classWeights = {
+      "workload-interactive": 1,
+      "workload-advancement": 1,
+      "workload-scheduler": 1,
+      "workload-orchestration": 1,
+      "storage-foreground": 1,
+      "storage-recovery": 1,
+      "storage-background": 1,
+    } as const;
+    const arbiter = new DefaultDeviceCapacityArbiter({
+      policy: {
+        version: 1,
+        occupancy: {
+          memoryReservationBytes: 1024 * 1024 * 1024,
+          temporaryBytes: 1024 * 1024 * 1024,
+          slots: 2,
+          memorySafetyReserveBytes: 0,
+          temporarySafetyReserveBytes: 0,
+        },
+        quantum: {
+          readBytes: 1024 * 1024 * 1024,
+          writeBytes: 1024 * 1024 * 1024,
+          ioOperations: 1_000_000,
+        },
+        quantumRefillPerSecond: {
+          readBytes: 1024 * 1024 * 1024,
+          writeBytes: 1024 * 1024 * 1024,
+          ioOperations: 1_000_000,
+        },
+        pressure: { maxCpuBusyRatio: 1, minimumAvailableMemoryBytes: 0 },
+        retryAfterMs: 1,
+        classWeights,
+      },
+      probe: () => ({
+        cpuBusyRatio: 0,
+        availableMemoryBytes: 1024 * 1024 * 1024,
+        processRssBytes: 0,
+        temporaryBytesAvailable: 1024 * 1024 * 1024,
+      }),
+    });
+    const governor = new DefaultStorageMaintenanceGovernor({
+      capacity: arbiter,
+    });
+    const { coordinator, temporaryArtifacts } = await expiredTemporaryAsset(
+      governor as unknown as Parameters<typeof expiredTemporaryAsset>[0],
+    );
+    // 占住临时存储的排他段:回收的删除批次必然堵在这把锁上。
+    const heldRef = await temporaryArtifacts.put(
+      Buffer.from("lock-holder", "utf8"),
+    );
+    let releaseHeld!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseHeld = resolve;
+    });
+    const order: string[] = [];
+    const held = temporaryArtifacts.withPresentReferences(
+      [heldRef],
+      async () => {
+        order.push("exclusive-held");
+        await gate;
+      },
+    );
+    await vi.waitFor(() => expect(order).toEqual(["exclusive-held"]));
+
+    const collection = coordinator.collectExpiredTemporaryAssets();
+    // 回收堵在设施锁上期间,设备上不得有任何未释放的回收容量——整段持
+    // permit 等锁就是这里漏出来的(单槽即自锁)。
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    releaseHeld();
+    await held;
+    const result = await collection;
+    expect(result.removed).toBeGreaterThanOrEqual(1);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 });

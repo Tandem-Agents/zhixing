@@ -71,6 +71,7 @@ export function createSurfaceAssetAuthority(
   );
   const temporaryPresence = new FileArtifactTemporaryPresenceStore(
     path.join(temporaryArtifacts.rootDir, ".presence"),
+    { storageMaintenance: options.storageMaintenance },
   );
   const lifecycle = new ArtifactLifecycleIndex({
     rootDir: path.join(options.authorityRoot, "derived"),
@@ -80,6 +81,7 @@ export function createSurfaceAssetAuthority(
     temporaryPresence,
     receiver,
     storageMaintenance: options.storageMaintenance,
+    maintenanceResourceId: options.artifacts.rootDir,
   });
   const projection = new SurfaceAssetProjection(
     options.log,
@@ -141,6 +143,10 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
 
   synchronize(): Promise<void> {
     return this.lifecycle.synchronize();
+  }
+
+  stopStorageMaintenance(): void {
+    this.lifecycle.stopStorageMaintenance();
   }
 
   async load(): Promise<SurfaceAssetGrantLedgerSnapshot> {

@@ -101,6 +101,10 @@ export class FileMeshBootstrapStore {
     this.#completionFile = path.join(distributedRoot, "mesh-bootstrap-completions.json");
   }
 
+  stopStorageMaintenance(): void {
+    this.#log.stopStorageMaintenance();
+  }
+
   async loadTrustEvents(): Promise<readonly HomeTrustEvent[]> {
     const records = await this.#log.readStream<TrustStreamRecord>("trust");
     const events: HomeTrustEvent[] = [];

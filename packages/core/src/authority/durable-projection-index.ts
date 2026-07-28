@@ -13,13 +13,18 @@ import {
   durablyRemoveFile,
   durablyRemoveFiles,
   ensureDurableDirectory,
+  SerialTaskQueue,
   syncDirectory,
 } from "../persistence/index.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
+  currentMaintenanceAbortSignal,
+  maintenanceRetryDelayMs,
+  runDetachedMaintenanceContext,
   runInMaintenanceContext,
-  runStorageMaintenanceTask,
+  runStorageMaintenanceStep,
+  storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
   type StorageMaintenanceGovernorPort,
@@ -50,6 +55,8 @@ const MAX_DIRECTORY_CACHE_PAGES = 64;
 const MAX_DIRECTORY_PAGE_BYTES = 64 * 1024;
 const MAX_RETIREMENT_PAGE_FILES = 64;
 const MAX_RETIREMENT_PAGE_BYTES = 64 * 1024;
+const MAX_RETIREMENT_TRANSITIONS_PER_TRIGGER = 2;
+const RETIREMENT_CONTINUATION_DELAY_MS = 1;
 const MAX_CLEAR_ENTRIES_PER_STEP = 64;
 
 export type DurableProjectionMutation =
@@ -129,6 +136,14 @@ export interface FileDurableProjectionIndexOptions {
   readonly overlayBytes?: number;
   readonly clock?: () => number;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  /**
+   * Governs caller-owned data reads only. Projection-owned housekeeping runs
+   * outside this step so the two maintenance owners never nest capacity permits.
+   */
+  readonly runReadStep?: <T>(
+    inputIdentity: unknown,
+    operation: () => Promise<T>,
+  ) => Promise<T>;
 }
 
 export type DurableProjectionCheckpoints = Readonly<
@@ -195,6 +210,18 @@ interface ProjectionManifest {
   readonly retirementRoot?: RetirementPagePointer;
   readonly retirementCleanup?: string;
 }
+
+interface ProjectionRetirementIdentity {
+  readonly manifestGeneration: number;
+  readonly manifestCheckpoints: DurableProjectionCheckpoints;
+  readonly retirementRoot?: string;
+  readonly retirementCleanup?: string;
+}
+
+type ProjectionRetirementStepResult =
+  | { readonly kind: "progressed" }
+  | { readonly kind: "blocked"; readonly retryAt?: number }
+  | { readonly kind: "stale" };
 
 interface ProjectionWriteIntent {
   readonly formatVersion: 1;
@@ -329,6 +356,7 @@ export class FileDurableProjectionIndex {
   readonly #overlayEntries: number;
   readonly #overlayBytes: number;
   readonly #clock: () => number;
+  #initialized = false;
   #manifest: ProjectionManifest | undefined;
   #active: ReadonlyMap<string, StoredMutation> = new Map();
   #activeBytes = 0;
@@ -343,7 +371,19 @@ export class FileDurableProjectionIndex {
     { readonly view: ReadView; users: number }
   >();
   readonly #directoryCache = new Map<string, DirectoryPage>();
-  readonly #maintenanceRunner: StorageMaintenanceTaskRunner | undefined;
+  readonly #manifestQueue = new SerialTaskQueue();
+  readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
+  readonly #runReadStep:
+    | (<T>(
+      inputIdentity: unknown,
+      operation: () => Promise<T>,
+    ) => Promise<T>)
+    | undefined;
+  #retirementRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  #retirementRetryAt: number | undefined;
+  #retirementCleanupFailure: { readonly error: unknown } | undefined;
+  #maintenanceStopped = false;
   /** 清理失败、尚待下一个写意图接管的派生文件名(相对 rootDir)。 */
   readonly #uncleared = new Set<string>();
   #writeIntent: ProjectionWriteIntent | undefined;
@@ -358,9 +398,11 @@ export class FileDurableProjectionIndex {
     this.#overlayEntries = options.overlayEntries ?? DEFAULT_OVERLAY_ENTRIES;
     this.#overlayBytes = options.overlayBytes ?? DEFAULT_OVERLAY_BYTES;
     this.#clock = options.clock ?? Date.now;
-    this.#maintenanceRunner = options.storageMaintenance
-      ? new StorageMaintenanceTaskRunner(options.storageMaintenance)
-      : undefined;
+    this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
+      options.storageMaintenance,
+    );
+    this.#storageMaintenance = options.storageMaintenance;
+    this.#runReadStep = options.runReadStep;
     assertPositiveInteger(this.#overlayEntries, "Projection overlay entry budget");
     assertPositiveInteger(this.#overlayBytes, "Projection overlay byte budget");
   }
@@ -368,16 +410,44 @@ export class FileDurableProjectionIndex {
   async initialize(
     emptyCheckpoints: DurableProjectionCheckpoints,
   ): Promise<void> {
-    if (this.#manifest !== undefined) return;
-    let initialized = false;
-    while (!initialized) {
-      initialized = await this.#runMaintenance(
-        "projection-scrub",
-        { emptyCheckpoints },
-        "committed",
-        () => this.#initializeStep(emptyCheckpoints),
-      );
+    if (this.#initialized) return;
+    const frozenInput = { emptyCheckpoints };
+    await this.#runMaintenanceObligation(
+      "projection-scrub",
+      frozenInput,
+      "committed",
+      async () => {
+        let initialized = false;
+        while (!initialized) {
+          initialized = await this.#manifestQueue.run(() =>
+            this.#runMaintenanceStep(
+              "projection-scrub",
+              { frozenInput, step: "initialize" },
+              "committed",
+              () => this.#initializeStep(emptyCheckpoints),
+            ),
+          );
+        }
+      },
+    );
+    try {
+      await this.#runRetirementCleanup({ drain: true });
+    } catch (error) {
+      if (!(error instanceof DurableProjectionStorageError)) throw error;
+      // Retirement pages are derived state too. A later page may be corrupt
+      // even when the manifest and its root page validated successfully, so
+      // cleanup remains part of initialization's rebuild boundary.
+      this.#manifest = undefined;
+      this.#currentCheckpoints = undefined;
+      this.#active = new Map();
+      this.#activeBytes = 0;
+      this.#resetActiveProgress();
+      this.#readViews.clear();
+      this.#inUseReadViews.clear();
+      this.#directoryCache.clear();
+      await this.reset(emptyCheckpoints);
     }
+    this.#initialized = true;
   }
 
   async #initializeStep(
@@ -408,7 +478,6 @@ export class FileDurableProjectionIndex {
         await this.#validatePublishedStorage(manifest);
         this.#manifest = manifest;
         this.#currentCheckpoints = manifest.checkpoints;
-        await this.#drainRetirement();
         return true;
       } catch {
         // The index is derived state. Invalid storage is replaced and rebuilt
@@ -423,15 +492,29 @@ export class FileDurableProjectionIndex {
   async reset(
     emptyCheckpoints: DurableProjectionCheckpoints,
   ): Promise<void> {
-    let reset = false;
-    while (!reset) {
-      reset = await this.#runMaintenance(
-        "projection-rebuild",
-        { emptyCheckpoints, currentGeneration: this.#manifest?.generation },
-        "committed",
-        () => this.#resetStep(emptyCheckpoints),
-      );
-    }
+    const frozenInput = {
+      emptyCheckpoints,
+      currentGeneration: this.#manifest?.generation,
+      currentCheckpoints: this.#manifest?.checkpoints,
+    };
+    await this.#runMaintenanceObligation(
+      "projection-rebuild",
+      frozenInput,
+      "committed",
+      async () => {
+        let reset = false;
+        while (!reset) {
+          reset = await this.#manifestQueue.run(() =>
+            this.#runMaintenanceStep(
+              "projection-rebuild",
+              { frozenInput, step: "reset" },
+              "committed",
+              () => this.#resetStep(emptyCheckpoints),
+            ),
+          );
+        }
+      },
+    );
   }
 
   async #resetStep(
@@ -463,6 +546,8 @@ export class FileDurableProjectionIndex {
     this.#currentCheckpoints = checkpoints;
     this.#readViews.clear();
     this.#directoryCache.clear();
+    this.#retirementCleanupFailure = undefined;
+    this.#clearRetirementRetry();
     this.#publicationSequence += 1;
   }
 
@@ -531,36 +616,38 @@ export class FileDurableProjectionIndex {
   async get(key: string): Promise<JsonValue | undefined> {
     assertKey(key);
     this.#expireReadViews();
-    await this.#drainRetirement();
+    await this.#runRetirementCleanup();
     const view = this.#captureReadView();
     this.#retainReadView(view);
     try {
-      const active = view.active.get(key);
-      if (active) return active.tombstone ? undefined : active.value;
-      for (const segment of view.deltaSegments) {
-        if (key < segment.minKey || key > segment.maxKey) continue;
-        const reader = await SegmentReader.open(this.rootDir, segment);
-        try {
-          const entry = await reader.get(key);
-          if (entry) return entry.tombstone ? undefined : entry.value;
-        } finally {
-          await reader.close();
+      return await this.#readStep({ step: "projection-get", key }, async () => {
+        const active = view.active.get(key);
+        if (active) return active.tombstone ? undefined : active.value;
+        for (const segment of view.deltaSegments) {
+          if (key < segment.minKey || key > segment.maxKey) continue;
+          const reader = await SegmentReader.open(this.rootDir, segment);
+          try {
+            const entry = await reader.get(key);
+            if (entry) return entry.tombstone ? undefined : entry.value;
+          } finally {
+            await reader.close();
+          }
         }
-      }
-      const base = await this.#baseSegmentForKey(view.baseRoot, key);
-      if (base && key >= base.minKey && key <= base.maxKey) {
-        const reader = await SegmentReader.open(this.rootDir, base);
-        try {
-          const entry = await reader.get(key);
-          if (entry) return entry.tombstone ? undefined : entry.value;
-        } finally {
-          await reader.close();
+        const base = await this.#baseSegmentForKey(view.baseRoot, key);
+        if (base && key >= base.minKey && key <= base.maxKey) {
+          const reader = await SegmentReader.open(this.rootDir, base);
+          try {
+            const entry = await reader.get(key);
+            if (entry) return entry.tombstone ? undefined : entry.value;
+          } finally {
+            await reader.close();
+          }
         }
-      }
-      return undefined;
+        return undefined;
+      });
     } finally {
       this.#releaseReadView(view);
-      await this.#drainRetirement();
+      await this.#runRetirementCleanup();
     }
   }
 
@@ -581,48 +668,92 @@ export class FileDurableProjectionIndex {
     const after = resumed?.lastKey;
     this.#retainReadView(view);
     try {
-      const entries = await this.#scanView(view, normalizedRange, limit, after);
-      const lastKey = entries.at(-1)?.key;
-      if (entries.length < limit || lastKey === undefined) {
-        this.#readViews.delete(view.id);
-        return { entries };
-      }
-      return {
-        entries,
-        continuation: encodeContinuation(view.id, lastKey),
-      };
+      return await this.#readStep(
+        {
+          step: "projection-scan",
+          range,
+          limit,
+          ...(continuation === undefined ? {} : { continuation }),
+        },
+        async () => {
+          const entries = await this.#scanView(
+            view,
+            normalizedRange,
+            limit,
+            after,
+          );
+          const lastKey = entries.at(-1)?.key;
+          if (entries.length < limit || lastKey === undefined) {
+            this.#readViews.delete(view.id);
+            return { entries };
+          }
+          return {
+            entries,
+            continuation: encodeContinuation(view.id, lastKey),
+          };
+        },
+      );
     } finally {
       this.#releaseReadView(view);
-      await this.#drainRetirement();
+      await this.#runRetirementCleanup();
     }
   }
 
   async flush(): Promise<void> {
-    // 紧急度继承调用语境,不在这里声明:本方法是被生命周期提交等上层调用的设施,
-    // 不是维护任务的所有者。前台请求触发的提交按前台准入,启动恢复触发的按恢复,
-    // 周期回收触发的才是后台——谁在等它只有顶层所有者知道。
+    // 紧急度继承调用语境,不在这里声明:前台请求触发的提交按前台准入,
+    // 启动恢复触发的按恢复,周期回收触发的才是后台。
     await this.#runFlush("committed");
   }
 
+  /** 进程停机时取消尚未跨过安全检查点的投影维护义务。 */
+  stopStorageMaintenance(): void {
+    this.#maintenanceStopped = true;
+    this.#clearRetirementRetry();
+    this.#maintenanceRunner.stop();
+  }
+
   async #runFlush(obligation: StorageMaintenanceObligation): Promise<void> {
+    await this.#runRetirementCleanup();
     for (;;) {
       const manifest = this.#requireManifest();
       if (manifest.compaction) {
-        const previousGeneration = manifest.generation;
-        await this.#runMaintenance(
+        const frozenInput = {
+          checkpoints: manifest.checkpoints,
+          deltaSegments: manifest.deltaSegments.map(({ id }) => id),
+        };
+        await this.#runMaintenanceObligation(
           "projection-compaction",
-          {
-            generation: manifest.generation,
-            ...(manifest.compaction.afterKey === undefined
-              ? {}
-              : { afterKey: manifest.compaction.afterKey }),
-          },
+          frozenInput,
           obligation,
-          () => this.#compactNextRange(),
+          async () => {
+            while (this.#requireManifest().compaction) {
+              const stepManifest = this.#requireManifest();
+              const previousGeneration = stepManifest.generation;
+              await this.#manifestQueue.run(() =>
+                this.#runMaintenanceStep(
+                  "projection-compaction",
+                  {
+                    frozenInput,
+                    generation: stepManifest.generation,
+                    ...(stepManifest.compaction?.afterKey === undefined
+                      ? {}
+                      : { afterKey: stepManifest.compaction.afterKey }),
+                  },
+                  obligation,
+                  () => this.#compactNextRange(),
+                ),
+              );
+              if (this.#requireManifest().generation <= previousGeneration) {
+                throw new Error("Projection compaction made no durable progress");
+              }
+              // Retirement debt has one stable owner independent of whichever
+              // compaction produced it. The owner layer holds no permit, so
+              // joining it here preserves both ownership and leaf-step locking.
+              await this.#runRetirementCleanup();
+            }
+          },
         );
-        if (this.#requireManifest().generation <= previousGeneration) {
-          throw new Error("Projection compaction made no durable progress");
-        }
+        await this.#runRetirementCleanup();
         continue;
       }
       if (
@@ -632,43 +763,219 @@ export class FileDurableProjectionIndex {
         this.#resetActiveProgress();
         return;
       }
-      await this.#runMaintenance(
+      const frozenInput = {
+        manifestGeneration: manifest.generation,
+        manifestCheckpoints: manifest.checkpoints,
+        targetCheckpoints: this.#currentCheckpoints,
+      };
+      await this.#runMaintenanceObligation(
         "projection-flush",
-        {
-          generation: manifest.generation,
-          checkpoints: this.#currentCheckpoints,
-          activeEntries: this.#active.size,
-          activeBytes: this.#activeBytes,
-        },
+        frozenInput,
         obligation,
-        () => this.#flushActive(),
+        () =>
+          this.#manifestQueue.run(() =>
+            this.#runMaintenanceStep(
+              "projection-flush",
+              {
+                frozenInput,
+                activeEntries: this.#active.size,
+                activeBytes: this.#activeBytes,
+              },
+              obligation,
+              () => this.#flushActive(),
+            ),
+          ),
       );
+      await this.#runRetirementCleanup();
     }
   }
 
-  async #runMaintenance<T>(
+  #runMaintenanceObligation<T>(
     kind: StorageMaintenanceKind,
     inputIdentity: unknown,
     obligation: StorageMaintenanceObligation,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return runStorageMaintenanceTask(
-      this.#maintenanceRunner,
+    const resourceId = `${this.projectionId}:${this.rootDir}`;
+    return this.#maintenanceRunner.run(
+      storageMaintenanceObligation(
+        kind,
+        resourceId,
+        inputIdentity,
+        { owner: "durable-projection-index", obligation },
+      ),
+      currentMaintenanceAbortSignal(),
+      operation,
+    );
+  }
+
+  #runMaintenanceStep<T>(
+    kind: StorageMaintenanceKind,
+    inputIdentity: unknown,
+    obligation: StorageMaintenanceObligation,
+    operation: () => Promise<T>,
+    maxWaitMs?: number,
+  ): Promise<T> {
+    const resourceId = `${this.projectionId}:${this.rootDir}`;
+    return runStorageMaintenanceStep(
+      this.#storageMaintenance,
       storageMaintenanceRequest(
         kind,
-        `${this.projectionId}:${this.rootDir}`,
+        resourceId,
         inputIdentity,
         // 是否零等待由维护执行语境单点决定:在协调器串行段或日志锁内调用时,
-        // 建立互斥的原语已标记,准入自动转为零等待——排队会把串行段占死,使同
-        // 一投影的其他提交一并停摆;段外调用则按常规等待。背压交由调用方在段外重试。
-        { obligation },
+        // 建立互斥的原语已标记,准入自动转为零等待;段外调用则按常规等待。
+        { obligation, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) },
       ),
       operation,
     );
   }
 
+  #readStep<T>(
+    inputIdentity: unknown,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runReadStep?.(inputIdentity, operation) ?? operation();
+  }
+
+  async #runRetirementCleanup(
+    options: {
+      readonly drain?: boolean;
+      readonly surfaceFailure?: boolean;
+    } = {},
+  ): Promise<void> {
+    if (
+      options.surfaceFailure !== false &&
+      this.#retirementCleanupFailure !== undefined
+    ) {
+      const failure = this.#retirementCleanupFailure;
+      this.#retirementCleanupFailure = undefined;
+      throw failure.error;
+    }
+    await this.#runMaintenanceObligation(
+      "projection-compaction",
+      { phase: "retirement-cleanup" },
+      "committed",
+      () =>
+        this.#drainRetirementDebt(
+          (inputIdentity, operation) =>
+            this.#manifestQueue.run(() =>
+              this.#runMaintenanceStep(
+                "projection-compaction",
+                inputIdentity,
+                "committed",
+                operation,
+                0,
+              ),
+            ),
+          options.drain ? undefined : MAX_RETIREMENT_TRANSITIONS_PER_TRIGGER,
+        ),
+    );
+  }
+
+  async #drainRetirementDebt(
+    transition: (
+      inputIdentity: unknown,
+      operation: () => Promise<ProjectionRetirementStepResult>,
+    ) => Promise<ProjectionRetirementStepResult>,
+    maxTransitions: number | undefined,
+  ): Promise<void> {
+    let transitions = 0;
+    for (;;) {
+      const frozenInput = this.#retirementIdentity();
+      if (!frozenInput) {
+        this.#retirementCleanupFailure = undefined;
+        this.#clearRetirementRetry();
+        return;
+      }
+      if (
+        maxTransitions !== undefined &&
+        transitions >= maxTransitions
+      ) {
+        // A caller pays only a fixed amount of housekeeping. The durable
+        // manifest remains the retry credential and the background pump owns
+        // the rest, so foreground latency never grows with historical debt.
+        this.#scheduleRetirementRetry(
+          this.#clock() + RETIREMENT_CONTINUATION_DELAY_MS,
+        );
+        return;
+      }
+      const inputIdentity = {
+        phase: "retirement-cleanup-step",
+        ...frozenInput,
+      };
+      let result: ProjectionRetirementStepResult;
+      try {
+        result = await transition(
+          inputIdentity,
+          () => this.#drainRetirementStep(frozenInput),
+        );
+      } catch (error) {
+        // The manifest is the durable retry credential. Temporary pressure
+        // pauses at this safe boundary; another trigger resumes from it.
+        const retryDelayMs = maintenanceRetryDelayMs(error);
+        if (retryDelayMs !== undefined) {
+          this.#scheduleRetirementRetry(
+            this.#clock() + Math.max(1, retryDelayMs),
+          );
+          return;
+        }
+        throw error;
+      }
+      if (result.kind === "blocked") {
+        if (result.retryAt !== undefined) {
+          this.#scheduleRetirementRetry(result.retryAt);
+        }
+        return;
+      }
+      if (result.kind === "progressed") transitions += 1;
+      // "stale" means another serialized manifest writer advanced the
+      // transition first; re-read without charging the bounded work budget.
+    }
+  }
+
+  #scheduleRetirementRetry(retryAt: number): void {
+    if (
+      this.#maintenanceStopped ||
+      (
+        this.#retirementRetryTimer !== undefined &&
+        this.#retirementRetryAt !== undefined &&
+        this.#retirementRetryAt <= retryAt
+      )
+    ) {
+      return;
+    }
+    this.#clearRetirementRetry();
+    const delayMs = Math.max(
+      1,
+      Math.min(2_147_483_647, retryAt - this.#clock()),
+    );
+    const timer = setTimeout(() => {
+      if (this.#retirementRetryTimer !== timer) return;
+      this.#retirementRetryTimer = undefined;
+      this.#retirementRetryAt = undefined;
+      void runDetachedMaintenanceContext("background", () =>
+        this.#runRetirementCleanup({ surfaceFailure: false })
+      ).catch((error: unknown) => {
+        if (!this.#maintenanceStopped) {
+          this.#retirementCleanupFailure = { error };
+        }
+      });
+    }, delayMs);
+    timer.unref();
+    this.#retirementRetryTimer = timer;
+    this.#retirementRetryAt = retryAt;
+  }
+
+  #clearRetirementRetry(): void {
+    if (this.#retirementRetryTimer !== undefined) {
+      clearTimeout(this.#retirementRetryTimer);
+    }
+    this.#retirementRetryTimer = undefined;
+    this.#retirementRetryAt = undefined;
+  }
+
   async #flushActive(): Promise<void> {
-    await this.#drainRetirement();
     if (this.#writeIntent) {
       await this.#completeWriteIntent(
         isCommittedIntent(this.#writeIntent, this.#requireManifest()),
@@ -745,7 +1052,6 @@ export class FileDurableProjectionIndex {
       // Housekeeping remains recoverable from the durable intent and must
       // never turn a successful publication into a false failure.
       await this.#completeWriteIntent(true).catch(() => undefined);
-      await this.#drainRetirement().catch(() => undefined);
     } else {
       throw new Error("Projection flush did not publish a manifest");
     }
@@ -936,6 +1242,14 @@ export class FileDurableProjectionIndex {
       return;
     }
     this.#inUseReadViews.delete(view.id);
+    if (this.#retirementIdentity()) {
+      // Releasing the last user is the ownership event that unblocks retired
+      // files. Register an independent wakeup before caller cleanup: the
+      // caller may already be cancelled, but committed debt must still resume.
+      this.#scheduleRetirementRetry(
+        this.#clock() + RETIREMENT_CONTINUATION_DELAY_MS,
+      );
+    }
   }
 
   #resumeView(encoded: string): { view: ReadView; lastKey: string } {
@@ -1034,7 +1348,6 @@ export class FileDurableProjectionIndex {
   }
 
   async #compactNextRange(): Promise<void> {
-    await this.#drainRetirement();
     if (this.#writeIntent) {
       await this.#completeWriteIntent(
         isCommittedIntent(this.#writeIntent, this.#requireManifest()),
@@ -1139,7 +1452,6 @@ export class FileDurableProjectionIndex {
       throw new Error("Projection compaction did not publish a manifest");
     }
     await this.#completeWriteIntent(true).catch(() => undefined);
-    await this.#drainRetirement().catch(() => undefined);
   }
 
   async #nextCompactionBatch(
@@ -1787,9 +2099,35 @@ export class FileDurableProjectionIndex {
     }
   }
 
-  async #drainRetirement(): Promise<void> {
+  #retirementIdentity(): ProjectionRetirementIdentity | undefined {
     const manifest = this.#manifest;
-    if (!manifest) return;
+    if (
+      !manifest ||
+      (!manifest.retirementRoot && !manifest.retirementCleanup)
+    ) {
+      return undefined;
+    }
+    return {
+      manifestGeneration: manifest.generation,
+      manifestCheckpoints: manifest.checkpoints,
+      ...(manifest.retirementRoot
+        ? { retirementRoot: manifest.retirementRoot.id }
+        : {}),
+      ...(manifest.retirementCleanup
+        ? { retirementCleanup: manifest.retirementCleanup }
+        : {}),
+    };
+  }
+
+  async #drainRetirementStep(
+    expected: ProjectionRetirementIdentity,
+  ): Promise<ProjectionRetirementStepResult> {
+    const manifest = this.#manifest;
+    if (!manifest) return { kind: "stale" };
+    const current = this.#retirementIdentity();
+    if (!current || !sameRetirementIdentity(current, expected)) {
+      return { kind: "stale" };
+    }
     if (manifest.retirementCleanup) {
       await durablyRemoveFile(
         path.join(this.rootDir, manifest.retirementCleanup),
@@ -1800,23 +2138,29 @@ export class FileDurableProjectionIndex {
       const next = withoutRetirementCleanup(manifest);
       await this.#writeManifest(next);
       this.#manifest = next;
-      return;
+      return { kind: "progressed" };
     }
-    if (!manifest.retirementRoot) return;
-    let oldestReadGeneration: number | undefined;
-    const observe = (view: ReadView) => {
-      oldestReadGeneration = oldestReadGeneration === undefined
-        ? view.generation
-        : Math.min(oldestReadGeneration, view.generation);
-    };
-    for (const view of this.#readViews.values()) observe(view);
-    for (const { view } of this.#inUseReadViews.values()) observe(view);
+    if (!manifest.retirementRoot) return { kind: "stale" };
+    this.#expireReadViews();
     const page = await this.#loadRetirementPage(manifest.retirementRoot);
-    if (
-      oldestReadGeneration !== undefined &&
-      oldestReadGeneration < page.retiredAtGeneration
-    ) {
-      return;
+    let blocked = false;
+    let retryAt: number | undefined;
+    for (const [id, view] of this.#readViews) {
+      if (view.generation >= page.retiredAtGeneration) continue;
+      blocked = true;
+      if (this.#inUseReadViews.has(id)) continue;
+      retryAt = retryAt === undefined
+        ? view.expiresAt
+        : Math.min(retryAt, view.expiresAt);
+    }
+    for (const { view } of this.#inUseReadViews.values()) {
+      if (view.generation < page.retiredAtGeneration) blocked = true;
+    }
+    if (blocked) {
+      return {
+        kind: "blocked",
+        ...(retryAt === undefined ? {} : { retryAt }),
+      };
     }
     await durablyRemoveFiles(
       page.files.map((file) => path.join(this.rootDir, file)),
@@ -1835,6 +2179,7 @@ export class FileDurableProjectionIndex {
     const normalized = normalizeManifestOptionals(next);
     await this.#writeManifest(normalized);
     this.#manifest = normalized;
+    return { kind: "progressed" };
   }
 
   async #beginWriteIntent(targetGeneration: number): Promise<void> {
@@ -2428,6 +2773,18 @@ function sameCheckpoints(
   right: DurableProjectionCheckpoints,
 ): boolean {
   return canonicalize(left) === canonicalize(right);
+}
+
+function sameRetirementIdentity(
+  left: ProjectionRetirementIdentity,
+  right: ProjectionRetirementIdentity,
+): boolean {
+  return (
+    left.manifestGeneration === right.manifestGeneration &&
+    sameCheckpoints(left.manifestCheckpoints, right.manifestCheckpoints) &&
+    left.retirementRoot === right.retirementRoot &&
+    left.retirementCleanup === right.retirementCleanup
+  );
 }
 
 function validateSegmentDescriptor(value: unknown): SegmentDescriptor {

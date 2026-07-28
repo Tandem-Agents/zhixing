@@ -20,6 +20,7 @@ import {
   OutboxRegistry,
   type PermissionRule,
 } from "@zhixing/core";
+import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import {
   createExecutionManifest,
@@ -34,7 +35,10 @@ import {
   setupDelivery,
   type DeliveryStack,
 } from "../setup-delivery.js";
-import { FileExecutionSnapshotVersionStore } from "../executor-snapshot-version-store.js";
+import {
+  FileExecutionSnapshotVersionStore,
+  FileTrustRuleSnapshotCatalog,
+} from "../executor-snapshot-version-store.js";
 import { StartupRollback } from "../serve/startup-rollback.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -168,6 +172,89 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       authorityStop.mockRestore();
       deliveryStop.mockRestore();
       outboxStop.mockRestore();
+    }
+  });
+
+  it("stops maintenance exactly once when startup fails after recovery", async () => {
+    // U23-67:恢复已启动维护资源之后、函数返回之前失败——清理所有权必须在任何
+    // 资源取得前就建立,否则这个窗口里没有人持有停止句柄。
+    const openCatalog = vi
+      .spyOn(FileTrustRuleSnapshotCatalog, "open")
+      .mockRejectedValueOnce(new Error("trust catalog failed"));
+    const stopAssets = vi.spyOn(
+      SurfaceAssetCoordinator.prototype,
+      "stopStorageMaintenance",
+    );
+    try {
+      const rollback = new StartupRollback();
+      await expect(
+        setupAuthorityRuntime({
+          zhixingHome: home,
+          secretStore: new MemorySecretStore(),
+          executorReadiness: TEST_EXECUTOR_READINESS,
+          startupRollback: rollback,
+        }),
+      ).rejects.toThrow("trust catalog failed");
+      // 内部失败即执行 handle:恢复期启动的维护义务恰一次停止。
+      expect(stopAssets).toHaveBeenCalledTimes(1);
+      // 外层启动失败再走同一回滚事务,复用同一幂等 handle,不重复停止。
+      await rollback.rollback();
+      expect(stopAssets).toHaveBeenCalledTimes(1);
+    } finally {
+      openCatalog.mockRestore();
+      stopAssets.mockRestore();
+    }
+  });
+
+  it("stops maintenance on failure even without an ambient rollback transaction", async () => {
+    // 未注入外层事务的独立调用者(测试、嵌入场景)同样不得泄漏维护任务。
+    const openCatalog = vi
+      .spyOn(FileTrustRuleSnapshotCatalog, "open")
+      .mockRejectedValueOnce(new Error("trust catalog failed"));
+    const stopAssets = vi.spyOn(
+      SurfaceAssetCoordinator.prototype,
+      "stopStorageMaintenance",
+    );
+    try {
+      await expect(
+        setupAuthorityRuntime({
+          zhixingHome: home,
+          secretStore: new MemorySecretStore(),
+          executorReadiness: TEST_EXECUTOR_READINESS,
+        }),
+      ).rejects.toThrow("trust catalog failed");
+      expect(stopAssets).toHaveBeenCalledTimes(1);
+    } finally {
+      openCatalog.mockRestore();
+      stopAssets.mockRestore();
+    }
+  });
+
+  it("shares one idempotent cleanup handle between rollback and shutdown", async () => {
+    // 成功启动后:外层启动回滚与正常停机复用运行时返回的同一 handle,资源只释放一次。
+    const stopAssets = vi.spyOn(
+      SurfaceAssetCoordinator.prototype,
+      "stopStorageMaintenance",
+    );
+    try {
+      const rollback = new StartupRollback();
+      const runtime = await setupAuthorityRuntime({
+        zhixingHome: home,
+        secretStore: new MemorySecretStore(),
+        executorReadiness: TEST_EXECUTOR_READINESS,
+        startupRollback: rollback,
+      });
+      expect(runtime.startupCleanup.name).toBe(
+        "authorityRuntime.stopStorageMaintenance",
+      );
+      // 模拟外层后续接入面失败触发整链回滚。
+      await rollback.rollback();
+      expect(stopAssets).toHaveBeenCalledTimes(1);
+      // 正常停机链再执行同一 handle:缓存结果,不再第二次停止。
+      await runtime.startupCleanup.run();
+      expect(stopAssets).toHaveBeenCalledTimes(1);
+    } finally {
+      stopAssets.mockRestore();
     }
   });
 

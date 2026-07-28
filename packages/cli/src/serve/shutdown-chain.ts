@@ -25,7 +25,10 @@ import type {
 } from "@zhixing/server";
 import type { ChannelRegistry, Scheduler } from "@zhixing/core";
 import type { McpHub } from "@zhixing/mcp";
-import type { DeliveryStack } from "../setup-delivery.js";
+import type {
+  AuthorityRuntimeStack,
+  DeliveryStack,
+} from "../setup-delivery.js";
 import type { StartupCleanupHandle } from "./startup-rollback.js";
 
 /**
@@ -39,12 +42,14 @@ import type { StartupCleanupHandle } from "./startup-rollback.js";
 export interface ShutdownChainResources {
   stateFile?: ServerStateFile;
   heartbeatTimerRef: { current: NodeJS.Timeout | null };
+  authorityRuntime?: AuthorityRuntimeStack;
   scheduler?: Scheduler;
   channels?: ChannelRegistry;
   deliveryStack?: DeliveryStack;
   /** MCP 连接层 hub —— 关闭所有 MCP server 连接 / stdio 子进程。 */
   mcpHub?: McpHub;
   startupCleanups?: {
+    readonly authorityRuntime?: StartupCleanupHandle;
     readonly scheduler?: StartupCleanupHandle;
     readonly channels?: StartupCleanupHandle;
     readonly deliveryStack?: StartupCleanupHandle;
@@ -115,6 +120,13 @@ export function registerCoreCleanup(
   registry: CleanupRegistry,
   resources: ShutdownChainResources,
 ): void {
+  if (resources.authorityRuntime) {
+    registry.register("authorityRuntime.stopStorageMaintenance", async () => {
+      const cleanup = resources.startupCleanups?.authorityRuntime;
+      if (cleanup) await cleanup.run();
+      else resources.authorityRuntime!.stopStorageMaintenance();
+    });
+  }
   registry.register("heartbeat.clear", () => {
     const t = resources.heartbeatTimerRef.current;
     if (t) clearInterval(t);

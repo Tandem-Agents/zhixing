@@ -30,13 +30,18 @@ import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
+  runInMaintenanceContext,
+  StorageMaintenanceTaskRunner,
+  type StorageMaintenanceGovernorPort,
   type StorageMaintenanceKind,
+  type StorageMaintenanceRequest,
 } from "../../resources/index.js";
 import { ArtifactLifecycleIndex } from "../artifact-lifecycle-index.js";
 import { FileArtifactStore } from "../artifact-store.js";
 import {
   type ArtifactTemporaryPresenceStore,
   FileArtifactTemporaryPresenceStore,
+  type FileArtifactTemporaryPresenceStoreOptions,
 } from "../artifact-temporary-presence.js";
 import { FileResumableArtifactReceiver } from "../assignment-artifacts.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
@@ -46,11 +51,25 @@ import {
 } from "../durable-projection-index.js";
 import type { DurableLogCheckpoint } from "../interfaces.js";
 
-const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+// 重 IO 组级预算:本机(低资源 Windows)上单条耐久用例真实耗时可达 20-30 秒,
+// 30 秒档会被临界抖动随机击穿;对齐 runbook 已验证的 120 秒档,断言失败仍立即终止。
+const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 
-function temporaryPresence(root: string): FileArtifactTemporaryPresenceStore {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+function temporaryPresence(
+  root: string,
+  options: FileArtifactTemporaryPresenceStoreOptions = {},
+): FileArtifactTemporaryPresenceStore {
   return new FileArtifactTemporaryPresenceStore(
     path.join(root, "temporary", ".presence"),
+    options,
   );
 }
 
@@ -266,11 +285,11 @@ describe("ArtifactLifecycleIndex", () => {
 
       await expect(lifecycle.synchronize()).resolves.toBeUndefined();
       expect(readTail.mock.calls.map(([cursor]) => cursor.lsn)).toEqual([
-        0, 64, 128, 192, 256, 257, 257,
+        0, 64, 128, 192, 256,
       ]);
-      expect(readTail.mock.calls.every(([, limit]) => limit === 64)).toBe(
-        true,
-      );
+      expect(readTail.mock.calls.map(([, limit]) => limit)).toEqual([
+        64, 64, 64, 64, 1,
+      ]);
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );
@@ -592,6 +611,169 @@ describe("ArtifactLifecycleIndex", () => {
   );
 
   it(
+    "accounts reconciliation scan reads inside the page permit",
+    async () => {
+      // 对账页里的目录扫描与 marker 读取都调用 claimDeviceCapacity,而那个记账
+      // 在没有容量语境时是静默空操作:只给写删叶补 permit,读的这一半就从有覆盖
+      // 退成没覆盖,而且不会有任何出口暴露出来。
+      const root = await createTempDir("artifact-lifecycle-scan-accounting");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(
+        path.join(root, "temporary"),
+      );
+      const receiver = new FileResumableArtifactReceiver(
+        temporaryArtifacts,
+        path.join(root, "partials"),
+        { maxArtifactBytes: 1_024 },
+      );
+      const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+        clock: () => "2026-07-25T00:00:00.000Z",
+      });
+      const claims: string[] = [];
+      const storageMaintenance: StorageMaintenanceGovernorPort = {
+        acquire: async () => ({
+          kind: "granted",
+          permit: {
+            granted: {
+              memoryReservationBytes: 0,
+              temporaryBytes: 0,
+              slots: 0,
+              readBytes: Number.MAX_SAFE_INTEGER,
+              writeBytes: Number.MAX_SAFE_INTEGER,
+              ioOperations: Number.MAX_SAFE_INTEGER,
+            },
+            tryBegin: () => ({
+              claim: (dimension: string) => {
+                claims.push(dimension);
+              },
+              complete: () => undefined,
+            }),
+            release: () => undefined,
+          },
+        }),
+        snapshot: () => ({ queued: {}, inFlight: {} }),
+      };
+      const presence = temporaryPresence(root, { storageMaintenance });
+      const bytes = Buffer.from("scan accounting", "utf8");
+      const ref = { digest: byteDigest(bytes), bytes: bytes.byteLength };
+      await presence.mark(ref, "scope-scan-accounting");
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: presence,
+        receiver,
+        storageMaintenance,
+      });
+      claims.length = 0;
+
+      await lifecycle.synchronize();
+
+      // marker 读取只发生在对账扫描里:读的字节记进了账,才说明这一页确实在
+      // 容量语境内执行。
+      expect(claims).toContain("readBytes");
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "admits the internal projection flush of a lifecycle mutation",
+    async () => {
+      // 内部投影不注入 governor 时,公开变更方法的 prepare/publish/flush 全部落在
+      // 任何 permit 之外:读代码看得见叶里的记账调用,但那次记账没有语境可落。
+      const root = await createTempDir("artifact-lifecycle-governed-flush");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(
+        path.join(root, "temporary"),
+      );
+      const receiver = new FileResumableArtifactReceiver(
+        temporaryArtifacts,
+        path.join(root, "partials"),
+        { maxArtifactBytes: 1_024 },
+      );
+      const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+        clock: () => "2026-07-25T00:00:00.000Z",
+      });
+      const bytes = Buffer.from("governed flush", "utf8");
+      const ref = await temporaryArtifacts.put(bytes);
+      const grant: SurfaceAssetGrant = {
+        v: 1,
+        grantId: "grt-01J0000000000000000000000F",
+        scope: {
+          domain: "conversation",
+          conversationId: "conversation-governed-flush",
+          ownerEpoch: 1,
+        },
+        surfacePrincipal: "surface-governed-flush",
+        requestId: "request-governed-flush",
+        kind: "asset-upload",
+        payloadDigest: byteDigest(Buffer.from("governed flush payload")),
+        assets: [ref],
+        issuedAt: "2026-07-25T00:00:00.000Z",
+        expiry: "2026-07-25T01:00:00.000Z",
+        signature: { alg: "test", keyId: "owner", sig: "test" },
+      };
+      await log.append([
+        { stream: "control", body: { t: "asset-grant-issued", grant } },
+      ]);
+      const admissions: StorageMaintenanceKind[] = [];
+      let activeSteps = 0;
+      const storageMaintenance: StorageMaintenanceGovernorPort = {
+        acquire: async (request) => {
+          expect(activeSteps).toBe(0);
+          admissions.push(request.kind);
+          return {
+            kind: "granted",
+            permit: {
+              granted: {
+                occupancy: {
+                  memoryReservationBytes: 0,
+                  temporaryBytes: 0,
+                  slots: 1,
+                },
+                quantum: {
+                  readBytes: Number.MAX_SAFE_INTEGER,
+                  writeBytes: Number.MAX_SAFE_INTEGER,
+                  ioOperations: Number.MAX_SAFE_INTEGER,
+                },
+              },
+              tryBegin: () => {
+                activeSteps += 1;
+                return {
+                  claim: () => undefined,
+                  complete: () => {
+                    activeSteps -= 1;
+                  },
+                };
+              },
+              release: () => undefined,
+            },
+          };
+        },
+        snapshot: () => ({ queued: {}, inFlight: {} }),
+      };
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root, { storageMaintenance }),
+        receiver,
+        storageMaintenance,
+      });
+
+      await lifecycle.recordTemporaryPresence(ref, canonicalize(grant.scope));
+
+      // 两个叶都必须自取容量:投影提交与 presence 物理写。
+      expect(admissions).toContain("projection-flush");
+      expect(admissions).toContain("lifecycle-reconcile");
+      expect(activeSteps).toBe(0);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
     "rebuilds release, temporary, and maintenance records before side effects",
     async () => {
       const root = await createTempDir("artifact-lifecycle-secondary-binding");
@@ -730,6 +912,93 @@ describe("ArtifactLifecycleIndex", () => {
       await expect(
         createIndex().releasedBefore("2026-07-25T02:00:00.000Z", 8),
       ).resolves.toEqual([release]);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps adopted cleanup drainable after the leaf is released",
+    async () => {
+      // 接管后、GC 清扫前会话即删除:叶子进入"已释放 + cleanup 未清"。这是合法
+      // 中间态——临时副本的物理清理与正式字节的保留窗无关。若 cleanup 反绑要求
+      // 主状态仍被保留,这个组合会抛投影损坏,重建重放得到同一状态再抛,GC 停摆。
+      const root = await createTempDir("artifact-lifecycle-released-cleanup");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(
+        path.join(root, "temporary"),
+      );
+      const receiver = new FileResumableArtifactReceiver(
+        temporaryArtifacts,
+        path.join(root, "partials"),
+        { maxArtifactBytes: 1_024 },
+      );
+      let current = "2026-07-25T00:00:00.000Z";
+      const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+        clock: () => current,
+      });
+      const bytes = Buffer.from("released cleanup", "utf8");
+      const ref = await temporaryArtifacts.put(bytes);
+      await expect(artifacts.put(bytes)).resolves.toEqual(ref);
+      const grant: SurfaceAssetGrant = {
+        v: 1,
+        grantId: "grt-01J00000000000000000000019",
+        scope: {
+          domain: "conversation",
+          conversationId: "conversation-released-cleanup",
+          ownerEpoch: 1,
+        },
+        surfacePrincipal: "surface-released-cleanup",
+        requestId: "request-released-cleanup",
+        kind: "asset-upload",
+        payloadDigest: byteDigest(Buffer.from("released cleanup payload")),
+        assets: [ref],
+        issuedAt: current,
+        expiry: "2026-07-25T01:00:00.000Z",
+        signature: { alg: "test", keyId: "owner", sig: "test" },
+      };
+      await log.append([
+        { stream: "control", body: { t: "asset-grant-issued", grant } },
+      ]);
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root),
+        receiver,
+      });
+      const scopeIdentity = canonicalize(grant.scope);
+      await lifecycle.recordTemporaryPresence(ref, scopeIdentity);
+      await lifecycle.settleTemporaryPresence(ref, scopeIdentity, true);
+      await log.append([
+        {
+          stream: "run:conversation-released-cleanup",
+          body: { t: "admitted", attachments: [{ ...ref, kind: "file" }] },
+        },
+      ]);
+      await lifecycle.synchronize();
+      await expect(lifecycle.adoptedTemporary(8)).resolves.toEqual([ref]);
+
+      current = "2026-07-25T00:30:00.000Z";
+      await log.append([
+        {
+          stream: "run:conversation-released-cleanup",
+          body: { t: "session-lifecycle", mutation: "delete" },
+        },
+      ]);
+      await lifecycle.synchronize();
+      // 释放事实成立(可回收候选存在)……
+      await expect(
+        lifecycle.releasedBefore("2026-07-25T02:00:00.000Z", 8),
+      ).resolves.toMatchObject([{ ref }]);
+      // ……同时 cleanup 仍可枚举、可清扫,不得抛投影损坏。
+      await expect(lifecycle.adoptedTemporary(8)).resolves.toEqual([ref]);
+      await expect(lifecycle.markTemporaryRemoved(ref)).resolves.toBe(true);
+      await expect(lifecycle.adoptedTemporary(8)).resolves.toEqual([]);
+      // 临时记录不得在释放后退回"过期临时"。
+      await expect(
+        lifecycle.temporaryBefore("2026-07-25T09:00:00.000Z", 8),
+      ).resolves.toEqual([]);
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );
@@ -1522,18 +1791,6 @@ describe("ArtifactLifecycleIndex", () => {
         path.join(root, "partials"),
         { maxArtifactBytes: 1_024 },
       );
-      const presence = temporaryPresence(root);
-      for (let index = 0; index < 66; index += 1) {
-        const bytes = Buffer.from(`staging-${index}`);
-        const ref = { digest: byteDigest(bytes), bytes: bytes.byteLength };
-        const staging = temporaryPresenceStagingPath(
-          presence,
-          ref,
-          `scope-${index}`,
-        );
-        await mkdir(path.dirname(staging), { recursive: true });
-        await writeFile(staging, bytes);
-      }
       const basePolicy = createDefaultDeviceCapacityPolicy();
       const delegate = new DefaultStorageMaintenanceGovernor({
         capacity: new DefaultDeviceCapacityArbiter({
@@ -1568,6 +1825,19 @@ describe("ArtifactLifecycleIndex", () => {
         },
         snapshot: () => delegate.snapshot(),
       };
+      // 容量由真正做物理删除的 presence 叶步骤自取,对账区段不再整段持有 permit。
+      const presence = temporaryPresence(root, { storageMaintenance });
+      for (let index = 0; index < 66; index += 1) {
+        const bytes = Buffer.from(`staging-${index}`);
+        const ref = { digest: byteDigest(bytes), bytes: bytes.byteLength };
+        const staging = temporaryPresenceStagingPath(
+          presence,
+          ref,
+          `scope-${index}`,
+        );
+        await mkdir(path.dirname(staging), { recursive: true });
+        await writeFile(staging, bytes);
+      }
       const log = new FileAuthorityCommitLog(
         path.join(root, "log"),
         artifacts,
@@ -1862,6 +2132,130 @@ describe("ArtifactLifecycleIndex", () => {
       await expect(
         lifecycle.temporaryBefore("2026-07-25T02:00:00.000Z", 8),
       ).resolves.toEqual([]);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps the same reconcile identity after the first source page advances",
+    async () => {
+      const root = await createTempDir("lifecycle-progress-coalesce");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(
+        path.join(root, "temporary"),
+      );
+      const receiver = new FileResumableArtifactReceiver(
+        temporaryArtifacts,
+        path.join(root, "partials"),
+        { maxArtifactBytes: 1_024 },
+      );
+      const commits = Array.from(
+        { length: 65 },
+        (_, index): CommitEnvelope<JsonValue> => ({
+          lsn: index + 1,
+          at: "2026-07-25T00:00:00.000Z",
+          entries: [],
+          envelopeDigest: `sha256:${(index + 1)
+            .toString(16)
+            .padStart(64, "0")}` as Digest,
+        }),
+      );
+      const checkpoint = (lsn: number): DurableLogCheckpoint => ({
+        logId: "lifecycle-progress-log",
+        lsn,
+        frameEndOffset: lsn,
+        prefixDigest: `sha256:${lsn.toString(16).padStart(64, "0")}` as Digest,
+      });
+      const releaseSecondPage = deferred<void>();
+      let reads = 0;
+      const readTail = vi.fn(
+        async (current: DurableLogCheckpoint, limit: number) => {
+          const page = commits.slice(current.lsn, current.lsn + limit);
+          const nextLsn = page.at(-1)?.lsn ?? current.lsn;
+          reads += 1;
+          if (reads === 2) await releaseSecondPage.promise;
+          return {
+            commits: page,
+            checkpoint: checkpoint(nextLsn),
+            hasMore: nextLsn < commits.length,
+          };
+        },
+      );
+      const log = {
+        originCheckpoint: async () => checkpoint(0),
+        checkpoint: async () => checkpoint(commits.length),
+        readTail,
+        stopStorageMaintenance: () => undefined,
+      } as unknown as FileAuthorityCommitLog;
+      const requests: StorageMaintenanceRequest[] = [];
+      const storageMaintenance: StorageMaintenanceGovernorPort = {
+        acquire: async (request) => {
+          requests.push(request);
+          return {
+            kind: "granted",
+            permit: {
+              granted: {
+                occupancy: {
+                  memoryReservationBytes: 0,
+                  temporaryBytes: 0,
+                  slots: 1,
+                },
+                quantum: {
+                  readBytes: Number.MAX_SAFE_INTEGER,
+                  writeBytes: Number.MAX_SAFE_INTEGER,
+                  ioOperations: Number.MAX_SAFE_INTEGER,
+                },
+              },
+              tryBegin: () => ({
+                claim: () => undefined,
+                complete: () => undefined,
+              }),
+              release: () => undefined,
+            },
+          };
+        },
+        snapshot: () => ({ queued: {}, inFlight: {} }),
+      };
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root, { storageMaintenance }),
+        receiver,
+        storageMaintenance,
+        maintenanceResourceId: artifacts.rootDir,
+      });
+      const runTask = vi.spyOn(StorageMaintenanceTaskRunner.prototype, "run");
+      const background = runInMaintenanceContext("background", () =>
+        lifecycle.synchronize()
+      );
+      await vi.waitFor(() => expect(reads).toBe(2), { timeout: 10_000 });
+      const firstRequestAfterRelease = requests.length;
+      const foreground = runInMaintenanceContext("foreground", () =>
+        lifecycle.synchronize()
+      );
+      await vi.waitFor(
+        () =>
+          expect(
+            runTask.mock.calls.filter(
+              ([request]) => request.kind === "lifecycle-reconcile",
+            ),
+          ).toHaveLength(2),
+        { timeout: 10_000 },
+      );
+      releaseSecondPage.resolve();
+      await Promise.all([background, foreground]);
+      runTask.mockRestore();
+
+      // 第二次触发发生在派生 checkpoint 已推进之后，但源日志头未变：它必须
+      // 加入原义务并把后续叶步骤提级，而不是用变化中的派生游标裂出新任务。
+      expect(requests.length).toBeGreaterThan(firstRequestAfterRelease);
+      expect(
+        requests
+          .slice(firstRequestAfterRelease)
+          .every((request) => request.urgency === "foreground"),
+      ).toBe(true);
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );

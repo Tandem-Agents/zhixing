@@ -71,6 +71,7 @@ export type SurfacePhase = "pre-server" | "post-server";
 
 export interface AssemblyStartupCleanups {
   mcp?: StartupCleanupHandle;
+  authorityRuntime?: StartupCleanupHandle;
   assetMaintenance?: StartupCleanupHandle;
   meshRuntime?: StartupCleanupHandle;
   channels?: StartupCleanupHandle;

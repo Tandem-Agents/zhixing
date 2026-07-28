@@ -138,6 +138,12 @@ export interface AuthorityRuntimeStack {
   readonly validateLocalConversationManifest: (
     manifest: ExecutionManifest<"conversation">,
   ) => AuthorityError | undefined;
+  readonly stopStorageMaintenance: () => void;
+  /**
+   * 启动阶段的清理句柄:在任何资源取得之前注册进启动回滚事务,内部失败、外层
+   * 启动失败与正常停机复用同一幂等 handle,维护任务恰一次停止。
+   */
+  readonly startupCleanup: StartupCleanupHandle;
 }
 
 export interface ConversationRuntimeBinding {
@@ -212,15 +218,36 @@ export interface SetupAuthorityRuntimeOptions {
   readonly resourceCandidateTtlMs?: number;
   readonly clock?: () => string;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly startupRollback?: StartupRollback;
 }
 
 export async function setupAuthorityRuntime(
   options: SetupAuthorityRuntimeOptions,
 ): Promise<AuthorityRuntimeStack> {
+  // 清理所有权先于任何资源取得建立:恢复与首次日志使用会在本函数中途启动维护
+  // 义务与定时任务,等函数返回后再注册,"恢复后、返回前失败"的窗口里就没有任何
+  // 人持有停止句柄。闭包读取下方逐步赋值的资源变量,未构造的部分停止即空操作,
+  // 因此注册点不需要判断"第一个可能启动维护的步骤在哪"。
+  let authorityLog: FileAuthorityCommitLog | undefined;
+  let executorLog: FileAuthorityCommitLog | undefined;
+  let surfaceAssets:
+    | ReturnType<typeof createSurfaceAssetAuthority>
+    | undefined;
+  const stopStorageMaintenance = () => {
+    surfaceAssets?.stopStorageMaintenance();
+    authorityLog?.stopStorageMaintenance();
+    executorLog?.stopStorageMaintenance();
+  };
+  const startupRollback = options.startupRollback ?? new StartupRollback();
+  const startupCleanup = startupRollback.register(
+    "authorityRuntime.stopStorageMaintenance",
+    stopStorageMaintenance,
+  );
+  try {
   const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
   const artifacts = new FileArtifactStore(path.join(authorityRoot, "artifacts"));
   const anchorEnabled = options.enableAnchor ?? true;
-  const authorityLog = anchorEnabled
+  authorityLog = anchorEnabled
     ? new FileAuthorityCommitLog(
       path.join(authorityRoot, "authority"),
       artifacts,
@@ -234,7 +261,7 @@ export async function setupAuthorityRuntime(
   const executorRuntime = localExecutorEnabled
     ? await import("@zhixing/executor")
     : undefined;
-  const executorLog = localExecutorEnabled
+  executorLog = localExecutorEnabled
     ? new FileAuthorityCommitLog(
       path.join(authorityRoot, "executor-authority"),
       artifacts,
@@ -279,7 +306,7 @@ export async function setupAuthorityRuntime(
     },
   };
   const clock = options.clock ?? (() => new Date().toISOString());
-  const surfaceAssets = authorityLog
+  surfaceAssets = authorityLog
     ? createSurfaceAssetAuthority({
         authorityRoot,
         log: authorityLog,
@@ -297,8 +324,9 @@ export async function setupAuthorityRuntime(
     : undefined;
   // 启动恢复没有任何调用在等它,但它决定权威何时可用:按恢复档准入,既不与
   // 小时级回收同档竞争,也不冒充前台抢占正在服务的请求。
-  if (surfaceAssets) {
-    await runInMaintenanceContext("recovery", () => surfaceAssets.recover());
+  const recoveringAssets = surfaceAssets;
+  if (recoveringAssets) {
+    await runInMaintenanceContext("recovery", () => recoveringAssets.recover());
   }
   const executorId = options.executorId ?? "executor:local";
   const capabilityDirectoryStore = new FileExecutorCapabilityDirectoryStore(
@@ -697,7 +725,15 @@ export async function setupAuthorityRuntime(
     prepareConversationAssignment,
     validateConversationRuntimeBinding,
     validateLocalConversationManifest,
+    startupCleanup,
+    stopStorageMaintenance,
   };
+  } catch (error) {
+    // 失败即执行同一幂等 handle;handle 缓存执行结果,外层回滚事务再跑它只会
+    // 复用同一次。原始失败优先上抛,清理自身的失败经外层回滚事务可观测。
+    await startupCleanup.run().catch(() => undefined);
+    throw error;
+  }
 }
 
 interface NormalizedExecutorReadiness {

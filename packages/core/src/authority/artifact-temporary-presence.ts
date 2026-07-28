@@ -11,7 +11,12 @@ import {
   syncDirectory,
 } from "../persistence/index.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
-import { claimDeviceCapacity } from "../resources/index.js";
+import {
+  claimDeviceCapacity,
+  runStorageMaintenanceStep,
+  storageMaintenanceRequest,
+  type StorageMaintenanceGovernorPort,
+} from "../resources/index.js";
 import { assertArtifactRef } from "./artifact-references.js";
 import { AuthorityStorageError } from "./errors.js";
 
@@ -67,6 +72,16 @@ export interface ArtifactTemporaryPresenceStore {
 }
 
 /**
+ * 物理 presence 存储的装配选项。
+ *
+ * 未注入 governor 时全部物理步骤直通,用于不受设备容量治理的场景(测试夹具、
+ * 未接入治理的历史装配)。生产组合根必须注入,否则叶级记账会静默落空。
+ */
+export interface FileArtifactTemporaryPresenceStoreOptions {
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+}
+
+/**
  * Durable physical metadata for temporary uploads.
  *
  * A marker is installed before receiver I/O. It is not an authority fact: it
@@ -84,12 +99,50 @@ implements ArtifactTemporaryPresenceStore {
     DURABILITY_CACHE_LIMIT,
   );
 
-  constructor(rootDir: string) {
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
+  #reconciliationCursorSequence = 0;
+
+  constructor(
+    rootDir: string,
+    options: FileArtifactTemporaryPresenceStoreOptions = {},
+  ) {
     this.rootDir = path.resolve(rootDir);
+    this.#storageMaintenance = options.storageMaintenance;
+  }
+
+  /**
+   * 临时区 presence 的物理写删叶步骤统一经此取得设备容量。
+   *
+   * 叶级记账(`claimDeviceCapacity`)在没有容量语境时是静默空操作,所以"叶里写了
+   * 记账"并不等于这次副作用被记进账——语境必须由真正执行副作用的这一步建立。
+   * permit 只包住单个 marker 的安装/删除或一个固定扫描批次。复合步骤内部调用
+   * 私有的无准入叶，任务边界不会被另一个 workKey 吞并。
+   */
+  #underMaintenancePermit<T>(
+    inputIdentity: unknown,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return runStorageMaintenanceStep(
+      this.#storageMaintenance,
+      storageMaintenanceRequest(
+        "lifecycle-reconcile",
+        this.rootDir,
+        inputIdentity,
+        { obligation: "committed" },
+      ),
+      operation,
+    );
   }
 
   async mark(ref: ArtifactRef, scopeIdentity: string): Promise<void> {
     assertPresenceInput(ref, scopeIdentity);
+    await this.#underMaintenancePermit(
+      { step: "mark", digest: ref.digest, scopeIdentity },
+      () => this.#markStep(ref, scopeIdentity),
+    );
+  }
+
+  async #markStep(ref: ArtifactRef, scopeIdentity: string): Promise<void> {
     const directory = this.#digestDirectory(ref);
     await this.#ensureDigestDirectory(directory);
     const target = this.#markerPath(ref, scopeIdentity);
@@ -112,7 +165,7 @@ implements ArtifactTemporaryPresenceStore {
       scopeIdentity,
     };
     const temporary = this.#stagingPath(target);
-    await this.#removeStaging(directory, temporary);
+    await this.#removeStagingStep(directory, temporary);
     const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(Buffer.from(canonicalize(marker), "utf8"));
@@ -129,13 +182,22 @@ implements ArtifactTemporaryPresenceStore {
       await syncDirectory(directory);
       this.#durableDirectoryContents.add(directory);
     } catch (error) {
-      await this.#removeStaging(directory, temporary).catch(() => undefined);
+      await this.#removeStagingStep(directory, temporary).catch(
+        () => undefined,
+      );
       throw error;
     }
   }
 
   async has(ref: ArtifactRef): Promise<boolean> {
     assertArtifactRef(ref);
+    return this.#underMaintenancePermit(
+      { step: "has", digest: ref.digest },
+      () => this.#hasStep(ref),
+    );
+  }
+
+  async #hasStep(ref: ArtifactRef): Promise<boolean> {
     const directory = this.#digestDirectory(ref);
     let entries;
     try {
@@ -213,7 +275,10 @@ implements ArtifactTemporaryPresenceStore {
       const directory = this.#digestDirectory(ref);
       this.#durableDirectoryEntries.delete(directory);
       this.#durableDirectoryContents.delete(directory);
-      await durablyRemoveDirectoryTree(directory);
+      await this.#underMaintenancePermit(
+        { step: "remove-all", digest: ref.digest },
+        () => durablyRemoveDirectoryTree(directory),
+      );
       return;
     }
 
@@ -229,15 +294,23 @@ implements ArtifactTemporaryPresenceStore {
     for (const scopeIdentity of scopeIdentities) {
       assertPresenceInput(ref, scopeIdentity);
     }
-    const targets = [...new Set(scopeIdentities)].map((scopeIdentity) =>
+    const scopes = [...new Set(scopeIdentities)];
+    const targets = scopes.map((scopeIdentity) =>
       this.#markerPath(ref, scopeIdentity)
     );
     const directory = this.#digestDirectory(ref);
     this.#durableDirectoryContents.delete(directory);
-    await durablyRemoveFiles(
-      targets.flatMap((target) => [target, this.#stagingPath(target)]),
+    // 身份取逻辑输入(digest + scope 集合),不取派生路径:路径是这些输入的函数,
+    // 放进身份只会让同一件工作在不同根目录下算出不同的 workKey。
+    await this.#underMaintenancePermit(
+      { step: "remove-scopes", digest: ref.digest, scopes },
+      async () => {
+        await durablyRemoveFiles(
+          targets.flatMap((target) => [target, this.#stagingPath(target)]),
+        );
+        await this.#collectEmptyDigestDirectoryStep(directory);
+      },
     );
-    await this.#collectEmptyDigestDirectory(directory);
   }
 
   async removeStagingFiles(): Promise<number> {
@@ -271,7 +344,10 @@ implements ArtifactTemporaryPresenceStore {
         const batch = staging;
         staging = [];
         this.#durableDirectoryContents.delete(digestDirectory);
-        removed += await durablyRemoveFiles(batch);
+        removed += await this.#underMaintenancePermit(
+          { step: "remove-staging", batch },
+          () => durablyRemoveFiles(batch),
+        );
       };
       for await (const entry of entries) {
         inspected += 1;
@@ -287,16 +363,31 @@ implements ArtifactTemporaryPresenceStore {
   }
 
   openReconciliationCursor(): TemporaryPresenceReconciliationCursor {
+    const cursor = ++this.#reconciliationCursorSequence;
     return new FileTemporaryPresenceReconciliationCursor(
       this.rootDir,
       (file) => this.#readMarker(file),
-      (directory, file) => this.#removeStaging(directory, file),
-      (directory) => this.#collectEmptyDigestDirectory(directory),
+      (directory, file) => this.#removeStagingStep(directory, file),
+      async (directory) => {
+        await this.#collectEmptyDigestDirectoryStep(directory);
+      },
+      (page, operation) =>
+        this.#underMaintenancePermit(
+          { step: "reconciliation-page", cursor, page },
+          operation,
+        ),
     );
   }
 
   async hasLegacyMigration(ref: ArtifactRef): Promise<boolean> {
     assertArtifactRef(ref);
+    return this.#underMaintenancePermit(
+      { step: "has-legacy-migration", digest: ref.digest },
+      () => this.#hasLegacyMigrationStep(ref),
+    );
+  }
+
+  async #hasLegacyMigrationStep(ref: ArtifactRef): Promise<boolean> {
     const migration = await this.#readMigration(
       this.#migrationPath(ref),
     ).catch((error: unknown) => {
@@ -310,6 +401,13 @@ implements ArtifactTemporaryPresenceStore {
 
   async beginLegacyMigration(ref: ArtifactRef): Promise<void> {
     assertArtifactRef(ref);
+    await this.#underMaintenancePermit(
+      { step: "begin-legacy-migration", digest: ref.digest },
+      () => this.#beginLegacyMigrationStep(ref),
+    );
+  }
+
+  async #beginLegacyMigrationStep(ref: ArtifactRef): Promise<void> {
     const directory = this.#digestDirectory(ref);
     await this.#ensureDigestDirectory(directory);
     const target = this.#migrationPath(ref);
@@ -326,7 +424,7 @@ implements ArtifactTemporaryPresenceStore {
       return;
     }
     const temporary = `${target}.tmp`;
-    await this.#removeStaging(directory, temporary);
+    await this.#removeStagingStep(directory, temporary);
     const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(Buffer.from(canonicalize({
@@ -346,7 +444,9 @@ implements ArtifactTemporaryPresenceStore {
       await syncDirectory(directory);
       this.#durableDirectoryContents.add(directory);
     } catch (error) {
-      await this.#removeStaging(directory, temporary).catch(() => undefined);
+      await this.#removeStagingStep(directory, temporary).catch(
+        () => undefined,
+      );
       throw error;
     }
   }
@@ -356,8 +456,13 @@ implements ArtifactTemporaryPresenceStore {
     const directory = this.#digestDirectory(ref);
     this.#durableDirectoryContents.delete(directory);
     const target = this.#migrationPath(ref);
-    await durablyRemoveFiles([target, `${target}.tmp`]);
-    await this.#collectEmptyDigestDirectory(directory);
+    await this.#underMaintenancePermit(
+      { step: "finish-legacy-migration", digest: ref.digest },
+      async () => {
+        await durablyRemoveFiles([target, `${target}.tmp`]);
+        await this.#collectEmptyDigestDirectoryStep(directory);
+      },
+    );
   }
 
   /**
@@ -367,10 +472,21 @@ implements ArtifactTemporaryPresenceStore {
    * 的路径可能本轮零删除。内容缓存只由真正执行了屏障的删除路径登记。
    */
   async #collectEmptyDigestDirectory(directory: string): Promise<void> {
-    const outcome = await durablyRemoveDirectory(directory);
+    const outcome = await this.#underMaintenancePermit(
+      { step: "collect-empty-directory", directory },
+      () => this.#collectEmptyDigestDirectoryStep(directory),
+    );
     if (outcome === "not-empty") return;
+  }
+
+  async #collectEmptyDigestDirectoryStep(
+    directory: string,
+  ): Promise<"removed" | "absent" | "not-empty"> {
+    const outcome = await durablyRemoveDirectory(directory);
+    if (outcome === "not-empty") return outcome;
     this.#durableDirectoryEntries.delete(directory);
     this.#durableDirectoryContents.delete(directory);
+    return outcome;
   }
 
   async #ensureDigestDirectory(directory: string): Promise<void> {
@@ -413,12 +529,16 @@ implements ArtifactTemporaryPresenceStore {
   }
 
   async #readMigration(file: string): Promise<TemporaryPresenceMigration> {
+    claimDeviceCapacity("ioOperations", 1);
     const handle = await open(file, "r");
     try {
+      claimDeviceCapacity("ioOperations", 1);
       const metadata = await handle.stat();
       if (!metadata.isFile() || metadata.size <= 0 || metadata.size > MAX_MARKER_BYTES) {
         throw presenceCorrupt("Temporary presence migration size is invalid");
       }
+      claimDeviceCapacity("readBytes", metadata.size);
+      claimDeviceCapacity("ioOperations", 1);
       const bytes = Buffer.allocUnsafe(metadata.size);
       const read = await handle.read(bytes, 0, bytes.byteLength, 0);
       if (read.bytesRead !== bytes.byteLength) {
@@ -467,7 +587,10 @@ implements ArtifactTemporaryPresenceStore {
     );
   }
 
-  async #removeStaging(directory: string, staging: string): Promise<void> {
+  async #removeStagingStep(
+    directory: string,
+    staging: string,
+  ): Promise<void> {
     this.#durableDirectoryContents.delete(directory);
     await durablyRemoveFile(staging);
     this.#durableDirectoryContents.add(directory);
@@ -481,6 +604,7 @@ implements TemporaryPresenceReconciliationCursor {
   #digestDirectory: string | undefined;
   #digestHex: string | undefined;
   #done = false;
+  #page = 0;
 
   constructor(
     private readonly rootDir: string,
@@ -494,6 +618,10 @@ implements TemporaryPresenceReconciliationCursor {
     private readonly collectEmptyDirectory: (
       directory: string,
     ) => Promise<void>,
+    private readonly runPage: <T>(
+      page: number,
+      operation: () => Promise<T>,
+    ) => Promise<T>,
   ) {}
 
   async next(limit: number): Promise<{
@@ -502,6 +630,15 @@ implements TemporaryPresenceReconciliationCursor {
   }> {
     assertPositiveLimit(limit, "Temporary presence cursor limit");
     if (this.#done) return { entries: [], done: true };
+    const page = this.#page;
+    this.#page += 1;
+    return this.runPage(page, () => this.#next(limit));
+  }
+
+  async #next(limit: number): Promise<{
+    readonly entries: readonly TemporaryPresenceReconciliationEntry[];
+    readonly done: boolean;
+  }> {
     const found: TemporaryPresenceReconciliationEntry[] = [];
     let inspected = 0;
     if (!this.#directories) {

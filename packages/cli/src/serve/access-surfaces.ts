@@ -64,7 +64,7 @@ const authorityRuntimeSurface: AccessSurface = {
   phase: "pre-server",
   async setup(ctx) {
     const bootstrap = ctx.meshBootstrap;
-    ctx.authorityRuntime = await setupAuthorityRuntime({
+    const authorityRuntime = await setupAuthorityRuntime({
       zhixingHome: ctx.zhixingHome,
       secretStore: ctx.secretStore,
       deviceKey: bootstrap.deviceKey,
@@ -78,7 +78,13 @@ const authorityRuntimeSurface: AccessSurface = {
       executorReadiness: ctx.executorReadiness,
       enableLocalExecutor: ctx.enabledRoles.includes("executor"),
       storageMaintenance: ctx.storageMaintenance,
+      // 清理所有权在 setupAuthorityRuntime 内部于任何资源取得前注册进同一回滚
+      // 事务;这里只采用返回的 handle,不再事后另建——事后注册会留下"恢复后、
+      // 返回前失败"的无人清理窗口。
+      startupRollback: ctx.startupRollback,
     });
+    ctx.startupCleanups.authorityRuntime = authorityRuntime.startupCleanup;
+    ctx.authorityRuntime = authorityRuntime;
   },
 };
 

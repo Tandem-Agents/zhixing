@@ -1,12 +1,14 @@
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CommitEnvelope, JsonValue } from "../../contracts/index.js";
 import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
+  StorageMaintenanceTaskRunner,
+  storageMaintenanceWorkKey,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceKind,
 } from "../../resources/index.js";
@@ -25,7 +27,9 @@ import {
   type DurableProjectionReadContext,
 } from "../index.js";
 
-const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+// 重 IO 组级预算:本机上单条耐久用例真实耗时可达 20-30 秒,30 秒档会被临界
+// 抖动随机击穿;对齐 runbook 已验证的 120 秒档,断言失败仍立即终止。
+const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 
 function checkpoint(lsn: number): DurableLogCheckpoint {
   return {
@@ -475,14 +479,36 @@ describe("FileDurableProjectionIndex", () => {
       );
       expect(untouched).toBeDefined();
 
-      for (let page = 0; page < 5; page += 1) {
-        const prepared = await index.prepare(
-          page === 4
-            ? [{ kind: "tombstone", key: "key-0000" }]
-            : [{ kind: "put", key: "key-0000", value: page + 10 }],
+      const runObligation = vi.spyOn(
+        StorageMaintenanceTaskRunner.prototype,
+        "run",
+      );
+      try {
+        for (let page = 0; page < 5; page += 1) {
+          if (page === 4) runObligation.mockClear();
+          const prepared = await index.prepare(
+            page === 4
+              ? [{ kind: "tombstone", key: "key-0000" }]
+              : [{ kind: "put", key: "key-0000", value: page + 10 }],
+          );
+          index.publish(prepared, { source: checkpoint(page + 6) });
+          await index.flush();
+        }
+        const retirementWorkKey = storageMaintenanceWorkKey(
+          "projection-compaction",
+          `test.leveled-compaction:${path.resolve(root)}`,
+          { phase: "retirement-cleanup" },
         );
-        index.publish(prepared, { source: checkpoint(page + 6) });
-        await index.flush();
+        // The final flush performs multiple compaction transitions. Every
+        // transition must re-enter the same fixed retirement obligation; the
+        // old bypass only produced the outer start/final pair.
+        expect(
+          runObligation.mock.calls.filter(
+            ([request]) => request.workKey === retirementWorkKey,
+          ).length,
+        ).toBeGreaterThan(2);
+      } finally {
+        runObligation.mockRestore();
       }
       const compacted = await readProjectionManifest(root);
       expect(compacted.deltaSegments).toHaveLength(0);

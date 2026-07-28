@@ -34,6 +34,9 @@ function mkFullResources(heartbeatTimerRef = { current: null as NodeJS.Timeout |
     channels: { dispose: vi.fn(async () => {}) } as any,
     mcpHub: { dispose: vi.fn(async () => {}) } as any,
     deliveryStack: { stop: vi.fn(async () => {}) } as any,
+    authorityRuntime: {
+      stopStorageMaintenance: vi.fn(),
+    } as any,
   };
 }
 
@@ -61,13 +64,14 @@ describe("registerTailCleanup", () => {
 });
 
 describe("registerCoreCleanup", () => {
-  it("with full resources: registers 6 items in correct order", () => {
+  it("with full resources: registers 7 items in correct order", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const spy = vi.spyOn(registry, "register");
 
     registerCoreCleanup(registry, mkFullResources());
 
     expect(spy.mock.calls.map((c) => c[0])).toEqual([
+      "authorityRuntime.stopStorageMaintenance",
       "heartbeat.clear",
       "deliveryStack.stop",
       "channels.dispose",
@@ -144,6 +148,11 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
           order.push("mcpHub.dispose");
         }),
       } as any,
+      authorityRuntime: {
+        stopStorageMaintenance: vi.fn(() => {
+          order.push("authorityRuntime.stopStorageMaintenance");
+        }),
+      } as any,
     };
 
     // 模拟 command.ts 的真实注册时序：tail → [runServer 注册 server.close] → core
@@ -163,10 +172,11 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
       "channels.dispose", // ④
       "deliveryStack.stop", // ⑤
       // heartbeat.clear 无副作用（timer=null），被跳过（⑥）
-      "server.close", // ⑦
-      "stateFile.markStopped", // ⑧
-      "stateFile.cleanup", // ⑨
-      // releaseLock 最后（⑩），但我们没 mock
+      "authorityRuntime.stopStorageMaintenance", // ⑦
+      "server.close", // ⑧
+      "stateFile.markStopped", // ⑨
+      "stateFile.cleanup", // ⑩
+      // releaseLock 最后（⑪），但我们没 mock
     ]);
   });
 
@@ -183,7 +193,7 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
 
     // Before runAll, capture original functions and replace with order-tracking ones
     // 最干净的方式：用真实资源 mock（上一个测试已做），这里只断言 LIFO 计数
-    expect(registry.size).toBe(3 /* tail */ + 6 /* core */ + 1 /* server.close */);
+    expect(registry.size).toBe(3 /* tail */ + 7 /* core */ + 1 /* server.close */);
 
     await registry.runAll("test");
     expect(registry.finished).toBe(true);

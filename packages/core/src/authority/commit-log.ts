@@ -25,12 +25,14 @@ import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
+  currentMaintenanceAbortSignal,
   runInMaintenanceContext,
-  runStorageMaintenanceTask,
-  storageMaintenanceRequest,
+  runStorageMaintenanceStep,
   maintenanceRetryDelayMs,
-  waitForMaintenanceRetry,
+  storageMaintenanceObligation,
+  storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
+  waitForMaintenanceRetry,
   type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
 import { collectArtifactRefs } from "./artifact-references.js";
@@ -64,6 +66,7 @@ import type {
   AuthorityLogSnapshot,
   AuthorityGarbageCollectionOptions,
   DurableLogCheckpoint,
+  PhysicalStorageStepRunner,
   ProjectionReplayOptions,
   ProjectionReducer,
   ProjectionCursor,
@@ -160,8 +163,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #lockStaleMs: number;
   readonly #lockWaitMs: number;
   readonly #operations = new SerialTaskQueue();
+  readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
-  readonly #maintenanceRunner: StorageMaintenanceTaskRunner | undefined;
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
   readonly #retainedReferenceIndex: RebuildableDurableProjectionIndex;
   #verifiedTail: VerifiedLogTail | undefined;
@@ -182,10 +185,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#lockStaleMs = options.lockStaleMs ?? 30_000;
     this.#lockWaitMs = options.lockWaitMs ?? 10_000;
+    this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
+      options.storageMaintenance,
+    );
     this.#storageMaintenance = options.storageMaintenance;
-    this.#maintenanceRunner = options.storageMaintenance
-      ? new StorageMaintenanceTaskRunner(options.storageMaintenance)
-      : undefined;
     this.#retainedReferenceIndex = this.durableProjection({
       projectionId: RETAINED_REFERENCE_PROJECTION_ID,
       reducerVersion: 3,
@@ -286,9 +289,18 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     return this.#withLogLock(async () => this.#durableCheckpoint(0));
   }
 
+  /** 进程停机时取消日志迁移及该日志所拥有的全部投影维护义务。 */
+  stopStorageMaintenance(): void {
+    this.#maintenanceRunner.stop();
+    for (const projection of this.#durableProjections.values()) {
+      projection.state.stopStorageMaintenance();
+    }
+  }
+
   async readTail<Body = JsonValue>(
     checkpoint: DurableLogCheckpoint,
     limit: number,
+    runPhysicalStep: PhysicalStorageStepRunner = async (operation) => operation(),
   ): Promise<{
     readonly commits: readonly CommitEnvelope<Body>[];
     readonly checkpoint: DurableLogCheckpoint;
@@ -297,7 +309,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 256) {
       throw new RangeError("Authority log tail limit must be 1-256");
     }
-    return this.#withLogLock(async () => {
+    return this.#withLogLock(() => runPhysicalStep(async () => {
       await this.#validateDurableCheckpoint(checkpoint);
       const commits: Array<CommitEnvelope<JsonValue>> = [];
       const scanned = await this.#scanLogFrom(
@@ -318,7 +330,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         checkpoint: this.#durableCheckpoint(scanned.lastLsn),
         hasMore: scanned.stopped === true,
       };
-    });
+    }));
   }
 
   async readEnvelopeAt<Body = JsonValue>(
@@ -1536,15 +1548,26 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (existing) {
       return decodeAuthorityWalFileHeader(existing).logId;
     }
-    return runStorageMaintenanceTask(
-      this.#maintenanceRunner,
-      storageMaintenanceRequest(
+    const inputIdentity = { sourceFormat: "legacy", identity: "missing" };
+    return this.#maintenanceRunner.run(
+      storageMaintenanceObligation(
         "log-migration",
         this.rootDir,
-        { sourceFormat: "legacy", identity: "missing" },
-        { obligation: "committed" },
+        inputIdentity,
+        { owner: "authority-commit-log", obligation: "committed" },
       ),
-      () => this.#createLegacyLogId(),
+      currentMaintenanceAbortSignal(),
+      () =>
+        runStorageMaintenanceStep(
+          this.#storageMaintenance,
+          storageMaintenanceRequest(
+            "log-migration",
+            this.rootDir,
+            inputIdentity,
+            { obligation: "committed" },
+          ),
+          () => this.#createLegacyLogId(),
+        ),
     );
   }
 

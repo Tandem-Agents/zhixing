@@ -6,12 +6,13 @@ import {
   type DeviceCapacityAdmission,
   type DeviceCapacityArbiterPort,
   type DeviceCapacityBudget,
-  type DeviceCapacityPermit,
   withDeviceCapacityStep,
 } from "./device-capacity.js";
 import {
+  currentMaintenanceAbortSignal,
   currentMaintenanceUrgency,
   isHoldingMaintenanceExclusion,
+  runWithMaintenanceUrgency,
 } from "./maintenance-context.js";
 
 export const STORAGE_MAINTENANCE_KINDS = [
@@ -26,6 +27,19 @@ export const STORAGE_MAINTENANCE_KINDS = [
 
 export type StorageMaintenanceKind =
   (typeof STORAGE_MAINTENANCE_KINDS)[number];
+export const STORAGE_MAINTENANCE_TASK_OWNERS = {
+  "log-migration": "authority-commit-log",
+  "projection-flush": "durable-projection-index",
+  "projection-rebuild": "durable-projection-index",
+  "projection-scrub": "durable-projection-index",
+  "projection-compaction": "durable-projection-index",
+  "lifecycle-reconcile": "artifact-lifecycle-index",
+  "asset-gc": "anchor-asset-maintainer",
+} as const satisfies Readonly<
+  Record<StorageMaintenanceKind, string>
+>;
+export type StorageMaintenanceTaskOwner =
+  (typeof STORAGE_MAINTENANCE_TASK_OWNERS)[StorageMaintenanceKind];
 export type StorageMaintenanceUrgency =
   | "foreground"
   | "recovery"
@@ -40,6 +54,19 @@ export interface StorageMaintenanceRequest {
   readonly atomic: DeviceCapacityBudget;
   readonly preferred: DeviceCapacityBudget;
   readonly maxWaitMs: number;
+}
+
+/**
+ * 义务级协调请求。义务层只做 single-flight 协调,不申请容量,因此不携带
+ * 预算与等待上限——容量语义全部属于叶级物理步骤请求。workKey 是义务的
+ * 规范身份:类别 + 资源 + 义务输入的摘要,同键即同一份工作。
+ */
+export interface StorageMaintenanceObligationRequest {
+  readonly workKey: Digest;
+  readonly kind: StorageMaintenanceKind;
+  readonly owner: StorageMaintenanceTaskOwner;
+  readonly urgency: StorageMaintenanceUrgency;
+  readonly obligation: StorageMaintenanceObligation;
 }
 
 export interface StorageMaintenanceDiagnostics {
@@ -169,124 +196,130 @@ export class DefaultStorageMaintenanceGovernor
 }
 
 interface SharedTask<T> {
-  readonly requestIdentity: string;
-  /** 当前生效请求。等待准入期间可被更强的同键请求提级替换。 */
-  request: StorageMaintenanceRequest;
+  readonly workKey: Digest;
+  readonly kind: StorageMaintenanceKind;
+  readonly owner: StorageMaintenanceTaskOwner;
+  /** committed 一经出现即不可降级；它表示工作已跨过候选提交点。 */
+  obligation: StorageMaintenanceObligation;
+  /** 当前仍在等待的调用者中最强的紧急度。 */
+  urgency: StorageMaintenanceUrgency;
   readonly abort: AbortController;
   promise: Promise<T>;
-  /** 当前这次准入尝试的中断器;提级时中断它以便用更强请求重新排队。 */
-  attempt: AbortController | undefined;
-  waiters: number;
+  readonly waiters: Map<symbol, StorageMaintenanceUrgency>;
   settled: boolean;
-  /** 已取得 permit 进入执行。此后提级无意义,新等待者直接共享结果。 */
-  admitted: boolean;
-  /** 等待准入期间被提级,当前这次 acquire 的取消应转为重试而非失败。 */
-  escalated: boolean;
 }
 
+/**
+ * 义务级协调层:完整维护义务的 single-flight 所有权。
+ *
+ * 与物理步骤准入严格分层:这里只做规范 workKey 的同键合流、提级、逐等待者
+ * 取消与诊断,不申请、不持有任何设备容量 permit——义务体内部的每个物理
+ * 步骤在取得所属锁或串行权后,经 `runStorageMaintenanceStep` 独立准入。
+ * 整段义务持有一个 permit 会横跨锁等待与全部步骤;把义务切成叶级 workKey
+ * 则合流、提级、取消与诊断失去载体——两种形态都是本类要消灭的。
+ */
 export class StorageMaintenanceTaskRunner {
   readonly #tasks = new Map<string, SharedTask<unknown>>();
+  #stopped = false;
 
-  constructor(private readonly governor: StorageMaintenanceGovernorPort) {}
+  constructor(private readonly governor?: StorageMaintenanceGovernorPort) {}
 
   run<T>(
-    request: StorageMaintenanceRequest,
+    request: StorageMaintenanceObligationRequest,
     waiterAbort: AbortSignal,
-    operation: (permit: DeviceCapacityPermit, abort: AbortSignal) => Promise<T>,
+    operation: (abort: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    validateStorageRequest(request);
-    const identity = requestIdentity(request);
+    validateStorageObligationRequest(request);
+    if (this.#stopped) {
+      return Promise.reject(new StorageMaintenanceCancelledError());
+    }
+    if (waiterAbort.aborted) {
+      return Promise.reject(new StorageMaintenanceCancelledError());
+    }
     const existing = this.#tasks.get(request.workKey);
     if (existing) {
-      if (existing.requestIdentity !== identity) {
+      if (
+        existing.kind !== request.kind ||
+        existing.owner !== request.owner
+      ) {
         return Promise.reject(
           new StorageMaintenanceConflictError(
             `Storage maintenance key ${request.workKey} was reused with different inputs`,
           ),
         );
       }
-      // 更强的同键请求让仍在排队的任务带着新紧急度重新准入;已经拿到 permit
-      // 的任务直接共享结果——它正在做的就是这件事,重排只会白白丢掉进度。
-      if (!existing.admitted && isStrongerRequest(request, existing.request)) {
-        existing.request = request;
-        existing.escalated = true;
-        existing.attempt?.abort();
+      // 已被最后一个 pre-commit 等待者取消的旧执行仍可能在清理。新调用不得
+      // 加入注定失败的 promise，也不得与它并行执行同键工作；等它结算后重驱。
+      if (existing.abort.signal.aborted) {
+        return this.#runAfterSettlement(
+          existing,
+          request,
+          waiterAbort,
+          operation,
+        );
       }
-      return this.#join(existing as SharedTask<T>, waiterAbort);
+      if (request.obligation === "committed") {
+        existing.obligation = "committed";
+      }
+      return this.#join(
+        existing as SharedTask<T>,
+        waiterAbort,
+        request.urgency,
+      );
     }
 
     const task: SharedTask<T> = {
-      requestIdentity: identity,
-      request,
+      workKey: request.workKey,
+      kind: request.kind,
+      owner: request.owner,
+      obligation: request.obligation,
+      urgency: request.urgency,
       abort: new AbortController(),
       promise: undefined as unknown as Promise<T>,
-      attempt: undefined,
-      waiters: 0,
+      waiters: new Map(),
       settled: false,
-      admitted: false,
-      escalated: false,
     };
     task.promise = this.#execute(task, operation).finally(() => {
       task.settled = true;
-      if (this.#tasks.get(request.workKey) === task) {
-        this.#tasks.delete(request.workKey);
+      if (this.#tasks.get(task.workKey) === task) {
+        this.#tasks.delete(task.workKey);
       }
     });
-    this.#tasks.set(request.workKey, task as SharedTask<unknown>);
-    return this.#join(task, waiterAbort);
+    this.#tasks.set(task.workKey, task as SharedTask<unknown>);
+    return this.#join(task, waiterAbort, request.urgency);
   }
 
   stop(): void {
+    this.#stopped = true;
     for (const task of this.#tasks.values()) task.abort.abort();
   }
 
   async #execute<T>(
     task: SharedTask<T>,
-    operation: (permit: DeviceCapacityPermit, abort: AbortSignal) => Promise<T>,
+    operation: (abort: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    for (;;) {
-      const admission = await this.#admit(task);
-      // 提级中断的准入不是失败:换用更强的请求重新排队。
-      if (admission.kind === "cancelled" && task.escalated) {
-        task.escalated = false;
-        continue;
-      }
-      if (admission.kind !== "granted") {
-        throw new StorageMaintenanceAdmissionError(admission);
-      }
-      task.admitted = true;
-      try {
-        return await operation(admission.permit, task.abort.signal);
-      } catch (error) {
-        if (this.governor instanceof DefaultStorageMaintenanceGovernor) {
-          this.governor.recordError(task.request.kind, error);
-        }
-        throw error;
-      } finally {
-        admission.permit.release();
-      }
-    }
-  }
-
-  /** 单次准入尝试:整体取消与提级中断都要能打断排队中的 acquire。 */
-  async #admit(task: SharedTask<unknown>): Promise<DeviceCapacityAdmission> {
-    if (task.abort.signal.aborted) return { kind: "cancelled" };
-    const attempt = new AbortController();
-    task.attempt = attempt;
-    const forward = () => attempt.abort();
-    task.abort.signal.addEventListener("abort", forward, { once: true });
     try {
-      return await this.governor.acquire(task.request, attempt.signal);
-    } finally {
-      task.abort.signal.removeEventListener("abort", forward);
-      task.attempt = undefined;
+      return await runWithMaintenanceUrgency(
+        () => task.urgency,
+        task.abort.signal,
+        () => operation(task.abort.signal),
+      );
+    } catch (error) {
+      recordMaintenanceError(this.governor, task.kind, error);
+      throw error;
     }
   }
 
-  #join<T>(task: SharedTask<T>, waiterAbort: AbortSignal): Promise<T> {
-    task.waiters += 1;
+  #join<T>(
+    task: SharedTask<T>,
+    waiterAbort: AbortSignal,
+    urgency: StorageMaintenanceUrgency,
+  ): Promise<T> {
+    const waiter = Symbol("storage-maintenance-waiter");
+    task.waiters.set(waiter, urgency);
+    this.#refreshUrgency(task);
     if (waiterAbort.aborted) {
-      this.#releaseWaiter(task);
+      this.#releaseWaiter(task, waiter);
       return Promise.reject(new StorageMaintenanceCancelledError());
     }
     return new Promise<T>((resolve, reject) => {
@@ -295,7 +328,7 @@ export class StorageMaintenanceTaskRunner {
         if (settled) return;
         settled = true;
         waiterAbort.removeEventListener("abort", onAbort);
-        this.#releaseWaiter(task);
+        this.#releaseWaiter(task, waiter);
         callback();
       };
       const onAbort = () =>
@@ -308,15 +341,62 @@ export class StorageMaintenanceTaskRunner {
     });
   }
 
-  #releaseWaiter(task: SharedTask<unknown>): void {
-    task.waiters = Math.max(0, task.waiters - 1);
+  #releaseWaiter(task: SharedTask<unknown>, waiter: symbol): void {
+    task.waiters.delete(waiter);
+    this.#refreshUrgency(task);
     if (
-      task.waiters === 0 &&
+      task.waiters.size === 0 &&
       !task.settled &&
-      task.request.obligation === "pre-commit"
+      task.obligation === "pre-commit"
     ) {
       task.abort.abort();
     }
+  }
+
+  #refreshUrgency(task: SharedTask<unknown>): void {
+    let urgency: StorageMaintenanceUrgency = "background";
+    for (const current of task.waiters.values()) {
+      if (URGENCY_RANK[current] > URGENCY_RANK[urgency]) urgency = current;
+    }
+    task.urgency = urgency;
+  }
+
+  #runAfterSettlement<T>(
+    current: SharedTask<unknown>,
+    request: StorageMaintenanceObligationRequest,
+    waiterAbort: AbortSignal,
+    operation: (abort: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let finished = false;
+      const finish = (callback: () => void) => {
+        if (finished) return;
+        finished = true;
+        waiterAbort.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () =>
+        finish(() => reject(new StorageMaintenanceCancelledError()));
+      waiterAbort.addEventListener("abort", onAbort, { once: true });
+      if (waiterAbort.aborted) {
+        onAbort();
+        return;
+      }
+      current.promise.then(
+        () => {
+          if (finished) return;
+          waiterAbort.removeEventListener("abort", onAbort);
+          finished = true;
+          this.run(request, waiterAbort, operation).then(resolve, reject);
+        },
+        () => {
+          if (finished) return;
+          waiterAbort.removeEventListener("abort", onAbort);
+          finished = true;
+          this.run(request, waiterAbort, operation).then(resolve, reject);
+        },
+      );
+    });
   }
 }
 
@@ -382,16 +462,71 @@ export function storageMaintenanceRequest(
   };
 }
 
-export async function runStorageMaintenanceTask<T>(
-  runner: StorageMaintenanceTaskRunner | undefined,
+/**
+ * 构造义务级协调请求:规范身份 = 类别 + 资源 + 义务输入的摘要。紧急度取当前
+ * 语境——"当前谁在等这份义务"只有触发点知道,义务自身不得自报。
+ */
+export function storageMaintenanceObligation(
+  kind: StorageMaintenanceKind,
+  resourceId: string,
+  inputIdentity: unknown,
+  options: {
+    readonly owner: StorageMaintenanceTaskOwner;
+    readonly obligation: StorageMaintenanceObligation;
+  },
+): StorageMaintenanceObligationRequest {
+  if (STORAGE_MAINTENANCE_TASK_OWNERS[kind] !== options.owner) {
+    throw new TypeError("Storage maintenance task owner is invalid");
+  }
+  return {
+    workKey: storageMaintenanceWorkKey(kind, resourceId, inputIdentity),
+    kind,
+    owner: options.owner,
+    urgency: currentMaintenanceUrgency(),
+    obligation: options.obligation,
+  };
+}
+
+/**
+ * 物理步骤准入层:一个叶级物理副作用的一次容量准入。
+ *
+ * 必须在取得所属锁或串行权之后、真正产生副作用之前调用;零等待由互斥语境
+ * 单点给出,背压由调用方在锁外重试。permit 完成即释放,绝不横跨锁等待、
+ * 串行队列或外部等待。不做 single-flight:叶步骤已被所属串行区线性化,
+ * 同键合流是义务层的职责。governor 缺省时直通,对应不装配治理的嵌入场景。
+ */
+export async function runStorageMaintenanceStep<T>(
+  governor: StorageMaintenanceGovernorPort | undefined,
   request: StorageMaintenanceRequest,
   operation: () => Promise<T>,
-  waiterAbort: AbortSignal = new AbortController().signal,
 ): Promise<T> {
-  if (!runner) return operation();
-  return runner.run(request, waiterAbort, (permit) =>
-    withDeviceCapacityStep(permit, request.atomic, operation),
-  );
+  const abort = currentMaintenanceAbortSignal();
+  throwIfMaintenanceCancelled(abort);
+  if (!governor) return operation();
+  validateStorageRequest(request);
+  const admission = await governor.acquire(request, abort);
+  if (admission.kind === "cancelled") {
+    throw new StorageMaintenanceCancelledError();
+  }
+  if (admission.kind !== "granted") {
+    throw new StorageMaintenanceAdmissionError(admission);
+  }
+  try {
+    throwIfMaintenanceCancelled(abort);
+    return await withDeviceCapacityStep(
+      admission.permit,
+      request.atomic,
+      async () => {
+        throwIfMaintenanceCancelled(abort);
+        return operation();
+      },
+    );
+  } catch (error) {
+    recordMaintenanceError(governor, request.kind, error);
+    throw error;
+  } finally {
+    admission.permit.release();
+  }
 }
 
 export function storageMaintenanceWorkKey(
@@ -448,6 +583,10 @@ export class StorageMaintenanceCancelledError extends Error {
   }
 }
 
+function throwIfMaintenanceCancelled(abort: AbortSignal): void {
+  if (abort.aborted) throw new StorageMaintenanceCancelledError();
+}
+
 export class StorageMaintenanceConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -470,19 +609,40 @@ function validateStorageRequest(request: StorageMaintenanceRequest): void {
   }
 }
 
-/**
- * 同键任务的身份口径 —— 只含业务身份与资源形状。
- *
- * 紧急度、义务来源和等待上限都是调度属性:同一份工作被前台等待还是后台触发,
- * 做的是同一件事,不该因此被判成异载荷冲突而拒绝合流。资源形状留在身份里,
- * 因为形状不同意味着 permit 授予的额度不能互换。
- */
-function requestIdentity(request: StorageMaintenanceRequest): string {
-  return JSON.stringify({
-    kind: request.kind,
-    atomic: request.atomic,
-    preferred: request.preferred,
-  });
+function validateStorageObligationRequest(
+  request: StorageMaintenanceObligationRequest,
+): void {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(request.workKey)) {
+    throw new TypeError("Storage maintenance work key is invalid");
+  }
+  if (!STORAGE_MAINTENANCE_KINDS.includes(request.kind)) {
+    throw new TypeError("Storage maintenance kind is invalid");
+  }
+  if (STORAGE_MAINTENANCE_TASK_OWNERS[request.kind] !== request.owner) {
+    throw new TypeError("Storage maintenance task owner is invalid");
+  }
+  if (!["foreground", "recovery", "background"].includes(request.urgency)) {
+    throw new TypeError("Storage maintenance urgency is invalid");
+  }
+  if (!["pre-commit", "committed"].includes(request.obligation)) {
+    throw new TypeError("Storage maintenance obligation is invalid");
+  }
+}
+
+/** 同一错误只记一次:步骤层先记,沿义务层上抛时去重保证不重复计数。 */
+const recordedMaintenanceErrors = new WeakSet<object>();
+
+function recordMaintenanceError(
+  governor: StorageMaintenanceGovernorPort | undefined,
+  kind: StorageMaintenanceKind,
+  error: unknown,
+): void {
+  if (!(governor instanceof DefaultStorageMaintenanceGovernor)) return;
+  if (typeof error === "object" && error !== null) {
+    if (recordedMaintenanceErrors.has(error)) return;
+    recordedMaintenanceErrors.add(error);
+  }
+  governor.recordError(kind, error);
 }
 
 /** 紧急度强弱序:前台 > 恢复 > 后台。 */
@@ -491,20 +651,6 @@ const URGENCY_RANK: Readonly<Record<StorageMaintenanceUrgency, number>> = {
   recovery: 1,
   background: 0,
 };
-
-/**
- * 新请求是否比在跑的任务更强。更强时等待中的任务重新准入,避免后台任务先占住
- * 键、前台等待者只能陪它排在低优先级队列里。
- */
-function isStrongerRequest(
-  next: StorageMaintenanceRequest,
-  current: StorageMaintenanceRequest,
-): boolean {
-  if (URGENCY_RANK[next.urgency] > URGENCY_RANK[current.urgency]) return true;
-  return (
-    next.obligation === "committed" && current.obligation === "pre-commit"
-  );
-}
 
 function addBudget(
   target: ReturnType<typeof emptyDeviceCapacityBudget>,

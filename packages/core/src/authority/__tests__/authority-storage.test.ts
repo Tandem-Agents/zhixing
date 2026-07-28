@@ -49,7 +49,9 @@ import {
   scanAuthorityWalFrames,
 } from "../wal-frame.js";
 
-const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+// 重 IO 组级预算:本机上单条耐久用例真实耗时可达 20-30 秒,30 秒档会被临界
+// 抖动随机击穿;对齐 runbook 已验证的 120 秒档,断言失败仍立即终止。
+const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 
 const signer: ProtocolSigner = {
   sign(schemaId, version, payload): Signature {

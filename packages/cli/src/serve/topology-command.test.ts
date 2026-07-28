@@ -63,7 +63,11 @@ describe("serve topology command", () => {
       credentialGeneration: null,
       secretStore: harness.secretStore,
     };
-    const mesh = { roles: ["executor"] };
+    const stopStorageMaintenance = vi.fn();
+    const mesh = {
+      roles: ["executor"],
+      bootstrapStore: { stopStorageMaintenance },
+    };
     harness.startup.mockImplementation(async () => {
       harness.order.push("startup");
       return startup;
@@ -79,6 +83,7 @@ describe("serve topology command", () => {
     await runServeCommand({}, harness.writer);
 
     expect(harness.order).toEqual(["startup", "capacity", "mesh", "roles"]);
+    expect(stopStorageMaintenance).toHaveBeenCalledTimes(1);
     expect(harness.prepareMesh).toHaveBeenCalledWith(expect.objectContaining({
       zhixingHome: "test-home",
       secretStore: harness.secretStore,
@@ -96,6 +101,27 @@ describe("serve topology command", () => {
         startup,
       },
     );
+  });
+
+  it("stops bootstrap log maintenance when role startup fails", async () => {
+    const stopStorageMaintenance = vi.fn();
+    harness.startup.mockResolvedValue({
+      kind: "ready",
+      config: {},
+      credentials: {},
+      credentialGeneration: null,
+      secretStore: harness.secretStore,
+    });
+    harness.prepareMesh.mockResolvedValue({
+      roles: ["anchor"],
+      bootstrapStore: { stopStorageMaintenance },
+    });
+    harness.runTopology.mockRejectedValue(new Error("role startup failed"));
+
+    await expect(runServeCommand({}, harness.writer)).rejects.toThrow(
+      "role startup failed",
+    );
+    expect(stopStorageMaintenance).toHaveBeenCalledTimes(1);
   });
 
   it("does not create mesh or role state when preflight is not ready", async () => {
