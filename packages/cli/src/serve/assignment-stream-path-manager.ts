@@ -16,7 +16,10 @@ import {
   type StreamVerifierCheckpoint,
   type InlineInteractionDisplay,
 } from "@zhixing/core/protocol";
-import { StreamConsumerDegradedError } from "@zhixing/executor/assignment-stream-spool";
+import {
+  StreamConsumerDegradedError,
+  StreamHistoryUnavailableError,
+} from "@zhixing/executor/assignment-stream-spool";
 import type { AssignmentStreamClient } from "./assignment-stream-mesh.js";
 
 export type AssignmentStreamPath = "direct" | "relay";
@@ -40,7 +43,13 @@ export interface AssignmentStreamPathManagerOptions {
   readonly ref: ExecutionRef;
   readonly consumer: StreamConsumerAuth;
   readonly direct: AssignmentStreamPathConnector;
-  readonly relay: AssignmentStreamPathConnector;
+  /**
+   * 中继路径连接器。只有第一方 surface 会话持有双路径(直连 executor 与
+   * 经 owner/anchor 中继);渠道宿主与 job owner-relay 自身就坐在 owner
+   * 位置,不存在第二条拓扑路径——省略本字段即诚实的单路径形态,失败
+   * 只在 direct 上有界重试,绝不伪造双路径。
+   */
+  readonly relay?: AssignmentStreamPathConnector;
   readonly adoptFrame: (
     frame: StreamFrame,
     checkpoint: StreamVerifierCheckpoint,
@@ -93,9 +102,10 @@ export class AssignmentStreamPathManager {
   readonly #assignmentId: string;
   readonly #ref: ExecutionRef;
   #consumer: StreamConsumerAuth;
-  readonly #connectors: Readonly<
-    Record<AssignmentStreamPath, AssignmentStreamPathConnector>
-  >;
+  readonly #connectors: {
+    readonly direct: AssignmentStreamPathConnector;
+    readonly relay?: AssignmentStreamPathConnector;
+  };
   readonly #adoptFrame: AssignmentStreamPathManagerOptions["adoptFrame"];
   readonly #maxPathAttempts: number;
   readonly #onPathsUnavailable:
@@ -139,7 +149,7 @@ export class AssignmentStreamPathManager {
     this.#consumer = request.consumer;
     this.#connectors = {
       direct: options.direct,
-      relay: options.relay,
+      ...(options.relay ? { relay: options.relay } : {}),
     };
     this.#adoptFrame = options.adoptFrame;
     this.#maxPathAttempts = maxPathAttempts;
@@ -247,7 +257,7 @@ export class AssignmentStreamPathManager {
           failures.push(error);
           const failedPath = this.#active?.path ?? this.#nextPath;
           await this.#invalidate(error);
-          this.#nextPath = failedPath === "direct" ? "relay" : "direct";
+          this.#nextPath = this.#alternateTo(failedPath);
         }
       }
 
@@ -264,6 +274,11 @@ export class AssignmentStreamPathManager {
   }
 
   async fallbackToRelay(): Promise<void> {
+    if (!this.#connectors.relay) {
+      throw new TypeError(
+        "Assignment stream consumer has no relay path to fall back to",
+      );
+    }
     await this.#select("relay");
   }
 
@@ -300,15 +315,26 @@ export class AssignmentStreamPathManager {
     await this.#invalidate(reason);
   }
 
+  #alternateTo(failedPath: AssignmentStreamPath): AssignmentStreamPath {
+    if (failedPath === "direct" && this.#connectors.relay) return "relay";
+    return "direct";
+  }
+
   async #open(
     path: AssignmentStreamPath,
     signal: AbortSignal,
   ): Promise<ActivePath> {
+    const connector = this.#connectors[path];
+    if (!connector) {
+      throw new AssignmentStreamPathUnavailableError(
+        `${path} assignment stream path is not configured`,
+      );
+    }
     const generation = ++this.#generation;
     const controller = new AbortController();
     let connection: AssignmentStreamPathConnection;
     try {
-      connection = await this.#connectors[path].open({
+      connection = await connector.open({
         assignmentId: this.#assignmentId,
         ref: this.#ref,
         consumer: this.#consumer,
@@ -408,7 +434,7 @@ export class AssignmentStreamPathManager {
           failures += 1;
           const failedPath = active?.path ?? this.#nextPath;
           await this.#invalidate(error);
-          this.#nextPath = failedPath === "direct" ? "relay" : "direct";
+          this.#nextPath = this.#alternateTo(failedPath);
         }
       }
       if (!range) {
@@ -463,4 +489,60 @@ function combineSignals(
 
 function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+/**
+ * 把连接的传输层失败统一映射为路径不可用,使路径管理器能据此切换或
+ * 有界重试。协议语义错误(严格校验拒绝、消费方降级、历史不可用)与
+ * 调用方主动取消原样上抛——它们不是"这条路走不通",换路径也不会好。
+ */
+export function mapConnectionTransportFailures(
+  connection: AssignmentStreamPathConnection,
+  label: string,
+): AssignmentStreamPathConnection {
+  const wrap = async <T>(
+    signal: AbortSignal | undefined,
+    operate: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await operate();
+    } catch (error) {
+      if (
+        signal?.aborted ||
+        error instanceof TypeError ||
+        error instanceof StreamConsumerDegradedError ||
+        error instanceof StreamHistoryUnavailableError ||
+        error instanceof AssignmentStreamPathUnavailableError
+      ) {
+        throw error;
+      }
+      throw new AssignmentStreamPathUnavailableError(
+        `${label} assignment stream path failed`,
+        { cause: error },
+      );
+    }
+  };
+  return {
+    subscribe: (request, signal) =>
+      wrap(signal, () => connection.subscribe(request, signal)),
+    acknowledge: (ack, signal) =>
+      wrap(signal, () => connection.acknowledge(ack, signal)),
+    ...(connection.readArtifact
+      ? {
+          readArtifact: (request, signal) =>
+            wrap(signal, () => {
+              const read = connection.readArtifact;
+              if (!read) {
+                throw new TypeError(
+                  "Assignment stream connection lost artifact reads",
+                );
+              }
+              return read.call(connection, request, signal);
+            }),
+        }
+      : {}),
+    ...(connection.close
+      ? { close: (reason?: Error) => connection.close?.(reason) }
+      : {}),
+  };
 }

@@ -69,7 +69,10 @@ export class JobStatusDirectory {
         }
         seen.add(key);
         const source = this.#sources.get(cursor.taskId)?.source;
-        if (!source) return [] as readonly JobStatusNotice[];
+        if (!source) {
+          // source 未注册不等于义务消失:游标原样保留,注册后续读不丢。
+          return { notices: [] as readonly JobStatusNotice[], next: cursor };
+        }
         const notices = await source.statusHistory(
           cursor.jobRunId,
           cursor.afterStatusRevision,
@@ -85,17 +88,22 @@ export class JobStatusDirectory {
           }
           revision = notice.statusRevision;
         }
-        return notices;
+        return {
+          notices,
+          next: { ...cursor, afterStatusRevision: revision },
+        };
       }),
     );
     return {
       notices: pages
-        .flat()
+        .flatMap((page) => page.notices)
         .sort((left, right) =>
           left.ref.taskId.localeCompare(right.ref.taskId) ||
           left.ref.jobRunId.localeCompare(right.ref.jobRunId) ||
           left.statusRevision - right.statusRevision),
-      next: [],
+      // 真实续读游标:每个入参游标按其权威页尾推进,调用方以此续读、
+      // 断线后从游标重建——绝不返回空表把进度谎报为终点。
+      next: pages.map((page) => page.next),
     };
   }
 

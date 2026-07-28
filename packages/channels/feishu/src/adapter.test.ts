@@ -42,6 +42,27 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 
 import { FeishuAdapter } from "./adapter.js";
 
+// 结构完备的签名 challenge token:严格 callback 校验器只放行规范 wire 形态。
+function challengeToken() {
+  return {
+    v: 1,
+    assignmentId: "asg-1",
+    challengeId: "challenge-1",
+    displayDigest: `sha256:${"a".repeat(64)}`,
+    interactionRequestId: "interaction-1",
+    issuedAt: "2026-07-28T00:00:00.000Z",
+    expiry: "2026-07-28T01:00:00.000Z",
+    ref: {
+      execution: "conversation",
+      conversationId: "conv-1",
+      runId: "run-1",
+      ownerEpoch: 1,
+    },
+    route: { channelId: "feishu", to: "ou_user" },
+    signature: { alg: "ed25519", keyId: "device:owner", sig: "sig-bytes" },
+  };
+}
+
 function makeContext(overrides?: Partial<ChannelContext>): ChannelContext {
   return {
     config: {
@@ -101,7 +122,6 @@ describe("FeishuAdapter", () => {
     const onChallengeAction = vi.fn();
     const adapter = new FeishuAdapter();
     await adapter.connect(makeContext({ onChallengeAction }));
-    const token = { kind: "conversation-channel-challenge", challengeId: "challenge" };
 
     await mockCardAction({
       open_id: "ou_user",
@@ -109,7 +129,7 @@ describe("FeishuAdapter", () => {
       action: {
         value: {
           v: 1,
-          token,
+          token: challengeToken(),
           decision: { allowed: true },
         },
       },
@@ -117,7 +137,7 @@ describe("FeishuAdapter", () => {
 
     expect(onChallengeAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        token,
+        token: challengeToken(),
         responder: {
           channelId: "feishu",
           platformSubject: "ou_user",
@@ -126,6 +146,58 @@ describe("FeishuAdapter", () => {
         decision: { allowed: true },
       }),
     );
+  });
+
+  it("keeps basic messaging and disables challenges without callback credentials", async () => {
+    const adapter = new FeishuAdapter();
+    const context = makeContext();
+    context.config.credentials = { appId: "test-id", appSecret: "test-secret" };
+    await adapter.connect(context);
+
+    expect(adapter.sendChallenge).toBeUndefined();
+    expect(context.registerHttpRoute).not.toHaveBeenCalled();
+    expect(context.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("verificationToken"),
+    );
+
+    const result = await adapter.send(
+      { channelId: "feishu", to: "ou_user1" },
+      { text: "Hello" },
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects callback payloads and decisions carrying unknown fields", async () => {
+    const onChallengeAction = vi.fn();
+    const adapter = new FeishuAdapter();
+    await adapter.connect(makeContext({ onChallengeAction }));
+
+    await expect(
+      mockCardAction({
+        open_id: "ou_user",
+        action: {
+          value: {
+            v: 1,
+            token: challengeToken(),
+            decision: { allowed: true },
+            extra: "injected",
+          },
+        },
+      }),
+    ).rejects.toThrow(/fields are incomplete or unknown/u);
+    await expect(
+      mockCardAction({
+        open_id: "ou_user",
+        action: {
+          value: {
+            v: 1,
+            token: challengeToken(),
+            decision: { allowed: false, reason: "no", verdict: "spoofed" },
+          },
+        },
+      }),
+    ).rejects.toThrow(/fields are incomplete or unknown/u);
+    expect(onChallengeAction).not.toHaveBeenCalled();
   });
 
   it("disconnects and closes WSClient", async () => {

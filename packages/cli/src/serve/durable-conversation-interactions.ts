@@ -31,15 +31,45 @@ export interface DurableInteractionBinding {
   readonly submission: InProcessAssignmentSubmission;
   readonly context: AuthorityCallContext;
   readonly surfacePrincipal: string;
+  broker?: IConfirmationBroker;
   readonly stream: StreamFrameAppender;
   readonly streamMeta: { readonly turnOrigin?: NonNullable<IngressContext["turnOrigin"]> };
   /** Cancels only the projection obligation owner, not the run being projected. */
   readonly signal?: AbortSignal;
 }
 
+export class ConversationInteractionRuntimeUnavailableError extends Error {
+  readonly retryable = true;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ConversationInteractionRuntimeUnavailableError";
+  }
+}
+
+export interface ConversationInteractionAnswerPort {
+  answerInteractionWithTicket(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+    readonly ticketId: string;
+    readonly surfacePrincipal: string;
+    readonly decision: Extract<
+      ConfirmationDecision,
+      { readonly kind: "allow-once" | "deny" }
+    >;
+  }): Promise<void>;
+  resolveNoInteractiveSurface(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+  }): Promise<void>;
+}
+
 /** Binds confirmations and side effects to the executor ledger that owns the run. */
 export class DurableConversationInteractionObserver
-  implements ConfirmationLifecycleObserver, ToolSideEffectObserver
+  implements
+    ConfirmationLifecycleObserver,
+    ToolSideEffectObserver,
+    ConversationInteractionAnswerPort
 {
   readonly #bindings = new AsyncLocalStorage<DurableInteractionBinding>();
   readonly #requests = new Map<string, DurableInteractionBinding>();
@@ -202,6 +232,61 @@ export class DurableConversationInteractionObserver
     return completion;
   }
 
+  async answerInteractionWithTicket(
+    input: Parameters<
+      ConversationInteractionAnswerPort["answerInteractionWithTicket"]
+    >[0],
+  ): Promise<void> {
+    const binding = this.#runtimeBinding(input);
+    const broker = binding.broker;
+    if (!broker) {
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Interaction answer has no active executor confirmation runtime",
+      );
+    }
+    const prepared =
+      await binding.ledger.prepareInteractionAnswerFromSurface(input);
+    if (prepared.kind === "replayed") return;
+    const resolved = await this.resolveWithSurfaceTicket(broker, {
+      assignmentId: input.assignmentId,
+      requestId: input.requestId,
+      ticketId: prepared.ticketId,
+      surfacePrincipal: prepared.surfacePrincipal,
+      decision: prepared.decision,
+    });
+    if (!resolved) {
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Interaction request is not yet restored in the executor runtime",
+      );
+    }
+    const replay =
+      await binding.ledger.prepareInteractionAnswerFromSurface(input);
+    if (replay.kind !== "replayed") {
+      throw new Error(
+        "Interaction answer did not reach a durable terminal result",
+      );
+    }
+  }
+
+  async resolveNoInteractiveSurface(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+  }): Promise<void> {
+    const binding = this.#runtimeBinding(input);
+    const resolve = binding.broker?.resolveNonInteractiveDurably;
+    if (!resolve) {
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Interaction has no active durable fail-closed runtime",
+      );
+    }
+    const resolved = await resolve.call(binding.broker, input.requestId);
+    if (!resolved) {
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Interaction request is not yet restored in the executor runtime",
+      );
+    }
+  }
+
   async drainAssignment(binding: DurableInteractionBinding): Promise<void> {
     const previous =
       this.#drains.get(binding.assignmentId) ?? Promise.resolve();
@@ -241,6 +326,19 @@ export class DurableConversationInteractionObserver
       }
     }
     this.#projectedRecordSeq.delete(assignmentId);
+  }
+
+  #runtimeBinding(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+  }): DurableInteractionBinding {
+    const binding = this.#requests.get(input.requestId);
+    if (!binding || binding.assignmentId !== input.assignmentId) {
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Interaction request is not yet restored in the executor runtime",
+      );
+    }
+    return binding;
   }
 
   async start(

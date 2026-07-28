@@ -9,6 +9,7 @@ import type {
   JobChannelChallengeToken,
   Signature,
 } from "../contracts/index.js";
+import type { ConfirmationDecision } from "../confirmation/types.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import type {
   ProtocolSignatureVerifier,
@@ -75,18 +76,21 @@ export function channelResponderPrincipal(
   )}`;
 }
 
-export function channelInteractionDecisionDigest(
-  interactionRequestId: string,
+/**
+ * 渠道 wire 决定与规范确认决定的唯一边界映射。渠道 grant 携带的
+ * `{allowed, reason?}` 只是传输形态;进入 interaction-finished 的
+ * decisionDigest 必须复用冻结的 ConfirmationDecision 摘要域,不得
+ * 为渠道另立第二套摘要语义。
+ */
+export function channelInteractionConfirmationDecision(
   decision: { readonly allowed: boolean; readonly reason?: string },
-): Digest {
-  assertProtocolIdentifier(
-    interactionRequestId,
-    "Channel decision interactionRequestId",
-  );
-  return protocolDigest("ChannelInteractionDecision", 1, {
-    interactionRequestId,
-    decision: validateDecision(decision, "Channel interaction decision"),
-  }) as Digest;
+): Extract<ConfirmationDecision, { kind: "allow-once" } | { kind: "deny" }> {
+  const validated = validateDecision(decision, "Channel interaction decision");
+  if (validated.allowed) return { kind: "allow-once" };
+  return {
+    kind: "deny",
+    ...(validated.reason === undefined ? {} : { reason: validated.reason }),
+  };
 }
 
 export function createSignedChannelChallengeToken(
@@ -100,10 +104,10 @@ export function createSignedChannelChallengeToken(
   } as ChannelChallengeToken;
 }
 
-export function validateChannelChallengeToken(
-  input: unknown,
-  verifier: ProtocolSignatureVerifier,
-): ChannelChallengeToken {
+function validateChallengeTokenStructure(input: unknown): {
+  readonly token: ChannelChallengeToken;
+  readonly payload: UnsignedChannelChallengeToken;
+} {
   const token = clone(input, "Channel challenge token") as ChannelChallengeToken;
   assertPlainObject(token, "Channel challenge token");
   assertExactKeys(
@@ -123,12 +127,48 @@ export function validateChannelChallengeToken(
     "Channel challenge token",
   );
   assertSignature(token.signature, "Channel challenge token signature");
-  const { signature, ...unsigned } = token;
+  const { signature: _, ...unsigned } = token;
   const payload = validateUnsignedChallengeToken(
     unsigned as UnsignedChannelChallengeToken,
   );
-  verifier.verify("ChannelChallengeToken", 1, payload, signature);
+  return { token, payload };
+}
+
+export function validateChannelChallengeToken(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): ChannelChallengeToken {
+  const { token, payload } = validateChallengeTokenStructure(input);
+  verifier.verify("ChannelChallengeToken", 1, payload, token.signature);
   return token;
+}
+
+/**
+ * 渠道 callback payload 的唯一严格结构校验器(渠道无关)。adapter 只负责
+ * 把平台事件映射到本 DTO 后调用它;未知字段、错形态、越界 reason 在进入
+ * 宿主前拒绝。token 签名与 pending 权威校验不在此处——那是 owner 侧持
+ * verifier 的职责,本函数只保证 wire 结构封闭。
+ */
+export function validateChannelChallengeCallback(value: unknown): {
+  readonly token: ChannelChallengeToken;
+  readonly decision: { readonly allowed: boolean; readonly reason?: string };
+} {
+  const payload = clone(value, "Channel challenge callback");
+  assertPlainObject(payload, "Channel challenge callback");
+  assertExactKeys(
+    payload,
+    ["decision", "token", "v"],
+    "Channel challenge callback",
+  );
+  if (payload.v !== 1) {
+    throw new TypeError("Channel challenge callback version must be 1");
+  }
+  const { token } = validateChallengeTokenStructure(payload.token);
+  const decision = validateDecision(
+    payload.decision,
+    "Channel challenge callback decision",
+  );
+  return { token, decision };
 }
 
 export function channelChallengeTokenDigest(

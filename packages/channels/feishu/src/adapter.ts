@@ -9,6 +9,7 @@ import type {
   DeliveryTarget,
   OutboundContent,
 } from "@zhixing/core";
+import { validateChannelChallengeCallback } from "@zhixing/core/protocol";
 import { buildChallengeCard, buildReplyCard } from "./cards.js";
 import { FeishuApiError, FeishuClient, detectReceiveIdType, resolveDomain } from "./client.js";
 import { resolveConfig } from "./config.js";
@@ -30,6 +31,13 @@ export class FeishuAdapter implements ChannelAdapter {
   private dedup: DedupCache | null = null;
   private logger: ChannelLogger | null = null;
 
+  /**
+   * 互动确认能力按凭据挂载:仅当 interactiveConfirmation 凭据在场时才存在,
+   * `isChallengeChannel` 的鸭子探测因此如实反映当前能力——degraded 时宿主
+   * 侧对该渠道 fail-closed,基础消息不受影响。
+   */
+  sendChallenge?: (message: ChannelChallengeMessage) => Promise<DeliveryResult>;
+
   async connect(ctx: ChannelContext): Promise<void> {
     const config = resolveConfig(ctx.config.credentials, ctx.config.options);
     this.logger = ctx.logger;
@@ -45,33 +53,45 @@ export class FeishuAdapter implements ChannelAdapter {
     const adapterId = this.id;
     const botOpenId = config.botOpenId;
 
-    const handler = new lark.CardActionHandler(
-      {
-        verificationToken: config.verificationToken,
-        encryptKey: config.encryptKey,
-      },
-      async (event: lark.InteractiveCardActionEvent) => {
-        const action = parseChallengeAction(event.action?.value);
-        ctx.onChallengeAction({
-          token: action.token,
-          responder: {
-            channelId: adapterId,
-            platformSubject: event.open_id,
-            ...(event.tenant_key ? { tenant: event.tenant_key } : {}),
-          },
-          decision: action.decision,
-          raw: event,
-        });
-        return {};
-      },
-    );
-    ctx.registerHttpRoute(
-      `/channels/${adapterId}/challenge`,
-      lark.adaptDefault(
+    if (config.interactiveConfirmation) {
+      const handler = new lark.CardActionHandler(
+        {
+          verificationToken: config.interactiveConfirmation.verificationToken,
+          encryptKey: config.interactiveConfirmation.encryptKey,
+        },
+        async (event: lark.InteractiveCardActionEvent) => {
+          const action = validateChannelChallengeCallback(event.action?.value);
+          // 平台只有在耐久裁决完成后才收到成功响应;失败上抛让平台重投,
+          // 耐久层的同键幂等保证重投只回放原结果。
+          await ctx.onChallengeAction({
+            token: action.token,
+            responder: {
+              channelId: adapterId,
+              platformSubject: event.open_id,
+              ...(event.tenant_key ? { tenant: event.tenant_key } : {}),
+            },
+            decision: action.decision,
+            raw: event,
+          });
+          return {};
+        },
+      );
+      ctx.registerHttpRoute(
         `/channels/${adapterId}/challenge`,
-        handler,
-      ),
-    );
+        lark.adaptDefault(
+          `/channels/${adapterId}/challenge`,
+          handler,
+        ),
+      );
+      this.sendChallenge = (message) => this.deliverChallenge(message);
+    } else {
+      delete this.sendChallenge;
+      this.logger?.warn(
+        "Feishu interactive confirmation is disabled: add verificationToken and encryptKey " +
+          "(飞书开放平台 → 事件与回调 → 加密策略) to enable signed challenge cards. " +
+          "Basic messaging stays available; restart after adding the credentials.",
+      );
+    }
 
     const eventDispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data) => {
@@ -123,6 +143,7 @@ export class FeishuAdapter implements ChannelAdapter {
     this.client = null;
     this.dedup?.clear();
     this.dedup = null;
+    delete this.sendChallenge;
     this.logger?.info("Feishu adapter disconnected");
     this.logger = null;
   }
@@ -148,7 +169,9 @@ export class FeishuAdapter implements ChannelAdapter {
     }
   }
 
-  async sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult> {
+  private async deliverChallenge(
+    message: ChannelChallengeMessage,
+  ): Promise<DeliveryResult> {
     if (!this.client) {
       return { success: false, error: "Adapter not connected", retryable: true };
     }
@@ -187,45 +210,3 @@ export class FeishuAdapter implements ChannelAdapter {
   }
 }
 
-function parseChallengeAction(value: unknown): {
-  readonly token: import("@zhixing/core").ChannelChallengeAction["token"];
-  readonly decision: import("@zhixing/core").ChannelChallengeAction["decision"];
-} {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  ) {
-    throw new TypeError("Feishu challenge action is invalid");
-  }
-  const candidate = value as Record<string, unknown>;
-  if (
-    candidate["v"] !== 1 ||
-    !candidate["token"] ||
-    typeof candidate["token"] !== "object" ||
-    !candidate["decision"] ||
-    typeof candidate["decision"] !== "object"
-  ) {
-    throw new TypeError("Feishu challenge action is incomplete");
-  }
-  const decision = candidate["decision"] as Record<string, unknown>;
-  if (typeof decision["allowed"] !== "boolean") {
-    throw new TypeError("Feishu challenge decision is invalid");
-  }
-  if (
-    decision["reason"] !== undefined &&
-    typeof decision["reason"] !== "string"
-  ) {
-    throw new TypeError("Feishu challenge reason is invalid");
-  }
-  return {
-    token: candidate["token"] as import("@zhixing/core").ChannelChallengeAction["token"],
-    decision: {
-      allowed: decision["allowed"],
-      ...(typeof decision["reason"] === "string"
-        ? { reason: decision["reason"] }
-        : {}),
-    },
-  };
-}

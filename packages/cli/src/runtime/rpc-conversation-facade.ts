@@ -47,6 +47,7 @@ import { generateTurnId, type UserTurnInput } from "@zhixing/core";
 import type {
   ConversationStatusNotice,
   FinalFrame,
+  StreamFrame,
 } from "@zhixing/core/contracts";
 import {
   RpcClientError,
@@ -364,6 +365,14 @@ export class RpcConversationFacade {
   onStatus(handler: (payload: ConversationStatusNotice) => void): () => void {
     return this.link.onNotification(SESSION_NOTIFICATIONS.status, (p) =>
       handler(p as ConversationStatusNotice),
+    );
+  }
+
+  /** S6 assignment 流的规范帧；与路径选择无关，跨重连保持同一 seq/摘要链。 */
+  onAssignmentStream(handler: (payload: StreamFrame) => void): () => void {
+    return this.link.onNotification(
+      SESSION_NOTIFICATIONS.assignmentStream,
+      (payload) => handler(payload as StreamFrame),
     );
   }
 

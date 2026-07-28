@@ -70,8 +70,7 @@ describe("JobOwnerRelay", () => {
         async resolveNoInteractiveSurface() {},
         async resolveGrant() {},
       },
-      direct,
-      relay: direct,
+      connector: direct,
     });
 
     await relay.poll();
@@ -117,8 +116,7 @@ describe("JobOwnerRelay", () => {
           async resolveNoInteractiveSurface() {},
           async resolveGrant() {},
         },
-        direct: { async open() { throw new Error("unused"); } },
-        relay: { async open() { throw new Error("unused"); } },
+        connector: { async open() { throw new Error("unused"); } },
       }),
     ).rejects.toThrow(/does not bind/);
   });

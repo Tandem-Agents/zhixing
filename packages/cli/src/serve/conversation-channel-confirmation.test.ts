@@ -73,8 +73,7 @@ describe("ConversationChannelHost", () => {
       verifier: identity,
       journal,
       resolver,
-      direct: { async open() { return connection; } },
-      relay: { async open() { throw new Error("unused"); } },
+      connector: { async open() { return connection; } },
       now: () => "2026-07-28T00:01:00.000Z",
     });
 
@@ -121,8 +120,7 @@ describe("ConversationChannelHost", () => {
       verifier: identity,
       journal,
       resolver,
-      direct: { async open() { throw new Error("unused"); } },
-      relay: { async open() { throw new Error("unused"); } },
+      connector: { async open() { throw new Error("unused"); } },
       now: () => "2026-07-28T00:01:00.000Z",
     });
 
@@ -161,7 +159,7 @@ describe("ConversationChannelHost", () => {
         },
       },
       resolver: { async resolve() { return false; } },
-      direct: {
+      connector: {
         async open() {
           return {
             async subscribe() {
@@ -183,7 +181,6 @@ describe("ConversationChannelHost", () => {
           };
         },
       },
-      relay: { async open() { throw new Error("unused"); } },
       now: () => "2026-07-28T00:01:00.000Z",
     });
 

@@ -30,6 +30,10 @@ import {
 } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
 import {
+  ExecutionStatusHub,
+  FirstPartyFinalitySession,
+} from "./first-party-finality-session.js";
+import {
   setupAuthorityRuntime,
   setupDelivery,
 } from "../setup-delivery.js";
@@ -43,7 +47,7 @@ import type { AccessSurface } from "./access-surface.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
-import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
+import { createLosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -89,6 +93,28 @@ const authorityRuntimeSurface: AccessSurface = {
     jobStatus.onStatus((notice) => {
       ctx.runner?.server.context.broadcastAll?.("job.status", notice);
     });
+    // 三域权威 live/history 的聚合面:history 惰性路由到各域权威(装配序
+    // 无关),live 由各域装配点 tee 入;第一方会话工厂按调用方 last-seen
+    // 游标建立合并投影,渠道投递不经过它。
+    const statusHub = new ExecutionStatusHub({
+      conversationHistory: (requests) =>
+        ctx.conversationProtocol
+          ? ctx.conversationProtocol.statusHistory(requests)
+          : Promise.resolve({ notices: [], next: requests }),
+      jobHistory: async (cursors) => {
+        const page = await jobStatus.statusHistory(cursors);
+        return {
+          notices: page.notices,
+          next: page.next,
+        };
+      },
+      deliveryHistory: async (afterByItem) =>
+        (await ctx.deliveryStack?.statusHistory(afterByItem)) ?? [],
+    });
+    jobStatus.onStatus((notice) => statusHub.publish(notice));
+    ctx.executionStatusHub = statusHub;
+    ctx.firstPartyFinality = (input) =>
+      new FirstPartyFinalitySession({ sources: statusHub, ...input });
     ctx.startupCleanups.jobStatus = ctx.startupRollback.register(
       "jobStatus.dispose",
       () => jobStatus.dispose(),
@@ -110,6 +136,9 @@ const executorDataPlaneSurface: AccessSurface = {
       zhixingHome: ctx.zhixingHome,
       authority: ctx.authorityRuntime,
       module: ctx.executorRoleModule,
+      ...(ctx.storageMaintenance
+        ? { storageMaintenance: ctx.storageMaintenance }
+        : {}),
       onError: (error) =>
         console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
     });
@@ -208,25 +237,31 @@ const losslessDataPlaneSurface: AccessSurface = {
   phase: "pre-server",
   async setup(ctx) {
     if (!ctx.enabledRoles.includes("anchor")) return;
-    if (!ctx.authorityRuntime || !ctx.conversationProtocol) {
+    if (!ctx.authorityRuntime || !ctx.conversationProtocol || !ctx.jobStatus) {
       throw new Error(
-        "Lossless data plane requires authority and conversation protocol runtimes",
+        "Lossless data plane requires authority, conversation, and job-status runtimes",
       );
     }
-    const runtime = new LosslessDataPlaneRuntime({
+    const composition = createLosslessDataPlaneComposition({
       authority: ctx.authorityRuntime,
       ...(ctx.executorDataPlane ? { local: ctx.executorDataPlane } : {}),
       mesh: () => ctx.meshRuntime,
       interactions: ctx.durableInteractions,
-      onError: (error) =>
+      protocol: ctx.conversationProtocol,
+      channels: () => ctx.channels,
+      jobStatus: ctx.jobStatus,
+      onDataPlaneError: (error) =>
         console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
+      onCoordinatorError: (error) =>
+        console.warn(chalk.yellow(`[channel-coordinator] ${error.message}`)),
     });
     ctx.startupCleanups.losslessDataPlane = ctx.startupRollback.register(
       "losslessDataPlane.close",
-      () => runtime.close(),
+      () => composition.close(),
     );
-    ctx.losslessDataPlane = runtime;
-    ctx.conversationProtocol.bindLosslessDataPlane(runtime);
+    ctx.losslessDataPlane = composition.runtime;
+    ctx.channelCoordinator = composition.coordinator;
+    ctx.jobRelayObligations = composition.jobRelayObligations;
   },
 };
 
@@ -335,6 +370,7 @@ const conversationSurface: AccessSurface = {
           SESSION_NOTIFICATIONS.status,
           notice,
         );
+        ctx.executionStatusHub?.publish(notice);
       },
       onFinal: (frame) => {
         ctx.sessionBroadcastRef.current?.(
@@ -342,6 +378,21 @@ const conversationSurface: AccessSurface = {
           SESSION_NOTIFICATIONS.final,
           frame,
         );
+      },
+      onFirstPartyFrame: (frame) => {
+        if (frame.ref.execution !== "conversation") return;
+        ctx.sessionBroadcastRef.current?.(
+          frame.ref.conversationId,
+          SESSION_NOTIFICATIONS.assignmentStream,
+          frame,
+        );
+      },
+      createFirstPartyFinality: (input) => {
+        const factory = ctx.firstPartyFinality;
+        if (!factory) {
+          throw new Error("First-party finality projection is not assembled");
+        }
+        return factory(input);
       },
       projectLifecycle: async (input) => {
         if (input.mutation === "clear") {
@@ -506,13 +557,16 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           sessionBroadcast: () => ctx.sessionBroadcastRef.current,
           sessionActivityBroadcast: () =>
             ctx.sessionActivityBroadcastRef.current,
+          // callback 可等待:耐久裁决完成才向平台确认;失败上抛让平台重投,
+          // 耐久层同键幂等保证重投只回放原结果——绝不 fire-and-forget。
           onChallengeAction: (action) => {
-            void losslessDataPlane.handleChallengeAction(action).catch((error) => {
-              channelLogger.warn(
-                "Signed challenge callback rejected: %s",
-                error instanceof Error ? error.message : String(error),
+            const coordinator = ctx.channelCoordinator;
+            if (!coordinator) {
+              return Promise.reject(
+                new Error("Channel interaction coordinator is not assembled"),
               );
-            });
+            }
+            return coordinator.handleChallengeAction(action);
           },
           registerHttpRoute: (path, handler) => {
             if (ctx.channelHttpRoutes.has(path)) {
@@ -524,6 +578,9 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         losslessDataPlane.bindChannels(result.registry);
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
+        // 渠道在场后恢复耐久开放义务(job relay 会话按权威日志重建;
+        // conversation 义务由协议恢复循环幂等重开)。
+        await ctx.channelCoordinator?.recover();
         ctx.startupCleanups.channels = ctx.startupRollback.register(
           "channels.dispose",
           () => result.registry.dispose(),
@@ -562,6 +619,9 @@ const deliverySurface: AccessSurface = {
     });
     ctx.deliveryStack = deliveryStack;
     ctx.startupCleanups.deliveryStack = deliveryStack.startupCleanup;
+    deliveryStack.onStatus((notice) => {
+      ctx.executionStatusHub?.publish(notice);
+    });
     ctx.conversationProtocol?.bindDeliveryDrain(() =>
       deliveryStack.authorityDelivery.flush(),
     );

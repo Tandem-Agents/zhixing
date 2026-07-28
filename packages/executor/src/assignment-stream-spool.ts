@@ -1,11 +1,12 @@
-import { open, readdir, rename, rm, writeFile } from "node:fs/promises";
-import type { Dirent } from "node:fs";
+import { open, opendir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import type { Dir } from "node:fs";
 import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   collectArtifactRefs,
   type ArtifactStore,
+  type PhysicalStorageStepRunner,
   type ProjectionCursor,
   type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
@@ -54,6 +55,7 @@ export const MAX_ASSIGNMENT_STREAM_FRAME_BYTES =
 
 const STREAM = "assignment:stream";
 const TOMBSTONE_VERSION = 1;
+const IDENTITY_VERSION = 1;
 
 export interface AssignmentStreamSpoolOptions {
   readonly capacityBytes?: number;
@@ -433,6 +435,7 @@ export class AssignmentStreamSpool {
     AssignmentStreamSpoolOptions["removeRetiredArtifact"]
   >;
   readonly #handles = new Map<string, AssignmentHandle>();
+  #assignmentScan: Dir | undefined;
 
   constructor(
     rootDir: string,
@@ -486,6 +489,10 @@ export class AssignmentStreamSpool {
           value: undefined,
         };
       });
+      await this.#writeAssignmentIdentity(
+        handle.assignmentId,
+        handle.directory,
+      );
       await this.#cleanupOrphanFrames(handle, result.state);
       await this.#drainPendingDeletes(handle);
       return snapshotOf(await this.#select(handle));
@@ -916,98 +923,127 @@ export class AssignmentStreamSpool {
   async reclaimDue(
     assignmentId: string,
     now: IsoTime = this.#clock(),
+    runPhysicalStep?: PhysicalStorageStepRunner,
   ): Promise<boolean> {
     assertCanonicalTime(now);
     const handle = this.#handle(assignmentId);
-    return handle.queue.run(async () => {
-      if (await this.#isTombstoned(handle)) {
-        await rm(handle.directory, { recursive: true, force: true });
-        this.#handles.delete(assignmentId);
-        return true;
-      }
-      let state = await this.#select(handle);
-      assertOpen(state);
-      if (state.reclaimed) {
+    // 容量准入由调用方经 runPhysicalStep 提供,在本 assignment 串行段内、
+    // 物理删除前取得;permit 绝不横跨队列等待。
+    const step = runPhysicalStep ?? ((operation) => operation());
+    return handle.queue.run(() =>
+      step(async () => {
+        if (await this.#isTombstoned(handle)) {
+          await rm(handle.directory, { recursive: true, force: true });
+          this.#handles.delete(assignmentId);
+          return true;
+        }
+        let state = await this.#select(handle);
+        assertOpen(state);
+        if (state.reclaimed) {
+          await this.#writeTombstone(handle);
+          await rm(handle.directory, { recursive: true, force: true });
+          this.#handles.delete(assignmentId);
+          return true;
+        }
+        if (
+          state.terminal &&
+          state.reclaimAfter === undefined &&
+          canArmReclaim(state)
+        ) {
+          const armed = await this.#transact(handle, (_state, at) => ({
+            kind: "append",
+            entries: [
+              record({
+                t: "reclaim-armed",
+                reclaimAfter: new Date(
+                  Date.parse(at) + this.#reclaimDelayMs,
+                ).toISOString(),
+              }),
+            ],
+            value: undefined,
+          }));
+          state = armed.state;
+        }
+        if (
+          state.reclaimAfter === undefined ||
+          Date.parse(state.reclaimAfter) > Date.parse(now)
+        ) {
+          return false;
+        }
+        await this.#transact(handle, () => ({
+          kind: "append",
+          entries: [record({ t: "reclaimed" })],
+          value: undefined,
+        }));
         await this.#writeTombstone(handle);
         await rm(handle.directory, { recursive: true, force: true });
         this.#handles.delete(assignmentId);
         return true;
-      }
-      if (
-        state.terminal &&
-        state.reclaimAfter === undefined &&
-        canArmReclaim(state)
-      ) {
-        const armed = await this.#transact(handle, (_state, at) => ({
-          kind: "append",
-          entries: [
-            record({
-              t: "reclaim-armed",
-              reclaimAfter: new Date(
-                Date.parse(at) + this.#reclaimDelayMs,
-              ).toISOString(),
-            }),
-          ],
-          value: undefined,
-        }));
-        state = armed.state;
-      }
-      if (
-        state.reclaimAfter === undefined ||
-        Date.parse(state.reclaimAfter) > Date.parse(now)
-      ) {
-        return false;
-      }
-      await this.#transact(handle, () => ({
-        kind: "append",
-        entries: [record({ t: "reclaimed" })],
-        value: undefined,
-      }));
-      await this.#writeTombstone(handle);
-      await rm(handle.directory, { recursive: true, force: true });
-      this.#handles.delete(assignmentId);
-      return true;
-    });
+      }),
+    );
   }
 
   /**
-   * Rebuilds the maintenance work set from durable spool identities.
-   * Directory names are digests and therefore cannot be used as assignment ids.
+   * Reads at most `limit` durable spool identities from one open directory
+   * cursor. A completed cursor is discarded and the next call starts a new
+   * sweep, so every maintenance round has a fixed physical-I/O bound while
+   * restarts merely repeat idempotent work.
+   */
+  async assignmentIdPage(
+    limit: number,
+    runPhysicalStep?: PhysicalStorageStepRunner,
+  ): Promise<readonly string[]> {
+    assertPositiveInteger(limit, "Assignment identity page limit");
+    const assignmentsRoot = path.join(this.#rootDir, "assignments");
+    const step = runPhysicalStep ?? ((operation) => operation());
+    return step(async () => {
+      if (!this.#assignmentScan) {
+        try {
+          this.#assignmentScan = await opendir(assignmentsRoot);
+        } catch (error) {
+          if (isNodeError(error, "ENOENT")) return [];
+          throw error;
+        }
+      }
+      const assignmentIds: string[] = [];
+      let inspected = 0;
+      while (inspected < limit) {
+        const entry = await this.#assignmentScan.read();
+        if (!entry) {
+          await this.#assignmentScan.close().catch(() => undefined);
+          this.#assignmentScan = undefined;
+          break;
+        }
+        inspected += 1;
+        if (!entry.isDirectory()) continue;
+        const assignmentId = await this.#readAssignmentIdentity(
+          path.join(assignmentsRoot, entry.name),
+          entry.name,
+        );
+        assignmentIds.push(assignmentId);
+      }
+      return assignmentIds;
+    });
+  }
+
+  async closeAssignmentScan(): Promise<void> {
+    const scan = this.#assignmentScan;
+    this.#assignmentScan = undefined;
+    await scan?.close().catch(() => undefined);
+  }
+
+  /**
+   * Compatibility helper for diagnostics and tests. Production maintenance
+   * uses assignmentIdPage so it never materializes the whole durable history.
    */
   async assignmentIds(): Promise<readonly string[]> {
-    const assignmentsRoot = path.join(this.#rootDir, "assignments");
-    let entries: Dirent<string>[];
-    try {
-      entries = await readdir(assignmentsRoot, { withFileTypes: true });
-    } catch (error) {
-      if (isNodeError(error, "ENOENT")) return [];
-      throw error;
+    const found = new Set<string>();
+    for (;;) {
+      const page = await this.assignmentIdPage(256);
+      for (const assignmentId of page) found.add(assignmentId);
+      if (this.#assignmentScan === undefined) break;
     }
-    const assignmentIds = new Set<string>();
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const directory = path.join(assignmentsRoot, entry.name);
-      const frames = new FileArtifactStore(path.join(directory, "frames"));
-      const log = new FileAuthorityCommitLog(
-        path.join(directory, "index"),
-        frames,
-        { clock: this.#clock },
-      );
-      const records = await log.readStream<SpoolRecord>(STREAM);
-      const opened = records
-        .map(({ body }) => validateSpoolRecord(body))
-        .find((body) => body.t === "opened");
-      if (!opened) {
-        throw corruptSpool("Stream spool has no durable assignment identity");
-      }
-      if (assignmentKey(opened.assignmentId) !== entry.name) {
-        throw corruptSpool("Stream spool directory does not bind its assignment");
-      }
-      assignmentIds.add(opened.assignmentId);
-    }
-    return [...assignmentIds].sort((left, right) =>
-      left.localeCompare(right, "en-US"),
-    );
+    return [...found].sort((left, right) => left.localeCompare(right, "en-US"));
   }
 
   async snapshot(assignmentId: string): Promise<StreamSpoolSnapshot> {
@@ -1463,6 +1499,86 @@ export class AssignmentStreamSpool {
     );
     await rename(temporary, target);
     await syncDirectory(directory);
+  }
+
+  async #writeAssignmentIdentity(
+    assignmentId: string,
+    directory: string,
+  ): Promise<void> {
+    const target = path.join(directory, "identity.json");
+    try {
+      const file = await open(target, "r");
+      await file.close();
+      return;
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+    }
+    await ensureDurableDirectory(directory);
+    const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile(
+      temporary,
+      canonicalize({
+        v: IDENTITY_VERSION,
+        assignmentId,
+      }),
+      { encoding: "utf8", flag: "wx", flush: true },
+    );
+    try {
+      await rename(temporary, target);
+      await syncDirectory(directory);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async #readAssignmentIdentity(
+    directory: string,
+    directoryKey: string,
+  ): Promise<string> {
+    const target = path.join(directory, "identity.json");
+    let value: unknown;
+    try {
+      const file = await open(target, "r");
+      try {
+        value = JSON.parse(await file.readFile({ encoding: "utf8" }));
+      } finally {
+        await file.close();
+      }
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+      const frames = new FileArtifactStore(path.join(directory, "frames"));
+      const log = new FileAuthorityCommitLog(
+        path.join(directory, "index"),
+        frames,
+        { clock: this.#clock },
+      );
+      const origin = await log.originCheckpoint();
+      const first = await log.readTail<SpoolRecord>(origin, 1);
+      const opened = first.commits
+        .flatMap((commit) => commit.entries)
+        .filter((entry) => entry.stream === STREAM)
+        .map(({ body }) => validateSpoolRecord(body))
+        .find((body) => body.t === "opened");
+      if (!opened) {
+        throw corruptSpool("Stream spool has no durable assignment identity");
+      }
+      value = { v: IDENTITY_VERSION, assignmentId: opened.assignmentId };
+      await this.#writeAssignmentIdentity(opened.assignmentId, directory);
+    }
+    if (
+      !isRecord(value) ||
+      Object.keys(value).sort().join(",") !== "assignmentId,v" ||
+      value.v !== IDENTITY_VERSION ||
+      typeof value.assignmentId !== "string"
+    ) {
+      throw corruptSpool("Stream spool identity sidecar is invalid");
+    }
+    assertIdentifier(value.assignmentId, "Stream assignmentId");
+    if (assignmentKey(value.assignmentId) !== directoryKey) {
+      throw corruptSpool("Stream spool directory does not bind its assignment");
+    }
+    return value.assignmentId;
   }
 
   #tombstonePath(assignmentId: string): string {
@@ -2314,6 +2430,10 @@ function record(body: SpoolRecord): {
 
 function assignmentKey(assignmentId: string): string {
   return byteDigest(Buffer.from(assignmentId, "utf8")).slice("sha256:".length);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function clone<T>(value: T): T {

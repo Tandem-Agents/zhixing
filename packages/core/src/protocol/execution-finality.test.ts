@@ -203,24 +203,80 @@ describe("ExecutionFinalityProjection", () => {
     ).toBe(true);
   });
 
-  it("accepts job committed results only through one stable delivery identity", async () => {
-    const onJobResult = vi.fn();
-    const projection = new ExecutionFinalityProjection({ onJobResult });
-    const result = {
-      ref: jobRef,
-      itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN",
-      statusRevision: 1,
-    };
-    await expect(projection.acceptJobResult(result)).resolves.toBe("accepted");
-    await expect(projection.acceptJobResult(result)).resolves.toBe("duplicate");
+  it("retries a committed final whose consumer rejected without advancing finality", async () => {
+    const chain = new StreamDigestChain("assignment-retry");
+    const streamFinal = chain.final();
+    const provisional = {
+      v: 1,
+      ref: conversationRef,
+      assignmentId: "assignment-retry",
+      streamEpoch: 1,
+      seq: streamFinal.finalSeq,
+      payload: { kind: "provisional-final", ...streamFinal },
+      meta: {},
+    } satisfies StreamFrame;
+    const bundle = createConversationSealedBundle({
+      assignmentId: "assignment-retry",
+      executorId: "executor-1",
+      streamFinal,
+      usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+      usageFinal: {
+        reportDigest: protocolDigest("TestUsage", 1, { retry: true }),
+        upToUsageSeq: 1,
+      },
+      dependencyArtifacts: [],
+      body: {
+        t: "conversation",
+        runId: "run-1",
+        conversationId: "conversation-1",
+        ownerEpoch: 1,
+        baseRevision: 0,
+        runRecord: {
+          type: "run",
+          runId: "run-1",
+          runIndex: 0,
+          timestamp: at,
+          messages: [
+            { role: "user", content: [{ type: "text", text: "retry final" }] },
+          ],
+        },
+        contentAssets: [],
+      },
+    });
+    const frame = {
+      v: 1,
+      conversationId: "conversation-1",
+      runId: "run-1",
+      commitRevision: 1,
+      digest: bundle.digest,
+    } as const;
+    let reject = true;
+    const onFinal = vi.fn(async () => {
+      if (reject) {
+        reject = false;
+        throw new Error("consumer unavailable");
+      }
+    });
+    const projection = new ExecutionFinalityProjection({
+      onConversationFinal: onFinal,
+    });
+
+    await projection.acceptProvisionalFinal(provisional);
     await expect(
-      projection.acceptJobResult({
-        ...result,
-        itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVM",
-      }),
-    ).rejects.toThrow(/conflicting/);
-    expect(onJobResult).toHaveBeenCalledTimes(1);
+      projection.confirmConversationFinal({ frame, bundle }),
+    ).rejects.toThrow(/consumer unavailable/u);
+    expect(
+      projection.isConversationFinalConfirmed("conversation-1", "run-1"),
+    ).toBe(false);
+    await expect(
+      projection.confirmConversationFinal({ frame, bundle }),
+    ).resolves.toBe("accepted");
+    await expect(
+      projection.confirmConversationFinal({ frame, bundle }),
+    ).resolves.toBe("duplicate");
+    expect(onFinal).toHaveBeenCalledTimes(2);
   });
+
 });
 
 function status(

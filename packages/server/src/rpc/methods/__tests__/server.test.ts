@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
+import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
+import type { RuntimeControlAdapter } from "../../../context.js";
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
@@ -342,6 +344,92 @@ describe("server.info", () => {
     expect(result.conversationStatusNext).toEqual([
       { conversationId: "conversation-1", runId: "run-1", afterStatusRevision: 4 },
     ]);
+  });
+
+  it("hands first-party status history over to one live projection per connection", async () => {
+    const close = vi.fn();
+    const notify = vi.fn();
+    let closeConnection: (() => void) | undefined;
+    let publish:
+      | ((notice: ExecutionStatusNotice) => void | Promise<void>)
+      | undefined;
+    const openFirstPartyFinality = vi.fn(async (
+      input: Parameters<
+        NonNullable<RuntimeControlAdapter["openFirstPartyFinality"]>
+      >[0],
+    ) => {
+      publish = input.onStatus;
+      await input.onStatus({
+        v: 1,
+        ref: {
+          execution: "conversation",
+          conversationId: "conversation-1",
+          runId: "run-1",
+          ownerEpoch: 1,
+        },
+        state: "running",
+        statusRevision: 4,
+        actions: [],
+        at: "2026-07-28T02:00:00.000Z",
+      });
+      return {
+        next: [{
+          subject: {
+            execution: "conversation" as const,
+            conversationId: "conversation-1",
+            runId: "run-1",
+          },
+          afterStatusRevision: 4,
+        }],
+        close,
+      };
+    });
+    const ctx = {
+      ...mkCtx({ runtimeControl: { openFirstPartyFinality } }),
+      connection: {
+        id: 9,
+        authenticated: true,
+        notify,
+        onClose(handler: () => void) {
+          closeConnection = handler;
+          return vi.fn();
+        },
+      },
+    } as unknown as HandlerContext;
+
+    const result = await buildServerInfoMethod().handler({
+      conversationStatusAfter: [{
+        conversationId: "conversation-1",
+        runId: "run-1",
+        afterStatusRevision: 3,
+      }],
+    }, ctx) as any;
+
+    expect(result.conversationStatus).toHaveLength(1);
+    expect(result.conversationStatusNext).toEqual([{
+      conversationId: "conversation-1",
+      runId: "run-1",
+      afterStatusRevision: 4,
+    }]);
+    await publish?.({
+      v: 1,
+      ref: {
+        execution: "conversation",
+        conversationId: "conversation-1",
+        runId: "run-1",
+        ownerEpoch: 1,
+      },
+      state: "failed",
+      statusRevision: 5,
+      actions: [],
+      at: "2026-07-28T02:00:01.000Z",
+    });
+    expect(notify).toHaveBeenCalledWith(
+      "session.status",
+      expect.objectContaining({ statusRevision: 5 }),
+    );
+    closeConnection?.();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("returns job status history after each run cursor", async () => {

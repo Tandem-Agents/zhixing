@@ -11,13 +11,16 @@ import {
   assertChannelInteractionGrantActiveAt,
   assertChannelInteractionGrantBinding,
   channelChallengeTokenDigest,
+  channelInteractionConfirmationDecision,
   channelInteractionGrantDigest,
   createSignedChannelChallengeToken,
   createSignedChannelInteractionGrant,
   interactionDisplayDigest,
+  validateChannelChallengeCallback,
   validateChannelChallengeToken,
   validateChannelInteractionGrant,
 } from "./channel-interaction.js";
+import { confirmationDecisionDigest } from "./assignment.js";
 import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
@@ -251,3 +254,69 @@ function grantWithoutSignature(): Omit<ChannelInteractionGrant, "signature"> {
   const { signature: _, ...payload } = value;
   return payload;
 }
+
+describe("channel challenge callback validation", () => {
+  const callback = () => ({
+    v: 1,
+    token: token(),
+    decision: { allowed: true },
+  });
+
+  it("accepts a canonical callback and returns its token and decision", () => {
+    const result = validateChannelChallengeCallback(callback());
+    expect(result.token).toEqual(token());
+    expect(result.decision).toEqual({ allowed: true });
+  });
+
+  it("rejects unknown fields on the payload, decision, and token", () => {
+    expect(() =>
+      validateChannelChallengeCallback({ ...callback(), extra: 1 }),
+    ).toThrow(/incomplete or unknown/u);
+    expect(() =>
+      validateChannelChallengeCallback({
+        ...callback(),
+        decision: { allowed: false, verdict: "spoofed" },
+      }),
+    ).toThrow(/incomplete or unknown/u);
+    expect(() =>
+      validateChannelChallengeCallback({
+        ...callback(),
+        token: { ...token(), extra: true },
+      }),
+    ).toThrow(/incomplete or unknown/u);
+  });
+
+  it("rejects wrong versions and oversized reasons", () => {
+    expect(() =>
+      validateChannelChallengeCallback({ ...callback(), v: 2 }),
+    ).toThrow(/version must be 1/u);
+    expect(() =>
+      validateChannelChallengeCallback({
+        ...callback(),
+        decision: { allowed: false, reason: "r".repeat(8 * 1024 + 1) },
+      }),
+    ).toThrow(/reason is invalid/u);
+  });
+});
+
+describe("channel decision digest unification", () => {
+  it("maps channel wire decisions onto the frozen confirmation decision digest", () => {
+    expect(channelInteractionConfirmationDecision({ allowed: true })).toEqual({
+      kind: "allow-once",
+    });
+    expect(
+      channelInteractionConfirmationDecision({ allowed: false, reason: "no" }),
+    ).toEqual({ kind: "deny", reason: "no" });
+    expect(
+      confirmationDecisionDigest(
+        "interaction-1",
+        channelInteractionConfirmationDecision({ allowed: false, reason: "no" }),
+      ),
+    ).toBe(
+      protocolDigest("ConfirmationDecision", 1, {
+        requestId: "interaction-1",
+        decision: { kind: "deny", reason: "no" },
+      }),
+    );
+  });
+});

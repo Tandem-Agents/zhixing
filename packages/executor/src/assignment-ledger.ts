@@ -105,7 +105,7 @@ import {
   validateConversationInteractionOutcome,
   assertChannelInteractionGrantActiveAt,
   assertChannelInteractionGrantBinding,
-  channelInteractionDecisionDigest,
+  channelInteractionConfirmationDecision,
   channelResponderPrincipal,
   validateChannelInteractionGrant,
   validateConversationActivation,
@@ -1561,9 +1561,9 @@ export class ConversationAssignmentLedger implements
       t: "answered",
       authority: { via: "channel-grant", grant },
       decision: grant.decision,
-      decisionDigest: channelInteractionDecisionDigest(
+      decisionDigest: confirmationDecisionDigest(
         input.requestId,
-        grant.decision,
+        channelInteractionConfirmationDecision(grant.decision),
       ),
       by: channelResponderPrincipal(grant.responder),
     }, this.#verifier) as Extract<

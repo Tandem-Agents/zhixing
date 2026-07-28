@@ -152,6 +152,40 @@ describe("checkMessaging", () => {
     expect(missing).toEqual([]);
   });
 
+  it("能力组半填 → 报组内缺失字段（成对凭据不许只填一半）", () => {
+    const missing = checkMessaging(
+      { messaging: { feishu: {} } },
+      {
+        channels: {
+          feishu: {
+            appId: "cli_xxx",
+            appSecret: "sec_yyy",
+            verificationToken: "vt_zzz",
+          },
+        },
+      },
+    );
+    expect(missing).toHaveLength(1);
+    expect(missing[0]?.field).toBe("encryptKey");
+  });
+
+  it("能力组全填 → []（互动确认凭据成对齐全）", () => {
+    const missing = checkMessaging(
+      { messaging: { feishu: {} } },
+      {
+        channels: {
+          feishu: {
+            appId: "cli_xxx",
+            appSecret: "sec_yyy",
+            verificationToken: "vt_zzz",
+            encryptKey: "ek_www",
+          },
+        },
+      },
+    );
+    expect(missing).toEqual([]);
+  });
+
   it("未启用的 channel 不查（即使凭证字段缺）", () => {
     // messaging 不含 feishu → checker 不查
     expect(

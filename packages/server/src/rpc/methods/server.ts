@@ -15,6 +15,8 @@
 import { isInternal } from "@zhixing/core";
 import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { isProtocolIdentifier } from "@zhixing/core/protocol";
+import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
 import { RpcAppError, RpcErrors, type MethodEntry } from "../handlers.js";
 import {
   PROTOCOL_VERSION,
@@ -112,6 +114,10 @@ export function buildServerShutdownMethod(): MethodEntry {
  * stale。protocol 供接入面做协议兼容判定(与 auth 握手同源)。
  */
 export function buildServerInfoMethod(): MethodEntry {
+  const finalityByConnection = new Map<
+    number,
+    { readonly close: () => void; readonly removeCloseListener: () => void }
+  >();
   return {
     name: "server.info",
     // 状态视图含 workspace 路径 / 会话规模等运维信息——要求认证;
@@ -121,18 +127,136 @@ export function buildServerInfoMethod(): MethodEntry {
       const conversations = ctx.server.conversations?.list() ?? [];
       const runtimeControl = buildRuntimeControlSnapshot(ctx);
       const statusAfter = parseStatusAfter(params);
-      const deliveryStatus =
-        (await ctx.server.runtimeControl?.deliveryStatus?.(
-          statusAfter.delivery,
-        )) ?? [];
-      const conversationStatusPage =
-        (await ctx.server.runtimeControl?.conversationStatus?.(
-          statusAfter.conversations,
-        )) ?? { notices: [], next: [] };
-      const jobStatusPage =
-        (await ctx.server.runtimeControl?.jobStatus?.(
-          statusAfter.jobs,
-        )) ?? { notices: [], next: [] };
+      let deliveryStatus: ExecutionStatusNotice[] = [];
+      let conversationStatus: ExecutionStatusNotice[] = [];
+      let jobStatus: ExecutionStatusNotice[] = [];
+      let deliveryStatusNext = statusAfter.delivery;
+      let conversationStatusNext = statusAfter.conversations;
+      let jobStatusNext = statusAfter.jobs;
+      const openFinality = ctx.server.runtimeControl?.openFirstPartyFinality;
+      const hasStatusCursors =
+        Object.keys(statusAfter.delivery).length > 0 ||
+        statusAfter.conversations.length > 0 ||
+        statusAfter.jobs.length > 0;
+      if (openFinality && hasStatusCursors) {
+        const current = finalityByConnection.get(ctx.connection.id);
+        current?.removeCloseListener();
+        current?.close();
+        let live = false;
+        const historical: ExecutionStatusNotice[] = [];
+        const opened = await openFinality({
+          lastSeen: [
+            ...Object.entries(statusAfter.delivery).map(
+              ([itemId, afterStatusRevision]) => ({
+                subject: { execution: "delivery" as const, itemId },
+                afterStatusRevision,
+              }),
+            ),
+            ...statusAfter.conversations.map((cursor) => ({
+              subject: {
+                execution: "conversation" as const,
+                conversationId: cursor.conversationId,
+                runId: cursor.runId,
+              },
+              afterStatusRevision: cursor.afterStatusRevision,
+            })),
+            ...statusAfter.jobs.map((cursor) => ({
+              subject: {
+                execution: "job" as const,
+                taskId: cursor.taskId,
+                jobRunId: cursor.jobRunId,
+              },
+              afterStatusRevision: cursor.afterStatusRevision,
+            })),
+          ],
+          onStatus: (notice) => {
+            if (!live) {
+              historical.push(notice);
+              return;
+            }
+            const method = statusNotificationMethod(notice);
+            if (ctx.connection.tryNotify) {
+              if (!ctx.connection.tryNotify(method, notice)) {
+                throw new Error(
+                  "Authenticated finality connection cannot accept notifications",
+                );
+              }
+              return;
+            }
+            if (ctx.connection.closed) {
+              throw new Error(
+                "Authenticated finality connection is already closed",
+              );
+            }
+            ctx.connection.notify(method, notice);
+          },
+          onResyncRequired: () => {
+            ctx.connection.close(1012, "finality-resync-required");
+          },
+        });
+        live = true;
+        const removeCloseListener = ctx.connection.onClose(() => {
+          if (finalityByConnection.get(ctx.connection.id)?.close === opened.close) {
+            finalityByConnection.delete(ctx.connection.id);
+          }
+          opened.close();
+        });
+        finalityByConnection.set(ctx.connection.id, {
+          close: opened.close,
+          removeCloseListener,
+        });
+        deliveryStatus = historical.filter(
+          (notice) => notice.ref.execution === "delivery",
+        );
+        conversationStatus = historical.filter(
+          (notice) => notice.ref.execution === "conversation",
+        );
+        jobStatus = historical.filter(
+          (notice) => notice.ref.execution === "job",
+        );
+        deliveryStatusNext = Object.fromEntries(
+          opened.next.flatMap((cursor) =>
+            cursor.subject.execution === "delivery"
+              ? [[cursor.subject.itemId, cursor.afterStatusRevision]]
+              : [],
+          ),
+        );
+        conversationStatusNext = opened.next.flatMap((cursor) =>
+          cursor.subject.execution === "conversation"
+            ? [{
+                conversationId: cursor.subject.conversationId,
+                runId: cursor.subject.runId,
+                afterStatusRevision: cursor.afterStatusRevision,
+              }]
+            : [],
+        );
+        jobStatusNext = opened.next.flatMap((cursor) =>
+          cursor.subject.execution === "job"
+            ? [{
+                taskId: cursor.subject.taskId,
+                jobRunId: cursor.subject.jobRunId,
+                afterStatusRevision: cursor.afterStatusRevision,
+              }]
+            : [],
+        );
+      } else {
+        deliveryStatus =
+          (await ctx.server.runtimeControl?.deliveryStatus?.(
+            statusAfter.delivery,
+          )) ?? [];
+        const conversationPage =
+          (await ctx.server.runtimeControl?.conversationStatus?.(
+            statusAfter.conversations,
+          )) ?? { notices: [], next: [] };
+        const jobPage =
+          (await ctx.server.runtimeControl?.jobStatus?.(
+            statusAfter.jobs,
+          )) ?? { notices: [], next: [] };
+        conversationStatus = [...conversationPage.notices];
+        conversationStatusNext = conversationPage.next;
+        jobStatus = [...jobPage.notices];
+        jobStatusNext = jobPage.next;
+      }
       return {
         version: ctx.server.version,
         protocol: PROTOCOL_VERSION,
@@ -160,10 +284,11 @@ export function buildServerInfoMethod(): MethodEntry {
         deferredWork: runtimeControl.deferredWork,
         keepAliveWork: runtimeControl.keepAliveWork,
         deliveryStatus,
-        conversationStatus: conversationStatusPage.notices,
-        conversationStatusNext: conversationStatusPage.next,
-        jobStatus: jobStatusPage.notices,
-        jobStatusNext: jobStatusPage.next,
+        deliveryStatusNext,
+        conversationStatus,
+        conversationStatusNext,
+        jobStatus,
+        jobStatusNext,
       };
     },
   };
@@ -373,6 +498,17 @@ function parseStatusAfter(
     }
   }
   return { delivery, conversations, jobs };
+}
+
+function statusNotificationMethod(notice: ExecutionStatusNotice): string {
+  switch (notice.ref.execution) {
+    case "conversation":
+      return SESSION_NOTIFICATIONS.status;
+    case "job":
+      return "job.status";
+    case "delivery":
+      return "delivery.status";
+  }
 }
 
 function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {

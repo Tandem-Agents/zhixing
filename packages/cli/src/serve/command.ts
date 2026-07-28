@@ -783,6 +783,55 @@ async function runServerProcess(
     confirmationHub,
     runRegistry,
     runtimeControl: {
+      openFirstPartyFinality: async (input) => {
+        const factory = ctx.firstPartyFinality;
+        const authority = ctx.authorityRuntime;
+        if (!factory || !authority) {
+          throw new Error("First-party finality is unavailable");
+        }
+        const session = factory({
+          lastSeen: input.lastSeen.map((cursor) => ({
+            subject:
+              cursor.subject.execution === "conversation"
+                ? {
+                    ...cursor.subject,
+                    ownerEpoch: authority.anchorEpoch,
+                  }
+                : cursor.subject.execution === "job"
+                  ? {
+                      ...cursor.subject,
+                      anchorEpoch: authority.anchorEpoch,
+                    }
+                  : cursor.subject,
+            afterStatusRevision: cursor.afterStatusRevision,
+          })),
+          onStatus: input.onStatus,
+          ...(input.onResyncRequired
+            ? { onResyncRequired: input.onResyncRequired }
+            : {}),
+        });
+        await session.start();
+        return {
+          next: session.nextCursors().map((cursor) => ({
+            subject:
+              cursor.subject.execution === "conversation"
+                ? {
+                    execution: "conversation" as const,
+                    conversationId: cursor.subject.conversationId,
+                    runId: cursor.subject.runId,
+                  }
+                : cursor.subject.execution === "job"
+                  ? {
+                      execution: "job" as const,
+                      taskId: cursor.subject.taskId,
+                      jobRunId: cursor.subject.jobRunId,
+                    }
+                  : cursor.subject,
+            afterStatusRevision: cursor.afterStatusRevision,
+          })),
+          close: () => session.close(),
+        };
+      },
       deliveryStats: () => {
         if (!ctx.deliveryStack) {
           return {

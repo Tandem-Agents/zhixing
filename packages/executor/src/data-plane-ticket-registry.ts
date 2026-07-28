@@ -1,5 +1,6 @@
 import type {
   AuthorityCommitLog,
+  PhysicalStorageStepRunner,
   ProjectionCursor,
   ProjectionTransactionContext,
   ProjectionTransactionDecision,
@@ -417,8 +418,11 @@ export class DataPlaneTicketRegistry {
     });
   }
 
-  async maintain(): Promise<number> {
-    return this.#operations.run(async () => {
+  async maintain(runPhysicalStep?: PhysicalStorageStepRunner): Promise<number> {
+    // 容量准入由调用方经 runPhysicalStep 提供,在 registry 串行段内、退休
+    // 事务批(耐久追加 + 前沿推进)前取得;permit 绝不横跨串行队列等待。
+    const step = runPhysicalStep ?? ((operation) => operation());
+    return this.#operations.run(() => step(async () => {
       const monotonicNow = this.#monotonicClock();
       const transaction = await this.#transact<readonly DataPlaneTicket[]>(
         (state, context) => {
@@ -470,7 +474,7 @@ export class DataPlaneTicketRegistry {
         };
       });
       return transaction.value.length;
-    });
+    }));
   }
 
   async #restoreAcceptedConsumer(

@@ -29,11 +29,6 @@ export interface ExecutionFinalityProjectionOptions {
   readonly afterStatusRevision?: ReadonlyMap<string, number>;
   readonly onStatus?: (notice: ExecutionStatusNotice) => void | Promise<void>;
   readonly onConversationFinal?: (frame: FinalFrame) => void | Promise<void>;
-  readonly onJobResult?: (input: {
-    readonly ref: JobRef;
-    readonly itemId: string;
-    readonly statusRevision: number;
-  }) => void | Promise<void>;
 }
 
 /**
@@ -52,14 +47,9 @@ export class ExecutionFinalityProjection {
     { readonly frame: FinalFrame; readonly bundle: SealedBundle }
   >();
   readonly #confirmedFinals = new Map<string, string>();
-  readonly #jobResults = new Map<
-    string,
-    { itemId: string; statusRevision: number }
-  >();
   readonly #onStatus: ExecutionFinalityProjectionOptions["onStatus"];
   readonly #onConversationFinal:
     ExecutionFinalityProjectionOptions["onConversationFinal"];
-  readonly #onJobResult: ExecutionFinalityProjectionOptions["onJobResult"];
 
   constructor(options: ExecutionFinalityProjectionOptions = {}) {
     for (const [key, revision] of options.afterStatusRevision ?? []) {
@@ -68,7 +58,6 @@ export class ExecutionFinalityProjection {
     }
     this.#onStatus = options.onStatus;
     this.#onConversationFinal = options.onConversationFinal;
-    this.#onJobResult = options.onJobResult;
   }
 
   static subjectKey(subject: ExecutionProjectionSubject): string {
@@ -112,9 +101,9 @@ export class ExecutionFinalityProjection {
     let next = current + 1;
     while (pending.has(next)) {
       const accepted = pending.get(next)!;
+      await this.#onStatus?.(structuredClone(accepted));
       pending.delete(next);
       this.#revisions.set(key, next);
-      await this.#onStatus?.(structuredClone(accepted));
       next += 1;
     }
     if (pending.size === 0) this.#pendingStatuses.delete(key);
@@ -139,13 +128,18 @@ export class ExecutionFinalityProjection {
       if (canonicalize(existing) !== canonicalize(frame)) {
         throw new TypeError("Conversation provisional final changed for one run");
       }
+      const pending = this.#pendingConversationFinals.get(key);
+      if (pending) {
+        await this.#commitConversationFinal(key, existing, pending);
+        this.#pendingConversationFinals.delete(key);
+      }
       return "duplicate";
     }
     this.#provisionalFinals.set(key, structuredClone(frame));
     const pending = this.#pendingConversationFinals.get(key);
     if (pending) {
-      this.#pendingConversationFinals.delete(key);
       await this.#commitConversationFinal(key, frame, pending);
+      this.#pendingConversationFinals.delete(key);
     }
     return "accepted";
   }
@@ -192,38 +186,7 @@ export class ExecutionFinalityProjection {
       return "buffered";
     }
     await this.#commitConversationFinal(key, provisional, { frame, bundle });
-    return "accepted";
-  }
-
-  async acceptJobResult(input: {
-    readonly ref: JobRef;
-    readonly itemId: string;
-    readonly statusRevision: number;
-  }): Promise<"accepted" | "duplicate"> {
-    if (input.ref.execution !== "job" || input.itemId.length === 0) {
-      throw new TypeError("Job result delivery identity is invalid");
-    }
-    assertRevision(input.statusRevision, "Job result delivery revision");
-    const key = ExecutionFinalityProjection.subjectKey(input.ref);
-    const existing = this.#jobResults.get(key);
-    if (existing) {
-      if (
-        existing.itemId !== input.itemId ||
-        existing.statusRevision !== input.statusRevision
-      ) {
-        throw new TypeError("Job run has conflicting committed result deliveries");
-      }
-      return "duplicate";
-    }
-    this.#jobResults.set(key, {
-      itemId: input.itemId,
-      statusRevision: input.statusRevision,
-    });
-    await this.#onJobResult?.({
-      ref: structuredClone(input.ref),
-      itemId: input.itemId,
-      statusRevision: input.statusRevision,
-    });
+    this.#pendingConversationFinals.delete(key);
     return "accepted";
   }
 
@@ -248,8 +211,8 @@ export class ExecutionFinalityProjection {
       }
       return;
     }
-    this.#confirmedFinals.set(key, identity);
     await this.#onConversationFinal?.(structuredClone(input.frame));
+    this.#confirmedFinals.set(key, identity);
   }
 }
 

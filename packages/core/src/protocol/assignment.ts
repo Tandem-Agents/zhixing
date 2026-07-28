@@ -58,7 +58,7 @@ import type {
 } from "./signature.js";
 import { validateContentAssetRefs } from "./surface-asset-grant.js";
 import {
-  channelInteractionDecisionDigest,
+  channelInteractionConfirmationDecision,
   channelResponderPrincipal,
   validateChannelInteractionGrant,
 } from "./channel-interaction.js";
@@ -1809,9 +1809,9 @@ export function validateAssignmentInteractionOutcome(
   }
   if (
     outcome.decisionDigest !==
-    channelInteractionDecisionDigest(
+    confirmationDecisionDigest(
       grant.interactionRequestId,
-      grant.decision,
+      channelInteractionConfirmationDecision(grant.decision),
     )
   ) {
     throw new TypeError(

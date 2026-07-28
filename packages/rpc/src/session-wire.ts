@@ -8,6 +8,7 @@
  *
  * 通知谱:
  * - session.delta / session.complete —— 主通道(turn 产出流),经 observer 组播
+ * - session.assignmentStream —— assignment 无损数据面的规范帧
  * - session.event —— 带外通道,信封类型与转发器内聚在 session-events.ts
  * - session.changed —— 会话级变更(run 外发生),经同一组播名册
  * - session.activity —— 非当前对话的低噪活动提示,只给工作台类接入面
@@ -74,6 +75,7 @@ export const SESSION_NOTIFICATIONS = {
   complete: "session.complete",
   final: "session.final",
   status: "session.status",
+  assignmentStream: "session.assignmentStream",
   event: "session.event",
   changed: "session.changed",
   activity: "session.activity",

@@ -23,6 +23,12 @@ export interface ChannelFieldSpec {
   hint: string;
   example: string;
   sensitive: boolean;
+  /**
+   * 能力组:携带此标志的字段不是渠道启用的必填项,而是某项能力的成对
+   * 凭据——同组字段全空时该能力停用(degraded)、渠道照常启用;组内只
+   * 填一部分是配置错误,启用校验(checkMessaging)按缺失字段报 issue。
+   */
+  capabilityGroup?: string;
   /** 文档链接——input panel 单独渲染为可点击行（OSC 8 hyperlink） */
   docUrl?: string;
 }
@@ -57,6 +63,24 @@ export const SUPPORTED_CHANNELS: SupportedChannel[] = [
         hint: "飞书开放平台应用的 App Secret（私密凭证）。",
         example: "xxxxxxxxxxxxxxxxxxxxxxxx",
         sensitive: true,
+        docUrl: "https://open.feishu.cn/app",
+      },
+      {
+        id: "verificationToken",
+        label: "Verification Token",
+        hint: "互动确认（卡片按钮回调）所需，与 Encrypt Key 成对；缺失时基础消息照常、互动确认停用。",
+        example: "xxxxxxxxxxxxxxxxxxxxxxxx",
+        sensitive: true,
+        capabilityGroup: "interactive-confirmation",
+        docUrl: "https://open.feishu.cn/app",
+      },
+      {
+        id: "encryptKey",
+        label: "Encrypt Key",
+        hint: "互动确认（卡片按钮回调）所需，与 Verification Token 成对；缺失时基础消息照常、互动确认停用。",
+        example: "xxxxxxxxxxxxxxxxxxxxxxxx",
+        sensitive: true,
+        capabilityGroup: "interactive-confirmation",
         docUrl: "https://open.feishu.cn/app",
       },
     ],

@@ -95,6 +95,7 @@ export async function runExecutorRole(
       zhixingHome,
       authority,
       module: executor,
+      storageMaintenance: deviceCapacity.storage,
       onError: (error) => writer.notify(`[data-plane] ${error.message}`),
     });
     const ledger = createConversationExecutorLedger({

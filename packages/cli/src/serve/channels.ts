@@ -82,7 +82,7 @@ export interface SetupChannelsOptions {
   sessionBroadcast?: () => SessionBroadcast | null;
   /** 非当前会话活动提示 getter；server 启动后才会返回真实函数。 */
   sessionActivityBroadcast?: () => SessionActivityBroadcast | null;
-  onChallengeAction?: (action: ChannelChallengeAction) => void;
+  onChallengeAction?: (action: ChannelChallengeAction) => Promise<void>;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
 }
 

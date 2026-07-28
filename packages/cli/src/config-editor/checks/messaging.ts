@@ -42,7 +42,20 @@ export function checkMessaging(
     if (!channelDef) continue;
 
     const channelCreds = credentials.channels?.[channelId] ?? {};
+    // 能力组内任一字段已填,组内其余字段升格为必填(成对凭据只填一半是
+    // 配置错误);整组全空是合法的能力停用态,不阻断渠道启用。
+    const activeGroups = new Set(
+      channelDef.requiredFields
+        .filter((field) => field.capabilityGroup && channelCreds[field.id])
+        .map((field) => field.capabilityGroup as string),
+    );
     for (const field of channelDef.requiredFields) {
+      if (
+        field.capabilityGroup &&
+        !activeGroups.has(field.capabilityGroup)
+      ) {
+        continue;
+      }
       if (!channelCreds[field.id]) {
         issues.push({
           channelId,

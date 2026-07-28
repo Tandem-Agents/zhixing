@@ -4,7 +4,6 @@ import {
   type ArtifactStore,
 } from "@zhixing/core/authority";
 import {
-  type IConfirmationBroker,
   type Message,
   type RunResult,
 } from "@zhixing/core";
@@ -27,7 +26,12 @@ import type {
   ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
-import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
+import {
+  ConversationInteractionRuntimeUnavailableError,
+  type ConversationInteractionAnswerPort,
+  type DurableConversationInteractionObserver,
+  type DurableInteractionBinding,
+} from "./durable-conversation-interactions.js";
 import {
   shouldRetryRemoteObligation,
 } from "./remote-obligation-failure.js";
@@ -63,7 +67,6 @@ export class ConversationAssignmentWorker {
   readonly #running = new Map<string, Promise<void>>();
   readonly #cancellations = new Map<string, Promise<void>>();
   readonly #executionAborts = new Map<string, AbortController>();
-  readonly #confirmationBrokers = new Map<string, IConfirmationBroker>();
   readonly #abort = new AbortController();
   #closed = false;
 
@@ -108,31 +111,26 @@ export class ConversationAssignmentWorker {
 
   async answerInteractionWithTicket(
     input: Parameters<
-      ConversationAssignmentLedger["prepareInteractionAnswerFromSurface"]
+      ConversationInteractionAnswerPort["answerInteractionWithTicket"]
     >[0],
   ): Promise<void> {
-    const prepared =
-      await this.options.ledger.prepareInteractionAnswerFromSurface(input);
-    if (prepared.kind === "replayed") return;
-    const broker = this.#confirmationBrokers.get(input.assignmentId);
-    if (!broker) {
-      throw new Error("Interaction answer has no active assignment runtime");
-    }
-    if (
-      await this.options.interactions.resolveWithSurfaceTicket(broker, {
-        assignmentId: input.assignmentId,
-        requestId: input.requestId,
-        ticketId: prepared.ticketId,
-        surfacePrincipal: prepared.surfacePrincipal,
-        decision: prepared.decision,
-      })
-    ) {
-      return;
-    }
-    const replay =
-      await this.options.ledger.prepareInteractionAnswerFromSurface(input);
-    if (replay.kind !== "replayed") {
-      throw new Error("Interaction answer did not reach a durable terminal result");
+    await this.options.interactions.answerInteractionWithTicket(input);
+  }
+
+  async resolveNoInteractiveSurface(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+  }): Promise<void> {
+    try {
+      await this.options.interactions.resolveNoInteractiveSurface(input);
+    } catch (error) {
+      if (error instanceof ConversationInteractionRuntimeUnavailableError) {
+        throw error;
+      }
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Interaction fail-closed runtime is unavailable",
+        { cause: error },
+      );
     }
   }
 
@@ -213,7 +211,7 @@ export class ConversationAssignmentWorker {
         ? await this.options.createStream({ assignmentId, ref: streamRef })
         : new StreamDigestChain(assignmentId);
       stream = activeStream;
-      const activeInteractionBinding = {
+      const activeInteractionBinding: DurableInteractionBinding = {
         assignmentId,
         ledger: this.options.ledger,
         submission: durableSubmission,
@@ -222,6 +220,7 @@ export class ConversationAssignmentWorker {
         stream: activeStream,
         streamMeta,
         signal: this.#abort.signal,
+        broker: undefined,
       };
       interactionBinding = activeInteractionBinding;
       await retryDurableObligation(
@@ -230,9 +229,7 @@ export class ConversationAssignmentWorker {
         this.#abort.signal,
       );
       runtime = await this.options.runtimeFactory.create(envelope.work.conversationId);
-      if (runtime.confirmationBroker) {
-        this.#confirmationBrokers.set(assignmentId, runtime.confirmationBroker);
-      }
+      activeInteractionBinding.broker = runtime.confirmationBroker;
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
       const generator = runtime.run(messages, {
         abortSignal,
@@ -319,7 +316,6 @@ export class ConversationAssignmentWorker {
         executionError ??= asError(error);
       }
     }
-    this.#confirmationBrokers.delete(assignmentId);
     if (executionError) {
       const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
       if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {

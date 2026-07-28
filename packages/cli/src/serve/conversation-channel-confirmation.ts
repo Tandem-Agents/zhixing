@@ -65,8 +65,11 @@ export interface ConversationChannelHostOptions {
   readonly verifier: ProtocolSignatureVerifier;
   readonly journal: ConversationChannelJournal;
   readonly resolver: ConversationChannelInteractionResolver;
-  readonly direct: AssignmentStreamPathConnector;
-  readonly relay: AssignmentStreamPathConnector;
+  /**
+   * 渠道宿主坐在 owner/anchor 位置,只有一条到 executor 的真实路径
+   * (本地进程内或 owner↔executor 连接)——不存在也不伪造第二条中继。
+   */
+  readonly connector: AssignmentStreamPathConnector;
   readonly now?: () => string;
   readonly initialCheckpoint?: StreamVerifierCheckpoint;
   readonly maxPathAttempts?: number;
@@ -113,8 +116,7 @@ export class ConversationChannelHost {
         kind: "surface-ticket",
         ticketId: ticket.ticketId,
       },
-      direct: options.direct,
-      relay: options.relay,
+      direct: options.connector,
       ...(options.initialCheckpoint
         ? { initialCheckpoint: options.initialCheckpoint }
         : {}),

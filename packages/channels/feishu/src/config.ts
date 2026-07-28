@@ -3,8 +3,15 @@ export interface FeishuAdapterConfig {
   appSecret: string;
   domain?: "feishu" | "lark";
   botOpenId?: string;
-  verificationToken: string;
-  encryptKey: string;
+  /**
+   * 互动确认(卡片按钮回调)的能力凭据,成对存在。缺失时基础消息能力
+   * 照常,互动确认整体停用(degraded)——不因新能力的凭据缺口让既有
+   * 消息链路失效。
+   */
+  interactiveConfirmation?: {
+    verificationToken: string;
+    encryptKey: string;
+  };
 
   dedupTtlMs?: number;
   dedupMaxSize?: number;
@@ -49,9 +56,11 @@ export function resolveConfig(
 
   const verificationToken = credentials["verificationToken"];
   const encryptKey = credentials["encryptKey"];
-  if (!verificationToken || !encryptKey) {
+  // 半配置是配置错误而非 degraded:只给其一无法判断意图,必须显式报错;
+  // 两者全缺才进入"互动确认停用、基础消息保留"的能力分级。
+  if (Boolean(verificationToken) !== Boolean(encryptKey)) {
     throw new Error(
-      "Feishu adapter requires verificationToken and encryptKey for signed interactive callbacks",
+      "Feishu interactive confirmation requires both verificationToken and encryptKey; provide both or neither",
     );
   }
 
@@ -60,8 +69,9 @@ export function resolveConfig(
     appSecret,
     domain: (domain as FeishuAdapterConfig["domain"]) ?? FEISHU_DEFAULTS.domain,
     botOpenId: botOpenId as string | undefined,
-    verificationToken,
-    encryptKey,
+    ...(verificationToken && encryptKey
+      ? { interactiveConfirmation: { verificationToken, encryptKey } }
+      : {}),
     dedupTtlMs: (dedupTtlMs as number) ?? FEISHU_DEFAULTS.dedupTtlMs,
     dedupMaxSize: (dedupMaxSize as number) ?? FEISHU_DEFAULTS.dedupMaxSize,
   };

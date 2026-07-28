@@ -14,6 +14,7 @@ import {
   DataPlaneTicketMeshClient,
   createDataPlaneTicketServiceHandler,
 } from "./data-plane-ticket-mesh.js";
+import { ConversationInteractionRuntimeUnavailableError } from "./durable-conversation-interactions.js";
 
 const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   sign(schemaId, version, payload) {
@@ -53,7 +54,11 @@ describe("data-plane ticket mesh adapter", () => {
           return true;
         },
       },
-      operations: { answerInteractionWithTicket, abortWithTicket },
+      operations: {
+        answerInteractionWithTicket,
+        resolveNoInteractiveSurface: vi.fn(async () => undefined),
+        abortWithTicket,
+      },
       authorizeOwner: (connection) => connection.peer.deviceId === "owner-fixed",
       surfacePrincipalFor: (connection) => `surface:${connection.peer.deviceId}`,
     });
@@ -133,6 +138,49 @@ describe("data-plane ticket mesh adapter", () => {
       }),
     ).rejects.toThrow(/owner/);
     expect(answerInteractionWithTicket).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a durable challenge when the executor runtime is not restored yet", async () => {
+    const handler = createDataPlaneTicketServiceHandler({
+      verifier: identity,
+      tickets: {
+        accept: vi.fn(async (value) => value),
+        revoke: vi.fn(async () => true),
+      },
+      operations: {
+        answerInteractionWithTicket: vi.fn(async () => {
+          throw new ConversationInteractionRuntimeUnavailableError(
+            "runtime not restored",
+          );
+        }),
+        resolveNoInteractiveSurface: vi.fn(async () => {
+          throw new ConversationInteractionRuntimeUnavailableError(
+            "runtime not restored",
+          );
+        }),
+        abortWithTicket: vi.fn(async () => undefined),
+      },
+      authorizeOwner: () => true,
+      surfacePrincipalFor: () => "surface:user-fixed",
+    });
+    const surface = new DataPlaneTicketMeshClient(
+      directClient(handler, connection("user-fixed")),
+    );
+
+    await expect(
+      surface.answer({
+        assignmentId: "assignment-fixed",
+        requestId: "request-fixed",
+        ticketId: "ticket:run-interact",
+        decision: { kind: "allow-once" },
+      }),
+    ).rejects.toBeInstanceOf(ConversationInteractionRuntimeUnavailableError);
+    await expect(
+      surface.resolveNoInteractiveSurface({
+        assignmentId: "assignment-fixed",
+        requestId: "request-fixed",
+      }),
+    ).rejects.toBeInstanceOf(ConversationInteractionRuntimeUnavailableError);
   });
 
   it("replays only active grants and carries revocation tombstones", async () => {

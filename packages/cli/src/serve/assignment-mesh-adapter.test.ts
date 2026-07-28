@@ -982,6 +982,26 @@ describe("assignment mesh adapters", () => {
       remoteCommit,
     );
     expect(await protocol.ownerLog.readAll()).toEqual(ownerAfterCommit);
+    const statuses = await protocol.journal.statusHistory("job-run-1", 0);
+    expect(statuses.length).toBeGreaterThan(0);
+    expect(
+      statuses.every(
+        (notice) =>
+          notice.ref.taskId === "task-1" &&
+          notice.ref.jobRunId === "job-run-1",
+      ),
+    ).toBe(true);
+    const deliveryItems = await protocol.deliveryAuthority.list();
+    expect(deliveryItems).toHaveLength(1);
+    expect(deliveryItems[0]).toMatchObject({
+      keyBody: {
+        kind: "job-result-delivery",
+        taskId: "task-1",
+        jobRunId: "job-run-1",
+      },
+      state: "queued",
+      statusRevision: 1,
+    });
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("preserves real cancellation and supersede guards across the mesh boundary", async () => {
@@ -1772,6 +1792,10 @@ async function createRealJobProtocolFixture(
   const snapshotFor = (executorId: string) => executorId === fixture.executorId
     ? executorCapabilitySnapshot(executorId)
     : undefined;
+  const deliveryAuthority = new DeliveryAuthority({
+    log: ownerLog,
+    anchorEpoch: 3,
+  });
   const journal = new JobJournal({
     taskId: "task-1",
     anchorEpoch: 3,
@@ -1782,9 +1806,7 @@ async function createRealJobProtocolFixture(
     snapshotFor,
     submission: submissionAuthorizer,
     ingress: { authorize() {} },
-    delivery: new OwnerDeliveryParticipant({
-      authority: new DeliveryAuthority({ log: ownerLog, anchorEpoch: 3 }),
-    }),
+    delivery: new OwnerDeliveryParticipant({ authority: deliveryAuthority }),
     clock: () => NOW,
   });
   const definition: TaskDefinition = {
@@ -1799,7 +1821,11 @@ async function createRealJobProtocolFixture(
         priority: "normal",
         schedule: { kind: "interval", everyMs: 60_000 },
         action: { kind: "agent-turn", prompt: "perform scheduled work" },
-        delivery: { kind: "none" },
+        delivery: {
+          kind: "channel",
+          channel: "feishu",
+          to: "chat-fixed",
+        },
       },
     },
   };
@@ -1878,7 +1904,14 @@ async function createRealJobProtocolFixture(
       : undefined,
     clock: () => NOW,
   });
-  return { dispatch, journal, ledger, ownerLog, executorLog };
+  return {
+    dispatch,
+    journal,
+    ledger,
+    deliveryAuthority,
+    ownerLog,
+    executorLog,
+  };
 }
 
 function installRealProtocolServices(
@@ -2237,6 +2270,11 @@ function createUnsignedJobEnvelope(
   executorId: string,
 ): UnsignedJobEnvelope {
   const assignmentId = "job-assignment-1";
+  const delivery = {
+    kind: "channel" as const,
+    channel: "feishu",
+    to: "chat-fixed",
+  };
   const manifestBody = {
     v: 1 as const,
     baseRef: {
@@ -2358,7 +2396,7 @@ function createUnsignedJobEnvelope(
         jobRunId: "job-run-1",
         scheduledFor: NOW,
         taskRevision: 1,
-        deliveryPlanDigest: jobDeliveryPlanDigest({ kind: "none" }),
+        deliveryPlanDigest: jobDeliveryPlanDigest(delivery),
         anchorEpoch: 3,
         assignmentId,
         executorId,

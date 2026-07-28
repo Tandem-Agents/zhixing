@@ -135,6 +135,7 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
         "durable-projection-index",
         "artifact-lifecycle-index",
         "anchor-asset-maintainer",
+        "executor-data-plane",
       ]),
     );
   });

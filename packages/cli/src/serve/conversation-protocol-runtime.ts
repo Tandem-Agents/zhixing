@@ -30,6 +30,7 @@ import type {
   SupersedeProof,
   TrustRuleSnapshot,
   ReservationOrigin,
+  StreamFrame,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import {
@@ -95,9 +96,14 @@ import {
 } from "./remote-obligation-failure.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import type {
+  FirstPartySurfaceSession,
   LosslessDataPlaneRuntime,
   LosslessDataPlaneSession,
 } from "./lossless-data-plane-runtime.js";
+import type {
+  FirstPartyFinalitySession,
+  FirstPartyFinalitySessionOptions,
+} from "./first-party-finality-session.js";
 
 export { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 
@@ -149,6 +155,10 @@ export interface ConversationProtocolRuntimeOptions {
   }) => Promise<RunResult>;
   readonly onStatus?: (notice: ConversationStatusNotice) => void | Promise<void>;
   readonly onFinal?: (frame: FinalFrame) => void | Promise<void>;
+  readonly onFirstPartyFrame?: (frame: StreamFrame) => void | Promise<void>;
+  readonly createFirstPartyFinality?: (
+    input: Omit<FirstPartyFinalitySessionOptions, "sources">,
+  ) => FirstPartyFinalitySession;
   /** Idempotently materializes a durable clear/delete fact into legacy storage/runtime views. */
   readonly projectLifecycle?: (
     input: DurableConversationSessionProjectionInput,
@@ -176,6 +186,13 @@ interface PreparedConversationAdmission {
 interface DurableAssignmentRunStream extends StreamFrameProducer {
   markTerminal?(): Promise<unknown>;
 }
+
+type ConversationLosslessDataPlane = Pick<
+  LosslessDataPlaneRuntime,
+  "openConversationChannel" | "openFirstPartySurfaceSession"
+> & {
+  recoverConversationChannels(journal: ConversationRunJournal): Promise<number>;
+};
 
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
@@ -208,6 +225,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #assignmentRuntimeBindings = new Map<string, ConversationRuntimeBinding>();
   readonly #schedulingRuns = new Set<string>();
   readonly #scheduledRuns = new Set<string>();
+  readonly #firstPartyPublishedFinals = new Set<string>();
+  readonly #ownerPublishedFirstPartyFinals = new Set<string>();
+  readonly #pendingFirstPartyFinals = new Set<string>();
   readonly #preparedAdmissions = new Map<string, PreparedConversationAdmission>();
   readonly #contexts: InProcessDispatchContextFactory;
   readonly #interactions: DurableConversationInteractionObserver;
@@ -216,6 +236,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | undefined;
   readonly #onStatus: ((notice: ConversationStatusNotice) => void | Promise<void>) | undefined;
   readonly #onFinal: ((frame: FinalFrame) => void | Promise<void>) | undefined;
+  readonly #onFirstPartyFrame:
+    | ((frame: StreamFrame) => void | Promise<void>)
+    | undefined;
+  readonly #createFirstPartyFinality:
+    | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
+    | undefined;
   readonly #projectLifecycle:
     | ((input: DurableConversationSessionProjectionInput) => Promise<void>)
     | undefined;
@@ -233,7 +259,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #recoveryConversations = new Map<string, number>();
   #remoteExecution: RemoteConversationExecutionDirectory | undefined;
   #losslessDataPlane:
-    | Pick<LosslessDataPlaneRuntime, "openConversationChannel">
+    | ConversationLosslessDataPlane
     | undefined;
 
   constructor(options: ConversationProtocolRuntimeOptions) {
@@ -244,6 +270,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
     this.#onStatus = options.onStatus;
     this.#onFinal = options.onFinal;
+    this.#onFirstPartyFrame = options.onFirstPartyFrame;
+    this.#createFirstPartyFinality = options.createFirstPartyFinality;
     this.#projectLifecycle = options.projectLifecycle;
     this.#recoverAuxiliary = options.recoverAuxiliary;
     this.#InProcessAssignmentSubmission =
@@ -304,7 +332,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   bindLosslessDataPlane(
-    runtime: Pick<LosslessDataPlaneRuntime, "openConversationChannel">,
+    runtime: ConversationLosslessDataPlane,
   ): void {
     if (this.#losslessDataPlane && this.#losslessDataPlane !== runtime) {
       throw new Error("Conversation lossless data plane is already bound");
@@ -823,6 +851,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const attempt = await journal.nextAssignmentAttempt(runId);
     const assignmentId = conversationAssignmentId(runId, attempt);
     let channelSession: LosslessDataPlaneSession | undefined;
+    let firstPartySurfaceSession: FirstPartySurfaceSession | undefined;
+    let firstPartyFinalitySession: FirstPartyFinalitySession | undefined;
     try {
       const authority = await journal.authorityState();
       if (authority.deleted) {
@@ -972,16 +1002,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             : `${remoteTarget ? "Remote" : "Local"} executor did not return exactly one dispatch result`,
         );
       }
+      const streamRef = {
+        execution: "conversation",
+        conversationId: input.conversationId,
+        runId,
+        ownerEpoch: this.#authority.anchorEpoch,
+      } as const;
       if (
         executionIngress.kind === "channel" &&
         this.#losslessDataPlane
       ) {
-        const broker = input.runtime.confirmationBroker;
-        if (!broker) {
-          throw new Error(
-            "Channel assignment runtime has no confirmation broker",
-          );
-        }
         const ticketId = `ticket:${protocolDigest(
           "ConversationChannelTicketIdentity",
           1,
@@ -1009,10 +1039,67 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             },
             ticket,
             journal,
-            broker,
+          });
+      } else if (
+        executionIngress.kind === "first-party" &&
+        this.#losslessDataPlane?.openFirstPartySurfaceSession
+      ) {
+        const ticketId = `ticket:${protocolDigest(
+          "ConversationFirstPartyTicketIdentity",
+          1,
+          {
+            assignmentId,
+            surfacePrincipal: executionIngress.surfacePrincipal,
+          },
+        )}`;
+        const ticket = await journal.issueDataPlaneTicket({
+          ticketId,
+          assignmentId,
+          surfacePrincipal: executionIngress.surfacePrincipal,
+          kind: "run-interact",
+          ttlMs: 24 * 60 * 60 * 1_000,
+        });
+        firstPartyFinalitySession = this.#createFirstPartyFinality?.({
+          lastSeen: [
+            {
+              subject: streamRef,
+              afterStatusRevision: 0,
+            },
+          ],
+          onStatus: () => undefined,
+          ...(this.#onFinal
+            ? {
+                onConversationFinal: async (frame) => {
+                  const identity = canonicalize(frame);
+                  if (this.#ownerPublishedFirstPartyFinals.delete(identity)) {
+                    this.#pendingFirstPartyFinals.delete(identity);
+                    return;
+                  }
+                  await this.#onFinal?.(frame);
+                  this.#pendingFirstPartyFinals.delete(identity);
+                  this.#firstPartyPublishedFinals.add(identity);
+                },
+              }
+            : {}),
+        });
+        await firstPartyFinalitySession?.start();
+        firstPartySurfaceSession =
+          await this.#losslessDataPlane.openFirstPartySurfaceSession({
+            executorId: targetExecutorId,
+            assignmentId,
+            ref: streamRef,
+            ticket,
+            surfacePrincipal: executionIngress.surfacePrincipal,
+            adoptFrame: async (frame) => {
+              if (frame.payload.kind === "provisional-final") {
+                await firstPartyFinalitySession?.acceptProvisionalFinal(frame);
+              }
+              await this.#onFirstPartyFrame?.(frame);
+            },
           });
       }
       if (remoteTarget) {
+        firstPartySurfaceSession?.start();
         return await this.#awaitRemoteConversationRun({
           journal,
           dispatcher,
@@ -1025,15 +1112,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       if (!submission) throw new Error("Local assignment submission is unavailable");
       await submission.startAndReport(assignmentId, submissionContext);
 
-      const streamRef = {
-        execution: "conversation",
-        conversationId: input.conversationId,
-        runId,
-        ownerEpoch: this.#authority.anchorEpoch,
-      } as const;
       const stream: DurableAssignmentRunStream = this.#createStream
         ? await this.#createStream({ assignmentId, ref: streamRef })
         : new StreamDigestChain(assignmentId);
+      firstPartySurfaceSession?.start();
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
@@ -1044,6 +1126,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         submission,
         context: submissionContext,
         surfacePrincipal: executionIngress.surfacePrincipal,
+        broker: input.runtime.confirmationBroker,
         stream,
         streamMeta,
       };
@@ -1198,7 +1281,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ...(advancement ? { advancement } : {}),
       };
       const usageFinal = await flushResourceUsage();
-      await localLedger!.sealConversationBundle(assignmentId, {
+      const bundle = await localLedger!.sealConversationBundle(assignmentId, {
         runRecord: transcriptRun,
         ...(runResult.windowCompact
           ? { windowCompact: runResult.windowCompact }
@@ -1224,6 +1307,43 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw error;
       }
       await stream.markTerminal?.();
+      if (firstPartySurfaceSession && firstPartyFinalitySession) {
+        const final = (await journal.pendingFinalFrames()).find(
+          (candidate) =>
+            candidate.conversationId === input.conversationId &&
+            candidate.runId === runId &&
+            candidate.commitRevision === committed.commitRevision,
+        );
+        if (!final) {
+          throw new Error(
+            "Committed first-party run has no durable final projection",
+          );
+        }
+        const finalIdentity = canonicalize(final);
+        this.#pendingFirstPartyFinals.add(finalIdentity);
+        try {
+          await firstPartyFinalitySession.confirmConversationFinal({
+            frame: final,
+            bundle,
+          });
+        } catch (error) {
+          input.hooks?.onFinalPublishFailure?.(error, runResult);
+        }
+        const surfaceSession = firstPartySurfaceSession;
+        const finalitySession = firstPartyFinalitySession;
+        const closeFirstPartyProjection = async () => {
+          this.#pendingFirstPartyFinals.delete(finalIdentity);
+          this.#ownerPublishedFirstPartyFinals.delete(finalIdentity);
+          finalitySession.close();
+          await surfaceSession.close();
+        };
+        void surfaceSession.waitForSeq(bundle.streamFinal.finalSeq).then(
+          closeFirstPartyProjection,
+          closeFirstPartyProjection,
+        ).catch(() => undefined);
+        firstPartySurfaceSession = undefined;
+        firstPartyFinalitySession = undefined;
+      }
       this.#markRecovery(input.conversationId);
       this.#kickDelivery(input.hooks?.onFinalPublishFailure, runResult);
       return runResult;
@@ -1232,6 +1352,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw error;
     } finally {
       await channelSession?.close();
+      firstPartyFinalitySession?.close();
+      await firstPartySurfaceSession?.close();
       this.#clearRunClaims(runId);
       this.#forgetAssignment(assignmentId);
     }
@@ -1448,6 +1570,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#withRecoveryClaim(conversationId, async () => {
         let count = 0;
         const journal = this.#journal(conversationId);
+        count +=
+          (await this.#losslessDataPlane?.recoverConversationChannels(
+            journal,
+          )) ?? 0;
         count += await this.#resumeLifecycleProjections(conversationId, journal);
         const authority = await journal.authorityState();
         if (authority.deleted && authority.pendingLifecycleProjections === 0) {
@@ -1573,6 +1699,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await journal.resumeCommittedProjections();
       if (!this.#onFinal) return 0;
       return await journal.publishPendingFinals(async (frame) => {
+        const identity = canonicalize(frame);
+        if (this.#firstPartyPublishedFinals.delete(identity)) {
+          return;
+        }
+        if (this.#pendingFirstPartyFinals.has(identity)) {
+          await this.#onFinal?.(frame);
+          this.#ownerPublishedFirstPartyFinals.add(identity);
+          return;
+        }
         await this.#onFinal?.(frame);
       });
     } catch (error) {

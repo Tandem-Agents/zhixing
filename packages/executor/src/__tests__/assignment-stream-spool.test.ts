@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readdir, rm } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -419,6 +419,56 @@ describe(
     await expect(
       restarted.open("assignment-fixed", ref),
     ).rejects.toThrow(/permanently reclaimed/);
+  });
+
+  it("discovers durable assignments through bounded governed pages", async () => {
+    const fixture = await createFixture();
+    const expected = Array.from(
+      { length: 40 },
+      (_, index) => `assignment-page-${index.toString().padStart(2, "0")}`,
+    );
+    for (const assignmentId of expected) {
+      await fixture.spool.open(assignmentId, ref);
+    }
+    let physicalSteps = 0;
+    const runPhysicalStep = async <T>(operation: () => Promise<T>): Promise<T> => {
+      physicalSteps += 1;
+      return operation();
+    };
+
+    const first = await fixture.spool.assignmentIdPage(32, runPhysicalStep);
+    const second = await fixture.spool.assignmentIdPage(32, runPhysicalStep);
+
+    expect(first).toHaveLength(32);
+    expect(second).toHaveLength(8);
+    expect(new Set([...first, ...second])).toEqual(new Set(expected));
+    expect(physicalSteps).toBe(2);
+    await fixture.spool.closeAssignmentScan();
+  });
+
+  it("backfills a bounded identity sidecar for a legacy spool directory", async () => {
+    const fixture = await createFixture();
+    const assignmentId = "assignment-legacy";
+    await fixture.spool.open(assignmentId, ref);
+    const assignmentDirectory = path.join(
+      fixture.spoolRoot,
+      "assignments",
+      byteDigest(Buffer.from(assignmentId, "utf8")).slice("sha256:".length),
+    );
+    await rm(path.join(assignmentDirectory, "identity.json"));
+    let physicalSteps = 0;
+
+    await expect(
+      fixture.spool.assignmentIdPage(1, async (operation) => {
+        physicalSteps += 1;
+        return operation();
+      }),
+    ).resolves.toEqual([assignmentId]);
+    await expect(
+      readFile(path.join(assignmentDirectory, "identity.json"), "utf8"),
+    ).resolves.toContain(assignmentId);
+    expect(physicalSteps).toBe(1);
+    await fixture.spool.closeAssignmentScan();
   });
 
   it("degrades a slow surface without blocking a fast consumer", async () => {

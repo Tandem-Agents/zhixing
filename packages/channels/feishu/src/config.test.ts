@@ -13,8 +13,10 @@ describe("resolveConfig", () => {
     const config = resolveConfig(credentials);
     expect(config.appId).toBe("id");
     expect(config.appSecret).toBe("secret");
-    expect(config.verificationToken).toBe("verification");
-    expect(config.encryptKey).toBe("encryption");
+    expect(config.interactiveConfirmation).toEqual({
+      verificationToken: "verification",
+      encryptKey: "encryption",
+    });
     expect(config.domain).toBe("feishu");
   });
 
@@ -26,17 +28,26 @@ describe("resolveConfig", () => {
     expect(() => resolveConfig({ appId: "id" })).toThrow("appSecret");
   });
 
-  it("requires the complete signed callback credential pair", () => {
-    expect(() =>
-      resolveConfig({ appId: "id", appSecret: "secret" }),
-    ).toThrow("verificationToken");
+  it("degrades interactive confirmation when the callback pair is absent", () => {
+    const config = resolveConfig({ appId: "id", appSecret: "secret" });
+    expect(config.interactiveConfirmation).toBeUndefined();
+  });
+
+  it("rejects a half-configured callback credential pair", () => {
     expect(() =>
       resolveConfig({
         appId: "id",
         appSecret: "secret",
         verificationToken: "verification",
       }),
-    ).toThrow("encryptKey");
+    ).toThrow(/both verificationToken and encryptKey/u);
+    expect(() =>
+      resolveConfig({
+        appId: "id",
+        appSecret: "secret",
+        encryptKey: "encryption",
+      }),
+    ).toThrow(/both verificationToken and encryptKey/u);
   });
 
   it("applies domain override from options", () => {

@@ -225,7 +225,9 @@ function buildChannelConfigMeta(
     channel?.requiredFields.map((field) => {
       const value = channelCreds[field.id];
       const status: Status = !value
-        ? { level: "pending", text: "待填" }
+        ? field.capabilityGroup
+          ? { level: "pending", text: "选填·能力未启" }
+          : { level: "pending", text: "待填" }
         : { level: "ready", text: field.sensitive ? maskForDisplay(value) : value };
       return {
         label: field.label,

@@ -158,7 +158,11 @@ export interface ChannelContext {
   logger: ChannelLogger;
 
   onMessage(msg: InboundMessage): void;
-  onChallengeAction(action: ChannelChallengeAction): void;
+  /**
+   * 渠道 callback 的可等待入口:宿主只在耐久裁决完成后 resolve,adapter
+   * 必须等它成功才向平台返回成功——发送方看到的"已受理"即已耐久。
+   */
+  onChallengeAction(action: ChannelChallengeAction): Promise<void>;
   registerHttpRoute(path: string, handler: HttpHandler): void;
 }
 

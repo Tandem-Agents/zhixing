@@ -67,8 +67,11 @@ export interface JobOwnerRelayOptions {
   readonly consumer: OwnerRelayAuth;
   readonly journal: JobOwnerRelayJournal;
   readonly resolver: JobChannelInteractionResolver;
-  readonly direct: AssignmentStreamPathConnector;
-  readonly relay: AssignmentStreamPathConnector;
+  /**
+   * job owner-relay 自身就是 owner 消费者,到 executor 只有一条真实路径
+   * (本地进程内或 owner↔executor 连接)——不存在也不伪造第二条中继。
+   */
+  readonly connector: AssignmentStreamPathConnector;
   readonly maxPathAttempts?: number;
   readonly onPathsUnavailable?: ConstructorParameters<
     typeof AssignmentStreamPathManager
@@ -102,8 +105,7 @@ export class JobOwnerRelay {
       assignmentId: options.assignmentId,
       ref: options.ref,
       consumer,
-      direct: options.direct,
-      relay: options.relay,
+      direct: options.connector,
       ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(options.maxPathAttempts === undefined
         ? {}

@@ -1,7 +1,6 @@
 import type {
   ChannelChallengeAction,
   ChannelRegistry,
-  IConfirmationBroker,
 } from "@zhixing/core";
 import { isChallengeChannel } from "@zhixing/core";
 import type {
@@ -9,19 +8,29 @@ import type {
   DataPlaneTicket,
   ExecutionRef,
 } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import {
+  canonicalize,
+  type StreamVerifierCheckpoint,
+} from "@zhixing/core/protocol";
 import {
   ChannelChallengeOutbox,
   type ConversationRunJournal,
 } from "@zhixing/owner-kernel";
 import {
+  AssignmentStreamPathManager,
+  AssignmentStreamPathsUnavailableError,
   AssignmentStreamPathUnavailableError,
+  mapConnectionTransportFailures,
+  type AssignmentStreamPath,
   type AssignmentStreamPathConnector,
+  type AssignmentStreamPathManagerOptions,
+  type AssignmentStreamPollResult,
 } from "./assignment-stream-path-manager.js";
 import {
   ConversationChannelHost,
 } from "./conversation-channel-confirmation.js";
 import type { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
+import { ConversationInteractionRuntimeUnavailableError } from "./durable-conversation-interactions.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import {
   JobOwnerRelay,
@@ -46,11 +55,19 @@ export interface ConversationChannelSessionInput {
   readonly ref: ConversationRef;
   readonly ticket: DataPlaneTicket;
   readonly journal: ConversationRunJournal;
-  readonly broker: IConfirmationBroker;
 }
 
 export interface LosslessDataPlaneSession {
   close(reason?: Error): Promise<void>;
+}
+
+export interface FirstPartySurfaceSession extends LosslessDataPlaneSession {
+  readonly path: AssignmentStreamPath | undefined;
+  start(): void;
+  poll(signal?: AbortSignal): Promise<AssignmentStreamPollResult>;
+  restoreDirect(): Promise<void>;
+  checkpoint(): StreamVerifierCheckpoint;
+  waitForSeq(seq: number, signal?: AbortSignal): Promise<void>;
 }
 
 /**
@@ -66,7 +83,7 @@ export class LosslessDataPlaneRuntime {
   readonly #mesh: () => MeshRuntimeAssembly | undefined;
   readonly #interactions: DurableConversationInteractionObserver;
   readonly #onError: ((error: Error) => void) | undefined;
-  readonly #sessions = new Set<ConversationChannelSession>();
+  readonly #sessions = new Set<LosslessDataPlaneSession>();
   readonly #byChallenge = new Map<string, ConversationChannelSession>();
   #channels: ChannelRegistry | undefined;
   #closed = false;
@@ -101,7 +118,6 @@ export class LosslessDataPlaneRuntime {
     }
     const endpoint = this.#endpoint(input.executorId);
     await endpoint.accept(input.ticket);
-    const connectors = this.#connectors(input.executorId);
     const host = new ConversationChannelHost({
       assignmentId: input.assignmentId,
       ref: input.ref,
@@ -125,17 +141,20 @@ export class LosslessDataPlaneRuntime {
                       ? { reason: answer.decision.reason }
                       : {}),
                   },
-            broker: input.broker,
           });
           return true;
         },
       },
-      ...connectors,
+      connector: this.#ownerPathConnector(input.executorId),
     });
     const session = new ConversationChannelSession({
       host,
       journal: input.journal,
-      broker: input.broker,
+      resolveNoInteractiveSurface: (requestId) =>
+        endpoint.resolveNoInteractiveSurface({
+          assignmentId: input.assignmentId,
+          requestId,
+        }),
       channels: this.#channels,
       onChallenge: (challengeId) => {
         const current = this.#byChallenge.get(challengeId);
@@ -168,7 +187,6 @@ export class LosslessDataPlaneRuntime {
     readonly resolver: JobChannelInteractionResolver;
   }): Promise<JobOwnerRelay> {
     if (this.#closed) throw new Error("Lossless data plane is closed");
-    const connectors = this.#connectors(input.executorId);
     return JobOwnerRelay.create({
       assignmentId: input.assignmentId,
       ref: input.ref,
@@ -183,7 +201,7 @@ export class LosslessDataPlaneRuntime {
       },
       journal: input.journal,
       resolver: input.resolver,
-      ...connectors,
+      connector: this.#ownerPathConnector(input.executorId),
     });
   }
 
@@ -215,7 +233,10 @@ export class LosslessDataPlaneRuntime {
       readonly ticketId: string;
       readonly surfacePrincipal: string;
       readonly decision: { readonly allowed: boolean; readonly reason?: string };
-      readonly broker: IConfirmationBroker;
+    }) => Promise<void>;
+    readonly resolveNoInteractiveSurface: (input: {
+      readonly assignmentId: string;
+      readonly requestId: string;
     }) => Promise<void>;
   } {
     if (executorId === this.#authority.executorId) {
@@ -229,27 +250,23 @@ export class LosslessDataPlaneRuntime {
             "interact",
             input.assignmentId,
           );
-          const resolved = await this.#interactions.resolveWithSurfaceTicket(
-            input.broker,
-            {
-              assignmentId: input.assignmentId,
-              requestId: input.requestId,
-              ticketId: input.ticketId,
-              surfacePrincipal: input.surfacePrincipal,
-              decision: input.decision.allowed
-                ? { kind: "allow-once" }
-                : {
-                    kind: "deny",
-                    ...(input.decision.reason
-                      ? { reason: input.decision.reason }
-                      : {}),
-                  },
-            },
-          );
-          if (!resolved) {
-            throw new Error("Channel interaction is no longer pending");
-          }
+          await this.#interactions.answerInteractionWithTicket({
+            assignmentId: input.assignmentId,
+            requestId: input.requestId,
+            ticketId: input.ticketId,
+            surfacePrincipal: input.surfacePrincipal,
+            decision: input.decision.allowed
+              ? { kind: "allow-once" }
+              : {
+                  kind: "deny",
+                  ...(input.decision.reason
+                    ? { reason: input.decision.reason }
+                    : {}),
+                },
+          });
         },
+        resolveNoInteractiveSurface: (input) =>
+          this.#interactions.resolveNoInteractiveSurface(input),
       };
     }
     const remote = this.#mesh()?.dataPlaneForExecutor(executorId);
@@ -269,16 +286,21 @@ export class LosslessDataPlaneRuntime {
                 ...(input.decision.reason
                   ? { reason: input.decision.reason }
                   : {}),
-              },
+            },
         }),
+      resolveNoInteractiveSurface: (input) =>
+        remote.tickets.resolveNoInteractiveSurface(input),
     };
   }
 
-  #connectors(executorId: string): {
-    readonly direct: AssignmentStreamPathConnector;
-    readonly relay: AssignmentStreamPathConnector;
-  } {
-    const open = (): AssignmentStreamClient => {
+  /**
+   * owner/anchor 位置到 executor 的唯一真实路径:本地 executor 走进程内
+   * 端点,远程走 owner↔executor 连接;建连与流中传输失败统一映射为
+   * 路径不可用,交由路径管理器有界重连。渠道宿主与 job owner-relay 只
+   * 持这一条路径——它们自身即中继点,不伪造第二条拓扑。
+   */
+  #ownerPathConnector(executorId: string): AssignmentStreamPathConnector {
+    const resolve = (): AssignmentStreamClient => {
       if (executorId === this.#authority.executorId) {
         const local = this.#local;
         if (!local) throw new Error("Local executor data plane is unavailable");
@@ -288,21 +310,175 @@ export class LosslessDataPlaneRuntime {
       if (!remote) throw new Error("Remote executor data plane is unavailable");
       return remote.stream;
     };
-    const connector = (label: "direct" | "relay"): AssignmentStreamPathConnector => ({
+    return {
       async open() {
+        let client: AssignmentStreamClient;
         try {
-          return open();
+          client = resolve();
         } catch (error) {
           throw new AssignmentStreamPathUnavailableError(
-            `${label} assignment stream path is unavailable`,
+            "owner assignment stream path is unavailable",
             { cause: error },
           );
         }
+        return mapConnectionTransportFailures(client, "owner");
       },
+    };
+  }
+
+  /**
+   * 第一方 surface 会话的双路径:direct 以本会话自己的端点直连 executor,
+   * relay 经 owner 转发段走同一 executor——两条链路组件互相独立、可独立
+   * 失败与恢复;subscribe/ack/readArtifact 携同一 surface-ticket 消费身份,
+   * 授权与水位跨路径不变。
+   */
+  async openFirstPartySurfaceSession(input: {
+    readonly executorId: string;
+    readonly assignmentId: string;
+    readonly ref: ExecutionRef;
+    readonly ticket: DataPlaneTicket;
+    readonly surfacePrincipal: string;
+    readonly adoptFrame: AssignmentStreamPathManagerOptions["adoptFrame"];
+    readonly initialCheckpoint?: StreamVerifierCheckpoint;
+    readonly maxPathAttempts?: number;
+    readonly onConsumerDegraded?: AssignmentStreamPathManagerOptions["onConsumerDegraded"];
+    readonly onPathsUnavailable?: AssignmentStreamPathManagerOptions["onPathsUnavailable"];
+  }): Promise<FirstPartySurfaceSession> {
+    if (this.#closed) throw new Error("Lossless data plane is closed");
+    if (input.ticket.surfacePrincipal !== input.surfacePrincipal) {
+      throw new TypeError(
+        "First-party surface session principal differs from its ticket",
+      );
+    }
+    const endpoint = this.#endpoint(input.executorId);
+    await endpoint.accept(input.ticket);
+    const consumer = {
+      kind: "surface-ticket" as const,
+      ticketId: input.ticket.ticketId,
+    };
+    const manager = new AuthenticatedFirstPartySurfaceAdapter({
+      assignmentId: input.assignmentId,
+      ref: input.ref,
+      consumer,
+      direct: this.#firstPartyDirectConnector(
+        input.executorId,
+        input.surfacePrincipal,
+      ),
+      relay: this.#ownerForwardConnector(input.executorId),
+      adoptFrame: input.adoptFrame,
+      ...(input.initialCheckpoint
+        ? { initialCheckpoint: input.initialCheckpoint }
+        : {}),
+      ...(input.maxPathAttempts === undefined
+        ? {}
+        : { maxPathAttempts: input.maxPathAttempts }),
+      ...(input.onConsumerDegraded === undefined
+        ? {}
+        : { onConsumerDegraded: input.onConsumerDegraded }),
+      ...(input.onPathsUnavailable === undefined
+        ? {}
+        : { onPathsUnavailable: input.onPathsUnavailable }),
+    }).manager;
+    const session = new ManagedFirstPartySurfaceSession({
+      manager,
+      onClosed: () => this.#sessions.delete(session),
+      onError: this.#onError,
     });
+    this.#sessions.add(session);
+    return session;
+  }
+
+  #firstPartyDirectConnector(
+    executorId: string,
+    surfacePrincipal: string,
+  ): AssignmentStreamPathConnector {
+    const runtime = this;
     return {
-      direct: connector("direct"),
-      relay: connector("relay"),
+      async open() {
+        if (executorId !== runtime.#authority.executorId) {
+          // 远程 surface 设备的直连(surface 设备 ↔ executor 设备的 mesh
+          // 连接)随后续 surface 接入规则交付;当前进程拓扑下非本地
+          // executor 即无直连路径,如实回退中继。
+          throw new AssignmentStreamPathUnavailableError(
+            "direct assignment stream path is unavailable for a remote executor",
+          );
+        }
+        const local = runtime.#local;
+        if (!local) {
+          throw new AssignmentStreamPathUnavailableError(
+            "direct assignment stream path is unavailable",
+          );
+        }
+        let client: AssignmentStreamClient;
+        try {
+          client = local.surfaceStreamClient(surfacePrincipal);
+        } catch (error) {
+          throw new AssignmentStreamPathUnavailableError(
+            "direct assignment stream path is unavailable",
+            { cause: error },
+          );
+        }
+        return mapConnectionTransportFailures(client, "direct");
+      },
+    };
+  }
+
+  /**
+   * 第一方 relay 的 owner 转发段:请求原样携 surface 消费身份经 owner 的
+   * executor 路径转发。转发段随本 runtime 关闭而失效,是独立于 direct 的
+   * 真实失败面。
+   */
+  #ownerForwardConnector(executorId: string): AssignmentStreamPathConnector {
+    const runtime = this;
+    const ownerPath = this.#ownerPathConnector(executorId);
+    return {
+      async open(request) {
+        if (runtime.#closed) {
+          throw new AssignmentStreamPathUnavailableError(
+            "relay assignment stream path is closed",
+          );
+        }
+        if (request.consumer.kind !== "surface-ticket") {
+          throw new TypeError(
+            "Owner stream forwarding serves surface consumers only",
+          );
+        }
+        const upstream = await ownerPath.open(request);
+        const forward = async <T>(operate: () => Promise<T>): Promise<T> => {
+          if (runtime.#closed) {
+            throw new AssignmentStreamPathUnavailableError(
+              "relay assignment stream path is closed",
+            );
+          }
+          return operate();
+        };
+        return mapConnectionTransportFailures(
+          {
+            subscribe: (subscribeRequest, signal) =>
+              forward(() => upstream.subscribe(subscribeRequest, signal)),
+            acknowledge: (ack, signal) =>
+              forward(() => upstream.acknowledge(ack, signal)),
+            ...(upstream.readArtifact
+              ? {
+                  readArtifact: (readRequest, signal) =>
+                    forward(() => {
+                      const read = upstream.readArtifact;
+                      if (!read) {
+                        throw new TypeError(
+                          "Owner stream forwarding lost artifact reads",
+                        );
+                      }
+                      return read.call(upstream, readRequest, signal);
+                    }),
+                }
+              : {}),
+            ...(upstream.close
+              ? { close: (reason?: Error) => upstream.close?.(reason) }
+              : {}),
+          },
+          "relay",
+        );
+      },
     };
   }
 }
@@ -310,7 +486,7 @@ export class LosslessDataPlaneRuntime {
 class ConversationChannelSession implements LosslessDataPlaneSession {
   readonly #host: ConversationChannelHost;
   readonly #journal: ConversationRunJournal;
-  readonly #broker: IConfirmationBroker;
+  readonly #resolveNoInteractiveSurface: (requestId: string) => Promise<void>;
   readonly #channels: ChannelRegistry;
   readonly #onChallenge: (challengeId: string) => void;
   readonly #onClosed: (challengeIds: ReadonlySet<string>) => void;
@@ -322,7 +498,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
   constructor(options: {
     readonly host: ConversationChannelHost;
     readonly journal: ConversationRunJournal;
-    readonly broker: IConfirmationBroker;
+    readonly resolveNoInteractiveSurface: (requestId: string) => Promise<void>;
     readonly channels: ChannelRegistry;
     readonly onChallenge: (challengeId: string) => void;
     readonly onClosed: (challengeIds: ReadonlySet<string>) => void;
@@ -330,7 +506,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
   }) {
     this.#host = options.host;
     this.#journal = options.journal;
-    this.#broker = options.broker;
+    this.#resolveNoInteractiveSurface = options.resolveNoInteractiveSurface;
     this.#channels = options.channels;
     this.#onChallenge = options.onChallenge;
     this.#onClosed = options.onClosed;
@@ -340,7 +516,10 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
   start(): void {
     if (this.#running) return;
     this.#running = this.#run().catch((error) => {
-      if (!this.#controller.signal.aborted) this.#onError?.(asError(error));
+      if (!this.#controller.signal.aborted) {
+        const failure = asError(error);
+        this.#onError?.(failure);
+      }
     });
   }
 
@@ -444,7 +623,17 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
         for (const failure of drained.failures) {
           this.#onError?.(failure.error);
           if (failure.error instanceof NonInteractiveChannelError) {
-            await this.#failClosed(failure.challengeId);
+            try {
+              await this.#failClosed(failure.challengeId);
+            } catch (error) {
+              if (
+                error instanceof ConversationInteractionRuntimeUnavailableError
+              ) {
+                this.#onError?.(error);
+                continue;
+              }
+              throw error;
+            }
           }
         }
         if (result.accepted === 0) {
@@ -462,16 +651,145 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
       (item) => item.prepared.token.challengeId === challengeId,
     );
     if (!challenge) return;
-    const resolve = this.#broker.resolveNonInteractiveDurably;
-    if (!resolve) {
-      throw new Error(
-        "Channel confirmation broker cannot durably fail closed",
-      );
-    }
-    await resolve.call(
-      this.#broker,
+    await this.#resolveNoInteractiveSurface(
       challenge.prepared.token.interactionRequestId,
     );
+  }
+}
+
+/**
+ * One authenticated first-party surface owns one path manager. The owner
+ * runtime may supply the relay capability, but it cannot mutate the surface's
+ * selected path, verifier checkpoint or ACK state.
+ */
+class AuthenticatedFirstPartySurfaceAdapter {
+  readonly manager: AssignmentStreamPathManager;
+
+  constructor(options: AssignmentStreamPathManagerOptions) {
+    this.manager = new AssignmentStreamPathManager(options);
+  }
+}
+
+class ManagedFirstPartySurfaceSession implements FirstPartySurfaceSession {
+  readonly #manager: AssignmentStreamPathManager;
+  readonly #onClosed: () => void;
+  readonly #onError: ((error: Error) => void) | undefined;
+  readonly #controller = new AbortController();
+  readonly #waiters = new Set<{
+    readonly seq: number;
+    readonly resolve: () => void;
+    readonly reject: (error: unknown) => void;
+    readonly cleanup: () => void;
+  }>();
+  #running: Promise<void> | undefined;
+  #acknowledgedSeq: number;
+  #closed = false;
+
+  constructor(options: {
+    readonly manager: AssignmentStreamPathManager;
+    readonly onClosed: () => void;
+    readonly onError?: (error: Error) => void;
+  }) {
+    this.#manager = options.manager;
+    this.#onClosed = options.onClosed;
+    this.#onError = options.onError;
+    this.#acknowledgedSeq = options.manager.checkpoint().lastSeq;
+  }
+
+  get path(): AssignmentStreamPath | undefined {
+    return this.#manager.path;
+  }
+
+  start(): void {
+    if (this.#running) return;
+    this.#running = this.#run().catch((error) => {
+      const failure = asError(error);
+      this.#rejectWaiters(failure);
+      if (!this.#controller.signal.aborted) this.#onError?.(failure);
+    });
+  }
+
+  async poll(signal?: AbortSignal): Promise<AssignmentStreamPollResult> {
+    const result = await this.#manager.poll(signal);
+    this.#observed(result.checkpoint.lastSeq);
+    return result;
+  }
+
+  restoreDirect(): Promise<void> {
+    return this.#manager.restoreDirect();
+  }
+
+  checkpoint(): StreamVerifierCheckpoint {
+    return this.#manager.checkpoint();
+  }
+
+  waitForSeq(seq: number, signal?: AbortSignal): Promise<void> {
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new TypeError("Assignment stream wait sequence is invalid");
+    }
+    if (this.#acknowledgedSeq >= seq) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        this.#waiters.delete(waiter);
+        reject(signal?.reason ?? new Error("Assignment stream wait aborted"));
+      };
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      const waiter = { seq, resolve, reject, cleanup };
+      this.#waiters.add(waiter);
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  #observed(seq: number): void {
+    this.#acknowledgedSeq = Math.max(this.#acknowledgedSeq, seq);
+    for (const waiter of [...this.#waiters]) {
+      if (seq < waiter.seq) continue;
+      this.#waiters.delete(waiter);
+      waiter.cleanup();
+      waiter.resolve();
+    }
+  }
+
+  async close(reason?: Error): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    const closed = reason ?? new Error("First-party surface session closed");
+    if (!this.#controller.signal.aborted) this.#controller.abort(closed);
+    for (const waiter of this.#waiters) {
+      waiter.cleanup();
+      waiter.reject(closed);
+    }
+    this.#waiters.clear();
+    await this.#manager.close(closed);
+    await this.#running;
+    this.#onClosed();
+  }
+
+  async #run(): Promise<void> {
+    while (!this.#controller.signal.aborted) {
+      try {
+        const result = await this.poll(this.#controller.signal);
+        if (result.accepted > 0) continue;
+      } catch (error) {
+        if (this.#controller.signal.aborted) throw error;
+        if (!(error instanceof AssignmentStreamPathsUnavailableError)) {
+          throw error;
+        }
+        this.#onError?.(error);
+      }
+      if (!this.#controller.signal.aborted) {
+        await delay(IDLE_POLL_MS, this.#controller.signal);
+      }
+    }
+  }
+
+  #rejectWaiters(error: Error): void {
+    for (const waiter of this.#waiters) {
+      waiter.cleanup();
+      waiter.reject(error);
+    }
+    this.#waiters.clear();
   }
 }
 

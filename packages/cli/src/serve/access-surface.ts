@@ -64,6 +64,15 @@ import type { JobStatusDirectory } from "./job-status-directory.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import type {
+  ChannelInteractionCoordinator,
+  JobRelayObligationDirectory,
+} from "./channel-interaction-coordinator.js";
+import type {
+  ExecutionStatusHub,
+  FirstPartyFinalitySession,
+  FirstPartyFinalitySessionOptions,
+} from "./first-party-finality-session.js";
+import type {
   StartupCleanupHandle,
   StartupRollback,
 } from "./startup-rollback.js";
@@ -154,6 +163,12 @@ export interface AssemblyContext {
   meshBootstrap: MeshRuntimeBootstrap;
   meshRuntime?: MeshRuntimeAssembly;
   losslessDataPlane?: LosslessDataPlaneRuntime;
+  channelCoordinator?: ChannelInteractionCoordinator;
+  jobRelayObligations?: JobRelayObligationDirectory;
+  executionStatusHub?: ExecutionStatusHub;
+  firstPartyFinality?: (
+    input: Omit<FirstPartyFinalitySessionOptions, "sources">,
+  ) => FirstPartyFinalitySession;
   assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
   jobStatus?: JobStatusDirectory;

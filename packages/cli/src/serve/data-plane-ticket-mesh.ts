@@ -20,6 +20,10 @@ import type {
   MeshServiceRegistry,
   SecureMeshConnection,
 } from "@zhixing/mesh";
+import {
+  ConversationInteractionRuntimeUnavailableError,
+  type ConversationInteractionAnswerPort,
+} from "./durable-conversation-interactions.js";
 
 export const DATA_PLANE_TICKET_SERVICE = "assignment.data-plane-ticket";
 
@@ -52,19 +56,27 @@ type DataPlaneTicketServiceRequest =
       readonly v: 1;
       readonly t: "abort";
       readonly request: ExecutionAbortRequest;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "resolve-non-interactive";
+      readonly assignmentId: string;
+      readonly requestId: string;
+    };
+
+type DataPlaneTicketServiceResponse =
+  | { readonly v: 1; readonly t: "ok" }
+  | {
+      readonly v: 1;
+      readonly t: "runtime-unavailable";
+      readonly assignmentId: string;
+      readonly requestId: string;
     };
 
 export interface DataPlaneTicketServiceOptions {
   readonly tickets: Pick<DataPlaneTicketRegistry, "accept" | "revoke">;
   readonly verifier: ProtocolSignatureVerifier;
-  readonly operations: {
-    answerInteractionWithTicket(input: {
-      readonly assignmentId: string;
-      readonly requestId: string;
-      readonly ticketId: string;
-      readonly surfacePrincipal: string;
-      readonly decision: FirstPartyInteractionDecision;
-    }): Promise<void>;
+  readonly operations: ConversationInteractionAnswerPort & {
     abortWithTicket(request: ExecutionAbortRequest): Promise<void>;
   };
   readonly authorizeOwner: (
@@ -121,24 +133,52 @@ export function createDataPlaneTicketServiceHandler(
         ticketId: request.ticketId,
       });
     } else if (request.t === "answer") {
-      await options.operations.answerInteractionWithTicket({
-        assignmentId: request.assignmentId,
-        requestId: request.requestId,
-        ticketId: request.ticketId,
-        surfacePrincipal: options.surfacePrincipalFor(connection),
-        decision: request.decision,
-      });
+      try {
+        await options.operations.answerInteractionWithTicket({
+          assignmentId: request.assignmentId,
+          requestId: request.requestId,
+          ticketId: request.ticketId,
+          surfacePrincipal: options.surfacePrincipalFor(connection),
+          decision: request.decision,
+        });
+      } catch (error) {
+        if (error instanceof ConversationInteractionRuntimeUnavailableError) {
+          return runtimeUnavailable(request);
+        }
+        throw error;
+      }
     } else if (request.t === "answer-channel") {
       if (!options.authorizeOwner(connection, request.assignmentId)) {
         throw new Error("Channel interaction relay requires the assignment owner");
       }
-      await options.operations.answerInteractionWithTicket({
-        assignmentId: request.assignmentId,
-        requestId: request.requestId,
-        ticketId: request.ticketId,
-        surfacePrincipal: request.surfacePrincipal,
-        decision: request.decision,
-      });
+      try {
+        await options.operations.answerInteractionWithTicket({
+          assignmentId: request.assignmentId,
+          requestId: request.requestId,
+          ticketId: request.ticketId,
+          surfacePrincipal: request.surfacePrincipal,
+          decision: request.decision,
+        });
+      } catch (error) {
+        if (error instanceof ConversationInteractionRuntimeUnavailableError) {
+          return runtimeUnavailable(request);
+        }
+        throw error;
+      }
+    } else if (request.t === "resolve-non-interactive") {
+      if (!options.authorizeOwner(connection, request.assignmentId)) {
+        throw new Error(
+          "Non-interactive resolution requires the assignment owner",
+        );
+      }
+      try {
+        await options.operations.resolveNoInteractiveSurface(request);
+      } catch (error) {
+        if (error instanceof ConversationInteractionRuntimeUnavailableError) {
+          return runtimeUnavailable(request);
+        }
+        throw error;
+      }
     } else {
       if (
         request.request.ticket.surfacePrincipal !==
@@ -149,8 +189,20 @@ export function createDataPlaneTicketServiceHandler(
       await options.operations.abortWithTicket(request.request);
     }
     signal.throwIfAborted();
-    return encode({ v: 1, t: "ok" });
+    return encode({ v: 1, t: "ok" } satisfies DataPlaneTicketServiceResponse);
   };
+}
+
+function runtimeUnavailable(input: {
+  readonly assignmentId: string;
+  readonly requestId: string;
+}): Uint8Array {
+  return encode({
+    v: 1,
+    t: "runtime-unavailable",
+    assignmentId: input.assignmentId,
+    requestId: input.requestId,
+  } satisfies DataPlaneTicketServiceResponse);
 }
 
 export class DataPlaneTicketMeshClient {
@@ -221,6 +273,16 @@ export class DataPlaneTicketMeshClient {
     await this.#send({ v: 1, t: "abort", request }, signal);
   }
 
+  async resolveNoInteractiveSurface(
+    input: {
+      readonly assignmentId: string;
+      readonly requestId: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#send({ v: 1, t: "resolve-non-interactive", ...input }, signal);
+  }
+
   async #send(
     request: DataPlaneTicketServiceRequest,
     signal?: AbortSignal,
@@ -232,12 +294,20 @@ export class DataPlaneTicketMeshClient {
         signal,
       ),
     );
+    if (!isPlainObject(response) || response.v !== 1) {
+      throw new TypeError("Data-plane ticket service response is invalid");
+    }
     if (
-      !isPlainObject(response) ||
-      response.v !== 1 ||
-      response.t !== "ok" ||
-      Object.keys(response).length !== 2
+      response.t === "runtime-unavailable" &&
+      Object.keys(response).length === 4 &&
+      typeof response.assignmentId === "string" &&
+      typeof response.requestId === "string"
     ) {
+      throw new ConversationInteractionRuntimeUnavailableError(
+        "Executor interaction runtime is not yet restored",
+      );
+    }
+    if (response.t !== "ok" || Object.keys(response).length !== 2) {
       throw new TypeError("Data-plane ticket service response is invalid");
     }
   }
@@ -300,6 +370,12 @@ function decodeRequest(
       t: "abort",
       request: validateExecutionAbortRequest(value.request, verifier),
     };
+  }
+  if (value.t === "resolve-non-interactive") {
+    assertKeys(value, ["assignmentId", "requestId", "t", "v"]);
+    assertIdentifier(value.assignmentId, "Interaction assignment id");
+    assertIdentifier(value.requestId, "Interaction request id");
+    return value as unknown as DataPlaneTicketServiceRequest;
   }
   throw new TypeError("Data-plane ticket service request type is invalid");
 }

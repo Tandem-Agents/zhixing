@@ -23,6 +23,8 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "projection-compaction",
   "lifecycle-reconcile",
   "asset-gc",
+  "ticket-retirement",
+  "stream-spool-reclaim",
 ] as const;
 
 export type StorageMaintenanceKind =
@@ -35,6 +37,8 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "projection-compaction": "durable-projection-index",
   "lifecycle-reconcile": "artifact-lifecycle-index",
   "asset-gc": "anchor-asset-maintainer",
+  "ticket-retirement": "executor-data-plane",
+  "stream-spool-reclaim": "executor-data-plane",
 } as const satisfies Readonly<
   Record<StorageMaintenanceKind, string>
 >;
@@ -430,6 +434,10 @@ const STORAGE_STEP_BUDGETS: Readonly<
     16_384,
   ),
   "asset-gc": budget(16 * MIB, 0, 256 * MIB, 256 * MIB, 4_096),
+  // 票据退休 = 有界 WAL 追加批与内存投影清理,量级由过期票据数决定。
+  "ticket-retirement": budget(16 * MIB, 0, 64 * MIB, 16 * MIB, 4_096),
+  // spool 回收 = 单 assignment 目录的墓碑写与物理删除。
+  "stream-spool-reclaim": budget(16 * MIB, 0, 256 * MIB, 256 * MIB, 4_096),
 };
 
 export function storageMaintenanceRequest(

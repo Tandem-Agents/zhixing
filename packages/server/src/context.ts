@@ -16,6 +16,7 @@ import type {
 } from "@zhixing/core";
 import type {
   ConversationStatusNotice,
+  ExecutionStatusNotice,
   JobStatusNotice,
 } from "@zhixing/core/contracts";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
@@ -40,6 +41,44 @@ import type {
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
 export interface RuntimeControlAdapter {
+  openFirstPartyFinality?: (input: {
+    readonly lastSeen: readonly {
+      readonly subject:
+        | {
+            readonly execution: "conversation";
+            readonly conversationId: string;
+            readonly runId: string;
+          }
+        | {
+            readonly execution: "job";
+            readonly taskId: string;
+            readonly jobRunId: string;
+          }
+        | { readonly execution: "delivery"; readonly itemId: string };
+      readonly afterStatusRevision: number;
+    }[];
+    readonly onStatus: (
+      notice: ExecutionStatusNotice,
+    ) => void | Promise<void>;
+    readonly onResyncRequired?: (error: Error) => void;
+  }) => Promise<{
+    readonly next: readonly {
+      readonly subject:
+        | {
+            readonly execution: "conversation";
+            readonly conversationId: string;
+            readonly runId: string;
+          }
+        | {
+            readonly execution: "job";
+            readonly taskId: string;
+            readonly jobRunId: string;
+          }
+        | { readonly execution: "delivery"; readonly itemId: string };
+      readonly afterStatusRevision: number;
+    }[];
+    close(): void;
+  }>;
   deliveryStats?: () => AuthorityDeliveryStats;
   deliveryStatus?: (
     afterByItem: Readonly<Record<string, number>>,

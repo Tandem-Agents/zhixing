@@ -446,11 +446,13 @@ describe("RpcConversationFacade · 通知还原", () => {
     const completes: unknown[] = [];
     const finals: unknown[] = [];
     const statuses: unknown[] = [];
+    const assignmentFrames: unknown[] = [];
     const intents: unknown[] = [];
     facade.onDelta((p) => deltas.push(p));
     facade.onComplete((p) => completes.push(p));
     facade.onFinal((p) => finals.push(p));
     facade.onStatus((p) => statuses.push(p));
+    facade.onAssignmentStream((p) => assignmentFrames.push(p));
     facade.onChanged((p) => changes.push(p));
     facade.onActivity((p) => activities.push(p));
     facade.onPostTurnControlIntent((p) => intents.push(p));
@@ -482,6 +484,23 @@ describe("RpcConversationFacade · 通知还原", () => {
       actions: [],
       at: "2026-07-18T00:00:00.000Z",
     });
+    fake.notify("session.assignmentStream", {
+      v: 1,
+      assignmentId: "assignment-1",
+      ref: {
+        execution: "conversation",
+        conversationId: "conv-1",
+        runId: "run-1",
+        ownerEpoch: 1,
+      },
+      seq: 1,
+      previousDigest: null,
+      digest: `sha256:${"b".repeat(64)}`,
+      payload: {
+        kind: "agent-yield",
+        yield: { type: "text_delta", text: "hi" },
+      },
+    });
     fake.notify("session.changed", {
       conversationId: "conv-1",
       change: "renamed",
@@ -506,6 +525,7 @@ describe("RpcConversationFacade · 通知还原", () => {
     expect(completes).toHaveLength(1);
     expect(finals).toHaveLength(1);
     expect(statuses).toHaveLength(1);
+    expect(assignmentFrames).toHaveLength(1);
     expect(changes[0]).toEqual({
       conversationId: "conv-1",
       change: "renamed",

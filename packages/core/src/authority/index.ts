@@ -88,6 +88,7 @@ export type {
   ArtifactRetentionSnapshot,
   ArtifactStore,
   MutableArtifactStore,
+  PhysicalStorageStepRunner,
   AuthorityCommitLog,
   AuthorityLogSnapshot,
   AuthorityGarbageCollectionOptions,

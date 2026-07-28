@@ -1,4 +1,11 @@
 import path from "node:path";
+import {
+  StorageMaintenanceTaskRunner,
+  runStorageMaintenanceStep,
+  storageMaintenanceObligation,
+  storageMaintenanceRequest,
+  type StorageMaintenanceGovernorPort,
+} from "@zhixing/core";
 import type { ExecutionRef } from "@zhixing/core/contracts";
 import type {
   AssignmentStreamSpool,
@@ -17,6 +24,9 @@ import {
 } from "./assignment-stream-mesh.js";
 
 const MAINTENANCE_INTERVAL_MS = 60_000;
+// 单轮回收批次上界:一轮维护至多触碰这么多 assignment,余量由游标续扫,
+// 保证单轮工作量与 spool 历史规模无关。
+const MAINTENANCE_RECLAIM_BATCH_LIMIT = 32;
 
 export interface ExecutorDataPlaneRuntimeOptions {
   readonly zhixingHome: string;
@@ -25,6 +35,8 @@ export interface ExecutorDataPlaneRuntimeOptions {
     ExecutorRoleModule,
     "AssignmentStreamSpool" | "AssignmentStreamWriter" | "DataPlaneTicketRegistry"
   >;
+  /** 设备唯一容量裁决入口;缺省即不装配治理的嵌入场景,维护直通执行。 */
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly clock?: () => string;
   readonly onError?: (error: Error) => void;
 }
@@ -39,6 +51,9 @@ export class ExecutorDataPlaneRuntime {
   readonly tickets: DataPlaneTicketRegistry;
   readonly #AssignmentStreamWriter: typeof AssignmentStreamWriter;
   readonly #onError: ((error: Error) => void) | undefined;
+  readonly #storageGovernor: StorageMaintenanceGovernorPort | undefined;
+  readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
+  readonly #executorId: string;
   #ledger: ConversationAssignmentLedger | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #maintenance: Promise<number> | undefined;
@@ -48,6 +63,11 @@ export class ExecutorDataPlaneRuntime {
     const clock = options.clock ?? (() => new Date().toISOString());
     this.#AssignmentStreamWriter = options.module.AssignmentStreamWriter;
     this.#onError = options.onError;
+    this.#storageGovernor = options.storageMaintenance;
+    this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
+      options.storageMaintenance,
+    );
+    this.#executorId = options.authority.executorId;
     this.spool = new options.module.AssignmentStreamSpool(
       path.join(
         options.zhixingHome,
@@ -119,6 +139,39 @@ export class ExecutorDataPlaneRuntime {
     return createInProcessAssignmentStreamClient(handler, connection);
   }
 
+  /**
+   * 已认证第一方 surface 的进程内直连端点。它与 owner relay 使用相同
+   * spool 服务，但以票据绑定的 surface principal 独立验权，不能借用
+   * owner-presented-ticket 分支。
+   */
+  surfaceStreamClient(surfacePrincipal: string): AssignmentStreamClient {
+    const ledger = this.#requireLedger();
+    const connection = {
+      peer: { deviceId: this.#executorId },
+    } as SecureMeshConnection;
+    const handler = createAssignmentStreamServiceHandler({
+      spool: this.spool,
+      authorize: createDataPlaneAssignmentStreamAuthorizer({
+        tickets: this.tickets,
+        surfacePrincipalFor: () => surfacePrincipal,
+        authorizeOwnerRelay: async (request) => {
+          if (request.consumer.kind !== "owner-relay") {
+            throw new TypeError(
+              "Owner relay authorization has the wrong consumer kind",
+            );
+          }
+          await ledger.authorizeOwnerRelay({
+            assignmentId: request.assignmentId,
+            consumer: request.consumer,
+            ownerDeviceId: this.#executorId,
+          });
+          return {};
+        },
+      }),
+    });
+    return createInProcessAssignmentStreamClient(handler, connection);
+  }
+
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Executor data plane is closed");
     this.#requireLedger();
@@ -142,14 +195,88 @@ export class ExecutorDataPlaneRuntime {
     this.#closed = true;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
-    await this.#maintenance;
+    this.#maintenanceRunner.stop();
+    await this.#maintenance?.catch(() => undefined);
+    await this.spool.closeAssignmentScan();
   }
 
+  /**
+   * 维护走第 23 单元的两层治理:义务层按规范 workKey 合流(票据退休一份
+   * 义务、spool 回收按 assignment 各一份),叶级物理步骤在各自互斥段内
+   * 经设备容量裁决器独立准入。单轮回收批次有上界,余量由游标跨轮续扫。
+   */
   async #runMaintenance(): Promise<number> {
-    const expired = await this.tickets.maintain();
+    const abort = new AbortController();
+    const expired = await this.#maintenanceRunner.run(
+      storageMaintenanceObligation("ticket-retirement", this.#executorId, "periodic", {
+        owner: "executor-data-plane",
+        obligation: "committed",
+      }),
+      abort.signal,
+      () =>
+        this.tickets.maintain((operation) =>
+          runStorageMaintenanceStep(
+            this.#storageGovernor,
+            storageMaintenanceRequest(
+              "ticket-retirement",
+              this.#executorId,
+              "periodic",
+              { obligation: "committed" },
+            ),
+            operation,
+          ),
+        ),
+    );
     let reclaimed = 0;
-    for (const assignmentId of await this.spool.assignmentIds()) {
-      if (await this.spool.reclaimDue(assignmentId)) reclaimed += 1;
+    const assignmentIds = await this.#maintenanceRunner.run(
+      storageMaintenanceObligation(
+        "stream-spool-reclaim",
+        this.#executorId,
+        "discovery",
+        { owner: "executor-data-plane", obligation: "committed" },
+      ),
+      abort.signal,
+      () =>
+        this.spool.assignmentIdPage(
+          MAINTENANCE_RECLAIM_BATCH_LIMIT,
+          (operation) =>
+            runStorageMaintenanceStep(
+              this.#storageGovernor,
+              storageMaintenanceRequest(
+                "stream-spool-reclaim",
+                this.#executorId,
+                "discovery",
+                { obligation: "committed" },
+              ),
+              operation,
+            ),
+        ),
+    );
+    for (const assignmentId of assignmentIds) {
+      if (this.#closed) break;
+      const done = await this.#maintenanceRunner.run(
+        storageMaintenanceObligation(
+          "stream-spool-reclaim",
+          assignmentId,
+          "periodic",
+          { owner: "executor-data-plane", obligation: "committed" },
+        ),
+        abort.signal,
+        () =>
+          this.spool.reclaimDue(assignmentId, undefined, (operation) =>
+            runStorageMaintenanceStep(
+              this.#storageGovernor,
+              storageMaintenanceRequest(
+                "stream-spool-reclaim",
+                assignmentId,
+                "periodic",
+                { obligation: "committed" },
+              ),
+              operation,
+            ),
+          ),
+      );
+      if (done) reclaimed += 1;
     }
     return expired + reclaimed;
   }

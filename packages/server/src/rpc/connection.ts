@@ -41,6 +41,8 @@ export interface RpcConnection {
   sendError(id: string | number | null, error: JsonRpcError): void;
   /** 发送服务端 → 客户端单向通知 */
   notify(method: string, params?: unknown): void;
+  /** 可观测的通知入队；连接不可写时返回 false，供零跳失投影触发重同步。 */
+  tryNotify?(method: string, params?: unknown): boolean;
   /** 主动关闭连接 */
   close(code?: number, reason?: string): void;
   /** 是否已关闭 */
@@ -73,13 +75,15 @@ export function createRpcConnection(
     closeListeners.clear();
   });
 
-  const safeSend = (text: string): void => {
-    if (closed) return;
-    if (socket.readyState !== socket.OPEN) return;
+  const safeSend = (text: string): boolean => {
+    if (closed) return false;
+    if (socket.readyState !== socket.OPEN) return false;
     try {
       socket.send(text);
+      return true;
     } catch {
       // 发送失败不向上抛——网络异常视为连接已断
+      return false;
     }
   };
 
@@ -95,6 +99,9 @@ export function createRpcConnection(
     },
     notify(method, params) {
       safeSend(encodeNotification(method, params));
+    },
+    tryNotify(method, params) {
+      return safeSend(encodeNotification(method, params));
     },
     close(code, reason) {
       if (closed) return;

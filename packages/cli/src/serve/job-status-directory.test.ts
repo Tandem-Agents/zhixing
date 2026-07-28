@@ -21,7 +21,7 @@ describe("JobStatusDirectory", () => {
       ]),
     ).resolves.toEqual({
       notices: [notice("task-1", "run-1", 1, "running")],
-      next: [],
+      next: [{ taskId: "task-1", jobRunId: "run-1", afterStatusRevision: 1 }],
     });
   });
 
