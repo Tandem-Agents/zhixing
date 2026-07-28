@@ -2,6 +2,8 @@ export {
   type ChannelAdapter,
   type ChannelBindingPolicy,
   type ChannelCapabilities,
+  type ChannelChallengeAction,
+  type ChannelChallengeMessage,
   type ChannelConfig,
   type ChannelContext,
   type ChannelEventMap,
@@ -29,12 +31,14 @@ export {
   type StreamHandle,
   type ThreadableChannel,
   type TypingChannel,
+  type ChallengeChannel,
   isApprovable,
   isEditable,
   isReactable,
   isStreamable,
   isThreadable,
   isTyping,
+  isChallengeChannel,
 } from "./capabilities.js";
 
 export { ChannelRegistry, type ChannelRegistryOptions } from "./registry.js";

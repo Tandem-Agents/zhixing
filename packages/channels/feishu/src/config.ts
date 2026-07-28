@@ -3,6 +3,8 @@ export interface FeishuAdapterConfig {
   appSecret: string;
   domain?: "feishu" | "lark";
   botOpenId?: string;
+  verificationToken: string;
+  encryptKey: string;
 
   dedupTtlMs?: number;
   dedupMaxSize?: number;
@@ -45,11 +47,21 @@ export function resolveConfig(
     throw new Error(`Invalid botOpenId: expected a string.`);
   }
 
+  const verificationToken = credentials["verificationToken"];
+  const encryptKey = credentials["encryptKey"];
+  if (!verificationToken || !encryptKey) {
+    throw new Error(
+      "Feishu adapter requires verificationToken and encryptKey for signed interactive callbacks",
+    );
+  }
+
   return {
     appId,
     appSecret,
     domain: (domain as FeishuAdapterConfig["domain"]) ?? FEISHU_DEFAULTS.domain,
     botOpenId: botOpenId as string | undefined,
+    verificationToken,
+    encryptKey,
     dedupTtlMs: (dedupTtlMs as number) ?? FEISHU_DEFAULTS.dedupTtlMs,
     dedupMaxSize: (dedupMaxSize as number) ?? FEISHU_DEFAULTS.dedupMaxSize,
   };

@@ -7,3 +7,5 @@ export * from "./job-assignment.js";
 export * from "./delivery-participant.js";
 export * from "./delivery-control.js";
 export * from "./resource-governor.js";
+export * from "./channel-interaction-records.js";
+export * from "./channel-challenge-outbox.js";

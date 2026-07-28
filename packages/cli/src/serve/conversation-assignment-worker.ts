@@ -54,7 +54,9 @@ export interface ConversationAssignmentWorkerOptions {
 
 type ConversationEnvelope = Extract<DispatchEnvelope, { execution: "conversation" }>;
 
-export type AssignmentRunStream = StreamFrameProducer;
+export interface AssignmentRunStream extends StreamFrameProducer {
+  markTerminal?(): Promise<unknown>;
+}
 
 /** Executor-owned lifecycle from durable receipt through owner acknowledgement. */
 export class ConversationAssignmentWorker {
@@ -330,6 +332,7 @@ export class ConversationAssignmentWorker {
           context,
           interactionBinding,
         );
+        await stream?.final(streamMeta);
       } catch (error) {
         executionError = asError(error);
       }
@@ -337,6 +340,7 @@ export class ConversationAssignmentWorker {
         reason: executionError.message,
         usageFinal,
       });
+      await stream?.markTerminal?.();
       throw executionError;
     }
 
@@ -346,10 +350,18 @@ export class ConversationAssignmentWorker {
       if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
         return;
       }
+      await this.#prepareRunEndUntilAvailable(
+        assignmentId,
+        durableSubmission,
+        context,
+        interactionBinding,
+      );
+      await stream?.final(streamMeta);
       await this.options.ledger.failExecution(assignmentId, {
         reason: error.message,
         usageFinal,
       });
+      await stream?.markTerminal?.();
       throw error;
     }
     if (!stream) {
@@ -375,10 +387,12 @@ export class ConversationAssignmentWorker {
         });
         throw failure;
       }
+      await stream.final(streamMeta);
       await this.options.ledger.failExecution(assignmentId, {
         reason: runFailureReason(result),
         usageFinal,
       });
+      await stream.markTerminal?.();
       return;
     }
     const source = result.runRecord.source;
@@ -424,6 +438,7 @@ export class ConversationAssignmentWorker {
       usageFinal,
     });
     await this.#submitUntilAcknowledged(bundle, submission, context);
+    await stream.markTerminal?.();
   }
 
   #scheduleCancellation(envelope: ConversationEnvelope): void {

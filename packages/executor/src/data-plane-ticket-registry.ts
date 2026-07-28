@@ -361,6 +361,34 @@ export class DataPlaneTicketRegistry {
     });
   }
 
+  /**
+   * Authorizes a channel surface represented by the assignment owner.
+   *
+   * The authenticated owner connection is only a transport representative. The
+   * signed ticket remains the source of the surface identity, so callers cannot
+   * replace a channel principal with the owner device principal.
+   */
+  async authorizeOwnerPresentedSurface(
+    ticketId: string,
+    use: DataPlaneTicketUse,
+    assignmentId: string,
+  ): Promise<AuthorizedDataPlaneTicket> {
+    const ticket = await this.#operations.run(async () => {
+      const projection = await this.#load();
+      if (projection.state.retired.has(ticketId)) {
+        throw new Error("Data-plane ticket is retired");
+      }
+      return projection.state.accepted.get(ticketId)?.ticket;
+    });
+    if (!ticket) throw new Error("Data-plane ticket is unknown");
+    return this.authorize(ticketId, use, {
+      assignmentId,
+      ref: ticket.ref,
+      executorId: ticket.executorId,
+      surfacePrincipal: ticket.surfacePrincipal,
+    });
+  }
+
   async recover(): Promise<void> {
     await this.maintain();
     await this.#operations.run(async () => {

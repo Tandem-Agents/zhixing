@@ -344,6 +344,43 @@ describe("server.info", () => {
     ]);
   });
 
+  it("returns job status history after each run cursor", async () => {
+    const jobStatus = vi.fn(async () => ({
+      notices: [{
+        v: 1,
+        ref: {
+          execution: "job",
+          taskId: "task-1",
+          jobRunId: "job-run-1",
+          anchorEpoch: 1,
+        },
+        state: "running",
+        statusRevision: 3,
+        actions: [],
+        at: "2026-07-28T02:00:00.000Z",
+      }],
+      next: [{
+        taskId: "task-1",
+        jobRunId: "job-run-1",
+        afterStatusRevision: 3,
+      }],
+    }));
+    const ctx = mkCtx({ runtimeControl: { jobStatus } });
+    const cursor = {
+      taskId: "task-1",
+      jobRunId: "job-run-1",
+      afterStatusRevision: 2,
+    };
+
+    const result = await buildServerInfoMethod().handler({
+      jobStatusAfter: [cursor],
+    }, ctx) as any;
+
+    expect(jobStatus).toHaveBeenCalledWith([cursor]);
+    expect(result.jobStatus).toHaveLength(1);
+    expect(result.jobStatusNext).toEqual([cursorWithRevision(cursor, 3)]);
+  });
+
   it("rejects a delivery cursor outside the protocol identifier domain", async () => {
     const ctx = mkCtx({ runtimeControl: { deliveryStatus: vi.fn() } });
     await expect(
@@ -366,11 +403,31 @@ describe("server.info", () => {
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
   });
 
+  it("rejects malformed job status cursors", async () => {
+    const ctx = mkCtx({ runtimeControl: { jobStatus: vi.fn() } });
+    await expect(
+      buildServerInfoMethod().handler({
+        jobStatusAfter: [{
+          taskId: "task-1",
+          jobRunId: "job-run-1",
+          afterStatusRevision: -1,
+        }],
+      }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+  });
+
   // silence lint on unused import
   it("RpcAppError is a class", () => {
     expect(typeof RpcAppError).toBe("function");
   });
 });
+
+function cursorWithRevision<T extends object>(
+  cursor: T,
+  afterStatusRevision: number,
+): T & { afterStatusRevision: number } {
+  return { ...cursor, afterStatusRevision };
+}
 
 describe("delivery.resolve", () => {
   it("forwards a validated decision with the authenticated surface identity", async () => {

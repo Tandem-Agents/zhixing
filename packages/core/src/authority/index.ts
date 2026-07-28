@@ -1,4 +1,7 @@
-export { collectArtifactRefs } from "./artifact-references.js";
+export {
+  assertArtifactRef,
+  collectArtifactRefs,
+} from "./artifact-references.js";
 export {
   describeControlArtifactClosure,
   resolveControlArtifactClosure,

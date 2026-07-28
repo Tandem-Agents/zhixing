@@ -5,6 +5,7 @@ import type {
   ChannelEventMap,
   ChannelLogger,
   ChannelStatus,
+  ChannelChallengeAction,
   InboundMessage,
   HttpHandler,
 } from "./types.js";
@@ -16,6 +17,7 @@ export interface ChannelRegistryOptions {
   eventBus: IEventBus<ChannelEventMap>;
   logger: ChannelLogger;
   onMessage?: (msg: InboundMessage) => void;
+  onChallengeAction?: (action: ChannelChallengeAction) => void;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
 }
 
@@ -117,7 +119,13 @@ export class ChannelRegistry {
     config: ChannelConfig,
     abortSignal: AbortSignal,
   ): ChannelContext {
-    const { eventBus, logger, onMessage, registerHttpRoute } = this.options;
+    const {
+      eventBus,
+      logger,
+      onMessage,
+      onChallengeAction,
+      registerHttpRoute,
+    } = this.options;
     return {
       config,
       abortSignal,
@@ -129,6 +137,12 @@ export class ChannelRegistry {
         });
         eventBus.emit("channel:message-received", { channelId, message: msg });
         onMessage?.(msg);
+      },
+      onChallengeAction: (action: ChannelChallengeAction) => {
+        this.updateStatus(channelId, "connected", {
+          lastMessageAt: new Date().toISOString(),
+        });
+        onChallengeAction?.(action);
       },
       registerHttpRoute: registerHttpRoute ?? (() => {
         throw new Error("HTTP route registration not available");

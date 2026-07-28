@@ -44,8 +44,12 @@ import type {
   JobCommitFence,
   JobGlobalStagedMutation,
   InteractionDisplay,
+  InteractionMirrorBatch,
+  InteractionMirrorEntry,
+  ChannelInteractionGrant,
   RunDispatchArguments,
   RunExecutorPort,
+  StreamConsumerAuth,
 } from "@zhixing/core/contracts";
 import {
   MAX_LEDGER_EVIDENCE_PAGE_BYTES,
@@ -59,7 +63,7 @@ import {
   MAX_PERMISSION_LEASE_TTL_MS,
   assertProtocolIdentifier as assertIdentifier,
   advanceAssignmentLedger,
-  advanceInteractionMirrorDigest,
+  advanceAssignmentInteractionMirrorDigest,
   applyValidatedAssignmentEntry,
   assignmentLedgerSeed,
   canonicalize,
@@ -71,7 +75,7 @@ import {
   createConversationSealedBundle,
   createMutationBatch,
   createAssignmentLedgerValidationState,
-  createSignedConversationInteractionMirrorBatch,
+  createSignedAssignmentInteractionMirrorBatch,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   dataPlaneTicketDigest,
@@ -95,8 +99,15 @@ import {
   validateMutationBatch,
   validateStagedMutationRecord,
   validateTranscriptRunRecord,
+  validateAssignmentInteractionMirrorEntry,
+  validateAssignmentInteractionOutcome,
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionOutcome,
+  assertChannelInteractionGrantActiveAt,
+  assertChannelInteractionGrantBinding,
+  channelInteractionDecisionDigest,
+  channelResponderPrincipal,
+  validateChannelInteractionGrant,
   validateConversationActivation,
   validateConversationEnvelope,
   validateDispatchControlBinding,
@@ -108,7 +119,7 @@ import {
   validateInteractionDisplay,
   validateCancelProof,
   type ConversationInteractionMirrorEntry,
-  type ConversationInteractionMirrorBatch,
+  type AssignmentInteractionOutcome,
   type ConversationInteractionOutcome,
   type AssignmentLedgerValidationState,
   type ExecutorCapabilitySnapshot,
@@ -228,7 +239,7 @@ export interface AssignmentSubmissionPort {
   reportStarted(assignmentId: string, ctx: AuthorityCallContext): Promise<void>;
   mirrorInteractions(
     assignmentId: string,
-    batch: ConversationInteractionMirrorBatch,
+    batch: InteractionMirrorBatch,
     ctx: AuthorityCallContext,
   ): Promise<InteractionMirrorReceipt>;
   submitBundle(
@@ -273,7 +284,7 @@ export interface InteractionMirrorReceipt {
   readonly mirrorDigest: string;
 }
 
-export type InteractionOutcome = ConversationInteractionOutcome;
+export type InteractionOutcome = AssignmentInteractionOutcome;
 
 export type StagedConversationMutationInput =
   | {
@@ -326,7 +337,7 @@ export interface InteractionRecoveryResult {
   readonly pending: ReadonlyArray<
     Extract<AssignmentRecord, { t: "interaction-requested" }>
   >;
-  readonly resolved: readonly ConversationInteractionMirrorEntry[];
+  readonly resolved: readonly InteractionMirrorEntry[];
 }
 
 export interface DurableInteractionStreamEvent {
@@ -359,6 +370,17 @@ export type SurfaceInteractionAnswerPreparation =
   | {
       readonly kind: "replayed";
       readonly result: ConversationInteractionMirrorEntry;
+    };
+
+export type ChannelInteractionAnswerPreparation =
+  | {
+      readonly kind: "authorized";
+      readonly grant: ChannelInteractionGrant;
+      readonly outcome: Extract<InteractionOutcome, { readonly t: "answered" }>;
+    }
+  | {
+      readonly kind: "replayed";
+      readonly result: InteractionMirrorEntry;
     };
 
 export type SurfaceAbortDisposition =
@@ -1320,9 +1342,12 @@ export class ConversationAssignmentLedger implements
     assignmentId: string,
     requestId: string,
     outcome: InteractionOutcome,
-  ): Promise<ConversationInteractionMirrorEntry> {
+  ): Promise<InteractionMirrorEntry> {
     assertIdentifier(requestId, "Interaction requestId");
-    const validatedOutcome = validateConversationInteractionOutcome(outcome);
+    const validatedOutcome = validateAssignmentInteractionOutcome(
+      outcome,
+      this.#verifier,
+    );
     const body = snapshot(
       {
         v: 1 as const,
@@ -1354,7 +1379,7 @@ export class ConversationAssignmentLedger implements
       }
       const entry = nextEntry(state, body);
       const ordinal = state.finishedOrder.length + 1;
-      const mirrorDigest = advanceInteractionMirrorDigest(
+      const mirrorDigest = advanceAssignmentInteractionMirrorDigest(
         state.validation.interactionMirrorDigest,
         {
           ordinal,
@@ -1373,14 +1398,14 @@ export class ConversationAssignmentLedger implements
     if (transaction.value.existing) {
       return mirrorEntry(transaction.value.existing);
     }
-    return validateConversationInteractionMirrorEntry({
+    return validateAssignmentInteractionMirrorEntry({
       ordinal: transaction.value.ordinal!,
       seq: transaction.value.recordSeq!,
       requestId,
       kind: "allow-once",
       outcome: validatedOutcome,
       at: transaction.commit!.at,
-    });
+    }, this.#verifier);
   }
 
   async interactionStreamEvents(
@@ -1450,7 +1475,12 @@ export class ConversationAssignmentLedger implements
           "Interaction requestId already has a different terminal result",
         );
       }
-      return { kind: "replayed", result: mirrorEntry(existing) };
+      return {
+        kind: "replayed",
+        result: validateConversationInteractionMirrorEntry(
+          mirrorEntry(existing),
+        ),
+      };
     }
     const tickets = this.#dataPlaneTickets;
     if (!tickets) {
@@ -1476,6 +1506,84 @@ export class ConversationAssignmentLedger implements
       ticketId: authorization.ticket.ticketId,
       surfacePrincipal: authorization.ticket.surfacePrincipal,
     };
+  }
+
+  async prepareInteractionAnswerFromChannel(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+    readonly grant: ChannelInteractionGrant;
+    readonly at?: string;
+  }): Promise<ChannelInteractionAnswerPreparation> {
+    assertIdentifier(input.assignmentId, "Channel answer assignmentId");
+    assertIdentifier(input.requestId, "Channel answer requestId");
+    const grant = validateChannelInteractionGrant(input.grant, this.#verifier);
+    const at = input.at ?? this.#clock();
+    assertChannelInteractionGrantActiveAt(grant, at);
+    const selected = await this.#select(input.assignmentId, (state) => ({
+      ref: state.received?.body.activation.ref,
+      ownerKeyId: state.received?.body.activation.signature.keyId,
+      requested: state.requested.get(input.requestId)?.body,
+      existing: state.finished.get(input.requestId),
+      active:
+        state.phase === "started" &&
+        state.aborts.length === 0 &&
+        !state.supersedeFence,
+    }));
+    if (
+      !selected.ref ||
+      selected.ref.execution !== "job" ||
+      !selected.requested
+    ) {
+      throw new Error(
+        "Channel interaction grant has no durable pending job request",
+      );
+    }
+    if (
+      grant.signature.keyId !== selected.ownerKeyId ||
+      grant.challengeToken.signature.keyId !== selected.ownerKeyId
+    ) {
+      throw new TypeError(
+        "Channel interaction grant is not signed by the durable job owner",
+      );
+    }
+    assertChannelInteractionGrantBinding(grant, {
+      ref: selected.ref,
+      assignmentId: input.assignmentId,
+      interactionRequestId: input.requestId,
+      challengeId: grant.challengeToken.challengeId,
+      route: grant.route,
+      responder: grant.responder,
+      decision: grant.decision,
+      toolName: selected.requested.toolName,
+      display: selected.requested.display,
+    });
+    const outcome = validateAssignmentInteractionOutcome({
+      t: "answered",
+      authority: { via: "channel-grant", grant },
+      decision: grant.decision,
+      decisionDigest: channelInteractionDecisionDigest(
+        input.requestId,
+        grant.decision,
+      ),
+      by: channelResponderPrincipal(grant.responder),
+    }, this.#verifier) as Extract<
+      InteractionOutcome,
+      { readonly t: "answered" }
+    >;
+    if (selected.existing) {
+      if (
+        canonicalize(selected.existing.body.outcome) !== canonicalize(outcome)
+      ) {
+        throw new Error(
+          "Interaction requestId already has a different terminal result",
+        );
+      }
+      return { kind: "replayed", result: mirrorEntry(selected.existing) };
+    }
+    if (!selected.active) {
+      throw new Error("Channel interaction grant cannot answer an inactive job");
+    }
+    return { kind: "authorized", grant, outcome };
   }
 
   async dataPlaneBinding(
@@ -1505,9 +1613,37 @@ export class ConversationAssignmentLedger implements
     );
   }
 
+  async authorizeOwnerRelay(input: {
+    readonly assignmentId: string;
+    readonly consumer: Extract<
+      StreamConsumerAuth,
+      { readonly kind: "owner-relay" }
+    >;
+    readonly ownerDeviceId: string;
+  }): Promise<void> {
+    assertIdentifier(input.assignmentId, "Owner relay assignment id");
+    assertIdentifier(input.ownerDeviceId, "Owner relay device id");
+    await this.#select(input.assignmentId, (state) => {
+      const ref = state.received?.body.activation.ref;
+      const control = state.control;
+      if (
+        !ref ||
+        ref.execution !== "job" ||
+        !control ||
+        control.ownerDeviceId !== input.ownerDeviceId ||
+        canonicalize(control.authority) !==
+          canonicalize(input.consumer.authority) ||
+        control.lease.controlLeaseId !== input.consumer.controlLeaseId ||
+        !this.#ownerControlLeaseIsActive(state)
+      ) {
+        throw new Error("Owner relay authorization is not active for this assignment");
+      }
+    });
+  }
+
   async pendingInteractionMirrors(
     assignmentId: string,
-  ): Promise<ConversationInteractionMirrorEntry[]> {
+  ): Promise<InteractionMirrorEntry[]> {
     return this.#select(assignmentId, (state) =>
       selectPendingInteractionMirrors(state, assignmentId, this.#executorId),
     );
@@ -1515,7 +1651,7 @@ export class ConversationAssignmentLedger implements
 
   async pendingInteractionMirrorBatch(
     assignmentId: string,
-  ): Promise<ConversationInteractionMirrorBatch | undefined> {
+  ): Promise<InteractionMirrorBatch | undefined> {
     const selected = await this.#select(assignmentId, (state) => ({
       previousDigest: state.mirroredInteractionDigest,
       entries: selectPendingInteractionMirrors(
@@ -1525,12 +1661,13 @@ export class ConversationAssignmentLedger implements
       ),
     }));
     if (selected.entries.length === 0) return undefined;
-    const batch = createSignedConversationInteractionMirrorBatch({
+    const batch = createSignedAssignmentInteractionMirrorBatch({
       assignmentId,
       executorId: this.#executorId,
       previousDigest: selected.previousDigest,
       entries: selected.entries,
       signer: this.#signer,
+      verifier: this.#verifier,
     });
     if (interactionMirrorRecordBytes(assignmentId, batch) > MAX_INLINE_LOGICAL_RECORD_BYTES) {
       throw new Error("Signed interaction mirror batch exceeded its capacity proof");
@@ -1637,18 +1774,18 @@ export class ConversationAssignmentLedger implements
         value: { pending: stillPending, appended },
       };
     });
-    const resolved: ConversationInteractionMirrorEntry[] = [];
+    const resolved: InteractionMirrorEntry[] = [];
     if (transaction.commit) {
       resolved.push(
         ...transaction.value.appended.map((item) =>
-          validateConversationInteractionMirrorEntry({
+          validateAssignmentInteractionMirrorEntry({
             ordinal: item.ordinal,
             seq: item.recordSeq,
             requestId: item.requestId,
             kind: "allow-once",
             outcome: item.outcome,
             at: transaction.commit!.at,
-          }),
+          }, this.#verifier),
         ),
       );
     }
@@ -3424,7 +3561,7 @@ export class InProcessAssignmentSubmission {
     requestId: string,
     outcome: InteractionOutcome,
     ctx: AuthorityCallContext,
-  ): Promise<ConversationInteractionMirrorEntry> {
+  ): Promise<InteractionMirrorEntry> {
     const finished = await this.#ledger.finishInteraction(
       assignmentId,
       requestId,
@@ -3665,15 +3802,15 @@ function validateInteractionRequest(
   assertInteractionRecordSize(body, "Interaction request");
 }
 
-function mirrorEntry(finished: FinishedInteraction): ConversationInteractionMirrorEntry {
-  return validateConversationInteractionMirrorEntry({
+function mirrorEntry(finished: FinishedInteraction): InteractionMirrorEntry {
+  return {
     ordinal: finished.ordinal,
     seq: finished.recordSeq,
     requestId: finished.body.requestId,
     kind: "allow-once",
     outcome: snapshot(finished.body.outcome, "Interaction outcome"),
     at: finished.at,
-  });
+  };
 }
 
 function surfaceTicketInteractionOutcome(input: {
@@ -3714,8 +3851,8 @@ function selectPendingInteractionMirrors(
   state: LedgerProjection,
   assignmentId: string,
   executorId: string,
-): ConversationInteractionMirrorEntry[] {
-  const entries: ConversationInteractionMirrorEntry[] = [];
+): InteractionMirrorEntry[] {
+  const entries: InteractionMirrorEntry[] = [];
   for (
     let index = state.mirroredFinishedCount;
     index < state.finishedOrder.length;
@@ -3745,7 +3882,7 @@ function selectPendingInteractionMirrors(
 
 function interactionMirrorRecordBytes(
   assignmentId: string,
-  batch: ConversationInteractionMirrorBatch,
+  batch: InteractionMirrorBatch,
 ): number {
   return Buffer.byteLength(
     canonicalize({ t: "interaction-mirror", assignmentId, batch }),
@@ -3757,7 +3894,7 @@ function interactionMirrorRecordCapacityBytes(input: {
   readonly assignmentId: string;
   readonly executorId: string;
   readonly previousDigest: string;
-  readonly entries: readonly ConversationInteractionMirrorEntry[];
+  readonly entries: readonly InteractionMirrorEntry[];
   readonly mirrorDigest: string;
 }): number {
   const maxWidthIdentifier = "\0".repeat(480);
@@ -3773,7 +3910,7 @@ function interactionMirrorRecordCapacityBytes(input: {
       keyId: maxWidthIdentifier,
       sig: maxWidthIdentifier,
     },
-  } as ConversationInteractionMirrorBatch);
+  } as InteractionMirrorBatch);
 }
 
 function assertInteractionRecordSize(value: unknown, label: string): void {
@@ -3806,7 +3943,7 @@ function assertFinishedInteractionFits(
         seq: Number.MAX_SAFE_INTEGER,
         requestId: body.requestId,
         kind: "allow-once",
-        outcome: body.outcome as ConversationInteractionOutcome,
+        outcome: body.outcome,
         at: MAX_WIDTH_CANONICAL_TIME,
       },
     ],

@@ -21,11 +21,14 @@ import type {
   AuthorityCallContext,
   AuthorityError,
   CancelProofBody,
+  ChannelInteractionGrant,
+  ChannelResponderRef,
   DataPlaneTicket,
   CommitEnvelope,
   DispatchResult,
   GovernorRecord,
   JobOccurrence,
+  JobChannelChallengeToken,
   JobRunState,
   JobStatusNotice,
   JobUncertainClosure,
@@ -45,10 +48,12 @@ import type {
   SystemJobResourceLease,
   TaskDefinition,
   TaskDefinitionBody,
+  StreamFrame,
   UncertainResolutionFact,
 } from "@zhixing/core/contracts";
 import {
   assertProtocolIdentifier as assertIdentifier,
+  assertChannelChallengeActiveAt,
   assertDataPlaneTicketTtlMs,
   assertActivatedAssignmentCapability,
   assertQueuedTerminalDequeue,
@@ -57,9 +62,12 @@ import {
   buildJobActivationPayloadFromBinding,
   applyValidatedAssignmentEntry,
   canonicalize,
+  acceptedRemoteIntervalRemainingMs,
   controlLeaseBindsDispatchEnvelope,
   createAssignmentLedgerValidationState,
   createSignedDataPlaneTicket,
+  createSignedChannelChallengeToken,
+  createSignedChannelInteractionGrant,
   createJobCommitFence,
   createSignedJobEnvelope,
   dispatchEnvelopeArtifact,
@@ -68,6 +76,7 @@ import {
   matchManifest,
   interactionMirrorBatchDigest,
   interactionMirrorSeed,
+  interactionDisplayDigest,
   mutationBatchArtifact,
   permissionSnapshotLeaseDigest,
   protocolDigest,
@@ -75,10 +84,15 @@ import {
   requiresFormalResourceCoordination,
   sealedBundleArtifact,
   signJobActivation,
+  streamLogicalFrameDigest,
+  StreamFrameVerifier,
   systemJobParamsDigest,
   validateAssignmentTerminationProof,
   validateAssignmentEntry,
   validateCancelProof,
+  validateChannelChallengeToken,
+  validateChannelInteractionGrant,
+  validateChannelResponderRef,
   validateDispatchConflictProof,
   validateDispatchResult,
   validateDataPlaneTicket,
@@ -88,17 +102,19 @@ import {
   validateJobEnvelope,
   validateJobOccurrence,
   validateIngressContext,
-  validateConversationInteractionMirrorBatch,
+  validateAssignmentInteractionMirrorBatch,
   validateJobSealedBundle,
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
   validateJobMutationBatch,
   validateSupersedeProof,
+  validateStreamFrame,
   validateSystemJobFence,
   validateSystemJobResourceLease,
   validateTaskDefinition,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
+  type StreamVerifierCheckpoint,
   type ExecutorCapabilitySnapshot,
   type UnsignedJobEnvelope,
 } from "@zhixing/core/protocol";
@@ -186,6 +202,7 @@ import type {
   JobStatusDeliveryInput,
   JobDeliveryParticipant,
 } from "./delivery-participant.js";
+import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
 // 权威记录注册表随公开 job 模块再导出:执行点行为矩阵(生产/full/guard/
 // 恢复/对抗)按它做类型级闭合,新增记录类型缺行即编译失败。
 export {
@@ -199,6 +216,14 @@ import {
   type JobControlEnvelope,
   type TrustedControlSource,
 } from "./control-admission.js";
+import {
+  advanceChannelInteractionJournal,
+  createChannelInteractionJournalState,
+  validateChannelInteractionRelayRecord,
+  type ChannelInteractionRelayRecord,
+  type ChannelInteractionJournalState,
+  type JobChannelChallengePreparedRecord,
+} from "./channel-interaction-records.js";
 
 type JobEnvelope = Extract<
   import("@zhixing/core/contracts").DispatchEnvelope,
@@ -364,6 +389,7 @@ interface JobProjection {
     string,
     MaterializedSystemJobResult
   >;
+  channelInteractions: ChannelInteractionJournalState;
 }
 
 export interface PendingJobDispatch {
@@ -532,6 +558,24 @@ export interface JobAssignmentPlan {
   readonly materialize: () => UnsignedJobEnvelope;
 }
 
+export interface JobChannelRelayAdoption {
+  readonly checkpoint: StreamVerifierCheckpoint;
+  readonly prepared?: JobChannelChallengePreparedRecord;
+  readonly closed?: Extract<
+    ChannelInteractionRelayRecord,
+    { readonly t: "channel-challenge-closed" }
+  >;
+}
+
+export type JobChannelChallengePreparation =
+  | {
+      readonly kind: "prepared";
+      readonly prepared: JobChannelChallengePreparedRecord;
+    }
+  | {
+      readonly kind: "no-interactive-surface";
+    };
+
 export type JobCancelResult =
   | { readonly state: "cancelled"; readonly assignmentId?: string }
   | {
@@ -598,6 +642,457 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   onStatus(listener: (notice: JobStatusNotice) => void | Promise<void>): () => void {
     this.#statusListeners.add(listener);
     return () => this.#statusListeners.delete(listener);
+  }
+
+  async channelRelayCheckpoint(
+    assignmentId: string,
+  ): Promise<StreamVerifierCheckpoint | undefined> {
+    assertIdentifier(assignmentId, "Channel relay assignmentId");
+    return this.#select((state) => {
+      const cursor = state.channelInteractions.cursorByAssignment.get(assignmentId);
+      return cursor
+        ? structuredClone(cursor.checkpoint)
+        : undefined;
+    });
+  }
+
+  async prepareChannelRelayRequest(
+    frameInput: StreamFrame,
+  ): Promise<JobChannelChallengePreparation> {
+    const frame = validateStreamFrame(frameInput);
+    const ref = frame.ref;
+    const payload = frame.payload;
+    if (
+      ref.execution !== "job" ||
+      ref.taskId !== this.#taskId ||
+      ref.anchorEpoch !== this.#anchorEpoch ||
+      payload.kind !== "interaction" ||
+      payload.event.t !== "requested"
+    ) {
+      throw new TypeError(
+        "Job channel preparation requires a requested interaction frame",
+      );
+    }
+    const event = payload.event;
+    const acceptedAt = this.#clock();
+    const remainingMs = acceptedRemoteIntervalRemainingMs({
+      issuedAt: event.issuedAt,
+      expiry: event.expiresAt,
+      acceptedAt,
+      maxTtlMs: 24 * 60 * 60 * 1_000,
+    });
+    const issuedAt = new Date(
+      Math.max(
+        Date.parse(acceptedAt),
+        Date.parse(event.issuedAt),
+      ),
+    ).toISOString();
+    const expiry = new Date(
+      Math.min(
+        Date.parse(event.expiresAt),
+        Date.parse(acceptedAt) + remainingMs,
+      ),
+    ).toISOString();
+    if (Date.parse(expiry) <= Date.parse(issuedAt)) {
+      return { kind: "no-interactive-surface" };
+    }
+    return this.#select((state) => {
+      const assigned = state.assignedById.get(frame.assignmentId);
+      const occurrence = assigned
+        ? state.occurrences.get(assigned.record.jobRunId)
+        : undefined;
+      const definition = occurrence
+        ? requireDefinitionRevision(state, occurrence.taskRevision)
+        : undefined;
+      if (
+        !assigned ||
+        assigned.record.jobRunId !== ref.jobRunId ||
+        assigned.record.anchorEpoch !== ref.anchorEpoch
+      ) {
+        throw new TypeError(
+          "Job channel request does not bind the current assignment",
+        );
+      }
+      if (
+        !definition ||
+        definition.definition.kind !== "user" ||
+        !definition.definition.origin ||
+        !definition.definition.interactionResponder
+      ) {
+        return { kind: "no-interactive-surface" as const };
+      }
+      const challengeId = protocolDigest("ChannelChallengeIdentity", 1, {
+        ref,
+        assignmentId: frame.assignmentId,
+        interactionRequestId: event.requestId,
+      });
+      const token = createSignedChannelChallengeToken(
+        {
+          v: 1,
+          challengeId,
+          ref,
+          assignmentId: frame.assignmentId,
+          interactionRequestId: event.requestId,
+          route: definition.definition.origin,
+          displayDigest: interactionDisplayDigest(
+            event.toolName,
+            event.display,
+          ),
+          issuedAt,
+          expiry,
+        },
+        this.#signer,
+      );
+      const prepared = validateChannelInteractionRelayRecord(
+        {
+          t: "channel-challenge-prepared",
+          ref,
+          assignmentId: frame.assignmentId,
+          frameSeq: frame.seq,
+          token,
+          responder: definition.definition.interactionResponder,
+          toolName: event.toolName,
+          display: event.display,
+        },
+        this.#verifier,
+      ) as JobChannelChallengePreparedRecord;
+      return { kind: "prepared" as const, prepared };
+    });
+  }
+
+  async adoptChannelRelayFrame(input: {
+    readonly frame: StreamFrame;
+    readonly checkpoint: StreamVerifierCheckpoint;
+    readonly prepared?: JobChannelChallengePreparedRecord;
+  }): Promise<JobChannelRelayAdoption> {
+    const frame = validateStreamFrame(input.frame);
+    const checkpoint = new StreamFrameVerifier(input.checkpoint).checkpoint();
+    const ref = frame.ref;
+    if (
+      ref.execution !== "job" ||
+      ref.taskId !== this.#taskId ||
+      ref.anchorEpoch !== this.#anchorEpoch ||
+      checkpoint.assignmentId !== frame.assignmentId ||
+      canonicalize(checkpoint.ref) !== canonicalize(frame.ref) ||
+      checkpoint.lastSeq !== frame.seq ||
+      checkpoint.streamEpoch !== frame.streamEpoch ||
+      checkpoint.lastLogicalDigest !== streamLogicalFrameDigest(frame)
+    ) {
+      throw new TypeError(
+        "Channel relay frame and verifier checkpoint are inconsistent",
+      );
+    }
+    const prepared =
+      input.prepared === undefined
+        ? undefined
+        : (validateChannelInteractionRelayRecord(
+            input.prepared,
+            this.#verifier,
+          ) as JobChannelChallengePreparedRecord);
+    const cursor = validateChannelInteractionRelayRecord(
+      {
+        t: "channel-relay-cursor",
+        jobRunId: ref.jobRunId,
+        assignmentId: frame.assignmentId,
+        upToSeq: frame.seq,
+        checkpoint,
+      },
+      this.#verifier,
+    ) as Extract<
+      ChannelInteractionRelayRecord,
+      { readonly t: "channel-relay-cursor" }
+    >;
+    const candidateReferences = prepared
+      ? collectArtifactRefs(prepared)
+      : [];
+
+    const transaction = await this.#transact<JobChannelRelayAdoption>(
+      (state, context) => {
+        const assigned = state.assignedById.get(frame.assignmentId);
+        if (
+          !assigned ||
+          assigned.record.jobRunId !== ref.jobRunId ||
+          assigned.record.anchorEpoch !== ref.anchorEpoch
+        ) {
+          throw new TypeError(
+            "Channel relay frame does not bind the current assignment",
+          );
+        }
+        const current =
+          state.channelInteractions.cursorByAssignment.get(frame.assignmentId);
+        if (current) {
+          if (frame.seq < current.upToSeq) {
+            throw new TypeError("Channel relay frame precedes the durable cursor");
+          }
+          if (frame.seq === current.upToSeq) {
+            if (canonicalize(current) !== canonicalize(cursor)) {
+              throw new TypeError(
+                "Channel relay frame conflicts with the durable cursor",
+              );
+            }
+            return {
+              kind: "return",
+              value: relayAdoptionAtCursor(
+                state.channelInteractions,
+                frame.assignmentId,
+                frame,
+                current.checkpoint,
+              ),
+            };
+          }
+        }
+        if (frame.seq !== (current?.upToSeq ?? 0) + 1) {
+          throw new TypeError("Channel relay frame skips the durable cursor");
+        }
+
+        const records: ChannelInteractionRelayRecord[] = [];
+        let adoptedPrepared: JobChannelChallengePreparedRecord | undefined;
+        let closed:
+          | Extract<
+              ChannelInteractionRelayRecord,
+              { readonly t: "channel-challenge-closed" }
+            >
+          | undefined;
+        if (
+          frame.payload.kind === "interaction" &&
+          frame.payload.event.t === "requested"
+        ) {
+          if (!prepared) {
+            const mirrored = state.interactionMirrors.get(frame.assignmentId);
+            if (!mirrored?.requestIds.has(frame.payload.event.requestId)) {
+              throw new TypeError(
+                "Channel interaction request requires an atomic prepared record or a durably mirrored terminal result",
+              );
+            }
+          } else {
+            if (
+              canonicalize(prepared.ref) !== canonicalize(frame.ref) ||
+              prepared.assignmentId !== frame.assignmentId ||
+              prepared.frameSeq !== frame.seq ||
+              prepared.token.interactionRequestId !== frame.payload.event.requestId ||
+              prepared.toolName !== frame.payload.event.toolName ||
+              canonicalize(prepared.display) !==
+                canonicalize(frame.payload.event.display) ||
+              prepared.token.issuedAt < frame.payload.event.issuedAt ||
+              prepared.token.expiry > frame.payload.event.expiresAt
+            ) {
+              throw new TypeError(
+                "Prepared channel challenge does not bind its stream frame",
+              );
+            }
+            adoptedPrepared = prepared;
+            records.push(prepared);
+          }
+        } else if (prepared) {
+          throw new TypeError(
+            "Only an interaction request can carry a prepared record",
+          );
+        }
+
+        if (
+          frame.payload.kind === "interaction" &&
+          frame.payload.event.t === "finished"
+        ) {
+          const interactionKey =
+            `${frame.assignmentId}\u0000${frame.payload.event.requestId}`;
+          const challengeId =
+            state.channelInteractions.challengeByInteraction.get(interactionKey);
+          if (!challengeId) {
+            throw new TypeError(
+              "Channel interaction completion has no prepared challenge",
+            );
+          }
+          closed = {
+            t: "channel-challenge-closed",
+            challengeId,
+            outcome: frame.payload.event.outcome,
+            at: context.at,
+          };
+          records.push(closed);
+        }
+        records.push(cursor);
+
+        return {
+          kind: "append",
+          entries: records.map((record) => jobRecord(this.#taskId, record)),
+          value: {
+            checkpoint,
+            ...(adoptedPrepared ? { prepared: adoptedPrepared } : {}),
+            ...(closed ? { closed } : {}),
+          },
+        };
+      },
+      candidateReferences,
+    );
+    return transaction.value;
+  }
+
+  async grantChannelChallenge(input: {
+    readonly token: JobChannelChallengeToken;
+    readonly responder: ChannelResponderRef;
+    readonly decision: {
+      readonly allowed: boolean;
+      readonly reason?: string;
+    };
+    readonly at?: string;
+  }): Promise<ChannelInteractionGrant> {
+    const token = validateChannelChallengeToken(input.token, this.#verifier);
+    if (token.ref.execution !== "job") {
+      throw new TypeError("Job channel callback requires a job token");
+    }
+    const jobToken = token as JobChannelChallengeToken;
+    const responder = validateChannelResponderRef(input.responder);
+    const at = input.at ?? this.#clock();
+    return (
+      await this.#transact<ChannelInteractionGrant>((state) => {
+        const prepared =
+          state.channelInteractions.preparedByChallenge.get(jobToken.challengeId);
+        if (
+          !prepared ||
+          prepared.ref.execution !== "job" ||
+          canonicalize(prepared.token) !== canonicalize(jobToken) ||
+          canonicalize(prepared.responder) !== canonicalize(responder) ||
+          state.channelInteractions.closedByChallenge.has(jobToken.challengeId)
+        ) {
+          throw new TypeError(
+            "Job channel callback does not bind a pending challenge",
+          );
+        }
+        const existing =
+          state.channelInteractions.grantByChallenge.get(jobToken.challengeId);
+        if (existing) {
+          if (
+            canonicalize(existing.grant.responder) !==
+              canonicalize(responder) ||
+            canonicalize(existing.grant.decision) !==
+              canonicalize(input.decision)
+          ) {
+            throw new TypeError(
+              "Job channel challenge already has a different grant",
+            );
+          }
+          return {
+            kind: "return",
+            value: structuredClone(existing.grant),
+          };
+        }
+        assertChannelChallengeActiveAt(jobToken, at);
+        const expiry = jobToken.expiry;
+        const grant = createSignedChannelInteractionGrant(
+          {
+            v: 1,
+            grantId: protocolDigest("ChannelInteractionGrantIdentity", 1, {
+              challengeId: jobToken.challengeId,
+            }),
+            ref: jobToken.ref,
+            assignmentId: jobToken.assignmentId,
+            interactionRequestId: jobToken.interactionRequestId,
+            challengeToken: jobToken,
+            route: jobToken.route,
+            responder,
+            decision: input.decision,
+            issuedAt: at,
+            expiry,
+          },
+          this.#signer,
+          this.#verifier,
+        );
+        const record = validateChannelInteractionRelayRecord(
+          {
+            t: "channel-challenge-granted",
+            jobRunId: jobToken.ref.jobRunId,
+            challengeId: jobToken.challengeId,
+            grant,
+          },
+          this.#verifier,
+        );
+        return {
+          kind: "append",
+          entries: [jobRecord(this.#taskId, record)],
+          value: validateChannelInteractionGrant(grant, this.#verifier),
+        };
+      })
+    ).value;
+  }
+
+  async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
+    return this.#select((state) =>
+      [...state.channelInteractions.preparedByChallenge.values()]
+        .filter(
+          (prepared): prepared is JobChannelChallengePreparedRecord =>
+            prepared.ref.execution === "job" &&
+            !state.channelInteractions.closedByChallenge.has(
+              prepared.token.challengeId,
+            ),
+        )
+        .map((prepared) => {
+          const delivered =
+            state.channelInteractions.deliveredByChallenge.get(
+              prepared.token.challengeId,
+            );
+          return {
+            prepared: structuredClone(prepared),
+            ...(delivered ? { delivered: structuredClone(delivered) } : {}),
+          };
+        }),
+    );
+  }
+
+  async recordChannelChallengeDelivered(input: {
+    readonly challengeId: string;
+    readonly receipt: {
+      readonly acceptedAt: string;
+      readonly platformMessage?: import("@zhixing/core/contracts").ChannelMessageRef;
+    };
+  }): Promise<void> {
+    const record = validateChannelInteractionRelayRecord(
+      {
+        t: "channel-challenge-delivered",
+        challengeId: input.challengeId,
+        receipt: input.receipt,
+      },
+      this.#verifier,
+    );
+    await this.#transact<void>((state) => {
+      const current =
+        state.channelInteractions.deliveredByChallenge.get(input.challengeId);
+      if (current && canonicalize(current) === canonicalize(record)) {
+        return { kind: "return", value: undefined };
+      }
+      return {
+        kind: "append",
+        entries: [jobRecord(this.#taskId, record)],
+        value: undefined,
+      };
+    });
+  }
+
+  async closeChannelChallenge(input: {
+    readonly challengeId: string;
+    readonly outcome: "cancelled" | "expired";
+    readonly at: string;
+  }): Promise<void> {
+    const record = validateChannelInteractionRelayRecord(
+      {
+        t: "channel-challenge-closed",
+        challengeId: input.challengeId,
+        outcome: input.outcome,
+        at: input.at,
+      },
+      this.#verifier,
+    );
+    await this.#transact<void>((state) => {
+      const current =
+        state.channelInteractions.closedByChallenge.get(input.challengeId);
+      if (current && canonicalize(current) === canonicalize(record)) {
+        return { kind: "return", value: undefined };
+      }
+      return {
+        kind: "append",
+        entries: [jobRecord(this.#taskId, record)],
+        value: undefined,
+      };
+    });
   }
 
   async define(definition: TaskDefinition, context: AuthorityCallContext): Promise<void> {
@@ -1668,7 +2163,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     ) {
       throw new TypeError("Interaction mirror batch exceeds the durable record limit");
     }
-    const batch = validateConversationInteractionMirrorBatch(
+    const batch = validateAssignmentInteractionMirrorBatch(
       rawBatch,
       this.#verifier,
     );
@@ -4901,7 +5396,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         return state;
       case "interaction-mirror": {
         const assigned = state.assignedById.get(body.assignmentId);
-        const batch = validateConversationInteractionMirrorBatch(
+        const batch = validateAssignmentInteractionMirrorBatch(
           body.batch,
           this.#verifier,
         );
@@ -4942,6 +5437,108 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             ...batch.entries.map((entry) => entry.requestId),
           ]),
         });
+        return state;
+      }
+      case "channel-challenge-prepared": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const occurrence = assigned
+          ? state.occurrences.get(assigned.record.jobRunId)
+          : undefined;
+        const definition = occurrence
+          ? requireDefinitionRevision(state, occurrence.taskRevision)
+          : undefined;
+        if (
+          !assigned ||
+          !definition ||
+          definition.definition.kind !== "user" ||
+          !definition.definition.origin ||
+          !definition.definition.interactionResponder ||
+          body.ref.taskId !== this.#taskId ||
+          body.ref.jobRunId !== assigned.record.jobRunId ||
+          body.ref.anchorEpoch !== assigned.record.anchorEpoch ||
+          canonicalize(body.responder) !==
+            canonicalize(definition.definition.interactionResponder) ||
+          canonicalize(body.token.route) !==
+            canonicalize(definition.definition.origin)
+        ) {
+          throw corruptJobJournal(
+            "Job channel challenge does not bind its assignment source",
+          );
+        }
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+      case "channel-challenge-granted":
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      case "channel-relay-cursor": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
+          throw corruptJobJournal(
+            "Channel relay cursor does not bind its assignment",
+          );
+        }
+        if (
+          body.checkpoint.ref.execution !== "job" ||
+          body.checkpoint.ref.taskId !== this.#taskId ||
+          body.checkpoint.ref.jobRunId !== assigned.record.jobRunId ||
+          body.checkpoint.ref.anchorEpoch !== assigned.record.anchorEpoch
+        ) {
+          throw corruptJobJournal(
+            "Channel relay checkpoint does not bind its assignment authority",
+          );
+        }
+        const preparedInEnvelope = envelopeRecords.find(
+          (
+            candidate,
+          ): candidate is Extract<
+            JobJournalRecord,
+            { t: "channel-challenge-prepared" }
+          > =>
+            candidate.t === "channel-challenge-prepared" &&
+            candidate.assignmentId === body.assignmentId,
+        );
+        if (
+          preparedInEnvelope &&
+          preparedInEnvelope.frameSeq !== body.upToSeq
+        ) {
+          throw corruptJobJournal(
+            "Prepared challenge and relay cursor must adopt the same frame",
+          );
+        }
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
         return state;
       }
       case "resolution": {
@@ -6920,6 +7517,7 @@ function emptyProjection(): JobProjection {
     nextJobRevision: 1,
     systemFences: new Map(),
     systemResults: new Map(),
+    channelInteractions: createChannelInteractionJournalState("job"),
   };
 }
 
@@ -7111,6 +7709,38 @@ function jobRecord(
 ): LogicalRecord<JobJournalRecord> {
   assertJobRecordFits(body);
   return { stream: jobStream(taskId), body };
+}
+
+function relayAdoptionAtCursor(
+  state: ChannelInteractionJournalState,
+  assignmentId: string,
+  frame: StreamFrame,
+  checkpoint: StreamVerifierCheckpoint,
+): JobChannelRelayAdoption {
+  if (
+    frame.payload.kind !== "interaction"
+  ) {
+    return { checkpoint: structuredClone(checkpoint) };
+  }
+  const challengeId = state.challengeByInteraction.get(
+    `${assignmentId}\u0000${frame.payload.event.requestId}`,
+  );
+  if (!challengeId) {
+    return { checkpoint: structuredClone(checkpoint) };
+  }
+  const prepared = state.preparedByChallenge.get(challengeId);
+  const closed = state.closedByChallenge.get(challengeId);
+  const jobPrepared =
+    prepared?.ref.execution === "job"
+      ? (prepared as JobChannelChallengePreparedRecord)
+      : undefined;
+  return {
+    checkpoint: structuredClone(checkpoint),
+    ...(frame.payload.event.t === "requested" && jobPrepared
+      ? { prepared: jobPrepared }
+      : {}),
+    ...(frame.payload.event.t === "finished" && closed ? { closed } : {}),
+  };
 }
 
 function taskRevisionRecord(

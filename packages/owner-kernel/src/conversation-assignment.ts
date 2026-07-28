@@ -24,6 +24,7 @@ import type {
   ConversationRunState,
   ConversationStatusNotice,
   ConversationInvocation,
+  ConversationChannelChallengeToken,
   ContentAssetRef,
   DataPlaneTicket,
   ControlResult,
@@ -44,6 +45,7 @@ import type {
   PublishRecord,
   PublishConflictNotice,
   SealedBundle,
+  StreamFrame,
   SupersedeProof,
   CancelProofBody,
   SessionInternalRecord,
@@ -62,14 +64,17 @@ import {
   assignmentActivationDigest,
   byteDigest,
   canonicalize,
+  assertChannelChallengeActiveAt,
   controlLeaseBindsDispatchEnvelope,
   createAssignmentLedgerValidationState,
   createSignedDataPlaneTicket,
+  createSignedChannelChallengeToken,
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   interactionMirrorBatchDigest,
   interactionMirrorSeed,
+  interactionDisplayDigest,
   permissionSnapshotLeaseDigest,
   protocolDigest,
   queuedTerminalDequeueRecord,
@@ -77,6 +82,7 @@ import {
   sealedBundleArtifact,
   signConversationActivation,
   validateConversationActivation,
+  validateChannelChallengeToken,
   validateConversationEnvelope,
   validateCancelProof,
   validateConversationSealedBundle,
@@ -95,6 +101,7 @@ import {
   validateMutationBatch,
   validateNonEmptyUserTurnInput,
   validateSupersedeProof,
+  validateStreamFrame,
   validateTranscriptRunRecord,
   validateAuthorityError as validateAuthorityErrorContract,
   validatePublishDecisionRecord,
@@ -176,6 +183,15 @@ import type {
   ConversationStatusDeliveryInput,
 } from "./delivery-participant.js";
 import type { AssignmentResourceCoordinator } from "./resource-governor.js";
+import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
+import {
+  advanceChannelInteractionJournal,
+  createChannelInteractionJournalState,
+  validateConversationChannelChallengeRecord,
+  type ConversationChannelChallengePreparedRecord,
+  type ConversationChannelChallengeRecord,
+  type ChannelInteractionJournalState,
+} from "./channel-interaction-records.js";
 
 export type { ConversationRunJournalRecord } from "./conversation-run-contracts.js";
 type ConversationUncertainResolutionFact = Extract<
@@ -613,6 +629,7 @@ interface RunProjection {
   readonly resolutionsByRun: Map<string, ConversationUncertainResolutionFact>;
   readonly statusHistoryByRun: Map<string, StatusHistoryEntry[]>;
   readonly closedAssignments: Set<string>;
+  channelInteractions: ChannelInteractionJournalState;
 }
 
 interface SubmissionGuardProjection {
@@ -777,6 +794,14 @@ export type ConversationCancelResult =
     }
   | { readonly state: Exclude<ConversationRunState, "cancelled" | "cancel-requested"> };
 
+export interface ConversationChannelFrameAdoption {
+  readonly prepared?: ConversationChannelChallengePreparedRecord;
+  readonly closed?: Extract<
+    ConversationChannelChallengeRecord,
+    { readonly t: "channel-challenge-closed" }
+  >;
+}
+
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
 export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
   readonly #conversationId: string;
@@ -827,6 +852,279 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#legacyAbortTickets = options.legacyAbortTickets;
+  }
+
+  async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
+    return this.#select((state) =>
+      [...state.channelInteractions.preparedByChallenge.values()]
+        .filter(
+          (prepared): prepared is ConversationChannelChallengePreparedRecord =>
+            prepared.ref.execution === "conversation" &&
+            !state.channelInteractions.closedByChallenge.has(
+              prepared.token.challengeId,
+            ),
+        )
+        .map((prepared) => {
+          const delivered =
+            state.channelInteractions.deliveredByChallenge.get(
+              prepared.token.challengeId,
+            );
+          return {
+            prepared: structuredClone(prepared),
+            ...(delivered ? { delivered: structuredClone(delivered) } : {}),
+          };
+        }),
+    );
+  }
+
+  async recordChannelChallengeDelivered(input: {
+    readonly challengeId: string;
+    readonly receipt: {
+      readonly acceptedAt: string;
+      readonly platformMessage?: import("@zhixing/core/contracts").ChannelMessageRef;
+    };
+  }): Promise<void> {
+    const record = validateConversationChannelChallengeRecord(
+      {
+        t: "channel-challenge-delivered",
+        challengeId: input.challengeId,
+        receipt: input.receipt,
+      },
+      this.#verifier,
+    );
+    await this.#transact<void>((state) => {
+      const current =
+        state.channelInteractions.deliveredByChallenge.get(input.challengeId);
+      if (current && canonicalize(current) === canonicalize(record)) {
+        return { kind: "return", value: undefined };
+      }
+      return {
+        kind: "append",
+        entries: [runRecord(this.#conversationId, record)],
+        value: undefined,
+      };
+    });
+  }
+
+  async closeChannelChallenge(input: {
+    readonly challengeId: string;
+    readonly outcome: "cancelled" | "expired";
+    readonly at: string;
+  }): Promise<void> {
+    const record = validateConversationChannelChallengeRecord(
+      {
+        t: "channel-challenge-closed",
+        challengeId: input.challengeId,
+        outcome: input.outcome,
+        at: input.at,
+      },
+      this.#verifier,
+    );
+    await this.#transact<void>((state) => {
+      const current =
+        state.channelInteractions.closedByChallenge.get(input.challengeId);
+      if (current && canonicalize(current) === canonicalize(record)) {
+        return { kind: "return", value: undefined };
+      }
+      return {
+        kind: "append",
+        entries: [runRecord(this.#conversationId, record)],
+        value: undefined,
+      };
+    });
+  }
+
+  async adoptConversationChannelFrame(
+    frameInput: StreamFrame,
+  ): Promise<ConversationChannelFrameAdoption> {
+    const frame = validateStreamFrame(frameInput);
+    const ref = frame.ref;
+    if (
+      ref.execution !== "conversation" ||
+      ref.conversationId !== this.#conversationId ||
+      ref.ownerEpoch !== this.#ownerEpoch
+    ) {
+      throw new TypeError(
+        "Conversation channel frame belongs to a different authority",
+      );
+    }
+    const payload = frame.payload;
+    if (payload.kind !== "interaction") return {};
+
+    const transaction = await this.#transact<ConversationChannelFrameAdoption>(
+      (state, context) => {
+        const assigned = state.assignedById.get(frame.assignmentId);
+        if (
+          !assigned ||
+          assigned.record.runId !== ref.runId ||
+          assigned.record.ownerEpoch !== ref.ownerEpoch
+        ) {
+          throw new TypeError(
+            "Conversation channel frame does not bind the current assignment",
+          );
+        }
+        const admitted = state.admittedByRun.get(ref.runId);
+        if (!admitted || admitted.record.ingress.kind !== "channel") {
+          throw new TypeError(
+            "Conversation channel confirmation requires channel ingress",
+          );
+        }
+        if (payload.event.t === "requested") {
+          const event = payload.event;
+          const interactionKey =
+            `${frame.assignmentId}\u0000${event.requestId}`;
+          const existingChallengeId =
+            state.channelInteractions.challengeByInteraction.get(interactionKey);
+          if (existingChallengeId) {
+            const existing =
+              state.channelInteractions.preparedByChallenge.get(
+                existingChallengeId,
+              );
+            if (!existing || existing.ref.execution !== "conversation") {
+              throw new TypeError(
+                "Conversation channel request conflicts with its prepared challenge",
+              );
+            }
+            const conversationPrepared =
+              existing as ConversationChannelChallengePreparedRecord;
+            if (
+              conversationPrepared.frameSeq !== frame.seq ||
+              conversationPrepared.toolName !== event.toolName ||
+              canonicalize(conversationPrepared.display) !==
+                canonicalize(event.display)
+            ) {
+              throw new TypeError(
+                "Conversation channel request conflicts with its prepared challenge",
+              );
+            }
+            return {
+              kind: "return",
+              value: { prepared: structuredClone(conversationPrepared) },
+            };
+          }
+          const challengeId = protocolDigest("ChannelChallengeIdentity", 1, {
+            ref,
+            assignmentId: frame.assignmentId,
+            interactionRequestId: event.requestId,
+          });
+          const token = createSignedChannelChallengeToken(
+            {
+              v: 1,
+              challengeId,
+              ref,
+              assignmentId: frame.assignmentId,
+              interactionRequestId: event.requestId,
+              route: admitted.record.ingress.replyTarget,
+              displayDigest: interactionDisplayDigest(
+                event.toolName,
+                event.display,
+              ),
+              issuedAt: event.issuedAt,
+              expiry: event.expiresAt,
+            },
+            this.#signer,
+          );
+          const prepared = validateConversationChannelChallengeRecord(
+            {
+              t: "channel-challenge-prepared",
+              ref,
+              assignmentId: frame.assignmentId,
+              frameSeq: frame.seq,
+              token,
+              responder: admitted.record.ingress.responder,
+              toolName: event.toolName,
+              display: event.display,
+            },
+            this.#verifier,
+          ) as ConversationChannelChallengePreparedRecord;
+          return {
+            kind: "append",
+            entries: [runRecord(this.#conversationId, prepared)],
+            value: { prepared },
+          };
+        }
+
+        const challengeId =
+          state.channelInteractions.challengeByInteraction.get(
+            `${frame.assignmentId}\u0000${payload.event.requestId}`,
+          );
+        if (!challengeId) {
+          throw new TypeError(
+            "Conversation channel completion has no prepared challenge",
+          );
+        }
+        const current =
+          state.channelInteractions.closedByChallenge.get(challengeId);
+        const closed = validateConversationChannelChallengeRecord(
+          {
+            t: "channel-challenge-closed",
+            challengeId,
+            outcome: payload.event.outcome,
+            at: context.at,
+          },
+          this.#verifier,
+        ) as Extract<
+          ConversationChannelChallengeRecord,
+          { readonly t: "channel-challenge-closed" }
+        >;
+        if (current) {
+          if (canonicalize(current) !== canonicalize(closed)) {
+            throw new TypeError(
+              "Conversation channel completion conflicts with its terminal record",
+            );
+          }
+          return {
+            kind: "return",
+            value: { closed: structuredClone(current) },
+          };
+        }
+        return {
+          kind: "append",
+          entries: [runRecord(this.#conversationId, closed)],
+          value: { closed },
+        };
+      },
+    );
+    return transaction.value;
+  }
+
+  async authorizeConversationChannelCallback(input: {
+    readonly token: ConversationChannelChallengeToken;
+    readonly responder: import("@zhixing/core/contracts").ChannelResponderRef;
+    readonly at?: string;
+  }): Promise<{
+    readonly assignmentId: string;
+    readonly interactionRequestId: string;
+  }> {
+    const token = validateChannelChallengeToken(input.token, this.#verifier);
+    if (token.ref.execution !== "conversation") {
+      throw new TypeError(
+        "Conversation channel callback requires a conversation token",
+      );
+    }
+    return this.#select((state) => {
+      const prepared =
+        state.channelInteractions.preparedByChallenge.get(token.challengeId);
+      if (
+        !prepared ||
+        prepared.ref.execution !== "conversation" ||
+        canonicalize(prepared.token) !== canonicalize(token) ||
+        canonicalize(prepared.responder) !== canonicalize(input.responder) ||
+        state.channelInteractions.closedByChallenge.has(token.challengeId)
+      ) {
+        throw new TypeError(
+          "Conversation channel callback does not bind a pending challenge",
+        );
+      }
+      assertChannelChallengeActiveAt(
+        prepared.token,
+        input.at ?? this.#clock(),
+      );
+      return {
+        assignmentId: prepared.assignmentId,
+        interactionRequestId: prepared.token.interactionRequestId,
+      };
+    });
   }
 
   async primeRecoverySnapshot(
@@ -5342,6 +5640,54 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.mirrorBatches.set(batchDigest, body);
         return state;
       }
+      case "channel-challenge-prepared": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const admitted = assigned
+          ? state.admittedByRun.get(assigned.record.runId)
+          : undefined;
+        if (
+          !assigned ||
+          !admitted ||
+          admitted.record.ingress.kind !== "channel" ||
+          body.ref.conversationId !== this.#conversationId ||
+          body.ref.runId !== assigned.record.runId ||
+          body.ref.ownerEpoch !== assigned.record.ownerEpoch ||
+          canonicalize(body.responder) !==
+            canonicalize(admitted.record.ingress.responder) ||
+          canonicalize(body.token.route) !==
+            canonicalize(admitted.record.ingress.replyTarget)
+        ) {
+          throw corruptRunJournal(
+            "Conversation channel challenge does not bind its assignment ingress",
+          );
+        }
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
       case "state": {
         const admitted = state.admittedByRun.get(body.runId);
         if (!admitted) {
@@ -7729,6 +8075,7 @@ function emptyProjection(conversationId: string): RunProjection {
     resolutionsByRun: new Map(),
     statusHistoryByRun: new Map(),
     closedAssignments: new Set(),
+    channelInteractions: createChannelInteractionJournalState("conversation"),
   };
 }
 

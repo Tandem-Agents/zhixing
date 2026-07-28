@@ -1,5 +1,6 @@
 import type {
   ChannelAdapter,
+  ChannelChallengeMessage,
   DeliveryResult,
   DeliveryTarget,
   Disposable,
@@ -48,6 +49,10 @@ export interface TypingChannel {
   stopTyping(target: DeliveryTarget): Promise<void>;
 }
 
+export interface ChallengeChannel {
+  sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult>;
+}
+
 // ─── 类型守卫 ───
 
 export function isEditable(adapter: ChannelAdapter): adapter is ChannelAdapter & EditableChannel {
@@ -72,4 +77,13 @@ export function isApprovable(adapter: ChannelAdapter): adapter is ChannelAdapter
 
 export function isTyping(adapter: ChannelAdapter): adapter is ChannelAdapter & TypingChannel {
   return "sendTyping" in adapter && typeof (adapter as Record<string, unknown>).sendTyping === "function";
+}
+
+export function isChallengeChannel(
+  adapter: ChannelAdapter,
+): adapter is ChannelAdapter & ChallengeChannel {
+  return (
+    "sendChallenge" in adapter &&
+    typeof (adapter as Record<string, unknown>).sendChallenge === "function"
+  );
 }

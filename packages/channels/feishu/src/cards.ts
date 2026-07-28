@@ -39,3 +39,56 @@ export function buildReplyCard(
     elements: [{ tag: "markdown", content: markdown }],
   };
 }
+
+export function buildChallengeCard(input: {
+  readonly title: string;
+  readonly lines: readonly string[];
+  readonly token: unknown;
+}): Record<string, unknown> {
+  const content = input.lines.length > 0
+    ? input.lines.join("\n")
+    : "需要你的确认。";
+  return {
+    config: {
+      wide_screen_mode: true,
+      enable_forward: false,
+      update_multi: false,
+    },
+    header: {
+      title: { tag: "plain_text", content: input.title },
+      template: "orange",
+    },
+    elements: [
+      { tag: "markdown", content: toCardText(content) },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "允许一次" },
+            type: "primary",
+            value: {
+              v: 1,
+              decision: { allowed: true },
+              token: input.token,
+            },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "拒绝" },
+            type: "danger",
+            value: {
+              v: 1,
+              decision: { allowed: false },
+              token: input.token,
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function toCardText(value: string): string {
+  return value.length > 0 ? value : "需要你的确认。";
+}

@@ -39,6 +39,16 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { registerSurfaceAssetMeshService } from "./surface-asset-mesh.js";
+import {
+  AssignmentStreamMeshClient,
+  createDataPlaneAssignmentStreamAuthorizer,
+  registerAssignmentStreamService,
+} from "./assignment-stream-mesh.js";
+import {
+  DataPlaneTicketMeshClient,
+  registerDataPlaneTicketService,
+} from "./data-plane-ticket-mesh.js";
+import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
@@ -56,6 +66,7 @@ export interface MeshRuntimeAssemblyOptions {
     readonly ledger: ConversationAssignmentLedger;
     readonly runtimeFactory: RuntimeFactory;
     readonly interactions: DurableConversationInteractionObserver;
+    readonly dataPlane: ExecutorDataPlaneRuntime;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
@@ -146,6 +157,8 @@ export class MeshRuntimeAssembly {
         InProcessAssignmentSubmission:
           options.executor!.InProcessAssignmentSubmission,
         interactions: options.executor!.interactions,
+        createStream: (input) =>
+          options.executor!.dataPlane.createStream(input),
         finalizeUsage: ({ assignmentId }) => this.finalizeExecutorUsage(assignmentId),
         onError: (_assignmentId, error) => options.onError?.(error),
       });
@@ -153,6 +166,49 @@ export class MeshRuntimeAssembly {
     this.#worker = worker;
 
     if (roles.has("executor")) {
+      const dataPlane = options.executor!.dataPlane;
+      const surfacePrincipalFor = (connection: import("@zhixing/mesh").SecureMeshConnection) =>
+        `surface:device:${connection.peer.deviceId}`;
+      this.#disposers.push(
+        registerAssignmentStreamService(this.services, {
+          spool: dataPlane.spool,
+          authorize: createDataPlaneAssignmentStreamAuthorizer({
+            tickets: dataPlane.tickets,
+            surfacePrincipalFor,
+            ownerMayPresentSurfaceTicket: (connection) =>
+              connection.peer.deviceId === options.trust.issuer.deviceId &&
+              this.#peerHasRole(connection.peer.deviceId, "anchor"),
+            authorizeOwnerRelay: async (request) => {
+              if (request.consumer.kind !== "owner-relay") {
+                throw new TypeError("Owner relay authorization has the wrong consumer kind");
+              }
+              await options.executor!.ledger.authorizeOwnerRelay({
+                assignmentId: request.assignmentId,
+                consumer: request.consumer,
+                ownerDeviceId: request.connection.peer.deviceId,
+              });
+              return {};
+            },
+          }),
+          authorizePeer: (deviceId) =>
+            this.#peerHasRole(deviceId, "anchor") ||
+            this.#peerHasRole(deviceId, "surface"),
+        }),
+      );
+      this.#disposers.push(
+        registerDataPlaneTicketService(this.services, {
+          tickets: dataPlane.tickets,
+          verifier: options.authority.verifier,
+          operations: worker!,
+          authorizeOwner: (connection) =>
+            connection.peer.deviceId === options.trust.issuer.deviceId &&
+            this.#peerHasRole(connection.peer.deviceId, "anchor"),
+          surfacePrincipalFor,
+          authorizePeer: (deviceId) =>
+            this.#peerHasRole(deviceId, "anchor") ||
+            this.#peerHasRole(deviceId, "surface"),
+        }),
+      );
       this.#disposers.push(registerExecutionSnapshotMeshService(
         this.services,
         {
@@ -263,6 +319,18 @@ export class MeshRuntimeAssembly {
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
   }
 
+  dataPlaneForExecutor(executorId: string): {
+    readonly stream: AssignmentStreamMeshClient;
+    readonly tickets: DataPlaneTicketMeshClient;
+  } {
+    const deviceId = this.#activeExecutorDeviceId(executorId);
+    const client = this.connections.client(deviceId);
+    return {
+      stream: new AssignmentStreamMeshClient(client),
+      tickets: new DataPlaneTicketMeshClient(client),
+    };
+  }
+
   #remoteDirectory(): RemoteConversationExecutionDirectory {
     const targets = new Map<string, RemoteConversationExecutionTarget>();
     const targetFor = (deviceId: string): RemoteConversationExecutionTarget => {
@@ -302,6 +370,21 @@ export class MeshRuntimeAssembly {
         return deviceId ? targetFor(deviceId) : undefined;
       },
     };
+  }
+
+  #activeExecutorDeviceId(executorId: string): string {
+    const deviceId = this.#control.currentTrust().members
+      .filter(
+        (member) =>
+          member.state === "active" &&
+          member.roles.includes("executor"),
+      )
+      .map((member) => member.device.deviceId)
+      .find((candidate) => executorIdForDevice(candidate) === executorId);
+    if (!deviceId || !this.connections.has(deviceId)) {
+      throw new Error(`Executor data plane is unavailable: ${executorId}`);
+    }
+    return deviceId;
   }
 
   async #authorizeArtifact(

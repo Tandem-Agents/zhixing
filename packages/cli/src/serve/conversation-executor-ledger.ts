@@ -39,6 +39,9 @@ export interface ConversationExecutorLedgerOptions {
     readonly manifest: ExecutionManifest<"conversation">;
   }) => AuthorityError | undefined;
   readonly maxPendingInteractions?: number;
+  readonly dataPlaneTickets?: ConstructorParameters<
+    typeof ConversationAssignmentLedger
+  >[0]["dataPlaneTickets"];
 }
 
 /** Creates the one durable conversation ledger used by either local or remote execution. */
@@ -62,6 +65,9 @@ export function createConversationExecutorLedger(
     runtimeBindingGuard: options.runtimeBindingGuard ?? (({ manifest }) =>
       options.authority.validateLocalConversationManifest(manifest)),
     clock,
+    ...(options.dataPlaneTickets === undefined
+      ? {}
+      : { dataPlaneTickets: options.dataPlaneTickets }),
     ...(options.maxPendingInteractions === undefined
       ? {}
       : { maxPendingInteractions: options.maxPendingInteractions }),

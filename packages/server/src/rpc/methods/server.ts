@@ -129,6 +129,10 @@ export function buildServerInfoMethod(): MethodEntry {
         (await ctx.server.runtimeControl?.conversationStatus?.(
           statusAfter.conversations,
         )) ?? { notices: [], next: [] };
+      const jobStatusPage =
+        (await ctx.server.runtimeControl?.jobStatus?.(
+          statusAfter.jobs,
+        )) ?? { notices: [], next: [] };
       return {
         version: ctx.server.version,
         protocol: PROTOCOL_VERSION,
@@ -158,6 +162,8 @@ export function buildServerInfoMethod(): MethodEntry {
         deliveryStatus,
         conversationStatus: conversationStatusPage.notices,
         conversationStatusNext: conversationStatusPage.next,
+        jobStatus: jobStatusPage.notices,
+        jobStatusNext: jobStatusPage.next,
       };
     },
   };
@@ -243,9 +249,14 @@ function parseStatusAfter(
     readonly runId: string;
     readonly afterStatusRevision: number;
   }[];
+  readonly jobs: readonly {
+    readonly taskId: string;
+    readonly jobRunId: string;
+    readonly afterStatusRevision: number;
+  }[];
 } {
   if (params === undefined || params === null) {
-    return { delivery: {}, conversations: [] };
+    return { delivery: {}, conversations: [], jobs: [] };
   }
   if (typeof params !== "object" || Array.isArray(params)) {
     throw RpcErrors.invalidParams("server.info params must be an object");
@@ -253,7 +264,10 @@ function parseStatusAfter(
   const value = params as Record<string, unknown>;
   if (
     Object.keys(value).some(
-      (key) => key !== "deliveryStatusAfter" && key !== "conversationStatusAfter",
+      (key) =>
+        key !== "deliveryStatusAfter" &&
+        key !== "conversationStatusAfter" &&
+        key !== "jobStatusAfter",
     )
   ) {
     throw RpcErrors.invalidParams("server.info params contain unknown fields");
@@ -319,7 +333,46 @@ function parseStatusAfter(
       });
     }
   }
-  return { delivery, conversations };
+  const jobs: Array<{
+    taskId: string;
+    jobRunId: string;
+    afterStatusRevision: number;
+  }> = [];
+  if (value.jobStatusAfter !== undefined) {
+    if (!Array.isArray(value.jobStatusAfter)) {
+      throw RpcErrors.invalidParams("jobStatusAfter must be an array");
+    }
+    if (value.jobStatusAfter.length > 64) {
+      throw RpcErrors.invalidParams("jobStatusAfter exceeds 64 cursors");
+    }
+    const seen = new Set<string>();
+    for (const entry of value.jobStatusAfter) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw RpcErrors.invalidParams("jobStatusAfter is invalid");
+      }
+      const cursor = entry as Record<string, unknown>;
+      if (
+        Object.keys(cursor).length !== 3 ||
+        !isProtocolIdentifier(cursor.taskId) ||
+        !isProtocolIdentifier(cursor.jobRunId) ||
+        !Number.isSafeInteger(cursor.afterStatusRevision) ||
+        (cursor.afterStatusRevision as number) < 0
+      ) {
+        throw RpcErrors.invalidParams("jobStatusAfter is invalid");
+      }
+      const key = JSON.stringify([cursor.taskId, cursor.jobRunId]);
+      if (seen.has(key)) {
+        throw RpcErrors.invalidParams("jobStatusAfter contains duplicate cursors");
+      }
+      seen.add(key);
+      jobs.push({
+        taskId: cursor.taskId as string,
+        jobRunId: cursor.jobRunId as string,
+        afterStatusRevision: cursor.afterStatusRevision as number,
+      });
+    }
+  }
+  return { delivery, conversations, jobs };
 }
 
 function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {

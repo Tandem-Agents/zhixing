@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelContext } from "@zhixing/core";
 
-const { mockStart, mockClose, mockCreate, mockRegister } = vi.hoisted(() => ({
+const {
+  mockStart,
+  mockClose,
+  mockCreate,
+  mockRegister,
+  mockCardAction,
+} = vi.hoisted(() => ({
   mockStart: vi.fn().mockResolvedValue(undefined),
   mockClose: vi.fn(),
   mockCreate: vi.fn(),
   mockRegister: vi.fn(),
+  mockCardAction: vi.fn(),
 }));
 
 vi.mock("@larksuiteoapi/node-sdk", () => ({
@@ -21,6 +28,16 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
   })),
   Domain: { Feishu: 0, Lark: 1 },
   LoggerLevel: { info: 3 },
+  CardActionHandler: vi.fn().mockImplementation(
+    (
+      _options: unknown,
+      callback: (event: unknown) => Promise<unknown>,
+    ) => {
+      mockCardAction.mockImplementation(callback);
+      return { handle: vi.fn() };
+    },
+  ),
+  adaptDefault: vi.fn((_path: string, handler: unknown) => handler),
 }));
 
 import { FeishuAdapter } from "./adapter.js";
@@ -30,7 +47,12 @@ function makeContext(overrides?: Partial<ChannelContext>): ChannelContext {
     config: {
       type: "feishu",
       enabled: true,
-      credentials: { appId: "test-id", appSecret: "test-secret" },
+      credentials: {
+        appId: "test-id",
+        appSecret: "test-secret",
+        verificationToken: "verification",
+        encryptKey: "encryption",
+      },
     },
     abortSignal: new AbortController().signal,
     eventBus: {
@@ -44,6 +66,7 @@ function makeContext(overrides?: Partial<ChannelContext>): ChannelContext {
       error: vi.fn(),
     },
     onMessage: vi.fn(),
+    onChallengeAction: vi.fn(),
     registerHttpRoute: vi.fn(),
     ...overrides,
   };
@@ -65,8 +88,44 @@ describe("FeishuAdapter", () => {
 
   it("connects and starts WSClient", async () => {
     const adapter = new FeishuAdapter();
-    await adapter.connect(makeContext());
+    const context = makeContext();
+    await adapter.connect(context);
     expect(mockStart).toHaveBeenCalledOnce();
+    expect(context.registerHttpRoute).toHaveBeenCalledWith(
+      "/channels/feishu/challenge",
+      expect.anything(),
+    );
+  });
+
+  it("derives a platform-authenticated responder from a signed card callback", async () => {
+    const onChallengeAction = vi.fn();
+    const adapter = new FeishuAdapter();
+    await adapter.connect(makeContext({ onChallengeAction }));
+    const token = { kind: "conversation-channel-challenge", challengeId: "challenge" };
+
+    await mockCardAction({
+      open_id: "ou_user",
+      tenant_key: "tenant",
+      action: {
+        value: {
+          v: 1,
+          token,
+          decision: { allowed: true },
+        },
+      },
+    });
+
+    expect(onChallengeAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        token,
+        responder: {
+          channelId: "feishu",
+          platformSubject: "ou_user",
+          tenant: "tenant",
+        },
+        decision: { allowed: true },
+      }),
+    );
   });
 
   it("disconnects and closes WSClient", async () => {

@@ -1,8 +1,8 @@
 /**
  * 接入面单元定义 —— 把 runServerProcess 里各接入面的内联装配等价搬成自包含 setup 单元。
  *
- * createAccessSurfaces 返回数组的顺序 = pre-server 依赖拓扑序（conversation→channel 门面
- * →delivery→text-renderer），setupAccessSurfaces 按此序遍历。每个 setup 内聚自己的
+ * createAccessSurfaces 返回数组的顺序 = pre-server 依赖拓扑序（conversation→mesh
+ * →lossless data plane→channel 门面→delivery），setupAccessSurfaces 按此序遍历。每个 setup 内聚自己的
  * 运行时条件（如 channel 判 messaging 配置）与失败处理；profile 是否启用由
  * PROFILES.surfaces 决定、不在 setup 内判 profile。teardown 策略见 access-surface.ts
  * 文件头（pre-server 走 shutdown-chain、post-server 在 setup 内自注册）。
@@ -18,9 +18,6 @@ import {
   createTokenEstimator,
   parseConversationId,
 } from "@zhixing/core";
-import {
-  TextConfirmationRenderer,
-} from "@zhixing/server";
 import { ConversationManager } from "@zhixing/owner-kernel";
 import {
   createConfirmationBridge,
@@ -44,6 +41,9 @@ import { governControlTextCall } from "./governed-control-llm.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type { AccessSurface } from "./access-surface.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
+import { JobStatusDirectory } from "./job-status-directory.js";
+import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -85,6 +85,39 @@ const authorityRuntimeSurface: AccessSurface = {
     });
     ctx.startupCleanups.authorityRuntime = authorityRuntime.startupCleanup;
     ctx.authorityRuntime = authorityRuntime;
+    const jobStatus = new JobStatusDirectory();
+    jobStatus.onStatus((notice) => {
+      ctx.runner?.server.context.broadcastAll?.("job.status", notice);
+    });
+    ctx.startupCleanups.jobStatus = ctx.startupRollback.register(
+      "jobStatus.dispose",
+      () => jobStatus.dispose(),
+    );
+    ctx.jobStatus = jobStatus;
+  },
+};
+
+/** Executor-owned durable stream and ticket substrate, shared by local and mesh adapters. */
+const executorDataPlaneSurface: AccessSurface = {
+  name: "executor-data-plane",
+  phase: "pre-server",
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("executor")) return;
+    if (!ctx.authorityRuntime || !ctx.executorRoleModule) {
+      throw new Error("Executor data plane requires authority and executor modules");
+    }
+    const dataPlane = new ExecutorDataPlaneRuntime({
+      zhixingHome: ctx.zhixingHome,
+      authority: ctx.authorityRuntime,
+      module: ctx.executorRoleModule,
+      onError: (error) =>
+        console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
+    });
+    ctx.startupCleanups.executorDataPlane = ctx.startupRollback.register(
+      "executorDataPlane.close",
+      () => dataPlane.close(),
+    );
+    ctx.executorDataPlane = dataPlane;
   },
 };
 
@@ -144,6 +177,7 @@ const meshSurface: AccessSurface = {
               ledger: ctx.conversationProtocol.executorLedger(),
               runtimeFactory: ctx.runtimeFactory,
               interactions: ctx.durableInteractions,
+              dataPlane: ctx.executorDataPlane!,
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule!.InProcessAssignmentSubmission,
             },
@@ -160,6 +194,39 @@ const meshSurface: AccessSurface = {
     await mesh.start();
     ctx.meshRuntime = mesh;
     ctx.startupCleanups.meshRuntime = cleanup;
+  },
+};
+
+/**
+ * S6 无损数据面唯一产品组合根。
+ *
+ * 该接入面先于渠道装配完成：conversation 协议、executor 端点、mesh adapter 和
+ * challenge 回调必须在渠道开始接收消息前形成闭环，避免新旧确认路径半启用。
+ */
+const losslessDataPlaneSurface: AccessSurface = {
+  name: "lossless-data-plane",
+  phase: "pre-server",
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("anchor")) return;
+    if (!ctx.authorityRuntime || !ctx.conversationProtocol) {
+      throw new Error(
+        "Lossless data plane requires authority and conversation protocol runtimes",
+      );
+    }
+    const runtime = new LosslessDataPlaneRuntime({
+      authority: ctx.authorityRuntime,
+      ...(ctx.executorDataPlane ? { local: ctx.executorDataPlane } : {}),
+      mesh: () => ctx.meshRuntime,
+      interactions: ctx.durableInteractions,
+      onError: (error) =>
+        console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
+    });
+    ctx.startupCleanups.losslessDataPlane = ctx.startupRollback.register(
+      "losslessDataPlane.close",
+      () => runtime.close(),
+    );
+    ctx.losslessDataPlane = runtime;
+    ctx.conversationProtocol.bindLosslessDataPlane(runtime);
   },
 };
 
@@ -238,6 +305,9 @@ const conversationSurface: AccessSurface = {
     });
 
     let manager: ConversationManager;
+    if (ctx.enabledRoles.includes("executor") && !ctx.executorDataPlane) {
+      throw new Error("Conversation executor requires its durable data plane");
+    }
     const protocol = new ConversationProtocolRuntime({
       authority: ctx.authorityRuntime,
       ...(ctx.executorRoleModule
@@ -247,6 +317,9 @@ const conversationSurface: AccessSurface = {
                 ctx.executorRoleModule.ConversationAssignmentLedger,
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule.InProcessAssignmentSubmission,
+              dataPlaneTickets: ctx.executorDataPlane!.tickets,
+              createStream: (input) =>
+                ctx.executorDataPlane!.createStream(input),
             },
           }
         : {}),
@@ -384,6 +457,10 @@ const conversationSurface: AccessSurface = {
       },
       durableTurnExecutor: protocol,
     });
+    if (ctx.executorDataPlane) {
+      ctx.executorDataPlane.bindLedger(protocol.executorLedger());
+      await ctx.executorDataPlane.start();
+    }
     await protocol.recoverReadinessProjections();
     ctx.conversations = manager;
     ctx.conversationProtocol = protocol;
@@ -396,13 +473,18 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
     name: "channel",
     phase: "pre-server",
     async setup(ctx) {
-      const { conversations, config, confirmationHub } = ctx;
+      const { conversations, config, losslessDataPlane } = ctx;
       if (
         !conversations ||
         !config.messaging ||
         Object.keys(config.messaging).length === 0
       ) {
         return;
+      }
+      if (!losslessDataPlane) {
+        throw new Error(
+          "Channel setup requires the complete S6 lossless data plane",
+        );
       }
       const channelLogger = {
         debug: (msg: string, ...args: unknown[]) =>
@@ -420,12 +502,26 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           credentials,
           conversations,
           logger: channelLogger,
-          confirmationHub,
           cancelKeywords: config.intent?.cancelKeywords,
           sessionBroadcast: () => ctx.sessionBroadcastRef.current,
           sessionActivityBroadcast: () =>
             ctx.sessionActivityBroadcastRef.current,
+          onChallengeAction: (action) => {
+            void losslessDataPlane.handleChallengeAction(action).catch((error) => {
+              channelLogger.warn(
+                "Signed challenge callback rejected: %s",
+                error instanceof Error ? error.message : String(error),
+              );
+            });
+          },
+          registerHttpRoute: (path, handler) => {
+            if (ctx.channelHttpRoutes.has(path)) {
+              throw new Error(`Channel HTTP route already registered: ${path}`);
+            }
+            ctx.channelHttpRoutes.set(path, handler);
+          },
         });
+        losslessDataPlane.bindChannels(result.registry);
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
         ctx.startupCleanups.channels = ctx.startupRollback.register(
@@ -475,36 +571,6 @@ const deliverySurface: AccessSurface = {
   },
 };
 
-/** 文本确认渲染器 —— 把 hub 的 request 事件翻译为通道纯文本消息；依赖通道。 */
-const textRendererSurface: AccessSurface = {
-  name: "text-renderer",
-  phase: "pre-server",
-  async setup(ctx) {
-    const { channels, confirmationHub } = ctx;
-    if (!channels) return;
-    const textRenderer = new TextConfirmationRenderer({
-      hub: confirmationHub,
-      channels,
-      logger: {
-        debug: (msg, ...args) =>
-          console.log(chalk.dim(`[confirm] ${msg}`), ...args),
-        info: (msg, ...args) =>
-          console.log(chalk.dim(`[confirm] ${msg}`), ...args),
-        warn: (msg, ...args) =>
-          console.warn(chalk.yellow(`[confirm] ${msg}`), ...args),
-        error: (msg, ...args) =>
-          console.error(chalk.red(`[confirm] ${msg}`), ...args),
-      },
-    });
-    ctx.startupCleanups.textRenderer = ctx.startupRollback.register(
-      "confirmationRenderer.stop",
-      () => textRenderer.stop(),
-    );
-    textRenderer.start();
-    ctx.textRenderer = textRenderer;
-  },
-};
-
 /**
  * 远程确认桥 —— hub 事件 → RPC notification；依赖 runServer 之后的 server.connections
  * 与会话执行面。post-server 阶段，teardown 在此 setup 内自注册（时序正确）。
@@ -547,12 +613,13 @@ export function createAccessSurfaces(
   return [
     mcpSurface,
     authorityRuntimeSurface,
+    executorDataPlaneSurface,
     conversationSurface,
     assetMaintenanceSurface,
     meshSurface,
+    losslessDataPlaneSurface,
     createChannelSurface(channelCredentials),
     deliverySurface,
-    textRendererSurface,
     confirmationBridgeSurface,
     conversationRecoverySurface,
   ];

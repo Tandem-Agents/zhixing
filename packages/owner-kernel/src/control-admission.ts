@@ -25,6 +25,7 @@ import type {
 import {
   canonicalize,
   assertProtocolIdentifier,
+  channelResponderPrincipal,
   MAX_PROTOCOL_IDENTIFIER_LENGTH,
   protocolDigest,
   validateChannelResponderRef,
@@ -355,8 +356,7 @@ export function createDeliveryControlEnvelope(
 }
 
 export function channelSurfacePrincipal(responder: ChannelResponderRef): string {
-  const value = validateChannelResponderRef(responder);
-  return `channel:${protocolDigest("ChannelResponderRef", 1, value)}`;
+  return channelResponderPrincipal(validateChannelResponderRef(responder));
 }
 
 /**

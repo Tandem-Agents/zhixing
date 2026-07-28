@@ -283,10 +283,12 @@ type DataPlaneTicket =
   | DataPlaneTicketBase & { kind: "abort";        renewable: false };  // 止损专用
 
 interface ChannelResponderRef { channelId: string; platformSubject: string; tenant?: string } // 渠道适配器自已认证入站派生，调用方不可自报
+interface InteractionDisplayInline { title: string; lines: string[] }
+type InteractionDisplay = InteractionDisplayInline | { ref: ArtifactRef }; // 写 assignment 前一次确定；ref 指向 InteractionDisplayInline 的规范 JCS 字节
 interface ChannelChallengeTokenBase<R extends ExecutionRef> {   // owner 预签、随互动消息下发并由平台 callback 原样带回；解决回复与请求的抗篡改关联
   challengeId: string; ref: R;
   assignmentId: string; interactionRequestId: string;
-  route: DeliveryTargetDto; displayDigest: Digest;       // = D("InteractionDisplay",1,{toolName,display})，防止 token 与用户所见决策内容错配
+  route: DeliveryTargetDto; displayDigest: Digest;       // = D("InteractionDisplay",1,{toolName,display})；token 只绑定摘要，不复制 display
   issuedAt: IsoTime; expiry: IsoTime; signature: Signature }
 type ConversationChannelChallengeToken = ChannelChallengeTokenBase<Extract<ExecutionRef, { execution: "conversation" }>>;
 type JobChannelChallengeToken = ChannelChallengeTokenBase<Extract<ExecutionRef, { execution: "job" }>>;
@@ -1127,11 +1129,11 @@ type ConversationProjectionProgressRecord =
 type ConversationChannelChallengePreparedRecord =
   { t: "channel-challenge-prepared"; ref: Extract<ExecutionRef, { execution: "conversation" }>; assignmentId: string; frameSeq: number;
       token: ConversationChannelChallengeToken; responder: ChannelResponderRef;
-      toolName: string; display: { title: string; lines: string[] } };
+      toolName: string; display: InteractionDisplay };
 type JobChannelChallengePreparedRecord =
   { t: "channel-challenge-prepared"; ref: Extract<ExecutionRef, { execution: "job" }>; assignmentId: string; frameSeq: number;
       token: JobChannelChallengeToken; responder: ChannelResponderRef;
-      toolName: string; display: { title: string; lines: string[] } };
+      toolName: string; display: InteractionDisplay };
 type ChannelChallengeLifecycleRecord =               // 不承载 pending 或应答权威；challengeId 在对应流内唯一
   | { t: "channel-challenge-delivered"; challengeId: string;
       receipt: { acceptedAt: IsoTime; platformMessage?: ChannelMessageRef } }
@@ -1142,7 +1144,8 @@ type JobChannelChallengeRecord = JobChannelChallengePreparedRecord | ChannelChal
 type ChannelChallengeRecord = ConversationChannelChallengeRecord | JobChannelChallengeRecord;
 type ChannelInteractionRelayRecord =                 // job 独有：owner-relay 耐久游标与 grant 落点
   | JobChannelChallengeRecord
-  | { t: "channel-relay-cursor"; jobRunId: string; assignmentId: string; upToSeq: number }
+  | { t: "channel-relay-cursor"; jobRunId: string; assignmentId: string; upToSeq: number;
+      checkpoint: StreamVerifierCheckpoint }         // checkpoint.lastSeq = upToSeq；随 cursor 同 envelope 耐久
   | { t: "channel-challenge-granted"; jobRunId: string; challengeId: string; grant: ChannelInteractionGrant };
 
 type JobJournalRecord =    // 键位 (taskId, jobRunId)
@@ -1225,7 +1228,7 @@ type AssignmentRecord =    // executor 设备域
                                                           // fence 先于 dispatch 到达时本记录即首个 assignment 状态事实（可前置 control-lease-renewed）= tombstone，迟到 dispatch 永久拒
   | { t: "started" }
   | { t: "interaction-requested"; requestId: string; kind: "allow-once"; toolName: string;
-      display: { title: string; lines: string[] } | { ref: ArtifactRef }; // 规范 JSON ≤8KiB；超限外置，重放必须解析并校验引用内容
+      display: InteractionDisplay; // 规范 JSON ≤8KiB；超限外置，重放必须解析并校验引用内容
       issuedAt: IsoTime; ttlMs: number; expiresAt: IsoTime } // executor 时钟，expiresAt = issuedAt + ttlMs（不等即拒）；恢复按 expiresAt，跨机按 issuedAt + TTL
                                                        // pending = requested 无同 requestId 的 finished
   | { t: "interaction-finished"; requestId: string; kind: "allow-once";
@@ -1806,7 +1809,7 @@ type StreamFramePayload =
   | { kind: "agent-event"; event: SessionEventProjection | { ref: ArtifactRef } }
   | { kind: "interaction"; event:                            // 确认交互的数据面下行——总纲"确认交互就近传输"的载体半边：
         { t: "requested"; requestId: string; toolName: string;
-          display: { title: string; lines: string[] } | { ref: ArtifactRef };
+          display: InteractionDisplay;
           issuedAt: IsoTime; ttlMs: number; expiresAt: IsoTime }
       | { t: "finished";  requestId: string; outcome: "allowed"|"denied"|"cancelled"|"expired" } }
       // assignment 流 interaction-requested / interaction-finished 落盘后的确定性投影，复用同一 seq / spool / 续流纪律；
@@ -1825,12 +1828,12 @@ interface StreamSubscribe { ref: ExecutionRef; assignmentId: string; consumer: S
 interface StreamAck       { assignmentId: string; consumer: StreamConsumerAuth; ackSeq: number }
 ```
 
-消费方守卫与耐久中继：`surface-ticket` 验票据的 ref / assignment / principal / expiry；`owner-relay` 仅适用 job，且只允许当前 assignment 的 owner-control principal，`authority` 必须与 ref epoch 同构、`controlLeaseId` 对应当前有效 ControlLease。owner-relay 的逻辑水位键固定为 `(assignmentId, authority)`，ControlLease 续签 / 换连接不重置；owner 重连先以新 lease **幂等重发** job 流最新 `channel-relay-cursor.upToSeq` 的 StreamAck（覆盖“本地已 fsync、ACK 丢失”窗口），executor 接受后才允许 `afterSeq = upToSeq + 1` 的订阅；任一消费方请求跳过未 ACK seq 均拒绝。owner 收到 interaction requested 帧时，先验 `expiresAt = issuedAt + ttlMs`，再按 §1.1 把 `issuedAt + TTL` 换算为本地单调 deadline，token expiry 不得更晚；并必须在**同一 CommitEnvelope**写 `channel-challenge-prepared` 与推进后的 `channel-relay-cursor`，fsync 成功后才回 StreamAck。此后渠道发送失败 / owner 崩溃只重驱 challenge outbox，不再依赖 executor spool；重复外发携同一签名 token，任一 callback 最终只产生一份 grant。finished 帧同理先写 `channel-challenge-closed + cursor` 再 ACK；其他帧至少先推进耐久 cursor（需要渠道呈现时同时落对应投影）再 ACK。上述 relay 记录只是投影运输与 callback 关联，pending / finished 权威仍唯一在 executor assignment 流。
+消费方守卫与耐久中继：`surface-ticket` 验票据的 ref / assignment / principal / expiry；`owner-relay` 仅适用 job，且只允许当前 assignment 的 owner-control principal，`authority` 必须与 ref epoch 同构、`controlLeaseId` 对应当前有效 ControlLease。owner-relay 的逻辑水位键固定为 `(assignmentId, authority)`，ControlLease 续签 / 换连接不重置；cursor 必须连同完整 `StreamVerifierCheckpoint` 耐久化，重启后不得放弃摘要校验或从头重放。owner 重连先以新 lease **幂等重发** job 流最新 `channel-relay-cursor.upToSeq` 的 StreamAck（覆盖“本地已 fsync、ACK 丢失”窗口），executor 接受后以 `afterSeq = upToSeq` 续订，服务端从 `upToSeq + 1` 返回；任一消费方请求跳过未 ACK seq 均拒绝。owner 收到 interaction requested 帧时，先验 `expiresAt = issuedAt + ttlMs`，再按 §1.1 把 `issuedAt + TTL` 换算为本地单调 deadline，token expiry 不得更晚；并必须在**同一 CommitEnvelope**写 `channel-challenge-prepared` 与推进后的 `channel-relay-cursor`，fsync 成功后才回 StreamAck。此后渠道发送失败 / owner 崩溃只重驱 challenge outbox，不再依赖 executor spool；重复外发携同一签名 token，任一 callback 最终只产生一份 grant。finished 帧同理先写 `channel-challenge-closed + cursor` 再 ACK；其他帧至少先推进耐久 cursor（需要渠道呈现时同时落对应投影）再 ACK。上述 relay 记录只是投影运输与 callback 关联，pending / finished 权威仍唯一在 executor assignment 流。
 
 游标与回收语义（机械口径）：`seq` 在 **assignment 全生命周期绝对单调且逐帧连续**（跨重连、跨路径切换不重置）；`streamEpoch` 只作旧连接 fencing（重连 +1，旧 epoch 帧被拒），不参与去重——路径切换零丢帧零重帧由单调 seq 单独保证。`provisional-final` 是该 assignment 的最后一帧，固定占用 `seq = lastDataSeq + 1`（无数据帧时为 1），其 payload.finalSeq 必须等于自身 `StreamFrame.seq`；此后禁止再产帧。`SealedBundle.streamFinal.finalSeq` 与该值相等，ACK / 重放 / spool 水位均包含这张收尾帧。
 **streamDigest 摘要域（冻结）**：增量哈希链**只覆盖数据帧**（payload kind = agent-yield / agent-event / interaction）——`D0 = H("zhixing:stream:v1" || assignmentId)`，每个数据帧按实际 seq 计算 `Dnext = H(Dprev || JCS({ seq, payload, meta }))`（JCS 沿 §1.2）；`provisional-final` 虽占用 seq 并参与 ACK / 重放，却是**链外收尾帧**，携带最后数据帧链头（空流即 D0）、自身不入链，循环定义结构性不存在。**显式排除** `streamEpoch`、`ref`、传输层头与连接态字段——同一逻辑帧换路径 / 换 epoch 摘要不变，收尾帧与 `SealedBundle.streamFinal` 可跨端机械核对。executor 在 spool 持久保存当前链头（崩溃恢复续算不重扫）。验收：路径切换前后摘要不变、数据帧逐字段篡改必失配、空流 finalSeq=1、收尾帧 seq / payload.finalSeq / bundle.finalSeq 三者不等即拒、收尾帧 ACK 后方可回收（随 S6）。executor 先写有界耐久 event spool（上限 64 MiB / assignment，超限背压至 run 暂停产帧；初值，S6 标定）再发送；重放恒从该消费方水位 +1 起。回收：assignment 终态且全部有效 surface 票据已 ack 至 finalSeq 或已失效，并且 owner-relay 已 ack 至 finalSeq 后，进入 24h 回收窗；owner-relay 不因 ControlLease 轮换 / 短暂过期丢失逻辑水位。owner 长期不可达时，只有在 assignment 已终态、assignment 流全部 interaction 均 finished 且 24h 回收窗届满后才可关闭未完成 relay——此后 owner 以 queryLedger / interaction mirror 恢复终态，不会遗失可应答 pending。滞后超过有界窗（初值 spool 上限的 1/2，S6 标定）的 surface observer 不再续票、明确降级到 owner 终态对账（§5.5 last-seen revision 路径），**禁止拖停 run 或阻塞快 observer**。agent-yield / agent-event 的规范对象不超过 32 KiB 时内联，超限时先以 JCS 字节落 artifact、帧内只携 `{ref}`；单帧上限 512 KiB，无法装入者在生产端稳定拒绝，不进入不可读取的 spool。
 
-interaction requested 的 `display` 在写 assignment 流前由共享 preparation 原语一次性确定 inline-or-ref 形态；assignment 记录、StreamFrame 与摘要链复用同一规范对象，任何执行点不得再次内联或独立重算表示。
+interaction requested 的 `display` 在写 assignment 流前由共享 preparation 原语一次性确定 inline-or-ref 形态；assignment 记录、StreamFrame、channel challenge prepared 与摘要链复用同一规范对象，token 只绑定该对象的 `displayDigest`，任何执行点不得再次内联或独立重算表示。ref 分支由持有该帧有效 `StreamConsumerAuth` 的消费方复用 S5 probe/read 原语读取：服务端必须验证该 ref 确由同一 assignment 的已耐久 interaction 帧引用，接收方校验 digest、长度、规范 JCS 与 `InteractionDisplayInline` 结构后才可渲染；它不是 committed/control 可见资产，不借用 `SurfaceAssetGrant`。物理保留沿 assignment 与 spool 既有生命周期：pending interaction 阻止 assignment 终结，finished 又必须在 challenge closed+cursor 耐久后才 ACK，随后才可按本节回收条件退休。渠道宿主只解析用于展示，prepared/outbox 始终保留原 ref；暂时不可读继续按同一 challenge 重驱，缺件、摘要或结构不符则 fail-closed，不得改写 display 或换发 token。
 
 ### 5.7 取证与止损
 

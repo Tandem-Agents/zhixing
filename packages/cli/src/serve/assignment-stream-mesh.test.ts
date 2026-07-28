@@ -12,14 +12,15 @@ import {
   StreamConsumerDegradedError,
   StreamHistoryUnavailableError,
 } from "@zhixing/executor/assignment-stream-spool";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type { SecureMeshConnection } from "@zhixing/mesh";
+import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   ASSIGNMENT_STREAM_SERVICE,
   AssignmentStreamMeshClient,
   createAssignmentStreamServiceHandler,
+  createInProcessAssignmentStreamClient,
 } from "./assignment-stream-mesh.js";
 
 const ref: ExecutionRef = {
@@ -37,6 +38,52 @@ const consumer: StreamConsumerAuth = {
 const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 
 describe("assignment stream mesh adapter", () => {
+  it.each(["in-process", "mesh"] as const)(
+    "satisfies the same replay and ACK contract through the %s adapter",
+    async (adapter) => {
+      const root = await createTempDir(`assignment-stream-conformance-${adapter}`);
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const spool = new AssignmentStreamSpool(path.join(root, "spool"), artifacts);
+      const writer = await AssignmentStreamWriter.open(
+        spool,
+        "assignment-fixed",
+        ref,
+      );
+      await writer.appendYield({ type: "text_delta", text: "first" });
+      await writer.appendYield({ type: "text_delta", text: "second" });
+      await writer.finalize();
+      await spool.qualifyConsumer({
+        assignmentId: "assignment-fixed",
+        ref,
+        consumer,
+        expiresAt: "2026-07-24T00:00:00.000Z",
+      });
+      const handler = createAssignmentStreamServiceHandler({
+        spool,
+        authorize: async () => ({
+          expiresAt: "2026-07-24T00:00:00.000Z",
+        }),
+      });
+      const peer = connection("surface-conformance");
+      const client =
+        adapter === "in-process"
+          ? createInProcessAssignmentStreamClient(handler, peer)
+          : new AssignmentStreamMeshClient(directClient(handler, peer));
+
+      const frames = await client.subscribe(subscribe(0));
+      expect(frames.map((frame) => frame.seq)).toEqual([1, 2, 3]);
+      expect(frames.at(-1)?.payload.kind).toBe("provisional-final");
+      await client.acknowledge({
+        v: 1,
+        assignmentId: "assignment-fixed",
+        consumer,
+        ackSeq: 3,
+      });
+      await expect(client.subscribe(subscribe(3))).resolves.toEqual([]);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
   it("binds authorization, fences the old path and preserves absolute sequence", async () => {
     const root = await createTempDir("assignment-stream-mesh");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -66,11 +113,13 @@ describe("assignment stream mesh adapter", () => {
     });
     const firstConnection = connection("surface-one");
     const secondConnection = connection("surface-one");
-    const first = new AssignmentStreamMeshClient(
-      directClient(handler, firstConnection),
+    const first = createInProcessAssignmentStreamClient(
+      handler,
+      firstConnection,
     );
-    const second = new AssignmentStreamMeshClient(
-      directClient(handler, secondConnection),
+    const second = createInProcessAssignmentStreamClient(
+      handler,
+      secondConnection,
     );
 
     const firstFrames = await first.subscribe(subscribe(0));
@@ -140,11 +189,13 @@ describe("assignment stream mesh adapter", () => {
         expiresAt: "2026-07-24T00:00:00.000Z",
       }),
     });
-    const first = new AssignmentStreamMeshClient(
-      directClient(handler, connection("surface-one")),
+    const first = createInProcessAssignmentStreamClient(
+      handler,
+      connection("surface-one"),
     );
-    const second = new AssignmentStreamMeshClient(
-      directClient(handler, connection("surface-two")),
+    const second = createInProcessAssignmentStreamClient(
+      handler,
+      connection("surface-two"),
     );
 
     await expect(first.subscribe(subscribe(0))).rejects.toThrow(
@@ -258,6 +309,12 @@ function subscribe(afterSeq: number): StreamSubscribe {
   };
 }
 
+function connection(deviceId: string): SecureMeshConnection {
+  return {
+    peer: { deviceId, publicKey: "test-public-key" },
+  } as unknown as SecureMeshConnection;
+}
+
 function directClient(
   handler: ReturnType<typeof createAssignmentStreamServiceHandler>,
   meshConnection: SecureMeshConnection,
@@ -272,10 +329,4 @@ function directClient(
       );
     },
   };
-}
-
-function connection(deviceId: string): SecureMeshConnection {
-  return {
-    peer: { deviceId, publicKey: "test-public-key" },
-  } as unknown as SecureMeshConnection;
 }

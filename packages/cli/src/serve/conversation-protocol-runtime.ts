@@ -43,6 +43,7 @@ import {
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
+  type StreamFrameProducer,
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
@@ -93,6 +94,10 @@ import {
   isRetryableMeshFailure,
 } from "./remote-obligation-failure.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
+import type {
+  LosslessDataPlaneRuntime,
+  LosslessDataPlaneSession,
+} from "./lossless-data-plane-runtime.js";
 
 export { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 
@@ -119,6 +124,13 @@ export interface ConversationProtocolRuntimeOptions {
   readonly localExecutor?: {
     readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+    readonly dataPlaneTickets?: ConstructorParameters<
+      typeof ConversationAssignmentLedger
+    >[0]["dataPlaneTickets"];
+    readonly createStream?: (input: {
+      readonly assignmentId: string;
+      readonly ref: import("@zhixing/core/contracts").ExecutionRef;
+    }) => Promise<DurableAssignmentRunStream>;
   };
   readonly executeRecoveredPerspective?: (input: {
     readonly manager: ConversationManager;
@@ -161,6 +173,10 @@ interface PreparedConversationAdmission {
   readonly invocation: ConversationInvocation;
 }
 
+interface DurableAssignmentRunStream extends StreamFrameProducer {
+  markTerminal?(): Promise<unknown>;
+}
+
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
   readonly #authority: AuthorityRuntimeStack;
@@ -169,6 +185,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #ledger: ConversationAssignmentLedger | undefined;
   readonly #InProcessAssignmentSubmission:
     | typeof InProcessAssignmentSubmission
+    | undefined;
+  readonly #createStream:
+    | ((
+        input: {
+          readonly assignmentId: string;
+          readonly ref: import("@zhixing/core/contracts").ExecutionRef;
+        },
+      ) => Promise<DurableAssignmentRunStream>)
     | undefined;
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
@@ -208,6 +232,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
   #remoteExecution: RemoteConversationExecutionDirectory | undefined;
+  #losslessDataPlane:
+    | Pick<LosslessDataPlaneRuntime, "openConversationChannel">
+    | undefined;
 
   constructor(options: ConversationProtocolRuntimeOptions) {
     this.#authority = options.authority;
@@ -221,6 +248,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoverAuxiliary = options.recoverAuxiliary;
     this.#InProcessAssignmentSubmission =
       options.localExecutor?.InProcessAssignmentSubmission;
+    this.#createStream = options.localExecutor?.createStream;
     this.#ledger = options.localExecutor?.ConversationAssignmentLedger
       ? createConversationExecutorLedger({
       Constructor: options.localExecutor.ConversationAssignmentLedger,
@@ -243,6 +271,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         });
       },
       clock: this.#clock,
+      ...(options.localExecutor.dataPlaneTickets === undefined
+        ? {}
+        : { dataPlaneTickets: options.localExecutor.dataPlaneTickets }),
       ...(options.maxPendingInteractions === undefined
         ? {}
         : { maxPendingInteractions: options.maxPendingInteractions }),
@@ -270,6 +301,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Remote conversation execution is already bound");
     }
     this.#remoteExecution = directory;
+  }
+
+  bindLosslessDataPlane(
+    runtime: Pick<LosslessDataPlaneRuntime, "openConversationChannel">,
+  ): void {
+    if (this.#losslessDataPlane && this.#losslessDataPlane !== runtime) {
+      throw new Error("Conversation lossless data plane is already bound");
+    }
+    this.#losslessDataPlane = runtime;
   }
 
   executorMeshRole(): {
@@ -782,6 +822,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     const attempt = await journal.nextAssignmentAttempt(runId);
     const assignmentId = conversationAssignmentId(runId, attempt);
+    let channelSession: LosslessDataPlaneSession | undefined;
     try {
       const authority = await journal.authorityState();
       if (authority.deleted) {
@@ -931,6 +972,46 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             : `${remoteTarget ? "Remote" : "Local"} executor did not return exactly one dispatch result`,
         );
       }
+      if (
+        executionIngress.kind === "channel" &&
+        this.#losslessDataPlane
+      ) {
+        const broker = input.runtime.confirmationBroker;
+        if (!broker) {
+          throw new Error(
+            "Channel assignment runtime has no confirmation broker",
+          );
+        }
+        const ticketId = `ticket:${protocolDigest(
+          "ConversationChannelTicketIdentity",
+          1,
+          {
+            assignmentId,
+            surfacePrincipal: executionIngress.surfacePrincipal,
+          },
+        )}`;
+        const ticket = await journal.issueDataPlaneTicket({
+          ticketId,
+          assignmentId,
+          surfacePrincipal: executionIngress.surfacePrincipal,
+          kind: "run-interact",
+          ttlMs: 24 * 60 * 60 * 1_000,
+        });
+        channelSession =
+          await this.#losslessDataPlane.openConversationChannel({
+            executorId: targetExecutorId,
+            assignmentId,
+            ref: {
+              execution: "conversation",
+              conversationId: input.conversationId,
+              runId,
+              ownerEpoch: this.#authority.anchorEpoch,
+            },
+            ticket,
+            journal,
+            broker,
+          });
+      }
       if (remoteTarget) {
         return await this.#awaitRemoteConversationRun({
           journal,
@@ -944,7 +1025,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       if (!submission) throw new Error("Local assignment submission is unavailable");
       await submission.startAndReport(assignmentId, submissionContext);
 
-      const stream = new StreamDigestChain(assignmentId);
+      const streamRef = {
+        execution: "conversation",
+        conversationId: input.conversationId,
+        runId,
+        ownerEpoch: this.#authority.anchorEpoch,
+      } as const;
+      const stream: DurableAssignmentRunStream = this.#createStream
+        ? await this.#createStream({ assignmentId, ref: streamRef })
+        : new StreamDigestChain(assignmentId);
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
@@ -1026,6 +1115,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               submissionContext,
               interactionBinding,
             );
+            await stream.final(streamMeta);
             const failure = await localLedger!.failExecution(assignmentId, {
               reason: executionFailureReason(error),
               usageFinal,
@@ -1041,6 +1131,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
                 );
               }
             }
+            await stream.markTerminal?.();
           }
           this.#kickDelivery();
         } catch (settlementError) {
@@ -1064,6 +1155,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             submissionContext,
             interactionBinding,
           );
+          await stream.final(streamMeta);
           const failure = await localLedger!.failExecution(assignmentId, {
             reason: runFailureReason(runResult.agentResult),
             usageFinal,
@@ -1082,6 +1174,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               );
             }
           }
+          await stream.markTerminal?.();
         }
         this.#kickDelivery(input.hooks?.onFinalPublishFailure, runResult);
         return runResult;
@@ -1111,7 +1204,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ? { windowCompact: runResult.windowCompact }
           : {}),
         contentAssets: [...appliedAdmission.attachments],
-        streamFinal: stream.final(),
+        streamFinal: await stream.final(streamMeta),
         usage: {
           inputTokens: runResult.agentResult.usage.inputTokens,
           outputTokens: runResult.agentResult.usage.outputTokens,
@@ -1130,6 +1223,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         input.hooks?.onCommitFailure?.(error, runResult);
         throw error;
       }
+      await stream.markTerminal?.();
       this.#markRecovery(input.conversationId);
       this.#kickDelivery(input.hooks?.onFinalPublishFailure, runResult);
       return runResult;
@@ -1137,6 +1231,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#markRecovery(input.conversationId);
       throw error;
     } finally {
+      await channelSession?.close();
       this.#clearRunClaims(runId);
       this.#forgetAssignment(assignmentId);
     }

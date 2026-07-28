@@ -54,6 +54,7 @@ export {
   validateStreamDataPayload,
   validateStreamFrame,
   validateStreamSubscribe,
+  validateStreamVerifierCheckpoint,
   type StreamDataFramePayload,
   type StreamDigestCheckpoint,
   type StreamFrameMeta,
@@ -63,12 +64,37 @@ export {
   type StreamVerifierCheckpoint,
 } from "./stream.js";
 export {
+  ExecutionFinalityProjection,
+  type ExecutionFinalityProjectionOptions,
+  type ExecutionProjectionSubject,
+} from "./execution-finality.js";
+export {
   materializeInteractionDisplay,
+  materializeInteractionDisplayBytes,
   prepareInteractionDisplay,
   validateInteractionDisplay,
   type InlineInteractionDisplay,
   type PreparedInteractionDisplay,
 } from "./interaction-display.js";
+export {
+  assertChannelChallengeActiveAt,
+  assertChannelChallengeBinding,
+  assertChannelInteractionGrantActiveAt,
+  assertChannelInteractionGrantBinding,
+  channelChallengeTokenDigest,
+  channelInteractionDecisionDigest,
+  channelInteractionGrantDigest,
+  channelResponderPrincipal,
+  createSignedChannelChallengeToken,
+  createSignedChannelInteractionGrant,
+  interactionDisplayDigest,
+  validateChannelChallengeToken,
+  validateChannelInteractionGrant,
+  type ChannelChallengeBinding,
+  type ChannelInteractionGrantBinding,
+  type UnsignedChannelChallengeToken,
+  type UnsignedChannelInteractionGrant,
+} from "./channel-interaction.js";
 export {
   assertProtocolIdentifier,
   assertPrefixedUlid,
@@ -147,6 +173,7 @@ export {
 } from "./job.js";
 export {
   advanceAssignmentLedger,
+  advanceAssignmentInteractionMirrorDigest,
   advanceInteractionMirrorDigest,
   applyValidatedAssignmentEntry,
   assignmentActivationDigest,
@@ -160,6 +187,7 @@ export {
   confirmationDecisionDigest,
   controlLeaseBindsDispatchEnvelope,
   createSignedConversationInteractionMirrorBatch,
+  createSignedAssignmentInteractionMirrorBatch,
   createSignedConversationEnvelope,
   createSignedJobEnvelope,
   dispatchEnvelopeArtifact,
@@ -187,6 +215,9 @@ export {
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionMirrorBatch,
   validateConversationInteractionOutcome,
+  validateAssignmentInteractionMirrorEntry,
+  validateAssignmentInteractionMirrorBatch,
+  validateAssignmentInteractionOutcome,
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
   validateDispatchResult,
@@ -200,6 +231,7 @@ export {
   type ConversationInteractionMirrorEntry,
   type ConversationInteractionMirrorBatch,
   type ConversationInteractionOutcome,
+  type AssignmentInteractionOutcome,
   type AssignmentLedgerValidationState,
   type DispatchEnvelopeArtifact,
   type UnsignedConversationEnvelope,

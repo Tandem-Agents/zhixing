@@ -371,6 +371,32 @@ describe("ConfirmationBroker — 耐久交互边界", () => {
       { kind: "backpressure" },
     ]);
   });
+
+  it("surface 已连接但不可用时仍可耐久地 fail-closed", async () => {
+    const afterResolved = vi.fn(async () => {});
+    const broker = new ConfirmationBroker({
+      lifecycleObserver: {
+        beforeRequest: async () => {},
+        afterResolved,
+      },
+    });
+    broker.onRequest(() => {});
+    const request = makeRequest({ id: "unusable-surface" });
+    const pending = broker.requestConfirmation(request);
+    await tick();
+
+    await expect(
+      broker.resolveNonInteractiveDurably(request.id),
+    ).resolves.toBe(true);
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ kind: "deny" }),
+    );
+    expect(afterResolved).toHaveBeenCalledWith(
+      request,
+      expect.objectContaining({ kind: "deny" }),
+      { kind: "non-interactive", resolver: "fail-to-deny" },
+    );
+  });
 });
 
 // ─── 非交互降级 ───

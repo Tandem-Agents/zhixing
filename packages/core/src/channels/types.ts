@@ -1,4 +1,9 @@
 import type { EventMap, IEventBus } from "../events/index.js";
+import type {
+  ChannelChallengeToken,
+  ChannelResponderRef,
+  InteractionDisplay,
+} from "../contracts/index.js";
 
 // ─── Disposable ───
 
@@ -33,6 +38,30 @@ export interface InboundMessage {
   mediaUrls?: string[];
   isCommand?: boolean;
   raw?: unknown;
+}
+
+/** Platform-authenticated callback emitted by an interactive channel message. */
+export interface ChannelChallengeAction {
+  readonly token: ChannelChallengeToken;
+  readonly responder: ChannelResponderRef;
+  readonly decision: {
+    readonly allowed: boolean;
+    readonly reason?: string;
+  };
+  readonly raw?: unknown;
+}
+
+/** Signed challenge rendered by a channel adapter without exposing owner tickets. */
+export interface ChannelChallengeMessage {
+  readonly challengeId: string;
+  readonly token: ChannelChallengeToken;
+  readonly responder: ChannelResponderRef;
+  readonly toolName: string;
+  readonly display: InteractionDisplay;
+  readonly renderedDisplay?: Extract<
+    InteractionDisplay,
+    { readonly title: string }
+  >;
 }
 
 // ─── 出站内容 ───
@@ -129,6 +158,7 @@ export interface ChannelContext {
   logger: ChannelLogger;
 
   onMessage(msg: InboundMessage): void;
+  onChallengeAction(action: ChannelChallengeAction): void;
   registerHttpRoute(path: string, handler: HttpHandler): void;
 }
 

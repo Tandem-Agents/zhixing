@@ -344,6 +344,43 @@ export class ConfirmationBroker implements IConfirmationBroker {
     });
   }
 
+  async resolveNonInteractiveDurably(
+    requestId: ConfirmationRequestId,
+  ): Promise<boolean> {
+    const entry = this.pending.get(requestId);
+    if (!entry) return false;
+    const decision = this.resolver.resolve(entry.request);
+    validateConfirmationDecisionText(decision);
+    const terminal: TerminalRequest = {
+      decision,
+      source: {
+        kind: "non-interactive",
+        resolver: this.resolver.name,
+      },
+      requeueOnFailure: true,
+      emit: () => {
+        this.emitEvent("confirmation:auto-resolved", {
+          requestId,
+          tool: entry.request.tool,
+          resolverName: this.resolver.name,
+          decision,
+          timestamp: this.now(),
+        });
+      },
+    };
+    if (!this.lifecycleObserver) {
+      this.completeImmediately(entry, terminal);
+      return true;
+    }
+    if (entry.terminal) {
+      return entry.terminal.source.kind === "non-interactive" &&
+        canonicalDecision(entry.terminal.decision) === canonicalDecision(decision)
+        ? entry.terminal.promise
+        : false;
+    }
+    return this.startTerminal(entry, terminal);
+  }
+
   cancel(requestId: ConfirmationRequestId, cause: CancelCause): boolean {
     const entry = this.pending.get(requestId);
     if (!entry) return false;

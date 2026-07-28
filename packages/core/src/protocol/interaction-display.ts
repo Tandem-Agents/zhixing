@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { assertArtifactRef } from "../authority/artifact-references.js";
 import type { ArtifactStore } from "../authority/interfaces.js";
@@ -51,7 +52,33 @@ export async function materializeInteractionDisplay(
   const display = validateInteractionDisplay(value);
   if (!("ref" in display)) return display;
 
-  const bytes = await artifacts.get(display.ref);
+  return materializeInteractionDisplayBytes(
+    display,
+    await artifacts.get(display.ref),
+  );
+}
+
+/** Validates bytes fetched through an authenticated stream artifact reader. */
+export function materializeInteractionDisplayBytes(
+  value: unknown,
+  bytesInput: Uint8Array,
+): InlineInteractionDisplay {
+  const display = validateInteractionDisplay(value);
+  if (!("ref" in display)) {
+    throw new TypeError(
+      "Interaction display bytes require a referenced representation",
+    );
+  }
+  const bytes = Buffer.from(bytesInput);
+  if (
+    bytes.byteLength !== display.ref.bytes ||
+    `sha256:${createHash("sha256").update(bytes).digest("hex")}` !==
+      display.ref.digest
+  ) {
+    throw new TypeError(
+      "Interaction display artifact bytes do not match their reference",
+    );
+  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);

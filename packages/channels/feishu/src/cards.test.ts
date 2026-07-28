@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReplyCard, getStatusConfig } from "./cards.js";
+import { buildChallengeCard, buildReplyCard, getStatusConfig } from "./cards.js";
 
 describe("getStatusConfig", () => {
   it("returns green for done status", () => {
@@ -46,5 +46,32 @@ describe("buildReplyCard", () => {
     const card = buildReplyCard("text", { status: "error" });
     const header = card.header as { title: { content: string } };
     expect(header.title.content).toContain("\u51fa\u9519");
+  });
+});
+
+describe("buildChallengeCard", () => {
+  it("embeds the same signed token in allow and deny actions", () => {
+    const token = { kind: "conversation-channel-challenge", challengeId: "c1" };
+    const card = buildChallengeCard({
+      title: "需要确认",
+      lines: ["运行命令"],
+      token,
+    });
+    const elements = card.elements as Array<Record<string, unknown>>;
+    const actions = (elements[1] as {
+      actions: Array<{ value: { token: unknown; decision: { allowed: boolean } } }>;
+    }).actions;
+
+    expect(actions).toHaveLength(2);
+    expect(actions[0]?.value).toEqual({
+      v: 1,
+      decision: { allowed: true },
+      token,
+    });
+    expect(actions[1]?.value).toEqual({
+      v: 1,
+      decision: { allowed: false },
+      token,
+    });
   });
 });

@@ -493,6 +493,7 @@ async function runServerProcess(
   // journal 域仓——turn 后维护(conversation 接入面)与系统维护任务共用。
   const journalStore = new JournalStore();
   const startupCleanups: AssemblyContext["startupCleanups"] = {};
+  const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
 
   const ctx: AssemblyContext = {
     profile,
@@ -518,13 +519,14 @@ async function runServerProcess(
     cleanup: registry,
     startupRollback,
     startupCleanups,
+    channelHttpRoutes,
     advancement: advancementController,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
   };
 
-  // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道门面 / 投递栈 / 文本确认渲染器。
-  // 产物写回 ctx.conversations / channels / inboundRouter / deliveryStack / textRenderer。
+  // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
+  // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
   await setupAccessSurfaces(accessSurfaces, ctx, "pre-server");
   conversationsRef.current = ctx.conversations ?? null;
 
@@ -777,6 +779,7 @@ async function runServerProcess(
       return builtinExtraTools.taskListService.getCached(conversationId);
     },
     channels: ctx.channels,
+    channelHttpRoutes,
     confirmationHub,
     runRegistry,
     runtimeControl: {
@@ -800,6 +803,9 @@ async function runServerProcess(
         ctx.deliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
       conversationStatus: (after) =>
         ctx.conversationProtocol?.statusHistory(after) ??
+        Promise.resolve({ notices: [], next: [] }),
+      jobStatus: (after) =>
+        ctx.jobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
       resolveDelivery: async (input) => {
         if (!ctx.deliveryStack) throw new Error("Delivery stack is unavailable");
@@ -883,22 +889,35 @@ async function runServerProcess(
   // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：
   //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
 
-  // 文本确认渲染器停订阅（防 shutdown 期间还有 confirmation 派发到即将断开的 channel）。
-  if (ctx.textRenderer) {
-    registry.register("confirmationRenderer.stop", () => {
-      return startupCleanups.textRenderer!.run();
-    });
-  }
-
   if (ctx.meshRuntime) {
     registry.register("meshRuntime.stop", async () => {
       await startupCleanups.meshRuntime!.run();
     });
   }
 
+  if (ctx.executorDataPlane) {
+    registry.register("executorDataPlane.close", async () => {
+      await startupCleanups.executorDataPlane!.run();
+    });
+  }
+
+  if (ctx.jobStatus) {
+    registry.register("jobStatus.dispose", async () => {
+      await startupCleanups.jobStatus!.run();
+    });
+  }
+
   if (ctx.assetMaintenance) {
     registry.register("assetMaintenance.stop", async () => {
       await startupCleanups.assetMaintenance!.run();
+    });
+  }
+
+  // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
+  // 更晚注册，仍会先停止新工作并收束在途执行。
+  if (ctx.losslessDataPlane) {
+    registry.register("losslessDataPlane.close", async () => {
+      await startupCleanups.losslessDataPlane!.run();
     });
   }
 

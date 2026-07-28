@@ -377,6 +377,33 @@ export class StreamFrameVerifier {
   }
 }
 
+export function validateStreamVerifierCheckpoint(
+  input: unknown,
+): StreamVerifierCheckpoint {
+  const checkpoint = snapshot(
+    input,
+    "Stream verifier checkpoint",
+  ) as StreamVerifierCheckpoint;
+  assertPlainObject(checkpoint, "Stream verifier checkpoint");
+  assertExactKeys(
+    checkpoint,
+    [
+      "assignmentId",
+      "dataFrames",
+      ...(checkpoint.finalSeq === undefined ? [] : ["finalSeq"]),
+      "head",
+      ...(checkpoint.lastLogicalDigest === undefined
+        ? []
+        : ["lastLogicalDigest"]),
+      "lastSeq",
+      "ref",
+      "streamEpoch",
+    ],
+    "Stream verifier checkpoint",
+  );
+  return new StreamFrameVerifier(checkpoint).checkpoint();
+}
+
 export function validateStreamFrame(input: unknown): StreamFrame {
   const frame = snapshot(input, "Stream frame") as StreamFrame;
   assertPlainObject(frame, "Stream frame");

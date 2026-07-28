@@ -72,6 +72,18 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   const registry = opts.registry ?? buildBuiltinRegistry();
 
   const httpServer = createServer((req, res) => {
+    const routePath = new URL(req.url ?? "/", "http://localhost").pathname;
+    const channelRoute = ctx.channelHttpRoutes?.get(routePath);
+    if (channelRoute) {
+      void Promise.resolve(channelRoute(req, res)).catch((error) => {
+        opts.onError?.(error, { method: `http:${routePath}` });
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "text/plain" });
+        }
+        if (!res.writableEnded) res.end("Internal Server Error");
+      });
+      return;
+    }
     // REST 路由匹配
     if (dispatchRest(req, res, ctx)) return;
 

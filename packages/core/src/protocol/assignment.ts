@@ -17,6 +17,7 @@ import type {
   DispatchRejectionProof,
   DispatchResult,
   Digest,
+  ExecutionRef,
   ExecutionKind,
   InteractionMirrorBatch,
   InteractionMirrorEntry,
@@ -56,6 +57,11 @@ import type {
   ProtocolSigner,
 } from "./signature.js";
 import { validateContentAssetRefs } from "./surface-asset-grant.js";
+import {
+  channelInteractionDecisionDigest,
+  channelResponderPrincipal,
+  validateChannelInteractionGrant,
+} from "./channel-interaction.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 
@@ -145,6 +151,8 @@ export type ConversationInteractionMirrorBatch = Omit<
   "entries"
 > & { readonly entries: ConversationInteractionMirrorEntry[] };
 
+export type AssignmentInteractionOutcome = InteractionMirrorEntry["outcome"];
+
 export function confirmationDecisionDigest(
   requestId: string,
   decision: ConfirmationDecision,
@@ -163,6 +171,7 @@ export interface AssignmentLedgerValidationState {
   lastSeq: number;
   chainDigest: Digest;
   phase: LedgerSnapshot["phase"];
+  ref?: ExecutionRef;
   received: boolean;
   started: boolean;
   control?: {
@@ -698,6 +707,14 @@ export function advanceInteractionMirrorDigest(
   previous: Digest,
   entry: Omit<ConversationInteractionMirrorEntry, "at">,
 ): Digest {
+  validateConversationInteractionOutcome(entry.outcome);
+  return advanceAssignmentInteractionMirrorDigest(previous, entry);
+}
+
+export function advanceAssignmentInteractionMirrorDigest(
+  previous: Digest,
+  entry: Omit<InteractionMirrorEntry, "at">,
+): Digest {
   assertDigest(previous, "Previous interaction mirror digest");
   assertPositiveInteger(entry.ordinal, "Interaction mirror ordinal");
   assertPositiveInteger(entry.seq, "Interaction mirror record sequence");
@@ -705,7 +722,6 @@ export function advanceInteractionMirrorDigest(
   if (entry.kind !== "allow-once") {
     throw new TypeError("Conversation interaction kind must be allow-once");
   }
-  validateConversationInteractionOutcome(entry.outcome);
   return protocolDigest("InteractionMirrorStep", 1, {
     previous,
     entry: snapshot(entry, "Interaction mirror chain entry"),
@@ -822,8 +838,145 @@ export function validateConversationInteractionMirrorBatch(
   return { ...payload, signature: batch.signature } as ConversationInteractionMirrorBatch;
 }
 
+export function createSignedAssignmentInteractionMirrorBatch(input: {
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly previousDigest: Digest;
+  readonly entries: readonly InteractionMirrorEntry[];
+  readonly signer: ProtocolSigner;
+  readonly verifier: ProtocolSignatureVerifier;
+}): InteractionMirrorBatch {
+  assertIdentifier(input.assignmentId, "Interaction mirror assignment id");
+  assertIdentifier(input.executorId, "Interaction mirror executor id");
+  assertDigest(input.previousDigest, "Previous interaction mirror digest");
+  if (input.entries.length === 0 || input.entries.length > 256) {
+    throw new TypeError(
+      "Interaction mirror batch must contain between 1 and 256 entries",
+    );
+  }
+  const entries = input.entries.map((entry) =>
+    validateAssignmentInteractionMirrorEntry(entry, input.verifier)
+  );
+  let mirrorDigest = input.previousDigest;
+  let previousOrdinal = entries[0]!.ordinal - 1;
+  let previousSeq = 0;
+  for (const entry of entries) {
+    if (entry.ordinal !== previousOrdinal + 1 || entry.seq <= previousSeq) {
+      throw new TypeError(
+        "Interaction mirror batch is not contiguous and increasing",
+      );
+    }
+    mirrorDigest = advanceAssignmentInteractionMirrorDigest(
+      mirrorDigest,
+      withoutField(entry, "at"),
+    );
+    previousOrdinal = entry.ordinal;
+    previousSeq = entry.seq;
+  }
+  const payload = snapshot(
+    {
+      v: 1 as const,
+      assignmentId: input.assignmentId,
+      executorId: input.executorId,
+      previousDigest: input.previousDigest,
+      entries,
+      mirrorDigest,
+    },
+    "Interaction mirror batch payload",
+  );
+  const signature = input.signer.sign("InteractionMirrorBatch", 1, payload);
+  assertSignature(signature, "Interaction mirror batch signature");
+  return snapshot(
+    { ...payload, signature },
+    "Signed interaction mirror batch",
+  ) as InteractionMirrorBatch;
+}
+
+export function validateAssignmentInteractionMirrorBatch(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): InteractionMirrorBatch {
+  assertObject(input, "Interaction mirror batch");
+  if (Array.isArray(input.entries) && input.entries.length > 256) {
+    throw new TypeError(
+      "Interaction mirror batch exceeds the 256-entry protocol limit",
+    );
+  }
+  const batch = snapshot(input, "Interaction mirror batch") as Record<
+    string,
+    unknown
+  >;
+  assertExactKeys(
+    batch,
+    [
+      "assignmentId",
+      "entries",
+      "executorId",
+      "mirrorDigest",
+      "previousDigest",
+      "signature",
+      "v",
+    ],
+    "Interaction mirror batch",
+  );
+  assertVersion(batch.v as number, "Interaction mirror batch");
+  assertIdentifier(batch.assignmentId, "Interaction mirror assignment id");
+  assertIdentifier(batch.executorId, "Interaction mirror executor id");
+  assertDigest(
+    batch.previousDigest as string,
+    "Previous interaction mirror digest",
+  );
+  assertDigest(batch.mirrorDigest as string, "Interaction mirror digest");
+  assertSignature(
+    batch.signature as Signature,
+    "Interaction mirror batch signature",
+  );
+  if (!Array.isArray(batch.entries) || batch.entries.length === 0) {
+    throw new TypeError(
+      "Interaction mirror batch must contain between 1 and 256 entries",
+    );
+  }
+  const entries = batch.entries.map((entry) =>
+    validateAssignmentInteractionMirrorEntry(entry, verifier)
+  );
+  let mirrorDigest = batch.previousDigest as Digest;
+  let previousOrdinal = entries[0]!.ordinal - 1;
+  let previousSeq = 0;
+  for (const entry of entries) {
+    if (entry.ordinal !== previousOrdinal + 1 || entry.seq <= previousSeq) {
+      throw new TypeError(
+        "Interaction mirror batch is not contiguous and increasing",
+      );
+    }
+    mirrorDigest = advanceAssignmentInteractionMirrorDigest(
+      mirrorDigest,
+      withoutField(entry, "at"),
+    );
+    previousOrdinal = entry.ordinal;
+    previousSeq = entry.seq;
+  }
+  if (mirrorDigest !== batch.mirrorDigest) {
+    throw new TypeError("Interaction mirror batch digest is invalid");
+  }
+  const normalized = {
+    ...batch,
+    entries,
+  } as unknown as InteractionMirrorBatch;
+  const payload = withoutField(normalized, "signature");
+  verifier.verify(
+    "InteractionMirrorBatch",
+    1,
+    payload,
+    batch.signature as Signature,
+  );
+  return {
+    ...payload,
+    signature: batch.signature,
+  } as InteractionMirrorBatch;
+}
+
 export function interactionMirrorBatchDigest(
-  batch: ConversationInteractionMirrorBatch,
+  batch: InteractionMirrorBatch,
 ): Digest {
   return protocolDigest(
     "InteractionMirrorBatch",
@@ -900,6 +1053,7 @@ export function applyValidatedAssignmentEntry(
       }
       state.phase = "received";
       state.received = true;
+      state.ref = snapshot(body.activation.ref, "Assignment execution reference");
       break;
     case "dispatch-rejected":
       if (
@@ -965,15 +1119,36 @@ export function applyValidatedAssignmentEntry(
       if (!state.pendingInteractions.delete(body.requestId)) {
         throw new TypeError("interaction result is missing or duplicated");
       }
+      if (
+        body.outcome.t === "answered" &&
+        body.outcome.authority.via === "channel-grant"
+      ) {
+        if (
+          state.ref?.execution !== "job" ||
+          canonicalize(body.outcome.authority.grant.ref) !==
+            canonicalize(state.ref) ||
+          body.outcome.authority.grant.assignmentId !== state.assignmentId ||
+          body.outcome.authority.grant.interactionRequestId !== body.requestId
+        ) {
+          throw new TypeError(
+            "Channel interaction grant does not bind the durable job assignment",
+          );
+        }
+      } else if (
+        state.ref?.execution === "job" &&
+        body.outcome.t === "answered"
+      ) {
+        throw new TypeError("Job interaction answer requires a channel grant");
+      }
       state.finishedInteractionCount += 1;
-      state.interactionMirrorDigest = advanceInteractionMirrorDigest(
+      state.interactionMirrorDigest = advanceAssignmentInteractionMirrorDigest(
         state.interactionMirrorDigest,
         {
           ordinal: state.finishedInteractionCount,
           seq: entry.recordSeq,
           requestId: body.requestId,
           kind: body.kind,
-          outcome: body.outcome as ConversationInteractionOutcome,
+          outcome: body.outcome,
         },
       );
       state.unmirroredFinished.set(entry.recordSeq, {
@@ -1588,6 +1763,72 @@ export function validateConversationInteractionOutcome(
   return outcome as ConversationInteractionOutcome;
 }
 
+export function validateAssignmentInteractionOutcome(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): AssignmentInteractionOutcome {
+  const outcome = snapshot(input, "Assignment interaction outcome") as Record<
+    string,
+    unknown
+  >;
+  assertObject(outcome, "Assignment interaction outcome");
+  if (outcome.t !== "answered") {
+    return validateConversationInteractionOutcome(outcome);
+  }
+  assertExactKeys(
+    outcome,
+    ["authority", "by", "decision", "decisionDigest", "t"],
+    "Answered interaction outcome",
+  );
+  assertObject(outcome.authority, "Interaction answer authority");
+  if (outcome.authority.via === "surface-ticket") {
+    return validateConversationInteractionOutcome(outcome);
+  }
+  assertExactKeys(
+    outcome.authority,
+    ["grant", "via"],
+    "Interaction answer authority",
+  );
+  if (outcome.authority.via !== "channel-grant") {
+    throw new TypeError("Interaction answer authority is invalid");
+  }
+  const grant = validateChannelInteractionGrant(
+    outcome.authority.grant,
+    verifier,
+  );
+  assertObject(outcome.decision, "Interaction decision");
+  assertExactKeys(
+    outcome.decision,
+    ["allowed", ...(outcome.decision.reason === undefined ? [] : ["reason"])],
+    "Interaction decision",
+  );
+  if (canonicalize(outcome.decision) !== canonicalize(grant.decision)) {
+    throw new TypeError(
+      "Interaction decision does not match its channel grant",
+    );
+  }
+  if (
+    outcome.decisionDigest !==
+    channelInteractionDecisionDigest(
+      grant.interactionRequestId,
+      grant.decision,
+    )
+  ) {
+    throw new TypeError(
+      "Interaction decision digest does not match its channel grant",
+    );
+  }
+  if (outcome.by !== channelResponderPrincipal(grant.responder)) {
+    throw new TypeError(
+      "Interaction responder is not derived from its channel grant",
+    );
+  }
+  return {
+    ...outcome,
+    authority: { via: "channel-grant", grant },
+  } as AssignmentInteractionOutcome;
+}
+
 export function validateConversationInteractionMirrorEntry(
   input: unknown,
 ): ConversationInteractionMirrorEntry {
@@ -1614,6 +1855,39 @@ export function validateConversationInteractionMirrorEntry(
   validateConversationInteractionOutcome(entry.outcome);
   assertCanonicalTime(entry.at, "Interaction mirror time");
   return entry as ConversationInteractionMirrorEntry;
+}
+
+export function validateAssignmentInteractionMirrorEntry(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): InteractionMirrorEntry {
+  const entry = snapshot(input, "Assignment interaction mirror entry") as Record<
+    string,
+    unknown
+  >;
+  assertObject(entry, "Assignment interaction mirror entry");
+  assertExactKeys(
+    entry,
+    ["at", "kind", "ordinal", "outcome", "requestId", "seq"],
+    "Assignment interaction mirror entry",
+  );
+  if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal as number) <= 0) {
+    throw new TypeError(
+      "Interaction mirror ordinal must be a positive safe integer",
+    );
+  }
+  if (!Number.isSafeInteger(entry.seq) || (entry.seq as number) <= 0) {
+    throw new TypeError(
+      "Interaction mirror sequence must be a positive safe integer",
+    );
+  }
+  assertIdentifier(entry.requestId, "Interaction requestId");
+  if (entry.kind !== "allow-once") {
+    throw new TypeError("Assignment interaction kind must be allow-once");
+  }
+  validateAssignmentInteractionOutcome(entry.outcome, verifier);
+  assertCanonicalTime(entry.at, "Interaction mirror time");
+  return entry as unknown as InteractionMirrorEntry;
 }
 
 function assertAssignmentRecord(
@@ -1707,7 +1981,7 @@ function assertAssignmentRecord(
       assertExactKeys(value, ["kind", "outcome", "requestId", "t", "v"], "interaction-finished record");
       assertIdentifier(value.requestId, "finished interaction requestId");
       if (value.kind !== "allow-once") throw new TypeError("Finished interaction kind is invalid");
-      validateConversationInteractionOutcome(value.outcome);
+      validateAssignmentInteractionOutcome(value.outcome, verifier);
       return;
     case "staged-mutation":
       assertExactKeys(

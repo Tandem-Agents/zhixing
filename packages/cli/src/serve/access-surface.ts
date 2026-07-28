@@ -35,7 +35,6 @@ import type {
   PerspectivesController,
   RunningServer,
   CleanupRegistry,
-  TextConfirmationRenderer,
 } from "@zhixing/server";
 import type {
   ConfirmationHub,
@@ -61,6 +60,9 @@ import type { ConversationProtocolRuntime } from "./conversation-protocol-runtim
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
+import type { JobStatusDirectory } from "./job-status-directory.js";
+import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import type {
   StartupCleanupHandle,
   StartupRollback,
@@ -72,11 +74,13 @@ export type SurfacePhase = "pre-server" | "post-server";
 export interface AssemblyStartupCleanups {
   mcp?: StartupCleanupHandle;
   authorityRuntime?: StartupCleanupHandle;
+  executorDataPlane?: StartupCleanupHandle;
+  jobStatus?: StartupCleanupHandle;
   assetMaintenance?: StartupCleanupHandle;
   meshRuntime?: StartupCleanupHandle;
+  losslessDataPlane?: StartupCleanupHandle;
   channels?: StartupCleanupHandle;
   deliveryStack?: StartupCleanupHandle;
-  textRenderer?: StartupCleanupHandle;
 }
 
 /**
@@ -135,6 +139,10 @@ export interface AssemblyContext {
   readonly cleanup: CleanupRegistry;
   readonly startupRollback: StartupRollback;
   readonly startupCleanups: AssemblyStartupCleanups;
+  readonly channelHttpRoutes: Map<
+    string,
+    import("@zhixing/core").HttpHandler
+  >;
 
   // ── 接入面产物（surface.setup 写回） ──
   conversations?: ConversationManager;
@@ -142,12 +150,14 @@ export interface AssemblyContext {
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
   authorityRuntime?: AuthorityRuntimeStack;
+  executorDataPlane?: ExecutorDataPlaneRuntime;
   meshBootstrap: MeshRuntimeBootstrap;
   meshRuntime?: MeshRuntimeAssembly;
+  losslessDataPlane?: LosslessDataPlaneRuntime;
   assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
+  jobStatus?: JobStatusDirectory;
   deliveryStack?: DeliveryStack;
-  textRenderer?: TextConfirmationRenderer;
 
   // ── post-server 输入（runServer resolve 后填，供 post-server 接入面读） ──
   runner?: RunningServer;

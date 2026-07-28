@@ -1,12 +1,14 @@
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 import type {
+  ArtifactRef,
   IsoTime,
   StreamAck,
   StreamConsumerAuth,
   StreamFrame,
   StreamSubscribe,
 } from "@zhixing/core/contracts";
+import { assertArtifactRef } from "@zhixing/core/authority";
 import {
   canonicalize,
   streamConsumerKey,
@@ -32,7 +34,7 @@ import type {
 export const ASSIGNMENT_STREAM_SERVICE = "assignment.stream";
 
 export interface AssignmentStreamAuthorizationRequest {
-  readonly operation: "subscribe" | "ack";
+  readonly operation: "subscribe" | "ack" | "read-artifact";
   readonly assignmentId: string;
   readonly consumer: StreamConsumerAuth;
   readonly connection: SecureMeshConnection;
@@ -51,9 +53,43 @@ export interface AssignmentStreamServiceOptions {
   readonly maxBytes?: number;
 }
 
+export interface AssignmentStreamClient {
+  subscribe(
+    request: StreamSubscribe,
+    signal?: AbortSignal,
+  ): Promise<readonly StreamFrame[]>;
+  acknowledge(ack: StreamAck, signal?: AbortSignal): Promise<void>;
+  readArtifact?(
+    request: AssignmentStreamArtifactRead,
+    signal?: AbortSignal,
+  ): Promise<AssignmentStreamArtifactRange>;
+}
+
+export interface AssignmentStreamArtifactRead {
+  readonly v: 1;
+  readonly assignmentId: string;
+  readonly consumer: StreamConsumerAuth;
+  readonly ref: ArtifactRef;
+  readonly offset: number;
+  readonly limit: number;
+}
+
+export interface AssignmentStreamArtifactRange {
+  readonly ref: ArtifactRef;
+  readonly offset: number;
+  readonly bytes: Uint8Array;
+  readonly complete: boolean;
+}
+
 export interface DataPlaneAssignmentStreamAuthorizationOptions {
-  readonly tickets: Pick<DataPlaneTicketRegistry, "authorizeSurface">;
+  readonly tickets: Pick<
+    DataPlaneTicketRegistry,
+    "authorizeSurface" | "authorizeOwnerPresentedSurface"
+  >;
   readonly surfacePrincipalFor: (connection: SecureMeshConnection) => string;
+  readonly ownerMayPresentSurfaceTicket?: (
+    connection: SecureMeshConnection,
+  ) => boolean;
   readonly authorizeOwnerRelay: (
     request: AssignmentStreamAuthorizationRequest,
   ) =>
@@ -68,12 +104,20 @@ export function createDataPlaneAssignmentStreamAuthorizer(
     if (request.consumer.kind === "owner-relay") {
       return options.authorizeOwnerRelay(request);
     }
-    const authorization = await options.tickets.authorizeSurface(
-      request.consumer.ticketId,
-      "observe",
-      request.assignmentId,
-      options.surfacePrincipalFor(request.connection),
-    );
+    const authorization = options.ownerMayPresentSurfaceTicket?.(
+      request.connection,
+    )
+      ? await options.tickets.authorizeOwnerPresentedSurface(
+          request.consumer.ticketId,
+          "observe",
+          request.assignmentId,
+        )
+      : await options.tickets.authorizeSurface(
+          request.consumer.ticketId,
+          "observe",
+          request.assignmentId,
+          options.surfacePrincipalFor(request.connection),
+        );
     return { expiresAt: authorization.expiresAt };
   };
 }
@@ -88,6 +132,11 @@ type StreamServiceRequest =
       readonly v: 1;
       readonly t: "ack";
       readonly ack: StreamAck;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "read-artifact";
+      readonly request: AssignmentStreamArtifactRead;
     };
 
 type StreamServiceResponse =
@@ -116,6 +165,14 @@ type StreamServiceResponse =
       readonly consumer: StreamConsumerAuth;
       readonly requestedAfterSeq: number;
       readonly prunedThrough: number;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "artifact-range";
+      readonly ref: ArtifactRef;
+      readonly offset: number;
+      readonly bytes: Uint8Array;
+      readonly complete: boolean;
     };
 
 export function registerAssignmentStreamService(
@@ -249,6 +306,35 @@ export function createAssignmentStreamServiceHandler(
       }
     }
 
+    if (request.t === "read-artifact") {
+      await options.authorize({
+        operation: "read-artifact",
+        assignmentId: request.request.assignmentId,
+        consumer: request.request.consumer,
+        connection,
+        signal,
+      });
+      signal.throwIfAborted();
+      const bytes = await options.spool.readRetainedArtifact(
+        request.request.assignmentId,
+        request.request.ref,
+      );
+      const end = Math.min(
+        bytes.byteLength,
+        request.request.offset + request.request.limit,
+      );
+      return encode({
+        v: 1,
+        t: "artifact-range",
+        ref: request.request.ref,
+        offset: request.request.offset,
+        bytes: Buffer.from(
+          bytes.subarray(request.request.offset, end),
+        ).toString("base64"),
+        complete: end === bytes.byteLength,
+      });
+    }
+
     await options.authorize({
       operation: "ack",
       assignmentId: request.ack.assignmentId,
@@ -273,7 +359,7 @@ export function createAssignmentStreamServiceHandler(
   };
 }
 
-export class AssignmentStreamMeshClient {
+export class AssignmentStreamMeshClient implements AssignmentStreamClient {
   constructor(private readonly client: MeshServiceClient) {}
 
   async subscribe(
@@ -288,8 +374,10 @@ export class AssignmentStreamMeshClient {
         signal,
       ),
     );
-    if (response.t === "acked") {
-      throw new TypeError("Stream service returned an ACK to a subscription");
+    if (response.t === "acked" || response.t === "artifact-range") {
+      throw new TypeError(
+        "Stream service returned a non-frame response to a subscription",
+      );
     }
     if (response.t !== "frames") {
       if (
@@ -352,6 +440,51 @@ export class AssignmentStreamMeshClient {
       );
     }
   }
+
+  async readArtifact(
+    requestInput: AssignmentStreamArtifactRead,
+    signal?: AbortSignal,
+  ): Promise<AssignmentStreamArtifactRange> {
+    const request = validateArtifactRead(requestInput);
+    const response = decodeResponse(
+      await this.client.request(
+        ASSIGNMENT_STREAM_SERVICE,
+        encode({ v: 1, t: "read-artifact", request }),
+        signal,
+      ),
+    );
+    if (
+      response.t !== "artifact-range" ||
+      canonicalize(response.ref) !== canonicalize(request.ref) ||
+      response.offset !== request.offset
+    ) {
+      throw new TypeError(
+        "Stream artifact response does not bind the request",
+      );
+    }
+    if (response.bytes.byteLength > request.limit) {
+      throw new TypeError("Stream artifact response exceeds the requested range");
+    }
+    return response;
+  }
+}
+
+export function createInProcessAssignmentStreamClient(
+  handler: ReturnType<typeof createAssignmentStreamServiceHandler>,
+  connection: SecureMeshConnection,
+): AssignmentStreamClient {
+  return new AssignmentStreamMeshClient({
+    request(serviceId, payload, signal) {
+      if (serviceId !== ASSIGNMENT_STREAM_SERVICE) {
+        throw new TypeError("In-process stream client received an unknown service");
+      }
+      return handler(
+        payload,
+        connection,
+        signal ?? new AbortController().signal,
+      );
+    },
+  });
 }
 
 function decodeRequest(payload: Uint8Array): StreamServiceRequest {
@@ -371,6 +504,18 @@ function decodeRequest(payload: Uint8Array): StreamServiceRequest {
   if (value.t === "ack") {
     assertExactKeys(value, ["ack", "t", "v"], "Stream ACK request");
     return { v: 1, t: "ack", ack: validateStreamAck(value.ack) };
+  }
+  if (value.t === "read-artifact") {
+    assertExactKeys(
+      value,
+      ["request", "t", "v"],
+      "Stream artifact request",
+    );
+    return {
+      v: 1,
+      t: "read-artifact",
+      request: validateArtifactRead(value.request),
+    };
   }
   throw new TypeError("Stream service request kind is invalid");
 }
@@ -452,7 +597,66 @@ function decodeResponse(payload: Uint8Array): StreamServiceResponse {
       prunedThrough: value.prunedThrough,
     };
   }
+  if (value.t === "artifact-range") {
+    assertExactKeys(
+      value,
+      ["bytes", "complete", "offset", "ref", "t", "v"],
+      "Stream artifact response",
+    );
+    assertArtifactRef(value.ref);
+    assertNonNegativeInteger(value.offset, "Stream artifact offset");
+    if (typeof value.bytes !== "string" || typeof value.complete !== "boolean") {
+      throw new TypeError("Stream artifact response fields are invalid");
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = Buffer.from(value.bytes, "base64");
+    } catch (error) {
+      throw new TypeError("Stream artifact response bytes are invalid", {
+        cause: error,
+      });
+    }
+    if (Buffer.from(bytes).toString("base64") !== value.bytes) {
+      throw new TypeError("Stream artifact response bytes are not canonical");
+    }
+    return {
+      v: 1,
+      t: "artifact-range",
+      ref: value.ref,
+      offset: value.offset,
+      bytes,
+      complete: value.complete,
+    };
+  }
   throw new TypeError("Stream service response kind is invalid");
+}
+
+function validateArtifactRead(input: unknown): AssignmentStreamArtifactRead {
+  assertPlainObject(input, "Stream artifact read");
+  assertExactKeys(
+    input,
+    ["assignmentId", "consumer", "limit", "offset", "ref", "v"],
+    "Stream artifact read",
+  );
+  if (input.v !== 1) {
+    throw new TypeError("Stream artifact read version is invalid");
+  }
+  assertNonEmptyString(input.assignmentId, "Stream assignmentId");
+  const consumer = validateStreamConsumerAuth(input.consumer);
+  assertArtifactRef(input.ref);
+  assertNonNegativeInteger(input.offset, "Stream artifact offset");
+  assertPositiveInteger(input.limit, "Stream artifact range limit");
+  if (input.offset > input.ref.bytes) {
+    throw new TypeError("Stream artifact offset exceeds its reference");
+  }
+  return {
+    v: 1,
+    assignmentId: input.assignmentId,
+    consumer,
+    ref: input.ref,
+    offset: input.offset as number,
+    limit: input.limit as number,
+  };
 }
 
 function encode(value: unknown): Uint8Array {

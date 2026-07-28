@@ -23,7 +23,7 @@ import {
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
   validateDataPlaneTicket,
-  validateConversationInteractionMirrorBatch,
+  validateAssignmentInteractionMirrorBatch,
   validateIngressContext,
   validateJobOccurrence,
   validateSupersedeProof,
@@ -35,6 +35,10 @@ import {
   validateResolutionFact,
   type Stored,
 } from "./conversation-run-contracts.js";
+import {
+  validateChannelInteractionRelayRecord,
+  type ChannelInteractionRelayRecord,
+} from "./channel-interaction-records.js";
 
 export type JobJournalRecord =
   | {
@@ -185,7 +189,8 @@ export type JobJournalRecord =
       readonly fence: SystemJobFence;
       readonly outcome: "committed" | "failed";
       readonly detail: Stored<SystemJobResultDetail>;
-    };
+    }
+  | ChannelInteractionRelayRecord;
 
 export type JobJournalRecordType = JobJournalRecord["t"];
 
@@ -254,6 +259,30 @@ export const JOB_JOURNAL_RECORD_SHAPES = {
   "ticket-revoked": { required: ["t", "ticketId"] },
   "ticket-sync-frontier": { required: ["expiresThrough", "t"] },
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
+  "channel-challenge-prepared": {
+    required: [
+      "assignmentId",
+      "display",
+      "frameSeq",
+      "ref",
+      "responder",
+      "t",
+      "token",
+      "toolName",
+    ],
+  },
+  "channel-challenge-delivered": {
+    required: ["challengeId", "receipt", "t"],
+  },
+  "channel-challenge-closed": {
+    required: ["at", "challengeId", "outcome", "t"],
+  },
+  "channel-relay-cursor": {
+    required: ["assignmentId", "checkpoint", "jobRunId", "t", "upToSeq"],
+  },
+  "channel-challenge-granted": {
+    required: ["challengeId", "grant", "jobRunId", "t"],
+  },
   state: {
     required: ["jobRunId", "state", "statusRevision", "t"],
     optional: ["assignmentId", "usageFinal"],
@@ -431,7 +460,14 @@ export function validateJobJournalRecord(
       break;
     case "interaction-mirror":
       assertIdentifier(value.assignmentId, "Job interaction mirror assignmentId");
-      validateConversationInteractionMirrorBatch(value.batch, verifier);
+      validateAssignmentInteractionMirrorBatch(value.batch, verifier);
+      break;
+    case "channel-challenge-prepared":
+    case "channel-challenge-delivered":
+    case "channel-challenge-closed":
+    case "channel-relay-cursor":
+    case "channel-challenge-granted":
+      validateChannelInteractionRelayRecord(value, verifier);
       break;
     case "state":
       assertIdentifier(value.jobRunId, "Job state jobRunId");

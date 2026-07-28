@@ -72,16 +72,32 @@ describe("data-plane ticket mesh adapter", () => {
       ticketId: interact.ticketId,
       decision: { kind: "allow-once" },
     });
+    await owner.answerChannel({
+      assignmentId: interact.assignmentId,
+      requestId: "channel-request-fixed",
+      ticketId: interact.ticketId,
+      surfacePrincipal: "channel:feishu:tenant-fixed:user-fixed",
+      decision: { kind: "deny", reason: "declined in channel" },
+    });
     await owner.revoke(interact.assignmentId, interact.ticketId);
     expect(accepted).toEqual([interact]);
     expect(revoked).toEqual([interact.ticketId]);
-    expect(answerInteractionWithTicket).toHaveBeenCalledWith({
-      assignmentId: interact.assignmentId,
-      requestId: "request-fixed",
-      ticketId: interact.ticketId,
-      surfacePrincipal: "surface:user-fixed",
-      decision: { kind: "allow-once" },
-    });
+    expect(answerInteractionWithTicket.mock.calls).toEqual([
+      [{
+        assignmentId: interact.assignmentId,
+        requestId: "request-fixed",
+        ticketId: interact.ticketId,
+        surfacePrincipal: "surface:user-fixed",
+        decision: { kind: "allow-once" },
+      }],
+      [{
+        assignmentId: interact.assignmentId,
+        requestId: "channel-request-fixed",
+        ticketId: interact.ticketId,
+        surfacePrincipal: "channel:feishu:tenant-fixed:user-fixed",
+        decision: { kind: "deny", reason: "declined in channel" },
+      }],
+    ]);
 
     const abortTicket = ticket("abort", "surface:user-fixed");
     const abortRequest: ExecutionAbortRequest = {
@@ -105,6 +121,18 @@ describe("data-plane ticket mesh adapter", () => {
         directClient(handler, connection("intruder")),
       ).accept(interact),
     ).rejects.toThrow(/owner/);
+    await expect(
+      new DataPlaneTicketMeshClient(
+        directClient(handler, connection("intruder")),
+      ).answerChannel({
+        assignmentId: interact.assignmentId,
+        requestId: "forged-channel-request",
+        ticketId: interact.ticketId,
+        surfacePrincipal: "channel:feishu:tenant-fixed:user-fixed",
+        decision: { kind: "allow-once" },
+      }),
+    ).rejects.toThrow(/owner/);
+    expect(answerInteractionWithTicket).toHaveBeenCalledTimes(2);
   });
 
   it("replays only active grants and carries revocation tombstones", async () => {

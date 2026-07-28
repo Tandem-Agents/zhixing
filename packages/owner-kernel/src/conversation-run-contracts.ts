@@ -42,6 +42,10 @@ import {
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
+import {
+  validateConversationChannelChallengeRecord,
+  type ConversationChannelChallengeRecord,
+} from "./channel-interaction-records.js";
 
 export type Stored<T> = T | { readonly ref: ArtifactRef };
 
@@ -173,6 +177,7 @@ export type ConversationRunJournalRecord =
       readonly assignmentId: string;
       readonly proof: AssignmentTerminationProof;
     }
+  | ConversationChannelChallengeRecord
   | SessionInternalRecord;
 
 export type ConversationRunRecord = Exclude<ConversationRunJournalRecord, SessionInternalRecord>;
@@ -256,6 +261,24 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
   "ticket-revoked": { required: ["t", "ticketId"] },
   "ticket-sync-frontier": { required: ["expiresThrough", "t"] },
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
+  "channel-challenge-prepared": {
+    required: [
+      "assignmentId",
+      "display",
+      "frameSeq",
+      "ref",
+      "responder",
+      "t",
+      "token",
+      "toolName",
+    ],
+  },
+  "channel-challenge-delivered": {
+    required: ["challengeId", "receipt", "t"],
+  },
+  "channel-challenge-closed": {
+    required: ["at", "challengeId", "outcome", "t"],
+  },
   state: {
     required: ["runId", "state", "statusRevision", "t"],
     optional: ["assignmentId", "reason", "usageFinal"],
@@ -452,6 +475,11 @@ export function validateConversationRunRecord(
           value.batch as ConversationInteractionMirrorBatch,
           verifier,
         );
+        break;
+      case "channel-challenge-prepared":
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+        validateConversationChannelChallengeRecord(value, verifier);
         break;
       case "state":
         assertIdentifier(value.runId, "Run state run id");

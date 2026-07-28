@@ -5,6 +5,9 @@ import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type {
   ConversationAssignmentLedger,
+  AssignmentStreamSpool,
+  AssignmentStreamWriter,
+  DataPlaneTicketRegistry,
   ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
   createExecutorRole,
@@ -37,6 +40,9 @@ export class UnsupportedServeRoleConfigurationError extends Error {
 
 export interface ExecutorRoleModule {
   readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
+  readonly AssignmentStreamSpool: typeof AssignmentStreamSpool;
+  readonly AssignmentStreamWriter: typeof AssignmentStreamWriter;
+  readonly DataPlaneTicketRegistry: typeof DataPlaneTicketRegistry;
   readonly ExecutorResourceGovernor: typeof ExecutorResourceGovernor;
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   readonly createExecutorRole: typeof createExecutorRole;

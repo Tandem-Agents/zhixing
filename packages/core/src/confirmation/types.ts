@@ -431,6 +431,14 @@ export interface ConfirmationRendererPort {
     requestId: ConfirmationRequestId,
     decision: ConfirmationDecision,
   ): Promise<boolean>;
+
+  /**
+   * Applies the configured non-interactive resolver even when a transport
+   * listener exists but the originating surface is no longer usable.
+   */
+  resolveNonInteractiveDurably?(
+    requestId: ConfirmationRequestId,
+  ): Promise<boolean>;
 }
 
 /** Durable interaction hook: request is stored before visibility and outcome before execution resumes. */

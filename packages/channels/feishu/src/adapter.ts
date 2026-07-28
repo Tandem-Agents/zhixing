@@ -2,13 +2,14 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import type {
   ChannelAdapter,
   ChannelCapabilities,
+  ChannelChallengeMessage,
   ChannelContext,
   ChannelLogger,
   DeliveryResult,
   DeliveryTarget,
   OutboundContent,
 } from "@zhixing/core";
-import { buildReplyCard } from "./cards.js";
+import { buildChallengeCard, buildReplyCard } from "./cards.js";
 import { FeishuApiError, FeishuClient, detectReceiveIdType, resolveDomain } from "./client.js";
 import { resolveConfig } from "./config.js";
 import { DedupCache } from "./dedup.js";
@@ -43,6 +44,34 @@ export class FeishuAdapter implements ChannelAdapter {
     const logger = this.logger;
     const adapterId = this.id;
     const botOpenId = config.botOpenId;
+
+    const handler = new lark.CardActionHandler(
+      {
+        verificationToken: config.verificationToken,
+        encryptKey: config.encryptKey,
+      },
+      async (event: lark.InteractiveCardActionEvent) => {
+        const action = parseChallengeAction(event.action?.value);
+        ctx.onChallengeAction({
+          token: action.token,
+          responder: {
+            channelId: adapterId,
+            platformSubject: event.open_id,
+            ...(event.tenant_key ? { tenant: event.tenant_key } : {}),
+          },
+          decision: action.decision,
+          raw: event,
+        });
+        return {};
+      },
+    );
+    ctx.registerHttpRoute(
+      `/channels/${adapterId}/challenge`,
+      lark.adaptDefault(
+        `/channels/${adapterId}/challenge`,
+        handler,
+      ),
+    );
 
     const eventDispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data) => {
@@ -118,4 +147,85 @@ export class FeishuAdapter implements ChannelAdapter {
       return { success: false, error: message, retryable };
     }
   }
+
+  async sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult> {
+    if (!this.client) {
+      return { success: false, error: "Adapter not connected", retryable: true };
+    }
+    const display =
+      "title" in message.display
+        ? message.display
+        : message.renderedDisplay;
+    if (!display) {
+      return {
+        success: false,
+        error: "Referenced challenge display was not materialized",
+        retryable: false,
+      };
+    }
+    try {
+      const card = buildChallengeCard({
+        title: display.title,
+        lines: display.lines,
+        token: message.token,
+      });
+      const receiveIdType = detectReceiveIdType(message.token.route.to);
+      const messageId = await this.client.sendCard(
+        message.token.route.to,
+        card,
+        receiveIdType,
+      );
+      return { success: true, messageId, retryable: false };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        error,
+        retryable: err instanceof FeishuApiError ? err.retryable : true,
+      };
+    }
+  }
+}
+
+function parseChallengeAction(value: unknown): {
+  readonly token: import("@zhixing/core").ChannelChallengeAction["token"];
+  readonly decision: import("@zhixing/core").ChannelChallengeAction["decision"];
+} {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new TypeError("Feishu challenge action is invalid");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate["v"] !== 1 ||
+    !candidate["token"] ||
+    typeof candidate["token"] !== "object" ||
+    !candidate["decision"] ||
+    typeof candidate["decision"] !== "object"
+  ) {
+    throw new TypeError("Feishu challenge action is incomplete");
+  }
+  const decision = candidate["decision"] as Record<string, unknown>;
+  if (typeof decision["allowed"] !== "boolean") {
+    throw new TypeError("Feishu challenge decision is invalid");
+  }
+  if (
+    decision["reason"] !== undefined &&
+    typeof decision["reason"] !== "string"
+  ) {
+    throw new TypeError("Feishu challenge reason is invalid");
+  }
+  return {
+    token: candidate["token"] as import("@zhixing/core").ChannelChallengeAction["token"],
+    decision: {
+      allowed: decision["allowed"],
+      ...(typeof decision["reason"] === "string"
+        ? { reason: decision["reason"] }
+        : {}),
+    },
+  };
 }

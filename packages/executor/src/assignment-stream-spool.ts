@@ -1,4 +1,5 @@
 import { open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import {
   FileArtifactStore,
@@ -238,6 +239,11 @@ export class AssignmentStreamWriter implements StreamFrameProducer {
       signal,
       sourceId,
     });
+  }
+
+  async markTerminal(): Promise<StreamSpoolSnapshot> {
+    const final = await this.final();
+    return this.#spool.markTerminal(this.#assignmentId, final.finalSeq);
   }
 }
 
@@ -962,6 +968,46 @@ export class AssignmentStreamSpool {
       this.#handles.delete(assignmentId);
       return true;
     });
+  }
+
+  /**
+   * Rebuilds the maintenance work set from durable spool identities.
+   * Directory names are digests and therefore cannot be used as assignment ids.
+   */
+  async assignmentIds(): Promise<readonly string[]> {
+    const assignmentsRoot = path.join(this.#rootDir, "assignments");
+    let entries: Dirent<string>[];
+    try {
+      entries = await readdir(assignmentsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) return [];
+      throw error;
+    }
+    const assignmentIds = new Set<string>();
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const directory = path.join(assignmentsRoot, entry.name);
+      const frames = new FileArtifactStore(path.join(directory, "frames"));
+      const log = new FileAuthorityCommitLog(
+        path.join(directory, "index"),
+        frames,
+        { clock: this.#clock },
+      );
+      const records = await log.readStream<SpoolRecord>(STREAM);
+      const opened = records
+        .map(({ body }) => validateSpoolRecord(body))
+        .find((body) => body.t === "opened");
+      if (!opened) {
+        throw corruptSpool("Stream spool has no durable assignment identity");
+      }
+      if (assignmentKey(opened.assignmentId) !== entry.name) {
+        throw corruptSpool("Stream spool directory does not bind its assignment");
+      }
+      assignmentIds.add(opened.assignmentId);
+    }
+    return [...assignmentIds].sort((left, right) =>
+      left.localeCompare(right, "en-US"),
+    );
   }
 
   async snapshot(assignmentId: string): Promise<StreamSpoolSnapshot> {

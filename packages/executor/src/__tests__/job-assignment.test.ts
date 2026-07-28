@@ -18,6 +18,7 @@ import type {
   PermissionSnapshotLease,
   Signature,
   SystemJobResourceLease,
+  StreamFrame,
   TaskDeliveryDto,
   TaskDefinition,
   TrustRuleSnapshot,
@@ -31,12 +32,14 @@ import {
   createJobCommitFence,
   createJobSealedBundle,
   createSignedConversationInteractionMirrorBatch,
+  createSignedChannelChallengeToken,
   createSignedJobEnvelope,
   createSignedTrustRuleSnapshot,
   dataPlaneTicketDigest,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   interactionMirrorSeed,
+  interactionDisplayDigest,
   jobDeliveryPlanDigest,
   mutationBatchArtifact,
   ownerControlRequestDigest,
@@ -46,6 +49,7 @@ import {
   sealedBundleArtifact,
   signCancelProof,
   signJobActivation,
+  StreamFrameVerifier,
   systemJobParamsDigest,
   validateJobMutationBatch,
   validateJobStagedMutationRecord,
@@ -1093,6 +1097,242 @@ describe("user job durable protocol", () => {
         },
       },
     });
+  });
+
+  it("atomically persists job relay verifier state with requested and finished frames", async () => {
+    const definition = userDefinition();
+    if (definition.definition.kind !== "user") {
+      throw new Error("fixture definition is not user-owned");
+    }
+    definition.definition = {
+      ...definition.definition,
+      origin: { channelId: "feishu", to: "chat-1" },
+      interactionResponder: {
+        channelId: "feishu",
+        platformSubject: "user-1",
+      },
+      spec: {
+        ...definition.definition.spec,
+        delivery: { kind: "channel", channel: "feishu", to: "chat-1" },
+      },
+    };
+    const harness = await createUserHarness({ definition });
+    const jobRef = {
+      execution: "job" as const,
+      taskId: TASK_ID,
+      jobRunId: JOB_RUN_ID,
+      anchorEpoch: 3,
+    };
+    const display = { title: "Approve?", lines: ["run"] };
+    const requested: StreamFrame = {
+      v: 1,
+      ref: jobRef,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 1,
+      seq: 1,
+      payload: {
+        kind: "interaction",
+        event: {
+          t: "requested",
+          requestId: "interaction-1",
+          toolName: "bash",
+          display,
+          issuedAt: NOW,
+          ttlMs: 60_000,
+          expiresAt: "2026-07-15T09:01:00.000Z",
+        },
+      },
+      meta: {},
+    };
+    const verifier = new StreamFrameVerifier({
+      assignmentId: ASSIGNMENT_ID,
+      ref: jobRef,
+    });
+    verifier.accept(requested);
+    const token = createSignedChannelChallengeToken(
+      {
+        v: 1,
+        challengeId: "challenge-1",
+        ref: jobRef,
+        assignmentId: ASSIGNMENT_ID,
+        interactionRequestId: "interaction-1",
+        route: definition.definition.origin!,
+        displayDigest: interactionDisplayDigest("bash", display),
+        issuedAt: NOW,
+        expiry: "2026-07-15T09:01:00.000Z",
+      },
+      harness.identity,
+    );
+
+    const first = await harness.journal.adoptChannelRelayFrame({
+      frame: requested,
+      checkpoint: verifier.checkpoint(),
+      prepared: {
+        t: "channel-challenge-prepared",
+        ref: jobRef,
+        assignmentId: ASSIGNMENT_ID,
+        frameSeq: 1,
+        token,
+        responder: definition.definition.interactionResponder!,
+        toolName: "bash",
+        display,
+      },
+    });
+    expect(first).toMatchObject({
+      checkpoint: { lastSeq: 1 },
+      prepared: { frameSeq: 1 },
+    });
+    const commitCount = (await harness.log.readAll()).length;
+    await expect(
+      harness.journal.adoptChannelRelayFrame({
+        frame: requested,
+        checkpoint: verifier.checkpoint(),
+        prepared: first.prepared,
+      }),
+    ).resolves.toMatchObject({ checkpoint: { lastSeq: 1 } });
+    expect((await harness.log.readAll()).length).toBe(commitCount);
+    await expect(
+      reopenUserJournal(harness).channelRelayCheckpoint(ASSIGNMENT_ID),
+    ).resolves.toEqual(verifier.checkpoint());
+
+    const finished: StreamFrame = {
+      v: 1,
+      ref: jobRef,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 2,
+      seq: 2,
+      payload: {
+        kind: "interaction",
+        event: {
+          t: "finished",
+          requestId: "interaction-1",
+          outcome: "allowed",
+        },
+      },
+      meta: {},
+    };
+    verifier.accept(finished);
+    await expect(
+      harness.journal.adoptChannelRelayFrame({
+        frame: finished,
+        checkpoint: verifier.checkpoint(),
+      }),
+    ).resolves.toMatchObject({
+      checkpoint: { lastSeq: 2 },
+      closed: { challengeId: "challenge-1", outcome: "allowed" },
+    });
+  });
+
+  it("durably grants a channel answer and mirrors the same authority into the job owner", async () => {
+    const definition = userDefinition();
+    if (definition.definition.kind !== "user") {
+      throw new Error("fixture definition is not user-owned");
+    }
+    definition.definition = {
+      ...definition.definition,
+      origin: { channelId: "feishu", to: "chat-1" },
+      interactionResponder: {
+        channelId: "feishu",
+        platformSubject: "user-1",
+      },
+      spec: {
+        ...definition.definition.spec,
+        delivery: { kind: "channel", channel: "feishu", to: "chat-1" },
+      },
+    };
+    const harness = await createUserHarness({ definition });
+    await start(harness);
+    const jobRef = {
+      execution: "job" as const,
+      taskId: TASK_ID,
+      jobRunId: JOB_RUN_ID,
+      anchorEpoch: 3,
+    };
+    const interactionRequest = {
+      t: "requested" as const,
+      requestId: "channel-interaction-1",
+      toolName: "bash",
+      display: { title: "Approve?", lines: ["run"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    };
+    const requested: StreamFrame = {
+      v: 1,
+      ref: jobRef,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 1,
+      seq: 1,
+      payload: {
+        kind: "interaction",
+        event: interactionRequest,
+      },
+      meta: {},
+    };
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, interactionRequest);
+    const preparation = await harness.journal.prepareChannelRelayRequest(requested);
+    if (preparation.kind !== "prepared") {
+      throw new Error("channel interaction unexpectedly had no responder");
+    }
+    const streamVerifier = new StreamFrameVerifier({
+      assignmentId: ASSIGNMENT_ID,
+      ref: jobRef,
+    });
+    streamVerifier.accept(requested);
+    await harness.journal.adoptChannelRelayFrame({
+      frame: requested,
+      checkpoint: streamVerifier.checkpoint(),
+      prepared: preparation.prepared,
+    });
+    const decision = { allowed: true, reason: "approved" };
+    const grant = await harness.journal.grantChannelChallenge({
+      token: preparation.prepared.token,
+      responder: definition.definition.interactionResponder,
+      decision,
+      at: NOW,
+    });
+    const answer = await harness.ledger.prepareInteractionAnswerFromChannel({
+      assignmentId: ASSIGNMENT_ID,
+      requestId: interactionRequest.requestId,
+      grant,
+      at: NOW,
+    });
+    if (answer.kind !== "authorized") {
+      throw new Error("fresh channel grant was unexpectedly replayed");
+    }
+    const finished = await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).finishAndMirror(
+      ASSIGNMENT_ID,
+      interactionRequest.requestId,
+      answer.outcome,
+      submissionContext(harness.unsigned),
+    );
+    expect(finished.outcome).toMatchObject({
+      t: "answered",
+      authority: { via: "channel-grant", grant },
+      decision,
+    });
+    await expect(
+      harness.ledger.prepareInteractionAnswerFromChannel({
+        assignmentId: ASSIGNMENT_ID,
+        requestId: interactionRequest.requestId,
+        grant,
+        at: NOW,
+      }),
+    ).resolves.toMatchObject({ kind: "replayed", result: finished });
+    await expect(
+      harness.ledger.prepareInteractionAnswerFromChannel({
+        assignmentId: ASSIGNMENT_ID,
+        requestId: interactionRequest.requestId,
+        grant: {
+          ...grant,
+          decision: { allowed: false },
+        },
+        at: NOW,
+      }),
+    ).rejects.toThrow();
   });
 
   it("distinguishes task pause from deletion for already-dispatched work", async () => {

@@ -6,6 +6,8 @@ import {
   type ChannelEventMap,
   type ChannelLogger,
   type InboundMessage,
+  type ChannelChallengeAction,
+  type HttpHandler,
 } from "@zhixing/core";
 import {
   APPROVE_KEYWORDS,
@@ -80,6 +82,8 @@ export interface SetupChannelsOptions {
   sessionBroadcast?: () => SessionBroadcast | null;
   /** 非当前会话活动提示 getter；server 启动后才会返回真实函数。 */
   sessionActivityBroadcast?: () => SessionActivityBroadcast | null;
+  onChallengeAction?: (action: ChannelChallengeAction) => void;
+  registerHttpRoute?: (path: string, handler: HttpHandler) => void;
 }
 
 export interface SetupChannelsResult {
@@ -100,6 +104,8 @@ export async function setupChannels(
     cancelKeywords,
     sessionBroadcast,
     sessionActivityBroadcast,
+    onChallengeAction,
+    registerHttpRoute,
   } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
@@ -121,6 +127,8 @@ export async function setupChannels(
           });
         }
       : undefined,
+    onChallengeAction,
+    registerHttpRoute,
   });
 
   if (conversations) {

@@ -41,6 +41,15 @@ type DataPlaneTicketServiceRequest =
     }
   | {
       readonly v: 1;
+      readonly t: "answer-channel";
+      readonly assignmentId: string;
+      readonly requestId: string;
+      readonly ticketId: string;
+      readonly surfacePrincipal: string;
+      readonly decision: FirstPartyInteractionDecision;
+    }
+  | {
+      readonly v: 1;
       readonly t: "abort";
       readonly request: ExecutionAbortRequest;
     };
@@ -119,6 +128,17 @@ export function createDataPlaneTicketServiceHandler(
         surfacePrincipal: options.surfacePrincipalFor(connection),
         decision: request.decision,
       });
+    } else if (request.t === "answer-channel") {
+      if (!options.authorizeOwner(connection, request.assignmentId)) {
+        throw new Error("Channel interaction relay requires the assignment owner");
+      }
+      await options.operations.answerInteractionWithTicket({
+        assignmentId: request.assignmentId,
+        requestId: request.requestId,
+        ticketId: request.ticketId,
+        surfacePrincipal: request.surfacePrincipal,
+        decision: request.decision,
+      });
     } else {
       if (
         request.request.ticket.surfacePrincipal !==
@@ -181,6 +201,19 @@ export class DataPlaneTicketMeshClient {
     await this.#send({ v: 1, t: "answer", ...input }, signal);
   }
 
+  async answerChannel(
+    input: {
+      readonly assignmentId: string;
+      readonly requestId: string;
+      readonly ticketId: string;
+      readonly surfacePrincipal: string;
+      readonly decision: FirstPartyInteractionDecision;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#send({ v: 1, t: "answer-channel", ...input }, signal);
+  }
+
   async abort(
     request: ExecutionAbortRequest,
     signal?: AbortSignal,
@@ -232,11 +265,12 @@ function decodeRequest(
     assertIdentifier(value.ticketId, "Ticket id");
     return value as unknown as DataPlaneTicketServiceRequest;
   }
-  if (value.t === "answer") {
+  if (value.t === "answer" || value.t === "answer-channel") {
     assertKeys(value, [
       "assignmentId",
       "decision",
       "requestId",
+      ...(value.t === "answer-channel" ? ["surfacePrincipal"] : []),
       "t",
       "ticketId",
       "v",
@@ -244,14 +278,20 @@ function decodeRequest(
     assertIdentifier(value.assignmentId, "Interaction assignment id");
     assertIdentifier(value.requestId, "Interaction request id");
     assertIdentifier(value.ticketId, "Interaction ticket id");
+    if (value.t === "answer-channel") {
+      assertIdentifier(value.surfacePrincipal, "Channel surface principal");
+    }
     return {
       v: 1,
-      t: "answer",
+      t: value.t,
       assignmentId: value.assignmentId as string,
       requestId: value.requestId as string,
       ticketId: value.ticketId as string,
+      ...(value.t === "answer-channel"
+        ? { surfacePrincipal: value.surfacePrincipal as string }
+        : {}),
       decision: validateFirstPartyInteractionDecision(value.decision),
-    };
+    } as DataPlaneTicketServiceRequest;
   }
   if (value.t === "abort") {
     assertKeys(value, ["request", "t", "v"]);

@@ -27,6 +27,7 @@ import type {
   ExecutorRoleModule,
   ServeBootstrapContext,
 } from "./role-topology.js";
+import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -59,6 +60,7 @@ export async function runExecutorRole(
 
   let mesh: MeshRuntimeAssembly | undefined;
   let authority: AuthorityRuntimeStack | undefined;
+  let dataPlane: ExecutorDataPlaneRuntime | undefined;
   try {
     const interactions = new DurableConversationInteractionObserver();
     const runtime = new ExecutorRuntimeSubstrate({
@@ -89,14 +91,23 @@ export async function runExecutorRole(
       enableLocalExecutor: true,
       storageMaintenance: deviceCapacity.storage,
     });
+    dataPlane = new ExecutorDataPlaneRuntime({
+      zhixingHome,
+      authority,
+      module: executor,
+      onError: (error) => writer.notify(`[data-plane] ${error.message}`),
+    });
     const ledger = createConversationExecutorLedger({
       Constructor: executor.ConversationAssignmentLedger,
       authority,
+      dataPlaneTickets: dataPlane.tickets,
       usageFinal: (assignmentId) => {
         if (!mesh) throw new Error("Executor mesh runtime is not ready");
         return mesh.finalizeExecutorUsage(assignmentId);
       },
     });
+    dataPlane.bindLedger(ledger);
+    await dataPlane.start();
     const role = executor.createExecutorRole({
       createAgentRuntime: () => runtime.createConversationRuntime(),
     });
@@ -113,6 +124,7 @@ export async function runExecutorRole(
         ledger,
         runtimeFactory,
         interactions,
+        dataPlane,
         InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
       },
       secretStore: bootstrap.secretStore,
@@ -122,6 +134,7 @@ export async function runExecutorRole(
     await waitForRoleShutdown();
   } finally {
     await mesh?.stop();
+    await dataPlane?.close();
     authority?.stopStorageMaintenance();
     await mcpHub.dispose();
   }

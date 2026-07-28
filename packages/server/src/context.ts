@@ -8,12 +8,16 @@
 import type {
   Scheduler,
   ChannelRegistry,
+  HttpHandler,
   RunRegistry,
   TaskListState,
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
 } from "@zhixing/core";
-import type { ConversationStatusNotice } from "@zhixing/core/contracts";
+import type {
+  ConversationStatusNotice,
+  JobStatusNotice,
+} from "@zhixing/core/contracts";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import type {
   AdvancementController,
@@ -51,6 +55,20 @@ export interface RuntimeControlAdapter {
     readonly next: readonly {
       readonly conversationId: string;
       readonly runId: string;
+      readonly afterStatusRevision: number;
+    }[];
+  }>;
+  jobStatus?: (
+    after: readonly {
+      readonly taskId: string;
+      readonly jobRunId: string;
+      readonly afterStatusRevision: number;
+    }[],
+  ) => Promise<{
+    readonly notices: readonly JobStatusNotice[];
+    readonly next: readonly {
+      readonly taskId: string;
+      readonly jobRunId: string;
       readonly afterStatusRevision: number;
     }[];
   }>;
@@ -140,6 +158,8 @@ export interface ServerContext {
   broadcastAll?: (method: string, params: unknown) => void;
   /** 通道注册表（不传则不启用通道功能） */
   channels?: ChannelRegistry;
+  /** Pre-server channel callback routes, keyed by exact path. */
+  channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   /**
    * 确认聚合器（不传则远程确认不启用，serve 模式回退到永久 pending → 30min expire → 拒绝）。
    * 远程权限确认的 owner 聚合入口。
@@ -192,6 +212,7 @@ export interface CreateContextOptions {
   taskListUpdate?: ServerContext["taskListUpdate"];
   taskListSnapshot?: ServerContext["taskListSnapshot"];
   channels?: ChannelRegistry;
+  channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   confirmationHub?: ConfirmationHub;
   runRegistry?: RunRegistry;
   runtimeControl?: RuntimeControlAdapter;
@@ -219,6 +240,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     taskListUpdate: opts.taskListUpdate,
     taskListSnapshot: opts.taskListSnapshot,
     channels: opts.channels,
+    channelHttpRoutes: opts.channelHttpRoutes,
     confirmationHub: opts.confirmationHub,
     runRegistry: opts.runRegistry,
     runtimeControl: opts.runtimeControl,

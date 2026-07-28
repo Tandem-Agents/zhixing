@@ -26,12 +26,13 @@ function allSurfaces(calls: string[]): AccessSurface[] {
   return [
     mockSurface("mcp", "pre-server", calls),
     mockSurface("authority-runtime", "pre-server", calls),
+    mockSurface("executor-data-plane", "pre-server", calls),
     mockSurface("asset-maintenance", "pre-server", calls),
     mockSurface("conversation", "pre-server", calls),
     mockSurface("mesh-control", "pre-server", calls),
+    mockSurface("lossless-data-plane", "pre-server", calls),
     mockSurface("channel", "pre-server", calls),
     mockSurface("delivery", "pre-server", calls),
-    mockSurface("text-renderer", "pre-server", calls),
     mockSurface("confirmation-bridge", "post-server", calls),
     mockSurface("conversation-recovery", "post-server", calls),
   ];
@@ -50,24 +51,26 @@ describe("access-surface 数据驱动装配", () => {
     expect(calls).toEqual([
       "mcp",
       "authority-runtime",
+      "executor-data-plane",
       "asset-maintenance",
       "conversation",
       "mesh-control",
+      "lossless-data-plane",
       "channel",
       "delivery",
-      "text-renderer",
     ]);
 
     await setupAccessSurfaces(surfaces, ctx("full"), "post-server");
     expect(calls).toEqual([
       "mcp",
       "authority-runtime",
+      "executor-data-plane",
       "asset-maintenance",
       "conversation",
       "mesh-control",
+      "lossless-data-plane",
       "channel",
       "delivery",
-      "text-renderer",
       "confirmation-bridge",
       "conversation-recovery",
     ]);
