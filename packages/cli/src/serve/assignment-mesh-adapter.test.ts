@@ -914,6 +914,40 @@ describe("assignment mesh adapters", () => {
     expect(replayArtifacts.getDigests).toEqual([sealedBundleArtifact(bundle).ref.digest]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("forwards interaction-settlement completion through the submission service", async () => {
+    const fixture = await createFixture();
+    let completed = 0;
+    const handler = createRunSubmissionMeshServiceHandler({
+      artifacts: fixture.ownerArtifacts,
+      executorIdForPeer: identityExecutorIdForPeer,
+      guard: conformanceSubmissionGuard(),
+      port: {
+        ...runSubmissionPort([]),
+        async completeInteractionSettlement() {
+          completed += 1;
+        },
+      },
+    });
+    const context = assignmentContext(fixture.capability);
+
+    await expect(
+      handler(
+        Buffer.from(
+          canonicalize({
+            v: 1,
+            method: "completeInteractionSettlement",
+            assignmentId: "assignment-1",
+            context,
+          }),
+          "utf8",
+        ),
+        { peer: { deviceId: fixture.executorId } } as SecureMeshConnection,
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual(Buffer.from("null", "utf8"));
+    expect(completed).toBe(1);
+  });
+
   it("preserves a real user-job journal and ledger lifecycle across the mesh boundary", async () => {
     const fixture = await createFixture();
     const protocol = await createRealJobProtocolFixture(fixture);

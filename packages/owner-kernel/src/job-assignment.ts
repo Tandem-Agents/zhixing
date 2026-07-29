@@ -32,6 +32,7 @@ import type {
   JobRunState,
   JobStatusNotice,
   JobUncertainClosure,
+  InteractionMirrorEntry,
   InteractionMirrorBatch,
   IngressContext,
   LedgerEvidencePage,
@@ -168,6 +169,8 @@ import {
   assertJobCancelFenceReplayContract,
   assertJobAdmissionReplayContract,
   assertJobConflictContainmentReplayContract,
+  assertJobInteractionSettlementCompletionReplayContract,
+  assertJobInteractionSettlementFenceReplayContract,
   assertJobOccurrenceReplayContract,
   assertJobMirrorReplayContract,
   assertJobResolutionBinding,
@@ -182,6 +185,7 @@ import {
   NOT_STARTED_PROOF_KINDS,
   notStartedRejectionKey,
   registerPendingSystemMiss,
+  sameJobInteractionSettlement,
   taskCreationProvenanceMatches,
   taskRevisionReplayViolation,
   validateJobJournalRecord,
@@ -304,6 +308,14 @@ interface JobSubmissionGuardProjection {
   >;
   readonly supersedeStartedAssignments: Set<string>;
   readonly cancelFences: Map<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
+  readonly interactionSettlementFences: Map<
+    string,
+    Extract<JobJournalRecord, { t: "interaction-settlement-fence" }>
+  >;
+  readonly completedInteractionSettlements: Map<
+    string,
+    Extract<JobJournalRecord, { t: "interaction-settlement-completed" }>
+  >;
   readonly acceptedCancellations: Set<string>;
   readonly durableStarted: Set<string>;
   readonly closedAssignments: Set<string>;
@@ -313,6 +325,20 @@ interface JobSubmissionGuardProjection {
   readonly ticketReplacementsById: Map<string, string>;
   readonly revokedTickets: Set<string>;
   ticketSyncFrontier: string | undefined;
+  readonly interactionMirrors: Map<
+    string,
+    {
+      readonly upTo: number;
+      readonly ordinal: number;
+      readonly digest: string;
+      readonly requestIds: ReadonlySet<string>;
+      readonly outcomes: ReadonlyMap<
+        string,
+        import("@zhixing/core/contracts").InteractionMirrorEntry["outcome"]
+      >;
+    }
+  >;
+  readonly interactionMirrorBatches: Set<string>;
   readonly resolutions: Map<string, JobResolutionFact>;
   readonly committedByAssignment: Map<
     string,
@@ -324,6 +350,7 @@ interface JobSubmissionGuardProjection {
   >;
   readonly systemFences: Map<string, SystemJobFence>;
   readonly systemResults: Set<string>;
+  channelInteractions: ChannelInteractionJournalState;
   nextJobRevision: number;
 }
 
@@ -351,6 +378,14 @@ interface JobProjection {
     Extract<JobJournalRecord, { t: "supersede-started-observed" }>
   >;
   readonly cancelFences: Map<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
+  readonly interactionSettlementFences: Map<
+    string,
+    Extract<JobJournalRecord, { t: "interaction-settlement-fence" }>
+  >;
+  readonly completedInteractionSettlements: Map<
+    string,
+    Extract<JobJournalRecord, { t: "interaction-settlement-completed" }>
+  >;
   readonly acceptedCancellations: Map<string, Extract<JobJournalRecord, { t: "cancel-proof-accepted" }>>;
   readonly rejectedNotStarted: Map<string, Extract<JobJournalRecord, { t: "not-started-rejected" }>>;
   readonly durableStarted: Set<string>;
@@ -367,6 +402,10 @@ interface JobProjection {
       readonly ordinal: number;
       readonly digest: string;
       readonly requestIds: ReadonlySet<string>;
+      readonly outcomes: ReadonlyMap<
+        string,
+        import("@zhixing/core/contracts").InteractionMirrorEntry["outcome"]
+      >;
     }
   >;
   readonly interactionMirrorBatches: Set<string>;
@@ -413,6 +452,20 @@ interface InProcessJobDispatcherBaseOptions {
   readonly journal: JobJournal;
   readonly executor: RunExecutorPort;
   readonly contexts: InProcessDispatchContextFactory;
+  /**
+   * dispatch 被 executor 接受后的进程内执行接缝——与 mesh 服务端
+   * onDispatchAccepted 对称;耐久事实已在 executor 账本,这里只是加速
+   * 通知,漏通知由 executor 恢复枚举兜底。
+   */
+  readonly onDispatchAccepted?: (
+    envelope: Extract<
+      import("@zhixing/core/contracts").DispatchEnvelope,
+      { execution: "job" }
+    >,
+  ) => void | Promise<void>;
+  readonly onCancelAccepted?: (
+    assignmentId: string,
+  ) => void | Promise<void>;
 }
 
 export type InProcessJobDispatcherOptions = InProcessJobDispatcherBaseOptions &
@@ -858,10 +911,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           frame.payload.event.t === "requested"
         ) {
           if (!prepared) {
-            const mirrored = state.interactionMirrors.get(frame.assignmentId);
-            if (!mirrored?.requestIds.has(frame.payload.event.requestId)) {
+            const mirroredOutcome = state.interactionMirrors
+              .get(frame.assignmentId)
+              ?.outcomes.get(frame.payload.event.requestId);
+            if (!mirroredOutcome || mirroredOutcome.t === "answered") {
               throw new TypeError(
-                "Channel interaction request requires an atomic prepared record or a durably mirrored terminal result",
+                "Channel interaction request without a prepared challenge requires a matching non-answered durable terminal result",
               );
             }
           } else {
@@ -898,17 +953,28 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           const challengeId =
             state.channelInteractions.challengeByInteraction.get(interactionKey);
           if (!challengeId) {
-            throw new TypeError(
-              "Channel interaction completion has no prepared challenge",
-            );
+            const mirroredOutcome = state.interactionMirrors
+              .get(frame.assignmentId)
+              ?.outcomes.get(frame.payload.event.requestId);
+            if (
+              !mirroredOutcome ||
+              mirroredOutcome.t === "answered" ||
+              channelRelayFinishedOutcome(mirroredOutcome) !==
+                frame.payload.event.outcome
+            ) {
+              throw new TypeError(
+                "Channel interaction completion without a prepared challenge does not match a non-answered durable terminal result",
+              );
+            }
+          } else {
+            closed = {
+              t: "channel-challenge-closed",
+              challengeId,
+              outcome: frame.payload.event.outcome,
+              at: context.at,
+            };
+            records.push(closed);
           }
-          closed = {
-            t: "channel-challenge-closed",
-            challengeId,
-            outcome: frame.payload.event.outcome,
-            at: context.at,
-          };
-          records.push(closed);
         }
         records.push(cursor);
 
@@ -1013,6 +1079,35 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         };
       })
     ).value;
+  }
+
+  async pendingChannelGrantDeliveries(): Promise<
+    readonly ChannelInteractionGrant[]
+  > {
+    return this.#select((state) => {
+      const pending: ChannelInteractionGrant[] = [];
+      for (const granted of state.channelInteractions.grantByChallenge.values()) {
+        if (granted.grant.ref.execution !== "job") continue;
+        const outcome = state.interactionMirrors
+          .get(granted.grant.assignmentId)
+          ?.outcomes.get(granted.grant.interactionRequestId);
+        if (!outcome) {
+          pending.push(structuredClone(granted.grant));
+          continue;
+        }
+        if (outcome.t !== "answered") continue;
+        if (
+          outcome.authority.via !== "channel-grant" ||
+          canonicalize(outcome.authority.grant) !==
+            canonicalize(granted.grant)
+        ) {
+          throw corruptJobJournal(
+            "Mirrored job answer conflicts with its durable channel grant",
+          );
+        }
+      }
+      return pending;
+    });
   }
 
   async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
@@ -1871,7 +1966,94 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       throw new TypeError("Ledger evidence does not close the job snapshot prefix");
     }
     if (validation.aborts.size === 0) return false;
-    await this.markUncertain(assignmentId, "job-cancel-unknown");
+    const abortTicket = [...validation.aborts.values()].find(
+      (
+        abort,
+      ): abort is Extract<
+        (typeof validation.aborts extends Map<string, infer T> ? T : never),
+        { readonly via: "abort-ticket" }
+      > => abort.via === "abort-ticket",
+    );
+    if (!abortTicket || validation.unmirroredFinished.size === 0) {
+      await this.markUncertain(assignmentId, "job-cancel-unknown");
+      return true;
+    }
+    const targetUpTo = Math.max(...validation.unmirroredFinished.keys());
+    const settlement = {
+      t: "interaction-settlement-fence" as const,
+      assignmentId,
+      ticketDigest: abortTicket.refId,
+      sourceLastSeq: validation.lastSeq,
+      sourceChainDigest: validation.chainDigest,
+      targetUpTo,
+      targetOrdinal: validation.finishedInteractionCount,
+      targetMirrorDigest: validation.interactionMirrorDigest,
+    };
+    await this.#transact<void>((state) => {
+      const assignedState = requireCurrentAssignment(state, assignmentId);
+      const current = state.states.get(assignedState.record.jobRunId);
+      if (!current) throw corruptJobJournal("Assigned job has no state");
+      const existingFence =
+        state.interactionSettlementFences.get(assignmentId);
+      if (existingFence) {
+        if (!sameJobInteractionSettlement(existingFence, settlement)) {
+          throw new Error(
+            "Job cancellation evidence conflicts with its durable interaction settlement",
+          );
+        }
+        return { kind: "return", value: undefined };
+      }
+      const existingResolution = state.resolutions.get(
+        assignedState.record.jobRunId,
+      );
+      if (
+        isOpenResolutionFact(existingResolution) &&
+        existingResolution.cause !== "job-cancel-unknown"
+      ) {
+        throw new Error("Job occurrence already has a different uncertain fact");
+      }
+      if (
+        current.state !== "dispatched" &&
+        current.state !== "running" &&
+        current.state !== "cancel-requested" &&
+        !(
+          current.state === "uncertain" &&
+          isOpenResolutionFact(existingResolution) &&
+          existingResolution.cause === "job-cancel-unknown"
+        )
+      ) {
+        throw new Error(
+          "Only an active or matching uncertain assignment can open interaction settlement",
+        );
+      }
+      const entries: LogicalRecord<JobJournalRecord>[] = [];
+      if (current.state !== "uncertain") {
+        const fact = openResolution(
+          this.#taskId,
+          assignedState.record.jobRunId,
+          this.#anchorEpoch,
+          assignmentId,
+          "job-cancel-unknown",
+          this.#clock(),
+        );
+        entries.push(
+          jobRecord(this.#taskId, {
+            t: "resolution",
+            jobRunId: assignedState.record.jobRunId,
+            fact,
+          }),
+          stateRecord(
+            this.#taskId,
+            assignedState.record.jobRunId,
+            "uncertain",
+            current.statusRevision + 1,
+            assignmentId,
+          ),
+        );
+      }
+      entries.push(jobRecord(this.#taskId, settlement));
+      return { kind: "append", entries, value: undefined };
+    });
     return true;
   }
 
@@ -2202,8 +2384,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           ordinal: 0,
           digest: interactionMirrorSeed(assignmentId),
           requestIds: new Set<string>(),
+          outcomes: new Map(),
         };
         const first = batch.entries[0]!;
+        const auditSettlement =
+          state.completedInteractionSettlements.has(assignmentId)
+            ? undefined
+            : state.interactionSettlementFences.get(assignmentId);
         assertJobMirrorReplayContract({
           assignmentExists: assigned !== undefined,
           assignmentIsCurrent:
@@ -2213,6 +2400,20 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           batchBindsRecord: batch.assignmentId === assignmentId,
           currentState,
           hasDurableCancelFence: state.cancelFences.has(assignmentId),
+          ...(auditSettlement
+            ? {
+                auditSettlementTarget: {
+                  upTo: auditSettlement.targetUpTo,
+                  ordinal: auditSettlement.targetOrdinal,
+                  mirrorDigest: auditSettlement.targetMirrorDigest,
+                },
+              }
+            : {}),
+          batchTarget: {
+            upTo: last.seq,
+            ordinal: last.ordinal,
+            mirrorDigest: batch.mirrorDigest,
+          },
           batchAlreadyMirrored: false,
           extendsCursor:
             batch.previousDigest === mirrored.digest &&
@@ -2222,7 +2423,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         });
         this.#authorizeSubmission(state, context, {
           mode:
-            currentState === "uncertain" || currentState === "cancel-requested"
+            auditSettlement ||
+            currentState === "uncertain" ||
+            currentState === "cancel-requested"
               ? "settlement"
               : "active",
           method: "submission.mirrorInteractions",
@@ -2245,6 +2448,79 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         };
       })
     ).value;
+  }
+
+  async completeInteractionSettlement(
+    assignmentId: string,
+    context: AuthorityCallContext,
+  ): Promise<void> {
+    this.#authenticateSubmission(context, {
+      method: "submission.mirrorInteractions",
+      assignmentId,
+    });
+    await this.#loadSubmissionGuard(context, {
+      method: "submission.mirrorInteractions",
+      assignmentId,
+    });
+    await this.#transact<void>((state) => {
+      const completed =
+        state.completedInteractionSettlements.get(assignmentId);
+      if (completed) {
+        this.#authorizeSubmission(state, context, {
+          mode: "durable-replay",
+          method: "submission.mirrorInteractions",
+          assignmentId,
+        });
+        return { kind: "return", value: undefined };
+      }
+      const fence = state.interactionSettlementFences.get(assignmentId);
+      if (!fence) {
+        throw new Error(
+          "Job interaction settlement has no durable audit obligation",
+        );
+      }
+      const mirrored = state.interactionMirrors.get(assignmentId);
+      if (
+        mirrored?.upTo !== fence.targetUpTo ||
+        mirrored.ordinal !== fence.targetOrdinal ||
+        mirrored.digest !== fence.targetMirrorDigest
+      ) {
+        throw new Error(
+          "Job interaction settlement has not reached its durable mirror target",
+        );
+      }
+      this.#authorizeSubmission(state, context, {
+        mode: "settlement",
+        method: "submission.mirrorInteractions",
+        assignmentId,
+      });
+      return {
+        kind: "append",
+        entries: [
+          jobRecord(this.#taskId, {
+            ...fence,
+            t: "interaction-settlement-completed",
+          }),
+        ],
+        value: undefined,
+      };
+    });
+  }
+
+  async pendingInteractionSettlements(): Promise<
+    readonly Extract<
+      JobJournalRecord,
+      { readonly t: "interaction-settlement-fence" }
+    >[]
+  > {
+    return this.#select((state) =>
+      [...state.interactionSettlementFences.values()]
+        .filter(
+          (fence) =>
+            !state.completedInteractionSettlements.has(fence.assignmentId),
+        )
+        .map((fence) => snapshot(fence)),
+    );
   }
 
   async failQueued(jobRunId: string): Promise<boolean> {
@@ -5227,6 +5503,62 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         state.cancelFences.set(body.assignmentId, body);
         return state;
       }
+      case "interaction-settlement-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertJobInteractionSettlementFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.interactionSettlementFences.has(
+            body.assignmentId,
+          ),
+          hasAtomicUncertainState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "uncertain",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          hasAtomicUnknownCancellationResolution:
+            assigned !== undefined &&
+            ((
+              state.resolutions.get(assigned.record.jobRunId)?.cause ===
+                "job-cancel-unknown" &&
+              state.resolutions.get(assigned.record.jobRunId)?.resolution ===
+                undefined
+            ) ||
+              envelopeRecords.some(
+                (record) =>
+                  record.t === "resolution" &&
+                  record.jobRunId === assigned.record.jobRunId &&
+                  record.fact.subject.assignmentId === body.assignmentId &&
+                  record.fact.cause === "job-cancel-unknown" &&
+                  record.fact.resolution === undefined,
+              )),
+        });
+        state.interactionSettlementFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-settlement-completed": {
+        assertJobInteractionSettlementCompletionReplayContract({
+          fence: state.interactionSettlementFences.get(body.assignmentId),
+          completion: body,
+          completionAlreadyExists:
+            state.completedInteractionSettlements.has(body.assignmentId),
+          mirrored: state.interactionMirrors.get(body.assignmentId),
+        });
+        state.completedInteractionSettlements.set(body.assignmentId, body);
+        return state;
+      }
       case "cancel-proof-accepted": {
         const assigned = state.assignedById.get(body.assignmentId);
         const current = assigned
@@ -5406,9 +5738,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           ordinal: 0,
           digest: interactionMirrorSeed(body.assignmentId),
           requestIds: new Set<string>(),
+          outcomes: new Map(),
         };
         const first = batch.entries[0]!;
         const last = batch.entries.at(-1)!;
+        const auditSettlement =
+          state.completedInteractionSettlements.has(body.assignmentId)
+            ? undefined
+            : state.interactionSettlementFences.get(body.assignmentId);
         assertJobMirrorReplayContract({
           assignmentExists: assigned !== undefined,
           assignmentIsCurrent:
@@ -5420,6 +5757,20 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             ? state.states.get(assigned.record.jobRunId)?.state
             : undefined,
           hasDurableCancelFence: state.cancelFences.has(body.assignmentId),
+          ...(auditSettlement
+            ? {
+                auditSettlementTarget: {
+                  upTo: auditSettlement.targetUpTo,
+                  ordinal: auditSettlement.targetOrdinal,
+                  mirrorDigest: auditSettlement.targetMirrorDigest,
+                },
+              }
+            : {}),
+          batchTarget: {
+            upTo: last.seq,
+            ordinal: last.ordinal,
+            mirrorDigest: batch.mirrorDigest,
+          },
           batchAlreadyMirrored: state.interactionMirrorBatches.has(batchKey),
           extendsCursor:
             batch.previousDigest === mirrored.digest &&
@@ -5435,6 +5786,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           requestIds: new Set([
             ...mirrored.requestIds,
             ...batch.entries.map((entry) => entry.requestId),
+          ]),
+          outcomes: new Map([
+            ...mirrored.outcomes,
+            ...batch.entries.map(
+              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
+            ),
           ]),
         });
         return state;
@@ -6580,6 +6937,218 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         state.cancelFences.set(body.assignmentId, body);
         return state;
       }
+      case "interaction-settlement-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertJobInteractionSettlementFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.interactionSettlementFences.has(
+            body.assignmentId,
+          ),
+          hasAtomicUncertainState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "uncertain",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          hasAtomicUnknownCancellationResolution:
+            assigned !== undefined &&
+            ((
+              state.resolutions.get(assigned.record.jobRunId)?.cause ===
+                "job-cancel-unknown" &&
+              state.resolutions.get(assigned.record.jobRunId)?.resolution ===
+                undefined
+            ) ||
+              envelopeRecords.some(
+                (record) =>
+                  record.t === "resolution" &&
+                  record.jobRunId === assigned.record.jobRunId &&
+                  record.fact.subject.assignmentId === body.assignmentId &&
+                  record.fact.cause === "job-cancel-unknown" &&
+                  record.fact.resolution === undefined,
+              )),
+        });
+        state.interactionSettlementFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-settlement-completed": {
+        assertJobInteractionSettlementCompletionReplayContract({
+          fence: state.interactionSettlementFences.get(body.assignmentId),
+          completion: body,
+          completionAlreadyExists:
+            state.completedInteractionSettlements.has(body.assignmentId),
+          mirrored: state.interactionMirrors.get(body.assignmentId),
+        });
+        state.completedInteractionSettlements.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-mirror": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const batch = validateAssignmentInteractionMirrorBatch(
+          body.batch,
+          this.#verifier,
+        );
+        const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
+        const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
+          upTo: 0,
+          ordinal: 0,
+          digest: interactionMirrorSeed(body.assignmentId),
+          requestIds: new Set<string>(),
+          outcomes: new Map(),
+        };
+        const first = batch.entries[0]!;
+        const last = batch.entries.at(-1)!;
+        const auditSettlement =
+          state.completedInteractionSettlements.has(body.assignmentId)
+            ? undefined
+            : state.interactionSettlementFences.get(body.assignmentId);
+        assertJobMirrorReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              body.assignmentId,
+          executorMatches: assigned?.record.executorId === batch.executorId,
+          batchBindsRecord: batch.assignmentId === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          hasDurableCancelFence: state.cancelFences.has(body.assignmentId),
+          ...(auditSettlement
+            ? {
+                auditSettlementTarget: {
+                  upTo: auditSettlement.targetUpTo,
+                  ordinal: auditSettlement.targetOrdinal,
+                  mirrorDigest: auditSettlement.targetMirrorDigest,
+                },
+              }
+            : {}),
+          batchTarget: {
+            upTo: last.seq,
+            ordinal: last.ordinal,
+            mirrorDigest: batch.mirrorDigest,
+          },
+          batchAlreadyMirrored: state.interactionMirrorBatches.has(batchKey),
+          extendsCursor:
+            batch.previousDigest === mirrored.digest &&
+            first.ordinal === mirrored.ordinal + 1 &&
+            first.seq > mirrored.upTo,
+          repeatsRequestId: batchRepeatsRequestId(batch, mirrored.requestIds),
+        });
+        state.interactionMirrorBatches.add(batchKey);
+        state.interactionMirrors.set(body.assignmentId, {
+          upTo: last.seq,
+          ordinal: last.ordinal,
+          digest: batch.mirrorDigest,
+          requestIds: new Set([
+            ...mirrored.requestIds,
+            ...batch.entries.map((entry) => entry.requestId),
+          ]),
+          outcomes: new Map([
+            ...mirrored.outcomes,
+            ...batch.entries.map(
+              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
+            ),
+          ]),
+        });
+        return state;
+      }
+      case "channel-challenge-prepared": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          !assigned ||
+          body.ref.taskId !== this.#taskId ||
+          body.ref.jobRunId !== assigned.record.jobRunId ||
+          body.ref.anchorEpoch !== assigned.record.anchorEpoch
+        ) {
+          throw corruptJobJournal(
+            "Job channel challenge does not bind its assignment source",
+          );
+        }
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+      case "channel-challenge-granted":
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      case "channel-relay-cursor": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          !assigned ||
+          assigned.record.jobRunId !== body.jobRunId ||
+          body.checkpoint.ref.execution !== "job" ||
+          body.checkpoint.ref.taskId !== this.#taskId ||
+          body.checkpoint.ref.jobRunId !== assigned.record.jobRunId ||
+          body.checkpoint.ref.anchorEpoch !== assigned.record.anchorEpoch
+        ) {
+          throw corruptJobJournal(
+            "Channel relay cursor does not bind its assignment authority",
+          );
+        }
+        const preparedInEnvelope = envelopeRecords.find(
+          (
+            candidate,
+          ): candidate is Extract<
+            JobJournalRecord,
+            { t: "channel-challenge-prepared" }
+          > =>
+            candidate.t === "channel-challenge-prepared" &&
+            candidate.assignmentId === body.assignmentId,
+        );
+        if (
+          preparedInEnvelope &&
+          preparedInEnvelope.frameSeq !== body.upToSeq
+        ) {
+          throw corruptJobJournal(
+            "Prepared challenge and relay cursor must adopt the same frame",
+          );
+        }
+        try {
+          state.channelInteractions = advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          );
+        } catch (error) {
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
       case "cancel-proof-accepted": {
         const assigned = state.assignedById.get(body.assignmentId);
         const current = assigned
@@ -7116,6 +7685,8 @@ function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
     supersedeRequests: new Map(),
     supersedeStartedAssignments: new Set(),
     cancelFences: new Map(),
+    interactionSettlementFences: new Map(),
+    completedInteractionSettlements: new Map(),
     acceptedCancellations: new Set(),
     durableStarted: new Set(),
     closedAssignments: new Set(),
@@ -7125,11 +7696,14 @@ function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
     ticketReplacementsById: new Map(),
     revokedTickets: new Set(),
     ticketSyncFrontier: undefined,
+    interactionMirrors: new Map(),
+    interactionMirrorBatches: new Set(),
     resolutions: new Map(),
     committedByAssignment: new Map(),
     bundleAcknowledgements: new Map(),
     systemFences: new Map(),
     systemResults: new Set(),
+    channelInteractions: createChannelInteractionJournalState("job"),
     nextJobRevision: 1,
   };
 }
@@ -7142,6 +7716,12 @@ export class InProcessJobDispatcher {
   readonly #contexts: InProcessDispatchContextFactory;
   readonly #cancellationSubmission: InProcessJobCancellationSubmission | undefined;
   readonly #bundleSubmission: InProcessJobBundleSubmission | undefined;
+  readonly #onDispatchAccepted:
+    | ((envelope: JobEnvelope) => void | Promise<void>)
+    | undefined;
+  readonly #onCancelAccepted:
+    | ((assignmentId: string) => void | Promise<void>)
+    | undefined;
 
   constructor(options: InProcessJobDispatcherOptions) {
     this.#enabled = options.enabled;
@@ -7150,6 +7730,8 @@ export class InProcessJobDispatcher {
     this.#contexts = options.contexts;
     this.#cancellationSubmission = options.cancellationSubmission;
     this.#bundleSubmission = options.bundleSubmission;
+    this.#onDispatchAccepted = options.onDispatchAccepted;
+    this.#onCancelAccepted = options.onCancelAccepted;
   }
 
   async dispatchPending(): Promise<readonly DispatchResult[]> {
@@ -7167,6 +7749,7 @@ export class InProcessJobDispatcher {
       outcomes.push(outcome);
       if (outcome.accepted) {
         await this.#journal.acknowledgeDispatch(item.assignmentId);
+        await this.#onDispatchAccepted?.(item.envelope);
       } else if (outcome.outcome === "rejected-before-received") {
         await this.#journal.acceptDispatchRejection(outcome);
       } else {
@@ -7211,12 +7794,14 @@ export class InProcessJobDispatcher {
       result.fence,
       this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
     );
+    await this.#onCancelAccepted?.(result.assignmentId);
     if (!(await this.#submitCancellation(result.assignmentId))) {
       await this.#executor.cancel(
         result.assignmentId,
         result.fence,
         this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
       );
+      await this.#onCancelAccepted?.(result.assignmentId);
       await this.#submitCancellation(result.assignmentId);
     }
     return result;
@@ -7231,12 +7816,14 @@ export class InProcessJobDispatcher {
         item.fence,
         this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
       );
+      await this.#onCancelAccepted?.(item.assignmentId);
       if (!(await this.#submitCancellation(item.assignmentId))) {
         await this.#executor.cancel(
           item.assignmentId,
           item.fence,
           this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
         );
+        await this.#onCancelAccepted?.(item.assignmentId);
         await this.#submitCancellation(item.assignmentId);
       }
     }
@@ -7496,6 +8083,8 @@ function emptyProjection(): JobProjection {
     supersedeRequests: new Map(),
     supersedeStarted: new Map(),
     cancelFences: new Map(),
+    interactionSettlementFences: new Map(),
+    completedInteractionSettlements: new Map(),
     acceptedCancellations: new Map(),
     rejectedNotStarted: new Map(),
     durableStarted: new Set(),
@@ -7741,6 +8330,21 @@ function relayAdoptionAtCursor(
       : {}),
     ...(frame.payload.event.t === "finished" && closed ? { closed } : {}),
   };
+}
+
+function channelRelayFinishedOutcome(
+  outcome: InteractionMirrorEntry["outcome"],
+): "allowed" | "denied" | "cancelled" | "expired" {
+  switch (outcome.t) {
+    case "answered":
+      return outcome.decision.allowed ? "allowed" : "denied";
+    case "auto-resolved":
+      return "denied";
+    case "cancelled":
+      return "cancelled";
+    case "expired":
+      return "expired";
+  }
 }
 
 function taskRevisionRecord(

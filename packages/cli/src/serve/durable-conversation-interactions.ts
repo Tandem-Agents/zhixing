@@ -20,10 +20,14 @@ import {
   type StreamFrameAppender,
 } from "@zhixing/core/protocol";
 import {
-  projectAssignmentInteractionStream,
   type ConversationAssignmentLedger,
   type InProcessAssignmentSubmission,
 } from "@zhixing/executor";
+import {
+  AssignmentInteractionProjector,
+  finishAssignmentSideEffect,
+  startAssignmentSideEffect,
+} from "./assignment-interaction-projection.js";
 
 export interface DurableInteractionBinding {
   readonly assignmentId: string;
@@ -73,8 +77,7 @@ export class DurableConversationInteractionObserver
 {
   readonly #bindings = new AsyncLocalStorage<DurableInteractionBinding>();
   readonly #requests = new Map<string, DurableInteractionBinding>();
-  readonly #projectedRecordSeq = new Map<string, number>();
-  readonly #drains = new Map<string, Promise<void>>();
+  readonly #projector = new AssignmentInteractionProjector();
   readonly #surfaceAnswers = new Map<
     string,
     {
@@ -288,34 +291,7 @@ export class DurableConversationInteractionObserver
   }
 
   async drainAssignment(binding: DurableInteractionBinding): Promise<void> {
-    const previous =
-      this.#drains.get(binding.assignmentId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => undefined)
-      .then(() => this.#projectAssignment(binding));
-    this.#drains.set(binding.assignmentId, current);
-    try {
-      await current;
-    } finally {
-      if (this.#drains.get(binding.assignmentId) === current) {
-        this.#drains.delete(binding.assignmentId);
-      }
-    }
-  }
-
-  async #projectAssignment(binding: DurableInteractionBinding): Promise<void> {
-    const projection = await projectAssignmentInteractionStream({
-      assignmentId: binding.assignmentId,
-      ledger: binding.ledger,
-      writer: binding.stream,
-      meta: binding.streamMeta,
-      afterRecordSeq: this.#projectedRecordSeq.get(binding.assignmentId),
-      signal: binding.signal,
-    });
-    this.#projectedRecordSeq.set(
-      binding.assignmentId,
-      projection.lastRecordSeq,
-    );
+    await this.#projector.drainAssignment(binding);
   }
 
   releaseAssignment(assignmentId: string): void {
@@ -325,7 +301,7 @@ export class DurableConversationInteractionObserver
         this.#surfaceAnswers.delete(requestId);
       }
     }
-    this.#projectedRecordSeq.delete(assignmentId);
+    this.#projector.release(assignmentId);
   }
 
   #runtimeBinding(input: {
@@ -345,45 +321,14 @@ export class DurableConversationInteractionObserver
     tool: ToolDefinition,
     input: Record<string, unknown>,
   ): Promise<unknown> {
-    const active = this.#requireActive();
-    const external = tool.boundaries?.some((boundary) =>
-      boundary.boundaryType === "external-service" ||
-      boundary.boundaryType === "messaging" ||
-      boundary.boundaryType === "calendar" ||
-      boundary.boundaryType === "financial"
-    ) ?? false;
-    const started = await active.ledger.startSideEffect(active.assignmentId, {
-      kind: external ? "external-call" : "tool-mutation",
-      toolName: tool.name,
-      summary: `${tool.name}(${Object.keys(input).sort().join(",")})`,
-      target: external
-        ? "external-service"
-        : tool.name === "Write" || tool.name === "Edit"
-          ? "workspace-file"
-          : "device-system",
-    });
-    return {
-      binding: active,
-      effectSeq: started.effectSeq,
-    };
+    return startAssignmentSideEffect(this.#requireActive(), tool, input);
   }
 
   async finish(
     token: unknown,
     result: { readonly status: "ok" | "failed" | "aborted" },
   ): Promise<void> {
-    if (!token || typeof token !== "object" || Array.isArray(token)) {
-      throw new TypeError("Side-effect observer token is invalid");
-    }
-    const value = token as { binding?: DurableInteractionBinding; effectSeq?: number };
-    if (!value.binding || !Number.isSafeInteger(value.effectSeq)) {
-      throw new TypeError("Side-effect observer token is incomplete");
-    }
-    await value.binding.ledger.completeSideEffect(
-      value.binding.assignmentId,
-      value.effectSeq!,
-      result,
-    );
+    await finishAssignmentSideEffect(token, result);
   }
 
   #requireActive(): DurableInteractionBinding {

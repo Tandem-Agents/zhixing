@@ -1,15 +1,19 @@
 import { Buffer } from "node:buffer";
 import {
   AuthorityStorageError,
+  DurableProjectionStorageError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   collectArtifactRefs,
   resolveDispatchArtifactClosure,
   resolveSealedBundleArtifactClosure,
   type ArtifactStore,
   type AuthorityCommitLog,
+  type DurableProjectionMutation,
+  type DurableProjectionReadContext,
   type ProjectionCursor,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
+  type RebuildableDurableProjectionIndex,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
@@ -24,6 +28,7 @@ import type {
   AuthorityError,
   CancelProofBody,
   ControlLease,
+  CommitEnvelope,
   DispatchConflictProof,
   DispatchRejectionProof,
   DispatchResult,
@@ -33,6 +38,7 @@ import type {
   LedgerEvidencePage,
   LedgerSnapshot,
   LogicalRecord,
+  JsonValue,
   PermissionSnapshotLease,
   SealedBundle,
   SupersedeProof,
@@ -466,6 +472,18 @@ interface LedgerProjection {
   acknowledgedCommitRevision?: number;
 }
 
+interface JobInteractionRecoveryIndexValue {
+  readonly v: 1;
+  readonly assignmentId: string;
+  readonly envelopeRef: ArtifactRef;
+  readonly phase: LedgerSnapshot["phase"];
+  readonly pendingInteractions: number;
+  readonly hasInteractionFacts: boolean;
+  readonly maxFinishedSeq: number;
+  readonly mirroredUpTo: number;
+  readonly hasAbort: boolean;
+}
+
 type DispatchDecision =
   | { readonly kind: "accepted" }
   | {
@@ -520,6 +538,7 @@ export class ConversationAssignmentLedger implements
   readonly #maxPendingInteractions: number;
   readonly #maxCachedAssignments: number;
   readonly #operations = new SerialTaskQueue();
+  readonly #jobInteractionRecoveryIndex: RebuildableDurableProjectionIndex;
   readonly #projections = new Map<
     string,
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
@@ -555,6 +574,16 @@ export class ConversationAssignmentLedger implements
     this.#resources = options.resources;
     this.#surfaceAbort = options.surfaceAbort;
     this.#dataPlaneTickets = options.dataPlaneTickets;
+    this.#jobInteractionRecoveryIndex = this.#log.durableProjection({
+      projectionId: "executor-job-interaction-obligations",
+      reducerVersion: 2,
+      reduce: (envelope, current) =>
+        reduceJobInteractionRecoveryIndex(
+          envelope,
+          current,
+          this.#verifier,
+        ),
+    });
     this.#maxPendingInteractions =
       options.maxPendingInteractions ?? DEFAULT_MAX_PENDING_INTERACTIONS;
     if (
@@ -995,6 +1024,20 @@ export class ConversationAssignmentLedger implements
     fence: { fenceSeq: number; requestId: string },
     ctx: AuthorityCallContext,
   ): Promise<void> {
+    await this.beginOwnerCancellation(assignmentId, fence, ctx);
+    await this.finishOwnerCancellation(assignmentId, fence, ctx);
+  }
+
+  /**
+   * Persists the owner fence without waiting for runtime shutdown, remote usage,
+   * mirrors, or proof generation. The executor composition root must signal and
+   * quiesce the matching runtime before calling finishOwnerCancellation.
+   */
+  async beginOwnerCancellation(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<void> {
     assertFence(fence, "Cancel fence");
     if (ctx.principal.kind !== "owner-control") {
       throw new Error("Cancellation requires an owner-control principal");
@@ -1005,6 +1048,26 @@ export class ConversationAssignmentLedger implements
       requestId: fence.requestId,
       body: { fenceSeq: fence.fenceSeq },
     });
+    await this.#requestAbort(assignmentId, {
+      cause: "owner-fence",
+      fence: snapshot(fence, "Cancel fence"),
+      authority: snapshot(ctx.principal.grant.scope, "Cancel authority"),
+    }, false);
+  }
+
+  /**
+   * Completes the already-persisted owner cancellation after the runtime owner
+   * has quiesced local execution and drained deterministic interaction duties.
+   */
+  async finishOwnerCancellation(
+    assignmentId: string,
+    fence: { fenceSeq: number; requestId: string },
+    ctx: AuthorityCallContext,
+  ): Promise<void> {
+    assertFence(fence, "Cancel fence");
+    if (ctx.principal.kind !== "owner-control") {
+      throw new Error("Cancellation requires an owner-control principal");
+    }
     await this.#requestAbort(assignmentId, {
       cause: "owner-fence",
       fence: snapshot(fence, "Cancel fence"),
@@ -1367,6 +1430,15 @@ export class ConversationAssignmentLedger implements
     }>(assignmentId, (state) => {
       const requested = state.requested.get(requestId);
       if (!requested) throw new Error("Interaction result has no durable request");
+      if (validatedOutcome.t === "answered") {
+        assertAnsweredInteractionAuthority(validatedOutcome.authority, {
+          assignmentId,
+          requestId,
+          ref: state.received?.body.activation.ref,
+          ownerKeyId: state.received?.body.activation.signature.keyId,
+          requested: requested.body,
+        });
+      }
       const existing = state.finished.get(requestId);
       if (existing) {
         if (canonicalize(existing.body) !== canonicalize(body)) {
@@ -1406,6 +1478,27 @@ export class ConversationAssignmentLedger implements
       outcome: validatedOutcome,
       at: transaction.commit!.at,
     }, this.#verifier);
+  }
+
+  async jobInteractionOutcome(
+    assignmentId: string,
+    requestId: string,
+  ): Promise<InteractionOutcome | undefined> {
+    assertIdentifier(requestId, "Interaction requestId");
+    return this.#select(assignmentId, (state) => {
+      if (
+        state.received?.body.activation.ref.execution !== "job" ||
+        !state.requested.has(requestId)
+      ) {
+        throw new Error(
+          "Job interaction outcome has no durable job request",
+        );
+      }
+      const finished = state.finished.get(requestId);
+      return finished
+        ? snapshot(finished.body.outcome, "Interaction outcome")
+        : undefined;
+    });
   }
 
   async interactionStreamEvents(
@@ -1518,7 +1611,6 @@ export class ConversationAssignmentLedger implements
     assertIdentifier(input.requestId, "Channel answer requestId");
     const grant = validateChannelInteractionGrant(input.grant, this.#verifier);
     const at = input.at ?? this.#clock();
-    assertChannelInteractionGrantActiveAt(grant, at);
     const selected = await this.#select(input.assignmentId, (state) => ({
       ref: state.received?.body.activation.ref,
       ownerKeyId: state.received?.body.activation.signature.keyId,
@@ -1529,34 +1621,16 @@ export class ConversationAssignmentLedger implements
         state.aborts.length === 0 &&
         !state.supersedeFence,
     }));
-    if (
-      !selected.ref ||
-      selected.ref.execution !== "job" ||
-      !selected.requested
-    ) {
-      throw new Error(
-        "Channel interaction grant has no durable pending job request",
-      );
-    }
-    if (
-      grant.signature.keyId !== selected.ownerKeyId ||
-      grant.challengeToken.signature.keyId !== selected.ownerKeyId
-    ) {
-      throw new TypeError(
-        "Channel interaction grant is not signed by the durable job owner",
-      );
-    }
-    assertChannelInteractionGrantBinding(grant, {
-      ref: selected.ref,
-      assignmentId: input.assignmentId,
-      interactionRequestId: input.requestId,
-      challengeId: grant.challengeToken.challengeId,
-      route: grant.route,
-      responder: grant.responder,
-      decision: grant.decision,
-      toolName: selected.requested.toolName,
-      display: selected.requested.display,
-    });
+    assertAnsweredInteractionAuthority(
+      { via: "channel-grant", grant },
+      {
+        assignmentId: input.assignmentId,
+        requestId: input.requestId,
+        ref: selected.ref,
+        ownerKeyId: selected.ownerKeyId,
+        requested: selected.requested,
+      },
+    );
     const outcome = validateAssignmentInteractionOutcome({
       t: "answered",
       authority: { via: "channel-grant", grant },
@@ -1583,6 +1657,7 @@ export class ConversationAssignmentLedger implements
     if (!selected.active) {
       throw new Error("Channel interaction grant cannot answer an inactive job");
     }
+    assertChannelInteractionGrantActiveAt(grant, at);
     return { kind: "authorized", grant, outcome };
   }
 
@@ -2176,11 +2251,86 @@ export class ConversationAssignmentLedger implements
       : undefined;
   }
 
+  /**
+   * job 恢复义务从同一账本状态派生,不建立第二事实源:received 恢复执行,
+   * sealed 恢复本地终态标记与 bundle 提交;started 未封包不得重新执行——
+   * 失联的 started 归 owner 的 uncertain 裁决,不在恢复集内。
+   */
+  async recoverableJobAssignments(): Promise<readonly JobEnvelope[]> {
+    const phases = new Set<LedgerSnapshot["phase"]>(["received", "sealed"]);
+    return this.#jobAssignmentsMatching(
+      (state) => phases.has(state.phase) && state.aborts.length === 0,
+    );
+  }
+
+  /**
+   * 独立于业务重执行的交互义务恢复枚举。索引只是 authority log 的可丢弃
+   * 派生物；commit log 负责 checkpoint、尾部追平与损坏重建。
+   */
+  async recoverableJobInteractionAssignments(): Promise<
+    readonly JobEnvelope[]
+  > {
+    const refs = await this.#readJobInteractionRecoveryIndex();
+    const envelopes: JobEnvelope[] = [];
+    for (const { assignmentId, envelopeRef } of refs) {
+      const envelope = await this.#loadJobEnvelope(assignmentId, envelopeRef);
+      if (envelope) envelopes.push(envelope);
+    }
+    return envelopes;
+  }
+
+  async jobAssignmentPhaseForRecovery(
+    assignmentId: string,
+  ): Promise<LedgerSnapshot["phase"] | undefined> {
+    assertIdentifier(assignmentId, "Job recovery assignment id");
+    return this.#select(assignmentId, (state) =>
+      state.received?.body.activation.ref.execution === "job"
+        ? state.phase
+        : undefined,
+    );
+  }
+
+  /** 已耐久取消的 job 恢复收束(镜像/stream 与可生成 proof),而非业务执行。 */
+  async recoverableJobCancellations(): Promise<readonly JobEnvelope[]> {
+    return this.#jobAssignmentsMatching(
+      (state) =>
+        state.aborts.length > 0 &&
+        (state.phase === "received" ||
+          state.phase === "started" ||
+          state.phase === "halted"),
+    );
+  }
+
+  async jobAssignmentForRecovery(
+    assignmentId: string,
+  ): Promise<JobEnvelope | undefined> {
+    assertIdentifier(assignmentId, "Job recovery assignment id");
+    const envelopeRef = await this.#select(
+      assignmentId,
+      (state) => state.received?.body.envelope.ref,
+    );
+    return envelopeRef
+      ? this.#loadJobEnvelope(assignmentId, envelopeRef)
+      : undefined;
+  }
+
   async hasPendingTicketCancellation(assignmentId: string): Promise<boolean> {
     return this.#select(
       assignmentId,
       (state) =>
         state.aborts.some((abort) => abort.via === "abort-ticket") &&
+        state.phase !== "failed" &&
+        state.phase !== "sealed" &&
+        state.phase !== "acked",
+    );
+  }
+
+  /** job 的取消由 owner fence 发起;失败路径以此让位给取消收束,避免竞争终态。 */
+  async hasPendingOwnerCancellation(assignmentId: string): Promise<boolean> {
+    return this.#select(
+      assignmentId,
+      (state) =>
+        state.aborts.some((abort) => abort.via === "owner-fence") &&
         state.phase !== "failed" &&
         state.phase !== "sealed" &&
         state.phase !== "acked",
@@ -2221,21 +2371,11 @@ export class ConversationAssignmentLedger implements
   async #conversationAssignmentsMatching(
     predicate: (state: LedgerProjection) => boolean,
   ): Promise<readonly ConversationEnvelope[]> {
-    const assignmentIds = new Set<string>();
-    for (const commit of await this.#log.readAll<unknown>()) {
-      for (const record of commit.entries) {
-        if (!record.stream.startsWith("assignment:")) continue;
-        assignmentIds.add(record.stream.slice("assignment:".length));
-      }
-    }
     const envelopes: ConversationEnvelope[] = [];
-    for (const assignmentId of [...assignmentIds].sort((left, right) =>
-      left.localeCompare(right, "en-US"))) {
-      const envelopeRef = await this.#select(assignmentId, (state) =>
-        predicate(state) && state.received
-          ? state.received.body.envelope.ref
-          : undefined);
-      if (!envelopeRef) continue;
+    for (
+      const { assignmentId, envelopeRef } of
+      await this.#assignmentEnvelopeRefsMatching(predicate)
+    ) {
       const envelope = await this.#loadConversationEnvelope(
         assignmentId,
         envelopeRef,
@@ -2249,13 +2389,130 @@ export class ConversationAssignmentLedger implements
     assignmentId: string,
     envelopeRef: ArtifactRef,
   ): Promise<ConversationEnvelope | undefined> {
+    const envelope = await this.#loadAssignmentEnvelope(
+      assignmentId,
+      envelopeRef,
+    );
+    return envelope.execution === "conversation" ? envelope : undefined;
+  }
+
+  async #jobAssignmentsMatching(
+    predicate: (state: LedgerProjection) => boolean,
+  ): Promise<readonly JobEnvelope[]> {
+    const envelopes: JobEnvelope[] = [];
+    for (
+      const { assignmentId, envelopeRef } of
+      await this.#assignmentEnvelopeRefsMatching(predicate)
+    ) {
+      const envelope = await this.#loadJobEnvelope(assignmentId, envelopeRef);
+      if (envelope) envelopes.push(envelope);
+    }
+    return envelopes;
+  }
+
+  async #loadJobEnvelope(
+    assignmentId: string,
+    envelopeRef: ArtifactRef,
+  ): Promise<JobEnvelope | undefined> {
+    const envelope = await this.#loadAssignmentEnvelope(
+      assignmentId,
+      envelopeRef,
+    );
+    return envelope.execution === "job" ? envelope : undefined;
+  }
+
+  async #assignmentEnvelopeRefsMatching(
+    predicate: (state: LedgerProjection) => boolean,
+  ): Promise<
+    readonly {
+      readonly assignmentId: string;
+      readonly envelopeRef: ArtifactRef;
+    }[]
+  > {
+    const assignmentIds = new Set<string>();
+    for (const commit of await this.#log.readAll<unknown>()) {
+      for (const record of commit.entries) {
+        const assignmentId = assignmentIdFromStream(record.stream);
+        if (!assignmentId) continue;
+        assignmentIds.add(assignmentId);
+      }
+    }
+    const refs: Array<{
+      readonly assignmentId: string;
+      readonly envelopeRef: ArtifactRef;
+    }> = [];
+    for (const assignmentId of [...assignmentIds].sort((left, right) =>
+      left.localeCompare(right, "en-US"))) {
+      const envelopeRef = await this.#select(assignmentId, (state) =>
+        predicate(state) && state.received
+          ? state.received.body.envelope.ref
+          : undefined);
+      if (envelopeRef) refs.push({ assignmentId, envelopeRef });
+    }
+    return refs;
+  }
+
+  async #readJobInteractionRecoveryIndex(): Promise<
+    readonly {
+      readonly assignmentId: string;
+      readonly envelopeRef: ArtifactRef;
+    }[]
+  > {
+    const scan = async () => {
+      const refs: Array<{
+        readonly assignmentId: string;
+        readonly envelopeRef: ArtifactRef;
+      }> = [];
+      let continuation: string | undefined;
+      do {
+        const page = await this.#jobInteractionRecoveryIndex.scan(
+          {
+            gte: JOB_INTERACTION_RECOVERY_KEY_PREFIX,
+            lt: `${JOB_INTERACTION_RECOVERY_KEY_PREFIX}\uffff`,
+          },
+          256,
+          continuation,
+        );
+        for (const entry of page.entries) {
+          const value = validateJobInteractionRecoveryIndexValue(entry.value);
+          if (entry.key !== jobInteractionRecoveryKey(value.assignmentId)) {
+            throw new TypeError(
+              "Job interaction recovery index value does not bind its key",
+            );
+          }
+          if (!isRecoverableJobInteractionObligation(value)) continue;
+          refs.push({
+            assignmentId: value.assignmentId,
+            envelopeRef: value.envelopeRef,
+          });
+        }
+        continuation = page.continuation;
+      } while (continuation);
+      return refs;
+    };
+    try {
+      return await scan();
+    } catch (error) {
+      if (!(error instanceof JobInteractionRecoveryProjectionValueError)) {
+        throw error;
+      }
+      await this.#jobInteractionRecoveryIndex.rebuild();
+      return scan();
+    }
+  }
+
+  async #loadAssignmentEnvelope(
+    assignmentId: string,
+    envelopeRef: ArtifactRef,
+  ): Promise<AssignmentEnvelope> {
     const bytes = await this.#artifacts.get(envelopeRef);
     const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
     if (raw.assignmentId !== assignmentId) {
       throw corruptLedger("Assignment envelope does not bind its ledger");
     }
-    if (raw.execution !== "conversation") return undefined;
-    return validateConversationEnvelope(raw, this.#verifier);
+    return raw.execution === "conversation"
+      ? validateConversationEnvelope(raw, this.#verifier)
+      : validateJobEnvelope(raw, this.#verifier);
   }
 
   async cancelProof(assignmentId: string): Promise<CancelProofBody | undefined> {
@@ -3412,6 +3669,292 @@ function emptyProjection(assignmentId: string): LedgerProjection {
 
 const requiresExecutorResourceReceipt = requiresFormalResourceCoordination;
 
+const JOB_INTERACTION_RECOVERY_KEY_PREFIX =
+  "job-interaction-obligation:";
+
+function jobInteractionRecoveryKey(assignmentId: string): string {
+  return `${JOB_INTERACTION_RECOVERY_KEY_PREFIX}${assignmentId}`;
+}
+
+/**
+ * answered 应答权威的域闸门:按 assignment 的耐久 execution 判别谁有资格
+ * 应答。channel-grant 只属于 job,且必须与本 assignment/request 的耐久事实
+ * 全绑定、由该 assignment 的耐久 owner key 签发。最终耐久写入口与 channel
+ * 预备入口共用本谓词,不得依赖上游是否已经校验过。
+ */
+function assertAnsweredInteractionAuthority(
+  authority: Extract<
+    AssignmentInteractionOutcome,
+    { readonly t: "answered" }
+  >["authority"],
+  durable: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+    readonly ref: ExecutionRef | undefined;
+    readonly ownerKeyId: string | undefined;
+    readonly requested:
+      | Extract<AssignmentRecord, { t: "interaction-requested" }>
+      | undefined;
+  },
+): void {
+  if (authority.via !== "channel-grant") return;
+  if (!durable.ref || durable.ref.execution !== "job" || !durable.requested) {
+    throw new TypeError(
+      "Channel interaction grant has no durable pending job request",
+    );
+  }
+  const grant = authority.grant;
+  if (
+    grant.signature.keyId !== durable.ownerKeyId ||
+    grant.challengeToken.signature.keyId !== durable.ownerKeyId
+  ) {
+    throw new TypeError(
+      "Channel interaction grant is not signed by the durable job owner",
+    );
+  }
+  assertChannelInteractionGrantBinding(grant, {
+    ref: durable.ref,
+    assignmentId: durable.assignmentId,
+    interactionRequestId: durable.requestId,
+    challengeId: grant.challengeToken.challengeId,
+    route: grant.route,
+    responder: grant.responder,
+    decision: grant.decision,
+    toolName: durable.requested.toolName,
+    display: durable.requested.display,
+  });
+}
+
+/** 只探记录种类以决定是否与本索引相关,结构校验仍归 validateAssignmentEntry。 */
+function isReceivedAssignmentEntry(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const inner = (body as { readonly body?: unknown }).body;
+  if (!inner || typeof inner !== "object") return false;
+  return (inner as { readonly t?: unknown }).t === "received";
+}
+
+async function reduceJobInteractionRecoveryIndex(
+  envelope: CommitEnvelope<unknown>,
+  current: DurableProjectionReadContext,
+  verifier: ProtocolSignatureVerifier,
+): Promise<readonly DurableProjectionMutation[]> {
+  const byAssignment = new Map<
+    string,
+    {
+      value: JobInteractionRecoveryIndexValue | undefined;
+      touched: boolean;
+    }
+  >();
+  for (const record of envelope.entries) {
+    const assignmentId = assignmentIdFromStream(record.stream);
+    if (!assignmentId) continue;
+    let pending = byAssignment.get(assignmentId);
+    if (!pending) {
+      const stored = await current.get(jobInteractionRecoveryKey(assignmentId));
+      pending = {
+        value:
+          stored === undefined
+            ? undefined
+            : validateJobInteractionRecoveryIndexValue(stored),
+        touched: false,
+      };
+      byAssignment.set(assignmentId, pending);
+    }
+    // 尚未被索引跟踪的 assignment 只有 received 能让它进入索引,其余记录本就
+    // 无处可落;不替本索引之外的记录承担校验,交由权威 reducer 在读取时拒绝。
+    if (!pending.value && !isReceivedAssignmentEntry(record.body)) continue;
+    const entry = validateAssignmentEntry(record.body, verifier);
+    const body = entry.body;
+    if (body.t === "received") {
+      if (body.activation.ref.execution !== "job") {
+        pending.value = undefined;
+        pending.touched = true;
+        continue;
+      }
+      pending.value = {
+        v: 1,
+        assignmentId,
+        envelopeRef: body.envelope.ref,
+        phase: "received",
+        pendingInteractions: 0,
+        hasInteractionFacts: false,
+        maxFinishedSeq: 0,
+        mirroredUpTo: 0,
+        hasAbort: false,
+      };
+      pending.touched = true;
+      continue;
+    }
+    if (!pending.value) continue;
+    let next = pending.value;
+    switch (body.t) {
+      case "dispatch-rejected":
+        next = { ...next, phase: "dispatch-rejected" };
+        break;
+      case "supersede-fenced":
+        next = { ...next, phase: "supersede-fenced" };
+        break;
+      case "started":
+        next = { ...next, phase: "started" };
+        break;
+      case "interaction-requested":
+        next = {
+          ...next,
+          pendingInteractions: next.pendingInteractions + 1,
+          hasInteractionFacts: true,
+        };
+        break;
+      case "interaction-finished":
+        next = {
+          ...next,
+          pendingInteractions: Math.max(0, next.pendingInteractions - 1),
+          hasInteractionFacts: true,
+          maxFinishedSeq: Math.max(next.maxFinishedSeq, entry.recordSeq),
+        };
+        break;
+      case "abort-requested":
+        next = { ...next, hasAbort: true };
+        break;
+      case "halted":
+        next = { ...next, phase: "halted" };
+        break;
+      case "execution-failed":
+        next = { ...next, phase: "failed" };
+        break;
+      case "bundle_sealed":
+        next = { ...next, phase: "sealed" };
+        break;
+      case "acked":
+        next = { ...next, phase: "acked" };
+        break;
+      case "mirrored":
+        next = { ...next, mirroredUpTo: body.upTo };
+        break;
+      default:
+        break;
+    }
+    pending.value = next;
+    pending.touched = true;
+  }
+  const mutations: DurableProjectionMutation[] = [];
+  for (const [assignmentId, pending] of byAssignment) {
+    if (!pending.touched) continue;
+    const value = pending.value;
+    const retained =
+      value !== undefined &&
+      (value.phase === "received" ||
+        value.phase === "started" ||
+        isRecoverableJobInteractionObligation(value));
+    mutations.push(
+      value && retained
+        ? {
+            kind: "put",
+            key: jobInteractionRecoveryKey(assignmentId),
+            value: value as unknown as JsonValue,
+          }
+        : {
+            kind: "tombstone",
+            key: jobInteractionRecoveryKey(assignmentId),
+          },
+    );
+  }
+  return mutations;
+}
+
+function validateJobInteractionRecoveryIndexValue(
+  input: JsonValue,
+): JobInteractionRecoveryIndexValue {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw corruptJobInteractionRecoveryProjection(
+      "Job interaction recovery index value is invalid",
+    );
+  }
+  const value = input as Record<string, JsonValue>;
+  const keys = Object.keys(value).sort();
+  const expected = [
+    "assignmentId",
+    "envelopeRef",
+    "hasAbort",
+    "hasInteractionFacts",
+    "maxFinishedSeq",
+    "mirroredUpTo",
+    "pendingInteractions",
+    "phase",
+    "v",
+  ];
+  if (canonicalize(keys) !== canonicalize(expected)) {
+    throw corruptJobInteractionRecoveryProjection(
+      "Job interaction recovery index value has unknown fields",
+    );
+  }
+  const ref = value.envelopeRef;
+  if (
+    value.v !== 1 ||
+    typeof value.assignmentId !== "string" ||
+    !ref ||
+    typeof ref !== "object" ||
+    Array.isArray(ref) ||
+    Object.keys(ref).sort().join(",") !== "bytes,digest" ||
+    typeof ref.digest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(ref.digest) ||
+    !Number.isSafeInteger(ref.bytes) ||
+    (ref.bytes as number) < 0 ||
+    typeof value.hasAbort !== "boolean" ||
+    typeof value.hasInteractionFacts !== "boolean" ||
+    !Number.isSafeInteger(value.maxFinishedSeq) ||
+    (value.maxFinishedSeq as number) < 0 ||
+    !Number.isSafeInteger(value.mirroredUpTo) ||
+    (value.mirroredUpTo as number) < 0 ||
+    !Number.isSafeInteger(value.pendingInteractions) ||
+    (value.pendingInteractions as number) < 0 ||
+    typeof value.phase !== "string" ||
+    ![
+      "unknown",
+      "received",
+      "dispatch-rejected",
+      "supersede-fenced",
+      "started",
+      "halted",
+      "failed",
+      "sealed",
+      "acked",
+    ].includes(value.phase)
+  ) {
+    throw corruptJobInteractionRecoveryProjection(
+      "Job interaction recovery index value is malformed",
+    );
+  }
+  return value as unknown as JobInteractionRecoveryIndexValue;
+}
+
+function isRecoverableJobInteractionObligation(
+  value: JobInteractionRecoveryIndexValue,
+): boolean {
+  return (
+    value.hasInteractionFacts &&
+    (value.phase === "received" ||
+      value.phase === "started" ||
+      value.hasAbort ||
+      value.pendingInteractions > 0 ||
+      value.maxFinishedSeq > value.mirroredUpTo)
+  );
+}
+
+function corruptJobInteractionRecoveryProjection(
+  message: string,
+): JobInteractionRecoveryProjectionValueError {
+  return new JobInteractionRecoveryProjectionValueError(message);
+}
+
+class JobInteractionRecoveryProjectionValueError
+  extends DurableProjectionStorageError
+{
+  constructor(message: string) {
+    super(message);
+    this.name = "JobInteractionRecoveryProjectionValueError";
+  }
+}
+
 function zeroAssignmentUsageFinal(assignmentId: string): {
   readonly reportDigest: string;
   readonly upToUsageSeq: 0;
@@ -3741,6 +4284,22 @@ function assignmentRecord(
 
 function assignmentStream(assignmentId: string): string {
   return `assignment:${assignmentId}`;
+}
+
+/**
+ * 与 assignment 日志共用同一提交日志、同享 `assignment:` 前缀,但由各自
+ * reducer 拥有的子流。assignmentId 自身含冒号,无法按分段区分,只能按子流
+ * 后缀排除;新增子流若漏登记,枚举与派生索引会以校验失败 fail-closed。
+ */
+const ASSIGNMENT_SUB_STREAM_SUFFIXES = [":data-plane-tickets"] as const;
+
+/** 只认本 ledger 自己写入的 assignment 流,子流一律让位给其所有者。 */
+function assignmentIdFromStream(stream: string): string | undefined {
+  if (!stream.startsWith("assignment:")) return undefined;
+  for (const suffix of ASSIGNMENT_SUB_STREAM_SUFFIXES) {
+    if (stream.endsWith(suffix)) return undefined;
+  }
+  return stream.slice("assignment:".length) || undefined;
 }
 
 async function interactionRequested(

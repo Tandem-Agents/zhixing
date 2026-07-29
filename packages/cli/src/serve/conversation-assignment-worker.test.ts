@@ -514,10 +514,10 @@ describe("ConversationAssignmentWorker", () => {
       });
       return { agentResult: { reason: "aborted" } };
     });
-    const resolveWithSurfaceTicket = vi.fn(async () => true);
+    const answerInteractionWithTicket = vi.fn(async () => undefined);
     const interactions = {
       ...interactionObserver(),
-      resolveWithSurfaceTicket,
+      answerInteractionWithTicket,
     } as unknown as DurableConversationInteractionObserver;
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
@@ -554,8 +554,8 @@ describe("ConversationAssignmentWorker", () => {
         decision: prepared.decision,
       }),
     ).resolves.toBeUndefined();
-    expect(resolveWithSurfaceTicket).toHaveBeenCalledWith(
-      confirmationBroker,
+    // 答复端口冻结在 observer:worker 只是执行宿主,原样转交票据答复。
+    expect(answerInteractionWithTicket).toHaveBeenCalledWith(
       expect.objectContaining({
         assignmentId,
         requestId: "request-interact",

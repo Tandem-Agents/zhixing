@@ -25,6 +25,7 @@ import type {
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
 import {
+  createAuthorityPrincipalMethodGuard,
   createJobCommitFence,
   createSignedCapabilityDescriptor,
   createSignedChannelChallengeToken,
@@ -44,6 +45,7 @@ import {
 import {
   ConversationAssignmentLedger,
   DataPlaneTicketRegistry,
+  ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import type { SecureMeshConnection } from "@zhixing/mesh";
@@ -92,7 +94,19 @@ import {
   DataPlaneTicketMeshClient,
   createDataPlaneTicketServiceHandler,
 } from "../data-plane-ticket-mesh.js";
+import type { JobInteractionAnswerPort } from "../durable-job-interactions.js";
+import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import { ExecutorDataPlaneRuntime } from "../executor-data-plane-runtime.js";
+import { loadOrCreateDeviceKey } from "../mesh-device-key.js";
+import {
+  JobAssignmentWorker,
+  type JobRuntimePort,
+} from "../job-assignment-worker.js";
+import {
+  JOB_INTERACTION_SERVICE,
+  JobInteractionMeshClient,
+  createJobInteractionServiceHandler,
+} from "../job-interaction-mesh.js";
 import {
   ExecutionStatusHub,
   FirstPartyFinalitySession,
@@ -102,8 +116,19 @@ import { createLosslessDataPlaneComposition } from "../lossless-data-plane-compo
 import type { MeshRuntimeAssembly } from "../mesh-runtime-assembly.js";
 import { createOwnerControlAuthorizer } from "../owner-control-authorizer.js";
 
-const NOW = "2026-07-28T00:00:00.000Z";
-const EXPIRY = "2026-07-28T02:00:00.000Z";
+// 场景基准时间取真实当前时刻,且每个场景开跑时刷新:授权物的接受方按
+// 真实(含单调)时钟校验剩余时效,控制租约仅 60 秒——晚启动的用例若沿用
+// 模块加载时刻,租约在开跑前就已耗尽。
+let NOW = new Date().toISOString();
+let EXPIRY = new Date(Date.parse(NOW) + 2 * 60 * 60 * 1000).toISOString();
+// 控制租约受 60 秒协议上限约束,与其余授权物的两小时窗口分开派生。
+let CONTROL_LEASE_EXPIRY = new Date(Date.parse(NOW) + 60_000).toISOString();
+
+function refreshScenarioClock(): void {
+  NOW = new Date().toISOString();
+  EXPIRY = new Date(Date.parse(NOW) + 2 * 60 * 60 * 1000).toISOString();
+  CONTROL_LEASE_EXPIRY = new Date(Date.parse(NOW) + 60_000).toISOString();
+}
 const DIGEST = `sha256:${"2".repeat(64)}` as const;
 const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
 
@@ -237,6 +262,10 @@ function createRuntime(
     broker.onRequest((request) => {
       queueMicrotask(() => broker.resolve(request.id, { kind: "allow-once" }));
     });
+  } else {
+    // 渠道场景:executor 侧存在等待远端裁决的交互面,请求保持挂起,
+    // 由渠道 grant 经耐久答复端口解决;无订阅者会触发 fail-closed 兜底。
+    broker.onRequest(() => {});
   }
   const assistant: Message = {
     role: "assistant",
@@ -347,13 +376,14 @@ function createExecutorLedger(input: {
     verifier: input.authority.verifier,
     ownerControl: createOwnerControlAuthorizer(
       input.authority.verifier,
-      () => NOW,
+      () => new Date().toISOString(),
     ),
     snapshotFor: input.snapshotFor,
     permissionSnapshotFor: input.permissionSnapshotFor,
     runtimeBindingGuard: () => undefined,
     dataPlaneTickets: input.tickets,
-    clock: () => NOW,
+    resources: input.authority.executorResourceGovernor,
+    clock: () => new Date().toISOString(),
   });
 }
 
@@ -363,6 +393,8 @@ interface RemoteExecutorHarness {
   readonly ledger: ConversationAssignmentLedger;
   readonly directory: RemoteConversationExecutionDirectory;
   readonly mesh: MeshRuntimeAssembly;
+  /** 远端 executor worker 的失败出口:静默会让 owner 侧只表现为挂起。 */
+  readonly workerErrors: readonly Error[];
   close(): Promise<void>;
 }
 
@@ -372,28 +404,68 @@ async function createRemoteConversationExecutor(input: {
   readonly protocol: ConversationProtocolRuntime;
   readonly runtimeFactory: RuntimeFactory;
   readonly interactions: DurableConversationInteractionObserver;
+  readonly executorKey: Awaited<ReturnType<typeof loadOrCreateDeviceKey>>;
 }): Promise<RemoteExecutorHarness> {
   const executorId = "executor:s6-remote";
-  const executorDeviceId = "device:s6-remote";
+  // 远端 executor 持自己的设备钥匙:artifact 传输授权等协议物要求
+  // 签名者即来源设备,借 owner 钥匙署远端设备名无法通过校验。
+  const executorKey = input.executorKey;
+  const executorDeviceId = executorKey.deviceId;
   const executorRoot = path.join(input.home, "remote-executor");
   const artifacts = new FileArtifactStore(path.join(executorRoot, "artifacts"));
   const log = new FileAuthorityCommitLog(
     path.join(executorRoot, "authority"),
     artifacts,
+    { clock: () => new Date().toISOString() },
   );
   const permissions = new Map<string, TrustRuleSnapshot>();
-  let snapshot = executorSnapshot(executorId, input.authority.signer, 0);
-  const executorAuthority = {
-    ...input.authority,
+  let snapshot = executorSnapshot(executorId, executorKey, 1);
+  // 远端 executor 的资源治理必须以自己的身份与账本运行——资源根的
+  // audience 绑定 executorId,复用 owner 实例会被 audience 校验拒绝。
+  const remoteResourceGovernor = new ExecutorResourceGovernor({
+    log,
+    signer: executorKey,
+    verifier: input.authority.verifier,
+    guard: createAuthorityPrincipalMethodGuard({
+      "resource-governor": [
+        "reservation.enqueueRoot",
+        "reservation.prepareAssignmentRoot",
+        "reservation.prepareSystemJobRoot",
+        "reservation.acquireRoot",
+        "reservation.acquireChild",
+        "reservation.reserveUsage",
+        "reservation.consume",
+        "reservation.settle",
+        "reservation.release",
+      ],
+    }),
     executorId,
+    localDomainId: `local:${executorDeviceId}`,
+    localGovernorEpoch: 1,
+    clock: () => new Date().toISOString(),
+  });
+  // 惰性覆盖:owner stack 上被禁用的 getter(如本地 executorLog)不得
+  // 被浅展开立即求值,远端替换面按属性名代理。
+  const executorOverrides: Record<string, unknown> = {
+    executorId,
+    signer: executorKey,
     executorLog: log,
     artifacts,
+    executorResourceGovernor: remoteResourceGovernor,
     executorCapabilities: {
       snapshotFor: (candidate: string) =>
         candidate === executorId ? snapshot : undefined,
     },
     permissionSnapshotFor: (digest: string) => permissions.get(digest),
-  } as AuthorityRuntimeStack;
+  };
+  const executorAuthority = new Proxy(input.authority, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && property in executorOverrides) {
+        return executorOverrides[property];
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as AuthorityRuntimeStack;
   const dataPlane = new ExecutorDataPlaneRuntime({
     zhixingHome: executorRoot,
     authority: executorAuthority,
@@ -402,10 +474,10 @@ async function createRemoteConversationExecutor(input: {
       AssignmentStreamWriter,
       DataPlaneTicketRegistry,
     },
-    clock: () => NOW,
+    clock: () => new Date().toISOString(),
   });
   const ledger = createExecutorLedger({
-    authority: input.authority,
+    authority: executorAuthority,
     executorId,
     log,
     artifacts,
@@ -444,7 +516,7 @@ async function createRemoteConversationExecutor(input: {
       receiver: ownerReceiver,
       verifier: input.authority.verifier,
       authorize: () => undefined,
-      clock: () => Date.parse(NOW),
+      clock: () => Date.now(),
     }),
   );
   executorHandlers.set(
@@ -454,7 +526,7 @@ async function createRemoteConversationExecutor(input: {
       receiver: executorReceiver,
       verifier: input.authority.verifier,
       authorize: () => undefined,
-      clock: () => Date.parse(NOW),
+      clock: () => Date.now(),
     }),
   );
 
@@ -462,12 +534,13 @@ async function createRemoteConversationExecutor(input: {
     client: executorToOwner,
     artifacts,
     receiver: executorReceiver,
-    signer: input.authority.signer,
+    signer: executorKey,
     localDeviceId: executorDeviceId,
     peerDeviceId: input.authority.deviceId,
     authorizationFor: authorizationForExecutor,
-    clock: () => Date.parse(NOW),
+    clock: () => Date.now(),
   });
+  const workerErrors: Error[] = [];
   const worker = new ConversationAssignmentWorker({
     ledger,
     runtimeFactory: input.runtimeFactory,
@@ -480,6 +553,7 @@ async function createRemoteConversationExecutor(input: {
     InProcessAssignmentSubmission,
     interactions: input.interactions,
     createStream: (stream) => dataPlane.createStream(stream),
+    onError: (_assignmentId, error) => workerErrors.push(error),
   });
   executorHandlers.set(
     RUN_EXECUTOR_SERVICE,
@@ -488,12 +562,12 @@ async function createRemoteConversationExecutor(input: {
       guard: ledger,
       artifacts,
       verifier: input.authority.verifier,
-      signer: input.authority.signer,
+      signer: executorKey,
       localDeviceId: executorDeviceId,
       artifactAuthorizationFor: authorizationForExecutor,
       authorizePeer: (deviceId) => deviceId === input.authority.deviceId,
       onDispatchAccepted: (envelope) => worker.accept(envelope),
-      clock: () => Date.parse(NOW),
+      clock: () => Date.now(),
     }),
   );
   ownerHandlers.set(
@@ -517,7 +591,7 @@ async function createRemoteConversationExecutor(input: {
         ownerMayPresentSurfaceTicket: (connection) =>
           connection.peer.deviceId === input.authority.deviceId,
         authorizeOwnerRelay: async (request) => {
-          await ledger.authorizeOwnerRelay({
+          await dataPlane.authorizeOwnerRelayConsumer({
             assignmentId: request.assignmentId,
             consumer: request.consumer as Extract<
               typeof request.consumer,
@@ -552,7 +626,7 @@ async function createRemoteConversationExecutor(input: {
     localDeviceId: input.authority.deviceId,
     peerDeviceId: executorDeviceId,
     authorizationFor: authorizationForOwner,
-    clock: () => Date.parse(NOW),
+    clock: () => Date.now(),
   });
   const remoteDataPlane = {
     dataPlaneForExecutor(candidate: string) {
@@ -574,7 +648,7 @@ async function createRemoteConversationExecutor(input: {
           permissions.set(permission.digest, permission);
           snapshot = executorSnapshot(
             executorId,
-            input.authority.signer,
+            executorKey,
             permission.snapshotVersion,
           );
           return snapshot;
@@ -590,7 +664,7 @@ async function createRemoteConversationExecutor(input: {
               permissions.set(permission.digest, permission);
               snapshot = executorSnapshot(
                 executorId,
-                input.authority.signer,
+                executorKey,
                 permission.snapshotVersion,
               );
               return snapshot;
@@ -606,6 +680,7 @@ async function createRemoteConversationExecutor(input: {
     ledger,
     directory,
     mesh: remoteDataPlane,
+    workerErrors,
     async close() {
       await worker.close();
       await dataPlane.close();
@@ -617,13 +692,32 @@ async function runConversationScenario(
   surface: ConversationSurface,
   topology: ExecutionTopology,
 ) {
+  refreshScenarioClock();
   const home = await createTempDir(`s6-${surface}-${topology}`);
+  // 远端 executor 的设备钥匙先于 owner stack 生成:协议物要求签名者即
+  // 来源设备,owner 侧的设备授权面也要认这把钥匙。
+  const remoteExecutorKey =
+    topology === "remote"
+      ? await loadOrCreateDeviceKey(new MemorySecretStore())
+      : undefined;
   const authority = await setupAuthorityRuntime({
     zhixingHome: home,
     secretStore: new MemorySecretStore(),
     executorReadiness,
     enableLocalExecutor: topology === "local",
-    clock: () => NOW,
+    ...(remoteExecutorKey
+      ? {
+          authorizedDeviceIds: [remoteExecutorKey.deviceId],
+          trustedIdentities: [
+            enrollDeviceIdentity(remoteExecutorKey, {
+              displayName: "s6-remote-executor",
+              platform: "linux",
+              enrolledAt: NOW,
+            }),
+          ],
+        }
+      : {}),
+    clock: () => new Date().toISOString(),
   });
   const interactions = new DurableConversationInteractionObserver();
   const runtime = createRuntime(home, interactions, surface);
@@ -647,7 +741,7 @@ async function runConversationScenario(
         AssignmentStreamWriter,
         DataPlaneTicketRegistry,
       },
-      clock: () => NOW,
+      clock: () => new Date().toISOString(),
     });
   }
   const jobStatus = new JobStatusDirectory();
@@ -662,6 +756,7 @@ async function runConversationScenario(
     authority,
     manager: () => manager,
     interactions,
+    clock: () => new Date().toISOString(),
     ...(topology === "local"
       ? {
           localExecutor: {
@@ -699,6 +794,7 @@ async function runConversationScenario(
       protocol,
       runtimeFactory,
       interactions,
+      executorKey: remoteExecutorKey!,
     });
     protocol.bindRemoteExecution(remote.directory);
   }
@@ -709,6 +805,7 @@ async function runConversationScenario(
     return { success: true as const, messageId: "message-s6" };
   });
   const channels = fakeChannels(sendChallenge);
+  const conversationBackgroundErrors: Error[] = [];
   const composition = createLosslessDataPlaneComposition({
     authority,
     ...(localDataPlane ? { local: localDataPlane } : {}),
@@ -717,6 +814,8 @@ async function runConversationScenario(
     protocol,
     channels: () => channels,
     jobStatus,
+    onDataPlaneError: (error) => conversationBackgroundErrors.push(error),
+    onCoordinatorError: (error) => conversationBackgroundErrors.push(error),
   });
   composition.runtime.bindChannels(channels);
 
@@ -785,7 +884,21 @@ async function runConversationScenario(
     notify: () => {},
   });
   if (surface === "channel") {
-    await vi.waitFor(() => expect(sendChallenge).toHaveBeenCalledOnce());
+    await vi.waitFor(
+      () => {
+        if (conversationBackgroundErrors.length > 0) {
+          throw new AggregateError(
+            conversationBackgroundErrors,
+            `S6 conversation background failures: ${conversationBackgroundErrors
+              .slice(0, 3)
+              .map((error) => `${error.name}: ${error.message}`)
+              .join("; ")}`,
+          );
+        }
+        expect(sendChallenge).toHaveBeenCalledOnce();
+      },
+      { timeout: 30_000 },
+    );
     const current = challenge;
     if (!current) throw new Error("S6 channel scenario did not emit a challenge");
     await composition.coordinator.handleChallengeAction({
@@ -794,8 +907,58 @@ async function runConversationScenario(
       decision: { allowed: true },
     });
   }
-  const settled = await turn;
-  if (settled.kind === "error") throw settled.error;
+  const settled = await Promise.race([
+    turn,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => {
+        for (const error of conversationBackgroundErrors.slice(0, 1)) {
+          if (error instanceof AggregateError) {
+            for (const entry of error.errors) {
+              if (entry instanceof Error && entry.cause instanceof Error) {
+                console.error("S6-DIAG-CAUSE", entry.cause.stack);
+              }
+            }
+          }
+        }
+        reject(
+          new Error(
+            `S6-DIAG turn did not settle; background=${JSON.stringify(
+              conversationBackgroundErrors.slice(0, 2).map((error) =>
+                error instanceof AggregateError
+                  ? `${error.name}: [${error.errors
+                      .map((entry) =>
+                        entry instanceof Error
+                          ? `${entry.name}: ${entry.message} <= ${
+                              entry.cause instanceof Error
+                                ? `${entry.cause.stack}`
+                                : String(entry.cause)
+                            }`
+                          : String(entry),
+                      )
+                      .join(" | ")}]`
+                  : `${error.name}: ${error.message}`,
+              ),
+            )}; remoteWorker=${JSON.stringify(
+              (remote?.workerErrors ?? []).map(
+                (error) => `${error.name}: ${error.message}`,
+              ),
+            )}`,
+          ),
+        );
+      }, 25_000).unref(),
+    ),
+  ]);
+  if (settled.kind === "error") {
+    if (settled.error instanceof AggregateError) {
+      throw new Error(
+        `${settled.error.message}: [${settled.error.errors
+          .map((entry) => (entry instanceof Error ? entry.message : String(entry)))
+          .join(" | ")}]`,
+        { cause: settled.error },
+      );
+    }
+    throw settled.error;
+  }
   expect(settled.kind).toBe("settled");
   await protocol.recover();
 
@@ -879,7 +1042,7 @@ function createJobUnsignedEnvelope(input: {
     },
     renewalSeq: 1,
     issuedAt: NOW,
-    expiry: EXPIRY,
+    expiry: CONTROL_LEASE_EXPIRY,
   };
   const permissionBody = {
     v: 1 as const,
@@ -1010,7 +1173,8 @@ function jobDispatchContexts(input: {
         requestDigest,
         controlLease: input.envelope.controlLease,
         issuedAt: NOW,
-        expiry: EXPIRY,
+        // grant 的时效必须落在其控制租约窗口内。
+        expiry: input.envelope.controlLease.expiry,
       };
       return {
         principal: {
@@ -1021,17 +1185,9 @@ function jobDispatchContexts(input: {
           },
         },
         requestId: request.requestId,
-        deadlineAt: EXPIRY,
+        deadlineAt: input.envelope.controlLease.expiry,
       };
     },
-  };
-}
-
-function submissionContext(capability: AuthorityCapability): AuthorityCallContext {
-  return {
-    principal: { kind: "assignment", capability },
-    requestId: "job-submission-s6",
-    deadlineAt: EXPIRY,
   };
 }
 
@@ -1040,12 +1196,13 @@ async function runJobScenario(
   interactive: boolean,
   probeCrossDomain = false,
 ) {
+  refreshScenarioClock();
   const home = await createTempDir(`s6-job-${topology}-${interactive}`);
   const authority = await setupAuthorityRuntime({
     zhixingHome: home,
     secretStore: new MemorySecretStore(),
     executorReadiness,
-    clock: () => NOW,
+    clock: () => new Date().toISOString(),
   });
   const permissionSnapshot = createSignedTrustRuleSnapshot(
     { snapshotVersion: 1, rules: [], generatedAt: NOW },
@@ -1060,7 +1217,7 @@ async function runJobScenario(
       AssignmentStreamWriter,
       DataPlaneTicketRegistry,
     },
-    clock: () => NOW,
+    clock: () => new Date().toISOString(),
   });
   const snapshot = await authority.currentExecutorSnapshot();
   const ledger = createExecutorLedger({
@@ -1102,7 +1259,7 @@ async function runJobScenario(
     submission: submissionAuthorizer,
     ingress: { authorize() {} },
     delivery: authority.participant,
-    clock: () => NOW,
+    clock: () => new Date().toISOString(),
   });
   const definition: TaskDefinition = {
     taskId: "task-s6",
@@ -1166,10 +1323,63 @@ async function runJobScenario(
     activation: dispatch.activation,
   });
 
-  let executorPort: ConversationAssignmentLedger | MeshRunExecutorPort = ledger;
+  // executor-owned job 执行装配:worker 自持真实交互协调器;fake 只在
+  // 外部 job runtime 边界(可控 agent 脚本),与 conversation 场景同构。
+  const jobRuntime: JobRuntimePort = {
+    create: async ({ confirmationBroker: broker }) => {
+      // executor 侧交互面存在但只等待远端裁决:渠道 grant 或无应答
+      // fail-closed 均须经耐久答复端口进入,不允许 broker 本地兜底。
+      broker.onRequest(() => {});
+      return {
+        async *run(instruction) {
+          const createdAt = Date.parse(NOW);
+          await broker.requestConfirmation({
+            id: "interaction-job-s6",
+            tool: "bash",
+            toolInput: { command: instruction.prompt },
+            workingDirectory: home,
+            display: {
+              title: "Approve?",
+              body: { kind: "generic", summary: "job work" },
+              cwd: home,
+            },
+            options: [{ kind: "allow-once", label: "Allow" }],
+            sessionType: "interactive",
+            contextId: { kind: "main" },
+            createdAt,
+            expiresAt: createdAt + 60_000,
+          });
+          yield { type: "text_delta", text: "done" } as AgentYield;
+          return {
+            status: "completed" as const,
+            summary: "scheduled work completed",
+            contentAssets: [],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+        async dispose() {},
+      };
+    },
+  };
+
   let ownerSubmission: JobJournal | MeshRunSubmissionPort = journal;
+  let executorPort: ConversationAssignmentLedger | MeshRunExecutorPort = ledger;
   let mesh: MeshRuntimeAssembly | undefined;
   let ackInterrupted = false;
+  const workerErrors: Error[] = [];
+  const worker = new JobAssignmentWorker({
+    ledger,
+    runtime: jobRuntime,
+    submissionFor: () => ownerSubmission,
+    finalizeUsage: async () => ({
+      reportDigest: DIGEST,
+      upToUsageSeq: 0,
+    }),
+    InProcessAssignmentSubmission,
+    createStream: (stream) => dataPlane.createStream(stream),
+    onError: (_assignmentId, error) => workerErrors.push(error),
+  });
+  let answers: JobInteractionAnswerPort = worker;
   if (topology === "remote") {
     const ownerHandlers = new Map<string, ServiceHandler>();
     const executorHandlers = new Map<string, ServiceHandler>();
@@ -1206,14 +1416,14 @@ async function runJobScenario(
     );
     const executorToOwner = serviceClient(
       ownerHandlers,
-      "device:s6-job-remote",
+      authority.deviceId,
     );
     const artifactHandler = createAssignmentArtifactServiceHandler({
       artifacts: authority.artifacts,
       receiver: executorReceiver,
       verifier: authority.verifier,
       authorize: () => undefined,
-      clock: () => Date.parse(NOW),
+      clock: () => Date.now(),
     });
     ownerHandlers.set(ASSIGNMENT_ARTIFACT_SERVICE, artifactHandler);
     executorHandlers.set(ASSIGNMENT_ARTIFACT_SERVICE, artifactHandler);
@@ -1225,10 +1435,12 @@ async function runJobScenario(
         artifacts: authority.artifacts,
         verifier: authority.verifier,
         signer: authority.signer,
-        localDeviceId: "device:s6-job-remote",
+        localDeviceId: authority.deviceId,
         artifactAuthorizationFor: authorization,
         authorizePeer: (deviceId) => deviceId === authority.deviceId,
-        clock: () => Date.parse(NOW),
+        onDispatchAccepted: (envelope) => worker.accept(envelope),
+        onCancelAccepted: (assignmentId) => worker.cancelAccepted(assignmentId),
+        clock: () => Date.now(),
       }),
     );
     ownerHandlers.set(
@@ -1249,7 +1461,7 @@ async function runJobScenario(
           surfacePrincipalFor: () => "surface:device:owner",
           ownerMayPresentSurfaceTicket: () => true,
           authorizeOwnerRelay: async (request) => {
-            await ledger.authorizeOwnerRelay({
+            await dataPlane.authorizeOwnerRelayConsumer({
               assignmentId: request.assignmentId,
               consumer: request.consumer as Extract<
                 typeof request.consumer,
@@ -1262,6 +1474,15 @@ async function runJobScenario(
         }),
       }),
     );
+    executorHandlers.set(
+      JOB_INTERACTION_SERVICE,
+      createJobInteractionServiceHandler({
+        answers: worker,
+        verifier: authority.verifier,
+        authorizeOwner: (connection) =>
+          connection.peer.deviceId === authority.deviceId,
+      }),
+    );
     executorPort = new MeshRunExecutorPort({
       client: ownerToExecutor,
       artifacts: authority.artifacts,
@@ -1269,20 +1490,21 @@ async function runJobScenario(
       verifier: authority.verifier,
       signer: authority.signer,
       localDeviceId: authority.deviceId,
-      peerDeviceId: "device:s6-job-remote",
+      peerDeviceId: authority.deviceId,
       authorizationFor: authorization,
-      clock: () => Date.parse(NOW),
+      clock: () => Date.now(),
     });
     ownerSubmission = new MeshRunSubmissionPort({
       client: executorToOwner,
       artifacts: authority.artifacts,
       receiver: executorReceiver,
       signer: authority.signer,
-      localDeviceId: "device:s6-job-remote",
+      localDeviceId: authority.deviceId,
       peerDeviceId: authority.deviceId,
       authorizationFor: authorization,
-      clock: () => Date.parse(NOW),
+      clock: () => Date.now(),
     });
+    answers = new JobInteractionMeshClient(ownerToExecutor);
     mesh = {
       dataPlaneForExecutor(candidate: string) {
         if (candidate !== authority.executorId) {
@@ -1296,10 +1518,6 @@ async function runJobScenario(
     } as MeshRuntimeAssembly;
   }
 
-  const assignmentSubmission = new InProcessAssignmentSubmission({
-    ledger,
-    owner: ownerSubmission,
-  });
   const dispatcher = new InProcessJobDispatcher({
     enabled: true,
     journal,
@@ -1309,27 +1527,21 @@ async function runJobScenario(
       ownerDeviceId: authority.deviceId,
       envelope: unsigned,
     }),
+    ...(topology === "local"
+      ? {
+          onDispatchAccepted: (envelope) => worker.accept(envelope),
+          onCancelAccepted: (assignmentId: string) =>
+            worker.cancelAccepted(assignmentId),
+        }
+      : {}),
     cancellationSubmission: {
-      submitCancellation: (assignmentId) =>
-        assignmentSubmission.submitCancellation(
-          assignmentId,
-          submissionContext(dispatch.envelope.capabilities[0]!),
-        ),
+      submitCancellation: async () => false,
     },
     bundleSubmission: {
-      submitSealedBundle: (assignmentId) =>
-        assignmentSubmission.submitSealedBundle(
-          assignmentId,
-          submissionContext(dispatch.envelope.capabilities[0]!),
-        ),
+      submitSealedBundle: async () => {
+        throw new Error("S6 job scenario does not redrive sealed bundles");
+      },
     },
-  });
-  await dispatcher.dispatchPending();
-  const context = submissionContext(dispatch.envelope.capabilities[0]!);
-  await assignmentSubmission.startAndReport(unsigned.assignmentId, context);
-  const writer = await dataPlane.createStream({
-    assignmentId: unsigned.assignmentId,
-    ref: dispatch.activation.ref,
   });
 
   const interactions = new DurableConversationInteractionObserver();
@@ -1339,6 +1551,7 @@ async function runJobScenario(
       throw new Error("Job-only S6 scenario has no conversation manager");
     },
     interactions,
+    clock: () => new Date().toISOString(),
   });
   let challenge: ChannelChallengeMessage | undefined;
   let sendAttempts = 0;
@@ -1356,6 +1569,15 @@ async function runJobScenario(
   });
   const channels = fakeChannels(sendChallenge);
   const jobStatus = new JobStatusDirectory();
+  const backgroundErrors: Error[] = [];
+  const describeError = (error: unknown, depth = 0): string =>
+    error instanceof Error
+      ? `${error.name}: ${error.message}${
+          error.cause !== undefined && depth < 6
+            ? ` <- ${describeError(error.cause, depth + 1)}`
+            : ""
+        }`
+      : String(error);
   const composition = createLosslessDataPlaneComposition({
     authority:
       topology === "local"
@@ -1367,27 +1589,11 @@ async function runJobScenario(
     protocol,
     channels: () => channels,
     jobStatus,
+    onDataPlaneError: (error) => backgroundErrors.push(error),
+    onCoordinatorError: (error) => backgroundErrors.push(error),
   });
   composition.runtime.bindChannels(channels);
 
-  const interactionRequestId = "interaction-job-s6";
-  const display = { title: "Approve?", lines: ["job work"] };
-  await ledger.requestInteraction(unsigned.assignmentId, {
-    requestId: interactionRequestId,
-    toolName: "bash",
-    display,
-    issuedAt: NOW,
-    ttlMs: 60_000,
-    expiresAt: "2026-07-28T00:01:00.000Z",
-  });
-  await writer.appendInteractionRequested({
-    requestId: interactionRequestId,
-    toolName: "bash",
-    display,
-    issuedAt: NOW,
-    ttlMs: 60_000,
-    expiresAt: "2026-07-28T00:01:00.000Z",
-  });
   let preparedCursorInterrupted = false;
   if (topology === "remote" && interactive) {
     const adopt = journal.adoptChannelRelayFrame.bind(journal);
@@ -1398,42 +1604,13 @@ async function runJobScenario(
       })
       .mockImplementation((input) => adopt(input));
   }
-  const resolveNoInteractiveSurface = vi.fn(async () => {
-    await writer.appendInteractionFinished({
-      requestId: interactionRequestId,
-      outcome: "denied",
-    });
-    await assignmentSubmission.finishAndMirror(
-      unsigned.assignmentId,
-      interactionRequestId,
-      {
-        t: "auto-resolved",
-        decision: "denied",
-        reason: "no-interactive-surface",
-      },
-      context,
-    );
-  });
-  const deliverGrant = vi.fn(async (grant) => {
-    const preparation = await ledger.prepareInteractionAnswerFromChannel({
-      assignmentId: unsigned.assignmentId,
-      requestId: interactionRequestId,
-      grant,
-      at: NOW,
-    });
-    if (preparation.kind === "authorized") {
-      await writer.appendInteractionFinished({
-        requestId: interactionRequestId,
-        outcome: preparation.outcome.decision.allowed ? "allowed" : "denied",
-      });
-      await assignmentSubmission.finishAndMirror(
-        unsigned.assignmentId,
-        interactionRequestId,
-        preparation.outcome,
-        context,
-      );
-    }
-  });
+  // 唯一驱动面:dispatch 从生产入口进入 executor,worker 自然执行并产生
+  // interaction、stream、result 与 delivery 终态。
+  await dispatcher.dispatchPending();
+
+  // job owner 的生产登记接缝:义务跟随已被 executor 接收的 assignment
+  // 登记;答复半边只能是生产答复端口(进程内协调器或 mesh 客户端),
+  // 测试不再手写任何 grant/无应答处理。
   const relay = await composition.coordinator.registerJobRelay({
     assignmentId: unsigned.assignmentId,
     ref: dispatch.activation.ref as Extract<
@@ -1443,14 +1620,30 @@ async function runJobScenario(
     executorId: authority.executorId,
     controlLeaseId: dispatch.envelope.controlLease.controlLeaseId,
     journal,
-    deliverGrant,
-    resolveNoInteractiveSurface,
+    answers,
   });
+
   if (interactive) {
-    await vi.waitFor(() =>
-      expect(sendChallenge).toHaveBeenCalledTimes(
-        topology === "remote" ? 2 : 1,
-      ),
+    await vi.waitFor(
+      () => {
+        // 故意注入的传输/prepared 中断是预期故障,由重驱吸收,不算失败。
+        const unexpected = [...workerErrors, ...backgroundErrors].filter(
+          (error) => !describeError(error).includes("injected"),
+        );
+        if (unexpected.length > 0) {
+          throw new AggregateError(
+            unexpected,
+            `S6 job scenario background failures: ${unexpected
+              .slice(0, 3)
+              .map((error) => describeError(error))
+              .join("; ")}`,
+          );
+        }
+        expect(sendChallenge).toHaveBeenCalledTimes(
+          topology === "remote" ? 2 : 1,
+        );
+      },
+      { timeout: 30_000 },
     );
     const current = challenge;
     if (!current) throw new Error("S6 job scenario did not emit a challenge");
@@ -1472,32 +1665,17 @@ async function runJobScenario(
           decision: { allowed: true },
         }),
       ).rejects.toThrow(/active job obligation/u);
-      expect(deliverGrant).not.toHaveBeenCalled();
     }
     await composition.coordinator.handleChallengeAction({
       token: current.token,
       responder,
       decision: { allowed: true },
     });
-    expect(deliverGrant).toHaveBeenCalledOnce();
   } else {
-    await vi.waitFor(() =>
-      expect(resolveNoInteractiveSurface).toHaveBeenCalledOnce(),
-    );
     expect(sendChallenge).not.toHaveBeenCalled();
   }
 
-  const streamFinal = await writer.final();
-  const bundle = await ledger.sealJobBundle(unsigned.assignmentId, {
-    fence: unsigned.work.fence,
-    outcome: { status: "completed", summary: "scheduled work completed" },
-    contentAssets: [],
-    streamFinal,
-    usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
-    usageFinal: { reportDigest: DIGEST, upToUsageSeq: 0 },
-  });
-  const committed = await ownerSubmission.submitBundle(bundle, context);
-  expect(committed.committed).toBe(true);
+  await worker.drain();
   const statusPage = await jobStatus.statusHistory([{
     taskId: "task-s6",
     jobRunId: "job-run-s6",
@@ -1528,6 +1706,10 @@ async function runJobScenario(
         entry.state === "queued",
     ),
   ).toHaveLength(1);
+  if (!interactive) {
+    // fail-closed 自动解决必须留下耐久痕迹且不再有开放 challenge。
+    expect(await journal.pendingChannelChallenges()).toHaveLength(0);
+  }
   if (topology === "remote" && interactive) {
     expect(preparedCursorInterrupted).toBe(true);
     expect(ackInterrupted).toBe(true);
@@ -1536,6 +1718,7 @@ async function runJobScenario(
 
   await relay.close();
   await composition.close();
+  await worker.close();
   await dataPlane.close();
   authority.stopStorageMaintenance();
   return { statuses, deliveries };

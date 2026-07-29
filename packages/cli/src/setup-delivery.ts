@@ -251,7 +251,12 @@ export async function setupAuthorityRuntime(
     ? new FileAuthorityCommitLog(
       path.join(authorityRoot, "authority"),
       artifacts,
-      { storageMaintenance: options.storageMaintenance },
+      {
+        storageMaintenance: options.storageMaintenance,
+        // commit 时间戳与本 stack 其余组件必须同钟:租约活性等判定
+        // 以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
+        ...(options.clock ? { clock: options.clock } : {}),
+      },
       )
     : undefined;
   const localExecutorEnabled = options.enableLocalExecutor ?? true;
@@ -265,7 +270,10 @@ export async function setupAuthorityRuntime(
     ? new FileAuthorityCommitLog(
       path.join(authorityRoot, "executor-authority"),
       artifacts,
-      { storageMaintenance: options.storageMaintenance },
+      {
+        storageMaintenance: options.storageMaintenance,
+        ...(options.clock ? { clock: options.clock } : {}),
+      },
       )
     : undefined;
   const anchorEpoch = options.anchorEpoch ?? 1;

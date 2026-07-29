@@ -244,8 +244,12 @@ export class AssignmentStreamWriter implements StreamFrameProducer {
   }
 
   async markTerminal(): Promise<StreamSpoolSnapshot> {
-    const final = await this.final();
-    return this.#spool.markTerminal(this.#assignmentId, final.finalSeq);
+    // final 帧在消费者全部确认后可能已被物理回收;终态序号的事实源是
+    // 耐久校验链,不重读帧本体,避免"回收后不可重放"的假失败。
+    const snapshot = await this.#spool.snapshot(this.#assignmentId);
+    const finalSeq =
+      snapshot.finalSeq ?? (await this.final()).finalSeq;
+    return this.#spool.markTerminal(this.#assignmentId, finalSeq);
   }
 }
 

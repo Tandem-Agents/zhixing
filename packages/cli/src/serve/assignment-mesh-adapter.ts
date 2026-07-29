@@ -25,6 +25,7 @@ import type {
   DispatchEnvelope,
   DispatchResult,
   InteractionMirrorBatch,
+  JobInteractionSettlementPort,
   LedgerEvidencePage,
   LedgerSnapshot,
   RunDispatchArguments,
@@ -175,7 +176,7 @@ export interface MeshRunSubmissionPortOptions {
 }
 
 export interface RunSubmissionMeshServiceOptions {
-  readonly port: RunSubmissionPort;
+  readonly port: RunSubmissionPort & Partial<JobInteractionSettlementPort>;
   readonly guard: AssignmentSubmissionPreflightPort;
   readonly artifacts: ArtifactStore;
   readonly executorIdForPeer: (deviceId: string) => string | undefined;
@@ -282,6 +283,12 @@ type SubmissionRequest =
       readonly method: "mirrorInteractions";
       readonly assignmentId: string;
       readonly batch: InteractionMirrorBatch;
+      readonly context: AuthorityCallContext;
+    }
+  | {
+      readonly v: 1;
+      readonly method: "completeInteractionSettlement";
+      readonly assignmentId: string;
       readonly context: AuthorityCallContext;
     };
 
@@ -870,7 +877,9 @@ export function createRunExecutorMeshServiceHandler(
   };
 }
 
-export class MeshRunSubmissionPort implements RunSubmissionPort {
+export class MeshRunSubmissionPort
+  implements RunSubmissionPort, JobInteractionSettlementPort
+{
   readonly #assets: AssignmentArtifactClient;
 
   constructor(private readonly options: MeshRunSubmissionPortOptions) {
@@ -976,6 +985,25 @@ export class MeshRunSubmissionPort implements RunSubmissionPort {
     }
     return receipt;
   }
+
+  async completeInteractionSettlement(
+    assignmentId: string,
+    context: AuthorityCallContext,
+  ): Promise<void> {
+    assertNull(
+      decode(
+        await this.options.client.request(
+          RUN_SUBMISSION_SERVICE,
+          encode({
+            v: 1,
+            method: "completeInteractionSettlement",
+            assignmentId,
+            context,
+          } satisfies SubmissionRequest),
+        ),
+      ),
+    );
+  }
 }
 
 export function registerRunSubmissionMeshService(
@@ -1028,6 +1056,18 @@ export function createRunSubmissionMeshServiceHandler(
       await options.port.submitCancelProof(
         request.assignmentId,
         request.proof,
+        request.context,
+      );
+      return encode(null);
+    }
+    if (request.method === "completeInteractionSettlement") {
+      if (!options.port.completeInteractionSettlement) {
+        throw new TypeError(
+          "Job interaction settlement is unavailable on this submission authority",
+        );
+      }
+      await options.port.completeInteractionSettlement(
+        request.assignmentId,
         request.context,
       );
       return encode(null);
@@ -1207,6 +1247,8 @@ function decodeSubmissionRequest(payload: Uint8Array): SubmissionRequest {
         ? ["assignmentId", "context", "method", "proof", "v"]
         : value.method === "mirrorInteractions"
           ? ["assignmentId", "batch", "context", "method", "v"]
+          : value.method === "completeInteractionSettlement"
+            ? ["assignmentId", "context", "method", "v"]
           : undefined;
   if (!keys) throw new TypeError("Submission request method is invalid");
   assertExactKeys(value, keys);

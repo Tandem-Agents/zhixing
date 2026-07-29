@@ -327,6 +327,17 @@ export interface RunSubmissionPort {
   ): Promise<{ mirroredUpTo: number; ordinal: number; mirrorDigest: Digest }>;
 }
 
+/**
+ * Job-only audit settlement after an abort-ticket leaves a verified executor
+ * prefix whose interaction projections still need to converge.
+ */
+export interface JobInteractionSettlementPort {
+  completeInteractionSettlement(
+    assignmentId: string,
+    ctx: AuthorityCallContext,
+  ): Promise<void>;
+}
+
 export interface ResourceUsageIntake {
   submitUsageReport(
     report: UsageReport,

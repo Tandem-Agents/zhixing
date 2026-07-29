@@ -150,6 +150,26 @@ export type JobJournalRecord =
       readonly batch: InteractionMirrorBatch;
     }
   | {
+      readonly t: "interaction-settlement-fence";
+      readonly assignmentId: string;
+      readonly ticketDigest: string;
+      readonly sourceLastSeq: number;
+      readonly sourceChainDigest: string;
+      readonly targetUpTo: number;
+      readonly targetOrdinal: number;
+      readonly targetMirrorDigest: string;
+    }
+  | {
+      readonly t: "interaction-settlement-completed";
+      readonly assignmentId: string;
+      readonly ticketDigest: string;
+      readonly sourceLastSeq: number;
+      readonly sourceChainDigest: string;
+      readonly targetUpTo: number;
+      readonly targetOrdinal: number;
+      readonly targetMirrorDigest: string;
+    }
+  | {
       readonly t: "state";
       readonly jobRunId: string;
       readonly assignmentId?: string;
@@ -259,6 +279,30 @@ export const JOB_JOURNAL_RECORD_SHAPES = {
   "ticket-revoked": { required: ["t", "ticketId"] },
   "ticket-sync-frontier": { required: ["expiresThrough", "t"] },
   "interaction-mirror": { required: ["assignmentId", "batch", "t"] },
+  "interaction-settlement-fence": {
+    required: [
+      "assignmentId",
+      "sourceChainDigest",
+      "sourceLastSeq",
+      "t",
+      "targetMirrorDigest",
+      "targetOrdinal",
+      "targetUpTo",
+      "ticketDigest",
+    ],
+  },
+  "interaction-settlement-completed": {
+    required: [
+      "assignmentId",
+      "sourceChainDigest",
+      "sourceLastSeq",
+      "t",
+      "targetMirrorDigest",
+      "targetOrdinal",
+      "targetUpTo",
+      "ticketDigest",
+    ],
+  },
   "channel-challenge-prepared": {
     required: [
       "assignmentId",
@@ -461,6 +505,42 @@ export function validateJobJournalRecord(
     case "interaction-mirror":
       assertIdentifier(value.assignmentId, "Job interaction mirror assignmentId");
       validateAssignmentInteractionMirrorBatch(value.batch, verifier);
+      break;
+    case "interaction-settlement-fence":
+    case "interaction-settlement-completed":
+      assertIdentifier(
+        value.assignmentId,
+        "Job interaction settlement assignmentId",
+      );
+      assertDigest(
+        value.ticketDigest,
+        "Job interaction settlement ticket digest",
+      );
+      assertPositive(
+        value.sourceLastSeq,
+        "Job interaction settlement source sequence",
+      );
+      assertDigest(
+        value.sourceChainDigest,
+        "Job interaction settlement source digest",
+      );
+      assertPositive(
+        value.targetUpTo,
+        "Job interaction settlement target sequence",
+      );
+      assertPositive(
+        value.targetOrdinal,
+        "Job interaction settlement target ordinal",
+      );
+      assertDigest(
+        value.targetMirrorDigest,
+        "Job interaction settlement target mirror digest",
+      );
+      if (value.targetUpTo > value.sourceLastSeq) {
+        throw corruptJobJournal(
+          "Job interaction settlement target exceeds its verified source prefix",
+        );
+      }
       break;
     case "channel-challenge-prepared":
     case "channel-challenge-delivered":
@@ -1276,27 +1356,125 @@ export function assertJobMirrorReplayContract(input: {
   readonly batchBindsRecord: boolean;
   readonly currentState: JobRunState | undefined;
   readonly hasDurableCancelFence: boolean;
+  readonly auditSettlementTarget?: {
+    readonly upTo: number;
+    readonly ordinal: number;
+    readonly mirrorDigest: string;
+  };
+  readonly batchTarget: {
+    readonly upTo: number;
+    readonly ordinal: number;
+    readonly mirrorDigest: string;
+  };
   readonly batchAlreadyMirrored: boolean;
   readonly extendsCursor: boolean;
   readonly repeatsRequestId: boolean;
 }): void {
+  const auditSettlement =
+    input.auditSettlementTarget !== undefined &&
+    input.batchTarget.upTo <= input.auditSettlementTarget.upTo &&
+    input.batchTarget.ordinal <= input.auditSettlementTarget.ordinal &&
+    (input.batchTarget.upTo !== input.auditSettlementTarget.upTo ||
+      input.batchTarget.ordinal !== input.auditSettlementTarget.ordinal ||
+      input.batchTarget.mirrorDigest ===
+        input.auditSettlementTarget.mirrorDigest);
   if (
     !input.assignmentExists ||
-    !input.assignmentIsCurrent ||
     !input.executorMatches ||
     !input.batchBindsRecord ||
     input.batchAlreadyMirrored ||
     !input.extendsCursor ||
     input.repeatsRequestId ||
-    (input.currentState !== "dispatched" &&
-      input.currentState !== "running" &&
-      !(
-        (input.currentState === "cancel-requested" ||
-          input.currentState === "uncertain") &&
-        input.hasDurableCancelFence
-      ))
+    (!auditSettlement &&
+      (!input.assignmentIsCurrent ||
+        (input.currentState !== "dispatched" &&
+          input.currentState !== "running" &&
+          !(
+            (input.currentState === "cancel-requested" ||
+              input.currentState === "uncertain") &&
+            input.hasDurableCancelFence
+          ))))
   ) {
     throw corruptJobJournal("Job interaction mirror replay contract is invalid");
+  }
+}
+
+export interface JobInteractionSettlementBinding {
+  readonly assignmentId: string;
+  readonly ticketDigest: string;
+  readonly sourceLastSeq: number;
+  readonly sourceChainDigest: string;
+  readonly targetUpTo: number;
+  readonly targetOrdinal: number;
+  readonly targetMirrorDigest: string;
+}
+
+export function sameJobInteractionSettlement(
+  left: JobInteractionSettlementBinding,
+  right: JobInteractionSettlementBinding,
+): boolean {
+  return (
+    left.assignmentId === right.assignmentId &&
+    left.ticketDigest === right.ticketDigest &&
+    left.sourceLastSeq === right.sourceLastSeq &&
+    left.sourceChainDigest === right.sourceChainDigest &&
+    left.targetUpTo === right.targetUpTo &&
+    left.targetOrdinal === right.targetOrdinal &&
+    left.targetMirrorDigest === right.targetMirrorDigest
+  );
+}
+
+export function assertJobInteractionSettlementFenceReplayContract(input: {
+  readonly assignmentExists: boolean;
+  readonly assignmentIsCurrent: boolean;
+  readonly currentState: JobRunState | undefined;
+  readonly fenceAlreadyExists: boolean;
+  readonly hasAtomicUncertainState: boolean;
+  readonly hasAtomicUnknownCancellationResolution: boolean;
+}): void {
+  if (
+    !input.assignmentExists ||
+    !input.assignmentIsCurrent ||
+    input.fenceAlreadyExists ||
+    (input.currentState !== "uncertain" &&
+      (input.currentState !== "dispatched" &&
+        input.currentState !== "running" &&
+        input.currentState !== "cancel-requested")) ||
+    (input.currentState !== "uncertain" &&
+      (!input.hasAtomicUncertainState ||
+        !input.hasAtomicUnknownCancellationResolution))
+  ) {
+    throw corruptJobJournal(
+      "Job interaction settlement fence is invalid or duplicated",
+    );
+  }
+}
+
+export function assertJobInteractionSettlementCompletionReplayContract(input: {
+  readonly fence:
+    | JobInteractionSettlementBinding
+    | undefined;
+  readonly completion: JobInteractionSettlementBinding;
+  readonly completionAlreadyExists: boolean;
+  readonly mirrored:
+    | {
+        readonly upTo: number;
+        readonly ordinal: number;
+        readonly digest: string;
+      }
+    | undefined;
+}): void {
+  if (
+    !input.fence ||
+    input.completionAlreadyExists ||
+    !sameJobInteractionSettlement(input.fence, input.completion) ||
+    input.mirrored?.upTo !== input.fence.targetUpTo ||
+    input.mirrored.ordinal !== input.fence.targetOrdinal ||
+    input.mirrored.digest !== input.fence.targetMirrorDigest
+  ) {
+    throw corruptJobJournal(
+      "Job interaction settlement completion lacks its exact mirrored fence",
+    );
   }
 }
 

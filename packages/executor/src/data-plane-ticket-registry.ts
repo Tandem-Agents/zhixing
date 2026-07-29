@@ -377,6 +377,11 @@ export class DataPlaneTicketRegistry {
     const ticket = await this.#operations.run(async () => {
       const projection = await this.#load();
       if (projection.state.retired.has(ticketId)) {
+        console.error(
+          "S6-DIAG-RETIRED",
+          ticketId,
+          JSON.stringify(projection.state.retired.get(ticketId)),
+        );
         throw new Error("Data-plane ticket is retired");
       }
       return projection.state.accepted.get(ticketId)?.ticket;

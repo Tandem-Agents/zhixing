@@ -52,6 +52,7 @@ describe("JobOwnerRelay", () => {
       grantChannelChallenge: vi.fn(async () => {
         throw new Error("unused");
       }),
+      pendingChannelGrantDeliveries: vi.fn(async () => []),
     };
     const first = connection([frame(2, 2)], order);
     const second = connection([], order);
@@ -110,6 +111,9 @@ describe("JobOwnerRelay", () => {
           },
           async grantChannelChallenge() {
             throw new Error("unused");
+          },
+          async pendingChannelGrantDeliveries() {
+            return [];
           },
         },
         resolver: {

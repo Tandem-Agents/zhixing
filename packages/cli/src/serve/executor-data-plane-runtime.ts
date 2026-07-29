@@ -109,8 +109,35 @@ export class ExecutorDataPlaneRuntime {
     );
   }
 
-  ownerStreamClient(ownerDeviceId: string): AssignmentStreamClient {
+  /**
+   * owner-relay 消费者的授权与耐久资格是一体义务:账本裁决 owner 身份与
+   * 控制租约后,消费者必须在同一入口完成 spool 资格登记(owner-relay 无
+   * 到期),否则订阅会被 spool 以未资格拒绝。local/mesh 装配共用本方法,
+   * 不得各自另行拼装。
+   */
+  async authorizeOwnerRelayConsumer(input: {
+    readonly assignmentId: string;
+    readonly consumer: Extract<
+      import("@zhixing/core/contracts").StreamConsumerAuth,
+      { readonly kind: "owner-relay" }
+    >;
+    readonly ownerDeviceId: string;
+  }): Promise<void> {
     const ledger = this.#requireLedger();
+    await ledger.authorizeOwnerRelay(input);
+    const binding = await ledger.dataPlaneBinding(input.assignmentId);
+    if (!binding) {
+      throw new Error("Owner relay authorization has no active assignment binding");
+    }
+    await this.spool.qualifyConsumer({
+      assignmentId: input.assignmentId,
+      ref: binding.ref,
+      consumer: input.consumer,
+    });
+  }
+
+  ownerStreamClient(ownerDeviceId: string): AssignmentStreamClient {
+    this.#requireLedger();
     const connection = {
       peer: { deviceId: ownerDeviceId },
     } as SecureMeshConnection;
@@ -127,7 +154,7 @@ export class ExecutorDataPlaneRuntime {
               "Owner relay authorization has the wrong consumer kind",
             );
           }
-          await ledger.authorizeOwnerRelay({
+          await this.authorizeOwnerRelayConsumer({
             assignmentId: request.assignmentId,
             consumer: request.consumer,
             ownerDeviceId,
@@ -145,7 +172,7 @@ export class ExecutorDataPlaneRuntime {
    * owner-presented-ticket 分支。
    */
   surfaceStreamClient(surfacePrincipal: string): AssignmentStreamClient {
-    const ledger = this.#requireLedger();
+    this.#requireLedger();
     const connection = {
       peer: { deviceId: this.#executorId },
     } as SecureMeshConnection;
@@ -160,7 +187,7 @@ export class ExecutorDataPlaneRuntime {
               "Owner relay authorization has the wrong consumer kind",
             );
           }
-          await ledger.authorizeOwnerRelay({
+          await this.authorizeOwnerRelayConsumer({
             assignmentId: request.assignmentId,
             consumer: request.consumer,
             ownerDeviceId: this.#executorId,

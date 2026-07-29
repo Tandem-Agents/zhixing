@@ -22,6 +22,7 @@ import type {
   IngressContext,
   PermissionSnapshotLease,
   Signature,
+  StreamFrame,
   TranscriptRunRecord,
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
@@ -35,8 +36,12 @@ import {
   assignmentLedgerSeed,
   buildConversationActivationPayload,
   canonicalize,
+  channelResponderPrincipal,
   confirmationDecisionDigest,
+  createSignedChannelChallengeToken,
+  createSignedChannelInteractionGrant,
   createSignedConversationEnvelope,
+  interactionDisplayDigest,
   dataPlaneTicketDigest,
   createSignedTrustRuleSnapshot,
   dispatchEnvelopeArtifact,
@@ -2512,6 +2517,89 @@ describe("conversation assignment protocol", () => {
     ).rejects.toThrow(/artifact/i);
   });
 
+  it("rejects a fully valid channel grant at the durable write entry of a conversation", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const requestId = "cross-domain-request";
+    const display = { title: "Approve?", lines: ["run"] };
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId,
+      toolName: "bash",
+      display,
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-13T09:01:00.000Z",
+    });
+    const jobRef = {
+      execution: "job" as const,
+      taskId: "task-cross-domain",
+      jobRunId: "job-run-cross-domain",
+      anchorEpoch: 3,
+    };
+    const route = { channelId: "feishu", to: "chat-1" };
+    const responder = { channelId: "feishu", platformSubject: "user-1" };
+    const decision = { allowed: true };
+    const challengeToken = createSignedChannelChallengeToken(
+      {
+        v: 1,
+        challengeId: "challenge-cross-domain",
+        ref: jobRef,
+        assignmentId: ASSIGNMENT_ID,
+        interactionRequestId: requestId,
+        route,
+        displayDigest: interactionDisplayDigest("bash", display),
+        issuedAt: NOW,
+        expiry: "2026-07-13T09:01:00.000Z",
+      },
+      harness.identity,
+    );
+    const grant = createSignedChannelInteractionGrant(
+      {
+        v: 1,
+        grantId: protocolDigest("ChannelInteractionGrantIdentity", 1, {
+          challengeId: challengeToken.challengeId,
+        }),
+        ref: jobRef,
+        assignmentId: ASSIGNMENT_ID,
+        interactionRequestId: requestId,
+        challengeToken,
+        route,
+        responder,
+        decision,
+        issuedAt: NOW,
+        expiry: challengeToken.expiry,
+      },
+      harness.identity,
+      harness.identity,
+    );
+    const beforeCrossDomain = (
+      await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)
+    ).length;
+    // 结构、签名与全绑定都合法,唯一不合法的是该 assignment 的 execution 域;
+    // 最终耐久写入口必须自己拒绝,不能依赖上游 prepare 是否被正确调用过。
+    await expect(
+      harness.ledger.finishInteraction(ASSIGNMENT_ID, requestId, {
+        t: "answered",
+        authority: { via: "channel-grant", grant },
+        decision,
+        decisionDigest: confirmationDecisionDigest(requestId, {
+          kind: "allow-once",
+        }),
+        by: channelResponderPrincipal(responder),
+      }),
+    ).rejects.toThrow(
+      "Channel interaction grant has no durable pending job request",
+    );
+    expect(
+      await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`),
+    ).toHaveLength(beforeCrossDomain);
+  });
+
   it("bounds interaction records and backlog while draining mirrors in finite batches", async () => {
     const harness = await createHarness({ maxPendingInteractions: 16 });
     await harness.ledger.dispatch(
@@ -2545,7 +2633,7 @@ describe("conversation assignment protocol", () => {
         decisionDigest: allowOnceDecisionDigest("bounded-0"),
         by: "channel:test",
       } as unknown as InteractionOutcome),
-    ).rejects.toThrow("Interaction answer authority");
+    ).rejects.toThrow("Channel interaction grant fields are incomplete or unknown");
     expect(await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)).toHaveLength(
       beforeInvalidOutcome,
     );
@@ -9752,6 +9840,7 @@ type ConversationBehaviorRecordType =
 type ConversationBehaviorScenarioId =
   | "commit"
   | "sessionLifecycle"
+  | "channelLifecycle"
   | "mirror"
   | "cancelHalted"
   | "cancelUncertainContained"
@@ -9811,10 +9900,88 @@ async function startConversation(
   );
 }
 
+async function createConversationChannelLifecycle() {
+  const responder = {
+    channelId: "feishu",
+    platformSubject: "matrix-user",
+    tenant: "matrix-tenant",
+  };
+  const harness = await createHarness({
+    ingress: {
+      kind: "channel",
+      surfacePrincipal: channelSurfacePrincipal(responder),
+      responder,
+      replyTarget: { channelId: "feishu", to: "matrix-chat" },
+      deviceId: "matrix-device",
+      ingressId: "matrix-channel-lifecycle",
+      receivedAt: NOW,
+    },
+  });
+  await startConversation(harness);
+  const ref = {
+    execution: "conversation" as const,
+    conversationId: CONVERSATION_ID,
+    runId: RUN_ID,
+    ownerEpoch: 3,
+  };
+  const requestId = "matrix-channel-interaction";
+  const requested: StreamFrame = {
+    v: 1,
+    ref,
+    assignmentId: ASSIGNMENT_ID,
+    streamEpoch: 1,
+    seq: 1,
+    payload: {
+      kind: "interaction",
+      event: {
+        t: "requested",
+        requestId,
+        toolName: "write",
+        display: { title: "Approve?", lines: ["write result"] },
+        issuedAt: NOW,
+        ttlMs: 60_000,
+        expiresAt: "2026-07-13T09:01:00.000Z",
+      },
+    },
+    meta: {},
+  };
+  const adoption = await harness.journal.adoptConversationChannelFrame(requested);
+  if (!adoption.prepared) {
+    throw new Error("matrix conversation channel challenge is missing");
+  }
+  await harness.journal.recordChannelChallengeDelivered({
+    challengeId: adoption.prepared.token.challengeId,
+    receipt: { acceptedAt: NOW },
+  });
+  const finish = () =>
+    harness.journal.adoptConversationChannelFrame({
+      v: 1,
+      ref,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 2,
+      seq: 2,
+      payload: {
+        kind: "interaction",
+        event: { t: "finished", requestId, outcome: "cancelled" },
+      },
+      meta: {},
+    });
+  return {
+    harness,
+    challengeId: adoption.prepared.token.challengeId,
+    finish,
+  };
+}
+
 const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async channelLifecycle() {
+    const lifecycle = await createConversationChannelLifecycle();
+    await lifecycle.finish();
+    return conversationBehaviorHarness(lifecycle.harness);
+  },
   async ticketLifecycle() {
     let nowMs = Date.parse(NOW);
     const clock = () => new Date(nowMs).toISOString();
@@ -10064,6 +10231,23 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
 };
 
 const CONVERSATION_RECOVERY_PROBES = {
+  async channelChallengeOutbox() {
+    const lifecycle = await createConversationChannelLifecycle();
+    await expect(
+      reopenJournal(lifecycle.harness).pendingChannelChallenges(),
+    ).resolves.toMatchObject([
+      {
+        prepared: {
+          token: { challengeId: lifecycle.challengeId },
+        },
+        delivered: { challengeId: lifecycle.challengeId },
+      },
+    ]);
+    await lifecycle.finish();
+    await expect(
+      reopenJournal(lifecycle.harness).pendingChannelChallenges(),
+    ).resolves.toEqual([]);
+  },
   async dispatchOutbox() {
     const harness = await createHarness();
     expect(await harness.journal.pendingDispatches()).toHaveLength(1);
@@ -10284,6 +10468,21 @@ const noConversationRecovery = (reason: string): ConversationRecoveryExpectation
 // commit/lifecycle projection 均由耐久恢复投影器生产；其生产场景显式执行
 // 对应 resume 消费者，不以在线提交副作用冒充耐久生产路径。
 const CONVERSATION_RECORD_BEHAVIOR = {
+  "channel-challenge-prepared": {
+    scenario: "channelLifecycle",
+    recovery: conversationRecovery("channelChallengeOutbox"),
+    corrupt: (body) => ({ ...body, assignmentId: "assignment-ghost" }),
+  },
+  "channel-challenge-delivered": {
+    scenario: "channelLifecycle",
+    recovery: conversationRecovery("channelChallengeOutbox"),
+    corrupt: (body) => ({ ...body, challengeId: "challenge-ghost" }),
+  },
+  "channel-challenge-closed": {
+    scenario: "channelLifecycle",
+    recovery: conversationRecovery("channelChallengeOutbox"),
+    corrupt: (body) => ({ ...body, challengeId: "challenge-ghost" }),
+  },
   "session-lifecycle": {
     scenario: "sessionLifecycle",
     recovery: conversationRecovery("lifecycleProjection"),
@@ -10476,7 +10675,30 @@ describe("conversation record execution-point behavior matrix", () => {
         : structuredClone(target.body);
       await behavior.log.append([{ stream: `run:${CONVERSATION_ID}`, body: vector }]);
       await expectConversationRejected(behavior.fullProbe);
-      if (behavior.guardProbe) await expectConversationRejected(behavior.guardProbe);
+      if (behavior.guardProbe) {
+        const guardBehavior =
+          await CONVERSATION_BEHAVIOR_SCENARIOS[spec.scenario]();
+        const guardRecords =
+          await guardBehavior.log.readStream<Record<string, unknown>>(
+            `run:${CONVERSATION_ID}`,
+          );
+        const guardTarget = guardRecords.filter((record) => {
+          const body = record.body as { t?: string; kind?: string };
+          return body.t === recordType || body.kind === recordType;
+        }).at(-1);
+        if (!guardTarget) {
+          throw new Error("matrix guard target record is missing");
+        }
+        const guardVector = spec.corrupt
+          ? spec.corrupt(
+              structuredClone(guardTarget.body) as Record<string, unknown>,
+            )
+          : structuredClone(guardTarget.body);
+        await guardBehavior.log.append([
+          { stream: `run:${CONVERSATION_ID}`, body: guardVector },
+        ]);
+        await expectConversationRejected(guardBehavior.guardProbe);
+      }
     },
     20_000,
   );

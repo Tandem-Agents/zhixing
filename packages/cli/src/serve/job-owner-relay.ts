@@ -51,6 +51,9 @@ export interface JobOwnerRelayJournal {
     };
     readonly at?: string;
   }): Promise<ChannelInteractionGrant>;
+  pendingChannelGrantDeliveries(): Promise<
+    readonly ChannelInteractionGrant[]
+  >;
 }
 
 export interface JobChannelInteractionResolver {
@@ -83,6 +86,7 @@ export class JobOwnerRelay {
   readonly #journal: JobOwnerRelayJournal;
   readonly #resolver: JobChannelInteractionResolver;
   readonly #manager: AssignmentStreamPathManager;
+  #grantDrain: Promise<number> | undefined;
 
   private constructor(
     ref: JobExecutionRef,
@@ -154,8 +158,11 @@ export class JobOwnerRelay {
     return this.#manager.checkpoint();
   }
 
-  poll(signal?: AbortSignal): Promise<AssignmentStreamPollResult> {
-    return this.#manager.poll(signal);
+  async poll(signal?: AbortSignal): Promise<AssignmentStreamPollResult> {
+    await this.#drainGrantDeliveries();
+    const result = await this.#manager.poll(signal);
+    await this.#drainGrantDeliveries();
+    return result;
   }
 
   materializeInteractionDisplay(
@@ -177,6 +184,23 @@ export class JobOwnerRelay {
     const grant = await this.#journal.grantChannelChallenge(input);
     await this.#resolver.resolveGrant(grant);
     return grant;
+  }
+
+  async #drainGrantDeliveries(): Promise<number> {
+    if (this.#grantDrain) return this.#grantDrain;
+    const running = (async () => {
+      const pending = await this.#journal.pendingChannelGrantDeliveries();
+      for (const grant of pending) {
+        await this.#resolver.resolveGrant(grant);
+      }
+      return pending.length;
+    })();
+    this.#grantDrain = running;
+    try {
+      return await running;
+    } finally {
+      if (this.#grantDrain === running) this.#grantDrain = undefined;
+    }
   }
 
   async rotateControlLease(controlLeaseId: string): Promise<void> {

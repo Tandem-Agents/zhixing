@@ -5,7 +5,6 @@ import type {
 import { isChallengeChannel } from "@zhixing/core";
 import type {
   DataPlaneTicket,
-  ChannelInteractionGrant,
   ExecutionRef,
 } from "@zhixing/core/contracts";
 import {
@@ -15,6 +14,7 @@ import {
   type ChannelChallengeOutboxStore,
 } from "@zhixing/owner-kernel";
 import { canonicalize } from "@zhixing/core/protocol";
+import type { JobInteractionAnswerPort } from "./durable-job-interactions.js";
 import type {
   ConversationChannelSessionInput,
   LosslessDataPlaneRuntime,
@@ -45,13 +45,12 @@ export interface JobRelayOpening {
   readonly executorId: string;
   readonly controlLeaseId: string;
   readonly journal: JobChannelObligationJournal;
-  /** grant 的 executor 转交半边:进程内走 ledger 提交链、跨机走 mesh。 */
-  readonly deliverGrant: (grant: ChannelInteractionGrant) => Promise<void>;
-  /** 无合法应答面时通知 executor fail-closed 自动解决。 */
-  readonly resolveNoInteractiveSurface: (input: {
-    readonly assignmentId: string;
-    readonly requestId: string;
-  }) => Promise<void>;
+  /**
+   * grant 与无应答解决的 executor 转交半边——必须是生产答复端口:
+   * 进程内为 executor 的 DurableJobInteractionCoordinator,跨机为
+   * JobInteractionMeshClient;不得以手写函数替代。
+   */
+  readonly answers: JobInteractionAnswerPort;
 }
 
 /**
@@ -414,8 +413,8 @@ class JobChannelSession implements LosslessDataPlaneSession {
       journal: this.#opening.journal,
       resolver: {
         resolveNoInteractiveSurface: (input) =>
-          this.#opening.resolveNoInteractiveSurface(input),
-        resolveGrant: (grant) => this.#opening.deliverGrant(grant),
+          this.#opening.answers.resolveNoInteractiveSurface(input),
+        resolveGrant: (grant) => this.#opening.answers.deliverGrant(grant),
       },
     });
     this.#running = this.#run().catch((error) => {

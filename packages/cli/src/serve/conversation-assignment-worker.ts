@@ -1,8 +1,5 @@
 import { Buffer } from "node:buffer";
-import {
-  AuthorityStorageError,
-  type ArtifactStore,
-} from "@zhixing/core/authority";
+import { type ArtifactStore } from "@zhixing/core/authority";
 import {
   type Message,
   type RunResult,
@@ -27,15 +24,21 @@ import type {
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import {
+  asError,
+  resumeSealedSubmission,
+  retryRemoteObligation,
+  submitBundleUntilAcknowledged,
+} from "./assignment-worker-obligations.js";
+import {
   ConversationInteractionRuntimeUnavailableError,
   type ConversationInteractionAnswerPort,
   type DurableConversationInteractionObserver,
   type DurableInteractionBinding,
 } from "./durable-conversation-interactions.js";
-import {
-  shouldRetryRemoteObligation,
-} from "./remote-obligation-failure.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
+import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
+
+const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 
 export interface ConversationAssignmentWorkerOptions {
   readonly ledger: ConversationAssignmentLedger;
@@ -488,27 +491,14 @@ export class ConversationAssignmentWorker {
     submission: RunSubmissionPort,
     context: AuthorityCallContext,
   ): Promise<void> {
-    let delayMs = 100;
-    let bundle: Awaited<ReturnType<ConversationAssignmentLedger["sealedBundle"]>> | undefined;
-    while (!this.#abort.signal.aborted) {
-      try {
-        const recovered = await this.options.ledger.sealedBundleForRecovery(assignmentId);
-        if (recovered.kind === "not-sealed") return;
-        bundle = recovered.bundle;
-        break;
-      } catch (error) {
-        if (
-          error instanceof AuthorityStorageError ||
-          !shouldRetryRemoteObligation(error)
-        ) {
-          throw error;
-        }
-        await abortableDelay(delayMs, this.#abort.signal);
-        delayMs = Math.min(delayMs * 2, 5_000);
-      }
-    }
-    if (!bundle) throw asError(this.#abort.signal.reason);
-    await this.#submitUntilAcknowledged(bundle, submission, context);
+    await resumeSealedSubmission({
+      assignmentId,
+      ledger: this.options.ledger,
+      owner: submission,
+      context,
+      signal: this.#abort.signal,
+      rejectionPrefix: COMMIT_REJECTION_PREFIX,
+    });
   }
 
   async #submitUntilAcknowledged(
@@ -516,47 +506,24 @@ export class ConversationAssignmentWorker {
     submission: RunSubmissionPort,
     context: AuthorityCallContext,
   ): Promise<void> {
-    let delayMs = 100;
-    while (!this.#abort.signal.aborted) {
-      try {
-        const committed = await submission.submitBundle(bundle, context);
-        if (!committed.committed) {
-          if (!committed.error.retryable) {
-            throw new StableAuthorityRejection(committed.error.message);
-          }
-        } else {
-          await this.options.ledger.acknowledge(bundle.assignmentId, committed.commitRevision);
-          return;
-        }
-      } catch (error) {
-        if (
-          error instanceof StableAuthorityRejection ||
-          !shouldRetryRemoteObligation(error)
-        ) {
-          throw error;
-        }
-      }
-      await abortableDelay(delayMs, this.#abort.signal);
-      delayMs = Math.min(delayMs * 2, 5_000);
-    }
-    throw asError(this.#abort.signal.reason);
+    await submitBundleUntilAcknowledged({
+      bundle,
+      owner: submission,
+      ledger: this.options.ledger,
+      context,
+      signal: this.#abort.signal,
+      rejectionPrefix: COMMIT_REJECTION_PREFIX,
+    });
   }
 
   async #finalizeUsageUntilAvailable(
     assignmentId: string,
     envelope: ConversationEnvelope,
   ): Promise<{ reportDigest: string; upToUsageSeq: number }> {
-    let delayMs = 100;
-    while (!this.#abort.signal.aborted) {
-      try {
-        return await this.options.finalizeUsage({ assignmentId, envelope });
-      } catch (error) {
-        if (!shouldRetryRemoteObligation(error)) throw error;
-        await abortableDelay(delayMs, this.#abort.signal);
-        delayMs = Math.min(delayMs * 2, 5_000);
-      }
-    }
-    throw asError(this.#abort.signal.reason);
+    return retryRemoteObligation(
+      () => this.options.finalizeUsage({ assignmentId, envelope }),
+      this.#abort.signal,
+    );
   }
 
   async #prepareRunEndUntilAvailable(
@@ -624,35 +591,9 @@ function runFailureReason(result: RunResult): string {
   return "运行未完成";
 }
 
-function asError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
-}
-
-class StableAuthorityRejection extends Error {
-  constructor(message: string) {
-    super(`Conversation commit rejected: ${message}`);
-    this.name = "StableAuthorityRejection";
-  }
-}
-
 class IncompleteCancellationProofError extends TypeError {
   constructor(message: string) {
     super(message);
     this.name = "IncompleteCancellationProofError";
   }
-}
-
-function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.reject(asError(signal.reason));
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(asError(signal.reason));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
 }

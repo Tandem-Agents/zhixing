@@ -3,6 +3,7 @@ import type {
   AuthorityCallContext,
   AuthorityCapability,
   DispatchEnvelope,
+  JobInteractionSettlementPort,
   ResourceUsageIntake,
   RunExecutorPort,
   RunSubmissionPort,
@@ -148,7 +149,9 @@ export class AssignmentMeshComposition {
     });
   }
 
-  submissionPort(peerDeviceId: string): RunSubmissionPort {
+  submissionPort(
+    peerDeviceId: string,
+  ): RunSubmissionPort & JobInteractionSettlementPort {
     if (!this.options.executor) {
       throw new Error("Submission mesh port requires the local executor role");
     }

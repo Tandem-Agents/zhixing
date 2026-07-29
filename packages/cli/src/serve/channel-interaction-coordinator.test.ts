@@ -88,8 +88,10 @@ function opening(
       onStatus: vi.fn(() => () => undefined),
       ...relayJournal,
     } as unknown as JobRelayOpening["journal"],
-    deliverGrant: vi.fn(async () => undefined),
-    resolveNoInteractiveSurface: vi.fn(async () => undefined),
+    answers: {
+      deliverGrant: vi.fn(async () => undefined),
+      resolveNoInteractiveSurface: vi.fn(async () => undefined),
+    },
   };
 }
 

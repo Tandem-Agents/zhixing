@@ -8,6 +8,7 @@ import type {
   HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
+  RunExecutorPort,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
@@ -49,6 +50,15 @@ import {
   registerDataPlaneTicketService,
 } from "./data-plane-ticket-mesh.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import {
+  JobAssignmentWorker,
+  type JobRuntimePort,
+} from "./job-assignment-worker.js";
+import { AssignmentOperationsRouter } from "./assignment-operations-router.js";
+import {
+  JobInteractionMeshClient,
+  registerJobInteractionService,
+} from "./job-interaction-mesh.js";
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
@@ -68,6 +78,14 @@ export interface MeshRuntimeAssemblyOptions {
     readonly interactions: DurableConversationInteractionObserver;
     readonly dataPlane: ExecutorDataPlaneRuntime;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+    /**
+     * job 执行装配接缝:提供 job 运行时端口即启用 executor-owned job
+     * worker 与其答复服务;缺省时本 executor 不承接 job dispatch,
+     * 生产端口由后续单元接入。
+     */
+    readonly job?: {
+      readonly runtime: JobRuntimePort;
+    };
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
   readonly onError?: (error: Error) => void;
@@ -80,6 +98,7 @@ export class MeshRuntimeAssembly {
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
+  readonly #jobWorker: JobAssignmentWorker | undefined;
   readonly #disposers: Array<() => void> = [];
   #started = false;
   #closed = false;
@@ -97,9 +116,64 @@ export class MeshRuntimeAssembly {
       path.join(options.zhixingHome, "distributed-runtime", "mesh-artifact-partials"),
       { maxArtifactBytes: MAX_ASSIGNMENT_ARTIFACT_BYTES },
     );
-    const executorRole = roles.has("executor")
+    let worker: ConversationAssignmentWorker | undefined;
+    let jobWorker: JobAssignmentWorker | undefined;
+    const executorPort: RunExecutorPort | undefined = roles.has("executor")
       ? {
-          port: options.executor!.ledger,
+          dispatch: (...args) => {
+            const [envelope] = args;
+            if (envelope.execution === "job" && !options.executor!.job) {
+              throw new TypeError(
+                "This executor has no enabled job runtime",
+              );
+            }
+            return (options.executor!.ledger as RunExecutorPort).dispatch(
+              ...args,
+            );
+          },
+          cancel: async (assignmentId, fence, context) => {
+            const jobPhase =
+              await options.executor!.ledger.jobAssignmentPhaseForRecovery(
+                assignmentId,
+              );
+            if (jobPhase !== undefined) {
+              if (!jobWorker) {
+                throw new TypeError(
+                  "Job cancellation has no enabled executor-owned job runtime",
+                );
+              }
+              await options.executor!.ledger.beginOwnerCancellation(
+                assignmentId,
+                fence,
+                context,
+              );
+              await jobWorker.cancelAccepted(assignmentId);
+              await options.executor!.ledger.finishOwnerCancellation(
+                assignmentId,
+                fence,
+                context,
+              );
+              return;
+            }
+            await options.executor!.ledger.cancel(assignmentId, fence, context);
+            worker?.abort(
+              assignmentId,
+              new Error("Conversation assignment was cancelled"),
+            );
+          },
+          supersede: (assignmentId, fence, context) =>
+            options.executor!.ledger.supersede(assignmentId, fence, context),
+          queryLedger: (assignmentId, context, range) =>
+            options.executor!.ledger.queryLedger(
+              assignmentId,
+              context,
+              range,
+            ),
+        }
+      : undefined;
+    const executorRole = executorPort
+      ? {
+          port: executorPort,
           guard: options.executor!.ledger,
           artifactAuthorizationFor: (assignmentId: string) =>
             options.executor!.ledger.assignmentArtifactAuthority(assignmentId),
@@ -108,8 +182,6 @@ export class MeshRuntimeAssembly {
     const anchorRole = roles.has("anchor")
       ? options.protocol!.submissionMeshRole()
       : undefined;
-    let worker: ConversationAssignmentWorker | undefined;
-
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
       connections: this.connections,
@@ -128,9 +200,9 @@ export class MeshRuntimeAssembly {
               authorizePeer: (deviceId) =>
                 deviceId === options.trust.issuer.deviceId &&
                 this.#peerHasRole(deviceId, "anchor"),
-              onDispatchAccepted: (envelope) => worker?.accept(envelope),
-              onCancelAccepted: (assignmentId) => {
-                worker?.abort(assignmentId, new Error("Conversation assignment was cancelled"));
+              onDispatchAccepted: (envelope) => {
+                worker?.accept(envelope);
+                jobWorker?.accept(envelope);
               },
             },
           }
@@ -162,11 +234,31 @@ export class MeshRuntimeAssembly {
         finalizeUsage: ({ assignmentId }) => this.finalizeExecutorUsage(assignmentId),
         onError: (_assignmentId, error) => options.onError?.(error),
       });
+      if (options.executor!.job) {
+        jobWorker = new JobAssignmentWorker({
+          ledger: options.executor!.ledger,
+          runtime: options.executor!.job.runtime,
+          submissionFor: () => this.#composition.submissionPort(anchorId),
+          InProcessAssignmentSubmission:
+            options.executor!.InProcessAssignmentSubmission,
+          createStream: (input) =>
+            options.executor!.dataPlane.createStream(input),
+          finalizeUsage: ({ assignmentId }) =>
+            this.finalizeExecutorUsage(assignmentId),
+          onError: (_assignmentId, error) => options.onError?.(error),
+        });
+      }
     }
     this.#worker = worker;
+    this.#jobWorker = jobWorker;
 
     if (roles.has("executor")) {
       const dataPlane = options.executor!.dataPlane;
+      const operations = new AssignmentOperationsRouter({
+        ledger: options.executor!.ledger,
+        conversation: worker!,
+        ...(jobWorker ? { job: jobWorker } : {}),
+      });
       const surfacePrincipalFor = (connection: import("@zhixing/mesh").SecureMeshConnection) =>
         `surface:device:${connection.peer.deviceId}`;
       this.#disposers.push(
@@ -182,7 +274,7 @@ export class MeshRuntimeAssembly {
               if (request.consumer.kind !== "owner-relay") {
                 throw new TypeError("Owner relay authorization has the wrong consumer kind");
               }
-              await options.executor!.ledger.authorizeOwnerRelay({
+              await options.executor!.dataPlane.authorizeOwnerRelayConsumer({
                 assignmentId: request.assignmentId,
                 consumer: request.consumer,
                 ownerDeviceId: request.connection.peer.deviceId,
@@ -199,7 +291,7 @@ export class MeshRuntimeAssembly {
         registerDataPlaneTicketService(this.services, {
           tickets: dataPlane.tickets,
           verifier: options.authority.verifier,
-          operations: worker!,
+          operations,
           authorizeOwner: (connection) =>
             connection.peer.deviceId === options.trust.issuer.deviceId &&
             this.#peerHasRole(connection.peer.deviceId, "anchor"),
@@ -218,6 +310,18 @@ export class MeshRuntimeAssembly {
         (deviceId) => this.#peerHasRole(deviceId, "anchor"),
         options.authority.verifier,
       ));
+      if (options.executor!.job) {
+        this.#disposers.push(
+          registerJobInteractionService(this.services, {
+            answers: jobWorker!,
+            verifier: options.authority.verifier,
+            authorizeOwner: (connection) =>
+              connection.peer.deviceId === options.trust.issuer.deviceId &&
+              this.#peerHasRole(connection.peer.deviceId, "anchor"),
+            authorizePeer: (deviceId) => this.#peerHasRole(deviceId, "anchor"),
+          }),
+        );
+      }
     }
 
     if (roles.has("anchor")) {
@@ -301,6 +405,7 @@ export class MeshRuntimeAssembly {
     try {
       await this.#control.start();
       await this.#worker?.recover();
+      await this.#jobWorker?.recover();
       this.#started = true;
     } catch (error) {
       await this.stop();
@@ -313,8 +418,10 @@ export class MeshRuntimeAssembly {
     this.#closed = true;
     this.#started = false;
     this.#worker?.stopAccepting();
+    this.#jobWorker?.stopAccepting();
     await this.#control.stop();
     await this.#worker?.close();
+    await this.#jobWorker?.close();
     this.#composition.close();
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
   }
@@ -329,6 +436,12 @@ export class MeshRuntimeAssembly {
       stream: new AssignmentStreamMeshClient(client),
       tickets: new DataPlaneTicketMeshClient(client),
     };
+  }
+
+  /** owner 侧获取指定 executor 的 job 答复转交客户端(JobRelayOpening.answers)。 */
+  jobInteractionForExecutor(executorId: string): JobInteractionMeshClient {
+    const deviceId = this.#activeExecutorDeviceId(executorId);
+    return new JobInteractionMeshClient(this.connections.client(deviceId));
   }
 
   #remoteDirectory(): RemoteConversationExecutionDirectory {

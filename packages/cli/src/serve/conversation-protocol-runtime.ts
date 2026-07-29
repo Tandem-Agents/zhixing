@@ -1766,13 +1766,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             const page = pages[index]!;
             const cursor = cursors[index]!;
             notices.push(page.notices);
-            if (page.nextAfterStatusRevision !== undefined) {
-              next.push({
-                conversationId,
-                runId: cursor.runId,
-                afterStatusRevision: page.nextAfterStatusRevision,
-              });
-            }
+            // 每个请求 subject 必须返回续读游标:无推进时保留原水位,
+            // 不得省略——省略会被消费侧的集合全等对账当作丢失 subject。
+            next.push({
+              conversationId,
+              runId: cursor.runId,
+              afterStatusRevision:
+                page.nextAfterStatusRevision ?? cursor.afterStatusRevision,
+            });
           }
         }
       }),
@@ -1801,7 +1802,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       signer: this.#authority.signer,
       verifier: this.#authority.verifier,
       submission: createSubmissionAuthorizer(
-        this.#authority.executorId,
+        (assignmentId) =>
+          this.#assignmentCapabilities.get(assignmentId)?.executorId ??
+          this.#authority.executorId,
         this.#authority.verifier,
       ),
       authority: this.#commitAuthority(conversationId),
@@ -2564,7 +2567,7 @@ function assignmentResourceContext(
 }
 
 function createSubmissionAuthorizer(
-  executorId: string,
+  executorIdFor: (assignmentId: string) => string,
   verifier: ProtocolSignatureVerifier,
 ): AssignmentSubmissionAuthorizer {
   const authenticate: AssignmentSubmissionAuthorizer["authenticate"] = (
@@ -2580,7 +2583,9 @@ function createSubmissionAuthorizer(
       verifier,
     );
     if (
-      capability.executorId !== executorId ||
+      // capability 必须属于该 assignment 被指派的 executor——本地或远端;
+      // 写死 owner 本地 executorId 会把一切远端提交拒之门外。
+      capability.executorId !== executorIdFor(identity.assignmentId) ||
       capability.assignmentId !== identity.assignmentId ||
       !capability.methods.includes(identity.method) ||
       Date.parse(context.deadlineAt) > Date.parse(capability.expiry)

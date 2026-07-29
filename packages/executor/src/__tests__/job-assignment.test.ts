@@ -33,7 +33,10 @@ import {
   createJobSealedBundle,
   createSignedConversationInteractionMirrorBatch,
   createSignedChannelChallengeToken,
+  createSignedChannelInteractionGrant,
   createSignedJobEnvelope,
+  channelResponderPrincipal,
+  confirmationDecisionDigest,
   createSignedTrustRuleSnapshot,
   dataPlaneTicketDigest,
   dispatchEnvelopeArtifact,
@@ -1099,6 +1102,117 @@ describe("user job durable protocol", () => {
     });
   });
 
+  it("rejects owner-signed channel grants bound to another assignment or request", async () => {
+    const definition = userDefinition();
+    if (definition.definition.kind !== "user") {
+      throw new Error("fixture definition is not user-owned");
+    }
+    definition.definition = {
+      ...definition.definition,
+      origin: { channelId: "feishu", to: "chat-1" },
+      interactionResponder: { channelId: "feishu", platformSubject: "user-1" },
+      spec: {
+        ...definition.definition.spec,
+        delivery: { kind: "channel", channel: "feishu", to: "chat-1" },
+      },
+    };
+    const harness = await createUserHarness({ definition });
+    await start(harness);
+    const jobRef = {
+      execution: "job" as const,
+      taskId: TASK_ID,
+      jobRunId: JOB_RUN_ID,
+      anchorEpoch: 3,
+    };
+    const requestId = "misbound-interaction";
+    const display = { title: "Approve?", lines: ["run"] };
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId,
+      toolName: "bash",
+      display,
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    });
+    const route = definition.definition.origin!;
+    const responder = definition.definition.interactionResponder!;
+    const decision = { allowed: true };
+    // grant 与 token 都由该 job 的耐久 owner 签发、结构完全合法,只有绑定的
+    // assignment / request 与最终写入目标不同。
+    const misboundGrant = (binding: {
+      readonly assignmentId: string;
+      readonly interactionRequestId: string;
+      readonly challengeId: string;
+    }) => {
+      const challengeToken = createSignedChannelChallengeToken(
+        {
+          v: 1,
+          challengeId: binding.challengeId,
+          ref: jobRef,
+          assignmentId: binding.assignmentId,
+          interactionRequestId: binding.interactionRequestId,
+          route,
+          displayDigest: interactionDisplayDigest("bash", display),
+          issuedAt: NOW,
+          expiry: "2026-07-15T09:01:00.000Z",
+        },
+        harness.identity,
+      );
+      return createSignedChannelInteractionGrant(
+        {
+          v: 1,
+          grantId: protocolDigest("ChannelInteractionGrantIdentity", 1, {
+            challengeId: binding.challengeId,
+          }),
+          ref: jobRef,
+          assignmentId: binding.assignmentId,
+          interactionRequestId: binding.interactionRequestId,
+          challengeToken,
+          route,
+          responder,
+          decision,
+          issuedAt: NOW,
+          expiry: challengeToken.expiry,
+        },
+        harness.identity,
+        harness.identity,
+      );
+    };
+    const before = (
+      await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`)
+    ).length;
+    for (const grant of [
+      misboundGrant({
+        assignmentId: "assignment-other",
+        interactionRequestId: requestId,
+        challengeId: "challenge-other-assignment",
+      }),
+      misboundGrant({
+        assignmentId: ASSIGNMENT_ID,
+        interactionRequestId: "another-interaction",
+        challengeId: "challenge-other-request",
+      }),
+    ]) {
+      await expect(
+        harness.ledger.finishInteraction(ASSIGNMENT_ID, requestId, {
+          t: "answered",
+          authority: { via: "channel-grant", grant },
+          decision,
+          decisionDigest: confirmationDecisionDigest(
+            grant.interactionRequestId,
+            { kind: "allow-once" },
+          ),
+          by: channelResponderPrincipal(responder),
+        }),
+      ).rejects.toThrow(
+        "Channel challenge token does not bind the requested interaction",
+      );
+      expect(
+        await harness.log.readStream(`assignment:${ASSIGNMENT_ID}`),
+      ).toHaveLength(before);
+    }
+  });
+
   it("atomically persists job relay verifier state with requested and finished frames", async () => {
     const definition = userDefinition();
     if (definition.definition.kind !== "user") {
@@ -1223,6 +1337,103 @@ describe("user job durable protocol", () => {
     });
   });
 
+  it("advances a relay without a challenge only for the matching non-answered durable outcome", async () => {
+    const harness = await createUserHarness();
+    await start(harness);
+    const requestId = "interaction-no-channel";
+    const request = {
+      t: "requested" as const,
+      requestId,
+      toolName: "bash",
+      display: { title: "Approve?", lines: ["run"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    };
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, request);
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).finishAndMirror(
+      ASSIGNMENT_ID,
+      requestId,
+      {
+        t: "auto-resolved",
+        decision: "denied",
+        reason: "no-interactive-surface",
+      },
+      submissionContext(harness.unsigned),
+    );
+
+    const ref = {
+      execution: "job" as const,
+      taskId: TASK_ID,
+      jobRunId: JOB_RUN_ID,
+      anchorEpoch: 3,
+    };
+    const requested: StreamFrame = {
+      v: 1,
+      ref,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 1,
+      seq: 1,
+      payload: { kind: "interaction", event: request },
+      meta: {},
+    };
+    const requestedVerifier = new StreamFrameVerifier({
+      assignmentId: ASSIGNMENT_ID,
+      ref,
+    });
+    requestedVerifier.accept(requested);
+    await expect(
+      harness.journal.adoptChannelRelayFrame({
+        frame: requested,
+        checkpoint: requestedVerifier.checkpoint(),
+      }),
+    ).resolves.toEqual({ checkpoint: requestedVerifier.checkpoint() });
+
+    const mismatched: StreamFrame = {
+      v: 1,
+      ref,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 2,
+      seq: 2,
+      payload: {
+        kind: "interaction",
+        event: { t: "finished", requestId, outcome: "allowed" },
+      },
+      meta: {},
+    };
+    const mismatchedVerifier = new StreamFrameVerifier(
+      requestedVerifier.checkpoint(),
+    );
+    mismatchedVerifier.accept(mismatched);
+    await expect(
+      harness.journal.adoptChannelRelayFrame({
+        frame: mismatched,
+        checkpoint: mismatchedVerifier.checkpoint(),
+      }),
+    ).rejects.toThrow("does not match a non-answered durable terminal result");
+
+    const finished: StreamFrame = {
+      ...mismatched,
+      payload: {
+        kind: "interaction",
+        event: { t: "finished", requestId, outcome: "denied" },
+      },
+    };
+    const finishedVerifier = new StreamFrameVerifier(
+      requestedVerifier.checkpoint(),
+    );
+    finishedVerifier.accept(finished);
+    await expect(
+      harness.journal.adoptChannelRelayFrame({
+        frame: finished,
+        checkpoint: finishedVerifier.checkpoint(),
+      }),
+    ).resolves.toEqual({ checkpoint: finishedVerifier.checkpoint() });
+  });
+
   it("durably grants a channel answer and mirrors the same authority into the job owner", async () => {
     const definition = userDefinition();
     if (definition.definition.kind !== "user") {
@@ -1319,7 +1530,7 @@ describe("user job durable protocol", () => {
         assignmentId: ASSIGNMENT_ID,
         requestId: interactionRequest.requestId,
         grant,
-        at: NOW,
+        at: "2026-07-15T10:00:00.000Z",
       }),
     ).resolves.toMatchObject({ kind: "replayed", result: finished });
     await expect(
@@ -1333,6 +1544,27 @@ describe("user job durable protocol", () => {
         at: NOW,
       }),
     ).rejects.toThrow();
+  });
+
+  it("enumerates orphaned job interaction duties from the durable projection", async () => {
+    const harness = await createUserHarness();
+    await start(harness);
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId: "orphaned-job-interaction",
+      toolName: "bash",
+      display: { title: "Approve?", lines: ["run"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    });
+    const readAll = vi
+      .spyOn(harness.log, "readAll")
+      .mockRejectedValue(new Error("full history must not be scanned"));
+    await expect(
+      harness.ledger.recoverableJobInteractionAssignments(),
+    ).resolves.toMatchObject([{ assignmentId: ASSIGNMENT_ID }]);
+    expect(readAll).not.toHaveBeenCalled();
+    readAll.mockRestore();
   });
 
   it("distinguishes task pause from deletion for already-dispatched work", async () => {
@@ -2564,6 +2796,7 @@ describe("user job durable protocol", () => {
 
   it("re-enters cancellation after audit settlement closes a pending interaction", async () => {
     const harness = await createUserHarness();
+    const onCancelAccepted = vi.fn(async () => undefined);
     const submission = new InProcessAssignmentSubmission({
       ledger: harness.ledger,
       owner: harness.journal,
@@ -2573,6 +2806,7 @@ describe("user job durable protocol", () => {
       journal: harness.journal,
       executor: harness.ledger,
       contexts: { create: ownerContext },
+      onCancelAccepted,
       cancellationSubmission: {
         submitCancellation(assignmentId) {
           return submission.submitCancellation(
@@ -2608,6 +2842,7 @@ describe("user job durable protocol", () => {
       requestId: "cancel-after-audit-settlement",
       context: surfaceContext("cancel-after-audit-settlement"),
     });
+    expect(onCancelAccepted).toHaveBeenCalledWith(ASSIGNMENT_ID);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 });
@@ -5316,6 +5551,8 @@ describe("job resource lease domain closure", () => {
 type JobBehaviorScenarioId =
   | "commit"
   | "manualAdmission"
+  | "channelLifecycle"
+  | "interactionSettlement"
   | "mirror"
   | "conflictAcked"
   | "cancelHalted"
@@ -5350,10 +5587,176 @@ function userBehaviorHarness(
   };
 }
 
+async function createJobChannelLifecycle() {
+  const definition = userDefinition();
+  if (definition.definition.kind !== "user") {
+    throw new Error("matrix job definition is not user-owned");
+  }
+  definition.definition = {
+    ...definition.definition,
+    origin: { channelId: "feishu", to: "matrix-chat" },
+    interactionResponder: {
+      channelId: "feishu",
+      platformSubject: "matrix-user",
+    },
+    spec: {
+      ...definition.definition.spec,
+      delivery: { kind: "channel", channel: "feishu", to: "matrix-chat" },
+    },
+  };
+  const harness = await createUserHarness({ definition });
+  await start(harness);
+  const ref = {
+    execution: "job" as const,
+    taskId: TASK_ID,
+    jobRunId: JOB_RUN_ID,
+    anchorEpoch: 3,
+  };
+  const requestId = "matrix-channel-interaction";
+  const interactionRequest = {
+    t: "requested" as const,
+    requestId,
+    toolName: "bash",
+    display: { title: "Approve?", lines: ["run"] },
+    issuedAt: NOW,
+    ttlMs: 60_000,
+    expiresAt: "2026-07-15T09:01:00.000Z",
+  };
+  await harness.ledger.requestInteraction(ASSIGNMENT_ID, interactionRequest);
+  const requested: StreamFrame = {
+    v: 1,
+    ref,
+    assignmentId: ASSIGNMENT_ID,
+    streamEpoch: 1,
+    seq: 1,
+    payload: { kind: "interaction", event: interactionRequest },
+    meta: {},
+  };
+  const preparation = await harness.journal.prepareChannelRelayRequest(requested);
+  if (preparation.kind !== "prepared") {
+    throw new Error("matrix job channel challenge is missing");
+  }
+  const verifier = new StreamFrameVerifier({
+    assignmentId: ASSIGNMENT_ID,
+    ref,
+  });
+  verifier.accept(requested);
+  await harness.journal.adoptChannelRelayFrame({
+    frame: requested,
+    checkpoint: verifier.checkpoint(),
+    prepared: preparation.prepared,
+  });
+  await harness.journal.recordChannelChallengeDelivered({
+    challengeId: preparation.prepared.token.challengeId,
+    receipt: { acceptedAt: NOW },
+  });
+  const decision = { allowed: true, reason: "approved" };
+  const grant = await harness.journal.grantChannelChallenge({
+    token: preparation.prepared.token,
+    responder: definition.definition.interactionResponder,
+    decision,
+    at: NOW,
+  });
+  const finish = async () => {
+    const answer = await harness.ledger.prepareInteractionAnswerFromChannel({
+      assignmentId: ASSIGNMENT_ID,
+      requestId,
+      grant,
+      at: NOW,
+    });
+    if (answer.kind !== "authorized") {
+      throw new Error("matrix job channel grant was unexpectedly replayed");
+    }
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).finishAndMirror(
+      ASSIGNMENT_ID,
+      requestId,
+      answer.outcome,
+      submissionContext(harness.unsigned),
+    );
+    const finished: StreamFrame = {
+      v: 1,
+      ref,
+      assignmentId: ASSIGNMENT_ID,
+      streamEpoch: 2,
+      seq: 2,
+      payload: {
+        kind: "interaction",
+        event: { t: "finished", requestId, outcome: "allowed" },
+      },
+      meta: {},
+    };
+    verifier.accept(finished);
+    await harness.journal.adoptChannelRelayFrame({
+      frame: finished,
+      checkpoint: verifier.checkpoint(),
+    });
+  };
+  return {
+    harness,
+    challengeId: preparation.prepared.token.challengeId,
+    grant,
+    finish,
+  };
+}
+
+async function createInteractionSettlement() {
+  const harness = await createUserHarness();
+  await start(harness);
+  const requestId = "matrix-settlement-interaction";
+  await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+    requestId,
+    toolName: "notify",
+    display: { title: "Notify?", lines: ["external effect"] },
+    issuedAt: NOW,
+    ttlMs: 60_000,
+    expiresAt: "2026-07-15T09:01:00.000Z",
+  });
+  await harness.ledger.finishInteraction(ASSIGNMENT_ID, requestId, {
+    t: "auto-resolved",
+    decision: "denied",
+    reason: "no-interactive-surface",
+  });
+  await harness.ledger.startSideEffect(ASSIGNMENT_ID, {
+    kind: "external-call",
+    toolName: "notify",
+    summary: "unknown external effect",
+    target: "external-service",
+  });
+  await harness.ledger.abortFromSurface(ASSIGNMENT_ID, surfaceAbortInput());
+  await reconcileOpenAbort(harness);
+  const complete = async () => {
+    const batch = await harness.ledger.pendingInteractionMirrorBatch(ASSIGNMENT_ID);
+    if (!batch) throw new Error("matrix settlement mirror batch is missing");
+    await harness.journal.mirrorInteractions(
+      ASSIGNMENT_ID,
+      batch,
+      submissionContext(harness.unsigned),
+    );
+    await harness.journal.completeInteractionSettlement(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+  };
+  return { harness, complete };
+}
+
 const JOB_BEHAVIOR_SCENARIOS: Record<
   JobBehaviorScenarioId,
   () => Promise<JobBehaviorHarness>
 > = {
+  async channelLifecycle() {
+    const lifecycle = await createJobChannelLifecycle();
+    await lifecycle.finish();
+    return userBehaviorHarness(lifecycle.harness);
+  },
+  async interactionSettlement() {
+    const settlement = await createInteractionSettlement();
+    await settlement.complete();
+    return userBehaviorHarness(settlement.harness);
+  },
   async ticketLifecycle() {
     let nowMs = Date.parse(NOW);
     const clock = () => new Date(nowMs).toISOString();
@@ -5614,6 +6017,45 @@ const JOB_BEHAVIOR_SCENARIOS: Record<
 };
 
 const JOB_RECOVERY_PROBES = {
+  async channelRelayOutbox() {
+    const lifecycle = await createJobChannelLifecycle();
+    await expect(
+      reopenUserJournal(lifecycle.harness).pendingChannelChallenges(),
+    ).resolves.toMatchObject([
+      {
+        prepared: {
+          token: { challengeId: lifecycle.challengeId },
+        },
+        delivered: { challengeId: lifecycle.challengeId },
+      },
+    ]);
+    await expect(
+      reopenUserJournal(lifecycle.harness).pendingChannelGrantDeliveries(),
+    ).resolves.toEqual([lifecycle.grant]);
+    await lifecycle.finish();
+    await expect(
+      reopenUserJournal(lifecycle.harness).pendingChannelChallenges(),
+    ).resolves.toEqual([]);
+    await expect(
+      reopenUserJournal(lifecycle.harness).pendingChannelGrantDeliveries(),
+    ).resolves.toEqual([]);
+    await expect(
+      reopenUserJournal(lifecycle.harness).channelRelayCheckpoint(ASSIGNMENT_ID),
+    ).resolves.toMatchObject({ lastSeq: 2 });
+  },
+  async interactionSettlementOutbox() {
+    const settlement = await createInteractionSettlement();
+    await expect(
+      reopenUserJournal(settlement.harness).pendingInteractionSettlements(),
+    ).resolves.toHaveLength(1);
+    await expect(
+      reopenUserJournal(settlement.harness).pendingCancellations(),
+    ).resolves.toEqual([]);
+    await settlement.complete();
+    await expect(
+      reopenUserJournal(settlement.harness).pendingInteractionSettlements(),
+    ).resolves.toEqual([]);
+  },
   async dispatchOutbox() {
     const harness = await createUserHarness();
     expect(await harness.journal.pendingDispatches()).toHaveLength(1);
@@ -5792,6 +6234,41 @@ interface JobRecordBehaviorSpec {
 const CONFLICT_TIME = "2026-07-15T09:03:00.000Z";
 
 const JOB_RECORD_BEHAVIOR = {
+  "channel-challenge-prepared": {
+    scenario: "channelLifecycle",
+    recovery: jobRecovery("channelRelayOutbox"),
+    corrupt: (body) => ({ ...body, assignmentId: "assignment-ghost" }),
+  },
+  "channel-relay-cursor": {
+    scenario: "channelLifecycle",
+    recovery: jobRecovery("channelRelayOutbox"),
+    corrupt: (body) => ({ ...body, upToSeq: 999 }),
+  },
+  "channel-challenge-granted": {
+    scenario: "channelLifecycle",
+    recovery: jobRecovery("channelRelayOutbox"),
+    corrupt: (body) => ({ ...body, challengeId: "challenge-ghost" }),
+  },
+  "channel-challenge-delivered": {
+    scenario: "channelLifecycle",
+    recovery: jobRecovery("channelRelayOutbox"),
+    corrupt: (body) => ({ ...body, challengeId: "challenge-ghost" }),
+  },
+  "channel-challenge-closed": {
+    scenario: "channelLifecycle",
+    recovery: jobRecovery("channelRelayOutbox"),
+    corrupt: (body) => ({ ...body, challengeId: "challenge-ghost" }),
+  },
+  "interaction-settlement-fence": {
+    scenario: "interactionSettlement",
+    recovery: jobRecovery("interactionSettlementOutbox"),
+    corrupt: (body) => ({ ...body, ticketDigest: SHA256_ZERO }),
+  },
+  "interaction-settlement-completed": {
+    scenario: "interactionSettlement",
+    recovery: jobRecovery("interactionSettlementOutbox"),
+    corrupt: (body) => ({ ...body, targetMirrorDigest: SHA256_ZERO }),
+  },
   "task-revision": {
     scenario: "commit",
     recovery: noJobRecovery("restart state is rebuilt by the full reducer itself"),
@@ -5974,7 +6451,26 @@ describe("job record execution-point behavior matrix", () => {
         : structuredClone(target.body);
       await behavior.log.append([{ stream: `job:${TASK_ID}`, body: vector }]);
       await expectBehaviorRejected(behavior.fullProbe);
-      if (behavior.guardProbe) await expectBehaviorRejected(behavior.guardProbe);
+      if (behavior.guardProbe) {
+        const guardBehavior = await JOB_BEHAVIOR_SCENARIOS[spec.scenario]();
+        const guardRecords =
+          await guardBehavior.log.readStream<
+            Record<string, unknown> & { t: string }
+          >(`job:${TASK_ID}`);
+        const guardTarget = guardRecords.filter(
+          (record) => record.body.t === recordType,
+        ).at(-1);
+        if (!guardTarget) {
+          throw new Error("matrix guard target record is missing");
+        }
+        const guardVector = spec.corrupt
+          ? spec.corrupt(structuredClone(guardTarget.body))
+          : structuredClone(guardTarget.body);
+        await guardBehavior.log.append([
+          { stream: `job:${TASK_ID}`, body: guardVector },
+        ]);
+        await expectBehaviorRejected(guardBehavior.guardProbe);
+      }
     },
     20_000,
   );
