@@ -603,9 +603,8 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
             if (stream.markTerminal) {
               await stream.markTerminal();
             }
-            await this.options.ledger.markTicketCancellationProofOwnerAccepted(
-              assignmentId,
-            );
+            await this.options.ledger
+              .markTicketCancellationProofOwnerAccepted(assignmentId);
           } catch (error) {
             if (!isRetryableInteractionRecoveryFailure(error)) throw error;
             this.#deferInteractionRecovery(
@@ -626,11 +625,29 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
                   assignmentId,
                 )
               : undefined;
-          await owner.completeInteractionSettlement(
-            assignmentId,
-            streamProof,
-            context,
-          );
+          try {
+            await owner.completeInteractionSettlement(
+              assignmentId,
+              streamProof,
+              context,
+            );
+            if (stream.markTerminal) {
+              await stream.markTerminal();
+            }
+            await this.options.ledger
+              .markInteractionSettlementOwnerAccepted(
+                assignmentId,
+                streamProof,
+              );
+          } catch (error) {
+            if (!isRetryableInteractionRecoveryFailure(error)) throw error;
+            this.#deferInteractionRecovery(
+              envelope,
+              this.#nextInteractionRecoveryDelay(assignmentId),
+            );
+            return;
+          }
+          this.#interactionRecoveryRetryMs.delete(assignmentId);
           return;
         }
       }

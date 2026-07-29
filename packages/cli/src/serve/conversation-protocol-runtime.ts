@@ -281,6 +281,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ? createConversationExecutorLedger({
       Constructor: options.localExecutor.ConversationAssignmentLedger,
       authority: options.authority,
+      assignmentRecordV2Writes: false,
       usageFinal: (assignmentId) =>
         options.authority.executorResourceGovernor.flushAssignment(
           assignmentId,

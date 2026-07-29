@@ -392,6 +392,7 @@ async function createUserHarness(
     ownerSnapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
     executorSnapshotFor?: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
+    assignmentRecordV2Writes?: boolean;
     clock?: () => string;
   } = {},
 ) {
@@ -450,6 +451,7 @@ async function createUserHarness(
     snapshotFor: options.executorSnapshotFor ?? matchingSnapshotFor,
     permissionSnapshotFor: (digest) => matchingPermissionSnapshotFor(identity, digest),
     runtimeBindingGuard: options.runtimeBindingGuard,
+    assignmentRecordV2Writes: options.assignmentRecordV2Writes ?? true,
     clock,
     surfaceAbort: {
       authorize(assignmentId, input) {
@@ -1666,6 +1668,34 @@ describe("user job durable protocol", () => {
     ).rejects.toThrow("conflicting durable checkpoint");
   });
 
+  it("keeps the compatibility production path on assignment v1 until activation", async () => {
+    const harness = await createUserHarness({
+      assignmentRecordV2Writes: false,
+    });
+    await start(harness);
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId: "compatibility-reader-request",
+      toolName: "read",
+      display: { title: "Read?", lines: ["compatibility"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    });
+
+    const page = await harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      { fromSeq: 1, limit: 256 },
+    );
+    if (!("fromSeq" in page)) {
+      throw new Error("expected assignment evidence page");
+    }
+    expect(page.entries.every((entry) => entry.body.v === 1)).toBe(true);
+    await expect(
+      harness.ledger.interactionStreamProjectionEnabled(ASSIGNMENT_ID),
+    ).resolves.toBe(false);
+  });
+
   it("distinguishes task pause from deletion for already-dispatched work", async () => {
     const harness = await createUserHarness();
     const disabled = userDefinition(2, "perform scheduled work", "disabled");
@@ -2256,6 +2286,28 @@ describe("user job durable protocol", () => {
     );
     expect(await harness.ledger.recoverableJobCancellations()).toEqual([]);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
+    const compatibilityReader = new ConversationAssignmentLedger({
+      log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
+      assignmentRecordV2Writes: false,
+    });
+    await expect(
+      compatibilityReader.hasPendingTicketCancellation(ASSIGNMENT_ID),
+    ).resolves.toBe(false);
+    await expect(
+      compatibilityReader.recoverableJobCancellations(),
+    ).resolves.toEqual([]);
     const closures = (await harness.journal.statusHistory(JOB_RUN_ID, 0)).filter(
       (notice) => notice.state === "uncertain-closed",
     );
@@ -2266,6 +2318,70 @@ describe("user job durable protocol", () => {
         resultingState: "queued",
       }),
     ]);
+  });
+
+  it("retires audit-only interaction settlement only after the exact owner acceptance is durable", async () => {
+    const settlement = await createInteractionSettlement();
+    await settlement.complete();
+    const { harness } = settlement;
+    const proof =
+      await harness.ledger.interactionSettlementStreamProof(ASSIGNMENT_ID);
+
+    expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
+      true,
+    );
+    expect(
+      (await harness.ledger.recoverableJobCancellations()).map(
+        (envelope) => envelope.assignmentId,
+      ),
+    ).toEqual([ASSIGNMENT_ID]);
+    await expect(
+      harness.ledger.markInteractionSettlementOwnerAccepted(
+        ASSIGNMENT_ID,
+        { ...proof, ticketDigest: SHA256_ZERO },
+      ),
+    ).rejects.toThrow("signature invalid");
+
+    await expect(
+      harness.ledger.markInteractionSettlementOwnerAccepted(
+        ASSIGNMENT_ID,
+        proof,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      harness.ledger.markInteractionSettlementOwnerAccepted(
+        ASSIGNMENT_ID,
+        proof,
+      ),
+    ).resolves.toBe(true);
+    expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
+      false,
+    );
+    expect(await harness.ledger.recoverableJobCancellations()).toEqual([]);
+
+    const replayed = new ConversationAssignmentLedger({
+      log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: harness.identity,
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) =>
+        matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
+      assignmentRecordV2Writes: false,
+    });
+    await expect(
+      replayed.hasPendingTicketCancellation(ASSIGNMENT_ID),
+    ).resolves.toBe(false);
+    await expect(replayed.recoverableJobCancellations()).resolves.toEqual([]);
+    await expect(
+      replayed.recoverableJobInteractionAssignments(),
+    ).resolves.toEqual([]);
   });
 
   it("accepts a lost started response replay after the job commits", async () => {
@@ -5945,10 +6061,14 @@ async function createInteractionSettlement() {
     );
     const batch = await harness.ledger.pendingInteractionMirrorBatch(ASSIGNMENT_ID);
     if (!batch) throw new Error("matrix settlement mirror batch is missing");
-    await harness.journal.mirrorInteractions(
+    const mirrorReceipt = await harness.journal.mirrorInteractions(
       ASSIGNMENT_ID,
       batch,
       submissionContext(harness.unsigned),
+    );
+    await harness.ledger.markInteractionsMirrored(
+      ASSIGNMENT_ID,
+      mirrorReceipt,
     );
     const proof =
       await harness.ledger.interactionSettlementStreamProof(ASSIGNMENT_ID);

@@ -1288,7 +1288,12 @@ type AssignmentRecordV2 =
   | { v: 2; t: "interaction-stream-projected";
       assignmentId: string; upToRecordSeq: number;
       lastStreamSeq: number; streamDigest: Digest }
-  | { v: 2; t: "cancel-proof-owner-accepted" };
+  | { v: 2; t: "cancel-proof-owner-accepted" }
+  | { v: 2; t: "interaction-settlement-owner-accepted";
+      assignmentId: string; ticketDigest: Digest; settlementVersion: 1 }
+  | { v: 2; t: "interaction-settlement-owner-accepted";
+      assignmentId: string; ticketDigest: Digest; settlementVersion: 2;
+      streamProof: InteractionSettlementStreamProof };
 ```
 
 `interaction-stream-projection-enabled` 是唯一格式切换事实，`legacyUpToRecordSeq` 必须等于该记录前一条 assignment record 的 seq；切换前前缀仍按 v1 合同解释。切换后的每个 `interaction-finished` 都必须被严格递增的 `interaction-stream-projected` 水位覆盖；写入水位前须以 spool 返回的耐久 `StreamVerifierCheckpoint` 核对 assignment、稳定 `interaction:<recordSeq>` sourceId 的无孔有序前缀、`lastStreamSeq` 与规范 `streamDigest`。同水位仅全等重放，异载荷、回退、超前、有孔或错摘要均拒绝。conversation assignment 禁止写这些 v2 分支。
@@ -1299,6 +1304,7 @@ type AssignmentRecordV2 =
 
 job interaction 的业务终态、owner mirror 与 stream 投影是同一 assignment 的分步耐久义务，由 executor assignment reconciler 按 assignment 串行推进；答复重放、run-end、取消与启动恢复都只唤醒该 owner，不得各自补写后续步骤。恢复枚举来自 assignment 日志的可重建耐久派生索引：尚可产生新交互的 received/started assignment 保留索引身份，终态且全部欠账清零后才退休；索引缺失、落后、超前或损坏时从日志重建，正常启动仅分页读取未退休义务与有界尾部。started assignment 只恢复 interaction/mirror/stream 欠账，绝不重跑业务 runtime。每步以稳定 sourceId 幂等投影，暂时失败保留义务并封顶退避，稳定合同冲突 fail-stop 且不得写 `bundle_sealed`、`execution-failed`、`halted` 或 stream final 越过欠账。
 abort-ticket 入口的成功只承诺取消前缀已耐久且 live worker 已收到停止信号；executor worker 是后续唯一义务所有者，负责重驱 interaction mirror、以耐久 abort 原因重入形成 proof、向 owner 提交，并在进程恢复时续跑每个未完成前缀。owner 成功接受 proof 的响应不是 executor 的完成事实；worker 必须完成本地 stream 终结后在同一 assignment 日志写 `cancel-proof-owner-accepted`，恢复枚举只以该记录退休提交义务。响应丢失或记录落盘前崩溃时重提同一 proof；记录全等重放幂等，异域、无 abort-ticket 或无 `halted` proof 均拒绝。运行时失败收束不得越过已存在的 abort 前缀另写 `execution-failed`。
+audit-only settlement 同样不得以 owner 成功响应退休 executor 义务：owner 全等接受 legacy 或 v2 settlement 后，worker 必须在本地 assignment 日志写 `interaction-settlement-owner-accepted`。legacy 记录绑定 `assignmentId + ticketDigest + settlementVersion:1`；已启用 stream 合同的记录还必须保存并复验本次提交的完整 `InteractionSettlementStreamProof`，禁止另造 proof 摘要。该记录与 `cancel-proof-owner-accepted` 互斥；无 abort-ticket、未完成 mirror、v2 stream 水位未闭合、proof 任一绑定不符或版本混用均拒绝。恢复枚举只有看到其中一种本地接受记录才可退休；响应丢失、本地落盘前崩溃或重启均重提同一请求。
 
 job 的 audit-only interaction settlement 分两代读取。无顶层版本的既有 `interaction-settlement-fence/completed` 固定为 legacy v1，只等待其冻结 mirror 水位；不得补造 v2 证据。已启用 stream 合同的目标必须写顶层 `v:2`：fence 额外绑定 executor、abort-ticket 所在的已验 ledger 前缀、目标 `interaction-finished` recordSeq；completed 除全等 mirror 外还必须携 executor 签名的 `InteractionSettlementStreamProof(v:2)`，绑定该 fence、覆盖目标的 `interaction-stream-projected` 记录、其 ledger chainDigest 及对应 stream checkpoint。owner 按 DTO/version/未知字段、签名、fence、源前缀、ledger 水位和 stream checkpoint 的固定次序验证后，才可在同一事务写 completed；全等重放返回原结果，legacy/v2 混用或任一绑定不符零写入。
 

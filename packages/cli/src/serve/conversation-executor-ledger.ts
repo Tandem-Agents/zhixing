@@ -39,6 +39,7 @@ export interface ConversationExecutorLedgerOptions {
     readonly manifest: ExecutionManifest<"conversation">;
   }) => AuthorityError | undefined;
   readonly maxPendingInteractions?: number;
+  readonly assignmentRecordV2Writes?: boolean;
   readonly dataPlaneTickets?: ConstructorParameters<
     typeof ConversationAssignmentLedger
   >[0]["dataPlaneTickets"];
@@ -71,5 +72,8 @@ export function createConversationExecutorLedger(
     ...(options.maxPendingInteractions === undefined
       ? {}
       : { maxPendingInteractions: options.maxPendingInteractions }),
+    ...(options.assignmentRecordV2Writes === undefined
+      ? {}
+      : { assignmentRecordV2Writes: options.assignmentRecordV2Writes }),
   });
 }

@@ -26,68 +26,115 @@ export function createAgentJobRuntimePort(
   return {
     async create({ confirmationBroker }) {
       let runtime: AgentRuntime | undefined;
+      let activeJoin: (() => Promise<void>) | undefined;
+      let activeUnlinkAbort: (() => void) | undefined;
+      let disposeTask: Promise<void> | undefined;
+      let handleDisposed = false;
+
+      const disposeOnce = (): Promise<void> => {
+        if (!runtime) return Promise.resolve();
+        disposeTask ??= runtime.dispose("session-dispose");
+        return disposeTask;
+      };
+
       return {
         async *run(
           instruction: JobExecutionInstruction,
           options: JobRuntimeRunOptions,
         ): AsyncGenerator<AgentYield, JobRunOutcome> {
+          if (handleDisposed) {
+            throw new Error("A disposed job runtime handle cannot execute");
+          }
           if (runtime) {
             throw new Error("A job runtime handle may execute only one instruction");
           }
           runtime = await factory.create(instruction, confirmationBroker);
-          const yields = new AsyncYieldQueue();
-          const running = runtime
-            .run({
-              messages: [userMessage(instruction.prompt)],
-              turnIndex: 0,
-              source: "scheduler",
-              abortSignal: options.abortSignal,
-              onYield: (event) => yields.push(event),
-              onProtocolEvent: (event) => options.onProtocolEvent(event),
-              authorizeToolExecution: options.authorizeToolExecution,
-              toolSideEffectObserver: options.toolSideEffectObserver,
-            })
-            .then(
-              (result) => {
-                yields.close();
-                return result;
-              },
-              (error) => {
-                yields.fail(error);
-                throw error;
-              },
-            );
-
-          while (true) {
-            const next = await yields.next();
-            if (next.done) break;
-            yield next.value;
+          if (handleDisposed) {
+            await disposeOnce();
+            throw new Error("A disposed job runtime handle cannot execute");
           }
-          const result = await running;
-          const agentResult = result.agentResult;
-          const usage = agentResult.usage;
-          if (agentResult.reason === "completed") {
+          const yields = new AsyncYieldQueue();
+          const stop = new AbortController();
+          const unlinkAbort = forwardAbort(options.abortSignal, stop);
+          activeUnlinkAbort = unlinkAbort;
+          const settled = Promise.resolve()
+            .then(() =>
+              runtime!.run({
+                messages: [userMessage(instruction.prompt)],
+                turnIndex: 0,
+                source: "scheduler",
+                abortSignal: stop.signal,
+                onYield: (event) => yields.push(event),
+                onProtocolEvent: (event) => options.onProtocolEvent(event),
+                authorizeToolExecution: options.authorizeToolExecution,
+                toolSideEffectObserver: options.toolSideEffectObserver,
+              }),
+            )
+            .then(
+              (result) => ({ ok: true as const, result }),
+              (error: unknown) => ({ ok: false as const, error }),
+            );
+          void settled.then(() => yields.close());
+          const join = async (): Promise<void> => {
+            if (!stop.signal.aborted) {
+              stop.abort(new Error("Job runtime consumer stopped before completion"));
+            }
+            await settled;
+          };
+          activeJoin = join;
+
+          let completed = false;
+          let primaryFailure = false;
+          try {
+            while (true) {
+              const next = await yields.next();
+              if (next.done) break;
+              yield next.value;
+            }
+            const outcome = await settled;
+            if (!outcome.ok) throw outcome.error;
+            const agentResult = outcome.result.agentResult;
+            const usage = agentResult.usage;
+            completed = true;
+            if (agentResult.reason === "completed") {
+              return {
+                status: "completed",
+                summary: extractText(agentResult.message),
+                contentAssets: [],
+                usage,
+              };
+            }
             return {
-              status: "completed",
-              summary: extractText(agentResult.message),
+              status: "failed",
+              summary:
+                agentResult.reason === "error"
+                  ? agentResult.error.message
+                  : agentResult.reason === "aborted"
+                    ? "Job execution was aborted"
+                    : `Job execution reached ${agentResult.maxTurns} turns`,
               contentAssets: [],
               usage,
             };
+          } catch (error) {
+            primaryFailure = true;
+            throw error;
+          } finally {
+            unlinkAbort();
+            activeUnlinkAbort = undefined;
+            if (!completed) await join();
+            try {
+              await disposeOnce();
+            } catch (error) {
+              if (!primaryFailure) throw error;
+            }
           }
-          return {
-            status: "failed",
-            summary:
-              agentResult.reason === "error"
-                ? agentResult.error.message
-                : agentResult.reason === "aborted"
-                  ? "Job execution was aborted"
-                  : `Job execution reached ${agentResult.maxTurns} turns`,
-            contentAssets: [],
-            usage,
-          };
         },
         async dispose() {
-          await runtime?.dispose("session-dispose");
+          handleDisposed = true;
+          activeUnlinkAbort?.();
+          activeUnlinkAbort = undefined;
+          await activeJoin?.();
+          await disposeOnce();
         },
       };
     },
@@ -98,7 +145,6 @@ class AsyncYieldQueue {
   readonly #items: AgentYield[] = [];
   #waiter: (() => void) | undefined;
   #closed = false;
-  #error: unknown;
 
   push(item: AgentYield): void {
     if (this.#closed) throw new Error("Job yield queue is closed");
@@ -107,12 +153,7 @@ class AsyncYieldQueue {
   }
 
   close(): void {
-    this.#closed = true;
-    this.#wake();
-  }
-
-  fail(error: unknown): void {
-    this.#error = error;
+    if (this.#closed) return;
     this.#closed = true;
     this.#wake();
   }
@@ -125,7 +166,6 @@ class AsyncYieldQueue {
     }
     const item = this.#items.shift();
     if (item) return { done: false, value: item };
-    if (this.#error) throw this.#error;
     return { done: true, value: undefined };
   }
 
@@ -134,4 +174,17 @@ class AsyncYieldQueue {
     this.#waiter = undefined;
     waiter?.();
   }
+}
+
+function forwardAbort(
+  source: AbortSignal,
+  target: AbortController,
+): () => void {
+  const abort = () => target.abort(source.reason);
+  if (source.aborted) {
+    abort();
+    return () => undefined;
+  }
+  source.addEventListener("abort", abort, { once: true });
+  return () => source.removeEventListener("abort", abort);
 }

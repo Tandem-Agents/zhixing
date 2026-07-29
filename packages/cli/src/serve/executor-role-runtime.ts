@@ -62,8 +62,10 @@ export async function runExecutorRole(
 
   let mesh: MeshRuntimeAssembly | undefined;
   let jobWorker: JobAssignmentWorker | undefined;
+  let jobOwner: ExecutorJobOwnerLifecycle | undefined;
   let authority: AuthorityRuntimeStack | undefined;
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
+  let roleFailure: unknown;
   try {
     const interactions = new DurableConversationInteractionObserver();
     const runtime = new ExecutorRuntimeSubstrate({
@@ -108,6 +110,7 @@ export async function runExecutorRole(
       Constructor: executor.ConversationAssignmentLedger,
       authority,
       dataPlaneTickets: dataPlane.tickets,
+      assignmentRecordV2Writes: false,
       usageFinal: (assignmentId) => {
         if (!mesh) throw new Error("Executor mesh runtime is not ready");
         return mesh.finalizeExecutorUsage(assignmentId);
@@ -159,20 +162,57 @@ export async function runExecutorRole(
       secretStore: bootstrap.secretStore,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
-    await mesh.start();
-    await jobWorker.recover();
+    jobOwner = new ExecutorJobOwnerLifecycle(jobWorker, mesh);
+    await jobOwner.start();
     await waitForRoleShutdown();
-  } finally {
-    jobWorker?.stopAccepting();
-    await jobWorker?.close();
-    await mesh?.stop();
+  } catch (error) {
+    roleFailure = error;
+  }
+  const cleanupFailures: unknown[] = [];
+  try {
+    if (jobOwner && !jobOwner.closed) {
+      await jobOwner.close();
+    } else if (!jobOwner) {
+      jobWorker?.stopAccepting();
+      await jobWorker?.close();
+      await mesh?.stop();
+    }
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  try {
     await dataPlane?.close();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  try {
     authority?.stopStorageMaintenance();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  try {
     await mcpHub.dispose();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  if (roleFailure !== undefined) {
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [roleFailure, ...cleanupFailures],
+        "Executor role and cleanup both failed",
+      );
+    }
+    throw roleFailure;
+  }
+  if (cleanupFailures.length > 0) {
+    throw new AggregateError(
+      cleanupFailures,
+      "Executor role cleanup failed",
+    );
   }
 }
 
-class ExecutorRuntimeSubstrate {
+export class ExecutorRuntimeSubstrate {
   constructor(private readonly options: {
     readonly config: ZhixingConfig;
     readonly credentials: Pick<ZhixingCredentials, "providers">;
@@ -273,6 +313,75 @@ class ExecutorRuntimeSubstrate {
         .map(({ server }) => server.serverId)
         .sort(),
     };
+  }
+}
+
+export class ExecutorJobOwnerLifecycle {
+  #transportAttempted = false;
+  #started = false;
+  #closed = false;
+
+  constructor(
+    private readonly worker: Pick<
+      JobAssignmentWorker,
+      "recover" | "stopAccepting" | "close"
+    >,
+    private readonly transport: Pick<MeshRuntimeAssembly, "start" | "stop">,
+  ) {}
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  async start(): Promise<void> {
+    if (this.#started || this.#transportAttempted) {
+      throw new Error("Executor job owner lifecycle may start only once");
+    }
+    this.#transportAttempted = true;
+    try {
+      await this.transport.start();
+      await this.worker.recover();
+      this.#started = true;
+    } catch (error) {
+      try {
+        await this.close();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Executor job owner startup and rollback both failed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    const failures: unknown[] = [];
+    try {
+      this.worker.stopAccepting();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.worker.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (this.#transportAttempted) {
+      try {
+        await this.transport.stop();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "Executor job owner shutdown failed",
+      );
+    }
   }
 }
 

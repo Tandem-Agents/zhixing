@@ -243,6 +243,11 @@ export interface AssignmentLedgerOptions {
   readonly dataPlaneTickets?: Pick<DataPlaneTicketRegistry, "authorize">;
   readonly maxPendingInteractions?: number;
   readonly maxCachedAssignments?: number;
+  /**
+   * Enables production creation of assignment v2 facts. Compatibility
+   * readers leave this disabled and may only continue an already-cut-over log.
+   */
+  readonly assignmentRecordV2Writes?: boolean;
 }
 
 export interface AssignmentSubmissionPort {
@@ -488,7 +493,7 @@ interface LedgerProjection {
 }
 
 interface JobInteractionRecoveryIndexValue {
-  readonly v: 2;
+  readonly v: 3;
   readonly assignmentId: string;
   readonly envelopeRef: ArtifactRef;
   readonly phase: LedgerSnapshot["phase"];
@@ -499,6 +504,9 @@ interface JobInteractionRecoveryIndexValue {
   readonly streamProjectionEnabledAfter?: number;
   readonly streamProjectedUpTo: number;
   readonly hasAbort: boolean;
+  readonly hasAbortTicket: boolean;
+  readonly cancelProofOwnerAccepted: boolean;
+  readonly interactionSettlementOwnerAccepted: boolean;
 }
 
 type DispatchDecision =
@@ -554,6 +562,7 @@ export class ConversationAssignmentLedger implements
   readonly #dataPlaneTickets: AssignmentLedgerOptions["dataPlaneTickets"];
   readonly #maxPendingInteractions: number;
   readonly #maxCachedAssignments: number;
+  readonly #assignmentRecordV2Writes: boolean;
   readonly #operations = new SerialTaskQueue();
   readonly #jobInteractionRecoveryIndex: RebuildableDurableProjectionIndex;
   readonly #projections = new Map<
@@ -591,9 +600,11 @@ export class ConversationAssignmentLedger implements
     this.#resources = options.resources;
     this.#surfaceAbort = options.surfaceAbort;
     this.#dataPlaneTickets = options.dataPlaneTickets;
+    this.#assignmentRecordV2Writes =
+      options.assignmentRecordV2Writes ?? false;
     this.#jobInteractionRecoveryIndex = this.#log.durableProjection({
       projectionId: "executor-job-interaction-obligations",
-      reducerVersion: 3,
+      reducerVersion: 4,
       reduce: (envelope, current) =>
         reduceJobInteractionRecoveryIndex(
           envelope,
@@ -1816,6 +1827,7 @@ export class ConversationAssignmentLedger implements
   async enableInteractionStreamProjection(
     assignmentId: string,
   ): Promise<number | undefined> {
+    if (!this.#assignmentRecordV2Writes) return undefined;
     return (
       await this.#transact<number | undefined>(assignmentId, (state) => {
         if (state.received?.body.activation.ref.execution !== "job") {
@@ -2524,7 +2536,8 @@ export class ConversationAssignmentLedger implements
     return this.#jobAssignmentsMatching(
       (state) =>
         state.aborts.some((abort) => abort.via === "abort-ticket") &&
-        !state.validation.cancelProofOwnerAccepted,
+        !state.validation.cancelProofOwnerAccepted &&
+        state.validation.interactionSettlementOwnerAccepted === undefined,
     );
   }
 
@@ -2546,7 +2559,8 @@ export class ConversationAssignmentLedger implements
       assignmentId,
       (state) =>
         state.aborts.some((abort) => abort.via === "abort-ticket") &&
-        !state.validation.cancelProofOwnerAccepted,
+        !state.validation.cancelProofOwnerAccepted &&
+        state.validation.interactionSettlementOwnerAccepted === undefined,
     );
   }
 
@@ -2591,10 +2605,11 @@ export class ConversationAssignmentLedger implements
    */
   async markTicketCancellationProofOwnerAccepted(
     assignmentId: string,
-  ): Promise<void> {
-    await this.#transact<void>(assignmentId, (state) => {
+  ): Promise<boolean> {
+    return (
+      await this.#transact<boolean>(assignmentId, (state) => {
       if (state.validation.cancelProofOwnerAccepted) {
-        return { kind: "return", value: undefined };
+        return { kind: "return", value: true };
       }
       if (
         state.received?.body.activation.ref.execution !== "job" ||
@@ -2605,6 +2620,12 @@ export class ConversationAssignmentLedger implements
         throw new Error(
           "Ticket cancellation proof cannot be retired before its durable halted proof",
         );
+      }
+      if (
+        !this.#assignmentRecordV2Writes &&
+        state.streamProjectionEnabledAfter === undefined
+      ) {
+        return { kind: "return", value: false };
       }
       return {
         kind: "append",
@@ -2617,9 +2638,74 @@ export class ConversationAssignmentLedger implements
             }),
           ),
         ],
-        value: undefined,
+        value: true,
       };
-    });
+      })
+    ).value;
+  }
+
+  /**
+   * Retires an audit-only abort-ticket settlement only after the authenticated
+   * owner has durably accepted the exact legacy/v2 settlement request.
+   */
+  async markInteractionSettlementOwnerAccepted(
+    assignmentId: string,
+    streamProof: InteractionSettlementStreamProof | undefined,
+  ): Promise<boolean> {
+    return (
+      await this.#transact<boolean>(assignmentId, (state) => {
+        const abort = [...state.validation.aborts.values()].find(
+          (candidate) => candidate.via === "abort-ticket",
+        );
+        if (!abort) {
+          throw new Error(
+            "Interaction settlement acceptance has no durable abort ticket",
+          );
+        }
+        const body = streamProof
+          ? ({
+              v: 2,
+              t: "interaction-settlement-owner-accepted",
+              assignmentId,
+              ticketDigest: abort.refId,
+              settlementVersion: 2,
+              streamProof,
+            } as const)
+          : ({
+              v: 2,
+              t: "interaction-settlement-owner-accepted",
+              assignmentId,
+              ticketDigest: abort.refId,
+              settlementVersion: 1,
+            } as const);
+        const existing =
+          state.validation.interactionSettlementOwnerAccepted;
+        if (existing) {
+          if (canonicalize(existing) !== canonicalize(body)) {
+            throw new Error(
+              "Interaction settlement was already accepted with a different durable identity",
+            );
+          }
+          return { kind: "return", value: true };
+        }
+        if (
+          !this.#assignmentRecordV2Writes &&
+          state.streamProjectionEnabledAfter === undefined
+        ) {
+          return { kind: "return", value: false };
+        }
+        return {
+          kind: "append",
+          entries: [
+            assignmentRecord(
+              assignmentId,
+              nextEntry(state, body),
+            ),
+          ],
+          value: true,
+        };
+      })
+    ).value;
   }
 
   async #conversationAssignmentsInPhases(
@@ -4062,7 +4148,7 @@ async function reduceJobInteractionRecoveryIndex(
         continue;
       }
       pending.value = {
-        v: 2,
+        v: 3,
         assignmentId,
         envelopeRef: body.envelope.ref,
         phase: "received",
@@ -4072,6 +4158,9 @@ async function reduceJobInteractionRecoveryIndex(
         mirroredUpTo: 0,
         streamProjectedUpTo: 0,
         hasAbort: false,
+        hasAbortTicket: false,
+        cancelProofOwnerAccepted: false,
+        interactionSettlementOwnerAccepted: false,
       };
       pending.touched = true;
       continue;
@@ -4104,7 +4193,12 @@ async function reduceJobInteractionRecoveryIndex(
         };
         break;
       case "abort-requested":
-        next = { ...next, hasAbort: true };
+        next = {
+          ...next,
+          hasAbort: true,
+          hasAbortTicket:
+            next.hasAbortTicket || body.via === "abort-ticket",
+        };
         break;
       case "halted":
         next = { ...next, phase: "halted" };
@@ -4132,6 +4226,18 @@ async function reduceJobInteractionRecoveryIndex(
         next = {
           ...next,
           streamProjectedUpTo: body.upToRecordSeq,
+        };
+        break;
+      case "cancel-proof-owner-accepted":
+        next = {
+          ...next,
+          cancelProofOwnerAccepted: true,
+        };
+        break;
+      case "interaction-settlement-owner-accepted":
+        next = {
+          ...next,
+          interactionSettlementOwnerAccepted: true,
         };
         break;
       default:
@@ -4176,9 +4282,12 @@ function validateJobInteractionRecoveryIndexValue(
   const keys = Object.keys(value).sort();
   const expected = [
     "assignmentId",
+    "cancelProofOwnerAccepted",
     "envelopeRef",
     "hasAbort",
+    "hasAbortTicket",
     "hasInteractionFacts",
+    "interactionSettlementOwnerAccepted",
     "maxFinishedSeq",
     "mirroredUpTo",
     "pendingInteractions",
@@ -4196,7 +4305,7 @@ function validateJobInteractionRecoveryIndexValue(
   }
   const ref = value.envelopeRef;
   if (
-    value.v !== 2 ||
+    value.v !== 3 ||
     typeof value.assignmentId !== "string" ||
     !ref ||
     typeof ref !== "object" ||
@@ -4207,6 +4316,9 @@ function validateJobInteractionRecoveryIndexValue(
     !Number.isSafeInteger(ref.bytes) ||
     (ref.bytes as number) < 0 ||
     typeof value.hasAbort !== "boolean" ||
+    typeof value.hasAbortTicket !== "boolean" ||
+    typeof value.cancelProofOwnerAccepted !== "boolean" ||
+    typeof value.interactionSettlementOwnerAccepted !== "boolean" ||
     typeof value.hasInteractionFacts !== "boolean" ||
     !Number.isSafeInteger(value.maxFinishedSeq) ||
     (value.maxFinishedSeq as number) < 0 ||
@@ -4242,18 +4354,24 @@ function validateJobInteractionRecoveryIndexValue(
 function canProduceJobInteractionObligation(
   value: JobInteractionRecoveryIndexValue,
 ): boolean {
-  return value.phase === "received" || value.phase === "started";
+  return (
+    !value.hasAbort &&
+    (value.phase === "received" || value.phase === "started")
+  );
 }
 
 function isRecoverableJobInteractionObligation(
   value: JobInteractionRecoveryIndexValue,
 ): boolean {
   return (
-    value.hasInteractionFacts &&
-    (value.pendingInteractions > 0 ||
-      value.maxFinishedSeq > value.mirroredUpTo ||
-      (value.streamProjectionEnabledAfter !== undefined &&
-        value.maxFinishedSeq > value.streamProjectedUpTo))
+    (value.hasInteractionFacts &&
+      (value.pendingInteractions > 0 ||
+        value.maxFinishedSeq > value.mirroredUpTo ||
+        (value.streamProjectionEnabledAfter !== undefined &&
+          value.maxFinishedSeq > value.streamProjectedUpTo))) ||
+    (value.hasAbortTicket &&
+      !value.cancelProofOwnerAccepted &&
+      !value.interactionSettlementOwnerAccepted)
   );
 }
 
@@ -4403,6 +4521,7 @@ function applyEntry(
       state.lastStreamProjectionRecordSeq = entry.recordSeq;
       return;
     case "cancel-proof-owner-accepted":
+    case "interaction-settlement-owner-accepted":
       return;
     default:
       throw corruptLedger("Unsupported assignment record in this protocol stage");

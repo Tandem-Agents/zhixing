@@ -4857,6 +4857,28 @@ describe("conversation assignment protocol", () => {
       },
       {
         v: 1,
+        t: "interaction-settlement-owner-accepted",
+        assignmentId: ASSIGNMENT_ID,
+        ticketDigest: SHA256_ZERO,
+        settlementVersion: 1,
+      },
+      {
+        v: 2,
+        t: "interaction-settlement-owner-accepted",
+        assignmentId: ASSIGNMENT_ID,
+        ticketDigest: SHA256_ZERO,
+        settlementVersion: 3,
+      },
+      {
+        v: 2,
+        t: "interaction-settlement-owner-accepted",
+        assignmentId: ASSIGNMENT_ID,
+        ticketDigest: SHA256_ZERO,
+        settlementVersion: 1,
+        futureField: true,
+      },
+      {
+        v: 1,
         t: "supersede-fenced",
         fenceSeq: 1,
         requestId: "future-request",

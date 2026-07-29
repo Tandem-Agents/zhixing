@@ -169,6 +169,7 @@ export interface DispatchEnvelopeArtifact {
 
 export interface AssignmentLedgerValidationState {
   readonly assignmentId: string;
+  executorId?: string;
   lastSeq: number;
   chainDigest: Digest;
   phase: LedgerSnapshot["phase"];
@@ -211,7 +212,14 @@ export interface AssignmentLedgerValidationState {
   streamProjectedUpTo: number;
   lastInteractionStreamSeq: number;
   interactionStreamDigest?: Digest;
+  lastFinishedInteractionRecordSeq: number;
+  lastStreamProjectionRecordSeq?: number;
+  lastStreamProjectionLedgerDigest?: Digest;
   cancelProofOwnerAccepted: boolean;
+  interactionSettlementOwnerAccepted?: Extract<
+    AssignmentRecord,
+    { readonly t: "interaction-settlement-owner-accepted" }
+  >;
   stagedMutationCount: number;
   readonly mutationRequestIds: Set<string>;
   sideEffectCount: number;
@@ -240,6 +248,7 @@ export function createAssignmentLedgerValidationState(
     mirroredInteractionOrdinal: 0,
     streamProjectedUpTo: 0,
     lastInteractionStreamSeq: 0,
+    lastFinishedInteractionRecordSeq: 0,
     cancelProofOwnerAccepted: false,
     stagedMutationCount: 0,
     mutationRequestIds: new Set(),
@@ -1222,6 +1231,7 @@ export function applyValidatedAssignmentEntry(
       state.phase = "received";
       state.received = true;
       state.ref = snapshot(body.activation.ref, "Assignment execution reference");
+      state.executorId = body.activation.executorId;
       break;
     case "dispatch-rejected":
       if (
@@ -1322,6 +1332,7 @@ export function applyValidatedAssignmentEntry(
         throw new TypeError("Job interaction answer requires a channel grant");
       }
       state.finishedInteractionCount += 1;
+      state.lastFinishedInteractionRecordSeq = entry.recordSeq;
       state.interactionMirrorDigest = advanceAssignmentInteractionMirrorDigest(
         state.interactionMirrorDigest,
         {
@@ -1462,6 +1473,50 @@ export function applyValidatedAssignmentEntry(
       }
       state.cancelProofOwnerAccepted = true;
       break;
+    case "interaction-settlement-owner-accepted": {
+      const abort = state.aborts.get(`abort-ticket\0${body.ticketDigest}`);
+      const proof = body.settlementVersion === 2 ? body.streamProof : undefined;
+      if (
+        state.ref?.execution !== "job" ||
+        state.phase !== "started" ||
+        abort?.via !== "abort-ticket" ||
+        state.cancelProofOwnerAccepted ||
+        state.interactionSettlementOwnerAccepted !== undefined ||
+        state.pendingInteractions.size > 0 ||
+        state.unmirroredFinished.size > 0 ||
+        state.openSideEffects.size === 0 ||
+        body.assignmentId !== state.assignmentId ||
+        (body.settlementVersion === 1 &&
+          state.streamProjectionEnabledAfter !== undefined) ||
+        (body.settlementVersion === 2 &&
+          (state.streamProjectionEnabledAfter === undefined ||
+            state.unprojectedFinished.size > 0 ||
+            proof === undefined ||
+            proof.assignmentId !== state.assignmentId ||
+            proof.executorId !== state.executorId ||
+            proof.ticketDigest !== body.ticketDigest ||
+            proof.sourceLastSeq !== abort.recordSeq ||
+            proof.sourceChainDigest !== abort.ledgerDigest ||
+            proof.targetInteractionRecordSeq !==
+              state.lastFinishedInteractionRecordSeq ||
+            proof.projectedRecordSeq !==
+              state.lastStreamProjectionRecordSeq ||
+            proof.upToRecordSeq !== state.streamProjectedUpTo ||
+            proof.lastStreamSeq !== state.lastInteractionStreamSeq ||
+            proof.streamDigest !== state.interactionStreamDigest ||
+            proof.ledgerChainDigest !==
+              state.lastStreamProjectionLedgerDigest))
+      ) {
+        throw new TypeError(
+          "interaction-settlement-owner-accepted does not bind a completed audit-only settlement",
+        );
+      }
+      state.interactionSettlementOwnerAccepted = snapshot(
+        body,
+        "Interaction settlement owner acceptance",
+      );
+      break;
+    }
     case "execution-failed":
       if (
         state.phase !== "started" ||
@@ -1540,6 +1595,8 @@ export function applyValidatedAssignmentEntry(
       state.streamProjectedUpTo = body.upToRecordSeq;
       state.lastInteractionStreamSeq = body.lastStreamSeq;
       state.interactionStreamDigest = body.streamDigest;
+      state.lastStreamProjectionRecordSeq = entry.recordSeq;
+      state.lastStreamProjectionLedgerDigest = nextLedgerDigest;
       break;
     }
     default:
@@ -2133,7 +2190,8 @@ function assertAssignmentRecord(
   const versionedStreamRecord =
     value.t === "interaction-stream-projection-enabled" ||
     value.t === "interaction-stream-projected" ||
-    value.t === "cancel-proof-owner-accepted";
+    value.t === "cancel-proof-owner-accepted" ||
+    value.t === "interaction-settlement-owner-accepted";
   if (
     (versionedStreamRecord && value.v !== 2) ||
     (!versionedStreamRecord && value.v !== 1)
@@ -2192,6 +2250,39 @@ function assertAssignmentRecord(
         ["t", "v"],
         "cancel-proof-owner-accepted record",
       );
+      return;
+    case "interaction-settlement-owner-accepted":
+      assertExactKeys(
+        value,
+        [
+          "assignmentId",
+          "settlementVersion",
+          ...(value.settlementVersion === 2 ? ["streamProof"] : []),
+          "t",
+          "ticketDigest",
+          "v",
+        ],
+        "interaction-settlement-owner-accepted record",
+      );
+      assertIdentifier(
+        value.assignmentId,
+        "Interaction settlement accepted assignment id",
+      );
+      assertDigest(
+        value.ticketDigest,
+        "Interaction settlement accepted ticket digest",
+      );
+      if (
+        value.settlementVersion !== 1 &&
+        value.settlementVersion !== 2
+      ) {
+        throw new TypeError(
+          "Interaction settlement accepted version must be 1 or 2",
+        );
+      }
+      if (value.settlementVersion === 2) {
+        validateInteractionSettlementStreamProof(value.streamProof, verifier);
+      }
       return;
     case "received":
       assertExactKeys(value, ["activation", "envelope", "t", "v"], "received record");

@@ -367,6 +367,21 @@ type AssignmentRecordV2 =
   | {
       readonly v: 2;
       readonly t: "cancel-proof-owner-accepted";
+    }
+  | {
+      readonly v: 2;
+      readonly t: "interaction-settlement-owner-accepted";
+      readonly assignmentId: string;
+      readonly ticketDigest: Digest;
+      readonly settlementVersion: 1;
+    }
+  | {
+      readonly v: 2;
+      readonly t: "interaction-settlement-owner-accepted";
+      readonly assignmentId: string;
+      readonly ticketDigest: Digest;
+      readonly settlementVersion: 2;
+      readonly streamProof: InteractionSettlementStreamProof;
     };
 
 export type AssignmentRecord = AssignmentRecordV1 | AssignmentRecordV2;
