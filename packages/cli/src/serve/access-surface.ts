@@ -62,6 +62,7 @@ import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import type { JobRuntimePort } from "./job-assignment-worker.js";
 import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import type {
   ChannelInteractionCoordinator,
@@ -116,6 +117,7 @@ export interface AssemblyContext {
   readonly transcript: ShardedTranscriptStore;
   readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;
+  readonly jobRuntime?: JobRuntimePort;
   readonly executorReadiness: () => ExecutorReadiness;
   readonly executorRoleModule?: ExecutorRoleModule;
   /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */

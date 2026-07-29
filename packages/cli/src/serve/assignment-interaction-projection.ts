@@ -12,6 +12,7 @@ import {
  */
 
 export interface AssignmentInteractionProjectionBinding {
+  readonly projectionDomain: "conversation" | "job";
   readonly assignmentId: string;
   readonly ledger: ConversationAssignmentLedger;
   readonly stream: StreamFrameAppender;
@@ -62,6 +63,20 @@ export class AssignmentInteractionProjector {
       afterRecordSeq: this.#projectedRecordSeq.get(binding.assignmentId),
       signal: binding.signal,
     });
+    if (binding.projectionDomain === "job") {
+      if (
+        projection.projected > 0 &&
+        projection.receipts.length !== projection.projected
+      ) {
+        throw new TypeError(
+          "Job interaction stream requires durable projection receipts",
+        );
+      }
+      await binding.ledger.markInteractionStreamProjected(
+        binding.assignmentId,
+        projection.receipts,
+      );
+    }
     this.#projectedRecordSeq.set(
       binding.assignmentId,
       projection.lastRecordSeq,

@@ -105,6 +105,12 @@ export interface StreamSpoolSnapshot {
   }[];
 }
 
+export interface DurableInteractionProjectionReceipt {
+  readonly sourceId: string;
+  readonly frame: StreamFrame;
+  readonly checkpoint: StreamVerifierCheckpoint;
+}
+
 export class AssignmentStreamWriter implements StreamFrameProducer {
   readonly #spool: AssignmentStreamSpool;
   readonly #assignmentId: string;
@@ -234,6 +240,22 @@ export class AssignmentStreamWriter implements StreamFrameProducer {
     sourceId?: string,
   ): Promise<StreamFrame> {
     return this.#spool.appendProduced({
+      assignmentId: this.#assignmentId,
+      ref: this.#ref,
+      payload,
+      meta,
+      signal,
+      sourceId,
+    });
+  }
+
+  appendInteractionProjection(
+    payload: StreamDataFramePayload,
+    meta: StreamFrameMeta,
+    signal: AbortSignal | undefined,
+    sourceId: string,
+  ): Promise<DurableInteractionProjectionReceipt> {
+    return this.#spool.appendInteractionProjection({
       assignmentId: this.#assignmentId,
       ref: this.#ref,
       payload,
@@ -376,7 +398,11 @@ interface AssignmentHandle {
 }
 
 type AppendAttempt =
-  | { readonly kind: "appended"; readonly frame: StreamFrame }
+  | {
+      readonly kind: "appended";
+      readonly frame: StreamFrame;
+      readonly checkpoint: StreamVerifierCheckpoint;
+    }
   | { readonly kind: "full" }
   | { readonly kind: "retry" };
 
@@ -660,6 +686,41 @@ export class AssignmentStreamSpool {
     input: AppendStreamFrameInput,
   ): Promise<StreamFrame> {
     return this.append(input);
+  }
+
+  async appendInteractionProjection(
+    input: AppendStreamFrameInput & { readonly sourceId: string },
+  ): Promise<DurableInteractionProjectionReceipt> {
+    await this.open(input.assignmentId, input.ref);
+    const handle = this.#handle(input.assignmentId);
+    try {
+      const prepared = await prepareStreamDataPayload(
+        input.payload,
+        this.#sourceArtifacts,
+        handle.frames,
+      );
+      for (;;) {
+        throwIfAborted(input.signal);
+        const attempt = await handle.queue.run(() =>
+          this.#tryAppend(handle, input, prepared),
+        );
+        if (attempt.kind === "appended") {
+          return {
+            sourceId: input.sourceId,
+            frame: attempt.frame,
+            checkpoint: attempt.checkpoint,
+          };
+        }
+        if (attempt.kind === "retry") continue;
+        await this.#waitForCapacity(handle, input.signal);
+      }
+    } catch (error) {
+      await handle.queue.run(async () => {
+        const state = await this.#select(handle);
+        await this.#cleanupOrphanFrames(handle, state, true);
+      });
+      throw error;
+    }
   }
 
   async finalize(input: {
@@ -1140,7 +1201,11 @@ export class AssignmentStreamSpool {
             "Stream source identity has conflicting logical content",
           );
         }
-        return { kind: "appended", frame: existing };
+        return {
+          kind: "appended",
+          frame: existing,
+          checkpoint: clone(state.verifier!),
+        };
       }
     }
     if (state.verifier!.finalSeq !== undefined) {
@@ -1240,7 +1305,11 @@ export class AssignmentStreamSpool {
       await rm(handle.frames.pathFor(storedRef), { force: true });
     }
     return result.value
-      ? { kind: "appended", frame }
+      ? {
+          kind: "appended",
+          frame,
+          checkpoint: clone(result.state.verifier!),
+        }
       : { kind: "retry" };
   }
 

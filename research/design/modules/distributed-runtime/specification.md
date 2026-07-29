@@ -1279,10 +1279,28 @@ type CancelProofBody = NotStartedCancelProof | HaltedCancelProof;               
 // owner 恢复：6.1 行 28-33 / 6.2 行 30-35），任一不符即拒。
 ```
 
-终态闭合纪律：每次真实副作用必为配对的 `side-effect-started / side-effect-completed`（同 effectSeq）；`halted` 与 `bundle_sealed` 之前全部 effect 必已闭合（completed，status 可为 aborted），pending interaction 必先结束，全部 `interaction-finished` 也必须已由 owner 耐久镜像并以 `mirrored` 水位确认。崩溃恢复发现未闭合 effect 时**不得补写** `halted`，只能如实上报账本 → owner 判 uncertain，未闭合 effect 即证据链；仅有 pending / 未镜像 interaction 时先完成确定性的终结结果并按 §3.7 重驱同一 mirror batch，成功后才允许重入形成终态。
+上述既有 `AssignmentRecord` 分支固定为顶层 `v:1`。本单元新增的 stream 投影与取消提交完成事实只允许使用以下顶层 `v:2` 分支，禁止把新判别项塞入 v1：
 
-job interaction 的业务终态、owner mirror 与 stream 投影是同一 assignment 的分步耐久义务，由 executor assignment reconciler 按 assignment 串行推进；答复重放、run-end、取消与启动恢复都只唤醒该 owner，不得各自补写后续步骤。恢复枚举来自 assignment 日志的可重建耐久派生索引，索引缺失、落后、超前或损坏时从日志重建，正常启动仅分页读取未退休义务与有界尾部；started assignment 只恢复 interaction/mirror/stream 欠账，绝不重跑业务 runtime。每步以稳定 sourceId 幂等投影，暂时失败保留义务并封顶退避，稳定合同冲突 fail-stop 且不得写 `bundle_sealed`、`execution-failed`、`halted` 或 stream final 越过欠账。
-abort-ticket 入口的成功只承诺取消前缀已耐久且 live worker 已收到停止信号；executor worker 是后续唯一义务所有者，负责重驱 interaction mirror、以耐久 abort 原因重入形成 proof、向 owner 提交，并在进程恢复时续跑每个未完成前缀。运行时失败收束不得越过已存在的 abort 前缀另写 `execution-failed`。
+```ts
+type AssignmentRecordV2 =
+  | { v: 2; t: "interaction-stream-projection-enabled";
+      legacyUpToRecordSeq: number }
+  | { v: 2; t: "interaction-stream-projected";
+      assignmentId: string; upToRecordSeq: number;
+      lastStreamSeq: number; streamDigest: Digest }
+  | { v: 2; t: "cancel-proof-owner-accepted" };
+```
+
+`interaction-stream-projection-enabled` 是唯一格式切换事实，`legacyUpToRecordSeq` 必须等于该记录前一条 assignment record 的 seq；切换前前缀仍按 v1 合同解释。切换后的每个 `interaction-finished` 都必须被严格递增的 `interaction-stream-projected` 水位覆盖；写入水位前须以 spool 返回的耐久 `StreamVerifierCheckpoint` 核对 assignment、稳定 `interaction:<recordSeq>` sourceId 的无孔有序前缀、`lastStreamSeq` 与规范 `streamDigest`。同水位仅全等重放，异载荷、回退、超前、有孔或错摘要均拒绝。conversation assignment 禁止写这些 v2 分支。
+
+启用采用两步兼容桥：先发布可严格双读 v1/v2、可完整处理已存在 v2 事实但不主动写切换记录的兼容版本；再由后继版本为新 job interaction 原子写一次切换事实并启用 v2 水位与终结门禁。切换后只允许回滚到前述兼容版本，不得回滚到只认识 v1 的版本。
+
+终态闭合纪律：每次真实副作用必为配对的 `side-effect-started / side-effect-completed`（同 effectSeq）；`halted`、`execution-failed` 与 `bundle_sealed` 之前全部 effect 必已闭合（completed，status 可为 aborted），pending interaction 必先结束，全部 `interaction-finished` 必须已由 owner 耐久镜像并以 `mirrored` 水位确认；已启用 v2 stream 合同的后缀还必须由独立的 `interaction-stream-projected` 水位覆盖。崩溃恢复发现未闭合 effect 时**不得补写** `halted`，只能如实上报账本 → owner 判 uncertain，未闭合 effect 即证据链；仅有 interaction 派生欠账时，由 assignment 唯一 reconciler 独立重驱 mirror 与 stream，二者全部闭合后才允许重入形成终态。
+
+job interaction 的业务终态、owner mirror 与 stream 投影是同一 assignment 的分步耐久义务，由 executor assignment reconciler 按 assignment 串行推进；答复重放、run-end、取消与启动恢复都只唤醒该 owner，不得各自补写后续步骤。恢复枚举来自 assignment 日志的可重建耐久派生索引：尚可产生新交互的 received/started assignment 保留索引身份，终态且全部欠账清零后才退休；索引缺失、落后、超前或损坏时从日志重建，正常启动仅分页读取未退休义务与有界尾部。started assignment 只恢复 interaction/mirror/stream 欠账，绝不重跑业务 runtime。每步以稳定 sourceId 幂等投影，暂时失败保留义务并封顶退避，稳定合同冲突 fail-stop 且不得写 `bundle_sealed`、`execution-failed`、`halted` 或 stream final 越过欠账。
+abort-ticket 入口的成功只承诺取消前缀已耐久且 live worker 已收到停止信号；executor worker 是后续唯一义务所有者，负责重驱 interaction mirror、以耐久 abort 原因重入形成 proof、向 owner 提交，并在进程恢复时续跑每个未完成前缀。owner 成功接受 proof 的响应不是 executor 的完成事实；worker 必须完成本地 stream 终结后在同一 assignment 日志写 `cancel-proof-owner-accepted`，恢复枚举只以该记录退休提交义务。响应丢失或记录落盘前崩溃时重提同一 proof；记录全等重放幂等，异域、无 abort-ticket 或无 `halted` proof 均拒绝。运行时失败收束不得越过已存在的 abort 前缀另写 `execution-failed`。
+
+job 的 audit-only interaction settlement 分两代读取。无顶层版本的既有 `interaction-settlement-fence/completed` 固定为 legacy v1，只等待其冻结 mirror 水位；不得补造 v2 证据。已启用 stream 合同的目标必须写顶层 `v:2`：fence 额外绑定 executor、abort-ticket 所在的已验 ledger 前缀、目标 `interaction-finished` recordSeq；completed 除全等 mirror 外还必须携 executor 签名的 `InteractionSettlementStreamProof(v:2)`，绑定该 fence、覆盖目标的 `interaction-stream-projected` 记录、其 ledger chainDigest 及对应 stream checkpoint。owner 按 DTO/version/未知字段、签名、fence、源前缀、ledger 水位和 stream checkpoint 的固定次序验证后，才可在同一事务写 completed；全等重放返回原结果，legacy/v2 混用或任一绑定不符零写入。
 
 ```ts
 type PublishRecord =       // mutation 发布进度（owner 侧）

@@ -42,6 +42,7 @@ import type {
   CancelProofBody,
   DispatchConflictProof,
   DispatchRejectionProof,
+  InteractionSettlementStreamProof,
   InteractionMirrorBatch,
   SupersedeProof,
 } from "./records.js";
@@ -334,6 +335,7 @@ export interface RunSubmissionPort {
 export interface JobInteractionSettlementPort {
   completeInteractionSettlement(
     assignmentId: string,
+    proof: InteractionSettlementStreamProof | undefined,
     ctx: AuthorityCallContext,
   ): Promise<void>;
 }

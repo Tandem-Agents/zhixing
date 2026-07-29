@@ -291,7 +291,10 @@ export class DurableConversationInteractionObserver
   }
 
   async drainAssignment(binding: DurableInteractionBinding): Promise<void> {
-    await this.#projector.drainAssignment(binding);
+    await this.#projector.drainAssignment({
+      ...binding,
+      projectionDomain: "conversation",
+    });
   }
 
   releaseAssignment(assignmentId: string): void {

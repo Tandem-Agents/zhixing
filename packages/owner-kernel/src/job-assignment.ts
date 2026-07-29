@@ -34,6 +34,7 @@ import type {
   JobUncertainClosure,
   InteractionMirrorEntry,
   InteractionMirrorBatch,
+  InteractionSettlementStreamProof,
   IngressContext,
   LedgerEvidencePage,
   LedgerSnapshot,
@@ -104,6 +105,7 @@ import {
   validateJobOccurrence,
   validateIngressContext,
   validateAssignmentInteractionMirrorBatch,
+  validateInteractionSettlementStreamProof,
   validateJobSealedBundle,
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
@@ -466,6 +468,7 @@ interface InProcessJobDispatcherBaseOptions {
   readonly onCancelAccepted?: (
     assignmentId: string,
   ) => void | Promise<void>;
+  readonly onRecoveryError?: (error: Error) => void;
 }
 
 export type InProcessJobDispatcherOptions = InProcessJobDispatcherBaseOptions &
@@ -1979,16 +1982,32 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       return true;
     }
     const targetUpTo = Math.max(...validation.unmirroredFinished.keys());
-    const settlement = {
-      t: "interaction-settlement-fence" as const,
-      assignmentId,
-      ticketDigest: abortTicket.refId,
-      sourceLastSeq: validation.lastSeq,
-      sourceChainDigest: validation.chainDigest,
-      targetUpTo,
-      targetOrdinal: validation.finishedInteractionCount,
-      targetMirrorDigest: validation.interactionMirrorDigest,
-    };
+    const settlement =
+      validation.streamProjectionEnabledAfter !== undefined &&
+      targetUpTo > validation.streamProjectionEnabledAfter
+        ? {
+            v: 2 as const,
+            t: "interaction-settlement-fence" as const,
+            assignmentId,
+            executorId: assigned.record.executorId,
+            ticketDigest: abortTicket.refId,
+            sourceLastSeq: abortTicket.recordSeq,
+            sourceChainDigest: abortTicket.ledgerDigest,
+            targetUpTo,
+            targetOrdinal: validation.finishedInteractionCount,
+            targetMirrorDigest: validation.interactionMirrorDigest,
+            targetInteractionRecordSeq: targetUpTo,
+          }
+        : {
+            t: "interaction-settlement-fence" as const,
+            assignmentId,
+            ticketDigest: abortTicket.refId,
+            sourceLastSeq: abortTicket.recordSeq,
+            sourceChainDigest: abortTicket.ledgerDigest,
+            targetUpTo,
+            targetOrdinal: validation.finishedInteractionCount,
+            targetMirrorDigest: validation.interactionMirrorDigest,
+          };
     await this.#transact<void>((state) => {
       const assignedState = requireCurrentAssignment(state, assignmentId);
       const current = state.states.get(assignedState.record.jobRunId);
@@ -2452,23 +2471,41 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
 
   async completeInteractionSettlement(
     assignmentId: string,
+    rawProof: InteractionSettlementStreamProof | undefined,
     context: AuthorityCallContext,
   ): Promise<void> {
     this.#authenticateSubmission(context, {
-      method: "submission.mirrorInteractions",
+      method: "submission.completeInteractionSettlement",
       assignmentId,
     });
     await this.#loadSubmissionGuard(context, {
-      method: "submission.mirrorInteractions",
+      method: "submission.completeInteractionSettlement",
       assignmentId,
     });
+    const proof =
+      rawProof === undefined
+        ? undefined
+        : validateInteractionSettlementStreamProof(
+            rawProof,
+            this.#verifier,
+          );
     await this.#transact<void>((state) => {
       const completed =
         state.completedInteractionSettlements.get(assignmentId);
       if (completed) {
+        if (
+          ("v" in completed && completed.v === 2
+            ? !proof ||
+              canonicalize(completed.streamProof) !== canonicalize(proof)
+            : proof !== undefined)
+        ) {
+          throw new Error(
+            "Job interaction settlement replay has a conflicting stream proof",
+          );
+        }
         this.#authorizeSubmission(state, context, {
           mode: "durable-replay",
-          method: "submission.mirrorInteractions",
+          method: "submission.completeInteractionSettlement",
           assignmentId,
         });
         return { kind: "return", value: undefined };
@@ -2489,9 +2526,30 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           "Job interaction settlement has not reached its durable mirror target",
         );
       }
+      if ("v" in fence && fence.v === 2) {
+        if (
+          !proof ||
+          proof.assignmentId !== assignmentId ||
+          proof.executorId !== fence.executorId ||
+          proof.ticketDigest !== fence.ticketDigest ||
+          proof.sourceLastSeq !== fence.sourceLastSeq ||
+          proof.sourceChainDigest !== fence.sourceChainDigest ||
+          proof.targetInteractionRecordSeq !==
+            fence.targetInteractionRecordSeq ||
+          proof.upToRecordSeq < fence.targetInteractionRecordSeq
+        ) {
+          throw new Error(
+            "Versioned interaction settlement lacks its executor stream proof",
+          );
+        }
+      } else if (proof !== undefined) {
+        throw new Error(
+          "Legacy interaction settlement cannot consume a versioned stream proof",
+        );
+      }
       this.#authorizeSubmission(state, context, {
         mode: "settlement",
-        method: "submission.mirrorInteractions",
+        method: "submission.completeInteractionSettlement",
         assignmentId,
       });
       return {
@@ -2500,6 +2558,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           jobRecord(this.#taskId, {
             ...fence,
             t: "interaction-settlement-completed",
+            ...("v" in fence && fence.v === 2
+              ? { streamProof: proof! }
+              : {}),
           }),
         ],
         value: undefined,
@@ -5505,6 +5566,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       case "interaction-settlement-fence": {
         const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          "v" in body &&
+          body.v === 2 &&
+          assigned?.record.executorId !== body.executorId
+        ) {
+          throw corruptJobJournal(
+            "Versioned interaction settlement names a different executor",
+          );
+        }
         const current = assigned
           ? state.states.get(assigned.record.jobRunId)
           : undefined;
@@ -5555,6 +5625,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           completionAlreadyExists:
             state.completedInteractionSettlements.has(body.assignmentId),
           mirrored: state.interactionMirrors.get(body.assignmentId),
+          ...("v" in body && body.v === 2
+            ? { streamProof: body.streamProof }
+            : {}),
         });
         state.completedInteractionSettlements.set(body.assignmentId, body);
         return state;
@@ -6939,6 +7012,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       case "interaction-settlement-fence": {
         const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          "v" in body &&
+          body.v === 2 &&
+          assigned?.record.executorId !== body.executorId
+        ) {
+          throw corruptJobJournal(
+            "Versioned interaction settlement names a different executor",
+          );
+        }
         const current = assigned
           ? state.states.get(assigned.record.jobRunId)
           : undefined;
@@ -6989,6 +7071,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           completionAlreadyExists:
             state.completedInteractionSettlements.has(body.assignmentId),
           mirrored: state.interactionMirrors.get(body.assignmentId),
+          ...("v" in body && body.v === 2
+            ? { streamProof: body.streamProof }
+            : {}),
         });
         state.completedInteractionSettlements.set(body.assignmentId, body);
         return state;
@@ -7722,6 +7807,22 @@ export class InProcessJobDispatcher {
   readonly #onCancelAccepted:
     | ((assignmentId: string) => void | Promise<void>)
     | undefined;
+  readonly #onRecoveryError: ((error: Error) => void) | undefined;
+  readonly #cancellationDispatches = new Map<
+    string,
+    {
+      readonly fence: PendingJobFence["fence"];
+      readonly task: Promise<boolean>;
+    }
+  >();
+  readonly #cancellationRetry = new Map<
+    string,
+    { readonly delayMs: number; readonly nextAttemptAt: number }
+  >();
+  readonly #stoppedCancellationRecovery = new Set<string>();
+  #recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  #recoveryRunning: Promise<void> | undefined;
+  #recoveryStopped = true;
 
   constructor(options: InProcessJobDispatcherOptions) {
     this.#enabled = options.enabled;
@@ -7732,6 +7833,54 @@ export class InProcessJobDispatcher {
     this.#bundleSubmission = options.bundleSubmission;
     this.#onDispatchAccepted = options.onDispatchAccepted;
     this.#onCancelAccepted = options.onCancelAccepted;
+    this.#onRecoveryError = options.onRecoveryError;
+  }
+
+  /**
+   * Owner 生命周期持有的耐久 outbox 驱动器。每轮都重读 journal；失败只结束
+   * 当前尝试，未完成 fence 仍由下一轮用同一身份继续推进。
+   */
+  startRecoveryLoop(intervalMs = 1_000): void {
+    if (!this.#enabled || this.#recoveryRunning || this.#recoveryTimer) return;
+    if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) {
+      throw new TypeError("Job recovery interval must be a positive integer");
+    }
+    this.#recoveryStopped = false;
+    const run = () => {
+      if (this.#recoveryStopped) return;
+      const active = this.#recoverDurableOutboxes();
+      this.#recoveryRunning = active;
+      void active
+        .catch((error) =>
+          this.#onRecoveryError?.(
+            error instanceof Error ? error : new Error(String(error)),
+          ),
+        )
+        .finally(() => {
+          if (this.#recoveryRunning === active) {
+            this.#recoveryRunning = undefined;
+          }
+          if (!this.#recoveryStopped) {
+            this.#recoveryTimer = setTimeout(() => {
+              this.#recoveryTimer = undefined;
+              run();
+            }, intervalMs);
+            this.#recoveryTimer.unref?.();
+          }
+        });
+    };
+    run();
+  }
+
+  async stopRecoveryLoop(): Promise<void> {
+    this.#recoveryStopped = true;
+    if (this.#recoveryTimer) clearTimeout(this.#recoveryTimer);
+    this.#recoveryTimer = undefined;
+    await this.#recoveryRunning?.catch(() => undefined);
+  }
+
+  async #recoverDurableOutboxes(): Promise<void> {
+    await this.recoverCancellations();
   }
 
   async dispatchPending(): Promise<readonly DispatchResult[]> {
@@ -7789,45 +7938,91 @@ export class InProcessJobDispatcher {
   }): Promise<JobCancelResult> {
     const result = await this.#journal.cancel(input);
     if (!this.#enabled || result.state !== "cancel-requested") return result;
-    await this.#executor.cancel(
+    await this.#dispatchCancellation(
       result.assignmentId,
       result.fence,
-      this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
     );
-    await this.#onCancelAccepted?.(result.assignmentId);
-    if (!(await this.#submitCancellation(result.assignmentId))) {
-      await this.#executor.cancel(
-        result.assignmentId,
-        result.fence,
-        this.#fenceContext(result.assignmentId, "executor.cancel", result.fence),
-      );
-      await this.#onCancelAccepted?.(result.assignmentId);
-      await this.#submitCancellation(result.assignmentId);
-    }
     return result;
   }
 
   async recoverCancellations(): Promise<number> {
     if (!this.#enabled) return 0;
     const pending = await this.#journal.pendingCancellations();
-    for (const item of pending) {
-      await this.#executor.cancel(
-        item.assignmentId,
-        item.fence,
-        this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
-      );
-      await this.#onCancelAccepted?.(item.assignmentId);
-      if (!(await this.#submitCancellation(item.assignmentId))) {
-        await this.#executor.cancel(
-          item.assignmentId,
-          item.fence,
-          this.#fenceContext(item.assignmentId, "executor.cancel", item.fence),
+    const now = Date.now();
+    const due = pending.filter((item) => {
+      if (this.#stoppedCancellationRecovery.has(item.assignmentId)) return false;
+      const retry = this.#cancellationRetry.get(item.assignmentId);
+      return retry === undefined || retry.nextAttemptAt <= now;
+    });
+    await Promise.all(
+      due.map((item) =>
+        this.#dispatchCancellation(item.assignmentId, item.fence),
+      ),
+    );
+    return due.length;
+  }
+
+  #dispatchCancellation(
+    assignmentId: string,
+    fence: PendingJobFence["fence"],
+  ): Promise<boolean> {
+    const existing = this.#cancellationDispatches.get(assignmentId);
+    if (existing) {
+      if (canonicalize(existing.fence) !== canonicalize(fence)) {
+        throw new Error(
+          "Job cancellation retry changed its durable fence identity",
         );
-        await this.#onCancelAccepted?.(item.assignmentId);
-        await this.#submitCancellation(item.assignmentId);
       }
+      return existing.task;
     }
-    return pending.length;
+    const task = this.#dispatchCancellationOnce(assignmentId, fence)
+      .then((completed) => {
+        if (completed) {
+          this.#cancellationRetry.delete(assignmentId);
+          this.#stoppedCancellationRecovery.delete(assignmentId);
+        } else {
+          this.#deferCancellationRecovery(assignmentId);
+        }
+        return completed;
+      })
+      .catch((error) => {
+        if (error instanceof TypeError) {
+          this.#stoppedCancellationRecovery.add(assignmentId);
+        } else {
+          this.#deferCancellationRecovery(assignmentId);
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.#cancellationDispatches.get(assignmentId)?.task === task) {
+          this.#cancellationDispatches.delete(assignmentId);
+        }
+      });
+    this.#cancellationDispatches.set(assignmentId, { fence, task });
+    return task;
+  }
+
+  #deferCancellationRecovery(assignmentId: string): void {
+    const previous = this.#cancellationRetry.get(assignmentId)?.delayMs ?? 50;
+    const delayMs = Math.min(previous * 2, 5_000);
+    this.#cancellationRetry.set(assignmentId, {
+      delayMs,
+      nextAttemptAt: Date.now() + previous,
+    });
+  }
+
+  async #dispatchCancellationOnce(
+    assignmentId: string,
+    fence: PendingJobFence["fence"],
+  ): Promise<boolean> {
+    if (await this.#submitCancellation(assignmentId)) return true;
+    await this.#executor.cancel(
+      assignmentId,
+      fence,
+      this.#fenceContext(assignmentId, "executor.cancel", fence),
+    );
+    await this.#onCancelAccepted?.(assignmentId);
+    return this.#submitCancellation(assignmentId);
   }
 
   async supersede(assignmentId: string, requestId: string): Promise<SupersedeProof> {

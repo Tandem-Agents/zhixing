@@ -136,6 +136,7 @@ import {
   type GovernedTextCall,
 } from "./governed-control-llm.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
+import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -458,6 +459,12 @@ async function runServerProcess(
           throw new Error("Local executor role is not enabled on this device");
         },
       };
+  const jobRuntime = executor
+    ? createAgentJobRuntimePort({
+        create: (instruction, confirmationBroker) =>
+          runtimeHost.createJobRuntime({ instruction, confirmationBroker }),
+      })
+    : undefined;
   const executorReadiness = createExecutorReadinessSource({
     runtime: runtimeHost,
     credentials,
@@ -508,6 +515,7 @@ async function runServerProcess(
     transcript,
     snapshots,
     runtimeFactory,
+    ...(jobRuntime ? { jobRuntime } : {}),
     executorReadiness,
     ...(executor ? { executorRoleModule: executor } : {}),
     convRepo,

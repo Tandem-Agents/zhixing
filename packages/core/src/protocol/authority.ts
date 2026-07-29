@@ -49,6 +49,7 @@ export const AUTHORITY_PORT_METHODS = [
   "submission.submitBundle",
   "submission.submitCancelProof",
   "submission.mirrorInteractions",
+  "submission.completeInteractionSettlement",
   "governor.submitUsageReport",
   "executor.dispatch",
   "executor.cancel",
@@ -69,6 +70,7 @@ export const ASSIGNMENT_SUBMISSION_METHODS = [
   "submission.submitBundle",
   "submission.submitCancelProof",
   "submission.mirrorInteractions",
+  "submission.completeInteractionSettlement",
 ] as const satisfies readonly SubmissionMethodId[];
 
 type MissingAssignmentSubmissionMethod = Exclude<

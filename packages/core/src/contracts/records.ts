@@ -225,7 +225,23 @@ export type InteractionMirrorBatch = InteractionMirrorBatchPayload & {
   signature: Signature;
 };
 
-export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
+export interface InteractionSettlementStreamProof {
+  readonly v: 2;
+  readonly assignmentId: string;
+  readonly executorId: string;
+  readonly ticketDigest: Digest;
+  readonly sourceLastSeq: number;
+  readonly sourceChainDigest: Digest;
+  readonly targetInteractionRecordSeq: number;
+  readonly projectedRecordSeq: number;
+  readonly upToRecordSeq: number;
+  readonly lastStreamSeq: number;
+  readonly streamDigest: Digest;
+  readonly ledgerChainDigest: Digest;
+  readonly signature: Signature;
+}
+
+type AssignmentRecordV1Body =
   (
     | {
         t: "received";
@@ -327,6 +343,33 @@ export type AssignmentRecord = WireSchemaV1<"AssignmentRecord"> &
     | { t: "acked"; commitRevision: number }
     | { t: "mirrored"; upTo: number; ordinal: number; mirrorDigest: Digest }
   );
+
+type AssignmentRecordV1 = AssignmentRecordV1Body extends infer RecordBody
+  ? RecordBody extends object
+    ? RecordBody & { readonly v: 1 }
+    : never
+  : never;
+
+type AssignmentRecordV2 =
+  | {
+      readonly v: 2;
+      readonly t: "interaction-stream-projection-enabled";
+      readonly legacyUpToRecordSeq: number;
+    }
+  | {
+      readonly v: 2;
+      readonly t: "interaction-stream-projected";
+      readonly assignmentId: string;
+      readonly upToRecordSeq: number;
+      readonly lastStreamSeq: number;
+      readonly streamDigest: Digest;
+    }
+  | {
+      readonly v: 2;
+      readonly t: "cancel-proof-owner-accepted";
+    };
+
+export type AssignmentRecord = AssignmentRecordV1 | AssignmentRecordV2;
 
 export interface AssignmentEntry {
   recordSeq: number;

@@ -608,6 +608,11 @@ export interface CreateAgentRuntimeOptions {
   confirmationFallback?: ConfirmationFallbackStrategy;
   /** Durable request/outcome boundary inherited by every broker in this runtime tree. */
   confirmationLifecycleObserver?: ConfirmationLifecycleObserver;
+  /**
+   * Externally owned confirmation broker for durable assignment runtimes.
+   * When present, the caller owns its lifecycle and request/outcome persistence.
+   */
+  confirmationBroker?: IConfirmationBroker;
   /** Per-run EventBus 装饰钩子,详见 {@link DecorateRunBusFn} */
   decorateRunBus?: DecorateRunBusFn;
   /**
@@ -921,9 +926,11 @@ export async function createAgentRuntime(
   });
 
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
-  const confirmationBroker = new ConfirmationBroker({
-    lifecycleObserver: options.confirmationLifecycleObserver,
-  });
+  const confirmationBroker =
+    options.confirmationBroker ??
+    new ConfirmationBroker({
+      lifecycleObserver: options.confirmationLifecycleObserver,
+    });
 
   // tools = baseTools + (可选 Task 工具)。Task 装配时 capture 装配期已知的
   // 共享服务 + 当前 baseTools snapshot 作为子工具池来源(子按 sub-agent

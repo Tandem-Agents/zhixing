@@ -28,6 +28,8 @@ import type {
   ServeBootstrapContext,
 } from "./role-topology.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
+import { JobAssignmentWorker } from "./job-assignment-worker.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -59,6 +61,7 @@ export async function runExecutorRole(
   const writer = createStdoutWriter();
 
   let mesh: MeshRuntimeAssembly | undefined;
+  let jobWorker: JobAssignmentWorker | undefined;
   let authority: AuthorityRuntimeStack | undefined;
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
   try {
@@ -69,7 +72,10 @@ export async function runExecutorRole(
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions,
-      deviceCapacity: deviceCapacity.workload("workload-interactive"),
+      deviceCapacity: {
+        interactive: deviceCapacity.workload("workload-interactive"),
+        scheduler: deviceCapacity.workload("workload-scheduler"),
+      },
     });
     authority = await setupAuthorityRuntime({
       zhixingHome,
@@ -113,6 +119,25 @@ export async function runExecutorRole(
       createAgentRuntime: () => runtime.createConversationRuntime(),
     });
     const runtimeFactory = executor.createInProcessRuntimeFactory(role);
+    jobWorker = new JobAssignmentWorker({
+      ledger,
+      runtime: createAgentJobRuntimePort({
+        create: (instruction, confirmationBroker) =>
+          runtime.createJobRuntime(instruction, confirmationBroker),
+      }),
+      submissionFor: () => {
+        if (!mesh) throw new Error("Executor submission transport is not ready");
+        return mesh.submissionForAnchor();
+      },
+      finalizeUsage: ({ assignmentId }) => {
+        if (!mesh) throw new Error("Executor usage transport is not ready");
+        return mesh.finalizeExecutorUsage(assignmentId);
+      },
+      InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+      createStream: (input) => dataPlane!.createStream(input),
+      onError: (_assignmentId, error) =>
+        writer.notify(`[job-worker] ${error.message}`),
+    });
     mesh = new MeshRuntimeAssembly({
       zhixingHome,
       trust: bootstrap.mesh.trust,
@@ -127,13 +152,19 @@ export async function runExecutorRole(
         interactions,
         dataPlane,
         InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+        job: {
+          worker: jobWorker,
+        },
       },
       secretStore: bootstrap.secretStore,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
     await mesh.start();
+    await jobWorker.recover();
     await waitForRoleShutdown();
   } finally {
+    jobWorker?.stopAccepting();
+    await jobWorker?.close();
     await mesh?.stop();
     await dataPlane?.close();
     authority?.stopStorageMaintenance();
@@ -148,13 +179,16 @@ class ExecutorRuntimeSubstrate {
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
-    readonly deviceCapacity: AgentRuntimeCapacityBinding;
+    readonly deviceCapacity: {
+      readonly interactive: AgentRuntimeCapacityBinding;
+      readonly scheduler: AgentRuntimeCapacityBinding;
+    };
   }) {}
 
   createConversationRuntime(): Promise<AgentRuntime> {
     const catalog = this.options.mcpHub.catalog();
     return createAgentRuntime({
-      deviceCapacity: this.options.deviceCapacity,
+      deviceCapacity: this.options.deviceCapacity.interactive,
       providerConfiguration: {
         config: this.options.config,
         credentials: this.options.credentials,
@@ -165,6 +199,62 @@ class ExecutorRuntimeSubstrate {
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
+    });
+  }
+
+  createJobRuntime(
+    instruction: import("@zhixing/core/contracts").JobExecutionInstruction,
+    confirmationBroker: import("@zhixing/core").IConfirmationBroker,
+  ): Promise<AgentRuntime> {
+    const catalog = this.options.mcpHub.catalog();
+    let extraTools = mapMcpTools(this.options.mcpHub);
+    const baseProfile = mainProfile();
+    const requested = instruction.tools
+      ? new Set(instruction.tools)
+      : undefined;
+    if (requested) {
+      const available = new Set([
+        ...baseProfile.enabledTools,
+        ...extraTools.map((tool) => tool.name),
+      ]);
+      const unknown = [...requested].filter((tool) => !available.has(tool));
+      if (unknown.length > 0) {
+        throw new TypeError(
+          `Job requested unavailable tools: ${unknown.sort().join(", ")}`,
+        );
+      }
+      extraTools = extraTools.filter((tool) => requested.has(tool.name));
+    }
+    const config =
+      instruction.model && this.options.config.llm
+        ? {
+            ...this.options.config,
+            llm: {
+              ...this.options.config.llm,
+              main: {
+                ...this.options.config.llm.main,
+                model: instruction.model,
+              },
+            },
+          }
+        : this.options.config;
+    return createAgentRuntime({
+      deviceCapacity: this.options.deviceCapacity.scheduler,
+      providerConfiguration: {
+        config,
+        credentials: this.options.credentials,
+      },
+      profile: {
+        ...baseProfile,
+        enabledTools: requested
+          ? baseProfile.enabledTools.filter((tool) => requested.has(tool))
+          : baseProfile.enabledTools,
+      },
+      extraTools,
+      executionMcpServers: catalog.map(({ server }) => server.serverId).sort(),
+      confirmationBroker,
+      systemProtectedPaths: this.options.systemProtectedPaths,
+      runtimeKind: "ephemeral",
     });
   }
 

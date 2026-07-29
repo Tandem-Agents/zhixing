@@ -18,6 +18,7 @@ import type {
   AuthorityCapability,
   CancelProofBody,
   DispatchEnvelope,
+  InteractionSettlementStreamProof,
   InteractionMirrorBatch,
   LedgerEvidencePage,
   RunDispatchArguments,
@@ -916,19 +917,39 @@ describe("assignment mesh adapters", () => {
 
   it("forwards interaction-settlement completion through the submission service", async () => {
     const fixture = await createFixture();
+    const protocol = await createRealJobProtocolFixture(fixture);
     let completed = 0;
+    let receivedProof: InteractionSettlementStreamProof | undefined;
     const handler = createRunSubmissionMeshServiceHandler({
       artifacts: fixture.ownerArtifacts,
       executorIdForPeer: identityExecutorIdForPeer,
       guard: conformanceSubmissionGuard(),
       port: {
         ...runSubmissionPort([]),
-        async completeInteractionSettlement() {
+        async completeInteractionSettlement(_assignmentId, proof) {
           completed += 1;
+          receivedProof = proof;
         },
       },
     });
-    const context = assignmentContext(fixture.capability);
+    const context = assignmentContext(
+      protocol.dispatch.envelope.capabilities[0]!,
+    );
+    const proof: InteractionSettlementStreamProof = {
+      v: 2,
+      assignmentId: "job-assignment-1",
+      executorId: fixture.executorId,
+      ticketDigest: DIGEST,
+      sourceLastSeq: 1,
+      sourceChainDigest: DIGEST,
+      targetInteractionRecordSeq: 2,
+      projectedRecordSeq: 3,
+      upToRecordSeq: 2,
+      lastStreamSeq: 2,
+      streamDigest: DIGEST,
+      ledgerChainDigest: DIGEST,
+      signature: { alg: "test", keyId: fixture.executorId, sig: "proof" },
+    };
 
     await expect(
       handler(
@@ -936,7 +957,8 @@ describe("assignment mesh adapters", () => {
           canonicalize({
             v: 1,
             method: "completeInteractionSettlement",
-            assignmentId: "assignment-1",
+            assignmentId: "job-assignment-1",
+            proof,
             context,
           }),
           "utf8",
@@ -946,6 +968,7 @@ describe("assignment mesh adapters", () => {
       ),
     ).resolves.toEqual(Buffer.from("null", "utf8"));
     expect(completed).toBe(1);
+    expect(receivedProof).toEqual(proof);
   });
 
   it("preserves a real user-job journal and ledger lifecycle across the mesh boundary", async () => {
@@ -2367,6 +2390,7 @@ function createUnsignedJobEnvelope(
     scope: { execution: "job" as const, taskId: "task-1" },
     anchorEpoch: 3,
     methods: [
+      "submission.completeInteractionSettlement",
       "submission.mirrorInteractions",
       "submission.reportStarted",
       "submission.submitBundle",

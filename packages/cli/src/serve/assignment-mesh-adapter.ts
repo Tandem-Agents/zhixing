@@ -25,6 +25,7 @@ import type {
   DispatchEnvelope,
   DispatchResult,
   InteractionMirrorBatch,
+  InteractionSettlementStreamProof,
   JobInteractionSettlementPort,
   LedgerEvidencePage,
   LedgerSnapshot,
@@ -289,6 +290,7 @@ type SubmissionRequest =
       readonly v: 1;
       readonly method: "completeInteractionSettlement";
       readonly assignmentId: string;
+      readonly proof?: InteractionSettlementStreamProof;
       readonly context: AuthorityCallContext;
     };
 
@@ -988,6 +990,7 @@ export class MeshRunSubmissionPort
 
   async completeInteractionSettlement(
     assignmentId: string,
+    proof: InteractionSettlementStreamProof | undefined,
     context: AuthorityCallContext,
   ): Promise<void> {
     assertNull(
@@ -998,6 +1001,7 @@ export class MeshRunSubmissionPort
             v: 1,
             method: "completeInteractionSettlement",
             assignmentId,
+            ...(proof === undefined ? {} : { proof }),
             context,
           } satisfies SubmissionRequest),
         ),
@@ -1068,6 +1072,7 @@ export function createRunSubmissionMeshServiceHandler(
       }
       await options.port.completeInteractionSettlement(
         request.assignmentId,
+        request.proof,
         request.context,
       );
       return encode(null);
@@ -1248,7 +1253,13 @@ function decodeSubmissionRequest(payload: Uint8Array): SubmissionRequest {
         : value.method === "mirrorInteractions"
           ? ["assignmentId", "batch", "context", "method", "v"]
           : value.method === "completeInteractionSettlement"
-            ? ["assignmentId", "context", "method", "v"]
+            ? [
+                "assignmentId",
+                "context",
+                "method",
+                ...(value.proof === undefined ? [] : ["proof"]),
+                "v",
+              ]
           : undefined;
   if (!keys) throw new TypeError("Submission request method is invalid");
   assertExactKeys(value, keys);
@@ -1413,7 +1424,9 @@ function submissionRequestPreflight(request: SubmissionRequest): SubmissionPrefl
         ? "submission.submitBundle"
         : request.method === "submitCancelProof"
           ? "submission.submitCancelProof"
-          : "submission.mirrorInteractions",
+          : request.method === "completeInteractionSettlement"
+            ? "submission.completeInteractionSettlement"
+            : "submission.mirrorInteractions",
     assignmentId: request.assignmentId,
   };
 }

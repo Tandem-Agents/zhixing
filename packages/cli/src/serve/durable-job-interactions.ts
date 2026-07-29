@@ -116,7 +116,13 @@ export class DurableJobInteractionCoordinator
     }
   >();
 
-  constructor(private readonly ledger: ConversationAssignmentLedger) {}
+  constructor(
+    private readonly ledger: ConversationAssignmentLedger,
+    private readonly wakeConvergence: (
+      assignmentId: string,
+      binding?: DurableJobInteractionBinding,
+    ) => void = () => undefined,
+  ) {}
 
   lifecycleObserverFor(
     binding: DurableJobInteractionBinding,
@@ -159,17 +165,16 @@ export class DurableJobInteractionCoordinator
         kind: "cancelled" as const,
         cause: "backpressure" as const,
       };
-      await active.submission.finishAndMirror(
+      await active.ledger.finishInteraction(
         active.assignmentId,
         request.id,
         jobInteractionOutcome(request.id, decision, { kind: "backpressure" }),
-        active.context,
       );
-      await this.drainAssignment(active);
+      this.wakeConvergence(active.assignmentId, active);
       return { accepted: false, decision };
     }
-    await this.drainAssignment(active);
     this.#requests.set(key, active);
+    this.wakeConvergence(active.assignmentId, active);
     return { accepted: true };
   }
 
@@ -184,7 +189,7 @@ export class DurableJobInteractionCoordinator
     if (active !== expected) {
       throw new Error(`Job interaction ${request.id} has no durable binding`);
     }
-    await active.submission.finishAndMirror(
+    await active.ledger.finishInteraction(
       active.assignmentId,
       request.id,
       jobInteractionOutcome(
@@ -194,9 +199,8 @@ export class DurableJobInteractionCoordinator
         this.#channelAnswers.get(key),
         this.#surfaceAnswers.get(key),
       ),
-      active.context,
     );
-    await this.drainAssignment(active);
+    this.wakeConvergence(active.assignmentId, active);
     this.#requests.delete(key);
     this.#channelAnswers.delete(key);
     this.#surfaceAnswers.delete(key);
@@ -210,7 +214,7 @@ export class DurableJobInteractionCoordinator
     const prepared =
       await this.ledger.prepareInteractionAnswerFromSurface(input);
     if (prepared.kind === "replayed") {
-      await this.#drainActiveBinding(input);
+      this.#wakeKnownBinding(input);
       return;
     }
     const key = interactionKey(input.assignmentId, input.requestId);
@@ -260,7 +264,7 @@ export class DurableJobInteractionCoordinator
       grant,
     });
     if (prepared.kind === "replayed") {
-      await this.#drainActiveBinding({
+      this.#wakeKnownBinding({
         assignmentId: grant.assignmentId,
         requestId: grant.interactionRequestId,
       });
@@ -330,7 +334,7 @@ export class DurableJobInteractionCoordinator
         input.requestId,
       )) !== undefined
     ) {
-      await this.#drainActiveBinding(input);
+      this.#wakeKnownBinding(input);
       return;
     }
     const binding = this.#runtimeBinding(input);
@@ -357,7 +361,10 @@ export class DurableJobInteractionCoordinator
   }
 
   async drainAssignment(binding: DurableJobInteractionBinding): Promise<void> {
-    await this.#projector.drainAssignment(binding);
+    await this.#projector.drainAssignment({
+      ...binding,
+      projectionDomain: "job",
+    });
   }
 
   releaseAssignment(assignmentId: string): void {
@@ -370,14 +377,14 @@ export class DurableJobInteractionCoordinator
     this.#projector.release(assignmentId);
   }
 
-  async #drainActiveBinding(input: {
+  #wakeKnownBinding(input: {
     readonly assignmentId: string;
     readonly requestId: string;
-  }): Promise<void> {
+  }): void {
     const binding = this.#requests.get(
       interactionKey(input.assignmentId, input.requestId),
     );
-    if (binding) await this.drainAssignment(binding);
+    this.wakeConvergence(input.assignmentId, binding);
   }
 
   #runtimeBinding(input: {

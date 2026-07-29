@@ -52,10 +52,12 @@ import type {
   InteractionDisplay,
   InteractionMirrorBatch,
   InteractionMirrorEntry,
+  InteractionSettlementStreamProof,
   ChannelInteractionGrant,
   RunDispatchArguments,
   RunExecutorPort,
   StreamConsumerAuth,
+  StreamFrame,
 } from "@zhixing/core/contracts";
 import {
   MAX_LEDGER_EVIDENCE_PAGE_BYTES,
@@ -82,6 +84,7 @@ import {
   createMutationBatch,
   createAssignmentLedgerValidationState,
   createSignedAssignmentInteractionMirrorBatch,
+  createSignedInteractionSettlementStreamProof,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
   dataPlaneTicketDigest,
@@ -133,6 +136,7 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type StreamDataFramePayload,
+  type StreamVerifierCheckpoint,
 } from "@zhixing/core/protocol";
 import type { ExecutorAssignmentResourceCoordinator } from "./resource-governor.js";
 import type { DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
@@ -393,6 +397,12 @@ export type SurfaceAbortDisposition =
   | { readonly kind: "accepted" }
   | { readonly kind: "terminal" };
 
+export interface InteractionStreamProjectionReceipt {
+  readonly sourceId: string;
+  readonly frame: StreamFrame;
+  readonly checkpoint: StreamVerifierCheckpoint;
+}
+
 interface FinishedInteraction {
   readonly body: Extract<AssignmentRecord, { t: "interaction-finished" }>;
   readonly recordSeq: number;
@@ -469,11 +479,16 @@ interface LedgerProjection {
   mirroredFinishedCount: number;
   mirroredInteractionOrdinal: number;
   mirroredInteractionDigest: string;
+  streamProjectionEnabledAfter?: number;
+  streamProjectedUpTo: number;
+  lastInteractionStreamSeq: number;
+  interactionStreamDigest?: string;
+  lastStreamProjectionRecordSeq?: number;
   acknowledgedCommitRevision?: number;
 }
 
 interface JobInteractionRecoveryIndexValue {
-  readonly v: 1;
+  readonly v: 2;
   readonly assignmentId: string;
   readonly envelopeRef: ArtifactRef;
   readonly phase: LedgerSnapshot["phase"];
@@ -481,6 +496,8 @@ interface JobInteractionRecoveryIndexValue {
   readonly hasInteractionFacts: boolean;
   readonly maxFinishedSeq: number;
   readonly mirroredUpTo: number;
+  readonly streamProjectionEnabledAfter?: number;
+  readonly streamProjectedUpTo: number;
   readonly hasAbort: boolean;
 }
 
@@ -576,7 +593,7 @@ export class ConversationAssignmentLedger implements
     this.#dataPlaneTickets = options.dataPlaneTickets;
     this.#jobInteractionRecoveryIndex = this.#log.durableProjection({
       projectionId: "executor-job-interaction-obligations",
-      reducerVersion: 2,
+      reducerVersion: 3,
       reduce: (envelope, current) =>
         reduceJobInteractionRecoveryIndex(
           envelope,
@@ -1346,6 +1363,7 @@ export class ConversationAssignmentLedger implements
     assignmentId: string,
     input: InteractionRequestInput,
   ): Promise<InteractionRequestDisposition> {
+    await this.enableInteractionStreamProjection(assignmentId);
     const prepared = await interactionRequested(input, this.#artifacts);
     const body = prepared.body;
     const transaction = await this.#transact<InteractionRequestDisposition>(
@@ -1795,6 +1813,205 @@ export class ConversationAssignmentLedger implements
     });
   }
 
+  async enableInteractionStreamProjection(
+    assignmentId: string,
+  ): Promise<number | undefined> {
+    return (
+      await this.#transact<number | undefined>(assignmentId, (state) => {
+        if (state.received?.body.activation.ref.execution !== "job") {
+          return { kind: "return", value: undefined };
+        }
+        if (state.streamProjectionEnabledAfter !== undefined) {
+          return {
+            kind: "return",
+            value: state.streamProjectionEnabledAfter,
+          };
+        }
+        const legacyUpToRecordSeq = state.lastSeq;
+        return {
+          kind: "append",
+          entries: [
+            assignmentRecord(
+              assignmentId,
+              nextEntry(state, {
+                v: 2,
+                t: "interaction-stream-projection-enabled",
+                legacyUpToRecordSeq,
+              }),
+            ),
+          ],
+          value: legacyUpToRecordSeq,
+        };
+      })
+    ).value;
+  }
+
+  async interactionStreamProjectionEnabled(
+    assignmentId: string,
+  ): Promise<boolean> {
+    return this.#select(
+      assignmentId,
+      (state) => state.streamProjectionEnabledAfter !== undefined,
+    );
+  }
+
+  async interactionStreamProjectedUpTo(
+    assignmentId: string,
+  ): Promise<number | undefined> {
+    return this.#select(assignmentId, (state) =>
+      state.streamProjectionEnabledAfter === undefined
+        ? undefined
+        : state.streamProjectedUpTo,
+    );
+  }
+
+  async markInteractionStreamProjected(
+    assignmentId: string,
+    receipts: readonly InteractionStreamProjectionReceipt[],
+  ): Promise<void> {
+    if (receipts.length === 0) return;
+    const lastReceipt = receipts.at(-1)!;
+    const checkpoint = lastReceipt.checkpoint;
+    if (
+      checkpoint.assignmentId !== assignmentId ||
+      checkpoint.lastSeq < lastReceipt.frame.seq ||
+      lastReceipt.frame.assignmentId !== assignmentId ||
+      checkpoint.streamEpoch !== lastReceipt.frame.streamEpoch ||
+      canonicalize(checkpoint.ref) !== canonicalize(lastReceipt.frame.ref)
+    ) {
+      throw new TypeError(
+        "Interaction stream receipt does not bind its durable checkpoint",
+      );
+    }
+    let previousFrameSeq = 0;
+    let previousRecordSeq = 0;
+    for (const receipt of receipts) {
+      const recordSeq = interactionRecordSeqFromSource(receipt.sourceId);
+      if (
+        receipt.frame.assignmentId !== assignmentId ||
+        receipt.frame.payload.kind !== "interaction" ||
+        receipt.checkpoint.assignmentId !== assignmentId ||
+        receipt.checkpoint.lastSeq < receipt.frame.seq ||
+        receipt.checkpoint.streamEpoch !== receipt.frame.streamEpoch ||
+        canonicalize(receipt.checkpoint.ref) !==
+          canonicalize(receipt.frame.ref) ||
+        receipt.frame.seq <= previousFrameSeq ||
+        recordSeq <= previousRecordSeq
+      ) {
+        throw new TypeError(
+          "Interaction stream receipts are not a contiguous ordered projection",
+        );
+      }
+      previousFrameSeq = receipt.frame.seq;
+      previousRecordSeq = recordSeq;
+    }
+    await this.#transact<void>(assignmentId, (state) => {
+      if (state.received?.body.activation.ref.execution !== "job") {
+        throw new TypeError(
+          "Conversation assignments cannot write job stream projection facts",
+        );
+      }
+      if (state.streamProjectionEnabledAfter === undefined) {
+        throw new Error(
+          "Interaction stream projection has no durable format cutover",
+        );
+      }
+      const finishedRecordSeqs = receipts
+        .filter((receipt) => receipt.frame.payload.kind === "interaction" &&
+          receipt.frame.payload.event.t === "finished")
+        .map((receipt) => interactionRecordSeqFromSource(receipt.sourceId));
+      const upToRecordSeq = finishedRecordSeqs.at(-1);
+      if (upToRecordSeq === undefined) return { kind: "return", value: undefined };
+      if (upToRecordSeq < state.streamProjectedUpTo) {
+        throw new Error(
+          "Interaction stream projection watermark cannot move backward",
+        );
+      }
+      if (upToRecordSeq === state.streamProjectedUpTo) {
+        if (
+          checkpoint.lastSeq !== state.lastInteractionStreamSeq ||
+          checkpoint.head !== state.interactionStreamDigest
+        ) {
+          throw new Error(
+            "Interaction stream projection watermark has a conflicting durable checkpoint",
+          );
+        }
+        return { kind: "return", value: undefined };
+      }
+      const expected = interactionProjectionSourceIds(
+        state,
+        state.streamProjectedUpTo,
+        upToRecordSeq,
+      );
+      const actual = receipts
+        .map((receipt) => receipt.sourceId)
+        .filter((sourceId) => {
+          const seq = interactionRecordSeqFromSource(sourceId);
+          return seq > state.streamProjectedUpTo && seq <= upToRecordSeq;
+        });
+      if (canonicalize(actual) !== canonicalize(expected)) {
+        throw new Error(
+          "Interaction stream receipt skips or reorders a durable interaction prefix",
+        );
+      }
+      return {
+        kind: "append",
+        entries: [
+          assignmentRecord(
+            assignmentId,
+            nextEntry(state, {
+              v: 2,
+              t: "interaction-stream-projected",
+              assignmentId,
+              upToRecordSeq,
+              lastStreamSeq: checkpoint.lastSeq,
+              streamDigest: checkpoint.head,
+            }),
+          ),
+        ],
+        value: undefined,
+      };
+    });
+  }
+
+  async interactionSettlementStreamProof(
+    assignmentId: string,
+  ): Promise<InteractionSettlementStreamProof> {
+    return this.#select(assignmentId, (state) => {
+      const abort = [...state.validation.aborts.values()]
+        .find((candidate) => candidate.via === "abort-ticket");
+      const target = state.finishedOrder.at(-1);
+      if (
+        !abort ||
+        !target ||
+        state.streamProjectionEnabledAfter === undefined ||
+        state.streamProjectedUpTo < target.recordSeq ||
+        state.lastStreamProjectionRecordSeq === undefined ||
+        state.interactionStreamDigest === undefined
+      ) {
+        throw new Error(
+          "Interaction settlement stream proof is not yet derivable from the assignment ledger",
+        );
+      }
+      return createSignedInteractionSettlementStreamProof({
+        v: 2,
+        assignmentId,
+        executorId: this.#executorId,
+        ticketDigest: abort.refId,
+        sourceLastSeq: abort.recordSeq,
+        sourceChainDigest: abort.ledgerDigest,
+        targetInteractionRecordSeq: target.recordSeq,
+        projectedRecordSeq: state.lastStreamProjectionRecordSeq,
+        upToRecordSeq: state.streamProjectedUpTo,
+        lastStreamSeq: state.lastInteractionStreamSeq,
+        streamDigest: state.interactionStreamDigest,
+        ledgerChainDigest:
+          state.ledgerBySeq[state.lastStreamProjectionRecordSeq - 1]!,
+        signer: this.#signer,
+      });
+    });
+  }
+
   async recoverInteractions(
     assignmentId: string,
     now = this.#clock(),
@@ -1812,8 +2029,12 @@ export class ConversationAssignmentLedger implements
       const pending = [...state.pendingRequests.values()].map((request) => request.body);
       const terminal =
         state.phase === "failed" || state.phase === "sealed" || state.phase === "acked";
+      const cancellation = state.aborts.at(-1);
       const toResolve = pending.filter(
-        (request) => terminal || canonicalTime(request.expiresAt, "Interaction expiry") < nowMs,
+        (request) =>
+          terminal ||
+          cancellation !== undefined ||
+          canonicalTime(request.expiresAt, "Interaction expiry") < nowMs,
       );
       const stillPending = pending.filter((request) => !toResolve.includes(request));
       if (toResolve.length === 0) {
@@ -1825,9 +2046,17 @@ export class ConversationAssignmentLedger implements
       let nextSeq = state.lastSeq;
       let ordinal = state.finishedOrder.length;
       const appended = toResolve.map((request) => {
-        const outcome: InteractionOutcome = terminal
-          ? { t: "cancelled", via: "run-end" }
-          : { t: "expired" };
+        const outcome: InteractionOutcome =
+          terminal || cancellation
+            ? {
+                t: "cancelled",
+                via: terminal
+                  ? "run-end"
+                  : cancellation!.via === "owner-fence"
+                    ? "cancel-fence"
+                    : "abort-ticket",
+              }
+            : { t: "expired" };
         nextSeq += 1;
         ordinal += 1;
         return { requestId: request.requestId, outcome, recordSeq: nextSeq, ordinal };
@@ -2294,10 +2523,8 @@ export class ConversationAssignmentLedger implements
   async recoverableJobCancellations(): Promise<readonly JobEnvelope[]> {
     return this.#jobAssignmentsMatching(
       (state) =>
-        state.aborts.length > 0 &&
-        (state.phase === "received" ||
-          state.phase === "started" ||
-          state.phase === "halted"),
+        state.aborts.some((abort) => abort.via === "abort-ticket") &&
+        !state.validation.cancelProofOwnerAccepted,
     );
   }
 
@@ -2319,9 +2546,7 @@ export class ConversationAssignmentLedger implements
       assignmentId,
       (state) =>
         state.aborts.some((abort) => abort.via === "abort-ticket") &&
-        state.phase !== "failed" &&
-        state.phase !== "sealed" &&
-        state.phase !== "acked",
+        !state.validation.cancelProofOwnerAccepted,
     );
   }
 
@@ -2357,6 +2582,43 @@ export class ConversationAssignmentLedger implements
       cause: "abort-ticket",
       ticketDigest: abort.refId,
       surfacePrincipal: abort.surfacePrincipal,
+    });
+  }
+
+  /**
+   * owner 已耐久接受 abort-ticket proof 后，在同一 assignment 日志退休本地重提义务。
+   * 响应丢失时允许重提同一 proof；只有本记录落盘后恢复枚举才会停止。
+   */
+  async markTicketCancellationProofOwnerAccepted(
+    assignmentId: string,
+  ): Promise<void> {
+    await this.#transact<void>(assignmentId, (state) => {
+      if (state.validation.cancelProofOwnerAccepted) {
+        return { kind: "return", value: undefined };
+      }
+      if (
+        state.received?.body.activation.ref.execution !== "job" ||
+        state.phase !== "halted" ||
+        !state.halted ||
+        !state.aborts.some((abort) => abort.via === "abort-ticket")
+      ) {
+        throw new Error(
+          "Ticket cancellation proof cannot be retired before its durable halted proof",
+        );
+      }
+      return {
+        kind: "append",
+        entries: [
+          assignmentRecord(
+            assignmentId,
+            nextEntry(state, {
+              v: 2,
+              t: "cancel-proof-owner-accepted",
+            }),
+          ),
+        ],
+        value: undefined,
+      };
     });
   }
 
@@ -3664,6 +3926,8 @@ function emptyProjection(assignmentId: string): LedgerProjection {
     mirroredFinishedCount: 0,
     mirroredInteractionOrdinal: 0,
     mirroredInteractionDigest: interactionMirrorSeed(assignmentId),
+    streamProjectedUpTo: 0,
+    lastInteractionStreamSeq: 0,
   };
 }
 
@@ -3674,6 +3938,32 @@ const JOB_INTERACTION_RECOVERY_KEY_PREFIX =
 
 function jobInteractionRecoveryKey(assignmentId: string): string {
   return `${JOB_INTERACTION_RECOVERY_KEY_PREFIX}${assignmentId}`;
+}
+
+function interactionRecordSeqFromSource(sourceId: string): number {
+  const match = /^interaction:(\d+)$/u.exec(sourceId);
+  const recordSeq = match ? Number(match[1]) : Number.NaN;
+  if (!Number.isSafeInteger(recordSeq) || recordSeq <= 0) {
+    throw new TypeError(
+      "Interaction stream source identity is not a positive record sequence",
+    );
+  }
+  return recordSeq;
+}
+
+function interactionProjectionSourceIds(
+  state: LedgerProjection,
+  afterRecordSeq: number,
+  upToRecordSeq: number,
+): string[] {
+  const records = [
+    ...[...state.requested.values()].map((item) => item.recordSeq),
+    ...[...state.finished.values()].map((item) => item.recordSeq),
+  ]
+    .filter((recordSeq) =>
+      recordSeq > afterRecordSeq && recordSeq <= upToRecordSeq)
+    .sort((left, right) => left - right);
+  return records.map((recordSeq) => `interaction:${recordSeq}`);
 }
 
 /**
@@ -3772,7 +4062,7 @@ async function reduceJobInteractionRecoveryIndex(
         continue;
       }
       pending.value = {
-        v: 1,
+        v: 2,
         assignmentId,
         envelopeRef: body.envelope.ref,
         phase: "received",
@@ -3780,6 +4070,7 @@ async function reduceJobInteractionRecoveryIndex(
         hasInteractionFacts: false,
         maxFinishedSeq: 0,
         mirroredUpTo: 0,
+        streamProjectedUpTo: 0,
         hasAbort: false,
       };
       pending.touched = true;
@@ -3830,6 +4121,19 @@ async function reduceJobInteractionRecoveryIndex(
       case "mirrored":
         next = { ...next, mirroredUpTo: body.upTo };
         break;
+      case "interaction-stream-projection-enabled":
+        next = {
+          ...next,
+          streamProjectionEnabledAfter: body.legacyUpToRecordSeq,
+          streamProjectedUpTo: body.legacyUpToRecordSeq,
+        };
+        break;
+      case "interaction-stream-projected":
+        next = {
+          ...next,
+          streamProjectedUpTo: body.upToRecordSeq,
+        };
+        break;
       default:
         break;
     }
@@ -3842,8 +4146,7 @@ async function reduceJobInteractionRecoveryIndex(
     const value = pending.value;
     const retained =
       value !== undefined &&
-      (value.phase === "received" ||
-        value.phase === "started" ||
+      (canProduceJobInteractionObligation(value) ||
         isRecoverableJobInteractionObligation(value));
     mutations.push(
       value && retained
@@ -3880,8 +4183,12 @@ function validateJobInteractionRecoveryIndexValue(
     "mirroredUpTo",
     "pendingInteractions",
     "phase",
+    ...(Object.hasOwn(value, "streamProjectionEnabledAfter")
+      ? ["streamProjectionEnabledAfter"]
+      : []),
+    "streamProjectedUpTo",
     "v",
-  ];
+  ].sort();
   if (canonicalize(keys) !== canonicalize(expected)) {
     throw corruptJobInteractionRecoveryProjection(
       "Job interaction recovery index value has unknown fields",
@@ -3889,7 +4196,7 @@ function validateJobInteractionRecoveryIndexValue(
   }
   const ref = value.envelopeRef;
   if (
-    value.v !== 1 ||
+    value.v !== 2 ||
     typeof value.assignmentId !== "string" ||
     !ref ||
     typeof ref !== "object" ||
@@ -3905,6 +4212,11 @@ function validateJobInteractionRecoveryIndexValue(
     (value.maxFinishedSeq as number) < 0 ||
     !Number.isSafeInteger(value.mirroredUpTo) ||
     (value.mirroredUpTo as number) < 0 ||
+    (value.streamProjectionEnabledAfter !== undefined &&
+      (!Number.isSafeInteger(value.streamProjectionEnabledAfter) ||
+        (value.streamProjectionEnabledAfter as number) < 0)) ||
+    !Number.isSafeInteger(value.streamProjectedUpTo) ||
+    (value.streamProjectedUpTo as number) < 0 ||
     !Number.isSafeInteger(value.pendingInteractions) ||
     (value.pendingInteractions as number) < 0 ||
     typeof value.phase !== "string" ||
@@ -3927,16 +4239,21 @@ function validateJobInteractionRecoveryIndexValue(
   return value as unknown as JobInteractionRecoveryIndexValue;
 }
 
+function canProduceJobInteractionObligation(
+  value: JobInteractionRecoveryIndexValue,
+): boolean {
+  return value.phase === "received" || value.phase === "started";
+}
+
 function isRecoverableJobInteractionObligation(
   value: JobInteractionRecoveryIndexValue,
 ): boolean {
   return (
     value.hasInteractionFacts &&
-    (value.phase === "received" ||
-      value.phase === "started" ||
-      value.hasAbort ||
-      value.pendingInteractions > 0 ||
-      value.maxFinishedSeq > value.mirroredUpTo)
+    (value.pendingInteractions > 0 ||
+      value.maxFinishedSeq > value.mirroredUpTo ||
+      (value.streamProjectionEnabledAfter !== undefined &&
+        value.maxFinishedSeq > value.streamProjectedUpTo))
   );
 }
 
@@ -4006,6 +4323,10 @@ function applyEntry(
       state.phase = "started";
       state.started = { recordSeq: entry.recordSeq, ledgerDigest };
       return;
+    case "interaction-stream-projection-enabled":
+      state.streamProjectionEnabledAfter = body.legacyUpToRecordSeq;
+      state.streamProjectedUpTo = body.legacyUpToRecordSeq;
+      return;
     case "interaction-requested":
       const requested = { body, recordSeq: entry.recordSeq };
       state.requested.set(body.requestId, requested);
@@ -4074,6 +4395,14 @@ function applyEntry(
       state.mirroredFinishedCount = finishedIndex + 1;
       state.mirroredInteractionOrdinal = body.ordinal;
       state.mirroredInteractionDigest = body.mirrorDigest;
+      return;
+    case "interaction-stream-projected":
+      state.streamProjectedUpTo = body.upToRecordSeq;
+      state.lastInteractionStreamSeq = body.lastStreamSeq;
+      state.interactionStreamDigest = body.streamDigest;
+      state.lastStreamProjectionRecordSeq = entry.recordSeq;
+      return;
+    case "cancel-proof-owner-accepted":
       return;
     default:
       throw corruptLedger("Unsupported assignment record in this protocol stage");

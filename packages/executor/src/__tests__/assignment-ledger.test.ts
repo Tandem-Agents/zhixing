@@ -4849,6 +4849,12 @@ describe("conversation assignment protocol", () => {
     ).toThrow("closed union");
     for (const invalidBody of [
       { v: 2, t: "started" },
+      { v: 1, t: "cancel-proof-owner-accepted" },
+      {
+        v: 2,
+        t: "cancel-proof-owner-accepted",
+        futureField: true,
+      },
       {
         v: 1,
         t: "supersede-fenced",

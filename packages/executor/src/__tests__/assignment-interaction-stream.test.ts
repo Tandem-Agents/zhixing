@@ -31,6 +31,9 @@ describe("projectAssignmentInteractionStream", { timeout: 30_000 }, () => {
       ref,
     );
     const ledger = {
+      async interactionStreamProjectedUpTo() {
+        return undefined;
+      },
       async interactionStreamEvents() {
         return [
           {
@@ -75,21 +78,27 @@ describe("projectAssignmentInteractionStream", { timeout: 30_000 }, () => {
       writer,
       meta,
     });
-    expect(first).toEqual({ projected: 2, lastRecordSeq: 3 });
+    expect(first.projected).toBe(2);
+    expect(first.lastRecordSeq).toBe(3);
+    expect(first.receipts).toHaveLength(2);
+    expect(first.receipts.map((receipt) => receipt.sourceId)).toEqual([
+      "interaction:2",
+      "interaction:3",
+    ]);
     await expect(projectAssignmentInteractionStream({
       assignmentId: "assignment-fixed",
       ledger,
       writer,
       meta,
       afterRecordSeq: first.lastRecordSeq,
-    })).resolves.toEqual({ projected: 0, lastRecordSeq: 3 });
+    })).resolves.toMatchObject({ projected: 0, lastRecordSeq: 3, receipts: [] });
 
     await expect(projectAssignmentInteractionStream({
       assignmentId: "assignment-fixed",
       ledger,
       writer,
       meta,
-    })).resolves.toEqual({ projected: 2, lastRecordSeq: 3 });
+    })).resolves.toMatchObject({ projected: 2, lastRecordSeq: 3 });
     expect((await spool.snapshot("assignment-fixed")).lastSeq).toBe(2);
   });
 });

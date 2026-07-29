@@ -21,6 +21,7 @@ import type {
   ExecutionKind,
   InteractionMirrorBatch,
   InteractionMirrorEntry,
+  InteractionSettlementStreamProof,
   IngressContext,
   LedgerEvidencePage,
   LedgerSnapshot,
@@ -182,11 +183,18 @@ export interface AssignmentLedgerValidationState {
   };
   readonly aborts: Map<
     string,
-    | { readonly via: "owner-fence"; readonly refId: string }
+    | {
+        readonly via: "owner-fence";
+        readonly refId: string;
+        readonly recordSeq: number;
+        readonly ledgerDigest: Digest;
+      }
     | {
         readonly via: "abort-ticket";
         readonly refId: string;
         readonly surfacePrincipal: string;
+        readonly recordSeq: number;
+        readonly ledgerDigest: Digest;
       }
   >;
   readonly requestedInteractions: Set<string>;
@@ -195,9 +203,15 @@ export interface AssignmentLedgerValidationState {
     number,
     { readonly ordinal: number; readonly mirrorDigest: Digest }
   >;
+  readonly unprojectedFinished: Set<number>;
   finishedInteractionCount: number;
   interactionMirrorDigest: Digest;
   mirroredInteractionOrdinal: number;
+  streamProjectionEnabledAfter?: number;
+  streamProjectedUpTo: number;
+  lastInteractionStreamSeq: number;
+  interactionStreamDigest?: Digest;
+  cancelProofOwnerAccepted: boolean;
   stagedMutationCount: number;
   readonly mutationRequestIds: Set<string>;
   sideEffectCount: number;
@@ -220,9 +234,13 @@ export function createAssignmentLedgerValidationState(
     requestedInteractions: new Set(),
     pendingInteractions: new Set(),
     unmirroredFinished: new Map(),
+    unprojectedFinished: new Set(),
     finishedInteractionCount: 0,
     interactionMirrorDigest: interactionMirrorSeed(assignmentId),
     mirroredInteractionOrdinal: 0,
+    streamProjectedUpTo: 0,
+    lastInteractionStreamSeq: 0,
+    cancelProofOwnerAccepted: false,
     stagedMutationCount: 0,
     mutationRequestIds: new Set(),
     sideEffectCount: 0,
@@ -985,6 +1003,155 @@ export function interactionMirrorBatchDigest(
   );
 }
 
+export function createSignedInteractionSettlementStreamProof(
+  input: Omit<InteractionSettlementStreamProof, "signature"> & {
+    readonly signer: ProtocolSigner;
+  },
+): InteractionSettlementStreamProof {
+  const { signer, ...rawPayload } = input;
+  const payload = validateInteractionSettlementStreamProofPayload(rawPayload);
+  const signature = signer.sign(
+    "InteractionSettlementStreamProof",
+    2,
+    payload,
+  );
+  assertSignature(
+    signature,
+    "Interaction settlement stream proof signature",
+  );
+  if (signature.keyId !== payload.executorId) {
+    throw new TypeError(
+      "Interaction settlement stream proof signer is not its executor",
+    );
+  }
+  return snapshot(
+    { ...payload, signature },
+    "Interaction settlement stream proof",
+  );
+}
+
+export function validateInteractionSettlementStreamProof(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): InteractionSettlementStreamProof {
+  const proof = snapshot(
+    input,
+    "Interaction settlement stream proof",
+  ) as InteractionSettlementStreamProof;
+  assertObject(proof, "Interaction settlement stream proof");
+  assertExactKeys(
+    proof,
+    [
+      "assignmentId",
+      "executorId",
+      "lastStreamSeq",
+      "ledgerChainDigest",
+      "projectedRecordSeq",
+      "signature",
+      "sourceChainDigest",
+      "sourceLastSeq",
+      "streamDigest",
+      "targetInteractionRecordSeq",
+      "ticketDigest",
+      "upToRecordSeq",
+      "v",
+    ],
+    "Interaction settlement stream proof",
+  );
+  assertSignature(
+    proof.signature,
+    "Interaction settlement stream proof signature",
+  );
+  const payload = validateInteractionSettlementStreamProofPayload(
+    withoutField(proof, "signature"),
+  );
+  verifier.verify(
+    "InteractionSettlementStreamProof",
+    2,
+    payload,
+    proof.signature,
+  );
+  if (proof.signature.keyId !== payload.executorId) {
+    throw new TypeError(
+      "Interaction settlement stream proof signer is not its executor",
+    );
+  }
+  return { ...payload, signature: proof.signature };
+}
+
+function validateInteractionSettlementStreamProofPayload(
+  input: Omit<InteractionSettlementStreamProof, "signature">,
+): Omit<InteractionSettlementStreamProof, "signature"> {
+  const payload = snapshot(
+    input,
+    "Interaction settlement stream proof payload",
+  );
+  assertExactKeys(
+    payload,
+    [
+      "assignmentId",
+      "executorId",
+      "lastStreamSeq",
+      "ledgerChainDigest",
+      "projectedRecordSeq",
+      "sourceChainDigest",
+      "sourceLastSeq",
+      "streamDigest",
+      "targetInteractionRecordSeq",
+      "ticketDigest",
+      "upToRecordSeq",
+      "v",
+    ],
+    "Interaction settlement stream proof payload",
+  );
+  if (payload.v !== 2) {
+    throw new TypeError(
+      "Interaction settlement stream proof version is unsupported",
+    );
+  }
+  assertIdentifier(payload.assignmentId, "Interaction settlement assignment id");
+  assertIdentifier(payload.executorId, "Interaction settlement executor id");
+  assertDigest(payload.ticketDigest, "Interaction settlement ticket digest");
+  assertPositiveInteger(
+    payload.sourceLastSeq,
+    "Interaction settlement source sequence",
+  );
+  assertDigest(
+    payload.sourceChainDigest,
+    "Interaction settlement source chain digest",
+  );
+  assertPositiveInteger(
+    payload.targetInteractionRecordSeq,
+    "Interaction settlement target record sequence",
+  );
+  assertPositiveInteger(
+    payload.projectedRecordSeq,
+    "Interaction settlement projection record sequence",
+  );
+  assertPositiveInteger(
+    payload.upToRecordSeq,
+    "Interaction settlement projected source sequence",
+  );
+  assertPositiveInteger(
+    payload.lastStreamSeq,
+    "Interaction settlement stream sequence",
+  );
+  assertDigest(payload.streamDigest, "Interaction settlement stream digest");
+  assertDigest(
+    payload.ledgerChainDigest,
+    "Interaction settlement ledger chain digest",
+  );
+  if (
+    payload.upToRecordSeq < payload.targetInteractionRecordSeq ||
+    payload.projectedRecordSeq <= payload.upToRecordSeq
+  ) {
+    throw new TypeError(
+      "Interaction settlement stream proof has inconsistent watermarks",
+    );
+  }
+  return payload;
+}
+
 export function advanceAssignmentLedger(
   previous: Digest,
   entry: AssignmentEntry,
@@ -1025,6 +1192,7 @@ export function applyValidatedAssignmentEntry(
     throw new TypeError("Assignment record sequence is not contiguous");
   }
   const body = entry.body;
+  const nextLedgerDigest = advanceAssignmentLedger(state.chainDigest, entry);
   switch (body.t) {
     case "received":
       if (state.phase !== "unknown" || state.aborts.size > 0) {
@@ -1105,6 +1273,19 @@ export function applyValidatedAssignmentEntry(
       state.phase = "started";
       state.started = true;
       break;
+    case "interaction-stream-projection-enabled":
+      if (
+        state.ref?.execution !== "job" ||
+        state.streamProjectionEnabledAfter !== undefined ||
+        body.legacyUpToRecordSeq !== entry.recordSeq - 1
+      ) {
+        throw new TypeError(
+          "Interaction stream projection cutover is not an idempotent job prefix boundary",
+        );
+      }
+      state.streamProjectionEnabledAfter = body.legacyUpToRecordSeq;
+      state.streamProjectedUpTo = body.legacyUpToRecordSeq;
+      break;
     case "interaction-requested":
       if (state.phase !== "started" || state.aborts.size > 0) {
         throw new TypeError("interaction request is outside a started assignment");
@@ -1155,6 +1336,12 @@ export function applyValidatedAssignmentEntry(
         ordinal: state.finishedInteractionCount,
         mirrorDigest: state.interactionMirrorDigest,
       });
+      if (
+        state.streamProjectionEnabledAfter !== undefined &&
+        entry.recordSeq > state.streamProjectionEnabledAfter
+      ) {
+        state.unprojectedFinished.add(entry.recordSeq);
+      }
       break;
     case "staged-mutation":
       if (state.phase !== "started" || state.aborts.size > 0) {
@@ -1206,11 +1393,18 @@ export function applyValidatedAssignmentEntry(
       state.aborts.set(
         key,
         body.via === "owner-fence"
-          ? { via: body.via, refId: body.refId }
+          ? {
+              via: body.via,
+              refId: body.refId,
+              recordSeq: entry.recordSeq,
+              ledgerDigest: nextLedgerDigest,
+            }
           : {
               via: body.via,
               refId: body.refId,
               surfacePrincipal: body.surfacePrincipal,
+              recordSeq: entry.recordSeq,
+              ledgerDigest: nextLedgerDigest,
             },
       );
       break;
@@ -1240,6 +1434,7 @@ export function applyValidatedAssignmentEntry(
         !closesCancellablePhase ||
         state.pendingInteractions.size > 0 ||
         state.unmirroredFinished.size > 0 ||
+        state.unprojectedFinished.size > 0 ||
         state.openSideEffects.size > 0 ||
         proof.assignmentId !== state.assignmentId ||
         proof.lastRecordSeq !== entry.recordSeq - 1 ||
@@ -1252,12 +1447,28 @@ export function applyValidatedAssignmentEntry(
       state.phase = "halted";
       break;
     }
+    case "cancel-proof-owner-accepted":
+      if (
+        state.ref?.execution !== "job" ||
+        state.phase !== "halted" ||
+        state.cancelProofOwnerAccepted ||
+        ![...state.aborts.values()].some(
+          (abort) => abort.via === "abort-ticket",
+        )
+      ) {
+        throw new TypeError(
+          "cancel-proof-owner-accepted has no pending ticket cancellation proof",
+        );
+      }
+      state.cancelProofOwnerAccepted = true;
+      break;
     case "execution-failed":
       if (
         state.phase !== "started" ||
         state.aborts.size > 0 ||
         state.pendingInteractions.size > 0 ||
         state.unmirroredFinished.size > 0 ||
+        state.unprojectedFinished.size > 0 ||
         state.openSideEffects.size > 0
       ) {
         throw new TypeError("execution-failed does not close a clean started assignment");
@@ -1270,6 +1481,7 @@ export function applyValidatedAssignmentEntry(
         state.aborts.size > 0 ||
         state.pendingInteractions.size > 0 ||
         state.unmirroredFinished.size > 0 ||
+        state.unprojectedFinished.size > 0 ||
         state.openSideEffects.size > 0
       ) {
         throw new TypeError("bundle_sealed has no started prefix");
@@ -1306,13 +1518,36 @@ export function applyValidatedAssignmentEntry(
       state.mirroredUpTo = body.upTo;
       state.mirroredInteractionOrdinal = body.ordinal;
       break;
+    case "interaction-stream-projected": {
+      if (
+        state.ref?.execution !== "job" ||
+        state.streamProjectionEnabledAfter === undefined ||
+        body.assignmentId !== state.assignmentId ||
+        body.upToRecordSeq <= state.streamProjectedUpTo ||
+        body.upToRecordSeq > entry.recordSeq - 1 ||
+        !state.unprojectedFinished.has(body.upToRecordSeq) ||
+        body.lastStreamSeq <= state.lastInteractionStreamSeq
+      ) {
+        throw new TypeError(
+          "Interaction stream projection watermark has no new finished job interaction",
+        );
+      }
+      for (const seq of state.unprojectedFinished) {
+        if (seq <= body.upToRecordSeq) {
+          state.unprojectedFinished.delete(seq);
+        }
+      }
+      state.streamProjectedUpTo = body.upToRecordSeq;
+      state.lastInteractionStreamSeq = body.lastStreamSeq;
+      state.interactionStreamDigest = body.streamDigest;
+      break;
+    }
     default:
       throw new TypeError("Assignment record kind is invalid");
   }
-  const digest = advanceAssignmentLedger(state.chainDigest, entry);
   state.lastSeq = entry.recordSeq;
-  state.chainDigest = digest;
-  return digest;
+  state.chainDigest = nextLedgerDigest;
+  return nextLedgerDigest;
 }
 
 export function validateLedgerEvidencePage(
@@ -1895,8 +2130,69 @@ function assertAssignmentRecord(
   verifier: ProtocolSignatureVerifier,
 ): void {
   assertObject(value, "Assignment record");
-  assertVersion(value.v, "Assignment record");
+  const versionedStreamRecord =
+    value.t === "interaction-stream-projection-enabled" ||
+    value.t === "interaction-stream-projected" ||
+    value.t === "cancel-proof-owner-accepted";
+  if (
+    (versionedStreamRecord && value.v !== 2) ||
+    (!versionedStreamRecord && value.v !== 1)
+  ) {
+    throw new TypeError(
+      versionedStreamRecord
+        ? "Versioned assignment facts require assignment record v2"
+        : "Legacy assignment facts require assignment record v1",
+    );
+  }
   switch (value.t) {
+    case "interaction-stream-projection-enabled":
+      assertExactKeys(
+        value,
+        ["legacyUpToRecordSeq", "t", "v"],
+        "interaction-stream-projection-enabled record",
+      );
+      assertNonNegativeInteger(
+        value.legacyUpToRecordSeq,
+        "Interaction stream projection legacy watermark",
+      );
+      return;
+    case "interaction-stream-projected":
+      assertExactKeys(
+        value,
+        [
+          "assignmentId",
+          "lastStreamSeq",
+          "streamDigest",
+          "t",
+          "upToRecordSeq",
+          "v",
+        ],
+        "interaction-stream-projected record",
+      );
+      assertIdentifier(
+        value.assignmentId,
+        "Interaction stream projection assignment id",
+      );
+      assertPositiveInteger(
+        value.upToRecordSeq,
+        "Interaction stream projection source watermark",
+      );
+      assertPositiveInteger(
+        value.lastStreamSeq,
+        "Interaction stream projection stream watermark",
+      );
+      assertDigest(
+        value.streamDigest,
+        "Interaction stream projection digest",
+      );
+      return;
+    case "cancel-proof-owner-accepted":
+      assertExactKeys(
+        value,
+        ["t", "v"],
+        "cancel-proof-owner-accepted record",
+      );
+      return;
     case "received":
       assertExactKeys(value, ["activation", "envelope", "t", "v"], "received record");
       assertExactKeys(value.envelope, ["ref"], "received envelope");

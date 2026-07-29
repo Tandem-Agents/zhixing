@@ -6,6 +6,7 @@ import type {
   DataPlaneTicket,
   DispatchConflictProof,
   InteractionMirrorBatch,
+  InteractionSettlementStreamProof,
   IngressContext,
   JobOccurrence,
   JobRunState,
@@ -24,6 +25,7 @@ import {
   validateDispatchRejectionProof,
   validateDataPlaneTicket,
   validateAssignmentInteractionMirrorBatch,
+  validateInteractionSettlementStreamProof,
   validateIngressContext,
   validateJobOccurrence,
   validateSupersedeProof,
@@ -160,6 +162,19 @@ export type JobJournalRecord =
       readonly targetMirrorDigest: string;
     }
   | {
+      readonly v: 2;
+      readonly t: "interaction-settlement-fence";
+      readonly assignmentId: string;
+      readonly executorId: string;
+      readonly ticketDigest: string;
+      readonly sourceLastSeq: number;
+      readonly sourceChainDigest: string;
+      readonly targetUpTo: number;
+      readonly targetOrdinal: number;
+      readonly targetMirrorDigest: string;
+      readonly targetInteractionRecordSeq: number;
+    }
+  | {
       readonly t: "interaction-settlement-completed";
       readonly assignmentId: string;
       readonly ticketDigest: string;
@@ -168,6 +183,20 @@ export type JobJournalRecord =
       readonly targetUpTo: number;
       readonly targetOrdinal: number;
       readonly targetMirrorDigest: string;
+    }
+  | {
+      readonly v: 2;
+      readonly t: "interaction-settlement-completed";
+      readonly assignmentId: string;
+      readonly executorId: string;
+      readonly ticketDigest: string;
+      readonly sourceLastSeq: number;
+      readonly sourceChainDigest: string;
+      readonly targetUpTo: number;
+      readonly targetOrdinal: number;
+      readonly targetMirrorDigest: string;
+      readonly targetInteractionRecordSeq: number;
+      readonly streamProof: InteractionSettlementStreamProof;
     }
   | {
       readonly t: "state";
@@ -381,11 +410,37 @@ export function validateJobJournalRecord(
   }
   const type = value.t as JobJournalRecordType;
   const shape: RecordShape = JOB_JOURNAL_RECORD_SHAPES[type];
+  const settlementShape: RecordShape =
+    (type === "interaction-settlement-fence" ||
+      type === "interaction-settlement-completed") &&
+    value.v === 2
+      ? {
+          required: [
+            "assignmentId",
+            "executorId",
+            "sourceChainDigest",
+            "sourceLastSeq",
+            ...(type === "interaction-settlement-completed"
+              ? ["streamProof"]
+              : []),
+            "t",
+            "targetInteractionRecordSeq",
+            "targetMirrorDigest",
+            "targetOrdinal",
+            "targetUpTo",
+            "ticketDigest",
+            "v",
+          ],
+        }
+      : shape;
   assertKeys(
     value,
-    [...shape.required, ...(shape.optional ?? [])],
+    [
+      ...settlementShape.required,
+      ...(settlementShape.optional ?? []),
+    ],
     `${type} job record`,
-    shape.optional ?? [],
+    settlementShape.optional ?? [],
   );
   switch (type) {
     case "task-revision":
@@ -508,6 +563,11 @@ export function validateJobJournalRecord(
       break;
     case "interaction-settlement-fence":
     case "interaction-settlement-completed":
+      if (value.v !== undefined && value.v !== 2) {
+        throw corruptJobJournal(
+          "Job interaction settlement version is unsupported",
+        );
+      }
       assertIdentifier(
         value.assignmentId,
         "Job interaction settlement assignmentId",
@@ -536,10 +596,31 @@ export function validateJobJournalRecord(
         value.targetMirrorDigest,
         "Job interaction settlement target mirror digest",
       );
-      if (value.targetUpTo > value.sourceLastSeq) {
+      if (value.v === undefined && value.targetUpTo > value.sourceLastSeq) {
         throw corruptJobJournal(
           "Job interaction settlement target exceeds its verified source prefix",
         );
+      }
+      if (value.v === 2) {
+        assertIdentifier(
+          value.executorId,
+          "Job interaction settlement executorId",
+        );
+        assertPositive(
+          value.targetInteractionRecordSeq,
+          "Job interaction settlement target interaction sequence",
+        );
+        if (value.targetInteractionRecordSeq !== value.targetUpTo) {
+          throw corruptJobJournal(
+            "Job interaction settlement stream target differs from mirror target",
+          );
+        }
+        if (value.t === "interaction-settlement-completed") {
+          validateInteractionSettlementStreamProof(
+            value.streamProof,
+            verifier,
+          );
+        }
       }
       break;
     case "channel-challenge-prepared":
@@ -1400,13 +1481,16 @@ export function assertJobMirrorReplayContract(input: {
 }
 
 export interface JobInteractionSettlementBinding {
+  readonly v?: 2;
   readonly assignmentId: string;
+  readonly executorId?: string;
   readonly ticketDigest: string;
   readonly sourceLastSeq: number;
   readonly sourceChainDigest: string;
   readonly targetUpTo: number;
   readonly targetOrdinal: number;
   readonly targetMirrorDigest: string;
+  readonly targetInteractionRecordSeq?: number;
 }
 
 export function sameJobInteractionSettlement(
@@ -1415,12 +1499,15 @@ export function sameJobInteractionSettlement(
 ): boolean {
   return (
     left.assignmentId === right.assignmentId &&
+    left.v === right.v &&
+    left.executorId === right.executorId &&
     left.ticketDigest === right.ticketDigest &&
     left.sourceLastSeq === right.sourceLastSeq &&
     left.sourceChainDigest === right.sourceChainDigest &&
     left.targetUpTo === right.targetUpTo &&
     left.targetOrdinal === right.targetOrdinal &&
-    left.targetMirrorDigest === right.targetMirrorDigest
+    left.targetMirrorDigest === right.targetMirrorDigest &&
+    left.targetInteractionRecordSeq === right.targetInteractionRecordSeq
   );
 }
 
@@ -1455,6 +1542,7 @@ export function assertJobInteractionSettlementCompletionReplayContract(input: {
     | JobInteractionSettlementBinding
     | undefined;
   readonly completion: JobInteractionSettlementBinding;
+  readonly streamProof?: InteractionSettlementStreamProof;
   readonly completionAlreadyExists: boolean;
   readonly mirrored:
     | {
@@ -1470,7 +1558,19 @@ export function assertJobInteractionSettlementCompletionReplayContract(input: {
     !sameJobInteractionSettlement(input.fence, input.completion) ||
     input.mirrored?.upTo !== input.fence.targetUpTo ||
     input.mirrored.ordinal !== input.fence.targetOrdinal ||
-    input.mirrored.digest !== input.fence.targetMirrorDigest
+    input.mirrored.digest !== input.fence.targetMirrorDigest ||
+    (input.fence.v === 2 &&
+      (!input.streamProof ||
+        input.streamProof.assignmentId !== input.fence.assignmentId ||
+        input.streamProof.executorId !== input.fence.executorId ||
+        input.streamProof.ticketDigest !== input.fence.ticketDigest ||
+        input.streamProof.sourceLastSeq !== input.fence.sourceLastSeq ||
+        input.streamProof.sourceChainDigest !==
+          input.fence.sourceChainDigest ||
+        input.streamProof.targetInteractionRecordSeq !==
+          input.fence.targetInteractionRecordSeq ||
+        input.streamProof.upToRecordSeq <
+          input.fence.targetInteractionRecordSeq!))
   ) {
     throw corruptJobJournal(
       "Job interaction settlement completion lacks its exact mirrored fence",

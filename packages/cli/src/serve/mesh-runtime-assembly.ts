@@ -50,9 +50,9 @@ import {
   registerDataPlaneTicketService,
 } from "./data-plane-ticket-mesh.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
-import {
+import type {
   JobAssignmentWorker,
-  type JobRuntimePort,
+  JobSubmissionOwner,
 } from "./job-assignment-worker.js";
 import { AssignmentOperationsRouter } from "./assignment-operations-router.js";
 import {
@@ -78,13 +78,9 @@ export interface MeshRuntimeAssemblyOptions {
     readonly interactions: DurableConversationInteractionObserver;
     readonly dataPlane: ExecutorDataPlaneRuntime;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
-    /**
-     * job 执行装配接缝:提供 job 运行时端口即启用 executor-owned job
-     * worker 与其答复服务;缺省时本 executor 不承接 job dispatch,
-     * 生产端口由后续单元接入。
-     */
+    /** Mesh 只注册 adapter；job worker 由稳定 executor role 组合根持有。 */
     readonly job?: {
-      readonly runtime: JobRuntimePort;
+      readonly worker: JobAssignmentWorker;
     };
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
@@ -98,7 +94,6 @@ export class MeshRuntimeAssembly {
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
-  readonly #jobWorker: JobAssignmentWorker | undefined;
   readonly #disposers: Array<() => void> = [];
   #started = false;
   #closed = false;
@@ -117,7 +112,7 @@ export class MeshRuntimeAssembly {
       { maxArtifactBytes: MAX_ASSIGNMENT_ARTIFACT_BYTES },
     );
     let worker: ConversationAssignmentWorker | undefined;
-    let jobWorker: JobAssignmentWorker | undefined;
+    const jobWorker = options.executor?.job?.worker;
     const executorPort: RunExecutorPort | undefined = roles.has("executor")
       ? {
           dispatch: (...args) => {
@@ -234,23 +229,8 @@ export class MeshRuntimeAssembly {
         finalizeUsage: ({ assignmentId }) => this.finalizeExecutorUsage(assignmentId),
         onError: (_assignmentId, error) => options.onError?.(error),
       });
-      if (options.executor!.job) {
-        jobWorker = new JobAssignmentWorker({
-          ledger: options.executor!.ledger,
-          runtime: options.executor!.job.runtime,
-          submissionFor: () => this.#composition.submissionPort(anchorId),
-          InProcessAssignmentSubmission:
-            options.executor!.InProcessAssignmentSubmission,
-          createStream: (input) =>
-            options.executor!.dataPlane.createStream(input),
-          finalizeUsage: ({ assignmentId }) =>
-            this.finalizeExecutorUsage(assignmentId),
-          onError: (_assignmentId, error) => options.onError?.(error),
-        });
-      }
     }
     this.#worker = worker;
-    this.#jobWorker = jobWorker;
 
     if (roles.has("executor")) {
       const dataPlane = options.executor!.dataPlane;
@@ -399,13 +379,17 @@ export class MeshRuntimeAssembly {
     );
   }
 
+  /** Executor role 组合根用它绑定 owner submission；mesh 本身不持有 worker 生命周期。 */
+  submissionForAnchor(): JobSubmissionOwner {
+    return this.#composition.submissionPort(this.options.trust.issuer.deviceId);
+  }
+
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
       await this.#control.start();
       await this.#worker?.recover();
-      await this.#jobWorker?.recover();
       this.#started = true;
     } catch (error) {
       await this.stop();
@@ -418,10 +402,8 @@ export class MeshRuntimeAssembly {
     this.#closed = true;
     this.#started = false;
     this.#worker?.stopAccepting();
-    this.#jobWorker?.stopAccepting();
     await this.#control.stop();
     await this.#worker?.close();
-    await this.#jobWorker?.close();
     this.#composition.close();
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
   }

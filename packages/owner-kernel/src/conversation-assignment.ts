@@ -268,6 +268,7 @@ const FINAL_OUTBOX_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export type AssignmentSubmissionMethod =
   | "submission.reportStarted"
   | "submission.mirrorInteractions"
+  | "submission.completeInteractionSettlement"
   | "submission.submitBundle"
   | "submission.submitCancelProof";
 
@@ -295,6 +296,7 @@ export type AssignmentSubmissionAuthorization =
       readonly mode: "settlement";
       readonly method:
         | "submission.mirrorInteractions"
+        | "submission.completeInteractionSettlement"
         | "submission.submitBundle"
         | "submission.submitCancelProof";
       readonly assignmentId: string;
@@ -305,6 +307,7 @@ export type AssignmentSubmissionAuthorization =
       readonly method:
       | "submission.reportStarted"
       | "submission.mirrorInteractions"
+      | "submission.completeInteractionSettlement"
       | "submission.submitBundle"
         | "submission.submitCancelProof";
       readonly assignmentId: string;

@@ -85,6 +85,11 @@ import {
   InProcessAssignmentSubmission,
   type AssignmentLedgerOptions,
 } from "../assignment-ledger.js";
+import { projectAssignmentInteractionStream } from "../assignment-interaction-stream.js";
+import {
+  AssignmentStreamSpool,
+  AssignmentStreamWriter,
+} from "../assignment-stream-spool.js";
 
 const NOW = "2026-07-15T09:00:00.000Z";
 const EXPIRY = "2026-07-15T10:00:00.000Z";
@@ -182,7 +187,12 @@ function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticip
 
 class TestProtocolIdentity implements ProtocolSigner, ProtocolSignatureVerifier {
   readonly #key = Buffer.from("unit-14-protocol-identity", "utf8");
+  readonly #keyId: string;
   #nonce = 0;
+
+  constructor(keyId = "test-owner") {
+    this.#keyId = keyId;
+  }
 
   sign(schemaId: string, version: number, payload: unknown): Signature {
     const nonce = String(++this.#nonce);
@@ -193,7 +203,7 @@ class TestProtocolIdentity implements ProtocolSigner, ProtocolSignatureVerifier 
       .digest("base64url");
     return {
       alg: "test-hmac-sha256",
-      keyId: "test-owner",
+      keyId: this.#keyId,
       sig: `${nonce}.${mac}`,
     };
   }
@@ -207,7 +217,7 @@ class TestProtocolIdentity implements ProtocolSigner, ProtocolSignatureVerifier 
     const [nonce, encoded, extra] = signature.sig.split(".");
     if (
       signature.alg !== "test-hmac-sha256" ||
-      signature.keyId !== "test-owner" ||
+      !["test-owner", EXECUTOR_ID].includes(signature.keyId) ||
       !nonce ||
       !encoded ||
       extra !== undefined
@@ -395,6 +405,7 @@ async function createUserHarness(
     lockWaitMs: 2_000,
   });
   const identity = new TestProtocolIdentity();
+  const executorIdentity = new TestProtocolIdentity(EXECUTOR_ID);
   const ownerArtifacts = options.ownerArtifacts?.(artifacts) ?? artifacts;
   const compatibilityFacts: Array<{ definition: TaskDefinition; occurrences: unknown[] }> = [];
   const compatibility: JobCompatibilityProjection = {
@@ -433,7 +444,7 @@ async function createUserHarness(
     log,
     artifacts,
     executorId: EXECUTOR_ID,
-    signer: identity,
+    signer: executorIdentity,
     verifier: identity,
     ownerControl,
     snapshotFor: options.executorSnapshotFor ?? matchingSnapshotFor,
@@ -1567,6 +1578,94 @@ describe("user job durable protocol", () => {
     readAll.mockRestore();
   });
 
+  it("retires a versioned job interaction only after mirror and durable stream watermarks", async () => {
+    const harness = await createUserHarness();
+    await start(harness);
+    await harness.ledger.enableInteractionStreamProjection(ASSIGNMENT_ID);
+    const requestId = "versioned-stream-settlement";
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId,
+      toolName: "bash",
+      display: { title: "Approve?", lines: ["run"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    });
+    await new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    }).finishAndMirror(
+      ASSIGNMENT_ID,
+      requestId,
+      {
+        t: "auto-resolved",
+        decision: "denied",
+        reason: "no-interactive-surface",
+      },
+      submissionContext(harness.unsigned),
+    );
+
+    expect(await harness.ledger.interactionStreamProjectionEnabled(ASSIGNMENT_ID))
+      .toBe(true);
+    await expect(
+      harness.ledger.recoverableJobInteractionAssignments(),
+    ).resolves.toMatchObject([{ assignmentId: ASSIGNMENT_ID }]);
+
+    const spool = new AssignmentStreamSpool(
+      path.join(harness.root, "job-stream"),
+      harness.artifacts,
+      { clock: () => NOW },
+    );
+    const writer = await AssignmentStreamWriter.open(
+      spool,
+      ASSIGNMENT_ID,
+      {
+        execution: "job",
+        taskId: TASK_ID,
+        jobRunId: JOB_RUN_ID,
+        anchorEpoch: 3,
+      },
+    );
+    const projection = await projectAssignmentInteractionStream({
+      assignmentId: ASSIGNMENT_ID,
+      ledger: harness.ledger,
+      writer,
+      meta: {},
+    });
+    await harness.ledger.markInteractionStreamProjected(
+      ASSIGNMENT_ID,
+      projection.receipts,
+    );
+
+    const projectedUpTo =
+      await harness.ledger.interactionStreamProjectedUpTo(ASSIGNMENT_ID);
+    expect(projectedUpTo).toBeGreaterThan(0);
+    await expect(
+      harness.ledger.recoverableJobInteractionAssignments(),
+    ).resolves.toEqual([]);
+    await expect(
+      harness.ledger.markInteractionStreamProjected(
+        ASSIGNMENT_ID,
+        projection.receipts,
+      ),
+    ).resolves.toBeUndefined();
+
+    const last = projection.receipts.at(-1);
+    if (!last) throw new Error("stream projection receipt is missing");
+    await expect(
+      harness.ledger.markInteractionStreamProjected(ASSIGNMENT_ID, [
+        ...projection.receipts.slice(0, -1),
+        {
+          ...last,
+          checkpoint: {
+            ...last.checkpoint,
+            head: SHA256_ZERO,
+          },
+        },
+      ]),
+    ).rejects.toThrow("conflicting durable checkpoint");
+  });
+
   it("distinguishes task pause from deletion for already-dispatched work", async () => {
     const harness = await createUserHarness();
     const disabled = userDefinition(2, "perform scheduled work", "disabled");
@@ -2131,12 +2230,31 @@ describe("user job durable protocol", () => {
     const harness = await createUserHarness();
     await receive(harness);
     await harness.ledger.abortFromSurface(ASSIGNMENT_ID, surfaceAbortInput());
+    expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
+      true,
+    );
+    expect(
+      (await harness.ledger.recoverableJobCancellations()).map(
+        (envelope) => envelope.assignmentId,
+      ),
+    ).toEqual([ASSIGNMENT_ID]);
     const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
     if (!proof) throw new Error("test ledger did not produce a cancel proof");
     const fact = await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
     const context = submissionContext(harness.unsigned);
     await harness.journal.submitCancelProof(ASSIGNMENT_ID, proof, context);
     await harness.journal.submitCancelProof(ASSIGNMENT_ID, proof, context);
+    // owner 的成功响应不是 executor 的耐久完成事实；响应丢失时仍须恢复并
+    // 重提同一 proof，直到本地 accepted 记录落盘。
+    expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
+      true,
+    );
+    await harness.ledger.markTicketCancellationProofOwnerAccepted(ASSIGNMENT_ID);
+    await harness.ledger.markTicketCancellationProofOwnerAccepted(ASSIGNMENT_ID);
+    expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
+      false,
+    );
+    expect(await harness.ledger.recoverableJobCancellations()).toEqual([]);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
     const closures = (await harness.journal.statusHistory(JOB_RUN_ID, 0)).filter(
       (notice) => notice.state === "uncertain-closed",
@@ -2844,6 +2962,77 @@ describe("user job durable protocol", () => {
     });
     expect(onCancelAccepted).toHaveBeenCalledWith(ASSIGNMENT_ID);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("keeps the owner cancellation fence durable across transient dispatcher failures", async () => {
+    const harness = await createUserHarness();
+    await receive(harness);
+    const submission = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    let cancelAttempts = 0;
+    const executor = new Proxy(harness.ledger, {
+      get(target, property, receiver) {
+        if (property === "cancel") {
+          return (...args: Parameters<typeof target.cancel>) => {
+            cancelAttempts += 1;
+            if (cancelAttempts <= 2) {
+              throw new Error("temporary executor transport loss");
+            }
+            return target.cancel(...args);
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const recoveryErrors: Error[] = [];
+    const dispatcher = new InProcessJobDispatcher({
+      enabled: true,
+      journal: harness.journal,
+      executor,
+      contexts: { create: ownerContext },
+      cancellationSubmission: {
+        submitCancellation(assignmentId) {
+          return submission.submitCancellation(
+            assignmentId,
+            submissionContext(harness.unsigned),
+          );
+        },
+      },
+      bundleSubmission: {
+        submitSealedBundle(assignmentId) {
+          return submission.submitSealedBundle(
+            assignmentId,
+            submissionContext(harness.unsigned),
+          );
+        },
+      },
+      onRecoveryError: (error) => recoveryErrors.push(error),
+    });
+
+    await expect(
+      dispatcher.cancel({
+        jobRunId: JOB_RUN_ID,
+        requestId: "durable-owner-fence-retry",
+        context: surfaceContext("durable-owner-fence-retry"),
+      }),
+    ).rejects.toThrow("temporary executor transport loss");
+    expect(await harness.journal.pendingCancellations()).toHaveLength(1);
+
+    dispatcher.startRecoveryLoop(1);
+    await vi.waitFor(
+      async () => {
+        expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
+      },
+      { timeout: 2_000 },
+    );
+    await dispatcher.stopRecoveryLoop();
+
+    expect(cancelAttempts).toBe(3);
+    expect(recoveryErrors).toHaveLength(1);
+    expect(await harness.journal.pendingCancellations()).toEqual([]);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 });
 
@@ -4715,6 +4904,7 @@ function createUnsignedJob(
     scope: { execution: "job" as const, taskId: TASK_ID },
     anchorEpoch: 3,
     methods: [
+      "submission.completeInteractionSettlement",
       "submission.mirrorInteractions",
       "submission.reportStarted",
       "submission.submitBundle",
@@ -5728,6 +5918,31 @@ async function createInteractionSettlement() {
   await harness.ledger.abortFromSurface(ASSIGNMENT_ID, surfaceAbortInput());
   await reconcileOpenAbort(harness);
   const complete = async () => {
+    const spool = new AssignmentStreamSpool(
+      path.join(harness.root, "settlement-stream"),
+      harness.artifacts,
+      { clock: () => NOW },
+    );
+    const writer = await AssignmentStreamWriter.open(
+      spool,
+      ASSIGNMENT_ID,
+      {
+        execution: "job",
+        taskId: TASK_ID,
+        jobRunId: JOB_RUN_ID,
+        anchorEpoch: 3,
+      },
+    );
+    const projection = await projectAssignmentInteractionStream({
+      assignmentId: ASSIGNMENT_ID,
+      ledger: harness.ledger,
+      writer,
+      meta: {},
+    });
+    await harness.ledger.markInteractionStreamProjected(
+      ASSIGNMENT_ID,
+      projection.receipts,
+    );
     const batch = await harness.ledger.pendingInteractionMirrorBatch(ASSIGNMENT_ID);
     if (!batch) throw new Error("matrix settlement mirror batch is missing");
     await harness.journal.mirrorInteractions(
@@ -5735,8 +5950,11 @@ async function createInteractionSettlement() {
       batch,
       submissionContext(harness.unsigned),
     );
+    const proof =
+      await harness.ledger.interactionSettlementStreamProof(ASSIGNMENT_ID);
     await harness.journal.completeInteractionSettlement(
       ASSIGNMENT_ID,
+      proof,
       submissionContext(harness.unsigned),
     );
   };

@@ -29,6 +29,8 @@ import {
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import type { SchedulerFacade, TurnOrigin, WorkScene } from "@zhixing/core";
+import type { IConfirmationBroker } from "@zhixing/core";
+import type { JobExecutionInstruction } from "@zhixing/core/contracts";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
@@ -43,6 +45,11 @@ type SkillStoreOption = CreateAgentRuntimeOptions["skillStore"];
 type ProviderConfigurationOption = CreateAgentRuntimeOptions["providerConfiguration"];
 type ConfirmationLifecycleObserverOption =
   CreateAgentRuntimeOptions["confirmationLifecycleObserver"];
+
+export interface JobAgentRuntimeOptions {
+  readonly instruction: JobExecutionInstruction;
+  readonly confirmationBroker: IConfirmationBroker;
+}
 
 export interface RuntimeHostOptions {
   /** 设备本地 SecretStore 的已解密内存投影，由产品组合根持有并注入。 */
@@ -145,6 +152,17 @@ export class RuntimeHost {
     return this.assemble(() => null, { runtimeKind: "ephemeral" });
   }
 
+  /**
+   * 发放 executor-owned job runtime。模型、工具与确认 broker 均来自已验
+   * assignment；不继承会话身份、工作场景或渠道接入面状态。
+   */
+  async createJobRuntime(options: JobAgentRuntimeOptions): Promise<AgentRuntime> {
+    return this.assemble(() => null, {
+      runtimeKind: "ephemeral",
+      job: options,
+    });
+  }
+
   /** Non-secret catalog derived from the same profile and extra-tool assemblers as runtime creation. */
   capabilityCatalog(): {
     readonly tools: readonly string[];
@@ -205,13 +223,15 @@ export class RuntimeHost {
         spec: { kind: "workscene"; sceneId: string; sceneName: string };
       };
       runtimeKind?: RuntimeKind;
+      job?: JobAgentRuntimeOptions;
     },
   ): Promise<AgentRuntime> {
     const workscene = opts?.workscene;
+    const job = opts?.job;
     const mcpServers = this.opts.extraTools.mcpHub.catalog()
       .map(({ server }) => server.serverId)
       .sort();
-    const extraTools = this.opts.extraTools.assembleTools({
+    let extraTools = this.opts.extraTools.assembleTools({
       scheduler: this.opts.scheduler,
       scheduleOrigin,
       spec: workscene?.spec,
@@ -219,6 +239,47 @@ export class RuntimeHost {
         ? this.opts.worksceneDirectory
         : undefined,
     });
+    const baseProfile = mainProfile();
+    const requestedTools = job?.instruction.tools
+      ? new Set(job.instruction.tools)
+      : undefined;
+    if (requestedTools) {
+      const available = new Set([
+        ...baseProfile.enabledTools,
+        ...extraTools.map((tool) => tool.name),
+      ]);
+      const unknown = [...requestedTools].filter((tool) => !available.has(tool));
+      if (unknown.length > 0) {
+        throw new TypeError(
+          `Job requested unavailable tools: ${unknown.sort().join(", ")}`,
+        );
+      }
+      extraTools = extraTools.filter((tool) => requestedTools.has(tool.name));
+    }
+    const profile = job
+      ? {
+          ...baseProfile,
+          enabledTools: requestedTools
+            ? baseProfile.enabledTools.filter((tool) => requestedTools.has(tool))
+            : baseProfile.enabledTools,
+        }
+      : workscene?.profile;
+    const providerConfiguration =
+      job?.instruction.model && this.opts.providerConfiguration.config.llm
+        ? {
+            ...this.opts.providerConfiguration,
+            config: {
+              ...this.opts.providerConfiguration.config,
+              llm: {
+                ...this.opts.providerConfiguration.config.llm,
+                main: {
+                  ...this.opts.providerConfiguration.config.llm.main,
+                  model: job.instruction.model,
+                },
+              },
+            },
+          }
+        : this.opts.providerConfiguration;
     // 临时运行时按调度类计费,常驻会话按交互类:两者的公平份额不同,且容量
     // 绑定必须在构造时就位——工具执行的注入点在运行时内部,事后包装拿不到。
     const capacityBinding =
@@ -227,12 +288,12 @@ export class RuntimeHost {
         : this.opts.deviceCapacity?.interactive;
     const runtime = await createAgentRuntime({
       ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
-      providerConfiguration: this.opts.providerConfiguration,
+      providerConfiguration,
       systemProtectedPaths: this.opts.systemProtectedPaths,
       workspace: workscene ? workscene.workspace : undefined,
       primaryRole: workscene?.primaryRole,
       memoryScope: workscene?.memoryScope,
-      profile: workscene?.profile,
+      profile,
       extraTools,
       executionMcpServers: mcpServers,
       decorateRunBus: this.opts.decorateRunBus,
@@ -240,6 +301,7 @@ export class RuntimeHost {
       segmentDeps: this.opts.segmentDeps,
       skillStore: this.opts.skillStore,
       runtimeKind: opts?.runtimeKind ?? "conversation",
+      ...(job ? { confirmationBroker: job.confirmationBroker } : {}),
       ...(opts?.runtimeKind !== "ephemeral" && this.opts.confirmationLifecycleObserver
         ? { confirmationLifecycleObserver: this.opts.confirmationLifecycleObserver }
         : {}),

@@ -2,6 +2,7 @@ import {
   ConfirmationBroker,
   type AgentYield,
   type IConfirmationBroker,
+  type PermissionRule,
   type ToolSideEffectObserver,
 } from "@zhixing/core";
 import type {
@@ -14,13 +15,13 @@ import type {
   JobExecutionInstruction,
   SessionEventProjection,
 } from "@zhixing/core/contracts";
+import { AuthorityStorageError } from "@zhixing/core/authority";
 import type { StreamFrameProducer } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import {
-  abortableDelay,
   asError,
   resumeSealedSubmission,
   retryRemoteObligation,
@@ -53,7 +54,7 @@ export interface JobRuntimeRunOptions {
   readonly onProtocolEvent: (
     event: SessionEventProjection,
   ) => Promise<void>;
-  readonly authorizeToolExecution: () => Promise<unknown>;
+  readonly authorizeToolExecution: () => Promise<readonly PermissionRule[]>;
   readonly toolSideEffectObserver: ToolSideEffectObserver;
 }
 
@@ -108,19 +109,37 @@ export interface JobRunStream extends StreamFrameProducer {
   markTerminal?(): Promise<unknown>;
 }
 
+type ActiveJobInteractionBinding = DurableJobInteractionBinding & {
+  readonly stream: JobRunStream;
+};
+
 /** Executor-owned job lifecycle from durable receipt through owner acknowledgement. */
 export class JobAssignmentWorker implements JobInteractionAnswerPort {
   readonly #running = new Map<string, Promise<void>>();
-  readonly #cancellations = new Map<string, Promise<void>>();
-  readonly #cancellationQuiescences = new Map<string, Promise<void>>();
   readonly #interactionRecoveries = new Map<string, Promise<void>>();
+  readonly #interactionRecoveryRequested = new Set<string>();
+  readonly #interactionRecoveryTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  readonly #interactionRecoveryRetryMs = new Map<string, number>();
+  readonly #interactionRecoveryQueue = new BoundedTaskQueue(4);
+  readonly #activeInteractionBindings = new Map<
+    string,
+    ActiveJobInteractionBinding
+  >();
   readonly #executionAborts = new Map<string, AbortController>();
   readonly #abort = new AbortController();
   readonly #interactions: DurableJobInteractionCoordinator;
   #closed = false;
 
   constructor(private readonly options: JobAssignmentWorkerOptions) {
-    this.#interactions = new DurableJobInteractionCoordinator(options.ledger);
+    this.#interactions = new DurableJobInteractionCoordinator(
+      options.ledger,
+      (assignmentId) => {
+        void this.#wakeInteractionRecovery(assignmentId);
+      },
+    );
   }
 
   accept(envelope: DispatchEnvelope): void {
@@ -135,6 +154,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         if (this.#executionAborts.get(envelope.assignmentId) === executionAbort) {
           this.#executionAborts.delete(envelope.assignmentId);
         }
+        this.#activeInteractionBindings.delete(envelope.assignmentId);
         this.#interactions.releaseAssignment(envelope.assignmentId);
       });
     this.#running.set(envelope.assignmentId, task);
@@ -203,7 +223,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     ) {
       return;
     }
-    await this.#quiesceCancellation(envelope);
+    await this.#scheduleCancellation(envelope);
   }
 
   async recover(): Promise<number> {
@@ -212,32 +232,23 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       this.options.ledger.recoverableJobCancellations(),
       this.options.ledger.recoverableJobInteractionAssignments(),
     ]);
-    const claimed = new Set([
-      ...pending.map((envelope) => envelope.assignmentId),
-      ...cancellations.map((envelope) => envelope.assignmentId),
-    ]);
     for (const envelope of pending) this.accept(envelope);
     for (const envelope of cancellations) {
       void this.#scheduleCancellation(envelope);
     }
     for (const envelope of interactions) {
-      if (!claimed.has(envelope.assignmentId)) {
-        this.#scheduleInteractionRecovery(envelope);
-      }
+      this.#scheduleInteractionRecovery(envelope);
     }
-    return (
-      pending.length +
-      cancellations.length +
-      interactions.filter((envelope) => !claimed.has(envelope.assignmentId))
-        .length
-    );
+    return new Set(
+      [...pending, ...cancellations, ...interactions].map(
+        (envelope) => envelope.assignmentId,
+      ),
+    ).size;
   }
 
   async drain(): Promise<void> {
     await Promise.all([
       ...this.#running.values(),
-      ...this.#cancellations.values(),
-      ...this.#cancellationQuiescences.values(),
       ...this.#interactionRecoveries.values(),
     ]);
   }
@@ -249,14 +260,20 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   async close(): Promise<void> {
     this.stopAccepting();
     this.#abort.abort(new Error("Job assignment worker stopped"));
+    for (const timer of this.#interactionRecoveryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#interactionRecoveryTimers.clear();
+    this.#interactionRecoveryRetryMs.clear();
+    this.#interactionRecoveryQueue.close(
+      new Error("Job assignment worker stopped"),
+    );
     for (const controller of this.#executionAborts.values()) {
       controller.abort(new Error("Job assignment worker stopped"));
     }
     await Promise.all(
       [
         ...this.#running.values(),
-        ...this.#cancellations.values(),
-        ...this.#cancellationQuiescences.values(),
         ...this.#interactionRecoveries.values(),
       ].map((task) => task.catch(() => undefined)),
     );
@@ -305,7 +322,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     let stream: JobRunStream | undefined;
     let protocolEventOrdinal = 0;
     let yieldOrdinal = 0;
-    let interactionBinding: DurableJobInteractionBinding | undefined;
+    let interactionBinding: ActiveJobInteractionBinding | undefined;
     let executionError: Error | undefined;
     try {
       const activeStream = await this.options.createStream({
@@ -313,7 +330,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         ref: streamRef,
       });
       stream = activeStream;
-      const activeInteractionBinding: DurableJobInteractionBinding = {
+      const activeInteractionBinding: ActiveJobInteractionBinding = {
         assignmentId,
         ledger: this.options.ledger,
         submission: durableSubmission,
@@ -324,6 +341,10 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         broker: undefined,
       };
       interactionBinding = activeInteractionBinding;
+      this.#activeInteractionBindings.set(
+        assignmentId,
+        activeInteractionBinding,
+      );
       await retryDurableObligation(
         () =>
           this.#interactions.drainAssignment(activeInteractionBinding),
@@ -483,30 +504,44 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   }
 
   #scheduleInteractionRecovery(envelope: JobEnvelope): void {
-    if (
-      this.#closed ||
-      this.#running.has(envelope.assignmentId) ||
-      this.#cancellations.has(envelope.assignmentId) ||
-      this.#interactionRecoveries.has(envelope.assignmentId)
-    ) {
-      return;
+    if (this.#closed) return;
+    const deferred = this.#interactionRecoveryTimers.get(envelope.assignmentId);
+    if (deferred) {
+      clearTimeout(deferred);
+      this.#interactionRecoveryTimers.delete(envelope.assignmentId);
     }
-    const task = this.#recoverInteractionObligation(envelope)
-      .catch((error) =>
-        this.options.onError?.(envelope.assignmentId, asError(error)),
-      )
+    this.#interactionRecoveryRequested.add(envelope.assignmentId);
+    if (this.#interactionRecoveries.has(envelope.assignmentId)) return;
+    const task = this.#interactionRecoveryQueue.run(async () => {
+      do {
+        this.#interactionRecoveryRequested.delete(envelope.assignmentId);
+        await this.#recoverInteractionObligation(envelope);
+      } while (
+        !this.#closed &&
+        this.#interactionRecoveryRequested.has(envelope.assignmentId)
+      );
+    })
+      .catch((error) => {
+        this.options.onError?.(envelope.assignmentId, asError(error));
+        throw error;
+      })
       .finally(() => {
         this.#interactionRecoveries.delete(envelope.assignmentId);
-        this.#interactions.releaseAssignment(envelope.assignmentId);
+        this.#interactionRecoveryRequested.delete(envelope.assignmentId);
+        if (!this.#activeInteractionBindings.has(envelope.assignmentId)) {
+          this.#interactions.releaseAssignment(envelope.assignmentId);
+        }
       });
     this.#interactionRecoveries.set(envelope.assignmentId, task);
+    void task.catch(() => undefined);
   }
 
   async #wakeInteractionRecovery(assignmentId: string): Promise<void> {
-    if (this.#running.has(assignmentId)) return;
     const envelope =
       await this.options.ledger.jobAssignmentForRecovery(assignmentId);
-    if (envelope) this.#scheduleInteractionRecovery(envelope);
+    if (!envelope) return;
+    this.#scheduleInteractionRecovery(envelope);
+    await this.#interactionRecoveries.get(assignmentId);
   }
 
   async #recoverInteractionObligation(
@@ -519,39 +554,119 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       ledger: this.options.ledger,
       owner,
     });
-    const stream = await this.options.createStream({
-      assignmentId,
-      ref: jobStreamRef(envelope),
-    });
-    const binding: DurableJobInteractionBinding = {
-      assignmentId,
-      ledger: this.options.ledger,
-      submission,
-      context,
-      stream,
-      streamMeta: {},
-      signal: this.#abort.signal,
-      broker: undefined,
-    };
+    const activeBinding = this.#activeInteractionBindings.get(assignmentId);
+    const stream =
+      activeBinding?.stream ??
+      await this.options.createStream({
+        assignmentId,
+        ref: jobStreamRef(envelope),
+      });
+    const binding: ActiveJobInteractionBinding =
+      activeBinding ?? {
+        assignmentId,
+        ledger: this.options.ledger,
+        submission,
+        context,
+        stream,
+        streamMeta: {},
+        signal: this.#abort.signal,
+        broker: undefined,
+      };
     while (!this.#abort.signal.aborted) {
-      const recovery = await retryDurableObligation(
-        async () => {
-          const current = await this.options.ledger.recoverInteractions(
+      let recovery: Awaited<
+        ReturnType<ConversationAssignmentLedger["recoverInteractions"]>
+      >;
+      try {
+        recovery = await this.#reconcileInteractionObligations({
+          assignmentId,
+          submission,
+          context,
+          binding,
+        });
+      } catch (error) {
+        if (!isRetryableInteractionRecoveryFailure(error)) throw error;
+        this.#deferInteractionRecovery(
+          envelope,
+          this.#nextInteractionRecoveryDelay(assignmentId),
+        );
+        return;
+      }
+      this.#interactionRecoveryRetryMs.delete(assignmentId);
+      const ticketCancellation =
+        await this.options.ledger.hasPendingTicketCancellation(assignmentId);
+      if (ticketCancellation) {
+        const proof =
+          await this.options.ledger.continueTicketCancellation(assignmentId);
+        if (proof) {
+          try {
+            await owner.submitCancelProof(assignmentId, proof, context);
+            if (stream.markTerminal) {
+              await stream.markTerminal();
+            }
+            await this.options.ledger.markTicketCancellationProofOwnerAccepted(
+              assignmentId,
+            );
+          } catch (error) {
+            if (!isRetryableInteractionRecoveryFailure(error)) throw error;
+            this.#deferInteractionRecovery(
+              envelope,
+              this.#nextInteractionRecoveryDelay(assignmentId),
+            );
+            return;
+          }
+          this.#interactionRecoveryRetryMs.delete(assignmentId);
+          return;
+        }
+        if (await this.options.ledger.hasOpenSideEffects(assignmentId)) {
+          const streamProof =
+            await this.options.ledger.interactionStreamProjectionEnabled(
+              assignmentId,
+            )
+              ? await this.options.ledger.interactionSettlementStreamProof(
+                  assignmentId,
+                )
+              : undefined;
+          await owner.completeInteractionSettlement(
             assignmentId,
+            streamProof,
+            context,
           );
-          await submission.flushInteractionMirrors(assignmentId, context);
-          await this.#interactions.drainAssignment(binding);
-          return current;
-        },
-        this.#abort.signal,
-      );
+          return;
+        }
+      }
       if (recovery.pending.length === 0) return;
+      if (activeBinding) return;
       const nextExpiry = Math.min(
         ...recovery.pending.map((request) => Date.parse(request.expiresAt)),
       );
       const remaining = Math.max(0, nextExpiry - Date.now());
-      await abortableDelay(Math.min(Math.max(remaining, 25), 5_000), this.#abort.signal);
+      this.#deferInteractionRecovery(
+        envelope,
+        Math.min(Math.max(remaining, 25), 5_000),
+      );
+      return;
     }
+  }
+
+  #deferInteractionRecovery(envelope: JobEnvelope, delayMs: number): void {
+    if (this.#closed || this.#interactionRecoveryTimers.has(envelope.assignmentId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.#interactionRecoveryTimers.delete(envelope.assignmentId);
+      this.#scheduleInteractionRecovery(envelope);
+    }, delayMs);
+    timer.unref?.();
+    this.#interactionRecoveryTimers.set(envelope.assignmentId, timer);
+  }
+
+  #nextInteractionRecoveryDelay(assignmentId: string): number {
+    const current = this.#interactionRecoveryRetryMs.get(assignmentId) ?? 100;
+    this.#interactionRecoveryRetryMs.set(
+      assignmentId,
+      Math.min(current * 2, 5_000),
+    );
+    return current;
   }
 
   /**
@@ -560,90 +675,15 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
    * 携原 fence 重驱，避免两个 owner 竞争同一终态。
    */
   #scheduleCancellation(envelope: JobEnvelope): Promise<void> {
-    const existing = this.#cancellations.get(envelope.assignmentId);
-    if (existing) return existing;
-    const task = (async () => {
-      await this.#quiesceCancellation(envelope);
-      if (
-        !(await this.options.ledger.hasPendingTicketCancellation(
-          envelope.assignmentId,
-        ))
-      ) {
-        return;
-      }
-      const owner = this.options.submissionFor(envelope);
-      const context = jobAssignmentContext(envelope);
-      await retryDurableObligation(
-        async () => {
-          const proof =
-            await this.options.ledger.continueTicketCancellation(
-              envelope.assignmentId,
-            );
-          if (proof) {
-            await owner.submitCancelProof(
-              envelope.assignmentId,
-              proof,
-              context,
-            );
-            return;
-          }
-          if (
-            await this.options.ledger.hasOpenSideEffects(
-              envelope.assignmentId,
-            )
-          ) {
-            await owner.completeInteractionSettlement(
-              envelope.assignmentId,
-              context,
-            );
-            return;
-          }
-          throw new Error("Ticket cancellation proof is not yet available");
-        },
-        this.#abort.signal,
-      );
-    })()
-      .catch((error) =>
-        this.options.onError?.(envelope.assignmentId, asError(error)),
-      )
-      .finally(() => {
-        this.#cancellations.delete(envelope.assignmentId);
-      });
-    this.#cancellations.set(envelope.assignmentId, task);
-    return task;
-  }
-
-  #quiesceCancellation(envelope: JobEnvelope): Promise<void> {
-    const existing = this.#cancellationQuiescences.get(envelope.assignmentId);
-    if (existing) return existing;
-    const running = this.#running.get(envelope.assignmentId);
-    const task = (async () => {
-      if (running) await running;
-      const owner = this.options.submissionFor(envelope);
-      const submission = new this.options.InProcessAssignmentSubmission({
-        ledger: this.options.ledger,
-        owner,
-      });
-      const context = jobAssignmentContext(envelope);
-      const stream = await this.options.createStream({
-        assignmentId: envelope.assignmentId,
-        ref: jobStreamRef(envelope),
-      });
-      const binding: DurableJobInteractionBinding = {
-        assignmentId: envelope.assignmentId,
-        ledger: this.options.ledger,
-        submission,
-        context,
-        stream,
-        streamMeta: {},
-        signal: this.#abort.signal,
-      };
-      await this.#settleCancelledStream(binding, stream);
-    })().finally(() => {
-      this.#cancellationQuiescences.delete(envelope.assignmentId);
-    });
-    this.#cancellationQuiescences.set(envelope.assignmentId, task);
-    return task;
+    this.abort(
+      envelope.assignmentId,
+      new Error("Job assignment cancellation is being reconciled"),
+    );
+    this.#scheduleInteractionRecovery(envelope);
+    return (
+      this.#interactionRecoveries.get(envelope.assignmentId) ??
+      Promise.resolve()
+    );
   }
 
   async #finalizeUsageUntilAvailable(
@@ -669,18 +709,59 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     assignmentId: string,
     submission: InProcessAssignmentSubmission,
     context: AuthorityCallContext,
-    interactionBinding: DurableJobInteractionBinding | undefined,
+    interactionBinding: ActiveJobInteractionBinding | undefined,
     signal: AbortSignal,
   ): Promise<void> {
     await retryDurableObligation(
       async () => {
-        await submission.prepareForRunEnd(assignmentId, context);
+        await this.options.ledger.closePendingInteractionsForRunEnd(
+          assignmentId,
+        );
         if (interactionBinding) {
-          await this.#interactions.drainAssignment(interactionBinding);
+          this.#activeInteractionBindings.set(
+            assignmentId,
+            interactionBinding,
+          );
+          await this.#wakeInteractionRecovery(assignmentId);
+        } else {
+          await submission.flushInteractionMirrors(assignmentId, context);
         }
       },
       signal,
     );
+  }
+
+  async #reconcileInteractionObligations(input: {
+    readonly assignmentId: string;
+    readonly submission: InProcessAssignmentSubmission;
+    readonly context: AuthorityCallContext;
+    readonly binding: DurableJobInteractionBinding;
+  }): Promise<
+    Awaited<ReturnType<ConversationAssignmentLedger["recoverInteractions"]>>
+  > {
+    const current = await this.options.ledger.recoverInteractions(
+      input.assignmentId,
+    );
+    const branches = await Promise.allSettled([
+      input.submission.flushInteractionMirrors(
+        input.assignmentId,
+        input.context,
+      ),
+      this.#interactions.drainAssignment(input.binding),
+    ]);
+    const failures = branches
+      .filter(
+        (branch): branch is PromiseRejectedResult =>
+          branch.status === "rejected",
+      )
+      .map((branch) => branch.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "Job interaction convergence remains incomplete",
+      );
+    }
+    return current;
   }
 
   async #markStreamTerminal(stream: JobRunStream): Promise<void> {
@@ -705,6 +786,17 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   }
 }
 
+function isRetryableInteractionRecoveryFailure(error: unknown): boolean {
+  if (error instanceof AuthorityStorageError) return false;
+  if (error instanceof AggregateError) {
+    return (
+      error.errors.length > 0 &&
+      error.errors.every(isRetryableInteractionRecoveryFailure)
+    );
+  }
+  return shouldRetryRemoteObligation(error);
+}
+
 function jobStreamRef(envelope: JobEnvelope): {
   readonly execution: "job";
   readonly jobRunId: string;
@@ -727,4 +819,48 @@ function jobAssignmentContext(envelope: JobEnvelope): AuthorityCallContext {
     requestId: `submission:${envelope.assignmentId}`,
     deadlineAt: capability.expiry,
   };
+}
+
+class BoundedTaskQueue {
+  readonly #pending: Array<{
+    readonly run: () => Promise<void>;
+    readonly resolve: () => void;
+    readonly reject: (error: unknown) => void;
+  }> = [];
+  #active = 0;
+  #closedError: Error | undefined;
+
+  constructor(private readonly concurrency: number) {
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+      throw new TypeError("Bounded task queue concurrency must be positive");
+    }
+  }
+
+  run(task: () => Promise<void>): Promise<void> {
+    if (this.#closedError) return Promise.reject(this.#closedError);
+    return new Promise<void>((resolve, reject) => {
+      this.#pending.push({ run: task, resolve, reject });
+      this.#drain();
+    });
+  }
+
+  close(error: Error): void {
+    this.#closedError = error;
+    for (const pending of this.#pending.splice(0)) pending.reject(error);
+  }
+
+  #drain(): void {
+    while (this.#active < this.concurrency) {
+      const next = this.#pending.shift();
+      if (!next) return;
+      this.#active += 1;
+      void next
+        .run()
+        .then(next.resolve, next.reject)
+        .finally(() => {
+          this.#active -= 1;
+          this.#drain();
+        });
+    }
+  }
 }

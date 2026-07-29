@@ -128,16 +128,20 @@ export interface WireSchemaMap {
 }
 
 export type WireSchemaId = keyof WireSchemaMap;
-export type WireSchemaVersion = { [K in WireSchemaId]: 1 };
+export type WireSchemaVersion = {
+  [K in WireSchemaId]: K extends "AssignmentRecord" ? 1 | 2 : 1;
+};
 
 type Assert<T extends true> = T;
-type EverySchemaIsV1 = {
-  [K in WireSchemaId]: [WireSchemaMap[K]] extends [{ readonly v: 1 }]
+type EverySchemaUsesRegisteredVersion = {
+  [K in WireSchemaId]: [WireSchemaMap[K]] extends [
+    { readonly v: WireSchemaVersion[K] },
+  ]
     ? true
     : false;
 }[WireSchemaId] extends true
   ? true
   : false;
 
-/** 编译失败即表示注册 schema 缺少或混入了非 v1 顶层合同。 */
-export type WireSchemaVersionInvariant = Assert<EverySchemaIsV1>;
+/** 编译失败即表示注册 schema 缺少或混入未登记的顶层版本。 */
+export type WireSchemaVersionInvariant = Assert<EverySchemaUsesRegisteredVersion>;

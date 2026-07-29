@@ -177,6 +177,7 @@ export type AuthorityPortMethodId =
   | "submission.submitBundle"
   | "submission.submitCancelProof"
   | "submission.mirrorInteractions"
+  | "submission.completeInteractionSettlement"
   | "governor.submitUsageReport"
   | "executor.dispatch"
   | "executor.cancel"
@@ -201,6 +202,7 @@ export type AssignmentMethodId = Extract<
   | "submission.submitBundle"
   | "submission.submitCancelProof"
   | "submission.mirrorInteractions"
+  | "submission.completeInteractionSettlement"
 >;
 
 export type SurfaceMethodId = Extract<
@@ -222,6 +224,7 @@ export type SubmissionMethodId = Extract<
   | "submission.submitBundle"
   | "submission.submitCancelProof"
   | "submission.mirrorInteractions"
+  | "submission.completeInteractionSettlement"
 >;
 
 export type OwnerControlMethodId = Extract<
