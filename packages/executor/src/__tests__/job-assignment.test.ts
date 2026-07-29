@@ -3028,8 +3028,8 @@ describe("user job durable protocol", () => {
     expect(queries).toBe(0);
   });
 
-  it("re-enters cancellation after audit settlement closes a pending interaction", async () => {
-    const harness = await createUserHarness();
+  it("re-enters legacy cancellation after audit settlement closes a pending interaction", async () => {
+    const harness = await createUserHarness({ assignmentRecordV2Writes: false });
     const onCancelAccepted = vi.fn(async () => undefined);
     const submission = new InProcessAssignmentSubmission({
       ledger: harness.ledger,
@@ -3077,6 +3077,91 @@ describe("user job durable protocol", () => {
       context: surfaceContext("cancel-after-audit-settlement"),
     });
     expect(onCancelAccepted).toHaveBeenCalledWith(ASSIGNMENT_ID);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("keeps versioned cancellation pending until stream projection and closes on same-fence replay", async () => {
+    const harness = await createUserHarness();
+    const submission = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    const dispatcher = new InProcessJobDispatcher({
+      enabled: true,
+      journal: harness.journal,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: {
+        submitCancellation(assignmentId) {
+          return submission.submitCancellation(
+            assignmentId,
+            submissionContext(harness.unsigned),
+          );
+        },
+      },
+      bundleSubmission: {
+        submitSealedBundle(assignmentId) {
+          return submission.submitSealedBundle(
+            assignmentId,
+            submissionContext(harness.unsigned),
+          );
+        },
+      },
+    });
+    await dispatcher.dispatchPending();
+    await submission.startAndReport(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId: "cancel-versioned-interaction",
+      toolName: "write",
+      display: { title: "confirm", lines: ["write result"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    });
+
+    await dispatcher.cancel({
+      jobRunId: JOB_RUN_ID,
+      requestId: "cancel-versioned-after-audit-settlement",
+      context: surfaceContext("cancel-versioned-after-audit-settlement"),
+    });
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe(
+      "cancel-requested",
+    );
+
+    const spool = new AssignmentStreamSpool(
+      path.join(harness.root, "cancel-versioned-stream"),
+      harness.artifacts,
+      { clock: () => NOW },
+    );
+    const writer = await AssignmentStreamWriter.open(
+      spool,
+      ASSIGNMENT_ID,
+      {
+        execution: "job",
+        taskId: TASK_ID,
+        jobRunId: JOB_RUN_ID,
+        anchorEpoch: 3,
+      },
+    );
+    const projection = await projectAssignmentInteractionStream({
+      assignmentId: ASSIGNMENT_ID,
+      ledger: harness.ledger,
+      writer,
+      meta: {},
+    });
+    await harness.ledger.markInteractionStreamProjected(
+      ASSIGNMENT_ID,
+      projection.receipts,
+    );
+
+    await dispatcher.cancel({
+      jobRunId: JOB_RUN_ID,
+      requestId: "cancel-versioned-after-audit-settlement",
+      context: surfaceContext("cancel-versioned-after-audit-settlement"),
+    });
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 

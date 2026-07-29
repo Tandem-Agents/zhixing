@@ -87,7 +87,10 @@ export type JobSubmissionOwner = ConstructorParameters<
 export interface JobAssignmentWorkerOptions {
   readonly ledger: ConversationAssignmentLedger;
   readonly runtime: JobRuntimePort;
-  readonly submissionFor: (envelope: JobEnvelope) => JobSubmissionOwner;
+  readonly submissionFor: (
+    envelope: JobEnvelope,
+    signal: AbortSignal,
+  ) => JobSubmissionOwner | Promise<JobSubmissionOwner>;
   readonly finalizeUsage: (input: {
     readonly assignmentId: string;
     readonly envelope: JobEnvelope;
@@ -282,7 +285,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   async #execute(envelope: JobEnvelope, abortSignal: AbortSignal): Promise<void> {
     const assignmentId = envelope.assignmentId;
     const context = jobAssignmentContext(envelope);
-    const owner = this.options.submissionFor(envelope);
+    const owner = await this.options.submissionFor(envelope, abortSignal);
     const durableSubmission = new this.options.InProcessAssignmentSubmission({
       ledger: this.options.ledger,
       owner,
@@ -549,7 +552,10 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   ): Promise<void> {
     const assignmentId = envelope.assignmentId;
     const context = jobAssignmentContext(envelope);
-    const owner = this.options.submissionFor(envelope);
+    const owner = await this.options.submissionFor(
+      envelope,
+      this.#abort.signal,
+    );
     const submission = new this.options.InProcessAssignmentSubmission({
       ledger: this.options.ledger,
       owner,

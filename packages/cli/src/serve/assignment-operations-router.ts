@@ -7,14 +7,57 @@ import type {
 import type {
   ConversationInteractionAnswerPort,
 } from "./durable-conversation-interactions.js";
-import { ConversationInteractionRuntimeUnavailableError } from "./durable-conversation-interactions.js";
 import type {
   JobInteractionAnswerPort,
 } from "./durable-job-interactions.js";
+import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 
 export interface AssignmentOperationsPort
   extends ConversationInteractionAnswerPort {
   abortWithTicket(request: ExecutionAbortRequest): Promise<void>;
+}
+
+/**
+ * Routes interaction operations from the durable assignment execution domain.
+ * Local and mesh adapters share this predicate instead of inspecting live
+ * workers or reproducing the execution-domain switch.
+ */
+export class AssignmentInteractionRouter
+  implements ConversationInteractionAnswerPort {
+  constructor(
+    private readonly options: {
+      readonly ledger: ConversationAssignmentLedger;
+      readonly conversation: ConversationInteractionAnswerPort;
+      readonly job?: JobInteractionAnswerPort;
+    },
+  ) {}
+
+  async answerInteractionWithTicket(
+    input: Parameters<
+      ConversationInteractionAnswerPort["answerInteractionWithTicket"]
+    >[0],
+  ): Promise<void> {
+    return (await this.#forAssignment(input.assignmentId))
+      .answerInteractionWithTicket(input);
+  }
+
+  async resolveNoInteractiveSurface(input: {
+    readonly assignmentId: string;
+    readonly requestId: string;
+  }): Promise<void> {
+    return (await this.#forAssignment(input.assignmentId))
+      .resolveNoInteractiveSurface(input);
+  }
+
+  async #forAssignment(
+    assignmentId: string,
+  ): Promise<ConversationInteractionAnswerPort> {
+    return routeAssignmentExecution(
+      this.options.ledger,
+      assignmentId,
+      this.options,
+    );
+  }
 }
 
 /**
@@ -63,20 +106,33 @@ export class AssignmentOperationsRouter implements AssignmentOperationsPort {
   async #forAssignment(
     assignmentId: string,
   ): Promise<AssignmentOperationsPort> {
-    const binding = await this.options.ledger.dataPlaneBinding(assignmentId);
-    if (!binding) {
-      throw new TypeError(
-        "Data-plane operation has no durable assignment binding",
-      );
-    }
-    if (binding.ref.execution === "conversation") {
-      return this.options.conversation;
-    }
-    if (!this.options.job) {
-      throw new ConversationInteractionRuntimeUnavailableError(
-        "Job data-plane operations are not enabled on this executor",
-      );
-    }
-    return this.options.job;
+    return routeAssignmentExecution(
+      this.options.ledger,
+      assignmentId,
+      this.options,
+    );
   }
+}
+
+async function routeAssignmentExecution<TConversation, TJob>(
+  ledger: ConversationAssignmentLedger,
+  assignmentId: string,
+  routes: {
+    readonly conversation: TConversation;
+    readonly job?: TJob;
+  },
+): Promise<TConversation | TJob> {
+  const binding = await ledger.dataPlaneBinding(assignmentId);
+  if (!binding) {
+    throw new TypeError(
+      "Data-plane operation has no durable assignment binding",
+    );
+  }
+  if (binding.ref.execution === "conversation") return routes.conversation;
+  if (!routes.job) {
+    throw new JobInteractionRuntimeUnavailableError(
+      "Job data-plane operations are not enabled on this executor",
+    );
+  }
+  return routes.job;
 }

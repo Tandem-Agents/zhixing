@@ -29,8 +29,10 @@ import {
 import {
   ConversationChannelHost,
 } from "./conversation-channel-confirmation.js";
-import type { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
-import { ConversationInteractionRuntimeUnavailableError } from "./durable-conversation-interactions.js";
+import {
+  ConversationInteractionRuntimeUnavailableError,
+  type ConversationInteractionAnswerPort,
+} from "./durable-conversation-interactions.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import {
   JobOwnerRelay,
@@ -81,7 +83,7 @@ export class LosslessDataPlaneRuntime {
   readonly #authority: AuthorityRuntimeStack;
   readonly #local: ExecutorDataPlaneRuntime | undefined;
   readonly #mesh: () => MeshRuntimeAssembly | undefined;
-  readonly #interactions: DurableConversationInteractionObserver;
+  readonly #interactions: ConversationInteractionAnswerPort;
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #sessions = new Set<LosslessDataPlaneSession>();
   readonly #byChallenge = new Map<string, ConversationChannelSession>();
@@ -92,7 +94,7 @@ export class LosslessDataPlaneRuntime {
     readonly authority: AuthorityRuntimeStack;
     readonly local?: ExecutorDataPlaneRuntime;
     readonly mesh: () => MeshRuntimeAssembly | undefined;
-    readonly interactions: DurableConversationInteractionObserver;
+    readonly interactions: ConversationInteractionAnswerPort;
     readonly onError?: (error: Error) => void;
   }) {
     this.#authority = options.authority;
@@ -265,8 +267,9 @@ export class LosslessDataPlaneRuntime {
                 },
           });
         },
-        resolveNoInteractiveSurface: (input) =>
-          this.#interactions.resolveNoInteractiveSurface(input),
+        resolveNoInteractiveSurface: async (input) => {
+          await this.#interactions.resolveNoInteractiveSurface(input);
+        },
       };
     }
     const remote = this.#mesh()?.dataPlaneForExecutor(executorId);

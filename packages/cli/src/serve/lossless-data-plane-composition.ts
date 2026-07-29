@@ -5,7 +5,7 @@ import {
   JobRelayObligationDirectory,
 } from "./channel-interaction-coordinator.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
-import type { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
+import type { ConversationInteractionAnswerPort } from "./durable-conversation-interactions.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
@@ -15,7 +15,8 @@ export interface LosslessDataPlaneCompositionOptions {
   readonly authority: AuthorityRuntimeStack;
   readonly local?: ExecutorDataPlaneRuntime;
   readonly mesh: () => MeshRuntimeAssembly | undefined;
-  readonly interactions: DurableConversationInteractionObserver;
+  readonly interactions: ConversationInteractionAnswerPort;
+  readonly jobRelayObligations?: JobRelayObligationDirectory;
   readonly protocol: Pick<ConversationProtocolRuntime, "bindLosslessDataPlane">;
   readonly channels: () => ChannelRegistry | undefined;
   readonly jobStatus: JobStatusDirectory;
@@ -48,7 +49,8 @@ export function createLosslessDataPlaneComposition(
       ? { onError: options.onDataPlaneError }
       : {}),
   });
-  const jobRelayObligations = new JobRelayObligationDirectory();
+  const jobRelayObligations =
+    options.jobRelayObligations ?? new JobRelayObligationDirectory();
   const coordinator = new ChannelInteractionCoordinator({
     dataPlane: runtime,
     channels: options.channels,

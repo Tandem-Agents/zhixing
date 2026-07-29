@@ -119,6 +119,7 @@ async function setupCtx() {
     transcript,
     snapshots,
     config: {},
+    enabledRoles: [],
     runtimeFactory,
     confirmationHub: undefined,
     conversationDirectory,

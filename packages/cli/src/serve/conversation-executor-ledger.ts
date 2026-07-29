@@ -11,6 +11,9 @@ import type {
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createOwnerControlAuthorizer } from "./owner-control-authorizer.js";
 
+/** The production cutover is shared by every local executor composition root. */
+export const ASSIGNMENT_RECORD_V2_WRITES_ENABLED = true;
+
 export interface ConversationAssignmentLedgerConstructor {
   new(options: ConstructorParameters<typeof ConversationAssignmentLedger>[0]):
     ConversationAssignmentLedger;

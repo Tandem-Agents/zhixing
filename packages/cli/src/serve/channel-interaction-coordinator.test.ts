@@ -290,6 +290,31 @@ describe("ChannelInteractionCoordinator", () => {
     await instance.close();
   });
 
+  it("holds recovered executor work until its durable job owner is registered", async () => {
+    const directory = new JobRelayObligationDirectory();
+    const controller = new AbortController();
+    const pending = directory.waitForSubmission("asg-job-1", controller.signal);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    const registered = opening();
+    directory.register(registered);
+    await expect(pending).resolves.toBe(registered.journal);
+  });
+
+  it("releases a pending submission wait when the executor owner closes", async () => {
+    const directory = new JobRelayObligationDirectory();
+    const controller = new AbortController();
+    const pending = directory.waitForSubmission("asg-job-1", controller.signal);
+
+    controller.abort(new Error("owner closed"));
+    await expect(pending).rejects.toThrow(/owner closed/u);
+  });
+
   it("closes every session and refuses further callbacks after close", async () => {
     const { instance, relay } = coordinator();
     await instance.openJobRelay(opening());

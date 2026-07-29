@@ -970,6 +970,12 @@ async function runServerProcess(
     });
   }
 
+  if (ctx.executorJobOwner) {
+    registry.register("executorJobOwner.close", async () => {
+      await startupCleanups.jobOwner!.run();
+    });
+  }
+
   // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
   // 更晚注册，仍会先停止新工作并收束在途执行。
   if (ctx.losslessDataPlane) {

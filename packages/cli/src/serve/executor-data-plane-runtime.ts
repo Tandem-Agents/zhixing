@@ -82,8 +82,8 @@ export class ExecutorDataPlaneRuntime {
       executorId: options.authority.executorId,
       verifier: options.authority.verifier,
       assignments: {
-        dataPlaneBinding: async (assignmentId) =>
-          this.#ledger?.dataPlaneBinding(assignmentId),
+        dataPlaneBinding: async (assignmentId, use) =>
+          this.#ledger?.dataPlaneBinding(assignmentId, use),
       },
       spool: this.spool,
       clock,

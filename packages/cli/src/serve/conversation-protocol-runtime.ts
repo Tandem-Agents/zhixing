@@ -90,7 +90,10 @@ import {
   DurableConversationInteractionObserver,
   type DurableInteractionBinding,
 } from "./durable-conversation-interactions.js";
-import { createConversationExecutorLedger } from "./conversation-executor-ledger.js";
+import {
+  ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
+  createConversationExecutorLedger,
+} from "./conversation-executor-ledger.js";
 import {
   isRetryableMeshFailure,
 } from "./remote-obligation-failure.js";
@@ -281,7 +284,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ? createConversationExecutorLedger({
       Constructor: options.localExecutor.ConversationAssignmentLedger,
       authority: options.authority,
-      assignmentRecordV2Writes: false,
+      assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
       usageFinal: (assignmentId) =>
         options.authority.executorResourceGovernor.flushAssignment(
           assignmentId,

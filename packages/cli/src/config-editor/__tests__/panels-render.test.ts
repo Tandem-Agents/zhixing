@@ -334,6 +334,8 @@ describe("config-editor panel 整屏快照", () => {
 
         › App ID                              ✓ cli_test123
       ░░▸ App Secret░░░░░░░░░░░░░░░░░░░░░░░░░░⚠ 待填░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+        › Verification Token                  ⚠ 选填·能力未启
+        › Encrypt Key                         ⚠ 选填·能力未启
 
         ┌────────┐
         │  启用  │   (请先补全必填项)

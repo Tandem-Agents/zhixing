@@ -11,24 +11,28 @@ function mockSurface(
   name: string,
   phase: SurfacePhase,
   calls: string[],
+  mandatory = false,
 ): AccessSurface {
   return {
     name,
     phase,
+    ...(mandatory ? { mandatory: true } : {}),
     setup: async () => {
       calls.push(name);
     },
   };
 }
 
-// mock 接入面集合 —— name 与 PROFILES.full.surfaces 对齐，数组序 = 依赖拓扑序。
+// mock 装配集合 —— profile 接入面与声明对账，mandatory 项独立于 profile，
+// 数组序仍是统一依赖拓扑序。
 function allSurfaces(calls: string[]): AccessSurface[] {
   return [
     mockSurface("mcp", "pre-server", calls),
     mockSurface("authority-runtime", "pre-server", calls),
     mockSurface("executor-data-plane", "pre-server", calls),
-    mockSurface("asset-maintenance", "pre-server", calls),
     mockSurface("conversation", "pre-server", calls),
+    mockSurface("executor-job-owner", "pre-server", calls, true),
+    mockSurface("asset-maintenance", "pre-server", calls),
     mockSurface("mesh-control", "pre-server", calls),
     mockSurface("lossless-data-plane", "pre-server", calls),
     mockSurface("channel", "pre-server", calls),
@@ -52,8 +56,9 @@ describe("access-surface 数据驱动装配", () => {
       "mcp",
       "authority-runtime",
       "executor-data-plane",
-      "asset-maintenance",
       "conversation",
+      "executor-job-owner",
+      "asset-maintenance",
       "mesh-control",
       "lossless-data-plane",
       "channel",
@@ -65,8 +70,9 @@ describe("access-surface 数据驱动装配", () => {
       "mcp",
       "authority-runtime",
       "executor-data-plane",
-      "asset-maintenance",
       "conversation",
+      "executor-job-owner",
+      "asset-maintenance",
       "mesh-control",
       "lossless-data-plane",
       "channel",
@@ -84,6 +90,7 @@ describe("access-surface 数据驱动装配", () => {
 
   it("PROFILES.full.surfaces 与接入面单元集合一致（防集合 / 单元漂移）", () => {
     const names = allSurfaces([])
+      .filter((surface) => surface.mandatory !== true)
       .map((s) => s.name)
       .sort();
     expect([...PROFILES.full.surfaces].sort()).toEqual(names);

@@ -10,7 +10,10 @@ import type {
   TurnSource,
   WireContractV1,
 } from "./foundation.js";
-import type { WireSchemaV1 } from "../types/distributed.js";
+import type {
+  WireSchemaIdentity,
+  WireSchemaV1,
+} from "../types/distributed.js";
 import type {
   AssignmentActivationProof,
   AuthorityEpochRef,
@@ -384,7 +387,8 @@ type AssignmentRecordV2 =
       readonly streamProof: InteractionSettlementStreamProof;
     };
 
-export type AssignmentRecord = AssignmentRecordV1 | AssignmentRecordV2;
+export type AssignmentRecord = WireSchemaIdentity<"AssignmentRecord"> &
+  (AssignmentRecordV1 | AssignmentRecordV2);
 
 export interface AssignmentEntry {
   recordSeq: number;

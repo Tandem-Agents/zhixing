@@ -63,8 +63,8 @@ describe("executor role job runtime production assembly", () => {
 
   it("starts transport before recovery and closes the owner before transport", async () => {
     const order: string[] = [];
-    const worker = {
-      recover: vi.fn(async () => {
+    const owner = {
+      start: vi.fn(async () => {
         order.push("recover");
       }),
       stopAccepting: vi.fn(() => {
@@ -83,7 +83,7 @@ describe("executor role job runtime production assembly", () => {
       }),
     };
     const lifecycle = new ExecutorJobOwnerLifecycle(
-      worker as never,
+      owner as never,
       transport as never,
     );
 
@@ -98,14 +98,14 @@ describe("executor role job runtime production assembly", () => {
       "worker-close",
       "transport-stop",
     ]);
-    expect(worker.close).toHaveBeenCalledTimes(1);
+    expect(owner.close).toHaveBeenCalledTimes(1);
     expect(transport.stop).toHaveBeenCalledTimes(1);
   });
 
   it("rolls back transport and worker when recovery fails", async () => {
     const failure = new Error("recovery failed");
-    const worker = {
-      recover: vi.fn(async () => {
+    const owner = {
+      start: vi.fn(async () => {
         throw failure;
       }),
       stopAccepting: vi.fn(),
@@ -116,21 +116,21 @@ describe("executor role job runtime production assembly", () => {
       stop: vi.fn(async () => undefined),
     };
     const lifecycle = new ExecutorJobOwnerLifecycle(
-      worker as never,
+      owner as never,
       transport as never,
     );
 
     await expect(lifecycle.start()).rejects.toBe(failure);
     expect(lifecycle.closed).toBe(true);
-    expect(worker.stopAccepting).toHaveBeenCalledTimes(1);
-    expect(worker.close).toHaveBeenCalledTimes(1);
+    expect(owner.stopAccepting).toHaveBeenCalledTimes(1);
+    expect(owner.close).toHaveBeenCalledTimes(1);
     expect(transport.stop).toHaveBeenCalledTimes(1);
   });
 
   it("rolls back both owners when transport startup itself fails", async () => {
     const failure = new Error("transport startup failed");
-    const worker = {
-      recover: vi.fn(async () => undefined),
+    const owner = {
+      start: vi.fn(async () => undefined),
       stopAccepting: vi.fn(),
       close: vi.fn(async () => undefined),
     };
@@ -141,14 +141,14 @@ describe("executor role job runtime production assembly", () => {
       stop: vi.fn(async () => undefined),
     };
     const lifecycle = new ExecutorJobOwnerLifecycle(
-      worker as never,
+      owner as never,
       transport as never,
     );
 
     await expect(lifecycle.start()).rejects.toBe(failure);
-    expect(worker.recover).not.toHaveBeenCalled();
-    expect(worker.stopAccepting).toHaveBeenCalledTimes(1);
-    expect(worker.close).toHaveBeenCalledTimes(1);
+    expect(owner.start).not.toHaveBeenCalled();
+    expect(owner.stopAccepting).toHaveBeenCalledTimes(1);
+    expect(owner.close).toHaveBeenCalledTimes(1);
     expect(transport.stop).toHaveBeenCalledTimes(1);
   });
 });

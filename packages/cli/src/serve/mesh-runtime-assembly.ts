@@ -50,11 +50,10 @@ import {
   registerDataPlaneTicketService,
 } from "./data-plane-ticket-mesh.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
-import type {
-  JobAssignmentWorker,
-  JobSubmissionOwner,
-} from "./job-assignment-worker.js";
+import type { JobSubmissionOwner } from "./job-assignment-worker.js";
+import type { ExecutorJobOwner } from "./executor-job-owner.js";
 import { AssignmentOperationsRouter } from "./assignment-operations-router.js";
+import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import {
   JobInteractionMeshClient,
   registerJobInteractionService,
@@ -80,7 +79,7 @@ export interface MeshRuntimeAssemblyOptions {
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
     /** Mesh 只注册 adapter；job worker 由稳定 executor role 组合根持有。 */
     readonly job?: {
-      readonly worker: JobAssignmentWorker;
+      readonly owner: ExecutorJobOwner;
     };
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
@@ -112,13 +111,16 @@ export class MeshRuntimeAssembly {
       { maxArtifactBytes: MAX_ASSIGNMENT_ARTIFACT_BYTES },
     );
     let worker: ConversationAssignmentWorker | undefined;
-    const jobWorker = options.executor?.job?.worker;
+    const jobOwner = options.executor?.job?.owner;
     const executorPort: RunExecutorPort | undefined = roles.has("executor")
       ? {
           dispatch: (...args) => {
             const [envelope] = args;
-            if (envelope.execution === "job" && !options.executor!.job) {
-              throw new TypeError(
+            if (
+              envelope.execution === "job" &&
+              (!jobOwner || !jobOwner.ready)
+            ) {
+              throw new JobInteractionRuntimeUnavailableError(
                 "This executor has no enabled job runtime",
               );
             }
@@ -132,8 +134,8 @@ export class MeshRuntimeAssembly {
                 assignmentId,
               );
             if (jobPhase !== undefined) {
-              if (!jobWorker) {
-                throw new TypeError(
+              if (!jobOwner || !jobOwner.ready) {
+                throw new JobInteractionRuntimeUnavailableError(
                   "Job cancellation has no enabled executor-owned job runtime",
                 );
               }
@@ -142,7 +144,7 @@ export class MeshRuntimeAssembly {
                 fence,
                 context,
               );
-              await jobWorker.cancelAccepted(assignmentId);
+              await jobOwner.cancelAccepted(assignmentId);
               await options.executor!.ledger.finishOwnerCancellation(
                 assignmentId,
                 fence,
@@ -196,8 +198,11 @@ export class MeshRuntimeAssembly {
                 deviceId === options.trust.issuer.deviceId &&
                 this.#peerHasRole(deviceId, "anchor"),
               onDispatchAccepted: (envelope) => {
-                worker?.accept(envelope);
-                jobWorker?.accept(envelope);
+                if (envelope.execution === "conversation") {
+                  worker?.accept(envelope);
+                } else {
+                  jobOwner?.accept(envelope);
+                }
               },
             },
           }
@@ -237,7 +242,7 @@ export class MeshRuntimeAssembly {
       const operations = new AssignmentOperationsRouter({
         ledger: options.executor!.ledger,
         conversation: worker!,
-        ...(jobWorker ? { job: jobWorker } : {}),
+        ...(jobOwner ? { job: jobOwner } : {}),
       });
       const surfacePrincipalFor = (connection: import("@zhixing/mesh").SecureMeshConnection) =>
         `surface:device:${connection.peer.deviceId}`;
@@ -293,7 +298,7 @@ export class MeshRuntimeAssembly {
       if (options.executor!.job) {
         this.#disposers.push(
           registerJobInteractionService(this.services, {
-            answers: jobWorker!,
+            answers: jobOwner!,
             verifier: options.authority.verifier,
             authorizeOwner: (connection) =>
               connection.peer.deviceId === options.trust.issuer.deviceId &&

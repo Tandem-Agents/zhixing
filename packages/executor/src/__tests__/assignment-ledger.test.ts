@@ -5739,7 +5739,7 @@ describe("conversation assignment protocol", () => {
       expiresAt: "2026-07-13T09:01:00.000Z",
     });
     await expect(sealDefaultBundle(harness.ledger)).rejects.toThrow(
-      "before every pending interaction is closed",
+      "before every interaction obligation is complete",
     );
     const corruptBundle = await putRealSealedBundleRef(harness);
     await harness.log.append<AssignmentEntry>([
@@ -5788,7 +5788,7 @@ describe("conversation assignment protocol", () => {
       },
     );
     await expect(sealDefaultBundle(sealHarness.ledger)).rejects.toThrow(
-      "before every finished interaction is mirrored",
+      "before every interaction obligation is complete",
     );
     const corruptBundle = await putRealSealedBundleRef(sealHarness);
     await sealHarness.log.append<AssignmentEntry>([

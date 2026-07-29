@@ -363,6 +363,67 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     await expect(registry.accept(expired)).resolves.toEqual(expired);
   });
 
+  it("keeps observation authorized after execution closes while active uses retire", async () => {
+    const root = await createTempDir("data-plane-ticket-registry-final-observation");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    let active = true;
+    const clock = () => "2026-07-23T00:10:00.000Z";
+    const log = new FileAuthorityCommitLog(
+      path.join(root, "authority"),
+      artifacts,
+      { clock },
+    );
+    const spool = new AssignmentStreamSpool(
+      path.join(root, "spool"),
+      artifacts,
+      { clock },
+    );
+    await spool.open("assignment-fixed", ref);
+    const binding = {
+      ref,
+      executorId: "executor-fixed",
+      ownerKeyId: "owner-fixed",
+    };
+    const registry = new DataPlaneTicketRegistry({
+      log,
+      executorId: "executor-fixed",
+      verifier: identity,
+      assignments: {
+        async dataPlaneBinding(_assignmentId, use) {
+          return active || use === "observe" ? binding : undefined;
+        },
+      },
+      spool,
+      clock,
+    });
+    const ticket = createTicketAt(
+      "run-interact",
+      "ticket:final-observation",
+      "2026-07-23T00:09:00.000Z",
+      "2026-07-23T00:14:00.000Z",
+      identity,
+    );
+    await registry.accept(ticket);
+    active = false;
+
+    await expect(
+      registry.authorizeSurface(
+        ticket.ticketId,
+        "observe",
+        ticket.assignmentId,
+        ticket.surfacePrincipal,
+      ),
+    ).resolves.toMatchObject({ ticket });
+    await expect(
+      registry.authorizeSurface(
+        ticket.ticketId,
+        "interact",
+        ticket.assignmentId,
+        ticket.surfacePrincipal,
+      ),
+    ).rejects.toThrow(/retired/);
+  });
+
   it("keeps retired tickets inactive after a wall-clock rollback and cold replay", async () => {
     const root = await createTempDir("data-plane-ticket-registry-frontier");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));

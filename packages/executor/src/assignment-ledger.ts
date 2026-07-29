@@ -133,6 +133,7 @@ import {
   type AssignmentLedgerValidationState,
   type ExecutorCapabilitySnapshot,
   type FirstPartyInteractionDecision,
+  type DataPlaneTicketUse,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type StreamDataFramePayload,
@@ -1692,6 +1693,7 @@ export class ConversationAssignmentLedger implements
 
   async dataPlaneBinding(
     assignmentId: string,
+    use?: DataPlaneTicketUse,
   ): Promise<
     {
       readonly ref: ExecutionRef;
@@ -1700,21 +1702,22 @@ export class ConversationAssignmentLedger implements
     } | undefined
   > {
     assertIdentifier(assignmentId, "Data-plane assignment id");
-    return this.#select(assignmentId, (state) =>
-      state.received &&
-      (state.phase === "received" || state.phase === "started") &&
-      state.aborts.length === 0 &&
-      !state.supersedeFence
-        ? {
-            ref: snapshot(
-              state.received.body.activation.ref,
-              "Data-plane execution reference",
-            ),
-            executorId: this.#executorId,
-            ownerKeyId: state.received.body.activation.signature.keyId,
-          }
-        : undefined,
-    );
+    return this.#select(assignmentId, (state) => {
+      if (!state.received) return undefined;
+      const acceptsActiveUse =
+        (state.phase === "received" || state.phase === "started") &&
+        state.aborts.length === 0 &&
+        !state.supersedeFence;
+      if (!acceptsActiveUse && use !== "observe") return undefined;
+      return {
+        ref: snapshot(
+          state.received.body.activation.ref,
+          "Data-plane execution reference",
+        ),
+        executorId: this.#executorId,
+        ownerKeyId: state.received.body.activation.signature.keyId,
+      };
+    });
   }
 
   async authorizeOwnerRelay(input: {
@@ -2914,14 +2917,9 @@ export class ConversationAssignmentLedger implements
         if ([...state.sideEffects.values()].some((effect) => !effect.completed)) {
           throw new Error("Assignment cannot seal a bundle with an open side effect");
         }
-        if (state.pendingRequests.size > 0) {
+        if (hasPendingInteractionObligations(state)) {
           throw new Error(
-            "Assignment cannot seal a bundle before every pending interaction is closed",
-          );
-        }
-        if (state.mirroredFinishedCount !== state.finishedOrder.length) {
-          throw new Error(
-            "Assignment cannot seal a bundle before every finished interaction is mirrored",
+            "Assignment cannot seal a bundle before every interaction obligation is complete",
           );
         }
         if (!state.received) {
@@ -3290,10 +3288,7 @@ export class ConversationAssignmentLedger implements
         const openEffect = [...state.sideEffects.values()].some(
           (effect) => !effect.completed,
         );
-        const hasUnmirroredInteraction =
-          state.mirroredFinishedCount !== state.finishedOrder.length ||
-          state.pendingRequests.size > 0;
-        if (openEffect || hasUnmirroredInteraction) {
+        if (openEffect || hasPendingInteractionObligations(state)) {
           if (entries.length === 0) {
             return { kind: "return", value: { ready: false } };
           }
@@ -3357,10 +3352,7 @@ export class ConversationAssignmentLedger implements
         const openEffect = [...state.sideEffects.values()].some(
           (effect) => !effect.completed,
         );
-        const hasUnmirroredInteraction =
-          state.mirroredFinishedCount !== state.finishedOrder.length ||
-          state.pendingRequests.size > 0;
-        if (openEffect || hasUnmirroredInteraction) {
+        if (openEffect || hasPendingInteractionObligations(state)) {
           return { kind: "return", value: undefined };
         }
         const decision = state.started ? "halted" : "not-started";
@@ -3453,8 +3445,7 @@ export class ConversationAssignmentLedger implements
       if (
         state.phase !== "started" ||
         state.aborts.length > 0 ||
-        state.pendingRequests.size > 0 ||
-        state.mirroredFinishedCount !== state.finishedOrder.length ||
+        hasPendingInteractionObligations(state) ||
         [...state.sideEffects.values()].some((effect) => !effect.completed)
       ) {
         throw new Error("Assignment execution failure has no clean started prefix");
@@ -4015,6 +4006,17 @@ function emptyProjection(assignmentId: string): LedgerProjection {
     streamProjectedUpTo: 0,
     lastInteractionStreamSeq: 0,
   };
+}
+
+function hasPendingInteractionObligations(state: LedgerProjection): boolean {
+  const lastFinishedRecordSeq = state.finishedOrder.at(-1)?.recordSeq ?? 0;
+  return (
+    state.pendingRequests.size > 0 ||
+    state.mirroredFinishedCount !== state.finishedOrder.length ||
+    (state.received?.body.activation.ref.execution === "job" &&
+      state.streamProjectionEnabledAfter !== undefined &&
+      state.streamProjectedUpTo < lastFinishedRecordSeq)
+  );
 }
 
 const requiresExecutorResourceReceipt = requiresFormalResourceCoordination;

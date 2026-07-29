@@ -69,11 +69,14 @@ import { describe, expect, it, vi } from "vitest";
 import { setupAuthorityRuntime, type AuthorityRuntimeStack } from "../../setup-delivery.js";
 import {
   ASSIGNMENT_ARTIFACT_SERVICE,
+  RESOURCE_USAGE_SERVICE,
   RUN_EXECUTOR_SERVICE,
   RUN_SUBMISSION_SERVICE,
+  MeshResourceUsageIntake,
   MeshRunExecutorPort,
   MeshRunSubmissionPort,
   createAssignmentArtifactServiceHandler,
+  createResourceUsageMeshServiceHandler,
   createRunExecutorMeshServiceHandler,
   createRunSubmissionMeshServiceHandler,
 } from "../assignment-mesh-adapter.js";
@@ -84,6 +87,7 @@ import {
   createDataPlaneAssignmentStreamAuthorizer,
 } from "../assignment-stream-mesh.js";
 import { ConversationAssignmentWorker } from "../conversation-assignment-worker.js";
+import { ASSIGNMENT_RECORD_V2_WRITES_ENABLED } from "../conversation-executor-ledger.js";
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
@@ -383,6 +387,7 @@ function createExecutorLedger(input: {
     runtimeBindingGuard: () => undefined,
     dataPlaneTickets: input.tickets,
     resources: input.authority.executorResourceGovernor,
+    assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
     clock: () => new Date().toISOString(),
   });
 }
@@ -540,16 +545,31 @@ async function createRemoteConversationExecutor(input: {
     authorizationFor: authorizationForExecutor,
     clock: () => Date.now(),
   });
+  ownerHandlers.set(
+    RESOURCE_USAGE_SERVICE,
+    createResourceUsageMeshServiceHandler({
+      intake: input.authority.resourceGovernor,
+      reporterIdForPeer: (deviceId) =>
+        deviceId === executorDeviceId ? executorId : undefined,
+    }),
+  );
+  const usageIntake = new MeshResourceUsageIntake({ client: executorToOwner });
   const workerErrors: Error[] = [];
   const worker = new ConversationAssignmentWorker({
     ledger,
     runtimeFactory: input.runtimeFactory,
     artifacts,
     submissionFor: () => submission,
-    finalizeUsage: async () => ({
-      reportDigest: DIGEST,
-      upToUsageSeq: 0,
-    }),
+    finalizeUsage: ({ assignmentId }) =>
+      remoteResourceGovernor.flushAssignment(
+        assignmentId,
+        usageIntake,
+        (report) => ({
+          principal: { kind: "usage-reporter", executorId: report.reporterId },
+          requestId: `usage-report:${report.digest}`,
+          deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      ),
     InProcessAssignmentSubmission,
     interactions: input.interactions,
     createStream: (stream) => dataPlane.createStream(stream),
@@ -911,18 +931,9 @@ async function runConversationScenario(
     turn,
     new Promise<never>((_, reject) =>
       setTimeout(() => {
-        for (const error of conversationBackgroundErrors.slice(0, 1)) {
-          if (error instanceof AggregateError) {
-            for (const entry of error.errors) {
-              if (entry instanceof Error && entry.cause instanceof Error) {
-                console.error("S6-DIAG-CAUSE", entry.cause.stack);
-              }
-            }
-          }
-        }
         reject(
           new Error(
-            `S6-DIAG turn did not settle; background=${JSON.stringify(
+            `Conversation turn did not settle; background=${JSON.stringify(
               conversationBackgroundErrors.slice(0, 2).map((error) =>
                 error instanceof AggregateError
                   ? `${error.name}: [${error.errors
@@ -942,6 +953,10 @@ async function runConversationScenario(
               (remote?.workerErrors ?? []).map(
                 (error) => `${error.name}: ${error.message}`,
               ),
+            )}; statuses=${JSON.stringify(statuses)}; finals=${JSON.stringify(
+              finals,
+            )}; frameKinds=${JSON.stringify(
+              firstPartyFrames.map((frame) => frame.payload.kind),
             )}`,
           ),
         );
@@ -1676,6 +1691,9 @@ async function runJobScenario(
   }
 
   await worker.drain();
+  await expect(
+    ledger.interactionStreamProjectionEnabled(unsigned.assignmentId),
+  ).resolves.toBe(true);
   const statusPage = await jobStatus.statusHistory([{
     taskId: "task-s6",
     jobRunId: "job-run-s6",

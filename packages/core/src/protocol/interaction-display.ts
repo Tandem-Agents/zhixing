@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { assertArtifactRef } from "../authority/artifact-references.js";
 import type { ArtifactStore } from "../authority/interfaces.js";
@@ -8,7 +7,7 @@ import {
   type ArtifactRef,
   type InteractionDisplay,
 } from "../contracts/index.js";
-import { canonicalize } from "./canonical.js";
+import { byteDigest, canonicalize } from "./canonical.js";
 
 export interface PreparedInteractionDisplay {
   readonly display: InteractionDisplay;
@@ -72,8 +71,7 @@ export function materializeInteractionDisplayBytes(
   const bytes = Buffer.from(bytesInput);
   if (
     bytes.byteLength !== display.ref.bytes ||
-    `sha256:${createHash("sha256").update(bytes).digest("hex")}` !==
-      display.ref.digest
+    byteDigest(bytes) !== display.ref.digest
   ) {
     throw new TypeError(
       "Interaction display artifact bytes do not match their reference",

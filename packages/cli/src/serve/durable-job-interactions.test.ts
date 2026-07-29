@@ -109,30 +109,30 @@ describe("DurableJobInteractionCoordinator", () => {
   });
 
   it("re-drives the active projection when a durable answer is replayed", async () => {
-    const interactionStreamEvents = vi.fn(async () => []);
     const ledger = {
       requestInteraction: vi.fn(async () => ({
         accepted: true,
         recordSeq: 1,
         display: { title: "Approve?", lines: ["run command"] },
       })),
-      interactionStreamEvents,
       prepareInteractionAnswerFromChannel: vi.fn(async () => ({
         kind: "replayed",
         result: {},
       })),
     } as unknown as ConversationAssignmentLedger;
-    const coordinator = new DurableJobInteractionCoordinator(ledger);
-    await coordinator.lifecycleObserverFor(binding("assignment-a", ledger))
+    const wakeConvergence = vi.fn();
+    const coordinator = new DurableJobInteractionCoordinator(ledger, wakeConvergence);
+    const active = binding("assignment-a", ledger);
+    await coordinator.lifecycleObserverFor(active)
       .beforeRequest(REQUEST);
-    interactionStreamEvents.mockClear();
+    wakeConvergence.mockClear();
 
     await coordinator.deliverGrant({
       assignmentId: "assignment-a",
       interactionRequestId: REQUEST.id,
     } as ChannelInteractionGrant);
 
-    expect(interactionStreamEvents).toHaveBeenCalledWith("assignment-a");
+    expect(wakeConvergence).toHaveBeenCalledWith("assignment-a", active);
   });
 });
 

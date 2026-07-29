@@ -81,6 +81,7 @@ export interface DataPlaneAssignmentBinding {
 export interface DataPlaneAssignmentBindingResolver {
   dataPlaneBinding(
     assignmentId: string,
+    use?: DataPlaneTicketUse,
   ): Promise<DataPlaneAssignmentBinding | undefined>;
 }
 
@@ -377,11 +378,6 @@ export class DataPlaneTicketRegistry {
     const ticket = await this.#operations.run(async () => {
       const projection = await this.#load();
       if (projection.state.retired.has(ticketId)) {
-        console.error(
-          "S6-DIAG-RETIRED",
-          ticketId,
-          JSON.stringify(projection.state.retired.get(ticketId)),
-        );
         throw new Error("Data-plane ticket is retired");
       }
       return projection.state.accepted.get(ticketId)?.ticket;
@@ -520,6 +516,7 @@ export class DataPlaneTicketRegistry {
     assertDataPlaneTicketBinding(accepted.ticket, binding);
     const currentActivation = await this.#assignments.dataPlaneBinding(
       accepted.ticket.assignmentId,
+      use,
     );
     if (
       !currentActivation ||

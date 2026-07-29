@@ -32,7 +32,11 @@ export interface WireContractV1 {
 
 declare const wireSchemaId: unique symbol;
 
-/** 顶层协议 schema 的编译期身份；标记不会进入序列化结果。 */
-export interface WireSchemaV1<SchemaId extends string> extends WireContractV1 {
+/** 顶层协议 schema 的编译期身份；独立于 wire 版本。 */
+export interface WireSchemaIdentity<SchemaId extends string> {
   readonly [wireSchemaId]?: SchemaId;
 }
+
+/** 顶层协议 schema 的编译期身份；标记不会进入序列化结果。 */
+export interface WireSchemaV1<SchemaId extends string>
+  extends WireContractV1, WireSchemaIdentity<SchemaId> {}

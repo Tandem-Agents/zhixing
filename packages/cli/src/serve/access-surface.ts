@@ -63,6 +63,7 @@ import type { ExecutorRoleModule } from "./role-topology.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { JobRuntimePort } from "./job-assignment-worker.js";
+import type { ExecutorJobOwner } from "./executor-job-owner.js";
 import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import type {
   ChannelInteractionCoordinator,
@@ -88,6 +89,7 @@ export interface AssemblyStartupCleanups {
   jobStatus?: StartupCleanupHandle;
   assetMaintenance?: StartupCleanupHandle;
   meshRuntime?: StartupCleanupHandle;
+  jobOwner?: StartupCleanupHandle;
   losslessDataPlane?: StartupCleanupHandle;
   channels?: StartupCleanupHandle;
   deliveryStack?: StartupCleanupHandle;
@@ -164,6 +166,7 @@ export interface AssemblyContext {
   executorDataPlane?: ExecutorDataPlaneRuntime;
   meshBootstrap: MeshRuntimeBootstrap;
   meshRuntime?: MeshRuntimeAssembly;
+  executorJobOwner?: ExecutorJobOwner;
   losslessDataPlane?: LosslessDataPlaneRuntime;
   channelCoordinator?: ChannelInteractionCoordinator;
   jobRelayObligations?: JobRelayObligationDirectory;
@@ -188,6 +191,11 @@ export interface AssemblyContext {
 export interface AccessSurface {
   readonly name: string;
   readonly phase: SurfacePhase;
+  /**
+   * Stable composition units share the ordered setup engine but cannot be
+   * removed by a profile. Optional external adapters remain profile-driven.
+   */
+  readonly mandatory?: boolean;
   setup(ctx: AssemblyContext): Promise<void>;
 }
 
@@ -202,7 +210,10 @@ export async function setupAccessSurfaces(
 ): Promise<void> {
   const enabled = new Set(PROFILES[ctx.profile].surfaces);
   for (const surface of surfaces) {
-    if (surface.phase === phase && enabled.has(surface.name)) {
+    if (
+      surface.phase === phase &&
+      (surface.mandatory === true || enabled.has(surface.name))
+    ) {
       await surface.setup(ctx);
     }
   }

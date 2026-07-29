@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
 import {
   ExecutionStatusHub,
@@ -64,8 +64,9 @@ describe("FirstPartyFinalitySession", () => {
 
     sources.publish(notice(3));
     sources.publish(notice(4));
-    await Promise.resolve();
-    expect(seen).toEqual([1, 2, 3, 4]);
+    await vi.waitFor(() => {
+      expect(seen).toEqual([1, 2, 3, 4]);
+    });
     session.close();
   });
 

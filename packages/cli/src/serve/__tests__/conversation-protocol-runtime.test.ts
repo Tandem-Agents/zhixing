@@ -1383,7 +1383,11 @@ describe("ConversationProtocolRuntime", () => {
     }]);
     expect(snapshotRead).toHaveBeenCalledTimes(1);
     expect(history.notices.some((notice) => notice.state === "cancelled")).toBe(true);
-    expect(history.next).toEqual([]);
+    expect(history.next).toEqual([{
+      conversationId: "conversation-cancel",
+      runId: admitted.runId,
+      afterStatusRevision: 0,
+    }]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("freezes batch cancellation on the surface request id and replays the original batch", async () => {

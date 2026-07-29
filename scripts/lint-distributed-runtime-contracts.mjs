@@ -24,6 +24,7 @@ const frozenSymbols = new Map([
       "Signature",
       "ArtifactRef",
       "WireContractV1",
+      "WireSchemaIdentity",
       "WireSchemaV1",
     ],
   ],
@@ -130,8 +131,26 @@ for (const file of await walk(packagesRoot)) {
     ts.ScriptKind.TS,
   );
   const createHashNames = new Set();
-  let constructsSha256 = false;
-  let hasProtocolDigestPrefix = false;
+  let constructsProtocolByteDigest = false;
+  function containsSha256Hash(current) {
+    let found = false;
+    function visit(candidate) {
+      if (
+        ts.isCallExpression(candidate) &&
+        ts.isIdentifier(candidate.expression) &&
+        createHashNames.has(candidate.expression.text) &&
+        candidate.arguments.length > 0 &&
+        ts.isStringLiteral(candidate.arguments[0]) &&
+        candidate.arguments[0].text === "sha256"
+      ) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(candidate, visit);
+    }
+    visit(current);
+    return found;
+  }
   function inspect(node) {
     if (
       ts.isImportDeclaration(node) &&
@@ -146,26 +165,16 @@ for (const file of await walk(packagesRoot)) {
       }
     }
     if (
-      ts.isCallExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      createHashNames.has(node.expression.text) &&
-      node.arguments.length > 0 &&
-      ts.isStringLiteral(node.arguments[0]) &&
-      node.arguments[0].text === "sha256"
+      ts.isTemplateExpression(node) &&
+      node.head.text === "sha256:" &&
+      node.templateSpans.some((span) => containsSha256Hash(span.expression))
     ) {
-      constructsSha256 = true;
-    }
-    if (
-      ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
-        node.text === "sha256:") ||
-      (ts.isTemplateExpression(node) && node.head.text === "sha256:")
-    ) {
-      hasProtocolDigestPrefix = true;
+      constructsProtocolByteDigest = true;
     }
     ts.forEachChild(node, inspect);
   }
   inspect(tree);
-  if (constructsSha256 && hasProtocolDigestPrefix) {
+  if (constructsProtocolByteDigest) {
     violations.push(
       `${relative(packagesRoot, file)}: protocol B(bytes) digests must use @zhixing/core/protocol byteDigest`,
     );
@@ -241,9 +250,11 @@ for (const [file, { tree }] of parsedFiles) {
   function visit(node) {
     const schemaReference =
       (ts.isTypeReferenceNode(node) &&
-        node.typeName.getText(tree) === "WireSchemaV1") ||
+        (node.typeName.getText(tree) === "WireSchemaV1" ||
+          node.typeName.getText(tree) === "WireSchemaIdentity")) ||
       (ts.isExpressionWithTypeArguments(node) &&
-        node.expression.getText(tree) === "WireSchemaV1");
+        (node.expression.getText(tree) === "WireSchemaV1" ||
+          node.expression.getText(tree) === "WireSchemaIdentity"));
     if (schemaReference && node.typeArguments?.length === 1) {
       const [argument] = node.typeArguments;
       if (
@@ -296,7 +307,7 @@ if (!schemaMap) {
   }
   for (const schemaId of registered.keys()) {
     if (!schemaMarkers.has(schemaId)) {
-      violations.push(`${schemaId}: registered schema is missing its WireSchemaV1 marker`);
+      violations.push(`${schemaId}: registered schema is missing its wire schema marker`);
     }
   }
 }

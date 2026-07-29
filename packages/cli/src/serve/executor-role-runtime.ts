@@ -15,7 +15,10 @@ import {
   setupAuthorityRuntime,
 } from "../setup-delivery.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
-import { createConversationExecutorLedger } from "./conversation-executor-ledger.js";
+import {
+  ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
+  createConversationExecutorLedger,
+} from "./conversation-executor-ledger.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
@@ -29,7 +32,10 @@ import type {
 } from "./role-topology.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
-import { JobAssignmentWorker } from "./job-assignment-worker.js";
+import {
+  ExecutorJobOwner,
+  ExecutorJobOwnerLifecycle,
+} from "./executor-job-owner.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -61,8 +67,8 @@ export async function runExecutorRole(
   const writer = createStdoutWriter();
 
   let mesh: MeshRuntimeAssembly | undefined;
-  let jobWorker: JobAssignmentWorker | undefined;
-  let jobOwner: ExecutorJobOwnerLifecycle | undefined;
+  let jobOwner: ExecutorJobOwner | undefined;
+  let jobOwnerLifecycle: ExecutorJobOwnerLifecycle | undefined;
   let authority: AuthorityRuntimeStack | undefined;
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
   let roleFailure: unknown;
@@ -110,7 +116,7 @@ export async function runExecutorRole(
       Constructor: executor.ConversationAssignmentLedger,
       authority,
       dataPlaneTickets: dataPlane.tickets,
-      assignmentRecordV2Writes: false,
+      assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
       usageFinal: (assignmentId) => {
         if (!mesh) throw new Error("Executor mesh runtime is not ready");
         return mesh.finalizeExecutorUsage(assignmentId);
@@ -122,7 +128,7 @@ export async function runExecutorRole(
       createAgentRuntime: () => runtime.createConversationRuntime(),
     });
     const runtimeFactory = executor.createInProcessRuntimeFactory(role);
-    jobWorker = new JobAssignmentWorker({
+    jobOwner = new ExecutorJobOwner({
       ledger,
       runtime: createAgentJobRuntimePort({
         create: (instruction, confirmationBroker) =>
@@ -156,25 +162,25 @@ export async function runExecutorRole(
         dataPlane,
         InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
         job: {
-          worker: jobWorker,
+          owner: jobOwner,
         },
       },
       secretStore: bootstrap.secretStore,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
-    jobOwner = new ExecutorJobOwnerLifecycle(jobWorker, mesh);
-    await jobOwner.start();
+    jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(jobOwner, mesh);
+    await jobOwnerLifecycle.start();
     await waitForRoleShutdown();
   } catch (error) {
     roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
   try {
-    if (jobOwner && !jobOwner.closed) {
-      await jobOwner.close();
-    } else if (!jobOwner) {
-      jobWorker?.stopAccepting();
-      await jobWorker?.close();
+    if (jobOwnerLifecycle && !jobOwnerLifecycle.closed) {
+      await jobOwnerLifecycle.close();
+    } else if (!jobOwnerLifecycle) {
+      jobOwner?.stopAccepting();
+      await jobOwner?.close();
       await mesh?.stop();
     }
   } catch (error) {
@@ -316,74 +322,7 @@ export class ExecutorRuntimeSubstrate {
   }
 }
 
-export class ExecutorJobOwnerLifecycle {
-  #transportAttempted = false;
-  #started = false;
-  #closed = false;
-
-  constructor(
-    private readonly worker: Pick<
-      JobAssignmentWorker,
-      "recover" | "stopAccepting" | "close"
-    >,
-    private readonly transport: Pick<MeshRuntimeAssembly, "start" | "stop">,
-  ) {}
-
-  get closed(): boolean {
-    return this.#closed;
-  }
-
-  async start(): Promise<void> {
-    if (this.#started || this.#transportAttempted) {
-      throw new Error("Executor job owner lifecycle may start only once");
-    }
-    this.#transportAttempted = true;
-    try {
-      await this.transport.start();
-      await this.worker.recover();
-      this.#started = true;
-    } catch (error) {
-      try {
-        await this.close();
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "Executor job owner startup and rollback both failed",
-        );
-      }
-      throw error;
-    }
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    const failures: unknown[] = [];
-    try {
-      this.worker.stopAccepting();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      await this.worker.close();
-    } catch (error) {
-      failures.push(error);
-    }
-    if (this.#transportAttempted) {
-      try {
-        await this.transport.stop();
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        "Executor job owner shutdown failed",
-      );
-    }
-  }
-}
+export { ExecutorJobOwnerLifecycle } from "./executor-job-owner.js";
 
 function mapMcpTools(hub: McpHub): ToolDefinition[] {
   return hub.catalog().flatMap(({ server, tools }) =>

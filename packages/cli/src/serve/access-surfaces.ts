@@ -18,6 +18,7 @@ import {
   createTokenEstimator,
   parseConversationId,
 } from "@zhixing/core";
+import type { AuthorityCallContext } from "@zhixing/core/contracts";
 import { ConversationManager } from "@zhixing/owner-kernel";
 import {
   createConfirmationBridge,
@@ -48,6 +49,10 @@ import { ZHIXING_CLI_VERSION } from "../version.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { createLosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
+import { ExecutorJobOwner } from "./executor-job-owner.js";
+import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
+import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
+import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -209,6 +214,9 @@ const meshSurface: AccessSurface = {
               dataPlane: ctx.executorDataPlane!,
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule!.InProcessAssignmentSubmission,
+              ...(ctx.executorJobOwner
+                ? { job: { owner: ctx.executorJobOwner } }
+                : {}),
             },
           }
         : {}),
@@ -222,6 +230,7 @@ const meshSurface: AccessSurface = {
     );
     await mesh.start();
     ctx.meshRuntime = mesh;
+    await ctx.executorJobOwner?.start();
     ctx.startupCleanups.meshRuntime = cleanup;
   },
 };
@@ -246,7 +255,14 @@ const losslessDataPlaneSurface: AccessSurface = {
       authority: ctx.authorityRuntime,
       ...(ctx.executorDataPlane ? { local: ctx.executorDataPlane } : {}),
       mesh: () => ctx.meshRuntime,
-      interactions: ctx.durableInteractions,
+      interactions: new AssignmentInteractionRouter({
+        ledger: ctx.conversationProtocol.executorLedger(),
+        conversation: ctx.durableInteractions,
+        ...(ctx.executorJobOwner ? { job: ctx.executorJobOwner } : {}),
+      }),
+      ...(ctx.jobRelayObligations
+        ? { jobRelayObligations: ctx.jobRelayObligations }
+        : {}),
       protocol: ctx.conversationProtocol,
       channels: () => ctx.channels,
       jobStatus: ctx.jobStatus,
@@ -262,6 +278,7 @@ const losslessDataPlaneSurface: AccessSurface = {
     ctx.losslessDataPlane = composition.runtime;
     ctx.channelCoordinator = composition.coordinator;
     ctx.jobRelayObligations = composition.jobRelayObligations;
+    await ctx.executorJobOwner?.start();
   },
 };
 
@@ -518,6 +535,86 @@ const conversationSurface: AccessSurface = {
   },
 };
 
+/**
+ * Mandatory executor-owned job convergence owner.
+ *
+ * The worker is created before optional transports so every adapter receives
+ * the same instance. Readiness is published only after recovery is scheduled.
+ */
+const executorJobOwnerSurface: AccessSurface = {
+  name: "executor-job-owner",
+  phase: "pre-server",
+  mandatory: true,
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("executor")) return;
+    if (
+      !ctx.authorityRuntime ||
+      !ctx.executorDataPlane ||
+      !ctx.executorRoleModule ||
+      !ctx.conversationProtocol ||
+      !ctx.jobRuntime
+    ) {
+      throw new Error(
+        "Executor job owner requires authority, ledger, data-plane, module, and job runtime",
+      );
+    }
+    if (ctx.executorJobOwner) {
+      throw new Error("Executor job owner is already assembled");
+    }
+    if (ctx.enabledRoles.includes("anchor")) {
+      ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
+    }
+    const owner = new ExecutorJobOwner({
+      ledger: ctx.conversationProtocol.executorLedger(),
+      runtime: ctx.jobRuntime,
+      submissionFor: (envelope, signal) => {
+        const local =
+          ctx.jobRelayObligations?.submissionFor(envelope.assignmentId);
+        if (local) return local;
+        if (ctx.enabledRoles.includes("anchor")) {
+          return ctx.jobRelayObligations!.waitForSubmission(
+            envelope.assignmentId,
+            signal,
+          );
+        }
+        const mesh = ctx.meshRuntime;
+        if (mesh) return mesh.submissionForAnchor();
+        throw new JobInteractionRuntimeUnavailableError(
+          "Job assignment owner submission is not registered",
+        );
+      },
+      finalizeUsage: ({ assignmentId }) => {
+        const authority = ctx.authorityRuntime!;
+        if (ctx.enabledRoles.includes("anchor")) {
+          return authority.executorResourceGovernor.flushAssignment(
+            assignmentId,
+            authority.resourceGovernor,
+            (report) =>
+              usageReporterContext(report.reporterId, report.digest),
+          );
+        }
+        const mesh = ctx.meshRuntime;
+        if (!mesh) {
+          throw new JobInteractionRuntimeUnavailableError(
+            "Executor usage transport is not ready",
+          );
+        }
+        return mesh.finalizeExecutorUsage(assignmentId);
+      },
+      InProcessAssignmentSubmission:
+        ctx.executorRoleModule.InProcessAssignmentSubmission,
+      createStream: (input) => ctx.executorDataPlane!.createStream(input),
+      onError: (_assignmentId, error) =>
+        console.warn(chalk.yellow(`[job-worker] ${error.message}`)),
+    });
+    ctx.startupCleanups.jobOwner = ctx.startupRollback.register(
+      "executorJobOwner.close",
+      () => owner.close(),
+    );
+    ctx.executorJobOwner = owner;
+  },
+};
+
 /** 社交通道 —— 先装稳定门面，外部连接异步进入状态机；setup 失败非致命。 */
 function createChannelSurface(credentials: ChannelCredentialProjection): AccessSurface {
   return {
@@ -675,6 +772,7 @@ export function createAccessSurfaces(
     authorityRuntimeSurface,
     executorDataPlaneSurface,
     conversationSurface,
+    executorJobOwnerSurface,
     assetMaintenanceSurface,
     meshSurface,
     losslessDataPlaneSurface,
@@ -683,4 +781,15 @@ export function createAccessSurfaces(
     confirmationBridgeSurface,
     conversationRecoverySurface,
   ];
+}
+
+function usageReporterContext(
+  executorId: string,
+  reportDigest: string,
+): AuthorityCallContext {
+  return {
+    principal: { kind: "usage-reporter", executorId },
+    requestId: `usage-report:${reportDigest}`,
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+  };
 }

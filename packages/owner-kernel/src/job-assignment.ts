@@ -8022,6 +8022,12 @@ export class InProcessJobDispatcher {
       this.#fenceContext(assignmentId, "executor.cancel", fence),
     );
     await this.#onCancelAccepted?.(assignmentId);
+    if (await this.#submitCancellation(assignmentId)) return true;
+    await this.#executor.cancel(
+      assignmentId,
+      fence,
+      this.#fenceContext(assignmentId, "executor.cancel", fence),
+    );
     return this.#submitCancellation(assignmentId);
   }
 

@@ -15,6 +15,7 @@ import {
 } from "@zhixing/owner-kernel";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { JobInteractionAnswerPort } from "./durable-job-interactions.js";
+import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type {
   ConversationChannelSessionInput,
   LosslessDataPlaneRuntime,
@@ -37,7 +38,8 @@ type JobRef = Extract<ExecutionRef, { readonly execution: "job" }>;
 export interface JobChannelObligationJournal
   extends JobOwnerRelayJournal,
     ChannelChallengeOutboxStore,
-    JobStatusSource {}
+    JobStatusSource,
+    JobSubmissionOwner {}
 
 export interface JobRelayOpening {
   readonly assignmentId: string;
@@ -53,6 +55,13 @@ export interface JobRelayOpening {
   readonly answers: JobInteractionAnswerPort;
 }
 
+interface JobSubmissionWaiter {
+  readonly resolve: (owner: JobSubmissionOwner) => void;
+  readonly reject: (error: unknown) => void;
+  readonly signal: AbortSignal;
+  readonly onAbort: () => void;
+}
+
 /**
  * job owner 的开放中继义务目录。目录只保存当前进程的装配引用；义务事实
  * 仍在各 JobJournal，job owner 重建 journal 后必须重新登记，协调器随后
@@ -60,12 +69,21 @@ export interface JobRelayOpening {
  */
 export class JobRelayObligationDirectory {
   readonly #openings = new Map<string, JobRelayOpening>();
+  readonly #waiters = new Map<string, Set<JobSubmissionWaiter>>();
 
   register(opening: JobRelayOpening): () => void {
     if (this.#openings.has(opening.assignmentId)) {
       throw new Error("Job relay assignment is already registered");
     }
     this.#openings.set(opening.assignmentId, opening);
+    const waiters = this.#waiters.get(opening.assignmentId);
+    if (waiters) {
+      this.#waiters.delete(opening.assignmentId);
+      for (const waiter of waiters) {
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+        waiter.resolve(opening.journal);
+      }
+    }
     return once(() => {
       if (this.#openings.get(opening.assignmentId) === opening) {
         this.#openings.delete(opening.assignmentId);
@@ -78,6 +96,38 @@ export class JobRelayObligationDirectory {
       left.assignmentId.localeCompare(right.assignmentId, "en-US"),
     );
   }
+
+  submissionFor(assignmentId: string): JobSubmissionOwner | undefined {
+    return this.#openings.get(assignmentId)?.journal;
+  }
+
+  waitForSubmission(
+    assignmentId: string,
+    signal: AbortSignal,
+  ): Promise<JobSubmissionOwner> {
+    const current = this.submissionFor(assignmentId);
+    if (current) return Promise.resolve(current);
+    if (signal.aborted) return Promise.reject(abortReason(signal));
+    return new Promise<JobSubmissionOwner>((resolve, reject) => {
+      const waiters = this.#waiters.get(assignmentId) ?? new Set();
+      let waiter!: JobSubmissionWaiter;
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        waiters.delete(waiter);
+        if (waiters.size === 0) this.#waiters.delete(assignmentId);
+        reject(abortReason(signal));
+      };
+      waiter = { resolve, reject, signal, onAbort };
+      waiters.add(waiter);
+      this.#waiters.set(assignmentId, waiters);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error("Job submission owner wait was aborted");
 }
 
 export interface ChannelInteractionCoordinatorOptions {
