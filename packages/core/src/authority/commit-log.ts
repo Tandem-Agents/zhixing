@@ -89,7 +89,7 @@ import {
 
 export const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const STREAM_PATTERN = /^(?:control|publish|governor|final-outbox|trust|exposure|delivery|pairing|checkpoint|(?:run|job|transfer|intent|assignment|executor):[^\u0000-\u001f\u007f]{1,480})$/u;
+const STREAM_PATTERN = /^(?:control|publish|governor|final-outbox|trust|exposure|delivery|pairing|checkpoint|(?:run|job|transfer|intent|assignment|executor|session-activity):[^\u0000-\u001f\u007f]{1,480})$/u;
 const LOG_ID_BYTES = 32;
 const RETAINED_REFERENCE_PROJECTION_ID = "authority-retained-references";
 const RETAINED_REFERENCE_PREFIX = "retention/reference/";

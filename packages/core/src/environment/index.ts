@@ -1,4 +1,10 @@
 export {
+  WorkspaceBindingCatalog,
+  WorkspaceBindingCatalogConflictError,
+  WorkspaceBindingCatalogDegradedError,
+  type WorkspaceBindingCatalogOptions,
+} from "./workspace-binding-catalog.js";
+export {
   WorkspaceBindingCancelledError,
   WorkspaceBindingConflictError,
   WorkspaceBindingNotFoundError,
@@ -7,8 +13,14 @@ export {
   localEnvironmentControlSubject,
   normalizeWorkspaceDisplayName,
   normalizeWorkspacePath,
+  validateLocalEnvironmentControl,
   type WorkspaceBindingServiceOptions,
 } from "./workspace-bindings.js";
+export {
+  S7_DURABLE_CONTRACT_LEDGER,
+  type S7DurableContractEntry,
+  type S7RecoveryClass,
+} from "./s7-contract-ledger.js";
 export {
   EnvironmentProbeOwner,
   LocalWorkspaceProbeAdapter,

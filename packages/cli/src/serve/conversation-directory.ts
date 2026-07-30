@@ -96,10 +96,10 @@ export function createConversationDirectory(deps: {
       return ensured;
     },
 
-    async touch(id): Promise<Conversation | null> {
+    async touch(id, at): Promise<Conversation | null> {
       const h = handlesFor(id);
       try {
-        await h.repo.touch(h.localId);
+        await h.repo.touch(h.localId, at);
         return await h.repo.get(h.localId);
       } catch {
         return null;

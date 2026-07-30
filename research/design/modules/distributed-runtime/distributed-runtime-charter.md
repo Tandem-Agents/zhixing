@@ -53,7 +53,7 @@ owner 通用规则（锚点域与本地域同样适用）：控制面智能（�
 
 ```
 contracts（core 内新增模块：run / owner / executor 端口、SessionStatePort /
-GlobalStatePort / EnvironmentPort / WorkspaceBindingAdminPort / WorkspaceBindingMigrationPort / ResourceReservationPort / ControlCompletionPort、
+GlobalStatePort / EnvironmentPort / WorkspaceBindingAdminPort / WorkspaceBindingRecoveryPort / WorkspaceBindingMigrationPort / ResourceReservationPort / ControlCompletionPort、
 协议 schema——纯类型）
    ↑                    ↑
 rpc（新包，自 server 抽出：   mesh（新包：设备身份、配对、认证连接、
@@ -100,7 +100,7 @@ executor = 新包组合（runtime-host + mesh + 执行账本 + 数据面服务�
 
 每类归属逐项写明 AuthorityTransfer、删除、保留与备份的覆盖方式（S0 冻结产物）。注意力窗口与窗口快照恒为 transcript 的派生视图（沿 transcript 架构既有裁决）：派发时冻结的窗口快照仅作不可变执行输入，不升级为长期权威，丢失可由权威事实重建或显式降级。
 
-**权威服务端口**：contracts 冻结 `SessionStatePort`（会话域读写，达对话 owner）、`GlobalStatePort`（全局域读写，达锚点）、本地只读 `EnvironmentPort`（环境事实）与仅目标设备受信管理面装配的 `WorkspaceBindingAdminPort`；后者不经 mesh 暴露。单机接进程内 adapter、跨机接 mesh adapter——完整 runtime 内 memory、task-list、技能使用记录等一切权威访问经端口完成，"完整装配"与"executor 零全局写实例"由此同时成立。所有远程写绑定 `run / assignment / epoch / requestId` 并耐久幂等，run 内写经 assignment 域 staged overlay、随权威提交发布（§6），端口每次调用经 `AuthorityCapability` 验权（§4）；会话附属 lifecycle 由 owner、全局 lifecycle 由锚点在权威提交后触发；离线本地会话物理不装配 GlobalStatePort，对应能力明确不可用。
+**权威服务端口**：contracts 冻结 `SessionStatePort`（会话域读写，达对话 owner）、`GlobalStatePort`（全局域读写，达锚点）、本地只读 `EnvironmentPort`（环境事实），以及仅目标设备受信管理面装配的 `WorkspaceBindingAdminPort` 与独立的 `WorkspaceBindingRecoveryPort`；后二者不经 mesh 暴露，恢复端口只处理已建档 binding 目录不可恢复的本机灾难恢复，不复用普通 CRUD 权限。单机接进程内 adapter、跨机接 mesh adapter——完整 runtime 内 memory、task-list、技能使用记录等一切权威访问经端口完成，"完整装配"与"executor 零全局写实例"由此同时成立。所有远程写绑定 `run / assignment / epoch / requestId` 并耐久幂等，run 内写经 assignment 域 staged overlay、随权威提交发布（§6），端口每次调用经 `AuthorityCapability` 验权（§4）；会话附属 lifecycle 由 owner、全局 lifecycle 由锚点在权威提交后触发；离线本地会话物理不装配 GlobalStatePort，对应能力明确不可用。
 
 **ExecutionManifest**（随派发、不可变）：精确引用会话基线 `baseRevision`、模型与策略配置版本、全部资产版本与环境要求。**CapabilityDescriptor**（executor 发布、带 revision）：只声明 workspace、工具、MCP、协议与凭据**就绪状态**，不含任何秘密。凭据就绪经不含秘密的 `CredentialBindingDescriptor` 表达：稳定 binding id、服务 / 资源 id、可核验的 principal / tenant / scope 指纹与 revision——无法从服务核验时使用用户确认的别名，禁止自动视为跨设备等价；`EnvironmentRequirement / ExecutionManifest` 按 binding 匹配，秘密仅由 executor 本地映射；多 binding 且语义不足时询问用户，不按"ready"猜账号。开跑前原子匹配当前 revision——缺失、失配或能力变化一律拒绝执行，owner 重排或排队；executor 由此可机械证明自己与单机版能力等价。
 
@@ -120,7 +120,7 @@ executor = 新包组合（runtime-host + mesh + 执行账本 + 数据面服务�
 ### §7 环境模型与路由
 
 - **两级端口**：owner 由随输入耐久化的显式环境选择、workscene、任务与会话生成结构化 `EnvironmentRequirement`；主模式与无 workscene 会话不得从进程目录或宿主配置暗取默认 workspace。显式选择只携已认证设备发布的 workspace 引用，真实路径必须先在目标设备本地受信入口转换，不能进入控制请求、日志或 mesh。`ExecutorSelector` 只按版本化 CapabilityDescriptor、在线状态与信任范围选宿主。无匹配 → 排队并向用户说明缺口；多匹配 → 稳定策略（显式绑定优先、近期亲和次之）；语义不明 → 询问用户——路由器不得猜测。
-- **workscene**：使用设备域稳定 workspace 引用（设备 + 引用名）；真实路径只在目标 executor 的本地受信管理面建立、规范化与校验，远端只选择该设备发布的用户命名工作区，产品界面不得暴露 `bindingRef` 或传递真实路径。场景最近活动由会话 owner 的耐久 `SessionMeta.lastActiveAt` 派生为锚点侧可重建投影，不另造 workscene touch 事实源；投影滞后只影响排序，不得阻断进出场景。
+- **workscene**：使用设备域稳定 workspace 引用（设备 + 引用名）；真实路径只在目标 executor 的本地受信管理面建立、规范化与校验，远端只选择该设备发布的用户命名工作区，产品界面不得暴露 `bindingRef` 或传递真实路径。场景最近活动只由会话 owner 在实际推进或删除 `SessionMeta` 的同一耐久提交中产生增量活动事实，再派生为锚点侧可重建投影；不得另造 workscene touch 事实源，也不得在查询热路径扫描全部场景或会话。投影滞后只影响排序，不得阻断进出场景。
 - **落点矩阵**：正式 spec 附"入口 / 操作 × owner / anchor / executor / surface"落点矩阵，覆盖会话命令、管理命令、compact、调度 ephemeral run、task-list、生命周期钩子、编排——每行一个明确落点，不留"经 dispatch 适配"的模糊表述。
 - **advancement 取证**：独立 `EvidenceRequest / EvidenceBundle` 协议——EvidenceRequest 是**签名、短租约、幂等的只读工作信封**：绑定 request / review / 被审 `runId`、当前 ownerEpoch、目标 executor、workspace 引用与 `workspaceBindingRevision`（设备域稳定引用的版本，非文件内容版本）、证据类型与定位摘要、expiry；AdvancementStore 耐久请求状态，executor 以有界幂等 journal 回放同一结果，EvidenceBundle 由 executor 签名并绑定 request digest 与证据摘要。**证据时点由 `observationToken` 承载**：executor 对 locator 范围做一致性观测，bundle 携 observedAt、前后状态指纹与内容摘要——采集中发生变化返回 typed stale，有限重试后保持 deferred；无快照能力的文件系统只承诺"当前状态的可核验观测"，要求历史精确快照时判 unknown / capability-gap，不伪造全局 revision。严格执行 PathGuard 与 binding revision 校验——旧权威 / 过期拒绝，缺失证据不得判通过；由 executor 上受限只读 provider 产证，不复用 run dispatch，不采信执行侧自述。
 - **资源治理**：两级 `ResourceGovernor`——锚点做跨来源（会话 / 推进 / 调度 / 编排）的公平准入、优先级与 provider / model / token / 成本预算，executor 做本机 workload 准入与耐久并发配额；实际本机执行批次再经设备唯一容量裁决器取得可丢物理 permit，`ResourceLease` 不占用或替代该 permit。瞬时容量经独立的短租约公告，不进 CapabilityDescriptor（保 manifest 匹配稳定）。治理身份经 contracts 的 `ResourceReservationPort`：顶层 run / job 持根 reservation，编排子节点用其有界子 reservation，推进准入 / 裁判 / 收场与环境管理 / 探测各用独立 control-class reservation，EvidenceRequest 用所属 review reservation 的 executor 侧子 reservation（不挂已结算 run）。**授权凭证是 ResourceGovernor 签发的可验证 `ResourceLease`**——绑定 reservationId、parentId、workload kind / id / attempt、受众（executor / provider / model）、预算上限、epoch、issuedAt / expiry 与 digest；provider 与 executor 以同一 guard 校验签名、层级额度与剩余额度，每笔消费以 `usageId` 幂等扣账、租约最终只结算一次；耐久 ledger 承载 settle / release / expire / reclaim，进程内 adapter 走同一验证——锚点账本、executor 守门与本地 adapter 分别留在各自组合包。**签发按权威域分域**：锚点域根租约由 anchor governor 签发；本地域根租约由设备本地耐久 governor 签发、绑定 `localDomainId / localOwnerEpoch`——只能消费本机 provider / executor 额度、不得授权全局预算，两域复用同一租约合同、层级扣账与 guard；收编不把本地消费追认为锚点预算；离线新 run / 控制调用 / 取证的双拓扑测试随 S4 / S8 验收。全部入口共用同一治理面；单会话保险丝保留。

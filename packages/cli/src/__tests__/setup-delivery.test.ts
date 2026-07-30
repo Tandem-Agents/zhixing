@@ -175,7 +175,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       bindingRef: binding.bindingRef,
       workspaceBindingRevision: binding.workspaceBindingRevision,
     });
-    const createdScene = await authority.worksceneRegistry!.apply(
+    const createdScene = await authority.globalState!.mutate(
       {
         kind: "workscene-create",
         name: "Workspace Scene",
@@ -184,7 +184,12 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
           bindingRef: binding.bindingRef,
         },
       },
-      { requestId: "create-workspace-scene" },
+      {
+        principal: { kind: "host", component: "setup-delivery-test" },
+        requestId: "create-workspace-scene",
+        authority: { domain: "global", anchorEpoch: authority.anchorEpoch },
+        deadlineAt: "2099-01-01T00:00:00.000Z",
+      },
     );
     if (createdScene.kind !== "workscene-applied") {
       throw new Error("workscene creation did not return an applied scene");
@@ -627,7 +632,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(runtime.workspaceBindingAdmin).toBeDefined();
     expect(runtime.workspaceBindingMigration).toBeDefined();
     expect(runtime.workspaceProbe).toBeDefined();
-    expect(runtime.worksceneRegistry).toBeUndefined();
+    expect(runtime.globalState).toBeUndefined();
     expect(() => runtime.authorityLog).toThrow("Anchor authority role is not enabled");
     expect(() => runtime.authority).toThrow("Anchor authority role is not enabled");
     expect(() => runtime.controlAdmission).toThrow("Anchor authority role is not enabled");
@@ -645,7 +650,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
 
     expect(runtime.authorityLog).toBeDefined();
     expect(runtime.controlAdmission).toBeDefined();
-    expect(runtime.worksceneRegistry).toBeDefined();
+    expect(runtime.globalState).toBeDefined();
     expect(runtime.environment).toBeUndefined();
     expect(runtime.workspaceBindingAdmin).toBeUndefined();
     expect(runtime.workspaceBindingMigration).toBeUndefined();

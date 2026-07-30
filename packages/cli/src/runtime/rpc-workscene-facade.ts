@@ -94,12 +94,19 @@ export class RpcWorksceneFacade {
   /** 取 / 建场景当前对话(宿主原子查询创建),返回全域键 + 场景信息。 */
   async enter(sceneId: string): Promise<WorksceneEnterResult> {
     const client = await this.link.getClient();
-    return client.request<WorksceneEnterResult>("workscene.enter", { sceneId });
+    return client.request<WorksceneEnterResult>("workscene.enter", {
+      sceneId,
+      requestId: `workscene-enter:${randomUUID()}`,
+    });
   }
 
   /** 退出场景——宿主侧仅 touch(最近使用);切回 main 由调用方自己完成。 */
   async exit(sceneId: string, conversationId: string): Promise<void> {
     const client = await this.link.getClient();
-    await client.request("workscene.exit", { sceneId, conversationId });
+    await client.request("workscene.exit", {
+      sceneId,
+      conversationId,
+      requestId: `workscene-exit:${randomUUID()}`,
+    });
   }
 }

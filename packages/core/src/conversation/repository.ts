@@ -228,9 +228,16 @@ export class ConversationRepository implements IConversationRepository {
     return conversation;
   }
 
-  async touch(id: string): Promise<void> {
+  async touch(id: string, at = new Date().toISOString()): Promise<void> {
+    if (
+      !Number.isFinite(Date.parse(at)) ||
+      new Date(at).toISOString() !== at
+    ) {
+      throw new TypeError("Conversation activity time is invalid");
+    }
     const conversation = await this.requireConversation(id);
-    conversation.lastActiveAt = new Date().toISOString();
+    if (Date.parse(at) < Date.parse(conversation.lastActiveAt)) return;
+    conversation.lastActiveAt = at;
     await this.writeMeta(conversation);
   }
 

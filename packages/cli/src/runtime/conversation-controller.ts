@@ -1080,8 +1080,15 @@ export class ConversationController {
     sceneId: string,
     mainTarget: ActiveConversation,
   ): Promise<ExitSceneResult> {
+    const leavingConversationId = this.active.conversationId;
+    if (this.observedConversationId === leavingConversationId) {
+      await this.opts.conversation
+        .unsubscribe(leavingConversationId)
+        .catch(() => {});
+      this.observedConversationId = null;
+    }
     await this.opts.workscene
-      .exit(sceneId, this.active.conversationId)
+      .exit(sceneId, leavingConversationId)
       .catch(() => {});
     // 目标可能从 mainTarget 逐级降级到候选——每次 resume 前把切换窗口
     // 收敛到当次精确目标，不按整个 main 域放行。

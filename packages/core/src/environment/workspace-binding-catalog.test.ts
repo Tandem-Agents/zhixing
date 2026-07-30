@@ -1,0 +1,328 @@
+import path from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it } from "vitest";
+import {
+  AuthorityStorageError,
+  FileArtifactStore,
+  FileAuthorityCommitLog,
+  type AuthorityCommitLog,
+} from "../authority/index.js";
+import type {
+  CapabilityDescriptor,
+  ExecutorVersionInventory,
+  ImmediateRootResourceLease,
+  ResourceLease,
+} from "../contracts/index.js";
+import {
+  protocolDigest,
+  type ProtocolSignatureVerifier,
+  type ProtocolSigner,
+} from "../protocol/index.js";
+import {
+  createDefaultDeviceCapacityPolicy,
+  DefaultDeviceCapacityArbiter,
+  StorageMaintenanceTaskRunner,
+} from "../resources/index.js";
+import {
+  WorkspaceBindingCatalog,
+  WorkspaceBindingCatalogConflictError,
+} from "./workspace-binding-catalog.js";
+import { localEnvironmentControlSubject } from "./workspace-bindings.js";
+
+const NOW = "2026-07-30T00:00:00.000Z";
+const EXPIRY = "2026-07-30T01:00:00.000Z";
+const identity: ProtocolSigner & ProtocolSignatureVerifier = {
+  sign(schemaId, version, payload) {
+    return {
+      alg: "test-digest",
+      keyId: "device-a",
+      sig: protocolDigest(schemaId, version, payload),
+    };
+  },
+  verify(schemaId, version, payload, signature) {
+    expect(signature).toEqual(this.sign(schemaId, version, payload));
+  },
+};
+
+describe("WorkspaceBindingCatalog", () => {
+  it("withdraws a corrupt catalog and resets through one durable generation reservation", async () => {
+    const fixture = await createFixture(corruptLog());
+    await fixture.catalog.initialize();
+    expect(await fixture.catalog.status()).toMatchObject({
+      state: "degraded",
+      catalogGeneration: "catalog-initial",
+    });
+    expect(fixture.published.at(-1)).toEqual([]);
+
+    const control = recoveryControl("reset-a", "catalog-initial");
+    const reservation = await fixture.catalog.beginReset(
+      { expectedCatalogGeneration: "catalog-initial" },
+      control,
+    );
+    expect(reservation).toMatchObject({
+      requestId: control.requestId,
+      previousCatalogGeneration: "catalog-initial",
+      preparedAt: NOW,
+    });
+    const receipt = await fixture.catalog.completeReset(
+      control.requestId,
+      new AbortController().signal,
+    );
+    expect(await fixture.catalog.completeReset(
+      control.requestId,
+      new AbortController().signal,
+    )).toEqual(receipt);
+    expect(await fixture.catalog.status()).toMatchObject({
+      state: "healthy",
+      catalogGeneration: receipt.catalogGeneration,
+    });
+    expect(await fixture.catalog.list(adminControl("list"))).toEqual([]);
+    await expect(
+      fixture.catalog.beginReset(
+        { expectedCatalogGeneration: receipt.catalogGeneration },
+        recoveryControl("reset-healthy", receipt.catalogGeneration),
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceBindingCatalogConflictError);
+  });
+
+  it("recovers a pending committed reset after restart without the original lease", async () => {
+    const fixture = await createFixture(corruptLog());
+    await fixture.catalog.initialize();
+    const control = recoveryControl("reset-restart", "catalog-initial");
+    const reserved = await fixture.catalog.beginReset(
+      { expectedCatalogGeneration: "catalog-initial" },
+      control,
+    );
+    fixture.catalog.stop();
+
+    const restarted = await createFixture(corruptLog(), fixture.root);
+    await restarted.catalog.initialize();
+    await restarted.catalog.recover();
+    expect(await restarted.catalog.status()).toMatchObject({
+      state: "healthy",
+      catalogGeneration: reserved.catalogGeneration,
+    });
+    expect(restarted.published.at(-1)).toEqual([]);
+  });
+
+  it("coalesces the committed reset and rejects competing reservations", async () => {
+    const fixture = await createFixture(corruptLog());
+    await fixture.catalog.initialize();
+    const control = recoveryControl("reset-shared", "catalog-initial");
+    const reservation = await fixture.catalog.beginReset(
+      { expectedCatalogGeneration: "catalog-initial" },
+      control,
+    );
+    await expect(
+      fixture.catalog.beginReset(
+        { expectedCatalogGeneration: "catalog-initial" },
+        recoveryControl("reset-competitor", "catalog-initial"),
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceBindingCatalogConflictError);
+
+    const [first, second] = await Promise.all([
+      fixture.catalog.completeReset(
+        control.requestId,
+        new AbortController().signal,
+      ),
+      fixture.catalog.completeReset(
+        control.requestId,
+        new AbortController().signal,
+      ),
+    ]);
+    expect(second).toEqual(first);
+    expect(first.catalogGeneration).toBe(reservation.catalogGeneration);
+    expect(
+      fixture.createdGenerations.filter(
+        (generation) => generation === reservation.catalogGeneration,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps degraded authority intact when reset confirmation or generation is invalid", async () => {
+    const fixture = await createFixture(corruptLog());
+    await fixture.catalog.initialize();
+    await expect(
+      fixture.catalog.beginReset(
+        { expectedCatalogGeneration: "catalog-other" },
+        recoveryControl("reset-wrong-generation", "catalog-initial"),
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceBindingCatalogConflictError);
+    const mismatched = recoveryControl("reset-confirmation", "catalog-initial");
+    await expect(
+      fixture.catalog.beginReset(
+        { expectedCatalogGeneration: "catalog-initial" },
+        {
+          ...mismatched,
+          confirmation: {
+            ...mismatched.confirmation,
+            requestId: localEnvironmentControlSubject(
+              "device-a",
+              "another-request",
+            ),
+          },
+        },
+      ),
+    ).rejects.toThrow("confirmation");
+    expect(await fixture.catalog.status()).toMatchObject({
+      state: "degraded",
+      catalogGeneration: "catalog-initial",
+    });
+    expect(fixture.published.at(-1)).toEqual([]);
+  });
+});
+
+function corruptLog(): AuthorityCommitLog {
+  return {
+    async readSnapshot() {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "injected catalog corruption",
+      );
+    },
+  } as unknown as AuthorityCommitLog;
+}
+
+async function createFixture(
+  initialLog: AuthorityCommitLog,
+  existingRoot?: string,
+) {
+  const root =
+    existingRoot ?? (await createTempDir("zhixing-workspace-catalog"));
+  const published: CapabilityDescriptor["workspaces"][] = [];
+  const createdGenerations: string[] = [];
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const capacity = new DefaultDeviceCapacityArbiter({
+    policy: createDefaultDeviceCapacityPolicy({
+      memoryBytes: 64 * 1024 * 1024,
+      temporaryBytes: 64 * 1024 * 1024,
+      cpuSlots: 4,
+      ioSlots: 4,
+      networkSlots: 4,
+      readBytesPerSecond: 64 * 1024 * 1024,
+      writeBytesPerSecond: 64 * 1024 * 1024,
+      ioOperationsPerSecond: 10_000,
+      cpuMillisPerSecond: 1_000,
+    }),
+  });
+  const catalog = new WorkspaceBindingCatalog({
+    rootDir: path.join(root, "catalog"),
+    initialLog,
+    createGenerationLog: (generation) => {
+      createdGenerations.push(generation);
+      return new FileAuthorityCommitLog(
+        path.join(root, "logs", generation),
+        artifacts,
+        { clock: () => NOW },
+      );
+    },
+    service: {
+      deviceId: "device-a",
+      executorId: "executor-a",
+      verifier: identity,
+      capacity,
+      migrationRunner: new StorageMaintenanceTaskRunner(),
+      capabilitySnapshot: async (workspaces) => {
+        published.push(workspaces.map((workspace) => ({ ...workspace })));
+        return descriptor(workspaces);
+      },
+      versionInventory: async () => inventory(),
+      clock: () => NOW,
+      bindingRefFactory: () => "workspace-new-generation",
+    },
+    recoveryRunner: new StorageMaintenanceTaskRunner(),
+    clock: () => NOW,
+  });
+  return { root, catalog, published, createdGenerations };
+}
+
+function recoveryControl(requestId: string, catalogGeneration: string) {
+  const request = localEnvironmentControlSubject("device-a", requestId);
+  return {
+    ...adminControl(requestId),
+    confirmation: {
+      kind: "workspace-binding-reset" as const,
+      token: "confirmed-reset-token-0001",
+      requestId: request,
+      catalogGeneration,
+      issuedAt: NOW,
+    },
+  };
+}
+
+function adminControl(requestId: string) {
+  const scoped = localEnvironmentControlSubject("device-a", requestId);
+  return {
+    requestId: scoped,
+    lease: immediateLease(scoped),
+    abort: new AbortController().signal,
+  };
+}
+
+function immediateLease(requestId: string): ImmediateRootResourceLease {
+  const payload: Omit<ResourceLease, "digest" | "signature"> = {
+    v: 1,
+    reservationId: `reservation-${requestId}`,
+    admissionClass: "interactive",
+    workload: { kind: "control", id: requestId, attempt: 1 },
+    scopeBinding: { kind: "control", subject: requestId },
+    audience: { executorId: "executor-a" },
+    budget: { maxCalls: 8 },
+    domain: {
+      kind: "local",
+      localDomainId: "device-a",
+      localGovernorEpoch: 1,
+    },
+    issuedAt: NOW,
+    expiry: EXPIRY,
+  };
+  const withDigest = {
+    ...payload,
+    digest: protocolDigest("ResourceLease", 1, payload),
+  };
+  return {
+    ...withDigest,
+    signature: identity.sign("ResourceLease", 1, withDigest),
+  } as ImmediateRootResourceLease;
+}
+
+function descriptor(
+  workspaces: CapabilityDescriptor["workspaces"],
+): CapabilityDescriptor {
+  return {
+    v: 1,
+    executorId: "executor-a",
+    revision: 1,
+    protocolVersion: "1",
+    workspaces,
+    tools: [],
+    mcpServers: [],
+    credentialBindings: [],
+    evidenceCapabilities: [],
+    at: NOW,
+    signature: identity.sign("CapabilityDescriptor", 1, {}),
+  };
+}
+
+function inventory(): ExecutorVersionInventory {
+  return {
+    v: 1,
+    executorId: "executor-a",
+    inventoryRevision: 1,
+    capabilityRevision: 1,
+    configVersions: {
+      runtimeConfigRev: 1,
+      modelProfileRev: 1,
+      policyRev: 1,
+    },
+    assetVersions: {
+      skillsRev: 1,
+      rubricsRev: 1,
+      promptAssetsRev: 1,
+    },
+    permissionSnapshotHighWater: 1,
+    credentialBindingRevisions: [],
+    at: NOW,
+    signature: identity.sign("ExecutorVersionInventory", 1, {}),
+  };
+}

@@ -1,20 +1,20 @@
 export type { WorkScene, IWorkSceneRegistry } from "./types.js";
-export { FsWorkSceneRegistry } from "./registry.js";
 export {
-  AnchorWorksceneRegistry,
+  legacyWorksceneCutover,
+  markLegacyWorksceneCutover,
+  withLegacyWorksceneWriteFence,
+} from "./registry.js";
+export {
   WorksceneConflictError,
   WorksceneNotFoundError,
   WorksceneRevisionError,
   worksceneImportSetDigest,
-  type AnchorWorksceneRegistryOptions,
   type WorksceneRegistryControlContext,
 } from "./authority-registry.js";
 export {
-  WorksceneActivityProjection,
-  type WorksceneActivityProjectionOptions,
-  type WorksceneActivitySnapshot,
-  type WorksceneSessionActivity,
-} from "./activity-projection.js";
+  AnchorWorksceneGlobalStateAdapter,
+  type AnchorWorksceneGlobalStateAdapterOptions,
+} from "./global-state-adapter.js";
 export {
   getWorkScenesRoot,
   getWorkSceneIndexPath,

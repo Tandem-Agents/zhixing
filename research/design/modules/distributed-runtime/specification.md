@@ -34,7 +34,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 - **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SurfaceAssetGrant`、`SourceFreezeProof`、`PermissionSnapshotLease` 与 `InteractionMirrorBatch`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`、mirror 耐久请求身份 = `D("InteractionMirrorBatch",1,InteractionMirrorBatch 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
 - **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。interaction 审计链固定 `M0 = D("InteractionMirrorSeed",1,{assignmentId})`，每个 `interaction-finished` 按完成次序分配连续 ordinal，并计算 `Mn = D("InteractionMirrorStep",1,{previous:M(n-1),entry:{ordinal,seq,requestId,kind,outcome}})`；`at` 由批次签名绑定但不进入链步（共享 assignment reducer 无需日志 envelope 时间即可复算）。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
 - **内容与引用摘要**：`ArtifactRef.digest`、`ContentAssetRef.digest`、`CheckpointEnvelope.chunks[].digest`、`EvidenceRequest.items[].digestHint`、证据 `contentDigest`、副作用 `resultDigest`、投递回执 `receipt.digest` 与恢复验证 `nonceDigest` 恒为各自所指不可变原始字节的 `B(bytes)`；`PairingOffer.issuer.keyFingerprint = B(规范公钥字节)`。`manifestDigest / snapshotDigest / parentDigest / reportDigest / envelopeDigest / requestDigest` 等引用字段必须等于目标对象按本表得到的摘要，不得对引用字段所在对象再哈希。`FinalOutboxRecord.digest / FinalFrame.digest` 固定引用 `SealedBundle.digest`；`AssetIndexEntry.digest` 固定引用对应资产 artifact 的 `ArtifactRef.digest`。
-- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution / responseBinding 摘要、confirmation `decisionDigest`、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `ConfirmationDecisionDigest = D("ConfirmationDecision",1,{requestId,decision})`，绑定一次确认操作的完整规范决定；`DeliveryResponseBinding = D("DeliveryResponseBinding",1,{itemId,attempt,startedAt})`——transport 响应归属绑定，不含 anchorEpoch、迁居不变；delivery 的 open / resolution 摘要含 epoch、仅用于 uncertain 裁决 fencing，与响应绑定不得混用。`PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
+- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution / responseBinding 摘要、confirmation `decisionDigest`、workspace binding reset `confirmationDigest`、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `ConfirmationDecisionDigest = D("ConfirmationDecision",1,{requestId,decision})`，绑定一次确认操作的完整规范决定；`WorkspaceBindingResetConfirmationDigest = D("WorkspaceBindingResetConfirmation",1,confirmation)`，且 `catalogGeneration = D("WorkspaceBindingCatalogGeneration",1,{previousCatalogGeneration,confirmationDigest})`，confirmation 自身已反绑 requestId，不得再次引入随机量或当前时钟；`DeliveryResponseBinding = D("DeliveryResponseBinding",1,{itemId,attempt,startedAt})`——transport 响应归属绑定，不含 anchorEpoch、迁居不变；delivery 的 open / resolution 摘要含 epoch、仅用于 uncertain 裁决 fencing，与响应绑定不得混用。`PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
 - 引用目标注册表（同名字段按所在 DTO 取对应行，禁止按名字猜）：
 
   | 引用字段 | 唯一目标 |
@@ -587,15 +587,19 @@ interface SessionStatePort {
 type SessionControlMutation =                     // 仅 ControlEnvelope session-write（surface / host）可携
   | { kind: "task-list-op"; op: TaskListOp }
   | { kind: "advancement-event"; event: AdvancementControlEvent }   // host（owner-services）专用
-  | { kind: "session-meta"; patch: { name?: string; sceneId?: string|null; viewLayerState?: string } }  // sceneId = workscene 进出的会话域绑定
+  | { kind: "session-meta"; patch: { name?: string; viewLayerState?: string } }
   | { kind: "window-op"; op: "clear" | "compact" }   // clear = transcript 清空事实 + 窗口归零；compact = owner 就地压缩（经 ControlCompletionPort），产物落 segment-append 与缓存指令
   | { kind: "conversation-delete" };
 type SessionStagedMutation =                      // 仅 assignment 流 staged-mutation（executor run 内）可携
   | { kind: "task-list-op"; op: TaskListOp }
   | { kind: "segment-append"; segment: SegmentRecord };
 type SessionInternalRecord =                      // 提交内务：仅 owner CAS 事务内产生，任何外部入口不可携
-  | { kind: "content-asset-index"; entries: ContentAssetRef[] };
+  | { kind: "content-asset-index"; entries: ContentAssetRef[] }
+  | { kind: "session-activity"; operation: "upsert"|"delete";
+      conversationId: string; sceneId: string; lastActiveAt: IsoTime; sessionRevision: number };
 ```
+
+`SessionMeta.sceneId` 是场景会话的静态身份：只能由 owner 在 `session-create` 时写入，并须与结构化 conversation id 中的 sceneId 全等；缺失表示主会话。创建后任何 `session-write` 均不得清除、替换或迁移该字段，重复创建只可按原 ControlEnvelope 幂等回放。`workscene.enter` 让目标会话 owner 取得或创建该场景会话并返回其身份；各接入面分别维护自己的当前会话指针，`exit` 只切回该接入面的主会话，不存在跨接入面的共享指针 winner。
 
 ### 3.2 GlobalStatePort（达锚点；本地域物理不装配）
 
@@ -624,6 +628,7 @@ type GlobalQuery =
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
   | { kind: "workscene-list" }
+  | { kind: "workscene-get"; sceneId: string }
   | { kind: "config-asset"; domain: ConfigAssetRecord["domain"]; key?: string }
   | { kind: "asset-index"; asset: "skills"|"rubrics"|"prompt-assets" };
 interface AssetIndexEntry { id: string; kind: "skills"|"rubrics"|"prompt-assets"; revision: number; digest: Digest }
@@ -634,6 +639,7 @@ type GlobalReadResult =
   | { kind: "trust-rules"; snapshot: TrustRuleSnapshot }
   | { kind: "schedule-list"; tasks: TaskDefinition[] }   // 仅 user 任务——system 任务经 isInternal 拦在一切用户视图外（既有语义）
   | { kind: "workscene-list"; scenes: WorksceneDto[] }
+  | { kind: "workscene-get"; scene: WorksceneDto | null }
   | { kind: "config-asset"; records: ConfigAssetRecord[] }
   | { kind: "asset-index"; entries: AssetIndexEntry[] };
 
@@ -731,12 +737,17 @@ interface WorksceneStagedReceipt {                // 只证明 workscene 写已�
   kind: "global-mutation-staged"; requestId: string; recordSeq: number; mutationDigest: Digest }
 type GlobalStagedMutationResult<M extends GlobalStagedMutation> =
   M extends WorksceneWriteMutation ? WorksceneStagedReceipt : { revision: number };
+interface GlobalAuthorityFence { domain: "global"; anchorEpoch: number }
+type GlobalReadCallContext = AuthorityCallContext & {
+  authority: GlobalAuthorityFence };
 type GlobalControlCallContext = AuthorityCallContext & {
-  principal: Extract<AuthorityPrincipal, { kind: "surface"|"host" }> };
+  principal: Extract<AuthorityPrincipal, { kind: "surface"|"host" }>;
+  authority: GlobalAuthorityFence };
 type GlobalStagedCallContext = AuthorityCallContext & {
-  principal: Extract<AuthorityPrincipal, { kind: "assignment" }> };
+  principal: Extract<AuthorityPrincipal, { kind: "assignment" }>;
+  authority: GlobalAuthorityFence };
 interface GlobalStatePort {
-  read(q: GlobalQuery, ctx: AuthorityCallContext): Promise<GlobalReadResult>;
+  read(q: GlobalQuery, ctx: GlobalReadCallContext): Promise<GlobalReadResult>;
   mutate<M extends GlobalControlMutation>(
     m: M, ctx: GlobalControlCallContext): Promise<GlobalControlMutationResult<M>>;
   mutate<M extends GlobalStagedMutation>(
@@ -746,7 +757,11 @@ interface GlobalStatePort {
 
 workscene control 写只有在权威提交完成后才返回 `WorksceneAppliedResult`：create / rename / set-workdir 返回完整 `WorksceneDto`，delete 返回被删对象身份与删除前对象 revision；其中外层 `revision` 是本次全局域提交 revision，`scene.revision` 是后续对象级 CAS 基线。assignment 的 workscene staged 写只返回 `WorksceneStagedReceipt`，其中 `recordSeq` 只属于本 assignment 的 overlay，既不是全局 revision，也不得作为“已应用”结果展示；其他 staged 域维持既有结果合同，不因本单元改型。到第 28 单元启用 workscene staged 发布时，owner 必须把最终 `WorksceneAppliedResult` 固化在对应 `publish-decision` 的 granted outcome 中，再按该结果幂等物化和呈现；不得在 overlay 阶段预报权威 revision。两条 workscene 路径的同一 requestId 全等重放分别返回原 applied 结果或原 receipt，响应丢失恢复不得重新生成 sceneId、重新查列表猜对象或把活动投影 revision 当管理 revision。
 
-`WorksceneDto.lastActiveAt` 的唯一来源是该场景全部会话 `SessionMeta.lastActiveAt` 的最大值（无会话时取 `createdAt`）：正常 turn 沿既有会话提交更新活动时间；enter 更新进入后的场景会话，exit 在解除绑定前更新离开的场景会话。锚点维护的 per-scene 最近活动索引只是可由会话权威事实重建的查询投影，不属于 `WorksceneWriteMutation`，不得接受 surface / executor 自报时间。投影变化不推进 workscene 管理 `revision`，不得制造 rename / set-workdir / delete 的虚假 CAS 冲突；投影缺失、落后或重建只影响排序，不得阻断 enter / exit，也不得形成第二个 touch 事实源。
+workscene 的对象读取与列表读取分别只经 `GlobalStatePort.read` 的 `workscene-get` / `workscene-list`，不得以全量列表代替 exact get。正常 create / rename / set-workdir / delete 与 host-only 的 legacy import / activate / abandon 均只经 `GlobalStatePort.mutate`、统一 guard 和同一 adapter 进入唯一 registry / reducer。该 adapter 是锚点 workscene 的唯一读写装配：内部组合新 `AnchorWorksceneRegistry` 与 `WorksceneActivityProjection`，在 list / get 结果中合并投影的 `lastActiveAt`；同时装配唯一删除投影维护者，分页读取待投影删除、调用注入的场景会话 / 记忆清理端口、耐久确认完成，并在启动时恢复未完成义务。目录、RPC、环境派生、本地产品入口和迁移器不得持有或直接调用新 registry、投影或删除维护状态。
+
+旧 `FsWorkSceneRegistry` 只允许在 cutover 前由兼容桥持有：旧写 fence 内它仍是唯一旧写面，并作为迁移源供 adapter 驱动导入；cutover 后立即冻结为只读备份。该例外不允许扩展为新业务读写面，也不豁免新 `AnchorWorksceneRegistry` 必须只在 `GlobalStatePort` adapter 内可达的结构约束。
+
+`WorksceneDto.lastActiveAt` 的唯一来源是该场景全部会话 `SessionMeta.lastActiveAt` 的最大值（无会话时取 `createdAt`）：正常 turn 沿既有会话提交更新活动时间；enter 更新进入后的场景会话，exit 在解除绑定前更新离开的场景会话。每次活动时间变化或会话删除都由 owner 在同一权威 `CommitEnvelope` 中产生 `session-activity` 内部记录；该记录与实际 `SessionMeta` revision、conversationId 和静态 sceneId 反绑，任何 surface / executor 均不可构造。锚点的 per-scene 最近活动索引只消费这条耐久增量事实链，按 AuthorityCommitLog checkpoint 追尾并保存逐会话贡献；索引缺失或损坏时从同一日志按固定页、受 storage governor 治理重建，禁止在 list/get、turn、enter 或 exit 热路径枚举 workscene 与 ConversationRepository。该索引不是 `WorksceneWriteMutation`，变化不推进 workscene 管理 `revision`；投影缺失、落后或重建只影响排序，不得阻断 enter / exit，也不得形成第二个 touch 事实源。
 
 联合按现有入口收录；新的资产 / 配置域随其模块的 S 节点增加分支（联合演进走 `v` 升版）。guidance、渠道注册、模型档位 / 策略等无远程调用方的非秘密期望配置统一经 `ConfigAssetRecord`（域键控、版本化）承载：锚点本地配置 adapter（文件 + reload → `config-asset-write`，host principal）写入权威，经既有资产同步机制分发——不逐域造 bespoke schema；该族随 §七权威覆盖表的"全局状态与期望配置"行参与转移 / 删除 / 保留 / 备份。
 
@@ -754,15 +769,15 @@ workscene control 写只有在权威提交完成后才返回 `WorksceneAppliedRe
 
 | kind | 允许 principal | 附加守卫 |
 |---|---|---|
-| session: task-list-op / session-meta / window-op | surface；host | busy 时 window-op 拒绝；expectedRevision |
+| session: task-list-op / session-meta / window-op | surface；host | session-meta 不含 sceneId；busy 时 window-op 拒绝；expectedRevision |
 | session: advancement-event | host（owner-services） | — |
 | session: conversation-delete | surface | busy 拒绝；连带 §七会话状态行删除语义 |
 | session staged: task-list-op / segment-append | assignment（capability 绑本对话） | 经 staged overlay，永不直接落权威 |
 | global: memory-append / schedule-* / trust-* / skill-* / rubric-* / workscene CRUD | surface；host | update / set-state / delete 类分支携 revision CAS（字段必填，类型层保证） |
-| global: workscene-import-legacy / workscene-activate-device-registry | host | 仅迁移器；不透明源快照 token、导入集合与 cutover 状态全等校验；surface / assignment 恒拒 |
+| global: workscene-import-legacy / workscene-activate-device-registry / workscene-abandon-legacy-import | host | 仅迁移器；不透明源快照 token、导入集合与 cutover 状态全等校验；surface / assignment 恒拒 |
 | global: config-asset-write | host（锚点配置 adapter） | revision 单调 |
 | global staged: 全部 | assignment | 经 staged overlay；capability.methods 含对应方法；job scope 只收 JobGlobalStagedMutation（类型层无 turn-origin 投递） |
-| internal: content-asset-index | 无入口——仅 owner CAS 事务内产生 | 出现在任何 mutate 调用即拒绝 |
+| internal: content-asset-index / session-activity | 无入口——仅 owner CAS 事务内产生 | 出现在任何 mutate 调用即拒绝；session-activity 与同 envelope 的 SessionMeta revision、conversationId、sceneId 全等 |
 
 ### 3.2b DeferredGlobalIntentPort（随对话 owner 装配——流跟对话走，端口跟流走）
 
@@ -798,6 +813,24 @@ interface LocalWorkspaceBinding {
 interface LocalEnvironmentControlContext {
   requestId: string; lease: ImmediateRootResourceLease; abort: AbortSignal;
 }
+interface LocalEnvironmentRecoveryContext extends LocalEnvironmentControlContext {
+  confirmation: { kind: "workspace-binding-reset"; token: string;
+    requestId: string; catalogGeneration: string; issuedAt: IsoTime };  // 仅本机受信确认面在展示完整影响后签发，单次使用并反绑请求与目录世代
+}
+interface WorkspaceBindingResetReceipt {
+  requestId: string; confirmationDigest: Digest;
+  previousCatalogGeneration: string; catalogGeneration: string;
+  logId: string; capabilityRevision: number; preparedAt: IsoTime;
+}
+interface WorkspaceBindingResetReservation {
+  requestId: string; confirmationDigest: Digest;
+  previousCatalogGeneration: string; catalogGeneration: string;
+}
+interface WorkspaceBindingRootManifest {
+  catalogGeneration: string; logId: string; capabilityRevision: number;
+  state: "healthy"|"degraded";
+  pendingReset?: WorkspaceBindingResetReservation;
+}
 type WorkspaceBindingPatch =
   | { displayName: string; absolutePath?: string }
   | { absolutePath: string; displayName?: string };
@@ -810,6 +843,12 @@ interface WorkspaceBindingAdminPort {             // 只在目标设备本地受
   remove(bindingRef: string, expectedRevision: number,
          control: LocalEnvironmentControlContext): Promise<void>;
 }
+interface WorkspaceBindingRecoveryPort {          // 独立最小权限恢复面；只在目标设备本地装配，不复用普通 CRUD 权限
+  status(): Promise<{ state: "healthy"|"degraded"; catalogGeneration: string; reason?: string }>;
+  reset(input: { expectedCatalogGeneration: string },
+        control: LocalEnvironmentRecoveryContext): Promise<{
+          catalogGeneration: string; capabilityRevision: number }>;
+}
 interface WorkspaceBindingMigrationPort {         // 仅本机 host 兼容桥装配；与 AdminPort 共用同一日志、reducer 与命名规则
   importLegacy(input: { migrationId: string; sourceSnapshotToken: string;
     displayName: string; absolutePath: string }, abort: AbortSignal): Promise<LocalWorkspaceBinding>;
@@ -818,7 +857,19 @@ interface WorkspaceBindingMigrationPort {         // 仅本机 host 兼容桥装
 
 `WorkspaceBindingAdminPort` 是真实路径进入系统的唯一入口：目标设备生成不透明且稳定的 `bindingRef`，用户明确命名可公开的 `displayName`，不得从路径或目录名静默推导公开名称；同一设备内规范化后的 `displayName` 必须唯一，重名稳定拒绝，产品选择器因而不依赖展示内部 id。`revision` 是本地管理 CAS，任一字段变化均推进；`workspaceBindingRevision` 只在规范路径等执行语义变化时推进，单纯改名只推进本地记录与 CapabilityDescriptor revision，不得使在途 manifest 失效。远端只经签名 `CapabilityDescriptor.workspaces` 看见设备、`displayName`、`bindingRef` 与 workspaceBindingRevision，产品界面展示设备名和工作区名称，不展示内部引用。目标设备尚无可用 binding 时，远端只提示用户到该设备授权工作区，不得降级为上传路径或远程建绑。
 
-binding 目录以设备本地 append-only 事实日志为唯一权威，索引与能力快照均可由日志重建。首次建档必须有显式 `uninitialized → established` 标记：只有从未建立时可初始化为空；已建立后日志缺失、截断或损坏一律 fail-closed 并使环境能力 degraded，不得静默回到空目录。删除只追加 tombstone，已使用的 `bindingRef` 永不重新绑定另一条路径；活动事实与 tombstone 随该设备 binding 目录全生命周期保留，不进入 §4.5 的普通终态幂等回收窗。投影损坏从日志重建，权威日志不可恢复时只能经用户明确的本地重置与重新授权建立新目录。
+binding 目录以设备本地 append-only 事实日志为唯一业务权威，索引与能力快照均可由日志重建。一个独立校验、copy-on-write 原子替换的 `WorkspaceBindingRootManifest` 只保存当前日志引用、目录状态及灾难恢复的唯一 `pendingReset` 预约，不保存 binding 业务内容；日志 header 与每条记录均反绑该 generation。`pendingReset` 只允许在 degraded 根上存在，不推进 capability revision，也不表示 reset 已提交。首次建档必须以该 manifest 完成显式 `uninitialized → established`：只有 manifest 从未建立时可初始化为空；已建立后日志缺失、截断或损坏一律 fail-closed 并把 manifest 状态推进为 degraded，不得静默回到空目录。删除只追加 tombstone，已使用的 `bindingRef` 永不重新绑定另一条路径；活动事实与 tombstone 随该设备 binding 目录全生命周期保留，不进入 §4.5 的普通终态幂等回收窗。投影损坏从日志重建。
+
+权威日志不可恢复时只能经独立 `WorkspaceBindingRecoveryPort` 灾难恢复：本机受信确认面先展示将撤回全部 workspace 能力、旧引用失效且需逐项重新授权的影响，再签发单次、高熵且反绑 `requestId` 与当前目录世代的 confirmation。处理端先校验 control 与 confirmation 的 requestId 全等，再按 §1.2 计算 confirmationDigest 和唯一目标 `catalogGeneration`；目标身份不得引入随机量、当前时钟或第二套 token 消费事实。
+
+每个目录世代使用以 generation 为键的不可变目录保存日志、header 与根元数据；新日志的唯一 `catalog-reset` genesis 是**准备回执**，记录旧 / 新 generation、requestId、confirmationDigest、logId、旧根 `capabilityRevision + 1` 与 `preparedAt`。该回执耐久只表示目标世代已经准备，不表示 reset 已提交；“临时 manifest fsync → 原子替换 → 目录 fsync”完成唯一根指针切换才是线性化点。旧世代日志与根只读保留，每个 reset 回执的 `previousCatalogGeneration` 构成可验证的世代链。
+
+reset 按一次耐久所有权转移收敛。交互阶段持 `environment-control` 根 lease，完成 confirmation、世代与竞争分支校验，并以 workload-interactive 物理准入原子写入唯一 `pendingReset`；预约落盘是该 lease 可以结算、释放的边界，之后调用方只等待或重放结果，不再持有业务 lease。若目标 generation 等于当前根，或从当前根沿各世代 genesis 的 `previousCatalogGeneration` 可验证地追溯到目标，则直接返回该目标回执中的原结果；若当前 degraded 根已有预约，只有 requestId、confirmationDigest、旧/新 generation 全等的同一目标可以加入等待，任何不同请求或目标稳定冲突；若不存在预约，只有目标回执和目标目录均不存在，且 expected generation、confirmation generation 与当前根全等时，才允许建立预约。
+
+预约耐久后的所有文件步骤只由 `workspace-catalog-reset` storage maintenance single-flight 执行：规范 workKey 绑定设备 binding 目录身份与 previous / target generation，固定 `obligation:"committed"`；该义务阻塞 binding 写入与 readiness，按 `urgency:"foreground"` 取得新的本机 permit，不得复用、恢复或重新签发原 `environment-control` lease。目标日志与准备回执必须先写入同 generation 的临时文件并 fsync，再以原子 rename + 目录 fsync 发布；崩溃遗留的未发布临时文件可由持有同一预约的任务清理后重建，已发布目标的坏 header / 回执则 fail-closed。完成目标日志发布后，以原子根切换提交 reset，并在新根中清除预约。目标是当前链之外且未被当前预约持有的孤儿准备世代、竞争分支或过期请求时稳定冲突；预约、已发布目标回执的缺字段、身份错绑或链断裂一律 fail-closed。不同 request 复用同一 confirmation 必因 request 绑定不等而拒绝，不得另建 spent-token 集合。崩溃发生在预约、临时日志写入、目标发布或根切换任一点，恢复任务只会继续同一目标世代，不得创建第二恢复日志或第二可写根。
+
+`pendingReset` 一经根 manifest 耐久，即从调用请求转化为设备本地必须前滚的恢复义务：预约本身证明确认已经验真，后续恢复不得再次依赖调用方保存或提交 confirmation。凡装配 binding 目录的拓扑都必须无条件创建唯一 reset recovery owner；它在启动时先于 AdminPort、新 reset 写入口和正常能力发布读取根 manifest，发现预约即向 storage governor 重建上述 committed single-flight 并申请新的 storage-foreground permit。恢复完成后才开放写入口；原调用方随后只按 requestId / confirmationDigest 回放结果。预约或已发布目标无法验真时保持 fail-closed，仅开放只读 `status` 与诊断，禁止清空预约、接受新 confirmation 或回退到旧 workspace 快照。启动恢复 owner 缺失、可选装配、依赖原 lease 或晚于业务入口均属于结构性失败。
+
+新根携回执中确定且严格前进的 capability revision 和空 workspaces 待发布事实，能力发布器只按当前 manifest 幂等重驱，网络失败不得复活旧快照。新 bindingRef 必须反绑新世代且永不复用旧值；不得从旧路径、旧快照或场景引用自动重建映射。reset 只在根 manifest 耐久后返回；旧 assignment 继续按引用失配排队，用户通过普通 AdminPort 重新授权并显式更新 workscene 引用后，才重新发布能力并唤醒匹配队列。错世代、healthy 状态、无效 confirmation、远程入口或部分安装一律零生效；崩溃恢复只能得到旧 degraded 根或完整新根。
 
 单机与“目标 executor 就是当前设备”的产品入口保持既有一步式体验：用户仍可在场景创建、改目录或主模式选择工作区时直接给出本机路径，入口在本机调用 `WorkspaceBindingAdminPort` 就地创建或复用 binding，再只把设备域引用提交给锚点；路径不得经过 RPC / mesh。新 binding 的公开名称取用户在同一交互中明确给出的名称；仅给出场景名与路径时，可以该用户已确认的场景名作为建议工作区名并在原确认面一并展示，禁止额外制造强制的“先建工作区、再选工作区”步骤。跨设备入口仍只能选择目标设备已经发布的工作区。主模式和无 workscene 会话的输入必须由 first-party 接入面显式携 `ExplicitEnvironmentSelection`；未选择即按无 workspace 执行，禁止从 `process.cwd`、启动参数或宿主配置暗取路径。跨设备时模型和远端接入面只使用设备名与工作区名称；若用户需要新路径，只能唤起目标设备本地的选择 / 授权动作，不得让原始路径先进入普通输入再补转换。
 
@@ -862,6 +913,7 @@ interface ResourceReservationPort {
 type StorageMaintenanceKind =
   | "log-migration"
   | "workspace-migration"
+  | "workspace-catalog-reset"
   | "workscene-cleanup"
   | "projection-flush" | "projection-rebuild" | "projection-scrub" | "projection-compaction"
   | "lifecycle-reconcile" | "asset-gc";
@@ -942,7 +994,7 @@ interface StorageMaintenanceGovernorPort {
 
 `maxWaitMs` 只限制一次物理准入尝试：workload 取外层操作剩余期限与策略上限的较小值，storage 取任务所有者的有界调度片；它不代替 single-flight 等待者各自的调用期限。期限内暂时无容量返回 `backpressured`，本次设备状态或策略下不能靠等待容纳 atomic 返回 `capacity-gap`；传给 storage governor 的 `AbortSignal` 是共享任务信号，只在进程停机或全部 `pre-commit` 等待者离开时取消，单个等待者不得直接传入。`admissionId` 每次进程内申请唯一，仅用于容量占用和诊断；arbiter 不解释业务任务身份、不做语义去重。
 
-single-flight 归维护义务的唯一任务所有者：AuthorityCommitLog 拥有 log migration，workscene 兼容桥迁移器拥有 workspace migration，锚点 workscene owner 拥有已提交删除的系统目录收敛，DurableProjectionIndex 拥有 projection 四类任务，ArtifactLifecycleIndex 拥有 lifecycle reconcile，锚点资产维护器拥有 asset GC。`workKey = D("StorageMaintenanceWork",1,{kind,resourceId,inputIdentity})`：日志使用逻辑日志身份与源格式，workspace 迁移使用设备、migrationId 与冻结 sourceSnapshotToken，workscene cleanup 使用 sceneId 与删除 revision，投影使用 projectionId 与 frozen manifest/checkpoint，生命周期使用 ArtifactStore 身份与源 checkpoint 集，GC 使用 ArtifactStore 身份与候选游标/release 前沿。键覆盖“复核义务 → 申请容量 → 执行 → 步骤计量 → permit 释放”的完整生命周期；新输入必须生成新键，禁止用资源名吞并不同代工作。
+single-flight 归维护义务的唯一任务所有者：AuthorityCommitLog 拥有 log migration，workscene 兼容桥迁移器拥有 workspace migration，binding reset recovery owner 拥有 workspace catalog reset，锚点 workscene owner 拥有已提交删除的系统目录收敛，DurableProjectionIndex 拥有 projection 四类任务，ArtifactLifecycleIndex 拥有 lifecycle reconcile，锚点资产维护器拥有 asset GC。`workKey = D("StorageMaintenanceWork",1,{kind,resourceId,inputIdentity})`：日志使用逻辑日志身份与源格式，workspace 迁移使用设备、migrationId 与冻结 sourceSnapshotToken，workspace catalog reset 使用设备 binding 目录身份及 previous / target generation，workscene cleanup 使用 sceneId 与删除 revision，投影使用 projectionId 与 frozen manifest/checkpoint，生命周期使用 ArtifactStore 身份与源 checkpoint 集，GC 使用 ArtifactStore 身份与候选游标/release 前沿。键覆盖“复核义务 → 申请容量 → 执行 → 步骤计量 → permit 释放”的完整生命周期；新输入必须生成新键，禁止用资源名吞并不同代工作。
 
 并发同键等待者加入同一个完成 promise，不另行申请 permit；每个等待者以自身调用期限等待，完成后再核对自己的提交前提。单个等待者超时或取消只解除自身等待，并向该调用返回对应结果；仅当全部等待者离开且义务仍为 `pre-commit` 时，任务所有者才触发共享任务信号并在安全检查点取消。进程停机可在安全检查点暂停任何任务；`committed` 来源无论失败或零等待者都不得清除，下次启动或触发仍从耐久事实重试。
 
@@ -1077,9 +1129,9 @@ interface ResourceUsageIntake {
 
 每个权威域持**唯一** append-only 提交日志；同进程共存的域共用同一物理文件、按 `stream` 区分：
 
-- 锚点进程（全局域 + 其默认 owner 会话域）：`control`、`run:<convId>`、`job:<taskId>`、`publish`、`transfer:<transferId>`、`governor`、`final-outbox`、`trust`、`exposure`、`delivery`、`pairing`、`intent:<convId>`（收编导入的离线意向，复核期落此）、`checkpoint`。
+- 锚点进程（全局域 + 其默认 owner 会话域）：`control`、`run:<convId>`、`session-activity:<convId>`、`job:<taskId>`、`publish`、`transfer:<transferId>`、`governor`、`final-outbox`、`trust`、`exposure`、`delivery`、`pairing`、`intent:<convId>`（收编导入的离线意向，复核期落此）、`checkpoint`。
 - executor 设备域：`assignment:<asgId>`、本地 governor 的 `governor`。
-- 本地域 owner（executor 进程内）：`control`、`run:<local convId>`、`publish`、`final-outbox`、`intent:<convId>`（离线全局意向——落 owner 域随对话收编转移，经 DeferredGlobalIntentPort 读写，§3.2b）、`transfer:<transferId>`（收编源端：freeze 证明与导出进度的耐久落点）。
+- 本地域 owner（executor 进程内）：`control`、`run:<local convId>`、`session-activity:<local convId>`、`publish`、`final-outbox`、`intent:<convId>`（离线全局意向——落 owner 域随对话收编转移，经 DeferredGlobalIntentPort 读写，§3.2b）、`transfer:<transferId>`（收编源端：freeze 证明与导出进度的耐久落点）。
 - 转移目标端（锚点收编 / 迁居目标）：staging 导入进度同落自己的 `transfer:<transferId>` 流——双端各持耐久 transfer 流，任意中断按各自日志重入。
 
 ```ts
@@ -1088,8 +1140,11 @@ interface LogicalRecord  { stream: string;
                            body: ControlRecord | RunJournalRecord | JobJournalRecord | AssignmentEntry
                                | PublishRecord | TransferRecord | GovernorRecord | FinalOutboxRecord
                                | TrustStreamRecord | ExposureStreamRecord | DeliveryStreamRecord
-                               | IntentStreamRecord | PairingStreamRecord | CheckpointStreamRecord }   // assignment 流恒经 AssignmentEntry 携 recordSeq（§4.3）
+                               | IntentStreamRecord | PairingStreamRecord | CheckpointStreamRecord
+                               | SessionInternalRecord }   // assignment 流恒经 AssignmentEntry 携 recordSeq（§4.3）
 ```
+
+`SessionInternalRecord` 的 `session-activity` 分支只允许写入与其 `conversationId` 全等的 `session-activity:<conversationId>` 流，并与实际推进或删除对应 `SessionMeta` 的记录处于同一 `CommitEnvelope`；不得由外部入口单独追加。codec 必须严格拒绝未知字段、错误 stream、conversation/scene 身份错绑、非严格前进的 session revision 和非法时间。该流属于会话权威事实，架构归属为随对话 owner 转移；第 25 单元只需把它注册为会话域可转移记录并验证 codec、stream 与转移目录分类，本地域 owner / `AuthorityTransfer` 的生产启用和端到端转移验收仍归第 30～32 单元。锚点活动投影只消费并可从此流重建，不得反过来成为会话或 workscene 的第二业务事实源。`content-asset-index` 分支维持既有 run 流合同，不因本次扩展改流。
 
 **原子性规则**：一次逻辑提交 = 一条 CommitEnvelope、一次 fsync——"applied + 权威变更决定 + 响应"与"CAS 权威件全集"各自恒在同一 envelope 内落定。transcript 分片、conversation meta、内容资产索引、终态推送、mutation 物化、HomeTrustRecord 快照全部是**可由 log 幂等重建的投影**（重启按 lsn 重放未投影段）。坏尾 envelope 截断隔离。带 state 字段的记录（final-outbox / exposure / intent）以**追加新记录**表达状态推进，投影按键 latest-wins。
 
@@ -1639,7 +1694,7 @@ type ControlRequest =
   | { t: "cancel-batch"; conversationId: string; ownerEpoch: number;     // 批量取消的唯一线性化点：候选集在权威 apply 时刻由 owner 以
       response?: { replyTarget: DeliveryTargetDto } }                    // 取消控制面的单源谓词冻结；结果携逐 run 终态；重放消费 applied 原批次、零重新枚举。
                                                                          // response 为渠道回执绑定——空批次时同一权威决定产出恰一条 control-response 投递 item
-  | { t: "session-create"; requestedName?: string; sceneId?: string }    // 路由到目标 owner（默认锚点；离线本地新会话就地）
+  | { t: "session-create"; requestedName?: string; sceneId?: string }    // 路由到目标 owner；sceneId 仅在创建时写入并与结构化 conversation id 反绑，创建后不可改
   | { t: "session-write"; conversationId: string; mutation: SessionControlMutation; ownerEpoch: number; domainRevision: number }
   | { t: "global-write";  mutation: GlobalControlMutation; anchorEpoch: number; domainRevision: number }
   | { t: "job-run";    taskId: string; anchorEpoch: number }             // 手动立即执行：稳定请求身份不含接收事实；完整 ingress 取首次耐久 ControlRecord.received 并写 admitted
@@ -2192,7 +2247,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | task-list 读写 | session.taskList / taskListUpdate；task_list 工具；/task /tasklist | run 内 staged / run 外 owner session-write | — | 对话 owner |
 | 推进闭环（确认 / 修订 / 取消 / 详情） | session.advancement*；/advancement | 对话 owner 控制面 | owner（Completion / ReviewerPort） | owner advancement 日志 |
 | workscene 注册管理 | workscene.create / rename / setWorkdir / delete；workscene_* 工具 | 锚点（global-write workscene-*；run 内工具经 staged；probe 取得 control lease） | 目录探测在目标 executor（经 WorkspaceProbeRequest + EnvironmentControlGrant，§5.3） | 锚点注册表 |
-| workscene 进出 | workscene.enter / exit；/work /exit | 对话 owner（session-meta sceneId） | owner 就地 | owner（会话域绑定） |
+| workscene 进出 | workscene.enter / exit；/work /exit | owner 取得/创建 sceneId 静态绑定的场景会话；接入面维护自身当前会话指针 | owner 就地；exit 仅切接入面指针 | owner 持场景会话；指针为各接入面连接态 |
 | schedule CRUD | schedule.create / update / delete；schedule 工具 | 锚点（global-write）；run 内 staged、离线 DeferredGlobalIntent | — | 锚点 TaskDefinition |
 | schedule 手动触发 / 中止 | schedule.run / abortRun；schedule 工具 run | 锚点 job 逻辑流（job-run / job-cancel） | executor（job run） | 锚点 fence CAS |
 | schedule 定时触发 | 锚点时钟 | 锚点 job 逻辑流 | executor（job run） | 锚点 fence CAS |
@@ -2201,7 +2256,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 技能管理 | skill.setState / archive；save_skill / admit_skill 工具；/skills | 锚点（global-write skill-*；run 内 staged create / update / admit） | — | 锚点资产库 |
 | 技能使用记录 | 运行时内部 | run 内 staged（skill-usage） | — | 锚点资产库 |
 | 段切换与段元数据 | 段钩子（beforeSummarize / afterSummarize / beforeNewSegmentStart） | run 内 staged（segment-append；flush 见 memory 写行） | executor 运行时 | 对话 owner |
-| workspace binding 本地管理 | 目标设备本地 CLI / 桌面设置 | 设备本地受信入口 + environment-control 根 lease；不经 mesh / RPC | `WorkspaceBindingAdminPort` + 本机容量准入 | executor 本地 binding 事实日志 |
+| workspace binding 本地管理与灾难恢复 | 目标设备本地 CLI / 桌面设置 | 普通 CRUD 经 `WorkspaceBindingAdminPort`；不可恢复日志 reset 经独立 `WorkspaceBindingRecoveryPort`、明确确认与世代 fence；均不经 mesh / RPC | 本机容量准入；reset 原子换代并撤回能力，重新授权仍走 AdminPort | executor 本地 binding 事实日志 |
 | 运行体生命周期钩子（onWindowOpen / onBeforeRun / onAfterRun / onWindowClose） | 运行时装配 | 只读注入，不落权威；写类动作必经端口走对应行 | executor / owner 各自 | —（约束行） |
 | 取证 | owner 发起 EvidenceRequest | AdvancementStore 请求态 + lease guard | 目标 executor（只读 provider） | owner 采信入 review |
 | 编排子节点 | 执行侧 runtime Task 工具 | 随父 run（子 lease） | executor 进程内 | 随父 run bundle |
@@ -2267,10 +2322,10 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 - **装配与所有权**：arbiter 与 storage governor 先于任何存储打开或迁移，在每个设备运行时各创建一次并注入全部日志、投影、生命周期索引、资产维护器和 workspace 兼容桥迁移器；环境管理与 probe handler 复用同一 arbiter。未启用相关存储的角色不创建任务；可选 mesh、channel 或 surface 组件不得成为权威维护义务的唯一任务所有者。
 - **容量与工作量**：`occupancy` 的显式工作内存预留、临时空间和槽位在 permit 存续期间独占；`quantum` 的读写字节和 I/O 次数按单调时间补充并在操作前按上界预扣。每类任务按 §3.4b 声明可安全检查点化的 atomic 上界，页、segment、GC、scrub 与重建按此拆步；arbiter 只授予可容纳 atomic 的批次，受治理资源包装器在副作用前核对本步骤累计请求额度，越界零副作用拒绝并封闭 permit。CPU 竞争由公平队列、并发槽位和有界检查点治理，不以进程级采样冒充任务实际用量。迁移在改写源文件前取得完整临时空间；`capacity-gap` 与暂时性 `backpressured` 必须分型，前者不得永久排队。
 - **分类与准入**：`obligation` 只表示任务能否随未提交候选一起消失：仅服务该候选、取消后无需续做为 `pre-commit`；由 WAL、manifest、checkpoint、写意图或生命周期事实独立证明、调用消失后仍须完成为 `committed`。`urgency` 只由阻塞关系决定：当前用户或权威操作等待它为 `foreground`，恢复可用性但无当前调用等待为 `recovery`，其余预防与回收为 `background`；不得由外部输入或调用方偏好提级。每个等待者独立接收 `backpressured` / `capacity-gap` / `cancelled`，不得借取消终结共享 committed 义务；候选业务写依赖的维护未完成时权威日志零追加。
-- **耐久真相与恢复**：governor 队列、permit 和统计都是可丢运行态，且不得依赖受治理存储。flush/compaction 义务来自 manifest/frozen batch，重建/scrub 来自 checkpoint 与日志，格式迁移来自格式状态与迁移凭据，workspace 迁移来自 migrationId、sourceSnapshotToken 及 open / activated / abandoned 终态，生命周期与 GC 来自权威记录、索引游标、候选和写意图；§3.4b 列明的任务所有者按规范 workKey 管理 single-flight、等待者和重试，governor 与 arbiter 均不另写业务事实。`committed` 工作预算不足时不得改写既有业务结果，重启后从上述来源恢复并重新申请 permit；workload 同样不恢复旧 permit，只在恢复执行前重新申请。
+- **耐久真相与恢复**：governor 队列、permit 和统计都是可丢运行态，且不得依赖受治理存储。flush/compaction 义务来自 manifest/frozen batch，重建/scrub 来自 checkpoint 与日志，格式迁移来自格式状态与迁移凭据，workspace 迁移来自 migrationId、sourceSnapshotToken 及 open / activated / abandoned 终态，workspace catalog reset 来自根 manifest 的 `pendingReset`，生命周期与 GC 来自权威记录、索引游标、候选和写意图；§3.4b 列明的任务所有者按规范 workKey 管理 single-flight、等待者和重试，governor 与 arbiter 均不另写业务事实。`committed` 工作预算不足时不得改写既有业务结果，重启后从上述来源恢复并重新申请 permit；workload 同样不恢复旧 permit，只在恢复执行前重新申请。
 - **公平与锁序**：设备 arbiter 为七个 class 都保留正份额，其中 workload-interactive 与阻塞当前操作的 storage-foreground 具有低延迟保证，workload-advancement / scheduler / orchestration、storage-recovery / background 在持续满载下也不得永久饥饿；空闲容量可借用但不得侵占保留份额。等待容量时不得持 authority、manifest、projection 或 ArtifactStore 锁；取得 permit 后按固定锁序复核前提，失效即零副作用释放。阻塞写入的恢复任务按 storage-foreground 重新准入，禁止长期停留在低优先级队列扩大 fail-closed 窗口。
 - **停机与诊断**：停止时拒绝新申请；未开始批次由下次启动从耐久来源重建，在途批次只在安全检查点结束并释放 permit。诊断按 maintenance kind 与七类容量 class 暴露排队、在途、预留占用、I/O 额度、设备级 CPU/RSS 压力、估算欠账、最老等待、阻塞维度、`capacity-gap`、越界请求和最近错误；仅在影响 readiness 或用户操作时提供可行动的存储繁忙/空间不足提示。
-- **落点与验收**：AuthorityCommitLog 迁移，workscene 兼容桥的分页 workspace migration，DurableProjectionIndex 的 flush/rebuild/scrub/compaction（含最近活动与 binding 目录投影），ArtifactLifecycleIndex 的恢复/对账及 surface 资产 GC 全部经 storage governor；binding CRUD 与 Environment probe 作为 interactive control workload 取得 lease，并让实际本机步骤与全部 workload / maintenance 共用唯一 arbiter。验收覆盖耐久 workload 配额与可丢物理 permit 分离、恢复前重新申请、崩溃残留计入磁盘余量、双平面预留不超卖、零 lease / permit 旁路、`atomic ≤ granted ≤ preferred`、资源操作前预扣与越界零副作用、类型化背压/容量缺口/取消、提交前零追加、提交后欠账恢复、规范 workKey、同键加入与逐等待者取消、失败后耐久重试、重启/停机、锁序、满载公平、阻塞恢复提级及临时空间不足保持源文件。
+- **落点与验收**：AuthorityCommitLog 迁移，workscene 兼容桥的分页 workspace migration，workspace catalog reset 的预约后前滚，DurableProjectionIndex 的 flush/rebuild/scrub/compaction（含最近活动与 binding 目录投影），ArtifactLifecycleIndex 的恢复/对账及 surface 资产 GC 全部经 storage governor；binding CRUD、reset 预约前交互阶段与 Environment probe 作为 interactive control workload 取得 lease，reset 预约后必须释放该 lease 并让实际文件步骤以 committed storage maintenance 身份和全部 workload / maintenance 共用唯一 arbiter。验收覆盖耐久 workload 配额与可丢物理 permit 分离、恢复前重新申请、崩溃残留计入磁盘余量、双平面预留不超卖、零 lease / permit 旁路、`atomic ≤ granted ≤ preferred`、资源操作前预扣与越界零副作用、类型化背压/容量缺口/取消、提交前零追加、提交后欠账恢复、规范 workKey、同键加入与逐等待者取消、失败后耐久重试、重启/停机、锁序、满载公平、阻塞恢复提级及临时空间不足保持源文件。
 
 ## 十一、产品旅程脚本（零术语，文案为验收锚）
 
@@ -2300,7 +2355,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | 15 | 集成：staged 写后 run 失败 / 取消 / uncertain | 外界零可见、零残留；崩溃注入下 publish 可续 |
 | 16 | 对抗：越权方法 / 资源 / 过期 capability；五类 principal 各自越权（含非 owner 设备伪造 owner-control、伪造 usage-reporter）；owner-relay 错 authority / lease；渠道 token / grant 伪签、错 challenge / responder / route / assignment / interaction / displayDigest、改 decision、过期与跨域重放；EnvironmentControlGrant / ResourceLease 越 request / executor / 设备 / binding / control subject / 时限，channel 伪造显式环境选择 | 全部 unauthorized，进程内同 guard；token / grant 审计记录可独立验签，重复 callback 只回放原结果；无效环境请求零文件系统访问 |
 | 17 | 集成 + 崩溃注入：重投 / 重连 / 权威重启；派发候选签发后、artifact fsync 前后、原子 `reserve+assigned`（含 permissionLeaseDigest）fsync 前后、ActivationProof 生成前后、executor `control-lease-renewed / received` fsync 前后、send / ACK / rejection / conflict response / owner conflict 裁决单 envelope fsync 前后 / containment cancel 发送、executor proof fsync、owner contained / resolution 原子提交与吊销发送前后 / fence 各点，含 ControlLease 旧代 / 错绑定 / 断线未续 / 时钟偏差与墙钟回拨、OwnerControlGrant 错设备 / scope / requestId / 请求正文、重启后同 payload 重签、两类 conflict 响应丢失重试、fence 先到、查询后抢跑与重复 dispatch；system-job 候选与 `reserve+running+SystemJobFence` 同样逐点注入 | 原子提交前零有效凭证、零 reservation，孤立 artifact 可 GC；提交后 ActivationPayload 可由日志确定性重建且权限租约实例不漂移，重签可幂等接受；owner-control 只接受当前派发 owner 对确切请求的授权，控制与权限租约按本地单调 deadline 失效且不可因回拨复活；conflict 两分支重启后分别收敛到唯一 ACK 或唯一 uncertain+止损事实，派发/ControlLease 立即停止；cancel 无 proof 时义务保留且有界退避，not-started 时 contained+resolution+superseded+租约终结全有或全无并安全重派，halted 时唯一 contained、停止 cancel 且仍待用户裁决；零半提交，ConflictProof 永不授权重派；received 前 executor 本地凭证无效、received 后离线可验；reserve 与归属事实恒同时存在并由 assigned/system fence 重驱；至多一次准入、零无日志执行、零双活、零凭证 / 租约泄漏 |
-| 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind（含 binding CRUD 与 Environment probe）；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决。设备容量面另跑全部 workload / maintenance kind（含 workspace migration）的零 permit 旁路、七类并发、workload 恢复重取、atomic/granted/step/actual、背压/容量缺口/取消、规范 workKey、同键加入与逐等待者取消、提交前后、崩溃残留、重启/停机、锁序及满载公平矩阵 | 未激活 workload 凭证全部拒绝，其余拒绝或幂等；重试不重复计费、租约单次结算；executor 断开 owner 后仍凭已耐久 proof 正常验权；queued 取消只写与业务终态同 envelope 的 workload dequeue tombstone、零租约终结动作，无水位只 reclaim。ResourceLease 与物理 permit 生命周期分离，workload/storage 共用唯一设备容量真相且并发不超卖；逐步预留保证正常 actual 不超 granted，违约可诊断，不能容纳 atomic 时返回 capacity-gap 而不永久排队；提交前不足零追加，提交后欠账可恢复；单个等待者取消不使同键调用提前继续或丢失 committed 义务，七类均不永久饥饿 |
+| 18 | 对抗：无 lease / 伪造 / 复用 / 超额 / 重复 usageId / 伪报 admissionClass / 越 delegation 上限的子租约 / 全 workload kind（含 binding CRUD、reset 预约前交互阶段与 Environment probe）；仅有签名候选、assignment reserve 无同 envelope assigned、capId 未列入 assigned、权限租约摘要未激活或以同 assignment 的另一张有效租约替换、executor 无 received activation / 伪造 activation、system-job reserve 无匹配 SystemJobFence；queued 取消与 uncertain 无水位裁决。设备容量面另跑全部 workload / maintenance kind（含 workspace migration 与 workspace-catalog-reset）的零 permit 旁路、七类并发、workload 恢复重取、atomic/granted/step/actual、背压/容量缺口/取消、规范 workKey、同键加入与逐等待者取消、提交前后、崩溃残留、重启/停机、锁序及满载公平矩阵 | 未激活 workload 凭证全部拒绝，其余拒绝或幂等；重试不重复计费、租约单次结算；executor 断开 owner 后仍凭已耐久 proof 正常验权；queued 取消只写与业务终态同 envelope 的 workload dequeue tombstone、零租约终结动作，无水位只 reclaim。ResourceLease 与物理 permit 生命周期分离，workload/storage 共用唯一设备容量真相且并发不超卖；reset 预约后原 lease 缺失或过期不阻断 committed storage 前滚；逐步预留保证正常 actual 不超 granted，违约可诊断，不能容纳 atomic 时返回 capacity-gap 而不永久排队；提交前不足零追加，提交后欠账可恢复；单个等待者取消不使同键调用提前继续或丢失 committed 义务，七类均不永久饥饿 |
 
 S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 schema/行为矩阵与 corruption vector；mirror 与 stream 两条水位按全部先后顺序及各耐久边界做崩溃注入；恢复补投必须经真实 owner relay 落 `closed+cursor` 后 ACK；索引重建、取消竞争、owner-fence 请求/响应丢失、audit settlement 双版本和资源饱和均须证明义务不丢、不重复且不越过终态。同一有限 conformance 套件驱动 executor-only、single-machine、anchor+executor 的真实组合根，证明每个适用拓扑恰一 job owner、恢复先于接流量、可选 adapter 不改变 owner 生命周期；所有故障注入必须证明实际命中。
 
@@ -2313,7 +2368,7 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 | transcript-persistence-and-attention-window-architecture.md | S3 | TranscriptRunRecord（现 RunRecord）增 runId 唯一键；接受协议改 SealedBundle 整包；windowCompact 明确为幂等缓存指令；写路径经对话 owner 的 AuthorityCommitLog，分片文件成为可由 log 幂等重建的投影（append-only 与"原文唯一权威"性质不变，原子性单元下移一层） |
 | 同上 | S7 | MemoryFlush 挂点改为权威提交后经 GlobalStatePort 发布 |
 | scheduler-architecture.md（及实现 spec） | S3/S7 | TaskDefinition / JobOccurrence 拆分（definition 分 user 白名单 Dto / system host-only 两族；webhook endpoint 整体 SecretRef；origin / interactionResponder / createdInTurn / system 恒锚点生成）、JobCommitFence（绑 deliveryPlanDigest）、派发用去敏 JobExecutionInstruction、system 任务与投递恒锚点本地执行、job uncertain 暂停语义、定时 job 的 owner-relay / channel challenge outbox、手动触发走 job-run 控制请求；S7 随 scheduler 接入 JobJournal 删除其对 IDeliveryPipeline.enqueue 的直接生产依赖（在此之前旧投递路径保持行为不变），job 结果此后只由锚点 CAS 写 delivery 流 |
-| workscene-management-architecture.md | S7 | workdir 升级为稳定设备域引用 `{deviceId, bindingRef}`；主模式 / 无场景输入以耐久 `ExplicitEnvironmentSelection` 显式选 workspace，不暗取宿主路径；每次派发由 ExecutionManifest 冻结当次 `workspaceBindingRevision`（不回写 workscene）；目录探测在目标 executor（WorkspaceProbeRequest / EnvironmentControlGrant / ResourceLease 协议）；enter / exit 定性为会话域绑定（session-meta sceneId），注册管理留锚点；旧目录迁移以 open→activated｜abandoned 终态收束 |
+| workscene-management-architecture.md | S7 | workdir 升级为稳定设备域引用 `{deviceId, bindingRef}`；主模式 / 无场景输入以耐久 `ExplicitEnvironmentSelection` 显式选 workspace，不暗取宿主路径；每次派发由 ExecutionManifest 冻结当次 `workspaceBindingRevision`（不回写 workscene）；目录探测在目标 executor（WorkspaceProbeRequest / EnvironmentControlGrant / ResourceLease 协议）；场景会话的 sceneId 在 session-create 时静态绑定，enter 由 owner 取得/创建会话，exit 只切各接入面自己的连接态指针，注册管理留锚点；旧目录迁移以 open→activated｜abandoned 终态收束 |
 | task-advancement-rubric-architecture.md | S7 | EvidenceRequest / EvidenceBundle / ObservationToken 替换第一级取证实现描述；裁判经 ControlCompletionPort；review 子 lease；AdvancementSnapshot / AdvancementControlEvent 类型化落点；契约确认拆"快照采用（会话域）/ 库沉淀（全局写，离线转 DeferredGlobalIntent）"两半——confirmDraft 的 saveOwn / updateOwn 归后者。**类型合同（目标形态在此冻结，S7 按此改型）**：`ConfirmedRubricSnapshot` 的库身份改判别 `source: { kind: "library"; rubricId; rubricVersion } \| { kind: "local-draft"; snapshotId: Ulid; contentDigest: Digest }`——现类型（advancement/types.ts:143）强制 rubricId / rubricVersion，离线确认在类型层不可实现；local-draft 分支使契约不依赖全局 id 即可生效，收编沉淀成功后经修订 link 回库 |
 | unified-core-and-access-surfaces.md | S1 | 宿主内部拓扑更新为角色装配（五包抽取） |
 | message-outbox.md（顺序层） | S3 | delivery-origin OutboxEntry 必带 delivery 流既有 idempotencyKey（其他非耐久消息仍可选），只承接 per-target 顺序，不再承担权威去重 / 生命周期；同 item 重驱复用原键 |
@@ -2404,7 +2459,7 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 | 22（S6） | 数据面票据与确认/止损 | 落 observe/interact/abort 票据的签发、续期、吊销；interaction 下行投影、第一方直连 allow-once、owner 失联 abort 与旁观只读 | 越权 observer、非原始 surface 应答、票据过期/吊销、交互取消竞态、断线重连和 abort 证明测试通过；pending 权威只在 assignment 流 |
 | 23（S6） | surface 内容资产数据面 | 回填并实现 surface 预上传授权、下载授权、断点续传、生命周期治理；control 写与 committed 内容都执行依赖闭包在场检查；以 §4.1 耐久派生索引承载幂等、到期与 releaseId；按 §3.4b/§10.1 在 core 建共享容量原语、在 CLI 组合根装配，并接入 core 存储维护及 executor/owner-services/orchestrator/runtime-host 的实际本机 workload 批次，本单元一次启用双平面唯一容量裁决 | S6 回填验收全部通过；缺件不得 control apply/CAS；上传中断可续、重复 digest 去重、越 requestId/assignment 拒绝；十万历史下正常启动只追尾、定点回放与 GC 固定分页，索引落后/损坏可从权威日志重建；存储维护与 workload 零旁路、双平面预留不超卖、越界请求零副作用，预算不足时提交前零追加、提交后欠账可恢复续跑，满载无饥饿且诊断可核对 |
 | 24（S6） | 中继、渠道确认与最终性整合 | 落 job owner-relay 水位、conversation/job challenge outbox、token/grant、status/final 合并和路径降级；闭合 job interaction 的 mirror/stream 双证据、统一恢复义务、稳定 owner 装配与 owner-fence 重驱；最后启用无损数据面 | 不变量 7、13、16 对应集成/对抗用例全绿；prepared/cursor/ACK/发送及 interaction 收敛各耐久边界可恢复；全部 job 拓扑 owner 唯一且恢复有界；渠道与第一方确认能力等价；S6 到此启用 |
-| 25（S7） | Environment 与 workscene 接入 | 落本地 `WorkspaceBindingAdminPort`、EnvironmentPort、WorkspaceProbeRequest/Grant、随 input 耐久化的显式环境选择、设备域 workspace 引用及 revision 复验；远端只选已发布工作区；workscene 注册留锚点、进出留会话 owner，最近活动由 SessionMeta 派生；binding 目录、probe 幂等与旧注册表迁移均有可恢复事实和有界终态 | 主模式 / 无场景显式 workspace 与无 workspace 两形态、本地建绑与远端 raw-path/建绑拒绝、目录五态、路径不出 wire、错设备/绑定/revision、远程 setWorkdir、binding / probe / 迁移崩溃恢复及保留、资源治理零旁路、最近活动投影重建、离线能力矩阵和现有 workscene 回归通过 |
+| 25（S7） | Environment 与 workscene 接入 | 落本地 `WorkspaceBindingAdminPort`、独立 `WorkspaceBindingRecoveryPort`、EnvironmentPort、WorkspaceProbeRequest/Grant、随 input 耐久化的显式环境选择、设备域 workspace 引用及 revision 复验；远端只选已发布工作区；workscene 注册留锚点、场景会话静态归 owner、接入面各持自身指针，最近活动由同会话权威提交的 `session-activity` 增量事实派生；binding 目录、probe 幂等与旧注册表迁移均有可恢复事实和有界终态 | 主模式 / 无场景显式 workspace 与无 workspace 两形态、本地建绑与远端 raw-path/建绑拒绝、目录五态、路径不出 wire、错设备/绑定/revision、远程 setWorkdir、binding 普通恢复与不可恢复日志换代、probe / 迁移崩溃恢复及保留、资源治理零旁路、最近活动增量投影与受治理重建、离线能力矩阵和现有 workscene 回归通过 |
 | 26（S7） | scheduler 与 job 产品闭环 | 将 scheduler CRUD/run/cancel/定时触发、冻结 delivery plan、渠道来源与维护通知接入 JobJournal/Delivery 流；随后排空旧队列残留投递，删除公开生产入口与旧 DeliveryPipeline/queue 组件——旧投递生产路径至此整体退役 | 任务定义/occurrence 隔离、线程路由保真、job uncertain 暂停/missed 汇总、投递唯一性、system 不进用户视图测试通过；job `run-interact` 生产入口以耐久触发来源机械保证手动 assignment 只用 surface ticket、定时 occurrence 只用 channel grant，签发端与 executor guard 同谓词，跨路径请求零签发、零终态追加；旧生产入口与旧队列零残留调用 |
 | 27（S7） | advancement 与独立取证 | 接入 AdvancementSnapshot/Event、ControlCompletion/Reviewer、review 子租约、EvidenceRequest/Bundle/ObservationToken、local-draft rubric 快照 | stale 有限重试、缺证据不判通过、PathGuard/binding revision、离线契约立即生效与全局沉淀延后测试通过 |
 | 28（S7） | 编排、memory、技能与生命周期接入 | 编排节点使用父 run 子租约；memory/skill/workscene/task-list/segment 的所有写按落点矩阵进入 staged/control；workscene staged 只返回 overlay receipt，最终 applied 结果随 publish-decision 耐久回传；写类 lifecycle 只在权威提交后触发 | 各模块既有测试 + 双拓扑 adapter 套件通过；workscene staged 零伪 applied、响应丢失不重生 sceneId/revision；failed/cancelled/uncertain 零外泄；executor 零全局 Store 写实例 |

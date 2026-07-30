@@ -22,6 +22,102 @@ import {
 } from "./paths.js";
 import type { IWorkSceneRegistry, WorkScene } from "./types.js";
 
+interface LegacyWorksceneCutover {
+  readonly version: 1;
+  readonly migrationId: string;
+  readonly sourceSnapshotToken: string;
+  readonly sourceDigest: string;
+  readonly activatedAt: string;
+}
+
+let legacyWriteFence: Promise<unknown> = Promise.resolve();
+
+export function withLegacyWorksceneWriteFence<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const result = legacyWriteFence.then(operation, operation);
+  legacyWriteFence = result.then(
+    () => {},
+    () => {},
+  );
+  return result;
+}
+
+export async function legacyWorksceneCutover(): Promise<
+  LegacyWorksceneCutover | undefined
+> {
+  try {
+    const value = JSON.parse(
+      await fs.readFile(legacyCutoverPath(), "utf8"),
+    ) as Partial<LegacyWorksceneCutover>;
+    if (
+      value.version !== 1 ||
+      typeof value.migrationId !== "string" ||
+      typeof value.sourceSnapshotToken !== "string" ||
+      typeof value.sourceDigest !== "string" ||
+      typeof value.activatedAt !== "string" ||
+      !Number.isFinite(Date.parse(value.activatedAt)) ||
+      new Date(Date.parse(value.activatedAt)).toISOString() !== value.activatedAt
+    ) {
+      throw new Error("Legacy workscene cutover marker is malformed");
+    }
+    return value as LegacyWorksceneCutover;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+export async function markLegacyWorksceneCutover(
+  input: Omit<LegacyWorksceneCutover, "version" | "activatedAt">,
+): Promise<LegacyWorksceneCutover> {
+  const existing = await legacyWorksceneCutover();
+  if (existing) {
+    if (
+      existing.migrationId !== input.migrationId ||
+      existing.sourceSnapshotToken !== input.sourceSnapshotToken ||
+      existing.sourceDigest !== input.sourceDigest
+    ) {
+      throw new Error("Legacy workscene authority already cut over");
+    }
+    return existing;
+  }
+  const marker: LegacyWorksceneCutover = {
+    version: 1,
+    ...input,
+    activatedAt: new Date().toISOString(),
+  };
+  await writeAtomic(
+    legacyCutoverPath(),
+    JSON.stringify(marker, null, 2),
+  );
+  return marker;
+}
+
+function legacyCutoverPath(): string {
+  return path.join(
+    path.dirname(getWorkSceneIndexPath()),
+    "authority-cutover.json",
+  );
+}
+
+async function assertLegacyWorksceneWritable(): Promise<void> {
+  if (await legacyWorksceneCutover()) {
+    throw Object.assign(
+      new Error(
+        "Legacy workscene registry is read-only after authority cutover",
+      ),
+      { code: "WORKSCENE_LEGACY_READ_ONLY" },
+    );
+  }
+}
+
 interface WorkSceneIndex {
   /** 已注册 id，按注册顺序追加；list 输出另按 lastActiveAt 排序。 */
   scenes: string[];
@@ -86,7 +182,8 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     // 全程持 index 锁：ensureUnique → 写 meta → 追加 index 原子完成，
     // 避免并发 add 抢同一 slug。writeMeta 内层 per-id 锁不与之死锁
     // （不同锁、固定外 index → 内 meta 顺序）。
-    return this.withIndexLock(async () => {
+    return withLegacyWorksceneWriteFence(() => this.withIndexLock(async () => {
+      await assertLegacyWorksceneWritable();
       const index = await this.readIndex();
       const taken = new Set(index.scenes);
       const id = await this.uniqueId(slugify(opts.name), taken);
@@ -103,7 +200,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
       await this.writeMeta(scene);
       await this.writeIndex({ scenes: [...index.scenes, id] });
       return scene;
-    });
+    }));
   }
 
   /**
@@ -123,28 +220,37 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
    *     tail 引用，破坏后续同 id 串行不变量
    */
   async remove(id: string): Promise<void> {
-    let removeDir: Promise<void> | undefined;
-    await this.withIndexLock(async () => {
-      const index = await this.readIndex();
-      await this.writeIndex({
-        scenes: index.scenes.filter((s) => s !== id),
+    await withLegacyWorksceneWriteFence(async () => {
+      await assertLegacyWorksceneWritable();
+      let removeDir: Promise<void> | undefined;
+      await this.withIndexLock(async () => {
+        const index = await this.readIndex();
+        await this.writeIndex({
+          scenes: index.scenes.filter((s) => s !== id),
+        });
+        removeDir = this.withMetaLock(id, async () => {
+          await fs.rm(getWorkSceneDir(id), { recursive: true, force: true });
+        });
       });
-      removeDir = this.withMetaLock(id, async () => {
-        await fs.rm(getWorkSceneDir(id), { recursive: true, force: true });
-      });
+      await removeDir;
     });
-    await removeDir;
   }
 
   async rename(id: string, name: string): Promise<WorkScene> {
-    return this.mutateMeta(id, (scene) => {
-      scene.name = name;
+    return withLegacyWorksceneWriteFence(async () => {
+      await assertLegacyWorksceneWritable();
+      return this.mutateMeta(id, (scene) => {
+        scene.name = name;
+      });
     });
   }
 
   async touch(id: string): Promise<void> {
-    await this.mutateMeta(id, (scene) => {
-      scene.lastActiveAt = new Date().toISOString();
+    await withLegacyWorksceneWriteFence(async () => {
+      await assertLegacyWorksceneWritable();
+      await this.mutateMeta(id, (scene) => {
+        scene.lastActiveAt = new Date().toISOString();
+      });
     });
   }
 
@@ -152,12 +258,15 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     id: string,
     workdir: string | null,
   ): Promise<WorkScene> {
-    return this.mutateMeta(id, (scene) => {
-      if (workdir === null) {
-        delete scene.workdir;
-      } else {
-        scene.workdir = workdir;
-      }
+    return withLegacyWorksceneWriteFence(async () => {
+      await assertLegacyWorksceneWritable();
+      return this.mutateMeta(id, (scene) => {
+        if (workdir === null) {
+          delete scene.workdir;
+        } else {
+          scene.workdir = workdir;
+        }
+      });
     });
   }
 

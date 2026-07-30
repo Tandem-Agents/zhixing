@@ -18,6 +18,7 @@ import {
 export const STORAGE_MAINTENANCE_KINDS = [
   "log-migration",
   "workspace-migration",
+  "workspace-catalog-reset",
   "workscene-cleanup",
   "projection-flush",
   "projection-rebuild",
@@ -34,6 +35,7 @@ export type StorageMaintenanceKind =
 export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "log-migration": "authority-commit-log",
   "workspace-migration": "workspace-binding-migrator",
+  "workspace-catalog-reset": "workspace-binding-recovery-owner",
   "workscene-cleanup": "anchor-workscene-owner",
   "projection-flush": "durable-projection-index",
   "projection-rebuild": "durable-projection-index",
@@ -417,6 +419,13 @@ const STORAGE_STEP_BUDGETS: Readonly<
   "workspace-migration": budget(
     16 * MIB,
     16 * MIB,
+    64 * MIB,
+    64 * MIB,
+    4_096,
+  ),
+  "workspace-catalog-reset": budget(
+    16 * MIB,
+    64 * MIB,
     64 * MIB,
     64 * MIB,
     4_096,

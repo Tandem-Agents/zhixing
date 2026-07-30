@@ -38,6 +38,7 @@ import type {
   PerspectivesController,
   RunningServer,
   CleanupRegistry,
+  WorksceneDirectory,
 } from "@zhixing/server";
 import type {
   ConfirmationHub,
@@ -133,6 +134,10 @@ export interface AssemblyContext {
   readonly convRepo: ConversationRepository;
   /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */
   readonly conversationDirectory: ConversationDirectory;
+  readonly conversationAuthorityRef: {
+    current: ConversationProtocolRuntime | undefined;
+  };
+  readonly worksceneDirectory: WorksceneDirectory;
   /** journal 域仓——turn 后维护与系统维护任务共用同一实例 */
   readonly journalStore: JournalStore;
   /**

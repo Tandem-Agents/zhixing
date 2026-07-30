@@ -35,6 +35,12 @@ import {
 } from "./session.js";
 import {
   buildWorksceneAuthorizeLocalWorkspaceMethod,
+  buildLocalWorkspaceStatusMethod,
+  buildLocalWorkspaceListMethod,
+  buildLocalWorkspaceRenameMethod,
+  buildLocalWorkspaceRepathMethod,
+  buildLocalWorkspaceRemoveMethod,
+  buildLocalWorkspaceResetMethod,
   buildWorksceneListMethod,
   buildWorksceneCreateMethod,
   buildWorksceneRenameMethod,
@@ -114,6 +120,12 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionTaskListMethod(),
     // workscene.*（场景管理面 + 进出执行体）
     buildWorksceneAuthorizeLocalWorkspaceMethod(),
+    buildLocalWorkspaceStatusMethod(),
+    buildLocalWorkspaceListMethod(),
+    buildLocalWorkspaceRenameMethod(),
+    buildLocalWorkspaceRepathMethod(),
+    buildLocalWorkspaceRemoveMethod(),
+    buildLocalWorkspaceResetMethod(),
     buildWorksceneListMethod(),
     buildWorksceneCreateMethod(),
     buildWorksceneRenameMethod(),

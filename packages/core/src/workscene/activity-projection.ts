@@ -1,194 +1,309 @@
-import { Buffer } from "node:buffer";
 import {
-  FileDurableProjectionIndex,
-  type DurableProjectionCheckpoints,
+  type AuthorityCommitLog,
+  type DurableProjectionIndex,
   type DurableProjectionMutation,
 } from "../authority/index.js";
-import type { JsonValue } from "../contracts/index.js";
-import { SerialTaskQueue } from "../persistence/index.js";
-import { canonicalize, protocolDigest } from "../protocol/index.js";
-import type { StorageMaintenanceGovernorPort } from "../resources/index.js";
+import type {
+  JsonValue,
+  SessionInternalRecord,
+} from "../contracts/index.js";
+import { protocolDigest } from "../protocol/index.js";
 
-const ACTIVITY_KEY_PREFIX = "activity:";
-const ACTIVITY_KEY_LIMIT = "activity;";
 const ACTIVITY_PAGE_SIZE = 128;
+const CONTRIBUTION_KEY_PREFIX = "contribution:";
+const SESSION_ACTIVITY_STREAM_PREFIX = "session-activity:";
 
-export interface WorksceneSessionActivity {
-  readonly conversationId: string;
-  readonly lastActiveAt: string;
-}
-
-export interface WorksceneActivitySnapshot {
-  readonly sceneId: string;
-  readonly sessions: readonly WorksceneSessionActivity[];
-}
-
-export interface WorksceneActivityProjectionOptions {
-  readonly rootDir: string;
-  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+export interface IncrementalWorksceneActivityProjectionOptions {
+  readonly log: AuthorityCommitLog;
 }
 
 /**
- * Durable read model for workscene recency.
+ * Owner-written, incremental workscene activity read model.
  *
- * Session metadata remains the only activity fact. Each sync treats the
- * canonical, sorted SessionMeta set as a logical verified source prefix; the
- * index may be deleted or rebuilt without losing activity. Projection failure
- * therefore degrades ordering only and never blocks scene lifecycle operations.
+ * The authority log contains the only activity facts. The durable projection
+ * stores one monotonic contribution per conversation plus a derived scene
+ * maximum; deleting the projection never loses facts because it can be rebuilt
+ * from the same log.
  */
-export class WorksceneActivityProjection {
-  readonly #index: FileDurableProjectionIndex;
-  readonly #queue = new SerialTaskQueue();
+export class IncrementalWorksceneActivityProjection {
+  readonly #index: DurableProjectionIndex;
+  readonly #latest = new Map<string, string>();
+  readonly #refreshes = new Map<string, Promise<void>>();
 
-  constructor(options: WorksceneActivityProjectionOptions) {
-    this.#index = new FileDurableProjectionIndex({
-      rootDir: options.rootDir,
-      projectionId: "workscene-session-activity",
+  constructor(options: IncrementalWorksceneActivityProjectionOptions) {
+    this.#index = options.log.durableProjection<SessionInternalRecord>({
+      projectionId: "workscene-session-activity-v2",
       reducerVersion: 1,
-      storageMaintenance: options.storageMaintenance,
-    });
-  }
-
-  async synchronize(
-    snapshots: readonly WorksceneActivitySnapshot[],
-  ): Promise<void> {
-    const normalized = normalizeSnapshots(snapshots);
-    return this.#queue.run(async () => {
-      const checkpoints = activityCheckpoints(normalized);
-      await this.#index.initialize(checkpoints);
-
-      const desired = new Map<string, JsonValue>();
-      for (const snapshot of normalized) {
-        const lastActiveAt = latestActivity(snapshot.sessions);
-        if (!lastActiveAt) continue;
-        desired.set(activityKey(snapshot.sceneId), {
-          sceneId: snapshot.sceneId,
-          lastActiveAt,
-        });
-      }
-
-      const mutations: DurableProjectionMutation[] = [...desired].map(
-        ([key, value]) => ({ kind: "put", key, value }),
-      );
-      let continuation: string | undefined;
-      do {
-        const page = await this.#index.scan(
-          { gte: ACTIVITY_KEY_PREFIX, lt: ACTIVITY_KEY_LIMIT },
-          ACTIVITY_PAGE_SIZE,
-          continuation,
-        );
-        for (const entry of page.entries) {
-          if (!desired.has(entry.key)) {
-            mutations.push({ kind: "tombstone", key: entry.key });
-          }
-        }
-        continuation = page.continuation;
-      } while (continuation);
-
-      const prepared = await this.#index.prepare(mutations);
-      this.#index.publish(prepared, checkpoints);
-      await this.#index.flush();
+      reduce: reduceIncrementalActivity,
     });
   }
 
   async get(sceneId: string): Promise<string | undefined> {
-    const value = await this.#index.get(activityKey(requireId(sceneId)));
-    if (value === undefined) return undefined;
-    if (
-      !value ||
-      typeof value !== "object" ||
-      Array.isArray(value) ||
-      Object.keys(value).sort().join(",") !== "lastActiveAt,sceneId" ||
-      value.sceneId !== sceneId ||
-      typeof value.lastActiveAt !== "string" ||
-      new Date(value.lastActiveAt).toISOString() !== value.lastActiveAt
-    ) {
-      throw new Error("Workscene activity projection value is invalid");
+    const normalizedSceneId = requireId(sceneId);
+    const value = await this.#index.get(sceneAggregateKey(normalizedSceneId));
+    if (value === undefined) {
+      this.#latest.delete(normalizedSceneId);
+      return undefined;
     }
-    return value.lastActiveAt;
+    const aggregate = parseAggregate(value);
+    if (aggregate.sceneId !== normalizedSceneId) {
+      throw new Error("Workscene activity projection scene binding is invalid");
+    }
+    this.#latest.set(normalizedSceneId, aggregate.lastActiveAt);
+    return aggregate.lastActiveAt;
   }
 
-  stop(): void {
-    this.#index.stopStorageMaintenance();
+  /**
+   * Returns the last projection value loaded in this process and starts an
+   * asynchronous refresh. Product reads never wait for projection catch-up.
+   */
+  peek(sceneId: string): string | undefined {
+    const normalizedSceneId = requireId(sceneId);
+    if (!this.#refreshes.has(normalizedSceneId)) {
+      const refresh = this.get(normalizedSceneId)
+        .then(() => undefined)
+        .catch(() => undefined)
+        .finally(() => {
+          if (this.#refreshes.get(normalizedSceneId) === refresh) {
+            this.#refreshes.delete(normalizedSceneId);
+          }
+        });
+      this.#refreshes.set(normalizedSceneId, refresh);
+    }
+    return this.#latest.get(normalizedSceneId);
   }
-}
 
-function normalizeSnapshots(
-  snapshots: readonly WorksceneActivitySnapshot[],
-): WorksceneActivitySnapshot[] {
-  const seen = new Set<string>();
-  return snapshots
-    .map((snapshot) => {
-      const sceneId = requireId(snapshot.sceneId);
-      if (seen.has(sceneId)) {
-        throw new TypeError("Workscene activity snapshot contains duplicates");
+  async contributions(sceneId: string): Promise<
+    readonly {
+      conversationId: string;
+      sceneId: string;
+      sessionRevision: number;
+      at: string;
+      deleted: boolean;
+    }[]
+  > {
+    const prefix = contributionScenePrefix(requireId(sceneId));
+    const result: ReturnType<typeof parseContribution>[] = [];
+    let continuation: string | undefined;
+    do {
+      const page = await this.#index.scan(
+        { gte: prefix, lt: `${prefix}\uffff` },
+        ACTIVITY_PAGE_SIZE,
+        continuation,
+      );
+      for (const entry of page.entries) {
+        result.push(parseContribution(entry.value));
       }
-      seen.add(sceneId);
-      return {
-        sceneId,
-        sessions: snapshot.sessions
-          .map((session) => ({
-            conversationId: requireId(session.conversationId),
-            lastActiveAt: requireTime(session.lastActiveAt),
-          }))
-          .sort((left, right) =>
-            left.conversationId.localeCompare(right.conversationId, "en-US"),
-          ),
-      };
-    })
-    .sort((left, right) => left.sceneId.localeCompare(right.sceneId, "en-US"));
-}
+      continuation = page.continuation;
+    } while (continuation);
+    return result.sort((left, right) =>
+      left.conversationId.localeCompare(right.conversationId, "en-US"),
+    );
+  }
 
-function activityCheckpoints(
-  snapshots: readonly WorksceneActivitySnapshot[],
-): DurableProjectionCheckpoints {
-  const catalog = snapshots.map(({ sceneId }) => sceneId);
-  const checkpoints: Record<
-    string,
-    DurableProjectionCheckpoints[string]
-  > = {
-    catalog: {
-      logId: "workscene-session-meta-catalog",
-      lsn: catalog.length,
-      frameEndOffset: Buffer.byteLength(canonicalize(catalog)),
-      prefixDigest: protocolDigest("WorksceneSessionMetaCatalog", 1, {
-        sceneIds: catalog,
-      }),
-    },
-  };
-  for (const snapshot of snapshots) {
-    const identity = protocolDigest("WorksceneActivitySource", 1, {
-      sceneId: snapshot.sceneId,
-    });
-    checkpoints[`scene:${identity.slice("sha256:".length)}`] = {
-      logId: `workscene-session-meta:${identity}`,
-      lsn: snapshot.sessions.length,
-      frameEndOffset: Buffer.byteLength(canonicalize(snapshot.sessions)),
-      prefixDigest: protocolDigest("WorksceneSessionMetaPrefix", 1, {
-        sceneId: snapshot.sceneId,
-        sessions: snapshot.sessions,
-      }),
+  async rebuild(): Promise<void> {
+    const rebuildable = this.#index as DurableProjectionIndex & {
+      rebuild?: () => Promise<void>;
     };
+    await rebuildable.rebuild?.();
   }
-  return checkpoints;
+
 }
 
-function latestActivity(
-  sessions: readonly WorksceneSessionActivity[],
-): string | undefined {
-  let latest: string | undefined;
-  for (const session of sessions) {
-    if (!latest || Date.parse(session.lastActiveAt) > Date.parse(latest)) {
-      latest = session.lastActiveAt;
+async function reduceIncrementalActivity(
+  envelope: {
+    readonly entries: ReadonlyArray<{
+      readonly stream: string;
+      readonly body: SessionInternalRecord;
+    }>;
+  },
+  current: {
+    get(key: string): Promise<JsonValue | undefined>;
+    scan(
+      range: { gte?: string; gt?: string; lt?: string },
+      limit: number,
+      continuation?: string,
+    ): Promise<{
+      entries: readonly { key: string; value: JsonValue }[];
+      continuation?: string;
+    }>;
+  },
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations = new Map<string, DurableProjectionMutation>();
+  const contributionsByScene = new Map<
+    string,
+    Map<string, ReturnType<typeof parseContribution>>
+  >();
+  const loadScene = async (
+    sceneId: string,
+  ): Promise<Map<string, ReturnType<typeof parseContribution>>> => {
+    const loaded = contributionsByScene.get(sceneId);
+    if (loaded) return loaded;
+    const contributions = new Map<
+      string,
+      ReturnType<typeof parseContribution>
+    >();
+    let continuation: string | undefined;
+    const prefix = contributionScenePrefix(sceneId);
+    do {
+      const page = await current.scan(
+        { gte: prefix, lt: `${prefix}\uffff` },
+        ACTIVITY_PAGE_SIZE,
+        continuation,
+      );
+      for (const candidate of page.entries) {
+        const parsed = parseContribution(candidate.value);
+        contributions.set(parsed.conversationId, parsed);
+      }
+      continuation = page.continuation;
+    } while (continuation);
+    contributionsByScene.set(sceneId, contributions);
+    return contributions;
+  };
+
+  for (const entry of envelope.entries) {
+    if (!entry.stream.startsWith(SESSION_ACTIVITY_STREAM_PREFIX)) continue;
+    if (entry.body.kind !== "session-activity") {
+      throw new Error("Session activity stream contains another record kind");
     }
+    const activity = validateActivityRecord(entry.body, entry.stream);
+    const contributions = await loadScene(activity.sceneId);
+    const key = contributionKey(activity.sceneId, activity.conversationId);
+    const existing = contributions.get(activity.conversationId);
+    if (
+      existing &&
+      existing.sessionRevision >= activity.sessionRevision
+    ) {
+      continue;
+    }
+    const nextContribution: JsonValue = {
+      conversationId: activity.conversationId,
+      sceneId: activity.sceneId,
+      sessionRevision: activity.sessionRevision,
+      at: activity.at,
+      deleted: activity.operation === "tombstone",
+    };
+    const parsed = parseContribution(nextContribution);
+    contributions.set(activity.conversationId, parsed);
+    mutations.set(key, { kind: "put", key, value: nextContribution });
   }
-  return latest;
+
+  for (const [sceneId, contributions] of contributionsByScene) {
+    let latest: string | undefined;
+    for (const contribution of contributions.values()) {
+      if (
+        !contribution.deleted &&
+        (!latest || Date.parse(contribution.at) > Date.parse(latest))
+      ) {
+        latest = contribution.at;
+      }
+    }
+    const aggregateKey = sceneAggregateKey(sceneId);
+    mutations.set(
+      aggregateKey,
+      latest
+        ? {
+            kind: "put",
+            key: aggregateKey,
+            value: { sceneId, lastActiveAt: latest },
+          }
+        : { kind: "tombstone", key: aggregateKey },
+    );
+  }
+  return [...mutations.values()];
 }
 
-function activityKey(sceneId: string): string {
-  return `${ACTIVITY_KEY_PREFIX}${protocolDigest("WorksceneActivityKey", 1, {
+function contributionScenePrefix(sceneId: string): string {
+  return `${CONTRIBUTION_KEY_PREFIX}${protocolDigest(
+    "WorksceneActivitySceneKey",
+    1,
+    { sceneId },
+  )}:`;
+}
+
+function contributionKey(sceneId: string, conversationId: string): string {
+  return `${contributionScenePrefix(sceneId)}${protocolDigest(
+    "WorksceneActivityConversationKey",
+    1,
+    { conversationId },
+  )}`;
+}
+
+function sceneAggregateKey(sceneId: string): string {
+  return `scene:${protocolDigest("WorksceneActivitySceneKey", 1, {
     sceneId,
   })}`;
+}
+
+function validateActivityRecord(
+  value: Extract<SessionInternalRecord, { kind: "session-activity" }>,
+  stream: string,
+): Extract<SessionInternalRecord, { kind: "session-activity" }> {
+  const conversationId = requireId(value.conversationId);
+  const sceneId = requireId(value.sceneId);
+  if (stream !== `${SESSION_ACTIVITY_STREAM_PREFIX}${conversationId}`) {
+    throw new Error("Session activity stream does not bind its conversation");
+  }
+  if (value.operation !== "put" && value.operation !== "tombstone") {
+    throw new Error("Session activity operation is invalid");
+  }
+  if (!Number.isSafeInteger(value.sessionRevision) || value.sessionRevision < 1) {
+    throw new Error("Session activity revision is invalid");
+  }
+  return {
+    kind: "session-activity",
+    operation: value.operation,
+    conversationId,
+    sceneId,
+    sessionRevision: value.sessionRevision,
+    at: requireTime(value.at),
+  };
+}
+
+function parseContribution(value: JsonValue): {
+  conversationId: string;
+  sceneId: string;
+  sessionRevision: number;
+  at: string;
+  deleted: boolean;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Session activity contribution is invalid");
+  }
+  const keys = Object.keys(value).sort().join(",");
+  if (
+    keys !== "at,conversationId,deleted,sceneId,sessionRevision" ||
+    typeof value.deleted !== "boolean" ||
+    !Number.isSafeInteger(value.sessionRevision) ||
+    (value.sessionRevision as number) < 1
+  ) {
+    throw new Error("Session activity contribution is invalid");
+  }
+  return {
+    conversationId: requireId(value.conversationId as string),
+    sceneId: requireId(value.sceneId as string),
+    sessionRevision: value.sessionRevision as number,
+    at: requireTime(value.at as string),
+    deleted: value.deleted,
+  };
+}
+
+function parseAggregate(value: JsonValue): {
+  sceneId: string;
+  lastActiveAt: string;
+} {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(",") !== "lastActiveAt,sceneId"
+  ) {
+    throw new Error("Workscene activity aggregate is invalid");
+  }
+  return {
+    sceneId: requireId(value.sceneId as string),
+    lastActiveAt: requireTime(value.lastActiveAt as string),
+  };
 }
 
 function requireId(value: string): string {

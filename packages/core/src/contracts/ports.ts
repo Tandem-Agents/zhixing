@@ -97,7 +97,7 @@ export interface SessionStatePort {
 }
 
 export interface GlobalStatePort {
-  read(q: GlobalQuery, ctx: AuthorityCallContext): Promise<GlobalReadResult>;
+  read(q: GlobalQuery, ctx: GlobalReadCallContext): Promise<GlobalReadResult>;
   mutate<M extends GlobalControlMutation>(
     mutation: M,
     ctx: GlobalControlCallContext,
@@ -115,12 +115,23 @@ export interface GlobalStatePort {
   >;
 }
 
+export interface GlobalAuthorityFence {
+  readonly domain: "global";
+  readonly anchorEpoch: number;
+}
+
+export type GlobalReadCallContext = AuthorityCallContext & {
+  readonly authority: GlobalAuthorityFence;
+};
+
 export type GlobalControlCallContext = AuthorityCallContext & {
   principal: Extract<AuthorityPrincipal, { kind: "surface" | "host" }>;
+  readonly authority: GlobalAuthorityFence;
 };
 
 export type GlobalStagedCallContext = AuthorityCallContext & {
   principal: Extract<AuthorityPrincipal, { kind: "assignment" }>;
+  readonly authority: GlobalAuthorityFence;
 };
 
 export interface DeferredGlobalIntentPort {
@@ -168,6 +179,45 @@ export interface LocalEnvironmentControlContext {
   abort: AbortSignal;
 }
 
+export interface LocalEnvironmentRecoveryContext
+  extends LocalEnvironmentControlContext {
+  confirmation: {
+    kind: "workspace-binding-reset";
+    token: string;
+    requestId: string;
+    catalogGeneration: string;
+    issuedAt: IsoTime;
+  };
+}
+
+export interface WorkspaceBindingResetReceipt {
+  requestId: string;
+  confirmationDigest: Digest;
+  previousCatalogGeneration: string;
+  catalogGeneration: string;
+  logId: string;
+  capabilityRevision: number;
+  preparedAt: IsoTime;
+}
+
+export interface WorkspaceBindingResetReservation {
+  requestId: string;
+  confirmationDigest: Digest;
+  previousCatalogGeneration: string;
+  catalogGeneration: string;
+  preparedAt: IsoTime;
+}
+
+export interface WorkspaceBindingRootManifest {
+  catalogGeneration: string;
+  logId: string;
+  capabilityRevision: number;
+  state: "healthy" | "degraded";
+  degradedReason?: string;
+  pendingReset?: WorkspaceBindingResetReservation;
+  lastReset?: WorkspaceBindingResetReceipt;
+}
+
 export type WorkspaceBindingPatch =
   | { displayName: string; absolutePath?: string }
   | { absolutePath: string; displayName?: string };
@@ -191,6 +241,22 @@ export interface WorkspaceBindingAdminPort {
     expectedRevision: number,
     control: LocalEnvironmentControlContext,
   ): Promise<void>;
+}
+
+export interface WorkspaceBindingRecoveryPort {
+  status(): Promise<{
+    state: "healthy" | "degraded";
+    catalogGeneration: string;
+    reason?: string;
+  }>;
+  beginReset(
+    input: { expectedCatalogGeneration: string },
+    control: LocalEnvironmentRecoveryContext,
+  ): Promise<WorkspaceBindingResetReservation>;
+  completeReset(
+    requestId: string,
+    abort: AbortSignal,
+  ): Promise<WorkspaceBindingResetReceipt>;
 }
 
 export interface WorkspaceBindingMigrationPort {

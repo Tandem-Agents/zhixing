@@ -2,8 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  AnchorWorksceneRegistry,
+  AnchorWorksceneGlobalStateAdapter,
   ConversationRepository,
+  ShardedTranscriptStore,
+  conversationsDir,
   parseConversationId,
 } from "@zhixing/core";
 import {
@@ -16,6 +18,7 @@ import type {
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import { createTempDir } from "@zhixing/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
+import { createConversationDirectory } from "../conversation-directory.js";
 import { createWorksceneDirectory } from "../workscene-directory.js";
 
 let originalHome: string | undefined;
@@ -174,6 +177,9 @@ describe("workscene directory", () => {
         observers.add(conversationId);
         return true;
       },
+      async getOrCreate() {
+        return {} as never;
+      },
       async quiescePrefix(prefix: string) {
         if ([...observers].some((id) => id.startsWith(prefix))) throw busyError();
         return () => {};
@@ -236,12 +242,15 @@ describe("workscene directory", () => {
     await expect(
       fixture.directory.remove(scene.id, deleteRequestId),
     ).rejects.toThrow("injected cleanup failure");
-    expect(await fixture.registry.get(scene.id)).toBeNull();
-    expect(await fixture.registry.pendingDeletions()).toHaveLength(1);
+    await expect(
+      fixture.globalState.read(
+        { kind: "workscene-get", sceneId: scene.id },
+        globalContext(requestId("read-after-delete")),
+      ),
+    ).resolves.toMatchObject({ kind: "workscene-get", scene: null });
 
     failCleanup = false;
     await expect(fixture.directory.recover()).resolves.toBeUndefined();
-    expect(await fixture.registry.pendingDeletions()).toEqual([]);
     await expect(
       fixture.directory.remove(scene.id, deleteRequestId),
     ).resolves.toBe(true);
@@ -285,11 +294,41 @@ async function createFixture(
     path.join(home, "authority-log"),
     artifacts,
   );
-  const registry = new AnchorWorksceneRegistry({ log });
+  let cleanup = async (
+    sceneId: string,
+    _conversationIds: readonly string[],
+  ) => {
+    await removeSceneDirectory?.(sceneId);
+  };
+  const globalState = new AnchorWorksceneGlobalStateAdapter({
+    log,
+    anchorEpoch: 1,
+    removeScene: (sceneId, conversationIds) =>
+      cleanup(sceneId, conversationIds),
+  });
+  const conversationDirectory = createConversationDirectory({
+    repo: new ConversationRepository({ kind: "user" }),
+    transcript: new ShardedTranscriptStore(
+      conversationsDir({ kind: "user" }),
+    ),
+  });
   let probe: WorkspaceProbeResult["probe"] = "directory";
   const authority = {
+    anchorEpoch: 1,
     deviceId: "device-a",
-    worksceneRegistry: registry,
+    globalState,
+    worksceneGlobalState: globalState,
+    installWorksceneCleanup: (
+      next: (
+        sceneId: string,
+        conversationIds: readonly string[],
+      ) => Promise<void>,
+    ) => {
+      cleanup = async (sceneId, conversationIds) => {
+        await removeSceneDirectory?.(sceneId);
+        await next(sceneId, conversationIds);
+      };
+    },
     workspaceCatalog: () => [{
       executorId: "executor-a",
       deviceId: "device-a",
@@ -318,12 +357,51 @@ async function createFixture(
   return {
     directory: createWorksceneDirectory({
       authority: () => authority,
+      conversationAuthority: () => ({
+        async touchWorksceneSession(input) {
+          await appendActivity(log, input, "put");
+          return { revision: 1, at: input.at };
+        },
+        async deleteWorksceneSession(input) {
+          await appendActivity(log, input, "tombstone");
+          return { revision: 1, at: input.at };
+        },
+      }),
+      conversationDirectory,
       ...(conversations ? { conversations: () => conversations } : {}),
-      ...(removeSceneDirectory ? { removeSceneDirectory } : {}),
     }),
-    registry,
+    globalState,
     setProbe(value: WorkspaceProbeResult["probe"]) {
       probe = value;
     },
+  };
+}
+
+async function appendActivity(
+  log: FileAuthorityCommitLog,
+  input: { conversationId: string; sceneId: string; at: string },
+  operation: "put" | "tombstone",
+) {
+  await log.append([
+    {
+      stream: `session-activity:${input.conversationId}`,
+      body: {
+        kind: "session-activity",
+        operation,
+        conversationId: input.conversationId,
+        sceneId: input.sceneId,
+        sessionRevision: 1,
+        at: input.at,
+      },
+    },
+  ]);
+}
+
+function globalContext(requestId: string) {
+  return {
+    principal: { kind: "host" as const, component: "workscene-test" },
+    requestId,
+    authority: { domain: "global" as const, anchorEpoch: 1 },
+    deadlineAt: "2099-01-01T00:00:00.000Z",
   };
 }

@@ -269,7 +269,7 @@ describe("FsWorkSceneRegistry · 并发安全", () => {
     expect(index.scenes.sort()).toEqual(ids);
   });
 
-  it("remove 进行中同名 add 避让旧物理目录，remove 完成后可复用原 id", async () => {
+  it("remove 进行中同名 add 等待旧写 fence，完成后安全复用原 id", async () => {
     const reg = new FsWorkSceneRegistry();
     const scene = await reg.add({ name: "same" });
     await fs.mkdir(path.join(getWorkSceneDir(scene.id), "me"), {
@@ -300,23 +300,25 @@ describe("FsWorkSceneRegistry · 并发安全", () => {
     const removing = reg.remove(scene.id);
     await rmStarted;
 
-    const duringRemove = await reg.add({ name: "same" });
-    expect(duringRemove.id).toBe("same-2");
-    await expect(
-      fs.stat(path.join(getWorkSceneDir(duringRemove.id), "me", "profile.md")),
-    ).rejects.toThrow();
+    let addSettled = false;
+    const afterRemoving = reg.add({ name: "same" }).finally(() => {
+      addSettled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(addSettled).toBe(false);
 
     releaseRemove();
     await removing;
 
-    const afterRemove = await reg.add({ name: "same" });
+    const afterRemove = await afterRemoving;
     expect(afterRemove.id).toBe("same");
     await expect(
       fs.stat(path.join(getWorkSceneDir(afterRemove.id), "me", "profile.md")),
     ).rejects.toThrow();
   });
 
-  it("同名 add 即使复用原 id，新 meta 写入也排在旧 rm 之后", async () => {
+  it("同名 add 的物理探测与 meta 写入都排在旧 rm 之后", async () => {
     const reg = new FsWorkSceneRegistry();
     const scene = await reg.add({ name: "same" });
     const sceneDir = getWorkSceneDir(scene.id);
@@ -358,13 +360,13 @@ describe("FsWorkSceneRegistry · 并发安全", () => {
     const reusing = reg.add({ name: "same" }).finally(() => {
       addSettled = true;
     });
-    await physicalChecked;
     await Promise.resolve();
     await Promise.resolve();
     expect(addSettled).toBe(false);
 
     releaseRemove();
     await removing;
+    await physicalChecked;
 
     const reused = await reusing;
     expect(reused.id).toBe(scene.id);

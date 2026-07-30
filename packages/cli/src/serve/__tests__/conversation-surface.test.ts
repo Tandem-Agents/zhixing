@@ -116,6 +116,7 @@ async function setupCtx() {
     perspectives: { executePerspectiveWork: vi.fn() },
     sessionBroadcastRef: { current: null },
     advancementRecoveryRef: { current: null },
+    conversationAuthorityRef: { current: null },
     transcript,
     snapshots,
     config: {},

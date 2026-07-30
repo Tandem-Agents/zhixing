@@ -10,6 +10,7 @@
 import type {
   LocalWorkspaceBinding,
   WorksceneDto,
+  WorkspaceBindingResetReceipt,
 } from "@zhixing/core/contracts";
 
 export class WorksceneInputError extends Error {
@@ -63,6 +64,7 @@ export interface WorksceneDirectory {
     sceneId: string,
     conversationId: string,
     at: string,
+    requestId?: string,
   ): Promise<void>;
   /**
    * enter 的完整执行体:取场景最近对话(无则创建)、注册 observer、
@@ -72,7 +74,7 @@ export interface WorksceneDirectory {
   enterScene(
     sceneId: string,
     observerId: string,
-    opts?: { recordActivity?: boolean },
+    opts?: { recordActivity?: boolean; requestId?: string },
   ): Promise<WorksceneDirectoryEnterResult | null>;
   /**
    * Host-local path handoff. Only an opaque one-time token may reach RPC;
@@ -85,6 +87,37 @@ export interface WorksceneDirectory {
       deviceId: string;
     }
   >;
+  /** 本机可信设置面；RPC 适配器只能在 loopback 连接上调用。 */
+  localWorkspaceStatus?(): Promise<{
+    state: "healthy" | "degraded";
+    catalogGeneration: string;
+    reason?: string;
+    resetImpact?: string;
+  }>;
+  listLocalWorkspaces?(): Promise<LocalWorkspaceBinding[]>;
+  renameLocalWorkspace?(input: {
+    bindingRef: string;
+    displayName: string;
+    expectedRevision: number;
+    requestId: string;
+  }): Promise<LocalWorkspaceBinding>;
+  repathLocalWorkspaceTransfer?(input: {
+    bindingRef: string;
+    expectedRevision: number;
+    transferToken: string;
+  }): Promise<LocalWorkspaceBinding>;
+  removeLocalWorkspace?(input: {
+    bindingRef: string;
+    expectedRevision: number;
+    requestId: string;
+  }): Promise<void>;
+  resetLocalWorkspaceCatalog?(input: {
+    expectedCatalogGeneration: string;
+    requestId: string;
+    confirmationToken: string;
+    confirmationIssuedAt: string;
+    confirmedImpact: string;
+  }): Promise<WorkspaceBindingResetReceipt>;
   workspaceCatalog?(): Promise<
     readonly {
       deviceId: string;

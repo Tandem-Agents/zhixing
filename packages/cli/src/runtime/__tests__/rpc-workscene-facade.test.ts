@@ -77,10 +77,17 @@ describe("RpcWorksceneFacade", () => {
     await facade.delete("scene-1");
 
     expect(fake.requests.map((r) => [r.method, r.params])).toEqual([
-      ["workscene.enter", { sceneId: "scene-1" }],
+      [
+        "workscene.enter",
+        { sceneId: "scene-1", requestId: expect.any(String) },
+      ],
       [
         "workscene.exit",
-        { sceneId: "scene-1", conversationId: "ws:scene-1:conv-3" },
+        {
+          sceneId: "scene-1",
+          conversationId: "ws:scene-1:conv-3",
+          requestId: expect.any(String),
+        },
       ],
       [
         "workscene.delete",

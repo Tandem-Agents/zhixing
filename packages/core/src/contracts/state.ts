@@ -68,10 +68,19 @@ export type SessionStagedMutation =
   | { kind: "task-list-op"; op: TaskListOp }
   | { kind: "segment-append"; segment: SegmentRecord };
 
-export type SessionInternalRecord = {
-  kind: "content-asset-index";
-  entries: ContentAssetRef[];
-};
+export type SessionInternalRecord =
+  | {
+      kind: "content-asset-index";
+      entries: ContentAssetRef[];
+    }
+  | {
+      kind: "session-activity";
+      operation: "put" | "tombstone";
+      conversationId: string;
+      sceneId: string;
+      sessionRevision: number;
+      at: IsoTime;
+    };
 
 export interface WorksceneDto {
   id: string;
@@ -124,6 +133,7 @@ export type GlobalQuery =
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
   | { kind: "workscene-list" }
+  | { kind: "workscene-get"; sceneId: string }
   | { kind: "config-asset"; domain: ConfigAssetRecord["domain"]; key?: string }
   | { kind: "asset-index"; asset: "skills" | "rubrics" | "prompt-assets" };
 
@@ -152,6 +162,7 @@ export type GlobalReadResult =
   | { kind: "trust-rules"; snapshot: TrustRuleSnapshot }
   | { kind: "schedule-list"; tasks: TaskDefinition[] }
   | { kind: "workscene-list"; scenes: WorksceneDto[] }
+  | { kind: "workscene-get"; scene: WorksceneDto | null }
   | { kind: "config-asset"; records: ConfigAssetRecord[] }
   | { kind: "asset-index"; entries: AssetIndexEntry[] };
 

@@ -1,7 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it } from "vitest";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -14,14 +13,6 @@ import {
 } from "./authority-registry.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
 describe("AnchorWorksceneRegistry", () => {
   it("linearizes CRUD, exact replay, CAS and tombstones", async () => {
     const fixture = await createRegistry();
@@ -86,7 +77,7 @@ describe("AnchorWorksceneRegistry", () => {
     });
     expect(await fixture.registry.get("project-a")).toBeNull();
     expect(await fixture.registry.replay("delete-1")).toEqual(removed);
-    expect(await fixture.registry.pendingDeletions()).toEqual([
+    expect((await fixture.registry.pendingDeletionPage()).items).toEqual([
       {
         sceneId: "project-a",
         deletionRevision: 2,
@@ -98,7 +89,7 @@ describe("AnchorWorksceneRegistry", () => {
       log: fixture.log,
       clock: () => NOW,
     });
-    expect(await restarted.pendingDeletions()).toEqual([
+    expect((await restarted.pendingDeletionPage()).items).toEqual([
       {
         sceneId: "project-a",
         deletionRevision: 2,
@@ -107,13 +98,13 @@ describe("AnchorWorksceneRegistry", () => {
     ]);
     await restarted.confirmDeletionProjected("project-a", 2);
     await restarted.confirmDeletionProjected("project-a", 2);
-    expect(await restarted.pendingDeletions()).toEqual([]);
+    expect((await restarted.pendingDeletionPage()).items).toEqual([]);
     expect(
       await new AnchorWorksceneRegistry({
         log: fixture.log,
         clock: () => NOW,
-      }).pendingDeletions(),
-    ).toEqual([]);
+      }).pendingDeletionPage(),
+    ).toEqual({ items: [] });
   });
 
   it("keeps legacy imports invisible until an exact atomic activation", async () => {
@@ -173,8 +164,7 @@ describe("AnchorWorksceneRegistry", () => {
 });
 
 async function createRegistry() {
-  const root = await mkdtemp(path.join(tmpdir(), "zhixing-workscene-authority-"));
-  roots.push(root);
+  const root = await createTempDir("zhixing-workscene-authority");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,

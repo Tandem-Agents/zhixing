@@ -1108,7 +1108,7 @@
     },
     {
       "kind": "type-import",
-      "references": 12,
+      "references": 13,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1156,7 +1156,7 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 7,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
@@ -1174,7 +1174,7 @@
     },
     {
       "kind": "import",
-      "references": 73,
+      "references": 75,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1276,7 +1276,7 @@
     },
     {
       "kind": "type-import",
-      "references": 12,
+      "references": 13,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1306,7 +1306,7 @@
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 7,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },

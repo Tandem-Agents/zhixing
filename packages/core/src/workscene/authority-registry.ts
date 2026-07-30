@@ -148,21 +148,58 @@ export class AnchorWorksceneRegistry {
     return result ? cloneResult(result) : null;
   }
 
-  async pendingDeletions(): Promise<
-    Array<{
+  async pendingDeletionPage(input?: {
+    readonly after?: {
+      readonly deletionRevision: number;
+      readonly sceneId: string;
+    };
+    readonly limit?: number;
+  }): Promise<{
+    readonly items: Array<{
       sceneId: string;
       deletionRevision: number;
       previousObjectRevision: number;
-    }>
-  > {
+    }>;
+    readonly next?: {
+      readonly deletionRevision: number;
+      readonly sceneId: string;
+    };
+  }> {
     await this.#ensureOpen();
-    return [...this.#state().pendingDeletions]
+    const limit = input?.limit ?? 64;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+      throw new TypeError("Workscene deletion page limit is invalid");
+    }
+    if (input?.after) {
+      requireRevision(input.after.deletionRevision);
+      requireIdentifier(input.after.sceneId, "Workscene deletion cursor scene id");
+    }
+    const pending = [...this.#state().pendingDeletions]
       .map(([sceneId, pending]) => ({ sceneId, ...pending }))
       .sort(
         (left, right) =>
           left.deletionRevision - right.deletionRevision ||
           left.sceneId.localeCompare(right.sceneId, "en-US"),
       );
+    const items = pending
+      .filter(
+        (item) =>
+          !input?.after || compareDeletionCursor(item, input.after) > 0,
+      )
+      .slice(0, limit);
+    const last = items.at(-1);
+    return {
+      items,
+      ...(last &&
+      pending.some((item) => compareDeletionCursor(item, last) > 0)
+        ? {
+            next: {
+              deletionRevision: last.deletionRevision,
+              sceneId: last.sceneId,
+            },
+          }
+        : {}),
+    };
   }
 
   async confirmDeletionProjected(
@@ -823,6 +860,16 @@ function normalizeName(value: string): string {
     throw new TypeError("Workscene name must be a non-empty bounded string");
   }
   return name;
+}
+
+function compareDeletionCursor(
+  left: { readonly deletionRevision: number; readonly sceneId: string },
+  right: { readonly deletionRevision: number; readonly sceneId: string },
+): number {
+  return (
+    left.deletionRevision - right.deletionRevision ||
+    left.sceneId.localeCompare(right.sceneId, "en-US")
+  );
 }
 
 function requireIdentifier(value: unknown, label: string): string {

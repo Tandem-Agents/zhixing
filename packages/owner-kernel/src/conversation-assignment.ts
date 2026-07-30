@@ -117,6 +117,7 @@ import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   compileDeliveryContent,
   DeliveryContentValidationError,
+  parseConversationId,
   type CompiledDeliveryContent,
 } from "@zhixing/core";
 import type {
@@ -531,6 +532,14 @@ interface RunProjection {
   readonly conversationId: string;
   domainRevision: number;
   deleted: boolean;
+  sessionMeta?: Extract<
+    ConversationRunJournalRecord,
+    { t: "session-meta" }
+  >;
+  readonly sessionMetaByRequest: Map<
+    string,
+    Extract<ConversationRunJournalRecord, { t: "session-meta" }>
+  >;
   readonly lifecycleByRequest: Map<
     string,
     Extract<ConversationRunJournalRecord, { t: "session-lifecycle" }>
@@ -1211,9 +1220,136 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       commitRevision: state.commits.at(-1)?.commitRevision ?? 0,
       deleted: state.deleted,
       hasDurableIdentity:
-        state.admittedByRun.size > 0 || state.lifecycleByRequest.size > 0,
+        state.sessionMeta !== undefined ||
+        state.admittedByRun.size > 0 ||
+        state.lifecycleByRequest.size > 0,
       pendingLifecycleProjections: state.pendingLifecycleProjections.size,
     }));
+  }
+
+  async touchWorksceneSession(input: {
+    readonly requestId: string;
+    readonly sceneId: string;
+    readonly at: string;
+  }): Promise<{ readonly revision: number; readonly at: string }> {
+    assertIdentifier(input.requestId, "Session activity request id");
+    assertIdentifier(input.sceneId, "Session activity scene id");
+    assertCanonicalActivityTime(input.at);
+    assertWorksceneIdentity(
+      this.#conversationId,
+      input.sceneId,
+    );
+    const transaction = await this.#transact<{
+      readonly revision: number;
+      readonly at: string;
+    }>((state) => {
+      const replay = state.sessionMetaByRequest.get(input.requestId);
+      if (replay) {
+        if (
+          replay.sceneId !== input.sceneId ||
+          replay.operation === "delete"
+        ) {
+          throw corruptRunJournal(
+            "Session activity request is already bound to another mutation",
+          );
+        }
+        return {
+          kind: "return",
+          value: {
+            revision: replay.domainRevision,
+            at: replay.lastActiveAt,
+          },
+        };
+      }
+      if (state.deleted) {
+        throw corruptRunJournal(
+          "Deleted workscene conversation cannot be touched",
+        );
+      }
+      const domainRevision = state.domainRevision + 1;
+      const operation = state.sessionMeta ? "touch" : "create";
+      const meta: Extract<
+        ConversationRunJournalRecord,
+        { t: "session-meta" }
+      > = {
+        t: "session-meta",
+        operation,
+        domainRevision,
+        requestId: input.requestId,
+        sceneId: input.sceneId,
+        lastActiveAt: input.at,
+      };
+      return {
+        kind: "append",
+        entries: worksceneSessionMetaEntries(this.#conversationId, meta),
+        value: { revision: domainRevision, at: input.at },
+      };
+    });
+    return transaction.value;
+  }
+
+  async deleteWorksceneSession(input: {
+    readonly requestId: string;
+    readonly sceneId: string;
+    readonly at: string;
+  }): Promise<
+    { readonly revision: number; readonly at: string } | undefined
+  > {
+    assertIdentifier(input.requestId, "Session deletion request id");
+    assertIdentifier(input.sceneId, "Session deletion scene id");
+    assertCanonicalActivityTime(input.at);
+    assertWorksceneIdentity(
+      this.#conversationId,
+      input.sceneId,
+    );
+    const transaction = await this.#transact<
+      { readonly revision: number; readonly at: string } | undefined
+    >((state) => {
+      const replay = state.sessionMetaByRequest.get(input.requestId);
+      if (replay) {
+        if (
+          replay.operation !== "delete" ||
+          replay.sceneId !== input.sceneId
+        ) {
+          throw corruptRunJournal(
+            "Session deletion request is already bound to another mutation",
+          );
+        }
+        return {
+          kind: "return",
+          value: {
+            revision: replay.domainRevision,
+            at: replay.lastActiveAt,
+          },
+        };
+      }
+      if (!state.sessionMeta) {
+        return { kind: "return", value: undefined };
+      }
+      if (state.deleted) {
+        throw corruptRunJournal(
+          "Workscene conversation was deleted by another request",
+        );
+      }
+      const domainRevision = state.domainRevision + 1;
+      const meta: Extract<
+        ConversationRunJournalRecord,
+        { t: "session-meta" }
+      > = {
+        t: "session-meta",
+        operation: "delete",
+        domainRevision,
+        requestId: input.requestId,
+        sceneId: input.sceneId,
+        lastActiveAt: input.at,
+      };
+      return {
+        kind: "append",
+        entries: worksceneSessionMetaEntries(this.#conversationId, meta),
+        value: { revision: domainRevision, at: input.at },
+      };
+    });
+    return transaction.value;
   }
 
   async lifecycleRequest(
@@ -4132,6 +4268,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             kind: "content-asset-index",
             entries: body.contentAssets,
           }),
+          ...worksceneTurnActivityEntries(
+            this.#conversationId,
+            state.domainRevision + 1,
+            bundle.assignmentId,
+            committedRunRecord.timestamp,
+            state.sessionMeta ? "touch" : "create",
+          ),
           ...capabilityRevocations(this.#conversationId, state, assigned),
           runRecord(this.#conversationId, {
             t: "state",
@@ -4887,6 +5030,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.pendingLifecycleProjections.delete(body.domainRevision);
         return state;
       }
+      if (body.kind === "session-activity") {
+        throw corruptRunJournal(
+          "Session activity record was written to the run stream",
+        );
+      }
       const committed = state.commits.at(-1);
       if (
         !committed ||
@@ -4910,6 +5058,38 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
     assertConversationRunRecord(body, this.#verifier);
     switch (body.t) {
+      case "session-meta": {
+        assertWorksceneIdentity(this.#conversationId, body.sceneId);
+        const current = state.sessionMeta;
+        if (
+          body.domainRevision !== state.domainRevision + 1 ||
+          state.sessionMetaByRequest.has(body.requestId) ||
+          (body.operation === "create" && current !== undefined) ||
+          (body.operation !== "create" &&
+            (!current || current.sceneId !== body.sceneId)) ||
+          (body.operation !== "delete" && state.deleted)
+        ) {
+          throw corruptRunJournal(
+            "Session metadata transition is not the unique next owner mutation",
+          );
+        }
+        if (
+          !envelopeContainsSessionActivity(
+            envelope,
+            this.#conversationId,
+            body,
+          )
+        ) {
+          throw corruptRunJournal(
+            "Session metadata transition lacks its atomic activity fact",
+          );
+        }
+        state.domainRevision = body.domainRevision;
+        state.sessionMeta = body;
+        state.sessionMetaByRequest.set(body.requestId, body);
+        if (body.operation === "delete") state.deleted = true;
+        return state;
+      }
       case "session-lifecycle": {
         if (
           body.domainRevision !== state.domainRevision + 1 ||
@@ -8065,6 +8245,8 @@ function emptyProjection(conversationId: string): RunProjection {
     conversationId,
     domainRevision: 0,
     deleted: false,
+    sessionMeta: undefined,
+    sessionMetaByRequest: new Map(),
     lifecycleByRequest: new Map(),
     pendingLifecycleProjections: new Map(),
     projectedLifecycleRevisions: new Set(),
@@ -8639,6 +8821,91 @@ function runRecord(
 
 function runStream(conversationId: string): string {
   return `run:${conversationId}`;
+}
+
+function worksceneTurnActivityEntries(
+  conversationId: string,
+  sessionRevision: number,
+  assignmentId: string,
+  at: string,
+  operation: "create" | "touch",
+): LogicalRecord<unknown>[] {
+  const scope = parseConversationId(conversationId).scope;
+  if (scope.kind !== "workscene") return [];
+  return worksceneSessionMetaEntries(conversationId, {
+    t: "session-meta",
+    operation,
+    domainRevision: sessionRevision,
+    requestId: `session-activity:${assignmentId}`,
+    sceneId: scope.sceneId,
+    lastActiveAt: at,
+  });
+}
+
+function worksceneSessionMetaEntries(
+  conversationId: string,
+  meta: Extract<ConversationRunJournalRecord, { t: "session-meta" }>,
+): LogicalRecord<unknown>[] {
+  const operation = meta.operation === "delete" ? "tombstone" : "put";
+  return [
+    runRecord(conversationId, meta),
+    {
+      stream: `session-activity:${conversationId}`,
+      body: {
+        kind: "session-activity",
+        operation,
+        conversationId,
+        sceneId: meta.sceneId,
+        sessionRevision: meta.domainRevision,
+        at: meta.lastActiveAt,
+      } satisfies Extract<
+        SessionInternalRecord,
+        { kind: "session-activity" }
+      >,
+    },
+  ];
+}
+
+function envelopeContainsSessionActivity(
+  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  conversationId: string,
+  meta: Extract<ConversationRunJournalRecord, { t: "session-meta" }>,
+): boolean {
+  const expected = {
+    kind: "session-activity",
+    operation: meta.operation === "delete" ? "tombstone" : "put",
+    conversationId,
+    sceneId: meta.sceneId,
+    sessionRevision: meta.domainRevision,
+    at: meta.lastActiveAt,
+  };
+  return envelope.entries.some(
+    (entry) =>
+      entry.stream === `session-activity:${conversationId}` &&
+      canonicalize(entry.body) === canonicalize(expected),
+  );
+}
+
+function assertWorksceneIdentity(
+  conversationId: string,
+  sceneId: string,
+): void {
+  const scope = parseConversationId(conversationId).scope;
+  if (scope.kind !== "workscene" || scope.sceneId !== sceneId) {
+    throw new TypeError(
+      "Workscene session metadata does not match its conversation identity",
+    );
+  }
+}
+
+function assertCanonicalActivityTime(value: string): void {
+  if (
+    typeof value !== "string" ||
+    !Number.isFinite(Date.parse(value)) ||
+    new Date(Date.parse(value)).toISOString() !== value
+  ) {
+    throw new TypeError("Session activity time is invalid");
+  }
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {

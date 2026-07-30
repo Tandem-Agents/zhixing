@@ -65,6 +65,12 @@ type WorkspaceBindingRecord =
       deviceId: string;
     }
   | {
+      t: "catalog-reset";
+      previousCatalogGeneration: string;
+      catalogGeneration: string;
+      confirmationDigest: string;
+    }
+  | {
       t: "binding-created";
       requestId: string;
       requestDigest: string;
@@ -151,6 +157,11 @@ export interface WorkspaceBindingServiceOptions {
   readonly versionInventory: () => Promise<ExecutorVersionInventory>;
   readonly clock?: () => string;
   readonly bindingRefFactory?: () => string;
+  readonly resetGenesis?: {
+    readonly previousCatalogGeneration: string;
+    readonly catalogGeneration: string;
+    readonly confirmationDigest: string;
+  };
 }
 
 /**
@@ -178,6 +189,7 @@ export class WorkspaceBindingService
   readonly #versionInventoryFactory: WorkspaceBindingServiceOptions["versionInventory"];
   readonly #clock: () => string;
   readonly #bindingRefFactory: () => string;
+  readonly #resetGenesis: WorkspaceBindingServiceOptions["resetGenesis"];
   readonly #operations = new SerialTaskQueue();
   #projection: WorkspaceBindingProjection | undefined;
   #cursor: ProjectionCursor | undefined;
@@ -200,6 +212,12 @@ export class WorkspaceBindingService
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#bindingRefFactory =
       options.bindingRefFactory ?? (() => `wsp-${randomUUID()}`);
+    this.#resetGenesis = options.resetGenesis;
+  }
+
+  /** Opens and validates the authority log without publishing capabilities. */
+  async initialize(): Promise<void> {
+    await this.#ensureOpen();
   }
 
   async list(
@@ -743,31 +761,12 @@ export class WorkspaceBindingService
   }
 
   #validateControl(control: LocalEnvironmentControlContext): void {
-    requireIdentifier(control.requestId, "Environment control requestId");
-    if (control.abort.aborted) {
-      throw new WorkspaceBindingCancelledError();
-    }
-    const lease = validateReservableResourceLease(
-      control.lease,
-      this.#verifier,
-    ) as ImmediateRootResourceLease;
-    assertResourceLeaseActiveAt(lease, this.#clock());
-    if (
-      lease.parentId !== undefined ||
-      lease.admissionClass !== "interactive" ||
-      lease.workload.kind !== "control" ||
-      lease.workload.id !== control.requestId ||
-      lease.scopeBinding.kind !== "control" ||
-      lease.scopeBinding.subject !== control.requestId ||
-      !control.requestId.startsWith(
-        `${localEnvironmentControlSubject(this.#deviceId, "")}`,
-      ) ||
-      lease.audience.executorId !== this.#executorId
-    ) {
-      throw new TypeError(
-        "Resource lease does not authorize local environment control",
-      );
-    }
+    validateLocalEnvironmentControl(control, {
+      deviceId: this.#deviceId,
+      executorId: this.#executorId,
+      verifier: this.#verifier,
+      clock: this.#clock,
+    });
   }
 
   #nextBindingRef(): string {
@@ -835,6 +834,17 @@ export class WorkspaceBindingService
           stream: DIRECTORY_STREAM,
           body: { t: "directory-established", deviceId: this.#deviceId },
         },
+        ...(this.#resetGenesis
+          ? [
+              {
+                stream: DIRECTORY_STREAM,
+                body: {
+                  t: "catalog-reset" as const,
+                  ...this.#resetGenesis,
+                },
+              },
+            ]
+          : []),
       ]);
       state = reduceWorkspaceBindingProjection(
         state,
@@ -863,6 +873,46 @@ export function localEnvironmentControlSubject(
     deviceId,
     "Workspace deviceId",
   )}:${requestNonce}`;
+}
+
+export function validateLocalEnvironmentControl(
+  control: LocalEnvironmentControlContext,
+  options: {
+    readonly deviceId: string;
+    readonly executorId: string;
+    readonly verifier: ProtocolSignatureVerifier;
+    readonly clock?: () => string;
+  },
+): ImmediateRootResourceLease {
+  requireIdentifier(control.requestId, "Environment control requestId");
+  if (control.abort.aborted) {
+    throw new WorkspaceBindingCancelledError();
+  }
+  const lease = validateReservableResourceLease(
+    control.lease,
+    options.verifier,
+  ) as ImmediateRootResourceLease;
+  assertResourceLeaseActiveAt(
+    lease,
+    (options.clock ?? (() => new Date().toISOString()))(),
+  );
+  if (
+    lease.parentId !== undefined ||
+    lease.admissionClass !== "interactive" ||
+    lease.workload.kind !== "control" ||
+    lease.workload.id !== control.requestId ||
+    lease.scopeBinding.kind !== "control" ||
+    lease.scopeBinding.subject !== control.requestId ||
+    !control.requestId.startsWith(
+      `${localEnvironmentControlSubject(options.deviceId, "")}`,
+    ) ||
+    lease.audience.executorId !== options.executorId
+  ) {
+    throw new TypeError(
+      "Resource lease does not authorize local environment control",
+    );
+  }
+  return lease;
 }
 
 export function normalizeWorkspaceDisplayName(input: string): string {
@@ -930,6 +980,13 @@ function reduceWorkspaceBindingProjection(
       }
       state.established = true;
       state.deviceId = record.deviceId;
+      break;
+    case "catalog-reset":
+      if (!state.established || state.bindings.size !== 0) {
+        throw corruptDirectory(
+          "Workspace catalog reset genesis is not the first catalog fact",
+        );
+      }
       break;
     case "binding-created":
       if (
@@ -1105,6 +1162,25 @@ function validateRecord(input: WorkspaceBindingRecord): WorkspaceBindingRecord {
   }
   if (input.t === "directory-established") {
     requireIdentifier(input.deviceId, "Workspace directory deviceId");
+    return input;
+  }
+  if (input.t === "catalog-reset") {
+    requireIdentifier(
+      input.previousCatalogGeneration,
+      "Previous workspace catalog generation",
+    );
+    requireIdentifier(
+      input.catalogGeneration,
+      "Workspace catalog generation",
+    );
+    if (
+      typeof input.confirmationDigest !== "string" ||
+      !input.confirmationDigest.startsWith("sha256:")
+    ) {
+      throw corruptDirectory(
+        "Workspace catalog reset confirmation digest is invalid",
+      );
+    }
     return input;
   }
   requireIdentifier(input.requestId, "Workspace binding requestId");

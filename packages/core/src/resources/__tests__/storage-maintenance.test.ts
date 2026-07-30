@@ -138,6 +138,7 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
         "anchor-workscene-owner",
         "executor-data-plane",
         "workspace-binding-migrator",
+        "workspace-binding-recovery-owner",
       ]),
     );
   });

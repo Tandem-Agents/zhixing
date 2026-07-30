@@ -10,13 +10,16 @@ import path from "node:path";
 import {
   getWorkSceneDir,
   getWorkSceneIndexPath,
+  markLegacyWorksceneCutover,
+  withLegacyWorksceneWriteFence,
   WorkspaceBindingConflictError,
   worksceneImportSetDigest,
-  type AnchorWorksceneRegistry,
   type WorkScene,
 } from "@zhixing/core";
 import type {
+  GlobalStatePort,
   WorksceneDto,
+  WorksceneMigrationMutation,
   WorkspaceBindingMigrationPort,
 } from "@zhixing/core/contracts";
 import {
@@ -45,7 +48,8 @@ interface MigrationReport {
 export async function migrateLegacyWorkscenes(options: {
   readonly rootDir: string;
   readonly deviceId: string;
-  readonly registry: AnchorWorksceneRegistry;
+  readonly anchorEpoch: number;
+  readonly globalState: GlobalStatePort;
   readonly bindings?: WorkspaceBindingMigrationPort;
   readonly abort?: AbortSignal;
 }): Promise<void> {
@@ -69,14 +73,16 @@ export async function migrateLegacyWorkscenes(options: {
       },
       abort,
     );
-    await options.registry.applyMigration(
+    await applyMigration(
+      options.globalState,
       {
         kind: "workscene-abandon-legacy-import",
         migrationId: report.migrationId,
         sourceSnapshotToken: report.sourceSnapshotToken,
         reason: "Legacy source changed before cutover",
       },
-      { requestId: `legacy-abandon:${report.migrationId}` },
+      `legacy-abandon:${report.migrationId}`,
+      options.anchorEpoch,
     );
     report = { ...report, status: "abandoned", reason: "source-changed" };
     await writeReport(reportPath, report);
@@ -102,7 +108,8 @@ export async function migrateLegacyWorkscenes(options: {
   );
   for (const scene of imports) {
     abort.throwIfAborted();
-    await options.registry.applyMigration(
+    await applyMigration(
+      options.globalState,
       {
         kind: "workscene-import-legacy",
         migrationId: report.migrationId,
@@ -114,12 +121,33 @@ export async function migrateLegacyWorkscenes(options: {
           createdAt: scene.createdAt,
         },
       },
-      { requestId: `legacy-import:${report.migrationId}:${scene.id}` },
+      `legacy-import:${report.migrationId}:${scene.id}`,
+      options.anchorEpoch,
     );
   }
 
-  const current = await readLegacySnapshot();
-  if (!current || current.digest !== report.sourceDigest) {
+  const activated = await withLegacyWorksceneWriteFence(async () => {
+    const current = await readLegacySnapshot();
+    if (!current || current.digest !== report.sourceDigest) return false;
+    await applyMigration(
+      options.globalState,
+      {
+        kind: "workscene-activate-device-registry",
+        migrationId: report.migrationId,
+        sourceSnapshotToken: report.sourceSnapshotToken,
+        importSetDigest: worksceneImportSetDigest(imports),
+      },
+      `legacy-activate:${report.migrationId}`,
+      options.anchorEpoch,
+    );
+    await markLegacyWorksceneCutover({
+      migrationId: report.migrationId,
+      sourceSnapshotToken: report.sourceSnapshotToken,
+      sourceDigest: report.sourceDigest,
+    });
+    return true;
+  });
+  if (!activated) {
     await options.bindings?.abandonLegacy(
       {
         migrationId: report.migrationId,
@@ -128,14 +156,16 @@ export async function migrateLegacyWorkscenes(options: {
       },
       abort,
     );
-    await options.registry.applyMigration(
+    await applyMigration(
+      options.globalState,
       {
         kind: "workscene-abandon-legacy-import",
         migrationId: report.migrationId,
         sourceSnapshotToken: report.sourceSnapshotToken,
         reason: "Legacy source changed before cutover",
       },
-      { requestId: `legacy-abandon:${report.migrationId}` },
+      `legacy-abandon:${report.migrationId}`,
+      options.anchorEpoch,
     );
     await writeReport(reportPath, {
       ...report,
@@ -145,15 +175,6 @@ export async function migrateLegacyWorkscenes(options: {
     return migrateLegacyWorkscenes(options);
   }
 
-  await options.registry.applyMigration(
-    {
-      kind: "workscene-activate-device-registry",
-      migrationId: report.migrationId,
-      sourceSnapshotToken: report.sourceSnapshotToken,
-      importSetDigest: worksceneImportSetDigest(imports),
-    },
-    { requestId: `legacy-activate:${report.migrationId}` },
-  );
   // The anchor cutover is the public authority fact. Binding activation follows
   // while startup is still closed; a crash between them replays this exact
   // activation before any serving port can observe the new registry.
@@ -254,6 +275,20 @@ async function materializeImports(
       }
       return imported;
     });
+}
+
+async function applyMigration(
+  globalState: GlobalStatePort,
+  mutation: WorksceneMigrationMutation,
+  requestId: string,
+  anchorEpoch: number,
+): Promise<void> {
+  await globalState.mutate(mutation, {
+    principal: { kind: "host", component: "workscene-migration-owner" },
+    requestId,
+    authority: { domain: "global", anchorEpoch },
+    deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+  });
 }
 
 function workspaceNameCandidates(

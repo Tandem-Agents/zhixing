@@ -536,6 +536,7 @@ const conversationSurface: AccessSurface = {
     await protocol.recoverReadinessProjections();
     ctx.conversations = manager;
     ctx.conversationProtocol = protocol;
+    ctx.conversationAuthorityRef.current = protocol;
   },
 };
 

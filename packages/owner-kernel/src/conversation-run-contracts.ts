@@ -59,6 +59,14 @@ export type ConversationRunJournalRecord =
       readonly requestId: string;
     }
   | {
+      readonly t: "session-meta";
+      readonly operation: "create" | "touch" | "delete";
+      readonly domainRevision: number;
+      readonly requestId: string;
+      readonly sceneId: string;
+      readonly lastActiveAt: string;
+    }
+  | {
       readonly t: "admitted";
       readonly ingressKey: string;
       readonly runId: string;
@@ -204,6 +212,7 @@ export type ConversationRunInternalRecord =
 
 export const CONVERSATION_RUN_INTERNAL_RECORD_TYPES = [
   "content-asset-index",
+  "session-activity",
   "conversation-commit-projection",
   "conversation-lifecycle-projection",
 ] as const satisfies readonly ConversationRunInternalRecord["kind"][];
@@ -216,6 +225,16 @@ interface RecordShape {
 export const CONVERSATION_RUN_RECORD_SHAPES = {
   "session-lifecycle": {
     required: ["domainRevision", "mutation", "requestId", "t"],
+  },
+  "session-meta": {
+    required: [
+      "domainRevision",
+      "lastActiveAt",
+      "operation",
+      "requestId",
+      "sceneId",
+      "t",
+    ],
   },
   admitted: {
     required: [
@@ -360,6 +379,22 @@ export function validateConversationRunRecord(
           "Session lifecycle domain revision",
         );
         assertIdentifier(value.requestId, "Session lifecycle request id");
+        break;
+      case "session-meta":
+        if (
+          value.operation !== "create" &&
+          value.operation !== "touch" &&
+          value.operation !== "delete"
+        ) {
+          throw corruptRunJournal("Session metadata operation is invalid");
+        }
+        assertPositiveSafeInteger(
+          value.domainRevision,
+          "Session metadata domain revision",
+        );
+        assertIdentifier(value.requestId, "Session metadata request id");
+        assertIdentifier(value.sceneId, "Session metadata scene id");
+        assertCanonicalTime(value.lastActiveAt, "Session metadata activity time");
         break;
       case "admitted": {
         assertIdentifier(value.ingressKey, "Admitted ingress key");
@@ -600,6 +635,31 @@ export function validateConversationRunInternalRecord(
       "Conversation lifecycle projection domain revision",
     );
     assertIdentifier(value.requestId, "Conversation lifecycle projection request id");
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "session-activity") {
+    assertExactRecordKeys(
+      value,
+      [
+        "at",
+        "conversationId",
+        "kind",
+        "operation",
+        "sceneId",
+        "sessionRevision",
+      ],
+      "Session activity record",
+    );
+    if (value.operation !== "put" && value.operation !== "tombstone") {
+      throw corruptRunJournal("Session activity operation is invalid");
+    }
+    assertIdentifier(value.conversationId, "Session activity conversation id");
+    assertIdentifier(value.sceneId, "Session activity scene id");
+    assertPositiveSafeInteger(
+      value.sessionRevision,
+      "Session activity revision",
+    );
+    assertCanonicalTime(value.at, "Session activity time");
     return value as ConversationRunInternalRecord;
   }
   if (value.kind !== "content-asset-index") {

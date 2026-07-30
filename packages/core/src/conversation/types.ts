@@ -108,7 +108,7 @@ export interface IConversationRepository {
   delete(id: string): Promise<void>;
   ensureDefault(): Promise<Conversation>;
   findLatest(): Promise<string | null>;
-  touch(id: string): Promise<void>;
+  touch(id: string, at?: string): Promise<void>;
   /**
    * 清空视图层状态字段（taskListState + segmentMetadata）—— `/clear` 命令路径。
    *

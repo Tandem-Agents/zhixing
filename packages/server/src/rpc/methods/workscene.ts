@@ -137,6 +137,29 @@ function localTransferToken(value: unknown, method: string): string {
   return value;
 }
 
+function requireLocalSettingsAccess(
+  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
+  method: string,
+): void {
+  if (!ctx.connection.loopback) {
+    throw RpcErrors.unauthorized(`${method} is available only on this device`);
+  }
+}
+
+function nonNegativeRevision(value: unknown, method: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw RpcErrors.invalidParams(`${method} requires 'expectedRevision'`);
+  }
+  return value as number;
+}
+
+function requiredText(value: unknown, method: string, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw RpcErrors.invalidParams(`${method} requires '${field}'`);
+  }
+  return value;
+}
+
 async function mapWorksceneErrors<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -181,6 +204,7 @@ export function buildWorksceneAuthorizeLocalWorkspaceMethod(): MethodEntry {
     name: "workscene.authorizeLocalWorkspace",
     requiresAuth: true,
     async handler(rawParams, ctx) {
+      requireLocalSettingsAccess(ctx, "workscene.authorizeLocalWorkspace");
       const params = requireOnlyFields(
         rawParams ?? {},
         "workscene.authorizeLocalWorkspace",
@@ -202,6 +226,163 @@ export function buildWorksceneAuthorizeLocalWorkspaceMethod(): MethodEntry {
         displayName: binding.displayName,
         workspaceBindingRevision: binding.workspaceBindingRevision,
       };
+    },
+  };
+}
+
+export function buildLocalWorkspaceStatusMethod(): MethodEntry {
+  return {
+    name: "workspace.localStatus",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      requireLocalSettingsAccess(ctx, "workspace.localStatus");
+      requireOnlyFields(rawParams ?? {}, "workspace.localStatus", []);
+      const operation = requireWorkscenes(ctx.server).localWorkspaceStatus;
+      if (!operation) {
+        throw RpcErrors.notFound("Local workspace recovery is unavailable");
+      }
+      return operation();
+    },
+  };
+}
+
+export function buildLocalWorkspaceListMethod(): MethodEntry {
+  return {
+    name: "workspace.localList",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      requireLocalSettingsAccess(ctx, "workspace.localList");
+      requireOnlyFields(rawParams ?? {}, "workspace.localList", []);
+      const operation = requireWorkscenes(ctx.server).listLocalWorkspaces;
+      if (!operation) {
+        throw RpcErrors.notFound("Local workspace administration is unavailable");
+      }
+      return { workspaces: await operation() };
+    },
+  };
+}
+
+export function buildLocalWorkspaceRenameMethod(): MethodEntry {
+  return {
+    name: "workspace.localRename",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const method = "workspace.localRename";
+      requireLocalSettingsAccess(ctx, method);
+      const params = requireOnlyFields(rawParams ?? {}, method, [
+        "bindingRef",
+        "displayName",
+        "expectedRevision",
+        "requestId",
+      ]);
+      const operation = requireWorkscenes(ctx.server).renameLocalWorkspace;
+      if (!operation) {
+        throw RpcErrors.notFound("Local workspace administration is unavailable");
+      }
+      return operation({
+        bindingRef: requiredText(params.bindingRef, method, "bindingRef"),
+        displayName: requiredText(params.displayName, method, "displayName"),
+        expectedRevision: nonNegativeRevision(params.expectedRevision, method),
+        requestId: requestId(params.requestId, method),
+      });
+    },
+  };
+}
+
+export function buildLocalWorkspaceRepathMethod(): MethodEntry {
+  return {
+    name: "workspace.localRepath",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const method = "workspace.localRepath";
+      requireLocalSettingsAccess(ctx, method);
+      const params = requireOnlyFields(rawParams ?? {}, method, [
+        "bindingRef",
+        "expectedRevision",
+        "transferToken",
+      ]);
+      const operation =
+        requireWorkscenes(ctx.server).repathLocalWorkspaceTransfer;
+      if (!operation) {
+        throw RpcErrors.notFound("Local workspace administration is unavailable");
+      }
+      return operation({
+        bindingRef: requiredText(params.bindingRef, method, "bindingRef"),
+        expectedRevision: nonNegativeRevision(params.expectedRevision, method),
+        transferToken: localTransferToken(params.transferToken, method),
+      });
+    },
+  };
+}
+
+export function buildLocalWorkspaceRemoveMethod(): MethodEntry {
+  return {
+    name: "workspace.localRemove",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const method = "workspace.localRemove";
+      requireLocalSettingsAccess(ctx, method);
+      const params = requireOnlyFields(rawParams ?? {}, method, [
+        "bindingRef",
+        "expectedRevision",
+        "requestId",
+      ]);
+      const operation = requireWorkscenes(ctx.server).removeLocalWorkspace;
+      if (!operation) {
+        throw RpcErrors.notFound("Local workspace administration is unavailable");
+      }
+      await operation({
+        bindingRef: requiredText(params.bindingRef, method, "bindingRef"),
+        expectedRevision: nonNegativeRevision(params.expectedRevision, method),
+        requestId: requestId(params.requestId, method),
+      });
+      return { ok: true };
+    },
+  };
+}
+
+export function buildLocalWorkspaceResetMethod(): MethodEntry {
+  return {
+    name: "workspace.localReset",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const method = "workspace.localReset";
+      requireLocalSettingsAccess(ctx, method);
+      const params = requireOnlyFields(rawParams ?? {}, method, [
+        "expectedCatalogGeneration",
+        "requestId",
+        "confirmationToken",
+        "confirmationIssuedAt",
+        "confirmedImpact",
+      ]);
+      const operation =
+        requireWorkscenes(ctx.server).resetLocalWorkspaceCatalog;
+      if (!operation) {
+        throw RpcErrors.notFound("Local workspace recovery is unavailable");
+      }
+      return operation({
+        expectedCatalogGeneration: requiredText(
+          params.expectedCatalogGeneration,
+          method,
+          "expectedCatalogGeneration",
+        ),
+        requestId: requestId(params.requestId, method),
+        confirmationToken: requiredText(
+          params.confirmationToken,
+          method,
+          "confirmationToken",
+        ),
+        confirmationIssuedAt: requiredText(
+          params.confirmationIssuedAt,
+          method,
+          "confirmationIssuedAt",
+        ),
+        confirmedImpact: requiredText(
+          params.confirmedImpact,
+          method,
+          "confirmedImpact",
+        ),
+      });
     },
   };
 }
@@ -349,6 +530,7 @@ export function buildWorksceneEnterMethod(): MethodEntry {
     async handler(rawParams, ctx) {
       const params = requireOnlyFields(rawParams ?? {}, "workscene.enter", [
         "sceneId",
+        "requestId",
       ]);
       if (typeof params.sceneId !== "string") {
         throw RpcErrors.invalidParams("workscene.enter requires 'sceneId'");
@@ -356,7 +538,9 @@ export function buildWorksceneEnterMethod(): MethodEntry {
       const sceneId = params.sceneId;
       const workscenes = requireWorkscenes(ctx.server);
       const entered = await mapWorksceneErrors(() =>
-        workscenes.enterScene(sceneId, String(ctx.connection.id)),
+        workscenes.enterScene(sceneId, String(ctx.connection.id), {
+          requestId: requestId(params.requestId, "workscene.enter"),
+        }),
       );
       if (!entered) {
         throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
@@ -390,6 +574,7 @@ export function buildWorksceneExitMethod(): MethodEntry {
       const params = requireOnlyFields(rawParams ?? {}, "workscene.exit", [
         "sceneId",
         "conversationId",
+        "requestId",
       ]);
       if (typeof params.sceneId !== "string") {
         throw RpcErrors.invalidParams("workscene.exit requires 'sceneId'");
@@ -402,6 +587,7 @@ export function buildWorksceneExitMethod(): MethodEntry {
           params.sceneId,
           params.conversationId,
           new Date().toISOString(),
+          requestId(params.requestId, "workscene.exit"),
         )
         .catch(() => {});
       return { ok: true };

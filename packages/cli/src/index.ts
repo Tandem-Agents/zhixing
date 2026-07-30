@@ -141,6 +141,17 @@ function parsePairingMethod(value: string): "qr" | "short" {
   return value;
 }
 
+function parseRevision(value: string): number {
+  if (!/^\d+$/u.test(value)) {
+    throw new InvalidArgumentError("revision 必须是非负整数");
+  }
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision)) {
+    throw new InvalidArgumentError("revision 超出安全整数范围");
+  }
+  return revision;
+}
+
 program
   .name("zhixing")
   .description("知行 — 智能体引擎")
@@ -242,6 +253,121 @@ program
       await renderActionError(err);
       process.exit(1);
     }
+  });
+
+const workspaceCmd = program
+  .command("workspace")
+  .description("管理本机已授权工作区");
+
+workspaceCmd
+  .command("status")
+  .description("查看本机工作区目录状态")
+  .action(async () => {
+    const { runWorkspaceCommand } = await import(
+      "./runtime/workspace-command.js"
+    );
+    await runWorkspaceCommand((workspace) => workspace.status());
+  });
+
+workspaceCmd
+  .command("list")
+  .description("列出本机已授权工作区")
+  .action(async () => {
+    const { runWorkspaceCommand } = await import(
+      "./runtime/workspace-command.js"
+    );
+    await runWorkspaceCommand((workspace) => workspace.list());
+  });
+
+workspaceCmd
+  .command("create")
+  .description("授权一个本机工作区")
+  .argument("<name>", "工作区名称")
+  .argument("<path>", "本机目录路径")
+  .action(async (name: string, targetPath: string) => {
+    const { runWorkspaceCommand } = await import(
+      "./runtime/workspace-command.js"
+    );
+    await runWorkspaceCommand((workspace) =>
+      workspace.create(name, targetPath),
+    );
+  });
+
+workspaceCmd
+  .command("rename")
+  .description("修改本机工作区名称")
+  .argument("<binding-ref>", "工作区引用")
+  .argument("<name>", "新名称")
+  .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
+  .action(
+    async (
+      bindingRef: string,
+      name: string,
+      options: { revision: number },
+    ) => {
+      const { runWorkspaceCommand } = await import(
+        "./runtime/workspace-command.js"
+      );
+      await runWorkspaceCommand((workspace) =>
+        workspace.rename(bindingRef, name, options.revision),
+      );
+    },
+  );
+
+workspaceCmd
+  .command("repath")
+  .description("修改本机工作区目录")
+  .argument("<binding-ref>", "工作区引用")
+  .argument("<path>", "新目录路径")
+  .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
+  .action(
+    async (
+      bindingRef: string,
+      targetPath: string,
+      options: { revision: number },
+    ) => {
+      const { runWorkspaceCommand } = await import(
+        "./runtime/workspace-command.js"
+      );
+      await runWorkspaceCommand((workspace) =>
+        workspace.repath(bindingRef, targetPath, options.revision),
+      );
+    },
+  );
+
+workspaceCmd
+  .command("remove")
+  .description("移除本机工作区授权")
+  .argument("<binding-ref>", "工作区引用")
+  .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
+  .action(async (bindingRef: string, options: { revision: number }) => {
+    const { runWorkspaceCommand } = await import(
+      "./runtime/workspace-command.js"
+    );
+    await runWorkspaceCommand(async (workspace) => {
+      await workspace.remove(bindingRef, options.revision);
+      return { removed: bindingRef };
+    });
+  });
+
+workspaceCmd
+  .command("reset")
+  .description("灾难恢复本机工作区目录")
+  .requiredOption("--generation <id>", "当前目录世代")
+  .requiredOption("--confirm <text>", "完整输入命令提示的影响说明")
+  .action(async (options: { generation: string; confirm: string }) => {
+    const {
+      runWorkspaceCommand,
+      WORKSPACE_CATALOG_RESET_IMPACT,
+    } = await import("./runtime/workspace-command.js");
+    if (options.confirm !== WORKSPACE_CATALOG_RESET_IMPACT) {
+      throw new InvalidArgumentError(
+        `必须完整确认：${WORKSPACE_CATALOG_RESET_IMPACT}`,
+      );
+    }
+    await runWorkspaceCommand((workspace) =>
+      workspace.reset(options.generation, options.confirm),
+    );
   });
 
 // ─── zhixing serve（常驻服务模式） ───

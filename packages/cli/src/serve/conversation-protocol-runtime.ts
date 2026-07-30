@@ -565,6 +565,26 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return this.#journal(conversationId).interactionOutcome(requestId);
   }
 
+  touchWorksceneSession(input: {
+    readonly conversationId: string;
+    readonly sceneId: string;
+    readonly requestId: string;
+    readonly at: string;
+  }): Promise<{ readonly revision: number; readonly at: string }> {
+    return this.#journal(input.conversationId).touchWorksceneSession(input);
+  }
+
+  deleteWorksceneSession(input: {
+    readonly conversationId: string;
+    readonly sceneId: string;
+    readonly requestId: string;
+    readonly at: string;
+  }): Promise<
+    { readonly revision: number; readonly at: string } | undefined
+  > {
+    return this.#journal(input.conversationId).deleteWorksceneSession(input);
+  }
+
   async cancel(
     input: DurableConversationCancelInput,
   ): Promise<DurableConversationCancellationResult> {

@@ -39,10 +39,12 @@ import type {
   EnvironmentRequirement,
   ExecutionManifest,
   ExplicitEnvironmentSelection,
+  GlobalStatePort,
   SecretStorePort,
   TrustRuleSnapshot,
   WorkspaceBindingAdminPort,
   WorkspaceBindingMigrationPort,
+  WorkspaceBindingRecoveryPort,
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
@@ -71,11 +73,15 @@ import {
   EnvironmentProbeOwner,
   preflightWorkspaceRequirement,
   selectExecutorForEnvironment,
-  WorkspaceBindingService,
+  WorkspaceBindingCatalog,
   WorkspaceProbeHandler,
   type WorkspaceProbePort,
 } from "@zhixing/core/environment";
-import { AnchorWorksceneRegistry, parseConversationId } from "@zhixing/core";
+import {
+  AnchorWorksceneGlobalStateAdapter,
+  getWorkSceneDir,
+  parseConversationId,
+} from "@zhixing/core";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -133,9 +139,17 @@ export interface AuthorityRuntimeStack {
   readonly environment?: EnvironmentPort;
   readonly workspaceBindingAdmin?: WorkspaceBindingAdminPort;
   readonly workspaceBindingMigration?: WorkspaceBindingMigrationPort;
+  readonly workspaceBindingRecovery?: WorkspaceBindingRecoveryPort;
   readonly workspaceProbe?: WorkspaceProbePort;
   readonly environmentProbeOwner?: EnvironmentProbeOwner;
-  readonly worksceneRegistry?: AnchorWorksceneRegistry;
+  readonly globalState?: GlobalStatePort;
+  readonly worksceneGlobalState?: AnchorWorksceneGlobalStateAdapter;
+  readonly installWorksceneCleanup: (
+    cleanup: (
+      sceneId: string,
+      conversationIds: readonly string[],
+    ) => Promise<void>,
+  ) => void;
   readonly workspaceCatalog: () => readonly {
     executorId: string;
     deviceId: string;
@@ -279,8 +293,14 @@ export async function setupAuthorityRuntime(
   let surfaceAssets:
     | ReturnType<typeof createSurfaceAssetAuthority>
     | undefined;
+  let worksceneGlobalState:
+    | AnchorWorksceneGlobalStateAdapter
+    | undefined;
+  let workspaceBindings: WorkspaceBindingCatalog | undefined;
   const stopStorageMaintenance = () => {
     surfaceAssets?.stopStorageMaintenance();
+    worksceneGlobalState?.stop();
+    workspaceBindings?.stop();
     authorityLog?.stopStorageMaintenance();
     executorLog?.stopStorageMaintenance();
   };
@@ -548,7 +568,6 @@ export async function setupAuthorityRuntime(
     capabilityDirectoryEstablished = true;
     return snapshotUpdate.snapshot;
   };
-  let workspaceBindings: WorkspaceBindingService | undefined;
   let workspaceProbe: WorkspaceProbeHandler | undefined;
   if (localExecutorEnabled) {
     if (!options.deviceCapacity) {
@@ -556,40 +575,61 @@ export async function setupAuthorityRuntime(
       // device runtime. Production assembly always supplies it; the local
       // environment ports remain physically absent otherwise.
     } else {
-      workspaceBindings = new WorkspaceBindingService({
-        rootDir: path.join(authorityRoot, "workspace-bindings"),
-        deviceId: key.deviceId,
-        executorId,
-        log: executorLog!,
-        verifier,
-        capacity: options.deviceCapacity,
-        migrationRunner: new StorageMaintenanceTaskRunner(
+      const bindingRoot = path.join(authorityRoot, "workspace-bindings");
+      const bindingArtifacts = new FileArtifactStore(
+        path.join(bindingRoot, "artifacts"),
+      );
+      workspaceBindings = new WorkspaceBindingCatalog({
+        rootDir: bindingRoot,
+        initialLog: executorLog!,
+        createGenerationLog: (generation) =>
+          new FileAuthorityCommitLog(
+            path.join(bindingRoot, "catalogs", generation),
+            bindingArtifacts,
+            {
+              storageMaintenance: options.storageMaintenance,
+              clock,
+            },
+          ),
+        service: {
+          deviceId: key.deviceId,
+          executorId,
+          verifier,
+          capacity: options.deviceCapacity,
+          migrationRunner: new StorageMaintenanceTaskRunner(
+            options.storageMaintenance,
+          ),
+          capabilitySnapshot: async (workspaces) => {
+            publishedWorkspaces = workspaces.map((workspace) => ({ ...workspace }));
+            return (
+              await publicationQueue.run(async () =>
+                publishLocalExecutorSnapshot(
+                  await permissionSnapshots.highWater(),
+                  readinessSource(),
+                  publishedWorkspaces,
+                ),
+              )
+            ).descriptor;
+          },
+          versionInventory: async () =>
+            (
+              await publicationQueue.run(async () =>
+                publishLocalExecutorSnapshot(
+                  await permissionSnapshots.highWater(),
+                  readinessSource(),
+                  publishedWorkspaces,
+                ),
+              )
+            ).inventory,
+          clock,
+        },
+        recoveryRunner: new StorageMaintenanceTaskRunner(
           options.storageMaintenance,
         ),
-        capabilitySnapshot: async (workspaces) => {
-          publishedWorkspaces = workspaces.map((workspace) => ({ ...workspace }));
-          return (
-            await publicationQueue.run(async () =>
-              publishLocalExecutorSnapshot(
-                await permissionSnapshots.highWater(),
-                readinessSource(),
-                publishedWorkspaces,
-              ),
-            )
-          ).descriptor;
-        },
-        versionInventory: async () =>
-          (
-            await publicationQueue.run(async () =>
-              publishLocalExecutorSnapshot(
-                await permissionSnapshots.highWater(),
-                readinessSource(),
-                publishedWorkspaces,
-              ),
-            )
-          ).inventory,
+        storageMaintenance: options.storageMaintenance,
         clock,
       });
+      await workspaceBindings.initialize();
       workspaceProbe = new WorkspaceProbeHandler({
         rootDir: path.join(authorityRoot, "workspace-probes"),
         executorId,
@@ -609,10 +649,23 @@ export async function setupAuthorityRuntime(
         clock,
       })
     : undefined;
-  const worksceneRegistry = authorityLog
-    ? new AnchorWorksceneRegistry({ log: authorityLog, clock })
-    : undefined;
-  if (worksceneRegistry && anchorEnabled) {
+  let worksceneCleanup = (
+    sceneId: string,
+    _conversationIds: readonly string[],
+  ) =>
+    fsp.rm(getWorkSceneDir(sceneId), { recursive: true, force: true });
+  worksceneGlobalState =
+    authorityLog
+      ? new AnchorWorksceneGlobalStateAdapter({
+          log: authorityLog,
+          anchorEpoch,
+          removeScene: (sceneId, conversationIds) =>
+            worksceneCleanup(sceneId, conversationIds),
+          storageMaintenance: options.storageMaintenance,
+          clock,
+        })
+      : undefined;
+  if (worksceneGlobalState && anchorEnabled) {
     await migrateLegacyWorkscenes({
       rootDir: path.join(
         options.zhixingHome,
@@ -620,7 +673,8 @@ export async function setupAuthorityRuntime(
         "workscene-migration",
       ),
       deviceId: key.deviceId,
-      registry: worksceneRegistry,
+      anchorEpoch,
+      globalState: worksceneGlobalState,
       ...(workspaceBindings ? { bindings: workspaceBindings } : {}),
     });
   }
@@ -662,9 +716,27 @@ export async function setupAuthorityRuntime(
       input.executionProfile,
     );
     const parsedConversation = parseConversationId(input.conversationId);
+    const worksceneRead =
+      parsedConversation.scope.kind === "workscene" && worksceneGlobalState
+        ? await worksceneGlobalState.read(
+            {
+              kind: "workscene-get",
+              sceneId: parsedConversation.scope.sceneId,
+            },
+            {
+              principal: {
+                kind: "host",
+                component: "conversation-assignment-owner",
+              },
+              requestId: `workscene-get:${input.conversationId}`,
+              authority: { domain: "global", anchorEpoch },
+              deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+            },
+          )
+        : undefined;
     const workscene =
-      parsedConversation.scope.kind === "workscene" && worksceneRegistry
-        ? await worksceneRegistry.get(parsedConversation.scope.sceneId)
+      worksceneRead?.kind === "workscene-get"
+        ? worksceneRead.scene ?? undefined
         : undefined;
     const environmentRequirement = deriveEnvironmentRequirement({
       ...(input.environment ? { explicit: input.environment } : {}),
@@ -966,9 +1038,14 @@ export async function setupAuthorityRuntime(
     environment: workspaceBindings,
     workspaceBindingAdmin: workspaceBindings,
     workspaceBindingMigration: workspaceBindings,
+    workspaceBindingRecovery: workspaceBindings,
     workspaceProbe,
     environmentProbeOwner,
-    worksceneRegistry,
+    globalState: worksceneGlobalState,
+    worksceneGlobalState,
+    installWorksceneCleanup: (cleanup) => {
+      worksceneCleanup = cleanup;
+    },
     workspaceCatalog: () =>
       executorCapabilities
         .activeSnapshots()

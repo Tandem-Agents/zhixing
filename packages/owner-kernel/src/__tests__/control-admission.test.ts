@@ -1029,3 +1029,99 @@ describe("ControlAdmissionJournal", () => {
     ).toThrow("not derived from its responder");
   });
 });
+
+describe("workscene session owner metadata", () => {
+  it("commits metadata and activity atomically and replays exact owner requests", async () => {
+    const { artifacts, log } = await createHarness();
+    const conversationId = "ws:scene-1:primary";
+    const journal = new ConversationRunJournal({
+      conversationId,
+      ownerEpoch: 1,
+      log,
+      artifacts,
+      signer,
+      verifier,
+      submission: {
+        authenticate() {},
+        authorize() {},
+      },
+      authority: {
+        decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
+      },
+      projection: { async project() {} },
+      delivery: new OwnerDeliveryParticipant({
+        authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
+      }),
+      clock: () => NOW,
+    });
+
+    await expect(
+      journal.touchWorksceneSession({
+        requestId: "enter-1",
+        sceneId: "scene-1",
+        at: NOW,
+      }),
+    ).resolves.toEqual({ revision: 1, at: NOW });
+    await expect(
+      journal.touchWorksceneSession({
+        requestId: "enter-1",
+        sceneId: "scene-1",
+        at: "2026-07-13T08:00:00.500Z",
+      }),
+    ).resolves.toEqual({ revision: 1, at: NOW });
+
+    const commitsAfterReplay = await log.readAll();
+    expect(commitsAfterReplay).toHaveLength(1);
+    expect(commitsAfterReplay[0]!.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stream: `run:${conversationId}`,
+          body: expect.objectContaining({
+            t: "session-meta",
+            operation: "create",
+            domainRevision: 1,
+          }),
+        }),
+        expect.objectContaining({
+          stream: `session-activity:${conversationId}`,
+          body: expect.objectContaining({
+            kind: "session-activity",
+            operation: "put",
+            sessionRevision: 1,
+          }),
+        }),
+      ]),
+    );
+
+    const deletedAt = "2026-07-13T08:00:01.000Z";
+    await expect(
+      journal.deleteWorksceneSession({
+        requestId: "delete-1",
+        sceneId: "scene-1",
+        at: deletedAt,
+      }),
+    ).resolves.toEqual({ revision: 2, at: deletedAt });
+    const commits = await log.readAll();
+    expect(commits).toHaveLength(2);
+    expect(commits[1]!.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stream: `run:${conversationId}`,
+          body: expect.objectContaining({
+            t: "session-meta",
+            operation: "delete",
+            domainRevision: 2,
+          }),
+        }),
+        expect.objectContaining({
+          stream: `session-activity:${conversationId}`,
+          body: expect.objectContaining({
+            kind: "session-activity",
+            operation: "tombstone",
+            sessionRevision: 2,
+          }),
+        }),
+      ]),
+    );
+  });
+});

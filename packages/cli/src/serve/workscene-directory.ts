@@ -1,17 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
 import {
-  ConversationRepository,
-  getWorkSceneDir,
   normalizeSceneName,
-  parseConversationId,
-  WorksceneActivityProjection,
-  WORKSCENE_CONVERSATION_PREFIX,
-  worksceneConversationId,
-  type AnchorWorksceneRegistry,
 } from "@zhixing/core";
 import type {
   AuthorityCallContext,
+  GlobalControlCallContext,
+  GlobalStatePort,
   ImmediateRootResourceLease,
   LocalWorkspaceBinding,
   WorksceneDto,
@@ -19,68 +13,145 @@ import type {
 } from "@zhixing/core/contracts";
 import { localEnvironmentControlSubject } from "@zhixing/core/environment";
 import { environmentControlSubject } from "@zhixing/core/protocol";
+import {
+  runStorageMaintenanceStep,
+  storageMaintenanceRequest,
+  type StorageMaintenanceGovernorPort,
+} from "@zhixing/core/resources";
 import type {
   WorksceneDirectory,
   WorksceneWriteResult,
 } from "@zhixing/server";
 import type { WorksceneToolDirectory } from "@zhixing/runtime-host";
 import type { ConversationManager } from "@zhixing/owner-kernel";
-import {
-  runStorageMaintenanceStep,
-  runInMaintenanceContext,
-  storageMaintenanceRequest,
-  type StorageMaintenanceGovernorPort,
-  type StorageMaintenanceUrgency,
-} from "@zhixing/core/resources";
+import type { ConversationDirectory } from "@zhixing/server";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import {
   readLocalWorkspaceTransfer,
   removeLocalWorkspaceTransfer,
 } from "../runtime/local-workspace-transfer.js";
+import { WORKSPACE_CATALOG_RESET_IMPACT } from "../runtime/workspace-reset-impact.js";
+import { WorksceneSessionOwner } from "./workscene-session-owner.js";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
+export { WORKSPACE_CATALOG_RESET_IMPACT };
 
 export interface LocalWorkspaceDirectory {
   recover(): Promise<void>;
   authorizeLocalWorkspaceTransfer(
     token: string,
   ): Promise<LocalWorkspaceBinding & { deviceId: string }>;
+  localWorkspaceStatus(): Promise<{
+    state: "healthy" | "degraded";
+    catalogGeneration: string;
+    reason?: string;
+    resetImpact?: string;
+  }>;
+  listLocalWorkspaces(): Promise<LocalWorkspaceBinding[]>;
+  createLocalWorkspace(
+    input: { displayName: string; absolutePath: string; requestId: string },
+  ): Promise<LocalWorkspaceBinding>;
+  renameLocalWorkspace(
+    input: {
+      bindingRef: string;
+      displayName: string;
+      expectedRevision: number;
+      requestId: string;
+    },
+  ): Promise<LocalWorkspaceBinding>;
+  repathLocalWorkspace(
+    input: {
+      bindingRef: string;
+      absolutePath: string;
+      expectedRevision: number;
+      requestId: string;
+    },
+  ): Promise<LocalWorkspaceBinding>;
+  repathLocalWorkspaceTransfer(input: {
+    bindingRef: string;
+    expectedRevision: number;
+    transferToken: string;
+  }): Promise<LocalWorkspaceBinding>;
+  removeLocalWorkspace(input: {
+    bindingRef: string;
+    expectedRevision: number;
+    requestId: string;
+  }): Promise<void>;
+  resetLocalWorkspaceCatalog(input: {
+    expectedCatalogGeneration: string;
+    requestId: string;
+    confirmationToken: string;
+    confirmationIssuedAt: string;
+    confirmedImpact: string;
+  }): Promise<import("@zhixing/core/contracts").WorkspaceBindingResetReceipt>;
 }
 
 export function createWorksceneDirectory(deps: {
   authority: () => AuthorityRuntimeStack | undefined;
   conversations?: () => ConversationManager | null;
+  conversationAuthority: () =>
+    | {
+        touchWorksceneSession(input: {
+          conversationId: string;
+          sceneId: string;
+          requestId: string;
+          at: string;
+        }): Promise<{ readonly revision: number; readonly at: string }>;
+        deleteWorksceneSession(input: {
+          conversationId: string;
+          sceneId: string;
+          requestId: string;
+          at: string;
+        }): Promise<
+          { readonly revision: number; readonly at: string } | undefined
+        >;
+      }
+    | undefined;
+  conversationDirectory: ConversationDirectory;
+  storageMaintenance?: StorageMaintenanceGovernorPort;
   probeRemote?: (
     deviceId: string,
     request: Parameters<
       NonNullable<AuthorityRuntimeStack["workspaceProbe"]>["probe"]
     >[0],
   ) => Promise<WorkspaceProbeResult>;
-  activityProjection?: WorksceneActivityProjection;
-  activityProjectionRoot?: string;
-  storageMaintenance?: StorageMaintenanceGovernorPort;
-  removeSceneDirectory?: (sceneId: string) => Promise<void>;
 }): WorksceneDirectory & WorksceneToolDirectory & LocalWorkspaceDirectory {
   const sceneChains = new Map<string, Promise<unknown>>();
-  let deletionRecovery: Promise<void> | undefined;
-  const activityProjection =
-    deps.activityProjection ??
-    (deps.activityProjectionRoot
-      ? new WorksceneActivityProjection({
-          rootDir: deps.activityProjectionRoot,
-          storageMaintenance: deps.storageMaintenance,
-        })
-      : undefined);
+  let sessionOwner: WorksceneSessionOwner | undefined;
 
   const authority = (): AuthorityRuntimeStack => {
     const current = deps.authority();
     if (!current) throw new Error("Workscene authority is not ready");
     return current;
   };
-  const registry = (): AnchorWorksceneRegistry => {
-    const current = authority().worksceneRegistry;
-    if (!current) throw new Error("Anchor workscene registry is unavailable");
+  const globalState = (): GlobalStatePort => {
+    const current = authority().globalState;
+    if (!current) throw new Error("Workscene global state is unavailable");
     return current;
+  };
+  const owner = (): WorksceneSessionOwner => {
+    if (sessionOwner) return sessionOwner;
+    const runtime = authority();
+    sessionOwner = new WorksceneSessionOwner({
+      conversations: () => deps.conversations?.() ?? null,
+      directory: deps.conversationDirectory,
+      authority: deps.conversationAuthority,
+      runCleanupStep: (resourceIdentity, operation) =>
+        runStorageMaintenanceStep(
+          deps.storageMaintenance,
+          storageMaintenanceRequest(
+            "workscene-cleanup",
+            resourceIdentity,
+            {},
+            { obligation: "committed" },
+          ),
+          operation,
+        ),
+    });
+    runtime.installWorksceneCleanup((sceneId, conversationIds) =>
+      sessionOwner!.removeScene(sceneId, conversationIds),
+    );
+    return sessionOwner;
   };
   const inputError = (message: string): Error =>
     Object.assign(new Error(message), {
@@ -96,13 +167,6 @@ export function createWorksceneDirectory(deps: {
       );
     }
   };
-  const busyError = (message: string): Error =>
-    Object.assign(new Error(message), {
-      name: "WorksceneBusyError",
-      code: "WORKSCENE_BUSY",
-    });
-  const sceneConversationPrefix = (sceneId: string): string =>
-    `${WORKSCENE_CONVERSATION_PREFIX}${sceneId}:`;
 
   function runSceneOperation<T>(
     sceneId: string,
@@ -118,95 +182,36 @@ export function createWorksceneDirectory(deps: {
     return task;
   }
 
-  async function projectDeletion(pending: {
-    sceneId: string;
-    deletionRevision: number;
-  }): Promise<void> {
-    await runStorageMaintenanceStep(
-      deps.storageMaintenance,
-      storageMaintenanceRequest(
-        "workscene-cleanup",
-        pending.sceneId,
-        { deletionRevision: pending.deletionRevision },
-        { obligation: "committed" },
-      ),
-      () =>
-        deps.removeSceneDirectory
-          ? deps.removeSceneDirectory(pending.sceneId)
-          : rm(getWorkSceneDir(pending.sceneId), {
-              recursive: true,
-              force: true,
-            }),
-    );
-    await registry().confirmDeletionProjected(
-      pending.sceneId,
-      pending.deletionRevision,
-    );
-  }
-
-  async function recoverPendingDeletions(
-    urgency: StorageMaintenanceUrgency,
-  ): Promise<void> {
-    if (!deps.authority()?.worksceneRegistry) return;
-    if (deletionRecovery) return deletionRecovery;
-    const recovery = runInMaintenanceContext(urgency, async () => {
-      const pending = await registry().pendingDeletions();
-      for (const deletion of pending) {
-        await runSceneOperation(deletion.sceneId, () =>
-          projectDeletion(deletion),
-        );
-      }
-    });
-    deletionRecovery = recovery;
-    try {
-      await recovery;
-    } finally {
-      if (deletionRecovery === recovery) deletionRecovery = undefined;
-    }
-  }
-
   function triggerDeletionRecovery(): void {
-    void recoverPendingDeletions("recovery").catch(() => {});
+    void authority().worksceneGlobalState?.recoverPendingDeletions().catch(() => {});
   }
 
   async function quiesceScene(sceneId: string): Promise<() => void> {
-    const manager = deps.conversations?.();
-    return manager
-      ? manager.quiescePrefix(sceneConversationPrefix(sceneId))
-      : () => {};
+    return owner().quiesce(sceneId);
   }
 
-  async function refreshActivity(
-    scenes: readonly WorksceneDto[],
-  ): Promise<void> {
-    if (!activityProjection) return;
-    await activityProjection.synchronize(
-      await Promise.all(
-        scenes.map(async (scene) => {
-          const sessions = await new ConversationRepository({
-            kind: "workscene",
-            sceneId: scene.id,
-          }).list({ includeArchived: true });
-          return {
-            sceneId: scene.id,
-            sessions: sessions.map(({ id, lastActiveAt }) => ({
-              conversationId: id,
-              lastActiveAt,
-            })),
-          };
-        }),
-      ),
+  function worksceneContext(
+    requestId: string,
+    expectedRevision?: number,
+  ): GlobalControlCallContext {
+    return {
+      principal: { kind: "host", component: "workscene-directory" },
+      requestId,
+      authority: { domain: "global", anchorEpoch: authority().anchorEpoch },
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    };
+  }
+
+  async function readScene(sceneId: string): Promise<WorksceneDto | null> {
+    const result = await globalState().read(
+      { kind: "workscene-get", sceneId },
+      worksceneContext(`workscene-read:${sceneId}:${randomUUID()}`),
     );
-  }
-
-  async function withProjectedActivity(
-    scene: WorksceneDto,
-  ): Promise<WorksceneDto> {
-    if (!activityProjection) return scene;
-    const projected = await activityProjection.get(scene.id);
-    return projected && Date.parse(projected) > Date.parse(scene.lastActiveAt)
-      ? { ...scene, lastActiveAt: projected }
-      : scene;
+    if (result.kind !== "workscene-get") {
+      throw new Error("Workscene global state returned another domain");
+    }
+    return result.scene;
   }
 
   async function withEnvironmentLease<T>(
@@ -244,6 +249,35 @@ export function createWorksceneDirectory(deps: {
         });
       }
     }
+  }
+
+  async function withLocalWorkspaceAdmin<T>(
+    requestId: string,
+    operation: (
+      admin: NonNullable<AuthorityRuntimeStack["workspaceBindingAdmin"]>,
+      control: {
+        requestId: string;
+        lease: ImmediateRootResourceLease;
+        abort: AbortSignal;
+      },
+    ) => Promise<T>,
+  ): Promise<T> {
+    const runtime = authority();
+    const admin = runtime.workspaceBindingAdmin;
+    if (!admin) {
+      throw new Error("Local workspace administration is unavailable");
+    }
+    const subject = localEnvironmentControlSubject(
+      runtime.deviceId,
+      requestId,
+    );
+    return withEnvironmentLease(subject, runtime.executorId, (lease) =>
+      operation(admin, {
+        requestId: subject,
+        lease,
+        abort: new AbortController().signal,
+      }),
+    );
   }
 
   async function probeWorkspace(
@@ -319,44 +353,38 @@ export function createWorksceneDirectory(deps: {
 
   return {
     async recover() {
-      await recoverPendingDeletions("recovery");
+      owner();
+      await authority().worksceneGlobalState?.recoverPendingDeletions();
     },
 
     async list() {
       triggerDeletionRecovery();
-      const scenes = await registry().list();
-      await refreshActivity(scenes).catch(() => {});
-      const projected = await Promise.all(
-        scenes.map((scene) =>
-          withProjectedActivity(scene).catch(() => scene),
-        ),
+      const result = await globalState().read(
+        { kind: "workscene-list" },
+        worksceneContext(`workscene-list:${randomUUID()}`),
       );
-      return projected.sort(
-        (left, right) =>
-          Date.parse(right.lastActiveAt) - Date.parse(left.lastActiveAt) ||
-          left.id.localeCompare(right.id, "en-US"),
-      );
+      if (result.kind !== "workscene-list") {
+        throw new Error("Workscene global state returned another domain");
+      }
+      return result.scenes;
     },
 
     async get(sceneId) {
       triggerDeletionRecovery();
-      const scene = await registry().get(sceneId);
-      if (!scene) return null;
-      await refreshActivity(await registry().list()).catch(() => {});
-      return withProjectedActivity(scene).catch(() => scene);
+      return readScene(sceneId);
     },
 
     async create(options): Promise<WorksceneWriteResult> {
       triggerDeletionRecovery();
       const name = normalizeName(options.name);
       const workspaceWarning = await validateWorkspace(options.workspace);
-      const result = await registry().apply(
+      const result = await globalState().mutate(
         {
           kind: "workscene-create",
           name,
           ...(options.workspace ? { workspace: options.workspace } : {}),
         },
-        { requestId: options.requestId },
+        worksceneContext(options.requestId),
       );
       if (result.kind !== "workscene-applied") {
         throw new Error("Workscene create returned a deletion result");
@@ -369,16 +397,16 @@ export function createWorksceneDirectory(deps: {
 
     async rename(sceneId, name, requestId) {
       triggerDeletionRecovery();
-      const current = await registry().get(sceneId);
+      const current = await readScene(sceneId);
       if (!current) return null;
-      const result = await registry().apply(
+      const result = await globalState().mutate(
         {
           kind: "workscene-rename",
           sceneId,
           name: normalizeName(name),
           expectedRevision: current.revision,
         },
-        { requestId },
+        worksceneContext(requestId, current.revision),
       );
       return result.kind === "workscene-applied" ? result.scene : null;
     },
@@ -387,18 +415,18 @@ export function createWorksceneDirectory(deps: {
       triggerDeletionRecovery();
       return runSceneOperation(sceneId, async () => {
         const workspaceWarning = await validateWorkspace(workspace ?? undefined);
-        const current = await registry().get(sceneId);
+        const current = await readScene(sceneId);
         if (!current) return null;
         const release = await quiesceScene(sceneId);
         try {
-          const result = await registry().apply(
+          const result = await globalState().mutate(
             {
               kind: "workscene-set-workdir",
               sceneId,
               workspace,
               expectedRevision: current.revision,
             },
-            { requestId },
+            worksceneContext(requestId, current.revision),
           );
           if (result.kind !== "workscene-applied") {
             throw new Error("Workscene workspace update returned deletion result");
@@ -415,56 +443,35 @@ export function createWorksceneDirectory(deps: {
 
     async remove(sceneId, requestId) {
       return runSceneOperation(sceneId, async () => {
-        const replay = await registry().replay(requestId);
-        if (replay) {
+        const current = await readScene(sceneId);
+        if (!current) {
+          const replay =
+            await authority().worksceneGlobalState?.replayMutation(requestId);
+          if (!replay) return false;
           if (
             replay.kind !== "workscene-deleted" ||
             replay.sceneId !== sceneId
           ) {
-            throw new Error(
-              "Workscene request identity was reused with another mutation",
+            throw inputError(
+              "工作场景删除请求标识已被另一项操作使用",
             );
           }
-          const pending = (await registry().pendingDeletions()).find(
-            (candidate) => candidate.sceneId === sceneId,
-          );
-          if (pending) {
-            await runInMaintenanceContext("foreground", () =>
-              projectDeletion(pending),
-            );
-          }
+          await authority().worksceneGlobalState?.recoverPendingDeletions();
           return true;
         }
-        const pending = (await registry().pendingDeletions()).find(
-          (candidate) => candidate.sceneId === sceneId,
-        );
-        if (pending) {
-          await runInMaintenanceContext("foreground", () =>
-            projectDeletion(pending),
-          );
-          return true;
-        }
-        const current = await registry().get(sceneId);
-        if (!current) return false;
         const release = await quiesceScene(sceneId);
         try {
-          const result = await registry().apply(
+          const result = await globalState().mutate(
             {
               kind: "workscene-delete",
               sceneId,
               expectedRevision: current.revision,
             },
-            { requestId },
+            worksceneContext(requestId, current.revision),
           );
           if (result.kind !== "workscene-deleted") {
             throw new Error("Workscene delete returned an applied result");
           }
-          await runInMaintenanceContext("foreground", () =>
-            projectDeletion({
-              sceneId,
-              deletionRevision: result.revision,
-            }),
-          );
           return true;
         } finally {
           release();
@@ -472,49 +479,33 @@ export function createWorksceneDirectory(deps: {
       });
     },
 
-    async recordActivity(sceneId, conversationId) {
+    async recordActivity(sceneId, conversationId, at, requestId) {
       triggerDeletionRecovery();
-      const parsed = parseConversationId(conversationId);
-      if (parsed.scope.kind !== "workscene" || parsed.scope.sceneId !== sceneId) {
-        throw inputError("会话不属于指定工作场景");
-      }
-      const repo = new ConversationRepository(parsed.scope);
-      await repo.touch(parsed.localId);
-      void registry()
-        .list()
-        .then(refreshActivity)
-        .catch(() => {});
+      await owner().record(
+        sceneId,
+        conversationId,
+        requestId ?? `workscene-activity:${randomUUID()}`,
+        at,
+      );
     },
 
     async enterScene(sceneId, observerId, options) {
       triggerDeletionRecovery();
       return runSceneOperation(sceneId, async () => {
-        const scene = await registry().get(sceneId);
+        const scene = await readScene(sceneId);
         if (!scene) return null;
-        const repo = new ConversationRepository({ kind: "workscene", sceneId });
-        const local = (await repo.list())[0] ?? (await repo.create({}));
-        const conversationId = worksceneConversationId(sceneId, local.id);
-        const manager = deps.conversations?.();
-        if (
-          manager &&
-          !manager.addObserver(conversationId, observerId, {
-            allowInactive: true,
-          })
-        ) {
-          throw busyError(
-            `Workscene ${sceneId} is being changed; try again later`,
-          );
-        }
-        if (options?.recordActivity !== false) {
-          await repo.touch(local.id).catch(() => {});
-          void registry()
-            .list()
-            .then(refreshActivity)
-            .catch(() => {});
-        }
+        const conversationId = await owner().enter(
+          sceneId,
+          observerId,
+          {
+            recordActivity: options?.recordActivity,
+            requestId:
+              options?.requestId ?? `workscene-enter:${randomUUID()}`,
+          },
+        );
         return {
           conversationId,
-          scene: await withProjectedActivity(scene).catch(() => scene),
+          scene: (await readScene(sceneId)) ?? scene,
         };
       });
     },
@@ -571,6 +562,132 @@ export function createWorksceneDirectory(deps: {
       );
       await removeLocalWorkspaceTransfer(token);
       return { ...binding, deviceId: runtime.deviceId };
+    },
+
+    async localWorkspaceStatus() {
+      const recovery = authority().workspaceBindingRecovery;
+      if (!recovery) {
+        throw new Error("Local workspace recovery is unavailable");
+      }
+      const status = await recovery.status();
+      return {
+        ...status,
+        ...(status.state === "degraded"
+          ? { resetImpact: WORKSPACE_CATALOG_RESET_IMPACT }
+          : {}),
+      };
+    },
+
+    async listLocalWorkspaces() {
+      return withLocalWorkspaceAdmin(
+        `workspace-list:${randomUUID()}`,
+        (admin, control) => admin.list(control),
+      );
+    },
+
+    async createLocalWorkspace(input) {
+      return withLocalWorkspaceAdmin(input.requestId, (admin, control) =>
+        admin.create(
+          {
+            displayName: input.displayName,
+            absolutePath: input.absolutePath,
+          },
+          control,
+        ),
+      );
+    },
+
+    async renameLocalWorkspace(input) {
+      return withLocalWorkspaceAdmin(input.requestId, (admin, control) =>
+        admin.update(
+          input.bindingRef,
+          { displayName: input.displayName },
+          input.expectedRevision,
+          control,
+        ),
+      );
+    },
+
+    async repathLocalWorkspace(input) {
+      return withLocalWorkspaceAdmin(input.requestId, (admin, control) =>
+        admin.update(
+          input.bindingRef,
+          { absolutePath: input.absolutePath },
+          input.expectedRevision,
+          control,
+        ),
+      );
+    },
+
+    async repathLocalWorkspaceTransfer(input) {
+      const transfer = await readLocalWorkspaceTransfer(input.transferToken);
+      try {
+        return await withLocalWorkspaceAdmin(
+          transfer.requestId,
+          (admin, control) =>
+            admin.update(
+              input.bindingRef,
+              { absolutePath: transfer.absolutePath },
+              input.expectedRevision,
+              control,
+            ),
+        );
+      } finally {
+        await removeLocalWorkspaceTransfer(input.transferToken).catch(() => {});
+      }
+    },
+
+    async removeLocalWorkspace(input) {
+      return withLocalWorkspaceAdmin(input.requestId, (admin, control) =>
+        admin.remove(
+          input.bindingRef,
+          input.expectedRevision,
+          control,
+        ),
+      );
+    },
+
+    async resetLocalWorkspaceCatalog(input) {
+      if (input.confirmedImpact !== WORKSPACE_CATALOG_RESET_IMPACT) {
+        throw inputError("恢复确认内容与实际影响不一致");
+      }
+      const runtime = authority();
+      const recovery = runtime.workspaceBindingRecovery;
+      if (!recovery) {
+        throw new Error("Local workspace recovery is unavailable");
+      }
+      const subject = localEnvironmentControlSubject(
+        runtime.deviceId,
+        input.requestId,
+      );
+      await withEnvironmentLease(
+        subject,
+        runtime.executorId,
+        async (lease) => {
+          await recovery.beginReset(
+            {
+              expectedCatalogGeneration:
+                input.expectedCatalogGeneration,
+            },
+            {
+              requestId: subject,
+              lease,
+              abort: new AbortController().signal,
+              confirmation: {
+                kind: "workspace-binding-reset",
+                token: input.confirmationToken,
+                requestId: subject,
+                catalogGeneration: input.expectedCatalogGeneration,
+                issuedAt: input.confirmationIssuedAt,
+              },
+            },
+          );
+        },
+      );
+      return recovery.completeReset(
+        subject,
+        new AbortController().signal,
+      );
     },
   };
 }

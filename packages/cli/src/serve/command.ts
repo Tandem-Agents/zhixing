@@ -82,7 +82,6 @@ import {
 } from "@zhixing/owner-services";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import fsp from "node:fs/promises";
-import path from "node:path";
 import chalk from "chalk";
 import {
   RuntimeHost,
@@ -253,15 +252,15 @@ async function runServerProcess(
   const meshRuntimeRef: {
     current: import("./mesh-runtime-assembly.js").MeshRuntimeAssembly | undefined;
   } = { current: undefined };
+  const conversationAuthorityRef: {
+    current: import("./conversation-protocol-runtime.js").ConversationProtocolRuntime | undefined;
+  } = { current: undefined };
   // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
   const worksceneDirectory = createWorksceneDirectory({
     authority: () => authorityRuntimeRef.current,
     conversations: () => conversationsRef.current,
-    activityProjectionRoot: path.join(
-      zhixingHome,
-      "distributed-runtime",
-      "workscene-activity",
-    ),
+    conversationAuthority: () => conversationAuthorityRef.current,
+    conversationDirectory,
     storageMaintenance: deviceCapacity.storage,
     probeRemote: (deviceId, request) => {
       const mesh = meshRuntimeRef.current;
@@ -583,6 +582,8 @@ async function runServerProcess(
     ...(executor ? { executorRoleModule: executor } : {}),
     convRepo,
     conversationDirectory,
+    conversationAuthorityRef,
+    worksceneDirectory,
     journalStore,
     sessionBroadcastRef,
     sessionActivityBroadcastRef,

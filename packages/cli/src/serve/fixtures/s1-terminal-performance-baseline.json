@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "baselineCommit": "d9283db480b48dd009947750e14698a31295594f",
+  "config": {
+    "samples": 40,
+    "warmups": 5,
+    "firstTokenQuantile": 0.95,
+    "frameRateQuantile": 0.05,
+    "noiseMadMultiplier": 4,
+    "minimumRetainedRatio": 0.8,
+    "maximumFirstTokenIncreaseRatio": 0.1,
+    "maximumFrameRateDecreaseRatio": 0.05
+  },
+  "scenarios": [
+    "cold-no-workspace",
+    "warm-no-workspace",
+    "cold-workspace",
+    "warm-workspace"
+  ],
+  "capture": {
+    "environmentFingerprintRequired": true,
+    "sameHardwareRequired": true,
+    "deterministicModelRequired": true,
+    "rawSamplesRequired": true
+  }
+}
