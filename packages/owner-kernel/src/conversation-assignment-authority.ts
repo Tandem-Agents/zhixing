@@ -3,6 +3,7 @@ import type {
   AuthorityError,
   AuthorityCapability,
   ControlLease,
+  EnvironmentRequirement,
   IngressContext,
   PermissionSnapshotLease,
   TrustRuleSnapshot,
@@ -35,6 +36,7 @@ export interface ConversationAssignmentIssueInput {
   readonly contentAssets: UnsignedConversationEnvelope["work"]["contentAssets"];
   readonly windowInput: UnsignedConversationEnvelope["work"]["windowInput"];
   readonly controlContext?: UnsignedConversationEnvelope["work"]["controlContext"];
+  readonly environment: EnvironmentRequirement;
   readonly policy: ConversationAssignmentCredentialPolicy;
 }
 
@@ -141,6 +143,7 @@ export class ConversationAssignmentAuthority
       tools: [...policy.manifestCapabilities.tools],
       mcpServers: [...policy.manifestCapabilities.mcpServers],
       environment: {
+        ...structuredClone(input.environment),
         credentialBindings: policy.manifestCapabilities.credentialBindings.map(
           ({ service, bindingId }) => ({ service, bindingId }),
         ),

@@ -342,11 +342,19 @@ export class ExecutorResourceGovernor
     budget: ResourceLease["budget"],
     origin: ReservationOrigin,
     ctx: AuthorityCallContext,
+    audience: { readonly executorId: string } = {
+      executorId: this.#executorId,
+    },
   ): Promise<ImmediateRootResourceLease> {
     const validatedOrigin = validateReservationOrigin(origin);
     this.#guard.assert(ctx.principal, "reservation.acquireRoot");
     assertResourceAdmissionRequest(workload, budget);
     requireIdentifier(ctx.requestId, "Reservation requestId");
+    if (audience.executorId !== this.#executorId) {
+      throw new TypeError(
+        "Executor-local resource governor cannot issue a lease for another executor",
+      );
+    }
     deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
     const reservationId = immediateReservationId(workload);
     await this.#enqueue(reservationId, workload, validatedOrigin.admissionClass);

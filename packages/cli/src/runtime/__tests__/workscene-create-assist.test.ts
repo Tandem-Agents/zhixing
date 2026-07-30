@@ -13,11 +13,15 @@ function scripted(...responses: string[]): WorksceneCreateAssistDeps["complete"]
   return vi.fn(async () => responses[index++] ?? '{"final":{"kind":"cancelled"}}');
 }
 
-function scene(name = "写作", workdir?: string) {
+function scene(
+  name = "写作",
+  workspace?: { deviceId: string; bindingRef: string },
+) {
   return {
     sceneId: "scene-1",
+    revision: 1,
     name,
-    ...(workdir ? { workdir } : {}),
+    ...(workspace ? { workspace } : {}),
     lastActiveAt: "2026-01-01T00:00:00.000Z",
   };
 }
@@ -30,12 +34,22 @@ function makeDeps(
   askUser: ReturnType<typeof vi.fn>;
 } {
   const confirm = vi.fn(async () => true);
-  const create = vi.fn(async (name: string, workdir?: string) => scene(name, workdir));
+  const authorizeLocalWorkspace = vi.fn(async () => ({
+    deviceId: "device-local",
+    bindingRef: "workspace-local",
+  }));
+  const create = vi.fn(
+    async (
+      name: string,
+      workspace?: { deviceId: string; bindingRef: string },
+    ) => scene(name, workspace),
+  );
   const askUser = vi.fn(async () => null);
   return {
     listScenes: vi.fn(async () => []),
     complete: scripted('{"final":{"kind":"cancelled"}}'),
     confirm,
+    authorizeLocalWorkspace,
     create,
     askUser,
     ...overrides,
@@ -71,7 +85,14 @@ describe("runWorksceneCreateAssist", () => {
     const result = await runWorksceneCreateAssist("给论文项目建一个场景", deps);
 
     expect(result.kind).toBe("created");
-    expect(deps.create).toHaveBeenCalledWith("论文项目", normalized);
+    expect(deps.authorizeLocalWorkspace).toHaveBeenCalledWith(
+      "论文项目",
+      normalized,
+    );
+    expect(deps.create).toHaveBeenCalledWith("论文项目", {
+      deviceId: "device-local",
+      bindingRef: "workspace-local",
+    });
     expect(proposal?.summary).toContain(`工作目录：${normalized}`);
     expect(proposal?.summary).toContain("下次进入将自动创建");
   });

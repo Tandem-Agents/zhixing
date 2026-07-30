@@ -28,6 +28,7 @@ import type { ConversationManager } from "@zhixing/owner-kernel";
 function makeScene(id: string, name = id): WorkScene {
   return {
     id,
+    revision: 1,
     name,
     createdAt: "2026-01-01T00:00:00.000Z",
     lastActiveAt: "2026-01-01T00:00:00.000Z",
@@ -55,7 +56,13 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
     },
     async create(opts) {
       const scene = makeScene(`scene-${next++}`, opts.name);
-      scenes.set(scene.id, { ...scene, workdir: opts.workdir } as WorkScene);
+      scenes.set(
+        scene.id,
+        {
+          ...scene,
+          ...(opts.workspace ? { workspace: opts.workspace } : {}),
+        } as WorkScene,
+      );
       return { scene: scenes.get(scene.id)! };
     },
     async rename(id, name) {
@@ -68,17 +75,17 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
     async remove(id) {
       return scenes.delete(id);
     },
-    async setWorkdir(id, workdir) {
+    async setWorkdir(id, workspace) {
       const scene = scenes.get(id);
       if (!scene) return null;
       const changed =
-        workdir === null
-          ? ({ ...scene, workdir: undefined } as WorkScene)
-          : ({ ...scene, workdir } as WorkScene);
+        workspace === null
+          ? ({ ...scene, workspace: undefined } as WorkScene)
+          : ({ ...scene, workspace } as WorkScene);
       scenes.set(id, changed);
       return { scene: changed };
     },
-    async touch(id) {
+    async recordActivity(id, _conversationId, _at) {
       touched.push(id);
     },
     async enterScene(sceneId) {
@@ -118,11 +125,11 @@ describe("workscene.* 方法", () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });
 
-    const created = (await call(buildWorksceneCreateMethod(), { name: "评审" }, ctx)) as {
+    const created = (await call(buildWorksceneCreateMethod(), { name: "评审", requestId: "create-1" }, ctx)) as {
       sceneId: string;
       name: string;
     };
-    await call(buildWorksceneCreateMethod(), { name: "评审副本" }, ctx);
+    await call(buildWorksceneCreateMethod(), { name: "评审副本", requestId: "create-2" }, ctx);
     expect(created.name).toBe("评审");
 
     const listed = (await call(buildWorksceneListMethod(), {}, ctx)) as {
@@ -134,28 +141,32 @@ describe("workscene.* 方法", () => {
 
     const renamed = (await call(
       buildWorksceneRenameMethod(),
-      { sceneId: created.sceneId, name: "评审二" },
+      { sceneId: created.sceneId, name: "评审二", requestId: "rename-1" },
       ctx,
     )) as { name: string };
     expect(renamed.name).toBe("评审二");
 
-    await call(buildWorksceneDeleteMethod(), { sceneId: created.sceneId }, ctx);
+    await call(buildWorksceneDeleteMethod(), { sceneId: created.sceneId, requestId: "delete-1" }, ctx);
     expect(await workscenes.get(created.sceneId)).toBeNull();
 
     await expect(
-      call(buildWorksceneRenameMethod(), { sceneId: "ghost", name: "x" }, ctx),
+      call(buildWorksceneRenameMethod(), { sceneId: "ghost", name: "x", requestId: "rename-ghost" }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
     await expect(
-      call(buildWorksceneDeleteMethod(), { sceneId: "ghost" }, ctx),
+      call(buildWorksceneDeleteMethod(), { sceneId: "ghost", requestId: "delete-ghost" }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
   });
 
-  it("create 边界:workdir 非字符串拒绝;领域校验错误映射 INVALID_PARAMS", async () => {
+  it("create 边界:拒绝 raw workdir 与非法 workspace;领域校验错误映射 INVALID_PARAMS", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });
 
     await expect(
-      call(buildWorksceneCreateMethod(), { name: "x", workdir: 42 }, ctx),
+      call(
+        buildWorksceneCreateMethod(),
+        { name: "x", requestId: "raw-path", workdir: "D:\\secret" },
+        ctx,
+      ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
 
     const invalidWorkscenes = memoryWorkscenes();
@@ -165,7 +176,11 @@ describe("workscene.* 方法", () => {
     await expect(
       call(
         buildWorksceneCreateMethod(),
-        { name: "x", workdir: "rel/path" },
+        {
+          name: "x",
+          requestId: "domain-invalid",
+          workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+        },
         makeCtx({ workscenes: invalidWorkscenes }),
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
@@ -177,23 +192,30 @@ describe("workscene.* 方法", () => {
     await expect(
       call(
         buildWorksceneRenameMethod(),
-        { sceneId: "scene-1", name: "   " },
+        { sceneId: "scene-1", name: "   ", requestId: "rename-invalid" },
         makeCtx({ workscenes: invalidRenameWorkscenes }),
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
 
     const created = (await call(
       buildWorksceneCreateMethod(),
-      { name: "任意字符串由领域服务校验", workdir: "host/path" },
+      {
+        name: "任意字符串由领域服务校验",
+        requestId: "create-workspace",
+        workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+      },
       ctx,
-    )) as { workdir?: string };
-    expect(created.workdir).toBe("host/path");
+    )) as { workspace?: { deviceId: string; bindingRef: string } };
+    expect(created.workspace).toEqual({
+      deviceId: "device-a",
+      bindingRef: "binding-a",
+    });
   });
 
   it("setWorkdir:缺参 invalidParams、null 解绑、not-found 与 BUSY 映射", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });
-    const created = (await call(buildWorksceneCreateMethod(), { name: "开发" }, ctx)) as {
+    const created = (await call(buildWorksceneCreateMethod(), { name: "开发", requestId: "create-set" }, ctx)) as {
       sceneId: string;
     };
 
@@ -203,7 +225,7 @@ describe("workscene.* 方法", () => {
     await expect(
       call(
         buildWorksceneSetWorkdirMethod(),
-        { sceneId: created.sceneId, workdir: 42 },
+        { sceneId: created.sceneId, requestId: "set-invalid", workdir: "D:\\secret" },
         ctx,
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
@@ -215,27 +237,38 @@ describe("workscene.* 方法", () => {
     await expect(
       call(
         buildWorksceneSetWorkdirMethod(),
-        { sceneId: created.sceneId, workdir: "   " },
+        {
+          sceneId: created.sceneId,
+          requestId: "set-invalid-workspace",
+          workspace: { deviceId: "device-a" },
+        },
         makeCtx({ workscenes: invalidWorkscenes }),
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
 
     const bound = (await call(
       buildWorksceneSetWorkdirMethod(),
-      { sceneId: created.sceneId, workdir: "D:\\work" },
+      {
+        sceneId: created.sceneId,
+        requestId: "set-bound",
+        workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+      },
       ctx,
-    )) as { workdir?: string };
-    expect(bound.workdir).toBe("D:\\work");
+    )) as { workspace?: { deviceId: string; bindingRef: string } };
+    expect(bound.workspace).toEqual({
+      deviceId: "device-a",
+      bindingRef: "binding-a",
+    });
 
     const cleared = (await call(
       buildWorksceneSetWorkdirMethod(),
-      { sceneId: created.sceneId, workdir: null },
+      { sceneId: created.sceneId, requestId: "set-clear", workspace: null },
       ctx,
-    )) as { workdir?: string };
-    expect(cleared.workdir).toBeUndefined();
+    )) as { workspace?: unknown };
+    expect(cleared.workspace).toBeUndefined();
 
     await expect(
-      call(buildWorksceneSetWorkdirMethod(), { sceneId: "ghost", workdir: null }, ctx),
+      call(buildWorksceneSetWorkdirMethod(), { sceneId: "ghost", requestId: "set-ghost", workspace: null }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
 
     const busyWorkscenes = memoryWorkscenes();
@@ -245,7 +278,7 @@ describe("workscene.* 方法", () => {
     await expect(
       call(
         buildWorksceneSetWorkdirMethod(),
-        { sceneId: created.sceneId, workdir: null },
+        { sceneId: created.sceneId, requestId: "set-busy", workspace: null },
         makeCtx({ workscenes: busyWorkscenes }),
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
@@ -254,7 +287,7 @@ describe("workscene.* 方法", () => {
   it("enter:返回全域键与场景元数据并 touch;场景不存在 NOT_FOUND", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });
-    const created = (await call(buildWorksceneCreateMethod(), { name: "开发" }, ctx)) as {
+    const created = (await call(buildWorksceneCreateMethod(), { name: "开发", requestId: "create-enter" }, ctx)) as {
       sceneId: string;
     };
 
@@ -276,7 +309,7 @@ describe("workscene.* 方法", () => {
     const workscenes = memoryWorkscenes();
     const created = (await call(
       buildWorksceneCreateMethod(),
-      { name: "推进场景" },
+      { name: "推进场景", requestId: "create-advancement" },
       makeCtx({ workscenes }),
     )) as { sceneId: string };
     const conversationId = `ws:${created.sceneId}:conv_main`;
@@ -329,7 +362,7 @@ describe("workscene.* 方法", () => {
     const workscenes = memoryWorkscenes();
     const created = (await call(
       buildWorksceneCreateMethod(),
-      { name: "顺序场景" },
+      { name: "顺序场景", requestId: "create-order" },
       makeCtx({ workscenes }),
     )) as { sceneId: string };
 
@@ -362,7 +395,7 @@ describe("workscene.* 方法", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const created = (await call(
       buildWorksceneCreateMethod(),
-      { name: "恢复失败场景" },
+      { name: "恢复失败场景", requestId: "create-recovery-failure" },
       makeCtx({ workscenes }),
     )) as { sceneId: string };
 
@@ -390,10 +423,14 @@ describe("workscene.* 方法", () => {
     }
   });
 
-  it("exit:touch 场景(无其他副作用)", async () => {
+  it("exit:记录离开会话的场景活动(无其他副作用)", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });
-    const r = (await call(buildWorksceneExitMethod(), { sceneId: "s1" }, ctx)) as {
+    const r = (await call(
+      buildWorksceneExitMethod(),
+      { sceneId: "s1", conversationId: "ws:s1:conv_main" },
+      ctx,
+    )) as {
       ok: boolean;
     };
     expect(r.ok).toBe(true);
@@ -404,7 +441,7 @@ describe("workscene.* 方法", () => {
     const workscenes = memoryWorkscenes();
     const created = (await call(
       buildWorksceneCreateMethod(),
-      { name: "忙场景" },
+      { name: "忙场景", requestId: "create-busy" },
       makeCtx({ workscenes }),
     )) as { sceneId: string };
 
@@ -413,7 +450,11 @@ describe("workscene.* 方法", () => {
     };
     const busyCtx = makeCtx({ workscenes });
     await expect(
-      call(buildWorksceneDeleteMethod(), { sceneId: created.sceneId }, busyCtx),
+      call(
+        buildWorksceneDeleteMethod(),
+        { sceneId: created.sceneId, requestId: "delete-busy" },
+        busyCtx,
+      ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
   });
 });

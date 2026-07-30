@@ -114,9 +114,9 @@ describe("资产层透传", () => {
 
     const conv = await host.createConversationRuntime();
     const ws = await host.createWorksceneRuntime({
-      id: "s1",
-      name: "场景",
-    } as never);
+      scene: workscene("s1", "场景"),
+      absolutePath: null,
+    });
     const eph = await host.createEphemeralRuntime();
 
     expect(onRuntimeCreated).toHaveBeenCalledTimes(3);
@@ -125,15 +125,16 @@ describe("资产层透传", () => {
     expect(onRuntimeCreated).toHaveBeenNthCalledWith(3, eph);
   });
 
-  it("workscene 装配:workdir 为工作区(缺省显式 null)、power 角色与记忆域、spec 进工具装配", async () => {
+  it("workscene 装配:只消费本机解析路径、无 workspace 显式 null，并绑定 power 角色与记忆域", async () => {
     const { options, assembled } = makeHostOptions();
     const host = new RuntimeHost(options);
 
     await host.createWorksceneRuntime({
-      id: "s1",
-      name: "场景",
-      workdir: "/proj",
-    } as never);
+      scene: workscene("s1", "场景", {
+        workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+      }),
+      absolutePath: "/proj",
+    });
     let params = createAgentRuntimeMock.mock.calls[0]![0];
     expect(params.workspace).toBe("/proj");
     expect(params.runtimeKind).toBe("conversation");
@@ -146,13 +147,33 @@ describe("资产层透传", () => {
       sceneName: "场景",
     });
 
-    // 无 workdir → workspace 显式 null(不回落 host 缺省,杜绝串到 cwd)
-    await host.createWorksceneRuntime({ id: "s2", name: "纯对话场景" } as never);
+    // 无 workspace → 显式 null（不回落 host 缺省，杜绝串到 cwd）
+    await host.createWorksceneRuntime({
+      scene: workscene("s2", "纯对话场景"),
+      absolutePath: null,
+    });
     params = createAgentRuntimeMock.mock.calls[1]![0];
     expect(params.workspace).toBeNull();
     expect(params.runtimeKind).toBe("conversation");
+    expect(params.profile.enabledTools).not.toContain("read");
+    expect(params.profile.enabledTools).not.toContain("admit_skill");
   });
 });
+
+function workscene(
+  id: string,
+  name: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    revision: 1,
+    name,
+    createdAt: "2026-07-30T00:00:00.000Z",
+    lastActiveAt: "2026-07-30T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 describe("schedule origin 派生", () => {
   it("会话路径:执行期从 RunContext 读 turnOrigin——渠道入口出 origin、本地对话 null、无上下文 null", async () => {

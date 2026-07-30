@@ -75,6 +75,7 @@ export type SessionInternalRecord = {
 
 export interface WorksceneDto {
   id: string;
+  revision: number;
   name: string;
   workspace?: { deviceId: string; bindingRef: string };
   createdAt: IsoTime;
@@ -251,6 +252,31 @@ export type WorksceneWriteMutation =
     }
   | { kind: "workscene-delete"; sceneId: string; expectedRevision: number };
 
+export type WorksceneMigrationMutation =
+  | {
+      kind: "workscene-import-legacy";
+      migrationId: string;
+      sourceSnapshotToken: string;
+      scene: {
+        id: string;
+        name: string;
+        createdAt: IsoTime;
+        workspace?: { deviceId: string; bindingRef: string };
+      };
+    }
+  | {
+      kind: "workscene-activate-device-registry";
+      migrationId: string;
+      sourceSnapshotToken: string;
+      importSetDigest: Digest;
+    }
+  | {
+      kind: "workscene-abandon-legacy-import";
+      migrationId: string;
+      sourceSnapshotToken: string;
+      reason: string;
+    };
+
 export type TrustWriteMutation =
   | { kind: "trust-persist"; rule: TrustRule }
   | { kind: "trust-revoke"; ruleId: string };
@@ -261,6 +287,7 @@ export type GlobalControlMutation =
   | SkillWriteMutation
   | RubricWriteMutation
   | WorksceneWriteMutation
+  | WorksceneMigrationMutation
   | TrustWriteMutation
   | { kind: "config-asset-write"; record: ConfigAssetRecord };
 
@@ -290,6 +317,38 @@ export type JobGlobalStagedMutation =
         content: DeliveryRequestDto["content"];
       };
     };
+
+export type WorksceneAppliedResult =
+  | {
+      kind: "workscene-applied";
+      operation: "create" | "rename" | "set-workdir";
+      revision: number;
+      scene: WorksceneDto;
+    }
+  | {
+      kind: "workscene-deleted";
+      operation: "delete";
+      revision: number;
+      sceneId: string;
+      previousObjectRevision: number;
+    };
+
+export type GlobalControlMutationResult<M extends GlobalControlMutation> =
+  M extends WorksceneWriteMutation
+    ? WorksceneAppliedResult
+    : { revision: number };
+
+export interface WorksceneStagedReceipt {
+  kind: "global-mutation-staged";
+  requestId: string;
+  recordSeq: number;
+  mutationDigest: Digest;
+}
+
+export type GlobalStagedMutationResult<M extends GlobalStagedMutation> =
+  M extends WorksceneWriteMutation
+    ? WorksceneStagedReceipt
+    : { revision: number };
 
 export type TaskDefinitionBody =
   | {

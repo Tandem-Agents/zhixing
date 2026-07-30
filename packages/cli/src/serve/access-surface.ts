@@ -28,7 +28,10 @@ import type {
   SnapshotStore,
 } from "@zhixing/core";
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import type {
+  DeviceCapacityArbiterPort,
+  StorageMaintenanceGovernorPort,
+} from "@zhixing/core/resources";
 import type {
   ConversationDirectory,
   InboundRouter,
@@ -114,6 +117,7 @@ export interface AssemblyContext {
   readonly secretStore: SecretStorePort;
   readonly durableInteractions: DurableConversationInteractionObserver;
   readonly perspectives: PerspectivesController;
+  readonly deviceCapacity: DeviceCapacityArbiterPort;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──

@@ -32,11 +32,17 @@ import {
 } from "@zhixing/core";
 import type {
   AuthorityError,
+  CapabilityDescriptor,
   CredentialBindingDescriptor,
   DeviceIdentity,
+  EnvironmentPort,
+  EnvironmentRequirement,
   ExecutionManifest,
+  ExplicitEnvironmentSelection,
   SecretStorePort,
   TrustRuleSnapshot,
+  WorkspaceBindingAdminPort,
+  WorkspaceBindingMigrationPort,
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
@@ -55,8 +61,21 @@ import {
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   runInMaintenanceContext,
+  StorageMaintenanceTaskRunner,
+  type DeviceCapacityArbiterPort,
   type StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
+import {
+  deriveEnvironmentRequirement,
+  executionProfileForEnvironment,
+  EnvironmentProbeOwner,
+  preflightWorkspaceRequirement,
+  selectExecutorForEnvironment,
+  WorkspaceBindingService,
+  WorkspaceProbeHandler,
+  type WorkspaceProbePort,
+} from "@zhixing/core/environment";
+import { AnchorWorksceneRegistry, parseConversationId } from "@zhixing/core";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -78,6 +97,7 @@ import {
   verifyDeviceSignature,
 } from "@zhixing/mesh/device-identity";
 
+import * as fsp from "node:fs/promises";
 import path from "node:path";
 import {
   FileExecutionSnapshotVersionStore,
@@ -86,6 +106,7 @@ import {
 } from "./executor-snapshot-version-store.js";
 import { loadOrCreateDeviceKey } from "./serve/mesh-device-key.js";
 import { createSurfaceAssetAuthority } from "./serve/surface-asset-authority.js";
+import { migrateLegacyWorkscenes } from "./serve/workscene-legacy-migration.js";
 import {
   StartupRollback,
   type StartupCleanupHandle,
@@ -109,6 +130,20 @@ export interface AuthorityRuntimeStack {
   readonly executorCapabilities: ExecutorCapabilityDirectory;
   readonly resourceGovernor: AnchorResourceGovernor;
   readonly executorResourceGovernor: ExecutorResourceGovernor;
+  readonly environment?: EnvironmentPort;
+  readonly workspaceBindingAdmin?: WorkspaceBindingAdminPort;
+  readonly workspaceBindingMigration?: WorkspaceBindingMigrationPort;
+  readonly workspaceProbe?: WorkspaceProbePort;
+  readonly environmentProbeOwner?: EnvironmentProbeOwner;
+  readonly worksceneRegistry?: AnchorWorksceneRegistry;
+  readonly workspaceCatalog: () => readonly {
+    executorId: string;
+    deviceId: string;
+    deviceName: string;
+    bindingRef: string;
+    displayName: string;
+    workspaceBindingRevision: number;
+  }[];
   readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
   readonly installPermissionSnapshot: (
@@ -122,10 +157,13 @@ export interface AuthorityRuntimeStack {
     authorizedDeviceIds: readonly string[],
   ) => void;
   readonly prepareConversationAssignment: (input: {
+    readonly conversationId: string;
     readonly executionProfile: RuntimeExecutionProfile;
     readonly permissionRules: readonly PermissionRule[];
+    readonly environment?: ExplicitEnvironmentSelection;
     readonly targets?: readonly {
       readonly executorId: string;
+      readonly deviceId: string;
       readonly synchronizePermission: (
         snapshot: TrustRuleSnapshot,
       ) => Promise<ExecutorCapabilitySnapshot>;
@@ -134,7 +172,13 @@ export interface AuthorityRuntimeStack {
   readonly validateConversationRuntimeBinding: (input: {
     readonly manifest: ExecutionManifest<"conversation">;
     readonly binding: ConversationRuntimeBinding;
-  }) => AuthorityError | undefined;
+  }) => Promise<AuthorityError | undefined>;
+  readonly preflightLocalConversationEnvironment: (
+    manifest: ExecutionManifest<"conversation">,
+  ) => Promise<{
+    readonly workspaceRoot: string | null;
+    readonly error?: AuthorityError;
+  }>;
   readonly validateLocalConversationManifest: (
     manifest: ExecutionManifest<"conversation">,
   ) => AuthorityError | undefined;
@@ -155,6 +199,7 @@ export interface PreparedConversationAssignmentAuthority {
   readonly executorId: string;
   readonly policy: ConversationAssignmentCredentialPolicy;
   readonly binding: ConversationRuntimeBinding;
+  readonly environment: EnvironmentRequirement;
 }
 
 export interface DeliveryStack {
@@ -218,6 +263,7 @@ export interface SetupAuthorityRuntimeOptions {
   readonly resourceCandidateTtlMs?: number;
   readonly clock?: () => string;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly deviceCapacity?: DeviceCapacityArbiterPort;
   readonly startupRollback?: StartupRollback;
 }
 
@@ -414,6 +460,7 @@ export async function setupAuthorityRuntime(
       })
     : undefined;
   const publicationQueue = new SerialTaskQueue();
+  let publishedWorkspaces: CapabilityDescriptor["workspaces"] = [];
   const readinessSource = () => normalizeExecutorReadiness(
     typeof options.executorReadiness === "function"
       ? options.executorReadiness()
@@ -433,6 +480,7 @@ export async function setupAuthorityRuntime(
   const publishLocalExecutorSnapshot = async (
     permissionSnapshotHighWater: number,
     readiness = readinessSource(),
+    workspaces: CapabilityDescriptor["workspaces"] = publishedWorkspaces,
   ): Promise<ExecutorCapabilitySnapshot> => {
     if (!versionStore) {
       throw new Error("Local executor role is not enabled on this device");
@@ -457,7 +505,7 @@ export async function setupAuthorityRuntime(
       executorId,
       revision: capabilityRevision,
       protocolVersion: EXECUTION_PROTOCOL_VERSION,
-      workspaces: [],
+      workspaces: workspaces.map((workspace) => ({ ...workspace })),
       tools: [...readiness.tools],
       mcpServers: [...readiness.mcpServers],
       credentialBindings: versionedCredentialBindings,
@@ -500,6 +548,82 @@ export async function setupAuthorityRuntime(
     capabilityDirectoryEstablished = true;
     return snapshotUpdate.snapshot;
   };
+  let workspaceBindings: WorkspaceBindingService | undefined;
+  let workspaceProbe: WorkspaceProbeHandler | undefined;
+  if (localExecutorEnabled) {
+    if (!options.deviceCapacity) {
+      // Library callers that only exercise authority protocols may omit the
+      // device runtime. Production assembly always supplies it; the local
+      // environment ports remain physically absent otherwise.
+    } else {
+      workspaceBindings = new WorkspaceBindingService({
+        rootDir: path.join(authorityRoot, "workspace-bindings"),
+        deviceId: key.deviceId,
+        executorId,
+        log: executorLog!,
+        verifier,
+        capacity: options.deviceCapacity,
+        migrationRunner: new StorageMaintenanceTaskRunner(
+          options.storageMaintenance,
+        ),
+        capabilitySnapshot: async (workspaces) => {
+          publishedWorkspaces = workspaces.map((workspace) => ({ ...workspace }));
+          return (
+            await publicationQueue.run(async () =>
+              publishLocalExecutorSnapshot(
+                await permissionSnapshots.highWater(),
+                readinessSource(),
+                publishedWorkspaces,
+              ),
+            )
+          ).descriptor;
+        },
+        versionInventory: async () =>
+          (
+            await publicationQueue.run(async () =>
+              publishLocalExecutorSnapshot(
+                await permissionSnapshots.highWater(),
+                readinessSource(),
+                publishedWorkspaces,
+              ),
+            )
+          ).inventory,
+        clock,
+      });
+      workspaceProbe = new WorkspaceProbeHandler({
+        rootDir: path.join(authorityRoot, "workspace-probes"),
+        executorId,
+        environment: workspaceBindings,
+        log: executorLog!,
+        signer: key,
+        verifier,
+        capacity: options.deviceCapacity,
+        clock,
+      });
+    }
+  }
+  const environmentProbeOwner = anchorEnabled
+    ? new EnvironmentProbeOwner({
+        signer: key,
+        verifier,
+        clock,
+      })
+    : undefined;
+  const worksceneRegistry = authorityLog
+    ? new AnchorWorksceneRegistry({ log: authorityLog, clock })
+    : undefined;
+  if (worksceneRegistry && anchorEnabled) {
+    await migrateLegacyWorkscenes({
+      rootDir: path.join(
+        options.zhixingHome,
+        "distributed-runtime",
+        "workscene-migration",
+      ),
+      deviceId: key.deviceId,
+      registry: worksceneRegistry,
+      ...(workspaceBindings ? { bindings: workspaceBindings } : {}),
+    });
+  }
   const currentExecutorSnapshot = () => publicationQueue.run(async () =>
     publishLocalExecutorSnapshot(await permissionSnapshots.highWater()));
   const installPermissionSnapshot = async (
@@ -518,10 +642,13 @@ export async function setupAuthorityRuntime(
   };
   const prepareConversationAssignment = (
     input: {
+      readonly conversationId: string;
       readonly executionProfile: RuntimeExecutionProfile;
       readonly permissionRules: readonly PermissionRule[];
+      readonly environment?: ExplicitEnvironmentSelection;
       readonly targets?: readonly {
         readonly executorId: string;
+        readonly deviceId: string;
         readonly synchronizePermission: (
           snapshot: TrustRuleSnapshot,
         ) => Promise<ExecutorCapabilitySnapshot>;
@@ -531,7 +658,22 @@ export async function setupAuthorityRuntime(
     if (!anchorEnabled) {
       throw new Error("Anchor authority role is not enabled on this device");
     }
-    const executionProfile = normalizeRuntimeExecutionProfile(input.executionProfile);
+    const inputExecutionProfile = normalizeRuntimeExecutionProfile(
+      input.executionProfile,
+    );
+    const parsedConversation = parseConversationId(input.conversationId);
+    const workscene =
+      parsedConversation.scope.kind === "workscene" && worksceneRegistry
+        ? await worksceneRegistry.get(parsedConversation.scope.sceneId)
+        : undefined;
+    const environmentRequirement = deriveEnvironmentRequirement({
+      ...(input.environment ? { explicit: input.environment } : {}),
+      ...(workscene ? { workscene } : {}),
+    });
+    const executionProfile = executionProfileForEnvironment(
+      inputExecutionProfile,
+      environmentRequirement,
+    );
     const permissionPublication = await permissionSnapshots.publishRules({
       rules: input.permissionRules,
       signer: key,
@@ -540,6 +682,7 @@ export async function setupAuthorityRuntime(
     const prepareTarget = (
       target: ExecutorCapabilitySnapshot,
       deviceDigest: string,
+      environment: EnvironmentRequirement,
     ): PreparedConversationAssignmentAuthority => {
       const requiredCredentialBindings = requiredBindingsForRuntime(
         executionProfile,
@@ -551,6 +694,12 @@ export async function setupAuthorityRuntime(
         credentialBindings: target.descriptor.credentialBindings,
         credentialGeneration: null,
       });
+      const frozenEnvironment: EnvironmentRequirement = {
+        ...environment,
+        credentialBindings: requiredCredentialBindings.map(
+          ({ service, bindingId }) => ({ service, bindingId }),
+        ),
+      };
       return {
         executorId: target.descriptor.executorId,
         policy: {
@@ -569,10 +718,22 @@ export async function setupAuthorityRuntime(
           budget: { maxCalls: 64, maxTokens: 256_000 },
         },
         binding: { executionProfile, deviceDigest },
+        environment: frozenEnvironment,
       };
     };
     const candidateErrors: Error[] = [];
+    const candidates: Array<{
+      snapshot: ExecutorCapabilitySnapshot;
+      deviceId: string;
+      deviceDigest: string;
+    }> = [];
     for (const candidate of input.targets ?? []) {
+      if (
+        environmentRequirement.workspace &&
+        candidate.deviceId !== environmentRequirement.workspace.deviceId
+      ) {
+        continue;
+      }
       try {
         const synchronized = await candidate.synchronizePermission(
           permissionPublication.snapshot,
@@ -583,33 +744,124 @@ export async function setupAuthorityRuntime(
         await acceptExecutorSnapshot(synchronized);
         const target = executorCapabilities.snapshotFor(candidate.executorId);
         if (!target) throw new Error("Target executor capability snapshot is unavailable");
-        return prepareTarget(
-          target,
-          protocolDigest("ExecutorRuntimeBinding", 1, target),
-        );
+        assertRuntimeAvailable(executionProfile, {
+          tools: target.descriptor.tools,
+          mcpServers: target.descriptor.mcpServers,
+          credentialBindings: target.descriptor.credentialBindings,
+          credentialGeneration: null,
+        });
+        candidates.push({
+          snapshot: target,
+          deviceId: candidate.deviceId,
+          deviceDigest: protocolDigest("ExecutorRuntimeBinding", 1, target),
+        });
       } catch (error) {
         candidateErrors.push(error instanceof Error ? error : new Error(String(error)));
       }
     }
-    if (localExecutorEnabled) {
+    if (
+      localExecutorEnabled &&
+      (!environmentRequirement.workspace ||
+        environmentRequirement.workspace.deviceId === key.deviceId)
+    ) {
       const localReadiness = readinessSource();
       const target = await publishLocalExecutorSnapshot(
         permissionPublication.highWater,
         localReadiness,
       );
-      return prepareTarget(target, deviceDigestFor(localReadiness));
+      candidates.push({
+        snapshot: target,
+        deviceId: key.deviceId,
+        deviceDigest: deviceDigestFor(localReadiness),
+      });
     }
-    throw new AggregateError(
-      candidateErrors,
-      candidateErrors.length > 0
-        ? "No online executor satisfies the conversation execution profile"
-        : "No authorized conversation executor is currently available",
+    const selection = selectExecutorForEnvironment(
+      environmentRequirement,
+      candidates.map(({ snapshot, deviceId }) => ({
+        executorId: snapshot.descriptor.executorId,
+        deviceId,
+        descriptor: snapshot.descriptor,
+      })),
+    );
+    if (selection.kind === "queued") {
+      throw new AggregateError(
+        candidateErrors,
+        `Conversation environment is queued: ${selection.reason}`,
+      );
+    }
+    const selected = candidates.find(
+      ({ snapshot }) =>
+        snapshot.descriptor.executorId === selection.executorId,
+    );
+    if (!selected) {
+      throw new Error("Selected executor capability snapshot disappeared");
+    }
+    return prepareTarget(
+      selected.snapshot,
+      selected.deviceDigest,
+      selection.environment,
     );
   });
-  const validateConversationRuntimeBinding = (input: {
+  const preflightLocalConversationEnvironment = async (
+    manifest: ExecutionManifest<"conversation">,
+  ): Promise<{
+    readonly workspaceRoot: string | null;
+    readonly error?: AuthorityError;
+  }> => {
+    if (!workspaceBindings) {
+      return manifest.environment.workspace
+        ? {
+            workspaceRoot: null,
+            error: {
+              code: "capability-gap",
+              message: "Local workspace environment is unavailable",
+              retryable: true,
+            },
+          }
+        : { workspaceRoot: null };
+    }
+    const result = await preflightWorkspaceRequirement(
+      workspaceBindings,
+      manifest.environment,
+    );
+    if (result.ok) {
+      if (result.state === "missing" && result.absolutePath) {
+        try {
+          await fsp.mkdir(result.absolutePath, { recursive: true });
+          if (await workspaceBindings.probePath(result.absolutePath) !== "directory") {
+            throw new Error("created workspace did not become a directory");
+          }
+        } catch (error) {
+          return {
+            workspaceRoot: null,
+            error: {
+              code: "capability-gap",
+              message: `Workspace creation failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              retryable: true,
+            },
+          };
+        }
+      }
+      return { workspaceRoot: result.absolutePath ?? null };
+    }
+    return {
+      workspaceRoot: null,
+      error: {
+        code:
+          result.reason === "revision-conflict"
+            ? "revision-conflict"
+            : "capability-gap",
+        message: `Workspace execution preflight failed: ${result.reason}`,
+        retryable: true,
+      },
+    };
+  };
+  const validateConversationRuntimeBinding = async (input: {
     readonly manifest: ExecutionManifest<"conversation">;
     readonly binding: ConversationRuntimeBinding;
-  }): AuthorityError | undefined => {
+  }): Promise<AuthorityError | undefined> => {
     try {
       const profile = normalizeRuntimeExecutionProfile(input.binding.executionProfile);
       const readiness = readinessSource();
@@ -637,7 +889,7 @@ export async function setupAuthorityRuntime(
           retryable: true,
         };
       }
-      return undefined;
+      return (await preflightLocalConversationEnvironment(input.manifest)).error;
     } catch (error) {
       return {
         code: "capability-gap",
@@ -711,6 +963,34 @@ export async function setupAuthorityRuntime(
       }
       return executorResourceGovernor;
     },
+    environment: workspaceBindings,
+    workspaceBindingAdmin: workspaceBindings,
+    workspaceBindingMigration: workspaceBindings,
+    workspaceProbe,
+    environmentProbeOwner,
+    worksceneRegistry,
+    workspaceCatalog: () =>
+      executorCapabilities
+        .activeSnapshots()
+        .flatMap((snapshot) => {
+          const deviceId = snapshot.descriptor.signature.keyId;
+          const deviceName =
+            trustedIdentities.get(deviceId)?.displayName ?? deviceId;
+          return snapshot.descriptor.workspaces.map((workspace) => ({
+            executorId: snapshot.descriptor.executorId,
+            deviceId,
+            deviceName,
+            bindingRef: workspace.bindingRef,
+            displayName: workspace.displayName,
+            workspaceBindingRevision: workspace.workspaceBindingRevision,
+          }));
+        })
+        .sort(
+          (left, right) =>
+            left.deviceName.localeCompare(right.deviceName) ||
+            left.displayName.localeCompare(right.displayName) ||
+            left.bindingRef.localeCompare(right.bindingRef),
+        ),
     permissionSnapshotFor: (digest) => permissionSnapshots.snapshotFor(digest),
     currentExecutorSnapshot,
     installPermissionSnapshot,
@@ -732,6 +1012,7 @@ export async function setupAuthorityRuntime(
     },
     prepareConversationAssignment,
     validateConversationRuntimeBinding,
+    preflightLocalConversationEnvironment,
     validateLocalConversationManifest,
     startupCleanup,
     stopStorageMaintenance,

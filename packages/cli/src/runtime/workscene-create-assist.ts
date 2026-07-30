@@ -15,7 +15,10 @@ import type { SelectionRequest } from "../tui/selection/index.js";
 export interface WorksceneCreateAssistScene {
   readonly sceneId: string;
   readonly name: string;
-  readonly workdir?: string;
+  readonly workspace?: {
+    readonly deviceName?: string;
+    readonly workspaceName?: string;
+  };
 }
 
 export interface WorksceneCreateProposal {
@@ -33,7 +36,14 @@ export type WorksceneCreateAssistResult =
 export interface WorksceneCreateAssistDeps {
   readonly listScenes: () => Promise<readonly WorksceneCreateAssistScene[]>;
   readonly complete: (prompt: string, signal?: AbortSignal) => Promise<string>;
-  readonly create: (name: string, workdir?: string) => Promise<WorksceneSummary>;
+  readonly authorizeLocalWorkspace: (
+    displayName: string,
+    absolutePath: string,
+  ) => Promise<{ deviceId: string; bindingRef: string }>;
+  readonly create: (
+    name: string,
+    workspace?: { deviceId: string; bindingRef: string },
+  ) => Promise<WorksceneSummary>;
   readonly confirm: (
     proposal: WorksceneCreateProposal,
     signal?: AbortSignal,
@@ -96,12 +106,17 @@ export async function runWorksceneCreateAssist(
           };
         }
 
-        const scene = await deps.create(proposal.name, proposal.workdir);
+        const workspace = proposal.workdir
+          ? await deps.authorizeLocalWorkspace(proposal.name, proposal.workdir)
+          : undefined;
+        const scene = await deps.create(proposal.name, workspace);
         createdScene = scene;
         return {
           ok: true,
           scene,
-          ...(scene.workdirWarning ? { workdirWarning: scene.workdirWarning } : {}),
+          ...(scene.workspaceWarning
+            ? { workspaceWarning: scene.workspaceWarning }
+            : {}),
         };
       },
     });
@@ -255,8 +270,12 @@ function formatSceneSnapshot(
 ): string[] {
   if (scenes.length === 0) return ["- 暂无"];
   return scenes.map((scene) => {
-    const workdir = scene.workdir ? `，目录：${scene.workdir}` : "";
-    return `- ${scene.name} (${scene.sceneId})${workdir}`;
+    const workspace = scene.workspace
+      ? `，工作区：${scene.workspace.deviceName ?? "当前设备"} / ${
+          scene.workspace.workspaceName ?? "已授权工作区"
+        }`
+      : "";
+    return `- ${scene.name} (${scene.sceneId})${workspace}`;
   });
 }
 

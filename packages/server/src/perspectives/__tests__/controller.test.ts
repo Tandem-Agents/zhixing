@@ -151,6 +151,7 @@ describe("PerspectivesController", () => {
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     let insideDurableAssignment = false;
+    const environmentEstimate = vi.fn(() => 7);
     const manager = new ConversationManager(createFactory(), managerConfig, {
       appendRun,
       durableTurnExecutor: stubDurableTurnExecutor({
@@ -162,7 +163,14 @@ describe("PerspectivesController", () => {
           });
           insideDurableAssignment = true;
           try {
-            const generator = input.runtime.run(input.messages, input.options);
+            const environmentRuntime: SessionRuntime = {
+              ...input.runtime,
+              sessionId: "environment-bound-perspective",
+              estimateMessagesTokens: environmentEstimate,
+            };
+            const runtime = input.adaptLocalRuntime?.(environmentRuntime) ??
+              input.runtime;
+            const generator = runtime.run(input.messages, input.options);
             while (true) {
               const item = await generator.next();
               if (item.done) {
@@ -226,6 +234,7 @@ describe("PerspectivesController", () => {
         providerIds: ["main"],
       },
     }]);
+    expect(environmentEstimate).toHaveBeenCalled();
     expect(durableRuns[0]).toMatchObject({
       perspectives: {
         definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,

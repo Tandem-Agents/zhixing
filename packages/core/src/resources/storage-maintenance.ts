@@ -17,6 +17,8 @@ import {
 
 export const STORAGE_MAINTENANCE_KINDS = [
   "log-migration",
+  "workspace-migration",
+  "workscene-cleanup",
   "projection-flush",
   "projection-rebuild",
   "projection-scrub",
@@ -31,6 +33,8 @@ export type StorageMaintenanceKind =
   (typeof STORAGE_MAINTENANCE_KINDS)[number];
 export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "log-migration": "authority-commit-log",
+  "workspace-migration": "workspace-binding-migrator",
+  "workscene-cleanup": "anchor-workscene-owner",
   "projection-flush": "durable-projection-index",
   "projection-rebuild": "durable-projection-index",
   "projection-scrub": "durable-projection-index",
@@ -410,6 +414,14 @@ const STORAGE_STEP_BUDGETS: Readonly<
   Record<StorageMaintenanceKind, DeviceCapacityBudget>
 > = {
   "log-migration": budget(32 * MIB, 256 * MIB, 256 * MIB, 256 * MIB, 4_096),
+  "workspace-migration": budget(
+    16 * MIB,
+    16 * MIB,
+    64 * MIB,
+    64 * MIB,
+    4_096,
+  ),
+  "workscene-cleanup": budget(16 * MIB, 0, 256 * MIB, 256 * MIB, 4_096),
   "projection-flush": budget(32 * MIB, 64 * MIB, 256 * MIB, 256 * MIB, 16_384),
   "projection-rebuild": budget(32 * MIB, 64 * MIB, 256 * MIB, 256 * MIB, 16_384),
   "projection-scrub": budget(

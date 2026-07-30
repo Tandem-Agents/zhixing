@@ -8,9 +8,18 @@
  *     user message 注入，避免动态任务文本污染 system prompt 前缀
  */
 
-import { getAgentIdentity } from "@zhixing/core";
-import type { WorkScene } from "@zhixing/core";
+import {
+  getAgentIdentity,
+  WORKSPACE_DEPENDENT_TOOL_IDS,
+} from "@zhixing/core";
 import type { AgentRoleProfile } from "./agent-role-profile.js";
+
+export interface WorksceneProfileInput {
+  readonly id: string;
+  readonly name: string;
+  /** Runtime-local resolution result; no raw path is required by the profile. */
+  readonly hasWorkspace?: boolean;
+}
 
 /**
  * 主 agent 身份段文本 —— 与历史 buildIdentity 输出 byte-equal,
@@ -58,13 +67,19 @@ export const SUB_AGENT_ENABLED_TOOLS = ["read", "glob", "grep", "web_fetch"] as 
  * 主 agent profile。name 来自全局 setAgentIdentity 单例,可由 zhixing.config.json
  * 的 agent.displayName 覆盖。
  */
-export function mainProfile(): AgentRoleProfile {
+export interface MainProfileOptions {
+  /** False means this runtime has no authorized workspace root. */
+  readonly hasWorkspace?: boolean;
+}
+
+export function mainProfile(options: MainProfileOptions = {}): AgentRoleProfile {
   return {
     name: getAgentIdentity().displayName,
     role: "main",
     instructions: MAIN_IDENTITY_INSTRUCTIONS,
     constraints: [],
-    enabledTools: MAIN_ENABLED_TOOLS,
+    enabledTools:
+      options.hasWorkspace === false ? NON_FILE_TOOLS : MAIN_ENABLED_TOOLS,
     capabilities: { canSpawnSubAgents: true, userFacing: true },
   };
 }
@@ -81,25 +96,24 @@ export interface SubAgentProfileOptions {
  * 等约束,避免子 agent 模仿主 agent 与用户对话的语气。
  */
 /**
- * 无 workdir 工作场景的工具集 —— 从主工具集剔除全部本地文件类工具
+ * 无授权 workspace 工作场景的工具集 —— 从主工具集剔除全部本地文件类工具
  * （bash/read/write/edit/glob/grep）。**by-construction 文件作用域隔离**：
- * 无 workdir = 该场景不涉本地文件，装配期即无文件工具，根本不存在"文件
- * 工具无根"问题；与"无 workdir power 的 workingDirectory 不落 cwd"互为
+ * 无 workspace = 该场景不涉本地文件，装配期即无文件工具，根本不存在"文件
+ * 工具无根"问题；与"无 workspace 的 workingDirectory 不落 cwd"互为
  * 主防线（无文件操作面）与纵深防御。
  *
  * 保留 load_skill / save_skill：技能库读写的是 ~/.zhixing/skills（app-state，
- * 非 workdir 本地文件），不属被剔除的本地文件类；无 workdir 场景仍可加载
+ * 非 workspace 本地文件），不属被剔除的本地文件类；无 workspace 场景仍可加载
  * work 区技能、也可把对话里的做法沉淀成技能。
  * **不保留 admit_skill**：接入要读用户给的本地路径（filesystem/read）——
- * 无 workdir 场景按构造无本地文件操作面,接入回主对话做。
+ * 无 workspace 场景按构造无本地文件操作面,接入回主对话做。
  */
-const WORKSCENE_NON_FILE_TOOLS = [
-  "memory",
-  "web_fetch",
-  "load_skill",
-  "save_skill",
-  "Task",
-] as const;
+const WORKSPACE_DEPENDENT_TOOLS = new Set<string>(
+  WORKSPACE_DEPENDENT_TOOL_IDS,
+);
+const NON_FILE_TOOLS = MAIN_ENABLED_TOOLS.filter(
+  (tool) => !WORKSPACE_DEPENDENT_TOOLS.has(tool),
+);
 
 /**
  * 工作场景 power agent profile —— 用户面对的主对话循环，专注单一工作场景。
@@ -107,14 +121,14 @@ const WORKSCENE_NON_FILE_TOOLS = [
  * 复用 subAgentProfile 把动态文本编进 instructions 的现成手法：同一 scene
  * 输出固定 → 静态前缀 byte-equal，多次进入缓存可复用。
  *
- * 工具集按 scene.workdir 有无二分（by-construction）：
- *   - 有 workdir：主工具全集（文件工具在 workdir 内操作）
- *   - 无 workdir：剔除本地文件类，仅留非文件工具（memory/web_fetch/load_skill/Task）
+ * 工具集按本地 runtime 是否已解析出授权 workspace 二分（by-construction）：
+ *   - 有 workspace：主工具全集（文件工具在授权工作根内操作）
+ *   - 无 workspace：剔除本地文件类，仅留非文件工具（memory/web_fetch/load_skill/Task）
  *
  * capabilities 同 mainProfile（用户面对、可派 Task）。
  */
-export function powerProfile(scene: WorkScene): AgentRoleProfile {
-  const hasWorkdir = Boolean(scene.workdir);
+export function powerProfile(scene: WorksceneProfileInput): AgentRoleProfile {
+  const hasWorkspace = scene.hasWorkspace === true;
   return {
     name: getAgentIdentity().displayName,
     role: "main",
@@ -122,14 +136,14 @@ export function powerProfile(scene: WorkScene): AgentRoleProfile {
       `${MAIN_IDENTITY_INSTRUCTIONS}\n\n` +
       `You are now focused on the work scene "${scene.name}". ` +
       `Work and memory in this scene are isolated from personal scope and other scenes. ` +
-      `Inside this scene, you may use confirmed tools to rename this scene, change its workdir, or clear its workdir binding; rename applies to registry metadata without restarting this window, while workdir changes take effect after this turn by re-entering the scene with the updated configuration. ` +
+      `Inside this scene, you may use confirmed tools to rename this scene, change its device workspace, or clear its workspace binding; rename applies to registry metadata without restarting this window, while workspace changes take effect after this turn by re-entering the scene with the updated configuration. ` +
       `When the work in this scene is done — or the user signals they want to step back to the broader conversation — ` +
       `judge for yourself that the scene is complete and call the workmode_exit tool to return to the main conversation. ` +
       `Do not just narrate that you are done; leaving the scene only happens when you call workmode_exit.`,
     constraints: [],
-    enabledTools: hasWorkdir
+    enabledTools: hasWorkspace
       ? MAIN_ENABLED_TOOLS
-      : WORKSCENE_NON_FILE_TOOLS,
+      : NON_FILE_TOOLS,
     capabilities: { canSpawnSubAgents: true, userFacing: true },
   };
 }

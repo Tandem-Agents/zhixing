@@ -43,6 +43,12 @@ const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 export interface ConversationAssignmentWorkerOptions {
   readonly ledger: ConversationAssignmentLedger;
   readonly runtimeFactory: RuntimeFactory;
+  readonly preflightEnvironment?: (
+    manifest: ConversationEnvelope["manifest"],
+  ) => Promise<{
+    readonly workspaceRoot: string | null;
+    readonly error?: import("@zhixing/core/contracts").AuthorityError;
+  }>;
   readonly artifacts: ArtifactStore;
   readonly submissionFor: (envelope: ConversationEnvelope) => RunSubmissionPort;
   readonly finalizeUsage: (input: {
@@ -179,6 +185,12 @@ export class ConversationAssignmentWorker {
       ledger: this.options.ledger,
       owner: submission,
     });
+    const environment = this.options.preflightEnvironment
+      ? await this.options.preflightEnvironment(envelope.manifest)
+      : { workspaceRoot: null };
+    if (environment.error) {
+      throw new Error(environment.error.message);
+    }
     const started = await this.options.ledger.start(assignmentId);
     if (!started.started) {
       await this.#resumeSealedSubmission(assignmentId, submission, context);
@@ -231,7 +243,26 @@ export class ConversationAssignmentWorker {
           this.options.interactions.drainAssignment(activeInteractionBinding),
         this.#abort.signal,
       );
-      runtime = await this.options.runtimeFactory.create(envelope.work.conversationId);
+      runtime = await this.options.runtimeFactory.create(
+        envelope.work.conversationId,
+        { workspaceRoot: environment.workspaceRoot },
+      );
+      const runtimeProfile = runtime.executionProfile?.();
+      if (
+        !runtimeProfile ||
+        canonicalize({
+          tools: runtimeProfile.tools,
+          mcpServers: runtimeProfile.mcpServers,
+        }) !==
+          canonicalize({
+            tools: envelope.manifest.tools,
+            mcpServers: envelope.manifest.mcpServers,
+          })
+      ) {
+        throw new Error(
+          "Conversation runtime does not match the frozen execution manifest",
+        );
+      }
       activeInteractionBinding.broker = runtime.confirmationBroker;
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
       const generator = runtime.run(messages, {

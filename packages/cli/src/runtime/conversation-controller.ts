@@ -1018,7 +1018,7 @@ export class ConversationController {
    */
   async setCurrentSceneWorkdirAndReenter(
     sceneId: string,
-    workdir: string | null,
+    workspace: { deviceId: string; bindingRef: string } | null,
   ): Promise<SetCurrentSceneWorkdirResult> {
     if (
       this.active.mode.kind !== "workscene" ||
@@ -1035,7 +1035,7 @@ export class ConversationController {
 
     let scene: WorksceneSummary;
     try {
-      scene = await this.opts.workscene.setWorkdir(sceneId, workdir);
+      scene = await this.opts.workscene.setWorkdir(sceneId, workspace);
     } catch (error) {
       if (isRpcNotFound(error)) {
         return { kind: "scene-missing", active: this.active, error };
@@ -1080,7 +1080,9 @@ export class ConversationController {
     sceneId: string,
     mainTarget: ActiveConversation,
   ): Promise<ExitSceneResult> {
-    await this.opts.workscene.exit(sceneId).catch(() => {});
+    await this.opts.workscene
+      .exit(sceneId, this.active.conversationId)
+      .catch(() => {});
     // 目标可能从 mainTarget 逐级降级到候选——每次 resume 前把切换窗口
     // 收敛到当次精确目标，不按整个 main 域放行。
     this.pendingSwitchTarget = (id) => id === mainTarget.conversationId;

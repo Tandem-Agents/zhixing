@@ -39,6 +39,7 @@ import {
   FileExecutionSnapshotVersionStore,
   FileTrustRuleSnapshotCatalog,
 } from "../executor-snapshot-version-store.js";
+import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
 import { StartupRollback } from "../serve/startup-rollback.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -73,6 +74,7 @@ function prepareAuthority(
   } = {},
 ) {
   return authority.prepareConversationAssignment({
+    conversationId: "test-conversation",
     executionProfile: input.executionProfile ?? EMPTY_EXECUTION_PROFILE,
     permissionRules: input.permissionRules ?? [],
   });
@@ -125,6 +127,134 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(stack.delivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
+  });
+
+  it("freezes an explicit workspace revision and preflights it before local execution", async () => {
+    const capacity = createDeviceCapacityRuntime(resolve(home, "capacity"));
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+      deviceCapacity: capacity.arbiter,
+      storageMaintenance: capacity.storage,
+    });
+    const migration = authority.workspaceBindingMigration;
+    expect(migration).toBeDefined();
+    const abort = new AbortController().signal;
+    const workspacePath = resolve(home, "workspace-a");
+    const binding = await migration!.importLegacy(
+      {
+        migrationId: "test-workspace-selection",
+        sourceSnapshotToken: "snapshot-a",
+        displayName: "Workspace A",
+        absolutePath: workspacePath,
+      },
+      abort,
+    );
+    await migration!.activateLegacy(
+      {
+        migrationId: "test-workspace-selection",
+        sourceSnapshotToken: "snapshot-a",
+      },
+      abort,
+    );
+
+    const prepared = await authority.prepareConversationAssignment({
+      conversationId: "main",
+      executionProfile: EMPTY_EXECUTION_PROFILE,
+      permissionRules: [],
+      environment: {
+        workspace: {
+          deviceId: authority.deviceId,
+          bindingRef: binding.bindingRef,
+        },
+      },
+    });
+    expect(prepared.environment.workspace).toEqual({
+      deviceId: authority.deviceId,
+      bindingRef: binding.bindingRef,
+      workspaceBindingRevision: binding.workspaceBindingRevision,
+    });
+    const createdScene = await authority.worksceneRegistry!.apply(
+      {
+        kind: "workscene-create",
+        name: "Workspace Scene",
+        workspace: {
+          deviceId: authority.deviceId,
+          bindingRef: binding.bindingRef,
+        },
+      },
+      { requestId: "create-workspace-scene" },
+    );
+    if (createdScene.kind !== "workscene-applied") {
+      throw new Error("workscene creation did not return an applied scene");
+    }
+    await expect(
+      authority.prepareConversationAssignment({
+        conversationId: `ws:${createdScene.scene.id}:conv_main`,
+        executionProfile: EMPTY_EXECUTION_PROFILE,
+        permissionRules: [],
+      }),
+    ).resolves.toMatchObject({
+      environment: {
+        workspace: {
+          deviceId: authority.deviceId,
+          bindingRef: binding.bindingRef,
+          workspaceBindingRevision: binding.workspaceBindingRevision,
+        },
+      },
+    });
+    const manifest = createExecutionManifest({
+      baseRef: {
+        execution: "conversation",
+        conversationId: "main",
+        baseRevision: 0,
+      },
+      protocolVersion: prepared.policy.manifestCapabilities.protocolVersion,
+      requires: {
+        ...prepared.policy.manifestRequires,
+        permissionSnapshotVersion:
+          prepared.policy.permissionSnapshot.snapshotVersion,
+      },
+      tools: [...prepared.policy.manifestCapabilities.tools],
+      mcpServers: [...prepared.policy.manifestCapabilities.mcpServers],
+      environment: prepared.environment,
+      credentialBindings: [
+        ...prepared.policy.manifestCapabilities.credentialBindings,
+      ],
+    });
+    await expect(
+      authority.preflightLocalConversationEnvironment(manifest),
+    ).resolves.toEqual({ workspaceRoot: workspacePath });
+    await expect(authority.environment!.probePath(workspacePath)).resolves.toBe(
+      "directory",
+    );
+
+    const staleManifest = {
+      ...manifest,
+      environment: {
+        ...manifest.environment,
+        workspace: {
+          ...manifest.environment.workspace!,
+          workspaceBindingRevision:
+            manifest.environment.workspace!.workspaceBindingRevision + 1,
+        },
+      },
+    };
+    await expect(
+      authority.preflightLocalConversationEnvironment(staleManifest),
+    ).resolves.toMatchObject({
+      workspaceRoot: null,
+      error: { code: "revision-conflict", retryable: true },
+    });
+
+    const unbound = await authority.prepareConversationAssignment({
+      conversationId: "main",
+      executionProfile: EMPTY_EXECUTION_PROFILE,
+      permissionRules: [],
+    });
+    expect(unbound.environment.workspace).toBeUndefined();
+    authority.stopStorageMaintenance();
   });
 
   it("rolls back every partially acquired delivery resource when later startup fails", async () => {
@@ -480,20 +610,52 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   });
 
   it("constructs an executor-only authority stack without anchor owners", async () => {
+    const capacity = createDeviceCapacityRuntime(resolve(home, "executor-capacity"));
     const runtime = await setupAuthorityRuntime({
       zhixingHome: home,
       secretStore: new MemorySecretStore(),
       executorReadiness: TEST_EXECUTOR_READINESS,
       enableAnchor: false,
       enableLocalExecutor: true,
+      deviceCapacity: capacity.arbiter,
+      storageMaintenance: capacity.storage,
     });
 
     expect(runtime.executorLog).toBeDefined();
     expect(runtime.executorResourceGovernor).toBeDefined();
+    expect(runtime.environment).toBeDefined();
+    expect(runtime.workspaceBindingAdmin).toBeDefined();
+    expect(runtime.workspaceBindingMigration).toBeDefined();
+    expect(runtime.workspaceProbe).toBeDefined();
+    expect(runtime.worksceneRegistry).toBeUndefined();
     expect(() => runtime.authorityLog).toThrow("Anchor authority role is not enabled");
     expect(() => runtime.authority).toThrow("Anchor authority role is not enabled");
     expect(() => runtime.controlAdmission).toThrow("Anchor authority role is not enabled");
     expect(() => runtime.resourceGovernor).toThrow("Anchor authority role is not enabled");
+  });
+
+  it("constructs an anchor-only authority stack without loading local environment ports", async () => {
+    const runtime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+      enableAnchor: true,
+      enableLocalExecutor: false,
+    });
+
+    expect(runtime.authorityLog).toBeDefined();
+    expect(runtime.controlAdmission).toBeDefined();
+    expect(runtime.worksceneRegistry).toBeDefined();
+    expect(runtime.environment).toBeUndefined();
+    expect(runtime.workspaceBindingAdmin).toBeUndefined();
+    expect(runtime.workspaceBindingMigration).toBeUndefined();
+    expect(runtime.workspaceProbe).toBeUndefined();
+    expect(() => runtime.executorLog).toThrow(
+      "Local executor role is not enabled",
+    );
+    expect(() => runtime.executorResourceGovernor).toThrow(
+      "Local executor role is not enabled",
+    );
   });
 
   it("selects the first compatible remote executor and falls back to local capacity", async () => {
@@ -520,16 +682,19 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       });
       const profile = { ...EMPTY_EXECUTION_PROFILE, tools: ["Read"] };
       const remote = await anchor.prepareConversationAssignment({
+        conversationId: "test-conversation",
         executionProfile: profile,
         permissionRules: [],
         targets: [
           {
             executorId: incompatible.executorId,
+            deviceId: incompatible.identity.deviceId,
             synchronizePermission: (snapshot) =>
               incompatible.installPermissionSnapshot(snapshot),
           },
           {
             executorId: compatible.executorId,
+            deviceId: compatible.identity.deviceId,
             synchronizePermission: (snapshot) =>
               compatible.installPermissionSnapshot(snapshot),
           },
@@ -538,10 +703,12 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       expect(remote.executorId).toBe(compatible.executorId);
 
       const local = await anchor.prepareConversationAssignment({
+        conversationId: "test-conversation",
         executionProfile: profile,
         permissionRules: [],
         targets: [{
           executorId: incompatible.executorId,
+          deviceId: incompatible.identity.deviceId,
           synchronizePermission: (snapshot) =>
             incompatible.installPermissionSnapshot(snapshot),
         }],

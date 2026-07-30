@@ -121,8 +121,10 @@ describe("buildDisplayBody", () => {
 
     expect(body.kind).toBe("generic");
     if (body.kind === "generic") {
-      expect(body.summary).toContain("动作：绑定或更换工作目录");
-      expect(body.summary).toContain(`工作目录：${normalizeWorkdir(longPath)}`);
+      expect(body.summary).toContain("动作：绑定或更换设备工作区");
+      expect(body.summary).toContain(
+        `本机工作目录：${normalizeWorkdir(longPath)}`,
+      );
       expect(body.summary).not.toContain('"workdir"');
       expect(body.summary).not.toContain("…");
     }

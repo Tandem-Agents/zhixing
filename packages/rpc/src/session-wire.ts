@@ -352,9 +352,15 @@ export interface SessionCompactResult {
 
 export interface WorksceneSummary {
   sceneId: string;
+  revision: number;
   name: string;
-  workdir?: string;
-  workdirWarning?: string;
+  workspace?: {
+    deviceId: string;
+    bindingRef: string;
+    deviceName?: string;
+    workspaceName?: string;
+  };
+  workspaceWarning?: string;
   lastActiveAt?: string;
 }
 

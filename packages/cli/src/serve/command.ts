@@ -38,7 +38,6 @@ import {
   type TurnContext,
   JournalStore,
   ConversationRepository,
-  FsWorkSceneRegistry,
   parseConversationId,
   ShardedTranscriptStore,
   SnapshotStore,
@@ -83,6 +82,7 @@ import {
 } from "@zhixing/owner-services";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import fsp from "node:fs/promises";
+import path from "node:path";
 import chalk from "chalk";
 import {
   RuntimeHost,
@@ -129,6 +129,7 @@ import { setupAssemblyUnits, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { createAssemblyUnits } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
+import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import { StartupRollback } from "./startup-rollback.js";
 import {
@@ -246,11 +247,27 @@ async function runServerProcess(
   const conversationsRef: { current: ConversationManager | null } = {
     current: null,
   };
+  const authorityRuntimeRef: { current: AuthorityRuntimeStack | undefined } = {
+    current: undefined,
+  };
+  const meshRuntimeRef: {
+    current: import("./mesh-runtime-assembly.js").MeshRuntimeAssembly | undefined;
+  } = { current: undefined };
   // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
-  const workSceneRegistry = new FsWorkSceneRegistry();
   const worksceneDirectory = createWorksceneDirectory({
-    registry: workSceneRegistry,
+    authority: () => authorityRuntimeRef.current,
     conversations: () => conversationsRef.current,
+    activityProjectionRoot: path.join(
+      zhixingHome,
+      "distributed-runtime",
+      "workscene-activity",
+    ),
+    storageMaintenance: deviceCapacity.storage,
+    probeRemote: (deviceId, request) => {
+      const mesh = meshRuntimeRef.current;
+      if (!mesh) throw new Error("目标设备当前不可达，无法确认工作区状态");
+      return mesh.workspaceProbeForDevice(deviceId).probe(request);
+    },
   });
   // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 目录在
   // serveSkillStore 创建后装配(共享同一锁域与结构版本)。
@@ -386,6 +403,19 @@ async function runServerProcess(
   //   投递 origin 执行期从 RunContext 派生,实例装配不再按对话定制。
   //   turn-context provider 注册收拢进 onRuntimeCreated——scheduler 是 lazy ref
   //   （顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时 fallback 空状态。
+  const resolveWorksceneRoot = async (sceneId: string): Promise<string | null> => {
+    const scene = await worksceneDirectory.get(sceneId);
+    if (!scene?.workspace) return null;
+    const runtime = authorityRuntimeRef.current;
+    if (!runtime?.environment || scene.workspace.deviceId !== runtime.deviceId) {
+      throw new Error(`工作场景 "${sceneId}" 的工作区不属于当前 executor`);
+    }
+    const resolved = await runtime.environment.resolveWorkspace(
+      scene.workspace.bindingRef,
+    );
+    return resolved.absolutePath;
+  };
+
   const runtimeHost = new RuntimeHost({
     providerConfiguration: {
       config,
@@ -407,7 +437,7 @@ async function runServerProcess(
       createAdvancementAcceptanceLifecycle(advancementController),
       createZhixingGuidanceLifecycle({
         getZhixingHome,
-        getWorkscene: (sceneId) => worksceneDirectory.get(sceneId),
+        resolveWorksceneRoot,
         readGuidanceFile,
         loadLayeredGuidance,
       }),
@@ -439,17 +469,49 @@ async function runServerProcess(
   //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
   const executorRole = executor?.createExecutorRole({
-    createAgentRuntime: async (sessionId) => {
+    createAgentRuntime: async (sessionId, environment) => {
       // 对话归属编码在全域键里:ws: 前缀 → 该场景的 power 装配;其余 main。
       const { scope } = parseConversationId(sessionId);
       if (scope.kind === "workscene") {
-        const scene = await workSceneRegistry.get(scope.sceneId);
+        const scene = await worksceneDirectory.get(scope.sceneId);
         if (!scene) {
           throw new Error(`工作场景 "${scope.sceneId}" 不存在,无法装配会话`);
         }
-        return runtimeHost.createWorksceneRuntime(scene);
+        if (environment) {
+          return runtimeHost.createWorksceneRuntime({
+            scene,
+            absolutePath: environment.workspaceRoot,
+          });
+        }
+        if (!scene.workspace) {
+          return runtimeHost.createWorksceneRuntime({
+            scene,
+            absolutePath: null,
+          });
+        }
+        const absolutePath = await resolveWorksceneRoot(scope.sceneId);
+        if (!absolutePath) {
+          throw new Error(
+            `工作场景 "${scope.sceneId}" 的工作区无法在当前 executor 解析`,
+          );
+        }
+        const runtime = authorityRuntimeRef.current!;
+        const probe = await runtime.environment!.probePath(absolutePath);
+        if (probe === "missing") {
+          await fsp.mkdir(absolutePath, { recursive: true });
+        } else if (probe !== "directory") {
+          throw new Error(
+            `工作场景 "${scope.sceneId}" 的工作区不可用于执行: ${probe}`,
+          );
+        }
+        return runtimeHost.createWorksceneRuntime({
+          scene,
+          absolutePath,
+        });
       }
-      return runtimeHost.createConversationRuntime();
+      return runtimeHost.createConversationRuntime(
+        environment?.workspaceRoot,
+      );
     },
   });
   const runtimeFactory = executorRole && executor
@@ -509,6 +571,7 @@ async function runServerProcess(
     secretStore: startupResult.secretStore,
     durableInteractions,
     perspectives: perspectivesController,
+    deviceCapacity: deviceCapacity.arbiter,
     storageMaintenance: deviceCapacity.storage,
     confirmationHub,
     mcpHub,
@@ -536,7 +599,10 @@ async function runServerProcess(
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
   // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
   await setupAssemblyUnits(assemblyUnits, ctx, "pre-server");
+  authorityRuntimeRef.current = ctx.authorityRuntime;
+  meshRuntimeRef.current = ctx.meshRuntime;
   conversationsRef.current = ctx.conversations ?? null;
+  await worksceneDirectory.recover();
 
   // ============================================================================
   // 恒定核心后置 —— 须在 pre-server 接入面之后构造。

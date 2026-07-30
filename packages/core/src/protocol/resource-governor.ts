@@ -1031,6 +1031,8 @@ export function validateReservationOrigin(input: unknown): ReservationOrigin {
   assertExactKeys(input, ["admissionClass", "entry"], "Reservation origin");
   const expected = input.entry === "conversation-input"
     ? "interactive"
+    : input.entry === "environment-control"
+      ? "interactive"
     : input.entry === "advancement-control"
       ? "advancement"
       : input.entry === "schedule-trigger"

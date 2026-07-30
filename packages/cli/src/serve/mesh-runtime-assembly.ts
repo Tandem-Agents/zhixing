@@ -58,6 +58,10 @@ import {
   JobInteractionMeshClient,
   registerJobInteractionService,
 } from "./job-interaction-mesh.js";
+import {
+  EnvironmentProbeMeshClient,
+  registerEnvironmentProbeMeshService,
+} from "./environment-probe-mesh.js";
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
@@ -223,6 +227,8 @@ export class MeshRuntimeAssembly {
       worker = new ConversationAssignmentWorker({
         ledger: options.executor!.ledger,
         runtimeFactory: options.executor!.runtimeFactory,
+        preflightEnvironment: (manifest) =>
+          options.authority.preflightLocalConversationEnvironment(manifest),
         artifacts: options.authority.artifacts,
         submissionFor: () => this.#composition.submissionPort(anchorId),
         resourceGovernor: options.authority.executorResourceGovernor,
@@ -295,6 +301,18 @@ export class MeshRuntimeAssembly {
         (deviceId) => this.#peerHasRole(deviceId, "anchor"),
         options.authority.verifier,
       ));
+      if (options.authority.workspaceProbe) {
+        this.#disposers.push(
+          registerEnvironmentProbeMeshService(
+            this.services,
+            options.authority.workspaceProbe,
+            options.authority.verifier,
+            (deviceId) =>
+              deviceId === options.trust.issuer.deviceId &&
+              this.#peerHasRole(deviceId, "anchor"),
+          ),
+        );
+      }
       if (options.executor!.job) {
         this.#disposers.push(
           registerJobInteractionService(this.services, {
@@ -431,6 +449,19 @@ export class MeshRuntimeAssembly {
     return new JobInteractionMeshClient(this.connections.client(deviceId));
   }
 
+  workspaceProbeForDevice(deviceId: string): EnvironmentProbeMeshClient {
+    if (
+      !this.#peerHasRole(deviceId, "executor") ||
+      !this.connections.has(deviceId)
+    ) {
+      throw new Error(`Workspace probe executor is unavailable: ${deviceId}`);
+    }
+    return new EnvironmentProbeMeshClient(
+      this.connections.client(deviceId),
+      this.options.authority.verifier,
+    );
+  }
+
   #remoteDirectory(): RemoteConversationExecutionDirectory {
     const targets = new Map<string, RemoteConversationExecutionTarget>();
     const targetFor = (deviceId: string): RemoteConversationExecutionTarget => {
@@ -443,6 +474,7 @@ export class MeshRuntimeAssembly {
       );
       const target = {
         executorId,
+        deviceId,
         executor: this.#composition.executorPort(deviceId, {
           verifier: this.options.authority.verifier,
           authorizationFor: (assignmentId) =>

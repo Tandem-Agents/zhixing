@@ -17,6 +17,7 @@ export * from "./scheduler/index.js";
 export * from "./orchestration/index.js";
 export * from "./conversation/index.js";
 export * from "./workscene/index.js";
+export * from "./environment/index.js";
 export * from "./channels/index.js";
 export * from "./delivery/index.js";
 export * from "./interrupt/index.js";

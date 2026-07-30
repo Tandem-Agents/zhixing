@@ -86,8 +86,8 @@ describe("subAgentProfile(opts)", () => {
 });
 
 describe("powerProfile(scene)", () => {
-  it("有 workdir → 主工具全集（含文件工具）", () => {
-    const p = powerProfile(makeScene({ workdir: "/tmp/proj" }));
+  it("有已解析 workspace → 主工具全集（含文件工具）", () => {
+    const p = powerProfile({ ...makeScene(), hasWorkspace: true });
     expect(p.enabledTools).toEqual([
       "read",
       "write",
@@ -104,8 +104,8 @@ describe("powerProfile(scene)", () => {
     ]);
   });
 
-  it("无 workdir → 剔除全部本地文件类工具（by-construction 隔离）", () => {
-    const p = powerProfile(makeScene());
+  it("无 workspace → 剔除全部本地文件类工具（by-construction 隔离）", () => {
+    const p = powerProfile({ ...makeScene(), hasWorkspace: false });
     // load_skill / save_skill 读写 app-state(~/.zhixing/skills)、非 workdir
     // 本地文件,故保留。
     expect(p.enabledTools).toEqual([
@@ -125,8 +125,8 @@ describe("powerProfile(scene)", () => {
     expect(p.instructions).toContain(MAIN_IDENTITY_INSTRUCTIONS);
     expect(p.instructions).toContain("写作场景");
     expect(p.instructions).toContain("rename this scene");
-    expect(p.instructions).toContain("change its workdir");
-    expect(p.instructions).toContain("clear its workdir binding");
+    expect(p.instructions).toContain("change its device workspace");
+    expect(p.instructions).toContain("clear its workspace binding");
     // 退出自判：显式指向 workmode_exit 工具，而非仅"叙述完成"
     expect(p.instructions).toContain("workmode_exit");
     expect(p.capabilities).toEqual({
@@ -137,7 +137,7 @@ describe("powerProfile(scene)", () => {
   });
 
   it("同一 scene 多次调用 instructions byte-equal（静态前缀缓存可复用）", () => {
-    const scene = makeScene({ workdir: "/x" });
+    const scene = { ...makeScene(), hasWorkspace: true };
     expect(powerProfile(scene).instructions).toBe(
       powerProfile(scene).instructions,
     );

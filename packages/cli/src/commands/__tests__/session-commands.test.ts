@@ -170,7 +170,14 @@ describe("registerModeCommands", () => {
       getActiveMode: () => mode,
       getActiveTurnPromise: () => null,
       listScenes: async () => [
-        { sceneId: "scene-1", name: "写作", workdir: "E:\\w" },
+        {
+          sceneId: "scene-1",
+          name: "写作",
+          workspace: {
+            deviceName: "当前设备",
+            workspaceName: "写作项目",
+          },
+        },
       ],
       rl: { close: vi.fn() },
     });

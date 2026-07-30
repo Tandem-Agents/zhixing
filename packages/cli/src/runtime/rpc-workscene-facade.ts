@@ -7,12 +7,17 @@
  * 指针行为。"当前在哪个场景"是连接级 UI 态,宿主与 facade 都零知识。
  */
 
+import { randomUUID } from "node:crypto";
 import type {
   WorksceneEnterResult,
   WorksceneListResult,
   WorksceneSummary,
 } from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
+import {
+  createLocalWorkspaceTransfer,
+  removeLocalWorkspaceTransfer,
+} from "./local-workspace-transfer.js";
 
 export class RpcWorksceneFacade {
   constructor(private readonly link: CoreHostLink) {}
@@ -24,13 +29,36 @@ export class RpcWorksceneFacade {
     return result.scenes;
   }
 
-  /** 登记新场景;workdir 须为绝对路径(宿主边界校验)。 */
-  async create(name: string, workdir?: string): Promise<WorksceneSummary> {
+  /** 登记新场景；普通控制面只携设备域 workspace 引用。 */
+  async create(
+    name: string,
+    workspace?: { deviceId: string; bindingRef: string },
+  ): Promise<WorksceneSummary> {
     const client = await this.link.getClient();
     return client.request<WorksceneSummary>("workscene.create", {
       name,
-      workdir,
+      ...(workspace ? { workspace } : {}),
+      requestId: `workscene-create:${randomUUID()}`,
     });
+  }
+
+  async authorizeLocalWorkspace(
+    displayName: string,
+    absolutePath: string,
+  ): Promise<{ deviceId: string; bindingRef: string }> {
+    const transfer = await createLocalWorkspaceTransfer({
+      displayName,
+      absolutePath,
+    });
+    try {
+      const client = await this.link.getClient();
+      return await client.request<{ deviceId: string; bindingRef: string }>(
+        "workscene.authorizeLocalWorkspace",
+        { transferToken: transfer.token },
+      );
+    } finally {
+      await removeLocalWorkspaceTransfer(transfer.token).catch(() => {});
+    }
   }
 
   async rename(sceneId: string, name: string): Promise<WorksceneSummary> {
@@ -38,24 +66,29 @@ export class RpcWorksceneFacade {
     return client.request<WorksceneSummary>("workscene.rename", {
       sceneId,
       name,
+      requestId: `workscene-rename:${randomUUID()}`,
     });
   }
 
   async setWorkdir(
     sceneId: string,
-    workdir: string | null,
+    workspace: { deviceId: string; bindingRef: string } | null,
   ): Promise<WorksceneSummary> {
     const client = await this.link.getClient();
     return client.request<WorksceneSummary>("workscene.setWorkdir", {
       sceneId,
-      workdir,
+      workspace,
+      requestId: `workscene-set-workdir:${randomUUID()}`,
     });
   }
 
   /** 删除场景登记;场景有活跃会话时宿主拒绝(BUSY)。 */
   async delete(sceneId: string): Promise<void> {
     const client = await this.link.getClient();
-    await client.request("workscene.delete", { sceneId });
+    await client.request("workscene.delete", {
+      sceneId,
+      requestId: `workscene-delete:${randomUUID()}`,
+    });
   }
 
   /** 取 / 建场景当前对话(宿主原子查询创建),返回全域键 + 场景信息。 */
@@ -65,8 +98,8 @@ export class RpcWorksceneFacade {
   }
 
   /** 退出场景——宿主侧仅 touch(最近使用);切回 main 由调用方自己完成。 */
-  async exit(sceneId: string): Promise<void> {
+  async exit(sceneId: string, conversationId: string): Promise<void> {
     const client = await this.link.getClient();
-    await client.request("workscene.exit", { sceneId });
+    await client.request("workscene.exit", { sceneId, conversationId });
   }
 }

@@ -129,10 +129,14 @@ function makeFakes() {
       conversationId: `ws:${sceneId}:conv-9`,
       scene: { sceneId, name: "写作场景" },
     })),
-    setWorkdir: vi.fn(async (sceneId: string, workdir: string | null) => ({
+    setWorkdir: vi.fn(async (
+      sceneId: string,
+      workspace: { deviceId: string; bindingRef: string } | null,
+    ) => ({
       sceneId,
+      revision: 2,
       name: "写作场景",
-      ...(workdir ? { workdir } : {}),
+      ...(workspace ? { workspace } : {}),
     })),
     exit: vi.fn(async () => {}),
   };
@@ -1177,11 +1181,14 @@ describe("ConversationController", () => {
     const exited = await controller.exitScene(initial);
     expect(exited).toEqual({ kind: "returned", active: initial });
     expect(f.conversation.resumeIfExists).toHaveBeenCalledWith("conv-1");
-    expect(f.workscene.exit).toHaveBeenCalledWith("scene-1");
+    expect(f.workscene.exit).toHaveBeenCalledWith(
+      "scene-1",
+      "ws:scene-1:conv-9",
+    );
     expect(controller.current).toEqual(initial);
   });
 
-  it("setCurrentSceneWorkdirAndReenter:撤 observer 后落盘并按新目录重进", async () => {
+  it("setCurrentSceneWorkdirAndReenter:撤 observer 后落盘并按新工作区重进", async () => {
     const f = makeFakes();
     const { controller } = makeController(f);
 
@@ -1192,12 +1199,15 @@ describe("ConversationController", () => {
 
     const result = await controller.setCurrentSceneWorkdirAndReenter(
       "scene-1",
-      "/tmp/project",
+      { deviceId: "device-a", bindingRef: "binding-a" },
     );
 
     expect(result.kind).toBe("reentered");
     expect(f.conversation.unsubscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
-    expect(f.workscene.setWorkdir).toHaveBeenCalledWith("scene-1", "/tmp/project");
+    expect(f.workscene.setWorkdir).toHaveBeenCalledWith(
+      "scene-1",
+      { deviceId: "device-a", bindingRef: "binding-a" },
+    );
     expect(f.workscene.enter).toHaveBeenLastCalledWith("scene-1");
     expect(controller.current.mode).toEqual({
       kind: "workscene",
@@ -1241,7 +1251,7 @@ describe("ConversationController", () => {
 
     const result = await controller.setCurrentSceneWorkdirAndReenter(
       "scene-1",
-      "/tmp/project",
+      { deviceId: "device-a", bindingRef: "binding-a" },
     );
 
     expect(result.kind).toBe("scene-missing");

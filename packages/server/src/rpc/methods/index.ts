@@ -34,6 +34,7 @@ import {
   buildSessionTaskListMethod,
 } from "./session.js";
 import {
+  buildWorksceneAuthorizeLocalWorkspaceMethod,
   buildWorksceneListMethod,
   buildWorksceneCreateMethod,
   buildWorksceneRenameMethod,
@@ -112,6 +113,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionTaskListUpdateMethod(),
     buildSessionTaskListMethod(),
     // workscene.*（场景管理面 + 进出执行体）
+    buildWorksceneAuthorizeLocalWorkspaceMethod(),
     buildWorksceneListMethod(),
     buildWorksceneCreateMethod(),
     buildWorksceneRenameMethod(),

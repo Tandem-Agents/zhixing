@@ -135,7 +135,9 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
         "durable-projection-index",
         "artifact-lifecycle-index",
         "anchor-asset-maintainer",
+        "anchor-workscene-owner",
         "executor-data-plane",
+        "workspace-binding-migrator",
       ]),
     );
   });

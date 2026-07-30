@@ -393,7 +393,14 @@ export interface ModeCommandsDeps {
   readonly getActiveTurnPromise: () => Promise<unknown> | null;
   /** 工作场景候选(经 RPC) —— /work 选择器列候选、命令解析 idOrName。 */
   readonly listScenes: () => Promise<
-    readonly { sceneId: string; name: string; workdir?: string }[]
+    readonly {
+      sceneId: string;
+      name: string;
+      workspace?: {
+        deviceName?: string;
+        workspaceName?: string;
+      };
+    }[]
   >;
   /** readline —— 主对话 /exit 走 rl.close() 触发完整 cleanup。 */
   readonly rl: { close(): void };
@@ -498,11 +505,15 @@ function buildWorkSceneArgSchema(deps: ModeCommandsDeps): ArgSchema {
         ) {
           continue;
         }
-        const wd = s.workdir ? ` · ${s.workdir}` : "";
+        const workspace = s.workspace
+          ? ` · ${s.workspace.deviceName ?? "当前设备"} / ${
+              s.workspace.workspaceName ?? "已授权工作区"
+            }`
+          : "";
         choices.push({
           value: s.sceneId,
           label: s.name || s.sceneId,
-          description: `${s.sceneId}${wd}`,
+          description: `${s.sceneId}${workspace}`,
         });
       }
       return choices;

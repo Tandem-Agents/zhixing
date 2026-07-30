@@ -87,9 +87,21 @@ function setupAuthorityRuntime(
 function createProtocol(
   options: ConstructorParameters<typeof ConversationProtocolRuntime>[0],
 ): ConversationProtocolRuntime {
+  const localExecutor = options.localExecutor ?? {
+    ...TEST_LOCAL_EXECUTOR,
+    runtimeFactory: {
+      create: async (conversationId: string) => {
+        const runtime = options.manager().getSession(conversationId)?.runtime;
+        if (!runtime) {
+          throw new Error(`Missing test conversation runtime: ${conversationId}`);
+        }
+        return runtime;
+      },
+    },
+  };
   return new ConversationProtocolRuntime({
     ...options,
-    localExecutor: options.localExecutor ?? TEST_LOCAL_EXECUTOR,
+    localExecutor,
   });
 }
 
@@ -220,6 +232,92 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("durably binds first-party environment selection to admission and rejects channel construction", async () => {
+    const home = await createTempDir("conversation-protocol-environment-selection");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore,
+    });
+    const conversationId = "conversation-environment-selection";
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    manager = new ConversationManager(
+      {
+        create: vi.fn(async () => ({
+          ...TEST_RUNTIME_AUTHORITY_FACTS,
+          sessionId: conversationId,
+          async *run(): AsyncGenerator<AgentYield, RunResult> {
+            throw new Error("environment admission must not execute");
+          },
+          abort: () => false,
+          async dispose() {},
+        })),
+      },
+      undefined,
+      { durableTurnExecutor: protocol },
+    );
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+
+    const firstParty = {
+      conversationId,
+      input: "use selected workspace",
+      invocation: { kind: "agent" as const, source: "interactive" as const },
+      environment: {
+        workspace: { deviceId: authority.deviceId, bindingRef: "workspace-a" },
+      },
+      options: {
+        source: "interactive" as const,
+        turnContext: {
+          turnId: "rpc:environment-selection",
+          turnOrigin: { channel: "rpc", triggeredBy: "connection-1" },
+        },
+      },
+      surfacePrincipal: "rpc:owner",
+    };
+    const admitted = await protocol.admit(firstParty);
+
+    const replayProtocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    await expect(replayProtocol.admit(firstParty)).resolves.toEqual({
+      runId: admitted.runId,
+      shouldSchedule: true,
+    });
+    replayProtocol.deferScheduling(conversationId, admitted.runId);
+    await expect(
+      replayProtocol.admit({
+        ...firstParty,
+        environment: {
+          workspace: { deviceId: authority.deviceId, bindingRef: "workspace-b" },
+        },
+      }),
+    ).rejects.toThrow(/payload|bound|conflict/iu);
+
+    await expect(
+      protocol.admit({
+        ...firstParty,
+        options: {
+          source: "channel",
+          turnContext: {
+            turnId: "feishu:environment-selection",
+            turnOrigin: {
+              channel: "feishu",
+              triggeredBy: "user-a",
+              target: { channelId: "feishu", to: "chat-a", threadId: "thread-a" },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow("Only first-party");
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("requires the matching upload grant before admitting attachments", async () => {
     let now = new Date().toISOString();
     const home = await createTempDir("conversation-protocol-attachments");
@@ -474,7 +572,7 @@ describe("ConversationProtocolRuntime", () => {
     const secretStore = new MemorySecretStore();
     let readiness = {
       ...TEST_EXECUTOR_READINESS,
-      tools: ["bash"],
+      tools: ["memory"],
       mcpServers: ["server-a"],
     };
     const readinessReads: string[][] = [];
@@ -507,7 +605,7 @@ describe("ConversationProtocolRuntime", () => {
         confirmations: [],
       }),
       executionProfile: () => ({
-        tools: ["bash"],
+        tools: ["memory"],
         mcpServers: ["server-a"],
         providerIds: [],
       }),
@@ -520,11 +618,11 @@ describe("ConversationProtocolRuntime", () => {
     const prepare = authority.prepareConversationAssignment;
     let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
     const validateBinding = authority.validateConversationRuntimeBinding;
-    const bindingResults: Array<ReturnType<typeof validateBinding>> = [];
+    const bindingResults: Array<Awaited<ReturnType<typeof validateBinding>>> = [];
     const validateBindingSpy = vi
       .spyOn(authority, "validateConversationRuntimeBinding")
-      .mockImplementation((input) => {
-        const result = validateBinding(input);
+      .mockImplementation(async (input) => {
+        const result = await validateBinding(input);
         bindingResults.push(result);
         return result;
       });
@@ -568,12 +666,12 @@ describe("ConversationProtocolRuntime", () => {
         "Local executor rejected a freshly issued assignment",
       );
       expect(validateBindingSpy).toHaveBeenCalledOnce();
-      expect(readinessReads).toEqual([["bash"], []]);
+      expect(readinessReads).toEqual([["memory"], []]);
       expect(bindingResults).toMatchObject([
         { code: "capability-gap", retryable: true },
       ]);
       expect(prepared?.policy.manifestCapabilities).toMatchObject({
-        tools: ["bash"],
+        tools: ["memory"],
         mcpServers: ["server-a"],
       });
       expect(prepared?.policy.permissionSnapshot.rules).toEqual([
@@ -1251,7 +1349,17 @@ describe("ConversationProtocolRuntime", () => {
       }),
     ).resolves.toEqual(resolved);
     await vi.waitFor(
-      () => {
+      async () => {
+        expect(executions).toBe(2);
+        expect(
+          (await restartedAuthority.authorityLog.readAll())
+            .flatMap((commit) => commit.entries)
+            .some(
+              (entry) =>
+                (entry.body as { t?: string; runId?: string }).t === "committed" &&
+                (entry.body as { runId?: string }).runId === runId,
+            ),
+        ).toBe(true);
         expect(
           restartedManager
             .list()
@@ -2591,7 +2699,10 @@ describe("ConversationProtocolRuntime", () => {
       },
       notify: () => {},
     });
-    expect(result.kind).toBe("settled");
+    expect(
+      result.kind,
+      result.kind === "error" ? String(result.error) : undefined,
+    ).toBe("settled");
     const committedRecord = (await authority.authorityLog.readAll())
       .flatMap((commit) => commit.entries)
       .map((entry) => entry.body as { t?: string; runId?: string })

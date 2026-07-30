@@ -29,6 +29,7 @@ import type {
   ConversationInvocation,
   ConversationRunState,
   ContentAssetRef,
+  ExplicitEnvironmentSelection,
   SessionControlMutation,
 } from "@zhixing/core/contracts";
 
@@ -61,7 +62,14 @@ export interface DurableConversationTurnInput {
   readonly messages: readonly Message[];
   readonly baseRevision: number;
   readonly runtime: SessionRuntime;
+  /**
+   * Composes invocation-specific behavior around the executor-local runtime that
+   * was created for the frozen environment. The protocol retains lifecycle
+   * ownership of the supplied runtime.
+   */
+  readonly adaptLocalRuntime?: (runtime: SessionRuntime) => SessionRuntime;
   readonly invocation: ConversationInvocation;
+  readonly environment?: ExplicitEnvironmentSelection;
   readonly options?: RunTurnOptions;
   readonly hooks?: RunTurnHooks;
 }
@@ -72,6 +80,7 @@ export interface DurableConversationAdmissionInput {
   readonly input: UserTurnInputLike;
   readonly attachments?: readonly ContentAssetRef[];
   readonly invocation: ConversationInvocation;
+  readonly environment?: ExplicitEnvironmentSelection;
   readonly options?: RunTurnOptions;
   /** Stable authenticated surface identity when transport routing identity is ephemeral. */
   readonly surfacePrincipal?: string;

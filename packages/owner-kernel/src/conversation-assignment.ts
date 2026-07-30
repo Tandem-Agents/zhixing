@@ -36,6 +36,7 @@ import type {
   DispatchResult,
   DispatchConflictProof,
   DispatchRejectionProof,
+  ExplicitEnvironmentSelection,
   IngressContext,
   IsoTime,
   LedgerSnapshot,
@@ -93,6 +94,7 @@ import {
   validateDispatchConflictProof,
   validateDispatchRejectionProof,
   validateDispatchResult,
+  validateExplicitEnvironmentSelection,
   validateDataPlaneTicket,
   validateAssignmentEntry,
   validateLedgerEvidencePage,
@@ -473,6 +475,7 @@ export interface PendingConversationInput {
   readonly attachments: readonly ContentAssetRef[];
   readonly ingress: IngressContext;
   readonly invocation: ConversationInvocation;
+  readonly environment?: ExplicitEnvironmentSelection;
   readonly queuedPosition: number;
 }
 
@@ -1302,6 +1305,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly attachments?: readonly ContentAssetRef[];
     readonly ingress: IngressContext;
     readonly invocation: ConversationInvocation;
+    readonly environment?: ExplicitEnvironmentSelection;
     readonly queuedPosition: number;
   }): Promise<void> {
     assertIdentifier(input.ingressKey, "Ingress key");
@@ -1313,6 +1317,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const userInput = snapshot(input.userInput, "Run input");
     const ingress = validateIngressContext(input.ingress);
     const invocation = validateConversationInvocation(input.invocation);
+    const environment = input.environment === undefined
+      ? undefined
+      : validateExplicitEnvironmentSelection(input.environment);
+    if (environment && ingress.kind !== "first-party") {
+      throw new TypeError(
+        "Only first-party admission may carry an environment selection",
+      );
+    }
     const attachments = validateContentAssetRefs(input.attachments ?? [], {
       allowEmpty: true,
       label: "Run admission attachments",
@@ -1326,6 +1338,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       ...(attachments.length > 0 ? { attachments } : {}),
       ingress,
       invocation,
+      ...(environment ? { environment } : {}),
       queuedPosition: input.queuedPosition,
     };
 
@@ -1342,6 +1355,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             canonicalize(byRun.record.attachments ?? []) !==
               canonicalize(attachments) ||
             canonicalize(byRun.record.invocation) !== canonicalize(invocation) ||
+            canonicalize(byRun.record.environment ?? null) !==
+              canonicalize(environment ?? null) ||
             byRun.record.queuedPosition !== input.queuedPosition
           ) {
             throw new Error("Run admission identity has conflicting durable payloads");
@@ -1384,6 +1399,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     validateNonEmptyUserTurnInput(body.input);
     const userInput = snapshot(body.input, "Run input");
     const invocation = validateConversationInvocation(body.invocation);
+    const environment = body.environment === undefined
+      ? undefined
+      : validateExplicitEnvironmentSelection(body.environment);
     const attachments = validateContentAssetRefs(body.attachments ?? [], {
       allowEmpty: true,
       label: "Control input attachments",
@@ -1471,6 +1489,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               canonicalize(attachments) ||
             canonicalize(existing.record.ingress) !== canonicalize(ingress) ||
             canonicalize(existing.record.invocation) !== canonicalize(invocation)
+            ||
+            canonicalize(existing.record.environment ?? null) !==
+              canonicalize(environment ?? null)
           ) {
             return {
               result: rejectedControl(
@@ -1516,6 +1537,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ...(attachments.length > 0 ? { attachments } : {}),
           ingress,
           invocation,
+          ...(environment ? { environment } : {}),
           queuedPosition,
         };
         return {
@@ -1712,6 +1734,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             admitted.record.invocation,
             "Pending conversation invocation",
           ),
+          ...(admitted.record.environment
+            ? {
+                environment: snapshot(
+                  admitted.record.environment,
+                  "Pending conversation environment",
+                ),
+              }
+            : {}),
           queuedPosition,
         };
       }),

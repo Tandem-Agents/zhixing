@@ -68,12 +68,77 @@ describe("ConversationAssignmentWorker", () => {
     expect(onError).toHaveBeenCalledWith(assignmentId, rejection);
   });
 
+  it("rejects a stale workspace before started and before any runtime side effect", async () => {
+    const assignmentId = "asg-worker-workspace-rejected";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      manifest: {
+        environment: {
+          deviceId: "device-a",
+          workspace: {
+            deviceId: "device-a",
+            bindingRef: "workspace-a",
+            workspaceBindingRevision: 2,
+          },
+        },
+      },
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const start = vi.fn();
+    const runtimeFactory = { create: vi.fn() } as unknown as RuntimeFactory;
+    const rejection = {
+      code: "environment-revision-mismatch",
+      message: "Workspace binding changed before execution",
+    };
+    const onError = vi.fn();
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger: { start } as unknown as ConversationAssignmentLedger,
+      runtimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({
+        reportStarted: vi.fn(),
+        mirrorInteractions: vi.fn(),
+        submitBundle: vi.fn(),
+        submitCancelProof: vi.fn(),
+      }),
+      finalizeUsage: vi.fn(),
+      interactions: interactionObserver(),
+      preflightEnvironment: vi.fn(async () => ({
+        workspaceRoot: null,
+        error: rejection,
+      })),
+      onError,
+    });
+
+    worker.accept(envelope);
+    await worker.drain();
+
+    expect(start).not.toHaveBeenCalled();
+    expect(runtimeFactory.create).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      assignmentId,
+      expect.objectContaining({ message: rejection.message }),
+    );
+  });
+
   it("durably terminates an assignment when runtime creation fails", async () => {
     const assignmentId = "asg-worker-create-failure";
     const envelope = {
       execution: "conversation",
       assignmentId,
       capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+      manifest: {
+        environment: {
+          deviceId: "device-a",
+          workspace: {
+            deviceId: "device-a",
+            bindingRef: "workspace-a",
+            workspaceBindingRevision: 2,
+          },
+        },
+      },
       work: {
         conversationId: "conversation-worker-create-failure",
         ingress: { kind: "first-party" },
@@ -97,11 +162,17 @@ describe("ConversationAssignmentWorker", () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("temporary stream projection failure"))
       .mockResolvedValue(undefined);
+    const preflightEnvironment = vi.fn(async () => ({
+      workspaceRoot: "D:\\workspace-a",
+    }));
+    const createRuntime = vi.fn(async () => {
+      throw runtimeFailure;
+    });
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
       ledger,
       runtimeFactory: {
-        create: vi.fn(async () => { throw runtimeFailure; }),
+        create: createRuntime,
       } as unknown as RuntimeFactory,
       artifacts: {} as ArtifactStore,
       submissionFor: () => ({
@@ -112,6 +183,7 @@ describe("ConversationAssignmentWorker", () => {
       }),
       finalizeUsage,
       interactions,
+      preflightEnvironment,
       onError,
     });
 
@@ -125,6 +197,11 @@ describe("ConversationAssignmentWorker", () => {
     expect(finalizeUsage).toHaveBeenCalledTimes(2);
     expect(drainAssignment).toHaveBeenCalledTimes(3);
     expect(ledger.closePendingInteractionsForRunEnd).toHaveBeenCalledTimes(2);
+    expect(preflightEnvironment).toHaveBeenCalledWith(envelope.manifest);
+    expect(createRuntime).toHaveBeenCalledWith(
+      envelope.work.conversationId,
+      { workspaceRoot: "D:\\workspace-a" },
+    );
     expect(onError).toHaveBeenCalledWith(assignmentId, runtimeFailure);
   });
 
@@ -338,6 +415,7 @@ describe("ConversationAssignmentWorker", () => {
     const envelope = {
       execution: "conversation",
       assignmentId,
+      manifest: { tools: [], mcpServers: [] },
       capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
       permissionLease: {},
       resourceLease: {},
@@ -381,7 +459,11 @@ describe("ConversationAssignmentWorker", () => {
       InProcessAssignmentSubmission,
       ledger,
       runtimeFactory: {
-        create: vi.fn(async () => ({ run, dispose: vi.fn(async () => undefined) })),
+        create: vi.fn(async () => ({
+          run,
+          executionProfile: () => ({ tools: [], mcpServers: [], providerIds: [] }),
+          dispose: vi.fn(async () => undefined),
+        })),
       } as unknown as RuntimeFactory,
       artifacts: {} as ArtifactStore,
       submissionFor: () => ({
@@ -468,6 +550,7 @@ describe("ConversationAssignmentWorker", () => {
     const envelope = {
       execution: "conversation",
       assignmentId,
+      manifest: { tools: [], mcpServers: [] },
       capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
       permissionLease: {},
       resourceLease: {},
@@ -526,6 +609,7 @@ describe("ConversationAssignmentWorker", () => {
         create: vi.fn(async () => ({
           run,
           confirmationBroker,
+          executionProfile: () => ({ tools: [], mcpServers: [], providerIds: [] }),
           dispose: vi.fn(async () => undefined),
         })),
       } as unknown as RuntimeFactory,
@@ -691,6 +775,7 @@ describe("ConversationAssignmentWorker", () => {
     const envelope = {
       execution: "conversation",
       assignmentId,
+      manifest: { tools: [], mcpServers: [] },
       capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
       permissionLease: {},
       resourceLease: {},
@@ -746,6 +831,7 @@ describe("ConversationAssignmentWorker", () => {
       ledger,
       runtimeFactory: {
         create: vi.fn(async () => ({
+          executionProfile: () => ({ tools: [], mcpServers: [], providerIds: [] }),
           run: async function* (_messages: unknown, options: {
             onProtocolEvent: (event: never, meta: { lineage?: string }) => void;
           }) {

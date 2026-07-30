@@ -22,9 +22,11 @@ import type {
 import type {
   DeferredGlobalIntent,
   GlobalControlMutation,
+  GlobalControlMutationResult,
   GlobalQuery,
   GlobalReadResult,
   GlobalStagedMutation,
+  GlobalStagedMutationResult,
   SessionControlMutation,
   SessionMeta,
   SessionStagedMutation,
@@ -96,11 +98,30 @@ export interface SessionStatePort {
 
 export interface GlobalStatePort {
   read(q: GlobalQuery, ctx: AuthorityCallContext): Promise<GlobalReadResult>;
+  mutate<M extends GlobalControlMutation>(
+    mutation: M,
+    ctx: GlobalControlCallContext,
+  ): Promise<GlobalControlMutationResult<M>>;
+  mutate<M extends GlobalStagedMutation>(
+    mutation: M,
+    ctx: GlobalStagedCallContext,
+  ): Promise<GlobalStagedMutationResult<M>>;
   mutate(
     mutation: GlobalControlMutation | GlobalStagedMutation,
     ctx: AuthorityCallContext,
-  ): Promise<{ revision: number }>;
+  ): Promise<
+    | GlobalControlMutationResult<GlobalControlMutation>
+    | GlobalStagedMutationResult<GlobalStagedMutation>
+  >;
 }
+
+export type GlobalControlCallContext = AuthorityCallContext & {
+  principal: Extract<AuthorityPrincipal, { kind: "surface" | "host" }>;
+};
+
+export type GlobalStagedCallContext = AuthorityCallContext & {
+  principal: Extract<AuthorityPrincipal, { kind: "assignment" }>;
+};
 
 export interface DeferredGlobalIntentPort {
   record(
@@ -133,8 +154,75 @@ export interface EnvironmentPort {
   versionInventory(): Promise<ExecutorVersionInventory>;
 }
 
+export interface LocalWorkspaceBinding {
+  bindingRef: string;
+  revision: number;
+  displayName: string;
+  absolutePath: string;
+  workspaceBindingRevision: number;
+}
+
+export interface LocalEnvironmentControlContext {
+  requestId: string;
+  lease: ImmediateRootResourceLease;
+  abort: AbortSignal;
+}
+
+export type WorkspaceBindingPatch =
+  | { displayName: string; absolutePath?: string }
+  | { absolutePath: string; displayName?: string };
+
+export interface WorkspaceBindingAdminPort {
+  list(
+    control: LocalEnvironmentControlContext,
+  ): Promise<LocalWorkspaceBinding[]>;
+  create(
+    input: { displayName: string; absolutePath: string },
+    control: LocalEnvironmentControlContext,
+  ): Promise<LocalWorkspaceBinding>;
+  update(
+    bindingRef: string,
+    patch: WorkspaceBindingPatch,
+    expectedRevision: number,
+    control: LocalEnvironmentControlContext,
+  ): Promise<LocalWorkspaceBinding>;
+  remove(
+    bindingRef: string,
+    expectedRevision: number,
+    control: LocalEnvironmentControlContext,
+  ): Promise<void>;
+}
+
+export interface WorkspaceBindingMigrationPort {
+  importLegacy(
+    input: {
+      migrationId: string;
+      sourceSnapshotToken: string;
+      displayName: string;
+      absolutePath: string;
+    },
+    abort: AbortSignal,
+  ): Promise<LocalWorkspaceBinding>;
+  activateLegacy(
+    input: {
+      migrationId: string;
+      sourceSnapshotToken: string;
+    },
+    abort: AbortSignal,
+  ): Promise<void>;
+  abandonLegacy(
+    input: {
+      migrationId: string;
+      sourceSnapshotToken: string;
+      reason: string;
+    },
+    abort: AbortSignal,
+  ): Promise<void>;
+}
+
 export type ReservationOrigin =
   | { admissionClass: "interactive"; entry: "conversation-input" }
+  | { admissionClass: "interactive"; entry: "environment-control" }
   | { admissionClass: "advancement"; entry: "advancement-control" }
   | { admissionClass: "scheduler"; entry: "schedule-trigger" }
   | { admissionClass: "orchestration"; entry: "orchestration" };
@@ -166,6 +254,7 @@ export interface ResourceReservationPort {
     budget: ResourceLease["budget"],
     origin: ReservationOrigin,
     ctx: AuthorityCallContext,
+    audience?: { readonly executorId: string },
   ): Promise<ImmediateRootResourceLease>;
   acquireChild(
     parent: ResourceLease,

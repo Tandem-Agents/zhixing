@@ -194,6 +194,15 @@ export class ExecutorCapabilityDirectory {
       : snapshot(entry.snapshot, "Executor capability snapshot");
   }
 
+  activeSnapshots(): ExecutorCapabilitySnapshot[] {
+    return [...this.#entries.keys()]
+      .sort()
+      .map((executorId) => this.snapshotFor(executorId))
+      .filter(
+        (entry): entry is ExecutorCapabilitySnapshot => entry !== undefined,
+      );
+  }
+
   async revokeDevice(deviceKeyId: string): Promise<void> {
     const nextEntries = new Map(this.#entries);
     let changed = false;
@@ -315,7 +324,7 @@ export function validateExecutorCapabilityDirectoryState(
       value.inventoryRevisionHighWater,
       "Directory inventory revision high water",
     );
-    assertPositiveInteger(
+    assertNonNegativeInteger(
       value.permissionSnapshotHighWater,
       "Directory permission snapshot high water",
     );
@@ -819,7 +828,7 @@ export function validateExecutorVersionInventory(
   assertPositiveInteger(inventory.inventoryRevision, "Inventory revision");
   assertPositiveInteger(inventory.capabilityRevision, "Inventory capability revision");
   validateDeviceVersions({ ...inventory.configVersions, ...inventory.assetVersions });
-  assertPositiveInteger(
+  assertNonNegativeInteger(
     inventory.permissionSnapshotHighWater,
     "Inventory permission snapshot high water",
   );

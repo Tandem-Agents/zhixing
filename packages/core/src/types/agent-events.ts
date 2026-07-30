@@ -99,7 +99,11 @@ export interface InterruptFiredEvent {
 export type PostTurnControlIntent =
   | { kind: "enter"; sceneId: string }
   | { kind: "exit" }
-  | { kind: "set_workdir"; sceneId: string; workdir: string | null };
+  | {
+      kind: "set_workdir";
+      sceneId: string;
+      workspace: { deviceId: string; bindingRef: string } | null;
+    };
 
 export interface PostTurnControlConflict {
   readonly kindsSeen: readonly PostTurnControlIntent["kind"][];

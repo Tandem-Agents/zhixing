@@ -229,7 +229,7 @@ export interface AssignmentLedgerOptions {
   readonly runtimeBindingGuard?: (input: {
     readonly assignmentId: string;
     readonly manifest: ExecutionManifest<"conversation">;
-  }) => AuthorityError | undefined;
+  }) => AuthorityError | undefined | Promise<AuthorityError | undefined>;
   readonly clock?: () => string;
   readonly monotonicClock?: () => number;
   readonly usageFinal?: (
@@ -745,6 +745,20 @@ export class ConversationAssignmentLedger implements
       );
     }
 
+    const shouldCheckRuntimeBinding =
+      envelope.execution === "conversation" &&
+      this.#runtimeBindingGuard !== undefined &&
+      await this.#select(
+        assignmentId,
+        (state) => state.received === undefined && state.rejection === undefined,
+      );
+    const runtimeBindingError = shouldCheckRuntimeBinding
+      ? await this.#runtimeBindingGuard!({
+          assignmentId,
+          manifest: envelope.manifest as ExecutionManifest<"conversation">,
+        })
+      : undefined;
+
     const transaction = await this.#transact<DispatchDecision>(
       assignmentId,
       (state, transactionContext) => {
@@ -803,12 +817,6 @@ export class ConversationAssignmentLedger implements
             },
           };
         }
-        const runtimeBindingError = envelope.execution === "conversation"
-          ? this.#runtimeBindingGuard?.({
-              assignmentId,
-              manifest: envelope.manifest,
-            })
-          : undefined;
         if (runtimeBindingError !== undefined) {
           const entry = nextEntry(state, {
             v: 1,

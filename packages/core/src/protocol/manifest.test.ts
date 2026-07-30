@@ -317,6 +317,22 @@ describe("capability and inventory contracts", () => {
     expect(validateExecutorVersionInventory(inventory(), verifier)).toEqual(inventory());
   });
 
+  it("allows an executor capability snapshot before its first permission asset exists", () => {
+    const emptyPermissionInventory = createSignedExecutorVersionInventory(
+      {
+        ...withoutSignedIdentity(inventory()),
+        permissionSnapshotHighWater: 0,
+      },
+      signer,
+    );
+    expect(
+      validateExecutorVersionInventory(
+        emptyPermissionInventory,
+        verifier,
+      ).permissionSnapshotHighWater,
+    ).toBe(0);
+  });
+
   it("rejects secret-bearing and ambiguous credential descriptors", () => {
     const value = descriptor();
     expect(() =>

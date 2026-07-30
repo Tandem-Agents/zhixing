@@ -785,6 +785,7 @@ async function runConversationScenario(
               readonly assignmentId: string;
               readonly ref: ExecutionRef;
             }) => localDataPlane!.createStream(stream),
+            runtimeFactory,
           },
         }
       : {}),

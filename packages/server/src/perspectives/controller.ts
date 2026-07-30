@@ -113,7 +113,7 @@ export class PerspectivesController {
   ): Promise<PerspectivesTurnResult> {
     let outcome: PerspectivesTurnResult | undefined;
     const controller = this;
-    const runtime: SessionRuntime = {
+    const createRuntime = (baseRuntime: SessionRuntime): SessionRuntime => ({
       sessionId: `perspectives:${input.managed.conversationId}`,
       async *run(_messages, options): AsyncGenerator<AgentYield, RunResult> {
         // durable assignment 注入的 meter——本 turn 独占该 assignment 的调用序列，
@@ -122,6 +122,7 @@ export class PerspectivesController {
         let callIndex = 0;
         const execution = await controller.executePerspectiveWork({
           ...input,
+          managed: { ...input.managed, runtime: baseRuntime },
           authorizeToolExecution: options?.authorizeToolExecution,
           ...(meter
             ? {
@@ -135,17 +136,17 @@ export class PerspectivesController {
         outcome = execution.outcome;
         return execution.runResult;
       },
-      abort: () => false,
+      abort: (reason) => baseRuntime.abort(reason),
       async dispose() {},
       securitySnapshot() {
-        const snapshot = input.managed.runtime.securitySnapshot?.();
+        const snapshot = baseRuntime.securitySnapshot?.();
         if (snapshot === undefined) {
           throw new Error("Perspective runtime lacks a security snapshot");
         }
         return snapshot;
       },
       executionPermissionRules() {
-        const rules = input.managed.runtime.executionPermissionRules?.();
+        const rules = baseRuntime.executionPermissionRules?.();
         if (rules === undefined) {
           throw new Error(
             "Perspective runtime lacks an execution permission snapshot",
@@ -154,13 +155,14 @@ export class PerspectivesController {
         return rules;
       },
       executionProfile() {
-        const profile = input.managed.runtime.executionProfile?.();
+        const profile = baseRuntime.executionProfile?.();
         if (profile === undefined) {
           throw new Error("Perspective runtime lacks an execution profile");
         }
         return profile;
       },
-    };
+    });
+    const runtime = createRuntime(input.managed.runtime);
     try {
       const generator = durable.run({
         conversationId: input.managed.conversationId,
@@ -171,6 +173,7 @@ export class PerspectivesController {
         ],
         baseRevision: input.managed.turnCount,
         runtime,
+        adaptLocalRuntime: createRuntime,
         invocation: {
           kind: "perspectives",
           source: input.source ?? "interactive",

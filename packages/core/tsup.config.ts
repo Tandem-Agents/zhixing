@@ -23,6 +23,7 @@ export default defineConfig({
     "src/persistence/index.ts",
     "src/authority/index.ts",
     "src/delivery/index.ts",
+    "src/environment/index.ts",
   ],
   format: ["esm"],
   dts: true,

@@ -61,15 +61,15 @@ describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => 
     await bus.emit("post_turn_control:requested", {
       kind: "set_workdir",
       sceneId: "scene-x",
-      workdir: "/a",
+      workspace: { deviceId: "device-a", bindingRef: "workspace-a" },
     });
     await bus.emit("post_turn_control:requested", {
       kind: "set_workdir",
       sceneId: "scene-x",
-      workdir: null,
+      workspace: null,
     });
     expect(acc.getOutcome()).toEqual({
-      intent: { kind: "set_workdir", sceneId: "scene-x", workdir: null },
+      intent: { kind: "set_workdir", sceneId: "scene-x", workspace: null },
     });
   });
 

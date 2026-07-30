@@ -898,6 +898,18 @@ describe("ControlAdmissionJournal", () => {
       }),
     ).resolves.toBeUndefined();
     expect(await log.readStream("run:conversation-1")).toHaveLength(2);
+    await expect(
+      journal.admit({
+        ingressKey: "surface:user-1/public-attachment-ingress",
+        runId: "run-public-attachment",
+        userInput: { parts: [{ type: "text", text: "inspect" }] },
+        attachments: [attachment],
+        ingress: source.ingress,
+        invocation: { kind: "agent", source: "interactive" },
+        queuedPosition: 0,
+      }),
+    ).resolves.toBeUndefined();
+    expect(await log.readStream("run:conversation-1")).toHaveLength(2);
 
     const missingSource = inputSource("public-missing-ingress");
     if (!missingSource.ingress) throw new Error("Expected first-party ingress");

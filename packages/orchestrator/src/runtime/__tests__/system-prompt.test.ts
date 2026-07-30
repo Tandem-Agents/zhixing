@@ -635,7 +635,7 @@ describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
     expect(prompt).toContain("workscene_memory_query");
     expect(prompt).toContain("set_workdir");
     expect(prompt).toContain("clear_workdir");
-    expect(prompt).toContain("optional working directory binding");
+    expect(prompt).toContain("optional device workspace");
     expect(prompt).toContain("before asking or switching");
     expect(prompt).toContain("finish the current turn normally");
   });

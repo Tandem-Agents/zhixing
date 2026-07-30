@@ -97,6 +97,10 @@ export type ConversationInvocation =
       question: string;
     };
 
+export interface ExplicitEnvironmentSelection {
+  workspace: { deviceId: string; bindingRef: string };
+}
+
 export type ControlRequest =
   | {
       t: "input";
@@ -105,6 +109,7 @@ export type ControlRequest =
       input: UserTurnInput;
       attachments?: ContentAssetRef[];
       invocation: ConversationInvocation;
+      environment?: ExplicitEnvironmentSelection;
       ownerEpoch: number;
     }
   | { t: "cancel"; conversationId: string; runId: string; ownerEpoch: number }
@@ -264,6 +269,7 @@ export interface EnvironmentControlGrant
   bindingRef: string;
   methods: ["environment.probe"];
   requestId: string;
+  resourceLeaseDigest: Digest;
   issuedAt: IsoTime;
   expiry: IsoTime;
   signature: Signature;
@@ -275,6 +281,7 @@ export interface WorkspaceProbeRequest
   deviceId: string;
   bindingRef: string;
   grant: EnvironmentControlGrant;
+  resourceLease: import("./authorization.js").ImmediateRootResourceLease;
   at: IsoTime;
 }
 

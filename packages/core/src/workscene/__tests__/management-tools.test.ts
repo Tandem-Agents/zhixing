@@ -63,17 +63,20 @@ describe("WORKSCENE_MANAGEMENT_TOOLS", () => {
   });
 
   it("所有 workscene 确认展示工具都有显式摘要构造", () => {
-    const longPath = path.join(path.sep, "tmp", "zhixing", "x".repeat(180));
     const sampleInputs: Partial<
       Record<WorksceneManagementToolName, Record<string, unknown>>
     > = {
       workscene_change_approve: {
         action: "set_workdir",
         sceneId: "scene-1",
-        workdir: longPath,
+        deviceName: "本机",
+        workspaceName: "项目",
       },
       workscene_rename_current: { name: "新名称" },
-      workscene_set_workdir_current: { workdir: longPath },
+      workscene_set_workdir_current: {
+        deviceName: "本机",
+        workspaceName: "项目",
+      },
       workscene_clear_workdir_current: {},
     };
     const displayContext = {
@@ -98,7 +101,7 @@ describe("WORKSCENE_MANAGEMENT_TOOLS", () => {
 });
 
 describe("buildWorksceneChangeSummary", () => {
-  it("规范化名称和工作目录,完整路径不截断", () => {
+  it("本机受信确认面保留完整路径且不截断", () => {
     const longPath = path.join(path.sep, "tmp", "zhixing", "x".repeat(180));
     const normalized = normalizeWorkdir(longPath);
     const summary = buildWorksceneChangeSummary({
@@ -109,8 +112,20 @@ describe("buildWorksceneChangeSummary", () => {
 
     expect(summary).toContain("动作：创建工作场景");
     expect(summary).toContain("新场景：写作场景");
-    expect(summary).toContain(`工作目录：${normalized}`);
+    expect(summary).toContain(`本机工作目录：${normalized}`);
     expect(summary).not.toContain("…");
+  });
+
+  it("远端确认只展示设备和工作区名称", () => {
+    const summary = buildWorksceneChangeSummary({
+      action: "set_workdir",
+      sceneId: "scene-alpha",
+      deviceName: "办公室电脑",
+      workspaceName: "项目",
+    });
+
+    expect(summary).toContain("设备工作区：办公室电脑 / 项目");
+    expect(summary).not.toContain("bindingRef");
   });
 
   it("主模式已有场景动作展示稳定 sceneId,不信任 sceneName", () => {

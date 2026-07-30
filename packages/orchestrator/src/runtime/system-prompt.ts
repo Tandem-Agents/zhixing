@@ -401,19 +401,19 @@ function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
  */
 export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
 
-A work scene is an isolated context for a bounded line of work, with optional working directory binding, private memory, and model. Entering one switches the conversation into that scene; leaving returns here.
+A work scene is an isolated context for a bounded line of work, with an optional device workspace, private memory, and model. Entering one switches the conversation into that scene; leaving returns here.
 
 Tools:
 - \`workmode_enter\`: enter a work scene; the switch takes effect after the current turn.
-- \`workscene_list\`: list scenes and their ids, names, optional workdir bindings, and recent activity.
+- \`workscene_list\`: list scenes and their ids, names, optional device workspace names, and recent activity.
 - \`workscene_memory_query\`: inspect existing scene memory before deciding.
-- \`workscene_change_approve\`: create, rename, remove, bind/change workdir, or clear workdir with confirmation.
+- \`workscene_change_approve\`: create, rename, remove, bind/change a device workspace, or clear the workspace binding with confirmation.
 
 How to decide:
-- Need scene ids or current workdir bindings: call \`workscene_list\`.
+- Need scene ids or current workspace bindings: call \`workscene_list\`.
 - Clear scene fit: call \`workmode_enter\` with that scene id; if none fits but one is warranted, propose it via \`workscene_change_approve\`.
 - Ambiguous fit: probe with \`workscene_memory_query\` before asking or switching.
-- Workdir management: use \`workscene_change_approve\` action \`set_workdir\` for an explicit directory path, and action \`clear_workdir\` only for an explicit unbind request.
+- Workspace management: use \`workscene_change_approve\` action \`set_workdir\` with a device and workspace name already authorized on that device, and action \`clear_workdir\` only for an explicit unbind request. Never request or transmit a remote filesystem path.
 - Casual or one-off questions: stay in the main conversation.
 
 After \`workmode_enter\`, finish the current turn normally; do not assume you are already inside the scene.`;

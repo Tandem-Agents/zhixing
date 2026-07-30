@@ -1,6 +1,21 @@
 export type { WorkScene, IWorkSceneRegistry } from "./types.js";
 export { FsWorkSceneRegistry } from "./registry.js";
 export {
+  AnchorWorksceneRegistry,
+  WorksceneConflictError,
+  WorksceneNotFoundError,
+  WorksceneRevisionError,
+  worksceneImportSetDigest,
+  type AnchorWorksceneRegistryOptions,
+  type WorksceneRegistryControlContext,
+} from "./authority-registry.js";
+export {
+  WorksceneActivityProjection,
+  type WorksceneActivityProjectionOptions,
+  type WorksceneActivitySnapshot,
+  type WorksceneSessionActivity,
+} from "./activity-projection.js";
+export {
   getWorkScenesRoot,
   getWorkSceneIndexPath,
   getWorkSceneDir,

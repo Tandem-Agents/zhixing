@@ -5,7 +5,8 @@ import {
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
 } from "@zhixing/orchestrator/runtime";
-import { mainProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
+import { parseConversationId } from "@zhixing/core";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createStdoutWriter } from "../screen/index.js";
@@ -104,6 +105,7 @@ export async function runExecutorRole(
       enableAnchor: false,
       enableLocalExecutor: true,
       storageMaintenance: deviceCapacity.storage,
+      deviceCapacity: deviceCapacity.arbiter,
     });
     dataPlane = new ExecutorDataPlaneRuntime({
       zhixingHome,
@@ -125,7 +127,11 @@ export async function runExecutorRole(
     dataPlane.bindLedger(ledger);
     await dataPlane.start();
     const role = executor.createExecutorRole({
-      createAgentRuntime: () => runtime.createConversationRuntime(),
+      createAgentRuntime: (sessionId, environment) =>
+        runtime.createConversationRuntime(
+          environment?.workspaceRoot,
+          sessionId,
+        ),
     });
     const runtimeFactory = executor.createInProcessRuntimeFactory(role);
     jobOwnerAssembly = new ExecutorJobOwnerAssembly({
@@ -234,20 +240,47 @@ export class ExecutorRuntimeSubstrate {
     };
   }) {}
 
-  createConversationRuntime(): Promise<AgentRuntime> {
+  createConversationRuntime(
+    workspaceRoot?: string | null,
+    sessionId?: string,
+  ): Promise<AgentRuntime> {
     const catalog = this.options.mcpHub.catalog();
+    const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
+    const workscene =
+      scope?.kind === "workscene"
+        ? {
+            sceneId: scope.sceneId,
+            profile: powerProfile({
+              id: scope.sceneId,
+              name: scope.sceneId,
+              hasWorkspace: workspaceRoot !== null,
+            }),
+          }
+        : undefined;
     return createAgentRuntime({
       deviceCapacity: this.options.deviceCapacity.interactive,
       providerConfiguration: {
         config: this.options.config,
         credentials: this.options.credentials,
       },
-      profile: mainProfile(),
+      profile:
+        workscene?.profile ??
+        mainProfile({ hasWorkspace: workspaceRoot !== null }),
       extraTools: mapMcpTools(this.options.mcpHub),
       executionMcpServers: catalog.map(({ server }) => server.serverId).sort(),
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
+      ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
+      ...(workscene
+        ? {
+            primaryRole: "power",
+            memoryScope: {
+              kind: "workscene" as const,
+              sceneId: workscene.sceneId,
+            },
+          }
+        : {}),
     });
   }
 

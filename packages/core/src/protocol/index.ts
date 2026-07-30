@@ -8,6 +8,19 @@ export {
 } from "./canonical.js";
 export type { ByteDigestAccumulator } from "./canonical.js";
 export {
+  createSignedEnvironmentControlGrant,
+  createSignedWorkspaceProbeResult,
+  environmentControlGrantDigest,
+  environmentControlSubject,
+  validateEnvironmentControlGrant,
+  validateExplicitEnvironmentSelection,
+  validateWorkspaceProbeRequest,
+  validateWorkspaceProbeResult,
+  workspaceProbeRequestDigest,
+  type UnsignedEnvironmentControlGrant,
+  type UnsignedWorkspaceProbeResult,
+} from "./environment.js";
+export {
   DATA_PLANE_TICKET_KINDS,
   MAX_DATA_PLANE_TICKET_TTL_MS,
   MAX_EXECUTION_ABORT_REASON_BYTES,

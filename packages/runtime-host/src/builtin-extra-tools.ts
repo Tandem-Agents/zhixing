@@ -156,7 +156,7 @@ export function createBuiltinExtraToolsAssembly(
           };
           tools.push(
             createWorksceneRenameCurrentTool(workscenes, scene),
-            createWorksceneSetWorkdirCurrentTool(scene),
+            createWorksceneSetWorkdirCurrentTool(scene, workscenes),
             createWorksceneClearWorkdirCurrentTool(scene),
           );
         }

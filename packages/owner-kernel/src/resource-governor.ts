@@ -350,11 +350,15 @@ export class AnchorResourceGovernor
     budget: ResourceLease["budget"],
     origin: ReservationOrigin,
     ctx: AuthorityCallContext,
+    audience: { readonly executorId: string } = {
+      executorId: this.#localExecutorId,
+    },
   ): Promise<ImmediateRootResourceLease> {
     const validatedOrigin = validateReservationOrigin(origin);
     this.#guard.assert(ctx.principal, "reservation.acquireRoot");
     assertResourceAdmissionRequest(workload, budget);
     requireIdentifier(ctx.requestId, "Reservation requestId");
+    requireIdentifier(audience.executorId, "Reservation audience executorId");
     deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
     const reservationId = immediateReservationId(workload);
     await this.#enqueue(reservationId, workload, validatedOrigin.admissionClass);
@@ -374,7 +378,7 @@ export class AnchorResourceGovernor
               }) === canonicalize({
                 workload,
                 scopeBinding: { kind: "control", subject: workload.id },
-                audience: { executorId: this.#localExecutorId },
+                audience,
                 budget,
               }),
             () => this.#signLease({
@@ -382,7 +386,7 @@ export class AnchorResourceGovernor
               admissionClass: validatedOrigin.admissionClass,
               workload,
               scopeBinding: { kind: "control", subject: workload.id },
-              audience: { executorId: this.#localExecutorId },
+              audience,
               budget,
               domain: { kind: "anchor", anchorEpoch: this.#anchorEpoch },
             }) as ImmediateRootResourceLease,

@@ -62,6 +62,7 @@ import {
   type ManagedSession,
   type PendingConversationInput,
   type SessionRuntime,
+  type RuntimeFactory,
   type DurableConversationAdmissionInput,
   type DurableConversationAdmissionResult,
   type DurableConversationCancelInput,
@@ -115,6 +116,7 @@ const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(CONTEXT_TTL_MS / 3);
 
 export interface RemoteConversationExecutionTarget {
   readonly executorId: string;
+  readonly deviceId: string;
   readonly executor: RunExecutorPort;
   synchronizePermission(snapshot: TrustRuleSnapshot): Promise<ExecutorCapabilitySnapshot>;
 }
@@ -140,6 +142,7 @@ export interface ConversationProtocolRuntimeOptions {
       readonly assignmentId: string;
       readonly ref: import("@zhixing/core/contracts").ExecutionRef;
     }) => Promise<DurableAssignmentRunStream>;
+    readonly runtimeFactory: RuntimeFactory;
   };
   readonly executeRecoveredPerspective?: (input: {
     readonly manager: ConversationManager;
@@ -174,6 +177,7 @@ interface AppliedConversationAdmission {
   readonly runId: string;
   readonly ingress: IngressContext;
   readonly attachments: PendingConversationInput["attachments"];
+  readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
   readonly replayed: boolean;
 }
 
@@ -184,6 +188,7 @@ interface PreparedConversationAdmission {
   readonly input: PendingConversationInput["input"];
   readonly attachments: PendingConversationInput["attachments"];
   readonly invocation: ConversationInvocation;
+  readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
 }
 
 interface DurableAssignmentRunStream extends StreamFrameProducer {
@@ -214,6 +219,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
       ) => Promise<DurableAssignmentRunStream>)
     | undefined;
+  readonly #localRuntimeFactory: RuntimeFactory | undefined;
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
   readonly #assignmentConversations = new Map<string, string>();
@@ -280,6 +286,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#InProcessAssignmentSubmission =
       options.localExecutor?.InProcessAssignmentSubmission;
     this.#createStream = options.localExecutor?.createStream;
+    this.#localRuntimeFactory = options.localExecutor?.runtimeFactory;
     this.#ledger = options.localExecutor?.ConversationAssignmentLedger
       ? createConversationExecutorLedger({
       Constructor: options.localExecutor.ConversationAssignmentLedger,
@@ -495,6 +502,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         input: normalizeUserTurnInput(input.input),
         attachments: [...(input.attachments ?? [])],
         invocation: input.invocation,
+        ...(input.environment
+          ? { environment: structuredClone(input.environment) }
+          : {}),
       });
       this.#markRecovery(input.conversationId);
     }
@@ -816,7 +826,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         canonicalize(normalizeUserTurnInput(input.input)) ||
         canonicalize(prepared.attachments) !==
           canonicalize(input.attachments ?? []) ||
-        canonicalize(prepared.invocation) !== canonicalize(input.invocation))
+        canonicalize(prepared.invocation) !== canonicalize(input.invocation) ||
+        canonicalize(prepared.environment ?? null) !==
+          canonicalize(input.environment ?? null))
     ) {
       throw new Error("Prepared conversation admission does not bind this invocation");
     }
@@ -857,6 +869,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     let channelSession: LosslessDataPlaneSession | undefined;
     let firstPartySurfaceSession: FirstPartySurfaceSession | undefined;
     let firstPartyFinalitySession: FirstPartyFinalitySession | undefined;
+    let localBaseRuntime: SessionRuntime | undefined;
+    let localExecutionRuntime: SessionRuntime | undefined;
     try {
       const authority = await journal.authorityState();
       if (authority.deleted) {
@@ -878,10 +892,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw new Error("No authorized conversation executor is currently available");
       }
       const preparedAuthority = await this.#authority.prepareConversationAssignment({
+        conversationId: input.conversationId,
         executionProfile,
         permissionRules,
+        ...(appliedAdmission.environment
+          ? { environment: appliedAdmission.environment }
+          : {}),
         targets: remoteTargets.map((target) => ({
           executorId: target.executorId,
+          deviceId: target.deviceId,
           synchronizePermission: (snapshot) => target.synchronizePermission(snapshot),
         })),
       });
@@ -891,6 +910,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         : remoteTargets.find((target) => target.executorId === targetExecutorId);
       if (!remoteTarget && targetExecutorId !== this.#authority.executorId) {
         throw new Error("Selected remote executor disappeared from the candidate set");
+      }
+      if (remoteTarget && input.adaptLocalRuntime) {
+        throw new Error("A local invocation runtime adapter cannot execute remotely");
       }
       const origin = reservationOriginForSource(input.options?.source);
       const resourceContext = resourceHostContext(
@@ -933,12 +955,47 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           messages: [...input.messages],
         },
         policy: preparedAuthority.policy,
+        environment: preparedAuthority.environment,
       });
+      if (!remoteTarget) {
+        const preflight =
+          await this.#authority.preflightLocalConversationEnvironment(
+            unsigned.manifest,
+          );
+        if (preflight.error) throw new Error(preflight.error.message);
+        const runtimeFactory = this.#localRuntimeFactory;
+        if (!runtimeFactory) {
+          throw new Error("Local assignment runtime factory is unavailable");
+        }
+        localBaseRuntime = await runtimeFactory.create(
+          input.conversationId,
+          { workspaceRoot: preflight.workspaceRoot },
+        );
+        localExecutionRuntime = input.adaptLocalRuntime?.(localBaseRuntime) ??
+          localBaseRuntime;
+        const actualProfile = requireRuntimeExecutionProfile(
+          localExecutionRuntime,
+        );
+        if (
+          canonicalize(actualProfile) !==
+          canonicalize(preparedAuthority.binding.executionProfile)
+        ) {
+          throw new Error(
+            "Local assignment runtime does not match the frozen execution profile",
+          );
+        }
+      }
       const dispatch = await journal.assign(unsigned);
       this.#rememberAssignment(dispatch.envelope, dispatch.activation);
       this.#assignmentRuntimeBindings.set(
         assignmentId,
-        preparedAuthority.binding,
+        localExecutionRuntime
+          ? {
+              ...preparedAuthority.binding,
+              executionProfile:
+                requireRuntimeExecutionProfile(localExecutionRuntime),
+            }
+          : preparedAuthority.binding,
       );
       const submission = remoteTarget
         ? undefined
@@ -1130,14 +1187,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         submission,
         context: submissionContext,
         surfacePrincipal: executionIngress.surfacePrincipal,
-        broker: input.runtime.confirmationBroker,
+        broker: localExecutionRuntime!.confirmationBroker,
         stream,
         streamMeta,
       };
       const controlHeartbeat = this.#startControlHeartbeat(assignmentId);
       let runResult: RunResult;
       try {
-        const generator = input.runtime.run(input.messages, {
+        const generator = localExecutionRuntime!.run(input.messages, {
           ...input.options,
           onProtocolEvent: async (event, meta) => {
             await stream.append(
@@ -1358,6 +1415,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await channelSession?.close();
       firstPartyFinalitySession?.close();
       await firstPartySurfaceSession?.close();
+      await localExecutionRuntime?.dispose();
+      if (localBaseRuntime && localBaseRuntime !== localExecutionRuntime) {
+        await localBaseRuntime.dispose();
+      }
       this.#clearRunClaims(runId);
       this.#forgetAssignment(assignmentId);
     }
@@ -1396,6 +1457,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         canonicalize(durablePending.attachments) !==
           canonicalize(input.attachments ?? []) ||
         canonicalize(durablePending.invocation) !== canonicalize(input.invocation)
+        ||
+        canonicalize(durablePending.environment ?? null) !==
+          canonicalize(input.environment ?? null)
       ) {
         throw new Error("Conversation ingress is already bound to another invocation");
       }
@@ -1404,6 +1468,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         runId: durablePending.runId,
         ingress: durablePending.ingress,
         attachments: durablePending.attachments,
+        ...(durablePending.environment
+          ? { environment: structuredClone(durablePending.environment) }
+          : {}),
         replayed: true,
       };
     }
@@ -1430,6 +1497,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ? { attachments: [...input.attachments] }
           : {}),
         invocation: input.invocation,
+        ...(input.environment
+          ? { environment: structuredClone(input.environment) }
+          : {}),
         ownerEpoch: this.#authority.anchorEpoch,
       },
     });
@@ -1464,6 +1534,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         runId: appliedReplay.result.body.runId,
         ingress,
         attachments: replayedAttachments,
+        ...(input.environment
+          ? { environment: structuredClone(input.environment) }
+          : {}),
         replayed: true,
       };
     }
@@ -1512,6 +1585,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     let durableIngress = ingress;
     let durableAttachments = [...(input.attachments ?? [])];
+    let durableEnvironment = input.environment
+      ? structuredClone(input.environment)
+      : undefined;
     const admittedRunId = admission.result.body.runId;
     if (admission.kind === "replayed") {
       const pending = (await journal.pendingInputs()).find(
@@ -1520,6 +1596,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       if (pending) {
         durableIngress = pending.ingress;
         durableAttachments = [...pending.attachments];
+        durableEnvironment = pending.environment
+          ? structuredClone(pending.environment)
+          : undefined;
       }
     }
     await this.#authority.surfaceAssets.markAdopted(durableAttachments);
@@ -1527,6 +1606,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       runId: admittedRunId,
       ingress: durableIngress,
       attachments: durableAttachments,
+      ...(durableEnvironment ? { environment: durableEnvironment } : {}),
       replayed: admission.kind === "replayed",
     };
   }
@@ -2122,7 +2202,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         );
       }
       const execute = this.#executeRecoveredPerspective;
-      const runtime: SessionRuntime = {
+      const createRuntime = (baseRuntime: SessionRuntime): SessionRuntime => ({
         sessionId: `recovered-perspectives:${conversationId}`,
         async *run(_messages, runtimeOptions): AsyncGenerator<AgentYield, RunResult> {
           // 恢复执行同样独占该 assignment 的计量序列——与正常 durable 路径同构
@@ -2130,7 +2210,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           let callIndex = 0;
           return await execute({
             manager,
-            managed,
+            managed: { ...managed, runtime: baseRuntime },
             originalInput: pending.input,
             question: invocation.question,
             source: invocation.source,
@@ -2147,13 +2227,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               : {}),
           });
         },
-        abort: (reason) => managed.runtime.abort(reason),
+        abort: (reason) => baseRuntime.abort(reason),
         async dispose() {},
-        securitySnapshot: () => requireRuntimeSecuritySnapshot(managed.runtime),
+        securitySnapshot: () => requireRuntimeSecuritySnapshot(baseRuntime),
         executionPermissionRules: () =>
-          requireRuntimeExecutionPermissionRules(managed.runtime),
-        executionProfile: () => requireRuntimeExecutionProfile(managed.runtime),
-      };
+          requireRuntimeExecutionPermissionRules(baseRuntime),
+        executionProfile: () => requireRuntimeExecutionProfile(baseRuntime),
+      });
+      const runtime = createRuntime(managed.runtime);
       const generator = this.run({
         conversationId,
         input: pending.input,
@@ -2164,6 +2245,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ],
         baseRevision: managed.turnCount,
         runtime,
+        adaptLocalRuntime: createRuntime,
         invocation,
         options: { ...options, turnIndex: managed.turnCount },
       });

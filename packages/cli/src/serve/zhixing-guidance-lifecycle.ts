@@ -9,13 +9,13 @@ import {
 } from "@zhixing/core";
 import type { AgentRuntimeLifecycle } from "@zhixing/orchestrator/runtime";
 
-export interface ZhixingGuidanceScene {
-  readonly workdir?: string;
-}
-
 export interface ZhixingGuidanceLifecycleDeps {
   readonly getZhixingHome: () => string;
-  readonly getWorkscene: (sceneId: string) => Promise<ZhixingGuidanceScene | null>;
+  /**
+   * Resolves the runtime-local workspace root. Raw paths never cross the
+   * workscene registry or its wire DTO.
+   */
+  readonly resolveWorksceneRoot: (sceneId: string) => Promise<string | null>;
   readonly readGuidanceFile: ReadGuidanceFile;
   readonly loadLayeredGuidance?: typeof defaultLoadLayeredGuidance;
 }
@@ -76,9 +76,9 @@ async function resolveWorkdir(
   deps: ZhixingGuidanceLifecycleDeps,
   reportWarning: (event: GuidanceWarningInput) => void,
 ): Promise<string | undefined> {
-  let scene: ZhixingGuidanceScene | null;
+  let workdir: string | null;
   try {
-    scene = await deps.getWorkscene(sceneId);
+    workdir = await deps.resolveWorksceneRoot(sceneId);
   } catch (error) {
     reportWarning({
       message: `工作场景约定查询失败，已降级为仅全局约定：${errorMessage(error)}`,
@@ -86,14 +86,14 @@ async function resolveWorkdir(
     return undefined;
   }
 
-  const workdir = scene?.workdir;
   if (!workdir) return undefined;
-  if (path.isAbsolute(workdir)) return workdir;
-
-  reportWarning({
-    message: `工作场景约定目录不是绝对路径，已跳过场景层：${workdir}`,
-  });
-  return undefined;
+  if (!path.isAbsolute(workdir)) {
+    reportWarning({
+      message: `工作场景约定查询失败，已降级为仅全局约定：工作区根目录不是绝对路径`,
+    });
+    return undefined;
+  }
+  return workdir;
 }
 
 function errorMessage(error: unknown): string {

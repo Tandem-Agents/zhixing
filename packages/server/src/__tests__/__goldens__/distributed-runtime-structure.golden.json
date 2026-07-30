@@ -1041,9 +1041,10 @@
     {
       "definition": [
         "sceneId: string;",
+        "revision: number;",
         "name: string;",
-        "workdir?: string;",
-        "workdirWarning?: string;",
+        "workspace?: { deviceId: string; bindingRef: string; deviceName?: string; workspaceName?: string; };",
+        "workspaceWarning?: string;",
         "lastActiveAt?: string;"
       ],
       "kind": "interface",
@@ -1059,7 +1060,7 @@
     },
     {
       "kind": "import",
-      "references": 8,
+      "references": 9,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1155,7 +1156,7 @@
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 6,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
@@ -1173,7 +1174,7 @@
     },
     {
       "kind": "import",
-      "references": 65,
+      "references": 73,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1239,13 +1240,13 @@
     },
     {
       "kind": "import",
-      "references": 10,
+      "references": 9,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
     {
       "kind": "type-import",
-      "references": 63,
+      "references": 67,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1263,7 +1264,7 @@
     },
     {
       "kind": "type-import",
-      "references": 24,
+      "references": 26,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1299,7 +1300,13 @@
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/runtime-host"
+    },
+    {
+      "kind": "type-import",
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
@@ -1503,7 +1510,7 @@
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 7,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing/core"
     },

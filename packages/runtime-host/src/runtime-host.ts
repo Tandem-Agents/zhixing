@@ -28,7 +28,8 @@ import {
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
-import type { SchedulerFacade, TurnOrigin, WorkScene } from "@zhixing/core";
+import type { SchedulerFacade, TurnOrigin } from "@zhixing/core";
+import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { IConfirmationBroker } from "@zhixing/core";
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
@@ -117,26 +118,35 @@ export class RuntimeHost {
   }
 
   /** 发放一个 main 会话 runtime 实例——投递 origin 执行期按当前 turn 来源派生。 */
-  async createConversationRuntime(): Promise<AgentRuntime> {
+  async createConversationRuntime(workspace?: string | null): Promise<AgentRuntime> {
     return this.assemble(this.conversationScheduleOrigin, {
       withWorkmodeTools: true,
       runtimeKind: "conversation",
+      ...(workspace === undefined ? {} : { workspace }),
     });
   }
 
   /**
-   * 发放一个工作场景会话的 runtime 实例——power 装配:场景 workdir 为工作区
-   * (无 workdir 显式 null,by-construction 杜绝串到 cwd)、记忆域绑场景、
+   * 发放一个工作场景会话的 runtime 实例——power 装配：本机解析后的授权路径为工作区
+   * （无 workspace 显式 null，by-construction 杜绝串到 cwd）、记忆域绑场景、
    * power 角色与 profile。场景对话经全域键(ws: 前缀)路由到此。
    */
-  async createWorksceneRuntime(scene: WorkScene): Promise<AgentRuntime> {
+  async createWorksceneRuntime(input: {
+    readonly scene: WorksceneDto;
+    readonly absolutePath: string | null;
+  }): Promise<AgentRuntime> {
+    const { scene, absolutePath } = input;
     return this.assemble(this.conversationScheduleOrigin, {
       withWorkmodeTools: true,
       workscene: {
-        workspace: scene.workdir ?? null,
+        workspace: absolutePath,
         primaryRole: "power",
         memoryScope: { kind: "workscene", sceneId: scene.id },
-        profile: powerProfile(scene),
+        profile: powerProfile({
+          id: scene.id,
+          name: scene.name,
+          hasWorkspace: absolutePath !== null,
+        }),
         spec: { kind: "workscene", sceneId: scene.id, sceneName: scene.name },
       },
       runtimeKind: "conversation",
@@ -180,7 +190,7 @@ export class RuntimeHost {
       lastActiveAt: "1970-01-01T00:00:00.000Z",
     };
     addProfile(powerProfile(catalogScene));
-    addProfile(powerProfile({ ...catalogScene, workdir: "." }));
+    addProfile(powerProfile({ ...catalogScene, hasWorkspace: true }));
     const addExtra = (input: Parameters<BuiltinExtraToolsAssembly["assembleTools"]>[0]) => {
       for (const tool of this.opts.extraTools.assembleTools(input)) tools.add(tool.name);
     };
@@ -222,6 +232,8 @@ export class RuntimeHost {
         profile: ReturnType<typeof powerProfile>;
         spec: { kind: "workscene"; sceneId: string; sceneName: string };
       };
+      /** Explicit executor-local root; null means this runtime has no file workspace. */
+      workspace?: string | null;
       runtimeKind?: RuntimeKind;
       job?: JobAgentRuntimeOptions;
     },
@@ -263,7 +275,8 @@ export class RuntimeHost {
             ? baseProfile.enabledTools.filter((tool) => requestedTools.has(tool))
             : baseProfile.enabledTools,
         }
-      : workscene?.profile;
+      : workscene?.profile ??
+        (opts?.workspace === null ? mainProfile({ hasWorkspace: false }) : undefined);
     const providerConfiguration =
       job?.instruction.model && this.opts.providerConfiguration.config.llm
         ? {
@@ -290,7 +303,7 @@ export class RuntimeHost {
       ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
       providerConfiguration,
       systemProtectedPaths: this.opts.systemProtectedPaths,
-      workspace: workscene ? workscene.workspace : undefined,
+      workspace: workscene ? workscene.workspace : opts?.workspace,
       primaryRole: workscene?.primaryRole,
       memoryScope: workscene?.memoryScope,
       profile,

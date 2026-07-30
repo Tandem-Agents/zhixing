@@ -68,8 +68,8 @@ export const WORKSCENE_MANAGEMENT_TOOLS = {
       add: { label: "创建工作场景" },
       remove: { label: "删除工作场景" },
       rename: { label: "重命名工作场景" },
-      set_workdir: { label: "绑定或更换工作目录" },
-      clear_workdir: { label: "解除目录绑定" },
+      set_workdir: { label: "绑定或更换设备工作区" },
+      clear_workdir: { label: "解除工作区绑定" },
     },
     boundaries: FILESYSTEM_WRITE_BOUNDARIES,
     requiresExplicitConfirmation: true,
@@ -116,7 +116,7 @@ export const WORKSCENE_MANAGEMENT_TOOLS = {
   workscene_set_workdir_current: {
     surface: "workscene",
     actions: {
-      set_workdir_current: { label: "更换当前工作场景目录" },
+      set_workdir_current: { label: "更换当前工作场景工作区" },
     },
     boundaries: AGENT_CONTEXT_AND_FILESYSTEM_WRITE_BOUNDARIES,
     requiresExplicitConfirmation: true,
@@ -126,7 +126,7 @@ export const WORKSCENE_MANAGEMENT_TOOLS = {
   workscene_clear_workdir_current: {
     surface: "workscene",
     actions: {
-      clear_workdir_current: { label: "解除当前工作场景目录绑定" },
+      clear_workdir_current: { label: "解除当前工作场景工作区绑定" },
     },
     boundaries: AGENT_CONTEXT_AND_FILESYSTEM_WRITE_BOUNDARIES,
     requiresExplicitConfirmation: true,
@@ -191,7 +191,10 @@ export interface WorksceneChangeSummaryInput {
   readonly action: string;
   readonly name?: unknown;
   readonly sceneId?: unknown;
+  /** 仅供当前设备本地受信确认面展示，不得进入普通控制 wire。 */
   readonly workdir?: unknown;
+  readonly deviceName?: unknown;
+  readonly workspaceName?: unknown;
 }
 
 export interface WorksceneChangeSummaryOptions {
@@ -212,6 +215,8 @@ export function buildWorksceneToolConfirmationSummary(
           name: input.name,
           sceneId: input.sceneId,
           workdir: input.workdir,
+          deviceName: input.deviceName,
+          workspaceName: input.workspaceName,
         },
         opts,
       );
@@ -222,7 +227,11 @@ export function buildWorksceneToolConfirmationSummary(
       );
     case "workscene_set_workdir_current":
       return buildWorksceneChangeSummary(
-        { action: "set_workdir_current", workdir: input.workdir },
+        {
+          action: "set_workdir_current",
+          deviceName: input.deviceName,
+          workspaceName: input.workspaceName,
+        },
         opts,
       );
     case "workscene_clear_workdir_current":
@@ -250,7 +259,7 @@ export function buildWorksceneChangeSummary(
   switch (action) {
     case "add":
       lines.push(`新场景：${formatSceneName(change.name)}`);
-      addWorkdirLine(lines, change.workdir);
+      addWorkspaceLine(lines, change);
       break;
     case "remove":
       lines.push(`目标场景：${formatSceneId(change.sceneId)}`);
@@ -261,11 +270,11 @@ export function buildWorksceneChangeSummary(
       break;
     case "set_workdir":
       lines.push(`目标场景：${formatSceneId(change.sceneId)}`);
-      addWorkdirLine(lines, change.workdir);
+      addWorkspaceLine(lines, change);
       break;
     case "clear_workdir":
       lines.push(`目标场景：${formatSceneId(change.sceneId)}`);
-      lines.push("工作目录：解除绑定");
+      lines.push("设备工作区：解除绑定");
       break;
     case "rename_current":
       lines.push(`当前场景：${formatCurrentScene(currentScene)}`);
@@ -273,11 +282,11 @@ export function buildWorksceneChangeSummary(
       break;
     case "set_workdir_current":
       lines.push(`当前场景：${formatCurrentScene(currentScene)}`);
-      addWorkdirLine(lines, change.workdir);
+      addWorkspaceLine(lines, change);
       break;
     case "clear_workdir_current":
       lines.push(`当前场景：${formatCurrentScene(currentScene)}`);
-      lines.push("工作目录：解除绑定");
+      lines.push("设备工作区：解除绑定");
       break;
     case "enter":
     case "exit":
@@ -328,7 +337,30 @@ function formatWorkdir(value: unknown): string {
 
 function addWorkdirLine(lines: string[], value: unknown): void {
   if (value === undefined || value === null) return;
-  lines.push(`工作目录：${formatWorkdir(value)}`);
+  lines.push(`本机工作目录：${formatWorkdir(value)}`);
+}
+
+function addWorkspaceLine(
+  lines: string[],
+  change: WorksceneChangeSummaryInput,
+): void {
+  const deviceName = optionalName(change.deviceName);
+  const workspaceName = optionalName(change.workspaceName);
+  if (deviceName || workspaceName) {
+    lines.push(
+      `设备工作区：${deviceName ?? "（未提供设备）"} / ${
+        workspaceName ?? "（未提供工作区）"
+      }`,
+    );
+    return;
+  }
+  addWorkdirLine(lines, change.workdir);
+}
+
+function optionalName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
 }
 
 function formatCurrentScene(

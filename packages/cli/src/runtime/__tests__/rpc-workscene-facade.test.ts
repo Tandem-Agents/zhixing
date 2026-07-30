@@ -3,13 +3,20 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 const scene = {
   sceneId: "scene-1",
+  revision: 1,
   name: "写作",
-  workdir: "E:\\work\\writing",
+  workspace: {
+    deviceId: "device-local",
+    bindingRef: "workspace-writing",
+    deviceName: "本机",
+    workspaceName: "写作",
+  },
   lastActiveAt: "2026-01-01T00:00:00.000Z",
 };
 
@@ -28,23 +35,29 @@ describe("RpcWorksceneFacade", () => {
     fake.setResponder(() => scene);
     const facade = new RpcWorksceneFacade(fake.link);
 
-    expect(await facade.create("写作", "E:\\work\\writing")).toEqual(scene);
+    const workspace = {
+      deviceId: "device-local",
+      bindingRef: "workspace-writing",
+    };
+    expect(await facade.create("写作", workspace)).toEqual(scene);
     expect(await facade.rename("scene-1", "写作二期")).toEqual(scene);
     expect(await facade.setWorkdir("scene-1", null)).toEqual(scene);
-    expect(fake.requests).toEqual([
-      {
-        method: "workscene.create",
-        params: { name: "写作", workdir: "E:\\work\\writing" },
-      },
-      {
-        method: "workscene.rename",
-        params: { sceneId: "scene-1", name: "写作二期" },
-      },
-      {
-        method: "workscene.setWorkdir",
-        params: { sceneId: "scene-1", workdir: null },
-      },
-    ]);
+    expect(fake.requests).toHaveLength(3);
+    expect(fake.requests[0]).toMatchObject({
+      method: "workscene.create",
+      params: { name: "写作", workspace },
+    });
+    expect(fake.requests[1]).toMatchObject({
+      method: "workscene.rename",
+      params: { sceneId: "scene-1", name: "写作二期" },
+    });
+    expect(fake.requests[2]).toMatchObject({
+      method: "workscene.setWorkdir",
+      params: { sceneId: "scene-1", workspace: null },
+    });
+    for (const request of fake.requests) {
+      expect(request.params).toMatchObject({ requestId: expect.any(String) });
+    }
   });
 
   it("enter 返回场景当前对话的全域键,exit / delete 携带 sceneId", async () => {
@@ -60,13 +73,51 @@ describe("RpcWorksceneFacade", () => {
     expect(entered.conversationId).toBe("ws:scene-1:conv-3");
     expect(entered.scene).toEqual(scene);
 
-    await facade.exit("scene-1");
+    await facade.exit("scene-1", "ws:scene-1:conv-3");
     await facade.delete("scene-1");
 
     expect(fake.requests.map((r) => [r.method, r.params])).toEqual([
       ["workscene.enter", { sceneId: "scene-1" }],
-      ["workscene.exit", { sceneId: "scene-1" }],
-      ["workscene.delete", { sceneId: "scene-1" }],
+      [
+        "workscene.exit",
+        { sceneId: "scene-1", conversationId: "ws:scene-1:conv-3" },
+      ],
+      [
+        "workscene.delete",
+        { sceneId: "scene-1", requestId: expect.any(String) },
+      ],
     ]);
+  });
+
+  it("本机路径交接只让一次性 token 进入 RPC", async () => {
+    const home = await createTempDir("rpc-workscene-local-transfer");
+    const originalHome = process.env.ZHIXING_HOME;
+    process.env.ZHIXING_HOME = home;
+    try {
+      const fake = makeFakeHostLink();
+      fake.setResponder(() => ({
+        deviceId: "device-local",
+        bindingRef: "binding-local",
+      }));
+      const facade = new RpcWorksceneFacade(fake.link);
+
+      await expect(
+        facade.authorizeLocalWorkspace("项目", "C:\\private\\project"),
+      ).resolves.toEqual({
+        deviceId: "device-local",
+        bindingRef: "binding-local",
+      });
+      expect(fake.requests).toHaveLength(1);
+      expect(fake.requests[0]).toMatchObject({
+        method: "workscene.authorizeLocalWorkspace",
+        params: { transferToken: expect.any(String) },
+      });
+      expect(JSON.stringify(fake.requests[0])).not.toContain(
+        "C:\\private\\project",
+      );
+    } finally {
+      if (originalHome === undefined) delete process.env.ZHIXING_HOME;
+      else process.env.ZHIXING_HOME = originalHome;
+    }
   });
 });

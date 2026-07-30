@@ -7,7 +7,10 @@
  * 纯函数派生(power 装配 / per-scope 持久化路由)。
  */
 
-import type { WorkScene } from "@zhixing/core";
+import type {
+  LocalWorkspaceBinding,
+  WorksceneDto,
+} from "@zhixing/core/contracts";
 
 export class WorksceneInputError extends Error {
   readonly code = "WORKSCENE_INPUT";
@@ -19,33 +22,48 @@ export class WorksceneInputError extends Error {
 }
 
 export interface WorksceneWriteResult {
-  scene: WorkScene;
-  workdirWarning?: string;
+  scene: WorksceneDto;
+  workspaceWarning?: string;
 }
 
 export interface WorksceneDirectoryEnterResult {
   conversationId: string;
-  scene: WorkScene;
+  scene: WorksceneDto;
 }
 
 export interface WorksceneDirectory {
-  list(): Promise<WorkScene[]>;
-  get(id: string): Promise<WorkScene | null>;
-  create(opts: { name: string; workdir?: string }): Promise<WorksceneWriteResult>;
+  list(): Promise<WorksceneDto[]>;
+  get(id: string): Promise<WorksceneDto | null>;
+  create(
+    opts: {
+      name: string;
+      workspace?: { deviceId: string; bindingRef: string };
+      requestId: string;
+    },
+  ): Promise<WorksceneWriteResult>;
   /** 改名;场景不存在返回 null */
-  rename(id: string, name: string): Promise<WorkScene | null>;
+  rename(
+    id: string,
+    name: string,
+    requestId: string,
+  ): Promise<WorksceneDto | null>;
   /** 绑定 / 更换 / 解绑工作目录;场景不存在返回 null */
   setWorkdir(
     id: string,
-    workdir: string | null,
+    workspace: { deviceId: string; bindingRef: string } | null,
+    requestId: string,
   ): Promise<WorksceneWriteResult | null>;
   /**
    * 彻底移除场景(登记 + 场景系统目录:meta / 记忆域 / 会话域)。
    * 用户代码工作目录(workdir)不动。不存在返回 false。
    */
-  remove(id: string): Promise<boolean>;
-  /** 刷新场景 lastActiveAt(enter / exit 时调) */
-  touch(id: string): Promise<void>;
+  remove(id: string, requestId: string): Promise<boolean>;
+  /** 更新会话 owner 的 SessionMeta 活动事实，并刷新可重建读投影。 */
+  recordActivity(
+    sceneId: string,
+    conversationId: string,
+    at: string,
+  ): Promise<void>;
   /**
    * enter 的完整执行体:取场景最近对话(无则创建)、注册 observer、
    * 按需刷新 lastActiveAt,返回全域键(`ws:<sceneId>:<convId>`)。
@@ -54,6 +72,25 @@ export interface WorksceneDirectory {
   enterScene(
     sceneId: string,
     observerId: string,
-    opts?: { touch?: boolean },
+    opts?: { recordActivity?: boolean },
   ): Promise<WorksceneDirectoryEnterResult | null>;
+  /**
+   * Host-local path handoff. Only an opaque one-time token may reach RPC;
+   * the raw path is read from the target device's private local handoff.
+   */
+  authorizeLocalWorkspaceTransfer?(
+    token: string,
+  ): Promise<
+    LocalWorkspaceBinding & {
+      deviceId: string;
+    }
+  >;
+  workspaceCatalog?(): Promise<
+    readonly {
+      deviceId: string;
+      deviceName: string;
+      bindingRef: string;
+      workspaceName: string;
+    }[]
+  >;
 }

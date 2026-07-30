@@ -1,29 +1,36 @@
-/**
- * WorksceneDirectory 持久层实现 —— 真实注册表 + 场景对话库(临时 home)锁
- * 与 server 契约的对齐:enter 的取 / 建语义与全域键形态、不存在的表达
- * (rename null / remove false / enter null)。
- */
-
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AnchorWorksceneRegistry,
   ConversationRepository,
-  FsWorkSceneRegistry,
   parseConversationId,
 } from "@zhixing/core";
+import {
+  FileArtifactStore,
+  FileAuthorityCommitLog,
+} from "@zhixing/core/authority";
+import type {
+  WorkspaceProbeResult,
+} from "@zhixing/core/contracts";
 import type { ConversationManager } from "@zhixing/owner-kernel";
+import { createTempDir } from "@zhixing/test-utils";
+import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createWorksceneDirectory } from "../workscene-directory.js";
 
 let originalHome: string | undefined;
-let directory: ReturnType<typeof createWorksceneDirectory>;
 let home: string;
+let requestSequence = 0;
+
+function requestId(prefix: string): string {
+  requestSequence += 1;
+  return `${prefix}-${requestSequence}`;
+}
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
-  const promise = new Promise<void>((r) => {
-    resolve = r;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
   });
   return { promise, resolve };
 }
@@ -36,123 +43,104 @@ function busyError(message = "busy"): Error {
 }
 
 beforeEach(async () => {
-  const tmp = await createTempDir("workscene-dir");
-  home = tmp;
+  home = await createTempDir("workscene-directory");
   originalHome = process.env.ZHIXING_HOME;
-  process.env.ZHIXING_HOME = tmp;
-  directory = createWorksceneDirectory({ registry: new FsWorkSceneRegistry() });
+  process.env.ZHIXING_HOME = home;
+  requestSequence = 0;
 });
+
 afterEach(() => {
   if (originalHome === undefined) delete process.env.ZHIXING_HOME;
   else process.env.ZHIXING_HOME = originalHome;
 });
 
-describe("workscene directory(持久层实现)", () => {
-  it("create/list/rename/remove 全链;不存在的表达为 null/false", async () => {
-    expect(await directory.rename("ghost", "x")).toBeNull();
-    expect(await directory.remove("ghost")).toBe(false);
+describe("workscene directory", () => {
+  it("linearizes CRUD and preserves not-found results", async () => {
+    const fixture = await createFixture();
+    expect(await fixture.directory.rename("ghost", "x", requestId("rename"))).toBeNull();
+    expect(await fixture.directory.remove("ghost", requestId("remove"))).toBe(false);
 
-    const { scene } = await directory.create({ name: "评审场景" });
-    expect((await directory.list()).map((s) => s.id)).toContain(scene.id);
+    const { scene } = await fixture.directory.create({
+      name: "评审场景",
+      requestId: requestId("create"),
+    });
+    expect((await fixture.directory.list()).map(({ id }) => id)).toContain(scene.id);
 
-    const renamed = await directory.rename(scene.id, "新场景名");
+    const renamed = await fixture.directory.rename(
+      scene.id,
+      "新场景名",
+      requestId("rename"),
+    );
     expect(renamed?.name).toBe("新场景名");
+    expect(renamed?.revision).toBeGreaterThan(scene.revision);
 
-    expect(await directory.remove(scene.id)).toBe(true);
-    expect(await directory.get(scene.id)).toBeNull();
+    expect(await fixture.directory.remove(scene.id, requestId("remove"))).toBe(true);
+    expect(await fixture.directory.get(scene.id)).toBeNull();
   });
 
-  it("enterScene:首次创建场景对话、再次进入复用同一对话;全域键可解析回场景", async () => {
-    const { scene } = await directory.create({ name: "开发场景" });
+  it("creates one owner conversation and reuses it across concurrent enters", async () => {
+    const fixture = await createFixture();
+    const { scene } = await fixture.directory.create({
+      name: "开发场景",
+      requestId: requestId("create"),
+    });
 
-    const first = await directory.enterScene(scene.id, "conn-1");
-    expect(first).not.toBeNull();
+    const [first, second, third] = await Promise.all([
+      fixture.directory.enterScene(scene.id, "surface-a"),
+      fixture.directory.enterScene(scene.id, "surface-b"),
+      fixture.directory.enterScene(scene.id, "surface-c"),
+    ]);
+    expect(second?.conversationId).toBe(first?.conversationId);
+    expect(third?.conversationId).toBe(first?.conversationId);
     const parsed = parseConversationId(first!.conversationId);
     expect(parsed.scope).toEqual({ kind: "workscene", sceneId: scene.id });
-
-    // 场景库内确实建了对话
-    const repo = new ConversationRepository({
-      kind: "workscene",
-      sceneId: scene.id,
-    });
-    expect((await repo.list()).map((c) => c.id)).toContain(parsed.localId);
-
-    // 再次进入:复用"场景当前对话",不重复创建
-    const second = await directory.enterScene(scene.id, "conn-1");
-    expect(second!.conversationId).toBe(first!.conversationId);
-    expect(await repo.list()).toHaveLength(1);
-
-    // 场景不存在 → null
-    expect(await directory.enterScene("ghost", "conn-1")).toBeNull();
+    expect(
+      await new ConversationRepository(parsed.scope).list(),
+    ).toHaveLength(1);
+    expect(await fixture.directory.enterScene("ghost", "surface-a")).toBeNull();
   });
 
-  it("enter 并发原子性:同一空场景并发进入只建一个对话(per-scene 串行)", async () => {
-    const { scene } = await directory.create({ name: "并发场景" });
-
-    const [a, b, c] = await Promise.all([
-      directory.enterScene(scene.id, "conn-1"),
-      directory.enterScene(scene.id, "conn-2"),
-      directory.enterScene(scene.id, "conn-3"),
-    ]);
-
-    expect(a!.conversationId).toBe(b!.conversationId);
-    expect(b!.conversationId).toBe(c!.conversationId);
-    const repo = new ConversationRepository({
-      kind: "workscene",
-      sceneId: scene.id,
-    });
-    expect(await repo.list()).toHaveLength(1);
-  });
-
-  it("create / setWorkdir 统一校验、规范化、缺失目录软提示与解绑", async () => {
-    await expect(directory.create({ name: "   " })).rejects.toMatchObject({
-      code: "WORKSCENE_INPUT",
-    });
-    await expect(directory.create({ name: "" })).rejects.toMatchObject({
-      code: "WORKSCENE_INPUT",
-    });
-    await expect(directory.create({ name: "bad", workdir: "rel/path" })).rejects.toThrow(
-      /绝对路径/,
-    );
-
-    const filePath = path.join(home, "not-dir.txt");
-    await fs.writeFile(filePath, "x", "utf-8");
+  it("accepts directory/missing workspace probes, rejects hard states and never exposes paths", async () => {
+    const fixture = await createFixture();
     await expect(
-      directory.create({ name: "file", workdir: filePath }),
-    ).rejects.toThrow(/不是目录/);
+      fixture.directory.create({ name: "   ", requestId: requestId("create") }),
+    ).rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
 
-    const existingDir = path.join(home, "existing");
-    await fs.mkdir(existingDir);
-    const created = await directory.create({
-      name: " 有目录 ",
-      workdir: `${existingDir}${path.sep}.`,
+    const workspace = { deviceId: "device-a", bindingRef: "workspace-a" };
+    const created = await fixture.directory.create({
+      name: "有工作区",
+      workspace,
+      requestId: requestId("create"),
     });
-    expect(created.scene.name).toBe("有目录");
-    expect(created.scene.workdir).toBe(path.normalize(`${existingDir}${path.sep}.`));
-    expect(created.workdirWarning).toBeUndefined();
+    expect(created.scene.workspace).toEqual(workspace);
+    expect(JSON.stringify(created)).not.toContain(home);
 
-    const missing = path.join(home, "missing");
-    const rebound = await directory.setWorkdir(created.scene.id, missing);
-    expect(rebound?.scene.workdir).toBe(missing);
-    expect(rebound?.workdirWarning).toContain("下次进入将自动创建");
+    fixture.setProbe("missing");
+    const rebound = await fixture.directory.setWorkdir(
+      created.scene.id,
+      workspace,
+      requestId("set"),
+    );
+    expect(rebound?.workspaceWarning).toContain("下次进入将自动创建");
 
-    const cleared = await directory.setWorkdir(created.scene.id, null);
-    expect(cleared?.scene.workdir).toBeUndefined();
-    await expect(directory.rename(created.scene.id, "   ")).rejects.toMatchObject({
-      code: "WORKSCENE_INPUT",
-    });
-    await expect(directory.setWorkdir(created.scene.id, "   ")).rejects.toMatchObject({
-      code: "WORKSCENE_INPUT",
-    });
-    await expect(directory.setWorkdir(created.scene.id, "")).rejects.toMatchObject({
-      code: "WORKSCENE_INPUT",
-    });
-    expect(await directory.setWorkdir("ghost", null)).toBeNull();
+    fixture.setProbe("non_directory");
+    await expect(
+      fixture.directory.setWorkdir(
+        created.scene.id,
+        workspace,
+        requestId("set"),
+      ),
+    ).rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
+    const cleared = await fixture.directory.setWorkdir(
+      created.scene.id,
+      null,
+      requestId("clear"),
+    );
+    expect(cleared?.scene).not.toHaveProperty("workspace");
   });
 
-  it("remove / setWorkdir 通过 quiescePrefix 静默,并在落盘后释放闸", async () => {
+  it("quiesces set/delete in the per-scene chain and never deletes the user workspace", async () => {
     const calls: string[] = [];
-    const registry = new FsWorkSceneRegistry();
     const manager = {
       async quiescePrefix(prefix: string) {
         calls.push(`quiesce:${prefix}`);
@@ -160,29 +148,26 @@ describe("workscene directory(持久层实现)", () => {
       },
       addObserver: () => true,
     } as unknown as ConversationManager;
-    const guarded = createWorksceneDirectory({
-      registry,
-      conversations: () => manager,
+    const fixture = await createFixture(manager);
+    const userWorkspace = path.join(home, "user-workspace");
+    await fs.mkdir(userWorkspace);
+    const { scene } = await fixture.directory.create({
+      name: "守卫场景",
+      requestId: requestId("create"),
     });
-    const { scene } = await guarded.create({ name: "守卫场景" });
-    const nextWorkdir = path.join(home, "next");
 
-    const changed = await guarded.setWorkdir(scene.id, nextWorkdir);
-    expect(changed?.scene.workdir).toBe(nextWorkdir);
+    await fixture.directory.setWorkdir(scene.id, null, requestId("set"));
+    expect(await fixture.directory.remove(scene.id, requestId("remove"))).toBe(true);
     expect(calls).toEqual([
       `quiesce:ws:${scene.id}:`,
       `release:ws:${scene.id}:`,
-    ]);
-
-    calls.length = 0;
-    expect(await guarded.remove(scene.id)).toBe(true);
-    expect(calls).toEqual([
       `quiesce:ws:${scene.id}:`,
       `release:ws:${scene.id}:`,
     ]);
+    expect((await fs.stat(userWorkspace)).isDirectory()).toBe(true);
   });
 
-  it("enter 先完成时 observer 已登记,后续 remove 命中 BUSY 且不删除场景", async () => {
+  it("rejects delete while an entered observer holds the scene", async () => {
     const observers = new Set<string>();
     const manager = {
       addObserver(conversationId: string) {
@@ -190,58 +175,29 @@ describe("workscene directory(持久层实现)", () => {
         return true;
       },
       async quiescePrefix(prefix: string) {
-        if ([...observers].some((id) => id.startsWith(prefix))) {
-          throw busyError();
-        }
+        if ([...observers].some((id) => id.startsWith(prefix))) throw busyError();
         return () => {};
       },
     } as unknown as ConversationManager;
-    const guarded = createWorksceneDirectory({
-      registry: new FsWorkSceneRegistry(),
-      conversations: () => manager,
-    });
-    const { scene } = await guarded.create({ name: "入场优先" });
-
-    const entered = await guarded.enterScene(scene.id, "conn-1");
-    await expect(guarded.remove(scene.id)).rejects.toMatchObject({
-      code: "WORKSCENE_BUSY",
+    const fixture = await createFixture(manager);
+    const { scene } = await fixture.directory.create({
+      name: "入场优先",
+      requestId: requestId("create"),
     });
 
-    expect(entered?.scene.id).toBe(scene.id);
-    expect(await guarded.get(scene.id)).not.toBeNull();
+    await expect(fixture.directory.enterScene(scene.id, "surface-a")).resolves.toBeTruthy();
+    await expect(
+      fixture.directory.remove(scene.id, requestId("remove")),
+    ).rejects.toMatchObject({ code: "WORKSCENE_BUSY" });
+    expect(await fixture.directory.get(scene.id)).not.toBeNull();
   });
 
-  it("enterScene 的 touch 失败不撤销已登记 observer 与入场结果", async () => {
-    class TouchFailRegistry extends FsWorkSceneRegistry {
-      override async touch(): Promise<void> {
-        throw new Error("touch failed");
-      }
-    }
-    const observed: string[] = [];
-    const guarded = createWorksceneDirectory({
-      registry: new TouchFailRegistry(),
-      conversations: () =>
-        ({
-          addObserver(conversationId: string) {
-            observed.push(conversationId);
-            return true;
-          },
-        }) as unknown as ConversationManager,
-    });
-    const { scene } = await guarded.create({ name: "touch 失败仍入场" });
-
-    const entered = await guarded.enterScene(scene.id, "conn-1");
-
-    expect(entered?.scene.id).toBe(scene.id);
-    expect(observed).toEqual([entered?.conversationId]);
-  });
-
-  it("remove 先进入链时 enter 等待并在删除后返回 null,不注册 observer", async () => {
+  it("serializes remove ahead of enter and prevents deleted-scene re-entry", async () => {
     const gate = deferred();
     const calls: string[] = [];
     const manager = {
       addObserver() {
-        calls.push("addObserver");
+        calls.push("observer");
         return true;
       },
       async quiescePrefix() {
@@ -250,15 +206,15 @@ describe("workscene directory(持久层实现)", () => {
         return () => calls.push("release");
       },
     } as unknown as ConversationManager;
-    const guarded = createWorksceneDirectory({
-      registry: new FsWorkSceneRegistry(),
-      conversations: () => manager,
+    const fixture = await createFixture(manager);
+    const { scene } = await fixture.directory.create({
+      name: "删除优先",
+      requestId: requestId("create"),
     });
-    const { scene } = await guarded.create({ name: "删除优先" });
 
-    const removing = guarded.remove(scene.id);
+    const removing = fixture.directory.remove(scene.id, requestId("remove"));
     await Promise.resolve();
-    const entering = guarded.enterScene(scene.id, "conn-1");
+    const entering = fixture.directory.enterScene(scene.id, "surface-a");
     gate.resolve();
 
     await expect(removing).resolves.toBe(true);
@@ -266,32 +222,108 @@ describe("workscene directory(持久层实现)", () => {
     expect(calls).toEqual(["quiesce", "release"]);
   });
 
-  it("setWorkdir 先进入链时 enter 等待并返回新 workdir 场景", async () => {
-    const gate = deferred();
-    const manager = {
-      addObserver: () => true,
-      async quiescePrefix() {
-        await gate.promise;
-        return () => {};
-      },
-    } as unknown as ConversationManager;
-    const guarded = createWorksceneDirectory({
-      registry: new FsWorkSceneRegistry(),
-      conversations: () => manager,
+  it("redrives a committed deletion after cleanup failure and preserves exact replay", async () => {
+    let failCleanup = true;
+    const fixture = await createFixture(undefined, async () => {
+      if (failCleanup) throw new Error("injected cleanup failure");
     });
-    const { scene } = await guarded.create({ name: "改目录优先" });
-    const nextWorkdir = path.join(home, "new-workdir");
+    const { scene } = await fixture.directory.create({
+      name: "可恢复删除",
+      requestId: requestId("create"),
+    });
+    const deleteRequestId = requestId("remove");
 
-    const changing = guarded.setWorkdir(scene.id, nextWorkdir);
-    await Promise.resolve();
-    const entering = guarded.enterScene(scene.id, "conn-1");
-    gate.resolve();
+    await expect(
+      fixture.directory.remove(scene.id, deleteRequestId),
+    ).rejects.toThrow("injected cleanup failure");
+    expect(await fixture.registry.get(scene.id)).toBeNull();
+    expect(await fixture.registry.pendingDeletions()).toHaveLength(1);
 
-    await expect(changing).resolves.toMatchObject({
-      scene: { id: scene.id, workdir: nextWorkdir },
+    failCleanup = false;
+    await expect(fixture.directory.recover()).resolves.toBeUndefined();
+    expect(await fixture.registry.pendingDeletions()).toEqual([]);
+    await expect(
+      fixture.directory.remove(scene.id, deleteRequestId),
+    ).resolves.toBe(true);
+    await expect(
+      fixture.directory.remove(scene.id, requestId("remove")),
+    ).resolves.toBe(false);
+  });
+
+  it("records activity only through the matching conversation owner fact", async () => {
+    const fixture = await createFixture();
+    const { scene } = await fixture.directory.create({
+      name: "活动场景",
+      requestId: requestId("create"),
     });
-    await expect(entering).resolves.toMatchObject({
-      scene: { id: scene.id, workdir: nextWorkdir },
+    const entered = await fixture.directory.enterScene(scene.id, "surface-a", {
+      recordActivity: false,
     });
+    await expect(
+      fixture.directory.recordActivity(
+        scene.id,
+        entered!.conversationId,
+        "2026-07-30T00:00:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.directory.recordActivity(
+        "another-scene",
+        entered!.conversationId,
+        "2026-07-30T00:00:00.000Z",
+      ),
+    ).rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
   });
 });
+
+async function createFixture(
+  conversations?: ConversationManager,
+  removeSceneDirectory?: (sceneId: string) => Promise<void>,
+) {
+  const artifacts = new FileArtifactStore(path.join(home, "authority-artifacts"));
+  const log = new FileAuthorityCommitLog(
+    path.join(home, "authority-log"),
+    artifacts,
+  );
+  const registry = new AnchorWorksceneRegistry({ log });
+  let probe: WorkspaceProbeResult["probe"] = "directory";
+  const authority = {
+    deviceId: "device-a",
+    worksceneRegistry: registry,
+    workspaceCatalog: () => [{
+      executorId: "executor-a",
+      deviceId: "device-a",
+      deviceName: "本机",
+      bindingRef: "workspace-a",
+      displayName: "工作区",
+      workspaceBindingRevision: 1,
+    }],
+    resourceGovernor: {
+      acquireRoot: vi.fn(async () => ({ leaseId: "lease-a" })),
+      settle: vi.fn(async () => undefined),
+      release: vi.fn(async () => undefined),
+    },
+    environmentProbeOwner: {
+      issue: vi.fn((input) => input),
+      accept: vi.fn((_request, result) => result),
+    },
+    workspaceProbe: {
+      probe: vi.fn(async (request: Record<string, unknown>) => ({
+        ...request,
+        executorId: "executor-a",
+        probe,
+      })),
+    },
+  } as unknown as AuthorityRuntimeStack;
+  return {
+    directory: createWorksceneDirectory({
+      authority: () => authority,
+      ...(conversations ? { conversations: () => conversations } : {}),
+      ...(removeSceneDirectory ? { removeSceneDirectory } : {}),
+    }),
+    registry,
+    setProbe(value: WorkspaceProbeResult["probe"]) {
+      probe = value;
+    },
+  };
+}

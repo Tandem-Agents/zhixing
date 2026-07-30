@@ -275,7 +275,13 @@ export interface RuntimeFactory {
    * 创建新运行时——纯执行体发放。会话历史装填(启动装填对 → 窗口起始条目)
    * 归 ConversationManager,工厂不感知。
    */
-  create(sessionId: string): Promise<SessionRuntime>;
+  create(
+    sessionId: string,
+    environment?: {
+      /** Executor-local path obtained only after the frozen binding is revalidated. */
+      readonly workspaceRoot: string | null;
+    },
+  ): Promise<SessionRuntime>;
 }
 
 /** @deprecated 使用 ManagedSessionInfo (from conversation-manager) 代替 */

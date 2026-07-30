@@ -25,7 +25,7 @@
  *     天然不需要确认（用户意图即授权）
  */
 
-import { isAbsolute } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   MemoryStore,
   getEnabledWorksceneToolActions,
@@ -33,15 +33,13 @@ import {
   getWorksceneToolBoundaries,
   getWorksceneToolPostTurnControlKind,
   normalizeSceneName,
-  normalizeWorkdir,
-  probeWorkdir,
   worksceneToolRequiresExplicitConfirmation,
   type JsonSchema,
   type MemoryCategory,
   type ToolDefinition,
-  type WorkScene,
   type WorksceneManagementToolName,
 } from "@zhixing/core";
+import type { WorksceneDto } from "@zhixing/core/contracts";
 import {
   emitPostTurnControlIntent,
   hasPostTurnControlCapability,
@@ -89,7 +87,7 @@ function assertPostTurnControlSupported(
   return undefined;
 }
 
-function appendWorkdirWarning(content: string, warning?: string): string {
+function appendWorkspaceWarning(content: string, warning?: string): string {
   return warning ? `${content}\n提示：${warning}` : content;
 }
 
@@ -99,50 +97,45 @@ function currentDisplayContext(scene: WorksceneCurrentToolContext) {
   };
 }
 
-function formatSceneLine(scene: WorkScene): string {
+function formatSceneLine(
+  scene: WorksceneDto,
+  label?: { deviceName: string; workspaceName: string },
+): string {
   const parts = [
     `- ${scene.name} (id: ${scene.id})`,
-    `  工作目录：${scene.workdir ?? "未绑定"}`,
+    `  工作区：${
+      scene.workspace
+        ? label
+          ? `${label.deviceName} / ${label.workspaceName}`
+          : "已绑定"
+        : "未绑定"
+    }`,
   ];
   if (scene.lastActiveAt) parts.push(`  最近使用：${scene.lastActiveAt}`);
   return parts.join("\n");
 }
 
-async function prepareCurrentWorkdir(
-  value: unknown,
+async function selectWorkspace(
+  workscenes: Pick<WorksceneToolDirectory, "selectWorkspace">,
+  input: Record<string, unknown>,
 ): Promise<
-  | { readonly workdir: string; readonly workdirWarning?: string }
+  | { readonly workspace: { deviceId: string; bindingRef: string } }
   | { readonly error: string }
 > {
-  if (typeof value !== "string" || !value.trim()) {
-    return { error: "workscene_set_workdir_current 需要 workdir" };
+  const deviceName =
+    typeof input.deviceName === "string" ? input.deviceName.trim() : "";
+  const workspaceName =
+    typeof input.workspaceName === "string" ? input.workspaceName.trim() : "";
+  if (!deviceName || !workspaceName) {
+    return { error: "需要 deviceName 与 workspaceName" };
   }
-
-  let workdir: string;
-  try {
-    workdir = normalizeWorkdir(value);
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-
-  if (!isAbsolute(workdir)) return { error: "工作目录必须是绝对路径" };
-
-  const probe = await probeWorkdir(workdir);
-  switch (probe.kind) {
-    case "directory":
-      return { workdir };
-    case "missing":
-      return {
-        workdir,
-        workdirWarning: `工作目录当前不存在，下次进入将自动创建：${workdir}`,
-      };
-    case "non_directory":
-      return { error: "工作目录已存在但不是目录" };
-    case "inaccessible":
-      return { error: `工作目录不可访问(${probe.code})` };
-    case "error":
-      return { error: `工作目录无法确认(${probe.code})` };
-  }
+  const workspace = await workscenes.selectWorkspace({
+    deviceName,
+    workspaceName,
+  });
+  return workspace
+    ? { workspace }
+    : { error: `未找到设备「${deviceName}」上的工作区「${workspaceName}」` };
 }
 
 /**
@@ -233,7 +226,7 @@ export function createWorkmodeExitTool(): ToolDefinition {
 export function createWorksceneChangeApproveTool(
   workscenes: Pick<
     WorksceneToolDirectory,
-    "create" | "remove" | "rename" | "setWorkdir"
+    "create" | "remove" | "rename" | "setWorkdir" | "selectWorkspace"
   >,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
@@ -252,9 +245,13 @@ export function createWorksceneChangeApproveTool(
         type: "string",
         description: "remove/rename/set_workdir/clear_workdir 的目标场景 id",
       },
-      workdir: {
+      deviceName: {
         type: "string",
-        description: "add 可选、set_workdir 必填：该场景的工作目录（必须是绝对路径）",
+        description: "add 可选、set_workdir 必填：目标设备的显示名称",
+      },
+      workspaceName: {
+        type: "string",
+        description: "add 可选、set_workdir 必填：目标设备已授权工作区的显示名称",
       },
     },
     required: ["action"],
@@ -262,7 +259,7 @@ export function createWorksceneChangeApproveTool(
   return {
     name: "workscene_change_approve",
     description:
-      "增删改工作场景注册表（add/remove/rename/set_workdir/clear_workdir）。需用户确认。",
+      "增删改工作场景注册表（add/remove/rename/set_workdir/clear_workdir）。远程只按设备名和已授权工作区名选择，需用户确认。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -281,51 +278,71 @@ export function createWorksceneChangeApproveTool(
         switch (action) {
           case "add": {
             if (!name) return fail("add 需要 name");
-            const workdir =
-              typeof input.workdir === "string" && input.workdir.trim()
-                ? input.workdir.trim()
-                : undefined;
-            const result = await workscenes.create({ name, workdir });
+            const hasWorkspace =
+              input.deviceName !== undefined || input.workspaceName !== undefined;
+            const selected = hasWorkspace
+              ? await selectWorkspace(workscenes, input)
+              : undefined;
+            if (selected && "error" in selected) return fail(selected.error);
+            const result = await workscenes.create({
+              name,
+              ...(selected ? { workspace: selected.workspace } : {}),
+              requestId: `workscene-create:${randomUUID()}`,
+            });
             return ok(
-              appendWorkdirWarning(
+              appendWorkspaceWarning(
                 `已创建工作场景「${result.scene.name}」（id: ${result.scene.id}）`,
-                result.workdirWarning,
+                result.workspaceWarning,
               ),
             );
           }
           case "remove": {
             if (!sceneId) return fail("remove 需要 sceneId");
-            // 用户的 workdir 不动 —— 那是用户的代码资产,系统不碰。
-            const removed = await workscenes.remove(sceneId);
+            // 用户工作区不动——它是用户资产，删除只清理场景系统数据。
+            const removed = await workscenes.remove(
+              sceneId,
+              `workscene-delete:${randomUUID()}`,
+            );
             if (!removed) return fail(`工作场景 "${sceneId}" 不存在`);
             return ok(`已删除工作场景 ${sceneId}（系统数据已物理清除）`);
           }
           case "rename": {
             if (!sceneId || !name)
               return fail("rename 需要 sceneId 与 name");
-            const s = await workscenes.rename(sceneId, name);
+            const s = await workscenes.rename(
+              sceneId,
+              name,
+              `workscene-rename:${randomUUID()}`,
+            );
             if (!s) return fail(`工作场景 "${sceneId}" 不存在`);
             return ok(`已重命名为「${s.name}」`);
           }
           case "set_workdir": {
             if (!sceneId) return fail("set_workdir 需要 sceneId");
-            const workdir =
-              typeof input.workdir === "string" ? input.workdir.trim() : "";
-            if (!workdir) return fail("set_workdir 需要 workdir");
-            const result = await workscenes.setWorkdir(sceneId, workdir);
+            const selected = await selectWorkspace(workscenes, input);
+            if ("error" in selected) return fail(selected.error);
+            const result = await workscenes.setWorkdir(
+              sceneId,
+              selected.workspace,
+              `workscene-set-workdir:${randomUUID()}`,
+            );
             if (!result) return fail(`工作场景 "${sceneId}" 不存在`);
             return ok(
-              appendWorkdirWarning(
-                `已将工作场景「${result.scene.name}」的工作目录设为：${result.scene.workdir}`,
-                result.workdirWarning,
+              appendWorkspaceWarning(
+                `已将工作场景「${result.scene.name}」绑定到所选设备工作区`,
+                result.workspaceWarning,
               ),
             );
           }
           case "clear_workdir": {
             if (!sceneId) return fail("clear_workdir 需要 sceneId");
-            const result = await workscenes.setWorkdir(sceneId, null);
+            const result = await workscenes.setWorkdir(
+              sceneId,
+              null,
+              `workscene-clear-workdir:${randomUUID()}`,
+            );
             if (!result) return fail(`工作场景 "${sceneId}" 不存在`);
-            return ok(`已解除工作场景「${result.scene.name}」的工作目录绑定`);
+            return ok(`已解除工作场景「${result.scene.name}」的设备工作区绑定`);
           }
           default:
             return fail(`未知 action: ${action}`);
@@ -343,7 +360,7 @@ export function createWorksceneChangeApproveTool(
  * workscene_list（main-only，只读）—— 查看场景管理元数据。
  */
 export function createWorksceneListTool(
-  workscenes: Pick<WorksceneToolDirectory, "list">,
+  workscenes: Pick<WorksceneToolDirectory, "list" | "workspaceCatalog">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -352,7 +369,7 @@ export function createWorksceneListTool(
   return {
     name: "workscene_list",
     description:
-      "只读列出工作场景管理元数据（id、名称、工作目录、最近使用时间），用于选择目标场景或查看目录绑定。",
+      "只读列出工作场景管理元数据（id、名称、设备工作区、最近使用时间），用于选择目标场景或查看工作区绑定。",
     inputSchema,
     isReadOnly: true,
     isParallelSafe: true,
@@ -361,7 +378,29 @@ export function createWorksceneListTool(
     async call() {
       const scenes = await workscenes.list();
       if (scenes.length === 0) return ok("当前没有任何工作场景");
-      return ok(scenes.map(formatSceneLine).join("\n\n"));
+      const catalog = await workscenes.workspaceCatalog();
+      return ok(
+        scenes
+          .map((scene) => {
+            const binding = scene.workspace
+              ? catalog.find(
+                  (entry) =>
+                    entry.deviceId === scene.workspace?.deviceId &&
+                    entry.bindingRef === scene.workspace.bindingRef,
+                )
+              : undefined;
+            return formatSceneLine(
+              scene,
+              binding
+                ? {
+                    deviceName: binding.deviceName,
+                    workspaceName: binding.workspaceName,
+                  }
+                : undefined,
+            );
+          })
+          .join("\n\n"),
+      );
     },
   };
 }
@@ -403,7 +442,11 @@ export function createWorksceneRenameCurrentTool(
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
       }
-      const renamed = await workscenes.rename(scene.sceneId, name);
+      const renamed = await workscenes.rename(
+        scene.sceneId,
+        name,
+        `workscene-rename-current:${randomUUID()}`,
+      );
       if (!renamed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
       return ok(
         `已将当前工作场景重命名为「${renamed.name}」。当前窗口可能仍显示旧名称，下次进入或窗口换代后会自然更新。`,
@@ -413,25 +456,30 @@ export function createWorksceneRenameCurrentTool(
 }
 
 /**
- * workscene_set_workdir_current（power-only）—— 确认后请求 turn 边界换目录重进。
+ * workscene_set_workdir_current（power-only）—— 确认后请求 turn 边界换工作区重进。
  */
 export function createWorksceneSetWorkdirCurrentTool(
   scene: WorksceneCurrentToolContext,
+  workscenes: Pick<WorksceneToolDirectory, "selectWorkspace">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
     properties: {
-      workdir: {
+      deviceName: {
         type: "string",
-        description: "当前工作场景的新工作目录，必须是本机绝对路径",
+        description: "目标设备的显示名称",
+      },
+      workspaceName: {
+        type: "string",
+        description: "目标设备已授权工作区的显示名称",
       },
     },
-    required: ["workdir"],
+    required: ["deviceName", "workspaceName"],
   };
   return {
     name: "workscene_set_workdir_current",
     description:
-      "更换当前工作场景的工作目录。变更在本轮结束后由 CLI 释放当前场景并按新目录重新进入。",
+      "更换当前工作场景的设备工作区。变更在本轮结束后由 CLI 释放当前场景并按新工作区重新进入。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -445,25 +493,20 @@ export function createWorksceneSetWorkdirCurrentTool(
         "workscene_set_workdir_current",
       );
       if (unsupported) return unsupported;
-      const prepared = await prepareCurrentWorkdir(input.workdir);
-      if ("error" in prepared) return fail(prepared.error);
+      const selected = await selectWorkspace(workscenes, input);
+      if ("error" in selected) return fail(selected.error);
       emitPostTurnControlIntent({
         kind: "set_workdir",
         sceneId: scene.sceneId,
-        workdir: prepared.workdir,
+        workspace: selected.workspace,
       });
-      return ok(
-        appendWorkdirWarning(
-          `已请求将当前工作场景目录更换为：${prepared.workdir}。本轮结束后会按新目录重新进入。`,
-          prepared.workdirWarning,
-        ),
-      );
+      return ok("已请求更换当前工作场景的设备工作区。本轮结束后会按新绑定重新进入。");
     },
   };
 }
 
 /**
- * workscene_clear_workdir_current（power-only）—— 显式解除当前场景工作目录绑定。
+ * workscene_clear_workdir_current（power-only）—— 显式解除当前场景设备工作区绑定。
  */
 export function createWorksceneClearWorkdirCurrentTool(
   scene: WorksceneCurrentToolContext,
@@ -475,7 +518,7 @@ export function createWorksceneClearWorkdirCurrentTool(
   return {
     name: "workscene_clear_workdir_current",
     description:
-      "解除当前工作场景的工作目录绑定。变更在本轮结束后由 CLI 释放当前场景并以无目录工具面重新进入。",
+      "解除当前工作场景的设备工作区绑定。变更在本轮结束后由 CLI 释放当前场景并以无工作区工具面重新进入。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -492,9 +535,9 @@ export function createWorksceneClearWorkdirCurrentTool(
       emitPostTurnControlIntent({
         kind: "set_workdir",
         sceneId: scene.sceneId,
-        workdir: null,
+        workspace: null,
       });
-      return ok("已请求解除当前工作场景目录绑定。本轮结束后会以无目录工具面重新进入。");
+      return ok("已请求解除当前工作场景工作区绑定。本轮结束后会以无工作区工具面重新进入。");
     },
   };
 }

@@ -139,7 +139,7 @@ function formatPostTurnControlIntent(
     case "exit":
       return "退出工作场景";
     case "set_workdir":
-      return intent.workdir ? "更换工作场景目录" : "解除工作场景目录绑定";
+      return intent.workspace ? "更换工作场景工作区" : "解除工作场景工作区绑定";
     default:
       return "工作场景控制";
   }
@@ -929,22 +929,26 @@ export async function startRepl(): Promise<void> {
       }
       const changed = await controller.setCurrentSceneWorkdirAndReenter(
         intent.sceneId,
-        intent.workdir,
+        intent.workspace,
       );
       if (changed.kind === "reentered") {
         const mode = changed.active.mode;
         const sceneName =
           mode.kind === "workscene" ? mode.sceneName : changed.scene.name;
-        const workdirText = intent.workdir
-          ? `新目录：${changed.scene.workdir ?? intent.workdir}`
-          : "已解除目录绑定";
+        const workspaceText = intent.workspace
+          ? `新工作区：${
+              changed.scene.workspace?.workspaceName ??
+              changed.scene.workspace?.deviceName ??
+              "已授权工作区"
+            }`
+          : "已解除工作区绑定";
         cliWriter.line(
           chalk.dim(
-            `\n  ${sep}\n  已按更新后的工作场景配置重新进入 ${chalk.cyan(sceneName)}\n  ${workdirText}\n  ${sep}\n`,
+            `\n  ${sep}\n  已按更新后的工作场景配置重新进入 ${chalk.cyan(sceneName)}\n  ${workspaceText}\n  ${sep}\n`,
           ),
         );
-        if (changed.scene.workdirWarning) {
-          cliWriter.line(chalk.dim(`  提示：${changed.scene.workdirWarning}\n`));
+        if (changed.scene.workspaceWarning) {
+          cliWriter.line(chalk.dim(`  提示：${changed.scene.workspaceWarning}\n`));
         }
         await syncCurrentTaskListView();
         if (changed.advancement) {
@@ -1536,8 +1540,13 @@ export async function startRepl(): Promise<void> {
                       listScenes: () => worksceneFacade.list(),
                       complete: (prompt, signal) =>
                         managementFacade.llmComplete(prompt, "main", signal),
-                      create: (sceneName, workdir) =>
-                        worksceneFacade.create(sceneName, workdir),
+                      authorizeLocalWorkspace: (displayName, absolutePath) =>
+                        worksceneFacade.authorizeLocalWorkspace(
+                          displayName,
+                          absolutePath,
+                        ),
+                      create: (sceneName, workspace) =>
+                        worksceneFacade.create(sceneName, workspace),
                       confirm: async (proposal, signal) => {
                         const choice = await worksceneCreateSelectionService.choose(
                           createWorksceneCreateSelectionRequest(proposal),

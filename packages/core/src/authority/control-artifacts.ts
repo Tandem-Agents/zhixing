@@ -9,6 +9,7 @@ import {
   protocolDigest,
   validateContentAssetRefs,
   validateConversationInvocation,
+  validateExplicitEnvironmentSelection,
   validateNonEmptyUserTurnInput,
 } from "../protocol/index.js";
 import { assertDeliveryItemId } from "../delivery/validation.js";
@@ -294,6 +295,7 @@ function assertAdmittedControlRequest(value: unknown): asserts value is ControlR
     [
       "attachments",
       "conversationId",
+      "environment",
       "ingress",
       "input",
       "invocation",
@@ -318,6 +320,14 @@ function assertAdmittedControlRequest(value: unknown): asserts value is ControlR
     throw new TypeError("Control input source is invalid");
   }
   validateNonEmptyUserTurnInput(value.input);
+  if (value.environment !== undefined) {
+    if (value.ingress.source !== "first-party") {
+      throw new TypeError(
+        "Only first-party input may carry an explicit environment selection",
+      );
+    }
+    validateExplicitEnvironmentSelection(value.environment);
+  }
   if (value.attachments !== undefined) {
     validateContentAssetRefs(value.attachments, {
       label: "Control input attachments",

@@ -31,6 +31,7 @@ export interface ConversationExecutorLedgerOptions {
     | "executorCapabilities"
     | "permissionSnapshotFor"
     | "executorResourceGovernor"
+    | "preflightLocalConversationEnvironment"
     | "validateLocalConversationManifest"
   >;
   readonly clock?: () => string;
@@ -40,7 +41,7 @@ export interface ConversationExecutorLedgerOptions {
   readonly runtimeBindingGuard?: (input: {
     readonly assignmentId: string;
     readonly manifest: ExecutionManifest<"conversation">;
-  }) => AuthorityError | undefined;
+  }) => AuthorityError | undefined | Promise<AuthorityError | undefined>;
   readonly maxPendingInteractions?: number;
   readonly assignmentRecordV2Writes?: boolean;
   readonly dataPlaneTickets?: ConstructorParameters<
@@ -66,8 +67,14 @@ export function createConversationExecutorLedger(
       options.authority.executorCapabilities.snapshotFor(executorId),
     permissionSnapshotFor: (digest: string): TrustRuleSnapshot | undefined =>
       options.authority.permissionSnapshotFor(digest),
-    runtimeBindingGuard: options.runtimeBindingGuard ?? (({ manifest }) =>
-      options.authority.validateLocalConversationManifest(manifest)),
+    runtimeBindingGuard: options.runtimeBindingGuard ?? (async ({ manifest }) => {
+      const compatibility =
+        options.authority.validateLocalConversationManifest(manifest);
+      if (compatibility) return compatibility;
+      return (await options.authority.preflightLocalConversationEnvironment(
+        manifest,
+      )).error;
+    }),
     clock,
     ...(options.dataPlaneTickets === undefined
       ? {}

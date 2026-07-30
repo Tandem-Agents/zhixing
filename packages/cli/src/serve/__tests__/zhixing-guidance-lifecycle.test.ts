@@ -23,7 +23,7 @@ describe("createZhixingGuidanceLifecycle", () => {
       readGuidanceFile: deps.readGuidanceFile,
       reportWarning: expect.any(Function),
     });
-    expect(deps.getWorkscene).not.toHaveBeenCalled();
+    expect(deps.resolveWorksceneRoot).not.toHaveBeenCalled();
   });
 
   it("work runtime 使用绝对 workdir 加载场景层", async () => {
@@ -36,7 +36,7 @@ describe("createZhixingGuidanceLifecycle", () => {
 
     await createZhixingGuidanceLifecycle(deps).onWindowOpen?.(ctx);
 
-    expect(deps.getWorkscene).toHaveBeenCalledWith("scene-1");
+    expect(deps.resolveWorksceneRoot).toHaveBeenCalledWith("scene-1");
     expect(deps.loadLayeredGuidance).toHaveBeenCalledWith({
       roots: { homeDir: "/home", workdir },
       readGuidanceFile: deps.readGuidanceFile,
@@ -104,7 +104,7 @@ describe("createZhixingGuidanceLifecycle", () => {
     const guidancePath = path.join("/home", "ZHIXING.md");
     const deps = {
       getZhixingHome: () => "/home",
-      getWorkscene: vi.fn(async () => null),
+      resolveWorksceneRoot: vi.fn(async () => null),
       readGuidanceFile: vi.fn(async ({ path: filePath, reportWarning }) => {
         reportWarning({
           message: `EACCES: permission denied, open '${filePath}'`,
@@ -163,7 +163,7 @@ describe("createZhixingGuidanceLifecycle", () => {
 
     expect(ctx.prefixes).toEqual([null]);
     expect(deps.loadLayeredGuidance).not.toHaveBeenCalled();
-    expect(deps.getWorkscene).not.toHaveBeenCalled();
+    expect(deps.resolveWorksceneRoot).not.toHaveBeenCalled();
   });
 });
 
@@ -175,9 +175,9 @@ function makeDeps(opts: {
 }) {
   return {
     getZhixingHome: () => "/home",
-    getWorkscene: vi.fn(async () => {
+    resolveWorksceneRoot: vi.fn(async () => {
       if (opts.getWorksceneError) throw opts.getWorksceneError;
-      return opts.scene ?? null;
+      return opts.scene?.workdir ?? null;
     }),
     readGuidanceFile: vi.fn(async () => null),
     loadLayeredGuidance: vi.fn(async () => {

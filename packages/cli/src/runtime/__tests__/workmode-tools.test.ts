@@ -15,8 +15,8 @@ import {
   getWorkSceneMemoryDir,
   getWorksceneToolBoundaries,
   type AgentEventMap,
-  type WorkScene,
 } from "@zhixing/core";
+import type { WorksceneDto } from "@zhixing/core/contracts";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createTempDir } from "@zhixing/test-utils";
 import {
@@ -41,6 +41,8 @@ function makeDirectory(
     remove: vi.fn().mockResolvedValue(true),
     rename: vi.fn(),
     setWorkdir: vi.fn(),
+    workspaceCatalog: vi.fn().mockResolvedValue([]),
+    selectWorkspace: vi.fn().mockResolvedValue(null),
     ...overrides,
   } as unknown as WorksceneToolDirectory;
 }
@@ -177,43 +179,61 @@ describe("workscene current tools", () => {
     );
 
     expect(result.isError).toBeFalsy();
-    expect(rename).toHaveBeenCalledWith("scene-1", "新场景名");
+    expect(rename).toHaveBeenCalledWith(
+      "scene-1",
+      "新场景名",
+      expect.stringMatching(/^workscene-rename-current:/),
+    );
     expect(emitted).toEqual([]);
   });
 
-  it("set_workdir_current 校验目录后 emit set_workdir，不直接落盘", async () => {
-    const workdir = await createTempDir("workscene-current-workdir");
-    const tool = createWorksceneSetWorkdirCurrentTool(scene);
+  it("set_workdir_current 按设备和工作区名称选择后 emit 引用，不传路径", async () => {
+    const directory = makeDirectory({
+      selectWorkspace: vi.fn().mockResolvedValue({
+        deviceId: "device-a",
+        bindingRef: "binding-a",
+      }),
+    });
+    const tool = createWorksceneSetWorkdirCurrentTool(scene, directory);
     expect(tool.requiresExplicitConfirmation).toBe(true);
     expect(tool.boundaries).toEqual(
       getWorksceneToolBoundaries("workscene_set_workdir_current"),
     );
 
     const { result, emitted } = await callInRun(() =>
-      tool.call({ workdir }, CTX),
+      tool.call({ deviceName: "本机", workspaceName: "项目" }, CTX),
     );
 
     expect(result.isError).toBeFalsy();
-    expect(emitted).toEqual([{ kind: "set_workdir", sceneId: "scene-1", workdir }]);
+    expect(emitted).toEqual([
+      {
+        kind: "set_workdir",
+        sceneId: "scene-1",
+        workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+      },
+    ]);
   });
 
-  it("set_workdir_current 缺目录或相对路径 → isError 且不 emit", async () => {
-    const tool = createWorksceneSetWorkdirCurrentTool(scene);
+  it("set_workdir_current 缺名称或传路径 → isError 且不 emit", async () => {
+    const directory = makeDirectory();
+    const tool = createWorksceneSetWorkdirCurrentTool(scene, directory);
     const missing = await callInRun(() => tool.call({}, CTX));
     expect(missing.result.isError).toBe(true);
     expect(missing.emitted).toEqual([]);
 
-    const relative = await callInRun(() =>
-      tool.call({ workdir: "relative/path" }, CTX),
+    const rawPath = await callInRun(() =>
+      tool.call({ workdir: "C:\\project" }, CTX),
     );
-    expect(relative.result.isError).toBe(true);
-    expect(relative.emitted).toEqual([]);
+    expect(rawPath.result.isError).toBe(true);
+    expect(rawPath.emitted).toEqual([]);
+    expect(directory.selectWorkspace).not.toHaveBeenCalled();
   });
 
   it("set_workdir_current 无 post-turn capability → isError 且不 emit", async () => {
-    const tool = createWorksceneSetWorkdirCurrentTool(scene);
+    const directory = makeDirectory();
+    const tool = createWorksceneSetWorkdirCurrentTool(scene, directory);
     const { result, emitted } = await callInRun(
-      () => tool.call({ workdir: "C:\\project" }, CTX),
+      () => tool.call({ deviceName: "本机", workspaceName: "项目" }, CTX),
       { postTurnControl: false },
     );
     expect(result.isError).toBe(true);
@@ -231,7 +251,7 @@ describe("workscene current tools", () => {
 
     expect(result.isError).toBeFalsy();
     expect(emitted).toEqual([
-      { kind: "set_workdir", sceneId: "scene-1", workdir: null },
+      { kind: "set_workdir", sceneId: "scene-1", workspace: null },
     ]);
   });
 });
@@ -251,13 +271,24 @@ describe("workscene_change_approve", () => {
     const setWorkdir = vi.fn().mockResolvedValue({
       scene: {
         id: "x",
+        revision: 2,
         name: "新名称",
-        workdir: "/tmp/project",
+        workspace: { deviceId: "device-a", bindingRef: "binding-a" },
         createdAt: "",
         lastActiveAt: "",
       },
     });
-    const directory = makeDirectory({ create, remove, rename, setWorkdir });
+    const selectWorkspace = vi.fn().mockResolvedValue({
+      deviceId: "device-a",
+      bindingRef: "binding-a",
+    });
+    const directory = makeDirectory({
+      create,
+      remove,
+      rename,
+      setWorkdir,
+      selectWorkspace,
+    });
     const tool = createWorksceneChangeApproveTool(directory);
     expect(tool.needsPermission).toBe(true);
     expect(tool.requiresExplicitConfirmation).toBe(true);
@@ -269,23 +300,46 @@ describe("workscene_change_approve", () => {
     );
 
     await tool.call({ action: "add", name: "新场景" }, CTX);
-    expect(create).toHaveBeenCalledWith({ name: "新场景", workdir: undefined });
+    expect(create).toHaveBeenCalledWith({
+      name: "新场景",
+      requestId: expect.stringMatching(/^workscene-create:/),
+    });
 
     await tool.call({ action: "remove", sceneId: "x" }, CTX);
-    expect(remove).toHaveBeenCalledWith("x");
+    expect(remove).toHaveBeenCalledWith(
+      "x",
+      expect.stringMatching(/^workscene-delete:/),
+    );
 
     await tool.call({ action: "rename", sceneId: "x", name: "新名称" }, CTX);
-    expect(rename).toHaveBeenCalledWith("x", "新名称");
+    expect(rename).toHaveBeenCalledWith(
+      "x",
+      "新名称",
+      expect.stringMatching(/^workscene-rename:/),
+    );
 
     await tool.call({
       action: "set_workdir",
       sceneId: "x",
-      workdir: "/tmp/project",
+      deviceName: "本机",
+      workspaceName: "项目",
     }, CTX);
-    expect(setWorkdir).toHaveBeenCalledWith("x", "/tmp/project");
+    expect(selectWorkspace).toHaveBeenCalledWith({
+      deviceName: "本机",
+      workspaceName: "项目",
+    });
+    expect(setWorkdir).toHaveBeenCalledWith(
+      "x",
+      { deviceId: "device-a", bindingRef: "binding-a" },
+      expect.stringMatching(/^workscene-set-workdir:/),
+    );
 
     await tool.call({ action: "clear_workdir", sceneId: "x" }, CTX);
-    expect(setWorkdir).toHaveBeenCalledWith("x", null);
+    expect(setWorkdir).toHaveBeenCalledWith(
+      "x",
+      null,
+      expect.stringMatching(/^workscene-clear-workdir:/),
+    );
   });
 
   it("领域服务守卫失败 → 工具返回 isError、不抛", async () => {
@@ -302,7 +356,7 @@ describe("workscene_change_approve", () => {
     expect(r.content).toContain("无法删除当前活跃的工作场景");
   });
 
-  it("缺必填参数 → isError,不调领域服务;set_workdir 缺 workdir 不解绑", async () => {
+  it("缺必填参数 → isError,不调领域服务;set_workdir 缺工作区名不解绑", async () => {
     const directory = makeDirectory();
     const tool = createWorksceneChangeApproveTool(directory);
     const r = await tool.call({ action: "add" }, CTX);
@@ -316,18 +370,33 @@ describe("workscene_change_approve", () => {
 });
 
 describe("workscene_list", () => {
-  it("只读返回 workdir 管理元数据", async () => {
+  it("只读返回设备与工作区名称，不暴露路径或内部引用", async () => {
     const directory = makeDirectory({
       list: vi.fn().mockResolvedValue([
         {
           id: "scene-a",
+          revision: 1,
           name: "场景A",
-          workdir: "/tmp/project",
+          workspace: { deviceId: "device-a", bindingRef: "binding-a" },
           createdAt: "",
           lastActiveAt: "2026-07-07T00:00:00.000Z",
         },
-        { id: "scene-b", name: "场景B", createdAt: "", lastActiveAt: "" },
-      ] satisfies WorkScene[]),
+        {
+          id: "scene-b",
+          revision: 1,
+          name: "场景B",
+          createdAt: "",
+          lastActiveAt: "",
+        },
+      ] satisfies WorksceneDto[]),
+      workspaceCatalog: vi.fn().mockResolvedValue([
+        {
+          deviceId: "device-a",
+          deviceName: "本机",
+          bindingRef: "binding-a",
+          workspaceName: "项目",
+        },
+      ]),
     });
     const tool = createWorksceneListTool(directory);
     expect(tool.isReadOnly).toBe(true);
@@ -337,9 +406,10 @@ describe("workscene_list", () => {
     const r = await tool.call({}, CTX);
     expect(r.isError).toBeFalsy();
     expect(r.content).toContain("场景A (id: scene-a)");
-    expect(r.content).toContain("工作目录：/tmp/project");
+    expect(r.content).toContain("工作区：本机 / 项目");
+    expect(r.content).not.toContain("binding-a");
     expect(r.content).toContain("场景B (id: scene-b)");
-    expect(r.content).toContain("工作目录：未绑定");
+    expect(r.content).toContain("工作区：未绑定");
   });
 });
 

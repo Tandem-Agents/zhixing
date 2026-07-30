@@ -10,6 +10,7 @@ import type {
   DataPlaneTicket,
   Digest,
   DispatchConflictProof,
+  ExplicitEnvironmentSelection,
   IngressContext,
   JobRunState,
   JobUncertainClosure,
@@ -37,6 +38,7 @@ import {
   validateDataPlaneTicket,
   validateDispatchConflictProof,
   validateIngressContext,
+  validateExplicitEnvironmentSelection,
   validateNonEmptyUserTurnInput,
   validateSupersedeProof,
   type ConversationInteractionMirrorBatch,
@@ -64,6 +66,7 @@ export type ConversationRunJournalRecord =
       readonly attachments?: ContentAssetRef[];
       readonly ingress: IngressContext;
       readonly invocation: ConversationInvocation;
+      readonly environment?: ExplicitEnvironmentSelection;
       readonly queuedPosition: number;
     }
   | {
@@ -224,7 +227,7 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
       "runId",
       "t",
     ],
-    optional: ["attachments"],
+    optional: ["attachments", "environment"],
   },
   assigned: {
     required: [
@@ -364,6 +367,14 @@ export function validateConversationRunRecord(
         assertNonNegativeSafeInteger(value.queuedPosition, "Admitted queued position");
         validateIngressContext(value.ingress as IngressContext);
         validateConversationInvocation(value.invocation);
+        if (value.environment !== undefined) {
+          validateExplicitEnvironmentSelection(value.environment);
+          if ((value.ingress as IngressContext).kind !== "first-party") {
+            throw corruptRunJournal(
+              "Only first-party admission may carry an environment selection",
+            );
+          }
+        }
         if (isStoredReference(value.input)) {
           assertArtifactReference(value.input.ref, "Admitted input reference");
         } else {
