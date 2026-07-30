@@ -123,6 +123,7 @@
 
 | 编号 | 原疑点与已验证事实 | 排除依据与适用边界 | 证据与输入基线 | 重开条件 | 最终裁决 |
 | ---- | ------------------ | ------------------ | -------------- | -------- | -------- |
+| X24-01 | 疑点：`pendingChannelGrantDeliveries()` 遇到同 request 已有非 `channel-grant` answered 终态时 fail-stop，会阻断该 assignment 的 relay 继续消费；怀疑缺少“两种合法凭证竞争”的处理格。核验事实：当前生产 `issueDataPlaneTicket()` 仅由 conversation runtime 调用，job 无 `run-interact` 签发入口；现有规格又明确手动 job 才使用 surface ticket、定时 job 不签数据面票据且只走 channel grant。 | 当前 S6 生产边界内，两条凭证路径不可并存；该状态只能来自错误装配、越权签发或日志损坏，不是合法竞态。`JobOwnerRelay` 按 assignment 隔离，保留 fail-stop 可防止在矛盾耐久事实之上继续推进 cursor。适用边界限于尚未接入 job `run-interact` 生产签发点的交付物。 | `309118d32c0c`；`specification.md`“job 域时序”；`conversation-protocol-runtime.ts` 两个生产签发点；`job-assignment.ts` 的 `grantChannelChallenge()`、`pendingChannelGrantDeliveries()`；`job-owner-relay.ts` 的 assignment 级 `poll()`。 | 第 26 单元或其他变更新增 job `run-interact` 生产签发点，或手动/定时 job 的耐久触发来源、凭证互斥谓词、grant 签发/验收路径发生变化。重开时必须机械证明：手动 job 只可签/用 surface ticket，定时 job 只可签/用 channel grant；无法证明即转真实问题。 | 已排除 |
 
 ## 迟发现教训
 
