@@ -20,6 +20,7 @@ import type { StreamFrameProducer } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
+  JobRecoveryObligation,
 } from "@zhixing/executor";
 import {
   asError,
@@ -36,6 +37,8 @@ import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 
 const COMMIT_REJECTION_PREFIX = "Job commit rejected";
+const JOB_RECOVERY_PAGE_SIZE = 32;
+const JOB_RECOVERY_CONCURRENCY = 4;
 
 type JobEnvelope = Extract<DispatchEnvelope, { execution: "job" }>;
 
@@ -126,14 +129,22 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     ReturnType<typeof setTimeout>
   >();
   readonly #interactionRecoveryRetryMs = new Map<string, number>();
-  readonly #interactionRecoveryQueue = new BoundedTaskQueue(4);
+  readonly #recoveryQueue = new BoundedTaskQueue(JOB_RECOVERY_CONCURRENCY);
   readonly #activeInteractionBindings = new Map<
     string,
     ActiveJobInteractionBinding
   >();
   readonly #executionAborts = new Map<string, AbortController>();
-  readonly #abort = new AbortController();
+  readonly #executionStages = new Map<
+    string,
+    "waiting-owner" | "starting" | "started"
+  >();
+  readonly #recoveryAbort = new AbortController();
   readonly #interactions: DurableJobInteractionCoordinator;
+  #recoveryPump: Promise<void> | undefined;
+  #closing: Promise<void> | undefined;
+  #accepting = true;
+  #recoveryStopped = false;
   #closed = false;
 
   constructor(private readonly options: JobAssignmentWorkerOptions) {
@@ -146,21 +157,33 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   }
 
   accept(envelope: DispatchEnvelope): void {
-    if (this.#closed || envelope.execution !== "job") return;
+    if (!this.#accepting || envelope.execution !== "job") return;
+    this.#startExecution(envelope);
+  }
+
+  #startExecution(envelope: JobEnvelope): Promise<void> | undefined {
+    if (this.#closed) return;
     if (this.#running.has(envelope.assignmentId)) return;
     const executionAbort = new AbortController();
     this.#executionAborts.set(envelope.assignmentId, executionAbort);
+    this.#executionStages.set(envelope.assignmentId, "waiting-owner");
     const task = this.#execute(envelope, executionAbort.signal)
-      .catch((error) => this.options.onError?.(envelope.assignmentId, asError(error)))
+      .catch((error) => {
+        if (!this.#recoveryStopped || !executionAbort.signal.aborted) {
+          this.options.onError?.(envelope.assignmentId, asError(error));
+        }
+      })
       .finally(() => {
         this.#running.delete(envelope.assignmentId);
         if (this.#executionAborts.get(envelope.assignmentId) === executionAbort) {
           this.#executionAborts.delete(envelope.assignmentId);
         }
+        this.#executionStages.delete(envelope.assignmentId);
         this.#activeInteractionBindings.delete(envelope.assignmentId);
         this.#interactions.releaseAssignment(envelope.assignmentId);
       });
     this.#running.set(envelope.assignmentId, task);
+    return task;
   }
 
   abort(assignmentId: string, reason: Error): boolean {
@@ -230,56 +253,74 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   }
 
   async recover(): Promise<number> {
-    const [pending, cancellations, interactions] = await Promise.all([
-      this.options.ledger.recoverableJobAssignments(),
-      this.options.ledger.recoverableJobCancellations(),
-      this.options.ledger.recoverableJobInteractionAssignments(),
-    ]);
-    for (const envelope of pending) this.accept(envelope);
-    for (const envelope of cancellations) {
-      void this.#scheduleCancellation(envelope);
+    if (this.#recoveryPump) return 0;
+    if (this.#recoveryStopped || this.#closed) {
+      throw new Error("Job assignment recovery is stopped");
     }
-    for (const envelope of interactions) {
-      this.#scheduleInteractionRecovery(envelope);
-    }
-    return new Set(
-      [...pending, ...cancellations, ...interactions].map(
-        (envelope) => envelope.assignmentId,
-      ),
-    ).size;
+    const firstPage = await this.options.ledger.recoverableJobObligations({
+      limit: JOB_RECOVERY_PAGE_SIZE,
+    });
+    this.#recoveryPump = this.#pumpRecovery(firstPage)
+      .catch((error) => {
+        if (!this.#recoveryAbort.signal.aborted) {
+          this.options.onError?.("job-recovery", asError(error));
+          throw error;
+        }
+      })
+      .finally(() => {
+        this.#recoveryPump = undefined;
+      });
+    void this.#recoveryPump.catch(() => undefined);
+    return firstPage.entries.length;
   }
 
   async drain(): Promise<void> {
     await Promise.all([
+      ...(this.#recoveryPump ? [this.#recoveryPump] : []),
       ...this.#running.values(),
       ...this.#interactionRecoveries.values(),
     ]);
   }
 
   stopAccepting(): void {
-    this.#closed = true;
+    this.#accepting = false;
   }
 
   async close(): Promise<void> {
+    if (this.#closing) return this.#closing;
     this.stopAccepting();
-    this.#abort.abort(new Error("Job assignment worker stopped"));
-    for (const timer of this.#interactionRecoveryTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.#interactionRecoveryTimers.clear();
-    this.#interactionRecoveryRetryMs.clear();
-    this.#interactionRecoveryQueue.close(
-      new Error("Job assignment worker stopped"),
-    );
-    for (const controller of this.#executionAborts.values()) {
-      controller.abort(new Error("Job assignment worker stopped"));
-    }
-    await Promise.all(
-      [
-        ...this.#running.values(),
-        ...this.#interactionRecoveries.values(),
-      ].map((task) => task.catch(() => undefined)),
-    );
+    this.#closing = (async () => {
+      this.#recoveryStopped = true;
+      for (const [assignmentId, controller] of this.#executionAborts) {
+        if (this.#executionStages.get(assignmentId) === "waiting-owner") {
+          controller.abort(
+            new Error(
+              "Job assignment stopped before execution ownership was acquired",
+            ),
+          );
+        }
+      }
+      this.#recoveryAbort.abort(
+        new Error("Job assignment recovery was stopped"),
+      );
+      for (const timer of this.#interactionRecoveryTimers.values()) {
+        clearTimeout(timer);
+      }
+      this.#interactionRecoveryTimers.clear();
+      this.#interactionRecoveryRetryMs.clear();
+      this.#recoveryQueue.close(
+        new Error("Job assignment recovery was stopped"),
+      );
+      await Promise.all(
+        [
+          ...(this.#recoveryPump ? [this.#recoveryPump] : []),
+          ...this.#running.values(),
+          ...this.#interactionRecoveries.values(),
+        ].map((task) => task.catch(() => undefined)),
+      );
+      this.#closed = true;
+    })();
+    return this.#closing;
   }
 
   async #execute(envelope: JobEnvelope, abortSignal: AbortSignal): Promise<void> {
@@ -290,6 +331,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       ledger: this.options.ledger,
       owner,
     });
+    this.#executionStages.set(assignmentId, "starting");
     const started = await this.options.ledger.start(assignmentId);
     if (!started.started) {
       const phase =
@@ -306,11 +348,12 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         ledger: this.options.ledger,
         owner,
         context,
-        signal: abortSignal,
+        signal: this.#recoveryAbort.signal,
         rejectionPrefix: COMMIT_REJECTION_PREFIX,
       });
       return;
     }
+    this.#executionStages.set(assignmentId, "started");
     try {
       await owner.reportStarted(assignmentId, context);
     } catch (error) {
@@ -436,7 +479,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       } catch (error) {
         executionError = asError(error);
       }
-      if (stream) await this.#markStreamTerminal(stream);
+      if (stream) await this.#markStreamTerminal(stream, abortSignal);
       await this.options.ledger.failExecution(assignmentId, {
         reason: executionError.message,
         usageFinal,
@@ -474,7 +517,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       streamFinal = await stream.final(streamMeta, abortSignal);
     } catch (error) {
       const failure = asError(error);
-      await this.#markStreamTerminal(stream);
+      await this.#markStreamTerminal(stream, abortSignal);
       await this.options.ledger.failExecution(assignmentId, {
         reason: failure.message,
         usageFinal,
@@ -501,13 +544,58 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       owner,
       ledger: this.options.ledger,
       context,
-      signal: this.#abort.signal,
+      signal: this.#recoveryAbort.signal,
       rejectionPrefix: COMMIT_REJECTION_PREFIX,
     });
   }
 
+  async #pumpRecovery(
+    firstPage: Awaited<
+      ReturnType<ConversationAssignmentLedger["recoverableJobObligations"]>
+    >,
+  ): Promise<void> {
+    let page = firstPage;
+    while (!this.#recoveryAbort.signal.aborted) {
+      const tasks = page.entries.map((obligation) =>
+        this.#recoverObligation(obligation).catch((error) => {
+          if (!this.#recoveryAbort.signal.aborted) {
+            this.options.onError?.(
+              obligation.envelope.assignmentId,
+              asError(error),
+            );
+          }
+        }),
+      );
+      await Promise.all(tasks);
+      if (!page.continuation || this.#recoveryAbort.signal.aborted) return;
+      page = await this.options.ledger.recoverableJobObligations({
+        limit: JOB_RECOVERY_PAGE_SIZE,
+        continuation: page.continuation,
+      });
+    }
+  }
+
+  async #recoverObligation(
+    obligation: JobRecoveryObligation,
+  ): Promise<void> {
+    const { envelope } = obligation;
+    if (obligation.cancellation) {
+      await this.#scheduleCancellation(envelope);
+      return;
+    }
+    if (obligation.interaction) {
+      this.#scheduleInteractionRecovery(envelope);
+      await this.#interactionRecoveries.get(envelope.assignmentId);
+    }
+    if (obligation.execution && !this.#recoveryAbort.signal.aborted) {
+      await this.#recoveryQueue.run(async () => {
+        await this.#startExecution(envelope);
+      });
+    }
+  }
+
   #scheduleInteractionRecovery(envelope: JobEnvelope): void {
-    if (this.#closed) return;
+    if (this.#recoveryStopped || this.#closed) return;
     const deferred = this.#interactionRecoveryTimers.get(envelope.assignmentId);
     if (deferred) {
       clearTimeout(deferred);
@@ -515,17 +603,19 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     }
     this.#interactionRecoveryRequested.add(envelope.assignmentId);
     if (this.#interactionRecoveries.has(envelope.assignmentId)) return;
-    const task = this.#interactionRecoveryQueue.run(async () => {
+    const task = this.#recoveryQueue.run(async () => {
       do {
         this.#interactionRecoveryRequested.delete(envelope.assignmentId);
         await this.#recoverInteractionObligation(envelope);
       } while (
-        !this.#closed &&
+        !this.#recoveryStopped &&
         this.#interactionRecoveryRequested.has(envelope.assignmentId)
       );
     })
       .catch((error) => {
-        this.options.onError?.(envelope.assignmentId, asError(error));
+        if (!this.#recoveryAbort.signal.aborted) {
+          this.options.onError?.(envelope.assignmentId, asError(error));
+        }
         throw error;
       })
       .finally(() => {
@@ -554,7 +644,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     const context = jobAssignmentContext(envelope);
     const owner = await this.options.submissionFor(
       envelope,
-      this.#abort.signal,
+      this.#recoveryAbort.signal,
     );
     const submission = new this.options.InProcessAssignmentSubmission({
       ledger: this.options.ledger,
@@ -575,10 +665,10 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         context,
         stream,
         streamMeta: {},
-        signal: this.#abort.signal,
+        signal: this.#recoveryAbort.signal,
         broker: undefined,
       };
-    while (!this.#abort.signal.aborted) {
+    while (!this.#recoveryAbort.signal.aborted) {
       let recovery: Awaited<
         ReturnType<ConversationAssignmentLedger["recoverInteractions"]>
       >;
@@ -672,7 +762,11 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   }
 
   #deferInteractionRecovery(envelope: JobEnvelope, delayMs: number): void {
-    if (this.#closed || this.#interactionRecoveryTimers.has(envelope.assignmentId)) {
+    if (
+      this.#recoveryStopped ||
+      this.#closed ||
+      this.#interactionRecoveryTimers.has(envelope.assignmentId)
+    ) {
       return;
     }
     const timer = setTimeout(() => {
@@ -745,7 +839,12 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
             assignmentId,
             interactionBinding,
           );
-          await this.#wakeInteractionRecovery(assignmentId);
+          await this.#reconcileInteractionObligations({
+            assignmentId,
+            submission,
+            context,
+            binding: interactionBinding,
+          });
         } else {
           await submission.flushInteractionMirrors(assignmentId, context);
         }
@@ -787,11 +886,14 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     return current;
   }
 
-  async #markStreamTerminal(stream: JobRunStream): Promise<void> {
+  async #markStreamTerminal(
+    stream: JobRunStream,
+    signal: AbortSignal = this.#recoveryAbort.signal,
+  ): Promise<void> {
     if (!stream.markTerminal) return;
     await retryDurableObligation(
       () => stream.markTerminal!().then(() => undefined),
-      this.#abort.signal,
+      signal,
     );
   }
 
@@ -802,7 +904,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     if (binding) {
       await retryDurableObligation(
         () => this.#interactions.drainAssignment(binding),
-        binding.signal,
+        this.#recoveryAbort.signal,
       );
     }
     if (stream) await this.#markStreamTerminal(stream);

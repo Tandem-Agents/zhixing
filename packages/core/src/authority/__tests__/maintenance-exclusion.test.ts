@@ -285,6 +285,44 @@ describe("maintenance admission inside exclusion regions", () => {
   );
 
   it(
+    "does not wait to retry log maintenance while an outer facility queue is held",
+    async () => {
+      const root = await createTempDir("maintenance-exclusion-outer-queue");
+      const logRoot = path.join(root, "authority-log");
+      await mkdir(logRoot, { recursive: true });
+      await writeFile(path.join(logRoot, "authority.log"), Buffer.alloc(0));
+      let acquires = 0;
+      const log = new FileAuthorityCommitLog(
+        logRoot,
+        new FileArtifactStore(path.join(root, "artifacts")),
+        {
+          clock: () => "2026-07-27T00:00:00.000Z",
+          storageMaintenance: {
+            acquire: async (): Promise<DeviceCapacityAdmission> => {
+              acquires += 1;
+              return {
+                kind: "backpressured",
+                blockedBy: "slots",
+                retryAfterMs: 1,
+              };
+            },
+            snapshot: () => ({ queued: {}, inFlight: {} }),
+          },
+        },
+      );
+      const outer = new SerialTaskQueue();
+
+      await expect(
+        outer.run(() =>
+          log.append([{ stream: "control", body: { t: "probe" } }]),
+        ),
+      ).rejects.toThrow(/backpressured/);
+      expect(acquires).toBe(1);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
     "issues zero-wait admissions from the artifact store exclusive section",
     async () => {
       const root = await createTempDir("maintenance-exclusion-store");

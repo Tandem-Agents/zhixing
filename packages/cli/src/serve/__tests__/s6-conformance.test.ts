@@ -102,10 +102,8 @@ import type { JobInteractionAnswerPort } from "../durable-job-interactions.js";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import { ExecutorDataPlaneRuntime } from "../executor-data-plane-runtime.js";
 import { loadOrCreateDeviceKey } from "../mesh-device-key.js";
-import {
-  JobAssignmentWorker,
-  type JobRuntimePort,
-} from "../job-assignment-worker.js";
+import type { JobRuntimePort } from "../job-assignment-worker.js";
+import { ExecutorJobOwnerAssembly } from "../executor-job-owner.js";
 import {
   JOB_INTERACTION_SERVICE,
   JobInteractionMeshClient,
@@ -1382,7 +1380,7 @@ async function runJobScenario(
   let mesh: MeshRuntimeAssembly | undefined;
   let ackInterrupted = false;
   const workerErrors: Error[] = [];
-  const worker = new JobAssignmentWorker({
+  const jobOwnerAssembly = new ExecutorJobOwnerAssembly({
     ledger,
     runtime: jobRuntime,
     submissionFor: () => ownerSubmission,
@@ -1394,7 +1392,9 @@ async function runJobScenario(
     createStream: (stream) => dataPlane.createStream(stream),
     onError: (_assignmentId, error) => workerErrors.push(error),
   });
-  let answers: JobInteractionAnswerPort = worker;
+  await jobOwnerAssembly.start();
+  const jobOwner = jobOwnerAssembly.owner;
+  let answers: JobInteractionAnswerPort = jobOwner;
   if (topology === "remote") {
     const ownerHandlers = new Map<string, ServiceHandler>();
     const executorHandlers = new Map<string, ServiceHandler>();
@@ -1453,8 +1453,9 @@ async function runJobScenario(
         localDeviceId: authority.deviceId,
         artifactAuthorizationFor: authorization,
         authorizePeer: (deviceId) => deviceId === authority.deviceId,
-        onDispatchAccepted: (envelope) => worker.accept(envelope),
-        onCancelAccepted: (assignmentId) => worker.cancelAccepted(assignmentId),
+        onDispatchAccepted: (envelope) => jobOwner.accept(envelope),
+        onCancelAccepted: (assignmentId) =>
+          jobOwner.cancelAccepted(assignmentId),
         clock: () => Date.now(),
       }),
     );
@@ -1492,7 +1493,7 @@ async function runJobScenario(
     executorHandlers.set(
       JOB_INTERACTION_SERVICE,
       createJobInteractionServiceHandler({
-        answers: worker,
+        answers: jobOwner,
         verifier: authority.verifier,
         authorizeOwner: (connection) =>
           connection.peer.deviceId === authority.deviceId,
@@ -1544,9 +1545,9 @@ async function runJobScenario(
     }),
     ...(topology === "local"
       ? {
-          onDispatchAccepted: (envelope) => worker.accept(envelope),
+          onDispatchAccepted: (envelope) => jobOwner.accept(envelope),
           onCancelAccepted: (assignmentId: string) =>
-            worker.cancelAccepted(assignmentId),
+            jobOwner.cancelAccepted(assignmentId),
         }
       : {}),
     cancellationSubmission: {
@@ -1690,7 +1691,7 @@ async function runJobScenario(
     expect(sendChallenge).not.toHaveBeenCalled();
   }
 
-  await worker.drain();
+  await jobOwnerAssembly.drain();
   await expect(
     ledger.interactionStreamProjectionEnabled(unsigned.assignmentId),
   ).resolves.toBe(true);
@@ -1736,7 +1737,7 @@ async function runJobScenario(
 
   await relay.close();
   await composition.close();
-  await worker.close();
+  await jobOwnerAssembly.close();
   await dataPlane.close();
   authority.stopStorageMaintenance();
   return { statuses, deliveries };

@@ -44,6 +44,7 @@ import {
   ensureDurableDirectory,
   syncDirectory,
 } from "@zhixing/core/persistence";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 
 export const DEFAULT_ASSIGNMENT_STREAM_SPOOL_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_ASSIGNMENT_STREAM_RECLAIM_DELAY_MS =
@@ -61,6 +62,7 @@ export interface AssignmentStreamSpoolOptions {
   readonly capacityBytes?: number;
   readonly clock?: () => IsoTime;
   readonly reclaimDelayMs?: number;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly removeRetiredArtifact?: (
     store: FileArtifactStore,
     ref: ArtifactRef,
@@ -461,6 +463,7 @@ export class AssignmentStreamSpool {
   readonly #capacityBytes: number;
   readonly #clock: () => IsoTime;
   readonly #reclaimDelayMs: number;
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #removeRetiredArtifact: NonNullable<
     AssignmentStreamSpoolOptions["removeRetiredArtifact"]
   >;
@@ -479,6 +482,7 @@ export class AssignmentStreamSpool {
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#reclaimDelayMs =
       options.reclaimDelayMs ?? DEFAULT_ASSIGNMENT_STREAM_RECLAIM_DELAY_MS;
+    this.#storageMaintenance = options.storageMaintenance;
     this.#removeRetiredArtifact =
       options.removeRetiredArtifact ??
       ((store, ref) => rm(store.pathFor(ref), { force: true }));
@@ -1061,7 +1065,7 @@ export class AssignmentStreamSpool {
     assertPositiveInteger(limit, "Assignment identity page limit");
     const assignmentsRoot = path.join(this.#rootDir, "assignments");
     const step = runPhysicalStep ?? ((operation) => operation());
-    return step(async () => {
+    const directories = await step(async () => {
       if (!this.#assignmentScan) {
         try {
           this.#assignmentScan = await opendir(assignmentsRoot);
@@ -1070,7 +1074,10 @@ export class AssignmentStreamSpool {
           throw error;
         }
       }
-      const assignmentIds: string[] = [];
+      const result: Array<{
+        readonly directory: string;
+        readonly directoryKey: string;
+      }> = [];
       let inspected = 0;
       while (inspected < limit) {
         const entry = await this.#assignmentScan.read();
@@ -1081,20 +1088,32 @@ export class AssignmentStreamSpool {
         }
         inspected += 1;
         if (!entry.isDirectory()) continue;
-        const assignmentId = await this.#readAssignmentIdentity(
-          path.join(assignmentsRoot, entry.name),
-          entry.name,
-        );
-        assignmentIds.push(assignmentId);
+        result.push({
+          directory: path.join(assignmentsRoot, entry.name),
+          directoryKey: entry.name,
+        });
       }
-      return assignmentIds;
+      return result;
     });
+    const assignmentIds: string[] = [];
+    for (const { directory, directoryKey } of directories) {
+      assignmentIds.push(
+        await this.#readAssignmentIdentity(directory, directoryKey, step),
+      );
+    }
+    return assignmentIds;
   }
 
   async closeAssignmentScan(): Promise<void> {
     const scan = this.#assignmentScan;
     this.#assignmentScan = undefined;
     await scan?.close().catch(() => undefined);
+  }
+
+  stopStorageMaintenance(): void {
+    for (const handle of this.#handles.values()) {
+      handle.log.stopStorageMaintenance();
+    }
   }
 
   /**
@@ -1432,6 +1451,7 @@ export class AssignmentStreamSpool {
       frames,
       log: new FileAuthorityCommitLog(path.join(directory, "index"), frames, {
         clock: this.#clock,
+        storageMaintenance: this.#storageMaintenance,
       }),
       queue: new SerialTaskQueue(),
       waiters: new Set(),
@@ -1608,36 +1628,54 @@ export class AssignmentStreamSpool {
   async #readAssignmentIdentity(
     directory: string,
     directoryKey: string,
+    runPhysicalStep: PhysicalStorageStepRunner,
   ): Promise<string> {
     const target = path.join(directory, "identity.json");
     let value: unknown;
     try {
-      const file = await open(target, "r");
-      try {
-        value = JSON.parse(await file.readFile({ encoding: "utf8" }));
-      } finally {
-        await file.close();
-      }
+      value = await runPhysicalStep(async () => {
+        const file = await open(target, "r");
+        try {
+          return JSON.parse(await file.readFile({ encoding: "utf8" }));
+        } finally {
+          await file.close();
+        }
+      });
     } catch (error) {
       if (!isNodeError(error, "ENOENT")) throw error;
       const frames = new FileArtifactStore(path.join(directory, "frames"));
       const log = new FileAuthorityCommitLog(
         path.join(directory, "index"),
         frames,
-        { clock: this.#clock },
+        {
+          clock: this.#clock,
+          storageMaintenance: this.#storageMaintenance,
+        },
       );
-      const origin = await log.originCheckpoint();
-      const first = await log.readTail<SpoolRecord>(origin, 1);
-      const opened = first.commits
-        .flatMap((commit) => commit.entries)
-        .filter((entry) => entry.stream === STREAM)
-        .map(({ body }) => validateSpoolRecord(body))
-        .find((body) => body.t === "opened");
-      if (!opened) {
-        throw corruptSpool("Stream spool has no durable assignment identity");
+      try {
+        // 先让日志在自己的锁内完成受治理的格式/身份恢复，再单独为有界
+        // tail 读取准入；不得让目录发现 permit 横跨日志锁或嵌套日志 permit。
+        const origin = await log.originCheckpoint();
+        const first = await log.readTail<SpoolRecord>(
+          origin,
+          1,
+          runPhysicalStep,
+        );
+        const opened = first.commits
+          .flatMap((commit) => commit.entries)
+          .filter((entry) => entry.stream === STREAM)
+          .map(({ body }) => validateSpoolRecord(body))
+          .find((body) => body.t === "opened");
+        if (!opened) {
+          throw corruptSpool("Stream spool has no durable assignment identity");
+        }
+        value = { v: IDENTITY_VERSION, assignmentId: opened.assignmentId };
+        await runPhysicalStep(() =>
+          this.#writeAssignmentIdentity(opened.assignmentId, directory),
+        );
+      } finally {
+        log.stopStorageMaintenance();
       }
-      value = { v: IDENTITY_VERSION, assignmentId: opened.assignmentId };
-      await this.#writeAssignmentIdentity(opened.assignmentId, directory);
     }
     if (
       !isRecord(value) ||

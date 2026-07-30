@@ -26,6 +26,7 @@ import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
   currentMaintenanceAbortSignal,
+  isHoldingMaintenanceExclusion,
   runInMaintenanceContext,
   runStorageMaintenanceStep,
   maintenanceRetryDelayMs,
@@ -1647,7 +1648,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       } catch (error) {
         // 可重试判据由 resources 层单点给出,这里不再内联。
         const retryAfterMs = maintenanceRetryDelayMs(error);
-        if (retryAfterMs === undefined || Date.now() >= maintenanceDeadline) {
+        // 内层日志锁已释放不代表调用栈已离开全部互斥区。若外层设施仍持有
+        // 串行权，等待后重试会把容量背压扩散成整条设施队列阻塞；交给最外层
+        // 所有者在退出其互斥区后重驱。
+        if (
+          retryAfterMs === undefined ||
+          isHoldingMaintenanceExclusion() ||
+          Date.now() >= maintenanceDeadline
+        ) {
           throw error;
         }
         await waitForMaintenanceRetry(

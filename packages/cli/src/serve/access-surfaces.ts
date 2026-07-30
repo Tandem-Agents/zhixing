@@ -1,8 +1,8 @@
 /**
  * 接入面单元定义 —— 把 runServerProcess 里各接入面的内联装配等价搬成自包含 setup 单元。
  *
- * createAccessSurfaces 返回数组的顺序 = pre-server 依赖拓扑序（conversation→mesh
- * →lossless data plane→channel 门面→delivery），setupAccessSurfaces 按此序遍历。每个 setup 内聚自己的
+ * createAssemblyUnits 返回数组的顺序 = pre-server 依赖拓扑序（conversation→mesh
+ * →lossless data plane→channel 门面→delivery），setupAssemblyUnits 按此序遍历。每个 setup 内聚自己的
  * 运行时条件（如 channel 判 messaging 配置）与失败处理；profile 是否启用由
  * PROFILES.surfaces 决定、不在 setup 内判 profile。teardown 策略见 access-surface.ts
  * 文件头（pre-server 走 shutdown-chain、post-server 在 setup 内自注册）。
@@ -44,12 +44,16 @@ import { createAdvancementReviewMaintenance } from "./advancement-review-mainten
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
-import type { AccessSurface } from "./access-surface.js";
+import type {
+  AccessSurface,
+  AssemblyUnit,
+  CoreAssemblyUnit,
+} from "./access-surface.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { createLosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
-import { ExecutorJobOwner } from "./executor-job-owner.js";
+import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
@@ -230,7 +234,6 @@ const meshSurface: AccessSurface = {
     );
     await mesh.start();
     ctx.meshRuntime = mesh;
-    await ctx.executorJobOwner?.start();
     ctx.startupCleanups.meshRuntime = cleanup;
   },
 };
@@ -278,7 +281,6 @@ const losslessDataPlaneSurface: AccessSurface = {
     ctx.losslessDataPlane = composition.runtime;
     ctx.channelCoordinator = composition.coordinator;
     ctx.jobRelayObligations = composition.jobRelayObligations;
-    await ctx.executorJobOwner?.start();
   },
 };
 
@@ -536,15 +538,15 @@ const conversationSurface: AccessSurface = {
 };
 
 /**
- * Mandatory executor-owned job convergence owner.
+ * Stable executor-owned job convergence owner.
  *
  * The worker is created before optional transports so every adapter receives
  * the same instance. Readiness is published only after recovery is scheduled.
  */
-const executorJobOwnerSurface: AccessSurface = {
+const executorJobOwnerUnit: CoreAssemblyUnit = {
   name: "executor-job-owner",
   phase: "pre-server",
-  mandatory: true,
+  kind: "core",
   async setup(ctx) {
     if (!ctx.enabledRoles.includes("executor")) return;
     if (
@@ -564,7 +566,7 @@ const executorJobOwnerSurface: AccessSurface = {
     if (ctx.enabledRoles.includes("anchor")) {
       ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
     }
-    const owner = new ExecutorJobOwner({
+    const assembly = new ExecutorJobOwnerAssembly({
       ledger: ctx.conversationProtocol.executorLedger(),
       runtime: ctx.jobRuntime,
       submissionFor: (envelope, signal) => {
@@ -607,11 +609,28 @@ const executorJobOwnerSurface: AccessSurface = {
       onError: (_assignmentId, error) =>
         console.warn(chalk.yellow(`[job-worker] ${error.message}`)),
     });
-    ctx.startupCleanups.jobOwner = ctx.startupRollback.register(
+    ctx.executorJobOwnerAssembly = assembly;
+    ctx.executorJobOwner = assembly.owner;
+  },
+};
+
+/**
+ * Starts durable recovery only after every enabled adapter has received the
+ * stable owner reference. Keeping this as a core unit prevents any optional
+ * transport from owning the job capability lifecycle.
+ */
+const executorJobOwnerStartUnit: CoreAssemblyUnit = {
+  name: "executor-job-owner-start",
+  phase: "pre-server",
+  kind: "core",
+  async setup(ctx) {
+    const assembly = ctx.executorJobOwnerAssembly;
+    if (!assembly) return;
+    ctx.startupCleanups.jobOwner ??= ctx.startupRollback.register(
       "executorJobOwner.close",
-      () => owner.close(),
+      () => assembly.close(),
     );
-    ctx.executorJobOwner = owner;
+    await assembly.start();
   },
 };
 
@@ -761,21 +780,22 @@ const conversationRecoverySurface: AccessSurface = {
 };
 
 /**
- * 全部接入面单元，按 pre-server 依赖拓扑序排列（post-server 项排最后）。
- * 新增接入面 = 在此加一个单元 + 在 access-surface.ts 的 PROFILES 对应 surfaces 集合加名字。
+ * 全部有序装配单元，按 pre-server 依赖拓扑序排列（post-server 项排最后）。
+ * 可选接入面还须加入 PROFILES；稳定核心单元不得进入 profile。
  */
-export function createAccessSurfaces(
+export function createAssemblyUnits(
   channelCredentials: ChannelCredentialProjection,
-): readonly AccessSurface[] {
+): readonly AssemblyUnit[] {
   return [
     mcpSurface,
     authorityRuntimeSurface,
     executorDataPlaneSurface,
     conversationSurface,
-    executorJobOwnerSurface,
+    executorJobOwnerUnit,
     assetMaintenanceSurface,
     meshSurface,
     losslessDataPlaneSurface,
+    executorJobOwnerStartUnit,
     createChannelSurface(channelCredentials),
     deliverySurface,
     confirmationBridgeSurface,

@@ -84,6 +84,7 @@ import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
   type AssignmentLedgerOptions,
+  type JobRecoveryObligation,
 } from "../assignment-ledger.js";
 import { projectAssignmentInteractionStream } from "../assignment-interaction-stream.js";
 import {
@@ -101,6 +102,22 @@ const EXECUTOR_ID = "executor-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+
+async function allJobRecoveryObligations(
+  ledger: ConversationAssignmentLedger,
+): Promise<readonly JobRecoveryObligation[]> {
+  const obligations: JobRecoveryObligation[] = [];
+  let continuation: string | undefined;
+  do {
+    const page = await ledger.recoverableJobObligations({
+      limit: 256,
+      ...(continuation ? { continuation } : {}),
+    });
+    obligations.push(...page.entries);
+    continuation = page.continuation;
+  } while (continuation);
+  return obligations;
+}
 
 const legacyAbortTickets: NonNullable<
   ConstructorParameters<typeof JobJournal>[0]["legacyAbortTickets"]
@@ -1573,9 +1590,12 @@ describe("user job durable protocol", () => {
     const readAll = vi
       .spyOn(harness.log, "readAll")
       .mockRejectedValue(new Error("full history must not be scanned"));
-    await expect(
-      harness.ledger.recoverableJobInteractionAssignments(),
-    ).resolves.toMatchObject([{ assignmentId: ASSIGNMENT_ID }]);
+    await expect(allJobRecoveryObligations(harness.ledger)).resolves.toMatchObject([
+      {
+        envelope: { assignmentId: ASSIGNMENT_ID },
+        interaction: true,
+      },
+    ]);
     expect(readAll).not.toHaveBeenCalled();
     readAll.mockRestore();
   });
@@ -1609,9 +1629,12 @@ describe("user job durable protocol", () => {
 
     expect(await harness.ledger.interactionStreamProjectionEnabled(ASSIGNMENT_ID))
       .toBe(true);
-    await expect(
-      harness.ledger.recoverableJobInteractionAssignments(),
-    ).resolves.toMatchObject([{ assignmentId: ASSIGNMENT_ID }]);
+    await expect(allJobRecoveryObligations(harness.ledger)).resolves.toMatchObject([
+      {
+        envelope: { assignmentId: ASSIGNMENT_ID },
+        interaction: true,
+      },
+    ]);
 
     const spool = new AssignmentStreamSpool(
       path.join(harness.root, "job-stream"),
@@ -1642,9 +1665,7 @@ describe("user job durable protocol", () => {
     const projectedUpTo =
       await harness.ledger.interactionStreamProjectedUpTo(ASSIGNMENT_ID);
     expect(projectedUpTo).toBeGreaterThan(0);
-    await expect(
-      harness.ledger.recoverableJobInteractionAssignments(),
-    ).resolves.toEqual([]);
+    await expect(allJobRecoveryObligations(harness.ledger)).resolves.toEqual([]);
     await expect(
       harness.ledger.markInteractionStreamProjected(
         ASSIGNMENT_ID,
@@ -2264,8 +2285,10 @@ describe("user job durable protocol", () => {
       true,
     );
     expect(
-      (await harness.ledger.recoverableJobCancellations()).map(
-        (envelope) => envelope.assignmentId,
+      (await allJobRecoveryObligations(harness.ledger))
+        .filter((obligation) => obligation.cancellation)
+        .map(
+        (obligation) => obligation.envelope.assignmentId,
       ),
     ).toEqual([ASSIGNMENT_ID]);
     const proof = await harness.ledger.cancelProof(ASSIGNMENT_ID);
@@ -2284,7 +2307,11 @@ describe("user job durable protocol", () => {
     expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
       false,
     );
-    expect(await harness.ledger.recoverableJobCancellations()).toEqual([]);
+    expect(
+      (await allJobRecoveryObligations(harness.ledger)).filter(
+        (obligation) => obligation.cancellation,
+      ),
+    ).toEqual([]);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
     const compatibilityReader = new ConversationAssignmentLedger({
       log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
@@ -2306,7 +2333,7 @@ describe("user job durable protocol", () => {
       compatibilityReader.hasPendingTicketCancellation(ASSIGNMENT_ID),
     ).resolves.toBe(false);
     await expect(
-      compatibilityReader.recoverableJobCancellations(),
+      allJobRecoveryObligations(compatibilityReader),
     ).resolves.toEqual([]);
     const closures = (await harness.journal.statusHistory(JOB_RUN_ID, 0)).filter(
       (notice) => notice.state === "uncertain-closed",
@@ -2331,8 +2358,10 @@ describe("user job durable protocol", () => {
       true,
     );
     expect(
-      (await harness.ledger.recoverableJobCancellations()).map(
-        (envelope) => envelope.assignmentId,
+      (await allJobRecoveryObligations(harness.ledger))
+        .filter((obligation) => obligation.cancellation)
+        .map(
+        (obligation) => obligation.envelope.assignmentId,
       ),
     ).toEqual([ASSIGNMENT_ID]);
     await expect(
@@ -2357,7 +2386,11 @@ describe("user job durable protocol", () => {
     expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
       false,
     );
-    expect(await harness.ledger.recoverableJobCancellations()).toEqual([]);
+    expect(
+      (await allJobRecoveryObligations(harness.ledger)).filter(
+        (obligation) => obligation.cancellation,
+      ),
+    ).toEqual([]);
 
     const replayed = new ConversationAssignmentLedger({
       log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
@@ -2378,10 +2411,7 @@ describe("user job durable protocol", () => {
     await expect(
       replayed.hasPendingTicketCancellation(ASSIGNMENT_ID),
     ).resolves.toBe(false);
-    await expect(replayed.recoverableJobCancellations()).resolves.toEqual([]);
-    await expect(
-      replayed.recoverableJobInteractionAssignments(),
-    ).resolves.toEqual([]);
+    await expect(allJobRecoveryObligations(replayed)).resolves.toEqual([]);
   });
 
   it("accepts a lost started response replay after the job commits", async () => {

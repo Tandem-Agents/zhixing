@@ -33,7 +33,7 @@ import type {
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
 import {
-  ExecutorJobOwner,
+  ExecutorJobOwnerAssembly,
   ExecutorJobOwnerLifecycle,
 } from "./executor-job-owner.js";
 
@@ -67,7 +67,7 @@ export async function runExecutorRole(
   const writer = createStdoutWriter();
 
   let mesh: MeshRuntimeAssembly | undefined;
-  let jobOwner: ExecutorJobOwner | undefined;
+  let jobOwnerAssembly: ExecutorJobOwnerAssembly | undefined;
   let jobOwnerLifecycle: ExecutorJobOwnerLifecycle | undefined;
   let authority: AuthorityRuntimeStack | undefined;
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
@@ -128,7 +128,7 @@ export async function runExecutorRole(
       createAgentRuntime: () => runtime.createConversationRuntime(),
     });
     const runtimeFactory = executor.createInProcessRuntimeFactory(role);
-    jobOwner = new ExecutorJobOwner({
+    jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
         create: (instruction, confirmationBroker) =>
@@ -162,13 +162,16 @@ export async function runExecutorRole(
         dataPlane,
         InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
         job: {
-          owner: jobOwner,
+          owner: jobOwnerAssembly.owner,
         },
       },
       secretStore: bootstrap.secretStore,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
-    jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(jobOwner, mesh);
+    jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(
+      jobOwnerAssembly,
+      mesh,
+    );
     await jobOwnerLifecycle.start();
     await waitForRoleShutdown();
   } catch (error) {
@@ -179,8 +182,8 @@ export async function runExecutorRole(
     if (jobOwnerLifecycle && !jobOwnerLifecycle.closed) {
       await jobOwnerLifecycle.close();
     } else if (!jobOwnerLifecycle) {
-      jobOwner?.stopAccepting();
-      await jobOwner?.close();
+      jobOwnerAssembly?.stopAccepting();
+      await jobOwnerAssembly?.close();
       await mesh?.stop();
     }
   } catch (error) {

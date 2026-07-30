@@ -240,10 +240,11 @@ export function buildServerInfoMethod(): MethodEntry {
             : [],
         );
       } else {
-        deliveryStatus =
-          (await ctx.server.runtimeControl?.deliveryStatus?.(
+        deliveryStatus = [
+          ...((await ctx.server.runtimeControl?.deliveryStatus?.(
             statusAfter.delivery,
-          )) ?? [];
+          )) ?? []),
+        ];
         const conversationPage =
           (await ctx.server.runtimeControl?.conversationStatus?.(
             statusAfter.conversations,

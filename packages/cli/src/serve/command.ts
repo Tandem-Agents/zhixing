@@ -5,13 +5,13 @@
  * 接入面**（access surface）。装配主干：
  *   1. 备齐恒定核心前置（token / transcript / confirmationHub / mcpHub / builtinExtraTools /
  *      runtimeFactory / CleanupRegistry）—— 接入面 setup 从这里读依赖
- *   2. 建 AssemblyContext，`setupAccessSurfaces(pre-server)` 数据驱动装入 profile 启用的接入面
+ *   2. 建 AssemblyContext，`setupAssemblyUnits(pre-server)` 数据驱动装入稳定核心单元与 profile 接入面
  *      （MCP / 会话执行面 / 通道 / 投递栈 / 文本确认渲染器，产物写回 ctx）
  *   3. 恒定核心后置（ephemeralRuntime / runAgentTurn / systemHandlers）—— ephemeralRuntime 消费
  *      mcp 接入面 connectAll 后的工具目录，故排在 pre-server 接入面之后构造
  *   4. 构造核心 Scheduler（读 ctx.deliveryStack）+ start + seed 系统任务
  *   5. createServerContext + runServer
- *   6. `setupAccessSurfaces(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
+ *   6. `setupAssemblyUnits(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
  *   7. registerCoreCleanup 用接入面产物注册 teardown（shutdown-chain，LIFO）
  *   8. banner / idle reaper / waitForShutdown
  *
@@ -125,9 +125,9 @@ import { isDaemonChild } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 import { shouldIdleExit } from "./idle-policy.js";
-import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
+import { setupAssemblyUnits, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
-import { createAccessSurfaces } from "./access-surfaces.js";
+import { createAssemblyUnits } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import { StartupRollback } from "./startup-rollback.js";
@@ -362,7 +362,7 @@ async function runServerProcess(
     ? { channels: credentials.channels }
     : {};
   const durableInteractions = new DurableConversationInteractionObserver();
-  const accessSurfaces = createAccessSurfaces(channelCredentials);
+  const assemblyUnits = createAssemblyUnits(channelCredentials);
   const advancementController = await createServeAdvancementController({
     config,
     credentials: providerCredentials,
@@ -494,7 +494,7 @@ async function runServerProcess(
   const lockPaths: ProcessLockPaths | undefined = undefined;
 
   // ============================================================================
-  // 接入面装配 —— 数据驱动。profile 经 PROFILES.surfaces 声明启用哪组接入面，setupAccessSurfaces
+  // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
   // ============================================================================
   // journal 域仓——turn 后维护(conversation 接入面)与系统维护任务共用。
@@ -535,7 +535,7 @@ async function runServerProcess(
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
   // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
-  await setupAccessSurfaces(accessSurfaces, ctx, "pre-server");
+  await setupAssemblyUnits(assemblyUnits, ctx, "pre-server");
   conversationsRef.current = ctx.conversations ?? null;
 
   // ============================================================================
@@ -940,7 +940,7 @@ async function runServerProcess(
 
   // post-server 接入面：confirmationBridge（依赖 runner.server.connections，在自己 setup 内
   // 注册 dispose 到 ctx.cleanup —— LIFO 落在 registerCoreCleanup 之后、即更先执行）。
-  await setupAccessSurfaces(accessSurfaces, ctx, "post-server");
+  await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
 
   // pre-server 接入面 teardown —— 时序硬约束（必须在 server.close 之前 = runServer 之后注册）
   // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：

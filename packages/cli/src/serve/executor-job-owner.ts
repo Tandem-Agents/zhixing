@@ -102,6 +102,10 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     this.#worker.stopAccepting();
   }
 
+  drain(): Promise<void> {
+    return this.#worker.drain();
+  }
+
   async close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.stopAccepting();
@@ -122,6 +126,40 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
 }
 
 /**
+ * Stable composition boundary for the executor-owned job capability.
+ *
+ * Every production topology constructs this unit; optional transports receive
+ * only its owner adapter and never own lifecycle or recovery.
+ */
+export class ExecutorJobOwnerAssembly {
+  readonly owner: ExecutorJobOwner;
+
+  constructor(options: JobAssignmentWorkerOptions) {
+    this.owner = new ExecutorJobOwner(options);
+  }
+
+  get ready(): boolean {
+    return this.owner.ready;
+  }
+
+  start(): Promise<void> {
+    return this.owner.start();
+  }
+
+  stopAccepting(): void {
+    this.owner.stopAccepting();
+  }
+
+  drain(): Promise<void> {
+    return this.owner.drain();
+  }
+
+  close(): Promise<void> {
+    return this.owner.close();
+  }
+}
+
+/**
  * Orders the transport and the job owner without transferring ownership of
  * either side to an optional mesh component.
  */
@@ -132,7 +170,7 @@ export class ExecutorJobOwnerLifecycle {
 
   constructor(
     private readonly owner: Pick<
-      ExecutorJobOwner,
+      ExecutorJobOwnerAssembly,
       "start" | "stopAccepting" | "close"
     >,
     private readonly transport: {

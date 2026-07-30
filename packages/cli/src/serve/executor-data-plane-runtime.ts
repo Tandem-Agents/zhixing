@@ -75,7 +75,10 @@ export class ExecutorDataPlaneRuntime {
         "assignment-streams",
       ),
       options.authority.artifacts,
-      { clock },
+      {
+        clock,
+        storageMaintenance: options.storageMaintenance,
+      },
     );
     this.tickets = new options.module.DataPlaneTicketRegistry({
       log: options.authority.executorLog,
@@ -223,6 +226,7 @@ export class ExecutorDataPlaneRuntime {
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#maintenanceRunner.stop();
+    this.spool.stopStorageMaintenance();
     await this.#maintenance?.catch(() => undefined);
     await this.spool.closeAssignmentScan();
   }

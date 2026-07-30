@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -15,6 +15,12 @@ import {
   canonicalize,
   streamLogicalFrameDigest,
 } from "@zhixing/core/protocol";
+import type {
+  DeviceCapacityAdmission,
+  DeviceCapacityDimension,
+  StorageMaintenanceGovernorPort,
+  StorageMaintenanceRequest,
+} from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import {
@@ -442,7 +448,8 @@ describe(
     expect(first).toHaveLength(32);
     expect(second).toHaveLength(8);
     expect(new Set([...first, ...second])).toEqual(new Set(expected));
-    expect(physicalSteps).toBe(2);
+    // 两个目录页 + 每个 assignment 的 sidecar 读取；单轮仍由 limit 固定上界。
+    expect(physicalSteps).toBe(42);
     await fixture.spool.closeAssignmentScan();
   });
 
@@ -467,8 +474,60 @@ describe(
     await expect(
       readFile(path.join(assignmentDirectory, "identity.json"), "utf8"),
     ).resolves.toContain(assignmentId);
-    expect(physicalSteps).toBe(1);
+    // 目录游标、sidecar 探测、日志 tail 与 sidecar 回填各自是独立物理步骤；
+    // 日志格式恢复不再嵌套在目录发现 permit 内。
+    expect(physicalSteps).toBe(4);
     await fixture.spool.closeAssignmentScan();
+  });
+
+  it("governs both internal log constructors without nesting the discovery step", async () => {
+    const root = await createTempDir("assignment-stream-spool-governor");
+    const spoolRoot = path.join(root, "spool");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const assignmentId = "assignment-governed-log";
+    const key = byteDigest(Buffer.from(assignmentId, "utf8")).slice(
+      "sha256:".length,
+    );
+    const assignmentDirectory = path.join(spoolRoot, "assignments", key);
+    const indexDirectory = path.join(assignmentDirectory, "index");
+    await mkdir(indexDirectory, { recursive: true });
+    await writeFile(path.join(indexDirectory, "authority.log"), Buffer.alloc(0));
+    const governor = recordingStorageGovernor();
+    const spool = new AssignmentStreamSpool(spoolRoot, artifacts, {
+      clock: () => "2026-07-23T00:00:00.000Z",
+      storageMaintenance: governor.port,
+    });
+
+    await spool.open(assignmentId, ref);
+    expect(
+      governor.requests.some(({ kind }) => kind === "log-migration"),
+    ).toBe(true);
+
+    await rm(path.join(assignmentDirectory, "identity.json"));
+    await rm(path.join(indexDirectory, "authority.log.identity"));
+    governor.requests.length = 0;
+    let insideDiscoveryStep = false;
+    const restarted = new AssignmentStreamSpool(spoolRoot, artifacts, {
+      clock: () => "2026-07-23T00:00:00.000Z",
+      storageMaintenance: governor.port,
+    });
+    await expect(
+      restarted.assignmentIdPage(1, async (operation) => {
+        expect(insideDiscoveryStep).toBe(false);
+        insideDiscoveryStep = true;
+        try {
+          return await operation();
+        } finally {
+          insideDiscoveryStep = false;
+        }
+      }),
+    ).resolves.toEqual([assignmentId]);
+    expect(
+      governor.requests.some(({ kind }) => kind === "log-migration"),
+    ).toBe(true);
+    expect(insideDiscoveryStep).toBe(false);
+    restarted.stopStorageMaintenance();
+    await restarted.closeAssignmentScan();
   });
 
   it("degrades a slow surface without blocking a fast consumer", async () => {
@@ -1434,6 +1493,42 @@ function rawSpoolLog(
     new FileArtifactStore(path.join(directory, "frames")),
     { clock: fixture.clock },
   );
+}
+
+function recordingStorageGovernor(): {
+  readonly port: StorageMaintenanceGovernorPort;
+  readonly requests: StorageMaintenanceRequest[];
+} {
+  const requests: StorageMaintenanceRequest[] = [];
+  const permit = {
+    granted: {
+      occupancy: {
+        memoryReservationBytes: Number.MAX_SAFE_INTEGER,
+        temporaryBytes: Number.MAX_SAFE_INTEGER,
+        slots: 1,
+      },
+      quantum: {
+        readBytes: Number.MAX_SAFE_INTEGER,
+        writeBytes: Number.MAX_SAFE_INTEGER,
+        ioOperations: Number.MAX_SAFE_INTEGER,
+      },
+    },
+    tryBegin: () => ({
+      claim: (_dimension: DeviceCapacityDimension, _amount: number) => undefined,
+      complete: () => undefined,
+    }),
+    release: () => undefined,
+  };
+  return {
+    requests,
+    port: {
+      acquire: async (request): Promise<DeviceCapacityAdmission> => {
+        requests.push(request);
+        return { kind: "granted", permit };
+      },
+      snapshot: () => ({ queued: {}, inFlight: {} }),
+    },
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

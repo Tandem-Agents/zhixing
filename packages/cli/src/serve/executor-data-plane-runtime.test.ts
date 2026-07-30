@@ -13,6 +13,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       assignmentIdPage = vi.fn(async () => ["assignment-1", "assignment-2"]);
       reclaimDue = reclaimDue;
       closeAssignmentScan = vi.fn(async () => undefined);
+      stopStorageMaintenance = vi.fn();
     }
     class Tickets {
       recover = recover;
@@ -67,8 +68,16 @@ describe("ExecutorDataPlaneRuntime", () => {
       (_, index) => `assignment-${String(index).padStart(2, "0")}`,
     );
     const reclaimed: string[] = [];
+    let spoolOptions: { readonly storageMaintenance?: unknown } | undefined;
     let page = 0;
     class Spool {
+      constructor(
+        _rootDir: string,
+        _artifacts: unknown,
+        options: { readonly storageMaintenance?: unknown },
+      ) {
+        spoolOptions = options;
+      }
       assignmentIdPage = vi.fn(
         async (
           limit: number,
@@ -97,6 +106,7 @@ describe("ExecutorDataPlaneRuntime", () => {
         },
       );
       closeAssignmentScan = vi.fn(async () => undefined);
+      stopStorageMaintenance = vi.fn();
     }
     class Tickets {
       recover = vi.fn(async () => undefined);
@@ -122,6 +132,7 @@ describe("ExecutorDataPlaneRuntime", () => {
         release: vi.fn(),
       },
     }));
+    const storageMaintenance = { acquire } as never;
     const runtime = new ExecutorDataPlaneRuntime({
       zhixingHome: "X:/zhixing-home",
       authority: {
@@ -135,9 +146,10 @@ describe("ExecutorDataPlaneRuntime", () => {
         AssignmentStreamWriter: Writer,
         DataPlaneTicketRegistry: Tickets,
       } as unknown as ExecutorRoleModule,
-      storageMaintenance: { acquire } as never,
+      storageMaintenance,
     });
     runtime.bindLedger({ dataPlaneBinding: vi.fn() } as never);
+    expect(spoolOptions?.storageMaintenance).toBe(storageMaintenance);
 
     await runtime.start();
     // 单轮上界:40 个 assignment 只发现并回收前 32 个；目录页、
@@ -155,6 +167,7 @@ describe("ExecutorDataPlaneRuntime", () => {
   it("cannot start or create a stream before the durable ledger is bound", async () => {
     class Spool {
       closeAssignmentScan = vi.fn(async () => undefined);
+      stopStorageMaintenance = vi.fn();
     }
     class Tickets {}
     class Writer {}

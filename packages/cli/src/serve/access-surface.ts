@@ -63,7 +63,10 @@ import type { ExecutorRoleModule } from "./role-topology.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { JobRuntimePort } from "./job-assignment-worker.js";
-import type { ExecutorJobOwner } from "./executor-job-owner.js";
+import type {
+  ExecutorJobOwner,
+  ExecutorJobOwnerAssembly,
+} from "./executor-job-owner.js";
 import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import type {
   ChannelInteractionCoordinator,
@@ -166,6 +169,7 @@ export interface AssemblyContext {
   executorDataPlane?: ExecutorDataPlaneRuntime;
   meshBootstrap: MeshRuntimeBootstrap;
   meshRuntime?: MeshRuntimeAssembly;
+  executorJobOwnerAssembly?: ExecutorJobOwnerAssembly;
   executorJobOwner?: ExecutorJobOwner;
   losslessDataPlane?: LosslessDataPlaneRuntime;
   channelCoordinator?: ChannelInteractionCoordinator;
@@ -188,33 +192,41 @@ export interface AssemblyContext {
  * 失败处理、对 ctx 的依赖读取与产物写回，全内聚在 setup 内；主干不再有它的 if。
  * teardown 见文件头说明。
  */
-export interface AccessSurface {
+interface OrderedAssemblyUnit {
   readonly name: string;
   readonly phase: SurfacePhase;
-  /**
-   * Stable composition units share the ordered setup engine but cannot be
-   * removed by a profile. Optional external adapters remain profile-driven.
-   */
-  readonly mandatory?: boolean;
   setup(ctx: AssemblyContext): Promise<void>;
 }
 
+/** Optional adapter selected by the active server profile. */
+export interface AccessSurface extends OrderedAssemblyUnit {
+  readonly kind?: "access-surface";
+}
+
+/** Stable core capability that no profile may remove. */
+export interface CoreAssemblyUnit extends OrderedAssemblyUnit {
+  readonly kind: "core";
+}
+
+export type AssemblyUnit = AccessSurface | CoreAssemblyUnit;
+
 /**
- * 数据驱动装配：按 `surfaces` 数组序（= 依赖拓扑序）遍历，装配当前 phase 且被本 profile
- * 启用的接入面。这是装配主干唯一的"接入面装配"出口——新增接入面不改本函数。
+ * One ordered assembly engine for stable core units and profile-selected
+ * adapters. Classification is explicit; core capabilities are never disguised
+ * as mandatory access surfaces.
  */
-export async function setupAccessSurfaces(
-  surfaces: readonly AccessSurface[],
+export async function setupAssemblyUnits(
+  units: readonly AssemblyUnit[],
   ctx: AssemblyContext,
   phase: SurfacePhase,
 ): Promise<void> {
   const enabled = new Set(PROFILES[ctx.profile].surfaces);
-  for (const surface of surfaces) {
+  for (const unit of units) {
     if (
-      surface.phase === phase &&
-      (surface.mandatory === true || enabled.has(surface.name))
+      unit.phase === phase &&
+      (unit.kind === "core" || enabled.has(unit.name))
     ) {
-      await surface.setup(ctx);
+      await unit.setup(ctx);
     }
   }
 }

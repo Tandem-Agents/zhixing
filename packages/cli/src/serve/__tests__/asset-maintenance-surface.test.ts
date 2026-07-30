@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createAccessSurfaces } from "../access-surfaces.js";
+import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
 
-const assetMaintenanceSurface = createAccessSurfaces({}).find(
+const assetMaintenanceSurface = createAssemblyUnits({}).find(
   (surface) => surface.name === "asset-maintenance",
 )!;
 
@@ -17,7 +17,7 @@ const assetMaintenanceSurface = createAccessSurfaces({}).find(
 describe("asset maintenance surface", () => {
   it("is enabled by the server profile and ordered after the authority runtime", () => {
     expect(PROFILES.full.surfaces).toContain("asset-maintenance");
-    const names = createAccessSurfaces({}).map((surface) => surface.name);
+    const names = createAssemblyUnits({}).map((surface) => surface.name);
     expect(names.indexOf("asset-maintenance")).toBeGreaterThan(
       names.indexOf("authority-runtime"),
     );

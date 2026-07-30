@@ -493,8 +493,8 @@ interface LedgerProjection {
   acknowledgedCommitRevision?: number;
 }
 
-interface JobInteractionRecoveryIndexValue {
-  readonly v: 3;
+interface JobRecoveryIndexValue {
+  readonly v: 4;
   readonly assignmentId: string;
   readonly envelopeRef: ArtifactRef;
   readonly phase: LedgerSnapshot["phase"];
@@ -508,6 +508,26 @@ interface JobInteractionRecoveryIndexValue {
   readonly hasAbortTicket: boolean;
   readonly cancelProofOwnerAccepted: boolean;
   readonly interactionSettlementOwnerAccepted: boolean;
+}
+
+export interface JobRecoveryObligation {
+  readonly envelope: Extract<
+    import("@zhixing/core/contracts").DispatchEnvelope,
+    { execution: "job" }
+  >;
+  readonly execution: boolean;
+  readonly cancellation: boolean;
+  readonly interaction: boolean;
+}
+
+export interface JobRecoveryObligationPage {
+  readonly entries: readonly JobRecoveryObligation[];
+  /**
+   * Stable assignment identity used as an exclusive lower bound. Recovery is
+   * idempotent, so a later page may observe newly appended obligations without
+   * holding an expiring projection read view.
+   */
+  readonly continuation?: string;
 }
 
 type DispatchDecision =
@@ -565,7 +585,7 @@ export class ConversationAssignmentLedger implements
   readonly #maxCachedAssignments: number;
   readonly #assignmentRecordV2Writes: boolean;
   readonly #operations = new SerialTaskQueue();
-  readonly #jobInteractionRecoveryIndex: RebuildableDurableProjectionIndex;
+  readonly #jobRecoveryIndex: RebuildableDurableProjectionIndex;
   readonly #projections = new Map<
     string,
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
@@ -603,11 +623,11 @@ export class ConversationAssignmentLedger implements
     this.#dataPlaneTickets = options.dataPlaneTickets;
     this.#assignmentRecordV2Writes =
       options.assignmentRecordV2Writes ?? false;
-    this.#jobInteractionRecoveryIndex = this.#log.durableProjection({
+    this.#jobRecoveryIndex = this.#log.durableProjection({
       projectionId: "executor-job-interaction-obligations",
-      reducerVersion: 4,
+      reducerVersion: 5,
       reduce: (envelope, current) =>
-        reduceJobInteractionRecoveryIndex(
+        reduceJobRecoveryIndex(
           envelope,
           current,
           this.#verifier,
@@ -2496,31 +2516,79 @@ export class ConversationAssignmentLedger implements
   }
 
   /**
-   * job 恢复义务从同一账本状态派生,不建立第二事实源:received 恢复执行,
-   * sealed 恢复本地终态标记与 bundle 提交;started 未封包不得重新执行——
-   * 失联的 started 归 owner 的 uncertain 裁决,不在恢复集内。
+   * Single bounded recovery catalogue for job execution, cancellation and
+   * interaction convergence. The assignment log is authoritative; this page
+   * is a rebuildable projection and its continuation is only a stable key.
    */
-  async recoverableJobAssignments(): Promise<readonly JobEnvelope[]> {
-    const phases = new Set<LedgerSnapshot["phase"]>(["received", "sealed"]);
-    return this.#jobAssignmentsMatching(
-      (state) => phases.has(state.phase) && state.aborts.length === 0,
-    );
-  }
-
-  /**
-   * 独立于业务重执行的交互义务恢复枚举。索引只是 authority log 的可丢弃
-   * 派生物；commit log 负责 checkpoint、尾部追平与损坏重建。
-   */
-  async recoverableJobInteractionAssignments(): Promise<
-    readonly JobEnvelope[]
-  > {
-    const refs = await this.#readJobInteractionRecoveryIndex();
-    const envelopes: JobEnvelope[] = [];
-    for (const { assignmentId, envelopeRef } of refs) {
-      const envelope = await this.#loadJobEnvelope(assignmentId, envelopeRef);
-      if (envelope) envelopes.push(envelope);
+  async recoverableJobObligations(input: {
+    readonly limit: number;
+    readonly continuation?: string;
+  }): Promise<JobRecoveryObligationPage> {
+    if (
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > 256
+    ) {
+      throw new RangeError("Job recovery page limit must be 1-256");
     }
-    return envelopes;
+    if (input.continuation !== undefined) {
+      assertIdentifier(input.continuation, "Job recovery continuation");
+    }
+    const scan = async (): Promise<JobRecoveryObligationPage> => {
+      const page = await this.#jobRecoveryIndex.scan(
+        {
+          ...(input.continuation
+            ? { gt: jobRecoveryKey(input.continuation) }
+            : { gte: JOB_RECOVERY_KEY_PREFIX }),
+          lt: `${JOB_RECOVERY_KEY_PREFIX}\uffff`,
+        },
+        input.limit,
+      );
+      const entries: JobRecoveryObligation[] = [];
+      for (const entry of page.entries) {
+        const value = validateJobRecoveryIndexValue(entry.value);
+        if (entry.key !== jobRecoveryKey(value.assignmentId)) {
+          throw corruptJobRecoveryProjection(
+            "Job recovery index value does not bind its key",
+          );
+        }
+        const obligation = classifyJobRecoveryObligation(value);
+        if (
+          !obligation.execution &&
+          !obligation.cancellation &&
+          !obligation.interaction
+        ) {
+          continue;
+        }
+        const envelope = await this.#loadJobEnvelope(
+          value.assignmentId,
+          value.envelopeRef,
+        );
+        if (!envelope) {
+          throw corruptJobRecoveryProjection(
+            "Job recovery index references a missing envelope",
+          );
+        }
+        entries.push({ envelope, ...obligation });
+      }
+      const last = page.entries.at(-1);
+      return {
+        entries,
+        ...(page.entries.length === input.limit && last
+          ? {
+              continuation: validateJobRecoveryIndexValue(last.value)
+                .assignmentId,
+            }
+          : {}),
+      };
+    };
+    try {
+      return await scan();
+    } catch (error) {
+      if (!(error instanceof JobRecoveryProjectionValueError)) throw error;
+      await this.#jobRecoveryIndex.rebuild();
+      return scan();
+    }
   }
 
   async jobAssignmentPhaseForRecovery(
@@ -2531,16 +2599,6 @@ export class ConversationAssignmentLedger implements
       state.received?.body.activation.ref.execution === "job"
         ? state.phase
         : undefined,
-    );
-  }
-
-  /** 已耐久取消的 job 恢复收束(镜像/stream 与可生成 proof),而非业务执行。 */
-  async recoverableJobCancellations(): Promise<readonly JobEnvelope[]> {
-    return this.#jobAssignmentsMatching(
-      (state) =>
-        state.aborts.some((abort) => abort.via === "abort-ticket") &&
-        !state.validation.cancelProofOwnerAccepted &&
-        state.validation.interactionSettlementOwnerAccepted === undefined,
     );
   }
 
@@ -2747,20 +2805,6 @@ export class ConversationAssignmentLedger implements
     return envelope.execution === "conversation" ? envelope : undefined;
   }
 
-  async #jobAssignmentsMatching(
-    predicate: (state: LedgerProjection) => boolean,
-  ): Promise<readonly JobEnvelope[]> {
-    const envelopes: JobEnvelope[] = [];
-    for (
-      const { assignmentId, envelopeRef } of
-      await this.#assignmentEnvelopeRefsMatching(predicate)
-    ) {
-      const envelope = await this.#loadJobEnvelope(assignmentId, envelopeRef);
-      if (envelope) envelopes.push(envelope);
-    }
-    return envelopes;
-  }
-
   async #loadJobEnvelope(
     assignmentId: string,
     envelopeRef: ArtifactRef,
@@ -2801,55 +2845,6 @@ export class ConversationAssignmentLedger implements
       if (envelopeRef) refs.push({ assignmentId, envelopeRef });
     }
     return refs;
-  }
-
-  async #readJobInteractionRecoveryIndex(): Promise<
-    readonly {
-      readonly assignmentId: string;
-      readonly envelopeRef: ArtifactRef;
-    }[]
-  > {
-    const scan = async () => {
-      const refs: Array<{
-        readonly assignmentId: string;
-        readonly envelopeRef: ArtifactRef;
-      }> = [];
-      let continuation: string | undefined;
-      do {
-        const page = await this.#jobInteractionRecoveryIndex.scan(
-          {
-            gte: JOB_INTERACTION_RECOVERY_KEY_PREFIX,
-            lt: `${JOB_INTERACTION_RECOVERY_KEY_PREFIX}\uffff`,
-          },
-          256,
-          continuation,
-        );
-        for (const entry of page.entries) {
-          const value = validateJobInteractionRecoveryIndexValue(entry.value);
-          if (entry.key !== jobInteractionRecoveryKey(value.assignmentId)) {
-            throw new TypeError(
-              "Job interaction recovery index value does not bind its key",
-            );
-          }
-          if (!isRecoverableJobInteractionObligation(value)) continue;
-          refs.push({
-            assignmentId: value.assignmentId,
-            envelopeRef: value.envelopeRef,
-          });
-        }
-        continuation = page.continuation;
-      } while (continuation);
-      return refs;
-    };
-    try {
-      return await scan();
-    } catch (error) {
-      if (!(error instanceof JobInteractionRecoveryProjectionValueError)) {
-        throw error;
-      }
-      await this.#jobInteractionRecoveryIndex.rebuild();
-      return scan();
-    }
   }
 
   async #loadAssignmentEnvelope(
@@ -4021,11 +4016,10 @@ function hasPendingInteractionObligations(state: LedgerProjection): boolean {
 
 const requiresExecutorResourceReceipt = requiresFormalResourceCoordination;
 
-const JOB_INTERACTION_RECOVERY_KEY_PREFIX =
-  "job-interaction-obligation:";
+const JOB_RECOVERY_KEY_PREFIX = "job-recovery-obligation:";
 
-function jobInteractionRecoveryKey(assignmentId: string): string {
-  return `${JOB_INTERACTION_RECOVERY_KEY_PREFIX}${assignmentId}`;
+function jobRecoveryKey(assignmentId: string): string {
+  return `${JOB_RECOVERY_KEY_PREFIX}${assignmentId}`;
 }
 
 function interactionRecordSeqFromSource(sourceId: string): number {
@@ -4111,7 +4105,7 @@ function isReceivedAssignmentEntry(body: unknown): boolean {
   return (inner as { readonly t?: unknown }).t === "received";
 }
 
-async function reduceJobInteractionRecoveryIndex(
+async function reduceJobRecoveryIndex(
   envelope: CommitEnvelope<unknown>,
   current: DurableProjectionReadContext,
   verifier: ProtocolSignatureVerifier,
@@ -4119,7 +4113,7 @@ async function reduceJobInteractionRecoveryIndex(
   const byAssignment = new Map<
     string,
     {
-      value: JobInteractionRecoveryIndexValue | undefined;
+      value: JobRecoveryIndexValue | undefined;
       touched: boolean;
     }
   >();
@@ -4128,12 +4122,12 @@ async function reduceJobInteractionRecoveryIndex(
     if (!assignmentId) continue;
     let pending = byAssignment.get(assignmentId);
     if (!pending) {
-      const stored = await current.get(jobInteractionRecoveryKey(assignmentId));
+      const stored = await current.get(jobRecoveryKey(assignmentId));
       pending = {
         value:
           stored === undefined
             ? undefined
-            : validateJobInteractionRecoveryIndexValue(stored),
+            : validateJobRecoveryIndexValue(stored),
         touched: false,
       };
       byAssignment.set(assignmentId, pending);
@@ -4150,7 +4144,7 @@ async function reduceJobInteractionRecoveryIndex(
         continue;
       }
       pending.value = {
-        v: 3,
+        v: 4,
         assignmentId,
         envelopeRef: body.envelope.ref,
         phase: "received",
@@ -4254,30 +4248,30 @@ async function reduceJobInteractionRecoveryIndex(
     const value = pending.value;
     const retained =
       value !== undefined &&
-      (canProduceJobInteractionObligation(value) ||
-        isRecoverableJobInteractionObligation(value));
+      (canProduceJobRecoveryObligation(value) ||
+        hasRecoverableJobObligation(value));
     mutations.push(
       value && retained
         ? {
             kind: "put",
-            key: jobInteractionRecoveryKey(assignmentId),
+            key: jobRecoveryKey(assignmentId),
             value: value as unknown as JsonValue,
           }
         : {
             kind: "tombstone",
-            key: jobInteractionRecoveryKey(assignmentId),
+            key: jobRecoveryKey(assignmentId),
           },
     );
   }
   return mutations;
 }
 
-function validateJobInteractionRecoveryIndexValue(
+function validateJobRecoveryIndexValue(
   input: JsonValue,
-): JobInteractionRecoveryIndexValue {
+): JobRecoveryIndexValue {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw corruptJobInteractionRecoveryProjection(
-      "Job interaction recovery index value is invalid",
+    throw corruptJobRecoveryProjection(
+      "Job recovery index value is invalid",
     );
   }
   const value = input as Record<string, JsonValue>;
@@ -4301,13 +4295,13 @@ function validateJobInteractionRecoveryIndexValue(
     "v",
   ].sort();
   if (canonicalize(keys) !== canonicalize(expected)) {
-    throw corruptJobInteractionRecoveryProjection(
-      "Job interaction recovery index value has unknown fields",
+    throw corruptJobRecoveryProjection(
+      "Job recovery index value has unknown fields",
     );
   }
   const ref = value.envelopeRef;
   if (
-    value.v !== 3 ||
+    value.v !== 4 ||
     typeof value.assignmentId !== "string" ||
     !ref ||
     typeof ref !== "object" ||
@@ -4346,49 +4340,60 @@ function validateJobInteractionRecoveryIndexValue(
       "acked",
     ].includes(value.phase)
   ) {
-    throw corruptJobInteractionRecoveryProjection(
-      "Job interaction recovery index value is malformed",
+    throw corruptJobRecoveryProjection(
+      "Job recovery index value is malformed",
     );
   }
-  return value as unknown as JobInteractionRecoveryIndexValue;
+  return value as unknown as JobRecoveryIndexValue;
 }
 
-function canProduceJobInteractionObligation(
-  value: JobInteractionRecoveryIndexValue,
+function canProduceJobRecoveryObligation(
+  value: JobRecoveryIndexValue,
 ): boolean {
-  return (
-    !value.hasAbort &&
-    (value.phase === "received" || value.phase === "started")
-  );
+  return value.phase === "received" || value.phase === "started";
 }
 
-function isRecoverableJobInteractionObligation(
-  value: JobInteractionRecoveryIndexValue,
-): boolean {
-  return (
-    (value.hasInteractionFacts &&
+function classifyJobRecoveryObligation(
+  value: JobRecoveryIndexValue,
+): Omit<JobRecoveryObligation, "envelope"> {
+  return {
+    execution:
+      !value.hasAbort &&
+      (value.phase === "received" || value.phase === "sealed"),
+    cancellation:
+      value.hasAbortTicket &&
+      !value.cancelProofOwnerAccepted &&
+      !value.interactionSettlementOwnerAccepted,
+    interaction:
+      value.hasInteractionFacts &&
       (value.pendingInteractions > 0 ||
         value.maxFinishedSeq > value.mirroredUpTo ||
         (value.streamProjectionEnabledAfter !== undefined &&
-          value.maxFinishedSeq > value.streamProjectedUpTo))) ||
-    (value.hasAbortTicket &&
-      !value.cancelProofOwnerAccepted &&
-      !value.interactionSettlementOwnerAccepted)
+          value.maxFinishedSeq > value.streamProjectedUpTo)),
+  };
+}
+
+function hasRecoverableJobObligation(value: JobRecoveryIndexValue): boolean {
+  const obligation = classifyJobRecoveryObligation(value);
+  return (
+    obligation.execution ||
+    obligation.cancellation ||
+    obligation.interaction
   );
 }
 
-function corruptJobInteractionRecoveryProjection(
+function corruptJobRecoveryProjection(
   message: string,
-): JobInteractionRecoveryProjectionValueError {
-  return new JobInteractionRecoveryProjectionValueError(message);
+): JobRecoveryProjectionValueError {
+  return new JobRecoveryProjectionValueError(message);
 }
 
-class JobInteractionRecoveryProjectionValueError
+class JobRecoveryProjectionValueError
   extends DurableProjectionStorageError
 {
   constructor(message: string) {
     super(message);
-    this.name = "JobInteractionRecoveryProjectionValueError";
+    this.name = "JobRecoveryProjectionValueError";
   }
 }
 

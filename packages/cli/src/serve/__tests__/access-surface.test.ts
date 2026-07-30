@@ -1,44 +1,45 @@
 import { describe, it, expect } from "vitest";
 import {
-  setupAccessSurfaces,
-  type AccessSurface,
+  setupAssemblyUnits,
+  type AssemblyUnit,
   type AssemblyContext,
   type SurfacePhase,
 } from "../access-surface.js";
 import { PROFILES, type ServerProfile } from "../profile.js";
 
-function mockSurface(
+function mockUnit(
   name: string,
   phase: SurfacePhase,
   calls: string[],
-  mandatory = false,
-): AccessSurface {
+  core = false,
+): AssemblyUnit {
   return {
     name,
     phase,
-    ...(mandatory ? { mandatory: true } : {}),
+    ...(core ? { kind: "core" as const } : {}),
     setup: async () => {
       calls.push(name);
     },
   };
 }
 
-// mock 装配集合 —— profile 接入面与声明对账，mandatory 项独立于 profile，
+// mock 装配集合 —— profile 接入面与声明对账，core 单元独立于 profile，
 // 数组序仍是统一依赖拓扑序。
-function allSurfaces(calls: string[]): AccessSurface[] {
+function allUnits(calls: string[]): AssemblyUnit[] {
   return [
-    mockSurface("mcp", "pre-server", calls),
-    mockSurface("authority-runtime", "pre-server", calls),
-    mockSurface("executor-data-plane", "pre-server", calls),
-    mockSurface("conversation", "pre-server", calls),
-    mockSurface("executor-job-owner", "pre-server", calls, true),
-    mockSurface("asset-maintenance", "pre-server", calls),
-    mockSurface("mesh-control", "pre-server", calls),
-    mockSurface("lossless-data-plane", "pre-server", calls),
-    mockSurface("channel", "pre-server", calls),
-    mockSurface("delivery", "pre-server", calls),
-    mockSurface("confirmation-bridge", "post-server", calls),
-    mockSurface("conversation-recovery", "post-server", calls),
+    mockUnit("mcp", "pre-server", calls),
+    mockUnit("authority-runtime", "pre-server", calls),
+    mockUnit("executor-data-plane", "pre-server", calls),
+    mockUnit("conversation", "pre-server", calls),
+    mockUnit("executor-job-owner", "pre-server", calls, true),
+    mockUnit("asset-maintenance", "pre-server", calls),
+    mockUnit("mesh-control", "pre-server", calls),
+    mockUnit("lossless-data-plane", "pre-server", calls),
+    mockUnit("executor-job-owner-start", "pre-server", calls, true),
+    mockUnit("channel", "pre-server", calls),
+    mockUnit("delivery", "pre-server", calls),
+    mockUnit("confirmation-bridge", "post-server", calls),
+    mockUnit("conversation-recovery", "post-server", calls),
   ];
 }
 
@@ -50,8 +51,8 @@ function ctx(profile: ServerProfile): AssemblyContext {
 describe("access-surface 数据驱动装配", () => {
   it("full 档 pre-server 按数组序装、post-server 单独装 bridge", async () => {
     const calls: string[] = [];
-    const surfaces = allSurfaces(calls);
-    await setupAccessSurfaces(surfaces, ctx("full"), "pre-server");
+    const units = allUnits(calls);
+    await setupAssemblyUnits(units, ctx("full"), "pre-server");
     expect(calls).toEqual([
       "mcp",
       "authority-runtime",
@@ -61,11 +62,12 @@ describe("access-surface 数据驱动装配", () => {
       "asset-maintenance",
       "mesh-control",
       "lossless-data-plane",
+      "executor-job-owner-start",
       "channel",
       "delivery",
     ]);
 
-    await setupAccessSurfaces(surfaces, ctx("full"), "post-server");
+    await setupAssemblyUnits(units, ctx("full"), "post-server");
     expect(calls).toEqual([
       "mcp",
       "authority-runtime",
@@ -75,6 +77,7 @@ describe("access-surface 数据驱动装配", () => {
       "asset-maintenance",
       "mesh-control",
       "lossless-data-plane",
+      "executor-job-owner-start",
       "channel",
       "delivery",
       "confirmation-bridge",
@@ -84,14 +87,14 @@ describe("access-surface 数据驱动装配", () => {
 
   it("phase 过滤：pre-server 装配不触发 post-server 接入面", async () => {
     const calls: string[] = [];
-    await setupAccessSurfaces(allSurfaces(calls), ctx("full"), "pre-server");
+    await setupAssemblyUnits(allUnits(calls), ctx("full"), "pre-server");
     expect(calls).not.toContain("confirmation-bridge");
   });
 
   it("PROFILES.full.surfaces 与接入面单元集合一致（防集合 / 单元漂移）", () => {
-    const names = allSurfaces([])
-      .filter((surface) => surface.mandatory !== true)
-      .map((s) => s.name)
+    const names = allUnits([])
+      .filter((unit) => unit.kind !== "core")
+      .map((unit) => unit.name)
       .sort();
     expect([...PROFILES.full.surfaces].sort()).toEqual(names);
   });

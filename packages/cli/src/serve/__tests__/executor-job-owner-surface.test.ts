@@ -1,19 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAccessSurfaces } from "../access-surfaces.js";
+import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
 
-const surface = createAccessSurfaces({}).find(
+const unit = createAssemblyUnits({}).find(
   (candidate) => candidate.name === "executor-job-owner",
+)!;
+const startUnit = createAssemblyUnits({}).find(
+  (candidate) => candidate.name === "executor-job-owner-start",
 )!;
 
 describe("executor job owner production surface", () => {
   it("is a mandatory pre-server composition unit between the ledger and adapters", () => {
-    const names = createAccessSurfaces({}).map((candidate) => candidate.name);
+    const names = createAssemblyUnits({}).map((candidate) => candidate.name);
     expect(PROFILES.full.surfaces).not.toContain("executor-job-owner");
-    expect(surface.phase).toBe("pre-server");
-    expect(surface.mandatory).toBe(true);
+    expect(unit.phase).toBe("pre-server");
+    expect(unit.kind).toBe("core");
     expect(names.indexOf("executor-job-owner")).toBeGreaterThan(
       names.indexOf("conversation"),
     );
@@ -23,6 +26,10 @@ describe("executor job owner production surface", () => {
     expect(names.indexOf("executor-job-owner")).toBeLessThan(
       names.indexOf("lossless-data-plane"),
     );
+    expect(startUnit.kind).toBe("core");
+    expect(names.indexOf("executor-job-owner-start")).toBeGreaterThan(
+      names.indexOf("lossless-data-plane"),
+    );
   });
 
   it("creates exactly one recoverable owner for anchor plus executor", async () => {
@@ -30,17 +37,16 @@ describe("executor job owner production surface", () => {
     const rollback = new StartupRollback();
     const ctx = ownerContext(["anchor", "executor"], ledger, rollback);
 
-    await surface.setup(ctx);
+    await unit.setup(ctx);
 
     expect(ctx.executorJobOwner).toBeDefined();
     expect(ctx.jobRelayObligations).toBeDefined();
+    expect(ctx.startupCleanups.jobOwner).toBeUndefined();
+    await startUnit.setup(ctx);
     expect(ctx.startupCleanups.jobOwner).toBeDefined();
-    await ctx.executorJobOwner!.start();
     expect(ctx.executorJobOwner!.ready).toBe(true);
-    expect(ledger.recoverableJobAssignments).toHaveBeenCalledTimes(1);
-    expect(ledger.recoverableJobCancellations).toHaveBeenCalledTimes(1);
-    expect(ledger.recoverableJobInteractionAssignments).toHaveBeenCalledTimes(1);
-    await expect(surface.setup(ctx)).rejects.toThrow(/already assembled/u);
+    expect(ledger.recoverableJobObligations).toHaveBeenCalledTimes(1);
+    await expect(unit.setup(ctx)).rejects.toThrow(/already assembled/u);
 
     await ctx.startupCleanups.jobOwner!.run();
     expect(ctx.executorJobOwner!.ready).toBe(false);
@@ -52,9 +58,10 @@ describe("executor job owner production surface", () => {
       recoveryLedger(),
       new StartupRollback(),
     );
-    await surface.setup(executorOnly);
+    await unit.setup(executorOnly);
     expect(executorOnly.executorJobOwner).toBeDefined();
     expect(executorOnly.jobRelayObligations).toBeUndefined();
+    await startUnit.setup(executorOnly);
     await executorOnly.startupCleanups.jobOwner!.run();
 
     const anchorOnly = ownerContext(
@@ -62,16 +69,39 @@ describe("executor job owner production surface", () => {
       recoveryLedger(),
       new StartupRollback(),
     );
-    await surface.setup(anchorOnly);
+    await unit.setup(anchorOnly);
     expect(anchorOnly.executorJobOwner).toBeUndefined();
+  });
+
+  it("registers rollback after transports so the started owner closes first", async () => {
+    const order: string[] = [];
+    const rollback = new StartupRollback();
+    const ctx = ownerContext(
+      ["anchor", "executor"],
+      recoveryLedger(),
+      rollback,
+    );
+    await unit.setup(ctx);
+    rollback.register("transport.stop", () => {
+      order.push("transport");
+    });
+    const assembly = ctx.executorJobOwnerAssembly!;
+    const close = assembly.close.bind(assembly);
+    vi.spyOn(assembly, "close").mockImplementation(async () => {
+      order.push("owner");
+      await close();
+    });
+
+    await startUnit.setup(ctx);
+    await rollback.rollback();
+
+    expect(order).toEqual(["owner", "transport"]);
   });
 });
 
 function recoveryLedger() {
   return {
-    recoverableJobAssignments: vi.fn(async () => []),
-    recoverableJobCancellations: vi.fn(async () => []),
-    recoverableJobInteractionAssignments: vi.fn(async () => []),
+    recoverableJobObligations: vi.fn(async () => ({ entries: [] })),
   };
 }
 

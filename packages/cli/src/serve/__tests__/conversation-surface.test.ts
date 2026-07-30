@@ -19,7 +19,7 @@ import {
 } from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
-import { createAccessSurfaces } from "../access-surfaces.js";
+import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
@@ -32,7 +32,7 @@ const TEST_EXECUTOR_READINESS = {
   credentialGeneration: null,
 };
 
-const conversationSurface = createAccessSurfaces({}).find(
+const conversationSurface = createAssemblyUnits({}).find(
   (s) => s.name === "conversation",
 )!;
 
