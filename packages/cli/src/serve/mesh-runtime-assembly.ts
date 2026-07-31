@@ -227,8 +227,16 @@ export class MeshRuntimeAssembly {
       worker = new ConversationAssignmentWorker({
         ledger: options.executor!.ledger,
         runtimeFactory: options.executor!.runtimeFactory,
-        preflightEnvironment: (manifest) =>
-          options.authority.preflightLocalConversationEnvironment(manifest),
+        preflightEnvironment: (manifest, assignmentId) =>
+          options.authority.takeLocalConversationEnvironmentPreflight(
+            manifest,
+            assignmentId,
+          ),
+        releasePreflightEnvironment: (manifest, assignmentId) =>
+          options.authority.releaseLocalConversationEnvironmentPreflight(
+            manifest,
+            assignmentId,
+          ),
         artifacts: options.authority.artifacts,
         submissionFor: () => this.#composition.submissionPort(anchorId),
         resourceGovernor: options.authority.executorResourceGovernor,

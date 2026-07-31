@@ -1086,7 +1086,7 @@ describe("workscene session owner metadata", () => {
           stream: `session-activity:${conversationId}`,
           body: expect.objectContaining({
             kind: "session-activity",
-            operation: "put",
+            operation: "upsert",
             sessionRevision: 1,
           }),
         }),
@@ -1117,7 +1117,7 @@ describe("workscene session owner metadata", () => {
           stream: `session-activity:${conversationId}`,
           body: expect.objectContaining({
             kind: "session-activity",
-            operation: "tombstone",
+            operation: "delete",
             sessionRevision: 2,
           }),
         }),

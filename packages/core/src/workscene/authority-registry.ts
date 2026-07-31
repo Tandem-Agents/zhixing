@@ -12,7 +12,7 @@ import type {
   WorksceneMigrationMutation,
   WorksceneWriteMutation,
 } from "../contracts/index.js";
-import { protocolDigest } from "../protocol/index.js";
+import { canonicalize, protocolDigest } from "../protocol/index.js";
 
 const REGISTRY_STREAM = "intent:workscene-registry";
 
@@ -517,6 +517,9 @@ function reduceRegistry(
 ): WorksceneRegistryProjection {
   const state = cloneProjection(previous);
   const record = validateRecord(entry.body);
+  if ("requestId" in record && state.requests.has(record.requestId)) {
+    throw corruptRegistry("Workscene request identity was reused");
+  }
   switch (record.t) {
     case "workscene-registry-established":
       if (state.established) {
@@ -525,9 +528,7 @@ function reduceRegistry(
       state.established = true;
       break;
     case "workscene-control-applied":
-      if (state.requests.has(record.requestId)) {
-        throw corruptRegistry("Workscene request identity was reused");
-      }
+      assertAppliedTransition(state, record.mutation, record.result);
       applyResult(state, record.result);
       state.requests.set(record.requestId, {
         mutationDigest: record.mutationDigest,
@@ -535,9 +536,6 @@ function reduceRegistry(
       });
       break;
     case "workscene-legacy-import-opened": {
-      if (state.requests.has(record.requestId)) {
-        throw corruptRegistry("Migration request identity was reused");
-      }
       const mutation = record.mutation;
       let batch = state.legacyBatches.get(mutation.migrationId);
       if (!batch) {
@@ -562,10 +560,18 @@ function reduceRegistry(
       break;
     }
     case "workscene-legacy-import-activated": {
-      if (state.requests.has(record.requestId)) {
-        throw corruptRegistry("Migration request identity was reused");
+      let batch = state.legacyBatches.get(record.mutation.migrationId);
+      if (
+        !batch &&
+        record.mutation.importSetDigest === worksceneImportSetDigest([])
+      ) {
+        batch = {
+          sourceSnapshotToken: record.mutation.sourceSnapshotToken,
+          imports: new Map(),
+          status: "open",
+        };
+        state.legacyBatches.set(record.mutation.migrationId, batch);
       }
-      const batch = state.legacyBatches.get(record.mutation.migrationId);
       if (
         !batch ||
         batch.status !== "open" ||
@@ -589,9 +595,6 @@ function reduceRegistry(
       break;
     }
     case "workscene-legacy-import-abandoned": {
-      if (state.requests.has(record.requestId)) {
-        throw corruptRegistry("Migration request identity was reused");
-      }
       const batch = state.legacyBatches.get(record.mutation.migrationId);
       if (
         !batch ||
@@ -618,6 +621,68 @@ function reduceRegistry(
     }
   }
   return state;
+}
+
+function assertAppliedTransition(
+  state: WorksceneRegistryProjection,
+  mutation: WorksceneWriteMutation,
+  result: WorksceneAppliedResult,
+): void {
+  if (mutation.kind === "workscene-create") {
+    if (
+      result.kind !== "workscene-applied" ||
+      result.operation !== "create" ||
+      state.scenes.has(result.scene.id) ||
+      state.tombstones.has(result.scene.id) ||
+      result.scene.revision !== 1 ||
+      result.scene.name !== mutation.name ||
+      !sameWorkspace(result.scene.workspace, mutation.workspace)
+    ) {
+      throw corruptRegistry(
+        "Workscene creation result contradicts the authoritative state",
+      );
+    }
+    return;
+  }
+
+  const sceneId = mutation.sceneId;
+  const current = state.scenes.get(sceneId);
+  if (!current || current.revision !== mutation.expectedRevision) {
+    throw corruptRegistry(
+      "Workscene mutation does not bind the current object revision",
+    );
+  }
+  if (mutation.kind === "workscene-delete") {
+    if (
+      result.kind !== "workscene-deleted" ||
+      result.operation !== "delete" ||
+      result.sceneId !== sceneId ||
+      result.previousObjectRevision !== current.revision
+    ) {
+      throw corruptRegistry(
+        "Workscene deletion result contradicts the authoritative state",
+      );
+    }
+    return;
+  }
+
+  if (result.kind !== "workscene-applied") {
+    throw corruptRegistry("Workscene mutation returned a deletion result");
+  }
+  const expected = cloneScene(current);
+  expected.revision = current.revision + 1;
+  if (mutation.kind === "workscene-rename") {
+    expected.name = mutation.name;
+  } else if (mutation.workspace) {
+    expected.workspace = { ...mutation.workspace };
+  } else {
+    delete expected.workspace;
+  }
+  if (canonicalize(result.scene) !== canonicalize(expected)) {
+    throw corruptRegistry(
+      "Workscene mutation result changes fields outside its authority",
+    );
+  }
 }
 
 function applyResult(
@@ -669,6 +734,12 @@ function validateMigrationTransition(
       }
       return;
     case "workscene-activate-device-registry":
+      if (
+        !batch &&
+        mutation.importSetDigest === worksceneImportSetDigest([])
+      ) {
+        return;
+      }
       if (
         !batch ||
         batch.status !== "open" ||
@@ -730,23 +801,46 @@ function migrationRecord(
 function validateMutation(
   input: WorksceneWriteMutation,
 ): WorksceneWriteMutation {
+  assertPlainRecord(input, "Workscene mutation");
   const mutation = structuredClone(input);
   switch (mutation.kind) {
     case "workscene-create":
+      assertRecordKeys(
+        mutation,
+        mutation.workspace
+          ? ["kind", "name", "workspace"]
+          : ["kind", "name"],
+        "Workscene create mutation",
+      );
       mutation.name = normalizeName(mutation.name);
       if (mutation.workspace) validateWorkspace(mutation.workspace);
       break;
     case "workscene-rename":
+      assertRecordKeys(
+        mutation,
+        ["expectedRevision", "kind", "name", "sceneId"],
+        "Workscene rename mutation",
+      );
       requireIdentifier(mutation.sceneId, "Workscene id");
       mutation.name = normalizeName(mutation.name);
       requireRevision(mutation.expectedRevision);
       break;
     case "workscene-set-workdir":
+      assertRecordKeys(
+        mutation,
+        ["expectedRevision", "kind", "sceneId", "workspace"],
+        "Workscene workspace mutation",
+      );
       requireIdentifier(mutation.sceneId, "Workscene id");
       if (mutation.workspace) validateWorkspace(mutation.workspace);
       requireRevision(mutation.expectedRevision);
       break;
     case "workscene-delete":
+      assertRecordKeys(
+        mutation,
+        ["expectedRevision", "kind", "sceneId"],
+        "Workscene delete mutation",
+      );
       requireIdentifier(mutation.sceneId, "Workscene id");
       requireRevision(mutation.expectedRevision);
       break;
@@ -759,20 +853,59 @@ function validateMutation(
 function validateMigrationMutation(
   input: WorksceneMigrationMutation,
 ): WorksceneMigrationMutation {
+  assertPlainRecord(input, "Workscene migration mutation");
   const mutation = structuredClone(input);
   requireIdentifier(mutation.migrationId, "Migration id");
   requireIdentifier(mutation.sourceSnapshotToken, "Source snapshot token");
   switch (mutation.kind) {
     case "workscene-import-legacy":
+      assertRecordKeys(
+        mutation,
+        [
+          "kind",
+          "migrationId",
+          "scene",
+          "sourceSnapshotToken",
+        ],
+        "Workscene legacy import mutation",
+      );
+      assertPlainRecord(mutation.scene, "Legacy workscene");
+      assertRecordKeys(
+        mutation.scene,
+        mutation.scene.workspace
+          ? ["createdAt", "id", "name", "workspace"]
+          : ["createdAt", "id", "name"],
+        "Legacy workscene",
+      );
       requireIdentifier(mutation.scene.id, "Legacy scene id");
       mutation.scene.name = normalizeName(mutation.scene.name);
       canonicalTime(mutation.scene.createdAt, "Legacy scene creation time");
       if (mutation.scene.workspace) validateWorkspace(mutation.scene.workspace);
       break;
     case "workscene-activate-device-registry":
+      assertRecordKeys(
+        mutation,
+        [
+          "importSetDigest",
+          "kind",
+          "migrationId",
+          "sourceSnapshotToken",
+        ],
+        "Workscene legacy activation mutation",
+      );
       requireDigest(mutation.importSetDigest, "Legacy import set digest");
       break;
     case "workscene-abandon-legacy-import":
+      assertRecordKeys(
+        mutation,
+        [
+          "kind",
+          "migrationId",
+          "reason",
+          "sourceSnapshotToken",
+        ],
+        "Workscene legacy abandonment mutation",
+      );
       if (
         typeof mutation.reason !== "string" ||
         mutation.reason.trim().length === 0
@@ -787,14 +920,78 @@ function validateMigrationMutation(
 }
 
 function validateRecord(record: WorksceneRegistryRecord): WorksceneRegistryRecord {
-  if (!record || typeof record !== "object") {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw corruptRegistry("Workscene registry record is malformed");
   }
-  canonicalTime(record.at, "Workscene registry record time");
-  if (record.t === "workscene-deletion-projected") {
-    requireIdentifier(record.sceneId, "Workscene id");
-    requireRevision(record.deletionRevision);
+  switch (record.t) {
+    case "workscene-registry-established":
+      assertRecordKeys(
+        record,
+        ["at", "t"],
+        "Workscene registry genesis",
+      );
+      break;
+    case "workscene-control-applied": {
+      assertRecordKeys(
+        record,
+        [
+          "at",
+          "mutation",
+          "mutationDigest",
+          "requestId",
+          "result",
+          "t",
+        ],
+        "Workscene control record",
+      );
+      requireIdentifier(record.requestId, "Workscene requestId");
+      const mutation = validateMutation(record.mutation);
+      if (canonicalize(mutation) !== canonicalize(record.mutation)) {
+        throw corruptRegistry("Workscene mutation is not canonical");
+      }
+      const expected = protocolDigest("WorksceneWriteMutation", 1, mutation);
+      if (record.mutationDigest !== expected) {
+        throw corruptRegistry("Workscene mutation digest is inconsistent");
+      }
+      validateAppliedResult(record.result, mutation);
+      break;
+    }
+    case "workscene-legacy-import-opened":
+    case "workscene-legacy-import-activated":
+    case "workscene-legacy-import-abandoned": {
+      assertRecordKeys(
+        record,
+        ["at", "mutation", "mutationDigest", "requestId", "t"],
+        "Workscene migration record",
+      );
+      requireIdentifier(record.requestId, "Workscene migration requestId");
+      const mutation = validateMigrationMutation(record.mutation);
+      if (canonicalize(mutation) !== canonicalize(record.mutation)) {
+        throw corruptRegistry("Workscene migration mutation is not canonical");
+      }
+      const expected = protocolDigest(
+        "WorksceneMigrationMutation",
+        1,
+        mutation,
+      );
+      if (record.mutationDigest !== expected) {
+        throw corruptRegistry("Workscene migration digest is inconsistent");
+      }
+      break;
+    }
+    case "workscene-deletion-projected":
+      assertRecordKeys(
+        record,
+        ["at", "deletionRevision", "sceneId", "t"],
+        "Workscene deletion projection record",
+      );
+      requireIdentifier(record.sceneId, "Workscene id");
+      requireRevision(record.deletionRevision);
+      break;
+    default:
+      throw corruptRegistry("Workscene registry record tag is unknown");
   }
+  canonicalTime(record.at, "Workscene registry record time");
   return record;
 }
 
@@ -817,13 +1014,45 @@ function importedScene(
 export function worksceneImportSetDigest(
   scenes: readonly WorksceneDto[],
 ): Digest {
-  return protocolDigest(
-    "WorksceneLegacyImportSet",
-    1,
-    [...scenes]
-      .map(cloneScene)
-      .sort((left, right) => left.id.localeCompare(right.id, "en-US")),
-  );
+  return [...scenes]
+    .map(cloneScene)
+    .sort((left, right) => left.id.localeCompare(right.id, "en-US"))
+    .reduce<Digest>(
+      (digest, scene) => worksceneImportSetDigestNext(digest, scene),
+      protocolDigest("WorksceneLegacyImportSet", 2, { count: 0 }),
+    );
+}
+
+export function worksceneImportSetDigestNext(
+  previous: Digest,
+  scene: WorksceneDto,
+): Digest {
+  requireDigest(previous, "Legacy import accumulator");
+  return protocolDigest("WorksceneLegacyImportSet", 2, {
+    previous,
+    scene: cloneScene(scene),
+  });
+}
+
+export function canonicalLegacyWorksceneImport(input: {
+  readonly id: string;
+  readonly name: string;
+  readonly createdAt: string;
+  readonly workspace?: { readonly deviceId: string; readonly bindingRef: string };
+}): WorksceneDto {
+  const name = input.name.trim().normalize("NFKC");
+  if (!name) {
+    throw new TypeError("Legacy workscene name is empty after normalization");
+  }
+  const imported: WorksceneDto = {
+    id: input.id,
+    revision: 1,
+    name,
+    createdAt: input.createdAt,
+    lastActiveAt: input.createdAt,
+  };
+  if (input.workspace) imported.workspace = { ...input.workspace };
+  return imported;
 }
 
 function importSetDigest(imports: Map<string, WorksceneDto>): Digest {
@@ -849,8 +1078,168 @@ function validateWorkspace(workspace: {
   deviceId: string;
   bindingRef: string;
 }): void {
+  assertPlainRecord(workspace, "Workscene workspace");
+  assertRecordKeys(
+    workspace,
+    ["bindingRef", "deviceId"],
+    "Workscene workspace",
+  );
   requireIdentifier(workspace.deviceId, "Workspace deviceId");
   requireIdentifier(workspace.bindingRef, "Workspace bindingRef");
+}
+
+function validateAppliedResult(
+  result: WorksceneAppliedResult,
+  mutation: WorksceneWriteMutation,
+): void {
+  assertPlainRecord(result, "Workscene applied result");
+  if (mutation.kind === "workscene-delete") {
+    assertRecordKeys(
+      result,
+      [
+        "kind",
+        "operation",
+        "previousObjectRevision",
+        "revision",
+        "sceneId",
+      ],
+      "Workscene delete result",
+    );
+    if (
+      result.kind !== "workscene-deleted" ||
+      result.operation !== "delete" ||
+      result.sceneId !== mutation.sceneId
+    ) {
+      throw corruptRegistry("Workscene delete result is inconsistent");
+    }
+    requireRevision(result.revision);
+    requireRevision(result.previousObjectRevision);
+    return;
+  }
+  assertRecordKeys(
+    result,
+    ["kind", "operation", "revision", "scene"],
+    "Workscene applied result",
+  );
+  if (
+    result.kind !== "workscene-applied" ||
+    result.operation !== operationForMutation(mutation)
+  ) {
+    throw corruptRegistry("Workscene applied result is inconsistent");
+  }
+  requireRevision(result.revision);
+  validateScene(result.scene);
+  switch (mutation.kind) {
+    case "workscene-create":
+      if (
+        result.scene.revision !== 1 ||
+        result.scene.name !== mutation.name ||
+        !sameWorkspace(result.scene.workspace, mutation.workspace) ||
+        result.scene.createdAt !== result.scene.lastActiveAt
+      ) {
+        throw corruptRegistry(
+          "Created workscene result is inconsistent",
+        );
+      }
+      break;
+    case "workscene-rename":
+      if (
+        result.scene.id !== mutation.sceneId ||
+        result.scene.revision !== mutation.expectedRevision + 1 ||
+        result.scene.name !== mutation.name
+      ) {
+        throw corruptRegistry("Renamed workscene result is inconsistent");
+      }
+      break;
+    case "workscene-set-workdir":
+      if (
+        result.scene.id !== mutation.sceneId ||
+        result.scene.revision !== mutation.expectedRevision + 1 ||
+        !sameWorkspace(result.scene.workspace, mutation.workspace)
+      ) {
+        throw corruptRegistry("Workscene workspace result is inconsistent");
+      }
+      break;
+  }
+}
+
+function sameWorkspace(
+  left: WorksceneDto["workspace"],
+  right: Extract<
+    WorksceneWriteMutation,
+    { kind: "workscene-set-workdir" }
+  >["workspace"],
+): boolean {
+  return (
+    left?.deviceId === right?.deviceId &&
+    left?.bindingRef === right?.bindingRef
+  );
+}
+
+function operationForMutation(
+  mutation: Exclude<WorksceneWriteMutation, { kind: "workscene-delete" }>,
+): "create" | "rename" | "set-workdir" {
+  switch (mutation.kind) {
+    case "workscene-create":
+      return "create";
+    case "workscene-rename":
+      return "rename";
+    case "workscene-set-workdir":
+      return "set-workdir";
+  }
+}
+
+function validateScene(scene: WorksceneDto): void {
+  assertPlainRecord(scene, "Workscene");
+  assertRecordKeys(
+    scene,
+    scene.workspace
+      ? [
+          "createdAt",
+          "id",
+          "lastActiveAt",
+          "name",
+          "revision",
+          "workspace",
+        ]
+      : ["createdAt", "id", "lastActiveAt", "name", "revision"],
+    "Workscene",
+  );
+  requireIdentifier(scene.id, "Workscene id");
+  requireRevision(scene.revision);
+  if (normalizeName(scene.name) !== scene.name) {
+    throw corruptRegistry("Workscene name is not canonical");
+  }
+  canonicalTime(scene.createdAt, "Workscene creation time");
+  canonicalTime(scene.lastActiveAt, "Workscene activity time");
+  if (Date.parse(scene.lastActiveAt) < Date.parse(scene.createdAt)) {
+    throw corruptRegistry("Workscene activity predates its creation");
+  }
+  if (scene.workspace) validateWorkspace(scene.workspace);
+}
+
+function assertPlainRecord(
+  value: unknown,
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw corruptRegistry(`${label} is malformed`);
+  }
+}
+
+function assertRecordKeys(
+  value: object,
+  expected: readonly string[],
+  label: string,
+): void {
+  if (Object.keys(value).sort().join(",") !== [...expected].sort().join(",")) {
+    throw corruptRegistry(`${label} fields are invalid`);
+  }
 }
 
 function normalizeName(value: string): string {

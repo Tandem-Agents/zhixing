@@ -234,6 +234,33 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     await expect(authority.environment!.probePath(workspacePath)).resolves.toBe(
       "directory",
     );
+    const resolveWorkspace = vi.spyOn(
+      authority.environment!,
+      "resolveWorkspace",
+    );
+    const firstPreflight =
+      authority.preflightLocalConversationEnvironment(manifest, "assignment-a");
+    const claimedPreflight =
+      authority.takeLocalConversationEnvironmentPreflight(
+        manifest,
+        "assignment-a",
+      );
+    await expect(Promise.all([firstPreflight, claimedPreflight])).resolves.toEqual([
+      { workspaceRoot: workspacePath },
+      { workspaceRoot: workspacePath },
+    ]);
+    await expect(
+      authority.preflightLocalConversationEnvironment(manifest, "assignment-a"),
+    ).resolves.toEqual({ workspaceRoot: workspacePath });
+    expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+    authority.releaseLocalConversationEnvironmentPreflight(
+      manifest,
+      "assignment-a",
+    );
+    await expect(
+      authority.preflightLocalConversationEnvironment(manifest, "assignment-a"),
+    ).resolves.toEqual({ workspaceRoot: workspacePath });
+    expect(resolveWorkspace).toHaveBeenCalledTimes(2);
 
     const staleManifest = {
       ...manifest,
@@ -259,8 +286,8 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       permissionRules: [],
     });
     expect(unbound.environment.workspace).toBeUndefined();
-    authority.stopStorageMaintenance();
-  });
+    await authority.stopStorageMaintenance();
+  }, 120_000);
 
   it("rolls back every partially acquired delivery resource when later startup fails", async () => {
     const order: string[] = [];
@@ -663,7 +690,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     );
   });
 
-  it("selects the first compatible remote executor and falls back to local capacity", async () => {
+  it("selects only the compatible executor named by owner affinity", async () => {
     const incompatibleHome = await createTempDir("delivery-incompatible-executor");
     const compatibleHome = await createTempDir("delivery-compatible-executor");
     try {
@@ -690,6 +717,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
         conversationId: "test-conversation",
         executionProfile: profile,
         permissionRules: [],
+        recentExecutorId: compatible.executorId,
         targets: [
           {
             executorId: incompatible.executorId,
@@ -711,6 +739,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
         conversationId: "test-conversation",
         executionProfile: profile,
         permissionRules: [],
+        recentExecutorId: anchor.executorId,
         targets: [{
           executorId: incompatible.executorId,
           deviceId: incompatible.identity.deviceId,
@@ -719,6 +748,20 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
         }],
       });
       expect(local.executorId).toBe(anchor.executorId);
+
+      await expect(
+        anchor.prepareConversationAssignment({
+          conversationId: "test-conversation",
+          executionProfile: profile,
+          permissionRules: [],
+          targets: [{
+            executorId: compatible.executorId,
+            deviceId: compatible.identity.deviceId,
+            synchronizePermission: (snapshot) =>
+              compatible.installPermissionSnapshot(snapshot),
+          }],
+        }),
+      ).rejects.toThrow("requires an explicit executor selection");
     } finally {
       await rm(incompatibleHome, { force: true, recursive: true });
       await rm(compatibleHome, { force: true, recursive: true });

@@ -2,7 +2,10 @@ import type {
   RuntimeFactory,
   SessionRuntime,
 } from "@zhixing/owner-kernel";
-import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
+import {
+  createAssignmentRuntimeAdapter,
+  createOwnerRuntimeAdapter,
+} from "@zhixing/runtime-host/session-adapter";
 
 type AgentRuntime = Parameters<typeof createOwnerRuntimeAdapter>[1];
 
@@ -19,6 +22,10 @@ export interface ExecutorRole {
     sessionId: string,
     environment?: { readonly workspaceRoot: string | null },
   ): Promise<SessionRuntime>;
+  createAssignmentRuntime(
+    sessionId: string,
+    environment?: { readonly workspaceRoot: string | null },
+  ): Promise<SessionRuntime>;
 }
 
 export function createExecutorRole(options: ExecutorRoleOptions): ExecutorRole {
@@ -26,6 +33,21 @@ export function createExecutorRole(options: ExecutorRoleOptions): ExecutorRole {
     async createSessionRuntime(sessionId, environment) {
       const runtime = await options.createAgentRuntime(sessionId, environment);
       return createOwnerRuntimeAdapter(sessionId, runtime);
+    },
+    async createAssignmentRuntime(sessionId, environment) {
+      const runtime = await options.createAgentRuntime(sessionId, environment);
+      return createAssignmentRuntimeAdapter(sessionId, runtime);
+    },
+  };
+}
+
+/** Assignment adapter: the runtime is retired when the assignment settles. */
+export function createInProcessAssignmentRuntimeFactory(
+  executor: ExecutorRole,
+): RuntimeFactory {
+  return {
+    create(sessionId, environment) {
+      return executor.createAssignmentRuntime(sessionId, environment);
     },
   };
 }

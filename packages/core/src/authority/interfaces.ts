@@ -28,7 +28,11 @@ export interface ArtifactStore {
   ): Promise<void>;
   get(ref: ArtifactRef): Promise<Uint8Array>;
   /** Reads at most `limit` bytes without materializing the complete artifact. */
-  readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array>;
+  readRange(
+    ref: ArtifactRef,
+    offset: number,
+    limit: number,
+  ): Promise<Uint8Array>;
   has(ref: ArtifactRef): Promise<boolean>;
 }
 
@@ -75,9 +79,9 @@ export interface ArtifactDeletionResult {
 
 export type ArtifactRetentionSnapshot =
   | {
-    readonly status: "current";
-    readonly retained: readonly ArtifactRef[];
-  }
+      readonly status: "current";
+      readonly retained: readonly ArtifactRef[];
+    }
   | { readonly status: "deferred" };
 
 export interface ArtifactGarbageCollectionResult {
@@ -125,6 +129,11 @@ export interface ProjectionTransactionOptions extends ProjectionReplayOptions {
   readonly cursor?: ProjectionCursor;
   /** Artifact references that a new commit may introduce. */
   readonly candidateReferences?: readonly ArtifactRef[];
+  /**
+   * Wraps the bounded physical read/append step after the commit-log lock is
+   * held. Capacity admission therefore never spans queue or file-lock wait.
+   */
+  readonly runPhysicalStep?: PhysicalStorageStepRunner;
 }
 
 export interface ProjectionTransactionContext {
@@ -156,7 +165,9 @@ export interface AuthorityLogSnapshot<Body = JsonValue> {
 }
 
 export interface AuthorityCommitLog {
-  append<Body>(entries: readonly LogicalRecord<Body>[]): Promise<CommitEnvelope<Body>>;
+  append<Body>(
+    entries: readonly LogicalRecord<Body>[],
+  ): Promise<CommitEnvelope<Body>>;
   readAll<Body = JsonValue>(): Promise<Array<CommitEnvelope<Body>>>;
   readSnapshot<Body = JsonValue>(): Promise<AuthorityLogSnapshot<Body>>;
   readStream<Body = JsonValue>(

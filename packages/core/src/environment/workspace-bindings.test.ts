@@ -19,7 +19,6 @@ import type {
 } from "../protocol/index.js";
 import {
   DefaultDeviceCapacityArbiter,
-  StorageMaintenanceTaskRunner,
   createDefaultDeviceCapacityPolicy,
 } from "../resources/index.js";
 import {
@@ -126,11 +125,7 @@ describe("WorkspaceBindingService", () => {
         control("same-request"),
       ),
     ).rejects.toBeInstanceOf(WorkspaceBindingConflictError);
-    await service.remove(
-      first.bindingRef,
-      first.revision,
-      control("remove-1"),
-    );
+    await service.remove(first.bindingRef, first.revision, control("remove-1"));
     await expect(
       service.resolveWorkspace(first.bindingRef),
     ).rejects.toBeInstanceOf(WorkspaceBindingNotFoundError);
@@ -254,6 +249,52 @@ describe("WorkspaceBindingService", () => {
       ),
     ).rejects.toThrow("cannot be revived");
   });
+
+  it.each([
+    {
+      name: "unknown record tag",
+      body: { t: "unknown-workspace-record" },
+    },
+    {
+      name: "extra durable field",
+      body: {
+        t: "directory-established",
+        deviceId: "device-a",
+        unexpected: true,
+      },
+    },
+    {
+      name: "request digest mismatch",
+      body: corruptCreateRecord({
+        requestDigest: protocolDigest("WorkspaceBindingCreate", 1, {
+          displayName: "Different",
+          absolutePath: path.resolve("different"),
+        }),
+      }),
+    },
+    {
+      name: "result contradicts its request",
+      body: corruptCreateRecord({
+        binding: {
+          bindingRef: "workspace-corrupt",
+          revision: 1,
+          displayName: "Different",
+          absolutePath: path.resolve("corrupt"),
+          workspaceBindingRevision: 1,
+        },
+      }),
+    },
+  ])("fails closed when recovery sees $name", async ({ body }) => {
+    const root = await tempRoot();
+    const service = createServiceAt(root);
+    await service.list(control("establish-directory"));
+    await appendRawRecord(root, body);
+
+    const restarted = createServiceAt(root);
+    await expect(
+      restarted.list(control("rebuild-after-corruption")),
+    ).rejects.toThrow();
+  });
 });
 
 async function createService(): Promise<WorkspaceBindingService> {
@@ -281,14 +322,14 @@ function createServiceAt(
   });
   return new WorkspaceBindingService({
     rootDir: path.join(root, "binding-state"),
+    catalogGeneration: "catalog-initial",
     deviceId: "device-a",
     executorId: "executor-a",
     log,
     verifier: identity,
     capacity,
-    migrationRunner: new StorageMaintenanceTaskRunner(),
-    capabilitySnapshot: async (workspaces) =>
-      descriptor(workspaces),
+    capabilitySnapshot: async (publication) =>
+      descriptor(publication.workspaces),
     versionInventory: async () => inventory(),
     clock: () => NOW,
     ...(bindingRefFactory ? { bindingRefFactory } : {}),
@@ -371,4 +412,46 @@ async function tempRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "workspace-binding-"));
   roots.push(root);
   return root;
+}
+
+async function appendRawRecord(root: string, body: unknown): Promise<void> {
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const log = new FileAuthorityCommitLog(
+    path.join(root, "binding-log"),
+    artifacts,
+    { clock: () => NOW },
+  );
+  await log.append([
+    {
+      stream: "executor:workspace-bindings",
+      body,
+    },
+  ]);
+}
+
+function corruptCreateRecord(
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  const request = {
+    kind: "create",
+    displayName: "Project",
+    absolutePath: path.resolve("corrupt"),
+  };
+  return {
+    t: "binding-created",
+    requestId: localEnvironmentControlSubject("device-a", "corrupt-record"),
+    requestDigest: protocolDigest("WorkspaceBindingCreate", 1, {
+      displayName: request.displayName,
+      absolutePath: request.absolutePath,
+    }),
+    request,
+    binding: {
+      bindingRef: "workspace-corrupt",
+      revision: 1,
+      displayName: request.displayName,
+      absolutePath: request.absolutePath,
+      workspaceBindingRevision: 1,
+    },
+    ...overrides,
+  };
 }

@@ -1087,9 +1087,7 @@ export class ConversationController {
         .catch(() => {});
       this.observedConversationId = null;
     }
-    await this.opts.workscene
-      .exit(sceneId, leavingConversationId)
-      .catch(() => {});
+    await this.opts.workscene.exit(sceneId, leavingConversationId);
     // 目标可能从 mainTarget 逐级降级到候选——每次 resume 前把切换窗口
     // 收敛到当次精确目标，不按整个 main 域放行。
     this.pendingSwitchTarget = (id) => id === mainTarget.conversationId;

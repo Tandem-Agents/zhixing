@@ -17,6 +17,7 @@ import type {
   ManagedSession,
   RunTurnOptions,
 } from "@zhixing/owner-kernel";
+import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import { runTurnWithCommit, type RunTurnHooks } from "@zhixing/owner-kernel/run-turn";
 import {
   SESSION_NOTIFICATIONS,
@@ -38,6 +39,7 @@ interface ProjectSessionTurnBaseOptions {
   readonly turnId: string;
   readonly runOptions?: RunTurnOptions;
   readonly hooks?: RunTurnHooks;
+  readonly environment?: ExplicitEnvironmentSelection;
   readonly notify: SessionTurnNotify;
   readonly abortSignal?: AbortSignal;
   readonly onPostTurnControlIntent?: (
@@ -64,6 +66,7 @@ export async function projectSessionTurn(
       input,
       opts.runOptions,
       opts.hooks,
+      opts.environment,
     );
 
     while (true) {

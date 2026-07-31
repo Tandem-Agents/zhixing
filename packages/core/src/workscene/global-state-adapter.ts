@@ -100,9 +100,17 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     switch (query.kind) {
       case "workscene-list": {
         const scenes = await this.#registry.list();
+        const projected = await Promise.all(
+          scenes.map((scene) => this.#mergeActivity(scene)),
+        );
         return {
           kind: "workscene-list",
-          scenes: await Promise.all(scenes.map((scene) => this.#mergeActivity(scene))),
+          scenes: projected.sort(
+            (left, right) =>
+              Date.parse(right.lastActiveAt) -
+                Date.parse(left.lastActiveAt) ||
+              left.id.localeCompare(right.id, "en-US"),
+          ),
         };
       }
       case "workscene-get": {

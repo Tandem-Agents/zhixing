@@ -97,7 +97,7 @@ describe("AnchorWorksceneGlobalStateAdapter", () => {
       conversationId: "ws:scene-a:first",
       sceneId: "scene-a",
       at: "2026-07-30T00:06:00.000Z",
-    }, "tombstone", 2);
+    }, "delete", 2);
     await expectLastActiveAt(fixture.adapter, "scene-a", NOW);
 
     const restarted = new AnchorWorksceneGlobalStateAdapter({
@@ -116,18 +116,18 @@ describe("AnchorWorksceneGlobalStateAdapter", () => {
       context("create"),
     );
     await fixture.log.append([
-      activityEntry("ws:scene-a:first", "scene-a", NOW, "put", 1),
-      activityEntry("ws:scene-a:second", "scene-a", LATER, "put", 1),
+      activityEntry("ws:scene-a:first", "scene-a", NOW, "upsert", 1),
+      activityEntry("ws:scene-a:second", "scene-a", LATER, "upsert", 1),
     ]);
     await expectLastActiveAt(fixture.adapter, "scene-a", LATER);
 
     await fixture.log.append([
-      activityEntry("ws:scene-a:second", "scene-a", LATER, "tombstone", 2),
+      activityEntry("ws:scene-a:second", "scene-a", LATER, "delete", 2),
       activityEntry(
         "ws:scene-a:first",
         "scene-a",
         "2026-07-30T00:01:00.000Z",
-        "put",
+        "upsert",
         2,
       ),
     ]);
@@ -217,7 +217,7 @@ function context(
 async function appendActivity(
   log: FileAuthorityCommitLog,
   input: { conversationId: string; sceneId: string; at: string },
-  operation: "put" | "tombstone" = "put",
+  operation: "upsert" | "delete" = "upsert",
   sessionRevision = 1,
 ) {
   await log.append([
@@ -235,7 +235,7 @@ function activityEntry(
   conversationId: string,
   sceneId: string,
   at: string,
-  operation: "put" | "tombstone",
+  operation: "upsert" | "delete",
   sessionRevision: number,
 ) {
   return {
@@ -246,7 +246,7 @@ function activityEntry(
       conversationId,
       sceneId,
       sessionRevision,
-      at,
+      lastActiveAt: at,
     },
   };
 }

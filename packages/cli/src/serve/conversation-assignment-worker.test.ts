@@ -46,6 +46,9 @@ describe("ConversationAssignmentWorker", () => {
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
       ledger: {
+        sealedBundleForRecovery: vi.fn(async () => ({
+          kind: "not-sealed" as const,
+        })),
         start: vi.fn(async () => ({ started: true })),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
@@ -92,9 +95,15 @@ describe("ConversationAssignmentWorker", () => {
       message: "Workspace binding changed before execution",
     };
     const onError = vi.fn();
+    const releasePreflightEnvironment = vi.fn();
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
-      ledger: { start } as unknown as ConversationAssignmentLedger,
+      ledger: {
+        sealedBundleForRecovery: vi.fn(async () => ({
+          kind: "not-sealed" as const,
+        })),
+        start,
+      } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
       artifacts: {} as ArtifactStore,
       submissionFor: () => ({
@@ -109,6 +118,7 @@ describe("ConversationAssignmentWorker", () => {
         workspaceRoot: null,
         error: rejection,
       })),
+      releasePreflightEnvironment,
       onError,
     });
 
@@ -117,6 +127,10 @@ describe("ConversationAssignmentWorker", () => {
 
     expect(start).not.toHaveBeenCalled();
     expect(runtimeFactory.create).not.toHaveBeenCalled();
+    expect(releasePreflightEnvironment).toHaveBeenCalledWith(
+      envelope.manifest,
+      assignmentId,
+    );
     expect(onError).toHaveBeenCalledWith(
       assignmentId,
       expect.objectContaining({ message: rejection.message }),
@@ -146,6 +160,9 @@ describe("ConversationAssignmentWorker", () => {
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
     const failExecution = vi.fn(async () => undefined);
     const ledger = {
+      sealedBundleForRecovery: vi.fn(async () => ({
+        kind: "not-sealed" as const,
+      })),
       start: vi.fn(async () => ({ started: true })),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
@@ -165,6 +182,7 @@ describe("ConversationAssignmentWorker", () => {
     const preflightEnvironment = vi.fn(async () => ({
       workspaceRoot: "D:\\workspace-a",
     }));
+    const releasePreflightEnvironment = vi.fn();
     const createRuntime = vi.fn(async () => {
       throw runtimeFailure;
     });
@@ -184,6 +202,7 @@ describe("ConversationAssignmentWorker", () => {
       finalizeUsage,
       interactions,
       preflightEnvironment,
+      releasePreflightEnvironment,
       onError,
     });
 
@@ -197,10 +216,17 @@ describe("ConversationAssignmentWorker", () => {
     expect(finalizeUsage).toHaveBeenCalledTimes(2);
     expect(drainAssignment).toHaveBeenCalledTimes(3);
     expect(ledger.closePendingInteractionsForRunEnd).toHaveBeenCalledTimes(2);
-    expect(preflightEnvironment).toHaveBeenCalledWith(envelope.manifest);
+    expect(preflightEnvironment).toHaveBeenCalledWith(
+      envelope.manifest,
+      envelope.assignmentId,
+    );
     expect(createRuntime).toHaveBeenCalledWith(
       envelope.work.conversationId,
       { workspaceRoot: "D:\\workspace-a" },
+    );
+    expect(releasePreflightEnvironment).toHaveBeenCalledWith(
+      envelope.manifest,
+      assignmentId,
     );
     expect(onError).toHaveBeenCalledWith(assignmentId, runtimeFailure);
   });
@@ -225,6 +251,9 @@ describe("ConversationAssignmentWorker", () => {
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
       ledger: {
+        sealedBundleForRecovery: vi.fn(async () => ({
+          kind: "not-sealed" as const,
+        })),
         start: vi.fn(async () => ({ started: true })),
         closePendingInteractionsForRunEnd: vi.fn(async () => 0),
         pendingInteractionMirrorBatch: vi.fn(async () => undefined),
@@ -436,6 +465,9 @@ describe("ConversationAssignmentWorker", () => {
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
     const failExecution = vi.fn(async () => undefined);
     const ledger = {
+      sealedBundleForRecovery: vi.fn(async () => ({
+        kind: "not-sealed" as const,
+      })),
       start: vi.fn(async () => ({ started: true })),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
@@ -577,6 +609,9 @@ describe("ConversationAssignmentWorker", () => {
       decision: { kind: "allow-once" as const },
     };
     const ledger = {
+      sealedBundleForRecovery: vi.fn(async () => ({
+        kind: "not-sealed" as const,
+      })),
       start: vi.fn(async () => ({ started: true })),
       prepareInteractionAnswerFromSurface: vi.fn(async () => prepared),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
@@ -818,6 +853,9 @@ describe("ConversationAssignmentWorker", () => {
     const sealConversationBundle = vi.fn(async () => ({ assignmentId } as SealedBundle));
     const interactions = interactionObserver();
     const ledger = {
+      sealedBundleForRecovery: vi.fn(async () => ({
+        kind: "not-sealed" as const,
+      })),
       start: vi.fn(async () => ({ started: true })),
       authorizeToolExecution: vi.fn(),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),

@@ -63,31 +63,31 @@ export class WorksceneSessionOwner {
     const conversationId = worksceneConversationId(sceneId, "primary");
     this.#assertSceneConversation(sceneId, conversationId);
     const at = new Date().toISOString();
-    let committedAt = at;
-    if (options.recordActivity !== false) {
-      committedAt = await this.#recordAuthority(
-        sceneId,
-        conversationId,
-        options.requestId,
-        at,
+    const manager = this.#conversations();
+    const observerClaimed =
+      manager?.addObserver(conversationId, observerId, {
+        allowInactive: true,
+      }) ?? false;
+    if (manager && !observerClaimed) {
+      throw worksceneBusy(
+        `Workscene ${sceneId} is being changed; try again later`,
       );
     }
-    await this.#directory.ensure(conversationId);
-    if (options.recordActivity !== false) {
-      await this.#directory.touch(conversationId, committedAt);
-    }
-    const manager = this.#conversations();
-    if (manager) {
-      await manager.getOrCreate(conversationId);
-      if (
-        !manager.addObserver(conversationId, observerId, {
-          allowInactive: true,
-        })
-      ) {
-        throw worksceneBusy(
-          `Workscene ${sceneId} is being changed; try again later`,
+    try {
+      if (options.recordActivity !== false) {
+        await this.#recordAuthority(
+          sceneId,
+          conversationId,
+          options.requestId,
+          at,
         );
       }
+      if (manager) await manager.getOrCreate(conversationId);
+    } catch (error) {
+      if (observerClaimed) {
+        manager?.removeObserver(conversationId, observerId);
+      }
+      throw error;
     }
     return conversationId;
   }
@@ -99,16 +99,30 @@ export class WorksceneSessionOwner {
     at: string,
   ): Promise<void> {
     this.#assertSceneConversation(sceneId, conversationId);
-    if (!(await this.#directory.exists(conversationId))) {
-      throw new Error("Workscene conversation does not exist");
-    }
-    const committedAt = await this.#recordAuthority(
+    await this.#recordAuthority(
       sceneId,
       conversationId,
       requestId,
       at,
     );
-    await this.#directory.touch(conversationId, committedAt);
+  }
+
+  async exit(
+    sceneId: string,
+    conversationId: string,
+    observerId: string,
+    requestId: string,
+    at: string,
+  ): Promise<void> {
+    this.#assertSceneConversation(sceneId, conversationId);
+    const manager = this.#conversations();
+    manager?.removeObserver(conversationId, observerId);
+    await this.#recordAuthority(
+      sceneId,
+      conversationId,
+      requestId,
+      at,
+    );
   }
 
   async quiesce(sceneId: string): Promise<() => void> {

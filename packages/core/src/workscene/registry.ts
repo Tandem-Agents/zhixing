@@ -16,10 +16,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { writeAtomic } from "../transcript/serializer.js";
-import {
-  getWorkSceneDir,
-  getWorkSceneIndexPath,
-} from "./paths.js";
+import { runHoldingMaintenanceExclusion } from "../resources/maintenance-context.js";
+import { getWorkSceneDir, getWorkSceneIndexPath } from "./paths.js";
 import type { IWorkSceneRegistry, WorkScene } from "./types.js";
 
 interface LegacyWorksceneCutover {
@@ -35,7 +33,8 @@ let legacyWriteFence: Promise<unknown> = Promise.resolve();
 export function withLegacyWorksceneWriteFence<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
-  const result = legacyWriteFence.then(operation, operation);
+  const run = () => runHoldingMaintenanceExclusion(operation);
+  const result = legacyWriteFence.then(run, run);
   legacyWriteFence = result.then(
     () => {},
     () => {},
@@ -57,7 +56,8 @@ export async function legacyWorksceneCutover(): Promise<
       typeof value.sourceDigest !== "string" ||
       typeof value.activatedAt !== "string" ||
       !Number.isFinite(Date.parse(value.activatedAt)) ||
-      new Date(Date.parse(value.activatedAt)).toISOString() !== value.activatedAt
+      new Date(Date.parse(value.activatedAt)).toISOString() !==
+        value.activatedAt
     ) {
       throw new Error("Legacy workscene cutover marker is malformed");
     }
@@ -93,10 +93,7 @@ export async function markLegacyWorksceneCutover(
     ...input,
     activatedAt: new Date().toISOString(),
   };
-  await writeAtomic(
-    legacyCutoverPath(),
-    JSON.stringify(marker, null, 2),
-  );
+  await writeAtomic(legacyCutoverPath(), JSON.stringify(marker, null, 2));
   return marker;
 }
 
@@ -165,8 +162,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     }
     return scenes.sort(
       (a, b) =>
-        new Date(b.lastActiveAt).getTime() -
-        new Date(a.lastActiveAt).getTime(),
+        new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
     );
   }
 
@@ -182,25 +178,27 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     // 全程持 index 锁：ensureUnique → 写 meta → 追加 index 原子完成，
     // 避免并发 add 抢同一 slug。writeMeta 内层 per-id 锁不与之死锁
     // （不同锁、固定外 index → 内 meta 顺序）。
-    return withLegacyWorksceneWriteFence(() => this.withIndexLock(async () => {
-      await assertLegacyWorksceneWritable();
-      const index = await this.readIndex();
-      const taken = new Set(index.scenes);
-      const id = await this.uniqueId(slugify(opts.name), taken);
-      const now = new Date().toISOString();
-      const scene: WorkScene = {
-        id,
-        name: opts.name,
-        ...(opts.workdir !== undefined ? { workdir: opts.workdir } : {}),
-        createdAt: now,
-        lastActiveAt: now,
-      };
-      // meta 先落盘再进 index：中途失败至多留未注册的孤儿目录（不被 list
-      // 列出，语义等价"未注册"），不会出现 index 指向缺失 meta。
-      await this.writeMeta(scene);
-      await this.writeIndex({ scenes: [...index.scenes, id] });
-      return scene;
-    }));
+    return withLegacyWorksceneWriteFence(() =>
+      this.withIndexLock(async () => {
+        await assertLegacyWorksceneWritable();
+        const index = await this.readIndex();
+        const taken = new Set(index.scenes);
+        const id = await this.uniqueId(slugify(opts.name), taken);
+        const now = new Date().toISOString();
+        const scene: WorkScene = {
+          id,
+          name: opts.name,
+          ...(opts.workdir !== undefined ? { workdir: opts.workdir } : {}),
+          createdAt: now,
+          lastActiveAt: now,
+        };
+        // meta 先落盘再进 index：中途失败至多留未注册的孤儿目录（不被 list
+        // 列出，语义等价"未注册"），不会出现 index 指向缺失 meta。
+        await this.writeMeta(scene);
+        await this.writeIndex({ scenes: [...index.scenes, id] });
+        return scene;
+      }),
+    );
   }
 
   /**
@@ -254,10 +252,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     });
   }
 
-  async setWorkdir(
-    id: string,
-    workdir: string | null,
-  ): Promise<WorkScene> {
+  async setWorkdir(id: string, workdir: string | null): Promise<WorkScene> {
     return withLegacyWorksceneWriteFence(async () => {
       await assertLegacyWorksceneWritable();
       return this.mutateMeta(id, (scene) => {
@@ -288,10 +283,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
 
   private async writeMeta(scene: WorkScene): Promise<void> {
     return this.withMetaLock(scene.id, async () => {
-      await writeAtomic(
-        metaPath(scene.id),
-        JSON.stringify(scene, null, 2),
-      );
+      await writeAtomic(metaPath(scene.id), JSON.stringify(scene, null, 2));
     });
   }
 
@@ -320,10 +312,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     });
   }
 
-  private async withMetaLock<T>(
-    id: string,
-    fn: () => Promise<T>,
-  ): Promise<T> {
+  private async withMetaLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.metaLocks.get(id) ?? Promise.resolve();
     const result = prev.then(fn);
     const tail = result.then(
@@ -352,10 +341,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
   }
 
   private async writeIndex(index: WorkSceneIndex): Promise<void> {
-    await writeAtomic(
-      getWorkSceneIndexPath(),
-      JSON.stringify(index, null, 2),
-    );
+    await writeAtomic(getWorkSceneIndexPath(), JSON.stringify(index, null, 2));
   }
 
   private async withIndexLock<T>(fn: () => Promise<T>): Promise<T> {

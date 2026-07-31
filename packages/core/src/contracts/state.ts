@@ -59,7 +59,7 @@ export type SessionControlMutation =
   | { kind: "advancement-event"; event: AdvancementControlEvent }
   | {
       kind: "session-meta";
-      patch: { name?: string; sceneId?: string | null; viewLayerState?: string };
+      patch: { name?: string; viewLayerState?: string };
     }
   | { kind: "window-op"; op: "clear" | "compact" }
   | { kind: "conversation-delete" };
@@ -75,11 +75,11 @@ export type SessionInternalRecord =
     }
   | {
       kind: "session-activity";
-      operation: "put" | "tombstone";
+      operation: "upsert" | "delete";
       conversationId: string;
       sceneId: string;
       sessionRevision: number;
-      at: IsoTime;
+      lastActiveAt: IsoTime;
     };
 
 export interface WorksceneDto {

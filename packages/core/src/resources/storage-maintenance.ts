@@ -26,6 +26,7 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "projection-compaction",
   "lifecycle-reconcile",
   "asset-gc",
+  "workspace-probe-retirement",
   "ticket-retirement",
   "stream-spool-reclaim",
 ] as const;
@@ -43,6 +44,7 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "projection-compaction": "durable-projection-index",
   "lifecycle-reconcile": "artifact-lifecycle-index",
   "asset-gc": "anchor-asset-maintainer",
+  "workspace-probe-retirement": "workspace-probe-owner",
   "ticket-retirement": "executor-data-plane",
   "stream-spool-reclaim": "executor-data-plane",
 } as const satisfies Readonly<
@@ -455,6 +457,14 @@ const STORAGE_STEP_BUDGETS: Readonly<
     16_384,
   ),
   "asset-gc": budget(16 * MIB, 0, 256 * MIB, 256 * MIB, 4_096),
+  // probe 退休 = 固定页的退休事实追加与完成时间索引收缩。
+  "workspace-probe-retirement": budget(
+    16 * MIB,
+    0,
+    64 * MIB,
+    16 * MIB,
+    4_096,
+  ),
   // 票据退休 = 有界 WAL 追加批与内存投影清理,量级由过期票据数决定。
   "ticket-retirement": budget(16 * MIB, 0, 64 * MIB, 16 * MIB, 4_096),
   // spool 回收 = 单 assignment 目录的墓碑写与物理删除。

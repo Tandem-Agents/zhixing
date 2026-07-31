@@ -180,8 +180,8 @@ async function reduceIncrementalActivity(
       conversationId: activity.conversationId,
       sceneId: activity.sceneId,
       sessionRevision: activity.sessionRevision,
-      at: activity.at,
-      deleted: activity.operation === "tombstone",
+      at: activity.lastActiveAt,
+      deleted: activity.operation === "delete",
     };
     const parsed = parseContribution(nextContribution);
     contributions.set(activity.conversationId, parsed);
@@ -244,7 +244,7 @@ function validateActivityRecord(
   if (stream !== `${SESSION_ACTIVITY_STREAM_PREFIX}${conversationId}`) {
     throw new Error("Session activity stream does not bind its conversation");
   }
-  if (value.operation !== "put" && value.operation !== "tombstone") {
+  if (value.operation !== "upsert" && value.operation !== "delete") {
     throw new Error("Session activity operation is invalid");
   }
   if (!Number.isSafeInteger(value.sessionRevision) || value.sessionRevision < 1) {
@@ -256,7 +256,7 @@ function validateActivityRecord(
     conversationId,
     sceneId,
     sessionRevision: value.sessionRevision,
-    at: requireTime(value.at),
+    lastActiveAt: requireTime(value.lastActiveAt),
   };
 }
 

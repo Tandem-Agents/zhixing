@@ -18,10 +18,6 @@ import {
   buildWorksceneDeleteMethod,
   buildWorksceneEnterMethod,
   buildWorksceneExitMethod,
-  buildLocalWorkspaceListMethod,
-  buildLocalWorkspaceRenameMethod,
-  buildLocalWorkspaceResetMethod,
-  buildLocalWorkspaceStatusMethod,
 } from "../methods/workscene.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import { WorksceneBusyError } from "@zhixing/owner-kernel";
@@ -52,6 +48,7 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
   let next = 0;
   return {
     touched,
+    async recover() {},
     async list() {
       return [...scenes.values()];
     },
@@ -98,6 +95,9 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
       touched.push(sceneId);
       return { conversationId: `ws:${sceneId}:conv_main`, scene };
     },
+    async exitScene(sceneId) {
+      touched.push(sceneId);
+    },
   };
 }
 
@@ -125,79 +125,6 @@ async function call(entry: { handler: (p: unknown, c: never) => unknown }, param
 }
 
 describe("workscene.* 方法", () => {
-  it("workspace 本地管理面只接受 loopback 并透传结构化操作", async () => {
-    const workscenes = memoryWorkscenes();
-    workscenes.localWorkspaceStatus = vi.fn(async () => ({
-      state: "degraded" as const,
-      catalogGeneration: "catalog-a",
-      reason: "damaged",
-    }));
-    workscenes.listLocalWorkspaces = vi.fn(async () => []);
-    workscenes.renameLocalWorkspace = vi.fn(async (input) => ({
-      bindingRef: input.bindingRef,
-      revision: input.expectedRevision + 1,
-      displayName: input.displayName,
-      absolutePath: "C:\\private\\workspace",
-      workspaceBindingRevision: 1,
-    }));
-    workscenes.resetLocalWorkspaceCatalog = vi.fn(async (input) => ({
-      requestId: input.requestId,
-      confirmationDigest: "sha256:confirmation",
-      previousCatalogGeneration: input.expectedCatalogGeneration,
-      catalogGeneration: "catalog-b",
-      logId: "workspace-bindings:catalog-b",
-      capabilityRevision: 2,
-      preparedAt: input.confirmationIssuedAt,
-    }));
-    const server = { workscenes } as unknown as ServerContext;
-    const local = {
-      server,
-      connection: { id: 1, loopback: true },
-    } as never;
-    const remote = {
-      server,
-      connection: { id: 2, loopback: false },
-    } as never;
-
-    await expect(
-      call(buildLocalWorkspaceStatusMethod(), {}, remote),
-    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.UNAUTHORIZED });
-    await expect(
-      call(buildLocalWorkspaceStatusMethod(), {}, local),
-    ).resolves.toMatchObject({ state: "degraded" });
-    await expect(
-      call(buildLocalWorkspaceListMethod(), {}, local),
-    ).resolves.toEqual({ workspaces: [] });
-    await expect(
-      call(
-        buildLocalWorkspaceRenameMethod(),
-        {
-          bindingRef: "binding-a",
-          displayName: "Project",
-          expectedRevision: 1,
-          requestId: "rename-a",
-        },
-        local,
-      ),
-    ).resolves.toMatchObject({ displayName: "Project", revision: 2 });
-    await expect(
-      call(
-        buildLocalWorkspaceResetMethod(),
-        {
-          expectedCatalogGeneration: "catalog-a",
-          requestId: "reset-a",
-          confirmationToken: "token-a",
-          confirmationIssuedAt: "2026-07-30T00:00:00.000Z",
-          confirmedImpact: "confirmed-impact",
-        },
-        local,
-      ),
-    ).resolves.toMatchObject({
-      previousCatalogGeneration: "catalog-a",
-      catalogGeneration: "catalog-b",
-    });
-  });
-
   it("管理面全链:create → list → rename → delete;不存在 NOT_FOUND", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });

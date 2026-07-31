@@ -133,7 +133,8 @@ export async function runExecutorRole(
           sessionId,
         ),
     });
-    const runtimeFactory = executor.createInProcessRuntimeFactory(role);
+    const runtimeFactory =
+      executor.createInProcessAssignmentRuntimeFactory(role);
     jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
@@ -201,7 +202,7 @@ export async function runExecutorRole(
     cleanupFailures.push(error);
   }
   try {
-    authority?.stopStorageMaintenance();
+    await authority?.stopStorageMaintenance();
   } catch (error) {
     cleanupFailures.push(error);
   }

@@ -124,7 +124,7 @@ export function registerCoreCleanup(
     registry.register("authorityRuntime.stopStorageMaintenance", async () => {
       const cleanup = resources.startupCleanups?.authorityRuntime;
       if (cleanup) await cleanup.run();
-      else resources.authorityRuntime!.stopStorageMaintenance();
+      else await resources.authorityRuntime!.stopStorageMaintenance();
     });
   }
   registry.register("heartbeat.clear", () => {

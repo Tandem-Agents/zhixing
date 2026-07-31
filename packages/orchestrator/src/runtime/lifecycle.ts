@@ -52,6 +52,7 @@ export type WindowCloseReason =
   | "session-dispose" // 会话实例整体销毁（cli 断开 / serve 会话驱逐）
   | "workmode-exit" // exitWorkMode 丢弃 work 运行体
   | "reload-replace" // reload 换代、退役旧实例
+  | "assignment-dispose" // assignment 级执行实例完成并退场
   | "assembly-rollback"; // 装配事务回滚、实例从未上位
 
 /**
@@ -60,7 +61,11 @@ export type WindowCloseReason =
  */
 export type DisposeReason = Extract<
   WindowCloseReason,
-  "session-dispose" | "workmode-exit" | "reload-replace" | "assembly-rollback"
+  | "session-dispose"
+  | "workmode-exit"
+  | "reload-replace"
+  | "assignment-dispose"
+  | "assembly-rollback"
 >;
 
 /**

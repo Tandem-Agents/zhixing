@@ -26,11 +26,13 @@ import {
 import {
   WorkspaceBindingCatalog,
   WorkspaceBindingCatalogConflictError,
+  workspaceCatalogGenerationStorageKey,
 } from "./workspace-binding-catalog.js";
 import { localEnvironmentControlSubject } from "./workspace-bindings.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2026-07-30T01:00:00.000Z";
+const capabilityRevisions = new Map<string, number>();
 const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   sign(schemaId, version, payload) {
     return {
@@ -68,10 +70,12 @@ describe("WorkspaceBindingCatalog", () => {
       control.requestId,
       new AbortController().signal,
     );
-    expect(await fixture.catalog.completeReset(
-      control.requestId,
-      new AbortController().signal,
-    )).toEqual(receipt);
+    expect(
+      await fixture.catalog.completeReset(
+        control.requestId,
+        new AbortController().signal,
+      ),
+    ).toEqual(receipt);
     expect(await fixture.catalog.status()).toMatchObject({
       state: "healthy",
       catalogGeneration: receipt.catalogGeneration,
@@ -93,7 +97,7 @@ describe("WorkspaceBindingCatalog", () => {
       { expectedCatalogGeneration: "catalog-initial" },
       control,
     );
-    fixture.catalog.stop();
+    await fixture.catalog.stop();
 
     const restarted = await createFixture(corruptLog(), fixture.root);
     await restarted.catalog.initialize();
@@ -204,6 +208,12 @@ async function createFixture(
       ioOperationsPerSecond: 10_000,
       cpuMillisPerSecond: 1_000,
     }),
+    probe: () => ({
+      cpuBusyRatio: 0,
+      availableMemoryBytes: Number.MAX_SAFE_INTEGER,
+      processRssBytes: 0,
+      temporaryBytesAvailable: Number.MAX_SAFE_INTEGER,
+    }),
   });
   const catalog = new WorkspaceBindingCatalog({
     rootDir: path.join(root, "catalog"),
@@ -211,7 +221,11 @@ async function createFixture(
     createGenerationLog: (generation) => {
       createdGenerations.push(generation);
       return new FileAuthorityCommitLog(
-        path.join(root, "logs", generation),
+        path.join(
+          root,
+          "logs",
+          workspaceCatalogGenerationStorageKey(generation),
+        ),
         artifacts,
         { clock: () => NOW },
       );
@@ -221,10 +235,13 @@ async function createFixture(
       executorId: "executor-a",
       verifier: identity,
       capacity,
-      migrationRunner: new StorageMaintenanceTaskRunner(),
-      capabilitySnapshot: async (workspaces) => {
-        published.push(workspaces.map((workspace) => ({ ...workspace })));
-        return descriptor(workspaces);
+      capabilitySnapshot: async (publication) => {
+        published.push(
+          publication.workspaces.map((workspace) => ({ ...workspace })),
+        );
+        const revision = (capabilityRevisions.get(root) ?? 0) + 1;
+        capabilityRevisions.set(root, revision);
+        return descriptor(publication.workspaces, revision);
       },
       versionInventory: async () => inventory(),
       clock: () => NOW,
@@ -242,7 +259,7 @@ function recoveryControl(requestId: string, catalogGeneration: string) {
     ...adminControl(requestId),
     confirmation: {
       kind: "workspace-binding-reset" as const,
-      token: "confirmed-reset-token-0001",
+      token: "confirmed-reset-token-0001-with-high-entropy",
       requestId: request,
       catalogGeneration,
       issuedAt: NOW,
@@ -288,11 +305,12 @@ function immediateLease(requestId: string): ImmediateRootResourceLease {
 
 function descriptor(
   workspaces: CapabilityDescriptor["workspaces"],
+  revision = 1,
 ): CapabilityDescriptor {
   return {
     v: 1,
     executorId: "executor-a",
-    revision: 1,
+    revision,
     protocolVersion: "1",
     workspaces,
     tools: [],

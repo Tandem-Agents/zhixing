@@ -11,6 +11,7 @@ import type {
   ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
   createExecutorRole,
+  createInProcessAssignmentRuntimeFactory,
   createInProcessRuntimeFactory,
 } from "@zhixing/executor";
 
@@ -46,6 +47,8 @@ export interface ExecutorRoleModule {
   readonly ExecutorResourceGovernor: typeof ExecutorResourceGovernor;
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   readonly createExecutorRole: typeof createExecutorRole;
+  readonly createInProcessAssignmentRuntimeFactory:
+    typeof createInProcessAssignmentRuntimeFactory;
   readonly createInProcessRuntimeFactory: typeof createInProcessRuntimeFactory;
 }
 

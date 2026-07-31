@@ -641,16 +641,16 @@ export function validateConversationRunInternalRecord(
     assertExactRecordKeys(
       value,
       [
-        "at",
         "conversationId",
         "kind",
+        "lastActiveAt",
         "operation",
         "sceneId",
         "sessionRevision",
       ],
       "Session activity record",
     );
-    if (value.operation !== "put" && value.operation !== "tombstone") {
+    if (value.operation !== "upsert" && value.operation !== "delete") {
       throw corruptRunJournal("Session activity operation is invalid");
     }
     assertIdentifier(value.conversationId, "Session activity conversation id");
@@ -659,7 +659,7 @@ export function validateConversationRunInternalRecord(
       value.sessionRevision,
       "Session activity revision",
     );
-    assertCanonicalTime(value.at, "Session activity time");
+    assertCanonicalTime(value.lastActiveAt, "Session activity time");
     return value as ConversationRunInternalRecord;
   }
   if (value.kind !== "content-asset-index") {

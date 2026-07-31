@@ -44,10 +44,7 @@ import {
   deletedConversationOf,
   isRetainingAuthorityRecord,
 } from "./artifact-retention.js";
-import {
-  collectArtifactGarbage,
-  FileArtifactStore,
-} from "./artifact-store.js";
+import { collectArtifactGarbage, FileArtifactStore } from "./artifact-store.js";
 import {
   bindDurableProjectionMutations,
   createBoundDurableProjectionReadContext,
@@ -89,7 +86,8 @@ import {
 
 export const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const STREAM_PATTERN = /^(?:control|publish|governor|final-outbox|trust|exposure|delivery|pairing|checkpoint|(?:run|job|transfer|intent|assignment|executor|session-activity):[^\u0000-\u001f\u007f]{1,480})$/u;
+const STREAM_PATTERN =
+  /^(?:control|publish|governor|final-outbox|trust|exposure|delivery|pairing|checkpoint|(?:run|job|transfer|intent|assignment|executor|session-activity):[^\u0000-\u001f\u007f]{1,480})$/u;
 const LOG_ID_BYTES = 32;
 const RETAINED_REFERENCE_PROJECTION_ID = "authority-retained-references";
 const RETAINED_REFERENCE_PREFIX = "retention/reference/";
@@ -202,11 +200,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     entries: readonly LogicalRecord<Body>[],
   ): Promise<CommitEnvelope<Body>> {
     if (entries.length === 0) {
-      throw new TypeError("A commit envelope must contain at least one logical record");
+      throw new TypeError(
+        "A commit envelope must contain at least one logical record",
+      );
     }
     const normalizedEntries = normalizeEntries(entries);
     const references = collectRetainedArtifactRefs(normalizedEntries);
-    const appendOperation = () => this.#withLogLock(() => this.#append(normalizedEntries));
+    const appendOperation = () =>
+      this.#withLogLock(() => this.#append(normalizedEntries));
     return references.length === 0
       ? appendOperation()
       : this.artifactStore.withPresentReferences(references, appendOperation);
@@ -256,7 +257,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const existing = this.#durableProjections.get(definition.projectionId);
     if (existing) {
       if (existing.state.reducerVersion !== definition.reducerVersion) {
-        throw new TypeError("Durable projection reducer version is inconsistent");
+        throw new TypeError(
+          "Durable projection reducer version is inconsistent",
+        );
       }
       return this.#boundProjection(existing);
     }
@@ -301,7 +304,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   async readTail<Body = JsonValue>(
     checkpoint: DurableLogCheckpoint,
     limit: number,
-    runPhysicalStep: PhysicalStorageStepRunner = async (operation) => operation(),
+    runPhysicalStep: PhysicalStorageStepRunner = async (operation) =>
+      operation(),
   ): Promise<{
     readonly commits: readonly CommitEnvelope<Body>[];
     readonly checkpoint: DurableLogCheckpoint;
@@ -310,28 +314,33 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 256) {
       throw new RangeError("Authority log tail limit must be 1-256");
     }
-    return this.#withLogLock(() => runPhysicalStep(async () => {
-      await this.#validateDurableCheckpoint(checkpoint);
-      const commits: Array<CommitEnvelope<JsonValue>> = [];
-      const scanned = await this.#scanLogFrom(
-        checkpoint.frameEndOffset,
-        checkpoint.lsn,
-        checkpoint.prefixDigest,
-        (envelope) => {
-          commits.push(envelope);
-          return commits.length < limit;
-        },
-      );
-      if (scanned.incompleteTail) {
-        await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
-      }
-      await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
-      return {
-        commits: commits as Array<CommitEnvelope<Body>>,
-        checkpoint: this.#durableCheckpoint(scanned.lastLsn),
-        hasMore: scanned.stopped === true,
-      };
-    }));
+    return this.#withLogLock(() =>
+      runPhysicalStep(async () => {
+        await this.#validateDurableCheckpoint(checkpoint);
+        const commits: Array<CommitEnvelope<JsonValue>> = [];
+        const scanned = await this.#scanLogFrom(
+          checkpoint.frameEndOffset,
+          checkpoint.lsn,
+          checkpoint.prefixDigest,
+          (envelope) => {
+            commits.push(envelope);
+            return commits.length < limit;
+          },
+        );
+        if (scanned.incompleteTail) {
+          await this.#quarantineTail(
+            scanned.incompleteTail,
+            scanned.validBytes,
+          );
+        }
+        await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+        return {
+          commits: commits as Array<CommitEnvelope<Body>>,
+          checkpoint: this.#durableCheckpoint(scanned.lastLsn),
+          hasMore: scanned.stopped === true,
+        };
+      }),
+    );
   }
 
   async readEnvelopeAt<Body = JsonValue>(
@@ -349,7 +358,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           fileReader(handle, metadata.size),
           checkpoint.frameEndOffset,
         );
-        const frameBytes = checkpoint.frameEndOffset - boundary.frameStartOffset;
+        const frameBytes =
+          checkpoint.frameEndOffset - boundary.frameStartOffset;
         let result: CommitEnvelope<JsonValue> | undefined;
         const scanned = await scanAuthorityWalFrames(
           fileReader(handle, frameBytes, boundary.frameStartOffset),
@@ -412,7 +422,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await this.#scanLog((envelope) => {
         if (envelope.lsn <= afterLsn) return;
         for (const record of envelope.entries) {
-          if (selectedStreams === undefined || selectedStreams.has(record.stream)) {
+          if (
+            selectedStreams === undefined ||
+            selectedStreams.has(record.stream)
+          ) {
             state = reducer(
               state,
               record as LogicalRecord<Body>,
@@ -440,7 +453,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       options.afterLsn !== undefined &&
       options.cursor.lsn !== options.afterLsn
     ) {
-      throw new TypeError("Projection cursor and afterLsn must identify the same prefix");
+      throw new TypeError(
+        "Projection cursor and afterLsn must identify the same prefix",
+      );
     }
     const afterLsn = options.cursor?.lsn ?? options.afterLsn ?? 0;
     assertReplayLsn(afterLsn);
@@ -449,80 +464,97 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       options.candidateReferences ?? [],
     );
     const candidateDigests = new Map(
-      candidateReferences.map((reference) => [reference.digest, reference.bytes]),
+      candidateReferences.map((reference) => [
+        reference.digest,
+        reference.bytes,
+      ]),
     );
+    const runPhysicalStep =
+      options.runPhysicalStep ??
+      (async <T>(operation: () => Promise<T>) => operation());
     const operation = () =>
-      this.#withLogLock(async () => {
-        const replay: Array<{
-          record: LogicalRecord<Body>;
-          envelope: CommitEnvelope<Body>;
-        }> = [];
-        const replayTail = await this.#readProjectionTail(
-          options.cursor,
-          afterLsn,
-          (rawEnvelope) => {
-          const envelope = rawEnvelope as unknown as CommitEnvelope<Body>;
-          for (const record of envelope.entries) {
-            if (selectedStreams === undefined || selectedStreams.has(record.stream)) {
-              replay.push({ record, envelope });
+      this.#withLogLock(() =>
+        runPhysicalStep(async () => {
+          const replay: Array<{
+            record: LogicalRecord<Body>;
+            envelope: CommitEnvelope<Body>;
+          }> = [];
+          const replayTail = await this.#readProjectionTail(
+            options.cursor,
+            afterLsn,
+            (rawEnvelope) => {
+              const envelope = rawEnvelope as unknown as CommitEnvelope<Body>;
+              for (const record of envelope.entries) {
+                if (
+                  selectedStreams === undefined ||
+                  selectedStreams.has(record.stream)
+                ) {
+                  replay.push({ record, envelope });
+                }
+              }
+            },
+          );
+          const { lastLsn } = replayTail;
+          if (afterLsn > lastLsn) {
+            throw new AuthorityStorageError(
+              "commit-log-corrupt",
+              `Projection cursor ${afterLsn} is ahead of commit log LSN ${lastLsn}`,
+            );
+          }
+
+          let state = initial;
+          for (const item of replay) {
+            state = await reducer(state, item.record, item.envelope);
+          }
+          const at = this.#clock();
+          assertCanonicalTime(at);
+          const decision = decide(state, {
+            lastLsn,
+            nextLsn: lastLsn + 1,
+            at,
+          });
+          if (decision.kind === "return") {
+            return {
+              value: decision.value,
+              state,
+              lastLsn,
+              cursor: replayTail.cursor,
+            };
+          }
+
+          const entries = normalizeEntries(decision.entries);
+          assertTransactionReferencesProtected(
+            collectRetainedArtifactRefs(entries),
+            candidateDigests,
+          );
+          const candidate = createCommitEnvelope(lastLsn + 1, at, entries);
+          let nextState = state;
+          for (const record of candidate.entries) {
+            if (
+              selectedStreams === undefined ||
+              selectedStreams.has(record.stream)
+            ) {
+              nextState = await reducer(nextState, record, candidate);
             }
           }
-          },
-        );
-        const { lastLsn } = replayTail;
-        if (afterLsn > lastLsn) {
-          throw new AuthorityStorageError(
-            "commit-log-corrupt",
-            `Projection cursor ${afterLsn} is ahead of commit log LSN ${lastLsn}`,
-          );
-        }
-
-        let state = initial;
-        for (const item of replay) {
-          state = await reducer(state, item.record, item.envelope);
-        }
-        const at = this.#clock();
-        assertCanonicalTime(at);
-        const decision = decide(state, {
-          lastLsn,
-          nextLsn: lastLsn + 1,
-          at,
-        });
-        if (decision.kind === "return") {
+          const commit = await this.#append(entries, at, candidate);
+          state = nextState;
           return {
             value: decision.value,
             state,
-            lastLsn,
-            cursor: replayTail.cursor,
+            lastLsn: commit.lsn,
+            cursor: this.#projectionCursor(commit.lsn),
+            commit,
           };
-        }
-
-        const entries = normalizeEntries(decision.entries);
-        assertTransactionReferencesProtected(
-          collectRetainedArtifactRefs(entries),
-          candidateDigests,
-        );
-        const candidate = createCommitEnvelope(lastLsn + 1, at, entries);
-        let nextState = state;
-        for (const record of candidate.entries) {
-          if (selectedStreams === undefined || selectedStreams.has(record.stream)) {
-            nextState = await reducer(nextState, record, candidate);
-          }
-        }
-        const commit = await this.#append(entries, at, candidate);
-        state = nextState;
-        return {
-          value: decision.value,
-          state,
-          lastLsn: commit.lsn,
-          cursor: this.#projectionCursor(commit.lsn),
-          commit,
-        };
-      });
+        }),
+      );
 
     return candidateReferences.length === 0
       ? operation()
-      : this.artifactStore.withPresentReferences(candidateReferences, operation);
+      : this.artifactStore.withPresentReferences(
+          candidateReferences,
+          operation,
+        );
   }
 
   async transactDurableProjection<Body = JsonValue, Value = void>(
@@ -540,18 +572,23 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }> {
     const projection = this.#durableProjections.get(projectionId);
     if (!projection) {
-      throw new TypeError(`Durable projection is not registered: ${projectionId}`);
+      throw new TypeError(
+        `Durable projection is not registered: ${projectionId}`,
+      );
     }
     const candidateReferences = collectArtifactRefs(
       options.candidateReferences ?? [],
     );
     const candidateDigests = new Map(
-      candidateReferences.map((reference) => [reference.digest, reference.bytes]),
+      candidateReferences.map((reference) => [
+        reference.digest,
+        reference.bytes,
+      ]),
     );
     const operation = () =>
       this.#withLogLock(async () => {
         await this.#withDurableProjectionRecovery(projection, () =>
-          this.#synchronizeDurableProjection(projection)
+          this.#synchronizeDurableProjection(projection),
         );
         const lastLsn = await this.#loadLastLsn();
         const at = this.#clock();
@@ -576,7 +613,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       });
     return candidateReferences.length === 0
       ? operation()
-      : this.artifactStore.withPresentReferences(candidateReferences, operation);
+      : this.artifactStore.withPresentReferences(
+          candidateReferences,
+          operation,
+        );
   }
 
   async collectGarbage(
@@ -615,10 +655,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         const stored = await this.#retainedReferenceIndex.get(key);
         if (stored === undefined) continue;
         const ref = retainedArtifactRef(stored, key);
-        if (
-          ref.digest !== candidate.digest ||
-          ref.bytes !== candidate.bytes
-        ) {
+        if (ref.digest !== candidate.digest || ref.bytes !== candidate.bytes) {
           throw new AuthorityStorageError(
             "invalid-authority-record",
             `Artifact ${candidate.digest} declares conflicting byte counts`,
@@ -711,7 +748,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     options: RetainedReferenceQueryOptions,
   ): Promise<boolean> {
     if (
-      await this.#retainedReferenceIndex.get(retainedUnconditionalKey(digest))
+      await this.#retainedReferenceIndex
+        .get(retainedUnconditionalKey(digest))
         .then((value) => {
           if (value === undefined) return false;
           retainedUnconditionalDigest(value, retainedUnconditionalKey(digest));
@@ -887,8 +925,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       );
     }
     const at = committedAt ?? this.#clock();
-    const envelope =
-      preparedEnvelope ?? createCommitEnvelope(lsn, at, entries);
+    const envelope = preparedEnvelope ?? createCommitEnvelope(lsn, at, entries);
     if (
       envelope.lsn !== lsn ||
       envelope.at !== at ||
@@ -1088,7 +1125,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     ) => void | Promise<void>,
   ): Promise<{ readonly lastLsn: number; readonly cursor: ProjectionCursor }> {
     if (cursor !== undefined && !(cursor instanceof FileProjectionCursor)) {
-      throw new TypeError("Projection cursor was not issued by this commit log");
+      throw new TypeError(
+        "Projection cursor was not issued by this commit log",
+      );
     }
     const metadata = await stat(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
@@ -1271,7 +1310,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
   }
 
-  async #recordVerifiedTail(lastLsn: number, prefixDigest: string): Promise<void> {
+  async #recordVerifiedTail(
+    lastLsn: number,
+    prefixDigest: string,
+  ): Promise<void> {
     const metadata = await stat(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
@@ -1607,9 +1649,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       return logIdBytes.toString("base64url");
     } catch (error) {
       if (isNodeError(error, "EEXIST")) {
-        return decodeAuthorityWalFileHeader(
-          await readFile(this.identityPath),
-        ).logId;
+        return decodeAuthorityWalFileHeader(await readFile(this.identityPath))
+          .logId;
       }
       throw new AuthorityStorageError(
         "commit-log-corrupt",
@@ -1670,9 +1711,12 @@ function validateProjectionStreams(
   options: ProjectionReplayOptions,
 ): ReadonlySet<string> | undefined {
   if (options.stream !== undefined && options.streams !== undefined) {
-    throw new TypeError("Projection stream and streams options are mutually exclusive");
+    throw new TypeError(
+      "Projection stream and streams options are mutually exclusive",
+    );
   }
-  const values = options.streams ??
+  const values =
+    options.streams ??
     (options.stream === undefined ? undefined : [options.stream]);
   if (values === undefined) return undefined;
   if (values.length === 0) {
@@ -1833,31 +1877,31 @@ function retainedLeafPrefix(digest: string): string {
 }
 
 function retainedLeafKey(digest: string, conversationId: string): string {
-  return `${retainedLeafPrefix(digest)}${
-    Buffer.from(conversationId, "utf8").toString("base64url")
-  }`;
+  return `${retainedLeafPrefix(digest)}${Buffer.from(
+    conversationId,
+    "utf8",
+  ).toString("base64url")}`;
 }
 
 function retainedDeadKey(conversationId: string): string {
-  return `${RETAINED_DEAD_PREFIX}${
-    Buffer.from(conversationId, "utf8").toString("base64url")
-  }`;
+  return `${RETAINED_DEAD_PREFIX}${Buffer.from(conversationId, "utf8").toString(
+    "base64url",
+  )}`;
 }
 
 function retainedRootKey(root: unknown): string {
-  return `${RETAINED_ROOT_PREFIX}${
-    protocolDigest("AuthorityRetainedReferenceRoot", 1, root)
-  }`;
+  return `${RETAINED_ROOT_PREFIX}${protocolDigest(
+    "AuthorityRetainedReferenceRoot",
+    1,
+    root,
+  )}`;
 }
 
 function retainedProjectionValue(value: unknown): JsonValue {
   return JSON.parse(canonicalize(value)) as JsonValue;
 }
 
-function retainedArtifactRef(
-  value: JsonValue,
-  key?: string,
-): ArtifactRef {
+function retainedArtifactRef(value: JsonValue, key?: string): ArtifactRef {
   if (
     !isPlainRecord(value) ||
     typeof value.digest !== "string" ||
@@ -1971,9 +2015,7 @@ function invalidRetainedProjection(
   return new RetainedReferenceProjectionValueError(message);
 }
 
-class RetainedReferenceProjectionValueError
-  extends DurableProjectionStorageError
-{
+class RetainedReferenceProjectionValueError extends DurableProjectionStorageError {
   constructor(message: string) {
     super(message);
     this.name = "RetainedReferenceProjectionValueError";
@@ -2030,7 +2072,8 @@ function parseEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValue> {
   }
   assertCanonicalTime(value.at);
   for (const entry of value.entries) {
-    if (!isPlainRecord(entry)) throw invalidEnvelope("Logical record must be an object");
+    if (!isPlainRecord(entry))
+      throw invalidEnvelope("Logical record must be an object");
     assertExactKeys(entry, ["body", "stream"]);
     if (typeof entry.stream !== "string") {
       throw invalidEnvelope("Logical record stream must be a string");
@@ -2061,8 +2104,13 @@ function assertStream(stream: string): void {
 
 function assertCanonicalTime(value: string): void {
   const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
-    throw new TypeError("Commit envelope time must be a canonical ISO timestamp");
+  if (
+    !Number.isFinite(timestamp) ||
+    new Date(timestamp).toISOString() !== value
+  ) {
+    throw new TypeError(
+      "Commit envelope time must be a canonical ISO timestamp",
+    );
   }
 }
 
@@ -2075,9 +2123,15 @@ function assertInlineBody(body: unknown): void {
   }
 }
 
-function assertExactKeys(value: Record<string, unknown>, expected: string[]): void {
+function assertExactKeys(
+  value: Record<string, unknown>,
+  expected: string[],
+): void {
   const actual = Object.keys(value).sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
     throw invalidEnvelope("Commit envelope contains unknown or missing fields");
   }
 }
@@ -2109,7 +2163,9 @@ function invalidEnvelope(message: string): AuthorityStorageError {
 
 function assertReplayLsn(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new TypeError("Projection replay LSN must be a non-negative safe integer");
+    throw new TypeError(
+      "Projection replay LSN must be a non-negative safe integer",
+    );
   }
 }
 
@@ -2224,6 +2280,9 @@ function tailMatches(
   );
 }
 
-function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+function isNodeError(
+  error: unknown,
+  code: string,
+): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && error.code === code;
 }

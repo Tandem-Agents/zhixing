@@ -7,6 +7,7 @@
     "firstTokenQuantile": 0.95,
     "frameRateQuantile": 0.05,
     "noiseMadMultiplier": 4,
+    "minimumNoiseToleranceRatio": 0.02,
     "minimumRetainedRatio": 0.8,
     "maximumFirstTokenIncreaseRatio": 0.1,
     "maximumFrameRateDecreaseRatio": 0.05

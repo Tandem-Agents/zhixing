@@ -78,7 +78,10 @@ export function createConversationDirectory(deps: {
 
     async exists(id): Promise<boolean> {
       const h = handlesFor(id);
-      return (await h.repo.get(h.localId)) !== null;
+      return (
+        (await h.repo.get(h.localId)) !== null ||
+        (await h.transcript.exists(h.localId))
+      );
     },
 
     async create(): Promise<Conversation> {
@@ -94,6 +97,11 @@ export function createConversationDirectory(deps: {
       const ensured = await h.repo.ensure(h.localId, { scope });
       await h.transcript.init(h.localId);
       return ensured;
+    },
+
+    async ensureTranscript(id): Promise<void> {
+      const h = handlesFor(id);
+      await h.transcript.init(h.localId);
     },
 
     async touch(id, at): Promise<Conversation | null> {
@@ -130,7 +138,9 @@ export function createConversationDirectory(deps: {
 
     async remove(id): Promise<boolean> {
       const h = handlesFor(id);
-      const existing = await h.repo.get(h.localId);
+      const existing =
+        (await h.repo.get(h.localId)) !== null ||
+        (await h.transcript.exists(h.localId));
       if (!existing) return false;
       await h.repo.delete(h.localId);
       return true;

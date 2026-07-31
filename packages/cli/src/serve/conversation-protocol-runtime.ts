@@ -305,6 +305,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           return options.authority.validateLocalConversationManifest(manifest);
         }
         return options.authority.validateConversationRuntimeBinding({
+          assignmentId,
           manifest,
           binding,
         });
@@ -891,6 +892,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     let firstPartyFinalitySession: FirstPartyFinalitySession | undefined;
     let localBaseRuntime: SessionRuntime | undefined;
     let localExecutionRuntime: SessionRuntime | undefined;
+    let localRuntimePromoted = false;
+    let localPreflightManifest:
+      | import("@zhixing/core/contracts").ExecutionManifest<"conversation">
+      | undefined;
     try {
       const authority = await journal.authorityState();
       if (authority.deleted) {
@@ -911,10 +916,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       if (remoteTargets.length === 0 && !localLedger) {
         throw new Error("No authorized conversation executor is currently available");
       }
+      const recentExecutorId = await journal.recentExecutorAffinity();
       const preparedAuthority = await this.#authority.prepareConversationAssignment({
         conversationId: input.conversationId,
         executionProfile,
         permissionRules,
+        ...(recentExecutorId ? { recentExecutorId } : {}),
         ...(appliedAdmission.environment
           ? { environment: appliedAdmission.environment }
           : {}),
@@ -978,9 +985,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         environment: preparedAuthority.environment,
       });
       if (!remoteTarget) {
+        localPreflightManifest = unsigned.manifest;
         const preflight =
           await this.#authority.preflightLocalConversationEnvironment(
             unsigned.manifest,
+            assignmentId,
           );
         if (preflight.error) throw new Error(preflight.error.message);
         const runtimeFactory = this.#localRuntimeFactory;
@@ -1006,6 +1015,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         }
       }
       const dispatch = await journal.assign(unsigned);
+      localRuntimePromoted = true;
       this.#rememberAssignment(dispatch.envelope, dispatch.activation);
       this.#assignmentRuntimeBindings.set(
         assignmentId,
@@ -1435,9 +1445,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await channelSession?.close();
       firstPartyFinalitySession?.close();
       await firstPartySurfaceSession?.close();
-      await localExecutionRuntime?.dispose();
+      const disposeReason = localRuntimePromoted
+        ? "assignment-dispose"
+        : "assembly-rollback";
+      await localExecutionRuntime?.dispose(disposeReason);
       if (localBaseRuntime && localBaseRuntime !== localExecutionRuntime) {
-        await localBaseRuntime.dispose();
+        await localBaseRuntime.dispose(disposeReason);
+      }
+      if (localPreflightManifest) {
+        this.#authority.releaseLocalConversationEnvironmentPreflight(
+          localPreflightManifest,
+          assignmentId,
+        );
       }
       this.#clearRunClaims(runId);
       this.#forgetAssignment(assignmentId);
@@ -2282,6 +2301,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           attachments: pending.attachments,
           turnIndex: managed.turnCount,
         },
+        undefined,
+        pending.environment,
       );
       while (!(await generator.next()).done) {
         // Provisional observers do not survive restart. Durable final and delivery

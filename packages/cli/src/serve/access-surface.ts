@@ -127,6 +127,7 @@ export interface AssemblyContext {
   readonly transcript: ShardedTranscriptStore;
   readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;
+  readonly assignmentRuntimeFactory: RuntimeFactory;
   readonly jobRuntime?: JobRuntimePort;
   readonly executorReadiness: () => ExecutorReadiness;
   readonly executorRoleModule?: ExecutorRoleModule;

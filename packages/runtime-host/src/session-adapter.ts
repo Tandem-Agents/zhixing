@@ -25,6 +25,7 @@ import {
 } from "@zhixing/core";
 import type {
   RunTurnOptions,
+  RuntimeDisposeReason,
   SessionRuntime,
 } from "@zhixing/owner-kernel";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
@@ -40,6 +41,7 @@ interface QueueItem {
 export function createOwnerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
+  defaultDisposeReason: RuntimeDisposeReason = "session-dispose",
 ): SessionRuntime {
   let currentController: AbortController | null = null;
 
@@ -213,10 +215,22 @@ export function createOwnerRuntimeAdapter(
       return agentRuntime.calibrationFactor;
     },
 
-    async dispose() {
+    async dispose(reason = defaultDisposeReason) {
       // 透传底层运行体末窗 onWindowClose —— 每个会话经 createAgentRuntime
       // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。
-      await agentRuntime.dispose("session-dispose");
+      await agentRuntime.dispose(reason);
     },
   };
+}
+
+/** Adapter for a runtime whose lifetime is exactly one durable assignment. */
+export function createAssignmentRuntimeAdapter(
+  sessionId: string,
+  agentRuntime: AgentRuntime,
+): SessionRuntime {
+  return createOwnerRuntimeAdapter(
+    sessionId,
+    agentRuntime,
+    "assignment-dispose",
+  );
 }

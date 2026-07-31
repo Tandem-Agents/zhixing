@@ -317,7 +317,9 @@ async function createFixture(
     anchorEpoch: 1,
     deviceId: "device-a",
     globalState,
-    worksceneGlobalState: globalState,
+    recoverWorksceneState: () => globalState.recoverPendingDeletions(),
+    replayWorksceneMutation: (requestId: string) =>
+      globalState.replayMutation(requestId),
     installWorksceneCleanup: (
       next: (
         sceneId: string,
@@ -359,15 +361,18 @@ async function createFixture(
       authority: () => authority,
       conversationAuthority: () => ({
         async touchWorksceneSession(input) {
-          await appendActivity(log, input, "put");
+          await appendActivity(log, input, "upsert");
           return { revision: 1, at: input.at };
         },
         async deleteWorksceneSession(input) {
-          await appendActivity(log, input, "tombstone");
+          await appendActivity(log, input, "delete");
           return { revision: 1, at: input.at };
         },
       }),
       conversationDirectory,
+      recoverWorksceneState: () => globalState.recoverPendingDeletions(),
+      replayWorksceneMutation: (requestId) =>
+        globalState.replayMutation(requestId),
       ...(conversations ? { conversations: () => conversations } : {}),
     }),
     globalState,
@@ -380,7 +385,7 @@ async function createFixture(
 async function appendActivity(
   log: FileAuthorityCommitLog,
   input: { conversationId: string; sceneId: string; at: string },
-  operation: "put" | "tombstone",
+  operation: "upsert" | "delete",
 ) {
   await log.append([
     {
@@ -391,7 +396,7 @@ async function appendActivity(
         conversationId: input.conversationId,
         sceneId: input.sceneId,
         sessionRevision: 1,
-        at: input.at,
+        lastActiveAt: input.at,
       },
     },
   ]);

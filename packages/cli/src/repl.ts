@@ -79,6 +79,7 @@ import {
 import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
 import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
+import { withLocalWorkspaceFacade } from "./runtime/workspace-command.js";
 import {
   RpcManagementFacade,
   type ServerInfoResult,
@@ -1541,9 +1542,11 @@ export async function startRepl(): Promise<void> {
                       complete: (prompt, signal) =>
                         managementFacade.llmComplete(prompt, "main", signal),
                       authorizeLocalWorkspace: (displayName, absolutePath) =>
-                        worksceneFacade.authorizeLocalWorkspace(
-                          displayName,
-                          absolutePath,
+                        withLocalWorkspaceFacade((workspace) =>
+                          workspace.authorizeForControl(
+                            displayName,
+                            absolutePath,
+                          ),
                         ),
                       create: (sceneName, workspace) =>
                         worksceneFacade.create(sceneName, workspace),

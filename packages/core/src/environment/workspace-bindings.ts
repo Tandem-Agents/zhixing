@@ -3,6 +3,7 @@ import { access, open, stat } from "node:fs/promises";
 import path from "node:path";
 import type {
   AuthorityCommitLog,
+  PhysicalStorageStepRunner,
   ProjectionCursor,
 } from "../authority/index.js";
 import { AuthorityStorageError } from "../authority/index.js";
@@ -17,6 +18,7 @@ import type {
   WorkspaceBindingAdminPort,
   WorkspaceBindingMigrationPort,
   WorkspaceBindingPatch,
+  WorkspaceBindingResetReceipt,
 } from "../contracts/index.js";
 import {
   ensureDurableDirectory,
@@ -31,14 +33,12 @@ import {
 } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
-  deviceCapacityAdmissionId,
-  DeviceCapacityAdmissionError,
   runWithDeviceCapacity,
-  storageMaintenanceObligation,
-  withDeviceCapacityStep,
+  runStorageMaintenanceStep,
+  storageMaintenanceRequest,
   type DeviceCapacityArbiterPort,
   type DeviceCapacityBudget,
-  type StorageMaintenanceTaskRunner,
+  type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
 
 const DIRECTORY_STREAM = "executor:workspace-bindings";
@@ -50,14 +50,41 @@ const ADMIN_STEP_BUDGET: DeviceCapacityBudget = {
   },
   quantum: { readBytes: 64 * 1024, writeBytes: 64 * 1024, ioOperations: 8 },
 };
-const MIGRATION_STEP_BUDGET: DeviceCapacityBudget = {
-  occupancy: {
-    memoryReservationBytes: 128 * 1024,
-    temporaryBytes: 0,
-    slots: 1,
-  },
-  quantum: { readBytes: 128 * 1024, writeBytes: 128 * 1024, ioOperations: 12 },
-};
+type WorkspaceBindingRequestIdentity =
+  | {
+      kind: "create";
+      displayName: string;
+      absolutePath: string;
+    }
+  | {
+      kind: "update";
+      bindingRef: string;
+      expectedRevision: number;
+      patch: WorkspaceBindingPatch;
+    }
+  | {
+      kind: "remove";
+      bindingRef: string;
+      expectedRevision: number;
+    }
+  | {
+      kind: "legacy-import";
+      migrationId: string;
+      sourceSnapshotToken: string;
+      displayName: string;
+      absolutePath: string;
+    }
+  | {
+      kind: "legacy-activate";
+      migrationId: string;
+      sourceSnapshotToken: string;
+    }
+  | {
+      kind: "legacy-abandon";
+      migrationId: string;
+      sourceSnapshotToken: string;
+      reason: string;
+    };
 
 type WorkspaceBindingRecord =
   | {
@@ -66,26 +93,33 @@ type WorkspaceBindingRecord =
     }
   | {
       t: "catalog-reset";
+      requestId: string;
       previousCatalogGeneration: string;
       catalogGeneration: string;
       confirmationDigest: string;
+      logId: string;
+      capabilityRevision: number;
+      preparedAt: string;
     }
   | {
       t: "binding-created";
       requestId: string;
       requestDigest: string;
+      request: WorkspaceBindingRequestIdentity;
       binding: LocalWorkspaceBinding;
     }
   | {
       t: "binding-updated";
       requestId: string;
       requestDigest: string;
+      request: WorkspaceBindingRequestIdentity;
       binding: LocalWorkspaceBinding;
     }
   | {
       t: "binding-removed";
       requestId: string;
       requestDigest: string;
+      request: WorkspaceBindingRequestIdentity;
       bindingRef: string;
       previousRevision: number;
     }
@@ -93,12 +127,14 @@ type WorkspaceBindingRecord =
       t: "binding-request-recorded";
       requestId: string;
       requestDigest: string;
+      request: WorkspaceBindingRequestIdentity;
       binding: LocalWorkspaceBinding;
     }
   | {
       t: "legacy-binding-staged";
       requestId: string;
       requestDigest: string;
+      request: WorkspaceBindingRequestIdentity;
       migrationId: string;
       sourceSnapshotToken: string;
       binding: LocalWorkspaceBinding;
@@ -107,6 +143,7 @@ type WorkspaceBindingRecord =
       t: "legacy-migration-activated" | "legacy-migration-abandoned";
       requestId: string;
       requestDigest: string;
+      request: WorkspaceBindingRequestIdentity;
       migrationId: string;
       sourceSnapshotToken: string;
       reason?: string;
@@ -141,27 +178,39 @@ interface WorkspaceBindingProjection {
     { readonly migrationId: string; readonly sourceSnapshotToken: string }
   >;
   readonly migrationTerminals: Map<string, "activated" | "abandoned">;
+  resetReceipt?: WorkspaceBindingResetReceipt;
 }
 
 export interface WorkspaceBindingServiceOptions {
   readonly rootDir: string;
+  readonly catalogGeneration: string;
   readonly deviceId: string;
   readonly executorId: string;
   readonly log: AuthorityCommitLog;
   readonly verifier: ProtocolSignatureVerifier;
   readonly capacity: DeviceCapacityArbiterPort;
-  readonly migrationRunner: StorageMaintenanceTaskRunner;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly capabilitySnapshot: (
-    workspaces: CapabilityDescriptor["workspaces"],
+    publication: WorkspaceCapabilityPublication,
   ) => Promise<CapabilityDescriptor>;
   readonly versionInventory: () => Promise<ExecutorVersionInventory>;
   readonly clock?: () => string;
   readonly bindingRefFactory?: () => string;
   readonly resetGenesis?: {
+    readonly requestId: string;
     readonly previousCatalogGeneration: string;
     readonly catalogGeneration: string;
     readonly confirmationDigest: string;
+    readonly logId: string;
+    readonly capabilityRevision: number;
+    readonly preparedAt: string;
   };
+}
+
+export interface WorkspaceCapabilityPublication {
+  readonly catalogGeneration: string;
+  readonly state: "healthy" | "degraded";
+  readonly workspaces: CapabilityDescriptor["workspaces"];
 }
 
 /**
@@ -179,12 +228,13 @@ export class WorkspaceBindingService
 {
   readonly #rootDir: string;
   readonly #markerPath: string;
+  readonly #catalogGeneration: string;
   readonly #deviceId: string;
   readonly #executorId: string;
   readonly #log: AuthorityCommitLog;
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #capacity: DeviceCapacityArbiterPort;
-  readonly #migrationRunner: StorageMaintenanceTaskRunner;
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #capabilitySnapshotFactory: WorkspaceBindingServiceOptions["capabilitySnapshot"];
   readonly #versionInventoryFactory: WorkspaceBindingServiceOptions["versionInventory"];
   readonly #clock: () => string;
@@ -198,6 +248,10 @@ export class WorkspaceBindingService
   constructor(options: WorkspaceBindingServiceOptions) {
     this.#rootDir = path.resolve(options.rootDir);
     this.#markerPath = path.join(this.#rootDir, "directory-established");
+    this.#catalogGeneration = requireIdentifier(
+      options.catalogGeneration,
+      "Workspace catalog generation",
+    );
     this.#deviceId = requireIdentifier(options.deviceId, "Workspace deviceId");
     this.#executorId = requireIdentifier(
       options.executorId,
@@ -206,7 +260,7 @@ export class WorkspaceBindingService
     this.#log = options.log;
     this.#verifier = options.verifier;
     this.#capacity = options.capacity;
-    this.#migrationRunner = options.migrationRunner;
+    this.#storageMaintenance = options.storageMaintenance;
     this.#capabilitySnapshotFactory = options.capabilitySnapshot;
     this.#versionInventoryFactory = options.versionInventory;
     this.#clock = options.clock ?? (() => new Date().toISOString());
@@ -220,17 +274,30 @@ export class WorkspaceBindingService
     await this.#ensureOpen();
   }
 
+  async resetReceipt(): Promise<WorkspaceBindingResetReceipt | undefined> {
+    await this.#ensureOpen();
+    return this.#operations.run(async () => {
+      await this.#synchronizeProjection();
+      const receipt = this.#state().resetReceipt;
+      return receipt ? structuredClone(receipt) : undefined;
+    });
+  }
+
   async list(
     control: LocalEnvironmentControlContext,
   ): Promise<LocalWorkspaceBinding[]> {
     this.#validateControl(control);
     await this.#ensureOpen();
-    return [...this.#state().bindings.values()]
-      .sort((left, right) =>
-        left.displayName.localeCompare(right.displayName) ||
-        left.bindingRef.localeCompare(right.bindingRef)
-      )
-      .map(cloneBinding);
+    return this.#operations.run(async () => {
+      await this.#synchronizeProjection();
+      return [...this.#state().bindings.values()]
+        .sort(
+          (left, right) =>
+            left.displayName.localeCompare(right.displayName) ||
+            left.bindingRef.localeCompare(right.bindingRef),
+        )
+        .map(cloneBinding);
+    });
   }
 
   async create(
@@ -241,49 +308,63 @@ export class WorkspaceBindingService
     const displayName = normalizeWorkspaceDisplayName(input.displayName);
     const absolutePath = normalizeWorkspacePath(input.absolutePath);
     await this.#ensureOpen();
-    const result = await this.#runAdminStep(control.abort, async () => {
-      const requestDigest = protocolDigest("WorkspaceBindingCreate", 1, {
-        displayName,
-        absolutePath,
-      });
-      return this.#transact(control.requestId, requestDigest, (state) => {
-        const duplicate = state.displayNames.get(displayNameKey(displayName));
-        if (duplicate) {
-          const existing = state.bindings.get(duplicate)!;
-          if (existing.absolutePath === absolutePath) {
-            return {
-              value: cloneBinding(existing),
-              record: {
-                t: "binding-request-recorded",
-                requestId: control.requestId,
-                requestDigest,
-                binding: cloneBinding(existing),
-              },
-            };
-          }
-          throw new WorkspaceBindingConflictError(
-            "Workspace display name is already in use",
-          );
-        }
-        const candidateRef = this.#nextBindingRef();
-        const binding: LocalWorkspaceBinding = {
-          bindingRef: candidateRef,
-          revision: 1,
+    const result = await this.#runAdminStep(
+      control.abort,
+      async (runPhysicalStep) => {
+        const request: WorkspaceBindingRequestIdentity = {
+          kind: "create",
           displayName,
           absolutePath,
-          workspaceBindingRevision: 1,
         };
-        return {
-          value: binding,
-          record: {
-            t: "binding-created",
-            requestId: control.requestId,
-            requestDigest,
-            binding,
+        const requestDigest = workspaceBindingRequestDigest(request);
+        return this.#transact(
+          control.requestId,
+          requestDigest,
+          (state) => {
+            const duplicate = state.displayNames.get(
+              displayNameKey(displayName),
+            );
+            if (duplicate) {
+              const existing = state.bindings.get(duplicate)!;
+              if (existing.absolutePath === absolutePath) {
+                return {
+                  value: cloneBinding(existing),
+                  record: {
+                    t: "binding-request-recorded",
+                    requestId: control.requestId,
+                    requestDigest,
+                    request,
+                    binding: cloneBinding(existing),
+                  },
+                };
+              }
+              throw new WorkspaceBindingConflictError(
+                "Workspace display name is already in use",
+              );
+            }
+            const candidateRef = this.#nextBindingRef(state);
+            const binding: LocalWorkspaceBinding = {
+              bindingRef: candidateRef,
+              revision: 1,
+              displayName,
+              absolutePath,
+              workspaceBindingRevision: 1,
+            };
+            return {
+              value: binding,
+              record: {
+                t: "binding-created",
+                requestId: control.requestId,
+                requestDigest,
+                request,
+                binding,
+              },
+            };
           },
-        };
-      });
-    });
+          runPhysicalStep,
+        );
+      },
+    );
     await this.capabilitySnapshot();
     return result;
   }
@@ -299,67 +380,80 @@ export class WorkspaceBindingService
     requirePositiveRevision(expectedRevision, "Workspace expected revision");
     const normalized = normalizePatch(patch);
     await this.#ensureOpen();
-    const result = await this.#runAdminStep(control.abort, async () => {
-      const requestDigest = protocolDigest("WorkspaceBindingUpdate", 1, {
-        bindingRef,
-        expectedRevision,
-        patch: normalized,
-      });
-      return this.#transact(control.requestId, requestDigest, (state) => {
-        const current = state.bindings.get(bindingRef);
-        if (!current) throw new WorkspaceBindingNotFoundError(bindingRef);
-        if (current.revision !== expectedRevision) {
-          throw new WorkspaceBindingRevisionError(
-            bindingRef,
-            expectedRevision,
-            current.revision,
-          );
-        }
-        const displayName = normalized.displayName ?? current.displayName;
-        const absolutePath = normalized.absolutePath ?? current.absolutePath;
-        const conflictingRef = state.displayNames.get(
-          displayNameKey(displayName),
-        );
-        if (conflictingRef && conflictingRef !== bindingRef) {
-          throw new WorkspaceBindingConflictError(
-            "Workspace display name is already in use",
-          );
-        }
-        if (
-          displayName === current.displayName &&
-          absolutePath === current.absolutePath
-        ) {
-          return {
-            value: cloneBinding(current),
-            record: {
-              t: "binding-request-recorded",
-              requestId: control.requestId,
-              requestDigest,
-              binding: cloneBinding(current),
-            },
-          };
-        }
-        const binding: LocalWorkspaceBinding = {
-          ...current,
-          revision: current.revision + 1,
-          displayName,
-          absolutePath,
-          workspaceBindingRevision:
-            absolutePath === current.absolutePath
-              ? current.workspaceBindingRevision
-              : current.workspaceBindingRevision + 1,
+    const result = await this.#runAdminStep(
+      control.abort,
+      async (runPhysicalStep) => {
+        const request: WorkspaceBindingRequestIdentity = {
+          kind: "update",
+          bindingRef,
+          expectedRevision,
+          patch: normalized,
         };
-        return {
-          value: binding,
-          record: {
-            t: "binding-updated",
-            requestId: control.requestId,
-            requestDigest,
-            binding,
+        const requestDigest = workspaceBindingRequestDigest(request);
+        return this.#transact(
+          control.requestId,
+          requestDigest,
+          (state) => {
+            const current = state.bindings.get(bindingRef);
+            if (!current) throw new WorkspaceBindingNotFoundError(bindingRef);
+            if (current.revision !== expectedRevision) {
+              throw new WorkspaceBindingRevisionError(
+                bindingRef,
+                expectedRevision,
+                current.revision,
+              );
+            }
+            const displayName = normalized.displayName ?? current.displayName;
+            const absolutePath =
+              normalized.absolutePath ?? current.absolutePath;
+            const conflictingRef = state.displayNames.get(
+              displayNameKey(displayName),
+            );
+            if (conflictingRef && conflictingRef !== bindingRef) {
+              throw new WorkspaceBindingConflictError(
+                "Workspace display name is already in use",
+              );
+            }
+            if (
+              displayName === current.displayName &&
+              absolutePath === current.absolutePath
+            ) {
+              return {
+                value: cloneBinding(current),
+                record: {
+                  t: "binding-request-recorded",
+                  requestId: control.requestId,
+                  requestDigest,
+                  request,
+                  binding: cloneBinding(current),
+                },
+              };
+            }
+            const binding: LocalWorkspaceBinding = {
+              ...current,
+              revision: current.revision + 1,
+              displayName,
+              absolutePath,
+              workspaceBindingRevision:
+                absolutePath === current.absolutePath
+                  ? current.workspaceBindingRevision
+                  : current.workspaceBindingRevision + 1,
+            };
+            return {
+              value: binding,
+              record: {
+                t: "binding-updated",
+                requestId: control.requestId,
+                requestDigest,
+                request,
+                binding,
+              },
+            };
           },
-        };
-      });
-    });
+          runPhysicalStep,
+        );
+      },
+    );
     await this.capabilitySnapshot();
     return result;
   }
@@ -373,32 +467,40 @@ export class WorkspaceBindingService
     requireIdentifier(bindingRef, "Workspace bindingRef");
     requirePositiveRevision(expectedRevision, "Workspace expected revision");
     await this.#ensureOpen();
-    await this.#runAdminStep(control.abort, async () => {
-      const requestDigest = protocolDigest("WorkspaceBindingRemove", 1, {
+    await this.#runAdminStep(control.abort, async (runPhysicalStep) => {
+      const request: WorkspaceBindingRequestIdentity = {
+        kind: "remove",
         bindingRef,
         expectedRevision,
-      });
-      await this.#transact(control.requestId, requestDigest, (state) => {
-        const current = state.bindings.get(bindingRef);
-        if (!current) throw new WorkspaceBindingNotFoundError(bindingRef);
-        if (current.revision !== expectedRevision) {
-          throw new WorkspaceBindingRevisionError(
-            bindingRef,
-            expectedRevision,
-            current.revision,
-          );
-        }
-        return {
-          value: undefined,
-          record: {
-            t: "binding-removed",
-            requestId: control.requestId,
-            requestDigest,
-            bindingRef,
-            previousRevision: current.revision,
-          },
-        };
-      });
+      };
+      const requestDigest = workspaceBindingRequestDigest(request);
+      await this.#transact(
+        control.requestId,
+        requestDigest,
+        (state) => {
+          const current = state.bindings.get(bindingRef);
+          if (!current) throw new WorkspaceBindingNotFoundError(bindingRef);
+          if (current.revision !== expectedRevision) {
+            throw new WorkspaceBindingRevisionError(
+              bindingRef,
+              expectedRevision,
+              current.revision,
+            );
+          }
+          return {
+            value: undefined,
+            record: {
+              t: "binding-removed",
+              requestId: control.requestId,
+              requestDigest,
+              request,
+              bindingRef,
+              previousRevision: current.revision,
+            },
+          };
+        },
+        runPhysicalStep,
+      );
     });
     await this.capabilitySnapshot();
   }
@@ -420,121 +522,90 @@ export class WorkspaceBindingService
     const displayName = normalizeWorkspaceDisplayName(input.displayName);
     const absolutePath = normalizeWorkspacePath(input.absolutePath);
     await this.#ensureOpen();
-    const requestDigest = protocolDigest("WorkspaceBindingLegacyImport", 1, {
+    const request: WorkspaceBindingRequestIdentity = {
+      kind: "legacy-import",
       migrationId: input.migrationId,
       sourceSnapshotToken: input.sourceSnapshotToken,
       displayName,
       absolutePath,
-    });
-    const requestId =
-      `migration:${input.migrationId}:${input.sourceSnapshotToken}:${requestDigest}`;
-    const result = await this.#migrationRunner.run(
-      storageMaintenanceObligation(
-        "workspace-migration",
-        this.#deviceId,
-        {
+    };
+    const requestDigest = workspaceBindingRequestDigest(request);
+    const requestId = `migration:${input.migrationId}:${input.sourceSnapshotToken}:${requestDigest}`;
+    const result = await this.#operations.run(() => {
+      abort.throwIfAborted();
+      return this.#transact(
+        requestId,
+        requestDigest,
+        (state) => {
+          const terminal = state.migrationTerminals.get(
+            migrationKey(input.migrationId, input.sourceSnapshotToken),
+          );
+          if (terminal) {
+            throw new WorkspaceBindingConflictError(
+              `Workspace migration is already ${terminal}`,
+            );
+          }
+          const samePath = [
+            ...state.bindings.values(),
+            ...[...state.stagedLegacy.values()]
+              .filter(
+                (entry) =>
+                  entry.migrationId === input.migrationId &&
+                  entry.sourceSnapshotToken === input.sourceSnapshotToken,
+              )
+              .map((entry) => entry.binding),
+          ].find((binding) => binding.absolutePath === absolutePath);
+          if (samePath) {
+            return {
+              value: cloneBinding(samePath),
+              record: {
+                t: "binding-request-recorded",
+                requestId,
+                requestDigest,
+                request,
+                binding: cloneBinding(samePath),
+              },
+            };
+          }
+          const nameKey = displayNameKey(displayName);
+          const stagedNameConflict = [...state.stagedLegacy.values()].some(
+            (entry) => displayNameKey(entry.binding.displayName) === nameKey,
+          );
+          if (state.displayNames.has(nameKey) || stagedNameConflict) {
+            throw new WorkspaceBindingConflictError(
+              "Legacy workspace display name conflicts with another path",
+              "legacy-name-conflict",
+            );
+          }
+          const candidateRef = this.#nextBindingRef(state);
+          const binding: LocalWorkspaceBinding = {
+            bindingRef: candidateRef,
+            revision: 1,
+            displayName,
+            absolutePath,
+            workspaceBindingRevision: 1,
+          };
+          return {
+            value: binding,
+            record: {
+              t: "legacy-binding-staged",
+              requestId,
+              requestDigest,
+              request,
+              migrationId: input.migrationId,
+              sourceSnapshotToken: input.sourceSnapshotToken,
+              binding,
+            },
+          };
+        },
+        this.#migrationPhysicalStep({
           migrationId: input.migrationId,
           sourceSnapshotToken: input.sourceSnapshotToken,
-        },
-        {
-          owner: "workspace-binding-migrator",
-          obligation: "committed",
-        },
-      ),
-      abort,
-      (taskAbort) =>
-        this.#operations.run(async () => {
-          const admission = await this.#capacity.acquire(
-            {
-              admissionId: deviceCapacityAdmissionId("workspace-migration"),
-              serviceClass: "storage-recovery",
-              atomic: MIGRATION_STEP_BUDGET,
-              preferred: MIGRATION_STEP_BUDGET,
-              maxWaitMs: 0,
-            },
-            taskAbort,
-          );
-          if (admission.kind !== "granted") {
-            throw new DeviceCapacityAdmissionError(admission);
-          }
-          try {
-              const terminal = this.#state().migrationTerminals.get(
-                migrationKey(input.migrationId, input.sourceSnapshotToken),
-              );
-              if (terminal === "abandoned") {
-                throw new WorkspaceBindingConflictError(
-                  "Abandoned workspace migration cannot be revived",
-                );
-              }
-              return await withDeviceCapacityStep(
-              admission.permit,
-              MIGRATION_STEP_BUDGET,
-              async () => {
-              claimDeviceCapacity("writeBytes", 4 * 1024);
-              claimDeviceCapacity("ioOperations", 2);
-              return this.#transact(requestId, requestDigest, (state) => {
-                const samePath = [
-                  ...state.bindings.values(),
-                  ...[...state.stagedLegacy.values()]
-                    .filter(
-                      (entry) =>
-                        entry.migrationId === input.migrationId &&
-                        entry.sourceSnapshotToken ===
-                          input.sourceSnapshotToken,
-                    )
-                    .map((entry) => entry.binding),
-                ].find((binding) => binding.absolutePath === absolutePath);
-                if (samePath) {
-                  return {
-                    value: cloneBinding(samePath),
-                    record: {
-                      t: "binding-request-recorded",
-                      requestId,
-                      requestDigest,
-                      binding: cloneBinding(samePath),
-                    },
-                  };
-                }
-                const nameKey = displayNameKey(displayName);
-                const stagedNameConflict = [...state.stagedLegacy.values()].some(
-                  (entry) =>
-                    displayNameKey(entry.binding.displayName) === nameKey,
-                );
-                if (
-                  state.displayNames.has(nameKey) ||
-                  stagedNameConflict
-                ) {
-                  throw new WorkspaceBindingConflictError(
-                    "Legacy workspace display name conflicts with another path",
-                  );
-                }
-                const candidateRef = this.#nextBindingRef();
-                const binding: LocalWorkspaceBinding = {
-                  bindingRef: candidateRef,
-                  revision: 1,
-                  displayName,
-                  absolutePath,
-                  workspaceBindingRevision: 1,
-                };
-                return {
-                  value: binding,
-                  record: {
-                    t: "legacy-binding-staged",
-                    requestId,
-                    requestDigest,
-                    migrationId: input.migrationId,
-                    sourceSnapshotToken: input.sourceSnapshotToken,
-                    binding,
-                  },
-                };
-              });
-              },
-            );
-          } finally {
-            admission.permit.release();
-          }
+          operation: "import-binding",
+          requestDigest,
         }),
-    );
+      );
+    });
     return result;
   }
 
@@ -575,68 +646,53 @@ export class WorkspaceBindingService
       "Workspace source snapshot token",
     );
     await this.#ensureOpen();
-    const requestDigest = protocolDigest(
+    const request: WorkspaceBindingRequestIdentity =
       status === "activated"
-        ? "WorkspaceBindingLegacyActivation"
-        : "WorkspaceBindingLegacyAbandonment",
-      1,
-      { ...input, ...(reason ? { reason } : {}) },
-    );
+        ? { kind: "legacy-activate", ...input }
+        : {
+            kind: "legacy-abandon",
+            ...input,
+            reason: reason!,
+          };
+    const requestDigest = workspaceBindingRequestDigest(request);
     const requestId = `migration:${status}:${input.migrationId}:${input.sourceSnapshotToken}`;
-    await this.#migrationRunner.run(
-      storageMaintenanceObligation(
-        "workspace-migration",
-        this.#deviceId,
-        {
+    await this.#operations.run(() => {
+      abort.throwIfAborted();
+      return this.#transact(
+        requestId,
+        requestDigest,
+        (state) => {
+          const terminal = state.migrationTerminals.get(
+            migrationKey(input.migrationId, input.sourceSnapshotToken),
+          );
+          if (terminal && terminal !== status) {
+            throw new WorkspaceBindingConflictError(
+              `Workspace migration is already ${terminal}`,
+            );
+          }
+          return {
+            value: undefined,
+            record: {
+              t:
+                status === "activated"
+                  ? "legacy-migration-activated"
+                  : "legacy-migration-abandoned",
+              requestId,
+              requestDigest,
+              request,
+              migrationId: input.migrationId,
+              sourceSnapshotToken: input.sourceSnapshotToken,
+              ...(reason ? { reason } : {}),
+            },
+          };
+        },
+        this.#migrationPhysicalStep({
           migrationId: input.migrationId,
           sourceSnapshotToken: input.sourceSnapshotToken,
-        },
-        { owner: "workspace-binding-migrator", obligation: "committed" },
-      ),
-      abort,
-      (taskAbort) =>
-        this.#operations.run(async () => {
-          const admission = await this.#capacity.acquire(
-            {
-              admissionId: deviceCapacityAdmissionId("workspace-migration"),
-              serviceClass: "storage-recovery",
-              atomic: MIGRATION_STEP_BUDGET,
-              preferred: MIGRATION_STEP_BUDGET,
-              maxWaitMs: 0,
-            },
-            taskAbort,
-          );
-          if (admission.kind !== "granted") {
-            throw new DeviceCapacityAdmissionError(admission);
-          }
-          try {
-            await withDeviceCapacityStep(
-              admission.permit,
-              MIGRATION_STEP_BUDGET,
-              async () => {
-              claimDeviceCapacity("writeBytes", 4 * 1024);
-              claimDeviceCapacity("ioOperations", 2);
-              await this.#transact(requestId, requestDigest, () => ({
-                value: undefined,
-                record: {
-                  t:
-                    status === "activated"
-                      ? "legacy-migration-activated"
-                      : "legacy-migration-abandoned",
-                  requestId,
-                  requestDigest,
-                  migrationId: input.migrationId,
-                  sourceSnapshotToken: input.sourceSnapshotToken,
-                  ...(reason ? { reason } : {}),
-                },
-              }));
-              },
-            );
-          } finally {
-            admission.permit.release();
-          }
+          operation: status,
         }),
-    );
+      );
+    });
   }
 
   async resolveWorkspace(
@@ -644,12 +700,15 @@ export class WorkspaceBindingService
   ): Promise<{ absolutePath: string; workspaceBindingRevision: number }> {
     requireIdentifier(bindingRef, "Workspace bindingRef");
     await this.#ensureOpen();
-    const binding = this.#state().bindings.get(bindingRef);
-    if (!binding) throw new WorkspaceBindingNotFoundError(bindingRef);
-    return {
-      absolutePath: binding.absolutePath,
-      workspaceBindingRevision: binding.workspaceBindingRevision,
-    };
+    return this.#operations.run(async () => {
+      await this.#synchronizeProjection();
+      const binding = this.#state().bindings.get(bindingRef);
+      if (!binding) throw new WorkspaceBindingNotFoundError(bindingRef);
+      return {
+        absolutePath: binding.absolutePath,
+        workspaceBindingRevision: binding.workspaceBindingRevision,
+      };
+    });
   }
 
   async probePath(
@@ -674,14 +733,21 @@ export class WorkspaceBindingService
 
   async capabilitySnapshot(): Promise<CapabilityDescriptor> {
     await this.#ensureOpen();
-    const workspaces = [...this.#state().bindings.values()]
-      .sort((left, right) => left.bindingRef.localeCompare(right.bindingRef))
-      .map(({ bindingRef, workspaceBindingRevision, displayName }) => ({
-        bindingRef,
-        workspaceBindingRevision,
-        displayName,
-      }));
-    return this.#capabilitySnapshotFactory(workspaces);
+    const workspaces = await this.#operations.run(async () => {
+      await this.#synchronizeProjection();
+      return [...this.#state().bindings.values()]
+        .sort((left, right) => left.bindingRef.localeCompare(right.bindingRef))
+        .map(({ bindingRef, workspaceBindingRevision, displayName }) => ({
+          bindingRef,
+          workspaceBindingRevision,
+          displayName,
+        }));
+    });
+    return this.#capabilitySnapshotFactory({
+      catalogGeneration: this.#catalogGeneration,
+      state: "healthy",
+      workspaces,
+    });
   }
 
   versionInventory(): Promise<ExecutorVersionInventory> {
@@ -691,9 +757,11 @@ export class WorkspaceBindingService
   async #transact<T>(
     requestId: string,
     requestDigest: string,
-    decide: (
-      state: WorkspaceBindingProjection,
-    ) => { value: T; record?: WorkspaceBindingRecord },
+    decide: (state: WorkspaceBindingProjection) => {
+      value: T;
+      record?: WorkspaceBindingRecord;
+    },
+    runPhysicalStep?: PhysicalStorageStepRunner,
   ): Promise<T> {
     const current = this.#state();
     const transaction = await this.#log.transactProjection(
@@ -730,7 +798,11 @@ export class WorkspaceBindingService
           value: decision.value,
         };
       },
-      { cursor: this.#cursor, stream: DIRECTORY_STREAM },
+      {
+        cursor: this.#cursor,
+        stream: DIRECTORY_STREAM,
+        ...(runPhysicalStep ? { runPhysicalStep } : {}),
+      },
     );
     this.#projection = transaction.state;
     this.#cursor = transaction.cursor;
@@ -739,25 +811,47 @@ export class WorkspaceBindingService
 
   async #runAdminStep<T>(
     abort: AbortSignal,
-    operation: () => Promise<T>,
+    operation: (runPhysicalStep: PhysicalStorageStepRunner) => Promise<T>,
   ): Promise<T> {
     return this.#operations.run(() =>
-      runWithDeviceCapacity(
-        this.#capacity,
-        {
-          serviceClass: "workload-interactive",
-          atomic: ADMIN_STEP_BUDGET,
-          preferred: ADMIN_STEP_BUDGET,
-          maxWaitMs: 0,
-        },
-        abort,
+      operation((physicalStep) =>
+        runWithDeviceCapacity(
+          this.#capacity,
+          {
+            serviceClass: "workload-interactive",
+            atomic: ADMIN_STEP_BUDGET,
+            preferred: ADMIN_STEP_BUDGET,
+            maxWaitMs: 0,
+          },
+          abort,
+          async () => {
+            claimDeviceCapacity("writeBytes", 4 * 1024);
+            claimDeviceCapacity("ioOperations", 2);
+            return physicalStep();
+          },
+        ),
+      ),
+    );
+  }
+
+  #migrationPhysicalStep(
+    identity: Readonly<Record<string, string>>,
+  ): PhysicalStorageStepRunner {
+    return (operation) =>
+      runStorageMaintenanceStep(
+        this.#storageMaintenance,
+        storageMaintenanceRequest(
+          "workspace-migration",
+          this.#deviceId,
+          identity,
+          { obligation: "committed" },
+        ),
         async () => {
           claimDeviceCapacity("writeBytes", 4 * 1024);
           claimDeviceCapacity("ioOperations", 2);
           return operation();
         },
-      ),
-    );
+      );
   }
 
   #validateControl(control: LocalEnvironmentControlContext): void {
@@ -769,13 +863,13 @@ export class WorkspaceBindingService
     });
   }
 
-  #nextBindingRef(): string {
+  #nextBindingRef(state: WorkspaceBindingProjection): string {
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const candidate = requireIdentifier(
         this.#bindingRefFactory(),
         "Workspace bindingRef",
       );
-      if (!this.#state().usedBindingRefs.has(candidate)) return candidate;
+      if (!state.usedBindingRefs.has(candidate)) return candidate;
     }
     throw new WorkspaceBindingConflictError(
       "Workspace binding identity source repeatedly collided",
@@ -797,12 +891,30 @@ export class WorkspaceBindingService
     return this.#opening;
   }
 
+  async #synchronizeProjection(): Promise<void> {
+    const transaction = await this.#log.transactProjection<
+      WorkspaceBindingProjection,
+      WorkspaceBindingRecord,
+      undefined
+    >(
+      this.#state(),
+      reduceWorkspaceBindingProjection,
+      () => ({ kind: "return", value: undefined }),
+      { cursor: this.#cursor, stream: DIRECTORY_STREAM },
+    );
+    this.#projection = transaction.state;
+    this.#cursor = transaction.cursor;
+  }
+
   async #open(): Promise<void> {
     await ensureDurableDirectory(this.#rootDir);
     const markerExists = await exists(this.#markerPath);
-    const logPath = "logPath" in this.#log
-      ? String((this.#log as AuthorityCommitLog & { logPath: string }).logPath)
-      : undefined;
+    const logPath =
+      "logPath" in this.#log
+        ? String(
+            (this.#log as AuthorityCommitLog & { logPath: string }).logPath,
+          )
+        : undefined;
     const logExists = logPath === undefined ? true : await exists(logPath);
     if (markerExists && !logExists) {
       throw new AuthorityStorageError(
@@ -846,12 +958,20 @@ export class WorkspaceBindingService
             ]
           : []),
       ]);
-      state = reduceWorkspaceBindingProjection(
-        state,
-        commit.entries[0] as LogicalRecord<WorkspaceBindingRecord>,
-      );
-      const refreshed =
-        await this.#log.readSnapshot<WorkspaceBindingRecord>();
+      for (const entry of commit.entries) {
+        state = reduceWorkspaceBindingProjection(
+          state,
+          entry as LogicalRecord<WorkspaceBindingRecord>,
+        );
+      }
+      const refreshed = await this.#log.readSnapshot<WorkspaceBindingRecord>();
+      state = emptyWorkspaceBindingProjection();
+      for (const envelope of refreshed.commits) {
+        for (const entry of envelope.entries) {
+          if (entry.stream !== DIRECTORY_STREAM) continue;
+          state = reduceWorkspaceBindingProjection(state, entry);
+        }
+      }
       this.#cursor = refreshed.cursor;
     }
     this.#projection = state;
@@ -940,14 +1060,8 @@ export function normalizeWorkspacePath(input: string): string {
   return value;
 }
 
-function normalizePatch(
-  patch: WorkspaceBindingPatch,
-): { displayName?: string; absolutePath?: string } {
-  if (
-    patch === null ||
-    typeof patch !== "object" ||
-    Array.isArray(patch)
-  ) {
+function normalizePatch(patch: WorkspaceBindingPatch): WorkspaceBindingPatch {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
     throw new TypeError("Workspace binding patch must be an object");
   }
   const keys = Object.keys(patch).sort();
@@ -957,13 +1071,30 @@ function normalizePatch(
   ) {
     throw new TypeError("Workspace binding patch fields are invalid");
   }
+  const displayName = patch.displayName;
+  const absolutePath = patch.absolutePath;
+  if (
+    ("displayName" in patch && typeof displayName !== "string") ||
+    ("absolutePath" in patch && typeof absolutePath !== "string")
+  ) {
+    throw new TypeError("Workspace binding patch values are invalid");
+  }
+  if (typeof displayName === "string" && typeof absolutePath === "string") {
+    return {
+      displayName: normalizeWorkspaceDisplayName(displayName),
+      absolutePath: normalizeWorkspacePath(absolutePath),
+    };
+  }
+  if (typeof displayName === "string") {
+    return {
+      displayName: normalizeWorkspaceDisplayName(displayName),
+    };
+  }
+  if (typeof absolutePath !== "string") {
+    throw new TypeError("Workspace binding patch values are invalid");
+  }
   return {
-    ...(typeof patch.displayName === "string"
-      ? { displayName: normalizeWorkspaceDisplayName(patch.displayName) }
-      : {}),
-    ...(typeof patch.absolutePath === "string"
-      ? { absolutePath: normalizeWorkspacePath(patch.absolutePath) }
-      : {}),
+    absolutePath: normalizeWorkspacePath(absolutePath),
   };
 }
 
@@ -973,6 +1104,9 @@ function reduceWorkspaceBindingProjection(
 ): WorkspaceBindingProjection {
   const state = cloneProjection(previous);
   const record = validateRecord(entry.body);
+  if ("requestId" in record && state.requests.has(record.requestId)) {
+    throw corruptDirectory("Workspace request identity was reused");
+  }
   switch (record.t) {
     case "directory-established":
       if (state.established) {
@@ -982,14 +1116,29 @@ function reduceWorkspaceBindingProjection(
       state.deviceId = record.deviceId;
       break;
     case "catalog-reset":
-      if (!state.established || state.bindings.size !== 0) {
+      if (
+        !state.established ||
+        state.bindings.size !== 0 ||
+        state.resetReceipt
+      ) {
         throw corruptDirectory(
           "Workspace catalog reset genesis is not the first catalog fact",
         );
       }
+      state.resetReceipt = {
+        requestId: record.requestId,
+        confirmationDigest: record.confirmationDigest,
+        previousCatalogGeneration: record.previousCatalogGeneration,
+        catalogGeneration: record.catalogGeneration,
+        logId: record.logId,
+        capabilityRevision: record.capabilityRevision,
+        preparedAt: record.preparedAt,
+      };
       break;
     case "binding-created":
       if (
+        record.binding.revision !== 1 ||
+        record.binding.workspaceBindingRevision !== 1 ||
         state.usedBindingRefs.has(record.binding.bindingRef) ||
         state.displayNames.has(displayNameKey(record.binding.displayName))
       ) {
@@ -1010,16 +1159,21 @@ function reduceWorkspaceBindingProjection(
       });
       break;
     case "binding-request-recorded":
-      if (state.requests.has(record.requestId)) {
-        throw corruptDirectory("Workspace request identity was reused");
-      }
+      assertRecordedRequestOutcome(state, record);
       state.requests.set(record.requestId, {
         digest: record.requestDigest,
         binding: cloneBinding(record.binding),
       });
       break;
     case "legacy-binding-staged":
-      if (state.usedBindingRefs.has(record.binding.bindingRef)) {
+      if (
+        record.binding.revision !== 1 ||
+        record.binding.workspaceBindingRevision !== 1 ||
+        state.migrationTerminals.has(
+          migrationKey(record.migrationId, record.sourceSnapshotToken),
+        ) ||
+        state.usedBindingRefs.has(record.binding.bindingRef)
+      ) {
         throw corruptDirectory("Workspace binding identity was reused");
       }
       if (
@@ -1047,6 +1201,23 @@ function reduceWorkspaceBindingProjection(
       const current = state.bindings.get(record.binding.bindingRef);
       if (!current || record.binding.revision !== current.revision + 1) {
         throw corruptDirectory("Workspace binding update is not continuous");
+      }
+      const request = record.request;
+      if (
+        request.kind !== "update" ||
+        request.expectedRevision !== current.revision ||
+        record.binding.displayName !==
+          (request.patch.displayName ?? current.displayName) ||
+        record.binding.absolutePath !==
+          (request.patch.absolutePath ?? current.absolutePath) ||
+        record.binding.workspaceBindingRevision !==
+          (record.binding.absolutePath === current.absolutePath
+            ? current.workspaceBindingRevision
+            : current.workspaceBindingRevision + 1)
+      ) {
+        throw corruptDirectory(
+          "Workspace binding update result contradicts its request",
+        );
       }
       state.displayNames.delete(displayNameKey(current.displayName));
       const owner = state.displayNames.get(
@@ -1091,8 +1262,8 @@ function reduceWorkspaceBindingProjection(
         record.sourceSnapshotToken,
       );
       const previousTerminal = state.migrationTerminals.get(terminalKey);
-      if (previousTerminal && previousTerminal !== "activated") {
-        throw corruptDirectory("Abandoned workspace migration was reactivated");
+      if (previousTerminal) {
+        throw corruptDirectory("Workspace migration terminal was repeated");
       }
       const staged = [...state.stagedLegacy].filter(
         ([, value]) =>
@@ -1101,10 +1272,7 @@ function reduceWorkspaceBindingProjection(
       );
       for (const [bindingRef, value] of staged) {
         const nameKey = displayNameKey(value.binding.displayName);
-        if (
-          state.bindings.has(bindingRef) ||
-          state.displayNames.has(nameKey)
-        ) {
+        if (state.bindings.has(bindingRef) || state.displayNames.has(nameKey)) {
           throw corruptDirectory(
             "Legacy workspace activation conflicts with active state",
           );
@@ -1126,6 +1294,9 @@ function reduceWorkspaceBindingProjection(
         record.migrationId,
         record.sourceSnapshotToken,
       );
+      if (state.migrationTerminals.has(terminalKey)) {
+        throw corruptDirectory("Workspace migration terminal was repeated");
+      }
       for (const [bindingRef, value] of [...state.stagedLegacy]) {
         if (
           value.migrationId === record.migrationId &&
@@ -1133,20 +1304,6 @@ function reduceWorkspaceBindingProjection(
         ) {
           state.stagedLegacy.delete(bindingRef);
         }
-      }
-      for (const [bindingRef, owner] of [...state.legacyOwners]) {
-        if (
-          owner.migrationId !== record.migrationId ||
-          owner.sourceSnapshotToken !== record.sourceSnapshotToken
-        ) {
-          continue;
-        }
-        const binding = state.bindings.get(bindingRef);
-        if (binding) {
-          state.bindings.delete(bindingRef);
-          state.displayNames.delete(displayNameKey(binding.displayName));
-        }
-        state.legacyOwners.delete(bindingRef);
       }
       state.migrationTerminals.set(terminalKey, "abandoned");
       state.requests.set(record.requestId, { digest: record.requestDigest });
@@ -1156,41 +1313,194 @@ function reduceWorkspaceBindingProjection(
   return state;
 }
 
-function validateRecord(input: WorkspaceBindingRecord): WorkspaceBindingRecord {
-  if (!input || typeof input !== "object") {
-    throw corruptDirectory("Workspace binding record is malformed");
-  }
-  if (input.t === "directory-established") {
-    requireIdentifier(input.deviceId, "Workspace directory deviceId");
-    return input;
-  }
-  if (input.t === "catalog-reset") {
-    requireIdentifier(
-      input.previousCatalogGeneration,
-      "Previous workspace catalog generation",
+function assertRecordedRequestOutcome(
+  state: WorkspaceBindingProjection,
+  record: Extract<WorkspaceBindingRecord, { t: "binding-request-recorded" }>,
+): void {
+  const request = record.request;
+  const active = state.bindings.get(record.binding.bindingRef);
+  const staged = state.stagedLegacy.get(record.binding.bindingRef)?.binding;
+  const existing = active ?? staged;
+  if (!existing || !sameBinding(existing, record.binding)) {
+    throw corruptDirectory(
+      "Workspace replay result is not present in authoritative state",
     );
-    requireIdentifier(
-      input.catalogGeneration,
-      "Workspace catalog generation",
-    );
+  }
+  if (request.kind === "update") {
     if (
-      typeof input.confirmationDigest !== "string" ||
-      !input.confirmationDigest.startsWith("sha256:")
+      request.expectedRevision !== existing.revision ||
+      (request.patch.displayName !== undefined &&
+        request.patch.displayName !== existing.displayName) ||
+      (request.patch.absolutePath !== undefined &&
+        request.patch.absolutePath !== existing.absolutePath)
     ) {
       throw corruptDirectory(
-        "Workspace catalog reset confirmation digest is invalid",
+        "Workspace update replay contradicts its current binding",
       );
     }
-    return input;
+  }
+  if (request.kind === "legacy-import" && !staged && !active) {
+    throw corruptDirectory("Legacy workspace replay has no imported binding");
+  }
+}
+
+function sameBinding(
+  left: LocalWorkspaceBinding,
+  right: LocalWorkspaceBinding,
+): boolean {
+  return (
+    left.bindingRef === right.bindingRef &&
+    left.revision === right.revision &&
+    left.displayName === right.displayName &&
+    left.absolutePath === right.absolutePath &&
+    left.workspaceBindingRevision === right.workspaceBindingRevision
+  );
+}
+
+function validateRecord(input: WorkspaceBindingRecord): WorkspaceBindingRecord {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw corruptDirectory("Workspace binding record is malformed");
+  }
+  switch (input.t) {
+    case "directory-established":
+      assertRecordKeys(input, ["deviceId", "t"], "Workspace directory genesis");
+      requireIdentifier(input.deviceId, "Workspace directory deviceId");
+      return input;
+    case "catalog-reset":
+      assertRecordKeys(
+        input,
+        [
+          "capabilityRevision",
+          "catalogGeneration",
+          "confirmationDigest",
+          "logId",
+          "preparedAt",
+          "previousCatalogGeneration",
+          "requestId",
+          "t",
+        ],
+        "Workspace catalog reset genesis",
+      );
+      requireIdentifier(
+        input.previousCatalogGeneration,
+        "Previous workspace catalog generation",
+      );
+      requireIdentifier(
+        input.catalogGeneration,
+        "Workspace catalog generation",
+      );
+      if (
+        input.catalogGeneration !==
+        protocolDigest("WorkspaceBindingCatalogGeneration", 1, {
+          previousCatalogGeneration: input.previousCatalogGeneration,
+          confirmationDigest: input.confirmationDigest,
+        })
+      ) {
+        throw corruptDirectory(
+          "Workspace catalog reset generation is inconsistent",
+        );
+      }
+      requireIdentifier(input.requestId, "Workspace catalog reset requestId");
+      requireIdentifier(input.logId, "Workspace catalog reset logId");
+      requireDigest(
+        input.confirmationDigest,
+        "Workspace catalog reset confirmation digest",
+      );
+      requirePositiveRevision(
+        input.capabilityRevision,
+        "Workspace catalog reset capability revision",
+      );
+      requireCanonicalTime(
+        input.preparedAt,
+        "Workspace catalog reset preparation time",
+      );
+      return input;
+    case "binding-created":
+    case "binding-updated":
+    case "binding-request-recorded":
+      assertRecordKeys(
+        input,
+        ["binding", "request", "requestDigest", "requestId", "t"],
+        "Workspace binding record",
+      );
+      break;
+    case "binding-removed":
+      assertRecordKeys(
+        input,
+        [
+          "bindingRef",
+          "previousRevision",
+          "request",
+          "requestDigest",
+          "requestId",
+          "t",
+        ],
+        "Workspace binding removal",
+      );
+      break;
+    case "legacy-binding-staged":
+      assertRecordKeys(
+        input,
+        [
+          "binding",
+          "migrationId",
+          "request",
+          "requestDigest",
+          "requestId",
+          "sourceSnapshotToken",
+          "t",
+        ],
+        "Legacy workspace binding",
+      );
+      break;
+    case "legacy-migration-activated":
+      assertRecordKeys(
+        input,
+        [
+          "migrationId",
+          "request",
+          "requestDigest",
+          "requestId",
+          "sourceSnapshotToken",
+          "t",
+        ],
+        "Legacy workspace migration activation",
+      );
+      break;
+    case "legacy-migration-abandoned":
+      assertRecordKeys(
+        input,
+        [
+          "migrationId",
+          "reason",
+          "request",
+          "requestDigest",
+          "requestId",
+          "sourceSnapshotToken",
+          "t",
+        ],
+        "Legacy workspace migration abandonment",
+      );
+      break;
+    default:
+      throw corruptDirectory("Workspace binding record tag is unknown");
   }
   requireIdentifier(input.requestId, "Workspace binding requestId");
-  if (
-    typeof input.requestDigest !== "string" ||
-    !input.requestDigest.startsWith("sha256:")
-  ) {
-    throw corruptDirectory("Workspace binding request digest is invalid");
+  requireDigest(input.requestDigest, "Workspace binding request digest");
+  const request = validateWorkspaceBindingRequest(input.request);
+  if (workspaceBindingRequestDigest(request) !== input.requestDigest) {
+    throw corruptDirectory("Workspace binding request digest is inconsistent");
   }
   if (input.t === "binding-removed") {
+    if (
+      request.kind !== "remove" ||
+      request.bindingRef !== input.bindingRef ||
+      request.expectedRevision !== input.previousRevision
+    ) {
+      throw corruptDirectory(
+        "Workspace binding removal does not bind its request",
+      );
+    }
     requireIdentifier(input.bindingRef, "Workspace bindingRef");
     requirePositiveRevision(
       input.previousRevision,
@@ -1202,6 +1512,20 @@ function validateRecord(input: WorkspaceBindingRecord): WorkspaceBindingRecord {
     input.t === "legacy-migration-activated" ||
     input.t === "legacy-migration-abandoned"
   ) {
+    const expectedKind =
+      input.t === "legacy-migration-activated"
+        ? "legacy-activate"
+        : "legacy-abandon";
+    if (
+      request.kind !== expectedKind ||
+      request.migrationId !== input.migrationId ||
+      request.sourceSnapshotToken !== input.sourceSnapshotToken ||
+      (request.kind === "legacy-abandon" && request.reason !== input.reason)
+    ) {
+      throw corruptDirectory(
+        "Workspace migration terminal does not bind its request",
+      );
+    }
     requireIdentifier(input.migrationId, "Workspace migrationId");
     requireIdentifier(
       input.sourceSnapshotToken,
@@ -1217,24 +1541,314 @@ function validateRecord(input: WorkspaceBindingRecord): WorkspaceBindingRecord {
   }
   validateBinding(input.binding);
   if (input.t === "legacy-binding-staged") {
+    if (
+      request.kind !== "legacy-import" ||
+      request.migrationId !== input.migrationId ||
+      request.sourceSnapshotToken !== input.sourceSnapshotToken ||
+      request.displayName !== input.binding.displayName ||
+      request.absolutePath !== input.binding.absolutePath
+    ) {
+      throw corruptDirectory(
+        "Legacy workspace binding does not bind its request",
+      );
+    }
     requireIdentifier(input.migrationId, "Workspace migrationId");
     requireIdentifier(
       input.sourceSnapshotToken,
       "Workspace source snapshot token",
     );
+  } else if (input.t === "binding-created") {
+    if (
+      request.kind !== "create" ||
+      request.displayName !== input.binding.displayName ||
+      request.absolutePath !== input.binding.absolutePath
+    ) {
+      throw corruptDirectory(
+        "Workspace binding creation does not bind its request",
+      );
+    }
+  } else if (input.t === "binding-updated") {
+    if (
+      request.kind !== "update" ||
+      request.bindingRef !== input.binding.bindingRef
+    ) {
+      throw corruptDirectory(
+        "Workspace binding update does not bind its request",
+      );
+    }
+  } else if (input.t === "binding-request-recorded") {
+    if (
+      (request.kind === "create" &&
+        (request.displayName !== input.binding.displayName ||
+          request.absolutePath !== input.binding.absolutePath)) ||
+      (request.kind === "update" &&
+        request.bindingRef !== input.binding.bindingRef) ||
+      (request.kind === "legacy-import" &&
+        (request.displayName !== input.binding.displayName ||
+          request.absolutePath !== input.binding.absolutePath)) ||
+      (request.kind !== "create" &&
+        request.kind !== "update" &&
+        request.kind !== "legacy-import")
+    ) {
+      throw corruptDirectory(
+        "Workspace replay result does not bind its request",
+      );
+    }
   }
   return input;
 }
 
+function validateWorkspaceBindingRequest(
+  value: unknown,
+): WorkspaceBindingRequestIdentity {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw corruptDirectory("Workspace binding request is malformed");
+  }
+  const request = value as Record<string, unknown>;
+  switch (request.kind) {
+    case "create": {
+      assertRecordKeys(
+        request,
+        ["absolutePath", "displayName", "kind"],
+        "Workspace create request",
+      );
+      const displayName = normalizeWorkspaceDisplayName(
+        request.displayName as string,
+      );
+      const absolutePath = normalizeWorkspacePath(
+        request.absolutePath as string,
+      );
+      if (
+        displayName !== request.displayName ||
+        absolutePath !== request.absolutePath
+      ) {
+        throw corruptDirectory("Workspace create request is not canonical");
+      }
+      return { kind: "create", displayName, absolutePath };
+    }
+    case "update": {
+      assertRecordKeys(
+        request,
+        ["bindingRef", "expectedRevision", "kind", "patch"],
+        "Workspace update request",
+      );
+      const bindingRef = requireIdentifier(
+        request.bindingRef,
+        "Workspace bindingRef",
+      );
+      const expectedRevision = requirePositiveRevision(
+        request.expectedRevision,
+        "Workspace expected revision",
+      );
+      const patch = normalizePatch(request.patch as WorkspaceBindingPatch);
+      if (
+        Object.keys(patch).sort().join(",") !==
+        Object.keys(request.patch as object)
+          .sort()
+          .join(",")
+      ) {
+        throw corruptDirectory("Workspace update patch is not canonical");
+      }
+      return { kind: "update", bindingRef, expectedRevision, patch };
+    }
+    case "remove":
+      assertRecordKeys(
+        request,
+        ["bindingRef", "expectedRevision", "kind"],
+        "Workspace remove request",
+      );
+      return {
+        kind: "remove",
+        bindingRef: requireIdentifier(
+          request.bindingRef,
+          "Workspace bindingRef",
+        ),
+        expectedRevision: requirePositiveRevision(
+          request.expectedRevision,
+          "Workspace expected revision",
+        ),
+      };
+    case "legacy-import": {
+      assertRecordKeys(
+        request,
+        [
+          "absolutePath",
+          "displayName",
+          "kind",
+          "migrationId",
+          "sourceSnapshotToken",
+        ],
+        "Legacy workspace import request",
+      );
+      const displayName = normalizeWorkspaceDisplayName(
+        request.displayName as string,
+      );
+      const absolutePath = normalizeWorkspacePath(
+        request.absolutePath as string,
+      );
+      if (
+        displayName !== request.displayName ||
+        absolutePath !== request.absolutePath
+      ) {
+        throw corruptDirectory(
+          "Legacy workspace import request is not canonical",
+        );
+      }
+      return {
+        kind: "legacy-import",
+        migrationId: requireIdentifier(
+          request.migrationId,
+          "Workspace migrationId",
+        ),
+        sourceSnapshotToken: requireIdentifier(
+          request.sourceSnapshotToken,
+          "Workspace source snapshot token",
+        ),
+        displayName,
+        absolutePath,
+      };
+    }
+    case "legacy-activate":
+      assertRecordKeys(
+        request,
+        ["kind", "migrationId", "sourceSnapshotToken"],
+        "Legacy workspace activation request",
+      );
+      return {
+        kind: "legacy-activate",
+        migrationId: requireIdentifier(
+          request.migrationId,
+          "Workspace migrationId",
+        ),
+        sourceSnapshotToken: requireIdentifier(
+          request.sourceSnapshotToken,
+          "Workspace source snapshot token",
+        ),
+      };
+    case "legacy-abandon":
+      assertRecordKeys(
+        request,
+        ["kind", "migrationId", "reason", "sourceSnapshotToken"],
+        "Legacy workspace abandonment request",
+      );
+      return {
+        kind: "legacy-abandon",
+        migrationId: requireIdentifier(
+          request.migrationId,
+          "Workspace migrationId",
+        ),
+        sourceSnapshotToken: requireIdentifier(
+          request.sourceSnapshotToken,
+          "Workspace source snapshot token",
+        ),
+        reason: requireIdentifier(
+          request.reason,
+          "Workspace migration abandonment reason",
+        ),
+      };
+    default:
+      throw corruptDirectory("Workspace binding request tag is unknown");
+  }
+}
+
+function workspaceBindingRequestDigest(
+  request: WorkspaceBindingRequestIdentity,
+): string {
+  switch (request.kind) {
+    case "create":
+      return protocolDigest("WorkspaceBindingCreate", 1, {
+        displayName: request.displayName,
+        absolutePath: request.absolutePath,
+      });
+    case "update":
+      return protocolDigest("WorkspaceBindingUpdate", 1, {
+        bindingRef: request.bindingRef,
+        expectedRevision: request.expectedRevision,
+        patch: request.patch,
+      });
+    case "remove":
+      return protocolDigest("WorkspaceBindingRemove", 1, {
+        bindingRef: request.bindingRef,
+        expectedRevision: request.expectedRevision,
+      });
+    case "legacy-import":
+      return protocolDigest("WorkspaceBindingLegacyImport", 1, {
+        migrationId: request.migrationId,
+        sourceSnapshotToken: request.sourceSnapshotToken,
+        displayName: request.displayName,
+        absolutePath: request.absolutePath,
+      });
+    case "legacy-activate":
+      return protocolDigest("WorkspaceBindingLegacyActivation", 1, {
+        migrationId: request.migrationId,
+        sourceSnapshotToken: request.sourceSnapshotToken,
+      });
+    case "legacy-abandon":
+      return protocolDigest("WorkspaceBindingLegacyAbandonment", 1, {
+        migrationId: request.migrationId,
+        sourceSnapshotToken: request.sourceSnapshotToken,
+        reason: request.reason,
+      });
+  }
+}
+
 function validateBinding(binding: LocalWorkspaceBinding): void {
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+    throw corruptDirectory("Workspace binding is malformed");
+  }
+  assertRecordKeys(
+    binding,
+    [
+      "absolutePath",
+      "bindingRef",
+      "displayName",
+      "revision",
+      "workspaceBindingRevision",
+    ],
+    "Workspace binding",
+  );
   requireIdentifier(binding.bindingRef, "Workspace bindingRef");
   requirePositiveRevision(binding.revision, "Workspace binding revision");
-  normalizeWorkspaceDisplayName(binding.displayName);
-  normalizeWorkspacePath(binding.absolutePath);
+  if (
+    normalizeWorkspaceDisplayName(binding.displayName) !== binding.displayName
+  ) {
+    throw corruptDirectory("Workspace binding display name is not canonical");
+  }
+  if (normalizeWorkspacePath(binding.absolutePath) !== binding.absolutePath) {
+    throw corruptDirectory("Workspace binding path is not canonical");
+  }
   requirePositiveRevision(
     binding.workspaceBindingRevision,
     "Workspace execution revision",
   );
+}
+
+function assertRecordKeys(
+  value: object,
+  expected: readonly string[],
+  label: string,
+): void {
+  if (Object.keys(value).sort().join(",") !== [...expected].sort().join(",")) {
+    throw corruptDirectory(`${label} fields are invalid`);
+  }
+}
+
+function requireDigest(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(value)) {
+    throw corruptDirectory(`${label} is invalid`);
+  }
+  return value;
+}
+
+function requireCanonicalTime(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw corruptDirectory(`${label} is invalid`);
+  }
+  const time = Date.parse(value);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) {
+    throw corruptDirectory(`${label} is invalid`);
+  }
+  return value;
 }
 
 function emptyWorkspaceBindingProjection(): WorkspaceBindingProjection {
@@ -1248,6 +1862,7 @@ function emptyWorkspaceBindingProjection(): WorkspaceBindingProjection {
     stagedLegacy: new Map(),
     legacyOwners: new Map(),
     migrationTerminals: new Map(),
+    resetReceipt: undefined,
   };
 }
 
@@ -1286,6 +1901,9 @@ function cloneProjection(
       [...source.legacyOwners].map(([key, value]) => [key, { ...value }]),
     ),
     migrationTerminals: new Map(source.migrationTerminals),
+    resetReceipt: source.resetReceipt
+      ? structuredClone(source.resetReceipt)
+      : undefined,
   };
 }
 
@@ -1297,7 +1915,10 @@ function displayNameKey(name: string): string {
   return name.normalize("NFC").toLocaleLowerCase("en-US");
 }
 
-function migrationKey(migrationId: string, sourceSnapshotToken: string): string {
+function migrationKey(
+  migrationId: string,
+  sourceSnapshotToken: string,
+): string {
   return `${migrationId}\u0000${sourceSnapshotToken}`;
 }
 
@@ -1367,7 +1988,10 @@ export class WorkspaceBindingNotFoundError extends Error {
 }
 
 export class WorkspaceBindingConflictError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly reason: "conflict" | "legacy-name-conflict" = "conflict",
+  ) {
     super(message);
     this.name = "WorkspaceBindingConflictError";
   }

@@ -145,7 +145,49 @@ export class ExecutorCapabilityDirectory {
     return new ExecutorCapabilityDirectory(options, state);
   }
 
+  /**
+   * Refreshes the in-memory view from the durable directory.
+   *
+   * Device-local administration may run in another trusted process while the
+   * long-lived host remains online. Readers must therefore be able to adopt a
+   * newer durable generation before evaluating or replaying a snapshot.
+   */
+  async refresh(): Promise<void> {
+    const loaded = await this.#store.load();
+    if (loaded === undefined) {
+      if (this.#generation === 0 && this.#entries.size === 0) return;
+      throw new TypeError("Executor capability directory state is missing");
+    }
+    const state = validateExecutorCapabilityDirectoryState(
+      loaded,
+      this.#verifier,
+    );
+    if (state.generation < this.#generation) {
+      throw new TypeError("Executor capability directory generation moved backwards");
+    }
+    if (state.generation === this.#generation) {
+      const current: ExecutorCapabilityDirectoryState = {
+        v: 1,
+        generation: this.#generation,
+        executors: [...this.#entries.values()].sort((left, right) =>
+          compareCanonicalStrings(left.executorId, right.executorId)
+        ),
+      };
+      if (canonicalize(state) !== canonicalize(current)) {
+        throw new TypeError(
+          "Executor capability directory generation was rewritten",
+        );
+      }
+      return;
+    }
+    this.#entries = new Map(
+      state.executors.map((entry) => [entry.executorId, entry]),
+    );
+    this.#generation = state.generation;
+  }
+
   async accept(incoming: ExecutorCapabilitySnapshot): Promise<ExecutorSnapshotUpdateResult> {
+    await this.refresh();
     const verified = validateExecutorCapabilitySnapshot(incoming, this.#verifier);
     const executorId = verified.descriptor.executorId;
     const deviceKeyId = verified.descriptor.signature.keyId;
@@ -204,6 +246,7 @@ export class ExecutorCapabilityDirectory {
   }
 
   async revokeDevice(deviceKeyId: string): Promise<void> {
+    await this.refresh();
     const nextEntries = new Map(this.#entries);
     let changed = false;
     for (const [executorId, entry] of nextEntries) {
@@ -220,6 +263,7 @@ export class ExecutorCapabilityDirectory {
     expectedDeviceKeyId: string,
     nextDeviceKeyId: string,
   ): Promise<void> {
+    await this.refresh();
     assertIdentifier(executorId, "Executor transition executorId");
     assertIdentifier(expectedDeviceKeyId, "Executor transition current device key");
     assertIdentifier(nextDeviceKeyId, "Executor transition next device key");

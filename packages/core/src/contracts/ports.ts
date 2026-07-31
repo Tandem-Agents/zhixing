@@ -215,7 +215,6 @@ export interface WorkspaceBindingRootManifest {
   state: "healthy" | "degraded";
   degradedReason?: string;
   pendingReset?: WorkspaceBindingResetReservation;
-  lastReset?: WorkspaceBindingResetReceipt;
 }
 
 export type WorkspaceBindingPatch =

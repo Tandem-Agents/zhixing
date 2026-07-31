@@ -2,6 +2,7 @@ export {
   WorkspaceBindingCatalog,
   WorkspaceBindingCatalogConflictError,
   WorkspaceBindingCatalogDegradedError,
+  workspaceCatalogGenerationStorageKey,
   type WorkspaceBindingCatalogOptions,
 } from "./workspace-binding-catalog.js";
 export {
@@ -37,6 +38,7 @@ export {
   executionProfileForEnvironment,
   preflightWorkspaceRequirement,
   selectExecutorForEnvironment,
+  ExecutorSelectionRequiredError,
   WORKSPACE_DEPENDENT_TOOL_IDS,
   type DerivedEnvironmentRequirement,
   type EnvironmentSourceInput,

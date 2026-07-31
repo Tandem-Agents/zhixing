@@ -8,7 +8,9 @@ export {
   WorksceneConflictError,
   WorksceneNotFoundError,
   WorksceneRevisionError,
+  canonicalLegacyWorksceneImport,
   worksceneImportSetDigest,
+  worksceneImportSetDigestNext,
   type WorksceneRegistryControlContext,
 } from "./authority-registry.js";
 export {

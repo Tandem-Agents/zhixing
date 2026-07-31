@@ -21,7 +21,10 @@ import {
   type AgentYield,
   type Message,
 } from "@zhixing/core";
-import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
+import {
+  createAssignmentRuntimeAdapter,
+  createOwnerRuntimeAdapter,
+} from "@zhixing/runtime-host/session-adapter";
 import type { RunResult } from "@zhixing/core";
 import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
 
@@ -256,6 +259,20 @@ describe("createOwnerRuntimeAdapter", () => {
 
     await runtime.dispose();
     expect(disposedWith).toBe("session-dispose");
+  });
+
+  it("uses the assignment lifecycle reason for assignment-scoped runtimes", async () => {
+    let disposedWith: string | undefined;
+    const agent = createMockAgentRuntime();
+    (agent as unknown as { dispose: (reason: string) => Promise<void> }).dispose =
+      async (reason: string) => {
+        disposedWith = reason;
+      };
+    const runtime = createAssignmentRuntimeAdapter("assignment-1", agent);
+
+    await runtime.dispose();
+
+    expect(disposedWith).toBe("assignment-dispose");
   });
 
   it("adapter 透传 AgentRuntime 的 confirmationBroker——远程确认链路依赖", () => {

@@ -45,10 +45,15 @@ export interface ConversationAssignmentWorkerOptions {
   readonly runtimeFactory: RuntimeFactory;
   readonly preflightEnvironment?: (
     manifest: ConversationEnvelope["manifest"],
+    assignmentId: string,
   ) => Promise<{
     readonly workspaceRoot: string | null;
     readonly error?: import("@zhixing/core/contracts").AuthorityError;
   }>;
+  readonly releasePreflightEnvironment?: (
+    manifest: ConversationEnvelope["manifest"],
+    assignmentId: string,
+  ) => void;
   readonly artifacts: ArtifactStore;
   readonly submissionFor: (envelope: ConversationEnvelope) => RunSubmissionPort;
   readonly finalizeUsage: (input: {
@@ -76,6 +81,7 @@ export class ConversationAssignmentWorker {
   readonly #running = new Map<string, Promise<void>>();
   readonly #cancellations = new Map<string, Promise<void>>();
   readonly #executionAborts = new Map<string, AbortController>();
+  readonly #preflightClaims = new Set<string>();
   readonly #abort = new AbortController();
   #closed = false;
 
@@ -94,6 +100,12 @@ export class ConversationAssignmentWorker {
           this.#executionAborts.delete(envelope.assignmentId);
         }
         this.options.interactions.releaseAssignment(envelope.assignmentId);
+        if (this.#preflightClaims.delete(envelope.assignmentId)) {
+          this.options.releasePreflightEnvironment?.(
+            envelope.manifest,
+            envelope.assignmentId,
+          );
+        }
       });
     this.#running.set(envelope.assignmentId, task);
   }
@@ -185,9 +197,17 @@ export class ConversationAssignmentWorker {
       ledger: this.options.ledger,
       owner: submission,
     });
+    if (
+      await this.#resumeSealedSubmission(assignmentId, submission, context)
+    ) {
+      return;
+    }
     const environment = this.options.preflightEnvironment
-      ? await this.options.preflightEnvironment(envelope.manifest)
+      ? await this.options.preflightEnvironment(envelope.manifest, assignmentId)
       : { workspaceRoot: null };
+    if (this.options.preflightEnvironment) {
+      this.#preflightClaims.add(assignmentId);
+    }
     if (environment.error) {
       throw new Error(environment.error.message);
     }
@@ -521,8 +541,8 @@ export class ConversationAssignmentWorker {
     assignmentId: string,
     submission: RunSubmissionPort,
     context: AuthorityCallContext,
-  ): Promise<void> {
-    await resumeSealedSubmission({
+  ): Promise<boolean> {
+    return resumeSealedSubmission({
       assignmentId,
       ledger: this.options.ledger,
       owner: submission,

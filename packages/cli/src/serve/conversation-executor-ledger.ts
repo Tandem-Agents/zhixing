@@ -67,12 +67,16 @@ export function createConversationExecutorLedger(
       options.authority.executorCapabilities.snapshotFor(executorId),
     permissionSnapshotFor: (digest: string): TrustRuleSnapshot | undefined =>
       options.authority.permissionSnapshotFor(digest),
-    runtimeBindingGuard: options.runtimeBindingGuard ?? (async ({ manifest }) => {
+    runtimeBindingGuard: options.runtimeBindingGuard ?? (async ({
+      assignmentId,
+      manifest,
+    }) => {
       const compatibility =
         options.authority.validateLocalConversationManifest(manifest);
       if (compatibility) return compatibility;
       return (await options.authority.preflightLocalConversationEnvironment(
         manifest,
+        assignmentId,
       )).error;
     }),
     clock,

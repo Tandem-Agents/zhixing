@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const packagesRoot = path.resolve(
@@ -8,32 +9,49 @@ const packagesRoot = path.resolve(
   "../../..",
 );
 let sources: ReadonlyMap<string, string>;
+let syntaxTrees: ReadonlyMap<string, ts.SourceFile>;
 
 describe("workscene authority structure boundary", () => {
   beforeAll(async () => {
     sources = await productionSources(packagesRoot);
+    syntaxTrees = new Map(
+      [...sources].map(([file, source]) => [
+        file,
+        ts.createSourceFile(
+          file,
+          source,
+          ts.ScriptTarget.Latest,
+          true,
+          ts.ScriptKind.TS,
+        ),
+      ]),
+    );
   }, 120_000);
 
-  it("keeps new authority and projection constructors inside the global adapter", async () => {
-    expect(matches(sources, /\bnew\s+AnchorWorksceneRegistry\s*\(/gu)).toEqual([
-      "core/src/workscene/global-state-adapter.ts",
-    ]);
+  it("keeps new authority and projection symbols reachable only by the global adapter", () => {
     expect(
-      matches(
-        sources,
-        /\bnew\s+IncrementalWorksceneActivityProjection\s*\(/gu,
-      ),
+      symbolReferences(syntaxTrees, "AnchorWorksceneRegistry", {
+        definition: "core/src/workscene/authority-registry.ts",
+      }),
+    ).toEqual(["core/src/workscene/global-state-adapter.ts"]);
+    expect(
+      symbolReferences(syntaxTrees, "IncrementalWorksceneActivityProjection", {
+        definition: "core/src/workscene/activity-projection.ts",
+      }),
     ).toEqual(["core/src/workscene/global-state-adapter.ts"]);
   });
 
-  it("keeps the legacy registry out of production construction and public exports", async () => {
-    expect(matches(sources, /\bnew\s+FsWorkSceneRegistry\s*\(/gu)).toEqual([]);
-    const worksceneIndex = await readFile(
-      path.join(packagesRoot, "core/src/workscene/index.ts"),
-      "utf8",
-    );
-    expect(worksceneIndex).not.toMatch(/\bFsWorkSceneRegistry\b/u);
-    expect(worksceneIndex).not.toMatch(/\bWorksceneActivityProjection\b/u);
+  it("keeps the legacy registry and projection out of production reachability", () => {
+    expect(
+      symbolReferences(syntaxTrees, "FsWorkSceneRegistry", {
+        definition: "core/src/workscene/registry.ts",
+      }),
+    ).toEqual([]);
+    expect(
+      symbolReferences(syntaxTrees, "WorksceneActivityProjection", {
+        definition: "core/src/workscene/activity-projection.ts",
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -66,14 +84,36 @@ async function productionSources(
   return result;
 }
 
-function matches(
-  sources: ReadonlyMap<string, string>,
-  pattern: RegExp,
+function symbolReferences(
+  trees: ReadonlyMap<string, ts.SourceFile>,
+  symbol: string,
+  options: { readonly definition: string },
 ): string[] {
-  const result: string[] = [];
-  for (const [file, source] of sources) {
-    pattern.lastIndex = 0;
-    if (pattern.test(source)) result.push(file);
+  const files = new Set<string>();
+  for (const [file, sourceFile] of trees) {
+    if (file === options.definition) continue;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isIdentifier(node) &&
+        node.text === symbol &&
+        !isPropertyName(node)
+      ) {
+        files.add(file);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
   }
-  return result.sort();
+  return [...files].sort();
+}
+
+function isPropertyName(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  return (
+    (ts.isPropertyAssignment(parent) && parent.name === node) ||
+    (ts.isPropertySignature(parent) && parent.name === node) ||
+    (ts.isPropertyDeclaration(parent) && parent.name === node) ||
+    (ts.isMethodDeclaration(parent) && parent.name === node) ||
+    (ts.isMethodSignature(parent) && parent.name === node)
+  );
 }

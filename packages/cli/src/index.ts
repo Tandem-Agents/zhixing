@@ -296,12 +296,12 @@ workspaceCmd
 workspaceCmd
   .command("rename")
   .description("修改本机工作区名称")
-  .argument("<binding-ref>", "工作区引用")
+  .argument("<current-name>", "当前工作区名称")
   .argument("<name>", "新名称")
   .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
   .action(
     async (
-      bindingRef: string,
+      currentName: string,
       name: string,
       options: { revision: number },
     ) => {
@@ -309,7 +309,7 @@ workspaceCmd
         "./runtime/workspace-command.js"
       );
       await runWorkspaceCommand((workspace) =>
-        workspace.rename(bindingRef, name, options.revision),
+        workspace.rename(currentName, name, options.revision),
       );
     },
   );
@@ -317,12 +317,12 @@ workspaceCmd
 workspaceCmd
   .command("repath")
   .description("修改本机工作区目录")
-  .argument("<binding-ref>", "工作区引用")
+  .argument("<name>", "工作区名称")
   .argument("<path>", "新目录路径")
   .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
   .action(
     async (
-      bindingRef: string,
+      name: string,
       targetPath: string,
       options: { revision: number },
     ) => {
@@ -330,7 +330,7 @@ workspaceCmd
         "./runtime/workspace-command.js"
       );
       await runWorkspaceCommand((workspace) =>
-        workspace.repath(bindingRef, targetPath, options.revision),
+        workspace.repath(name, targetPath, options.revision),
       );
     },
   );
@@ -338,15 +338,15 @@ workspaceCmd
 workspaceCmd
   .command("remove")
   .description("移除本机工作区授权")
-  .argument("<binding-ref>", "工作区引用")
+  .argument("<name>", "工作区名称")
   .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
-  .action(async (bindingRef: string, options: { revision: number }) => {
+  .action(async (name: string, options: { revision: number }) => {
     const { runWorkspaceCommand } = await import(
       "./runtime/workspace-command.js"
     );
     await runWorkspaceCommand(async (workspace) => {
-      await workspace.remove(bindingRef, options.revision);
-      return { removed: bindingRef };
+      await workspace.remove(name, options.revision);
+      return { removed: name };
     });
   });
 

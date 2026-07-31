@@ -261,6 +261,12 @@ async function runServerProcess(
     conversations: () => conversationsRef.current,
     conversationAuthority: () => conversationAuthorityRef.current,
     conversationDirectory,
+    recoverWorksceneState: async () => {
+      await authorityRuntimeRef.current?.recoverWorksceneState();
+    },
+    replayWorksceneMutation: async (requestId) =>
+      (await authorityRuntimeRef.current?.replayWorksceneMutation(requestId)) ??
+      null,
     storageMaintenance: deviceCapacity.storage,
     probeRemote: (deviceId, request) => {
       const mesh = meshRuntimeRef.current;
@@ -520,6 +526,9 @@ async function runServerProcess(
           throw new Error("Local executor role is not enabled on this device");
         },
       };
+  const assignmentRuntimeFactory = executorRole && executor
+    ? executor.createInProcessAssignmentRuntimeFactory(executorRole)
+    : runtimeFactory;
   const jobRuntime = executor
     ? createAgentJobRuntimePort({
         create: (instruction, confirmationBroker) =>
@@ -577,6 +586,7 @@ async function runServerProcess(
     transcript,
     snapshots,
     runtimeFactory,
+    assignmentRuntimeFactory,
     ...(jobRuntime ? { jobRuntime } : {}),
     executorReadiness,
     ...(executor ? { executorRoleModule: executor } : {}),

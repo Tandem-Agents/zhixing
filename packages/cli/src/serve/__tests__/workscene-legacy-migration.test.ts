@@ -62,7 +62,13 @@ describe("workscene legacy migration", () => {
       bindings: migration,
     });
 
-    expect(migration.importLegacy).toHaveBeenCalledTimes(1);
+    const importedCalls = vi.mocked(migration.importLegacy).mock.calls.length;
+    expect(importedCalls).toBeGreaterThan(0);
+    expect(
+      vi
+        .mocked(migration.importLegacy)
+        .mock.calls.every(([input]) => input.absolutePath === workspacePath),
+    ).toBe(true);
     expect(migration.activateLegacy).toHaveBeenCalledTimes(1);
     const listed = await fixture.globalState.read(
       { kind: "workscene-list" },
@@ -87,7 +93,8 @@ describe("workscene legacy migration", () => {
     expect(report).not.toContain(workspacePath);
     expect(JSON.parse(report)).toMatchObject({
       status: "activated",
-      scenes: [],
+      phase: "cutover",
+      version: 3,
     });
 
     await migrateLegacyWorkscenes({
@@ -97,16 +104,43 @@ describe("workscene legacy migration", () => {
       globalState: fixture.globalState,
       bindings: migration,
     });
-    expect(migration.importLegacy).toHaveBeenCalledTimes(1);
+    expect(migration.importLegacy).toHaveBeenCalledTimes(importedCalls);
     expect(migration.activateLegacy).toHaveBeenCalledTimes(1);
   });
 
+  it("activates an empty legacy registry with the canonical empty digest", async () => {
+    await seedLegacyScenes([]);
+    const fixture = await createRegistry();
+    await migrateLegacyWorkscenes({
+      rootDir: path.join(home, "migration-empty"),
+      deviceId: "device-a",
+      anchorEpoch: 1,
+      globalState: fixture.globalState,
+    });
+
+    const listed = await fixture.globalState.read(
+      { kind: "workscene-list" },
+      readContext("list-empty-import"),
+    );
+    expect(listed).toEqual({ kind: "workscene-list", scenes: [] });
+    expect(
+      JSON.parse(
+        await readFile(
+          path.join(home, "migration-empty", "workscene-legacy-migration.json"),
+          "utf8",
+        ),
+      ),
+    ).toMatchObject({ status: "activated", pageCount: 0, nextPage: 0 });
+  });
+
   it("imports unprovable device ownership as an unbound workscene", async () => {
-    const [scene] = await seedLegacyScenes([{
-      id: "portable",
-      name: "Portable",
-      workdir: path.join(home, "unknown-device-workspace"),
-    }]);
+    const [scene] = await seedLegacyScenes([
+      {
+        id: "portable",
+        name: "Portable",
+        workdir: path.join(home, "unknown-device-workspace"),
+      },
+    ]);
     const fixture = await createRegistry();
 
     await migrateLegacyWorkscenes({
@@ -120,7 +154,9 @@ describe("workscene legacy migration", () => {
       { kind: "workscene-get", sceneId: scene.id },
       readContext("get-imported"),
     );
-    expect(imported.kind === "workscene-get" ? imported.scene : null).toMatchObject({
+    expect(
+      imported.kind === "workscene-get" ? imported.scene : null,
+    ).toMatchObject({
       id: scene.id,
       name: scene.name,
     });
@@ -173,7 +209,9 @@ async function seedLegacyScenes(
 }
 
 async function createRegistry() {
-  const artifacts = new FileArtifactStore(path.join(home, "authority-artifacts"));
+  const artifacts = new FileArtifactStore(
+    path.join(home, "authority-artifacts"),
+  );
   const log = new FileAuthorityCommitLog(
     path.join(home, "authority-log"),
     artifacts,

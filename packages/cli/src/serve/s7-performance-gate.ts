@@ -11,6 +11,7 @@ export interface TerminalPerformanceConfig {
   readonly firstTokenQuantile: number;
   readonly frameRateQuantile: number;
   readonly noiseMadMultiplier: number;
+  readonly minimumNoiseToleranceRatio: number;
   readonly minimumRetainedRatio: number;
   readonly maximumFirstTokenIncreaseRatio: number;
   readonly maximumFrameRateDecreaseRatio: number;
@@ -24,6 +25,7 @@ export const S7_TERMINAL_PERFORMANCE_CONFIG: TerminalPerformanceConfig = {
   firstTokenQuantile: 0.95,
   frameRateQuantile: 0.05,
   noiseMadMultiplier: 4,
+  minimumNoiseToleranceRatio: 0.02,
   minimumRetainedRatio: 0.8,
   maximumFirstTokenIncreaseRatio: 0.1,
   maximumFrameRateDecreaseRatio: 0.05,
@@ -39,7 +41,7 @@ export interface TerminalPerformanceSample {
   readonly firstTokenMs: number;
   readonly streamDurationMs: number;
   readonly streamFrameCount: number;
-  readonly workspaceFilesystemCalls: number;
+  readonly workspacePreflightCalls: number;
   readonly activityProjectionWritesBeforeFirstToken: number;
 }
 
@@ -85,6 +87,26 @@ export interface TerminalPerformanceBaselineManifest {
   };
 }
 
+export interface TerminalPerformanceCaptureAsset {
+  readonly version: 1;
+  readonly revision: string;
+  readonly environment: {
+    readonly platform: string;
+    readonly architecture: string;
+    readonly cpuModel: string;
+    readonly cpuCount: number;
+    readonly memoryBytes: number;
+    readonly nodeVersion: string;
+    readonly loadProfile: string;
+    readonly runtimeParametersDigest: string;
+    readonly fixedInputDigest: string;
+    readonly deterministicModelDigest: string;
+  };
+  readonly environmentFingerprint: string;
+  readonly configDigest: string;
+  readonly runs: readonly TerminalPerformanceRun[];
+}
+
 export interface TerminalPerformanceReport {
   readonly configDigest: string;
   readonly environmentFingerprint: string;
@@ -115,7 +137,7 @@ export class TerminalPerformanceSampleRecorder {
   #firstFrameAt: number | undefined;
   #lastFrameAt: number | undefined;
   #streamFrameCount = 0;
-  #workspaceFilesystemCalls = 0;
+  #workspacePreflightCalls = 0;
   #activityProjectionWritesBeforeFirstToken = 0;
 
   constructor(clock: () => number = () => performance.now()) {
@@ -123,8 +145,8 @@ export class TerminalPerformanceSampleRecorder {
     this.#startedAt = clock();
   }
 
-  workspaceFilesystemAccess(): void {
-    this.#workspaceFilesystemCalls += 1;
+  workspacePreflight(): void {
+    this.#workspacePreflightCalls += 1;
   }
 
   activityProjectionWrite(): void {
@@ -154,7 +176,7 @@ export class TerminalPerformanceSampleRecorder {
       firstTokenMs: this.#firstFrameAt - this.#startedAt,
       streamDurationMs: this.#lastFrameAt - this.#firstFrameAt,
       streamFrameCount: this.#streamFrameCount,
-      workspaceFilesystemCalls: this.#workspaceFilesystemCalls,
+      workspacePreflightCalls: this.#workspacePreflightCalls,
       activityProjectionWritesBeforeFirstToken:
         this.#activityProjectionWritesBeforeFirstToken,
     };
@@ -209,6 +231,8 @@ export function validateTerminalPerformanceBaselineManifest(
       frameRateQuantile: S7_TERMINAL_PERFORMANCE_CONFIG.frameRateQuantile,
       noiseMadMultiplier:
         S7_TERMINAL_PERFORMANCE_CONFIG.noiseMadMultiplier,
+      minimumNoiseToleranceRatio:
+        S7_TERMINAL_PERFORMANCE_CONFIG.minimumNoiseToleranceRatio,
       minimumRetainedRatio:
         S7_TERMINAL_PERFORMANCE_CONFIG.minimumRetainedRatio,
       maximumFirstTokenIncreaseRatio:
@@ -230,6 +254,109 @@ export function validateTerminalPerformanceBaselineManifest(
   return expected;
 }
 
+export function validateTerminalPerformanceCaptureAsset(
+  value: unknown,
+): TerminalPerformanceCaptureAsset {
+  const asset = requireRecord(value, "terminal performance capture");
+  requireExactKeys(asset, [
+    "version",
+    "revision",
+    "environment",
+    "environmentFingerprint",
+    "configDigest",
+    "runs",
+  ], "terminal performance capture");
+  if (asset.version !== 1) {
+    throw new TypeError("Terminal performance capture version is unsupported");
+  }
+  const revision = requireText(asset.revision, "performance revision");
+  const environment = requireRecord(
+    asset.environment,
+    "terminal performance environment",
+  );
+  requireExactKeys(environment, [
+    "platform",
+    "architecture",
+    "cpuModel",
+    "cpuCount",
+    "memoryBytes",
+    "nodeVersion",
+    "loadProfile",
+    "runtimeParametersDigest",
+    "fixedInputDigest",
+    "deterministicModelDigest",
+  ], "terminal performance environment");
+  const normalizedEnvironment = {
+    platform: requireText(environment.platform, "performance platform"),
+    architecture: requireText(
+      environment.architecture,
+      "performance architecture",
+    ),
+    cpuModel: requireText(environment.cpuModel, "performance CPU model"),
+    cpuCount: requirePositiveInteger(
+      environment.cpuCount,
+      "performance CPU count",
+    ),
+    memoryBytes: requirePositiveInteger(
+      environment.memoryBytes,
+      "performance memory",
+    ),
+    nodeVersion: requireText(
+      environment.nodeVersion,
+      "performance Node version",
+    ),
+    loadProfile: requireText(
+      environment.loadProfile,
+      "performance load profile",
+    ),
+    runtimeParametersDigest: requireDigest(
+      environment.runtimeParametersDigest,
+      "performance runtime parameters",
+    ),
+    fixedInputDigest: requireDigest(
+      environment.fixedInputDigest,
+      "performance fixed input",
+    ),
+    deterministicModelDigest: requireDigest(
+      environment.deterministicModelDigest,
+      "performance deterministic model",
+    ),
+  };
+  const environmentFingerprint = requireDigest(
+    asset.environmentFingerprint,
+    "performance environment fingerprint",
+  );
+  if (
+    terminalPerformanceEnvironmentFingerprint(normalizedEnvironment) !==
+    environmentFingerprint
+  ) {
+    throw new TypeError(
+      "Terminal performance environment fingerprint is not reproducible",
+    );
+  }
+  if (asset.configDigest !== terminalPerformanceConfigDigest()) {
+    throw new TypeError("Terminal performance capture configuration is stale");
+  }
+  if (!Array.isArray(asset.runs)) {
+    throw new TypeError("Terminal performance capture runs are invalid");
+  }
+  const runs = asset.runs.map((candidate) =>
+    validateTerminalPerformanceRun(candidate, {
+      revision,
+      environmentFingerprint,
+    }),
+  );
+  indexRuns(runs, "capture");
+  return {
+    version: 1,
+    revision,
+    environment: normalizedEnvironment,
+    environmentFingerprint,
+    configDigest: terminalPerformanceConfigDigest(),
+    runs,
+  };
+}
+
 export function createTerminalPerformanceRun(input: Omit<
   TerminalPerformanceRun,
   "configDigest"
@@ -242,7 +369,7 @@ export function createTerminalPerformanceRun(input: Omit<
   }
   assertEnvironmentFingerprint(input.environmentFingerprint);
   input.rawSamples.forEach((sample) =>
-    validateSample(sample, input.scenario),
+    validateSample(sample, input.scenario, input.revision),
   );
   return {
     configDigest: terminalPerformanceConfigDigest(config),
@@ -265,6 +392,7 @@ export async function captureTerminalPerformance(input: {
     validateSample(
       await input.probe.run(input.scenario, "warmup", index),
       input.scenario,
+      input.revision,
     );
   }
   const rawSamples: TerminalPerformanceSample[] = [];
@@ -458,6 +586,50 @@ function cloneRun(run: TerminalPerformanceRun): TerminalPerformanceRun {
   };
 }
 
+function validateTerminalPerformanceRun(
+  value: unknown,
+  expected: {
+    readonly revision: string;
+    readonly environmentFingerprint: string;
+  },
+): TerminalPerformanceRun {
+  const run = requireRecord(value, "terminal performance run");
+  requireExactKeys(run, [
+    "configDigest",
+    "environmentFingerprint",
+    "revision",
+    "scenario",
+    "rawSamples",
+  ], "terminal performance run");
+  if (
+    run.configDigest !== terminalPerformanceConfigDigest() ||
+    run.environmentFingerprint !== expected.environmentFingerprint ||
+    run.revision !== expected.revision ||
+    !S7_TERMINAL_PERFORMANCE_SCENARIOS.includes(
+      run.scenario as TerminalPerformanceScenario,
+    ) ||
+    !Array.isArray(run.rawSamples)
+  ) {
+    throw new TypeError("Terminal performance run binding is invalid");
+  }
+  for (const sample of run.rawSamples) {
+    const record = requireRecord(sample, "terminal performance sample");
+    requireExactKeys(record, [
+      "firstTokenMs",
+      "streamDurationMs",
+      "streamFrameCount",
+      "workspacePreflightCalls",
+      "activityProjectionWritesBeforeFirstToken",
+    ], "terminal performance sample");
+  }
+  return createTerminalPerformanceRun({
+    environmentFingerprint: expected.environmentFingerprint,
+    revision: expected.revision,
+    scenario: run.scenario as TerminalPerformanceScenario,
+    rawSamples: run.rawSamples as unknown as readonly TerminalPerformanceSample[],
+  });
+}
+
 function rejectNoise(
   samples: readonly TerminalPerformanceSample[],
   config: TerminalPerformanceConfig,
@@ -478,13 +650,17 @@ function rejectNoise(
   return samples.filter((sample) => {
     const latencyDistance = Math.abs(sample.firstTokenMs - latencyMedian);
     const rateDistance = Math.abs(framesPerSecond(sample) - rateMedian);
+    const latencyTolerance = Math.max(
+      latencyMad * config.noiseMadMultiplier,
+      latencyMedian * config.minimumNoiseToleranceRatio,
+    );
+    const rateTolerance = Math.max(
+      rateMad * config.noiseMadMultiplier,
+      rateMedian * config.minimumNoiseToleranceRatio,
+    );
     return (
-      (latencyMad === 0
-        ? latencyDistance === 0
-        : latencyDistance <= latencyMad * config.noiseMadMultiplier) &&
-      (rateMad === 0
-        ? rateDistance === 0
-        : rateDistance <= rateMad * config.noiseMadMultiplier)
+      latencyDistance <= latencyTolerance &&
+      rateDistance <= rateTolerance
     );
   });
 }
@@ -492,6 +668,7 @@ function rejectNoise(
 function validateSample(
   sample: TerminalPerformanceSample,
   scenario: TerminalPerformanceScenario,
+  revision: string,
 ): void {
   for (const [name, value] of Object.entries(sample)) {
     if (!Number.isFinite(value) || value < 0) {
@@ -501,15 +678,16 @@ function validateSample(
   if (
     !Number.isSafeInteger(sample.streamFrameCount) ||
     sample.streamFrameCount < 2 ||
-    !Number.isSafeInteger(sample.workspaceFilesystemCalls) ||
+    !Number.isSafeInteger(sample.workspacePreflightCalls) ||
     !Number.isSafeInteger(sample.activityProjectionWritesBeforeFirstToken)
   ) {
     throw new TypeError("Terminal performance counters are invalid");
   }
-  const hasWorkspace =
-    scenario === "cold-workspace" || scenario === "warm-workspace";
+  const expectsWorkspacePreflight =
+    revision !== S1_RUNTIME_BASELINE_COMMIT &&
+    (scenario === "cold-workspace" || scenario === "warm-workspace");
   if (
-    sample.workspaceFilesystemCalls !== (hasWorkspace ? 1 : 0) ||
+    sample.workspacePreflightCalls !== (expectsWorkspacePreflight ? 1 : 0) ||
     sample.activityProjectionWritesBeforeFirstToken !== 0
   ) {
     throw new Error(
@@ -550,6 +728,46 @@ function assertEnvironmentFingerprint(value: string): void {
   if (!value.startsWith("sha256:")) {
     throw new TypeError("Environment fingerprint must be a canonical digest");
   }
+}
+
+function requireRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const keys = [...expected].sort();
+  if (
+    actual.length !== keys.length ||
+    actual.some((key, index) => key !== keys[index])
+  ) {
+    throw new TypeError(`${label} fields are invalid`);
+  }
+}
+
+function requirePositiveInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value as number;
+}
+
+function requireDigest(value: unknown, label: string): string {
+  const digest = requireText(value, label);
+  if (!/^sha256:[0-9a-f]{64}$/u.test(digest)) {
+    throw new TypeError(`${label} is not a canonical digest`);
+  }
+  return digest;
 }
 
 function requireText(value: unknown, label: string): string {

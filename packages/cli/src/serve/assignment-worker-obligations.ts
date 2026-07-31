@@ -164,13 +164,13 @@ export async function resumeSealedSubmission(input: {
   readonly context: AuthorityCallContext;
   readonly signal: AbortSignal;
   readonly rejectionPrefix: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const recovered = await retryRemoteObligation(
     () => input.ledger.sealedBundleForRecovery(input.assignmentId),
     input.signal,
     (error) => error instanceof AuthorityStorageError,
   );
-  if (recovered.kind === "not-sealed") return;
+  if (recovered.kind === "not-sealed") return false;
   await submitBundleUntilAcknowledged({
     bundle: recovered.bundle,
     owner: input.owner,
@@ -179,4 +179,5 @@ export async function resumeSealedSubmission(input: {
     signal: input.signal,
     rejectionPrefix: input.rejectionPrefix,
   });
+  return true;
 }

@@ -26,9 +26,17 @@ import {
 } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
+  runDetachedMaintenanceContext,
   runWithDeviceCapacity,
   type DeviceCapacityArbiterPort,
   type DeviceCapacityBudget,
+} from "../resources/index.js";
+import {
+  runStorageMaintenanceStep,
+  storageMaintenanceObligation,
+  storageMaintenanceRequest,
+  StorageMaintenanceTaskRunner,
+  type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
 
 const PROBE_STREAM = "executor:workspace-probes";
@@ -50,6 +58,13 @@ type WorkspaceProbeRecord =
       at: string;
     }
   | {
+      t: "probe-started-v2";
+      key: string;
+      requestDigest: string;
+      request: WorkspaceProbeRequest;
+      at: string;
+    }
+  | {
       t: "probe-completed";
       key: string;
       requestDigest: string;
@@ -65,6 +80,7 @@ type WorkspaceProbeRecord =
 
 interface ProbeEntry {
   readonly requestDigest: string;
+  readonly request?: WorkspaceProbeRequest;
   readonly startedAt: string;
   readonly result?: WorkspaceProbeResult;
   readonly completedAt?: string;
@@ -74,6 +90,10 @@ interface ProbeProjection {
   established: boolean;
   executorId?: string;
   readonly entries: Map<string, ProbeEntry>;
+  completed: readonly {
+    readonly key: string;
+    readonly completedAt: string;
+  }[];
 }
 
 export interface WorkspaceProbeHandlerOptions {
@@ -84,6 +104,7 @@ export interface WorkspaceProbeHandlerOptions {
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
   readonly capacity: DeviceCapacityArbiterPort;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly clock?: () => string;
 }
 
@@ -103,6 +124,8 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #capacity: DeviceCapacityArbiterPort;
+  readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
+  readonly #retentionRunner: StorageMaintenanceTaskRunner;
   readonly #clock: () => string;
   readonly #inFlight = new Map<
     string,
@@ -111,6 +134,9 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
   #projection: ProbeProjection | undefined;
   #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
+  #retentionTimer: NodeJS.Timeout | undefined;
+  #retentionRunning: Promise<void> | undefined;
+  #retentionAbort: AbortController | undefined;
 
   constructor(options: WorkspaceProbeHandlerOptions) {
     this.#rootDir = path.resolve(options.rootDir);
@@ -124,6 +150,10 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     this.#signer = options.signer;
     this.#verifier = options.verifier;
     this.#capacity = options.capacity;
+    this.#storageMaintenance = options.storageMaintenance;
+    this.#retentionRunner = new StorageMaintenanceTaskRunner(
+      options.storageMaintenance,
+    );
     this.#clock = options.clock ?? (() => new Date().toISOString());
   }
 
@@ -171,60 +201,166 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     }
   }
 
-  async compact(completedBefore: string): Promise<number> {
+  async compact(
+    completedBefore: string,
+    limit = 64,
+    abort: AbortSignal = new AbortController().signal,
+  ): Promise<number> {
     const cutoff = parseCanonicalTime(
       completedBefore,
       "Workspace probe retention cutoff",
     );
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 256) {
+      throw new RangeError(
+        "Workspace probe retirement page size must be between 1 and 256",
+      );
+    }
     await this.#ensureOpen();
     let retired = 0;
-    for (const [key, entry] of this.#state().entries) {
+    const page: ProbeProjection["completed"][number][] = [];
+    for (const entry of this.#state().completed) {
       if (
-        !entry.result ||
-        !entry.completedAt ||
         parseCanonicalTime(entry.completedAt, "Workspace probe completion") >=
-          cutoff
+        cutoff
       ) {
-        continue;
+        break;
       }
-      const transaction = await this.#log.transactProjection<
-        ProbeProjection,
-        WorkspaceProbeRecord,
-        boolean
-      >(
-        this.#state(),
-        reduceProbeProjection,
-        (state) => {
-          const current = state.entries.get(key);
-          if (
-            !current?.result ||
-            current.requestDigest !== entry.requestDigest
-          ) {
-            return { kind: "return", value: false };
-          }
-          return {
-            kind: "append",
-            entries: [
-              {
-                stream: PROBE_STREAM,
-                body: {
-                  t: "probe-retired",
-                  key,
-                  requestDigest: entry.requestDigest,
-                  at: this.#clock(),
-                },
-              },
-            ],
-            value: true,
-          };
-        },
-        { cursor: this.#cursor, stream: PROBE_STREAM },
+      page.push(entry);
+      if (page.length === limit) break;
+    }
+    for (const candidate of page) {
+      if (abort.aborted) throw abort.reason;
+      const entry = this.#state().entries.get(candidate.key);
+      if (!entry?.result) continue;
+      const transaction = await runStorageMaintenanceStep(
+        this.#storageMaintenance,
+        storageMaintenanceRequest(
+          "workspace-probe-retirement",
+          this.#rootDir,
+          {
+            key: candidate.key,
+            requestDigest: entry.requestDigest,
+          },
+          { obligation: "committed" },
+        ),
+        () =>
+          this.#log.transactProjection<
+            ProbeProjection,
+            WorkspaceProbeRecord,
+            boolean
+          >(
+            this.#state(),
+            (projection, record) =>
+              reduceProbeProjection(projection, record, this.#verifier),
+            (state) => {
+              const current = state.entries.get(candidate.key);
+              if (
+                !current?.result ||
+                current.requestDigest !== entry.requestDigest
+              ) {
+                return { kind: "return", value: false };
+              }
+              return {
+                kind: "append",
+                entries: [
+                  {
+                    stream: PROBE_STREAM,
+                    body: {
+                      t: "probe-retired",
+                      key: candidate.key,
+                      requestDigest: entry.requestDigest,
+                      at: this.#clock(),
+                    },
+                  },
+                ],
+                value: true,
+              };
+            },
+            { cursor: this.#cursor, stream: PROBE_STREAM },
+          ),
       );
       this.#projection = transaction.state;
       this.#cursor = transaction.cursor;
       if (transaction.value) retired += 1;
     }
     return retired;
+  }
+
+  startRetentionMaintenance(
+    options: {
+      readonly retentionMs?: number;
+      readonly intervalMs?: number;
+      readonly onError?: (error: Error) => void;
+    } = {},
+  ): void {
+    if (this.#retentionTimer) return;
+    const retentionMs = options.retentionMs ?? 27 * 24 * 60 * 60 * 1_000;
+    const intervalMs = options.intervalMs ?? 6 * 60 * 60 * 1_000;
+    if (
+      !Number.isSafeInteger(retentionMs) ||
+      retentionMs <= 0 ||
+      !Number.isSafeInteger(intervalMs) ||
+      intervalMs <= 0
+    ) {
+      throw new RangeError("Workspace probe retention intervals are invalid");
+    }
+    const run = () => {
+      if (this.#retentionRunning) return;
+      const controller = new AbortController();
+      this.#retentionAbort = controller;
+      this.#retentionRunning = runDetachedMaintenanceContext(
+        "background",
+        () => {
+          const cutoff = new Date(
+            parseCanonicalTime(
+              this.#clock(),
+              "Workspace probe retention time",
+            ) - retentionMs,
+          ).toISOString();
+          return this.#retentionRunner.run(
+            storageMaintenanceObligation(
+              "workspace-probe-retirement",
+              this.#rootDir,
+              { completedBefore: cutoff },
+              {
+                owner: "workspace-probe-owner",
+                obligation: "committed",
+              },
+            ),
+            controller.signal,
+            async (taskAbort) => {
+              while ((await this.compact(cutoff, 64, taskAbort)) === 64) {
+                // Each page is separately governed and durably advances the index.
+              }
+            },
+          );
+        },
+      )
+        .catch((error: unknown) =>
+          options.onError?.(
+            error instanceof Error ? error : new Error(String(error)),
+          ),
+        )
+        .finally(() => {
+          if (this.#retentionAbort === controller) {
+            this.#retentionAbort = undefined;
+          }
+          this.#retentionRunning = undefined;
+        });
+    };
+    this.#retentionTimer = setInterval(run, intervalMs);
+    this.#retentionTimer.unref?.();
+    run();
+  }
+
+  async stopRetentionMaintenance(): Promise<void> {
+    if (this.#retentionTimer) clearInterval(this.#retentionTimer);
+    this.#retentionTimer = undefined;
+    this.#retentionAbort?.abort(
+      new DOMException("Workspace probe retention stopped", "AbortError"),
+    );
+    await this.#retentionRunning;
+    this.#retentionRunner.stop();
   }
 
   async #executeFresh(
@@ -243,7 +379,8 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
       ProbeEntry | undefined
     >(
       this.#state(),
-      reduceProbeProjection,
+      (projection, record) =>
+        reduceProbeProjection(projection, record, this.#verifier),
       (state) => {
         const current = state.entries.get(key);
         if (current) {
@@ -260,9 +397,10 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
             {
               stream: PROBE_STREAM,
               body: {
-                t: "probe-started",
+                t: "probe-started-v2",
                 key,
                 requestDigest,
+                request: structuredClone(request),
                 at: this.#clock(),
               },
             },
@@ -308,7 +446,8 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
       WorkspaceProbeResult
     >(
       this.#state(),
-      reduceProbeProjection,
+      (projection, record) =>
+        reduceProbeProjection(projection, record, this.#verifier),
       (state) => {
         const current = state.entries.get(key);
         if (!current || current.requestDigest !== requestDigest) {
@@ -366,9 +505,12 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
   async #open(): Promise<void> {
     await ensureDurableDirectory(this.#rootDir);
     const markerExists = await exists(this.#markerPath);
-    const logPath = "logPath" in this.#log
-      ? String((this.#log as AuthorityCommitLog & { logPath: string }).logPath)
-      : undefined;
+    const logPath =
+      "logPath" in this.#log
+        ? String(
+            (this.#log as AuthorityCommitLog & { logPath: string }).logPath,
+          )
+        : undefined;
     const logExists = logPath === undefined ? true : await exists(logPath);
     if (markerExists && !logExists) {
       throw new AuthorityStorageError(
@@ -384,6 +526,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
           state = reduceProbeProjection(
             state,
             entry as LogicalRecord<WorkspaceProbeRecord>,
+            this.#verifier,
           );
         }
       }
@@ -416,6 +559,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
             state = reduceProbeProjection(
               state,
               entry as LogicalRecord<WorkspaceProbeRecord>,
+              this.#verifier,
             );
           }
         }
@@ -534,9 +678,7 @@ export class LocalWorkspaceProbeAdapter implements WorkspaceProbePort {
 
 export class MeshWorkspaceProbeAdapter implements WorkspaceProbePort {
   constructor(
-    private readonly send: (
-      request: WorkspaceProbeRequest,
-    ) => Promise<unknown>,
+    private readonly send: (request: WorkspaceProbeRequest) => Promise<unknown>,
     private readonly verifier: ProtocolSignatureVerifier,
   ) {}
 
@@ -554,6 +696,7 @@ export class MeshWorkspaceProbeAdapter implements WorkspaceProbePort {
 function reduceProbeProjection(
   previous: ProbeProjection,
   entry: LogicalRecord<WorkspaceProbeRecord>,
+  verifier: ProtocolSignatureVerifier,
 ): ProbeProjection {
   const state: ProbeProjection = {
     established: previous.established,
@@ -563,12 +706,19 @@ function reduceProbeProjection(
         key,
         {
           ...value,
+          ...(value.request ? { request: structuredClone(value.request) } : {}),
           ...(value.result ? { result: structuredClone(value.result) } : {}),
         },
       ]),
     ),
+    completed: previous.completed.map((entry) => ({ ...entry })),
   };
-  const record = validateProbeRecord(entry.body);
+  const record = validateProbeRecord(entry.body, verifier);
+  if (record.t !== "probe-log-established" && !state.established) {
+    throw corruptProbeLog(
+      "Workspace probe record appeared before log establishment",
+    );
+  }
   switch (record.t) {
     case "probe-log-established":
       if (state.established) {
@@ -578,11 +728,23 @@ function reduceProbeProjection(
       state.executorId = record.executorId;
       break;
     case "probe-started":
+    case "probe-started-v2":
       if (state.entries.has(record.key)) {
         throw corruptProbeLog("Workspace probe start identity was reused");
       }
+      if (
+        record.t === "probe-started-v2" &&
+        record.request.resourceLease.audience.executorId !== state.executorId
+      ) {
+        throw corruptProbeLog(
+          "Workspace probe request targets another executor",
+        );
+      }
       state.entries.set(record.key, {
         requestDigest: record.requestDigest,
+        ...(record.t === "probe-started-v2"
+          ? { request: structuredClone(record.request) }
+          : {}),
         startedAt: record.at,
       });
       break;
@@ -591,7 +753,17 @@ function reduceProbeProjection(
       if (
         !current ||
         current.result ||
-        current.requestDigest !== record.requestDigest
+        current.requestDigest !== record.requestDigest ||
+        Date.parse(record.at) < Date.parse(current.startedAt) ||
+        (current.request !== undefined &&
+          (record.result.requestId !== current.request.requestId ||
+            record.result.bindingRef !== current.request.bindingRef)) ||
+        (current.request === undefined &&
+          !legacyProbeKeyBindsRequestId(
+            record.key,
+            record.result.requestId,
+          )) ||
+        record.result.executorId !== state.executorId
       ) {
         throw corruptProbeLog("Workspace probe completion is inconsistent");
       }
@@ -600,48 +772,138 @@ function reduceProbeProjection(
         result: structuredClone(record.result),
         completedAt: record.at,
       });
+      state.completed = insertProbeCompletion(state.completed, {
+        key: record.key,
+        completedAt: record.at,
+      });
       break;
     }
     case "probe-retired": {
       const current = state.entries.get(record.key);
       if (
         !current?.result ||
-        current.requestDigest !== record.requestDigest
+        current.requestDigest !== record.requestDigest ||
+        current.completedAt === undefined ||
+        Date.parse(record.at) < Date.parse(current.completedAt)
       ) {
         throw corruptProbeLog("Workspace probe retirement is inconsistent");
       }
       state.entries.delete(record.key);
+      state.completed = state.completed.filter(
+        (entry) => entry.key !== record.key,
+      );
       break;
     }
   }
   return state;
 }
 
-function validateProbeRecord(record: WorkspaceProbeRecord): WorkspaceProbeRecord {
-  if (!record || typeof record !== "object") {
+function validateProbeRecord(
+  record: WorkspaceProbeRecord,
+  verifier: ProtocolSignatureVerifier,
+): WorkspaceProbeRecord {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw corruptProbeLog("Workspace probe record is malformed");
   }
   if (record.t === "probe-log-established") {
+    assertProbeRecordKeys(
+      record,
+      ["executorId", "t"],
+      "Workspace probe log genesis",
+    );
     requireIdentifier(record.executorId, "Workspace probe executorId");
     return record;
   }
+  if (
+    record.t !== "probe-started" &&
+    record.t !== "probe-started-v2" &&
+    record.t !== "probe-completed" &&
+    record.t !== "probe-retired"
+  ) {
+    throw corruptProbeLog("Workspace probe record tag is unknown");
+  }
+  assertProbeRecordKeys(
+    record,
+    record.t === "probe-started"
+      ? ["at", "key", "requestDigest", "t"]
+      : record.t === "probe-started-v2"
+        ? ["at", "key", "request", "requestDigest", "t"]
+        : record.t === "probe-completed"
+          ? ["at", "key", "requestDigest", "result", "t"]
+          : ["at", "key", "requestDigest", "t"],
+    "Workspace probe record",
+  );
   requireIdentifier(record.key, "Workspace probe key");
-  requireIdentifier(record.requestDigest, "Workspace probe request digest");
+  if (!/^sha256:[0-9a-f]{64}$/u.test(record.requestDigest)) {
+    throw corruptProbeLog("Workspace probe request digest is invalid");
+  }
   parseCanonicalTime(record.at, "Workspace probe record time");
+  if (record.t === "probe-started-v2") {
+    let request: WorkspaceProbeRequest;
+    try {
+      request = validateWorkspaceProbeRequest(record.request, verifier, {
+        requireActiveAt: false,
+      });
+    } catch {
+      throw corruptProbeLog("Workspace probe request is malformed");
+    }
+    if (
+      workspaceProbeRequestDigest(request) !== record.requestDigest ||
+      probeKey(request) !== record.key
+    ) {
+      throw corruptProbeLog("Workspace probe request identity is inconsistent");
+    }
+  }
   if (record.t === "probe-completed") {
-    if (!record.result || typeof record.result !== "object") {
+    try {
+      validateWorkspaceProbeResult(record.result, verifier);
+    } catch {
       throw corruptProbeLog("Workspace probe result is malformed");
     }
   }
   return record;
 }
 
+function assertProbeRecordKeys(
+  value: object,
+  expected: readonly string[],
+  label: string,
+): void {
+  if (Object.keys(value).sort().join(",") !== [...expected].sort().join(",")) {
+    throw corruptProbeLog(`${label} fields are invalid`);
+  }
+}
+
 function emptyProbeProjection(): ProbeProjection {
-  return { established: false, entries: new Map() };
+  return { established: false, entries: new Map(), completed: [] };
+}
+
+function insertProbeCompletion(
+  entries: readonly { readonly key: string; readonly completedAt: string }[],
+  candidate: { readonly key: string; readonly completedAt: string },
+): readonly { readonly key: string; readonly completedAt: string }[] {
+  const output = [...entries];
+  const index = output.findIndex(
+    (entry) =>
+      entry.completedAt > candidate.completedAt ||
+      (entry.completedAt === candidate.completedAt &&
+        entry.key.localeCompare(candidate.key, "en-US") > 0),
+  );
+  if (index < 0) output.push(candidate);
+  else output.splice(index, 0, candidate);
+  return output;
 }
 
 function probeKey(request: WorkspaceProbeRequest): string {
   return `${request.requestId}/${request.grant.grantId}`;
+}
+
+function legacyProbeKeyBindsRequestId(
+  key: string,
+  requestId: string,
+): boolean {
+  const prefix = `${requestId}/`;
+  return key.startsWith(prefix) && key.length > prefix.length;
 }
 
 function requireIdentifier(value: unknown, label: string): string {
@@ -675,12 +937,10 @@ async function exists(target: string): Promise<boolean> {
 }
 
 async function writeMarker(markerPath: string): Promise<void> {
-  const handle = await open(markerPath, "wx", 0o600).catch(
-    (error: unknown) => {
-      if (isNodeError(error, "EEXIST")) return undefined;
-      throw error;
-    },
-  );
+  const handle = await open(markerPath, "wx", 0o600).catch((error: unknown) => {
+    if (isNodeError(error, "EEXIST")) return undefined;
+    throw error;
+  });
   if (!handle) return;
   try {
     await handle.writeFile("workspace-probe-log-v1\n", "utf8");

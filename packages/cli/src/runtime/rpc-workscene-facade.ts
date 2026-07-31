@@ -14,10 +14,6 @@ import type {
   WorksceneSummary,
 } from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
-import {
-  createLocalWorkspaceTransfer,
-  removeLocalWorkspaceTransfer,
-} from "./local-workspace-transfer.js";
 
 export class RpcWorksceneFacade {
   constructor(private readonly link: CoreHostLink) {}
@@ -40,25 +36,6 @@ export class RpcWorksceneFacade {
       ...(workspace ? { workspace } : {}),
       requestId: `workscene-create:${randomUUID()}`,
     });
-  }
-
-  async authorizeLocalWorkspace(
-    displayName: string,
-    absolutePath: string,
-  ): Promise<{ deviceId: string; bindingRef: string }> {
-    const transfer = await createLocalWorkspaceTransfer({
-      displayName,
-      absolutePath,
-    });
-    try {
-      const client = await this.link.getClient();
-      return await client.request<{ deviceId: string; bindingRef: string }>(
-        "workscene.authorizeLocalWorkspace",
-        { transferToken: transfer.token },
-      );
-    } finally {
-      await removeLocalWorkspaceTransfer(transfer.token).catch(() => {});
-    }
   }
 
   async rename(sceneId: string, name: string): Promise<WorksceneSummary> {

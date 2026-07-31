@@ -3,7 +3,6 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
 import { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
@@ -96,35 +95,4 @@ describe("RpcWorksceneFacade", () => {
     ]);
   });
 
-  it("本机路径交接只让一次性 token 进入 RPC", async () => {
-    const home = await createTempDir("rpc-workscene-local-transfer");
-    const originalHome = process.env.ZHIXING_HOME;
-    process.env.ZHIXING_HOME = home;
-    try {
-      const fake = makeFakeHostLink();
-      fake.setResponder(() => ({
-        deviceId: "device-local",
-        bindingRef: "binding-local",
-      }));
-      const facade = new RpcWorksceneFacade(fake.link);
-
-      await expect(
-        facade.authorizeLocalWorkspace("项目", "C:\\private\\project"),
-      ).resolves.toEqual({
-        deviceId: "device-local",
-        bindingRef: "binding-local",
-      });
-      expect(fake.requests).toHaveLength(1);
-      expect(fake.requests[0]).toMatchObject({
-        method: "workscene.authorizeLocalWorkspace",
-        params: { transferToken: expect.any(String) },
-      });
-      expect(JSON.stringify(fake.requests[0])).not.toContain(
-        "C:\\private\\project",
-      );
-    } finally {
-      if (originalHome === undefined) delete process.env.ZHIXING_HOME;
-      else process.env.ZHIXING_HOME = originalHome;
-    }
-  });
 });

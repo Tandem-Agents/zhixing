@@ -75,6 +75,13 @@ export interface RunTurnOptions {
   modelCallResourceMeter?: ModelCallResourceMeter;
 }
 
+export type RuntimeDisposeReason =
+  | "session-dispose"
+  | "workmode-exit"
+  | "reload-replace"
+  | "assignment-dispose"
+  | "assembly-rollback";
+
 export interface SessionRuntime {
   readonly sessionId: string;
   /**
@@ -110,7 +117,7 @@ export interface SessionRuntime {
    * async：实现透传底层运行体的末窗 onWindowClose（收尾 / flush 须可等待、失败须
    * 可被销毁调用方捕获），排除 fire-and-forget。调用方应 await。
    */
-  dispose(): Promise<void>;
+  dispose(reason?: RuntimeDisposeReason): Promise<void>;
   /**
    * 确认交互 broker —— 可选。
    *

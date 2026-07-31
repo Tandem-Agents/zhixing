@@ -42,6 +42,7 @@ import type {
   GlobalStatePort,
   SecretStorePort,
   TrustRuleSnapshot,
+  WorksceneAppliedResult,
   WorkspaceBindingAdminPort,
   WorkspaceBindingMigrationPort,
   WorkspaceBindingRecoveryPort,
@@ -71,9 +72,11 @@ import {
   deriveEnvironmentRequirement,
   executionProfileForEnvironment,
   EnvironmentProbeOwner,
+  ExecutorSelectionRequiredError,
   preflightWorkspaceRequirement,
   selectExecutorForEnvironment,
   WorkspaceBindingCatalog,
+  workspaceCatalogGenerationStorageKey,
   WorkspaceProbeHandler,
   type WorkspaceProbePort,
 } from "@zhixing/core/environment";
@@ -143,7 +146,10 @@ export interface AuthorityRuntimeStack {
   readonly workspaceProbe?: WorkspaceProbePort;
   readonly environmentProbeOwner?: EnvironmentProbeOwner;
   readonly globalState?: GlobalStatePort;
-  readonly worksceneGlobalState?: AnchorWorksceneGlobalStateAdapter;
+  readonly recoverWorksceneState: () => Promise<void>;
+  readonly replayWorksceneMutation: (
+    requestId: string,
+  ) => Promise<WorksceneAppliedResult | null>;
   readonly installWorksceneCleanup: (
     cleanup: (
       sceneId: string,
@@ -158,7 +164,9 @@ export interface AuthorityRuntimeStack {
     displayName: string;
     workspaceBindingRevision: number;
   }[];
-  readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
+  readonly permissionSnapshotFor: (
+    digest: string,
+  ) => TrustRuleSnapshot | undefined;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
   readonly installPermissionSnapshot: (
     snapshot: TrustRuleSnapshot,
@@ -175,6 +183,7 @@ export interface AuthorityRuntimeStack {
     readonly executionProfile: RuntimeExecutionProfile;
     readonly permissionRules: readonly PermissionRule[];
     readonly environment?: ExplicitEnvironmentSelection;
+    readonly recentExecutorId?: string;
     readonly targets?: readonly {
       readonly executorId: string;
       readonly deviceId: string;
@@ -184,19 +193,32 @@ export interface AuthorityRuntimeStack {
     }[];
   }) => Promise<PreparedConversationAssignmentAuthority>;
   readonly validateConversationRuntimeBinding: (input: {
+    readonly assignmentId: string;
     readonly manifest: ExecutionManifest<"conversation">;
     readonly binding: ConversationRuntimeBinding;
   }) => Promise<AuthorityError | undefined>;
   readonly preflightLocalConversationEnvironment: (
     manifest: ExecutionManifest<"conversation">,
+    assignmentId?: string,
   ) => Promise<{
     readonly workspaceRoot: string | null;
     readonly error?: AuthorityError;
   }>;
+  readonly takeLocalConversationEnvironmentPreflight: (
+    manifest: ExecutionManifest<"conversation">,
+    assignmentId: string,
+  ) => Promise<{
+    readonly workspaceRoot: string | null;
+    readonly error?: AuthorityError;
+  }>;
+  readonly releaseLocalConversationEnvironmentPreflight: (
+    manifest: ExecutionManifest<"conversation">,
+    assignmentId: string,
+  ) => void;
   readonly validateLocalConversationManifest: (
     manifest: ExecutionManifest<"conversation">,
   ) => AuthorityError | undefined;
-  readonly stopStorageMaintenance: () => void;
+  readonly stopStorageMaintenance: () => Promise<void>;
   /**
    * 启动阶段的清理句柄:在任何资源取得之前注册进启动回滚事务,内部失败、外层
    * 启动失败与正常停机复用同一幂等 handle,维护任务恰一次停止。
@@ -256,7 +278,10 @@ export interface SetupDeliveryOptions {
 export interface ExecutorReadiness {
   readonly tools: readonly string[];
   readonly mcpServers: readonly string[];
-  readonly credentialBindings: readonly Omit<CredentialBindingDescriptor, "revision">[];
+  readonly credentialBindings: readonly Omit<
+    CredentialBindingDescriptor,
+    "revision"
+  >[];
   readonly deviceScopedCredentialBindingIds: readonly string[];
   /** Opaque SecretStore commit generation; never published on protocol surfaces. */
   readonly credentialGeneration: string | null;
@@ -271,7 +296,12 @@ export interface SetupAuthorityRuntimeOptions {
   readonly executorId?: string;
   readonly anchorEpoch?: number;
   readonly configurationSnapshot?: unknown;
-  readonly executorReadiness: ExecutorReadiness | (() => ExecutorReadiness);
+  /**
+   * Omit only for the target-device local workspace settings process. In that
+   * mode the previously published non-secret readiness is preserved while the
+   * workspace projection advances.
+   */
+  readonly executorReadiness?: ExecutorReadiness | (() => ExecutorReadiness);
   readonly enableAnchor?: boolean;
   readonly enableLocalExecutor?: boolean;
   readonly resourceCandidateTtlMs?: number;
@@ -290,17 +320,15 @@ export async function setupAuthorityRuntime(
   // 因此注册点不需要判断"第一个可能启动维护的步骤在哪"。
   let authorityLog: FileAuthorityCommitLog | undefined;
   let executorLog: FileAuthorityCommitLog | undefined;
-  let surfaceAssets:
-    | ReturnType<typeof createSurfaceAssetAuthority>
-    | undefined;
-  let worksceneGlobalState:
-    | AnchorWorksceneGlobalStateAdapter
-    | undefined;
+  let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
+  let worksceneGlobalState: AnchorWorksceneGlobalStateAdapter | undefined;
   let workspaceBindings: WorkspaceBindingCatalog | undefined;
-  const stopStorageMaintenance = () => {
+  let workspaceProbe: WorkspaceProbeHandler | undefined;
+  const stopStorageMaintenance = async () => {
+    await workspaceProbe?.stopRetentionMaintenance();
     surfaceAssets?.stopStorageMaintenance();
     worksceneGlobalState?.stop();
-    workspaceBindings?.stop();
+    await workspaceBindings?.stop();
     authorityLog?.stopStorageMaintenance();
     executorLog?.stopStorageMaintenance();
   };
@@ -310,352 +338,420 @@ export async function setupAuthorityRuntime(
     stopStorageMaintenance,
   );
   try {
-  const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
-  const artifacts = new FileArtifactStore(path.join(authorityRoot, "artifacts"));
-  const anchorEnabled = options.enableAnchor ?? true;
-  authorityLog = anchorEnabled
-    ? new FileAuthorityCommitLog(
-      path.join(authorityRoot, "authority"),
-      artifacts,
-      {
-        storageMaintenance: options.storageMaintenance,
-        // commit 时间戳与本 stack 其余组件必须同钟:租约活性等判定
-        // 以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
-        ...(options.clock ? { clock: options.clock } : {}),
-      },
-      )
-    : undefined;
-  const localExecutorEnabled = options.enableLocalExecutor ?? true;
-  const anchorRuntime = anchorEnabled
-    ? await import("@zhixing/owner-kernel")
-    : undefined;
-  const executorRuntime = localExecutorEnabled
-    ? await import("@zhixing/executor")
-    : undefined;
-  executorLog = localExecutorEnabled
-    ? new FileAuthorityCommitLog(
-      path.join(authorityRoot, "executor-authority"),
-      artifacts,
-      {
-        storageMaintenance: options.storageMaintenance,
-        ...(options.clock ? { clock: options.clock } : {}),
-      },
-      )
-    : undefined;
-  const anchorEpoch = options.anchorEpoch ?? 1;
-  const authority = authorityLog
-    ? new DeliveryAuthority({ log: authorityLog, anchorEpoch })
-    : undefined;
-  const participant = authority
-    ? new anchorRuntime!.OwnerDeliveryParticipant({ authority })
-    : undefined;
-  const controlAdmission = authorityLog
-    ? new anchorRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
-    : undefined;
-  const key = options.deviceKey ?? await loadOrCreateDeviceKey(options.secretStore);
-  const identity = enrollDeviceIdentity(key, {
-    displayName: "local-anchor",
-    platform: process.platform === "win32"
-      ? "windows"
-      : process.platform === "darwin"
-        ? "macos"
-        : "linux",
-    enrolledAt: new Date().toISOString(),
-  });
-  const trustedIdentities = new Map(
-    [identity, ...(options.trustedIdentities ?? [])].map((candidate) => [
-      candidate.deviceId,
-      candidate,
-    ]),
-  );
-  const authorizedDeviceIds = new Set(
-    options.authorizedDeviceIds ?? [...trustedIdentities.keys()],
-  );
-  authorizedDeviceIds.add(identity.deviceId);
-  const verifier: ProtocolSignatureVerifier = {
-    verify(schemaId, version, payload, signature) {
-      const signer = trustedIdentities.get(signature.keyId);
-      if (!signer) throw new TypeError("Protocol signature belongs to an untrusted device");
-      verifyDeviceSignature(signer, schemaId, version, payload, signature);
-    },
-  };
-  const clock = options.clock ?? (() => new Date().toISOString());
-  surfaceAssets = authorityLog
-    ? createSurfaceAssetAuthority({
-        authorityRoot,
-        log: authorityLog,
-        retentionLogs: [
-          authorityLog,
-          ...(executorLog ? [executorLog] : []),
-        ],
-        artifacts,
-        signer: key,
-        verifier,
-        anchorEpoch,
-        storageMaintenance: options.storageMaintenance,
-        clock,
-      })
-    : undefined;
-  // 启动恢复没有任何调用在等它,但它决定权威何时可用:按恢复档准入,既不与
-  // 小时级回收同档竞争,也不冒充前台抢占正在服务的请求。
-  const recoveringAssets = surfaceAssets;
-  if (recoveringAssets) {
-    await runInMaintenanceContext("recovery", () => recoveringAssets.recover());
-  }
-  const executorId = options.executorId ?? "executor:local";
-  const capabilityDirectoryStore = new FileExecutorCapabilityDirectoryStore(
-    path.join(authorityRoot, "executor-capability-directory.json"),
-  );
-  let capabilityDirectoryEstablished =
-    (await capabilityDirectoryStore.load()) !== undefined;
-  const versionStore = localExecutorEnabled
-    ? new FileExecutionSnapshotVersionStore(
-        path.join(authorityRoot, "executor-snapshot-version.json"),
-        clock,
-      )
-    : undefined;
-  await versionStore?.assertCapabilityDirectoryCoherence(
-    capabilityDirectoryEstablished,
-  );
-  const permissionSnapshots = await FileTrustRuleSnapshotCatalog.open(
-    path.join(authorityRoot, "permission-snapshots"),
-    verifier,
-  );
-  const executorCapabilities = await ExecutorCapabilityDirectory.open({
-    verifier,
-    store: capabilityDirectoryStore,
-    isDeviceAuthorized: (deviceKeyId) => authorizedDeviceIds.has(deviceKeyId),
-    allowInitialize: !capabilityDirectoryEstablished,
-  });
-  const resourceGuard = createAuthorityPrincipalMethodGuard({
-    "resource-governor": [
-      "reservation.enqueueRoot",
-      "reservation.prepareAssignmentRoot",
-      "reservation.prepareSystemJobRoot",
-      "reservation.acquireRoot",
-      "reservation.acquireChild",
-      "reservation.reserveUsage",
-      "reservation.consume",
-      "reservation.settle",
-      "reservation.release",
-    ],
-    // control 类轻推理治理边界（llm.complete / turn 后台维护）——最小方法面
-    "control-llm": [
-      "reservation.acquireRoot",
-      "reservation.reserveUsage",
-      "reservation.consume",
-      "reservation.settle",
-      "reservation.release",
-    ],
-  });
-  const resourceGovernor = authorityLog
-    ? new anchorRuntime!.AnchorResourceGovernor({
-        log: authorityLog,
-        signer: key,
-        verifier,
-        guard: resourceGuard,
-        anchorEpoch,
-        localExecutorId: executorId,
-        reporterKeyFor: (candidateExecutorId) =>
-          executorCapabilities.snapshotFor(candidateExecutorId)?.descriptor.signature.keyId,
-        ...(options.resourceCandidateTtlMs === undefined
-          ? {}
-          : { candidateTtlMs: options.resourceCandidateTtlMs }),
-        clock,
-      })
-    : undefined;
-  const executorResourceGovernor = executorLog
-    ? new executorRuntime!.ExecutorResourceGovernor({
-        log: executorLog,
-        signer: key,
-        verifier,
-        guard: resourceGuard,
-        executorId,
-        localDomainId: `local:${key.deviceId}`,
-        localGovernorEpoch: 1,
-        ...(options.resourceCandidateTtlMs === undefined
-          ? {}
-          : { candidateTtlMs: options.resourceCandidateTtlMs }),
-        clock,
-      })
-    : undefined;
-  const publicationQueue = new SerialTaskQueue();
-  let publishedWorkspaces: CapabilityDescriptor["workspaces"] = [];
-  const readinessSource = () => normalizeExecutorReadiness(
-    typeof options.executorReadiness === "function"
-      ? options.executorReadiness()
-      : options.executorReadiness,
-    key.deviceId,
-  );
-  const deviceDigestFor = (readiness: NormalizedExecutorReadiness) =>
-    protocolDigest("LocalTransitionConfiguration", 1, {
-      configuration: options.configurationSnapshot ?? { profile: "default" },
-      executorReadiness: {
-        tools: readiness.tools,
-        mcpServers: readiness.mcpServers,
-        credentialBindings: readiness.credentialBindings,
-        credentialGeneration: readiness.credentialGeneration,
-      },
-    });
-  const publishLocalExecutorSnapshot = async (
-    permissionSnapshotHighWater: number,
-    readiness = readinessSource(),
-    workspaces: CapabilityDescriptor["workspaces"] = publishedWorkspaces,
-  ): Promise<ExecutorCapabilitySnapshot> => {
-    if (!versionStore) {
-      throw new Error("Local executor role is not enabled on this device");
-    }
-    const deviceDigest = deviceDigestFor(readiness);
-    const inventoryDigest = protocolDigest("LocalTransitionInventory", 1, {
-      deviceDigest,
-      permissionSnapshotHighWater,
-    });
-    const versionResolution = await versionStore.synchronize(
-      executorId,
-      deviceDigest,
-      inventoryDigest,
-      { allowInitialize: !capabilityDirectoryEstablished },
+    const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
+    const artifacts = new FileArtifactStore(
+      path.join(authorityRoot, "artifacts"),
     );
-    const capabilityRevision = versionResolution.deviceRevision;
-    const versionedCredentialBindings = readiness.credentialBindings.map((binding) => ({
-      ...binding,
-      revision: capabilityRevision,
-    }));
-    const descriptor = createSignedCapabilityDescriptor({
-      executorId,
-      revision: capabilityRevision,
-      protocolVersion: EXECUTION_PROTOCOL_VERSION,
-      workspaces: workspaces.map((workspace) => ({ ...workspace })),
-      tools: [...readiness.tools],
-      mcpServers: [...readiness.mcpServers],
-      credentialBindings: versionedCredentialBindings,
-      evidenceCapabilities: [],
-      at: versionResolution.deviceGeneratedAt,
-    }, key);
-    const inventory = createSignedExecutorVersionInventory({
-      executorId,
-      inventoryRevision: versionResolution.inventoryRevision,
-      capabilityRevision,
-      configVersions: {
-        runtimeConfigRev: capabilityRevision,
-        modelProfileRev: capabilityRevision,
-        policyRev: capabilityRevision,
+    const anchorEnabled = options.enableAnchor ?? true;
+    authorityLog = anchorEnabled
+      ? new FileAuthorityCommitLog(
+          path.join(authorityRoot, "authority"),
+          artifacts,
+          {
+            storageMaintenance: options.storageMaintenance,
+            // commit 时间戳与本 stack 其余组件必须同钟:租约活性等判定
+            // 以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
+            ...(options.clock ? { clock: options.clock } : {}),
+          },
+        )
+      : undefined;
+    const localExecutorEnabled = options.enableLocalExecutor ?? true;
+    const anchorRuntime = anchorEnabled
+      ? await import("@zhixing/owner-kernel")
+      : undefined;
+    const executorRuntime = localExecutorEnabled
+      ? await import("@zhixing/executor")
+      : undefined;
+    executorLog = localExecutorEnabled
+      ? new FileAuthorityCommitLog(
+          path.join(authorityRoot, "executor-authority"),
+          artifacts,
+          {
+            storageMaintenance: options.storageMaintenance,
+            ...(options.clock ? { clock: options.clock } : {}),
+          },
+        )
+      : undefined;
+    const anchorEpoch = options.anchorEpoch ?? 1;
+    const authority = authorityLog
+      ? new DeliveryAuthority({ log: authorityLog, anchorEpoch })
+      : undefined;
+    const participant = authority
+      ? new anchorRuntime!.OwnerDeliveryParticipant({ authority })
+      : undefined;
+    const controlAdmission = authorityLog
+      ? new anchorRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
+      : undefined;
+    const key =
+      options.deviceKey ?? (await loadOrCreateDeviceKey(options.secretStore));
+    const identity = enrollDeviceIdentity(key, {
+      displayName: "local-anchor",
+      platform:
+        process.platform === "win32"
+          ? "windows"
+          : process.platform === "darwin"
+            ? "macos"
+            : "linux",
+      enrolledAt: new Date().toISOString(),
+    });
+    const trustedIdentities = new Map(
+      [identity, ...(options.trustedIdentities ?? [])].map((candidate) => [
+        candidate.deviceId,
+        candidate,
+      ]),
+    );
+    const authorizedDeviceIds = new Set(
+      options.authorizedDeviceIds ?? [...trustedIdentities.keys()],
+    );
+    authorizedDeviceIds.add(identity.deviceId);
+    const verifier: ProtocolSignatureVerifier = {
+      verify(schemaId, version, payload, signature) {
+        const signer = trustedIdentities.get(signature.keyId);
+        if (!signer)
+          throw new TypeError(
+            "Protocol signature belongs to an untrusted device",
+          );
+        verifyDeviceSignature(signer, schemaId, version, payload, signature);
       },
-      assetVersions: {
-        skillsRev: capabilityRevision,
-        rubricsRev: capabilityRevision,
-        promptAssetsRev: capabilityRevision,
-      },
-      permissionSnapshotHighWater,
-      credentialBindingRevisions: versionedCredentialBindings.map(
-        ({ bindingId, revision }) => ({ bindingId, revision }),
-      ),
-      at: versionResolution.inventoryGeneratedAt,
-    }, key);
-    const snapshotUpdate = await executorCapabilities.accept({ descriptor, inventory });
-    if (!snapshotUpdate.ok) {
-      throw new Error(
-        `Local executor capability snapshot rejected: ${snapshotUpdate.error.message}`,
+    };
+    const clock = options.clock ?? (() => new Date().toISOString());
+    surfaceAssets = authorityLog
+      ? createSurfaceAssetAuthority({
+          authorityRoot,
+          log: authorityLog,
+          retentionLogs: [authorityLog, ...(executorLog ? [executorLog] : [])],
+          artifacts,
+          signer: key,
+          verifier,
+          anchorEpoch,
+          storageMaintenance: options.storageMaintenance,
+          clock,
+        })
+      : undefined;
+    // 启动恢复没有任何调用在等它,但它决定权威何时可用:按恢复档准入,既不与
+    // 小时级回收同档竞争,也不冒充前台抢占正在服务的请求。
+    const recoveringAssets = surfaceAssets;
+    if (recoveringAssets) {
+      await runInMaintenanceContext("recovery", () =>
+        recoveringAssets.recover(),
       );
     }
-    await versionStore.markCapabilityDirectoryEstablished({
-      executorId,
-      deviceDigest,
-      deviceRevision: versionResolution.deviceRevision,
-      inventoryDigest,
-      inventoryRevision: versionResolution.inventoryRevision,
+    const executorId = options.executorId ?? "executor:local";
+    const capabilityDirectoryStore = new FileExecutorCapabilityDirectoryStore(
+      path.join(authorityRoot, "executor-capability-directory.json"),
+    );
+    let capabilityDirectoryEstablished =
+      (await capabilityDirectoryStore.load()) !== undefined;
+    const versionStore = localExecutorEnabled
+      ? new FileExecutionSnapshotVersionStore(
+          path.join(authorityRoot, "executor-snapshot-version.json"),
+          clock,
+        )
+      : undefined;
+    await versionStore?.assertCapabilityDirectoryCoherence(
+      capabilityDirectoryEstablished,
+    );
+    const permissionSnapshots = await FileTrustRuleSnapshotCatalog.open(
+      path.join(authorityRoot, "permission-snapshots"),
+      verifier,
+    );
+    const executorCapabilities = await ExecutorCapabilityDirectory.open({
+      verifier,
+      store: capabilityDirectoryStore,
+      isDeviceAuthorized: (deviceKeyId) => authorizedDeviceIds.has(deviceKeyId),
+      allowInitialize: !capabilityDirectoryEstablished,
     });
-    capabilityDirectoryEstablished = true;
-    return snapshotUpdate.snapshot;
-  };
-  let workspaceProbe: WorkspaceProbeHandler | undefined;
-  if (localExecutorEnabled) {
-    if (!options.deviceCapacity) {
-      // Library callers that only exercise authority protocols may omit the
-      // device runtime. Production assembly always supplies it; the local
-      // environment ports remain physically absent otherwise.
-    } else {
-      const bindingRoot = path.join(authorityRoot, "workspace-bindings");
-      const bindingArtifacts = new FileArtifactStore(
-        path.join(bindingRoot, "artifacts"),
-      );
-      workspaceBindings = new WorkspaceBindingCatalog({
-        rootDir: bindingRoot,
-        initialLog: executorLog!,
-        createGenerationLog: (generation) =>
-          new FileAuthorityCommitLog(
-            path.join(bindingRoot, "catalogs", generation),
-            bindingArtifacts,
-            {
-              storageMaintenance: options.storageMaintenance,
-              clock,
-            },
-          ),
-        service: {
-          deviceId: key.deviceId,
-          executorId,
+    const resourceGuard = createAuthorityPrincipalMethodGuard({
+      "resource-governor": [
+        "reservation.enqueueRoot",
+        "reservation.prepareAssignmentRoot",
+        "reservation.prepareSystemJobRoot",
+        "reservation.acquireRoot",
+        "reservation.acquireChild",
+        "reservation.reserveUsage",
+        "reservation.consume",
+        "reservation.settle",
+        "reservation.release",
+      ],
+      // control 类轻推理治理边界（llm.complete / turn 后台维护）——最小方法面
+      "control-llm": [
+        "reservation.acquireRoot",
+        "reservation.reserveUsage",
+        "reservation.consume",
+        "reservation.settle",
+        "reservation.release",
+      ],
+    });
+    const resourceGovernor = authorityLog
+      ? new anchorRuntime!.AnchorResourceGovernor({
+          log: authorityLog,
+          signer: key,
           verifier,
-          capacity: options.deviceCapacity,
-          migrationRunner: new StorageMaintenanceTaskRunner(
+          guard: resourceGuard,
+          anchorEpoch,
+          localExecutorId: executorId,
+          reporterKeyFor: (candidateExecutorId) =>
+            executorCapabilities.snapshotFor(candidateExecutorId)?.descriptor
+              .signature.keyId,
+          ...(options.resourceCandidateTtlMs === undefined
+            ? {}
+            : { candidateTtlMs: options.resourceCandidateTtlMs }),
+          clock,
+        })
+      : undefined;
+    const executorResourceGovernor = executorLog
+      ? new executorRuntime!.ExecutorResourceGovernor({
+          log: executorLog,
+          signer: key,
+          verifier,
+          guard: resourceGuard,
+          executorId,
+          localDomainId: `local:${key.deviceId}`,
+          localGovernorEpoch: 1,
+          ...(options.resourceCandidateTtlMs === undefined
+            ? {}
+            : { candidateTtlMs: options.resourceCandidateTtlMs }),
+          clock,
+        })
+      : undefined;
+    const publicationQueue = new SerialTaskQueue();
+    let publishedWorkspaces: CapabilityDescriptor["workspaces"] = [];
+    let publishedWorkspaceCatalog = {
+      catalogGeneration: "catalog-uninitialized",
+      state: "degraded" as "healthy" | "degraded",
+    };
+    const readinessSource = () => {
+      const configured = options.executorReadiness;
+      if (configured !== undefined) {
+        return normalizeExecutorReadiness(
+          typeof configured === "function" ? configured() : configured,
+          key.deviceId,
+        );
+      }
+      const published =
+        executorCapabilities.snapshotFor(executorId)?.descriptor;
+      if (!published) {
+        throw new Error(
+          "Local workspace settings require an established executor capability snapshot",
+        );
+      }
+      return {
+        tools: [...published.tools],
+        mcpServers: [...published.mcpServers],
+        credentialBindings: published.credentialBindings.map(
+          ({ revision: _revision, ...binding }) => binding,
+        ),
+        credentialGeneration: null,
+      } satisfies NormalizedExecutorReadiness;
+    };
+    const deviceDigestFor = (
+      readiness: NormalizedExecutorReadiness,
+      workspaces: CapabilityDescriptor["workspaces"] = publishedWorkspaces,
+      workspaceCatalog = publishedWorkspaceCatalog,
+    ) =>
+      protocolDigest("LocalTransitionConfiguration", 1, {
+        configuration: options.configurationSnapshot ?? { profile: "default" },
+        executorReadiness: {
+          tools: readiness.tools,
+          mcpServers: readiness.mcpServers,
+          credentialBindings: readiness.credentialBindings,
+          credentialGeneration: readiness.credentialGeneration,
+        },
+        workspaceCatalog: {
+          catalogGeneration: workspaceCatalog.catalogGeneration,
+          state: workspaceCatalog.state,
+          workspaces: [...workspaces]
+            .map((workspace) => ({ ...workspace }))
+            .sort((left, right) =>
+              left.bindingRef.localeCompare(right.bindingRef, "en-US"),
+            ),
+        },
+      });
+    const publishLocalExecutorSnapshot = async (
+      permissionSnapshotHighWater: number,
+      readiness = readinessSource(),
+      workspaces: CapabilityDescriptor["workspaces"] = publishedWorkspaces,
+      workspaceCatalog = publishedWorkspaceCatalog,
+    ): Promise<ExecutorCapabilitySnapshot> => {
+      if (!versionStore) {
+        throw new Error("Local executor role is not enabled on this device");
+      }
+      const deviceDigest = deviceDigestFor(
+        readiness,
+        workspaces,
+        workspaceCatalog,
+      );
+      const inventoryDigest = protocolDigest("LocalTransitionInventory", 1, {
+        deviceDigest,
+        permissionSnapshotHighWater,
+      });
+      const versionResolution = await versionStore.synchronize(
+        executorId,
+        deviceDigest,
+        inventoryDigest,
+        { allowInitialize: !capabilityDirectoryEstablished },
+      );
+      const capabilityRevision = versionResolution.deviceRevision;
+      const versionedCredentialBindings = readiness.credentialBindings.map(
+        (binding) => ({
+          ...binding,
+          revision: capabilityRevision,
+        }),
+      );
+      const descriptor = createSignedCapabilityDescriptor(
+        {
+          executorId,
+          revision: capabilityRevision,
+          protocolVersion: EXECUTION_PROTOCOL_VERSION,
+          workspaces: workspaces.map((workspace) => ({ ...workspace })),
+          tools: [...readiness.tools],
+          mcpServers: [...readiness.mcpServers],
+          credentialBindings: versionedCredentialBindings,
+          evidenceCapabilities: [],
+          at: versionResolution.deviceGeneratedAt,
+        },
+        key,
+      );
+      const inventory = createSignedExecutorVersionInventory(
+        {
+          executorId,
+          inventoryRevision: versionResolution.inventoryRevision,
+          capabilityRevision,
+          configVersions: {
+            runtimeConfigRev: capabilityRevision,
+            modelProfileRev: capabilityRevision,
+            policyRev: capabilityRevision,
+          },
+          assetVersions: {
+            skillsRev: capabilityRevision,
+            rubricsRev: capabilityRevision,
+            promptAssetsRev: capabilityRevision,
+          },
+          permissionSnapshotHighWater,
+          credentialBindingRevisions: versionedCredentialBindings.map(
+            ({ bindingId, revision }) => ({ bindingId, revision }),
+          ),
+          at: versionResolution.inventoryGeneratedAt,
+        },
+        key,
+      );
+      const snapshotUpdate = await executorCapabilities.accept({
+        descriptor,
+        inventory,
+      });
+      if (!snapshotUpdate.ok) {
+        throw new Error(
+          `Local executor capability snapshot rejected: ${snapshotUpdate.error.message}`,
+        );
+      }
+      await versionStore.markCapabilityDirectoryEstablished({
+        executorId,
+        deviceDigest,
+        deviceRevision: versionResolution.deviceRevision,
+        inventoryDigest,
+        inventoryRevision: versionResolution.inventoryRevision,
+      });
+      capabilityDirectoryEstablished = true;
+      return snapshotUpdate.snapshot;
+    };
+    if (localExecutorEnabled) {
+      if (!options.deviceCapacity) {
+        // Library callers that only exercise authority protocols may omit the
+        // device runtime. Production assembly always supplies it; the local
+        // environment ports remain physically absent otherwise.
+      } else {
+        const bindingRoot = path.join(authorityRoot, "workspace-bindings");
+        const bindingArtifacts = new FileArtifactStore(
+          path.join(bindingRoot, "artifacts"),
+        );
+        workspaceBindings = new WorkspaceBindingCatalog({
+          rootDir: bindingRoot,
+          initialLog: executorLog!,
+          createGenerationLog: (generation) =>
+            new FileAuthorityCommitLog(
+              path.join(
+                bindingRoot,
+                "catalogs",
+                workspaceCatalogGenerationStorageKey(generation),
+              ),
+              bindingArtifacts,
+              {
+                storageMaintenance: options.storageMaintenance,
+                clock,
+              },
+            ),
+          service: {
+            deviceId: key.deviceId,
+            executorId,
+            verifier,
+            capacity: options.deviceCapacity,
+            capabilitySnapshot: async (publication) => {
+              const nextCatalog = {
+                catalogGeneration: publication.catalogGeneration,
+                state: publication.state,
+              };
+              const nextWorkspaces = publication.workspaces.map(
+                (workspace) => ({
+                  ...workspace,
+                }),
+              );
+              return publicationQueue.run(async () => {
+                const snapshot = await publishLocalExecutorSnapshot(
+                  await permissionSnapshots.highWater(),
+                  readinessSource(),
+                  nextWorkspaces,
+                  nextCatalog,
+                );
+                publishedWorkspaceCatalog = nextCatalog;
+                publishedWorkspaces = nextWorkspaces;
+                return snapshot.descriptor;
+              });
+            },
+            versionInventory: async () =>
+              (
+                await publicationQueue.run(async () =>
+                  publishLocalExecutorSnapshot(
+                    await permissionSnapshots.highWater(),
+                    readinessSource(),
+                    publishedWorkspaces,
+                  ),
+                )
+              ).inventory,
+            clock,
+          },
+          recoveryRunner: new StorageMaintenanceTaskRunner(
             options.storageMaintenance,
           ),
-          capabilitySnapshot: async (workspaces) => {
-            publishedWorkspaces = workspaces.map((workspace) => ({ ...workspace }));
-            return (
-              await publicationQueue.run(async () =>
-                publishLocalExecutorSnapshot(
-                  await permissionSnapshots.highWater(),
-                  readinessSource(),
-                  publishedWorkspaces,
-                ),
-              )
-            ).descriptor;
-          },
-          versionInventory: async () =>
-            (
-              await publicationQueue.run(async () =>
-                publishLocalExecutorSnapshot(
-                  await permissionSnapshots.highWater(),
-                  readinessSource(),
-                  publishedWorkspaces,
-                ),
-              )
-            ).inventory,
+          storageMaintenance: options.storageMaintenance,
           clock,
-        },
-        recoveryRunner: new StorageMaintenanceTaskRunner(
-          options.storageMaintenance,
-        ),
-        storageMaintenance: options.storageMaintenance,
-        clock,
-      });
-      await workspaceBindings.initialize();
-      workspaceProbe = new WorkspaceProbeHandler({
-        rootDir: path.join(authorityRoot, "workspace-probes"),
-        executorId,
-        environment: workspaceBindings,
-        log: executorLog!,
-        signer: key,
-        verifier,
-        capacity: options.deviceCapacity,
-        clock,
-      });
+        });
+        await workspaceBindings.initialize();
+        workspaceProbe = new WorkspaceProbeHandler({
+          rootDir: path.join(authorityRoot, "workspace-probes"),
+          executorId,
+          environment: workspaceBindings,
+          log: executorLog!,
+          signer: key,
+          verifier,
+          capacity: options.deviceCapacity,
+          storageMaintenance: options.storageMaintenance,
+          clock,
+        });
+        workspaceProbe.startRetentionMaintenance();
+      }
     }
-  }
-  const environmentProbeOwner = anchorEnabled
-    ? new EnvironmentProbeOwner({
-        signer: key,
-        verifier,
-        clock,
-      })
-    : undefined;
-  let worksceneCleanup = (
-    sceneId: string,
-    _conversationIds: readonly string[],
-  ) =>
-    fsp.rm(getWorkSceneDir(sceneId), { recursive: true, force: true });
-  worksceneGlobalState =
-    authorityLog
+    const environmentProbeOwner = anchorEnabled
+      ? new EnvironmentProbeOwner({
+          signer: key,
+          verifier,
+          clock,
+        })
+      : undefined;
+    let worksceneCleanup = (
+      sceneId: string,
+      _conversationIds: readonly string[],
+    ) => fsp.rm(getWorkSceneDir(sceneId), { recursive: true, force: true });
+    worksceneGlobalState = authorityLog
       ? new AnchorWorksceneGlobalStateAdapter({
           log: authorityLog,
           anchorEpoch,
@@ -665,41 +761,65 @@ export async function setupAuthorityRuntime(
           clock,
         })
       : undefined;
-  if (worksceneGlobalState && anchorEnabled) {
-    await migrateLegacyWorkscenes({
-      rootDir: path.join(
-        options.zhixingHome,
-        "distributed-runtime",
-        "workscene-migration",
-      ),
-      deviceId: key.deviceId,
-      anchorEpoch,
-      globalState: worksceneGlobalState,
-      ...(workspaceBindings ? { bindings: workspaceBindings } : {}),
-    });
-  }
-  const currentExecutorSnapshot = () => publicationQueue.run(async () =>
-    publishLocalExecutorSnapshot(await permissionSnapshots.highWater()));
-  const installPermissionSnapshot = async (
-    snapshot: TrustRuleSnapshot,
-  ): Promise<ExecutorCapabilitySnapshot> => {
-    await permissionSnapshots.publish(snapshot);
-    return currentExecutorSnapshot();
-  };
-  const acceptExecutorSnapshot = async (
-    snapshot: ExecutorCapabilitySnapshot,
-  ): Promise<void> => {
-    const accepted = await executorCapabilities.accept(snapshot);
-    if (!accepted.ok) {
-      throw new Error(`Remote executor capability snapshot rejected: ${accepted.error.message}`);
+    if (worksceneGlobalState && anchorEnabled) {
+      await runInMaintenanceContext("recovery", () =>
+        migrateLegacyWorkscenes({
+          rootDir: path.join(
+            options.zhixingHome,
+            "distributed-runtime",
+            "workscene-migration",
+          ),
+          deviceId: key.deviceId,
+          anchorEpoch,
+          globalState: worksceneGlobalState,
+          ...(workspaceBindings ? { bindings: workspaceBindings } : {}),
+          storageMaintenance: options.storageMaintenance,
+        }),
+      );
     }
-  };
-  const prepareConversationAssignment = (
-    input: {
+    const refreshLocalExecutorSnapshot = async (
+      permissionSnapshotHighWater?: number,
+    ): Promise<ExecutorCapabilitySnapshot> => {
+      if (workspaceBindings) {
+        await workspaceBindings.capabilitySnapshot();
+        const refreshed = executorCapabilities.snapshotFor(executorId);
+        if (!refreshed) {
+          throw new Error(
+            "Workspace capability publication did not establish the local executor snapshot",
+          );
+        }
+        return refreshed;
+      }
+      return publicationQueue.run(async () =>
+        publishLocalExecutorSnapshot(
+          permissionSnapshotHighWater ??
+            (await permissionSnapshots.highWater()),
+        ),
+      );
+    };
+    const currentExecutorSnapshot = () => refreshLocalExecutorSnapshot();
+    const installPermissionSnapshot = async (
+      snapshot: TrustRuleSnapshot,
+    ): Promise<ExecutorCapabilitySnapshot> => {
+      await permissionSnapshots.publish(snapshot);
+      return currentExecutorSnapshot();
+    };
+    const acceptExecutorSnapshot = async (
+      snapshot: ExecutorCapabilitySnapshot,
+    ): Promise<void> => {
+      const accepted = await executorCapabilities.accept(snapshot);
+      if (!accepted.ok) {
+        throw new Error(
+          `Remote executor capability snapshot rejected: ${accepted.error.message}`,
+        );
+      }
+    };
+    const prepareConversationAssignment = async (input: {
       readonly conversationId: string;
       readonly executionProfile: RuntimeExecutionProfile;
       readonly permissionRules: readonly PermissionRule[];
       readonly environment?: ExplicitEnvironmentSelection;
+      readonly recentExecutorId?: string;
       readonly targets?: readonly {
         readonly executorId: string;
         readonly deviceId: string;
@@ -707,393 +827,535 @@ export async function setupAuthorityRuntime(
           snapshot: TrustRuleSnapshot,
         ) => Promise<ExecutorCapabilitySnapshot>;
       }[];
-    },
-  ) => publicationQueue.run(async (): Promise<PreparedConversationAssignmentAuthority> => {
-    if (!anchorEnabled) {
-      throw new Error("Anchor authority role is not enabled on this device");
-    }
-    const inputExecutionProfile = normalizeRuntimeExecutionProfile(
-      input.executionProfile,
-    );
-    const parsedConversation = parseConversationId(input.conversationId);
-    const worksceneRead =
-      parsedConversation.scope.kind === "workscene" && worksceneGlobalState
-        ? await worksceneGlobalState.read(
-            {
-              kind: "workscene-get",
-              sceneId: parsedConversation.scope.sceneId,
-            },
-            {
-              principal: {
-                kind: "host",
-                component: "conversation-assignment-owner",
-              },
-              requestId: `workscene-get:${input.conversationId}`,
-              authority: { domain: "global", anchorEpoch },
-              deadlineAt: new Date(Date.now() + 30_000).toISOString(),
-            },
-          )
-        : undefined;
-    const workscene =
-      worksceneRead?.kind === "workscene-get"
-        ? worksceneRead.scene ?? undefined
-        : undefined;
-    const environmentRequirement = deriveEnvironmentRequirement({
-      ...(input.environment ? { explicit: input.environment } : {}),
-      ...(workscene ? { workscene } : {}),
-    });
-    const executionProfile = executionProfileForEnvironment(
-      inputExecutionProfile,
-      environmentRequirement,
-    );
-    const permissionPublication = await permissionSnapshots.publishRules({
-      rules: input.permissionRules,
-      signer: key,
-      generatedAt: canonicalTime(clock(), "Permission snapshot time"),
-    });
-    const prepareTarget = (
-      target: ExecutorCapabilitySnapshot,
-      deviceDigest: string,
-      environment: EnvironmentRequirement,
-    ): PreparedConversationAssignmentAuthority => {
-      const requiredCredentialBindings = requiredBindingsForRuntime(
-        executionProfile,
-        target.descriptor.credentialBindings,
-      );
-      assertRuntimeAvailable(executionProfile, {
-        tools: target.descriptor.tools,
-        mcpServers: target.descriptor.mcpServers,
-        credentialBindings: target.descriptor.credentialBindings,
-        credentialGeneration: null,
-      });
-      const frozenEnvironment: EnvironmentRequirement = {
-        ...environment,
-        credentialBindings: requiredCredentialBindings.map(
-          ({ service, bindingId }) => ({ service, bindingId }),
-        ),
-      };
-      return {
-        executorId: target.descriptor.executorId,
-        policy: {
-          credentialTtlMs: 24 * 60 * 60 * 1_000,
-          manifestRequires: {
-            ...target.inventory.configVersions,
-            ...target.inventory.assetVersions,
-          },
-          manifestCapabilities: {
-            protocolVersion: target.descriptor.protocolVersion,
-            tools: executionProfile.tools,
-            mcpServers: executionProfile.mcpServers,
-            credentialBindings: requiredCredentialBindings,
-          },
-          permissionSnapshot: permissionPublication.snapshot,
-          budget: { maxCalls: 64, maxTokens: 256_000 },
-        },
-        binding: { executionProfile, deviceDigest },
-        environment: frozenEnvironment,
-      };
-    };
-    const candidateErrors: Error[] = [];
-    const candidates: Array<{
-      snapshot: ExecutorCapabilitySnapshot;
-      deviceId: string;
-      deviceDigest: string;
-    }> = [];
-    for (const candidate of input.targets ?? []) {
-      if (
-        environmentRequirement.workspace &&
-        candidate.deviceId !== environmentRequirement.workspace.deviceId
-      ) {
-        continue;
+    }): Promise<PreparedConversationAssignmentAuthority> => {
+      if (!anchorEnabled) {
+        throw new Error("Anchor authority role is not enabled on this device");
       }
-      try {
-        const synchronized = await candidate.synchronizePermission(
-          permissionPublication.snapshot,
+      const inputExecutionProfile = normalizeRuntimeExecutionProfile(
+        input.executionProfile,
+      );
+      const parsedConversation = parseConversationId(input.conversationId);
+      const worksceneRead =
+        parsedConversation.scope.kind === "workscene" && worksceneGlobalState
+          ? await worksceneGlobalState.read(
+              {
+                kind: "workscene-get",
+                sceneId: parsedConversation.scope.sceneId,
+              },
+              {
+                principal: {
+                  kind: "host",
+                  component: "conversation-assignment-owner",
+                },
+                requestId: `workscene-get:${input.conversationId}`,
+                authority: { domain: "global", anchorEpoch },
+                deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+              },
+            )
+          : undefined;
+      const workscene =
+        worksceneRead?.kind === "workscene-get"
+          ? (worksceneRead.scene ?? undefined)
+          : undefined;
+      const environmentRequirement = deriveEnvironmentRequirement({
+        ...(input.environment ? { explicit: input.environment } : {}),
+        ...(workscene ? { workscene } : {}),
+      });
+      const executionProfile = executionProfileForEnvironment(
+        inputExecutionProfile,
+        environmentRequirement,
+      );
+      const permissionPublication = await permissionSnapshots.publishRules({
+        rules: input.permissionRules,
+        signer: key,
+        generatedAt: canonicalTime(clock(), "Permission snapshot time"),
+      });
+      const prepareTarget = (
+        target: ExecutorCapabilitySnapshot,
+        deviceDigest: string,
+        environment: EnvironmentRequirement,
+      ): PreparedConversationAssignmentAuthority => {
+        const requiredCredentialBindings = requiredBindingsForRuntime(
+          executionProfile,
+          target.descriptor.credentialBindings,
         );
-        if (synchronized.descriptor.executorId !== candidate.executorId) {
-          throw new TypeError("Synchronized executor snapshot belongs to another executor");
-        }
-        await acceptExecutorSnapshot(synchronized);
-        const target = executorCapabilities.snapshotFor(candidate.executorId);
-        if (!target) throw new Error("Target executor capability snapshot is unavailable");
         assertRuntimeAvailable(executionProfile, {
           tools: target.descriptor.tools,
           mcpServers: target.descriptor.mcpServers,
           credentialBindings: target.descriptor.credentialBindings,
           credentialGeneration: null,
         });
+        const frozenEnvironment: EnvironmentRequirement = {
+          ...environment,
+          credentialBindings: requiredCredentialBindings.map(
+            ({ service, bindingId }) => ({ service, bindingId }),
+          ),
+        };
+        return {
+          executorId: target.descriptor.executorId,
+          policy: {
+            credentialTtlMs: 24 * 60 * 60 * 1_000,
+            manifestRequires: {
+              ...target.inventory.configVersions,
+              ...target.inventory.assetVersions,
+            },
+            manifestCapabilities: {
+              protocolVersion: target.descriptor.protocolVersion,
+              tools: executionProfile.tools,
+              mcpServers: executionProfile.mcpServers,
+              credentialBindings: requiredCredentialBindings,
+            },
+            permissionSnapshot: permissionPublication.snapshot,
+            budget: { maxCalls: 64, maxTokens: 256_000 },
+          },
+          binding: { executionProfile, deviceDigest },
+          environment: frozenEnvironment,
+        };
+      };
+      const candidateErrors: Error[] = [];
+      const candidates: Array<{
+        snapshot: ExecutorCapabilitySnapshot;
+        deviceId: string;
+        deviceDigest: string;
+      }> = [];
+      for (const candidate of input.targets ?? []) {
+        if (
+          environmentRequirement.workspace &&
+          candidate.deviceId !== environmentRequirement.workspace.deviceId
+        ) {
+          continue;
+        }
+        try {
+          const synchronized = await candidate.synchronizePermission(
+            permissionPublication.snapshot,
+          );
+          if (synchronized.descriptor.executorId !== candidate.executorId) {
+            throw new TypeError(
+              "Synchronized executor snapshot belongs to another executor",
+            );
+          }
+          await acceptExecutorSnapshot(synchronized);
+          const target = executorCapabilities.snapshotFor(candidate.executorId);
+          if (!target)
+            throw new Error(
+              "Target executor capability snapshot is unavailable",
+            );
+          assertRuntimeAvailable(executionProfile, {
+            tools: target.descriptor.tools,
+            mcpServers: target.descriptor.mcpServers,
+            credentialBindings: target.descriptor.credentialBindings,
+            credentialGeneration: null,
+          });
+          candidates.push({
+            snapshot: target,
+            deviceId: candidate.deviceId,
+            deviceDigest: protocolDigest("ExecutorRuntimeBinding", 1, target),
+          });
+        } catch (error) {
+          candidateErrors.push(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      }
+      if (
+        localExecutorEnabled &&
+        (!environmentRequirement.workspace ||
+          environmentRequirement.workspace.deviceId === key.deviceId)
+      ) {
+        const localReadiness = readinessSource();
+        const target = await refreshLocalExecutorSnapshot(
+          permissionPublication.highWater,
+        );
         candidates.push({
           snapshot: target,
-          deviceId: candidate.deviceId,
-          deviceDigest: protocolDigest("ExecutorRuntimeBinding", 1, target),
+          deviceId: key.deviceId,
+          deviceDigest: deviceDigestFor(localReadiness),
         });
-      } catch (error) {
-        candidateErrors.push(error instanceof Error ? error : new Error(String(error)));
       }
-    }
-    if (
-      localExecutorEnabled &&
-      (!environmentRequirement.workspace ||
-        environmentRequirement.workspace.deviceId === key.deviceId)
-    ) {
-      const localReadiness = readinessSource();
-      const target = await publishLocalExecutorSnapshot(
-        permissionPublication.highWater,
-        localReadiness,
+      const selection = selectExecutorForEnvironment(
+        environmentRequirement,
+        candidates.map(({ snapshot, deviceId }) => ({
+          executorId: snapshot.descriptor.executorId,
+          deviceId,
+          descriptor: snapshot.descriptor,
+        })),
+        input.recentExecutorId,
       );
-      candidates.push({
-        snapshot: target,
-        deviceId: key.deviceId,
-        deviceDigest: deviceDigestFor(localReadiness),
-      });
-    }
-    const selection = selectExecutorForEnvironment(
-      environmentRequirement,
-      candidates.map(({ snapshot, deviceId }) => ({
-        executorId: snapshot.descriptor.executorId,
-        deviceId,
-        descriptor: snapshot.descriptor,
-      })),
-    );
-    if (selection.kind === "queued") {
-      throw new AggregateError(
-        candidateErrors,
-        `Conversation environment is queued: ${selection.reason}`,
+      if (selection.kind === "queued") {
+        throw new AggregateError(
+          candidateErrors,
+          `Conversation environment is queued: ${selection.reason}`,
+        );
+      }
+      if (selection.kind === "selection-required") {
+        throw new ExecutorSelectionRequiredError(selection.candidates);
+      }
+      const selected = candidates.find(
+        ({ snapshot }) =>
+          snapshot.descriptor.executorId === selection.executorId,
       );
-    }
-    const selected = candidates.find(
-      ({ snapshot }) =>
-        snapshot.descriptor.executorId === selection.executorId,
-    );
-    if (!selected) {
-      throw new Error("Selected executor capability snapshot disappeared");
-    }
-    return prepareTarget(
-      selected.snapshot,
-      selected.deviceDigest,
-      selection.environment,
-    );
-  });
-  const preflightLocalConversationEnvironment = async (
-    manifest: ExecutionManifest<"conversation">,
-  ): Promise<{
-    readonly workspaceRoot: string | null;
-    readonly error?: AuthorityError;
-  }> => {
-    if (!workspaceBindings) {
-      return manifest.environment.workspace
-        ? {
-            workspaceRoot: null,
-            error: {
-              code: "capability-gap",
-              message: "Local workspace environment is unavailable",
-              retryable: true,
-            },
+      if (!selected) {
+        throw new Error("Selected executor capability snapshot disappeared");
+      }
+      return prepareTarget(
+        selected.snapshot,
+        selected.deviceDigest,
+        selection.environment,
+      );
+    };
+    const performLocalConversationEnvironmentPreflight = async (
+      manifest: ExecutionManifest<"conversation">,
+    ): Promise<{
+      readonly workspaceRoot: string | null;
+      readonly error?: AuthorityError;
+    }> => {
+      if (!workspaceBindings) {
+        return manifest.environment.workspace
+          ? {
+              workspaceRoot: null,
+              error: {
+                code: "capability-gap",
+                message: "Local workspace environment is unavailable",
+                retryable: true,
+              },
+            }
+          : { workspaceRoot: null };
+      }
+      const result = await preflightWorkspaceRequirement(
+        workspaceBindings,
+        manifest.environment,
+      );
+      if (result.ok) {
+        if (result.state === "missing" && result.absolutePath) {
+          try {
+            await fsp.mkdir(result.absolutePath, { recursive: true });
+            if (
+              (await workspaceBindings.probePath(result.absolutePath)) !==
+              "directory"
+            ) {
+              throw new Error("created workspace did not become a directory");
+            }
+          } catch (error) {
+            return {
+              workspaceRoot: null,
+              error: {
+                code: "capability-gap",
+                message: `Workspace creation failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+                retryable: true,
+              },
+            };
           }
-        : { workspaceRoot: null };
-    }
-    const result = await preflightWorkspaceRequirement(
-      workspaceBindings,
-      manifest.environment,
-    );
-    if (result.ok) {
-      if (result.state === "missing" && result.absolutePath) {
-        try {
-          await fsp.mkdir(result.absolutePath, { recursive: true });
-          if (await workspaceBindings.probePath(result.absolutePath) !== "directory") {
-            throw new Error("created workspace did not become a directory");
+        }
+        return { workspaceRoot: result.absolutePath ?? null };
+      }
+      return {
+        workspaceRoot: null,
+        error: {
+          code:
+            result.reason === "revision-conflict"
+              ? "revision-conflict"
+              : "capability-gap",
+          message: `Workspace execution preflight failed: ${result.reason}`,
+          retryable: true,
+        },
+      };
+    };
+    const environmentPreflights = new Map<
+      string,
+      {
+        readonly promise: Promise<{
+          readonly workspaceRoot: string | null;
+          readonly error?: AuthorityError;
+        }>;
+        claimed: boolean;
+      }
+    >();
+    const createEnvironmentPreflight = (
+      key: string,
+      manifest: ExecutionManifest<"conversation">,
+      claimed: boolean,
+    ): {
+      readonly promise: Promise<{
+        readonly workspaceRoot: string | null;
+        readonly error?: AuthorityError;
+      }>;
+      claimed: boolean;
+    } => {
+      let promise!: Promise<{
+        readonly workspaceRoot: string | null;
+        readonly error?: AuthorityError;
+      }>;
+      promise = performLocalConversationEnvironmentPreflight(manifest).then(
+        (result) => {
+          if (
+            result.error &&
+            environmentPreflights.get(key)?.promise === promise
+          ) {
+            environmentPreflights.delete(key);
           }
-        } catch (error) {
+          return result;
+        },
+        (error) => {
+          if (environmentPreflights.get(key)?.promise === promise) {
+            environmentPreflights.delete(key);
+          }
+          throw error;
+        },
+      );
+      const entry = { promise, claimed };
+      environmentPreflights.set(key, entry);
+      return entry;
+    };
+    const preflightLocalConversationEnvironment = (
+      manifest: ExecutionManifest<"conversation">,
+      assignmentId?: string,
+    ): Promise<{
+      readonly workspaceRoot: string | null;
+      readonly error?: AuthorityError;
+    }> => {
+      if (assignmentId === undefined) {
+        return performLocalConversationEnvironmentPreflight(manifest);
+      }
+      const key = `${assignmentId}\u0000${manifest.digest}`;
+      const existing = environmentPreflights.get(key);
+      if (existing) return existing.promise;
+      const entry = createEnvironmentPreflight(key, manifest, false);
+      return entry.promise;
+    };
+    const takeLocalConversationEnvironmentPreflight = async (
+      manifest: ExecutionManifest<"conversation">,
+      assignmentId: string,
+    ): Promise<{
+      readonly workspaceRoot: string | null;
+      readonly error?: AuthorityError;
+    }> => {
+      const key = `${assignmentId}\u0000${manifest.digest}`;
+      let entry = environmentPreflights.get(key);
+      if (!entry) {
+        entry = createEnvironmentPreflight(key, manifest, true);
+      } else {
+        if (entry.claimed) {
+          throw new Error(
+            "Local conversation environment preflight was already claimed",
+          );
+        }
+        entry.claimed = true;
+      }
+      return entry.promise;
+    };
+    const releaseLocalConversationEnvironmentPreflight = (
+      manifest: ExecutionManifest<"conversation">,
+      assignmentId: string,
+    ): void => {
+      environmentPreflights.delete(`${assignmentId}\u0000${manifest.digest}`);
+    };
+    const validateConversationRuntimeBinding = async (input: {
+      readonly assignmentId: string;
+      readonly manifest: ExecutionManifest<"conversation">;
+      readonly binding: ConversationRuntimeBinding;
+    }): Promise<AuthorityError | undefined> => {
+      try {
+        const profile = normalizeRuntimeExecutionProfile(
+          input.binding.executionProfile,
+        );
+        const readiness = readinessSource();
+        assertRuntimeAvailable(profile, readiness);
+        if (input.binding.deviceDigest !== deviceDigestFor(readiness)) {
           return {
-            workspaceRoot: null,
-            error: {
-              code: "capability-gap",
-              message: `Workspace creation failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-              retryable: true,
-            },
+            code: "revision-conflict",
+            message:
+              "Executor device generation changed before durable receipt",
+            retryable: true,
           };
         }
+        const versionedBindings = readiness.credentialBindings.map(
+          (binding) => ({
+            ...binding,
+            revision: input.manifest.requires.runtimeConfigRev,
+          }),
+        );
+        const expectedBindings = requiredBindingsForRuntime(
+          profile,
+          versionedBindings,
+        );
+        if (
+          canonicalize(input.manifest.tools) !== canonicalize(profile.tools) ||
+          canonicalize(input.manifest.mcpServers) !==
+            canonicalize(profile.mcpServers) ||
+          canonicalize(input.manifest.credentialBindings) !==
+            canonicalize(expectedBindings)
+        ) {
+          return {
+            code: "revision-conflict",
+            message: "Execution manifest does not bind the assembled runtime",
+            retryable: true,
+          };
+        }
+        return (
+          await preflightLocalConversationEnvironment(
+            input.manifest,
+            input.assignmentId,
+          )
+        ).error;
+      } catch (error) {
+        return {
+          code: "capability-gap",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Runtime readiness is unavailable",
+          retryable: true,
+        };
       }
-      return { workspaceRoot: result.absolutePath ?? null };
-    }
-    return {
-      workspaceRoot: null,
-      error: {
-        code:
-          result.reason === "revision-conflict"
-            ? "revision-conflict"
-            : "capability-gap",
-        message: `Workspace execution preflight failed: ${result.reason}`,
-        retryable: true,
-      },
     };
-  };
-  const validateConversationRuntimeBinding = async (input: {
-    readonly manifest: ExecutionManifest<"conversation">;
-    readonly binding: ConversationRuntimeBinding;
-  }): Promise<AuthorityError | undefined> => {
-    try {
-      const profile = normalizeRuntimeExecutionProfile(input.binding.executionProfile);
-      const readiness = readinessSource();
-      assertRuntimeAvailable(profile, readiness);
-      if (input.binding.deviceDigest !== deviceDigestFor(readiness)) {
+    const validateLocalConversationManifest = (
+      manifest: ExecutionManifest<"conversation">,
+    ): AuthorityError | undefined => {
+      if (!localExecutorEnabled) {
         return {
-          code: "revision-conflict",
-          message: "Executor device generation changed before durable receipt",
+          code: "capability-gap",
+          message: "Local executor role is not enabled on this device",
           retryable: true,
         };
       }
-      const versionedBindings = readiness.credentialBindings.map((binding) => ({
-        ...binding,
-        revision: input.manifest.requires.runtimeConfigRev,
-      }));
-      const expectedBindings = requiredBindingsForRuntime(profile, versionedBindings);
-      if (
-        canonicalize(input.manifest.tools) !== canonicalize(profile.tools) ||
-        canonicalize(input.manifest.mcpServers) !== canonicalize(profile.mcpServers) ||
-        canonicalize(input.manifest.credentialBindings) !== canonicalize(expectedBindings)
-      ) {
+      const snapshot = executorCapabilities.snapshotFor(executorId);
+      if (!snapshot) {
         return {
-          code: "revision-conflict",
-          message: "Execution manifest does not bind the assembled runtime",
+          code: "capability-gap",
+          message: "Local executor capability snapshot is unavailable",
           retryable: true,
         };
       }
-      return (await preflightLocalConversationEnvironment(input.manifest)).error;
-    } catch (error) {
-      return {
-        code: "capability-gap",
-        message: error instanceof Error ? error.message : "Runtime readiness is unavailable",
-        retryable: true,
-      };
-    }
-  };
-  const validateLocalConversationManifest = (
-    manifest: ExecutionManifest<"conversation">,
-  ): AuthorityError | undefined => {
-    if (!localExecutorEnabled) {
-      return {
-        code: "capability-gap",
-        message: "Local executor role is not enabled on this device",
-        retryable: true,
-      };
-    }
-    const snapshot = executorCapabilities.snapshotFor(executorId);
-    if (!snapshot) {
-      return {
-        code: "capability-gap",
-        message: "Local executor capability snapshot is unavailable",
-        retryable: true,
-      };
-    }
-    const result = matchManifest(manifest, snapshot.descriptor, snapshot.inventory);
-    return result.ok ? undefined : result.error;
-  };
-  return {
-    anchorEpoch,
-    deviceId: key.deviceId,
-    identityKey: key,
-    identity,
-    executorId,
-    signer: key,
-    verifier,
-    get authority() {
-      if (!authority) throw new Error("Anchor authority role is not enabled");
-      return authority;
-    },
-    get authorityLog() {
-      if (!authorityLog) throw new Error("Anchor authority role is not enabled");
-      return authorityLog;
-    },
-    get executorLog() {
-      if (!executorLog) throw new Error("Local executor role is not enabled");
-      return executorLog;
-    },
-    artifacts,
-    get surfaceAssets() {
-      if (!surfaceAssets) throw new Error("Anchor authority role is not enabled");
-      return surfaceAssets;
-    },
-    get participant() {
-      if (!participant) throw new Error("Anchor authority role is not enabled");
-      return participant;
-    },
-    get controlAdmission() {
-      if (!controlAdmission) throw new Error("Anchor authority role is not enabled");
-      return controlAdmission;
-    },
-    executorCapabilities,
-    get resourceGovernor() {
-      if (!resourceGovernor) throw new Error("Anchor authority role is not enabled");
-      return resourceGovernor;
-    },
-    get executorResourceGovernor() {
-      if (!executorResourceGovernor) {
-        throw new Error("Local executor role is not enabled");
-      }
-      return executorResourceGovernor;
-    },
-    environment: workspaceBindings,
-    workspaceBindingAdmin: workspaceBindings,
-    workspaceBindingMigration: workspaceBindings,
-    workspaceBindingRecovery: workspaceBindings,
-    workspaceProbe,
-    environmentProbeOwner,
-    globalState: worksceneGlobalState,
-    worksceneGlobalState,
-    installWorksceneCleanup: (cleanup) => {
-      worksceneCleanup = cleanup;
-    },
-    workspaceCatalog: () =>
-      executorCapabilities
-        .activeSnapshots()
-        .flatMap((snapshot) => {
-          const deviceId = snapshot.descriptor.signature.keyId;
-          const deviceName =
-            trustedIdentities.get(deviceId)?.displayName ?? deviceId;
-          return snapshot.descriptor.workspaces.map((workspace) => ({
-            executorId: snapshot.descriptor.executorId,
-            deviceId,
-            deviceName,
-            bindingRef: workspace.bindingRef,
-            displayName: workspace.displayName,
-            workspaceBindingRevision: workspace.workspaceBindingRevision,
-          }));
-        })
-        .sort(
-          (left, right) =>
-            left.deviceName.localeCompare(right.deviceName) ||
-            left.displayName.localeCompare(right.displayName) ||
-            left.bindingRef.localeCompare(right.bindingRef),
-        ),
-    permissionSnapshotFor: (digest) => permissionSnapshots.snapshotFor(digest),
-    currentExecutorSnapshot,
-    installPermissionSnapshot,
-    acceptExecutorSnapshot,
-    reconcileTrustedDevices: (identities, deviceIds) => {
-      for (const candidate of identities) {
-        if (deviceIdFromPublicKey(candidate.publicKey) !== candidate.deviceId) {
-          throw new TypeError("Trusted device identity does not match its public key");
+      const result = matchManifest(
+        manifest,
+        snapshot.descriptor,
+        snapshot.inventory,
+      );
+      return result.ok ? undefined : result.error;
+    };
+    return {
+      anchorEpoch,
+      deviceId: key.deviceId,
+      identityKey: key,
+      identity,
+      executorId,
+      signer: key,
+      verifier,
+      get authority() {
+        if (!authority) throw new Error("Anchor authority role is not enabled");
+        return authority;
+      },
+      get authorityLog() {
+        if (!authorityLog)
+          throw new Error("Anchor authority role is not enabled");
+        return authorityLog;
+      },
+      get executorLog() {
+        if (!executorLog) throw new Error("Local executor role is not enabled");
+        return executorLog;
+      },
+      artifacts,
+      get surfaceAssets() {
+        if (!surfaceAssets)
+          throw new Error("Anchor authority role is not enabled");
+        return surfaceAssets;
+      },
+      get participant() {
+        if (!participant)
+          throw new Error("Anchor authority role is not enabled");
+        return participant;
+      },
+      get controlAdmission() {
+        if (!controlAdmission)
+          throw new Error("Anchor authority role is not enabled");
+        return controlAdmission;
+      },
+      executorCapabilities,
+      get resourceGovernor() {
+        if (!resourceGovernor)
+          throw new Error("Anchor authority role is not enabled");
+        return resourceGovernor;
+      },
+      get executorResourceGovernor() {
+        if (!executorResourceGovernor) {
+          throw new Error("Local executor role is not enabled");
         }
-        const existing = trustedIdentities.get(candidate.deviceId);
-        if (existing && canonicalize(existing) !== canonicalize(candidate)) {
-          throw new TypeError("Trusted device identity changed for an existing device id");
+        return executorResourceGovernor;
+      },
+      environment: workspaceBindings,
+      workspaceBindingAdmin: workspaceBindings,
+      workspaceBindingMigration: workspaceBindings,
+      workspaceBindingRecovery: workspaceBindings,
+      workspaceProbe,
+      environmentProbeOwner,
+      globalState: worksceneGlobalState,
+      recoverWorksceneState: async () => {
+        await worksceneGlobalState?.recoverPendingDeletions();
+      },
+      replayWorksceneMutation: (requestId) =>
+        worksceneGlobalState?.replayMutation(requestId) ?? Promise.resolve(null),
+      installWorksceneCleanup: (cleanup) => {
+        worksceneCleanup = cleanup;
+      },
+      workspaceCatalog: () =>
+        executorCapabilities
+          .activeSnapshots()
+          .flatMap((snapshot) => {
+            const deviceId = snapshot.descriptor.signature.keyId;
+            const deviceName =
+              trustedIdentities.get(deviceId)?.displayName ?? deviceId;
+            return snapshot.descriptor.workspaces.map((workspace) => ({
+              executorId: snapshot.descriptor.executorId,
+              deviceId,
+              deviceName,
+              bindingRef: workspace.bindingRef,
+              displayName: workspace.displayName,
+              workspaceBindingRevision: workspace.workspaceBindingRevision,
+            }));
+          })
+          .sort(
+            (left, right) =>
+              left.deviceName.localeCompare(right.deviceName) ||
+              left.displayName.localeCompare(right.displayName) ||
+              left.bindingRef.localeCompare(right.bindingRef),
+          ),
+      permissionSnapshotFor: (digest) =>
+        permissionSnapshots.snapshotFor(digest),
+      currentExecutorSnapshot,
+      installPermissionSnapshot,
+      acceptExecutorSnapshot,
+      reconcileTrustedDevices: (identities, deviceIds) => {
+        for (const candidate of identities) {
+          if (
+            deviceIdFromPublicKey(candidate.publicKey) !== candidate.deviceId
+          ) {
+            throw new TypeError(
+              "Trusted device identity does not match its public key",
+            );
+          }
+          const existing = trustedIdentities.get(candidate.deviceId);
+          if (existing && canonicalize(existing) !== canonicalize(candidate)) {
+            throw new TypeError(
+              "Trusted device identity changed for an existing device id",
+            );
+          }
+          trustedIdentities.set(candidate.deviceId, candidate);
         }
-        trustedIdentities.set(candidate.deviceId, candidate);
-      }
-      authorizedDeviceIds.clear();
-      authorizedDeviceIds.add(identity.deviceId);
-      for (const deviceId of deviceIds) authorizedDeviceIds.add(deviceId);
-    },
-    prepareConversationAssignment,
-    validateConversationRuntimeBinding,
-    preflightLocalConversationEnvironment,
-    validateLocalConversationManifest,
-    startupCleanup,
-    stopStorageMaintenance,
-  };
+        authorizedDeviceIds.clear();
+        authorizedDeviceIds.add(identity.deviceId);
+        for (const deviceId of deviceIds) authorizedDeviceIds.add(deviceId);
+      },
+      prepareConversationAssignment,
+      validateConversationRuntimeBinding,
+      preflightLocalConversationEnvironment,
+      takeLocalConversationEnvironmentPreflight,
+      releaseLocalConversationEnvironmentPreflight,
+      validateLocalConversationManifest,
+      startupCleanup,
+      stopStorageMaintenance,
+    };
   } catch (error) {
     // 失败即执行同一幂等 handle;handle 缓存执行结果,外层回滚事务再跑它只会
     // 复用同一次。原始失败优先上抛,清理自身的失败经外层回滚事务可观测。
@@ -1105,7 +1367,10 @@ export async function setupAuthorityRuntime(
 interface NormalizedExecutorReadiness {
   readonly tools: readonly string[];
   readonly mcpServers: readonly string[];
-  readonly credentialBindings: readonly Omit<CredentialBindingDescriptor, "revision">[];
+  readonly credentialBindings: readonly Omit<
+    CredentialBindingDescriptor,
+    "revision"
+  >[];
   readonly credentialGeneration: string | null;
 }
 
@@ -1114,40 +1379,58 @@ function normalizeExecutorReadiness(
   deviceId: string,
 ): NormalizedExecutorReadiness {
   const tools = normalizeIdentifiers(input.tools, "Executor tools");
-  const mcpServers = normalizeIdentifiers(input.mcpServers, "Executor MCP servers");
-  const deviceScopedBindingIds = new Set(input.deviceScopedCredentialBindingIds);
+  const mcpServers = normalizeIdentifiers(
+    input.mcpServers,
+    "Executor MCP servers",
+  );
+  const deviceScopedBindingIds = new Set(
+    input.deviceScopedCredentialBindingIds,
+  );
   const logicalBindingIds = new Set<string>();
-  const credentialBindings = input.credentialBindings.map((binding) => {
-    requireIdentifier(binding.bindingId, "Executor credential binding id");
-    requireIdentifier(binding.service, "Executor credential service");
-    if (logicalBindingIds.has(binding.bindingId)) {
-      throw new TypeError("Executor credential binding ids must be unique");
-    }
-    logicalBindingIds.add(binding.bindingId);
-    const deviceScoped = deviceScopedBindingIds.delete(binding.bindingId);
-    if (deviceScoped && binding.verification !== "user-alias") {
-      throw new TypeError("Only user-alias credential bindings can be device-scoped");
-    }
-    return {
-      bindingId: deviceScoped
-        ? deviceScopedUserAliasBindingId(deviceId, binding.bindingId)
-        : binding.bindingId,
-      service: binding.service,
-      verification: binding.verification,
-      ...(binding.resource === undefined ? {} : { resource: binding.resource }),
-      ...(binding.principalFingerprint === undefined
-        ? {}
-        : { principalFingerprint: binding.principalFingerprint }),
-      ...(binding.tenant === undefined ? {} : { tenant: binding.tenant }),
-      ...(binding.scopes === undefined ? {} : { scopes: [...binding.scopes] }),
-    } satisfies Omit<CredentialBindingDescriptor, "revision">;
-  }).sort((left, right) => compareCanonicalStrings(left.bindingId, right.bindingId));
+  const credentialBindings = input.credentialBindings
+    .map((binding) => {
+      requireIdentifier(binding.bindingId, "Executor credential binding id");
+      requireIdentifier(binding.service, "Executor credential service");
+      if (logicalBindingIds.has(binding.bindingId)) {
+        throw new TypeError("Executor credential binding ids must be unique");
+      }
+      logicalBindingIds.add(binding.bindingId);
+      const deviceScoped = deviceScopedBindingIds.delete(binding.bindingId);
+      if (deviceScoped && binding.verification !== "user-alias") {
+        throw new TypeError(
+          "Only user-alias credential bindings can be device-scoped",
+        );
+      }
+      return {
+        bindingId: deviceScoped
+          ? deviceScopedUserAliasBindingId(deviceId, binding.bindingId)
+          : binding.bindingId,
+        service: binding.service,
+        verification: binding.verification,
+        ...(binding.resource === undefined
+          ? {}
+          : { resource: binding.resource }),
+        ...(binding.principalFingerprint === undefined
+          ? {}
+          : { principalFingerprint: binding.principalFingerprint }),
+        ...(binding.tenant === undefined ? {} : { tenant: binding.tenant }),
+        ...(binding.scopes === undefined
+          ? {}
+          : { scopes: [...binding.scopes] }),
+      } satisfies Omit<CredentialBindingDescriptor, "revision">;
+    })
+    .sort((left, right) =>
+      compareCanonicalStrings(left.bindingId, right.bindingId),
+    );
   if (deviceScopedBindingIds.size > 0) {
-    throw new TypeError("Device-scoped executor credential binding is not published");
+    throw new TypeError(
+      "Device-scoped executor credential binding is not published",
+    );
   }
   if (
     input.credentialGeneration !== null &&
-    (typeof input.credentialGeneration !== "string" || input.credentialGeneration.length === 0)
+    (typeof input.credentialGeneration !== "string" ||
+      input.credentialGeneration.length === 0)
   ) {
     throw new TypeError("Executor credential generation is invalid");
   }
@@ -1186,11 +1469,17 @@ function assertRuntimeAvailable(
 function requiredBindingsForRuntime(
   profile: RuntimeExecutionProfile,
   available: readonly CredentialBindingDescriptor[],
-): Array<{ readonly service: string; readonly bindingId: string; readonly revision: number }> {
+): Array<{
+  readonly service: string;
+  readonly bindingId: string;
+  readonly revision: number;
+}> {
   const byService = new Map<string, CredentialBindingDescriptor>();
   for (const binding of available) {
     if (byService.has(binding.service)) {
-      throw new TypeError(`Executor publishes multiple bindings for service ${binding.service}`);
+      throw new TypeError(
+        `Executor publishes multiple bindings for service ${binding.service}`,
+      );
     }
     byService.set(binding.service, binding);
   }
@@ -1198,7 +1487,9 @@ function requiredBindingsForRuntime(
   for (const providerId of profile.providerIds) {
     const binding = byService.get(`provider-${providerId}`);
     if (binding === undefined) {
-      throw new Error(`Resolved provider credential is not ready: ${providerId}`);
+      throw new Error(
+        `Resolved provider credential is not ready: ${providerId}`,
+      );
     }
     required.push(binding);
   }
@@ -1207,14 +1498,23 @@ function requiredBindingsForRuntime(
     if (binding !== undefined) required.push(binding);
   }
   return required
-    .map(({ service, bindingId, revision }) => ({ service, bindingId, revision }))
-    .sort((left, right) => compareCanonicalStrings(
-      `${left.service}\u0000${left.bindingId}`,
-      `${right.service}\u0000${right.bindingId}`,
-    ));
+    .map(({ service, bindingId, revision }) => ({
+      service,
+      bindingId,
+      revision,
+    }))
+    .sort((left, right) =>
+      compareCanonicalStrings(
+        `${left.service}\u0000${left.bindingId}`,
+        `${right.service}\u0000${right.bindingId}`,
+      ),
+    );
 }
 
-function normalizeIdentifiers(values: readonly string[], label: string): string[] {
+function normalizeIdentifiers(
+  values: readonly string[],
+  label: string,
+): string[] {
   const normalized = new Set<string>();
   for (const value of values) {
     requireIdentifier(value, label);
@@ -1237,7 +1537,10 @@ function canonicalTime(value: string, label: string): string {
   return value;
 }
 
-function deviceScopedUserAliasBindingId(deviceId: string, logicalBindingId: string): string {
+function deviceScopedUserAliasBindingId(
+  deviceId: string,
+  logicalBindingId: string,
+): string {
   const bindingId = `user-alias:${deviceId}:${logicalBindingId}`;
   if (bindingId.length > 480) {
     throw new TypeError("Device-scoped credential binding id is too long");
@@ -1245,12 +1548,12 @@ function deviceScopedUserAliasBindingId(deviceId: string, logicalBindingId: stri
   return bindingId;
 }
 
-export async function setupDelivery(options: SetupDeliveryOptions): Promise<DeliveryStack> {
+export async function setupDelivery(
+  options: SetupDeliveryOptions,
+): Promise<DeliveryStack> {
   const { channels, zhixingHome, logger } = options;
-  const {
-    applyDeliveryResolutionControl,
-    createDeliveryControlEnvelope,
-  } = await import("@zhixing/owner-kernel");
+  const { applyDeliveryResolutionControl, createDeliveryControlEnvelope } =
+    await import("@zhixing/owner-kernel");
 
   // 1. OutboxRegistry — 顺序层，per-target FIFO
   //    doSend 直通 channel adapter；adapter 未就绪则返回可重试失败

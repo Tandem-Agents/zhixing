@@ -87,6 +87,31 @@ describe("environment selection", () => {
     ).toMatchObject({ kind: "selected", executorId: "executor-a" });
   });
 
+  it("uses only an eligible owner affinity and otherwise requires an explicit choice", () => {
+    const candidates = [
+      candidate({}, { executorId: "executor-a", deviceId: "device-a" }),
+      candidate({}, { executorId: "executor-b", deviceId: "device-b" }),
+    ];
+    expect(selectExecutorForEnvironment({}, candidates)).toEqual({
+      kind: "selection-required",
+      requirement: {},
+      candidates: [
+        { executorId: "executor-a", deviceId: "device-a" },
+        { executorId: "executor-b", deviceId: "device-b" },
+      ],
+    });
+    expect(
+      selectExecutorForEnvironment({}, candidates, "executor-b"),
+    ).toMatchObject({ kind: "selected", executorId: "executor-b" });
+    expect(
+      selectExecutorForEnvironment(
+        { deviceId: "device-a" },
+        candidates,
+        "executor-b",
+      ),
+    ).toMatchObject({ kind: "selected", executorId: "executor-a" });
+  });
+
   it("distinguishes a missing path and converts probe exceptions to fail-closed results", async () => {
     const requirement: EnvironmentRequirement = {
       workspace: {
@@ -131,17 +156,21 @@ describe("environment selection", () => {
 
 function candidate(
   overrides: Partial<CapabilityDescriptor>,
+  identity: {
+    readonly executorId: string;
+    readonly deviceId: string;
+  } = { executorId: "executor-a", deviceId: "device-a" },
 ): {
   executorId: string;
   deviceId: string;
   descriptor: CapabilityDescriptor;
 } {
   return {
-    executorId: "executor-a",
-    deviceId: "device-a",
+    executorId: identity.executorId,
+    deviceId: identity.deviceId,
     descriptor: {
       v: 1,
-      executorId: "executor-a",
+      executorId: identity.executorId,
       revision: 1,
       protocolVersion: "1",
       workspaces: [],
@@ -150,7 +179,7 @@ function candidate(
       credentialBindings: [],
       evidenceCapabilities: [],
       at: "2026-07-30T00:00:00.000Z",
-      signature: { alg: "test", keyId: "device-a", sig: "signature" },
+      signature: { alg: "test", keyId: identity.deviceId, sig: "signature" },
       ...overrides,
     },
   };

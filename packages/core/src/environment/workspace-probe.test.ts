@@ -20,7 +20,6 @@ import {
 import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
-  StorageMaintenanceTaskRunner,
 } from "../resources/index.js";
 import {
   WorkspaceBindingService,
@@ -57,32 +56,32 @@ afterEach(async () => {
 });
 
 describe("workspace probe conformance", () => {
-  it.each(["local", "mesh"] as const)(
-    "%s adapter drives the same signed handler contract",
-    async (adapterKind) => {
-      const fixture = await createFixture();
-      const port =
-        adapterKind === "local"
-          ? new LocalWorkspaceProbeAdapter(fixture.handler)
-          : new MeshWorkspaceProbeAdapter(
-              (request) => fixture.handler.probe(request),
-              identity,
-            );
-      const request = fixture.owner.issue({
-        requestId: "probe-1",
-        deviceId: "device-a",
-        bindingRef: fixture.bindingRef,
-        executorId: "executor-a",
-        resourceLease: probeLease("probe-1"),
-      });
-      await expect(port.probe(request)).resolves.toMatchObject({
-        requestId: "probe-1",
-        bindingRef: fixture.bindingRef,
-        probe: "directory",
-        executorId: "executor-a",
-      });
-    },
-  );
+  it.each([
+    "local",
+    "mesh",
+  ] as const)("%s adapter drives the same signed handler contract", async (adapterKind) => {
+    const fixture = await createFixture();
+    const port =
+      adapterKind === "local"
+        ? new LocalWorkspaceProbeAdapter(fixture.handler)
+        : new MeshWorkspaceProbeAdapter(
+            (request) => fixture.handler.probe(request),
+            identity,
+          );
+    const request = fixture.owner.issue({
+      requestId: "probe-1",
+      deviceId: "device-a",
+      bindingRef: fixture.bindingRef,
+      executorId: "executor-a",
+      resourceLease: probeLease("probe-1"),
+    });
+    await expect(port.probe(request)).resolves.toMatchObject({
+      requestId: "probe-1",
+      bindingRef: fixture.bindingRef,
+      probe: "directory",
+      executorId: "executor-a",
+    });
+  });
 
   it("single-flights concurrent requests and rejects identity reuse", async () => {
     const fixture = await createFixture();
@@ -161,13 +160,14 @@ async function createFixture() {
   );
   const bindings = new WorkspaceBindingService({
     rootDir: path.join(root, "binding-state"),
+    catalogGeneration: "catalog-initial",
     deviceId: "device-a",
     executorId: "executor-a",
     log: bindingLog,
     verifier: identity,
     capacity,
-    migrationRunner: new StorageMaintenanceTaskRunner(),
-    capabilitySnapshot: async (workspaces) => descriptor(workspaces),
+    capabilitySnapshot: async (publication) =>
+      descriptor(publication.workspaces),
     versionInventory: async () => inventory(),
     clock: () => NOW,
     bindingRefFactory: () => "workspace-a",
@@ -213,21 +213,13 @@ function localControl(requestId: string) {
   const scopedRequestId = localEnvironmentControlSubject("device-a", requestId);
   return {
     requestId: scopedRequestId,
-    lease: lease(
-      scopedRequestId,
-      scopedRequestId,
-      "executor-a",
-    ),
+    lease: lease(scopedRequestId, scopedRequestId, "executor-a"),
     abort: new AbortController().signal,
   };
 }
 
 function probeLease(requestId: string): ImmediateRootResourceLease {
-  return lease(
-    requestId,
-    requestId,
-    "executor-a",
-  );
+  return lease(requestId, requestId, "executor-a");
 }
 
 function lease(

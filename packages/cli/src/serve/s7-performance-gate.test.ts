@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { protocolDigest } from "@zhixing/core/protocol";
 import {
@@ -13,6 +13,7 @@ import {
   TerminalPerformanceSampleRecorder,
   terminalPerformanceEnvironmentFingerprint,
   validateTerminalPerformanceBaselineManifest,
+  validateTerminalPerformanceCaptureAsset,
   type TerminalPerformanceSample,
   type TerminalPerformanceScenario,
 } from "./s7-performance-gate.js";
@@ -22,12 +23,14 @@ const ENVIRONMENT = protocolDigest("PerformanceEnvironment", 1, {
   cpu: "deterministic",
   node: "fixed",
 });
+const CURRENT_CAPTURE =
+  process.env.ZHIXING_S7_CURRENT_PERFORMANCE_CAPTURE;
 
 describe("S7 terminal performance gate", () => {
   it("records first-token, stream cadence and pre-token work from one monotonic clock", () => {
     const times = [100, 108, 118, 128];
     const recorder = new TerminalPerformanceSampleRecorder(() => times.shift()!);
-    recorder.workspaceFilesystemAccess();
+    recorder.workspacePreflight();
     recorder.frame();
     recorder.activityProjectionWrite();
     recorder.frame();
@@ -36,7 +39,7 @@ describe("S7 terminal performance gate", () => {
       firstTokenMs: 8,
       streamDurationMs: 20,
       streamFrameCount: 3,
-      workspaceFilesystemCalls: 1,
+      workspacePreflightCalls: 1,
       activityProjectionWritesBeforeFirstToken: 0,
     });
   });
@@ -79,33 +82,55 @@ describe("S7 terminal performance gate", () => {
     );
   });
 
-  it.each([
-    "cold-no-workspace",
-    "warm-no-workspace",
-    "cold-workspace",
-    "warm-workspace",
-  ] as const)("compares %s against the frozen S1 distribution", (scenario) => {
-    const baseline = run(
-      S1_RUNTIME_BASELINE_COMMIT,
-      scenario,
-      samples(scenario, 100, 20),
+  it("loads a complete raw S1 capture rather than synthesizing the baseline", async () => {
+    const baseline = await readCapture(
+      new URL(
+        "./fixtures/s1-terminal-performance-capture.json",
+        import.meta.url,
+      ),
     );
-    const current = run(
-      "current",
-      scenario,
-      samples(scenario, 108, 19.2),
-    );
-    expect(compareTerminalPerformance(baseline, current)).toMatchObject({
-      passed: true,
-      failures: [],
+    expect(baseline).toMatchObject({
+      revision: S1_RUNTIME_BASELINE_COMMIT,
+      environmentFingerprint: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
     });
+    expect(baseline.runs).toHaveLength(4);
+    expect(
+      baseline.runs.every(
+        ({ rawSamples }) =>
+          rawSamples.length === S7_TERMINAL_PERFORMANCE_CONFIG.samples,
+      ),
+    ).toBe(true);
   });
+
+  it.runIf(CURRENT_CAPTURE)(
+    "compares a live current production capture with the same-machine S1 asset",
+    async () => {
+      const baseline = await readCapture(
+        new URL(
+          "./fixtures/s1-terminal-performance-capture.json",
+          import.meta.url,
+        ),
+      );
+      const current = await readCapture(pathToFileURL(CURRENT_CAPTURE!));
+      expect(
+        compareTerminalPerformanceMatrix({
+          baseline: baseline.runs,
+          current: current.runs,
+        }),
+      ).toMatchObject({ passed: true });
+    },
+  );
 
   it("rejects threshold regressions and mismatched environments", () => {
     const baseline = run(
       S1_RUNTIME_BASELINE_COMMIT,
       "warm-workspace",
-      samples("warm-workspace", 100, 20),
+      samples(
+        "warm-workspace",
+        100,
+        20,
+        S1_RUNTIME_BASELINE_COMMIT,
+      ),
     );
     const regression = run(
       "current",
@@ -135,7 +160,7 @@ describe("S7 terminal performance gate", () => {
         "warm-no-workspace",
         samples("warm-no-workspace", 100, 20).map((sample, index) =>
           index === 0
-            ? { ...sample, workspaceFilesystemCalls: 1 }
+            ? { ...sample, workspacePreflightCalls: 1 }
             : sample,
         ),
       ),
@@ -239,16 +264,18 @@ function samples(
   scenario: TerminalPerformanceScenario,
   firstTokenMs: number,
   framesPerSecond: number,
+  revision = "current",
 ): TerminalPerformanceSample[] {
-  const hasWorkspace =
-    scenario === "cold-workspace" || scenario === "warm-workspace";
+  const requiresWorkspacePreflight =
+    revision !== S1_RUNTIME_BASELINE_COMMIT &&
+    (scenario === "cold-workspace" || scenario === "warm-workspace");
   return Array.from(
     { length: S7_TERMINAL_PERFORMANCE_CONFIG.samples },
     (_, index) => ({
       firstTokenMs: firstTokenMs + ((index % 5) - 2) * 0.2,
       streamDurationMs: (19 * 1_000) / framesPerSecond,
       streamFrameCount: 20,
-      workspaceFilesystemCalls: hasWorkspace ? 1 : 0,
+      workspacePreflightCalls: requiresWorkspacePreflight ? 1 : 0,
       activityProjectionWritesBeforeFirstToken: 0,
     }),
   );
@@ -270,7 +297,13 @@ function matrix(
     run(
       revision,
       scenario,
-      samples(scenario, firstTokenMs, framesPerSecond),
+      samples(scenario, firstTokenMs, framesPerSecond, revision),
     ),
+  );
+}
+
+async function readCapture(location: URL) {
+  return validateTerminalPerformanceCaptureAsset(
+    JSON.parse(await readFile(fileURLToPath(location), "utf8")),
   );
 }

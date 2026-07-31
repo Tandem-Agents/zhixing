@@ -37,6 +37,8 @@ import {
   type UserTurnInput,
   userTurnInputFromText,
 } from "@zhixing/core";
+import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
+import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -94,6 +96,7 @@ interface SessionSendParams extends ConversationIdParams {
   input?: unknown;
   engage?: unknown;
   surfaceCapabilities?: unknown;
+  environment?: unknown;
   /** 发起端可预分配 turnId,用于避免 loopback 下 complete 先于 send 响应的竞态 */
   turnId?: unknown;
 }
@@ -115,6 +118,12 @@ export function buildSessionSendMethod(): MethodEntry {
         );
       }
       const engage = normalizeSessionEngage(params.engage);
+      const environment = normalizeSessionEnvironment(params.environment);
+      if (engage && environment) {
+        throw RpcErrors.invalidParams(
+          "session.send environment selection is only supported for agent turns",
+        );
+      }
       const surfaceCapabilities = normalizeSurfaceCapabilities(
         params.surfaceCapabilities,
       );
@@ -126,9 +135,10 @@ export function buildSessionSendMethod(): MethodEntry {
           "session.send requires a stable 'turnId' while durable execution is enabled",
         );
       }
-      const turnId = params.turnId !== undefined
-        ? validateTurnId(params.turnId)
-        : generateTurnId();
+      const turnId =
+        params.turnId !== undefined
+          ? validateTurnId(params.turnId)
+          : generateTurnId();
       const connectionId = String(ctx.connection.id);
       const broadcast = ctx.server.sessionBroadcast;
       const advancement = ctx.server.advancement;
@@ -221,6 +231,7 @@ export function buildSessionSendMethod(): MethodEntry {
             broadcast,
             server: ctx.server,
             surfaceCapabilities,
+            ...(environment ? { environment } : {}),
           });
           // 中途插话可见性：输入被分类为同一目标的补充继续——发起端据此
           // 告知用户，含是否为处理输入而中止了在跑的推进代理。
@@ -247,6 +258,7 @@ export function buildSessionSendMethod(): MethodEntry {
             broadcast,
             server: ctx.server,
             surfaceCapabilities,
+            ...(environment ? { environment } : {}),
           });
         }
 
@@ -274,6 +286,7 @@ export function buildSessionSendMethod(): MethodEntry {
             broadcast,
             server: ctx.server,
             surfaceCapabilities,
+            ...(environment ? { environment } : {}),
           });
         }
 
@@ -439,6 +452,7 @@ export function buildSessionSendMethod(): MethodEntry {
           broadcast,
           server: ctx.server,
           surfaceCapabilities,
+          ...(environment ? { environment } : {}),
         });
         // active 会话无 outstanding 且不 busy 时（proxy 结算后的间隙 /
         // 验收挂起期），continue-active 走本 fall-through——插话告知与
@@ -463,6 +477,7 @@ export function buildSessionSendMethod(): MethodEntry {
         broadcast,
         server: ctx.server,
         surfaceCapabilities,
+        ...(environment ? { environment } : {}),
       });
     },
   };
@@ -478,11 +493,13 @@ interface SessionAdvancementActionParams extends ConversationIdParams {
   rubricPersistence?: unknown;
 }
 
-interface SessionAdvancementCancelParams extends SessionAdvancementActionParams {
+interface SessionAdvancementCancelParams
+  extends SessionAdvancementActionParams {
   executeOriginal?: unknown;
 }
 
-interface SessionAdvancementReviseParams extends SessionAdvancementActionParams {
+interface SessionAdvancementReviseParams
+  extends SessionAdvancementActionParams {
   userFeedback?: unknown;
 }
 
@@ -490,10 +507,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
   return {
     name: "session.advancementConfirm",
     requiresAuth: true,
-    async handler(
-      rawParams,
-      ctx,
-    ): Promise<SessionAdvancementConfirmResult> {
+    async handler(rawParams, ctx): Promise<SessionAdvancementConfirmResult> {
       const params = (rawParams ?? {}) as SessionAdvancementActionParams;
       const conversationId = requireConversationId(
         params,
@@ -530,14 +544,16 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
             }),
         });
       } catch (err) {
-        if (err instanceof RpcAppError && err.code === RPC_ERROR_CODES.NOT_FOUND) {
+        if (
+          err instanceof RpcAppError &&
+          err.code === RPC_ERROR_CODES.NOT_FOUND
+        ) {
           await advancement
             .cancelOpenSession({
               conversationId,
               advancementSessionId,
               reason: "system-error",
-              message:
-                "原始对话已不存在，推进会话已取消以避免悬空状态。",
+              message: "原始对话已不存在，推进会话已取消以避免悬空状态。",
             })
             .catch(() => null);
         }
@@ -575,8 +591,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
             conversationId,
             advancementSessionId,
             reason: "system-error",
-            message:
-              "原始任务未能进入执行队列，推进会话已取消以避免悬空状态。",
+            message: "原始任务未能进入执行队列，推进会话已取消以避免悬空状态。",
           })
           .catch(() => null);
         if (cancelled) {
@@ -763,7 +778,10 @@ async function prepareActiveAdvancementUserTurn(input: {
   readonly turnId: string;
   readonly input: UserTurnInput;
 }): Promise<
-  | (Extract<AdvancementPrepareResult, { readonly kind: "active-user-turn" }> & {
+  | (Extract<
+      AdvancementPrepareResult,
+      { readonly kind: "active-user-turn" }
+    > & {
       /** 为处理本次输入中止了正在执行的推进代理——发起端告知素材。 */
       readonly interruptedProxy: boolean;
     })
@@ -778,7 +796,9 @@ async function prepareActiveAdvancementUserTurn(input: {
     >
   | null
 > {
-  const active = await input.advancement.loadActiveSession(input.conversationId);
+  const active = await input.advancement.loadActiveSession(
+    input.conversationId,
+  );
   if (active?.status !== "active") return null;
 
   // active 会话的用户输入一律先过准入分类——排队与分类正交：对话正忙于
@@ -872,7 +892,8 @@ async function prepareAdvancementUserTurn(input: {
       userInput: input.input,
       beforeCreateSession: input.conversationId
         ? undefined
-        : () => ensureConversationShell(input.server, input.preparedConversationId),
+        : () =>
+            ensureConversationShell(input.server, input.preparedConversationId),
     });
 
   if (!input.conversationId) {
@@ -926,6 +947,7 @@ interface SendDirectTurnInput {
   readonly broadcast?: SessionBroadcast;
   readonly server: ServerContext;
   readonly surfaceCapabilities: SessionSurfaceCapabilities;
+  readonly environment?: ExplicitEnvironmentSelection;
 }
 
 interface SendUserTurnInput extends SendDirectTurnInput {
@@ -958,6 +980,9 @@ async function sendDirectTurn(
     connection: input.connection,
     broadcast: input.broadcast,
     surfaceCapabilities: input.surfaceCapabilities,
+    ...(input.environment
+      ? { environment: structuredClone(input.environment) }
+      : {}),
   });
   return {
     conversationId: admitted.conversationId,
@@ -999,6 +1024,7 @@ interface AdmitAndMaybeStartTurnInput {
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
   readonly surfaceCapabilities: SessionSurfaceCapabilities;
+  readonly environment?: ExplicitEnvironmentSelection;
 }
 
 interface AdmitAndMaybeStartPerspectiveTurnInput extends SendDirectTurnInput {
@@ -1122,25 +1148,28 @@ async function admitAndMaybeStartTurn(
       createConversation: input.createConversation,
       exists: input.exists,
       connectionId: input.connectionId,
-      source: "channel",
+      source: "interactive",
       beforeEnqueue: (managed) =>
         input.manager.admitDurableTurn({
           conversationId: managed.conversationId,
           input: input.input,
-          invocation: { kind: "agent", source: "channel" },
+          invocation: { kind: "agent", source: "interactive" },
+          ...(input.environment
+            ? { environment: structuredClone(input.environment) }
+            : {}),
           options: {
             turnContext: rpcTurnContext(
               input.turnId,
               input.connection,
               input.surfaceCapabilities,
             ),
-            source: "channel",
+            source: "interactive",
             surfacePrincipal: rpcSurfacePrincipal(input.connection),
           },
           surfacePrincipal: rpcSurfacePrincipal(input.connection),
         }),
       makeTask: (managed) => ({
-        source: "channel",
+        source: "interactive",
         execute: () =>
           runManagedTurn(
             managed,
@@ -1150,6 +1179,7 @@ async function admitAndMaybeStartTurn(
             input.manager,
             input.broadcast,
             input.surfaceCapabilities,
+            input.environment,
           ),
         // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
         cancel: () => {
@@ -1227,9 +1257,13 @@ function respondRubricRegenerated(input: {
   readonly manager: ConversationManager;
 }): SessionAwaitingRubricResult {
   const { prepared } = input;
-  input.manager.addObserver(prepared.session.conversationId, input.connectionId, {
-    allowInactive: true,
-  });
+  input.manager.addObserver(
+    prepared.session.conversationId,
+    input.connectionId,
+    {
+      allowInactive: true,
+    },
+  );
   notifyAdvancementEvent({
     conversationId: prepared.exitedSession.conversationId,
     turnId: input.turnId,
@@ -1418,6 +1452,7 @@ async function runManagedTurn(
   surfaceCapabilities: SessionSurfaceCapabilities = {
     postTurnControl: false,
   },
+  environment?: ExplicitEnvironmentSelection,
 ): Promise<void> {
   const conversationId = managed.conversationId;
   const push = (method: string, params: unknown): void => {
@@ -1453,9 +1488,10 @@ async function runManagedTurn(
         turnContext,
         surfacePrincipal: rpcSurfacePrincipal(connection),
         turnIndex: managed.turnCount,
-        source: "channel",
+        source: "interactive",
       },
       notify: push,
+      ...(environment ? { environment } : {}),
       abortSignal: abortController.signal,
       onPostTurnControlIntent: (control) => {
         // turn 边界控制意图是可执行的控制字段,只定向发起连接——跟随权归发起
@@ -1480,6 +1516,21 @@ async function runManagedTurn(
     if (connection.closed) {
       manager.removeObserver(conversationId, String(connection.id));
     }
+  }
+}
+
+function normalizeSessionEnvironment(
+  value: unknown,
+): ExplicitEnvironmentSelection | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return validateExplicitEnvironmentSelection(value);
+  } catch (error) {
+    throw RpcErrors.invalidParams(
+      error instanceof Error
+        ? `session.send environment is invalid: ${error.message}`
+        : "session.send environment is invalid",
+    );
   }
 }
 
@@ -1581,7 +1632,10 @@ function notifyCancelledPerspectiveTurn(input: {
     turnId: input.turnId,
     result: {
       reason: "error",
-      error: { name: "Cancelled", message: "Pending perspective turn cancelled" },
+      error: {
+        name: "Cancelled",
+        message: "Pending perspective turn cancelled",
+      },
       usage: emptyUsage(),
     },
   } satisfies SessionCompletePayload);
@@ -1625,7 +1679,11 @@ function notifyPerspectiveComplete(
     result,
   } satisfies SessionCompletePayload;
   if (input.broadcast) {
-    input.broadcast(input.conversationId, SESSION_NOTIFICATIONS.complete, payload);
+    input.broadcast(
+      input.conversationId,
+      SESSION_NOTIFICATIONS.complete,
+      payload,
+    );
   } else {
     input.connection.notify(SESSION_NOTIFICATIONS.complete, payload);
   }
@@ -1656,7 +1714,9 @@ function formatPerspectiveStage(stage: string): string {
   }
 }
 
-function normalizeSessionInput(params: SessionSendParams): UserTurnInput | null {
+function normalizeSessionInput(
+  params: SessionSendParams,
+): UserTurnInput | null {
   const hasText = hasProvidedSessionInput(params, "text");
   const hasInput = hasProvidedSessionInput(params, "input");
 
@@ -1685,19 +1745,27 @@ function normalizeSessionEngage(value: unknown): SessionSendEngage | undefined {
   }
   const engage = value as { kind?: unknown; question?: unknown };
   if (engage.kind !== "perspectives") {
-    throw RpcErrors.invalidParams("session.send 'engage.kind' is not supported");
+    throw RpcErrors.invalidParams(
+      "session.send 'engage.kind' is not supported",
+    );
   }
   if (typeof engage.question !== "string") {
-    throw RpcErrors.invalidParams("session.send 'engage.question' must be a string");
+    throw RpcErrors.invalidParams(
+      "session.send 'engage.question' must be a string",
+    );
   }
   const question = engage.question.trim();
   if (question.length === 0) {
-    throw RpcErrors.invalidParams("session.send 'engage.question' must not be empty");
+    throw RpcErrors.invalidParams(
+      "session.send 'engage.question' must not be empty",
+    );
   }
   return { kind: "perspectives", question };
 }
 
-function normalizeSurfaceCapabilities(value: unknown): SessionSurfaceCapabilities {
+function normalizeSurfaceCapabilities(
+  value: unknown,
+): SessionSurfaceCapabilities {
   if (value === undefined) return { postTurnControl: false };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw RpcErrors.invalidParams(
@@ -1714,7 +1782,10 @@ function hasProvidedSessionInput(
   params: SessionSendParams,
   key: "text" | "input",
 ): boolean {
-  return Object.prototype.hasOwnProperty.call(params, key) && params[key] !== undefined;
+  return (
+    Object.prototype.hasOwnProperty.call(params, key) &&
+    params[key] !== undefined
+  );
 }
 
 // ─── session.list ───
@@ -1818,7 +1889,9 @@ export function buildSessionHistoryMethod(): MethodEntry {
       const params = (rawParams ?? {}) as SessionHistoryParams;
       const id = params.conversationId ?? params.sessionId;
       if (typeof id !== "string") {
-        throw RpcErrors.invalidParams("session.history requires 'conversationId'");
+        throw RpcErrors.invalidParams(
+          "session.history requires 'conversationId'",
+        );
       }
       // limit / before 严格校验——坏 limit(字符串 / 非正数)会让分页判定
       // 失真甚至退化为无界读取;接入面统一后 RPC 契约必须 fail-fast。
@@ -1847,7 +1920,10 @@ export function buildSessionHistoryMethod(): MethodEntry {
       }
       const directory = requireDirectory(ctx.server);
       return directory.readRunsReverse(id, {
-        limit: Math.min(params.limit ?? HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT),
+        limit: Math.min(
+          params.limit ?? HISTORY_DEFAULT_LIMIT,
+          HISTORY_MAX_LIMIT,
+        ),
         before: params.before,
       });
     },
@@ -1868,10 +1944,14 @@ export function buildSessionRenameMethod(): MethodEntry {
     async handler(rawParams, ctx) {
       const params = (rawParams ?? {}) as SessionRenameParams;
       if (typeof params.conversationId !== "string") {
-        throw RpcErrors.invalidParams("session.rename requires 'conversationId'");
+        throw RpcErrors.invalidParams(
+          "session.rename requires 'conversationId'",
+        );
       }
       if (typeof params.name !== "string" || params.name.trim().length === 0) {
-        throw RpcErrors.invalidParams("session.rename requires non-empty 'name'");
+        throw RpcErrors.invalidParams(
+          "session.rename requires non-empty 'name'",
+        );
       }
       const directory = requireDirectory(ctx.server);
       const renamed = await directory.rename(
@@ -1883,11 +1963,15 @@ export function buildSessionRenameMethod(): MethodEntry {
       }
       // 会话级变更组播——observer 名册在 conversation 身份层,因此已落盘但
       // 未激活 runtime 的当前对话也能收到 run 外变更。
-      ctx.server.sessionBroadcast?.(params.conversationId, SESSION_NOTIFICATIONS.changed, {
-        conversationId: params.conversationId,
-        change: "renamed",
-        name: renamed.name,
-      } satisfies SessionChangedPayload);
+      ctx.server.sessionBroadcast?.(
+        params.conversationId,
+        SESSION_NOTIFICATIONS.changed,
+        {
+          conversationId: params.conversationId,
+          change: "renamed",
+          name: renamed.name,
+        } satisfies SessionChangedPayload,
+      );
       // 返回入参全域键——目录契约返回库内身份(场景对话是 localId),
       // 全域键(ws: 前缀)由 RPC 层保持,断键即断静态归属路由
       return {
@@ -1916,7 +2000,9 @@ export function buildSessionAbortMethod(): MethodEntry {
       const params = (rawParams ?? {}) as SessionAbortParams;
       const id = params.conversationId ?? params.sessionId;
       if (typeof id !== "string") {
-        throw RpcErrors.invalidParams("session.abort requires 'conversationId'");
+        throw RpcErrors.invalidParams(
+          "session.abort requires 'conversationId'",
+        );
       }
       const manager = requireConversations(ctx.server);
       const hasRequestId = params.requestId !== undefined;
@@ -1940,7 +2026,9 @@ export function buildSessionAbortMethod(): MethodEntry {
         (hasRequestId && !isProtocolIdentifier(params.requestId)) ||
         (hasRunId && !isProtocolIdentifier(params.runId))
       ) {
-        throw RpcErrors.invalidParams("session.abort control identity is invalid");
+        throw RpcErrors.invalidParams(
+          "session.abort control identity is invalid",
+        );
       }
       const abortReason = {
         kind: "user-cancel" as const,
@@ -2046,7 +2134,8 @@ function parseSessionResolveParams(raw: unknown): {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw RpcErrors.invalidParams("session.resolve params must be an object");
   }
-  const value = raw as unknown as SessionResolveParams & Record<string, unknown>;
+  const value = raw as unknown as SessionResolveParams &
+    Record<string, unknown>;
   const fields = [
     "requestId",
     "conversationId",
@@ -2076,14 +2165,18 @@ function parseSessionResolveParams(raw: unknown): {
   return value as ReturnType<typeof parseSessionResolveParams>;
 }
 
-function authenticatedConversationPrincipal(ctx: Parameters<MethodEntry["handler"]>[1]) {
+function authenticatedConversationPrincipal(
+  ctx: Parameters<MethodEntry["handler"]>[1],
+) {
   const surfacePrincipal = rpcSurfacePrincipal(ctx.connection);
   const connectionId = String(ctx.connection.id);
   if (
     !isProtocolIdentifier(surfacePrincipal) ||
     !isProtocolIdentifier(connectionId)
   ) {
-    throw RpcErrors.invalidParams("authenticated conversation identity is invalid");
+    throw RpcErrors.invalidParams(
+      "authenticated conversation identity is invalid",
+    );
   }
   return requireConversations(ctx.server).durableControlPrincipal({
     surfacePrincipal,
@@ -2108,7 +2201,9 @@ export function buildSessionDeleteMethod(): MethodEntry {
       const params = (rawParams ?? {}) as SessionDeleteParams;
       const id = params.conversationId ?? params.sessionId;
       if (typeof id !== "string") {
-        throw RpcErrors.invalidParams("session.delete requires 'conversationId'");
+        throw RpcErrors.invalidParams(
+          "session.delete requires 'conversationId'",
+        );
       }
       const manager = requireConversations(ctx.server);
       const requestId = lifecycleRequestId(
@@ -2183,7 +2278,10 @@ export function buildSessionDeleteMethod(): MethodEntry {
         try {
           await ctx.server.advancement?.removeConversationData(id);
         } catch (err) {
-          console.error("[session.delete] advancement data removal failed:", err);
+          console.error(
+            "[session.delete] advancement data removal failed:",
+            err,
+          );
         }
       }
     },
@@ -2270,7 +2368,9 @@ export function buildSessionClearMethod(): MethodEntry {
     async handler(rawParams, ctx): Promise<SessionClearResult> {
       const params = (rawParams ?? {}) as SessionClearParams;
       if (typeof params.conversationId !== "string") {
-        throw RpcErrors.invalidParams("session.clear requires 'conversationId'");
+        throw RpcErrors.invalidParams(
+          "session.clear requires 'conversationId'",
+        );
       }
       const id = params.conversationId;
       const manager = requireConversations(ctx.server);
@@ -2295,7 +2395,7 @@ export function buildSessionClearMethod(): MethodEntry {
               mutation: { kind: "window-op", op: "clear" },
               principal: durableControl.principal,
               conversationExists: async () =>
-                manager.has(id) || await directory.exists(id),
+                manager.has(id) || (await directory.exists(id)),
             });
             const revision = requireDurableLifecycleRevision(
               write,
@@ -2368,9 +2468,7 @@ export function buildSessionCompactMethod(): MethodEntry {
         );
       }
       if (result.status === "not-found") {
-        throw RpcErrors.notFound(
-          `Session not found: ${conversationId}`,
-        );
+        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
       }
       if (result.status === "unsupported") {
         throw new RpcAppError(
@@ -2654,7 +2752,9 @@ export function buildSessionResumeMethod(): MethodEntry {
     async handler(rawParams, ctx): Promise<SessionResumeResult> {
       const params = (rawParams ?? {}) as SessionResumeParams;
       if (typeof params.conversationId !== "string") {
-        throw RpcErrors.invalidParams("session.resume requires 'conversationId'");
+        throw RpcErrors.invalidParams(
+          "session.resume requires 'conversationId'",
+        );
       }
       const directory = requireDirectory(ctx.server);
       const touched = await directory.touch(params.conversationId);
@@ -2800,7 +2900,9 @@ function parseRubricPersistence(
     }
     return { kind: "update-existing", rubricId: value.rubricId };
   }
-  throw RpcErrors.invalidParams(`${method} has invalid 'rubricPersistence.kind'`);
+  throw RpcErrors.invalidParams(
+    `${method} has invalid 'rubricPersistence.kind'`,
+  );
 }
 
 export async function loadAdvancementState(

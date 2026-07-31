@@ -528,6 +528,12 @@ interface AssignedProjection {
   acked: boolean;
 }
 
+interface PendingLifecycleProjection {
+  readonly mutation: "clear" | "delete";
+  readonly domainRevision: number;
+  readonly requestId: string;
+}
+
 interface RunProjection {
   readonly conversationId: string;
   domainRevision: number;
@@ -546,7 +552,7 @@ interface RunProjection {
   >;
   readonly pendingLifecycleProjections: Map<
     number,
-    Extract<ConversationRunJournalRecord, { t: "session-lifecycle" }>
+    PendingLifecycleProjection
   >;
   readonly projectedLifecycleRevisions: Set<number>;
   readonly admittedByRun: Map<string, AdmittedProjection>;
@@ -1247,7 +1253,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (replay) {
         if (
           replay.sceneId !== input.sceneId ||
-          replay.operation === "delete"
+          replay.operation === "delete" ||
+          replay.lastActiveAt !== input.at
         ) {
           throw corruptRunJournal(
             "Session activity request is already bound to another mutation",
@@ -1309,7 +1316,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (replay) {
         if (
           replay.operation !== "delete" ||
-          replay.sceneId !== input.sceneId
+          replay.sceneId !== input.sceneId ||
+          replay.lastActiveAt !== input.at
         ) {
           throw corruptRunJournal(
             "Session deletion request is already bound to another mutation",
@@ -1327,9 +1335,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return { kind: "return", value: undefined };
       }
       if (state.deleted) {
-        throw corruptRunJournal(
-          "Workscene conversation was deleted by another request",
-        );
+        return {
+          kind: "return",
+          value: {
+            revision: state.sessionMeta.domainRevision,
+            at: state.sessionMeta.lastActiveAt,
+          },
+        };
       }
       const domainRevision = state.domainRevision + 1;
       const meta: Extract<
@@ -1357,7 +1369,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   ): Promise<ConversationLifecycleProjectionInput | undefined> {
     assertIdentifier(requestId, "Session lifecycle request id");
     return this.#select((state) => {
-      const record = state.lifecycleByRequest.get(requestId);
+      const lifecycle = state.lifecycleByRequest.get(requestId);
+      const sessionMeta = state.sessionMetaByRequest.get(requestId);
+      const record: PendingLifecycleProjection | undefined =
+        lifecycle ??
+        (sessionMeta?.operation === "delete"
+          ? {
+              mutation: "delete",
+              domainRevision: sessionMeta.domainRevision,
+              requestId: sessionMeta.requestId,
+            }
+          : undefined);
       return record
         ? {
             conversationId: this.#conversationId,
@@ -1376,7 +1398,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const transaction = await this.#transact<boolean>((state) => {
       const pending = state.pendingLifecycleProjections.get(input.domainRevision);
       if (!pending) {
-        const durable = state.lifecycleByRequest.get(input.requestId);
+        const lifecycle = state.lifecycleByRequest.get(input.requestId);
+        const sessionMeta = state.sessionMetaByRequest.get(input.requestId);
+        const durable: PendingLifecycleProjection | undefined =
+          lifecycle ??
+          (sessionMeta?.operation === "delete"
+            ? {
+                mutation: "delete",
+                domainRevision: sessionMeta.domainRevision,
+                requestId: sessionMeta.requestId,
+              }
+            : undefined);
         if (
           durable?.domainRevision === input.domainRevision &&
           durable.mutation === input.mutation &&
@@ -1840,6 +1872,25 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       ),
     );
     return assigned ? [await this.#materializeDispatch(assigned)] : [];
+  }
+
+  /**
+   * Returns the executor that completed the most recent committed run.
+   * This is the owner-authoritative affinity input for the next assignment;
+   * failed or merely attempted assignments never become routing preference.
+   */
+  async recentExecutorAffinity(): Promise<string | undefined> {
+    return this.#select((state) => {
+      const committed = state.commits.at(-1);
+      if (!committed) return undefined;
+      const assigned = state.assignedById.get(committed.assignmentId);
+      if (!assigned) {
+        throw corruptRunJournal(
+          "Committed conversation run has no durable assignment",
+        );
+      }
+      return assigned.record.executorId;
+    });
   }
 
   /** Inputs that are durably admitted but have no active assignment, in FIFO order. */
@@ -2403,20 +2454,32 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             };
           }
           const revision = state.domainRevision + 1;
+          const scope = parseConversationId(this.#conversationId).scope;
+          const authorityEntries =
+            mutation === "delete" && scope.kind === "workscene"
+              ? worksceneSessionMetaEntries(this.#conversationId, {
+                  t: "session-meta",
+                  operation: "delete",
+                  domainRevision: revision,
+                  requestId: context.canonicalRequestId,
+                  sceneId: scope.sceneId,
+                  lastActiveAt: context.authorityPrefix.at,
+                })
+              : [
+                  runRecord(this.#conversationId, {
+                    t: "session-lifecycle",
+                    mutation,
+                    domainRevision: revision,
+                    requestId: context.canonicalRequestId,
+                  }),
+                ];
           return {
             result: {
               v: 1,
               status: "ok",
               body: { t: "session-write", revision },
             },
-            authorityEntries: [
-              runRecord(this.#conversationId, {
-                t: "session-lifecycle",
-                mutation,
-                domainRevision: revision,
-                requestId: context.canonicalRequestId,
-              }),
-            ],
+            authorityEntries,
           };
         }
         if (body.t === "cancel") {
@@ -5067,7 +5130,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           (body.operation === "create" && current !== undefined) ||
           (body.operation !== "create" &&
             (!current || current.sceneId !== body.sceneId)) ||
-          (body.operation !== "delete" && state.deleted)
+          (body.operation !== "delete" && state.deleted) ||
+          (current !== undefined &&
+            Date.parse(body.lastActiveAt) < Date.parse(current.lastActiveAt))
         ) {
           throw corruptRunJournal(
             "Session metadata transition is not the unique next owner mutation",
@@ -5087,7 +5152,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.domainRevision = body.domainRevision;
         state.sessionMeta = body;
         state.sessionMetaByRequest.set(body.requestId, body);
-        if (body.operation === "delete") state.deleted = true;
+        if (body.operation === "delete") {
+          state.deleted = true;
+          state.pendingLifecycleProjections.set(body.domainRevision, {
+            mutation: "delete",
+            domainRevision: body.domainRevision,
+            requestId: body.requestId,
+          });
+        }
         return state;
       }
       case "session-lifecycle": {
@@ -8846,7 +8918,7 @@ function worksceneSessionMetaEntries(
   conversationId: string,
   meta: Extract<ConversationRunJournalRecord, { t: "session-meta" }>,
 ): LogicalRecord<unknown>[] {
-  const operation = meta.operation === "delete" ? "tombstone" : "put";
+  const operation = meta.operation === "delete" ? "delete" : "upsert";
   return [
     runRecord(conversationId, meta),
     {
@@ -8857,7 +8929,7 @@ function worksceneSessionMetaEntries(
         conversationId,
         sceneId: meta.sceneId,
         sessionRevision: meta.domainRevision,
-        at: meta.lastActiveAt,
+        lastActiveAt: meta.lastActiveAt,
       } satisfies Extract<
         SessionInternalRecord,
         { kind: "session-activity" }
@@ -8873,11 +8945,11 @@ function envelopeContainsSessionActivity(
 ): boolean {
   const expected = {
     kind: "session-activity",
-    operation: meta.operation === "delete" ? "tombstone" : "put",
+    operation: meta.operation === "delete" ? "delete" : "upsert",
     conversationId,
     sceneId: meta.sceneId,
     sessionRevision: meta.domainRevision,
-    at: meta.lastActiveAt,
+    lastActiveAt: meta.lastActiveAt,
   };
   return envelope.entries.some(
     (entry) =>

@@ -260,6 +260,7 @@ export async function* runTurnWithCommit(
   input: UserTurnInputLike,
   options?: RunTurnOptions,
   hooks?: RunTurnHooks,
+  environment?: ExplicitEnvironmentSelection,
 ): AsyncGenerator<AgentYield, RunResult> {
   const session = manager.getSession(conversationId);
   if (!session) {
@@ -282,6 +283,7 @@ export async function* runTurnWithCommit(
       baseRevision: session.turnCount,
       runtime: session.runtime,
       invocation: agentInvocation(options),
+      ...(environment ? { environment: structuredClone(environment) } : {}),
       ...(options ? { options } : {}),
       ...(hooks ? { hooks } : {}),
     });

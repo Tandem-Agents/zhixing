@@ -214,7 +214,7 @@ const meshSurface: AccessSurface = {
         ? {
             executor: {
               ledger: ctx.conversationProtocol.executorLedger(),
-              runtimeFactory: ctx.runtimeFactory,
+              runtimeFactory: ctx.assignmentRuntimeFactory,
               interactions: ctx.durableInteractions,
               dataPlane: ctx.executorDataPlane!,
               InProcessAssignmentSubmission:
@@ -373,7 +373,7 @@ const conversationSurface: AccessSurface = {
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule.InProcessAssignmentSubmission,
               dataPlaneTickets: ctx.executorDataPlane!.tickets,
-              runtimeFactory: ctx.runtimeFactory,
+              runtimeFactory: ctx.assignmentRuntimeFactory,
               createStream: (input) =>
                 ctx.executorDataPlane!.createStream(input),
             },
@@ -506,6 +506,10 @@ const conversationSurface: AccessSurface = {
         await s.transcript.init(s.localId);
       },
       ensureConversation: async (conversationId) => {
+        if (parseConversationId(conversationId).scope.kind === "workscene") {
+          await ctx.conversationDirectory.ensureTranscript(conversationId);
+          return;
+        }
         await ctx.conversationDirectory.ensure(conversationId);
       },
       appendRun: async (conversationId, input) => {

@@ -8037,8 +8037,14 @@ describe("conversation assignment protocol", () => {
     await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(committed.unsigned));
     const bundle = await sealDefaultBundle(committed.ledger);
     await committed.journal.submitBundle(bundle, submissionContext(committed.unsigned));
+    await expect(committed.journal.recentExecutorAffinity()).resolves.toBe(
+      EXECUTOR_ID,
+    );
     counted = new CountingArtifactStore(committed.artifacts);
     const coldCommitted = reopenJournal(committed, { artifacts: counted });
+    await expect(coldCommitted.recentExecutorAffinity()).resolves.toBe(
+      EXECUTOR_ID,
+    );
     counted.resetReads();
     await expect(
       coldCommitted.submitBundle(bundle, submissionContext(committed.unsigned)),

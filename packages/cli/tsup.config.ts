@@ -1,7 +1,11 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: {
+    index: "src/index.ts",
+    "s7-terminal-performance-probe":
+      "src/serve/s7-terminal-performance-probe.ts",
+  },
   format: ["esm"],
   dts: false,
   sourcemap: true,

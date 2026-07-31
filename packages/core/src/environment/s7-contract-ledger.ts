@@ -19,6 +19,14 @@ export interface S7DurableContractEntry {
   readonly variants: readonly string[];
   readonly rejectionBranches: readonly string[];
   readonly corruptionVectors: readonly string[];
+  readonly executableEvidence: {
+    readonly producerModule: string;
+    readonly producerSymbol: string;
+    readonly recoveryModule: string;
+    readonly recoverySymbol: string;
+    readonly behaviorTestModule: string;
+    readonly behaviorTest: string;
+  };
 }
 
 /**
@@ -53,6 +61,16 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
       "non-contiguous-revision",
       "broken-deletion-confirmation",
     ],
+    executableEvidence: {
+      producerModule: "packages/core/src/workscene/global-state-adapter.ts",
+      producerSymbol: "AnchorWorksceneGlobalStateAdapter",
+      recoveryModule: "packages/core/src/workscene/global-state-adapter.ts",
+      recoverySymbol: "recoverPendingDeletions",
+      behaviorTestModule:
+        "packages/core/src/workscene/global-state-adapter.test.ts",
+      behaviorTest:
+        "redrives the committed deletion until cleanup and confirmation converge",
+    },
   },
   {
     recordFamily: "workspace-binding",
@@ -82,6 +100,16 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
       "invalid-record",
       "broken-log-tail",
     ],
+    executableEvidence: {
+      producerModule: "packages/core/src/environment/workspace-bindings.ts",
+      producerSymbol: "WorkspaceBindingService",
+      recoveryModule: "packages/core/src/environment/workspace-bindings.ts",
+      recoverySymbol: "initialize",
+      behaviorTestModule:
+        "packages/core/src/environment/workspace-bindings.test.ts",
+      behaviorTest:
+        "rebuilds its projection after restart and publishes path-free capability",
+    },
   },
   {
     recordFamily: "workspace-binding-root",
@@ -102,6 +130,18 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
       "invalid-reset-genesis",
       "broken-generation-link",
     ],
+    executableEvidence: {
+      producerModule:
+        "packages/core/src/environment/workspace-binding-catalog.ts",
+      producerSymbol: "WorkspaceBindingCatalog",
+      recoveryModule:
+        "packages/core/src/environment/workspace-binding-catalog.ts",
+      recoverySymbol: "recover",
+      behaviorTestModule:
+        "packages/core/src/environment/workspace-binding-catalog.test.ts",
+      behaviorTest:
+        "recovers a pending committed reset after restart without the original lease",
+    },
   },
   {
     recordFamily: "workspace-probe",
@@ -121,6 +161,16 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
       "request-result-mismatch",
       "broken-replay-index",
     ],
+    executableEvidence: {
+      producerModule: "packages/core/src/environment/workspace-probe.ts",
+      producerSymbol: "WorkspaceProbeHandler",
+      recoveryModule: "packages/core/src/environment/workspace-probe.ts",
+      recoverySymbol: "startRetentionMaintenance",
+      behaviorTestModule:
+        "packages/core/src/environment/workspace-probe.test.ts",
+      behaviorTest:
+        "rebuilds durable replay state and permits exact replay after expiry",
+    },
   },
   {
     recordFamily: "session-activity",
@@ -128,17 +178,23 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
     recoveryOwner: "anchor-workscene-owner",
     resourceIdentity: "session-activity:<conversationId>",
     recoveryClass: "authority-replay",
-    variants: ["put", "tombstone"],
+    variants: ["upsert", "delete"],
     rejectionBranches: [
       "conversation-scene-mismatch",
       "non-monotonic-revision",
       "external-construction",
     ],
-    corruptionVectors: [
-      "wrong-stream",
-      "invalid-time",
-      "identity-rebinding",
-    ],
+    corruptionVectors: ["wrong-stream", "invalid-time", "identity-rebinding"],
+    executableEvidence: {
+      producerModule: "packages/owner-kernel/src/conversation-assignment.ts",
+      producerSymbol: "touchWorksceneSession",
+      recoveryModule: "packages/core/src/workscene/activity-projection.ts",
+      recoverySymbol: "IncrementalWorksceneActivityProjection",
+      behaviorTestModule:
+        "packages/owner-kernel/src/__tests__/control-admission.test.ts",
+      behaviorTest:
+        "commits metadata and activity atomically and replays exact owner requests",
+    },
   },
   {
     recordFamily: "legacy-workscene-migration",
@@ -156,8 +212,19 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
     corruptionVectors: [
       "malformed-report",
       "broken-terminal",
+      "source-pages-mismatch",
       "cutover-marker-mismatch",
     ],
+    executableEvidence: {
+      producerModule: "packages/cli/src/serve/workscene-legacy-migration.ts",
+      producerSymbol: "migrateLegacyWorkscenes",
+      recoveryModule: "packages/cli/src/serve/workscene-legacy-migration.ts",
+      recoverySymbol: "migrateLegacyWorkscenes",
+      behaviorTestModule:
+        "packages/cli/src/serve/__tests__/workscene-legacy-migration.test.ts",
+      behaviorTest:
+        "holds the legacy write fence through source recheck and makes the old write surface read-only",
+    },
   },
   {
     recordFamily: "workscene-activity-projection",
@@ -176,5 +243,15 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
       "invalid-aggregate",
       "checkpoint-mismatch",
     ],
+    executableEvidence: {
+      producerModule: "packages/core/src/workscene/activity-projection.ts",
+      producerSymbol: "IncrementalWorksceneActivityProjection",
+      recoveryModule: "packages/core/src/workscene/activity-projection.ts",
+      recoverySymbol: "rebuild",
+      behaviorTestModule:
+        "packages/core/src/workscene/global-state-adapter.test.ts",
+      behaviorTest:
+        "keeps one contribution per conversation and recomputes the scene maximum",
+    },
   },
 ] as const satisfies readonly S7DurableContractEntry[];

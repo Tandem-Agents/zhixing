@@ -14,6 +14,7 @@ import {
 import {
   LocalWorkspaceProbeAdapter,
   localEnvironmentControlSubject,
+  selectExecutorForEnvironment,
   type WorkspaceProbePort,
 } from "@zhixing/core/environment";
 import {
@@ -28,6 +29,10 @@ import {
 } from "@zhixing/core/resources";
 import type { SecureMeshConnection } from "@zhixing/mesh";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import {
+  ConversationManager,
+  runTurnWithCommit,
+} from "@zhixing/owner-kernel";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type {
   MeshServiceDefinition,
@@ -41,6 +46,10 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "./conversation-protocol-runtime.js";
+import {
+  MeshExecutionSnapshotClient,
+  registerExecutionSnapshotMeshService,
+} from "./execution-snapshot-mesh.js";
 import {
   EnvironmentProbeMeshClient,
   registerEnvironmentProbeMeshService,
@@ -76,6 +85,10 @@ describe("S7 environment/workscene production conformance", () => {
       probe: "directory",
       pathFreeWire: true,
       ownerSession: true,
+      ownerExit: true,
+      runtimeActivated: true,
+      queued: "workspace-unavailable",
+      meshAuthorize: true,
       activityMerged: true,
     });
   }, 120_000);
@@ -170,9 +183,22 @@ async function runChain(topology: "in-process" | "mesh") {
       },
     );
 
+    const mesh =
+      topology === "mesh"
+        ? createMeshEnvironmentAdapters({
+            probe: executor.workspaceProbe!,
+            publisher: {
+              currentCapability: executor.currentExecutorSnapshot,
+              installPermission: executor.installPermissionSnapshot,
+            },
+            executorVerifier: executor.verifier,
+            ownerVerifier: anchor.verifier,
+            ownerDeviceId: anchor.deviceId,
+          })
+        : undefined;
     if (topology === "mesh") {
       await anchor.acceptExecutorSnapshot(
-        await executor.currentExecutorSnapshot(),
+        await mesh!.snapshots.currentCapability(),
       );
     }
     const created = await anchor.globalState!.mutate(
@@ -213,7 +239,7 @@ async function runChain(topology: "in-process" | "mesh") {
                 executorId: executor.executorId,
                 deviceId: executor.deviceId,
                 synchronizePermission: (snapshot) =>
-                  executor!.installPermissionSnapshot(snapshot),
+                  mesh!.snapshots.installPermission(snapshot),
               },
             ],
           }
@@ -257,23 +283,66 @@ async function runChain(topology: "in-process" | "mesh") {
     const probePort =
       topology === "in-process"
         ? new LocalWorkspaceProbeAdapter(executor.workspaceProbe!)
-        : meshProbePort(
-            executor.workspaceProbe!,
-            executor.identityKey,
-            executor.verifier,
-            anchor.verifier,
-            anchor.deviceId,
-          );
+        : mesh!.probe;
     const probe = anchor.environmentProbeOwner!.accept(
       probeRequest,
       await probePort.probe(probeRequest),
       executor.executorId,
     );
+    let unauthorizedProbeRejected = topology === "in-process";
+    if (mesh) {
+      try {
+        await mesh.unauthorizedProbe.probe(probeRequest);
+      } catch {
+        unauthorizedProbeRejected = true;
+      }
+    }
+    let runtimeCreates = 0;
+    const conversationManager = new ConversationManager(
+      {
+        async create(sessionId) {
+          runtimeCreates += 1;
+          return {
+            sessionId,
+            async *run(messages) {
+              yield { type: "text_delta" as const, text: "ready" };
+              yield { type: "text_delta" as const, text: "." };
+              const assistant = {
+                role: "assistant" as const,
+                content: [{ type: "text" as const, text: "ready." }],
+              };
+              return {
+                agentResult: {
+                  reason: "completed" as const,
+                  message: assistant,
+                  usage: { inputTokens: 1, outputTokens: 1 },
+                },
+                runRecord: {
+                  timestamp: NOW,
+                  messages: [messages.at(-1)!, assistant],
+                  usage: { inputTokens: 1, outputTokens: 1 },
+                  source: "interactive" as const,
+                },
+                newMessages: [assistant],
+                durationMs: 1,
+              };
+            },
+            abort() {
+              return false;
+            },
+            async dispose() {},
+          };
+        },
+      },
+      {
+        idleCheckIntervalMs: 60_000,
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 60_000,
+      },
+    );
     const conversationProtocol = new ConversationProtocolRuntime({
       authority: anchor,
-      manager: () => {
-        throw new Error("The conformance session never activates a runtime");
-      },
+      manager: () => conversationManager,
       interactions: new DurableConversationInteractionObserver(),
       clock: () => NOW,
     });
@@ -284,7 +353,7 @@ async function runChain(topology: "in-process" | "mesh") {
       ),
     });
     const sessionOwner = new WorksceneSessionOwner({
-      conversations: () => null,
+      conversations: () => conversationManager,
       directory: conversationDirectory,
       authority: () => conversationProtocol,
       runCleanupStep: (_resourceIdentity, operation) => operation(),
@@ -294,7 +363,23 @@ async function runChain(topology: "in-process" | "mesh") {
       `surface-${topology}`,
       {
         requestId: `enter-${topology}`,
+        recordActivity: false,
       },
+    );
+    let runtimeFrames = 0;
+    for await (const _frame of runTurnWithCommit(
+      conversationManager,
+      ownerConversationId,
+      "conformance",
+    )) {
+      runtimeFrames += 1;
+    }
+    await sessionOwner.exit(
+      created.scene.id,
+      ownerConversationId,
+      `surface-${topology}`,
+      `exit-${topology}`,
+      new Date().toISOString(),
     );
     let scene: typeof created.scene | null = null;
     await expect
@@ -326,6 +411,22 @@ async function runChain(topology: "in-process" | "mesh") {
       )
       .toBe(true);
     const snapshot = await executor.currentExecutorSnapshot();
+    const queued = selectExecutorForEnvironment(
+      {
+        workspace: {
+          deviceId: executor.deviceId,
+          bindingRef: "workspace:missing",
+        },
+      },
+      [
+        {
+          executorId: executor.executorId,
+          deviceId: executor.deviceId,
+          descriptor: snapshot.descriptor,
+        },
+      ],
+    );
+    await conversationManager.disposeAll();
 
     return {
       bindingPublished: snapshot.descriptor.workspaces.some(
@@ -353,6 +454,16 @@ async function runChain(topology: "in-process" | "mesh") {
           probe,
         }).includes(workspaceRoot),
       ownerSession: ownerConversationId.startsWith(`ws:${created.scene.id}:`),
+      ownerExit:
+        conversationManager.getObserverCount(ownerConversationId) === 0,
+      runtimeActivated: runtimeCreates === 1 && runtimeFrames === 2,
+      queued: queued.kind === "queued" ? queued.reason : queued.kind,
+      meshAuthorize:
+        topology === "in-process" ||
+        (mesh!.calls.get("environment.probe") === 2 &&
+          mesh!.calls.get("execution.snapshot") === 2 &&
+          mesh!.authorizationChecks === 4 &&
+          unauthorizedProbeRejected),
       activityMerged:
         !!scene &&
         Date.parse(scene.lastActiveAt) > Date.parse(created.scene.createdAt),
@@ -366,39 +477,81 @@ async function runChain(topology: "in-process" | "mesh") {
   }
 }
 
-function meshProbePort(
-  probe: WorkspaceProbePort,
-  executorSigner: DeviceKey,
+function createMeshEnvironmentAdapters(input: {
+  probe: WorkspaceProbePort;
+  publisher: {
+    currentCapability(): ReturnType<
+      Awaited<ReturnType<typeof setupAuthorityRuntime>>["currentExecutorSnapshot"]
+    >;
+    installPermission(
+      snapshot: Parameters<
+        Awaited<ReturnType<typeof setupAuthorityRuntime>>["installPermissionSnapshot"]
+      >[0],
+    ): ReturnType<
+      Awaited<ReturnType<typeof setupAuthorityRuntime>>["installPermissionSnapshot"]
+    >;
+  };
   executorVerifier: ProtocolSignatureVerifier,
   ownerVerifier: ProtocolSignatureVerifier,
   ownerDeviceId: string,
-): WorkspaceProbePort {
-  let definition: MeshServiceDefinition | undefined;
+}) {
+  const definitions = new Map<string, MeshServiceDefinition>();
+  const calls = new Map<string, number>();
+  let authorizationChecks = 0;
   const registry = {
-    register(_serviceId: string, next: MeshServiceDefinition) {
-      definition = next;
-      return () => {};
+    register(serviceId: string, definition: MeshServiceDefinition) {
+      definitions.set(serviceId, definition);
+      return () => definitions.delete(serviceId);
     },
   } as MeshServiceRegistry;
   registerEnvironmentProbeMeshService(
     registry,
-    probe,
-    executorVerifier,
-    (deviceId) => deviceId === ownerDeviceId,
+    input.probe,
+    input.executorVerifier,
+    (deviceId) => deviceId === input.ownerDeviceId,
   );
-  const connection = {
-    peer: { deviceId: ownerDeviceId, publicKey: "test-public-key" },
-  } as unknown as SecureMeshConnection;
-  const client: MeshServiceClient = {
-    request(_serviceId, payload, signal) {
-      return definition!.handler(
-        payload,
-        connection,
-        signal ?? new AbortController().signal,
-      );
+  registerExecutionSnapshotMeshService(
+    registry,
+    input.publisher,
+    (deviceId) => deviceId === input.ownerDeviceId,
+    input.executorVerifier,
+  );
+  const clientFor = (peerDeviceId: string): MeshServiceClient => {
+    const connection = {
+      peer: { deviceId: peerDeviceId, publicKey: "test-public-key" },
+    } as unknown as SecureMeshConnection;
+    return {
+      request(serviceId, payload, signal) {
+        const definition = definitions.get(serviceId);
+        if (!definition) {
+          throw new Error(`S7 mesh service is unavailable: ${serviceId}`);
+        }
+        calls.set(serviceId, (calls.get(serviceId) ?? 0) + 1);
+        authorizationChecks += 1;
+        if (definition.authorize && !definition.authorize(connection)) {
+          throw new Error(`S7 mesh service rejected the owner: ${serviceId}`);
+        }
+        return definition.handler(
+          payload,
+          connection,
+          signal ?? new AbortController().signal,
+        );
+      },
+    };
+  };
+  const client = clientFor(input.ownerDeviceId);
+  return {
+    probe: new EnvironmentProbeMeshClient(client, input.ownerVerifier),
+    unauthorizedProbe: new EnvironmentProbeMeshClient(
+      clientFor("device:unauthorized"),
+      input.ownerVerifier,
+    ),
+    snapshots: new MeshExecutionSnapshotClient(client, input.ownerVerifier),
+    calls,
+    get authorizationChecks() {
+      return authorizationChecks;
     },
   };
-  return new EnvironmentProbeMeshClient(client, ownerVerifier);
 }
 
 function rootLease(

@@ -7,11 +7,7 @@
  * 纯函数派生(power 装配 / per-scope 持久化路由)。
  */
 
-import type {
-  LocalWorkspaceBinding,
-  WorksceneDto,
-  WorkspaceBindingResetReceipt,
-} from "@zhixing/core/contracts";
+import type { WorksceneDto } from "@zhixing/core/contracts";
 
 export class WorksceneInputError extends Error {
   readonly code = "WORKSCENE_INPUT";
@@ -33,6 +29,8 @@ export interface WorksceneDirectoryEnterResult {
 }
 
 export interface WorksceneDirectory {
+  /** Resume host-owned deletion obligations before serving mutations. */
+  recover(): Promise<void>;
   list(): Promise<WorksceneDto[]>;
   get(id: string): Promise<WorksceneDto | null>;
   create(
@@ -76,48 +74,13 @@ export interface WorksceneDirectory {
     observerId: string,
     opts?: { recordActivity?: boolean; requestId?: string },
   ): Promise<WorksceneDirectoryEnterResult | null>;
-  /**
-   * Host-local path handoff. Only an opaque one-time token may reach RPC;
-   * the raw path is read from the target device's private local handoff.
-   */
-  authorizeLocalWorkspaceTransfer?(
-    token: string,
-  ): Promise<
-    LocalWorkspaceBinding & {
-      deviceId: string;
-    }
-  >;
-  /** 本机可信设置面；RPC 适配器只能在 loopback 连接上调用。 */
-  localWorkspaceStatus?(): Promise<{
-    state: "healthy" | "degraded";
-    catalogGeneration: string;
-    reason?: string;
-    resetImpact?: string;
-  }>;
-  listLocalWorkspaces?(): Promise<LocalWorkspaceBinding[]>;
-  renameLocalWorkspace?(input: {
-    bindingRef: string;
-    displayName: string;
-    expectedRevision: number;
-    requestId: string;
-  }): Promise<LocalWorkspaceBinding>;
-  repathLocalWorkspaceTransfer?(input: {
-    bindingRef: string;
-    expectedRevision: number;
-    transferToken: string;
-  }): Promise<LocalWorkspaceBinding>;
-  removeLocalWorkspace?(input: {
-    bindingRef: string;
-    expectedRevision: number;
-    requestId: string;
-  }): Promise<void>;
-  resetLocalWorkspaceCatalog?(input: {
-    expectedCatalogGeneration: string;
-    requestId: string;
-    confirmationToken: string;
-    confirmationIssuedAt: string;
-    confirmedImpact: string;
-  }): Promise<WorkspaceBindingResetReceipt>;
+  /** 释放接入面 observer，并由同一会话 owner 提交退出活动事实。 */
+  exitScene(
+    sceneId: string,
+    conversationId: string,
+    observerId: string,
+    requestId: string,
+  ): Promise<void>;
   workspaceCatalog?(): Promise<
     readonly {
       deviceId: string;
