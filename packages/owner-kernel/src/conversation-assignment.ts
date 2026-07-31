@@ -1253,8 +1253,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (replay) {
         if (
           replay.sceneId !== input.sceneId ||
-          replay.operation === "delete" ||
-          replay.lastActiveAt !== input.at
+          replay.operation === "delete"
         ) {
           throw corruptRunJournal(
             "Session activity request is already bound to another mutation",
@@ -1316,8 +1315,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (replay) {
         if (
           replay.operation !== "delete" ||
-          replay.sceneId !== input.sceneId ||
-          replay.lastActiveAt !== input.at
+          replay.sceneId !== input.sceneId
         ) {
           throw corruptRunJournal(
             "Session deletion request is already bound to another mutation",

@@ -7,10 +7,19 @@ import type {
   SecretStorePort,
 } from "@zhixing/core/contracts";
 import {
+  ConfirmationBroker,
   ConversationRepository,
   ShardedTranscriptStore,
   conversationsDir,
+  type AgentYield,
+  type Message,
+  type RunResult,
 } from "@zhixing/core";
+import {
+  createExecutorRole,
+  createInProcessAssignmentRuntimeFactory,
+  createInProcessRuntimeFactory,
+} from "@zhixing/executor";
 import {
   LocalWorkspaceProbeAdapter,
   localEnvironmentControlSubject,
@@ -54,7 +63,8 @@ import {
   EnvironmentProbeMeshClient,
   registerEnvironmentProbeMeshService,
 } from "./environment-probe-mesh.js";
-import { WorksceneSessionOwner } from "./workscene-session-owner.js";
+import { createWorksceneDirectory } from "./workscene-directory.js";
+import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2099-01-01T00:00:00.000Z";
@@ -115,19 +125,9 @@ async function runChain(topology: "in-process" | "mesh") {
           platform: "headless",
           enrolledAt: NOW,
         });
-  const arbiter = new DefaultDeviceCapacityArbiter({
-    policy: createDefaultDeviceCapacityPolicy(),
-    probe: () => ({
-      cpuBusyRatio: 0,
-      availableMemoryBytes: 16 * 1024 * 1024 * 1024,
-      processRssBytes: 64 * 1024 * 1024,
-      temporaryBytesAvailable: 16 * 1024 * 1024 * 1024,
-    }),
-  });
-  const capacity = {
-    arbiter,
-    storage: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
-  };
+  const executorCapacity = createCapacity();
+  const anchorCapacity =
+    topology === "in-process" ? executorCapacity : createCapacity();
   const previousHome = process.env.ZHIXING_HOME;
   process.env.ZHIXING_HOME = anchorHome;
   let anchor: Awaited<ReturnType<typeof setupAuthorityRuntime>> | undefined;
@@ -144,8 +144,8 @@ async function runChain(topology: "in-process" | "mesh") {
       executorReadiness: READINESS,
       enableAnchor: topology === "in-process",
       enableLocalExecutor: true,
-      deviceCapacity: capacity.arbiter,
-      storageMaintenance: capacity.storage,
+      deviceCapacity: executorCapacity.arbiter,
+      storageMaintenance: executorCapacity.storage,
       clock: () => NOW,
     });
     anchor =
@@ -160,6 +160,8 @@ async function runChain(topology: "in-process" | "mesh") {
             executorReadiness: READINESS,
             enableAnchor: true,
             enableLocalExecutor: false,
+            deviceCapacity: anchorCapacity.arbiter,
+            storageMaintenance: anchorCapacity.storage,
             clock: () => NOW,
           });
 
@@ -297,68 +299,56 @@ async function runChain(topology: "in-process" | "mesh") {
         unauthorizedProbeRejected = true;
       }
     }
-    let runtimeCreates = 0;
-    const conversationManager = new ConversationManager(
-      {
-        async create(sessionId) {
-          runtimeCreates += 1;
-          return {
-            sessionId,
-            async *run(messages) {
-              yield { type: "text_delta" as const, text: "ready" };
-              yield { type: "text_delta" as const, text: "." };
-              const assistant = {
-                role: "assistant" as const,
-                content: [{ type: "text" as const, text: "ready." }],
-              };
-              return {
-                agentResult: {
-                  reason: "completed" as const,
-                  message: assistant,
-                  usage: { inputTokens: 1, outputTokens: 1 },
-                },
-                runRecord: {
-                  timestamp: NOW,
-                  messages: [messages.at(-1)!, assistant],
-                  usage: { inputTokens: 1, outputTokens: 1 },
-                  source: "interactive" as const,
-                },
-                newMessages: [assistant],
-                durationMs: 1,
-              };
-            },
-            abort() {
-              return false;
-            },
-            async dispose() {},
-          };
-        },
+    const runtimeRoots: Array<string | null> = [];
+    const runtimeDisposals: string[] = [];
+    const executorRole = createExecutorRole({
+      async createAgentRuntime(_sessionId, environment) {
+        runtimeRoots.push(environment?.workspaceRoot ?? null);
+        return deterministicAgentRuntime((reason) => {
+          runtimeDisposals.push(reason ?? "missing");
+        }) as never;
       },
-      {
-        idleCheckIntervalMs: 60_000,
-        graceTimeoutMs: 60_000,
-        idleTimeoutMs: 60_000,
-      },
-    );
+    });
+    const ownerRuntimeFactory = createInProcessRuntimeFactory(executorRole);
+    const assignmentRuntimeFactory =
+      createInProcessAssignmentRuntimeFactory(executorRole);
+    let conversationManager: ConversationManager;
     const conversationProtocol = new ConversationProtocolRuntime({
       authority: anchor,
       manager: () => conversationManager,
       interactions: new DurableConversationInteractionObserver(),
       clock: () => NOW,
     });
+    conversationManager = new ConversationManager(
+      ownerRuntimeFactory,
+      {
+        idleCheckIntervalMs: 60_000,
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 60_000,
+      },
+    );
+    const worksceneStorageCleanup = createWorksceneStorageCleanup({
+      storageMaintenance: anchorCapacity.storage,
+    });
     const conversationDirectory = createConversationDirectory({
       repo: new ConversationRepository({ kind: "user" }),
       transcript: new ShardedTranscriptStore(
         conversationsDir({ kind: "user" }),
       ),
+      worksceneStorageCleanup,
     });
-    const sessionOwner = new WorksceneSessionOwner({
+    const worksceneDirectory = createWorksceneDirectory({
+      authority: () => anchor,
       conversations: () => conversationManager,
-      directory: conversationDirectory,
-      authority: () => conversationProtocol,
-      runCleanupStep: (_resourceIdentity, operation) => operation(),
+      conversationAuthority: () => conversationProtocol,
+      conversationDirectory,
+      worksceneStorageCleanup,
+      recoverWorksceneState: () => anchor.recoverWorksceneState(),
+      replayWorksceneMutation: (requestId) =>
+        anchor.replayWorksceneMutation(requestId),
     });
-    const ownerConversationId = await sessionOwner.enter(
+    await worksceneDirectory.recover();
+    const entered = await worksceneDirectory.enterScene(
       created.scene.id,
       `surface-${topology}`,
       {
@@ -366,6 +356,8 @@ async function runChain(topology: "in-process" | "mesh") {
         recordActivity: false,
       },
     );
+    if (!entered) throw new Error("Workscene owner did not enter the scene");
+    const ownerConversationId = entered.conversationId;
     let runtimeFrames = 0;
     for await (const _frame of runTurnWithCommit(
       conversationManager,
@@ -374,12 +366,25 @@ async function runChain(topology: "in-process" | "mesh") {
     )) {
       runtimeFrames += 1;
     }
-    await sessionOwner.exit(
+    const assignmentRuntime = await assignmentRuntimeFactory.create(
+      ownerConversationId,
+      { workspaceRoot: preflight.workspaceRoot },
+    );
+    let assignmentFrames = 0;
+    const assignmentRun = assignmentRuntime.run([
+      { role: "user", content: [{ type: "text", text: "conformance" }] },
+    ]);
+    while (true) {
+      const item = await assignmentRun.next();
+      if (item.done) break;
+      assignmentFrames += 1;
+    }
+    await assignmentRuntime.dispose();
+    await worksceneDirectory.exitScene(
       created.scene.id,
       ownerConversationId,
       `surface-${topology}`,
       `exit-${topology}`,
-      new Date().toISOString(),
     );
     let scene: typeof created.scene | null = null;
     await expect
@@ -456,7 +461,14 @@ async function runChain(topology: "in-process" | "mesh") {
       ownerSession: ownerConversationId.startsWith(`ws:${created.scene.id}:`),
       ownerExit:
         conversationManager.getObserverCount(ownerConversationId) === 0,
-      runtimeActivated: runtimeCreates === 1 && runtimeFrames === 2,
+      runtimeActivated:
+        runtimeRoots.length === 2 &&
+        runtimeRoots[0] === null &&
+        runtimeRoots[1] === workspaceRoot &&
+        runtimeFrames === 2 &&
+        assignmentFrames === 2 &&
+        runtimeDisposals.join(",") ===
+          "assignment-dispose,session-dispose",
       queued: queued.kind === "queued" ? queued.reason : queued.kind,
       meshAuthorize:
         topology === "in-process" ||
@@ -469,12 +481,81 @@ async function runChain(topology: "in-process" | "mesh") {
         Date.parse(scene.lastActiveAt) > Date.parse(created.scene.createdAt),
     };
   } finally {
-    executor?.stopStorageMaintenance();
-    if (anchor && anchor !== executor) anchor.stopStorageMaintenance();
-    if (previousHome === undefined) delete process.env.ZHIXING_HOME;
-    else process.env.ZHIXING_HOME = previousHome;
-    await rm(root, { recursive: true, force: true });
+    try {
+      await executor?.stopStorageMaintenance();
+      if (anchor && anchor !== executor) await anchor.stopStorageMaintenance();
+    } finally {
+      if (previousHome === undefined) delete process.env.ZHIXING_HOME;
+      else process.env.ZHIXING_HOME = previousHome;
+      await rm(root, { recursive: true, force: true });
+    }
   }
+}
+
+function createCapacity() {
+  const arbiter = new DefaultDeviceCapacityArbiter({
+    policy: createDefaultDeviceCapacityPolicy(),
+    probe: () => ({
+      cpuBusyRatio: 0,
+      availableMemoryBytes: 16 * 1024 * 1024 * 1024,
+      processRssBytes: 64 * 1024 * 1024,
+      temporaryBytesAvailable: 16 * 1024 * 1024 * 1024,
+    }),
+  });
+  return {
+    arbiter,
+    storage: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
+  };
+}
+
+function deterministicAgentRuntime(
+  onDispose: (reason: string | undefined) => void,
+) {
+  const confirmationBroker = new ConfirmationBroker();
+  const assistant: Message = {
+    role: "assistant",
+    content: [{ type: "text", text: "ready." }],
+  };
+  return {
+    confirmationBroker,
+    drainLifecycleDiagnostics: () => [],
+    executionPermissionRules: () => [],
+    executionProfile: () => EMPTY_PROFILE,
+    securitySnapshot: () => ({
+      contextId: { kind: "main" as const },
+      workspacePath: null,
+      permissionRules: [],
+      builtinRules: [],
+      rateLimits: [],
+      confirmations: [],
+    }),
+    async run(input: {
+      readonly messages: readonly Message[];
+      readonly onYield: (event: AgentYield) => void;
+    }): Promise<RunResult> {
+      input.onYield({ type: "text_delta", text: "ready" });
+      input.onYield({ type: "text_delta", text: "." });
+      return {
+        agentResult: {
+          reason: "completed",
+          message: assistant,
+          usage: { inputTokens: 1, outputTokens: 1 },
+        },
+        runRecord: {
+          timestamp: NOW,
+          messages: [input.messages.at(-1)!, assistant],
+          usage: { inputTokens: 1, outputTokens: 1 },
+          source: "interactive",
+        },
+        newMessages: [assistant],
+        durationMs: 1,
+      };
+    },
+    abort: () => false,
+    async dispose(reason?: string) {
+      onDispose(reason);
+    },
+  };
 }
 
 function createMeshEnvironmentAdapters(input: {

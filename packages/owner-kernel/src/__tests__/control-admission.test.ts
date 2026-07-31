@@ -1101,6 +1101,13 @@ describe("workscene session owner metadata", () => {
         at: deletedAt,
       }),
     ).resolves.toEqual({ revision: 2, at: deletedAt });
+    await expect(
+      journal.deleteWorksceneSession({
+        requestId: "delete-1",
+        sceneId: "scene-1",
+        at: "2026-07-13T08:00:01.500Z",
+      }),
+    ).resolves.toEqual({ revision: 2, at: deletedAt });
     const commits = await log.readAll();
     expect(commits).toHaveLength(2);
     expect(commits[1]!.entries).toEqual(

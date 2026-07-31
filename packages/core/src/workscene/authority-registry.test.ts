@@ -109,12 +109,15 @@ describe("AnchorWorksceneRegistry", () => {
 
   it("keeps legacy imports invisible until an exact atomic activation", async () => {
     const fixture = await createRegistry();
-    const scene = {
+    const legacyScene = {
       id: "legacy-a",
-      revision: 1,
       name: "Legacy",
       workspace: { deviceId: "device-a", bindingRef: "workspace-a" },
       createdAt: NOW,
+    };
+    const scene = {
+      ...legacyScene,
+      revision: 1,
       lastActiveAt: NOW,
     };
     await fixture.registry.applyMigration(
@@ -122,7 +125,7 @@ describe("AnchorWorksceneRegistry", () => {
         kind: "workscene-import-legacy",
         migrationId: "migration-a",
         sourceSnapshotToken: "snapshot-a",
-        scene,
+        scene: legacyScene,
       },
       { requestId: "import-a" },
     );

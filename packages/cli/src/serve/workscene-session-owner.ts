@@ -1,12 +1,11 @@
-import { rm } from "node:fs/promises";
 import {
-  getWorkSceneDir,
   parseConversationId,
   WORKSCENE_CONVERSATION_PREFIX,
   worksceneConversationId,
 } from "@zhixing/core";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { ConversationDirectory } from "@zhixing/server";
+import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 export interface WorksceneSessionOwnerOptions {
   readonly conversations: () => ConversationManager | null;
@@ -29,10 +28,7 @@ export interface WorksceneSessionOwnerOptions {
         >;
       }
     | undefined;
-  readonly runCleanupStep: <T>(
-    resourceIdentity: string,
-    operation: () => Promise<T>,
-  ) => Promise<T>;
+  readonly storageCleanup: WorksceneStorageCleanup;
 }
 
 /**
@@ -46,13 +42,13 @@ export class WorksceneSessionOwner {
   readonly #conversations: () => ConversationManager | null;
   readonly #directory: ConversationDirectory;
   readonly #authority: WorksceneSessionOwnerOptions["authority"];
-  readonly #runCleanupStep: WorksceneSessionOwnerOptions["runCleanupStep"];
+  readonly #storageCleanup: WorksceneStorageCleanup;
 
   constructor(options: WorksceneSessionOwnerOptions) {
     this.#conversations = options.conversations;
     this.#directory = options.directory;
     this.#authority = options.authority;
-    this.#runCleanupStep = options.runCleanupStep;
+    this.#storageCleanup = options.storageCleanup;
   }
 
   async enter(
@@ -151,14 +147,9 @@ export class WorksceneSessionOwner {
         requestId: `workscene-delete:${sceneId}:${conversationId}`,
         at,
       });
-      await this.#runCleanupStep(
-        `conversation:${conversationId}`,
-        () => this.#directory.remove(conversationId),
-      );
+      await this.#directory.remove(conversationId);
     }
-    await this.#runCleanupStep(`workscene:${sceneId}`, () =>
-      rm(getWorkSceneDir(sceneId), { recursive: true, force: true }),
-    );
+    await this.#storageCleanup.removeScene(sceneId);
   }
 
   async #recordAuthority(

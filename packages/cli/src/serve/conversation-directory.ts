@@ -22,6 +22,7 @@ import type {
   ConversationDirectory,
   RunsPageCursor,
 } from "@zhixing/server";
+import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 interface ScopeHandles {
   repo: IConversationRepository;
@@ -37,6 +38,7 @@ interface ConversationRepoRoute {
 export function createConversationDirectory(deps: {
   repo: ConversationRepository;
   transcript: ShardedTranscriptStore;
+  worksceneStorageCleanup: WorksceneStorageCleanup;
   /**
    * task_list 进程内 cache 的清理钩子(可选)——clear 抹掉 meta 里的
    * task_list 盘上状态,cache 与盘是同一数据的两层,在同一实现点维护一致性。
@@ -138,9 +140,17 @@ export function createConversationDirectory(deps: {
 
     async remove(id): Promise<boolean> {
       const h = handlesFor(id);
+      const { scope } = parseConversationId(id);
       const existing =
         (await h.repo.get(h.localId)) !== null ||
         (await h.transcript.exists(h.localId));
+      if (scope.kind === "workscene") {
+        await deps.worksceneStorageCleanup.removeConversation(
+          scope.sceneId,
+          h.localId,
+        );
+        return existing;
+      }
       if (!existing) return false;
       await h.repo.delete(h.localId);
       return true;

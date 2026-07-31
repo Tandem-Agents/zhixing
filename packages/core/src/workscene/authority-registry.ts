@@ -1165,10 +1165,7 @@ function validateAppliedResult(
 
 function sameWorkspace(
   left: WorksceneDto["workspace"],
-  right: Extract<
-    WorksceneWriteMutation,
-    { kind: "workscene-set-workdir" }
-  >["workspace"],
+  right: WorksceneDto["workspace"] | null,
 ): boolean {
   return (
     left?.deviceId === right?.deviceId &&

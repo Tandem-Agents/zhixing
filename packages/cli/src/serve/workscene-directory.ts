@@ -12,11 +12,6 @@ import type {
   WorkspaceProbeResult,
 } from "@zhixing/core/contracts";
 import { environmentControlSubject } from "@zhixing/core/protocol";
-import {
-  runStorageMaintenanceStep,
-  storageMaintenanceRequest,
-  type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
 import type {
   WorksceneDirectory,
   WorksceneWriteResult,
@@ -26,6 +21,7 @@ import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { ConversationDirectory } from "@zhixing/server";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { WorksceneSessionOwner } from "./workscene-session-owner.js";
+import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
 
@@ -55,7 +51,7 @@ export function createWorksceneDirectory(deps: {
   replayWorksceneMutation: (
     requestId: string,
   ) => Promise<WorksceneAppliedResult | null>;
-  storageMaintenance?: StorageMaintenanceGovernorPort;
+  worksceneStorageCleanup: WorksceneStorageCleanup;
   probeRemote?: (
     deviceId: string,
     request: Parameters<
@@ -83,17 +79,7 @@ export function createWorksceneDirectory(deps: {
       conversations: () => deps.conversations?.() ?? null,
       directory: deps.conversationDirectory,
       authority: deps.conversationAuthority,
-      runCleanupStep: (resourceIdentity, operation) =>
-        runStorageMaintenanceStep(
-          deps.storageMaintenance,
-          storageMaintenanceRequest(
-            "workscene-cleanup",
-            resourceIdentity,
-            {},
-            { obligation: "committed" },
-          ),
-          operation,
-        ),
+      storageCleanup: deps.worksceneStorageCleanup,
     });
     runtime.installWorksceneCleanup((sceneId, conversationIds) =>
       sessionOwner!.removeScene(sceneId, conversationIds),

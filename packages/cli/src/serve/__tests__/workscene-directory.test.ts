@@ -20,6 +20,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createConversationDirectory } from "../conversation-directory.js";
 import { createWorksceneDirectory } from "../workscene-directory.js";
+import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
 let originalHome: string | undefined;
 let home: string;
@@ -81,7 +82,7 @@ describe("workscene directory", () => {
     expect(await fixture.directory.get(scene.id)).toBeNull();
   });
 
-  it("creates one owner conversation and reuses it across concurrent enters", async () => {
+  it("derives one owner conversation identity and reuses it across concurrent enters", async () => {
     const fixture = await createFixture();
     const { scene } = await fixture.directory.create({
       name: "开发场景",
@@ -97,9 +98,6 @@ describe("workscene directory", () => {
     expect(third?.conversationId).toBe(first?.conversationId);
     const parsed = parseConversationId(first!.conversationId);
     expect(parsed.scope).toEqual({ kind: "workscene", sceneId: scene.id });
-    expect(
-      await new ConversationRepository(parsed.scope).list(),
-    ).toHaveLength(1);
     expect(await fixture.directory.enterScene("ghost", "surface-a")).toBeNull();
   });
 
@@ -306,11 +304,13 @@ async function createFixture(
     removeScene: (sceneId, conversationIds) =>
       cleanup(sceneId, conversationIds),
   });
+  const worksceneStorageCleanup = createWorksceneStorageCleanup();
   const conversationDirectory = createConversationDirectory({
     repo: new ConversationRepository({ kind: "user" }),
     transcript: new ShardedTranscriptStore(
       conversationsDir({ kind: "user" }),
     ),
+    worksceneStorageCleanup,
   });
   let probe: WorkspaceProbeResult["probe"] = "directory";
   const authority = {
@@ -370,6 +370,7 @@ async function createFixture(
         },
       }),
       conversationDirectory,
+      worksceneStorageCleanup,
       recoverWorksceneState: () => globalState.recoverPendingDeletions(),
       replayWorksceneMutation: (requestId) =>
         globalState.replayMutation(requestId),

@@ -82,7 +82,6 @@ import {
 } from "@zhixing/core/environment";
 import {
   AnchorWorksceneGlobalStateAdapter,
-  getWorkSceneDir,
   parseConversationId,
 } from "@zhixing/core";
 import {
@@ -520,6 +519,12 @@ export async function setupAuthorityRuntime(
       catalogGeneration: "catalog-uninitialized",
       state: "degraded" as "healthy" | "degraded",
     };
+    let latestLocalExecutorPublication:
+      | {
+          readonly snapshot: ExecutorCapabilitySnapshot;
+          readonly deviceDigest: string;
+        }
+      | undefined;
     const readinessSource = () => {
       const configured = options.executorReadiness;
       if (configured !== undefined) {
@@ -572,7 +577,10 @@ export async function setupAuthorityRuntime(
       readiness = readinessSource(),
       workspaces: CapabilityDescriptor["workspaces"] = publishedWorkspaces,
       workspaceCatalog = publishedWorkspaceCatalog,
-    ): Promise<ExecutorCapabilitySnapshot> => {
+    ): Promise<{
+      readonly snapshot: ExecutorCapabilitySnapshot;
+      readonly deviceDigest: string;
+    }> => {
       if (!versionStore) {
         throw new Error("Local executor role is not enabled on this device");
       }
@@ -652,7 +660,12 @@ export async function setupAuthorityRuntime(
         inventoryRevision: versionResolution.inventoryRevision,
       });
       capabilityDirectoryEstablished = true;
-      return snapshotUpdate.snapshot;
+      const publication = {
+        snapshot: snapshotUpdate.snapshot,
+        deviceDigest,
+      };
+      latestLocalExecutorPublication = publication;
+      return publication;
     };
     if (localExecutorEnabled) {
       if (!options.deviceCapacity) {
@@ -696,7 +709,7 @@ export async function setupAuthorityRuntime(
                 }),
               );
               return publicationQueue.run(async () => {
-                const snapshot = await publishLocalExecutorSnapshot(
+                const publication = await publishLocalExecutorSnapshot(
                   await permissionSnapshots.highWater(),
                   readinessSource(),
                   nextWorkspaces,
@@ -704,7 +717,7 @@ export async function setupAuthorityRuntime(
                 );
                 publishedWorkspaceCatalog = nextCatalog;
                 publishedWorkspaces = nextWorkspaces;
-                return snapshot.descriptor;
+                return publication.snapshot.descriptor;
               });
             },
             versionInventory: async () =>
@@ -716,7 +729,7 @@ export async function setupAuthorityRuntime(
                     publishedWorkspaces,
                   ),
                 )
-              ).inventory,
+              ).snapshot.inventory,
             clock,
           },
           recoveryRunner: new StorageMaintenanceTaskRunner(
@@ -747,21 +760,25 @@ export async function setupAuthorityRuntime(
           clock,
         })
       : undefined;
-    let worksceneCleanup = (
-      sceneId: string,
-      _conversationIds: readonly string[],
-    ) => fsp.rm(getWorkSceneDir(sceneId), { recursive: true, force: true });
+    let worksceneCleanup:
+      | ((sceneId: string, conversationIds: readonly string[]) => Promise<void>)
+      | undefined;
     worksceneGlobalState = authorityLog
       ? new AnchorWorksceneGlobalStateAdapter({
           log: authorityLog,
           anchorEpoch,
-          removeScene: (sceneId, conversationIds) =>
-            worksceneCleanup(sceneId, conversationIds),
+          removeScene: (sceneId, conversationIds) => {
+            if (!worksceneCleanup) {
+              throw new Error("Workscene cleanup owner is not installed");
+            }
+            return worksceneCleanup(sceneId, conversationIds);
+          },
           storageMaintenance: options.storageMaintenance,
           clock,
         })
       : undefined;
-    if (worksceneGlobalState && anchorEnabled) {
+    const migrationGlobalState = worksceneGlobalState;
+    if (migrationGlobalState && anchorEnabled) {
       await runInMaintenanceContext("recovery", () =>
         migrateLegacyWorkscenes({
           rootDir: path.join(
@@ -771,7 +788,7 @@ export async function setupAuthorityRuntime(
           ),
           deviceId: key.deviceId,
           anchorEpoch,
-          globalState: worksceneGlobalState,
+          globalState: migrationGlobalState,
           ...(workspaceBindings ? { bindings: workspaceBindings } : {}),
           storageMaintenance: options.storageMaintenance,
         }),
@@ -779,16 +796,26 @@ export async function setupAuthorityRuntime(
     }
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
-    ): Promise<ExecutorCapabilitySnapshot> => {
+    ): Promise<{
+      readonly snapshot: ExecutorCapabilitySnapshot;
+      readonly deviceDigest: string;
+    }> => {
       if (workspaceBindings) {
         await workspaceBindings.capabilitySnapshot();
-        const refreshed = executorCapabilities.snapshotFor(executorId);
-        if (!refreshed) {
-          throw new Error(
-            "Workspace capability publication did not establish the local executor snapshot",
-          );
-        }
-        return refreshed;
+        return publicationQueue.run(async () => {
+          const refreshed = executorCapabilities.snapshotFor(executorId);
+          if (
+            !refreshed ||
+            !latestLocalExecutorPublication ||
+            latestLocalExecutorPublication.snapshot.descriptor.revision !==
+              refreshed.descriptor.revision
+          ) {
+            throw new Error(
+              "Workspace capability publication did not establish the local executor snapshot",
+            );
+          }
+          return latestLocalExecutorPublication;
+        });
       }
       return publicationQueue.run(async () =>
         publishLocalExecutorSnapshot(
@@ -797,7 +824,8 @@ export async function setupAuthorityRuntime(
         ),
       );
     };
-    const currentExecutorSnapshot = () => refreshLocalExecutorSnapshot();
+    const currentExecutorSnapshot = async () =>
+      (await refreshLocalExecutorSnapshot()).snapshot;
     const installPermissionSnapshot = async (
       snapshot: TrustRuleSnapshot,
     ): Promise<ExecutorCapabilitySnapshot> => {
@@ -962,14 +990,14 @@ export async function setupAuthorityRuntime(
         (!environmentRequirement.workspace ||
           environmentRequirement.workspace.deviceId === key.deviceId)
       ) {
-        const localReadiness = readinessSource();
-        const target = await refreshLocalExecutorSnapshot(
+        const publication = await refreshLocalExecutorSnapshot(
           permissionPublication.highWater,
         );
+        const target = publication.snapshot;
         candidates.push({
           snapshot: target,
           deviceId: key.deviceId,
-          deviceDigest: deviceDigestFor(localReadiness),
+          deviceDigest: publication.deviceDigest,
         });
       }
       const selection = selectExecutorForEnvironment(
@@ -1297,6 +1325,9 @@ export async function setupAuthorityRuntime(
       replayWorksceneMutation: (requestId) =>
         worksceneGlobalState?.replayMutation(requestId) ?? Promise.resolve(null),
       installWorksceneCleanup: (cleanup) => {
+        if (worksceneCleanup) {
+          throw new Error("Workscene cleanup owner is already installed");
+        }
         worksceneCleanup = cleanup;
       },
       workspaceCatalog: () =>

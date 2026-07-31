@@ -42,7 +42,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           throw new Error("not used");
         },
       }),
-      runCleanupStep: (_resourceIdentity, operation) => operation(),
+      storageCleanup: unusedStorageCleanup(),
     });
 
     await expect(
@@ -75,7 +75,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           throw new Error("not used");
         },
       }),
-      runCleanupStep: (_resourceIdentity, operation) => operation(),
+      storageCleanup: unusedStorageCleanup(),
     });
 
     await owner.exit(
@@ -92,7 +92,7 @@ describe("WorksceneSessionOwner cleanup", () => {
     ]);
   });
 
-  it("keeps authority writes outside capacity permits and admits each physical leaf", async () => {
+  it("keeps authority writes ahead of the shared physical cleanup owner", async () => {
     const order: string[] = [];
     const directory = {
       remove: vi.fn(async (conversationId: string) => {
@@ -112,13 +112,13 @@ describe("WorksceneSessionOwner cleanup", () => {
           return { revision: 2, at: input.at };
         },
       }),
-      async runCleanupStep(resourceIdentity, operation) {
-        order.push(`permit:${resourceIdentity}:acquire`);
-        try {
-          return await operation();
-        } finally {
-          order.push(`permit:${resourceIdentity}:release`);
-        }
+      storageCleanup: {
+        async removeConversation() {
+          throw new Error("conversation cleanup belongs to the directory");
+        },
+        async removeScene(sceneId) {
+          order.push(`cleanup:${sceneId}`);
+        },
       },
     });
 
@@ -126,11 +126,19 @@ describe("WorksceneSessionOwner cleanup", () => {
 
     expect(order).toEqual([
       "authority:ws:scene-a:primary",
-      "permit:conversation:ws:scene-a:primary:acquire",
       "remove:ws:scene-a:primary",
-      "permit:conversation:ws:scene-a:primary:release",
-      "permit:workscene:scene-a:acquire",
-      "permit:workscene:scene-a:release",
+      "cleanup:scene-a",
     ]);
   });
 });
+
+function unusedStorageCleanup() {
+  return {
+    async removeConversation() {
+      throw new Error("not used");
+    },
+    async removeScene() {
+      throw new Error("not used");
+    },
+  };
+}

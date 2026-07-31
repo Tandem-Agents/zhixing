@@ -531,20 +531,22 @@ export class WorkspaceBindingService
     };
     const requestDigest = workspaceBindingRequestDigest(request);
     const requestId = `migration:${input.migrationId}:${input.sourceSnapshotToken}:${requestDigest}`;
+    const assertMigrationOpen = (state: WorkspaceBindingProjection) => {
+      const terminal = state.migrationTerminals.get(
+        migrationKey(input.migrationId, input.sourceSnapshotToken),
+      );
+      if (terminal) {
+        throw new WorkspaceBindingConflictError(
+          `Workspace migration ${terminal} cannot be revived`,
+        );
+      }
+    };
     const result = await this.#operations.run(() => {
       abort.throwIfAborted();
       return this.#transact(
         requestId,
         requestDigest,
         (state) => {
-          const terminal = state.migrationTerminals.get(
-            migrationKey(input.migrationId, input.sourceSnapshotToken),
-          );
-          if (terminal) {
-            throw new WorkspaceBindingConflictError(
-              `Workspace migration is already ${terminal}`,
-            );
-          }
           const samePath = [
             ...state.bindings.values(),
             ...[...state.stagedLegacy.values()]
@@ -604,6 +606,7 @@ export class WorkspaceBindingService
           operation: "import-binding",
           requestDigest,
         }),
+        assertMigrationOpen,
       );
     });
     return result;
@@ -762,12 +765,14 @@ export class WorkspaceBindingService
       record?: WorkspaceBindingRecord;
     },
     runPhysicalStep?: PhysicalStorageStepRunner,
+    assertReplayAllowed?: (state: WorkspaceBindingProjection) => void,
   ): Promise<T> {
     const current = this.#state();
     const transaction = await this.#log.transactProjection(
       current,
       reduceWorkspaceBindingProjection,
       (state) => {
+        assertReplayAllowed?.(state);
         const previous = state.requests.get(requestId);
         if (previous) {
           if (previous.digest !== requestDigest) {

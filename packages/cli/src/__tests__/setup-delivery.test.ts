@@ -697,21 +697,26 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       const incompatible = await setupAuthorityRuntime({
         zhixingHome: incompatibleHome,
         secretStore: new MemorySecretStore(),
+        executorId: "executor:incompatible",
         executorReadiness: TEST_EXECUTOR_READINESS,
         enableAnchor: false,
       });
       const compatible = await setupAuthorityRuntime({
         zhixingHome: compatibleHome,
         secretStore: new MemorySecretStore(),
+        executorId: "executor:compatible",
         executorReadiness: { ...TEST_EXECUTOR_READINESS, tools: ["Read"] },
         enableAnchor: false,
       });
       const anchor = await setupAuthorityRuntime({
         zhixingHome: home,
         secretStore: new MemorySecretStore(),
+        executorId: "executor:anchor",
         trustedIdentities: [incompatible.identity, compatible.identity],
         executorReadiness: { ...TEST_EXECUTOR_READINESS, tools: ["Read"] },
       });
+      incompatible.reconcileTrustedDevices([anchor.identity], [anchor.deviceId]);
+      compatible.reconcileTrustedDevices([anchor.identity], [anchor.deviceId]);
       const profile = { ...EMPTY_EXECUTION_PROFILE, tools: ["Read"] };
       const remote = await anchor.prepareConversationAssignment({
         conversationId: "test-conversation",

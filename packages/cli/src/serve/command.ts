@@ -113,6 +113,7 @@ import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
+import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import {
   createTrustDirectory,
   createSkillDirectory,
@@ -231,12 +232,16 @@ async function runServerProcess(
     }
     return { repo: convRepo, localId };
   };
+  const worksceneStorageCleanup = createWorksceneStorageCleanup({
+    storageMaintenance: deviceCapacity.storage,
+  });
   // 对话目录(盘上事实:清单 / 建删 / 改名 / 清空 / 倒读)——session.* 命令
   // 执行体的持久层,与 REPL 同 scope(同 home 同目录)。task_list cache 清理
   // 经 lazy 闭包接 builtinExtraTools(声明在后,运行期调用时已就位)。
   const conversationDirectory = createConversationDirectory({
     repo: convRepo,
     transcript,
+    worksceneStorageCleanup,
     repoForConversationId,
     clearTaskListCache: (conversationId) =>
       builtinExtraTools.taskListService.clear(conversationId),
@@ -261,13 +266,13 @@ async function runServerProcess(
     conversations: () => conversationsRef.current,
     conversationAuthority: () => conversationAuthorityRef.current,
     conversationDirectory,
+    worksceneStorageCleanup,
     recoverWorksceneState: async () => {
       await authorityRuntimeRef.current?.recoverWorksceneState();
     },
     replayWorksceneMutation: async (requestId) =>
       (await authorityRuntimeRef.current?.replayWorksceneMutation(requestId)) ??
       null,
-    storageMaintenance: deviceCapacity.storage,
     probeRemote: (deviceId, request) => {
       const mesh = meshRuntimeRef.current;
       if (!mesh) throw new Error("目标设备当前不可达，无法确认工作区状态");

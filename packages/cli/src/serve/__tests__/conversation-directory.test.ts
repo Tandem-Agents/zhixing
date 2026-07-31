@@ -16,6 +16,7 @@ import {
   worksceneConversationId,
 } from "@zhixing/core";
 import { createConversationDirectory } from "../conversation-directory.js";
+import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
 let originalHome: string | undefined;
 let directory: ReturnType<typeof createConversationDirectory>;
@@ -28,7 +29,11 @@ beforeEach(async () => {
   process.env.ZHIXING_HOME = tmp;
   repo = new ConversationRepository({ kind: "user" });
   transcript = new ShardedTranscriptStore(conversationsDir({ kind: "user" }));
-  directory = createConversationDirectory({ repo, transcript });
+  directory = createConversationDirectory({
+    repo,
+    transcript,
+    worksceneStorageCleanup: createWorksceneStorageCleanup(),
+  });
 });
 afterEach(() => {
   if (originalHome === undefined) delete process.env.ZHIXING_HOME;
@@ -110,6 +115,7 @@ describe("conversation directory(持久层实现)", () => {
     const dir = createConversationDirectory({
       repo,
       transcript,
+      worksceneStorageCleanup: createWorksceneStorageCleanup(),
       clearTaskListCache: (id) => clearedCache.push(id),
     });
 
@@ -143,6 +149,7 @@ describe("conversation directory(持久层实现)", () => {
     const dir = createConversationDirectory({
       repo,
       transcript,
+      worksceneStorageCleanup: createWorksceneStorageCleanup(),
       repoForConversationId: (conversationId) => {
         const { scope, localId } = parseConversationId(conversationId);
         if (scope.kind === "workscene") return { repo: sceneRepo, localId };

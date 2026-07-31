@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:集中修复（13 项生产修改已完成、待验证；U25-02 与 U25-06 仍有明确实现残留）
+- **当前状态**:独立审查准备（15 项集中修复及合并直接验证已完成，待按当前交付物更新并执行独立审查清单）
 - **连续无新增问题轮数**:0 / 2
 - **交付物是否冻结**:否
-- **交付物文件集**:第 25 单元起点 `994f05c` 至当前工作区共 119 个非工作台交付文件（CLI 46、core 42、executor 3、orchestrator 5、owner-kernel 7、rpc 1、runtime-host 4、server 9、架构与规格 2）；无删除项；路径集 SHA-256 `fdf529f26f014bb875fb82624938288bcc07d799a457492670c0ed33c3e8180c`
-- **当前交付物指纹**:`git-clean-blob-manifest-v1:180e644f430ef8c037d6643192ab77919132178b1f09bbda3e7a936c36cd9fbc`（119 个路径排序后逐行计算 `path<TAB>git hash-object --path=<path> <path>`，UTF-8、LF、无末尾换行；工作台、单元登记文件和暂存状态不计入）
+- **交付物文件集**:第 25 单元起点 `994f05c` 至当前工作区共 133 个非工作台交付文件（CLI 54、core 43、executor 4、orchestrator 6、owner-kernel 7、rpc 2、runtime-host 5、server 9、脚本 1、架构与规格 2）；无删除项；路径集 SHA-256 `1abb5d6f3b0fdfc0e545fdf1d7aa68a88f811cc07ed4a1a66278d45282ac99ed`
+- **当前交付物指纹**:`git-clean-blob-manifest-v1:42633b6d9813e09aba2f29b575c63c76cf425a74b075befe1922b5d01dece87f`（133 个路径排序后逐行计算 `path<TAB>git hash-object --path=<path> <path>`，UTF-8、LF、无末尾换行；工作台、单元登记文件和暂存状态不计入）
 - **架构来源**:分布式运行时总纲与可执行规格；持续在线需求；workscene、会话、运行时生命周期、常驻服务、权限、资源治理；第 13～24 单元适用排除项与迟发现教训；第 25 单元 19 项定稿开发清单
 
 ## 固定边界
@@ -32,7 +32,7 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
-| 119 个当前交付文件 | core 导出与 schema、server 两份 golden、S7 合同账本、S1 性能基线、包级类型与生产组合根 | 独立审查与冻结准备时逐组落账 | 待核查 |
+| 133 个当前交付文件 | core 导出与 schema、server 两份 golden、S7 合同账本、S1 性能基线、包级类型与生产组合根 | 独立审查与冻结准备时逐组落账 | 待核查 |
 
 ## 关键原语核查
 
@@ -64,16 +64,16 @@
 >
 > **本轮收口方式**：U25-02～U25-07、U25-11、U25-14 是已定稿开发义务没有真正完成的补充开发，不得按普通问题逐点修补或修一项审一轮；须与 U25-01、U25-10 两个功能缺陷组成一次集中实现闭包，按 `U25-01 → U25-05 → U25-11 → U25-03 → U25-14 → U25-02 → U25-04 → U25-10 → U25-06 → U25-07` 的依赖顺序完成生产链，最后统一建设 conformance 与性能证据。U25-08、U25-09、U25-12、U25-13、U25-15 为非阻断问题，保持独立记录，不穿插本批阻断闭包。
 >
-> **当前实现核账**：U25-01、U25-03～U25-05、U25-07～U25-15 已有覆盖其登记根因和方案的生产代码与直接测试代码，统一转为“待验证”；U25-02、U25-06 仍存在下列明确残留，保持“修复中”。“待验证”只表示实现闭包已落地，不代表测试、独立审查或最终验证通过。
+> **当前实现核账**：U25-01～U25-15 已有覆盖其登记根因和方案的生产代码与直接测试代码；当前 44 个变更测试/golden 文件已完成一次合并直接验证核账，未留已知功能断言失败，统一处于“待验证”。“待验证”表示实现与直接验证闭包已落地，仍须经过当前交付物的独立审查、冻结终审、独立功能审查和最终验证。
 
 | 编号 | 事实与证据 | 根本原因 | 完整影响面 | 最优解决方案与验收条件 | 状态 |
 | ---- | ---------- | -------- | ---------- | ---------------------- | ---- |
 | U25-01 | **P0，工作量：中；来源 P25-08 与执行者 1 号全审，功能缺陷。** binding CRUD 已提交权威日志后再发布能力，但 `deviceDigest` 不含 catalog generation/规范 workspace 集，版本存储复用旧 revision；生产复现为发布后 create 报 `Capability descriptor revision was rewritten`，且重启后 `publishedWorkspaces=[]`、全域无 catalog snapshot 重建调用，degraded/reset 撤回同样无法发布。 | binding 权威事实与能力快照各自推进版本，没有从 catalog 快照到严格前进 capability revision 的唯一版本输入和线性化发布原语。 | binding CRUD/reset/degraded、启动重建、CapabilityDescriptor、版本清单、selector、queued 唤醒及恢复测试；受影响 IR25-01、03、10、12、16～17、23、26～27。 | 以 catalog generation、规范 workspace 集和设备 readiness 共同生成唯一版本输入；启动先从 binding 日志重建发布集，CRUD、degraded 撤回、reset 与恢复重发都经同一串行发布原语取得严格前进 revision，响应丢失只重放原快照。验收覆盖发布后 CRUD、重启、损坏、reset、响应丢失及 selector 零失效候选循环。 | 待验证 |
-| U25-02 | **P0，工作量：大；来源 P25-11 与执行者 1 号全审，补充开发（D25-F01/F02/F03 未真正完成）。** legacy 二写、observer 释放、同 envelope tombstone、重复删除与 owner 收敛主体已落地；**当前残留**是 `WorksceneSessionOwner.removeScene` 仍以一次递归 `rm` 删除整棵场景目录，物理清理没有分页游标与有界批次，容量准入也无法按叶级副作用结算。 | 场景会话的创建、活动、observer、删除与派生投影原先没有统一归属同一 owner/CommitEnvelope；当前剩余风险收敛为删除 owner 的物理清理仍可能无界占用并在崩溃后从头重做。 | GlobalStatePort adapter、WorksceneSessionOwner、ConversationDirectory/Manager、session.delete、session-activity、enter/exit、observer、quiesce、活动/删除投影与测试；受影响 IR25-01、06、08、12～13、16～18、21、23、26。 | 保留已经完成的唯一 owner 与同 envelope 语义；把场景目录清理改为由删除 owner 持有的可恢复分页义务：耐久记录页游标，每页只枚举并删除固定数量对象，叶级物理删除独立取得 storage permit，崩溃后从游标重驱，全部页完成后再删除空目录并标记清理终态。验收除既有 wire 删除、多接入面、quiesce/exit、重启与竞争外，增加大目录有界批次、页间崩溃续跑和零治理旁路。 | 修复中 |
+| U25-02 | **P0，工作量：大；来源 P25-11 与执行者 1 号全审，补充开发（D25-F01/F02/F03 未真正完成）。** legacy 二写、observer 释放、同 envelope tombstone、重复删除与 owner 收敛主体已落地；物理清理现由组合根唯一创建的共享 owner 承载，会话与场景删除按场景串行，使用目标外耐久游标分页遍历，每个文件、空目录与游标步骤独立取得 storage permit；场景终态前还会有界清退崩溃遗留的会话游标。 | 场景会话的创建、活动、observer、删除与派生投影原先没有统一归属同一 owner/CommitEnvelope；物理清理也曾以一次递归删除无界占用并在崩溃后从头重做。 | GlobalStatePort adapter、WorksceneSessionOwner、ConversationDirectory/Manager、session.delete、session-activity、enter/exit、observer、quiesce、活动/删除投影与测试；受影响 IR25-01、06、08、12～13、16～18、21、23、26。 | 保留已经完成的唯一 owner 与同 envelope 语义；把场景目录清理改为由删除 owner 持有的可恢复分页义务：耐久记录页游标，每页只枚举并删除固定数量对象，叶级物理删除独立取得 storage permit，崩溃后从游标重驱，全部页完成后再删除空目录并标记清理终态。验收除既有 wire 删除、多接入面、quiesce/exit、重启与竞争外，增加大目录有界批次、页间崩溃续跑和零治理旁路。 | 待验证 |
 | U25-03 | **P1，工作量：中偏大；来源 P25-09 与执行者 1 号全审，补充开发（D25-F04 未真正完成）。** 七条本地命令仍经 loopback RPC；list/rename/repath 响应直接返回 absolutePath，`LocalWorkspaceTransfer` 又把路径及 requestId 落本地文件后令 token 过 wire，CLI 暴露 bindingRef；RecoveryPort 启动恢复只 fire-and-forget 一次并吞错。 | local-only 管理与 committed recovery owner 没有形成真实生产入口，错误地用普通 RPC、路径中转文件和一次调用栈代替。 | CLI/桌面本机入口、server RPC/golden、AdminPort、RecoveryPort、路径 transfer、确认、reset owner、能力撤回/恢复及测试；受影响 IR25-01～02、04、12～14、18～20、23、26～27。 | 在目标设备本机组合根直接注入同进程 Admin/RecoveryPort，删除生产 RPC、facade 和路径 transfer；本机管理面可显示本机路径但不要求用户处理 bindingRef，跨设备仅传设备域引用；reset 先展示三项影响再签发单次 confirmation，预约后由全部适用拓扑必然创建的 committed owner 持续重驱。验收证明零 RPC/mesh/路径 token、零远端路径、零 bindingRef 产品文案及无人重试恢复。 | 待验证 |
 | U25-04 | **P1，工作量：大；来源 P25-12 与执行者 1 号全审，补充开发（D25-F05 未真正完成）。** legacy 迁移仍全量、无治理；客户端 `importSetDigest` 使用 legacy `lastActiveAt` 且不规范化 name，锚点却强制 `lastActiveAt=createdAt` 并 NFKC，常见旧数据必冲突；空 `scenes` 也因没有 batch 永久拒绝 activation。 | 迁移缺少两侧共享的规范导入模型与有界 committed owner，导致正常旧数据无法 cutover，且大数据迁移不可恢复、不可治理。 | 旧注册表源、规范导入 DTO/digest、空集合、迁移报告、binding import、GlobalStatePort、storage maintenance、启动恢复、cutover/回滚与测试；受影响 IR25-07、15～17、19、23、26。 | 定义两侧共用的 path-free 规范 import entry 与空集合 digest；以冻结源清单、分页游标和有界 report 作为恢复事实，每批源读取、binding 导入、锚点提交与报告落盘由同一 committed migration owner 经 storage maintenance 执行，全部页完成后持旧写 fence 复核并单次 cutover。验收覆盖被 touch/NFKC 名称、零场景、容量不足、分页崩溃/重启、响应丢失、源变化与再次升级。 | 待验证 |
 | U25-05 | **P1，工作量：中；来源 P25-10 与执行者 1 号全审，补充开发（D25-F06 的严格 schema 闭包未完成）。** workscene、binding、probe 三类 reducer 仅浅校验；`mutationDigest` 不重算、probe result 不验完整签名、binding record 无 exact keys 且六条 requestId 分支可覆盖既有请求。 | 把 TypeScript 联合类型当作耐久输入校验，缺少恢复、增量和回放共用的单源严格 validator 与统一 request replay 守卫。 | 三类日志 schema、validator/reducer、投影重建、幂等回放、签名结果、corruption vectors 与合同测试；受影响 IR25-02～03、05、14、16～17、19、23、26。 | 为每个记录族建立唯一严格 validator，逐 tag 校验 exact keys、完整嵌套 DTO、规范时间/摘要/签名及由 stream/request 重算的身份反绑；所有 requestId 分支先经过同一“同摘要回放、异摘要冲突”守卫；恢复、增量与回放统一调用，参数化 corruption matrix 逐变体证明 fail-closed。 | 待验证 |
-| U25-06 | **P1，工作量：大；来源 P25-13 与执行者 1 号全审，补充开发（D25-F06 未真正完成）。** mesh probe、能力/权限同步、authorize 与主要状态链已经接入真实 authority 组合根；**当前残留**是 conformance 仍手工构造 fake `ConversationManager` runtime 并直接 new `WorksceneSessionOwner`，没有穿过生产 executor runtime factory、workscene directory/owner 装配和真实事件出口，因此删除生产 runtime 或 owner 装配仍可能不使套件失败。 | 真实双组合根、逐记录生产/恢复点和拒绝/损坏分支的机械验收基础设施原先没有交付；当前剩余缺口是执行与场景 owner 后半链仍由测试自建替身承载，证据不能反绑生产装配。 | 两种真实 adapter/组合根、S7 完整生产链、记录与 manifest 状态族、恢复 owner、故障/资源矩阵、结构可达性及变异证明；受影响 IR25-05、12～13、22～23、26。 | 保留已完成的双 authority root、真实 mesh service/client/authorize 与状态对账；把 runtime、owner enter/exit 和事件出口改由两侧各自的生产 executor runtime factory 与 workscene directory/owner 组合根创建，测试只注入确定性模型、时钟和外部平台边界。随后以删除 runtime factory、owner 装配、authorize、拒绝或 corruption 分支的变异证明套件有鉴别力。 | 修复中 |
+| U25-06 | **P1，工作量：大；来源 P25-13 与执行者 1 号全审，补充开发（D25-F06 未真正完成）。** conformance 现由同一套件驱动真实 in-process/mesh authority 根、mesh service/client/authorize、生产 owner/assignment runtime factory、workscene directory/owner、preflight 与事件流；两台设备分别使用自己的容量根，测试替身只保留确定性模型与外部平台边界。 | 真实双组合根、逐记录生产/恢复点和拒绝/损坏分支的机械验收基础设施原先没有交付；执行与场景 owner 后半链也曾由测试自建替身承载，证据不能反绑生产装配。 | 两种真实 adapter/组合根、S7 完整生产链、记录与 manifest 状态族、恢复 owner、故障/资源矩阵、结构可达性及变异证明；受影响 IR25-05、12～13、22～23、26。 | 保留已完成的双 authority root、真实 mesh service/client/authorize 与状态对账；把 runtime、owner enter/exit 和事件出口改由两侧各自的生产 executor runtime factory 与 workscene directory/owner 组合根创建，测试只注入确定性模型、时钟和外部平台边界。随后以删除 runtime factory、owner 装配、authorize、拒绝或 corruption 分支的变异证明套件有鉴别力。 | 待验证 |
 | U25-07 | **P1，工作量：中；来源 P25-14 与执行者 1 号全审，补充开发（D25-F07 未真正完成）。** 性能门禁在测试内合成样本自我比较；S1 fixture 自述 `rawSamplesRequired:true` 却无原始样本，recorder/probe/capture 生产零接线，机械断言还固化“有 workspace 恰一次 preflight”而真实链为两次。 | 只实现了统计比较算法，没有交付可复现的 S1/当前采集与量化验收链，门禁也未绑定真实生产路径。 | S1 冻结提交、真实测量运行器、固定环境/模型替身、原始样本、环境指纹、阈值、preflight 单源与门禁测试；受影响 IR25-18、23、26。 | 在相同固定环境下以确定性模型替身运行 S1 与当前版本，保存原始样本、环境指纹和统计输出；环境不匹配拒绝比较，门禁只消费真实资产并调用生产测量入口，不在测试内生成结论样本。验收覆盖冷/热、无 workspace/有 workspace、唯一 preflight 与阈值边界。 | 待验证 |
 | U25-08 | **P2，工作量：中；来源 NB25-01 与执行者 1 号全审。** probe 终态保留只有手工 compact、生产零调用者，缺全部 executor 拓扑必然创建的维护 owner，现有枚举与退休也是单轮全量扫描。 | 有界保留合同没有生产调度与分页索引承载。 | probe 结果日志、完成时间索引、retire、executor role、storage governor、启动/停机与生命周期测试。 | 由 executor role 持有唯一 27 天保留维护器，以可重建有序索引分页固定批次，经 storage governor 追加 retire 并保存续跑点；启动恢复和停机闭合。 | 待验证 |
 | U25-09 | **P2，工作量：小到中；来源 NB25-02 与执行者 1 号全审。** assignment 在 owner 预装配、executor 接收和 worker 启动链重复执行 workspace resolve+probe，现有性能门禁却假定恰一次。 | 同一 assignment 的本地 preflight 没有进程内唯一执行身份和接管点，真实性能证据接线后必然失败。 | owner/executor preflight、ledger 接收、worker 启动、local/mesh、重启和首 token 测试。 | 在 executor 组合根建立按 assignmentId+manifestDigest 的 preflight single-flight；ledger 接收结果，worker 原子接管；重启重新执行一次，终态清理，绝不持久化真实路径；性能门禁只观测该唯一生产点。 | 待验证 |
@@ -104,6 +104,12 @@
 
 | 编号 | 证明目标与当前缺口 | 最小命令或检查 | 输入闭包 | 阶段 / 成本 / 实耗 | 结果 | 证据输入指纹 | 状态 |
 | ---- | ------------------ | -------------- | -------- | ------------------ | ---- | ------------ | ---- |
+| V25-01 | core 的 14 个变更测试文件覆盖严格 reducer、binding/reset、probe、workscene authority、结构边界与 storage kind | 以 Vitest 运行 14 个变更测试文件；失败按单例归因后复核合并结果 | `packages/core` 当前变更测试及其直接生产输入 | 集中修复合并直接验证 / 中 | 178 / 178 通过；其中 3 个重 IO 超时项按 runbook 定向复核通过 | 当前完整交付指纹 `42633b6d…87f`；文件清单见本行证明目标 | 有效 |
+| V25-02 | owner-kernel 的显式环境 admission、重放与 sceneId 静态身份 | `control-admission.test.ts` | `conversation-assignment.ts` 与对应测试 | 集中修复合并直接验证 / 低 | 18 / 18 通过 | 当前完整交付指纹 `42633b6d…87f` | 有效 |
+| V25-03 | orchestrator 的默认 profile、turn 控制累加和 prompt 声明面 | 运行 3 个变更测试文件 | `packages/orchestrator` 当前变更生产/测试闭包 | 集中修复合并直接验证 / 低 | 87 / 87 通过 | 当前完整交付指纹 `42633b6d…87f` | 有效 |
+| V25-04 | server 的 workscene RPC 薄适配和两份结构/行为 golden | 运行 2 个变更测试文件并核对 golden | `packages/server` 当前变更生产/测试/golden 闭包 | 集中修复合并直接验证 / 低 | 22 / 22 通过 | 当前完整交付指纹 `42633b6d…87f` | 有效 |
+| V25-05 | executor assignment ledger 中本单元改动的环境与回放行为 | 定向运行被修改用例；全文件运行仅作诊断，不作为包测证据 | `assignment-ledger.test.ts` 中本单元改动用例及直接生产输入 | 集中修复合并直接验证 / 中 | 修改行为定向通过；全文件在 302.8 秒硬截止前 155 项通过、零断言失败，包级全测留待最终验证 | 当前完整交付指纹 `42633b6d…87f` | 有效 |
+| V25-06 | CLI 21 个变更测试文件覆盖生产组合根、local-only 管理、迁移、清理、conformance 与性能入口 | 按 IO 特征拆为 A/B1/B2 三组运行；失败单例归因并定向复核 | `packages/cli` 当前 21 个变更测试文件及其直接生产输入 | 集中修复合并直接验证 / 高 | A 103 / 103；B1 57 / 57；B2 55 通过、1 跳过；全部已知失败定向复核通过 | 当前完整交付指纹 `42633b6d…87f` | 有效 |
 
 ## 终审记录
 

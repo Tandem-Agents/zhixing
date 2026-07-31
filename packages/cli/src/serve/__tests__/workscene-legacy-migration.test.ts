@@ -93,7 +93,7 @@ describe("workscene legacy migration", () => {
     expect(report).not.toContain(workspacePath);
     expect(JSON.parse(report)).toMatchObject({
       status: "activated",
-      phase: "cutover",
+      phase: "cleanup",
       version: 3,
     });
 
