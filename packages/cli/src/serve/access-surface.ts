@@ -85,6 +85,7 @@ import type {
   StartupCleanupHandle,
   StartupRollback,
 } from "./startup-rollback.js";
+import type { LocalWorkspaceOwnerLease } from "../runtime/local-workspace-owner.js";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -100,6 +101,7 @@ export interface AssemblyStartupCleanups {
   losslessDataPlane?: StartupCleanupHandle;
   channels?: StartupCleanupHandle;
   deliveryStack?: StartupCleanupHandle;
+  localWorkspaceHost?: StartupCleanupHandle;
 }
 
 /**
@@ -120,6 +122,7 @@ export interface AssemblyContext {
   readonly perspectives: PerspectivesController;
   readonly deviceCapacity: DeviceCapacityArbiterPort;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly localWorkspaceOwner?: LocalWorkspaceOwnerLease;
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;

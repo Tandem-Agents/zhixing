@@ -3,6 +3,7 @@ import {
   type DurableProjectionIndex,
   type DurableProjectionMutation,
 } from "../authority/index.js";
+import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import type {
   JsonValue,
   SessionInternalRecord,
@@ -109,6 +110,19 @@ export class IncrementalWorksceneActivityProjection {
   }
 
 }
+
+export const WORKSCENE_ACTIVITY_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "workscene-activity-projection",
+  producer: "IncrementalWorksceneActivityProjection",
+  recoveryOwner: "anchor-workscene-owner",
+  resourceIdentity: "workscene-session-activity-v2",
+  recoveryClass: "derived-rebuild",
+  cases: [
+    ...["put", "tombstone"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSCENE_ACTIVITY_${key.toUpperCase()}` })),
+    ...["stale-contribution", "wrong-scene", "wrong-conversation"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSCENE_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["invalid-contribution", "invalid-aggregate", "checkpoint-mismatch"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSCENE_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
+  ],
+} as const);
 
 async function reduceIncrementalActivity(
   envelope: {

@@ -14,6 +14,7 @@ import {
   type ServeRoleConfiguration,
 } from "./role-topology.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
+import { acquireLocalWorkspaceOwner } from "../runtime/local-workspace-owner.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -37,16 +38,18 @@ export async function runServeCommand(
     process.exit(startup.kind === "cancelled" ? 0 : 2);
     return;
   }
-  const deviceCapacity = createDeviceCapacityRuntime(
-    `${zhixingHome}/distributed-runtime/capacity`,
-  );
-  const mesh = await prepareMeshRuntimeBootstrap({
-    zhixingHome,
-    secretStore,
-    storageMaintenance: deviceCapacity.storage,
-    ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
-  });
+  const localWorkspaceOwner = await acquireLocalWorkspaceOwner(zhixingHome);
+  const deviceCapacity = createDeviceCapacityRuntime(`${zhixingHome}/distributed-runtime/capacity`);
+  let mesh: Awaited<ReturnType<typeof prepareMeshRuntimeBootstrap>> | undefined;
   try {
+    mesh = await prepareMeshRuntimeBootstrap({
+      zhixingHome,
+      secretStore,
+      storageMaintenance: deviceCapacity.storage,
+      ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
+    });
+    const ownsLocalWorkspace = mesh.roles.includes("executor");
+    if (!ownsLocalWorkspace) await localWorkspaceOwner.release();
     await runConfiguredServeTopology(
       { roles: mesh.roles },
       {
@@ -55,10 +58,17 @@ export async function runServeCommand(
         executor: () => import("@zhixing/executor"),
       },
       options,
-      { mesh, deviceCapacity, secretStore, startup },
+      {
+        mesh,
+        deviceCapacity,
+        secretStore,
+        startup,
+        ...(ownsLocalWorkspace ? { localWorkspaceOwner } : {}),
+      },
     );
   } finally {
-    mesh.bootstrapStore.stopStorageMaintenance();
+    mesh?.bootstrapStore.stopStorageMaintenance();
+    await localWorkspaceOwner.release();
   }
 }
 

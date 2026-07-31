@@ -2,6 +2,7 @@ export {
   WorkspaceBindingCatalog,
   WorkspaceBindingCatalogConflictError,
   WorkspaceBindingCatalogDegradedError,
+  WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT,
   workspaceCatalogGenerationStorageKey,
   type WorkspaceBindingCatalogOptions,
 } from "./workspace-binding-catalog.js";
@@ -11,6 +12,7 @@ export {
   WorkspaceBindingNotFoundError,
   WorkspaceBindingRevisionError,
   WorkspaceBindingService,
+  WORKSPACE_BINDING_DURABLE_CONTRACT,
   localEnvironmentControlSubject,
   normalizeWorkspaceDisplayName,
   normalizeWorkspacePath,
@@ -18,15 +20,11 @@ export {
   type WorkspaceBindingServiceOptions,
 } from "./workspace-bindings.js";
 export {
-  S7_DURABLE_CONTRACT_LEDGER,
-  type S7DurableContractEntry,
-  type S7RecoveryClass,
-} from "./s7-contract-ledger.js";
-export {
   EnvironmentProbeOwner,
   LocalWorkspaceProbeAdapter,
   MeshWorkspaceProbeAdapter,
   WorkspaceProbeConflictError,
+  WORKSPACE_PROBE_DURABLE_CONTRACT,
   WorkspaceProbeHandler,
   type EnvironmentProbeOwnerOptions,
   type WorkspaceProbeHandlerOptions,

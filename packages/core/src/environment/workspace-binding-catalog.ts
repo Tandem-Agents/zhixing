@@ -19,6 +19,7 @@ import type {
   WorkspaceBindingResetReceipt,
   WorkspaceBindingRootManifest,
 } from "../contracts/index.js";
+import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import {
   acquireFileLock,
   ensureDurableDirectory,
@@ -918,6 +919,19 @@ export class WorkspaceBindingCatalogConflictError extends Error {
     this.name = "WorkspaceBindingCatalogConflictError";
   }
 }
+
+export const WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "workspace-binding-root",
+  producer: "WorkspaceBindingCatalog",
+  recoveryOwner: "workspace-binding-recovery-owner",
+  resourceIdentity: "workspace-catalog-reset:<device-root>",
+  recoveryClass: "committed-forward-recovery",
+  cases: [
+    ...["healthy", "degraded", "pending-reset"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSPACE_ROOT_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["healthy-reset", "confirmation-mismatch", "generation-conflict", "reservation-conflict"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSPACE_ROOT_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["malformed-manifest", "missing-active-log", "invalid-reset-genesis", "broken-generation-link"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSPACE_ROOT_${key.replaceAll("-", "_").toUpperCase()}` })),
+  ],
+} as const);
 
 function resetConfirmationDigest(
   control: LocalEnvironmentRecoveryContext,

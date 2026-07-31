@@ -1,0 +1,414 @@
+{
+  "version": 1,
+  "roleConfigurations": {
+    "anchor-executor": [
+      {
+        "name": "auth",
+        "requiresAuth": false
+      },
+      {
+        "name": "confirmation.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "confirmation.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "delivery.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "health",
+        "requiresAuth": false
+      },
+      {
+        "name": "llm.complete",
+        "requiresAuth": true
+      },
+      {
+        "name": "memory.journalStats",
+        "requiresAuth": true
+      },
+      {
+        "name": "memory.peopleList",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.abortRun",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.create",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.delete",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.run",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.update",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.info",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.shutdown",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.abort",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementCancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementConfirm",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementDetail",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementRevise",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.clear",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.compact",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.contextBudget",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.delete",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.history",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.rename",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.resume",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.security",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.subscribe",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.taskList",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.taskListUpdate",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.unsubscribe",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.usage",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.archive",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.setState",
+        "requiresAuth": true
+      },
+      {
+        "name": "trust.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "trust.revoke",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.create",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.delete",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.enter",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.exit",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.rename",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.setWorkdir",
+        "requiresAuth": true
+      }
+    ],
+    "anchor-surface": [
+      {
+        "name": "auth",
+        "requiresAuth": false
+      },
+      {
+        "name": "confirmation.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "confirmation.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "delivery.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "health",
+        "requiresAuth": false
+      },
+      {
+        "name": "llm.complete",
+        "requiresAuth": true
+      },
+      {
+        "name": "memory.journalStats",
+        "requiresAuth": true
+      },
+      {
+        "name": "memory.peopleList",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.abortRun",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.create",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.delete",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.run",
+        "requiresAuth": true
+      },
+      {
+        "name": "schedule.update",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.info",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.shutdown",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.abort",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementCancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementConfirm",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementDetail",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementRevise",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.clear",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.compact",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.contextBudget",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.delete",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.history",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.rename",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.resume",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.security",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.subscribe",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.taskList",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.taskListUpdate",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.unsubscribe",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.usage",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.archive",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "skill.setState",
+        "requiresAuth": true
+      },
+      {
+        "name": "trust.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "trust.revoke",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.create",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.delete",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.enter",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.exit",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.rename",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.setWorkdir",
+        "requiresAuth": true
+      }
+    ],
+    "executor-only": []
+  },
+  "retiredMethods": [
+    "workspace.binding.admin",
+    "workspace.binding.reset"
+  ]
+}

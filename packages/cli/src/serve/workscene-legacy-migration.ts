@@ -18,6 +18,7 @@ import type {
   WorksceneMigrationMutation,
   WorkspaceBindingMigrationPort,
 } from "@zhixing/core/contracts";
+import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import { syncDirectory } from "@zhixing/core/persistence";
 import {
@@ -924,3 +925,16 @@ function waitForRetry(abort: AbortSignal, delayMs: number): Promise<void> {
     timer.unref?.();
   });
 }
+
+export const LEGACY_WORKSCENE_MIGRATION_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "legacy-workscene-migration",
+  producer: "migrateLegacyWorkscenes",
+  recoveryOwner: "workscene-migration-owner",
+  resourceIdentity: "legacy-workscene-migration:<migrationId>",
+  recoveryClass: "committed-forward-recovery",
+  cases: [
+    ...["open", "activated", "abandoned"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSCENE_MIGRATION_${key.toUpperCase()}` })),
+    ...["source-changed", "terminal-revival", "import-set-mismatch", "post-cutover-write"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSCENE_MIGRATION_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["malformed-report", "broken-terminal", "source-pages-mismatch", "cutover-marker-mismatch"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSCENE_MIGRATION_${key.replaceAll("-", "_").toUpperCase()}` })),
+  ],
+} as const);

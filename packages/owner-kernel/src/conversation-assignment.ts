@@ -1,5 +1,9 @@
 import { Buffer } from "node:buffer";
 import {
+  defineDurableRuntimeContract,
+  publishTerminalPerformanceObservation,
+} from "@zhixing/core/contracts";
+import {
   AuthorityStorageError,
   collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
@@ -527,6 +531,19 @@ interface AssignedProjection {
   readonly commit: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string };
   acked: boolean;
 }
+
+export const SESSION_ACTIVITY_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "session-activity",
+  producer: "ConversationRunJournal",
+  recoveryOwner: "anchor-workscene-owner",
+  resourceIdentity: "session-activity:<conversationId>",
+  recoveryClass: "authority-replay",
+  cases: [
+    ...["upsert", "delete"].map((key) => ({ kind: "variant" as const, key, reasonCode: `SESSION_ACTIVITY_${key.toUpperCase()}` })),
+    ...["conversation-scene-mismatch", "non-monotonic-revision", "external-construction"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `SESSION_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["wrong-stream", "invalid-time", "identity-rebinding"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `SESSION_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
+  ],
+} as const);
 
 interface PendingLifecycleProjection {
   readonly mutation: "clear" | "delete";
@@ -7673,6 +7690,19 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           cursor: transaction.cursor,
         };
         if (transaction.commit) {
+          if (
+            transaction.commit.entries.some(
+              (entry) =>
+                typeof entry.body === "object" &&
+                entry.body !== null &&
+                "kind" in entry.body &&
+                entry.body.kind === "session-activity",
+            )
+          ) {
+            publishTerminalPerformanceObservation({
+              kind: "session-activity-commit",
+            });
+          }
           this.#publishStatusNotices(
             conversationStatusNoticesForCommit(
               transaction.state,

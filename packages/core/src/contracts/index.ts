@@ -28,4 +28,6 @@ export {
 export type * from "./records.js";
 export type * from "./commit-log.js";
 export type * from "./ports.js";
+export * from "./durable-contract.js";
+export * from "./terminal-performance-observation.js";
 export type { WireSchemaId, WireSchemaMap, WireSchemaVersion } from "./schema.js";

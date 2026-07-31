@@ -234,6 +234,9 @@ async function runServerProcess(
   };
   const worksceneStorageCleanup = createWorksceneStorageCleanup({
     storageMaintenance: deviceCapacity.storage,
+    ...(bootstrap.localWorkspaceOwner
+      ? { localWorkspaceOwner: bootstrap.localWorkspaceOwner }
+      : {}),
   });
   // 对话目录(盘上事实:清单 / 建删 / 改名 / 清空 / 倒读)——session.* 命令
   // 执行体的持久层,与 REPL 同 scope(同 home 同目录)。task_list cache 清理
@@ -1013,6 +1016,7 @@ async function runServerProcess(
     mcpHub: builtinExtraTools.mcpHub,
     startupCleanups: {
       authorityRuntime: startupCleanups.authorityRuntime,
+      localWorkspaceHost: startupCleanups.localWorkspaceHost,
       scheduler: schedulerCleanup,
       channels: startupCleanups.channels,
       deliveryStack: startupCleanups.deliveryStack,

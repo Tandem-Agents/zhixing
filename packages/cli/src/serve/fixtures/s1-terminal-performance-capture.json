@@ -15,6 +15,14 @@
   },
   "environmentFingerprint": "sha256:309835f2e5a14c106af2a0126b18a4dcb7cf8ac73aea4f342f854bc495d30da9",
   "configDigest": "sha256:89067f52a176d217e92db5bb4172bf73cb0475bf999baabdc4d871c09383b722",
+  "delivery": {
+    "sourceRevision": "d9283db480b48dd009947750e14698a31295594f",
+    "deliveryTreeDigest": "sha256:2bf4e6b793bd6c2a6a80b829b0ae4f273ba4f968e3beabbd95281fc9804af1a4",
+    "buildDigest": "sha256:d057adfe3e441ca1f3c221e5cc722e6d4239b6a6a90192abfe21b0aa2ba80ad7",
+    "harnessDigest": "sha256:6d1aa64adf921fa31ea64b8ec1fcd722f7d90e54bb3ec72c7f4de298b939eff4",
+    "setupAdapterDigest": "sha256:ab25b149c0309e3bf3f736851abf84a8cfa4f246c65f8a3cf79190100dbc4b7b",
+    "scenarioSetupDigest": "sha256:6e12184d787350374edcc59aad01feb77dd1c8489d88debb3a0f22f4422a78db"
+  },
   "runs": [
     {
       "configDigest": "sha256:89067f52a176d217e92db5bb4172bf73cb0475bf999baabdc4d871c09383b722",

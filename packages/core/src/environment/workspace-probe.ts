@@ -13,6 +13,7 @@ import type {
   WorkspaceProbeRequest,
   WorkspaceProbeResult,
 } from "../contracts/index.js";
+import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import { ensureDurableDirectory, syncDirectory } from "../persistence/index.js";
 import {
   canonicalize,
@@ -969,3 +970,16 @@ export class WorkspaceProbeConflictError extends Error {
     this.name = "WorkspaceProbeConflictError";
   }
 }
+
+export const WORKSPACE_PROBE_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "workspace-probe",
+  producer: "WorkspaceProbeHandler",
+  recoveryOwner: "workspace-probe-owner",
+  resourceIdentity: "workspace-probe:<requestId>",
+  recoveryClass: "authority-replay",
+  cases: [
+    ...["log-established", "started", "completed", "retired"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSPACE_PROBE_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["grant-binding", "lease-binding", "request-conflict", "expired-fresh-request"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSPACE_PROBE_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["invalid-result", "request-result-mismatch", "broken-replay-index"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSPACE_PROBE_${key.replaceAll("-", "_").toUpperCase()}` })),
+  ],
+} as const);

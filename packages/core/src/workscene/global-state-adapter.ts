@@ -13,6 +13,7 @@ import type {
   WorksceneMigrationMutation,
   WorksceneWriteMutation,
 } from "../contracts/index.js";
+import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import type { AuthorityCommitLog } from "../authority/index.js";
 import { assertPrincipalAllowsAuthorityMethod } from "../protocol/index.js";
 import {
@@ -291,6 +292,22 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     }
   }
 }
+
+export const WORKSCENE_REGISTRY_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "workscene-registry",
+  producer: "AnchorWorksceneGlobalStateAdapter",
+  recoveryOwner: "anchor-workscene-owner",
+  resourceIdentity: "workscene:<sceneId>",
+  recoveryClass: "authority-replay",
+  cases: [
+    ...["established", "control-applied", "legacy-import-open", "legacy-import-activated", "legacy-import-abandoned", "deletion-projected"]
+      .map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSCENE_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["principal-method", "request-conflict", "revision-conflict", "deletion-pending"]
+      .map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSCENE_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["unknown-record", "non-contiguous-revision", "broken-deletion-confirmation"]
+      .map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSCENE_${key.replaceAll("-", "_").toUpperCase()}` })),
+  ],
+} as const);
 
 function isWorksceneWrite(
   mutation: GlobalControlMutation | GlobalStagedMutation,

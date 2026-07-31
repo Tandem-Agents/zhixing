@@ -147,3 +147,14 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
   ]);
   return registry;
 }
+
+/** Canonical serializable registry view used by both production drift checks and golden generation. */
+export function captureBuiltinRegistryDescriptor(): readonly {
+  readonly name: string;
+  readonly requiresAuth: boolean;
+}[] {
+  return buildBuiltinRegistry()
+    .list()
+    .map(({ name, requiresAuth = true }) => ({ name, requiresAuth }))
+    .sort((left, right) => left.name.localeCompare(right.name, "en-US"));
+}

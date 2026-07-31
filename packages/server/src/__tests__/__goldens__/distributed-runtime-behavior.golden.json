@@ -849,19 +849,6 @@
     },
     {
       "emptyRequest": {},
-      "method": "workscene.authorizeLocalWorkspace",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
       "method": "workscene.create",
       "outcome": {
         "code": -32602,
@@ -943,84 +930,6 @@
       "method": "workscene.setWorkdir",
       "outcome": {
         "code": -32602,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "workspace.localList",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "workspace.localRemove",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "workspace.localRename",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "workspace.localRepath",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "workspace.localReset",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "workspace.localStatus",
-      "outcome": {
-        "code": -32603,
         "kind": "error",
         "shape": {
           "code": "number",

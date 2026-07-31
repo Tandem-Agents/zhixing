@@ -27,7 +27,10 @@ import {
   createInitialControlEnvelope,
 } from "@zhixing/owner-kernel";
 import { createServerContext } from "../context.js";
-import { buildBuiltinRegistry } from "../rpc/methods/index.js";
+import {
+  buildBuiltinRegistry,
+  captureBuiltinRegistryDescriptor,
+} from "../rpc/methods/index.js";
 import { buildServerShutdownMethod } from "../rpc/methods/server.js";
 import {
   buildSessionNewMethod,
@@ -87,6 +90,24 @@ describe("distributed runtime migration behavior golden", () => {
     expect(descriptor).toEqual({ name: "health", requiresAuth: false });
     expect(descriptor).not.toHaveProperty("handler");
     expect(Object.isFrozen(descriptor)).toBe(true);
+  });
+
+  it("derives every applicable role golden from the canonical production registry", async () => {
+    const golden = JSON.parse(await readFile(new URL(
+      "./__goldens__/canonical-registry.golden.json",
+      import.meta.url,
+    ), "utf8")) as {
+      roleConfigurations: Record<string, unknown>;
+      retiredMethods: string[];
+    };
+    const descriptor = captureBuiltinRegistryDescriptor();
+    expect(golden.roleConfigurations).toEqual({
+      "anchor-executor": descriptor,
+      "anchor-surface": descriptor,
+      "executor-only": [],
+    });
+    const registered = new Set(descriptor.map(({ name }) => name));
+    for (const retired of golden.retiredMethods) expect(registered.has(retired)).toBe(false);
   });
 });
 

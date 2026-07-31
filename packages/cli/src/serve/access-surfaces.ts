@@ -57,6 +57,7 @@ import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
+import { createLocalWorkspaceManagementHost } from "../runtime/local-workspace-management-host.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -99,6 +100,28 @@ const authorityRuntimeSurface: AccessSurface = {
     });
     ctx.startupCleanups.authorityRuntime = authorityRuntime.startupCleanup;
     ctx.authorityRuntime = authorityRuntime;
+    if (ctx.enabledRoles.includes("executor") && ctx.localWorkspaceOwner) {
+      const admin = authorityRuntime.workspaceBindingAdmin;
+      const recovery = authorityRuntime.workspaceBindingRecovery;
+      if (!admin || !recovery) throw new Error("Local workspace management ports are unavailable");
+      const host = createLocalWorkspaceManagementHost({
+        lease: ctx.localWorkspaceOwner,
+        zhixingHome: ctx.zhixingHome,
+        facade: {
+          deviceId: authorityRuntime.deviceId,
+          executorId: executorIdForDevice(authorityRuntime.deviceId),
+          admin,
+          recovery,
+          resources: authorityRuntime.executorResourceGovernor,
+        },
+        storageMaintenance: ctx.storageMaintenance,
+      });
+      ctx.startupCleanups.localWorkspaceHost = ctx.startupRollback.register(
+        "localWorkspaceHost.close",
+        () => host.close(),
+      );
+      await host.start();
+    }
     const jobStatus = new JobStatusDirectory();
     jobStatus.onStatus((notice) => {
       ctx.runner?.server.context.broadcastAll?.("job.status", notice);

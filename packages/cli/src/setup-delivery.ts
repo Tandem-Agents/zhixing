@@ -47,6 +47,7 @@ import type {
   WorkspaceBindingMigrationPort,
   WorkspaceBindingRecoveryPort,
 } from "@zhixing/core/contracts";
+import { publishTerminalPerformanceObservation } from "@zhixing/core/contracts";
 import {
   canonicalize,
   createSignedCapabilityDescriptor,
@@ -1053,6 +1054,9 @@ export async function setupAuthorityRuntime(
         workspaceBindings,
         manifest.environment,
       );
+      if (manifest.environment.workspace) {
+        publishTerminalPerformanceObservation({ kind: "workspace-preflight" });
+      }
       if (result.ok) {
         if (result.state === "missing" && result.absolutePath) {
           try {

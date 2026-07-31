@@ -14,6 +14,9 @@ import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
+import { installTerminalPerformanceObservationReporter } from "./serve/terminal-performance-observation.js";
+
+installTerminalPerformanceObservationReporter();
 
 async function renderActionError(error: unknown): Promise<void> {
   const writer = createStdoutWriter();

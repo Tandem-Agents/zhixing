@@ -37,6 +37,10 @@ import {
   ExecutorJobOwnerAssembly,
   ExecutorJobOwnerLifecycle,
 } from "./executor-job-owner.js";
+import {
+  LocalWorkspaceManagementHost,
+  createLocalWorkspaceManagementHost,
+} from "../runtime/local-workspace-management-host.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -72,6 +76,7 @@ export async function runExecutorRole(
   let jobOwnerLifecycle: ExecutorJobOwnerLifecycle | undefined;
   let authority: AuthorityRuntimeStack | undefined;
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
+  let localWorkspaceHost: LocalWorkspaceManagementHost | undefined;
   let roleFailure: unknown;
   try {
     const interactions = new DurableConversationInteractionObserver();
@@ -107,6 +112,25 @@ export async function runExecutorRole(
       storageMaintenance: deviceCapacity.storage,
       deviceCapacity: deviceCapacity.arbiter,
     });
+    if (!bootstrap.localWorkspaceOwner) {
+      throw new Error("Executor host did not acquire the local workspace owner lock");
+    }
+    if (!authority.workspaceBindingAdmin || !authority.workspaceBindingRecovery) {
+      throw new Error("Local workspace management ports are unavailable");
+    }
+    localWorkspaceHost = createLocalWorkspaceManagementHost({
+      lease: bootstrap.localWorkspaceOwner,
+      zhixingHome,
+      facade: {
+        deviceId: authority.deviceId,
+        executorId: executorIdForDevice(authority.deviceId),
+        admin: authority.workspaceBindingAdmin,
+        recovery: authority.workspaceBindingRecovery,
+        resources: authority.executorResourceGovernor,
+      },
+      storageMaintenance: deviceCapacity.storage,
+    });
+    await localWorkspaceHost.start();
     dataPlane = new ExecutorDataPlaneRuntime({
       zhixingHome,
       authority,
@@ -185,6 +209,11 @@ export async function runExecutorRole(
     roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
+  try {
+    await localWorkspaceHost?.close();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
   try {
     if (jobOwnerLifecycle && !jobOwnerLifecycle.closed) {
       await jobOwnerLifecycle.close();

@@ -845,9 +845,10 @@ interface WorkspaceBindingAdminPort {             // 只在目标设备本地受
 }
 interface WorkspaceBindingRecoveryPort {          // 独立最小权限恢复面；只在目标设备本地装配，不复用普通 CRUD 权限
   status(): Promise<{ state: "healthy"|"degraded"; catalogGeneration: string; reason?: string }>;
-  reset(input: { expectedCatalogGeneration: string },
-        control: LocalEnvironmentRecoveryContext): Promise<{
-          catalogGeneration: string; capabilityRevision: number }>;
+  beginReset(input: { expectedCatalogGeneration: string },
+             control: LocalEnvironmentRecoveryContext): Promise<WorkspaceBindingResetReservation>;
+  completeReset(requestId: string,
+                abort: AbortSignal): Promise<WorkspaceBindingResetReceipt>;
 }
 interface WorkspaceBindingMigrationPort {         // 仅本机 host 兼容桥装配；与 AdminPort 共用同一日志、reducer 与命名规则
   importLegacy(input: { migrationId: string; sourceSnapshotToken: string;
@@ -870,6 +871,10 @@ reset 按一次耐久所有权转移收敛。交互阶段持 `environment-contro
 `pendingReset` 一经根 manifest 耐久，即从调用请求转化为设备本地必须前滚的恢复义务：预约本身证明确认已经验真，后续恢复不得再次依赖调用方保存或提交 confirmation。凡装配 binding 目录的拓扑都必须无条件创建唯一 reset recovery owner；它在启动时先于 AdminPort、新 reset 写入口和正常能力发布读取根 manifest，发现预约即向 storage governor 重建上述 committed single-flight 并申请新的 storage-foreground permit。恢复完成后才开放写入口；原调用方随后只按 requestId / confirmationDigest 回放结果。预约或已发布目标无法验真时保持 fail-closed，仅开放只读 `status` 与诊断，禁止清空预约、接受新 confirmation 或回退到旧 workspace 快照。启动恢复 owner 缺失、可选装配、依赖原 lease 或晚于业务入口均属于结构性失败。
 
 新根携回执中确定且严格前进的 capability revision 和空 workspaces 待发布事实，能力发布器只按当前 manifest 幂等重驱，网络失败不得复活旧快照。新 bindingRef 必须反绑新世代且永不复用旧值；不得从旧路径、旧快照或场景引用自动重建映射。reset 只在根 manifest 耐久后返回；旧 assignment 继续按引用失配排队，用户通过普通 AdminPort 重新授权并显式更新 workscene 引用后，才重新发布能力并唤醒匹配队列。错世代、healthy 状态、无效 confirmation、远程入口或部分安装一律零生效；崩溃恢复只能得到旧 degraded 根或完整新根。
+
+本机 workspace 管理只有一个设备级组合根。它必须在打开 capacity、binding/root manifest、probe、投影、恢复任务或本机操作日志之前取得同一跨进程 owner 锁，并在完整生命周期内持有；常驻进程和按需命令只能通过带版本、严格字段校验且限当前 OS 用户的本地 transport 复用该 host，锁忙且 host 不可达时稳定拒绝，禁止打开第二套权威设施。本地管理能力只随 executor 角色装配，host 统一构造 authority、根 lease 与 storage governor 请求；普通 RPC、mesh、server registry 与远端产品面均不得暴露该 transport 或真实路径。
+
+本机有副作用的 workspace 操作统一采用 host-owned `prepare → commit → completed → confirmed-prefix` 协议。prepare 在唯一 append-only outbox 中耐久规范输入、inputDigest、高熵 operationId 与单调 localSeq；同一输入在 prepared、committed 或未确认 completed 期间只认领同一身份。commit 后义务归 host，调用方退出不影响前滚；结果在 client 以无空洞连续前缀确认前必须可重放，确认反绑每项 operationId、inputDigest、resultDigest 与滚动 prefixDigest。checkpoint 只推进单调确认水位并保留 outboxId、nextSeq 与连续前缀摘要，禁止按时间清理或保存无界逐请求墓碑；缺失、损坏、回退、越洞、序号复用或摘要错绑均 fail-closed。reset preview/confirm 只是该协议的 prepare/commit 特化：preview 展示完整影响，confirm 后才形成必须恢复的 committed 义务。
 
 单机与“目标 executor 就是当前设备”的产品入口保持既有一步式体验：用户仍可在场景创建、改目录或主模式选择工作区时直接给出本机路径，入口在本机调用 `WorkspaceBindingAdminPort` 就地创建或复用 binding，再只把设备域引用提交给锚点；路径不得经过 RPC / mesh。新 binding 的公开名称取用户在同一交互中明确给出的名称；仅给出场景名与路径时，可以该用户已确认的场景名作为建议工作区名并在原确认面一并展示，禁止额外制造强制的“先建工作区、再选工作区”步骤。跨设备入口仍只能选择目标设备已经发布的工作区。主模式和无 workscene 会话的输入必须由 first-party 接入面显式携 `ExplicitEnvironmentSelection`；未选择即按无 workspace 执行，禁止从 `process.cwd`、启动参数或宿主配置暗取路径。跨设备时模型和远端接入面只使用设备名与工作区名称；若用户需要新路径，只能唤起目标设备本地的选择 / 授权动作，不得让原始路径先进入普通输入再补转换。
 
@@ -914,6 +919,7 @@ type StorageMaintenanceKind =
   | "log-migration"
   | "workspace-migration"
   | "workspace-catalog-reset"
+  | "local-workspace-operation-outbox"
   | "workscene-cleanup"
   | "projection-flush" | "projection-rebuild" | "projection-scrub" | "projection-compaction"
   | "lifecycle-reconcile" | "asset-gc";
@@ -2431,6 +2437,8 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 - capability、permission lease、resource lease 与 ticket 的“签名候选”不等于激活；激活、吊销、结算和回收都必须有唯一耐久锚。
 - server 与 executor 零互相 import；未启用角色零加载、零监听；cli 始终是单一产品入口和组合根。
 - 用户只感知“值班 / 干活”；既有单机行为、入口响应、事件顺序和持久化结果在对应能力正式启用前必须通过 golden 保持等价。
+
+第 25 项的结构、兼容与体验验收必须反绑真实生产交付物：RecoveryPort 的规格片段与 TypeScript 导出机械比对；server golden 只从 canonical production registry 生成；耐久记录族由各生产 owner 声明 canonical descriptor，验收组合根对 descriptor、真实 validator/reducer/recovery 场景作 exact-set 对账。终端性能由同一外部 driver 分别启动隔离的 S1 与 current 构建，版本专属公开入口在计时前把同一规范目录、内容和产品意图准备成 S1 raw workspace 与 current binding workspace；固定比较有/无 workspace 的冷、热路径并沿用同一统计规则。资产必须反绑两侧 revision、交付与构建摘要、driver、版本专属 setup、等价场景和环境指纹，缺失、陈旧、跨环境或任一侧未真实采集均失败；不得以手写 fixture、源码符号、测试标题或环境变量跳过代替机械证据。
 
 | 提交 | 边界 | 目标 | 验收 |
 |---|---|---|---|

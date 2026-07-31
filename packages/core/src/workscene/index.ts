@@ -15,8 +15,13 @@ export {
 } from "./authority-registry.js";
 export {
   AnchorWorksceneGlobalStateAdapter,
+  WORKSCENE_REGISTRY_DURABLE_CONTRACT,
   type AnchorWorksceneGlobalStateAdapterOptions,
 } from "./global-state-adapter.js";
+export {
+  IncrementalWorksceneActivityProjection,
+  WORKSCENE_ACTIVITY_DURABLE_CONTRACT,
+} from "./activity-projection.js";
 export {
   getWorkScenesRoot,
   getWorkSceneIndexPath,

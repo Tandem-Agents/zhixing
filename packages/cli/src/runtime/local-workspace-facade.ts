@@ -36,6 +36,11 @@ export interface LocalWorkspaceFacadeOptions {
   readonly resources: ExecutorResourceGovernor;
 }
 
+export interface LocalWorkspaceOperationAuthority {
+  readonly requestNonce: string;
+  readonly confirmationToken?: string;
+}
+
 /**
  * Target-device settings adapter. It calls the local ports directly; neither
  * raw paths nor recovery capabilities cross an RPC or mesh boundary.
@@ -74,9 +79,10 @@ export class LocalWorkspaceFacade {
   async create(
     displayName: string,
     absolutePath: string,
+    authority?: LocalWorkspaceOperationAuthority,
   ): Promise<LocalWorkspaceView> {
     return this.#withControl(
-      `workspace-create:${randomUUID()}`,
+      authority?.requestNonce ?? `workspace-create:${randomUUID()}`,
       async (control) =>
         toView(
           await this.#admin.create({ displayName, absolutePath }, control),
@@ -87,9 +93,10 @@ export class LocalWorkspaceFacade {
   async authorizeForControl(
     displayName: string,
     absolutePath: string,
+    authority?: LocalWorkspaceOperationAuthority,
   ): Promise<{ deviceId: string; bindingRef: string }> {
     const binding = await this.#withControl(
-      `workspace-authorize:${randomUUID()}`,
+      authority?.requestNonce ?? `workspace-authorize:${randomUUID()}`,
       (control) => this.#admin.create({ displayName, absolutePath }, control),
     );
     return { deviceId: this.#deviceId, bindingRef: binding.bindingRef };
@@ -99,9 +106,10 @@ export class LocalWorkspaceFacade {
     currentName: string,
     displayName: string,
     expectedRevision: number,
+    authority?: LocalWorkspaceOperationAuthority,
   ): Promise<LocalWorkspaceView> {
     return this.#withControl(
-      `workspace-rename:${randomUUID()}`,
+      authority?.requestNonce ?? `workspace-rename:${randomUUID()}`,
       async (control) => {
         const current = await this.#bindingByName(currentName, control);
         return toView(
@@ -120,9 +128,10 @@ export class LocalWorkspaceFacade {
     name: string,
     absolutePath: string,
     expectedRevision: number,
+    authority?: LocalWorkspaceOperationAuthority,
   ): Promise<LocalWorkspaceView> {
     return this.#withControl(
-      `workspace-repath:${randomUUID()}`,
+      authority?.requestNonce ?? `workspace-repath:${randomUUID()}`,
       async (control) => {
         const current = await this.#bindingByName(name, control);
         return toView(
@@ -137,9 +146,13 @@ export class LocalWorkspaceFacade {
     );
   }
 
-  async remove(name: string, expectedRevision: number): Promise<void> {
+  async remove(
+    name: string,
+    expectedRevision: number,
+    authority?: LocalWorkspaceOperationAuthority,
+  ): Promise<void> {
     await this.#withControl(
-      `workspace-remove:${randomUUID()}`,
+      authority?.requestNonce ?? `workspace-remove:${randomUUID()}`,
       async (control) => {
         const current = await this.#bindingByName(name, control);
         await this.#admin.remove(
@@ -154,11 +167,12 @@ export class LocalWorkspaceFacade {
   async reset(
     expectedCatalogGeneration: string,
     confirmedImpact: string,
+    authority?: LocalWorkspaceOperationAuthority,
   ): Promise<WorkspaceBindingResetReceipt> {
     if (confirmedImpact !== WORKSPACE_CATALOG_RESET_IMPACT) {
       throw new TypeError("工作区目录恢复确认内容不完整");
     }
-    const requestNonce = `workspace-reset:${randomUUID()}`;
+    const requestNonce = authority?.requestNonce ?? `workspace-reset:${randomUUID()}`;
     const requestId = localEnvironmentControlSubject(
       this.#deviceId,
       requestNonce,
@@ -172,7 +186,7 @@ export class LocalWorkspaceFacade {
           abort: new AbortController().signal,
           confirmation: {
             kind: "workspace-binding-reset",
-            token: randomBytes(32).toString("base64url"),
+            token: authority?.confirmationToken ?? randomBytes(32).toString("base64url"),
             requestId,
             catalogGeneration: expectedCatalogGeneration,
             issuedAt: new Date().toISOString(),

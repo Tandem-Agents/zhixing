@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { protocolDigest } from "@zhixing/core/protocol";
 import {
   analyzeRun,
+  assertComparableTerminalPerformanceCaptures,
   captureTerminalPerformanceMatrix,
   compareTerminalPerformanceMatrix,
   compareTerminalPerformance,
@@ -100,6 +101,58 @@ describe("S7 terminal performance gate", () => {
           rawSamples.length === S7_TERMINAL_PERFORMANCE_CONFIG.samples,
       ),
     ).toBe(true);
+  });
+
+  it("requires one external driver and an equivalent version-specific scenario setup", async () => {
+    const baseline = await readCapture(
+      new URL(
+        "./fixtures/s1-terminal-performance-capture.json",
+        import.meta.url,
+      ),
+    );
+    const current = {
+      ...baseline,
+      revision: "current",
+      delivery: {
+        ...baseline.delivery,
+        sourceRevision: "current",
+        setupAdapterDigest: protocolDigest("SetupAdapter", 1, {
+          version: "current",
+        }),
+      },
+      runs: baseline.runs.map((run) => ({ ...run, revision: "current" })),
+    };
+    expect(() =>
+      assertComparableTerminalPerformanceCaptures({ baseline, current }),
+    ).not.toThrow();
+    expect(() =>
+      assertComparableTerminalPerformanceCaptures({
+        baseline,
+        current: {
+          ...current,
+          delivery: {
+            ...current.delivery,
+            scenarioSetupDigest: protocolDigest("ScenarioSetup", 1, {
+              workspace: "different",
+            }),
+          },
+        },
+      }),
+    ).toThrow("prepared equivalently");
+    expect(() =>
+      assertComparableTerminalPerformanceCaptures({
+        baseline,
+        current: {
+          ...current,
+          delivery: {
+            ...current.delivery,
+            harnessDigest: protocolDigest("Harness", 1, {
+              driver: "different",
+            }),
+          },
+        },
+      }),
+    ).toThrow("same external driver");
   });
 
   it.runIf(CURRENT_CAPTURE)(

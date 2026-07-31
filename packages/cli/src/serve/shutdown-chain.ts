@@ -50,6 +50,7 @@ export interface ShutdownChainResources {
   mcpHub?: McpHub;
   startupCleanups?: {
     readonly authorityRuntime?: StartupCleanupHandle;
+    readonly localWorkspaceHost?: StartupCleanupHandle;
     readonly scheduler?: StartupCleanupHandle;
     readonly channels?: StartupCleanupHandle;
     readonly deliveryStack?: StartupCleanupHandle;
@@ -125,6 +126,11 @@ export function registerCoreCleanup(
       const cleanup = resources.startupCleanups?.authorityRuntime;
       if (cleanup) await cleanup.run();
       else await resources.authorityRuntime!.stopStorageMaintenance();
+    });
+  }
+  if (resources.startupCleanups?.localWorkspaceHost) {
+    registry.register("localWorkspaceHost.close", async () => {
+      await resources.startupCleanups!.localWorkspaceHost!.run();
     });
   }
   registry.register("heartbeat.clear", () => {

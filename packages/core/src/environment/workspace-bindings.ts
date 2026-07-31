@@ -20,6 +20,7 @@ import type {
   WorkspaceBindingPatch,
   WorkspaceBindingResetReceipt,
 } from "../contracts/index.js";
+import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import {
   ensureDurableDirectory,
   SerialTaskQueue,
@@ -2020,4 +2021,29 @@ export class WorkspaceBindingCancelledError extends Error {
     super("Workspace binding operation was cancelled");
     this.name = "WorkspaceBindingCancelledError";
   }
+}
+
+export const WORKSPACE_BINDING_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "workspace-binding",
+  producer: "WorkspaceBindingService",
+  recoveryOwner: "workspace-binding-recovery-owner",
+  resourceIdentity: "workspace-binding:<deviceId>",
+  recoveryClass: "authority-replay",
+  cases: durableCases("WORKSPACE_BINDING", {
+    variant: ["directory-established", "catalog-reset", "binding-created", "binding-updated", "binding-removed", "request-recorded", "legacy-binding-staged", "legacy-migration-activated", "legacy-migration-abandoned"],
+    rejection: ["control-lease", "name-conflict", "revision-conflict", "tombstoned-reference"],
+    corruption: ["missing-establishment", "invalid-record", "broken-log-tail"],
+  }),
+} as const);
+
+function durableCases(
+  prefix: string,
+  groups: Readonly<Record<"variant" | "rejection" | "corruption", readonly string[]>>,
+) {
+  return (Object.entries(groups) as ["variant" | "rejection" | "corruption", readonly string[]][])
+    .flatMap(([kind, keys]) => keys.map((key) => ({
+      kind,
+      key,
+      reasonCode: `${prefix}_${key.replaceAll("-", "_").toUpperCase()}`,
+    })));
 }

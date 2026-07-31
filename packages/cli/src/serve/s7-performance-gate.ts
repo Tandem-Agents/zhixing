@@ -104,6 +104,14 @@ export interface TerminalPerformanceCaptureAsset {
   };
   readonly environmentFingerprint: string;
   readonly configDigest: string;
+  readonly delivery: {
+    readonly sourceRevision: string;
+    readonly deliveryTreeDigest: string;
+    readonly buildDigest: string;
+    readonly harnessDigest: string;
+    readonly setupAdapterDigest: string;
+    readonly scenarioSetupDigest: string;
+  };
   readonly runs: readonly TerminalPerformanceRun[];
 }
 
@@ -264,6 +272,7 @@ export function validateTerminalPerformanceCaptureAsset(
     "environment",
     "environmentFingerprint",
     "configDigest",
+    "delivery",
     "runs",
   ], "terminal performance capture");
   if (asset.version !== 1) {
@@ -337,6 +346,26 @@ export function validateTerminalPerformanceCaptureAsset(
   if (asset.configDigest !== terminalPerformanceConfigDigest()) {
     throw new TypeError("Terminal performance capture configuration is stale");
   }
+  const delivery = requireRecord(asset.delivery, "terminal performance delivery");
+  requireExactKeys(delivery, [
+    "sourceRevision",
+    "deliveryTreeDigest",
+    "buildDigest",
+    "harnessDigest",
+    "setupAdapterDigest",
+    "scenarioSetupDigest",
+  ], "terminal performance delivery");
+  const normalizedDelivery = {
+    sourceRevision: requireText(delivery.sourceRevision, "performance source revision"),
+    deliveryTreeDigest: requireDigest(delivery.deliveryTreeDigest, "performance delivery tree"),
+    buildDigest: requireDigest(delivery.buildDigest, "performance build"),
+    harnessDigest: requireDigest(delivery.harnessDigest, "performance harness"),
+    setupAdapterDigest: requireDigest(delivery.setupAdapterDigest, "performance setup adapter"),
+    scenarioSetupDigest: requireDigest(delivery.scenarioSetupDigest, "performance scenario setup"),
+  };
+  if (normalizedDelivery.sourceRevision !== revision) {
+    throw new TypeError("Terminal performance delivery revision is stale");
+  }
   if (!Array.isArray(asset.runs)) {
     throw new TypeError("Terminal performance capture runs are invalid");
   }
@@ -353,8 +382,24 @@ export function validateTerminalPerformanceCaptureAsset(
     environment: normalizedEnvironment,
     environmentFingerprint,
     configDigest: terminalPerformanceConfigDigest(),
+    delivery: normalizedDelivery,
     runs,
   };
+}
+
+export function assertComparableTerminalPerformanceCaptures(input: {
+  readonly baseline: TerminalPerformanceCaptureAsset;
+  readonly current: TerminalPerformanceCaptureAsset;
+}): void {
+  if (input.baseline.delivery.harnessDigest !== input.current.delivery.harnessDigest) {
+    throw new Error("S1/current performance captures did not use the same external driver");
+  }
+  if (
+    input.baseline.delivery.scenarioSetupDigest !==
+    input.current.delivery.scenarioSetupDigest
+  ) {
+    throw new Error("S1/current performance scenarios were not prepared equivalently");
+  }
 }
 
 export function createTerminalPerformanceRun(input: Omit<
