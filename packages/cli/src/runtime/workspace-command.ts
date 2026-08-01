@@ -1,5 +1,6 @@
 import path from "node:path";
 import { getZhixingHome } from "@zhixing/core";
+import { protocolDigest } from "@zhixing/core/protocol";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { createStdoutWriter } from "../screen/cli-writer.js";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
@@ -12,46 +13,93 @@ import { parseServerSpecs } from "./mcp-config.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import { createExecutorReadinessSource } from "../serve/executor-readiness.js";
 import {
-  LocalWorkspaceManagementHost,
-  createLocalWorkspaceManagementHost,
   createLocalWorkspaceClient,
   localWorkspaceHostIsReachable,
+  RecoveredLocalWorkspaceOperationsError,
+  type LocalWorkspaceConsumptionCredential,
+  type LocalWorkspaceManagementHost,
   type LocalWorkspaceClient,
 } from "./local-workspace-management-host.js";
-import { acquireLocalWorkspaceOwner } from "./local-workspace-owner.js";
+import type {
+  LocalWorkspaceOperation,
+  LocalWorkspaceWriteOperation,
+} from "./local-workspace-operation-outbox.js";
+import {
+  acquireExecutorLocalWorkspaceOwner,
+  startExecutorLocalWorkspaceHost,
+} from "./local-workspace-bootstrap.js";
 import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
 
 export { WORKSPACE_CATALOG_RESET_IMPACT };
 
+export function worksceneCreateRequestIdForLocalWorkspace(
+  credential: LocalWorkspaceConsumptionCredential,
+): string {
+  return `workscene-create:${protocolDigest(
+    "LocalWorkspaceConsumptionCredential",
+    1,
+    credential,
+  )}`;
+}
+
+export interface LocalWorkspaceRecoveryNotice {
+  readonly operationId: string;
+  readonly operation: LocalWorkspaceOperation["input"]["kind"];
+  readonly target: string;
+  readonly outcome: "succeeded" | "failed";
+  readonly credential: LocalWorkspaceConsumptionCredential;
+  readonly controlWorkspace?: {
+    readonly deviceId: string;
+    readonly bindingRef: string;
+  };
+  readonly error?: { readonly code: string; readonly message: string };
+}
+
+interface LocalWorkspaceDelivery<T, R> {
+  readonly result: (
+    value: T,
+    credential: LocalWorkspaceConsumptionCredential | undefined,
+  ) => Promise<R>;
+  readonly recovered: (
+    operations: readonly LocalWorkspaceRecoveryNotice[],
+  ) => Promise<void>;
+}
+
 export async function runWorkspaceCommand(
   operation: (workspace: LocalWorkspaceClient) => Promise<unknown>,
 ): Promise<void> {
-  const result = await withLocalWorkspaceFacade(operation);
-  if (result !== undefined) createStdoutWriter().line(JSON.stringify(result, null, 2));
+  const writer = createStdoutWriter();
+  await withLocalWorkspaceFacade(operation, {
+    result: async (result) => {
+      if (result !== undefined) writer.line(JSON.stringify(result, null, 2));
+    },
+    recovered: async (operations) => {
+      if (operations.some(({ controlWorkspace }) => controlWorkspace)) {
+        throw new Error(
+          "检测到尚未完成工作场景创建的本机工作区授权，请先启动交互终端完成恢复",
+        );
+      }
+      writer.line(JSON.stringify({ recoveredOperations: operations }, null, 2));
+    },
+  });
 }
 
-export async function withLocalWorkspaceFacade<T>(
+export async function withLocalWorkspaceFacade<T, R = T>(
   operation: (workspace: LocalWorkspaceClient) => Promise<T>,
-): Promise<T> {
+  delivery: LocalWorkspaceDelivery<T, R>,
+): Promise<R> {
   const zhixingHome = getZhixingHome();
   const existing = createLocalWorkspaceClient(zhixingHome);
-  if (await localWorkspaceHostIsReachable(zhixingHome)) return operation(existing);
-
-  let owner;
-  try {
-    owner = await acquireLocalWorkspaceOwner(zhixingHome);
-  } catch {
-    throw new Error("本机工作区管理 owner 正在运行但不可达，请稍后重试");
+  if (await localWorkspaceHostIsReachable(zhixingHome)) {
+    return useLocalWorkspaceClient(existing, operation, delivery);
   }
 
   let runtime: Awaited<ReturnType<typeof setupAuthorityRuntime>> | undefined;
   let mesh: Awaited<ReturnType<typeof prepareMeshRuntimeBootstrap>> | undefined;
   let host: LocalWorkspaceManagementHost | undefined;
   let mcpHub: ReturnType<typeof createMcpHub> | undefined;
+  let owner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>>;
   try {
-    const raced = createLocalWorkspaceClient(zhixingHome);
-    if (await localWorkspaceHostIsReachable(zhixingHome)) return operation(raced);
-
     const secretStore = createPlatformSecretStore({ homeDir: zhixingHome });
     const startup = await runStartupCheck({
       homeDir: zhixingHome,
@@ -72,6 +120,15 @@ export async function withLocalWorkspaceFacade<T>(
     });
     if (!mesh.roles.includes("executor")) {
       throw new Error("当前设备未启用 executor 角色，本机工作区管理能力不可用");
+    }
+    try {
+      owner = await acquireExecutorLocalWorkspaceOwner(zhixingHome, mesh.roles);
+    } catch {
+      const raced = createLocalWorkspaceClient(zhixingHome);
+      if (await localWorkspaceHostIsReachable(zhixingHome)) {
+        return useLocalWorkspaceClient(raced, operation, delivery);
+      }
+      throw new Error("本机工作区管理 owner 正在运行但不可达，请稍后重试");
     }
     const [{ ExecutorRuntimeSubstrate }, { DurableConversationInteractionObserver }] =
       await Promise.all([
@@ -120,25 +177,128 @@ export async function withLocalWorkspaceFacade<T>(
     const admin = runtime.workspaceBindingAdmin;
     const recovery = runtime.workspaceBindingRecovery;
     if (!admin || !recovery) throw new Error("本机工作区管理能力不可用");
-    host = createLocalWorkspaceManagementHost({
+    host = await startExecutorLocalWorkspaceHost({
+      roles: mesh.roles,
       lease: owner,
-      zhixingHome,
-      facade: {
-        deviceId: runtime.deviceId,
-        executorId: executorIdForDevice(runtime.deviceId),
-        admin,
-        recovery,
-        resources: runtime.executorResourceGovernor,
+      host: {
+        zhixingHome,
+        facade: {
+          deviceId: runtime.deviceId,
+          executorId: executorIdForDevice(runtime.deviceId),
+          admin,
+          recovery,
+          resources: runtime.executorResourceGovernor,
+        },
+        storageMaintenance: capacity.storage,
       },
-      storageMaintenance: capacity.storage,
     });
-    await host.start();
-    return await operation(createLocalWorkspaceClient(zhixingHome));
+    if (!host) throw new Error("本机工作区管理能力不可用");
+    return await useLocalWorkspaceClient(
+      createLocalWorkspaceClient(zhixingHome),
+      operation,
+      delivery,
+    );
   } finally {
     await host?.close().catch(() => undefined);
     await runtime?.startupCleanup.run().catch(() => undefined);
     await mcpHub?.dispose().catch(() => undefined);
     mesh?.bootstrapStore.stopStorageMaintenance();
-    await owner.release();
+    await owner?.release();
   }
+}
+
+async function useLocalWorkspaceClient<T, R>(
+  client: LocalWorkspaceClient,
+  operation: (workspace: LocalWorkspaceClient) => Promise<T>,
+  delivery: LocalWorkspaceDelivery<T, R>,
+): Promise<R> {
+  for (;;) {
+    try {
+      const result = await operation(client);
+      const delivered = await delivery.result(
+        result,
+        client.consumptionCredential(),
+      );
+      await client.confirmDelivered();
+      return delivered;
+    } catch (error) {
+      if (!(error instanceof RecoveredLocalWorkspaceOperationsError)) throw error;
+      await delivery.recovered(
+        error.operations.map((operation) =>
+          recoveryNoticeOf(error.outboxId, operation)),
+      );
+      await client.confirmDelivered();
+    }
+  }
+}
+
+function recoveryNoticeOf(
+  outboxId: string,
+  operation: LocalWorkspaceOperation,
+): LocalWorkspaceRecoveryNotice {
+  const result = operation.result as
+    | {
+        readonly ok?: unknown;
+        readonly error?: { readonly code?: unknown; readonly message?: unknown };
+      }
+    | undefined;
+  const failed = result?.ok === false;
+  const error = result?.error;
+  const controlWorkspace = controlWorkspaceResult(operation);
+  return {
+    operationId: operation.operationId,
+    operation: operation.input.kind,
+    target: operationTarget(operation.input),
+    outcome: failed ? "failed" : "succeeded",
+    credential: {
+      outboxId,
+      localSeq: operation.localSeq,
+      operationId: operation.operationId,
+      inputDigest: operation.inputDigest,
+      resultDigest: operation.resultDigest!,
+    },
+    ...(controlWorkspace ? { controlWorkspace } : {}),
+    ...(failed && typeof error?.code === "string" && typeof error.message === "string"
+      ? { error: { code: error.code, message: error.message } }
+      : {}),
+  };
+}
+
+function controlWorkspaceResult(
+  operation: LocalWorkspaceOperation,
+): { readonly deviceId: string; readonly bindingRef: string } | undefined {
+  if (
+    operation.input.kind !== "create" ||
+    operation.input.purpose !== "control"
+  ) return undefined;
+  const result = operation.result as
+    | { readonly ok?: unknown; readonly value?: unknown }
+    | undefined;
+  if (
+    result?.ok !== true ||
+    !result.value ||
+    typeof result.value !== "object" ||
+    Array.isArray(result.value)
+  ) return undefined;
+  const value = result.value as Record<string, unknown>;
+  if (
+    typeof value.deviceId !== "string" ||
+    typeof value.bindingRef !== "string"
+  ) return undefined;
+  return { deviceId: value.deviceId, bindingRef: value.bindingRef };
+}
+
+function operationTarget(input: LocalWorkspaceWriteOperation): string {
+  switch (input.kind) {
+    case "create":
+      return input.displayName;
+    case "rename":
+      return input.currentName;
+    case "repath":
+    case "remove":
+      return input.name;
+    case "reset":
+      return input.expectedCatalogGeneration;
+  }
+  throw new TypeError("Unknown local workspace operation");
 }

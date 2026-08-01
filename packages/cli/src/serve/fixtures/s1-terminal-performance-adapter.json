@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "target": "baseline",
+  "revision": "d9283db480b48dd009947750e14698a31295594f",
+  "intent": "return the fixed three-frame performance response",
+  "input": "benchmark",
+  "deterministicProvider": {
+    "kind": "loopback-openai-compatible-v1",
+    "response": ["frame-1", "frame-2", "frame-3"]
+  },
+  "environment": {
+    "ZHIXING_HOME": "{home}",
+    "ZHIXING_CONFIG_PATH": "{home}/config.jsonc",
+    "ZHIXING_INPUT_TYPEAHEAD": "off"
+  },
+  "setup": {
+    "noWorkspace": {
+      "kind": "public-config",
+      "command": "node",
+      "args": ["{harness}/scripts/s7-public-scenario-setup.mjs", "--target", "{target}", "--home", "{home}", "--workspace", "{workspace}", "--mode", "s1-no-workspace"]
+    },
+    "workspace": {
+      "kind": "public-config",
+      "command": "node",
+      "args": ["{harness}/scripts/s7-public-scenario-setup.mjs", "--target", "{target}", "--home", "{home}", "--workspace", "{workspace}", "--mode", "s1-workspace"]
+    }
+  },
+  "terminal": {
+    "kind": "public-first-party-cli",
+    "command": "node",
+    "args": ["{harness}/scripts/s7-public-terminal-driver.mjs", "--target", "{target}", "--home", "{home}"]
+  },
+  "protocol": {
+    "ready": "❯\\s",
+    "frame": "^frame-[123]$",
+    "complete": "^frame-3$"
+  },
+  "timeoutMs": 30000
+}

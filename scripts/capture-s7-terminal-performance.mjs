@@ -12,8 +12,33 @@ const target = path.resolve(args.target);
 const adapterPath = path.resolve(args.adapter);
 const output = path.resolve(args.output);
 const manifest = JSON.parse(await readFile(path.join(root, "packages/cli/src/serve/fixtures/s1-terminal-performance-baseline.json"), "utf8"));
-const adapter = validateAdapter(JSON.parse(await readFile(adapterPath, "utf8")), args.revision);
-const scriptDigest = await fileDigest(fileURLToPath(import.meta.url));
+const canonicalAdapterPath = path.join(
+  root,
+  "packages/cli/src/serve/fixtures",
+  args.adapterRole === "baseline"
+    ? "s1-terminal-performance-adapter.json"
+    : "current-terminal-performance-adapter.json",
+);
+if (adapterPath !== canonicalAdapterPath) {
+  throw new Error("Performance capture must use the checked-in canonical adapter");
+}
+const adapter = validateAdapter(
+  JSON.parse(await readFile(adapterPath, "utf8")),
+  args.revision,
+  args.adapterRole,
+);
+const harnessFiles = [
+  fileURLToPath(import.meta.url),
+  path.join(root, "scripts/s7-public-scenario-setup.mjs"),
+  path.join(root, "scripts/s7-public-terminal-driver.mjs"),
+  path.join(root, "scripts/compare-s7-terminal-performance.mjs"),
+];
+const harnessFilesDigest = digest(await Promise.all(
+  harnessFiles.map(async (file) => [
+    path.relative(root, file).replaceAll("\\", "/"),
+    await fileDigest(file),
+  ]),
+));
 const adapterDigest = await fileDigest(adapterPath);
 const deliveryTreeDigest = await directoryDigest(path.join(target, "packages"));
 const buildDigest = await directoryDigest(path.join(target, "packages", "cli", "dist"));
@@ -21,7 +46,7 @@ const workspace = await mkdtemp(path.join(tmpdir(), "zhixing-s7-terminal-"));
 const observationPrefix = "__ZHIXING_TERMINAL_PERFORMANCE_V1__:";
 
 try {
-  const scenarioSetup = await prepareScenarios(adapter, { target, workspace });
+  const scenarioSetup = await prepareScenarios(adapter, { target, workspace, harness: root });
   const environment = {
     platform: platform(),
     architecture: arch(),
@@ -45,6 +70,7 @@ try {
   for (const scenario of manifest.scenarios) {
     const driver = new ExternalTerminalDriver(adapter, {
       target,
+      harness: root,
       home: scenarioSetup[scenario].home,
       workspace: scenarioSetup[scenario].workspace,
     });
@@ -70,7 +96,6 @@ try {
       workspace: setup.workspace === null ? "none" : "canonical-fixture",
       intent: setup.intent,
       contentDigest: setup.contentDigest,
-      setupKind: setup.setupKind,
     })),
   );
   await mkdir(path.dirname(output), { recursive: true });
@@ -84,7 +109,9 @@ try {
       sourceRevision: args.revision,
       deliveryTreeDigest,
       buildDigest,
-      harnessDigest: protocolDigest("TerminalPerformanceHarness", 1, { scriptDigest }),
+      harnessDigest: protocolDigest("TerminalPerformanceHarness", 1, {
+        harnessFilesDigest,
+      }),
       setupAdapterDigest: adapterDigest,
       scenarioSetupDigest,
     },
@@ -227,15 +254,52 @@ async function runCommand(spec, context) {
   });
 }
 
-function validateAdapter(value, revision) {
-  if (!value || value.version !== 1 || value.revision !== revision) throw new Error("Performance adapter revision is invalid");
+function validateAdapter(value, revision, role) {
+  if (
+    !value ||
+    Object.keys(value).sort().join(",") !==
+      "deterministicProvider,environment,input,intent,protocol,revision,setup,target,terminal,timeoutMs,version" ||
+    value.version !== 1 ||
+    value.target !== role ||
+    (role === "baseline"
+      ? value.revision !== revision
+      : value.revision !== "delivery-head")
+  ) throw new Error("Performance adapter revision is invalid");
+  if (
+    typeof value.intent !== "string" ||
+    typeof value.input !== "string" ||
+    value.deterministicProvider?.kind !== "loopback-openai-compatible-v1" ||
+    JSON.stringify(value.deterministicProvider.response) !== JSON.stringify(["frame-1", "frame-2", "frame-3"])
+  ) throw new Error("Performance adapter deterministic input is invalid");
   for (const key of ["noWorkspace", "workspace"]) {
     const item = value.setup?.[key];
-    if (!item || item.kind !== "public-cli" || typeof item.command !== "string" || !Array.isArray(item.args)) {
-      throw new Error(`Performance ${key} setup must use a public CLI adapter`);
+    const expectedMode = `${role === "baseline" ? "s1" : "current"}-${key === "workspace" ? "workspace" : "no-workspace"}`;
+    const expectedKind = role === "baseline" || key === "noWorkspace"
+      ? "public-config"
+      : "public-cli";
+    if (
+      !item ||
+      Object.keys(item).sort().join(",") !== "args,command,kind" ||
+      item.kind !== expectedKind ||
+      item.command !== "node" ||
+      !Array.isArray(item.args) ||
+      item.args[0] !== "{harness}/scripts/s7-public-scenario-setup.mjs" ||
+      item.args.at(-1) !== expectedMode
+    ) {
+      throw new Error(`Performance ${key} setup must use its version-specific public entry`);
     }
   }
-  if (!value.terminal || value.terminal.kind !== "public-first-party-cli") throw new Error("Performance terminal adapter is not public");
+  if (
+    !value.terminal ||
+    Object.keys(value.terminal).sort().join(",") !== "args,command,kind" ||
+    value.terminal.kind !== "public-first-party-cli" ||
+    value.terminal.command !== "node" ||
+    value.terminal.args[0] !== "{harness}/scripts/s7-public-terminal-driver.mjs"
+  ) throw new Error("Performance terminal adapter is not public");
+  if (
+    Object.keys(value.environment ?? {}).sort().join(",") !==
+      "ZHIXING_CONFIG_PATH,ZHIXING_HOME,ZHIXING_INPUT_TYPEAHEAD"
+  ) throw new Error("Performance adapter environment is not canonical");
   for (const key of ["ready", "frame", "complete"]) new RegExp(value.protocol?.[key], "u");
   if (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1000) throw new Error("Performance adapter timeout is invalid");
   return value;
@@ -243,18 +307,28 @@ function validateAdapter(value, revision) {
 
 function parseArgs(argv) {
   const result = {};
+  const allowed = new Set(["target", "adapter", "adapterRole", "output", "revision"]);
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
     const value = argv[index + 1];
-    if (!key?.startsWith("--") || !value) throw new Error("Expected --target, --adapter, --output and --revision");
-    result[key.slice(2)] = value;
+    if (!key?.startsWith("--") || !value) throw new Error("Expected complete performance capture arguments");
+    const name = key.slice(2);
+    if (!allowed.has(name) || name in result) throw new Error(`Unknown or duplicate --${name}`);
+    result[name] = value;
   }
-  for (const key of ["target", "adapter", "output", "revision"]) if (!result[key]) throw new Error(`Missing --${key}`);
+  for (const key of ["target", "adapter", "adapterRole", "output", "revision"]) if (!result[key]) throw new Error(`Missing --${key}`);
+  if (result.adapterRole !== "baseline" && result.adapterRole !== "current") {
+    throw new Error("Performance adapter role is invalid");
+  }
   return result;
 }
 
 function expand(value, context) {
-  return value.replaceAll("{target}", context.target).replaceAll("{home}", context.home ?? "").replaceAll("{workspace}", context.workspace ?? "");
+  return value
+    .replaceAll("{target}", context.target)
+    .replaceAll("{harness}", context.harness ?? "")
+    .replaceAll("{home}", context.home ?? "")
+    .replaceAll("{workspace}", context.workspace ?? "");
 }
 
 function expandRecord(value, context) {

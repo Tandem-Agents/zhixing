@@ -4,6 +4,7 @@ import { protocolDigest } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { LocalWorkspaceOperationOutbox } from "./local-workspace-operation-outbox.js";
+import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
 
 async function createRoot(): Promise<string> {
   return path.join(await createTempDir("workspace-outbox"), "outbox");
@@ -126,5 +127,56 @@ describe("LocalWorkspaceOperationOutbox", () => {
     await writeFile(marker, `${JSON.stringify(markerRecord)}\n`, "utf8");
     await expect(new LocalWorkspaceOperationOutbox({ rootDir: rebound }).initialize())
       .rejects.toThrow("identity");
+  });
+
+  it("binds reset preview and commit to one durable identity across restart", async () => {
+    const root = await createRoot();
+    const clock = () => "2026-08-01T00:00:00.000Z";
+    const first = new LocalWorkspaceOperationOutbox({ rootDir: root, clock });
+    const preview = await first.prepare({
+      kind: "reset",
+      expectedCatalogGeneration: "catalog-a",
+      impact: WORKSPACE_CATALOG_RESET_IMPACT,
+    });
+    expect(preview).toMatchObject({ state: "prepared" });
+    expect(preview.confirmationToken).toBeUndefined();
+    expect(preview.expiresAt).toBe("2026-08-01T00:15:00.000Z");
+
+    const restarted = new LocalWorkspaceOperationOutbox({ rootDir: root, clock });
+    await expect(restarted.prepare(preview.input)).resolves.toMatchObject({
+      operationId: preview.operationId,
+      localSeq: preview.localSeq,
+      inputDigest: preview.inputDigest,
+    });
+    await expect(restarted.commit(preview, { impact: "another impact" }))
+      .rejects.toThrow("does not match");
+    const committed = await restarted.commit(preview, {
+      impact: WORKSPACE_CATALOG_RESET_IMPACT,
+    });
+    expect(committed).toMatchObject({
+      state: "committed",
+      operationId: preview.operationId,
+    });
+    expect(committed.confirmationToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  });
+
+  it("abandons an expired reset preview without creating a committed obligation", async () => {
+    const root = await createRoot();
+    let now = "2026-08-01T00:00:00.000Z";
+    const outbox = new LocalWorkspaceOperationOutbox({ rootDir: root, clock: () => now });
+    const preview = await outbox.prepare({
+      kind: "reset",
+      expectedCatalogGeneration: "catalog-a",
+      impact: WORKSPACE_CATALOG_RESET_IMPACT,
+    });
+    now = "2026-08-01T00:15:00.001Z";
+    await expect(outbox.commit(preview, { impact: WORKSPACE_CATALOG_RESET_IMPACT }))
+      .rejects.toThrow("abandoned");
+    await expect(outbox.pending()).resolves.toMatchObject({
+      operations: [expect.objectContaining({
+        operationId: preview.operationId,
+        state: "abandoned",
+      })],
+    });
   });
 });

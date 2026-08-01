@@ -37,10 +37,8 @@ import {
   ExecutorJobOwnerAssembly,
   ExecutorJobOwnerLifecycle,
 } from "./executor-job-owner.js";
-import {
-  LocalWorkspaceManagementHost,
-  createLocalWorkspaceManagementHost,
-} from "../runtime/local-workspace-management-host.js";
+import type { LocalWorkspaceManagementHost } from "../runtime/local-workspace-management-host.js";
+import { startExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -112,25 +110,25 @@ export async function runExecutorRole(
       storageMaintenance: deviceCapacity.storage,
       deviceCapacity: deviceCapacity.arbiter,
     });
-    if (!bootstrap.localWorkspaceOwner) {
-      throw new Error("Executor host did not acquire the local workspace owner lock");
-    }
     if (!authority.workspaceBindingAdmin || !authority.workspaceBindingRecovery) {
       throw new Error("Local workspace management ports are unavailable");
     }
-    localWorkspaceHost = createLocalWorkspaceManagementHost({
+    localWorkspaceHost = await startExecutorLocalWorkspaceHost({
+      roles: bootstrap.mesh.roles,
       lease: bootstrap.localWorkspaceOwner,
-      zhixingHome,
-      facade: {
-        deviceId: authority.deviceId,
-        executorId: executorIdForDevice(authority.deviceId),
-        admin: authority.workspaceBindingAdmin,
-        recovery: authority.workspaceBindingRecovery,
-        resources: authority.executorResourceGovernor,
+      host: {
+        zhixingHome,
+        facade: {
+          deviceId: authority.deviceId,
+          executorId: executorIdForDevice(authority.deviceId),
+          admin: authority.workspaceBindingAdmin,
+          recovery: authority.workspaceBindingRecovery,
+          resources: authority.executorResourceGovernor,
+        },
+        storageMaintenance: deviceCapacity.storage,
       },
-      storageMaintenance: deviceCapacity.storage,
     });
-    await localWorkspaceHost.start();
+    if (!localWorkspaceHost) throw new Error("Local workspace management host is unavailable");
     dataPlane = new ExecutorDataPlaneRuntime({
       zhixingHome,
       authority,

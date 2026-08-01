@@ -79,7 +79,10 @@ import {
 import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
 import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
-import { withLocalWorkspaceFacade } from "./runtime/workspace-command.js";
+import {
+  withLocalWorkspaceFacade,
+  worksceneCreateRequestIdForLocalWorkspace,
+} from "./runtime/workspace-command.js";
 import {
   RpcManagementFacade,
   type ServerInfoResult,
@@ -1541,12 +1544,52 @@ export async function startRepl(): Promise<void> {
                       listScenes: () => worksceneFacade.list(),
                       complete: (prompt, signal) =>
                         managementFacade.llmComplete(prompt, "main", signal),
-                      authorizeLocalWorkspace: (displayName, absolutePath) =>
-                        withLocalWorkspaceFacade((workspace) =>
-                          workspace.authorizeForControl(
-                            displayName,
-                            absolutePath,
-                          ),
+                      createWithLocalWorkspace: (sceneName, absolutePath) =>
+                        withLocalWorkspaceFacade(
+                          (workspace) =>
+                            workspace.authorizeForControl(
+                              sceneName,
+                              absolutePath,
+                            ),
+                          {
+                            result: async (workspace, credential) => {
+                              if (!credential) {
+                                throw new Error(
+                                  "本机工作区授权缺少可恢复的消费凭据",
+                                );
+                              }
+                              return worksceneFacade.create(
+                                sceneName,
+                                workspace,
+                                worksceneCreateRequestIdForLocalWorkspace(
+                                  credential,
+                                ),
+                              );
+                            },
+                            recovered: async (operations) => {
+                              cliWriter.line(
+                                chalk.yellow(
+                                  `${layout.contentPrefix}已恢复 ${operations.length} 条先前未确认的本机工作区操作结果。`,
+                                ),
+                              );
+                              for (const operation of operations) {
+                                if (operation.controlWorkspace) {
+                                  await worksceneFacade.create(
+                                    operation.target,
+                                    operation.controlWorkspace,
+                                    worksceneCreateRequestIdForLocalWorkspace(
+                                      operation.credential,
+                                    ),
+                                  );
+                                }
+                                cliWriter.line(
+                                  chalk.dim(
+                                    `${layout.contentPrefix}${operation.operation} · ${operation.target} · ${operation.outcome === "succeeded" ? "已完成" : "失败"}`,
+                                  ),
+                                );
+                              }
+                            },
+                          },
                         ),
                       create: (sceneName, workspace) =>
                         worksceneFacade.create(sceneName, workspace),

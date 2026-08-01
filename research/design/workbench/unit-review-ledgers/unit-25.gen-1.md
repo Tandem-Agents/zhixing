@@ -11,7 +11,7 @@
 
 ## 当前状态
 
-- **当前状态**:独立审查清单重定稿（D25-F08/F09 补充开发已完成，当前 151 路径交付闭包待定稿审查与独立审查）
+- **当前状态**:冻结准备（U25-16/U25-17 已完成专项修复、直接验证与功能审查；待更新完整交付闭包、派生产物账和冻结指纹）
 - **连续无新增问题轮数**:0 / 2
 - **交付物是否冻结**:否
 - **交付物文件集**:第 25 单元起点 `994f05c` 至当前工作区共 151 个非工作台交付路径（CLI 64、core 45、executor 4、orchestrator 6、owner-kernel 7、rpc 2、runtime-host 5、server 11、脚本 4、根配置 1、架构与规格 2）；无删除项；路径集 SHA-256 `f87a0aa7cd8172235df05181c23517c88335eb9e6c1eb5e855742cea15ba46ec`
@@ -64,7 +64,7 @@
 >
 > **本轮收口方式**：U25-02～U25-07、U25-11、U25-14 是已定稿开发义务没有真正完成的补充开发，不得按普通问题逐点修补或修一项审一轮；须与 U25-01、U25-10 两个功能缺陷组成一次集中实现闭包，按 `U25-01 → U25-05 → U25-11 → U25-03 → U25-14 → U25-02 → U25-04 → U25-10 → U25-06 → U25-07` 的依赖顺序完成生产链，最后统一建设 conformance 与性能证据。U25-08、U25-09、U25-12、U25-13、U25-15 为非阻断问题，保持独立记录，不穿插本批阻断闭包。
 >
-> **当前实现核账**：U25-01～U25-15 的既有实现证据绑定旧 133 文件基线；U25-16/U25-17 已分别由 D25-F08/F09 完成补充开发。当前 151 路径交付闭包改变了公共合同、生产组合根、耐久重放和结构/体验验收资产，全部问题统一处于“待验证”，旧验证证据不得代表当前结论。
+> **当前实现核账**：U25-01～U25-15 的既有实现证据绑定旧 133 文件基线，保持“待验证”。D25-F08/F09 的 U25-16/U25-17 已完成专项修复、受影响验证和独立功能闭包核查，状态为“已验证”；整单元旧验证证据仍不得代表最终结论。
 
 | 编号 | 事实与证据 | 根本原因 | 完整影响面 | 最优解决方案与验收条件 | 状态 |
 | ---- | ---------- | -------- | ---------- | ---------------------- | ---- |
@@ -83,8 +83,8 @@
 | U25-13 | **P2，工作量：小到中；来源执行者 1 号全审。** 生产选机未传稳定亲和参数，多候选恒退化为 executorId 字典序；语义不足时直接取首项，没有询问分支。 | 多设备下选择结果忽略既有亲和与用户意图，可能静默跑到非预期设备。 | ExecutorSelector、owner 组合根、queued/询问产品面及 IR25-10、20。 | 由 owner 单源提供冻结的稳定亲和键；多候选仅在冻结策略能唯一判定时自动选择，否则返回结构化“需要选择”终态交给 first-party 询问，禁止字典序兜底。验收覆盖重启稳定、候选同分、离线/上线与用户选择回放。 | 待验证 |
 | U25-14 | **P1，工作量：小到中；来源执行者 1 号全审，补充开发（D25-01/D25-07 未真正完成）。** `runTurnWithCommit` 的 durable.run 调用未传 `environment`，RPC/session turn 入口也无显式选择载荷；而 durable admission 对 environment 做全等反绑，入口一旦接通就会首调或重放失败。 | first-party 显式环境选择只落了合同和内层运行时，真实输入→admission→assignment 生产链断裂；IR25-09 的既有通过结论失效。 | first-party RPC/session wire、run-turn、durable admission/replay、environment requirement、channel 拒绝与 IR25-01～02、09、16、19、22～23、26。 | 在 first-party 输入 DTO 增加结构化显式选择并严格解析，逐层原样传入 `runTurnWithCommit`、durable.run、ControlEnvelope 和 assignment；channel/非 first-party 零构造。重放逐层反绑同一选择，缺省明确为无 workspace。验收用真实 first-party 入口覆盖有/无选择、异载荷重放、重启/重派及 channel 拒绝。 | 待验证 |
 | U25-15 | **P2，工作量：小；来源执行者 1 号全审。** `SessionControlMutation` 的 session-meta patch 类型仍暴露 `sceneId`，`session-activity` 实现字段 `operation:put/tombstone`、`at` 又与冻结的 `upsert/delete`、`lastActiveAt` 不同。 | 类型/耐久声明与冻结语义分裂，调用者可构造运行时必拒载荷，后续兼容与转移实现会按错误 schema 接入。 | core contract/codec、生产者/消费者、兼容 fixture、转移分类及 IR25-02、08、19、23。 | 从 patch 类型移除 sceneId，并将 session-activity 字段统一到冻结合同；若已有落盘样本则增加显式版本化兼容读，禁止静默双语义。同步全部生产者、严格 codec、fixture 与行为矩阵。 | 待验证 |
-| U25-16 | **P1，工作量：大；来源 P25-16，补充开发（D25-F08）。** 旧实现由调用端临时创建第二 authority/capacity/outbox 根，操作身份随请求变化，提交后丢响应无法可靠认领，reset 也缺少完整预览—确认—恢复链。 | 本机 workspace 管理没有唯一跨进程生产 owner，也没有把 prepare、commit、权威结果、因果确认和 checkpoint 压缩组织成同一耐久操作协议。 | daemon/one-shot bootstrap、本机 transport、workspace Admin/Recovery、capacity 与 owner 锁、LocalWorkspaceOperationOutbox、reset、恢复、关停、路径保密及 IR25-01～04、12～20、22～23、26～29。 | 由目标设备唯一 `LocalWorkspaceManagementHost` 持有 owner 锁、capacity、权威端口和 outbox；客户端只经受信本地 transport 执行 prepare→commit，host 以稳定 operationId/localSeq/inputDigest 重驱 committed 义务，并以连续前缀 `throughSeq + prefixDigest` 因果确认后压缩结果；reset 复用同一协议完成 preview→confirm→恢复。验收须机械覆盖双进程竞争、任意响应丢失、越洞/回退确认、各崩溃边界、重启、关停和普通 RPC/mesh/raw-path 零暴露。 | 待验证 |
-| U25-17 | **P1，工作量：大；来源 P25-17，补充开发（D25-F09）。** 旧结构与体验验收依赖手写 registry/golden、字符串账本和可跳过的合成性能采集，无法证明当前生产合同、分支与真实终端路径。 | 规格、TypeScript 端口、生产 registry、耐久分支和性能资产各自维护第二份事实，没有反绑同一交付物与真实生产执行点。 | RecoveryPort 合同、canonical registry/golden、生产 record descriptor 与 scenario、真实 reducer/recovery owner、隔离 S1/current 构建、终端 driver、preflight/activity 测量、资产指纹及 IR25-02、13、19、22～24、26～27、30～33。 | 机械对账规格与导出合同；从 canonical production registry 生成 golden；由生产 descriptor 与可执行 scenario adapter exact-set 构造耐久账本，逐分支经过真实 producer/validator/reducer/recovery；外部 harness 用公开入口准备等价 S1 raw-workspace/current binding-workspace，并经真实终端链采集冷热样本，统一记录构建、场景、配置和环境指纹。验收要求任何合同漂移、分支缺格、绕过生产路径、陈旧资产或缺 current capture 均 fail-closed。 | 待验证 |
+| U25-16 | **P1，工作量：中偏大；来源 P25-16，D25-F08 专项闭包已验证。** daemon、access-surface 与 one-shot 现共用 role-gated owner/host 原语，anchor-only 零 workspace owner；全设备 capacity 保持全角色唯一裁决器，只有 executor 在取得 canonical owner 后打开 workspace 权威设施。completed 结果携稳定 `outboxId + localSeq + operationId + inputDigest + resultDigest` 消费凭据，调用方先完成下游耐久交付，再确认连续前缀；workscene 创建以该凭据派生稳定 requestId，响应丢失或重启只幂等重放。reset preview 在 prepare 时冻结同一身份、世代和 expiry，confirm 只提交原 operation。 | 原根因是设施排他、角色门控、调用方消费事实和 reset 用户确认没有归入同一耐久操作状态机；现已由唯一 host/outbox、稳定消费凭据和 prepare→confirm 状态机单源闭合。 | daemon/one-shot/access-surface bootstrap、本机 transport、LocalWorkspaceOperationOutbox、workspace 命令与 reset、非 executor 拓扑、崩溃恢复和 conformance；受影响 IR25-01～02、04、12～13、16～17、20、22、26～29。 | 专项功能审查确认：无 workspace 私有 capacity/第二 owner；结果交付失败不推进确认水位，交付成功后才确认；控制授权恢复以稳定 requestId 收敛；preview 放弃、过期、重启及重复确认均保持同一身份。直接相关 CLI 用例、core 合同用例及格式检查通过；CLI 类型检查仅剩既有配置凭据错误，本闭包无新增类型错误。 | 已验证 |
+| U25-17 | **P1，工作量：大；来源 P25-17，D25-F09 专项闭包已验证。** RecoveryPort 现以 TypeScript AST 规范化完整方法签名对账规格；registry golden 由 canonical production registry 与生产 role topology 生成；耐久账本聚合八个生产 descriptor，exact-set adapter 覆盖全部登记分支，其中 workspace binding/outbox 逐分支直穿生产原语，其余记录族运行各自完整生产测试闭包，已不再只回显 descriptor。S1/current canonical adapter 固定在仓库内，仅走版本专属公开设置入口与共同终端 driver；capture 反绑脚本、setup、driver、比较器、场景摘要和交付指纹。 | 原根因是验收层维护可自洽的第二份摘要；现已改为从真实端口、角色装配、生产 descriptor/测试闭包及公开终端入口派生唯一证据。 | RecoveryPort 合同、server registry/golden、八类耐久 owner/validator/reducer/recovery、S1/current 终端采集、`s7:verify` 与结构/体验提交门禁；受影响 IR25-01～02、13、19、22～24、26、30～33。 | 专项功能审查确认：方法/角色/family/分支/adapter 任一集合漂移均使门禁失败；baseline 不导入 current 实现，版本间仅比较等价产品场景；外部 adapter、错误角色、摘要缺失或陈旧资产均 fail-closed。AST drift、registry golden、八族账本、性能门禁与脚本语法直接验证通过。 | 已验证 |
 
 ## 已排除问题
 
@@ -112,6 +112,8 @@
 | V25-04 | server 的 workscene RPC 薄适配和 canonical registry 结构/行为 golden | 运行当前变更测试并从真实 registry 核对 golden | `packages/server` 当前变更生产/测试/golden 闭包 | 集中修复合并直接验证 / 低 | 旧基线 22 / 22 通过；golden 生成链已替换，须重跑 | 旧交付指纹 `42633b6d…87f` | 失效 |
 | V25-05 | executor assignment ledger 中本单元改动的环境与回放行为 | 定向运行被修改用例；全文件运行仅作诊断，不作为包测证据 | `assignment-ledger.test.ts` 中本单元改动用例及直接生产输入 | 集中修复合并直接验证 / 中 | 旧基线定向通过；生产 descriptor/scenario 输入已变化，须重跑 | 旧交付指纹 `42633b6d…87f` | 失效 |
 | V25-06 | CLI 当前变更测试覆盖唯一管理组合根、耐久 outbox、local-only transport、迁移、conformance 与真实性能入口 | 按 IO 特征分组运行；失败单例归因并定向复核 | `packages/cli` 当前变更生产/测试闭包及 S7 验收脚本 | 集中修复合并直接验证 / 高 | 旧基线分组通过；D25-F08/F09 新增生产链和测试，须按当前闭包重跑 | 旧交付指纹 `42633b6d…87f` | 失效 |
+| V25-07 | U25-16 的角色门禁、唯一 workspace host/outbox、稳定消费凭据、下游幂等交付与 reset 同身份确认 | CLI 八个直接相关测试文件分组运行；失败项修正后仅重跑该文件；专项功能审查复核生产调用链 | 17 文件闭包：bootstrap、host/outbox、workspace command、REPL/workscene consumer、daemon/access/executor 装配及对应测试 | 专项直接验证 / 中 | 42 通过、1 跳过；Biome 相关 16 文件零问题；CLI 类型检查仅剩 8 个既有配置凭据错误，本闭包零新增；功能审查通过 | `git-closure:2176c7534bb9dcc7fa5d3bd13b6f2cf79ecea9ac` | 有效 |
+| V25-08 | U25-17 的完整端口漂移、生产角色 registry、八族耐久 exact-set 见证及 canonical 公开终端采集门禁 | core drift 单测；registry golden check 与 server golden；CLI durable ledger/performance gate；全部相关 mjs `node --check`；专项功能审查 | 11 文件闭包：合同 drift、ledger/scenario、两版本 adapter、capture/setup/driver/golden/verify 脚本 | 专项直接验证 / 中 | core 1/1、server golden 3/3、CLI ledger 4/4 与 performance gate 9 通过 1 跳过；脚本语法检查通过；功能审查通过 | `git-closure:0a1c928ad8140e9a1383178f8effba194dfb593d` | 有效 |
 
 ## 终审记录
 

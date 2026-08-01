@@ -94,12 +94,13 @@ describe("serve topology command", () => {
       { roles: mesh.roles },
       expect.any(Object),
       {},
-      {
+      expect.objectContaining({
         mesh,
         deviceCapacity: harness.deviceCapacity,
+        localWorkspaceOwner: expect.objectContaining({ zhixingHome: "test-home" }),
         secretStore: harness.secretStore,
         startup,
-      },
+      }),
     );
   });
 

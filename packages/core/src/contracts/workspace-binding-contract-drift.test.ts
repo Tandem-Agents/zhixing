@@ -12,30 +12,27 @@ describe("workspace binding recovery contract", () => {
       readFile(path.join(repositoryRoot, "packages/core/src/contracts/ports.ts"), "utf8"),
       readFile(path.join(repositoryRoot, "research/design/modules/distributed-runtime/specification.md"), "utf8"),
     ]);
-    expect(interfaceMethods(source, "WorkspaceBindingRecoveryPort")).toEqual({
-      beginReset: 2,
-      completeReset: 2,
-      status: 0,
-    });
     const block = specification.match(/interface WorkspaceBindingRecoveryPort \{[\s\S]*?\n\}/u)?.[0];
     expect(block, "normative recovery port block").toBeDefined();
-    expect(interfaceMethods(block!, "WorkspaceBindingRecoveryPort")).toEqual({
-      beginReset: 2,
-      completeReset: 2,
-      status: 0,
-    });
+    expect(interfaceMethods(source, "WorkspaceBindingRecoveryPort")).toEqual(
+      interfaceMethods(block!, "WorkspaceBindingRecoveryPort"),
+    );
     expect(block).not.toContain("reset(");
   });
 });
 
-function interfaceMethods(source: string, name: string): Record<string, number> {
+function interfaceMethods(source: string, name: string): Record<string, string> {
   const tree = ts.createSourceFile("contract.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const methods: Record<string, number> = {};
+  const printer = ts.createPrinter({ removeComments: true });
+  const methods: Record<string, string> = {};
   const visit = (node: ts.Node): void => {
     if (ts.isInterfaceDeclaration(node) && node.name.text === name) {
       for (const member of node.members) {
         if (ts.isMethodSignature(member) && ts.isIdentifier(member.name)) {
-          methods[member.name.text] = member.parameters.length;
+          methods[member.name.text] = printer
+            .printNode(ts.EmitHint.Unspecified, member, tree)
+            .replace(/\s+/gu, " ")
+            .trim();
         }
       }
     }

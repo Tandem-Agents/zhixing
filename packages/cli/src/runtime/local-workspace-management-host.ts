@@ -22,20 +22,30 @@ import {
   callLocalWorkspaceHost,
   type LocalWorkspaceOwnerLease,
 } from "./local-workspace-owner.js";
+import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
 
 const PAGE_SIZE = 64;
 
-interface OperationIdentity {
+export interface OperationIdentity {
   readonly localSeq: number;
   readonly operationId: string;
   readonly inputDigest: string;
+}
+
+export interface LocalWorkspaceConsumptionCredential extends OperationIdentity {
+  readonly outboxId: string;
+  readonly resultDigest: string;
 }
 
 type HostRequest =
   | { readonly kind: "status" }
   | { readonly kind: "list" }
   | { readonly kind: "prepare"; readonly input: LocalWorkspaceWriteOperation }
-  | { readonly kind: "commit"; readonly identity: OperationIdentity }
+  | {
+      readonly kind: "commit";
+      readonly identity: OperationIdentity;
+      readonly confirmation?: { readonly impact: string };
+    }
   | { readonly kind: "pending"; readonly afterSeq: number }
   | {
       readonly kind: "acknowledge";
@@ -67,16 +77,65 @@ export interface LocalWorkspaceClient {
   rename(currentName: string, displayName: string, expectedRevision: number): Promise<LocalWorkspaceView>;
   repath(name: string, absolutePath: string, expectedRevision: number): Promise<LocalWorkspaceView>;
   remove(name: string, expectedRevision: number): Promise<void>;
-  reset(expectedCatalogGeneration: string, confirmedImpact: string): Promise<WorkspaceBindingResetReceipt>;
+  previewReset(expectedCatalogGeneration: string): Promise<LocalWorkspaceResetPreview>;
+  confirmReset(
+    preview: LocalWorkspaceResetPreview,
+    confirmedImpact: string,
+  ): Promise<WorkspaceBindingResetReceipt>;
+  consumptionCredential(): LocalWorkspaceConsumptionCredential | undefined;
+  confirmDelivered(): Promise<void>;
+}
+
+export interface LocalWorkspaceResetPreview extends OperationIdentity {
+  readonly expectedCatalogGeneration: string;
+  readonly impact: string;
+  readonly expiresAt: string;
+}
+
+export function encodeLocalWorkspaceResetPreview(
+  preview: LocalWorkspaceResetPreview,
+): string {
+  validateResetPreview(preview);
+  return Buffer.from(JSON.stringify(preview), "utf8").toString("base64url");
+}
+
+export function decodeLocalWorkspaceResetPreview(
+  encoded: string,
+): LocalWorkspaceResetPreview {
+  if (!/^[A-Za-z0-9_-]+$/u.test(encoded)) {
+    throw new TypeError("Local workspace reset confirmation is invalid");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    throw new TypeError("Local workspace reset confirmation is invalid");
+  }
+  const record = exactRecord(
+    value,
+    [
+      "expectedCatalogGeneration",
+      "expiresAt",
+      "impact",
+      "inputDigest",
+      "localSeq",
+      "operationId",
+    ],
+    "reset confirmation",
+  ) as unknown as LocalWorkspaceResetPreview;
+  validateResetPreview(record);
+  return structuredClone(record);
 }
 
 export class RecoveredLocalWorkspaceOperationsError extends Error {
   readonly code = "LOCAL_WORKSPACE_RESULTS_RECOVERED";
+  readonly outboxId: string;
   readonly operations: readonly LocalWorkspaceOperation[];
 
-  constructor(operations: readonly LocalWorkspaceOperation[]) {
+  constructor(outboxId: string, operations: readonly LocalWorkspaceOperation[]) {
     super("已恢复先前未确认的本机工作区操作结果，请查看后重试当前命令");
     this.name = "RecoveredLocalWorkspaceOperationsError";
+    this.outboxId = outboxId;
     this.operations = operations.map((operation) => structuredClone(operation));
   }
 }
@@ -132,7 +191,10 @@ export class LocalWorkspaceManagementHost {
       }
       return this.#outbox.prepare(request.input);
     }
-    const committed = await this.#outbox.commit(request.identity);
+    const committed = await this.#outbox.commit(
+      request.identity,
+      request.confirmation,
+    );
     const completed = await this.#drive(committed);
     return completed;
   }
@@ -202,7 +264,7 @@ export class LocalWorkspaceManagementHost {
       case "reset":
         return this.#facade.reset(
           input.expectedCatalogGeneration,
-          input.confirmedImpact,
+          input.impact,
           authority,
         );
     }
@@ -230,13 +292,26 @@ export function createLocalWorkspaceManagementHost(input: {
 }
 
 export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceClient {
+  let pendingDelivery: PendingDelivery | undefined;
+  let currentResult: LocalWorkspaceOperation | undefined;
+  const recover = async (): Promise<PendingDelivery> => {
+    pendingDelivery = await readPendingDelivery(zhixingHome);
+    return pendingDelivery;
+  };
   const read = (kind: "status" | "list") => async (): Promise<unknown> => {
-    const recovered = await reconcile(zhixingHome);
-    reportUnclaimedResults(recovered);
+    currentResult = undefined;
+    const recovered = await recover();
+    reportUnclaimedResults(recovered.outboxId, recovered.operations);
     const result = await callLocalWorkspaceHost(zhixingHome, { kind });
     return kind === "status" ? validateStatus(result) : validateWorkspaceList(result);
   };
-  const write = (input: LocalWorkspaceWriteOperation) => execute(zhixingHome, input);
+  const write = (
+    input: LocalWorkspaceWriteOperation,
+    confirmation?: { readonly impact: string },
+  ) => execute(zhixingHome, input, recover, confirmation).then((completed) => {
+    currentResult = completed.operation;
+    return completed.value;
+  });
   return {
     status: read("status") as () => Promise<LocalWorkspaceCatalogStatus>,
     list: read("list") as () => Promise<LocalWorkspaceView[]>,
@@ -252,8 +327,90 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
     remove: async (name, expectedRevision) => {
       await write({ kind: "remove", name, expectedRevision });
     },
-    reset: (expectedCatalogGeneration, confirmedImpact) =>
-      write({ kind: "reset", expectedCatalogGeneration, confirmedImpact }) as Promise<WorkspaceBindingResetReceipt>,
+    previewReset: async (expectedCatalogGeneration) => {
+      currentResult = undefined;
+      const input = validateLocalWorkspaceWriteOperation({
+        kind: "reset",
+        expectedCatalogGeneration,
+        impact: WORKSPACE_CATALOG_RESET_IMPACT,
+      });
+      const recovered = await recover();
+      reportUnclaimedResults(recovered.outboxId, recovered.operations);
+      const prepared = validateLocalWorkspaceOperation(
+        await callLocalWorkspaceHost(zhixingHome, { kind: "prepare", input }),
+      );
+      return resetPreviewOf(prepared);
+    },
+    confirmReset: async (preview, confirmedImpact) => {
+      validateResetPreview(preview);
+      if (confirmedImpact !== preview.impact) {
+        throw new TypeError("工作区目录恢复确认内容不完整");
+      }
+      const input = validateLocalWorkspaceWriteOperation({
+        kind: "reset",
+        expectedCatalogGeneration: preview.expectedCatalogGeneration,
+        impact: preview.impact,
+      });
+      const recovered = await recover();
+      const claimed = recovered.operations.find(
+        (operation) =>
+          operation.state === "completed" &&
+          operation.localSeq === preview.localSeq &&
+          operation.operationId === preview.operationId &&
+          operation.inputDigest === preview.inputDigest,
+      );
+      reportUnclaimedResults(
+        recovered.outboxId,
+        claimed
+          ? recovered.operations.filter(
+              (operation) => operation.operationId !== claimed.operationId,
+            )
+          : recovered.operations,
+      );
+      if (claimed) {
+        currentResult = claimed;
+        return resultValue(input, validateOperationResult(claimed.result)) as WorkspaceBindingResetReceipt;
+      }
+      const completed = validateLocalWorkspaceOperation(
+        await callLocalWorkspaceHost(zhixingHome, {
+          kind: "commit",
+          identity: {
+            localSeq: preview.localSeq,
+            operationId: preview.operationId,
+            inputDigest: preview.inputDigest,
+          },
+          confirmation: { impact: confirmedImpact },
+        }),
+      );
+      const result = validateOperationResult(completed.result);
+      await recover();
+      currentResult = completed;
+      return resultValue(input, result) as WorkspaceBindingResetReceipt;
+    },
+    consumptionCredential: () => {
+      const delivery = pendingDelivery;
+      const operation = currentResult;
+      if (!delivery || !operation?.resultDigest) return undefined;
+      if (!delivery.operations.some((candidate) =>
+        candidate.localSeq === operation.localSeq &&
+        candidate.operationId === operation.operationId &&
+        candidate.inputDigest === operation.inputDigest &&
+        candidate.resultDigest === operation.resultDigest)) {
+        throw new Error("Local workspace result is not part of the recoverable delivery prefix");
+      }
+      return {
+        outboxId: delivery.outboxId,
+        ...identityOf(operation),
+        resultDigest: operation.resultDigest,
+      };
+    },
+    confirmDelivered: async () => {
+      const delivery = pendingDelivery;
+      if (!delivery || delivery.operations.length === 0) return;
+      await acknowledgeDelivery(zhixingHome, delivery);
+      pendingDelivery = undefined;
+      currentResult = undefined;
+    },
   };
 }
 
@@ -266,26 +423,42 @@ export async function localWorkspaceHostIsReachable(zhixingHome: string): Promis
   }
 }
 
-async function execute(zhixingHome: string, input: LocalWorkspaceWriteOperation): Promise<unknown> {
+async function execute(
+  zhixingHome: string,
+  input: LocalWorkspaceWriteOperation,
+  recover: () => Promise<PendingDelivery>,
+  confirmation?: { readonly impact: string },
+): Promise<{ readonly value: unknown; readonly operation: LocalWorkspaceOperation }> {
   const normalized = validateLocalWorkspaceWriteOperation(input);
   const inputDigest = protocolDigest("LocalWorkspaceOperationInput", 1, normalized);
-  const recovered = await reconcile(zhixingHome);
-  const claimed = recovered.find(
+  const recovered = await recover();
+  const claimed = recovered.operations.find(
     (operation) => operation.state === "completed" && operation.inputDigest === inputDigest,
   );
   reportUnclaimedResults(
-    claimed ? recovered.filter((operation) => operation.operationId !== claimed.operationId) : recovered,
+    recovered.outboxId,
+    claimed
+      ? recovered.operations.filter(
+          (operation) => operation.operationId !== claimed.operationId,
+        )
+      : recovered.operations,
   );
-  if (claimed) return resultValue(normalized, validateOperationResult(claimed.result));
+  if (claimed) {
+    return {
+      value: resultValue(normalized, validateOperationResult(claimed.result)),
+      operation: claimed,
+    };
+  }
 
   const prepared = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(zhixingHome, { kind: "prepare", input: normalized }));
   const completed = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(zhixingHome, {
     kind: "commit",
     identity: identityOf(prepared),
+    ...(confirmation ? { confirmation } : {}),
   }));
   const result = validateOperationResult(completed.result);
-  await reconcile(zhixingHome);
-  return resultValue(normalized, result);
+  await recover();
+  return { value: resultValue(normalized, result), operation: completed };
 }
 
 function resultValue(input: LocalWorkspaceWriteOperation, result: OperationResult): unknown {
@@ -317,8 +490,15 @@ function validateOperationResult(value: unknown): OperationResult {
   throw new TypeError("Local workspace operation result is invalid");
 }
 
-async function reconcile(zhixingHome: string): Promise<readonly LocalWorkspaceOperation[]> {
+interface PendingDelivery {
+  readonly outboxId: string;
+  readonly confirmation: { readonly throughSeq: number; readonly prefixDigest: string };
+  readonly operations: readonly LocalWorkspaceOperation[];
+}
+
+async function readPendingDelivery(zhixingHome: string): Promise<PendingDelivery> {
   let afterSeq = 0;
+  let outboxId: string | undefined;
   let confirmation: { throughSeq: number; prefixDigest: string } | undefined;
   const terminal: LocalWorkspaceOperation[] = [];
   for (;;) {
@@ -326,6 +506,10 @@ async function reconcile(zhixingHome: string): Promise<readonly LocalWorkspaceOp
       kind: "pending",
       afterSeq,
     }));
+    outboxId ??= page.outboxId;
+    if (outboxId !== page.outboxId) {
+      throw new Error("Local workspace outbox identity changed during delivery recovery");
+    }
     confirmation ??= page.confirmation;
     for (const operation of page.operations) {
       if (operation.localSeq !== (terminal.at(-1)?.localSeq ?? confirmation.throughSeq) + 1) break;
@@ -335,7 +519,24 @@ async function reconcile(zhixingHome: string): Promise<readonly LocalWorkspaceOp
     if (page.next === undefined) break;
     afterSeq = page.next;
   }
-  if (!confirmation || terminal.length === 0) return [];
+  if (!confirmation || terminal.length === 0) {
+    return {
+      outboxId: outboxId ?? "",
+      confirmation: confirmation ?? {
+        throughSeq: 0,
+        prefixDigest: protocolDigest("LocalWorkspaceOperationPrefix", 1, null),
+      },
+      operations: [],
+    };
+  }
+  return { outboxId: outboxId!, confirmation, operations: terminal };
+}
+
+async function acknowledgeDelivery(
+  zhixingHome: string,
+  delivery: PendingDelivery,
+): Promise<void> {
+  const { confirmation, operations: terminal } = delivery;
   let prefixDigest = confirmation.prefixDigest;
   const entries: ConfirmationEntry[] = terminal.map((operation) => {
     const entry = { ...identityOf(operation), resultDigest: operation.resultDigest! };
@@ -351,12 +552,44 @@ async function reconcile(zhixingHome: string): Promise<readonly LocalWorkspaceOp
     prefixDigest,
     entries,
   });
-  return terminal;
 }
 
-function reportUnclaimedResults(operations: readonly LocalWorkspaceOperation[]): void {
+function resetPreviewOf(operation: LocalWorkspaceOperation): LocalWorkspaceResetPreview {
+  if (operation.input.kind !== "reset" || !operation.expiresAt) {
+    throw new TypeError("Local workspace reset preview is invalid");
+  }
+  return {
+    ...identityOf(operation),
+    expectedCatalogGeneration: operation.input.expectedCatalogGeneration,
+    impact: operation.input.impact,
+    expiresAt: operation.expiresAt,
+  };
+}
+
+function validateResetPreview(value: LocalWorkspaceResetPreview): void {
+  if (
+    !Number.isSafeInteger(value.localSeq) ||
+    value.localSeq < 1 ||
+    typeof value.operationId !== "string" ||
+    typeof value.inputDigest !== "string" ||
+    typeof value.expectedCatalogGeneration !== "string" ||
+    value.expectedCatalogGeneration.length === 0 ||
+    value.impact !== WORKSPACE_CATALOG_RESET_IMPACT ||
+    typeof value.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(value.expiresAt))
+  ) {
+    throw new TypeError("Local workspace reset preview is invalid");
+  }
+}
+
+function reportUnclaimedResults(
+  outboxId: string,
+  operations: readonly LocalWorkspaceOperation[],
+): void {
   const completed = operations.filter((operation) => operation.state === "completed");
-  if (completed.length > 0) throw new RecoveredLocalWorkspaceOperationsError(completed);
+  if (completed.length > 0) {
+    throw new RecoveredLocalWorkspaceOperationsError(outboxId, completed);
+  }
 }
 
 function identityOf(operation: LocalWorkspaceOperation): OperationIdentity {
@@ -374,7 +607,9 @@ function validateHostRequest(value: unknown): HostRequest {
     status: ["kind"],
     list: ["kind"],
     prepare: ["input", "kind"],
-    commit: ["identity", "kind"],
+    commit: "confirmation" in request
+      ? ["confirmation", "identity", "kind"]
+      : ["identity", "kind"],
     pending: ["afterSeq", "kind"],
     acknowledge: ["entries", "kind", "prefixDigest", "throughSeq"],
   };
@@ -388,8 +623,24 @@ function validateHostRequest(value: unknown): HostRequest {
       return { kind: request.kind };
     case "prepare":
       return { kind: "prepare", input: validateLocalWorkspaceWriteOperation(request.input) };
-    case "commit":
-      return { kind: "commit", identity: validateIdentity(request.identity) };
+    case "commit": {
+      const confirmation = request.confirmation === undefined
+        ? undefined
+        : exactRecord(request.confirmation, ["impact"], "operation confirmation");
+      if (
+        confirmation !== undefined &&
+        confirmation.impact !== WORKSPACE_CATALOG_RESET_IMPACT
+      ) {
+        throw new TypeError("Local workspace reset confirmation is invalid");
+      }
+      return {
+        kind: "commit",
+        identity: validateIdentity(request.identity),
+        ...(confirmation
+          ? { confirmation: { impact: confirmation.impact as string } }
+          : {}),
+      };
+    }
     case "pending":
       if (!Number.isSafeInteger(request.afterSeq) || (request.afterSeq as number) < 0) {
         throw new TypeError("Local workspace pending cursor is invalid");
@@ -449,6 +700,7 @@ function validateConfirmationEntry(value: unknown): ConfirmationEntry {
 }
 
 function validatePendingPage(value: unknown): {
+  outboxId: string;
   operations: LocalWorkspaceOperation[];
   next?: number;
   confirmation: { throughSeq: number; prefixDigest: string };
@@ -456,8 +708,8 @@ function validatePendingPage(value: unknown): {
   const record = exactRecord(
     value,
     value && typeof value === "object" && "next" in value
-      ? ["confirmation", "next", "operations"]
-      : ["confirmation", "operations"],
+      ? ["confirmation", "next", "operations", "outboxId"]
+      : ["confirmation", "operations", "outboxId"],
     "pending page",
   );
   if (!Array.isArray(record.operations)) throw new TypeError("Local workspace pending operations are invalid");
@@ -467,11 +719,14 @@ function validatePendingPage(value: unknown): {
     (confirmation.throughSeq as number) < 0 ||
     typeof confirmation.prefixDigest !== "string" ||
     !/^sha256:[0-9a-f]{64}$/u.test(confirmation.prefixDigest) ||
-    (record.next !== undefined && (!Number.isSafeInteger(record.next) || (record.next as number) < 1))
+    (record.next !== undefined && (!Number.isSafeInteger(record.next) || (record.next as number) < 1)) ||
+    typeof record.outboxId !== "string" ||
+    !/^outbox-[A-Za-z0-9_-]{32}$/u.test(record.outboxId)
   ) {
     throw new TypeError("Local workspace pending page is invalid");
   }
   return {
+    outboxId: record.outboxId as string,
     operations: record.operations.map(validateLocalWorkspaceOperation),
     ...(record.next === undefined ? {} : { next: record.next as number }),
     confirmation: {

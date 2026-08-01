@@ -15,8 +15,16 @@ try {
   }
   await run("pnpm", ["build"], args.baseline);
   await run("pnpm", ["build"], args.current);
-  await capture(args.current, args.baseline, args.baselineAdapter, baselineCapture, baselineRevision);
-  await capture(args.current, args.current, args.currentAdapter, currentCapture, currentRevision);
+  const baselineAdapter = path.join(
+    args.current,
+    "packages/cli/src/serve/fixtures/s1-terminal-performance-adapter.json",
+  );
+  const currentAdapter = path.join(
+    args.current,
+    "packages/cli/src/serve/fixtures/current-terminal-performance-adapter.json",
+  );
+  await capture(args.current, args.baseline, baselineAdapter, "baseline", baselineCapture, baselineRevision);
+  await capture(args.current, args.current, currentAdapter, "current", currentCapture, currentRevision);
   await run("pnpm", ["s7:registry-golden"], args.current);
   await run("pnpm", [
     "--filter", "@zhixing/core", "exec", "vitest", "run",
@@ -46,11 +54,12 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-function capture(current, target, adapter, outputPath, revision) {
+function capture(current, target, adapter, adapterRole, outputPath, revision) {
   return run(process.execPath, [
     path.join(current, "scripts/capture-s7-terminal-performance.mjs"),
     "--target", target,
     "--adapter", adapter,
+    "--adapterRole", adapterRole,
     "--output", outputPath,
     "--revision", revision,
   ], current);
@@ -58,13 +67,16 @@ function capture(current, target, adapter, outputPath, revision) {
 
 function parseArgs(argv) {
   const result = {};
+  const allowed = new Set(["baseline", "current"]);
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
     const value = argv[index + 1];
     if (!key?.startsWith("--") || !value) throw new Error("S7 verification arguments are incomplete");
-    result[key.slice(2)] = path.resolve(value);
+    const name = key.slice(2);
+    if (!allowed.has(name) || name in result) throw new Error(`Unknown or duplicate --${name}`);
+    result[name] = path.resolve(value);
   }
-  for (const key of ["baseline", "current", "baselineAdapter", "currentAdapter"]) {
+  for (const key of ["baseline", "current"]) {
     if (!result[key]) throw new Error(`Missing --${key}`);
   }
   return result;

@@ -2,18 +2,21 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureBuiltinRegistryDescriptor } from "../packages/server/src/rpc/methods/index.ts";
+import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const target = path.join(root, "packages/server/src/__tests__/__goldens__/canonical-registry.golden.json");
 
 export function captureCanonicalRegistryGolden() {
   const hosted = captureBuiltinRegistryDescriptor();
+  const registryFor = (roles) =>
+    planServeTopology({ roles }) === "anchor-host" ? hosted : [];
   return {
     version: 1,
     roleConfigurations: {
-      "anchor-executor": hosted,
-      "anchor-surface": hosted,
-      "executor-only": [],
+      "anchor-executor": registryFor(["anchor", "executor"]),
+      "anchor-surface": registryFor(["anchor", "surface"]),
+      "executor-only": registryFor(["executor"]),
     },
     retiredMethods: ["workspace.binding.admin", "workspace.binding.reset"],
   };

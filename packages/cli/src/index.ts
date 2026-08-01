@@ -357,19 +357,30 @@ workspaceCmd
   .command("reset")
   .description("灾难恢复本机工作区目录")
   .requiredOption("--generation <id>", "当前目录世代")
-  .requiredOption("--confirm <text>", "完整输入命令提示的影响说明")
-  .action(async (options: { generation: string; confirm: string }) => {
+  .option("--confirm <preview>", "提交上一次预览返回的确认凭据")
+  .action(async (options: { generation: string; confirm?: string }) => {
+    const { runWorkspaceCommand } = await import("./runtime/workspace-command.js");
     const {
-      runWorkspaceCommand,
-      WORKSPACE_CATALOG_RESET_IMPACT,
-    } = await import("./runtime/workspace-command.js");
-    if (options.confirm !== WORKSPACE_CATALOG_RESET_IMPACT) {
-      throw new InvalidArgumentError(
-        `必须完整确认：${WORKSPACE_CATALOG_RESET_IMPACT}`,
-      );
+      decodeLocalWorkspaceResetPreview,
+      encodeLocalWorkspaceResetPreview,
+    } = await import("./runtime/local-workspace-management-host.js");
+    if (!options.confirm) {
+      await runWorkspaceCommand(async (workspace) => {
+        const preview = await workspace.previewReset(options.generation);
+        return {
+          impact: preview.impact,
+          expiresAt: preview.expiresAt,
+          confirmation: encodeLocalWorkspaceResetPreview(preview),
+        };
+      });
+      return;
+    }
+    const preview = decodeLocalWorkspaceResetPreview(options.confirm);
+    if (preview.expectedCatalogGeneration !== options.generation) {
+      throw new InvalidArgumentError("恢复确认凭据不属于当前目录世代");
     }
     await runWorkspaceCommand((workspace) =>
-      workspace.reset(options.generation, options.confirm),
+      workspace.confirmReset(preview, preview.impact),
     );
   });
 

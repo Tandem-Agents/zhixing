@@ -34,10 +34,11 @@ function makeDeps(
   askUser: ReturnType<typeof vi.fn>;
 } {
   const confirm = vi.fn(async () => true);
-  const authorizeLocalWorkspace = vi.fn(async () => ({
-    deviceId: "device-local",
-    bindingRef: "workspace-local",
-  }));
+  const createWithLocalWorkspace = vi.fn(async (name: string) =>
+    scene(name, {
+      deviceId: "device-local",
+      bindingRef: "workspace-local",
+    }));
   const create = vi.fn(
     async (
       name: string,
@@ -49,7 +50,7 @@ function makeDeps(
     listScenes: vi.fn(async () => []),
     complete: scripted('{"final":{"kind":"cancelled"}}'),
     confirm,
-    authorizeLocalWorkspace,
+    createWithLocalWorkspace,
     create,
     askUser,
     ...overrides,
@@ -85,14 +86,11 @@ describe("runWorksceneCreateAssist", () => {
     const result = await runWorksceneCreateAssist("给论文项目建一个场景", deps);
 
     expect(result.kind).toBe("created");
-    expect(deps.authorizeLocalWorkspace).toHaveBeenCalledWith(
+    expect(deps.createWithLocalWorkspace).toHaveBeenCalledWith(
       "论文项目",
       normalized,
     );
-    expect(deps.create).toHaveBeenCalledWith("论文项目", {
-      deviceId: "device-local",
-      bindingRef: "workspace-local",
-    });
+    expect(deps.create).not.toHaveBeenCalled();
     expect(proposal?.summary).toContain(`工作目录：${normalized}`);
     expect(proposal?.summary).toContain("下次进入将自动创建");
   });
@@ -114,7 +112,7 @@ describe("runWorksceneCreateAssist", () => {
       "这个场景叫什么名字？",
       undefined,
     );
-    expect(deps.create).toHaveBeenCalledWith("写作", undefined);
+    expect(deps.create).toHaveBeenCalledWith("写作");
   });
 
   it("本地预检失败不弹确认门，并把校验错误回灌给模型澄清", async () => {
@@ -167,7 +165,7 @@ describe("runWorksceneCreateAssist", () => {
     expect(result.kind).toBe("created");
     expect(deps.confirm).toHaveBeenCalledTimes(1);
     expect(deps.create).toHaveBeenCalledTimes(1);
-    expect(deps.create).toHaveBeenCalledWith("写作", undefined);
+    expect(deps.create).toHaveBeenCalledWith("写作");
   });
 
   it("模型先声称已创建会被拒绝，真实创建成功后才可 created 收尾", async () => {

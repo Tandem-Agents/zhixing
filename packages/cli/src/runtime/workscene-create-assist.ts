@@ -36,10 +36,10 @@ export type WorksceneCreateAssistResult =
 export interface WorksceneCreateAssistDeps {
   readonly listScenes: () => Promise<readonly WorksceneCreateAssistScene[]>;
   readonly complete: (prompt: string, signal?: AbortSignal) => Promise<string>;
-  readonly authorizeLocalWorkspace: (
-    displayName: string,
+  readonly createWithLocalWorkspace: (
+    name: string,
     absolutePath: string,
-  ) => Promise<{ deviceId: string; bindingRef: string }>;
+  ) => Promise<WorksceneSummary>;
   readonly create: (
     name: string,
     workspace?: { deviceId: string; bindingRef: string },
@@ -106,10 +106,9 @@ export async function runWorksceneCreateAssist(
           };
         }
 
-        const workspace = proposal.workdir
-          ? await deps.authorizeLocalWorkspace(proposal.name, proposal.workdir)
-          : undefined;
-        const scene = await deps.create(proposal.name, workspace);
+        const scene = proposal.workdir
+          ? await deps.createWithLocalWorkspace(proposal.name, proposal.workdir)
+          : await deps.create(proposal.name);
         createdScene = scene;
         return {
           ok: true,

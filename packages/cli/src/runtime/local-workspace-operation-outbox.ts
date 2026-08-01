@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   runStorageMaintenanceStep,
@@ -10,14 +11,33 @@ import {
 
 const VERSION = 1;
 const EMPTY_PREFIX = protocolDigest("LocalWorkspaceOperationPrefix", 1, null);
-const PREPARED_TTL_MS = 15 * 60_000;
+export const LOCAL_WORKSPACE_PREPARED_TTL_MS = 15 * 60_000;
+
+export const LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT =
+  defineDurableRuntimeContract({
+    recordFamily: "local-workspace-operation-outbox",
+    producer: "LocalWorkspaceOperationOutbox",
+    recoveryOwner: "LocalWorkspaceManagementHost",
+    resourceIdentity: "zhixingHome/runtime/local-workspace-operation-outbox",
+    recoveryClass: "committed-forward-recovery",
+    cases: [
+      { kind: "variant", key: "prepared", reasonCode: "LOCAL_WORKSPACE_OPERATION_PREPARED" },
+      { kind: "variant", key: "committed", reasonCode: "LOCAL_WORKSPACE_OPERATION_COMMITTED" },
+      { kind: "variant", key: "completed", reasonCode: "LOCAL_WORKSPACE_OPERATION_COMPLETED" },
+      { kind: "variant", key: "abandoned", reasonCode: "LOCAL_WORKSPACE_OPERATION_ABANDONED" },
+      { kind: "rejection", key: "identity-mismatch", reasonCode: "LOCAL_WORKSPACE_OPERATION_IDENTITY_MISMATCH" },
+      { kind: "rejection", key: "confirmation-hole", reasonCode: "LOCAL_WORKSPACE_CONFIRMATION_HOLE" },
+      { kind: "corruption", key: "checkpoint-chain", reasonCode: "LOCAL_WORKSPACE_OUTBOX_CHAIN_CORRUPT" },
+      { kind: "corruption", key: "establishment-marker", reasonCode: "LOCAL_WORKSPACE_OUTBOX_IDENTITY_CORRUPT" },
+    ],
+  });
 
 export type LocalWorkspaceWriteOperation =
   | { readonly kind: "create"; readonly purpose: "settings" | "control"; readonly displayName: string; readonly absolutePath: string }
   | { readonly kind: "rename"; readonly currentName: string; readonly displayName: string; readonly expectedRevision: number }
   | { readonly kind: "repath"; readonly name: string; readonly absolutePath: string; readonly expectedRevision: number }
   | { readonly kind: "remove"; readonly name: string; readonly expectedRevision: number }
-  | { readonly kind: "reset"; readonly expectedCatalogGeneration: string; readonly confirmedImpact: string };
+  | { readonly kind: "reset"; readonly expectedCatalogGeneration: string; readonly impact: string };
 
 export type LocalWorkspaceOperationState =
   | "prepared"
@@ -32,6 +52,7 @@ export interface LocalWorkspaceOperation {
   readonly inputDigest: string;
   readonly state: LocalWorkspaceOperationState;
   readonly preparedAt: string;
+  readonly expiresAt?: string;
   readonly confirmationToken?: string;
   readonly result?: unknown;
   readonly resultDigest?: string;
@@ -138,15 +159,20 @@ export class LocalWorkspaceOperationOutbox {
       );
       if (existing) return cloneOperation(existing);
       const state = this.#requireState();
+      const preparedAt = this.#clock();
       const operation: LocalWorkspaceOperation = {
         localSeq: state.nextLocalSeq,
         operationId: `workspace-operation-${randomUUID()}`,
         input: normalized,
         inputDigest,
         state: "prepared",
-        preparedAt: this.#clock(),
+        preparedAt,
         ...(normalized.kind === "reset"
-          ? { confirmationToken: randomBytes(32).toString("base64url") }
+          ? {
+              expiresAt: new Date(
+                Date.parse(preparedAt) + LOCAL_WORKSPACE_PREPARED_TTL_MS,
+              ).toISOString(),
+            }
           : {}),
       };
       await this.#append(operation);
@@ -157,15 +183,37 @@ export class LocalWorkspaceOperationOutbox {
 
   async commit(
     identity: { readonly localSeq: number; readonly operationId: string; readonly inputDigest: string },
+    confirmation?: { readonly impact: string },
   ): Promise<LocalWorkspaceOperation> {
     await this.initialize();
     return this.#serial(async () => {
+      await this.#expirePrepared();
       const operation = this.#requireOperation(identity);
       if (operation.state === "abandoned") {
         throw new Error("Local workspace operation reservation was abandoned");
       }
+      if (operation.input.kind === "reset") {
+        if (confirmation?.impact !== operation.input.impact) {
+          throw new Error("Local workspace reset confirmation does not match its preview");
+        }
+      } else if (confirmation !== undefined) {
+        throw new Error("Local workspace confirmation is only valid for reset");
+      }
       if (operation.state === "prepared") {
-        const committed = { ...operation, state: "committed" as const };
+        if (operation.input.kind === "reset") {
+          if (
+            !operation.expiresAt
+          ) {
+            throw new Error("Local workspace reset preview is invalid or expired");
+          }
+        }
+        const committed = {
+          ...operation,
+          state: "committed" as const,
+          ...(operation.input.kind === "reset"
+            ? { confirmationToken: randomBytes(32).toString("base64url") }
+            : {}),
+        };
         await this.#append(committed);
         return cloneOperation(committed);
       }
@@ -198,6 +246,7 @@ export class LocalWorkspaceOperationOutbox {
   }
 
   async pending(afterSeq = 0, limit = 64): Promise<{
+    readonly outboxId: string;
     readonly operations: readonly LocalWorkspaceOperation[];
     readonly next?: number;
     readonly confirmation: { readonly throughSeq: number; readonly prefixDigest: string };
@@ -215,6 +264,7 @@ export class LocalWorkspaceOperationOutbox {
     const hasMore = last !== undefined && [...this.#requireState().operations.keys()].some((seq) => seq > last);
     const checkpoint = this.#requireState().checkpoint;
     return {
+      outboxId: checkpoint.outboxId,
       operations,
       ...(hasMore ? { next: last } : {}),
       confirmation: {
@@ -297,7 +347,16 @@ export class LocalWorkspaceOperationOutbox {
   async #expirePrepared(): Promise<void> {
     const now = Date.parse(this.#clock());
     for (const operation of [...this.#requireState().operations.values()]) {
-      if (operation.state !== "prepared" || now - Date.parse(operation.preparedAt) <= PREPARED_TTL_MS) continue;
+      if (
+        operation.state !== "prepared" ||
+        now <= Date.parse(
+          operation.expiresAt ??
+            new Date(
+              Date.parse(operation.preparedAt) +
+                LOCAL_WORKSPACE_PREPARED_TTL_MS,
+            ).toISOString(),
+        )
+      ) continue;
       const result = { abandoned: true };
       await this.#append({
         ...operation,
@@ -499,7 +558,7 @@ export function validateLocalWorkspaceWriteOperation(value: unknown): LocalWorks
     rename: ["currentName", "displayName", "expectedRevision", "kind"],
     repath: ["absolutePath", "expectedRevision", "kind", "name"],
     remove: ["expectedRevision", "kind", "name"],
-    reset: ["confirmedImpact", "expectedCatalogGeneration", "kind"],
+    reset: ["expectedCatalogGeneration", "impact", "kind"],
   };
   if (!record || typeof record.kind !== "string" || !(record.kind in keysByKind)) {
     throw new TypeError("Local workspace operation kind is invalid");
@@ -578,7 +637,7 @@ function validateEvent(value: unknown, eventSeq: number, previousDigest: string,
 export function validateLocalWorkspaceOperation(value: unknown): LocalWorkspaceOperation {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Local workspace operation is invalid");
   const record = value as Record<string, unknown>;
-  const allowed = ["confirmationToken", "input", "inputDigest", "localSeq", "operationId", "preparedAt", "result", "resultDigest", "state"];
+  const allowed = ["confirmationToken", "expiresAt", "input", "inputDigest", "localSeq", "operationId", "preparedAt", "result", "resultDigest", "state"];
   if (Object.keys(record).some((key) => !allowed.includes(key)) || !Object.keys(record).every((key) => allowed.includes(key))) {
     throw new Error("Local workspace operation fields are invalid");
   }
@@ -589,7 +648,14 @@ export function validateLocalWorkspaceOperation(value: unknown): LocalWorkspaceO
     record.inputDigest !== protocolDigest("LocalWorkspaceOperationInput", 1, input) ||
     !["prepared", "committed", "completed", "abandoned"].includes(record.state as string) ||
     typeof record.preparedAt !== "string" || !isCanonicalTimestamp(record.preparedAt) ||
-    (input.kind === "reset" ? typeof record.confirmationToken !== "string" : record.confirmationToken !== undefined) ||
+    (input.kind === "reset"
+      ? typeof record.expiresAt !== "string" ||
+        !isCanonicalTimestamp(record.expiresAt) ||
+        Date.parse(record.expiresAt) <= Date.parse(record.preparedAt as string) ||
+        (record.state === "committed" || record.state === "completed"
+          ? typeof record.confirmationToken !== "string"
+          : record.confirmationToken !== undefined)
+      : record.expiresAt !== undefined || record.confirmationToken !== undefined) ||
     (isTerminalState(record.state)
       ? typeof record.resultDigest !== "string" || record.resultDigest !== protocolDigest("LocalWorkspaceOperationResult", 1, record.result ?? null)
       : record.result !== undefined || record.resultDigest !== undefined)

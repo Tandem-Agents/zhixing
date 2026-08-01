@@ -8,6 +8,7 @@ import {
 import type { DurableRuntimeContractDescriptor } from "@zhixing/core/contracts";
 import { SESSION_ACTIVITY_DURABLE_CONTRACT } from "@zhixing/owner-kernel";
 import { LEGACY_WORKSCENE_MIGRATION_DURABLE_CONTRACT } from "./workscene-legacy-migration.js";
+import { LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT } from "../runtime/local-workspace-operation-outbox.js";
 
 export const S7_DURABLE_CONTRACT_LEDGER = [
   WORKSCENE_REGISTRY_DURABLE_CONTRACT,
@@ -17,6 +18,7 @@ export const S7_DURABLE_CONTRACT_LEDGER = [
   SESSION_ACTIVITY_DURABLE_CONTRACT,
   LEGACY_WORKSCENE_MIGRATION_DURABLE_CONTRACT,
   WORKSCENE_ACTIVITY_DURABLE_CONTRACT,
+  LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT,
 ] as const satisfies readonly DurableRuntimeContractDescriptor[];
 
 export interface S7DurableScenarioAdapter {

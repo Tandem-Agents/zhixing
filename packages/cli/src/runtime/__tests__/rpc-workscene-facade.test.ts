@@ -38,13 +38,18 @@ describe("RpcWorksceneFacade", () => {
       deviceId: "device-local",
       bindingRef: "workspace-writing",
     };
-    expect(await facade.create("写作", workspace)).toEqual(scene);
+    expect(await facade.create("写作", workspace, "workscene-create:stable"))
+      .toEqual(scene);
     expect(await facade.rename("scene-1", "写作二期")).toEqual(scene);
     expect(await facade.setWorkdir("scene-1", null)).toEqual(scene);
     expect(fake.requests).toHaveLength(3);
     expect(fake.requests[0]).toMatchObject({
       method: "workscene.create",
-      params: { name: "写作", workspace },
+      params: {
+        name: "写作",
+        workspace,
+        requestId: "workscene-create:stable",
+      },
     });
     expect(fake.requests[1]).toMatchObject({
       method: "workscene.rename",
@@ -54,7 +59,7 @@ describe("RpcWorksceneFacade", () => {
       method: "workscene.setWorkdir",
       params: { sceneId: "scene-1", workspace: null },
     });
-    for (const request of fake.requests) {
+    for (const request of fake.requests.slice(1)) {
       expect(request.params).toMatchObject({ requestId: expect.any(String) });
     }
   });

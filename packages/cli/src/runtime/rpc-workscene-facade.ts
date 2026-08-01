@@ -29,12 +29,13 @@ export class RpcWorksceneFacade {
   async create(
     name: string,
     workspace?: { deviceId: string; bindingRef: string },
+    requestId = `workscene-create:${randomUUID()}`,
   ): Promise<WorksceneSummary> {
     const client = await this.link.getClient();
     return client.request<WorksceneSummary>("workscene.create", {
       name,
       ...(workspace ? { workspace } : {}),
-      requestId: `workscene-create:${randomUUID()}`,
+      requestId,
     });
   }
 
