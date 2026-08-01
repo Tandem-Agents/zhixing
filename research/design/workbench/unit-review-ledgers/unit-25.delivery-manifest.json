@@ -4,7 +4,7 @@
   "excludedPrefixes": [
     "research/design/workbench/"
   ],
-  "pathCount": 168,
+  "pathCount": 169,
   "deletedCount": 0,
   "groups": {
     "architecture-and-specification": 3,
@@ -14,15 +14,20 @@
     "orchestrator": 6,
     "other": 2,
     "owner-kernel": 11,
-    "root-config": 1,
+    "root-config": 2,
     "rpc": 2,
     "runtime-host": 5,
     "scripts": 3,
     "server": 11
   },
-  "pathSetSha256": "c4aa74838b0cafdb104c7de0a125976920e1cca7207c0fa108b32cc16a420509",
-  "fingerprint": "git-delivery-manifest-v1:3caf0af9a6a52aa51fdc574ce1465495f3bfadad7b314b13cf6de66ad2057923",
+  "pathSetSha256": "379c6be1568451cb664fdf962f2b78ff3ed8c04de2180078edc2da9049b640be",
+  "fingerprint": "git-delivery-manifest-v1:df892a12002cf5b7fe4e46f318f7f9b5f7581607aaedf9903c9e8f3bf6b82360",
   "entries": [
+    {
+      "status": "M",
+      "path": "AGENTS.md",
+      "blob": "222ba1081af9efdb7bb0b8093da9f558768d50d9"
+    },
     {
       "status": "M",
       "path": "package.json",
@@ -831,12 +836,12 @@
     {
       "status": "M",
       "path": "research/design/modules/distributed-runtime/distributed-runtime-charter.md",
-      "blob": "6a7d4b7f29df4b11771d0acfc9284fa08366a55e"
+      "blob": "ab3724acd0267036109a56170960ec5ac52519a4"
     },
     {
       "status": "M",
       "path": "research/design/modules/distributed-runtime/specification.md",
-      "blob": "f30cf9e57b36b06a1a431ef8fc1f9eea51f56750"
+      "blob": "6bc5074844e1fd90b48478b4ae9f782941b968bb"
     },
     {
       "status": "A",
