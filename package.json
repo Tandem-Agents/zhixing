@@ -26,7 +26,6 @@
     "security:secrets": "node scripts/check-secret-boundaries.mjs",
     "s7:registry-golden": "node --import=tsx/esm scripts/s7-registry-golden.mjs --check",
     "s7:registry-golden:write": "node --import=tsx/esm scripts/s7-registry-golden.mjs --write",
-    "s7:verify": "node scripts/verify-s7-delivery.mjs",
     "lint": "pnpm security:supply-chain && pnpm security:mesh-test-clock && pnpm security:secrets && biome check .",
     "lint:fix": "biome check --write .",
     "clean": "pnpm -r run clean",

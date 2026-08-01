@@ -96,20 +96,22 @@ export function getTotalInputTokens(usage: TokenUsage): number {
 
 /** 合并两个 TokenUsage（累加） */
 export function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  const cacheReadTokens =
+    a.cacheReadTokens || b.cacheReadTokens
+      ? (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0)
+      : undefined;
+  const cacheWriteTokens =
+    a.cacheWriteTokens || b.cacheWriteTokens
+      ? (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0)
+      : undefined;
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     // 规范全量输入按 canonical 口径累加（各侧经 getTotalInputTokens 归一后相加），
     // 与 inputTokens 累加正交 —— 既有读 inputTokens 的消费方逐字节不变。
     totalInputTokens: getTotalInputTokens(a) + getTotalInputTokens(b),
     outputTokens: a.outputTokens + b.outputTokens,
-    cacheReadTokens:
-      a.cacheReadTokens || b.cacheReadTokens
-        ? (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0)
-        : undefined,
-    cacheWriteTokens:
-      a.cacheWriteTokens || b.cacheWriteTokens
-        ? (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0)
-        : undefined,
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
 }
 

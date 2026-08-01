@@ -47,6 +47,7 @@
 | 2026-05-14 | [Confirmation 面板输入消失](2026-05-14-confirm-input-paste-misroute.md) | dist 未 build 让用户测旧版本污染 hypothesis 验证回路、跨 host 模式照抄邻居 onPaste 实现导致协议漂移、修复理由停留在"猜中根因"层 | cli 改源码必 build + 时间戳验证才让用户测、同代码跨 host 模式可能 emergent 漂移需主动质疑、抄邻居前先看协议本意、修复理由优先业务语义/防御性原则而非"猜中根因" |
 | 2026-05-20 | [Confirm 面板退出后输入冻结 —— ConPTY raw-mode 翻转死锁](2026-05-20-confirm-input-freeze-conpty.md) | 「可观测字段全绿但功能挂」识别延迟、已有 postmortem 沉淀方法论没立即调用、refcount 共享资源 handoff 路径没设计 | 字段全绿但功能挂 = 立刻切 host 层；诊断开始先扫一遍 postmortems README 检查清单；共享资源 refcount 必须显式设计 handoff 不让 count 归零 |
 | 2026-07-12 | [公共 API 抽取中的兼容盲区](2026-07-12-public-api-compatibility-blind-spot.md) | 用符号恒等代替旧调用合同验证、遗漏公开入口这一独立消费者 | 签名变化必须走兼容适配；同时验证生成声明、根入口路由与旧调用行为 |
+| 2026-08-01 | [把非核心性能观测过度设计成不可行门禁](2026-08-01-performance-gate-overdesign.md) | 把一条性能目标扩张为近四千行、可能耗时九十分钟的强制同步 runner | 先区分功能验收与信息观测；先验证门禁自身可行性；非核心 benchmark 不得阻断单元交付 |
 
 每写完一篇追加一行；让索引页本身成为可扫描的"反模式清单"。
 

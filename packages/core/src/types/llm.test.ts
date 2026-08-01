@@ -40,8 +40,11 @@ describe("TokenUsage 辅助函数", () => {
 
       const merged = mergeUsage(a, b);
 
-      expect(merged.cacheReadTokens).toBeUndefined();
-      expect(merged.cacheWriteTokens).toBeUndefined();
+      expect(Object.keys(merged).sort()).toEqual([
+        "inputTokens",
+        "outputTokens",
+        "totalInputTokens",
+      ]);
     });
 
     it("任一方有缓存字段时应正确累加", () => {

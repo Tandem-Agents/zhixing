@@ -132,16 +132,18 @@ describe("Agent Loop", () => {
     it("agent:run_end 事件在 completed 终止时不带 errorType (P1-ε)", async () => {
       const provider = mockTextProvider("ok");
       const eventBus = new EventBus<AgentEventMap>();
-      const runEndPayloads: Array<{ reason: string; errorType?: string }> = [];
-      eventBus.on("agent:run_end", (data) =>
-        runEndPayloads.push({ reason: data.reason, errorType: data.errorType }),
-      );
+      const runEndPayloads: AgentEventMap["agent:run_end"][] = [];
+      eventBus.on("agent:run_end", (data) => runEndPayloads.push(data));
 
       await drainAgentLoop(baseParams(provider, { eventBus }));
 
       expect(runEndPayloads).toHaveLength(1);
       expect(runEndPayloads[0]!.reason).toBe("completed");
-      expect(runEndPayloads[0]!.errorType).toBeUndefined();
+      expect(Object.keys(runEndPayloads[0]!).sort()).toEqual([
+        "duration",
+        "reason",
+        "usage",
+      ]);
     });
 
     it("单轮工具调用：LLM → 工具 → LLM → completed", async () => {

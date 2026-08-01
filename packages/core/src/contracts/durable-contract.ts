@@ -5,11 +5,20 @@ export type DurableRecoveryClass =
 
 export type DurableContractCaseKind = "variant" | "rejection" | "corruption";
 
-export interface DurableContractCase {
-  readonly kind: DurableContractCaseKind;
+export interface DurableContractVariantCase {
+  readonly kind: "variant";
+  readonly key: string;
+}
+
+export interface DurableContractFailureCase {
+  readonly kind: "rejection" | "corruption";
   readonly key: string;
   readonly reasonCode: string;
 }
+
+export type DurableContractCase =
+  | DurableContractVariantCase
+  | DurableContractFailureCase;
 
 export interface DurableRuntimeContractDescriptor {
   readonly recordFamily: string;
@@ -28,7 +37,10 @@ export function defineDurableRuntimeContract<T extends DurableRuntimeContractDes
   for (const item of descriptor.cases) {
     const identity = `${item.kind}:${item.key}`;
     if (keys.has(identity)) throw new TypeError(`Duplicate durable contract case: ${identity}`);
-    if (!/^[A-Z][A-Z0-9_]+$/u.test(item.reasonCode)) {
+    if (item.kind === "variant" && "reasonCode" in item) {
+      throw new TypeError(`Durable variant must not declare a reason code: ${identity}`);
+    }
+    if (item.kind !== "variant" && !/^[A-Z][A-Z0-9_]+$/u.test(item.reasonCode)) {
       throw new TypeError(`Durable contract reason code is not stable: ${item.reasonCode}`);
     }
     keys.add(identity);

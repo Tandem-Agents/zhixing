@@ -1,0 +1,867 @@
+{
+  "schema": "git-delivery-manifest-v1",
+  "baseRevision": "994f05c5a3db4154e97d3b83b177068839878e66",
+  "excludedPrefixes": [
+    "research/design/workbench/"
+  ],
+  "pathCount": 168,
+  "deletedCount": 0,
+  "groups": {
+    "architecture-and-specification": 3,
+    "CLI": 64,
+    "core": 56,
+    "executor": 4,
+    "orchestrator": 6,
+    "other": 2,
+    "owner-kernel": 11,
+    "root-config": 1,
+    "rpc": 2,
+    "runtime-host": 5,
+    "scripts": 3,
+    "server": 11
+  },
+  "pathSetSha256": "c4aa74838b0cafdb104c7de0a125976920e1cca7207c0fa108b32cc16a420509",
+  "fingerprint": "git-delivery-manifest-v1:3caf0af9a6a52aa51fdc574ce1465495f3bfadad7b314b13cf6de66ad2057923",
+  "entries": [
+    {
+      "status": "M",
+      "path": "package.json",
+      "blob": "7ebf3a730470a26d0b96ee0812ceba001ed967ed"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/__tests__/setup-delivery.test.ts",
+      "blob": "c846213a1e5b2dc57be8c8676f990173934358d2"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/commands/__tests__/session-commands.test.ts",
+      "blob": "c844cabf60f32d85cf56ba4c6fe57182361cd62c"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/commands/session-commands.ts",
+      "blob": "9d1135d4f700d6d591efbdb5da1cb8506624396c"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/index.ts",
+      "blob": "36a8b973025e75afcfc87ff93881ead98dae7a3d"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/repl.ts",
+      "blob": "27ca9027a31c01f8ab5fafa3eacccc506c7a5cf9"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/__tests__/conversation-controller.test.ts",
+      "blob": "c2bddd1e476c8e2bedaecf79baca4ca3d724e511"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/__tests__/rpc-workscene-facade.test.ts",
+      "blob": "5921ff469a3efbb46f72fd04491481db2ac9b30a"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/__tests__/runtime-host.test.ts",
+      "blob": "f609f0860d4f37980370d3ebd7f28bc535e5e87f"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/__tests__/workmode-tools.test.ts",
+      "blob": "13c7fab47e49d43976a08dc1ba3ca4958360f751"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/__tests__/workscene-create-assist.test.ts",
+      "blob": "5254de8b6fe117a7782039f8861286eac2848471"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/conversation-controller.ts",
+      "blob": "1bfa0743b0b96744d14b37057ea1f9ec100f192a"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-bootstrap.test.ts",
+      "blob": "aec94ed68688034f359434497b9b9771ec492ed2"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-bootstrap.ts",
+      "blob": "ebacfef3760fbd93b410a1573ad9955ed1a7e308"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-facade.ts",
+      "blob": "8f8c9baa567c9e8a1aec00b5ae193a4b556a2516"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-management-host.test.ts",
+      "blob": "db49a015e80b08b792b34811b28970d272e5d4cc"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-management-host.ts",
+      "blob": "88385b426fb703e6da51abe64fdb60373ff58dd6"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-operation-outbox.test.ts",
+      "blob": "915bbd67a14a31d91c6e77118d6b80340b5a81f8"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
+      "blob": "93d0d12cc28b789e7f5956810a3cdf9631027da7"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-owner.test.ts",
+      "blob": "5481a4e1cb22dd65b64895efe98b55bb360b6b92"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/local-workspace-owner.ts",
+      "blob": "34ebeeba9a497287b887dfed57e437aeb3cca002"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/rpc-workscene-facade.ts",
+      "blob": "f5bb490a2995a90475dd6ead83850e5d56af2faa"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/runtime/workscene-create-assist.ts",
+      "blob": "a020594c651d10f832d57a7e304216a75987fa72"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/workspace-command.ts",
+      "blob": "c638b93fb82d0cefbfb7d67310b36efd27b0bcfb"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/runtime/workspace-reset-impact.ts",
+      "blob": "dcbc4072e54ac4a92cb4701ab919aaee2e750347"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/conversation-directory.test.ts",
+      "blob": "e8aac5af7b7197af16d96f5f0d5e3112e05e8788"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/conversation-protocol-runtime.test.ts",
+      "blob": "420a2ca6fbf265b887f5ee6c8ee6ab1b60a69f6d"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/conversation-surface.test.ts",
+      "blob": "2ef07ca1ea6709df1ab4b9b130c25a9c3ec9cc24"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/s6-conformance.test.ts",
+      "blob": "c6ae0d907b0cb2b84c5a14cc42f88050f4180e68"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/__tests__/s7-durable-cli-scenarios.ts",
+      "blob": "78b183ab24cbfac7c0f855a953d2c088c699d290"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/__tests__/s7-durable-runtime-witness.ts",
+      "blob": "4953f0e6392a2142f054f5fe7c10d97b5e47a8af"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/__tests__/s7-durable-scenario-adapters.ts",
+      "blob": "3e4ddd4362894affcb49045ec53dee6b8c47ec8b"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/session-adapter.test.ts",
+      "blob": "f5d23297e0979aa82e78dc1887c5122f7d797b10"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/workscene-directory.test.ts",
+      "blob": "169f28c4eabb88f70f0ad4f1b88a196910ef6046"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/__tests__/workscene-legacy-migration.test.ts",
+      "blob": "b795e2c6ae7986d34946df2c13dd8c85dd4d9969"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/__tests__/zhixing-guidance-lifecycle.test.ts",
+      "blob": "df7de2968affb2c4b9b19a01264d29dcce837349"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/access-surface.ts",
+      "blob": "8d4ae4bcdca000d2e55b02790ff19d750ce52257"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/access-surfaces.ts",
+      "blob": "4c2727772b06fa0f16424befa26f223b82f37ce1"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/assignment-worker-obligations.ts",
+      "blob": "83ad4c5a816e34f8bfdb775eccd1850a358583a2"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/command.ts",
+      "blob": "1c849b1a0a3db0548ea3f736b27d0b8a82254b88"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/conversation-assignment-worker.test.ts",
+      "blob": "2068e96d3ac40541abf4100e612020026a4a51a0"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/conversation-assignment-worker.ts",
+      "blob": "eede8b68c790a30d544e6696ca7703ed6425abf8"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/conversation-directory.ts",
+      "blob": "afb8a976b794d866a94e528ea1efb4c84c009e22"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/conversation-executor-ledger.ts",
+      "blob": "203490e85af82860a890bdc673fc9759b6ceba89"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "blob": "e26394e395b696103faa22f8720db89bc238a40d"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/environment-probe-mesh.test.ts",
+      "blob": "6ac36bac0d92e5a80c791db0790d9edcb8985a42"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/environment-probe-mesh.ts",
+      "blob": "207369ba1e7ba96374f880ba11824a04953c084e"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/executor-role-runtime.ts",
+      "blob": "2f8fe71b60f963b1f0aa3ebc901b26e149630085"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "blob": "00cd5d693f4862035fef833b2ded3568aa9abd43"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/role-topology.ts",
+      "blob": "22c4f50854cff12895e893f4950a47bb5a0bf90b"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/s7-durable-contract-ledger.test.ts",
+      "blob": "c48f8160918df922d25873e7a908e7b52fe479b1"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/s7-durable-contract-ledger.ts",
+      "blob": "78211655c88c8c65bbb0a3f4ff76811006ca254b"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/s7-environment-conformance.test.ts",
+      "blob": "b64281211b2e7ec9b0a4b14d91f33654fdd33f23"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/shutdown-chain.ts",
+      "blob": "16a0f9a92ce14eef5f1034b5564feacb0ee6a775"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/topology-command.test.ts",
+      "blob": "bbea0d77e678222fc258ce7b07c263c110a4084f"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/topology-command.ts",
+      "blob": "c152838cc7806bac36cb5d3ad91794e1b8368f97"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/workscene-directory.ts",
+      "blob": "51ced4f97274e452347c2ce24537eb194e5e8764"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/workscene-legacy-migration.ts",
+      "blob": "1f5c20e84aadfb0b5604a98cdc72bafcd291ec56"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/workscene-session-owner.test.ts",
+      "blob": "eca69c6bdad7459da22cb28d5d08aad3a148c7c5"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/workscene-session-owner.ts",
+      "blob": "a72d3c5e6df512a96fcf41b6cec834bb40fa8e20"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/workscene-storage-cleanup.test.ts",
+      "blob": "f2073af628a43f3659523b3279fe261452c742d0"
+    },
+    {
+      "status": "A",
+      "path": "packages/cli/src/serve/workscene-storage-cleanup.ts",
+      "blob": "c37f61b4bd1862df73d332d77a2c7ee1dbe18924"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/serve/zhixing-guidance-lifecycle.ts",
+      "blob": "74675b3f276b9a48ec6ad2c357b4ec0ad09adc9f"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/src/setup-delivery.ts",
+      "blob": "95fa265adb45d94d8a59b3f118becdb1d5894c20"
+    },
+    {
+      "status": "M",
+      "path": "packages/cli/tsup.config.ts",
+      "blob": "04f53e03449cd32f50f1a00409241327f75935bb"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/package.json",
+      "blob": "05c8a247efcbe4d0160361f8c44dd693a8b88922"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/authority/commit-log.ts",
+      "blob": "07e34397f5831b0e6b28156262932620e4b7e5ba"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/authority/control-artifacts.ts",
+      "blob": "6ddeb62f612add0fc37f320bb5537dcb122b6a49"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/authority/errors.ts",
+      "blob": "e32d0c316c62c221330218aeb3a8ae4572670bf4"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/authority/interfaces.ts",
+      "blob": "f0433de1cfc017d9f6527ab81b6ec3d875843d34"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/authority/surface-assets.ts",
+      "blob": "08155028704dfbb790decc266835c7a834ef41ab"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/confirmation/__tests__/request-builder.test.ts",
+      "blob": "548662f36fc1170a961626d20f172e53a13831c5"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/contracts/durable-contract.ts",
+      "blob": "2c3fe4f612e72feedc77e20cc39e92a65ba75092"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/contracts/index.ts",
+      "blob": "e6ba30419b4c2e68077821d5df6f46842d9599f1"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/contracts/ports.ts",
+      "blob": "a056139798855883dfc3a531311f6041eaffb543"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/contracts/protocol.ts",
+      "blob": "c60604a99e9c19c35b6a11fad4b6bf8499515b7d"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/contracts/state.ts",
+      "blob": "6564dd6066ce434ee666fdc27e2806df2fb45be3"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/contracts/workspace-binding-contract-drift.test.ts",
+      "blob": "f0cab8561414af6badc14b2ebb251786dbc4da25"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/conversation/repository.ts",
+      "blob": "bade1d262164af96f04541c57e819b230074915c"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/conversation/types.ts",
+      "blob": "d9bde60ce23d3154c62d4cbb70f0bb02bbdda7dd"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/index.ts",
+      "blob": "75de2111c94b948fae1f519778c3e3dc4646a6f9"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/selection.test.ts",
+      "blob": "6500df3d44da45938499ddb764a2abbe39aa6ff6"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/selection.ts",
+      "blob": "d72d087c6802c0362a7d4cbd3e7efb88907b00ec"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/workspace-binding-catalog.test.ts",
+      "blob": "5d77c3d8d5f870c6ae1a39a832e4b1852394f714"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/workspace-binding-catalog.ts",
+      "blob": "7731e8c6a3618599291e7cacb18cc4358cd33559"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/workspace-bindings.test.ts",
+      "blob": "ec3c11d6c5a5bc6f38832a2019ccb2c50bf46705"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/workspace-bindings.ts",
+      "blob": "d0f2dc6a730e66044d13d75d54075b25a2775635"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/workspace-probe.test.ts",
+      "blob": "67a9ebb06113cb41bb17ad3a9c407b2c32a1c43f"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/environment/workspace-probe.ts",
+      "blob": "eec9e4aaafbbc60349a70ebec4b74174bc0a1d04"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/index.ts",
+      "blob": "d7ac266eb8621ee5e24a5e829d8bfab5a0ca35a2"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/loop/__tests__/agent-loop.test.ts",
+      "blob": "7a968b068161796bca65b1b5903bbafa0173122c"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/loop/__tests__/run-record-builder.test.ts",
+      "blob": "482067701c3fbe3fae04de959798ca5b8a6e7825"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/loop/agent-loop.ts",
+      "blob": "4ead8382ecf3273c673a1208ab20cfb0d6d12239"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/loop/run-record-builder.ts",
+      "blob": "52e50190f8462b6dbe50c7c8d3f6e0c78b056d39"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/protocol/authority.ts",
+      "blob": "682a58e70a7079910bc89aa5120cbfc448115ed9"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/protocol/environment.test.ts",
+      "blob": "54d01c4ab21ef114150fc8d4b97116330b8f42fa"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/protocol/environment.ts",
+      "blob": "7bf0ddd1b028b51657f0b3afe2fb5dfae3a230a3"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/protocol/index.ts",
+      "blob": "55964eb5bc64ae7e1eaf449373e5489783c6c367"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/protocol/manifest.test.ts",
+      "blob": "02c691a15f858a131f7c282c9ae6b17579c4c626"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/protocol/manifest.ts",
+      "blob": "6fbd464a027dbc86b3a824042e69b380de966a5e"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/protocol/resource-governor.ts",
+      "blob": "94f8876365458b4689eb867685a7be67db093d6e"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/resources/__tests__/storage-maintenance.test.ts",
+      "blob": "ccaf8bc29fa0acfb1f5d9c5a35d830fae15841b0"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/resources/storage-maintenance.ts",
+      "blob": "d2495e8b129ed8f02ad1c94037220f82e5e88c5d"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/test-support/s7-durable-harness.ts",
+      "blob": "e11da8894cf7807e17839a60cdf1c7c3c6032cc4"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/test-support/s7-durable-scenarios.ts",
+      "blob": "181eb405876cbc345cb61aabd9d69535ec6d585d"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/test-support/s7-durable.ts",
+      "blob": "db0966855e4dc9a1b76d1a409e109616c2be06c3"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/types/agent-events.ts",
+      "blob": "01c5ee76e6fe2dd381de5e32a0f9777838fdf82f"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/types/llm.test.ts",
+      "blob": "0411d28dd0cfe1505ef9ab11be145480d3c3efac"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/types/llm.ts",
+      "blob": "9a335ac0bf980c5abed9c18b1f1c11336fbe5a71"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/workscene/__tests__/management-tools.test.ts",
+      "blob": "209a10f2f2231ad716b37e0eac1a1b4a3c216d3c"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/workscene/__tests__/registry.test.ts",
+      "blob": "d2073a06c30f6d680f7bdd7e2589ed1eb3d6a333"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/workscene/activity-projection.ts",
+      "blob": "e2de4714985098c6630ede354d1eeaf0f4def2cd"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/workscene/authority-registry.test.ts",
+      "blob": "ba57c729cbf93b57d0aa41c75423ea92ca92eb75"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/workscene/authority-registry.ts",
+      "blob": "190b3dd112f697a19540b353e472caf160110187"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/workscene/global-state-adapter.test.ts",
+      "blob": "9691640b6750080d3ab2fc17da5584a20d1694a5"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/workscene/global-state-adapter.ts",
+      "blob": "1273e43e5040a0fe21d7f18faba6d166e8c28d43"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/workscene/index.ts",
+      "blob": "041bf7f69d00325963d3f667e32e2b11e5e4f8a4"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/workscene/management-tools.ts",
+      "blob": "01f7a6d5bc564dc2470527810afd654e0bb87e9f"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/src/workscene/registry.ts",
+      "blob": "1bd2144b8a3960b26580d674ffaad97d80e06d5a"
+    },
+    {
+      "status": "A",
+      "path": "packages/core/src/workscene/structure-boundary.test.ts",
+      "blob": "47a9be15c6b8251c4efbdb75d0d8f3cbb0848ea6"
+    },
+    {
+      "status": "M",
+      "path": "packages/core/tsup.config.ts",
+      "blob": "16fea37de229733a86649ff2fa1cc2f27faca52a"
+    },
+    {
+      "status": "M",
+      "path": "packages/executor/src/__tests__/assignment-ledger.test.ts",
+      "blob": "ff24389e870968d2a6d16ea76b2d067835cc1f2f"
+    },
+    {
+      "status": "M",
+      "path": "packages/executor/src/assignment-ledger.ts",
+      "blob": "414127d36019f53952811fd6a2616d13502e06a9"
+    },
+    {
+      "status": "M",
+      "path": "packages/executor/src/resource-governor.ts",
+      "blob": "bfc2494afb5b759f078ccd25ad2e80de5200da44"
+    },
+    {
+      "status": "M",
+      "path": "packages/executor/src/runtime-role.ts",
+      "blob": "ea4395d6b700e9f975571c04f653b426d681f701"
+    },
+    {
+      "status": "M",
+      "path": "packages/orchestrator/src/profile/__tests__/default-profiles.test.ts",
+      "blob": "68ab5841817930b6abbdc3ab00b8fb22069ed759"
+    },
+    {
+      "status": "M",
+      "path": "packages/orchestrator/src/profile/default-profiles.ts",
+      "blob": "e8f549b993b432e109231c15e14c316f1c8c58ba"
+    },
+    {
+      "status": "M",
+      "path": "packages/orchestrator/src/runtime/__tests__/post-turn-control-accumulator.test.ts",
+      "blob": "0cbebe61780180d4af0569e64878e24f6e63b59a"
+    },
+    {
+      "status": "M",
+      "path": "packages/orchestrator/src/runtime/__tests__/system-prompt.test.ts",
+      "blob": "4951f90e72015fd60030b452b1345a2ecff07d02"
+    },
+    {
+      "status": "M",
+      "path": "packages/orchestrator/src/runtime/lifecycle.ts",
+      "blob": "d23f7d118975b19c3b370dde1429b481280d4e70"
+    },
+    {
+      "status": "M",
+      "path": "packages/orchestrator/src/runtime/system-prompt.ts",
+      "blob": "227246ef5a67b790837f5a772d0cdb94e3de034f"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/package.json",
+      "blob": "0ff7edf9abe4d39eabbace399f5eedd1fb93ddd7"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/__tests__/control-admission.test.ts",
+      "blob": "c4931d88ddcd5f15b586e6fa911a09c305658867"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/conversation-assignment-authority.ts",
+      "blob": "27fcf79c55ac2d8ff87bbf68eb35d25a4895ee7f"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/conversation-assignment.ts",
+      "blob": "8b5bf1619418bc65bd8fb37362f7e2ea114c6115"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/conversation-run-contracts.ts",
+      "blob": "192395c403475977f9454fb83bb7961aec5ea95f"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/resource-governor.ts",
+      "blob": "13320e26c8b104cb96d943981ba9a1a4d4f96875"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/run-turn.ts",
+      "blob": "7067082bba25da9384209e89392a802ef30563a1"
+    },
+    {
+      "status": "A",
+      "path": "packages/owner-kernel/src/test-support/s7-durable-scenarios.ts",
+      "blob": "13ad494f7d06528e4da1d0a68f75a6c946918608"
+    },
+    {
+      "status": "A",
+      "path": "packages/owner-kernel/src/test-support/s7-durable.ts",
+      "blob": "b82199b9fbd3e9376a7d2fc54bd565f23a3d33b4"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/src/types.ts",
+      "blob": "ade18138e6afebf276b2b19ad422fd1d1a1ae529"
+    },
+    {
+      "status": "M",
+      "path": "packages/owner-kernel/tsup.config.ts",
+      "blob": "bdb9c3c77129bbbcedb60ae11bd219c4a828516e"
+    },
+    {
+      "status": "M",
+      "path": "packages/rpc/src/session-turn-stream.ts",
+      "blob": "2b6d688c27e48076f28a7906eb3ef5926c215e43"
+    },
+    {
+      "status": "M",
+      "path": "packages/rpc/src/session-wire.ts",
+      "blob": "c73605add515ad6e43cf1d75b5525ccf07c842ad"
+    },
+    {
+      "status": "M",
+      "path": "packages/runtime-host/src/builtin-extra-tools.ts",
+      "blob": "1190d81f0197f66f271dee081852cb88ff1811d8"
+    },
+    {
+      "status": "M",
+      "path": "packages/runtime-host/src/runtime-host.ts",
+      "blob": "c4b723fe32ed068da753b007bfd8d3ad79a38d9d"
+    },
+    {
+      "status": "M",
+      "path": "packages/runtime-host/src/session-adapter.ts",
+      "blob": "6dcbe262585e1b4c577d829f139cb49e5afc5b4d"
+    },
+    {
+      "status": "M",
+      "path": "packages/runtime-host/src/workmode-tools.ts",
+      "blob": "6837b09fe73348b45a4b794f33ec9267f572b22c"
+    },
+    {
+      "status": "M",
+      "path": "packages/runtime-host/src/workscene-port.ts",
+      "blob": "cf780121623a8860714c73d76274a3992e4e74ab"
+    },
+    {
+      "status": "A",
+      "path": "packages/server/src/__tests__/__goldens__/canonical-registry.golden.json",
+      "blob": "edc2679ddf42776aa56757f8d58fad87f0e52977"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/__tests__/__goldens__/distributed-runtime-structure.golden.json",
+      "blob": "18c09e7e4c80fe79da6e845c95df50110bd9c8a3"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/__tests__/distributed-runtime-golden.test.ts",
+      "blob": "ec8875a0ac46c112f5d2d7e3e42323d98b00fb91"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/perspectives/__tests__/controller.test.ts",
+      "blob": "13dad8198f52f92b7e78dd951cb594152c2f1340"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/perspectives/controller.ts",
+      "blob": "dce4b170359676cbfa2256c42ebc620662401b66"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/rpc/__tests__/workscene-methods.test.ts",
+      "blob": "d6ab25865e2be836c8011f8d83fbd1eb63c5c89b"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/rpc/methods/index.ts",
+      "blob": "8dd0425b40fb844152ab6f822af6878e00c119f8"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/rpc/methods/session.ts",
+      "blob": "15bf3fa70418e3937cf8102cc33594b6a5cdb2b1"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/rpc/methods/workscene.ts",
+      "blob": "6c7e6989a359966132feca25e93397bf590e4371"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/runtime/conversation-directory.ts",
+      "blob": "9b450c724cf1ee8caf623ed6403b3fbcc5fcec36"
+    },
+    {
+      "status": "M",
+      "path": "packages/server/src/runtime/workscene-directory.ts",
+      "blob": "f24e6cb63c9984203bc69a32dd5e315f69fd02ac"
+    },
+    {
+      "status": "M",
+      "path": "research/design/drafts/unified-core-and-access-surfaces.md",
+      "blob": "eb7a4cd694cd8e273e5e5c38e28e7207f248f552"
+    },
+    {
+      "status": "M",
+      "path": "research/design/modules/distributed-runtime/distributed-runtime-charter.md",
+      "blob": "6a7d4b7f29df4b11771d0acfc9284fa08366a55e"
+    },
+    {
+      "status": "M",
+      "path": "research/design/modules/distributed-runtime/specification.md",
+      "blob": "f30cf9e57b36b06a1a431ef8fc1f9eea51f56750"
+    },
+    {
+      "status": "A",
+      "path": "research/postmortems/2026-08-01-performance-gate-overdesign.md",
+      "blob": "b4d566fcc4fed437e8a4956fd7262d1629beab8f"
+    },
+    {
+      "status": "M",
+      "path": "research/postmortems/README.md",
+      "blob": "f7ea9bc7d62208257b635653949822369cdda771"
+    },
+    {
+      "status": "A",
+      "path": "scripts/s7-registry-golden.mjs",
+      "blob": "f7fc979791adcd07bbca577313d00302ecf79a32"
+    },
+    {
+      "status": "A",
+      "path": "scripts/unit-delivery-manifest.mjs",
+      "blob": "5d324740b1082c40d12c105a36ade7805fa3f812"
+    },
+    {
+      "status": "A",
+      "path": "scripts/unit-delivery-manifest.test.mjs",
+      "blob": "49bb79f5eea07581d38d80b23e22f3e1f51ee04c"
+    }
+  ]
+}

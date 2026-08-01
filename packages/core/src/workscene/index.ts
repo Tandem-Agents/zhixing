@@ -5,7 +5,6 @@ export {
   withLegacyWorksceneWriteFence,
 } from "./registry.js";
 export {
-  AnchorWorksceneRegistry,
   WorksceneConflictError,
   WorksceneNotFoundError,
   WorksceneRevisionError,
@@ -20,7 +19,6 @@ export {
   type AnchorWorksceneGlobalStateAdapterOptions,
 } from "./global-state-adapter.js";
 export {
-  IncrementalWorksceneActivityProjection,
   WORKSCENE_ACTIVITY_DURABLE_CONTRACT,
 } from "./activity-projection.js";
 export {

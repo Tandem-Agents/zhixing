@@ -2,6 +2,7 @@ export {
   WorkspaceBindingCatalog,
   WorkspaceBindingCatalogConflictError,
   WorkspaceBindingCatalogDegradedError,
+  WorkspaceBindingCatalogIntegrityError,
   WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT,
   workspaceCatalogGenerationStorageKey,
   type WorkspaceBindingCatalogOptions,

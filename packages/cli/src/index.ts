@@ -14,9 +14,6 @@ import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
-import { installTerminalPerformanceObservationReporter } from "./serve/terminal-performance-observation.js";
-
-installTerminalPerformanceObservationReporter();
 
 async function renderActionError(error: unknown): Promise<void> {
   const writer = createStdoutWriter();
@@ -294,6 +291,18 @@ workspaceCmd
     await runWorkspaceCommand((workspace) =>
       workspace.create(name, targetPath),
     );
+  });
+
+workspaceCmd
+  .command("create-scene")
+  .description("授权本机目录并创建绑定该目录的工作场景")
+  .argument("<name>", "工作场景与工作区名称")
+  .argument("<path>", "本机目录路径")
+  .action(async (name: string, targetPath: string) => {
+    const { runWorkspaceSceneCreateCommand } = await import(
+      "./runtime/workspace-command.js"
+    );
+    await runWorkspaceSceneCreateCommand(name, targetPath);
   });
 
 workspaceCmd

@@ -162,11 +162,19 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     input: WorkspaceProbeRequest,
     abort: AbortSignal = new AbortController().signal,
   ): Promise<WorkspaceProbeResult> {
-    const request = validateWorkspaceProbeRequest(input, this.#verifier, {
-      requireActiveAt: false,
-    });
+    let request: WorkspaceProbeRequest;
+    try {
+      request = validateWorkspaceProbeRequest(input, this.#verifier, {
+        requireActiveAt: false,
+      });
+    } catch (error) {
+      throw new WorkspaceProbeRejectedError(
+        error instanceof Error ? error.message : "Workspace probe request is invalid",
+        { cause: error },
+      );
+    }
     if (request.resourceLease.audience.executorId !== this.#executorId) {
-      throw new TypeError(
+      throw new WorkspaceProbeRejectedError(
         "Workspace probe resource lease belongs to another executor",
       );
     }
@@ -370,7 +378,14 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     requestDigest: string,
     abort: AbortSignal,
   ): Promise<WorkspaceProbeResult> {
-    validateWorkspaceProbeRequest(request, this.#verifier);
+    try {
+      validateWorkspaceProbeRequest(request, this.#verifier);
+    } catch (error) {
+      throw new WorkspaceProbeRejectedError(
+        error instanceof Error ? error.message : "Workspace probe request is no longer active",
+        { cause: error },
+      );
+    }
     const resolved = await this.#environment.resolveWorkspace(
       request.bindingRef,
     );
@@ -965,6 +980,8 @@ function corruptProbeLog(message: string): AuthorityStorageError {
 }
 
 export class WorkspaceProbeConflictError extends Error {
+  readonly reasonCode = "WORKSPACE_PROBE_CONFLICT";
+
   constructor(message: string) {
     super(message);
     this.name = "WorkspaceProbeConflictError";
@@ -978,8 +995,18 @@ export const WORKSPACE_PROBE_DURABLE_CONTRACT = defineDurableRuntimeContract({
   resourceIdentity: "workspace-probe:<requestId>",
   recoveryClass: "authority-replay",
   cases: [
-    ...["log-established", "started", "completed", "retired"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSPACE_PROBE_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["grant-binding", "lease-binding", "request-conflict", "expired-fresh-request"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSPACE_PROBE_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["invalid-result", "request-result-mismatch", "broken-replay-index"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSPACE_PROBE_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["log-established", "started", "completed", "retired"].map((key) => ({ kind: "variant" as const, key })),
+    ...["grant-binding", "lease-binding", "expired-fresh-request"].map((key) => ({ kind: "rejection" as const, key, reasonCode: "WORKSPACE_PROBE_REJECTED" })),
+    { kind: "rejection", key: "request-conflict", reasonCode: "WORKSPACE_PROBE_CONFLICT" },
+    ...["invalid-result", "request-result-mismatch", "broken-replay-index"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "AUTHORITY_RECORD_INVALID" })),
   ],
 } as const);
+
+export class WorkspaceProbeRejectedError extends TypeError {
+  readonly reasonCode = "WORKSPACE_PROBE_REJECTED";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorkspaceProbeRejectedError";
+  }
+}

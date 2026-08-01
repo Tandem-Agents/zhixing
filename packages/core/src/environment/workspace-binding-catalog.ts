@@ -42,6 +42,7 @@ import {
 } from "../resources/index.js";
 import {
   validateLocalEnvironmentControl,
+  WorkspaceBindingCancelledError,
   WorkspaceBindingService,
   type WorkspaceCapabilityPublication,
   type WorkspaceBindingServiceOptions,
@@ -163,7 +164,14 @@ export class WorkspaceBindingCatalog
     input: { expectedCatalogGeneration: string },
     control: LocalEnvironmentRecoveryContext,
   ): Promise<NonNullable<WorkspaceBindingRootManifest["pendingReset"]>> {
-    validateLocalEnvironmentControl(control, this.#serviceOptions);
+    try {
+      validateLocalEnvironmentControl(control, this.#serviceOptions);
+    } catch (error) {
+      throw new WorkspaceBindingCatalogConflictError(
+        error instanceof Error ? error.message : "Workspace catalog reset control is invalid",
+        { cause: error },
+      );
+    }
     await this.#ensureOpen();
     await this.#refreshRootFromDisk();
     const confirmationDigest = resetConfirmationDigest(control);
@@ -194,7 +202,14 @@ export class WorkspaceBindingCatalog
       this.#startRecoveryOwner();
       return structuredClone(existing);
     }
-    validateFreshResetConfirmation(control.confirmation, this.#clock());
+    try {
+      validateFreshResetConfirmation(control.confirmation, this.#clock());
+    } catch (error) {
+      throw new WorkspaceBindingCatalogConflictError(
+        error instanceof Error ? error.message : "Workspace catalog reset confirmation is invalid",
+        { cause: error },
+      );
+    }
     const reservation = await this.#manifestQueue.run(async () => {
       const current = this.#requireManifest();
       if (
@@ -268,11 +283,7 @@ export class WorkspaceBindingCatalog
     let rejectAbort: (() => void) | undefined;
     const onAbort = new Promise<never>((_, reject) => {
       rejectAbort = () =>
-        reject(
-          new WorkspaceBindingCatalogConflictError(
-            "Workspace catalog reset waiter was cancelled",
-          ),
-        );
+        reject(new WorkspaceBindingCancelledError());
       if (abort.aborted) rejectAbort();
       else abort.addEventListener("abort", rejectAbort, { once: true });
     });
@@ -283,7 +294,7 @@ export class WorkspaceBindingCatalog
     }
     const replay = await this.#findResetReceipt(requestId);
     if (!replay) {
-      throw new WorkspaceBindingCatalogConflictError(
+      throw new WorkspaceBindingCatalogIntegrityError(
         "Workspace catalog reset completed without its receipt",
       );
     }
@@ -436,7 +447,7 @@ export class WorkspaceBindingCatalog
       return;
     })
       .catch((error: unknown) => {
-        this.#recoveryFailure = `workspace-reset:${errorCode(error)}`;
+        this.#recoveryFailure = catalogFailureCode(error);
         throw error;
       })
       .finally(() => {
@@ -467,13 +478,13 @@ export class WorkspaceBindingCatalog
           const current = await this.#readManifest();
           if (!current.pendingReset) {
             if (current.catalogGeneration !== reservation.catalogGeneration) {
-              throw new WorkspaceBindingCatalogConflictError(
+              throw new WorkspaceBindingCatalogIntegrityError(
                 "Workspace catalog reset completed with another generation",
               );
             }
             const replay = await this.#findResetReceipt(reservation.requestId);
             if (!replay) {
-              throw new WorkspaceBindingCatalogConflictError(
+              throw new WorkspaceBindingCatalogIntegrityError(
                 "Workspace catalog reset receipt is missing from its generation",
               );
             }
@@ -500,19 +511,19 @@ export class WorkspaceBindingCatalog
           await service.initialize();
           const durableReceipt = await service.resetReceipt();
           if (!durableReceipt) {
-            throw new WorkspaceBindingCatalogConflictError(
+            throw new WorkspaceBindingCatalogIntegrityError(
               "Workspace catalog reset target lacks its durable receipt",
             );
           }
           assertReceiptMatchesReservation(durableReceipt, reservation);
           if (canonicalize(durableReceipt) !== canonicalize(preparedReceipt)) {
-            throw new WorkspaceBindingCatalogConflictError(
+            throw new WorkspaceBindingCatalogIntegrityError(
               "Workspace catalog reset target receipt changed",
             );
           }
           const checkpoint = await log.checkpoint();
           if (checkpoint.logId !== preparedReceipt.logId) {
-            throw new WorkspaceBindingCatalogConflictError(
+            throw new WorkspaceBindingCatalogIntegrityError(
               "Workspace catalog reset target log identity changed",
             );
           }
@@ -549,7 +560,7 @@ export class WorkspaceBindingCatalog
     const visited = new Set<string>();
     while (generation !== "catalog-initial") {
       if (visited.has(generation)) {
-        throw new WorkspaceBindingCatalogConflictError(
+        throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace catalog generation chain contains a cycle",
         );
       }
@@ -566,14 +577,14 @@ export class WorkspaceBindingCatalog
       }
       const receipt = await service.resetReceipt();
       if (!receipt || receipt.catalogGeneration !== generation) {
-        throw new WorkspaceBindingCatalogConflictError(
+        throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace catalog generation chain is incomplete",
         );
       }
       validateResetReceipt(receipt);
       const checkpoint = await log.checkpoint();
       if (checkpoint.logId !== receipt.logId) {
-        throw new WorkspaceBindingCatalogConflictError(
+        throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace catalog generation log identity is inconsistent",
         );
       }
@@ -674,7 +685,7 @@ export class WorkspaceBindingCatalog
         const manifest: PersistedRootManifest = {
           version: MANIFEST_VERSION,
           state: "degraded",
-          degradedReason: errorCode(error),
+          degradedReason: catalogFailureCode(error),
           catalogGeneration: generation,
           logId: "unavailable",
           capabilityRevision: 1,
@@ -704,14 +715,16 @@ export class WorkspaceBindingCatalog
       await service.initialize();
       const checkpoint = await log.checkpoint();
       if (checkpoint.logId !== persisted.logId) {
-        throw new Error("Workspace catalog root log identity changed");
+        throw new WorkspaceBindingCatalogIntegrityError(
+          "Workspace catalog root log identity changed",
+        );
       }
       this.#active = service;
     } catch (error) {
       const degraded: PersistedRootManifest = {
         ...persisted,
         state: "degraded",
-        degradedReason: errorCode(error),
+        degradedReason: catalogFailureCode(error),
       };
       await this.#writeManifest(degraded, persisted);
       this.#manifest = degraded;
@@ -753,7 +766,7 @@ export class WorkspaceBindingCatalog
       }
       const current = this.#requireManifest();
       if (current.catalogGeneration !== publication.catalogGeneration) {
-        throw new WorkspaceBindingCatalogConflictError(
+        throw new WorkspaceBindingCatalogIntegrityError(
           "A superseded workspace catalog attempted to publish capabilities",
         );
       }
@@ -763,7 +776,7 @@ export class WorkspaceBindingCatalog
         return descriptor;
       }
       if (descriptor.revision < current.capabilityRevision) {
-        throw new WorkspaceBindingCatalogConflictError(
+        throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace capability revision moved backwards",
         );
       }
@@ -785,10 +798,20 @@ export class WorkspaceBindingCatalog
   }
 
   async #readManifest(): Promise<PersistedRootManifest> {
-    const parsed = JSON.parse(
-      await readFile(this.#manifestPath, "utf8"),
-    ) as unknown;
-    return validateManifest(parsed);
+    try {
+      const parsed = JSON.parse(
+        await readFile(this.#manifestPath, "utf8"),
+      ) as unknown;
+      return validateManifest(parsed);
+    } catch (error) {
+      if (isMissing(error) || error instanceof WorkspaceBindingCatalogIntegrityError) {
+        throw error;
+      }
+      throw new WorkspaceBindingCatalogIntegrityError(
+        "Workspace catalog root manifest is corrupt",
+        { cause: error },
+      );
+    }
   }
 
   async #refreshRootFromDisk(): Promise<void> {
@@ -814,7 +837,7 @@ export class WorkspaceBindingCatalog
           await service.initialize();
           const checkpoint = await log.checkpoint();
           if (checkpoint.logId !== latest.logId) {
-            throw new WorkspaceBindingCatalogConflictError(
+            throw new WorkspaceBindingCatalogIntegrityError(
               "Workspace catalog root points to another log",
             );
           }
@@ -851,7 +874,7 @@ export class WorkspaceBindingCatalog
         throw error;
       });
       if (canonicalize(current ?? null) !== canonicalize(expected ?? null)) {
-        throw new WorkspaceBindingCatalogConflictError(
+        throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace catalog root manifest changed concurrently",
         );
       }
@@ -914,9 +937,18 @@ export class WorkspaceBindingCatalogDegradedError extends Error {
 export class WorkspaceBindingCatalogConflictError extends Error {
   readonly code = "WORKSPACE_CATALOG_CONFLICT";
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "WorkspaceBindingCatalogConflictError";
+  }
+}
+
+export class WorkspaceBindingCatalogIntegrityError extends Error {
+  readonly code = "WORKSPACE_CATALOG_INTEGRITY";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorkspaceBindingCatalogIntegrityError";
   }
 }
 
@@ -927,9 +959,9 @@ export const WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT = defineDurableRuntimeContr
   resourceIdentity: "workspace-catalog-reset:<device-root>",
   recoveryClass: "committed-forward-recovery",
   cases: [
-    ...["healthy", "degraded", "pending-reset"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSPACE_ROOT_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["healthy-reset", "confirmation-mismatch", "generation-conflict", "reservation-conflict"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSPACE_ROOT_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["malformed-manifest", "missing-active-log", "invalid-reset-genesis", "broken-generation-link"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSPACE_ROOT_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["healthy", "degraded", "pending-reset"].map((key) => ({ kind: "variant" as const, key })),
+    ...["healthy-reset", "confirmation-mismatch", "generation-conflict", "reservation-conflict"].map((key) => ({ kind: "rejection" as const, key, reasonCode: "WORKSPACE_CATALOG_CONFLICT" })),
+    ...["malformed-manifest", "missing-active-log", "invalid-reset-genesis", "broken-generation-link"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "WORKSPACE_CATALOG_INTEGRITY" })),
   ],
 } as const);
 
@@ -1120,7 +1152,7 @@ function assertSameReservation(
   expected: NonNullable<WorkspaceBindingRootManifest["pendingReset"]>,
 ): void {
   if (canonicalize(current) !== canonicalize(expected)) {
-    throw new WorkspaceBindingCatalogConflictError(
+    throw new WorkspaceBindingCatalogIntegrityError(
       "Workspace catalog reset reservation changed",
     );
   }
@@ -1150,7 +1182,7 @@ function assertReceiptMatchesReservation(
     receipt.catalogGeneration !== reservation.catalogGeneration ||
     receipt.preparedAt !== reservation.preparedAt
   ) {
-    throw new WorkspaceBindingCatalogConflictError(
+    throw new WorkspaceBindingCatalogIntegrityError(
       "Workspace catalog reset receipt does not bind its reservation",
     );
   }
@@ -1177,6 +1209,30 @@ function errorCode(error: unknown): string {
     return (error as Error & { code: string }).code;
   }
   return error instanceof Error ? error.name : "unknown";
+}
+
+function catalogFailureCode(error: unknown): string {
+  const code = error instanceof Error && "code" in error
+    ? (error as Error & { code?: unknown }).code
+    : undefined;
+  const reasonCode = error instanceof Error && "reasonCode" in error
+    ? (error as Error & { reasonCode?: unknown }).reasonCode
+    : undefined;
+  if (
+    error instanceof WorkspaceBindingCatalogIntegrityError ||
+    error instanceof AuthorityStorageError ||
+    code === "artifact-missing" ||
+    code === "artifact-corrupt" ||
+    code === "commit-log-corrupt" ||
+    code === "invalid-authority-record" ||
+    reasonCode === "AUTHORITY_ARTIFACT_MISSING" ||
+    reasonCode === "AUTHORITY_ARTIFACT_CORRUPT" ||
+    reasonCode === "AUTHORITY_COMMIT_LOG_CORRUPT" ||
+    reasonCode === "AUTHORITY_RECORD_INVALID"
+  ) {
+    return "WORKSPACE_CATALOG_INTEGRITY";
+  }
+  return errorCode(error);
 }
 
 function isMissing(error: unknown): boolean {

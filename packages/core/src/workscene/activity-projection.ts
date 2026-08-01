@@ -49,7 +49,9 @@ export class IncrementalWorksceneActivityProjection {
     }
     const aggregate = parseAggregate(value);
     if (aggregate.sceneId !== normalizedSceneId) {
-      throw new Error("Workscene activity projection scene binding is invalid");
+      throw new WorksceneActivityProjectionCorruptionError(
+        "Workscene activity projection scene binding is invalid",
+      );
     }
     this.#latest.set(normalizedSceneId, aggregate.lastActiveAt);
     return aggregate.lastActiveAt;
@@ -119,11 +121,29 @@ export const WORKSCENE_ACTIVITY_DURABLE_CONTRACT = defineDurableRuntimeContract(
   resourceIdentity: "workscene-session-activity-v2",
   recoveryClass: "derived-rebuild",
   cases: [
-    ...["put", "tombstone"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSCENE_ACTIVITY_${key.toUpperCase()}` })),
-    ...["stale-contribution", "wrong-scene", "wrong-conversation"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSCENE_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["invalid-contribution", "invalid-aggregate", "checkpoint-mismatch"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSCENE_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["put", "tombstone", "stale-contribution", "checkpoint-mismatch"].map((key) => ({ kind: "variant" as const, key })),
+    ...["wrong-scene", "wrong-conversation"].map((key) => ({ kind: "rejection" as const, key, reasonCode: "WORKSCENE_ACTIVITY_REJECTED" })),
+    ...["invalid-contribution", "invalid-aggregate"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "WORKSCENE_ACTIVITY_CORRUPT" })),
   ],
 } as const);
+
+export class WorksceneActivityRejectedError extends TypeError {
+  readonly reasonCode = "WORKSCENE_ACTIVITY_REJECTED";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorksceneActivityRejectedError";
+  }
+}
+
+export class WorksceneActivityProjectionCorruptionError extends Error {
+  readonly reasonCode = "WORKSCENE_ACTIVITY_CORRUPT";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorksceneActivityProjectionCorruptionError";
+  }
+}
 
 async function reduceIncrementalActivity(
   envelope: {
@@ -179,7 +199,9 @@ async function reduceIncrementalActivity(
   for (const entry of envelope.entries) {
     if (!entry.stream.startsWith(SESSION_ACTIVITY_STREAM_PREFIX)) continue;
     if (entry.body.kind !== "session-activity") {
-      throw new Error("Session activity stream contains another record kind");
+      throw new WorksceneActivityRejectedError(
+        "Session activity stream contains another record kind",
+      );
     }
     const activity = validateActivityRecord(entry.body, entry.stream);
     const contributions = await loadScene(activity.sceneId);
@@ -254,29 +276,37 @@ function validateActivityRecord(
   value: Extract<SessionInternalRecord, { kind: "session-activity" }>,
   stream: string,
 ): Extract<SessionInternalRecord, { kind: "session-activity" }> {
-  const conversationId = requireId(value.conversationId);
-  const sceneId = requireId(value.sceneId);
-  if (stream !== `${SESSION_ACTIVITY_STREAM_PREFIX}${conversationId}`) {
-    throw new Error("Session activity stream does not bind its conversation");
+  try {
+    const conversationId = requireId(value.conversationId);
+    const sceneId = requireId(value.sceneId);
+    if (stream !== `${SESSION_ACTIVITY_STREAM_PREFIX}${conversationId}`) {
+      throw new TypeError("Session activity stream does not bind its conversation");
+    }
+    const scope = parseConversationId(conversationId).scope;
+    if (scope.kind !== "workscene" || scope.sceneId !== sceneId) {
+      throw new TypeError("Session activity scene does not bind its conversation");
+    }
+    if (value.operation !== "upsert" && value.operation !== "delete") {
+      throw new TypeError("Session activity operation is invalid");
+    }
+    if (!Number.isSafeInteger(value.sessionRevision) || value.sessionRevision < 1) {
+      throw new TypeError("Session activity revision is invalid");
+    }
+    return {
+      kind: "session-activity",
+      operation: value.operation,
+      conversationId,
+      sceneId,
+      sessionRevision: value.sessionRevision,
+      lastActiveAt: requireTime(value.lastActiveAt),
+    };
+  } catch (error) {
+    if (error instanceof WorksceneActivityRejectedError) throw error;
+    throw new WorksceneActivityRejectedError(
+      error instanceof Error ? error.message : "Session activity record is invalid",
+      { cause: error },
+    );
   }
-  const scope = parseConversationId(conversationId).scope;
-  if (scope.kind !== "workscene" || scope.sceneId !== sceneId) {
-    throw new Error("Session activity scene does not bind its conversation");
-  }
-  if (value.operation !== "upsert" && value.operation !== "delete") {
-    throw new Error("Session activity operation is invalid");
-  }
-  if (!Number.isSafeInteger(value.sessionRevision) || value.sessionRevision < 1) {
-    throw new Error("Session activity revision is invalid");
-  }
-  return {
-    kind: "session-activity",
-    operation: value.operation,
-    conversationId,
-    sceneId,
-    sessionRevision: value.sessionRevision,
-    lastActiveAt: requireTime(value.lastActiveAt),
-  };
 }
 
 function parseContribution(value: JsonValue): {
@@ -286,43 +316,59 @@ function parseContribution(value: JsonValue): {
   at: string;
   deleted: boolean;
 } {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Session activity contribution is invalid");
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("Session activity contribution is invalid");
+    }
+    const keys = Object.keys(value).sort().join(",");
+    if (
+      keys !== "at,conversationId,deleted,sceneId,sessionRevision" ||
+      typeof value.deleted !== "boolean" ||
+      !Number.isSafeInteger(value.sessionRevision) ||
+      (value.sessionRevision as number) < 1
+    ) {
+      throw new TypeError("Session activity contribution is invalid");
+    }
+    return {
+      conversationId: requireId(value.conversationId as string),
+      sceneId: requireId(value.sceneId as string),
+      sessionRevision: value.sessionRevision as number,
+      at: requireTime(value.at as string),
+      deleted: value.deleted,
+    };
+  } catch (error) {
+    if (error instanceof WorksceneActivityProjectionCorruptionError) throw error;
+    throw new WorksceneActivityProjectionCorruptionError(
+      error instanceof Error ? error.message : "Session activity contribution is invalid",
+      { cause: error },
+    );
   }
-  const keys = Object.keys(value).sort().join(",");
-  if (
-    keys !== "at,conversationId,deleted,sceneId,sessionRevision" ||
-    typeof value.deleted !== "boolean" ||
-    !Number.isSafeInteger(value.sessionRevision) ||
-    (value.sessionRevision as number) < 1
-  ) {
-    throw new Error("Session activity contribution is invalid");
-  }
-  return {
-    conversationId: requireId(value.conversationId as string),
-    sceneId: requireId(value.sceneId as string),
-    sessionRevision: value.sessionRevision as number,
-    at: requireTime(value.at as string),
-    deleted: value.deleted,
-  };
 }
 
 function parseAggregate(value: JsonValue): {
   sceneId: string;
   lastActiveAt: string;
 } {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).sort().join(",") !== "lastActiveAt,sceneId"
-  ) {
-    throw new Error("Workscene activity aggregate is invalid");
+  try {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== "lastActiveAt,sceneId"
+    ) {
+      throw new TypeError("Workscene activity aggregate is invalid");
+    }
+    return {
+      sceneId: requireId(value.sceneId as string),
+      lastActiveAt: requireTime(value.lastActiveAt as string),
+    };
+  } catch (error) {
+    if (error instanceof WorksceneActivityProjectionCorruptionError) throw error;
+    throw new WorksceneActivityProjectionCorruptionError(
+      error instanceof Error ? error.message : "Workscene activity aggregate is invalid",
+      { cause: error },
+    );
   }
-  return {
-    sceneId: requireId(value.sceneId as string),
-    lastActiveAt: requireTime(value.lastActiveAt as string),
-  };
 }
 
 function requireId(value: string): string {

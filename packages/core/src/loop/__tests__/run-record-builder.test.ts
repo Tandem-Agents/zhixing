@@ -4,6 +4,34 @@ import { buildRunRecord } from "../run-record-builder.js";
 import type { Message } from "../../types/messages.js";
 
 describe("buildRunRecord", () => {
+  it("omits absent optional metadata from the durable record", () => {
+    const userMessage: Message = {
+      role: "user",
+      content: [{ type: "text", text: "hello" }],
+    };
+    const assistantMessage: Message = {
+      role: "assistant",
+      content: [{ type: "text", text: "world" }],
+    };
+
+    const record = buildRunRecord({
+      userMessage,
+      newMessages: [assistantMessage],
+      agentResult: {
+        reason: "completed",
+        message: assistantMessage,
+        usage: { inputTokens: 1, outputTokens: 2 },
+      },
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(Object.keys(record).sort()).toEqual([
+      "messages",
+      "timestamp",
+      "usage",
+    ]);
+  });
+
   it("keeps advancement metadata at run level and leaves protocol messages clean", () => {
     const userMessage: Message = {
       role: "user",

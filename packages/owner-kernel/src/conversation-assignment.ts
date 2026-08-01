@@ -1,8 +1,5 @@
 import { Buffer } from "node:buffer";
-import {
-  defineDurableRuntimeContract,
-  publishTerminalPerformanceObservation,
-} from "@zhixing/core/contracts";
+import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import {
   AuthorityStorageError,
   collectArtifactRefs,
@@ -539,11 +536,21 @@ export const SESSION_ACTIVITY_DURABLE_CONTRACT = defineDurableRuntimeContract({
   resourceIdentity: "session-activity:<conversationId>",
   recoveryClass: "authority-replay",
   cases: [
-    ...["upsert", "delete"].map((key) => ({ kind: "variant" as const, key, reasonCode: `SESSION_ACTIVITY_${key.toUpperCase()}` })),
-    ...["conversation-scene-mismatch", "non-monotonic-revision", "external-construction"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `SESSION_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["wrong-stream", "invalid-time", "identity-rebinding"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `SESSION_ACTIVITY_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["upsert", "delete"].map((key) => ({ kind: "variant" as const, key })),
+    ...["conversation-scene-mismatch", "external-construction"].map((key) => ({ kind: "rejection" as const, key, reasonCode: "SESSION_ACTIVITY_REJECTED" })),
+    { kind: "rejection", key: "non-monotonic-revision", reasonCode: "AUTHORITY_RECORD_INVALID" },
+    ...["wrong-stream", "invalid-time", "identity-rebinding"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "AUTHORITY_RECORD_INVALID" })),
   ],
 } as const);
+
+export class SessionActivityRejectedError extends TypeError {
+  readonly reasonCode = "SESSION_ACTIVITY_REJECTED";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SessionActivityRejectedError";
+  }
+}
 
 interface PendingLifecycleProjection {
   readonly mutation: "clear" | "delete";
@@ -1255,19 +1262,26 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly sceneId: string;
     readonly at: string;
   }): Promise<{ readonly revision: number; readonly at: string }> {
-    assertPlainRecord(input, "Session activity input");
-    assertExactRecordKeys(
-      input,
-      ["at", "requestId", "sceneId"],
-      "Session activity input",
-    );
-    assertIdentifier(input.requestId, "Session activity request id");
-    assertIdentifier(input.sceneId, "Session activity scene id");
-    assertCanonicalActivityTime(input.at);
-    assertWorksceneIdentity(
-      this.#conversationId,
-      input.sceneId,
-    );
+    try {
+      assertPlainRecord(input, "Session activity input");
+      assertExactRecordKeys(
+        input,
+        ["at", "requestId", "sceneId"],
+        "Session activity input",
+      );
+      assertIdentifier(input.requestId, "Session activity request id");
+      assertIdentifier(input.sceneId, "Session activity scene id");
+      assertCanonicalActivityTime(input.at);
+      assertWorksceneIdentity(
+        this.#conversationId,
+        input.sceneId,
+      );
+    } catch (error) {
+      throw new SessionActivityRejectedError(
+        error instanceof Error ? error.message : "Session activity input is invalid",
+        { cause: error },
+      );
+    }
     const transaction = await this.#transact<{
       readonly revision: number;
       readonly at: string;
@@ -7702,19 +7716,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           cursor: transaction.cursor,
         };
         if (transaction.commit) {
-          if (
-            transaction.commit.entries.some(
-              (entry) =>
-                typeof entry.body === "object" &&
-                entry.body !== null &&
-                "kind" in entry.body &&
-                entry.body.kind === "session-activity",
-            )
-          ) {
-            publishTerminalPerformanceObservation({
-              kind: "session-activity-commit",
-            });
-          }
           this.#publishStatusNotices(
             conversationStatusNoticesForCommit(
               transaction.state,

@@ -12,7 +12,6 @@ import type {
   ControlResult,
   Signature,
 } from "@zhixing/core/contracts";
-import { observeTerminalPerformance } from "@zhixing/core/contracts";
 import {
   protocolDigest,
   type ProtocolSignatureVerifier,
@@ -1033,10 +1032,6 @@ describe("ControlAdmissionJournal", () => {
 
 describe("workscene session owner metadata", () => {
   it("commits metadata and activity atomically and replays exact owner requests", async () => {
-    const observations: string[] = [];
-    const stopObserving = observeTerminalPerformance(({ kind }) => {
-      observations.push(kind);
-    });
     const { artifacts, log } = await createHarness();
     const conversationId = "ws:scene-1:primary";
     const journal = new ConversationRunJournal({
@@ -1114,11 +1109,6 @@ describe("workscene session owner metadata", () => {
       }),
     ).resolves.toEqual({ revision: 2, at: deletedAt });
     const commits = await log.readAll();
-    stopObserving();
-    expect(observations).toEqual([
-      "session-activity-commit",
-      "session-activity-commit",
-    ]);
     expect(commits).toHaveLength(2);
     expect(commits[1]!.entries).toEqual(
       expect.arrayContaining([

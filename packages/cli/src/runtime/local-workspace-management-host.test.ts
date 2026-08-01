@@ -1,13 +1,23 @@
 import path from "node:path";
+import { writeFile } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
+import { ExecutorResourceBackpressureError } from "@zhixing/executor";
+import {
+  WorkspaceBindingCancelledError,
+  WorkspaceBindingCatalogConflictError,
+  WorkspaceBindingCatalogDegradedError,
+  WorkspaceBindingCatalogIntegrityError,
+} from "@zhixing/core/environment";
 import {
   LocalWorkspaceManagementHost,
   RecoveredLocalWorkspaceOperationsError,
   createLocalWorkspaceClient,
   decodeLocalWorkspaceResetPreview,
   encodeLocalWorkspaceResetPreview,
+  readLocalWorkspaceHostStatus,
 } from "./local-workspace-management-host.js";
+import { LocalWorkspaceBusinessError } from "./local-workspace-facade.js";
 import {
   LocalWorkspaceOperationOutbox,
   validateLocalWorkspaceOperation,
@@ -271,4 +281,369 @@ describe("LocalWorkspaceManagementHost", () => {
       await lease.release();
     }
   });
+
+  it("drains the oldest committed operation through retry without letting a later write pass it", async () => {
+    const home = await createTempDir("workspace-host-ordered-drain");
+    const attempts: string[] = [];
+    let firstAttempt = true;
+    const create = vi.fn(async (displayName: string, absolutePath: string) => {
+      attempts.push(displayName);
+      if (displayName === "first" && firstAttempt) {
+        firstAttempt = false;
+        throw new ExecutorResourceBackpressureError(1);
+      }
+      return {
+        name: displayName,
+        path: absolutePath,
+        revision: 1,
+        workspaceBindingRevision: 1,
+      };
+    });
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create,
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      const first = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "first", absolutePath: "C:\\first" },
+      }));
+      const second = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "second", absolutePath: "C:\\second" },
+      }));
+      const firstCommit = callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(first),
+      });
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1), {
+        interval: 1,
+        timeout: 40,
+      });
+      await expect(callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(second),
+      })).rejects.toThrow("capacity is limited");
+      await expect(firstCommit).resolves.toMatchObject({ state: "completed" });
+      await expect(callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(second),
+      })).resolves.toMatchObject({ state: "completed" });
+      expect(attempts).toEqual(["first", "first", "second"]);
+      await expect(readLocalWorkspaceHostStatus(home)).resolves.toEqual({ state: "ready" });
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("persists deterministic rejection but keeps unknown failure committed and diagnosable", async () => {
+    const home = await createTempDir("workspace-host-decisions");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const create = vi.fn(async (displayName: string) => {
+      if (displayName === "rejected") {
+        throw new LocalWorkspaceBusinessError("WORKSPACE_POLICY_REJECTED", "rejected by policy");
+      }
+      throw new Error("unexpected storage state");
+    });
+    const outbox = new LocalWorkspaceOperationOutbox({
+      rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+    });
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create,
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox,
+    });
+    try {
+      await host.start();
+      const rejected = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "rejected", absolutePath: "C:\\rejected" },
+      }));
+      const rejectedResult = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(rejected),
+      }));
+      expect(rejectedResult).toMatchObject({
+        state: "completed",
+        result: { ok: false, error: { code: "WORKSPACE_POLICY_REJECTED" } },
+      });
+
+      const corrupt = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "corrupt", absolutePath: "C:\\corrupt" },
+      }));
+      await expect(callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(corrupt),
+      })).rejects.toThrow("unexpected storage state");
+      expect(outbox.operation(corrupt).state).toBe("committed");
+      await expect(readLocalWorkspaceHostStatus(home)).resolves.toMatchObject({
+        state: "degraded",
+        diagnostic: {
+          code: "LOCAL_WORKSPACE_OPERATION_FAILED",
+          localSeq: corrupt.localSeq,
+        },
+      });
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it.each([
+    {
+      label: "catalog degraded",
+      error: new WorkspaceBindingCatalogDegradedError("catalog unavailable"),
+      code: "WORKSPACE_CATALOG_DEGRADED",
+    },
+    {
+      label: "catalog integrity",
+      error: new WorkspaceBindingCatalogIntegrityError("catalog chain is corrupt"),
+      code: "WORKSPACE_CATALOG_INTEGRITY",
+    },
+  ])("keeps a committed operation recoverable after $label failure", async ({ error, code }) => {
+    const home = await createTempDir(
+      `workspace-host-${code.toLowerCase().replaceAll("_", "-")}`,
+    );
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const outbox = new LocalWorkspaceOperationOutbox({
+      rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+    });
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create: async () => { throw error; },
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox,
+    });
+    try {
+      await host.start();
+      const prepared = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" },
+      }));
+      await expect(callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(prepared),
+      })).rejects.toThrow(error.message);
+      expect(outbox.operation(prepared).state).toBe("committed");
+      await expect(readLocalWorkspaceHostStatus(home)).resolves.toMatchObject({
+        state: "degraded",
+        diagnostic: { code, localSeq: prepared.localSeq },
+      });
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("persists only an explicit catalog business conflict as a completed result", async () => {
+    const home = await createTempDir("workspace-host-catalog-business-conflict");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const outbox = new LocalWorkspaceOperationOutbox({
+      rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+    });
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create: async () => {
+          throw new WorkspaceBindingCatalogConflictError("request generation changed");
+        },
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox,
+    });
+    try {
+      await host.start();
+      const prepared = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" },
+      }));
+      await expect(callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(prepared),
+      })).resolves.toMatchObject({
+        state: "completed",
+        result: { ok: false, error: { code: "WORKSPACE_CATALOG_CONFLICT" } },
+      });
+      expect(outbox.operation(prepared).state).toBe("completed");
+      await expect(readLocalWorkspaceHostStatus(home)).resolves.toEqual({ state: "ready" });
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("stops a retrying operation at a committed safe point and resumes it after restart", async () => {
+    const home = await createTempDir("workspace-host-shutdown-resume");
+    let executionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      executionStarted = resolve;
+    });
+    const rootDir = path.join(home, "runtime", "local-workspace-operation-outbox");
+    const firstLease = await acquireLocalWorkspaceOwner(home);
+    const firstOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
+    const firstHost = new LocalWorkspaceManagementHost({
+      lease: firstLease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create: async (_displayName: string, _absolutePath: string, authority?: { abort?: AbortSignal }) => {
+          executionStarted();
+          await new Promise<void>((_resolve, reject) => {
+            authority?.abort?.addEventListener(
+              "abort",
+              () => reject(new WorkspaceBindingCancelledError()),
+              { once: true },
+            );
+          });
+          throw new Error("unreachable");
+        },
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: firstOutbox,
+    });
+    await firstHost.start();
+    const prepared = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+      kind: "prepare",
+      input: { kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" },
+    }));
+    const committing = callLocalWorkspaceHost(home, {
+      kind: "commit",
+      identity: operationIdentity(prepared),
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await started;
+    await firstHost.close();
+    expect(await committing).toBeInstanceOf(Error);
+    expect(firstOutbox.operation(prepared).state).toBe("committed");
+    await firstLease.release();
+
+    const secondLease = await acquireLocalWorkspaceOwner(home);
+    const secondOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
+    const secondHost = new LocalWorkspaceManagementHost({
+      lease: secondLease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create: async (displayName: string, absolutePath: string) => ({
+          name: displayName,
+          path: absolutePath,
+          revision: 1,
+          workspaceBindingRevision: 1,
+        }),
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: secondOutbox,
+    });
+    try {
+      await secondHost.start();
+      await vi.waitFor(async () => {
+        expect((await readLocalWorkspaceHostStatus(home)).state).toBe("ready");
+      });
+      expect(secondOutbox.operation(prepared).state).toBe("completed");
+    } finally {
+      await secondHost.close();
+      await secondLease.release();
+    }
+  });
+
+  it("publishes a read-only diagnostic surface when durable recovery is corrupt", async () => {
+    const home = await createTempDir("workspace-host-corrupt-recovery");
+    const rootDir = path.join(home, "runtime", "local-workspace-operation-outbox");
+    await new LocalWorkspaceOperationOutbox({ rootDir }).initialize();
+    await writeFile(path.join(rootDir, "operations.ndjson"), "not-json\n", "utf8");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create: vi.fn(),
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({ rootDir }),
+    });
+    try {
+      await host.start();
+      await expect(readLocalWorkspaceHostStatus(home)).resolves.toMatchObject({
+        state: "degraded",
+        diagnostic: { code: "LOCAL_WORKSPACE_OUTBOX_CHAIN_CORRUPT" },
+      });
+      await expect(callLocalWorkspaceHost(home, { kind: "status" })).resolves.toEqual({
+        state: "healthy",
+        catalogGeneration: "catalog-a",
+      });
+      await expect(callLocalWorkspaceHost(home, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" },
+      })).rejects.toThrow();
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
 });
+
+function operationIdentity(operation: {
+  readonly localSeq: number;
+  readonly operationId: string;
+  readonly inputDigest: string;
+}) {
+  return {
+    localSeq: operation.localSeq,
+    operationId: operation.operationId,
+    inputDigest: operation.inputDigest,
+  };
+}

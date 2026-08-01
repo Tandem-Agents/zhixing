@@ -24,6 +24,8 @@ export default defineConfig({
     "src/authority/index.ts",
     "src/delivery/index.ts",
     "src/environment/index.ts",
+    "src/test-support/s7-durable.ts",
+    "src/test-support/s7-durable-harness.ts",
   ],
   format: ["esm"],
   dts: true,

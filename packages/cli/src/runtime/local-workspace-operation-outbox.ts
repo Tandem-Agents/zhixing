@@ -13,6 +13,42 @@ const VERSION = 1;
 const EMPTY_PREFIX = protocolDigest("LocalWorkspaceOperationPrefix", 1, null);
 export const LOCAL_WORKSPACE_PREPARED_TTL_MS = 15 * 60_000;
 
+export class LocalWorkspaceOperationIdentityMismatchError extends Error {
+  readonly code = "LOCAL_WORKSPACE_OPERATION_IDENTITY_MISMATCH";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LocalWorkspaceOperationIdentityMismatchError";
+  }
+}
+
+export class LocalWorkspaceConfirmationHoleError extends Error {
+  readonly code = "LOCAL_WORKSPACE_CONFIRMATION_HOLE";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LocalWorkspaceConfirmationHoleError";
+  }
+}
+
+export class LocalWorkspaceOutboxChainCorruptionError extends Error {
+  readonly code = "LOCAL_WORKSPACE_OUTBOX_CHAIN_CORRUPT";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LocalWorkspaceOutboxChainCorruptionError";
+  }
+}
+
+export class LocalWorkspaceOutboxIdentityCorruptionError extends Error {
+  readonly code = "LOCAL_WORKSPACE_OUTBOX_IDENTITY_CORRUPT";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LocalWorkspaceOutboxIdentityCorruptionError";
+  }
+}
+
 export const LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT =
   defineDurableRuntimeContract({
     recordFamily: "local-workspace-operation-outbox",
@@ -21,10 +57,10 @@ export const LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT =
     resourceIdentity: "zhixingHome/runtime/local-workspace-operation-outbox",
     recoveryClass: "committed-forward-recovery",
     cases: [
-      { kind: "variant", key: "prepared", reasonCode: "LOCAL_WORKSPACE_OPERATION_PREPARED" },
-      { kind: "variant", key: "committed", reasonCode: "LOCAL_WORKSPACE_OPERATION_COMMITTED" },
-      { kind: "variant", key: "completed", reasonCode: "LOCAL_WORKSPACE_OPERATION_COMPLETED" },
-      { kind: "variant", key: "abandoned", reasonCode: "LOCAL_WORKSPACE_OPERATION_ABANDONED" },
+      { kind: "variant", key: "prepared" },
+      { kind: "variant", key: "committed" },
+      { kind: "variant", key: "completed" },
+      { kind: "variant", key: "abandoned" },
       { kind: "rejection", key: "identity-mismatch", reasonCode: "LOCAL_WORKSPACE_OPERATION_IDENTITY_MISMATCH" },
       { kind: "rejection", key: "confirmation-hole", reasonCode: "LOCAL_WORKSPACE_CONFIRMATION_HOLE" },
       { kind: "corruption", key: "checkpoint-chain", reasonCode: "LOCAL_WORKSPACE_OUTBOX_CHAIN_CORRUPT" },
@@ -289,11 +325,15 @@ export class LocalWorkspaceOperationOutbox {
     return this.#serial(async () => {
       const state = this.#requireState();
       if (input.outboxId !== state.checkpoint.outboxId) {
-        throw new Error("Local workspace acknowledgment is bound to another outbox");
+        throw new LocalWorkspaceOperationIdentityMismatchError(
+          "Local workspace acknowledgment is bound to another outbox",
+        );
       }
       if (input.throughSeq === state.checkpoint.confirmedThroughSeq) {
         if (input.prefixDigest !== state.checkpoint.confirmedPrefixDigest) {
-          throw new Error("Local workspace acknowledgment digest conflicts with its watermark");
+          throw new LocalWorkspaceConfirmationHoleError(
+            "Local workspace acknowledgment digest conflicts with its watermark",
+          );
         }
         return {
           outboxId: state.checkpoint.outboxId,
@@ -302,12 +342,18 @@ export class LocalWorkspaceOperationOutbox {
         };
       }
       if (input.throughSeq < state.checkpoint.confirmedThroughSeq) {
-        throw new Error("Local workspace acknowledgment moved backwards");
+        throw new LocalWorkspaceConfirmationHoleError(
+          "Local workspace acknowledgment moved backwards",
+        );
       }
       let expectedSeq = state.checkpoint.confirmedThroughSeq + 1;
       let prefixDigest = state.checkpoint.confirmedPrefixDigest;
       for (const entry of input.entries) {
-        if (entry.localSeq !== expectedSeq) throw new Error("Local workspace acknowledgment crossed an operation hole");
+        if (entry.localSeq !== expectedSeq) {
+          throw new LocalWorkspaceConfirmationHoleError(
+            "Local workspace acknowledgment crossed an operation hole",
+          );
+        }
         const operation = state.operations.get(entry.localSeq);
         if (!operation || !isTerminal(operation) || !operation.resultDigest) {
           throw new Error("Local workspace acknowledgment contains a non-terminal operation");
@@ -316,7 +362,11 @@ export class LocalWorkspaceOperationOutbox {
           operation.operationId !== entry.operationId ||
           operation.inputDigest !== entry.inputDigest ||
           operation.resultDigest !== entry.resultDigest
-        ) throw new Error("Local workspace acknowledgment is bound to another operation");
+        ) {
+          throw new LocalWorkspaceOperationIdentityMismatchError(
+            "Local workspace acknowledgment is bound to another operation",
+          );
+        }
         prefixDigest = protocolDigest("LocalWorkspaceOperationPrefix", 1, {
           previous: prefixDigest,
           localSeq: entry.localSeq,
@@ -327,7 +377,9 @@ export class LocalWorkspaceOperationOutbox {
         expectedSeq += 1;
       }
       if (input.entries.at(-1)?.localSeq !== input.throughSeq || prefixDigest !== input.prefixDigest) {
-        throw new Error("Local workspace acknowledgment prefix is invalid");
+        throw new LocalWorkspaceConfirmationHoleError(
+          "Local workspace acknowledgment prefix is invalid",
+        );
       }
       const checkpoint: Checkpoint = {
         ...state.checkpoint,
@@ -356,6 +408,14 @@ export class LocalWorkspaceOperationOutbox {
     return cloneOperation(this.#requireOperation(identity));
   }
 
+  async oldestCommitted(): Promise<LocalWorkspaceOperation | undefined> {
+    await this.initialize();
+    const operation = [...this.#requireState().operations.values()]
+      .filter((candidate) => candidate.state === "committed")
+      .sort((left, right) => left.localSeq - right.localSeq)[0];
+    return operation ? cloneOperation(operation) : undefined;
+  }
+
   async #expirePrepared(): Promise<void> {
     const now = Date.parse(this.#clock());
     for (const operation of [...this.#requireState().operations.values()]) {
@@ -381,16 +441,30 @@ export class LocalWorkspaceOperationOutbox {
 
   async #recoverEstablishmentMarker(): Promise<void> {
     const state = this.#requireState();
-    const marker = validateMarker(JSON.parse(await readFile(this.#markerPath, "utf8")));
+    let marker: EstablishmentMarker;
+    try {
+      marker = validateMarker(JSON.parse(await readFile(this.#markerPath, "utf8")));
+    } catch (error) {
+      throw new LocalWorkspaceOutboxIdentityCorruptionError(
+        error instanceof Error ? error.message : "Local workspace outbox establishment marker is corrupt",
+        { cause: error },
+      );
+    }
     if (marker.outboxId !== state.checkpoint.outboxId) {
-      throw new Error("Local workspace outbox identity conflicts with its establishment marker");
+      throw new LocalWorkspaceOutboxIdentityCorruptionError(
+        "Local workspace outbox identity conflicts with its establishment marker",
+      );
     }
     if (marker.confirmedThroughSeq < state.checkpoint.confirmedThroughSeq) {
-      throw new Error("Local workspace outbox establishment marker moved backwards");
+      throw new LocalWorkspaceOutboxIdentityCorruptionError(
+        "Local workspace outbox establishment marker moved backwards",
+      );
     }
     if (marker.confirmedThroughSeq === state.checkpoint.confirmedThroughSeq) {
       if (marker.confirmedPrefixDigest !== state.checkpoint.confirmedPrefixDigest) {
-        throw new Error("Local workspace outbox establishment marker digest conflicts with its checkpoint");
+        throw new LocalWorkspaceOutboxIdentityCorruptionError(
+          "Local workspace outbox establishment marker digest conflicts with its checkpoint",
+        );
       }
       return;
     }
@@ -400,7 +474,9 @@ export class LocalWorkspaceOperationOutbox {
     while (expectedSeq <= marker.confirmedThroughSeq) {
       const operation = state.operations.get(expectedSeq);
       if (!operation || !isTerminal(operation) || !operation.resultDigest) {
-        throw new Error("Local workspace outbox rollback cannot be recovered from its durable log");
+        throw new LocalWorkspaceOutboxIdentityCorruptionError(
+          "Local workspace outbox rollback cannot be recovered from its durable log",
+        );
       }
       prefixDigest = protocolDigest("LocalWorkspaceOperationPrefix", 1, {
         previous: prefixDigest,
@@ -412,7 +488,9 @@ export class LocalWorkspaceOperationOutbox {
       expectedSeq += 1;
     }
     if (prefixDigest !== marker.confirmedPrefixDigest) {
-      throw new Error("Local workspace outbox rollback conflicts with its durable confirmation prefix");
+      throw new LocalWorkspaceOutboxIdentityCorruptionError(
+        "Local workspace outbox rollback conflicts with its durable confirmation prefix",
+      );
     }
     const checkpoint: Checkpoint = {
       ...state.checkpoint,
@@ -490,40 +568,48 @@ export class LocalWorkspaceOperationOutbox {
   }
 
   async #read(): Promise<PersistedState> {
-    const lines = (await readFile(this.#filePath, "utf8")).split("\n").filter(Boolean);
-    if (lines.length === 0) throw new Error("Local workspace outbox is empty");
-    const first = parseExact(JSON.parse(lines[0]!), ["checkpoint", "digest"], "checkpoint envelope");
-    const checkpoint = validateCheckpoint(first.checkpoint);
-    const checkpointDigest = protocolDigest("LocalWorkspaceOperationCheckpoint", 1, checkpoint);
-    if (first.digest !== checkpointDigest) throw new Error("Local workspace outbox checkpoint digest is invalid");
-    const operations = new Map<number, LocalWorkspaceOperation>();
-    let headDigest = checkpointDigest;
-    let nextEventSeq = 1;
-    for (const line of lines.slice(1)) {
-      const event = validateEvent(JSON.parse(line), nextEventSeq, headDigest, checkpoint);
-      const previous = operations.get(event.operation.localSeq);
-      validateTransition(previous, event.operation);
-      operations.set(event.operation.localSeq, cloneOperation(event.operation));
-      headDigest = event.digest;
-      nextEventSeq += 1;
-    }
-    const sequences = [...operations.keys()].sort((a, b) => a - b);
-    for (let index = 0; index < sequences.length; index += 1) {
-      if (sequences[index] !== checkpoint.confirmedThroughSeq + index + 1) {
-        throw new Error("Local workspace outbox operation sequence contains a gap");
+    try {
+      const lines = (await readFile(this.#filePath, "utf8")).split("\n").filter(Boolean);
+      if (lines.length === 0) throw new Error("Local workspace outbox is empty");
+      const first = parseExact(JSON.parse(lines[0]!), ["checkpoint", "digest"], "checkpoint envelope");
+      const checkpoint = validateCheckpoint(first.checkpoint);
+      const checkpointDigest = protocolDigest("LocalWorkspaceOperationCheckpoint", 1, checkpoint);
+      if (first.digest !== checkpointDigest) throw new Error("Local workspace outbox checkpoint digest is invalid");
+      const operations = new Map<number, LocalWorkspaceOperation>();
+      let headDigest = checkpointDigest;
+      let nextEventSeq = 1;
+      for (const line of lines.slice(1)) {
+        const event = validateEvent(JSON.parse(line), nextEventSeq, headDigest, checkpoint);
+        const previous = operations.get(event.operation.localSeq);
+        validateTransition(previous, event.operation);
+        operations.set(event.operation.localSeq, cloneOperation(event.operation));
+        headDigest = event.digest;
+        nextEventSeq += 1;
       }
+      const sequences = [...operations.keys()].sort((a, b) => a - b);
+      for (let index = 0; index < sequences.length; index += 1) {
+        if (sequences[index] !== checkpoint.confirmedThroughSeq + index + 1) {
+          throw new Error("Local workspace outbox operation sequence contains a gap");
+        }
+      }
+      const nextLocalSeq = Math.max(
+        checkpoint.nextSeq,
+        (sequences.at(-1) ?? checkpoint.confirmedThroughSeq) + 1,
+      );
+      if (
+        checkpoint.nextSeq < checkpoint.confirmedThroughSeq + 1 ||
+        nextLocalSeq !== checkpoint.confirmedThroughSeq + sequences.length + 1
+      ) {
+        throw new Error("Local workspace outbox next sequence is invalid");
+      }
+      return { checkpoint, operations, nextLocalSeq, nextEventSeq, headDigest };
+    } catch (error) {
+      if (error instanceof LocalWorkspaceOutboxChainCorruptionError) throw error;
+      throw new LocalWorkspaceOutboxChainCorruptionError(
+        error instanceof Error ? error.message : "Local workspace outbox chain is corrupt",
+        { cause: error },
+      );
     }
-    const nextLocalSeq = Math.max(
-      checkpoint.nextSeq,
-      (sequences.at(-1) ?? checkpoint.confirmedThroughSeq) + 1,
-    );
-    if (
-      checkpoint.nextSeq < checkpoint.confirmedThroughSeq + 1 ||
-      nextLocalSeq !== checkpoint.confirmedThroughSeq + sequences.length + 1
-    ) {
-      throw new Error("Local workspace outbox next sequence is invalid");
-    }
-    return { checkpoint, operations, nextLocalSeq, nextEventSeq, headDigest };
   }
 
   async #storageStep(identity: unknown, operation: () => Promise<void>): Promise<void> {
@@ -551,7 +637,9 @@ export class LocalWorkspaceOperationOutbox {
     }
     const operation = state.operations.get(identity.localSeq);
     if (!operation || operation.operationId !== identity.operationId || operation.inputDigest !== identity.inputDigest) {
-      throw new Error("Local workspace operation identity is invalid");
+      throw new LocalWorkspaceOperationIdentityMismatchError(
+        "Local workspace operation identity is invalid",
+      );
     }
     return operation;
   }

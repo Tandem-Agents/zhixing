@@ -153,7 +153,8 @@
         "readonly turnId: string;",
         "readonly connection: RpcConnection;",
         "readonly broadcast?: SessionBroadcast;",
-        "readonly surfaceCapabilities: SessionSurfaceCapabilities;"
+        "readonly surfaceCapabilities: SessionSurfaceCapabilities;",
+        "readonly environment?: ExplicitEnvironmentSelection;"
       ],
       "kind": "interface",
       "name": "AdmitAndMaybeStartTurnInput"
@@ -512,7 +513,8 @@
         "readonly connection: RpcConnection;",
         "readonly broadcast?: SessionBroadcast;",
         "readonly server: ServerContext;",
-        "readonly surfaceCapabilities: SessionSurfaceCapabilities;"
+        "readonly surfaceCapabilities: SessionSurfaceCapabilities;",
+        "readonly environment?: ExplicitEnvironmentSelection;"
       ],
       "kind": "interface",
       "name": "SendDirectTurnInput"
@@ -916,6 +918,7 @@
         "input?: unknown;",
         "engage?: unknown;",
         "surfaceCapabilities?: unknown;",
+        "environment?: unknown;",
         "turnId?: unknown;"
       ],
       "kind": "interface",
@@ -1043,7 +1046,7 @@
         "sceneId: string;",
         "revision: number;",
         "name: string;",
-        "workspace?: { deviceId: string; bindingRef: string; deviceName?: string; workspaceName?: string; };",
+        "workspace?: { deviceId: string; bindingRef: string; workspaceBindingRevision?: number; deviceName?: string; workspaceName?: string; };",
         "workspaceWarning?: string;",
         "lastActiveAt?: string;"
       ],
@@ -1053,20 +1056,38 @@
   ],
   "topologyEdges": [
     {
-      "kind": "import",
+      "kind": "dynamic-import",
       "references": 2,
       "sourceZone": "cli/runtime",
       "target": "cli/serve"
     },
     {
       "kind": "import",
-      "references": 9,
+      "references": 6,
+      "sourceZone": "cli/runtime",
+      "target": "cli/serve"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "external:node:net"
+    },
+    {
+      "kind": "import",
+      "references": 20,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/executor"
+    },
+    {
+      "kind": "import",
+      "references": 3,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/mcp"
     },
@@ -1096,7 +1117,7 @@
     },
     {
       "kind": "import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/secrets"
     },
@@ -1108,9 +1129,15 @@
     },
     {
       "kind": "type-import",
-      "references": 13,
+      "references": 16,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/executor"
     },
     {
       "kind": "type-import",
@@ -1156,7 +1183,7 @@
     },
     {
       "kind": "import",
-      "references": 7,
+      "references": 9,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
@@ -1174,7 +1201,7 @@
     },
     {
       "kind": "import",
-      "references": 75,
+      "references": 81,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1204,7 +1231,7 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 7,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1246,7 +1273,13 @@
     },
     {
       "kind": "type-import",
-      "references": 67,
+      "references": 3,
+      "sourceZone": "cli/serve",
+      "target": "cli/runtime"
+    },
+    {
+      "kind": "type-import",
+      "references": 68,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1438,13 +1471,13 @@
     },
     {
       "kind": "import",
-      "references": 28,
+      "references": 29,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 19,
+      "references": 20,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
@@ -1474,7 +1507,7 @@
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "rpc",
       "target": "package:@zhixing/core"
     },
@@ -1582,7 +1615,7 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 7,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
     },
@@ -1612,7 +1645,7 @@
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
     },

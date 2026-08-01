@@ -1381,6 +1381,8 @@ export class WorksceneNotFoundError extends Error {
 }
 
 export class WorksceneConflictError extends Error {
+  readonly reasonCode = "WORKSCENE_CONFLICT";
+
   constructor(message: string) {
     super(message);
     this.name = "WorksceneConflictError";
@@ -1388,6 +1390,8 @@ export class WorksceneConflictError extends Error {
 }
 
 export class WorksceneRevisionError extends Error {
+  readonly reasonCode = "WORKSCENE_REVISION_CONFLICT";
+
   constructor(
     readonly sceneId: string,
     readonly expectedRevision: number,

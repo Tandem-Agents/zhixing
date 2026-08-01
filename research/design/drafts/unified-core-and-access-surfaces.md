@@ -267,7 +267,7 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 
 ### 3.7 验收纲
 
-- **体验底线**:首 token 延迟增量与流式帧率无感(loopback);`zz` 打开到可输入不显著变长(宿主拉起 / 连接与 cli 启动并行);宿主内存基线纳入观测。
+- **体验底线**:新增拓扑不得在单机终端输入与流式路径引入无必要的同步网络等待；`zz` 打开到可输入不显著变长（宿主拉起、连接与 CLI 启动并行）。性能数据仅用于按需诊断，不构成开发单元门禁。
 - **单 owner**:结构性验收——cli 进程无 Store 写实例、无窗口实例(grep 级 + 架构评审);**所有管理命令零本地写**(/name、/resume inline 删除、/work 场景 CRUD、/clear 视图态清理、/trust 撤销、/skills 启停 / 置顶 / 模式 / 归档全部经 RPC);grep 验收对象 = cli 侧 convRepo / 场景注册表 / permissionStore / skillStore / 记忆域仓(JournalStore / PeopleStore / MemoryStore)/ transcript / snapshot 的全部写调用与实例构造。
 - **功能全谱经 RPC**:对话 / 流式 / 工具事件 / 确认(**含持久授权全选项**,见裁决 5)/ 段切换提示 / /clear / /resume / /compact / workscene / reload / 技能(索引随宿主 runtime、slash 补全随事件刷新)在 cli 全部如常。
 - **多端连续**:机主本人通过 App 私聊入口发来的消息不按来源拆成"飞书对话 / cli 对话";默认进入用户主对话或显式绑定对话,来源只影响默认回复路由与隐私边界。cli 打开同一 conversation 时可见可续;cli 接续该 conversation 默认不回显到外部 App,只有显式"回复到来源 App / 发给对方"才投递到 channel。外部消息进入非当前 conversation 时,cli 不自动切换,只经连接级活动事件做低打扰提示;多 observer 同看一个流式 turn。

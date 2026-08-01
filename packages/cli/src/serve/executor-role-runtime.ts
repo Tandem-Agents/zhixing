@@ -38,7 +38,7 @@ import {
   ExecutorJobOwnerLifecycle,
 } from "./executor-job-owner.js";
 import type { LocalWorkspaceManagementHost } from "../runtime/local-workspace-management-host.js";
-import { startExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
+import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -113,7 +113,7 @@ export async function runExecutorRole(
     if (!authority.workspaceBindingAdmin || !authority.workspaceBindingRecovery) {
       throw new Error("Local workspace management ports are unavailable");
     }
-    localWorkspaceHost = await startExecutorLocalWorkspaceHost({
+    localWorkspaceHost = createExecutorLocalWorkspaceHost({
       identity: bootstrap.localWorkspaceIdentity,
       host: {
         zhixingHome,
@@ -128,6 +128,7 @@ export async function runExecutorRole(
       },
     });
     if (!localWorkspaceHost) throw new Error("Local workspace management host is unavailable");
+    await localWorkspaceHost.start();
     dataPlane = new ExecutorDataPlaneRuntime({
       zhixingHome,
       authority,

@@ -37,6 +37,20 @@ export function defineLocalWorkspaceAssemblyIdentity(
   return { kind: "non-executor" };
 }
 
+export function createExecutorLocalWorkspaceHost(input: {
+  readonly identity: LocalWorkspaceAssemblyIdentity;
+  readonly host: Omit<
+    Parameters<typeof createLocalWorkspaceManagementHost>[0],
+    "lease"
+  >;
+}): LocalWorkspaceManagementHost | undefined {
+  if (input.identity.kind === "non-executor") return undefined;
+  return createLocalWorkspaceManagementHost({
+    ...input.host,
+    lease: input.identity.lease,
+  });
+}
+
 export async function startExecutorLocalWorkspaceHost(input: {
   readonly identity: LocalWorkspaceAssemblyIdentity;
   readonly host: Omit<
@@ -44,11 +58,8 @@ export async function startExecutorLocalWorkspaceHost(input: {
     "lease"
   >;
 }): Promise<LocalWorkspaceManagementHost | undefined> {
-  if (input.identity.kind === "non-executor") return undefined;
-  const host = createLocalWorkspaceManagementHost({
-    ...input.host,
-    lease: input.identity.lease,
-  });
+  const host = createExecutorLocalWorkspaceHost(input);
+  if (!host) return undefined;
   await host.start();
   return host;
 }

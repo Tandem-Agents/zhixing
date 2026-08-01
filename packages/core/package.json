@@ -87,6 +87,14 @@
     "./environment": {
       "types": "./dist/environment/index.d.ts",
       "import": "./dist/environment/index.js"
+    },
+    "./test-support/s7-durable": {
+      "types": "./dist/test-support/s7-durable.d.ts",
+      "import": "./dist/test-support/s7-durable.js"
+    },
+    "./test-support/s7-durable-harness": {
+      "types": "./dist/test-support/s7-durable-harness.d.ts",
+      "import": "./dist/test-support/s7-durable-harness.js"
     }
   },
   "files": [

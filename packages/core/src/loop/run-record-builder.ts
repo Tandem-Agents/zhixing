@@ -72,8 +72,10 @@ export function buildRunRecord(input: BuildRunRecordInput): RunRecordInput {
     timestamp: input.timestamp ?? new Date().toISOString(),
     messages: [input.userMessage, ...input.newMessages],
     usage: input.agentResult.usage,
-    source: input.source,
-    advancement: input.advancement,
+    ...(input.source === undefined ? {} : { source: input.source }),
+    ...(input.advancement === undefined
+      ? {}
+      : { advancement: input.advancement }),
   };
 }
 

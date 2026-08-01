@@ -247,8 +247,12 @@ export async function* runAgentLoop(
       reason: finalResult.reason,
       duration: Date.now() - startTime,
       usage: finalResult.usage,
-      error: finalResult.reason === "error" ? finalResult.error.message : undefined,
-      errorType: finalResult.reason === "error" ? finalResult.error.type : undefined,
+      ...(finalResult.reason === "error"
+        ? {
+            error: finalResult.error.message,
+            errorType: finalResult.error.type,
+          }
+        : {}),
     });
 
     return finalResult;

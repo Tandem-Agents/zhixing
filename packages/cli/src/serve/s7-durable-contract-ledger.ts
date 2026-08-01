@@ -26,7 +26,7 @@ export interface S7DurableScenarioAdapter {
   readonly family: string;
   readonly caseKey: string;
   readonly kind: "variant" | "rejection" | "corruption";
-  readonly expectedReasonCode: string;
+  readonly expectedReasonCode?: string;
   readonly expectedProducer: string;
   readonly expectedRecoveryOwner: string;
   readonly expectedResourceIdentity: string;
@@ -36,7 +36,7 @@ export interface S7DurableScenarioObservation {
   readonly family: string;
   readonly kind: "variant" | "rejection" | "corruption";
   readonly caseKey: string;
-  readonly reasonCode: string;
+  readonly reasonCode?: string;
   readonly producer: string;
   readonly recoveryOwner: string;
   readonly resourceIdentity: string;
@@ -55,7 +55,7 @@ export function requiredS7DurableScenarios(): readonly S7DurableScenarioAdapter[
       family: descriptor.recordFamily,
       caseKey: entry.key,
       kind: entry.kind,
-      expectedReasonCode: entry.reasonCode,
+      expectedReasonCode: entry.kind === "variant" ? undefined : entry.reasonCode,
       expectedProducer: descriptor.producer,
       expectedRecoveryOwner: descriptor.recoveryOwner,
       expectedResourceIdentity: descriptor.resourceIdentity,

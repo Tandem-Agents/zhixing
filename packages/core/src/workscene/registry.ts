@@ -84,7 +84,10 @@ export async function markLegacyWorksceneCutover(
       existing.sourceSnapshotToken !== input.sourceSnapshotToken ||
       existing.sourceDigest !== input.sourceDigest
     ) {
-      throw new Error("Legacy workscene authority already cut over");
+      throw Object.assign(
+        new Error("Legacy workscene authority already cut over"),
+        { code: "WORKSCENE_LEGACY_CUTOVER_CONFLICT" },
+      );
     }
     return existing;
   }

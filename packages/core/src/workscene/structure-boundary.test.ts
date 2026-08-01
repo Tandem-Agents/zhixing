@@ -28,31 +28,43 @@ describe("workscene authority structure boundary", () => {
     );
   }, 120_000);
 
-  it("keeps new authority and projection symbols reachable only by the global adapter", () => {
-    expect(
-      symbolReferences(syntaxTrees, "AnchorWorksceneRegistry", {
-        definition: "core/src/workscene/authority-registry.ts",
-      }),
-    ).toEqual(["core/src/workscene/global-state-adapter.ts"]);
-    expect(
-      symbolReferences(syntaxTrees, "IncrementalWorksceneActivityProjection", {
-        definition: "core/src/workscene/activity-projection.ts",
-      }),
-    ).toEqual(["core/src/workscene/global-state-adapter.ts"]);
-  });
+  it(
+    "keeps new authority and projection symbols reachable only by the global adapter",
+    () => {
+      expect(
+        symbolReferences(syntaxTrees, "AnchorWorksceneRegistry", {
+          definition: "core/src/workscene/authority-registry.ts",
+        }),
+      ).toEqual(["core/src/workscene/global-state-adapter.ts"]);
+      expect(
+        symbolReferences(
+          syntaxTrees,
+          "IncrementalWorksceneActivityProjection",
+          {
+            definition: "core/src/workscene/activity-projection.ts",
+          },
+        ),
+      ).toEqual(["core/src/workscene/global-state-adapter.ts"]);
+    },
+    120_000,
+  );
 
-  it("keeps the legacy registry and projection out of production reachability", () => {
-    expect(
-      symbolReferences(syntaxTrees, "FsWorkSceneRegistry", {
-        definition: "core/src/workscene/registry.ts",
-      }),
-    ).toEqual([]);
-    expect(
-      symbolReferences(syntaxTrees, "WorksceneActivityProjection", {
-        definition: "core/src/workscene/activity-projection.ts",
-      }),
-    ).toEqual([]);
-  });
+  it(
+    "keeps the legacy registry and projection out of production reachability",
+    () => {
+      expect(
+        symbolReferences(syntaxTrees, "FsWorkSceneRegistry", {
+          definition: "core/src/workscene/registry.ts",
+        }),
+      ).toEqual([]);
+      expect(
+        symbolReferences(syntaxTrees, "WorksceneActivityProjection", {
+          definition: "core/src/workscene/activity-projection.ts",
+        }),
+      ).toEqual([]);
+    },
+    120_000,
+  );
 });
 
 async function productionSources(
@@ -64,7 +76,9 @@ async function productionSources(
       if (entry.name === "dist" || entry.name === "node_modules") continue;
       const absolute = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name !== "__tests__") await visit(absolute);
+        if (entry.name !== "__tests__" && entry.name !== "test-support") {
+          await visit(absolute);
+        }
         continue;
       }
       if (

@@ -1034,7 +1034,7 @@ export function validateLocalEnvironmentControl(
     ) ||
     lease.audience.executorId !== options.executorId
   ) {
-    throw new TypeError(
+    throw new WorkspaceBindingControlError(
       "Resource lease does not authorize local environment control",
     );
   }
@@ -1987,6 +1987,8 @@ function corruptDirectory(message: string): AuthorityStorageError {
 }
 
 export class WorkspaceBindingNotFoundError extends Error {
+  readonly reasonCode = "WORKSPACE_BINDING_NOT_FOUND";
+
   constructor(readonly bindingRef: string) {
     super(`Workspace binding does not exist: ${bindingRef}`);
     this.name = "WorkspaceBindingNotFoundError";
@@ -1994,6 +1996,8 @@ export class WorkspaceBindingNotFoundError extends Error {
 }
 
 export class WorkspaceBindingConflictError extends Error {
+  readonly reasonCode = "WORKSPACE_BINDING_CONFLICT";
+
   constructor(
     message: string,
     readonly reason: "conflict" | "legacy-name-conflict" = "conflict",
@@ -2004,6 +2008,8 @@ export class WorkspaceBindingConflictError extends Error {
 }
 
 export class WorkspaceBindingRevisionError extends Error {
+  readonly reasonCode = "WORKSPACE_BINDING_REVISION_CONFLICT";
+
   constructor(
     readonly bindingRef: string,
     readonly expected: number,
@@ -2017,6 +2023,8 @@ export class WorkspaceBindingRevisionError extends Error {
 }
 
 export class WorkspaceBindingCancelledError extends Error {
+  readonly reasonCode = "WORKSPACE_BINDING_CANCELLED";
+
   constructor() {
     super("Workspace binding operation was cancelled");
     this.name = "WorkspaceBindingCancelledError";
@@ -2029,21 +2037,24 @@ export const WORKSPACE_BINDING_DURABLE_CONTRACT = defineDurableRuntimeContract({
   recoveryOwner: "workspace-binding-recovery-owner",
   resourceIdentity: "workspace-binding:<deviceId>",
   recoveryClass: "authority-replay",
-  cases: durableCases("WORKSPACE_BINDING", {
-    variant: ["directory-established", "catalog-reset", "binding-created", "binding-updated", "binding-removed", "request-recorded", "legacy-binding-staged", "legacy-migration-activated", "legacy-migration-abandoned"],
-    rejection: ["control-lease", "name-conflict", "revision-conflict", "tombstoned-reference"],
-    corruption: ["missing-establishment", "invalid-record", "broken-log-tail"],
-  }),
+  cases: [
+    ...["directory-established", "catalog-reset", "binding-created", "binding-updated", "binding-removed", "request-recorded", "legacy-binding-staged", "legacy-migration-activated", "legacy-migration-abandoned"]
+      .map((key) => ({ kind: "variant" as const, key })),
+    { kind: "rejection", key: "control-lease", reasonCode: "WORKSPACE_BINDING_CONTROL_FORBIDDEN" },
+    { kind: "rejection", key: "name-conflict", reasonCode: "WORKSPACE_BINDING_CONFLICT" },
+    { kind: "rejection", key: "revision-conflict", reasonCode: "WORKSPACE_BINDING_REVISION_CONFLICT" },
+    { kind: "rejection", key: "tombstoned-reference", reasonCode: "WORKSPACE_BINDING_NOT_FOUND" },
+    { kind: "corruption", key: "missing-establishment", reasonCode: "AUTHORITY_ARTIFACT_CORRUPT" },
+    { kind: "corruption", key: "invalid-record", reasonCode: "AUTHORITY_ARTIFACT_CORRUPT" },
+    { kind: "corruption", key: "broken-log-tail", reasonCode: "AUTHORITY_RECORD_INVALID" },
+  ],
 } as const);
 
-function durableCases(
-  prefix: string,
-  groups: Readonly<Record<"variant" | "rejection" | "corruption", readonly string[]>>,
-) {
-  return (Object.entries(groups) as ["variant" | "rejection" | "corruption", readonly string[]][])
-    .flatMap(([kind, keys]) => keys.map((key) => ({
-      kind,
-      key,
-      reasonCode: `${prefix}_${key.replaceAll("-", "_").toUpperCase()}`,
-    })));
+export class WorkspaceBindingControlError extends TypeError {
+  readonly reasonCode = "WORKSPACE_BINDING_CONTROL_FORBIDDEN";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceBindingControlError";
+  }
 }

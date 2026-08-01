@@ -232,6 +232,55 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("establishes the owner session identity before the first input and workscene activity", async () => {
+    const home = await createTempDir("conversation-protocol-session-identity");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    const protocol = createProtocol({
+      authority,
+      manager: () => {
+        throw new Error("manager is not used by admission");
+      },
+      interactions: new DurableConversationInteractionObserver(),
+    });
+
+    const conversationId = "conversation-first-input";
+    await expect(protocol.admit({
+      conversationId,
+      input: "first input",
+      invocation: { kind: "agent", source: "interactive" },
+      options: {
+        source: "interactive",
+        turnContext: { turnId: "rpc:first-input" },
+      },
+      surfacePrincipal: "rpc:owner",
+    })).resolves.toMatchObject({ shouldSchedule: true });
+
+    const worksceneConversation = "ws:scene-first-activity:primary";
+    await expect(protocol.touchWorksceneSession({
+      conversationId: worksceneConversation,
+      sceneId: "scene-first-activity",
+      requestId: "workscene-enter:scene-first-activity",
+      at: new Date().toISOString(),
+    })).resolves.toMatchObject({ revision: 1 });
+
+    const creations = (await authority.authorityLog.readAll())
+      .flatMap((commit) => commit.entries)
+      .map((entry) => entry.body as {
+        t?: string;
+        envelope?: { body?: { t?: string; sceneId?: string } };
+      })
+      .filter((body) =>
+        body.t === "received" && body.envelope?.body?.t === "session-create"
+      );
+    expect(creations.map((body) => body.envelope.body)).toEqual([
+      { t: "session-create" },
+      { t: "session-create", sceneId: "scene-first-activity" },
+    ]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("durably binds first-party environment selection to admission and rejects channel construction", async () => {
     const home = await createTempDir("conversation-protocol-environment-selection");
     const secretStore = new MemorySecretStore();
@@ -1264,6 +1313,19 @@ describe("ConversationProtocolRuntime", () => {
       .map((entry) => entry.body as { t?: string; runId?: string; state?: string });
     const runId = recordsBefore.find((record) => record.t === "admitted")?.runId;
     expect(runId).toBeTruthy();
+
+    await protocol.recover();
+    const recordsWhileOwned = (await authority.authorityLog.readAll())
+      .flatMap((commit) => commit.entries)
+      .map((entry) => entry.body as { t?: string; runId?: string; state?: string });
+    expect(
+      recordsWhileOwned.some(
+        (record) =>
+          record.t === "state" &&
+          record.runId === runId &&
+          record.state === "uncertain",
+      ),
+    ).toBe(false);
 
     const restartedAuthority = await setupAuthorityRuntime({
       zhixingHome: home,

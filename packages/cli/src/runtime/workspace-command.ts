@@ -27,9 +27,14 @@ import type {
 import {
   acquireExecutorLocalWorkspaceOwner,
   defineLocalWorkspaceAssemblyIdentity,
-  startExecutorLocalWorkspaceHost,
+  createExecutorLocalWorkspaceHost,
 } from "./local-workspace-bootstrap.js";
 import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
+import {
+  CoreHostConnection,
+  defaultCoreHostConnectionDeps,
+} from "./core-host-connection.js";
+import { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 
 export { WORKSPACE_CATALOG_RESET_IMPACT };
 
@@ -83,6 +88,73 @@ export async function runWorkspaceCommand(
       writer.line(JSON.stringify({ recoveredOperations: operations }, null, 2));
     },
   });
+}
+
+/**
+ * Public first-party automation entry for the same local authorization plus
+ * workscene-create transaction used by the interactive assistant.
+ */
+export async function runWorkspaceSceneCreateCommand(
+  sceneName: string,
+  absolutePath: string,
+): Promise<void> {
+  const writer = createStdoutWriter();
+  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps());
+  try {
+    await coreHost.ensure();
+    const workscenes = new RpcWorksceneFacade(coreHost);
+    const created = await withLocalWorkspaceFacade(
+      (workspace) => workspace.authorizeForControl(sceneName, absolutePath),
+      {
+        result: async (workspace, credential) => {
+          if (!credential) {
+            throw new Error("本机工作区授权缺少可恢复的消费凭据");
+          }
+          const scene = await workscenes.create(
+            sceneName,
+            workspace,
+            worksceneCreateRequestIdForLocalWorkspace(credential),
+          );
+          return { scene, workspace };
+        },
+        recovered: async (operations) => {
+          for (const operation of operations) {
+            if (!operation.controlWorkspace) continue;
+            await workscenes.create(
+              operation.target,
+              operation.controlWorkspace,
+              worksceneCreateRequestIdForLocalWorkspace(operation.credential),
+            );
+          }
+        },
+      },
+    );
+    const views = await withLocalWorkspaceFacade(
+      (workspace) => workspace.list(),
+      {
+        result: async (result) => result,
+        recovered: async (operations) => {
+          if (operations.length > 0) {
+            throw new Error("本机工作区授权仍有未消费的恢复结果");
+          }
+        },
+      },
+    );
+    const matching = views.filter(({ name }) => name === sceneName);
+    if (matching.length !== 1) {
+      throw new Error("无法唯一读取刚创建的本机工作区授权");
+    }
+    writer.line(
+      JSON.stringify({
+        sceneId: created.scene.sceneId,
+        deviceId: created.workspace.deviceId,
+        bindingRef: created.workspace.bindingRef,
+        workspaceBindingRevision: matching[0]!.workspaceBindingRevision,
+      }),
+    );
+  } finally {
+    await coreHost.dispose();
+  }
 }
 
 export async function withLocalWorkspaceFacade<T, R = T>(
@@ -178,7 +250,7 @@ export async function withLocalWorkspaceFacade<T, R = T>(
     const admin = runtime.workspaceBindingAdmin;
     const recovery = runtime.workspaceBindingRecovery;
     if (!admin || !recovery) throw new Error("本机工作区管理能力不可用");
-    host = await startExecutorLocalWorkspaceHost({
+    host = createExecutorLocalWorkspaceHost({
       identity: defineLocalWorkspaceAssemblyIdentity(mesh.roles, owner),
       host: {
         zhixingHome,
@@ -193,6 +265,7 @@ export async function withLocalWorkspaceFacade<T, R = T>(
       },
     });
     if (!host) throw new Error("本机工作区管理能力不可用");
+    await host.start();
     return await useLocalWorkspaceClient(
       createLocalWorkspaceClient(zhixingHome),
       operation,

@@ -266,6 +266,7 @@ export {
   PRINCIPAL_METHODS,
   acceptedRemoteIntervalRemainingMs,
   acceptedRemoteIntervalStatus,
+  AuthorityMethodForbiddenError,
   assertActivatedAssignmentCapability,
   assertActivePermissionSnapshotLease,
   assertAuthorizedOwnerControlGrant,

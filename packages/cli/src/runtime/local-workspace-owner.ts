@@ -94,42 +94,57 @@ export class LocalWorkspaceTransportServer {
       user: os.userInfo().username,
       token: randomBytes(32).toString("base64url"),
     };
-    await writeSecret(this.#lease.secretPath, secret);
-    if (process.platform !== "win32") {
-      await rm(this.#lease.endpoint, { force: true });
-    }
     const server = net.createServer((socket) => this.#accept(socket));
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => {
-        server.off("listening", onListening);
-        reject(error);
-      };
-      const onListening = () => {
-        server.off("error", onError);
-        resolve();
-      };
-      server.once("error", onError);
-      server.once("listening", onListening);
-      server.listen(this.#lease.endpoint);
-    });
-    if (process.platform !== "win32") await chmod(this.#lease.endpoint, 0o600);
-    this.#secret = secret;
-    this.#server = server;
+    try {
+      await this.#removePublication();
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => {
+          server.off("listening", onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          server.off("error", onError);
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(this.#lease.endpoint);
+      });
+      this.#server = server;
+      if (process.platform !== "win32") await chmod(this.#lease.endpoint, 0o600);
+      this.#secret = secret;
+      await writeSecret(this.#lease.secretPath, secret);
+    } catch (error) {
+      this.#secret = undefined;
+      this.#server = undefined;
+      await closeServer(server).catch(() => undefined);
+      await this.#removePublication().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async unpublish(): Promise<void> {
+    this.#secret = undefined;
+    await Promise.all([
+      rm(this.#lease.secretPath, { force: true }),
+      rm(secretTempPath(this.#lease.secretPath), { force: true }),
+    ]);
   }
 
   async close(): Promise<void> {
     const server = this.#server;
     this.#server = undefined;
-    this.#secret = undefined;
-    if (server) {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
-    }
-    await rm(this.#lease.secretPath, { force: true });
-    if (process.platform !== "win32") {
-      await rm(this.#lease.endpoint, { force: true });
-    }
+    await this.unpublish();
+    if (server) await closeServer(server);
+    if (process.platform !== "win32") await rm(this.#lease.endpoint, { force: true });
+  }
+
+  async #removePublication(): Promise<void> {
+    await Promise.all([
+      rm(this.#lease.secretPath, { force: true }),
+      rm(secretTempPath(this.#lease.secretPath), { force: true }),
+    ]);
+    if (process.platform !== "win32") await rm(this.#lease.endpoint, { force: true });
   }
 
   #accept(socket: Socket): void {
@@ -183,6 +198,13 @@ export class LocalWorkspaceTransportServer {
   }
 }
 
+function closeServer(server: Server): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
 export async function callLocalWorkspaceHost(
   zhixingHome: string,
   body: unknown,
@@ -231,7 +253,8 @@ export async function callLocalWorkspaceHost(
 
 async function writeSecret(filePath: string, value: TransportSecret): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temp = `${filePath}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  const temp = secretTempPath(filePath);
+  await rm(temp, { force: true });
   const handle = await open(temp, "wx", 0o600);
   try {
     await handle.writeFile(`${canonicalize(value)}\n`, "utf8");
@@ -239,7 +262,16 @@ async function writeSecret(filePath: string, value: TransportSecret): Promise<vo
   } finally {
     await handle.close();
   }
-  await rename(temp, filePath);
+  try {
+    await rename(temp, filePath);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function secretTempPath(filePath: string): string {
+  return `${filePath}.tmp`;
 }
 
 function validateSecret(value: unknown): TransportSecret {

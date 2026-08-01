@@ -39,6 +39,17 @@ export interface LocalWorkspaceFacadeOptions {
 export interface LocalWorkspaceOperationAuthority {
   readonly requestNonce: string;
   readonly confirmationToken?: string;
+  readonly abort?: AbortSignal;
+}
+
+export class LocalWorkspaceBusinessError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "LocalWorkspaceBusinessError";
+    this.code = code;
+  }
 }
 
 /**
@@ -87,6 +98,7 @@ export class LocalWorkspaceFacade {
         toView(
           await this.#admin.create({ displayName, absolutePath }, control),
         ),
+      authority?.abort,
     );
   }
 
@@ -98,6 +110,7 @@ export class LocalWorkspaceFacade {
     const binding = await this.#withControl(
       authority?.requestNonce ?? `workspace-authorize:${randomUUID()}`,
       (control) => this.#admin.create({ displayName, absolutePath }, control),
+      authority?.abort,
     );
     return { deviceId: this.#deviceId, bindingRef: binding.bindingRef };
   }
@@ -121,6 +134,7 @@ export class LocalWorkspaceFacade {
           ),
         );
       },
+      authority?.abort,
     );
   }
 
@@ -143,6 +157,7 @@ export class LocalWorkspaceFacade {
           ),
         );
       },
+      authority?.abort,
     );
   }
 
@@ -161,6 +176,7 @@ export class LocalWorkspaceFacade {
           control,
         );
       },
+      authority?.abort,
     );
   }
 
@@ -177,13 +193,14 @@ export class LocalWorkspaceFacade {
       this.#deviceId,
       requestNonce,
     );
+    const abort = authority?.abort ?? new AbortController().signal;
     await this.#withLease(requestId, async (lease) => {
       await this.#recovery.beginReset(
         { expectedCatalogGeneration },
         {
           requestId,
           lease,
-          abort: new AbortController().signal,
+          abort,
           confirmation: {
             kind: "workspace-binding-reset",
             token: authority?.confirmationToken ?? randomBytes(32).toString("base64url"),
@@ -196,7 +213,7 @@ export class LocalWorkspaceFacade {
     });
     return this.#recovery.completeReset(
       requestId,
-      new AbortController().signal,
+      abort,
     );
   }
 
@@ -208,7 +225,10 @@ export class LocalWorkspaceFacade {
       (binding) => binding.displayName === displayName,
     );
     if (matches.length !== 1) {
-      throw new Error(
+      throw new LocalWorkspaceBusinessError(
+        matches.length === 0
+          ? "LOCAL_WORKSPACE_NOT_FOUND"
+          : "LOCAL_WORKSPACE_NAME_CONFLICT",
         matches.length === 0
           ? `本机没有名为“${displayName}”的已授权工作区`
           : `本机工作区名称“${displayName}”不唯一`,
@@ -220,6 +240,7 @@ export class LocalWorkspaceFacade {
   #withControl<T>(
     requestNonce: string,
     operation: (control: LocalEnvironmentControlContext) => Promise<T>,
+    abort = new AbortController().signal,
   ): Promise<T> {
     const requestId = localEnvironmentControlSubject(
       this.#deviceId,
@@ -229,7 +250,7 @@ export class LocalWorkspaceFacade {
       operation({
         requestId,
         lease,
-        abort: new AbortController().signal,
+        abort,
       }),
     );
   }

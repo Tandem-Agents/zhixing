@@ -357,6 +357,7 @@ export interface WorksceneSummary {
   workspace?: {
     deviceId: string;
     bindingRef: string;
+    workspaceBindingRevision?: number;
     deviceName?: string;
     workspaceName?: string;
   };

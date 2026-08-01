@@ -287,6 +287,11 @@ export class SurfaceAssetCoordinator {
     }
   }
 
+  /** Returns whether the authority currently owns the requested asset scope. */
+  ownsScope(scope: SurfaceAssetScope): Promise<boolean> {
+    return this.#serving(() => Promise.resolve(this.options.authorizeScope(scope)));
+  }
+
   async issue(
     request: SurfaceAssetGrantIssueRequest,
   ): Promise<SurfaceAssetGrant> {

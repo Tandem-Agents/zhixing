@@ -57,7 +57,7 @@ import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
-import { startExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
+import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -104,7 +104,7 @@ const authorityRuntimeSurface: AccessSurface = {
       const admin = authorityRuntime.workspaceBindingAdmin;
       const recovery = authorityRuntime.workspaceBindingRecovery;
       if (!admin || !recovery) throw new Error("Local workspace management ports are unavailable");
-      const host = await startExecutorLocalWorkspaceHost({
+      const host = createExecutorLocalWorkspaceHost({
         identity: ctx.localWorkspaceIdentity,
         host: {
           zhixingHome: ctx.zhixingHome,
@@ -123,6 +123,7 @@ const authorityRuntimeSurface: AccessSurface = {
         "localWorkspaceHost.close",
         () => host.close(),
       );
+      await host.start();
     }
     const jobStatus = new JobStatusDirectory();
     jobStatus.onStatus((notice) => {
@@ -531,6 +532,7 @@ const conversationSurface: AccessSurface = {
         await s.transcript.init(s.localId);
       },
       ensureConversation: async (conversationId) => {
+        await protocol.ensureSession(conversationId);
         if (parseConversationId(conversationId).scope.kind === "workscene") {
           await ctx.conversationDirectory.ensureTranscript(conversationId);
           return;

@@ -189,7 +189,18 @@ export function assertPrincipalAllowsAuthorityMethod(
   method: AuthorityPortMethodId,
 ): void {
   if (!principalAllowsAuthorityMethod(principal, method)) {
-    throw new TypeError(`${principal} principal cannot call ${method}`);
+    throw new AuthorityMethodForbiddenError(
+      `${principal} principal cannot call ${method}`,
+    );
+  }
+}
+
+export class AuthorityMethodForbiddenError extends TypeError {
+  readonly reasonCode = "AUTHORITY_METHOD_FORBIDDEN";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthorityMethodForbiddenError";
   }
 }
 

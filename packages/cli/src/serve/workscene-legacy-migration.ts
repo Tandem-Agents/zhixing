@@ -61,6 +61,15 @@ interface MigrationReport {
   readonly reason?: string;
 }
 
+export class LegacyWorksceneMigrationReportCorruptionError extends Error {
+  readonly reasonCode = "WORKSCENE_MIGRATION_REPORT_CORRUPT";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LegacyWorksceneMigrationReportCorruptionError";
+  }
+}
+
 interface LegacyMigrationOptions {
   readonly rootDir: string;
   readonly deviceId: string;
@@ -181,7 +190,11 @@ async function driveOpenMigration(
     );
     await writeReport(
       reportPath,
-      { ...initial, status: "abandoned", reason: "source-changed" },
+      {
+        ...initial,
+        status: "abandoned",
+        reason: "WORKSCENE_MIGRATION_SOURCE_CHANGED",
+      },
       options.storageMaintenance,
     );
     return "retry";
@@ -211,7 +224,7 @@ async function driveOpenMigration(
         {
           ...report,
           status: "abandoned",
-          reason: "source-pages-mismatch",
+          reason: "WORKSCENE_MIGRATION_SOURCE_PAGES_CORRUPT",
         },
         options.storageMaintenance,
       );
@@ -224,18 +237,22 @@ async function driveOpenMigration(
   report = await importBindingPages(options, report, reportPath, abort);
   report = await importScenePages(options, report, reportPath, abort);
 
-  const activated = await withLegacyWorksceneWriteFence(async () => {
+  const cutover = await withLegacyWorksceneWriteFence(async () => {
     const current = await readLegacySnapshot(
       options.storageMaintenance,
       report.migrationId,
     );
-    if (!current || current.digest !== report.sourceDigest) return false;
+    if (!current || current.digest !== report.sourceDigest) {
+      return "source-changed" as const;
+    }
     const frozenDigest = await readFrozenSnapshotDigest(
       options.rootDir,
       report,
       options.storageMaintenance,
     );
-    if (frozenDigest !== report.sourceDigest) return false;
+    if (frozenDigest !== report.sourceDigest) {
+      return "source-pages-corrupt" as const;
+    }
     await applyMigration(
       options.globalState,
       {
@@ -264,17 +281,26 @@ async function driveOpenMigration(
           sourceDigest: report.sourceDigest,
         }),
     );
-    return true;
+    return "activated" as const;
   });
-  if (!activated) {
+  if (cutover !== "activated") {
+    const sourcePagesCorrupt = cutover === "source-pages-corrupt";
     await abandonMigration(
       options,
       report,
-      "Legacy source changed before cutover",
+      sourcePagesCorrupt
+        ? "Frozen legacy source pages do not match their source commitment"
+        : "Legacy source changed before cutover",
     );
     await writeReport(
       reportPath,
-      { ...report, status: "abandoned", reason: "source-changed" },
+      {
+        ...report,
+        status: "abandoned",
+        reason: sourcePagesCorrupt
+          ? "WORKSCENE_MIGRATION_SOURCE_PAGES_CORRUPT"
+          : "WORKSCENE_MIGRATION_SOURCE_CHANGED",
+      },
       options.storageMaintenance,
     );
     return "retry";
@@ -759,9 +785,19 @@ async function readReport(
       }),
   );
   if (raw === undefined) return undefined;
-  const parsed = JSON.parse(raw) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new LegacyWorksceneMigrationReportCorruptionError(
+      "Legacy workscene migration report is malformed",
+      { cause: error },
+    );
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new TypeError("Legacy workscene migration report is malformed");
+    throw new LegacyWorksceneMigrationReportCorruptionError(
+      "Legacy workscene migration report is malformed",
+    );
   }
   const report = parsed as MigrationReport;
   const expectedKeys =
@@ -815,7 +851,9 @@ async function readReport(
       (report.phase !== "cleanup" || report.nextPage !== report.pageCount)) ||
     (report.status === "abandoned" && report.reason === undefined)
   ) {
-    throw new TypeError("Legacy workscene migration report is malformed");
+    throw new LegacyWorksceneMigrationReportCorruptionError(
+      "Legacy workscene migration report is malformed",
+    );
   }
   return report;
 }
@@ -933,8 +971,12 @@ export const LEGACY_WORKSCENE_MIGRATION_DURABLE_CONTRACT = defineDurableRuntimeC
   resourceIdentity: "legacy-workscene-migration:<migrationId>",
   recoveryClass: "committed-forward-recovery",
   cases: [
-    ...["open", "activated", "abandoned"].map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSCENE_MIGRATION_${key.toUpperCase()}` })),
-    ...["source-changed", "terminal-revival", "import-set-mismatch", "post-cutover-write"].map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSCENE_MIGRATION_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["malformed-report", "broken-terminal", "source-pages-mismatch", "cutover-marker-mismatch"].map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSCENE_MIGRATION_${key.replaceAll("-", "_").toUpperCase()}` })),
+    ...["open", "activated", "abandoned", "terminal-revival"].map((key) => ({ kind: "variant" as const, key })),
+    { kind: "rejection", key: "source-changed", reasonCode: "WORKSCENE_MIGRATION_SOURCE_CHANGED" },
+    { kind: "rejection", key: "import-set-mismatch", reasonCode: "WORKSCENE_CONFLICT" },
+    { kind: "rejection", key: "post-cutover-write", reasonCode: "WORKSCENE_LEGACY_READ_ONLY" },
+    ...["malformed-report", "broken-terminal"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "WORKSCENE_MIGRATION_REPORT_CORRUPT" })),
+    { kind: "corruption", key: "source-pages-mismatch", reasonCode: "WORKSCENE_MIGRATION_SOURCE_PAGES_CORRUPT" },
+    { kind: "corruption", key: "cutover-marker-mismatch", reasonCode: "WORKSCENE_LEGACY_CUTOVER_CONFLICT" },
   ],
 } as const);

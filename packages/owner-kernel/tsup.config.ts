@@ -13,6 +13,7 @@ export default defineConfig({
     "src/conversation-assignment.ts",
     "src/job-assignment.ts",
     "src/delivery.ts",
+    "src/test-support/s7-durable.ts",
   ],
   format: ["esm"],
   dts: true,

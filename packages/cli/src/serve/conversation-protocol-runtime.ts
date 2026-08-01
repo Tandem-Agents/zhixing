@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   normalizeUserTurnInput,
+  parseConversationId,
   userMessageFromTurnInput,
   type AgentYield,
   type RunResult,
@@ -266,6 +267,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryDiscovered = false;
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
+  readonly #sessionIdentities = new Map<string, Promise<void>>();
   #remoteExecution: RemoteConversationExecutionDirectory | undefined;
   #losslessDataPlane:
     | ConversationLosslessDataPlane
@@ -471,6 +473,25 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     // recovery generations, capabilities and scheduler claims have independent
     // owners and must survive ordinary cache eviction.
     this.#journals.delete(conversationId);
+    this.#sessionIdentities.delete(conversationId);
+  }
+
+  /**
+   * Establishes the owner-routed conversation identity before any dependent fact.
+   * The deterministic request is the sole creation identity, so response loss and
+   * concurrent activation replay the original authority decision.
+   */
+  ensureSession(conversationId: string): Promise<void> {
+    const existing = this.#sessionIdentities.get(conversationId);
+    if (existing) return existing;
+    const establishing = this.#establishSession(conversationId);
+    this.#sessionIdentities.set(conversationId, establishing);
+    void establishing.catch(() => {
+      if (this.#sessionIdentities.get(conversationId) === establishing) {
+        this.#sessionIdentities.delete(conversationId);
+      }
+    });
+    return establishing;
   }
 
   async admit(
@@ -480,6 +501,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!key) {
       throw new Error("Durable conversation admission requires a stable turn id");
     }
+    await this.ensureSession(input.conversationId);
     const admission = await this.#applyInputAdmission(input);
     let state: Awaited<ReturnType<ConversationRunJournal["runState"]>> = "queued";
     if (admission.replayed) {
@@ -566,12 +588,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return this.#journal(conversationId).interactionOutcome(requestId);
   }
 
-  touchWorksceneSession(input: {
+  async touchWorksceneSession(input: {
     readonly conversationId: string;
     readonly sceneId: string;
     readonly requestId: string;
     readonly at: string;
   }): Promise<{ readonly revision: number; readonly at: string }> {
+    await this.ensureSession(input.conversationId);
     const { conversationId, ...activity } = input;
     return this.#journal(conversationId).touchWorksceneSession(activity);
   }
@@ -1652,6 +1675,73 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
   }
 
+  async #establishSession(conversationId: string): Promise<void> {
+    const scope = {
+      domain: "conversation" as const,
+      conversationId,
+      ownerEpoch: this.#authority.anchorEpoch,
+    };
+    if (await this.#authority.surfaceAssets.ownsScope(scope)) return;
+
+    const parsed = parseConversationId(conversationId);
+    const source = {
+      principal: {
+        surfacePrincipal: "owner:conversation-lifecycle",
+        deviceId: this.#authority.deviceId,
+        connectionId: "owner:conversation-lifecycle",
+      },
+    };
+    const envelope = createInitialControlEnvelope({
+      requestId: `session-create:${conversationId}`,
+      source,
+      at: this.#clock(),
+      body: {
+        t: "session-create",
+        ...(parsed.scope.kind === "workscene"
+          ? { sceneId: parsed.scope.sceneId }
+          : {}),
+      },
+    });
+    const apply = () =>
+      this.#authority.controlAdmission.apply({
+        envelope,
+        source,
+        prepare: () => ({
+          result: {
+            v: 1,
+            status: "ok",
+            body: { t: "session-create", conversationId },
+          },
+          authorityRevision: 1,
+        }),
+      });
+    let outcome: Awaited<ReturnType<typeof apply>>;
+    try {
+      outcome = await apply();
+    } catch (firstError) {
+      try {
+        outcome = await apply();
+      } catch (replayError) {
+        throw new AggregateError(
+          [firstError, replayError],
+          "Conversation creation could not determine its durable disposition",
+        );
+      }
+    }
+    if (outcome.kind === "rejected" || outcome.result.status === "rejected") {
+      const message = outcome.result.status === "rejected"
+        ? outcome.result.error.message
+        : "conversation creation was rejected";
+      throw new Error(`Conversation creation was rejected: ${message}`);
+    }
+    if (
+      outcome.result.body.t !== "session-create" ||
+      outcome.result.body.conversationId !== conversationId
+    ) {
+      throw new Error("Conversation creation returned another durable identity");
+    }
+  }
+
   #kickDelivery(
     onFailure?: (error: unknown, runResult: RunResult) => void,
     runResult?: RunResult,
@@ -2100,6 +2190,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   ): Promise<number> {
     let reconciled = 0;
     for (const candidate of await journal.assignmentsAwaitingRecovery()) {
+      if (this.#scheduledRuns.has(candidate.dispatch.envelope.work.runId)) {
+        continue;
+      }
       this.#rememberAssignment(
         candidate.dispatch.envelope,
         candidate.dispatch.activation,

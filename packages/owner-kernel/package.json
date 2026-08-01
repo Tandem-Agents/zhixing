@@ -48,6 +48,10 @@
     "./delivery": {
       "types": "./dist/delivery.d.ts",
       "import": "./dist/delivery.js"
+    },
+    "./test-support/s7-durable": {
+      "types": "./dist/test-support/s7-durable.d.ts",
+      "import": "./dist/test-support/s7-durable.js"
     }
   },
   "files": ["dist"],

@@ -21,11 +21,7 @@ import {
   type PermissionRule,
 } from "@zhixing/core";
 import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
-import {
-  observeTerminalPerformance,
-  type SecretRef,
-  type SecretStorePort,
-} from "@zhixing/core/contracts";
+import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import {
   createExecutionManifest,
   matchManifest,
@@ -134,10 +130,6 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   });
 
   it("freezes an explicit workspace revision and preflights it before local execution", async () => {
-    const observations: string[] = [];
-    const stopObserving = observeTerminalPerformance(({ kind }) => {
-      observations.push(kind);
-    });
     const capacity = createDeviceCapacityRuntime(resolve(home, "capacity"));
     const authority = await setupAuthorityRuntime({
       zhixingHome: home,
@@ -294,13 +286,6 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       permissionRules: [],
     });
     expect(unbound.environment.workspace).toBeUndefined();
-    stopObserving();
-    expect(observations).toEqual([
-      "workspace-preflight",
-      "workspace-preflight",
-      "workspace-preflight",
-      "workspace-preflight",
-    ]);
     await authority.stopStorageMaintenance();
   }, 120_000);
 

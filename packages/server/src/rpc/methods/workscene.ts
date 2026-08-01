@@ -78,6 +78,8 @@ async function sceneSummary(
             ...scene.workspace,
             ...(workspaceMetadata
               ? {
+                  workspaceBindingRevision:
+                    workspaceMetadata.workspaceBindingRevision,
                   deviceName: workspaceMetadata.deviceName,
                   workspaceName: workspaceMetadata.workspaceName,
                 }

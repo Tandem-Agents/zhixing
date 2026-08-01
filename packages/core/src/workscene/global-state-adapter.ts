@@ -15,7 +15,10 @@ import type {
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import type { AuthorityCommitLog } from "../authority/index.js";
-import { assertPrincipalAllowsAuthorityMethod } from "../protocol/index.js";
+import {
+  assertPrincipalAllowsAuthorityMethod,
+  AuthorityMethodForbiddenError,
+} from "../protocol/index.js";
 import {
   runInMaintenanceContext,
   storageMaintenanceObligation,
@@ -145,7 +148,7 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
   > {
     this.#admit(context, "global.mutate");
     if (context.principal.kind === "assignment") {
-      throw new TypeError(
+      throw new AuthorityMethodForbiddenError(
         "Assignment workscene mutations must be staged by the assignment owner",
       );
     }
@@ -301,11 +304,13 @@ export const WORKSCENE_REGISTRY_DURABLE_CONTRACT = defineDurableRuntimeContract(
   recoveryClass: "authority-replay",
   cases: [
     ...["established", "control-applied", "legacy-import-open", "legacy-import-activated", "legacy-import-abandoned", "deletion-projected"]
-      .map((key) => ({ kind: "variant" as const, key, reasonCode: `WORKSCENE_${key.replaceAll("-", "_").toUpperCase()}` })),
-    ...["principal-method", "request-conflict", "revision-conflict", "deletion-pending"]
-      .map((key) => ({ kind: "rejection" as const, key, reasonCode: `WORKSCENE_${key.replaceAll("-", "_").toUpperCase()}` })),
+      .map((key) => ({ kind: "variant" as const, key })),
+    { kind: "rejection", key: "principal-method", reasonCode: "AUTHORITY_METHOD_FORBIDDEN" },
+    { kind: "rejection", key: "request-conflict", reasonCode: "WORKSCENE_CONFLICT" },
+    { kind: "rejection", key: "revision-conflict", reasonCode: "WORKSCENE_REVISION_CONFLICT" },
+    { kind: "rejection", key: "deletion-pending", reasonCode: "WORKSCENE_CONFLICT" },
     ...["unknown-record", "non-contiguous-revision", "broken-deletion-confirmation"]
-      .map((key) => ({ kind: "corruption" as const, key, reasonCode: `WORKSCENE_${key.replaceAll("-", "_").toUpperCase()}` })),
+      .map((key) => ({ kind: "corruption" as const, key, reasonCode: "AUTHORITY_RECORD_INVALID" })),
   ],
 } as const);
 
