@@ -2442,7 +2442,7 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 - server 与 executor 零互相 import；未启用角色零加载、零监听；cli 始终是单一产品入口和组合根。
 - 用户只感知“值班 / 干活”；既有单机行为、入口响应、事件顺序和持久化结果在对应能力正式启用前必须通过 golden 保持等价。
 
-第 25 项的结构、兼容与体验验收必须反绑真实生产交付物：RecoveryPort 的规格片段与 TypeScript 导出机械比对；server golden 只从 canonical production registry 生成；耐久记录族由各生产 owner 声明 canonical descriptor，并由所属生产包的非生产 `test-support` 接缝提供逐 case 可执行场景，中央组合根只聚合两侧 stable key 做 exact-set 对账，不得另写 family / case / reason 清单。场景观察只能由真实执行结果生成：variant 从实际解码记录或耐久终态反解 key；rejection 采信真实 typed decision 并证明零写；corruption 必须定向变异后经真实 reopen 取得 typed code。producer / resource 见证只在实际写入或准入成功后产生，recovery owner 见证只在真实恢复入口接管义务后产生；禁止用请求元数据回填观察值、构造函数名或测试映射猜 owner，亦不得为测试扩大生产主入口导出。验收组合根对 descriptor、真实 validator / reducer / recovery 场景作 exact-set 对账，并以删分支、改错 typed code / owner / resource、跳过 reopen、回填请求元数据或恢复类名映射等变异证明有鉴别力。
+第 25 项的结构、兼容与体验验收必须反绑真实生产交付物：RecoveryPort 的规格片段与 TypeScript 导出机械比对；server golden 只从 canonical production registry 生成；耐久记录族由所属生产包声明 canonical descriptor，并在非生产 `test-support` 接缝提供逐 case 行为场景，中央组合根只聚合两侧 stable key 做 exact-set 对账，不得另写 family / case / reason 清单。场景须执行真实 validator、reducer、日志重放或 reopen，并断言实际 typed decision、零写拒绝、耐久终态或 corruption code；生产点、资源身份和恢复 owner 由既有装配、拓扑与结构测试分别证明。禁止让场景自报 producer / resource / recovery owner 再把这些标签当成生产事实，也不得为验收扩大生产主入口、增加专用运行时见证协议或重复证明既有结构合同。
 
 | 提交 | 边界 | 目标 | 验收 |
 |---|---|---|---|

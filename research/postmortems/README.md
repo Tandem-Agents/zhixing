@@ -48,6 +48,7 @@
 | 2026-05-20 | [Confirm 面板退出后输入冻结 —— ConPTY raw-mode 翻转死锁](2026-05-20-confirm-input-freeze-conpty.md) | 「可观测字段全绿但功能挂」识别延迟、已有 postmortem 沉淀方法论没立即调用、refcount 共享资源 handoff 路径没设计 | 字段全绿但功能挂 = 立刻切 host 层；诊断开始先扫一遍 postmortems README 检查清单；共享资源 refcount 必须显式设计 handoff 不让 count 归零 |
 | 2026-07-12 | [公共 API 抽取中的兼容盲区](2026-07-12-public-api-compatibility-blind-spot.md) | 用符号恒等代替旧调用合同验证、遗漏公开入口这一独立消费者 | 签名变化必须走兼容适配；同时验证生成声明、根入口路由与旧调用行为 |
 | 2026-08-01 | [把非核心性能观测过度设计成不可行门禁](2026-08-01-performance-gate-overdesign.md) | 把一条性能目标扩张为近四千行、可能耗时九十分钟的强制同步 runner | 先区分功能验收与信息观测；先验证门禁自身可行性；非核心 benchmark 不得阻断单元交付 |
+| 2026-08-02 | [把验收夸大误判为产品阻断](2026-08-02-acceptance-gap-misclassified-as-product-blocker.md) | 把自报标签无法证明误判成 P1 大问题，险些扩建一天工作量的无效见证设施 | 生产事实、必要证据、验收设计分层；大工作量先过价值门；优先删除过度验收 |
 
 每写完一篇追加一行；让索引页本身成为可扫描的"反模式清单"。
 
