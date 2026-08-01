@@ -8,6 +8,10 @@ import {
   type LocalWorkspaceOwnerLease,
 } from "./local-workspace-owner.js";
 
+export type LocalWorkspaceAssemblyIdentity =
+  | { readonly kind: "executor"; readonly lease: LocalWorkspaceOwnerLease }
+  | { readonly kind: "non-executor" };
+
 export async function acquireExecutorLocalWorkspaceOwner(
   zhixingHome: string,
   roles: readonly DeviceRole[],
@@ -17,26 +21,33 @@ export async function acquireExecutorLocalWorkspaceOwner(
     : undefined;
 }
 
+export function defineLocalWorkspaceAssemblyIdentity(
+  roles: readonly DeviceRole[],
+  lease: LocalWorkspaceOwnerLease | undefined,
+): LocalWorkspaceAssemblyIdentity {
+  if (roles.includes("executor")) {
+    if (!lease) {
+      throw new Error("Executor topology did not acquire local workspace management ownership");
+    }
+    return { kind: "executor", lease };
+  }
+  if (lease) {
+    throw new Error("A non-executor topology cannot own local workspace management");
+  }
+  return { kind: "non-executor" };
+}
+
 export async function startExecutorLocalWorkspaceHost(input: {
-  readonly roles: readonly DeviceRole[];
-  readonly lease?: LocalWorkspaceOwnerLease;
+  readonly identity: LocalWorkspaceAssemblyIdentity;
   readonly host: Omit<
     Parameters<typeof createLocalWorkspaceManagementHost>[0],
     "lease"
   >;
 }): Promise<LocalWorkspaceManagementHost | undefined> {
-  if (!input.roles.includes("executor")) {
-    if (input.lease) {
-      throw new Error("A non-executor topology cannot own local workspace management");
-    }
-    return undefined;
-  }
-  if (!input.lease) {
-    throw new Error("Executor topology did not acquire local workspace management ownership");
-  }
+  if (input.identity.kind === "non-executor") return undefined;
   const host = createLocalWorkspaceManagementHost({
     ...input.host,
-    lease: input.lease,
+    lease: input.identity.lease,
   });
   await host.start();
   return host;

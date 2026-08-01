@@ -26,6 +26,7 @@ import type {
 } from "./local-workspace-operation-outbox.js";
 import {
   acquireExecutorLocalWorkspaceOwner,
+  defineLocalWorkspaceAssemblyIdentity,
   startExecutorLocalWorkspaceHost,
 } from "./local-workspace-bootstrap.js";
 import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
@@ -178,8 +179,7 @@ export async function withLocalWorkspaceFacade<T, R = T>(
     const recovery = runtime.workspaceBindingRecovery;
     if (!admin || !recovery) throw new Error("本机工作区管理能力不可用");
     host = await startExecutorLocalWorkspaceHost({
-      roles: mesh.roles,
-      lease: owner,
+      identity: defineLocalWorkspaceAssemblyIdentity(mesh.roles, owner),
       host: {
         zhixingHome,
         facade: {

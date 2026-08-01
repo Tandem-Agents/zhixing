@@ -1,7 +1,10 @@
 import { stat } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { acquireExecutorLocalWorkspaceOwner } from "./local-workspace-bootstrap.js";
+import {
+  acquireExecutorLocalWorkspaceOwner,
+  defineLocalWorkspaceAssemblyIdentity,
+} from "./local-workspace-bootstrap.js";
 import { acquireLocalWorkspaceOwner } from "./local-workspace-owner.js";
 
 describe("local workspace role-gated bootstrap", () => {
@@ -20,5 +23,25 @@ describe("local workspace role-gated bootstrap", () => {
     await roleOwner!.release();
     const successor = await acquireLocalWorkspaceOwner(home);
     await successor.release();
+  });
+
+  it("makes executor ownership required and rejects it for non-executor roles", async () => {
+    const home = await createTempDir("workspace-bootstrap-identity");
+    const owner = await acquireLocalWorkspaceOwner(home);
+    try {
+      expect(defineLocalWorkspaceAssemblyIdentity(["executor"], owner)).toEqual({
+        kind: "executor",
+        lease: owner,
+      });
+      expect(() => defineLocalWorkspaceAssemblyIdentity(["anchor"], owner))
+        .toThrow("non-executor");
+      expect(() => defineLocalWorkspaceAssemblyIdentity(["executor"], undefined))
+        .toThrow("did not acquire");
+      expect(defineLocalWorkspaceAssemblyIdentity(["anchor"], undefined)).toEqual({
+        kind: "non-executor",
+      });
+    } finally {
+      await owner.release();
+    }
   });
 });

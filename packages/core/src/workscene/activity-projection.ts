@@ -3,6 +3,7 @@ import {
   type DurableProjectionIndex,
   type DurableProjectionMutation,
 } from "../authority/index.js";
+import { parseConversationId } from "../conversation/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import type {
   JsonValue,
@@ -257,6 +258,10 @@ function validateActivityRecord(
   const sceneId = requireId(value.sceneId);
   if (stream !== `${SESSION_ACTIVITY_STREAM_PREFIX}${conversationId}`) {
     throw new Error("Session activity stream does not bind its conversation");
+  }
+  const scope = parseConversationId(conversationId).scope;
+  if (scope.kind !== "workscene" || scope.sceneId !== sceneId) {
+    throw new Error("Session activity scene does not bind its conversation");
   }
   if (value.operation !== "upsert" && value.operation !== "delete") {
     throw new Error("Session activity operation is invalid");

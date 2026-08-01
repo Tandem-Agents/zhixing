@@ -114,8 +114,7 @@ export async function runExecutorRole(
       throw new Error("Local workspace management ports are unavailable");
     }
     localWorkspaceHost = await startExecutorLocalWorkspaceHost({
-      roles: bootstrap.mesh.roles,
-      lease: bootstrap.localWorkspaceOwner,
+      identity: bootstrap.localWorkspaceIdentity,
       host: {
         zhixingHome,
         facade: {

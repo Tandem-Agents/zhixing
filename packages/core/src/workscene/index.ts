@@ -5,6 +5,7 @@ export {
   withLegacyWorksceneWriteFence,
 } from "./registry.js";
 export {
+  AnchorWorksceneRegistry,
   WorksceneConflictError,
   WorksceneNotFoundError,
   WorksceneRevisionError,

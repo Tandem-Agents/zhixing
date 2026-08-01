@@ -572,7 +572,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     readonly requestId: string;
     readonly at: string;
   }): Promise<{ readonly revision: number; readonly at: string }> {
-    return this.#journal(input.conversationId).touchWorksceneSession(input);
+    const { conversationId, ...activity } = input;
+    return this.#journal(conversationId).touchWorksceneSession(activity);
   }
 
   deleteWorksceneSession(input: {
@@ -583,7 +584,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }): Promise<
     { readonly revision: number; readonly at: string } | undefined
   > {
-    return this.#journal(input.conversationId).deleteWorksceneSession(input);
+    const { conversationId, ...activity } = input;
+    return this.#journal(conversationId).deleteWorksceneSession(activity);
   }
 
   async cancel(

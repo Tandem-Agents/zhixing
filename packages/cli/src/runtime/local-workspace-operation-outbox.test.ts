@@ -44,15 +44,28 @@ describe("LocalWorkspaceOperationOutbox", () => {
       ...entry,
     });
     const receipt = await restarted.acknowledge({
+      outboxId: page.outboxId,
       throughSeq: completed.localSeq,
       prefixDigest,
       entries: [entry],
     });
+    expect(receipt).toEqual({
+      outboxId: page.outboxId,
+      throughSeq: completed.localSeq,
+      prefixDigest,
+    });
     await expect(restarted.acknowledge({
+      outboxId: page.outboxId,
       throughSeq: completed.localSeq,
       prefixDigest,
       entries: [entry],
     })).resolves.toEqual(receipt);
+    await expect(restarted.acknowledge({
+      outboxId: "outbox-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      throughSeq: completed.localSeq,
+      prefixDigest,
+      entries: [entry],
+    })).rejects.toThrow("another outbox");
     expect((await restarted.pending()).operations).toEqual([]);
   });
 
@@ -63,6 +76,7 @@ describe("LocalWorkspaceOperationOutbox", () => {
     await outbox.commit(second);
     const completed = await outbox.complete(second, { ok: true, value: null });
     await expect(outbox.acknowledge({
+      outboxId: outbox.outboxId,
       throughSeq: 2,
       prefixDigest: completed.resultDigest!,
       entries: [{
@@ -93,7 +107,12 @@ describe("LocalWorkspaceOperationOutbox", () => {
       previous: page.confirmation.prefixDigest,
       ...entry,
     });
-    await outbox.acknowledge({ throughSeq: 1, prefixDigest, entries: [entry] });
+    await outbox.acknowledge({
+      outboxId: page.outboxId,
+      throughSeq: 1,
+      prefixDigest,
+      entries: [entry],
+    });
 
     await writeFile(file, beforeCheckpoint, "utf8");
     const recovered = new LocalWorkspaceOperationOutbox({ rootDir: root });

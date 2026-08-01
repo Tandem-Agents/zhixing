@@ -49,6 +49,7 @@ type HostRequest =
   | { readonly kind: "pending"; readonly afterSeq: number }
   | {
       readonly kind: "acknowledge";
+      readonly outboxId: string;
       readonly throughSeq: number;
       readonly prefixDigest: string;
       readonly entries: readonly ConfirmationEntry[];
@@ -546,12 +547,20 @@ async function acknowledgeDelivery(
     });
     return entry;
   });
-  await callLocalWorkspaceHost(zhixingHome, {
+  const receipt = validateAcknowledgmentReceipt(await callLocalWorkspaceHost(zhixingHome, {
     kind: "acknowledge",
+    outboxId: delivery.outboxId,
     throughSeq: terminal.at(-1)!.localSeq,
     prefixDigest,
     entries,
-  });
+  }));
+  if (
+    receipt.outboxId !== delivery.outboxId ||
+    receipt.throughSeq !== terminal.at(-1)!.localSeq ||
+    receipt.prefixDigest !== prefixDigest
+  ) {
+    throw new Error("Local workspace acknowledgment receipt is bound to another delivery");
+  }
 }
 
 function resetPreviewOf(operation: LocalWorkspaceOperation): LocalWorkspaceResetPreview {
@@ -611,7 +620,7 @@ function validateHostRequest(value: unknown): HostRequest {
       ? ["confirmation", "identity", "kind"]
       : ["identity", "kind"],
     pending: ["afterSeq", "kind"],
-    acknowledge: ["entries", "kind", "prefixDigest", "throughSeq"],
+    acknowledge: ["entries", "kind", "outboxId", "prefixDigest", "throughSeq"],
   };
   if (typeof request.kind !== "string" || !(request.kind in allowed)) throw new TypeError("Local workspace host request kind is invalid");
   if (Object.keys(request).sort().join(",") !== [...allowed[request.kind]!].sort().join(",")) {
@@ -648,6 +657,8 @@ function validateHostRequest(value: unknown): HostRequest {
       return { kind: "pending", afterSeq: request.afterSeq as number };
     case "acknowledge": {
       if (
+        typeof request.outboxId !== "string" ||
+        !/^outbox-[A-Za-z0-9_-]{32}$/u.test(request.outboxId) ||
         !Number.isSafeInteger(request.throughSeq) ||
         (request.throughSeq as number) < 1 ||
         typeof request.prefixDigest !== "string" ||
@@ -658,6 +669,7 @@ function validateHostRequest(value: unknown): HostRequest {
       }
       return {
         kind: "acknowledge",
+        outboxId: request.outboxId,
         throughSeq: request.throughSeq as number,
         prefixDigest: request.prefixDigest,
         entries: request.entries.map(validateConfirmationEntry),
@@ -665,6 +677,33 @@ function validateHostRequest(value: unknown): HostRequest {
     }
   }
   throw new TypeError("Local workspace host request kind is invalid");
+}
+
+function validateAcknowledgmentReceipt(value: unknown): {
+  readonly outboxId: string;
+  readonly throughSeq: number;
+  readonly prefixDigest: string;
+} {
+  const record = exactRecord(
+    value,
+    ["outboxId", "prefixDigest", "throughSeq"],
+    "acknowledgment receipt",
+  );
+  if (
+    typeof record.outboxId !== "string" ||
+    !/^outbox-[A-Za-z0-9_-]{32}$/u.test(record.outboxId) ||
+    !Number.isSafeInteger(record.throughSeq) ||
+    (record.throughSeq as number) < 1 ||
+    typeof record.prefixDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(record.prefixDigest)
+  ) {
+    throw new TypeError("Local workspace acknowledgment receipt is invalid");
+  }
+  return record as {
+    readonly outboxId: string;
+    readonly throughSeq: number;
+    readonly prefixDigest: string;
+  };
 }
 
 function validateIdentity(value: unknown): OperationIdentity {

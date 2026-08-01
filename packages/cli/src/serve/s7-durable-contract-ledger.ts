@@ -27,6 +27,20 @@ export interface S7DurableScenarioAdapter {
   readonly caseKey: string;
   readonly kind: "variant" | "rejection" | "corruption";
   readonly expectedReasonCode: string;
+  readonly expectedProducer: string;
+  readonly expectedRecoveryOwner: string;
+  readonly expectedResourceIdentity: string;
+}
+
+export interface S7DurableScenarioObservation {
+  readonly family: string;
+  readonly kind: "variant" | "rejection" | "corruption";
+  readonly caseKey: string;
+  readonly reasonCode: string;
+  readonly producer: string;
+  readonly recoveryOwner: string;
+  readonly resourceIdentity: string;
+  readonly evidence: string;
 }
 
 /**
@@ -42,12 +56,15 @@ export function requiredS7DurableScenarios(): readonly S7DurableScenarioAdapter[
       caseKey: entry.key,
       kind: entry.kind,
       expectedReasonCode: entry.reasonCode,
+      expectedProducer: descriptor.producer,
+      expectedRecoveryOwner: descriptor.recoveryOwner,
+      expectedResourceIdentity: descriptor.resourceIdentity,
     })),
   ).sort((left, right) => left.key.localeCompare(right.key, "en-US"));
 }
 
 export function assertExactS7ScenarioSet(
-  implementations: ReadonlyMap<string, () => Promise<{ readonly reasonCode: string }>>,
+  implementations: ReadonlyMap<string, () => Promise<S7DurableScenarioObservation>>,
 ): void {
   const required = requiredS7DurableScenarios();
   const expected = required.map(({ key }) => key);
@@ -57,4 +74,56 @@ export function assertExactS7ScenarioSet(
     const extra = actual.filter((key) => !expected.includes(key));
     throw new Error(`S7 durable scenarios differ from production descriptors; missing=${missing.join("|")}; extra=${extra.join("|")}`);
   }
+}
+
+/**
+ * Compares an independently observed production result with the canonical
+ * descriptor entry. Scenario implementations never receive these expected
+ * values, so they cannot pass by echoing the registry they are meant to test.
+ */
+export function assertS7DurableScenarioObservation(
+  required: S7DurableScenarioAdapter,
+  observation: S7DurableScenarioObservation,
+): void {
+  const expected = {
+    family: required.family,
+    kind: required.kind,
+    caseKey: required.caseKey,
+    reasonCode: required.expectedReasonCode,
+    producer: required.expectedProducer,
+    recoveryOwner: required.expectedRecoveryOwner,
+    resourceIdentity: required.expectedResourceIdentity,
+  };
+  const actual = {
+    family: observation.family,
+    kind: observation.kind,
+    caseKey: observation.caseKey,
+    reasonCode: observation.reasonCode,
+    producer: observation.producer,
+    recoveryOwner: observation.recoveryOwner,
+  };
+  const { resourceIdentity: expectedResourceIdentity, ...expectedWithoutResource } = expected;
+  if (
+    JSON.stringify(actual) !== JSON.stringify(expectedWithoutResource) ||
+    !resourceIdentityMatches(expectedResourceIdentity, observation.resourceIdentity)
+  ) {
+    throw new Error(
+      `S7 durable scenario observation is not bound to ${required.key}; expected=${JSON.stringify(expected)}; actual=${JSON.stringify({ ...actual, resourceIdentity: observation.resourceIdentity })}`,
+    );
+  }
+  if (typeof observation.evidence !== "string" || observation.evidence.trim().length === 0) {
+    throw new Error(`S7 durable scenario ${required.key} has no production evidence`);
+  }
+}
+
+function resourceIdentityMatches(pattern: string, actual: string): boolean {
+  const normalizedPattern = pattern.replaceAll("\\", "/");
+  const normalizedActual = actual.replaceAll("\\", "/");
+  if (normalizedPattern.startsWith("zhixingHome/")) {
+    return normalizedActual.endsWith(normalizedPattern.slice("zhixingHome".length));
+  }
+  const expression = normalizedPattern
+    .replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+    .replace(/<[^>]+>/gu, "[^/]+");
+  return new RegExp(`^${expression}$`, "u").test(normalizedActual);
 }

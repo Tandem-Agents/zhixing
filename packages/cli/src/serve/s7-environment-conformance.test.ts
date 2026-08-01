@@ -22,7 +22,6 @@ import {
 } from "@zhixing/executor";
 import {
   LocalWorkspaceProbeAdapter,
-  localEnvironmentControlSubject,
   selectExecutorForEnvironment,
   type WorkspaceProbePort,
 } from "@zhixing/core/environment";
@@ -49,6 +48,16 @@ import type {
 } from "@zhixing/mesh/service-registry";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
+import {
+  acquireExecutorLocalWorkspaceOwner,
+  defineLocalWorkspaceAssemblyIdentity,
+  startExecutorLocalWorkspaceHost,
+} from "../runtime/local-workspace-bootstrap.js";
+import {
+  createLocalWorkspaceClient,
+  type LocalWorkspaceManagementHost,
+} from "../runtime/local-workspace-management-host.js";
+import type { LocalWorkspaceOwnerLease } from "../runtime/local-workspace-owner.js";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import {
@@ -66,8 +75,9 @@ import {
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
-const NOW = "2026-07-30T00:00:00.000Z";
-const EXPIRY = "2099-01-01T00:00:00.000Z";
+const TEST_EPOCH = Date.now();
+const NOW = new Date(TEST_EPOCH).toISOString();
+const EXPIRY = new Date(TEST_EPOCH + 60 * 60 * 1000).toISOString();
 const EMPTY_PROFILE = {
   tools: [] as string[],
   mcpServers: [] as string[],
@@ -132,7 +142,13 @@ async function runChain(topology: "in-process" | "mesh") {
   process.env.ZHIXING_HOME = anchorHome;
   let anchor: Awaited<ReturnType<typeof setupAuthorityRuntime>> | undefined;
   let executor: Awaited<ReturnType<typeof setupAuthorityRuntime>> | undefined;
+  let workspaceOwner: LocalWorkspaceOwnerLease | undefined;
+  let workspaceHost: LocalWorkspaceManagementHost | undefined;
   try {
+    workspaceOwner = await acquireExecutorLocalWorkspaceOwner(
+      executorHome,
+      ["executor"],
+    );
     executor = await setupAuthorityRuntime({
       zhixingHome: executorHome,
       secretStore: new MemorySecretStore(),
@@ -165,24 +181,36 @@ async function runChain(topology: "in-process" | "mesh") {
             clock: () => NOW,
           });
 
+    if (!executor.workspaceBindingAdmin || !executor.workspaceBindingRecovery) {
+      throw new Error("S7 executor did not expose local workspace management ports");
+    }
+    workspaceHost = await startExecutorLocalWorkspaceHost({
+      identity: defineLocalWorkspaceAssemblyIdentity(
+        ["executor"],
+        workspaceOwner,
+      ),
+      host: {
+        zhixingHome: executorHome,
+        facade: {
+          deviceId: executor.deviceId,
+          executorId: executor.executorId,
+          admin: executor.workspaceBindingAdmin,
+          recovery: executor.workspaceBindingRecovery,
+          resources: executor.executorResourceGovernor,
+        },
+        storageMaintenance: executorCapacity.storage,
+      },
+    });
+    if (!workspaceHost) {
+      throw new Error("S7 executor did not start its local workspace management host");
+    }
+
     const workspaceRoot = resolve(root, "workspace");
     await mkdir(workspaceRoot, { recursive: true });
-    const adminRequest = localEnvironmentControlSubject(
-      executor.deviceId,
-      `s7-${topology}`,
-    );
-    const binding = await executor.workspaceBindingAdmin!.create(
-      { displayName: "Project", absolutePath: workspaceRoot },
-      {
-        requestId: adminRequest,
-        lease: rootLease(
-          executorKey,
-          adminRequest,
-          executor.executorId,
-          executor.deviceId,
-        ),
-        abort: new AbortController().signal,
-      },
+    const workspaceClient = createLocalWorkspaceClient(executorHome);
+    const binding = await workspaceClient.authorizeForControl(
+      "Project",
+      workspaceRoot,
     );
 
     const mesh =
@@ -221,6 +249,13 @@ async function runChain(topology: "in-process" | "mesh") {
     );
     if (created.kind !== "workscene-applied") {
       throw new Error("Workscene create did not return an applied result");
+    }
+    await workspaceClient.confirmDelivered();
+    const bindingView = (await workspaceClient.list()).find(
+      (candidate) => candidate.name === "Project",
+    );
+    if (!bindingView) {
+      throw new Error("S7 local workspace client did not read back the created binding");
     }
 
     const conversationId = `ws:${created.scene.id}:conv_main`;
@@ -438,14 +473,14 @@ async function runChain(topology: "in-process" | "mesh") {
         (entry) =>
           entry.bindingRef === binding.bindingRef &&
           entry.workspaceBindingRevision ===
-            binding.workspaceBindingRevision,
+            bindingView.workspaceBindingRevision,
       ),
       sceneBound:
         scene?.workspace?.deviceId === executor.deviceId &&
         scene.workspace.bindingRef === binding.bindingRef,
       assignmentFrozen:
         prepared.environment.workspace?.workspaceBindingRevision ===
-        binding.workspaceBindingRevision,
+        bindingView.workspaceBindingRevision,
       preflight:
         preflight.workspaceRoot === workspaceRoot
           ? "workspace-root"
@@ -482,12 +517,22 @@ async function runChain(topology: "in-process" | "mesh") {
     };
   } finally {
     try {
-      await executor?.stopStorageMaintenance();
-      if (anchor && anchor !== executor) await anchor.stopStorageMaintenance();
+      await workspaceHost?.close();
+      try {
+        await executor?.stopStorageMaintenance();
+        if (anchor && anchor !== executor) await anchor.stopStorageMaintenance();
+      } finally {
+        await workspaceOwner?.release();
+      }
     } finally {
       if (previousHome === undefined) delete process.env.ZHIXING_HOME;
       else process.env.ZHIXING_HOME = previousHome;
-      await rm(root, { recursive: true, force: true });
+      await rm(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
     }
   }
 }

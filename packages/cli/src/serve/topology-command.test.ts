@@ -8,6 +8,10 @@ const harness = vi.hoisted(() => ({
     marker: "device-capacity",
     storage: { marker: "storage-maintenance" },
   },
+  localWorkspaceOwner: {
+    zhixingHome: "test-home",
+    release: vi.fn(),
+  },
   prepareMesh: vi.fn(),
   runTopology: vi.fn(),
   writer: {
@@ -36,6 +40,18 @@ vi.mock("./device-capacity-runtime.js", () => ({
     return harness.deviceCapacity;
   },
 }));
+vi.mock("../runtime/local-workspace-bootstrap.js", () => ({
+  acquireExecutorLocalWorkspaceOwner: async (
+    _home: string,
+    roles: readonly string[],
+  ) => roles.includes("executor") ? harness.localWorkspaceOwner : undefined,
+  defineLocalWorkspaceAssemblyIdentity: (
+    roles: readonly string[],
+    lease: typeof harness.localWorkspaceOwner | undefined,
+  ) => roles.includes("executor")
+    ? { kind: "executor", lease }
+    : { kind: "non-executor" },
+}));
 vi.mock("./role-topology.js", () => ({
   DEFAULT_LOCAL_ROLE_CONFIGURATION: { roles: ["anchor", "executor"] },
   runConfiguredServeTopology: (...args: unknown[]) => harness.runTopology(...args),
@@ -49,6 +65,7 @@ describe("serve topology command", () => {
     harness.startup.mockReset();
     harness.prepareMesh.mockReset();
     harness.runTopology.mockReset();
+    harness.localWorkspaceOwner.release.mockReset();
     harness.writer.line.mockReset();
     harness.writer.appendInline.mockReset();
     harness.writer.notify.mockReset();
@@ -77,6 +94,7 @@ describe("serve topology command", () => {
       return mesh;
     });
     harness.runTopology.mockImplementation(async () => {
+      expect(harness.localWorkspaceOwner.release).not.toHaveBeenCalled();
       harness.order.push("roles");
     });
 
@@ -84,6 +102,7 @@ describe("serve topology command", () => {
 
     expect(harness.order).toEqual(["startup", "capacity", "mesh", "roles"]);
     expect(stopStorageMaintenance).toHaveBeenCalledTimes(1);
+    expect(harness.localWorkspaceOwner.release).toHaveBeenCalledTimes(1);
     expect(harness.prepareMesh).toHaveBeenCalledWith(expect.objectContaining({
       zhixingHome: "test-home",
       secretStore: harness.secretStore,
@@ -97,7 +116,10 @@ describe("serve topology command", () => {
       expect.objectContaining({
         mesh,
         deviceCapacity: harness.deviceCapacity,
-        localWorkspaceOwner: expect.objectContaining({ zhixingHome: "test-home" }),
+        localWorkspaceIdentity: {
+          kind: "executor",
+          lease: expect.objectContaining({ zhixingHome: "test-home" }),
+        },
         secretStore: harness.secretStore,
         startup,
       }),
@@ -114,7 +136,7 @@ describe("serve topology command", () => {
       secretStore: harness.secretStore,
     });
     harness.prepareMesh.mockResolvedValue({
-      roles: ["anchor"],
+      roles: ["anchor", "executor"],
       bootstrapStore: { stopStorageMaintenance },
     });
     harness.runTopology.mockRejectedValue(new Error("role startup failed"));
@@ -123,6 +145,7 @@ describe("serve topology command", () => {
       "role startup failed",
     );
     expect(stopStorageMaintenance).toHaveBeenCalledTimes(1);
+    expect(harness.localWorkspaceOwner.release).toHaveBeenCalledTimes(1);
   });
 
   it("does not create mesh or role state when preflight is not ready", async () => {

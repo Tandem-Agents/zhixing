@@ -275,6 +275,7 @@ export class LocalWorkspaceOperationOutbox {
   }
 
   async acknowledge(input: {
+    readonly outboxId: string;
     readonly throughSeq: number;
     readonly prefixDigest: string;
     readonly entries: readonly {
@@ -283,15 +284,22 @@ export class LocalWorkspaceOperationOutbox {
       inputDigest: string;
       resultDigest: string;
     }[];
-  }): Promise<{ throughSeq: number; prefixDigest: string }> {
+  }): Promise<{ outboxId: string; throughSeq: number; prefixDigest: string }> {
     await this.initialize();
     return this.#serial(async () => {
       const state = this.#requireState();
+      if (input.outboxId !== state.checkpoint.outboxId) {
+        throw new Error("Local workspace acknowledgment is bound to another outbox");
+      }
       if (input.throughSeq === state.checkpoint.confirmedThroughSeq) {
         if (input.prefixDigest !== state.checkpoint.confirmedPrefixDigest) {
           throw new Error("Local workspace acknowledgment digest conflicts with its watermark");
         }
-        return { throughSeq: input.throughSeq, prefixDigest: input.prefixDigest };
+        return {
+          outboxId: state.checkpoint.outboxId,
+          throughSeq: input.throughSeq,
+          prefixDigest: input.prefixDigest,
+        };
       }
       if (input.throughSeq < state.checkpoint.confirmedThroughSeq) {
         throw new Error("Local workspace acknowledgment moved backwards");
@@ -336,7 +344,11 @@ export class LocalWorkspaceOperationOutbox {
       );
       await this.#replace(checkpoint, remaining);
       this.#state = await this.#read();
-      return { throughSeq: input.throughSeq, prefixDigest };
+      return {
+        outboxId: state.checkpoint.outboxId,
+        throughSeq: input.throughSeq,
+        prefixDigest,
+      };
     });
   }
 

@@ -105,8 +105,7 @@ const authorityRuntimeSurface: AccessSurface = {
       const recovery = authorityRuntime.workspaceBindingRecovery;
       if (!admin || !recovery) throw new Error("Local workspace management ports are unavailable");
       const host = await startExecutorLocalWorkspaceHost({
-        roles: ctx.enabledRoles,
-        lease: ctx.localWorkspaceOwner,
+        identity: ctx.localWorkspaceIdentity,
         host: {
           zhixingHome: ctx.zhixingHome,
           facade: {

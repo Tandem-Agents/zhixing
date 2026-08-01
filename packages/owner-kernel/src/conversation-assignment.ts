@@ -1255,6 +1255,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly sceneId: string;
     readonly at: string;
   }): Promise<{ readonly revision: number; readonly at: string }> {
+    assertPlainRecord(input, "Session activity input");
+    assertExactRecordKeys(
+      input,
+      ["at", "requestId", "sceneId"],
+      "Session activity input",
+    );
     assertIdentifier(input.requestId, "Session activity request id");
     assertIdentifier(input.sceneId, "Session activity scene id");
     assertCanonicalActivityTime(input.at);
@@ -1318,6 +1324,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }): Promise<
     { readonly revision: number; readonly at: string } | undefined
   > {
+    assertPlainRecord(input, "Session deletion input");
+    assertExactRecordKeys(
+      input,
+      ["at", "requestId", "sceneId"],
+      "Session deletion input",
+    );
     assertIdentifier(input.requestId, "Session deletion request id");
     assertIdentifier(input.sceneId, "Session deletion scene id");
     assertCanonicalActivityTime(input.at);

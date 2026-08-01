@@ -14,7 +14,10 @@ import {
   type ServeRoleConfiguration,
 } from "./role-topology.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
-import { acquireExecutorLocalWorkspaceOwner } from "../runtime/local-workspace-bootstrap.js";
+import {
+  acquireExecutorLocalWorkspaceOwner,
+  defineLocalWorkspaceAssemblyIdentity,
+} from "../runtime/local-workspace-bootstrap.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -65,7 +68,10 @@ export async function runServeCommand(
         deviceCapacity,
         secretStore,
         startup,
-        ...(localWorkspaceOwner ? { localWorkspaceOwner } : {}),
+        localWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity(
+          mesh.roles,
+          localWorkspaceOwner,
+        ),
       },
     );
   } finally {

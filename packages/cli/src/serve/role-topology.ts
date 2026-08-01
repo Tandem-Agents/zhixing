@@ -3,7 +3,7 @@ import type { CredentialStoreCoordinator } from "@zhixing/providers";
 import type { StartupCheckResult } from "../startup.js";
 import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
-import type { LocalWorkspaceOwnerLease } from "../runtime/local-workspace-owner.js";
+import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
 import type {
   ConversationAssignmentLedger,
   AssignmentStreamSpool,
@@ -58,7 +58,7 @@ export interface ServeBootstrapContext {
   readonly deviceCapacity: DeviceCapacityRuntime;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
   readonly startup: Extract<StartupCheckResult, { readonly kind: "ready" }>;
-  readonly localWorkspaceOwner?: LocalWorkspaceOwnerLease;
+  readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
 }
 
 export interface ServiceHostModule<Options> {
