@@ -1,7 +1,7 @@
 /**
  * OutboxSender — 把 OutboxRegistry 包装成 DeliverySender
  *
- * 让现有 DeliveryPipeline 无需改造即可把 drain 目标从"直发 adapter"切换为"经 Outbox"。
+ * 将权威 Delivery owner 与一次性旧队列排空器统一接到 Outbox 顺序层。
  * Pipeline → OutboxSender.send(target, content, meta) → registry.of(target).post(entry)
  *
  * 规格：[message-outbox.md](../../../../research/design/specifications/message-outbox.md) §5.3

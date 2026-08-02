@@ -2,6 +2,7 @@ export { Scheduler } from "./scheduler.js";
 export type { SchedulerDeps } from "./scheduler.js";
 export { JsonTaskStore, getSchedulerStorePath } from "./task-store.js";
 export { TimerLoop } from "./timer-loop.js";
+export { nextScheduleTime, nextFutureScheduleTime } from "./schedule-time.js";
 export { RunRegistry } from "./run-registry.js";
 export { DEFAULT_SCHEDULER_CONFIG } from "./config.js";
 export type { SchedulerConfig } from "./config.js";
@@ -37,4 +38,8 @@ export type {
   TaskPatch,
   SchedulerFacadeEvent,
   SchedulerFacadeEventHandler,
+  SchedulerBackend,
+  SchedulerControlSource,
+  ScheduleMutationContext,
+  ScheduleMutationStager,
 } from "./facade.js";

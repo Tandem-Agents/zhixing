@@ -31,6 +31,13 @@ export type SchedulerEventMap = {
     name: string;
   };
 
+  /** 手动运行已耐久受理；后续状态、取消与结果均以 jobRunId 为唯一身份。 */
+  "scheduler:task-accepted": {
+    taskId: string;
+    jobRunId: string;
+    name: string;
+  };
+
   /** 任务开始执行 */
   "scheduler:task-started": {
     taskId: string;

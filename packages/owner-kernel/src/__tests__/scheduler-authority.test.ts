@@ -1,0 +1,374 @@
+import type { SchedulerEventMap } from "@zhixing/core";
+import { createEventBus } from "@zhixing/core";
+import type { JobOccurrence, TaskDefinition } from "@zhixing/core/contracts";
+import { describe, expect, it, vi } from "vitest";
+import type { ControlAdmissionJournal } from "../control-admission.js";
+import type { JobJournal } from "../job-assignment.js";
+import { AnchorScheduler } from "../scheduler-authority.js";
+
+class MemoryJobJournal {
+  definition: TaskDefinition | undefined;
+  runs: JobOccurrence[] = [];
+  readonly resumeSystemJobs = vi.fn(async () => {});
+  readonly listeners = new Set<() => void>();
+  readonly triggerCalls: Array<{
+    readonly jobRunId: string;
+    readonly scheduledFor: string;
+    readonly source: "user" | "system";
+  }> = [];
+  readonly controlRuns = new Map<string, string>();
+  readonly runSystem = vi.fn(async (jobRunId: string) => {
+    const run = this.runs.find((candidate) => candidate.jobRunId === jobRunId);
+    if (run) run.state = "committed";
+    return "committed" as const;
+  });
+
+  async taskDefinition() {
+    return this.definition ? structuredClone(this.definition) : undefined;
+  }
+
+  async occurrences() {
+    return structuredClone(this.runs);
+  }
+
+  async define(definition: TaskDefinition) {
+    this.definition = structuredClone(definition);
+  }
+
+  async trigger(input: {
+    readonly jobRunId: string;
+    readonly scheduledFor: string;
+    readonly source: "user" | "system";
+  }) {
+    this.triggerCalls.push(structuredClone(input));
+    const existing = this.runs.find((run) => run.jobRunId === input.jobRunId);
+    if (existing) return structuredClone(existing);
+    const occurrence: JobOccurrence = {
+      taskId: this.definition!.taskId,
+      jobRunId: input.jobRunId,
+      scheduledFor: input.scheduledFor,
+      taskRevision: this.definition!.taskRevision,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "queued",
+    };
+    this.runs.push(occurrence);
+    return structuredClone(occurrence);
+  }
+
+  async applyControl(input: {
+    readonly envelope: { readonly requestId: string };
+  }) {
+    let jobRunId = this.controlRuns.get(input.envelope.requestId);
+    if (!jobRunId) {
+      jobRunId = `job:${input.envelope.requestId}`;
+      this.controlRuns.set(input.envelope.requestId, jobRunId);
+      await this.trigger({
+        jobRunId,
+        scheduledFor: "2026-08-02T00:00:00.000Z",
+        source: "user",
+      });
+    }
+    return {
+      kind: "applied" as const,
+      result: {
+        status: "ok" as const,
+        body: { t: "job-run" as const, jobRunId },
+      },
+    };
+  }
+
+  async occurrence(jobRunId: string) {
+    const occurrence = this.runs.find((item) => item.jobRunId === jobRunId);
+    return occurrence ? structuredClone(occurrence) : undefined;
+  }
+
+  async currentState(jobRunId: string) {
+    return this.runs.find((item) => item.jobRunId === jobRunId)?.state;
+  }
+
+  async cancel(input: { readonly jobRunId: string }) {
+    const occurrence = this.runs.find(
+      (item) => item.jobRunId === input.jobRunId,
+    );
+    if (!occurrence) throw new Error("unknown occurrence");
+    occurrence.state = "cancelled";
+    for (const listener of this.listeners) listener();
+    return { state: "cancelled" as const };
+  }
+
+  onStatus(listener: () => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+}
+
+function fixture(input: {
+  journals?: Map<string, MemoryJobJournal>;
+  systemTasks?: ConstructorParameters<typeof AnchorScheduler>[0]["systemTasks"];
+  activateUserJob?: ConstructorParameters<typeof AnchorScheduler>[0]["activateUserJob"];
+} = {}) {
+  const journals = input.journals ?? new Map<string, MemoryJobJournal>();
+  const eventBus = createEventBus<SchedulerEventMap>();
+  const scheduler = new AnchorScheduler({
+    anchorEpoch: 3,
+    deviceId: "anchor-device",
+    admission: {} as ControlAdmissionJournal,
+    eventBus,
+    listTaskIds: async () => [...journals.keys()],
+    journalFor: (taskId) => {
+      let journal = journals.get(taskId);
+      if (!journal) {
+        journal = new MemoryJobJournal();
+        journals.set(taskId, journal);
+      }
+      return journal as unknown as JobJournal;
+    },
+    activateUserJob: input.activateUserJob ?? (async () => {}),
+    systemTasks: input.systemTasks ?? new Map(),
+    pollMs: 60_000,
+    now: () => new Date("2026-08-02T00:00:00.000Z"),
+  });
+  return { scheduler, journals, eventBus };
+}
+
+describe("AnchorScheduler authority", () => {
+  it("publishes the durable manual job identity before returning its result", async () => {
+    const journal = new MemoryJobJournal();
+    let accepted: { taskId: string; jobRunId: string; name: string } | undefined;
+    const { scheduler, eventBus } = fixture({
+      journals: new Map([["task-1", journal]]),
+      activateUserJob: async ({ occurrence }) => {
+        const stored = journal.runs.find(
+          (candidate) => candidate.jobRunId === occurrence.jobRunId,
+        );
+        if (stored) stored.state = "committed";
+      },
+    });
+    journal.definition = {
+      taskId: "task-1",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "daily",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "summarize" },
+        },
+        createdInTurn: "turn-1",
+      },
+    };
+    eventBus.on("scheduler:task-accepted", (event) => {
+      accepted = event;
+    });
+    await scheduler.start();
+    const result = await scheduler.runTask(
+      "task-1",
+      "manual-1",
+    );
+
+    expect(accepted).toEqual({
+      taskId: "task-1",
+      jobRunId: "job:manual-1",
+      name: "daily",
+    });
+    expect(result.status).toBe("ok");
+    await scheduler.stop();
+  });
+
+  it("derives immutable task source from authenticated ingress", async () => {
+    const { scheduler, journals } = fixture();
+    await scheduler.start();
+
+    const created = await scheduler.createTask(
+      {
+        name: "daily",
+        enabled: true,
+        priority: "normal",
+        schedule: { kind: "interval", everyMs: 60_000 },
+        action: { kind: "agent-turn", prompt: "summarize" },
+      },
+      "create-daily",
+      {
+        connectionId: "connection-1",
+        ingress: {
+          kind: "channel",
+          surfacePrincipal: "surface-1",
+          responder: {
+            channelId: "feishu",
+            platformSubject: "user-1",
+          },
+          replyTarget: {
+            channelId: "feishu",
+            to: "chat-1",
+            threadId: "thread-1",
+          },
+          deviceId: "device-1",
+          ingressId: "ingress-1",
+          receivedAt: "2026-08-02T00:00:00.000Z",
+        },
+      },
+    );
+
+    const definition = journals.get(created.id)!.definition!;
+    expect(definition).toMatchObject({
+      definition: {
+        kind: "user",
+        origin: { channelId: "feishu", to: "chat-1", threadId: "thread-1" },
+        interactionResponder: {
+          channelId: "feishu",
+          platformSubject: "user-1",
+        },
+        createdInTurn: "ingress-1",
+      },
+    });
+    await scheduler.stop();
+  });
+
+  it("seeds host-only tasks before opening and restores their host registration", async () => {
+    const systemTasks = new Map([
+      [
+        "__journal-gc",
+        {
+          id: "__journal-gc",
+          name: "journal-gc",
+          handler: "__journal-gc",
+          schedule: { kind: "cron" as const, expr: "0 3 * * *" },
+        },
+      ],
+    ]);
+    const first = fixture({ systemTasks });
+    await first.scheduler.start();
+    expect(first.scheduler.getTask("__journal-gc")).toMatchObject({
+      id: "__journal-gc",
+      system: true,
+      schedule: { kind: "cron", expr: "0 3 * * *" },
+    });
+    expect(first.scheduler.listTasks()).toEqual([]);
+    await first.scheduler.stop();
+
+    const restarted = fixture({ journals: first.journals, systemTasks });
+    await restarted.scheduler.start();
+    expect(restarted.scheduler.getTask("__journal-gc")).toMatchObject({
+      system: true,
+      name: "journal-gc",
+    });
+    expect(first.journals.get("__journal-gc")!.resumeSystemJobs).toHaveBeenCalled();
+    await restarted.scheduler.stop();
+  });
+
+  it("coalesces an offline system interval into one ready-boundary catch-up", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "__journal-gc",
+      taskRevision: 1,
+      state: "enabled",
+      definition: { kind: "system", handler: "__journal-gc" },
+    };
+    journal.runs.push({
+      taskId: "__journal-gc",
+      jobRunId: "previous",
+      scheduledFor: "2026-08-01T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "committed",
+    });
+    const systemTasks = new Map([
+      [
+        "__journal-gc",
+        {
+          id: "__journal-gc",
+          name: "journal-gc",
+          handler: "__journal-gc",
+          schedule: { kind: "interval" as const, everyMs: 60_000 },
+        },
+      ],
+    ]);
+    const { scheduler } = fixture({
+      journals: new Map([["__journal-gc", journal]]),
+      systemTasks,
+    });
+
+    await scheduler.start();
+    await scheduler.tick();
+    await scheduler.tick();
+
+    expect(journal.triggerCalls).toHaveLength(1);
+    expect(journal.triggerCalls[0]?.scheduledFor).toBe(
+      "2026-08-02T00:00:00.000Z",
+    );
+    expect(journal.runSystem).toHaveBeenCalledTimes(1);
+    await scheduler.stop();
+  });
+
+  it("deletes the definition before cancelling every in-flight occurrence", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-1",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "daily",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "summarize" },
+        },
+      },
+    };
+    journal.runs.push(
+      {
+        taskId: "task-1",
+        jobRunId: "queued",
+        scheduledFor: "2026-08-02T00:00:00.000Z",
+        taskRevision: 1,
+        deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+        state: "queued",
+      },
+      {
+        taskId: "task-1",
+        jobRunId: "running",
+        scheduledFor: "2026-08-02T00:01:00.000Z",
+        taskRevision: 1,
+        deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+        state: "running",
+      },
+    );
+    const cancelUserJob = vi.fn(async (input: { jobRunId: string }) => {
+      expect(journal.definition?.state).toBe("deleted");
+      const occurrence = journal.runs.find(
+        (item) => item.jobRunId === input.jobRunId,
+      );
+      if (occurrence) occurrence.state = "cancelled";
+      return { state: "cancelled" };
+    });
+    const journals = new Map([["task-1", journal]]);
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new AnchorScheduler({
+      anchorEpoch: 3,
+      deviceId: "anchor-device",
+      admission: {} as ControlAdmissionJournal,
+      eventBus,
+      listTaskIds: async () => ["task-1"],
+      journalFor: () => journal as unknown as JobJournal,
+      activateUserJob: async () => {},
+      cancelUserJob: cancelUserJob as never,
+      pollMs: 60_000,
+      now: () => new Date("2026-08-02T00:00:00.000Z"),
+    });
+
+    await scheduler.start();
+    await scheduler.deleteTask("task-1", "delete-task-1");
+
+    expect(cancelUserJob.mock.calls.map(([input]) => input.jobRunId).sort()).toEqual([
+      "queued",
+      "running",
+    ]);
+    expect(scheduler.getTask("task-1")).toBeUndefined();
+    await scheduler.stop();
+  });
+});

@@ -10,13 +10,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AuthorityDeliveryPipeline,
   ChannelRegistry,
-  DeliveryPipeline,
+  LegacyDeliveryDrainer,
   OutboxRegistry,
   type PermissionRule,
 } from "@zhixing/core";
@@ -124,7 +124,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       logger: quietLogger,
     });
     expect(stack).toBeDefined();
-    expect(stack.delivery).toBeDefined();
+    expect(stack.authorityDelivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
   });
@@ -290,6 +290,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   }, 120_000);
 
   it("rolls back every partially acquired delivery resource when later startup fails", async () => {
+    await writeFile(resolve(home, "delivery-queue.json"), "[]", "utf8");
     const order: string[] = [];
     const authorityStart = vi
       .spyOn(AuthorityDeliveryPipeline.prototype, "start")
@@ -300,7 +301,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
         order.push("authority");
       });
     const deliveryStop = vi
-      .spyOn(DeliveryPipeline.prototype, "stop")
+      .spyOn(LegacyDeliveryDrainer.prototype, "stop")
       .mockImplementationOnce(async () => {
         order.push("delivery");
       });

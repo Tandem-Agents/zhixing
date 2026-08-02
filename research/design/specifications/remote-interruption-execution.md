@@ -100,6 +100,8 @@
 
 ### 0.5 与主模块、与既有 server 组件的关系
 
+> **S7 scheduler/job 边界：** 下文的进程内 `RunRegistry` 是旧 ephemeral scheduler 路径的历史设计，不再承担生产 job 的取消或恢复权威。当前 `schedule.abortRun(jobRunId)` 只提交到锚点 `JobJournal`，由当前 assignment 的耐久 fence、取消证明和 uncertain 裁决推进；断线不取消，重启继续重驱同一身份。停机先拒绝新入口和 timer 触发，再让已接管执行到安全终态或耐久恢复点，最后释放 transport；不得用同一个全局 abort 同时终止业务执行与可重建恢复尝试。
+
 | 现有组件 | 当前角色 | 本规格上线后 |
 |---------|---------|-------------|
 | 主模块 `InterruptController` / `forkController` | CLI 路径已用 | server 路径同样使用,通过 `createInterruptController({ parent: abortSignal })` 接入外部 signal |

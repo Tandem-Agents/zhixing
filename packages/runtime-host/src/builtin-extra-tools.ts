@@ -29,7 +29,6 @@ import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import {
   createScheduleTool,
   TaskListService,
-  type ScheduleToolOrigin,
   type TaskListStore,
 } from "@zhixing/tools-builtin";
 import {
@@ -50,13 +49,11 @@ import {
  * 装配 extra tools 实例时需要的 per-runtime 上下文。
  *
  * scheduler 用 SchedulerFacade getter —— 交互端可注入 RpcSchedulerFacade（懒接入核心宿主），
- * ephemeral 运行可注入 LocalSchedulerFacade（直调本进程 Scheduler）。getter 形态让工具
- * 不感知"本地实例 vs 远程接入"，也解除 scheduler 延迟装配的顺序依赖。
+ * ephemeral 运行可注入宿主本地 facade。getter 形态让工具不感知
+ * "本地实例 vs 远程接入"，也解除 scheduler 延迟装配的顺序依赖。
  */
 export interface ExtraToolsRuntimeContext {
   scheduler: () => SchedulerFacade;
-  /** 定时任务源 origin（可选）—— 会话实例执行期派生，ephemeral 恒 null */
-  scheduleOrigin?: () => ScheduleToolOrigin | null;
   /**
    * 本次 runtime 的模式 —— 决定追加哪组 workscene 工具（by-construction 隔离：
    * power 物理不持有 main-only 工具）。缺省视为 main（无 workmode
@@ -118,10 +115,7 @@ export function createBuiltinExtraToolsAssembly(
     mcpHub,
 
     assembleTools(ctx: ExtraToolsRuntimeContext): ToolDefinition[] {
-      const scheduleTool = createScheduleTool(
-        ctx.scheduler,
-        ctx.scheduleOrigin,
-      );
+      const scheduleTool = createScheduleTool(ctx.scheduler);
 
       // task_list 工具通过 ALS 拿 conversationId —— `runContextStorage` 由
       // `runtime.run({ conversationId })` 入口在 per-run 范围内注入。ephemeral

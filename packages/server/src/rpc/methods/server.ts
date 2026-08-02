@@ -530,7 +530,6 @@ async function runShutdownStrategy(
     const reason = { kind: "external" as const, origin: "server-shutdown" };
     await Promise.allSettled([
       ctx.server.conversations?.abortAllAndWait(reason, timeoutMs),
-      ctx.server.runRegistry?.abortAllAndWait(reason, timeoutMs),
       flushDeliveryBeforeDeadline(ctx, deadline),
     ]);
     return;
@@ -580,7 +579,8 @@ function currentCancellableWorkCount(
       Math.max(0, Number(conversation.pendingCount ?? 0)),
     0,
   );
-  return conversationWork + (ctx.server.runRegistry?.size() ?? 0);
+  const scheduledWork = ctx.server.scheduler?.activeTaskCount ?? 0;
+  return conversationWork + scheduledWork;
 }
 
 function buildRuntimeControlSnapshot(
@@ -609,7 +609,7 @@ function buildRuntimeControlSnapshot(
     });
   }
 
-  const runCount = ctx.server.runRegistry?.size() ?? 0;
+  const runCount = ctx.server.scheduler?.activeTaskCount ?? 0;
   if (runCount > 0) {
     cancellableWork.push({
       id: "scheduler:runs",

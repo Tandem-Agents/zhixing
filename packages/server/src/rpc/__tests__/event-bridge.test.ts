@@ -46,7 +46,7 @@ describe("event-bridge 内部任务过滤", () => {
     );
   });
 
-  it("started / failed / disabled 同样按 isInternalTask 过滤", async () => {
+  it("accepted / started / failed / disabled 同样按 isInternalTask 过滤", async () => {
     const bus = createEventBus<SchedulerEventMap>();
     const conn = fakeConn();
     createEventBridge({
@@ -55,6 +55,11 @@ describe("event-bridge 内部任务过滤", () => {
       isInternalTask: (taskId) => taskId === "__gc",
     });
 
+    await bus.emit("scheduler:task-accepted", {
+      taskId: "__gc",
+      jobRunId: "job-gc",
+      name: "gc",
+    });
     await bus.emit("scheduler:task-started", {
       taskId: "__gc",
       name: "gc",
@@ -72,6 +77,27 @@ describe("event-bridge 内部任务过滤", () => {
       reason: "x",
     });
     expect(conn.notify).not.toHaveBeenCalled();
+  });
+
+  it("手动运行受理先广播稳定 jobRunId", async () => {
+    const bus = createEventBus<SchedulerEventMap>();
+    const conn = fakeConn();
+    createEventBridge({
+      connections: new Set([conn]),
+      schedulerEventBus: bus,
+    });
+
+    await bus.emit("scheduler:task-accepted", {
+      taskId: "task-1",
+      jobRunId: "job-1",
+      name: "daily",
+    });
+
+    expect(conn.notify).toHaveBeenCalledWith("schedule.accepted", {
+      taskId: "task-1",
+      jobRunId: "job-1",
+      name: "daily",
+    });
   });
 
   it("不传 isInternalTask 时全部广播（向后兼容）", async () => {

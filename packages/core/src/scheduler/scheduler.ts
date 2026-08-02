@@ -34,8 +34,6 @@ import type {
   TaskStore,
 } from "./types.js";
 import type { SchedulerEventMap } from "./events.js";
-import type { IDeliveryPipeline } from "../delivery/types.js";
-import { DEFAULT_SLOT_TTL_MS } from "../delivery/outbox-types.js";
 
 // ─── Scheduler 依赖注入 ───
 
@@ -47,7 +45,6 @@ export interface SchedulerDeps {
   systemHandlers?: Map<string, SystemHandler>;
   eventBus: IEventBus<SchedulerEventMap>;
   logger?: SchedulerLogger;
-  delivery?: IDeliveryPipeline;
 }
 
 // ─── Scheduler ───
@@ -61,7 +58,6 @@ export class Scheduler {
   private readonly logger: SchedulerLogger;
   private readonly now: () => Date;
   private readonly timerLoop: TimerLoop;
-  private readonly delivery?: IDeliveryPipeline;
 
   /** 当前正在执行的任务 ID 集合 */
   private readonly activeTasks = new Set<string>();
@@ -85,7 +81,6 @@ export class Scheduler {
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
     this.logger = deps.logger ?? createDefaultLogger();
-    this.delivery = deps.delivery;
 
     this.timerLoop = new TimerLoop({
       getEnabledTasks: () => this.getEnabledTasks(),
@@ -424,7 +419,6 @@ export class Scheduler {
           summary: result.output?.slice(0, 200),
         });
 
-        await this.enqueueDelivery(task, result);
       } else {
         const errorResult = applyErrorPolicy(task, result.error ?? "Unknown error", this.config, finishTime);
 
@@ -471,87 +465,6 @@ export class Scheduler {
       return result;
     } finally {
       this.activeTasks.delete(task.id);
-    }
-  }
-
-  private async enqueueDelivery(
-    task: ScheduledTask,
-    result: AgentTurnResult,
-  ): Promise<void> {
-    // 内部维护任务静默：结果不触达用户（不投递 channel）——与事件广播边界对内部
-    // 任务的处理一致，由同一 isInternal 谓词推导，不靠「内部任务碰巧没配 delivery」兜底。
-    if (isInternal(task)) {
-      task.state.lastDeliveryStatus = "skipped";
-      return;
-    }
-
-    if (!this.delivery) {
-      task.state.lastDeliveryStatus = "skipped";
-      return;
-    }
-
-    const output = result.output ?? "";
-    if (!output) {
-      task.state.lastDeliveryStatus = "skipped";
-      return;
-    }
-
-    // 1. 显式配置 → 用它
-    let target: { channelId: string; to: string; threadId?: string } | null = null;
-    if (task.delivery?.kind === "channel") {
-      target = { channelId: task.delivery.channel, to: task.delivery.to };
-    }
-
-    // 2. 任务创建时捕获的 origin → 自动回复到来源会话
-    if (!target && task.origin) {
-      target = task.origin;
-    }
-
-    // 3. 无法解析 → 跳过
-    if (!target) {
-      this.logger.info(`[投递] 跳过 "${task.name}" — 无 origin 无显式配置`);
-      task.state.lastDeliveryStatus = "skipped";
-      return;
-    }
-
-    this.logger.info(`[投递] "${task.name}" → ${target.channelId}:${target.to} len=${output.length} text="${output}"`);
-    try {
-      await this.delivery.enqueue({
-        target,
-        content: {
-          text: output,
-          markdown: output,
-        },
-        source: {
-          kind: "scheduler",
-          taskId: task.id,
-          taskName: task.name,
-          // createdInTurn 只在三条件都满足时透传：
-          //
-          // 1) task.createdInTurn 存在（非 channel 创建的任务如 API/CLI 不带）
-          // 2) 是 `once` 任务——周期任务（interval/cron）每次 fire 时，
-          //    创建它的 turn 早已结束，对应 slot 必然 expired 或 orphan，
-          //    带 afterSlot 只会每次 fire 都触发 causal-broken 告警噪音
-          // 3) 创建至今 < SLOT_TTL——对于"明天 9 点"这种远期 once 任务，
-          //    fire 时对应 slot 必已 expired/reaped，透传也是噪音
-          //
-          // 典型受益场景："5 秒后提醒我"——近期创建 + once + slot pending/filled，
-          // afterSlot 真正实现 Phase 3 因果保证（回复先于 task fire）。
-          ...(task.createdInTurn !== undefined &&
-            task.schedule.kind === "once" &&
-            Date.now() - new Date(task.createdAt).getTime() <
-              DEFAULT_SLOT_TTL_MS && {
-              createdInTurn: task.createdInTurn,
-            }),
-        },
-      });
-      await this.delivery.flush();
-      task.state.lastDeliveryStatus = "sent";
-    } catch (err) {
-      task.state.lastDeliveryStatus = "failed";
-      this.logger.warn(`Delivery enqueue failed for task ${task.name}`, {
-        error: err instanceof Error ? err.message : String(err),
-      });
     }
   }
 

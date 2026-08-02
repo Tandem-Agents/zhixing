@@ -37,6 +37,7 @@ import {
 } from "./durable-conversation-interactions.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
+import { createAssignmentScheduleStager } from "./assignment-schedule-stager.js";
 
 const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 
@@ -316,6 +317,11 @@ export class ConversationAssignmentWorker {
             envelope.permissionLease,
           ),
         toolSideEffectObserver: this.options.interactions,
+        stageScheduleMutation: createAssignmentScheduleStager(
+          this.options.ledger,
+          assignmentId,
+          envelope.work.ownerEpoch,
+        ),
         ...(this.options.resourceGovernor
           ? {
               modelCallResourceMeter: {

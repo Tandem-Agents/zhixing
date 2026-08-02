@@ -59,6 +59,7 @@ import {
   type AssignmentSubmissionIdentity,
   type AssignmentSubmissionPreflightPort,
   type ConversationCommitAuthority,
+  type ConversationMutationPublisher,
   type ConversationManager,
   type ManagedSession,
   type PendingConversationInput,
@@ -100,6 +101,7 @@ import {
   isRetryableMeshFailure,
 } from "./remote-obligation-failure.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
+import { createAssignmentScheduleStager } from "./assignment-schedule-stager.js";
 import type {
   FirstPartySurfaceSession,
   LosslessDataPlaneRuntime,
@@ -232,6 +234,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     string,
     AssignmentActivationProof<"conversation">
   >();
+  readonly #assignmentIngress = new Map<string, IngressContext>();
   readonly #assignmentRuntimeBindings = new Map<string, ConversationRuntimeBinding>();
   readonly #schedulingRuns = new Set<string>();
   readonly #scheduledRuns = new Set<string>();
@@ -272,6 +275,19 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #losslessDataPlane:
     | ConversationLosslessDataPlane
     | undefined;
+  #mutationPublisher: ConversationMutationPublisher | undefined;
+  readonly #mutationPublisherProxy: ConversationMutationPublisher = {
+    decideGlobalBatchAtPrefix: (input) =>
+      this.#requiredMutationPublisher().decideGlobalBatchAtPrefix(input),
+    prepareGlobalBatchAtPrefix: (input) => {
+      const publisher = this.#requiredMutationPublisher();
+      return publisher.prepareGlobalBatchAtPrefix?.(input) ?? {
+        outcomes: publisher.decideGlobalBatchAtPrefix(input),
+        records: [],
+      };
+    },
+    apply: (input) => this.#requiredMutationPublisher().apply(input),
+  };
 
   constructor(options: ConversationProtocolRuntimeOptions) {
     this.#authority = options.authority;
@@ -352,6 +368,19 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Conversation lossless data plane is already bound");
     }
     this.#losslessDataPlane = runtime;
+  }
+
+  bindMutationPublisher(publisher: ConversationMutationPublisher): void {
+    if (this.#mutationPublisher && this.#mutationPublisher !== publisher) {
+      throw new Error("Conversation mutation publisher is already bound");
+    }
+    this.#mutationPublisher = publisher;
+  }
+
+  assignmentIngress(assignmentId: string): IngressContext {
+    const ingress = this.#assignmentIngress.get(assignmentId);
+    if (!ingress) throw new Error(`Unknown conversation assignment ${assignmentId}`);
+    return structuredClone(ingress);
   }
 
   executorMeshRole(): {
@@ -1261,6 +1290,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             );
           },
           toolSideEffectObserver: this.#interactions,
+          stageScheduleMutation: createAssignmentScheduleStager(
+            localLedger!,
+            assignmentId,
+            this.#authority.anchorEpoch,
+          ),
           authorizeToolExecution: () =>
             localLedger!.authorizeToolExecution(
               assignmentId,
@@ -2026,6 +2060,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       projection: {
         project: (projection) => this.#manager().project(projection),
       },
+      publisher: this.#mutationPublisherProxy,
       delivery: this.#authority.participant,
       resources: this.#authority.resourceGovernor,
       clock: this.#clock,
@@ -2585,13 +2620,25 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     );
     this.#assignmentCapabilities.set(envelope.assignmentId, capability);
     this.#assignmentActivations.set(envelope.assignmentId, activation);
+    this.#assignmentIngress.set(
+      envelope.assignmentId,
+      structuredClone(envelope.work.ingress),
+    );
   }
 
   #forgetAssignment(assignmentId: string): void {
     this.#assignmentConversations.delete(assignmentId);
     this.#assignmentCapabilities.delete(assignmentId);
     this.#assignmentActivations.delete(assignmentId);
+    this.#assignmentIngress.delete(assignmentId);
     this.#interactions.releaseAssignment(assignmentId);
+  }
+
+  #requiredMutationPublisher(): ConversationMutationPublisher {
+    if (!this.#mutationPublisher) {
+      throw new Error("Conversation global mutation publisher is unavailable");
+    }
+    return this.#mutationPublisher;
   }
 }
 

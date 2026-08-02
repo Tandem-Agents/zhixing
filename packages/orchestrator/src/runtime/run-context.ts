@@ -25,6 +25,7 @@ import type {
   EventBus,
   PostTurnControlIntent,
   TurnOrigin,
+  ScheduleMutationStager,
 } from "@zhixing/core";
 import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 
@@ -64,6 +65,8 @@ export interface RunContext {
     readonly meter: ModelCallResourceMeter;
     readonly nextCallIndex: () => number;
   };
+  /** Durable assignment-local scheduler mutation append port. */
+  stageScheduleMutation?: ScheduleMutationStager;
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();

@@ -624,13 +624,6 @@ async function captureShutdownStrategies() {
         return 1;
       },
     } as never;
-    server.runRegistry = {
-      size: () => 0,
-      abortAllAndWait: async (reason: unknown, timeoutMs: number) => {
-        calls.push({ action: "abort-jobs", reason, timeoutMs });
-        return 1;
-      },
-    } as never;
     const context = { connection: { authenticated: true }, server } as HandlerContext;
     const result = buildServerShutdownMethod().handler(
       { reason: "golden-stop", strategy, timeoutMs: 1_000 },

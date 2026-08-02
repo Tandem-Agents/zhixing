@@ -35,6 +35,7 @@ import {
 } from "./durable-job-interactions.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
+import { createAssignmentScheduleStager } from "./assignment-schedule-stager.js";
 
 const COMMIT_REJECTION_PREFIX = "Job commit rejected";
 const JOB_RECOVERY_PAGE_SIZE = 32;
@@ -59,6 +60,7 @@ export interface JobRuntimeRunOptions {
   ) => Promise<void>;
   readonly authorizeToolExecution: () => Promise<readonly PermissionRule[]>;
   readonly toolSideEffectObserver: ToolSideEffectObserver;
+  readonly stageScheduleMutation: import("@zhixing/core").ScheduleMutationStager;
 }
 
 export interface JobRuntimeHandle {
@@ -423,6 +425,11 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
             envelope.permissionLease,
           ),
         toolSideEffectObserver: this.#interactions,
+        stageScheduleMutation: createAssignmentScheduleStager(
+          this.options.ledger,
+          assignmentId,
+          envelope.work.fence.anchorEpoch,
+        ),
       });
       while (true) {
         const item = await this.#interactions.withBinding(

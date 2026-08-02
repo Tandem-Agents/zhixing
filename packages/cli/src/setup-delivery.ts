@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 创建 OutboxRegistry（顺序层，per-target FIFO）
- * - 保留 scheduler 既有 DeliveryPipeline 生产链
+ * - 仅在发现旧队列文件时启动一次性兼容排空器
  * - 组装 conversation 使用的权威 delivery 生产链
  * - 两条链路共享 per-target FIFO Outbox
  *
@@ -12,11 +12,11 @@
  */
 
 import {
-  DeliveryPipeline,
+  LegacyDeliveryDrainer,
   AuthorityDeliveryPipeline,
   DeliveryAuthority,
   DeliveryTransportRegistry,
-  DEFAULT_DELIVERY_CONFIG,
+  DEFAULT_LEGACY_DELIVERY_DRAINER_CONFIG,
   DEFAULT_AUTHORITY_DELIVERY_CONFIG,
   OutboxRegistry,
   type RuntimeExecutionProfile,
@@ -25,6 +25,7 @@ import {
   channelAuthorityDeliveryTransport,
   type ChannelRegistry,
   type AuthorityDeliveryEventMap,
+  type AuthorityDeliveryStats,
   type DeliveryEventMap,
   type DeliveryStatusNotice,
   type OutboxEvent,
@@ -40,6 +41,7 @@ import type {
   ExecutionManifest,
   ExplicitEnvironmentSelection,
   GlobalStatePort,
+  JobExecutionInstruction,
   SecretStorePort,
   TrustRuleSnapshot,
   WorksceneAppliedResult,
@@ -96,6 +98,7 @@ import type {
   applyDeliveryResolutionControl,
   CreateDeliveryControlEnvelopeInput,
   ConversationAssignmentCredentialPolicy,
+  JobAssignmentCredentialPolicy,
 } from "@zhixing/owner-kernel";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
@@ -145,6 +148,7 @@ export interface AuthorityRuntimeStack {
   readonly workspaceProbe?: WorkspaceProbePort;
   readonly environmentProbeOwner?: EnvironmentProbeOwner;
   readonly globalState?: GlobalStatePort;
+  readonly installSchedulerGlobalState: (state: GlobalStatePort) => void;
   readonly recoverWorksceneState: () => Promise<void>;
   readonly replayWorksceneMutation: (
     requestId: string,
@@ -191,6 +195,24 @@ export interface AuthorityRuntimeStack {
       ) => Promise<ExecutorCapabilitySnapshot>;
     }[];
   }) => Promise<PreparedConversationAssignmentAuthority>;
+  readonly prepareJobAssignment: (input: {
+    readonly instruction: JobExecutionInstruction;
+    readonly capabilities: {
+      readonly tools: readonly string[];
+      readonly mcpServers: readonly string[];
+    };
+    readonly targets?: readonly {
+      readonly executorId: string;
+      readonly deviceId: string;
+      readonly synchronizePermission: (
+        snapshot: TrustRuleSnapshot,
+      ) => Promise<ExecutorCapabilitySnapshot>;
+    }[];
+  }) => Promise<{
+    readonly executorId: string;
+    readonly policy: JobAssignmentCredentialPolicy;
+    readonly environment: EnvironmentRequirement;
+  }>;
   readonly validateConversationRuntimeBinding: (input: {
     readonly assignmentId: string;
     readonly manifest: ExecutionManifest<"conversation">;
@@ -238,8 +260,9 @@ export interface PreparedConversationAssignmentAuthority {
 }
 
 export interface DeliveryStack {
-  delivery: DeliveryPipeline;
   authorityDelivery: AuthorityDeliveryPipeline;
+  stats(): AuthorityDeliveryStats;
+  flush(): Promise<void>;
   authority: DeliveryAuthority;
   authorityLog: FileAuthorityCommitLog;
   artifacts: FileArtifactStore;
@@ -321,6 +344,7 @@ export async function setupAuthorityRuntime(
   let executorLog: FileAuthorityCommitLog | undefined;
   let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
   let worksceneGlobalState: AnchorWorksceneGlobalStateAdapter | undefined;
+  let schedulerGlobalState: GlobalStatePort | undefined;
   let workspaceBindings: WorkspaceBindingCatalog | undefined;
   let workspaceProbe: WorkspaceProbeHandler | undefined;
   const stopStorageMaintenance = async () => {
@@ -1031,6 +1055,97 @@ export async function setupAuthorityRuntime(
         selection.environment,
       );
     };
+    const prepareJobAssignment: AuthorityRuntimeStack["prepareJobAssignment"] = async (
+      input,
+    ) => {
+      if (!anchorEnabled) {
+        throw new Error("Anchor authority role is not enabled on this device");
+      }
+      const requestedTools = input.instruction.tools
+        ? [...new Set(input.instruction.tools)].sort()
+        : [...new Set(input.capabilities.tools)].sort();
+      const requestedMcpServers = [...new Set(input.capabilities.mcpServers)].sort();
+      const permissionPublication = await permissionSnapshots.publishRules({
+        rules: [],
+        signer: key,
+        generatedAt: canonicalTime(clock(), "Permission snapshot time"),
+      });
+      const candidates: ExecutorCapabilitySnapshot[] = [];
+      for (const candidate of input.targets ?? []) {
+        try {
+          const synchronized = await candidate.synchronizePermission(
+            permissionPublication.snapshot,
+          );
+          if (synchronized.descriptor.executorId !== candidate.executorId) {
+            throw new TypeError(
+              "Synchronized executor snapshot belongs to another executor",
+            );
+          }
+          await acceptExecutorSnapshot(synchronized);
+          const accepted = executorCapabilities.snapshotFor(candidate.executorId);
+          if (accepted) candidates.push(accepted);
+        } catch {
+          // A disappearing remote candidate is a recoverable capability gap;
+          // another compatible executor may still accept this occurrence.
+        }
+      }
+      if (localExecutorEnabled) {
+        candidates.push(
+          (await refreshLocalExecutorSnapshot(permissionPublication.highWater))
+            .snapshot,
+        );
+      }
+      const selected = candidates
+        .filter((candidate) =>
+          requestedTools.every((tool) => candidate.descriptor.tools.includes(tool)) &&
+          requestedMcpServers.every((server) =>
+            candidate.descriptor.mcpServers.includes(server),
+          ),
+        )
+        .sort((left, right) =>
+          Number(right.descriptor.executorId === executorId) -
+            Number(left.descriptor.executorId === executorId) ||
+          left.descriptor.executorId.localeCompare(right.descriptor.executorId),
+        )[0];
+      if (!selected) {
+        throw new Error(
+          "Scheduled job is queued because no compatible executor is available",
+        );
+      }
+      const credentialBindings = selected.descriptor.credentialBindings
+        .map((binding) => ({
+          service: binding.service,
+          bindingId: binding.bindingId,
+          revision: binding.revision,
+        }))
+        .sort((left, right) =>
+          left.service.localeCompare(right.service) ||
+          left.bindingId.localeCompare(right.bindingId),
+        );
+      return {
+        executorId: selected.descriptor.executorId,
+        policy: {
+          credentialTtlMs: 24 * 60 * 60 * 1_000,
+          manifestRequires: {
+            ...selected.inventory.configVersions,
+            ...selected.inventory.assetVersions,
+          },
+          manifestCapabilities: {
+            protocolVersion: selected.descriptor.protocolVersion,
+            tools: requestedTools,
+            mcpServers: requestedMcpServers,
+            credentialBindings,
+          },
+          permissionSnapshot: permissionPublication.snapshot,
+          budget: { maxCalls: 64, maxTokens: 256_000 },
+        },
+        environment: {
+          credentialBindings: credentialBindings.map(
+            ({ service, bindingId }) => ({ service, bindingId }),
+          ),
+        },
+      };
+    };
     const performLocalConversationEnvironmentPreflight = async (
       manifest: ExecutionManifest<"conversation">,
     ): Promise<{
@@ -1263,6 +1378,12 @@ export async function setupAuthorityRuntime(
       );
       return result.ok ? undefined : result.error;
     };
+    const routedGlobalState = worksceneGlobalState
+      ? createGlobalStateRouter(
+          worksceneGlobalState,
+          () => schedulerGlobalState,
+        )
+      : undefined;
     return {
       anchorEpoch,
       deviceId: key.deviceId,
@@ -1318,7 +1439,13 @@ export async function setupAuthorityRuntime(
       workspaceBindingRecovery: workspaceBindings,
       workspaceProbe,
       environmentProbeOwner,
-      globalState: worksceneGlobalState,
+      globalState: routedGlobalState,
+      installSchedulerGlobalState: (state) => {
+        if (schedulerGlobalState) {
+          throw new Error("Scheduler global state owner is already installed");
+        }
+        schedulerGlobalState = state;
+      },
       recoverWorksceneState: async () => {
         await worksceneGlobalState?.recoverPendingDeletions();
       },
@@ -1379,6 +1506,7 @@ export async function setupAuthorityRuntime(
         for (const deviceId of deviceIds) authorizedDeviceIds.add(deviceId);
       },
       prepareConversationAssignment,
+      prepareJobAssignment,
       validateConversationRuntimeBinding,
       preflightLocalConversationEnvironment,
       takeLocalConversationEnvironmentPreflight,
@@ -1403,6 +1531,53 @@ interface NormalizedExecutorReadiness {
     "revision"
   >[];
   readonly credentialGeneration: string | null;
+}
+
+function createGlobalStateRouter(
+  workscene: GlobalStatePort,
+  scheduler: () => GlobalStatePort | undefined,
+): GlobalStatePort {
+  const routeMutation = (
+    mutation: Parameters<GlobalStatePort["mutate"]>[0],
+  ): GlobalStatePort => {
+    if (!mutation.kind.startsWith("schedule-")) return workscene;
+    const owner = scheduler();
+    if (!owner) {
+      throw new Error("Scheduler authority is not ready");
+    }
+    return owner;
+  };
+  return {
+    read: (query, context) => {
+      if (query.kind !== "schedule-list") {
+        return workscene.read(query, context);
+      }
+      const owner = scheduler();
+      if (!owner) {
+        throw new Error("Scheduler authority is not ready");
+      }
+      return owner.read(query, context);
+    },
+    mutate: ((
+      mutation:
+        | import("@zhixing/core/contracts").GlobalControlMutation
+        | import("@zhixing/core/contracts").GlobalStagedMutation,
+      context: import("@zhixing/core/contracts").AuthorityCallContext,
+    ) =>
+      routeMutation(mutation).mutate(
+        mutation,
+        context,
+      )) as GlobalStatePort["mutate"],
+  };
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fsp.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeExecutorReadiness(
@@ -1616,7 +1791,7 @@ export async function setupDelivery(
   const statusListeners = new Set<
     (notice: DeliveryStatusNotice) => void | Promise<void>
   >();
-  let delivery: DeliveryPipeline | undefined;
+  let legacyDrainer: LegacyDeliveryDrainer | undefined;
   let authorityDelivery: AuthorityDeliveryPipeline | undefined;
   const startupRollback = options.startupRollback ?? new StartupRollback();
   const startupCleanup = startupRollback.register(
@@ -1624,7 +1799,7 @@ export async function setupDelivery(
     async () => {
       statusListeners.clear();
       await authorityDelivery?.stop();
-      await delivery?.stop();
+      await legacyDrainer?.stop();
       await outboxRegistry.dispose();
     },
   );
@@ -1646,21 +1821,24 @@ export async function setupDelivery(
       controlAdmission,
     } = options.authorityRuntime;
 
-    delivery = new DeliveryPipeline({
-      sender,
-      eventBus: createEventBus<DeliveryEventMap>(),
-      config: {
-        ...DEFAULT_DELIVERY_CONFIG,
-        queueFilePath: path.join(zhixingHome, "delivery-queue.json"),
-      },
-      logger: {
-        debug: () => {},
-        info: (msg: string) => logger.info(`[delivery] ${msg}`),
-        warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
-        error: (msg: string) => logger.error(`[delivery] ${msg}`),
-      },
-    });
-    await delivery.start();
+    const legacyQueuePath = path.join(zhixingHome, "delivery-queue.json");
+    if (await pathExists(legacyQueuePath)) {
+      legacyDrainer = new LegacyDeliveryDrainer({
+        sender,
+        eventBus: createEventBus<DeliveryEventMap>(),
+        config: {
+          ...DEFAULT_LEGACY_DELIVERY_DRAINER_CONFIG,
+          queueFilePath: legacyQueuePath,
+        },
+        logger: {
+          debug: () => {},
+          info: (msg: string) => logger.info(`[legacy-delivery] ${msg}`),
+          warn: (msg: string) => logger.warn(`[legacy-delivery] ${msg}`),
+          error: (msg: string) => logger.error(`[legacy-delivery] ${msg}`),
+        },
+      });
+      await legacyDrainer.start();
+    }
 
     const transports = new DeliveryTransportRegistry();
     transports.register(channelAuthorityDeliveryTransport(sender));
@@ -1691,8 +1869,19 @@ export async function setupDelivery(
     await authorityDelivery.start();
 
     return {
-      delivery,
       authorityDelivery,
+      stats: () => {
+        const authorityStats = authorityDelivery!.stats();
+        return {
+          ...authorityStats,
+          pending:
+            authorityStats.pending + (legacyDrainer?.stats().queued ?? 0),
+        };
+      },
+      flush: async () => {
+        await legacyDrainer?.flush();
+        await authorityDelivery!.flush();
+      },
       authority,
       authorityLog,
       artifacts,

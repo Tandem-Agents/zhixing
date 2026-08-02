@@ -5,7 +5,7 @@ export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
 export { createMemoryTool } from "./memory.js";
-export { createScheduleTool, type ScheduleToolOrigin } from "./schedule.js";
+export { createScheduleTool } from "./schedule.js";
 export {
   TaskListService,
   type TaskListStore,

@@ -9,6 +9,7 @@
  */
 
 import type { DeliveryTarget } from "../channels/types.js";
+import type { SecretRef } from "../contracts/identity.js";
 import type { AbortReason } from "../interrupt/types.js";
 
 // ─── 任务优先级 ───
@@ -66,8 +67,8 @@ export type TaskAction =
 
 export type TaskDelivery =
   | { kind: "none" }
-  | { kind: "channel"; channel: string; to: string }
-  | { kind: "webhook"; url: string; headers?: Record<string, string> };
+  | { kind: "channel"; channel: string; to: string; threadId?: string }
+  | { kind: "webhook"; endpoint: SecretRef };
 
 // ─── 任务运行时状态 ───
 
@@ -90,6 +91,8 @@ export interface TaskState {
 
 export interface ScheduledTask {
   id: string;
+  /** Anchor-owned optimistic-concurrency revision exposed by the read projection. */
+  taskRevision?: number;
   name: string;
   description?: string;
   enabled: boolean;

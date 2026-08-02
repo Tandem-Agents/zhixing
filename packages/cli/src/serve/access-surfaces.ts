@@ -100,6 +100,9 @@ const authorityRuntimeSurface: AccessSurface = {
     });
     ctx.startupCleanups.authorityRuntime = authorityRuntime.startupCleanup;
     ctx.authorityRuntime = authorityRuntime;
+    if (ctx.enabledRoles.includes("anchor")) {
+      ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
+    }
     if (ctx.enabledRoles.includes("executor")) {
       const admin = authorityRuntime.workspaceBindingAdmin;
       const recovery = authorityRuntime.workspaceBindingRecovery;
@@ -236,6 +239,9 @@ const meshSurface: AccessSurface = {
       bootstrapStore: bootstrap.bootstrapStore,
       authority: ctx.authorityRuntime,
       protocol: ctx.conversationProtocol,
+      ...(ctx.jobRelayObligations
+        ? { jobRelays: ctx.jobRelayObligations }
+        : {}),
       ...(ctx.enabledRoles.includes("executor")
         ? {
             executor: {
@@ -773,7 +779,7 @@ const deliverySurface: AccessSurface = {
       ctx.executionStatusHub?.publish(notice);
     });
     ctx.conversationProtocol?.bindDeliveryDrain(() =>
-      deliveryStack.authorityDelivery.flush(),
+      deliveryStack.flush(),
     );
     if (ctx.inboundRouter) {
       ctx.inboundRouter.setOutboxRegistry(deliveryStack.outboxRegistry);

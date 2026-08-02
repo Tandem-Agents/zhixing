@@ -498,6 +498,12 @@ type OrchestratorEvents = {
 
 ## 四、Scheduler（定时任务调度器）
 
+### 4.0 当前生产合同（S7 第 26 单元）
+
+当前实现以锚点 `AnchorScheduler + JobJournal` 为唯一任务与 job 权威：任务 CRUD、手动触发、timer、取消、结果、状态和投递义务都由耐久日志驱动，`scheduler.json` 仅作兼容查询投影。用户 job 经 assignment 协议派发到 local/mesh executor；system job 由锚点封闭注册并在本地执行。对话或 job 执行中的 schedule 写必须暂存并随所属提交原子生效，失败、取消和未裁决 uncertain 均不得外泄。
+
+手动触发先耐久受理并发布稳定 `jobRunId`，等待式 facade 仅从该 job 的权威状态与结果投影完成。关停顺序固定为拒绝新入口、停止 timer 触发、收敛或耐久化已接管执行、最后释放 transport。下文基于旧 `Scheduler`、`RunRegistry` 或直接 runtime 的设计细节属于历史实现说明，与本节冲突时不得作为当前生产合同。
+
 ### 4.1 定位
 
 Scheduler 是 Server 模式的核心子系统，负责定时任务的创建、调度、执行和投递。
@@ -731,6 +737,8 @@ Level 1 完整执行规格（概念、竞品调研、架构决策、里程碑拆
 > 本节早期版本曾给出"双层过滤（Scheduler + Delivery Pipeline）"的设计。M32 Faithful Delivery 契约明文废弃 Delivery 层 filter 机制，原设计的第二层已失效。完整决策推演见 active-hours-execution.md。
 
 ### 4.7 Delivery Pipeline（投递管线）
+
+> **S7 当前边界：** 新投递已由权威 Delivery 日志、outbox 和状态目录接管。旧 `DeliveryPipeline`、`DeliveryQueue` 与磁盘 store 不再是生产写入面，只允许通过一次性 drainer 排空既有记录；记录全部接管后删除旧文件，损坏或未知结构必须 fail-closed。以下内容仅描述历史实现及其演进背景。
 
 > **实现偏差：** 核心架构一致，接口细节有演化。`DeliverySender` 取代直接 ChannelRegistry 依赖（可插拔发送）；重试语义区分 channel-not-ready（不消耗 attempts）与 send 失败（指数退避）。详见 [implementation-roadmap.md Step 12](../implementation-roadmap.md)。
 >

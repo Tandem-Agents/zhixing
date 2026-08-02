@@ -462,6 +462,7 @@
     },
     {
       "definition": [
+        "requestId?: string;",
         "runId?: string;"
       ],
       "kind": "interface",
@@ -469,12 +470,13 @@
     },
     {
       "definition": [
+        "requestId?: string;",
         "name?: string;",
         "description?: string;",
         "enabled?: boolean;",
         "priority?: ScheduledTask[\"priority\"];",
         "schedule?: ScheduledTask[\"schedule\"];",
-        "action?: ScheduledTask[\"action\"];",
+        "action?: TaskSpec[\"action\"];",
         "delivery?: ScheduledTask[\"delivery\"];"
       ],
       "kind": "interface",
@@ -482,6 +484,7 @@
     },
     {
       "definition": [
+        "requestId?: string;",
         "id?: string;"
       ],
       "kind": "interface",
@@ -489,6 +492,7 @@
     },
     {
       "definition": [
+        "requestId?: string;",
         "id?: string;"
       ],
       "kind": "interface",
@@ -496,8 +500,9 @@
     },
     {
       "definition": [
+        "requestId?: string;",
         "id?: string;",
-        "patch?: Partial< Pick< ScheduledTask, \"name\" | \"description\" | \"enabled\" | \"priority\" | \"schedule\" | \"action\" | \"delivery\" > >;"
+        "patch?: TaskPatch;"
       ],
       "kind": "interface",
       "name": "ScheduleUpdateParams"
@@ -1075,7 +1080,7 @@
     },
     {
       "kind": "import",
-      "references": 20,
+      "references": 19,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1201,7 +1206,7 @@
     },
     {
       "kind": "import",
-      "references": 81,
+      "references": 80,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1231,7 +1236,7 @@
     },
     {
       "kind": "import",
-      "references": 7,
+      "references": 9,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1279,13 +1284,13 @@
     },
     {
       "kind": "type-import",
-      "references": 68,
+      "references": 72,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 14,
+      "references": 15,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/executor"
     },
@@ -1471,13 +1476,13 @@
     },
     {
       "kind": "import",
-      "references": 29,
+      "references": 39,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 20,
+      "references": 27,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
@@ -1531,7 +1536,7 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing/orchestrator"
     },
@@ -1543,7 +1548,7 @@
     },
     {
       "kind": "type-import",
-      "references": 7,
+      "references": 9,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing/core"
     },
@@ -1561,7 +1566,7 @@
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 1,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing/tools-builtin"
     },
@@ -1615,7 +1620,7 @@
     },
     {
       "kind": "import",
-      "references": 7,
+      "references": 8,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
     },

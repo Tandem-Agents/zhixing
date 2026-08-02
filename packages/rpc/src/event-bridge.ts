@@ -74,6 +74,17 @@ function wireScheduler(
   const subs: Array<() => void> = [];
 
   subs.push(
+    bus.on("scheduler:task-accepted", (e) => {
+      if (isInternal(e.taskId)) return;
+      broadcast("schedule.accepted", {
+        taskId: e.taskId,
+        jobRunId: e.jobRunId,
+        name: e.name,
+      });
+    }),
+  );
+
+  subs.push(
     bus.on("scheduler:task-started", (e) => {
       if (isInternal(e.taskId)) return;
       broadcast("schedule.started", { taskId: e.taskId, name: e.name });

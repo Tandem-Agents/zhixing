@@ -359,7 +359,7 @@
       "emptyRequest": {},
       "method": "schedule.abortRun",
       "outcome": {
-        "code": -32603,
+        "code": -32602,
         "kind": "error",
         "shape": {
           "code": "number",
@@ -1035,14 +1035,6 @@
       "calls": [
         {
           "action": "abort-conversations",
-          "reason": {
-            "kind": "external",
-            "origin": "server-shutdown"
-          },
-          "timeoutMs": 1000
-        },
-        {
-          "action": "abort-jobs",
           "reason": {
             "kind": "external",
             "origin": "server-shutdown"

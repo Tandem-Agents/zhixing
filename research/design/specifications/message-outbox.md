@@ -12,6 +12,14 @@
 
 ---
 
+## 当前生产边界（S7 第 26 单元）
+
+Outbox 仍负责同一目标的用户可见顺序与因果依赖，但新消息的耐久事实源已经统一为权威 Delivery 日志及其可重建状态目录。Scheduler/job 提交只在同一权威提交中产生结果和 delivery intent，投影消费者再把待办送入 Outbox；不得由 scheduler 直接调用 runtime 或另写旧 delivery queue。
+
+旧 `DeliveryPipeline` / `DeliveryQueue` / store 只保留一次性排空入口：按旧 itemId 幂等接管到权威 Delivery，成功后删除原记录，全部为空才删除旧文件；它们不得再接收新写入，也不与权威日志形成双事实源。本文后续将 DeliveryPipeline 描述为持续生产组件的段落属于历史设计，冲突时以本节为准。
+
+---
+
 ## 一、问题定义
 
 ### 1.1 观察到的现象

@@ -68,6 +68,7 @@ export function createAgentJobRuntimePort(
                 onProtocolEvent: (event) => options.onProtocolEvent(event),
                 authorizeToolExecution: options.authorizeToolExecution,
                 toolSideEffectObserver: options.toolSideEffectObserver,
+                stageScheduleMutation: options.stageScheduleMutation,
               }),
             )
             .then(

@@ -115,7 +115,6 @@ describe("setupDelivery authority production path", () => {
       logger: quietLogger,
     });
     expect(stack).toBeDefined();
-    expect(stack.delivery).toBeDefined();
     expect(stack.authorityDelivery).toBeDefined();
     expect(stack.authority).toBeDefined();
     expect(stack.authorityLog).toBeDefined();

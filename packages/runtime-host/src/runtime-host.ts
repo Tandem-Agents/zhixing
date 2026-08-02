@@ -10,9 +10,8 @@
  *   发放 ephemeral 实例,同享资产层。实例所有权归调用方(会话适配层 / 任务执行
  *   器负责 dispose),host 只管装配。
  *
- * 对话级差异经执行期上下文取,不做装配期定制:schedule 工具的投递 origin 在工具
- * 执行时从 RunContext 的 turnOrigin 派生——同一装配闭包服务全部对话。对话身份
- * 不承载外部 App 来源,来源只作为回复和通知目标。
+ * 对话级差异经执行期上下文取,不做装配期定制。schedule 工具只提交用户可控
+ * TaskSpec；origin、responder 与创建 turn 由 owner 从已认证 ingress 反绑。
  *
  * onRuntimeCreated 是发放后的统一装配后置钩子(turn-context provider 注册等):
  * 会话与 ephemeral 两条发放路径都经此,杜绝"某入口漏注册"类不对齐。
@@ -20,7 +19,6 @@
 
 import {
   createAgentRuntime,
-  runContextStorage,
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
   type AgentRuntimeLifecycle,
@@ -28,13 +26,13 @@ import {
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
-import type { SchedulerFacade, TurnOrigin } from "@zhixing/core";
+import type { SchedulerFacade } from "@zhixing/core";
 import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { IConfirmationBroker } from "@zhixing/core";
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
-import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
+import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
 
 /** 从 createAgentRuntime 公共契约推导类型——避免依赖 orchestrator 内部路径 */
 type DecorateRunBusFn = NonNullable<CreateAgentRuntimeOptions["decorateRunBus"]>;
@@ -95,31 +93,16 @@ export interface RuntimeHostOptions {
   worksceneDirectory?: () => WorksceneToolDirectory;
 }
 
-/** 从 turn 来源解析定时任务投递目标；无来源目标时不做隐式通知。 */
-export function resolveScheduleOriginFromTurnOrigin(
-  turnOrigin: TurnOrigin | undefined,
-): ScheduleToolOrigin | null {
-  return turnOrigin?.target ? { ...turnOrigin.target } : null;
-}
-
 export class RuntimeHost {
-  /**
-   * 会话实例共用的 origin 派生闭包——执行期从 RunContext 读当前 run 的
-   * turnOrigin,装配期不绑定任何对话或接入面。
-   */
-  private readonly conversationScheduleOrigin: () => ScheduleToolOrigin | null;
+  private readonly executionScheduler: ExecutionSchedulerFacade;
 
   constructor(private readonly opts: RuntimeHostOptions) {
-    this.conversationScheduleOrigin = () => {
-      return resolveScheduleOriginFromTurnOrigin(
-        runContextStorage.getStore()?.turnOrigin,
-      );
-    };
+    this.executionScheduler = new ExecutionSchedulerFacade(opts.scheduler);
   }
 
-  /** 发放一个 main 会话 runtime 实例——投递 origin 执行期按当前 turn 来源派生。 */
+  /** 发放一个 main 会话 runtime 实例。 */
   async createConversationRuntime(workspace?: string | null): Promise<AgentRuntime> {
-    return this.assemble(this.conversationScheduleOrigin, {
+    return this.assemble({
       withWorkmodeTools: true,
       runtimeKind: "conversation",
       ...(workspace === undefined ? {} : { workspace }),
@@ -136,7 +119,7 @@ export class RuntimeHost {
     readonly absolutePath: string | null;
   }): Promise<AgentRuntime> {
     const { scene, absolutePath } = input;
-    return this.assemble(this.conversationScheduleOrigin, {
+    return this.assemble({
       withWorkmodeTools: true,
       workscene: {
         workspace: absolutePath,
@@ -159,7 +142,7 @@ export class RuntimeHost {
    * workmode 工具组。
    */
   async createEphemeralRuntime(): Promise<AgentRuntime> {
-    return this.assemble(() => null, { runtimeKind: "ephemeral" });
+    return this.assemble({ runtimeKind: "ephemeral" });
   }
 
   /**
@@ -167,7 +150,7 @@ export class RuntimeHost {
    * assignment；不继承会话身份、工作场景或渠道接入面状态。
    */
   async createJobRuntime(options: JobAgentRuntimeOptions): Promise<AgentRuntime> {
-    return this.assemble(() => null, {
+    return this.assemble({
       runtimeKind: "ephemeral",
       job: options,
     });
@@ -196,14 +179,12 @@ export class RuntimeHost {
     };
     addExtra({
       scheduler: this.opts.scheduler,
-      scheduleOrigin: () => null,
       worksceneDirectory: this.opts.worksceneDirectory,
     });
-    addExtra({ scheduler: this.opts.scheduler, scheduleOrigin: () => null });
+    addExtra({ scheduler: this.opts.scheduler });
     if (this.opts.worksceneDirectory) {
       addExtra({
         scheduler: this.opts.scheduler,
-        scheduleOrigin: () => null,
         spec: {
           kind: "workscene",
           sceneId: "capability-catalog",
@@ -221,7 +202,6 @@ export class RuntimeHost {
   }
 
   private async assemble(
-    scheduleOrigin: () => ScheduleToolOrigin | null,
     opts?: {
       /** 会话路径装 workmode 工具组(LLM 进出场景意图的产生面) */
       withWorkmodeTools?: boolean;
@@ -244,8 +224,7 @@ export class RuntimeHost {
       .map(({ server }) => server.serverId)
       .sort();
     let extraTools = this.opts.extraTools.assembleTools({
-      scheduler: this.opts.scheduler,
-      scheduleOrigin,
+      scheduler: () => this.executionScheduler,
       spec: workscene?.spec,
       worksceneDirectory: opts?.withWorkmodeTools
         ? this.opts.worksceneDirectory

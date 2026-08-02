@@ -109,24 +109,6 @@ export interface DeliverySender {
   isReady(channelId: string): boolean;
 }
 
-// ─── 入队参数 ───
-
-export interface EnqueueParams {
-  target: DeliveryTarget;
-  content: OutboundContent;
-  priority?: DeliveryPriority;
-  source?: DeliverySource;
-  maxAttempts?: number;
-}
-
-// ─── Pipeline 接口 ───
-
-export interface IDeliveryPipeline {
-  enqueue(params: EnqueueParams): Promise<string>;
-  flush(): Promise<void>;
-  stats(): DeliveryStats;
-}
-
 // ─── 权威投递流的只读投影与执行适配 ───
 
 export interface DeliveryOpenFact {

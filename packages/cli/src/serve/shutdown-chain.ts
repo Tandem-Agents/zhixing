@@ -23,7 +23,7 @@ import type {
   ProcessLockPaths,
   ExitReason,
 } from "@zhixing/server";
-import type { ChannelRegistry, Scheduler } from "@zhixing/core";
+import type { ChannelRegistry, SchedulerBackend } from "@zhixing/core";
 import type { McpHub } from "@zhixing/mcp";
 import type {
   AuthorityRuntimeStack,
@@ -43,7 +43,7 @@ export interface ShutdownChainResources {
   stateFile?: ServerStateFile;
   heartbeatTimerRef: { current: NodeJS.Timeout | null };
   authorityRuntime?: AuthorityRuntimeStack;
-  scheduler?: Scheduler;
+  scheduler?: SchedulerBackend;
   channels?: ChannelRegistry;
   deliveryStack?: DeliveryStack;
   /** MCP 连接层 hub —— 关闭所有 MCP server 连接 / stdio 子进程。 */
@@ -106,8 +106,8 @@ export function registerTailCleanup(
  *
  * 注册顺序（LIFO 执行由下到上）：
  *   1. heartbeat.clear          （LIFO 执行 ⑥ —— 停 heartbeat timer）
- *   2. deliveryStack.stop       （⑤ —— 关投递栈）
- *   3. channels.dispose         （④ —— 断通道）
+ *   2. channels.dispose         （⑤ —— 权威投递收口后断通道）
+ *   3. deliveryStack.stop       （④ —— 先排空权威投递栈）
  *   4. mcpHub.dispose           （③ —— 关 MCP 连接 / stdio 子进程）
  *   5. scheduler.stop           （② —— 停调度器）
  *   6. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
@@ -137,18 +137,18 @@ export function registerCoreCleanup(
     const t = resources.heartbeatTimerRef.current;
     if (t) clearInterval(t);
   });
-  if (resources.deliveryStack) {
-    registry.register("deliveryStack.stop", async () => {
-      const cleanup = resources.startupCleanups?.deliveryStack;
-      if (cleanup) await cleanup.run();
-      else await resources.deliveryStack!.stop();
-    });
-  }
   if (resources.channels) {
     registry.register("channels.dispose", async () => {
       const cleanup = resources.startupCleanups?.channels;
       if (cleanup) await cleanup.run();
       else await resources.channels!.dispose();
+    });
+  }
+  if (resources.deliveryStack) {
+    registry.register("deliveryStack.stop", async () => {
+      const cleanup = resources.startupCleanups?.deliveryStack;
+      if (cleanup) await cleanup.run();
+      else await resources.deliveryStack!.stop();
     });
   }
   if (resources.mcpHub) {

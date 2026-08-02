@@ -1,0 +1,671 @@
+import type {
+  IEventBus,
+  ScheduledTask,
+  SchedulerEventMap,
+  SystemHandler,
+} from "@zhixing/core";
+import type {
+  AuthorityCallContext,
+  AuthorityCapability,
+  DataPlaneTicket,
+  ExecutionRef,
+  JobOccurrence,
+  JobExecutionInstruction,
+  OwnerControlGrant,
+  TaskDefinition,
+} from "@zhixing/core/contracts";
+import {
+  MAX_CONTROL_LEASE_TTL_MS,
+  assertPrincipalAllowsAuthorityMethod,
+  ownerControlRequestDigest,
+  protocolDigest,
+  validateAuthorityCapability,
+} from "@zhixing/core/protocol";
+import type { JsonTaskStore } from "@zhixing/core";
+import {
+  AnchorScheduler,
+  InProcessJobDispatcher,
+  JobAssignmentAuthority,
+  JobJournal,
+  SchedulerJobCommitParticipant,
+  SchedulerConversationMutationPublisher,
+  assignmentReservationId,
+  type AssignmentSubmissionAuthorizer,
+  type InProcessDispatchContextFactory,
+  type JobIngressAuthorizer,
+  type PendingJobDispatch,
+  type SystemJobHandler,
+} from "@zhixing/owner-kernel";
+import type { AuthorityRuntimeStack } from "../setup-delivery.js";
+import type {
+  JobRelayObligationDirectory,
+  JobRelayOpening,
+} from "./channel-interaction-coordinator.js";
+import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import type { ExecutorJobOwner } from "./executor-job-owner.js";
+import type { JobStatusDirectory } from "./job-status-directory.js";
+import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
+import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
+
+const OWNER_CONTEXT_RENEWAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
+
+export interface AnchorSchedulerRuntimeOptions {
+  readonly authority: AuthorityRuntimeStack;
+  readonly protocol: ConversationProtocolRuntime;
+  readonly eventBus: IEventBus<SchedulerEventMap>;
+  readonly compatibilityStore: JsonTaskStore;
+  readonly jobStatus: JobStatusDirectory;
+  readonly jobRelays: JobRelayObligationDirectory;
+  readonly openManualJobSurface: (input: {
+    readonly executorId: string;
+    readonly assignmentId: string;
+    readonly ref: Extract<ExecutionRef, { readonly execution: "job" }>;
+    readonly ticket: DataPlaneTicket;
+    readonly surfacePrincipal: string;
+  }) => Promise<void>;
+  readonly localJobOwner?: ExecutorJobOwner;
+  readonly mesh: () => MeshRuntimeAssembly | undefined;
+  readonly capabilities: {
+    readonly tools: readonly string[];
+    readonly mcpServers: readonly string[];
+  };
+  readonly systemHandlers: ReadonlyMap<string, SystemHandler>;
+  readonly systemTasks: NonNullable<
+    import("@zhixing/owner-kernel").AnchorSchedulerOptions["systemTasks"]
+  >;
+  readonly migrateLegacyDelivery?: import("@zhixing/owner-kernel").AnchorSchedulerOptions["migrateLegacyDelivery"];
+  readonly now?: () => Date;
+  readonly onError?: (error: Error) => void;
+}
+
+/**
+ * Product composition for the anchor-owned scheduler and job authority.
+ *
+ * The compatibility JSON store is read once for migration and thereafter is
+ * only a projection. All execution goes through the existing assignment
+ * ledger, executor job owner and durable submission protocol.
+ */
+export class AnchorSchedulerRuntime {
+  readonly scheduler: AnchorScheduler;
+  readonly #options: AnchorSchedulerRuntimeOptions;
+  readonly #issuer: JobAssignmentAuthority;
+  readonly #commitParticipant: SchedulerJobCommitParticipant;
+  readonly #journals = new Map<string, JobJournal>();
+  readonly #executorByAssignment = new Map<string, string>();
+  readonly #artifactAuthorityByAssignment = new Map<
+    string,
+    AssignmentArtifactAuthority
+  >();
+  readonly #relayDisposers = new Map<string, () => void>();
+  readonly #statusDisposers = new Map<string, () => void>();
+  readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
+  readonly #pendingManualSurfaces = new Map<
+    string,
+    { readonly journal: JobJournal; readonly pending: PendingJobDispatch }
+  >();
+  readonly #openedManualSurfaces = new Set<string>();
+  readonly #legacyTasks: readonly ScheduledTask[];
+  readonly #clock: () => string;
+  #manualSurfacesReady = false;
+
+  private constructor(
+    options: AnchorSchedulerRuntimeOptions,
+    legacyTasks: readonly ScheduledTask[],
+  ) {
+    this.#options = options;
+    this.#legacyTasks = legacyTasks;
+    this.#clock = () => (options.now?.() ?? new Date()).toISOString();
+    this.#issuer = new JobAssignmentAuthority({
+      signer: options.authority.signer,
+      verifier: options.authority.verifier,
+      snapshotFor: (executorId) =>
+        options.authority.executorCapabilities.snapshotFor(executorId),
+      clock: this.#clock,
+    });
+    this.scheduler = new AnchorScheduler({
+      anchorEpoch: options.authority.anchorEpoch,
+      deviceId: options.authority.deviceId,
+      admission: options.authority.controlAdmission,
+      eventBus: options.eventBus,
+      listTaskIds: () => this.#listTaskIds(),
+      journalFor: (taskId) => this.#journal(taskId),
+      activateUserJob: (input) => this.#activate(input),
+      recoverUserJobs: (journal) => this.#recoverJournal(journal),
+      cancelUserJob: (input) => this.#cancel(input),
+      legacyTasks: () => Promise.resolve(this.#legacyTasks),
+      ...(options.migrateLegacyDelivery
+        ? { migrateLegacyDelivery: options.migrateLegacyDelivery }
+        : {}),
+      systemTasks: options.systemTasks,
+      onProjection: (tasks) => options.compatibilityStore.save([...tasks]),
+      ...(options.now ? { now: options.now } : {}),
+      ...(options.onError ? { onError: options.onError } : {}),
+    });
+    this.#commitParticipant = new SchedulerJobCommitParticipant({
+      definitionFor: (taskId) => this.scheduler.getDefinition(taskId),
+      applied: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
+    });
+    options.protocol.bindMutationPublisher(
+      new SchedulerConversationMutationPublisher({
+        anchorEpoch: options.authority.anchorEpoch,
+        definitionFor: (taskId) => this.scheduler.getDefinition(taskId),
+        refresh: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
+        sourceForAssignment: (assignmentId) => {
+          const ingress = options.protocol.assignmentIngress(assignmentId);
+          const origin =
+            ingress.kind === "channel"
+              ? ingress.replyTarget
+              : ingress.turnOrigin?.target;
+          return {
+            ...(origin ? { origin: structuredClone(origin) } : {}),
+            ...(ingress.kind === "channel"
+              ? { interactionResponder: structuredClone(ingress.responder) }
+              : {}),
+            createdInTurn: ingress.ingressId,
+          };
+        },
+      }),
+    );
+  }
+
+  static async create(
+    options: AnchorSchedulerRuntimeOptions,
+  ): Promise<AnchorSchedulerRuntime> {
+    const legacyTasks = await options.compatibilityStore.load();
+    return new AnchorSchedulerRuntime(options, legacyTasks);
+  }
+
+  async start(): Promise<void> {
+    await this.scheduler.start();
+  }
+
+  async stop(): Promise<void> {
+    await this.scheduler.stop();
+    await Promise.all(
+      [...this.#dispatchers.values()].map((dispatcher) =>
+        dispatcher.stopRecoveryLoop(),
+      ),
+    );
+    for (const dispose of this.#relayDisposers.values()) dispose();
+    for (const dispose of this.#statusDisposers.values()) dispose();
+    this.#relayDisposers.clear();
+    this.#statusDisposers.clear();
+    this.#dispatchers.clear();
+    this.#pendingManualSurfaces.clear();
+    this.#openedManualSurfaces.clear();
+  }
+
+  /** Called after the RPC server exists, so recovered manual surfaces can resume. */
+  async resumeManualJobSurfaces(): Promise<void> {
+    this.#manualSurfacesReady = true;
+    for (const { journal, pending } of this.#pendingManualSurfaces.values()) {
+      await this.#openManualSurface(journal, pending);
+    }
+  }
+
+  async #activate(input: {
+    readonly journal: JobJournal;
+    readonly definition: TaskDefinition & {
+      readonly definition: Extract<TaskDefinition["definition"], { kind: "user" }>;
+    };
+    readonly occurrence: JobOccurrence;
+  }): Promise<void> {
+    const instruction: JobExecutionInstruction = {
+      kind: "agent-turn",
+      prompt: input.definition.definition.spec.action.prompt,
+      ...(input.definition.definition.spec.action.model
+        ? { model: input.definition.definition.spec.action.model }
+        : {}),
+      ...(input.definition.definition.spec.action.tools
+        ? { tools: [...input.definition.definition.spec.action.tools] }
+        : {}),
+    };
+    const prepared = await this.#options.authority.prepareJobAssignment({
+      instruction,
+      capabilities: this.#options.capabilities,
+      ...(await this.#remoteTargets()),
+    });
+    const attempt = 1;
+    const assignmentId = `assignment:${protocolDigest("JobAssignmentIdentity", 1, {
+      taskId: input.occurrence.taskId,
+      jobRunId: input.occurrence.jobRunId,
+      taskRevision: input.occurrence.taskRevision,
+      attempt,
+    })}`;
+    const context = resourceContext(assignmentId, this.#clock());
+    await this.#options.authority.resourceGovernor.enqueueRoot(
+      assignmentReservationId(assignmentId),
+      { kind: "job", id: input.occurrence.jobRunId, attempt },
+      { admissionClass: "scheduler", entry: "schedule-trigger" },
+      context,
+    );
+    const resourceLease =
+      await this.#options.authority.resourceGovernor.prepareAssignmentRoot<"job">(
+        {
+          assignmentId,
+          executorId: prepared.executorId,
+          workload: { kind: "job", id: input.occurrence.jobRunId, attempt },
+          scopeBinding: {
+            kind: "job",
+            taskId: input.occurrence.taskId,
+            anchorEpoch: this.#options.authority.anchorEpoch,
+          },
+          budget: prepared.policy.budget,
+        },
+        { admissionClass: "scheduler", entry: "schedule-trigger" },
+        context,
+      );
+    const unsigned = this.#issuer.issue({
+      assignmentId,
+      executorId: prepared.executorId,
+      anchorEpoch: this.#options.authority.anchorEpoch,
+      attempt,
+      occurrence: input.occurrence,
+      definition: input.definition,
+      instruction,
+      environment: prepared.environment,
+      resourceLease,
+      policy: prepared.policy,
+    });
+    this.#executorByAssignment.set(assignmentId, prepared.executorId);
+    const pending = await input.journal.assign({
+      taskId: input.occurrence.taskId,
+      jobRunId: input.occurrence.jobRunId,
+      anchorEpoch: this.#options.authority.anchorEpoch,
+      assignmentId,
+      executorId: prepared.executorId,
+      manifest: unsigned.manifest,
+      materialize: () => unsigned,
+    });
+    await this.#rememberPending(input.journal, pending);
+    const dispatcher = this.#dispatcher(input.journal, pending);
+    await dispatcher.dispatchPending();
+    if (this.#manualSurfacesReady) {
+      await this.#openManualSurface(input.journal, pending);
+    }
+  }
+
+  async #cancel(input: {
+    readonly journal: JobJournal;
+    readonly jobRunId: string;
+    readonly requestId: string;
+    readonly context: AuthorityCallContext;
+  }) {
+    const candidate = (await input.journal.assignmentsAwaitingRecovery()).find(
+      (entry) => entry.dispatch.envelope.work.jobRunId === input.jobRunId,
+    );
+    if (!candidate) return input.journal.cancel(input);
+    await this.#rememberPending(input.journal, candidate.dispatch);
+    return this.#dispatcher(input.journal, candidate.dispatch).cancel(input);
+  }
+
+  async #recoverJournal(journal: JobJournal): Promise<void> {
+    const candidates = await journal.assignmentsAwaitingRecovery();
+    for (const candidate of candidates) {
+      await this.#rememberPending(journal, candidate.dispatch);
+      const dispatcher = this.#dispatcher(journal, candidate.dispatch);
+      await dispatcher.dispatchPending();
+      await dispatcher.recoverStarted();
+      await dispatcher.recoverCancellations();
+      dispatcher.startRecoveryLoop();
+    }
+  }
+
+  async #rememberPending(
+    journal: JobJournal,
+    pending: PendingJobDispatch,
+  ): Promise<void> {
+    const capability = pending.envelope.capabilities[0] as
+      | AuthorityCapability<"job">
+      | undefined;
+    if (!capability) throw new Error("Job assignment has no authority capability");
+    this.#executorByAssignment.set(
+      pending.assignmentId,
+      pending.envelope.executorId,
+    );
+    this.#artifactAuthorityByAssignment.set(pending.assignmentId, {
+      capability,
+      activation: pending.activation,
+    });
+    const route = await journal.interactionRoute(pending.assignmentId);
+    if (route.kind === "surface-ticket") {
+      this.#pendingManualSurfaces.set(pending.assignmentId, { journal, pending });
+      const dispose = this.#relayDisposers.get(pending.assignmentId);
+      dispose?.();
+      this.#relayDisposers.delete(pending.assignmentId);
+      return;
+    }
+    if (!this.#relayDisposers.has(pending.assignmentId)) {
+      const opening: JobRelayOpening = {
+        assignmentId: pending.assignmentId,
+        ref: {
+          execution: "job",
+          taskId: pending.envelope.work.taskId,
+          jobRunId: pending.envelope.work.jobRunId,
+          anchorEpoch: this.#options.authority.anchorEpoch,
+        },
+        executorId: pending.envelope.executorId,
+        controlLeaseId: pending.envelope.controlLease.controlLeaseId,
+        journal,
+        answers: this.#answersFor(pending.envelope.executorId),
+      };
+      this.#relayDisposers.set(
+        pending.assignmentId,
+        this.#options.jobRelays.register(opening),
+      );
+    }
+  }
+
+  async #openManualSurface(
+    journal: JobJournal,
+    pending: PendingJobDispatch,
+  ): Promise<void> {
+    if (this.#openedManualSurfaces.has(pending.assignmentId)) return;
+    const route = await journal.interactionRoute(pending.assignmentId);
+    if (route.kind !== "surface-ticket") return;
+    const facts = await journal.dataPlaneTicketFacts();
+    const revoked = new Set(facts.revokedTicketIds);
+    const existing = facts.issued
+      .filter(
+        (ticket) =>
+          ticket.assignmentId === pending.assignmentId &&
+          ticket.kind === "run-interact" &&
+          ticket.surfacePrincipal === route.ingress.surfacePrincipal &&
+          !revoked.has(ticket.ticketId),
+      )
+      .sort((left, right) => left.issuedAt.localeCompare(right.issuedAt))
+      .at(-1);
+    const now = Date.parse(this.#clock());
+    const ticket =
+      existing && Date.parse(existing.expiry) > now
+        ? existing
+        : await journal.issueDataPlaneTicket({
+            ticketId: `ticket:${protocolDigest(
+              "ManualJobInteractionTicketIdentity",
+              1,
+              {
+                assignmentId: pending.assignmentId,
+                surfacePrincipal: route.ingress.surfacePrincipal,
+                generation: facts.issued.filter(
+                  (candidate) =>
+                    candidate.assignmentId === pending.assignmentId &&
+                    candidate.kind === "run-interact",
+                ).length + 1,
+              },
+            )}`,
+            assignmentId: pending.assignmentId,
+            surfacePrincipal: route.ingress.surfacePrincipal,
+            kind: "run-interact",
+            ttlMs: 24 * 60 * 60 * 1_000,
+            ...(existing ? { replacesTicketId: existing.ticketId } : {}),
+          });
+    await this.#options.openManualJobSurface({
+      executorId: pending.envelope.executorId,
+      assignmentId: pending.assignmentId,
+      ref: {
+        execution: "job",
+        taskId: pending.envelope.work.taskId,
+        jobRunId: pending.envelope.work.jobRunId,
+        anchorEpoch: this.#options.authority.anchorEpoch,
+      },
+      ticket,
+      surfacePrincipal: route.ingress.surfacePrincipal,
+    });
+    this.#openedManualSurfaces.add(pending.assignmentId);
+  }
+
+  #dispatcher(
+    journal: JobJournal,
+    pending: PendingJobDispatch,
+  ): InProcessJobDispatcher {
+    const key = pending.assignmentId;
+    const current = this.#dispatchers.get(key);
+    if (current) return current;
+    const local = pending.envelope.executorId === this.#options.authority.executorId;
+    const dispatcher = new InProcessJobDispatcher({
+      enabled: true,
+      journal,
+      executor: local
+        ? this.#options.protocol.executorLedger()
+        : this.#requiredMesh().jobExecutorFor(
+            pending.envelope.executorId,
+            (assignmentId) => this.#artifactAuthority(assignmentId),
+          ),
+      contexts: jobDispatchContexts({
+        signer: this.#options.authority.signer,
+        ownerDeviceId: this.#options.authority.deviceId,
+        pending,
+        controlLease: () => this.#issuer.controlLeaseFor({
+          assignmentId: pending.assignmentId,
+          taskId: pending.envelope.work.taskId,
+          anchorEpoch: this.#options.authority.anchorEpoch,
+          at: this.#clock(),
+        }),
+      }),
+      cancellationSubmission: { submitCancellation: async () => false },
+      bundleSubmission: {
+        submitSealedBundle: async () => {
+          throw new Error("Executor job owner retains sealed-bundle recovery");
+        },
+      },
+      ...(local
+        ? {
+            onDispatchAccepted: (envelope) =>
+              this.#requiredLocalOwner().accept(envelope),
+            onCancelAccepted: (assignmentId) =>
+              this.#requiredLocalOwner().cancelAccepted(assignmentId),
+          }
+        : {}),
+      onRecoveryError: (error) => this.#options.onError?.(error),
+    });
+    this.#dispatchers.set(key, dispatcher);
+    return dispatcher;
+  }
+
+  #answersFor(executorId: string) {
+    return executorId === this.#options.authority.executorId
+      ? this.#requiredLocalOwner()
+      : this.#requiredMesh().jobInteractionForExecutor(executorId);
+  }
+
+  #requiredLocalOwner(): ExecutorJobOwner {
+    if (!this.#options.localJobOwner) {
+      throw new Error("Selected local executor has no job owner");
+    }
+    return this.#options.localJobOwner;
+  }
+
+  #requiredMesh(): MeshRuntimeAssembly {
+    const mesh = this.#options.mesh();
+    if (!mesh) throw new Error("Selected remote executor transport is unavailable");
+    return mesh;
+  }
+
+  async #remoteTargets() {
+    const mesh = this.#options.mesh();
+    if (!mesh) return {};
+    return { targets: await mesh.jobExecutionTargets() };
+  }
+
+  #artifactAuthority(assignmentId: string): Promise<AssignmentArtifactAuthority> {
+    const authority = this.#artifactAuthorityByAssignment.get(assignmentId);
+    if (!authority) {
+      return Promise.reject(new Error(`Unknown job assignment ${assignmentId}`));
+    }
+    return Promise.resolve(authority);
+  }
+
+  #journal(taskId: string): JobJournal {
+    let journal = this.#journals.get(taskId);
+    if (journal) return journal;
+    journal = new JobJournal({
+      taskId,
+      anchorEpoch: this.#options.authority.anchorEpoch,
+      log: this.#options.authority.authorityLog,
+      artifacts: this.#options.authority.artifacts,
+      signer: this.#options.authority.signer,
+      verifier: this.#options.authority.verifier,
+      snapshotFor: (executorId) =>
+        this.#options.authority.executorCapabilities.snapshotFor(executorId),
+      submission: submissionAuthorizer(
+        this.#executorByAssignment,
+        this.#options.authority.verifier,
+      ),
+      ingress: schedulerIngressAuthorizer(),
+      delivery: this.#options.authority.participant,
+      commitParticipant: this.#commitParticipant,
+      resources: this.#options.authority.resourceGovernor,
+      systemResources: this.#options.authority.resourceGovernor,
+      systemHandlers: adaptSystemHandlers(this.#options.systemHandlers),
+      clock: this.#clock,
+    });
+    this.#journals.set(taskId, journal);
+    this.#statusDisposers.set(
+      taskId,
+      this.#options.jobStatus.register(taskId, journal),
+    );
+    return journal;
+  }
+
+  async #listTaskIds(): Promise<readonly string[]> {
+    const streams = (await this.#options.authority.authorityLog.readAll())
+      .flatMap((commit) => commit.entries)
+      .map((entry) => entry.stream)
+      .filter((stream) => stream.startsWith("job:"))
+      .map((stream) => stream.slice("job:".length));
+    return [...new Set(streams)].sort();
+  }
+}
+
+function adaptSystemHandlers(
+  handlers: ReadonlyMap<string, SystemHandler>,
+): ReadonlyMap<import("@zhixing/core/contracts").SystemHandlerId, SystemJobHandler> {
+  return new Map(
+    [...handlers].map(([id, handler]) => [
+      id as import("@zhixing/core/contracts").SystemHandlerId,
+      async ({ params }) => {
+        const result = await handler(
+          params && typeof params === "object" && !Array.isArray(params)
+            ? (params as Record<string, unknown>)
+            : undefined,
+        );
+        if (result.status !== "ok") {
+          throw new Error(result.summary ?? `System job ${id} failed`);
+        }
+        return result.summary ? { summary: result.summary } : {};
+      },
+    ]),
+  );
+}
+
+function submissionAuthorizer(
+  executorByAssignment: ReadonlyMap<string, string>,
+  verifier: AnchorSchedulerRuntimeOptions["authority"]["verifier"],
+): AssignmentSubmissionAuthorizer {
+  const authenticate: AssignmentSubmissionAuthorizer["authenticate"] = (
+    context,
+    identity,
+  ) => {
+    if (context.principal.kind !== "assignment") {
+      throw new Error("Job submission requires an assignment capability");
+    }
+    assertPrincipalAllowsAuthorityMethod("assignment", identity.method);
+    const capability = validateAuthorityCapability(
+      context.principal.capability,
+      verifier,
+    );
+    if (
+      capability.assignmentId !== identity.assignmentId ||
+      capability.executorId !== executorByAssignment.get(identity.assignmentId) ||
+      !capability.methods.includes(identity.method) ||
+      Date.parse(context.deadlineAt) > Date.parse(capability.expiry)
+    ) {
+      throw new Error("Assignment capability does not authorize this job submission");
+    }
+  };
+  return {
+    authenticate,
+    authorize(context, authorization) {
+      authenticate(context, authorization);
+    },
+  };
+}
+
+function schedulerIngressAuthorizer(): JobIngressAuthorizer {
+  return {
+    authorize(context, action, definition) {
+      if (action.startsWith("system-") && context.principal.kind !== "host") {
+        throw new Error("Only the anchor host may control system jobs");
+      }
+      if (
+        action.startsWith("user-") &&
+        context.principal.kind !== "host" &&
+        context.principal.kind !== "surface"
+      ) {
+        throw new Error("User jobs require an authenticated host or surface");
+      }
+      if (
+        action.startsWith("system-") !==
+        (definition.definition.kind === "system")
+      ) {
+        throw new Error("Job control action does not match the task domain");
+      }
+    },
+  };
+}
+
+function jobDispatchContexts(input: {
+  readonly signer: AnchorSchedulerRuntimeOptions["authority"]["signer"];
+  readonly ownerDeviceId: string;
+  readonly pending: PendingJobDispatch;
+  readonly controlLease: () => import("@zhixing/core/contracts").ControlLease;
+}): InProcessDispatchContextFactory {
+  return {
+    create(assignmentId, method, request) {
+      const controlLease = input.controlLease();
+      const scope = controlLease.authority;
+      const now = Date.now();
+      const issuedAt = new Date(now).toISOString();
+      const expiry = controlLease.expiry;
+      const requestDigest = ownerControlRequestDigest({
+        method,
+        assignmentId,
+        authority: scope,
+        requestId: request.requestId,
+        body: request.body,
+      });
+      const payload = {
+        v: 1 as const,
+        assignmentId,
+        scope,
+        methods: [method],
+        callerDeviceId: input.ownerDeviceId,
+        requestId: request.requestId,
+        requestDigest,
+        controlLease,
+        issuedAt,
+        expiry,
+      };
+      const grant: OwnerControlGrant = {
+        ...payload,
+        signature: input.signer.sign("OwnerControlGrant", 1, payload),
+      };
+      return {
+        principal: { kind: "owner-control", grant },
+        requestId: request.requestId,
+        deadlineAt: expiry,
+      };
+    },
+  };
+}
+
+function resourceContext(
+  assignmentId: string,
+  now: string,
+): AuthorityCallContext {
+  return {
+    principal: { kind: "host", component: "anchor-scheduler" },
+    requestId: `resource:${assignmentId}`,
+    deadlineAt: new Date(Date.parse(now) + OWNER_CONTEXT_RENEWAL_MS).toISOString(),
+  };
+}

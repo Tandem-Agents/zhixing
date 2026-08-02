@@ -20,7 +20,6 @@
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
 import { isInternal } from "@zhixing/core";
 import type {
-  DeliveryTarget,
   SchedulerFacade,
   ScheduledTask,
   TaskSchedule,
@@ -60,11 +59,8 @@ const SCHEDULE_SYSTEM_PROMPT_HINTS: readonly string[] = [
  * CLI 中 session/scheduler 的循环初始化依赖：
  * tool 在 session 创建时注入，scheduler 在 session 之后创建。
  */
-export type ScheduleToolOrigin = DeliveryTarget;
-
 export function createScheduleTool(
   getFacade: () => SchedulerFacade,
-  getOrigin?: () => ScheduleToolOrigin | null,
 ): ToolDefinition {
   return {
     name: "schedule",
@@ -159,13 +155,13 @@ export function createScheduleTool(
         const facade = getFacade();
         switch (action) {
           case "create":
-            return await handleCreate(facade, input, getOrigin, context);
+            return await handleCreate(facade, input, context);
           case "list":
             return await handleList(facade);
           case "update":
-            return await handleUpdate(facade, input);
+            return await handleUpdate(facade, input, context);
           case "delete":
-            return await handleDelete(facade, input);
+            return await handleDelete(facade, input, context);
           case "run":
             return await handleRun(facade, input);
           default:
@@ -184,7 +180,6 @@ export function createScheduleTool(
 async function handleCreate(
   facade: SchedulerFacade,
   input: Record<string, unknown>,
-  getOrigin?: () => ScheduleToolOrigin | null,
   context?: ToolExecutionContext,
 ): Promise<ToolResult> {
   const name = input.name as string;
@@ -200,13 +195,6 @@ async function handleCreate(
     return { content: `Invalid schedule: missing parameters for kind '${scheduleKind}'`, isError: true };
   }
 
-  const origin = getOrigin?.() ?? undefined;
-
-  // 若本次工具调用发生在 channel turn 内，把 turnId 捕获到 task 上——
-  // 任务 fire 后其投递 entry 会以 createdInTurn 派生 afterSlot，确保回复先于 task fire。
-  // REPL/ephemeral 上下文无 turnId，createdInTurn 保持 undefined。
-  const createdInTurn = context?.turnId;
-
   const task = await facade.create({
     name,
     description: (input.description as string) ?? undefined,
@@ -214,9 +202,7 @@ async function handleCreate(
     priority: (input.priority as TaskPriority) ?? "normal",
     schedule,
     action: { kind: "agent-turn", prompt },
-    origin,
-    ...(createdInTurn !== undefined && { createdInTurn }),
-  });
+  }, scheduleMutationContext(context));
 
   // ADR-007 Phase 3 之后不再主动调 commitToUser——详见文件顶部的演化记。
   // LLM 根据此 ToolResult 自然叙述"任务已创建"，Phase 3 slot 保证 task fire
@@ -241,6 +227,7 @@ async function handleList(facade: SchedulerFacade): Promise<ToolResult> {
 async function handleUpdate(
   facade: SchedulerFacade,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ): Promise<ToolResult> {
   const id = input.id as string;
   if (!id) return { content: "Missing required parameter: id", isError: true };
@@ -256,18 +243,19 @@ async function handleUpdate(
     if (schedule) patch.schedule = schedule;
   }
 
-  const task = await facade.update(id, patch);
+  const task = await facade.update(id, patch, scheduleMutationContext(context));
   return { content: formatTask(task, "Task updated successfully") };
 }
 
 async function handleDelete(
   facade: SchedulerFacade,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ): Promise<ToolResult> {
   const id = input.id as string;
   if (!id) return { content: "Missing required parameter: id", isError: true };
 
-  await facade.delete(id);
+  await facade.delete(id, scheduleMutationContext(context));
   return { content: `Task ${id} deleted.` };
 }
 
@@ -310,6 +298,12 @@ function buildSchedule(
     default:
       return null;
   }
+}
+
+function scheduleMutationContext(
+  context: ToolExecutionContext | undefined,
+): { operationId?: string } | undefined {
+  return context?.toolCallId ? { operationId: context.toolCallId } : undefined;
 }
 
 function formatTask(task: ScheduledTask, header: string): string {

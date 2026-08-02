@@ -104,6 +104,7 @@ export function createOwnerRuntimeAdapter(
           toolSideEffectObserver: options?.toolSideEffectObserver,
           authorizeToolExecution: options?.authorizeToolExecution,
           modelCallResourceMeter: options?.modelCallResourceMeter,
+          stageScheduleMutation: options?.stageScheduleMutation,
         })
         .then(
           (runResult) => {

@@ -639,6 +639,9 @@ describe("user job durable protocol", () => {
     await receive(scheduled);
     await scheduled.journal.acknowledgeDispatch(ASSIGNMENT_ID);
     await expect(
+      scheduled.journal.interactionRoute(ASSIGNMENT_ID),
+    ).resolves.toEqual({ kind: "no-interactive-surface" });
+    await expect(
       scheduled.journal.issueDataPlaneTicket({
         ticketId: "scheduled-ticket",
         assignmentId: ASSIGNMENT_ID,
@@ -674,6 +677,12 @@ describe("user job durable protocol", () => {
       ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
     );
     await manual.journal.acknowledgeDispatch(ASSIGNMENT_ID);
+    await expect(
+      manual.journal.interactionRoute(ASSIGNMENT_ID),
+    ).resolves.toMatchObject({
+      kind: "surface-ticket",
+      ingress: { surfacePrincipal: source.ingress.surfacePrincipal },
+    });
     await expect(
       manual.journal.issueDataPlaneTicket({
         ticketId: "manual-foreign-interact",
@@ -1511,6 +1520,9 @@ describe("user job durable protocol", () => {
       meta: {},
     };
     await harness.ledger.requestInteraction(ASSIGNMENT_ID, interactionRequest);
+    await expect(
+      harness.journal.interactionRoute(ASSIGNMENT_ID),
+    ).resolves.toEqual({ kind: "channel-grant" });
     const preparation = await harness.journal.prepareChannelRelayRequest(requested);
     if (preparation.kind !== "prepared") {
       throw new Error("channel interaction unexpectedly had no responder");

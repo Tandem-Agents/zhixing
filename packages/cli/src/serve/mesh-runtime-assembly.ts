@@ -9,6 +9,7 @@ import type {
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
   RunExecutorPort,
+  RunSubmissionPort,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
@@ -17,13 +18,17 @@ import {
 } from "@zhixing/mesh/bootstrap";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { RuntimeFactory } from "@zhixing/owner-kernel";
+import type {
+  AssignmentSubmissionPreflightPort,
+  RuntimeFactory,
+} from "@zhixing/owner-kernel";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
+import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
 import type {
@@ -52,6 +57,7 @@ import {
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type { ExecutorJobOwner } from "./executor-job-owner.js";
+import type { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentOperationsRouter } from "./assignment-operations-router.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import {
@@ -65,6 +71,62 @@ import {
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
+function routedSubmissionMeshRole(
+  protocol: ConversationProtocolRuntime,
+  jobRelays: JobRelayObligationDirectory | undefined,
+): {
+  readonly submission: RunSubmissionPort;
+  readonly submissionGuard: AssignmentSubmissionPreflightPort;
+} {
+  const conversation = protocol.submissionMeshRole();
+  const jobJournal = (context: AuthorityCallContext, assignmentId: string) => {
+    const principal = context.principal;
+    if (
+      principal.kind !== "assignment" ||
+      principal.capability.scope.execution !== "job" ||
+      principal.capability.assignmentId !== assignmentId
+    ) {
+      throw new TypeError("Job submission requires its bound job assignment capability");
+    }
+    const journal = jobRelays?.submissionFor(assignmentId);
+    if (!journal) {
+      throw new JobInteractionRuntimeUnavailableError(
+        `Job submission owner is not registered for ${assignmentId}`,
+      );
+    }
+    return journal;
+  };
+  const isJob = (context: AuthorityCallContext) =>
+    context.principal.kind === "assignment" &&
+    context.principal.capability.scope.execution === "job";
+  return {
+    submission: {
+      reportStarted: (assignmentId, context) =>
+        isJob(context)
+          ? jobJournal(context, assignmentId).reportStarted(assignmentId, context)
+          : conversation.submission.reportStarted(assignmentId, context),
+      submitBundle: (bundle, context) =>
+        isJob(context)
+          ? jobJournal(context, bundle.assignmentId).submitBundle(bundle, context)
+          : conversation.submission.submitBundle(bundle, context),
+      submitCancelProof: (assignmentId, proof, context) =>
+        isJob(context)
+          ? jobJournal(context, assignmentId).submitCancelProof(assignmentId, proof, context)
+          : conversation.submission.submitCancelProof(assignmentId, proof, context),
+      mirrorInteractions: (assignmentId, batch, context) =>
+        isJob(context)
+          ? jobJournal(context, assignmentId).mirrorInteractions(assignmentId, batch, context)
+          : conversation.submission.mirrorInteractions(assignmentId, batch, context),
+    },
+    submissionGuard: {
+      preflightSubmission: (context, identity) =>
+        isJob(context)
+          ? jobJournal(context, identity.assignmentId).preflightSubmission(context, identity)
+          : conversation.submissionGuard.preflightSubmission(context, identity),
+    },
+  };
+}
+
 export interface MeshRuntimeAssemblyOptions {
   readonly zhixingHome: string;
   readonly trust: HomeTrustRecord;
@@ -75,6 +137,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly authority: AuthorityRuntimeStack;
   readonly protocol?: ConversationProtocolRuntime;
+  readonly jobRelays?: JobRelayObligationDirectory;
   readonly executor?: {
     readonly ledger: ConversationAssignmentLedger;
     readonly runtimeFactory: RuntimeFactory;
@@ -181,7 +244,7 @@ export class MeshRuntimeAssembly {
         }
       : undefined;
     const anchorRole = roles.has("anchor")
-      ? options.protocol!.submissionMeshRole()
+      ? routedSubmissionMeshRole(options.protocol!, options.jobRelays)
       : undefined;
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
@@ -455,6 +518,34 @@ export class MeshRuntimeAssembly {
   jobInteractionForExecutor(executorId: string): JobInteractionMeshClient {
     const deviceId = this.#activeExecutorDeviceId(executorId);
     return new JobInteractionMeshClient(this.connections.client(deviceId));
+  }
+
+  /** Remote job candidates use the same authenticated executor links as conversations. */
+  async jobExecutionTargets(): Promise<readonly {
+    readonly executorId: string;
+    readonly deviceId: string;
+    readonly synchronizePermission: RemoteConversationExecutionTarget["synchronizePermission"];
+  }[]> {
+    const directory = this.#remoteDirectory();
+    return (await directory.candidates()).map((target) => ({
+      executorId: target.executorId,
+      deviceId: target.deviceId,
+      synchronizePermission: (snapshot) => target.synchronizePermission(snapshot),
+    }));
+  }
+
+  /** Owner-side job dispatcher for one authenticated remote executor. */
+  jobExecutorFor(
+    executorId: string,
+    authorizationFor: (
+      assignmentId: string,
+    ) => Promise<AssignmentArtifactAuthority>,
+  ): RunExecutorPort {
+    const deviceId = this.#activeExecutorDeviceId(executorId);
+    return this.#composition.executorPort(deviceId, {
+      verifier: this.options.authority.verifier,
+      authorizationFor,
+    });
   }
 
   workspaceProbeForDevice(deviceId: string): EnvironmentProbeMeshClient {

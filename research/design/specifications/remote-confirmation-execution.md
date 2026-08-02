@@ -147,6 +147,8 @@ ConfirmationBroker（per-AgentRuntime，既有）
 
 ### 2.3 依赖既有能力
 
+> **S7 scheduler/job 边界：** scheduler 不再以无身份的 ephemeral runtime 作为确认归属。手动 `job-run` 的首次耐久 admitted 记录携带已认证 ingress，只有该来源 surface 可以获得绑定 `taskId + jobRunId + assignmentId` 的 run-interact 数据面票据；timer admitted 明确无 ingress，不签发数据面票据，只能使用任务定义冻结的渠道 responder 经 channel challenge/grant 应答。路由必须直接按耐久来源判别，禁止先试一种凭证再回退另一种。job 的镜像、grant、取消和关闭义务均归 `JobJournal`，重启后按同一身份重驱。
+
 | 既有能力 | 落地位置 | 复用方式 |
 |---------|---------|---------|
 | `ConfirmationBroker` | `packages/core/src/confirmation/broker.ts` | `onRequest` / `resolve` / `cancelAll` / `listPending` 直接用；**扩展 `onResolved` 事件** |

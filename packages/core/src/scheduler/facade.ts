@@ -1,23 +1,42 @@
 /**
- * SchedulerFacade —— 消费者与「本地 Scheduler 实例 vs 经 RPC 接入宿主」之间的解耦缝。
+ * SchedulerFacade —— 消费者与「宿主本地权威 vs 经 RPC 接入宿主」之间的解耦缝。
  *
  * 所有调度消费者（schedule 工具、turn-context、cli 命令）只依赖此接口，不直接 new Scheduler、
  * 也不直接碰 RPC：
- * - LocalSchedulerFacade —— 直调本进程 Scheduler（核心宿主内部用）。
+ * - LocalSchedulerFacade —— 直调本进程 SchedulerBackend（核心宿主内部用）。
  * - RpcSchedulerFacade —— 经 RPC 接入核心宿主（cli 用，在 cli 包实现，叠加 ensure）。
  */
 
 import type { IEventBus } from "../events/index.js";
 import type { SchedulerEventMap } from "./events.js";
-import type { Scheduler } from "./scheduler.js";
 import { isInternal } from "./status-summary.js";
-import type { AgentTurnResult, ScheduledTask } from "./types.js";
+import type { AgentTurnResult, ScheduledTask, TaskAction } from "./types.js";
+import type { ScheduleWriteMutation } from "../contracts/state.js";
+import type { IngressContext } from "../contracts/protocol.js";
 
 /** 任务视图 —— 当前等于完整 ScheduledTask；保留为命名缝，未来可换投影类型而不动消费者签名。 */
 export type TaskView = ScheduledTask;
 
 /** 创建任务的入参（id / state / 时间戳由内核生成）。 */
-export type TaskSpec = Omit<ScheduledTask, "id" | "state" | "createdAt" | "updatedAt">;
+export type TaskSpec = Omit<
+  ScheduledTask,
+  | "id"
+  | "taskRevision"
+  | "state"
+  | "createdAt"
+  | "updatedAt"
+  | "origin"
+  | "createdInTurn"
+  | "action"
+> & {
+  readonly action: Extract<TaskAction, { readonly kind: "agent-turn" }>;
+};
+
+/** Authenticated source for a direct scheduler control request. */
+export interface SchedulerControlSource {
+  readonly ingress: IngressContext;
+  readonly connectionId: string;
+}
 
 /** 调度任务定义在运行时合同中的唯一别名。 */
 export type ScheduleTaskSpec = TaskSpec;
@@ -25,7 +44,7 @@ export type ScheduleTaskSpec = TaskSpec;
 /** 更新任务的补丁 —— 只允许改这些字段（与 Scheduler.updateTask 对齐）。 */
 export type TaskPatch = Partial<
   Pick<
-    ScheduledTask,
+    TaskSpec,
     "name" | "description" | "enabled" | "priority" | "schedule" | "action" | "delivery"
   >
 >;
@@ -35,6 +54,7 @@ export type TaskPatch = Partial<
  * completed 合并成功/失败（status 区分），与 RPC 事件桥的语义一致，便于消费者一处处理。
  */
 export type SchedulerFacadeEvent =
+  | { kind: "accepted"; taskId: string; jobRunId: string; name: string }
   | { kind: "started"; taskId: string; name: string }
   | {
       kind: "completed";
@@ -52,15 +72,58 @@ export type SchedulerFacadeEvent =
 
 export type SchedulerFacadeEventHandler = (event: SchedulerFacadeEvent) => void;
 
+/** Stable identity of one schedule tool mutation inside a durable execution. */
+export interface ScheduleMutationContext {
+  readonly operationId?: string;
+}
+
+/** Assignment-scoped append-only mutation port inherited by nested tool calls. */
+export type ScheduleMutationStager = (input: {
+  readonly mutation: ScheduleWriteMutation;
+  readonly operationId?: string;
+}) => Promise<{ readonly seq: number; readonly taskId?: string }>;
+
+/**
+ * Host-owned scheduler product port.
+ *
+ * The legacy in-process Scheduler and the durable anchor scheduler both
+ * implement this surface. Consumers must not depend on either implementation
+ * class, otherwise replacing the legacy direct-execution path would require a
+ * second facade and create two scheduler owners.
+ */
+export interface SchedulerBackend {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  createTask(
+    spec: TaskSpec,
+    requestId?: string,
+    source?: SchedulerControlSource,
+  ): Promise<TaskView>;
+  listTasks(): TaskView[];
+  updateTask(id: string, patch: TaskPatch, requestId?: string): Promise<TaskView>;
+  deleteTask(id: string, requestId?: string): Promise<void>;
+  runTask(
+    id: string,
+    requestId?: string,
+    source?: SchedulerControlSource,
+  ): Promise<AgentTurnResult>;
+  getTask(id: string): TaskView | undefined;
+  abortRun?(
+    runId: string,
+    requestId?: string,
+  ): Promise<boolean> | boolean;
+  readonly activeTaskCount?: number;
+}
+
 export interface SchedulerFacade {
   /** 创建任务，返回创建后的任务视图（含内核算出的 nextRunAt）。 */
-  create(spec: TaskSpec): Promise<TaskView>;
+  create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView>;
   /** 列出任务（纯读）。 */
   list(): Promise<TaskView[]>;
   /** 更新任务，返回更新后的任务视图。 */
-  update(id: string, patch: TaskPatch): Promise<TaskView>;
+  update(id: string, patch: TaskPatch, context?: ScheduleMutationContext): Promise<TaskView>;
   /** 删除任务。 */
-  delete(id: string): Promise<void>;
+  delete(id: string, context?: ScheduleMutationContext): Promise<void>;
   /** 立即运行任务一次。 */
   run(id: string): Promise<AgentTurnResult>;
   /** 订阅运行事件，返回取消订阅函数。 */
@@ -69,10 +132,10 @@ export interface SchedulerFacade {
   dispose?(): Promise<void>;
 }
 
-/** 直调本进程 Scheduler 的门面实现（核心宿主内部用）。 */
+/** 直调本进程 scheduler 权威后端的门面实现（核心宿主内部用）。 */
 export class LocalSchedulerFacade implements SchedulerFacade {
   constructor(
-    private readonly scheduler: Scheduler,
+    private readonly scheduler: SchedulerBackend,
     private readonly eventBus: IEventBus<SchedulerEventMap>,
   ) {}
 
@@ -104,6 +167,9 @@ export class LocalSchedulerFacade implements SchedulerFacade {
       return !t || !isInternal(t);
     };
     const offs = [
+      this.eventBus.on("scheduler:task-accepted", (e) => {
+        if (visible(e.taskId)) handler({ kind: "accepted", ...e });
+      }),
       this.eventBus.on("scheduler:task-started", (e) => {
         if (visible(e.taskId))
           handler({ kind: "started", taskId: e.taskId, name: e.name });

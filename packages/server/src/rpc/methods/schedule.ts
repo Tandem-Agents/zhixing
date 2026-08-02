@@ -11,7 +11,14 @@
  * 推送事件由 wireSchedulerEventBridge 单独负责（订阅 scheduler EventBus → notify 所有连接）。
  */
 
-import type { ScheduledTask } from "@zhixing/core";
+import { randomUUID } from "node:crypto";
+import type {
+  ScheduledTask,
+  SchedulerControlSource,
+  TaskPatch,
+  TaskSpec,
+} from "@zhixing/core";
+import { validateTaskDefinition } from "@zhixing/core/protocol";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -23,7 +30,8 @@ export function buildScheduleListMethod(): MethodEntry {
   return {
     name: "schedule.list",
     requiresAuth: true,
-    handler(_params, ctx): ScheduledTask[] {
+    handler(params, ctx): ScheduledTask[] {
+      strictParams(params, [], "schedule.list");
       return requireScheduler(ctx.server).listTasks();
     },
   };
@@ -32,12 +40,13 @@ export function buildScheduleListMethod(): MethodEntry {
 // ─── schedule.create ───
 
 interface ScheduleCreateParams {
+  requestId?: string;
   name?: string;
   description?: string;
   enabled?: boolean;
   priority?: ScheduledTask["priority"];
   schedule?: ScheduledTask["schedule"];
-  action?: ScheduledTask["action"];
+  action?: TaskSpec["action"];
   delivery?: ScheduledTask["delivery"];
 }
 
@@ -46,7 +55,10 @@ export function buildScheduleCreateMethod(): MethodEntry {
     name: "schedule.create",
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<ScheduledTask> {
-      const params = (rawParams ?? {}) as ScheduleCreateParams;
+      const params = strictParams<ScheduleCreateParams>(rawParams, [
+        "requestId", "name", "description", "enabled", "priority",
+        "schedule", "action", "delivery",
+      ], "schedule.create");
 
       if (typeof params.name !== "string" || params.name.length === 0) {
         throw RpcErrors.invalidParams("schedule.create requires 'name'");
@@ -59,15 +71,23 @@ export function buildScheduleCreateMethod(): MethodEntry {
       }
 
       const scheduler = requireScheduler(ctx.server);
-      return scheduler.createTask({
+      const spec = {
         name: params.name,
-        description: params.description,
+        ...(params.description !== undefined ? { description: params.description } : {}),
         enabled: params.enabled ?? true,
         priority: params.priority ?? "normal",
         schedule: params.schedule,
         action: params.action,
-        delivery: params.delivery,
-      });
+        ...(params.delivery !== undefined ? { delivery: params.delivery } : {}),
+      };
+      validateUserSpec(spec, "schedule.create");
+      const operationId =
+        requestId(params.requestId) ?? `schedule-create-${randomUUID()}`;
+      return scheduler.createTask(
+        spec,
+        operationId,
+        scheduleControlSource(ctx, operationId),
+      );
     },
   };
 }
@@ -75,13 +95,9 @@ export function buildScheduleCreateMethod(): MethodEntry {
 // ─── schedule.update ───
 
 interface ScheduleUpdateParams {
+  requestId?: string;
   id?: string;
-  patch?: Partial<
-    Pick<
-      ScheduledTask,
-      "name" | "description" | "enabled" | "priority" | "schedule" | "action" | "delivery"
-    >
-  >;
+  patch?: TaskPatch;
 }
 
 export function buildScheduleUpdateMethod(): MethodEntry {
@@ -89,13 +105,24 @@ export function buildScheduleUpdateMethod(): MethodEntry {
     name: "schedule.update",
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<ScheduledTask> {
-      const params = (rawParams ?? {}) as ScheduleUpdateParams;
+      const params = strictParams<ScheduleUpdateParams>(rawParams, [
+        "requestId", "id", "patch",
+      ], "schedule.update");
       if (typeof params.id !== "string") {
         throw RpcErrors.invalidParams("schedule.update requires 'id'");
       }
+      const patch = strictParams<NonNullable<ScheduleUpdateParams["patch"]>>(
+        params.patch,
+        ["name", "description", "enabled", "priority", "schedule", "action", "delivery"],
+        "schedule.update patch",
+      );
       const scheduler = requireScheduler(ctx.server);
       try {
-        return await scheduler.updateTask(params.id, params.patch ?? {});
+        return await scheduler.updateTask(
+          params.id,
+          patch,
+          requestId(params.requestId),
+        );
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("Task not found")) {
           throw RpcErrors.notFound(err.message);
@@ -109,6 +136,7 @@ export function buildScheduleUpdateMethod(): MethodEntry {
 // ─── schedule.delete ───
 
 interface ScheduleDeleteParams {
+  requestId?: string;
   id?: string;
 }
 
@@ -117,13 +145,15 @@ export function buildScheduleDeleteMethod(): MethodEntry {
     name: "schedule.delete",
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<void> {
-      const params = (rawParams ?? {}) as ScheduleDeleteParams;
+      const params = strictParams<ScheduleDeleteParams>(rawParams, [
+        "requestId", "id",
+      ], "schedule.delete");
       if (typeof params.id !== "string") {
         throw RpcErrors.invalidParams("schedule.delete requires 'id'");
       }
       const scheduler = requireScheduler(ctx.server);
       try {
-        await scheduler.deleteTask(params.id);
+        await scheduler.deleteTask(params.id, requestId(params.requestId));
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("Task not found")) {
           throw RpcErrors.notFound(err.message);
@@ -141,6 +171,7 @@ export function buildScheduleDeleteMethod(): MethodEntry {
 // ─── schedule.run ───
 
 interface ScheduleRunParams {
+  requestId?: string;
   id?: string;
 }
 
@@ -149,13 +180,21 @@ export function buildScheduleRunMethod(): MethodEntry {
     name: "schedule.run",
     requiresAuth: true,
     async handler(rawParams, ctx) {
-      const params = (rawParams ?? {}) as ScheduleRunParams;
+      const params = strictParams<ScheduleRunParams>(rawParams, [
+        "requestId", "id",
+      ], "schedule.run");
       if (typeof params.id !== "string") {
         throw RpcErrors.invalidParams("schedule.run requires 'id'");
       }
       const scheduler = requireScheduler(ctx.server);
       try {
-        return await scheduler.runTask(params.id);
+        const operationId =
+          requestId(params.requestId) ?? `schedule-run-${randomUUID()}`;
+        return await scheduler.runTask(
+          params.id,
+          operationId,
+          scheduleControlSource(ctx, operationId),
+        );
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("Task not found")) {
           throw RpcErrors.notFound(err.message);
@@ -169,6 +208,7 @@ export function buildScheduleRunMethod(): MethodEntry {
 // ─── schedule.abortRun ───
 
 interface ScheduleAbortRunParams {
+  requestId?: string;
   runId?: string;
 }
 
@@ -176,24 +216,94 @@ export function buildScheduleAbortRunMethod(): MethodEntry {
   return {
     name: "schedule.abortRun",
     requiresAuth: true,
-    handler(rawParams, ctx): { aborted: boolean } {
-      const runRegistry = ctx.server.runRegistry;
-      if (!runRegistry) {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "RunRegistry not configured on server",
-        );
-      }
-      const params = (rawParams ?? {}) as ScheduleAbortRunParams;
+    async handler(rawParams, ctx): Promise<{ aborted: boolean }> {
+      const params = strictParams<ScheduleAbortRunParams>(rawParams, [
+        "requestId", "runId",
+      ], "schedule.abortRun");
       if (typeof params.runId !== "string") {
         throw RpcErrors.invalidParams("schedule.abortRun requires 'runId'");
       }
-      const aborted = runRegistry.abortRun(params.runId, {
-        kind: "user-cancel",
-        source: "rpc",
-        pressedAt: Date.now(),
-      });
-      return { aborted };
+      const scheduler = requireScheduler(ctx.server);
+      if (scheduler.abortRun) {
+        return {
+          aborted: await scheduler.abortRun(
+            params.runId,
+            requestId(params.requestId),
+          ),
+        };
+      }
+      throw new RpcAppError(
+        RPC_ERROR_CODES.INTERNAL_ERROR,
+        "Scheduler cancellation is unavailable",
+      );
+    },
+  };
+}
+
+function requestId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.length === 0 || value.length > 512 || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw RpcErrors.invalidParams("schedule requestId is invalid");
+  }
+  return value;
+}
+
+function strictParams<T>(
+  input: unknown,
+  allowed: readonly string[],
+  label: string,
+): T {
+  const value = input ?? {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw RpcErrors.invalidParams(`${label} params must be an object`);
+  }
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    throw RpcErrors.invalidParams(
+      `${label} contains unsupported fields: ${unexpected.join(", ")}`,
+    );
+  }
+  return value as T;
+}
+
+function validateUserSpec(
+  spec: TaskSpec,
+  label: string,
+): void {
+  try {
+    validateTaskDefinition({
+      taskId: "rpc-schedule-validation",
+      taskRevision: 1,
+      definition: { kind: "user", spec },
+      state: spec.enabled ? "enabled" : "disabled",
+    });
+  } catch (error) {
+    throw RpcErrors.invalidParams(
+      `${label} is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function scheduleControlSource(
+  ctx: Parameters<MethodEntry["handler"]>[1],
+  ingressId: string,
+): SchedulerControlSource | undefined {
+  const surfacePrincipal = "rpc:owner";
+  const connectionId = String(ctx.connection.id);
+  const principal = ctx.server.conversations?.durableControlPrincipal({
+    surfacePrincipal,
+    connectionId,
+  });
+  if (!principal) return undefined;
+  return {
+    connectionId,
+    ingress: {
+      kind: "first-party",
+      surfacePrincipal,
+      deviceId: principal.deviceId,
+      ingressId,
+      receivedAt: new Date().toISOString(),
+      turnOrigin: { channel: "rpc", triggeredBy: connectionId },
     },
   };
 }

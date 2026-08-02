@@ -70,7 +70,7 @@ function buildStatus(ctx: ServerContext): ServerStatus {
     scheduler: ctx.scheduler
       ? {
           taskCount: ctx.scheduler.listTasks().length,
-          activeTaskCount: ctx.scheduler.activeTaskCount,
+          activeTaskCount: ctx.scheduler.activeTaskCount ?? 0,
         }
       : undefined,
     memory: {

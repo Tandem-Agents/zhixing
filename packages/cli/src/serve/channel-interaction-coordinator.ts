@@ -8,13 +8,14 @@ import type {
   ExecutionRef,
 } from "@zhixing/core/contracts";
 import {
+  type AssignmentSubmissionPreflightPort,
   ChannelChallengeOutbox,
   channelSurfacePrincipal,
   type ConversationRunJournal,
   type ChannelChallengeOutboxStore,
 } from "@zhixing/owner-kernel";
 import { canonicalize } from "@zhixing/core/protocol";
-import type { JobInteractionAnswerPort } from "./durable-job-interactions.js";
+import type { JobInteractionGrantPort } from "./durable-job-interactions.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type {
   ConversationChannelSessionInput,
@@ -39,7 +40,8 @@ export interface JobChannelObligationJournal
   extends JobOwnerRelayJournal,
     ChannelChallengeOutboxStore,
     JobStatusSource,
-    JobSubmissionOwner {}
+    JobSubmissionOwner,
+    AssignmentSubmissionPreflightPort {}
 
 export interface JobRelayOpening {
   readonly assignmentId: string;
@@ -52,11 +54,11 @@ export interface JobRelayOpening {
    * 进程内为 executor 的 DurableJobInteractionCoordinator,跨机为
    * JobInteractionMeshClient;不得以手写函数替代。
    */
-  readonly answers: JobInteractionAnswerPort;
+  readonly answers: JobInteractionGrantPort;
 }
 
 interface JobSubmissionWaiter {
-  readonly resolve: (owner: JobSubmissionOwner) => void;
+  readonly resolve: (owner: JobChannelObligationJournal) => void;
   readonly reject: (error: unknown) => void;
   readonly signal: AbortSignal;
   readonly onAbort: () => void;
@@ -97,18 +99,18 @@ export class JobRelayObligationDirectory {
     );
   }
 
-  submissionFor(assignmentId: string): JobSubmissionOwner | undefined {
+  submissionFor(assignmentId: string): JobChannelObligationJournal | undefined {
     return this.#openings.get(assignmentId)?.journal;
   }
 
   waitForSubmission(
     assignmentId: string,
     signal: AbortSignal,
-  ): Promise<JobSubmissionOwner> {
+  ): Promise<JobChannelObligationJournal> {
     const current = this.submissionFor(assignmentId);
     if (current) return Promise.resolve(current);
     if (signal.aborted) return Promise.reject(abortReason(signal));
-    return new Promise<JobSubmissionOwner>((resolve, reject) => {
+    return new Promise<JobChannelObligationJournal>((resolve, reject) => {
       const waiters = this.#waiters.get(assignmentId) ?? new Set();
       let waiter!: JobSubmissionWaiter;
       const onAbort = () => {

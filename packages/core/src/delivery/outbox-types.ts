@@ -5,7 +5,7 @@
  *
  * Outbox 是叠加在 ChannelAdapter 之上的 per-target FIFO 串行化层。
  * 职责：顺序性（per-user 串行）+ 因果依赖（Phase 3 Turn Slot）。
- * 非职责：持久化、重试策略、过滤（归 DeliveryPipeline）。
+ * 非职责：持久化、重试策略、过滤（归权威 Delivery owner）。
  */
 
 import type {

@@ -33,7 +33,8 @@ export interface EphemeralTurnOptions {
    */
   turnContext?: TurnContext;
   /**
-   * 可选 abortSignal。由 scheduler 入口的 `RunRegistry.registerRun` 提供 —— 触发
+   * 可选 abortSignal。由当前执行 owner 提供；scheduler user job 已走耐久
+   * cancellation dispatcher，不再由进程内 RunRegistry 持有取消事实。
    * 后,agent-loop / LLM call / 工具执行通过 signal 链路自然完成 cleanup,
    * AgentResult.aborted.abortReason 携带类型化中断源,经 `serializeAbortReason`
    * 序列化到 `AgentTurnResult.detail`。

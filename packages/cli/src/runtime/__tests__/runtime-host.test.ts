@@ -1,13 +1,11 @@
 /**
- * RuntimeHost 装配契约 —— 资产透传、两条发放路径、origin 执行期派生。
+ * RuntimeHost 装配契约 —— 资产透传与各类 runtime 发放路径。
  *
  * 范围:锁 host 这一层"装配参数从哪来、origin 何时定"——
  *   - 资产层透传:skillStore / segmentDeps / decorateRunBus 按引用直达
  *     createAgentRuntime;extra tools 经 assembly 装配;main/ephemeral 工作区由
  *     createAgentRuntime 按配置解析,host 不持用户启动覆盖
- *   - 会话路径:scheduleOrigin 执行期从 RunContext 的 turnOrigin 派生
- *     (渠道入口带投递目标、本地对话与无上下文时 null),装配期不绑定对话
- *   - ephemeral 路径:origin 恒 null
+ *   - schedule 工具只持 scheduler facade；权威来源由 owner 从 ingress 反绑
  *   - onRuntimeCreated:两条发放路径都被调用(杜绝"某入口漏注册")
  *
  * mock 策略:createAgentRuntime stub 捕获装配参数;assembly 用真实形态的最小
@@ -25,16 +23,12 @@ vi.mock("@zhixing/orchestrator/runtime", async (orig) => {
   return { ...actual, createAgentRuntime: createAgentRuntimeMock };
 });
 
-const { RuntimeHost, resolveScheduleOriginFromTurnOrigin } = await import(
-  "@zhixing/runtime-host/runtime-host"
-);
-const { runContextStorage } = await import("@zhixing/orchestrator/runtime");
+const { RuntimeHost } = await import("@zhixing/runtime-host/runtime-host");
 
 // ─── 测试辅助 ───
 
 type AssembledCtx = {
   scheduler: () => unknown;
-  scheduleOrigin?: () => unknown;
 };
 
 function makeHostOptions() {
@@ -69,25 +63,6 @@ beforeEach(() => {
   createAgentRuntimeMock.mockImplementation(async () => ({
     marker: "runtime",
   }));
-});
-
-describe("resolveScheduleOriginFromTurnOrigin", () => {
-  it("从 turnOrigin 读取投递目标;无来源目标返回 null", () => {
-    expect(
-      resolveScheduleOriginFromTurnOrigin({
-        channel: "feishu",
-        target: { channelId: "feishu", to: "ou_abc" },
-        triggeredBy: "ou_abc",
-      }),
-    ).toEqual({
-      channelId: "feishu",
-      to: "ou_abc",
-    });
-    expect(resolveScheduleOriginFromTurnOrigin(undefined)).toBeNull();
-    expect(
-      resolveScheduleOriginFromTurnOrigin({ channel: "cli" }),
-    ).toBeNull();
-  });
 });
 
 describe("资产层透传", () => {
@@ -175,101 +150,3 @@ function workscene(
   };
 }
 
-describe("schedule origin 派生", () => {
-  it("会话路径:执行期从 RunContext 读 turnOrigin——渠道入口出 origin、本地对话 null、无上下文 null", async () => {
-    const { options, assembled } = makeHostOptions();
-    const host = new RuntimeHost(options);
-    await host.createConversationRuntime();
-    const getOrigin = assembled[0]!.scheduleOrigin!;
-
-    // 无 RunContext(装配期 / 测试裸调)→ null
-    expect(getOrigin()).toBeNull();
-
-    // 渠道入口 run 内 → 使用来源投递目标
-    const bus = { on: vi.fn(), emit: vi.fn() } as never;
-    runContextStorage.run(
-      {
-        bus,
-        lineage: "main",
-        conversationId: "default",
-        turnOrigin: {
-          channel: "feishu",
-          target: { channelId: "feishu", to: "ou_x" },
-          triggeredBy: "ou_x",
-        },
-      },
-      () => {
-        expect(getOrigin()).toEqual({ channelId: "feishu", to: "ou_x" });
-      },
-    );
-
-    // 本地对话 run 内 → null
-    runContextStorage.run(
-      { bus, lineage: "main", conversationId: "default" },
-      () => {
-        expect(getOrigin()).toBeNull();
-      },
-    );
-  });
-
-  it("同一会话装配闭包服务不同来源——同实例在不同 RunContext 下派生不同 origin", async () => {
-    const { options, assembled } = makeHostOptions();
-    const host = new RuntimeHost(options);
-    await host.createConversationRuntime();
-    const getOrigin = assembled[0]!.scheduleOrigin!;
-    const bus = { on: vi.fn(), emit: vi.fn() } as never;
-
-    runContextStorage.run(
-      {
-        bus,
-        lineage: "main",
-        conversationId: "default",
-        turnOrigin: {
-          channel: "feishu",
-          target: { channelId: "feishu", to: "ou_a" },
-          triggeredBy: "ou_a",
-        },
-      },
-      () => expect(getOrigin()).toEqual({ channelId: "feishu", to: "ou_a" }),
-    );
-    runContextStorage.run(
-      {
-        bus,
-        lineage: "main",
-        conversationId: "default",
-        turnOrigin: {
-          channel: "feishu",
-          target: { channelId: "feishu", to: "ou_b" },
-          triggeredBy: "ou_b",
-        },
-      },
-      () => expect(getOrigin()).toEqual({ channelId: "feishu", to: "ou_b" }),
-    );
-  });
-
-  it("ephemeral 路径:origin 恒 null(任一 RunContext 下都不派生)", async () => {
-    const { options, assembled } = makeHostOptions();
-    const host = new RuntimeHost(options);
-    await host.createEphemeralRuntime();
-    expect(createAgentRuntimeMock.mock.calls[0]![0].runtimeKind).toBe("ephemeral");
-    const getOrigin = assembled[0]!.scheduleOrigin!;
-    const bus = { on: vi.fn(), emit: vi.fn() } as never;
-
-    expect(getOrigin()).toBeNull();
-    runContextStorage.run(
-      {
-        bus,
-        lineage: "main",
-        conversationId: "default",
-        turnOrigin: {
-          channel: "feishu",
-          target: { channelId: "feishu", to: "ou_x" },
-          triggeredBy: "ou_x",
-        },
-      },
-      () => {
-        expect(getOrigin()).toBeNull();
-      },
-    );
-  });
-});

@@ -6,6 +6,20 @@
 
 ---
 
+## 当前生产架构（S7 第 26 单元）
+
+本节是调度子系统的当前权威边界；本文后续对旧 `Scheduler`、`RunRegistry`、`DeliveryPipeline` 和 `scheduler.json` 的描述仅保留历史推演价值，冲突时以本节和分布式运行时执行规格为准。
+
+- 锚点内的 `AnchorScheduler + JobJournal` 是任务定义、触发 occurrence、运行状态、取消、结果和投递义务的唯一权威；`scheduler.json` 仅是可重建的兼容查询投影。
+- 用户任务只接受严格的 agent-turn 定义。来源、应答方和创建 turn 由已认证入口在锚点侧派生，调用方不能自报；对话或 job 内的 schedule 写先进入 assignment 暂存，且只随所属提交原子生效。
+- 手动触发与 timer 都先耐久写入稳定 `jobRunId`。手动受理立即发布该身份，现有等待式 facade 只依据对应 job 的权威状态与结果投影完成；断线不取消，重试不产生第二个 job。
+- 用户 job 经统一 assignment 协议派发到 local/mesh executor；system job 由锚点按封闭 handler 注册表在本地执行，禁止经 RPC 创建、读取、触发或取消。
+- 手动 job 的交互资格来自首次耐久 ingress，可签发原 surface 的数据面票据；定时 job 无 ingress，只能走已冻结的渠道 grant。两类路径不得试探或互相降级。
+- 新投递统一由权威 Delivery 日志、outbox 与状态目录驱动。旧 `DeliveryPipeline` / queue / store 只允许一次性排空迁移，排空后删除且永不接收新写入。
+- 停机按“拒绝新入口 → 停止 timer 触发 → 收敛或耐久化已接管执行 → 释放 transport”推进；不得用一个全局 abort 同时终止业务执行和可重建恢复尝试。
+
+---
+
 ## 一、需求与原则锚定
 
 ### 需求

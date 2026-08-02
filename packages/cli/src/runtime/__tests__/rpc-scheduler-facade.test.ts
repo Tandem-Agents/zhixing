@@ -59,7 +59,10 @@ describe("RpcSchedulerFacade", () => {
     expect(result.status).toBe("ok");
     expect(fake.requests).toContainEqual({
       method: "schedule.run",
-      params: { id: "new1" },
+      params: {
+        id: "new1",
+        requestId: expect.stringMatching(/^schedule-run-/),
+      },
     });
   });
 
@@ -70,11 +73,22 @@ describe("RpcSchedulerFacade", () => {
     const events: SchedulerFacadeEvent[] = [];
     facade.onEvent((e) => events.push(e));
 
+    fake.notify("schedule.accepted", {
+      taskId: "t1",
+      jobRunId: "j1",
+      name: "x",
+    });
     fake.notify("schedule.completed", {
       taskId: "t1",
       name: "x",
       status: "error",
       error: "boom",
+    });
+    expect(events).toContainEqual({
+      kind: "accepted",
+      taskId: "t1",
+      jobRunId: "j1",
+      name: "x",
     });
     expect(events).toContainEqual({
       kind: "completed",

@@ -73,8 +73,8 @@ describe("registerCoreCleanup", () => {
     expect(spy.mock.calls.map((c) => c[0])).toEqual([
       "authorityRuntime.stopStorageMaintenance",
       "heartbeat.clear",
-      "deliveryStack.stop",
       "channels.dispose",
+      "deliveryStack.stop",
       "mcpHub.dispose",
       "scheduler.stop",
       "stateFile.markStopping",
@@ -169,8 +169,8 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
       "stateFile.markStopping", // ①
       "scheduler.stop", // ②
       "mcpHub.dispose", // ③ —— 先停调度再关 MCP 连接 / 子进程
-      "channels.dispose", // ④
-      "deliveryStack.stop", // ⑤
+      "deliveryStack.stop", // ④ —— 先排空权威投递，再释放 transport
+      "channels.dispose", // ⑤
       // heartbeat.clear 无副作用（timer=null），被跳过（⑥）
       "authorityRuntime.stopStorageMaintenance", // ⑦
       "server.close", // ⑧

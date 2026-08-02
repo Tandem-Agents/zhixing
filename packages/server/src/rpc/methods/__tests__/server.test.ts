@@ -228,8 +228,8 @@ describe("server.info", () => {
             },
           ],
         } as never,
-        runRegistry: { size: () => 1 } as never,
         scheduler: {
+          activeTaskCount: 1,
           listTasks: () => [
             { id: "user-task", enabled: true, system: false },
             { id: "system-task", enabled: true, system: true },

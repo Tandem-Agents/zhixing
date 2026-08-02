@@ -511,6 +511,8 @@ export interface RunParams {
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** Durable budget pre-reservation and settlement for every provider attempt in this run. */
   modelCallResourceMeter?: ModelCallResourceMeter;
+  /** Durable assignment-local scheduler mutation append port. */
+  stageScheduleMutation?: import("@zhixing/core").ScheduleMutationStager;
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -1874,6 +1876,7 @@ export async function createAgentRuntime(
             conversationId: params.conversationId,
             turnOrigin: params.turnContext?.turnOrigin,
             authorizeToolExecution: params.authorizeToolExecution,
+            stageScheduleMutation: params.stageScheduleMutation,
             ...(modelCallMetering ? { modelCallMetering } : {}),
           },
           async (): Promise<RunResult> => {

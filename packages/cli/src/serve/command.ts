@@ -20,22 +20,17 @@
  */
 
 import {
-  Scheduler,
   JsonTaskStore,
-  RunRegistry,
   computeStatusSummary,
   isInternal,
   createEventBus,
-  generateTurnId,
   getZhixingHome,
   loadLayeredGuidance,
-  type AgentTurnParams,
   type AgentEventMap,
   type SchedulerEventMap,
-  type AgentTurnResult,
   type SchedulerFacade,
+  type SchedulerBackend,
   LocalSchedulerFacade,
-  type TurnContext,
   JournalStore,
   ConversationRepository,
   parseConversationId,
@@ -65,6 +60,7 @@ import {
   type ProcessLockPaths,
 } from "@zhixing/server";
 import {
+  AnchorSchedulerGlobalStateAdapter,
   ConfirmationHub,
   type ConversationManager,
 } from "@zhixing/owner-kernel";
@@ -119,7 +115,6 @@ import {
   createSkillDirectory,
   createMemoryDirectory,
 } from "./management-directories.js";
-import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
@@ -138,6 +133,7 @@ import {
 } from "./governed-control-llm.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
+import { AnchorSchedulerRuntime } from "./anchor-scheduler-runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -286,13 +282,10 @@ async function runServerProcess(
   });
   const memoryDirectory = createMemoryDirectory();
 
-  // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
-  //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
-  let schedulerRef: Scheduler | null = null;
-  // schedule 工具经门面接入——后台宿主内直调本进程 Scheduler（LocalSchedulerFacade，恒定核心）。
-  // 实例化落点在核心 Scheduler 创建之后（见下）。getSchedulerFacade 惰性返回：会话执行面
-  // （per-session runtimeFactory，装配早于 scheduler）与 ephemeralRuntime 的 schedule 工具
-  // 都经它共用同一实例、直调同一本进程 Scheduler——工具 call 必在后台宿主跑起来后、ref 已就位。
+  // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
+  let schedulerRef: SchedulerBackend | null = null;
+  // schedule 工具经门面接入锚点唯一 scheduler 权威。实例化落点在权威创建后；
+  // per-runtime 工具只持 getter，不持第二套 scheduler 状态。
   let schedulerFacadeRef: LocalSchedulerFacade | null = null;
   const getSchedulerFacade = (): SchedulerFacade => {
     if (!schedulerFacadeRef) throw new Error("Scheduler not initialized yet");
@@ -648,56 +641,9 @@ async function runServerProcess(
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
   const ephemeralRuntime = await runtimeHost.createEphemeralRuntime();
 
-  // 4c. 把 ephemeralRuntime 的 broker 挂到 hub —— 定时任务的 confirmation 从这里流出。
-  //     命名空间用 "ephemeral"（与 conversation broker 的 "conv:${convId}" 命名规约区分）。
-  //     进程生命周期内不 detach——ephemeralRuntime 也不单独 dispose。
-  //     attach 与 hub.onEvent（textRenderer / bridge 订阅）相互独立，hub 是中介；装配期无
-  //     confirmation 流动，故 attach 落在 textRenderer 接入面之后亦安全。
-  confirmationHub.attach("ephemeral", ephemeralRuntime.confirmationBroker);
-
-  // 4d. Scheduler 装配的恒定核心料件（eventBus / runRegistry / runAgentTurn / systemHandlers）。
+  // Scheduler job 由 executor owner 的耐久数据面执行；管理用 ephemeral
+  // runtime 只服务 llm.complete，不再充当 scheduler runtime 或确认 broker。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
-
-  // RunRegistry —— 每个 ephemeral run 注册一个 AbortController,允许:
-  //   - schedule.abortRun(runId) RPC 主动中断
-  //   - graceful shutdown 通过 abortAllAndWait 让所有 in-flight 走完 cleanup
-  // Scheduler 对同 task 不允许并发(executeSingleTask 入口的 activeTasks 守卫保证),
-  // 故 params.taskId 与 in-flight run 一一对应,作为 RunRegistry key 安全。
-  const runRegistry = new RunRegistry();
-
-  const runAgentTurn = async (
-    params: AgentTurnParams,
-  ): Promise<AgentTurnResult> => {
-    const taskPrompt = params.context === "scheduled-task"
-      ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
-      : params.prompt;
-
-    // 远程确认回程地址（见 remote-confirmation-execution.md）：
-    //   scheduler → ephemeralRuntime 路径下，任何工具触发的 confirmation
-    //   按 turnOrigin.target 路由回创建任务时的通道对话。
-    //   无 target 时（e.g. system 任务、未绑定通道的任务）降级为 defaultTarget / 仅 RPC。
-    const turnContext: TurnContext = {
-      turnId: generateTurnId(),
-      turnOrigin: {
-        channel: "scheduler",
-        target: params.deliveryTarget,
-        triggeredBy: params.taskId,
-      },
-    };
-
-    const runKey = params.taskId ?? "anon";
-    const abortSignal = runRegistry.registerRun(runKey);
-    try {
-      return await runEphemeralTurn({
-        runtime: ephemeralRuntime,
-        prompt: taskPrompt,
-        turnContext,
-        abortSignal,
-      });
-    } finally {
-      runRegistry.unregisterRun(runKey);
-    }
-  };
 
   // 本 home 全部对话根：用户域 + 各工作场景域。按物理目录枚举——保留清理是
   // 物理层维护，场景目录存在即纳入，不依赖注册表状态（注册表丢失不该让
@@ -740,60 +686,139 @@ async function runServerProcess(
     },
   });
 
-  // ============================================================================
-  // Scheduler 在 job owner 正式接管前继续经耐久兼容队列投递结果，
-  // 避免旧能力先下线。接管时由同一次切换移除该兼容路径。
-  // ============================================================================
-  const scheduler = new Scheduler({
-    store: new JsonTaskStore(),
-    eventBus: schedulerEventBus,
-    runAgentTurn,
-    systemHandlers,
-    ...(ctx.deliveryStack
-      ? { delivery: ctx.deliveryStack.delivery }
-      : {}),
-    logger: {
-      info: (msg, data) => console.log(chalk.dim(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
-      warn: (msg, data) => console.warn(chalk.yellow(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
-      error: (msg, data) => console.error(chalk.red(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
-      debug: () => {},
-    },
-  });
-  const schedulerCleanup = startupRollback.register(
-    "scheduler.stop",
-    () => scheduler.stop(),
-  );
-  schedulerRef = scheduler;
-  // LocalSchedulerFacade —— 在恒定核心装配点实例化一次（绑核心 Scheduler、与执行面正交）：
-  // 后台宿主内会话执行面 / ephemeralRuntime 的 schedule 工具经 getSchedulerFacade 共用它，
-  // 直调本进程 Scheduler（不绕 RPC）；cli 侧对称用 RpcSchedulerFacade。统一 SchedulerFacade 缝。
-  schedulerFacadeRef = new LocalSchedulerFacade(scheduler, schedulerEventBus);
-  await scheduler.start();
-
-  // 系统维护任务落地（seed-if-absent、幂等）——handler 已在 systemHandlers 注册。
-  // 各自 cron、各自周期；未来 __skill-evict 等同此追加。
-  await scheduler.ensureSystemTask({
-    id: "__journal-gc",
-    name: "journal-gc",
-    handler: "__journal-gc",
-    schedule: { kind: "cron", expr: "0 3 * * *" },
-  });
-  // transcript 保留清理（分片 + 摘要快照的时间窗真删）——天级足够（判据
-  // 以天计），与 journal-gc 错开半小时避免维护任务扎堆。
-  await scheduler.ensureSystemTask({
-    id: "__transcript-gc",
-    name: "transcript-gc",
-    handler: "__transcript-gc",
-    schedule: { kind: "cron", expr: "30 3 * * *" },
-  });
-  // 推进控制日志孤儿清理（对话已删而目录残留）——生命周期跟随对话本体，
-  // 主路径是 session.delete 连带删除，此任务只兜孤儿；继续错开半小时。
-  await scheduler.ensureSystemTask({
-    id: "__advancement-gc",
-    name: "advancement-gc",
-    handler: "__advancement-gc",
-    schedule: { kind: "cron", expr: "0 4 * * *" },
-  });
+  // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
+  // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
+  let schedulerRuntime: AnchorSchedulerRuntime | undefined;
+  let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
+  if (ctx.enabledRoles.includes("anchor")) {
+    if (
+      !ctx.authorityRuntime ||
+      !ctx.conversationProtocol ||
+      !ctx.jobStatus ||
+      !ctx.jobRelayObligations
+    ) {
+      throw new Error(
+        "Anchor scheduler requires authority, protocol, job status, and relay owners",
+      );
+    }
+    schedulerRuntime = await AnchorSchedulerRuntime.create({
+      authority: ctx.authorityRuntime,
+      protocol: ctx.conversationProtocol,
+      eventBus: schedulerEventBus,
+      compatibilityStore: new JsonTaskStore(),
+      jobStatus: ctx.jobStatus,
+      jobRelays: ctx.jobRelayObligations,
+      openManualJobSurface: async (input) => {
+        const coordinator = ctx.channelCoordinator;
+        if (!coordinator) {
+          throw new Error("Manual job data plane is unavailable");
+        }
+        const session = await coordinator.openFirstPartySurfaceSession({
+          executorId: input.executorId,
+          assignmentId: input.assignmentId,
+          ref: input.ref,
+          ticket: input.ticket,
+          surfacePrincipal: input.surfacePrincipal,
+          adoptFrame: async (frame) => {
+            const connections = runner?.server.connections;
+            const recipients = connections
+              ? [...connections].filter(
+                  (connection) => connection.authenticated && !connection.closed,
+                )
+              : [];
+            if (recipients.length === 0) {
+              throw new Error("Manual job surface is disconnected");
+            }
+            for (const connection of recipients) {
+              connection.notify(SESSION_NOTIFICATIONS.assignmentStream, frame);
+            }
+          },
+        });
+        session.start();
+      },
+      ...(ctx.executorJobOwner ? { localJobOwner: ctx.executorJobOwner } : {}),
+      mesh: () => ctx.meshRuntime,
+      capabilities: runtimeHost.capabilityCatalog(),
+      systemHandlers,
+      systemTasks: new Map([
+        [
+          "__journal-gc",
+          {
+            id: "__journal-gc",
+            name: "journal-gc",
+            handler: "__journal-gc",
+            schedule: { kind: "cron", expr: "0 3 * * *" },
+          },
+        ],
+        [
+          "__transcript-gc",
+          {
+            id: "__transcript-gc",
+            name: "transcript-gc",
+            handler: "__transcript-gc",
+            schedule: { kind: "cron", expr: "30 3 * * *" },
+          },
+        ],
+        [
+          "__advancement-gc",
+          {
+            id: "__advancement-gc",
+            name: "advancement-gc",
+            handler: "__advancement-gc",
+            schedule: { kind: "cron", expr: "0 4 * * *" },
+          },
+        ],
+      ]),
+      migrateLegacyDelivery: async (delivery, taskId) => {
+        if (!delivery) return undefined;
+        if (delivery.kind === "none") return { kind: "none" };
+        if (delivery.kind === "channel") {
+          return {
+            kind: "channel",
+            channel: delivery.channel,
+            to: delivery.to,
+            ...(delivery.threadId ? { threadId: delivery.threadId } : {}),
+          };
+        }
+        if ("endpoint" in delivery) {
+          return { kind: "webhook", endpoint: delivery.endpoint };
+        }
+        const legacy = delivery as unknown as {
+          readonly url: string;
+          readonly headers?: Readonly<Record<string, string>>;
+        };
+        const endpoint = {
+          kind: "webhook" as const,
+          bindingId: `scheduler/${taskId}/webhook`,
+        };
+        await startupResult.secretStore.put(
+          endpoint,
+          JSON.stringify({ url: legacy.url, headers: legacy.headers ?? {} }),
+        );
+        return { kind: "webhook", endpoint };
+      },
+      onError: (error) =>
+        console.error(chalk.red(`[scheduler] ${error.message}`)),
+    });
+    const runtime = schedulerRuntime;
+    schedulerCleanup = startupRollback.register(
+      "scheduler.stop",
+      () => runtime.stop(),
+    );
+    schedulerRef = runtime.scheduler;
+    schedulerFacadeRef = new LocalSchedulerFacade(
+      runtime.scheduler,
+      schedulerEventBus,
+    );
+    ctx.authorityRuntime.installSchedulerGlobalState(
+      new AnchorSchedulerGlobalStateAdapter(
+        runtime.scheduler,
+        ctx.authorityRuntime.anchorEpoch,
+      ),
+    );
+    await runtime.start();
+  }
+  const scheduler = schedulerRuntime?.scheduler;
 
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
@@ -821,7 +846,7 @@ async function runServerProcess(
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
-    scheduler,
+    ...(scheduler ? { scheduler } : {}),
     conversations: ctx.conversations,
     advancement: ctx.advancement,
     advancementRecovery,
@@ -872,7 +897,6 @@ async function runServerProcess(
     channels: ctx.channels,
     channelHttpRoutes,
     confirmationHub,
-    runRegistry,
     runtimeControl: {
       openFirstPartyFinality: async (input) => {
         const factory = ctx.firstPartyFinality;
@@ -935,9 +959,7 @@ async function runServerProcess(
             uncertain: 0,
           };
         }
-        const authority = ctx.deliveryStack.authorityDelivery.stats();
-        const legacy = ctx.deliveryStack.delivery.stats();
-        return { ...authority, pending: authority.pending + legacy.queued };
+        return ctx.deliveryStack.stats();
       },
       deliveryStatus: (afterByItem) =>
         ctx.deliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
@@ -963,8 +985,7 @@ async function runServerProcess(
         });
       },
       flushDelivery: async () => {
-        await ctx.deliveryStack?.delivery.flush();
-        await ctx.deliveryStack?.authorityDelivery.flush();
+        await ctx.deliveryStack?.flush();
       },
     },
   });
@@ -979,7 +1000,7 @@ async function runServerProcess(
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
   runner = await runServer({
       context: serverCtx,
-      scheduler,
+      ...(scheduler ? { scheduler } : {}),
       schedulerEventBus,
       cleanupRegistry: registry,
       lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
@@ -1001,6 +1022,7 @@ async function runServerProcess(
 
   // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
   ctx.runner = runner;
+  await schedulerRuntime?.resumeManualJobSurfaces();
 
   // runServer 之后：核心资源清理（LIFO 最先执行 —— markStopping / scheduler / channels /
   // delivery / heartbeat）。接入面产物（channels / deliveryStack）从 ctx 取。
@@ -1008,14 +1030,12 @@ async function runServerProcess(
     stateFile,
     heartbeatTimerRef,
     authorityRuntime: ctx.authorityRuntime,
-    scheduler,
     channels: ctx.channels,
     deliveryStack: ctx.deliveryStack,
     mcpHub: builtinExtraTools.mcpHub,
     startupCleanups: {
       authorityRuntime: startupCleanups.authorityRuntime,
       localWorkspaceHost: startupCleanups.localWorkspaceHost,
-      scheduler: schedulerCleanup,
       channels: startupCleanups.channels,
       deliveryStack: startupCleanups.deliveryStack,
       mcp: startupCleanups.mcp,
@@ -1085,10 +1105,6 @@ async function runServerProcess(
             ),
           ]
         : []),
-      runRegistry.abortAllAndWait(
-        { kind: "external", origin: "scheduler-shutdown" },
-        30_000,
-      ),
     ]);
   });
 
@@ -1096,6 +1112,15 @@ async function runServerProcess(
     const protocol = ctx.conversationProtocol;
     registry.register("conversationProtocol.stopRecovery", async () => {
       await protocol.stopRecoveryLoop();
+    });
+  }
+
+  // Scheduler owns trigger admission and job recovery loops. Stop it before
+  // executor/job/channel owners are released so no new occurrence can enter
+  // while every accepted assignment is already durable and restartable.
+  if (schedulerCleanup) {
+    registry.register("scheduler.stop", async () => {
+      await schedulerCleanup!.run();
     });
   }
 
@@ -1201,9 +1226,8 @@ async function runServerProcess(
         connectionCount: runner!.server.connections.size,
         channelStates:
           ctx.channels?.listStatuses().map((s) => s.state) ?? [],
-        hasUserPendingWork: scheduler
-          .listTasks()
-          .some((t) => !isInternal(t) && t.enabled),
+        hasUserPendingWork:
+          scheduler?.listTasks().some((t) => !isInternal(t) && t.enabled) ?? false,
       });
       if (exit) {
         serverCtx.requestShutdown?.("idle");

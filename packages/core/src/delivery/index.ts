@@ -1,10 +1,10 @@
-export { DeliveryPipeline } from "./pipeline.js";
+export { LegacyDeliveryDrainer } from "./legacy-drainer.js";
 export type {
-  DeliveryLogger,
-  DeliveryPipelineConfig,
-  DeliveryPipelineDeps,
-} from "./pipeline.js";
-export { DEFAULT_DELIVERY_CONFIG } from "./pipeline.js";
+  LegacyDeliveryDrainerConfig,
+  LegacyDeliveryDrainerDeps,
+  LegacyDeliveryDrainerLogger,
+} from "./legacy-drainer.js";
+export { DEFAULT_LEGACY_DELIVERY_DRAINER_CONFIG } from "./legacy-drainer.js";
 
 export { AuthorityDeliveryPipeline } from "./authority-pipeline.js";
 export { channelAuthorityDeliveryTransport } from "./authority-pipeline.js";
@@ -62,8 +62,6 @@ export type {
   DeliveryResolutionRequestBinding,
 } from "./authority.js";
 
-export { DeliveryQueue } from "./queue.js";
-export type { DeliveryQueueOptions } from "./queue.js";
 export { AuthorityDeliveryQueue } from "./authority-queue.js";
 export type { AuthorityDeliveryQueueOptions } from "./authority-queue.js";
 
@@ -91,8 +89,6 @@ export type {
   DeliverySource,
   DeliveryStats,
   DeliveryTransport,
-  EnqueueParams,
-  IDeliveryPipeline,
 } from "./types.js";
 
 // ─── Outbox（顺序层 / ADR-007） ───

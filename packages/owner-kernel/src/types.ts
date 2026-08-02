@@ -34,6 +34,7 @@ import type {
   ContentAssetRef,
   ModelCallResourceMeter,
 } from "@zhixing/core/contracts";
+import type { ScheduleMutationStager } from "@zhixing/core";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
 // 方便 owner-kernel 及其下游从统一入口获取。
@@ -73,6 +74,8 @@ export interface RunTurnOptions {
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** Durable per-provider-call resource accounting for this assigned run. */
   modelCallResourceMeter?: ModelCallResourceMeter;
+  /** Assignment-local schedule writes; absent on trusted control surfaces. */
+  stageScheduleMutation?: ScheduleMutationStager;
 }
 
 export type RuntimeDisposeReason =

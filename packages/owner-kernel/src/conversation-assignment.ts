@@ -446,6 +446,26 @@ export interface ConversationMutationPublisher {
           readonly error: import("@zhixing/core/contracts").AuthorityError;
         };
   }>;
+  /**
+   * A publisher that owns records in the same physical authority log may
+   * materialize granted mutations atomically with the conversation commit.
+   * Legacy publishers can omit this method and retain post-commit apply.
+   */
+  prepareGlobalBatchAtPrefix?(input: {
+    readonly assignmentId: string;
+    readonly authorityPrefixLsn: number;
+    readonly records: ReadonlyArray<{
+      readonly seq: number;
+      readonly mutation: GlobalStagedMutation;
+      readonly requestId: string;
+      readonly expected: { readonly anchorEpoch: number };
+    }>;
+  }): {
+    readonly outcomes: ReturnType<
+      ConversationMutationPublisher["decideGlobalBatchAtPrefix"]
+    >;
+    readonly records: readonly LogicalRecord<unknown>[];
+  };
   /** Granted decisions are final; replaying the same assignment/seq must not duplicate effects. */
   apply(input: {
     readonly assignmentId: string;
@@ -4285,6 +4305,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           };
         }
         const outcomes: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"] = [];
+        let globalMutationRecords: readonly LogicalRecord<unknown>[] = [];
         const admitted = state.admittedByRun.get(body.runId);
         if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
         const deliveryInput: ConversationDeliveryCommitInput = {
@@ -4322,17 +4343,28 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               requestId: record.requestId,
               expected: record.expected!,
             }));
-          const globalOutcomes =
+          const globalInput = {
+            assignmentId: bundle.assignmentId,
+            authorityPrefixLsn: authorityPrefix.lastLsn,
+            records: globalRecords,
+          };
+          const prepared =
             globalRecords.length === 0
-              ? new Map<number, ReturnType<ConversationMutationPublisher["decideGlobalBatchAtPrefix"]>[number]["outcome"]>()
-              : validateGlobalPublishBatchOutcomes(
-                  globalRecords,
-                  this.#publisher!.decideGlobalBatchAtPrefix({
-                    assignmentId: bundle.assignmentId,
-                    authorityPrefixLsn: authorityPrefix.lastLsn,
-                    records: globalRecords,
-                  }),
-                );
+              ? { outcomes: [] as const, records: [] as const }
+              : this.#publisher!.prepareGlobalBatchAtPrefix?.(globalInput) ?? {
+                  outcomes:
+                    this.#publisher!.decideGlobalBatchAtPrefix(globalInput),
+                  records: [] as const,
+                };
+          assertGlobalMutationRecords(
+            prepared.records,
+            runStream(this.#conversationId),
+          );
+          globalMutationRecords = prepared.records;
+          const globalOutcomes = validateGlobalPublishBatchOutcomes(
+            globalRecords,
+            prepared.outcomes,
+          );
           for (const record of batch.records) {
             if (record.domain === "session") {
               outcomes.push({
@@ -4389,6 +4421,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               (state.stateByRun.get(body.runId)?.statusRevision ?? 0) + 1,
           }),
           ...deliveryDecision.records,
+          ...globalMutationRecords,
         ];
         if (currentRunState === "uncertain") {
           if (!openResolution || openResolution.resolution) {
@@ -8934,6 +8967,23 @@ function runRecord(
 
 function runStream(conversationId: string): string {
   return `run:${conversationId}`;
+}
+
+function assertGlobalMutationRecords(
+  records: readonly LogicalRecord<unknown>[],
+  conversationStream: string,
+): void {
+  const reserved = new Set([
+    conversationStream,
+    "delivery",
+    "publish",
+    "final-outbox",
+  ]);
+  if (records.some((record) => reserved.has(record.stream))) {
+    throw new Error(
+      "Conversation global mutation publisher wrote an owner-reserved stream",
+    );
+  }
 }
 
 function worksceneTurnActivityEntries(

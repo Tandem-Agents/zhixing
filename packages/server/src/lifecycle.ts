@@ -39,7 +39,7 @@
  * - SIGTERM 在 Windows 等价 force-kill（仍尽量调 handler）
  */
 
-import type { Scheduler } from "@zhixing/core";
+import type { SchedulerBackend } from "@zhixing/core";
 import { startServer, type StartServerOptions, type ZhixingServerInstance } from "./server.js";
 import {
   acquireLock,
@@ -51,7 +51,7 @@ import { CleanupRegistry } from "./cleanup-registry.js";
 
 export interface RunServerOptions extends StartServerOptions {
   /** Scheduler 实例（已 start）。独立模式会在 registry 中注册 scheduler.stop */
-  scheduler?: Scheduler;
+  scheduler?: SchedulerBackend;
   /** 进程锁文件路径覆盖 */
   lockPaths?: ProcessLockPaths;
   /** 写入 PID 发现文件的诊断元数据 */

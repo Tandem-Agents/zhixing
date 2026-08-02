@@ -511,6 +511,10 @@ export interface JobCommitParticipant {
         >;
       }
     | { readonly accepted: false; readonly error: AuthorityError };
+  applied?(input: {
+    readonly assignmentId: string;
+    readonly mutationBatch: MutationBatch;
+  }): Promise<void>;
 }
 
 export interface SystemJobResourceCoordinator {
@@ -631,6 +635,12 @@ export type JobChannelChallengePreparation =
   | {
       readonly kind: "no-interactive-surface";
     };
+
+/** Durable interaction route derived from the admitted occurrence. */
+export type JobInteractionRoute =
+  | { readonly kind: "surface-ticket"; readonly ingress: IngressContext }
+  | { readonly kind: "channel-grant" }
+  | { readonly kind: "no-interactive-surface" };
 
 export type JobCancelResult =
   | { readonly state: "cancelled"; readonly assignmentId?: string }
@@ -767,6 +777,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       ) {
         throw new TypeError(
           "Job channel request does not bind the current assignment",
+        );
+      }
+      if (state.ingressByJob.has(assigned.record.jobRunId)) {
+        throw new Error(
+          "Manual jobs cannot use the scheduled channel-grant route",
         );
       }
       if (
@@ -1113,6 +1128,33 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
+  async interactionRoute(assignmentId: string): Promise<JobInteractionRoute> {
+    assertIdentifier(assignmentId, "Interaction route assignmentId");
+    return this.#select((state) => {
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned) throw new Error("Interaction route assignment is unknown");
+      if (state.assignmentByJob.get(assigned.record.jobRunId) !== assignmentId) {
+        throw new Error("Interaction route requires the current assignment");
+      }
+      const ingress = state.ingressByJob.get(assigned.record.jobRunId);
+      if (ingress) {
+        return {
+          kind: "surface-ticket" as const,
+          ingress: snapshot(ingress),
+        };
+      }
+      const occurrence = state.occurrences.get(assigned.record.jobRunId);
+      const definition = occurrence
+        ? requireDefinitionRevision(state, occurrence.taskRevision)
+        : undefined;
+      return definition?.definition.kind === "user" &&
+        definition.definition.origin &&
+        definition.definition.interactionResponder
+        ? { kind: "channel-grant" as const }
+        : { kind: "no-interactive-surface" as const };
+    });
+  }
+
   async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
     return this.#select((state) =>
       [...state.channelInteractions.preparedByChallenge.values()]
@@ -1319,6 +1361,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     readonly scheduledFor: string;
     readonly context: AuthorityCallContext;
     readonly source: "user" | "system";
+    /** User tasks missed while the anchor was offline are recorded, never backfilled. */
+    readonly disposition?: "due" | "missed-offline";
   }): Promise<JobOccurrence> {
     assertIdentifier(input.jobRunId, "Job run id");
     assertCanonicalTime(input.scheduledFor, "Job scheduled time");
@@ -1353,10 +1397,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       if (definition.state !== "enabled") {
         throw new Error("Disabled or deleted tasks cannot create occurrences");
       }
-      let occurrenceState: JobRunState = "queued";
+      let occurrenceState: JobRunState =
+        input.disposition === "missed-offline" && input.source === "user"
+          ? "missed"
+          : "queued";
       let effectiveActiveState: JobRunState | undefined;
       const entries: LogicalRecord<unknown>[] = [];
-      if (state.activeJobRunId) {
+      if (state.activeJobRunId && occurrenceState !== "missed") {
         const active = state.states.get(state.activeJobRunId);
         effectiveActiveState = active?.state;
         if (active?.state === "uncertain") {
@@ -3958,7 +4005,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       },
       [...closure.references, ...compiledDelivery.references],
     );
-    if (transaction.value.committed) await this.resumeCompatibilityProjection();
+    if (transaction.value.committed) {
+      if (closure.batch && this.#commitParticipant?.applied) {
+        await this.#commitParticipant.applied({
+          assignmentId,
+          mutationBatch: closure.batch,
+        });
+      }
+      await this.resumeCompatibilityProjection();
+    }
     return transaction.value;
   }
 
@@ -4359,6 +4414,25 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           })
         : undefined;
     });
+  }
+
+  /** Rebuildable task-local occurrence projection for scheduler/query recovery. */
+  async occurrences(): Promise<readonly JobOccurrence[]> {
+    return this.#select((state) =>
+      [...state.occurrences.values()]
+        .map((occurrence) => {
+          const current = state.states.get(occurrence.jobRunId);
+          return validateJobOccurrence({
+            ...snapshot(occurrence),
+            state: current?.state ?? occurrence.state,
+          });
+        })
+        .sort(
+          (left, right) =>
+            left.scheduledFor.localeCompare(right.scheduledFor) ||
+            left.jobRunId.localeCompare(right.jobRunId),
+        ),
+    );
   }
 
   async currentState(jobRunId: string): Promise<JobRunState | undefined> {

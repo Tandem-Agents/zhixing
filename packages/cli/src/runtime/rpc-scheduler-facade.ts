@@ -22,6 +22,7 @@ import {
 } from "@zhixing/core";
 import type { CoreHostLink } from "./core-host-connection.js";
 import { readSchedulerTasksSync } from "./scheduler-projection.js";
+import { randomUUID } from "node:crypto";
 
 export interface RpcSchedulerFacadeOptions {
   /** 进程级共享的核心宿主连接。 */
@@ -41,7 +42,10 @@ export class RpcSchedulerFacade implements SchedulerFacade {
 
   async create(spec: TaskSpec): Promise<TaskView> {
     const client = await this.link.getClient();
-    return client.request<TaskView>("schedule.create", spec);
+    return client.request<TaskView>("schedule.create", {
+      ...spec,
+      requestId: `schedule-create-${randomUUID()}`,
+    });
   }
 
   // 读投影：直接读 scheduler.json（宿主单写者的只读投影），不拉宿主。损坏即空，
@@ -52,21 +56,32 @@ export class RpcSchedulerFacade implements SchedulerFacade {
 
   async update(id: string, patch: TaskPatch): Promise<TaskView> {
     const client = await this.link.getClient();
-    return client.request<TaskView>("schedule.update", { id, patch });
+    return client.request<TaskView>("schedule.update", {
+      id,
+      patch,
+      requestId: `schedule-update-${randomUUID()}`,
+    });
   }
 
   async delete(id: string): Promise<void> {
     const client = await this.link.getClient();
-    await client.request("schedule.delete", { id });
+    await client.request("schedule.delete", {
+      id,
+      requestId: `schedule-delete-${randomUUID()}`,
+    });
   }
 
   async run(id: string): Promise<AgentTurnResult> {
     const client = await this.link.getClient();
-    return client.request<AgentTurnResult>("schedule.run", { id });
+    return client.request<AgentTurnResult>("schedule.run", {
+      id,
+      requestId: `schedule-run-${randomUUID()}`,
+    });
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
     const offs = [
+      this.link.onNotification("schedule.accepted", (p) => handler(toAccepted(p))),
       this.link.onNotification("schedule.started", (p) => handler(toStarted(p))),
       this.link.onNotification("schedule.completed", (p) => handler(toCompleted(p))),
       this.link.onNotification("schedule.disabled", (p) => handler(toDisabled(p))),
@@ -79,6 +94,16 @@ export class RpcSchedulerFacade implements SchedulerFacade {
 
 // ─── RPC notification payload → 统一门面事件 ───
 // event-bridge 推送的 payload 形状已含这些字段（task-failed 已并入 completed{status:error}）。
+
+function toAccepted(payload: unknown): SchedulerFacadeEvent {
+  const p = payload as { taskId: string; jobRunId: string; name: string };
+  return {
+    kind: "accepted",
+    taskId: p.taskId,
+    jobRunId: p.jobRunId,
+    name: p.name,
+  };
+}
 
 function toStarted(payload: unknown): SchedulerFacadeEvent {
   const p = payload as { taskId: string; name: string };

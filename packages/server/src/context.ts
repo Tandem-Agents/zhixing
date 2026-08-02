@@ -6,10 +6,9 @@
  */
 
 import type {
-  Scheduler,
+  SchedulerBackend,
   ChannelRegistry,
   HttpHandler,
-  RunRegistry,
   TaskListState,
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
@@ -137,7 +136,7 @@ export interface ServerContext {
   /** 共享 token（auth 验证用）。由 ServerOrchestrator 注入 */
   readonly token: string;
   /** 调度器实例（S2.E 注入） */
-  scheduler?: Scheduler;
+  scheduler?: SchedulerBackend;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
   /** 任务推进闭环控制面。不传则 session.send 保持纯执行语义。 */
@@ -204,12 +203,6 @@ export interface ServerContext {
    * 远程权限确认的 owner 聚合入口。
    */
   confirmationHub?: ConfirmationHub;
-  /**
-   * Scheduler ephemeral run 的中断注册表。不传则 `schedule.abortRun` RPC 不可用,
-   * scheduler 关停链 abort 也降级 no-op。serve 模式应注入 —— 由 command.ts
-   * 与 scheduler 一起初始化。
-   */
-  runRegistry?: RunRegistry;
   /** 运行控制需要的可选事实源与动作钩子，由宿主装配层注入。 */
   runtimeControl?: RuntimeControlAdapter;
   /** 实际监听的地址（startServer 监听就绪后回填） */
@@ -235,7 +228,7 @@ export interface CreateContextOptions {
   config: ServerConfig;
   version: string;
   token: string;
-  scheduler?: Scheduler;
+  scheduler?: SchedulerBackend;
   conversations?: ConversationManager;
   advancement?: AdvancementController;
   advancementRecovery?: AdvancementRecoveryMaintenance;
@@ -253,7 +246,6 @@ export interface CreateContextOptions {
   channels?: ChannelRegistry;
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   confirmationHub?: ConfirmationHub;
-  runRegistry?: RunRegistry;
   runtimeControl?: RuntimeControlAdapter;
 }
 
@@ -281,7 +273,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     channels: opts.channels,
     channelHttpRoutes: opts.channelHttpRoutes,
     confirmationHub: opts.confirmationHub,
-    runRegistry: opts.runRegistry,
     runtimeControl: opts.runtimeControl,
   };
 }

@@ -3,8 +3,8 @@
     "stateFile.markStopping",
     "scheduler.stop",
     "mcpHub.dispose",
-    "channels.dispose",
     "deliveryStack.stop",
+    "channels.dispose",
     "server.close",
     "stateFile.markStopped",
     "stateFile.cleanup"
@@ -15,8 +15,8 @@
     "stateFile.markStopped",
     "server.close",
     "heartbeat.clear",
-    "deliveryStack.stop",
     "channels.dispose",
+    "deliveryStack.stop",
     "mcpHub.dispose",
     "scheduler.stop",
     "stateFile.markStopping"
