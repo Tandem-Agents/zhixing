@@ -11,9 +11,6 @@ export interface S7ExecutableScenarioObservation {
   readonly kind: DurableCaseKind;
   readonly caseKey: string;
   readonly reasonCode?: string;
-  readonly producer: string;
-  readonly recoveryOwner: string;
-  readonly resourceIdentity: string;
   readonly evidence: string;
 }
 
@@ -48,12 +45,6 @@ interface ScenarioEvidence {
   readonly details: string[];
   readonly outcomes: Array<{ readonly kind: DurableCaseKind; readonly caseKey: string }>;
   readonly reasonCodes: Set<string>;
-  readonly producers: Set<string>;
-  readonly recoveryOwners: Set<string>;
-  readonly resourceIdentities: Set<string>;
-  readonly producerCandidates: Set<string>;
-  readonly recoveryOwnerCandidates: Set<string>;
-  readonly resourceIdentityCandidates: Set<string>;
   readonly temporaryDirectories: Set<string>;
   readonly cleanups: Array<() => void | Promise<void>>;
 }
@@ -88,12 +79,6 @@ function scenario(
       details: [],
       outcomes: [],
       reasonCodes: new Set(),
-      producers: new Set(),
-      recoveryOwners: new Set(),
-      resourceIdentities: new Set(),
-      producerCandidates: new Set(),
-      recoveryOwnerCandidates: new Set(),
-      resourceIdentityCandidates: new Set(),
       temporaryDirectories: new Set(),
       cleanups: [],
     };
@@ -107,21 +92,6 @@ function scenario(
         );
       }
       const outcome = onlyObserved(evidence.outcomes, "durable outcome", runtime.family, kind, caseKey);
-      const producer = onlyObserved(evidence.producers, "producer", runtime.family, kind, caseKey);
-      const recoveryOwner = onlyObserved(
-        evidence.recoveryOwners,
-        "recovery owner",
-        runtime.family,
-        kind,
-        caseKey,
-      );
-      const resourceIdentity = onlyObserved(
-        evidence.resourceIdentities,
-        "resource identity",
-        runtime.family,
-        kind,
-        caseKey,
-      );
       const reasonCode = outcome.kind === "variant"
         ? undefined
         : onlyObserved(evidence.reasonCodes, "typed reason code", runtime.family, kind, caseKey);
@@ -130,9 +100,6 @@ function scenario(
         kind: outcome.kind,
         caseKey: outcome.caseKey,
         ...(reasonCode === undefined ? {} : { reasonCode }),
-        producer,
-        recoveryOwner,
-        resourceIdentity,
         evidence: evidence.details.join(" | "),
       };
     } finally {
@@ -192,37 +159,6 @@ function onlyObserved<T>(
   return observed[0]!;
 }
 
-export function observeProducerHandle(
-  handle: object | ((...args: never[]) => unknown),
-  producer: string,
-  resourceIdentity: string,
-): void {
-  if ((typeof handle !== "object" && typeof handle !== "function") || handle === null) {
-    throw new Error("S7 producer witness did not originate from a runtime handle");
-  }
-  if (resourceIdentity.length === 0) {
-    throw new Error("S7 scenario resource identity is empty");
-  }
-  const evidence = evidenceContext.getStore();
-  evidence?.producerCandidates.add(producer);
-  evidence?.resourceIdentityCandidates.add(resourceIdentity);
-  evidence?.details.push(`producer-handle:${producer}:${resourceIdentity}`);
-  if (evidence) commitWitnessCandidates(evidence);
-}
-
-export function observeRecoveryOwnerHandle(
-  handle: object | ((...args: never[]) => unknown),
-  recoveryOwner: string,
-): void {
-  if ((typeof handle !== "object" && typeof handle !== "function") || handle === null) {
-    throw new Error("S7 recovery witness did not originate from a runtime handle");
-  }
-  const evidence = evidenceContext.getStore();
-  evidence?.recoveryOwnerCandidates.add(recoveryOwner);
-  evidence?.details.push(`recovery-handle:${recoveryOwner}`);
-  if (evidence) commitWitnessCandidates(evidence);
-}
-
 export function observeOutcome(
   outcome: Readonly<{ kind: DurableCaseKind; caseKey: string }>,
 ): void {
@@ -231,17 +167,6 @@ export function observeOutcome(
   if (!outcomes.some((candidate) =>
     candidate.kind === outcome.kind && candidate.caseKey === outcome.caseKey)) {
     outcomes.push(outcome);
-  }
-  const evidence = evidenceContext.getStore();
-  if (evidence) commitWitnessCandidates(evidence);
-}
-
-function commitWitnessCandidates(evidence: ScenarioEvidence): void {
-  if (evidence.outcomes.length === 0) return;
-  for (const producer of evidence.producerCandidates) evidence.producers.add(producer);
-  for (const owner of evidence.recoveryOwnerCandidates) evidence.recoveryOwners.add(owner);
-  for (const identity of evidence.resourceIdentityCandidates) {
-    evidence.resourceIdentities.add(identity);
   }
 }
 

@@ -16,6 +16,14 @@ import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 
 async function renderActionError(error: unknown): Promise<void> {
+  if (
+    error instanceof Error &&
+    "deliveryConfirmed" in error &&
+    (error as Error & { readonly deliveryConfirmed?: unknown })
+      .deliveryConfirmed === true
+  ) {
+    return;
+  }
   const writer = createStdoutWriter();
   try {
     const { renderError } = await import("./render.js");

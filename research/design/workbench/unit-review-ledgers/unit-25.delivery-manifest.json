@@ -4,15 +4,15 @@
   "excludedPrefixes": [
     "research/design/workbench/"
   ],
-  "pathCount": 169,
+  "pathCount": 171,
   "deletedCount": 0,
   "groups": {
     "architecture-and-specification": 3,
-    "CLI": 64,
+    "CLI": 65,
     "core": 56,
     "executor": 4,
     "orchestrator": 6,
-    "other": 2,
+    "other": 3,
     "owner-kernel": 11,
     "root-config": 2,
     "rpc": 2,
@@ -20,13 +20,13 @@
     "scripts": 3,
     "server": 11
   },
-  "pathSetSha256": "379c6be1568451cb664fdf962f2b78ff3ed8c04de2180078edc2da9049b640be",
-  "fingerprint": "git-delivery-manifest-v1:df892a12002cf5b7fe4e46f318f7f9b5f7581607aaedf9903c9e8f3bf6b82360",
+  "pathSetSha256": "e116fe9c861e29a209933ae34eb65c0669aad2afd8ea39372c9d5a805530be32",
+  "fingerprint": "git-delivery-manifest-v1:d3e8cc4ec4915854de22bc7e6e6643fedeb962564f17bde70a3d4aafbd64dae1",
   "entries": [
     {
       "status": "M",
       "path": "AGENTS.md",
-      "blob": "222ba1081af9efdb7bb0b8093da9f558768d50d9"
+      "blob": "5d2fa046a74c551d1ec7aec05ec4a606294917f8"
     },
     {
       "status": "M",
@@ -51,12 +51,12 @@
     {
       "status": "M",
       "path": "packages/cli/src/index.ts",
-      "blob": "36a8b973025e75afcfc87ff93881ead98dae7a3d"
+      "blob": "d65ca31d99fd22809182602488c400c5c20a9b1e"
     },
     {
       "status": "M",
       "path": "packages/cli/src/repl.ts",
-      "blob": "27ca9027a31c01f8ab5fafa3eacccc506c7a5cf9"
+      "blob": "1f6499275967c819f803964fc87b52b463aaa767"
     },
     {
       "status": "M",
@@ -106,12 +106,12 @@
     {
       "status": "A",
       "path": "packages/cli/src/runtime/local-workspace-management-host.test.ts",
-      "blob": "db49a015e80b08b792b34811b28970d272e5d4cc"
+      "blob": "308743db398bc3643e842ae3241e20936d3c9d43"
     },
     {
       "status": "A",
       "path": "packages/cli/src/runtime/local-workspace-management-host.ts",
-      "blob": "88385b426fb703e6da51abe64fdb60373ff58dd6"
+      "blob": "56677710a4e75457b36b2d8e12f6665f156fc2ab"
     },
     {
       "status": "A",
@@ -145,8 +145,13 @@
     },
     {
       "status": "A",
+      "path": "packages/cli/src/runtime/workspace-command.test.ts",
+      "blob": "5e9eb5e294016571669dff7cdc170bf5e7d5e988"
+    },
+    {
+      "status": "A",
       "path": "packages/cli/src/runtime/workspace-command.ts",
-      "blob": "c638b93fb82d0cefbfb7d67310b36efd27b0bcfb"
+      "blob": "0086955d3e99da984755b56d192c77663068bc3d"
     },
     {
       "status": "A",
@@ -176,7 +181,7 @@
     {
       "status": "A",
       "path": "packages/cli/src/serve/__tests__/s7-durable-cli-scenarios.ts",
-      "blob": "78b183ab24cbfac7c0f855a953d2c088c699d290"
+      "blob": "7259e409c23d60f6f74745470497bff5aa0a8d3c"
     },
     {
       "status": "A",
@@ -281,12 +286,12 @@
     {
       "status": "A",
       "path": "packages/cli/src/serve/s7-durable-contract-ledger.test.ts",
-      "blob": "c48f8160918df922d25873e7a908e7b52fe479b1"
+      "blob": "b1a930ac43b7a5716eab0687598c66b9a5824ccc"
     },
     {
       "status": "A",
       "path": "packages/cli/src/serve/s7-durable-contract-ledger.ts",
-      "blob": "78211655c88c8c65bbb0a3f4ff76811006ca254b"
+      "blob": "f0643bc6a35f21c79178629a5df8f7c0222a361c"
     },
     {
       "status": "A",
@@ -546,12 +551,12 @@
     {
       "status": "A",
       "path": "packages/core/src/test-support/s7-durable-harness.ts",
-      "blob": "e11da8894cf7807e17839a60cdf1c7c3c6032cc4"
+      "blob": "c5667424ad93be24b14dde33332de1fddec38c4f"
     },
     {
       "status": "A",
       "path": "packages/core/src/test-support/s7-durable-scenarios.ts",
-      "blob": "181eb405876cbc345cb61aabd9d69535ec6d585d"
+      "blob": "7a026cd103f73896e72be8bd192aed5305a3cba6"
     },
     {
       "status": "A",
@@ -721,7 +726,7 @@
     {
       "status": "A",
       "path": "packages/owner-kernel/src/test-support/s7-durable-scenarios.ts",
-      "blob": "13ad494f7d06528e4da1d0a68f75a6c946918608"
+      "blob": "33512af8aafc05980c6f8e7f3988b868627eca6e"
     },
     {
       "status": "A",
@@ -841,7 +846,7 @@
     {
       "status": "M",
       "path": "research/design/modules/distributed-runtime/specification.md",
-      "blob": "6bc5074844e1fd90b48478b4ae9f782941b968bb"
+      "blob": "6b37fabc127156fc6b965ab1f5e7554d1ee97769"
     },
     {
       "status": "A",
@@ -849,9 +854,14 @@
       "blob": "b4d566fcc4fed437e8a4956fd7262d1629beab8f"
     },
     {
+      "status": "A",
+      "path": "research/postmortems/2026-08-02-acceptance-gap-misclassified-as-product-blocker.md",
+      "blob": "a2cb325dd4ccdeaa275452e87d5e627f56f02885"
+    },
+    {
       "status": "M",
       "path": "research/postmortems/README.md",
-      "blob": "f7ea9bc7d62208257b635653949822369cdda771"
+      "blob": "87ddbdd0a20146614ec5ea3de7837e9e9fd00994"
     },
     {
       "status": "A",

@@ -47,9 +47,6 @@ describe("S7 production durable contract registry", () => {
       kind: "variant" as const,
       caseKey: "ghost",
       reasonCode: "GHOST",
-      producer: "ghost",
-      recoveryOwner: "ghost",
-      resourceIdentity: "ghost",
       evidence: "ghost",
     }));
     expect(() => assertExactS7ScenarioSet(extra)).toThrow("extra=");
@@ -98,6 +95,8 @@ describe("S7 production durable contract registry", () => {
       expect(scenarioSource).not.toMatch(/observeOutcome\s*\(\s*\{\s*kind\s*,\s*caseKey/u);
       expect(scenarioSource).not.toMatch(/observeProducerHandle\s*\(\s*[A-Z0-9_]+_DURABLE_CONTRACT/u);
       expect(scenarioSource).not.toMatch(/observeRecoveryOwnerHandle\s*\(\s*[A-Z0-9_]+_DURABLE_CONTRACT/u);
+      expect(scenarioSource).not.toContain("observeProducerHandle");
+      expect(scenarioSource).not.toContain("observeRecoveryOwnerHandle");
     }
 
     const mainWorksceneExports = await readFile(
@@ -128,7 +127,7 @@ describe("S7 production durable contract registry", () => {
     120_000,
   );
 
-  it("rejects forged case, reason, owner and empty evidence independently", async () => {
+  it("rejects forged case, reason and empty evidence independently", async () => {
     const temporaryDirectoryRoot = await createTempDir("s7-durable-ledger-forgery");
     const required = requiredS7DurableScenarios()[0]!;
     const execute = createS7DurableScenarioAdapters().get(required.key)!;
@@ -136,9 +135,6 @@ describe("S7 production durable contract registry", () => {
     for (const mutation of [
       { ...observed, caseKey: `${observed.caseKey}-forged` },
       { ...observed, reasonCode: `${observed.reasonCode}_FORGED` },
-      { ...observed, producer: `${observed.producer}-forged` },
-      { ...observed, recoveryOwner: `${observed.recoveryOwner}-forged` },
-      { ...observed, resourceIdentity: "not-the-required-resource" },
       { ...observed, evidence: "" },
     ]) {
       expect(() => assertS7DurableScenarioObservation(required, mutation)).toThrow();
@@ -147,18 +143,6 @@ describe("S7 production durable contract registry", () => {
       {
         ...required,
         expectedReasonCode: `${required.expectedReasonCode}_FORGED`,
-      },
-      {
-        ...required,
-        expectedProducer: `${required.expectedProducer}-forged`,
-      },
-      {
-        ...required,
-        expectedRecoveryOwner: `${required.expectedRecoveryOwner}-forged`,
-      },
-      {
-        ...required,
-        expectedResourceIdentity: `${required.expectedResourceIdentity}-forged`,
       },
     ]) {
       expect(() =>

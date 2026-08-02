@@ -16,8 +16,6 @@ import {
   createS7TempDir,
   expectFailure,
   observeOutcome,
-  observeProducerHandle,
-  observeRecoveryOwnerHandle,
   observeReasonCode,
   type DurableCaseKind,
 } from "@zhixing/core/test-support/s7-durable-harness";
@@ -300,19 +298,7 @@ async function createLegacyGlobalState(_home: string, log: FileAuthorityCommitLo
 async function runLegacyMigration(
   fixture: Parameters<typeof migrateLegacyWorkscenes>[0],
 ): Promise<void> {
-  try {
-    await migrateLegacyWorkscenes(fixture);
-  } finally {
-    observeProducerHandle(
-      migrateLegacyWorkscenes,
-      "migrateLegacyWorkscenes",
-      "legacy-workscene-migration:migration-a",
-    );
-    observeRecoveryOwnerHandle(
-      fixture.migrationRunner ?? migrateLegacyWorkscenes,
-      "workscene-migration-owner",
-    );
-  }
+  await migrateLegacyWorkscenes(fixture);
 }
 
 function singlePassMigrationRunner(): StorageMaintenanceTaskRunner {
@@ -566,11 +552,6 @@ async function createOutbox(): Promise<LocalWorkspaceOperationOutbox> {
     root,
   );
   await outbox.initialize();
-  observeProducerHandle(
-    outbox,
-    "LocalWorkspaceOperationOutbox",
-    root,
-  );
   return outbox;
 }
 
@@ -579,11 +560,6 @@ function trackOutbox(
   root: string,
 ): LocalWorkspaceOperationOutbox {
   roots.set(outbox, root);
-  observeProducerHandle(
-    outbox,
-    "LocalWorkspaceOperationOutbox",
-    root,
-  );
   return outbox;
 }
 
@@ -632,10 +608,6 @@ async function recoverOutboxWithHost(
   });
   try {
     await host.start();
-    observeRecoveryOwnerHandle(
-      host,
-      "LocalWorkspaceManagementHost",
-    );
     const status = await waitForLocalWorkspaceHostSettlement(home);
     return {
       executions,

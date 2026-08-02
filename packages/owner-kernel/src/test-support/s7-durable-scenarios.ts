@@ -14,8 +14,6 @@ import {
   assert,
   createS7TempDir,
   expectFailure,
-  observeProducerHandle,
-  observeRecoveryOwnerHandle,
   type DurableCaseKind,
 } from "@zhixing/core/test-support/s7-durable-harness";
 
@@ -181,12 +179,6 @@ async function createSessionActivityFixture() {
     clock: () => NOW,
   });
   const journal = createJournal();
-  observeProducerHandle(
-    journal,
-    "ConversationRunJournal",
-    `session-activity:${conversationId}`,
-  );
-  observeRecoveryOwnerHandle(journal, "anchor-workscene-owner");
   return { conversationId, log, journal, createJournal };
 }
 

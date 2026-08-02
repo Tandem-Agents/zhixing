@@ -10,6 +10,7 @@ import {
   WorkspaceBindingCatalogIntegrityError,
 } from "@zhixing/core/environment";
 import {
+  CompletedLocalWorkspaceOperationError,
   LocalWorkspaceManagementHost,
   RecoveredLocalWorkspaceOperationsError,
   createLocalWorkspaceClient,
@@ -134,6 +135,58 @@ describe("LocalWorkspaceManagementHost", () => {
         operations: readonly unknown[];
       };
       expect(acknowledged.operations).toEqual([]);
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("keeps a completed business failure addressable until the caller confirms delivery", async () => {
+    const home = await createTempDir("workspace-host-failed-delivery");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      facade: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        create: async () => {
+          throw new LocalWorkspaceBusinessError(
+            "WORKSPACE_POLICY_REJECTED",
+            "rejected by policy",
+          );
+        },
+        authorizeForControl: vi.fn(),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      const client = createLocalWorkspaceClient(home);
+      await expect(client.create("paper", "C:\\paper")).rejects.toMatchObject({
+        name: "CompletedLocalWorkspaceOperationError",
+        code: "WORKSPACE_POLICY_REJECTED",
+      });
+      const credential = client.consumptionCredential();
+      expect(credential).toMatchObject({
+        outboxId: expect.stringMatching(/^outbox-/u),
+        operationId: expect.stringMatching(/^workspace-operation-/u),
+        resultDigest: expect.stringMatching(/^sha256:/u),
+      });
+
+      const restarted = createLocalWorkspaceClient(home);
+      await expect(restarted.create("paper", "C:\\paper")).rejects.toMatchObject({
+        name: "CompletedLocalWorkspaceOperationError",
+        code: "WORKSPACE_POLICY_REJECTED",
+      });
+      expect(restarted.consumptionCredential()).toEqual(credential);
+      await restarted.confirmDelivered();
+      await expect(createLocalWorkspaceClient(home).list()).resolves.toEqual([]);
     } finally {
       await host.close();
       await lease.release();

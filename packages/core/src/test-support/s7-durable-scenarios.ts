@@ -56,8 +56,6 @@ import {
   expectFailure,
   observeError,
   observeOutcome,
-  observeProducerHandle,
-  observeRecoveryOwnerHandle,
   observeReasonCode,
   registerS7Cleanup,
   type DurableCaseKind,
@@ -366,8 +364,6 @@ async function createWorksceneRegistryFixture(options: {
     clock: () => NOW,
     sceneIdFactory: () => "scene-a",
   });
-  observeProducerHandle(adapter, "AnchorWorksceneGlobalStateAdapter", "workscene:scene-a");
-  observeRecoveryOwnerHandle(adapter, "anchor-workscene-owner");
   return { log, adapter };
 }
 
@@ -633,12 +629,6 @@ async function createWorkspaceCatalogFixture(
     recoveryRunner: new StorageMaintenanceTaskRunner(),
     clock: () => NOW,
   });
-  observeProducerHandle(
-    catalog,
-    "WorkspaceBindingCatalog",
-    `workspace-catalog-reset:${protocolDigest("S7WorkspaceCatalogRoot", 1, root)}`,
-  );
-  observeRecoveryOwnerHandle(catalog, "workspace-binding-recovery-owner");
   registerS7Cleanup(() => catalog.stop());
   return { root, catalog, published };
 }
@@ -921,8 +911,6 @@ async function createWorkspaceProbeFixture(clock: () => string = () => NOW) {
     clock,
   });
   const handler = createHandler();
-  observeProducerHandle(handler, "WorkspaceProbeHandler", "workspace-probe:probe-runtime");
-  observeRecoveryOwnerHandle(handler, "workspace-probe-owner");
   return {
     bindingRef: binding.bindingRef,
     handler,
@@ -1087,8 +1075,6 @@ async function createWorkspaceBindingService(options: {
     bindingRefFactory: () => `workspace-${Math.random().toString(36).slice(2)}`,
     ...(options.resetGenesis ? { resetGenesis: options.resetGenesis } : {}),
   });
-  observeProducerHandle(service, "WorkspaceBindingService", "workspace-binding:device-a");
-  observeRecoveryOwnerHandle(service, "workspace-binding-recovery-owner");
   return service;
 }
 
@@ -1403,8 +1389,6 @@ export async function executeWorksceneActivityProjectionCase(
 async function createActivityProjectionFixture() {
   const { root, log } = await createActivityProjectionStorageFixture();
   const projection = new IncrementalWorksceneActivityProjection({ log });
-  observeProducerHandle(projection, "IncrementalWorksceneActivityProjection", "workscene-session-activity-v2");
-  observeRecoveryOwnerHandle(projection, "anchor-workscene-owner");
   return { root, log, projection };
 }
 
@@ -1419,20 +1403,13 @@ async function createActivityProjectionStorageFixture() {
 }
 
 function createActivityProjectionAt(root: string): IncrementalWorksceneActivityProjection {
-  const projection = new IncrementalWorksceneActivityProjection({
+  return new IncrementalWorksceneActivityProjection({
     log: new FileAuthorityCommitLog(
       path.join(root, "authority"),
       new FileArtifactStore(path.join(root, "artifacts")),
       { clock: () => NOW },
     ),
   });
-  observeProducerHandle(
-    projection,
-    "IncrementalWorksceneActivityProjection",
-    "workscene-session-activity-v2",
-  );
-  observeRecoveryOwnerHandle(projection, "anchor-workscene-owner");
-  return projection;
 }
 
 async function writeActivityProjectionStorage(

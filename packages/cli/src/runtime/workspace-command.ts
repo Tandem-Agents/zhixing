@@ -14,6 +14,7 @@ import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.j
 import { createExecutorReadinessSource } from "../serve/executor-readiness.js";
 import {
   createLocalWorkspaceClient,
+  CompletedLocalWorkspaceOperationError,
   localWorkspaceHostIsReachable,
   RecoveredLocalWorkspaceOperationsError,
   type LocalWorkspaceConsumptionCredential,
@@ -69,6 +70,10 @@ interface LocalWorkspaceDelivery<T, R> {
   readonly recovered: (
     operations: readonly LocalWorkspaceRecoveryNotice[],
   ) => Promise<void>;
+  readonly failure: (
+    error: CompletedLocalWorkspaceOperationError,
+    credential: LocalWorkspaceConsumptionCredential,
+  ) => Promise<void>;
 }
 
 export async function runWorkspaceCommand(
@@ -87,6 +92,7 @@ export async function runWorkspaceCommand(
       }
       writer.line(JSON.stringify({ recoveredOperations: operations }, null, 2));
     },
+    failure: (error) => renderLocalWorkspaceFailure(error, writer),
   });
 }
 
@@ -127,6 +133,7 @@ export async function runWorkspaceSceneCreateCommand(
             );
           }
         },
+        failure: (error) => renderLocalWorkspaceFailure(error, writer),
       },
     );
     const views = await withLocalWorkspaceFacade(
@@ -138,6 +145,7 @@ export async function runWorkspaceSceneCreateCommand(
             throw new Error("本机工作区授权仍有未消费的恢复结果");
           }
         },
+        failure: (error) => renderLocalWorkspaceFailure(error, writer),
       },
     );
     const matching = views.filter(({ name }) => name === sceneName);
@@ -280,7 +288,7 @@ export async function withLocalWorkspaceFacade<T, R = T>(
   }
 }
 
-async function useLocalWorkspaceClient<T, R>(
+export async function useLocalWorkspaceClient<T, R>(
   client: LocalWorkspaceClient,
   operation: (workspace: LocalWorkspaceClient) => Promise<T>,
   delivery: LocalWorkspaceDelivery<T, R>,
@@ -295,6 +303,19 @@ async function useLocalWorkspaceClient<T, R>(
       await client.confirmDelivered();
       return delivered;
     } catch (error) {
+      if (error instanceof CompletedLocalWorkspaceOperationError) {
+        const credential = client.consumptionCredential();
+        if (!credential) {
+          throw new Error(
+            "Completed local workspace failure has no recoverable consumption credential",
+            { cause: error },
+          );
+        }
+        await delivery.failure(error, credential);
+        await client.confirmDelivered();
+        error.markDeliveryConfirmed();
+        throw error;
+      }
       if (!(error instanceof RecoveredLocalWorkspaceOperationsError)) throw error;
       await delivery.recovered(
         error.operations.map((operation) =>
@@ -303,6 +324,14 @@ async function useLocalWorkspaceClient<T, R>(
       await client.confirmDelivered();
     }
   }
+}
+
+async function renderLocalWorkspaceFailure(
+  error: CompletedLocalWorkspaceOperationError,
+  writer: ReturnType<typeof createStdoutWriter>,
+): Promise<void> {
+  const { renderError } = await import("../render.js");
+  renderError(error, writer);
 }
 
 function recoveryNoticeOf(

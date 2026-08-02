@@ -192,6 +192,25 @@ export class RecoveredLocalWorkspaceOperationsError extends Error {
   }
 }
 
+export class CompletedLocalWorkspaceOperationError extends Error {
+  readonly code: string;
+  #deliveryConfirmed = false;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "CompletedLocalWorkspaceOperationError";
+    this.code = code;
+  }
+
+  get deliveryConfirmed(): boolean {
+    return this.#deliveryConfirmed;
+  }
+
+  markDeliveryConfirmed(): void {
+    this.#deliveryConfirmed = true;
+  }
+}
+
 export class LocalWorkspaceManagementHost {
   readonly #facade: LocalWorkspaceHostFacade;
   readonly #outbox: LocalWorkspaceOperationOutbox;
@@ -695,7 +714,7 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
     confirmation?: { readonly impact: string },
   ) => execute(zhixingHome, input, recover, confirmation).then((completed) => {
     currentResult = completed.operation;
-    return completed.value;
+    return resultValue(input, completed.result);
   });
   return {
     status: read("status") as () => Promise<LocalWorkspaceCatalogStatus>,
@@ -823,7 +842,7 @@ async function execute(
   input: LocalWorkspaceWriteOperation,
   recover: () => Promise<PendingDelivery>,
   confirmation?: { readonly impact: string },
-): Promise<{ readonly value: unknown; readonly operation: LocalWorkspaceOperation }> {
+): Promise<{ readonly result: OperationResult; readonly operation: LocalWorkspaceOperation }> {
   const normalized = validateLocalWorkspaceWriteOperation(input);
   const inputDigest = protocolDigest("LocalWorkspaceOperationInput", 1, normalized);
   const recovered = await recover();
@@ -840,7 +859,7 @@ async function execute(
   );
   if (claimed) {
     return {
-      value: resultValue(normalized, validateOperationResult(claimed.result)),
+      result: validateOperationResult(claimed.result),
       operation: claimed,
     };
   }
@@ -853,14 +872,15 @@ async function execute(
   }));
   const result = validateOperationResult(completed.result);
   await recover();
-  return { value: resultValue(normalized, result), operation: completed };
+  return { result, operation: completed };
 }
 
 function resultValue(input: LocalWorkspaceWriteOperation, result: OperationResult): unknown {
   if (!result.ok) {
-    const error = new Error(result.error?.message ?? "Local workspace operation failed") as Error & { code?: string };
-    error.code = result.error?.code;
-    throw error;
+    throw new CompletedLocalWorkspaceOperationError(
+      result.error?.code ?? "LOCAL_WORKSPACE_OPERATION_FAILED",
+      result.error?.message ?? "Local workspace operation failed",
+    );
   }
   return validateOperationValue(input, result.value);
 }

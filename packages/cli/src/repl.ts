@@ -1589,6 +1589,13 @@ export async function startRepl(): Promise<void> {
                                 );
                               }
                             },
+                            failure: async (error) => {
+                              cliWriter.line(
+                                chalk.red(
+                                  `${layout.contentPrefix}${error.message}`,
+                                ),
+                              );
+                            },
                           },
                         ),
                       create: (sceneName, workspace) =>
