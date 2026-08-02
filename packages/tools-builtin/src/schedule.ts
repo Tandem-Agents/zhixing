@@ -130,6 +130,10 @@ export function createScheduleTool(
           type: "string",
           description: "Task ID (required for update, delete, run)",
         },
+        task_revision: {
+          type: "number",
+          description: "Authority revision returned by list/create/update (required for update/delete unless observed in this client)",
+        },
         // ─── update 参数 ───
         enabled: {
           type: "boolean",
@@ -163,7 +167,7 @@ export function createScheduleTool(
           case "delete":
             return await handleDelete(facade, input, context);
           case "run":
-            return await handleRun(facade, input);
+            return await handleRun(facade, input, context);
           default:
             return { content: `Unknown action: ${action}`, isError: true };
         }
@@ -243,7 +247,7 @@ async function handleUpdate(
     if (schedule) patch.schedule = schedule;
   }
 
-  const task = await facade.update(id, patch, scheduleMutationContext(context));
+  const task = await facade.update(id, patch, scheduleMutationContext(context, input));
   return { content: formatTask(task, "Task updated successfully") };
 }
 
@@ -255,18 +259,19 @@ async function handleDelete(
   const id = input.id as string;
   if (!id) return { content: "Missing required parameter: id", isError: true };
 
-  await facade.delete(id, scheduleMutationContext(context));
+  await facade.delete(id, scheduleMutationContext(context, input));
   return { content: `Task ${id} deleted.` };
 }
 
 async function handleRun(
   facade: SchedulerFacade,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ): Promise<ToolResult> {
   const id = input.id as string;
   if (!id) return { content: "Missing required parameter: id", isError: true };
 
-  const result = await facade.run(id);
+  const result = await facade.run(id, scheduleMutationContext(context));
   return {
     content: `Task executed: ${result.status}\nDuration: ${result.durationMs}ms${result.output ? `\nOutput: ${result.output}` : ""}${result.error ? `\nError: ${result.error}` : ""}`,
   };
@@ -302,14 +307,24 @@ function buildSchedule(
 
 function scheduleMutationContext(
   context: ToolExecutionContext | undefined,
-): { operationId?: string } | undefined {
-  return context?.toolCallId ? { operationId: context.toolCallId } : undefined;
+  input?: Record<string, unknown>,
+): { operationId?: string; taskRevision?: number } | undefined {
+  const taskRevision = input?.task_revision;
+  const validRevision = Number.isSafeInteger(taskRevision) && (taskRevision as number) > 0
+    ? taskRevision as number
+    : undefined;
+  if (!context?.toolCallId && !validRevision) return undefined;
+  return {
+    ...(context?.toolCallId ? { operationId: context.toolCallId } : {}),
+    ...(validRevision ? { taskRevision: validRevision } : {}),
+  };
 }
 
 function formatTask(task: ScheduledTask, header: string): string {
   const lines = [
     header,
     `  ID: ${task.id}`,
+    `  Revision: ${task.taskRevision ?? "N/A"}`,
     `  Name: ${task.name}`,
     `  Schedule: ${formatSchedule(task.schedule)}`,
     `  Priority: ${task.priority}`,
@@ -325,7 +340,7 @@ function formatTaskBrief(task: ScheduledTask): string {
   const lastRun = task.state.lastRunAt
     ? `last: ${task.state.lastStatus ?? "?"} at ${task.state.lastRunAt}`
     : "never run";
-  return `[${status}] ${task.name} (${task.id})\n    ${formatSchedule(task.schedule)} | ${task.priority} | ${lastRun}\n    Next: ${task.state.nextRunAt ?? "N/A"}`;
+  return `[${status}] ${task.name} (${task.id}, revision ${task.taskRevision ?? "N/A"})\n    ${formatSchedule(task.schedule)} | ${task.priority} | ${lastRun}\n    Next: ${task.state.nextRunAt ?? "N/A"}`;
 }
 
 function formatSchedule(schedule: TaskSchedule): string {

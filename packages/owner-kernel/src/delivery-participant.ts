@@ -96,6 +96,13 @@ export interface JobStatusDeliveryInput {
   readonly statusRevision: number;
 }
 
+export interface SchedulerNoticeDeliveryInput {
+  readonly at: string;
+  readonly noticeId: string;
+  readonly target: DeliveryTargetDto;
+  readonly text: string;
+}
+
 export interface ConversationDeliveryParticipant {
   coordinate<Result>(operation: () => Promise<Result>): Promise<Result>;
   prepareConversationCommit(input: ConversationDeliveryCommitInput): DeliveryParticipantResult;
@@ -119,6 +126,9 @@ export interface JobDeliveryParticipant {
   coordinate<Result>(operation: () => Promise<Result>): Promise<Result>;
   prepareJobCommit(input: JobDeliveryCommitInput): DeliveryParticipantResult;
   prepareJobStatuses(inputs: readonly JobStatusDeliveryInput[]): DeliveryParticipantResult;
+  prepareSchedulerNotices?(
+    inputs: readonly SchedulerNoticeDeliveryInput[],
+  ): DeliveryParticipantResult;
   assertJobCommit(input: JobDeliveryCommitInput, envelope: CommitEnvelope<unknown>): void;
   assertJobStatuses(
     inputs: readonly JobStatusDeliveryInput[],
@@ -253,6 +263,29 @@ export class OwnerDeliveryParticipant
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
       inputs.flatMap((input) => jobStatusInputs(input, this.#maxAttempts)),
+      requireSingleCommitTime(inputs),
+    );
+  }
+
+  prepareSchedulerNotices(
+    inputs: readonly SchedulerNoticeDeliveryInput[],
+  ): DeliveryParticipantResult {
+    if (inputs.length === 0) return emptyParticipantResult();
+    return this.#prepare(
+      inputs.map((input) => ({
+        keyBody: {
+          kind: "scheduler-user-notice-delivery" as const,
+          noticeId: input.noticeId,
+        },
+        intent: {
+          endpoint: { kind: "channel" as const, target: input.target },
+          content: { text: input.text, markdown: input.text },
+          priority: "normal" as const,
+          source: { kind: "system" as const, reason: "scheduler-user-notice" },
+          createdAt: input.at,
+          maxAttempts: this.#maxAttempts,
+        },
+      })),
       requireSingleCommitTime(inputs),
     );
   }

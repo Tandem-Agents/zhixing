@@ -75,6 +75,8 @@ export type SchedulerFacadeEventHandler = (event: SchedulerFacadeEvent) => void;
 /** Stable identity of one schedule tool mutation inside a durable execution. */
 export interface ScheduleMutationContext {
   readonly operationId?: string;
+  /** Revision observed by the caller from a prior authority read. */
+  readonly taskRevision?: number;
 }
 
 /** Assignment-scoped append-only mutation port inherited by nested tool calls. */
@@ -100,8 +102,19 @@ export interface SchedulerBackend {
     source?: SchedulerControlSource,
   ): Promise<TaskView>;
   listTasks(): TaskView[];
-  updateTask(id: string, patch: TaskPatch, requestId?: string): Promise<TaskView>;
-  deleteTask(id: string, requestId?: string): Promise<void>;
+  updateTask(
+    id: string,
+    patch: TaskPatch,
+    requestId?: string,
+    taskRevision?: number,
+    source?: SchedulerControlSource,
+  ): Promise<TaskView>;
+  deleteTask(
+    id: string,
+    requestId?: string,
+    taskRevision?: number,
+    source?: SchedulerControlSource,
+  ): Promise<void>;
   runTask(
     id: string,
     requestId?: string,
@@ -111,6 +124,7 @@ export interface SchedulerBackend {
   abortRun?(
     runId: string,
     requestId?: string,
+    source?: SchedulerControlSource,
   ): Promise<boolean> | boolean;
   readonly activeTaskCount?: number;
 }
@@ -125,7 +139,7 @@ export interface SchedulerFacade {
   /** 删除任务。 */
   delete(id: string, context?: ScheduleMutationContext): Promise<void>;
   /** 立即运行任务一次。 */
-  run(id: string): Promise<AgentTurnResult>;
+  run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult>;
   /** 订阅运行事件，返回取消订阅函数。 */
   onEvent(handler: SchedulerFacadeEventHandler): () => void;
   /** 释放底层资源（如断开 RPC 连接 / 清订阅）。可选——本地实现通常无需。 */
@@ -134,29 +148,64 @@ export interface SchedulerFacade {
 
 /** 直调本进程 scheduler 权威后端的门面实现（核心宿主内部用）。 */
 export class LocalSchedulerFacade implements SchedulerFacade {
+  readonly #observedRevisions = new Map<string, number>();
   constructor(
     private readonly scheduler: SchedulerBackend,
     private readonly eventBus: IEventBus<SchedulerEventMap>,
   ) {}
 
-  async create(spec: TaskSpec): Promise<TaskView> {
-    return this.scheduler.createTask(spec);
+  async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
+    const task = await this.scheduler.createTask(
+      spec,
+      requireOperationId(context, "Schedule creation"),
+    );
+    this.#observe(task);
+    return task;
   }
 
   async list(): Promise<TaskView[]> {
-    return this.scheduler.listTasks();
+    const tasks = this.scheduler.listTasks();
+    for (const task of tasks) this.#observe(task);
+    return tasks;
   }
 
-  async update(id: string, patch: TaskPatch): Promise<TaskView> {
-    return this.scheduler.updateTask(id, patch);
+  async update(
+    id: string,
+    patch: TaskPatch,
+    context?: ScheduleMutationContext,
+  ): Promise<TaskView> {
+    const revision = context?.taskRevision ?? this.#observedRevisions.get(id);
+    const task = await this.scheduler.updateTask(
+      id,
+      patch,
+      requireOperationId(context, "Schedule update"),
+      revision,
+    );
+    this.#observe(task);
+    return task;
   }
 
-  async delete(id: string): Promise<void> {
-    await this.scheduler.deleteTask(id);
+  async delete(id: string, context?: ScheduleMutationContext): Promise<void> {
+    const revision = context?.taskRevision ?? this.#observedRevisions.get(id);
+    await this.scheduler.deleteTask(
+      id,
+      requireOperationId(context, "Schedule deletion"),
+      revision,
+    );
+    this.#observedRevisions.delete(id);
   }
 
-  async run(id: string): Promise<AgentTurnResult> {
-    return this.scheduler.runTask(id);
+  async run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult> {
+    return this.scheduler.runTask(
+      id,
+      requireOperationId(context, "Schedule run"),
+    );
+  }
+
+  #observe(task: TaskView): void {
+    if (Number.isSafeInteger(task.taskRevision) && task.taskRevision! > 0) {
+      this.#observedRevisions.set(task.id, task.taskRevision!);
+    }
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
@@ -212,4 +261,15 @@ export class LocalSchedulerFacade implements SchedulerFacade {
       for (const off of offs) off();
     };
   }
+}
+
+function requireOperationId(
+  context: ScheduleMutationContext | undefined,
+  label: string,
+): string {
+  const operationId = context?.operationId;
+  if (!operationId) {
+    throw new Error(`${label} requires a stable operation id`);
+  }
+  return operationId;
 }

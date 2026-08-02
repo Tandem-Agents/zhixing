@@ -19,10 +19,10 @@ import {
   type AgentTurnResult,
   type SchedulerFacadeEvent,
   type SchedulerFacadeEventHandler,
+  type ScheduleMutationContext,
 } from "@zhixing/core";
 import type { CoreHostLink } from "./core-host-connection.js";
 import { readSchedulerTasksSync } from "./scheduler-projection.js";
-import { randomUUID } from "node:crypto";
 
 export interface RpcSchedulerFacadeOptions {
   /** 进程级共享的核心宿主连接。 */
@@ -34,49 +34,69 @@ export interface RpcSchedulerFacadeOptions {
 export class RpcSchedulerFacade implements SchedulerFacade {
   private readonly link: CoreHostLink;
   private readonly storePath: string;
+  private readonly observedRevisions = new Map<string, number>();
 
   constructor(opts: RpcSchedulerFacadeOptions) {
     this.link = opts.connection;
     this.storePath = opts.storePath ?? getSchedulerStorePath();
   }
 
-  async create(spec: TaskSpec): Promise<TaskView> {
+  async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
     const client = await this.link.getClient();
-    return client.request<TaskView>("schedule.create", {
+    const task = await client.request<TaskView>("schedule.create", {
       ...spec,
-      requestId: `schedule-create-${randomUUID()}`,
+      requestId: requireOperationId(context, "Schedule creation"),
     });
+    this.observe(task);
+    return task;
   }
 
   // 读投影：直接读 scheduler.json（宿主单写者的只读投影），不拉宿主。损坏即空，
   // 与 turn-context 的 sync 投影同降级语义（不向消费者抛原始 JSON 解析错误）。
   async list(): Promise<TaskView[]> {
-    return readSchedulerTasksSync(this.storePath);
+    const tasks = readSchedulerTasksSync(this.storePath);
+    for (const task of tasks) this.observe(task);
+    return tasks;
   }
 
-  async update(id: string, patch: TaskPatch): Promise<TaskView> {
+  async update(id: string, patch: TaskPatch, context?: ScheduleMutationContext): Promise<TaskView> {
     const client = await this.link.getClient();
-    return client.request<TaskView>("schedule.update", {
+    const taskRevision = context?.taskRevision ?? this.observedRevisions.get(id);
+    if (!taskRevision) throw new Error("Schedule update requires an observed task revision");
+    const task = await client.request<TaskView>("schedule.update", {
       id,
       patch,
-      requestId: `schedule-update-${randomUUID()}`,
+      taskRevision,
+      requestId: requireOperationId(context, "Schedule update"),
     });
+    this.observe(task);
+    return task;
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(id: string, context?: ScheduleMutationContext): Promise<void> {
     const client = await this.link.getClient();
+    const taskRevision = context?.taskRevision ?? this.observedRevisions.get(id);
+    if (!taskRevision) throw new Error("Schedule deletion requires an observed task revision");
     await client.request("schedule.delete", {
       id,
-      requestId: `schedule-delete-${randomUUID()}`,
+      taskRevision,
+      requestId: requireOperationId(context, "Schedule deletion"),
     });
+    this.observedRevisions.delete(id);
   }
 
-  async run(id: string): Promise<AgentTurnResult> {
+  async run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult> {
     const client = await this.link.getClient();
     return client.request<AgentTurnResult>("schedule.run", {
       id,
-      requestId: `schedule-run-${randomUUID()}`,
+      requestId: requireOperationId(context, "Schedule run"),
     });
+  }
+
+  private observe(task: TaskView): void {
+    if (Number.isSafeInteger(task.taskRevision) && task.taskRevision! > 0) {
+      this.observedRevisions.set(task.id, task.taskRevision!);
+    }
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
@@ -103,6 +123,17 @@ function toAccepted(payload: unknown): SchedulerFacadeEvent {
     jobRunId: p.jobRunId,
     name: p.name,
   };
+}
+
+function requireOperationId(
+  context: ScheduleMutationContext | undefined,
+  label: string,
+): string {
+  const operationId = context?.operationId;
+  if (!operationId) {
+    throw new Error(`${label} requires a stable operation id`);
+  }
+  return operationId;
 }
 
 function toStarted(payload: unknown): SchedulerFacadeEvent {

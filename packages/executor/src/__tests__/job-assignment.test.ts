@@ -66,7 +66,10 @@ import {
   ControlAdmissionJournal,
   createJobControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
-import { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
+import {
+  OwnerDeliveryParticipant,
+  SchedulerUserNoticeJournal,
+} from "@zhixing/owner-kernel";
 import {
   InProcessJobDispatcher,
   JOB_JOURNAL_RECORD_SHAPES,
@@ -411,6 +414,14 @@ async function createUserHarness(
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
     assignmentRecordV2Writes?: boolean;
     clock?: () => string;
+    legacyPolicy?: {
+      readonly kind: "legacy-import";
+      readonly nextFire: string;
+      readonly scheduleDigest: string;
+      readonly legacyDigest: string;
+    };
+    schedulerFailureThreshold?: number;
+    schedulerNotices?: boolean;
   } = {},
 ) {
   const root = await createTempDir("job-assignment");
@@ -435,6 +446,10 @@ async function createUserHarness(
     },
     async remove() {},
   };
+  const delivery = deliveryParticipant(log);
+  const schedulerNotices = options.schedulerNotices
+    ? new SchedulerUserNoticeJournal({ log, delivery })
+    : undefined;
   const journal = new JobJournal({
     taskId: TASK_ID,
     anchorEpoch: 3,
@@ -442,7 +457,7 @@ async function createUserHarness(
     artifacts: ownerArtifacts,
     signer: identity,
     verifier: identity,
-    delivery: deliveryParticipant(log),
+    delivery,
     submission,
     compatibility,
     ingress: {
@@ -457,6 +472,8 @@ async function createUserHarness(
     legacyAbortTickets,
     clock,
     snapshotFor: options.ownerSnapshotFor ?? matchingSnapshotFor,
+    schedulerFailureThreshold: options.schedulerFailureThreshold,
+    schedulerNotices,
   });
   const ledger = new ConversationAssignmentLedger({
     log,
@@ -483,7 +500,11 @@ async function createUserHarness(
     },
   });
   const definition = options.definition ?? userDefinition();
-  await journal.define(definition, surfaceContext("define-user"));
+  await journal.define(
+    definition,
+    surfaceContext("define-user"),
+    options.legacyPolicy,
+  );
   const unsigned = createUnsignedJob(identity, {
     delivery:
       definition.definition.kind === "user"
@@ -507,6 +528,7 @@ async function createUserHarness(
     identity,
     compatibilityFacts,
     journal,
+    schedulerNotices,
     ledger,
     unsigned,
     dispatch,
@@ -5983,6 +6005,10 @@ describe("job resource lease domain closure", () => {
 
 type JobBehaviorScenarioId =
   | "commit"
+  | "legacyPolicy"
+  | "missedPolicy"
+  | "failurePolicy"
+  | "capabilityGap"
   | "manualAdmission"
   | "channelLifecycle"
   | "interactionSettlement"
@@ -6212,6 +6238,74 @@ const JOB_BEHAVIOR_SCENARIOS: Record<
   JobBehaviorScenarioId,
   () => Promise<JobBehaviorHarness>
 > = {
+  async legacyPolicy() {
+    const harness = await createUserHarness({
+      trigger: false,
+      legacyPolicy: {
+        kind: "legacy-import",
+        nextFire: "2026-07-15T09:05:00.000Z",
+        scheduleDigest: protocolDigest(
+          "LegacySchedule",
+          1,
+          userDefinition().definition,
+        ),
+        legacyDigest: protocolDigest("LegacyTask", 1, { taskId: TASK_ID }),
+      },
+    });
+    return userBehaviorHarness(harness);
+  },
+  async missedPolicy() {
+    const harness = await createUserHarness({ trigger: false });
+    await harness.journal.trigger({
+      jobRunId: JOB_RUN_ID,
+      scheduledFor: NOW,
+      context: surfaceContext("matrix-missed-policy"),
+      source: "user",
+      disposition: "missed-offline",
+      missedNextFire: {
+        readyBoundary: "2026-07-15T09:02:00.000Z",
+        nextFire: "2026-07-15T09:03:00.000Z",
+      },
+    });
+    return userBehaviorHarness(harness);
+  },
+  async failurePolicy() {
+    const harness = await createUserHarness({
+      assign: false,
+      schedulerFailureThreshold: 1,
+    });
+    await harness.journal.failQueued(JOB_RUN_ID);
+    await harness.journal.define(
+      userDefinition(2, "perform scheduled work", "disabled"),
+      surfaceContext("matrix-auto-disable-definition"),
+    );
+    await harness.journal.settleSchedulerAutoDisable({
+      jobRunId: JOB_RUN_ID,
+      disabledTaskRevision: 2,
+      context: hostContext("matrix-auto-disable-settled"),
+    });
+    return userBehaviorHarness(harness);
+  },
+  async capabilityGap() {
+    const harness = await createUserHarness({
+      assign: false,
+      schedulerNotices: true,
+    });
+    await harness.journal.noteCapabilityGap({
+      jobRunId: JOB_RUN_ID,
+      capabilityRevision: 1,
+      reason: "required executor capability is unavailable",
+      context: hostContext("matrix-capability-gap-open"),
+    });
+    await harness.journal.noteCapabilityGap({
+      jobRunId: JOB_RUN_ID,
+      capabilityRevision: 2,
+      reason: "required executor capability remains unavailable",
+      context: hostContext("matrix-capability-gap-update"),
+    });
+    await harness.journal.assign(assignmentPlan(harness.unsigned));
+    return userBehaviorHarness(harness);
+  },
   async channelLifecycle() {
     const lifecycle = await createJobChannelLifecycle();
     await lifecycle.finish();
@@ -6482,6 +6576,89 @@ const JOB_BEHAVIOR_SCENARIOS: Record<
 };
 
 const JOB_RECOVERY_PROBES = {
+  async schedulerPolicyProjection() {
+    const legacy = await JOB_BEHAVIOR_SCENARIOS.legacyPolicy();
+    const legacyJournal = await createUserHarness({
+      trigger: false,
+      legacyPolicy: {
+        kind: "legacy-import",
+        nextFire: "2026-07-15T09:05:00.000Z",
+        scheduleDigest: protocolDigest("LegacySchedule", 1, userDefinition().definition),
+        legacyDigest: protocolDigest("LegacyTask", 1, { taskId: TASK_ID }),
+      },
+    });
+    await expect(reopenUserJournal(legacyJournal).schedulerPolicy()).resolves.toMatchObject({
+      legacyNextFire: { nextFire: "2026-07-15T09:05:00.000Z" },
+    });
+    await legacy.fullProbe();
+
+    const missed = await createUserHarness({ trigger: false });
+    await missed.journal.trigger({
+      jobRunId: JOB_RUN_ID,
+      scheduledFor: NOW,
+      context: surfaceContext("matrix-policy-recovery-missed"),
+      source: "user",
+      disposition: "missed-offline",
+      missedNextFire: {
+        readyBoundary: "2026-07-15T09:02:00.000Z",
+        nextFire: "2026-07-15T09:03:00.000Z",
+      },
+    });
+    const missedPolicy = await reopenUserJournal(missed).schedulerPolicy();
+    expect(missedPolicy.missedNextFireByRun.get(JOB_RUN_ID)).toMatchObject({
+      nextFire: "2026-07-15T09:03:00.000Z",
+    });
+
+    const failure = await createUserHarness({
+      assign: false,
+      schedulerFailureThreshold: 1,
+    });
+    await failure.journal.failQueued(JOB_RUN_ID);
+    const pending = await reopenUserJournal(failure).schedulerPolicy();
+    expect(pending.failurePolicyByRun.get(JOB_RUN_ID)).toMatchObject({
+      autoDisableRequired: true,
+    });
+    expect(pending.pendingAutoDisable).toHaveLength(1);
+    await failure.journal.define(
+      userDefinition(2, "perform scheduled work", "disabled"),
+      surfaceContext("matrix-policy-recovery-disable"),
+    );
+    await failure.journal.settleSchedulerAutoDisable({
+      jobRunId: JOB_RUN_ID,
+      disabledTaskRevision: 2,
+      context: hostContext("matrix-policy-recovery-settle"),
+    });
+    await expect(
+      reopenUserJournal(failure).schedulerPolicy(),
+    ).resolves.toMatchObject({ pendingAutoDisable: [] });
+  },
+  async schedulerNoticeProjection() {
+    const harness = await createUserHarness({
+      assign: false,
+      schedulerNotices: true,
+    });
+    if (!harness.schedulerNotices) {
+      throw new Error("matrix scheduler notice authority is missing");
+    }
+    await harness.journal.noteCapabilityGap({
+      jobRunId: JOB_RUN_ID,
+      capabilityRevision: 1,
+      reason: "required executor capability is unavailable",
+      context: hostContext("matrix-notice-recovery-open"),
+    });
+    await harness.journal.noteCapabilityGap({
+      jobRunId: JOB_RUN_ID,
+      capabilityRevision: 2,
+      reason: "required executor capability remains unavailable",
+      context: hostContext("matrix-notice-recovery-update"),
+    });
+    await harness.journal.assign(assignmentPlan(harness.unsigned));
+    await expect(harness.schedulerNotices.history(0)).resolves.toMatchObject([
+      { kind: "capability-gap", state: "open" },
+      { kind: "capability-gap", state: "updated" },
+      { kind: "capability-gap", state: "closed" },
+    ]);
+  },
   async channelRelayOutbox() {
     const lifecycle = await createJobChannelLifecycle();
     await expect(
@@ -6699,6 +6876,34 @@ interface JobRecordBehaviorSpec {
 const CONFLICT_TIME = "2026-07-15T09:03:00.000Z";
 
 const JOB_RECORD_BEHAVIOR = {
+  "legacy-next-fire": {
+    scenario: "legacyPolicy",
+    recovery: jobRecovery("schedulerPolicyProjection"),
+  },
+  "missed-next-fire": {
+    scenario: "missedPolicy",
+    recovery: jobRecovery("schedulerPolicyProjection"),
+  },
+  "failure-policy": {
+    scenario: "failurePolicy",
+    recovery: jobRecovery("schedulerPolicyProjection"),
+  },
+  "auto-disable-settled": {
+    scenario: "failurePolicy",
+    recovery: jobRecovery("schedulerPolicyProjection"),
+  },
+  "capability-gap-opened": {
+    scenario: "capabilityGap",
+    recovery: jobRecovery("schedulerNoticeProjection"),
+  },
+  "capability-gap-updated": {
+    scenario: "capabilityGap",
+    recovery: jobRecovery("schedulerNoticeProjection"),
+  },
+  "capability-gap-closed": {
+    scenario: "capabilityGap",
+    recovery: jobRecovery("schedulerNoticeProjection"),
+  },
   "channel-challenge-prepared": {
     scenario: "channelLifecycle",
     recovery: jobRecovery("channelRelayOutbox"),
@@ -6872,6 +7077,102 @@ async function expectGuardReplayAccepted(probe: () => Promise<unknown>): Promise
     // still be stably rejected by the already-replayed terminal state.
   }
 }
+
+describe("scheduler mutation and automatic-disable fences", () => {
+  it("replays a durable task mutation before CAS and rejects key reuse", async () => {
+    const harness = await createUserHarness({ trigger: false });
+    const operationId = "schedule-update-replay";
+    const operationDigest = protocolDigest("ScheduleUpdateIntent", 1, {
+      taskId: TASK_ID,
+      taskRevision: 1,
+      patch: { name: "renamed" },
+    });
+    const next = userDefinition(2, "perform scheduled work", "enabled");
+
+    await expect(
+      harness.journal.define(next, surfaceContext(operationId), undefined, {
+        operationId,
+        operationDigest,
+        expectedRevision: 1,
+      }),
+    ).resolves.toEqual({ taskRevision: 2, replayed: false });
+    await expect(
+      reopenUserJournal(harness).define(next, surfaceContext(operationId), undefined, {
+        operationId,
+        operationDigest,
+        expectedRevision: 1,
+      }),
+    ).resolves.toEqual({ taskRevision: 2, replayed: true });
+    await expect(
+      reopenUserJournal(harness).taskMutationRevision(
+        operationId,
+        operationDigest,
+      ),
+    ).resolves.toBe(2);
+    await expect(
+      reopenUserJournal(harness).taskMutationRevision(
+        operationId,
+        protocolDigest("ScheduleUpdateIntent", 1, { different: true }),
+      ),
+    ).rejects.toThrow("conflicting payload");
+    await expect(
+      reopenUserJournal(harness).define(
+        userDefinition(3, "perform scheduled work", "enabled"),
+        surfaceContext("stale-update"),
+        undefined,
+        {
+          operationId: "stale-update",
+          operationDigest: protocolDigest("ScheduleUpdateIntent", 1, {
+            taskId: TASK_ID,
+            taskRevision: 1,
+            patch: { enabled: true },
+          }),
+          expectedRevision: 1,
+        },
+      ),
+    ).rejects.toThrow("revision conflict");
+  });
+
+  it("rejects scheduled and manual triggers while auto-disable is pending", async () => {
+    const harness = await createUserHarness({
+      assign: false,
+      schedulerFailureThreshold: 1,
+    });
+    await harness.journal.failQueued(JOB_RUN_ID);
+
+    await expect(
+      harness.journal.trigger({
+        jobRunId: "job-after-auto-disable",
+        scheduledFor: "2026-07-15T09:01:00.000Z",
+        context: surfaceContext("scheduled-after-auto-disable"),
+        source: "user",
+      }),
+    ).rejects.toThrow("pending automatic disablement");
+
+    const source = jobRunSource(NOW, "manual-after-auto-disable");
+    const outcome = await harness.journal.applyControl({
+      admission: new ControlAdmissionJournal(harness.log, harness.artifacts),
+      envelope: createJobControlEnvelope({
+        requestId: "manual-after-auto-disable",
+        source,
+        at: NOW,
+        body: { t: "job-run", taskId: TASK_ID, anchorEpoch: 3 },
+      }),
+      source,
+    });
+    expect(outcome).toMatchObject({
+      kind: "applied",
+      result: {
+        status: "rejected",
+        error: {
+          code: "fence-rejected",
+          message: "Task is pending automatic disablement",
+        },
+      },
+    });
+    await expect(harness.journal.occurrences()).resolves.toHaveLength(1);
+  });
+});
 
 describe("job record execution-point behavior matrix", () => {
   it("binds every job record type to a producing scenario", () => {

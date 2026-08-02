@@ -25,6 +25,11 @@ import { protocolDigest } from "@zhixing/core/protocol";
 import { createJobControlEnvelope } from "./control-admission.js";
 import type { ControlAdmissionJournal, TrustedControlSource } from "./control-admission.js";
 import type { JobJournal } from "./job-assignment.js";
+import {
+  schedulerNoticeGroupKey,
+  type MissedSummaryGroup,
+  type SchedulerUserNoticeJournal,
+} from "./scheduler-user-notices.js";
 
 const TERMINAL_STATES = new Set([
   "committed",
@@ -35,7 +40,6 @@ const TERMINAL_STATES = new Set([
 ] as const);
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_MISSED_GRACE_MS = 30_000;
-const DEFAULT_FAILURE_THRESHOLD = 5;
 
 export interface AnchorSchedulerOptions {
   readonly anchorEpoch: number;
@@ -71,6 +75,7 @@ export interface AnchorSchedulerOptions {
   readonly pollMs?: number;
   readonly missedGraceMs?: number;
   readonly failureThreshold?: number;
+  readonly schedulerNotices?: SchedulerUserNoticeJournal;
 }
 
 export interface AnchorSystemTaskSpec {
@@ -111,10 +116,12 @@ export class AnchorScheduler {
   readonly #now: () => Date;
   readonly #pollMs: number;
   readonly #missedGraceMs: number;
-  readonly #failureThreshold: number;
   #onlineSince: number | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #accepting = false;
+  #prepared = false;
+  #activationRecovery: Promise<void> | undefined;
+  readonly #recoveringTaskIds = new Set<string>();
   #tickRunning = false;
 
   constructor(options: AnchorSchedulerOptions) {
@@ -128,14 +135,16 @@ export class AnchorScheduler {
       options.missedGraceMs ?? DEFAULT_MISSED_GRACE_MS,
       "Scheduler missed grace",
     );
-    this.#failureThreshold = boundedPositive(
-      options.failureThreshold ?? DEFAULT_FAILURE_THRESHOLD,
-      "Scheduler failure threshold",
-    );
   }
 
   async start(): Promise<void> {
-    if (this.#accepting) return;
+    await this.prepare();
+    this.activate();
+    await this.#activationRecovery;
+  }
+
+  async prepare(): Promise<void> {
+    if (this.#prepared) return;
     this.#onlineSince = this.#now().getTime();
     for (const taskId of await this.#options.listTaskIds()) {
       const registeredSystem = this.#options.systemTasks?.get(taskId);
@@ -146,22 +155,64 @@ export class AnchorScheduler {
     }
     await this.#importLegacyTasks();
     await this.#ensureConfiguredSystemTasks();
-    for (const [taskId, definition] of this.#definitions) {
-      const journal = this.#journal(taskId);
-      if (definition.definition.kind === "system") {
-        await journal.resumeSystemJobs(this.#hostContext(`resume-system-${taskId}`));
-      } else {
-        await this.#options.recoverUserJobs?.(journal);
-      }
-      await this.#refreshTask(
-        taskId,
-        definition.definition.kind === "system"
-          ? { systemView: this.#systemView(taskId) }
-          : {},
-      );
-    }
+    await this.#publishProjection();
+    this.#prepared = true;
+  }
+
+  activate(): void {
+    if (!this.#prepared) throw new Error("Scheduler must be prepared before activation");
+    if (this.#accepting) return;
     this.#accepting = true;
+    this.#arm();
+    this.#activationRecovery = this.#recoverAfterActivation().catch((error) => {
+      this.#options.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
+  }
+
+  async #recoverAfterActivation(): Promise<void> {
+    const pending = [...this.#definitions];
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (this.#accepting) {
+        const entry = pending[cursor++];
+        if (!entry) return;
+        const [taskId, definition] = entry;
+        const journal = this.#journal(taskId);
+        this.#recoveringTaskIds.add(taskId);
+        try {
+          await this.#disableAfterRepeatedFailure(taskId);
+          if (definition.definition.kind === "system") {
+            await journal.resumeSystemJobs(
+              this.#hostContext(`resume-system-${taskId}`),
+            );
+          } else {
+            await this.#options.recoverUserJobs?.(journal);
+          }
+        } catch (error) {
+          this.#options.onError?.(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        } finally {
+          try {
+            await this.#refreshTask(
+              taskId,
+              definition.definition.kind === "system"
+                ? { systemView: this.#systemView(taskId) }
+                : {},
+            );
+          } finally {
+            this.#recoveringTaskIds.delete(taskId);
+          }
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(4, pending.length) }, () => worker()),
+    );
     await this.#resumeQueuedUserJobs();
+    await this.#prepareMissedSummaries();
     for (const [taskId, definition] of this.#definitions) {
       if (definition.definition.kind === "system") continue;
       for (const occurrence of await this.#journal(taskId).occurrences()) {
@@ -171,23 +222,61 @@ export class AnchorScheduler {
       }
     }
     await this.#publishProjection();
-    this.#arm();
+  }
+
+  async #prepareMissedSummaries(): Promise<void> {
+    if (!this.#options.schedulerNotices) return;
+    const groups = new Map<string, {
+      readonly target?: Extract<TaskDefinition["definition"], { kind: "user" }>["origin"];
+      readonly members: Array<MissedSummaryGroup["members"][number]>;
+    }>();
+    for (const [taskId, definition] of this.#definitions) {
+      if (definition.definition.kind !== "user") continue;
+      const target = definition.definition.origin;
+      const groupKey = schedulerNoticeGroupKey(target);
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = { ...(target ? { target } : {}), members: [] };
+        groups.set(groupKey, group);
+      }
+      for (const occurrence of await this.#journal(taskId).occurrences()) {
+        if (occurrence.state !== "missed") continue;
+        group.members.push({
+          taskId,
+          jobRunId: occurrence.jobRunId,
+          taskName: definition.definition.spec.name,
+          scheduledFor: occurrence.scheduledFor,
+        });
+      }
+    }
+    await this.#options.schedulerNotices.prepareMissedSummaries(
+      [...groups].map(([groupKey, group]) => ({
+        groupKey,
+        members: group.members,
+        ...(group.target ? { target: group.target } : {}),
+      })),
+      this.#now().toISOString(),
+    );
   }
 
   async stop(): Promise<void> {
     this.#accepting = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
+    await this.#activationRecovery?.catch(() => undefined);
+    this.#activationRecovery = undefined;
     await Promise.allSettled(this.#completionTrackers.values());
     for (const unsubscribe of this.#statusUnsubscribers.values()) unsubscribe();
     this.#statusUnsubscribers.clear();
     await this.#publishProjection();
+    this.#prepared = false;
   }
 
   async createTask(
     spec: TaskSpec,
     requestId = `schedule-create-${randomUUID()}`,
     source?: SchedulerControlSource,
+    operationDigest = protocolDigest("ScheduleCreateIntent", 1, { spec }),
   ): Promise<ScheduledTask> {
     this.#requireAccepting();
     if (spec.action.kind !== "agent-turn") {
@@ -196,14 +285,25 @@ export class AnchorScheduler {
     // The caller's idempotency key owns task identity, so a response-loss
     // retry reaches the same journal instead of creating another task.
     const taskId = scheduleTaskIdForRequest(requestId);
+    const journal = this.#journal(taskId);
+    if (await this.#taskMutationRevisionFor(journal, requestId, operationDigest)) {
+      await this.#refreshTask(taskId);
+      return this.#requiredView(taskId);
+    }
     const definition = await this.#userDefinition(
       taskId,
       1,
       spec,
       source ? definitionSource(source.ingress) : {},
     );
-    await this.#journal(taskId).define(definition, this.#hostContext(requestId));
+    const applied = await journal.define(
+      definition,
+      this.#hostContext(requestId),
+      undefined,
+      { operationId: requestId, operationDigest },
+    );
     await this.#refreshTask(taskId);
+    if (applied?.replayed) return this.#requiredView(taskId);
     await this.#options.eventBus.emit("scheduler:task-created", {
       taskId,
       name: spec.name,
@@ -219,8 +319,19 @@ export class AnchorScheduler {
     taskId: string,
     patch: TaskPatch,
     requestId = `schedule-update-${randomUUID()}`,
+    expectedRevision?: number,
+    operationDigest = protocolDigest("ScheduleUpdateIntent", 1, {
+      taskId,
+      ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      patch,
+    }),
   ): Promise<ScheduledTask> {
     this.#requireAccepting();
+    const journal = this.#journal(taskId);
+    if (await this.#taskMutationRevisionFor(journal, requestId, operationDigest)) {
+      await this.#refreshTask(taskId);
+      return this.#requiredView(taskId);
+    }
     const current = this.#requiredUserDefinition(taskId);
     const view = this.#requiredView(taskId);
     const currentSpec = current.definition.spec;
@@ -257,8 +368,18 @@ export class AnchorScheduler {
           : {}),
       },
     );
-    await this.#journal(taskId).define(next, this.#hostContext(requestId));
+    const applied = await journal.define(
+      next,
+      this.#hostContext(requestId),
+      undefined,
+      {
+        operationId: requestId,
+        operationDigest,
+        ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      },
+    );
     await this.#refreshTask(taskId);
+    if (applied?.replayed) return this.#requiredView(taskId);
     await this.#options.eventBus.emit("scheduler:task-updated", {
       taskId,
       name: (next.definition as Extract<TaskDefinition["definition"], { kind: "user" }>).spec.name,
@@ -271,8 +392,15 @@ export class AnchorScheduler {
   async deleteTask(
     taskId: string,
     requestId = `schedule-delete-${randomUUID()}`,
+    expectedRevision?: number,
+    operationDigest = protocolDigest("ScheduleDeleteIntent", 1, {
+      taskId,
+      ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+    }),
   ): Promise<void> {
     this.#requireAccepting();
+    const journal = this.#journal(taskId);
+    if (await this.#taskMutationRevisionFor(journal, requestId, operationDigest)) return;
     const current = this.#requiredUserDefinition(taskId);
     const view = this.#requiredView(taskId);
     const deleted: TaskDefinition = {
@@ -284,8 +412,17 @@ export class AnchorScheduler {
         spec: { ...structuredClone(current.definition.spec), enabled: false },
       },
     };
-    const journal = this.#journal(taskId);
-    await journal.define(deleted, this.#hostContext(requestId));
+    const applied = await journal.define(
+      deleted,
+      this.#hostContext(requestId),
+      undefined,
+      {
+        operationId: requestId,
+        operationDigest,
+        ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      },
+    );
+    if (applied?.replayed) return;
     const cancellationFailures: unknown[] = [];
     for (const occurrence of await journal.occurrences()) {
       if (TERMINAL_STATES.has(occurrence.state as never)) continue;
@@ -472,12 +609,33 @@ export class AnchorScheduler {
   async abortRun(
     jobRunId: string,
     requestId = `schedule-cancel-${randomUUID()}`,
+    controlSource?: SchedulerControlSource,
   ): Promise<boolean> {
     this.#requireAccepting();
     const taskId = this.#taskForRun(jobRunId);
     if (!taskId) return false;
     const journal = this.#journal(taskId);
-    const context = this.#hostContext(requestId);
+    const at = this.#now().toISOString();
+    const source = this.#manualSource(requestId, at, controlSource);
+    const outcome = await journal.applyControl({
+      admission: this.#options.admission,
+      envelope: createJobControlEnvelope({
+        requestId,
+        source,
+        at,
+        body: {
+          t: "job-cancel",
+          taskId,
+          jobRunId,
+          anchorEpoch: this.#options.anchorEpoch,
+        },
+      }),
+      source,
+    });
+    if (outcome.kind === "rejected" || outcome.result.status !== "ok") {
+      return false;
+    }
+    const context = this.#controlContext(requestId, controlSource);
     const result = this.#options.cancelUserJob
       ? await this.#options.cancelUserJob({
           journal,
@@ -599,7 +757,20 @@ export class AnchorScheduler {
       context: this.#hostContext(`schedule-trigger-${jobRunId}`),
       source: definition.definition.kind,
       ...(offlineMiss && definition.definition.kind === "user"
-        ? { disposition: "missed-offline" as const }
+        ? {
+            disposition: "missed-offline" as const,
+            missedNextFire: {
+              readyBoundary: new Date(this.#onlineSince!).toISOString(),
+              ...(definition.definition.spec.schedule.kind === "once"
+                ? {}
+                : {
+                    nextFire: nextScheduleTime(
+                      definition.definition.spec.schedule,
+                      new Date(this.#onlineSince!),
+                    ),
+                  }),
+            },
+          }
         : {}),
     });
     if (occurrence.state === "queued") {
@@ -656,6 +827,7 @@ export class AnchorScheduler {
 
   async #resumeQueuedUserJobs(): Promise<void> {
     for (const [taskId, queued] of this.#queuedRunsByTask) {
+      if (this.#recoveringTaskIds.has(taskId)) continue;
       const definition = this.#definitions.get(taskId);
       if (!definition || definition.definition.kind !== "user") continue;
       for (const occurrence of queued) {
@@ -747,13 +919,33 @@ export class AnchorScheduler {
   }
 
   async #disableAfterRepeatedFailure(taskId: string): Promise<void> {
+    const journal = this.#journal(taskId);
+    const policy = (await this.#schedulerPolicyFor(journal)).pendingAutoDisable.at(0);
+    if (!policy) return;
+    let definition = await journal.taskDefinition();
+    if (!definition || definition.definition.kind !== "user") return;
     const view = this.#requiredView(taskId);
-    if (view.state.consecutiveErrors < this.#failureThreshold || !view.enabled) return;
-    await this.updateTask(
-      taskId,
-      { enabled: false },
-      `schedule-auto-disable-${taskId}-${this.#definitions.get(taskId)?.taskRevision ?? 0}`,
-    );
+    if (definition.state !== "disabled") {
+      await this.updateTask(
+        taskId,
+        { enabled: false },
+        `schedule-auto-disable:${protocolDigest("SchedulerAutoDisable", 1, {
+          taskId,
+          jobRunId: policy.jobRunId,
+          taskRevision: policy.taskRevision,
+          failureCount: policy.failureCount,
+        })}`,
+      );
+      definition = await journal.taskDefinition();
+    }
+    if (!definition || definition.state !== "disabled") {
+      throw new Error("Scheduler auto-disable did not produce a disabled definition");
+    }
+    await journal.settleSchedulerAutoDisable({
+      jobRunId: policy.jobRunId,
+      disabledTaskRevision: definition.taskRevision,
+      context: this.#hostContext(`schedule-auto-disable-settled-${policy.jobRunId}`),
+    });
     await this.#options.eventBus.emit("scheduler:task-disabled", {
       taskId,
       name: view.name,
@@ -828,20 +1020,49 @@ export class AnchorScheduler {
       ? projectUserTask(projection)
       : projectSystemTask(projection, options.systemView, previous);
     this.#views.set(taskId, view);
+    const policy = await this.#schedulerPolicyFor(journal);
+    const last = occurrences.at(-1);
+    const frozen = last?.state === "missed"
+      ? policy.missedNextFireByRun.get(last.jobRunId)?.nextFire
+      : last && (last.state === "failed" || last.state === "expired")
+        ? policy.failurePolicyByRun.get(last.jobRunId)?.nextFire
+        : undefined;
+    const pendingAutoDisable = policy.pendingAutoDisable.length > 0;
+    const legacyNext = !last && policy.legacyNextFire?.taskRevision === definition.taskRevision
+      ? policy.legacyNextFire.nextFire
+      : undefined;
     const unchangedDefinition =
       previousDefinition?.taskRevision === definition.taskRevision &&
       previousDefinition.state === definition.state;
-    const next =
-      (unchangedDefinition ? this.#nextRunByTask.get(taskId) : undefined) ??
-      deriveNextRun(
-        view.schedule,
-        occurrences,
-        new Date(projection.updatedAt),
-        taskId,
-      );
+    const next = pendingAutoDisable
+      ? undefined
+      : frozen ?? legacyNext ??
+        (unchangedDefinition ? this.#nextRunByTask.get(taskId) : undefined) ??
+        deriveNextRun(view.schedule, occurrences, new Date(projection.updatedAt));
     if (definition.state === "enabled" && next) this.#nextRunByTask.set(taskId, next);
     else this.#nextRunByTask.delete(taskId);
     view.state.nextRunAt = this.#nextRunByTask.get(taskId);
+  }
+
+  async #schedulerPolicyFor(journal: JobJournal): ReturnType<JobJournal["schedulerPolicy"]> {
+    if (typeof journal.schedulerPolicy === "function") return journal.schedulerPolicy();
+    // Test-only legacy journal doubles do not carry scheduler policy facts.
+    return Promise.resolve({
+      missedNextFireByRun: new Map(),
+      failurePolicyByRun: new Map(),
+      pendingAutoDisable: [],
+    });
+  }
+
+  async #taskMutationRevisionFor(
+    journal: JobJournal,
+    operationId: string,
+    operationDigest: string,
+  ): Promise<number | undefined> {
+    if (typeof journal.taskMutationRevision === "function") {
+      return journal.taskMutationRevision(operationId, operationDigest);
+    }
+    return undefined;
   }
 
   async #importLegacyTasks(): Promise<void> {
@@ -867,13 +1088,16 @@ export class AnchorScheduler {
       await this.#journal(legacy.id).define(
         definition,
         this.#hostContext(`schedule-legacy-import-${legacy.id}`),
+        legacy.state.nextRunAt
+          ? {
+              kind: "legacy-import",
+              nextFire: legacy.state.nextRunAt,
+              scheduleDigest: protocolDigest("LegacySchedulerSchedule", 1, legacy.schedule),
+              legacyDigest: protocolDigest("LegacyScheduledTask", 1, legacy),
+            }
+          : undefined,
       );
       await this.#refreshTask(legacy.id);
-      const view = this.#views.get(legacy.id);
-      if (view && legacy.state.nextRunAt) {
-        this.#nextRunByTask.set(legacy.id, legacy.state.nextRunAt);
-        view.state.nextRunAt = legacy.state.nextRunAt;
-      }
     }
   }
 
@@ -957,6 +1181,22 @@ export class AnchorScheduler {
   #hostContext(requestId: string): AuthorityCallContext {
     return {
       principal: { kind: "host", component: "anchor-scheduler" },
+      requestId,
+      deadlineAt: new Date(this.#now().getTime() + 60_000).toISOString(),
+    };
+  }
+
+  #controlContext(
+    requestId: string,
+    source: SchedulerControlSource | undefined,
+  ): AuthorityCallContext {
+    if (!source) return this.#hostContext(requestId);
+    return {
+      principal: {
+        kind: "surface",
+        surfacePrincipal: source.ingress.surfacePrincipal,
+        connectionId: source.connectionId,
+      },
       requestId,
       deadlineAt: new Date(this.#now().getTime() + 60_000).toISOString(),
     };
@@ -1128,7 +1368,6 @@ function deriveNextRun(
   schedule: TaskSchedule,
   occurrences: readonly JobOccurrence[],
   now: Date,
-  taskId: string,
 ): string | undefined {
   const last = occurrences.at(-1);
   if (!last) {
@@ -1136,22 +1375,7 @@ function deriveNextRun(
     return nextScheduleTime(schedule, now);
   }
   if (schedule.kind === "once") return undefined;
-  const scheduled = nextScheduleTime(schedule, new Date(last.scheduledFor));
-  if (!scheduled) return undefined;
-  const failures = countConsecutiveFailures(occurrences);
-  if (failures === 0) return scheduled;
-  const capMs = Math.min(60_000 * 2 ** Math.min(failures - 1, 6), 3_600_000);
-  const entropy = Number.parseInt(
-    createHash("sha256")
-      .update(`${taskId}\n${last.jobRunId}\n${failures}`)
-      .digest("hex")
-      .slice(0, 12),
-    16,
-  );
-  const jitterMs = entropy % (capMs + 1);
-  return new Date(
-    Math.max(Date.parse(scheduled), now.getTime() + jitterMs),
-  ).toISOString();
+  return nextScheduleTime(schedule, new Date(last.scheduledFor));
 }
 
 function countConsecutiveFailures(occurrences: readonly JobOccurrence[]): number {

@@ -18,6 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { MethodEntry } from "../handlers.js";
 import { RpcErrors } from "../handlers.js";
 import { PROTOCOL_VERSION, SUPPORTED_PROTOCOL_RANGE } from "../protocol.js";
+import { RpcSurfaceRegistry } from "../surface-identity.js";
 
 
 interface AuthParams {
@@ -54,6 +55,17 @@ export function buildAuthMethod(): MethodEntry {
 
       ctx.connection.authenticated = true;
       ctx.connection.clientInfo = params.client;
+      if (params.client?.id !== undefined) {
+        const registry = ctx.server.rpcSurfaces ?? new RpcSurfaceRegistry();
+        try {
+          registry.bind(ctx.connection, params.client.id);
+        } catch (error) {
+          ctx.connection.authenticated = false;
+          throw RpcErrors.invalidParams(
+            error instanceof Error ? error.message : "Invalid first-party client identity",
+          );
+        }
+      }
 
       return {
         protocol: PROTOCOL_VERSION,

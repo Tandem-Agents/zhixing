@@ -292,8 +292,8 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   it("rolls back every partially acquired delivery resource when later startup fails", async () => {
     await writeFile(resolve(home, "delivery-queue.json"), "[]", "utf8");
     const order: string[] = [];
-    const authorityStart = vi
-      .spyOn(AuthorityDeliveryPipeline.prototype, "start")
+    const authorityPrepare = vi
+      .spyOn(AuthorityDeliveryPipeline.prototype, "prepare")
       .mockRejectedValueOnce(new Error("authority delivery failed"));
     const authorityStop = vi
       .spyOn(AuthorityDeliveryPipeline.prototype, "stop")
@@ -331,7 +331,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       expect(deliveryStop).toHaveBeenCalledTimes(1);
       expect(outboxStop).toHaveBeenCalledTimes(1);
     } finally {
-      authorityStart.mockRestore();
+      authorityPrepare.mockRestore();
       authorityStop.mockRestore();
       deliveryStop.mockRestore();
       outboxStop.mockRestore();

@@ -29,6 +29,17 @@ import {
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-schedule";
+let nextClientInstance = 0;
+const conversations = {
+  durableControlPrincipal(input: {
+    readonly surfacePrincipal: string;
+    readonly connectionId: string;
+  }) {
+    return { ...input, deviceId: "device-test" };
+  },
+  removeObserverFromAll() {},
+  async disposeAll() {},
+} as never;
 
 // ─── Mock runAgentTurn (avoids real LLM) ───
 
@@ -53,6 +64,7 @@ interface RpcClient {
 }
 
 async function connect(port: number): Promise<RpcClient> {
+  const clientInstanceId = `schedule-test-${++nextClientInstance}`;
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   await new Promise<void>((resolve, reject) => {
     ws.once("open", () => resolve());
@@ -90,7 +102,24 @@ async function connect(port: number): Promise<RpcClient> {
       const id = ++nextId;
       return new Promise((resolve) => {
         pending.set(id, resolve);
-        ws.send(encodeRequest(id, method, params));
+        const authenticatedParams =
+          method === "auth" && typeof params === "object" && params !== null
+            ? { ...params, client: { id: clientInstanceId } }
+            : params;
+        const requestParams =
+          method.startsWith("schedule.") &&
+          method !== "schedule.list" &&
+          typeof authenticatedParams === "object" &&
+          authenticatedParams !== null
+            ? {
+                ...authenticatedParams,
+                requestId:
+                  "requestId" in authenticatedParams
+                    ? (authenticatedParams as { requestId?: unknown }).requestId
+                    : `${clientInstanceId}:${method}:${id}`,
+              }
+            : authenticatedParams;
+        ws.send(encodeRequest(id, method, requestParams));
       });
     },
     waitNotification(method, timeoutMs = 2000) {
@@ -144,6 +173,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       scheduler,
+      conversations,
     });
     server = await startServer({ context: ctx, schedulerEventBus: eventBus });
   });
@@ -224,8 +254,16 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       action: { kind: "agent-turn", prompt: "x" },
     })) as { result: ScheduledTask };
 
-    const delResp = await client.request("schedule.delete", { id: created.result.id });
-    expect(isSuccessResponse(delResp)).toBe(true);
+    const delResp = await client.request("schedule.delete", {
+      id: created.result.id,
+      // This integration fixture intentionally uses the retired in-memory
+      // scheduler, whose test projection predates durable revisions. The
+      // production scheduler port validates the observed revision itself.
+      taskRevision: 1,
+    });
+    if (!isSuccessResponse(delResp)) {
+      throw new Error(`schedule.delete failed: ${JSON.stringify(delResp)}`);
+    }
 
     const list = await client.request("schedule.list");
     if (isSuccessResponse(list)) {
@@ -237,7 +275,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
   it("schedule.delete returns NOT_FOUND for unknown id", async () => {
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
-    const r = await client.request("schedule.delete", { id: "nope" });
+    const r = await client.request("schedule.delete", { id: "nope", taskRevision: 1 });
     expect(isErrorResponse(r)).toBe(true);
     if (isErrorResponse(r)) {
       expect(r.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
@@ -396,6 +434,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
         version: TEST_VERSION,
         token: TEST_TOKEN,
         scheduler: schedulerWithReg,
+        conversations,
       });
       serverWithReg = await startServer({ context: ctx, schedulerEventBus: eventBus });
     });

@@ -306,6 +306,37 @@ describe("server.info", () => {
     expect(result.deliveryStatus).toHaveLength(1);
   });
 
+  it("returns scheduler notices from the caller's scalar durable cursor", async () => {
+    const notice = {
+      noticeId: "gap-1",
+      revision: 9,
+      kind: "capability-gap" as const,
+      state: "open" as const,
+      ref: {
+        kind: "capability-gap" as const,
+        taskId: "task-1",
+        jobRunId: "job-1",
+        round: 1,
+      },
+      reason: "缺少执行能力",
+      actions: ["检查目标设备"],
+      at: "2026-08-02T00:00:00.000Z",
+    };
+    const schedulerNotices = vi.fn(async () => ({
+      notices: [notice],
+      nextRevision: 9,
+    }));
+    const ctx = mkCtx({ runtimeControl: { schedulerNotices } });
+
+    const result = await buildServerInfoMethod().handler({
+      schedulerNoticeAfter: 4,
+    }, ctx) as any;
+
+    expect(schedulerNotices).toHaveBeenCalledWith(4);
+    expect(result.schedulerNotices).toEqual([notice]);
+    expect(result.schedulerNoticeNext).toBe(9);
+  });
+
   it("returns conversation status history after each run cursor", async () => {
     const conversationStatus = vi.fn(async () => ({
       notices: [{
@@ -551,7 +582,7 @@ describe("delivery.resolve", () => {
     expect(resolveDelivery).toHaveBeenCalledWith({
       ...params,
       principal: {
-        surfacePrincipal: "rpc:owner",
+        surfacePrincipal: "rpc:desktop",
         deviceId: "anchor-device",
         connectionId: "7",
       },

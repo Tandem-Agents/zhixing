@@ -1,6 +1,11 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
+  SCHEDULER_USER_NOTICE_STREAM,
+  nextScheduleTime,
+  type TaskSchedule,
+} from "@zhixing/core";
+import {
   AuthorityStorageError,
   collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
@@ -209,6 +214,7 @@ import type {
   JobDeliveryParticipant,
 } from "./delivery-participant.js";
 import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
+import type { SchedulerUserNoticeJournal } from "./scheduler-user-notices.js";
 // 权威记录注册表随公开 job 模块再导出:执行点行为矩阵(生产/full/guard/
 // 恢复/对抗)按它做类型级闭合,新增记录类型缺行即编译失败。
 export {
@@ -273,6 +279,10 @@ interface JobSubmissionGuardProjection {
   latestDefinitionState: "enabled" | "disabled" | "deleted";
   latestDefinitionRevision: number | undefined;
   readonly definitionKinds: Map<number, "user" | "system">;
+  readonly taskOperations: Map<
+    string,
+    { readonly digest: string; readonly taskRevision: number }
+  >;
   readonly systemMissAliases: Set<string>;
   pendingSystemMissedJobRunId: string | undefined;
   readonly occurrences: Map<
@@ -359,7 +369,32 @@ interface JobSubmissionGuardProjection {
 interface JobProjection {
   definition?: TaskDefinition;
   readonly definitions: Map<number, TaskDefinition>;
+  readonly taskOperations: Map<
+    string,
+    { readonly digest: string; readonly taskRevision: number }
+  >;
   readonly occurrences: Map<string, JobOccurrence>;
+  legacyNextFire?: Extract<JobJournalRecord, { t: "legacy-next-fire" }>;
+  readonly missedNextFireByRun: Map<
+    string,
+    Extract<JobJournalRecord, { t: "missed-next-fire" }>
+  >;
+  readonly failurePolicyByRun: Map<
+    string,
+    Extract<JobJournalRecord, { t: "failure-policy" }>
+  >;
+  readonly autoDisableSettledRuns: Set<string>;
+  readonly capabilityGapByRun: Map<
+    string,
+    {
+      readonly round: number;
+      readonly noticeId: string;
+      readonly capabilityRevision: number;
+      readonly reasonDigest: string;
+      readonly reason: string;
+      readonly open: boolean;
+    }
+  >;
   readonly systemMissAliases: Map<
     string,
     { readonly scheduledFor: string; readonly coalescedJobRunId: string }
@@ -605,6 +640,8 @@ export interface JobJournalOptions {
   readonly systemResources?: SystemJobResourceCoordinator;
   readonly systemHandlers?: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
   readonly clock?: () => string;
+  readonly schedulerFailureThreshold?: number;
+  readonly schedulerNotices?: SchedulerUserNoticeJournal;
 }
 
 /** Pure assignment metadata checked before the authority is allowed to issue credentials. */
@@ -670,6 +707,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #systemResources: SystemJobResourceCoordinator | undefined;
   readonly #systemHandlers: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
   readonly #clock: () => string;
+  readonly #schedulerFailureThreshold: number;
+  readonly #schedulerNotices: SchedulerUserNoticeJournal | undefined;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
     (notice: JobStatusNotice) => void | Promise<void>
@@ -703,6 +742,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     this.#systemResources = options.systemResources;
     this.#systemHandlers = options.systemHandlers ?? new Map();
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    this.#schedulerFailureThreshold = options.schedulerFailureThreshold ?? 5;
+    this.#schedulerNotices = options.schedulerNotices;
+    assertPositive(this.#schedulerFailureThreshold, "Scheduler failure threshold");
   }
 
   onStatus(listener: (notice: JobStatusNotice) => void | Promise<void>): () => void {
@@ -1099,6 +1141,166 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     ).value;
   }
 
+  async taskMutationRevision(
+    operationId: string,
+    operationDigest: string,
+  ): Promise<number | undefined> {
+    assertIdentifier(operationId, "Task mutation operationId");
+    return this.#select((state) => {
+      const receipt = state.taskOperations.get(operationId);
+      if (!receipt) return undefined;
+      if (receipt.digest !== operationDigest) {
+        throw new Error("Task mutation operation id has a conflicting payload");
+      }
+      return receipt.taskRevision;
+    });
+  }
+
+  async schedulerPolicy(): Promise<{
+    readonly legacyNextFire?: Extract<JobJournalRecord, { t: "legacy-next-fire" }>;
+    readonly missedNextFireByRun: ReadonlyMap<
+      string,
+      Extract<JobJournalRecord, { t: "missed-next-fire" }>
+    >;
+    readonly failurePolicyByRun: ReadonlyMap<
+      string,
+      Extract<JobJournalRecord, { t: "failure-policy" }>
+    >;
+    readonly pendingAutoDisable: readonly Extract<
+      JobJournalRecord,
+      { t: "failure-policy" }
+    >[];
+  }> {
+    return this.#select((state) => ({
+      ...(state.legacyNextFire
+        ? { legacyNextFire: structuredClone(state.legacyNextFire) }
+        : {}),
+      missedNextFireByRun: new Map(
+        [...state.missedNextFireByRun].map(([key, value]) => [key, structuredClone(value)]),
+      ),
+      failurePolicyByRun: new Map(
+        [...state.failurePolicyByRun].map(([key, value]) => [key, structuredClone(value)]),
+      ),
+      pendingAutoDisable: [...state.failurePolicyByRun.values()]
+        .filter(
+          (policy) =>
+            policy.autoDisableRequired &&
+            !state.autoDisableSettledRuns.has(policy.jobRunId),
+        )
+        .map((policy) => structuredClone(policy)),
+    }));
+  }
+
+  async noteCapabilityGap(input: {
+    readonly jobRunId: string;
+    readonly capabilityRevision: number;
+    readonly reason: string;
+    readonly context: AuthorityCallContext;
+  }): Promise<void> {
+    if (!this.#schedulerNotices) {
+      throw new Error("Scheduler notice authority is unavailable");
+    }
+    if (input.context.principal.kind !== "host") {
+      throw new Error("Scheduler capability-gap observation is host-owned");
+    }
+    assertIdentifier(input.jobRunId, "Capability gap jobRunId");
+    assertPositive(input.capabilityRevision, "Capability gap revision");
+    if (input.reason.length === 0) throw new TypeError("Capability gap reason is required");
+    const reasonDigest = protocolDigest("SchedulerCapabilityGapReason", 1, {
+      reason: input.reason,
+    });
+    await this.#transact<void>((state) => {
+      const occurrence = state.occurrences.get(input.jobRunId);
+      const current = state.states.get(input.jobRunId);
+      const definition = occurrence
+        ? requireDefinitionRevision(state, occurrence.taskRevision)
+        : undefined;
+      if (!occurrence || !current || current.state !== "queued" || !definition) {
+        throw new Error("Capability gap requires a queued user occurrence");
+      }
+      if (definition.definition.kind !== "user") {
+        throw new Error("System jobs do not emit user capability-gap notices");
+      }
+      const previous = state.capabilityGapByRun.get(input.jobRunId);
+      if (
+        previous?.open &&
+        previous.capabilityRevision === input.capabilityRevision &&
+        previous.reasonDigest === reasonDigest
+      ) {
+        return { kind: "return", value: undefined };
+      }
+      const round = previous?.open ? previous.round : (previous?.round ?? 0) + 1;
+      const noticeId = previous?.open
+        ? previous.noticeId
+        : `scheduler-gap:${protocolDigest("SchedulerCapabilityGap", 1, {
+            taskId: this.#taskId,
+            jobRunId: input.jobRunId,
+            round,
+          })}`;
+      const kind = previous?.open ? "capability-gap-updated" : "capability-gap-opened";
+      const text = `定时任务「${definition.definition.spec.name}」暂时找不到可用的执行环境，已排队等待；请检查目标设备及所需能力。`;
+      const entries: LogicalRecord<unknown>[] = [
+        jobRecord(this.#taskId, {
+          t: kind,
+          jobRunId: input.jobRunId,
+          round,
+          noticeId,
+          capabilityRevision: input.capabilityRevision,
+          reasonDigest,
+          reason: input.reason,
+        }),
+        ...this.#schedulerNotices!.prepareRecords({
+          noticeId,
+          kind: "capability-gap",
+          state: previous?.open ? "updated" : "open",
+          ref: { kind: "capability-gap", taskId: this.#taskId, jobRunId: input.jobRunId, round },
+          reason: input.reason,
+          actions: ["检查目标设备在线状态", "检查任务所需工具与能力"],
+          at: this.#clock(),
+          ...(!previous?.open && definition.definition.origin
+            ? { target: definition.definition.origin, channelText: text }
+            : {}),
+        }),
+      ];
+      return { kind: "append", entries, value: undefined };
+    });
+    await this.#schedulerNotices.publishNew();
+  }
+
+  async settleSchedulerAutoDisable(input: {
+    readonly jobRunId: string;
+    readonly disabledTaskRevision: number;
+    readonly context: AuthorityCallContext;
+  }): Promise<void> {
+    if (input.context.principal.kind !== "host") {
+      throw new Error("Scheduler policy settlement is host-owned");
+    }
+    await this.#transact<void>((state) => {
+      if (state.autoDisableSettledRuns.has(input.jobRunId)) {
+        return { kind: "return", value: undefined };
+      }
+      const policy = state.failurePolicyByRun.get(input.jobRunId);
+      if (!policy?.autoDisableRequired) {
+        throw new Error("Scheduler auto-disable has no durable obligation");
+      }
+      if (
+        state.definition?.state !== "disabled" ||
+        state.definition.taskRevision !== input.disabledTaskRevision
+      ) {
+        throw new Error("Scheduler auto-disable settlement lacks its disabled definition");
+      }
+      return {
+        kind: "append",
+        entries: [jobRecord(this.#taskId, {
+          t: "auto-disable-settled",
+          jobRunId: input.jobRunId,
+          disabledTaskRevision: input.disabledTaskRevision,
+        })],
+        value: undefined,
+      };
+    });
+  }
+
   async pendingChannelGrantDeliveries(): Promise<
     readonly ChannelInteractionGrant[]
   > {
@@ -1235,28 +1437,91 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
-  async define(definition: TaskDefinition, context: AuthorityCallContext): Promise<void> {
+  async define(
+    definition: TaskDefinition,
+    context: AuthorityCallContext,
+    policy?: {
+      readonly kind: "legacy-import";
+      readonly nextFire: string;
+      readonly scheduleDigest: string;
+      readonly legacyDigest: string;
+    },
+    operation?: {
+      readonly operationId: string;
+      readonly operationDigest: string;
+      readonly expectedRevision?: number;
+    },
+  ): Promise<{ readonly taskRevision: number; readonly replayed: boolean }> {
     const candidate = validateTaskDefinition(definition);
     if (candidate.taskId !== this.#taskId) {
       throw new TypeError("Task definition belongs to a different job journal");
     }
     this.#authorizeDefinition(context, candidate);
+    if (operation) {
+      assertIdentifier(operation.operationId, "Task mutation operationId");
+      if (!/^sha256:[a-f0-9]{64}$/.test(operation.operationDigest)) {
+        throw new TypeError("Task mutation operation digest is invalid");
+      }
+      const replay = await this.taskMutationRevision(
+        operation.operationId,
+        operation.operationDigest,
+      );
+      if (replay !== undefined) {
+        return { taskRevision: replay, replayed: true };
+      }
+    }
     const prepared = await prepareJobStored(
       candidate,
-      (stored) => taskRevisionRecord(candidate, stored),
+      (stored) => taskRevisionRecord(candidate, stored, operation),
       this.#artifacts,
     );
-    await this.#transact<void>((state, prefix) => {
+    const revision = await this.#transact<{
+      readonly taskRevision: number;
+      readonly replayed: boolean;
+    }>((state, prefix) => {
+      if (operation) {
+        const replay = state.taskOperations.get(operation.operationId);
+        if (replay) {
+          if (replay.digest !== operation.operationDigest) {
+            throw new Error("Task mutation operation id has a conflicting payload");
+          }
+          return {
+            kind: "return",
+            value: { taskRevision: replay.taskRevision, replayed: true },
+          };
+        }
+      }
       const current = state.definition;
+      if (
+        operation?.expectedRevision !== undefined &&
+        current?.taskRevision !== operation.expectedRevision
+      ) {
+        throw new Error("Schedule task revision conflict");
+      }
       if (current && canonicalize(current) === canonicalize(candidate)) {
-        return { kind: "return", value: undefined };
+        return {
+          kind: "return",
+          value: { taskRevision: current.taskRevision, replayed: true },
+        };
       }
       if (current && !taskCreationProvenanceMatches(current, candidate)) {
         throw new Error("Task creation provenance is immutable");
       }
       const entries: LogicalRecord<JobJournalRecord | GovernorRecord>[] = [
-        jobRecord(this.#taskId, taskRevisionRecord(candidate, prepared.stored)),
+        jobRecord(
+          this.#taskId,
+          taskRevisionRecord(candidate, prepared.stored, operation),
+        ),
       ];
+      if (policy) {
+        entries.push(jobRecord(this.#taskId, {
+          t: "legacy-next-fire",
+          taskRevision: candidate.taskRevision,
+          nextFire: policy.nextFire,
+          scheduleDigest: policy.scheduleDigest,
+          legacyDigest: policy.legacyDigest,
+        }));
+      }
       if (taskRevisionStopsQueued(candidate) && state.activeJobRunId) {
         const active = state.states.get(state.activeJobRunId);
         const assignmentId = state.assignmentByJob.get(state.activeJobRunId);
@@ -1351,9 +1616,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         ...atomicFacts,
       });
       if (violation !== undefined) throwTaskDefinitionViolation(violation);
-      return { kind: "append", entries, value: undefined };
+      return {
+        kind: "append",
+        entries,
+        value: { taskRevision: candidate.taskRevision, replayed: false },
+      };
     }, prepared.references);
     await this.resumeCompatibilityProjection();
+    return revision.value;
   }
 
   async trigger(input: {
@@ -1363,6 +1633,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     readonly source: "user" | "system";
     /** User tasks missed while the anchor was offline are recorded, never backfilled. */
     readonly disposition?: "due" | "missed-offline";
+    readonly missedNextFire?: {
+      readonly readyBoundary: string;
+      readonly nextFire?: string;
+    };
   }): Promise<JobOccurrence> {
     assertIdentifier(input.jobRunId, "Job run id");
     assertCanonicalTime(input.scheduledFor, "Job scheduled time");
@@ -1396,6 +1670,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       if (definition.state !== "enabled") {
         throw new Error("Disabled or deleted tasks cannot create occurrences");
+      }
+      if (
+        [...state.failurePolicyByRun.values()].some(
+          (policy) =>
+            policy.autoDisableRequired &&
+            !state.autoDisableSettledRuns.has(policy.jobRunId),
+        )
+      ) {
+        throw new Error("Task is pending automatic disablement");
       }
       let occurrenceState: JobRunState =
         input.disposition === "missed-offline" && input.source === "user"
@@ -1488,8 +1771,25 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         occurrenceState: occurrence.state,
         activeState: effectiveActiveState,
         hasAtomicAdmission: occurrence.state === "queued",
+        hasAtomicOfflineMissPolicy:
+          occurrence.state === "missed" &&
+          input.source === "user" &&
+          input.missedNextFire !== undefined,
       });
       entries.push(jobRecord(this.#taskId, { t: "occurrence", occ: occurrence }));
+      if (occurrenceState === "missed" && input.source === "user") {
+        if (!input.missedNextFire) {
+          throw new TypeError("Missed user occurrence requires a frozen next-fire policy");
+        }
+        entries.push(jobRecord(this.#taskId, {
+          t: "missed-next-fire",
+          jobRunId: input.jobRunId,
+          readyBoundary: input.missedNextFire.readyBoundary,
+          ...(input.missedNextFire.nextFire
+            ? { nextFire: input.missedNextFire.nextFire }
+            : {}),
+        }));
+      }
       if (occurrenceState === "queued") {
         const admission: Extract<JobJournalRecord, { t: "admitted" }> = {
           t: "admitted",
@@ -2845,6 +3145,20 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           }
           if (definition.state !== "enabled") {
             return { result: rejectedControl("fence-rejected", "Task is not enabled") };
+          }
+          if (
+            [...state.failurePolicyByRun.values()].some(
+              (policy) =>
+                policy.autoDisableRequired &&
+                !state.autoDisableSettledRuns.has(policy.jobRunId),
+            )
+          ) {
+            return {
+              result: rejectedControl(
+                "fence-rejected",
+                "Task is pending automatic disablement",
+              ),
+            };
           }
           const replacementEntries: LogicalRecord<unknown>[] = [];
           if (state.activeJobRunId) {
@@ -4908,6 +5222,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               state,
               decision.entries,
             );
+            const policyRecords = this.#prepareSchedulerPolicyRecords(
+              state,
+              decision.entries,
+              context.at,
+            );
             const statuses = jobStatusDeliveryInputs(
               this.#taskId,
               state,
@@ -4921,6 +5240,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               entries: [
                 ...resourceRecords,
                 ...decision.entries,
+                ...policyRecords,
                 ...prepared.records,
               ],
             };
@@ -4953,6 +5273,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               this.#anchorEpoch,
             ),
           );
+          await this.#schedulerNotices?.publishNew();
         }
         return transaction;
       } catch (error) {
@@ -5130,6 +5451,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             envelopeLsn: envelope.lsn,
           }),
         });
+        if (body.operationId !== undefined) {
+          if (state.taskOperations.has(body.operationId)) {
+            throw corruptJobJournal("Task mutation operation is duplicated");
+          }
+          state.taskOperations.set(body.operationId, {
+            digest: body.operationDigest!,
+            taskRevision: body.taskRevision,
+          });
+        }
         state.definition = snapshot(definition);
         state.definitions.set(definition.taskRevision, snapshot(definition));
         return state;
@@ -5155,6 +5485,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           hasAtomicAdmission: envelopeRecords.some(
             (record) =>
               record.t === "admitted" && record.jobRunId === body.occ.jobRunId,
+          ),
+          hasAtomicOfflineMissPolicy: envelopeRecords.some(
+            (record) =>
+              record.t === "missed-next-fire" &&
+              record.jobRunId === body.occ.jobRunId,
           ),
         });
         if (
@@ -5182,6 +5517,118 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           definitionKind: definition.definition.kind,
           occurrenceState: body.occ.state,
         });
+        return state;
+      }
+      case "legacy-next-fire": {
+        const definitionRecord = envelopeRecords.find(
+          (record) =>
+            record.t === "task-revision" &&
+            record.taskRevision === body.taskRevision,
+        );
+        if (!definitionRecord || state.legacyNextFire) {
+          throw corruptJobJournal("Legacy next-fire lacks its atomic imported definition");
+        }
+        state.legacyNextFire = body;
+        return state;
+      }
+      case "missed-next-fire": {
+        const occurrence = envelopeRecords.find(
+          (record) =>
+            record.t === "occurrence" &&
+            record.occ.jobRunId === body.jobRunId &&
+            record.occ.state === "missed",
+        );
+        if (!occurrence || state.missedNextFireByRun.has(body.jobRunId)) {
+          throw corruptJobJournal("Missed next-fire lacks its atomic missed occurrence");
+        }
+        state.missedNextFireByRun.set(body.jobRunId, body);
+        return state;
+      }
+      case "failure-policy": {
+        const terminal = envelopeRecords.find(
+          (record) =>
+            record.t === "state" &&
+            record.jobRunId === body.jobRunId &&
+            (record.state === "failed" || record.state === "expired") &&
+            record.statusRevision === body.statusRevision,
+        );
+        const occurrence = state.occurrences.get(body.jobRunId);
+        if (
+          !terminal ||
+          !occurrence ||
+          occurrence.taskRevision !== body.taskRevision ||
+          state.failurePolicyByRun.has(body.jobRunId)
+        ) {
+          throw corruptJobJournal("Failure policy lacks its atomic failed terminal");
+        }
+        state.failurePolicyByRun.set(body.jobRunId, body);
+        return state;
+      }
+      case "auto-disable-settled": {
+        const policy = state.failurePolicyByRun.get(body.jobRunId);
+        if (
+          !policy?.autoDisableRequired ||
+          state.definition?.state !== "disabled" ||
+          state.definition.taskRevision !== body.disabledTaskRevision ||
+          state.autoDisableSettledRuns.has(body.jobRunId)
+        ) {
+          throw corruptJobJournal("Auto-disable settlement is invalid or duplicated");
+        }
+        state.autoDisableSettledRuns.add(body.jobRunId);
+        return state;
+      }
+      case "capability-gap-opened":
+      case "capability-gap-updated": {
+        if (!envelope.entries.some((entry) =>
+          entry.stream === SCHEDULER_USER_NOTICE_STREAM &&
+          typeof entry.body === "object" && entry.body !== null &&
+          (entry.body as { noticeId?: unknown }).noticeId === body.noticeId,
+        )) {
+          throw corruptJobJournal("Capability gap lacks its atomic user notice");
+        }
+        const current = state.states.get(body.jobRunId);
+        if (current?.state !== "queued") {
+          throw corruptJobJournal("Capability gap does not bind a queued occurrence");
+        }
+        const previous = state.capabilityGapByRun.get(body.jobRunId);
+        if (body.t === "capability-gap-opened") {
+          if (previous?.open || body.round !== (previous?.round ?? 0) + 1) {
+            throw corruptJobJournal("Capability gap opening round is invalid");
+          }
+        } else if (
+          !previous?.open ||
+          previous.round !== body.round ||
+          previous.noticeId !== body.noticeId
+        ) {
+          throw corruptJobJournal("Capability gap update does not bind the open round");
+        }
+        state.capabilityGapByRun.set(body.jobRunId, {
+          round: body.round,
+          noticeId: body.noticeId,
+          capabilityRevision: body.capabilityRevision,
+          reasonDigest: body.reasonDigest,
+          reason: body.reason,
+          open: true,
+        });
+        return state;
+      }
+      case "capability-gap-closed": {
+        if (!envelope.entries.some((entry) =>
+          entry.stream === SCHEDULER_USER_NOTICE_STREAM &&
+          typeof entry.body === "object" && entry.body !== null &&
+          (entry.body as { noticeId?: unknown }).noticeId === body.noticeId,
+        )) {
+          throw corruptJobJournal("Capability gap close lacks its atomic notice update");
+        }
+        const previous = state.capabilityGapByRun.get(body.jobRunId);
+        if (
+          !previous?.open ||
+          previous.round !== body.round ||
+          previous.noticeId !== body.noticeId
+        ) {
+          throw corruptJobJournal("Capability gap close does not bind the open round");
+        }
+        state.capabilityGapByRun.set(body.jobRunId, { ...previous, open: false });
         return state;
       }
       case "system-miss-coalesced": {
@@ -6688,6 +7135,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             envelopeLsn: envelope.lsn,
           }),
         });
+        if (body.operationId !== undefined) {
+          if (state.taskOperations.has(body.operationId)) {
+            throw corruptJobJournal("Task mutation operation is duplicated");
+          }
+          state.taskOperations.set(body.operationId, {
+            digest: body.operationDigest!,
+            taskRevision: body.taskRevision,
+          });
+        }
         state.definitionKinds.set(body.taskRevision, body.kind);
         state.latestDefinitionState = body.state;
         state.latestDefinitionRevision = body.taskRevision;
@@ -6714,6 +7170,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             (record) =>
               record.t === "admitted" && record.jobRunId === body.occ.jobRunId,
           ),
+          hasAtomicOfflineMissPolicy: envelopeRecords.some(
+            (record) =>
+              record.t === "missed-next-fire" &&
+              record.jobRunId === body.occ.jobRunId,
+          ),
         });
         state.occurrences.set(body.occ.jobRunId, {
           scheduledFor: body.occ.scheduledFor,
@@ -6734,6 +7195,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         });
         return state;
       }
+      case "legacy-next-fire":
+      case "missed-next-fire":
+      case "failure-policy":
+      case "auto-disable-settled":
+      case "capability-gap-opened":
+      case "capability-gap-updated":
+      case "capability-gap-closed":
+        return state;
       case "system-miss-coalesced": {
         const coalesced = state.occurrences.get(body.coalescedJobRunId);
         const active = state.activeJobRunId
@@ -7823,6 +8292,92 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         return state;
     }
   };
+
+  #prepareSchedulerPolicyRecords(
+    state: JobProjection,
+    entries: readonly LogicalRecord<unknown>[],
+    at: string,
+  ): readonly LogicalRecord<unknown>[] {
+    const definition = state.definition;
+    if (!definition || definition.definition.kind !== "user") return [];
+    const result: LogicalRecord<unknown>[] = [];
+    for (const entry of entries) {
+      if (entry.stream !== jobStream(this.#taskId)) continue;
+      const body = entry.body as Partial<JobJournalRecord>;
+      if (
+        body.t !== "state" ||
+        (body.state !== "failed" && body.state !== "expired") ||
+        typeof body.jobRunId !== "string" ||
+        typeof body.statusRevision !== "number"
+      ) {
+        continue;
+      }
+      const occurrence = state.occurrences.get(body.jobRunId);
+      if (!occurrence) {
+        throw corruptJobJournal("Scheduler failure policy has no occurrence");
+      }
+      const failureCount = consecutiveSchedulerFailures(
+        state,
+        occurrence.jobRunId,
+      );
+      const nextFire = frozenFailureNextFire({
+        taskId: this.#taskId,
+        jobRunId: occurrence.jobRunId,
+        schedule: definition.definition.spec.schedule,
+        scheduledFor: occurrence.scheduledFor,
+        failureCount,
+        decidedAt: at,
+      });
+      result.push(jobRecord(this.#taskId, {
+        t: "failure-policy",
+        jobRunId: occurrence.jobRunId,
+        taskRevision: occurrence.taskRevision,
+        statusRevision: body.statusRevision,
+        failureCount,
+        threshold: this.#schedulerFailureThreshold,
+        ...(nextFire ? { nextFire } : {}),
+        autoDisableRequired: failureCount >= this.#schedulerFailureThreshold,
+      }));
+    }
+    if (this.#schedulerNotices) {
+      const closingRun = entries
+        .filter((entry) => entry.stream === jobStream(this.#taskId))
+        .map((entry) => entry.body as {
+          readonly t?: string;
+          readonly jobRunId?: string;
+          readonly state?: JobRunState;
+        })
+        .find((body) =>
+          (body.t === "assigned" && typeof body.jobRunId === "string") ||
+          (body.t === "state" && typeof body.jobRunId === "string" &&
+            body.state !== undefined && isTerminal(body.state)),
+        )?.jobRunId;
+      const gap = closingRun ? state.capabilityGapByRun.get(closingRun) : undefined;
+      if (closingRun && gap?.open) {
+        result.push(jobRecord(this.#taskId, {
+          t: "capability-gap-closed",
+          jobRunId: closingRun,
+          round: gap.round,
+          noticeId: gap.noticeId,
+        }));
+        result.push(...this.#schedulerNotices.prepareRecords({
+          noticeId: gap.noticeId,
+          kind: "capability-gap",
+          state: "closed",
+          ref: {
+            kind: "capability-gap",
+            taskId: this.#taskId,
+            jobRunId: closingRun,
+            round: gap.round,
+          },
+          reason: "已找到可用执行环境，任务继续处理。",
+          actions: [],
+          at,
+        }));
+      }
+    }
+    return result;
+  }
 }
 
 function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
@@ -7830,6 +8385,7 @@ function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
     latestDefinitionState: "enabled",
     latestDefinitionRevision: undefined,
     definitionKinds: new Map(),
+    taskOperations: new Map(),
     systemMissAliases: new Set(),
     pendingSystemMissedJobRunId: undefined,
     occurrences: new Map(),
@@ -8345,7 +8901,12 @@ class JobBundleClosureError extends Error {
 function emptyProjection(): JobProjection {
   return {
     definitions: new Map(),
+    taskOperations: new Map(),
     occurrences: new Map(),
+    missedNextFireByRun: new Map(),
+    failurePolicyByRun: new Map(),
+    autoDisableSettledRuns: new Set(),
+    capabilityGapByRun: new Map(),
     systemMissAliases: new Map(),
     admittedJobs: new Set(),
     ingressByJob: new Map(),
@@ -8625,6 +9186,10 @@ function channelRelayFinishedOutcome(
 function taskRevisionRecord(
   definition: TaskDefinition,
   stored: Stored<TaskDefinition>,
+  operation?: {
+    readonly operationId: string;
+    readonly operationDigest: string;
+  },
 ): Extract<JobJournalRecord, { t: "task-revision" }> {
   return {
     t: "task-revision",
@@ -8633,6 +9198,12 @@ function taskRevisionRecord(
     state: definition.state,
     kind: definition.definition.kind,
     def: stored,
+    ...(operation
+      ? {
+          operationId: operation.operationId,
+          operationDigest: operation.operationDigest,
+        }
+      : {}),
   };
 }
 
@@ -8723,6 +9294,54 @@ function stateRecord(
     state,
     statusRevision,
   });
+}
+
+function consecutiveSchedulerFailures(
+  state: JobProjection,
+  currentJobRunId: string,
+): number {
+  const ordered = [...state.occurrences.values()].sort(
+    (left, right) =>
+      left.scheduledFor.localeCompare(right.scheduledFor) ||
+      left.jobRunId.localeCompare(right.jobRunId),
+  );
+  const index = ordered.findIndex((occurrence) => occurrence.jobRunId === currentJobRunId);
+  if (index < 0) throw corruptJobJournal("Scheduler failure occurrence is absent");
+  let count = 1;
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const previous = state.states.get(ordered[cursor]!.jobRunId)?.state;
+    if (previous === "failed" || previous === "expired") count += 1;
+    else if (previous !== "missed") break;
+  }
+  return count;
+}
+
+function frozenFailureNextFire(input: {
+  readonly taskId: string;
+  readonly jobRunId: string;
+  readonly schedule: TaskSchedule;
+  readonly scheduledFor: string;
+  readonly failureCount: number;
+  readonly decidedAt: string;
+}): string | undefined {
+  if (input.schedule.kind === "once") return undefined;
+  const scheduled = nextScheduleTime(input.schedule, new Date(input.scheduledFor));
+  if (!scheduled) return undefined;
+  const capMs = Math.min(
+    60_000 * 2 ** Math.min(input.failureCount - 1, 6),
+    3_600_000,
+  );
+  const entropy = Number.parseInt(
+    createHash("sha256")
+      .update(`${input.taskId}\n${input.jobRunId}\n${input.failureCount}`)
+      .digest("hex")
+      .slice(0, 12),
+    16,
+  );
+  const jitterMs = entropy % (capMs + 1);
+  return new Date(
+    Math.max(Date.parse(scheduled), Date.parse(input.decidedAt) + jitterMs),
+  ).toISOString();
 }
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";

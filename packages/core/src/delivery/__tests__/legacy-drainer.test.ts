@@ -51,6 +51,18 @@ async function fixture(send: ReturnType<typeof vi.fn>) {
 }
 
 describe("LegacyDeliveryDrainer", () => {
+  it("loads legacy work without invoking transport before activation", async () => {
+    const send = vi.fn(async () => ({ success: true, retryable: false }));
+    const { drainer } = await fixture(send);
+
+    await drainer.prepare();
+    expect(send).not.toHaveBeenCalled();
+
+    drainer.activate();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+    await drainer.stop();
+  });
+
   it("drains the retired queue with the original item identity and removes it", async () => {
     const send = vi.fn(async () => ({ success: true, retryable: false }));
     const { drainer, queueFilePath } = await fixture(send);

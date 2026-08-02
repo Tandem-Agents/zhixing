@@ -17,6 +17,24 @@ class MemoryJobJournal {
     readonly source: "user" | "system";
   }> = [];
   readonly controlRuns = new Map<string, string>();
+  readonly missedNextFireByRun = new Map<string, {
+    readonly t: "missed-next-fire";
+    readonly jobRunId: string;
+    readonly taskRevision: number;
+    readonly readyBoundary: string;
+    readonly nextFire?: string;
+  }>();
+  readonly failurePolicyByRun = new Map<string, {
+    readonly t: "failure-policy";
+    readonly jobRunId: string;
+    readonly taskRevision: number;
+    readonly statusRevision: number;
+    readonly failureCount: number;
+    readonly threshold: number;
+    readonly nextFire?: string;
+    readonly autoDisableRequired: boolean;
+  }>();
+  readonly settledAutoDisable = new Set<string>();
   readonly runSystem = vi.fn(async (jobRunId: string) => {
     const run = this.runs.find((candidate) => candidate.jobRunId === jobRunId);
     if (run) run.state = "committed";
@@ -39,6 +57,11 @@ class MemoryJobJournal {
     readonly jobRunId: string;
     readonly scheduledFor: string;
     readonly source: "user" | "system";
+    readonly disposition?: "missed-offline";
+    readonly missedNextFire?: {
+      readonly readyBoundary: string;
+      readonly nextFire?: string;
+    };
   }) {
     this.triggerCalls.push(structuredClone(input));
     const existing = this.runs.find((run) => run.jobRunId === input.jobRunId);
@@ -49,10 +72,37 @@ class MemoryJobJournal {
       scheduledFor: input.scheduledFor,
       taskRevision: this.definition!.taskRevision,
       deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
-      state: "queued",
+      state: input.disposition === "missed-offline" ? "missed" : "queued",
     };
     this.runs.push(occurrence);
+    if (input.missedNextFire) {
+      this.missedNextFireByRun.set(input.jobRunId, {
+        t: "missed-next-fire",
+        jobRunId: input.jobRunId,
+        taskRevision: occurrence.taskRevision,
+        readyBoundary: input.missedNextFire.readyBoundary,
+        ...(input.missedNextFire.nextFire
+          ? { nextFire: input.missedNextFire.nextFire }
+          : {}),
+      });
+    }
     return structuredClone(occurrence);
+  }
+
+  async schedulerPolicy() {
+    return {
+      missedNextFireByRun: new Map(this.missedNextFireByRun),
+      failurePolicyByRun: new Map(this.failurePolicyByRun),
+      pendingAutoDisable: [...this.failurePolicyByRun.values()].filter(
+        (policy) =>
+          policy.autoDisableRequired &&
+          !this.settledAutoDisable.has(policy.jobRunId),
+      ),
+    };
+  }
+
+  async settleSchedulerAutoDisable(input: { readonly jobRunId: string }) {
+    this.settledAutoDisable.add(input.jobRunId);
   }
 
   async applyControl(input: {
@@ -132,6 +182,47 @@ function fixture(input: {
 }
 
 describe("AnchorScheduler authority", () => {
+  it("prepares projections without recovery side effects and activates asynchronously", async () => {
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "__journal-gc",
+      taskRevision: 1,
+      state: "enabled",
+      definition: { kind: "system", handler: "__journal-gc" },
+    };
+    journal.resumeSystemJobs.mockImplementation(async () => recoveryGate);
+    const systemTasks = new Map([
+      [
+        "__journal-gc",
+        {
+          id: "__journal-gc",
+          name: "journal-gc",
+          handler: "__journal-gc",
+          schedule: { kind: "interval" as const, everyMs: 60_000 },
+        },
+      ],
+    ]);
+    const { scheduler } = fixture({
+      journals: new Map([["__journal-gc", journal]]),
+      systemTasks,
+    });
+
+    await scheduler.prepare();
+    expect(journal.resumeSystemJobs).not.toHaveBeenCalled();
+    await expect(
+      scheduler.runTask("__journal-gc", "before-ready"),
+    ).rejects.toThrow("Scheduler is not accepting commands");
+
+    scheduler.activate();
+    await vi.waitFor(() => expect(journal.resumeSystemJobs).toHaveBeenCalledOnce());
+    releaseRecovery();
+    await scheduler.stop();
+  });
+
   it("publishes the durable manual job identity before returning its result", async () => {
     const journal = new MemoryJobJournal();
     let accepted: { taskId: string; jobRunId: string; name: string } | undefined;
@@ -300,6 +391,96 @@ describe("AnchorScheduler authority", () => {
       "2026-08-02T00:00:00.000Z",
     );
     expect(journal.runSystem).toHaveBeenCalledTimes(1);
+    await scheduler.stop();
+  });
+
+  it("freezes one offline user miss and advances directly beyond the ready boundary", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-1",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "daily",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "summarize" },
+        },
+      },
+    };
+    journal.runs.push({
+      taskId: "task-1",
+      jobRunId: "previous",
+      scheduledFor: "2026-08-01T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "committed",
+    });
+    const { scheduler } = fixture({
+      journals: new Map([["task-1", journal]]),
+    });
+
+    await scheduler.start();
+    await scheduler.tick();
+    await scheduler.tick();
+
+    expect(journal.triggerCalls).toHaveLength(1);
+    const policy = [...journal.missedNextFireByRun.values()][0];
+    expect(policy?.readyBoundary).toBe("2026-08-02T00:00:00.000Z");
+    expect(Date.parse(policy?.nextFire ?? "")).toBeGreaterThan(
+      Date.parse(policy!.readyBoundary),
+    );
+    await scheduler.stop();
+  });
+
+  it("redrives a committed auto-disable obligation to one disabled definition", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-1",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "daily",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "summarize" },
+        },
+      },
+    };
+    journal.runs.push({
+      taskId: "task-1",
+      jobRunId: "failed-1",
+      scheduledFor: "2026-08-01T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "failed",
+    });
+    journal.failurePolicyByRun.set("failed-1", {
+      t: "failure-policy",
+      jobRunId: "failed-1",
+      taskRevision: 1,
+      statusRevision: 2,
+      failureCount: 3,
+      threshold: 3,
+      autoDisableRequired: true,
+    });
+    const { scheduler } = fixture({
+      journals: new Map([["task-1", journal]]),
+    });
+
+    await scheduler.start();
+
+    expect(journal.definition).toMatchObject({
+      taskRevision: 2,
+      state: "disabled",
+    });
+    expect(journal.settledAutoDisable).toEqual(new Set(["failed-1"]));
     await scheduler.stop();
   });
 

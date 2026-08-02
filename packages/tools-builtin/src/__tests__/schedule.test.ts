@@ -56,6 +56,7 @@ async function withScheduler<T>(
 function baseContext(overrides?: Partial<ToolExecutionContext>): ToolExecutionContext {
   return {
     workingDirectory: "/tmp",
+    toolCallId: "schedule-tool-call-test",
     ...overrides,
   };
 }

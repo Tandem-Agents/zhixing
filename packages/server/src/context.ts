@@ -17,6 +17,7 @@ import type {
   ConversationStatusNotice,
   ExecutionStatusNotice,
   JobStatusNotice,
+  SchedulerUserNotice,
 } from "@zhixing/core/contracts";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import type {
@@ -28,6 +29,7 @@ import type {
   SessionBroadcast,
 } from "@zhixing/rpc/session-broadcast";
 import type { ServerConfig } from "./types.js";
+import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
@@ -109,6 +111,10 @@ export interface RuntimeControlAdapter {
       readonly jobRunId: string;
       readonly afterStatusRevision: number;
     }[];
+  }>; 
+  schedulerNotices?: (afterRevision: number) => Promise<{
+    readonly notices: readonly SchedulerUserNotice[];
+    readonly nextRevision: number;
   }>;
   resolveDelivery?: (input: {
     readonly requestId: string;
@@ -189,6 +195,8 @@ export interface ServerContext {
   taskListSnapshot?: (conversationId: string) => Promise<TaskListState | null>;
   /** 当前连接数(startServer 回填,server.info 用)。 */
   connectionCount?: () => number;
+  /** Stable first-party RPC surface identity registry. */
+  rpcSurfaces?: RpcSurfaceRegistry;
   /**
    * 向全部已认证连接广播(startServer 回填)——全局域变更通知用
    * (如 skill.changed);会话域推送走 sessionBroadcast(observer 名册)。

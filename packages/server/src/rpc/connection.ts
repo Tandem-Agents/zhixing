@@ -35,6 +35,10 @@ export interface RpcConnection {
   readonly loopback: boolean;
   /** 客户端自报的元信息（auth 后填充） */
   clientInfo?: { id?: string; version?: string };
+  /** Stable first-party surface identity established by auth. */
+  surfacePrincipal?: string;
+  /** Monotonic connection generation for the stable surface identity. */
+  surfaceGeneration?: number;
   /** 发送 RPC 成功响应 */
   sendSuccess(id: string | number | null, result: unknown): void;
   /** 发送 RPC 错误响应 */

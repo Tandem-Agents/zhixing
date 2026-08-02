@@ -25,7 +25,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
 
   async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().create(spec);
+    if (!staged) return this.base().create(spec, context);
     const result = await staged.stage({
       mutation: { kind: "schedule-create", spec: taskSpecDto(spec) },
       operationId: this.#operationId(staged.state, context),
@@ -59,7 +59,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
     context?: ScheduleMutationContext,
   ): Promise<TaskView> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().update(id, patch);
+    if (!staged) return this.base().update(id, patch, context);
     const current = await this.#current(staged.state, id);
     const taskRevision = requiredRevision(current);
     const next: TaskView = {
@@ -83,7 +83,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
 
   async delete(id: string, context?: ScheduleMutationContext): Promise<void> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().delete(id);
+    if (!staged) return this.base().delete(id, context);
     const current = await this.#current(staged.state, id);
     await staged.stage({
       mutation: {
@@ -96,8 +96,8 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
     staged.state.tasks.delete(id);
   }
 
-  run(id: string): Promise<AgentTurnResult> {
-    return this.base().run(id);
+  run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult> {
+    return this.base().run(id, context);
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {

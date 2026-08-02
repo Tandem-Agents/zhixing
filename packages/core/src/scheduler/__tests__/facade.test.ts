@@ -41,15 +41,17 @@ describe("LocalSchedulerFacade", () => {
     const { scheduler, facade } = setup();
     await scheduler.start();
 
-    const task = await facade.create(futureOnce());
+    const task = await facade.create(futureOnce(), { operationId: "create-1" });
     expect(task.id).toBeTruthy();
     expect(await facade.list()).toHaveLength(1);
 
-    const updated = await facade.update(task.id, { name: "renamed" });
+    const updated = await facade.update(task.id, { name: "renamed" }, {
+      operationId: "update-1",
+    });
     expect(updated.name).toBe("renamed");
     expect((await facade.list())[0]!.name).toBe("renamed");
 
-    await facade.delete(task.id);
+    await facade.delete(task.id, { operationId: "delete-1" });
     expect(await facade.list()).toHaveLength(0);
 
     await scheduler.stop();
@@ -62,8 +64,8 @@ describe("LocalSchedulerFacade", () => {
     const { scheduler, facade } = setup(mockRun);
     await scheduler.start();
 
-    const task = await facade.create(futureOnce());
-    const result = await facade.run(task.id);
+    const task = await facade.create(futureOnce(), { operationId: "create-run" });
+    const result = await facade.run(task.id, { operationId: "run-1" });
     expect(result.status).toBe("ok");
     expect(result.output).toBe("ran");
     expect(mockRun).toHaveBeenCalledOnce();
@@ -83,12 +85,15 @@ describe("LocalSchedulerFacade", () => {
     const events: SchedulerFacadeEvent[] = [];
     const off = facade.onEvent((e) => events.push(e));
 
-    const okTask = await facade.create(futureOnce());
-    await facade.run(okTask.id);
+    const okTask = await facade.create(futureOnce(), { operationId: "create-ok" });
+    await facade.run(okTask.id, { operationId: "run-ok" });
 
     shouldFail = true;
-    const failTask = await facade.create({ ...futureOnce(), name: "t2" });
-    await facade.run(failTask.id);
+    const failTask = await facade.create(
+      { ...futureOnce(), name: "t2" },
+      { operationId: "create-fail" },
+    );
+    await facade.run(failTask.id, { operationId: "run-fail" });
 
     const completed = events.filter((e) => e.kind === "completed");
     expect(completed.some((e) => e.kind === "completed" && e.status === "ok")).toBe(true);

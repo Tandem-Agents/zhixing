@@ -23,6 +23,7 @@ import {
 } from "../../protocol/index.js";
 import {
   DeliveryAuthority,
+  SCHEDULER_USER_NOTICE_STREAM,
   deliveryRecord,
   type DeliveryEnqueueInput,
   type DeliveryEnqueueResult,
@@ -158,6 +159,14 @@ export function deliverySourceRecords(
           jobRunId: key.jobRunId,
           statusRevision: key.statusRevision,
           state: "failed",
+        },
+      }];
+    case "scheduler-user-notice-delivery":
+      return [{
+        stream: SCHEDULER_USER_NOTICE_STREAM,
+        body: {
+          t: "scheduler-user-notice",
+          noticeId: key.noticeId,
         },
       }];
     case "staged-delivery":

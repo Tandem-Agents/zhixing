@@ -6,6 +6,7 @@
 
 export * from "./rpc/protocol.js";
 export * from "./rpc/connection.js";
+export * from "./rpc/surface-identity.js";
 export * from "./rpc/dispatcher.js";
 export * from "./rpc/handlers.js";
 export * from "./rpc/methods/index.js";

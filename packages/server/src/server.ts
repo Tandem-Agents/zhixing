@@ -28,6 +28,7 @@ import {
 import { RpcDispatcher } from "./rpc/dispatcher.js";
 import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
+import { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 
 export interface ZhixingServerInstance {
   /** 实际监听的端口（监听 0 时由 OS 分配） */
@@ -96,6 +97,8 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   // 用 noServer 模式：手动处理 upgrade，便于路径过滤
   const wss = new WebSocketServer({ noServer: true });
   const connections = new Set<RpcConnection>();
+  const rpcSurfaces = new RpcSurfaceRegistry();
+  ctx.rpcSurfaces = rpcSurfaces;
   const dispatcher = new RpcDispatcher({ registry, server: ctx, onError: opts.onError });
 
   httpServer.on("upgrade", (req, socket, head) => {
@@ -123,6 +126,7 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     });
 
     ws.on("close", () => {
+      rpcSurfaces.unbind(connection);
       connections.delete(connection);
       ctx.conversations?.removeObserverFromAll(String(connection.id));
     });

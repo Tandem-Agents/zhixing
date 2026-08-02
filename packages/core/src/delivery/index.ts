@@ -23,6 +23,7 @@ export type { DeliveryStatusNotice } from "../contracts/index.js";
 
 export {
   DELIVERY_STREAM,
+  SCHEDULER_USER_NOTICE_STREAM,
   assertDeliveryEnvelopeCompanions,
   DeliveryAuthority,
   decideDeliveryResolution,

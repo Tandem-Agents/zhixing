@@ -31,6 +31,7 @@ import {
 import { spawnDaemon } from "../serve/daemon.js";
 import { runStopCommand } from "../serve/stop.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
+import { randomUUID } from "node:crypto";
 
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
 const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 30_000;
@@ -127,6 +128,8 @@ export interface CoreHostConnectionDeps {
   clock?: () => number;
   /** 测试注入：等待。 */
   sleep?: (ms: number) => Promise<void>;
+  /** Stable for this client instance and reused across transport reconnects. */
+  clientInstanceId?: string;
 }
 
 /** 默认依赖：发现走 discoverServer、拉起走静默 spawnDaemon、client 走 createRpcClient。 */
@@ -174,6 +177,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
 }
 
 export class CoreHostConnection implements CoreHostLink {
+  private readonly clientInstanceId: string;
   private client: RpcClient | null = null;
   private endpoint: ServerEndpoint | null = null;
   private connecting: Promise<RpcClient> | null = null;
@@ -192,6 +196,7 @@ export class CoreHostConnection implements CoreHostLink {
   private versionRecheckTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly deps: CoreHostConnectionDeps) {
+    this.clientInstanceId = deps.clientInstanceId ?? randomUUID();
     if (deps.onLifecycleNotice) {
       this.lifecycleHandlers.add(deps.onLifecycleNotice);
     }
@@ -355,7 +360,7 @@ export class CoreHostConnection implements CoreHostLink {
 
     try {
       const auth = await client.authenticate(endpoint.token, {
-        id: "zhixing-cli",
+        id: `zhixing-cli:${this.clientInstanceId}`,
         version: this.clientVersion(),
       });
       this.assertProtocolCompatible(auth);

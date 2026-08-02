@@ -61,7 +61,7 @@ const PRIORITY_ORDER: Record<AuthorityDeliveryItem["priority"], number> = {
 };
 const MAX_TIMER_INTERVAL_MS = 2_147_483_647;
 
-type PipelineState = "unstarted" | "running" | "stopped";
+type PipelineState = "unstarted" | "prepared" | "running" | "stopped";
 
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
 export class AuthorityDeliveryPipeline {
@@ -101,20 +101,29 @@ export class AuthorityDeliveryPipeline {
   }
 
   async start(): Promise<void> {
+    await this.prepare();
+    this.activate();
+    await this.#activeFlush;
+  }
+
+  async prepare(): Promise<void> {
     if (this.#state !== "unstarted") {
-      throw new Error(`Pipeline.start: illegal transition from state="${this.#state}"`);
+      throw new Error(`Pipeline.prepare: illegal transition from state="${this.#state}"`);
     }
-    const pending = await this.#queue.load();
+    await this.#queue.load();
+    this.#state = "prepared";
+  }
+
+  activate(): void {
+    if (this.#state !== "prepared") {
+      throw new Error(`Pipeline.activate: illegal transition from state="${this.#state}"`);
+    }
     this.#state = "running";
-    if (pending > 0) {
-      try {
-        await this.flush();
-      } catch (error) {
-        this.#logger.warn("Recovery drain failed; the durable facts remain pending", {
-          code: safePipelineFailureCode(error),
-        });
-      }
-    }
+    void this.flush().catch((error) => {
+      this.#logger.warn("Recovery drain failed; the durable facts remain pending", {
+        code: safePipelineFailureCode(error),
+      });
+    });
     if (this.#config.flushIntervalMs > 0) {
       this.#flushTimer = setInterval(() => {
         if (this.#state !== "running") return;
@@ -129,7 +138,7 @@ export class AuthorityDeliveryPipeline {
 
   async stop(): Promise<void> {
     if (this.#state === "stopped") return;
-    if (this.#state !== "running") {
+    if (this.#state !== "running" && this.#state !== "prepared") {
       throw new Error(`Pipeline.stop: illegal transition from state="${this.#state}"`);
     }
     this.#state = "stopped";

@@ -85,13 +85,14 @@ describe("CoreHostConnection", () => {
       discover: async () => endpoint,
       spawn,
       createClient: () => asClient(client),
+      clientInstanceId: "test-instance",
     });
 
     const got = await conn.getClient();
     expect(got).toBe(asClient(client));
     expect(client.connect).toHaveBeenCalledOnce();
     expect(client.authenticate).toHaveBeenCalledWith("tok", {
-      id: "zhixing-cli",
+      id: "zhixing-cli:test-instance",
       version: "0.1.0",
     });
     expect(spawn).not.toHaveBeenCalled();
@@ -648,6 +649,7 @@ describe("CoreHostConnection", () => {
       discover,
       spawn: vi.fn(async () => ({ ok: true })),
       createClient: () => asClient(clients[i++]!),
+      clientInstanceId: "reconnect-instance",
     });
 
     await conn.getClient();
@@ -655,6 +657,14 @@ describe("CoreHostConnection", () => {
     const got = await conn.getClient();
     expect(got).toBe(asClient(c2));
     expect(discover).toHaveBeenCalledTimes(2);
+    expect(c1.authenticate).toHaveBeenCalledWith("tok", {
+      id: "zhixing-cli:reconnect-instance",
+      version: "0.1.0",
+    });
+    expect(c2.authenticate).toHaveBeenCalledWith("tok", {
+      id: "zhixing-cli:reconnect-instance",
+      version: "0.1.0",
+    });
   });
 
   it("发现到 PID 存活但连接不可用 → 清理旧宿主、拉起新宿主并连接新 endpoint", async () => {
@@ -678,6 +688,7 @@ describe("CoreHostConnection", () => {
       spawn,
       stopUnresponsiveHost,
       createClient: () => asClient(clients[i++]!),
+      clientInstanceId: "replacement-instance",
     });
 
     const got = await conn.getClient();
@@ -692,7 +703,7 @@ describe("CoreHostConnection", () => {
     expect(discover).toHaveBeenCalledTimes(3);
     expect(c1.close).toHaveBeenCalledOnce();
     expect(c2.authenticate).toHaveBeenCalledWith("tok", {
-      id: "zhixing-cli",
+      id: "zhixing-cli:replacement-instance",
       version: "0.1.0",
     });
   });

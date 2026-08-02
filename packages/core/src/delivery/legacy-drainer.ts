@@ -62,7 +62,7 @@ export class LegacyDeliveryDrainer {
   readonly #now: () => Date;
   readonly #logger: LegacyDeliveryDrainerLogger;
   #items: DeliveryItem[] = [];
-  #state: "unstarted" | "running" | "stopped" = "unstarted";
+  #state: "unstarted" | "prepared" | "running" | "stopped" = "unstarted";
   #timer: ReturnType<typeof setInterval> | undefined;
   #activeFlush: Promise<void> | undefined;
   #delivered = 0;
@@ -77,15 +77,33 @@ export class LegacyDeliveryDrainer {
   }
 
   async start(): Promise<void> {
+    await this.prepare();
+    this.activate();
+    await this.#activeFlush;
+  }
+
+  async prepare(): Promise<void> {
     if (this.#state !== "unstarted") {
-      throw new Error(`Legacy drainer cannot start from ${this.#state}`);
+      throw new Error(`Legacy drainer cannot prepare from ${this.#state}`);
     }
     this.#items = await readLegacyQueue(this.#config.queueFilePath);
+    this.#state = "prepared";
+    if (this.#items.length === 0) {
+      await persistLegacyQueue(this.#config.queueFilePath, []);
+    }
+  }
+
+  activate(): void {
+    if (this.#state !== "prepared") {
+      throw new Error(`Legacy drainer cannot activate from ${this.#state}`);
+    }
     this.#state = "running";
     if (this.#items.length > 0) {
-      await this.flush();
-    } else {
-      await persistLegacyQueue(this.#config.queueFilePath, []);
+      void this.flush().catch((error) => {
+        this.#logger.error("Legacy delivery recovery drain failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
     if (this.#items.length > 0 && this.#config.flushIntervalMs > 0) {
       this.#timer = setInterval(() => {
@@ -102,7 +120,7 @@ export class LegacyDeliveryDrainer {
 
   async stop(): Promise<void> {
     if (this.#state === "stopped") return;
-    if (this.#state !== "running") {
+    if (this.#state !== "running" && this.#state !== "prepared") {
       throw new Error("Legacy drainer was not started");
     }
     this.#state = "stopped";

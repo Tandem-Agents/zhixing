@@ -118,6 +118,7 @@ import {
 import { loadOrCreateDeviceKey } from "./serve/mesh-device-key.js";
 import { createSurfaceAssetAuthority } from "./serve/surface-asset-authority.js";
 import { migrateLegacyWorkscenes } from "./serve/workscene-legacy-migration.js";
+import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import {
   StartupRollback,
   type StartupCleanupHandle,
@@ -261,6 +262,8 @@ export interface PreparedConversationAssignmentAuthority {
 
 export interface DeliveryStack {
   authorityDelivery: AuthorityDeliveryPipeline;
+  /** Enables transport side effects after the RPC server is listening. */
+  activate(): void;
   stats(): AuthorityDeliveryStats;
   flush(): Promise<void>;
   authority: DeliveryAuthority;
@@ -1108,8 +1111,12 @@ export async function setupAuthorityRuntime(
           left.descriptor.executorId.localeCompare(right.descriptor.executorId),
         )[0];
       if (!selected) {
-        throw new Error(
+        throw new SchedulerCapabilityGapError(
           "Scheduled job is queued because no compatible executor is available",
+          Math.max(
+            1,
+            ...candidates.map((candidate) => candidate.inventory.capabilityRevision),
+          ),
         );
       }
       const credentialBindings = selected.descriptor.credentialBindings
@@ -1837,7 +1844,7 @@ export async function setupDelivery(
           error: (msg: string) => logger.error(`[legacy-delivery] ${msg}`),
         },
       });
-      await legacyDrainer.start();
+      await legacyDrainer.prepare();
     }
 
     const transports = new DeliveryTransportRegistry();
@@ -1866,10 +1873,14 @@ export async function setupDelivery(
         error: (msg: string) => logger.error(`[delivery] ${msg}`),
       },
     });
-    await authorityDelivery.start();
+    await authorityDelivery.prepare();
 
     return {
       authorityDelivery,
+      activate: () => {
+        legacyDrainer?.activate();
+        authorityDelivery!.activate();
+      },
       stats: () => {
         const authorityStats = authorityDelivery!.stats();
         return {

@@ -50,8 +50,53 @@ export type JobJournalRecord =
       readonly state: TaskDefinition["state"];
       readonly kind: TaskDefinition["definition"]["kind"];
       readonly def: Stored<TaskDefinition>;
+      readonly operationId?: string;
+      readonly operationDigest?: string;
     }
   | { readonly t: "occurrence"; readonly occ: JobOccurrence }
+  | {
+      readonly t: "legacy-next-fire";
+      readonly taskRevision: number;
+      readonly nextFire: string;
+      readonly scheduleDigest: string;
+      readonly legacyDigest: string;
+    }
+  | {
+      readonly t: "missed-next-fire";
+      readonly jobRunId: string;
+      readonly readyBoundary: string;
+      readonly nextFire?: string;
+    }
+  | {
+      readonly t: "failure-policy";
+      readonly jobRunId: string;
+      readonly taskRevision: number;
+      readonly statusRevision: number;
+      readonly failureCount: number;
+      readonly threshold: number;
+      readonly nextFire?: string;
+      readonly autoDisableRequired: boolean;
+    }
+  | {
+      readonly t: "auto-disable-settled";
+      readonly jobRunId: string;
+      readonly disabledTaskRevision: number;
+    }
+  | {
+      readonly t: "capability-gap-opened" | "capability-gap-updated";
+      readonly jobRunId: string;
+      readonly round: number;
+      readonly noticeId: string;
+      readonly capabilityRevision: number;
+      readonly reasonDigest: string;
+      readonly reason: string;
+    }
+  | {
+      readonly t: "capability-gap-closed";
+      readonly jobRunId: string;
+      readonly round: number;
+      readonly noticeId: string;
+    }
   | {
       readonly t: "system-miss-coalesced";
       readonly requestedJobRunId: string;
@@ -251,8 +296,56 @@ interface RecordShape {
 export const JOB_JOURNAL_RECORD_SHAPES = {
   "task-revision": {
     required: ["def", "kind", "state", "t", "taskId", "taskRevision"],
+    optional: ["operationId", "operationDigest"],
   },
   occurrence: { required: ["occ", "t"] },
+  "legacy-next-fire": {
+    required: ["legacyDigest", "nextFire", "scheduleDigest", "t", "taskRevision"],
+  },
+  "missed-next-fire": {
+    required: ["jobRunId", "readyBoundary", "t"],
+    optional: ["nextFire"],
+  },
+  "failure-policy": {
+    required: [
+      "autoDisableRequired",
+      "failureCount",
+      "jobRunId",
+      "statusRevision",
+      "t",
+      "taskRevision",
+      "threshold",
+    ],
+    optional: ["nextFire"],
+  },
+  "auto-disable-settled": {
+    required: ["disabledTaskRevision", "jobRunId", "t"],
+  },
+  "capability-gap-opened": {
+    required: [
+      "capabilityRevision",
+      "jobRunId",
+      "noticeId",
+      "reason",
+      "reasonDigest",
+      "round",
+      "t",
+    ],
+  },
+  "capability-gap-updated": {
+    required: [
+      "capabilityRevision",
+      "jobRunId",
+      "noticeId",
+      "reason",
+      "reasonDigest",
+      "round",
+      "t",
+    ],
+  },
+  "capability-gap-closed": {
+    required: ["jobRunId", "noticeId", "round", "t"],
+  },
   "system-miss-coalesced": {
     required: ["coalescedJobRunId", "requestedJobRunId", "scheduledFor", "t"],
   },
@@ -452,6 +545,13 @@ export function validateJobJournalRecord(
       if (value.kind !== "user" && value.kind !== "system") {
         throw corruptJobJournal("Task revision kind is invalid");
       }
+      if ((value.operationId === undefined) !== (value.operationDigest === undefined)) {
+        throw corruptJobJournal("Task revision operation binding is incomplete");
+      }
+      if (value.operationId !== undefined) {
+        assertIdentifier(value.operationId, "Task revision operationId");
+        assertDigest(value.operationDigest, "Task revision operation digest");
+      }
       if (isStoredReference(value.def)) {
         assertArtifactRef(value.def.ref, "Task definition ref");
       } else {
@@ -468,6 +568,56 @@ export function validateJobJournalRecord(
       break;
     case "occurrence":
       validateJobOccurrence(value.occ as JobOccurrence);
+      break;
+    case "legacy-next-fire":
+      assertPositive(value.taskRevision, "Legacy next-fire task revision");
+      assertTime(value.nextFire, "Legacy next-fire time");
+      assertDigest(value.scheduleDigest, "Legacy schedule digest");
+      assertDigest(value.legacyDigest, "Legacy record digest");
+      break;
+    case "missed-next-fire":
+      assertIdentifier(value.jobRunId, "Missed next-fire jobRunId");
+      assertTime(value.readyBoundary, "Missed next-fire ready boundary");
+      if (value.nextFire !== undefined) {
+        assertTime(value.nextFire, "Missed next-fire time");
+        if (Date.parse(value.nextFire) <= Date.parse(value.readyBoundary)) {
+          throw corruptJobJournal("Missed next-fire must be strictly after ready boundary");
+        }
+      }
+      break;
+    case "failure-policy":
+      assertIdentifier(value.jobRunId, "Failure policy jobRunId");
+      assertPositive(value.taskRevision, "Failure policy task revision");
+      assertPositive(value.statusRevision, "Failure policy status revision");
+      assertPositive(value.failureCount, "Failure policy count");
+      assertPositive(value.threshold, "Failure policy threshold");
+      if (value.nextFire !== undefined) assertTime(value.nextFire, "Failure policy next-fire");
+      if (typeof value.autoDisableRequired !== "boolean") {
+        throw corruptJobJournal("Failure policy auto-disable flag is invalid");
+      }
+      if (value.autoDisableRequired !== (value.failureCount >= value.threshold)) {
+        throw corruptJobJournal("Failure policy auto-disable flag differs from threshold");
+      }
+      break;
+    case "auto-disable-settled":
+      assertIdentifier(value.jobRunId, "Auto-disable settlement jobRunId");
+      assertPositive(value.disabledTaskRevision, "Auto-disable task revision");
+      break;
+    case "capability-gap-opened":
+    case "capability-gap-updated":
+      assertIdentifier(value.jobRunId, "Capability gap jobRunId");
+      assertPositive(value.round, "Capability gap round");
+      assertIdentifier(value.noticeId, "Capability gap noticeId");
+      assertPositive(value.capabilityRevision, "Capability gap revision");
+      assertDigest(value.reasonDigest, "Capability gap reason digest");
+      if (typeof value.reason !== "string" || value.reason.length === 0) {
+        throw corruptJobJournal("Capability gap reason is invalid");
+      }
+      break;
+    case "capability-gap-closed":
+      assertIdentifier(value.jobRunId, "Capability gap jobRunId");
+      assertPositive(value.round, "Capability gap round");
+      assertIdentifier(value.noticeId, "Capability gap noticeId");
       break;
     case "system-miss-coalesced":
       assertIdentifier(value.requestedJobRunId, "Requested system jobRunId");
@@ -1068,6 +1218,7 @@ export function assertJobOccurrenceReplayContract(input: {
   readonly occurrenceState: JobOccurrence["state"];
   readonly activeState: JobRunState | undefined;
   readonly hasAtomicAdmission: boolean;
+  readonly hasAtomicOfflineMissPolicy: boolean;
 }): void {
   if (
     !input.taskIdMatches ||
@@ -1088,6 +1239,7 @@ export function assertJobOccurrenceReplayContract(input: {
   }
   if (
     input.occurrenceState === "missed" &&
+    !(input.definitionKind === "user" && input.hasAtomicOfflineMissPolicy) &&
     (input.activeState === undefined ||
       isTerminalJobState(input.activeState) ||
       (input.definitionKind === "user" && input.activeState === "queued"))

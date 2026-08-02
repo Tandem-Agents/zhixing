@@ -7,6 +7,7 @@ export * from "./job-assignment-authority.js";
 export * from "./job-assignment.js";
 export * from "./scheduler-authority.js";
 export * from "./scheduler-global-state.js";
+export * from "./scheduler-user-notices.js";
 export * from "./scheduler-job-commit.js";
 export * from "./scheduler-conversation-publisher.js";
 export * from "./delivery-participant.js";

@@ -68,6 +68,28 @@ function transport(
 }
 
 describe("AuthorityDeliveryPipeline", () => {
+  it("prepares durable work without invoking transport before activation", async () => {
+    const fixture = await createDeliveryTestHarness();
+    const created = await fixture.enqueue();
+    if (!created.accepted) throw new Error("fixture enqueue failed");
+    const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+    const pipeline = new AuthorityDeliveryPipeline({
+      authority: fixture.authority,
+      artifacts: fixture.artifacts,
+      transport: transport(send),
+      eventBus: createEventBus<AuthorityDeliveryEventMap>(),
+      config: { baseRetryDelayMs: 1_000, flushIntervalMs: 0 },
+      now: fixture.now,
+    });
+
+    await pipeline.prepare();
+    expect(send).not.toHaveBeenCalled();
+
+    pipeline.activate();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+    await pipeline.stop();
+  });
+
   it("has no public production entry", async () => {
     const fixture = await createPipeline(transport(async () => ({ success: true, retryable: false })));
     expect("enqueue" in fixture.pipeline).toBe(false);

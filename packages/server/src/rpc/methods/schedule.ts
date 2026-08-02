@@ -11,7 +11,6 @@
  * 推送事件由 wireSchedulerEventBridge 单独负责（订阅 scheduler EventBus → notify 所有连接）。
  */
 
-import { randomUUID } from "node:crypto";
 import type {
   ScheduledTask,
   SchedulerControlSource,
@@ -23,6 +22,7 @@ import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
+import { requireRpcSurfacePrincipal } from "../surface-identity.js";
 
 // ─── schedule.list ───
 
@@ -81,8 +81,7 @@ export function buildScheduleCreateMethod(): MethodEntry {
         ...(params.delivery !== undefined ? { delivery: params.delivery } : {}),
       };
       validateUserSpec(spec, "schedule.create");
-      const operationId =
-        requestId(params.requestId) ?? `schedule-create-${randomUUID()}`;
+      const operationId = requiredRequestId(params.requestId, "schedule.create");
       return scheduler.createTask(
         spec,
         operationId,
@@ -97,6 +96,7 @@ export function buildScheduleCreateMethod(): MethodEntry {
 interface ScheduleUpdateParams {
   requestId?: string;
   id?: string;
+  taskRevision?: number;
   patch?: TaskPatch;
 }
 
@@ -106,22 +106,26 @@ export function buildScheduleUpdateMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<ScheduledTask> {
       const params = strictParams<ScheduleUpdateParams>(rawParams, [
-        "requestId", "id", "patch",
+        "requestId", "id", "taskRevision", "patch",
       ], "schedule.update");
       if (typeof params.id !== "string") {
         throw RpcErrors.invalidParams("schedule.update requires 'id'");
       }
+      const taskRevision = requiredTaskRevision(params.taskRevision, "schedule.update");
       const patch = strictParams<NonNullable<ScheduleUpdateParams["patch"]>>(
         params.patch,
         ["name", "description", "enabled", "priority", "schedule", "action", "delivery"],
         "schedule.update patch",
       );
       const scheduler = requireScheduler(ctx.server);
+      const operationId = requiredRequestId(params.requestId, "schedule.update");
       try {
         return await scheduler.updateTask(
           params.id,
           patch,
-          requestId(params.requestId),
+          operationId,
+          taskRevision,
+          scheduleControlSource(ctx, operationId),
         );
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("Task not found")) {
@@ -138,6 +142,7 @@ export function buildScheduleUpdateMethod(): MethodEntry {
 interface ScheduleDeleteParams {
   requestId?: string;
   id?: string;
+  taskRevision?: number;
 }
 
 export function buildScheduleDeleteMethod(): MethodEntry {
@@ -146,14 +151,21 @@ export function buildScheduleDeleteMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<void> {
       const params = strictParams<ScheduleDeleteParams>(rawParams, [
-        "requestId", "id",
+        "requestId", "id", "taskRevision",
       ], "schedule.delete");
       if (typeof params.id !== "string") {
         throw RpcErrors.invalidParams("schedule.delete requires 'id'");
       }
+      const taskRevision = requiredTaskRevision(params.taskRevision, "schedule.delete");
       const scheduler = requireScheduler(ctx.server);
+      const operationId = requiredRequestId(params.requestId, "schedule.delete");
       try {
-        await scheduler.deleteTask(params.id, requestId(params.requestId));
+        await scheduler.deleteTask(
+          params.id,
+          operationId,
+          taskRevision,
+          scheduleControlSource(ctx, operationId),
+        );
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("Task not found")) {
           throw RpcErrors.notFound(err.message);
@@ -188,8 +200,7 @@ export function buildScheduleRunMethod(): MethodEntry {
       }
       const scheduler = requireScheduler(ctx.server);
       try {
-        const operationId =
-          requestId(params.requestId) ?? `schedule-run-${randomUUID()}`;
+        const operationId = requiredRequestId(params.requestId, "schedule.run");
         return await scheduler.runTask(
           params.id,
           operationId,
@@ -225,10 +236,15 @@ export function buildScheduleAbortRunMethod(): MethodEntry {
       }
       const scheduler = requireScheduler(ctx.server);
       if (scheduler.abortRun) {
+        const operationId = requiredRequestId(
+          params.requestId,
+          "schedule.abortRun",
+        );
         return {
           aborted: await scheduler.abortRun(
             params.runId,
-            requestId(params.requestId),
+            operationId,
+            scheduleControlSource(ctx, operationId),
           ),
         };
       }
@@ -246,6 +262,21 @@ function requestId(value: string | undefined): string | undefined {
     throw RpcErrors.invalidParams("schedule requestId is invalid");
   }
   return value;
+}
+
+function requiredRequestId(value: string | undefined, method: string): string {
+  const parsed = requestId(value);
+  if (!parsed) {
+    throw RpcErrors.invalidParams(`${method} requires a stable 'requestId'`);
+  }
+  return parsed;
+}
+
+function requiredTaskRevision(value: number | undefined, method: string): number {
+  if (!Number.isSafeInteger(value) || value! <= 0) {
+    throw RpcErrors.invalidParams(`${method} requires a positive 'taskRevision'`);
+  }
+  return value!;
 }
 
 function strictParams<T>(
@@ -287,14 +318,25 @@ function validateUserSpec(
 function scheduleControlSource(
   ctx: Parameters<MethodEntry["handler"]>[1],
   ingressId: string,
-): SchedulerControlSource | undefined {
-  const surfacePrincipal = "rpc:owner";
+): SchedulerControlSource {
+  let surfacePrincipal: string;
+  try {
+    surfacePrincipal = requireRpcSurfacePrincipal(ctx.connection);
+  } catch (error) {
+    throw RpcErrors.invalidParams(
+      error instanceof Error ? error.message : "Stable RPC surface identity is required",
+    );
+  }
   const connectionId = String(ctx.connection.id);
   const principal = ctx.server.conversations?.durableControlPrincipal({
     surfacePrincipal,
     connectionId,
   });
-  if (!principal) return undefined;
+  if (!principal) {
+    throw RpcErrors.invalidParams(
+      "Authenticated RPC operation requires a durable control principal",
+    );
+  }
   return {
     connectionId,
     ingress: {
@@ -303,7 +345,7 @@ function scheduleControlSource(
       deviceId: principal.deviceId,
       ingressId,
       receivedAt: new Date().toISOString(),
-      turnOrigin: { channel: "rpc", triggeredBy: connectionId },
+      turnOrigin: { channel: "rpc", triggeredBy: surfacePrincipal },
     },
   };
 }

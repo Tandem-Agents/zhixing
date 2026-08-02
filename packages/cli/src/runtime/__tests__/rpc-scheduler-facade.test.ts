@@ -46,24 +46,40 @@ describe("RpcSchedulerFacade", () => {
     );
     const facade = new RpcSchedulerFacade({ connection: fake.link, storePath });
 
-    const task = await facade.create({
-      name: "x",
-      enabled: true,
-      priority: "normal",
-      schedule: { kind: "interval", everyMs: 60_000 },
-      action: { kind: "agent-turn", prompt: "p" },
-    });
+    const task = await facade.create(
+      {
+        name: "x",
+        enabled: true,
+        priority: "normal",
+        schedule: { kind: "interval", everyMs: 60_000 },
+        action: { kind: "agent-turn", prompt: "p" },
+      },
+      { operationId: "schedule-create:test" },
+    );
     expect(task.id).toBe("new1");
 
-    const result = await facade.run("new1");
+    const result = await facade.run("new1", {
+      operationId: "schedule-run:test",
+    });
     expect(result.status).toBe("ok");
     expect(fake.requests).toContainEqual({
       method: "schedule.run",
       params: {
         id: "new1",
-        requestId: expect.stringMatching(/^schedule-run-/),
+        requestId: "schedule-run:test",
       },
     });
+  });
+
+  it("拒绝在 facade 内为写操作临时生成 operation id", async () => {
+    const facade = new RpcSchedulerFacade({
+      connection: makeFakeHostLink().link,
+      storePath,
+    });
+
+    await expect(facade.run("task-1")).rejects.toThrow(
+      "Schedule run requires a stable operation id",
+    );
   });
 
   it("onEvent 映射 RPC notification（completed 含 error）", async () => {

@@ -29,6 +29,7 @@ import {
   JobJournal,
   SchedulerJobCommitParticipant,
   SchedulerConversationMutationPublisher,
+  SchedulerUserNoticeJournal,
   assignmentReservationId,
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
@@ -46,6 +47,7 @@ import type { ExecutorJobOwner } from "./executor-job-owner.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
+import { SchedulerCapabilityGapError } from "./scheduler-capability-gap.js";
 
 const OWNER_CONTEXT_RENEWAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
 
@@ -87,6 +89,7 @@ export interface AnchorSchedulerRuntimeOptions {
  */
 export class AnchorSchedulerRuntime {
   readonly scheduler: AnchorScheduler;
+  readonly schedulerNotices: SchedulerUserNoticeJournal;
   readonly #options: AnchorSchedulerRuntimeOptions;
   readonly #issuer: JobAssignmentAuthority;
   readonly #commitParticipant: SchedulerJobCommitParticipant;
@@ -98,6 +101,7 @@ export class AnchorSchedulerRuntime {
   >();
   readonly #relayDisposers = new Map<string, () => void>();
   readonly #statusDisposers = new Map<string, () => void>();
+  readonly #schedulerNoticeDisposer: () => void;
   readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
   readonly #pendingManualSurfaces = new Map<
     string,
@@ -122,6 +126,13 @@ export class AnchorSchedulerRuntime {
         options.authority.executorCapabilities.snapshotFor(executorId),
       clock: this.#clock,
     });
+    this.schedulerNotices = new SchedulerUserNoticeJournal({
+      log: options.authority.authorityLog,
+      delivery: options.authority.participant,
+    });
+    this.#schedulerNoticeDisposer = options.jobStatus.registerScheduler(
+      this.schedulerNotices,
+    );
     this.scheduler = new AnchorScheduler({
       anchorEpoch: options.authority.anchorEpoch,
       deviceId: options.authority.deviceId,
@@ -137,6 +148,7 @@ export class AnchorSchedulerRuntime {
         ? { migrateLegacyDelivery: options.migrateLegacyDelivery }
         : {}),
       systemTasks: options.systemTasks,
+      schedulerNotices: this.schedulerNotices,
       onProjection: (tasks) => options.compatibilityStore.save([...tasks]),
       ...(options.now ? { now: options.now } : {}),
       ...(options.onError ? { onError: options.onError } : {}),
@@ -172,11 +184,17 @@ export class AnchorSchedulerRuntime {
     options: AnchorSchedulerRuntimeOptions,
   ): Promise<AnchorSchedulerRuntime> {
     const legacyTasks = await options.compatibilityStore.load();
-    return new AnchorSchedulerRuntime(options, legacyTasks);
+    const runtime = new AnchorSchedulerRuntime(options, legacyTasks);
+    await runtime.schedulerNotices.initializeLiveCursor();
+    return runtime;
   }
 
   async start(): Promise<void> {
-    await this.scheduler.start();
+    await this.scheduler.prepare();
+  }
+
+  activate(): void {
+    this.scheduler.activate();
   }
 
   async stop(): Promise<void> {
@@ -193,6 +211,7 @@ export class AnchorSchedulerRuntime {
     this.#dispatchers.clear();
     this.#pendingManualSurfaces.clear();
     this.#openedManualSurfaces.clear();
+    this.#schedulerNoticeDisposer();
   }
 
   /** Called after the RPC server exists, so recovered manual surfaces can resume. */
@@ -220,11 +239,36 @@ export class AnchorSchedulerRuntime {
         ? { tools: [...input.definition.definition.spec.action.tools] }
         : {}),
     };
-    const prepared = await this.#options.authority.prepareJobAssignment({
-      instruction,
-      capabilities: this.#options.capabilities,
-      ...(await this.#remoteTargets()),
-    });
+    let prepared;
+    try {
+      prepared = await this.#options.authority.prepareJobAssignment({
+        instruction,
+        capabilities: this.#options.capabilities,
+        ...(await this.#remoteTargets()),
+      });
+    } catch (error) {
+      if (error instanceof SchedulerCapabilityGapError) {
+        const requestId = `scheduler-gap:${protocolDigest("SchedulerGapObservation", 1, {
+          taskId: input.occurrence.taskId,
+          jobRunId: input.occurrence.jobRunId,
+          capabilityRevision: error.capabilityRevision,
+          reason: error.message,
+        })}`;
+        await input.journal.noteCapabilityGap({
+          jobRunId: input.occurrence.jobRunId,
+          capabilityRevision: error.capabilityRevision,
+          reason: error.message,
+          context: {
+            principal: { kind: "host", component: "anchor-scheduler" },
+            requestId,
+            deadlineAt: new Date(
+              Date.parse(this.#clock()) + OWNER_CONTEXT_RENEWAL_MS,
+            ).toISOString(),
+          },
+        });
+      }
+      throw error;
+    }
     const attempt = 1;
     const assignmentId = `assignment:${protocolDigest("JobAssignmentIdentity", 1, {
       taskId: input.occurrence.taskId,
@@ -302,12 +346,18 @@ export class AnchorSchedulerRuntime {
   async #recoverJournal(journal: JobJournal): Promise<void> {
     const candidates = await journal.assignmentsAwaitingRecovery();
     for (const candidate of candidates) {
-      await this.#rememberPending(journal, candidate.dispatch);
-      const dispatcher = this.#dispatcher(journal, candidate.dispatch);
-      await dispatcher.dispatchPending();
-      await dispatcher.recoverStarted();
-      await dispatcher.recoverCancellations();
-      dispatcher.startRecoveryLoop();
+      try {
+        await this.#rememberPending(journal, candidate.dispatch);
+        const dispatcher = this.#dispatcher(journal, candidate.dispatch);
+        await dispatcher.dispatchPending();
+        await dispatcher.recoverStarted();
+        await dispatcher.recoverCancellations();
+        dispatcher.startRecoveryLoop();
+      } catch (error) {
+        this.#options.onError?.(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
     }
   }
 
@@ -517,6 +567,8 @@ export class AnchorSchedulerRuntime {
       resources: this.#options.authority.resourceGovernor,
       systemResources: this.#options.authority.resourceGovernor,
       systemHandlers: adaptSystemHandlers(this.#options.systemHandlers),
+      schedulerFailureThreshold: 5,
+      schedulerNotices: this.schedulerNotices,
       clock: this.#clock,
     });
     this.#journals.set(taskId, journal);

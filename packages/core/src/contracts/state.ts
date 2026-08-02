@@ -430,6 +430,10 @@ export type DeliveryEnqueueKeyBody =
       statusRevision: number;
     }
   | {
+      kind: "scheduler-user-notice-delivery";
+      noticeId: string;
+    }
+  | {
       // 控制回执:一个控制决定恰产生一个回执 item,以 canonical requestId 幂等。
       // 当前唯一生产者是 cancel-batch 的空批次渠道回执。
       kind: "conversation-control-response-delivery";

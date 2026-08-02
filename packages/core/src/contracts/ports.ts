@@ -37,6 +37,7 @@ import type {
   CapabilityDescriptor,
   DispatchEnvelope,
   ExecutorVersionInventory,
+  IngressContext,
   SealedBundle,
 } from "./protocol.js";
 import type {
@@ -127,6 +128,10 @@ export type GlobalReadCallContext = AuthorityCallContext & {
 export type GlobalControlCallContext = AuthorityCallContext & {
   principal: Extract<AuthorityPrincipal, { kind: "surface" | "host" }>;
   readonly authority: GlobalAuthorityFence;
+  /** Digest of the caller's original mutation intent for durable replay checks. */
+  readonly operationDigest?: string;
+  /** Authenticated product ingress retained when a global mutation creates provenance. */
+  readonly ingress?: IngressContext;
 };
 
 export type GlobalStagedCallContext = AuthorityCallContext & {

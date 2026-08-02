@@ -61,6 +61,7 @@ import {
 } from "@zhixing/server";
 import {
   AnchorSchedulerGlobalStateAdapter,
+  AnchorSchedulerProductPort,
   ConfirmationHub,
   type ConversationManager,
 } from "@zhixing/owner-kernel";
@@ -71,6 +72,7 @@ import {
   type SessionBroadcast,
   type SessionChangedPayload,
 } from "@zhixing/rpc";
+import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import {
   createAdvancementRecoveryMaintenance,
   renderRecentContextFromMessages,
@@ -284,6 +286,7 @@ async function runServerProcess(
 
   // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
   let schedulerRef: SchedulerBackend | null = null;
+  let schedulerProductRef: SchedulerBackend | undefined;
   // schedule 工具经门面接入锚点唯一 scheduler 权威。实例化落点在权威创建后；
   // per-runtime 工具只持 getter，不持第二套 scheduler 状态。
   let schedulerFacadeRef: LocalSchedulerFacade | null = null;
@@ -720,17 +723,20 @@ async function runServerProcess(
           ticket: input.ticket,
           surfacePrincipal: input.surfacePrincipal,
           adoptFrame: async (frame) => {
-            const connections = runner?.server.connections;
-            const recipients = connections
-              ? [...connections].filter(
-                  (connection) => connection.authenticated && !connection.closed,
-                )
-              : [];
-            if (recipients.length === 0) {
-              throw new Error("Manual job surface is disconnected");
-            }
-            for (const connection of recipients) {
-              connection.notify(SESSION_NOTIFICATIONS.assignmentStream, frame);
+            const binding = runner?.server.context.rpcSurfaces?.current(
+              input.surfacePrincipal,
+            );
+            if (
+              !binding ||
+              binding.connection.surfaceGeneration !== binding.generation ||
+              !binding.connection.tryNotify?.(
+                SESSION_NOTIFICATIONS.assignmentStream,
+                frame,
+              )
+            ) {
+              throw new AssignmentStreamPathUnavailableError(
+                "Manual job surface is disconnected",
+              );
             }
           },
         });
@@ -805,20 +811,25 @@ async function runServerProcess(
       "scheduler.stop",
       () => runtime.stop(),
     );
-    schedulerRef = runtime.scheduler;
-    schedulerFacadeRef = new LocalSchedulerFacade(
+    const schedulerGlobalState = new AnchorSchedulerGlobalStateAdapter(
       runtime.scheduler,
+      ctx.authorityRuntime.anchorEpoch,
+    );
+    const schedulerProduct = new AnchorSchedulerProductPort(
+      runtime.scheduler,
+      schedulerGlobalState,
+      ctx.authorityRuntime.anchorEpoch,
+    );
+    schedulerRef = schedulerProduct;
+    schedulerFacadeRef = new LocalSchedulerFacade(
+      schedulerProduct,
       schedulerEventBus,
     );
-    ctx.authorityRuntime.installSchedulerGlobalState(
-      new AnchorSchedulerGlobalStateAdapter(
-        runtime.scheduler,
-        ctx.authorityRuntime.anchorEpoch,
-      ),
-    );
+    ctx.authorityRuntime.installSchedulerGlobalState(schedulerGlobalState);
+    schedulerProductRef = schedulerProduct;
     await runtime.start();
   }
-  const scheduler = schedulerRuntime?.scheduler;
+  const scheduler = schedulerProductRef;
 
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
@@ -969,6 +980,9 @@ async function runServerProcess(
       jobStatus: (after) =>
         ctx.jobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
+      schedulerNotices: (afterRevision) =>
+        ctx.jobStatus?.schedulerHistory(afterRevision) ??
+        Promise.resolve({ notices: [], nextRevision: afterRevision }),
       resolveDelivery: async (input) => {
         if (!ctx.deliveryStack) throw new Error("Delivery stack is unavailable");
         return ctx.deliveryStack.resolve({
@@ -1019,6 +1033,11 @@ async function runServerProcess(
   sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
   sessionActivityBroadcastRef.current =
     serverCtx.sessionActivityBroadcast ?? null;
+
+  // External handlers and transports become active only after the product
+  // ingress is listening; preparation above is intentionally side-effect free.
+  ctx.deliveryStack?.activate();
+  schedulerRuntime?.activate();
 
   // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
   ctx.runner = runner;

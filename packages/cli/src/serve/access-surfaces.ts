@@ -132,6 +132,9 @@ const authorityRuntimeSurface: AccessSurface = {
     jobStatus.onStatus((notice) => {
       ctx.runner?.server.context.broadcastAll?.("job.status", notice);
     });
+    jobStatus.onSchedulerNotice((notice) => {
+      ctx.runner?.server.context.broadcastAll?.("scheduler.notice", notice);
+    });
     // 三域权威 live/history 的聚合面:history 惰性路由到各域权威(装配序
     // 无关),live 由各域装配点 tee 入;第一方会话工厂按调用方 last-seen
     // 游标建立合并投影,渠道投递不经过它。

@@ -43,6 +43,7 @@ import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
+import { requireRpcSurfacePrincipal } from "../surface-identity.js";
 import type { ServerContext } from "../../context.js";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
 import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
@@ -1542,7 +1543,7 @@ function perspectiveTurnContext(
     turnId,
     turnOrigin: {
       channel: "rpc",
-      triggeredBy: String(connection.id),
+      triggeredBy: requireRpcSurfacePrincipal(connection),
     },
   };
 }
@@ -1569,8 +1570,7 @@ function rpcTurnContext(
 }
 
 function rpcSurfacePrincipal(connection: RpcConnection): string {
-  void connection;
-  return "rpc:owner";
+  return requireRpcSurfacePrincipal(connection);
 }
 
 function notifyPerspectiveTurnResult(input: {

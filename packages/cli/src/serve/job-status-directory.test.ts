@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { JobStatusNotice } from "@zhixing/core/contracts";
+import type {
+  JobStatusNotice,
+  SchedulerUserNotice,
+} from "@zhixing/core/contracts";
 import {
   JobStatusDirectory,
   type JobStatusSource,
@@ -32,6 +35,32 @@ describe("JobStatusDirectory", () => {
     expect(() =>
       fixture.emit(notice("task-2", "run-1", 1, "running")),
     ).toThrow(/different task/);
+  });
+
+  it("uses the scheduler authority revision for both catch-up and live notices", async () => {
+    const directory = new JobStatusDirectory();
+    const listeners = new Set<
+      (notice: SchedulerUserNotice) => void | Promise<void>
+    >();
+    const records = [schedulerNotice(4), schedulerNotice(7)];
+    directory.registerScheduler({
+      async history(afterRevision) {
+        return records.filter((record) => record.revision > afterRevision);
+      },
+      onNotice(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
+    const live = vi.fn();
+    directory.onSchedulerNotice(live);
+
+    for (const listener of listeners) void listener(schedulerNotice(7));
+    expect(live).toHaveBeenCalledWith(schedulerNotice(7));
+    await expect(directory.schedulerHistory(4)).resolves.toEqual({
+      notices: [schedulerNotice(7)],
+      nextRevision: 7,
+    });
   });
 });
 
@@ -73,5 +102,23 @@ function notice(
     statusRevision,
     actions: [],
     at: "2026-07-28T00:00:00.000Z",
+  };
+}
+
+function schedulerNotice(revision: number): SchedulerUserNotice {
+  return {
+    noticeId: "gap-1",
+    revision,
+    kind: "capability-gap",
+    state: "open",
+    ref: {
+      kind: "capability-gap",
+      taskId: "task-1",
+      jobRunId: "job-1",
+      round: 1,
+    },
+    reason: "缺少执行能力",
+    actions: ["检查目标设备"],
+    at: "2026-08-02T00:00:00.000Z",
   };
 }

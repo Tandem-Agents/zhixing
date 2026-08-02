@@ -61,6 +61,7 @@ describe("job replay contracts", () => {
     occurrenceState: "queued" as const,
     activeState: undefined,
     hasAtomicAdmission: true,
+    hasAtomicOfflineMissPolicy: false,
   };
   const validTaskRevision = {
     taskIdMatches: true,
@@ -169,6 +170,15 @@ describe("job replay contracts", () => {
         occurrenceState: "missed",
         activeState: "running",
         hasAtomicAdmission: false,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertJobOccurrenceReplayContract({
+        ...validOccurrence,
+        occurrenceState: "missed",
+        activeState: undefined,
+        hasAtomicAdmission: false,
+        hasAtomicOfflineMissPolicy: true,
       }),
     ).not.toThrow();
   });

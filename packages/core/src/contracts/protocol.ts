@@ -503,6 +503,30 @@ export type DeliveryStatusNotice =
 export type ExecutionStatusNotice = WireSchemaV1<"ExecutionStatusNotice"> &
   (ConversationStatusNotice | JobStatusNotice | DeliveryStatusNotice);
 
+/** Narrow, durable scheduler notices that do not correspond to one job-state revision. */
+export interface SchedulerUserNotice {
+  readonly noticeId: string;
+  /** Authority commit LSN; the scalar server.info continuation cursor. */
+  readonly revision: number;
+  readonly kind: "missed-summary" | "capability-gap";
+  readonly state: "prepared" | "open" | "updated" | "closed";
+  readonly ref:
+    | {
+        readonly kind: "missed-summary";
+        readonly batchId: string;
+        readonly memberCount: number;
+      }
+    | {
+        readonly kind: "capability-gap";
+        readonly taskId: string;
+        readonly jobRunId: string;
+        readonly round: number;
+      };
+  readonly reason: string;
+  readonly actions: readonly string[];
+  readonly at: IsoTime;
+}
+
 export type StreamFramePayload =
   | { kind: "agent-yield"; yield: AgentYield | { ref: ArtifactRef } }
   | {

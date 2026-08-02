@@ -41,6 +41,7 @@ import {
 } from "./validation.js";
 
 export const DELIVERY_STREAM = "delivery";
+export const SCHEDULER_USER_NOTICE_STREAM = "intent:scheduler-user-notice";
 const deliveryOperationQueues = new WeakMap<AuthorityCommitLog, SerialTaskQueue>();
 
 interface MutableDeliveryItem {
@@ -1119,6 +1120,12 @@ function deliverySourceMatches(
         body.jobRunId === key.jobRunId &&
         body.statusRevision === key.statusRevision
       );
+    case "scheduler-user-notice-delivery":
+      return (
+        candidate.stream === SCHEDULER_USER_NOTICE_STREAM &&
+        body.t === "scheduler-user-notice" &&
+        body.noticeId === key.noticeId
+      );
     case "conversation-control-response-delivery": {
       // 回执只允许伴随"成功的空 cancel-batch"applied 事实:除 canonical
       // requestId 外还必须校验结果结构——其他控制类型的 applied 不得冒充
@@ -1411,6 +1418,10 @@ export function validateDeliveryEnqueueKeyBody(value: unknown): asserts value is
       assertIdentifier(value.taskId, "Delivery task id");
       assertIdentifier(value.jobRunId, "Delivery job run id");
       assertPositiveInteger(value.statusRevision, "Delivery status revision");
+      return;
+    case "scheduler-user-notice-delivery":
+      assertExactKeys(value, ["kind", "noticeId"]);
+      assertIdentifier(value.noticeId, "Scheduler notice id");
       return;
     case "conversation-control-response-delivery":
       assertExactKeys(value, ["conversationId", "kind", "requestId"]);

@@ -1,4 +1,4 @@
-import type { JobStatusNotice } from "@zhixing/core/contracts";
+import type { JobStatusNotice, SchedulerUserNotice } from "@zhixing/core/contracts";
 
 export interface JobStatusSource {
   statusHistory(
@@ -16,6 +16,11 @@ export interface JobStatusCursor {
   readonly afterStatusRevision: number;
 }
 
+export interface SchedulerNoticeSource {
+  history(afterRevision: number): Promise<readonly SchedulerUserNotice[]>;
+  onNotice(listener: (notice: SchedulerUserNotice) => void | Promise<void>): () => void;
+}
+
 /** Aggregates task-scoped job authorities without owning their lifecycle. */
 export class JobStatusDirectory {
   readonly #sources = new Map<
@@ -25,6 +30,47 @@ export class JobStatusDirectory {
   readonly #listeners = new Set<
     (notice: JobStatusNotice) => void | Promise<void>
   >();
+  readonly #schedulerListeners = new Set<
+    (notice: SchedulerUserNotice) => void | Promise<void>
+  >();
+  #schedulerSource:
+    | { source: SchedulerNoticeSource; unsubscribe: () => void }
+    | undefined;
+
+  registerScheduler(source: SchedulerNoticeSource): () => void {
+    if (this.#schedulerSource) throw new Error("Scheduler notice source is already registered");
+    const unsubscribe = source.onNotice((notice) => {
+      for (const listener of this.#schedulerListeners) void listener(notice);
+    });
+    const entry = { source, unsubscribe };
+    this.#schedulerSource = entry;
+    return () => {
+      if (this.#schedulerSource !== entry) return;
+      this.#schedulerSource = undefined;
+      unsubscribe();
+    };
+  }
+
+  onSchedulerNotice(
+    listener: (notice: SchedulerUserNotice) => void | Promise<void>,
+  ): () => void {
+    this.#schedulerListeners.add(listener);
+    return () => this.#schedulerListeners.delete(listener);
+  }
+
+  async schedulerHistory(afterRevision: number): Promise<{
+    readonly notices: readonly SchedulerUserNotice[];
+    readonly nextRevision: number;
+  }> {
+    if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
+      throw new TypeError("Scheduler notice cursor is invalid");
+    }
+    const notices = await this.#schedulerSource?.source.history(afterRevision) ?? [];
+    return {
+      notices,
+      nextRevision: notices.at(-1)?.revision ?? afterRevision,
+    };
+  }
 
   register(taskId: string, source: JobStatusSource): () => void {
     if (taskId.length === 0 || this.#sources.has(taskId)) {
@@ -108,8 +154,11 @@ export class JobStatusDirectory {
   }
 
   dispose(): void {
+    this.#schedulerSource?.unsubscribe();
+    this.#schedulerSource = undefined;
     for (const entry of this.#sources.values()) entry.unsubscribe();
     this.#sources.clear();
     this.#listeners.clear();
+    this.#schedulerListeners.clear();
   }
 }

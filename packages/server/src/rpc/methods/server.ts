@@ -24,6 +24,7 @@ import {
   SUPPORTED_PROTOCOL_RANGE,
 } from "../protocol.js";
 import type { ServerShutdownStrategy } from "../../context.js";
+import { requireRpcSurfacePrincipal } from "../surface-identity.js";
 
 export interface ServerShutdownParams {
   reason?: string;
@@ -133,6 +134,9 @@ export function buildServerInfoMethod(): MethodEntry {
       let deliveryStatusNext = statusAfter.delivery;
       let conversationStatusNext = statusAfter.conversations;
       let jobStatusNext = statusAfter.jobs;
+      const schedulerNoticePage =
+        (await ctx.server.runtimeControl?.schedulerNotices?.(statusAfter.scheduler)) ??
+        { notices: [], nextRevision: statusAfter.scheduler };
       const openFinality = ctx.server.runtimeControl?.openFirstPartyFinality;
       const hasStatusCursors =
         Object.keys(statusAfter.delivery).length > 0 ||
@@ -290,6 +294,8 @@ export function buildServerInfoMethod(): MethodEntry {
         conversationStatusNext,
         jobStatus,
         jobStatusNext,
+        schedulerNotices: schedulerNoticePage.notices,
+        schedulerNoticeNext: schedulerNoticePage.nextRevision,
       };
     },
   };
@@ -303,7 +309,7 @@ export function buildDeliveryResolveMethod(): MethodEntry {
       const params = parseDeliveryResolveParams(rawParams);
       const resolve = ctx.server.runtimeControl?.resolveDelivery;
       if (!resolve) throw RpcErrors.internal("delivery resolution is not available");
-      const surfacePrincipal = "rpc:owner";
+      const surfacePrincipal = requireRpcSurfacePrincipal(ctx.connection);
       const connectionId = String(ctx.connection.id);
       if (
         !isProtocolIdentifier(surfacePrincipal) ||
@@ -380,9 +386,10 @@ function parseStatusAfter(
     readonly jobRunId: string;
     readonly afterStatusRevision: number;
   }[];
+  readonly scheduler: number;
 } {
   if (params === undefined || params === null) {
-    return { delivery: {}, conversations: [], jobs: [] };
+    return { delivery: {}, conversations: [], jobs: [], scheduler: 0 };
   }
   if (typeof params !== "object" || Array.isArray(params)) {
     throw RpcErrors.invalidParams("server.info params must be an object");
@@ -393,12 +400,19 @@ function parseStatusAfter(
       (key) =>
         key !== "deliveryStatusAfter" &&
         key !== "conversationStatusAfter" &&
-        key !== "jobStatusAfter",
+        key !== "jobStatusAfter" &&
+        key !== "schedulerNoticeAfter",
     )
   ) {
     throw RpcErrors.invalidParams("server.info params contain unknown fields");
   }
   const delivery: Record<string, number> = {};
+  const scheduler = value.schedulerNoticeAfter === undefined
+    ? 0
+    : value.schedulerNoticeAfter;
+  if (!Number.isSafeInteger(scheduler) || (scheduler as number) < 0) {
+    throw RpcErrors.invalidParams("schedulerNoticeAfter is invalid");
+  }
   if (value.deliveryStatusAfter !== undefined) {
     if (
       value.deliveryStatusAfter === null ||
@@ -498,7 +512,7 @@ function parseStatusAfter(
       });
     }
   }
-  return { delivery, conversations, jobs };
+  return { delivery, conversations, jobs, scheduler: scheduler as number };
 }
 
 function statusNotificationMethod(notice: ExecutionStatusNotice): string {
