@@ -128,6 +128,12 @@
 凡裁决导致问题事实、根因、影响、范围、评级、工作量、方案或处置结论发生变化，必须在问题描述中追加“价值裁决记录”，写明原结论、推翻或收窄它的事实、新决定及重开条件。不得修改实现；全部问题完成价值裁决后立即停止。
 ```
 
+#### 复核范围收敛是否误伤产品体验
+
+```
+我有一个担心：我们进行这次审查，是为了控制范围，避免无限扩张导致规模失控；根本目标仍然是围绕架构总纲，向用户提供具有优秀产品体验的功能。可以砍掉越界、低价值或过度实现，但不能砍掉用户体验。请重新判断当前最新版本是否同时满足这两个目标；有问题统一说明，没有问题直接简要回复。
+```
+
 ### 2.4 将审查问题转入问题列表
 
 ```
@@ -161,22 +167,22 @@
 #### 目标模式：审查并收敛问题列表
 
 ```
-目标：只收敛第 26 单元正式问题列表中的 U26-01～U26-05 五个 P1 和 U26-06 一个 P2，使每项都真正命中根因，并具备可由执行者直接实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题。
+目标：只收敛第 26 单元正式问题列表中的 U26-07～U26-08 两个 P1 和 U26-09～U26-10 两个 P2，使每项都真正命中根因，并具备可由执行者直接实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 26 单元正式文件中的六项问题，只依据正式文件的耐久状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 26 单元正式文件中的四项问题，只依据正式文件的耐久状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词完成条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 按 `U26-01 → U26-02 → U26-03 → U26-04 → U26-05 → U26-06` 逐项重建事实链，判断当前描述是根本原因还是表象，并核准事实证据、完整影响面、受影响审查项、评级和工作量；同根内容必须合并，独立根因不得相互遮蔽。
+1. 按 `U26-07 → U26-08 → U26-09 → U26-10` 逐项重建事实链，判断当前描述是根本原因还是表象，并核准事实证据、完整影响面、受影响审查项、评级和工作量；同根内容必须合并，独立根因不得相互遮蔽。
 2. 以“首席产品官 + 乔布斯”直觉和最优架构标准审查方案：从唯一所有权、单一事实源、线性化点、恢复机制和真实产品体验根治，不得逐点打补丁、制造第二语义或留下已知债务。
 3. 每项方案必须用最少文字说清改什么、怎么改、关键边界及完成判据，让执行者无需实现猜测即可一次完成。发现缺口时直接修正原问题行，只复审变化项及受其影响的结论。
-4. 六项均看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：用户操作权威与接入面隔离、启动/恢复拓扑、调度策略的耐久并发与崩溃恢复、用户通知闭环与非阻断生命周期价值边界。各路不得沿用前轮结论；发现反证则修正原问题并重新复审。
+4. 四项均看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：手动 surface 恢复与唯一生命周期所有权、missed 汇总的启动并发与崩溃恢复、公开通知的产品语言与可行动性、终态事件驱动的资源释放与非阻断价值边界；同时核查 `U26-07↔U26-10` 和 `U26-08↔U26-09` 的直接交界。各路不得沿用前轮结论；发现反证则修正原问题并重新复审。
 
 只有现有架构无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或单元边界时才暂停；其余架构选择按整体最优且不留债务自主收敛。
 
-完成条件：同一份未修改问题列表通过四路冷启动对抗复审；六项事实均被根因完整解释，影响面无遗漏，最优方案和验收条件可直接执行，不会再因同根残留导致局部返工。满足后明确回复“六项问题的根因与最优方案已闭合”并立即停止。
+完成条件：同一份未修改问题列表通过四路冷启动对抗复审；四项事实均被根因完整解释，影响面无遗漏，最优方案和验收条件可直接执行，不会再因同根残留导致局部返工。满足后明确回复“四项问题的根因与最优方案已闭合”并立即停止。
 ```
 
 ### 2.6 识别开发阶段遗漏
@@ -219,21 +225,21 @@
 ### 2.9 目标模式：解决问题并完成多角色对抗收口
 
 ```text
-目标：按照正式问题列表的实施顺序，彻底解决第 26 单元 U26-01～U26-05 五个 P1，闭合其当前登记事实及同根残留；按既有价值裁决收口 U26-06，保持其为非阻断后置事项，重开条件未被新事实触发时不得实现通用日志压缩。不得扩展到其他问题或全单元流程。
+目标：彻底解决第 26 单元 U26-07～U26-08 两个 P1 和 U26-09～U26-10 两个 P2，闭合其当前登记事实及同根残留；不得扩展到其他问题或全单元流程。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 26 单元正式文件中的 U26-01～U26-06，只依据正式文件的最新根因、价值裁决、方案、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 26 单元正式文件中的 U26-07～U26-10，只依据正式文件的最新根因、价值裁决、方案、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词结束条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 修复前先抛开现有问题描述和验收条件，从权威架构、规格与当前生产调用图反向推导 U26-01～U26-05 各自必须闭合的完整功能链、状态组合和交界，形成固定核查矩阵；每项至少明确生产入口、唯一 owner、耐久事实与线性化点、消费终态、重试/崩溃恢复、拒绝零副作用、生产装配和直接交界，并绑定当前源码事实。再按 `U26-01 → U26-02 → U26-03 → U26-04 → U26-05` 完成生产实现、架构与规格及直接相关测试。同根残留并入原问题，禁止新增表象问题或逐点打补丁；U26-06 只核对重开条件，不得据此新增基础设施。每项和每个阶段完成时立即更新正式文件的状态与证据，续跑只恢复未完成部分。
-2. 按验证手册运行受影响包的必要测试；失败先归因，实现问题直接修复并回到第 1 步。不得新增或运行非必要 benchmark、信息采集或与五项 P1 验收无关的验证设施。
-3. 记录并冻结当前交付物指纹，按第 1 步矩阵逐格从当前架构和源码重建事实链；矩阵必须覆盖五项完整功能链、各自全部验收条件，以及 `U26-01↔U26-02` 的操作权威与 surface 身份、`U26-03↔U26-04` 的 ready 边界与策略恢复、`U26-04↔U26-05` 的 missed/capability-gap 与用户通知，并核实 U26-06 的后置结论未被当前生产事实推翻。测试通过不得代替功能判断；整轮只读且不得因发现残留提前结束，矩阵全部完成后才统一归并。
-4. 专项功能审查通过后，对该指纹执行四个相互隔离的冷启动对抗角色：用户操作权威与接入面隔离、启动与恢复拓扑、调度策略的耐久并发与崩溃恢复、用户通知闭环与非阻断生命周期价值边界。每个角色都必须抛开已有问题描述、验收条件、实现说明、测试结果和其他角色结论，先独立从权威合同与当前源码推导应有闭包，再与固定矩阵双向对账，并完整覆盖六项及其交界；每项都须主动构造适用的重复、错绑、半提交、断线/停机、崩溃恢复和装配缺失反例，不适用者写明源码事实。每完成一格立即把事实链、反例和结论耐久写入正式文件后才能继续；未落盘、漏项、只审角色擅长分区、沿用既有范围或缺少事实证据的“无问题”均不计完成。
+1. 修复前先抛开现有问题描述和验收条件，从权威架构、规格与当前生产调用图反向推导四项必须闭合的完整功能链、状态组合和交界，形成固定核查矩阵；每项至少明确生产入口、唯一 owner、耐久事实与线性化点、消费终态、重试/崩溃恢复、生产装配和直接交界，并绑定当前源码事实。按依赖顺序 `U26-10 → U26-07 → U26-08 → U26-09` 完成内部生命周期信号与资源退役、手动 surface 恢复、missed 汇总必达和公开通知分层及直接相关测试。同根残留并入原问题，禁止新增表象问题或逐点打补丁；不得扩建通用事件总线、session registry、文案系统、监控或诊断设施。每项和每个阶段完成时立即更新正式文件的状态与证据，续跑只恢复未完成部分。
+2. 按验证手册运行受影响包的必要测试；失败先归因，实现问题直接修复并回到第 1 步。不得新增或运行非必要 benchmark、信息采集或与四项验收无关的验证设施。
+3. 记录并冻结当前交付物指纹，按第 1 步矩阵逐格从当前架构和源码重建事实链；矩阵必须覆盖四项完整功能链、各自全部验收条件，以及 `U26-07↔U26-10` 的 opening、job 终态、assignment 退役与资源释放，`U26-08↔U26-09` 的 missed 汇总、公开通知和补读投影。测试通过不得代替功能判断；整轮只读且不得因发现残留提前结束，矩阵全部完成后才统一归并。
+4. 专项功能审查通过后，对该指纹执行四个相互隔离的冷启动对抗角色：手动 surface 恢复与唯一生命周期所有权、missed 汇总的启动并发与崩溃恢复、公开通知的产品语言与可行动性、终态事件驱动的资源释放与非阻断价值边界。每个角色都必须抛开已有问题描述、验收条件、实现说明、测试结果和其他角色结论，先独立从权威合同与当前源码推导应有闭包，再与固定矩阵双向对账，并完整覆盖四项及其交界；每项都须主动构造适用的重复、错绑、半提交、断线/停机、崩溃恢复、opening/closing 竞争和装配缺失反例，不适用者写明源码事实。每完成一格立即把事实链、反例和结论耐久写入正式文件后才能继续；未落盘、漏项、只审角色擅长分区、沿用既有范围或缺少事实证据的“无问题”均不计完成。
 5. 所有发现首次出现时立即以稳定编号写入反证账，不得等整轮结束或依赖对话记忆。每轮机械取专项审查、四路记录及历轮反证的并集，并在收口前对各轮、各角色结果执行差异审计：任何曾出现而本轮未出现的发现，都必须逐条标明“同根合并”“当前源码证伪”或“修复后复核通过”及证据；不得因后一次发现更少、用户重发提示词或多数角色未发现而消失。发现真实反证时，先扩充固定矩阵并修正对应原问题的事实、根因、影响面、最优方案和验收条件，再将受影响项退回“待验证”并回到第 1 步；不得直接形成局部补丁。任何交付物修改都会使指纹、核查矩阵和四路对抗结论全部失效，必须在受影响包测试完成后重新执行。
 
-结束条件：同一冻结指纹上的 U26-01～U26-05 五项方案全部落地，受影响包测试通过，专项功能审查和四路冷启动对抗角色均留下完整、可归并的核查矩阵；差异审计无未处置发现，累计反证全部有耐久记录并被当前源码事实证伪或修复后复核通过；五项 P1 均已更新为“已验证”，U26-06 已按状态约定收口为非阻断后置事项且重开条件未触发。满足后明确报告“五项阻断问题已彻底解决，U26-06 后置边界保持成立”并立即停止；不得进入全单元终审或最终验证。
+结束条件：同一冻结指纹上的 U26-07～U26-10 四项方案全部落地，受影响包测试通过，专项功能审查和四路冷启动对抗角色均留下完整、可归并的核查矩阵；差异审计无未处置发现，累计反证全部有耐久记录并被当前源码事实证伪或修复后复核通过；四项均已更新为“已验证”。满足后明确报告“四项问题已彻底解决”并立即停止；不得进入全单元终审或最终验证。
 ```
 
 ## 审查清单
@@ -242,13 +248,13 @@
 
 - **当前单元**：第 26 单元 · generation 1
 - **架构来源**：分布式运行时总纲、可执行规格与 S2 供应链约束；scheduler、常驻服务/daemon、消息 Outbox、工具/turn 因果、远程确认与远程中断现役合同；第 14、15A、15B、24、25 单元冻结合同；第 26 单元定稿开发清单
-- **交付基线**：HEAD 4ec98cf 至当前完整工作区的 104 个非工作台路径；新增 21、修改 77、删除 6；CLI 25、core 26、executor 1、orchestrator 2、owner-kernel 18、rpc 1、runtime-host 5、server 18、tools-builtin 3、架构文档 5
-- **交付指纹**：git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a；路径集 SHA-256 为 eacd516d4465e8cc07a61c3ff8a8468f1123fb581bda61694543ceb83735410f；指纹只作证据，不建立为审查项
+- **交付基线**：HEAD 4ec98cf 至当前完整工作区的 106 个非工作台路径；新增 23、修改 77、删除 6；CLI 27、core 26、executor 1、orchestrator 2、owner-kernel 18、rpc 1、runtime-host 5、server 18、tools-builtin 3、架构文档 5
+- **交付指纹**：git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b；路径集 SHA-256 为 bf7ee1f5b1193efc0db4ad8367b42fa1bc40878251e9e7d5cf6a61bca117ce36；指纹只作证据，不建立为审查项
 - **目标提交边界**：第 26 单元（S7）scheduler 与 job 产品闭环的生产实现、直接相关测试和五份被替代路径文档
-- **当前任务进度**：100%（30 / 30 项已审；18 项 [x]，12 项 [!]）
+- **当前任务进度**：40%（12 / 30 项可直接复用；12 项 [x]，18 项 [~]）
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论
 
-> **清单状态**：104 路径新交付基线已经逐项审查。发现两个独立 P1 根因，影响 12 个审查项；另有两个 P2。18 项通过，当前独立审查不通过；本轮问题尚未转入第 26 单元正式问题列表。
+> **清单状态**：U26-07～U26-10 已完成修复并在正式问题列表中标为“已验证”；两类临时问题表保持为空。交付闭包更新为 106 个路径。依据生命周期事件、手动 surface、missed 汇总和公开通知的实际影响范围，18 项改为 `[~]`，旧阻断证据失效；其余 12 项 `[x]` 有事实证明未受影响，结论继续复用。
 
 ### 来源覆盖
 
@@ -317,7 +323,7 @@
 | 第 24 单元 X24-01、L24-01～L24-05 与冻结合同 | 适用 | job run-interact 重开条件已由本单元触发；凭证互斥、稳定 owner、派生索引、记录矩阵、隐藏存储治理及派生资产检测归入 IR26-08、IR26-16～IR26-17、IR26-23、IR26-25、IR26-28～IR26-29。 |
 | 第 25 单元冻结合同（X/L 表为空） | 部分适用 | 显式环境、无 workspace、组合根、治理与当前生产交付指纹算法作为回归输入，归入 IR26-07、IR26-16、IR26-24～IR26-27；本单元不重开 workspace 管理。 |
 | 第 26 单元定稿开发清单 D26-01～D26-11 | 适用 | 十一项开发义务分别由 IR26-01～IR26-30 承载；清单限定范围，不替代总纲与规格。 |
-| 当前完整交付闭包 | 适用 | 104 个生产、测试和文档路径逐路径反向归入 IR26-02～IR26-30；未归项路径、删除项仍可达或新增生产路径无审查落点即为范围缺口。 |
+| 当前完整交付闭包 | 适用 | 106 个生产、测试和文档路径逐路径反向归入 IR26-02～IR26-30；未归项路径、删除项仍可达或新增生产路径无审查落点即为范围缺口。 |
 
 ### 审查项
 
@@ -328,31 +334,31 @@
 | IR26-03 | [x] | 任务与 job 唯一权威 | AnchorScheduler 拥有的 AuthorityCommitLog 与逐任务 JobJournal 是唯一事实源；TaskDefinition 目录可由日志重建，scheduler.json 仅是单向兼容投影。首次导入旧 user 任务保留身份与下一未来触发，system 行只由 host 注册；部分导入、重复启动、异载荷、损坏和投影重建均有确定终态。 | GlobalStatePort 与 AnchorScheduler 的唯一写面、日志权威、兼容投影及恢复边界已闭合，未发现第二事实源或直达写面。 |
 | IR26-04 | [x] | CRUD、查询与受信入口 | schedule create/update/set-state/delete/list/run/abortRun、模型工具、RPC/facade、CLI、turn-context provider 及状态事件只达锚点权威或其只读投影；requestId、anchorEpoch、taskRevision、payloadDigest 与认证 ingress 全等；system 任务对所有用户入口不可见不可改；离线不伪生效。 | CRUD/list/run/abortRun 的受信入口、稳定 operationId、epoch/revision CAS 与 system 隔离已闭合，未发现阻断问题。 |
 | IR26-05 | [x] | conversation/job 内暂存发布 | assignment 内 schedule 写只进入 staged overlay，create/update/delete 的结果身份稳定；只随所属 conversation/job 提交同 envelope 发布，失败、取消或未裁决 uncertain 零外泄；响应丢失回放原 receipt/applied 结果，不生成第二 task。 | 复用原结论：本轮未修改 assignment 内 staged overlay、MutationBatch 或 publish-decision 链，既有同 envelope 发布证据继续有效。 |
-| IR26-06 | [x] | occurrence 与时钟语义 | 手动和 timer 均先原子写稳定 jobRunId、occurrence、queued 与 admitted；taskRevision、scheduledFor、deliveryPlan 反绑不可变 definition。每任务至多一个非终态 occurrence；在线拥塞不误判 missed，离线错过按 ready 锚点处理；once/interval/cron、回拨、退避、停用和单任务失败隔离均按冻结语义收敛。 | occurrence 身份、离线 recurring 跳转、失败阈值停用及其崩溃恢复已收敛到耐久原子事实，未发现阻断问题。 |
+| IR26-06 | [~] | occurrence 与时钟语义 | 手动和 timer 均先原子写稳定 jobRunId、occurrence、queued 与 admitted；taskRevision、scheduledFor、deliveryPlan 反绑不可变 definition。每任务至多一个非终态 occurrence；在线拥塞不误判 missed，离线错过按 ready 锚点处理；once/interval/cron、回拨、退避、停用和单任务失败隔离均按冻结语义收敛。 | Job lifecycle 订阅与 missed-summary 命中驱动改变 terminal/missed 后的投影刷新和下一触发计算；旧结论失效，待重审 occurrence 与时钟语义。 |
 | IR26-07 | [x] | user job 派发与环境 | queued occurrence 只生成去敏 instruction/manifest，经 selector、资源治理、local/mesh dispatcher、executor ledger 与 JobCommitFence；无 workspace 不暗取 cwd。match、binding、reserve、assigned 顺序原子；可恢复缺口保持 queued，确定硬缺口 failed；错域、版本、epoch、lease、fence 零执行。 | instruction/manifest、selector、environment、reserve/assigned 与 local/mesh dispatcher 共用受验合同，未发现绕过或 cwd 回流。 |
-| IR26-08 | [!] | 手动 ticket 与定时 grant | 以 JobJournal 的 occurrence/admitted 与不可变 definition 来源为唯一 operations router：手动 job 只签发并接受原始 surface 的 run-interact/abort ticket；定时 job 零数据面票据，只接受冻结 origin/responder 的 channel grant。签发端、executor guard、恢复 owner 共用同一谓词；跨路径、缺来源或错绑在 interaction-finished 前拒绝且零追加。 | P26-06：恢复得到的手动 assignment 可能在 ready 快照之后才进入 pending，现有一次性 handoff 不会再驱动 surface；并发恢复还可能重复打开。 |
+| IR26-08 | [~] | 手动 ticket 与定时 grant | 以 JobJournal 的 occurrence/admitted 与不可变 definition 来源为唯一 operations router：手动 job 只签发并接受原始 surface 的 run-interact/abort ticket；定时 job 零数据面票据，只接受冻结 origin/responder 的 channel grant。签发端、executor guard、恢复 owner 共用同一谓词；跨路径、缺来源或错绑在 interaction-finished 前拒绝且零追加。 | U26-07 已引入 assignmentId 唯一 manual-surface lifecycle 及终态/退役顺序；旧 P26-06 阻断证据失效，待重审 ticket/grant 完整链。 |
 | IR26-09 | [x] | user job 38 行状态机 | 对 specification §6.2 的 38 行逐行建立 current state、触发、追加记录、资源/票据动作和次态对账；full/guard/recovery 均接受合法边、拒绝全部 sibling 非法边；每行有真实 producer 和可判定终态。 | user job 38 行真实 producer/reducer/guard/recovery 矩阵完整，未发现非法边或无生产者记录。 |
-| IR26-10 | [x] | system job 六行闭环 | ensureSystemTask 只注册封闭 SystemHandlerId；system job 仅锚点本地 runSystem，经 scheduler-class lease 与 SystemJobFence，六行状态机逐行闭合；无 assignment、manifest、票据、用户投递或 uncertain，用户入口零可达；重启同 jobRunId 重驱，错过至多合并一次。 | system job 六行真实状态机、封闭 handler、scheduler-class lease/fence 与用户隔离成立。 |
-| IR26-11 | [x] | 取消、删除、超时与 uncertain | queued 原子取消；dispatched/running 只经耐久 cancel-requested、唯一 dispatcher 与证明收束；超时不以进程 abort 伪终态。completed 只重提、可证未 started 才重派、结果不明进入 uncertain；禁用不取消在途，删除收束全部在途；打开 fact、迟到 bundle、三选裁决和恢复均唯一。 | queued/assigned/running 的取消、删除、迟到 bundle 与 uncertain 裁决沿唯一耐久路径收敛，未发现阻断问题。 |
+| IR26-10 | [~] | system job 六行闭环 | ensureSystemTask 只注册封闭 SystemHandlerId；system job 仅锚点本地 runSystem，经 scheduler-class lease 与 SystemJobFence，六行状态机逐行闭合；无 assignment、manifest、票据、用户投递或 uncertain，用户入口零可达；重启同 jobRunId 重驱，错过至多合并一次。 | JobJournal 新增覆盖 committed 的内部 lifecycle 事件，system job 终态也进入新投影刷新路径；旧结论失效，待重审六行闭环。 |
+| IR26-11 | [~] | 取消、删除、超时与 uncertain | queued 原子取消；dispatched/running 只经耐久 cancel-requested、唯一 dispatcher 与证明收束；超时不以进程 abort 伪终态。completed 只重提、可证未 started 才重派、结果不明进入 uncertain；禁用不取消在途，删除收束全部在途；打开 fact、迟到 bundle、三选裁决和恢复均唯一。 | cancelled、failed、committed 等终态现驱动内部 waiter 与 surface/resource 清理；权威取消状态机未改，但消费终态输入变化，待重审。 |
 | IR26-12 | [x] | 结果与投递原子提交 | user job committed 时以 JobCommitFence 在同一 CommitEnvelope 写终态、publish-decision 和 delivery enqueued；fence.deliveryPlanDigest 与 occurrence 冻结 plan 全等。显式目标优先，否则保留 origin/channel/thread；none 不投递；source、priority、afterSlot 与 SecretRef 边界正确；transport 结果不回滚 job。 | 终态、publish-decision、delivery enqueue 与 fence 摘要同 envelope；显式目标、来源目标和 none 分支均闭合。 |
-| IR26-13 | [!] | 状态、missed 与维护通知 | 每次状态转移按单调 statusRevision 至多生成一条可实时和补读 notice；committed 只走结果投递，渠道状态只收白名单非 committed 终态与 uncertain。missed 按稳定批次和 origin 聚合一次，能力/离线缺口只通知一次，裁决通知携完整 openFactDigest，断线补读零跳失。 | P26-07：在线 tick 产生 missed 后不调用现有汇总 producer，通知只能等下一次启动恢复；NB26-02：能力缺口 notice 的公开 reason 泄漏 executor 术语。 |
+| IR26-13 | [~] | 状态、missed 与维护通知 | 每次状态转移按单调 statusRevision 至多生成一条可实时和补读 notice；committed 只走结果投递，渠道状态只收白名单非 committed 终态与 uncertain。missed 按稳定批次和 origin 聚合一次，能力/离线缺口只通知一次，裁决通知携完整 openFactDigest，断线补读零跳失。 | U26-08、U26-09 已补 missed 必达提示与公开通知分层；旧 P26-07、NB26-02 证据失效，待重审实时、历史与补读链。 |
 | IR26-14 | [x] | Delivery 与 Outbox | 权威 Delivery 十五行生命周期、唯一 key/index、claim/send/outcome/retry/uncertain/裁决与可重建状态目录保持；投影待办只送入 per-target Outbox，FIFO、turn slot、单消费者和失败边界不分叉；同 key 同 intent 回放，异 intent 冲突且来源 envelope 零写入。 | 现役 Delivery 十五行、六类 producer、per-target Outbox 与同 key 回放合同未被本轮修复破坏。 |
 | IR26-15 | [x] | 旧投递排空与退役 | 所有新 producer 零调用公开 enqueue 后，唯一 legacy drainer 才可按旧 itemId、目标顺序、重试和幂等语义接管旧 queue；queued/retrying 与已接管 send 收敛前不得删文件。空 home 零实例零常驻；损坏 fail-closed；排空完成后旧公开 enqueue、Pipeline/queue/store 及其专属 stats/flush 与生产装配零可达，现役权威 Delivery 的查询/flush 不受此条误伤。 | legacy drainer 只在 ready 后激活，身份、响应丢失、损坏、排空与零新 enqueue 边界成立。 |
-| IR26-16 | [!] | 生产组合根与唯一 owner | 含 anchor 的单机、anchor-only、anchor+executor 及可选 mesh/channel 关闭拓扑中恰有一个 scheduler/job owner；executor-only 或未启用 anchor 的拓扑零 owner。交互 CLI、one-shot 与 daemon 只经同一 core-host/facade，schedule profile 按需拉起；任务目录、timer、journal recovery、dispatcher、relay、status/delivery producer、system runner 和 legacy drainer 的创建、启动、失败回滚与关闭均归唯一组合根。 | P26-06：手动 surface 的 pending/opened/dispatcher 状态缺少同一 assignment 的唯一生命周期 owner 与终态清理。 |
-| IR26-17 | [!] | 启动恢复与 ready 门禁 | schedule profile 首次使用只拉起一个 owner；启动先打开权威日志并重建目录/投影，有限枚举并接管未完成 occurrence、dispatch、cancel、interaction、commit、delivery 和 legacy-drain 义务后才宣告 profile/server ready，真实执行与外部投递可在 ready 后由同一 owner 有界重驱，不得阻塞整体就绪。各义务按稳定身份分页、失败隔离并持续重驱；任何可重建派生索引具有日志/index/checkpoint 写序、落后/损坏自愈和重建期间 fail-closed。 | P26-06：启动恢复与 ready 之间采用一次性 pending 快照，晚到恢复义务没有确定重驱入口。 |
-| IR26-18 | [x] | quiesce 与停机 | 停机顺序固定为拒绝新 schedule 写/run 与 timer fire、停止新触发、推进已接管执行到安全终态或耐久恢复点、主动 drain 可立即完成的 delivery/outbox，最后释放 channel/transport；schedule profile 空闲退出与 daemon/前台 shutdown 共用该序列，不得用一个全局 abort 同时终止业务执行和恢复尝试。正常、启动失败、空闲退出、重复 stop 与 transport 失败均幂等。 | shutdown 先拒绝新入口，再停 scheduler/recovery、收束 job owner，最后释放 transport；重复 stop 与失败回滚保持幂等。 |
-| IR26-19 | [!] | 手动用户闭环 | 从受信用户入口 CRUD/list 到 job-run 稳定受理、派发、原 surface 交互/取消、提交、状态/结果投递与重试形成一条生产可达链；线程、来源、身份、断线与响应丢失均保持，用户只见任务语言和可行动状态。 | P26-06：重启后的手动任务可恢复 assignment 却不恢复原 surface 会话，用户交互链可能永久缺失。 |
-| IR26-20 | [!] | 定时渠道闭环 | 从 timer occurrence 到派发、owner relay、challenge/token/grant、提交、线程内结果/状态、missed 汇总和渠道不可达降级形成一条生产可达链；无 ingress、缺 responder、回调重投、发送/ACK 丢失和过期均有确定终态且不试探 ticket 路径。 | P26-07：在线 missed 不进入耐久聚合通知，定时渠道用户可能在不重启服务时永远收不到错过说明。 |
-| IR26-21 | [x] | system 维护闭环 | 从 host ensure、到期/catch-up、资源准入、handler、fence、终态、释放和重启恢复形成一条生产链；首次 seed 不补跑，system 不进入用户列表、事件、投递、确认或 uncertain；单个 handler 失败不阻断其他任务。 | system job 从注册、到期、资源、handler、fence、终态到恢复均在 ready 后有界重驱，未发现阻断问题。 |
-| IR26-22 | [!] | 并发、幂等与线性化 | 固定覆盖 CRUD CAS、手动/timer 竞争、重复 tick、同任务并发、派发/取消/封包/投递竞争、同 request/operation 重放与响应丢失。每链只有一个耐久 winner、稳定身份、线性化点和完成判据；迟到输入只回放或拒绝，零第二 task/job/assignment/delivery/终态。 | P26-06：resume 与恢复并发缺少 per-assignment singleflight，既可能漏开也可能重复打开。 |
-| IR26-23 | [!] | 崩溃、损坏与恢复 | 有限覆盖十一类半提交边界：task revision 已写而目录/投影未更新；staged mutation 已提交而 task revision/publish-decision 未完成；occurrence queued 而未派发；assigned 而未 started；cancel-requested 而 proof 未回；interaction prepared/granted 而 mirror/closed 未完成；bundle sealed/committed 而 ACK 未回；system reserve/fence 或 terminal/settle/release 未完整落定；job terminal 而 status/delivery 投影未完成；delivery enqueued/attempt-started 而 outcome 未回；legacy send 已开始/完成而队列文件未重写。重启只推进原义务；坏尾、未知记录及 index/checkpoint 落后、超前或损坏均隔离或由权威日志重建。 | P26-06：pending 在 ready 前后交错的恢复时序没有稳定完成判据，重启不能保证只推进原 surface 义务。 |
+| IR26-16 | [~] | 生产组合根与唯一 owner | 含 anchor 的单机、anchor-only、anchor+executor 及可选 mesh/channel 关闭拓扑中恰有一个 scheduler/job owner；executor-only 或未启用 anchor 的拓扑零 owner。交互 CLI、one-shot 与 daemon 只经同一 core-host/facade，schedule profile 按需拉起；任务目录、timer、journal recovery、dispatcher、relay、status/delivery producer、system runner 和 legacy drainer 的创建、启动、失败回滚与关闭均归唯一组合根。 | AnchorSchedulerRuntime 新增 manual lifecycle owner、journal lifecycle 订阅与 assignment retirement；旧 P26-06 证据失效，待重审组合根唯一 owner。 |
+| IR26-17 | [~] | 启动恢复与 ready 门禁 | schedule profile 首次使用只拉起一个 owner；启动先打开权威日志并重建目录/投影，有限枚举并接管未完成 occurrence、dispatch、cancel、interaction、commit、delivery 和 legacy-drain 义务后才宣告 profile/server ready，真实执行与外部投递可在 ready 后由同一 owner 有界重驱，不得阻塞整体就绪。各义务按稳定身份分页、失败隔离并持续重驱；任何可重建派生索引具有日志/index/checkpoint 写序、落后/损坏自愈和重建期间 fail-closed。 | ready 后登记即时驱动、启动 missed 提示重建及订阅先于初读改变恢复路径；旧证据失效，待重审 ready 门禁。 |
+| IR26-18 | [~] | quiesce 与停机 | 停机顺序固定为拒绝新 schedule 写/run 与 timer fire、停止新触发、推进已接管执行到安全终态或耐久恢复点、主动 drain 可立即完成的 delivery/outbox，最后释放 channel/transport；schedule profile 空闲退出与 daemon/前台 shutdown 共用该序列，不得用一个全局 abort 同时终止业务执行和恢复尝试。正常、启动失败、空闲退出、重复 stop 与 transport 失败均幂等。 | stop 新增 manual lifecycle 关闭、retirement task 等待与 lifecycle disposer；旧停机结论输入变化，待重审。 |
+| IR26-19 | [~] | 手动用户闭环 | 从受信用户入口 CRUD/list 到 job-run 稳定受理、派发、原 surface 交互/取消、提交、状态/结果投递与重试形成一条生产可达链；线程、来源、身份、断线与响应丢失均保持，用户只见任务语言和可行动状态。 | U26-07 已补原 surface 恢复、单飞打开和终态优先关闭；旧 P26-06 证据失效，待重审手动用户闭环。 |
+| IR26-20 | [~] | 定时渠道闭环 | 从 timer occurrence 到派发、owner relay、challenge/token/grant、提交、线程内结果/状态、missed 汇总和渠道不可达降级形成一条生产可达链；无 ingress、缺 responder、回调重投、发送/ACK 丢失和过期均有确定终态且不试探 ticket 路径。 | U26-08 已补 missed 提交后命中、失败重驱及启动重建；旧 P26-07 证据失效，待重审定时渠道闭环。 |
+| IR26-21 | [~] | system 维护闭环 | 从 host ensure、到期/catch-up、资源准入、handler、fence、终态、释放和重启恢复形成一条生产链；首次 seed 不补跑，system 不进入用户列表、事件、投递、确认或 uncertain；单个 handler 失败不阻断其他任务。 | system job 终态现通过内部 lifecycle 事件刷新 scheduler 投影；handler/fence 未改，但完整消费链输入变化，待重审。 |
+| IR26-22 | [~] | 并发、幂等与线性化 | 固定覆盖 CRUD CAS、手动/timer 竞争、重复 tick、同任务并发、派发/取消/封包/投递竞争、同 request/operation 重放与响应丢失。每链只有一个耐久 winner、稳定身份、线性化点和完成判据；迟到输入只回放或拒绝，零第二 task/job/assignment/delivery/终态。 | per-assignment opening singleflight、订阅先于初读、missed 提示并发协议均为新线性化输入；旧证据失效，待重审。 |
+| IR26-23 | [~] | 崩溃、损坏与恢复 | 有限覆盖十一类半提交边界：task revision 已写而目录/投影未更新；staged mutation 已提交而 task revision/publish-decision 未完成；occurrence queued 而未派发；assigned 而未 started；cancel-requested 而 proof 未回；interaction prepared/granted 而 mirror/closed 未完成；bundle sealed/committed 而 ACK 未回；system reserve/fence 或 terminal/settle/release 未完整落定；job terminal 而 status/delivery 投影未完成；delivery enqueued/attempt-started 而 outcome 未回；legacy send 已开始/完成而队列文件未重写。重启只推进原义务；坏尾、未知记录及 index/checkpoint 落后、超前或损坏均隔离或由权威日志重建。 | 新增 opening/terminal/retired、missed 提交后失败及 bundle ACK 后退役恢复边界；旧证据失效，待重审。 |
 | IR26-24 | [x] | 安全、权限与秘密 | origin、interactionResponder、createdInTurn、system、id/revision/time/state 只由锚点派生；assignment、surface、host、owner-control、usage-reporter 五类 principal 的封闭方法子集及其 resource/epoch/assignment/lease 绑定逐项验权，owner-relay 还须验证当前 owner-control authority。Webhook endpoint 只以 SecretRef 耐久，解析只在发送边界；prompt、wire、日志、错误和诊断零秘密/真实路径；伪签、错绑、过期与跨域重放在副作用前拒绝。 | principal 方法集、epoch/resource/assignment/lease 绑定、SecretRef 解析边界与错绑拒绝均成立。 |
-| IR26-25 | [x] | 资源、保留与复杂度 | user/system job、delivery、legacy drain、日志/投影恢复均经既有唯一 resource/storage governor；permit 只覆盖无嵌套、无锁内或外部等待的叶级步骤。timer/重试/队列/索引有硬上界，单任务失败隔离；首次生产接管后，TaskDefinition/JobJournal/Delivery 终态幂等索引与日志按 §4.5 的 27 天窗口保留并由既有有界压缩/GC 所有者收束，窗口内 exact replay 不变；启动和热路径不随完整历史无界扫描，空闲零忙等。 | NB26-03：每个未终态 occurrence 以 50ms 独立轮询，且手动 assignment 的运行态映射缺少终态释放；不阻断当前核心功能但形成可避免的资源成本。 |
-| IR26-26 | [!] | 产品体验与诚实状态 | CRUD、运行、取消、错过、排队、不可用、失败、uncertain、停用和通知文案均低术语、可行动且不暴露 anchor/executor/lease/fence/bindingRef；手动受理立即给稳定身份，离线不伪成功，状态与实际权威事实一致；范围内体验优秀但不增加非必要能力。 | P26-07：在线 missed 缺用户通知；NB26-02：能力缺口 notice 的公开 reason 使用内部 executor 术语。 |
-| IR26-27 | [!] | 前置能力与兼容回归 | 第 14、15A、15B、24、25 单元的 assignment、job reducer、delivery、conversation staged publish、ticket/grant、resource、environment 和 shutdown 稳定合同不回归；现有 once/interval/cron、priority/active-hours、RPC event bridge 与 no-workspace 行为保持；删除旧 Scheduler/RunRegistry/Pipeline 不留下兼容调用。 | P26-06：原 surface ticket 合同恢复时缺少稳定 handoff 与生命周期清理，触发前置能力回归。 |
-| IR26-28 | [!] | 历史排除项与迟发现教训 | 逐项核对有限集合：EX14-01、LD14-01～LD14-08；U15-X1～U15-X5、U15-L1～U15-L26；U15B-X1～U15B-X9、U15B-L1～U15B-L35；X24-01、L24-01～L24-05。每项记录适用/不适用与事实；X24-01 必须重开并由 IR26-08 证明，U15-X3 必须由 IR26-25 证明生产接管后的保留/压缩，其他命中重开条件者不得沿用排除结论。 | P26-06 使 X24-01 的稳定 owner 重开条件仍未闭合；其他适用排除项与迟发现教训未发现新增阻断。 |
+| IR26-25 | [~] | 资源、保留与复杂度 | user/system job、delivery、legacy drain、日志/投影恢复均经既有唯一 resource/storage governor；permit 只覆盖无嵌套、无锁内或外部等待的叶级步骤。timer/重试/队列/索引有硬上界，单任务失败隔离；首次生产接管后，TaskDefinition/JobJournal/Delivery 终态幂等索引与日志按 §4.5 的 27 天窗口保留并由既有有界压缩/GC 所有者收束，窗口内 exact replay 不变；启动和热路径不随完整历史无界扫描，空闲零忙等。 | U26-10 删除 50ms 轮询并新增终态资源退役，U26-08 改为命中式处理；旧 NB26-03 证据失效，待重审资源上界。 |
+| IR26-26 | [~] | 产品体验与诚实状态 | CRUD、运行、取消、错过、排队、不可用、失败、uncertain、停用和通知文案均低术语、可行动且不暴露 anchor/executor/lease/fence/bindingRef；手动受理立即给稳定身份，离线不伪成功，状态与实际权威事实一致；范围内体验优秀但不增加非必要能力。 | U26-08、U26-09 已补 missed 通知必达和低术语公开 reason/actions；旧证据失效，待重审产品体验。 |
+| IR26-27 | [~] | 前置能力与兼容回归 | 第 14、15A、15B、24、25 单元的 assignment、job reducer、delivery、conversation staged publish、ticket/grant、resource、environment 和 shutdown 稳定合同不回归；现有 once/interval/cron、priority/active-hours、RPC event bridge 与 no-workspace 行为保持；删除旧 Scheduler/RunRegistry/Pipeline 不留下兼容调用。 | JobJournal 内部 lifecycle、manual surface owner 和 runtime 清理改变第 24 单元交界；旧 P26-06 证据失效，待回归。 |
+| IR26-28 | [~] | 历史排除项与迟发现教训 | 逐项核对有限集合：EX14-01、LD14-01～LD14-08；U15-X1～U15-X5、U15-L1～U15-L26；U15B-X1～U15B-X9、U15B-L1～U15B-L35；X24-01、L24-01～L24-05。每项记录适用/不适用与事实；X24-01 必须重开并由 IR26-08 证明，U15-X3 必须由 IR26-25 证明生产接管后的保留/压缩，其他命中重开条件者不得沿用排除结论。 | X24-01 现由唯一 manual lifecycle owner 与退役顺序闭合；旧重开结论失效，待按当前源码重审有限历史集合。 |
 | IR26-29 | [x] | 记录、状态机与结构验收 | 对有限权威记录集建立机械闭包：task-revision/TaskDefinition 与 occurrence；user job 的 admitted、assigned/dispatch、cancel/supersede、ticket、interaction/relay、state、committed/ACK、resolution；system miss、fence/result；Delivery 六类 enqueue source 与十五行。每类均有真实 producer、full reducer、compact guard、恢复消费者或事实化 N/A、污染向量；38 行 user、6 行 system 与 15 行 delivery 逐行执行真实实现，不用共同 fake、自报标签或仅元数据断言伪造证据。旧队列的 read/send/retry/remove 另由 IR26-15、IR26-23 审查，不伪装成权威记录族。 | TaskDefinition、occurrence、user/system job 与 Delivery 的真实 producer/reducer/guard/recovery 结构闭包成立。 |
-| IR26-30 | [!] | 文档、交付闭包与明确排除 | 五份被替代路径文档与总纲/spec 当前合同一致，旧内容明确标为历史；104 个交付路径逐个归入本清单，6 个删除项生产零可达，新增文件均有必要性和消费者。明确排除第 27～38 单元、诊断/benchmark/性能采集/通用迁移与非必要重构；最终不存在未判来源、条款、功能链或交付路径。 | 104 个非工作台交付路径已逐项归入当前清单，6 个删除项保持生产零可达；P26-06、P26-07 尚未闭合，因此当前不可提交。 |
+| IR26-30 | [~] | 文档、交付闭包与明确排除 | 五份被替代路径文档与总纲/spec 当前合同一致，旧内容明确标为历史；106 个交付路径逐个归入本清单，6 个删除项生产零可达，新增文件均有必要性和消费者。明确排除第 27～38 单元、诊断/benchmark/性能采集/通用迁移与非必要重构；最终不存在未判来源、条款、功能链或交付路径。 | 交付闭包更新为 106 路径，新增 manual lifecycle 生产与测试文件；U26-07～U26-10 已验证，旧 104 路径反向对账证据失效，待按当前闭包重审。 |
 
 ---
 
@@ -362,8 +368,6 @@
 
 | 编号 | 问题描述 | 产生的影响 | 工作量评估 | 问题评级 | 相关审查项 |
 | --- | --- | --- | --- | --- | --- |
-| P26-06 | **手动 job 的 surface 恢复缺少唯一生命周期 owner。** `resumeManualJobSurfaces()` 只处理调用瞬间的 pending 快照；恢复稍后写入 pending 时不会再打开，且 resume/recovery 并发没有 per-assignment singleflight，终态也未统一清理运行态映射。**最优方案：**以 assignment 为键建立唯一、幂等的 surface 生命周期驱动；ready 前后进入 pending 都触发同一驱动，并发只共享一个 opening；终态统一释放 pending/opened/dispatcher/executor/artifact/disposer。验收覆盖 ready 前后发现、并发 resume+recover、重连、重启及终态清理。 | 重启后的手动任务可恢复 assignment 却永久缺少原 surface 会话；并发时还可能重复打开，导致交互链不可用或出现双 owner。 | 中（集中修改 runtime 生命周期状态机及直接恢复/并发测试，不新增基础设施） | P1 | IR26-08、IR26-16、IR26-17、IR26-19、IR26-22、IR26-23、IR26-27、IR26-28、IR26-30 |
-| P26-07 | **在线 missed 事实没有进入耐久汇总通知。** 现有 `prepareMissedSummaries` 只在启动恢复结束调用；服务在线时 `tick()` 产生 missed 后不会调用它。**最优方案：**每个 scheduler tick 批次完成后与启动恢复共用同一汇总入口，按 origin 收集新增耐久 missed 事实并调用既有去重 producer；禁止逐 occurrence 通知。验收覆盖同批聚合、重复 tick/重启不重复、不同 origin 分离及在线重叠产生通知。 | 服务持续在线时，定时渠道任务即使已经耐久记录为 missed，用户也可能永远收不到错过说明，除非之后重启服务。 | 小到中（复用现有耐久汇总器，补一个生产调用点和直接测试） | P1 | IR26-13、IR26-20、IR26-26、IR26-30 |
 
 ## 非阻断级问题列表
 
@@ -371,5 +375,3 @@
 
 | 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 |
 | --- | --- | --- | --- | --- | --- |
-| NB26-02 | 能力缺口 notice 的公开 `reason` 直接使用包含 `executor` 的内部异常文案，虽然渠道文本已是用户语言，但第一方 notice 仍泄漏拓扑术语。 | 读取第一方状态通知的用户会看到内部实现术语，违反低术语产品合同；不影响任务正确性。 | 原始原因与摘要只留内部证据；公开 notice 使用稳定、可行动且与渠道文案一致的用户语言，并保留既有 action。 | 小 | P2 |
-| NB26-03 | 每个未终态 occurrence 都以 50ms 独立轮询完成状态，手动 assignment 的 pending/opened/dispatcher/executor/artifact 映射又缺少终态清理。 | 任务数量增长时形成与未终态任务数成正比的忙轮询和常驻状态，长期运行增加无必要资源消耗；当前小规模核心功能仍可用。 | 复用现有状态订阅，或改为一个有界恢复循环；在统一终态回调中释放 assignment 相关状态与 disposer，禁止新增第二状态源。 | 中 | P2 |

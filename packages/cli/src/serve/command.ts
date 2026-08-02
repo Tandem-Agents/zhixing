@@ -741,6 +741,7 @@ async function runServerProcess(
           },
         });
         session.start();
+        return session;
       },
       ...(ctx.executorJobOwner ? { localJobOwner: ctx.executorJobOwner } : {}),
       mesh: () => ctx.meshRuntime,

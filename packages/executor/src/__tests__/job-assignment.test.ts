@@ -656,6 +656,64 @@ async function resolve(
 }
 
 describe("user job durable protocol", () => {
+  it("keeps capability diagnostics internal while publishing actionable notices", async () => {
+    const harness = await createUserHarness({
+      assign: false,
+      schedulerNotices: true,
+    });
+    if (!harness.schedulerNotices) {
+      throw new Error("scheduler notice authority is unavailable");
+    }
+    const diagnostic =
+      "anchor executor lease fence mismatch: required tool is unavailable";
+    await harness.journal.noteCapabilityGap({
+      jobRunId: JOB_RUN_ID,
+      capabilityRevision: 1,
+      reason: diagnostic,
+      context: hostContext("capability-gap-product-language"),
+    });
+    await harness.journal.noteCapabilityGap({
+      jobRunId: JOB_RUN_ID,
+      capabilityRevision: 2,
+      reason: `${diagnostic}: still unavailable`,
+      context: hostContext("capability-gap-product-language-update"),
+    });
+    await harness.journal.assign(assignmentPlan(harness.unsigned));
+
+    const history = await harness.schedulerNotices.history(0);
+    expect(history).toHaveLength(3);
+    expect(history.map((notice) => notice.state)).toEqual([
+      "open",
+      "updated",
+      "closed",
+    ]);
+    for (const notice of history.slice(0, 2)) {
+      expect(notice).toMatchObject({
+        kind: "capability-gap",
+        reason: expect.stringContaining("暂时找不到可用的执行环境"),
+        actions: ["检查目标设备在线状态", "检查任务所需工具与能力"],
+      });
+    }
+    expect(history[2]).toMatchObject({
+      kind: "capability-gap",
+      state: "closed",
+      reason: "已找到可用执行环境，任务继续处理。",
+      actions: [],
+    });
+    for (const notice of history) {
+      expect(notice.reason).not.toMatch(/anchor|executor|lease|fence/u);
+    }
+
+    const internal = (await harness.log.readAll())
+      .flatMap((commit) => commit.entries)
+      .find(
+        (entry) =>
+          entry.stream === `job:${TASK_ID}` &&
+          (entry.body as { t?: string }).t === "capability-gap-opened",
+      );
+    expect(internal?.body).toMatchObject({ reason: diagnostic });
+  });
+
   it("issues data-plane tickets only for a manual job's original surface", async () => {
     const scheduled = await createUserHarness();
     await receive(scheduled);
@@ -2938,10 +2996,26 @@ describe("user job durable protocol", () => {
   it("redrives a sealed bundle after owner commit response loss and acknowledges it", async () => {
     const harness = await createUserHarness();
     await start(harness);
+    const publicStatuses = vi.fn();
+    const lifecycle = vi.fn();
+    harness.journal.onStatus(publicStatuses);
+    harness.journal.onLifecycle(lifecycle);
     const bundle = await seal(harness);
     await expect(
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 1 });
+    await vi.waitFor(() =>
+      expect(lifecycle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "job-state-changed",
+          state: "committed",
+        }),
+      ),
+    );
+    expect(publicStatuses).not.toHaveBeenCalled();
+    expect(lifecycle).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "assignment-retired" }),
+    );
     await expect(
       harness.ledger.queryLedger(
         ASSIGNMENT_ID,
@@ -2958,6 +3032,14 @@ describe("user job durable protocol", () => {
       phase: "acked",
       acknowledgedCommitRevision: 1,
     });
+    await vi.waitFor(() =>
+      expect(lifecycle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "assignment-retired",
+          assignmentId: ASSIGNMENT_ID,
+        }),
+      ),
+    );
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
     let secondRestartQueries = 0;
     expect(

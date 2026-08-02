@@ -1,16 +1,23 @@
 import type { SchedulerEventMap } from "@zhixing/core";
 import { createEventBus } from "@zhixing/core";
-import type { JobOccurrence, TaskDefinition } from "@zhixing/core/contracts";
+import type {
+  JobOccurrence,
+  JobRunState,
+  TaskDefinition,
+} from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import type { ControlAdmissionJournal } from "../control-admission.js";
-import type { JobJournal } from "../job-assignment.js";
+import type { JobJournal, JobLifecycleEvent } from "../job-assignment.js";
 import { AnchorScheduler } from "../scheduler-authority.js";
 
 class MemoryJobJournal {
   definition: TaskDefinition | undefined;
   runs: JobOccurrence[] = [];
   readonly resumeSystemJobs = vi.fn(async () => {});
-  readonly listeners = new Set<() => void>();
+  readonly statusListeners = new Set<() => void>();
+  readonly lifecycleListeners = new Set<
+    (event: JobLifecycleEvent) => void | Promise<void>
+  >();
   readonly triggerCalls: Array<{
     readonly jobRunId: string;
     readonly scheduledFor: string;
@@ -36,8 +43,7 @@ class MemoryJobJournal {
   }>();
   readonly settledAutoDisable = new Set<string>();
   readonly runSystem = vi.fn(async (jobRunId: string) => {
-    const run = this.runs.find((candidate) => candidate.jobRunId === jobRunId);
-    if (run) run.state = "committed";
+    this.setState(jobRunId, "committed");
     return "committed" as const;
   });
 
@@ -86,6 +92,7 @@ class MemoryJobJournal {
           : {}),
       });
     }
+    this.emitState(occurrence);
     return structuredClone(occurrence);
   }
 
@@ -132,23 +139,51 @@ class MemoryJobJournal {
     return occurrence ? structuredClone(occurrence) : undefined;
   }
 
-  async currentState(jobRunId: string) {
-    return this.runs.find((item) => item.jobRunId === jobRunId)?.state;
-  }
+  readonly currentState = vi.fn(async (jobRunId: string) =>
+    this.runs.find((item) => item.jobRunId === jobRunId)?.state,
+  );
 
   async cancel(input: { readonly jobRunId: string }) {
     const occurrence = this.runs.find(
       (item) => item.jobRunId === input.jobRunId,
     );
     if (!occurrence) throw new Error("unknown occurrence");
-    occurrence.state = "cancelled";
-    for (const listener of this.listeners) listener();
+    this.setState(input.jobRunId, "cancelled");
+    for (const listener of this.statusListeners) listener();
     return { state: "cancelled" as const };
   }
 
   onStatus(listener: () => void) {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  onLifecycle(listener: (event: JobLifecycleEvent) => void | Promise<void>) {
+    this.lifecycleListeners.add(listener);
+    return () => this.lifecycleListeners.delete(listener);
+  }
+
+  setState(jobRunId: string, state: JobRunState): void {
+    const occurrence = this.runs.find((item) => item.jobRunId === jobRunId);
+    if (!occurrence) return;
+    occurrence.state = state;
+    this.emitState(occurrence);
+  }
+
+  private emitState(occurrence: JobOccurrence): void {
+    const event: JobLifecycleEvent = {
+      kind: "job-state-changed",
+      ref: {
+        execution: "job",
+        taskId: occurrence.taskId,
+        jobRunId: occurrence.jobRunId,
+        anchorEpoch: 3,
+      },
+      state: occurrence.state,
+      statusRevision: occurrence.state === "queued" ? 1 : 2,
+      at: "2026-08-02T00:00:00.000Z",
+    };
+    for (const listener of this.lifecycleListeners) void listener(event);
   }
 }
 
@@ -156,6 +191,8 @@ function fixture(input: {
   journals?: Map<string, MemoryJobJournal>;
   systemTasks?: ConstructorParameters<typeof AnchorScheduler>[0]["systemTasks"];
   activateUserJob?: ConstructorParameters<typeof AnchorScheduler>[0]["activateUserJob"];
+  schedulerNotices?: ConstructorParameters<typeof AnchorScheduler>[0]["schedulerNotices"];
+  onError?: (error: Error) => void;
 } = {}) {
   const journals = input.journals ?? new Map<string, MemoryJobJournal>();
   const eventBus = createEventBus<SchedulerEventMap>();
@@ -175,6 +212,8 @@ function fixture(input: {
     },
     activateUserJob: input.activateUserJob ?? (async () => {}),
     systemTasks: input.systemTasks ?? new Map(),
+    ...(input.schedulerNotices ? { schedulerNotices: input.schedulerNotices } : {}),
+    ...(input.onError ? { onError: input.onError } : {}),
     pollMs: 60_000,
     now: () => new Date("2026-08-02T00:00:00.000Z"),
   });
@@ -229,10 +268,7 @@ describe("AnchorScheduler authority", () => {
     const { scheduler, eventBus } = fixture({
       journals: new Map([["task-1", journal]]),
       activateUserJob: async ({ occurrence }) => {
-        const stored = journal.runs.find(
-          (candidate) => candidate.jobRunId === occurrence.jobRunId,
-        );
-        if (stored) stored.state = "committed";
+        journal.setState(occurrence.jobRunId, "committed");
       },
     });
     journal.definition = {
@@ -255,6 +291,8 @@ describe("AnchorScheduler authority", () => {
       accepted = event;
     });
     await scheduler.start();
+    expect(journal.lifecycleListeners.size).toBe(1);
+    expect(journal.statusListeners.size).toBe(0);
     const result = await scheduler.runTask(
       "task-1",
       "manual-1",
@@ -266,6 +304,9 @@ describe("AnchorScheduler authority", () => {
       name: "daily",
     });
     expect(result.status).toBe("ok");
+    const readsAfterCompletion = journal.currentState.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(journal.currentState).toHaveBeenCalledTimes(readsAfterCompletion);
     await scheduler.stop();
   });
 
@@ -434,6 +475,68 @@ describe("AnchorScheduler authority", () => {
       Date.parse(policy!.readyBoundary),
     );
     await scheduler.stop();
+  });
+
+  it("redrives a missed summary only after a durable miss hint", async () => {
+    vi.useFakeTimers();
+    try {
+      const journal = new MemoryJobJournal();
+      journal.definition = {
+        taskId: "task-1",
+        taskRevision: 1,
+        state: "enabled",
+        definition: {
+          kind: "user",
+          spec: {
+            name: "daily",
+            enabled: true,
+            priority: "normal",
+            schedule: { kind: "interval", everyMs: 60_000 },
+            action: { kind: "agent-turn", prompt: "summarize" },
+          },
+        },
+      };
+      journal.runs.push({
+        taskId: "task-1",
+        jobRunId: "previous",
+        scheduledFor: "2026-08-01T00:00:00.000Z",
+        taskRevision: 1,
+        deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+        state: "committed",
+      });
+      const prepareMissedSummaries = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("notice projection unavailable"))
+        .mockResolvedValue(undefined);
+      const onError = vi.fn();
+      const { scheduler } = fixture({
+        journals: new Map([["task-1", journal]]),
+        schedulerNotices: {
+          prepareMissedSummaries,
+        } as unknown as NonNullable<
+          ConstructorParameters<typeof AnchorScheduler>[0]["schedulerNotices"]
+        >,
+        onError,
+      });
+
+      await scheduler.start();
+      expect(prepareMissedSummaries).toHaveBeenCalledTimes(1);
+
+      await scheduler.tick();
+      expect(prepareMissedSummaries).toHaveBeenCalledTimes(2);
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "notice projection unavailable" }),
+      );
+
+      await scheduler.tick();
+      expect(prepareMissedSummaries).toHaveBeenCalledTimes(3);
+      await scheduler.tick();
+      expect(prepareMissedSummaries).toHaveBeenCalledTimes(3);
+      await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("redrives a committed auto-disable obligation to one disabled definition", async () => {

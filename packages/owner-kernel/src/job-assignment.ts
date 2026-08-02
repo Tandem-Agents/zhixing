@@ -479,6 +479,36 @@ export interface PendingJobFence {
   readonly fence: { readonly fenceSeq: number; readonly requestId: string };
 }
 
+/**
+ * Process-local wakeups derived only after the authoritative journal commit.
+ * They are never replay or recovery facts; consumers rebuild from JobJournal.
+ */
+export type JobLifecycleEvent =
+  | {
+      readonly kind: "job-state-changed";
+      readonly ref: {
+        readonly execution: "job";
+        readonly taskId: string;
+        readonly jobRunId: string;
+        readonly anchorEpoch: number;
+      };
+      readonly state: JobRunState;
+      readonly statusRevision: number;
+      readonly assignmentId?: string;
+      readonly at: string;
+    }
+  | {
+      readonly kind: "assignment-retired";
+      readonly ref: {
+        readonly execution: "job";
+        readonly taskId: string;
+        readonly jobRunId: string;
+        readonly anchorEpoch: number;
+      };
+      readonly assignmentId: string;
+      readonly at: string;
+    };
+
 export interface InProcessJobCancellationSubmission {
   submitCancellation(assignmentId: string): Promise<boolean>;
 }
@@ -713,6 +743,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #statusListeners = new Set<
     (notice: JobStatusNotice) => void | Promise<void>
   >();
+  readonly #lifecycleListeners = new Set<
+    (event: JobLifecycleEvent) => void | Promise<void>
+  >();
   readonly #systemRuns = new Map<string, Promise<"committed" | "failed">>();
   #projection: { readonly state: JobProjection; readonly cursor: ProjectionCursor } | undefined;
   #submissionGuard:
@@ -750,6 +783,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   onStatus(listener: (notice: JobStatusNotice) => void | Promise<void>): () => void {
     this.#statusListeners.add(listener);
     return () => this.#statusListeners.delete(listener);
+  }
+
+  onLifecycle(
+    listener: (event: JobLifecycleEvent) => void | Promise<void>,
+  ): () => void {
+    this.#lifecycleListeners.add(listener);
+    return () => this.#lifecycleListeners.delete(listener);
   }
 
   async channelRelayCheckpoint(
@@ -1254,7 +1294,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           kind: "capability-gap",
           state: previous?.open ? "updated" : "open",
           ref: { kind: "capability-gap", taskId: this.#taskId, jobRunId: input.jobRunId, round },
-          reason: input.reason,
+          reason: text,
           actions: ["检查目标设备在线状态", "检查任务所需工具与能力"],
           at: this.#clock(),
           ...(!previous?.open && definition.definition.origin
@@ -3113,6 +3153,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       onCommitted: (state, commit) => {
         this.#publishStatusNotices(
           jobStatusNoticesForCommit(
+            state,
+            commit,
+            this.#taskId,
+            this.#anchorEpoch,
+          ),
+        );
+        this.#publishLifecycleEvents(
+          jobLifecycleEventsForCommit(
             state,
             commit,
             this.#taskId,
@@ -5267,6 +5315,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         if (transaction.commit) {
           this.#publishStatusNotices(
             jobStatusNoticesForCommit(
+              transaction.state,
+              transaction.commit,
+              this.#taskId,
+              this.#anchorEpoch,
+            ),
+          );
+          this.#publishLifecycleEvents(
+            jobLifecycleEventsForCommit(
               transaction.state,
               transaction.commit,
               this.#taskId,
@@ -8378,6 +8434,16 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     }
     return result;
   }
+
+  #publishLifecycleEvents(events: readonly JobLifecycleEvent[]): void {
+    for (const event of events) {
+      for (const listener of this.#lifecycleListeners) {
+        void Promise.resolve()
+          .then(() => listener(event))
+          .catch(() => undefined);
+      }
+    }
+  }
 }
 
 function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
@@ -9027,6 +9093,91 @@ function jobStatusNoticesForCommit(
     if (notice) notices.push(notice);
   }
   return notices;
+}
+
+function jobLifecycleEventsForCommit(
+  state: JobProjection,
+  envelope: CommitEnvelope<unknown>,
+  taskId: string,
+  anchorEpoch: number,
+): JobLifecycleEvent[] {
+  const events: JobLifecycleEvent[] = [];
+  const retiredCandidates = new Set<string>();
+  const seenStates = new Set<string>();
+  for (const record of envelope.entries) {
+    if (record.stream !== jobStream(taskId)) continue;
+    const body = record.body as JobJournalRecord;
+    const identity =
+      body.t === "occurrence"
+        ? { jobRunId: body.occ.jobRunId, statusRevision: 1 }
+        : body.t === "state"
+          ? { jobRunId: body.jobRunId, statusRevision: body.statusRevision }
+          : undefined;
+    if (identity) {
+      const key = `${identity.jobRunId}:${identity.statusRevision}`;
+      if (!seenStates.has(key)) {
+        seenStates.add(key);
+        const projected = state.statusHistoryByRun
+          .get(identity.jobRunId)
+          ?.find((entry) => entry.statusRevision === identity.statusRevision);
+        if (!projected) {
+          throw corruptJobJournal("Committed job lifecycle state has no projection");
+        }
+        const assignmentId = assignmentIdFromJobRecord(body);
+        events.push({
+          kind: "job-state-changed",
+          ref: {
+            execution: "job",
+            taskId,
+            jobRunId: identity.jobRunId,
+            anchorEpoch,
+          },
+          state: projected.state,
+          statusRevision: projected.statusRevision,
+          ...(assignmentId ? { assignmentId } : {}),
+          at: envelope.at,
+        });
+      }
+    }
+    const assignmentId = assignmentIdFromJobRecord(body);
+    if (assignmentId) retiredCandidates.add(assignmentId);
+  }
+  for (const assignmentId of retiredCandidates) {
+    if (
+      state.recoveryAssignments.has(assignmentId) ||
+      state.bundleAcknowledgementOutbox.has(assignmentId)
+    ) {
+      continue;
+    }
+    const assigned = state.assignedById.get(assignmentId);
+    if (!assigned) continue;
+    events.push({
+      kind: "assignment-retired",
+      ref: {
+        execution: "job",
+        taskId,
+        jobRunId: assigned.record.jobRunId,
+        anchorEpoch,
+      },
+      assignmentId,
+      at: envelope.at,
+    });
+  }
+  return events;
+}
+
+function assignmentIdFromJobRecord(
+  record: JobJournalRecord,
+): string | undefined {
+  if (
+    "assignmentId" in record &&
+    typeof record.assignmentId === "string"
+  ) {
+    return record.assignmentId;
+  }
+  return record.t === "resolution"
+    ? record.fact.subject.assignmentId
+    : undefined;
 }
 
 function jobStream(taskId: string): string {

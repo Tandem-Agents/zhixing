@@ -18,13 +18,14 @@ import type {
   AuthorityCallContext,
   IngressContext,
   JobOccurrence,
+  JobRunState,
   JsonValue,
   TaskDefinition,
 } from "@zhixing/core/contracts";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { createJobControlEnvelope } from "./control-admission.js";
 import type { ControlAdmissionJournal, TrustedControlSource } from "./control-admission.js";
-import type { JobJournal } from "./job-assignment.js";
+import type { JobJournal, JobLifecycleEvent } from "./job-assignment.js";
 import {
   schedulerNoticeGroupKey,
   type MissedSummaryGroup,
@@ -95,6 +96,11 @@ interface TaskRuntimeProjection {
   readonly updatedAt: string;
 }
 
+interface JobStateWaiter {
+  readonly resolve: (state: JobRunState | undefined) => void;
+  readonly reject: (error: unknown) => void;
+}
+
 /**
  * Anchor-owned scheduler product service.
  *
@@ -112,7 +118,8 @@ export class AnchorScheduler {
   readonly #queuedRunsByTask = new Map<string, readonly JobOccurrence[]>();
   readonly #completionTrackers = new Map<string, Promise<void>>();
   readonly #taskByRun = new Map<string, string>();
-  readonly #statusUnsubscribers = new Map<string, () => void>();
+  readonly #lifecycleUnsubscribers = new Map<string, () => void>();
+  readonly #stateWaiters = new Map<string, Set<JobStateWaiter>>();
   readonly #now: () => Date;
   readonly #pollMs: number;
   readonly #missedGraceMs: number;
@@ -123,6 +130,7 @@ export class AnchorScheduler {
   #activationRecovery: Promise<void> | undefined;
   readonly #recoveringTaskIds = new Set<string>();
   #tickRunning = false;
+  #missedSummaryPending = false;
 
   constructor(options: AnchorSchedulerOptions) {
     if (!Number.isSafeInteger(options.anchorEpoch) || options.anchorEpoch <= 0) {
@@ -212,7 +220,14 @@ export class AnchorScheduler {
       Array.from({ length: Math.min(4, pending.length) }, () => worker()),
     );
     await this.#resumeQueuedUserJobs();
-    await this.#prepareMissedSummaries();
+    this.#missedSummaryPending = true;
+    try {
+      await this.#driveMissedSummaries();
+    } catch (error) {
+      this.#options.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
     for (const [taskId, definition] of this.#definitions) {
       if (definition.definition.kind === "system") continue;
       for (const occurrence of await this.#journal(taskId).occurrences()) {
@@ -259,15 +274,30 @@ export class AnchorScheduler {
     );
   }
 
+  async #driveMissedSummaries(): Promise<void> {
+    if (!this.#missedSummaryPending) return;
+    this.#missedSummaryPending = false;
+    try {
+      await this.#prepareMissedSummaries();
+    } catch (error) {
+      this.#missedSummaryPending = true;
+      throw error;
+    }
+  }
+
   async stop(): Promise<void> {
     this.#accepting = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
+    for (const waiters of this.#stateWaiters.values()) {
+      for (const waiter of waiters) waiter.resolve(undefined);
+    }
+    this.#stateWaiters.clear();
     await this.#activationRecovery?.catch(() => undefined);
     this.#activationRecovery = undefined;
     await Promise.allSettled(this.#completionTrackers.values());
-    for (const unsubscribe of this.#statusUnsubscribers.values()) unsubscribe();
-    this.#statusUnsubscribers.clear();
+    for (const unsubscribe of this.#lifecycleUnsubscribers.values()) unsubscribe();
+    this.#lifecycleUnsubscribers.clear();
     await this.#publishProjection();
     this.#prepared = false;
   }
@@ -712,6 +742,13 @@ export class AnchorScheduler {
           );
         }
       }
+      try {
+        await this.#driveMissedSummaries();
+      } catch (error) {
+        this.#options.onError?.(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
     } finally {
       this.#tickRunning = false;
       this.#arm();
@@ -773,6 +810,9 @@ export class AnchorScheduler {
           }
         : {}),
     });
+    if (occurrence.state === "missed") {
+      this.#missedSummaryPending = true;
+    }
     if (occurrence.state === "queued") {
       if (definition.definition.kind === "system") {
         await journal.runSystem(
@@ -859,33 +899,28 @@ export class AnchorScheduler {
   }
 
   async #observeCompletion(taskId: string, jobRunId: string): Promise<void> {
-    while (this.#accepting) {
-      const state = await this.#journal(taskId).currentState(jobRunId);
-      if (state && TERMINAL_STATES.has(state as never)) {
-        await this.#refreshTask(taskId);
-        const view = this.#requiredView(taskId);
-        if (state === "committed") {
-          await this.#options.eventBus.emit("scheduler:task-completed", {
-            taskId,
-            name: view.name,
-            durationMs: 0,
-            summary: view.state.lastSummary,
-          });
-        } else if (state !== "missed") {
-          await this.#options.eventBus.emit("scheduler:task-failed", {
-            taskId,
-            name: view.name,
-            error: view.state.lastError ?? `Job ended as ${state}`,
-            consecutiveErrors: view.state.consecutiveErrors,
-            nextRunAt: view.state.nextRunAt,
-          });
-          await this.#disableAfterRepeatedFailure(taskId);
-        }
-        await this.#publishProjection();
-        return;
-      }
-      await delay(50);
+    const state = await this.#waitForTerminalState(taskId, jobRunId);
+    if (!state) return;
+    await this.#refreshTask(taskId);
+    const view = this.#requiredView(taskId);
+    if (state === "committed") {
+      await this.#options.eventBus.emit("scheduler:task-completed", {
+        taskId,
+        name: view.name,
+        durationMs: 0,
+        summary: view.state.lastSummary,
+      });
+    } else if (state !== "missed") {
+      await this.#options.eventBus.emit("scheduler:task-failed", {
+        taskId,
+        name: view.name,
+        error: view.state.lastError ?? `Job ended as ${state}`,
+        consecutiveErrors: view.state.consecutiveErrors,
+        nextRunAt: view.state.nextRunAt,
+      });
+      await this.#disableAfterRepeatedFailure(taskId);
     }
+    await this.#publishProjection();
   }
 
   async #waitForResult(
@@ -893,29 +928,63 @@ export class AnchorScheduler {
     jobRunId: string,
     startedAt: number,
   ): Promise<AgentTurnResult> {
-    while (this.#accepting) {
-      const state = await this.#journal(taskId).currentState(jobRunId);
-      if (state && TERMINAL_STATES.has(state as never)) {
-        if (state === "committed") {
-          return {
-            status: "ok",
-            output: "Scheduled job completed.",
-            durationMs: Math.max(0, this.#now().getTime() - startedAt),
-          };
-        }
-        return {
-          status: "error",
-          error: `Scheduled job ended as ${state}.`,
-          durationMs: Math.max(0, this.#now().getTime() - startedAt),
-        };
-      }
-      await delay(50);
+    const state = await this.#waitForTerminalState(taskId, jobRunId);
+    if (state === "committed") {
+      return {
+        status: "ok",
+        output: "Scheduled job completed.",
+        durationMs: Math.max(0, this.#now().getTime() - startedAt),
+      };
+    }
+    if (state) {
+      return {
+        status: "error",
+        error: `Scheduled job ended as ${state}.`,
+        durationMs: Math.max(0, this.#now().getTime() - startedAt),
+      };
     }
     return {
       status: "error",
       error: "Scheduler stopped while the job remained durable for recovery.",
       durationMs: Math.max(0, this.#now().getTime() - startedAt),
     };
+  }
+
+  #waitForTerminalState(
+    taskId: string,
+    jobRunId: string,
+  ): Promise<JobRunState | undefined> {
+    const journal = this.#journal(taskId);
+    return new Promise<JobRunState | undefined>((resolve, reject) => {
+      let settled = false;
+      const finish = (state: JobRunState | undefined): void => {
+        if (settled) return;
+        settled = true;
+        const waiters = this.#stateWaiters.get(jobRunId);
+        waiters?.delete(waiter);
+        if (waiters?.size === 0) this.#stateWaiters.delete(jobRunId);
+        resolve(state);
+      };
+      const fail = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        const waiters = this.#stateWaiters.get(jobRunId);
+        waiters?.delete(waiter);
+        if (waiters?.size === 0) this.#stateWaiters.delete(jobRunId);
+        reject(error);
+      };
+      const waiter: JobStateWaiter = { resolve: finish, reject: fail };
+      let waiters = this.#stateWaiters.get(jobRunId);
+      if (!waiters) {
+        waiters = new Set();
+        this.#stateWaiters.set(jobRunId, waiters);
+      }
+      waiters.add(waiter);
+      void journal.currentState(jobRunId).then((state) => {
+        if (state && TERMINAL_STATES.has(state as never)) finish(state);
+        else if (!this.#accepting) finish(undefined);
+      }, fail);
+    });
   }
 
   async #disableAfterRepeatedFailure(taskId: string): Promise<void> {
@@ -985,11 +1054,15 @@ export class AnchorScheduler {
     }
     const previousDefinition = this.#definitions.get(taskId);
     this.#definitions.set(taskId, definition);
-    if (!this.#statusUnsubscribers.has(taskId)) {
-      this.#statusUnsubscribers.set(
+    if (!this.#lifecycleUnsubscribers.has(taskId)) {
+      this.#lifecycleUnsubscribers.set(
         taskId,
-        journal.onStatus(() => {
-          void this.#refreshTask(taskId).then(() => this.#publishProjection());
+        journal.onLifecycle((event) => {
+          void this.#handleLifecycleEvent(event).catch((error) => {
+            this.#options.onError?.(
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          });
         }),
       );
     }
@@ -1042,6 +1115,18 @@ export class AnchorScheduler {
     if (definition.state === "enabled" && next) this.#nextRunByTask.set(taskId, next);
     else this.#nextRunByTask.delete(taskId);
     view.state.nextRunAt = this.#nextRunByTask.get(taskId);
+  }
+
+  async #handleLifecycleEvent(event: JobLifecycleEvent): Promise<void> {
+    if (event.kind !== "job-state-changed") return;
+    if (event.state === "missed") this.#missedSummaryPending = true;
+    if (TERMINAL_STATES.has(event.state as never)) {
+      for (const waiter of this.#stateWaiters.get(event.ref.jobRunId) ?? []) {
+        waiter.resolve(event.state);
+      }
+    }
+    await this.#refreshTask(event.ref.taskId);
+    await this.#publishProjection();
   }
 
   async #schedulerPolicyFor(journal: JobJournal): ReturnType<JobJournal["schedulerPolicy"]> {
@@ -1440,8 +1525,4 @@ function boundedPositive(value: number, label: string): number {
     throw new TypeError(`${label} must be a positive safe integer`);
   }
   return value;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

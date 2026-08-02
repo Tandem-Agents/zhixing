@@ -34,6 +34,7 @@ import {
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
   type JobIngressAuthorizer,
+  type JobLifecycleEvent,
   type PendingJobDispatch,
   type SystemJobHandler,
 } from "@zhixing/owner-kernel";
@@ -47,9 +48,20 @@ import type { ExecutorJobOwner } from "./executor-job-owner.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
+import {
+  ManualJobSurfaceLifecycle,
+  type ManualJobSurfaceSession,
+} from "./manual-job-surface-lifecycle.js";
 import { SchedulerCapabilityGapError } from "./scheduler-capability-gap.js";
 
 const OWNER_CONTEXT_RENEWAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
+const TERMINAL_JOB_STATES = new Set([
+  "committed",
+  "cancelled",
+  "failed",
+  "expired",
+  "missed",
+] as const);
 
 export interface AnchorSchedulerRuntimeOptions {
   readonly authority: AuthorityRuntimeStack;
@@ -64,7 +76,7 @@ export interface AnchorSchedulerRuntimeOptions {
     readonly ref: Extract<ExecutionRef, { readonly execution: "job" }>;
     readonly ticket: DataPlaneTicket;
     readonly surfacePrincipal: string;
-  }) => Promise<void>;
+  }) => Promise<ManualJobSurfaceSession>;
   readonly localJobOwner?: ExecutorJobOwner;
   readonly mesh: () => MeshRuntimeAssembly | undefined;
   readonly capabilities: {
@@ -101,16 +113,13 @@ export class AnchorSchedulerRuntime {
   >();
   readonly #relayDisposers = new Map<string, () => void>();
   readonly #statusDisposers = new Map<string, () => void>();
+  readonly #journalLifecycleDisposers = new Map<string, () => void>();
   readonly #schedulerNoticeDisposer: () => void;
   readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
-  readonly #pendingManualSurfaces = new Map<
-    string,
-    { readonly journal: JobJournal; readonly pending: PendingJobDispatch }
-  >();
-  readonly #openedManualSurfaces = new Set<string>();
+  readonly #manualSurfaces: ManualJobSurfaceLifecycle;
+  readonly #retirementTasks = new Map<string, Promise<void>>();
   readonly #legacyTasks: readonly ScheduledTask[];
   readonly #clock: () => string;
-  #manualSurfacesReady = false;
 
   private constructor(
     options: AnchorSchedulerRuntimeOptions,
@@ -119,6 +128,9 @@ export class AnchorSchedulerRuntime {
     this.#options = options;
     this.#legacyTasks = legacyTasks;
     this.#clock = () => (options.now?.() ?? new Date()).toISOString();
+    this.#manualSurfaces = new ManualJobSurfaceLifecycle({
+      ...(options.onError ? { onError: options.onError } : {}),
+    });
     this.#issuer = new JobAssignmentAuthority({
       signer: options.authority.signer,
       verifier: options.authority.verifier,
@@ -199,6 +211,8 @@ export class AnchorSchedulerRuntime {
 
   async stop(): Promise<void> {
     await this.scheduler.stop();
+    await this.#manualSurfaces.stop();
+    await Promise.allSettled(this.#retirementTasks.values());
     await Promise.all(
       [...this.#dispatchers.values()].map((dispatcher) =>
         dispatcher.stopRecoveryLoop(),
@@ -206,20 +220,19 @@ export class AnchorSchedulerRuntime {
     );
     for (const dispose of this.#relayDisposers.values()) dispose();
     for (const dispose of this.#statusDisposers.values()) dispose();
+    for (const dispose of this.#journalLifecycleDisposers.values()) dispose();
     this.#relayDisposers.clear();
     this.#statusDisposers.clear();
+    this.#journalLifecycleDisposers.clear();
     this.#dispatchers.clear();
-    this.#pendingManualSurfaces.clear();
-    this.#openedManualSurfaces.clear();
+    this.#executorByAssignment.clear();
+    this.#artifactAuthorityByAssignment.clear();
     this.#schedulerNoticeDisposer();
   }
 
   /** Called after the RPC server exists, so recovered manual surfaces can resume. */
   async resumeManualJobSurfaces(): Promise<void> {
-    this.#manualSurfacesReady = true;
-    for (const { journal, pending } of this.#pendingManualSurfaces.values()) {
-      await this.#openManualSurface(journal, pending);
-    }
+    await this.#manualSurfaces.resume();
   }
 
   async #activate(input: {
@@ -324,9 +337,6 @@ export class AnchorSchedulerRuntime {
     await this.#rememberPending(input.journal, pending);
     const dispatcher = this.#dispatcher(input.journal, pending);
     await dispatcher.dispatchPending();
-    if (this.#manualSurfacesReady) {
-      await this.#openManualSurface(input.journal, pending);
-    }
   }
 
   async #cancel(input: {
@@ -379,10 +389,21 @@ export class AnchorSchedulerRuntime {
     });
     const route = await journal.interactionRoute(pending.assignmentId);
     if (route.kind === "surface-ticket") {
-      this.#pendingManualSurfaces.set(pending.assignmentId, { journal, pending });
       const dispose = this.#relayDisposers.get(pending.assignmentId);
       dispose?.();
       this.#relayDisposers.delete(pending.assignmentId);
+      const state = await journal.currentState(pending.envelope.work.jobRunId);
+      if (state && TERMINAL_JOB_STATES.has(state as never)) {
+        await this.#manualSurfaces.markJobTerminal(
+          pending.envelope.work.jobRunId,
+        );
+        return;
+      }
+      this.#manualSurfaces.register({
+        assignmentId: pending.assignmentId,
+        jobRunId: pending.envelope.work.jobRunId,
+        open: () => this.#openManualSurface(journal, pending),
+      });
       return;
     }
     if (!this.#relayDisposers.has(pending.assignmentId)) {
@@ -409,10 +430,11 @@ export class AnchorSchedulerRuntime {
   async #openManualSurface(
     journal: JobJournal,
     pending: PendingJobDispatch,
-  ): Promise<void> {
-    if (this.#openedManualSurfaces.has(pending.assignmentId)) return;
+  ): Promise<ManualJobSurfaceSession> {
     const route = await journal.interactionRoute(pending.assignmentId);
-    if (route.kind !== "surface-ticket") return;
+    if (route.kind !== "surface-ticket") {
+      throw new Error("Manual job assignment no longer has a surface route");
+    }
     const facts = await journal.dataPlaneTicketFacts();
     const revoked = new Set(facts.revokedTicketIds);
     const existing = facts.issued
@@ -449,7 +471,7 @@ export class AnchorSchedulerRuntime {
             ttlMs: 24 * 60 * 60 * 1_000,
             ...(existing ? { replacesTicketId: existing.ticketId } : {}),
           });
-    await this.#options.openManualJobSurface({
+    return this.#options.openManualJobSurface({
       executorId: pending.envelope.executorId,
       assignmentId: pending.assignmentId,
       ref: {
@@ -461,7 +483,6 @@ export class AnchorSchedulerRuntime {
       ticket,
       surfacePrincipal: route.ingress.surfacePrincipal,
     });
-    this.#openedManualSurfaces.add(pending.assignmentId);
   }
 
   #dispatcher(
@@ -545,6 +566,42 @@ export class AnchorSchedulerRuntime {
     return Promise.resolve(authority);
   }
 
+  async #handleJobLifecycle(event: JobLifecycleEvent): Promise<void> {
+    if (event.kind === "job-state-changed") {
+      if (TERMINAL_JOB_STATES.has(event.state as never)) {
+        await this.#manualSurfaces.markJobTerminal(event.ref.jobRunId);
+      }
+      return;
+    }
+    await this.#retireAssignment(
+      event.assignmentId,
+      event.ref.jobRunId,
+    );
+  }
+
+  #retireAssignment(assignmentId: string, jobRunId: string): Promise<void> {
+    const current = this.#retirementTasks.get(assignmentId);
+    if (current) return current;
+    let retirement!: Promise<void>;
+    retirement = (async () => {
+      await this.#manualSurfaces.retire(assignmentId, jobRunId);
+      const dispatcher = this.#dispatchers.get(assignmentId);
+      await dispatcher?.stopRecoveryLoop();
+      this.#dispatchers.delete(assignmentId);
+      const disposeRelay = this.#relayDisposers.get(assignmentId);
+      disposeRelay?.();
+      this.#relayDisposers.delete(assignmentId);
+      this.#executorByAssignment.delete(assignmentId);
+      this.#artifactAuthorityByAssignment.delete(assignmentId);
+    })().finally(() => {
+      if (this.#retirementTasks.get(assignmentId) === retirement) {
+        this.#retirementTasks.delete(assignmentId);
+      }
+    });
+    this.#retirementTasks.set(assignmentId, retirement);
+    return retirement;
+  }
+
   #journal(taskId: string): JobJournal {
     let journal = this.#journals.get(taskId);
     if (journal) return journal;
@@ -572,6 +629,16 @@ export class AnchorSchedulerRuntime {
       clock: this.#clock,
     });
     this.#journals.set(taskId, journal);
+    this.#journalLifecycleDisposers.set(
+      taskId,
+      journal.onLifecycle((event) => {
+        void this.#handleJobLifecycle(event).catch((error) => {
+          this.#options.onError?.(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        });
+      }),
+    );
     this.#statusDisposers.set(
       taskId,
       this.#options.jobStatus.register(taskId, journal),
