@@ -567,7 +567,10 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         event: "advancement:contract_confirmed",
         payload: {
           advancementSessionId: confirmed.session.id,
-          rubricId: confirmed.session.confirmedRubric?.rubricId,
+          rubricId:
+            confirmed.session.confirmedRubric?.source.kind === "library"
+              ? confirmed.session.confirmedRubric.source.rubricId
+              : undefined,
         },
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
@@ -621,6 +624,9 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         status: "confirmed",
         advancementSessionId: confirmed.session.id,
         runStatus: admitted.runStatus,
+        ...(confirmed.rubricPublication
+          ? { rubricPublicationMessage: confirmed.rubricPublication.message }
+          : {}),
       };
     },
   };

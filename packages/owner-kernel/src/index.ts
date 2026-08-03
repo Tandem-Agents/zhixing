@@ -15,3 +15,4 @@ export * from "./delivery-control.js";
 export * from "./resource-governor.js";
 export * from "./channel-interaction-records.js";
 export * from "./channel-challenge-outbox.js";
+export * from "./session-state-adapter.js";

@@ -3,6 +3,7 @@ import {
   buildCompactSummaryPair,
   createAdvancementWindowReviewEntry,
   createSegmentManager,
+  createSegmentSummarizeFn,
   createTokenEstimator,
   detectStagnation,
   drainAgentLoop,
@@ -14,15 +15,22 @@ import {
   type AdvancementWindowEntry,
   type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
+  type LLMProvider,
   type Message,
   type ReviewEvidence,
   type SegmentDecision,
+  type SegmentSummarizeLLMFn,
   type WindowCompact,
   userMessage,
 } from "@zhixing/core";
 import type { AgentResult, TokenUsage } from "@zhixing/core";
+import type {
+  AuthorityCallContext,
+  ResourceLease,
+} from "@zhixing/core/contracts";
 import type { EvidenceCapabilitySet } from "@zhixing/core/advancement";
 import { runWithDeviceCapacity } from "@zhixing/core/resources";
+import { meteredProviderCall } from "../runtime/create-agent-runtime.js";
 import {
   completeMissingRequiredEvidence,
   createDefaultAdvancementEvidenceProvider,
@@ -41,6 +49,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_MAX_JUDGE_TURNS = 1;
+const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 
 export function createAdvancementRuntime(
   options: AdvancementRuntimeOptions,
@@ -49,37 +58,179 @@ export function createAdvancementRuntime(
 }
 
 class DefaultAdvancementRuntime implements AdvancementRuntime {
-  private readonly evidenceProvider: AdvancementEvidenceProvider;
+  private readonly evidenceProvider?: AdvancementEvidenceProvider;
   private readonly maxJudgeTurns: number;
   private readonly now: () => Date;
   private readonly idGenerator: () => string;
 
   constructor(private readonly options: AdvancementRuntimeOptions) {
-    this.evidenceProvider =
-      options.evidenceProvider ?? createDefaultAdvancementEvidenceProvider();
+    this.evidenceProvider = options.canonicalEvidenceOnly
+      ? undefined
+      : options.evidenceProvider ?? createDefaultAdvancementEvidenceProvider();
     this.maxJudgeTurns = options.maxJudgeTurns ?? DEFAULT_MAX_JUDGE_TURNS;
     this.now = options.now ?? (() => new Date());
     this.idGenerator =
       options.idGenerator ?? (() => `adv_review_${randomUUID()}`);
   }
 
-  async reviewRun(
+  async review(
     input: AdvancementReviewRunInput,
+    lease: ResourceLease,
+    abort: AbortSignal,
   ): Promise<AdvancementReviewRunOutcome> {
     // 整个 review 的主体是裁判的多轮 LLM 往返,属于网络等待,按容量合同不占
     // permit;真正用本机资源的只有取证那一段,容量随之下沉到那里。
-    return this.reviewRunWithCapacityAtEvidence(input);
+    const meterSession = this.#meterSession(input, lease);
+    const judgeProvider = meterSession
+      ? this.#meteredProvider(this.options.provider, meterSession, "judge")
+      : this.options.provider;
+    const summarize = this.#summarizeFn(meterSession);
+    return this.reviewRunWithCapacityAtEvidence(
+      input,
+      abort,
+      judgeProvider,
+      summarize,
+    );
+  }
+
+  /** 租约计量会话——裁判与窗口调用共用同一 review 根租约与身份。 */
+  #meterSession(
+    input: AdvancementReviewRunInput,
+    lease: ResourceLease,
+  ): { readonly lease: ResourceLease; readonly ctx: AuthorityCallContext } | undefined {
+    if (!this.options.resourceMeter) return undefined;
+    return {
+      lease,
+      ctx: {
+        principal: {
+          kind: "host",
+          component: this.options.hostComponent ?? "advancement-review",
+        },
+        requestId: `advancement-review:${input.sessionId}:${input.runIndex}`,
+        deadlineAt: lease.expiry,
+      },
+    };
+  }
+
+  /** 把裸 provider 的 chat 包成对租约计量的通道——真实 provider 调用沿稳定 usageId 预占/消费。 */
+  #meteredProvider(
+    provider: LLMProvider,
+    session: { readonly lease: ResourceLease; readonly ctx: AuthorityCallContext },
+    prefix: string,
+  ): LLMProvider {
+    const nextCallIndex = (() => {
+      let index = 0;
+      return () => ++index;
+    })();
+    const meter = {
+      reserve: async ({ callIndex, tokenUpperBound }: {
+        callIndex: number;
+        tokenUpperBound: number;
+      }) => {
+        const usageId = `usage:${session.lease.reservationId}:${prefix}:${callIndex}`;
+        await this.options.resourceMeter!.reserveUsage(
+          session.lease,
+          { usageId, tokens: tokenUpperBound, calls: 1 },
+          session.ctx,
+        );
+        return { usageId };
+      },
+      consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+        await this.options.resourceMeter!.consume(
+          session.lease,
+          { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+          session.ctx,
+        );
+      },
+    };
+    return {
+      id: provider.id,
+      models: provider.models,
+      chat: (request) =>
+        meteredProviderCall({
+          call: (providerRequest) => provider.chat(providerRequest),
+          meter,
+          nextCallIndex,
+          defaultMaxOutputTokens:
+            this.options.defaultMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+        })(request),
+      ...(provider.countTokens
+        ? { countTokens: provider.countTokens }
+        : {}),
+    };
+  }
+
+  /** 推进窗口摘要通道——与裁判同一租约计量；未装配 light 通道时返回 undefined。 */
+  #summarizeFn(
+    session: { readonly lease: ResourceLease; readonly ctx: AuthorityCallContext } | undefined,
+  ): SegmentSummarizeLLMFn | undefined {
+    const light = this.options.lightProvider;
+    const model = this.options.lightModel;
+    if (!light || !model) return undefined;
+    if (!session) {
+      return createSegmentSummarizeFn(
+        (request) => light.chat({ ...request, model, thinking: this.options.lightThinking }),
+        model,
+      );
+    }
+    const nextCallIndex = (() => {
+      let index = 0;
+      return () => ++index;
+    })();
+    const meter = {
+      reserve: async ({ callIndex, tokenUpperBound }: {
+        callIndex: number;
+        tokenUpperBound: number;
+      }) => {
+        const usageId = `usage:${session.lease.reservationId}:window:${callIndex}`;
+        await this.options.resourceMeter!.reserveUsage(
+          session.lease,
+          { usageId, tokens: tokenUpperBound, calls: 1 },
+          session.ctx,
+        );
+        return { usageId };
+      },
+      consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+        await this.options.resourceMeter!.consume(
+          session.lease,
+          { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+          session.ctx,
+        );
+      },
+    };
+    const meteredChat = meteredProviderCall({
+      call: (providerRequest) => light.chat(providerRequest),
+      meter,
+      nextCallIndex,
+      defaultMaxOutputTokens:
+        this.options.defaultMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    });
+    return createSegmentSummarizeFn(
+      (request) =>
+        meteredChat({
+          ...request,
+          model,
+          thinking: this.options.lightThinking,
+        }),
+      model,
+    );
   }
 
   /** 本机取证受容量治理:它读工作区文件,是这条流程里唯一的本机批次。 */
   private async collectEvidenceUnderCapacity(
     input: AdvancementReviewRunInput,
+    abort: AbortSignal,
   ): Promise<readonly ReviewEvidence[]> {
-    const collect = () =>
-      this.evidenceProvider.collect({
+    const collect = () => {
+      if (!this.evidenceProvider) {
+        throw new Error("Canonical advancement evidence is required");
+      }
+      return this.evidenceProvider.collect({
         ...input,
         requirements: input.rubric.content.evidenceRequirements ?? [],
+        abortSignal: abort,
       });
+    };
     const capacity = this.options.deviceCapacity;
     if (!capacity) return collect();
     return runWithDeviceCapacity(
@@ -90,20 +241,31 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         preferred: capacity.preferred,
         maxWaitMs: capacity.maxWaitMs,
       },
-      input.abortSignal ?? new AbortController().signal,
+      abort,
       collect,
     );
   }
 
   private async reviewRunWithCapacityAtEvidence(
     input: AdvancementReviewRunInput,
+    abort: AbortSignal,
+    judgeProvider: LLMProvider,
+    summarize: SegmentSummarizeLLMFn | undefined,
   ): Promise<AdvancementReviewRunOutcome> {
     let evidence: ReviewEvidence[];
     try {
-      evidence = completeMissingRequiredEvidence({
-        requirements: input.rubric.content.evidenceRequirements ?? [],
-        evidence: await this.collectEvidenceUnderCapacity(input),
-      });
+      if (input.canonicalEvidence) {
+        assertCanonicalEvidence(input.canonicalEvidence, input.rubric);
+      }
+      evidence = input.canonicalEvidence
+        ? completeMissingRequiredEvidence({
+            requirements: input.rubric.content.evidenceRequirements ?? [],
+            evidence: input.canonicalEvidence,
+          })
+        : completeMissingRequiredEvidence({
+            requirements: input.rubric.content.evidenceRequirements ?? [],
+            evidence: await this.collectEvidenceUnderCapacity(input, abort),
+          });
     } catch (error) {
       return deferredOutcome(`推进侧取证失败：${errorMessage(error)}`);
     }
@@ -121,13 +283,15 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     const contextWindow = await buildContextWindow({
       input,
       options: this.options.contextWindow,
+      summarize,
       systemPrompt,
       tools: [toToolSpec(judgeTool.tool)],
+      abortSignal: abort,
     });
 
     try {
       const { result } = await drainAgentLoop({
-        provider: this.options.provider,
+        provider: judgeProvider,
         model: this.options.model,
         thinking: this.options.thinking,
         systemPrompt,
@@ -137,7 +301,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         tools: [judgeTool.tool],
         maxTurns: this.maxJudgeTurns,
         workingDirectory: this.options.workingDirectory,
-        abortSignal: input.abortSignal,
+        abortSignal: abort,
       });
 
       const submitted = judgeTool.getSubmittedReview();
@@ -174,7 +338,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         contextWindow.acceptReview(review, review.reviewedAt),
       );
     } catch (error) {
-      if (input.abortSignal?.aborted) {
+      if (abort.aborted) {
         return abortedOutcome();
       }
       return deferredOutcome(`推进侧裁判运行失败：${errorMessage(error)}`);
@@ -199,6 +363,30 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       exitReason: "system-error",
       contextWindow,
     };
+  }
+}
+
+function assertCanonicalEvidence(
+  evidence: readonly ReviewEvidence[],
+  rubric: AdvancementReviewRunInput["rubric"],
+): void {
+  const ids = new Set<string>();
+  const requirements = new Map(
+    (rubric.content.evidenceRequirements ?? []).map((item) => [item.id, item]),
+  );
+  for (const item of evidence) {
+    if (!item.id || ids.has(item.id)) {
+      throw new TypeError("Canonical evidence ids must be non-empty and unique");
+    }
+    ids.add(item.id);
+    if (item.requirementId) {
+      const requirement = requirements.get(item.requirementId);
+      if (!requirement || requirement.kind !== item.kind) {
+        throw new TypeError("Canonical evidence is bound to another requirement");
+      }
+    } else if (item.source === "independent") {
+      throw new TypeError("Independent canonical evidence must bind a requirement");
+    }
   }
 }
 
@@ -259,8 +447,10 @@ function buildJudgePrompt(
 async function buildContextWindow(input: {
   readonly input: AdvancementReviewRunInput;
   readonly options: AdvancementRuntimeOptions["contextWindow"];
+  readonly summarize: SegmentSummarizeLLMFn | undefined;
   readonly systemPrompt: string;
   readonly tools: ReturnType<typeof toToolSpec>[];
+  readonly abortSignal?: AbortSignal;
 }): Promise<{
   readonly messages: readonly Message[];
   readonly snapshot?: AdvancementReviewContextWindowSnapshot;
@@ -276,7 +466,7 @@ async function buildContextWindow(input: {
   );
 
   const beforeMessages = flattenWindowEntries(entries);
-  if (!input.options) {
+  if (!input.options || !input.summarize) {
     const snapshot: AdvancementReviewContextWindowSnapshot = {
       source: "advancement-window",
       priorReviewCount: priorReviews.length,
@@ -303,7 +493,7 @@ async function buildContextWindow(input: {
   const segment = createSegmentManager({
     estimator: input.options.estimator ?? createTokenEstimator(),
     capability: input.options.capability,
-    callLLM: input.options.summarize,
+    callLLM: input.summarize,
     persistence: { async appendSegment() {} },
     taskListReader: { hasInProgress: () => false },
     ...(input.options.bufferTurns === undefined
@@ -316,7 +506,7 @@ async function buildContextWindow(input: {
     tools: input.tools,
     turnCount: priorReviews.length,
     conversationId: undefined,
-    abortSignal: input.input.abortSignal,
+    abortSignal: input.abortSignal,
   });
 
   const afterEntries = out.windowCompact
@@ -509,8 +699,7 @@ function abortedOutcome(): AdvancementReviewRunOutcome {
 function renderRubric(rubric: ConfirmedRubricSnapshot): string {
   return JSON.stringify(
     {
-      id: rubric.rubricId,
-      version: rubric.rubricVersion,
+      source: rubric.source,
       title: rubric.title,
       description: rubric.description,
       passCriteria: rubric.content.passCriteria,

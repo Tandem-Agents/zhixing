@@ -78,6 +78,8 @@ export interface AcceptedTurn {
   readonly advancementContinuation?: {
     readonly interruptedProxy: boolean;
   };
+  /** 会话准则已生效；全局准则库沉淀独立进行。 */
+  readonly rubricPublicationMessage?: string;
 }
 
 export interface AwaitingRubricConfirmationTurn {
@@ -516,6 +518,9 @@ export class ConversationController {
         conversationId: pending.conversationId,
         turnId: pending.turnId,
         outcome,
+        ...(result.rubricPublicationMessage
+          ? { rubricPublicationMessage: result.rubricPublicationMessage }
+          : {}),
       };
     } catch (err) {
       this.discardTurnWaiter(pending.conversationId, pending.turnId);

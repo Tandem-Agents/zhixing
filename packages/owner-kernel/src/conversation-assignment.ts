@@ -1,6 +1,15 @@
 import { Buffer } from "node:buffer";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import {
+  applyAdvancementEvent,
+  assertAdvancementEventBatchLegal,
+  freezeAdvancementSessions,
+  isAdvancementControlEvent,
+  type AdvancementControlEvent,
+  type AdvancementFoldMap,
+  type AdvancementSession,
+} from "@zhixing/core/advancement";
+import {
   AuthorityStorageError,
   collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
@@ -563,6 +572,41 @@ export const SESSION_ACTIVITY_DURABLE_CONTRACT = defineDurableRuntimeContract({
   ],
 } as const);
 
+export const ADVANCEMENT_DURABLE_CONTRACT = defineDurableRuntimeContract({
+  recordFamily: "advancement-event",
+  producer: "ConversationRunJournal",
+  recoveryOwner: "anchor-conversation-owner",
+  resourceIdentity: "run:<conversationId>",
+  recoveryClass: "authority-replay",
+  cases: [
+    ...["single-event", "composite-batch", "artifact-stored"].map((key) => ({
+      kind: "variant" as const,
+      key,
+    })),
+    ...["conflicting-payload", "illegal-batch"].map((key) => ({
+      kind: "rejection" as const,
+      key,
+      reasonCode: "ADVANCEMENT_WRITE_REJECTED",
+    })),
+    ...["invalid-event", "non-monotonic-revision", "conflicting-durable-payload"].map(
+      (key) => ({
+        kind: "corruption" as const,
+        key,
+        reasonCode: "AUTHORITY_RECORD_INVALID",
+      }),
+    ),
+  ],
+} as const);
+
+export class AdvancementWriteRejectedError extends TypeError {
+  readonly reasonCode = "ADVANCEMENT_WRITE_REJECTED";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AdvancementWriteRejectedError";
+  }
+}
+
 export class SessionActivityRejectedError extends TypeError {
   readonly reasonCode = "SESSION_ACTIVITY_REJECTED";
 
@@ -582,6 +626,11 @@ interface RunProjection {
   readonly conversationId: string;
   domainRevision: number;
   deleted: boolean;
+  readonly advancementSessions: AdvancementFoldMap;
+  readonly advancementWrites: Map<
+    string,
+    { readonly domainRevision: number; readonly eventsDigest: string }
+  >;
   sessionMeta?: Extract<
     ConversationRunJournalRecord,
     { t: "session-meta" }
@@ -871,6 +920,11 @@ export interface ConversationChannelFrameAdoption {
 export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
   readonly #conversationId: string;
   readonly #ownerEpoch: number;
+
+  /** 该权威日志绑定会话——端口适配层据此核对会话绑定。 */
+  get conversationId(): string {
+    return this.#conversationId;
+  }
   readonly #log: AuthorityCommitLog;
   readonly #artifacts: ArtifactStore;
   readonly #signer: ProtocolSigner;
@@ -1952,6 +2006,23 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       }
       return assigned.record.executorId;
     });
+  }
+
+  /** accepted run 的冻结 dispatch；推进取证只从这条 owner 权威事实派生目标。 */
+  async advancementEvidenceDispatch(
+    runId: string,
+  ): Promise<PendingConversationDispatch | undefined> {
+    assertIdentifier(runId, "Run id");
+    const assigned = await this.#select((state) => {
+      const committed = state.commits.find((candidate) => candidate.runId === runId);
+      if (!committed) return undefined;
+      const projection = state.assignedById.get(committed.assignmentId);
+      if (!projection) {
+        throw corruptRunJournal("Committed run has no durable assignment");
+      }
+      return snapshot(projection, "Advancement evidence assignment");
+    });
+    return assigned ? await this.#materializeDispatch(assigned) : undefined;
   }
 
   /** Inputs that are durably admitted but have no active assignment, in FIFO order. */
@@ -4796,6 +4867,92 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => state.stateByRun.get(runId)?.state);
   }
 
+  /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
+  async advancementSessions(): Promise<AdvancementSession[]> {
+    return this.#select((state) =>
+      freezeAdvancementSessions(state.advancementSessions),
+    );
+  }
+
+  /**
+   * 推进控制事件的原子写入：一次推进写入（单事件或复合事件组）按序验证、
+   * 在同一提交落盘；同一 requestId 回放原结果，异载荷拒绝。
+   */
+  async applyAdvancementEvents(input: {
+    readonly requestId: string;
+    readonly events: readonly AdvancementControlEvent[];
+  }): Promise<{ readonly domainRevision: number }> {
+    assertIdentifier(input.requestId, "Advancement write request id");
+    if (input.events.length === 0) {
+      throw new TypeError("Advancement write requires at least one event");
+    }
+    const sessionIds = new Set(input.events.map((event) => event.sessionId));
+    if (sessionIds.size !== 1) {
+      throw new TypeError(
+        "Advancement write events must bind exactly one advancement session",
+      );
+    }
+    for (const event of input.events) {
+      if (!isAdvancementControlEvent(event, this.#verifier)) {
+        throw new TypeError("Advancement event contract failed");
+      }
+    }
+    const eventsDigest = byteDigest(
+      Buffer.from(canonicalize(input.events), "utf8"),
+    );
+    const prepared: PreparedStored<AdvancementControlEvent>[] = [];
+    for (const event of input.events) {
+      prepared.push(await prepareStored(event, this.#artifacts));
+    }
+    const transaction = await this.#transact<{ domainRevision: number }>(
+      (state) => {
+        const existing = state.advancementWrites.get(input.requestId);
+        if (existing) {
+          if (existing.eventsDigest !== eventsDigest) {
+            throw new AdvancementWriteRejectedError(
+              "Advancement write identity has conflicting durable payloads",
+            );
+          }
+          return {
+            kind: "return",
+            value: { domainRevision: existing.domainRevision },
+          };
+        }
+        if (state.deleted) {
+          throw new AdvancementWriteRejectedError(
+            "AdvancementStore: conversation has been durably deleted",
+          );
+        }
+        try {
+          assertAdvancementEventBatchLegal(
+            state.advancementSessions,
+            input.events,
+          );
+        } catch (error) {
+          throw new AdvancementWriteRejectedError(
+            error instanceof Error ? error.message : String(error),
+            { cause: error },
+          );
+        }
+        const domainRevision = state.domainRevision + 1;
+        const entries = prepared.map((candidate) =>
+          runRecord(this.#conversationId, {
+            t: "advancement-event",
+            requestId: input.requestId,
+            domainRevision,
+            eventsDigest,
+            event: candidate.stored,
+          }),
+        );
+        return { kind: "append", entries, value: { domainRevision } };
+      },
+      collectArtifactRefs(
+        prepared.flatMap((candidate) => candidate.references),
+      ),
+    );
+    return transaction.value;
+  }
+
   async publishConflicts(assignmentId: string): Promise<PublishConflictNotice | undefined> {
     assertIdentifier(assignmentId, "Assignment id");
     const [committed, conflicts] = await Promise.all([
@@ -6417,6 +6574,36 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             state.assignmentByRun.delete(body.runId);
           }
         }
+        return state;
+      }
+      case "advancement-event": {
+        const event = await loadStored(body.event, this.#artifacts);
+        if (!isAdvancementControlEvent(event, this.#verifier)) {
+          throw corruptRunJournal("Run journal contains an invalid advancement event");
+        }
+        const existingWrite = state.advancementWrites.get(body.requestId);
+        if (existingWrite) {
+          if (
+            existingWrite.domainRevision !== body.domainRevision ||
+            existingWrite.eventsDigest !== body.eventsDigest
+          ) {
+            throw corruptRunJournal(
+              "Advancement write identity has conflicting durable payloads",
+            );
+          }
+        } else {
+          if (body.domainRevision <= state.domainRevision) {
+            throw corruptRunJournal(
+              "Advancement event domain revision is not monotonic",
+            );
+          }
+          state.advancementWrites.set(body.requestId, {
+            domainRevision: body.domainRevision,
+            eventsDigest: body.eventsDigest,
+          });
+          state.domainRevision = body.domainRevision;
+        }
+        applyAdvancementEvent(state.advancementSessions, event);
         return state;
       }
       case "committed": {
@@ -8391,6 +8578,8 @@ function emptyProjection(conversationId: string): RunProjection {
     conversationId,
     domainRevision: 0,
     deleted: false,
+    advancementSessions: new Map(),
+    advancementWrites: new Map(),
     sessionMeta: undefined,
     sessionMetaByRequest: new Map(),
     lifecycleByRequest: new Map(),

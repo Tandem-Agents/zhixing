@@ -80,6 +80,7 @@ async function reviewAcceptedTurn(
   }
   const result = await advancement.afterTurnCommitted({
     conversationId: info.conversationId,
+    runId: info.turnId,
     runIndex: info.runIndex,
     runRecord: info.runRecord,
     runRecordRef: info.runRecordRef,

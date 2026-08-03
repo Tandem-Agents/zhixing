@@ -83,6 +83,7 @@ import {
   type WorkspaceProbePort,
 } from "@zhixing/core/environment";
 import {
+  AnchorRubricGlobalStateAdapter,
   AnchorWorksceneGlobalStateAdapter,
   parseConversationId,
 } from "@zhixing/core";
@@ -347,6 +348,7 @@ export async function setupAuthorityRuntime(
   let executorLog: FileAuthorityCommitLog | undefined;
   let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
   let worksceneGlobalState: AnchorWorksceneGlobalStateAdapter | undefined;
+  let rubricGlobalState: AnchorRubricGlobalStateAdapter | undefined;
   let schedulerGlobalState: GlobalStatePort | undefined;
   let workspaceBindings: WorkspaceBindingCatalog | undefined;
   let workspaceProbe: WorkspaceProbeHandler | undefined;
@@ -588,6 +590,7 @@ export async function setupAuthorityRuntime(
           mcpServers: readiness.mcpServers,
           credentialBindings: readiness.credentialBindings,
           credentialGeneration: readiness.credentialGeneration,
+          evidenceCapabilities: ["artifact", "file-diff", "log"],
         },
         workspaceCatalog: {
           catalogGeneration: workspaceCatalog.catalogGeneration,
@@ -642,7 +645,7 @@ export async function setupAuthorityRuntime(
           tools: [...readiness.tools],
           mcpServers: [...readiness.mcpServers],
           credentialBindings: versionedCredentialBindings,
-          evidenceCapabilities: [],
+          evidenceCapabilities: ["artifact", "file-diff", "log"],
           at: versionResolution.deviceGeneratedAt,
         },
         key,
@@ -801,6 +804,14 @@ export async function setupAuthorityRuntime(
             return worksceneCleanup(sceneId, conversationIds);
           },
           storageMaintenance: options.storageMaintenance,
+          clock,
+        })
+      : undefined;
+    rubricGlobalState = authorityLog
+      ? new AnchorRubricGlobalStateAdapter({
+          log: authorityLog,
+          artifacts,
+          anchorEpoch,
           clock,
         })
       : undefined;
@@ -1385,10 +1396,11 @@ export async function setupAuthorityRuntime(
       );
       return result.ok ? undefined : result.error;
     };
-    const routedGlobalState = worksceneGlobalState
+    const routedGlobalState = worksceneGlobalState && rubricGlobalState
       ? createGlobalStateRouter(
           worksceneGlobalState,
           () => schedulerGlobalState,
+          rubricGlobalState,
         )
       : undefined;
     return {
@@ -1543,10 +1555,12 @@ interface NormalizedExecutorReadiness {
 function createGlobalStateRouter(
   workscene: GlobalStatePort,
   scheduler: () => GlobalStatePort | undefined,
+  rubrics: GlobalStatePort,
 ): GlobalStatePort {
   const routeMutation = (
     mutation: Parameters<GlobalStatePort["mutate"]>[0],
   ): GlobalStatePort => {
+    if (mutation.kind.startsWith("rubric-")) return rubrics;
     if (!mutation.kind.startsWith("schedule-")) return workscene;
     const owner = scheduler();
     if (!owner) {
@@ -1556,6 +1570,9 @@ function createGlobalStateRouter(
   };
   return {
     read: (query, context) => {
+      if (query.kind === "asset-index" && query.asset === "rubrics") {
+        return rubrics.read(query, context);
+      }
       if (query.kind !== "schedule-list") {
         return workscene.read(query, context);
       }

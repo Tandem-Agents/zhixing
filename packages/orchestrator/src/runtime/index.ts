@@ -56,6 +56,10 @@ export {
   type TextCallOptions,
 } from "./create-agent-runtime.js";
 export {
+  createControlCompletionPort,
+  type ControlCompletionPortOptions,
+} from "./control-completion-port.js";
+export {
   governToolExecution,
   type AgentRuntimeCapacityBinding,
 } from "./governed-agent-runtime.js";

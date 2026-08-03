@@ -27,8 +27,11 @@ function collectionInput(
     sessionId: "adv-1",
     originalUserTask: { parts: [{ type: "text", text: "把测试修到全绿" }] },
     rubric: {
-      rubricId: "rubric-1",
-      rubricVersion: "v1",
+      source: {
+        kind: "library",
+        rubricId: "rubric-1",
+        rubricVersion: "v1",
+      },
       title: "验收",
       description: "验收",
       content: {

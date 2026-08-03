@@ -190,6 +190,8 @@ export interface SessionAdvancementConfirmResult extends SessionAcceptedSendResu
   status: "confirmed";
   advancementSessionId: string;
   runStatus: "immediate" | "queued";
+  /** 会话契约已生效后，全局准则沉淀的非阻断状态提示。 */
+  rubricPublicationMessage?: string;
 }
 
 export type SessionRubricPersistenceChoice = RubricDraftPersistenceChoice;

@@ -51,8 +51,11 @@ function draft(id = "draft-1"): RubricContractDraftSnapshot {
 function confirmed(): ConfirmedRubricSnapshot {
   const content = draft().content;
   return {
-    rubricId: "rubric-code-review",
-    rubricVersion: "v1",
+    source: {
+      kind: "library",
+      rubricId: "rubric-code-review",
+      rubricVersion: "v1",
+    },
     title: "代码审查推进准则",
     description: "用于判断开发任务是否完成",
     content: {
@@ -175,7 +178,11 @@ describe("AdvancementStore", () => {
     );
     expect(session.status).toBe("active");
     expect(session.pendingRubricDraft).toBeUndefined();
-    expect(session.confirmedRubric?.rubricId).toBe("rubric-code-review");
+    expect(session.confirmedRubric?.source).toEqual({
+      kind: "library",
+      rubricId: "rubric-code-review",
+      rubricVersion: "v1",
+    });
 
     session = await store.appendRunReview(
       "conv-1",

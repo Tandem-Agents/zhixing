@@ -392,6 +392,36 @@ async function runServerProcess(
     // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
     // 惰性取值；advancement 外调发生在运行期，届时必已就绪
     governor: () => ctx.authorityRuntime?.resourceGovernor,
+    // 会话状态端口——conversation 权威运行时在 surface 装配期创建，惰性取值
+    sessionState: () => ctx.conversationProtocol?.sessionState,
+    evidenceRuntime: () => {
+      const authority = ctx.authorityRuntime;
+      const protocol = ctx.conversationProtocol;
+      if (!authority || !protocol) return undefined;
+      return {
+        signer: authority.signer,
+        verifier: authority.verifier,
+        resolveTarget: (conversationId: string, runId: string) =>
+          protocol.advancementEvidenceTarget(conversationId, runId),
+        clientFor: (executorId: string) => {
+          if (executorId === authority.executorId) return ctx.evidenceHandler;
+          try {
+            return ctx.meshRuntime?.evidenceForExecutor(executorId);
+          } catch {
+            return undefined;
+          }
+        },
+      };
+    },
+    rubricRuntime: () => {
+      const authority = ctx.authorityRuntime;
+      if (!authority?.globalState) return undefined;
+      return {
+        globalState: authority.globalState,
+        artifacts: authority.artifacts,
+        anchorEpoch: authority.anchorEpoch,
+      };
+    },
     deviceCapacity: deviceCapacity.workload("workload-advancement"),
     // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
     // 延迟基线进 serve 日志作观测数据。
@@ -581,6 +611,7 @@ async function runServerProcess(
     durableInteractions,
     perspectives: perspectivesController,
     deviceCapacity: deviceCapacity.arbiter,
+    advancementCapacity: deviceCapacity.workload("workload-advancement"),
     storageMaintenance: deviceCapacity.storage,
     localWorkspaceIdentity: bootstrap.localWorkspaceIdentity,
     confirmationHub,
@@ -853,6 +884,33 @@ async function runServerProcess(
         })
       : undefined;
   advancementRecoveryRef.current = advancementRecovery ?? null;
+
+  // Reconcile accepted-but-unreviewed runs and their durable evidence requests
+  // before any control ingress starts listening. Recovery may schedule local
+  // proxy work, but it never requires a connected surface.
+  if (advancementRecovery) {
+    try {
+      const recovered = await advancementRecovery.recoverAllOpenSessions();
+      const scheduledCount = recovered.filter(
+        (item) =>
+          item.status === "scheduled" ||
+          item.status === "already-running" ||
+          item.status === "accepted-run-recovered",
+      ).length;
+      if (scheduledCount > 0) {
+        console.log(
+          chalk.dim(
+            `[advancement] recovered ${scheduledCount} active proxy turn(s)`,
+          ),
+        );
+      }
+    } catch (err) {
+      console.warn(
+        chalk.yellow("[advancement] recovery scan failed:"),
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
@@ -1151,32 +1209,15 @@ async function runServerProcess(
     });
   }
 
+  if (ctx.evidenceHandler) {
+    const evidenceHandler = ctx.evidenceHandler;
+    registry.register("evidenceHandler.stopAccepting", () => {
+      evidenceHandler.stopAccepting();
+    });
+  }
+
   // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
   startupRollback.commit();
-
-  if (advancementRecovery) {
-    try {
-      const recovered = await advancementRecovery.recoverAllOpenSessions();
-      const scheduledCount = recovered.filter(
-        (item) =>
-          item.status === "scheduled" ||
-          item.status === "already-running" ||
-          item.status === "accepted-run-recovered",
-      ).length;
-      if (scheduledCount > 0) {
-        console.log(
-          chalk.dim(
-            `[advancement] recovered ${scheduledCount} active proxy turn(s)`,
-          ),
-        );
-      }
-    } catch (err) {
-      console.warn(
-        chalk.yellow("[advancement] recovery scan failed:"),
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
 
   // Post-runServer 启动步骤（startup guard 包裹）
   //   不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。

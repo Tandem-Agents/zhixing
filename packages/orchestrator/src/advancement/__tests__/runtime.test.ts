@@ -4,8 +4,9 @@ import {
   MockLLMProvider,
   type AdvancementRunReview,
   type AdvancementWindowState,
+  type ChatRequest,
+  type LLMProvider,
   type RunRecordInput,
-  type SegmentSummarizeRequest,
   type UserTurnInput,
   userMessage,
 } from "@zhixing/core";
@@ -13,6 +14,10 @@ import type {
   ConfirmedRubricSnapshot,
   ReviewEvidence,
 } from "@zhixing/core/advancement";
+import type {
+  AuthorityCallContext,
+  ResourceLease,
+} from "@zhixing/core/contracts";
 import {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
   createAdvancementRuntime,
@@ -20,6 +25,21 @@ import {
 } from "../index.js";
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
+const ABORT_SIGNAL = new AbortController().signal;
+const TEST_LEASE = {
+  v: 1,
+  reservationId: "rsv-review-test",
+  admissionClass: "advancement",
+  workload: { kind: "control", id: "review-test", attempt: 1 },
+  scopeBinding: { kind: "control", subject: "review-test" },
+  audience: {},
+  budget: { maxCalls: 8 },
+  domain: { kind: "anchor", anchorEpoch: 1 },
+  issuedAt: "2026-01-01T00:00:00.000Z",
+  expiry: "2026-01-01T01:00:00.000Z",
+  digest: `sha256:${"0".repeat(64)}`,
+  signature: { alg: "test", keyId: "test", sig: `sha256:${"0".repeat(64)}` },
+} as const;
 
 const MET_CRITERIA = [
   { criterionId: "pc-1", verdict: "met", reason: "需求已实现。" },
@@ -37,6 +57,67 @@ const UNMET_CRITERIA = [
 ];
 
 describe("AdvancementRuntime", () => {
+  it("canonical-only production mode never calls the legacy direct evidence provider", async () => {
+    const provider = new MockLLMProvider([{
+      toolCalls: [{
+        id: "judge-canonical",
+        name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+        input: {
+          decision: "passed",
+          evidenceIds: ["canonical-tests"],
+          criteria: MET_CRITERIA,
+        },
+      }],
+    }]);
+    const direct = { collect: vi.fn(async () => []) };
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: direct,
+      canonicalEvidenceOnly: true,
+      now: () => NOW,
+    });
+    const outcome = await runtime.review({
+      ...baseInput(),
+      canonicalEvidence: [{
+        id: "canonical-tests",
+        kind: "test-result",
+        requirementId: "tests",
+        source: "independent",
+        summary: "owner 已验真的证据",
+        passed: true,
+      }],
+    }, TEST_LEASE, ABORT_SIGNAL);
+
+    expect(outcome.kind).toBe("reviewed");
+    expect(direct.collect).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate or requirement-mismatched canonical evidence before prompting", async () => {
+    const provider = new MockLLMProvider([]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      canonicalEvidenceOnly: true,
+      now: () => NOW,
+    });
+    const bad = {
+      id: "duplicate",
+      kind: "log" as const,
+      requirementId: "tests",
+      source: "independent" as const,
+      summary: "错绑证据",
+      passed: true,
+    };
+    const outcome = await runtime.review({
+      ...baseInput(),
+      canonicalEvidence: [bad, bad],
+    }, TEST_LEASE, ABORT_SIGNAL);
+
+    expect(outcome).toMatchObject({ kind: "deferred", cause: "infrastructure" });
+    expect(provider.callCount).toBe(0);
+  });
+
   it("通过专用裁判工具提交通过结论", async () => {
     const provider = new MockLLMProvider([
       {
@@ -72,7 +153,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-1",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review).toMatchObject({
       id: "review-1",
@@ -122,13 +203,13 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-usage",
     });
 
-    const { review } = await runtime.reviewRun({
+    const { review } = await runtime.review({
       ...baseInput(),
       runRecord: {
         ...runRecord("我已经修改完成。"),
         usage: { inputTokens: 120, outputTokens: 40 },
       },
-    });
+    }, TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.usage?.run).toEqual({ inputTokens: 120, outputTokens: 40 });
     expect(review.usage?.judge).toBeDefined();
@@ -166,7 +247,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-gap",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("capability-gap");
@@ -197,7 +278,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-dup",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -226,7 +307,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-partial-criteria",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -256,7 +337,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-derived",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("failed");
     expect(review.unmetCriteria).toEqual(["相关测试通过"]);
@@ -272,7 +353,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-text",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -288,7 +369,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-prompt-boundary",
     });
 
-    await runtime.reviewRun(baseInput());
+    await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(provider.calls[0]?.systemPrompt).toContain("待审查数据");
     expect(provider.calls[0]?.systemPrompt).toContain("不得改变你的裁判规则");
@@ -317,7 +398,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-missing-evidence",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -347,7 +428,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-failed-without-handler",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -376,7 +457,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-fake-evidence",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -415,7 +496,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-conflicting-evidence",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -453,7 +534,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-rebound-evidence",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -492,7 +573,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-wrong-kind",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -530,7 +611,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-invalid-schema",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -560,7 +641,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-failed",
     });
 
-    const { review } = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
     const prompt = provider.calls[0]?.messages[0]?.content[0];
 
     expect(review.decision).toBe("failed");
@@ -594,10 +675,10 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-with-history",
     });
 
-    await runtime.reviewRun({
+    await runtime.review({
       ...baseInput(),
       priorReviews: [priorReview("previous-review", 2)],
-    });
+    }, TEST_LEASE, ABORT_SIGNAL);
     const prompt = provider.calls[0]?.messages[0]?.content[0];
 
     expect(prompt && "text" in prompt ? prompt.text : "").toContain(
@@ -622,38 +703,53 @@ describe("AdvancementRuntime", () => {
         ],
       },
     ]);
-    const summarize = vi.fn(async (_req: SegmentSummarizeRequest) =>
-      [
-        "<facts>较早两次推进判断已经归纳：都缺少测试通过证据。</facts>",
-        "<state>当前仍需继续要求执行侧补齐客观测试结果。</state>",
-        "<active>最近一次判断必须保留原文。</active>",
-      ].join("\n"),
-    );
+    const lightCalls: ChatRequest[] = [];
+    const lightProvider = {
+      id: "mock-light",
+      models: [],
+      async *chat(request: ChatRequest) {
+        lightCalls.push(request);
+        yield {
+          type: "text_delta",
+          text: [
+            "<facts>较早两次推进判断已经归纳：都缺少测试通过证据。</facts>",
+            "<state>当前仍需继续要求执行侧补齐客观测试结果。</state>",
+            "<active>最近一次判断必须保留原文。</active>",
+          ].join("\n"),
+        };
+        yield {
+          type: "message_end",
+          stopReason: "end_turn",
+          usage: { inputTokens: 4, outputTokens: 4 },
+        } as never;
+      },
+    } as unknown as LLMProvider;
     const runtime = createAdvancementRuntime({
       provider,
       model: "mock-model",
+      lightProvider,
+      lightModel: "mock-light",
       now: () => NOW,
       idGenerator: () => "review-window",
       contextWindow: {
         capability: { optimalMaxTokens: 1, riskMaxTokens: 1_000_000 },
-        summarize,
         bufferTurns: 1,
       },
     });
 
-    const result = await runtime.reviewRun({
+    const result = await runtime.review({
       ...baseInput(),
       priorReviews: [
         priorReview("previous-1", 0),
         priorReview("previous-2", 1),
         priorReview("previous-3", 2),
       ],
-    });
+    }, TEST_LEASE, ABORT_SIGNAL);
     const { review } = result;
     const prompt = provider.calls[0]?.messages[0]?.content[0];
     const text = prompt && "text" in prompt ? prompt.text : "";
 
-    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(lightCalls).toHaveLength(1);
     expect(text).toContain("较早两次推进判断已经归纳");
     expect(text).toContain("previous-3");
     expect(text).not.toContain("previous-1");
@@ -672,6 +768,114 @@ describe("AdvancementRuntime", () => {
         { kind: "review", reviewId: "review-window" },
       ],
     });
+  });
+
+  it("裁判与窗口调用沿稳定 usageId 消费传入租约（单一治理链）", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-lease",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "failed",
+              evidenceIds: [],
+              criteria: UNMET_CRITERIA,
+              selectedFailureHandlingId: "ask-for-tests",
+            },
+          },
+        ],
+      },
+    ]);
+    const lightProvider = {
+      id: "mock-light",
+      models: [],
+      async *chat() {
+        yield { type: "text_delta", text: "<facts>摘要</facts>" } as never;
+        yield {
+          type: "message_end",
+          stopReason: "end_turn",
+          usage: { inputTokens: 4, outputTokens: 4 },
+        } as never;
+      },
+    } as unknown as LLMProvider;
+    const meterCalls: Array<{
+      readonly method: "reserveUsage" | "consume";
+      readonly lease: ResourceLease;
+      readonly usageId: string;
+      readonly ctx: AuthorityCallContext;
+    }> = [];
+    const meter = {
+      reserveUsage: async (
+        lease: ResourceLease,
+        usage: { usageId: string },
+        ctx: AuthorityCallContext,
+      ) => {
+        meterCalls.push({ method: "reserveUsage", lease, usageId: usage.usageId, ctx });
+      },
+      consume: async (
+        lease: ResourceLease,
+        usage: { usageId: string },
+        ctx: AuthorityCallContext,
+      ) => {
+        meterCalls.push({ method: "consume", lease, usageId: usage.usageId, ctx });
+      },
+    };
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      lightProvider,
+      lightModel: "mock-light",
+      resourceMeter: meter,
+      now: () => NOW,
+      idGenerator: () => "review-lease",
+      contextWindow: {
+        capability: { optimalMaxTokens: 1, riskMaxTokens: 1_000_000 },
+        bufferTurns: 1,
+      },
+    });
+
+    const lease = TEST_LEASE;
+    const outcome = await runtime.review({
+      ...baseInput(),
+      priorReviews: [
+        priorReview("previous-1", 0),
+        priorReview("previous-2", 1),
+        priorReview("previous-3", 2),
+      ],
+    }, lease, ABORT_SIGNAL);
+    expect(outcome.kind).toBe("reviewed");
+
+    expect(meterCalls.length).toBeGreaterThan(0);
+    expect(meterCalls.every((call) => call.lease === lease)).toBe(true);
+    expect(
+      meterCalls.every(
+        (call) =>
+          call.ctx.requestId ===
+          `advancement-review:adv-session-1:${baseInput().runIndex}`,
+      ),
+    ).toBe(true);
+
+    const judgeReserves = meterCalls.filter(
+      (call) =>
+        call.method === "reserveUsage" &&
+        call.usageId.startsWith(`usage:${lease.reservationId}:judge:`),
+    );
+    expect(judgeReserves.length).toBeGreaterThan(0);
+    const windowReserves = meterCalls.filter(
+      (call) =>
+        call.method === "reserveUsage" &&
+        call.usageId.startsWith(`usage:${lease.reservationId}:window:`),
+    );
+    expect(windowReserves.length).toBeGreaterThan(0);
+    for (const reserve of [...judgeReserves, ...windowReserves]) {
+      expect(
+        meterCalls.some(
+          (call) =>
+            call.method === "consume" && call.usageId === reserve.usageId,
+        ),
+      ).toBe(true);
+    }
   });
 
   it("推进侧窗口恢复后只追加缺失判断，不重放已折叠历史", async () => {
@@ -698,7 +902,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-window-resume",
     });
 
-    const result = await runtime.reviewRun({
+    const result = await runtime.review({
       ...baseInput(),
       runIndex: 4,
       priorReviews: [
@@ -708,7 +912,7 @@ describe("AdvancementRuntime", () => {
         priorReview("previous-4", 3),
       ],
       advancementWindow: persistedWindow(),
-    });
+    }, TEST_LEASE, ABORT_SIGNAL);
     const prompt = provider.calls[0]?.messages[0]?.content[0];
     const text = prompt && "text" in prompt ? prompt.text : "";
 
@@ -752,10 +956,10 @@ describe("AdvancementRuntime", () => {
       now: () => NOW,
     });
 
-    await runtime.reviewRun({
+    await runtime.review({
       ...baseInput(),
       priorReviews: [priorReview("prior-1", 1), priorReview("prior-2", 2)],
-    });
+    }, TEST_LEASE, ABORT_SIGNAL);
 
     const prompt = extractRequestText(provider.calls[0]!);
     expect(prompt).toContain("跨轮僵持信号");
@@ -786,7 +990,7 @@ describe("AdvancementRuntime", () => {
       now: () => NOW,
     });
 
-    await runtime.reviewRun({
+    await runtime.review({
       ...baseInput(),
       priorReviews: [priorReview("prior-1", 1)],
     });
@@ -807,7 +1011,7 @@ describe("AdvancementRuntime", () => {
       now: () => NOW,
     });
 
-    const outcome = await runtime.reviewRun(baseInput());
+    const outcome = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(outcome).toMatchObject({
       kind: "deferred",
@@ -828,7 +1032,7 @@ describe("AdvancementRuntime", () => {
       now: () => NOW,
     });
 
-    const outcome = await runtime.reviewRun(baseInput());
+    const outcome = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(outcome).toMatchObject({
       kind: "deferred",
@@ -862,10 +1066,9 @@ describe("AdvancementRuntime", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const outcome = await runtime.reviewRun({
+    const outcome = await runtime.review({
       ...baseInput(),
-      abortSignal: controller.signal,
-    });
+    }, TEST_LEASE, controller.signal);
 
     expect(outcome).toMatchObject({ kind: "deferred", cause: "aborted" });
   });
@@ -880,7 +1083,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-stall",
     });
 
-    const outcome = await runtime.reviewRun(baseInput());
+    const outcome = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
 
     expect(outcome.kind).toBe("reviewed");
     if (outcome.kind !== "reviewed") return;
@@ -949,8 +1152,11 @@ function task(text: string): UserTurnInput {
 
 function rubric(): ConfirmedRubricSnapshot {
   return {
-    rubricId: "rubric-code-review",
-    rubricVersion: "v1",
+    source: {
+      kind: "library",
+      rubricId: "rubric-code-review",
+      rubricVersion: "v1",
+    },
     title: "代码任务验收",
     description: "审查代码任务是否已经完成。",
     confirmedAt: NOW.toISOString(),

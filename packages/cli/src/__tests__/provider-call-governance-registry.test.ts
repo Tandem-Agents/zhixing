@@ -47,8 +47,8 @@ const GOVERNED_CALL_SITES: ReadonlyArray<{
   },
   {
     file: "cli/src/serve/advancement-controller.ts",
-    marker: "governControlProvider(",
-    governance: "control 根治理——advancement 全部外调（rubric 草案/修订、准入、收场、裁判、摘要）经 governed roles 单点接入（advancement/advancement-control）",
+    marker: "completionPort.complete({",
+    governance: "control 根治理——advancement 准入/草案/修订/收场经 ControlCompletionPort、裁判/窗口经 AdvancementReviewerPort，全部沿调用方租约以稳定 usageId 计量（advancement/advancement-control）",
   },
 ];
 
@@ -112,8 +112,8 @@ describe("provider call governance registry", () => {
     }> = [
       {
         file: "cli/src/serve/advancement-controller.ts",
-        expected: 4,
-        nature: "governed roles 构造（createMain/LightCallLLM×2、summarize provider.chat、reviewer 经 roles）——全部经 governControlProvider",
+        expected: 0,
+        nature: "推进外调零直连——全部经 ControlCompletionPort（准入/草案/修订/收场）与 AdvancementReviewerPort（裁判/窗口摘要）沿调用方租约计量",
       },
       {
         file: "cli/src/serve/command.ts",

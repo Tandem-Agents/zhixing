@@ -1,17 +1,26 @@
+import { randomUUID } from "node:crypto";
 import {
-  AdvancementStore,
   buildClosureSynthesisPrompt,
-  createSegmentSummarizeFn,
   LLMAdvancementAdmissionStrategy,
   LLMRubricDraftGenerationStrategy,
   LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
-  RubricStore,
   userMessage,
   validateThinkingConfig,
   type LLMRole,
   type ThinkingConfig,
 } from "@zhixing/core";
+import type {
+  EvidenceClientPort,
+  GlobalStatePort,
+  ResourceReservationPort,
+  SessionStatePort,
+} from "@zhixing/core/contracts";
+import type { FileArtifactStore } from "@zhixing/core/authority";
+import type {
+  ProtocolSignatureVerifier,
+  ProtocolSigner,
+} from "@zhixing/core/protocol";
 import {
   createProviderRoles,
   getModelCapabilityOverride,
@@ -23,30 +32,35 @@ import {
 } from "@zhixing/providers";
 import {
   createAdvancementRuntime,
-  createFirstPartyEvidenceProvider,
-  detectEvidenceCapabilities,
 } from "@zhixing/orchestrator/advancement";
-import {
-  createLightCallLLM,
-  createMainCallLLM,
-  type AgentRuntimeCapacityBinding,
-} from "@zhixing/orchestrator/runtime";
+import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
+import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import { PROTOCOL_BUDGET_DEFAULTS } from "@zhixing/providers";
 import {
-  governControlProvider,
-  type ControlLlmGovernor,
-} from "./governed-control-llm.js";
-import { AdvancementController } from "@zhixing/owner-services";
+  AdvancementController,
+  AdvancementEvidenceCoordinator,
+  SessionAdvancementStore,
+  type AdvancementEvidenceTarget,
+} from "@zhixing/owner-services";
+import {
+  GlobalRubricCatalog,
+  GlobalRubricPublication,
+} from "./advancement-rubric-library.js";
 
 export interface ServeAdvancementControllerDeps {
   readonly config: ZhixingConfig;
   readonly credentials: ProviderCredentialProjection;
   /**
-   * control 治理端口（惰性——authority runtime 在 pre-server surface 装配，
+   * control 资源治理端口（惰性——authority runtime 在 pre-server surface 装配，
    * 晚于本控制器创建；advancement 外调发生在运行期，取值时必须已就绪，
    * 缺失即 fail-closed，不允许静默绕过治理）。
    */
-  readonly governor: () => ControlLlmGovernor | undefined;
+  readonly governor: () => ResourceReservationPort | undefined;
+  /**
+   * 会话状态端口（惰性）——advancement 权威状态读写经对话 owner 日志，
+   * 无权威运行时即 fail-closed，不回退本地文件形态。
+   */
+  readonly sessionState: () => SessionStatePort | undefined;
   readonly deviceCapacity?: AgentRuntimeCapacityBinding;
   /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */
   readonly recentContextProvider?: (
@@ -54,28 +68,63 @@ export interface ServeAdvancementControllerDeps {
   ) => Promise<string | undefined>;
   /** 准入延迟基线观测（诊断日志）。 */
   readonly onAdmissionTiming?: (elapsedMs: number) => void;
+  readonly evidenceRuntime?: () =>
+    | {
+        readonly signer: ProtocolSigner;
+        readonly verifier: ProtocolSignatureVerifier;
+        readonly resolveTarget: (
+          conversationId: string,
+          runId: string,
+        ) => Promise<AdvancementEvidenceTarget | undefined>;
+        readonly clientFor: (executorId: string) => EvidenceClientPort | undefined;
+      }
+    | undefined;
+  readonly rubricRuntime?: () =>
+    | {
+        readonly globalState: GlobalStatePort;
+        readonly artifacts: FileArtifactStore;
+        readonly anchorEpoch: number;
+      }
+    | undefined;
 }
 
 /** 惰性解析的治理端口代理——每次调用时解析真实 governor，缺失即拒绝。 */
-function lazyControlGovernor(
-  resolve: () => ControlLlmGovernor | undefined,
-): ControlLlmGovernor {
-  const required = (): ControlLlmGovernor => {
-    const governor = resolve();
-    if (!governor) {
+function lazyResourcePort(
+  resolve: () => ResourceReservationPort | undefined,
+): ResourceReservationPort {
+  const required = (): ResourceReservationPort => {
+    const port = resolve();
+    if (!port) {
       throw new Error("Advancement LLM calls require the durable authority runtime");
     }
-    return governor;
+    return port;
   };
   return {
-    acquireRoot: (workload, budget, origin, ctx) =>
-      required().acquireRoot(workload, budget, origin, ctx),
+    enqueueRoot: (reservationId, workload, origin, ctx) =>
+      required().enqueueRoot(reservationId, workload, origin, ctx),
+    prepareAssignmentRoot: (request, origin, ctx) =>
+      required().prepareAssignmentRoot(request, origin, ctx),
+    prepareSystemJobRoot: (request, origin, ctx) =>
+      required().prepareSystemJobRoot(request, origin, ctx),
+    acquireRoot: (workload, budget, origin, ctx, audience, scopeBinding) =>
+      required().acquireRoot(
+        workload,
+        budget,
+        origin,
+        ctx,
+        audience,
+        scopeBinding,
+      ),
+    acquireChild: (parent, workload, budget, ctx) =>
+      required().acquireChild(parent, workload, budget, ctx),
     reserveUsage: (lease, usage, ctx) => required().reserveUsage(lease, usage, ctx),
     consume: (lease, usage, ctx) => required().consume(lease, usage, ctx),
     settle: (lease, ctx) => required().settle(lease, ctx),
     release: (lease, ctx) => required().release(lease, ctx),
   };
 }
+
+const ADVANCEMENT_CONTROL_BUDGET = { maxCalls: 1, maxTokens: 300_000 } as const;
 
 export async function createServeAdvancementController(
   deps: ServeAdvancementControllerDeps,
@@ -84,34 +133,14 @@ export async function createServeAdvancementController(
     config: deps.config,
     credentials: deps.credentials,
   });
-  // advancement 的全部真实 LLM 外调经 control 治理边界：provider 层单点包装，
-  // 每次 chat = 独立 advancement 类 control 工作（acquireRoot→流式预占/消费→终结）——
-  // 后续 mainCall/lightCall/reviewer/summarize 全部消费 governed roles，零旁路
-  const governor = lazyControlGovernor(deps.governor);
-  const governedRole = (
-    role: (typeof rawRoles)["main"],
-    protocol: keyof typeof PROTOCOL_BUDGET_DEFAULTS,
-  ): typeof role => {
-    const provider = governControlProvider(
-      {
-        governor,
-        origin: { admissionClass: "advancement", entry: "advancement-control" },
-        workPrefix: "advancement",
-        defaultMaxOutputTokens: PROTOCOL_BUDGET_DEFAULTS[protocol].maxOutputTokens,
-      },
-      role.provider,
-    );
-    return {
-      provider,
-      model: role.model,
-      chat: (request) => provider.chat({ ...request, model: role.model }),
-      ...(role.countTokens ? { countTokens: role.countTokens } : {}),
-    };
-  };
+  // 推进控制智能（准入 / 草案 / 修订 / 收场 / 裁判）的全部真实 LLM 外调只经
+  // ControlCompletionPort 与 AdvancementReviewerPort 两条通道：调用方取得
+  // control 根租约并在 finally 终结，端口沿租约以稳定 usageId 计量——
+  // 通道消费的 provider 保持未治理（裸），杜绝双重租约。
+  const governor = lazyResourcePort(deps.governor);
   const roles = {
-    main: governedRole(rawRoles.main, resolvedRoles.main.resolved.protocol),
-    light: governedRole(rawRoles.light, resolvedRoles.light.resolved.protocol),
-    power: governedRole(rawRoles.power, resolvedRoles.power.resolved.protocol),
+    main: rawRoles.main,
+    light: rawRoles.light,
   };
   const mainThinking = resolveConfiguredThinking(
     roles.main,
@@ -121,10 +150,47 @@ export async function createServeAdvancementController(
     roles.light,
     config.llm?.light?.thinking,
   );
-  // 推进的两个单发调用是纯 LLM 网络往返,按容量合同不占 permit:等待响应期间
-  // 持有设备槽位会挡住真正要用本机资源的工作,而自己什么也没在算。
-  const mainCall = createMainCallLLM(roles, mainThinking);
-  const lightCall = createLightCallLLM(roles, lightThinking);
+  const completionPort = createControlCompletionPort({
+    roles,
+    thinking: { main: mainThinking, light: lightThinking },
+    meter: governor,
+    defaultMaxOutputTokens:
+      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.light.resolved.protocol]
+        .maxOutputTokens,
+  });
+  const completeViaPort = async (
+    role: "main" | "light",
+    prompt: string,
+  ): Promise<string> => {
+    const workId = `advancement:${randomUUID()}`;
+    const ctx = {
+      principal: { kind: "host" as const, component: "advancement-control" },
+      requestId: `advancement-control:${workId}`,
+      deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+    };
+    const lease = await governor.acquireRoot(
+      { kind: "control", id: workId, attempt: 1 },
+      ADVANCEMENT_CONTROL_BUDGET,
+      { admissionClass: "advancement", entry: "advancement-control" },
+      ctx,
+    );
+    try {
+      const result = await completionPort.complete({
+        role,
+        messages: [userMessage(prompt)],
+        lease,
+        abort: new AbortController().signal,
+        deadlineAt: ctx.deadlineAt,
+      });
+      if (!result.ok) {
+        throw new Error(result.error.message);
+      }
+      return result.text;
+    } finally {
+      await governor.settle(lease, ctx).catch(() => {});
+      await governor.release(lease, ctx).catch(() => {});
+    }
+  };
   const workspace = resolveWorkspace(config, {
     sessionType: resolveWorkspaceSessionType(),
   });
@@ -137,26 +203,73 @@ export async function createServeAdvancementController(
   // 传入草案生成——required 只能落在能力集内的 kind 上；无工作区时
   // 无从独立取证，能力集为空、不装取证 provider（安全缺省）。
   const workspacePath = workspace.path ?? undefined;
-  const evidenceCapabilities = workspacePath
-    ? await detectEvidenceCapabilities(workspacePath)
+  const evidenceCapabilities = deps.evidenceRuntime
+    ? { independentKinds: ["file-diff", "log", "artifact"] as const }
     : undefined;
 
+  const rubricLibrary = {
+    globalState: () => deps.rubricRuntime?.()?.globalState,
+    artifacts: () => deps.rubricRuntime?.()?.artifacts,
+    anchorEpoch: () => deps.rubricRuntime?.()?.anchorEpoch,
+  };
   const contractBuilder = new RubricContractBuilder({
-    rubricStore: new RubricStore(),
+    rubricCatalog: new GlobalRubricCatalog(rubricLibrary),
     generationStrategy: new LLMRubricDraftGenerationStrategy({
-      complete: (prompt) => mainCall([userMessage(prompt)]),
+      complete: (prompt) => completeViaPort("main", prompt),
     }),
     revisionStrategy: new LLMRubricDraftRevisionStrategy({
-      complete: (prompt) => mainCall([userMessage(prompt)]),
+      complete: (prompt) => completeViaPort("main", prompt),
     }),
     ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
   });
 
+  const store = new SessionAdvancementStore({
+      port: () => {
+        const port = deps.sessionState();
+        if (!port) {
+          throw new Error(
+            "Advancement requires the conversation authority runtime",
+          );
+        }
+        return port;
+      },
+    });
+  const evidence = deps.evidenceRuntime
+    ? new AdvancementEvidenceCoordinator({
+        store,
+        resources: governor,
+        resolveTarget: (conversationId, runId) => {
+          const runtime = deps.evidenceRuntime?.();
+          if (!runtime) return Promise.resolve(undefined);
+          return runtime.resolveTarget(conversationId, runId);
+        },
+        clientFor: (executorId) =>
+          deps.evidenceRuntime?.()?.clientFor(executorId),
+        signer: {
+          sign: (schemaId, version, payload) => {
+            const runtime = deps.evidenceRuntime?.();
+            if (!runtime) throw new Error("Advancement evidence runtime is unavailable");
+            return runtime.signer.sign(schemaId, version, payload);
+          },
+        },
+        verifier: {
+          verify: (schemaId, version, payload, signature) => {
+            const runtime = deps.evidenceRuntime?.();
+            if (!runtime) throw new Error("Advancement evidence runtime is unavailable");
+            runtime.verifier.verify(schemaId, version, payload, signature);
+          },
+        },
+      })
+    : undefined;
+
   return new AdvancementController({
-    store: new AdvancementStore(),
+    store,
     admissionStrategy: new LLMAdvancementAdmissionStrategy({
-      complete: (prompt) => lightCall([userMessage(prompt)]),
+      complete: (prompt) => completeViaPort("light", prompt),
     }),
+    resources: governor,
+    ...(evidence ? { evidence } : {}),
+    rubricPublication: new GlobalRubricPublication(rubricLibrary),
     ...(deps.recentContextProvider
       ? { recentContextProvider: deps.recentContextProvider }
       : {}),
@@ -166,7 +279,7 @@ export async function createServeAdvancementController(
     // 收场合成走轻推理通道；失败由 controller 降级结构化直出。
     closureSynthesizer: {
       synthesize: (facts) =>
-        lightCall([userMessage(buildClosureSynthesisPrompt(facts))]),
+        completeViaPort("light", buildClosureSynthesisPrompt(facts)),
     },
     ...(config.advancement?.sessionTokenBudget !== undefined
       ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
@@ -176,28 +289,21 @@ export async function createServeAdvancementController(
       provider: roles.main.provider,
       model: roles.main.model,
       thinking: mainThinking,
+      lightProvider: roles.light.provider,
+      lightModel: roles.light.model,
+      lightThinking,
+      resourceMeter: governor,
+      defaultMaxOutputTokens:
+        PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol]
+          .maxOutputTokens,
       ...(deps.deviceCapacity
         ? { deviceCapacity: deps.deviceCapacity }
         : {}),
       workingDirectory: workspacePath,
+      canonicalEvidenceOnly: true,
       ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
-      ...(workspacePath
-        ? {
-            evidenceProvider: createFirstPartyEvidenceProvider({
-              workspace: workspacePath,
-            }),
-          }
-        : {}),
       contextWindow: {
         capability: advancementWindowCapability,
-        summarize: createSegmentSummarizeFn(
-          (request) =>
-            roles.light.provider.chat({
-              ...request,
-              thinking: lightThinking,
-            }),
-          roles.light.model,
-        ),
       },
     }),
   });

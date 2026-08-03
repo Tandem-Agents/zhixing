@@ -21,6 +21,18 @@ export {
   type UnsignedWorkspaceProbeResult,
 } from "./environment.js";
 export {
+  createSignedEvidenceBundle,
+  createSignedEvidenceRequest,
+  evidenceObservationStateFingerprint,
+  evidenceRequestDigest,
+  MAX_EVIDENCE_DOCUMENT_BYTES,
+  MAX_EVIDENCE_SUMMARY_BYTES,
+  validateEvidenceBundle,
+  validateEvidenceRequest,
+  type UnsignedEvidenceBundle,
+  type UnsignedEvidenceRequest,
+} from "./evidence.js";
+export {
   DATA_PLANE_TICKET_KINDS,
   MAX_DATA_PLANE_TICKET_TTL_MS,
   MAX_EXECUTION_ABORT_REASON_BYTES,

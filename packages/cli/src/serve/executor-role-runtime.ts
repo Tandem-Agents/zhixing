@@ -1,4 +1,5 @@
 import { getZhixingHome, type ToolDefinition } from "@zhixing/core";
+import path from "node:path";
 import { createMcpHub, mapServerTools, type McpHub } from "@zhixing/mcp";
 import {
   createAgentRuntime,
@@ -39,6 +40,10 @@ import {
 } from "./executor-job-owner.js";
 import type { LocalWorkspaceManagementHost } from "../runtime/local-workspace-management-host.js";
 import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
+import {
+  EvidenceJournal,
+  ExecutorEvidenceHandler,
+} from "@zhixing/orchestrator/advancement";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -75,6 +80,7 @@ export async function runExecutorRole(
   let authority: AuthorityRuntimeStack | undefined;
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
   let localWorkspaceHost: LocalWorkspaceManagementHost | undefined;
+  let evidenceHandler: ExecutorEvidenceHandler | undefined;
   let roleFailure: unknown;
   try {
     const interactions = new DurableConversationInteractionObserver();
@@ -129,6 +135,25 @@ export async function runExecutorRole(
     });
     if (!localWorkspaceHost) throw new Error("Local workspace management host is unavailable");
     await localWorkspaceHost.start();
+    if (!authority.environment) {
+      throw new Error("Executor evidence requires the local environment authority");
+    }
+    evidenceHandler = new ExecutorEvidenceHandler({
+      executorId: authority.executorId,
+      environment: authority.environment,
+      journal: new EvidenceJournal({
+        file: path.join(
+          zhixingHome,
+          "distributed-runtime",
+          "evidence",
+          `${authority.executorId}.jsonl`,
+        ),
+        verifier: authority.verifier,
+      }),
+      signer: authority.signer,
+      verifier: authority.verifier,
+      capacity: deviceCapacity.workload("workload-advancement"),
+    });
     dataPlane = new ExecutorDataPlaneRuntime({
       zhixingHome,
       authority,
@@ -190,6 +215,7 @@ export async function runExecutorRole(
         interactions,
         dataPlane,
         InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+        evidence: evidenceHandler,
         job: {
           owner: jobOwnerAssembly.owner,
         },
@@ -207,6 +233,11 @@ export async function runExecutorRole(
     roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
+  try {
+    evidenceHandler?.stopAccepting();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
   try {
     await localWorkspaceHost?.close();
   } catch (error) {

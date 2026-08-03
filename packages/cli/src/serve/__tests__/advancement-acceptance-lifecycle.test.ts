@@ -13,8 +13,11 @@ function activeSession(): AdvancementSession {
     updatedAt: "2026-01-01T00:01:00.000Z",
     rubricDraftVersion: 1,
     confirmedRubric: {
-      rubricId: "rubric-1",
-      rubricVersion: "v1",
+      source: {
+        kind: "library",
+        rubricId: "rubric-1",
+        rubricVersion: "v1",
+      },
       title: "代码任务验收",
       description: "判断代码任务是否完成",
       content: {

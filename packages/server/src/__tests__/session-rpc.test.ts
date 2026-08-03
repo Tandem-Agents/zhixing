@@ -667,8 +667,11 @@ describe("session.* RPC (S2.D)", () => {
   function testConfirmedRubric(): ConfirmedRubricSnapshot {
     const content = testDraft("turn-recovery-original").content;
     return {
-      rubricId: "rubric-recovery",
-      rubricVersion: "v1",
+      source: {
+        kind: "library",
+        rubricId: "rubric-recovery",
+        rubricVersion: "v1",
+      },
       title: "确认版测试推进准则",
       description: "用户确认后的推进准则。",
       content: {

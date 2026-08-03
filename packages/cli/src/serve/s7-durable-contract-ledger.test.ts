@@ -13,6 +13,7 @@ import { createS7DurableScenarioAdapters } from "./__tests__/s7-durable-scenario
 describe("S7 production durable contract registry", () => {
   it("aggregates every production-owned descriptor exactly once", () => {
     expect(S7_DURABLE_CONTRACT_LEDGER.map(({ recordFamily }) => recordFamily).sort()).toEqual([
+      "advancement-event",
       "legacy-workscene-migration",
       "local-workspace-operation-outbox",
       "session-activity",

@@ -238,6 +238,25 @@ export class FileArtifactStore implements MutableArtifactStore {
     }
   }
 
+  /** Resolves the complete immutable reference for an indexed digest. */
+  async referenceForDigest(digest: ArtifactRef["digest"]): Promise<ArtifactRef | undefined> {
+    if (!/^sha256:[a-f0-9]{64}$/u.test(digest)) {
+      throw new TypeError("Artifact digest is invalid");
+    }
+    const hex = digest.slice("sha256:".length);
+    const target = path.join(this.rootDir, "sha256", hex.slice(0, 2), hex);
+    try {
+      const metadata = await stat(target);
+      if (!metadata.isFile() || !Number.isSafeInteger(metadata.size)) return undefined;
+      const ref: ArtifactRef = { digest, bytes: metadata.size };
+      await this.#verifyStoredReference(ref);
+      return ref;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
   pathFor(ref: ArtifactRef): string {
     const hex = artifactDigestHex(ref);
     return path.join(this.rootDir, "sha256", hex.slice(0, 2), hex);

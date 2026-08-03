@@ -27,7 +27,11 @@ import type {
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
-import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
+import type {
+  DeviceRole,
+  EvidenceHandlerPort,
+  SecretStorePort,
+} from "@zhixing/core/contracts";
 import type {
   DeviceCapacityArbiterPort,
   StorageMaintenanceGovernorPort,
@@ -86,6 +90,7 @@ import type {
   StartupRollback,
 } from "./startup-rollback.js";
 import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
+import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -121,6 +126,7 @@ export interface AssemblyContext {
   readonly durableInteractions: DurableConversationInteractionObserver;
   readonly perspectives: PerspectivesController;
   readonly deviceCapacity: DeviceCapacityArbiterPort;
+  readonly advancementCapacity: AgentRuntimeCapacityBinding;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
 
@@ -180,6 +186,7 @@ export interface AssemblyContext {
   inboundRouter?: InboundRouter | null;
   authorityRuntime?: AuthorityRuntimeStack;
   executorDataPlane?: ExecutorDataPlaneRuntime;
+  evidenceHandler?: EvidenceHandlerPort & { stopAccepting(): void };
   meshBootstrap: MeshRuntimeBootstrap;
   meshRuntime?: MeshRuntimeAssembly;
   executorJobOwnerAssembly?: ExecutorJobOwnerAssembly;

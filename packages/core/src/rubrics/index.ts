@@ -13,4 +13,8 @@ export {
   rubricsIndexPath,
 } from "./paths.js";
 export { RubricStore } from "./store.js";
+export {
+  AnchorRubricGlobalStateAdapter,
+  type AnchorRubricGlobalStateAdapterOptions,
+} from "./global-state-adapter.js";
 export * from "./types.js";

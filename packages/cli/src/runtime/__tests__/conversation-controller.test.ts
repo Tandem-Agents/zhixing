@@ -680,7 +680,6 @@ describe("ConversationController", () => {
       turnId,
     });
     expect(settled).toBe(false);
-
     f.emit.complete({
       conversationId: "conv-1",
       sessionId: "conv-1",
@@ -779,6 +778,7 @@ describe("ConversationController", () => {
       status: "confirmed",
       advancementSessionId: "adv-1",
       runStatus: "immediate",
+      rubricPublicationMessage: "准则已用于本任务，连接值班设备后保存。",
     });
 
     const acceptedTurn = await controller.confirmRubricContract(pending, {
@@ -801,6 +801,9 @@ describe("ConversationController", () => {
       turnId: "turn-rubric",
     });
     expect(settled).toBe(false);
+    expect(acceptedTurn.rubricPublicationMessage).toBe(
+      "准则已用于本任务，连接值班设备后保存。",
+    );
 
     f.emit.complete({
       conversationId: "conv-1",

@@ -1,4 +1,6 @@
 import { AuthorityStorageError } from "@zhixing/core/authority";
+import { isAdvancementControlEvent } from "@zhixing/core/advancement";
+import type { AdvancementControlEvent } from "@zhixing/core/advancement";
 import type {
   ArtifactRef,
   AssignmentTerminationProof,
@@ -173,6 +175,16 @@ export type ConversationRunJournalRecord =
     }
   | { readonly t: "resolution"; readonly runId: string; readonly fact: UncertainResolutionFact }
   | {
+      readonly t: "advancement-event";
+      /** 所属推进写入的幂等身份——同一 requestId 重放原结果，异载荷拒绝。 */
+      readonly requestId: string;
+      /** 本次推进写入的会话域 revision（整批事件共享）。 */
+      readonly domainRevision: number;
+      /** 整批事件的规范内容摘要（B(bytes)），逐记录冗余以判定异载荷。 */
+      readonly eventsDigest: string;
+      readonly event: Stored<AdvancementControlEvent>;
+    }
+  | {
       readonly t: "cancel-contained";
       readonly assignmentId: string;
       readonly openFactDigest: string;
@@ -312,6 +324,9 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
     required: ["assignmentId", "bundleRef", "commitRevision", "t"],
   },
   resolution: { required: ["fact", "runId", "t"] },
+  "advancement-event": {
+    required: ["domainRevision", "event", "eventsDigest", "requestId", "t"],
+  },
   "cancel-contained": {
     required: ["assignmentId", "openFactDigest", "proof", "t"],
   },
@@ -588,6 +603,20 @@ export function validateConversationRunRecord(
         assertIdentifier(value.runId, "Resolution run id");
         validateResolutionFact(value.fact);
         break;
+      case "advancement-event": {
+        assertIdentifier(value.requestId, "Advancement event request id");
+        assertPositiveSafeInteger(
+          value.domainRevision,
+          "Advancement event domain revision",
+        );
+        assertDigest(value.eventsDigest, "Advancement events digest");
+        if (isStoredReference(value.event)) {
+          assertArtifactReference(value.event.ref, "Advancement event reference");
+        } else if (!isAdvancementControlEvent(value.event, verifier)) {
+          throw corruptRunJournal("Advancement event contract failed");
+        }
+        break;
+      }
       case "cancel-contained":
       case "cancel-proof-accepted":
         assertIdentifier(value.assignmentId, `${type} assignment id`);

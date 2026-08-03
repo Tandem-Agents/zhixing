@@ -1,10 +1,13 @@
 import type {
-  AdvancementControlEvent,
   AdvancementSnapshot,
   AuthorityError,
   Message,
   TaskListState,
 } from "./foundation.js";
+import type {
+  AdvancementReviewRunInput,
+  AdvancementReviewRunOutcome,
+} from "../advancement/review.js";
 import type {
   AssignmentActivationProof,
   AssignmentReservationRequest,
@@ -36,6 +39,8 @@ import type {
 import type {
   CapabilityDescriptor,
   DispatchEnvelope,
+  EvidenceBundle,
+  EvidenceRequest,
   ExecutorVersionInventory,
   IngressContext,
   SealedBundle,
@@ -86,10 +91,14 @@ export interface SessionStatePort {
     conversationId: string,
     ctx: AuthorityCallContext,
   ): Promise<TaskListState>;
+  /**
+   * 读取该对话折叠后的推进头状态：open（awaiting / active）会话优先，
+   * 否则最新的终态会话；对话无任何推进历史时返回 null。
+   */
   readAdvancementState(
     conversationId: string,
     ctx: AuthorityCallContext,
-  ): Promise<AdvancementSnapshot>;
+  ): Promise<AdvancementSnapshot | null>;
   mutate(
     conversationId: string,
     mutation: SessionControlMutation | SessionStagedMutation,
@@ -325,6 +334,7 @@ export interface ResourceReservationPort {
     origin: ReservationOrigin,
     ctx: AuthorityCallContext,
     audience?: { readonly executorId: string },
+    scopeBinding?: ResourceLease["scopeBinding"],
   ): Promise<ImmediateRootResourceLease>;
   acquireChild(
     parent: ResourceLease,
@@ -354,7 +364,25 @@ export interface ResourceReservationPort {
   ): Promise<void>;
   settle(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void>;
   release(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void>;
+  /** 仅在无法形成可核验 usage 水位时使用；正常业务终结仍须 settle/release。 */
+  reclaim?(lease: ResourceLease): Promise<void>;
 }
+
+/** executor 取证入口的封闭结果；typed-stale 由签名 bundle 的观测令牌导出。 */
+export type EvidenceExecutionResult =
+  | { readonly kind: "bundle"; readonly bundle: EvidenceBundle }
+  | { readonly kind: "capability-gap" };
+
+/** owner 到目标 executor 的取证传输端口；进程内与 mesh 共享同一合同。 */
+export interface EvidenceClientPort {
+  collect(
+    request: EvidenceRequest,
+    abort: AbortSignal,
+  ): Promise<EvidenceExecutionResult>;
+}
+
+/** executor 侧唯一受限取证入口，不创建 assignment，也不复用 run dispatch。 */
+export interface EvidenceHandlerPort extends EvidenceClientPort {}
 
 export interface ControlCompletionPort {
   complete(request: {
@@ -376,11 +404,16 @@ export interface ControlCompletionPort {
 }
 
 export interface AdvancementReviewerPort {
+  /**
+   * 推进侧裁判调用——输入是 advancement 模块的唯一领域合同（被审 run、
+   * 确认版 Rubric、既往 review、推进窗口与 owner 已验真 canonical
+   * evidence）；返回结论或挂起分流，不直接写任何权威状态。
+   */
   review(
-    input: AdvancementSnapshot,
+    input: AdvancementReviewRunInput,
     lease: ResourceLease,
     abort: AbortSignal,
-  ): Promise<AdvancementControlEvent[]>;
+  ): Promise<AdvancementReviewRunOutcome>;
 }
 
 export interface LedgerSnapshot extends WireSchemaV1<"LedgerSnapshot"> {

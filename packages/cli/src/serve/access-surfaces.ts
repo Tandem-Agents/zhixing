@@ -9,6 +9,7 @@
  */
 
 import chalk from "chalk";
+import path from "node:path";
 import {
   ShardedTranscriptStore,
   SnapshotStore,
@@ -58,6 +59,10 @@ import { JobInteractionRuntimeUnavailableError } from "./durable-job-interaction
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
 import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
+import {
+  EvidenceJournal,
+  ExecutorEvidenceHandler,
+} from "@zhixing/orchestrator/advancement";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -127,6 +132,25 @@ const authorityRuntimeSurface: AccessSurface = {
         () => host.close(),
       );
       await host.start();
+      if (!authorityRuntime.environment) {
+        throw new Error("Executor evidence requires the local environment authority");
+      }
+      ctx.evidenceHandler = new ExecutorEvidenceHandler({
+        executorId: authorityRuntime.executorId,
+        environment: authorityRuntime.environment,
+        journal: new EvidenceJournal({
+          file: path.join(
+            ctx.zhixingHome,
+            "distributed-runtime",
+            "evidence",
+            `${authorityRuntime.executorId}.jsonl`,
+          ),
+          verifier: authorityRuntime.verifier,
+        }),
+        signer: authorityRuntime.signer,
+        verifier: authorityRuntime.verifier,
+        capacity: ctx.advancementCapacity,
+      });
     }
     const jobStatus = new JobStatusDirectory();
     jobStatus.onStatus((notice) => {
@@ -254,6 +278,9 @@ const meshSurface: AccessSurface = {
               dataPlane: ctx.executorDataPlane!,
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule!.InProcessAssignmentSubmission,
+              ...(ctx.evidenceHandler
+                ? { evidence: ctx.evidenceHandler }
+                : {}),
               ...(ctx.executorJobOwner
                 ? { job: { owner: ctx.executorJobOwner } }
                 : {}),

@@ -1,50 +1,41 @@
 import type {
-  AdvancementRunReview,
-  AdvancementWindowState,
+  AdvancementReviewRunInput,
   ConfirmedRubricSnapshot,
   EvidenceCapabilitySet,
-  ReviewEvidence,
 } from "@zhixing/core/advancement";
 import type {
   LLMProvider,
-  RunRecordInput,
-  RunRecordRef,
-  SegmentSummarizeLLMFn,
+  ReviewEvidence,
   SegmentThresholds,
   ITokenEstimator,
   ThinkingConfig,
-  UserTurnInput,
 } from "@zhixing/core";
+import type {
+  AdvancementReviewerPort,
+  ResourceReservationPort,
+} from "@zhixing/core/contracts";
 import type { AgentRuntimeCapacityBinding } from "../runtime/governed-agent-runtime.js";
 
-/**
- * 一次验收的结果——结论与挂起是两种语义，不用异常做控制流：
- * - reviewed：裁判产出了结论（含 fail-closed 的终局 exit）——落盘、驱动闭环。
- * - deferred：本轮验收未产生结论——基础设施 transient 失败（限流 / 网络 /
- *   取证 IO）或调用被中止。不落盘 review、不前进已审进度，被审 run 保持
- *   「已接受未审」态由补审触发点收敛；过夜任务不因一次抖动永久退出。
- */
-export type AdvancementReviewRunOutcome =
-  | {
-      readonly kind: "reviewed";
-      readonly review: AdvancementRunReview;
-      readonly advancementWindow?: AdvancementWindowState;
-    }
-  | {
-      readonly kind: "deferred";
-      readonly cause: "infrastructure" | "aborted";
-      readonly reason: string;
-    };
+export type {
+  AdvancementReviewRunInput,
+  AdvancementReviewRunOutcome,
+} from "@zhixing/core/advancement";
 
-export interface AdvancementRuntime {
-  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementReviewRunOutcome>;
-}
+/** 推进侧裁判运行体——AdvancementReviewerPort 的生产实现形状。 */
+export type AdvancementRuntime = AdvancementReviewerPort;
 
 export interface AdvancementRuntimeOptions {
+  /** 未治理的主档 provider——裁判调用的计量由本运行体对传入租约单点执行。 */
   readonly provider: LLMProvider;
   readonly model: string;
   readonly thinking?: ThinkingConfig;
+  /** 未治理的 light provider——推进窗口摘要的计量与裁判同一租约。 */
+  readonly lightProvider?: LLMProvider;
+  readonly lightModel?: string;
+  readonly lightThinking?: ThinkingConfig;
   readonly evidenceProvider?: AdvancementEvidenceProvider;
+  /** Production owner path requires already verified evidence and never reads local files. */
+  readonly canonicalEvidenceOnly?: boolean;
   /**
    * 取证能力集事实——喂入裁判 system prompt，让裁判能区分「执行侧还没产出
    * 证据（failed 催证）」与「系统没有核验能力（capability-gap 退出）」。
@@ -57,30 +48,28 @@ export interface AdvancementRuntimeOptions {
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
   readonly deviceCapacity?: AgentRuntimeCapacityBinding;
+  /**
+   * 租约计量面——裁判与窗口调用沿稳定 usageId 对 review 传入租约预占/消费；
+   * 缺省时调用不计量（测试 / 无治理装配）。
+   */
+  readonly resourceMeter?: Pick<
+    ResourceReservationPort,
+    "reserveUsage" | "consume"
+  >;
+  readonly hostComponent?: string;
+  readonly defaultMaxOutputTokens?: number;
 }
 
 export interface AdvancementContextWindowOptions {
   readonly capability: SegmentThresholds;
-  readonly summarize: SegmentSummarizeLLMFn;
   readonly estimator?: ITokenEstimator;
   readonly bufferTurns?: number;
-}
-
-export interface AdvancementReviewRunInput {
-  readonly sessionId: string;
-  readonly originalUserTask: UserTurnInput;
-  readonly rubric: ConfirmedRubricSnapshot;
-  readonly runIndex: number;
-  readonly runRecord: RunRecordInput;
-  readonly runRecordRef?: RunRecordRef;
-  readonly priorReviews?: readonly AdvancementRunReview[];
-  readonly advancementWindow?: AdvancementWindowState;
-  readonly abortSignal?: AbortSignal;
 }
 
 export interface AdvancementEvidenceCollectionInput
   extends AdvancementReviewRunInput {
   readonly requirements: ConfirmedRubricSnapshot["content"]["evidenceRequirements"];
+  readonly abortSignal?: AbortSignal;
 }
 
 export interface AdvancementEvidenceProvider {

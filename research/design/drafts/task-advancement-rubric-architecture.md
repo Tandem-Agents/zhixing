@@ -180,8 +180,8 @@ server 编排层（ServerContext + session.* RPC 编排）
 │  ├─ RubricContractBuilder（命中 / 生成 / 确认 Rubric）
 │  ├─ AdvancementRuntime（推进侧独立判断运行体）
 │  ├─ ProxyMessageScheduler（代理消息入同一会话队列）
-│  └─ AdvancementStore（推进会话控制日志，含 advancementSession 状态）
-└─ RubricStore（Rubric 一等资产库，协议见 rubric-protocol）
+│  └─ SessionStatePort（对话 owner 权威日志中的 advancement 状态与事件）
+└─ Rubric catalog / GlobalStatePort（Rubric 只读检索与独立全局沉淀）
 ```
 
 生效面注：`AdvancementController` 挂载在 `ServerContext.advancement`，由 `session.send` 等 RPC handler 编排调用；`ConversationManager` 类本体不持有它的引用——「不内嵌 Rubric 语义」由结构保证，比早稿「ConversationManager 增加 advancement 依赖」的措辞更干净，以此为准。
@@ -193,7 +193,7 @@ server 编排层（ServerContext + session.* RPC 编排）
 | 执行侧 main runtime   | 按用户 / 代理消息执行任务                      | 不判断自己是否完成               |
 | AdvancementController | 任务级状态机、调度下一轮                       | 不生成执行方案、不替执行侧改文件 |
 | AdvancementRuntime    | 按确认版 Rubric 验收、选择未通过处理、判断退出 | 不写主线历史、不每轮找用户确认   |
-| RubricStore           | 存储、检索、版本化 Rubric                      | 不参与 run 调度                  |
+| Rubric catalog / GlobalStatePort | 只读检索、内容资产与全局版本化沉淀            | 不阻塞会话契约采用、不参与 run 调度 |
 | ConversationManager   | 串行、持久化、窗口接受、事件组播               | 不内嵌 Rubric 语义               |
 
 ### 4. 核心数据模型
@@ -304,7 +304,7 @@ interface ConfirmedRubricSnapshot {
 
 **通过标准条目化（裁决）**：条目 id 在**契约快照层**分配——快照不可变，故 id 在整个推进会话内恒稳，是归因引用（§4.6 `criterionId`）、跨轮机械对比（§7 死胡同检测）、收场标准矩阵（§7）的稳定锚。资产层 `RUBRIC.md` 与草案阶段保持自然列表（`string[]`），不给用户与生成策略加编号负担；id 由确认固化这一步机械分配。没有稳定 id 时，这三个消费者全靠裁判 LLM 逐字复述标准文本——复述漂移一次全链路断。
 
-如果没有命中已有 Rubric，推进侧生成新 Rubric 草案，经用户确认后先进入 RubricStore，再把保存后的版本作为本 session 的快照。`rubricVersion` 由 RubricStore 在保存 / 修订时分配维护（资产级单调版本，Store 索引事实）——协议层 RUBRIC.md frontmatter 不承载版本字段（rubric-protocol §八的「版本信息」扩展点指未来的展示性元数据，与此快照字段两回事）。`evidenceRequirements` 是推进侧独立取证的协议入口；并非每类任务都必须有客观证据，但一旦任务存在文件、测试、构建、日志、差异等可核对信号，Rubric 草案应尽量把证据要求写入契约，供推进侧独立验收。
+命中已有 Rubric 时，会话保存 `source:library` 的不可变快照并记录库身份与版本。未命中时，用户确认先把 `source:local-draft` 的 `snapshotId + contentDigest` 随 advancement 事件写入当前对话 owner，并立即启动原任务；保存或修订全局 Rubric 是独立后续动作，失败或离线不得回滚已经采用的会话契约。锚点在线时正文先进入 ArtifactStore，再经 GlobalStatePort 写目录；本地域离线时只经注入的 DeferredGlobalIntentPort 登记意向，提示“已用于本任务，连接值班设备后保存”。后续 link 只关联库身份，不改写 active 快照内容。`evidenceRequirements` 是推进侧独立取证的协议入口；并非每类任务都必须有客观证据，但一旦任务存在文件、日志、差异或产物等当前可只读核对的信号，Rubric 草案应尽量把证据要求写入契约，供推进侧独立验收。
 
 #### 4.5 AdvancementRunReview
 
@@ -359,17 +359,11 @@ interface ReviewAttribution {
 
 > 生效面：已落地（C14）——代理消息 content = failureHandling 意图骨架 + `renderReviewAttribution` 确定性渲染的归因事实块；`attribution` 随 review 与 proxy 持久化。
 
-#### 4.7 AdvancementStore 持久化形态与退役
+#### 4.7 Advancement 权威状态与生命周期
 
-控制日志形态：`~/.zhixing/advancement/<conversationId>/advancement.jsonl`，per-conversation append-only 事件日志（session_created / rubric_draft_revised / rubric_confirmed / run_reviewed / window_updated / proxy_enqueued / proxy_settled / completed / exited / cancelled 十类事件），加载时全量重放折叠出会话状态；坏行与不完整事件隔离跳过；per-conversation 进程内锁串行写。推进侧窗口蒸馏态（`window_updated`）与 review 同事务原子落盘——派生缓存性质，丢失可从 review 事件重放重建（代价是重做折叠摘要），不构成第二真相源。
+推进状态不再拥有独立文件事实源。生产实现只经 `SessionStatePort.readAdvancementState` 读取，并把 `SessionControlMutation(kind:"advancement-event")` 交给当前 conversation owner；`AdvancementSnapshot` 与 `AdvancementControlEvent` 是唯一状态和事件联合。会话、草案、确认快照、review、window、proxy、终态，以及 evidence 请求的“已耐久—结果已耐久—settled/deferred”闭环，都进入同一对话权威日志并严格绑定 conversationId、advancementSessionId、ownerEpoch 与 session revision。
 
-退役边界（裁决）：控制日志是对话的附属控制面数据，生命周期跟随对话本体，不独立于对话存活。
-
-- **对话删除连带删除**：`session.delete` 在取消 open 推进会话之外，须连带删除该对话的 `advancement/<conversationId>/` 目录——对话本体已不存在时，控制日志没有独立存在意义。清理失败只 warn、不影响主对话删除结果（与现有取消逻辑同容错纪律）。
-- **孤儿目录 GC 兜底**：维护 sweep（沿 `__transcript-gc` 同款「持久层暴露 sweep 能力 + 调度器薄触发壳」模式）枚举 advancement 根目录，删除对应对话已不存在的孤儿目录；删失败跳过、下轮再来，幂等。
-- **不做日志内截断**：单对话控制事件体量远小于对话正文（不含 run 原文），append-only 纪律优先，不引入日志重写。
-
-> 生效面：已落地（C13）——`session.delete` 在取消 open 会话后连带 `removeConversationData` 删除目录（失败只 warn）；`__advancement-gc` 系统任务（天级 cron、沿薄壳模式）经 `sweepOrphanDirs` 清理孤儿目录。判活语义：目录段经 `fromSafePathSegment` 无损还原为 conversationId（安全投影可逆），解析 scope 后按对话侧真实布局做存在性检查——**不做目录名跨域比对**（控制日志目录名是全域键投影、对话侧是 scope 下的 localId 投影，workscene 对话两者不同名，跨域比对会把存活场景会话误判孤儿）。
+窗口与 pending evidence 是从同一事件序列折叠出的有界投影，不构成第二事实源。任意崩溃后只凭会话日志恢复未审 accepted run 与未完成 evidence 义务；owner 换代后旧 epoch 的请求和结果零推进。对话删除与迁移自然携带或清除该会话域状态，不再维护独立 advancement 目录、孤儿 sweep 或旧文件兼容生产路径。
 
 ### 5. 生命周期流程
 
@@ -405,10 +399,10 @@ interface ReviewAttribution {
 
 推进任务进入推进流程后：
 
-1. `RubricContractBuilder` 用用户任务检索 RubricStore。
+1. `RubricContractBuilder` 只经注入的 Rubric catalog 检索索引，并按需读取内容资产。
 2. 命中：生成 `RubricContractDraftSnapshot`，展示给用户确认。
 3. 未命中：由 Rubric 草案生成策略基于当前任务、候选 Rubric 与协议规格生成新 Rubric 草案，展示给用户确认。
-4. 用户确认后，写入 `AdvancementSession.confirmedRubric`；若是新 Rubric，按下方「场景化生成与沉淀治理」沉淀入 RubricStore。
+4. 用户确认后，先把不可变快照写入对话 owner 并立即生效；若是新 Rubric，再按下方「场景化生成与沉淀治理」独立沉淀到全局库，沉淀不可阻塞或回滚当前任务。
 5. 会话状态进入 `active`，原始用户任务作为第一条执行 turn 入队；确认版验收条件自此对执行侧每 run 可见（载体见 §5.3——run 瞬态注入，只活在发送视图，落盘与窗口恒为原文）。
 
 用户确认只发生在这里。进入 `active` 后，推进侧按确认版 Rubric 自动推进，不再每轮询问用户。
@@ -416,7 +410,7 @@ interface ReviewAttribution {
 **场景化生成与沉淀治理（裁决）**：需求本意是「用户同意即沉淀、未来可复用」——沉淀的价值在复用，而复用的前提是 Rubric 天生是**场景级**的。当前生成契约要求草案「贴合当前任务」，与协议「title / description 表达场景、不表达某一次具体任务」自相矛盾：贴合单次任务的标准无条件入库，一百个任务就是一百条一次性条目，检索误命中 + 用户确认面的橡皮图章效应叠加，最终整个任务按别的任务的过期标准裁判——库从资产退化为污染源。裁决从根因修：
 
 - **生成契约改为场景级**：草案的 passCriteria / failureHandling 写场景可复用的标准与处理；本次任务的具体细节走事实变量与证据要求承载。生成 prompt 与协议要求对齐，不再自相矛盾。
-- **沉淀治理兜底**：保存前做近邻检测（与既有 Rubric 高相似时提示复用/修订已有条目而非另存新条）；确认即沉淀的需求语义保留，但沉淀的是场景资产、不是任务快照。
+- **沉淀治理兜底**：确认前做近邻检测（与既有 Rubric 高相似时提示复用/修订已有条目而非另存新条）；确认即采用，沉淀作为独立后续动作处理，沉淀的是场景资产、不是任务快照。
 - 本次任务契约仍以 `ConfirmedRubricSnapshot` 快照隔离——库条目后续演化不影响 active 会话，不变。
 
 > 生效面：生成契约已场景化（C15）——生成与修订 prompt 均改为「场景可复用表述、任务细节归证据要求与 locator」，自相矛盾消除。近邻治理交互已落地（C18）——generated 草案携带达到近邻阈值的候选时，确认面默认提示修订已有条目，且保留「另存新准则」显式选择；确认请求将沉淀选择传回控制面，core 按选择更新 existing own / own 覆盖 linked 或另存新条。
@@ -432,7 +426,7 @@ Rubric 确认是控制面流程，不是一次执行 run：
 - Rubric 确认面必须提供降级动作：用户选择“直接执行不启用推进”时，关闭待确认推进会话，原始任务按普通任务进入执行，并复用原始 `turnId`。
 - `session.complete` 仍只表示执行 run 的终止结果，不用它伪装 Rubric 草案完成；等待确认、取消、草案更新走 `session.event` 的控制面事件。
 - 原始 `turnId` 绑定原始用户任务，并由 RPC / 控制面保存。用户确认通过独立确认方法进入：确认后构造闭包持有原始 `turnId` 的 `makeTask`，再把原始用户任务交给 `ConversationManager.admitTurn`；`admitTurn` 不接收 `turnId`，只负责准入、排队和返回 admission。后续 delta / complete 仍使用该原始 `turnId`；取消则 session 标记 `cancelled`，发控制面取消事件，原始任务不执行。
-- 确认草案与确认记录进入 AdvancementStore，不进入执行侧注意力窗口。
+- 确认草案与确认记录进入对话 owner 的 advancement 权威状态，不进入执行侧注意力窗口。
 
 **awaiting 会话跨重启的行为（定死，防止歧义）**：`awaiting-rubric-confirmation` 会话不进入恢复扫描（恢复只处理 active），重启后不自动重发 `contract_draft` 事件——它静默存活在控制日志里，经 `session.list` / `session.resume` 以状态快照回投给接入面，由接入面据快照重建确认 UI。理由：草案确认是等待用户决策的控制面状态，不是需要系统主动续跑的工作；自动重发事件会在用户未打开会话时空推。接入面必须消费 resume 快照重建确认面，否则待确认任务在重启后对用户不可见（该消费路径与专项测试随 §15 C11 一并验收）。
 
@@ -468,7 +462,7 @@ run 输入 = [...执行侧注意力窗口, 当前用户/代理消息]
 
 1. 把 `runRecord`、最终 assistant 回复、工具调用投影、推进侧独立读取的证据交给 AdvancementRuntime。
 2. AdvancementRuntime 按确认版 Rubric 通过裁判判定工具输出 `passed` / `failed` / `exit`。
-3. 记录 `AdvancementRunReview` 到 AdvancementStore。
+3. 经 SessionStatePort 记录 `AdvancementRunReview` 到对话 owner 权威日志。
 
 验收通过：
 
@@ -551,30 +545,30 @@ AdvancementRuntime 第一版能力：
 
 - 使用独立 system prompt / profile：身份是“推进侧裁判”。
 - 默认使用当前执行侧同 provider / model / account 的可靠验收档模型，形成独立缓存链；以后可做专用 evaluator role，但不能降低验收可靠性。
-- 具备受限的独立只读取证通道：可按 Rubric 的 `evidenceRequirements` 独立核验客观证据；不得写文件、执行副作用工具或替执行侧完成任务。取证形态是 loop 前由 `evidenceProvider.collect()` 一次性预取、以文本注入裁判 prompt——裁判 loop 本身只持裁判判定工具，不带 agentic 读工具（取证确定性化、裁判单轮化，两者都服务可靠性）。
+- 具备受限的独立只读取证通道：owner 从已接受 run 与确认版 Rubric 构造并先耐久记录签名 EvidenceRequest，目标 executor 经独立 evidence handler 生成签名 EvidenceBundle / ObservationToken；owner 验真、绑定并落盘后，才以 canonical evidenceId 输入 AdvancementReviewerPort。裁判 loop 只持裁判判定工具，不带 agentic 读工具；生产路径不得再调用本地 `evidenceProvider.collect()` 或从拓扑对象暗取证据。
 - 需要新增证据但当前证据不存在时，通过代理消息要求执行侧补充；推进侧不得把“执行侧自述”当成客观证据的替代品。
 - 有独立 AdvancementWindowState，窗口尺寸复用现有注意力窗口规则。
 - 上下文只包含：用户任务、确认版 Rubric、每轮执行结果、既往验收判断、已收集证据。（代理回复文本本身存于 Rubric failureHandling，不单列为上下文项。本清单是**裁判阶段**的验收上下文；Rubric 库索引只进入**契约构建阶段**的匹配上下文——两个阶段两份上下文，§8「索引只进入推进侧上下文」指后者，不进裁判验收上下文。）
 
 **取证能力分级（裁决）**——「独立核验」按副作用面分两级，`required` 语义与能力集耦合：
 
-- **第一级 · 纯只读核验**：文件差异 / 文件内容与存在性（`file-diff`）、日志文件（`log`）、产物状态（`artifact`）——文件系统只读可达、零副作用、无需权限确认。这是 evidenceProvider 生产实现的范围（§15 C10）。
+- **第一级 · 纯只读核验**：文件差异 / 文件内容与存在性（`file-diff`）、日志文件（`log`）、产物状态（`artifact`）——目标 executor 在冻结 workspace binding/revision 内只读采集，复用 PathGuard，零副作用、无需权限确认。这是 EvidenceRequest/Bundle 生产实现的范围。
 - **第二级 · 验证性执行**：独立重跑测试 / 构建命令以核验 `test-result` / `build-result`——语义是验证、但有执行面副作用。只能执行 Rubric 契约中用户确认过的验证命令、经现有权限管线、不绕确认。第一版不实现，留口不预建。
 - **`required` 只能落在系统当前具备独立核验能力的 kind 上**：取证能力集是草案生成策略的输入，生成与确认阶段即约束 `required:true` 不得指向能力集外的 kind；能力集外的证据要求仍可写入契约（作为裁判参考与代理消息素材），但不构成 passed 的硬门槛。未来第二级落地，能力集扩大，`required` 可用面自动扩大——协议不变。
 - **能力缺口的退出语义**：若 active 会话中出现 required 客观证据系统无法独立核验的局面（历史契约、能力回退），裁判不得进入「failed → 代理消息要证据 → 执行侧自述 → 仍无 independent 证据」的无效循环——这是死胡同的系统能力变体，应走退出请用户裁决，诚实告知“无法独立核验，请人工验收”。exitReason 新增 `capability-gap` 枚举值，不复用 `system-error`（语义污染）。
 
-**第一级取证施工语义（裁决，C10 的地基）**：
+**第一级取证施工语义（当前目标形态）**：
 
-- **file-diff 的基线语义**：第一级实现 = git 工作区变更的只读读取（`git diff` / `git status`）——在「执行侧不自主 commit」的产品纪律下，工作区未提交变更就是任务变更的良好近似，零新设施。workspace 非 git 仓库或 git 不可用时，`file-diff` **不进能力集**（能力集本就是运行时探测的系统事实）；「任务起点文件快照」设施留作未来增强、不预建，不承诺跨 commit 的变更追踪。
-- **证据定位机制**：`EvidenceRequirementSpec` 扩展可选结构化 `locator`（第一级只支持 `paths`；验证命令类 locator 属第二级），由草案生成策略从任务上下文填写、随契约确认对用户可见可改——定位是契约的一部分，不是取证时的临场猜测。file-diff 类无 locator 时以 git 工作区全量变更 + 执行侧本轮工具调用触碰路径的投影兜底定位；log / artifact 类**无可执行 locator 不得标 `required`**——无从确定性定位的要求做不了独立核验，不能成为硬门槛（与能力集耦合规则同源）。
-- **能力集的声明与传递**：类型住 core（纯声明）、探测住 orchestrator（provider 侧运行时探测：git 可用性、workspace 形态），经装配传入草案生成策略输入——required 落点约束在生成与确认阶段生效。
-- **取证路径安全**：只读也守 workspace 边界——locator 路径经 realpath 归一 + 边界校验（复用 PathGuard；symlink 逃逸是权限模块的已知教训），越界路径按「该项证据缺失」处理、不抛权限确认（取证不该变成确认风暴，缺失自有 verdict 上限规则兜底）。
+- **file-diff 的基线语义**：目标 executor 读取当前 git 工作区事实（`git status` 为事实源、`git diff` 为摘要增强）；workspace 非 git 仓库或 git 不可用时按请求返回 capability-gap，不虚报成功。能力目录只声明 provider kind，具体 workspace 前提在请求级诚实解析；不预建历史文件系统快照。
+- **证据定位机制**：`EvidenceRequirementSpec.locator` 是契约的一部分。owner 按确认顺序耐久保存 item→requirement 映射；file-diff 无 locator 时只允许当前 git 工作区变更与该 run 已触碰路径投影，log / artifact 必须严格按 locator 读取，禁止临场猜测或越界降级扫描。
+- **能力集的声明与传递**：类型住 core；executor 在签名 CapabilityDescriptor 发布稳定 provider kinds，具体 git / locator 可达性在 EvidenceRequest 处理时核对。owner 发送前全等校验目标 executor、workspace binding/revision 与 provider kind；required 落点约束在生成和确认阶段生效。
+- **取证路径安全与一致性**：任何文件访问前先验签并校验 ownerEpoch、目标 executor、workspace binding/revision、子租约和容量 permit；locator 经 PathGuard。采集前后对有序 locator 集计算状态指纹，不等即 `consistent=false`，不得作为可采信证据；真实路径与秘密不上 wire。
 
-> 生效面：已落地（C10）——`first-party-evidence.ts` 实现 git 工作区变更只读取证（status 为必需事实源、diff --stat 为摘要增强，unborn HEAD 等无基线场景不连累 status）与 log / artifact 按 locator 定位读取（PathGuard realpath 边界，显式 locator 全越界按证据缺失、绝不降级全量；无 locator 时按执行侧本轮工具触碰路径投影收窄）；`detectEvidenceCapabilities` 运行时探测；core 侧 required 缺省两处已按 `canBeRequired` 能力集约束收敛，required 死锁解除。
+> 生效面：取证由会话 owner 的耐久请求链与 executor 独立 handler 承担；进程内和 mesh 只替换 transport adapter，共用同一 codec、guard、journal 与业务实现。journal 对同 requestId 全等重放原耐久结果、异载荷拒绝，过期请求只可回放既有终态；stale 有限重试后保持 deferred。
 >
 > **verdict 上限的载体（实施决策记录）**：unknown 上限规则的机械可校验部分在 evidence 层（required 独立证据护栏）；criteria 层的上限由裁判 system prompt 硬指令承载（标准条目无 kind、与证据要求无绑定字段，逐条机械校验不可行——两层门裁决本就声明「无需在条目上新增任何标志」）。能力集事实同时喂入裁判 prompt，使裁判能区分「执行侧未产证据（failed 催证）」与「系统无核验能力（capability-gap 退出）」。
 >
-> **已知边界**：① 能力集在宿主启动时探测一次、进程内冻结——中途 `git init` 需重启宿主才进能力集；② 取证根绑全局 workspace（与裁判 workingDirectory 同源）——workscene 会话的推进任务取证落在全局工作区上，场景级取证根随 workscene 归宿主的演进另行对齐。
+> **边界**：本单元只实现第一级只读取证；测试/构建等验证性执行仍属后续能力。无 workspace、目标离线、binding/revision 漂移或请求级前提不满足时诚实返回 capability-gap / deferred，不伪造 cwd 或改选不持有冻结 workspace 的设备。
 
 证据策略分层：
 
@@ -604,7 +598,7 @@ AdvancementRuntime 第一版能力：
 
 实现上可以复用 provider 调用、prompt 组装、工具调用、注意力窗口与 SegmentManager 等底层原语，但不得复用执行侧 main runtime 的 loop / tools / lifecycle。若第一版为了装配便利使用 runtime 能力，也必须是专用 evaluator runtime，且只暴露只读取证工具与裁判判定工具，禁用执行工具与主线 transcript 写入。
 
-推进侧不写主线 transcript；它的判断过程只进入 AdvancementStore。
+推进侧不写主线 transcript；结论性 review 与归因只进入对话 owner 的 advancement 权威状态。
 
 ### 7. 退出边界
 
@@ -617,7 +611,7 @@ AdvancementRuntime 第一版能力：
 - **用户接管 / 目标变更退出**：用户真实输入改变目标、修改验收标准、要求停止自动推进，或开启新任务。有推进事实的接管归 `exited` 并交付收场（§5.4 终态归类裁决）。
 - **系统能力退出**：裁判结论性失败（fail-closed 的 `system-error`）、required 客观证据超出系统当前独立核验能力（§6 能力缺口）——诚实告知用户系统层原因、请人工验收。**基础设施 transient 失败不是退出类别**：不产生 review、挂起待补审（§6 韧性裁决），穷尽重试仍不可用也只挂起，不伪装成任务级结论。
 
-死胡同判断的核心不是 run 次数，而是“下一条代理消息是否还能带来新的有效推进”。不能证明有效，就退出。**死胡同检测机制化（裁决）**：跨轮比较的输入是 AdvancementStore 里的结构化 review 序列（以 `criterionId` 锚定的逐条判定集合、证据指纹的逐轮对比——"连续 N 轮 unmet 条目集与证据无变化"是机械可验信号），不依赖推进侧折叠窗口的自然语言记忆——任务越长窗口折叠越早蒸发跨轮细节，而长任务恰是最需要死胡同检测的场景；LLM 裁判在机械信号之上做最终判断，事实来自 store、判断交 LLM。
+死胡同判断的核心不是 run 次数，而是“下一条代理消息是否还能带来新的有效推进”。不能证明有效，就退出。**死胡同检测机制化（裁决）**：跨轮比较的输入是 owner 权威状态里的结构化 review 序列（以 `criterionId` 锚定的逐条判定集合、证据指纹的逐轮对比——"连续 N 轮 unmet 条目集与证据无变化"是机械可验信号），不依赖推进侧折叠窗口的自然语言记忆——任务越长窗口折叠越早蒸发跨轮细节，而长任务恰是最需要死胡同检测的场景；LLM 裁判在机械信号之上做最终判断，事实来自权威日志、判断交 LLM。
 
 **单会话失控保险丝（裁决）**：需求底线「不允许执行侧无限执行」的机制落点。单个推进会话设 **token 口径**的可配置宽阈值，默认宽到正常任务永不触碰——它是失控保险丝，不是推进机制；触达即以 exitReason `budget-exceeded`（新枚举值）退出 + 收场交付（用户拿到完整进度与卡点，不是静默熔断）。退出分类归位：保险丝是上方「风险退出」类中「成本风险」的机制化落点。选 token 不选 run 次数：token 是用户真正在乎的成本口径，且不与「不设固定最大 run 次数」冲突（后者拒绝的是拿轮数当验收 / 退出机制）。计量数据源 = review 序列所载的 usage 两半快照（被审 run 的 RunRecord usage + 裁判调用 usage，随 review 落盘、沿序列累加即得会话总量，免于回读 transcript，§4.5）。哲学与注意力层「应急地板」同构：正常机制（死胡同检测 / 风险退出）之上的最后保险。owner 级全局预算仍外移宿主层（见下），两层互补不重复。
 
@@ -625,32 +619,13 @@ AdvancementRuntime 第一版能力：
 
 **全局预算（跨模块缺口，记录待决）**：per-conversation 串行与隔离已正确，但 N 个对话并发自动续推没有任何 owner 级预算 / 节流——多个过夜任务可打满 rate limit，并与裁判失败路径共振。该边界不属于本模块（单会话内无从判断全局负载），应挂核心宿主层（调度器 / RuntimeHost 已是全局资源的 owner），与未来其他自动化消费者（scheduler、workflow）共用同一预算面。本文只记录依赖，不在推进侧造局部限流。
 
-**收场交付（裁决）**：`completed` 与 `exited` 不是裸事件名，而是一份收场报告——素材全部躺在 AdvancementStore（逐轮 review 的标准判定、证据、已试的 failureHandling、exitReason），退出/完成时一次 LLM 合成：**标准矩阵**（每条 passCriteria 的最终状态 + 最后证据）+ **已尝试策略** + **卡点与建议下一步**（exited 时）/ **验收证据链**（completed 时）。用户过夜发任务，醒来看到的是"推进了 N 轮、完成了 X、卡在 Y、建议 Z"，不是一行退出原因加 20 轮 transcript 考古作业。合成失败降级为结构化数据直出，不阻塞退出。
+**收场交付（裁决）**：`completed` 与 `exited` 不是裸事件名，而是一份收场报告——素材全部来自 owner 权威状态（逐轮 review 的标准判定、证据、已试的 failureHandling、exitReason），退出/完成时一次 LLM 合成：**标准矩阵**（每条 passCriteria 的最终状态 + 最后证据）+ **已尝试策略** + **卡点与建议下一步**（exited 时）/ **验收证据链**（completed 时）。用户过夜发任务，醒来看到的是"推进了 N 轮、完成了 X、卡在 Y、建议 Z"，不是一行退出原因加 20 轮 transcript 考古作业。合成失败降级为结构化数据直出，不阻塞退出。
 
-### 8. RubricStore 与资产模型
+### 8. Rubric 全局资产与会话快照
 
-Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Skill 相同的资产组织模式，但必须独立实现 Rubric 语义：
+Rubric 是与 Skill / Rule 同级的一等全局资产。推进模块只依赖 `RubricCatalogPort` 的轻量索引和按需正文；锚点 adapter 从 GlobalStatePort 的 rubric asset index 读取身份与 revision，再从 ArtifactStore 取得规范正文。写入时正文先落内容资产，GlobalStatePort 只保存 ArtifactRef、元数据和对象级 revision；目录、RPC 或 owner-services 都不得直接打开设备文件 Store。
 
-```text
-~/.zhixing/rubrics/
-├── index.json
-├── own/<id>/RUBRIC.md
-├── linked/<id>/RUBRIC.md
-└── archived/<id>/RUBRIC.md
-```
-
-这里的“同构”只指资产目录与索引模式相似，不指直接复用 `SkillStore` 代码。`SkillStore` 绑定 `SKILL.md`、frontmatter、mode、pinned、skill source 等技能语义，不能作为 RubricStore 的实现捷径。若后续确实需要复用，应先提取领域无关的 ManagedAssetStore / ManagedDocumentStore 基础设施，再让 SkillStore 与 RubricStore 分别承载各自协议。
-
-`id` 是 Rubric 的稳定资产身份，首次保存时写入 `RUBRIC.md` frontmatter；后续 `title` 只作为可编辑展示名，不再反向改变资产身份。
-
-第一版只要求：
-
-- `listForMatching()`：返回 id / title / description 等轻量索引。
-- `load(id)`：加载全文。
-- `saveOwn(draft)`：保存用户确认后的新 Rubric。
-- `archive(id)`：归档。
-
-匹配只看 Rubric 的 title / description / 场景描述；正文按需加载，保持渐进披露。Rubric 索引只进入推进侧上下文，不进入执行侧 system prompt。
+全局资产身份与会话契约身份分离：库命中快照记录稳定 rubricId/version；新草案快照使用 local-draft snapshotId/contentDigest。全局保存、修订、归档不改变 active 会话内容。匹配只看 title / description / 场景描述，正文按需加载，保持渐进披露；Rubric 索引只进入契约构建上下文，不进入执行侧 system prompt 或裁判验收上下文。
 
 **冷启动（产品缺口，记录待决）**：出厂 RubricStore 为空，意味着用户前 N 个推进任务全部走最重路径（LLM 现写草案 + 阅读 + 确认）——闭环的第一印象由最贵的形态承担。linked 区机制已在，缺的是一批产品预设 Rubric 资产（常见场景：代码开发完成验收、文档审查、需求收敛等）的规划与写作。这属于产品资产投入，不是架构改动；预设内容进 requirement-backlog 立项，不在本文展开。
 
@@ -1161,7 +1136,7 @@ C18 新增的验收项：
 审查重点：
 
 - 生成草案的场景泛化性有专项用例（同场景两个不同任务应命中同一 Rubric）。
-- 确认即沉淀的需求语义保留，沉淀物是场景资产而非任务快照（不变量 17）。
+- 确认即采用、沉淀独立后续；沉淀物是场景资产而非任务快照（不变量 17）。
 - 生成输出不把单次任务细节写死进可复用标准。
 
 #### C16：裁判韧性与恢复自愈
@@ -1190,7 +1165,7 @@ C18 新增的验收项：
 
 内容：
 
-- 收场报告合成（§7 裁决）：completed / exited 时从 AdvancementStore 的结构化 review 序列一次合成标准矩阵 + 已试策略 + 卡点与建议（exited）/ 验收证据链（completed），随事件交付；合成失败降级为结构化数据直出。
+- 收场报告合成（§7 裁决）：completed / exited 时从 owner 权威状态的结构化 review 序列一次合成标准矩阵 + 已试策略 + 卡点与建议（exited）/ 验收证据链（completed），随事件交付；合成失败降级为结构化数据直出。
 - 契约再生（§7 裁决）：标准修正类退出后，新推进会话草案从旧契约预填 + 用户修正生成（复用 `rubricDraftVersion` 修订机制），一次确认重启推进。
 - 死胡同检测机制化（§7 裁决）：跨轮逐条判定（criterionId 锚定）与证据指纹对比消费 store 结构化序列，机械信号之上 LLM 终判。
 - 单会话失控保险丝（§7 裁决）：token 口径可配置宽阈值，触达即系统边界退出 + 收场交付；usage 计量 = review 序列所载两半快照（§4.5 `review.usage.{run,judge}`）沿序列累加，exitReason: `budget-exceeded`（新枚举值，不复用 system-error / capability-gap）。

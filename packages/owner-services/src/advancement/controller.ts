@@ -1,5 +1,4 @@
 import {
-  AdvancementStore,
   RubricContractBuilder,
   ConservativeAdvancementAdmissionStrategy,
   createAdvancementWindowReviewEntry,
@@ -7,10 +6,10 @@ import {
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
   type AdvancementProxyMessage,
+  type AdvancementReviewRunOutcome,
   type AdvancementRunReview,
   type AdvancementSession,
   type AdvancementWindowState,
-  type ConfirmedRubricSnapshot,
   type RunRecordInput,
   type RunRecordRef,
   type RubricContractDraftSnapshot,
@@ -26,11 +25,22 @@ import {
   renderClosureReport,
   sumAdvancementUsage,
 } from "@zhixing/core";
+import type {
+  AdvancementReviewerPort,
+  AuthorityCallContext,
+  ImmediateRootResourceLease,
+  ResourceReservationPort,
+} from "@zhixing/core/contracts";
 import { randomUUID } from "node:crypto";
 import {
   buildAdvancementProxyMessage,
   selectFailureHandling,
 } from "./proxy-content.js";
+import type { AdvancementSessionStore } from "./session-store.js";
+import {
+  AdvancementEvidenceCoordinator,
+  AdvancementEvidenceDeferredError,
+} from "./evidence.js";
 
 export type AdvancementPrepareResult =
   | {
@@ -91,6 +101,20 @@ export interface AdvancementConfirmedTurn {
   readonly session: AdvancementSession;
   readonly originalTurnId: string;
   readonly originalUserTask: UserTurnInput;
+  readonly rubricPublication?: RubricPublicationOutcome;
+}
+
+export type RubricPublicationOutcome =
+  | { readonly kind: "saved"; readonly rubricId: string; readonly revision: number }
+  | { readonly kind: "deferred"; readonly message: string };
+
+export interface RubricPublicationPort {
+  acceptanceOutcome(): RubricPublicationOutcome;
+  publish(input: {
+    readonly conversationId: string;
+    readonly draft: RubricContractDraftSnapshot;
+    readonly persistence: RubricDraftPersistenceChoice;
+  }): Promise<RubricPublicationOutcome>;
 }
 
 export interface AdvancementRevisedDraft {
@@ -112,10 +136,17 @@ export type AdvancementCancelResult =
     };
 
 export interface AdvancementControllerOptions {
-  readonly store?: AdvancementStore;
+  /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
+  readonly store: AdvancementSessionStore;
   readonly contractBuilder?: RubricContractBuilder;
   readonly admissionStrategy?: AdvancementAdmissionStrategy;
-  readonly reviewer?: AdvancementRunReviewer;
+  readonly reviewer?: AdvancementReviewerPort;
+  /** 准入 / 裁判 / 收场的 control 资源治理端口——装配 reviewer 时必需。 */
+  readonly resources?: ResourceReservationPort;
+  /** owner 侧耐久取证协调器；未装配时只允许无独立取证的既有测试/兼容路径。 */
+  readonly evidence?: AdvancementEvidenceCoordinator;
+  /** Optional global-library publication; active session adoption never waits on it. */
+  readonly rubricPublication?: RubricPublicationPort;
   /**
    * 最近会话投影提供者——给准入判断喂执行侧窗口尾部的轻量文本，
    * 让「继续把它弄完」这类上下文依赖输入分类正确。失败按无投影处理。
@@ -137,39 +168,13 @@ export interface AdvancementControllerOptions {
   readonly proxyIdGenerator?: () => string;
 }
 
-export interface AdvancementReviewRunInput {
-  readonly sessionId: string;
-  readonly originalUserTask: UserTurnInput;
-  readonly rubric: ConfirmedRubricSnapshot;
-  readonly runIndex: number;
-  readonly runRecord: RunRecordInput;
-  readonly runRecordRef?: RunRecordRef;
-  readonly priorReviews?: readonly AdvancementRunReview[];
-  readonly advancementWindow?: AdvancementWindowState;
-  readonly abortSignal?: AbortSignal;
-}
+export type {
+  AdvancementReviewRunInput,
+  AdvancementReviewRunOutcome,
+} from "@zhixing/core";
 
-/**
- * 验收运行体的结果联合——结论与挂起分流：
- * - reviewed：裁判有结论（含 fail-closed 终局），落盘驱动闭环。
- * - deferred：本轮没产生结论（基础设施 transient 失败或调用被中止），
- *   不落盘、不前进已审进度，被审 run 保持「已接受未审」等补审收敛。
- */
-export type AdvancementReviewRunOutcome =
-  | {
-      readonly kind: "reviewed";
-      readonly review: AdvancementRunReview;
-      readonly advancementWindow?: AdvancementWindowState;
-    }
-  | {
-      readonly kind: "deferred";
-      readonly cause: "infrastructure" | "aborted";
-      readonly reason: string;
-    };
-
-export interface AdvancementRunReviewer {
-  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementReviewRunOutcome>;
-}
+/** 推进侧裁判端口——与 contracts AdvancementReviewerPort 同一抽象。 */
+export type AdvancementRunReviewer = AdvancementReviewerPort;
 
 /**
  * 收场报告合成执行体——可替换 strategy（与准入 / 草案生成同构），默认
@@ -223,10 +228,13 @@ export type AdvancementTurnReviewResult =
     };
 
 export class AdvancementController {
-  private readonly store: AdvancementStore;
+  private readonly store: AdvancementSessionStore;
   private readonly contractBuilder: RubricContractBuilder;
   private readonly admissionStrategy: AdvancementAdmissionStrategy;
   private readonly reviewer?: AdvancementRunReviewer;
+  private readonly resources?: ResourceReservationPort;
+  private readonly evidence?: AdvancementEvidenceCoordinator;
+  private readonly rubricPublication?: RubricPublicationPort;
   private readonly recentContextProvider?: (
     conversationId: string,
   ) => Promise<string | undefined>;
@@ -237,12 +245,15 @@ export class AdvancementController {
   private readonly reviewIdGenerator: () => string;
   private readonly proxyIdGenerator: () => string;
 
-  constructor(options: AdvancementControllerOptions = {}) {
-    this.store = options.store ?? new AdvancementStore();
+  constructor(options: AdvancementControllerOptions) {
+    this.store = options.store;
     this.contractBuilder = options.contractBuilder ?? new RubricContractBuilder();
     this.admissionStrategy =
       options.admissionStrategy ?? new ConservativeAdvancementAdmissionStrategy();
     this.reviewer = options.reviewer;
+    this.resources = options.resources;
+    this.evidence = options.evidence;
+    this.rubricPublication = options.rubricPublication;
     this.recentContextProvider = options.recentContextProvider;
     this.onAdmissionTiming = options.onAdmissionTiming;
     this.closureSynthesizer = options.closureSynthesizer;
@@ -547,19 +558,32 @@ export class AdvancementController {
         "推进准则草案已被修订，请查看最新内容后再确认。",
       );
     }
-    const confirmedRubric = await this.contractBuilder.confirmDraft(draft, {
-      persistence: input.persistence,
-    });
+    const confirmedRubric = await this.contractBuilder.confirmDraft(draft);
     const confirmed = await this.store.confirmRubric(
       input.conversationId,
       input.advancementSessionId,
       confirmedRubric,
       confirmedRubric.confirmedAt,
     );
+    let rubricPublication: RubricPublicationOutcome | undefined;
+    if (draft.source === "generated" && input.persistence) {
+      rubricPublication = this.rubricPublication?.acceptanceOutcome() ?? {
+        kind: "deferred",
+        message: "准则已用于本任务，连接值班设备后可保存到准则库。",
+      };
+      if (this.rubricPublication) {
+        void this.rubricPublication.publish({
+          conversationId: input.conversationId,
+          draft,
+          persistence: input.persistence,
+        }).catch(() => undefined);
+      }
+    }
     return {
       session: confirmed,
       originalTurnId: draft.originalTurnId,
       originalUserTask: confirmed.originalUserTask,
+      ...(rubricPublication ? { rubricPublication } : {}),
     };
   }
 
@@ -772,6 +796,7 @@ export class AdvancementController {
 
   async afterTurnCommitted(input: {
     readonly conversationId: string;
+    readonly runId?: string;
     readonly runIndex: number;
     readonly runRecord: RunRecordInput;
     readonly runRecordRef?: RunRecordRef;
@@ -805,6 +830,13 @@ export class AdvancementController {
       );
       return await this.persistReviewOutcome(session, review);
     }
+    if (!this.resources) {
+      const review = this.systemExitReview(
+        input,
+        "推进侧控制资源治理端口未装配，无法继续可靠验收。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
 
     // 失控保险丝（审前计量）：沿 review 序列累加的两半 usage 快照触达
     // 阈值即系统边界退出 + 收场交付，不再消耗裁判调用。
@@ -819,26 +851,91 @@ export class AdvancementController {
     }
 
     let outcome: AdvancementReviewRunOutcome;
+    const pendingEvidence = input.runId
+      ? session.evidence?.pending.find(
+          (pending) => pending.request.runId === input.runId,
+        )
+      : undefined;
+    const reviewId = pendingEvidence?.reviewId ?? this.reviewIdGenerator();
+    const reviewCtx: AuthorityCallContext = {
+      principal: { kind: "host", component: "advancement-review" },
+      requestId: `advancement-review:${reviewId}`,
+      deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+    };
+    let lease: ImmediateRootResourceLease | undefined;
+    let evidenceRequestId: string | undefined;
     try {
-      outcome = await this.reviewer.reviewRun({
-        sessionId: session.id,
-        originalUserTask: session.originalUserTask,
-        rubric,
-        runIndex: input.runIndex,
-        runRecord: input.runRecord,
-        runRecordRef: input.runRecordRef,
-        priorReviews: session.runs,
-        advancementWindow: session.advancementWindow,
-        abortSignal: input.abortSignal,
-      });
+      const evidenceTarget = this.evidence && input.runId
+        ? await this.evidence.resolveTarget(input.conversationId, input.runId)
+        : undefined;
+      lease = await this.resources.acquireRoot(
+        { kind: "control", id: reviewId, attempt: 1 },
+        { maxCalls: 8, maxTokens: 300_000 },
+        { admissionClass: "advancement", entry: "advancement-control" },
+        reviewCtx,
+        evidenceTarget ? { executorId: evidenceTarget.executorId } : undefined,
+        evidenceTarget
+          ? {
+              kind: "conversation",
+              conversationId: input.conversationId,
+              ownerEpoch: evidenceTarget.ownerEpoch,
+            }
+          : undefined,
+      );
+      const collected = this.evidence && input.runId
+        ? await this.evidence.collect({
+            session,
+            runId: input.runId,
+            reviewId,
+            runRecord: input.runRecord,
+            rootLease: lease,
+            target: evidenceTarget,
+            abort: input.abortSignal ?? new AbortController().signal,
+          })
+        : undefined;
+      evidenceRequestId = collected?.requestId;
+      outcome = await this.reviewer.review(
+        {
+          sessionId: session.id,
+          originalUserTask: session.originalUserTask,
+          rubric,
+          runIndex: input.runIndex,
+          runRecord: input.runRecord,
+          runRecordRef: input.runRecordRef,
+          priorReviews: session.runs,
+          advancementWindow: session.advancementWindow,
+          ...(collected
+            ? { canonicalEvidence: collected.canonicalEvidence }
+            : {}),
+        },
+        lease,
+        input.abortSignal ?? new AbortController().signal,
+      );
     } catch (err) {
       // 运行体按契约不 throw；意外 throw 视作基础设施抖动挂起，
       // 交补审触发点收敛，不误落终局杀掉长期会话。
       outcome = {
         kind: "deferred",
-        cause: "infrastructure",
+        cause:
+          err instanceof AdvancementEvidenceDeferredError ||
+          (err instanceof Error && err.name === "AbortError")
+            ? "aborted"
+            : "infrastructure",
         reason: `推进侧验收运行失败：${errorMessage(err)}`,
       };
+    } finally {
+      if (lease) {
+        try {
+          await this.resources.settle(lease, reviewCtx);
+        } catch {
+          // 终结失败由治理侧过期回收兜底，不吞裁判结论。
+        }
+        try {
+          await this.resources.release(lease, reviewCtx);
+        } catch {
+          // 同上。
+        }
+      }
     }
     if (outcome.kind === "deferred") {
       return {
@@ -856,6 +953,7 @@ export class AdvancementController {
       session,
       outcome.review,
       outcome.advancementWindow,
+      evidenceRequestId,
     );
   }
 
@@ -887,6 +985,7 @@ export class AdvancementController {
     session: AdvancementSession,
     review: AdvancementRunReview,
     advancementWindow?: AdvancementWindowState,
+    evidenceRequestId?: string,
   ): Promise<AdvancementTurnReviewResult> {
     if (review.decision === "passed") {
       const exit: AdvancementExit = {
@@ -901,6 +1000,7 @@ export class AdvancementController {
         { type: "completed", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
         advancementWindow,
+        evidenceRequestId,
       );
       return {
         kind: "completed",
@@ -923,6 +1023,7 @@ export class AdvancementController {
         { type: "exited", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
         advancementWindow,
+        evidenceRequestId,
       );
       return {
         kind: "exited",
@@ -957,6 +1058,7 @@ export class AdvancementController {
         { type: "exited", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
         syncAdvancementWindowReview(advancementWindow, exitReview),
+        evidenceRequestId,
       );
       return {
         kind: "exited",
@@ -967,13 +1069,19 @@ export class AdvancementController {
       };
     }
 
-    return await this.persistProxyOutcome(session, review, advancementWindow);
+    return await this.persistProxyOutcome(
+      session,
+      review,
+      advancementWindow,
+      evidenceRequestId,
+    );
   }
 
   private async persistProxyOutcome(
     session: AdvancementSession,
     review: AdvancementRunReview,
     advancementWindow?: AdvancementWindowState,
+    evidenceRequestId?: string,
   ): Promise<AdvancementTurnReviewResult> {
     const rubric = session.confirmedRubric;
     const handling = rubric
@@ -999,6 +1107,7 @@ export class AdvancementController {
         { type: "exited", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
         syncAdvancementWindowReview(advancementWindow, exitReview),
+        evidenceRequestId,
       );
       return {
         kind: "exited",
@@ -1030,6 +1139,7 @@ export class AdvancementController {
       proxyMessage,
       review.reviewedAt,
       syncAdvancementWindowReview(advancementWindow, reviewWithProxy),
+      evidenceRequestId,
     );
     return {
       kind: "proxy-enqueued",

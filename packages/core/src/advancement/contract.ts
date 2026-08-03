@@ -3,7 +3,6 @@ import {
   extractUserTurnInputText,
   type UserTurnInput,
 } from "../types/user-input.js";
-import { RubricStore } from "../rubrics/store.js";
 import type {
   RubricAsset,
   RubricDraft,
@@ -20,10 +19,10 @@ import type {
   RubricCandidateSnapshot,
   RubricContractContentSnapshot,
   RubricContractDraftSnapshot,
-  RubricDraftPersistenceChoice,
 } from "./types.js";
 import { EMPTY_EVIDENCE_CAPABILITIES, canBeRequired } from "./types.js";
 import { parseJsonObject } from "./json.js";
+import { protocolDigest } from "../protocol/canonical.js";
 
 const RUBRIC_MATCH_SCORE_THRESHOLD = 0.3;
 export const RUBRIC_NEARBY_SCORE_THRESHOLD = 0.2;
@@ -68,8 +67,19 @@ export interface RubricDraftRevisionStrategy {
 
 export type RubricContractComplete = (prompt: string) => Promise<string>;
 
+/** Read-only Rubric library view injected by the current authority domain. */
+export interface RubricCatalogPort {
+  listForMatching(): Promise<readonly RubricIndexEntry[]>;
+  load(id: string): Promise<RubricAsset>;
+}
+
+const EMPTY_RUBRIC_CATALOG: RubricCatalogPort = {
+  listForMatching: () => Promise.resolve([]),
+  load: (id) => Promise.reject(new Error(`Rubric "${id}" is unavailable`)),
+};
+
 export interface RubricContractBuilderOptions {
-  readonly rubricStore?: RubricStore;
+  readonly rubricCatalog?: RubricCatalogPort;
   readonly generationStrategy?: RubricDraftGenerationStrategy;
   readonly revisionStrategy?: RubricDraftRevisionStrategy;
   /**
@@ -81,14 +91,14 @@ export interface RubricContractBuilderOptions {
 }
 
 export class RubricContractBuilder {
-  private readonly rubricStore: RubricStore;
+  private readonly rubricCatalog: RubricCatalogPort;
   private readonly generationStrategy: RubricDraftGenerationStrategy;
   private readonly revisionStrategy: RubricDraftRevisionStrategy;
   private readonly evidenceCapabilities: EvidenceCapabilitySet;
   private readonly now: () => string;
 
   constructor(options: RubricContractBuilderOptions = {}) {
-    this.rubricStore = options.rubricStore ?? new RubricStore();
+    this.rubricCatalog = options.rubricCatalog ?? EMPTY_RUBRIC_CATALOG;
     this.generationStrategy =
       options.generationStrategy ?? new UnavailableRubricDraftGenerationStrategy();
     this.revisionStrategy =
@@ -102,12 +112,12 @@ export class RubricContractBuilder {
     input: BuildRubricContractDraftInput,
   ): Promise<RubricContractDraftSnapshot> {
     const taskText = extractUserTurnInputText(input.originalUserTask).trim();
-    const candidates = await this.rubricStore.listForMatching();
+    const candidates = await this.rubricCatalog.listForMatching();
     const ranked = rankRubrics(taskText, candidates);
     const matched = ranked[0];
 
     if (matched && matched.score >= RUBRIC_MATCH_SCORE_THRESHOLD) {
-      const asset = await this.rubricStore.load(matched.rubric.id);
+      const asset = await this.rubricCatalog.load(matched.rubric.id);
       return this.fromRubricAsset(input, asset, ranked);
     }
 
@@ -139,17 +149,19 @@ export class RubricContractBuilder {
 
   async confirmDraft(
     draft: RubricContractDraftSnapshot,
-    opts: { readonly persistence?: RubricDraftPersistenceChoice } = {},
   ): Promise<ConfirmedRubricSnapshot> {
     if (draft.source === "matched") {
       const rubricId = draft.candidateRubricIds[0];
       if (!rubricId) {
         throw new Error("RubricContractBuilder: matched draft 缺少 rubric id");
       }
-      const asset = await this.rubricStore.load(rubricId);
+      const asset = await this.rubricCatalog.load(rubricId);
       return {
-        rubricId: asset.id,
-        rubricVersion: asset.updatedAt,
+        source: {
+          kind: "library",
+          rubricId: asset.id,
+          rubricVersion: asset.updatedAt,
+        },
         title: asset.title,
         description: asset.description,
         content: sealContractContent(draft.content),
@@ -158,40 +170,22 @@ export class RubricContractBuilder {
       };
     }
 
-    const saved =
-      opts.persistence?.kind === "update-existing"
-        ? await this.updateExistingRubric(draft, opts.persistence.rubricId)
-        : await this.rubricStore.saveOwn(toRubricDraft(draft));
     return {
-      rubricId: saved.id,
-      rubricVersion: saved.updatedAt,
-      title: saved.title,
-      description: saved.description,
+      source: {
+        kind: "local-draft",
+        snapshotId: draft.draftId,
+        contentDigest: protocolDigest("ConfirmedRubricContent", 1, {
+          title: draft.title,
+          description: draft.description,
+          content: sealContractContent(draft.content),
+        }),
+      },
+      title: draft.title,
+      description: draft.description,
       content: sealContractContent(draft.content),
       confirmedAt: this.now(),
       confirmedBy: "user",
     };
-  }
-
-  private async updateExistingRubric(
-    draft: RubricContractDraftSnapshot,
-    rubricId: string,
-  ) {
-    const candidate = draft.candidateRubrics?.find((item) => item.id === rubricId);
-    if (!candidate || !draft.candidateRubricIds.includes(rubricId)) {
-      throw new Error(
-        `RubricContractBuilder: candidate rubric "${rubricId}" 不在草案候选中`,
-      );
-    }
-    if (
-      typeof candidate.matchScore !== "number" ||
-      candidate.matchScore < RUBRIC_NEARBY_SCORE_THRESHOLD
-    ) {
-      throw new Error(
-        `RubricContractBuilder: candidate rubric "${rubricId}" 未达到近邻修订阈值`,
-      );
-    }
-    return await this.rubricStore.updateOwn(rubricId, toRubricDraft(draft, rubricId));
   }
 
   private fromRubricAsset(
@@ -716,7 +710,7 @@ function toDraftCandidate(item: RankedRubric): RubricDraftCandidate {
   };
 }
 
-function toRubricDraft(
+export function projectRubricContractDraft(
   draft: RubricContractDraftSnapshot,
   id?: string,
 ): RubricDraft {

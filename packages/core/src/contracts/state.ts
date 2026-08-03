@@ -56,7 +56,12 @@ export type ContentAssetRef = ArtifactRef & {
 
 export type SessionControlMutation =
   | { kind: "task-list-op"; op: TaskListOp }
-  | { kind: "advancement-event"; event: AdvancementControlEvent }
+  | {
+      kind: "advancement-event";
+      // 一次原子推进写入：单个事件或复合 review/proxy/terminal 事件组按序应用，
+      // 同一提交内全部落盘，杜绝半组事件成为权威事实。
+      events: readonly AdvancementControlEvent[];
+    }
   | {
       kind: "session-meta";
       patch: { name?: string; viewLayerState?: string };

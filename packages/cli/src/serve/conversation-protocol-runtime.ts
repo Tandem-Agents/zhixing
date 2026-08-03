@@ -78,6 +78,7 @@ import {
   type DurableConversationTurnExecutor,
   type DurableConversationTurnInput,
   type InProcessDispatchContextFactory,
+  AnchorSessionStateAdapter,
 } from "@zhixing/owner-kernel";
 import { runTurnWithCommit } from "@zhixing/owner-kernel/run-turn";
 import type {
@@ -89,6 +90,7 @@ import type {
   ConversationRuntimeBinding,
 } from "../setup-delivery.js";
 import type { ExecutorCapabilitySnapshot } from "@zhixing/core/protocol";
+import type { SessionStatePort } from "@zhixing/core/contracts";
 import {
   DurableConversationInteractionObserver,
   type DurableInteractionBinding,
@@ -210,6 +212,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #authority: AuthorityRuntimeStack;
   readonly #manager: () => ConversationManager;
   readonly #clock: () => string;
+  #sessionState: SessionStatePort | undefined;
   readonly #ledger: ConversationAssignmentLedger | undefined;
   readonly #InProcessAssignmentSubmission:
     | typeof InProcessAssignmentSubmission
@@ -2030,6 +2033,19 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return { notices: notices.flat(), next };
   }
 
+  /**
+   * 会话状态端口——advancement 等会话域消费者经它读写 owner 权威日志；
+   * 惰性创建，journal 访问走缓存实例（查询侧不再每次重建）。
+   */
+  get sessionState(): SessionStatePort {
+    if (!this.#sessionState) {
+      this.#sessionState = new AnchorSessionStateAdapter({
+        journalFor: (conversationId) => this.#journal(conversationId),
+      });
+    }
+    return this.#sessionState;
+  }
+
   #journal(conversationId: string): ConversationRunJournal {
     const existing = this.#journals.get(conversationId);
     if (existing) return existing;
@@ -2624,6 +2640,22 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       envelope.assignmentId,
       structuredClone(envelope.work.ingress),
     );
+  }
+
+  /** 推进取证目标只由 accepted run 的冻结 manifest 与已验签能力目录决定。 */
+  async advancementEvidenceTarget(conversationId: string, runId: string) {
+    const dispatch = await this.#journal(conversationId).advancementEvidenceDispatch(runId);
+    if (!dispatch) return undefined;
+    const descriptor = this.#authority.executorCapabilities.snapshotFor(
+      dispatch.envelope.executorId,
+    )?.descriptor;
+    if (!descriptor) return undefined;
+    return {
+      ownerEpoch: dispatch.envelope.work.ownerEpoch,
+      executorId: dispatch.envelope.executorId,
+      workspace: dispatch.envelope.manifest.environment.workspace,
+      descriptor,
+    };
   }
 
   #forgetAssignment(assignmentId: string): void {

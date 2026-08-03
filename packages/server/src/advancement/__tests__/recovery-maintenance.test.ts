@@ -20,6 +20,44 @@ import {
   type AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
 import type { SessionBroadcast } from "@zhixing/rpc";
+import type {
+  ImmediateRootResourceLease,
+  ResourceReservationPort,
+} from "@zhixing/core/contracts";
+
+function fakeResources(): ResourceReservationPort {
+  const leaseFor = (id: string): ImmediateRootResourceLease => ({
+    v: 1,
+    reservationId: `rsv-${id}`,
+    admissionClass: "advancement",
+    workload: { kind: "control", id, attempt: 1 },
+    scopeBinding: { kind: "control", subject: id },
+    audience: {},
+    budget: { maxCalls: 8 },
+    domain: { kind: "anchor", anchorEpoch: 1 },
+    issuedAt: "2026-01-01T00:00:00.000Z",
+    expiry: "2026-01-01T01:00:00.000Z",
+    digest: "sha256:" + "0".repeat(64),
+    signature: { alg: "test", keyId: "test", sig: "sha256:" + "0".repeat(64) },
+  });
+  return {
+    enqueueRoot: async () => {},
+    prepareAssignmentRoot: async () => {
+      throw new Error("unused");
+    },
+    prepareSystemJobRoot: async () => {
+      throw new Error("unused");
+    },
+    acquireRoot: async (workload) => leaseFor(String(workload.id)),
+    acquireChild: async () => {
+      throw new Error("unused");
+    },
+    reserveUsage: async () => {},
+    consume: async () => {},
+    settle: async () => {},
+    release: async () => {},
+  };
+}
 import {
   createAdvancementEventSink,
   createAdvancementProxyTurnPort,
@@ -80,8 +118,11 @@ function draft(): RubricContractDraftSnapshot {
 function confirmed(): ConfirmedRubricSnapshot {
   const content = draft().content;
   return {
-    rubricId: "rubric-1",
-    rubricVersion: "v1",
+    source: {
+      kind: "library",
+      rubricId: "rubric-1",
+      rubricVersion: "v1",
+    },
     title: "确认版测试推进准则",
     description: "用户确认后的准则。",
     content: {
@@ -509,7 +550,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const dir = directory(true, [acceptedRun]);
     const events: Array<{ event?: string }> = [];
     const reviewer = {
-      reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+      review: vi.fn(async (input: { runIndex: number }) => ({
         kind: "reviewed" as const,
         review: {
           id: "review-pass",
@@ -532,7 +573,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       })),
     };
     const recovery = createAdvancementRecoveryMaintenance({
-      advancement: new AdvancementController({ store, reviewer }),
+      advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: mgr as never,
       directory: dir as never,
       sessionBroadcast: () => (_conversationId, _method, payload) => {
@@ -548,11 +589,13 @@ describe("AdvancementRecoveryMaintenance", () => {
       runRecordRef: { shardId: "000001", runIndex: 0 },
     });
     expect(mgr.admitTurn).not.toHaveBeenCalled();
-    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+    expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({
         runIndex: 0,
         priorReviews: [],
       }),
+      expect.anything(),
+      expect.anything(),
     );
     await expect(store.loadActiveSession("conv-1")).resolves.toBeNull();
     expect(events.map((event) => event.event)).toEqual([
@@ -586,7 +629,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       },
     ];
     const reviewer = {
-      reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+      review: vi.fn(async (input: { runIndex: number }) => ({
         kind: "reviewed" as const,
         review: {
           id: `review-${input.runIndex}`,
@@ -619,7 +662,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const recovery = createAdvancementRecoveryMaintenance({
       advancement: new AdvancementController({
         store,
-        reviewer,
+        resources: fakeResources(),        reviewer,
         proxyIdGenerator: () => "proxy-2",
       }),
       manager: mgr as never,
@@ -636,17 +679,21 @@ describe("AdvancementRecoveryMaintenance", () => {
       advancementSessionId: "adv-1",
       runRecordRef: { shardId: "000001", runIndex: 1 },
     });
-    expect(reviewer.reviewRun).toHaveBeenCalledTimes(2);
-    expect(reviewer.reviewRun).toHaveBeenNthCalledWith(
+    expect(reviewer.review).toHaveBeenCalledTimes(2);
+    expect(reviewer.review).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ runIndex: 0, priorReviews: [] }),
+      expect.anything(),
+      expect.anything(),
     );
-    expect(reviewer.reviewRun).toHaveBeenNthCalledWith(
+    expect(reviewer.review).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
         runIndex: 1,
         priorReviews: [expect.objectContaining({ id: "review-0" })],
       }),
+      expect.anything(),
+      expect.anything(),
     );
     expect(mgr.admitTurn).not.toHaveBeenCalled();
     await expect(store.loadActiveSession("conv-1")).resolves.toBeNull();
@@ -679,7 +726,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const dir = directory(true, [proxyRun]);
     const events: Array<{ event?: string }> = [];
     const reviewer = {
-      reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+      review: vi.fn(async (input: { runIndex: number }) => ({
         kind: "reviewed" as const,
         review: {
           id: "review-pass",
@@ -702,7 +749,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       })),
     };
     const recovery = createAdvancementRecoveryMaintenance({
-      advancement: new AdvancementController({ store, reviewer }),
+      advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: mgr as never,
       directory: dir as never,
       sessionBroadcast: () => (_conversationId, _method, payload) => {
@@ -719,11 +766,13 @@ describe("AdvancementRecoveryMaintenance", () => {
       runRecordRef: { shardId: "000001", runIndex: 1 },
     });
     expect(mgr.admitTurn).not.toHaveBeenCalled();
-    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+    expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({
         runIndex: 1,
         priorReviews: [expect.objectContaining({ id: "review-1" })],
       }),
+      expect.anything(),
+      expect.anything(),
     );
     await expect(store.loadActiveSession("conv-1")).resolves.toBeNull();
     expect(events.map((event) => event.event)).toEqual([
@@ -757,7 +806,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       },
     };
     const reviewer = {
-      reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+      review: vi.fn(async (input: { runIndex: number }) => ({
         kind: "reviewed" as const,
         review: {
           id: "review-pass",
@@ -780,7 +829,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       })),
     };
     const recovery = createAdvancementRecoveryMaintenance({
-      advancement: new AdvancementController({ store, reviewer }),
+      advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: manager() as never,
       directory: directory(true, [proxyRun]) as never,
     });
@@ -793,11 +842,13 @@ describe("AdvancementRecoveryMaintenance", () => {
       proxyMessageId: "proxy-1",
       runRecordRef: { shardId: "000001", runIndex: 1 },
     });
-    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+    expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({
         runIndex: 1,
         priorReviews: [expect.objectContaining({ id: "review-1" })],
       }),
+      expect.anything(),
+      expect.anything(),
     );
     await expect(store.loadActiveSession("conv-1")).resolves.toBeNull();
   });
@@ -880,7 +931,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       source: "interactive",
     };
     const reviewer = {
-      reviewRun: vi.fn(async () => ({
+      review: vi.fn(async () => ({
         kind: "deferred" as const,
         cause: "infrastructure" as const,
         reason: "rate limited",
@@ -888,7 +939,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const events: Array<{ event?: string }> = [];
     const recovery = createAdvancementRecoveryMaintenance({
-      advancement: new AdvancementController({ store, reviewer }),
+      advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: manager() as never,
       directory: directory(true, [run]) as never,
       sessionBroadcast: () => (_conversationId, _method, payload) => {
@@ -905,7 +956,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       cause: "infrastructure",
       message: "rate limited",
     });
-    expect(reviewer.reviewRun).toHaveBeenCalledTimes(1);
+    expect(reviewer.review).toHaveBeenCalledTimes(1);
     const session = await store.loadActiveSession("conv-1");
     expect(session?.runs).toHaveLength(0);
     expect(events.map((event) => event.event)).toEqual([
@@ -926,7 +977,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       source: "interactive",
     }));
     const reviewer = {
-      reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+      review: vi.fn(async (input: { runIndex: number }) => ({
         kind: "reviewed" as const,
         review: {
           id: `review-${input.runIndex}`,
@@ -952,7 +1003,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const recovery = createAdvancementRecoveryMaintenance({
       advancement: new AdvancementController({
         store,
-        reviewer,
+        resources: fakeResources(),        reviewer,
         proxyIdGenerator: () => "proxy-catchup",
       }),
       manager: manager() as never,
@@ -963,9 +1014,11 @@ describe("AdvancementRecoveryMaintenance", () => {
       beforeRunIndex: 1,
     });
 
-    expect(reviewer.reviewRun).toHaveBeenCalledTimes(1);
-    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+    expect(reviewer.review).toHaveBeenCalledTimes(1);
+    expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({ runIndex: 0 }),
+      expect.anything(),
+      expect.anything(),
     );
     expect(result).toMatchObject({
       status: "scheduled",

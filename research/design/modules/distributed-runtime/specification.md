@@ -1017,8 +1017,9 @@ interface ControlCompletionPort {
     Promise<{ ok: true; text: string; toolCall?: { name: string; input: object }; usage: { inputTokens: number; outputTokens: number } }
            | { ok: false; error: AuthorityError }>;
 }
-interface AdvancementReviewerPort {      // 输入输出沿 advancement 模块 reviewRun 契约（符号引用）
-  review(input: AdvancementSnapshot, lease: ResourceLease, abort: AbortSignal): Promise<AdvancementControlEvent[]>;
+interface AdvancementReviewerPort {      // owner 只传完整领域输入；reviewer 不直接写权威状态
+  review(input: AdvancementReviewRunInput, lease: ResourceLease, abort: AbortSignal):
+    Promise<AdvancementReviewRunOutcome>;
 }
 ```
 

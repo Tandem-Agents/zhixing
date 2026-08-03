@@ -11,6 +11,44 @@ import type {
   RunRecordInput,
 } from "@zhixing/core";
 import { AdvancementController } from "@zhixing/owner-services";
+import type {
+  ImmediateRootResourceLease,
+  ResourceReservationPort,
+} from "@zhixing/core/contracts";
+
+function fakeResources(): ResourceReservationPort {
+  const leaseFor = (id: string): ImmediateRootResourceLease => ({
+    v: 1,
+    reservationId: `rsv-${id}`,
+    admissionClass: "advancement",
+    workload: { kind: "control", id, attempt: 1 },
+    scopeBinding: { kind: "control", subject: id },
+    audience: {},
+    budget: { maxCalls: 8 },
+    domain: { kind: "anchor", anchorEpoch: 1 },
+    issuedAt: "2026-01-01T00:00:00.000Z",
+    expiry: "2026-01-01T01:00:00.000Z",
+    digest: "sha256:" + "0".repeat(64),
+    signature: { alg: "test", keyId: "test", sig: "sha256:" + "0".repeat(64) },
+  });
+  return {
+    enqueueRoot: async () => {},
+    prepareAssignmentRoot: async () => {
+      throw new Error("unused");
+    },
+    prepareSystemJobRoot: async () => {
+      throw new Error("unused");
+    },
+    acquireRoot: async (workload) => leaseFor(String(workload.id)),
+    acquireChild: async () => {
+      throw new Error("unused");
+    },
+    reserveUsage: async () => {},
+    consume: async () => {},
+    settle: async () => {},
+    release: async () => {},
+  };
+}
 
 function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };
@@ -49,8 +87,11 @@ function draft(): RubricContractDraftSnapshot {
 function confirmed(): ConfirmedRubricSnapshot {
   const content = draft().content;
   return {
-    rubricId: "rubric-code-review",
-    rubricVersion: "v1",
+    source: {
+      kind: "library",
+      rubricId: "rubric-code-review",
+      rubricVersion: "v1",
+    },
     title: "代码审查推进准则",
     description: "用于判断开发任务是否完成",
     content: {
@@ -194,11 +235,11 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const store = await makeStore();
     await makeActive(store);
     const reviewer = {
-      reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
+      review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
     };
     const controller = new AdvancementController({
       store,
-      reviewer,
+      resources: fakeResources(),      reviewer,
       proxyIdGenerator: () => "proxy-1",
     });
 
@@ -210,12 +251,14 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
 
     expect(result.kind).toBe("proxy-enqueued");
-    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+    expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: "session-1",
         runIndex: 0,
         priorReviews: [],
       }),
+      expect.anything(),
+      expect.anything(),
     );
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("active");
@@ -246,7 +289,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     );
     const nextWindow = windowState(2, "review-next");
     const reviewer = {
-      reviewRun: vi.fn(async () => ({
+      review: vi.fn(async () => ({
         kind: "reviewed" as const,
         review: review({
           id: "review-next",
@@ -258,7 +301,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     };
     const controller = new AdvancementController({
       store,
-      reviewer,
+      resources: fakeResources(),      reviewer,
       proxyIdGenerator: () => "proxy-1",
     });
 
@@ -269,11 +312,13 @@ describe("AdvancementController.afterTurnCommitted", () => {
       runRecordRef: { shardId: "000001", runIndex: 1 },
     });
 
-    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+    expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({
         priorReviews: [expect.objectContaining({ id: "review-previous" })],
         advancementWindow: previousWindow,
       }),
+      expect.anything(),
+      expect.anything(),
     );
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.advancementWindow?.entries[0]).toMatchObject({
@@ -292,8 +337,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
     await makeActive(store);
     const controller = new AdvancementController({
       store,
-      reviewer: {
-        reviewRun: vi.fn(async () => ({
+      resources: fakeResources(),      reviewer: {
+        review: vi.fn(async () => ({
           kind: "reviewed" as const,
           review: review({
             decision: "passed",
@@ -333,8 +378,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
     const controller = new AdvancementController({
       store,
-      reviewer: {
-        reviewRun: vi.fn(async () =>
+      resources: fakeResources(),      reviewer: {
+        review: vi.fn(async () =>
           ({
             kind: "reviewed" as const,
             review: review({
@@ -391,10 +436,10 @@ describe("AdvancementController.afterTurnCommitted", () => {
       attribution: review().attribution,
       createdAt: "2026-01-01T00:02:30.000Z",
     });
-    const reviewer = { reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
+    const reviewer = { review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
     const controller = new AdvancementController({
       store,
-      reviewer,
+      resources: fakeResources(),      reviewer,
       now: () => "2026-01-01T00:04:00.000Z",
       reviewIdGenerator: () => "review-system-error",
     });
@@ -410,7 +455,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
 
     expect(result.kind).toBe("exited");
-    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+    expect(reviewer.review).not.toHaveBeenCalled();
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("exited");
     expect(session?.exit?.reason).toBe("system-error");
@@ -421,8 +466,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
     await makeActive(store);
     const controller = new AdvancementController({
       store,
-      reviewer: {
-        reviewRun: vi.fn(async () =>
+      resources: fakeResources(),      reviewer: {
+        review: vi.fn(async () =>
           ({
             kind: "reviewed" as const,
             review: review({
@@ -506,7 +551,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
 
   it("没有 active session 时跳过且不调用 reviewer", async () => {
     const store = await makeStore();
-    const reviewer = { reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
+    const reviewer = { review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
     const controller = new AdvancementController({ store, reviewer });
 
     const result = await controller.afterTurnCommitted({
@@ -516,7 +561,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
 
     expect(result).toEqual({ kind: "skipped", reason: "no-active-session" });
-    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+    expect(reviewer.review).not.toHaveBeenCalled();
   });
 
   it("累计 usage 触达保险丝阈值时审前退出为 budget-exceeded 并交付收场", async () => {
@@ -534,11 +579,11 @@ describe("AdvancementController.afterTurnCommitted", () => {
       "2026-01-01T00:03:00.000Z",
     );
     const reviewer = {
-      reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
+      review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
     };
     const controller = new AdvancementController({
       store,
-      reviewer,
+      resources: fakeResources(),      reviewer,
       sessionTokenBudget: 1000,
       now: () => "2026-01-01T00:04:00.000Z",
     });
@@ -555,7 +600,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(result.exit.reason).toBe("budget-exceeded");
     expect(result.exit.message).toContain("成本上限");
     expect(result.closure.facts.usage.totalTokens).toBeGreaterThanOrEqual(1400);
-    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+    expect(reviewer.review).not.toHaveBeenCalled();
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("exited");
     expect(session?.exit?.reason).toBe("budget-exceeded");
@@ -567,7 +612,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const reviewer = {
       // 本轮 failed review 自带打穿阈值的 usage——审前（既往为 0）放行，
       // 审后必须拦住下一轮执行。
-      reviewRun: vi.fn(async () => ({
+      review: vi.fn(async () => ({
         kind: "reviewed" as const,
         review: review({
           usage: {
@@ -579,7 +624,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     };
     const controller = new AdvancementController({
       store,
-      reviewer,
+      resources: fakeResources(),      reviewer,
       sessionTokenBudget: 1000,
       proxyIdGenerator: () => "proxy-should-not-exist",
       now: () => "2026-01-01T00:04:00.000Z",
@@ -723,8 +768,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
       await makeActive(store);
       const controller = new AdvancementController({
         store,
-        reviewer: {
-          reviewRun: vi.fn(async () => ({
+        resources: fakeResources(),        reviewer: {
+          review: vi.fn(async () => ({
             kind: "reviewed" as const,
             review: review({
               decision: "passed",
@@ -769,7 +814,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       "2026-01-01T00:03:00.000Z",
     );
     const reviewer = {
-      reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
+      review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
     };
     const controller = new AdvancementController({ store, reviewer });
 
@@ -780,7 +825,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
 
     expect(result).toEqual({ kind: "skipped", reason: "already-reviewed" });
-    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+    expect(reviewer.review).not.toHaveBeenCalled();
   });
 
   it("reviewer 返回 deferred 时挂起本轮验收，session 保持 active 且不落盘 review", async () => {
@@ -788,8 +833,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
     await makeActive(store);
     const controller = new AdvancementController({
       store,
-      reviewer: {
-        reviewRun: vi.fn(async () => ({
+      resources: fakeResources(),      reviewer: {
+        review: vi.fn(async () => ({
           kind: "deferred" as const,
           cause: "infrastructure" as const,
           reason: "推进侧裁判调用出错：rate limited",
@@ -819,7 +864,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     await makeActive(store);
     const controller = new AdvancementController({
       store,
-      reviewer: { reviewRun: vi.fn(async () => { throw new Error("judge down"); }) },
+      resources: fakeResources(),      reviewer: { review: vi.fn(async () => { throw new Error("judge down"); }) },
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
@@ -847,8 +892,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
       await makeActive(store);
       const controller = new AdvancementController({
         store,
-        reviewer: {
-          reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: badReview })),
+        resources: fakeResources(),        reviewer: {
+          review: vi.fn(async () => ({ kind: "reviewed" as const, review: badReview })),
         },
         now: () => "2026-01-01T00:04:00.000Z",
       });

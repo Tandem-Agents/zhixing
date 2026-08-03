@@ -16,6 +16,7 @@ export {
   LLMRubricDraftRevisionStrategy,
   RUBRIC_NEARBY_SCORE_THRESHOLD,
   RubricContractBuilder,
+  projectRubricContractDraft,
   projectConfirmedRubricToDraftContent,
 } from "./contract.js";
 export {
@@ -39,6 +40,7 @@ export type {
   ReviseRubricContractDraftInput,
   RubricContractComplete,
   RubricContractBuilderOptions,
+  RubricCatalogPort,
   RubricDraftCandidate,
   RubricDraftGenerationInput,
   RubricDraftGenerationStrategy,
@@ -52,6 +54,23 @@ export {
   getAdvancementRoot,
 } from "./paths.js";
 export { AdvancementStore } from "./store.js";
+export { isAdvancementControlEvent } from "./event-codec.js";
+export type {
+  AdvancementReviewRunInput,
+  AdvancementReviewRunOutcome,
+} from "./review.js";
+export {
+  advancementHeadSession,
+  applyAdvancementEvent,
+  assertTerminalReviewDecision,
+  foldAdvancementEvents,
+  freezeAdvancementSessions,
+  isOpenAdvancementSession,
+  runReviewedEvents,
+  type AdvancementFoldMap,
+  type AdvancementFoldSession,
+} from "./reducer.js";
+export { assertAdvancementEventBatchLegal } from "./guards.js";
 export {
   deriveUnmetCriteriaTexts,
   renderAcceptanceConditions,

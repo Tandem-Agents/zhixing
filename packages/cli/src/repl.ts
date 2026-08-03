@@ -1812,6 +1812,11 @@ export async function startRepl(): Promise<void> {
         continue;
       }
       if (!acceptedTurn) continue;
+      if (acceptedTurn.rubricPublicationMessage) {
+        cliWriter.notify(
+          chalk.dim(`  ◆ ${acceptedTurn.rubricPublicationMessage}`),
+        );
+      }
       // 中途插话可见性：输入落在 active 推进会话上时一句话告知分类结果，
       // 有 in-flight 代理被中止时先说明——用户不困惑于「我的话去哪了」。
       if (acceptedTurn.advancementContinuation) {

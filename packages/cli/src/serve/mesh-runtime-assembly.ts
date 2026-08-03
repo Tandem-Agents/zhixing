@@ -10,6 +10,7 @@ import type {
   MeshRoleBootConfig,
   RunExecutorPort,
   RunSubmissionPort,
+  EvidenceHandlerPort,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
@@ -68,6 +69,10 @@ import {
   EnvironmentProbeMeshClient,
   registerEnvironmentProbeMeshService,
 } from "./environment-probe-mesh.js";
+import {
+  EvidenceMeshClient,
+  registerEvidenceMeshService,
+} from "./evidence-mesh.js";
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
@@ -144,6 +149,7 @@ export interface MeshRuntimeAssemblyOptions {
     readonly interactions: DurableConversationInteractionObserver;
     readonly dataPlane: ExecutorDataPlaneRuntime;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+    readonly evidence?: EvidenceHandlerPort;
     /** Mesh 只注册 adapter；job worker 由稳定 executor role 组合根持有。 */
     readonly job?: {
       readonly owner: ExecutorJobOwner;
@@ -384,6 +390,18 @@ export class MeshRuntimeAssembly {
           ),
         );
       }
+      if (options.executor!.evidence) {
+        this.#disposers.push(
+          registerEvidenceMeshService(
+            this.services,
+            options.executor!.evidence,
+            options.authority.verifier,
+            (deviceId) =>
+              deviceId === options.trust.issuer.deviceId &&
+              this.#peerHasRole(deviceId, "anchor"),
+          ),
+        );
+      }
       if (options.executor!.job) {
         this.#disposers.push(
           registerJobInteractionService(this.services, {
@@ -556,6 +574,21 @@ export class MeshRuntimeAssembly {
       throw new Error(`Workspace probe executor is unavailable: ${deviceId}`);
     }
     return new EnvironmentProbeMeshClient(
+      this.connections.client(deviceId),
+      this.options.authority.verifier,
+    );
+  }
+
+  /** local 与 mesh 共用同一 EvidenceHandlerPort 合同和业务实现。 */
+  evidenceForExecutor(executorId: string): EvidenceHandlerPort {
+    if (
+      executorId === this.options.authority.executorId &&
+      this.options.executor?.evidence
+    ) {
+      return this.options.executor.evidence;
+    }
+    const deviceId = this.#activeExecutorDeviceId(executorId);
+    return new EvidenceMeshClient(
       this.connections.client(deviceId),
       this.options.authority.verifier,
     );

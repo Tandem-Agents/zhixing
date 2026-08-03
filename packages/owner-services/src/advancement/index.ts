@@ -7,12 +7,18 @@ export {
   type AdvancementConfirmedTurn,
   type AdvancementControllerOptions,
   type AdvancementPrepareResult,
+  type RubricPublicationOutcome,
+  type RubricPublicationPort,
   type AdvancementReviewRunInput,
   type AdvancementReviewRunOutcome,
   type AdvancementRunReviewer,
   type AdvancementRevisedDraft,
   type AdvancementTurnReviewResult,
 } from "./controller.js";
+export {
+  DeferredRubricPublication,
+  type DeferredRubricPublicationOptions,
+} from "./deferred-rubric-publication.js";
 export {
   buildAdvancementProxyMessage,
   buildProxyVariables,
@@ -41,6 +47,19 @@ export {
   type AdvancementConversationDirectory,
   type AdvancementRunsPage,
 } from "./conversation-directory-port.js";
+export {
+  SessionAdvancementStore,
+  type AdvancementSessionStore,
+  type SessionAdvancementStoreOptions,
+} from "./session-store.js";
+export {
+  AdvancementEvidenceCoordinator,
+  AdvancementEvidenceDeferredError,
+  type AdvancementEvidenceCoordinatorOptions,
+  type AdvancementEvidenceReviewInput,
+  type AdvancementEvidenceReviewResult,
+  type AdvancementEvidenceTarget,
+} from "./evidence.js";
 export {
   type AdvancementEventSink,
   type AdvancementPresentationEvent,

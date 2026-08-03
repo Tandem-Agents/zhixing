@@ -1,5 +1,7 @@
 import type { RunRecordRef } from "../transcript/shard/types.js";
 export type { RunRecordAdvancementMetadata } from "../transcript/types.js";
+import type { EvidenceBundle, EvidenceRequest } from "../contracts/protocol.js";
+import type { Digest } from "../types/distributed.js";
 import type { TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
 import type { UserTurnInput } from "../types/user-input.js";
@@ -142,9 +144,26 @@ export interface RubricContractDraftSnapshot {
   readonly createdAt: string;
 }
 
+/**
+ * 已确认 Rubric 契约的来源身份。library：库条目的不可变快照，由 rubricId 与
+ * 资产级版本锚定；local-draft：尚未沉淀全局库的确认草案，以稳定 snapshotId
+ * 与内容摘要锚定——契约不依赖全局身份即可在当前 owner 立即生效，离线确认
+ * 在类型层可构造；后续沉淀成功只经修订关联库身份，不改写 active 快照内容。
+ */
+export type ConfirmedRubricSource =
+  | {
+      readonly kind: "library";
+      readonly rubricId: string;
+      readonly rubricVersion: string;
+    }
+  | {
+      readonly kind: "local-draft";
+      readonly snapshotId: string;
+      readonly contentDigest: Digest;
+    };
+
 export interface ConfirmedRubricSnapshot {
-  readonly rubricId: string;
-  readonly rubricVersion: string;
+  readonly source: ConfirmedRubricSource;
   readonly title: string;
   readonly description: string;
   readonly content: ConfirmedRubricContentSnapshot;
@@ -303,6 +322,7 @@ export interface AdvancementSession {
   readonly proxyMessages: readonly AdvancementProxyMessage[];
   readonly outstandingProxyMessageId?: string;
   readonly advancementWindow?: AdvancementWindowState;
+  readonly evidence?: AdvancementEvidenceProjection;
   readonly exit?: AdvancementExit;
 }
 
@@ -322,6 +342,9 @@ export type AdvancementStoreEvent =
   | AdvancementWindowUpdatedEvent
   | AdvancementProxyEnqueuedEvent
   | AdvancementProxySettledEvent
+  | AdvancementEvidenceRequestedEvent
+  | AdvancementEvidenceResultEvent
+  | AdvancementEvidenceSettledEvent
   | AdvancementCompletedEvent
   | AdvancementExitedEvent
   | AdvancementCancelledEvent;
@@ -402,4 +425,68 @@ export interface AdvancementCancelledEvent {
   readonly timestamp: string;
   readonly sessionId: string;
   readonly exit?: AdvancementExit;
+}
+
+/**
+ * 取证请求的验真结果：bundle 是 executor 签名、经 owner 全等绑定核验的独立
+ * 证据包；typed-stale 是观测前后状态指纹不一致；capability-gap 是系统当前
+ * 不具备该请求所需的独立核验能力（无快照文件系统上的历史精确证据等）。
+ */
+export type AdvancementEvidenceOutcome =
+  | { readonly kind: "bundle"; readonly bundle: EvidenceBundle }
+  | { readonly kind: "typed-stale" }
+  | { readonly kind: "capability-gap" };
+
+/** 单个证据 item 到一至多个契约证据要求的耐久映射（wire 不新增内部 id）。 */
+export interface AdvancementEvidenceItemRequirement {
+  readonly itemIndex: number;
+  readonly requirementIds: readonly string[];
+}
+
+/** 一次取证 attempt 的完整耐久请求事实——未过期 attempt 的重发只回放它。 */
+export interface AdvancementEvidenceAttempt {
+  readonly requestId: string;
+  readonly reviewId: string;
+  readonly attempt: number;
+  readonly request: EvidenceRequest;
+  readonly itemRequirements: readonly AdvancementEvidenceItemRequirement[];
+  readonly requestDigest: Digest;
+}
+
+export type AdvancementEvidenceSettlement = "consumed" | "deferred";
+
+/** 未关闭的取证请求：发送、结果接收与 review 之间任意崩溃的重入凭据。 */
+export interface AdvancementEvidencePending
+  extends AdvancementEvidenceAttempt {
+  readonly outcome?: AdvancementEvidenceOutcome;
+}
+
+export interface AdvancementEvidenceProjection {
+  readonly pending: readonly AdvancementEvidencePending[];
+}
+
+/** pending 投影上界——正常每会话至多一个在飞请求，越界即异常信号。 */
+export const MAX_ADVANCEMENT_PENDING_EVIDENCE = 16;
+
+export interface AdvancementEvidenceRequestedEvent {
+  readonly type: "evidence_requested";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly attempt: AdvancementEvidenceAttempt;
+}
+
+export interface AdvancementEvidenceResultEvent {
+  readonly type: "evidence_result";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly requestId: string;
+  readonly outcome: AdvancementEvidenceOutcome;
+}
+
+export interface AdvancementEvidenceSettledEvent {
+  readonly type: "evidence_settled";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly requestId: string;
+  readonly settlement: AdvancementEvidenceSettlement;
 }

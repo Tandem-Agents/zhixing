@@ -30,7 +30,7 @@ describe("RubricContractBuilder", () => {
     });
 
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
     });
     const draft = await builder.buildDraft({
@@ -49,7 +49,7 @@ describe("RubricContractBuilder", () => {
       path.join(await createTempDir("rubric-contract"), "rubrics"),
     );
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
     });
 
@@ -65,7 +65,7 @@ describe("RubricContractBuilder", () => {
     );
     const prompts: string[] = [];
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
       generationStrategy: new LLMRubricDraftGenerationStrategy({
         complete: async (prompt) => {
@@ -123,7 +123,7 @@ describe("RubricContractBuilder", () => {
     });
     const prompts: string[] = [];
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
       generationStrategy: new LLMRubricDraftGenerationStrategy({
         complete: async (prompt) => {
@@ -159,9 +159,11 @@ describe("RubricContractBuilder", () => {
     expect(draft.candidateRubrics?.[0]?.matchScore).toBeLessThan(0.2);
     expect(prompts[0]).toContain("可参考的相近 Rubric:");
     expect(prompts[0]).toContain("导出结果验收");
-    await expect(builder.confirmDraft(draft, {
-      persistence: { kind: "update-existing", rubricId: "导出结果验收" },
-    })).rejects.toThrow("未达到近邻修订阈值");
+    const confirmed = await builder.confirmDraft(draft);
+    expect(confirmed.source).toMatchObject({
+      kind: "local-draft",
+      snapshotId: draft.draftId,
+    });
   });
 
   it("generated 草案可修订近邻 Rubric，避免另存一次性条目", async () => {
@@ -177,7 +179,7 @@ describe("RubricContractBuilder", () => {
       },
     });
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
       generationStrategy: new LLMRubricDraftGenerationStrategy({
         complete: async () =>
@@ -212,18 +214,16 @@ describe("RubricContractBuilder", () => {
     expect(draft.candidateRubrics?.[0]?.title).toBe(existing.title);
     expect(draft.candidateRubrics?.[0]?.matchScore).toBeGreaterThanOrEqual(0.2);
 
-    const confirmed = await builder.confirmDraft(draft, {
-      persistence: { kind: "update-existing", rubricId: existing.id },
-    });
+    const confirmed = await builder.confirmDraft(draft);
 
-    expect(confirmed.rubricId).toBe(existing.id);
+    expect(confirmed.source).toMatchObject({
+      kind: "local-draft",
+      snapshotId: draft.draftId,
+    });
     const records = await rubricStore.listForMatching();
     expect(records).toHaveLength(1);
     const loaded = await rubricStore.load(existing.id);
-    expect(loaded.document.content.passCriteria).toEqual([
-      "导出入口可用",
-      "导出文件内容符合格式",
-    ]);
+    expect(loaded.document.content.passCriteria).toEqual(["导出结果可下载"]);
     expect(confirmed.content.passCriteria).toEqual([
       { id: "pc-1", text: "导出入口可用" },
       { id: "pc-2", text: "导出文件内容符合格式" },
@@ -243,7 +243,7 @@ describe("RubricContractBuilder", () => {
       },
     });
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
       generationStrategy: new LLMRubricDraftGenerationStrategy({
         complete: async () =>
@@ -270,12 +270,13 @@ describe("RubricContractBuilder", () => {
       originalTurnId: "turn-nearby-save",
       originalUserTask: userTurnInputFromText("请把导出功能做到可验收"),
     });
-    const confirmed = await builder.confirmDraft(draft, {
-      persistence: { kind: "save-new" },
-    });
+    const confirmed = await builder.confirmDraft(draft);
 
-    expect(confirmed.rubricId).toBe("导出功能验收准则");
-    expect(await rubricStore.listForMatching()).toHaveLength(2);
+    expect(confirmed.source).toMatchObject({
+      kind: "local-draft",
+      snapshotId: draft.draftId,
+    });
+    expect(await rubricStore.listForMatching()).toHaveLength(1);
   });
 
   it("可用 LLM 修订策略按用户反馈生成新版草案", async () => {
@@ -283,7 +284,7 @@ describe("RubricContractBuilder", () => {
       path.join(await createTempDir("rubric-contract-revise"), "rubrics"),
     );
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:10:00.000Z",
       revisionStrategy: new LLMRubricDraftRevisionStrategy({
         complete: async (prompt) => {
@@ -357,7 +358,7 @@ describe("RubricContractBuilder", () => {
       path.join(await createTempDir("rubric-contract-caps"), "rubrics"),
     );
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
       evidenceCapabilities: { independentKinds: ["file-diff", "log"] },
       generationStrategy: new LLMRubricDraftGenerationStrategy({
@@ -433,7 +434,7 @@ describe("RubricContractBuilder", () => {
       },
     });
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
       evidenceCapabilities: { independentKinds: ["file-diff"] },
     });
@@ -467,7 +468,7 @@ describe("RubricContractBuilder", () => {
       },
     });
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
     });
 
@@ -496,7 +497,7 @@ describe("RubricContractBuilder", () => {
       },
     });
     const builder = new RubricContractBuilder({
-      rubricStore,
+      rubricCatalog: rubricStore,
       now: () => "2026-01-01T00:00:00.000Z",
     });
     const draft = await builder.buildDraft({

@@ -11,6 +11,14 @@ export {
   type GitExecFn,
 } from "./first-party-evidence.js";
 export {
+  EvidenceJournal,
+  type EvidenceJournalOptions,
+} from "./evidence-journal.js";
+export {
+  ExecutorEvidenceHandler,
+  type ExecutorEvidenceHandlerOptions,
+} from "./executor-evidence.js";
+export {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
   createAdvancementJudgeTool,
 } from "./judge-tool.js";

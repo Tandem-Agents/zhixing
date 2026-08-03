@@ -1,30 +1,33 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { isAdvancementControlEvent } from "./event-codec.js";
 import {
   advancementConversationDir,
   advancementLogPath,
   getAdvancementRoot,
 } from "./paths.js";
+import {
+  assertTerminalReviewDecision,
+  foldAdvancementEvents,
+  isOpenAdvancementSession,
+  runReviewedEvents,
+} from "./reducer.js";
 import type {
   AdvancementCompletedEvent,
   AdvancementExit,
   AdvancementExitedEvent,
-  AdvancementProxyEnqueuedEvent,
   AdvancementProxyMessage,
-  AdvancementProxySettledEvent,
-  AdvancementRubricDraftRevisedEvent,
-  AdvancementRubricConfirmedEvent,
   AdvancementRunReview,
-  AdvancementRunReviewedEvent,
   AdvancementSession,
-  AdvancementSessionCreatedEvent,
   AdvancementStoreEvent,
   AdvancementWindowState,
-  AdvancementWindowUpdatedEvent,
   ConfirmedRubricSnapshot,
   CreateAdvancementSessionInput,
   RubricContractDraftSnapshot,
 } from "./types.js";
+
+/** 文件控制日志的容错重放只作结构校验——签名载荷在写入侧已被真实验签。 */
+const REPLAY_VERIFIER = { verify: () => {} };
 
 export class AdvancementStore {
   private readonly root: string;
@@ -98,7 +101,7 @@ export class AdvancementStore {
           `AdvancementStore: session "${input.id}" already exists`,
         );
       }
-      if (sessions.some(isOpenSession)) {
+      if (sessions.some(isOpenAdvancementSession)) {
         throw new Error(
           `AdvancementStore: conversation "${input.conversationId}" already has an open advancement session`,
         );
@@ -406,7 +409,7 @@ export class AdvancementStore {
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
       );
-      if (!isOpenSession(session)) {
+      if (!isOpenAdvancementSession(session)) {
         throw new Error(
           `AdvancementStore: session "${sessionId}" is already closed`,
         );
@@ -439,7 +442,7 @@ export class AdvancementStore {
     conversationId: string,
   ): Promise<AdvancementSession | null> {
     return (
-      (await this.loadConversationSessions(conversationId)).find(isOpenSession) ??
+      (await this.loadConversationSessions(conversationId)).find(isOpenAdvancementSession) ??
       null
     );
   }
@@ -479,12 +482,8 @@ export class AdvancementStore {
   private async loadConversationSessionsInLock(
     conversationId: string,
   ): Promise<AdvancementSession[]> {
-    const sessions = new Map<string, MutableAdvancementSession>();
-    for (const event of await this.readEventsInLock(conversationId)) {
-      applyEvent(sessions, event);
-    }
-    return [...sessions.values()].map(freezeSession).sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt),
+    return foldAdvancementEvents(
+      await this.readEventsInLock(conversationId),
     );
   }
 
@@ -503,7 +502,9 @@ export class AdvancementStore {
       if (!line) continue;
       try {
         const parsed = JSON.parse(line) as unknown;
-        if (isAdvancementStoreEvent(parsed)) events.push(parsed);
+        if (isAdvancementControlEvent(parsed, REPLAY_VERIFIER)) {
+          events.push(parsed);
+        }
       } catch {
         continue;
       }
@@ -570,264 +571,5 @@ export class AdvancementStore {
       throw new Error(`AdvancementStore: session "${sessionId}" is not active`);
     }
     return session;
-  }
-}
-
-function assertTerminalReviewDecision(
-  review: AdvancementRunReview,
-  terminalType: "completed" | "exited",
-): void {
-  if (terminalType === "completed" && review.decision !== "passed") {
-    throw new Error(
-      `AdvancementStore: completed review must have decision "passed"`,
-    );
-  }
-  if (terminalType === "exited" && review.decision !== "exit") {
-    throw new Error(
-      `AdvancementStore: exited review must have decision "exit"`,
-    );
-  }
-}
-
-function runReviewedEvents(
-  sessionId: string,
-  review: AdvancementRunReview,
-  timestamp: string,
-  advancementWindow: AdvancementWindowState | undefined,
-): AdvancementStoreEvent[] {
-  return [
-    {
-      type: "run_reviewed",
-      timestamp,
-      sessionId,
-      review,
-    },
-    ...(advancementWindow
-      ? [
-          {
-            type: "window_updated" as const,
-            timestamp: advancementWindow.updatedAt,
-            sessionId,
-            advancementWindow,
-          },
-        ]
-      : []),
-  ];
-}
-
-interface MutableAdvancementSession {
-  id: string;
-  conversationId: string;
-  status: AdvancementSession["status"];
-  originalUserTask: AdvancementSession["originalUserTask"];
-  createdAt: string;
-  updatedAt: string;
-  rubricDraftVersion: number;
-  pendingRubricDraft?: AdvancementSession["pendingRubricDraft"];
-  confirmedRubric?: AdvancementSession["confirmedRubric"];
-  runs: AdvancementRunReview[];
-  proxyMessages: AdvancementProxyMessage[];
-  outstandingProxyMessageId?: string;
-  advancementWindow?: AdvancementWindowState;
-  exit?: AdvancementExit;
-}
-
-function applyEvent(
-  sessions: Map<string, MutableAdvancementSession>,
-  event: AdvancementStoreEvent,
-): void {
-  switch (event.type) {
-    case "session_created":
-      sessions.set(event.sessionId, {
-        id: event.sessionId,
-        conversationId: event.conversationId,
-        status: "awaiting-rubric-confirmation",
-        originalUserTask: event.originalUserTask,
-        createdAt: event.timestamp,
-        updatedAt: event.timestamp,
-        rubricDraftVersion: 0,
-        pendingRubricDraft: event.pendingRubricDraft,
-        runs: [],
-        proxyMessages: [],
-      });
-      break;
-    case "rubric_confirmed": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.status = "active";
-      session.updatedAt = event.timestamp;
-      session.confirmedRubric = event.confirmedRubric;
-      session.pendingRubricDraft = undefined;
-      break;
-    }
-    case "rubric_draft_revised": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.updatedAt = event.timestamp;
-      session.rubricDraftVersion += 1;
-      session.pendingRubricDraft = event.pendingRubricDraft;
-      break;
-    }
-    case "run_reviewed": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.updatedAt = event.timestamp;
-      session.runs.push(event.review);
-      break;
-    }
-    case "window_updated": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.updatedAt = event.timestamp;
-      session.advancementWindow = event.advancementWindow;
-      break;
-    }
-    case "proxy_enqueued": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.updatedAt = event.timestamp;
-      session.proxyMessages.push(event.proxyMessage);
-      session.outstandingProxyMessageId = event.proxyMessage.id;
-      break;
-    }
-    case "proxy_settled": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.updatedAt = event.timestamp;
-      if (session.outstandingProxyMessageId === event.proxyMessageId) {
-        session.outstandingProxyMessageId = undefined;
-      }
-      break;
-    }
-    case "completed": {
-      closeSession(sessions, event, "completed");
-      break;
-    }
-    case "exited": {
-      closeSession(sessions, event, "exited");
-      break;
-    }
-    case "cancelled": {
-      const session = sessions.get(event.sessionId);
-      if (!session) return;
-      session.status = "cancelled";
-      session.updatedAt = event.timestamp;
-      session.outstandingProxyMessageId = undefined;
-      session.exit = event.exit;
-      break;
-    }
-  }
-}
-
-function closeSession(
-  sessions: Map<string, MutableAdvancementSession>,
-  event: AdvancementCompletedEvent | AdvancementExitedEvent,
-  status: "completed" | "exited",
-): void {
-  const session = sessions.get(event.sessionId);
-  if (!session) return;
-  session.status = status;
-  session.updatedAt = event.timestamp;
-  session.outstandingProxyMessageId = undefined;
-  session.exit = event.exit;
-}
-
-function freezeSession(session: MutableAdvancementSession): AdvancementSession {
-  return {
-    id: session.id,
-    conversationId: session.conversationId,
-    status: session.status,
-    originalUserTask: session.originalUserTask,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    rubricDraftVersion: session.rubricDraftVersion,
-    pendingRubricDraft: session.pendingRubricDraft,
-    confirmedRubric: session.confirmedRubric,
-    runs: [...session.runs],
-    proxyMessages: [...session.proxyMessages],
-    outstandingProxyMessageId: session.outstandingProxyMessageId,
-    advancementWindow: session.advancementWindow,
-    exit: session.exit,
-  };
-}
-
-function isOpenSession(session: Pick<AdvancementSession, "status">): boolean {
-  return (
-    session.status === "awaiting-rubric-confirmation" ||
-    session.status === "active"
-  );
-}
-
-function isAdvancementStoreEvent(value: unknown): value is AdvancementStoreEvent {
-  if (!value || typeof value !== "object") return false;
-  const event = value as Partial<AdvancementStoreEvent>;
-  if (typeof event.type !== "string") return false;
-  if (typeof event.timestamp !== "string") return false;
-  if (typeof event.sessionId !== "string") return false;
-  switch (event.type) {
-    case "session_created":
-      return (
-        typeof (event as Partial<AdvancementSessionCreatedEvent>)
-          .conversationId === "string" &&
-        typeof (event as Partial<AdvancementSessionCreatedEvent>)
-          .pendingRubricDraft === "object" &&
-        typeof (event as Partial<AdvancementSessionCreatedEvent>)
-          .originalUserTask === "object"
-      );
-    case "rubric_confirmed": {
-      // 条目化形状校验——升级前的 legacy 快照（passCriteria: string[]）整条
-      // 隔离：半隔离会让字符串条目穿透到注入渲染与裁判 schema（产出
-      // undefined/null），干净地不可见让旧会话退回 awaiting、可重新确认。
-      const rubric = (event as Partial<AdvancementRubricConfirmedEvent>)
-        .confirmedRubric;
-      if (!rubric || typeof rubric !== "object") return false;
-      const criteria = (rubric as { content?: { passCriteria?: unknown } })
-        .content?.passCriteria;
-      return (
-        Array.isArray(criteria) &&
-        criteria.every(
-          (item) =>
-            !!item &&
-            typeof item === "object" &&
-            typeof (item as { id?: unknown }).id === "string" &&
-            typeof (item as { text?: unknown }).text === "string",
-        )
-      );
-    }
-    case "rubric_draft_revised":
-      return typeof (event as Partial<AdvancementRubricDraftRevisedEvent>)
-        .pendingRubricDraft === "object";
-    case "run_reviewed": {
-      const review = (event as Partial<AdvancementRunReviewedEvent>).review;
-      return (
-        typeof review === "object" &&
-        review !== null &&
-        typeof (review as { attribution?: unknown }).attribution === "object"
-      );
-    }
-    case "window_updated":
-      return typeof (event as Partial<AdvancementWindowUpdatedEvent>)
-        .advancementWindow === "object";
-    case "proxy_enqueued": {
-      const proxy = (event as Partial<AdvancementProxyEnqueuedEvent>)
-        .proxyMessage;
-      return (
-        typeof proxy === "object" &&
-        proxy !== null &&
-        typeof (proxy as { attribution?: unknown }).attribution === "object"
-      );
-    }
-    case "proxy_settled":
-      return typeof (event as Partial<AdvancementProxySettledEvent>)
-        .proxyMessageId === "string";
-    case "completed":
-      return typeof (event as Partial<AdvancementCompletedEvent>).exit ===
-        "object";
-    case "exited":
-      return typeof (event as Partial<AdvancementExitedEvent>).exit === "object";
-    case "cancelled":
-      return true;
-    default:
-      return false;
   }
 }

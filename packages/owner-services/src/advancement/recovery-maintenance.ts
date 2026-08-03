@@ -382,6 +382,7 @@ class DefaultAdvancementRecoveryMaintenance
     try {
       const result = await this.options.advancement.afterTurnCommitted({
         conversationId: session.conversationId,
+        runId: recoveryRunId(accepted),
         runIndex: accepted.record.runIndex,
         runRecord: accepted.record,
         runRecordRef: accepted.runRecordRef,
@@ -552,8 +553,11 @@ function recoveryRunId(accepted: {
   readonly record: RunRecord;
   readonly runRecordRef: RunRecordRef;
 }): string {
+  const committedRunId = (accepted.record as RunRecord & { runId?: unknown }).runId;
+  if (typeof committedRunId === "string" && committedRunId.length > 0) {
+    return committedRunId;
+  }
   return (
-    accepted.record.advancement?.proxyMessageId ??
-    `recovered:${accepted.runRecordRef.shardId}:${accepted.runRecordRef.runIndex}`
+    `legacy-recovered:${accepted.runRecordRef.shardId}:${accepted.runRecordRef.runIndex}`
   );
 }

@@ -353,12 +353,29 @@ export class AnchorResourceGovernor
     audience: { readonly executorId: string } = {
       executorId: this.#localExecutorId,
     },
+    scopeBinding: ResourceLease["scopeBinding"] = {
+      kind: "control",
+      subject: workload.id,
+    },
   ): Promise<ImmediateRootResourceLease> {
     const validatedOrigin = validateReservationOrigin(origin);
     this.#guard.assert(ctx.principal, "reservation.acquireRoot");
     assertResourceAdmissionRequest(workload, budget);
     requireIdentifier(ctx.requestId, "Reservation requestId");
     requireIdentifier(audience.executorId, "Reservation audience executorId");
+    if (scopeBinding.kind === "conversation") {
+      requireIdentifier(scopeBinding.conversationId, "Reservation conversationId");
+      if (!Number.isSafeInteger(scopeBinding.ownerEpoch) || scopeBinding.ownerEpoch <= 0) {
+        throw new TypeError("Reservation ownerEpoch must be a positive safe integer");
+      }
+    } else if (scopeBinding.kind === "job") {
+      requireIdentifier(scopeBinding.taskId, "Reservation taskId");
+      if (!Number.isSafeInteger(scopeBinding.anchorEpoch) || scopeBinding.anchorEpoch <= 0) {
+        throw new TypeError("Reservation anchorEpoch must be a positive safe integer");
+      }
+    } else {
+      requireIdentifier(scopeBinding.subject, "Reservation control subject");
+    }
     deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
     const reservationId = immediateReservationId(workload);
     await this.#enqueue(reservationId, workload, validatedOrigin.admissionClass);
@@ -377,7 +394,7 @@ export class AnchorResourceGovernor
                 budget: candidate.budget,
               }) === canonicalize({
                 workload,
-                scopeBinding: { kind: "control", subject: workload.id },
+                scopeBinding,
                 audience,
                 budget,
               }),
@@ -385,7 +402,7 @@ export class AnchorResourceGovernor
               reservationId,
               admissionClass: validatedOrigin.admissionClass,
               workload,
-              scopeBinding: { kind: "control", subject: workload.id },
+              scopeBinding,
               audience,
               budget,
               domain: { kind: "anchor", anchorEpoch: this.#anchorEpoch },
