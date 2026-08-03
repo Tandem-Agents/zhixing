@@ -9873,6 +9873,7 @@ type ConversationBehaviorRecordType =
 
 type ConversationBehaviorScenarioId =
   | "commit"
+  | "worksceneSession"
   | "sessionLifecycle"
   | "channelLifecycle"
   | "mirror"
@@ -9888,12 +9889,15 @@ type ConversationBehaviorScenarioId =
 
 interface ConversationBehaviorHarness {
   readonly log: FileAuthorityCommitLog;
+  readonly conversationId: string;
   readonly fullProbe: () => Promise<unknown>;
   readonly guardProbe?: () => Promise<unknown>;
 }
 
 interface ConversationRecordBehaviorSpec {
   readonly scenario: ConversationBehaviorScenarioId;
+  readonly stream?: "run" | "session-activity";
+  readonly corruptStream?: "run" | "session-activity";
   readonly corrupt?: (body: Record<string, unknown>) => Record<string, unknown>;
   readonly recovery: ConversationRecoveryExpectation;
 }
@@ -9904,6 +9908,7 @@ function conversationBehaviorHarness(
 ): ConversationBehaviorHarness {
   return {
     log: harness.log,
+    conversationId: CONVERSATION_ID,
     fullProbe: () => reopenJournal(harness, { clock }).currentState(RUN_ID),
     guardProbe: () =>
       reopenJournal(harness, { clock }).reportStarted(
@@ -10011,6 +10016,44 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async worksceneSession() {
+    const root = await createTempDir("conversation-workscene-session-matrix");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
+      lockWaitMs: 2_000,
+    });
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => NOW,
+      lockWaitMs: 2_000,
+    });
+    const identity = new TestProtocolIdentity();
+    const conversationId = "ws:matrix-scene:primary";
+    const createJournal = () =>
+      new ConversationRunJournal({
+        conversationId,
+        ownerEpoch: 3,
+        log,
+        artifacts,
+        signer: identity,
+        verifier: identity,
+        delivery: deliveryParticipant(log),
+        clock: () => NOW,
+        submission,
+        authority: {
+          decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
+        },
+        projection: { async project() {} },
+      });
+    await createJournal().touchWorksceneSession({
+      requestId: "matrix-session-create",
+      sceneId: "matrix-scene",
+      at: NOW,
+    });
+    return {
+      log,
+      conversationId,
+      fullProbe: () => createJournal().authorityState(),
+    };
+  },
   async channelLifecycle() {
     const lifecycle = await createConversationChannelLifecycle();
     await lifecycle.finish();
@@ -10521,6 +10564,12 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     scenario: "sessionLifecycle",
     recovery: conversationRecovery("lifecycleProjection"),
   },
+  "session-meta": {
+    scenario: "worksceneSession",
+    recovery: noConversationRecovery(
+      "session metadata is replayed as conversation-owner authority state",
+    ),
+  },
   admitted: {
     scenario: "commit",
     recovery: noConversationRecovery("admission is consumed by normal state replay only"),
@@ -10616,6 +10665,14 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     recovery: noConversationRecovery("asset sidecars are replayed by the full reducer only"),
     corrupt: (body) => ({ ...body, entries: [{ bogus: true }] }),
   },
+  "session-activity": {
+    scenario: "worksceneSession",
+    stream: "session-activity",
+    corruptStream: "run",
+    recovery: noConversationRecovery(
+      "session activity is replayed from its conversation-scoped authority stream",
+    ),
+  },
   "conversation-commit-projection": {
     scenario: "commitProjection",
     recovery: conversationRecovery("commitProjection"),
@@ -10690,8 +10747,12 @@ describe("conversation record execution-point behavior matrix", () => {
         recordType
       ] as ConversationRecordBehaviorSpec;
       const behavior = await CONVERSATION_BEHAVIOR_SCENARIOS[spec.scenario]();
+      const stream =
+        spec.stream === "session-activity"
+          ? `session-activity:${behavior.conversationId}`
+          : `run:${behavior.conversationId}`;
       const records = await behavior.log.readStream<Record<string, unknown>>(
-        `run:${CONVERSATION_ID}`,
+        stream,
       );
       const produced = records.filter((record) => {
         const body = record.body as { t?: string; kind?: string };
@@ -10707,14 +10768,22 @@ describe("conversation record execution-point behavior matrix", () => {
       const vector = spec.corrupt
         ? spec.corrupt(structuredClone(target.body) as Record<string, unknown>)
         : structuredClone(target.body);
-      await behavior.log.append([{ stream: `run:${CONVERSATION_ID}`, body: vector }]);
+      const corruptStream =
+        spec.corruptStream === "session-activity"
+          ? `session-activity:${behavior.conversationId}`
+          : spec.corruptStream === "run"
+            ? `run:${behavior.conversationId}`
+            : stream;
+      await behavior.log.append([{ stream: corruptStream, body: vector }]);
       await expectConversationRejected(behavior.fullProbe);
       if (behavior.guardProbe) {
         const guardBehavior =
           await CONVERSATION_BEHAVIOR_SCENARIOS[spec.scenario]();
         const guardRecords =
           await guardBehavior.log.readStream<Record<string, unknown>>(
-            `run:${CONVERSATION_ID}`,
+            spec.stream === "session-activity"
+              ? `session-activity:${guardBehavior.conversationId}`
+              : `run:${guardBehavior.conversationId}`,
           );
         const guardTarget = guardRecords.filter((record) => {
           const body = record.body as { t?: string; kind?: string };
@@ -10729,7 +10798,17 @@ describe("conversation record execution-point behavior matrix", () => {
             )
           : structuredClone(guardTarget.body);
         await guardBehavior.log.append([
-          { stream: `run:${CONVERSATION_ID}`, body: guardVector },
+          {
+            stream:
+              spec.corruptStream === "session-activity"
+                ? `session-activity:${guardBehavior.conversationId}`
+                : spec.corruptStream === "run"
+                  ? `run:${guardBehavior.conversationId}`
+                  : spec.stream === "session-activity"
+                    ? `session-activity:${guardBehavior.conversationId}`
+                    : `run:${guardBehavior.conversationId}`,
+            body: guardVector,
+          },
         ]);
         await expectConversationRejected(guardBehavior.guardProbe);
       }

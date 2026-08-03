@@ -93,7 +93,7 @@ describe("session durable control 方法", () => {
         runId: "run-1",
         reason: expect.objectContaining({ kind: "user-cancel", source: "rpc" }),
         principal: {
-          surfacePrincipal: "rpc:owner",
+          surfacePrincipal: "rpc:desktop",
           connectionId: "connection-1",
           deviceId: "anchor-device",
         },
@@ -269,7 +269,7 @@ describe("session durable control 方法", () => {
               }) => ({ ...input, deviceId: "anchor-device" }),
             },
           } as unknown as ServerContext,
-          connection: { id: "connection-2", clientInfo: { id: "rpc:desktop" } },
+          connection: { id: "connection-2", clientInfo: { id: "desktop" } },
         } as never,
       ),
     ).resolves.toMatchObject({ state: "cancelled" });
@@ -278,7 +278,7 @@ describe("session durable control 方法", () => {
         ownerEpoch: 1,
         decision: "user-abandoned",
         principal: {
-          surfacePrincipal: "rpc:owner",
+          surfacePrincipal: "rpc:desktop",
           connectionId: "connection-2",
           deviceId: "anchor-device",
         },

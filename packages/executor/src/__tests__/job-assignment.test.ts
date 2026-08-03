@@ -105,6 +105,10 @@ const EXECUTOR_ID = "executor-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+const FROZEN_MISSED_NEXT_FIRE = {
+  readyBoundary: "2026-07-15T09:06:00.000Z",
+  nextFire: "2026-07-15T09:07:00.000Z",
+} as const;
 
 async function allJobRecoveryObligations(
   ledger: ConversationAssignmentLedger,
@@ -2328,6 +2332,7 @@ describe("user job durable protocol", () => {
       scheduledFor: "2026-07-15T09:01:00.000Z",
       context: surfaceContext("trigger-missed"),
       source: "user",
+      missedNextFire: FROZEN_MISSED_NEXT_FIRE,
     });
     expect(missed.state).toBe("missed");
   });
@@ -4031,6 +4036,7 @@ describe("user job clock occurrences while one is in flight", () => {
         scheduledFor: "2026-07-15T09:05:00.000Z",
         context: surfaceContext(`occupied-${occupied}`),
         source: "user",
+        missedNextFire: FROZEN_MISSED_NEXT_FIRE,
       });
       expect(occurrence.state).toBe("missed");
       expect(await harness.journal.currentState(JOB_RUN_ID)).toBe(occupied);
@@ -4660,6 +4666,7 @@ async function exerciseUserJobRow(row: (typeof USER_JOB_ROWS)[number][0]) {
         scheduledFor: "2026-07-15T09:01:00.000Z",
         context: surfaceContext("row-2"),
         source: "user",
+        missedNextFire: FROZEN_MISSED_NEXT_FIRE,
       });
       expect(occurrence.state).toBe("missed");
       return;

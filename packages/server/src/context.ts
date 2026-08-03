@@ -111,7 +111,7 @@ export interface RuntimeControlAdapter {
       readonly jobRunId: string;
       readonly afterStatusRevision: number;
     }[];
-  }>; 
+  }>;
   schedulerNotices?: (afterRevision: number) => Promise<{
     readonly notices: readonly SchedulerUserNotice[];
     readonly nextRevision: number;

@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U26-01～U26-10 均已验证；U26-07～U26-10 的受影响验证、专项功能审查、四路冷启动对抗与差异审计已完成；按用户限定尚未进入全单元终审或最终验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:否（本次专项审查输入已固定；全单元尚未进入冻结终审）
-- **交付物文件集**:以第 26 单元起点 `4ec98cf` 计算的当前完整交付闭包共 106 个非工作台路径，其中删除 6 个；路径集 SHA-256 `bf7ee1f5b1193efc0db4ad8367b42fa1bc40878251e9e7d5cf6a61bca117ce36`
-- **当前交付物指纹**:`git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b`
+- **当前状态**:已完成；全部正式问题已验证，独立审查清单 30 / 30 通过，连续两轮冻结终审、独立功能审查和必要最终验证均绑定同一冻结交付物通过
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是
+- **交付物文件集**:以第 26 单元起点 `4ec98cf` 计算的当前完整交付闭包共 109 个非工作台路径，其中删除 6 个；路径集 SHA-256 `72e81512c4b70c88b6f421cfea1fe8fa3335fb6eb0f9ee9b09410ed9d9d6a8fc`
+- **当前交付物指纹**:`git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08`
 - **架构来源**:分布式运行时总纲与可执行规格；第 26 单元定稿开发清单；scheduler、job、Delivery、surface、恢复与生产组合根适用合同；第 26 单元独立审查清单及价值裁决记录
 
 ## 固定边界
@@ -32,7 +32,7 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
-| 第 26 单元当前 104 路径完整闭包 | scheduler/job 合同、codec、生产组合根、结构验收与交付路径须在后续全单元冻结前统一反向归项 | 唯一 manifest 生成器以 `4ec98cf` 为基线计算：104 路径、6 删除，分组和为 104；本次专项只证明 U26-01～U26-06 闭包，不替代后续 IR26-01～IR26-30 全量反向对账 | 通过 |
+| 第 26 单元当前 109 路径完整闭包 | scheduler/job 合同、codec、生产组合根、结构验收、五份架构文档与全部交付路径 | 唯一 manifest 生成器以 `4ec98cf` 为基线实算：109 路径、6 删除；CLI 27、core 26、executor 2、orchestrator 2、owner-kernel 18、rpc 1、runtime-host 5、server 20、tools-builtin 3、架构规格 5；路径集与完整指纹均同冻结值，独立审查清单 IR26-30 已逐路径反向对账 | 通过 |
 
 ## 关键原语核查
 
@@ -56,18 +56,17 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
-| R26-01 | U26-01 scheduler 操作权威、幂等与 CAS 完整链 | schedule 工具、Local/RPC/Execution facade、schedule RPC、AnchorSchedulerProductPort/GlobalState adapter、TaskDefinition/receipt、run/cancel JobControl 及直接测试 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | 任一 operationId/source/revision/digest、GlobalState adapter、receipt 或 JobControl 路径变化 | 通过 | 0/2 | 专项审查从工具调用身份反推至权威提交：缺稳定 id 或身份即拒绝，同键同载荷先于 CAS 回放、同键异载荷与旧 revision 拒绝；测试与生产扫描通过。专项审查不计正式终审深审次数 |
-| R26-02 | U26-02 第一方 surface 身份与 manual job 回程 | CoreHost 持久 instance id、auth/RpcSurfaceRegistry、connection generation、schedule ingress、manual surface/stream、delivery.resolve 与对应测试 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | client id、auth binding、连接代际、manual surface 游标或任何相邻控制入口身份变化 | 通过 | 0/2 | 双客户端、同身份重连、旧代迟到、缺身份与错绑反例均由稳定 principal + 当前代际 fence 收口；无广播回退，delivery.resolve 同样复用唯一身份函数 |
-| R26-03 | U26-03 ready 边界与恢复拓扑 | scheduler prepare/activate、command runServer 顺序、user/system/manual 恢复、authority/legacy delivery 生命周期、停止恢复点及测试 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | prepare/activate、ready 顺序、恢复并发/隔离、transport 或 handler 生命周期变化 | 通过 | 0/2 | ready 前只 prepare；runServer 后才 activate。timer 立即接管，恢复固定并发且每条 assignment 单独隔离，慢项/坏项不阻断 ready 或同任务后续义务，停止后未完成事实仍可重建 |
-| R26-04 | U26-04 调度策略耐久并发与崩溃恢复 | scheduler-policy 判别联合、legacy import、missed ready boundary、failure terminal/backoff、auto-disable obligation/settlement、timer/投影及测试 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | policy codec/reducer、时钟算法、failure threshold、触发 fence 或恢复投影变化 | 通过 | 0/2 | 三类策略结果与输入事实原子提交，恢复只读冻结结果；pending auto-disable 在 settlement 前同时阻断定时与手动新触发，稳定 requestId 只产生唯一 disabled revision |
-| R26-05 | U26-05 missed/capability-gap 用户通知闭环 | SchedulerUserNotice 合同/日志、missed 分组、水位去重、capability gap open/update/close、Delivery、JobStatusDirectory/server.info/live 及测试 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | notice schema/key/revision、missed 水位、gap round、Delivery 或 live/history 投影变化 | 通过 | 0/2 | missed 批次与 gap 轮次均使用稳定耐久事实；重复 ready/poll 不重发，恢复/终态关闭后可新开一轮；成功提交统一触发 live，server.info 由同一 LSN 标量补读 |
-| R26-06 | 五项交界组合与 U26-06 后置边界 | R26-01～R26-05 当前输入；CRUD↔surface、ready↔policy、policy↔notice 交界；AuthorityCommitLog 当前容量/启动事实 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | 任一 R26-01～05 输入/结论变化；出现可复现容量或启动损失，或通用 compaction owner 进入定稿单元 | 通过 | 0/2 | 四路冷启动对抗与差异审计无未处置反证；U26-06 两项重开事实均不存在，未新增通用压缩、benchmark 或信息采集设施 |
-
-| R26-07 | U26-10 内部 job 生命周期信号与 assignment 资源退役 | `JobJournal.onLifecycle`、提交后事件派生、scheduler waiter、runtime dispatcher/relay/executor/artifact/manual-session 清理及直接测试 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | lifecycle 事件、终态集合、bundle ACK/恢复 outbox、waiter 或 assignment 资源所有权变化 | 通过 | 0/2 | 专项审查确认事件只在权威提交后派生，覆盖 committed；assignment-retired 严格晚于 recovery 与 bundle-ack outbox 清空。scheduler 订阅先于初读且零 50ms 轮询，runtime 终态先关闭 surface、退役后幂等释放全部 assignment 资源 |
-| R26-08 | U26-07 手动 surface 唯一生命周期与恢复 | `ManualJobSurfaceLifecycle`、ready/register/resume、open/close session、AnchorSchedulerRuntime 装配与直接测试 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 手动 surface 注册、opening singleflight、终态/退役顺序、重试或生产 open callback 变化 | 通过 | 0/2 | ready 前后、恢复与显式 resume 均汇入 assignmentId 唯一 owner；打开失败可重驱，终态优先于迟到 opening，退役后不复活；错 job 身份稳定拒绝 |
-| R26-09 | U26-08 missed 汇总命中式必达与恢复 | missed occurrence、lifecycle 唤醒、pending hint、prepareMissedSummaries、水位/成员/origin 去重、启动恢复及直接测试 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | missed 提交、恢复扫描、汇总水位、pending 驱动或 tick 顺序变化 | 通过 | 0/2 | missed 提交后在可失败步骤前命中提示，扫描/发布失败恢复提示；启动从耐久 occurrence 与水位重建。提示非事实源，无命中时零全量扫描，重复/分组/重启由既有耐久键去重 |
-| R26-10 | U26-09 capability-gap 公开通知分层 | capability-gap 内部记录、SchedulerUserNotice open/update/close、Delivery、live/history/server.info 及直接测试 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | gap reason/digest、公开 notice 文案/actions、补读或投影边界变化 | 通过 | 0/2 | 原始 reason/digest 仅留内部记录，公开面统一消费友好 notice；打开、更新、关闭、重开和补读均无内部拓扑词并保留可行动步骤 |
-| R26-11 | U26-07～U26-10 跨项组合推演 | R26-07～R26-10 当前输入；opening↔job 终态↔assignment 退役、missed 汇总↔公开通知交界 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 任一 R26-07～R26-10 输入、状态或结论变化 | 通过 | 0/2 | 四路冷启动对抗和差异审计无未处置反证；进程内 wakeup 不形成第二事实源，资源退役与用户通知各自保持唯一耐久边界 |
+| R26-01 | U26-01 scheduler 操作权威、幂等与 CAS 完整链 | schedule 工具、Local/RPC/Execution facade、schedule RPC、AnchorSchedulerProductPort/GlobalState adapter、TaskDefinition/receipt、run/cancel JobControl 及直接测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 任一 operationId/source/revision/digest、GlobalState adapter、receipt 或 JobControl 路径变化 | 通过 | 2/2 | 最终两轮分别从入口到权威、从并发/丢响应反例回推；CRUD 经 GlobalState/CAS，run/cancel 经 JobControl，稳定键回放、旧 revision 与同键异载荷均确定收敛；server golden 已同步 taskRevision 与真实 registry，零生产 backend 直达 |
+| R26-02 | U26-02 第一方 surface 身份与 manual job 回程 | CoreHost 持久 instance id、auth/RpcSurfaceRegistry、connection generation、schedule ingress、manual surface/stream、delivery.resolve 与对应测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | client id、auth binding、连接代际、manual surface 游标或任何相邻控制入口身份变化 | 通过 | 2/2 | 最终两轮分别核对身份主链和旧代/错绑反例；稳定 instance id 派生唯一 principal，连接代际淘汰旧连接，ingress、ticket、manual lifecycle 与补续游标无广播或公共身份回退；server 全包 754/754 覆盖当前身份夹具 |
+| R26-03 | U26-03 ready 边界与恢复拓扑 | scheduler prepare/activate、command runServer 顺序、user/system/manual 恢复、authority/legacy delivery 生命周期、停止恢复点及测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | prepare/activate、ready 顺序、恢复并发/隔离、transport 或 handler 生命周期变化 | 通过 | 2/2 | 最终两轮分别核对启动主链和慢项/坏项/停机反例；prepare 只重建，runServer 后 activate，有界恢复逐义务隔离，stop 不终止耐久恢复点且不形成无限 drain；本轮生产输入未变 |
+| R26-04 | U26-04 调度策略耐久并发与崩溃恢复 | scheduler-policy 判别联合、legacy import、missed ready boundary、failure terminal/backoff、auto-disable obligation/settlement、timer/投影及测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | policy codec/reducer、时钟算法、failure threshold、触发 fence 或恢复投影变化 | 通过 | 2/2 | 最终两轮分别核对策略投影和各提交边界崩溃/墙钟变化；三类 policy 事实耐久冻结，恢复不重算，auto-disable-required 在 settled 前共同阻断手动与定时触发；六个旧测试夹具已显式携带 frozen next-fire 并通过 |
+| R26-05 | U26-05 missed/capability-gap 用户通知闭环 | SchedulerUserNotice 合同/日志、missed 分组、水位去重、capability gap open/update/close、Delivery、JobStatusDirectory/server.info/live 及测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | notice schema/key/revision、missed 水位、gap round、Delivery 或 live/history 投影变化 | 通过 | 2/2 | 最终两轮分别核对通知主链和重复/断线/半提交反例；耐久成员、轮次与稳定 notice key 单源生成，投递失败可重驱，live/history/server.info 同源且不泄漏内部诊断；行为 golden 已同步 scheduler notice 投影 |
+| R26-06 | 五项交界组合与 U26-06 后置边界 | R26-01～R26-05 当前输入；CRUD↔surface、ready↔policy、policy↔notice 交界；AuthorityCommitLog 当前容量/启动事实 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 任一 R26-01～05 输入/结论变化；出现可复现容量或启动损失，或通用 compaction owner 进入定稿单元 | 通过 | 2/2 | 最终两轮完成五链及三处交界正反向推演；无双 owner、第二事实源或永久等待，U26-06 的容量/启动损失与定稿 compaction owner 重开条件均未触发；最终验证未引入范围外设施 |
+| R26-07 | U26-10 内部 job 生命周期信号与 assignment 资源退役 | `JobJournal.onLifecycle`、提交后事件派生、scheduler waiter、runtime dispatcher/relay/executor/artifact/manual-session 清理及直接测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | lifecycle 事件、终态集合、bundle ACK/恢复 outbox、waiter 或 assignment 资源所有权变化 | 通过 | 2/2 | 最终两轮分别核对提交后派生和崩溃/ACK 边界；生命周期事件含 committed 且只在权威提交后发布，retired 严格晚于 recovery 与 bundle ACK，资源释放幂等且不早退；本轮生产输入未变 |
+| R26-08 | U26-07 手动 surface 唯一生命周期与恢复 | `ManualJobSurfaceLifecycle`、ready/register/resume、open/close session、AnchorSchedulerRuntime 装配与直接测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 手动 surface 注册、opening singleflight、终态/退役顺序、重试或生产 open callback 变化 | 通过 | 2/2 | 最终两轮分别核对生命周期主链和 opening/terminal/retired 竞争；assignmentId 单飞、失败可重驱，终态优先关闭迟到 session，retired 后零复活且错 job 身份拒绝；CLI S6 四条真实拓扑隔离通过 |
+| R26-09 | U26-08 missed 汇总命中式必达与恢复 | missed occurrence、lifecycle 唤醒、pending hint、prepareMissedSummaries、水位/成员/origin 去重、启动恢复及直接测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | missed 提交、恢复扫描、汇总水位、pending 驱动或 tick 顺序变化 | 通过 | 2/2 | 最终两轮分别核对命中主链和提交后失败/重启反例；pending 仅作可丢唤醒且失败重置，重启从 occurrence 与已验水位重建，无命中时零周期全量扫描；frozen next-fire 夹具与生产约束一致 |
+| R26-10 | U26-09 capability-gap 公开通知分层 | capability-gap 内部记录、SchedulerUserNotice open/update/close、Delivery、live/history/server.info 及直接测试 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | gap reason/digest、公开 notice 文案/actions、补读或投影边界变化 | 通过 | 2/2 | 最终两轮分别核对公开投影和关闭/重开/补读反例；内部 reason/digest 不进入公开面，open/update/close/reopen 在 Delivery、live/history/server.info 上保持同一产品语义；server 全包和当前 behavior golden 通过 |
+| R26-11 | U26-07～U26-10 跨项组合推演 | R26-07～R26-10 当前输入；opening↔job 终态↔assignment 退役、missed 汇总↔公开通知交界 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 任一 R26-07～R26-10 输入、状态或结论变化 | 通过 | 2/2 | 最终两轮分别从业务到资源、从失败交界反向推演；opening→terminal→retired 与 missed→公开 notice 均单源闭合，进程内事件只作唤醒，不产生第二事实源或资源泄漏；最终验证修复只同步测试证据，未改变生产交界 |
 
 ## 问题列表
 
@@ -110,14 +109,13 @@
 
 ## U26-07～U26-10 专项审查与四路对抗记录
 
-> 冻结基线：`git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b`（106 个非工作台路径，删除 6 个）。每行均从权威合同与当前源码冷启动重建，不以测试通过代替功能判断。
+> 专项审查原始冻结基线：`git-delivery-manifest-v1:b043a59d3e25240ce2d623152032eec7d6d44f2867a3b5fb741cab23c0af42e6`（106 个非工作台路径，删除 6 个）；最终验证同步测试夹具与 golden 后，由 V26-15 在当前 109 路径指纹上重新复核并取代本基线。每行均从权威合同与当前源码冷启动重建，不以测试通过代替功能判断。
 
 | 角色 / 矩阵 | 独立事实链与主动反例 | 结论 |
 | ----------- | -------------------- | ---- |
 | 手动 surface 恢复与唯一生命周期所有权 | ready 前登记、ready 后恢复登记和显式 resume 均汇入按 assignmentId 唯一的 lifecycle；重复 register、resume/recovery 并发只共享 opening；打开失败保留 pending 并由单一有界 timer 重驱。job 终态先同步进入 closing，迟到 session 立即 close；assignment-retired 后才删除项。错 jobRunId 的同 assignment 注册被拒；断线由原 surface generation 的 adopt 路径失败，不改绑；进程崩溃后仅从 Journal 未退役 assignment 重建。生产组合根始终注入唯一 open/close session，未发现旁路 owner 或复活窗口 | 通过；C26-06、C26-07 当前源码证伪 |
 | missed 汇总的启动并发与崩溃恢复 | 每个 task journal 在 prepare/refresh 时先装配 lifecycle 订阅；missed 提交后事件处理与 trigger 返回路径均在任何可能失败的 refresh/publish 前命中内存提示。驱动先清提示，扫描期间新增 missed 会重新置位；扫描或 publish 失败恢复提示。崩溃丢提示后，启动恢复末尾从全部权威 occurrence 与耐久 missedMembers 水位经同一入口重建。重复 tick、提交后失败、扫描/tick 交错、同组多任务、不同 origin、部分组已提交及通知响应丢失均由稳定 member key、group key、noticeId 与单一日志投影去重；无提示时 tick 零全量扫描 | 通过；C26-08 当前源码证伪 |
 | 公开通知的产品语言与可行动性 | capability-gap open/update 在同一事务中把原始 reason/digest 仅写入 job 内部记录，并用既有友好 text/actions 生成公开 notice；closed 使用独立恢复文案。JobStatusDirectory 的 live 与 history 以及 `server.info` 都原样消费同一 `SchedulerUserNotice`，不存在回读内部 job reason 的旁路。主动核对首次打开、更新、关闭、关闭后重开、断线游标补读和 missed 汇总交界：公开面均说明“正在等待/已恢复”及用户动作，零 anchor/executor/lease/fence 等内部拓扑词；未新增文案系统 | 通过；C26-09 当前源码证伪 |
-
 | 终态事件驱动的资源释放与非阻断价值边界 | `JobLifecycleEvent` 只由 `applyControl`/`#transact` 的 committed 回调从同一投影派生；状态事件按精确 statusRevision 取值并含公开 status 刻意省略的 committed。scheduler 每个 journal 单次订阅，waiter 先登记再初读，重复终态只幂等 resolve；assignment-retired 仅在 recovery 与 bundle-ack outbox 同时无该 assignment 后发布。runtime 对 job 终态先 closing/close surface，退役再单飞停止 recovery、注销 relay并删除 dispatcher/executor/artifact；close/stop/dispose 均幂等或吞并已知关闭错误。事件丢失不损坏耐久状态：进程崩溃会销毁内存资源，重启仅从 Journal 未退役义务重建。主动核对 committed、cancelled/failed/missed、bundle ACK 前后、重复信号、opening/closing 竞争、退役过程中崩溃与长期 queued，未发现轮询、提前退役或历史映射复活 | 通过；C26-10、C26-11 当前源码证伪 |
 | U26-07↔U26-10 与 U26-08↔U26-09 交界 | 手动 assignment 的 opening 由同一 lifecycle owner 持有，job 终态先禁止发布迟到 session，assignment-retired 再删除 owner 与其余资源，严格保持“业务终态先关闭、耐久义务退役后释放”。missed occurrence 的提交后唤醒只驱动既有耐久汇总；汇总与 capability-gap 都进入同一公开 notice 日志，但成员水位、origin、notice key 与友好 reason/actions 各自反绑，不互相覆盖或回读内部 reason。重复、半提交、停机和重启均回到各自唯一事实源 | 通过；两组直接交界无新增反证 |
 | 历轮反证差异审计 | 机械取固定矩阵、四路角色与历轮 C26-06～C26-11 并集：C26-06→U26-07 ready 后即时驱动；C26-07→U26-07/U26-10 singleflight 与终态优先；C26-08→U26-08 命中式提示及启动重建；C26-09→U26-09 公开投影分层；C26-10→U26-10 内部 committed 事件与订阅先于初读；C26-11→U26-10 退役后资源释放。六项均由当前冻结源码、直接测试或两者共同复核，无发现被遗漏、降级或无依据消失 | 通过；零未处置反证 |
@@ -128,6 +126,7 @@
 
 | 编号 | 原疑点与已验证事实 | 排除依据与适用边界 | 证据与输入基线 | 重开条件 | 最终裁决 |
 | ---- | ------------------ | ------------------ | -------------- | -------- | -------- |
+| X26-01 | `pnpm security:secrets` 命中 `packages/cli/src/serve/executor-readiness.ts` 与 `packages/cli/src/serve/executor-role-runtime.ts` 保留完整 credential projection | 两个文件及该检查器相对第 26 单元起点 `4ec98cf` 均无变更，不属于本单元 109 路径交付闭包；本单元新增/修改路径未产生秘密投影命中，不能据此扩大第 26 单元范围 | `git diff --name-only 4ec98cf --` 对两个文件及检查器输出为空；最终安全门禁诊断 | 任一命中文件或检查器进入当前单元交付闭包，或出现本单元新增秘密泄漏的源码事实 | 已排除 |
 
 ## 迟发现教训
 
@@ -148,20 +147,22 @@
 | V26-04 | 角色三：调度策略的耐久并发与崩溃恢复 | 冷启动核对三类 policy 事实与 reducer/投影，构造提交前后崩溃、墙钟变化、重复恢复、auto-disable 半提交及手动/定时竞争 | R26-04 全部登记输入及 R26-04↔R26-05 交界 | 专项功能审查 / 低 | C26-04 修复后，冻结 next-fire 不重算、missed 有界、pending disable 阻断所有新触发并最终唯一 settled | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | 有效 |
 | V26-05 | 角色四：用户通知闭环与 U26-06 生命周期价值边界 | 冷启动核对 missed/gap 耐久 producer、Delivery、live/history；构造重复 ready/poll、断线、提交半途、关闭重开，并核对 U26-06 两项重开条件 | R26-05、U26-06 及 policy↔notice 交界 | 专项功能审查 / 低 | C26-05 修复后 notice 同源、不重不漏且可补读；U26-06 无当前容量/启动损失、无定稿 compaction owner，后置成立 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | 有效 |
 | V26-06 | 历轮反证差异审计 | 机械取专项矩阵与四路记录并集，逐项核对 C26-01～C26-05 | R26-01～R26-06 与 V26-02～V26-05 | 专项收口 / 低 | C26-01→U26-01、C26-02→U26-02、C26-03→U26-03、C26-04→U26-04、C26-05→U26-05，均为同根合并且已由当前源码与定向测试复核通过；零未处置发现 | `git-delivery-manifest-v1:65d8919906dce250a6769732b39f0adfa587b5d14625e08d2b470545b2e2ea6a` | 有效 |
-
 | V26-07 | 四项修复的类型、构建、格式与直接行为证据 | owner-kernel/executor 包级 `tsc --noEmit`；CLI 已登记基线口径类型检查；owner-kernel 与 CLI 构建；scheduler authority、manual surface lifecycle、job lifecycle/capability-gap 定向测试；Biome 变更文件 | U26-07～U26-10 的 8 个生产/测试 TypeScript 文件及直接消费构建产物 | 专项受影响验证 / 中 | owner-kernel、executor 类型通过；CLI 仅命中 runbook 已登记的 8 个 config-editor credential 基线错误，零本次新增错误；owner-kernel 与 CLI 构建通过；定向 14/14；Biome 零问题 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 有效 |
 | V26-08 | 共享 lifecycle 原语在 owner-kernel 包内无回归 | owner-kernel 全包 Vitest | JobJournal lifecycle、scheduler authority 及同包共享权威日志消费者 | 合并直接验证 / 中 | 235/235 通过 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 有效 |
 | V26-09 | 大包诊断与本次范围归因 | executor、CLI 全包首次机器可读运行及定向归因；不重复整包 | U26-07～U26-10 直接变更与相邻既有测试 | 诊断 / 高 | executor 492/500，CLI 2624/2632；失败分别为既有 assignment 行为矩阵/旧 policy fixture/IO timeout 与 mesh pairing、delivery 背压、S6 conversation conformance，均不涉及本次 scheduler/manual-job 变更；本次直接相关用例全部通过，未据此扩展修复范围 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 诊断 |
 | V26-10 | 角色一与角色三：手动 surface 生命周期、公开通知产品边界 | 从生产入口冷启动构造 ready 前后、重复打开、失败重驱、opening/terminal/retired 竞争，以及 gap open/update/close/reopen/live/history/server.info | R26-08、R26-10 及 U26-07↔U26-10、U26-08↔U26-09 交界 | 专项功能审查 / 低 | 唯一生命周期 owner、终态优先与公开友好文案成立；C26-06、C26-07、C26-09 修复后复核通过 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 有效 |
 | V26-11 | 角色二与角色四：missed 必达、内部终态与资源退役 | 冷启动构造恢复扫描/tick 交错、提交后失败、重启、重复分组、committed/其他终态、bundle ACK 前后、重复退役和进程崩溃 | R26-07、R26-09 及两组直接交界 | 专项功能审查 / 低 | 提示只作可丢唤醒且能由日志重建；内部终态事件提交后产生，assignment-retired 不早于 ACK，资源幂等释放；C26-08、C26-10、C26-11 修复后复核通过 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 有效 |
-| V26-12 | 四项专项差异审计与冻结指纹复核 | 机械取固定矩阵、四路对抗与 C26-06～C26-11 并集；重新运行唯一 delivery manifest 生成器并核对路径集 | R26-07～R26-11、V26-07～V26-11 与当前 106 路径闭包 | 专项收口 / 低 | 六条历轮反证均有同根归属和当前源码/测试证据，零未处置发现；manifest 重算为 106 路径、6 删除、路径集 SHA-256 `bf7ee1f5b1193efc0db4ad8367b42fa1bc40878251e9e7d5cf6a61bca117ce36`，与冻结指纹一致 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 有效 |
+| V26-12 | 四项专项差异审计与冻结指纹复核 | 机械取固定矩阵、四路对抗与 C26-06～C26-11 并集；重新运行唯一 delivery manifest 生成器并核对路径集 | R26-07～R26-11、V26-07～V26-11 与当时 106 路径闭包 | 专项收口 / 低 | 六条历轮反证均有同根归属和当前源码/测试证据，零未处置发现；当时 manifest 为 106 路径、6 删除；封版前仅清理两处交付卫生，精确指纹由后续冻结证据替代 | `git-delivery-manifest-v1:ab246685ca670c01f48d7e4f08b569047048815e134f91fd34ded9e151a7677b` | 失效 |
+| V26-13 | 最终验证前冻结交付物的两轮终审、独立功能审查与交付卫生成立 | 11 项复用表两轮正反向审查；按五类失效机制独立审查；manifest 重算；`git diff --check` 与结构扫描 | 当时 106 路径闭包、30 项独立清单、R26-01～R26-11、IF26-01～IF26-05 | 冻结准备与审查 / 低 | 当时两轮终审与独立功能审查零新增；最终验证随后同步测试夹具与 golden，当前精确指纹由 V26-14～V26-15 取代 | `git-delivery-manifest-v1:b043a59d3e25240ce2d623152032eec7d6d44f2867a3b5fb741cab23c0af42e6` | 失效 |
+| V26-14 | 当前冻结交付物的必要最终验证全部成立 | `pnpm build`；受影响包全测逐包串行；资源型超时按 runbook 定向隔离；Biome 变更 TS；`git diff --check`；manifest 重算 | 当前 109 路径闭包及其构建、测试、golden、结构证据 | 最终验证 / 高 | 构建 17/17；tools-builtin 286/286、orchestrator 431/431、server 754/754、runtime-host 2/2、owner-kernel 235/235、core 2587/2587、executor 502/502、CLI 2632/2632。tools/core/CLI 的默认 5 秒资源型超时均按 runbook 隔离通过；Biome 与 diff-check 通过。最终验证发现的 server 身份夹具/golden 与 executor 行为矩阵/旧 policy fixture 已按当前合同修正并在全包或完整受影响矩阵复核通过 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 有效 |
+| V26-15 | 最终验证修正后的同一冻结交付物完成两轮终审与独立功能审查 | 11 项复用表在当前指纹上两轮正反向复核；五类独立失效机制与跨链组合复核；30 项独立清单和 109 路径反向对账 | 当前 109 路径闭包、R26-01～R26-11、IF26-01～IF26-05、IR26-01～IR26-30、V26-14 | 冻结终审与独立功能审查 / 中 | 第一轮从需求、架构、生产入口到消费终态逐链复核，第二轮从并发、崩溃、安全、资源与测试盲区反推；最终修正只同步测试证据和 golden，不改变生产 owner、事实源、线性化点或产品范围。五类独立风险区与全部交界在当前指纹上重新覆盖，零新增 P0/P1/P2/P3 | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —          | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —          | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0        | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 通过；最终验证修正后重取冻结输入，11 项完整事实链、30 项独立清单与 109 路径逐项对账；修正仅同步当前合同的测试夹具、行为矩阵与 golden，零生产语义漂移、零新增问题 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0        | `git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 通过；从丢响应、旧代、半提交、墙钟变化、opening/terminal、ACK/退役、断线补读及测试伪通过反向推演；新增 session 记录场景与错误流拒绝证据闭合，零新增问题 |
 
 ## 独立审查覆盖表
 
@@ -169,5 +170,10 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF26-01 | 操作权威、幂等、CAS 与第一方 surface 身份隔离 | schedule 工具/三类 facade/RPC→GlobalState/JobControl；client instance→principal/generation→manual stream；`git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 已覆盖 | 从缺 operationId、旧 revision、同键异载荷、双客户端、重连旧代与错绑反例冷启动核对；两类权威无旁路，原 surface 回程不广播；server 身份夹具与 golden 已在当前指纹全包通过 | 任一 authority adapter、operation identity、认证绑定、surface generation 或 stream 路由变化 |
+| IF26-02 | ready、恢复、停机与生产装配拓扑 | scheduler/delivery prepare→runServer→activate、user/system/manual 恢复、stop 恢复点及组合根；`git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 已覆盖 | 构造慢 handler/transport、坏单项、大量欠账、启动中止和停机竞争；ready 前零副作用，ready 后固定并发逐义务收敛，停机不丢耐久义务 | prepare/activate/stop 顺序、恢复 owner、transport 或 handler 装配变化 |
+| IF26-03 | 调度策略、missed/capability-gap 的耐久并发与通知恢复 | policy 判别联合、occurrence/watermark/gap round、SchedulerUserNotice/Delivery/live/history；`git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 已覆盖 | 构造各提交边界崩溃、墙钟变化、重复 ready/poll、断线与关闭重开；策略不重算，通知不重不漏且公开面不泄漏内部诊断 | policy schema/reducer、通知 key/revision、Delivery 或公开投影变化 |
+| IF26-04 | job 终态、manual surface 与 assignment 资源释放 | JobJournal lifecycle、ManualJobSurfaceLifecycle、opening/terminal/retired、bundle ACK、dispatcher/relay/artifact 清理；`git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 已覆盖 | 构造 opening 迟到、失败重驱、committed/取消/失败、ACK 前后与重复退役；事件只在提交后派生，终态优先、ACK 后退役、资源幂等释放 | lifecycle 事件、终态集合、manual session 或 assignment 资源所有权变化 |
+| IF26-05 | 跨区产品闭包、兼容性、资源上界与交付路径 | IF26-01～04 全部输入、30 项独立清单、109 路径 manifest 与 U26-06 价值裁决；`git-delivery-manifest-v1:41384467440834d8602392123351bfeeb2ed34e37ff841a5761f37650cdb8d08` | 已覆盖 | 双向推演 CRUD↔surface、ready↔policy、policy↔notice、opening↔terminal↔retired、missed↔公开通知；executor 行为矩阵把 session-meta/session-activity 真实生产场景和错误流拒绝纳入机械证据；无第二事实源、永久等待、内部术语泄漏或范围外设施，U26-06 重开条件未触发 | 任一独立风险区变化、manifest 路径变化，或 U26-06 重开事实出现 |
 
 <!-- registration-complete: unit-26.gen-1 -->

@@ -68,6 +68,7 @@ import { createTempDir } from "@zhixing/test-utils";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
+let nextTestClientInstance = 0;
 
 // ─── Mock runtime ───
 
@@ -410,6 +411,7 @@ async function connect(port: number): Promise<RpcClient> {
   });
 
   let nextId = 0;
+  const clientInstanceId = `session-test-${++nextTestClientInstance}`;
   const pending = new Map<string | number, (msg: JsonRpcResponse) => void>();
   const notificationQueue: Array<{ method: string; params: unknown }> = [];
   const notificationWaiters: Array<{
@@ -447,7 +449,10 @@ async function connect(port: number): Promise<RpcClient> {
       const id = ++nextId;
       return new Promise<JsonRpcResponse>((resolve) => {
         pending.set(id, resolve);
-        ws.send(encodeRequest(id, method, params));
+        const requestParams = method === "auth" && params && typeof params === "object"
+          ? { ...params, client: { id: clientInstanceId } }
+          : params;
+        ws.send(encodeRequest(id, method, requestParams));
       });
     },
     waitNotification(method, timeoutMs = 2000) {

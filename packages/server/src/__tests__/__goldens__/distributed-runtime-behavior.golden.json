@@ -475,6 +475,8 @@
             "max": "number",
             "min": "number"
           },
+          "schedulerNoticeNext": "number",
+          "schedulerNotices": [],
           "shutdownAvailable": "boolean",
           "startedAt": "string",
           "uptimeSec": "number",

@@ -404,6 +404,8 @@
         "authenticated: boolean;",
         "readonly loopback: boolean;",
         "clientInfo?: { id?: string; version?: string };",
+        "surfacePrincipal?: string;",
+        "surfaceGeneration?: number;",
         "sendSuccess(id: string | number | null, result: unknown): void;",
         "sendError(id: string | number | null, error: JsonRpcError): void;",
         "notify(method: string, params?: unknown): void;",
@@ -430,6 +432,15 @@
       ],
       "kind": "interface",
       "name": "RpcNotificationConnection"
+    },
+    {
+      "definition": [
+        "readonly surfacePrincipal: string;",
+        "readonly generation: number;",
+        "readonly connection: RpcConnection;"
+      ],
+      "kind": "interface",
+      "name": "RpcSurfaceBinding"
     },
     {
       "definition": [
@@ -485,7 +496,8 @@
     {
       "definition": [
         "requestId?: string;",
-        "id?: string;"
+        "id?: string;",
+        "taskRevision?: number;"
       ],
       "kind": "interface",
       "name": "ScheduleDeleteParams"
@@ -502,6 +514,7 @@
       "definition": [
         "requestId?: string;",
         "id?: string;",
+        "taskRevision?: number;",
         "patch?: TaskPatch;"
       ],
       "kind": "interface",
@@ -1476,13 +1489,13 @@
     },
     {
       "kind": "import",
-      "references": 39,
+      "references": 42,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 27,
+      "references": 30,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
