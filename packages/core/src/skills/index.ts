@@ -7,6 +7,8 @@
 
 export { skillNameToId } from "./id.js";
 export { SkillStore } from "./store.js";
+export { AnchorSkillGlobalStateAdapter } from "./global-state-adapter.js";
+export type { AnchorSkillGlobalStateAdapterOptions } from "./global-state-adapter.js";
 export { renderSkillIndex } from "./render.js";
 export type { RenderSkillIndexOptions, SkillIndexEntry } from "./render.js";
 export { getBuiltinSkill, builtinIndexEntries } from "./builtin.js";

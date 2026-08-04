@@ -5,6 +5,7 @@ export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
 export { createMemoryTool } from "./memory.js";
+export type { MemoryToolPort } from "./memory.js";
 export { createScheduleTool } from "./schedule.js";
 export {
   TaskListService,
@@ -13,6 +14,7 @@ export {
   type TaskListStateListener,
 } from "./task-list.js";
 export { createWebFetchTool } from "./web-fetch.js";
+export type { SkillAdmissionPort, SkillSaver } from "./skill.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
 export {
   BUILTIN_TOOL_FACTORIES,

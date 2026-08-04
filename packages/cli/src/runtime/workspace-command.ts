@@ -229,9 +229,14 @@ export async function withLocalWorkspaceFacade<T, R = T>(
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions: new DurableConversationInteractionObserver(),
+      artifactStore: () => {
+        if (!runtime) throw new Error("Executor artifact store is not ready");
+        return runtime.artifacts;
+      },
       deviceCapacity: {
         interactive: capacity.workload("workload-interactive"),
         scheduler: capacity.workload("workload-scheduler"),
+        orchestration: capacity.workload("workload-orchestration"),
       },
     });
     runtime = await setupAuthorityRuntime({

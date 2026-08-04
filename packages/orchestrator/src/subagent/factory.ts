@@ -40,6 +40,8 @@ import {
   type TokenUsage,
   type ToolDefinition,
 } from "@zhixing/core";
+import { protocolDigest } from "@zhixing/core/protocol";
+import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing/core/contracts";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
 import {
   runContextStorage,
@@ -150,6 +152,8 @@ export interface RunChildAgentOptions {
   taskDescription?: string;
   /** 父工具调用 id，用于把子运行事件关联回 Task 调用。 */
   parentToolCallId?: string;
+  /** Stable Task tool-call or definition/node/run identity for durable child replay. */
+  childOperationId?: string;
   /**
    * 从父注意力窗口冻结出的只读背景消息。它进入子 loop 的 messages 通道,
    * 不拼进 system prompt,避免破坏同角色子 agent 的静态 prompt cache 前缀。
@@ -209,7 +213,14 @@ export interface ChildAgentResult {
 export async function runChildAgent(
   opts: RunChildAgentOptions,
 ): Promise<ChildAgentResult> {
-  const subAgentId = randomUUID();
+  const parentContext = runContextStorage.getStore();
+  const stableOperationId = opts.childOperationId ?? opts.parentToolCallId;
+  const subAgentId = parentContext?.resourceReservation && stableOperationId
+    ? `sub-${protocolDigest("OrchestrationChild", 1, {
+        parentReservationId: parentContext.resourceReservation.parentLease.reservationId,
+        operationId: stableOperationId,
+      }).replace(/^sha256:/, "").slice(0, 24)}`
+    : randomUUID();
   const startTime = Date.now();
 
   // 顶层兜底 —— 任何意外 throw 转 failed,保证函数永不抛
@@ -338,16 +349,58 @@ async function runChildAgentInner(
   // 阶段 2 + 3:跑 loop + cleanup discipline
   let runResult: SubAgentLoopResult | null = null;
   let caughtError: unknown = null;
+  const parentContext = runContextStorage.getStore();
+  let childLease: ChildResourceLease | undefined;
 
   try {
+    if (parentContext?.resourceReservation) {
+      const operationId = opts.childOperationId ?? opts.parentToolCallId;
+      if (!operationId) {
+        throw new Error("Durable child execution requires a stable operation identity");
+      }
+      childLease = await parentContext.resourceReservation.port.acquireChild(
+        parentContext.resourceReservation.parentLease,
+        { kind: "orchestration-node", id: subAgentId, attempt: 1 },
+        { maxTokens: budget.maxTokens, maxCalls: budget.maxTurns },
+        parentContext.resourceReservation.contextFor(`child:${subAgentId}:acquire`),
+      );
+    }
     await emitChildStart(opts, subAgentId, childLineage, childBus);
-    const parentMetering = runContextStorage.getStore()?.modelCallMetering;
+    const childMetering = childLease && parentContext?.resourceReservation
+      ? childModelMetering(childLease, parentContext.resourceReservation)
+      : parentContext?.modelCallMetering;
     runResult = await runContextStorage.run(
       {
         bus: childBus,
         lineage: childLineage,
         authorizeToolExecution: opts.authorizeToolExecution,
-        ...(parentMetering ? { modelCallMetering: parentMetering } : {}),
+        ...(parentContext?.conversationId
+          ? { conversationId: parentContext.conversationId }
+          : {}),
+        ...(parentContext?.turnOrigin
+          ? { turnOrigin: parentContext.turnOrigin }
+          : {}),
+        ...(parentContext?.stageScheduleMutation
+          ? { stageScheduleMutation: parentContext.stageScheduleMutation }
+          : {}),
+        ...(parentContext?.assignmentMutations
+          ? { assignmentMutations: parentContext.assignmentMutations }
+          : {}),
+        ...(parentContext?.globalQuery
+          ? { globalQuery: parentContext.globalQuery }
+          : {}),
+        ...(childMetering ? { modelCallMetering: childMetering } : {}),
+        ...(parentContext?.resourceReservation
+          ? {
+              resourceReservation: {
+                ...parentContext.resourceReservation,
+                parentLease: childLease ?? parentContext.resourceReservation.parentLease,
+              },
+            }
+          : {}),
+        ...(parentContext?.orchestrationCapacity
+          ? { orchestrationCapacity: parentContext.orchestrationCapacity }
+          : {}),
       },
       () =>
         runSubAgentLoop({
@@ -375,6 +428,7 @@ async function runChildAgentInner(
           // 子 agent 与父 agent 共享同一 workspace —— 工具执行目录与
           // system prompt "Working directory" 字段对齐
           workingDirectory: opts.workspace ?? process.cwd(),
+          orchestrationCapacity: parentContext?.orchestrationCapacity,
         }),
     );
   } catch (loopError) {
@@ -395,8 +449,55 @@ async function runChildAgentInner(
     runResult,
     caughtError,
   });
+  if (childLease && parentContext?.resourceReservation) {
+    try {
+      await parentContext.resourceReservation.port.settle(
+        childLease,
+        parentContext.resourceReservation.contextFor(`child:${subAgentId}:settle`),
+      );
+      await parentContext.resourceReservation.port.release(
+        childLease,
+        parentContext.resourceReservation.contextFor(`child:${subAgentId}:release`),
+      );
+    } catch (error) {
+      return buildFailedResult({
+        subAgentId,
+        startTime,
+        error,
+        errorType: "unexpected_error",
+      });
+    }
+  }
   await emitChildEnd(opts, childResult, childLineage, childBus);
   return childResult;
+}
+
+function childModelMetering(
+  lease: ChildResourceLease,
+  binding: NonNullable<import("../runtime/run-context.js").RunContext["resourceReservation"]>,
+): { readonly meter: ModelCallResourceMeter; readonly nextCallIndex: () => number } {
+  let callIndex = 0;
+  return {
+    nextCallIndex: () => ++callIndex,
+    meter: {
+      async reserve({ callIndex: index, tokenUpperBound }) {
+        const usageId = `usage:${lease.reservationId}:model:${index}`;
+        await binding.port.reserveUsage(
+          lease,
+          { usageId, tokens: tokenUpperBound, calls: 1 },
+          binding.contextFor(`${usageId}:reserve`),
+        );
+        return { usageId };
+      },
+      async consume({ usageId, tokens }) {
+        await binding.port.consume(
+          lease,
+          { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+          binding.contextFor(`${usageId}:consume`),
+        );
+      },
+    },
+  };
 }
 
 // ─── 折叠辅助 ───

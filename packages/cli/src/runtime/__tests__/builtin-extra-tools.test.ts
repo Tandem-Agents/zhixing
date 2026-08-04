@@ -9,7 +9,11 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { SchedulerFacade } from "@zhixing/core";
+import type {
+  AssignmentMutationPort,
+  AssignmentMutationRequest,
+  SchedulerFacade,
+} from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "@zhixing/runtime-host/builtin-extra-tools";
@@ -20,6 +24,27 @@ import type { WorksceneToolDirectory } from "@zhixing/runtime-host/workmode-tool
 
 function fakeScheduler(): SchedulerFacade {
   return {} as SchedulerFacade;
+}
+
+function assignmentMutationFixture(assignmentId: string) {
+  const staged: AssignmentMutationRequest[] = [];
+  const port: AssignmentMutationPort = {
+    assignmentId,
+    execution: "conversation",
+    async stage(input) {
+      staged.push(input);
+      return {
+        kind: "assignment-mutation-staged",
+        requestId: input.operationId,
+        recordSeq: staged.length,
+        mutationDigest: "a".repeat(64),
+      };
+    },
+    async readOverlay() {
+      return [];
+    },
+  };
+  return { port, staged };
 }
 
 // 工厂仅在构造期 capture 服务、call 体才用方法，故名集合断言用空桩足够。
@@ -68,8 +93,10 @@ describe("createBuiltinExtraToolsAssembly", () => {
     expect(tools1[1]).not.toBe(tools2[1]);
   });
 
-  it("多次 assembleTools 共享同一 TaskListService —— state 跨 runtime 持续", async () => {
+  it("多次 assembleTools 共享服务但只向当前 assignment 暂存任务变更", async () => {
     const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+
+    const assignment = assignmentMutationFixture("assignment-1");
 
     // 第一次装配，工具 set 一些 state
     const tools1 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
@@ -80,13 +107,14 @@ describe("createBuiltinExtraToolsAssembly", () => {
         bus: {} as never,
         lineage: "main",
         conversationId: "conv-1",
+        assignmentMutations: assignment.port,
       },
       async () => {
         await taskListTool1.call(
           {
             items: [{ content: "first run task", status: "in_progress" }],
           },
-          { workingDirectory: "/tmp" },
+          { workingDirectory: "/tmp", toolCallId: "call-1" },
         );
       },
     );
@@ -95,11 +123,8 @@ describe("createBuiltinExtraToolsAssembly", () => {
     const tools2 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const taskListTool2 = tools2.find((t) => t.name === "task_list")!;
 
-    // 新工具实例仍能看到旧工具 set 的 state（共享 service.cache）
-    expect(assembly.taskListService.getInProgressTasks("conv-1")).toHaveLength(1);
-    expect(assembly.taskListService.getInProgressTasks("conv-1")[0]?.content).toBe(
-      "first run task",
-    );
+    expect(assignment.staged).toHaveLength(1);
+    expect(assembly.taskListService.getAllTasks("conv-1")).toEqual([]);
 
     // 新工具 set 后旧路径也能看到（双向共享）
     await runContextStorage.run(
@@ -107,27 +132,31 @@ describe("createBuiltinExtraToolsAssembly", () => {
         bus: {} as never,
         lineage: "main",
         conversationId: "conv-1",
+        assignmentMutations: assignment.port,
       },
       async () => {
         await taskListTool2.call(
           {
             items: [{ content: "second run task", status: "completed" }],
           },
-          { workingDirectory: "/tmp" },
+          { workingDirectory: "/tmp", toolCallId: "call-2" },
         );
       },
     );
 
-    expect(assembly.taskListService.getAllTasks("conv-1")).toHaveLength(1);
-    expect(assembly.taskListService.getAllTasks("conv-1")[0]?.content).toBe(
-      "second run task",
-    );
+    expect(assignment.staged).toHaveLength(2);
+    expect(assignment.staged.map((entry) => entry.operationId)).toEqual([
+      "task-list:call-1",
+      "task-list:call-2",
+    ]);
   });
 
-  it("task_list 工具走 ALS 取 conversationId —— runtime.run 入口 conversationId 注入透传", async () => {
+  it("task_list 工具走 ALS 并隔离不同 assignment 的暂存记录", async () => {
     const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const taskListTool = tools.find((t) => t.name === "task_list")!;
+    const assignmentA = assignmentMutationFixture("assignment-A");
+    const assignmentB = assignmentMutationFixture("assignment-B");
 
     // ALS 上下文 conv-A
     await runContextStorage.run(
@@ -135,11 +164,12 @@ describe("createBuiltinExtraToolsAssembly", () => {
         bus: {} as never,
         lineage: "main",
         conversationId: "conv-A",
+        assignmentMutations: assignmentA.port,
       },
       async () => {
         await taskListTool.call(
           { items: [{ content: "A only", status: "pending" }] },
-          { workingDirectory: "/tmp" },
+          { workingDirectory: "/tmp", toolCallId: "call-A" },
         );
       },
     );
@@ -150,20 +180,28 @@ describe("createBuiltinExtraToolsAssembly", () => {
         bus: {} as never,
         lineage: "main",
         conversationId: "conv-B",
+        assignmentMutations: assignmentB.port,
       },
       async () => {
         await taskListTool.call(
           { items: [{ content: "B only", status: "in_progress" }] },
-          { workingDirectory: "/tmp" },
+          { workingDirectory: "/tmp", toolCallId: "call-B" },
         );
       },
     );
 
-    // 两个 conversation 各自独立的 state
-    expect(assembly.taskListService.getAllTasks("conv-A")[0]?.content).toBe("A only");
-    expect(assembly.taskListService.getAllTasks("conv-B")[0]?.content).toBe("B only");
-    expect(assembly.taskListService.getInProgressTasks("conv-A")).toHaveLength(0);
-    expect(assembly.taskListService.getInProgressTasks("conv-B")).toHaveLength(1);
+    expect(assignmentA.staged).toHaveLength(1);
+    expect(assignmentA.staged[0]).toMatchObject({
+      operationId: "task-list:call-A",
+      mutation: { kind: "task-list-op" },
+    });
+    expect(assignmentB.staged).toHaveLength(1);
+    expect(assignmentB.staged[0]).toMatchObject({
+      operationId: "task-list:call-B",
+      mutation: { kind: "task-list-op" },
+    });
+    expect(assembly.taskListService.getAllTasks("conv-A")).toEqual([]);
+    expect(assembly.taskListService.getAllTasks("conv-B")).toEqual([]);
   });
 
   it("无 ALS 上下文（ephemeral 路径）→ task_list 调用 isError 拒绝", async () => {

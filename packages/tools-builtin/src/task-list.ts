@@ -33,6 +33,8 @@ import type {
   ToolDefinition,
   ToolResult,
 } from "@zhixing/core";
+import type { AssignmentMutationPort } from "@zhixing/core/contracts";
+import { protocolDigest } from "@zhixing/core/protocol";
 
 // ─── Layer 1: 持久化抽象 ───
 
@@ -147,6 +149,13 @@ export class TaskListService {
     this.emit(conversationId, null);
   }
 
+  /** 接受 owner 已提交并已落盘的派生状态，不触发第二次持久化写。 */
+  acceptCommitted(conversationId: string, state: TaskListState): void {
+    const committed: TaskListState = { items: [...state.items] };
+    this.cache.set(conversationId, committed);
+    this.emit(conversationId, committed);
+  }
+
   // ─── 原子写 ───
 
   /**
@@ -229,9 +238,77 @@ export class TaskListService {
    * 每次调用返回一个新 ToolDefinition 实例（不共享对象引用），但都闭包引用同一
    * service —— runtime swap 后调用方拿新 ToolDefinition，行为一致。
    */
-  createTool(getConversationId: () => string | undefined): ToolDefinition {
-    const service = this;
-    return {
+  createTool(
+    getConversationId: () => string | undefined,
+    getAssignmentMutations?: () => AssignmentMutationPort | undefined,
+  ): ToolDefinition {
+    if (getAssignmentMutations) {
+      return createTaskListToolDefinition(
+        getConversationId,
+        async (_conversationId, items, toolCallId) => {
+          if (!toolCallId) {
+            return {
+              content: "Task list updates require a durable tool call identity.",
+              isError: true,
+            };
+          }
+          const assignmentMutations = getAssignmentMutations();
+          if (!assignmentMutations) {
+            return {
+              content: "Task list updates require an active durable turn.",
+              isError: true,
+            };
+          }
+          try {
+            await assignmentMutations.stage({
+              domain: "session",
+              mutation: {
+                kind: "task-list-op",
+                op: { op: "set", state: { items } },
+              },
+              operationId: `task-list:${toolCallId}`,
+            });
+            return {
+              content: `${renderSummary({ items })}\nThis update will take effect when the current turn completes successfully.`,
+            };
+          } catch (err) {
+            return {
+              content: `Failed to prepare task list update: ${err instanceof Error ? err.message : String(err)}.`,
+              isError: true,
+            };
+          }
+        },
+      );
+    }
+
+    return createTaskListToolDefinition(
+      getConversationId,
+      async (conversationId, items) => {
+        try {
+          const updated = await this.set(conversationId, items);
+          return { content: renderSummary(updated) };
+        } catch (err) {
+          return {
+            content:
+              `Failed to persist task list: ${err instanceof Error ? err.message : String(err)}. ` +
+              `Previous state preserved.`,
+            isError: true,
+          };
+        }
+      },
+    );
+  }
+}
+
+function createTaskListToolDefinition(
+  getConversationId: () => string | undefined,
+  apply: (
+    conversationId: string,
+    items: TaskItem[],
+    toolCallId: string | undefined,
+  ) => Promise<ToolResult>,
+): ToolDefinition {
+  return {
       name: "task_list",
       description: TASK_LIST_TOOL_DESCRIPTION,
       inputSchema: {
@@ -270,7 +347,7 @@ export class TaskListService {
       isReadOnly: false,
       isParallelSafe: false,
       needsPermission: false,
-      async call(input): Promise<ToolResult> {
+      async call(input, ctx): Promise<ToolResult> {
         // ─── Step 1: ephemeral 拒绝 ───
         // 一次性 run（定时任务等 ephemeral）的 ALS 中 conversationId === undefined，
         // task_list 无 conversation 绑定可落 —— 拒绝调用且不改 state，避免污染
@@ -287,26 +364,14 @@ export class TaskListService {
         }
 
         // ─── Step 2: 输入校验 + normalize ───
-        const validated = validateAndNormalize(input);
+        const validated = validateAndNormalize(input, ctx.toolCallId);
         if (!validated.ok) {
           return { content: validated.error, isError: true };
         }
 
-        // ─── Step 3: 原子 set ───
-        try {
-          const updated = await service.set(conversationId, validated.items);
-          return { content: renderSummary(updated) };
-        } catch (err) {
-          return {
-            content:
-              `Failed to persist task list: ${err instanceof Error ? err.message : String(err)}. ` +
-              `Previous state preserved.`,
-            isError: true,
-          };
-        }
+        return apply(conversationId, validated.items, ctx.toolCallId);
       },
     };
-  }
 }
 
 // ─── 工具描述 ───
@@ -344,7 +409,10 @@ type ValidationResult =
   | { ok: true; items: TaskItem[] }
   | { ok: false; error: string };
 
-function validateAndNormalize(input: Record<string, unknown>): ValidationResult {
+function validateAndNormalize(
+  input: Record<string, unknown>,
+  operationId?: string,
+): ValidationResult {
   const rawItems = input.items;
   if (!Array.isArray(rawItems)) {
     return { ok: false, error: "Invalid input: 'items' must be an array." };
@@ -372,7 +440,16 @@ function validateAndNormalize(input: Record<string, unknown>): ValidationResult 
       };
     }
     normalized.push({
-      id: typeof raw.id === "string" && raw.id !== "" ? raw.id : randomUUID(),
+      id:
+        typeof raw.id === "string" && raw.id !== ""
+          ? raw.id
+          : operationId
+            ? `task-${protocolDigest("TaskListItem", 1, {
+                operationId,
+                index: i,
+                content: raw.content,
+              }).slice(0, 20)}`
+            : randomUUID(),
       content: raw.content,
       status: raw.status,
     });

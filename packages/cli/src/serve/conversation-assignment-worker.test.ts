@@ -30,6 +30,25 @@ function interactionObserver(): DurableConversationInteractionObserver {
   } as unknown as DurableConversationInteractionObserver;
 }
 
+function globalAuthorityCapability(
+  assignmentId: string,
+  conversationId: string,
+): AuthorityCapability {
+  return {
+    v: 1,
+    capId: `cap-${assignmentId}`,
+    executorId: "executor-test",
+    scope: { execution: "conversation", conversationId },
+    ownerEpoch: 1,
+    methods: ["global.read", "global.mutate"],
+    resources: [],
+    assignmentId,
+    issuedAt: new Date().toISOString(),
+    expiry: new Date(Date.now() + 60_000).toISOString(),
+    signature: { keyId: "key-test", algorithm: "ed25519", value: "signature" },
+  } as AuthorityCapability;
+}
+
 describe("ConversationAssignmentWorker", () => {
   it("does not execute after the owner durably rejects the started observation", async () => {
     const assignmentId = "asg-worker-start-rejected";
@@ -441,15 +460,16 @@ describe("ConversationAssignmentWorker", () => {
 
   it("propagates durable remote cancellation into the active runtime", async () => {
     const assignmentId = "asg-worker-cancel";
+    const conversationId = "conversation-worker-cancel";
     const envelope = {
       execution: "conversation",
       assignmentId,
       manifest: { tools: [], mcpServers: [] },
-      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+      capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
       resourceLease: {},
       work: {
-        conversationId: "conversation-worker-cancel",
+        conversationId,
         runId: "run-worker-cancel",
         baseRevision: 2,
         ingress: {
@@ -579,15 +599,16 @@ describe("ConversationAssignmentWorker", () => {
 
   it("routes an authorized surface answer through the active runtime broker", async () => {
     const assignmentId = "asg-worker-ticket-answer";
+    const conversationId = "conversation-worker-ticket-answer";
     const envelope = {
       execution: "conversation",
       assignmentId,
       manifest: { tools: [], mcpServers: [] },
-      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+      capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
       resourceLease: {},
       work: {
-        conversationId: "conversation-worker-ticket-answer",
+        conversationId,
         runId: "run-worker-ticket-answer",
         ownerEpoch: 1,
         baseRevision: 2,
@@ -802,6 +823,7 @@ describe("ConversationAssignmentWorker", () => {
 
   it("binds turn origin to every remotely produced stream frame", async () => {
     const assignmentId = "asg-worker-turn-origin";
+    const conversationId = "conversation-turn-origin";
     const turnOrigin = {
       channel: "channel-test",
       target: { channelId: "channel-test", to: "user-test" },
@@ -811,11 +833,11 @@ describe("ConversationAssignmentWorker", () => {
       execution: "conversation",
       assignmentId,
       manifest: { tools: [], mcpServers: [] },
-      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+      capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
       resourceLease: {},
       work: {
-        conversationId: "conversation-turn-origin",
+        conversationId,
         runId: "run-turn-origin",
         ownerEpoch: 2,
         baseRevision: 3,

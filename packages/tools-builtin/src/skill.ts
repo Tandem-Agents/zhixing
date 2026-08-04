@@ -60,13 +60,13 @@ export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
     // → 经 app-state 边界判 internal(自动放行),不每次加载弹确认。
     boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
 
-    async call(input): Promise<ToolResult> {
+    async call(input, context): Promise<ToolResult> {
       const id = typeof input.id === "string" ? input.id.trim() : "";
       if (!id) {
         return { content: "load_skill 需要非空的 id 参数。", isError: true };
       }
       try {
-        const { name, body } = await loader.loadText(id);
+        const { name, body } = await loader.loadText(id, context?.toolCallId);
         return { content: `# ${name}\n\n${body}`, isError: false };
       } catch (e) {
         return {
@@ -85,7 +85,10 @@ export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
  * 管线",不耦合 SkillStore 与管线内部;装配期把 runSkillSavePipeline 绑定
  * store 后注入,测试可注入轻量 mock。
  */
-export type SkillSaver = (draft: SkillDraft) => Promise<SkillSaveOutcome>;
+export type SkillSaver = (
+  draft: SkillDraft,
+  operationId?: string,
+) => Promise<SkillSaveOutcome>;
 
 /**
  * save_skill 工具 —— 创建 / 打磨技能的唯一落盘口(upsert:同名即更新)。
@@ -140,7 +143,7 @@ export function createSaveSkillTool(
     isParallelSafe: false, // 写技能库结构性状态(index/目录),串行执行
     needsPermission: false, // 确认由影响分类管线承担(无边界声明 → 确认),与此字段正交
 
-    async call(input): Promise<ToolResult> {
+    async call(input, context): Promise<ToolResult> {
       const name = typeof input.name === "string" ? input.name.trim() : "";
       const description =
         typeof input.description === "string" ? input.description.trim() : "";
@@ -155,10 +158,13 @@ export function createSaveSkillTool(
         ? input.mode
         : defaultMode;
       try {
-        const result = await saver({ name, description, body, mode });
+        const result = await saver(
+          { name, description, body, mode },
+          context?.toolCallId,
+        );
         const action = result.outcome === "created" ? "新建" : "更新";
         const lines = [
-          `已${action}技能「${result.name}」(id: ${result.id})。用户可输入 /${result.id} 唤起它。`,
+          `已记录${action}技能「${result.name}」(id: ${result.id})；本轮成功完成后入库。`,
         ];
         if (result.scrubbedCount > 0) {
           lines.push(
@@ -184,7 +190,7 @@ export interface SkillAdmissionPort {
   discardStaging(dir: string): Promise<void>;
   admit(
     stagingDir: string,
-    opts?: { mode?: SkillMode },
+    opts?: { mode?: SkillMode; operationId?: string },
   ): Promise<{ id: string; name: string }>;
   sweepStaleStaging(maxAgeMs: number): Promise<number>;
 }
@@ -278,7 +284,7 @@ export function createAdmitSkillTool(
       { boundaryType: "app-state", access: "write", dynamic: false },
     ],
 
-    async call(input): Promise<ToolResult> {
+    async call(input, context): Promise<ToolResult> {
       // 跨进程孤儿暂存清扫:token 在内存,进程重启后无主 candidate 按 mtime 收走;
       // 顺扫内存登记里已过期的项(及其暂存)。
       await store.sweepStaleStaging(ADMISSION_TOKEN_TTL_MS).catch(() => {});
@@ -291,7 +297,7 @@ export function createAdmitSkillTool(
         typeof input.admissionToken === "string"
           ? input.admissionToken.trim()
           : "";
-      if (token) return confirmAdmission(token);
+      if (token) return confirmAdmission(token, context?.toolCallId);
 
       const srcPath = typeof input.path === "string" ? input.path.trim() : "";
       if (!srcPath) {
@@ -305,11 +311,15 @@ export function createAdmitSkillTool(
         input.mode === "work" || input.mode === "main"
           ? input.mode
           : defaultMode;
-      return firstCall(srcPath, mode);
+      return firstCall(srcPath, mode, context?.toolCallId);
     },
   };
 
-  async function firstCall(srcPath: string, mode: SkillMode): Promise<ToolResult> {
+  async function firstCall(
+    srcPath: string,
+    mode: SkillMode,
+    operationId: string | undefined,
+  ): Promise<ToolResult> {
     let staging: string | null = null;
     try {
       staging = await store.prepareStaging();
@@ -339,10 +349,10 @@ export function createAdmitSkillTool(
       }
 
       if (verdict.decision === "safe") {
-        const rec = await store.admit(staging, { mode });
+        const rec = await store.admit(staging, { mode, operationId });
         await store.discardStaging(staging);
         return {
-          content: `已接入技能「${rec.name}」(id: ${rec.id})。用户可输入 /${rec.id} 唤起它;它在接入区,可在 /skills 里管理。`,
+          content: `已记录接入技能「${rec.name}」(id: ${rec.id})；本轮成功完成后入库。`,
           isError: false,
         };
       }
@@ -375,7 +385,10 @@ export function createAdmitSkillTool(
     }
   }
 
-  async function confirmAdmission(token: string): Promise<ToolResult> {
+  async function confirmAdmission(
+    token: string,
+    operationId: string | undefined,
+  ): Promise<ToolResult> {
     const entry = pending.get(token);
     if (!entry || entry.expiresAt <= Date.now()) {
       await dropPending(token);
@@ -393,10 +406,13 @@ export function createAdmitSkillTool(
           isError: true,
         };
       }
-      const rec = await store.admit(entry.stagingDir, { mode: entry.mode });
+      const rec = await store.admit(entry.stagingDir, {
+        mode: entry.mode,
+        operationId,
+      });
       await dropPending(token);
       return {
-        content: `已接入技能「${rec.name}」(id: ${rec.id})。用户可输入 /${rec.id} 唤起它;它在接入区,可在 /skills 里管理。`,
+        content: `已记录接入技能「${rec.name}」(id: ${rec.id})；本轮成功完成后入库。`,
         isError: false,
       };
     } catch (e) {

@@ -29,6 +29,17 @@ import {
   type LLMRoles,
   type ToolDefinition,
 } from "@zhixing/core";
+import type {
+  AssignmentGlobalQueryPort,
+  AssignmentMutationPort,
+  ChildResourceLease,
+  ResourceLease,
+  ResourceReservationPort,
+} from "@zhixing/core/contracts";
+import type {
+  DeviceCapacityArbiterPort,
+  DeviceCapacityBudget,
+} from "@zhixing/core/resources";
 import { runChildAgent, type RunChildAgentOptions } from "../factory.js";
 import { runContextStorage, type RunContext } from "../../runtime/run-context.js";
 
@@ -112,6 +123,124 @@ describe("runChildAgent · happy path", () => {
     expect(result.status).toBe("completed");
     expect(result.toolUses).toBe(1);
     expect(result.usage.inputTokens).toBeGreaterThan(0);
+  });
+});
+
+describe("runChildAgent · assignment child resource boundary", () => {
+  it("acquires one stable child lease, meters the provider on it, and releases after inherited work closes", async () => {
+    const provider = new MockLLMProvider([
+      { toolCalls: [{ id: "probe-call", name: "read", input: {} }] },
+      { text: "done" },
+    ]);
+    const parentLease = { reservationId: "parent-reservation" } as ResourceLease;
+    const childLease = {
+      reservationId: "child-reservation",
+      parentId: "parent-reservation",
+      workload: { kind: "orchestration-node", id: "child", attempt: 1 },
+    } as ChildResourceLease;
+    const acquireChild = vi.fn().mockResolvedValue(childLease);
+    const reserveUsage = vi.fn().mockResolvedValue(undefined);
+    const consume = vi.fn().mockResolvedValue(undefined);
+    const settle = vi.fn().mockResolvedValue(undefined);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const reservationPort = {
+      acquireChild,
+      reserveUsage,
+      consume,
+      settle,
+      release,
+    } as unknown as ResourceReservationPort;
+    const assignmentMutations = {
+      assignmentId: "assignment-1",
+      execution: "conversation",
+    } as AssignmentMutationPort;
+    const globalQuery = {} as AssignmentGlobalQueryPort;
+    const capacityRelease = vi.fn();
+    const capacityComplete = vi.fn();
+    const capacityAcquire = vi.fn().mockResolvedValue({
+      kind: "granted",
+      permit: {
+        granted: {
+          occupancy: { memoryReservationBytes: 1, temporaryBytes: 0, slots: 1 },
+          quantum: { readBytes: 1, writeBytes: 1, ioOperations: 1 },
+        },
+        tryBegin: () => ({ claim: vi.fn(), complete: capacityComplete }),
+        release: capacityRelease,
+      },
+    });
+    const capacityBudget: DeviceCapacityBudget = {
+      occupancy: { memoryReservationBytes: 1, temporaryBytes: 0, slots: 1 },
+      quantum: { readBytes: 1, writeBytes: 1, ioOperations: 1 },
+    };
+    let childContext: RunContext | undefined;
+    const probe = makeReadOnlyTool("read");
+    probe.call = async () => {
+      childContext = runContextStorage.getStore();
+      const metering = childContext?.modelCallMetering;
+      if (!metering) throw new Error("child metering missing");
+      const reserved = await metering.meter.reserve({
+        callIndex: metering.nextCallIndex(),
+        tokenUpperBound: 100,
+      });
+      await metering.meter.consume({ usageId: reserved.usageId, tokens: 10 });
+      return { content: "ok", isError: false };
+    };
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+
+    const result = await runContextStorage.run(
+      {
+        bus: parentBus,
+        lineage: "main",
+        conversationId: "conversation-1",
+        assignmentMutations,
+        globalQuery,
+        resourceReservation: {
+          port: reservationPort,
+          parentLease,
+          contextFor: (requestId) => ({ requestId }) as never,
+        },
+        orchestrationCapacity: {
+          arbiter: {
+            acquire: capacityAcquire,
+            snapshot: vi.fn(),
+          } as unknown as DeviceCapacityArbiterPort,
+          atomic: capacityBudget,
+          preferred: capacityBudget,
+          maxWaitMs: 1_000,
+        },
+      },
+      () =>
+        runChildAgent(
+          makeBaseOpts(provider, {
+            parentBus,
+            parentTools: [probe],
+            childOperationId: "tool-call-1",
+          }),
+        ),
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.subAgentId).toMatch(/^sub-[0-9a-f]{24}$/);
+    expect(acquireChild).toHaveBeenCalledTimes(1);
+    expect(acquireChild.mock.calls[0]?.[0]).toBe(parentLease);
+    expect(acquireChild.mock.calls[0]?.[1]).toMatchObject({
+      kind: "orchestration-node",
+      id: result.subAgentId,
+      attempt: 1,
+    });
+    expect(reserveUsage).toHaveBeenCalled();
+    expect(consume).toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(childLease, expect.anything());
+    expect(release).toHaveBeenCalledWith(childLease, expect.anything());
+    expect(childContext?.assignmentMutations).toBe(assignmentMutations);
+    expect(childContext?.globalQuery).toBe(globalQuery);
+    expect(childContext?.resourceReservation?.parentLease).toBe(childLease);
+    expect(capacityAcquire).toHaveBeenCalledTimes(1);
+    expect(capacityAcquire.mock.calls[0]?.[0]).toMatchObject({
+      serviceClass: "workload-orchestration",
+    });
+    expect(capacityComplete).toHaveBeenCalledTimes(1);
+    expect(capacityRelease).toHaveBeenCalledTimes(1);
   });
 });
 

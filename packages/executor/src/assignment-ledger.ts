@@ -21,6 +21,7 @@ import type {
   AssignmentActivationProof,
   AssignmentEntry,
   AssignmentRecord,
+  AssignmentStagedReceipt,
   AssignmentResourceLease,
   AuthorityCapability,
   AuthorityCallContext,
@@ -90,6 +91,7 @@ import {
   dataPlaneTicketDigest,
   jobBundleRoots,
   mutationBatchArtifact,
+  stagedMutationDigest,
   interactionMirrorSeed,
   materializeInteractionDisplay,
   matchManifest,
@@ -2173,9 +2175,10 @@ export class ConversationAssignmentLedger implements
   async stageMutation(
     assignmentId: string,
     input: StagedConversationMutationInput | StagedJobMutationInput,
-  ): Promise<{ readonly seq: number }> {
+  ): Promise<AssignmentStagedReceipt> {
     const candidate = snapshot(input, "Staged mutation input");
-    const transaction = await this.#transact<{ seq: number }>(assignmentId, (state) => {
+    const digest = stagedMutationDigest(candidate);
+    const transaction = await this.#transact<AssignmentStagedReceipt>(assignmentId, (state) => {
       if (state.mutationRequestIds.has(candidate.requestId)) {
         const existing = state.stagedMutationByRequestId.get(candidate.requestId);
         if (
@@ -2189,7 +2192,15 @@ export class ConversationAssignmentLedger implements
         ) {
           throw new Error("Staged mutation requestId has a conflicting payload");
         }
-        return { kind: "return", value: { seq: existing.seq } };
+        return {
+          kind: "return",
+          value: {
+            kind: "assignment-mutation-staged",
+            requestId: existing.requestId,
+            recordSeq: existing.seq,
+            mutationDigest: stagedMutationDigest(existing),
+          },
+        };
       }
       if (state.phase !== "started" || state.aborts.length > 0) {
         throw new Error("Assignment can stage mutations only while started");
@@ -2210,10 +2221,29 @@ export class ConversationAssignmentLedger implements
       return {
         kind: "append",
         entries: [assignmentRecord(assignmentId, nextEntry(state, staged))],
-        value: { seq: staged.seq },
+        value: {
+          kind: "assignment-mutation-staged",
+          requestId: staged.requestId,
+          recordSeq: staged.seq,
+          mutationDigest: digest,
+        },
       };
     }, collectArtifactRefs(candidate));
     return transaction.value;
+  }
+
+  async readStagedMutationOverlay(
+    assignmentId: string,
+  ): Promise<readonly import("@zhixing/core/contracts").AssignmentMutationOverlayRecord[]> {
+    return this.#select(assignmentId, (state) =>
+      state.stagedMutations.map((record) => ({
+        recordSeq: record.seq,
+        domain: record.domain,
+        mutation: snapshot(record.mutation, "Staged overlay mutation"),
+        requestId: record.requestId,
+        mutationDigest: stagedMutationDigest(record),
+      })),
+    );
   }
 
   async sealConversationBundle(

@@ -56,13 +56,15 @@ async function listStaging(): Promise<string[]> {
 }
 
 describe("admit_skill 首调三态", () => {
-  it("safe → 自动入库 linked、清暂存、content 含 id 与唤起提示", async () => {
+  it("safe → 记录 linked、清暂存、content 不虚报提交前已可唤起", async () => {
     const tool = createAdmitSkillTool(store, assessAs("safe"), "main");
     const r = await tool.call({ path: srcDir }, CTX);
 
     expect(r.isError).toBe(false);
     expect(r.content).toContain("部署助手");
-    expect(r.content).toContain("/部署助手");
+    expect(r.content).toContain("id: 部署助手");
+    expect(r.content).toContain("本轮成功完成后入库");
+    expect(r.content).not.toContain("/部署助手");
     expect((await store.listAll()).map((s) => s.id)).toContain("部署助手");
     expect(await listStaging()).toEqual([]); // 清暂存
   });
@@ -125,7 +127,8 @@ describe("admit_skill 确认重调(artifact 绑定)", () => {
 
     const second = await tool.call({ admissionToken: token }, CTX);
     expect(second.isError).toBe(false);
-    expect(second.content).toContain("已接入");
+    expect(second.content).toContain("已记录接入");
+    expect(second.content).toContain("本轮成功完成后入库");
     expect(await listStaging()).toEqual([]);
     // mode 用登记值(work)
     const managed = await store.listForManagement();

@@ -30,6 +30,8 @@ import type {
   GlobalReadResult,
   GlobalStagedMutation,
   GlobalStagedMutationResult,
+  AssignmentStagedReceipt,
+  JobGlobalStagedMutation,
   SessionControlMutation,
   SessionMeta,
   SessionStagedMutation,
@@ -123,6 +125,46 @@ export interface GlobalStatePort {
     | GlobalControlMutationResult<GlobalControlMutation>
     | GlobalStagedMutationResult<GlobalStagedMutation>
   >;
+}
+
+export type AssignmentMutationRequest =
+  | {
+      readonly domain: "session";
+      readonly mutation: SessionStagedMutation;
+      readonly operationId: string;
+    }
+  | {
+      readonly domain: "global";
+      readonly mutation: GlobalStagedMutation | JobGlobalStagedMutation;
+      readonly operationId: string;
+    };
+
+export interface AssignmentMutationOverlayRecord {
+  readonly recordSeq: number;
+  readonly domain: "session" | "global";
+  readonly mutation:
+    | SessionStagedMutation
+    | GlobalStagedMutation
+    | JobGlobalStagedMutation;
+  readonly requestId: string;
+  readonly mutationDigest: Digest;
+}
+
+/**
+ * The only run-internal authoritative write surface. Descendant agents and
+ * orchestration nodes inherit the same instance, so they contribute to the
+ * parent's immutable MutationBatch rather than creating another fact source.
+ */
+export interface AssignmentMutationPort {
+  readonly assignmentId: string;
+  readonly execution: ExecutionKind;
+  stage(input: AssignmentMutationRequest): Promise<AssignmentStagedReceipt>;
+  readOverlay(): Promise<readonly AssignmentMutationOverlayRecord[]>;
+}
+
+/** Path-free, read-only global authority facade for runtime consumers. */
+export interface AssignmentGlobalQueryPort {
+  read(query: GlobalQuery): Promise<GlobalReadResult>;
 }
 
 export interface GlobalAuthorityFence {

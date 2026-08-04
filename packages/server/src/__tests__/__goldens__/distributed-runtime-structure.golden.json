@@ -1221,7 +1221,7 @@
     },
     {
       "kind": "import",
-      "references": 82,
+      "references": 84,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1299,7 +1299,7 @@
     },
     {
       "kind": "type-import",
-      "references": 79,
+      "references": 83,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1317,7 +1317,7 @@
     },
     {
       "kind": "type-import",
-      "references": 28,
+      "references": 30,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1362,6 +1362,12 @@
       "references": 7,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/tools-builtin"
     },
     {
       "kind": "import",
@@ -1461,7 +1467,7 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 6,
       "sourceZone": "orchestrator/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1485,19 +1491,25 @@
     },
     {
       "kind": "type-import",
-      "references": 11,
+      "references": 15,
       "sourceZone": "orchestrator/runtime",
       "target": "package:@zhixing/core"
     },
     {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "orchestrator/runtime",
+      "target": "package:@zhixing/tools-builtin"
+    },
+    {
       "kind": "import",
-      "references": 47,
+      "references": 48,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 33,
+      "references": 34,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
@@ -1557,7 +1569,7 @@
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 6,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing/orchestrator"
     },
@@ -1569,7 +1581,7 @@
     },
     {
       "kind": "type-import",
-      "references": 9,
+      "references": 10,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing/core"
     },

@@ -65,9 +65,8 @@ import {
   computeContextTokens,
   toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
-  MemoryStore,
-  getMemoryDir,
-  getWorkSceneMemoryDir,
+  type MemoryLogicalEntry,
+  type MemoryScopeRef,
   PermissionStore,
   resolveAgentIdentity,
   resolveModelInfo,
@@ -81,10 +80,9 @@ import {
   runAgentLoop,
   TurnContextInjector,
   TimeProvider,
-  SkillStore,
-  getSkillsRoot,
   renderSkillIndex,
   builtinIndexEntries,
+  getBuiltinSkill,
   type SkillMode,
   type Resettable,
   type RuntimeExecutionProfile,
@@ -94,7 +92,15 @@ import {
   projectSessionEvent,
   type AgentLoopDeps,
 } from "@zhixing/core";
-import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
+import type { ArtifactStore } from "@zhixing/core/authority";
+import type {
+  AssignmentGlobalQueryPort,
+  AssignmentMutationPort,
+  AuthorityCallContext,
+  ModelCallResourceMeter,
+  ResourceLease,
+  ResourceReservationPort,
+} from "@zhixing/core/contracts";
 import {
   createProviderRoles,
   ensureWorkspaceDir,
@@ -114,7 +120,9 @@ import {
   BUILTIN_TOOL_FACTORIES,
   BUILTIN_TOOL_NAMES,
   WEB_FETCH_DEFAULT_RULES,
+  type MemoryToolPort,
 } from "@zhixing/tools-builtin";
+import { protocolDigest } from "@zhixing/core/protocol";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
@@ -162,6 +170,10 @@ import {
   createAgentNodeExecutorV1,
   OrchestrationRunnerV1,
 } from "../orchestration/index.js";
+import {
+  createAssignmentSkillPorts,
+  renderAssignmentSkillIndex,
+} from "./assignment-skill-port.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -170,7 +182,6 @@ import {
  * 个人助理的技能集天然不大,20 条足以覆盖常用;超出部分靠 usage 排序的 top-N
  * 自然让位(高频技能优先入索引),未来由技能管家(分级 / 淘汰)进一步策展。
  */
-const SKILL_INDEX_TOP_N = 20;
 const LIFECYCLE_DIAGNOSTIC_LIMIT = 100;
 
 class ProtocolEventConsumerError extends Error {
@@ -212,36 +223,6 @@ function safeDispose(label: string, dispose: () => void): void {
  * skill 索引的唯一来源是此订阅者 —— 装配期不再硬编码注入，首窗 onWindowOpen 首次
  * 贡献、运行体首次 buildSystemPrompt 即含 skill 段，单一路径无并存。
  */
-function makeSkillIndexLifecycle(
-  skillStore: SkillStore,
-  skillMode: SkillMode,
-): AgentRuntimeLifecycle {
-  let builtVersion = -1; // 上次贡献所依据的 skill 版本
-  return {
-    id: "skill-index-rebuild",
-    async onWindowOpen(ctx) {
-      const cur = skillStore.version(skillMode);
-      if (cur === builtVersion) return; // 已最新 → 零 IO、零重算、不调接口
-      // 双池拼装:用户池(top-N)+ builtin 池(注册集按模式取,独立小额度、
-      // 不挤占用户额度)。遮蔽必须用**含 disabled 的全集** id——loadText 对
-      // disabled 技能仍按目录优先(禁用只影响索引可见性、指名加载仍可),
-      // 若用剔 disabled 的 listAll 判遮蔽,禁用的 own 同名 fork 会让 builtin
-      // 文案回到索引、加载却出用户版,展示与加载指向两份内容。builtin 随
-      // 版本恒定,不参与版本比对(零开销路径不受影响)。
-      const userTopN = await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N);
-      const userIds = new Set(
-        (await skillStore.listForManagement()).map((record) => record.id),
-      );
-      const next = renderSkillIndex([
-        ...userTopN,
-        ...builtinIndexEntries(skillMode, userIds),
-      ]);
-      ctx.updateSystemPromptSegment("skill-index", next);
-      builtVersion = cur;
-    },
-  };
-}
-
 /** 钩子错误转可读消息 —— lifecycle 失败事件 / 销毁调用方 warn 共用。 */
 function lifecycleErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -513,6 +494,18 @@ export interface RunParams {
   modelCallResourceMeter?: ModelCallResourceMeter;
   /** Durable assignment-local scheduler mutation append port. */
   stageScheduleMutation?: import("@zhixing/core").ScheduleMutationStager;
+  /** Unified assignment-local staged mutation and overlay port. */
+  assignmentMutations?: AssignmentMutationPort;
+  /** Assignment-bound read-only global authority facade. */
+  globalQuery?: AssignmentGlobalQueryPort;
+  /** Stable issue time of the durable assignment. */
+  assignmentIssuedAt?: string;
+  /** Durable parent assignment root for Task and orchestration child leases. */
+  resourceReservation?: {
+    readonly port: ResourceReservationPort;
+    readonly parentLease: ResourceLease;
+    readonly contextFor: (requestId: string) => AuthorityCallContext;
+  };
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -584,6 +577,8 @@ export interface CreateAgentRuntimeOptions {
    * 容量,故只接在工具执行注入点上。
    */
   deviceCapacity?: AgentRuntimeCapacityBinding;
+  /** Dedicated local capacity class for Task and file-DAG child execution. */
+  orchestrationCapacity?: AgentRuntimeCapacityBinding;
   /** 组合根已从设备本地 SecretStore 解出的配置投影；运行时不得自行触达持久化秘密。 */
   providerConfiguration: {
     readonly config: ZhixingConfig;
@@ -646,15 +641,8 @@ export interface CreateAgentRuntimeOptions {
   memoryScope?:
     | { kind: "personal" }
     | { kind: "workscene"; sceneId: string };
-  /**
-   * 技能库 store —— 缺省时内部按全局库根(~/.zhixing/skills)自建一个。
-   *
-   * cli 注入会话级单一实例,使 runtime 的索引读 / load_skill 与 cli 侧的 /<name>
-   * 唤醒、技能管理面板共享同一锁域(index.json 读改写串行),从根上杜绝跨实例
-   * 并发写丢更新。serve / 测试等无 cli 面板的路径不传,走内部
-   * 自建即可(技能为全局、库根固定,实例无状态、无生命周期负担)。
-   */
-  skillStore?: SkillStore;
+  /** Immutable skill content assets; catalog and writes remain assignment-owned. */
+  artifactStore?: ArtifactStore;
   /**
    * 主对话槽位 —— 缺省 "main"。决定主对话语义六处（capability /
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
@@ -806,23 +794,76 @@ export async function createAgentRuntime(
   // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
   // 的注册输入（Task 工具 needsPermission: false 且无 boundaries，不参与
   // 这些链路）。
-  // 个人记忆域 scope 解析 —— 装配期唯一解析点。从 memoryScope 定整域 root
-  // （personal = getMemoryDir() Layer-A 正确默认；workscene = 该场景 me/ 域），
-  // 据此构造**单一** MemoryStore（memory 工具 + flush strategy 共用，消除双
-  // 实例）。runtime 生命周期内不变。
-  const memoryRoot =
-    options.memoryScope?.kind === "workscene"
-      ? getWorkSceneMemoryDir(options.memoryScope.sceneId)
-      : getMemoryDir();
-  const memoryStore = new MemoryStore(memoryRoot);
+  const memoryScope: MemoryScopeRef = options.memoryScope ?? { kind: "personal" };
+  const memoryPort: MemoryToolPort = {
+    async save(input) {
+      const entries = await readMemoryEntries(memoryScope, input.category);
+      const current = entries.find((entry) => entry.id === input.id);
+      if (input.action === "save" && current) {
+        throw new Error(`Memory "${input.id}" already exists; use update`);
+      }
+      if (input.action === "update" && !current) {
+        throw new Error(`Memory "${input.id}" does not exist; use save`);
+      }
+      await requireAssignmentMutations().stage({
+        domain: "global",
+        operationId: input.operationId,
+        mutation: {
+          kind: "memory-append",
+          payload: {
+            domain: "memory",
+            scope: memoryScope,
+            category: input.category,
+            id: input.id,
+            meta: toJsonObject(input.meta),
+            content: input.content,
+            ...(current ? { expectedDigest: current.digest } : {}),
+          },
+        },
+      });
+    },
+    async search(query) {
+      const port = requireGlobalQuery();
+      const result = await port.read({
+        kind: "memory-search",
+        scope: memoryScope,
+        domain: "memory",
+        query,
+        limit: 20,
+      });
+      if (result.kind !== "memory-search") {
+        throw new Error("Memory query returned another result type");
+      }
+      return await readMemoryOverlay(result.hits.map((hit) => hit.entry), memoryScope);
+    },
+    list: (category) => readMemoryEntries(memoryScope, category),
+    async delete(input) {
+      const entries = await readMemoryEntries(memoryScope, input.category);
+      const current = entries.find((entry) => entry.id === input.id);
+      if (!current) return false;
+      await requireAssignmentMutations().stage({
+        domain: "global",
+        operationId: input.operationId,
+        mutation: {
+          kind: "memory-delete",
+          scope: memoryScope,
+          domain: "memory",
+          category: input.category,
+          id: input.id,
+          expectedDigest: current.digest,
+        },
+      });
+      return true;
+    },
+  };
 
-  // 技能分区跟随场景,与记忆域同源于 memoryScope —— "工作场景"这一个轴同时定
-  // 记忆域与技能区:工作场景注入 work 区技能,个人对话注入 main 区。SkillStore
-  // 是技能库唯一磁盘访问点(库根固定 ~/.zhixing/skills,不随场景隔离 —— 技能跨
-  // 场景共享,只按 mode 分区注入),load_skill 工具与索引段共用此实例。
+  // 技能分区跟随场景。执行侧只持 immutable artifact 与 assignment 读写接缝；
+  // 目录、状态、usage 和物化的唯一写 owner 在 anchor。
   const skillMode: SkillMode =
     options.memoryScope?.kind === "workscene" ? "work" : "main";
-  const skillStore = options.skillStore ?? new SkillStore(getSkillsRoot());
+  const skillPorts = options.artifactStore
+    ? createAssignmentSkillPorts(options.artifactStore)
+    : unavailableAssignmentSkillPorts();
 
   // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
   // 无需 per-run 重算）。三类用途严格分区：
@@ -857,8 +898,10 @@ export async function createAgentRuntime(
 
   const builtinCtx = {
     proxy: config.network?.proxy,
-    memoryStore,
-    skillStore,
+    memoryPort,
+    skillLoader: skillPorts.loader,
+    skillSaver: skillPorts.saver,
+    skillAdmission: skillPorts.admission,
     skillMode,
     // 接入审查独立裁判：绑 main 档单发（质量敏感安全裁决）、不带对话上下文
     admissionLlm: (prompt: string) => mainCallLLM([userMessage(prompt)]),
@@ -1010,13 +1053,11 @@ export async function createAgentRuntime(
   // capture 实例权威延续值 byte-equal。tools[] 装配一次冻结（reload 级、比注意力
   // 窗口更强）,任何阶段不增删改;per-turn 信息走 turn-context 注入、不进 systemPrompt。
   //
-  // 数据驱动段（skill-index）的内容不在装配期硬编码,而由 onWindowOpen 订阅者经公共
-  // updateSystemPromptSegment 贡献 —— 首窗首次贡献、首次 buildSystemPrompt 即含该段
-  //（单一路径,无装配期与订阅者并存）。固定段输入（profile / tools / cwd / workspace,
-  // 运行体生命周期内不变）装配期 capture,与段覆盖一起喂 buildSystemPrompt 重拼。
+  // builtin 索引是包内只读常量；用户目录只在注意力窗口首次 run 或窗口换代时
+  // 经 assignment GlobalQuery 刷新。窗口内的后续 run 不重读目录，保持 prompt
+  // byte-equal。
   const runtimeId = randomUUID();
   const lifecycle: readonly AgentRuntimeLifecycle[] = [
-    makeSkillIndexLifecycle(skillStore, skillMode),
     ...(options.lifecycle ?? []),
   ];
   const lifecycleIds = new Set<string>();
@@ -1043,7 +1084,10 @@ export async function createAgentRuntime(
   // 实例级 holder（所有 run 共享）—— authoritativePrompt 由首窗 onWindowOpen 建立。
   let instanceSegmentOverrides: Partial<
     Record<SystemPromptSegment, string | null>
-  > = {};
+  > = {
+    "skill-index": renderSkillIndex(builtinIndexEntries(skillMode, new Set())),
+  };
+  let skillCatalogRevision = -1;
   let instanceMessagePrefixContributions: PrefixContributionHolder = new Map();
   let authoritativePrompt = "";
   let authoritativeMessagePrefix: readonly Message[] = [];
@@ -1254,7 +1298,55 @@ export async function createAgentRuntime(
   const memoryFlushHook = createMemoryFlushHook({
     flusher: new MemoryFlusher({
       callLLM: lightCallLLM,
-      store: memoryStore,
+      write: async (extraction, operationId) => {
+        const mutations = requireAssignmentMutations();
+        const common = {
+          scope: memoryScope,
+          content: extraction.content,
+        };
+        await mutations.stage({
+          domain: "global",
+          operationId,
+          mutation: extraction.category === "journal"
+            ? {
+                kind: "memory-append",
+                payload: {
+                  domain: "journal",
+                  ...common,
+                  date: extraction.id,
+                },
+              }
+            : extraction.category === "person"
+              ? {
+                  kind: "memory-append",
+                  payload: {
+                    domain: "people",
+                    ...common,
+                    id: extraction.id,
+                    meta: {
+                      name: String(extraction.meta.name ?? extraction.id),
+                      relation: String(extraction.meta.relation ?? "unknown"),
+                      ...(typeof extraction.meta.birthday === "string"
+                        ? { birthday: extraction.meta.birthday }
+                        : {}),
+                      ...(Array.isArray(extraction.meta.tags)
+                        ? { tags: extraction.meta.tags.map(String) }
+                        : {}),
+                    },
+                  },
+                }
+              : {
+                  kind: "memory-append",
+                  payload: {
+                    domain: "memory",
+                    ...common,
+                    category: "profile",
+                    id: extraction.id,
+                    meta: toJsonObject(extraction.meta),
+                  },
+                },
+        });
+      },
     }),
   });
 
@@ -1522,7 +1614,9 @@ export async function createAgentRuntime(
         persistence: { async appendSegment() {} },
         taskListReader: { hasInProgress: () => false },
         eventBus: localBus,
-        hooks: [memoryFlushHook],
+        // Manual compact is a run-out control operation: it must not create
+        // assignment-scoped memory writes without a commit boundary.
+        hooks: [],
       });
 
       // localBus 与 UI 隔离，降级信息经返回值显式交付——在 evaluate 期间
@@ -1689,6 +1783,25 @@ export async function createAgentRuntime(
       // 入口 capture 实例权威当前值（窗口延续则 byte-equal、cache 跨 run 命中;上个
       // run 末轮切段 / run 外换代已更新实例权威则取到新值）。run 内换代只改本 run
       // 局部,并发 run 互不观测对方的换代（窗口内 byte-equal 在并发下成立的根本）。
+      const entryWindowIndex = windowCounter - 1;
+      const isWindowFirstRun = entryWindowIndex !== lastRunEntryWindowIndex;
+      lastRunEntryWindowIndex = entryWindowIndex;
+
+      if (isWindowFirstRun && params.globalQuery) {
+        const skillIndex = await renderAssignmentSkillIndex(
+          skillMode,
+          params.globalQuery,
+        );
+        if (skillIndex.catalogRevision > skillCatalogRevision) {
+          skillCatalogRevision = skillIndex.catalogRevision;
+          instanceSegmentOverrides = {
+            ...instanceSegmentOverrides,
+            "skill-index": skillIndex.content,
+          };
+          authoritativePrompt = buildPrompt(instanceSegmentOverrides);
+        }
+      }
+
       const localSegmentOverrides: Partial<
         Record<SystemPromptSegment, string | null>
       > = { ...instanceSegmentOverrides };
@@ -1714,6 +1827,21 @@ export async function createAgentRuntime(
           const nextInstanceSegmentOverrides = { ...instanceSegmentOverrides };
           const nextLocalMessagePrefixContributions: PrefixContributionHolder =
             new Map(localMessagePrefixContributions);
+
+          if (params.globalQuery) {
+            const skillIndex = await renderAssignmentSkillIndex(
+              skillMode,
+              params.globalQuery,
+            );
+            localSegmentOverrides["skill-index"] = skillIndex.content;
+            if (
+              myEpoch > instanceEpoch &&
+              skillIndex.catalogRevision >= skillCatalogRevision
+            ) {
+              skillCatalogRevision = skillIndex.catalogRevision;
+              nextInstanceSegmentOverrides["skill-index"] = skillIndex.content;
+            }
+          }
 
           for (const sub of lifecycle) {
             const closeCtx: LifecycleWindowCloseContext = {
@@ -1814,12 +1942,6 @@ export async function createAgentRuntime(
       // 用户消息贡献注入内容。不重建 system prompt（run 入口重建会违反窗口内
       // byte-equal）。抛错不阻塞 run。
       //
-      // isWindowFirstRun：run 入口所在窗口（windowCounter - 1）与上个 run 入口窗口
-      // 比对 —— 这段同步、单线程原子;窗口可在 run 内换代,故按入口时刻判定。
-      const entryWindowIndex = windowCounter - 1;
-      const isWindowFirstRun = entryWindowIndex !== lastRunEntryWindowIndex;
-      lastRunEntryWindowIndex = entryWindowIndex;
-
       // 订阅者经 injectUserContext 贡献注入内容,运行体收齐后拼一个 <context> 块
       //（拼装 / 包标签 / 注入位置归运行体,订阅者只递交内容）。
       const userContextContributions: string[] = [];
@@ -1877,6 +1999,11 @@ export async function createAgentRuntime(
             turnOrigin: params.turnContext?.turnOrigin,
             authorizeToolExecution: params.authorizeToolExecution,
             stageScheduleMutation: params.stageScheduleMutation,
+            assignmentMutations: params.assignmentMutations,
+            globalQuery: params.globalQuery,
+            assignmentIssuedAt: params.assignmentIssuedAt,
+            resourceReservation: params.resourceReservation,
+            orchestrationCapacity: options.orchestrationCapacity,
             ...(modelCallMetering ? { modelCallMetering } : {}),
           },
           async (): Promise<RunResult> => {
@@ -2183,4 +2310,139 @@ function freezeExecutionProfile(
     mcpServers: Object.freeze(normalize(input.mcpServers, "Runtime MCP servers")),
     providerIds: Object.freeze(normalize(input.providerIds, "Runtime providers")),
   });
+}
+
+function unavailableAssignmentSkillPorts(): ReturnType<
+  typeof createAssignmentSkillPorts
+> {
+  const unavailable = async (): Promise<never> => {
+    throw new Error("User skills require an active artifact-backed assignment");
+  };
+  return {
+    loader: {
+      async loadText(id) {
+        const builtin = getBuiltinSkill(id);
+        if (!builtin) return unavailable();
+        return { id: builtin.id, name: builtin.name, body: builtin.body };
+      },
+    },
+    saver: unavailable,
+    admission: {
+      prepareStaging: unavailable,
+      discardStaging: unavailable,
+      admit: unavailable,
+      sweepStaleStaging: async () => 0,
+    },
+  };
+}
+
+function requireAssignmentMutations(): AssignmentMutationPort {
+  const mutations = runContextStorage.getStore()?.assignmentMutations;
+  if (!mutations) {
+    throw new Error("Memory writes require an active durable assignment");
+  }
+  return mutations;
+}
+
+function requireGlobalQuery(): AssignmentGlobalQueryPort {
+  const query = runContextStorage.getStore()?.globalQuery;
+  if (!query) {
+    throw new Error("Memory reads require the assignment global query port");
+  }
+  return query;
+}
+
+async function readMemoryEntries(
+  scope: MemoryScopeRef,
+  category: "profile" | "person" | "journal",
+): Promise<readonly MemoryLogicalEntry[]> {
+  const result = await requireGlobalQuery().read({
+    kind: "memory-list",
+    scope,
+    domain: "memory",
+    category,
+  });
+  if (result.kind !== "memory-list") {
+    throw new Error("Memory list returned another result type");
+  }
+  return (await readMemoryOverlay(result.entries, scope)).filter(
+    (entry) => entry.category === category,
+  );
+}
+
+async function readMemoryOverlay(
+  base: readonly MemoryLogicalEntry[],
+  scope: MemoryScopeRef,
+): Promise<MemoryLogicalEntry[]> {
+  const result = new Map(base.map((entry) => [`${entry.category}:${entry.id}`, entry]));
+  const port = runContextStorage.getStore()?.assignmentMutations;
+  if (!port) return [...result.values()];
+  const records = await port.readOverlay();
+  for (const record of records) {
+    if (record.domain !== "global") continue;
+    const mutation = record.mutation;
+    if (mutation.kind === "memory-delete") {
+      if (!sameMemoryScope(mutation.scope, scope)) continue;
+      const category = mutation.category ?? memoryCategoryForDomain(mutation.domain);
+      result.delete(`${category}:${mutation.id}`);
+      continue;
+    }
+    if (mutation.kind !== "memory-append" || !sameMemoryScope(mutation.payload.scope, scope)) {
+      continue;
+    }
+    const payload = mutation.payload;
+    const category = payload.domain === "memory"
+      ? payload.category
+      : memoryCategoryForDomain(payload.domain);
+    const id = payload.domain === "journal" ? payload.date : payload.id;
+    if (!id) continue;
+    const key = `${category}:${id}`;
+    const previous = result.get(key);
+    const meta = payload.domain === "memory"
+      ? payload.meta
+      : payload.domain === "people"
+        ? payload.meta as unknown as Record<string, import("@zhixing/core").JsonValue>
+        : { date: id };
+    result.set(key, {
+      domain: payload.domain,
+      scope,
+      category,
+      id,
+      meta,
+      content:
+        payload.domain === "journal" && previous
+          ? `${previous.content}\n\n---\n\n${payload.content}`
+          : payload.content,
+      revision: (previous?.revision ?? 0) + 1,
+      digest: protocolDigest("MemoryLogicalEntry", 1, {
+        scope,
+        category,
+        id,
+        meta,
+        content: payload.content,
+      }),
+    });
+  }
+  return [...result.values()];
+}
+
+function memoryCategoryForDomain(
+  domain: "memory" | "journal" | "people",
+): "profile" | "person" | "journal" {
+  return domain === "people" ? "person" : domain === "journal" ? "journal" : "profile";
+}
+
+function sameMemoryScope(left: MemoryScopeRef, right: MemoryScopeRef): boolean {
+  return left.kind === right.kind &&
+    (left.kind === "personal" ||
+      (right.kind === "workscene" && left.sceneId === right.sceneId));
+}
+
+function toJsonObject(
+  input: Record<string, unknown>,
+): Record<string, import("@zhixing/core").JsonValue> {
+  return JSON.parse(JSON.stringify(input)) as Record<
+    string,
+    import("@zhixing/core").JsonValue
+  >;
 }

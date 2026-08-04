@@ -7,6 +7,7 @@ import type {
   ResourceUsageIntake,
   RunExecutorPort,
   RunSubmissionPort,
+  GlobalStatePort,
 } from "@zhixing/core/contracts";
 import type {
   ProtocolSignatureVerifier,
@@ -29,6 +30,10 @@ import {
   type AnyAssignmentActivationProof,
   type AssignmentArtifactAuthorization,
 } from "./assignment-mesh-adapter.js";
+import {
+  MeshAssignmentGlobalQueryPort,
+  registerGlobalQueryMeshService,
+} from "./global-query-mesh.js";
 
 export interface AssignmentMeshStorage {
   readonly artifacts: ArtifactStore;
@@ -67,6 +72,7 @@ export interface AssignmentMeshAnchorRole {
   readonly submissionGuard: AssignmentSubmissionPreflightPort;
   readonly usage: ResourceUsageIntake;
   readonly executorIdForPeer: (deviceId: string) => string | undefined;
+  readonly globalState: GlobalStatePort;
 }
 
 export interface AssignmentMeshCompositionOptions {
@@ -122,6 +128,12 @@ export class AssignmentMeshComposition {
         intake: options.anchor.usage,
         reporterIdForPeer: options.anchor.executorIdForPeer,
       }));
+      this.#disposers.push(registerGlobalQueryMeshService(
+        options.services,
+        options.anchor.globalState,
+        options.identity.verifier,
+        options.anchor.executorIdForPeer,
+      ));
     }
   }
 
@@ -170,6 +182,18 @@ export class AssignmentMeshComposition {
     return new MeshResourceUsageIntake({
       client: this.options.connections.client(peerDeviceId),
     });
+  }
+
+  globalQueryPort(
+    peerDeviceId: string,
+    capability: AuthorityCapability,
+    anchorEpoch: number,
+  ): import("@zhixing/core/contracts").AssignmentGlobalQueryPort {
+    return new MeshAssignmentGlobalQueryPort(
+      this.options.connections.client(peerDeviceId),
+      capability,
+      anchorEpoch,
+    );
   }
 
   close(): void {

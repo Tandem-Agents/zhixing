@@ -121,7 +121,6 @@ export const WORKSCENE_MANAGEMENT_TOOLS = {
     boundaries: AGENT_CONTEXT_AND_FILESYSTEM_WRITE_BOUNDARIES,
     requiresExplicitConfirmation: true,
     confirmationDisplay: "workscene",
-    postTurnControlKind: "set_workdir",
   },
   workscene_clear_workdir_current: {
     surface: "workscene",
@@ -131,7 +130,6 @@ export const WORKSCENE_MANAGEMENT_TOOLS = {
     boundaries: AGENT_CONTEXT_AND_FILESYSTEM_WRITE_BOUNDARIES,
     requiresExplicitConfirmation: true,
     confirmationDisplay: "workscene",
-    postTurnControlKind: "set_workdir",
   },
 } as const satisfies Record<
   WorksceneManagementToolName,

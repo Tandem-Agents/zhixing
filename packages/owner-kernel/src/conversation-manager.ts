@@ -201,6 +201,11 @@ export interface ConversationManagerCallbacks {
   appendRun?: AppendRun;
   /** 新提交协议的派生投影；未启用新路径时可以省略。 */
   appendCommittedRun?: AppendCommittedRun;
+  /** 幂等物化与权威 run 同批提交的 session 派生状态。 */
+  applyCommittedSessionMutations?: (
+    conversationId: string,
+    mutations: ConversationCommitProjectionInput["sessionMutations"],
+  ) => Promise<void>;
   /**
    * 派生摘要快照写入 —— 对应快照 store 的 `write`。
    *
@@ -385,6 +390,7 @@ export class ConversationManager implements ConversationCommitProjection {
   private readonly ensureConversation?: EnsureConversation;
   private readonly appendRunCb?: AppendRun;
   private readonly appendCommittedRunCb?: AppendCommittedRun;
+  private readonly applyCommittedSessionMutationsCb?: ConversationManagerCallbacks["applyCommittedSessionMutations"];
   private readonly writeSnapshotCb?: (
     conversationId: string,
     input: SnapshotInput,
@@ -422,6 +428,8 @@ export class ConversationManager implements ConversationCommitProjection {
       this.ensureConversation = callbacksOrOnRelease.ensureConversation;
       this.appendRunCb = callbacksOrOnRelease.appendRun;
       this.appendCommittedRunCb = callbacksOrOnRelease.appendCommittedRun;
+      this.applyCommittedSessionMutationsCb =
+        callbacksOrOnRelease.applyCommittedSessionMutations;
       this.writeSnapshotCb = callbacksOrOnRelease.writeSnapshot;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
       this.onTurnCommitted = callbacksOrOnRelease.onTurnCommitted;
@@ -1559,6 +1567,10 @@ export class ConversationManager implements ConversationCommitProjection {
       throw new Error("ConversationManager requires appendCommittedRun for commit projection");
     }
     const conversationId = input.conversationId;
+    await this.applyCommittedSessionMutationsCb?.(
+      conversationId,
+      input.sessionMutations,
+    );
     const accepted = await this.appendCommittedRunCb(conversationId, input.runRecord);
     if (!accepted.appended) return;
     const session = this.sessions.get(conversationId);

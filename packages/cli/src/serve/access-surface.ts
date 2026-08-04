@@ -58,6 +58,7 @@ import type {
   AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
 import type { McpHub } from "@zhixing/mcp";
+import type { TaskListService } from "@zhixing/tools-builtin";
 import type {
   AuthorityRuntimeStack,
   DeliveryStack,
@@ -144,6 +145,11 @@ export interface AssemblyContext {
   readonly convRepo: ConversationRepository;
   /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */
   readonly conversationDirectory: ConversationDirectory;
+  readonly conversationRepoFor: (conversationId: string) => {
+    readonly repo: import("@zhixing/core").IConversationRepository;
+    readonly localId: string;
+  };
+  readonly taskListService: TaskListService;
   readonly conversationAuthorityRef: {
     current: ConversationProtocolRuntime | undefined;
   };

@@ -13,6 +13,7 @@ import type {
   DeliveryTargetDto,
   MemoryAppendPayload,
   MemoryCategoryDto,
+  IsoTime,
   PersonMetaDto,
   ScheduleTaskSpec,
   SegmentRecord,
@@ -36,7 +37,7 @@ import type { PersonMeta } from "../memory/people-store.js";
 import type { TaskSpec } from "../scheduler/facade.js";
 import type { TaskPriority, TaskSchedule } from "../scheduler/types.js";
 import type { PermissionRule } from "../security/types.js";
-import type { SkillMode, SkillUsage } from "../skills/types.js";
+import type { SkillMode } from "../skills/types.js";
 import type { RunRecord } from "../transcript/shard/types.js";
 import type { WindowCompact } from "../context/window/types.js";
 
@@ -124,7 +125,10 @@ export type TaskListOpInvariant = Assert<
   Equal<TaskListOp, { op: "set"; state: TaskListState }>
 >;
 export type SkillUsageRecordInvariant = Assert<
-  Equivalent<SkillUsageRecord, SkillUsage & { skillId: string }>
+  Equal<
+    SkillUsageRecord,
+    { skillId: string; occurredAt: IsoTime; hitDelta: 1 }
+  >
 >;
 export type MemoryCategorySnapshotInvariant = Assert<
   Equal<MemoryCategoryDto, MemoryCategory>

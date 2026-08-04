@@ -9,6 +9,10 @@
 
 import { describe, it, expect } from "vitest";
 import type { TaskListState } from "@zhixing/core";
+import type {
+  AssignmentMutationPort,
+  AssignmentMutationRequest,
+} from "@zhixing/core/contracts";
 import { TaskListService, type TaskListStore } from "../task-list.js";
 
 // ─── 内存 store fixture ───
@@ -245,6 +249,76 @@ describe("task_list 工具 — ephemeral 拒绝（修复 Bug-1）", () => {
     expect(service.getCached("main")).toEqual(before);
     expect(service.getInProgressTasks("main")).toHaveLength(1);
     expect(service.getInProgressTasks("main")[0]?.content).toBe("用户任务");
+  });
+});
+
+describe("task_list 工具 — assignment staged 边界", () => {
+  function fixture() {
+    const staged: AssignmentMutationRequest[] = [];
+    const port: AssignmentMutationPort = {
+      assignmentId: "assignment-1",
+      execution: "conversation",
+      async stage(input) {
+        staged.push(input);
+        return {
+          kind: "assignment-mutation-staged",
+          requestId: input.operationId,
+          recordSeq: staged.length,
+          mutationDigest: "a".repeat(64),
+        };
+      },
+      async readOverlay() {
+        return [];
+      },
+    };
+    return { staged, port };
+  }
+
+  it("run 内 set 只追加 task-list-op，commit 前不改 store/cache", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    const { staged, port } = fixture();
+    const tool = service.createTool(() => "conv-1", () => port);
+
+    const result = await tool.call(
+      { items: [{ content: "finish work", status: "in_progress" }] },
+      { workingDirectory: "/tmp", toolCallId: "call-1" },
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("current turn completes successfully");
+    expect(staged).toHaveLength(1);
+    expect(staged[0]).toMatchObject({
+      domain: "session",
+      operationId: "task-list:call-1",
+      mutation: { kind: "task-list-op" },
+    });
+    expect(store.saveCalls).toEqual([]);
+    expect(service.getCached("conv-1")).toBeNull();
+  });
+
+  it("同一 durable toolCall 重放生成全等任务身份与 operationId", async () => {
+    const service = new TaskListService(createStubStore());
+    const { staged, port } = fixture();
+    const tool = service.createTool(() => "conv-1", () => port);
+    const input = { items: [{ content: "stable", status: "pending" }] };
+
+    await tool.call(input, { workingDirectory: "/tmp", toolCallId: "call-stable" });
+    await tool.call(input, { workingDirectory: "/tmp", toolCallId: "call-stable" });
+
+    expect(staged[1]).toEqual(staged[0]);
+  });
+
+  it("无 active assignment 时 fail-closed，不降级直写", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    const tool = service.createTool(() => "conv-1", () => undefined);
+    const result = await tool.call(
+      { items: [{ content: "blocked", status: "pending" }] },
+      { workingDirectory: "/tmp", toolCallId: "call-blocked" },
+    );
+    expect(result.isError).toBe(true);
+    expect(store.saveCalls).toEqual([]);
   });
 });
 

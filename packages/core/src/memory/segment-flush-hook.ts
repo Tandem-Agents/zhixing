@@ -27,6 +27,7 @@ export function createMemoryFlushHook(
       if (ctx.messages.length < minMessages) return;
       await config.flusher.flush(ctx.messages, {
         abortSignal: ctx.abortSignal,
+        operationId: `segment-memory:${ctx.segmentId}`,
       });
     },
   };

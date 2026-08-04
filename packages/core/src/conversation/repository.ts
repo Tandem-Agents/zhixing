@@ -290,6 +290,13 @@ export class ConversationRepository implements IConversationRepository {
       const parsed = JSON.parse(content) as Record<string, unknown>;
       const existing = parsed.segmentMetadata as SegmentMetadata | undefined;
       const prevSegments = existing?.segments ?? [];
+      const replay = prevSegments.find((candidate) => candidate.segmentId === meta.segmentId);
+      if (replay) {
+        if (JSON.stringify(replay) !== JSON.stringify(meta)) {
+          throw new Error(`Segment "${meta.segmentId}" conflicts with its committed projection`);
+        }
+        return;
+      }
       const next: SegmentMetadata = {
         currentSegmentId: meta.segmentId,
         segments: [...prevSegments, meta],

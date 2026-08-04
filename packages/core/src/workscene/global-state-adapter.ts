@@ -8,6 +8,7 @@ import type {
   GlobalStagedMutation,
   GlobalStagedMutationResult,
   GlobalStagedCallContext,
+  LogicalRecord,
   GlobalStatePort,
   WorksceneAppliedResult,
   WorksceneMigrationMutation,
@@ -18,6 +19,7 @@ import type { AuthorityCommitLog } from "../authority/index.js";
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
+  canonicalize,
 } from "../protocol/index.js";
 import {
   runInMaintenanceContext,
@@ -93,6 +95,63 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     ) {
       throw new TypeError("Workscene deletion page size is invalid");
     }
+  }
+
+  async initializeStagedPublishing(): Promise<void> {
+    await this.#registry.initialize();
+  }
+
+  ownsStagedMutation(mutation: GlobalStagedMutation): boolean {
+    return isWorksceneWrite(mutation);
+  }
+
+  prepareStagedMutations(input: {
+    readonly records: ReadonlyArray<{
+      readonly seq: number;
+      readonly requestId: string;
+      readonly mutation: GlobalStagedMutation;
+    }>;
+  }): {
+    readonly records: readonly LogicalRecord[];
+    readonly outcomes: ReturnType<AnchorWorksceneRegistry["planStaged"]>["outcomes"];
+  } {
+    return this.#registry.planStaged(
+      input.records.map((record) => {
+        if (!isWorksceneWrite(record.mutation)) {
+          throw new TypeError("Workscene planner received another mutation domain");
+        }
+        return { ...record, mutation: record.mutation };
+      }),
+    );
+  }
+
+  async applyStagedMutation(input: {
+    readonly requestId: string;
+    readonly targetRevision: number;
+    readonly appliedResult?: WorksceneAppliedResult;
+  }): Promise<void> {
+    if (!input.appliedResult) {
+      throw new TypeError("Committed workscene mutation omitted its applied result");
+    }
+    await this.#registry.refreshCommitted();
+    const replay = await this.#registry.replay(input.requestId);
+    if (
+      !replay ||
+      replay.revision !== input.targetRevision ||
+      canonicalize(replay) !== canonicalize(input.appliedResult)
+    ) {
+      throw new Error("Committed workscene result is unavailable or changed");
+    }
+    if (replay.kind === "workscene-deleted") {
+      await runInMaintenanceContext("foreground", () =>
+        this.#projectDeletion(replay.sceneId, replay.revision),
+      );
+    }
+  }
+
+  async refreshStagedMutations(): Promise<void> {
+    await this.#registry.refreshCommitted();
+    await this.recoverPendingDeletions();
   }
 
   async read(

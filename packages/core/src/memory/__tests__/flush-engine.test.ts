@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import {
   MemoryFlusher,
@@ -153,6 +153,33 @@ describe("MemoryFlusher", () => {
     const flusher = new MemoryFlusher({ callLLM: async () => "[]", store });
     const result = await flusher.flush(SAMPLE_MESSAGES);
     expect(result).toEqual({ extracted: 0, saved: 0, errors: [] });
+  });
+
+  it("staged writer 收到稳定的逐条 operationId，且不触达可写 Store", async () => {
+    const write = vi.fn().mockResolvedValue(undefined);
+    const flusher = new MemoryFlusher({
+      callLLM: makeLLMFn([
+        { category: "profile", id: "profile", meta: {}, content: "a" },
+        { category: "journal", id: "2026-08-04", meta: {}, content: "b" },
+      ]),
+      write,
+    });
+
+    const result = await flusher.flush(SAMPLE_MESSAGES, {
+      operationId: "segment-memory:segment-7",
+    });
+
+    expect(result).toEqual({ extracted: 2, saved: 2, errors: [] });
+    expect(write).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ category: "profile", id: "profile" }),
+      "segment-memory:segment-7:0",
+    );
+    expect(write).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ category: "journal", id: "2026-08-04" }),
+      "segment-memory:segment-7:1",
+    );
   });
 
   it("LLM 调用抛错 → flush 抛出（容错归调用方：段切换 hook 失败降级 warning）", async () => {

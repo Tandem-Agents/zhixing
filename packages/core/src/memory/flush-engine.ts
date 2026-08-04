@@ -61,7 +61,8 @@ export interface FlushResult {
 
 export interface MemoryFlusherConfig {
   readonly callLLM: TextCallLLMFn;
-  readonly store: MemoryStore;
+  readonly store?: MemoryStore;
+  readonly write?: (extraction: FlushExtraction, operationId: string) => Promise<void>;
 }
 
 /**
@@ -73,17 +74,22 @@ export interface MemoryFlusherConfig {
  */
 export class MemoryFlusher {
   private readonly callLLM: TextCallLLMFn;
-  private readonly store: MemoryStore;
+  private readonly store: MemoryStore | undefined;
+  private readonly write: MemoryFlusherConfig["write"];
 
   constructor(config: MemoryFlusherConfig) {
     this.callLLM = config.callLLM;
     this.store = config.store;
+    this.write = config.write;
+    if (!this.store && !this.write) {
+      throw new TypeError("MemoryFlusher requires a store or staged write port");
+    }
   }
 
   /** 从消息中提取记忆并保存。 */
   async flush(
     messages: readonly Message[],
-    opts?: { abortSignal?: AbortSignal },
+    opts?: { abortSignal?: AbortSignal; operationId?: string },
   ): Promise<FlushResult> {
     const extractionMessages = buildExtractionRequest(messages);
     const rawResponse = await this.callLLM(extractionMessages, opts);
@@ -92,12 +98,14 @@ export class MemoryFlusher {
     const errors: string[] = [];
     let saved = 0;
 
-    for (const ext of extractions) {
+    for (const [index, ext] of extractions.entries()) {
       try {
-        if (ext.category === "journal") {
+        if (this.write) {
+          await this.write(ext, `${opts?.operationId ?? "memory-flush"}:${index}`);
+        } else if (ext.category === "journal") {
           await this.appendJournal(ext);
         } else {
-          await this.store.save({
+          await this.store!.save({
             category: ext.category as MemoryCategory,
             id: ext.id,
             meta: ext.meta,
@@ -117,18 +125,18 @@ export class MemoryFlusher {
 
   /** Journal 是追加模式：读取已有内容，在末尾追加新条目。 */
   private async appendJournal(ext: FlushExtraction): Promise<void> {
-    const existing = await this.store.load("journal", ext.id);
+    const existing = await this.store!.load("journal", ext.id);
 
     if (existing) {
       const newContent = `${existing.content}\n\n---\n\n${ext.content}`;
-      await this.store.save({
+      await this.store!.save({
         category: "journal",
         id: ext.id,
         meta: { ...existing.meta, ...ext.meta },
         content: newContent,
       });
     } else {
-      await this.store.save({
+      await this.store!.save({
         category: "journal",
         id: ext.id,
         meta: ext.meta,

@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AuthorityCommitLog,
-  ProjectionCursor,
-} from "../authority/index.js";
+import type { AuthorityCommitLog, ProjectionCursor } from "../authority/index.js";
 import { AuthorityStorageError } from "../authority/index.js";
 import type {
+  AuthorityError,
   Digest,
+  JsonValue,
   LogicalRecord,
   WorksceneAppliedResult,
   WorksceneDto,
@@ -101,6 +100,25 @@ export interface AnchorWorksceneRegistryOptions {
   readonly sceneIdFactory?: (name: string) => string;
 }
 
+export interface WorksceneStagedMutationRecord {
+  readonly seq: number;
+  readonly requestId: string;
+  readonly mutation: WorksceneWriteMutation;
+}
+
+export interface WorksceneStagedMutationPlan {
+  readonly records: readonly LogicalRecord<JsonValue>[];
+  readonly outcomes: ReadonlyMap<
+    number,
+    | {
+        readonly t: "granted";
+        readonly targetRevision: number;
+        readonly appliedResult: WorksceneAppliedResult;
+      }
+    | { readonly t: "conflicted"; readonly error: AuthorityError }
+  >;
+}
+
 /**
  * Anchor-owned workscene registry. The append-only authority log is the sole
  * source of management state. Session activity is deliberately absent: it is
@@ -121,6 +139,92 @@ export class AnchorWorksceneRegistry {
     this.#sceneIdFactory =
       options.sceneIdFactory ??
       ((name) => `${slugify(name)}-${randomUUID().slice(0, 8)}`);
+  }
+
+  /** Opens the durable projection before a synchronous owner commit planner is installed. */
+  async initialize(): Promise<void> {
+    await this.#ensureOpen();
+  }
+
+  /**
+   * Purely plans run-staged workscene writes against the current authority
+   * projection. Returned records are appended in the owning run commit; this
+   * method never mutates the live projection or the filesystem.
+   */
+  planStaged(records: readonly WorksceneStagedMutationRecord[]): WorksceneStagedMutationPlan {
+    let overlay = cloneProjection(this.#state());
+    const planned: LogicalRecord<JsonValue>[] = [];
+    const outcomes = new Map<
+      number,
+      | {
+          readonly t: "granted";
+          readonly targetRevision: number;
+          readonly appliedResult: WorksceneAppliedResult;
+        }
+      | { readonly t: "conflicted"; readonly error: AuthorityError }
+    >();
+
+    for (const record of records) {
+      const normalized = validateMutation(record.mutation);
+      const mutationDigest = protocolDigest(
+        "WorksceneWriteMutation",
+        1,
+        normalized,
+      );
+      const replay = overlay.requests.get(record.requestId);
+      if (replay) {
+        if (replay.mutationDigest !== mutationDigest || !replay.result) {
+          outcomes.set(record.seq, stagedConflict(
+            "idempotency-conflict",
+            "Workscene request identity is already bound to another mutation",
+          ));
+        } else {
+          outcomes.set(record.seq, {
+            t: "granted",
+            targetRevision: replay.result.revision,
+            appliedResult: cloneResult(replay.result),
+          });
+        }
+        continue;
+      }
+
+      try {
+        const at = this.#clock();
+        const result = decideMutation(
+          overlay,
+          normalized,
+          at,
+          this.#sceneIdFactory,
+        );
+        const logical: LogicalRecord<WorksceneRegistryRecord> = {
+          stream: REGISTRY_STREAM,
+          body: {
+            t: "workscene-control-applied",
+            requestId: record.requestId,
+            mutationDigest,
+            mutation: structuredClone(normalized),
+            result: cloneResult(result),
+            at,
+          },
+        };
+        overlay = reduceRegistry(overlay, logical);
+        planned.push(logical as unknown as LogicalRecord<JsonValue>);
+        outcomes.set(record.seq, {
+          t: "granted",
+          targetRevision: result.revision,
+          appliedResult: cloneResult(result),
+        });
+      } catch (error) {
+        outcomes.set(record.seq, worksceneStagedConflict(error));
+      }
+    }
+    return { records: planned, outcomes };
+  }
+
+  /** Reloads records atomically appended by an owning run commit. */
+  async refreshCommitted(): Promise<void> {
+    await this.#ensureOpen();
+    await this.#reload();
   }
 
   async list(): Promise<WorksceneDto[]> {
@@ -429,6 +533,51 @@ export class AnchorWorksceneRegistry {
     }
     this.#projection = state;
   }
+
+  async #reload(): Promise<void> {
+    const snapshot = await this.#log.readSnapshot<WorksceneRegistryRecord>();
+    let state = emptyProjection();
+    for (const commit of snapshot.commits) {
+      for (const entry of commit.entries) {
+        if (entry.stream !== REGISTRY_STREAM) continue;
+        state = reduceRegistry(
+          state,
+          entry as LogicalRecord<WorksceneRegistryRecord>,
+        );
+      }
+    }
+    if (!state.established) {
+      throw corruptRegistry("Workscene registry lost its establishment record");
+    }
+    this.#projection = state;
+    this.#cursor = snapshot.cursor;
+  }
+}
+
+function worksceneStagedConflict(error: unknown): {
+  readonly t: "conflicted";
+  readonly error: AuthorityError;
+} {
+  if (error instanceof WorksceneRevisionError) {
+    return stagedConflict("revision-conflict", error.message);
+  }
+  if (error instanceof WorksceneNotFoundError) {
+    return stagedConflict("not-found", error.message);
+  }
+  if (error instanceof WorksceneConflictError) {
+    return stagedConflict("idempotency-conflict", error.message);
+  }
+  if (error instanceof TypeError) {
+    return stagedConflict("invalid", error.message);
+  }
+  throw error;
+}
+
+function stagedConflict(
+  code: AuthorityError["code"],
+  message: string,
+): { readonly t: "conflicted"; readonly error: AuthorityError } {
+  return { t: "conflicted", error: { code, message, retryable: false } };
 }
 
 function decideMutation(

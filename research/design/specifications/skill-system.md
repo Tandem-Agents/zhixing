@@ -244,3 +244,10 @@ Index 产生时按 `index.mode` 过滤:标 `main` 进 main runtime 索引、标 
 - **`admit_skill` 二段协议**:首调三态(safe 入库且清暂存 / escalate 拒且清、**断言无 token 返回** / needs-confirm 留暂存 + 返回 token 与报告);确认重调(token 命中 + digest 一致 → admit 落 linked 用登记 mode、清登记清暂存);**TOCTOU 防御**(重调前改写暂存内容 → digest 不一致 → 拒、清暂存);TTL 过期(重调遇过期 → 拒;首调顺扫清过期项);**跨进程孤儿清理**(内存登记丢失但 staging 目录超 TTL → `sweepStaleStaging` 删除;未超 TTL 的不误删);跨实例失效(新工具实例对旧 token 返回重新审查);**schema 安全自描述**(顶层 `path` 进 `resolvedAccess.paths`、声明双边界 + permissionArgumentKey,断言路径被管线可见);暂存 SKILL.md 缺 name → 失败且清;清理责任表六路径逐条断言无残留。
 - **Control / 指令**:`SkillCommandSource.list()` 产 `execution:"agent"` 的 `CommandDef`;`refresh()` 后补全更新;`/<name>` 不需 handler 即可分派为 agent message。`/skills` 技能管理器走 alt-screen(断言进 / 退 alternate screen buffer、不碰主对话历史);浏览渲染 = 面向管理的全集读(含 `disabled` + usage,**非 `listAll`**)投影,断言 disabled 技能可见可重启用;状态操作裸键 → `setState`(pin / 禁用 / 改 mode)/ `archive`(归档)落 Store、即时重读重画。
 - 纯逻辑注入 mock(fs / LLM / registry),无真网真 LLM。
+
+## 十一、分布式运行时权威边界
+
+- 用户技能目录是 path-free 的 GlobalQuery 投影，内容正文只由 immutable artifact 引用读取。运行体、动态 slash source 与管理面不得依赖宿主路径或持有可写 SkillStore。
+- 用户技能在窗口开启时按 catalog revision 刷新；同一窗口内 system prompt 保持 byte-equal。builtin 继续来自包内只读注册集，不进入用户 usage、管理或 slash 目录。
+- run 内 create、update、admit 和成功 load 的 usage delta 只进入 assignment staged batch；规范化内容先上传为 batch dependency。提交前只有本 assignment overlay 可见，工具只说明本轮成功后生效。
+- owner 在同一提交边界完成对象 CAS 与 dependency closure 校验，锚点 adapter 唯一物化内容、状态、索引和 usage。冲突、失败、取消和未裁决运行不得产生全局可见技能或 usage。

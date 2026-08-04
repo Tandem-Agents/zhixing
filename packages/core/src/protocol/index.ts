@@ -182,6 +182,8 @@ export {
   validateJobSealedBundle,
   validateJobStagedMutationRecord,
   validateMutationBatch,
+  stagedMutationDigest,
+  validateAssignmentStagedReceipt,
   validateSealedBundle,
   validateStagedMutationRecord,
   validateTranscriptRunRecord,

@@ -27,7 +27,18 @@ import type {
   TurnOrigin,
   ScheduleMutationStager,
 } from "@zhixing/core";
-import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
+import type {
+  AssignmentGlobalQueryPort,
+  AssignmentMutationPort,
+  AuthorityCallContext,
+  ModelCallResourceMeter,
+  ResourceReservationPort,
+  ResourceLease,
+} from "@zhixing/core/contracts";
+import type {
+  DeviceCapacityArbiterPort,
+  DeviceCapacityBudget,
+} from "@zhixing/core/resources";
 
 export type { DurableToolExecutionAuthorizer } from "@zhixing/core";
 
@@ -67,6 +78,25 @@ export interface RunContext {
   };
   /** Durable assignment-local scheduler mutation append port. */
   stageScheduleMutation?: ScheduleMutationStager;
+  /** Unified assignment-local staged write and read-own-writes overlay. */
+  assignmentMutations?: AssignmentMutationPort;
+  /** Read-only global authority view bound to this assignment. */
+  globalQuery?: AssignmentGlobalQueryPort;
+  /** Durable assignment issue time used by idempotent staged records. */
+  assignmentIssuedAt?: string;
+  /** Parent assignment root used to issue stable, bounded child leases. */
+  resourceReservation?: {
+    readonly port: ResourceReservationPort;
+    readonly parentLease: ResourceLease;
+    readonly contextFor: (requestId: string) => AuthorityCallContext;
+  };
+  /** Physical capacity class used only around child local execution batches. */
+  orchestrationCapacity?: {
+    readonly arbiter: DeviceCapacityArbiterPort;
+    readonly atomic: DeviceCapacityBudget;
+    readonly preferred: DeviceCapacityBudget;
+    readonly maxWaitMs: number;
+  };
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();

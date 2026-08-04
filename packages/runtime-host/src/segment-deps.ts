@@ -24,6 +24,7 @@ import {
   type TaskListReader,
 } from "@zhixing/core";
 import type { TaskListService } from "@zhixing/tools-builtin";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
 export interface RuntimeHostSegmentDeps {
   readonly taskListReader: TaskListReader;
@@ -38,11 +39,28 @@ export interface RuntimeHostSegmentDepsInput {
 export function createPersistentSegmentDeps(
   input: RuntimeHostSegmentDepsInput,
 ): RuntimeHostSegmentDeps {
+  const committed = createSegmentPersistence({
+    conversationRepo: input.conversationRepo,
+  });
   return {
     taskListReader: createTaskListReaderFromService(input.taskListService),
-    persistence: createSegmentPersistence({
-      conversationRepo: input.conversationRepo,
-    }),
+    persistence: {
+      async appendSegment(conversationId, segment) {
+        const run = runContextStorage.getStore();
+        if (!run) {
+          await committed.appendSegment(conversationId, segment);
+          return;
+        }
+        if (!run.assignmentMutations) {
+          throw new Error("Segment metadata requires an active durable assignment");
+        }
+        await run.assignmentMutations.stage({
+          domain: "session",
+          mutation: { kind: "segment-append", segment },
+          operationId: `segment:${segment.segmentId}`,
+        });
+      },
+    },
   };
 }
 
@@ -58,8 +76,16 @@ export function createTransientSegmentDeps(input: {
   return {
     taskListReader: createTaskListReaderFromService(input.taskListService),
     persistence: {
-      async appendSegment() {
-        /* 瞬态运行不落 segmentMeta；它不参与段切换语义。 */
+      async appendSegment(_conversationId, segment) {
+        const run = runContextStorage.getStore();
+        if (!run?.assignmentMutations || run.assignmentMutations.execution !== "conversation") {
+          return;
+        }
+        await run.assignmentMutations.stage({
+          domain: "session",
+          mutation: { kind: "segment-append", segment },
+          operationId: `segment:${segment.segmentId}`,
+        });
       },
     },
   };
@@ -68,14 +94,28 @@ export function createTransientSegmentDeps(input: {
 /**
  * 把 TaskListService 适配成 TaskListReader。
  *
- * 实现契约：同步返回（service.getInProgressTasks 走 in-memory cache）；
- * conversation 不存在 / 未 prime / 未 set 都返 false。
+ * 当前 assignment 有 task-list overlay 时优先读己之写；否则读取已提交 cache。
  */
 export function createTaskListReaderFromService(
   service: TaskListService,
 ): TaskListReader {
   return {
-    hasInProgress(conversationId) {
+    async hasInProgress(conversationId) {
+      const mutations = runContextStorage.getStore()?.assignmentMutations;
+      if (mutations) {
+        const staged = await mutations.readOverlay();
+        for (let index = staged.length - 1; index >= 0; index -= 1) {
+          const record = staged[index]!;
+          if (
+            record.domain === "session" &&
+            record.mutation.kind === "task-list-op"
+          ) {
+            return record.mutation.op.state.items.some(
+              (item) => item.status === "in_progress",
+            );
+          }
+        }
+      }
       return service.getInProgressTasks(conversationId).length > 0;
     },
   };

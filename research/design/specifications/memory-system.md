@@ -1105,3 +1105,10 @@ interface MemoryToolInput {
 - **用户有逃生通道**：如果用户认为某条 journal 内容重要，可以在 30 天内手动或通过对话将其提升为 skill/profile 内容，避免被凝练压缩。
 
 **风险**：凝练质量依赖 LLM。低质量凝练可能丢失有价值信息。缓解措施：凝练前保留原始文件 7 天的 "grace period"（凝练执行后不立即删除原文件，等下次生命周期检查时再删除）。
+
+## 分布式运行时权威边界
+
+- 运行中的记忆身份固定为 personal 或具体 workscene。模型不能自报或通配 scope；跨 scope 读取必须持有精确能力。
+- 当前 assignment 内的 save、update、delete 和三域 flush 只形成有稳定 operationId 的全局 staged mutation。工具可通过本 assignment overlay 读己之写，但提交前不得改动文件、索引或其他 run 的视图，也不得声称已经入库。
+- 读取统一经 GlobalQuery 返回 path-free DTO；运行体只持 query、artifact reader 与 stager，不持有可写 MemoryStore。MemoryStore 只在锚点 adapter 内负责唯一物化。
+- owner 在 run 提交时原子决定对象 CAS；granted 由日志幂等发布，conflicted 为终态，failed、cancelled 不发布，uncertain 等待裁决。场景删除只清理对应 sceneId 的记忆域，绝不触及 personal。

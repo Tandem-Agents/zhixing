@@ -58,6 +58,7 @@ import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
+import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
 import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
 import {
   EvidenceJournal,
@@ -583,6 +584,20 @@ const conversationSurface: AccessSurface = {
         const s = storesFor(conversationId);
         return await s.transcript.appendCommittedRunRecord(s.localId, input);
       },
+      applyCommittedSessionMutations: async (conversationId, mutations) => {
+        const { repo, localId } = ctx.conversationRepoFor(conversationId);
+        for (const record of [...mutations].sort((a, b) => a.seq - b.seq)) {
+          if (record.mutation.kind === "task-list-op") {
+            await repo.updateTaskListState(localId, record.mutation.op.state);
+            ctx.taskListService.acceptCommitted(
+              conversationId,
+              record.mutation.op.state,
+            );
+            continue;
+          }
+          await repo.appendSegmentMeta(localId, record.mutation.segment);
+        }
+      },
       writeSnapshot: async (conversationId, input) => {
         const s = storesFor(conversationId);
         await s.snapshots.write(s.localId, input);
@@ -673,8 +688,30 @@ const executorJobOwnerUnit: CoreAssemblyUnit = {
         }
         return mesh.finalizeExecutorUsage(assignmentId);
       },
+      globalQueryFor: (capability, anchorEpoch) => {
+        const authority = ctx.authorityRuntime!;
+        if (ctx.enabledRoles.includes("anchor")) {
+          if (!authority.globalState) {
+            throw new JobInteractionRuntimeUnavailableError(
+              "Anchor global authority state is unavailable",
+            );
+          }
+          return createAssignmentGlobalQueryPort({
+            state: authority.globalState,
+            capability,
+            anchorEpoch,
+          });
+        }
+        if (!ctx.meshRuntime) {
+          throw new JobInteractionRuntimeUnavailableError(
+            "Job assignment global query transport is not registered",
+          );
+        }
+        return ctx.meshRuntime.globalQueryForAnchor(capability, anchorEpoch);
+      },
       InProcessAssignmentSubmission:
         ctx.executorRoleModule.InProcessAssignmentSubmission,
+      resourceGovernor: ctx.authorityRuntime.executorResourceGovernor,
       createStream: (input) => ctx.executorDataPlane!.createStream(input),
       onError: (_assignmentId, error) =>
         console.warn(chalk.yellow(`[job-worker] ${error.message}`)),

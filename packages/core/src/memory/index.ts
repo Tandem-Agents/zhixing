@@ -14,6 +14,8 @@ export type { ProfileData, ProfileMeta } from "./types.js";
 export type {
   MemoryAppendPayload,
   MemoryCategoryDto,
+  MemoryLogicalEntry,
+  MemoryScopeRef,
   PersonMetaDto,
 } from "./contracts.js";
 export { getMemoryDir } from "./types.js";
@@ -21,3 +23,8 @@ export { MemoryFlusher, parseExtractions, FLUSH_EXTRACTION_PROMPT } from "./flus
 export type { FlushExtraction, FlushResult, MemoryFlusherConfig } from "./flush-engine.js";
 export { createMemoryFlushHook } from "./segment-flush-hook.js";
 export type { MemoryFlushHookConfig } from "./segment-flush-hook.js";
+export {
+  AnchorMemoryGlobalStateAdapter,
+  MemoryMutationConflictError,
+} from "./global-state-adapter.js";
+export type { AnchorMemoryGlobalStateAdapterOptions } from "./global-state-adapter.js";

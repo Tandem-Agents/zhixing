@@ -74,12 +74,14 @@ describe("save_skill 工具(SkillSavePipeline 的确认护栏包装)", () => {
     body: "1. 构建",
   };
 
-  it("成功保存:content 含名称 / id / 唤起提示,新建措辞", async () => {
+  it("成功暂存:content 含名称 / id / 提交后生效,不虚报已可唤起", async () => {
     const tool = createSaveSkillTool(okSaver, "main");
     const r = await tool.call(INPUT, CTX as never);
     expect(r.isError).toBe(false);
     expect(r.content).toContain("部署流程");
-    expect(r.content).toContain("/deploy-flow");
+    expect(r.content).toContain("id: deploy-flow");
+    expect(r.content).toContain("本轮成功完成后入库");
+    expect(r.content).not.toContain("/deploy-flow");
     expect(r.content).toContain("新建");
     expect(r.content).not.toContain("密钥");
   });

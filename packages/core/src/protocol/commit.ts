@@ -18,6 +18,43 @@ type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
 type ConversationSealedBundle = SealedBundle & { body: ConversationCommitBundle };
 type JobSealedBundle = SealedBundle & { body: JobCommitBundle };
 
+export function stagedMutationDigest(input: {
+  readonly domain: "session" | "global";
+  readonly mutation: StagedMutationRecord["mutation"];
+  readonly expected?: { readonly anchorEpoch: number };
+}): import("../contracts/index.js").Digest {
+  const payload = {
+    v: 1 as const,
+    domain: input.domain,
+    mutation: structuredClone(input.mutation),
+    ...(input.expected ? { expected: structuredClone(input.expected) } : {}),
+  };
+  return protocolDigest("AssignmentStagedMutation", 1, payload);
+}
+
+export function validateAssignmentStagedReceipt(
+  value: unknown,
+): import("../contracts/index.js").AssignmentStagedReceipt {
+  assertPlainObject(value, "Assignment staged receipt");
+  assertExactKeys(
+    value,
+    ["kind", "mutationDigest", "recordSeq", "requestId"],
+    "Assignment staged receipt",
+  );
+  const receipt = value as unknown as import("../contracts/index.js").AssignmentStagedReceipt;
+  if (receipt.kind !== "assignment-mutation-staged") {
+    throw new TypeError("Assignment staged receipt kind is invalid");
+  }
+  assertIdentifier(receipt.requestId, "Assignment staged receipt requestId");
+  if (!Number.isSafeInteger(receipt.recordSeq) || receipt.recordSeq <= 0) {
+    throw new TypeError("Assignment staged receipt recordSeq must be positive");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(receipt.mutationDigest)) {
+    throw new TypeError("Assignment staged receipt mutationDigest is invalid");
+  }
+  return snapshot(receipt, "Assignment staged receipt");
+}
+
 export interface ArtifactValue<T> {
   readonly value: T;
   readonly bytes: Uint8Array;
@@ -509,6 +546,23 @@ function validateGlobalStagedMutation(mutation: StagedMutationRecord["mutation"]
       assertExactKeys(mutation, ["kind", "payload"], "Memory staged mutation");
       validateMemoryAppend(mutation.payload);
       return;
+    case "memory-delete":
+      assertExactKeys(
+        mutation,
+        ["category", "domain", "expectedDigest", "id", "kind", "scope"],
+        "Memory delete mutation",
+        true,
+      );
+      validateMemoryScope(mutation.scope);
+      if (mutation.domain !== "memory" && mutation.domain !== "journal" && mutation.domain !== "people") {
+        throw new TypeError("Memory delete domain is invalid");
+      }
+      if (mutation.category !== undefined && mutation.category !== "profile" && mutation.category !== "person" && mutation.category !== "journal") {
+        throw new TypeError("Memory delete category is invalid");
+      }
+      assertIdentifier(mutation.id, "Memory delete id");
+      assertDigest(mutation.expectedDigest, "Memory delete expected digest");
+      return;
     case "schedule-create":
       assertExactKeys(mutation, ["kind", "spec"], "Schedule create mutation");
       validateScheduleSpec(mutation.spec);
@@ -547,24 +601,32 @@ function validateGlobalStagedMutation(mutation: StagedMutationRecord["mutation"]
     case "skill-usage":
       assertExactKeys(mutation, ["kind", "record"], "Skill usage mutation");
       assertPlainObject(mutation.record, "Skill usage record");
-      assertExactKeys(mutation.record, ["hitCount", "lastHitAt", "skillId"], "Skill usage record");
+      assertExactKeys(mutation.record, ["hitDelta", "occurredAt", "skillId"], "Skill usage record");
       assertIdentifier(mutation.record.skillId, "Skill id");
-      canonicalTime(mutation.record.lastHitAt, "Skill last-hit time");
-      assertNonNegativeInteger(mutation.record.hitCount, "Skill hit count");
+      canonicalTime(mutation.record.occurredAt, "Skill occurrence time");
+      if (mutation.record.hitDelta !== 1) {
+        throw new TypeError("Skill usage delta must equal one");
+      }
       return;
     case "skill-create":
     case "skill-admit":
-      assertExactKeys(mutation, ["kind", "record"], "Skill write mutation");
+      assertExactKeys(mutation, ["kind", "mode", "record"], "Skill write mutation");
+      if (mutation.mode !== "main" && mutation.mode !== "work") {
+        throw new TypeError("Skill mode is invalid");
+      }
       validateSkillWrite(mutation.record);
       return;
     case "skill-update":
       assertExactKeys(
         mutation,
-        ["expectedRevision", "kind", "record", "skillId"],
+        ["expectedRevision", "kind", "mode", "record", "skillId"],
         "Skill update mutation",
       );
       assertIdentifier(mutation.skillId, "Skill id");
       assertNonNegativeInteger(mutation.expectedRevision, "Skill expected revision");
+      if (mutation.mode !== "main" && mutation.mode !== "work") {
+        throw new TypeError("Skill mode is invalid");
+      }
       validateSkillWrite(mutation.record);
       return;
     case "workscene-create":
@@ -621,32 +683,40 @@ function validateMemoryAppend(payload: unknown): void {
     case "memory":
       assertExactKeys(
         payload,
-        ["category", "content", "domain", "id", "meta"],
+        ["category", "content", "domain", "expectedDigest", "id", "meta", "scope"],
         "Memory append payload",
+        true,
       );
+      validateMemoryScope(payload.scope);
       if (payload.category !== "profile" && payload.category !== "person" && payload.category !== "journal") {
         throw new TypeError("Memory category is invalid");
       }
       assertIdentifier(payload.id, "Memory entry id");
       assertPlainObject(payload.meta, "Memory entry metadata");
       assertString(payload.content, "Memory entry content");
+      if (payload.expectedDigest !== undefined) {
+        assertDigest(payload.expectedDigest, "Memory expected digest");
+      }
       return;
     case "journal":
       assertExactKeys(
         payload,
-        ["content", "date", "domain"],
+        ["content", "date", "domain", "scope"],
         "Journal append payload",
         true,
       );
+      validateMemoryScope(payload.scope);
       assertString(payload.content, "Journal content");
       if (payload.date !== undefined) assertString(payload.date, "Journal date");
       return;
     case "people":
       assertExactKeys(
         payload,
-        ["content", "domain", "id", "meta"],
+        ["content", "domain", "expectedDigest", "id", "meta", "scope"],
         "People append payload",
+        true,
       );
+      validateMemoryScope(payload.scope);
       assertIdentifier(payload.id, "Person entry id");
       assertString(payload.content, "Person entry content");
       assertPlainObject(payload.meta, "Person metadata");
@@ -664,10 +734,27 @@ function validateMemoryAppend(payload: unknown): void {
       if (payload.meta.tags !== undefined) {
         assertStringArray(payload.meta.tags, "Person tags");
       }
+      if (payload.expectedDigest !== undefined) {
+        assertDigest(payload.expectedDigest, "Person expected digest");
+      }
       return;
     default:
       throw new TypeError("Memory append domain is invalid");
   }
+}
+
+function validateMemoryScope(scope: unknown): void {
+  assertPlainObject(scope, "Memory scope");
+  if (scope.kind === "personal") {
+    assertExactKeys(scope, ["kind"], "Personal memory scope");
+    return;
+  }
+  if (scope.kind === "workscene") {
+    assertExactKeys(scope, ["kind", "sceneId"], "Workscene memory scope");
+    assertIdentifier(scope.sceneId, "Workscene memory scene id");
+    return;
+  }
+  throw new TypeError("Memory scope is invalid");
 }
 
 function validateScheduleSpec(spec: unknown): void {

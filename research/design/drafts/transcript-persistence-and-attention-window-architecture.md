@@ -411,3 +411,7 @@ interface AttentionWindowState {
 10. 段评估对有无 conversationId 行为一致（仅持久化副作用差异）。
 
 ---
+
+## 分布式 assignment 接入
+
+在耐久 assignment 中，段切换算法仍只决定窗口视图；`SegmentManager.appendSegment` 不再直接写 `ConversationRepository`。它以 segmentId 派生稳定 operationId，将 `segment-append` 写入当前会话 staged overlay；同 run 的段判据可读己之写，其他 run、缓存、订阅者和 transcript 投影在 commit 前均不可见。提交后由会话 owner 按 MutationBatch 顺序恰一次物化并通知。failed/cancelled 丢弃，uncertain 等待裁决；无耐久 conversation assignment 的临时 run 不得伪造持久化。run 外 `/clear`、`/compact` 继续走 control completion，不进入 assignment stager。

@@ -1,4 +1,9 @@
-import type { JsonValue } from "../types/distributed.js";
+import type { Digest, IsoTime, JsonValue } from "../types/distributed.js";
+
+/** Logical memory boundary; physical paths never cross the authority port. */
+export type MemoryScopeRef =
+  | { kind: "personal" }
+  | { kind: "workscene"; sceneId: string };
 
 /** 记忆分类的 wire 值域快照。 */
 export type MemoryCategoryDto = "profile" | "person" | "journal";
@@ -15,10 +20,31 @@ export interface PersonMetaDto {
 export type MemoryAppendPayload =
   | {
       domain: "memory";
+      scope: MemoryScopeRef;
       category: MemoryCategoryDto;
       id: string;
       meta: Record<string, JsonValue>;
       content: string;
+      expectedDigest?: Digest;
     }
-  | { domain: "journal"; content: string; date?: string }
-  | { domain: "people"; id: string; meta: PersonMetaDto; content: string };
+  | { domain: "journal"; scope: MemoryScopeRef; content: string; date?: string }
+  | {
+      domain: "people";
+      scope: MemoryScopeRef;
+      id: string;
+      meta: PersonMetaDto;
+      content: string;
+      expectedDigest?: Digest;
+    };
+
+export interface MemoryLogicalEntry {
+  domain: "memory" | "journal" | "people";
+  scope: MemoryScopeRef;
+  category?: MemoryCategoryDto;
+  id: string;
+  meta: Record<string, JsonValue>;
+  content: string;
+  revision: number;
+  digest: Digest;
+  updatedAt?: IsoTime;
+}

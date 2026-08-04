@@ -105,6 +105,9 @@ export function createOwnerRuntimeAdapter(
           authorizeToolExecution: options?.authorizeToolExecution,
           modelCallResourceMeter: options?.modelCallResourceMeter,
           stageScheduleMutation: options?.stageScheduleMutation,
+          assignmentMutations: options?.assignmentMutations,
+          globalQuery: options?.globalQuery,
+          assignmentIssuedAt: options?.assignmentIssuedAt,
         })
         .then(
           (runResult) => {

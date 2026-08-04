@@ -31,6 +31,8 @@ import type {
   WindowCompact,
 } from "@zhixing/core";
 import type {
+  AssignmentGlobalQueryPort,
+  AssignmentMutationPort,
   ContentAssetRef,
   ModelCallResourceMeter,
 } from "@zhixing/core/contracts";
@@ -76,6 +78,12 @@ export interface RunTurnOptions {
   modelCallResourceMeter?: ModelCallResourceMeter;
   /** Assignment-local schedule writes; absent on trusted control surfaces. */
   stageScheduleMutation?: ScheduleMutationStager;
+  /** Unified assignment-local staged write/overlay inherited by descendants. */
+  assignmentMutations?: AssignmentMutationPort;
+  /** Read-only global authority facade bound to this assignment. */
+  globalQuery?: AssignmentGlobalQueryPort;
+  /** Stable issue time of the durable assignment. */
+  assignmentIssuedAt?: string;
 }
 
 export type RuntimeDisposeReason =

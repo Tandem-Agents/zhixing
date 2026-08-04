@@ -164,7 +164,7 @@ export class SegmentManager {
     // ephemeral（无 conversationId）照常评估与切段；任务进行中守卫依赖任务
     // 清单，ephemeral 无清单 → 视为无进行中任务
     const hasInProgressTask = input.conversationId
-      ? this.cfg.taskListReader.hasInProgress(input.conversationId)
+      ? await this.cfg.taskListReader.hasInProgress(input.conversationId)
       : false;
     const decision = decideSegmentAction({
       currentTokens,

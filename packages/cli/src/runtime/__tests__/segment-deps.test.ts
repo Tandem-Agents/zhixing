@@ -16,6 +16,12 @@ import type {
   IConversationRepository,
   SegmentMeta,
 } from "@zhixing/core";
+import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import type {
+  AssignmentMutationOverlayRecord,
+  AssignmentMutationPort,
+} from "@zhixing/core/contracts";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { TaskListService } from "@zhixing/tools-builtin";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
@@ -64,11 +70,11 @@ const SAMPLE_META: SegmentMeta = {
 // ─── TaskListReader 适配 ───
 
 describe("createTaskListReaderFromService", () => {
-  it("service 无任务 → hasInProgress 返 false", () => {
+  it("service 无任务 → hasInProgress 返 false", async () => {
     const service = makeTaskListService();
     const reader = createTaskListReaderFromService(service);
 
-    expect(reader.hasInProgress("conv-1")).toBe(false);
+    await expect(reader.hasInProgress("conv-1")).resolves.toBe(false);
   });
 
   it("service 含 pending + completed（无 in_progress）→ false", async () => {
@@ -79,7 +85,7 @@ describe("createTaskListReaderFromService", () => {
     ]);
     const reader = createTaskListReaderFromService(service);
 
-    expect(reader.hasInProgress("conv-1")).toBe(false);
+    await expect(reader.hasInProgress("conv-1")).resolves.toBe(false);
   });
 
   it("service 含 in_progress → true", async () => {
@@ -89,7 +95,7 @@ describe("createTaskListReaderFromService", () => {
     ]);
     const reader = createTaskListReaderFromService(service);
 
-    expect(reader.hasInProgress("conv-1")).toBe(true);
+    await expect(reader.hasInProgress("conv-1")).resolves.toBe(true);
   });
 
   it("跨 conversationId 隔离 —— 一个 conv 有 in_progress 不影响另一个", async () => {
@@ -102,9 +108,47 @@ describe("createTaskListReaderFromService", () => {
     ]);
     const reader = createTaskListReaderFromService(service);
 
-    expect(reader.hasInProgress("conv-A")).toBe(true);
-    expect(reader.hasInProgress("conv-B")).toBe(false);
-    expect(reader.hasInProgress("conv-never-set")).toBe(false);
+    await expect(reader.hasInProgress("conv-A")).resolves.toBe(true);
+    await expect(reader.hasInProgress("conv-B")).resolves.toBe(false);
+    await expect(reader.hasInProgress("conv-never-set")).resolves.toBe(false);
+  });
+
+  it("段切换判据优先读取当前 assignment 的 task-list overlay", async () => {
+    const service = makeTaskListService();
+    const overlay: AssignmentMutationOverlayRecord[] = [
+      {
+        recordSeq: 1,
+        domain: "session",
+        requestId: "task-list:tool-call-1",
+        mutationDigest: "digest-task-list",
+        mutation: {
+          kind: "task-list-op",
+          op: {
+            op: "set",
+            state: {
+              items: [{ id: "active", content: "运行中", status: "in_progress" }],
+            },
+          },
+        },
+      },
+    ];
+    const assignmentMutations = {
+      assignmentId: "assignment-1",
+      execution: "conversation",
+      readOverlay: async () => overlay,
+    } as AssignmentMutationPort;
+
+    const result = await runContextStorage.run(
+      {
+        bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+        lineage: "main",
+        assignmentMutations,
+      },
+      () => createTaskListReaderFromService(service).hasInProgress("conv-1"),
+    );
+
+    expect(result).toBe(true);
+    expect(service.getInProgressTasks("conv-1")).toEqual([]);
   });
 });
 
@@ -144,21 +188,70 @@ describe("createPersistentSegmentDeps", () => {
       conversationRepo: makeFakeConversationRepo(),
     });
 
-    expect(deps.taskListReader.hasInProgress("conv-Z")).toBe(false);
+    await expect(deps.taskListReader.hasInProgress("conv-Z")).resolves.toBe(false);
     await service.set("conv-Z", [
       { id: "x", content: "running", status: "in_progress" },
     ]);
-    expect(deps.taskListReader.hasInProgress("conv-Z")).toBe(true);
+    await expect(deps.taskListReader.hasInProgress("conv-Z")).resolves.toBe(true);
+  });
+
+  it("run 内 segment 写只进入 assignment overlay，权威 repository 提交前不变", async () => {
+    const conversationRepo = makeFakeConversationRepo();
+    const deps = createPersistentSegmentDeps({
+      taskListService: makeTaskListService(),
+      conversationRepo,
+    });
+    const staged: AssignmentMutationOverlayRecord[] = [];
+    const mutations: AssignmentMutationPort = {
+      assignmentId: "assignment-1",
+      execution: "conversation",
+      async stage(input) {
+        const record: AssignmentMutationOverlayRecord = {
+          recordSeq: staged.length + 1,
+          domain: input.domain,
+          mutation: input.mutation,
+          requestId: input.operationId,
+          mutationDigest: `digest-${staged.length + 1}`,
+        };
+        staged.push(record);
+        return {
+          kind: "assignment-mutation-staged",
+          requestId: record.requestId,
+          recordSeq: record.recordSeq,
+          mutationDigest: record.mutationDigest,
+        };
+      },
+      async readOverlay() {
+        return staged;
+      },
+    };
+
+    await runContextStorage.run(
+      {
+        bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+        lineage: "main",
+        assignmentMutations: mutations,
+      },
+      () => deps.persistence.appendSegment("conv-Y", SAMPLE_META),
+    );
+
+    expect(conversationRepo.calls).toEqual([]);
+    expect(staged).toHaveLength(1);
+    expect(staged[0]).toMatchObject({
+      domain: "session",
+      requestId: "segment:seg-abc",
+      mutation: { kind: "segment-append", segment: SAMPLE_META },
+    });
   });
 });
 
 describe("createTransientSegmentDeps", () => {
-  it("taskListReader 与 REPL 同源；persistence 为 no-op（segmentMeta 缺写无害）", async () => {
+  it("assignment 外保持瞬态 no-op，taskListReader 与 REPL 同源", async () => {
     const service = makeTaskListService();
     const deps = createTransientSegmentDeps({ taskListService: service });
 
     // in-progress 守卫与 REPL 装配同一适配器语义
-    expect(deps.taskListReader.hasInProgress("conv-x")).toBe(false);
+    await expect(deps.taskListReader.hasInProgress("conv-x")).resolves.toBe(false);
     // no-op persistence：不抛、无副作用 —— serve segmentMeta 暂不落盘
     await expect(
       deps.persistence.appendSegment("conv-x", {

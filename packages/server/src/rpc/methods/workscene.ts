@@ -40,16 +40,6 @@ function requireWorkscenes(server: ServerContext): WorksceneDirectory {
   return server.workscenes;
 }
 
-function requireConversationManager(server: ServerContext) {
-  if (!server.conversations) {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.INTERNAL_ERROR,
-      "ConversationManager not configured on server",
-    );
-  }
-  return server.conversations;
-}
-
 async function sceneSummary(
   directory: WorksceneDirectory,
   scene: {

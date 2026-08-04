@@ -4,6 +4,8 @@
 >
 > **范围**:本 spec 仅覆盖 REPL(cli)路径。server 模式的工作模式单独 spec —— 对齐 [runtime-session-hot-reload.md](runtime-session-hot-reload.md) 的边界处理(RuntimeSession 是 cli 专属抽象;server 触发与反馈不同)。
 
+> **当前权威接入补充**：下文早期以 runtime 持有可写 Store/Registry、管理工具直接落盘或以 `set_workdir` post-turn 意图落盘的描述，在耐久 assignment 中已由分布式运行时合同取代。运行体只持 GlobalQuery、Artifact reader 和 assignment stager；personal/workscene 记忆按静态会话身份反绑，main 的跨场景记忆查询仍是 path-free 的按需只读检索。workscene create/rename/setWorkdir/delete 与 memory 写只进入当前 MutationBatch，工具只说明本轮成功后生效；enter/exit 继续是合法的 turn-boundary 控制。锚点 adapter 在 owner 提交后唯一物化，提交前不得切换 runtime、暴露主机路径或声称已应用。
+
 ## 总览
 
 工作模式 = 用户进入具体工作场景时,同一对话内运行配置的切换。不是 sub-agent,不是在 main 上原地换模型,而是一个独立的 power AgentRuntime 实例,与 main runtime 在同一 REPL session 内共存、按 active 切换。

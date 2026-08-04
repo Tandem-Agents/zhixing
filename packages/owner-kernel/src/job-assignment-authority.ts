@@ -166,7 +166,10 @@ export class JobAssignmentAuthority {
       scope: { execution: "job" as const, taskId: occurrence.taskId },
       anchorEpoch: input.anchorEpoch,
       methods: [...PRINCIPAL_METHODS.assignment],
-      resources: [`task:${occurrence.taskId}`] as AuthorityCapability<"job">["resources"],
+      resources: [
+        `task:${occurrence.taskId}`,
+        "memory-domain:personal",
+      ] as AuthorityCapability<"job">["resources"],
       assignmentId: input.assignmentId,
       issuedAt,
       expiry,

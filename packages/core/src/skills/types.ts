@@ -43,8 +43,24 @@ export interface SkillUsage {
 /** 技能使用度量的跨边界稳定快照。 */
 export interface SkillUsageRecord {
   skillId: string;
-  lastHitAt: import("../types/distributed.js").IsoTime;
-  hitCount: number;
+  occurredAt: import("../types/distributed.js").IsoTime;
+  hitDelta: 1;
+}
+
+/** Path-free authority catalog entry shared by runtime and management views. */
+export interface SkillCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  mode: SkillModeDto;
+  pinned: boolean;
+  disabled: boolean;
+  createdAt: import("../types/distributed.js").IsoTime;
+  usage: SkillUsage | null;
+  contentRef: import("../contracts/foundation.js").ArtifactRef;
+  revision: number;
+  digest: import("../contracts/foundation.js").Digest;
 }
 
 /**
@@ -96,5 +112,8 @@ export interface SkillDraft {
  * 不依赖整个 SkillStore。SkillStore 结构上满足此接口;测试可注入轻量 mock。
  */
 export interface SkillTextLoader {
-  loadText(id: string): Promise<{ id: string; name: string; body: string }>;
+  loadText(
+    id: string,
+    operationId?: string,
+  ): Promise<{ id: string; name: string; body: string }>;
 }

@@ -29,6 +29,7 @@ import type {
 } from "@zhixing/executor";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
+import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
 import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
@@ -178,6 +179,11 @@ export class MeshRuntimeAssembly {
     if (roles.has("executor") && !options.executor) {
       throw new Error("Executor mesh role requires the executor runtime substrate");
     }
+    const anchorGlobalState = roles.has("anchor")
+      ? options.authority.globalState ?? (() => {
+          throw new Error("Anchor mesh role requires the global authority state port");
+        })()
+      : undefined;
     const receiver = new FileResumableArtifactReceiver(
       options.authority.artifacts,
       path.join(options.zhixingHome, "distributed-runtime", "mesh-artifact-partials"),
@@ -250,7 +256,10 @@ export class MeshRuntimeAssembly {
         }
       : undefined;
     const anchorRole = roles.has("anchor")
-      ? routedSubmissionMeshRole(options.protocol!, options.jobRelays)
+      ? {
+          ...routedSubmissionMeshRole(options.protocol!, options.jobRelays),
+          globalState: anchorGlobalState!,
+        }
       : undefined;
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
@@ -308,6 +317,14 @@ export class MeshRuntimeAssembly {
           ),
         artifacts: options.authority.artifacts,
         submissionFor: () => this.#composition.submissionPort(anchorId),
+        globalQueryFor: (capability, anchorEpoch) =>
+          roles.has("anchor")
+            ? createAssignmentGlobalQueryPort({
+                state: anchorGlobalState!,
+                capability,
+                anchorEpoch,
+              })
+            : this.#composition.globalQueryPort(anchorId, capability, anchorEpoch),
         resourceGovernor: options.authority.executorResourceGovernor,
         InProcessAssignmentSubmission:
           options.executor!.InProcessAssignmentSubmission,
@@ -494,6 +511,17 @@ export class MeshRuntimeAssembly {
   /** Executor role 组合根用它绑定 owner submission；mesh 本身不持有 worker 生命周期。 */
   submissionForAnchor(): JobSubmissionOwner {
     return this.#composition.submissionPort(this.options.trust.issuer.deviceId);
+  }
+
+  globalQueryForAnchor(
+    capability: import("@zhixing/core/contracts").AuthorityCapability,
+    anchorEpoch: number,
+  ): import("@zhixing/core/contracts").AssignmentGlobalQueryPort {
+    return this.#composition.globalQueryPort(
+      this.options.trust.issuer.deviceId,
+      capability,
+      anchorEpoch,
+    );
   }
 
   async start(): Promise<void> {

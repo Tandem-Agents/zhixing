@@ -1,4 +1,5 @@
 import { getZhixingHome, type ToolDefinition } from "@zhixing/core";
+import type { ArtifactStore } from "@zhixing/core/authority";
 import path from "node:path";
 import { createMcpHub, mapServerTools, type McpHub } from "@zhixing/mcp";
 import {
@@ -90,9 +91,14 @@ export async function runExecutorRole(
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions,
+      artifactStore: () => {
+        if (!authority) throw new Error("Executor artifact store is not ready");
+        return authority.artifacts;
+      },
       deviceCapacity: {
         interactive: deviceCapacity.workload("workload-interactive"),
         scheduler: deviceCapacity.workload("workload-scheduler"),
+        orchestration: deviceCapacity.workload("workload-orchestration"),
       },
     });
     authority = await setupAuthorityRuntime({
@@ -196,7 +202,12 @@ export async function runExecutorRole(
         if (!mesh) throw new Error("Executor usage transport is not ready");
         return mesh.finalizeExecutorUsage(assignmentId);
       },
+      globalQueryFor: (capability, anchorEpoch) => {
+        if (!mesh) throw new Error("Executor global query transport is not ready");
+        return mesh.globalQueryForAnchor(capability, anchorEpoch);
+      },
       InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+      resourceGovernor: authority.executorResourceGovernor,
       createStream: (input) => dataPlane!.createStream(input),
       onError: (_assignmentId, error) =>
         writer.notify(`[job-worker] ${error.message}`),
@@ -293,9 +304,11 @@ export class ExecutorRuntimeSubstrate {
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
+    readonly artifactStore: () => ArtifactStore;
     readonly deviceCapacity: {
       readonly interactive: AgentRuntimeCapacityBinding;
       readonly scheduler: AgentRuntimeCapacityBinding;
+      readonly orchestration: AgentRuntimeCapacityBinding;
     };
   }) {}
 
@@ -317,7 +330,9 @@ export class ExecutorRuntimeSubstrate {
           }
         : undefined;
     return createAgentRuntime({
+      artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.interactive,
+      orchestrationCapacity: this.options.deviceCapacity.orchestration,
       providerConfiguration: {
         config: this.options.config,
         credentials: this.options.credentials,
@@ -380,7 +395,9 @@ export class ExecutorRuntimeSubstrate {
           }
         : this.options.config;
     return createAgentRuntime({
+      artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.scheduler,
+      orchestrationCapacity: this.options.deviceCapacity.orchestration,
       providerConfiguration: {
         config,
         credentials: this.options.credentials,

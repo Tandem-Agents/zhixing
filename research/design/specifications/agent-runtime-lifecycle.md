@@ -553,6 +553,15 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 | 前置依赖 | ① `SkillStore` 暴露 `version(mode)`（单调 + publish-after-commit）✅；② core agent-loop per-run 现取 + `windowLifecycle` 回调透传 runTurnBegin / runTurnEnd（内部触发 onChange、返回值不带 windowChange 字段）✅；③ `buildSystemPrompt` segmentOverrides 段覆盖 ✅ |
 | 关联文档已回写 | [skill-system.md](./skill-system.md) §3.2/§3.3/§九 已标注注意力窗口边界重建落地；[lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §二已标注四钩子需求实现 |
 
+## 权威写入时序
+
+生命周期钩子仍按既定四阶段触发，但钩子的触发时点不是运行中权威写入的提交点。只读 prompt/context 贡献、本地资源释放和告警保持原时点；会改变会话或全局权威状态的消费者必须遵守以下边界：
+
+- MemoryFlush 只提取候选并以稳定 operationId 写入当前 assignment 的 memory staged overlay；segment 元数据同样只写 `segment-append`。二者在 commit 前对其他运行体和持久化投影不可见。
+- failed、cancelled 丢弃整批写；uncertain 不得执行物化，等待 owner 裁决。committed 后仅由 owner 日志中的 publish 义务幂等物化，响应丢失或重启只重驱未 settled 项。
+- run 外 retention、clear、compact 等维护继续经 control/maintenance owner，不得伪造 assignment 或借 lifecycle 钩子绕开权威端口。
+- 钩子隔离、deadline、abort、warning 与非关键失败策略保持不变；不得为写类钩子另建第二日志或通用 outbox。
+
 ---
 
 ## 附录：已删除的 `injectContext` 首条 `<context>` 注入器承载的三项业务（待未来通过 onBeforeRun 订阅者补回）

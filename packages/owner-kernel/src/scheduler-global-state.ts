@@ -8,6 +8,7 @@ import type {
   GlobalStagedCallContext,
   GlobalStagedMutation,
   GlobalStagedMutationResult,
+  AssignmentStagedReceipt,
   GlobalStatePort,
   ScheduleTaskSpecDto,
   ScheduleWriteMutation,
@@ -61,7 +62,7 @@ export class AnchorSchedulerGlobalStateAdapter implements GlobalStatePort {
   async mutate(
     mutation: GlobalControlMutation | GlobalStagedMutation,
     context: GlobalControlCallContext | GlobalStagedCallContext,
-  ): Promise<{ revision: number }> {
+  ): Promise<{ revision: number } | AssignmentStagedReceipt> {
     this.#admit(context, "global.mutate");
     if (context.principal.kind === "assignment") {
       throw new AuthorityMethodForbiddenError(

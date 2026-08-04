@@ -1,11 +1,16 @@
 import type {
   AuthorityError,
+  GlobalStagedMutation,
   MutationBatch,
   PublishRecord,
   ScheduleWriteMutation,
   TaskDefinition,
 } from "@zhixing/core/contracts";
 import type { JobCommitParticipant } from "./job-assignment.js";
+import type {
+  GlobalMutationCommitParticipant,
+  GlobalMutationCommitRecord,
+} from "./global-mutation-participant.js";
 import {
   planScheduleMutationCommit,
   scheduleMutationTaskId,
@@ -19,6 +24,7 @@ type PublishOutcome = Extract<
 export interface SchedulerJobCommitParticipantOptions {
   readonly definitionFor: (taskId: string) => TaskDefinition | undefined;
   readonly applied: (taskIds: readonly string[]) => Promise<void>;
+  readonly participants?: readonly GlobalMutationCommitParticipant[];
 }
 
 /** Atomically publishes job-staged schedule mutations into TaskDefinition streams. */
@@ -36,12 +42,16 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
       readonly requestId: string;
       readonly mutation: ScheduleWriteMutation;
     }> = [];
+    const participantRecords = new Map<
+      GlobalMutationCommitParticipant,
+      GlobalMutationCommitRecord[]
+    >();
 
     for (const record of input.mutationBatch.records) {
       if (record.domain === "global" && record.mutation.kind === "delivery-enqueue") {
         continue;
       }
-      if (record.domain !== "global" || !isScheduleMutation(record.mutation)) {
+      if (record.domain !== "global") {
         outcomes.set(
           record.seq,
           conflict(
@@ -49,6 +59,34 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
             "This job owner does not publish the staged global mutation domain",
           ),
         );
+        continue;
+      }
+      if (!isScheduleMutation(record.mutation)) {
+        const mutation = record.mutation as GlobalStagedMutation;
+        const owners = (this.#options.participants ?? []).filter((participant) =>
+          participant.ownsStagedMutation(mutation),
+        );
+        if (owners.length > 1) {
+          throw new Error("A job-staged global mutation has multiple anchor owners");
+        }
+        const owner = owners[0];
+        if (!owner) {
+          outcomes.set(
+            record.seq,
+            conflict(
+              "capability-gap",
+              "This job owner does not publish the staged global mutation domain",
+            ),
+          );
+          continue;
+        }
+        const owned = participantRecords.get(owner) ?? [];
+        owned.push({
+          seq: record.seq,
+          requestId: record.requestId,
+          mutation,
+        });
+        participantRecords.set(owner, owned);
         continue;
       }
       scheduleRecords.push({
@@ -77,7 +115,19 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
       source,
     });
     for (const [seq, outcome] of plan.outcomes) outcomes.set(seq, outcome);
-    return { accepted: true as const, records: plan.records, outcomes };
+    const plannedRecords: import("@zhixing/core/contracts").LogicalRecord[] = [
+      ...plan.records,
+    ];
+    for (const [participant, records] of participantRecords) {
+      const prepared = participant.prepareStagedMutations({
+        assignmentId: input.bundle.assignmentId,
+        authorityPrefixLsn: input.authorityPrefixLsn,
+        records,
+      });
+      plannedRecords.push(...prepared.records);
+      for (const [seq, outcome] of prepared.outcomes) outcomes.set(seq, outcome);
+    }
+    return { accepted: true as const, records: plannedRecords, outcomes };
   }
 
   async applied(input: {
@@ -91,6 +141,22 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
     );
     if (taskIds.length > 0) {
       await this.#options.applied(taskIds);
+    }
+    for (const participant of this.#options.participants ?? []) {
+      const records = input.mutationBatch.records.flatMap((record) =>
+        record.domain === "global" &&
+        record.mutation.kind !== "delivery-enqueue" &&
+        participant.ownsStagedMutation(record.mutation as GlobalStagedMutation)
+          ? [{
+              seq: record.seq,
+              requestId: record.requestId,
+              mutation: record.mutation as GlobalStagedMutation,
+            }]
+          : [],
+      );
+      if (records.length > 0) {
+        await participant.refreshStagedMutations?.(records);
+      }
     }
   }
 }

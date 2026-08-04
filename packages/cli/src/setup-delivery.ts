@@ -84,7 +84,13 @@ import {
 } from "@zhixing/core/environment";
 import {
   AnchorRubricGlobalStateAdapter,
+  AnchorMemoryGlobalStateAdapter,
+  AnchorSkillGlobalStateAdapter,
   AnchorWorksceneGlobalStateAdapter,
+  SkillStore,
+  getSkillsRoot,
+  getMemoryDir,
+  getWorkSceneMemoryDir,
   parseConversationId,
 } from "@zhixing/core";
 import {
@@ -100,6 +106,7 @@ import type {
   CreateDeliveryControlEnvelopeInput,
   ConversationAssignmentCredentialPolicy,
   JobAssignmentCredentialPolicy,
+  GlobalMutationCommitParticipant,
 } from "@zhixing/owner-kernel";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
@@ -150,6 +157,7 @@ export interface AuthorityRuntimeStack {
   readonly workspaceProbe?: WorkspaceProbePort;
   readonly environmentProbeOwner?: EnvironmentProbeOwner;
   readonly globalState?: GlobalStatePort;
+  readonly globalMutationParticipants: readonly GlobalMutationCommitParticipant[];
   readonly installSchedulerGlobalState: (state: GlobalStatePort) => void;
   readonly recoverWorksceneState: () => Promise<void>;
   readonly replayWorksceneMutation: (
@@ -348,6 +356,8 @@ export async function setupAuthorityRuntime(
   let executorLog: FileAuthorityCommitLog | undefined;
   let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
   let worksceneGlobalState: AnchorWorksceneGlobalStateAdapter | undefined;
+  let memoryGlobalState: AnchorMemoryGlobalStateAdapter | undefined;
+  let skillGlobalState: AnchorSkillGlobalStateAdapter | undefined;
   let rubricGlobalState: AnchorRubricGlobalStateAdapter | undefined;
   let schedulerGlobalState: GlobalStatePort | undefined;
   let workspaceBindings: WorkspaceBindingCatalog | undefined;
@@ -807,6 +817,26 @@ export async function setupAuthorityRuntime(
           clock,
         })
       : undefined;
+    memoryGlobalState = authorityLog
+      ? new AnchorMemoryGlobalStateAdapter({
+          log: authorityLog,
+          anchorEpoch,
+          scopeRoot: (scope) =>
+            scope.kind === "personal"
+              ? getMemoryDir()
+              : getWorkSceneMemoryDir(scope.sceneId),
+          clock,
+        })
+      : undefined;
+    skillGlobalState = authorityLog
+      ? new AnchorSkillGlobalStateAdapter({
+          log: authorityLog,
+          artifacts,
+          store: new SkillStore(getSkillsRoot()),
+          anchorEpoch,
+          clock,
+        })
+      : undefined;
     rubricGlobalState = authorityLog
       ? new AnchorRubricGlobalStateAdapter({
           log: authorityLog,
@@ -832,6 +862,9 @@ export async function setupAuthorityRuntime(
         }),
       );
     }
+    await worksceneGlobalState?.initializeStagedPublishing();
+    await memoryGlobalState?.initializeStagedPublishing();
+    await skillGlobalState?.initializeStagedPublishing();
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
     ): Promise<{
@@ -1396,9 +1429,11 @@ export async function setupAuthorityRuntime(
       );
       return result.ok ? undefined : result.error;
     };
-    const routedGlobalState = worksceneGlobalState && rubricGlobalState
+    const routedGlobalState = worksceneGlobalState && memoryGlobalState && skillGlobalState && rubricGlobalState
       ? createGlobalStateRouter(
           worksceneGlobalState,
+          memoryGlobalState,
+          skillGlobalState,
           () => schedulerGlobalState,
           rubricGlobalState,
         )
@@ -1459,6 +1494,9 @@ export async function setupAuthorityRuntime(
       workspaceProbe,
       environmentProbeOwner,
       globalState: routedGlobalState,
+      globalMutationParticipants: worksceneGlobalState && memoryGlobalState && skillGlobalState
+        ? [worksceneGlobalState, memoryGlobalState, skillGlobalState]
+        : [],
       installSchedulerGlobalState: (state) => {
         if (schedulerGlobalState) {
           throw new Error("Scheduler global state owner is already installed");
@@ -1554,6 +1592,8 @@ interface NormalizedExecutorReadiness {
 
 function createGlobalStateRouter(
   workscene: GlobalStatePort,
+  memory: GlobalStatePort,
+  skills: GlobalStatePort,
   scheduler: () => GlobalStatePort | undefined,
   rubrics: GlobalStatePort,
 ): GlobalStatePort {
@@ -1561,6 +1601,8 @@ function createGlobalStateRouter(
     mutation: Parameters<GlobalStatePort["mutate"]>[0],
   ): GlobalStatePort => {
     if (mutation.kind.startsWith("rubric-")) return rubrics;
+    if (mutation.kind.startsWith("memory-")) return memory;
+    if (mutation.kind.startsWith("skill-")) return skills;
     if (!mutation.kind.startsWith("schedule-")) return workscene;
     const owner = scheduler();
     if (!owner) {
@@ -1570,8 +1612,18 @@ function createGlobalStateRouter(
   };
   return {
     read: (query, context) => {
+      if (query.kind.startsWith("memory-")) {
+        return memory.read(query, context);
+      }
       if (query.kind === "asset-index" && query.asset === "rubrics") {
         return rubrics.read(query, context);
+      }
+      if (
+        query.kind === "skill-catalog" ||
+        query.kind === "skill-get" ||
+        (query.kind === "asset-index" && query.asset === "skills")
+      ) {
+        return skills.read(query, context);
       }
       if (query.kind !== "schedule-list") {
         return workscene.read(query, context);

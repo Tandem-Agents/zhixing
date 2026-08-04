@@ -1,4 +1,5 @@
 import type {
+  AuthorityCapability,
   DispatchEnvelope,
   InteractionSettlementStreamProof,
 } from "@zhixing/core/contracts";
@@ -36,7 +37,21 @@ const envelope = {
     jobRunId: "job-run:recovery",
     fence: { anchorEpoch: 1 },
   },
-  capabilities: [{ expiry: "2026-07-30T00:00:00.000Z" }],
+  capabilities: [
+    {
+      v: 1,
+      capId: "cap-job-recovery",
+      executorId: "executor:recovery",
+      scope: { execution: "job", jobId: "task:recovery" },
+      ownerEpoch: 1,
+      methods: ["global.read", "global.mutate"],
+      resources: [],
+      assignmentId,
+      issuedAt: new Date().toISOString(),
+      expiry: new Date(Date.now() + 60_000).toISOString(),
+      signature: { keyId: "key-test", algorithm: "ed25519", value: "signature" },
+    } as AuthorityCapability,
+  ],
 } as unknown as Extract<DispatchEnvelope, { execution: "job" }>;
 
 describe("job assignment audit-only recovery", () => {

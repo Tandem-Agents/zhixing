@@ -5,8 +5,7 @@
  * 沉淀的新规则随读即见;撤销落盘后对新建 runtime 实例生效(活跃实例的内存
  * 副本随实例换代刷新,最终一致)。
  *
- * skill:包装注入的 skillStore 单实例(与全部 runtime 共享锁域,setState /
- * archive 的结构版本递增对一切消费者一致)。
+ * skill:只经 GlobalStatePort 的 path-free query/control 合同读写。
  */
 
 import {
@@ -16,8 +15,9 @@ import {
   parseConversationId,
   type PermissionContextId,
   type PermissionRule,
-  type SkillStore,
 } from "@zhixing/core";
+import { randomUUID } from "node:crypto";
+import type { GlobalStatePort } from "@zhixing/core/contracts";
 import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
@@ -77,33 +77,78 @@ export function createTrustDirectory(deps: {
 }
 
 export function createSkillDirectory(deps: {
-  skillStore: SkillStore;
+  globalState: GlobalStatePort;
+  anchorEpoch: number;
 }): SkillDirectory {
-  const { skillStore } = deps;
+  let structuralVersion = 0;
+  const context = (requestId: string) => ({
+    principal: { kind: "host" as const, component: "skill-management" },
+    requestId,
+    deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    authority: { domain: "global" as const, anchorEpoch: deps.anchorEpoch },
+  });
+  const readCatalog = async () => {
+    const result = await deps.globalState.read(
+      { kind: "skill-catalog", includeDisabled: true },
+      context(`skill-list:${randomUUID()}`),
+    );
+    if (result.kind !== "skill-catalog") {
+      throw new Error("Skill catalog returned another result type");
+    }
+    structuralVersion = result.catalogRevision;
+    return result.entries;
+  };
+  const readEntry = async (id: string) => {
+    const result = await deps.globalState.read(
+      { kind: "skill-get", skillId: id },
+      context(`skill-get:${randomUUID()}`),
+    );
+    if (result.kind !== "skill-get") {
+      throw new Error("Skill lookup returned another result type");
+    }
+    structuralVersion = result.catalogRevision;
+    return result.entry;
+  };
   return {
     list() {
-      return skillStore.listForManagement();
+      return readCatalog();
     },
     async setState(id, patch): Promise<boolean> {
-      try {
-        await skillStore.setState(id, patch);
-        return true;
-      } catch {
-        // store 对不存在的技能 throw——目录契约用 false 表达"不存在"
-        return false;
-      }
+      const current = await readEntry(id);
+      if (!current) return false;
+      const statePatch = patch.mode !== undefined
+        ? { mode: patch.mode, ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.disabled !== undefined ? { disabled: patch.disabled } : {}) }
+        : patch.pinned !== undefined
+          ? { pinned: patch.pinned, ...(patch.disabled !== undefined ? { disabled: patch.disabled } : {}) }
+          : { disabled: patch.disabled! };
+      await deps.globalState.mutate(
+        {
+          kind: "skill-set-state",
+          skillId: id,
+          patch: statePatch,
+          expectedRevision: current.revision,
+        },
+        context(`skill-state:${randomUUID()}`),
+      );
+      await readCatalog();
+      return true;
     },
     async archive(id): Promise<boolean> {
-      try {
-        await skillStore.archive(id);
-        return true;
-      } catch {
-        return false;
-      }
+      const current = await readEntry(id);
+      if (!current) return false;
+      await deps.globalState.mutate(
+        {
+          kind: "skill-archive",
+          skillId: id,
+          expectedRevision: current.revision,
+        },
+        context(`skill-archive:${randomUUID()}`),
+      );
+      await readCatalog();
+      return true;
     },
     structuralVersion() {
-      // store 版本按全局粒度递增(不区分 mode),任一 mode 投影变更都不漏检
-      return skillStore.version("main");
+      return structuralVersion;
     },
   };
 }

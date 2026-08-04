@@ -12,11 +12,11 @@
  * 反映禁用 / 归档带来的成员变化),再重读列表重画。
  */
 
-import type { ManagedSkillRecord, SkillMode } from "@zhixing/core";
+import type { SkillCatalogEntry, SkillMode } from "@zhixing/core";
 
 /** 控制器对 Store 的最小依赖(接口隔离,便于注入 stub 单测)。 */
 export interface SkillManagerStore {
-  listForManagement(): Promise<readonly ManagedSkillRecord[]>;
+  listForManagement(): Promise<readonly SkillCatalogEntry[]>;
   setState(
     id: string,
     patch: { mode?: SkillMode; pinned?: boolean; disabled?: boolean },
@@ -26,13 +26,13 @@ export interface SkillManagerStore {
 
 /** 渲染所需的视图快照 —— 外壳据此画列表 + 高亮。 */
 export interface SkillManagerView {
-  readonly items: readonly ManagedSkillRecord[];
+  readonly items: readonly SkillCatalogEntry[];
   /** 当前高亮项的下标;列表空时为 -1。 */
   readonly selectedIndex: number;
 }
 
 export class SkillManagerController {
-  private items: ManagedSkillRecord[] = [];
+  private items: SkillCatalogEntry[] = [];
   private selected = 0;
 
   constructor(
@@ -98,7 +98,7 @@ export class SkillManagerController {
     await this.afterMutate(cur.id);
   }
 
-  private current(): ManagedSkillRecord | null {
+  private current(): SkillCatalogEntry | null {
     return this.items[this.selected] ?? null;
   }
 

@@ -123,6 +123,7 @@ export function createBuiltinExtraToolsAssembly(
       // 直接 isError 拒绝（不污染任何 conversation 的 cache）。
       const taskListTool = taskListService.createTool(
         () => runContextStorage.getStore()?.conversationId,
+        () => runContextStorage.getStore()?.assignmentMutations,
       );
 
       const tools: ToolDefinition[] = [scheduleTool, taskListTool];

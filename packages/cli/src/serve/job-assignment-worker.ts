@@ -19,6 +19,7 @@ import { AuthorityStorageError } from "@zhixing/core/authority";
 import type { StreamFrameProducer } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
+  ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
   JobRecoveryObligation,
 } from "@zhixing/executor";
@@ -35,7 +36,11 @@ import {
 } from "./durable-job-interactions.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
-import { createAssignmentScheduleStager } from "./assignment-schedule-stager.js";
+import {
+  assignmentGlobalCapability,
+  createAssignmentMutationPort,
+  createAssignmentScheduleStager,
+} from "./assignment-schedule-stager.js";
 
 const COMMIT_REJECTION_PREFIX = "Job commit rejected";
 const JOB_RECOVERY_PAGE_SIZE = 32;
@@ -61,6 +66,9 @@ export interface JobRuntimeRunOptions {
   readonly authorizeToolExecution: () => Promise<readonly PermissionRule[]>;
   readonly toolSideEffectObserver: ToolSideEffectObserver;
   readonly stageScheduleMutation: import("@zhixing/core").ScheduleMutationStager;
+  readonly assignmentMutations: import("@zhixing/core/contracts").AssignmentMutationPort;
+  readonly globalQuery?: import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
+  readonly assignmentIssuedAt: string;
 }
 
 export interface JobRuntimeHandle {
@@ -101,6 +109,11 @@ export interface JobAssignmentWorkerOptions {
     readonly envelope: JobEnvelope;
   }) => Promise<{ reportDigest: string; upToUsageSeq: number }>;
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+  readonly resourceGovernor?: ExecutorResourceGovernor;
+  readonly globalQueryFor?: (
+    capability: import("@zhixing/core/contracts").AuthorityCapability,
+    anchorEpoch: number,
+  ) => import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
   readonly createStream: (input: {
     readonly assignmentId: string;
     readonly ref: {
@@ -429,7 +442,68 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
           this.options.ledger,
           assignmentId,
           envelope.work.fence.anchorEpoch,
+          "job",
+          assignmentGlobalCapability({
+            assignmentId,
+            execution: "job",
+            capabilities: envelope.capabilities,
+          }),
         ),
+        assignmentMutations: createAssignmentMutationPort({
+          ledger: this.options.ledger,
+          assignmentId,
+          execution: "job",
+          anchorEpoch: envelope.work.fence.anchorEpoch,
+          capability: assignmentGlobalCapability({
+            assignmentId,
+            execution: "job",
+            capabilities: envelope.capabilities,
+          }),
+        }),
+        assignmentIssuedAt: envelope.issuedAt,
+        ...(this.options.globalQueryFor
+          ? {
+              globalQuery: this.options.globalQueryFor(
+                assignmentGlobalCapability({
+                  assignmentId,
+                  execution: "job",
+                  capabilities: envelope.capabilities,
+                }),
+                envelope.work.fence.anchorEpoch,
+              ),
+            }
+          : {}),
+        ...(this.options.resourceGovernor
+          ? {
+              resourceReservation: {
+                port: this.options.resourceGovernor,
+                parentLease: envelope.resourceLease,
+                contextFor: (requestId: string) =>
+                  jobResourceContext(envelope, requestId),
+              },
+              modelCallResourceMeter: {
+                reserve: async ({ callIndex, tokenUpperBound }: {
+                  callIndex: number;
+                  tokenUpperBound: number;
+                }) => {
+                  const usageId = `usage:${assignmentId}:model:${callIndex}`;
+                  await this.options.resourceGovernor!.reserveUsage(
+                    envelope.resourceLease,
+                    { usageId, tokens: tokenUpperBound, calls: 1 },
+                    jobResourceContext(envelope, usageId),
+                  );
+                  return { usageId };
+                },
+                consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+                  await this.options.resourceGovernor!.consume(
+                    envelope.resourceLease,
+                    { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+                    jobResourceContext(envelope, usageId),
+                  );
+                },
+              },
+            }
+          : {}),
       });
       while (true) {
         const item = await this.#interactions.withBinding(
@@ -916,6 +990,22 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     }
     if (stream) await this.#markStreamTerminal(stream);
   }
+}
+
+function jobResourceContext(
+  envelope: JobEnvelope,
+  requestId: string,
+): AuthorityCallContext {
+  const capability = assignmentGlobalCapability({
+    assignmentId: envelope.assignmentId,
+    execution: "job",
+    capabilities: envelope.capabilities,
+  });
+  return {
+    principal: { kind: "assignment", capability },
+    requestId: `resource:${envelope.assignmentId}:${requestId}`,
+    deadlineAt: capability.expiry,
+  };
 }
 
 function isRetryableInteractionRecoveryFailure(error: unknown): boolean {

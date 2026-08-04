@@ -168,6 +168,7 @@ export class AnchorSchedulerRuntime {
     this.#commitParticipant = new SchedulerJobCommitParticipant({
       definitionFor: (taskId) => this.scheduler.getDefinition(taskId),
       applied: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
+      participants: options.authority.globalMutationParticipants,
     });
     options.protocol.bindMutationPublisher(
       new SchedulerConversationMutationPublisher({
@@ -188,6 +189,7 @@ export class AnchorSchedulerRuntime {
             createdInTurn: ingress.ingressId,
           };
         },
+        participants: options.authority.globalMutationParticipants,
       }),
     );
   }

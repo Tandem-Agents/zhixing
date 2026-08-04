@@ -69,6 +69,9 @@ export function createAgentJobRuntimePort(
                 authorizeToolExecution: options.authorizeToolExecution,
                 toolSideEffectObserver: options.toolSideEffectObserver,
                 stageScheduleMutation: options.stageScheduleMutation,
+                assignmentMutations: options.assignmentMutations,
+                globalQuery: options.globalQuery,
+                assignmentIssuedAt: options.assignmentIssuedAt,
               }),
             )
             .then(

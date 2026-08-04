@@ -36,6 +36,7 @@ import type {
   SkillSource,
   SkillState,
   SkillUsage,
+  SkillCatalogEntry,
 } from "./types.js";
 
 /** 先扫 linked、再扫 own —— own 对同 id 后写遮蔽 linked。 */
@@ -137,6 +138,72 @@ export class SkillStore {
       return { id, name: builtin.name, body: builtin.body };
     }
     throw new Error(`技能 "${id}" 不存在`);
+  }
+
+  /** Reads the canonical SKILL.md without recording a runtime hit. */
+  async readDocument(id: string): Promise<string> {
+    const located = await this.locate(id);
+    const file = path.join(located.dir, SKILL_FILE);
+    this.assertWithinRoot(file);
+    return fs.readFile(file, "utf-8");
+  }
+
+  /**
+   * Anchor-only physical projection. Callers supply a path-free catalog fact
+   * and immutable bytes already accepted by the global authority.
+   */
+  async materializeAuthority(
+    entry: SkillCatalogEntry,
+    document: string,
+  ): Promise<void> {
+    const parsed = parseFrontmatter(document);
+    if (skillNameToId(entry.name) !== entry.id) {
+      throw new Error("Skill catalog identity is invalid");
+    }
+    const normalized = stringifyFrontmatter(
+      { name: entry.name, description: entry.description },
+      parsed.content,
+    );
+    const existing = (await this.scan()).get(entry.id);
+    let dir = existing?.source === entry.source ? existing.dir : undefined;
+    if (!dir) {
+      dir = await this.reserveDir(sourceRoot(this.root, entry.source), entry.id);
+      await fs.mkdir(dir, { recursive: true });
+    }
+    const file = path.join(dir, SKILL_FILE);
+    this.assertWithinRoot(file);
+    await writeAtomic(file, normalized);
+    await this.withIndexLock(async () => {
+      const current = await this.readIndex();
+      current.set(entry.id, {
+        id: entry.id,
+        mode: entry.mode,
+        pinned: entry.pinned,
+        disabled: entry.disabled,
+        createdAt: entry.createdAt,
+      });
+      await this.writeIndex(current);
+      this.bumpStructuralVersion();
+    });
+    await this.materializeUsage(entry.id, entry.usage);
+  }
+
+  /** Replaces the derived usage file with the authority's cumulative view. */
+  async materializeUsage(id: string, usage: SkillUsage | null): Promise<void> {
+    await this.withIdLock(id, async () => {
+      if (!usage) {
+        await fs.rm(usagePath(this.root, id), { force: true });
+        return;
+      }
+      await fs.mkdir(usageDir(this.root), { recursive: true });
+      await writeAtomic(usagePath(this.root, id), JSON.stringify(usage, null, 2));
+    });
+  }
+
+  /** Idempotently projects an authority archive fact. */
+  async materializeArchive(id: string): Promise<void> {
+    if (!(await this.scan()).has(id)) return;
+    await this.archive(id);
   }
 
   /**

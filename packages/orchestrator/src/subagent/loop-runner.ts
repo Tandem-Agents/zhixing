@@ -69,7 +69,11 @@ import {
   type WatchdogPolicy,
 } from "@zhixing/core";
 import { createSecureExecuteTool } from "../security/secure-executor.js";
-import type { DurableToolExecutionAuthorizer } from "../runtime/run-context.js";
+import type {
+  DurableToolExecutionAuthorizer,
+  RunContext,
+} from "../runtime/run-context.js";
+import { governToolExecution } from "../runtime/governed-agent-runtime.js";
 import { trackMessages } from "../runtime/track-messages.js";
 import type { BudgetExceededKind } from "./budget.js";
 
@@ -188,6 +192,8 @@ export interface RunSubAgentLoopOptions {
   userIntent?: string;
   /** Durable assignment authority inherited by this child executor. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** Dedicated capacity binding for actual child-local tool batches. */
+  orchestrationCapacity?: RunContext["orchestrationCapacity"];
 }
 
 // ─── 实现 ───
@@ -294,6 +300,12 @@ export async function runSubAgentLoop(
       eventBus: opts.eventBus,
       authorizeToolExecution: opts.authorizeToolExecution,
     });
+    const executeTool = opts.orchestrationCapacity
+      ? governToolExecution(secureExecuteTool, {
+          ...opts.orchestrationCapacity,
+          serviceClass: "workload-orchestration",
+        })
+      : secureExecuteTool;
 
     // drain yields + 终止 result —— drainAgentLoop 收集所有 yield 直到 done
     const { yields, result } = await drainAgentLoop({
@@ -315,7 +327,7 @@ export async function runSubAgentLoop(
       llmRoles: opts.llmRoles,
       workingDirectory: opts.workingDirectory,
       deps: {
-        executeTool: secureExecuteTool,
+        executeTool,
       },
     });
 

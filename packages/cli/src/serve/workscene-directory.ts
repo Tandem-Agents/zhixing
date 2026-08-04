@@ -416,6 +416,7 @@ export function createWorksceneDirectory(deps: {
         deviceId: workspace.deviceId,
         deviceName: workspace.deviceName,
         bindingRef: workspace.bindingRef,
+        workspaceBindingRevision: workspace.workspaceBindingRevision,
         workspaceName: workspace.displayName,
       }));
     },

@@ -148,7 +148,7 @@ export interface SegmentPersistence {
  *   - conversation 不存在 / 无 task_list state 时返 false（与 ephemeral 路径自然降级一致）
  */
 export interface TaskListReader {
-  hasInProgress(conversationId: string): boolean;
+  hasInProgress(conversationId: string): boolean | Promise<boolean>;
 }
 
 // ─── 扩展点 ───

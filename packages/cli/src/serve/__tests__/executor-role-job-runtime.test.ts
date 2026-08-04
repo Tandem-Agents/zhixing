@@ -1,4 +1,4 @@
-import type { IConfirmationBroker } from "@zhixing/core";
+import type { ArtifactStore, IConfirmationBroker } from "@zhixing/core";
 import type { McpHub } from "@zhixing/mcp";
 import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import type { ZhixingConfig } from "@zhixing/providers";
@@ -29,6 +29,8 @@ describe("executor role job runtime production assembly", () => {
     const runtime = {} as AgentRuntime;
     runtimeMocks.createAgentRuntime.mockResolvedValueOnce(runtime);
     const schedulerCapacity = {} as AgentRuntimeCapacityBinding;
+    const orchestrationCapacity = {} as AgentRuntimeCapacityBinding;
+    const artifactStore = {} as ArtifactStore;
     const confirmationBroker = {} as IConfirmationBroker;
     const substrate = new ExecutorRuntimeSubstrate({
       config: {} as ZhixingConfig,
@@ -39,9 +41,11 @@ describe("executor role job runtime production assembly", () => {
       } as unknown as McpHub,
       systemProtectedPaths: ["protected"],
       interactions: {} as never,
+      artifactStore: () => artifactStore,
       deviceCapacity: {
         interactive: {} as AgentRuntimeCapacityBinding,
         scheduler: schedulerCapacity,
+        orchestration: orchestrationCapacity,
       },
     });
 
@@ -54,7 +58,9 @@ describe("executor role job runtime production assembly", () => {
     expect(runtimeMocks.createAgentRuntime).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmationBroker,
+        artifactStore,
         deviceCapacity: schedulerCapacity,
+        orchestrationCapacity,
         runtimeKind: "ephemeral",
         systemProtectedPaths: ["protected"],
       }),

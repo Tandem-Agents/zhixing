@@ -2897,7 +2897,12 @@ describe("conversation assignment protocol", () => {
           },
         },
       }),
-    ).resolves.toEqual({ seq: 1 });
+    ).resolves.toMatchObject({
+      kind: "assignment-mutation-staged",
+      requestId: "indexed-mutation-0",
+      recordSeq: 1,
+      mutationDigest: expect.any(String),
+    });
     await expect(
       restarted.stageMutation(ASSIGNMENT_ID, {
         domain: "session",
@@ -2914,7 +2919,12 @@ describe("conversation assignment protocol", () => {
           },
         },
       }),
-    ).resolves.toEqual({ seq: 33 });
+    ).resolves.toMatchObject({
+      kind: "assignment-mutation-staged",
+      requestId: "indexed-mutation-32",
+      recordSeq: 33,
+      mutationDigest: expect.any(String),
+    });
   }, 15_000);
 
   it("commits a sealed conversation exactly once and recovers publish and final response loss", async () => {
@@ -3762,8 +3772,14 @@ describe("conversation assignment protocol", () => {
   it("rejects publish progress that skips a granted mutation", async () => {
     const harness = await createHarness({
       publisher: {
-        decideGlobalBatchAtPrefix() {
-          throw new Error("global decision is not expected");
+        decideGlobalBatchAtPrefix(input) {
+          return input.records.map((record) => ({
+            seq: record.seq,
+            outcome: {
+              t: "granted" as const,
+              targetRevision: record.seq,
+            },
+          }));
         },
         async apply() {
           throw new Error("pause before publish progress");
@@ -3782,15 +3798,15 @@ describe("conversation assignment protocol", () => {
     await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
     for (const [index, content] of ["one", "two"].entries()) {
       await harness.ledger.stageMutation(ASSIGNMENT_ID, {
-        domain: "session",
+        domain: "global",
         requestId: `mutation-${index + 1}`,
+        expected: { anchorEpoch: 9 },
         mutation: {
-          kind: "task-list-op",
-          op: {
-            op: "set",
-            state: {
-              items: [{ id: `task-${index + 1}`, content, status: "pending" }],
-            },
+          kind: "memory-append",
+          payload: {
+            domain: "journal",
+            scope: { kind: "personal" },
+            content,
           },
         },
       });
@@ -3817,7 +3833,7 @@ describe("conversation assignment protocol", () => {
         body: {
           t: "publish-progress" as const,
           assignmentId: ASSIGNMENT_ID,
-          domain: "session" as const,
+          domain: "global" as const,
           upToSeq: 2,
           state: "settled" as const,
         },

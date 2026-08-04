@@ -20,6 +20,8 @@
 
 第一版只服务一个真实消费者：多视角发散收敛。架构必须允许未来扩展，但首版实现不得为尚未出现的拓扑预先建大系统。
 
+每个实际 agent node 都是父 run 内的短命工作单元：以 `definitionId + runId + nodeId + attempt` 派生稳定 operation identity，在 provider 前从父 ResourceLease 取得有界 child lease，并仅在本机实际执行批次持有 `workload-orchestration` device permit。节点的模型计量只落 child lease，工具读写继承父 assignment 的 query、overlay 与 MutationBatch；节点结果只回到父 bundle，不另建可提交事实源。装配失败零租约、零 permit；所有终态先结算和释放子资源，再允许父节点终态推进。现有有限 DAG、fail-fast、abort 隔离及无跨重启编排边界保持不变。
+
 #### 0.1 上层消费者与演进纪律
 
 - 已落地消费者：[多视角发散收敛架构](./multi-perspective-divergence-convergence-architecture.md)。它是基于本基础设施的上层业务能力，用来消费可信模板填参、数组展开、节点依赖、模型角色、编排执行与事件投影等通用能力。

@@ -59,7 +59,9 @@ describe("WORKSCENE_MANAGEMENT_TOOLS", () => {
     expect(getWorksceneToolPostTurnControlKind("workmode_enter")).toBe("enter");
     expect(getWorksceneToolPostTurnControlKind("workmode_exit")).toBe("exit");
     expect(getWorksceneToolPostTurnControlKind("workscene_set_workdir_current"))
-      .toBe("set_workdir");
+      .toBeUndefined();
+    expect(getWorksceneToolPostTurnControlKind("workscene_clear_workdir_current"))
+      .toBeUndefined();
   });
 
   it("所有 workscene 确认展示工具都有显式摘要构造", () => {

@@ -1085,6 +1085,8 @@ function createJobUnsignedEnvelope(input: {
       "submission.reportStarted",
       "submission.submitBundle",
       "submission.submitCancelProof",
+      "global.read",
+      "global.mutate",
     ] as AuthorityCapability<"job">["methods"],
     resources: ["task:task-s6"] as AuthorityCapability<"job">["resources"],
     assignmentId,

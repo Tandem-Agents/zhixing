@@ -568,3 +568,11 @@ Subagents 不把完整详情塞进原信息栏。活跃期间，在原信息栏�
 - `packages/cli/src/output/output-renderer.ts`
 - `packages/cli/src/context-indicator/context-indicator.ts`
 - `packages/cli/src/task-tail/task-tail.ts`（与 Subagents 共存的既有锚点行 tail 源，不属于子 agent 本体）
+
+## 12. 父 run 资源与权威边界
+
+- Task 子 Agent 在首次 provider 调用前，必须以父 reservation 和耐久 toolCallId 派生稳定的短命子身份，并从父 ResourceLease 取得有界 child lease；装配、工具选择或静态校验失败发生在取租约之前。
+- 子 Agent 的全部模型调用只在 child lease 上 reserve/consume，不能继续使用父 meter。孙 Agent 从当前 child lease 继续委派，预算、受众和 lineage 不得跳回根租约。
+- 本机实际执行批次另取 `workload-orchestration` device permit；等待容量、网络等待、用户交互和空闲期不得持有该 permit，也不得在等待容量时持 authority、manifest 或 artifact 锁。
+- 子工具继承父 assignment 的 query、stager 和 overlay，所有权威写仍进入父 MutationBatch；子 Agent 不产生独立提交事实源。
+- completed、failed、aborted 和 timeout 均须先收敛 usage、settle/release child 并释放 permit，再向父返回终态。响应不明按稳定身份重放，任一时刻不得出现第二个 active child。

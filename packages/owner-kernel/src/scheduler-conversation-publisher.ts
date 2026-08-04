@@ -4,6 +4,10 @@ import type {
   TaskDefinition,
 } from "@zhixing/core/contracts";
 import type { ConversationMutationPublisher } from "./conversation-assignment.js";
+import type {
+  GlobalMutationCommitParticipant,
+  GlobalMutationCommitRecord,
+} from "./global-mutation-participant.js";
 import {
   planScheduleMutationCommit,
   scheduleMutationTaskId,
@@ -18,6 +22,7 @@ export interface SchedulerConversationMutationPublisherOptions {
   readonly sourceForAssignment: (
     assignmentId: string,
   ) => ScheduleDefinitionSource;
+  readonly participants?: readonly GlobalMutationCommitParticipant[];
 }
 
 /** Publishes conversation-staged schedule writes in the conversation commit. */
@@ -44,11 +49,13 @@ export class SchedulerConversationMutationPublisher
     >
   > {
     const outcomes = new Map<number, SchedulePublishOutcome>();
-    const scheduleRecords: Array<{
-      readonly seq: number;
-      readonly requestId: string;
+    const scheduleRecords: Array<GlobalMutationCommitRecord & {
       readonly mutation: ScheduleWriteMutation;
     }> = [];
+    const participantRecords = new Map<
+      GlobalMutationCommitParticipant,
+      GlobalMutationCommitRecord[]
+    >();
     for (const record of input.records) {
       if (record.expected.anchorEpoch !== this.#options.anchorEpoch) {
         outcomes.set(
@@ -62,6 +69,23 @@ export class SchedulerConversationMutationPublisher
           mutation: record.mutation,
         });
       } else {
+        const owners = (this.#options.participants ?? []).filter((participant) =>
+          participant.ownsStagedMutation(record.mutation),
+        );
+        if (owners.length > 1) {
+          throw new Error("A staged global mutation has multiple anchor owners");
+        }
+        const owner = owners[0];
+        if (owner) {
+          const owned = participantRecords.get(owner) ?? [];
+          owned.push({
+            seq: record.seq,
+            requestId: record.requestId,
+            mutation: record.mutation,
+          });
+          participantRecords.set(owner, owned);
+          continue;
+        }
         outcomes.set(
           record.seq,
           conflict(
@@ -78,8 +102,20 @@ export class SchedulerConversationMutationPublisher
       source: this.#options.sourceForAssignment(input.assignmentId),
     });
     for (const [seq, outcome] of plan.outcomes) outcomes.set(seq, outcome);
+    const plannedRecords: import("@zhixing/core/contracts").LogicalRecord[] = [
+      ...plan.records,
+    ];
+    for (const [participant, records] of participantRecords) {
+      const prepared = participant.prepareStagedMutations({
+        assignmentId: input.assignmentId,
+        authorityPrefixLsn: input.authorityPrefixLsn,
+        records,
+      });
+      plannedRecords.push(...prepared.records);
+      for (const [seq, outcome] of prepared.outcomes) outcomes.set(seq, outcome);
+    }
     return {
-      records: plan.records,
+      records: plannedRecords,
       outcomes: input.records.map((record) => ({
         seq: record.seq,
         outcome:
@@ -92,8 +128,21 @@ export class SchedulerConversationMutationPublisher
   async apply(
     input: Parameters<ConversationMutationPublisher["apply"]>[0],
   ): Promise<void> {
-    if (input.domain !== "global" || !isScheduleMutation(input.mutation)) {
-      throw new Error("This publisher only materializes global schedule mutations");
+    if (input.domain !== "global") {
+      throw new Error("This publisher only materializes global mutations");
+    }
+    if (!isScheduleMutation(input.mutation)) {
+      const owners = (this.#options.participants ?? []).filter((participant) =>
+        participant.ownsStagedMutation(input.mutation as import("@zhixing/core/contracts").GlobalStagedMutation),
+      );
+      if (owners.length !== 1) {
+        throw new Error("Committed global mutation has no unique anchor owner");
+      }
+      await owners[0]!.applyStagedMutation({
+        ...input,
+        mutation: input.mutation as import("@zhixing/core/contracts").GlobalStagedMutation,
+      });
+      return;
     }
     const taskId = scheduleMutationTaskId(input.mutation, input.requestId);
     await this.#options.refresh([taskId]);

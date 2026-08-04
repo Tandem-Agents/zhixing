@@ -30,6 +30,7 @@ import type { SchedulerFacade } from "@zhixing/core";
 import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { IConfirmationBroker } from "@zhixing/core";
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
+import type { ArtifactStore } from "@zhixing/core/authority";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
@@ -40,7 +41,6 @@ type OnSecurityBlockedFn = NonNullable<
   CreateAgentRuntimeOptions["onSecurityBlocked"]
 >;
 type SegmentDepsOption = CreateAgentRuntimeOptions["segmentDeps"];
-type SkillStoreOption = CreateAgentRuntimeOptions["skillStore"];
 type ProviderConfigurationOption = CreateAgentRuntimeOptions["providerConfiguration"];
 type ConfirmationLifecycleObserverOption =
   CreateAgentRuntimeOptions["confirmationLifecycleObserver"];
@@ -57,14 +57,15 @@ export interface RuntimeHostOptions {
   confirmationLifecycleObserver?: ConfirmationLifecycleObserverOption;
   /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
   systemProtectedPaths: readonly string[];
-  /** 技能库单实例——索引结构版本跨全部实例一致,任一保存全员下窗即见 */
-  skillStore: SkillStoreOption;
+  /** Executor-local immutable artifacts; skill authority remains on the anchor. */
+  artifactStore: () => ArtifactStore;
   /** 段切换外部依赖——注意力窗口的段保护对一切运行体生效 */
   segmentDeps: SegmentDepsOption;
   /** 设备唯一容量裁决器派生的可信 workload 准入；生产组合根必须提供。 */
   deviceCapacity?: {
     readonly interactive: AgentRuntimeCapacityBinding;
     readonly scheduler: AgentRuntimeCapacityBinding;
+    readonly orchestration: AgentRuntimeCapacityBinding;
   };
   /** extra tools 装配单例(含 task_list service 与 MCP hub) */
   extraTools: BuiltinExtraToolsAssembly;
@@ -280,6 +281,9 @@ export class RuntimeHost {
         : this.opts.deviceCapacity?.interactive;
     const runtime = await createAgentRuntime({
       ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
+      ...(this.opts.deviceCapacity
+        ? { orchestrationCapacity: this.opts.deviceCapacity.orchestration }
+        : {}),
       providerConfiguration,
       systemProtectedPaths: this.opts.systemProtectedPaths,
       workspace: workscene ? workscene.workspace : opts?.workspace,
@@ -291,7 +295,7 @@ export class RuntimeHost {
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,
       segmentDeps: this.opts.segmentDeps,
-      skillStore: this.opts.skillStore,
+      artifactStore: this.opts.artifactStore(),
       runtimeKind: opts?.runtimeKind ?? "conversation",
       ...(job ? { confirmationBroker: job.confirmationBroker } : {}),
       ...(opts?.runtimeKind !== "ephemeral" && this.opts.confirmationLifecycleObserver

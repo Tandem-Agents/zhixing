@@ -8,9 +8,9 @@
 
 import type {
   JournalStats,
-  ManagedSkillRecord,
   PermissionRule,
   PersonEntry,
+  SkillCatalogEntry,
   SkillMode,
 } from "@zhixing/core";
 
@@ -34,7 +34,7 @@ export interface TrustDirectory {
 /** 技能库管理 —— /skills 管理器与 slash 补全候选源的执行体 */
 export interface SkillDirectory {
   /** 管理视图(含 disabled 全集;builtin 零暴露) */
-  list(): Promise<ManagedSkillRecord[]>;
+  list(): Promise<SkillCatalogEntry[]>;
   /** 改技能状态;技能不存在返回 false */
   setState(
     id: string,

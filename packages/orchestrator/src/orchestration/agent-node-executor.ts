@@ -92,6 +92,7 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
       parentBroker: this.options.parentBroker,
       parentTools: selectedTools.tools,
       parentSignal: context.abortSignal,
+      childOperationId: `${context.definitionId}:${context.runId}:${node.id}:1`,
       task: buildAgentNodeTask(node, context),
       backgroundMessages: node.context.includeContextSnapshot
         ? context.contextSnapshot?.messages

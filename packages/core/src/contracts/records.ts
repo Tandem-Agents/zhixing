@@ -27,6 +27,7 @@ import type {
   GlobalStagedMutation,
   JobGlobalStagedMutation,
   SessionStagedMutation,
+  WorksceneAppliedResult,
 } from "./state.js";
 import type { ControlEnvelope, IngressContext } from "./protocol.js";
 
@@ -412,7 +413,11 @@ export type PublishRecord =
       outcomes: Array<{
         seq: number;
         outcome:
-          | { t: "granted"; targetRevision: number }
+          | {
+              t: "granted";
+              targetRevision: number;
+              appliedResult?: WorksceneAppliedResult;
+            }
           | { t: "conflicted"; error: AuthorityError };
       }>;
     }

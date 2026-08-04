@@ -66,6 +66,7 @@ describe("ChildAgentNodeExecutorV1", () => {
     expect(captured?.parentBus).toBe(context.bus);
     expect(captured?.parentLineage).toBe(context.lineage);
     expect(captured?.parentSignal).toBe(context.abortSignal);
+    expect(captured?.childOperationId).toBe("definition-1:run-1:review:1");
     expect(captured?.backgroundMessages).toBe(snapshot.messages);
     expect(captured?.budget).toMatchObject({
       maxTurns: 3,

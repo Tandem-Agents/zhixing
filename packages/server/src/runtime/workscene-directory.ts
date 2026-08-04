@@ -86,6 +86,7 @@ export interface WorksceneDirectory {
       deviceId: string;
       deviceName: string;
       bindingRef: string;
+      workspaceBindingRevision: number;
       workspaceName: string;
     }[]
   >;

@@ -16,8 +16,29 @@
  * - memory 工具的 description 指导 AI 何时主动保存记忆
  */
 
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
-import type { MemoryStore, MemoryCategory } from "@zhixing/core";
+import { type ToolDefinition, type ToolResult } from "@zhixing/core";
+import type {
+  MemoryLogicalEntry,
+  MemoryCategory,
+} from "@zhixing/core";
+
+export interface MemoryToolPort {
+  save(input: {
+    action: "save" | "update";
+    category: MemoryCategory;
+    id: string;
+    meta: Record<string, unknown>;
+    content: string;
+    operationId: string;
+  }): Promise<void>;
+  search(query: string): Promise<readonly MemoryLogicalEntry[]>;
+  list(category: MemoryCategory): Promise<readonly MemoryLogicalEntry[]>;
+  delete(input: {
+    category: MemoryCategory;
+    id: string;
+    operationId: string;
+  }): Promise<boolean>;
+}
 
 const MEMORY_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `memory` to save, search, and manage stable personal memories (identity, preferences, relationships)",
@@ -28,7 +49,7 @@ const MEMORY_SYSTEM_PROMPT_HINTS: readonly string[] = [
  * store 由装配期注入（单一 scoped 实例，与 flush strategy 共用）—— 工具不再
  * 自建 `new MemoryStore()`，杜绝双实例与工作场景下写穿个人记忆域。
  */
-export function createMemoryTool(store: MemoryStore): ToolDefinition {
+export function createMemoryTool(store: MemoryToolPort): ToolDefinition {
 
   return {
     name: "memory",
@@ -93,21 +114,22 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
     boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
     systemPromptHints: MEMORY_SYSTEM_PROMPT_HINTS,
 
-    async call(input): Promise<ToolResult> {
+    async call(input, context): Promise<ToolResult> {
       const action = input.action as string;
+      const operationId = context?.toolCallId ?? `memory:${action}`;
 
       try {
         switch (action) {
           case "save":
-            return await handleSave(store, input);
+            return await handleSave(store, input, "save", operationId);
           case "search":
             return await handleSearch(store, input);
           case "list":
             return await handleList(store, input);
           case "update":
-            return await handleSave(store, input);
+            return await handleSave(store, input, "update", operationId);
           case "delete":
-            return await handleDelete(store, input);
+            return await handleDelete(store, input, operationId);
           default:
             return { content: `Unknown action: ${action}. Valid actions: save, search, list, update, delete`, isError: true };
         }
@@ -124,8 +146,10 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
 // ─── Action Handlers ───
 
 async function handleSave(
-  store: MemoryStore,
+  store: MemoryToolPort,
   input: Record<string, unknown>,
+  action: "save" | "update",
+  operationId: string,
 ): Promise<ToolResult> {
   const category = input.category as MemoryCategory | undefined;
   const id = input.id as string | undefined;
@@ -139,12 +163,17 @@ async function handleSave(
     return { content: "Missing required field: id", isError: true };
   }
 
-  const filePath = await store.save({ category, id, meta, content });
-  return { content: `Memory saved: ${filePath}` };
+  await store.save({ action, category, id, meta, content, operationId });
+  return {
+    content:
+      action === "save"
+        ? "This memory will be saved when the current turn completes successfully."
+        : "This memory will be updated when the current turn completes successfully.",
+  };
 }
 
 async function handleSearch(
-  store: MemoryStore,
+  store: MemoryToolPort,
   input: Record<string, unknown>,
 ): Promise<ToolResult> {
   const query = input.query as string | undefined;
@@ -169,7 +198,7 @@ async function handleSearch(
 }
 
 async function handleList(
-  store: MemoryStore,
+  store: MemoryToolPort,
   input: Record<string, unknown>,
 ): Promise<ToolResult> {
   const category = input.category as MemoryCategory | undefined;
@@ -195,8 +224,9 @@ async function handleList(
 }
 
 async function handleDelete(
-  store: MemoryStore,
+  store: MemoryToolPort,
   input: Record<string, unknown>,
+  operationId: string,
 ): Promise<ToolResult> {
   const category = input.category as MemoryCategory | undefined;
   const id = input.id as string | undefined;
@@ -208,9 +238,11 @@ async function handleDelete(
     return { content: "Missing required field: id", isError: true };
   }
 
-  const deleted = await store.delete(category, id);
+  const deleted = await store.delete({ category, id, operationId });
   if (deleted) {
-    return { content: `Memory deleted: ${category}/${id}` };
+    return {
+      content: "This memory will be removed when the current turn completes successfully.",
+    };
   }
   return { content: `Memory not found: ${category}/${id}`, isError: true };
 }

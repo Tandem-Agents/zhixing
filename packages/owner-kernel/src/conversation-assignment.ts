@@ -414,6 +414,11 @@ export interface ConversationCommitProjectionInput {
   readonly runRecord: TranscriptRunRecord;
   readonly windowCompact?: import("@zhixing/core/contracts").WindowCompactInstruction;
   readonly contentAssets: readonly import("@zhixing/core/contracts").ContentAssetRef[];
+  readonly sessionMutations: ReadonlyArray<{
+    readonly seq: number;
+    readonly mutation: SessionStagedMutation;
+    readonly requestId: string;
+  }>;
 }
 
 export interface ConversationCommitProjection {
@@ -450,7 +455,11 @@ export interface ConversationMutationPublisher {
   }): ReadonlyArray<{
     readonly seq: number;
     readonly outcome:
-      | { readonly t: "granted"; readonly targetRevision: number }
+      | {
+          readonly t: "granted";
+          readonly targetRevision: number;
+          readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
+        }
       | {
           readonly t: "conflicted";
           readonly error: import("@zhixing/core/contracts").AuthorityError;
@@ -484,6 +493,7 @@ export interface ConversationMutationPublisher {
     readonly mutation: SessionStagedMutation | GlobalStagedMutation;
     readonly requestId: string;
     readonly targetRevision: number;
+    readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
   }): Promise<void>;
 }
 
@@ -4607,6 +4617,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         runRecord: closure.runRecord,
         ...(bundle.body.windowCompact ? { windowCompact: bundle.body.windowCompact } : {}),
         contentAssets: bundle.body.contentAssets,
+        sessionMutations: (closure.batch?.records ?? [])
+          .filter((record) => record.domain === "session")
+          .map((record) => ({
+            seq: record.seq,
+            mutation: record.mutation as SessionStagedMutation,
+            requestId: record.requestId,
+          })),
       });
       const progress: ConversationProjectionRecord = {
         kind: "conversation-commit-projection",
@@ -4713,6 +4730,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           mutation: record.mutation as SessionStagedMutation | GlobalStagedMutation,
           requestId: record.requestId,
           targetRevision: decided.outcome.targetRevision,
+          ...(decided.outcome.appliedResult
+            ? { appliedResult: decided.outcome.appliedResult }
+            : {}),
         });
         const settled = index === plan.grantedSeqs.length - 1;
         await this.#appendPublishProgress({
@@ -5041,6 +5061,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ? { windowCompact: bundle.body.windowCompact }
         : {}),
       contentAssets: bundle.body.contentAssets,
+      sessionMutations: (closure.batch?.records ?? [])
+        .filter((record) => record.domain === "session")
+        .map((record) => ({
+          seq: record.seq,
+          mutation: record.mutation as SessionStagedMutation,
+          requestId: record.requestId,
+        })),
     };
   }
 
@@ -9783,7 +9810,7 @@ function envelopeContainsCommit(
 function mutationNeedsExternalPublish(
   record: MutationBatch["records"][number],
 ): boolean {
-  return record.domain === "session" || record.mutation.kind !== "delivery-enqueue";
+  return record.domain === "global" && record.mutation.kind !== "delivery-enqueue";
 }
 
 function publishDecisionRequired(
@@ -10395,7 +10422,10 @@ type GlobalPublishBatch = ReturnType<
 type GlobalPublishOutcome = GlobalPublishBatch[number]["outcome"];
 
 function validateGlobalPublishBatchOutcomes(
-  records: readonly { readonly seq: number }[],
+  records: readonly {
+    readonly seq: number;
+    readonly mutation: GlobalStagedMutation;
+  }[],
   value: GlobalPublishBatch,
 ): Map<number, GlobalPublishOutcome> {
   if (!Array.isArray(value) || value.length !== records.length) {
@@ -10410,18 +10440,39 @@ function validateGlobalPublishBatchOutcomes(
     }
     outcomes.set(
       item.seq as number,
-      validateGlobalPublishOutcome(item.outcome as GlobalPublishOutcome),
+      validateGlobalPublishOutcome(
+        item.outcome as GlobalPublishOutcome,
+        records[index]!.mutation,
+      ),
     );
   }
   return outcomes;
 }
 
-function validateGlobalPublishOutcome(value: GlobalPublishOutcome): GlobalPublishOutcome {
+function validateGlobalPublishOutcome(
+  value: GlobalPublishOutcome,
+  mutation?: GlobalStagedMutation,
+): GlobalPublishOutcome {
   const outcome = snapshot(value, "Global publish outcome");
   assertPlainRecord(outcome, "Global publish outcome");
   if (outcome.t === "granted") {
-    assertExactRecordKeys(outcome, ["t", "targetRevision"], "Granted publish outcome");
+    assertExactRecordKeys(
+      outcome,
+      outcome.appliedResult === undefined
+        ? ["t", "targetRevision"]
+        : ["appliedResult", "t", "targetRevision"],
+      "Granted publish outcome",
+    );
     assertPositiveSafeInteger(outcome.targetRevision as number, "Granted target revision");
+    const isWorkscene = mutation?.kind.startsWith("workscene-") ?? false;
+    if (isWorkscene !== (outcome.appliedResult !== undefined)) {
+      throw new TypeError(
+        "Only granted workscene mutations must carry their applied result",
+      );
+    }
+    if (outcome.appliedResult !== undefined) {
+      validateWorksceneAppliedOutcome(outcome.appliedResult);
+    }
     return outcome as GlobalPublishOutcome;
   }
   if (outcome.t === "conflicted") {
@@ -10430,6 +10481,43 @@ function validateGlobalPublishOutcome(value: GlobalPublishOutcome): GlobalPublis
     return outcome as GlobalPublishOutcome;
   }
   throw new TypeError("Global publish outcome kind is invalid");
+}
+
+function validateWorksceneAppliedOutcome(value: unknown): void {
+  assertPlainRecord(value, "Workscene applied publish outcome");
+  const result = value as Record<string, unknown>;
+  if (result.kind === "workscene-deleted") {
+    assertExactRecordKeys(
+      result,
+      ["kind", "operation", "previousObjectRevision", "revision", "sceneId"],
+      "Workscene deleted outcome",
+    );
+    if (result.operation !== "delete") {
+      throw new TypeError("Workscene deleted outcome operation is invalid");
+    }
+    assertPositiveSafeInteger(result.revision as number, "Workscene domain revision");
+    assertPositiveSafeInteger(
+      result.previousObjectRevision as number,
+      "Workscene previous object revision",
+    );
+    assertIdentifier(String(result.sceneId), "Workscene outcome scene id");
+    return;
+  }
+  assertExactRecordKeys(
+    result,
+    ["kind", "operation", "revision", "scene"],
+    "Workscene applied outcome",
+  );
+  if (
+    result.kind !== "workscene-applied" ||
+    (result.operation !== "create" &&
+      result.operation !== "rename" &&
+      result.operation !== "set-workdir")
+  ) {
+    throw new TypeError("Workscene applied outcome is invalid");
+  }
+  assertPositiveSafeInteger(result.revision as number, "Workscene domain revision");
+  assertPlainRecord(result.scene, "Workscene applied scene");
 }
 
 function rejected(

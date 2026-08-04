@@ -106,7 +106,12 @@ import {
   isRetryableMeshFailure,
 } from "./remote-obligation-failure.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
-import { createAssignmentScheduleStager } from "./assignment-schedule-stager.js";
+import {
+  assignmentGlobalCapability,
+  createAssignmentGlobalQueryPort,
+  createAssignmentMutationPort,
+  createAssignmentScheduleStager,
+} from "./assignment-schedule-stager.js";
 import type {
   FirstPartySurfaceSession,
   LosslessDataPlaneRuntime,
@@ -1043,6 +1048,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
         policy: preparedAuthority.policy,
         environment: preparedAuthority.environment,
+        memoryResources: await this.#memoryResourcesForAssignment(
+          input.conversationId,
+          assignmentId,
+        ),
       });
       if (!remoteTarget) {
         localPreflightManifest = unsigned.manifest;
@@ -1300,7 +1309,37 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             localLedger!,
             assignmentId,
             this.#authority.anchorEpoch,
+            "conversation",
+            assignmentGlobalCapability({
+              assignmentId,
+              execution: "conversation",
+              capabilities: dispatch.envelope.capabilities,
+            }),
           ),
+          assignmentMutations: createAssignmentMutationPort({
+            ledger: localLedger!,
+            assignmentId,
+            execution: "conversation",
+            anchorEpoch: this.#authority.anchorEpoch,
+            capability: assignmentGlobalCapability({
+              assignmentId,
+              execution: "conversation",
+              capabilities: dispatch.envelope.capabilities,
+            }),
+          }),
+          ...(this.#authority.globalState
+            ? {
+                globalQuery: createAssignmentGlobalQueryPort({
+                  state: this.#authority.globalState,
+                  capability: assignmentGlobalCapability({
+                    assignmentId,
+                    execution: "conversation",
+                    capabilities: dispatch.envelope.capabilities,
+                  }),
+                  anchorEpoch: this.#authority.anchorEpoch,
+                }),
+              }
+            : {}),
           authorizeToolExecution: () =>
             localLedger!.authorizeToolExecution(
               assignmentId,
@@ -1736,6 +1775,30 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
   }
 
+  async #memoryResourcesForAssignment(
+    conversationId: string,
+    assignmentId: string,
+  ): Promise<readonly `memory-domain:${string}`[]> {
+    const scope = parseConversationId(conversationId).scope;
+    if (scope.kind === "workscene" || !this.#authority.globalState) return [];
+    const now = Date.parse(this.#clock());
+    const result = await this.#authority.globalState.read(
+      { kind: "workscene-list" },
+      {
+        principal: { kind: "host", component: "conversation-assignment-issuer" },
+        requestId: `assignment-memory-scopes:${assignmentId}`,
+        deadlineAt: new Date(now + 30_000).toISOString(),
+        authority: { domain: "global", anchorEpoch: this.#authority.anchorEpoch },
+      },
+    );
+    if (result.kind !== "workscene-list") {
+      throw new Error("Workscene authority returned another result type");
+    }
+    return result.scenes
+      .map((scene) => `memory-domain:workscene:${scene.id}` as const)
+      .sort();
+  }
+
   async #establishSession(conversationId: string): Promise<void> {
     const scope = {
       domain: "conversation" as const,
@@ -2116,8 +2179,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       decideAtPrefix: (decision) => {
         if (
           decision.conversationId !== conversationId ||
-          decision.ownerEpoch !== this.#authority.anchorEpoch ||
-          decision.sessionMutations.length > 0
+          decision.ownerEpoch !== this.#authority.anchorEpoch
         ) {
           return {
             committed: false,

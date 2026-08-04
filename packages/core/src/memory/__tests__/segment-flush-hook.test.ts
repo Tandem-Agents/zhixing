@@ -40,7 +40,10 @@ describe("createMemoryFlushHook", () => {
       active: "a",
     });
 
-    expect(flush).toHaveBeenCalledWith(messages, { abortSignal: signal });
+    expect(flush).toHaveBeenCalledWith(messages, {
+      abortSignal: signal,
+      operationId: "segment-memory:seg-1",
+    });
   });
 
   it("被摘段过小（< minMessages）→ 不花提取调用", async () => {

@@ -20,9 +20,7 @@
  *   - vi.hoisted ref 让每个测试动态注入不同的 provider 响应序列
  */
 
-import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 import {
   beforeEach,
   describe,
@@ -35,7 +33,6 @@ import {
   AgentError,
   buildGuidanceMessagePair,
   MockLLMProvider,
-  SkillStore,
   skillNameToId,
   deriveToolCalls,
   userMessage,
@@ -45,9 +42,15 @@ import {
   type AgentEventMap,
   type Message,
   type ToolDefinition,
+  type SkillCatalogEntry,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
-import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
+import type {
+  AssignmentGlobalQueryPort,
+  GlobalQuery,
+  GlobalReadResult,
+  ModelCallResourceMeter,
+} from "@zhixing/core/contracts";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
@@ -70,7 +73,47 @@ const {
     degradationsRef: { current: [] as RoleDegradation[] },
     decorateCalls: [] as Array<IEventBus<AgentEventMap>>,
     decorateDisposes: [] as Array<() => void>,
-  }));
+}));
+
+function makeSkillCatalogQuery(
+  entries: readonly SkillCatalogEntry[],
+  catalogRevision = 1,
+): { port: AssignmentGlobalQueryPort; read: ReturnType<typeof vi.fn> } {
+  const read = vi.fn(async (query: GlobalQuery): Promise<GlobalReadResult> => {
+    if (query.kind === "skill-catalog") {
+      return { kind: "skill-catalog", catalogRevision, entries: [...entries] };
+    }
+    if (query.kind === "skill-get") {
+      return {
+        kind: "skill-get",
+        catalogRevision,
+        entry: entries.find((entry) => entry.id === query.skillId) ?? null,
+      };
+    }
+    throw new Error(`Unexpected global query in skill fixture: ${query.kind}`);
+  });
+  return { port: { read }, read };
+}
+
+function ownSkillEntry(
+  overrides: Partial<SkillCatalogEntry> = {},
+): SkillCatalogEntry {
+  return {
+    id: skillNameToId("提炼技能"),
+    name: "提炼技能",
+    description: "用户定制版描述",
+    source: "own",
+    mode: "main",
+    pinned: false,
+    disabled: false,
+    createdAt: "2026-08-04T00:00:00.000Z",
+    usage: null,
+    contentRef: "a".repeat(64),
+    revision: 1,
+    digest: "b".repeat(64),
+    ...overrides,
+  };
+}
 
 vi.mock("@zhixing/providers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@zhixing/providers")>();
@@ -399,7 +442,7 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     return messages;
   }
 
-  it("强制切段成功：阈值置零绕过 defer，产出 windowCompact（含结构化摘要）+ 新段消息；记忆提取随 afterSummarize 触发", async () => {
+  it("强制切段成功：阈值置零绕过 defer，产出 windowCompact（含结构化摘要）+ 新段消息；run 外不触发 memory staged 写", async () => {
     // 响应序列：① 段摘要（light）② 记忆提取（light，返回空数组 → 零写盘）
     providerRef.current = new MockLLMProvider([
       { text: SUMMARY_XML },
@@ -423,8 +466,8 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     expect("budget" in result).toBe(false);
     // 正常摘要切段无降级信息
     expect(result.emergencyFloor).toBeUndefined();
-    // 端到端：段摘要 + 记忆提取共两次 light 调用（提取挂 afterSummarize）
-    expect(providerRef.current!.calls.length).toBe(2);
+    // 手动 compact 属于 run 外 control，仅执行段摘要，不触发 assignment-only memory flush。
+    expect(providerRef.current!.calls.length).toBe(1);
   });
 
   it("摘要 LLM 失败 → 应急地板机械兜底：emergencyFloor 携根因随返回值交付（降级知情）", async () => {
@@ -2061,78 +2104,64 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 
   it("内置 skill 订阅者:索引段含 builtin 条目(双池拼装),own 同名时遮蔽", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-lc-builtin-"));
-    try {
-      // 空库:索引段仍含 builtin「提炼技能」(builtin 不依赖用户技能存在)
-      const runtime = await createAgentRuntime({
-        skillStore: new SkillStore(root),
-      });
-      await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
-      expect(providerRef.current.calls[0]!.systemPrompt).toContain("提炼技能");
+    const empty = makeSkillCatalogQuery([]);
+    const runtime = await createAgentRuntime();
+    await runtime.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+      globalQuery: empty.port,
+    });
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain("提炼技能");
 
-      // own 同名:用户版生效,builtin 条目退出索引(描述以用户版为准)
-      const dir = path.join(root, "own", "distill-fork");
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(
-        path.join(dir, "SKILL.md"),
-        "---\nname: 提炼技能\ndescription: 用户定制版描述\n---\nbody",
-        "utf-8",
-      );
-      const runtime2 = await createAgentRuntime({
-        skillStore: new SkillStore(root),
-      });
-      await runtime2.run({ messages: [userMessage("hi")], turnIndex: 0 });
-      const prompt2 = providerRef.current.calls[1]!.systemPrompt!;
-      expect(prompt2).toContain("用户定制版描述");
-      expect(prompt2).not.toContain("加载本方法来起草");
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
+    const own = makeSkillCatalogQuery([ownSkillEntry()]);
+    const runtime2 = await createAgentRuntime();
+    await runtime2.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+      globalQuery: own.port,
+    });
+    const prompt2 = providerRef.current.calls[1]!.systemPrompt!;
+    expect(prompt2).toContain("用户定制版描述");
+    expect(prompt2).not.toContain("加载本方法来起草");
   });
 
   it("内置 skill 订阅者:own 同名 fork 被禁用 → builtin 不回落索引(遮蔽按含 disabled 全集,展示与加载一致)", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-lc-disabled-"));
-    try {
-      const dir = path.join(root, "own", "distill-fork");
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(
-        path.join(dir, "SKILL.md"),
-        "---\nname: 提炼技能\ndescription: 用户定制版描述\n---\nbody",
-        "utf-8",
-      );
-      const store = new SkillStore(root);
-      await store.setState(skillNameToId("提炼技能"), { disabled: true });
-
-      const runtime = await createAgentRuntime({ skillStore: store });
-      await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
-      const prompt = providerRef.current.calls[0]!.systemPrompt!;
-      // 禁用 = 该 id 从索引整体消失(用户版剔除、builtin 不得回落——loadText
-      // 指名加载仍出用户版,索引若显示 builtin 文案则展示与加载指向两份内容)
-      expect(prompt).not.toContain("用户定制版描述");
-      expect(prompt).not.toContain("加载本方法来起草");
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
+    const query = makeSkillCatalogQuery([ownSkillEntry({ disabled: true })]);
+    const runtime = await createAgentRuntime();
+    await runtime.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+      globalQuery: query.port,
+    });
+    const prompt = providerRef.current.calls[0]!.systemPrompt!;
+    // 禁用 = 该 id 从索引整体消失(用户版剔除、builtin 不得回落)。
+    expect(prompt).not.toContain("用户定制版描述");
+    expect(prompt).not.toContain("加载本方法来起草");
   });
 
-  it("内置 skill 订阅者:version 未变 → 窗口换代零重算(不扫盘)", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-lc-"));
-    try {
-      const store = new SkillStore(root);
-      const querySpy = vi.spyOn(store, "queryTopN");
+  it("技能目录只在窗口边界读取，同一窗口多 run 的 prompt byte-equal", async () => {
+    providerRef.current = new MockLLMProvider([
+      { text: "ok" },
+      { text: "ok" },
+      { text: "ok" },
+    ]);
+    const query = makeSkillCatalogQuery([ownSkillEntry()], 7);
+    const runtime = await createAgentRuntime();
 
-      const runtime = await createAgentRuntime({ skillStore: store });
-      // 首窗:version(0) ≠ builtVersion(-1) → 重算一次
-      expect(querySpy).toHaveBeenCalledTimes(1);
+    await runtime.run({ messages: [userMessage("one")], turnIndex: 0, globalQuery: query.port });
+    await runtime.run({ messages: [userMessage("two")], turnIndex: 1, globalQuery: query.port });
+    expect(query.read).toHaveBeenCalledTimes(1);
+    expect(providerRef.current.calls[1]!.systemPrompt).toBe(
+      providerRef.current.calls[0]!.systemPrompt,
+    );
 
-      // clear 换代:version 仍 0 = builtVersion 0 → 零重算、不扫盘
-      await runtime.onAttentionWindowChange("clear");
-      expect(querySpy).toHaveBeenCalledTimes(1);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
+    await runtime.onAttentionWindowChange("clear");
+    await runtime.run({ messages: [userMessage("three")], turnIndex: 0, globalQuery: query.port });
+    expect(query.read).toHaveBeenCalledTimes(2);
+    expect(providerRef.current.calls[2]!.systemPrompt).toBe(
+      providerRef.current.calls[0]!.systemPrompt,
+    );
   });
 
   it("dispose 透传销毁类 reason 到末窗 onWindowClose(assembly-rollback)", async () => {

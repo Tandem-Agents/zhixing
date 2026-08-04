@@ -36,7 +36,6 @@ import {
   parseConversationId,
   ShardedTranscriptStore,
   SnapshotStore,
-  SkillStore,
   conversationsDir,
   runRetentionSweep,
   getWorkScenesRoot,
@@ -278,8 +277,8 @@ async function runServerProcess(
       return mesh.workspaceProbeForDevice(deviceId).probe(request);
     },
   });
-  // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 目录在
-  // serveSkillStore 创建后装配(共享同一锁域与结构版本)。
+  // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 经锚点
+  // GlobalStatePort 的 path-free query/control 合同装配。
   const trustDirectory = createTrustDirectory({
     config,
   });
@@ -374,11 +373,6 @@ async function runServerProcess(
     taskListService: builtinExtraTools.taskListService,
   });
 
-  // 3c''. 技能库 —— serve 全部 runtime(per-session + ephemeral)共享单实例:
-  //   索引重建靠 store 内存结构版本比对,实例分散会让"会话 A 经 save_skill
-  //   存技能、会话 B 下窗不知道"(各自版本各自计);共享后任一保存,全部
-  //   runtime 下个窗口换代即见。磁盘本就同一目录,共享无额外耦合。
-  const serveSkillStore = new SkillStore();
   const providerCredentials = credentials.providers
     ? { providers: credentials.providers }
     : {};
@@ -460,11 +454,16 @@ async function runServerProcess(
     },
     confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
-    skillStore: serveSkillStore,
+    artifactStore: () => {
+      const runtime = authorityRuntimeRef.current;
+      if (!runtime) throw new Error("Runtime artifact store is not ready");
+      return runtime.artifacts;
+    },
     segmentDeps: serveSegmentDeps,
     deviceCapacity: {
       interactive: deviceCapacity.workload("workload-interactive"),
       scheduler: deviceCapacity.workload("workload-scheduler"),
+      orchestration: deviceCapacity.workload("workload-orchestration"),
     },
     extraTools: builtinExtraTools,
     scheduler: getSchedulerFacade,
@@ -626,6 +625,8 @@ async function runServerProcess(
     ...(executor ? { executorRoleModule: executor } : {}),
     convRepo,
     conversationDirectory,
+    conversationRepoFor: repoForConversationId,
+    taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
     worksceneDirectory,
     journalStore,
@@ -918,6 +919,11 @@ async function runServerProcess(
     }
   }
 
+  const authorityRuntime = authorityRuntimeRef.current;
+  if (!authorityRuntime?.globalState) {
+    throw new Error("Skill management requires the anchor global-state authority");
+  }
+
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
@@ -930,7 +936,10 @@ async function runServerProcess(
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,
-    skills: createSkillDirectory({ skillStore: serveSkillStore }),
+    skills: createSkillDirectory({
+      globalState: authorityRuntime.globalState,
+      anchorEpoch: authorityRuntime.anchorEpoch,
+    }),
     memory: memoryDirectory,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此

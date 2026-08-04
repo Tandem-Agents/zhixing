@@ -6,12 +6,10 @@ import type {
   DeliveryTargetDto,
   Digest,
   IsoTime,
-  JournalEntry,
   JsonValue,
   MemoryAppendPayload,
-  MemoryEntry,
+  MemoryCategoryDto,
   OutboundContentDto,
-  PersonEntry,
   SegmentRecord,
   SkillModeDto,
   SkillUsageRecord,
@@ -22,6 +20,10 @@ import type {
   TrustRule,
   TrustRuleSnapshot,
 } from "./foundation.js";
+import type {
+  MemoryLogicalEntry,
+  MemoryScopeRef,
+} from "../memory/contracts.js";
 import type { WireSchemaV1 } from "../types/distributed.js";
 import type {
   ChannelMessageRef,
@@ -130,15 +132,29 @@ export interface ConfigAssetRecord extends WireSchemaV1<"ConfigAssetRecord"> {
 export type GlobalQuery =
   | {
       kind: "memory-search";
+      scope: MemoryScopeRef;
       domain: "memory" | "journal" | "people";
       query: string;
       limit: number;
     }
-  | { kind: "memory-stats"; domain: "journal" | "people" }
+  | {
+      kind: "memory-list";
+      scope: MemoryScopeRef;
+      domain: "memory" | "journal" | "people";
+      category?: MemoryCategoryDto;
+    }
+  | { kind: "memory-stats"; scope: MemoryScopeRef; domain: "journal" | "people" }
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
   | { kind: "workscene-list" }
   | { kind: "workscene-get"; sceneId: string }
+  | {
+      kind: "skill-catalog";
+      mode?: SkillModeDto;
+      includeDisabled?: boolean;
+      limit?: number;
+    }
+  | { kind: "skill-get"; skillId: string }
   | { kind: "config-asset"; domain: ConfigAssetRecord["domain"]; key?: string }
   | { kind: "asset-index"; asset: "skills" | "rubrics" | "prompt-assets" };
 
@@ -152,12 +168,9 @@ export interface AssetIndexEntry {
 export type GlobalReadResult =
   | {
       kind: "memory-search";
-      hits: Array<{
-        domain: "memory" | "journal" | "people";
-        entry: MemoryEntry | JournalEntry | PersonEntry;
-        score?: number;
-      }>;
+      hits: Array<{ entry: MemoryLogicalEntry; score?: number }>;
     }
+  | { kind: "memory-list"; entries: MemoryLogicalEntry[] }
   | {
       kind: "memory-stats";
       domain: "journal" | "people";
@@ -168,6 +181,16 @@ export type GlobalReadResult =
   | { kind: "schedule-list"; tasks: TaskDefinition[] }
   | { kind: "workscene-list"; scenes: WorksceneDto[] }
   | { kind: "workscene-get"; scene: WorksceneDto | null }
+  | {
+      kind: "skill-catalog";
+      catalogRevision: number;
+      entries: import("../skills/types.js").SkillCatalogEntry[];
+    }
+  | {
+      kind: "skill-get";
+      catalogRevision: number;
+      entry: import("../skills/types.js").SkillCatalogEntry | null;
+    }
   | { kind: "config-asset"; records: ConfigAssetRecord[] }
   | { kind: "asset-index"; entries: AssetIndexEntry[] };
 
@@ -222,14 +245,15 @@ export type ScheduleWriteMutation =
   | { kind: "schedule-delete"; taskId: string; taskRevision: number };
 
 export type SkillWriteMutation =
-  | { kind: "skill-create"; record: SkillWriteDto }
+  | { kind: "skill-create"; record: SkillWriteDto; mode: SkillModeDto }
   | {
       kind: "skill-update";
       skillId: string;
       record: SkillWriteDto;
+      mode: SkillModeDto;
       expectedRevision: number;
     }
-  | { kind: "skill-admit"; record: SkillWriteDto }
+  | { kind: "skill-admit"; record: SkillWriteDto; mode: SkillModeDto }
   | {
       kind: "skill-set-state";
       skillId: string;
@@ -299,6 +323,14 @@ export type TrustWriteMutation =
 
 export type GlobalControlMutation =
   | { kind: "memory-append"; payload: MemoryAppendPayload }
+  | {
+      kind: "memory-delete";
+      scope: MemoryScopeRef;
+      domain: "memory" | "journal" | "people";
+      category?: MemoryCategoryDto;
+      id: string;
+      expectedDigest: Digest;
+    }
   | ScheduleWriteMutation
   | SkillWriteMutation
   | RubricWriteMutation
@@ -309,6 +341,7 @@ export type GlobalControlMutation =
 
 export type GlobalStagedBase =
   | { kind: "memory-append"; payload: MemoryAppendPayload }
+  | Extract<GlobalControlMutation, { kind: "memory-delete" }>
   | ScheduleWriteMutation
   | { kind: "skill-usage"; record: SkillUsageRecord }
   | Extract<
@@ -355,16 +388,20 @@ export type GlobalControlMutationResult<M extends GlobalControlMutation> =
     : { revision: number };
 
 export interface WorksceneStagedReceipt {
-  kind: "global-mutation-staged";
+  kind: "assignment-mutation-staged";
   requestId: string;
   recordSeq: number;
   mutationDigest: Digest;
 }
 
+/**
+ * A durable assignment-local acknowledgement. It deliberately carries no
+ * authority revision: the owning run has not committed when this is issued.
+ */
+export type AssignmentStagedReceipt = WorksceneStagedReceipt;
+
 export type GlobalStagedMutationResult<M extends GlobalStagedMutation> =
-  M extends WorksceneWriteMutation
-    ? WorksceneStagedReceipt
-    : { revision: number };
+  M extends GlobalStagedMutation ? AssignmentStagedReceipt : never;
 
 export type TaskDefinitionBody =
   | {

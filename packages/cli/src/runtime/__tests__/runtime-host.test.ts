@@ -2,7 +2,7 @@
  * RuntimeHost 装配契约 —— 资产透传与各类 runtime 发放路径。
  *
  * 范围:锁 host 这一层"装配参数从哪来、origin 何时定"——
- *   - 资产层透传:skillStore / segmentDeps / decorateRunBus 按引用直达
+ *   - 资产层透传:artifactStore / segmentDeps / decorateRunBus 按引用直达
  *     createAgentRuntime;extra tools 经 assembly 装配;main/ephemeral 工作区由
  *     createAgentRuntime 按配置解析,host 不持用户启动覆盖
  *   - schedule 工具只持 scheduler facade；权威来源由 owner 从 ingress 反绑
@@ -34,13 +34,13 @@ type AssembledCtx = {
 function makeHostOptions() {
   const assembled: AssembledCtx[] = [];
   const onRuntimeCreated = vi.fn();
-  const skillStore = { marker: "skill-store" };
   const segmentDeps = { marker: "segment-deps" };
   const decorateRunBus = () => () => {};
+  const artifactStore = { marker: "artifact-store" };
   const tools = [{ name: "schedule" }];
   const options = {
     systemProtectedPaths: ["/host/credentials.json", "/host/secret-vault"],
-    skillStore,
+    artifactStore: () => artifactStore,
     segmentDeps,
     extraTools: {
       taskListService: {},
@@ -55,7 +55,15 @@ function makeHostOptions() {
     onSecurityBlocked: vi.fn(),
     onRuntimeCreated,
   } as never;
-  return { options, assembled, onRuntimeCreated, skillStore, segmentDeps, decorateRunBus, tools };
+  return {
+    options,
+    assembled,
+    onRuntimeCreated,
+    segmentDeps,
+    decorateRunBus,
+    artifactStore,
+    tools,
+  };
 }
 
 beforeEach(() => {
@@ -66,17 +74,18 @@ beforeEach(() => {
 });
 
 describe("资产层透传", () => {
-  it("skillStore / segmentDeps / decorateRunBus 按引用直达装配,main 不注入 workspace 覆盖", async () => {
-    const { options, skillStore, segmentDeps, decorateRunBus, tools } =
+  it("artifactStore / segmentDeps / decorateRunBus 按引用直达装配,main 不注入 workspace 覆盖", async () => {
+    const { options, segmentDeps, decorateRunBus, artifactStore, tools } =
       makeHostOptions();
     const host = new RuntimeHost(options);
 
     await host.createConversationRuntime();
 
     const params = createAgentRuntimeMock.mock.calls[0]![0];
-    expect(params.skillStore).toBe(skillStore);
+    expect(params.skillStore).toBeUndefined();
     expect(params.segmentDeps).toBe(segmentDeps);
     expect(params.decorateRunBus).toBe(decorateRunBus);
+    expect(params.artifactStore).toBe(artifactStore);
     expect(params.workspace).toBeUndefined();
     expect(params.extraTools).toBe(tools);
     expect(params.runtimeKind).toBe("conversation");

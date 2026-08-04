@@ -37,7 +37,11 @@ import {
 } from "./durable-conversation-interactions.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
-import { createAssignmentScheduleStager } from "./assignment-schedule-stager.js";
+import {
+  assignmentGlobalCapability,
+  createAssignmentMutationPort,
+  createAssignmentScheduleStager,
+} from "./assignment-schedule-stager.js";
 
 const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 
@@ -57,6 +61,10 @@ export interface ConversationAssignmentWorkerOptions {
   ) => void;
   readonly artifacts: ArtifactStore;
   readonly submissionFor: (envelope: ConversationEnvelope) => RunSubmissionPort;
+  readonly globalQueryFor?: (
+    capability: import("@zhixing/core/contracts").AuthorityCapability,
+    anchorEpoch: number,
+  ) => import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
   readonly finalizeUsage: (input: {
     readonly assignmentId: string;
     readonly envelope: ConversationEnvelope;
@@ -321,9 +329,45 @@ export class ConversationAssignmentWorker {
           this.options.ledger,
           assignmentId,
           envelope.work.ownerEpoch,
+          "conversation",
+          assignmentGlobalCapability({
+            assignmentId,
+            execution: "conversation",
+            capabilities: envelope.capabilities,
+          }),
         ),
+        assignmentMutations: createAssignmentMutationPort({
+          ledger: this.options.ledger,
+          assignmentId,
+          execution: "conversation",
+          anchorEpoch: envelope.work.ownerEpoch,
+          capability: assignmentGlobalCapability({
+            assignmentId,
+            execution: "conversation",
+            capabilities: envelope.capabilities,
+          }),
+        }),
+        assignmentIssuedAt: envelope.issuedAt,
+        ...(this.options.globalQueryFor
+          ? {
+              globalQuery: this.options.globalQueryFor(
+                assignmentGlobalCapability({
+                  assignmentId,
+                  execution: "conversation",
+                  capabilities: envelope.capabilities,
+                }),
+                envelope.work.ownerEpoch,
+              ),
+            }
+          : {}),
         ...(this.options.resourceGovernor
           ? {
+              resourceReservation: {
+                port: this.options.resourceGovernor,
+                parentLease: envelope.resourceLease,
+                contextFor: (requestId: string) =>
+                  assignmentResourceContext(envelope, requestId),
+              },
               modelCallResourceMeter: {
                 reserve: async ({ callIndex, tokenUpperBound }: {
                   callIndex: number;
