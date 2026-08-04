@@ -2,12 +2,17 @@ import {
   RubricContractBuilder,
   ConservativeAdvancementAdmissionStrategy,
   createAdvancementWindowReviewEntry,
+  advancementReviewAttemptId,
+  advancementReviewLineageId,
+  advancementReviewRootRequestId,
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
   type AdvancementProxyMessage,
   type AdvancementReviewRunOutcome,
   type AdvancementRunReview,
+  type AdvancementReviewAttempt,
+  type AdvancementReviewRootContract,
   type AdvancementSession,
   type AdvancementWindowState,
   type RunRecordInput,
@@ -25,13 +30,14 @@ import {
   renderClosureReport,
   sumAdvancementUsage,
 } from "@zhixing/core";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type {
   AdvancementReviewerPort,
   AuthorityCallContext,
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import { randomUUID } from "node:crypto";
 import {
   buildAdvancementProxyMessage,
@@ -41,6 +47,7 @@ import type { AdvancementSessionStore } from "./session-store.js";
 import {
   AdvancementEvidenceCoordinator,
   AdvancementEvidenceDeferredError,
+  type AdvancementEvidenceRootTarget,
 } from "./evidence.js";
 
 export type AdvancementPrepareResult =
@@ -246,6 +253,7 @@ export class AdvancementController {
   private readonly now: () => string;
   private readonly reviewIdGenerator: () => string;
   private readonly proxyIdGenerator: () => string;
+  private readonly reviewFlights = new Map<string, Promise<AdvancementTurnReviewResult>>();
 
   constructor(options: AdvancementControllerOptions) {
     this.store = options.store;
@@ -751,6 +759,7 @@ export class AdvancementController {
   async loadActiveSession(
     conversationId: string,
   ): Promise<AdvancementSession | null> {
+    await this.reconcileTerminalReviewAttempts(conversationId);
     return await this.store.loadActiveSession(conversationId);
   }
 
@@ -843,10 +852,41 @@ export class AdvancementController {
     readonly runRecordRef?: RunRecordRef;
     readonly abortSignal?: AbortSignal;
   }): Promise<AdvancementTurnReviewResult> {
-    let session = await this.store.loadActiveSession(input.conversationId);
+    const key = reviewFlightKey(input);
+    const current = this.reviewFlights.get(key);
+    if (current) return await current;
+    const flight = this.reviewCommittedTurn(input).finally(() => {
+      if (this.reviewFlights.get(key) === flight) this.reviewFlights.delete(key);
+    });
+    this.reviewFlights.set(key, flight);
+    return await flight;
+  }
+
+  private async reviewCommittedTurn(input: {
+    readonly conversationId: string;
+    readonly runId?: string;
+    readonly runIndex: number;
+    readonly runRecord: RunRecordInput;
+    readonly runRecordRef?: RunRecordRef;
+    readonly abortSignal?: AbortSignal;
+  }): Promise<AdvancementTurnReviewResult> {
+    let session = await this.loadActiveSession(input.conversationId);
     if (!session) return { kind: "skipped", reason: "no-active-session" };
     if (session.status !== "active") {
       return { kind: "skipped", reason: "not-active" };
+    }
+    const existingAttempt = input.runRecordRef
+      ? reviewAttemptFor(session, input.runRecordRef)
+      : undefined;
+    if (
+      existingAttempt &&
+      isTerminalAttempt(existingAttempt) &&
+      !(await this.cleanupReviewAttemptRoot(existingAttempt))
+    ) {
+      return reviewDeferred(
+        session,
+        "既有裁判终态已落盘，资源仍等待保守回收。",
+      );
     }
     // 幂等护栏：补审触发点有三个（宿主启动扫描、resume、turn 提交
     // catch-up），并发或重复命中同一 run 时只允许第一份结论落盘。
@@ -891,57 +931,216 @@ export class AdvancementController {
       return await this.persistReviewOutcome(session, review);
     }
 
-    let outcome: AdvancementReviewRunOutcome;
-    const pendingEvidence = input.runId
-      ? session.evidence?.pending.find(
-          (pending) => pending.request.runId === input.runId,
-        )
+    if (!input.runRecordRef) {
+      const review = this.systemExitReview(
+        input,
+        "推进侧验收缺少 accepted run 的耐久位置，无法建立可恢复的裁判身份。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
+
+    const runId = input.runId ?? stableRunId(input.runRecordRef);
+    let attempt = reviewAttemptFor(session, input.runRecordRef);
+    if (attempt?.phase === "invoking") {
+      const settled = await this.transitionTerminalReviewAttempt(
+        input.conversationId,
+        session.id,
+        terminalAttempt(
+          attempt,
+          "deferred",
+          "裁判调用结果不明；本代禁止重放 provider。",
+        ),
+      );
+      session = settled.session;
+      attempt = settled.attempt;
+    }
+    if (attempt && isTerminalAttempt(attempt)) {
+      const cleaned = await this.cleanupReviewAttemptRoot(attempt);
+      if (!cleaned) {
+        return reviewDeferred(
+          session,
+          "裁判资源仍在等待保守计量回收，暂不进入下一代验收。",
+        );
+      }
+      session = (await this.store.loadActiveSession(input.conversationId)) ?? session;
+      if (session.runs.some((run) => sameRunRecordRef(run.runRecordRef, input.runRecordRef))) {
+        return { kind: "skipped", reason: "already-reviewed" };
+      }
+    }
+
+    const lineageId = advancementReviewLineageId(session.id, input.runRecordRef);
+    const carriedTarget = this.evidence && input.runId
+      ? this.evidence.carriedOutcomeRootTarget(session, input.runId)
       : undefined;
-    const priorGeneration = input.runId
-      ? session.evidence?.generations?.find(
-          (entry) => entry.runId === input.runId,
-        )
+    const evidenceTarget = this.evidence && input.runId && !carriedTarget
+      ? await this.evidence.resolveTarget(input.conversationId, input.runId)
       : undefined;
-    const reviewId =
-      pendingEvidence?.reviewId ??
-      priorGeneration?.reviewId ??
-      this.reviewIdGenerator();
-    const evidenceGeneration = (priorGeneration?.generation ?? 0) + 1;
-    const reviewCtx: AuthorityCallContext = {
-      principal: { kind: "host", component: "advancement-review" },
-      requestId: `advancement-review:${reviewId}:generation:${evidenceGeneration}`,
-      deadlineAt: new Date(Date.now() + 120_000).toISOString(),
-    };
-    let lease: ImmediateRootResourceLease | undefined;
-    let evidenceRequestId: string | undefined;
+    const rootTarget = carriedTarget ?? evidenceTarget;
+
+    attempt = reviewAttemptFor(session, input.runRecordRef);
+    if (!attempt || isTerminalAttempt(attempt)) {
+      const legacyGeneration = session.evidence?.generations?.find(
+        (entry) => entry.runId === runId,
+      )?.generation ?? 0;
+      const generation = Math.max(attempt?.generation ?? 0, legacyGeneration) + 1;
+      const root = reviewRootContract({
+        lineageId,
+        generation,
+        conversationId: input.conversationId,
+        target: rootTarget,
+      });
+      attempt = {
+        lineageId,
+        generation,
+        runId,
+        runIndex: input.runIndex,
+        runRecordRef: structuredClone(input.runRecordRef),
+        phase: "started",
+        root,
+      };
+      session = await this.store.transitionReviewAttempt(
+        input.conversationId,
+        session.id,
+        attempt,
+        this.now(),
+      );
+    }
+
+    if (attempt.phase !== "started") {
+      throw new Error("AdvancementController: review attempt is not restartable");
+    }
+    if (!reviewRootTargetMatches(attempt.root, rootTarget)) {
+      const expired = terminalAttempt(
+        attempt,
+        "expired",
+        "取证目标在裁判调用前发生变化；冻结本代并等待下一次恢复。",
+      );
+      const settled = await this.transitionTerminalReviewAttempt(
+        input.conversationId,
+        session.id,
+        expired,
+      );
+      session = settled.session;
+      await this.cleanupReviewAttemptRoot(settled.attempt);
+      return reviewDeferred(session, settled.attempt.detail ?? expired.detail!);
+    }
+
+    let lease: ImmediateRootResourceLease;
     try {
-      const evidenceTarget = this.evidence && input.runId
-        ? await this.evidence.resolveTarget(input.conversationId, input.runId)
+      lease = await this.acquireReviewRoot(attempt);
+    } catch (error) {
+      if (!(error instanceof ImmediateRootReplayTerminalError)) {
+        return reviewDeferred(
+          session,
+          `裁判根资源获取结果尚未确定：${errorMessage(error)}`,
+        );
+      }
+      const afterFailure = await this.store.loadSession(
+        input.conversationId,
+        session.id,
+      );
+      const durableAfterFailure = afterFailure
+        ? reviewAttemptFor(afterFailure, input.runRecordRef)
         : undefined;
-      lease = await this.resources.acquireRoot(
-        {
-          kind: "control",
-          id: `${reviewId}:generation:${evidenceGeneration}`,
-          attempt: 1,
-        },
-        { maxCalls: 8, maxTokens: 300_000 },
-        { admissionClass: "advancement", entry: "advancement-control" },
-        reviewCtx,
-        evidenceTarget ? { executorId: evidenceTarget.executorId } : undefined,
-        evidenceTarget
-          ? {
-              kind: "conversation",
-              conversationId: input.conversationId,
-              ownerEpoch: evidenceTarget.ownerEpoch,
-            }
+      if (
+        afterFailure &&
+        (afterFailure.status !== "active" ||
+          !durableAfterFailure ||
+          durableAfterFailure.lineageId !== attempt.lineageId ||
+          durableAfterFailure.generation !== attempt.generation ||
+          durableAfterFailure.phase !== "started")
+      ) {
+        if (
+          durableAfterFailure &&
+          durableAfterFailure.lineageId === attempt.lineageId &&
+          durableAfterFailure.generation === attempt.generation &&
+          isTerminalAttempt(durableAfterFailure)
+        ) {
+          await this.cleanupReviewAttemptRoot(durableAfterFailure);
+        }
+        return reviewDeferred(
+          afterFailure,
+          "裁判根获取结束前业务 owner 已推进，本代不再写入或调用外部裁判。",
+        );
+      }
+      if (!afterFailure) {
+        throw new Error(
+          "AdvancementController: session disappeared after its review root became terminal",
+        );
+      }
+      session = afterFailure;
+      attempt = durableAfterFailure!;
+      const expired = terminalAttempt(
+        attempt,
+        "expired",
+        `裁判根资源已${describeRootTerminal(error)}，本代不再复活。`,
+        error.inspection.kind === "reservation"
+          ? error.inspection.lease
           : undefined,
       );
-      const collected = this.evidence && input.runId
+      const settled = await this.transitionTerminalReviewAttempt(
+        input.conversationId,
+        session.id,
+        expired,
+      );
+      session = settled.session;
+      await this.cleanupReviewAttemptRoot(settled.attempt);
+      return reviewDeferred(session, settled.attempt.detail ?? expired.detail!);
+    }
+
+    const afterAcquire = await this.store.loadSession(
+      input.conversationId,
+      session.id,
+    );
+    const durableAfterAcquire = afterAcquire
+      ? reviewAttemptFor(afterAcquire, input.runRecordRef)
+      : undefined;
+    if (
+      !afterAcquire ||
+      afterAcquire.status !== "active" ||
+      !durableAfterAcquire ||
+      durableAfterAcquire.lineageId !== attempt.lineageId ||
+      durableAfterAcquire.generation !== attempt.generation ||
+      durableAfterAcquire.phase !== "started"
+    ) {
+      const cleanupAttempt = durableAfterAcquire &&
+          isTerminalAttempt(durableAfterAcquire)
+        ? durableAfterAcquire
+        : terminalAttempt(
+            { ...attempt, rootLease: lease },
+            "expired",
+            "裁判根取得后业务 owner 已不再允许本代继续。",
+            lease,
+          );
+      if (durableAfterAcquire?.phase !== "invoking") {
+        await this.cleanupReviewAttemptRoot(cleanupAttempt);
+      }
+      if (!afterAcquire) {
+        throw new Error(
+          "AdvancementController: session disappeared after acquiring its review root",
+        );
+      }
+      return reviewDeferred(
+        afterAcquire,
+        durableAfterAcquire?.phase === "invoking"
+          ? "本代裁判已由唯一调用者接管。"
+          : "裁判根取得后推进会话已进入终态，本代不再调用外部裁判。",
+      );
+    }
+    session = afterAcquire;
+    attempt = durableAfterAcquire;
+
+    let evidenceRequestId: string | undefined;
+    let collected:
+      | { readonly canonicalEvidence: readonly import("@zhixing/core").ReviewEvidence[]; readonly requestId?: string }
+      | undefined;
+    try {
+      collected = this.evidence && input.runId
         ? await this.evidence.collect({
             session,
             runId: input.runId,
-            reviewId,
-            generation: evidenceGeneration,
+            reviewId: attempt.lineageId,
+            generation: attempt.generation,
             runRecord: input.runRecord,
             rootLease: lease,
             target: evidenceTarget,
@@ -949,6 +1148,75 @@ export class AdvancementController {
           })
         : undefined;
       evidenceRequestId = collected?.requestId;
+    } catch (error) {
+      const expired = terminalAttempt(
+        { ...attempt, rootLease: lease },
+        "expired",
+        `独立取证未能形成可消费终态：${errorMessage(error)}`,
+        lease,
+      );
+      const settled = await this.transitionTerminalReviewAttempt(
+        input.conversationId,
+        session.id,
+        expired,
+      );
+      session = settled.session;
+      await this.cleanupReviewAttemptRoot(settled.attempt);
+      return reviewDeferred(
+        session,
+        settled.attempt.detail ?? expired.detail!,
+        error instanceof AdvancementEvidenceDeferredError ||
+          (error instanceof Error && error.name === "AbortError")
+          ? "aborted"
+          : "infrastructure",
+      );
+    }
+
+    const invoking: AdvancementReviewAttempt = {
+      ...attempt,
+      phase: "invoking",
+      rootLease: lease,
+    };
+    try {
+      session = await this.store.transitionReviewAttempt(
+        input.conversationId,
+        session.id,
+        invoking,
+        this.now(),
+      );
+    } catch (error) {
+      const latestSession = await this.store.loadSession(
+        input.conversationId,
+        session.id,
+      );
+      const latestAttempt = latestSession
+        ? reviewAttemptFor(latestSession, input.runRecordRef)
+        : undefined;
+      if (
+        latestSession &&
+        (latestSession.status !== "active" ||
+          (latestAttempt !== undefined && isTerminalAttempt(latestAttempt)))
+      ) {
+        await this.cleanupReviewAttemptRoot(
+          latestAttempt && isTerminalAttempt(latestAttempt)
+            ? latestAttempt
+            : terminalAttempt(
+                { ...attempt, rootLease: lease },
+                "expired",
+                "裁判调用前业务 owner 已进入终态。",
+                lease,
+              ),
+        );
+        return reviewDeferred(
+          latestSession,
+          "裁判调用前推进会话已进入终态，本代未调用外部裁判。",
+        );
+      }
+      throw error;
+    }
+
+    let outcome: AdvancementReviewRunOutcome;
+    try {
       outcome = await this.reviewer.review(
         {
           sessionId: session.id,
@@ -959,56 +1227,209 @@ export class AdvancementController {
           runRecordRef: input.runRecordRef,
           priorReviews: session.runs,
           advancementWindow: session.advancementWindow,
-          ...(collected
-            ? { canonicalEvidence: collected.canonicalEvidence }
-            : {}),
+          ...(collected ? { canonicalEvidence: collected.canonicalEvidence } : {}),
         },
         lease,
         input.abortSignal ?? new AbortController().signal,
       );
-    } catch (err) {
-      // 运行体按契约不 throw；意外 throw 视作基础设施抖动挂起，
-      // 交补审触发点收敛，不误落终局杀掉长期会话。
+    } catch (error) {
       outcome = {
         kind: "deferred",
         cause:
-          err instanceof AdvancementEvidenceDeferredError ||
-          (err instanceof Error && err.name === "AbortError")
+          error instanceof Error && error.name === "AbortError"
             ? "aborted"
             : "infrastructure",
-        reason: `推进侧验收运行失败：${errorMessage(err)}`,
+        reason: `推进侧验收运行失败：${errorMessage(error)}`,
       };
-    } finally {
-      if (lease) {
-        try {
-          await this.resources.settle(lease, reviewCtx);
-        } catch {
-          // 终结失败由治理侧过期回收兜底，不吞裁判结论。
-        }
-        try {
-          await this.resources.release(lease, reviewCtx);
-        } catch {
-          // 同上。
-        }
-      }
     }
     if (outcome.kind === "deferred") {
-      return {
-        kind: "review-deferred",
+      const deferred = terminalAttempt(
+        invoking,
+        "deferred",
+        outcome.reason,
+        lease,
+      );
+      const settled = await this.transitionTerminalReviewAttempt(
+        input.conversationId,
+        session.id,
+        deferred,
+      );
+      session = settled.session;
+      await this.cleanupReviewAttemptRoot(settled.attempt);
+      return reviewDeferred(
         session,
-        cause: outcome.cause,
-        reason: outcome.reason,
-      };
+        settled.attempt.detail ?? outcome.reason,
+        outcome.cause,
+      );
     }
 
-    // 结论与被审 run 的绑定校验在挂起分流之外：不匹配是系统一致性
-    // 错误，直接冒泡暴露，不落盘也不伪装成裁判结论。
     assertReviewMatchesAcceptedRun(input, outcome.review);
-    return await this.persistReviewOutcome(
+    const consumed = terminalAttempt(invoking, "consumed", undefined, lease);
+    const result = await this.persistReviewOutcome(
       session,
       outcome.review,
       outcome.advancementWindow,
       evidenceRequestId,
+      consumed,
+    );
+    await this.cleanupReviewAttemptRoot(consumed);
+    return result;
+  }
+
+  private async reconcileTerminalReviewAttempts(
+    conversationId: string,
+  ): Promise<void> {
+    if (!this.resources) return;
+    const sessions = await this.store.loadConversationSessions(conversationId);
+    for (const session of sessions) {
+      for (const attempt of session.reviewAttempts ?? []) {
+        if (isTerminalAttempt(attempt)) {
+          await this.cleanupReviewAttemptRoot(attempt);
+        }
+      }
+    }
+  }
+
+  private async transitionTerminalReviewAttempt(
+    conversationId: string,
+    sessionId: string,
+    proposed: AdvancementReviewAttempt,
+  ): Promise<{
+    readonly session: AdvancementSession;
+    readonly attempt: AdvancementReviewAttempt;
+  }> {
+    if (!isTerminalAttempt(proposed)) {
+      throw new TypeError("AdvancementController: terminal transition requires a terminal attempt");
+    }
+    try {
+      const session = await this.store.transitionReviewAttempt(
+        conversationId,
+        sessionId,
+        proposed,
+        this.now(),
+      );
+      return {
+        session,
+        attempt: reviewAttemptFor(session, proposed.runRecordRef) ?? proposed,
+      };
+    } catch (error) {
+      const session = await this.store.loadSession(conversationId, sessionId);
+      const winner = session
+        ? reviewAttemptFor(session, proposed.runRecordRef)
+        : undefined;
+      if (
+        session &&
+        winner &&
+        winner.lineageId === proposed.lineageId &&
+        winner.generation === proposed.generation &&
+        isTerminalAttempt(winner)
+      ) {
+        return { session, attempt: winner };
+      }
+      throw error;
+    }
+  }
+
+  private async acquireReviewRoot(
+    attempt: AdvancementReviewAttempt,
+  ): Promise<ImmediateRootResourceLease> {
+    if (!this.resources) {
+      throw new Error("AdvancementController: resource governor is not assembled");
+    }
+    const inspection = await this.resources.inspectImmediateRoot(
+      attempt.root.workload,
+    );
+    if (inspection.kind === "reservation") {
+      assertReviewRootLease(attempt.root, inspection.lease);
+      if (inspection.state !== "active") {
+        throw new ImmediateRootReplayTerminalError(inspection);
+      }
+      return inspection.lease;
+    }
+    if (inspection.kind === "dequeued") {
+      throw new ImmediateRootReplayTerminalError(inspection);
+    }
+    let lease: ImmediateRootResourceLease;
+    try {
+      lease = await this.resources.acquireRoot(
+        attempt.root.workload,
+        attempt.root.budget,
+        { admissionClass: "advancement", entry: "advancement-control" },
+        reviewRootContext(attempt.root),
+        attempt.root.audience,
+        attempt.root.scopeBinding,
+      );
+    } catch (error) {
+      const afterFailure = await this.resources.inspectImmediateRoot(
+        attempt.root.workload,
+      );
+      if (
+        afterFailure.kind === "reservation" &&
+        afterFailure.state === "active"
+      ) {
+        assertReviewRootLease(attempt.root, afterFailure.lease);
+        return afterFailure.lease;
+      }
+      if (
+        afterFailure.kind === "dequeued" ||
+        (afterFailure.kind === "reservation" && afterFailure.state !== "active")
+      ) {
+        throw new ImmediateRootReplayTerminalError(afterFailure);
+      }
+      throw error;
+    }
+    assertReviewRootLease(attempt.root, lease);
+    return lease;
+  }
+
+  private async cleanupReviewAttemptRoot(
+    attempt: AdvancementReviewAttempt,
+  ): Promise<boolean> {
+    if (!this.resources || !isTerminalAttempt(attempt)) return false;
+    let inspection = await this.resources.inspectImmediateRoot(attempt.root.workload);
+    if (inspection.kind === "absent" || inspection.kind === "dequeued") return true;
+    if (inspection.kind === "queued") {
+      try {
+        const lease = await this.resources.acquireRoot(
+          attempt.root.workload,
+          attempt.root.budget,
+          { admissionClass: "advancement", entry: "advancement-control" },
+          reviewRootContext(attempt.root, 250),
+          attempt.root.audience,
+          attempt.root.scopeBinding,
+        );
+        assertReviewRootLease(attempt.root, lease);
+      } catch {
+        // acquireRoot 的有界 deadline 会为未激活队列写入出队事实；
+        // 无论返回还是抛错都以随后重读的耐久分类为准。
+      }
+      inspection = await this.resources.inspectImmediateRoot(attempt.root.workload);
+      if (inspection.kind === "absent" || inspection.kind === "dequeued") return true;
+      if (inspection.kind === "queued") return false;
+    }
+    assertReviewRootLease(attempt.root, inspection.lease);
+    if (inspection.state === "released" || inspection.state === "reclaimed") {
+      return true;
+    }
+    const ctx = reviewRootContext(attempt.root);
+    if (inspection.state === "active") {
+      try {
+        await this.resources.settle(inspection.lease, ctx);
+      } catch {
+        return false;
+      }
+    }
+    try {
+      await this.resources.release(inspection.lease, ctx);
+    } catch {
+      return false;
+    }
+    inspection = await this.resources.inspectImmediateRoot(attempt.root.workload);
+    return (
+      inspection.kind === "absent" ||
+      inspection.kind === "dequeued" ||
+      (inspection.kind === "reservation" &&
+        (inspection.state === "released" || inspection.state === "reclaimed"))
     );
   }
 
@@ -1018,11 +1439,32 @@ export class AdvancementController {
     message: string,
     reason: AdvancementExit["reason"] = "user-cancelled",
   ): Promise<AdvancementSession> {
-    return await this.store.cancelSession(conversationId, sessionId, {
+    let current = await this.store.loadSession(conversationId, sessionId);
+    const terminalAttempts: AdvancementReviewAttempt[] = [];
+    for (const attempt of current?.reviewAttempts ?? []) {
+      if (attempt.phase !== "started" && attempt.phase !== "invoking") continue;
+      const terminal = terminalAttempt(
+        attempt,
+        attempt.phase === "invoking" ? "deferred" : "expired",
+        "推进会话关闭，未完成裁判尝试停止推进。",
+      );
+      const settled = await this.transitionTerminalReviewAttempt(
+        conversationId,
+        sessionId,
+        terminal,
+      );
+      current = settled.session;
+      terminalAttempts.push(settled.attempt);
+    }
+    const cancelled = await this.store.cancelSession(conversationId, sessionId, {
       reason,
       message,
       occurredAt: this.now(),
     } satisfies AdvancementExit);
+    for (const attempt of terminalAttempts) {
+      await this.cleanupReviewAttemptRoot(attempt);
+    }
+    return cancelled;
   }
 
   private async requireSession(
@@ -1041,6 +1483,7 @@ export class AdvancementController {
     review: AdvancementRunReview,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementTurnReviewResult> {
     if (review.decision === "passed") {
       const exit: AdvancementExit = {
@@ -1056,6 +1499,7 @@ export class AdvancementController {
         review.reviewedAt,
         advancementWindow,
         evidenceRequestId,
+        reviewAttempt,
       );
       return {
         kind: "completed",
@@ -1079,6 +1523,7 @@ export class AdvancementController {
         review.reviewedAt,
         advancementWindow,
         evidenceRequestId,
+        reviewAttempt,
       );
       return {
         kind: "exited",
@@ -1114,6 +1559,7 @@ export class AdvancementController {
         review.reviewedAt,
         syncAdvancementWindowReview(advancementWindow, exitReview),
         evidenceRequestId,
+        reviewAttempt,
       );
       return {
         kind: "exited",
@@ -1129,6 +1575,7 @@ export class AdvancementController {
       review,
       advancementWindow,
       evidenceRequestId,
+      reviewAttempt,
     );
   }
 
@@ -1137,6 +1584,7 @@ export class AdvancementController {
     review: AdvancementRunReview,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementTurnReviewResult> {
     const rubric = session.confirmedRubric;
     const handling = rubric
@@ -1163,6 +1611,7 @@ export class AdvancementController {
         review.reviewedAt,
         syncAdvancementWindowReview(advancementWindow, exitReview),
         evidenceRequestId,
+        reviewAttempt,
       );
       return {
         kind: "exited",
@@ -1195,6 +1644,7 @@ export class AdvancementController {
       review.reviewedAt,
       syncAdvancementWindowReview(advancementWindow, reviewWithProxy),
       evidenceRequestId,
+      reviewAttempt,
     );
     return {
       kind: "proxy-enqueued",
@@ -1281,6 +1731,140 @@ export class AdvancementController {
       exitReason,
     };
   }
+}
+
+function reviewFlightKey(input: {
+  readonly conversationId: string;
+  readonly runIndex: number;
+  readonly runRecordRef?: RunRecordRef;
+}): string {
+  return input.runRecordRef
+    ? `${input.conversationId}:${input.runRecordRef.shardId}:${input.runRecordRef.runIndex}`
+    : `${input.conversationId}:legacy:${input.runIndex}`;
+}
+
+function stableRunId(ref: RunRecordRef): string {
+  return `accepted-run:${ref.shardId}:${ref.runIndex}`;
+}
+
+function reviewAttemptFor(
+  session: AdvancementSession,
+  ref: RunRecordRef,
+): AdvancementReviewAttempt | undefined {
+  return session.reviewAttempts?.find((attempt) =>
+    sameRunRecordRef(attempt.runRecordRef, ref),
+  );
+}
+
+function isTerminalAttempt(attempt: AdvancementReviewAttempt): boolean {
+  return (
+    attempt.phase === "consumed" ||
+    attempt.phase === "deferred" ||
+    attempt.phase === "expired"
+  );
+}
+
+function terminalAttempt(
+  attempt: AdvancementReviewAttempt,
+  phase: "consumed" | "deferred" | "expired",
+  detail?: string,
+  rootLease?: ImmediateRootResourceLease,
+): AdvancementReviewAttempt {
+  return {
+    lineageId: attempt.lineageId,
+    generation: attempt.generation,
+    runId: attempt.runId,
+    runIndex: attempt.runIndex,
+    runRecordRef: structuredClone(attempt.runRecordRef),
+    phase,
+    root: structuredClone(attempt.root),
+    ...(rootLease ?? attempt.rootLease
+      ? { rootLease: structuredClone(rootLease ?? attempt.rootLease!) }
+      : {}),
+    ...(detail === undefined ? {} : { detail }),
+  };
+}
+
+function reviewRootContract(input: {
+  readonly lineageId: string;
+  readonly generation: number;
+  readonly conversationId: string;
+  readonly target?: AdvancementEvidenceRootTarget;
+}): AdvancementReviewRootContract {
+  const id = advancementReviewAttemptId(input.lineageId, input.generation);
+  return {
+    workload: { kind: "control", id, attempt: 1 },
+    budget: { maxCalls: 8, maxTokens: 300_000 },
+    requestId: advancementReviewRootRequestId(input.lineageId, input.generation),
+    ...(input.target
+      ? {
+          audience: { executorId: input.target.executorId },
+          scopeBinding: {
+            kind: "conversation" as const,
+            conversationId: input.conversationId,
+            ownerEpoch: input.target.ownerEpoch,
+          },
+        }
+      : {}),
+  };
+}
+
+function reviewRootTargetMatches(
+  root: AdvancementReviewRootContract,
+  target: AdvancementEvidenceRootTarget | undefined,
+): boolean {
+  if (!target) {
+    return root.audience === undefined && root.scopeBinding === undefined;
+  }
+  return (
+    root.audience?.executorId === target.executorId &&
+    root.scopeBinding?.kind === "conversation" &&
+    root.scopeBinding.ownerEpoch === target.ownerEpoch
+  );
+}
+
+function reviewRootContext(
+  root: AdvancementReviewRootContract,
+  deadlineMs = 120_000,
+): AuthorityCallContext {
+  return {
+    principal: { kind: "host", component: "advancement-review" },
+    requestId: root.requestId,
+    deadlineAt: new Date(Date.now() + deadlineMs).toISOString(),
+  };
+}
+
+function assertReviewRootLease(
+  root: AdvancementReviewRootContract,
+  lease: ImmediateRootResourceLease,
+): void {
+  const expectedScope = root.scopeBinding ?? {
+    kind: "control" as const,
+    subject: root.workload.id,
+  };
+  if (
+    canonicalize(lease.workload) !== canonicalize(root.workload) ||
+    canonicalize(lease.budget) !== canonicalize(root.budget) ||
+    canonicalize(lease.scopeBinding) !== canonicalize(expectedScope) ||
+    (root.audience !== undefined &&
+      canonicalize(lease.audience) !== canonicalize(root.audience))
+  ) {
+    throw new Error("AdvancementController: review root changed its frozen contract");
+  }
+}
+
+function describeRootTerminal(error: ImmediateRootReplayTerminalError): string {
+  return error.inspection.kind === "dequeued"
+    ? `出队（${error.inspection.reason}）`
+    : `进入 ${error.inspection.state} 终态`;
+}
+
+function reviewDeferred(
+  session: AdvancementSession,
+  reason: string,
+  cause: "infrastructure" | "aborted" = "infrastructure",
+): AdvancementTurnReviewResult {
+  return { kind: "review-deferred", session, cause, reason };
 }
 
 function errorMessage(err: unknown): string {

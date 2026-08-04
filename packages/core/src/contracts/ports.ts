@@ -311,6 +311,32 @@ export type SystemJobReservationOrigin = Extract<
   { entry: "schedule-trigger" }
 >;
 
+export type ImmediateRootReservationInspection =
+  | { readonly kind: "absent" }
+  | { readonly kind: "queued"; readonly reservationId: string }
+  | {
+      readonly kind: "dequeued";
+      readonly reason: "cancelled" | "failed" | "expired";
+    }
+  | {
+      readonly kind: "reservation";
+      readonly state: "active" | "settled" | "released" | "reclaimed";
+      readonly lease: ImmediateRootResourceLease;
+    };
+
+/** acquireRoot 对已出队或已终态稳定身份的显式分类，调用方不得把它当新请求。 */
+export class ImmediateRootReplayTerminalError extends Error {
+  constructor(readonly inspection: Exclude<
+    ImmediateRootReservationInspection,
+    { readonly kind: "absent" | "queued" }
+  >) {
+    super(`Immediate resource root is ${
+      inspection.kind === "dequeued" ? "dequeued" : inspection.state
+    }`);
+    this.name = "ImmediateRootReplayTerminalError";
+  }
+}
+
 export interface ResourceReservationPort {
   enqueueRoot(
     reservationId: string,
@@ -336,6 +362,9 @@ export interface ResourceReservationPort {
     audience?: { readonly executorId: string },
     scopeBinding?: ResourceLease["scopeBinding"],
   ): Promise<ImmediateRootResourceLease>;
+  inspectImmediateRoot(
+    workload: ImmediateRootWorkload,
+  ): Promise<ImmediateRootReservationInspection>;
   acquireChild(
     parent: ResourceLease,
     workload: import("./authorization.js").ChildResourceLease["workload"],

@@ -18,20 +18,25 @@ import type {
 import { protocolDigest } from "@zhixing/core/protocol";
 
 function fakeResources(): ResourceReservationPort {
-  const leaseFor = (id: string): ImmediateRootResourceLease => ({
+  const leaseFor = (id: string): ImmediateRootResourceLease => {
+    const unsigned = {
     v: 1,
     reservationId: `rsv-${id}`,
     admissionClass: "advancement",
     workload: { kind: "control", id, attempt: 1 },
     scopeBinding: { kind: "control", subject: id },
-    audience: {},
-    budget: { maxCalls: 8 },
+    audience: { executorId: "executor-local" },
+    budget: { maxCalls: 8, maxTokens: 300_000 },
     domain: { kind: "anchor", anchorEpoch: 1 },
     issuedAt: "2026-01-01T00:00:00.000Z",
     expiry: "2026-01-01T01:00:00.000Z",
-    digest: "sha256:" + "0".repeat(64),
-    signature: { alg: "test", keyId: "test", sig: "sha256:" + "0".repeat(64) },
-  });
+    } as const;
+    return {
+      ...unsigned,
+      digest: protocolDigest("ResourceLease", 1, unsigned),
+      signature: { alg: "test", keyId: "test", sig: "test" },
+    };
+  };
   return {
     enqueueRoot: async () => {},
     prepareAssignmentRoot: async () => {
@@ -41,6 +46,7 @@ function fakeResources(): ResourceReservationPort {
       throw new Error("unused");
     },
     acquireRoot: async (workload) => leaseFor(String(workload.id)),
+    inspectImmediateRoot: async () => ({ kind: "absent" }),
     acquireChild: async () => {
       throw new Error("unused");
     },
@@ -372,8 +378,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const result = await controller.afterTurnCommitted({
       conversationId: "conv-1",
       runIndex: 0,
-      runRecord: runRecord(),
       runRecordRef: { shardId: "000001", runIndex: 0 },
+      runRecord: runRecord(),
     });
 
     expect(result.kind).toBe("completed");
@@ -403,6 +409,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
         createdAt: "2026-01-01T00:02:30.000Z",
       },
     );
+    const appendTerminal = vi.spyOn(store, "appendTerminalRunReview");
     const controller = new AdvancementController({
       store,
       resources: fakeResources(),      reviewer: {
@@ -439,16 +446,71 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
 
     expect(result.kind).toBe("completed");
+    expect(appendTerminal.mock.calls[0]?.[7]?.phase).toBe("consumed");
     const events = await store.readEvents("conv-1");
+    expect(
+      events
+        .filter((event) => event.type === "review_attempt_transitioned")
+        .map((event) => event.attempt.phase),
+    ).toEqual(["started", "invoking", "consumed"]);
     expect(events.map((event) => event.type)).toEqual([
       "session_created",
       "rubric_confirmed",
       "run_reviewed",
       "proxy_enqueued",
       "proxy_settled",
+      "review_attempt_transitioned",
+      "review_attempt_transitioned",
       "run_reviewed",
+      "review_attempt_transitioned",
       "completed",
     ]);
+  });
+
+  it("同一 accepted run 的并发触发共享一条 review flight", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    let finishReview!: (value: {
+      kind: "reviewed";
+      review: AdvancementRunReview;
+    }) => void;
+    const reviewer = {
+      review: vi.fn(() => new Promise<{
+        kind: "reviewed";
+        review: AdvancementRunReview;
+      }>((resolve) => {
+        finishReview = resolve;
+      })),
+    };
+    const controller = new AdvancementController({
+      store,
+      resources: fakeResources(),
+      reviewer,
+      now: () => "2026-01-01T00:04:00.000Z",
+    });
+    const input = {
+      conversationId: "conv-1",
+      runIndex: 0,
+      runRecord: runRecord(),
+      runRecordRef: { shardId: "000001", runIndex: 0 },
+    } as const;
+
+    const first = controller.afterTurnCommitted(input);
+    const second = controller.afterTurnCommitted(input);
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledTimes(1));
+    finishReview({
+      kind: "reviewed",
+      review: review({
+        decision: "passed",
+        unmetCriteria: [],
+        attribution: passedAttribution(),
+        runRecordRef: input.runRecordRef,
+      }),
+    });
+
+    const results = await Promise.all([first, second]);
+    expect(results.map((result) => result.kind)).toEqual(["completed", "completed"]);
+    expect(reviewer.review).toHaveBeenCalledTimes(1);
   });
 
   it("advancement 来源 run 缺少匹配 metadata 时退出推进", async () => {
@@ -882,6 +944,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const result = await controller.afterTurnCommitted({
       conversationId: "conv-1",
       runIndex: 0,
+      runRecordRef: { shardId: "000001", runIndex: 0 },
       runRecord: runRecord(),
     });
 
@@ -907,6 +970,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const result = await controller.afterTurnCommitted({
       conversationId: "conv-1",
       runIndex: 0,
+      runRecordRef: { shardId: "000001", runIndex: 0 },
       runRecord: runRecord(),
     });
 

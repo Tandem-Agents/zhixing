@@ -2,10 +2,14 @@ import type {
   AdvancementControlEvent,
   AdvancementEvidenceAttempt,
   AdvancementEvidenceOutcome,
+  AdvancementReviewAttempt,
 } from "./types.js";
 import {
+  assertResourceAdmissionRequest,
+  canonicalize,
   validateEvidenceBundle,
   validateEvidenceRequest,
+  validateReservableResourceLease,
   validateMessage,
   evidenceRequestDigest,
   type ProtocolSignatureVerifier,
@@ -115,6 +119,11 @@ export function isAdvancementControlEvent(
           "timestamp",
           "type",
         ]) && typeof event.proxyMessageId === "string"
+      );
+    case "review_attempt_transitioned":
+      return (
+        hasExactKeys(event, ["attempt", "sessionId", "timestamp", "type"]) &&
+        isReviewAttemptShape(event.attempt, verifier)
       );
     case "evidence_requested": {
       if (
@@ -229,6 +238,125 @@ export function isAdvancementControlEvent(
     default:
       return false;
   }
+}
+
+function isReviewAttemptShape(
+  value: unknown,
+  verifier: ProtocolSignatureVerifier,
+): value is AdvancementReviewAttempt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const attempt = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(attempt, [
+      ...(attempt.detail === undefined ? [] : ["detail"]),
+      "generation",
+      "lineageId",
+      "phase",
+      "root",
+      ...(attempt.rootLease === undefined ? [] : ["rootLease"]),
+      "runId",
+      "runIndex",
+      "runRecordRef",
+    ]) ||
+    !isNonEmptyString(attempt.lineageId) ||
+    !Number.isSafeInteger(attempt.generation) ||
+    (attempt.generation as number) <= 0 ||
+    !isNonEmptyString(attempt.runId) ||
+    !Number.isSafeInteger(attempt.runIndex) ||
+    (attempt.runIndex as number) < 0 ||
+    !isRunRecordRefShape(attempt.runRecordRef) ||
+    !["started", "invoking", "consumed", "deferred", "expired"].includes(
+      String(attempt.phase),
+    ) ||
+    (attempt.detail !== undefined && typeof attempt.detail !== "string") ||
+    !isReviewRootContractShape(attempt.root)
+  ) {
+    return false;
+  }
+  if (attempt.rootLease !== undefined) {
+    try {
+      const lease = validateReservableResourceLease(attempt.rootLease, verifier);
+      const root = attempt.root as AdvancementReviewAttempt["root"];
+      if (
+        lease.workload.kind !== "control" ||
+        canonicalize(lease.workload) !== canonicalize(root.workload) ||
+        canonicalize(lease.budget) !== canonicalize(root.budget) ||
+        (root.audience !== undefined &&
+          canonicalize(lease.audience) !== canonicalize(root.audience)) ||
+        (root.scopeBinding !== undefined &&
+          canonicalize(lease.scopeBinding) !== canonicalize(root.scopeBinding))
+      ) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return attempt.phase === "started"
+    ? attempt.rootLease === undefined && attempt.detail === undefined
+    : attempt.phase === "expired"
+      ? true
+      : attempt.rootLease !== undefined;
+}
+
+function isReviewRootContractShape(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const root = value as Record<string, unknown>;
+  if (
+    !hasExactKeys(root, [
+      ...(root.audience === undefined ? [] : ["audience"]),
+      "budget",
+      "requestId",
+      ...(root.scopeBinding === undefined ? [] : ["scopeBinding"]),
+      "workload",
+    ]) ||
+    !isNonEmptyString(root.requestId)
+  ) {
+    return false;
+  }
+  try {
+    assertResourceAdmissionRequest(root.workload, root.budget);
+  } catch {
+    return false;
+  }
+  const workload = root.workload as { kind?: unknown };
+  if (workload.kind !== "control") return false;
+  if (root.audience !== undefined) {
+    const audience = root.audience as Record<string, unknown>;
+    if (
+      !audience ||
+      typeof audience !== "object" ||
+      !hasExactKeys(audience, ["executorId"]) ||
+      !isNonEmptyString(audience.executorId)
+    ) {
+      return false;
+    }
+  }
+  if (root.scopeBinding !== undefined) {
+    const scope = root.scopeBinding as Record<string, unknown>;
+    if (!scope || typeof scope !== "object" || Array.isArray(scope)) return false;
+    if (
+      scope.kind === "control" &&
+      hasExactKeys(scope, ["kind", "subject"]) &&
+      isNonEmptyString(scope.subject)
+    ) return true;
+    if (
+      scope.kind === "conversation" &&
+      hasExactKeys(scope, ["conversationId", "kind", "ownerEpoch"]) &&
+      isNonEmptyString(scope.conversationId) &&
+      Number.isSafeInteger(scope.ownerEpoch) &&
+      (scope.ownerEpoch as number) > 0
+    ) return true;
+    if (
+      scope.kind === "job" &&
+      hasExactKeys(scope, ["anchorEpoch", "kind", "taskId"]) &&
+      isNonEmptyString(scope.taskId) &&
+      Number.isSafeInteger(scope.anchorEpoch) &&
+      (scope.anchorEpoch as number) > 0
+    ) return true;
+    return false;
+  }
+  return true;
 }
 
 function isEvidenceOutcome(

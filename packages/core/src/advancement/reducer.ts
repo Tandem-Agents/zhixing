@@ -24,6 +24,7 @@ export interface MutableAdvancementSession {
   proxyMessages: AdvancementSession["proxyMessages"][number][];
   outstandingProxyMessageId?: string;
   advancementWindow?: AdvancementWindowState;
+  reviewAttempts: NonNullable<AdvancementSession["reviewAttempts"]>[number][];
   evidencePending: AdvancementEvidenceProjection["pending"][number][];
   evidenceGenerations: AdvancementEvidenceGeneration[];
   exit?: AdvancementSession["exit"];
@@ -76,6 +77,7 @@ export function applyAdvancementEvent(
         pendingRubricDraft: event.pendingRubricDraft,
         runs: [],
         proxyMessages: [],
+        reviewAttempts: [],
         evidencePending: [],
         evidenceGenerations: [],
       });
@@ -142,6 +144,20 @@ export function applyAdvancementEvent(
       if (session.outstandingProxyMessageId === event.proxyMessageId) {
         session.outstandingProxyMessageId = undefined;
       }
+      break;
+    }
+    case "review_attempt_transitioned": {
+      const session = sessions.get(event.sessionId);
+      if (!session) return;
+      session.updatedAt = event.timestamp;
+      session.reviewAttempts = [
+        ...session.reviewAttempts.filter(
+          (attempt) =>
+            attempt.runRecordRef.shardId !== event.attempt.runRecordRef.shardId ||
+            attempt.runRecordRef.runIndex !== event.attempt.runRecordRef.runIndex,
+        ),
+        structuredClone(event.attempt),
+      ];
       break;
     }
     case "evidence_requested": {
@@ -244,6 +260,9 @@ function freezeSession(session: MutableAdvancementSession): AdvancementSession {
     proxyMessages: [...session.proxyMessages],
     outstandingProxyMessageId: session.outstandingProxyMessageId,
     advancementWindow: session.advancementWindow,
+    ...(session.reviewAttempts.length > 0
+      ? { reviewAttempts: session.reviewAttempts.map((attempt) => structuredClone(attempt)) }
+      : {}),
     ...(session.evidencePending.length > 0 || session.evidenceGenerations.length > 0
       ? {
           evidence: {

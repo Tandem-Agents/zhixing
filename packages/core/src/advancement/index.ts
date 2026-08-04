@@ -56,6 +56,12 @@ export {
 export { AdvancementStore } from "./store.js";
 export { isAdvancementControlEvent } from "./event-codec.js";
 export { advancementEvidenceRequestId } from "./evidence-identity.js";
+export {
+  advancementReviewAttemptId,
+  advancementReviewAttemptMutationId,
+  advancementReviewLineageId,
+  advancementReviewRootRequestId,
+} from "./review-attempt-identity.js";
 export type {
   AdvancementReviewRunInput,
   AdvancementReviewRunOutcome,

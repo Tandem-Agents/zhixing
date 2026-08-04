@@ -1,5 +1,10 @@
 import type { RunRecordRef } from "../transcript/shard/types.js";
 export type { RunRecordAdvancementMetadata } from "../transcript/types.js";
+import type {
+  ImmediateRootResourceLease,
+  ImmediateRootWorkload,
+  ResourceLease,
+} from "../contracts/authorization.js";
 import type { EvidenceBundle, EvidenceRequest } from "../contracts/protocol.js";
 import type { Digest } from "../types/distributed.js";
 import type { TokenUsage } from "../types/llm.js";
@@ -324,6 +329,8 @@ export interface AdvancementSession {
   readonly proxyMessages: readonly AdvancementProxyMessage[];
   readonly outstandingProxyMessageId?: string;
   readonly advancementWindow?: AdvancementWindowState;
+  /** 每个 accepted run 最新一代裁判尝试；完整历史仍由 owner 事件日志保留。 */
+  readonly reviewAttempts?: readonly AdvancementReviewAttempt[];
   readonly evidence?: AdvancementEvidenceProjection;
   readonly exit?: AdvancementExit;
 }
@@ -345,6 +352,7 @@ export type AdvancementStoreEvent =
   | AdvancementWindowUpdatedEvent
   | AdvancementProxyEnqueuedEvent
   | AdvancementProxySettledEvent
+  | AdvancementReviewAttemptTransitionedEvent
   | AdvancementEvidenceRequestedEvent
   | AdvancementEvidenceResultEvent
   | AdvancementEvidenceSettledEvent
@@ -502,6 +510,48 @@ export interface AdvancementEvidencePending
 export interface AdvancementEvidenceProjection {
   readonly pending: readonly AdvancementEvidencePending[];
   readonly generations?: readonly AdvancementEvidenceGeneration[];
+}
+
+export type AdvancementReviewAttemptPhase =
+  | "started"
+  | "invoking"
+  | "consumed"
+  | "deferred"
+  | "expired";
+
+/**
+ * 一代裁判尝试冻结的根资源合同。可选字段表示调用 governor 时显式省略，
+ * 因而由同一设备的稳定本地缺省值解释；重放不得根据当前拓扑重算它们。
+ */
+export interface AdvancementReviewRootContract {
+  readonly workload: ImmediateRootWorkload;
+  readonly budget: ResourceLease["budget"];
+  readonly requestId: string;
+  readonly audience?: { readonly executorId: string };
+  readonly scopeBinding?: ResourceLease["scopeBinding"];
+}
+
+/**
+ * accepted run 的耐久裁判尝试。业务结论、外部调用阶段与资源阶段分离：
+ * invoking 是外部裁判可能已发生的不可重放边界；terminal phase 先于 root 清理。
+ */
+export interface AdvancementReviewAttempt {
+  readonly lineageId: string;
+  readonly generation: number;
+  readonly runId: string;
+  readonly runIndex: number;
+  readonly runRecordRef: RunRecordRef;
+  readonly phase: AdvancementReviewAttemptPhase;
+  readonly root: AdvancementReviewRootContract;
+  readonly rootLease?: ImmediateRootResourceLease;
+  readonly detail?: string;
+}
+
+export interface AdvancementReviewAttemptTransitionedEvent {
+  readonly type: "review_attempt_transitioned";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly attempt: AdvancementReviewAttempt;
 }
 
 export interface AdvancementEvidenceGeneration {

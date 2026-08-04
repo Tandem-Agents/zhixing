@@ -18,10 +18,14 @@ import {
 } from "./reducer.js";
 import type {
   AdvancementCompletedEvent,
+  AdvancementEvidenceAttempt,
+  AdvancementEvidenceOutcome,
+  AdvancementEvidenceSettlement,
   AdvancementExit,
   AdvancementExitedEvent,
   AdvancementProxyMessage,
   AdvancementRunReview,
+  AdvancementReviewAttempt,
   AdvancementSession,
   AdvancementStoreEvent,
   AdvancementWindowState,
@@ -222,6 +226,8 @@ export class AdvancementStore {
     review: AdvancementRunReview,
     timestamp = new Date().toISOString(),
     advancementWindow?: AdvancementWindowState,
+    evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       this.assertActiveSession(
@@ -230,7 +236,11 @@ export class AdvancementStore {
       );
       await this.appendEventsInLock(
         conversationId,
-        runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+        [
+          ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+          ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
+          ...reviewAttemptEvent(sessionId, reviewAttempt, timestamp),
+        ],
       );
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
@@ -250,6 +260,8 @@ export class AdvancementStore {
     },
     timestamp = review.reviewedAt,
     advancementWindow?: AdvancementWindowState,
+    evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       this.assertActiveSession(
@@ -259,6 +271,8 @@ export class AdvancementStore {
       assertTerminalReviewDecision(review, terminal.type);
       await this.appendEventsInLock(conversationId, [
         ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+        ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
+        ...reviewAttemptEvent(sessionId, reviewAttempt, timestamp),
         {
           type: terminal.type,
           timestamp: terminal.timestamp ?? terminal.exit.occurredAt,
@@ -280,6 +294,8 @@ export class AdvancementStore {
     proxyMessage: AdvancementProxyMessage,
     timestamp = review.reviewedAt,
     advancementWindow?: AdvancementWindowState,
+    evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       const session = this.assertActiveSession(
@@ -308,6 +324,8 @@ export class AdvancementStore {
       }
       await this.appendEventsInLock(conversationId, [
         ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+        ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
+        ...reviewAttemptEvent(sessionId, reviewAttempt, timestamp),
         {
           type: "proxy_enqueued",
           timestamp: proxyMessage.createdAt,
@@ -315,6 +333,84 @@ export class AdvancementStore {
           proxyMessage,
         },
       ]);
+      return this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+    });
+  }
+
+  async appendEvidenceRequest(
+    conversationId: string,
+    sessionId: string,
+    attempt: AdvancementEvidenceAttempt,
+    timestamp = new Date().toISOString(),
+  ): Promise<AdvancementSession> {
+    return await this.appendDomainEvent(conversationId, sessionId, {
+      type: "evidence_requested",
+      timestamp,
+      sessionId,
+      attempt,
+    });
+  }
+
+  async appendEvidenceResult(
+    conversationId: string,
+    sessionId: string,
+    requestId: string,
+    outcome: AdvancementEvidenceOutcome,
+    timestamp = new Date().toISOString(),
+  ): Promise<AdvancementSession> {
+    return await this.appendDomainEvent(conversationId, sessionId, {
+      type: "evidence_result",
+      timestamp,
+      sessionId,
+      requestId,
+      outcome,
+    });
+  }
+
+  async settleEvidence(
+    conversationId: string,
+    sessionId: string,
+    requestId: string,
+    settlement: AdvancementEvidenceSettlement,
+    timestamp = new Date().toISOString(),
+  ): Promise<AdvancementSession> {
+    return await this.appendDomainEvent(conversationId, sessionId, {
+      type: "evidence_settled",
+      timestamp,
+      sessionId,
+      requestId,
+      settlement,
+    });
+  }
+
+  async transitionReviewAttempt(
+    conversationId: string,
+    sessionId: string,
+    attempt: AdvancementReviewAttempt,
+    timestamp = new Date().toISOString(),
+  ): Promise<AdvancementSession> {
+    return await this.appendDomainEvent(conversationId, sessionId, {
+      type: "review_attempt_transitioned",
+      timestamp,
+      sessionId,
+      attempt,
+    });
+  }
+
+  private async appendDomainEvent(
+    conversationId: string,
+    sessionId: string,
+    event: AdvancementStoreEvent,
+  ): Promise<AdvancementSession> {
+    return await this.withConversationLock(conversationId, async () => {
+      this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+      await this.appendEventInLock(conversationId, event);
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
@@ -615,4 +711,30 @@ export class AdvancementStore {
     }
     return session;
   }
+}
+
+function evidenceSettlementEvent(
+  sessionId: string,
+  requestId: string | undefined,
+  timestamp: string,
+): AdvancementStoreEvent[] {
+  return requestId
+    ? [{
+        type: "evidence_settled",
+        timestamp,
+        sessionId,
+        requestId,
+        settlement: "consumed",
+      }]
+    : [];
+}
+
+function reviewAttemptEvent(
+  sessionId: string,
+  attempt: AdvancementReviewAttempt | undefined,
+  timestamp: string,
+): AdvancementStoreEvent[] {
+  return attempt
+    ? [{ type: "review_attempt_transitioned", timestamp, sessionId, attempt }]
+    : [];
 }

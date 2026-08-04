@@ -115,6 +115,8 @@ function lazyResourcePort(
         audience,
         scopeBinding,
       ),
+    inspectImmediateRoot: (workload) =>
+      required().inspectImmediateRoot(workload),
     acquireChild: (parent, workload, budget, ctx) =>
       required().acquireChild(parent, workload, budget, ctx),
     reserveUsage: (lease, usage, ctx) => required().reserveUsage(lease, usage, ctx),

@@ -8,6 +8,7 @@ import type {
   ChildResourceLease,
   GovernorRecord,
   ImmediateRootResourceLease,
+  ImmediateRootReservationInspection,
   ImmediateRootWorkload,
   LogicalRecord,
   ReservationOrigin,
@@ -20,6 +21,7 @@ import type {
   SystemJobResourceLease,
   UsageReport,
 } from "@zhixing/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import type {
   AuthorityCommitLog,
   ProjectionCursor,
@@ -227,6 +229,13 @@ export class AnchorResourceGovernor
     admissionClass: AdmissionClass,
   ): Promise<void> {
     await this.#transact<void>((state) => {
+      const dequeued = state.dequeued.get(rootResourceWorkloadKey(workload));
+      if (dequeued !== undefined) {
+        throw new ImmediateRootReplayTerminalError({
+          kind: "dequeued",
+          reason: dequeued,
+        });
+      }
       const existing = state.queued.get(reservationId);
       if (existing !== undefined) {
         if (
@@ -410,6 +419,7 @@ export class AnchorResourceGovernor
           ),
       );
     } catch (error) {
+      if (error instanceof ImmediateRootReplayTerminalError) throw error;
       if (error instanceof ResourceAdmissionDeferredError) {
         await this.#dequeue(workload, "expired");
         throw new ResourceAdmissionExpiredError(reservationId);
@@ -418,6 +428,36 @@ export class AnchorResourceGovernor
       await this.#dequeue(workload, "failed");
       throw error;
     }
+  }
+
+  async inspectImmediateRoot(
+    workload: ImmediateRootWorkload,
+  ): Promise<ImmediateRootReservationInspection> {
+    assertResourceAdmissionRequest(workload);
+    const state = await this.#state();
+    const reservationId = immediateReservationId(workload);
+    const reservation = state.reservations.get(reservationId);
+    if (reservation) {
+      if (
+        reservation.depth !== 0 ||
+        reservation.lease.workload.kind !== "control" ||
+        canonicalize(reservation.lease.workload) !== canonicalize(workload)
+      ) {
+        throw new TypeError("Immediate resource inspection found a conflicting root");
+      }
+      return {
+        kind: "reservation",
+        state: reservation.state,
+        lease: structuredClone(reservation.lease as ImmediateRootResourceLease),
+      };
+    }
+    if (state.queued.has(reservationId)) {
+      return { kind: "queued", reservationId };
+    }
+    const dequeued = state.dequeued.get(rootResourceWorkloadKey(workload));
+    return dequeued === undefined
+      ? { kind: "absent" }
+      : { kind: "dequeued", reason: dequeued };
   }
 
   async acquireChild(
@@ -1047,10 +1087,14 @@ export class AnchorResourceGovernor
         ) {
           throw new TypeError("Immediate resource retry changed its frozen request");
         }
-        return {
-          kind: "return",
-          value: existing.lease as ImmediateRootResourceLease,
-        };
+        if (existing.state !== "active") {
+          throw new ImmediateRootReplayTerminalError({
+            kind: "reservation",
+            state: existing.state,
+            lease: structuredClone(existing.lease as ImmediateRootResourceLease),
+          });
+        }
+        return { kind: "return", value: existing.lease as ImmediateRootResourceLease };
       }
       if (state.queued.get(reservationId) !== admissionClass) {
         throw new TypeError("Immediate resource root is not durably queued");
@@ -1677,9 +1721,20 @@ function terminalDecision(
   ) {
     throw new TypeError("Resource terminal conflicts with its durable state");
   }
+  const conservativeUsage = kind === "settle"
+    ? conservativeUsageConsumptionRecords(
+        state,
+        current.depth === 0
+          ? { rootReservationIds: new Set([current.rootReservationId]) }
+          : { reservationIds: new Set([lease.reservationId]) },
+      )
+    : [];
   return {
     kind: "append",
-    entries: [governorRecord({ t: kind, reservationId: lease.reservationId })],
+    entries: [
+      ...conservativeUsage.map(governorRecord),
+      governorRecord({ t: kind, reservationId: lease.reservationId }),
+    ],
     value: undefined,
   };
 }

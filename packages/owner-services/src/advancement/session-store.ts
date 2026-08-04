@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   runReviewedEvents,
+  advancementReviewAttemptMutationId,
   type AdvancementControlEvent,
   type AdvancementEvidenceAttempt,
   type AdvancementEvidenceOutcome,
@@ -9,12 +10,14 @@ import {
   type AdvancementExit,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
+  type AdvancementReviewAttempt,
   type AdvancementSession,
   type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
 } from "@zhixing/core";
+import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type {
   AuthorityCallContext,
   SessionStatePort,
@@ -69,6 +72,12 @@ export interface AdvancementSessionStore {
     settlement: AdvancementEvidenceSettlement,
     timestamp?: string,
   ): Promise<AdvancementSession>;
+  transitionReviewAttempt(
+    conversationId: string,
+    sessionId: string,
+    attempt: AdvancementReviewAttempt,
+    timestamp?: string,
+  ): Promise<AdvancementSession>;
   appendRunReview(
     conversationId: string,
     sessionId: string,
@@ -76,6 +85,7 @@ export interface AdvancementSessionStore {
     timestamp?: string,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession>;
   appendTerminalRunReview(
     conversationId: string,
@@ -89,6 +99,7 @@ export interface AdvancementSessionStore {
     timestamp?: string,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession>;
   appendRunReviewWithProxyMessage(
     conversationId: string,
@@ -98,6 +109,7 @@ export interface AdvancementSessionStore {
     timestamp?: string,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession>;
   enqueueProxyMessage(
     conversationId: string,
@@ -253,7 +265,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
       { type: "evidence_requested", timestamp, sessionId, attempt },
-    ]);
+    ], stableEvidenceMutationId(attempt.reviewId, attempt.generation, `requested:${attempt.attempt}`));
   }
 
   async appendEvidenceResult(
@@ -265,7 +277,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
       { type: "evidence_result", timestamp, sessionId, requestId, outcome },
-    ]);
+    ], stableEvidenceMutationId(requestId, 1, `result:${protocolDigest("AdvancementEvidenceOutcome", 1, outcome)}`));
   }
 
   async settleEvidence(
@@ -277,7 +289,24 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
       { type: "evidence_settled", timestamp, sessionId, requestId, settlement },
-    ]);
+    ], stableEvidenceMutationId(requestId, 1, `settled:${settlement}`));
+  }
+
+  async transitionReviewAttempt(
+    conversationId: string,
+    sessionId: string,
+    attempt: AdvancementReviewAttempt,
+    timestamp = this.#now(),
+  ): Promise<AdvancementSession> {
+    return await this.#write(
+      conversationId,
+      [{ type: "review_attempt_transitioned", timestamp, sessionId, attempt }],
+      advancementReviewAttemptMutationId(
+        attempt.lineageId,
+        attempt.generation,
+        attempt.phase,
+      ),
+    );
   }
 
   async appendRunReview(
@@ -287,11 +316,23 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     timestamp = this.#now(),
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession> {
-    return await this.#write(conversationId, [
-      ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
-      ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
-    ]);
+    return await this.#write(
+      conversationId,
+      [
+        ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+        ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
+        ...reviewAttemptEvent(sessionId, reviewAttempt, timestamp),
+      ],
+      reviewAttempt
+        ? advancementReviewAttemptMutationId(
+            reviewAttempt.lineageId,
+            reviewAttempt.generation,
+            reviewAttempt.phase,
+          )
+        : undefined,
+    );
   }
 
   async appendTerminalRunReview(
@@ -306,17 +347,29 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     timestamp = review.reviewedAt,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession> {
-    return await this.#write(conversationId, [
-      ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
-      {
-        type: terminal.type,
-        timestamp: terminal.timestamp ?? terminal.exit.occurredAt,
-        sessionId,
-        exit: terminal.exit,
-      },
-      ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
-    ]);
+    return await this.#write(
+      conversationId,
+      [
+        ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+        ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
+        ...reviewAttemptEvent(sessionId, reviewAttempt, timestamp),
+        {
+          type: terminal.type,
+          timestamp: terminal.timestamp ?? terminal.exit.occurredAt,
+          sessionId,
+          exit: terminal.exit,
+        },
+      ],
+      reviewAttempt
+        ? advancementReviewAttemptMutationId(
+            reviewAttempt.lineageId,
+            reviewAttempt.generation,
+            reviewAttempt.phase,
+          )
+        : undefined,
+    );
   }
 
   async appendRunReviewWithProxyMessage(
@@ -327,17 +380,29 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     timestamp = review.reviewedAt,
     advancementWindow?: AdvancementWindowState,
     evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
   ): Promise<AdvancementSession> {
-    return await this.#write(conversationId, [
-      ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
-      {
-        type: "proxy_enqueued",
-        timestamp: proxyMessage.createdAt,
-        sessionId,
-        proxyMessage,
-      },
-      ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
-    ]);
+    return await this.#write(
+      conversationId,
+      [
+        ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+        ...evidenceSettlementEvent(sessionId, evidenceRequestId, timestamp),
+        ...reviewAttemptEvent(sessionId, reviewAttempt, timestamp),
+        {
+          type: "proxy_enqueued",
+          timestamp: proxyMessage.createdAt,
+          sessionId,
+          proxyMessage,
+        },
+      ],
+      reviewAttempt
+        ? advancementReviewAttemptMutationId(
+            reviewAttempt.lineageId,
+            reviewAttempt.generation,
+            reviewAttempt.phase,
+          )
+        : undefined,
+    );
   }
 
   async enqueueProxyMessage(
@@ -462,12 +527,26 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
   async #write(
     conversationId: string,
     events: readonly AdvancementControlEvent[],
+    requestId?: string,
   ): Promise<AdvancementSession> {
-    await this.#requirePort().mutate(
-      conversationId,
-      { kind: "advancement-event", events },
-      this.#ctx(this.#requestIdFor()),
-    );
+    try {
+      await this.#requirePort().mutate(
+        conversationId,
+        { kind: "advancement-event", events },
+        this.#ctx(requestId ?? this.#requestIdFor()),
+      );
+    } catch (error) {
+      if (requestId === undefined) throw error;
+      try {
+        const head = await this.#read(conversationId);
+        if (head && events.every((event) => advancementEventIsReflected(head, event))) {
+          return head;
+        }
+      } catch {
+        // The original mutation error remains the authoritative failure.
+      }
+      throw error;
+    }
     const head = await this.#read(conversationId);
     if (!head) {
       throw new Error("AdvancementStore: session disappeared after write");
@@ -482,6 +561,92 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     };
   }
+}
+
+function advancementEventIsReflected(
+  session: AdvancementSession,
+  event: AdvancementControlEvent,
+): boolean {
+  if (event.sessionId !== session.id) return false;
+  switch (event.type) {
+    case "review_attempt_transitioned": {
+      const current = session.reviewAttempts?.find(
+        (attempt) => attempt.lineageId === event.attempt.lineageId,
+      );
+      return current !== undefined && canonicalEqual(current, event.attempt);
+    }
+    case "run_reviewed":
+      return session.runs.some(
+        (review) => review.id === event.review.id && canonicalEqual(review, event.review),
+      );
+    case "window_updated":
+      return canonicalEqual(session.advancementWindow, event.advancementWindow);
+    case "evidence_requested": {
+      const pending = session.evidence?.pending.find(
+        (attempt) => attempt.requestId === event.attempt.requestId,
+      );
+      if (pending && canonicalEqual(pending, event.attempt)) return true;
+      const generation = session.evidence?.generations?.find(
+        (entry) =>
+          entry.reviewId === event.attempt.reviewId &&
+          entry.generation === event.attempt.generation,
+      );
+      return (generation?.lastAttempt ?? 0) >= event.attempt.attempt;
+    }
+    case "evidence_result": {
+      const pending = session.evidence?.pending.find(
+        (attempt) => attempt.requestId === event.requestId,
+      );
+      return pending?.outcome !== undefined && canonicalEqual(pending.outcome, event.outcome);
+    }
+    case "evidence_settled":
+      return !session.evidence?.pending.some(
+        (attempt) => attempt.requestId === event.requestId,
+      );
+    case "proxy_enqueued":
+      return session.proxyMessages.some(
+        (message) =>
+          message.id === event.proxyMessage.id &&
+          canonicalEqual(message, event.proxyMessage),
+      );
+    case "completed":
+      return session.status === "completed" && canonicalEqual(session.exit, event.exit);
+    case "exited":
+      return session.status === "exited" && canonicalEqual(session.exit, event.exit);
+    default:
+      return false;
+  }
+}
+
+function canonicalEqual(left: unknown, right: unknown): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  try {
+    return canonicalize(left) === canonicalize(right);
+  } catch {
+    return false;
+  }
+}
+
+function reviewAttemptEvent(
+  sessionId: string,
+  attempt: AdvancementReviewAttempt | undefined,
+  timestamp: string,
+): AdvancementControlEvent[] {
+  return attempt
+    ? [{ type: "review_attempt_transitioned", timestamp, sessionId, attempt }]
+    : [];
+}
+
+function stableEvidenceMutationId(
+  identity: string,
+  generation: number,
+  transition: string,
+): string {
+  return `adv-evidence-mutation:${protocolDigest("AdvancementEvidenceMutation", 1, {
+    identity,
+    generation,
+    transition,
+  }).slice("sha256:".length)}`;
 }
 
 function evidenceSettlementEvent(

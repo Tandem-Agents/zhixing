@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   advancementHeadSession,
+  advancementReviewAttemptId,
+  advancementReviewLineageId,
   applyAdvancementEvent,
   assertAdvancementEventBatchLegal,
   freezeAdvancementSessions,
@@ -9,6 +11,7 @@ import {
   type AdvancementFoldMap,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
+  type AdvancementReviewAttempt,
   type ConfirmedRubricSnapshot,
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
@@ -32,6 +35,7 @@ const NOW = "2026-08-02T00:00:00.000Z";
 function createFakePort() {
   const folds = new Map<string, AdvancementFoldMap>();
   const writes: Array<{ conversationId: string; events: readonly AdvancementControlEvent[] }> = [];
+  let failNextResponse = false;
   const port: SessionStatePort = {
     async readAdvancementState(conversationId) {
       const fold = folds.get(conversationId) ?? new Map();
@@ -52,6 +56,10 @@ function createFakePort() {
       }
       folds.set(conversationId, fold);
       writes.push({ conversationId, events: mutation.events });
+      if (failNextResponse) {
+        failNextResponse = false;
+        throw new Error("simulated committed response loss");
+      }
       return { revision: writes.length };
     },
     readSessionMeta() {
@@ -64,7 +72,13 @@ function createFakePort() {
       throw new Error("unimplemented");
     },
   };
-  return { port, writes };
+  return {
+    port,
+    writes,
+    failNextResponse() {
+      failNextResponse = true;
+    },
+  };
 }
 
 function task(text: string): UserTurnInput {
@@ -173,11 +187,59 @@ function exit(reason: AdvancementExit["reason"]): AdvancementExit {
   return { reason, message: "收场", occurredAt: NOW };
 }
 
-function makeStore(): { store: AdvancementSessionStore; writes: unknown[] } {
-  const { port, writes } = createFakePort();
+function makeStore(): {
+  store: AdvancementSessionStore;
+  writes: unknown[];
+  failNextResponse(): void;
+} {
+  const { port, writes, failNextResponse } = createFakePort();
   return {
     store: new SessionAdvancementStore({ port: () => port, now: () => NOW }),
     writes,
+    failNextResponse,
+  };
+}
+
+function reviewAttempt(
+  phase: AdvancementReviewAttempt["phase"],
+): AdvancementReviewAttempt {
+  const runRecordRef = { shardId: "shard-1", runIndex: 0 };
+  const lineageId = advancementReviewLineageId("session-1", runRecordRef);
+  const id = advancementReviewAttemptId(lineageId, 1);
+  const root = {
+    workload: { kind: "control" as const, id, attempt: 1 },
+    budget: { maxCalls: 8, maxTokens: 300_000 },
+    requestId: `advancement-review-root:${id}`,
+  };
+  const unsignedLease = {
+    v: 1 as const,
+    reservationId: `reservation:${id}`,
+    admissionClass: "advancement" as const,
+    workload: root.workload,
+    scopeBinding: { kind: "control" as const, subject: id },
+    audience: { executorId: "executor-1" },
+    budget: root.budget,
+    domain: { kind: "anchor" as const, anchorEpoch: 1 },
+    issuedAt: NOW,
+    expiry: "2026-08-02T01:00:00.000Z",
+  };
+  return {
+    lineageId,
+    generation: 1,
+    runId: "accepted-run:shard-1:0",
+    runIndex: 0,
+    runRecordRef,
+    phase,
+    root,
+    ...(phase === "started"
+      ? {}
+      : {
+          rootLease: {
+            ...unsignedLease,
+            digest: protocolDigest("ResourceLease", 1, unsignedLease),
+            signature: { alg: "test", keyId: "test", sig: "test" },
+          },
+        }),
   };
 }
 
@@ -260,6 +322,56 @@ describe("SessionAdvancementStore", () => {
       "run_reviewed",
       "completed",
     ]);
+  });
+
+  it("稳定 review-attempt 写在提交响应丢失后以权威投影确认", async () => {
+    const { store, failNextResponse } = makeStore();
+    await store.createSession(createInput());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
+
+    const started = reviewAttempt("started");
+    failNextResponse();
+    const afterStarted = await store.transitionReviewAttempt(
+      "conv-1",
+      "session-1",
+      started,
+    );
+    expect(afterStarted.reviewAttempts?.[0]?.phase).toBe("started");
+
+    const invoking = reviewAttempt("invoking");
+    failNextResponse();
+    const afterInvoking = await store.transitionReviewAttempt(
+      "conv-1",
+      "session-1",
+      invoking,
+    );
+    expect(afterInvoking.reviewAttempts?.[0]?.phase).toBe("invoking");
+
+    const consumed = reviewAttempt("consumed");
+    failNextResponse();
+    const completed = await store.appendTerminalRunReview(
+      "conv-1",
+      "session-1",
+      review({
+        decision: "passed",
+        unmetCriteria: [],
+        selectedFailureHandlingId: undefined,
+        proxyMessageId: undefined,
+        runRecordRef: { shardId: "shard-1", runIndex: 0 },
+      }),
+      { type: "completed", exit: exit("passed") },
+      NOW,
+      undefined,
+      undefined,
+      consumed,
+    );
+    expect(completed.status).toBe("completed");
+    expect(completed.reviewAttempts?.[0]?.phase).toBe("consumed");
   });
 
   it("settle 幂等早退：已结算的 proxy 不再产生写入", async () => {

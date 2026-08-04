@@ -1,6 +1,13 @@
-import type { ProtocolSignatureVerifier } from "../../protocol/index.js";
+import {
+  protocolDigest,
+  type ProtocolSignatureVerifier,
+} from "../../protocol/index.js";
 import { describe, expect, it } from "vitest";
 import { isAdvancementControlEvent } from "../event-codec.js";
+import {
+  advancementReviewAttemptId,
+  advancementReviewLineageId,
+} from "../review-attempt-identity.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const verifier: ProtocolSignatureVerifier = { verify() {} };
@@ -95,7 +102,71 @@ describe("isAdvancementControlEvent", () => {
       },
     }, verifier)).toBe(false);
   });
+
+  it("accepts closed review-attempt phases and rejects lease/root drift", () => {
+    const started = reviewAttemptEvent("started");
+    const invoking = reviewAttemptEvent("invoking");
+    expect(isAdvancementControlEvent(started, verifier)).toBe(true);
+    expect(isAdvancementControlEvent(invoking, verifier)).toBe(true);
+    expect(isAdvancementControlEvent({
+      ...invoking,
+      attempt: {
+        ...invoking.attempt,
+        rootLease: {
+          ...invoking.attempt.rootLease,
+          budget: { maxCalls: 7, maxTokens: 300_000 },
+        },
+      },
+    }, verifier)).toBe(false);
+    expect(isAdvancementControlEvent({
+      ...started,
+      attempt: { ...started.attempt, unknown: true },
+    }, verifier)).toBe(false);
+  });
 });
+
+function reviewAttemptEvent(phase: "started" | "invoking") {
+  const runRecordRef = { shardId: "shard-1", runIndex: 0 };
+  const lineageId = advancementReviewLineageId("session-1", runRecordRef);
+  const id = advancementReviewAttemptId(lineageId, 1);
+  const root = {
+    workload: { kind: "control" as const, id, attempt: 1 },
+    budget: { maxCalls: 8, maxTokens: 300_000 },
+    requestId: `advancement-review-root:${id}`,
+  };
+  const unsignedLease = {
+    v: 1 as const,
+    reservationId: `reservation:${id}`,
+    admissionClass: "advancement" as const,
+    workload: root.workload,
+    scopeBinding: { kind: "control" as const, subject: id },
+    audience: { executorId: "executor-1" },
+    budget: root.budget,
+    domain: { kind: "anchor" as const, anchorEpoch: 1 },
+    issuedAt: "2026-08-04T00:00:00.000Z",
+    expiry: "2026-08-04T01:00:00.000Z",
+  };
+  const rootLease = {
+    ...unsignedLease,
+    digest: protocolDigest("ResourceLease", 1, unsignedLease),
+    signature: { alg: "test", keyId: "test", sig: "test" },
+  };
+  return {
+    type: "review_attempt_transitioned" as const,
+    timestamp: NOW,
+    sessionId: "session-1",
+    attempt: {
+      lineageId,
+      generation: 1,
+      runId: "accepted-run:shard-1:0",
+      runIndex: 0,
+      runRecordRef,
+      phase,
+      root,
+      ...(phase === "invoking" ? { rootLease } : {}),
+    },
+  };
+}
 
 function reviewed() {
   return {

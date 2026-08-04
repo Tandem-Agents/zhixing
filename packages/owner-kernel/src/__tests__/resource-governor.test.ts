@@ -10,6 +10,7 @@ import type {
   Signature,
   UsageReport,
 } from "@zhixing/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import {
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
@@ -65,7 +66,7 @@ describe("AnchorResourceGovernor", () => {
       { kind: "run", id: "run-cancelled", attempt: 1 },
       { admissionClass: "interactive", entry: "conversation-input" },
       hostContext,
-    )).rejects.toThrow("Dequeued");
+    )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
   it("keeps candidate signing side-effect free and atomically rechecks activation", async () => {
@@ -292,6 +293,57 @@ describe("AnchorResourceGovernor", () => {
       hostContext,
     )).resolves.toEqual(lease);
     expect(await fixture.log.readAll()).toHaveLength(recordCount);
+    await expect(fixture.governor.inspectImmediateRoot(workload)).resolves.toEqual({
+      kind: "reservation",
+      state: "active",
+      lease,
+    });
+    await fixture.governor.settle(lease, hostContext);
+    await fixture.governor.release(lease, hostContext);
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toEqual({
+      kind: "reservation",
+      state: "released",
+      lease,
+    });
+    await expect(fixture.restart().acquireRoot(
+      workload,
+      { maxCalls: 1 },
+      origin,
+      hostContext,
+    )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
+  });
+
+  it("conservatively consumes unfinished metered usage when settling a control root", async () => {
+    const fixture = await createHarness();
+    const workload = { kind: "control", id: "control-unfinished-usage", attempt: 1 } as const;
+    const lease = await fixture.governor.acquireRoot(
+      workload,
+      { maxCalls: 1, maxTokens: 100 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      hostContext,
+    );
+    await fixture.governor.reserveUsage(
+      lease,
+      { usageId: "usage:control-unfinished-usage:1", calls: 1, tokens: 100 },
+      hostContext,
+    );
+
+    await expect(fixture.governor.settle(lease, hostContext)).resolves.toBeUndefined();
+    await expect(fixture.governor.release(lease, hostContext)).resolves.toBeUndefined();
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toMatchObject({
+      kind: "reservation",
+      state: "released",
+    });
+
+    const records = (await fixture.log.readAll())
+      .flatMap((envelope) => envelope.entries)
+      .map((entry) => entry.body as { t?: string; usageId?: string });
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        t: "consume",
+        usageId: "usage:control-unfinished-usage:1",
+      }),
+    ]));
   });
 
   it("rejects invalid admission requests before any queue side-effect", async () => {
@@ -357,6 +409,17 @@ describe("AnchorResourceGovernor", () => {
       .map((entry) => (entry.body as { t?: string }).t ?? "")
       .filter((t) => t === "queued" || t === "dequeue");
     expect(records).toEqual(["queued", "dequeue"]);
+    const workload = { kind: "control", id: "control-expired", attempt: 1 } as const;
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toMatchObject({
+      kind: "dequeued",
+      reason: "expired",
+    });
+    await expect(fixture.restart().acquireRoot(
+      workload,
+      { maxCalls: 1 },
+      { admissionClass: "interactive", entry: "conversation-input" },
+      hostContext,
+    )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
   it("rejects polluted governor records during authoritative replay", async () => {

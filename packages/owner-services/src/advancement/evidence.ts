@@ -45,6 +45,11 @@ export interface AdvancementEvidenceTarget {
   readonly descriptor: CapabilityDescriptor;
 }
 
+export type AdvancementEvidenceRootTarget = Pick<
+  AdvancementEvidenceTarget,
+  "executorId" | "ownerEpoch"
+>;
+
 export interface AdvancementEvidenceCoordinatorOptions {
   readonly store: AdvancementSessionStore;
   readonly resources: ResourceReservationPort;
@@ -108,10 +113,56 @@ export class AdvancementEvidenceCoordinator {
     return { ...target, descriptor };
   }
 
+  carriedOutcomeRootTarget(
+    session: AdvancementSession,
+    runId: string,
+  ): AdvancementEvidenceRootTarget | undefined {
+    const carried = session.evidence?.pending.find(
+      (pending) =>
+        pending.request.runId === runId &&
+        (pending.outcome?.kind === "bundle" ||
+          pending.outcome?.kind === "capability-gap"),
+    );
+    return carried
+      ? {
+          executorId: carried.request.executorId,
+          ownerEpoch: carried.request.ownerEpoch,
+        }
+      : undefined;
+  }
+
   async collect(
     input: AdvancementEvidenceReviewInput,
   ): Promise<AdvancementEvidenceReviewResult> {
     const baseline = conversationEvidence(input.runRecord, input.session.confirmedRubric);
+    let carried = input.session.evidence?.pending.find(
+      (pending) => pending.request.runId === input.runId,
+    );
+    if (carried?.outcome?.kind === "capability-gap") {
+      return { canonicalEvidence: baseline, requestId: carried.requestId };
+    }
+    if (carried?.outcome?.kind === "bundle") {
+      return {
+        canonicalEvidence: [
+          ...baseline,
+          ...canonicalBundleEvidence(
+            carried.request,
+            carried.itemRequirements,
+            carried.outcome.bundle,
+          ),
+        ],
+        requestId: carried.requestId,
+      };
+    }
+    if (carried?.outcome?.kind === "typed-stale") {
+      await this.#options.store.settleEvidence(
+        input.session.conversationId,
+        input.session.id,
+        carried.requestId,
+        "deferred",
+      );
+      carried = undefined;
+    }
     const rubric = input.session.confirmedRubric;
     const target = input.target;
     const workspace = target?.workspace;
@@ -142,17 +193,12 @@ export class AdvancementEvidenceCoordinator {
     for (let offset = 0; offset <= MAX_STALE_RETRIES; offset += 1) {
       input.abort.throwIfAborted();
       const attempt = 1 + offset;
-      const carried =
-        offset === 0
-          ? input.session.evidence?.pending.find(
-              (pending) => pending.request.runId === input.runId,
-            )
-          : undefined;
+      const currentCarried = offset === 0 ? carried : undefined;
       let requestId =
-        carried?.requestId ??
+        currentCarried?.requestId ??
         advancementEvidenceRequestId(input.reviewId, generation, attempt);
       let existing =
-        carried ??
+        currentCarried ??
         input.session.evidence?.pending.find(
           (pending) => pending.requestId === requestId,
         );

@@ -1,4 +1,5 @@
 import type {
+  AdvancementEvidenceOutcome,
   AdvancementSession,
   ConfirmedRubricSnapshot,
   RunRecordInput,
@@ -173,6 +174,54 @@ describe("AdvancementEvidenceCoordinator", () => {
     expect(result.canonicalEvidence.some((item) => item.source === "independent")).toBe(false);
   });
 
+  it("reuses a carried capability gap before consulting a changed target", async () => {
+    const calls: string[] = [];
+    const carried = pendingOutcomeSession({ kind: "capability-gap" });
+    const coordinator = makeCoordinator({
+      store: storeRecording(calls),
+      resources: resourcesRecording(calls),
+      target: targetWithoutWorkspace(),
+      collect: async () => {
+        calls.push("transport");
+        throw new Error("durable capability gap must not be dispatched");
+      },
+    });
+
+    const result = await coordinator.collect(reviewInput({
+      session: carried.session,
+      generation: 2,
+      rootLease: rootLease("review-root-new"),
+      target: targetWithoutWorkspace(),
+    }));
+
+    expect(result.requestId).toBe(carried.request.requestId);
+    expect(result.canonicalEvidence.some((item) => item.source === "independent")).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("settles a carried stale outcome before creating a fresh request for the current target", async () => {
+    const calls: string[] = [];
+    const carried = pendingOutcomeSession({ kind: "typed-stale" });
+    const coordinator = makeCoordinator({
+      store: storeRecording(calls),
+      resources: resourcesRecording(calls),
+      collect: async () => {
+        calls.push("transport");
+        return { kind: "capability-gap" };
+      },
+    });
+
+    const result = await coordinator.collect(reviewInput({
+      session: carried.session,
+      generation: 2,
+      rootLease: rootLease("review-root-new"),
+    }));
+
+    expect(result.requestId).not.toBe(carried.request.requestId);
+    expect(calls[0]).toBe("evidence-deferred");
+    expect(calls).toContain("transport");
+  });
+
   it("finishes a child lease when the durable request write fails before dispatch handoff", async () => {
     const calls: string[] = [];
     const store = storeRecording(calls);
@@ -263,6 +312,7 @@ describe("AdvancementEvidenceCoordinator", () => {
     const coordinator = makeCoordinator({
       store: storeRecording(calls),
       resources: resourcesRecording(calls),
+      target: targetWithoutWorkspace(),
       collect: async () => {
         calls.push("transport");
         throw new Error("durable outcome must not be dispatched");
@@ -273,6 +323,7 @@ describe("AdvancementEvidenceCoordinator", () => {
       session: pendingSession,
       generation: 2,
       rootLease: rootLease("review-root-new"),
+      target: targetWithoutWorkspace(),
     }));
 
     expect(result.requestId).toBe(requestId);
@@ -327,6 +378,7 @@ function resourcesRecording(calls: string[]): ResourceReservationPort {
     prepareAssignmentRoot: async () => { throw new Error("unused"); },
     prepareSystemJobRoot: async () => { throw new Error("unused"); },
     acquireRoot: async () => rootLease(),
+    inspectImmediateRoot: async () => ({ kind: "absent" }),
     acquireChild: async (parent, workload) => {
       calls.push("acquire-child");
       return childLease(parent, workload.id, workload.attempt);
@@ -335,6 +387,52 @@ function resourcesRecording(calls: string[]): ResourceReservationPort {
     consume: async () => { calls.push("consume"); },
     settle: async (lease) => { calls.push(lease.parentId ? "child-settle" : "root-settle"); },
     release: async (lease) => { calls.push(lease.parentId ? "child-release" : "root-release"); },
+  };
+}
+
+function pendingOutcomeSession(outcome: AdvancementEvidenceOutcome): {
+  session: AdvancementSession;
+  request: EvidenceRequest;
+} {
+  const requestId = "evidence:carried-outcome";
+  const request = createSignedEvidenceRequest(
+    {
+      v: 1,
+      requestId,
+      reviewId: "review-1",
+      runId: "run-1",
+      conversationId: "conversation-1",
+      ownerEpoch: 3,
+      executorId: "executor-1",
+      workspace: { bindingRef: "workspace-1", workspaceBindingRevision: 7 },
+      items: [{ kind: "log", locator: { paths: ["logs/run.log"] } }],
+      lease: childLease(rootLease("review-root-old"), requestId, 1),
+      issuedAt: NOW,
+      expiry: EXPIRY,
+    },
+    identity,
+    identity,
+  );
+  return {
+    request,
+    session: {
+      ...session(),
+      evidence: {
+        pending: [{
+          requestId,
+          reviewId: "review-1",
+          generation: 1,
+          attempt: 1,
+          request,
+          requestDigest: evidenceRequestDigest(request),
+          itemRequirements: [{ itemIndex: 0, requirementIds: ["required-log"] }],
+          outcome,
+        }],
+        generations: [
+          { runId: "run-1", reviewId: "review-1", generation: 1, lastAttempt: 1 },
+        ],
+      },
+    },
   };
 }
 

@@ -167,22 +167,22 @@
 #### 目标模式：审查并收敛问题列表
 
 ```
-目标：只收敛第 27 单元正式问题列表中的 U27-01～U27-05 五个 P1 和 U27-06～U27-09 四个 P2，使每项都真正命中根因，并具备可由执行者直接实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题。
+目标：只收敛第 27 单元正式问题列表中同根重开的 U27-04，确认其真正命中“终态 evidence 快路径与 review-attempt 租约代际脱节”的根因，并形成可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U27-01～U27-03、U27-05～U27-09 的既有结论直接复用。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 27 单元正式文件中的 U27-01～U27-09，只依据正式文件的耐久状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 27 单元正式文件中的 U27-04，只依据该问题最新的事实、价值裁决、方案、验收条件、反证账和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词完成条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 按 `U27-01 → U27-02 → U27-03 → U27-04 → U27-05 → U27-06 → U27-07 → U27-08 → U27-09` 逐项重建事实链，判断当前描述是根本原因还是表象，并核准事实证据、完整影响面、受影响审查项、评级和工作量；同根内容必须合并，独立根因不得相互遮蔽。
-2. 以“首席产品官 + 乔布斯”直觉和最优架构标准审查方案：从唯一所有权、单一事实源、线性化点、恢复机制和真实产品体验根治，不得逐点打补丁、制造第二语义或留下已知债务。
-3. 每项方案必须用最少文字说清改什么、怎么改、关键边界及完成判据，让执行者无需实现猜测即可一次完成。发现缺口时直接修正原问题行，只复审变化项及受其影响的结论。
-4. 九项均看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：Rubric 草案与确认—准入恢复；accepted-run 连续验收与 evidence generation/租约收敛；取证路径真实性与事件防御边界；子租约清理、保存反馈与启动恢复。重点核查 `U27-02↔U27-08`、`U27-03↔U27-09`、`U27-04↔U27-06`、`U27-05↔U27-07` 的直接交界。各路不得沿用前轮结论；发现反证则修正原问题并重新复审。
+1. 抛开 U27-04 的旧验证结论，从权威架构、规格和当前生产调用图独立重建完整失败链：既有终态 evidence → 新 review generation/root 获取 → coordinator 复用终态 bundle 且不写新 `evidence_requested` → reviewer deferred/throw 或 review 落盘/响应丢失 → root settle/release → 重启恢复仍计算同一 generation → governor 回放已终态 root → `resourceMeter.reserveUsage` 拒绝。逐点核准可达性、源码证据、当前损失、受影响审查项、P1 评级和中工作量；价值裁决未被新生产事实触发重开时不得恢复已否定的扩面方案。
+2. 对照正常 evidence 请求路径与终态 bundle 快路径，枚举获取响应丢失、reviewer deferred/throw、review 提交前后崩溃或响应丢失、连续两次恢复、root 过期回收、并发恢复和成功路径。每格必须能唯一指出 owner、耐久事实、稳定身份、线性化顺序、pending/terminal 判据和重驱入口；无法解释即说明当前根因仍是表象。
+3. 以锁定范围内的最优架构审查方案：复用同一 advancement owner 日志，耐久记录严格前进的 review-attempt generation 与 started/deferred/consumed/expired 终态；pending attempt 只回放同一 root，terminal 或 expired attempt 先幂等收完旧 root 再进入下一代，成功时 review、evidence settlement 与 consumed 同批提交，终态 evidence 只复用不得重派。必须证明 owner 终态前不可 release、每代只有一个 root、拒绝与恢复可收敛；不得使用随机身份、复活终态租约或扩建通用 operation/outbox。发现缺口时直接修正 U27-04 原记录，使执行者无需猜测即可实施。
+4. U27-04 看似闭合后，对同一份未修改记录执行四路冷启动对抗复审：owner 日志与线性化顺序、governor/root 生命周期与计量 reviewer、崩溃恢复与幂等并发、范围价值与产品后果。各路必须抛开前轮结论，从当前合同与源码主动构造第 2 步的反例并双向对账；只核查 U27-04 与子租约交接的直接边界，不得借机重审其他问题。发现真实反证则修正原记录并重新执行四路复审。
 
 只有现有架构无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或单元边界时才暂停；其余架构选择按整体最优且不留债务自主收敛。
 
-完成条件：同一份未修改问题列表通过四路冷启动对抗复审；九项事实均被根因完整解释，影响面无遗漏，最优方案和验收条件可直接执行，不会再因同根残留导致局部返工。满足后明确回复“九项当前问题的根因与最优方案已闭合”并立即停止。
+完成条件：同一份未修改的 U27-04 记录通过四路冷启动对抗复审；全部已知失败时序及同根直接变体均被根因解释，并映射到唯一 owner、耐久代际、重驱机制和确定终态；方案与验收条件可直接执行，不会再因终态 evidence 快路径的同根残留返工。满足后明确回复“U27-04 的根因与最优方案已闭合”并立即停止。
 ```
 
 ### 2.6 识别开发阶段遗漏
@@ -225,21 +225,21 @@
 ### 2.9 目标模式：解决问题并完成多角色对抗收口
 
 ```text
-目标：彻底解决第 27 单元 U27-01～U27-05 五个 P1 和 U27-06～U27-09 四个 P2，闭合其当前登记事实及同根残留；不得扩展到其他问题或全单元流程。
+目标：彻底解决第 27 单元同根重开的 U27-04，闭合其当前登记事实、C27-19～C27-23 及同根直接变体；不得扩展到其他问题或全单元流程，U27-01～U27-03、U27-05～U27-09 的既有结论直接复用。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 27 单元正式文件中的 U27-01～U27-09，只依据正式文件的最新根因、价值裁决、方案、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 27 单元正式文件中的 U27-04、其固定矩阵、反证账和 L27-01，只依据正式文件的最新根因、价值裁决、方案、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词结束条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 修复前先抛开现有问题描述和验收条件，从权威架构、规格与当前生产调用图反向推导九项必须闭合的完整功能链、状态组合和交界，形成固定核查矩阵；每项至少明确生产入口、唯一 owner、耐久事实与线性化点、消费终态、重试/崩溃恢复、生产装配和直接交界，并绑定当前源码事实。按依赖顺序 `U27-01 → U27-02 → U27-08 → U27-03 → U27-09 → U27-04 → U27-06 → U27-05 → U27-07` 完成确认内容守卫、确认—准入耐久义务与保存反馈、accepted-run 连续验收与启动恢复、evidence generation 与子租约交接、取证路径真实性与事件防御边界，并同步正式问题要求的架构、规格及直接相关测试。同根残留并入原问题，禁止新增表象问题或逐点打补丁；不得扩建通用 operation/outbox、第二任务事实源、通用事件总线、通知系统、监控、诊断、benchmark 或信息采集设施。每项和每个阶段完成时立即更新正式文件的状态与证据，续跑只恢复未完成部分。
-2. 按验证手册运行受影响包的必要测试；失败先归因，实现问题直接修复并回到第 1 步。不得新增或运行非必要 benchmark、信息采集或与九项验收无关的验证设施。
-3. 记录并冻结当前交付物指纹，按第 1 步矩阵逐格从当前架构和源码重建事实链；矩阵必须覆盖九项完整功能链、各自全部验收条件，以及 `U27-02↔U27-08` 的确认、原任务耐久准入与可选全局保存，`U27-03↔U27-09` 的连续验收与坏会话隔离，`U27-04↔U27-06` 的 generation、租约代际与局部所有权交接，`U27-05↔U27-07` 的真实取证与事件写入/重放防御。测试通过不得代替功能判断；整轮只读且不得因发现残留提前结束，矩阵全部完成后才统一归并。
-4. 专项功能审查通过后，对该指纹执行四个相互隔离的冷启动对抗角色：Rubric 草案与确认—准入恢复、accepted-run 连续验收与 evidence generation/租约收敛、取证路径真实性与事件防御边界、子租约清理与保存反馈及启动恢复。每个角色都必须抛开已有问题描述、验收条件、实现说明、测试结果和其他角色结论，先独立从权威合同与当前源码推导应有闭包，再与固定矩阵双向对账，并完整覆盖九项及其交界；每项都须主动构造适用的重复、错绑、半提交、暂态/结果不明、断线/停机、崩溃恢复、路径替换、代际竞争和装配缺失反例，不适用者写明源码事实。每完成一格立即把事实链、反例和结论耐久写入正式文件后才能继续；未落盘、漏项、只审角色擅长分区、沿用既有范围或缺少事实证据的“无问题”均不计完成。
-5. 所有发现首次出现时立即以稳定编号写入反证账，不得等整轮结束或依赖对话记忆。每轮机械取专项审查、四路记录及历轮反证的并集，并在收口前对各轮、各角色结果执行差异审计：任何曾出现而本轮未出现的发现，都必须逐条标明“同根合并”“当前源码证伪”或“修复后复核通过”及证据；不得因后一次发现更少、用户重发提示词或多数角色未发现而消失。发现真实反证时，先扩充固定矩阵并修正对应原问题的事实、根因、影响面、最优方案和验收条件，再将受影响项退回“待验证”并回到第 1 步；不得直接形成局部补丁。任何交付物修改都会使指纹、核查矩阵和四路对抗结论全部失效，必须在受影响包测试完成后重新执行。
+1. 修复前从权威架构、规格与当前生产调用图重建 U27-04 固定矩阵，逐格核准 `started → invoking → consumed/deferred/expired → root cleanup` 的唯一 owner、稳定身份、线性化顺序与重驱入口；覆盖无 evidence、carried bundle/capability-gap/typed-stale/pending、target 漂移、acquire 响应不明、reviewer 调用及 usage reserve/consume 后崩溃、review 写与响应丢失、review/session 终态后清理前崩溃、到期/回收、并发、旧状态升级和连续恢复。
+2. 按正式方案一次完成：core 事件/codec/guard/reducer；稳定 owner mutation 身份；controller per-run 单飞与 review-attempt 状态机；carried outcome 先于 fresh target 门；active/出队/终态 root 的稳定分类；invoking 后禁止同根 provider 重跑；review 与 consumed 原子提交；attempt 清理先于 reviewed/not-active/closed 早退；同步权威架构、规格及直接相关测试。同根残留并入 U27-04，禁止逐点补分支、随机重试身份、复活终态租约或扩建通用 operation/outbox、监控、诊断、benchmark 和信息采集设施。每个实质阶段完成后立即更新正式状态与证据。
+3. 按验证手册运行受影响包的最小必要测试；必须使用真实 governor 与生产 metered reviewer 覆盖固定矩阵。失败先归因，实现问题直接修复并回到第 2 步；不得运行与 U27-04 无关的全单元验证。
+4. 测试通过后冻结当前交付物指纹，整轮只读地逐格重建 U27-04 事实链；测试通过不得代替功能判断，全部矩阵完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：owner 日志与线性化顺序、governor/root 生命周期与计量 reviewer、崩溃恢复与幂等并发、范围价值与产品后果。各角色须抛开既有结论，主动重造全部适用反例并与矩阵双向对账。
+5. 新发现首次出现即以稳定编号写入反证账；收口前对 C27-19～C27-23、专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正 U27-04 的根因、方案、验收和矩阵，再回到第 2 步；任何交付物修改都会使冻结指纹与对抗结论失效。
 
-结束条件：同一冻结指纹上的 U27-01～U27-09 九项方案全部落地，受影响包测试通过，专项功能审查和四路冷启动对抗角色均留下完整、可归并的核查矩阵；差异审计无未处置发现，累计反证全部有耐久记录并被当前源码事实证伪或修复后复核通过；九项均已更新为“已验证”。满足后明确报告“九项问题已彻底解决”并立即停止；不得进入全单元终审或最终验证。
+结束条件：同一冻结指纹上的 U27-04 方案全部落地，受影响包测试通过，专项功能审查与四路冷启动对抗均留下完整矩阵；C27-19～C27-23 及新增同根反证全部有耐久处置，证明每代恰一 root/调用者、invoking 后零同根 provider 重跑、terminal evidence 零重复 dispatch、owner 终态先于 root 终态、closed session 零遗留 active root，provider 恢复后最终恰一全等 review；U27-04 已更新为“已验证”。满足后明确报告“U27-04 已彻底解决”并立即停止；不得进入全单元终审或最终验证。
 ```
 
 ## 审查清单
@@ -248,13 +248,13 @@
 
 - **当前单元**：第 27 单元 · generation 1
 - **架构来源**：分布式运行时总纲与可执行规格；任务推进闭环架构与 Rubric 协议；运行体生命周期、对话/接入面、确认交互、注意力窗口与 workscene 直接上下游合同；持续在线/本地执行与 S2 安全供应链约束；第 14、15A、15B、18、20、23、25、26 单元冻结合同、适用排除项与迟发现教训；第 27 单元定稿开发清单
-- **交付基线**：HEAD `d4cce198` 至当前完整工作区的 85 个非工作台路径，删除 0；CLI 22、core 23、orchestrator 11、owner-kernel 9、owner-services 9、rpc 1、server 8、架构与规格 2
-- **交付指纹**：`git-delivery-manifest-v1:9df97c419e0898708bbc81252d8791c90e9b91a0c72ee5c683983a8e8e373144`；路径集 SHA-256 为 `5673c4238b492011e353aa6bfc8678bf79cdffc1e3086c0d36b3830af6ddf2f3`；指纹只作范围证据，不建立为审查项
+- **交付基线**：HEAD `d4cce198` 至当前完整工作区的 91 个非工作台路径，删除 0；CLI 23、core 25、executor 2、orchestrator 11、owner-kernel 10、owner-services 9、rpc 1、server 8、架构与规格 2
+- **交付指纹**：`git-delivery-manifest-v1:5ed32cbeecd82cd741690d71859be6c78e89edaf68417daa922c00bab00d915a`；路径集 SHA-256 为 `16db2a4b7a8a583896c650e2ec5fc14462dad8ebb89b9ee0cc343150f3b30402`；指纹只作范围证据，不建立为审查项
 - **目标提交边界**：第 27 单元（S7）advancement 与独立取证的生产实现、直接相关测试，以及同步修订的推进架构与分布式运行时规格
-- **当前任务进度**：36%（16 / 45 项保持完成；16 项 [x]、29 项 [~]）
+- **当前任务进度**：100%（45 / 45 项完成；45 项 [x]、0 项 [~]）
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论
 
-> **清单状态**：U27-01～U27-09 已在正式文件中更新为“已验证”。根据修复的真实变更范围，29 个受影响审查项已改为 `[~]` 且旧证据失效；16 个可证明未受影响的 `[x]` 保持不变。下方临时问题区仍为空，下一步只审查 `[~]` 项。
+> **清单状态**：独立审查通过。U27-01～U27-09 已在正式文件中更新为“已验证”；本轮对 29 个受影响项完成当前源码重审，原 16 个可证明登记输入未变化的 `[x]` 继续复用。45 项全部为 `[x]`，P0/P1 与非阻断临时问题列表均为空。
 
 ### 来源覆盖
 
@@ -285,7 +285,7 @@
 | specification.md §3.6～§3.7 | 部分适用 | 被审 accepted run、run 所有权、资源水位与 existing submission 事实作为 review 输入归入 IR27-09、IR27-13～IR27-17、IR27-24、IR27-36；本单元不改变普通 run 派发/提交协议。 |
 | specification.md §3.8 | 适用 | advancement-event 仅 host、rubric 全局写的 principal/revision 守卫归入 IR27-05、IR27-27、IR27-34。 |
 | specification.md §4.1～§4.2 | 适用 | advancement 逻辑流、单一 AuthorityCommitLog、ArtifactStore 先内容后引用、可重建投影与内容可见性归入 IR27-04、IR27-12、IR27-17、IR27-19、IR27-26～IR27-27、IR27-33～IR27-35。 |
-| specification.md §4.3 | 适用 | AdvancementStoreEvent 十三分支、evidence_requested/result/settled、被审 RunRecord 与会话删除分类归入 IR27-04～IR27-12、IR27-15、IR27-17、IR27-24、IR27-33、IR27-36、IR27-41。 |
+| specification.md §4.3 | 适用 | AdvancementStoreEvent 十五分支、evidence_requested/result/settled、被审 RunRecord 与会话删除分类归入 IR27-04～IR27-12、IR27-15、IR27-17、IR27-24、IR27-33、IR27-36、IR27-41。 |
 | specification.md §4.4～§4.5 | 部分适用 | advancement 原子复合状态、投影恢复、归因随 review/proxy 耐久、证据 journal 终态保留和 pending 不回收归入 IR27-04、IR27-09～IR27-12、IR27-17、IR27-19、IR27-33、IR27-35、IR27-39、IR27-41；普通 staged publish 不改。 |
 | specification.md §5.1 | 部分适用 | first-party 任务准入、advancement invocation、requestId/ingress、原 turn/draft 身份与取消交界归入 IR27-06～IR27-10、IR27-32、IR27-36、IR27-40；scheduler/job 控制入口不改。 |
 | specification.md §5.2～§5.6 | 部分适用 | accepted run、每 run 验收条件瞬态注入、source/ingress 所有权、取消/terminal、stream/final 只作推进 review、proxy 和恢复输入，归入 IR27-09～IR27-12、IR27-24、IR27-33、IR27-36、IR27-38～IR27-40；assignment/job 数据面合同不重做。 |
@@ -310,7 +310,7 @@
 | always-online-and-local-execution-requirements.md §5 | 不适用 | 本章是竞品能力现状归纳，不产生第 27 单元实现或审查义务。 |
 | always-online-and-local-execution-requirements.md §6 | 部分适用 | 单机与常驻锚点两种形态平权、本机接入不绕远端及既有业务需求保持不变，归入 IR27-28～IR27-32、IR27-36；未来桌面客户端不在本单元。 |
 | always-online-and-local-execution-requirements.md §7 | 部分适用 | 智能体持续在线、环境任务诚实等待且恢复、单机用户不承担分布式代价归入 IR27-16～IR27-17、IR27-25、IR27-28～IR27-32；普通提醒/定时/通知能力不因本单元重开。 |
-| s2-security-supply-chain-review.md 裁决、强制门禁、接受依据 | 部分适用 | 既有受管安全依赖、精确锁版与零旁路规则归入 IR27-34、IR27-37；当前 85 路径不含依赖或锁文件变化，不重开库选型与供应链建设。 |
+| s2-security-supply-chain-review.md 裁决、强制门禁、接受依据 | 部分适用 | 既有受管安全依赖、精确锁版与零旁路规则归入 IR27-34、IR27-37；当前 91 路径不含依赖或锁文件变化，不重开库选型与供应链建设。 |
 | task-advancement-rubric-architecture.md 需求区、§0～§3 | 适用 | 任务/问题边界、球员/裁判隔离、一次确认、标准公开/程序私有/验证独立、结构化归因、独立窗口、owner 拓扑和范围归入 IR27-01、IR27-06～IR27-08、IR27-28、IR27-32、IR27-38～IR27-40。 |
 | task-advancement-rubric-architecture.md §4.1～§4.7 | 适用 | admission/session/draft/confirmed/review/proxy/归因/权威事件模型逐项归入 IR27-02～IR27-12、IR27-24～IR27-27、IR27-39、IR27-41。 |
 | task-advancement-rubric-architecture.md §5.1～§5.6 | 适用 | 用户输入、契约确认、run 瞬态契约注入、accepted 后 review、代理续推与中间态恢复逐项归入 IR27-06～IR27-12、IR27-15～IR27-17、IR27-24～IR27-25、IR27-31～IR27-33、IR27-38～IR27-40。 |
@@ -336,7 +336,7 @@
 | conversation-model.md §2～§5、§7～§9、§11～§12 | 部分适用 | Conversation 唯一事实源、任一对话至多一个 Session、turn 接受/持久化、CLI/server 生命周期、transcript 原文、恢复可见性和鉴权 RPC 投影归入 IR27-04～IR27-12、IR27-28、IR27-31～IR27-33、IR27-38～IR27-40；通道实现、scheduler/background、管理 CRUD 和历史实施路线未被本单元重开。§1/§14～§15 为术语/决策索引，适用结论已由上述章节承载。 |
 | server-gateway.md §5～§6、§10 | 部分适用 | 已认证 JSON-RPC、conversation send/event 关联、入站只经 Conversation owner、同一 Agent Loop 与网络安全边界归入 IR27-05～IR27-12、IR27-28、IR27-31～IR27-32、IR27-34、IR27-37、IR27-40；通道 adapter、跨通道投递、OpenAI API、平台适配和路线图未被本单元重开。§1～§3、§11～§14 为定位、对比、历史规划与类型汇总，不新增第 27 单元义务。 |
 | confirmation-ux.md §3～§8 | 部分适用 | advancement 确认复用既有选择/渲染基础设施时，须保持数据与渲染分离、稳定 requestId、串行 pending、重复决定幂等、取消/失联有确定结果且产品文案可理解，归入 IR27-07、IR27-32、IR27-34、IR27-40；SecurityPipeline 权限确认语义不被 Rubric 确认替代。竞品调研、未来 Web/渠道 renderer、smart 分诊和实施路线不适用。 |
-| remote-confirmation-execution.md §0～§10 | 部分适用（仅隔离回归） | 当前 85 路径未修改 `ConfirmationBroker`、ConfirmationHub/Bridge、InboundRouter、TextConfirmationRenderer 或 channel challenge/grant；advancement 的 Rubric 控制确认只经 `SelectionService` 与 owner advancement 事件，不得复用或改变权限确认往返语义。该隔离由 IR27-28、IR27-37、IR27-40 判定，不重做远程权限确认功能。 |
+| remote-confirmation-execution.md §0～§10 | 部分适用（仅隔离回归） | 当前 91 路径未修改 `ConfirmationBroker`、ConfirmationHub/Bridge、InboundRouter、TextConfirmationRenderer 或 channel challenge/grant；advancement 的 Rubric 控制确认只经 `SelectionService` 与 owner advancement 事件，不得复用或改变权限确认往返语义。该隔离由 IR27-28、IR27-37、IR27-40 判定，不重做远程权限确认功能。 |
 | remote-interruption-execution.md §0～§8 | 部分适用 | 当前变更触及 conversation controller、session RPC、advancement user takeover/cancel 与停机交界，既有 turn 级 `abortSignal`、`session.abort`、pending 清理、唯一反馈及 `control > confirmation > agent-input` 优先级不得回归，归入 IR27-10、IR27-12、IR27-31～IR27-34、IR27-40；飞书 IntentClassifier、scheduler RunRegistry、卡片按钮和通道渲染未被本单元修改，不形成新增门禁。 |
 | workscene-management-architecture.md 需求区、§0～§3、§6、§8～§10 | 部分适用 | workscene 恢复/切换的用户可见性、设备域 workspace binding、无 workspace 语义、CLI/RPC 同一领域服务及确认边界归入 IR27-16、IR27-18、IR27-20～IR27-23、IR27-29、IR27-32、IR27-34、IR27-40；真实路径模型已由第 25 单元 device/binding 合同取代。管理 CRUD、quiesce、智能创建和工具权限未被本单元重开。 |
 | 第 14 单元 EX14-01、LD14-01～LD14-08 与冻结合同 | 部分适用 | EX14-01 的旧无 ingress `ControlRecord` 重开条件未出现；LD14-01～LD14-08 适用于本单元新增事件族、wire validator、状态量词、恢复义务和结构门禁，归入 IR27-02、IR27-04～IR27-05、IR27-12、IR27-17～IR27-19、IR27-24、IR27-33～IR27-36、IR27-41。 |
@@ -346,59 +346,59 @@
 | 第 20 单元 X20-01～X20-12、L20-01～L20-09 与冻结合同 | 部分适用 | 新增 advancement evidence mesh、目标 workspace/device 选宿、local/mesh adapter、角色装配、服务授权和启动/停机，使相应检测动作归入 IR27-15～IR27-18、IR27-28～IR27-35、IR27-43；job 产品入口、其它数据面、issuer 迁居和既有工具链疑点是否重开，须由 IR27-43 按原条件判定。 |
 | 第 23 单元 X23-01～X23-20、L23-01～L23-53、L23-53b、L23-54～L23-59 与冻结合同 | 部分适用 | 新增 evidence journal、ArtifactStore 引用、recovery maintenance、设备 permit、物理 I/O、local/mesh conformance、严格合同与故障注入，相关检测动作归入 IR27-02、IR27-14、IR27-17～IR27-24、IR27-28～IR27-35、IR27-37、IR27-41、IR27-44；surface asset、旧 WAL/迁移、本地域 owner 等未直接相交条目仍须由 IR27-44 按各自原重开条件写明不适用事实。 |
 | 第 25 单元冻结合同（X/L 表为空） | 适用 | EnvironmentPort、PathGuard、workspace binding/revision、能力发布、无 workspace 与唯一交付指纹算法归入 IR27-16、IR27-18、IR27-20～IR27-23、IR27-29、IR27-34、IR27-37、IR27-45。 |
-| 第 26 单元 X26-01 与冻结合同 | 适用 | executor-role-runtime 已进入当前 85 路径，X26-01 重开条件满足；credential projection/秘密扫描必须按当前变更重新归因，归入 IR27-23、IR27-29、IR27-34、IR27-37、IR27-45。scheduler/job 只作 accepted run、资源和停机交界回归。 |
+| 第 26 单元 X26-01 与冻结合同 | 适用 | executor-role-runtime 已进入当前 91 路径，X26-01 重开条件满足；credential projection/秘密扫描必须按当前变更重新归因，归入 IR27-23、IR27-29、IR27-34、IR27-37、IR27-45。scheduler/job 只作 accepted run、资源和停机交界回归。 |
 | 第 27 单元定稿开发清单 D27-01～D27-11 | 适用 | D27-01→IR27-02/03/34/37；D27-02→IR27-04/05/12/17/33/41；D27-03→IR27-06/08/09/13/25/28；D27-04→IR27-13/14/18/19/29/33/35；D27-05→IR27-15/16/17/24/25/33；D27-06→IR27-18～23/29/30/34/35；D27-07→IR27-20～24/34；D27-08→IR27-24/25/39；D27-09→IR27-03/26/27/32；D27-10→IR27-28～31/33/37；D27-11→IR27-01/32/37～40。开发清单限定范围，不替代总纲、规格和当前交付物反向核查。 |
-| 当前完整交付闭包 | 适用 | 85 个路径逐一归项：CLI 22→IR27-06～IR27-12/15～17/26～32/34～41；core 23→IR27-02～05/15/23～27/34～39/41；orchestrator 11→IR27-08/18～23/29～31/34～39/41；owner-kernel 9→IR27-04～05/13～14/33～37/41；owner-services 9→IR27-05～17/24～28/31～39/41；rpc 1→IR27-32/34/36～37/40；server 8→IR27-04～12/28/31～32/36～41；文档 2→IR27-37。未归项路径或新增生产链无审查落点即为范围缺口。 |
+| 当前完整交付闭包 | 适用 | 91 个路径逐一归项：CLI 23→IR27-06～IR27-17/26～32/34～41；core 25→IR27-02～05/12～17/23～25/34～37/41～42；executor 2→IR27-13～14/29/33/35/42；orchestrator 11→IR27-08/18～23/29～31/34～39/41；owner-kernel 10→IR27-04～05/13～14/33～37/41～44；owner-services 9→IR27-05～17/24～28/31～39/41；rpc 1→IR27-32/34/36～37/40；server 8→IR27-04～17/28/31～33/36～41；文档 2→IR27-37。未归项路径或新增生产链无审查落点即为范围缺口。 |
 
 ### 审查项
 
 | 编号 | 状态 | 审查分区 | 审查点与通过条件 | 证据 |
 | --- | --- | --- | --- | --- |
-| IR27-01 | [x] | 产品目标与单元边界 | 通过：85 路径均可反绑 D27-01～D27-11；未发现第 28～38 单元、二级取证、benchmark/性能采集、通用诊断或非必要 UI 进入生产交付。 | 已审 |
-| IR27-02 | [~] | 协议合同、codec 与摘要 | 通过（含 P2 残留）：当前所有生产事件均由同进程 typed producer 构造，外部入口不能直接提交 advancement event，ArtifactStore/commit log 完整性层也先于 replay；codec/guard 深层覆盖不足是防御纵深债务，未形成当前 P0/P1。 | 旧结论失效；U27-07 修复改变登记输入，待重审 |
-| IR27-03 | [~] | Rubric 契约与严格校验 | 阻断：`normalizeGeneratedRubricDraft` 直接消费正常生产链中的 LLM 输出，却未拒绝规范化后重复的 evidence requirement id 与 failureHandling id；同键多义可进入确认快照。 | 旧结论失效；U27-01 修复改变登记输入，待重审 |
-| IR27-04 | [~] | advancement 唯一权威状态 | 通过（含 P2 残留）：统一日志、原子批次及全部当前 typed producer 的合法事件序列成立；粗粒度领域门禁尚不能防住未来 producer 回归，但当前没有外部 raw-event 写入口或已查实的非法生产事件。 | 旧结论失效；U27-07 修复改变登记输入，待重审 |
-| IR27-05 | [~] | 权威写守卫与绑定 | 通过（含 P2 残留）：authority envelope 的 owner/revision fence 与当前 producer 的 review/run/evidence/terminal 绑定成立；共享 guard 的深层反绑仍需加固，但未发现当前生产调用能构造错绑写入。 | 旧结论失效；U27-07 修复改变登记输入，待重审 |
+| IR27-01 | [x] | 产品目标与单元边界 | 通过：91 路径均可反绑 D27-01～D27-11；未发现第 28～38 单元、二级取证、benchmark/性能采集、通用诊断或非必要 UI 进入生产交付。 | 当前 manifest 复算：91 路径、0 删除，分组和、路径集哈希与冻结指纹全等 |
+| IR27-02 | [x] | 协议合同、codec 与摘要 | 通过：advancement 全事件由严格 codec 校验嵌套形状与 exact keys，review-attempt 的冻结 root/lease 形状、阶段与 evidence 请求均在 reducer 前复用同一 codec 与 batch guard；摘要、请求与结果引用绑定完整。 | 当前源码重建；`event-codec.ts`、`guards.ts`、`review-attempt-identity.ts` 及直接负例 |
+| IR27-03 | [x] | Rubric 契约与严格校验 | 通过：生成、修订、库匹配和最终 seal 均复用同一 content-id 守卫，requirement/failureHandling 规范化碰撞在确认前 fail-closed，合法 `pc-N` 语义不变。 | 当前源码重建；`contract.ts` 及直接负例 |
+| IR27-04 | [x] | advancement 唯一权威状态 | 通过：review-attempt 加入既有 `AdvancementControlEvent`，只经 conversation owner 的同一日志与 batch guard 提交；没有外部 raw-event 写入口、第二 reducer 或旁路状态面。 | 当前生产调用图；core/file store 与 `SessionAdvancementStore` 写入、重放和投影路径核对 |
+| IR27-05 | [x] | 权威写守卫与绑定 | 通过：owner/revision fence、确认内容、review/run、proxy、review-attempt lineage/generation/root、evidence request/result/settlement 与 terminal 复合写均在 reducer 前完成有限身份反绑。 | 当前源码重建；`guards.ts`、`store.ts`、稳定 mutation identity 与响应丢失投影确认用例 |
 | IR27-06 | [x] | 任务准入与草案生成 | 通过：能力目录按架构只声明稳定 provider kind，workspace/Git/locator 是请求级前提并以 typed capability-gap 诚实退出；以未预探测 Git 为由判阻断与冻结语义冲突。 | 已审 |
-| IR27-07 | [~] | 一次确认、修订与取消 | 阻断：草案版本检查、originalTurnId 与普通准入失败取消成立；但 confirm 写 active 与原任务准入之间崩溃时，现有恢复不会以同一 turn 身份重驱缺失义务。revise/cancel 通用操作回放没有当前损失依据，不再作为阻断。 | 旧结论失效；U27-02 修复改变登记输入，待重审 |
-| IR27-08 | [x] | ControlCompletion 与 Reviewer 边界 | 通过：控制生成/收场与 reviewer 端口分离，review 输入显式携 run/Rubric/history/window/canonical evidence/lease/abort；owner-services 无 provider/拓扑反向依赖，reviewer 不写权威状态。 | 已审 |
-| IR27-09 | [~] | accepted run 验收线性化 | 阻断：turn 维护在 catch-up 返回 deferred/failed 时仍继续审当前 run；恢复又以已审 `max(runIndex)` 作为水位，较早欠审 run 会被永久跳过，review 序列可出现不可恢复缺口。 | 旧结论失效；U27-03 修复改变登记输入，待重审 |
+| IR27-07 | [x] | 一次确认、修订与取消 | 通过：确认同提交强制写入稳定 turn/surface/origin/摘要绑定的 admission intent；在线与恢复均 exact replay 既有耐久准入，暂态/结果不明保持 pending，只有确定拒绝取消。 | 当前源码重建；confirm RPC、original-task admission port 与恢复入口 |
+| IR27-08 | [x] | ControlCompletion 与 Reviewer 边界 | 通过：控制生成/收场与 reviewer 端口分离，review 输入显式携 run/Rubric/history/window/canonical evidence/lease/abort；review-attempt 只由 owner controller 编排，owner-services 无 provider/拓扑反向依赖，reviewer 不写权威状态。 | 当前 controller、reviewer port 与 CLI 生产组合根重建 |
+| IR27-09 | [x] | accepted run 验收线性化 | 通过：以原任务 admission 结清 runId 为下界，按全等 `RunRecordRef` oldest-first 查首个欠审 accepted run；同 run 进程内单飞，catch-up 未证明连续或补审未产生全等耐久 review 时均 fail-closed。 | 当前 `recovery-maintenance.ts`、controller 单飞键、CLI maintenance 与恢复回归核对 |
 | IR27-10 | [x] | 代理续推与用户中断 | 通过：failed review 与 proxy 复合写、单 outstanding、durable claim 查询、用户输入分类/接管和既有 turn abort 链均复用现有 owner/run 语义；未见第二取消状态机或 sibling 误收束。 | 已审 |
-| IR27-11 | [~] | 完成、退出与收场交付 | 通过（含 P2 残留）：当前完成/退出 producer 均从裁判或明确接管事实生成收场；共享 guard 尚未机械拒绝内部误用，但没有支持场景可绕过 controller 直接写 terminal。 | 旧结论失效；U27-07 修复改变登记输入，待重审 |
-| IR27-12 | [~] | 恢复状态全枚举 | 阻断：恢复覆盖 accepted run/proxy，但未闭合确认已落盘而原任务未准入；且欠审 run 可被更大已审 runIndex 水位永久越过。两条均只凭现有耐久事实无法自动收敛。 | 旧结论失效；U27-02、U27-03、U27-09 修复改变登记输入，待重审 |
-| IR27-13 | [~] | control/review 根租约 | 阻断：控制/裁判/收场的租约与计量通道已装配，但恢复 pending evidence 时复用同一 reviewId、`attempt:1`；governor 会回放已 released 的旧根，后续子租约因 parent 非 active 永久失败。 | 旧结论失效；U27-04 修复改变登记输入，待重审 |
-| IR27-14 | [~] | evidence 子租约与物理容量 | 通过（含非阻断残留）：wire codec 强制 workload/requestId、admission、audience、conversation/epoch 和父预算/expiry，executor 另取 workload-advancement permit；dispatch 路径子先父后结算成立。子租约签发后、dispatch 前异常缺少局部 finally，形成有界到期回收的 P2 资源残留。 | 旧结论失效；U27-06 修复改变登记输入，待重审 |
-| IR27-15 | [~] | 取证计划与耐久 requirement 映射 | 通过（含 P2 残留）：当前 producer 从同一规范 request 生成有界 item 与去重 requirement 映射；codec/guard 缺少独立深层复验属于防御纵深，不足以证明当前映射可错绑。 | 旧结论失效；U27-07 修复改变登记输入，待重审 |
-| IR27-16 | [x] | 目标选择、能力与环境 | 通过：目标由 accepted run 冻结 manifest 与签名 descriptor 解析；descriptor 声明稳定 provider kind，具体 workspace/Git/locator 在请求时验真并以 capability-gap 退出，符合既定能力分层。 | 已审 |
-| IR27-17 | [~] | owner 耐久请求与有限重试 | 阻断：请求先写、结果先写和 stale 有限重试成立；但 lease/根代际变化仍按 `reviewId + attempt` 派生相同 requestId，既与 executor journal 的冻结身份冲突，也可能复用 released 根，恢复无法收敛。 | 旧结论失效；U27-04 修复改变登记输入，待重审 |
-| IR27-18 | [~] | executor 入口守卫与零读取拒绝 | 通过：当前锚点 owner 拓扑中 mesh 只接受已配对锚点设备、同设备唯一 anchor owner 由锁保证，旧进程不能成为并行调用者；current-owner replay 疑点已按 `X27-03` 排除，第 32 单元确定义务由全局规格承载，不构成本单元问题。 | 旧结论失效；U27-06 修复改变登记输入，待重审 |
+| IR27-11 | [x] | 完成、退出与收场交付 | 通过：completed/exited 必须与同批全等 review 决定一致；review、可选 evidence consumed、attempt consumed 与 proxy/terminal 由同一 owner 批次提交，失败策略与归因反绑既有 failed review，当前生产入口零旁路。 | 当前 event codec、batch guard、controller 与两种 store 的复合写路径重建 |
+| IR27-12 | [x] | 恢复状态全枚举 | 通过：确认准入、accepted 连续补审、坏会话隔离保持闭合；旧 terminal evidence、started/invoking、acquire 响应不明、review deferred/抛错/提交丢失、取消与 closed cleanup 均由耐久 attempt 代际确定收敛。 | 当前控制器状态推演；真实 governor+生产 reviewer 7 个崩溃/竞争用例及恢复维护回归 |
+| IR27-13 | [x] | control/review 根租约 | 通过：每个全等 accepted run 先耐久 `started` 与冻结 root，`invoking` 先于 provider，review 与 `consumed` 同批；deferred/expired 先于 settle/release，terminal replay 分类不复活旧根。 | 当前 `controller.ts`、两侧 governor、`ImmediateRootReservationInspection` 与真实组合根用例重建 |
+| IR27-14 | [x] | evidence 子租约与物理容量 | 通过：child 从签发到 dispatch 的所有权交接唯一；接管前构造/权威写异常即时 `finishLease`，接管后只由 dispatch finally 终结；carried terminal outcome 零复活旧 child，executor 仍使用独立 advancement I/O permit。 | 当前 `evidence.ts`、executor handler 与 carried terminal outcome 直接用例重建 |
+| IR27-15 | [x] | 取证计划与耐久 requirement 映射 | 通过：有界 items 与去重 item→requirement 映射由同一规范 request 生成；codec/guard 校验索引范围、request/review/generation/digest 全等并只允许结果和结算指向当前 pending。 | 当前 producer、codec、guard 与 canonical evidence 派生路径重建 |
+| IR27-16 | [x] | 目标选择、能力与环境 | 通过：目标由 accepted run 冻结 manifest 与签名 descriptor 解析；carried bundle/capability-gap 先于当前目标重算并冻结原 executor/ownerEpoch，fresh 请求才按当前 workspace/Git/locator 前提验真。 | 当前 `carriedOutcomeRootTarget`、`resolveTarget`、target-drift 负例与 `X27-01` 边界核对 |
+| IR27-17 | [x] | owner 耐久请求与有限重试 | 通过：review-attempt 代际独立于 evidence child 代际并在任何 root acquire 前耐久；terminal evidence 可跨多代零 dispatch 复用，typed-stale 先结清再 fresh，review 未提交不再丢失下一代身份。 | 当前 owner 日志投影、稳定 mutation id、连续 deferred/提交崩溃恢复用例重建 |
+| IR27-18 | [x] | executor 入口守卫与零读取拒绝 | 通过：验签、executor/lease/workspace/revision/provider/permit 均先于文件读取；当前单锚点唯一 owner 拓扑满足授权前提，未来 AuthorityTransfer 门禁已在全局第 32 单元规范，不越界前置。 | 当前生产组合根与 `X27-03` 重开条件核对 |
 | IR27-19 | [x] | executor 幂等 journal | 通过：requestId+规范请求身份线性化，同键并发合流、重启/过期 exact replay、异载荷拒绝、pending 保留、终态 27 天索引与损坏 fail-closed 均由 journal 及直接测试承载；当前阻断在上游代际 identity 与 replay 授权顺序，不是 journal 语义。 | 已审 |
 | IR27-20 | [x] | file-diff provider | 通过：provider 只在解析后的目标 workspace 执行只读 `git status --porcelain`，locator 进入 `-- paths`；无 locator 为当前全工作区事实，路径/digest 不符及 Git 不可用诚实降为 missing/capability-gap，不虚构历史快照。 | 已审 |
-| IR27-21 | [~] | log/artifact provider | 阻断：无 locator/越界会拒绝，但 PathGuard 校验与后续 `readFile` 分离，校验后路径被替换为 symlink 时可读取 workspace 外内容；多文件又以无路径/长度 framing 的 `Buffer.concat` 计算 digest，文件间字节迁移可保持同一 digest。 | 旧结论失效；U27-05 修复改变登记输入，待重审 |
-| IR27-22 | [~] | ObservationToken 一致性 | 阻断：pre/post 与 typed-stale 归一链成立，但 log/artifact 多路径状态使用无 framing 的聚合字节摘要；不同逐文件状态可生成相同聚合 digest，使采集中变化被误判 `consistent=true`。 | 旧结论失效；U27-05 修复改变登记输入，待重审 |
-| IR27-23 | [~] | EvidenceBundle 真实性与隐私 | 阻断：签名/requestDigest/executor、当前单锚点 owner 边界与有界 scrubbed summary 成立；但路径校验/读取存在 TOCTOU，恶意工作区进程可把 workspace 外日志摘录和 digest 带入证据。 | 旧结论失效；U27-05 修复改变登记输入，待重审 |
-| IR27-24 | [x] | owner 验真与 canonical evidence | 通过：bundle 签名、requestDigest/executor/observation、请求 item 身份与 digestHint 在进入 reviewer 前校验；stale 归一为 typed-stale，canonical id 由 requestId/itemIndex/requirementId 派生，裁判只可按 id 采用原对象。领域日志映射校验缺口已归 IR27-02/05/15。 | 已审 |
-| IR27-25 | [x] | 裁判采信与通过判据 | 通过：工具 schema/运行时校验强制 criterion 全覆盖和 canonical evidenceId；passed 的两层门与架构一致，required 客观证据只认 independent+passed；transient/abort deferred，结论性无工具提交 fail-closed，capability-gap 有明确退出语义。 | 已审 |
+| IR27-21 | [x] | log/artifact provider | 通过：locator 先 canonical 判界再打开 canonical 文件；读取前后句柄 stat 与读后 realpath/stat 全等反绑，路径替换或内容变化只产出 typed-stale，未授权字节不进入 bundle。 | 当前源码与 handle-open 后 ABA 直接用例核对 |
+| IR27-22 | [x] | ObservationToken 一致性 | 通过：多路径按请求顺序用 path/state/length/contentDigest 的 JCS 帧形成规范原始字节，pre/post 指纹无裸拼接歧义；单次读取身份或状态变化稳定归一为 stale。 | 当前源码与规范摘要公式核对 |
+| IR27-23 | [x] | EvidenceBundle 真实性与隐私 | 通过：签名、requestDigest、executor、observation 与每项身份完整验真；文件字节绑定已授权句柄且 summary 有界脱敏，真实路径和秘密不上 wire。 | 当前 executor handler、bundle verifier 与安全负例核对 |
+| IR27-24 | [x] | owner 验真与 canonical evidence | 通过：bundle 签名、requestDigest/executor/observation、请求 item 身份与 digestHint 在进入 reviewer 前校验；carried bundle 仍按原请求验真，stale 归一为 typed-stale，canonical id 只由原 requestId/itemIndex/requirementId 派生。 | 当前 `evidence.ts`、协议 validator、pending 映射 guard 与 carried outcome 用例重建 |
+| IR27-25 | [x] | 裁判采信与通过判据 | 通过：工具 schema/运行时校验强制 criterion 全覆盖和 canonical evidenceId；passed 两层门不变，required 客观证据只认 independent+passed；transient/abort 先耐久 deferred attempt，结论性无工具提交 fail-closed，capability-gap 保持明确退出语义。 | 当前 reviewer 端口、controller outcome 分流、真实 metered reviewer 回归与既有判据核对 |
 | IR27-26 | [x] | Rubric catalog 与会话采用 | 通过：catalog/ArtifactStore/GlobalStatePort 与 local-draft 原子采用成立；稳定 provider kind 在生成/确认时约束 required，请求级前提不满足走明确 capability-gap，不要求把动态 workspace 状态冻结进全局 Rubric。 | 已审 |
-| IR27-27 | [~] | 全局沉淀与延后意向 | 通过（含 P2 残留）：会话采用与全局沉淀分离、CAS 与稳定 publication requestId 成立；异步发布失败被吞会损害保存反馈，但不回滚 active 或阻断任务执行。 | 旧结论失效；U27-08 修复改变登记输入，待重审 |
-| IR27-28 | [x] | owner 生产组合根 | 通过：serve 组合根统一创建 controller/lifecycle/reviewer，并以 lazy authority/session/evidence 端口接入当前 anchor owner；server/RPC/CLI 为薄入口和投影，ConversationManager 无 advancement 领域持有，未发现第二 owner runtime。 | 已审 |
-| IR27-29 | [x] | executor 生产组合根与能力发布 | 通过：handler/journal/environment/capacity/local-mesh 组合成立；签名 descriptor 发布稳定 provider kind，具体 Git/workspace/locator 前提按请求解析，非 Git 或不可达返回 capability-gap，不属于能力谎报。 | 已审 |
-| IR27-30 | [x] | local/mesh adapter 等价 | 通过：local 与 mesh 最终进入同一 `ExecutorEvidenceHandler` 和 wire codec；mesh 只做 canonical transport/peer 授权/abort 透传，不承载 reviewer、不回退 owner 本地 provider。当前单锚点 owner 的 peer/owner-lock 边界成立；多 owner 授权不属本单元，引用 `X27-03`，未来由全局规格第 32 单元承载。 | 已审 |
-| IR27-31 | [~] | 启动、持续恢复与停机 | 通过（含 P2 残留）：启动扫描失败由组合根捕获且 server 仍会启动，用户 resume 又会按会话重驱；单坏项隔离与总扫描预算仍值得补，但当前无坏项或规模事实证明其阻断最小完整产品。 | 旧结论失效；U27-09 修复改变登记输入，待重审 |
-| IR27-32 | [~] | RPC/CLI 产品旅程可达性 | 阻断：主旅程入口与 owner 投影同源，但 confirm→原任务准入之间缺恢复 owner，欠审 run 又可被最大水位跳过；两条都会让当前推进任务永久停摆。准则库保存吞错已降为 P2，不再扩大主旅程阻断范围。 | 旧结论失效；U27-02、U27-03、U27-08 修复改变登记输入，待重审 |
-| IR27-33 | [~] | 并发、半提交与崩溃矩阵 | 阻断：confirm→原任务准入缺同身份重驱、欠审 run 可被更大水位覆盖、review 根续跑会回放 released lease、证据代际重用 requestId，路径采集还存在并发替换窗；这些当前可达格缺稳定 owner 或安全线性化点。 | 旧结论失效；U27-02、U27-03、U27-04、U27-05、U27-06、U27-09 修复改变登记输入，待重审 |
-| IR27-34 | [~] | 安全与零副作用 | 阻断：协议签名、静态错绑与当前 owner 拓扑成立，但 log/artifact 的 PathGuard 校验与后续 path read 分离，恶意工作区进程可在窗口内替换 symlink，把工作区外日志摘录送入裁判。 | 旧结论失效；U27-05 修复改变登记输入，待重审 |
-| IR27-35 | [~] | 资源、保留与复杂度 | 通过（含 P2 残留）：provider I/O permit、items/summary/retry 与 27 天 replay 上界成立；dispatch 前子租约清理和启动坏项隔离分别登记为 `U27-06`、`U27-09`。Rubric 全资产加载没有真实规模或体验损失，已按 `X27-02` 排除，不构成当前或未来计划任务。 | 旧结论失效；U27-06、U27-09 修复改变登记输入，待重审 |
-| IR27-36 | [~] | 第 14/15 单元历史合同 | 阻断：有限集合已逐项复核；confirm→admit 缺耐久重驱，以及 review/evidence 根代际复用 released 身份，直接命中静态身份与耐久重驱检测动作。event 深层加固已降 P2，不再作为本项阻断依据。 | 旧结论失效；U27-02、U27-04 修复改变登记输入，待重审 |
-| IR27-37 | [~] | 文档、结构与交付闭包 | 阻断：77 路径/0 删除/分组/指纹与逐路径归项成立；但推进架构标记恢复与一级取证闭包已落地，当前 confirm 恢复、连续补审、evidence generation 与路径原子读取仍未达到对应生效面，文档结论需随实现同步。 | 旧结论失效；U27-02 修复改变登记输入，待重审 |
+| IR27-27 | [x] | 全局沉淀与延后意向 | 通过：会话采用与全局 CAS 沉淀独立；publication task 在产生处把 rejection 收敛为 saved/deferred/failed，RPC 固定先耐久准入原任务、后反馈真实保存结果，失败不回滚 active/run。 | 当前 confirm controller 与 RPC 编排核对 |
+| IR27-28 | [x] | owner 生产组合根 | 通过：serve 组合根唯一创建 controller/reviewer/evidence coordinator，并以 lazy authority governor 与 `SessionStatePort` 接入当前 conversation owner；review-attempt 检查端口沿同一 governor 代理注入，server/RPC/CLI 仍为薄入口和投影。 | 当前 `createServeAdvancementController`、command 装配、owner-services 依赖图与全仓生产构造点核对 |
+| IR27-29 | [x] | executor 生产组合根与能力发布 | 通过：handler/journal/environment/capacity/local-mesh 组合未被 review-attempt 改写；签名 descriptor 仍只发布稳定 provider kind，具体 Git/workspace/locator 前提按请求解析，资源 governor 新检查面不建立第二取证入口。 | 当前 executor handler、access/executor-role 装配与 governor 合同交界核对 |
+| IR27-30 | [x] | local/mesh adapter 等价 | 通过：local 与 mesh 仍最终进入同一 `ExecutorEvidenceHandler` 和 wire codec；mesh 只做 canonical transport/peer 授权/abort 透传，不承载 reviewer、不回退 owner 本地 provider。当前单锚点 owner 边界未变化，`X27-03` 重开条件未触发。 | 当前 command `clientFor`、mesh `evidenceForExecutor`、local handler 与冻结排除项反向核对 |
+| IR27-31 | [x] | 启动、持续恢复与停机 | 通过：启动与持续维护均先经 `loadActiveSession` 收敛 terminal attempt；逐 conversation 隔离、oldest-first 补审和健康项继续不变，started/invoking/terminal root 在恢复与停机竞争中均有确定重驱或清理终态。 | 当前 `recovery-maintenance.ts`、`loadActiveSession`/`reconcileTerminalReviewAttempts`、取消与 queued-root 竞争用例重建 |
+| IR27-32 | [x] | RPC/CLI 产品旅程可达性 | 通过：确认、原任务执行、连续补审、deferred 后恢复、保存反馈与确定收场均可达；review-attempt/rootLease 仅属 owner 内部事实，RPC/CLI 有限投影不泄露拓扑、租约或能力凭证。 | 当前 RPC state/detail projector、CLI maintenance、deferred/响应丢失恢复链与产品输出核对 |
+| IR27-33 | [x] | 并发、半提交与崩溃矩阵 | 通过：acquire 响应不明、invoking 后崩溃、provider usage 后 review 提交失败、target 漂移、取消与 acquire/deferred/queued-root 竞争均由耐久 attempt 与 root inspection 收敛；同 run 单飞且 invoking 不重放 provider。 | 真实 governor+生产 metered reviewer 7 个定向用例及当前 controller 状态推演 |
+| IR27-34 | [x] | 安全与零副作用 | 通过：协议签名、owner/revision/lineage/root 静态绑定与零读取拒绝成立；log/artifact canonical handle 防住 symlink/ABA，reviewAttempts/rootLease 未进入 RPC/CLI wire 投影，拒绝路径不泄露字节或能力凭证。 | 当前 codec/guard、RPC projector、PathGuard 与攻击负例核对 |
+| IR27-35 | [x] | 资源、保留与复杂度 | 通过：每个 review generation 恰一 root，terminal root 不复活；queued/active/terminal 分类支持幂等清理，未完成计量在 settle 时保守消费，attempt 投影按 run 只保留最新代，未引入随日志或场景无界扫描的新热路径。 | 当前两侧 governor、controller cleanup、reducer 与计量/重启直接用例重建 |
+| IR27-36 | [x] | 第 14/15 单元历史合同 | 通过：review-attempt 的 lineage/generation/root 与 mutation id 全由耐久输入稳定派生，外部副作用前先写 started/invoking，恢复不依赖单次调用栈；有限 X/L 重开检测未发现第二 owner、宽松 codec 或响应丢失空洞。 | 当前事件/guard/store/controller 与第 14/15 单元适用检测动作逐项对账 |
+| IR27-37 | [x] | 文档、结构与交付闭包 | 通过：91 路径、0 删除、分组、路径集哈希、交付指纹与逐路径归项全等；架构和规格已同步 review-attempt 严格代际、invoking 不重放、owner 终态先于 root 清理及 terminal root 不复活，未引入依赖或范围外设施。 | manifest 当前复算；两份权威文档与生产代码反向对账，`git diff --check` 通过 |
 | IR27-38 | [x] | 执行侧公开契约瞬态注入 | 通过：host lifecycle 在 onBeforeRun 从 active owner 投影注入同一确认版 passCriteria/evidence requirements；终态不注入，不改落盘原文/窗口/system/tools/cache prefix，failureHandling、库索引和裁判过程未下发，ConversationManager 无领域引用。 | 已审 |
 | IR27-39 | [x] | 归因权威与确定性续推 | 通过：criterionId 顺序稳定、工具强制恰一覆盖，unmet 从 attribution 派生；review/proxy 复合写和 missing-proxy 纯函数重建复用同一 attribution/failureHandling，只输出结论与证据摘录。 | 已审 |
-| IR27-40 | [~] | 产品呈现、交互身份与恢复可见性 | 通过（含 P2 残留）：确认 framing、SelectionService、取消、代理来源、详情与恢复可见性成立；“正在保存”后吞错会让一次明确保存选择缺少结果反馈，但不影响任务主旅程，降为非阻断体验问题。 | 旧结论失效；U27-08 修复改变登记输入，待重审 |
-| IR27-41 | [~] | 事件状态机结构性闭包 | 阻断：十三类 producer/reducer/replay 已建，当前事件深层防御不足本身降为 P2；但正常 LLM 草案入口仍可产生重复 requirement/failure id 并进入确认快照，结构闭包仍有当前可达缺口。 | 旧结论失效；U27-01、U27-07 修复改变登记输入，待重审 |
-| IR27-42 | [~] | 第 18 单元历史合同 | 通过（含 P2 残留）：当前资源、身份与 producer 输入验证成立；深层 event validator 已登记为 `U27-07`。current-owner replay 在现有单锚点唯一 owner 拓扑不可达，引用 `X27-03`，不再作为本单元问题。 | 旧结论失效；U27-07 修复改变登记输入，待重审 |
-| IR27-43 | [x] | 第 20 单元历史合同 | 通过：远端只取证、local/mesh 同 handler、owner 裁判不远端执行成立；stable provider kind 与请求级能力前提是既定合同，现有单锚点拓扑没有第二 current owner，相关疑点引用 `X27-03`。 | 已审 |
-| IR27-44 | [~] | 第 23 单元历史合同 | 阻断：有限 X/L 集合已按日志、replay、恢复 owner、容量、I/O、消费者和结构闭包逐项映射；`U27-04` 的 review/evidence request 代际冲突仍命中既有静态身份与恢复 owner 检测。启动扫描与 event validator 分别登记为 `U27-09`、`U27-07`；current-owner 疑点引用 `X27-03`，均不新增阻断根因。 | 旧结论失效；U27-04 修复改变登记输入，待重审 |
-| IR27-45 | [~] | 第 25/26 单元交界合同 | 阻断：executor-role 秘密隔离与“descriptor 只声明稳定 provider kind、请求级解析 workspace/Git”均成立；唯一当前阻断是 accepted-run 补审以最大水位越过欠账，破坏连续恢复合同。 | 旧结论失效；U27-03 修复改变登记输入，待重审 |
+| IR27-40 | [x] | 产品呈现、交互身份与恢复可见性 | 通过：确认、取消、resume、proxy 来源、详情与收场均为人话且不泄漏拓扑；全局保存实际 saved/deferred/failed 在原任务准入后反馈，失败不伪装成功。 | 当前 RPC/CLI 投影与产品旅程核对 |
+| IR27-41 | [x] | 事件状态机结构性闭包 | 通过：十五类 producer/reducer/replay 均有严格 codec、领域 guard、合法 producer 和直接负例；`review_attempt_transitioned` 的 lineage/generation/root/phase 及与 review/terminal 复合提交的跨事件绑定均在 reducer 前拒绝错配。 | 当前 event union、codec、guard、reducer、两种 store producer 与行为矩阵反向对账 |
+| IR27-42 | [x] | 第 18 单元历史合同 | 通过：当前资源身份、租约层级、producer 输入和 runtime validator 均成立；新增 root inspection 只返回有限状态分类，terminal exact replay fail-closed；current-owner replay 在现有单锚点拓扑不可达并由 `X27-03` 与全局第 32 单元门禁承接。 | 当前两侧 governor 合同与历史重开条件逐项核对 |
+| IR27-43 | [x] | 第 20 单元历史合同 | 通过：远端只取证、local/mesh 同 handler、owner 裁判不远端执行成立；review-attempt 只扩展 owner 的资源 governor 控制面，未建立远端 reviewer 或第二数据入口，相关未来 owner 疑点继续引用 `X27-03`。 | 当前 local/mesh 组合根、adapter 与历史重开条件逐项核对 |
+| IR27-44 | [x] | 第 23 单元历史合同 | 通过：日志重放、I/O permit、consumer、evidence child 清理与静态身份检测均成立；review generation 在 acquire 前耐久，released/settled/reclaimed root 只作终态分类并驱动下一代，旧根不会复活或重新调用 provider。 | 当前 owner 日志、governor replay/inspection、controller cleanup 与历史检测动作复核 |
+| IR27-45 | [x] | 第 25/26 单元交界合同 | 通过：executor-role 秘密隔离、descriptor 只声明稳定 provider kind、请求级 workspace/Git 解析和 accepted-run oldest-first 连续前缀均成立；没有重开第 25/26 单元既有根因。 | 当前源码与冻结合同交界核对 |
 
 ---
 

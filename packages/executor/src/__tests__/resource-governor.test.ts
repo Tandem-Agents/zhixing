@@ -13,6 +13,7 @@ import type {
   Signature,
   UsageReport,
 } from "@zhixing/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import {
   canonicalize,
   protocolDigest,
@@ -78,6 +79,17 @@ describe("ExecutorResourceGovernor", () => {
       .map((entry) => (entry.body as { t?: string }).t ?? "")
       .filter((t) => t === "queued" || t === "dequeue");
     expect(records).toEqual(["queued", "dequeue"]);
+    const workload = { kind: "control", id: "control-expired", attempt: 1 } as const;
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toMatchObject({
+      kind: "dequeued",
+      reason: "expired",
+    });
+    await expect(fixture.restart().acquireRoot(
+      workload,
+      { maxCalls: 1 },
+      { admissionClass: "interactive", entry: "conversation-input" },
+      context,
+    )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
   it("rejects invalid admission requests before any queue side-effect", async () => {
@@ -232,11 +244,33 @@ describe("ExecutorResourceGovernor", () => {
       context,
     )).resolves.toEqual(lease);
     expect(await fixture.log.readAll()).toHaveLength(recordCount);
+    await expect(fixture.governor.inspectImmediateRoot(workload)).resolves.toEqual({
+      kind: "reservation",
+      state: "active",
+      lease,
+    });
+    const terminalContext = {
+      ...context,
+      deadlineAt: "2026-07-20T00:00:30.000Z",
+    };
+    await fixture.governor.settle(lease, terminalContext);
+    await fixture.governor.release(lease, terminalContext);
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toEqual({
+      kind: "reservation",
+      state: "released",
+      lease,
+    });
+    await expect(fixture.restart().acquireRoot(
+      workload,
+      { maxCalls: 1 },
+      origin,
+      context,
+    )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
 
     const state = await fixture.governor.snapshot();
     expect([...state.reservations.values()].filter(
       (reservation) => reservation.depth === 0 && reservation.state === "active",
-    )).toHaveLength(1);
+    )).toHaveLength(0);
   });
 
   it("rechecks control capacity at reserve and retains queued work for retry", async () => {

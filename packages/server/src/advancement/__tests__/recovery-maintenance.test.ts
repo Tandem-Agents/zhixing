@@ -27,20 +27,35 @@ import type {
 import { protocolDigest } from "@zhixing/core/protocol";
 
 function fakeResources(): ResourceReservationPort {
-  const leaseFor = (id: string): ImmediateRootResourceLease => ({
-    v: 1,
-    reservationId: `rsv-${id}`,
-    admissionClass: "advancement",
-    workload: { kind: "control", id, attempt: 1 },
-    scopeBinding: { kind: "control", subject: id },
-    audience: {},
-    budget: { maxCalls: 8 },
-    domain: { kind: "anchor", anchorEpoch: 1 },
-    issuedAt: "2026-01-01T00:00:00.000Z",
-    expiry: "2026-01-01T01:00:00.000Z",
-    digest: "sha256:" + "0".repeat(64),
-    signature: { alg: "test", keyId: "test", sig: "sha256:" + "0".repeat(64) },
-  });
+  const leaseFor = (
+    workload: Parameters<ResourceReservationPort["acquireRoot"]>[0],
+    budget: Parameters<ResourceReservationPort["acquireRoot"]>[1],
+    audience: Parameters<ResourceReservationPort["acquireRoot"]>[4] = {
+      executorId: "executor-local",
+    },
+    scopeBinding: Parameters<ResourceReservationPort["acquireRoot"]>[5] = {
+      kind: "control",
+      subject: workload.id,
+    },
+  ): ImmediateRootResourceLease => {
+    const unsigned = {
+      v: 1 as const,
+      reservationId: `rsv-${workload.id}`,
+      admissionClass: "advancement" as const,
+      workload,
+      scopeBinding,
+      audience,
+      budget,
+      domain: { kind: "anchor" as const, anchorEpoch: 1 },
+      issuedAt: "2026-01-01T00:00:00.000Z",
+      expiry: "2026-01-01T01:00:00.000Z",
+    };
+    return {
+      ...unsigned,
+      digest: protocolDigest("ResourceLease", 1, unsigned),
+      signature: { alg: "test", keyId: "test", sig: "test" },
+    };
+  };
   return {
     enqueueRoot: async () => {},
     prepareAssignmentRoot: async () => {
@@ -49,7 +64,9 @@ function fakeResources(): ResourceReservationPort {
     prepareSystemJobRoot: async () => {
       throw new Error("unused");
     },
-    acquireRoot: async (workload) => leaseFor(String(workload.id)),
+    acquireRoot: async (workload, budget, _origin, _ctx, audience, scopeBinding) =>
+      leaseFor(workload, budget, audience, scopeBinding),
+    inspectImmediateRoot: async () => ({ kind: "absent" }),
     acquireChild: async () => {
       throw new Error("unused");
     },

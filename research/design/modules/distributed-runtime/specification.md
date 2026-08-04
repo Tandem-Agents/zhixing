@@ -65,7 +65,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 | `WindowCompactInstruction` | ≙ 现有 `WindowCompact` @ `packages/core/src/context/window/types.ts`（S3 明确其"幂等缓存更新指令"语义） | windowCompact 指令 |
 | `TaskListState` | 现有同名 @ `packages/core/src/conversation/types.ts` | 任务清单状态 |
 | `TaskListOp` | 本文冻结（§1.3b；现状为整份状态替换 `updateTaskListState`，首个 op 即 set 全量） | 任务清单操作 |
-| `AdvancementControlEvent` | ≙ 现有 `AdvancementStoreEvent` @ `packages/core/src/advancement/types.ts:315`（控制日志十类事件的既有判别联合，直接 import type） | 推进控制日志事件族 |
+| `AdvancementControlEvent` | ≙ 现有 `AdvancementStoreEvent` @ `packages/core/src/advancement/types.ts`（控制日志的既有判别联合，直接 import type） | 推进控制日志事件族；含窄域 review-attempt 相位事实 |
 | `AdvancementSnapshot` | ≙ 现有 `AdvancementSession` @ `packages/core/src/advancement/types.ts`（S1 直接 import type；读结果不落 log，体量无阈值约束） | 推进状态快照 |
 | `TrustRule` | ≙ 现有 `PermissionRule` @ `packages/core/src/security/types.ts:238` | 本机信任规则存储 DTO |
 | `PortableTrustRule` | 本文冻结（§1.3b）；由 `TrustRule` 显式投影，排除本机路径与可变命中统计 | 跨设备签名规则 DTO |
@@ -2299,7 +2299,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 
 ## 十、资源治理规格
 
-- 层级：顶层 run / job = 根 lease；编排子节点 = 父的有界子 lease（预算 ≤ 父剩余）；推进准入 / 裁判 / 收场 = 独立 control-class 根 lease；取证 = 所属 review lease 的 executor 侧子 lease（EvidenceRequest 直接携带，§5.7）。
+- 层级：顶层 run / job = 根 lease；编排子节点 = 父的有界子 lease（预算 ≤ 父剩余）；推进准入 / 裁判 / 收场 = 独立 control-class 根 lease；取证 = 所属 review lease 的 executor 侧子 lease（EvidenceRequest 直接携带，§5.7）。裁判根由 conversation owner 日志中的全等 run review-attempt 唯一拥有：lineage 由 sessionId + runRecordRef 确定派生，generation 严格前进并冻结 workload / budget / audience / scope / requestId，进程内同 run 只允许一个调用者。
 - 结算：`consume(usageId)` 幂等累计 → `settle` 单次结算 → `release` 归还余额；expiry 未 settle 由 governor `reclaim`（按已 consume 记账、余额归还）；全部动作落 GovernorRecord（§4.3）。**计量线性化点是每次真实外部调用的响应边界**，协议冻结为"耐久预占 → 消费收束"：①外调前以稳定 `usageId` 落盘 `usage-reserved`（calls 恒占 1，tokens/cost 按请求上限；并发调用各自预占，租约剩余额度不足即拒绝调用）——外部调用是真实副作用，先落盘再外调（§6 纪律）；②每次真实响应以同 `usageId` consume 实际用量，预占差额随之归还；③结果未知（超时、崩溃恢复扫描到未收束的 `usage-reserved`）按预占上限**保守 consume 计终值**，不设事后修正通道——宁多勿少，敞口以预占上限为界。失败、abort 与非 completed 路径先落盘已知 consume 再按终结表收束；run/job 最终水位载体：committed 走 SealedBundle `usageFinal` 对账，其余终态以已落盘 consume 与 UsageReport 水位为准（无可核验水位则 reclaim）。禁止以工具调用计数替代 provider 调用计量，禁止只在成功终态汇总补记。
 - **全 workload 租约终结表**（每个 workload kind 的每个终态都有显式终结动作，正常路径零"依赖过期回收"；全部动作幂等）：
 
@@ -2314,7 +2314,8 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | run / job | uncertain → queued（证实未 started 重派） | **旧 assignment 租约先终结**（未 consume 全额 release；失联无对账则 reclaim），新 assignment 以 attempt+1 重取新租约 |
 | run / job | uncertain 未裁决 | 挂起不终结；executor 失联超期由 `reclaim` 兜底 |
 | system job | committed / failed / cancelled | 见 6.2b（同 envelope settle / release，已冻结） |
-| control（准入 / 裁判 / 收场） | 调用返回（成功 / 失败 / abort） | 调用方 finally 内 settle + release——ControlCompletionPort / AdvancementReviewerPort 的调用合同 |
+| control（准入 / 收场） | 调用返回（成功 / 失败 / abort） | 调用方 finally 内 settle + release——ControlCompletionPort 的调用合同 |
+| control（裁判） | review-attempt `consumed / deferred / expired` 已在 owner 日志耐久 | owner 终态先于 settle + release；`consumed` 与 review 同批，`invoking` 恢复先转 deferred 且零同根 provider 重跑；acquire 返回后须重读同代 active+started 事实，取消/终态竞争胜出则零外调并清理根；terminal attempt 遗留 queued root 时以同一冻结合同有界驱动，获准即 settle+release，未获准则 deadline 出队；启动、定向恢复及 closed-session 早退前都先幂等清理 terminal attempt |
 | evidence | EvidenceBundle 交付 / typed-stale 保持 deferred 的终态 | executor 侧子租约 settle + release，随 intake 上报对账 |
 | orchestration-node | 节点终态（completed / failed / aborted） | 子租约终结；父租约随所属 run 的行走 |
 - 启动与周期恢复按业务归属单一终结：assignment / system-job 根及其子租约只由对应业务恢复所有者在同轮收敛 anchor / executor 双半边，先把未收束预占按上限保守 consume，再写业务终态与资源终结；通用 governor 扫描只回收无业务归属的 control 根及孤儿资源。回收顺序子先于父，重复扫描零重复记账。
@@ -2322,7 +2323,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 - **根 lease 候选生命周期**（适用 `prepareAssignmentRoot / prepareSystemJobRoot`。两者在资源端口内按调用 deadline 有界等待 WDRR 候选；瞬时 pending 只触发重试，deadline 到达则返回可识别的延期结果并保留耐久 queued，由所属 run / job 恢复重驱，绝不写业务失败或单独 dequeue。control 类 `acquireRoot` 同样入队、共用同一公平治理面——它是"排队至准入并原子激活"的便捷接口：调用方同步等待，出队即原子 `reserve` 返回激活租约，无候选阶段；排队中放弃或超时以 `dequeue(cancelled|expired)` 单独落盘（无伴随业务终态），激活后终结走 finally 行。"即时激活"仅指其 `reserve` 无需第二个归属事实，不豁免准入）：
   1. **候选身份与重试**：签名候选恒为零权内存对象，prepare 不落租约日志、只对 WDRR 当前可调度队首授予；排他签发权是 governor 进程内**占用态** `(reservationId, 完整候选, expiry)`。同一 workload attempt 的 assignment / reservation 身份必须可稳定重建，禁止因重启或响应丢失改用随机新身份遗弃旧队列项；占用未过期时重复 prepare **幂等返回同一候选**，不重签；workload 重派提高 `attempt` 后才进入新身份。
   2. **过期**：占用短 TTL，过期即释放签发权，队首可重新授予（新候选替换占用、旧候选随之失效）。占用态是可丢弃的调度运行态而非权威事实：reservation 端口只在域内进程装配（§3.4），候选持有者与 governor 同崩溃域、崩溃同灭，恢复 reducer 仅凭耐久流重建 `queued → reserved | dequeued` 投影。
-  3. **激活与出队竞争**：`queued` 的耐久出边恰有两条。assignment / system-job 的 `reserve` 提交必须匹配当前未过期候选；control 根在同一 governor 事务内完成队首选择、容量复验、签发和 `reserve`，不得产生候选窗口。业务终态按 workload 身份原子写 `dequeue` tombstone——队列项尚未产生时仍阻断其迟到入队，已 reserve 后则拒绝并改走租约终结表。两者由同一物理日志 append 顺序线性化，先落盘定局。
+  3. **激活与出队竞争**：`queued` 的耐久出边恰有两条。assignment / system-job 的 `reserve` 提交必须匹配当前未过期候选；control 根在同一 governor 事务内完成队首选择、容量复验、签发和 `reserve`，不得产生候选窗口。业务终态按 workload 身份原子写 `dequeue` tombstone——队列项尚未产生时仍阻断其迟到入队，已 reserve 后则拒绝并改走租约终结表。两者由同一物理日志 append 顺序线性化，先落盘定局。control exact replay 必须把 absent / queued / dequeued 与 active / settled / released / reclaimed 作为稳定分类返回；只有 active 全等 lease 可继续，终态 lease 不得作为可调用凭证返回。
   4. **调度语义**：占用中的队首使其 admissionClass **类内推进暂驻**、其它类照常调度；占用过期、出队或晋升后类内立即推进——TTL 有限加出队即时，机械保证队首失联后后继有界获准且不外溢阻塞他类。**公平状态（各类差额与队列内容）由 `queued / reserve / dequeue` 耐久序列确定性重建**——恢复后以重建差额继续调度即无漂移；占用暂驻等瞬时决策是运行态、不落日志也不重放（占用窗口内他类先行不消耗队首类差额，无公平损失），公平性由满载与恢复测试共同验收。
 - 分域：锚点域根 lease 由 anchor governor 签发；本地域根 lease 由设备本地耐久 governor 签发（绑 `localDomainId / localGovernorEpoch`），只消费本机额度、不授权全局预算；两域同一租约合同与 guard；收编不追认本地消费为锚点预算；双拓扑测试随 S4 / S8 验收。
 - 租约时间与重放授权：首次耐久 `reserve` 所在 envelope 的 `at` 是本地域接收时刻；接收端按 §1.1 校验签发者区间并冻结剩余 TTL，进程内只用本地单调 deadline。assignment 资源调用的 capability 同样以 `assigned / received` 所在 envelope 的 `at` 冻结单调 deadline，任一 deadline 到期即拒绝 fresh 写。重启从耐久接收时刻与剩余 TTL 恢复，墙钟回拨不得延长或复活租约/能力。exact durable replay 仍必须通过 principal×method guard、凭证签名、capId 曾在对应 `assigned / received` 中耐久接纳，以及 scope / assignment / executor / lease 静态绑定；只豁免当前激活、吊销和 deadline，命中后零追加返回原结果。

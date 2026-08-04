@@ -16,6 +16,11 @@ import {
 } from "../protocol/index.js";
 import { assertUniqueConfirmedRubricContractContentIds } from "./contract.js";
 import { advancementEvidenceRequestId } from "./evidence-identity.js";
+import {
+  advancementReviewAttemptId,
+  advancementReviewLineageId,
+  advancementReviewRootRequestId,
+} from "./review-attempt-identity.js";
 
 /**
  * 一次推进写入的批次合法性谓词——权威日志写入侧的唯一领域门禁：与文件
@@ -233,9 +238,110 @@ export function assertAdvancementEventBatchLegal(
         }
         break;
       }
+      case "review_attempt_transitioned": {
+        const session = requireActive(work, event.sessionId);
+        const attempt = event.attempt;
+        const expectedLineage = advancementReviewLineageId(
+          event.sessionId,
+          attempt.runRecordRef,
+        );
+        if (
+          attempt.lineageId !== expectedLineage ||
+          attempt.runIndex !== attempt.runRecordRef.runIndex ||
+          attempt.root.workload.kind !== "control" ||
+          attempt.root.workload.id !==
+            advancementReviewAttemptId(attempt.lineageId, attempt.generation) ||
+          attempt.root.workload.attempt !== 1 ||
+          attempt.root.requestId !==
+            advancementReviewRootRequestId(attempt.lineageId, attempt.generation) ||
+          (attempt.root.audience === undefined) !==
+            (attempt.root.scopeBinding === undefined) ||
+          (attempt.root.scopeBinding !== undefined &&
+            (attempt.root.scopeBinding.kind !== "conversation" ||
+              attempt.root.scopeBinding.conversationId !== session.conversationId))
+        ) {
+          throw new Error(
+            "AdvancementStore: review attempt does not bind its accepted run and root contract",
+          );
+        }
+        const current = session.reviewAttempts.find((candidate) =>
+          sameRunRecordRef(candidate.runRecordRef, attempt.runRecordRef),
+        );
+        if (attempt.phase === "started") {
+          const legacyGeneration = session.evidenceGenerations.find(
+            (entry) => entry.runId === attempt.runId,
+          )?.generation;
+          if (
+            current
+              ? !isTerminalReviewAttempt(current.phase) ||
+                attempt.generation !== current.generation + 1 ||
+                attempt.runId !== current.runId ||
+                attempt.lineageId !== current.lineageId
+              : attempt.generation !== (legacyGeneration ?? 0) + 1
+          ) {
+            throw new Error(
+              "AdvancementStore: review attempt generation must advance from a terminal attempt",
+            );
+          }
+          break;
+        }
+        if (
+          !current ||
+          current.lineageId !== attempt.lineageId ||
+          current.generation !== attempt.generation ||
+          current.runId !== attempt.runId ||
+          current.runIndex !== attempt.runIndex ||
+          canonicalize(current.root) !== canonicalize(attempt.root)
+        ) {
+          throw new Error(
+            "AdvancementStore: review attempt transition changed its frozen identity",
+          );
+        }
+        if (attempt.phase === "invoking") {
+          if (current.phase !== "started") {
+            throw new Error(
+              "AdvancementStore: only a started review attempt can begin invocation",
+            );
+          }
+          break;
+        }
+        if (
+          attempt.phase === "consumed" &&
+          (current.phase !== "invoking" ||
+            !session.runs.some(
+              (review) =>
+                review.runRecordRef !== undefined &&
+                sameRunRecordRef(review.runRecordRef, attempt.runRecordRef),
+            ))
+        ) {
+          throw new Error(
+            "AdvancementStore: consumed review attempt requires its run review in the same batch",
+          );
+        }
+        if (
+          attempt.phase === "deferred" && current.phase !== "invoking"
+        ) {
+          throw new Error(
+            "AdvancementStore: deferred review attempt requires an unknown invocation outcome",
+          );
+        }
+        if (
+          attempt.phase === "expired" &&
+          current.phase !== "started" &&
+          current.phase !== "invoking"
+        ) {
+          throw new Error(
+            "AdvancementStore: expired review attempt requires a pending attempt",
+          );
+        }
+        break;
+      }
       case "evidence_requested": {
         const session = requireActive(work, event.sessionId);
         const attempt = event.attempt;
+        const reviewAttempt = session.reviewAttempts.find(
+          (candidate) => candidate.runId === attempt.request.runId,
+        );
         const currentGeneration = session.evidenceGenerations.find(
           (entry) => entry.runId === attempt.request.runId,
         );
@@ -253,7 +359,12 @@ export function assertAdvancementEventBatchLegal(
               attempt.attempt,
             ) ||
           attempt.request.lease.workload.id !== attempt.requestId ||
-          attempt.request.lease.workload.attempt !== attempt.generation
+          attempt.request.lease.workload.attempt !== attempt.generation ||
+          (reviewAttempt !== undefined &&
+            (reviewAttempt.phase !== "started" ||
+              reviewAttempt.lineageId !== attempt.reviewId ||
+              reviewAttempt.generation !== attempt.generation)) ||
+          (reviewAttempt === undefined && session.reviewAttempts.length > 0)
         ) {
           throw new Error(
             "AdvancementStore: evidence attempt does not bind its signed request",
@@ -267,7 +378,8 @@ export function assertAdvancementEventBatchLegal(
                 : attempt.generation !== currentGeneration.generation + 1 ||
                   attempt.attempt !== 1 ||
                   currentRunPending !== undefined)
-            : attempt.generation !== 1 || attempt.attempt !== 1
+            : attempt.generation !== (reviewAttempt?.generation ?? 1) ||
+              attempt.attempt !== 1
         ) {
           throw new Error(
             "AdvancementStore: evidence generation must advance monotonically",
@@ -332,6 +444,19 @@ export function assertAdvancementEventBatchLegal(
     }
     applyAdvancementEvent(work, event);
   }
+}
+
+function sameRunRecordRef(
+  left: { readonly shardId: string; readonly runIndex: number },
+  right: { readonly shardId: string; readonly runIndex: number },
+): boolean {
+  return left.shardId === right.shardId && left.runIndex === right.runIndex;
+}
+
+function isTerminalReviewAttempt(
+  phase: "started" | "invoking" | "consumed" | "deferred" | "expired",
+): boolean {
+  return phase === "consumed" || phase === "deferred" || phase === "expired";
 }
 
 function requireSession(

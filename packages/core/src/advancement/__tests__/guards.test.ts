@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { assertAdvancementEventBatchLegal } from "../guards.js";
 import { advancementEvidenceRequestId } from "../evidence-identity.js";
+import {
+  advancementReviewAttemptId,
+  advancementReviewAttemptMutationId,
+  advancementReviewLineageId,
+} from "../review-attempt-identity.js";
 import { applyAdvancementEvent, type AdvancementFoldMap } from "../reducer.js";
 import { evidenceRequestDigest, protocolDigest } from "../../protocol/index.js";
 import type {
   AdvancementEvidenceAttempt,
   AdvancementControlEvent,
   AdvancementProxyMessage,
+  AdvancementReviewAttempt,
   AdvancementRunReview,
   ConfirmedRubricSnapshot,
   RubricContractDraftSnapshot,
@@ -337,7 +343,126 @@ describe("assertAdvancementEventBatchLegal", () => {
       settlement: "deferred",
     }])).toThrow("does not bind a pending request");
   });
+
+  it("review attempt 只允许严格前进代际，并把 review 与 consumed 绑定", () => {
+    const fold = activeFold();
+    const started = reviewAttempt("started", 1);
+    const startedEvent = reviewAttemptTransition(started);
+    expect(() => assertAdvancementEventBatchLegal(activeFold(), [
+      reviewAttemptTransition({
+        ...started,
+        root: { ...started.root, requestId: "unstable-root-request" },
+      }),
+    ])).toThrow("does not bind its accepted run and root contract");
+    expect(() => assertAdvancementEventBatchLegal(activeFold(), [
+      reviewAttemptTransition({
+        ...started,
+        root: {
+          ...started.root,
+          audience: { executorId: "executor-1" },
+        },
+      }),
+    ])).toThrow("does not bind its accepted run and root contract");
+    expect(() => assertAdvancementEventBatchLegal(fold, [startedEvent])).not.toThrow();
+    applyAdvancementEvent(fold, startedEvent);
+
+    expect(() =>
+      assertAdvancementEventBatchLegal(fold, [reviewAttemptTransition(started)]),
+    ).toThrow("generation must advance");
+
+    const invoking = reviewAttempt("invoking", 1);
+    const invokingEvent = reviewAttemptTransition(invoking);
+    expect(() => assertAdvancementEventBatchLegal(fold, [invokingEvent])).not.toThrow();
+    applyAdvancementEvent(fold, invokingEvent);
+
+    const consumed = reviewAttempt("consumed", 1);
+    expect(() =>
+      assertAdvancementEventBatchLegal(fold, [reviewAttemptTransition(consumed)]),
+    ).toThrow("requires its run review");
+
+    const boundReview = {
+      ...reviewed,
+      review: review({
+        decision: "passed",
+        unmetCriteria: [],
+        selectedFailureHandlingId: undefined,
+        proxyMessageId: undefined,
+        runRecordRef: { shardId: "shard-1", runIndex: 0 },
+      }),
+    } as AdvancementControlEvent;
+    expect(() =>
+      assertAdvancementEventBatchLegal(fold, [
+        boundReview,
+        reviewAttemptTransition(consumed),
+      ]),
+    ).not.toThrow();
+
+    applyAdvancementEvent(fold, boundReview);
+    expect(() =>
+      assertAdvancementEventBatchLegal(fold, [reviewAttemptTransition(consumed)]),
+    ).not.toThrow();
+  });
+
+  it("review attempt mutation identity 由代际与相位稳定派生", () => {
+    const first = advancementReviewAttemptMutationId("lineage-1", 2, "invoking");
+    expect(advancementReviewAttemptMutationId("lineage-1", 2, "invoking"))
+      .toBe(first);
+    expect(advancementReviewAttemptMutationId("lineage-1", 2, "deferred"))
+      .not.toBe(first);
+  });
 });
+
+function reviewAttempt(
+  phase: AdvancementReviewAttempt["phase"],
+  generation: number,
+): AdvancementReviewAttempt {
+  const runRecordRef = { shardId: "shard-1", runIndex: 0 };
+  const lineageId = advancementReviewLineageId("session-1", runRecordRef);
+  const id = advancementReviewAttemptId(lineageId, generation);
+  const root = {
+    workload: { kind: "control" as const, id, attempt: 1 },
+    budget: { maxCalls: 8, maxTokens: 300_000 },
+    requestId: `advancement-review-root:${id}`,
+  };
+  const unsignedLease = {
+    v: 1 as const,
+    reservationId: `reservation:${id}`,
+    admissionClass: "advancement" as const,
+    workload: root.workload,
+    scopeBinding: { kind: "control" as const, subject: id },
+    audience: { executorId: "executor-1" },
+    budget: root.budget,
+    domain: { kind: "anchor" as const, anchorEpoch: 1 },
+    issuedAt: NOW,
+    expiry: "2026-08-02T01:00:00.000Z",
+  };
+  const rootLease = {
+    ...unsignedLease,
+    digest: protocolDigest("ResourceLease", 1, unsignedLease),
+    signature: { alg: "test", keyId: "test", sig: "test" },
+  };
+  return {
+    lineageId,
+    generation,
+    runId: "accepted-run:shard-1:0",
+    runIndex: 0,
+    runRecordRef,
+    phase,
+    root,
+    ...(phase === "started" ? {} : { rootLease }),
+  };
+}
+
+function reviewAttemptTransition(
+  attempt: AdvancementReviewAttempt,
+): AdvancementControlEvent {
+  return {
+    type: "review_attempt_transitioned",
+    timestamp: NOW,
+    sessionId: "session-1",
+    attempt,
+  };
+}
 
 function evidenceAttempt(
   generation: number,
