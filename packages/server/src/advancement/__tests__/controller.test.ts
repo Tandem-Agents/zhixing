@@ -15,6 +15,7 @@ import type {
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
+import { protocolDigest } from "@zhixing/core/protocol";
 
 function fakeResources(): ResourceReservationPort {
   const leaseFor = (id: string): ImmediateRootResourceLease => ({
@@ -52,6 +53,19 @@ function fakeResources(): ResourceReservationPort {
 
 function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };
+}
+
+function originalTaskAdmissionIntent() {
+  return {
+    turnId: "turn-1",
+    surfacePrincipal: "surface:test",
+    turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
+    inputDigest: protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      task("把测试修到全绿"),
+    ),
+  };
 }
 
 function draft(): RubricContractDraftSnapshot {
@@ -190,7 +204,12 @@ async function makeActive(store: AdvancementStore): Promise<void> {
     pendingRubricDraft: draft(),
     createdAt: "2026-01-01T00:00:00.000Z",
   });
-  await store.confirmRubric("conv-1", "session-1", confirmed());
+  await store.confirmRubric(
+    "conv-1",
+    "session-1",
+    confirmed(),
+    originalTaskAdmissionIntent(),
+  );
 }
 
 async function makeStore() {
@@ -366,16 +385,24 @@ describe("AdvancementController.afterTurnCommitted", () => {
   it("accepted proxy run 会先清理 outstanding，再按本轮验收继续推进", async () => {
     const store = await makeStore();
     await makeActive(store);
-    await store.enqueueProxyMessage("conv-1", "session-1", {
-      id: "proxy-1",
-      sessionId: "session-1",
-      reviewId: "review-0",
-      content: task("请修复失败测试后再继续。"),
-      rubricFailureHandlingId: "fix-tests",
-      variables: {},
-      attribution: review().attribution,
-      createdAt: "2026-01-01T00:02:30.000Z",
-    });
+    await store.appendRunReviewWithProxyMessage(
+      "conv-1",
+      "session-1",
+      review({
+        id: "review-0",
+        proxyMessageId: "proxy-1",
+      }),
+      {
+        id: "proxy-1",
+        sessionId: "session-1",
+        reviewId: "review-0",
+        content: task("请修复失败测试后再继续。"),
+        rubricFailureHandlingId: "fix-tests",
+        variables: {},
+        attribution: review().attribution,
+        createdAt: "2026-01-01T00:02:30.000Z",
+      },
+    );
     const controller = new AdvancementController({
       store,
       resources: fakeResources(),      reviewer: {
@@ -416,6 +443,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session_created",
       "rubric_confirmed",
+      "run_reviewed",
       "proxy_enqueued",
       "proxy_settled",
       "run_reviewed",
@@ -426,16 +454,24 @@ describe("AdvancementController.afterTurnCommitted", () => {
   it("advancement 来源 run 缺少匹配 metadata 时退出推进", async () => {
     const store = await makeStore();
     await makeActive(store);
-    await store.enqueueProxyMessage("conv-1", "session-1", {
-      id: "proxy-1",
-      sessionId: "session-1",
-      reviewId: "review-0",
-      content: task("请修复失败测试后再继续。"),
-      rubricFailureHandlingId: "fix-tests",
-      variables: {},
-      attribution: review().attribution,
-      createdAt: "2026-01-01T00:02:30.000Z",
-    });
+    await store.appendRunReviewWithProxyMessage(
+      "conv-1",
+      "session-1",
+      review({
+        id: "review-0",
+        proxyMessageId: "proxy-1",
+      }),
+      {
+        id: "proxy-1",
+        sessionId: "session-1",
+        reviewId: "review-0",
+        content: task("请修复失败测试后再继续。"),
+        rubricFailureHandlingId: "fix-tests",
+        variables: {},
+        attribution: review().attribution,
+        createdAt: "2026-01-01T00:02:30.000Z",
+      },
+    );
     const reviewer = { review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
     const controller = new AdvancementController({
       store,

@@ -193,6 +193,28 @@ export class RubricContractBuilder {
     asset: RubricAsset,
     ranked: readonly RankedRubric[],
   ): RubricContractDraftSnapshot {
+    const content: RubricContractContentSnapshot = {
+      passCriteria: asset.document.content.passCriteria,
+      evidenceRequirements: asset.document.content.evidenceRequirements.map(
+        (item): EvidenceRequirementSpec => {
+          const kind = inferEvidenceKind(item.text);
+          return {
+            id: item.id,
+            kind,
+            description: item.text,
+            required: canBeRequired(kind, undefined, this.evidenceCapabilities),
+          };
+        },
+      ),
+      failureHandling: asset.document.content.failureHandling.map(
+        (item): FailureHandlingSpec => ({
+          id: item.id,
+          scenario: item.scenario,
+          reply: item.reply,
+        }),
+      ),
+    };
+    assertUniqueRubricContractContentIds(content);
     return {
       draftId: randomUUID(),
       originalTurnId: input.originalTurnId,
@@ -223,27 +245,7 @@ export class RubricContractBuilder {
       ]),
       title: asset.title,
       description: asset.description,
-      content: {
-        passCriteria: asset.document.content.passCriteria,
-        evidenceRequirements: asset.document.content.evidenceRequirements.map(
-          (item): EvidenceRequirementSpec => {
-            const kind = inferEvidenceKind(item.text);
-            return {
-              id: item.id,
-              kind,
-              description: item.text,
-              required: canBeRequired(kind, undefined, this.evidenceCapabilities),
-            };
-          },
-        ),
-        failureHandling: asset.document.content.failureHandling.map(
-          (item): FailureHandlingSpec => ({
-            id: item.id,
-            scenario: item.scenario,
-            reply: item.reply,
-          }),
-        ),
-      },
+      content,
       createdAt: this.now(),
     };
   }
@@ -525,7 +527,7 @@ function normalizeGeneratedRubricDraft(
     throw new Error("rubric draft must be an object");
   }
   const record = value as Record<string, unknown>;
-  return {
+  const normalized = {
     title: normalizeRequiredString(record.title, "title").slice(0, 80),
     description: normalizeRequiredString(
       record.description,
@@ -540,6 +542,8 @@ function normalizeGeneratedRubricDraft(
       failureHandling: normalizeFailureHandling(record.failureHandling),
     },
   };
+  assertUniqueRubricContractContentIds(normalized.content);
+  return normalized;
 }
 
 function normalizeStringList(value: unknown, field: string): string[] {
@@ -660,6 +664,7 @@ function normalizeId(value: unknown, fallback: string): string {
 function sealContractContent(
   content: RubricContractContentSnapshot,
 ): ConfirmedRubricContentSnapshot {
+  assertUniqueRubricContractContentIds(content);
   return {
     passCriteria: content.passCriteria.map((text, index) => ({
       id: `pc-${index + 1}`,
@@ -670,6 +675,42 @@ function sealContractContent(
       : {}),
     failureHandling: content.failureHandling,
   };
+}
+
+export function assertUniqueRubricContractContentIds(
+  content: Pick<
+    RubricContractContentSnapshot,
+    "evidenceRequirements" | "failureHandling"
+  >,
+): void {
+  assertUniqueIds(
+    content.evidenceRequirements ?? [],
+    "evidence requirement",
+  );
+  assertUniqueIds(content.failureHandling, "failure handling");
+}
+
+export function assertUniqueConfirmedRubricContractContentIds(
+  content: ConfirmedRubricContentSnapshot,
+): void {
+  assertUniqueRubricContractContentIds(content);
+  assertUniqueIds(content.passCriteria, "pass criterion");
+}
+
+function assertUniqueIds(
+  values: readonly { readonly id: string }[],
+  field: string,
+): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value.id.trim()) {
+      throw new Error(`${field} id must be non-empty`);
+    }
+    if (seen.has(value.id)) {
+      throw new Error(`${field} id must be unique: ${value.id}`);
+    }
+    seen.add(value.id);
+  }
 }
 
 /**

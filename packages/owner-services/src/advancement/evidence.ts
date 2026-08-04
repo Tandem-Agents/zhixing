@@ -2,13 +2,13 @@ import {
   canonicalize,
   createSignedEvidenceRequest,
   evidenceRequestDigest,
-  protocolDigest,
   validateCapabilityDescriptor,
   validateEvidenceBundle,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import {
+  advancementEvidenceRequestId,
   extractText,
   isObjectiveEvidenceKind,
   type AdvancementEvidenceOutcome,
@@ -62,6 +62,7 @@ export interface AdvancementEvidenceReviewInput {
   readonly session: AdvancementSession;
   readonly runId: string;
   readonly reviewId: string;
+  readonly generation?: number;
   readonly runRecord: RunRecordInput;
   readonly rootLease: ImmediateRootResourceLease;
   readonly target?: AdvancementEvidenceTarget;
@@ -137,19 +138,31 @@ export class AdvancementEvidenceCoordinator {
     }
 
     let lastRequestId: string | undefined;
+    const generation = input.generation ?? 1;
     for (let offset = 0; offset <= MAX_STALE_RETRIES; offset += 1) {
       input.abort.throwIfAborted();
-      const attempt = input.rootLease.workload.attempt + offset;
-      const requestId = evidenceRequestId(input.reviewId, attempt);
-      lastRequestId = requestId;
-      const existing = input.session.evidence?.pending.find(
-        (pending) => pending.requestId === requestId,
-      );
+      const attempt = 1 + offset;
+      const carried =
+        offset === 0
+          ? input.session.evidence?.pending.find(
+              (pending) => pending.request.runId === input.runId,
+            )
+          : undefined;
+      let requestId =
+        carried?.requestId ??
+        advancementEvidenceRequestId(input.reviewId, generation, attempt);
+      let existing =
+        carried ??
+        input.session.evidence?.pending.find(
+          (pending) => pending.requestId === requestId,
+        );
       let request = existing?.request;
+      const hasDurableOutcome = existing?.outcome !== undefined;
       if (
         !request ||
-        request.lease.parentDigest !== input.rootLease.digest ||
-        Date.parse(request.expiry) <= Date.parse(this.#now())
+        (!hasDurableOutcome &&
+          (request.lease.parentDigest !== input.rootLease.digest ||
+            Date.parse(request.expiry) <= Date.parse(this.#now())))
       ) {
         if (existing) {
           await this.#options.store.settleEvidence(
@@ -158,38 +171,56 @@ export class AdvancementEvidenceCoordinator {
             existing.requestId,
             "deferred",
           );
+          existing = undefined;
+          request = undefined;
+          requestId = advancementEvidenceRequestId(
+            input.reviewId,
+            generation,
+            attempt,
+          );
         }
         const child = await this.#options.resources.acquireChild(
           input.rootLease,
-          { kind: "evidence", id: requestId, attempt },
+          { kind: "evidence", id: requestId, attempt: generation },
           { maxCalls: 1 },
           evidenceContext(requestId),
         );
-        request = createEvidenceRequest({
-          requestId,
-          reviewId: input.reviewId,
-          runId: input.runId,
-          conversationId: input.session.conversationId,
-          target: { ...target, workspace },
-          items,
-          lease: child,
-          now: this.#now(),
-          verifier: this.#options.verifier,
-          signer: this.#options.signer,
-        });
-        await this.#options.store.appendEvidenceRequest(
-          input.session.conversationId,
-          input.session.id,
-          {
+        try {
+          request = createEvidenceRequest({
             requestId,
             reviewId: input.reviewId,
-            attempt,
-            request,
-            itemRequirements: mappings,
-            requestDigest: evidenceRequestDigest(request),
-          },
-        );
+            runId: input.runId,
+            conversationId: input.session.conversationId,
+            target: { ...target, workspace },
+            items,
+            lease: child,
+            now: this.#now(),
+            verifier: this.#options.verifier,
+            signer: this.#options.signer,
+          });
+          await this.#options.store.appendEvidenceRequest(
+            input.session.conversationId,
+            input.session.id,
+            {
+              requestId,
+              reviewId: input.reviewId,
+              generation,
+              attempt,
+              request,
+              itemRequirements: mappings,
+              requestDigest: evidenceRequestDigest(request),
+            },
+          );
+        } catch (error) {
+          await finishLease(
+            this.#options.resources,
+            child,
+            evidenceContext(requestId),
+          );
+          throw error;
+        }
       }
+      lastRequestId = requestId;
 
       let outcome: AdvancementEvidenceOutcome;
       try {
@@ -440,13 +471,6 @@ function isContractRelativePath(candidate: string): boolean {
   }
   const segments = candidate.replaceAll("\\", "/").split("/");
   return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
-}
-
-function evidenceRequestId(reviewId: string, attempt: number): string {
-  return `evidence:${protocolDigest("AdvancementEvidenceRequestId", 1, {
-    reviewId,
-    attempt,
-  }).slice("sha256:".length)}`;
 }
 
 function evidenceContext(requestId: string): AuthorityCallContext {

@@ -18,7 +18,10 @@ import type {
   Signature,
   UserTurnInput,
 } from "@zhixing/core/contracts";
-import type { AdvancementControlEvent } from "@zhixing/core/advancement";
+import {
+  advancementEvidenceRequestId,
+  type AdvancementControlEvent,
+} from "@zhixing/core/advancement";
 import {
   createSignedEvidenceRequest,
   protocolDigest,
@@ -170,6 +173,26 @@ function createdEvent(
   };
 }
 
+function confirmedEvent(): AdvancementControlEvent {
+  const originalUserTask = task("把测试修到全绿");
+  return {
+    type: "rubric_confirmed",
+    timestamp: NOW,
+    sessionId: "session-1",
+    confirmedRubric: confirmed(),
+    admissionIntent: {
+      turnId: "turn-1",
+      surfacePrincipal: "surface:test",
+      turnOrigin: { channel: "rpc", triggeredBy: "surface:test" },
+      inputDigest: protocolDigest(
+        "AdvancementOriginalTaskInput",
+        1,
+        originalUserTask,
+      ),
+    },
+  };
+}
+
 function review(extra: Partial<AdvancementRunReview> = {}): AdvancementRunReview {
   const value = {
     id: "review-1",
@@ -209,7 +232,7 @@ function proxyMessage(extra: Partial<AdvancementProxyMessage> = {}): Advancement
     content: task("请继续修复失败测试"),
     rubricFailureHandlingId: "fix-tests",
     variables: { unmet_criteria: "测试通过" },
-    attribution: { criteria: [] },
+    attribution: review().attribution,
     createdAt: NOW,
     ...extra,
   };
@@ -233,6 +256,7 @@ function signLease(
 }
 
 function evidenceRequest(): EvidenceRequest {
+  const requestId = advancementEvidenceRequestId("review-1", 1, 1);
   const parent = signLease({
     v: 1,
     reservationId: "rsv-review-1",
@@ -251,7 +275,7 @@ function evidenceRequest(): EvidenceRequest {
     parentId: parent.reservationId,
     parentDigest: parent.digest,
     admissionClass: "advancement",
-    workload: { kind: "evidence", id: "req-1", attempt: 1 },
+    workload: { kind: "evidence", id: requestId, attempt: 1 },
     scopeBinding: { kind: "conversation", conversationId: "conv-1", ownerEpoch: 1 },
     audience: { executorId: "executor-1" },
     budget: { maxCalls: 4 },
@@ -262,7 +286,7 @@ function evidenceRequest(): EvidenceRequest {
   return createSignedEvidenceRequest(
     {
       v: 1,
-      requestId: "req-1",
+      requestId,
       reviewId: "review-1",
       runId: "run-1",
       conversationId: "conv-1",
@@ -287,7 +311,7 @@ describe("AnchorSessionStateAdapter advancement", () => {
     expect((await read())?.status).toBe("awaiting-rubric-confirmation");
 
     await write([
-      { type: "rubric_confirmed", timestamp: NOW, sessionId: "session-1", confirmedRubric: confirmed() },
+      confirmedEvent(),
     ]);
     expect((await read())?.status).toBe("active");
 
@@ -303,7 +327,12 @@ describe("AnchorSessionStateAdapter advancement", () => {
     expect((await read())?.outstandingProxyMessageId).toBeUndefined();
 
     await write([
-      reviewedEvent({ id: "review-2", decision: "passed", proxyMessageId: undefined }),
+      reviewedEvent({
+        id: "review-2",
+        runIndex: 1,
+        decision: "passed",
+        proxyMessageId: undefined,
+      }),
       { type: "completed", timestamp: NOW, sessionId: "session-1", exit: exit("passed") },
     ]);
     const head = await read();
@@ -385,11 +414,11 @@ describe("AnchorSessionStateAdapter advancement", () => {
       "already has an open advancement session",
     );
     await write([
-      { type: "rubric_confirmed", timestamp: NOW, sessionId: "session-1", confirmedRubric: confirmed() },
+      confirmedEvent(),
     ]);
     await expect(
       write([
-        { type: "rubric_confirmed", timestamp: NOW, sessionId: "session-1", confirmedRubric: confirmed() },
+        confirmedEvent(),
       ]),
     ).rejects.toThrow("is not awaiting rubric confirmation");
     await expect(
@@ -403,7 +432,7 @@ describe("AnchorSessionStateAdapter advancement", () => {
     const { write, makeJournal } = await createHarness();
     await write([createdEvent()]);
     await write([
-      { type: "rubric_confirmed", timestamp: NOW, sessionId: "session-1", confirmedRubric: confirmed() },
+      confirmedEvent(),
     ]);
     await write([
       reviewedEvent(),
@@ -440,7 +469,7 @@ describe("AnchorSessionStateAdapter advancement", () => {
     const { write, adapter } = await createHarness();
     await write([createdEvent()]);
     await write([
-      { type: "rubric_confirmed", timestamp: NOW, sessionId: "session-1", confirmedRubric: confirmed() },
+      confirmedEvent(),
     ]);
     await expect(
       adapter.mutate(
@@ -455,11 +484,10 @@ describe("AnchorSessionStateAdapter advancement", () => {
     const { write, read } = await createHarness();
     await write([createdEvent()]);
     await write([
-      { type: "rubric_confirmed", timestamp: NOW, sessionId: "session-1", confirmedRubric: confirmed() },
+      confirmedEvent(),
     ]);
-    await write([reviewedEvent()]);
-
     const request = evidenceRequest();
+    const requestId = request.requestId;
     const requestDigest = protocolDigest("EvidenceRequest", 1, (() => {
       const { signature: _sig, ...payload } = request;
       return payload;
@@ -471,8 +499,9 @@ describe("AnchorSessionStateAdapter advancement", () => {
         timestamp: NOW,
         sessionId: "session-1",
         attempt: {
-          requestId: "req-1",
+          requestId,
           reviewId: "review-1",
+          generation: 1,
           attempt: 1,
           request,
           itemRequirements: [{ itemIndex: 0, requirementIds: ["tests"] }],
@@ -483,7 +512,7 @@ describe("AnchorSessionStateAdapter advancement", () => {
     let head = await read();
     expect(head?.evidence?.pending).toHaveLength(1);
     expect(head?.evidence?.pending[0]).toMatchObject({
-      requestId: "req-1",
+      requestId,
       reviewId: "review-1",
     });
     expect(head?.evidence?.pending[0]?.outcome).toBeUndefined();
@@ -493,7 +522,7 @@ describe("AnchorSessionStateAdapter advancement", () => {
         type: "evidence_result",
         timestamp: NOW,
         sessionId: "session-1",
-        requestId: "req-1",
+        requestId,
         outcome: { kind: "typed-stale" },
       },
     ]);
@@ -505,12 +534,17 @@ describe("AnchorSessionStateAdapter advancement", () => {
         type: "evidence_settled",
         timestamp: NOW,
         sessionId: "session-1",
-        requestId: "req-1",
+        requestId,
         settlement: "deferred",
       },
     ]);
     head = await read();
-    expect(head?.evidence).toBeUndefined();
+    expect(head?.evidence).toEqual({
+      pending: [],
+      generations: [
+        { runId: "run-1", reviewId: "review-1", generation: 1, lastAttempt: 1 },
+      ],
+    });
   });
 
   it("会话删除后推进写入被拒（删除闭包归对话权威）", async () => {

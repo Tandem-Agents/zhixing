@@ -516,4 +516,93 @@ describe("RubricContractBuilder", () => {
       draft.content.failureHandling,
     );
   });
+
+  it("生成草案拒绝规范化后碰撞的 requirement 与 failure id", async () => {
+    const builder = new RubricContractBuilder({
+      generationStrategy: new LLMRubricDraftGenerationStrategy({
+        complete: async () =>
+          JSON.stringify({
+            title: "碰撞准则",
+            description: "验证规范化后的唯一性。",
+            passCriteria: ["完成", "完成"],
+            evidenceRequirements: [
+              { id: "Build Result", kind: "test-result", description: "甲" },
+              { id: "build-result", kind: "test-result", description: "乙" },
+            ],
+            failureHandling: [
+              { id: "retry.now", scenario: "甲", reply: "继续" },
+              { id: "retry-now", scenario: "乙", reply: "继续" },
+            ],
+          }),
+      }),
+    });
+
+    await expect(
+      builder.buildDraft({
+        originalTurnId: "turn-collision",
+        originalUserTask: userTurnInputFromText("生成一个准则"),
+      }),
+    ).rejects.toThrow("evidence requirement id must be unique");
+  });
+
+  it("matched Rubric 拒绝派生后碰撞的 requirement id", async () => {
+    const rubricStore = new RubricStore(
+      path.join(await createTempDir("rubric-contract-matched-collision"), "rubrics"),
+    );
+    await rubricStore.saveOwn({
+      title: "测试全绿推进准则",
+      description: "用于测试全绿任务",
+      content: {
+        passCriteria: ["完成"],
+        evidenceRequirements: ["运行测试", "运行测试"],
+        failureHandling: [{ scenario: "失败", reply: "继续" }],
+      },
+    });
+    const builder = new RubricContractBuilder({ rubricCatalog: rubricStore });
+
+    await expect(
+      builder.buildDraft({
+        originalTurnId: "turn-matched-collision",
+        originalUserTask: userTurnInputFromText("请把测试全绿任务盯到验收通过"),
+      }),
+    ).rejects.toThrow("evidence requirement id must be unique");
+  });
+
+  it("确认入口再次拒绝被调用方篡改出的重复 id，且不去重通过标准", async () => {
+    const builder = new RubricContractBuilder({
+      generationStrategy: new LLMRubricDraftGenerationStrategy({
+        complete: async () =>
+          JSON.stringify({
+            title: "确认守卫",
+            description: "验证确认边界。",
+            passCriteria: ["相同标准", "相同标准"],
+            evidenceRequirements: [
+              { id: "first", kind: "test-result", description: "测试" },
+            ],
+            failureHandling: [
+              { id: "retry", scenario: "失败", reply: "继续" },
+            ],
+          }),
+      }),
+    });
+    const draft = await builder.buildDraft({
+      originalTurnId: "turn-confirm-collision",
+      originalUserTask: userTurnInputFromText("生成一个准则"),
+    });
+    const poisoned = {
+      ...draft,
+      content: {
+        ...draft.content,
+        failureHandling: [
+          ...draft.content.failureHandling,
+          { ...draft.content.failureHandling[0]!, scenario: "另一失败" },
+        ],
+      },
+    };
+
+    await expect(builder.confirmDraft(poisoned)).rejects.toThrow(
+      "failure handling id must be unique",
+    );
+    expect(draft.content.passCriteria).toEqual(["相同标准", "相同标准"]);
+  });
 });

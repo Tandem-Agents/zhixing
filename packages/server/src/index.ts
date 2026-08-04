@@ -28,6 +28,7 @@ export * from "./channels/index.js";
 export * from "./confirmation/index.js";
 export {
   createAdvancementEventSink,
+  createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
   type AdvancementProxyTurnAdapterOptions,
 } from "./advancement/adapters.js";

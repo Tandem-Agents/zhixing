@@ -25,6 +25,7 @@ import {
   renderClosureReport,
   sumAdvancementUsage,
 } from "@zhixing/core";
+import { protocolDigest } from "@zhixing/core/protocol";
 import type {
   AdvancementReviewerPort,
   AuthorityCallContext,
@@ -101,12 +102,13 @@ export interface AdvancementConfirmedTurn {
   readonly session: AdvancementSession;
   readonly originalTurnId: string;
   readonly originalUserTask: UserTurnInput;
-  readonly rubricPublication?: RubricPublicationOutcome;
+  readonly rubricPublicationTask?: Promise<RubricPublicationOutcome>;
 }
 
 export type RubricPublicationOutcome =
   | { readonly kind: "saved"; readonly rubricId: string; readonly revision: number }
-  | { readonly kind: "deferred"; readonly message: string };
+  | { readonly kind: "deferred"; readonly message: string }
+  | { readonly kind: "failed"; readonly message: string };
 
 export interface RubricPublicationPort {
   acceptanceOutcome(): RubricPublicationOutcome;
@@ -537,6 +539,7 @@ export class AdvancementController {
      */
     readonly expectedRubricDraftId: string;
     readonly persistence?: RubricDraftPersistenceChoice;
+    readonly surfacePrincipal: string;
   }): Promise<AdvancementConfirmedTurn> {
     const session = await this.requireSession(
       input.conversationId,
@@ -559,32 +562,70 @@ export class AdvancementController {
       );
     }
     const confirmedRubric = await this.contractBuilder.confirmDraft(draft);
+    const inputDigest = protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      session.originalUserTask,
+    );
     const confirmed = await this.store.confirmRubric(
       input.conversationId,
       input.advancementSessionId,
       confirmedRubric,
+      {
+        turnId: draft.originalTurnId,
+        surfacePrincipal: input.surfacePrincipal,
+        turnOrigin: {
+          channel: "rpc",
+          triggeredBy: input.surfacePrincipal,
+        },
+        inputDigest,
+      },
       confirmedRubric.confirmedAt,
     );
-    let rubricPublication: RubricPublicationOutcome | undefined;
+    let rubricPublicationTask: Promise<RubricPublicationOutcome> | undefined;
     if (draft.source === "generated" && input.persistence) {
-      rubricPublication = this.rubricPublication?.acceptanceOutcome() ?? {
-        kind: "deferred",
-        message: "准则已用于本任务，连接值班设备后可保存到准则库。",
-      };
       if (this.rubricPublication) {
-        void this.rubricPublication.publish({
-          conversationId: input.conversationId,
-          draft,
-          persistence: input.persistence,
-        }).catch(() => undefined);
+        rubricPublicationTask = this.rubricPublication
+          .publish({
+            conversationId: input.conversationId,
+            draft,
+            persistence: input.persistence,
+          })
+          .catch(() => ({
+            kind: "failed",
+            message: "任务已继续执行，但准则暂未保存；稍后可重新保存。",
+          }));
+      } else {
+        rubricPublicationTask = Promise.resolve({
+          kind: "deferred",
+          message: "准则已用于本任务，连接值班设备后可保存到准则库。",
+        });
       }
     }
     return {
       session: confirmed,
       originalTurnId: draft.originalTurnId,
       originalUserTask: confirmed.originalUserTask,
-      ...(rubricPublication ? { rubricPublication } : {}),
+      ...(rubricPublicationTask ? { rubricPublicationTask } : {}),
     };
+  }
+
+  settleOriginalTaskAdmission(input: {
+    readonly conversationId: string;
+    readonly advancementSessionId: string;
+    readonly turnId: string;
+    readonly inputDigest: import("@zhixing/core").Digest;
+    readonly runId: string;
+  }): Promise<AdvancementSession> {
+    return this.store.settleOriginalTaskAdmission(
+      input.conversationId,
+      input.advancementSessionId,
+      {
+        turnId: input.turnId,
+        inputDigest: input.inputDigest,
+        runId: input.runId,
+      },
+    );
   }
 
   async reviseRubricDraft(input: {
@@ -856,10 +897,19 @@ export class AdvancementController {
           (pending) => pending.request.runId === input.runId,
         )
       : undefined;
-    const reviewId = pendingEvidence?.reviewId ?? this.reviewIdGenerator();
+    const priorGeneration = input.runId
+      ? session.evidence?.generations?.find(
+          (entry) => entry.runId === input.runId,
+        )
+      : undefined;
+    const reviewId =
+      pendingEvidence?.reviewId ??
+      priorGeneration?.reviewId ??
+      this.reviewIdGenerator();
+    const evidenceGeneration = (priorGeneration?.generation ?? 0) + 1;
     const reviewCtx: AuthorityCallContext = {
       principal: { kind: "host", component: "advancement-review" },
-      requestId: `advancement-review:${reviewId}`,
+      requestId: `advancement-review:${reviewId}:generation:${evidenceGeneration}`,
       deadlineAt: new Date(Date.now() + 120_000).toISOString(),
     };
     let lease: ImmediateRootResourceLease | undefined;
@@ -869,7 +919,11 @@ export class AdvancementController {
         ? await this.evidence.resolveTarget(input.conversationId, input.runId)
         : undefined;
       lease = await this.resources.acquireRoot(
-        { kind: "control", id: reviewId, attempt: 1 },
+        {
+          kind: "control",
+          id: `${reviewId}:generation:${evidenceGeneration}`,
+          attempt: 1,
+        },
         { maxCalls: 8, maxTokens: 300_000 },
         { admissionClass: "advancement", entry: "advancement-control" },
         reviewCtx,
@@ -887,6 +941,7 @@ export class AdvancementController {
             session,
             runId: input.runId,
             reviewId,
+            generation: evidenceGeneration,
             runRecord: input.runRecord,
             rootLease: lease,
             target: evidenceTarget,

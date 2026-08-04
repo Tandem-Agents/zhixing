@@ -5,6 +5,7 @@ import type {
   RunRecordAdvancementMetadata,
   TurnContext,
   UserTurnInput,
+  AdvancementSession,
 } from "@zhixing/core";
 
 export type AdvancementProxyScheduleResult =
@@ -40,6 +41,18 @@ export interface AdvancementProxyTurnPort {
   schedule(
     request: AdvancementProxyTurnRequest,
   ): Promise<AdvancementProxyScheduleResult>;
+}
+
+/** Replays the exact original-task admission frozen by Rubric confirmation. */
+export interface AdvancementOriginalTaskAdmissionPort {
+  admit(session: AdvancementSession): Promise<
+    | { readonly status: "admitted"; readonly runId: string }
+    | {
+        readonly status: "rejected";
+        readonly reason: "conversation-not-found" | "idempotency-conflict";
+        readonly message: string;
+      }
+  >;
 }
 
 export type AdvancementPresentationEvent =

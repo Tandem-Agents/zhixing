@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isAdvancementControlEvent } from "./event-codec.js";
+import { assertAdvancementEventBatchLegal } from "./guards.js";
 import {
   advancementConversationDir,
   advancementLogPath,
@@ -8,9 +9,12 @@ import {
 } from "./paths.js";
 import {
   assertTerminalReviewDecision,
+  applyAdvancementEvent,
+  foldAdvancementEventMap,
   foldAdvancementEvents,
   isOpenAdvancementSession,
   runReviewedEvents,
+  type AdvancementFoldMap,
 } from "./reducer.js";
 import type {
   AdvancementCompletedEvent,
@@ -127,6 +131,7 @@ export class AdvancementStore {
     conversationId: string,
     sessionId: string,
     confirmedRubric: ConfirmedRubricSnapshot,
+    admissionIntent: import("./types.js").AdvancementOriginalTaskAdmissionIntent,
     timestamp = new Date().toISOString(),
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
@@ -144,6 +149,27 @@ export class AdvancementStore {
         timestamp,
         sessionId,
         confirmedRubric,
+        admissionIntent,
+      });
+      return this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+    });
+  }
+
+  async settleOriginalTaskAdmission(
+    conversationId: string,
+    sessionId: string,
+    settlement: { readonly turnId: string; readonly inputDigest: import("../types/distributed.js").Digest; readonly runId: string },
+    timestamp = new Date().toISOString(),
+  ): Promise<AdvancementSession> {
+    return await this.withConversationLock(conversationId, async () => {
+      await this.appendEventInLock(conversationId, {
+        type: "original_task_admitted",
+        timestamp,
+        sessionId,
+        ...settlement,
       });
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
@@ -498,13 +524,15 @@ export class AdvancementStore {
     }
 
     const events: AdvancementStoreEvent[] = [];
+    const fold: AdvancementFoldMap = new Map();
     for (const line of raw.split("\n")) {
       if (!line) continue;
       try {
         const parsed = JSON.parse(line) as unknown;
-        if (isAdvancementControlEvent(parsed, REPLAY_VERIFIER)) {
-          events.push(parsed);
-        }
+        if (!isAdvancementControlEvent(parsed, REPLAY_VERIFIER)) continue;
+        assertAdvancementEventBatchLegal(fold, [parsed]);
+        applyAdvancementEvent(fold, parsed);
+        events.push(parsed);
       } catch {
         continue;
       }
@@ -524,11 +552,26 @@ export class AdvancementStore {
     events: readonly AdvancementStoreEvent[],
   ): Promise<void> {
     if (events.length === 0) return;
+    const persistedEvents: AdvancementStoreEvent[] = [];
+    for (const event of events) {
+      const eventType = event.type;
+      const persisted: unknown = JSON.parse(JSON.stringify(event));
+      if (!isAdvancementControlEvent(persisted, REPLAY_VERIFIER)) {
+        throw new Error(
+          `AdvancementStore: invalid advancement event "${eventType}"`,
+        );
+      }
+      persistedEvents.push(persisted);
+    }
+    assertAdvancementEventBatchLegal(
+      foldAdvancementEventMap(await this.readEventsInLock(conversationId)),
+      persistedEvents,
+    );
     const file = advancementLogPath(this.root, conversationId);
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.appendFile(
       file,
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      `${persistedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     );
   }
 

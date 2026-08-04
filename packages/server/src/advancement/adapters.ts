@@ -1,11 +1,14 @@
 import {
+  DurableConversationAdmissionRejectedError,
   WorksceneBusyError,
   type ConversationManager,
 } from "@zhixing/owner-kernel";
 import type {
   AdvancementEventSink,
+  AdvancementOriginalTaskAdmissionPort,
   AdvancementProxyTurnPort,
 } from "@zhixing/owner-services";
+import { protocolDigest } from "@zhixing/core/protocol";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
@@ -131,6 +134,70 @@ export function createAdvancementProxyTurnPort(
       return {
         status: admission.status === "replayed" ? "queued" : admission.status,
       };
+    },
+  };
+}
+
+export function createAdvancementOriginalTaskAdmissionPort(
+  manager: ConversationManager,
+  options?: {
+    readonly conversationExists?: (conversationId: string) => Promise<boolean>;
+  },
+): AdvancementOriginalTaskAdmissionPort {
+  return {
+    async admit(session) {
+      const obligation = session.originalTaskAdmission;
+      if (!obligation) {
+        throw new Error("Advancement original-task admission intent is missing");
+      }
+      const expected = protocolDigest(
+        "AdvancementOriginalTaskInput",
+        1,
+        session.originalUserTask,
+      );
+      if (expected !== obligation.intent.inputDigest) {
+        throw new Error("Advancement original-task admission input digest mismatch");
+      }
+      if (
+        options?.conversationExists &&
+        !(await options.conversationExists(session.conversationId))
+      ) {
+        return {
+          status: "rejected",
+          reason: "conversation-not-found",
+          message: "Original conversation no longer exists",
+        };
+      }
+      try {
+        const admission = await manager.admitDurableTurn({
+          conversationId: session.conversationId,
+          input: session.originalUserTask,
+          invocation: { kind: "agent", source: "interactive" },
+          options: {
+            turnContext: {
+              turnId: obligation.intent.turnId,
+              turnOrigin: obligation.intent.turnOrigin,
+            },
+            source: "interactive",
+            surfacePrincipal: obligation.intent.surfacePrincipal,
+          },
+          surfacePrincipal: obligation.intent.surfacePrincipal,
+        });
+        if (admission.shouldEnqueue) admission.onDeferred?.();
+        if (!admission.runId) {
+          throw new Error("Durable original-task admission did not return a run id");
+        }
+        return { status: "admitted", runId: admission.runId };
+      } catch (error) {
+        if (error instanceof DurableConversationAdmissionRejectedError) {
+          return {
+            status: "rejected",
+            reason: error.code,
+            message: error.message,
+          };
+        }
+        throw error;
+      }
     },
   };
 }

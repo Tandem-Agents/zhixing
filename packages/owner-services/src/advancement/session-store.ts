@@ -5,6 +5,7 @@ import {
   type AdvancementEvidenceAttempt,
   type AdvancementEvidenceOutcome,
   type AdvancementEvidenceSettlement,
+  type AdvancementOriginalTaskAdmissionIntent,
   type AdvancementExit,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
@@ -29,6 +30,17 @@ export interface AdvancementSessionStore {
     conversationId: string,
     sessionId: string,
     confirmedRubric: ConfirmedRubricSnapshot,
+    admissionIntent: AdvancementOriginalTaskAdmissionIntent,
+    timestamp?: string,
+  ): Promise<AdvancementSession>;
+  settleOriginalTaskAdmission(
+    conversationId: string,
+    sessionId: string,
+    settlement: {
+      readonly turnId: string;
+      readonly inputDigest: import("@zhixing/core").Digest;
+      readonly runId: string;
+    },
     timestamp?: string,
   ): Promise<AdvancementSession>;
   reviseRubricDraft(
@@ -188,10 +200,37 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     conversationId: string,
     sessionId: string,
     confirmedRubric: ConfirmedRubricSnapshot,
+    admissionIntent: AdvancementOriginalTaskAdmissionIntent,
     timestamp = this.#now(),
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
-      { type: "rubric_confirmed", timestamp, sessionId, confirmedRubric },
+      {
+        type: "rubric_confirmed",
+        timestamp,
+        sessionId,
+        confirmedRubric,
+        admissionIntent,
+      },
+    ]);
+  }
+
+  async settleOriginalTaskAdmission(
+    conversationId: string,
+    sessionId: string,
+    settlement: {
+      readonly turnId: string;
+      readonly inputDigest: import("@zhixing/core").Digest;
+      readonly runId: string;
+    },
+    timestamp = this.#now(),
+  ): Promise<AdvancementSession> {
+    return await this.#write(conversationId, [
+      {
+        type: "original_task_admitted",
+        timestamp,
+        sessionId,
+        ...settlement,
+      },
     ]);
   }
 

@@ -16,6 +16,7 @@ import {
   ConversationManager,
   ConversationRunJournal,
   createInitialControlEnvelope,
+  DurableConversationAdmissionRejectedError,
   type RuntimeFactory,
   type SessionRuntime,
 } from "@zhixing/owner-kernel";
@@ -340,14 +341,16 @@ describe("ConversationProtocolRuntime", () => {
       shouldSchedule: true,
     });
     replayProtocol.deferScheduling(conversationId, admitted.runId);
-    await expect(
-      replayProtocol.admit({
+    const conflictingReplay = replayProtocol.admit({
         ...firstParty,
         environment: {
           workspace: { deviceId: authority.deviceId, bindingRef: "workspace-b" },
         },
-      }),
-    ).rejects.toThrow(/payload|bound|conflict/iu);
+      });
+    await expect(conflictingReplay).rejects.toBeInstanceOf(
+      DurableConversationAdmissionRejectedError,
+    );
+    await expect(conflictingReplay).rejects.toThrow(/payload|bound|conflict/iu);
 
     await expect(
       protocol.admit({

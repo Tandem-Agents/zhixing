@@ -13,6 +13,7 @@ import type {
   RubricContractDraftSnapshot,
 } from "../types.js";
 import type { Message } from "../../types/messages.js";
+import { protocolDigest } from "../../protocol/index.js";
 
 function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };
@@ -81,6 +82,19 @@ function createInput(
     pendingRubricDraft: draft(),
     createdAt: "2026-01-01T00:00:00.000Z",
     ...extra,
+  };
+}
+
+function originalTaskAdmissionIntent() {
+  return {
+    turnId: "turn-1",
+    surfacePrincipal: "surface:test",
+    turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
+    inputDigest: protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      createInput().originalUserTask,
+    ),
   };
 }
 
@@ -174,6 +188,7 @@ describe("AdvancementStore", () => {
       "conv-1",
       "session-1",
       confirmed(),
+      originalTaskAdmissionIntent(),
       "2026-01-01T00:01:00.000Z",
     );
     expect(session.status).toBe("active");
@@ -187,7 +202,7 @@ describe("AdvancementStore", () => {
     session = await store.appendRunReview(
       "conv-1",
       "session-1",
-      review(),
+      review({ proxyMessageId: "proxy-1" }),
       "2026-01-01T00:02:00.000Z",
     );
     expect(session.runs).toHaveLength(1);
@@ -224,6 +239,23 @@ describe("AdvancementStore", () => {
     );
     expect(settledReplay.outstandingProxyMessageId).toBeUndefined();
 
+    session = await store.appendRunReview("conv-1", "session-1", {
+      id: "review-2",
+      runIndex: 1,
+      runRecordRef: { shardId: "000001", runIndex: 1 },
+      reviewedAt: "2026-01-01T00:04:45.000Z",
+      decision: "passed",
+      evidence: [],
+      attribution: {
+        criteria: confirmed().content.passCriteria.map((criterion) => ({
+          criterionId: criterion.id,
+          verdict: "met",
+          reason: "验收通过",
+        })),
+      },
+      unmetCriteria: [],
+    });
+
     session = await store.completeSession(
       "conv-1",
       "session-1",
@@ -253,7 +285,7 @@ describe("AdvancementStore", () => {
     expect(replayed?.proxyMessages[0]?.content).toEqual(
       task("请修复失败测试后再继续。"),
     );
-    expect(await reopened.readEvents("conv-1")).toHaveLength(6);
+    expect(await reopened.readEvents("conv-1")).toHaveLength(7);
   });
 
   it("拒绝同一 conversation 同时存在多个 open session", async () => {
@@ -273,18 +305,28 @@ describe("AdvancementStore", () => {
   it("同一 active session 同时只能有一条 outstanding proxy", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
 
-    await store.enqueueProxyMessage("conv-1", "session-1", {
-      id: "proxy-1",
-      sessionId: "session-1",
-      reviewId: "review-1",
-      content: task("继续修复"),
-      rubricFailureHandlingId: "fix-tests",
-      variables: {},
-      attribution: review().attribution,
-      createdAt: "2026-01-01T00:03:00.000Z",
-    });
+    await store.appendRunReviewWithProxyMessage(
+      "conv-1",
+      "session-1",
+      review({ proxyMessageId: "proxy-1" }),
+      {
+        id: "proxy-1",
+        sessionId: "session-1",
+        reviewId: "review-1",
+        content: task("继续修复"),
+        rubricFailureHandlingId: "fix-tests",
+        variables: {},
+        attribution: review().attribution,
+        createdAt: "2026-01-01T00:03:00.000Z",
+      },
+    );
 
     await expect(
       store.enqueueProxyMessage("conv-1", "session-1", {
@@ -303,7 +345,12 @@ describe("AdvancementStore", () => {
   it("失败 review 与代理消息作为同一个推进结果原子写入", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
 
     const session = await store.appendRunReviewWithProxyMessage(
       "conv-1",
@@ -335,7 +382,12 @@ describe("AdvancementStore", () => {
   it("review 与推进窗口状态作为同一个验收结果持久化并可重放", async () => {
     const { root, store } = await makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
     const advancementWindow = windowState();
 
     const session = await store.appendRunReviewWithProxyMessage(
@@ -375,7 +427,12 @@ describe("AdvancementStore", () => {
   it("终态 review 与 completed/exited 作为同一个验收结果写入", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
 
     const session = await store.appendTerminalRunReview(
       "conv-1",
@@ -403,7 +460,12 @@ describe("AdvancementStore", () => {
   it("拒绝终态事件与 review decision 不一致", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
 
     await expect(
       store.appendTerminalRunReview(
@@ -599,7 +661,12 @@ describe("AdvancementStore", () => {
   it("重放时隔离缺少归因的旧形状 review 与 proxy 事件", async () => {
     const { root, store } = await makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
 
     const { attribution: _dropReview, ...legacyReview } = review();
     const legacyProxy = {

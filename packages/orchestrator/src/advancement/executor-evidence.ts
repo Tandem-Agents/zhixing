@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import type { Stats } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +12,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   byteDigest,
+  canonicalize,
   createSignedEvidenceBundle,
   evidenceObservationStateFingerprint,
   evidenceRequestDigest,
@@ -41,6 +43,8 @@ interface CollectedItem {
   readonly summary?: string;
 }
 
+class StaleEvidenceObservationError extends Error {}
+
 export interface ExecutorEvidenceHandlerOptions {
   readonly executorId: string;
   readonly environment: EnvironmentPort;
@@ -52,6 +56,8 @@ export interface ExecutorEvidenceHandlerOptions {
   readonly now?: () => string;
   /** 测试故障注入：pre 采样完成后、post 采样前执行。 */
   readonly betweenObservations?: () => Promise<void>;
+  /** 测试故障注入：句柄身份取样后、读取内容前执行。 */
+  readonly afterFileOpened?: (canonicalPath: string) => Promise<void>;
 }
 
 /** executor 角色的只读取证入口；全部文件访问都发生在协议与身份守卫之后。 */
@@ -173,9 +179,16 @@ export class ExecutorEvidenceHandler implements EvidenceHandlerPort {
     workspaceRoot: string,
     abort: AbortSignal,
   ): Promise<EvidenceExecutionResult> {
-    const pre = await this.#collectStates(request, workspaceRoot, abort);
-    await this.#options.betweenObservations?.();
-    const post = await this.#collectStates(request, workspaceRoot, abort);
+    let pre: CollectedItem[];
+    let post: CollectedItem[];
+    try {
+      pre = await this.#collectStates(request, workspaceRoot, abort);
+      await this.#options.betweenObservations?.();
+      post = await this.#collectStates(request, workspaceRoot, abort);
+    } catch (error) {
+      if (!(error instanceof StaleEvidenceObservationError)) throw error;
+      return staleBundle(request, this.#options.signer, this.#now());
+    }
     const preStateFingerprint = fingerprint(pre);
     const postStateFingerprint = fingerprint(post);
     const consistent = preStateFingerprint === postStateFingerprint;
@@ -230,7 +243,14 @@ export class ExecutorEvidenceHandler implements EvidenceHandlerPort {
     const out: CollectedItem[] = [];
     for (const item of request.items) {
       abort.throwIfAborted();
-      out.push(await collectItem(workspaceRoot, item.kind, item.locator));
+      out.push(
+        await collectItem(
+          workspaceRoot,
+          item.kind,
+          item.locator,
+          this.#options.afterFileOpened,
+        ),
+      );
     }
     return out;
   }
@@ -240,6 +260,7 @@ async function collectItem(
   workspaceRoot: string,
   kind: EvidenceKind,
   locator: EvidenceLocator,
+  afterFileOpened?: (canonicalPath: string) => Promise<void>,
 ): Promise<CollectedItem> {
   if (kind === "file-diff") {
     try {
@@ -275,24 +296,160 @@ async function collectItem(
   if (relative.length !== declared.length) {
     return { kind, locator, state: { kind: "missing" } };
   }
-  const chunks: Buffer[] = [];
+  const frames: Array<
+    | { relativePath: string; state: "missing" }
+    | {
+        relativePath: string;
+        state: "present";
+        length: number;
+        contentDigest: Digest;
+      }
+  > = [];
+  const excerpts: Buffer[] = [];
   for (const item of relative) {
     try {
-      const bytes = await fs.readFile(path.join(workspaceRoot, item));
-      chunks.push(bytes);
-    } catch {
-      return { kind, locator, state: { kind: "missing" } };
+      const bytes = await readStableWorkspaceFile(
+        workspaceRoot,
+        item,
+        afterFileOpened,
+      );
+      excerpts.push(bytes);
+      frames.push({
+        relativePath: item.replaceAll("\\", "/"),
+        state: "present",
+        length: bytes.byteLength,
+        contentDigest: byteDigest(bytes),
+      });
+    } catch (error) {
+      if (error instanceof StaleEvidenceObservationError) throw error;
+      if (!isMissingFileError(error)) throw error;
+      frames.push({
+        relativePath: item.replaceAll("\\", "/"),
+        state: "missing",
+      });
     }
   }
-  const bytes = Buffer.concat(chunks);
+  if (!frames.some((frame) => frame.state === "present")) {
+    return { kind, locator, state: { kind: "missing" } };
+  }
+  const bytes = Buffer.from(canonicalize(frames), "utf8");
+  const totalBytes = frames.reduce(
+    (sum, frame) => sum + (frame.state === "present" ? frame.length : 0),
+    0,
+  );
   return present(
     kind,
     locator,
     bytes,
     kind === "log"
-      ? `日志证据存在，共 ${bytes.byteLength} 字节。${textExcerpt(bytes)}`
-      : `产物证据存在，共 ${bytes.byteLength} 字节。`,
+      ? `日志证据存在，共 ${totalBytes} 字节。${textExcerpt(Buffer.concat(excerpts))}`
+      : `产物证据存在，共 ${totalBytes} 字节。`,
   );
+}
+
+async function readStableWorkspaceFile(
+  workspaceRoot: string,
+  relativePath: string,
+  afterFileOpened?: (canonicalPath: string) => Promise<void>,
+): Promise<Buffer> {
+  const root = await fs.realpath(workspaceRoot);
+  const requested = PathGuard.resolve(relativePath, root);
+  const canonical = await fs.realpath(requested);
+  if (!isWithinCanonicalRoot(root, canonical)) {
+    throw new StaleEvidenceObservationError("Evidence path escaped workspace");
+  }
+  const handle = await fs.open(canonical, "r");
+  try {
+    const before = await handle.stat();
+    if (!before.isFile()) {
+      throw new StaleEvidenceObservationError("Evidence path is not a file");
+    }
+    await afterFileOpened?.(canonical);
+    const bytes = await handle.readFile();
+    const afterHandle = await handle.stat();
+    const afterCanonical = await fs.realpath(requested);
+    const afterPath = await fs.stat(afterCanonical);
+    if (
+      afterCanonical !== canonical ||
+      !isWithinCanonicalRoot(root, afterCanonical) ||
+      !sameFileSnapshot(before, afterHandle) ||
+      !sameFileSnapshot(afterHandle, afterPath)
+    ) {
+      throw new StaleEvidenceObservationError(
+        "Evidence file changed while it was being observed",
+      );
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+function sameFileSnapshot(
+  left: Stats,
+  right: Stats,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs
+  );
+}
+
+function isWithinCanonicalRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ["ENOENT", "ENOTDIR"].includes(String((error as NodeJS.ErrnoException).code))
+  );
+}
+
+function staleBundle(
+  request: EvidenceRequest,
+  signer: ProtocolSigner,
+  observedAt: string,
+): EvidenceExecutionResult {
+  const marker = Buffer.from(
+    canonicalize({ requestId: request.requestId, state: "typed-stale" }),
+    "utf8",
+  );
+  const fingerprint = byteDigest(marker);
+  const item = request.items[0]!;
+  return {
+    kind: "bundle",
+    bundle: createSignedEvidenceBundle(
+      {
+        v: 1,
+        requestId: request.requestId,
+        requestDigest: evidenceRequestDigest(request),
+        observation: {
+          observedAt,
+          preStateFingerprint: fingerprint,
+          postStateFingerprint: byteDigest(
+            Buffer.concat([marker, Buffer.from([0])]),
+          ),
+          consistent: false,
+        },
+        items: [
+          {
+            kind: item.kind,
+            locator: item.locator,
+            contentDigest: fingerprint,
+            summary: "取证期间文件身份发生变化，请在工作区稳定后重试。",
+            source: "independent",
+          },
+        ],
+        executorId: request.executorId,
+      },
+      signer,
+    ),
+  };
 }
 
 function present(

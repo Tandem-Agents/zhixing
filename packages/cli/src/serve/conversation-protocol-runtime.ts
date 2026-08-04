@@ -80,7 +80,10 @@ import {
   type InProcessDispatchContextFactory,
   AnchorSessionStateAdapter,
 } from "@zhixing/owner-kernel";
-import { runTurnWithCommit } from "@zhixing/owner-kernel/run-turn";
+import {
+  DurableConversationAdmissionRejectedError,
+  runTurnWithCommit,
+} from "@zhixing/owner-kernel/run-turn";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -1562,7 +1565,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         canonicalize(durablePending.environment ?? null) !==
           canonicalize(input.environment ?? null)
       ) {
-        throw new Error("Conversation ingress is already bound to another invocation");
+        throw new DurableConversationAdmissionRejectedError(
+          "idempotency-conflict",
+          "Conversation ingress is already bound to another invocation",
+        );
       }
       await this.#authority.surfaceAssets.markAdopted(durablePending.attachments);
       return {
@@ -1617,12 +1623,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (admissionState.kind === "settled") {
       const appliedReplay = admissionState.outcome;
       if (appliedReplay.kind === "rejected") {
-        throw new Error(
+        throw new DurableConversationAdmissionRejectedError(
+          "idempotency-conflict",
           `Conversation input was rejected: ${appliedReplay.result.error.message}`,
         );
       }
       if (appliedReplay.result.status === "rejected") {
-        throw new Error(
+        throw new DurableConversationAdmissionRejectedError(
+          appliedReplay.result.error.code === "idempotency-conflict"
+            ? "idempotency-conflict"
+            : "conversation-not-found",
           `Conversation input was rejected: ${appliedReplay.result.error.message}`,
         );
       }
@@ -1669,6 +1679,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       try {
         admission = await journal.applyInputControl(control);
       } catch (replayError) {
+        if (
+          firstError instanceof DurableConversationAdmissionRejectedError &&
+          replayError instanceof DurableConversationAdmissionRejectedError
+        ) {
+          throw replayError;
+        }
         throw new AggregateError(
           [firstError, replayError],
           "Conversation input admission could not determine its durable disposition",
@@ -1676,10 +1692,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
     }
     if (admission.kind === "rejected") {
-      throw new Error(`Conversation input was rejected: ${admission.result.error.message}`);
+      throw new DurableConversationAdmissionRejectedError(
+        "idempotency-conflict",
+        `Conversation input was rejected: ${admission.result.error.message}`,
+      );
     }
     if (admission.result.status === "rejected") {
-      throw new Error(`Conversation input was rejected: ${admission.result.error.message}`);
+      throw new DurableConversationAdmissionRejectedError(
+        admission.result.error.code === "idempotency-conflict"
+          ? "idempotency-conflict"
+          : "conversation-not-found",
+        `Conversation input was rejected: ${admission.result.error.message}`,
+      );
     }
     if (admission.result.body.t !== "input") {
       throw new Error("Conversation input admission returned another control result");

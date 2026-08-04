@@ -247,10 +247,21 @@ function advancementCreatedEvent(text: string): AdvancementControlEvent {
 }
 
 function advancementConfirmedEvent(): AdvancementControlEvent {
+  const originalUserTask = { parts: [{ type: "text" as const, text: "任务" }] };
   return {
     type: "rubric_confirmed",
     timestamp: ADVANCEMENT_NOW,
     sessionId: "session-1",
+    admissionIntent: {
+      turnId: "turn-1",
+      surfacePrincipal: "surface:test",
+      turnOrigin: { channel: "rpc", triggeredBy: "surface:test" },
+      inputDigest: protocolDigest(
+        "AdvancementOriginalTaskInput",
+        1,
+        originalUserTask,
+      ),
+    },
     confirmedRubric: {
       source: { kind: "library", rubricId: "rubric-1", rubricVersion: "v1" },
       title: "准则",
@@ -279,6 +290,7 @@ function advancementReviewedEvent(): AdvancementControlEvent {
       evidence: [],
       attribution: { criteria: [] },
       unmetCriteria: ["测试通过"],
+      selectedFailureHandlingId: "fix",
       proxyMessageId: "proxy-1",
     },
   };

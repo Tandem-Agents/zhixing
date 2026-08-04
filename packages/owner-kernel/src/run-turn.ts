@@ -92,6 +92,19 @@ export interface DurableConversationAdmissionResult {
   readonly shouldSchedule: boolean;
 }
 
+export class DurableConversationAdmissionRejectedError extends Error {
+  readonly code: "conversation-not-found" | "idempotency-conflict";
+
+  constructor(
+    code: "conversation-not-found" | "idempotency-conflict",
+    message: string,
+  ) {
+    super(message);
+    this.name = "DurableConversationAdmissionRejectedError";
+    this.code = code;
+  }
+}
+
 export interface DurableConversationControlPrincipal {
   readonly surfacePrincipal: string;
   readonly deviceId: string;

@@ -62,6 +62,7 @@ export {
 } from "./evidence.js";
 export {
   type AdvancementEventSink,
+  type AdvancementOriginalTaskAdmissionPort,
   type AdvancementPresentationEvent,
   type AdvancementProxyDurableClaim,
   type AdvancementProxyScheduleResult,

@@ -15,6 +15,7 @@ import type {
 import {
   createSignedCapabilityDescriptor,
   createSignedEvidenceBundle,
+  createSignedEvidenceRequest,
   evidenceObservationStateFingerprint,
   evidenceRequestDigest,
   protocolDigest,
@@ -170,6 +171,118 @@ describe("AdvancementEvidenceCoordinator", () => {
     expect(transported).toBe(false);
     expect(result.requestId).toBeUndefined();
     expect(result.canonicalEvidence.some((item) => item.source === "independent")).toBe(false);
+  });
+
+  it("finishes a child lease when the durable request write fails before dispatch handoff", async () => {
+    const calls: string[] = [];
+    const store = storeRecording(calls);
+    store.appendEvidenceRequest = async () => {
+      calls.push("request-durable");
+      throw new Error("owner log unavailable");
+    };
+    const coordinator = makeCoordinator({
+      store,
+      resources: resourcesRecording(calls),
+      collect: async () => {
+        calls.push("transport");
+        return { kind: "capability-gap" };
+      },
+    });
+
+    await expect(coordinator.collect(reviewInput())).rejects.toThrow(
+      "owner log unavailable",
+    );
+    expect(calls).toEqual([
+      "acquire-child",
+      "request-durable",
+      "child-settle",
+      "child-release",
+    ]);
+  });
+
+  it("consumes a durable terminal bundle without reviving its released evidence lease", async () => {
+    const calls: string[] = [];
+    const oldRoot = rootLease("review-root-old");
+    const requestId = "evidence:durable-result";
+    const request = createSignedEvidenceRequest(
+      {
+        v: 1,
+        requestId,
+        reviewId: "review-1",
+        runId: "run-1",
+        conversationId: "conversation-1",
+        ownerEpoch: 3,
+        executorId: "executor-1",
+        workspace: {
+          bindingRef: "workspace-1",
+          workspaceBindingRevision: 7,
+        },
+        items: [{ kind: "log", locator: { paths: ["logs/run.log"] } }],
+        lease: childLease(oldRoot, requestId, 1),
+        issuedAt: NOW,
+        expiry: EXPIRY,
+      },
+      identity,
+      identity,
+    );
+    const bundle = createSignedEvidenceBundle(
+      {
+        v: 1,
+        requestId,
+        requestDigest: evidenceRequestDigest(request),
+        executorId: "executor-1",
+        observation: observation(true),
+        items: [{
+          kind: "log",
+          locator: { paths: ["logs/run.log"] },
+          contentDigest: protocolDigest("content", 1, { durable: true }),
+          summary: "已耐久完成。",
+          source: "independent",
+        }],
+      },
+      identity,
+    );
+    const pendingSession: AdvancementSession = {
+      ...session(),
+      evidence: {
+        pending: [{
+          requestId,
+          reviewId: "review-1",
+          generation: 1,
+          attempt: 1,
+          request,
+          requestDigest: evidenceRequestDigest(request),
+          itemRequirements: [{ itemIndex: 0, requirementIds: ["required-log"] }],
+          outcome: { kind: "bundle", bundle },
+        }],
+        generations: [
+          { runId: "run-1", reviewId: "review-1", generation: 1, lastAttempt: 1 },
+        ],
+      },
+    };
+    const coordinator = makeCoordinator({
+      store: storeRecording(calls),
+      resources: resourcesRecording(calls),
+      collect: async () => {
+        calls.push("transport");
+        throw new Error("durable outcome must not be dispatched");
+      },
+    });
+
+    const result = await coordinator.collect(reviewInput({
+      session: pendingSession,
+      generation: 2,
+      rootLease: rootLease("review-root-new"),
+    }));
+
+    expect(result.requestId).toBe(requestId);
+    expect(result.canonicalEvidence).toContainEqual(expect.objectContaining({
+      requirementId: "required-log",
+      source: "independent",
+    }));
+    // The pending fact remains until the review and its consumed settlement
+    // commit together; collection itself performs no lease or transport work.
+    expect(calls).toEqual([]);
   });
 });
 
@@ -331,10 +444,10 @@ function observation(consistent: boolean) {
   return { observedAt: NOW, preStateFingerprint: pre, postStateFingerprint: post, consistent };
 }
 
-function rootLease(): ImmediateRootResourceLease {
+function rootLease(reservationId = "review-root-1"): ImmediateRootResourceLease {
   return signLease({
     v: 1,
-    reservationId: "review-root-1",
+    reservationId,
     admissionClass: "advancement",
     workload: { kind: "control", id: "review-1", attempt: 1 },
     scopeBinding: { kind: "conversation", conversationId: "conversation-1", ownerEpoch: 3 },

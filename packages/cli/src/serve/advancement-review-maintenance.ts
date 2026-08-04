@@ -71,12 +71,16 @@ async function reviewAcceptedTurn(
 ): Promise<void> {
   const advancement = deps.advancement;
   if (!advancement) return;
-  try {
-    await deps.recoverConversation?.(info.conversationId, {
-      beforeRunIndex: info.runIndex,
-    });
-  } catch {
-    // catch-up 失败不阻断当轮验收；欠账等下一个补审触发点。
+  if (deps.recoverConversation) {
+    let catchUp: unknown;
+    try {
+      catchUp = await deps.recoverConversation(info.conversationId, {
+        beforeRunIndex: info.runIndex,
+      });
+    } catch {
+      return;
+    }
+    if (!catchUpProvedContinuous(catchUp)) return;
   }
   const result = await advancement.afterTurnCommitted({
     conversationId: info.conversationId,
@@ -90,4 +94,18 @@ async function reviewAcceptedTurn(
     runId: info.turnId,
     result,
   });
+}
+
+function catchUpProvedContinuous(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const status = (value as { status?: unknown }).status;
+  return (
+    status === "no-pending-recovery" ||
+    status === "accepted-run-recovered" ||
+    status === "scheduled" ||
+    status === "already-running" ||
+    status === "already-scheduled" ||
+    status === "durable-run-owned" ||
+    status === "closed-run-recovered"
+  );
 }

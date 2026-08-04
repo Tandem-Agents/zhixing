@@ -5,6 +5,7 @@ import type { Digest } from "../types/distributed.js";
 import type { TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
 import type { UserTurnInput } from "../types/user-input.js";
+import type { TurnOrigin } from "../types/tools.js";
 
 export type AdvancementSessionStatus =
   | "awaiting-rubric-confirmation"
@@ -318,6 +319,7 @@ export interface AdvancementSession {
   readonly rubricDraftVersion: number;
   readonly pendingRubricDraft?: RubricContractDraftSnapshot;
   readonly confirmedRubric?: ConfirmedRubricSnapshot;
+  readonly originalTaskAdmission?: AdvancementOriginalTaskAdmission;
   readonly runs: readonly AdvancementRunReview[];
   readonly proxyMessages: readonly AdvancementProxyMessage[];
   readonly outstandingProxyMessageId?: string;
@@ -338,6 +340,7 @@ export type AdvancementStoreEvent =
   | AdvancementSessionCreatedEvent
   | AdvancementRubricDraftRevisedEvent
   | AdvancementRubricConfirmedEvent
+  | AdvancementOriginalTaskAdmittedEvent
   | AdvancementRunReviewedEvent
   | AdvancementWindowUpdatedEvent
   | AdvancementProxyEnqueuedEvent
@@ -376,6 +379,39 @@ export interface AdvancementRubricConfirmedEvent {
   readonly timestamp: string;
   readonly sessionId: string;
   readonly confirmedRubric: ConfirmedRubricSnapshot;
+  readonly admissionIntent: AdvancementOriginalTaskAdmissionIntent;
+}
+
+/**
+ * The narrow durable obligation created by confirming a Rubric. Task content
+ * remains owned by `AdvancementSession.originalUserTask`; this record only
+ * freezes the exact identity needed to replay durable admission.
+ */
+export interface AdvancementOriginalTaskAdmissionIntent {
+  readonly turnId: string;
+  readonly surfacePrincipal: string;
+  readonly turnOrigin: TurnOrigin;
+  readonly inputDigest: Digest;
+}
+
+export type AdvancementOriginalTaskAdmission =
+  | {
+      readonly status: "pending";
+      readonly intent: AdvancementOriginalTaskAdmissionIntent;
+    }
+  | {
+      readonly status: "admitted";
+      readonly intent: AdvancementOriginalTaskAdmissionIntent;
+      readonly runId: string;
+    };
+
+export interface AdvancementOriginalTaskAdmittedEvent {
+  readonly type: "original_task_admitted";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly inputDigest: Digest;
+  readonly runId: string;
 }
 
 export interface AdvancementRunReviewedEvent {
@@ -447,6 +483,8 @@ export interface AdvancementEvidenceItemRequirement {
 export interface AdvancementEvidenceAttempt {
   readonly requestId: string;
   readonly reviewId: string;
+  /** Strictly increasing durable recovery generation for this reviewed run. */
+  readonly generation: number;
   readonly attempt: number;
   readonly request: EvidenceRequest;
   readonly itemRequirements: readonly AdvancementEvidenceItemRequirement[];
@@ -463,6 +501,15 @@ export interface AdvancementEvidencePending
 
 export interface AdvancementEvidenceProjection {
   readonly pending: readonly AdvancementEvidencePending[];
+  readonly generations?: readonly AdvancementEvidenceGeneration[];
+}
+
+export interface AdvancementEvidenceGeneration {
+  readonly runId: string;
+  readonly reviewId: string;
+  readonly generation: number;
+  /** Last durably requested attempt in this generation, including settled attempts. */
+  readonly lastAttempt: number;
 }
 
 /** pending 投影上界——正常每会话至多一个在飞请求，越界即异常信号。 */

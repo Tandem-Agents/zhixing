@@ -51,6 +51,7 @@ import {
   ServerLogLifecycle,
   CleanupRegistry,
   createAdvancementEventSink,
+  createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
   LlmPerspectiveAllocationStrategy,
   PerspectivesController,
@@ -877,6 +878,11 @@ async function runServerProcess(
             conversationExists: (conversationId) =>
               conversationDirectory.exists(conversationId),
           }),
+          originalTasks: createAdvancementOriginalTaskAdmissionPort(
+            ctx.conversations,
+            { conversationExists: (conversationId) =>
+              conversationDirectory.exists(conversationId) },
+          ),
           events: createAdvancementEventSink(
             () => sessionBroadcastRef.current,
           ),

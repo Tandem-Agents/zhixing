@@ -14,6 +14,7 @@ import {
   type RubricContractDraftSnapshot,
   type UserTurnInput,
 } from "@zhixing/core";
+import { protocolDigest } from "@zhixing/core/protocol";
 import type {
   AuthorityCallContext,
   SessionControlMutation,
@@ -121,6 +122,19 @@ function createInput(
   };
 }
 
+function originalTaskAdmissionIntent() {
+  return {
+    turnId: "turn-1",
+    surfacePrincipal: "surface:user-1",
+    turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:user-1" },
+    inputDigest: protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      createInput().originalUserTask,
+    ),
+  };
+}
+
 function review(extra: Partial<AdvancementRunReview> = {}): AdvancementRunReview {
   const value = {
     id: "review-1",
@@ -168,10 +182,53 @@ function makeStore(): { store: AdvancementSessionStore; writes: unknown[] } {
 }
 
 describe("SessionAdvancementStore", () => {
+  it("原任务准入意向与结清 runId 由同一 owner 日志耐久投影", async () => {
+    const { store } = makeStore();
+    const original = createInput();
+    await store.createSession(original);
+    const inputDigest = protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      original.originalUserTask,
+    );
+    const active = await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      {
+        turnId: "turn-1",
+        surfacePrincipal: "surface:user-1",
+        turnOrigin: { channel: "rpc", triggeredBy: "surface:user-1" },
+        inputDigest,
+      },
+      NOW,
+    );
+    expect(active.originalTaskAdmission).toEqual({
+      status: "pending",
+      intent: expect.objectContaining({ inputDigest, turnId: "turn-1" }),
+    });
+
+    const settled = await store.settleOriginalTaskAdmission(
+      "conv-1",
+      "session-1",
+      { turnId: "turn-1", inputDigest, runId: "run-1" },
+    );
+    expect(settled.originalTaskAdmission).toEqual({
+      status: "admitted",
+      intent: expect.objectContaining({ inputDigest, turnId: "turn-1" }),
+      runId: "run-1",
+    });
+  });
+
   it("构造与文件控制日志一致的事件序列", async () => {
     const { store, writes } = makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
     await store.appendRunReviewWithProxyMessage(
       "conv-1",
       "session-1",
@@ -182,7 +239,12 @@ describe("SessionAdvancementStore", () => {
     await store.appendTerminalRunReview(
       "conv-1",
       "session-1",
-      review({ id: "review-2", decision: "passed", proxyMessageId: undefined }),
+      review({
+        id: "review-2",
+        runIndex: 1,
+        decision: "passed",
+        proxyMessageId: undefined,
+      }),
       { type: "completed", exit: exit("passed") },
     );
 
@@ -203,7 +265,12 @@ describe("SessionAdvancementStore", () => {
   it("settle 幂等早退：已结算的 proxy 不再产生写入", async () => {
     const { store, writes } = makeStore();
     await store.createSession(createInput());
-    await store.confirmRubric("conv-1", "session-1", confirmed());
+    await store.confirmRubric(
+      "conv-1",
+      "session-1",
+      confirmed(),
+      originalTaskAdmissionIntent(),
+    );
     await store.appendRunReviewWithProxyMessage(
       "conv-1",
       "session-1",

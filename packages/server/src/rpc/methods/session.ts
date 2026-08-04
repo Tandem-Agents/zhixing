@@ -82,6 +82,7 @@ import {
 } from "@zhixing/rpc/session-wire";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import type { AdvancementPrepareResult } from "@zhixing/owner-services";
+import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
 import {
   generateConversationId,
   WorksceneBusyError,
@@ -542,6 +543,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
               advancementSessionId,
               expectedRubricDraftId: rubricDraftId,
               persistence,
+              surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
             }),
         });
       } catch (err) {
@@ -588,16 +590,24 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
           connection: ctx.connection,
           broadcast: ctx.server.sessionBroadcast,
           surfaceCapabilities: { postTurnControl: false },
+          admissionIdentity: confirmed.session.originalTaskAdmission?.intent,
         });
       } catch (err) {
-        const cancelled = await advancement
-          .cancelOpenSession({
-            conversationId,
-            advancementSessionId,
-            reason: "system-error",
-            message: "原始任务未能进入执行队列，推进会话已取消以避免悬空状态。",
-          })
-          .catch(() => null);
+        const cancelled =
+          (err instanceof RpcAppError && err.code === RPC_ERROR_CODES.NOT_FOUND) ||
+          err instanceof DurableConversationAdmissionRejectedError
+            ? await advancement
+                .cancelOpenSession({
+                  conversationId,
+                  advancementSessionId,
+                  reason: "system-error",
+                  message:
+                    err instanceof DurableConversationAdmissionRejectedError
+                      ? "原始任务的耐久准入身份发生冲突，推进会话已安全取消。"
+                      : "原始对话已不存在，推进会话已取消以避免悬空状态。",
+                })
+                .catch(() => null)
+            : null;
         if (cancelled) {
           notifyAdvancementEvent({
             conversationId,
@@ -616,6 +626,33 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         throw err;
       }
 
+      const admissionIntent = confirmed.session.originalTaskAdmission?.intent;
+      if (admitted.runId && admissionIntent) {
+        await advancement
+          .settleOriginalTaskAdmission({
+            conversationId,
+            advancementSessionId,
+            turnId: admissionIntent.turnId,
+            inputDigest: admissionIntent.inputDigest,
+            runId: admitted.runId,
+          })
+          .catch(() => undefined);
+      }
+
+      let rubricPublicationMessage: string | undefined;
+      if (confirmed.rubricPublicationTask) {
+        try {
+          const publication = await confirmed.rubricPublicationTask;
+          rubricPublicationMessage =
+            publication.kind === "saved"
+              ? "准则已保存到准则库。"
+              : publication.message;
+        } catch {
+          rubricPublicationMessage =
+            "任务已继续执行，但准则暂未保存；稍后可重新保存。";
+        }
+      }
+
       return {
         conversationId: admitted.conversationId,
         sessionId: admitted.conversationId,
@@ -624,8 +661,8 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         status: "confirmed",
         advancementSessionId: confirmed.session.id,
         runStatus: admitted.runStatus,
-        ...(confirmed.rubricPublication
-          ? { rubricPublicationMessage: confirmed.rubricPublication.message }
+        ...(rubricPublicationMessage
+          ? { rubricPublicationMessage }
           : {}),
       };
     },
@@ -1032,6 +1069,10 @@ interface AdmitAndMaybeStartTurnInput {
   readonly broadcast?: SessionBroadcast;
   readonly surfaceCapabilities: SessionSurfaceCapabilities;
   readonly environment?: ExplicitEnvironmentSelection;
+  readonly admissionIdentity?: {
+    readonly surfacePrincipal: string;
+    readonly turnOrigin: TurnContext["turnOrigin"];
+  };
 }
 
 interface AdmitAndMaybeStartPerspectiveTurnInput extends SendDirectTurnInput {
@@ -1165,15 +1206,24 @@ async function admitAndMaybeStartTurn(
             ? { environment: structuredClone(input.environment) }
             : {}),
           options: {
-            turnContext: rpcTurnContext(
-              input.turnId,
-              input.connection,
-              input.surfaceCapabilities,
-            ),
+            turnContext: input.admissionIdentity
+              ? {
+                  turnId: input.turnId,
+                  turnOrigin: input.admissionIdentity.turnOrigin,
+                }
+              : rpcTurnContext(
+                  input.turnId,
+                  input.connection,
+                  input.surfaceCapabilities,
+                ),
             source: "interactive",
-            surfacePrincipal: rpcSurfacePrincipal(input.connection),
+            surfacePrincipal:
+              input.admissionIdentity?.surfacePrincipal ??
+              rpcSurfacePrincipal(input.connection),
           },
-          surfacePrincipal: rpcSurfacePrincipal(input.connection),
+          surfacePrincipal:
+            input.admissionIdentity?.surfacePrincipal ??
+            rpcSurfacePrincipal(input.connection),
         }),
       makeTask: (managed) => ({
         source: "interactive",

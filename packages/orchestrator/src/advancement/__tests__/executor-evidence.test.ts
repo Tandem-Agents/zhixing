@@ -159,6 +159,42 @@ describe("ExecutorEvidenceHandler", () => {
     }
   });
 
+  it("discards bytes when the authorized path is replaced after its handle opens", async () => {
+    const root = await temporaryRoot();
+    const workspace = path.join(root, "workspace");
+    const log = path.join(workspace, "logs", "run.log");
+    const displaced = path.join(workspace, "logs", "run.displaced.log");
+    await fs.mkdir(path.dirname(log), { recursive: true });
+    await fs.writeFile(log, "authorized-before-open\n");
+    let replaced = false;
+    const handler = new ExecutorEvidenceHandler({
+      executorId: "executor-1",
+      environment: environmentFor(workspace),
+      journal: new EvidenceJournal({
+        file: path.join(root, "evidence.jsonl"),
+        verifier: identity,
+      }),
+      signer: identity,
+      verifier: identity,
+      now: () => "2026-08-03T00:10:00.000Z",
+      afterFileOpened: async (canonicalPath) => {
+        if (replaced) return;
+        replaced = true;
+        await fs.rename(canonicalPath, displaced);
+        await fs.writeFile(canonicalPath, "replacement-must-not-be-evidence\n");
+      },
+    });
+
+    const result = await handler.collect(request(), new AbortController().signal);
+    expect(result.kind).toBe("bundle");
+    if (result.kind === "bundle") {
+      expect(result.bundle.observation.consistent).toBe(false);
+      expect(result.bundle.items[0]?.summary).not.toContain(
+        "replacement-must-not-be-evidence",
+      );
+    }
+  });
+
   it("rejects binding revision drift before reading workspace evidence", async () => {
     const root = await temporaryRoot();
     let resolveCalls = 0;
@@ -215,6 +251,62 @@ describe("ExecutorEvidenceHandler", () => {
     expect(visible.kind).toBe("bundle");
     if (visible.kind === "bundle") {
       expect(visible.bundle.items[0]?.summary).not.toContain("sk-secret-value");
+    }
+  });
+
+  it("frames every requested file identity so byte redistribution cannot collide", async () => {
+    const root = await temporaryRoot();
+    const workspace = path.join(root, "workspace");
+    await fs.mkdir(path.join(workspace, "logs"), { recursive: true });
+    const firstPath = path.join(workspace, "logs", "a.log");
+    const secondPath = path.join(workspace, "logs", "b.log");
+    await fs.writeFile(firstPath, "ab");
+    await fs.writeFile(secondPath, "c");
+    const makeHandler = (journalName: string) =>
+      new ExecutorEvidenceHandler({
+        executorId: "executor-1",
+        environment: environmentFor(workspace),
+        journal: new EvidenceJournal({
+          file: path.join(root, journalName),
+          verifier: identity,
+        }),
+        signer: identity,
+        verifier: identity,
+        now: () => "2026-08-03T00:10:00.000Z",
+      });
+    const first = await makeHandler("first.jsonl").collect(
+      request({
+        requestId: "request-framed-first",
+        items: [
+          {
+            kind: "log",
+            locator: { paths: ["logs/a.log", "logs/b.log"] },
+          },
+        ],
+      }),
+      new AbortController().signal,
+    );
+    await fs.writeFile(firstPath, "a");
+    await fs.writeFile(secondPath, "bc");
+    const second = await makeHandler("second.jsonl").collect(
+      request({
+        requestId: "request-framed-second",
+        items: [
+          {
+            kind: "log",
+            locator: { paths: ["logs/a.log", "logs/b.log"] },
+          },
+        ],
+      }),
+      new AbortController().signal,
+    );
+
+    expect(first.kind).toBe("bundle");
+    expect(second.kind).toBe("bundle");
+    if (first.kind === "bundle" && second.kind === "bundle") {
+      expect(first.bundle.items[0]?.contentDigest).not.toBe(
+        second.bundle.items[0]?.contentDigest,
+      );
     }
   });
 

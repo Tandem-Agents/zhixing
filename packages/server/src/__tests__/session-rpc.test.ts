@@ -31,9 +31,13 @@ import type {
 } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
-import { ConversationManager } from "@zhixing/owner-kernel";
+import {
+  ConversationManager,
+  DurableConversationAdmissionRejectedError,
+} from "@zhixing/owner-kernel";
 import type {
   ConversationBootstrap,
+  DurableConversationTurnExecutor,
   RunTurnOptions,
   RuntimeSubAgentUsageEntry,
   RuntimeSecuritySnapshot,
@@ -65,6 +69,7 @@ import {
   type PerspectivesOrchestrationExecutor,
 } from "../perspectives/index.js";
 import { createTempDir } from "@zhixing/test-utils";
+import { protocolDigest } from "@zhixing/core/protocol";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
@@ -219,6 +224,48 @@ function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
   return {
     async create(sessionId) {
       return createMockRuntime(sessionId, opts);
+    },
+  };
+}
+
+function createDurableReplayExecutor(
+  runId: string,
+): DurableConversationTurnExecutor {
+  return {
+    admit: async () => ({ runId, shouldSchedule: false }),
+    confirmScheduled: () => {},
+    deferScheduling: () => {},
+    cancelAdmitted: async () => {},
+    cancel: async () => ({ dispositions: [] }),
+    findRunByIngress: async () => undefined,
+    findInteractionOutcome: async () => undefined,
+    resolveUncertain: async () => ({
+      state: "queued",
+      factDigest: `sha256:${"0".repeat(64)}`,
+    }),
+    writeSession: async () => ({ status: "accepted", domainRevision: 1 }),
+    projectSession: async () => {},
+    controlPrincipal: ({ surfacePrincipal, connectionId }) => ({
+      surfacePrincipal,
+      connectionId,
+      deviceId: "device-test",
+    }),
+    run: async function* (): AsyncGenerator<AgentYield, RunResult> {
+      throw new Error("durable replay executor must not start a second run");
+    },
+    publishPendingFinals: async () => 0,
+    releaseConversation: () => {},
+  };
+}
+
+function createDurableRejectedExecutor(): DurableConversationTurnExecutor {
+  return {
+    ...createDurableReplayExecutor("run-never-created"),
+    admit: async () => {
+      throw new DurableConversationAdmissionRejectedError(
+        "idempotency-conflict",
+        "conflicting durable payload",
+      );
     },
   };
 }
@@ -519,6 +566,7 @@ describe("session.* RPC (S2.D)", () => {
   }>;
   async function createTestAdvancementHarness(opts: {
     admissionStrategy?: AdvancementAdmissionStrategy;
+    rubricPublication?: ConstructorParameters<typeof AdvancementController>[0]["rubricPublication"];
   } = {}): Promise<{
     controller: AdvancementController;
     store: AdvancementStore;
@@ -532,6 +580,9 @@ describe("session.* RPC (S2.D)", () => {
         contractBuilder: createTestRubricContractBuilder(root),
         admissionStrategy:
           opts.admissionStrategy ?? createStartAdvancementAdmissionStrategy(),
+        ...(opts.rubricPublication
+          ? { rubricPublication: opts.rubricPublication }
+          : {}),
         now: () => "2026-01-01T00:00:00.000Z",
       }),
     };
@@ -702,10 +753,31 @@ describe("session.* RPC (S2.D)", () => {
       conversationId,
       "adv-recovery",
       testConfirmedRubric(),
+      {
+        turnId: "turn-recovery-original",
+        surfacePrincipal: "surface:test",
+        turnOrigin: { channel: "rpc", triggeredBy: "surface:test" },
+        inputDigest: protocolDigest(
+          "AdvancementOriginalTaskInput",
+          1,
+          testUserInput("把测试修到全绿"),
+        ),
+      },
     );
+    const admissionInputDigest = protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      testUserInput("把测试修到全绿"),
+    );
+    await store.settleOriginalTaskAdmission(conversationId, "adv-recovery", {
+      turnId: "turn-recovery-original",
+      inputDigest: admissionInputDigest,
+      runId: "run-recovery-original",
+    });
     const review: AdvancementRunReview = {
       id: "review-recovery",
       runIndex: 0,
+      runRecordRef: { shardId: "000001", runIndex: 0 },
       reviewedAt: "2026-01-01T00:02:00.000Z",
       decision: "failed",
       evidence: [],
@@ -743,11 +815,24 @@ describe("session.* RPC (S2.D)", () => {
       perspectives?: PerspectivesController;
       withAdvancementRecovery?: boolean;
       seedConversations?: readonly string[];
+      durableTurnExecutor?: DurableConversationTurnExecutor;
     } = {},
   ): Promise<void> {
     recordsByConversation.clear();
     for (const conversationId of opts.seedConversations ?? []) {
-      recordsByConversation.set(conversationId, []);
+      recordsByConversation.set(conversationId, [
+        {
+          type: "run",
+          runId: "run-recovery-original",
+          runIndex: 0,
+          timestamp: "2026-01-01T00:01:30.000Z",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "把测试修到全绿" }] },
+            { role: "assistant", content: [{ type: "text", text: "先修了一部分。" }] },
+          ],
+          source: "interactive",
+        },
+      ]);
     }
     const conversations = new ConversationManager(factory, {
       graceTimeoutMs: 60_000,
@@ -759,6 +844,9 @@ describe("session.* RPC (S2.D)", () => {
         recordsByConversation.set(conversationId, [...prev, record]);
         return { runIndex: prev.length, shardId: "000001" };
       },
+      ...(opts.durableTurnExecutor
+        ? { durableTurnExecutor: opts.durableTurnExecutor }
+        : {}),
     });
     const conversationDirectory = createMemoryDirectory(recordsByConversation);
     const advancementRecovery =
@@ -1447,8 +1535,21 @@ describe("session.* RPC (S2.D)", () => {
   });
 
   it("session.advancementConfirm 确认后用原始 turnId 执行原任务", async () => {
+    const publicationCalls: string[] = [];
+    const advancement = await createTestAdvancementHarness({
+      rubricPublication: {
+        acceptanceOutcome: () => ({
+          kind: "deferred",
+          message: "准则等待保存。",
+        }),
+        publish: async ({ draft }) => {
+          publicationCalls.push(draft.draftId);
+          return { kind: "saved", rubricId: "rubric-saved", revision: 1 };
+        },
+      },
+    });
     await startWithFactory(createMockFactory({ deltaCount: 0 }), {
-      advancement: await createTestAdvancementController(),
+      advancement: advancement.controller,
     });
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
@@ -1470,6 +1571,7 @@ describe("session.* RPC (S2.D)", () => {
       conversationId: awaiting.conversationId,
       advancementSessionId: awaiting.advancementSessionId,
       rubricDraftId: awaiting.rubricDraftId,
+      rubricPersistence: { kind: "save-new" },
     });
     expect(isSuccessResponse(confirmResp)).toBe(true);
     if (!isSuccessResponse(confirmResp)) return;
@@ -1477,6 +1579,7 @@ describe("session.* RPC (S2.D)", () => {
       status: "confirmed",
       turnId: "turn-adv-2",
       runStatus: "immediate",
+      rubricPublicationMessage: "准则已保存到准则库。",
     });
 
     const event = await client.waitNotification("session.event");
@@ -1496,6 +1599,168 @@ describe("session.* RPC (S2.D)", () => {
       type: "text",
       text: "请把测试修到全绿，盯到验收通过",
     });
+    expect(publicationCalls).toEqual([awaiting.rubricDraftId]);
+    client.close();
+  });
+
+  it.each([
+    {
+      label: "deferred",
+      publish: async () => ({
+        kind: "deferred" as const,
+        message: "准则库暂忙，稍后会继续保存。",
+      }),
+      expectedMessage: "准则库暂忙，稍后会继续保存。",
+    },
+    {
+      label: "failed",
+      publish: async () => {
+        throw new Error("rubric publication failed");
+      },
+      expectedMessage: "任务已继续执行，但准则暂未保存；稍后可重新保存。",
+    },
+  ])(
+    "session.advancementConfirm 映射 $label 保存结果且不取消原任务",
+    async ({ label, publish, expectedMessage }) => {
+      const advancement = await createTestAdvancementHarness({
+        rubricPublication: {
+          acceptanceOutcome: () => ({
+            kind: "deferred",
+            message: "准则等待保存。",
+          }),
+          publish,
+        },
+      });
+      await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+        advancement: advancement.controller,
+      });
+      const client = await connect(server.port);
+      await client.request("auth", { token: TEST_TOKEN });
+
+      const turnId = `turn-publication-${label}`;
+      const sendResp = await client.request("session.send", {
+        text: "请继续完成任务，并保存确认后的准则",
+        turnId,
+      });
+      expect(isSuccessResponse(sendResp)).toBe(true);
+      if (!isSuccessResponse(sendResp)) return;
+      const awaiting = sendResp.result as {
+        conversationId: string;
+        advancementSessionId: string;
+        rubricDraftId: string;
+      };
+      await client.waitNotification("session.event");
+
+      const confirmResp = await client.request("session.advancementConfirm", {
+        conversationId: awaiting.conversationId,
+        advancementSessionId: awaiting.advancementSessionId,
+        rubricDraftId: awaiting.rubricDraftId,
+        rubricPersistence: { kind: "save-new" },
+      });
+      expect(isSuccessResponse(confirmResp)).toBe(true);
+      if (!isSuccessResponse(confirmResp)) return;
+      expect(confirmResp.result).toMatchObject({
+        status: "confirmed",
+        turnId,
+        runStatus: "immediate",
+        rubricPublicationMessage: expectedMessage,
+      });
+      await client.waitNotification("session.complete");
+
+      const session = await advancement.store.loadSession(
+        awaiting.conversationId,
+        awaiting.advancementSessionId,
+      );
+      expect(session?.status).toBe("active");
+      client.close();
+    },
+  );
+
+  it("session.advancementConfirm 结清已存在的耐久原任务准入", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      durableTurnExecutor: createDurableReplayExecutor("run-original-task"),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-durable-original",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+      rubricDraftId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const confirmResp = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
+    });
+    expect(isSuccessResponse(confirmResp)).toBe(true);
+    if (!isSuccessResponse(confirmResp)) return;
+    expect(confirmResp.result).toMatchObject({
+      status: "confirmed",
+      turnId: "turn-durable-original",
+      runId: "run-original-task",
+      runStatus: "queued",
+    });
+
+    const durable = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(durable?.originalTaskAdmission).toMatchObject({
+      status: "admitted",
+      intent: {
+        turnId: "turn-durable-original",
+        surfacePrincipal: expect.any(String),
+      },
+      runId: "run-original-task",
+    });
+    client.close();
+  });
+
+  it("session.advancementConfirm 遇到确定性准入冲突时取消推进会话", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      durableTurnExecutor: createDurableRejectedExecutor(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请完成原任务",
+      turnId: "turn-durable-conflict",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+      rubricDraftId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const confirmResp = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
+    });
+    expect(isErrorResponse(confirmResp)).toBe(true);
+
+    const session = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(session?.status).toBe("cancelled");
     client.close();
   });
 
@@ -2085,8 +2350,8 @@ describe("session.* RPC (S2.D)", () => {
       },
     });
 
-    await waitUntil(() => (recordsByConversation.get("conv-recovery") ?? []).length === 1);
-    const record = recordsByConversation.get("conv-recovery")?.[0] as {
+    await waitUntil(() => (recordsByConversation.get("conv-recovery") ?? []).length === 2);
+    const record = recordsByConversation.get("conv-recovery")?.[1] as {
       source?: string;
       advancement?: { sessionId: string; proxyMessageId: string };
       messages: Message[];
@@ -2197,9 +2462,9 @@ describe("session.* RPC (S2.D)", () => {
 
     // 被中断的推进立即重接：outstanding proxy 被重新调度执行
     await waitUntil(
-      () => (recordsByConversation.get("conv-revise-fail") ?? []).length === 1,
+      () => (recordsByConversation.get("conv-revise-fail") ?? []).length === 2,
     );
-    const record = recordsByConversation.get("conv-revise-fail")?.[0] as {
+    const record = recordsByConversation.get("conv-revise-fail")?.[1] as {
       source?: string;
       advancement?: { proxyMessageId: string };
     };

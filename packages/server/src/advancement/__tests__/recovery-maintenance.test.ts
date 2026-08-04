@@ -24,6 +24,7 @@ import type {
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
+import { protocolDigest } from "@zhixing/core/protocol";
 
 function fakeResources(): ResourceReservationPort {
   const leaseFor = (id: string): ImmediateRootResourceLease => ({
@@ -92,6 +93,19 @@ function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };
 }
 
+function originalTaskAdmissionIntent() {
+  return {
+    turnId: "turn-1",
+    surfacePrincipal: "surface:test",
+    turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
+    inputDigest: protocolDigest(
+      "AdvancementOriginalTaskInput",
+      1,
+      task("把测试修到全绿"),
+    ),
+  };
+}
+
 function draft(): RubricContractDraftSnapshot {
   return {
     draftId: "draft-1",
@@ -142,6 +156,7 @@ function failedReview(): AdvancementRunReview {
   return {
     id: "review-1",
     runIndex: 0,
+    runRecordRef: { shardId: "000001", runIndex: 0 },
     reviewedAt: "2026-01-01T00:02:00.000Z",
     decision: "failed",
     evidence: [],
@@ -197,11 +212,37 @@ async function makeConfirmedStoreWithRoot(): Promise<{
     pendingRubricDraft: draft(),
     createdAt: "2026-01-01T00:00:00.000Z",
   });
-  await store.confirmRubric("conv-1", "adv-1", confirmed());
+  await store.confirmRubric(
+    "conv-1",
+    "adv-1",
+    confirmed(),
+    originalTaskAdmissionIntent(),
+  );
+  const intent = originalTaskAdmissionIntent();
+  await store.settleOriginalTaskAdmission("conv-1", "adv-1", {
+    turnId: intent.turnId,
+    inputDigest: intent.inputDigest,
+    runId: "legacy-recovered:000001:0",
+  });
   return { store, root };
 }
 
 function directory(exists: boolean, runs: RunRecord[] = []) {
+  const availableRuns = runs.some((record) => record.runIndex === 0)
+    ? runs
+    : [
+        {
+          type: "run" as const,
+          runIndex: 0,
+          timestamp: "2026-01-01T00:01:30.000Z",
+          messages: [
+            userMessage("把测试修到全绿"),
+            assistantMessage("先修了一部分。"),
+          ],
+          source: "interactive" as const,
+        },
+        ...runs,
+      ];
   return {
     list: vi.fn(async () => [
       {
@@ -215,7 +256,7 @@ function directory(exists: boolean, runs: RunRecord[] = []) {
     ]),
     exists: vi.fn(async () => exists),
     readRunsReverse: vi.fn(async (_conversationId: string, opts: { limit: number }) => ({
-      runs: runs
+      runs: availableRuns
         .slice()
         .reverse()
         .slice(0, opts.limit)
@@ -388,7 +429,6 @@ describe("AdvancementRecoveryMaintenance", () => {
     });
 
     const result = await recovery.recoverConversation("conv-1");
-
     expect(result).toMatchObject({
       status: "failed",
       conversationId: "conv-1",
@@ -1024,6 +1064,314 @@ describe("AdvancementRecoveryMaintenance", () => {
       status: "scheduled",
       proxyMessageId: "proxy-catchup",
     });
+  });
+
+  it("原任务首次 run 命中补审上界时只证明此前零欠账，不吞掉当轮验收", async () => {
+    const store = await makeConfirmedStore();
+    const originalRun: RunRecord = {
+      type: "run",
+      runIndex: 0,
+      timestamp: "2026-01-01T00:04:00.000Z",
+      messages: [
+        userMessage("把测试修到全绿"),
+        assistantMessage("测试已全绿。"),
+      ],
+      source: "interactive",
+    };
+    const reviewer = { review: vi.fn() };
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({
+        store,
+        reviewer,
+        resources: fakeResources(),
+      }),
+      manager: manager() as never,
+      directory: directory(true, [originalRun]) as never,
+    });
+
+    await expect(
+      recovery.recoverConversation("conv-1", { beforeRunIndex: 0 }),
+    ).resolves.toEqual({
+      status: "no-pending-recovery",
+      conversationId: "conv-1",
+    });
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("补审短路未产生全等 review 时 fail-closed 而不循环重扫", async () => {
+    const store = await makeConfirmedStore();
+    await store.appendRunReview("conv-1", "adv-1", {
+      ...failedReview(),
+      runRecordRef: { shardId: "wrong-shard", runIndex: 0 },
+    });
+    const reviewer = { review: vi.fn() };
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({
+        store,
+        reviewer,
+        resources: fakeResources(),
+      }),
+      manager: manager() as never,
+      directory: directory(true) as never,
+    });
+
+    await expect(recovery.recoverConversation("conv-1")).resolves.toMatchObject({
+      status: "failed",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      message:
+        "Accepted-run recovery returned without durably reviewing the selected run",
+    });
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("启动扫描隔离单个坏 conversation 并继续恢复后续健康项", async () => {
+    const active = {
+      id: "adv-bad",
+      conversationId: "conv-bad",
+      status: "active",
+      originalUserTask: task("继续"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      rubricDraftVersion: 0,
+      confirmedRubric: confirmed(),
+      runs: [],
+      proxyMessages: [],
+    };
+    const advancement = {
+      loadActiveSession: vi.fn(async (conversationId: string) =>
+        conversationId === "conv-bad" ? active : null,
+      ),
+      rebuildMissingProxyMessage: vi.fn(async () => ({
+        kind: "not-applicable" as const,
+      })),
+    };
+    const directoryPort: AdvancementConversationDirectory = {
+      list: async () => [
+        { id: "conv-bad" },
+        { id: "conv-good" },
+      ] as never,
+      exists: async () => true,
+      readRunsReverse: async (conversationId) => {
+        if (conversationId === "conv-bad") throw new Error("corrupt run shard");
+        return { runs: [], hasMore: false };
+      },
+    };
+    const recovery = createOwnerAdvancementRecoveryMaintenance({
+      advancement: advancement as never,
+      directory: directoryPort,
+      proxyTurns: {
+        isRunning: () => false,
+        inspectDurableClaim: async () => ({ status: "unclaimed" }),
+        schedule: async () => ({ status: "immediate" }),
+      },
+    });
+
+    await expect(recovery.recoverAllOpenSessions()).resolves.toEqual([
+      expect.objectContaining({ status: "failed", conversationId: "conv-bad" }),
+      { status: "no-active-session", conversationId: "conv-good" },
+    ]);
+    expect(advancement.loadActiveSession).toHaveBeenCalledWith("conv-good");
+  });
+
+  it("重启后以原准入载荷重驱 pending 并耐久结清 runId", async () => {
+    const pending = {
+      id: "adv-admission-recovery",
+      conversationId: "conv-1",
+      status: "active",
+      originalUserTask: task("完成原任务"),
+      originalTaskAdmission: {
+        status: "pending",
+        intent: {
+          turnId: "turn-original",
+          surfacePrincipal: "surface:user-1",
+          turnOrigin: { channel: "rpc", triggeredBy: "surface:user-1" },
+          inputDigest: `sha256:${"1".repeat(64)}`,
+        },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      rubricDraftVersion: 0,
+      confirmedRubric: confirmed(),
+      runs: [],
+      proxyMessages: [],
+    };
+    const admitted = {
+      ...pending,
+      originalTaskAdmission: {
+        status: "admitted",
+        intent: pending.originalTaskAdmission.intent,
+        runId: "run-original",
+      },
+    };
+    const advancement = {
+      loadActiveSession: vi.fn(async () => pending),
+      settleOriginalTaskAdmission: vi.fn(async () => admitted),
+      rebuildMissingProxyMessage: vi.fn(async () => ({
+        kind: "not-applicable" as const,
+      })),
+      afterTurnCommitted: vi.fn(),
+    };
+    const originalTasks = {
+      admit: vi.fn(async () => ({
+        status: "admitted" as const,
+        runId: "run-original",
+      })),
+    };
+    const recovery = createOwnerAdvancementRecoveryMaintenance({
+      advancement: advancement as never,
+      originalTasks,
+      directory: {
+        list: async () => [{ id: "conv-1" }] as never,
+        exists: async () => true,
+        readRunsReverse: async () => ({ runs: [], hasMore: false }),
+      },
+      proxyTurns: {
+        isRunning: () => false,
+        inspectDurableClaim: async () => ({ status: "unclaimed" }),
+        schedule: async () => ({ status: "immediate" }),
+      },
+    });
+
+    await expect(recovery.recoverConversation("conv-1")).resolves.toEqual({
+      status: "awaiting-original-run",
+      conversationId: "conv-1",
+    });
+    expect(originalTasks.admit).toHaveBeenCalledWith(pending);
+    expect(advancement.settleOriginalTaskAdmission).toHaveBeenCalledWith({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-admission-recovery",
+      turnId: "turn-original",
+      inputDigest: pending.originalTaskAdmission.intent.inputDigest,
+      runId: "run-original",
+    });
+  });
+
+  it("确定性原任务准入拒绝会安全取消推进会话", async () => {
+    const pending = {
+      id: "adv-admission-rejected",
+      conversationId: "conv-1",
+      status: "active",
+      originalUserTask: task("完成原任务"),
+      originalTaskAdmission: {
+        status: "pending",
+        intent: {
+          turnId: "turn-original",
+          surfacePrincipal: "surface:user-1",
+          turnOrigin: { channel: "rpc", triggeredBy: "surface:user-1" },
+          inputDigest: "sha256:" + "1".repeat(64),
+        },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      rubricDraftVersion: 0,
+      confirmedRubric: confirmed(),
+      runs: [],
+      proxyMessages: [],
+    };
+    const advancement = {
+      loadActiveSession: vi.fn(async () => pending),
+      cancelOpenSession: vi.fn(async () => ({
+        ...pending,
+        status: "cancelled" as const,
+      })),
+      settleOriginalTaskAdmission: vi.fn(),
+    };
+    const recovery = createOwnerAdvancementRecoveryMaintenance({
+      advancement: advancement as never,
+      originalTasks: {
+        admit: vi.fn(async () => ({
+          status: "rejected" as const,
+          reason: "idempotency-conflict" as const,
+          message: "conflicting durable payload",
+        })),
+      },
+      directory: {
+        list: async () => [{ id: "conv-1" }] as never,
+        exists: async () => true,
+        readRunsReverse: vi.fn(),
+      },
+      proxyTurns: {
+        isRunning: () => false,
+        inspectDurableClaim: async () => ({ status: "unclaimed" }),
+        schedule: async () => ({ status: "immediate" }),
+      },
+    });
+
+    await expect(recovery.recoverConversation("conv-1")).resolves.toEqual({
+      status: "not-active",
+      conversationId: "conv-1",
+    });
+    expect(advancement.cancelOpenSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-admission-rejected",
+        reason: "system-error",
+      }),
+    );
+    expect(advancement.settleOriginalTaskAdmission).not.toHaveBeenCalled();
+  });
+
+  it("原任务 runId 下界尚未出现在日志时不猜测后续 accepted run", async () => {
+    const active = {
+      id: "adv-lower-bound",
+      conversationId: "conv-1",
+      status: "active",
+      originalUserTask: task("完成原任务"),
+      originalTaskAdmission: {
+        status: "admitted",
+        intent: {
+          turnId: "turn-original",
+          surfacePrincipal: "surface:user-1",
+          turnOrigin: { channel: "rpc", triggeredBy: "surface:user-1" },
+          inputDigest: "sha256:" + "1".repeat(64),
+        },
+        runId: "run-original",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      rubricDraftVersion: 0,
+      confirmedRubric: confirmed(),
+      runs: [],
+      proxyMessages: [],
+    };
+    const advancement = {
+      loadActiveSession: vi.fn(async () => active),
+      rebuildMissingProxyMessage: vi.fn(async () => ({
+        kind: "not-applicable" as const,
+      })),
+      afterTurnCommitted: vi.fn(),
+    };
+    const later: RunRecord & { runId: string } = {
+      type: "run",
+      runId: "run-later",
+      runIndex: 2,
+      timestamp: "2026-01-01T00:02:00.000Z",
+      messages: [userMessage("后来任务"), assistantMessage("完成")],
+      source: "interactive",
+    };
+    const recovery = createOwnerAdvancementRecoveryMaintenance({
+      advancement: advancement as never,
+      directory: {
+        list: async () => [{ id: "conv-1" }] as never,
+        exists: async () => true,
+        readRunsReverse: async () => ({
+          runs: [{ shardId: "000001", record: later }],
+          hasMore: false,
+        }),
+      },
+      proxyTurns: {
+        isRunning: () => false,
+        inspectDurableClaim: async () => ({ status: "unclaimed" }),
+        schedule: async () => ({ status: "immediate" }),
+      },
+    });
+
+    await expect(recovery.recoverConversation("conv-1")).resolves.toEqual({
+      status: "awaiting-original-run",
+      conversationId: "conv-1",
+    });
+    expect(advancement.afterTurnCommitted).not.toHaveBeenCalled();
   });
 });
 

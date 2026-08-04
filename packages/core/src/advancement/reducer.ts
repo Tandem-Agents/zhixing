@@ -1,5 +1,6 @@
 import type {
   AdvancementEvidenceProjection,
+  AdvancementEvidenceGeneration,
   AdvancementRunReview,
   AdvancementSession,
   AdvancementStoreEvent,
@@ -18,11 +19,13 @@ export interface MutableAdvancementSession {
   rubricDraftVersion: number;
   pendingRubricDraft?: AdvancementSession["pendingRubricDraft"];
   confirmedRubric?: AdvancementSession["confirmedRubric"];
+  originalTaskAdmission?: AdvancementSession["originalTaskAdmission"];
   runs: AdvancementSession["runs"][number][];
   proxyMessages: AdvancementSession["proxyMessages"][number][];
   outstandingProxyMessageId?: string;
   advancementWindow?: AdvancementWindowState;
   evidencePending: AdvancementEvidenceProjection["pending"][number][];
+  evidenceGenerations: AdvancementEvidenceGeneration[];
   exit?: AdvancementSession["exit"];
 }
 
@@ -33,11 +36,18 @@ export type AdvancementFoldMap = Map<string, AdvancementFoldSession>;
 export function foldAdvancementEvents(
   events: readonly AdvancementStoreEvent[],
 ): AdvancementSession[] {
+  return freezeAdvancementSessions(foldAdvancementEventMap(events));
+}
+
+/** 事件序列折叠为可供批次门禁继续推演的内部地图。 */
+export function foldAdvancementEventMap(
+  events: readonly AdvancementStoreEvent[],
+): AdvancementFoldMap {
   const sessions: AdvancementFoldMap = new Map();
   for (const event of events) {
     applyAdvancementEvent(sessions, event);
   }
-  return freezeAdvancementSessions(sessions);
+  return sessions;
 }
 
 /** 折叠地图冻结为按创建时间排序的会话列表。 */
@@ -67,6 +77,7 @@ export function applyAdvancementEvent(
         runs: [],
         proxyMessages: [],
         evidencePending: [],
+        evidenceGenerations: [],
       });
       break;
     case "rubric_confirmed": {
@@ -75,7 +86,23 @@ export function applyAdvancementEvent(
       session.status = "active";
       session.updatedAt = event.timestamp;
       session.confirmedRubric = event.confirmedRubric;
+      session.originalTaskAdmission = {
+        status: "pending",
+        intent: event.admissionIntent,
+      };
       session.pendingRubricDraft = undefined;
+      break;
+    }
+    case "original_task_admitted": {
+      const session = sessions.get(event.sessionId);
+      const pending = session?.originalTaskAdmission;
+      if (!session || !pending) return;
+      session.updatedAt = event.timestamp;
+      session.originalTaskAdmission = {
+        status: "admitted",
+        intent: pending.intent,
+        runId: event.runId,
+      };
       break;
     }
     case "rubric_draft_revised": {
@@ -129,6 +156,17 @@ export function applyAdvancementEvent(
         return;
       }
       session.evidencePending.push({ ...event.attempt });
+      session.evidenceGenerations = [
+        ...session.evidenceGenerations.filter(
+          (entry) => entry.runId !== event.attempt.request.runId,
+        ),
+        {
+          runId: event.attempt.request.runId,
+          reviewId: event.attempt.reviewId,
+          generation: event.attempt.generation,
+          lastAttempt: event.attempt.attempt,
+        },
+      ];
       break;
     }
     case "evidence_result": {
@@ -201,12 +239,18 @@ function freezeSession(session: MutableAdvancementSession): AdvancementSession {
     rubricDraftVersion: session.rubricDraftVersion,
     pendingRubricDraft: session.pendingRubricDraft,
     confirmedRubric: session.confirmedRubric,
+    originalTaskAdmission: session.originalTaskAdmission,
     runs: [...session.runs],
     proxyMessages: [...session.proxyMessages],
     outstandingProxyMessageId: session.outstandingProxyMessageId,
     advancementWindow: session.advancementWindow,
-    ...(session.evidencePending.length > 0
-      ? { evidence: { pending: [...session.evidencePending] } }
+    ...(session.evidencePending.length > 0 || session.evidenceGenerations.length > 0
+      ? {
+          evidence: {
+            pending: [...session.evidencePending],
+            generations: [...session.evidenceGenerations],
+          },
+        }
       : {}),
     exit: session.exit,
   };

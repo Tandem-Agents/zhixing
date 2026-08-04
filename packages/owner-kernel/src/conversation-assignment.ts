@@ -130,6 +130,7 @@ import {
   parseConversationId,
   type CompiledDeliveryContent,
 } from "@zhixing/core";
+import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
 import type {
   ControlAdmissionJournal,
   ControlAdmissionOutcome,
@@ -1642,7 +1643,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               canonicalize(environment ?? null) ||
             byRun.record.queuedPosition !== input.queuedPosition
           ) {
-            throw new Error("Run admission identity has conflicting durable payloads");
+            throw new DurableConversationAdmissionRejectedError(
+              "idempotency-conflict",
+              "Run admission identity has conflicting durable payloads",
+            );
           }
           return { kind: "return", value: undefined };
         }
@@ -6580,6 +6584,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const event = await loadStored(body.event, this.#artifacts);
         if (!isAdvancementControlEvent(event, this.#verifier)) {
           throw corruptRunJournal("Run journal contains an invalid advancement event");
+        }
+        try {
+          assertAdvancementEventBatchLegal(state.advancementSessions, [event]);
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error ? error.message : String(error),
+          );
         }
         const existingWrite = state.advancementWrites.get(body.requestId);
         if (existingWrite) {

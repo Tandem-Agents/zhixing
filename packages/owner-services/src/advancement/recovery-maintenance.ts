@@ -8,6 +8,7 @@ import type { AdvancementConversationDirectory } from "./conversation-directory-
 import type { AdvancementController } from "./controller.js";
 import type {
   AdvancementEventSink,
+  AdvancementOriginalTaskAdmissionPort,
   AdvancementProxyDurableClaim,
   AdvancementProxyTurnPort,
 } from "./ports.js";
@@ -24,12 +25,17 @@ export interface AdvancementRecoveryMaintenanceOptions {
   readonly directory: AdvancementConversationDirectory;
   readonly proxyTurns: AdvancementProxyTurnPort;
   readonly events?: AdvancementEventSink;
+  readonly originalTasks?: AdvancementOriginalTaskAdmissionPort;
   readonly logger?: Pick<Console, "warn">;
 }
 
 export type AdvancementRecoveryResult =
   | {
-      readonly status: "no-active-session" | "not-active" | "no-pending-recovery";
+      readonly status:
+        | "no-active-session"
+        | "not-active"
+        | "no-pending-recovery"
+        | "awaiting-original-run";
       readonly conversationId: string;
     }
   | {
@@ -118,7 +124,11 @@ class DefaultAdvancementRecoveryMaintenance
     const conversations = await this.options.directory.list();
     const results: AdvancementRecoveryResult[] = [];
     for (const conversation of conversations) {
-      results.push(await this.recoverConversation(conversation.id));
+      try {
+        results.push(await this.recoverConversation(conversation.id));
+      } catch (error) {
+        results.push(this.failed(conversation.id, undefined, undefined, error));
+      }
     }
     return results;
   }
@@ -155,9 +165,48 @@ class DefaultAdvancementRecoveryMaintenance
       return { status: "not-active", conversationId };
     }
 
+    if (session.originalTaskAdmission?.status === "pending") {
+      const originalTasks = this.options.originalTasks;
+      if (!originalTasks) {
+        return this.failed(
+          conversationId,
+          session.id,
+          undefined,
+          new Error("Original-task admission recovery is not assembled"),
+        );
+      }
+      try {
+        const admitted = await originalTasks.admit(session);
+        if (admitted.status === "rejected") {
+          await this.options.advancement.cancelOpenSession({
+            conversationId,
+            advancementSessionId: session.id,
+            reason: "system-error",
+            message:
+              admitted.reason === "conversation-not-found"
+                ? "原始对话已不存在，推进会话已取消以避免悬空状态。"
+                : "原始任务的耐久准入身份发生冲突，推进会话已安全取消。",
+          });
+          return { status: "not-active", conversationId };
+        }
+        session = await this.options.advancement.settleOriginalTaskAdmission({
+          conversationId,
+          advancementSessionId: session.id,
+          turnId: session.originalTaskAdmission.intent.turnId,
+          inputDigest: session.originalTaskAdmission.intent.inputDigest,
+          runId: admitted.runId,
+        });
+      } catch (error) {
+        return this.failed(conversationId, session.id, undefined, error);
+      }
+    }
+
     let lastRecoveredRun: AdvancementRecoveryResult | undefined;
     while (true) {
       const acceptedRun = await this.findUnreviewedAcceptedRun(session, options);
+      if (acceptedRun === null) {
+        return { status: "awaiting-original-run", conversationId };
+      }
       if (!acceptedRun) break;
       const recovered = await this.recoverAcceptedRun(session, acceptedRun);
       if (recovered.status !== "accepted-run-recovered") return recovered;
@@ -168,6 +217,22 @@ class DefaultAdvancementRecoveryMaintenance
       );
       if (!latest) return recovered;
       if (latest.status !== "active") return recovered;
+      if (
+        !latest.runs.some(
+          (review) =>
+            review.runRecordRef !== undefined &&
+            runRefKey(review.runRecordRef) === runRefKey(acceptedRun.runRecordRef),
+        )
+      ) {
+        return this.failed(
+          conversationId,
+          latest.id,
+          acceptedRun.record.advancement?.proxyMessageId,
+          new Error(
+            "Accepted-run recovery returned without durably reviewing the selected run",
+          ),
+        );
+      }
       session = latest;
     }
 
@@ -321,10 +386,20 @@ class DefaultAdvancementRecoveryMaintenance
         readonly record: RunRecord;
         readonly runRecordRef: RunRecordRef;
       }
+    | null
     | undefined
   > {
     let before: RunRecordRef | undefined;
-    const reviewedThrough = lastReviewedRunIndex(session);
+    const reviewed = new Set(
+      session.runs
+        .map((run) => run.runRecordRef)
+        .filter((ref): ref is RunRecordRef => ref !== undefined)
+        .map(runRefKey),
+    );
+    const lowerRunId =
+      session.originalTaskAdmission?.status === "admitted"
+        ? session.originalTaskAdmission.runId
+        : undefined;
     const candidates: Array<{
       record: RunRecord;
       runRecordRef: RunRecordRef;
@@ -339,33 +414,41 @@ class DefaultAdvancementRecoveryMaintenance
       );
       for (const item of page.runs) {
         const record = item.record;
-        if (reviewedThrough !== undefined && record.runIndex <= reviewedThrough) {
+        if (!lowerRunId && record.timestamp < session.createdAt) {
           return oldestCandidate(candidates);
         }
-        if (
-          reviewedThrough === undefined &&
-          record.timestamp < session.createdAt
-        ) {
-          return oldestCandidate(candidates);
-        }
+        const ref = {
+          shardId: item.shardId,
+          runIndex: record.runIndex,
+        };
+        const isLowerBound =
+          lowerRunId !== undefined &&
+          recoveryRunId({ record, runRecordRef: ref }) === lowerRunId;
         if (
           options?.beforeRunIndex !== undefined &&
           record.runIndex >= options.beforeRunIndex
         ) {
+          if (isLowerBound) return oldestCandidate(candidates);
           continue;
         }
-        if (isRecoverableAcceptedRun(session, record)) {
+        if (
+          isRecoverableAcceptedRun(session, record) &&
+          !reviewed.has(runRefKey(ref))
+        ) {
           candidates.push({
             record,
-            runRecordRef: {
-              shardId: item.shardId,
-              runIndex: record.runIndex,
-            },
+            runRecordRef: ref,
           });
+        }
+        if (isLowerBound) {
+          return oldestCandidate(candidates);
         }
       }
       if (!page.hasMore || page.runs.length === 0) {
-        return oldestCandidate(candidates);
+        // The admitted original run is the durable lower bound for this
+        // advancement session.  If it is absent, the scanned suffix cannot
+        // prove membership and must not advance a later run.
+        return lowerRunId ? null : oldestCandidate(candidates);
       }
       const last = page.runs[page.runs.length - 1]!;
       before = { shardId: last.shardId, runIndex: last.record.runIndex };
@@ -499,11 +582,8 @@ function recoveryKey(
   return `${session.conversationId}:${session.id}:${proxyMessage.id}`;
 }
 
-function lastReviewedRunIndex(
-  session: AdvancementSession,
-): number | undefined {
-  const indexes = session.runs.map((run) => run.runIndex);
-  return indexes.length > 0 ? Math.max(...indexes) : undefined;
+function runRefKey(ref: RunRecordRef): string {
+  return `${ref.shardId}:${ref.runIndex}`;
 }
 
 function oldestCandidate(

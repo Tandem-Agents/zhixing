@@ -123,6 +123,7 @@ describe("createAdvancementReviewMaintenance", () => {
 
     expect(advancement.afterTurnCommitted).toHaveBeenCalledWith({
       conversationId: "conv-1",
+      runId: "turn-1",
       runIndex: 0,
       runRecord: expect.objectContaining({ timestamp: "2026-01-01T00:00:00.000Z" }),
       runRecordRef: { shardId: "000001", runIndex: 0 },
@@ -315,7 +316,7 @@ describe("createAdvancementReviewMaintenance", () => {
     const recoverConversation = vi.fn(
       async (_conversationId: string, _options?: { beforeRunIndex?: number }) => {
         order.push("catch-up");
-        return undefined;
+        return { status: "no-pending-recovery" };
       },
     );
     const maintain = createAdvancementReviewMaintenance({
@@ -334,7 +335,7 @@ describe("createAdvancementReviewMaintenance", () => {
     });
   });
 
-  it("catch-up 失败不阻断当轮验收", async () => {
+  it("catch-up 失败时保留当轮未审，避免跨过更早缺口", async () => {
     const advancement = {
       afterTurnCommitted: vi.fn(async () => reviewed()),
     };
@@ -350,8 +351,31 @@ describe("createAdvancementReviewMaintenance", () => {
     await flush();
     await flush();
 
-    expect(advancement.afterTurnCommitted).toHaveBeenCalledTimes(1);
+    expect(advancement.afterTurnCommitted).not.toHaveBeenCalled();
   });
+
+  it.each(["failed", "awaiting-original-run"])(
+    "catch-up 返回 %s 时同样保留当轮未审",
+    async (status) => {
+    const advancement = {
+      afterTurnCommitted: vi.fn(async () => reviewed()),
+    };
+    const maintain = createAdvancementReviewMaintenance({
+      advancement: advancement as never,
+      sessionBroadcast: () => null,
+      recoverConversation: vi.fn(async () => ({
+        status,
+        message: "original admission run is not visible",
+      })),
+    });
+
+    maintain(makeInfo());
+    await flush();
+    await flush();
+
+    expect(advancement.afterTurnCommitted).not.toHaveBeenCalled();
+    },
+  );
 
   it("review-deferred 结果发 review_deferred 事件且不调度代理", async () => {
     const events: SessionEventEnvelope[] = [];
