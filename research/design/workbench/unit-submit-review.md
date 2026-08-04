@@ -248,13 +248,13 @@
 
 - **当前单元**：第 27 单元 · generation 1
 - **架构来源**：分布式运行时总纲与可执行规格；任务推进闭环架构与 Rubric 协议；运行体生命周期、对话/接入面、确认交互、注意力窗口与 workscene 直接上下游合同；持续在线/本地执行与 S2 安全供应链约束；第 14、15A、15B、18、20、23、25、26 单元冻结合同、适用排除项与迟发现教训；第 27 单元定稿开发清单
-- **交付基线**：HEAD `d4cce198` 至当前完整工作区的 91 个非工作台路径，删除 0；CLI 23、core 25、executor 2、orchestrator 11、owner-kernel 10、owner-services 9、rpc 1、server 8、架构与规格 2
-- **交付指纹**：`git-delivery-manifest-v1:5ed32cbeecd82cd741690d71859be6c78e89edaf68417daa922c00bab00d915a`；路径集 SHA-256 为 `16db2a4b7a8a583896c650e2ec5fc14462dad8ebb89b9ee0cc343150f3b30402`；指纹只作范围证据，不建立为审查项
+- **交付基线**：HEAD `d4cce198` 至当前完整工作区的 93 个非工作台路径，删除 0；CLI 23、core 25、executor 3、orchestrator 11、owner-kernel 10、owner-services 9、rpc 1、server 9、架构与规格 2
+- **交付指纹**：`git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda`；路径集 SHA-256 为 `354d171394b4ac464a6c8b284ecf037a4e0518e92a244d2f59d781910e95b600`；指纹只作范围证据，不建立为审查项
 - **目标提交边界**：第 27 单元（S7）advancement 与独立取证的生产实现、直接相关测试，以及同步修订的推进架构与分布式运行时规格
 - **当前任务进度**：100%（45 / 45 项完成；45 项 [x]、0 项 [~]）
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论
 
-> **清单状态**：独立审查通过。U27-01～U27-09 已在正式文件中更新为“已验证”；本轮对 29 个受影响项完成当前源码重审，原 16 个可证明登记输入未变化的 `[x]` 继续复用。45 项全部为 `[x]`，P0/P1 与非阻断临时问题列表均为空。
+> **清单状态**：独立审查通过。U27-01～U27-09 已在正式文件中更新为“已验证”；最终验证补齐 `advancement-event` 的真实生产行为矩阵并同步结构 golden 后，IR27-37、IR27-41 与跨项闭包已在当前指纹复审通过，其余 43 项输入未变化并继续复用。45 项全部为 `[x]`，P0/P1 与非阻断临时问题列表均为空。
 
 ### 来源覆盖
 
@@ -310,7 +310,7 @@
 | always-online-and-local-execution-requirements.md §5 | 不适用 | 本章是竞品能力现状归纳，不产生第 27 单元实现或审查义务。 |
 | always-online-and-local-execution-requirements.md §6 | 部分适用 | 单机与常驻锚点两种形态平权、本机接入不绕远端及既有业务需求保持不变，归入 IR27-28～IR27-32、IR27-36；未来桌面客户端不在本单元。 |
 | always-online-and-local-execution-requirements.md §7 | 部分适用 | 智能体持续在线、环境任务诚实等待且恢复、单机用户不承担分布式代价归入 IR27-16～IR27-17、IR27-25、IR27-28～IR27-32；普通提醒/定时/通知能力不因本单元重开。 |
-| s2-security-supply-chain-review.md 裁决、强制门禁、接受依据 | 部分适用 | 既有受管安全依赖、精确锁版与零旁路规则归入 IR27-34、IR27-37；当前 91 路径不含依赖或锁文件变化，不重开库选型与供应链建设。 |
+| s2-security-supply-chain-review.md 裁决、强制门禁、接受依据 | 部分适用 | 既有受管安全依赖、精确锁版与零旁路规则归入 IR27-34、IR27-37；当前 93 路径不含依赖或锁文件变化，不重开库选型与供应链建设。 |
 | task-advancement-rubric-architecture.md 需求区、§0～§3 | 适用 | 任务/问题边界、球员/裁判隔离、一次确认、标准公开/程序私有/验证独立、结构化归因、独立窗口、owner 拓扑和范围归入 IR27-01、IR27-06～IR27-08、IR27-28、IR27-32、IR27-38～IR27-40。 |
 | task-advancement-rubric-architecture.md §4.1～§4.7 | 适用 | admission/session/draft/confirmed/review/proxy/归因/权威事件模型逐项归入 IR27-02～IR27-12、IR27-24～IR27-27、IR27-39、IR27-41。 |
 | task-advancement-rubric-architecture.md §5.1～§5.6 | 适用 | 用户输入、契约确认、run 瞬态契约注入、accepted 后 review、代理续推与中间态恢复逐项归入 IR27-06～IR27-12、IR27-15～IR27-17、IR27-24～IR27-25、IR27-31～IR27-33、IR27-38～IR27-40。 |
@@ -336,7 +336,7 @@
 | conversation-model.md §2～§5、§7～§9、§11～§12 | 部分适用 | Conversation 唯一事实源、任一对话至多一个 Session、turn 接受/持久化、CLI/server 生命周期、transcript 原文、恢复可见性和鉴权 RPC 投影归入 IR27-04～IR27-12、IR27-28、IR27-31～IR27-33、IR27-38～IR27-40；通道实现、scheduler/background、管理 CRUD 和历史实施路线未被本单元重开。§1/§14～§15 为术语/决策索引，适用结论已由上述章节承载。 |
 | server-gateway.md §5～§6、§10 | 部分适用 | 已认证 JSON-RPC、conversation send/event 关联、入站只经 Conversation owner、同一 Agent Loop 与网络安全边界归入 IR27-05～IR27-12、IR27-28、IR27-31～IR27-32、IR27-34、IR27-37、IR27-40；通道 adapter、跨通道投递、OpenAI API、平台适配和路线图未被本单元重开。§1～§3、§11～§14 为定位、对比、历史规划与类型汇总，不新增第 27 单元义务。 |
 | confirmation-ux.md §3～§8 | 部分适用 | advancement 确认复用既有选择/渲染基础设施时，须保持数据与渲染分离、稳定 requestId、串行 pending、重复决定幂等、取消/失联有确定结果且产品文案可理解，归入 IR27-07、IR27-32、IR27-34、IR27-40；SecurityPipeline 权限确认语义不被 Rubric 确认替代。竞品调研、未来 Web/渠道 renderer、smart 分诊和实施路线不适用。 |
-| remote-confirmation-execution.md §0～§10 | 部分适用（仅隔离回归） | 当前 91 路径未修改 `ConfirmationBroker`、ConfirmationHub/Bridge、InboundRouter、TextConfirmationRenderer 或 channel challenge/grant；advancement 的 Rubric 控制确认只经 `SelectionService` 与 owner advancement 事件，不得复用或改变权限确认往返语义。该隔离由 IR27-28、IR27-37、IR27-40 判定，不重做远程权限确认功能。 |
+| remote-confirmation-execution.md §0～§10 | 部分适用（仅隔离回归） | 当前 93 路径未修改 `ConfirmationBroker`、ConfirmationHub/Bridge、InboundRouter、TextConfirmationRenderer 或 channel challenge/grant；advancement 的 Rubric 控制确认只经 `SelectionService` 与 owner advancement 事件，不得复用或改变权限确认往返语义。该隔离由 IR27-28、IR27-37、IR27-40 判定，不重做远程权限确认功能。 |
 | remote-interruption-execution.md §0～§8 | 部分适用 | 当前变更触及 conversation controller、session RPC、advancement user takeover/cancel 与停机交界，既有 turn 级 `abortSignal`、`session.abort`、pending 清理、唯一反馈及 `control > confirmation > agent-input` 优先级不得回归，归入 IR27-10、IR27-12、IR27-31～IR27-34、IR27-40；飞书 IntentClassifier、scheduler RunRegistry、卡片按钮和通道渲染未被本单元修改，不形成新增门禁。 |
 | workscene-management-architecture.md 需求区、§0～§3、§6、§8～§10 | 部分适用 | workscene 恢复/切换的用户可见性、设备域 workspace binding、无 workspace 语义、CLI/RPC 同一领域服务及确认边界归入 IR27-16、IR27-18、IR27-20～IR27-23、IR27-29、IR27-32、IR27-34、IR27-40；真实路径模型已由第 25 单元 device/binding 合同取代。管理 CRUD、quiesce、智能创建和工具权限未被本单元重开。 |
 | 第 14 单元 EX14-01、LD14-01～LD14-08 与冻结合同 | 部分适用 | EX14-01 的旧无 ingress `ControlRecord` 重开条件未出现；LD14-01～LD14-08 适用于本单元新增事件族、wire validator、状态量词、恢复义务和结构门禁，归入 IR27-02、IR27-04～IR27-05、IR27-12、IR27-17～IR27-19、IR27-24、IR27-33～IR27-36、IR27-41。 |
@@ -346,15 +346,15 @@
 | 第 20 单元 X20-01～X20-12、L20-01～L20-09 与冻结合同 | 部分适用 | 新增 advancement evidence mesh、目标 workspace/device 选宿、local/mesh adapter、角色装配、服务授权和启动/停机，使相应检测动作归入 IR27-15～IR27-18、IR27-28～IR27-35、IR27-43；job 产品入口、其它数据面、issuer 迁居和既有工具链疑点是否重开，须由 IR27-43 按原条件判定。 |
 | 第 23 单元 X23-01～X23-20、L23-01～L23-53、L23-53b、L23-54～L23-59 与冻结合同 | 部分适用 | 新增 evidence journal、ArtifactStore 引用、recovery maintenance、设备 permit、物理 I/O、local/mesh conformance、严格合同与故障注入，相关检测动作归入 IR27-02、IR27-14、IR27-17～IR27-24、IR27-28～IR27-35、IR27-37、IR27-41、IR27-44；surface asset、旧 WAL/迁移、本地域 owner 等未直接相交条目仍须由 IR27-44 按各自原重开条件写明不适用事实。 |
 | 第 25 单元冻结合同（X/L 表为空） | 适用 | EnvironmentPort、PathGuard、workspace binding/revision、能力发布、无 workspace 与唯一交付指纹算法归入 IR27-16、IR27-18、IR27-20～IR27-23、IR27-29、IR27-34、IR27-37、IR27-45。 |
-| 第 26 单元 X26-01 与冻结合同 | 适用 | executor-role-runtime 已进入当前 91 路径，X26-01 重开条件满足；credential projection/秘密扫描必须按当前变更重新归因，归入 IR27-23、IR27-29、IR27-34、IR27-37、IR27-45。scheduler/job 只作 accepted run、资源和停机交界回归。 |
+| 第 26 单元 X26-01 与冻结合同 | 适用 | executor-role-runtime 已进入当前 93 路径，X26-01 重开条件满足；credential projection/秘密扫描必须按当前变更重新归因，归入 IR27-23、IR27-29、IR27-34、IR27-37、IR27-45。scheduler/job 只作 accepted run、资源和停机交界回归。 |
 | 第 27 单元定稿开发清单 D27-01～D27-11 | 适用 | D27-01→IR27-02/03/34/37；D27-02→IR27-04/05/12/17/33/41；D27-03→IR27-06/08/09/13/25/28；D27-04→IR27-13/14/18/19/29/33/35；D27-05→IR27-15/16/17/24/25/33；D27-06→IR27-18～23/29/30/34/35；D27-07→IR27-20～24/34；D27-08→IR27-24/25/39；D27-09→IR27-03/26/27/32；D27-10→IR27-28～31/33/37；D27-11→IR27-01/32/37～40。开发清单限定范围，不替代总纲、规格和当前交付物反向核查。 |
-| 当前完整交付闭包 | 适用 | 91 个路径逐一归项：CLI 23→IR27-06～IR27-17/26～32/34～41；core 25→IR27-02～05/12～17/23～25/34～37/41～42；executor 2→IR27-13～14/29/33/35/42；orchestrator 11→IR27-08/18～23/29～31/34～39/41；owner-kernel 10→IR27-04～05/13～14/33～37/41～44；owner-services 9→IR27-05～17/24～28/31～39/41；rpc 1→IR27-32/34/36～37/40；server 8→IR27-04～17/28/31～33/36～41；文档 2→IR27-37。未归项路径或新增生产链无审查落点即为范围缺口。 |
+| 当前完整交付闭包 | 适用 | 93 个路径逐一归项：CLI 23→IR27-06～IR27-17/26～32/34～41；core 25→IR27-02～05/12～17/23～25/34～37/41～42；executor 3→IR27-13～14/29/33/35/41～42；orchestrator 11→IR27-08/18～23/29～31/34～39/41；owner-kernel 10→IR27-04～05/13～14/33～37/41～44；owner-services 9→IR27-05～17/24～28/31～39/41；rpc 1→IR27-32/34/36～37/40；server 9→IR27-04～17/28/31～33/36～41；文档 2→IR27-37。未归项路径或新增生产链无审查落点即为范围缺口。 |
 
 ### 审查项
 
 | 编号 | 状态 | 审查分区 | 审查点与通过条件 | 证据 |
 | --- | --- | --- | --- | --- |
-| IR27-01 | [x] | 产品目标与单元边界 | 通过：91 路径均可反绑 D27-01～D27-11；未发现第 28～38 单元、二级取证、benchmark/性能采集、通用诊断或非必要 UI 进入生产交付。 | 当前 manifest 复算：91 路径、0 删除，分组和、路径集哈希与冻结指纹全等 |
+| IR27-01 | [x] | 产品目标与单元边界 | 通过：93 路径均可反绑 D27-01～D27-11；未发现第 28～38 单元、二级取证、benchmark/性能采集、通用诊断或非必要 UI 进入生产交付。 | 当前 manifest 复算：93 路径、0 删除，分组和、路径集哈希与冻结指纹全等 |
 | IR27-02 | [x] | 协议合同、codec 与摘要 | 通过：advancement 全事件由严格 codec 校验嵌套形状与 exact keys，review-attempt 的冻结 root/lease 形状、阶段与 evidence 请求均在 reducer 前复用同一 codec 与 batch guard；摘要、请求与结果引用绑定完整。 | 当前源码重建；`event-codec.ts`、`guards.ts`、`review-attempt-identity.ts` 及直接负例 |
 | IR27-03 | [x] | Rubric 契约与严格校验 | 通过：生成、修订、库匹配和最终 seal 均复用同一 content-id 守卫，requirement/failureHandling 规范化碰撞在确认前 fail-closed，合法 `pc-N` 语义不变。 | 当前源码重建；`contract.ts` 及直接负例 |
 | IR27-04 | [x] | advancement 唯一权威状态 | 通过：review-attempt 加入既有 `AdvancementControlEvent`，只经 conversation owner 的同一日志与 batch guard 提交；没有外部 raw-event 写入口、第二 reducer 或旁路状态面。 | 当前生产调用图；core/file store 与 `SessionAdvancementStore` 写入、重放和投影路径核对 |
@@ -390,11 +390,11 @@
 | IR27-34 | [x] | 安全与零副作用 | 通过：协议签名、owner/revision/lineage/root 静态绑定与零读取拒绝成立；log/artifact canonical handle 防住 symlink/ABA，reviewAttempts/rootLease 未进入 RPC/CLI wire 投影，拒绝路径不泄露字节或能力凭证。 | 当前 codec/guard、RPC projector、PathGuard 与攻击负例核对 |
 | IR27-35 | [x] | 资源、保留与复杂度 | 通过：每个 review generation 恰一 root，terminal root 不复活；queued/active/terminal 分类支持幂等清理，未完成计量在 settle 时保守消费，attempt 投影按 run 只保留最新代，未引入随日志或场景无界扫描的新热路径。 | 当前两侧 governor、controller cleanup、reducer 与计量/重启直接用例重建 |
 | IR27-36 | [x] | 第 14/15 单元历史合同 | 通过：review-attempt 的 lineage/generation/root 与 mutation id 全由耐久输入稳定派生，外部副作用前先写 started/invoking，恢复不依赖单次调用栈；有限 X/L 重开检测未发现第二 owner、宽松 codec 或响应丢失空洞。 | 当前事件/guard/store/controller 与第 14/15 单元适用检测动作逐项对账 |
-| IR27-37 | [x] | 文档、结构与交付闭包 | 通过：91 路径、0 删除、分组、路径集哈希、交付指纹与逐路径归项全等；架构和规格已同步 review-attempt 严格代际、invoking 不重放、owner 终态先于 root 清理及 terminal root 不复活，未引入依赖或范围外设施。 | manifest 当前复算；两份权威文档与生产代码反向对账，`git diff --check` 通过 |
+| IR27-37 | [x] | 文档、结构与交付闭包 | 通过：93 路径、0 删除、分组、路径集哈希、交付指纹与逐路径归项全等；结构 golden 已同步当前 RPC 合同和生产依赖边；架构和规格已同步 review-attempt 严格代际、invoking 不重放、owner 终态先于 root 清理及 terminal root 不复活，未引入依赖或范围外设施。 | 当前 manifest 与结构 golden 只读复跑通过；两份权威文档与生产代码反向对账，`git diff --check` 通过 |
 | IR27-38 | [x] | 执行侧公开契约瞬态注入 | 通过：host lifecycle 在 onBeforeRun 从 active owner 投影注入同一确认版 passCriteria/evidence requirements；终态不注入，不改落盘原文/窗口/system/tools/cache prefix，failureHandling、库索引和裁判过程未下发，ConversationManager 无领域引用。 | 已审 |
 | IR27-39 | [x] | 归因权威与确定性续推 | 通过：criterionId 顺序稳定、工具强制恰一覆盖，unmet 从 attribution 派生；review/proxy 复合写和 missing-proxy 纯函数重建复用同一 attribution/failureHandling，只输出结论与证据摘录。 | 已审 |
 | IR27-40 | [x] | 产品呈现、交互身份与恢复可见性 | 通过：确认、取消、resume、proxy 来源、详情与收场均为人话且不泄漏拓扑；全局保存实际 saved/deferred/failed 在原任务准入后反馈，失败不伪装成功。 | 当前 RPC/CLI 投影与产品旅程核对 |
-| IR27-41 | [x] | 事件状态机结构性闭包 | 通过：十五类 producer/reducer/replay 均有严格 codec、领域 guard、合法 producer 和直接负例；`review_attempt_transitioned` 的 lineage/generation/root/phase 及与 review/terminal 复合提交的跨事件绑定均在 reducer 前拒绝错配。 | 当前 event union、codec、guard、reducer、两种 store producer 与行为矩阵反向对账 |
+| IR27-41 | [x] | 事件状态机结构性闭包 | 通过：十五类 producer/reducer/replay 均有严格 codec、领域 guard、合法 producer 和直接负例；`advancement-event` 已进入 conversation record 真实生产、完整重放和异载荷拒绝矩阵；`review_attempt_transitioned` 的 lineage/generation/root/phase 及与 review/terminal 复合提交的跨事件绑定均在 reducer 前拒绝错配。 | 当前 event union、codec、guard、reducer、两种 store producer与 41 项行为矩阵反向对账通过 |
 | IR27-42 | [x] | 第 18 单元历史合同 | 通过：当前资源身份、租约层级、producer 输入和 runtime validator 均成立；新增 root inspection 只返回有限状态分类，terminal exact replay fail-closed；current-owner replay 在现有单锚点拓扑不可达并由 `X27-03` 与全局第 32 单元门禁承接。 | 当前两侧 governor 合同与历史重开条件逐项核对 |
 | IR27-43 | [x] | 第 20 单元历史合同 | 通过：远端只取证、local/mesh 同 handler、owner 裁判不远端执行成立；review-attempt 只扩展 owner 的资源 governor 控制面，未建立远端 reviewer 或第二数据入口，相关未来 owner 疑点继续引用 `X27-03`。 | 当前 local/mesh 组合根、adapter 与历史重开条件逐项核对 |
 | IR27-44 | [x] | 第 23 单元历史合同 | 通过：日志重放、I/O permit、consumer、evidence child 清理与静态身份检测均成立；review generation 在 acquire 前耐久，released/settled/reclaimed root 只作终态分类并驱动下一代，旧根不会复活或重新调用 provider。 | 当前 owner 日志、governor replay/inspection、controller cleanup 与历史检测动作复核 |

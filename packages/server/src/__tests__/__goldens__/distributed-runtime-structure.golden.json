@@ -154,7 +154,8 @@
         "readonly connection: RpcConnection;",
         "readonly broadcast?: SessionBroadcast;",
         "readonly surfaceCapabilities: SessionSurfaceCapabilities;",
-        "readonly environment?: ExplicitEnvironmentSelection;"
+        "readonly environment?: ExplicitEnvironmentSelection;",
+        "readonly admissionIdentity?: { readonly surfacePrincipal: string; readonly turnOrigin: TurnContext[\"turnOrigin\"]; };"
       ],
       "kind": "interface",
       "name": "AdmitAndMaybeStartTurnInput"
@@ -625,7 +626,8 @@
       "definition": [
         "status: \"confirmed\";",
         "advancementSessionId: string;",
-        "runStatus: \"immediate\" | \"queued\";"
+        "runStatus: \"immediate\" | \"queued\";",
+        "rubricPublicationMessage?: string;"
       ],
       "kind": "interface",
       "name": "SessionAdvancementConfirmResult"
@@ -1219,7 +1221,7 @@
     },
     {
       "kind": "import",
-      "references": 80,
+      "references": 82,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1243,7 +1245,7 @@
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 7,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/orchestrator"
     },
@@ -1297,7 +1299,7 @@
     },
     {
       "kind": "type-import",
-      "references": 72,
+      "references": 79,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1315,13 +1317,13 @@
     },
     {
       "kind": "type-import",
-      "references": 26,
+      "references": 28,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 7,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/orchestrator"
     },
@@ -1333,7 +1335,7 @@
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-services"
     },
@@ -1399,7 +1401,7 @@
     },
     {
       "kind": "import",
-      "references": 12,
+      "references": 13,
       "sourceZone": "executor",
       "target": "package:@zhixing/core"
     },
@@ -1483,31 +1485,37 @@
     },
     {
       "kind": "type-import",
-      "references": 9,
+      "references": 11,
       "sourceZone": "orchestrator/runtime",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 42,
+      "references": 47,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 30,
+      "references": 33,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 8,
+      "sourceZone": "owner-services",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-export",
+      "references": 1,
       "sourceZone": "owner-services",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 9,
       "sourceZone": "owner-services",
       "target": "package:@zhixing/core"
     },
@@ -1599,6 +1607,12 @@
       "kind": "import",
       "references": 1,
       "sourceZone": "server/advancement",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "server/advancement",
       "target": "package:@zhixing/owner-kernel"
     },
     {
@@ -1639,7 +1653,7 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/owner-kernel"
     },

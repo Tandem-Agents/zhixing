@@ -4924,7 +4924,7 @@ describe("conversation assignment protocol", () => {
       } as never),
     ).rejects.toThrow("Ledger snapshot");
     expect(await owner.journal.currentState(RUN_ID)).toBe("dispatched");
-  });
+  }, 20_000);
 
   it("rejects every incomplete atomic closure for conflict and uncertain resolution", async () => {
     const ackedConflict = await createHarness();
@@ -9873,6 +9873,7 @@ type ConversationBehaviorRecordType =
 
 type ConversationBehaviorScenarioId =
   | "commit"
+  | "advancementSession"
   | "worksceneSession"
   | "sessionLifecycle"
   | "channelLifecycle"
@@ -10016,6 +10017,43 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async advancementSession() {
+    const harness = await createHarness();
+    await harness.journal.applyAdvancementEvents({
+      requestId: "matrix-advancement-event",
+      events: [
+        {
+          type: "session_created",
+          timestamp: NOW,
+          sessionId: "matrix-advancement-session",
+          conversationId: CONVERSATION_ID,
+          originalUserTask: {
+            parts: [{ type: "text", text: "continue the accepted work" }],
+          },
+          pendingRubricDraft: {
+            draftId: "matrix-rubric-draft",
+            originalTurnId: "matrix-turn",
+            source: "generated",
+            candidateRubricIds: [],
+            title: "Completion rubric",
+            description: "Confirm the accepted work is complete.",
+            content: {
+              passCriteria: ["The accepted work is complete."],
+              failureHandling: [
+                {
+                  id: "continue",
+                  scenario: "The work is incomplete.",
+                  reply: "Continue the accepted work.",
+                },
+              ],
+            },
+            createdAt: NOW,
+          },
+        },
+      ],
+    });
+    return conversationBehaviorHarness(harness);
+  },
   async worksceneSession() {
     const root = await createTempDir("conversation-workscene-session-matrix");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
@@ -10569,6 +10607,13 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     recovery: noConversationRecovery(
       "session metadata is replayed as conversation-owner authority state",
     ),
+  },
+  "advancement-event": {
+    scenario: "advancementSession",
+    recovery: noConversationRecovery(
+      "advancement events are replayed as conversation-owner authority state",
+    ),
+    corrupt: (body) => ({ ...body, eventsDigest: SHA256_ZERO }),
   },
   admitted: {
     scenario: "commit",

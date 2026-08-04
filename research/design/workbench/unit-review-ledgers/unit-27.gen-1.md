@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U27-04 已验证；C27-19～C27-25、专项矩阵、四路冷启动对抗与差异审计均已闭合；U27-01～U27-03、U27-05～U27-09 既有结论保持有效；未进入全单元终审或最终验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是；仅用于 U27-04 专项收口，冻结后零实现修改
-- **交付物文件集**:第 27 单元起点 `d4cce198` 至当前完整工作区的 91 个非工作台路径，删除 0；CLI 23、core 25、executor 2、orchestrator 11、owner-kernel 10、owner-services 9、rpc 1、server 8、架构与规格 2
-- **当前交付物指纹**:`git-delivery-manifest-v1:5ed32cbeecd82cd741690d71859be6c78e89edaf68417daa922c00bab00d915a`；路径集 SHA-256 `16db2a4b7a8a583896c650e2ec5fc14462dad8ebb89b9ee0cc343150f3b30402`
+- **当前状态**:完成；U27-01～U27-10 全部已验证，连续两轮冻结终审、独立功能审查与最终验证均通过，第 27 单元已封版
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是；当前指纹完成终审与最终验证后零实现修改
+- **交付物文件集**:第 27 单元起点 `d4cce198` 至当前完整工作区的 93 个非工作台路径，删除 0；CLI 23、core 25、executor 3、orchestrator 11、owner-kernel 10、owner-services 9、rpc 1、server 9、架构与规格 2
+- **当前交付物指纹**:`git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda`；路径集 SHA-256 `354d171394b4ac464a6c8b284ecf037a4e0518e92a244d2f59d781910e95b600`
 - **架构来源**:分布式运行时总纲与可执行规格；任务推进闭环架构与 Rubric 协议；运行体生命周期、对话/接入面、确认交互、注意力窗口与 workscene 直接上下游合同；持续在线/本地执行与 S2 安全供应链约束；第 14、15A、15B、18、20、23、25、26 单元冻结合同、适用排除项与迟发现教训；第 27 单元定稿开发清单
 
 ## 固定边界
@@ -32,6 +32,11 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
+| 架构与规格 2 路径 | advancement、Rubric、evidence、review-attempt 与资源顺序必须和生产合同一致 | IR27-01～IR27-45 来源映射、两轮终审及逐路径反向对账 | 通过 |
+| core 25、owner-kernel 10、owner-services 9 路径 | 事件/codec/guard/reducer、conversation owner 日志、review/evidence 服务与恢复投影必须闭合 | core、owner-kernel、owner-services 包测；专项矩阵 S27-01～S27-09 | 通过 |
+| orchestrator 11、executor 3 路径 | 真实取证、运行体装配、资源 governor、conversation record 行为矩阵必须同步 | orchestrator 448/448；executor 最终 503/503；`advancement-event` 真实生产/重放/拒绝矩阵 | 通过 |
+| CLI 23、server 9、rpc 1 路径 | 产品入口、RPC 投影、local/mesh 装配、恢复和结构 golden 必须同步 | CLI 最终 2648/2648；server 771/771；RPC 由全量构建和结构扫描覆盖 | 通过 |
+| 结构/导出/交付派生资产 | 分布式结构 golden、交付路径集、分组、哈希与指纹必须对应当前完整交付物 | golden 普通只读复跑；manifest 93 路径、0 删除；`git diff --check` | 通过 |
 
 ## 关键原语核查
 
@@ -39,6 +44,11 @@
 
 | 关键原语 | 唯一事实源 | 生效/线性化点 | 崩溃与竞争插点 | 生产者/消费者 | 时间、空间、重放与队列上界 | 结论 |
 | -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
+| advancement owner 状态 | conversation owner 的同一 authority log | 严格 codec/guard 后的原子事件批次 | 确认、准入、review/proxy/terminal 写前后及响应丢失 | core/owner-kernel 生产，owner-services/server/CLI 消费 | stable request identity；投影可重建且每 run 只保留最新 attempt | 通过 |
+| accepted-run 连续验收 | admitted runId 下界与全等 reviewed 集合 | oldest-first 首个缺口被全等 review 关闭 | deferred/failed、错绑 ref、重启与坏会话隔离 | recovery maintenance/controller/reviewer | 分页扫描；单会话 fail-closed、跨会话继续 | 通过 |
+| review-attempt 与 root | advancement owner attempt 日志 + governor root | started→invoking→terminal，owner terminal 先于 root terminal | acquire/调用/计量/review/cleanup 各边界、并发取消 | owner-services/CLI 与两侧 governor | 每代恰一 root/调用者；invoking 不重放；terminal 幂等清理 | 通过 |
+| evidence 取证与验真 | executor journal 与签名 EvidenceBundle | 已授权句柄读取、规范 observation 和 owner 验真 | symlink/ABA、target 漂移、typed stale、响应丢失 | orchestrator/executor producer，owner reviewer consumer | 有界 item/重试；terminal outcome 零重复 dispatch | 通过 |
+| 产品入口与生产装配 | 当前 conversation owner 与唯一 serve composition root | confirm/admit、resume、投影与 local/mesh 适配入口 | 启动/停机、断线、保存失败、装配缺失 | server/RPC/CLI 与真实 runtime | 不暴露拓扑/租约；零通用 outbox/benchmark/诊断扩面 | 通过 |
 
 ## 审查结论复用表
 
@@ -50,6 +60,13 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R27-01 | Rubric、确认—准入与 advancement 权威状态 | core advancement 契约/事件/guard/reducer；owner store；server/RPC/CLI confirm 与 recovery；直接测试 | `git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda` | 事件、owner 写入口、确认或准入合同变化 | 通过 | 2/2 | 独立清单 IR27-02～IR27-12、IR27-38～IR27-41 与两轮冻结终审均无新增问题 |
+| R27-02 | accepted-run、review-attempt、evidence 与资源恢复 | owner-services controller/evidence/recovery；owner-kernel/executor governor；CLI 生产 metered reviewer；专项与崩溃测试 | 同当前交付指纹 | review 状态、root/usage、恢复顺序或 consumer 变化 | 通过 | 2/2 | S27-03～S27-06、A27-05～A27-08、IR27-13～IR27-19/24～25/31～35/44～45 通过 |
+| R27-03 | executor 真实取证与安全边界 | orchestrator provider/handler、executor journal、PathGuard、bundle validator、local/mesh adapter 与攻击测试 | 同当前交付指纹 | provider、wire、workspace/binding、路径或签名合同变化 | 通过 | 2/2 | IR27-15～IR27-24、IR27-29～IR27-30、IR27-34 通过；ABA/错绑/stale 全闭合 |
+| R27-04 | 产品旅程、RPC/CLI 呈现与装配拓扑 | server/RPC/CLI 入口、projection、resume、保存反馈、组合根与 local/remote S6 路径 | 同当前交付指纹 | 产品入口、projection、runtime assembly 或拓扑变化 | 通过 | 2/2 | IR27-06～IR27-12、IR27-27～IR27-32、IR27-38～IR27-40；S6 8/8 |
+| R27-05 | 兼容、安全、资源上界与历史合同 | 适用 X/L 检测、strict codec、retention/cleanup、资源分类、秘密与结构扫描 | 同当前交付指纹 | 公共合同、事件族、资源/保留策略或历史重开条件触发 | 通过 | 2/2 | IR27-33～IR27-36、IR27-41～IR27-45 通过，无重开项 |
+| R27-06 | 文档、派生资产、测试与完整交付闭包 | 93 路径 manifest、架构/规格、结构 golden、包测、全量构建与 diff hygiene | 同当前交付指纹；路径集 SHA-256 `354d171394b4ac464a6c8b284ecf037a4e0518e92a244d2f59d781910e95b600` | 任一交付路径、派生资产或验证输入变化 | 通过 | 2/2 | IR27-01、IR27-37、IR27-41；U27-10 修复后复核；V27-06 通过 |
+| R27-07 | 跨项组合推演 | R27-01～R27-06 当前输入、结论及 U27-01～U27-10/C27-01～C27-26 | 任一上游项当前指纹与结论的规范汇总 | 任一上游项新增、失效或结论变化 | 通过 | 2/2 | 两轮分别从正常旅程与并发/崩溃/安全/资源交界推演，零新增问题 |
 
 ## 问题列表
 
@@ -66,6 +83,7 @@
 | U27-07 | **P2，工作量：中；来源 NB27-03（原 P27-01）。** `isAdvancementControlEvent` 对 draft/window/exit 仅验 object，对 review/proxy 仅验 attribution object；领域 guard 对 evidence 三类事件只验 active，未核 requestId/reviewId/requestDigest/映射边界及结果、结算所指 pending。当前事件只由同进程 typed producer 生成且已核合法，因此尚无当前业务故障。专项审查进一步确认 proxy 门禁只反绑 `proxyMessageId`，未反绑失败 review 的 reviewId、failureHandling 与 attribution，reviewId 本身未做会话内唯一性检查；确认事件门禁也只校验 requirement/failure id，允许调用方构造或受损重放携带重复 criterion id，裁判的集合覆盖会把两个标准压成一个。**价值裁决记录：**原结论按“畸形事件可进入生产”评为 P1、大；生产调用图推翻外部可达性，改为 P2、中；本轮只把实际缺失谓词列成有限闭包，不恢复开放式全排列。 | 权威事件 codec 与领域 guard 没有复用完整嵌套领域 validator，也未在 reducer 前封住当前 reducer 与裁判实际依赖的有限身份/跨事件绑定；这是内部 producer 回归/受损 replay 的防御纵深缺口。 | 生产端：advancement typed producers、权威写与 replay；类型组合：draft、confirmedRubric、review、window、proxy、exit、evidence attempt/result/settlement；消费者：guard、reducer、裁判、投影与恢复；异常终态：未知字段/错类型、确认 criterion id 重复、重复 review id/run 身份、proxy-review/failureHandling/attribution 错绑、evidence request/digest/index/pending 错绑；测试：上述有限字段与绑定负例，不做开放全排列。受影响审查项：IR27-02、IR27-04、IR27-05、IR27-11、IR27-15、IR27-41、IR27-42。 | 让 codec 复用各嵌套领域 validator；guard 只补当前消费者实际依赖的有限绑定：确认版 criterion/requirement/failure id 分组唯一，review id 与 run 身份唯一，proxy 的 reviewId、failureHandling 与 attribution 全等对应同一 failed review，evidence attempt 的 requestId/reviewId/digest/索引全等且结果与结算只指向当前 pending，terminal 与同批 review 决定一致。验收：当前合法 producers 全通过，列明的非法形状/错绑在 reducer 前 fail-closed，外部仍无 raw-event 入口且不建设全排列设施。 | 已验证 |
 | U27-08 | **P2，工作量：小；来源 NB27-04（由 P27-03 拆分）。** 全局 publication 已有稳定 `draftId+persistence` requestId 与 CAS，但 controller 只返回预估 `acceptanceOutcome`，随后 fire-and-forget 并吞错；用户看到“正在保存”后永远收不到真实 saved/deferred/failed。专项审查进一步确认：当前把 `failed` 留作裸 Promise rejection，RPC 完成原任务准入后才附加处理器；准入跨越 I/O 时 rejection 可先成为未处理拒绝。**价值裁决记录：**原结论与 confirm 恢复合为 P1、大，现因失败不回滚本任务而独立为 P2、小；本轮对抗复核否定了“confirm 返回前先等待保存”的旧方案，因为权威 D27-09 明确本任务采用/准入不得等待全局写。 | 可选 publication 的异步完成结果没有在产生处立即收敛为窄域显式终态；同时其正确修复必须守住“本地契约采用与原任务准入优先、全局保存独立”的产品边界。 | 生产端：confirm controller、RPC admission 与 GlobalRubricPublication；类型组合：稳定 requestId、CAS、publication task 及 saved/deferred/failed；消费者：RPC/CLI 反馈与 Rubric 库；异常终态：保存失败/超时、失败先于准入完成、准入与保存交错、响应丢失和重复 publish；测试：任务先准入、三种真实结果、失败不形成未处理拒绝、不取消 active/run、同键幂等。受影响审查项：IR27-27、IR27-32、IR27-40。 | controller 启动窄域 publication task，并在产生处立即把 rejection 收敛为显式 `failed` 结果；RPC 先完成 U27-02 的耐久原任务 admission，再消费该 task，将 `saved/deferred/failed` 映射为真实人话反馈。publication 失败不得取消 active/run，继续复用稳定 requestId，不新增 DeferredGlobalIntent 或通用通知设施。验收：原任务准入零等待全局写，失败先于准入完成也不产生未处理拒绝，返回文案与真实结果一致，保存失败仍继续任务，重复调用不重复落库。 | 已验证 |
 | U27-09 | **P2，工作量：小；来源 NB27-06（原 P27-09）。** 启动恢复顺序扫描目录；`loadActiveSession` 异常已在单会话内转为 failed，但 `findUnreviewedAcceptedRun` 的 run 读取异常会让 `recoverConversation` reject，继而结束 `recoverAllOpenSessions` 的剩余扫描。组合根会捕获，server 仍启动，用户 resume 还能定向恢复健康会话。**价值裁决记录：**原结论为 P1、中并要求耐久分页 cursor；当前无启动阻断或规模损失，故保持 P2、小。 | 全局启动枚举没有把单 conversation 的恢复失败隔离成一项结果，导致一个坏项截断后续健康项的主动恢复；这与 U27-03 的会话内连续前缀无关。 | 生产端：启动目录枚举、`recoverAllOpenSessions` 与 `recoverConversation`；类型组合：conversation entry、run-read success/failure 与 recovery result；消费者：启动组合根、server readiness、后续健康会话；异常终态：单坏项、其后健康项、全局扫描与 resume；测试：坏项隔离继续、服务启动、健康项主动及定向恢复。受影响审查项：IR27-12、IR27-31、IR27-33、IR27-35。 | 在 `recoverAllOpenSessions` 的逐 conversation 边界捕获 reject，转成带 conversationId 的 failed 结果并继续；复用现有目录与 `recoverConversation`，不加 cursor。验收：坏项不截断后续项或 server 启动，U27-03 在坏会话内仍 fail-closed，健康项可主动/定向恢复；仅重开条件成立才评估分页。 | 已验证 |
+| U27-10 | **P2，工作量：小；最终验证发现。** conversation record 行为矩阵遗漏新增 `advancement-event`，结构 golden 也未同步当前 RPC 字段与生产依赖边；包内绝大多数测试仍可通过，但结构闭包会留下未执行记录类型并使 golden 红灯。 | 新增公共记录/合同后，派生的可执行行为清单与结构基线没有机械跟随生产合同更新。 | 生产端不变；派生面：executor conversation record 行为矩阵、server distributed-runtime structure golden；消费者：全类型生产/重放/错载荷门禁与包图/RPC 结构门禁；异常终态：新增记录无真实生产场景证据、结构变化被旧基线误报；受影响审查项：IR27-37、IR27-41。 | 为 `advancement-event` 增加真实 owner 生产、完整重放与异载荷拒绝场景；核对后以显式 golden 更新命令同步真实 RPC 字段和依赖边，普通模式复跑通过。验收：行为矩阵 41/41、server 结构门禁通过、最终包测与构建闭合。 | 已验证 |
 
 ## U27-01～U27-09 专项固定核查矩阵
 
@@ -110,6 +128,7 @@
 | C27-23 | review 与 attempt-consumed 已提交、root 尚未清理即崩溃时，`already-reviewed` 或 closed-session 早退会跳过 attempt 清理，容量只能等待过期回收 | U27-04 | 修复后复核通过：启动、定向读取与 turn 路径均先按 terminal attempt 清理 root，再执行 reviewed/not-active/closed 早退 |
 | C27-24 | root acquire 与取消、reviewer deferred 同时竞争时，旧实现可能在 owner 已终态后继续 provider，或由两个 terminal writer 使取消失败 | U27-04 | 修复后复核通过：acquire 返回后重读同代 active+started；零资格即零 provider 并清理。terminal transition 冲突重读并接受首个耐久 terminal winner，取消与 deferred 竞争均收敛 |
 | C27-25 | provider 已 reserve usage、但错误流未产生 message_end/consume 时，attempt 虽先 deferred，root settle 会因 open usage 拒绝，只能等待 TTL | U27-04 | 修复后复核通过：anchor settle 在同一 governor 事务内先按预占上限补 consume 再 settle；真实 metered reviewer 证明第一代即时释放、第二代恢复成功且最终恰一 review |
+| C27-26 | 新增 `advancement-event` 与 RPC/依赖结构变化未进入对应派生验收资产 | U27-10 | 修复后复核通过：真实生产/重放/拒绝矩阵补齐，结构 golden 核对差异后更新并以普通模式通过 |
 
 ## U27-01～U27-09 专项与冷启动对抗记录
 
@@ -153,6 +172,7 @@
 | 编号 | 对应问题与先前通过轮次 | 遗漏机制 | 后续必做的检测动作与适用范围 | 应用记录（轮次:证据） |
 | ---- | ---------------------- | -------- | ---------------------------- | --------------------- |
 | L27-01 | U27-04；此前 S27-04、A27-02、D27-01 与 V27-02/V27-05 均判通过 | 把 evidence request generation 与 reviewer root attempt generation 当成同一生命周期；测试只证明一次 terminal bundle 复用且使用 fake resource port，没有检查“快路跳过耐久事件、却仍创建并终结资源”的第二次恢复。 | 对任何跳过常规耐久写的快路，分别列出业务状态、外部调用相位与租约状态；强制构造“旧业务结果已耐久→外部调用或提交结果不明→资源终态→再次恢复”连续两轮，并使用真实状态机证明身份先耐久、外部调用前有相位边界、业务终态先于资源释放；终态业务也须在 early return 前重驱资源清理。适用于本单元 review/evidence 快路及后续新增的 owner 快路。 | 本轮首次应用发现 C27-19～C27-23；修复后再次应用并以真实 governor、生产 metered reviewer 重造 acquire 响应不明、取消竞争、reserve 未 consume、review 提交崩溃与 closed cleanup，追加 C27-24～C27-25 并全部修复后复核通过。 |
+| L27-02 | U27-10；独立清单 IR27-37、IR27-41 已通过后在最终验证发现 | 公共记录和 RPC/依赖结构已变化，但审查只核生产 codec/guard 与当前源码，没有机械比较记录全集对可执行生产矩阵、当前结构对 golden。 | 新增或修改公共记录类型、RPC 结果字段或跨包引用时，最终验证必须机械运行“记录全集=行为矩阵键集”和结构 golden 普通模式；只在差异已人工核对后显式更新基线。适用于所有公共记录/结构变更单元。 | 本轮执行发现 C27-26；补齐矩阵并同步 golden 后，executor 行为矩阵 41/41、server 结构门禁普通模式通过。 |
 
 ## 验证计划与证据账本
 
@@ -163,15 +183,16 @@
 | V27-01 | U27-01、U27-02、U27-03、U27-07 的 core 契约、事件、领域门禁、文件日志写入与重放成立 | core advancement 目录 Vitest；最近变化的 codec/guard 定向 Vitest；core `tsc --noEmit`；core build | core advancement 的 23 个当前交付路径及直接构建产物 | 受影响验证 / 低 | 原目录 8 文件 72/72；C27-18 后 codec/guard 2 文件 11/11；当前类型与构建通过。写入与重放共用严格谓词，确认三组 id 与有限跨事件绑定均在 reducer 前拒绝 | `git-delivery-manifest-v1:9df97c419e0898708bbc81252d8791c90e9b91a0c72ee5c683983a8e8e373144` | 有效 |
 | V27-02 | U27-04～U27-06 的 generation、租约交接、句柄绑定及直接消费者回归成立 | core codec/guard、owner-services evidence/controller/session-store、owner-kernel/executor governor、server advancement 与 CLI 真实 governor+生产 metered reviewer 定向集；包内类型检查 | U27-04 的 core、owner-services、owner-kernel、executor、server、CLI 生产链及直接测试 | 受影响验证 / 低 | core 14/14、evidence 8/8、owner-kernel governor 20/20、executor governor 3/3、server 53/53、CLI 连续恢复 7/7；core、owner-services、owner-kernel、executor 类型通过，server/CLI 仅保留已登记无关基线。真实 reviewer 覆盖 invoking 崩溃、acquire 响应丢失、reserve 未 consume、review 提交崩溃、取消与终态竞争及 closed cleanup | `git-delivery-manifest-v1:5ed32cbeecd82cd741690d71859be6c78e89edaf68417daa922c00bab00d915a` | 有效 |
 | V27-03 | U27-02、U27-03、U27-08、U27-09 的 RPC、恢复枚举、真实保存反馈与坏会话隔离成立 | server advancement/recovery 与 session RPC Vitest；CLI advancement maintenance 定向 Vitest；owner-services build | server advancement/RPC、CLI recovery/production assembly 的当前输入及 core、owner-services 最新构建产物 | 受影响验证 / 低 | server advancement 原 50/50，C27-15 后 recovery 27/27，C27-17 后保存 deferred/failed 2/2；session RPC 原 76/76、CLI advancement/运行时 35/35，owner-services 当前构建通过。server/CLI 类型仅保留验证手册既有基线 | `git-delivery-manifest-v1:9df97c419e0898708bbc81252d8791c90e9b91a0c72ee5c683983a8e8e373144` | 有效 |
-| V27-04 | 当前冻结交付物的格式、补丁卫生、构建与可重复范围指纹成立 | Biome 当前 U27-04 变更 TS；`git diff --check`；`pnpm build`；`unit-delivery-manifest.mjs --base d4cce198` | 24 个当前变更 TS 与 91 路径完整交付闭包 | 冻结准备 / 中 / 222.7s 构建 | Biome 24 文件零问题；diff-check 通过；全量构建 17/17 通过；91 路径、零删除，分组和为 91，路径集 SHA-256 `16db2a4b7a8a583896c650e2ec5fc14462dad8ebb89b9ee0cc343150f3b30402` | `git-delivery-manifest-v1:5ed32cbeecd82cd741690d71859be6c78e89edaf68417daa922c00bab00d915a` | 有效 |
+| V27-04 | 当前冻结交付物的补丁卫生、构建与可重复范围指纹成立 | `git diff --check`；`pnpm build`；`unit-delivery-manifest.mjs --base d4cce198` | 当前 93 路径完整交付闭包 | 最终冻结 / 中 / 260s 构建 | diff-check 通过；修正后全量构建 17/17 通过；93 路径、零删除，分组和为 93，路径集 SHA-256 `354d171394b4ac464a6c8b284ecf037a4e0518e92a244d2f59d781910e95b600` | `git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda` | 有效 |
 | V27-05 | U27-04 专项功能审查、四路冷启动对抗与历轮反证差异审计闭合 | 对当前指纹重做 S27-04、A27-05～A27-08、D27-01；其余问题结论复用 | U27-04 固定矩阵、C27-19～C27-25 及 accepted-run/evidence/resource/closed-session 直接交界 | 专项收口 / 低 | 固定矩阵逐格闭合；四路从 owner 线性化、governor/计量、崩溃并发、范围价值独立重建均无新增反证；C27-19～C27-25 全部修复后复核通过，差异审计零消失项 | `git-delivery-manifest-v1:5ed32cbeecd82cd741690d71859be6c78e89edaf68417daa922c00bab00d915a` | 有效 |
+| V27-06 | 当前完整交付物的受影响包测试与最终结构门禁通过 | 各包目录串行 Vitest（JSON 首轮 + 仅失败项 fresh process 归因）；结构 golden 普通复跑；最终 `pnpm build` | core、owner-kernel、orchestrator、executor、owner-services、server、CLI 与 RPC 构建闭包 | 最终验证 / 中 | core 2620/2620、owner-kernel 246/246、orchestrator 448/448、executor 503/503、owner-services 10/10、server 771/771、CLI 2648/2648，合计 7246/7246；首轮超时/资源 backpressure 均按手册定向复跑通过；RPC 无独立测试，由结构扫描和 17/17 构建覆盖 | `git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda` | 通过；复用 45 项独立审查并对 IR27-37、IR27-41 当前变化重审 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `git-delivery-manifest-v1:eb1b74f9aee0d8deda2c8454e8b204d52616069f070ec828544c47c190e57dda` | 通过；跨项组合推演与最终验证差异审计无新增问题 |
 
 ## 独立审查覆盖表
 
@@ -179,5 +200,11 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| I27-01 | 权威状态、身份与确认—准入链 | core/owner-kernel/server/RPC/CLI 当前生产入口与 `eb1b74f9...` | 已覆盖 | IR27-02～IR27-12、IR27-38～IR27-41 全部通过；零第二 owner/事实源 | 公共事件、owner 写入口、准入身份或投影变化 |
+| I27-02 | review/evidence 并发、崩溃与资源终态 | owner-services、governor、生产 reviewer、恢复入口与当前指纹 | 已覆盖 | S27-03～S27-06、A27-05～A27-08；所有插点映射唯一 owner/代际/终态 | attempt/root/usage/恢复合同变化 |
+| I27-03 | 取证真实性、安全与隐私 | orchestrator/executor/provider/PathGuard/bundle validator 与当前指纹 | 已覆盖 | 句柄/路径反绑、签名、错绑、stale 与 local/mesh 等价均通过 | provider、workspace、wire 或签名边界变化 |
+| I27-04 | 产品旅程、装配与异常恢复 | server/RPC/CLI 入口、local/remote runtime、S6 及当前指纹 | 已覆盖 | 确认、执行、验收、代理、恢复、保存反馈和收场均可达且为人话 | 产品入口、projection 或组合根变化 |
+| I27-05 | 交付闭包、兼容与派生资产 | 93 路径 manifest、架构/规格、结构 golden、适用历史合同 | 已覆盖 | IR27-01、IR27-33～IR27-37、IR27-42～IR27-45；U27-10 修复后无待核查派生项 | 交付路径、文档、golden、依赖或历史重开条件变化 |
+| I27-06 | 跨区组合核查 | I27-01～I27-05 结论、U27/C27/L27 全集及当前指纹 | 已覆盖 | 两轮冻结终审、独立清单 45/45、最终验证 7246/7246；问题列表零待解决 | 任一覆盖项失效、出现新反证或实现修改 |
 
 <!-- registration-complete: unit-27.gen-1 -->
