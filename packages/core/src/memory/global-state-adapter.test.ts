@@ -9,6 +9,7 @@ import type {
 } from "../contracts/index.js";
 import { MemoryStore } from "./memory-store.js";
 import { AnchorMemoryGlobalStateAdapter } from "./global-state-adapter.js";
+import { projectMemoryLogicalEntry } from "./logical-entry.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 
@@ -140,6 +141,62 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
         },
       ),
     ).rejects.toThrow("does not cover");
+  });
+
+  it("accepts consecutive same-batch people updates using the shared projected digest", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.mutate(
+      {
+        kind: "memory-append",
+        payload: {
+          domain: "people",
+          scope: { kind: "personal" },
+          id: "person-a",
+          meta: { name: "A", relation: "friend" },
+          content: "first",
+        },
+      },
+      controlContext("people-create"),
+    );
+    const listed = await fixture.adapter.read(
+      { kind: "memory-list", scope: { kind: "personal" }, domain: "people" },
+      readContext("people-current"),
+    );
+    if (listed.kind !== "memory-list") throw new Error("unexpected result");
+    const current = listed.entries[0]!;
+    const secondPayload = {
+      domain: "people" as const,
+      scope: { kind: "personal" as const },
+      id: "person-a",
+      meta: { name: "A", relation: "friend" },
+      content: "second",
+      expectedDigest: current.digest,
+    };
+    const projected = projectMemoryLogicalEntry(secondPayload, current, { revision: 2 });
+    const plan = fixture.adapter.prepareStagedMutations({
+      records: [
+        {
+          seq: 1,
+          requestId: "people-second",
+          mutation: { kind: "memory-append", payload: secondPayload },
+        },
+        {
+          seq: 2,
+          requestId: "people-third",
+          mutation: {
+            kind: "memory-append",
+            payload: {
+              ...secondPayload,
+              content: "third",
+              expectedDigest: projected.digest,
+            },
+          },
+        },
+      ],
+    });
+
+    expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 2 });
+    expect(plan.outcomes.get(2)).toEqual({ t: "granted", targetRevision: 3 });
   });
 });
 

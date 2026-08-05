@@ -3623,7 +3623,31 @@ describe("conversation assignment protocol", () => {
         },
       ],
     });
-    expect((await harness.journal.finalHistory(7))[0]?.frame.publishConflicts).toBe(1);
+    const [history] = await harness.journal.finalHistory(7);
+    expect(history?.frame.publishConflicts).toBe(1);
+    expect(history?.publishResults).toEqual([
+      {
+        conversationId: CONVERSATION_ID,
+        runId: RUN_ID,
+        commitRevision: 8,
+        assignmentId: ASSIGNMENT_ID,
+        seq: 1,
+        mutation: { kind: "workscene-create", name: "Focus" },
+        decision: {
+          t: "conflicted",
+          error: {
+            code: "revision-conflict",
+            message: "workscene changed",
+            retryable: false,
+          },
+        },
+      },
+    ]);
+    const publishedResults: unknown[] = [];
+    await expect(harness.journal.publishPendingFinals(async (_frame, results) => {
+      publishedResults.push(results);
+    })).resolves.toBe(1);
+    expect(publishedResults).toEqual([history?.publishResults]);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("commits from dispatched when the started report is lost and absorbs a late report", async () => {

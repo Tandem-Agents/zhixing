@@ -107,15 +107,13 @@ skill = 可复用的「做某类事的方法」（程序性知识）,按需调�
 
 > 稳定前缀在**单个注意力窗口生命周期内** byte-equal 不动;**跨窗口生命周期边界**(压缩 / 模式切换 / resume)才允许重建,且重建是「检查 → 变了才换、没变 byte-equal 不动」。
 
-### 3.2 落地形态:窗口生命周期订阅者(已实现)
+### 3.2 落地形态:assignment-bound runtime 刷新(已实现)
 
-**索引段的唯一来源是生命周期订阅者 `makeSkillIndexLifecycle`(`create-agent-runtime.ts:164`),装配期不硬编码注入**:`onWindowOpen` 时比对 `skillStore.version(mode)` 与上次构建版本——**变了才** `queryTopN` 重渲染、经公共 `updateSystemPromptSegment("skill-index", next)` 贡献索引段;没变零 IO、零重算、不调接口(byte-equal 不动、cache 不破)。首窗 `onWindowOpen` 首次构建;技能集变更(创建 / 接入 / 状态写)在**下一个注意力窗口换代**时自然生效——窗口内 systemPrompt byte-equal 铁律不破。`mode` 来源:`createAgentRuntime` options 的 `skillMode`(`cli/runtime/session.ts` 按 `isWorkscene` 传)。
-
-**builtin 池拼装挂同一订阅者**:重渲染时 = 用户池(`queryTopN`)+ builtin 池(注册集,§二)末端拼装(§3.4);builtin 随版本恒定、不影响版本比对的零开销路径。
+**索引段的唯一生产者是 `createAgentRuntime` 的窗口刷新路径。**用户目录只能经当前 assignment 的 `GlobalQuery` 读取，因此构造期和通用 lifecycle subscriber 不持有目录读取权限：新窗口的首个 run 在 prompt 首次消费前刷新；run 内窗口换代由同一 runtime-owned 路径刷新。返回的 `catalogRevision` 只允许单调前进，窗口内后续 run 不重读，保持 systemPrompt byte-equal。`mode` 来自 runtime 的 `skillMode`，builtin 池在同一路径末端拼装，不进入用户目录权威。
 
 ### 3.3 v2 增量:运行中变更的即时性
 
-重建机制已就位(§3.2),v2 技能管家运行中产生 / 淘汰技能**无需新机制**——管家写库使 `skillStore.version` 递增,下一次 `onWindowOpen` 自然重渲染。若 v2 需要"当前窗口内即见"(不等换代),才考虑追加窗口内重建点;在产品证明该需求前不做(窗口换代频度已足够)。
+重建机制已就位(§3.2),v2 技能管家运行中产生 / 淘汰技能**无需新机制**——权威 catalog revision 前进后，下一窗口的 assignment-bound 刷新自然生效。若 v2 需要"当前窗口内即见"(不等换代),才考虑追加窗口内重建点;在产品证明该需求前不做。
 
 ### 3.4 索引产生管线
 
@@ -224,14 +222,14 @@ Index 产生时按 `index.mode` 过滤:标 `main` 进 main runtime 索引、标 
 | `orchestrator` | Store 构造 + `builtinCtx` 注入;`load_skill` / `save_skill` / `admit_skill` 注册(经能力工具注册表;admit 的 `admissionLlm` 绑 main 档单发、装配期直接注入(单发通道构造前移,工厂缺失 fail-fast));skill 索引段(含 builtin 条目)接入 system prompt | `create-agent-runtime.ts`(`memoryStore`/`builtinCtx` 注入、`BUILTIN_TOOL_FACTORIES` 实例化、`buildSystemPrompt` 构造点)、`system-prompt.ts`(`SystemPromptSegment`/`renderSegment`/`MAIN_AGENT_SEGMENTS`) |
 | `cli` | `SkillCommandSource`(唤醒)、`/skills` 技能管理器(alt-screen,仅结构性策展)、**创建 / 打磨与接入均无 cli 专属件**(对话流能力内化:创建见 skill-authoring.md,接入见 §六) | `repl.ts`(`DefaultCommandRegistry`/`registerDynamicSource`)、`DynamicCommandSource`(`core/typeahead/types.ts:345`);管理器复用中性 `tui/` 共享 alt-screen 原语(`tui/render.ts`、`tui/input.ts`、`tui/key-event.ts`、`screen/screen-controller.ts`),浏览 = 面向管理的全集读(含 `disabled` + usage,§二;**非 `listAll`** —— 后者剔 disabled、补全用;**不含 builtin**)、状态操作 = `setState`/`archive`;原 `admission-command.ts`(单键 / `--force` 裁决交互)随接入内化退役 |
 
-「注意力窗口生命周期边界」即 runtime 生命周期钩子(`AgentRuntimeLifecycle.onWindowOpen`),属 runtime 层、非 skill 模块;索引段经 `updateSystemPromptSegment` 公共接口贡献(已实现,§3.2),无需任何 holder 改造。
+「注意力窗口生命周期边界」由 runtime 的窗口换代事实定义；skill 索引刷新由持有 assignment `GlobalQuery` 的 runtime 在该边界执行，外部 lifecycle subscriber 不获得构造期查询权限。
 
 ## 九、v1 → v2 跨版插座
 
 第二版(技能管家)完整架构见 [skill-evolution.md](./skill-evolution.md);本节只列 v1 侧预留点 —— 第二版往这些点插入、不推倒重来:
 - **度量信号** —— `usage/` 旁路,v1 已用于 top-N 排序;v2 加「淘汰判断」第二消费者。
 - **来源标记** —— v1 来源全由目录定(`own` 本地产生 / `linked` 外部接入)、不设字段;v2 在 `own/` 内加 `stewardCreated` 布尔标记激活来源边界(技能管家只动自产)。插座 = `index.json` 是 per-id 可扩展状态对象,v2 加字段即纯增量。
-- **`load_skill`(度量采集点)** —— v1 建好,v2 直接接。**`systemPrompt` 可重建插座** —— ✅ 已落地（[agent-runtime-lifecycle.md](./agent-runtime-lifecycle.md)）:实际落地为双层 holder（非预想的一行）+ onWindowOpen 注册式订阅 + `SkillStore.version(mode)` 门控的边界重建检查（§3.2/§3.3）。
+- **`load_skill`(度量采集点)** —— v1 建好,v2 直接接。**`systemPrompt` 可重建插座** —— ✅ 已落地（[agent-runtime-lifecycle.md](./agent-runtime-lifecycle.md)）:双层 holder 保持窗口内稳定，skill 目录由 assignment-bound runtime 刷新并以权威 catalog revision 单调提交（§3.2/§3.3）。
 - **写隔离** —— v1 `linked` 物理只读;v2 决断 `own` 是否再物理细分(§二)。
 
 ## 十、测试拓扑

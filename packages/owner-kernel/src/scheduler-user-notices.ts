@@ -227,7 +227,9 @@ function validateNoticeFact(value: unknown): SchedulerNoticeFact {
     Object.keys(value).some((key) => !allowedKeys.has(key)) ||
     fact.t !== "scheduler-user-notice" ||
     typeof fact.noticeId !== "string" || fact.noticeId.length === 0 ||
-    (fact.kind !== "missed-summary" && fact.kind !== "capability-gap") ||
+    (fact.kind !== "missed-summary" &&
+      fact.kind !== "capability-gap" &&
+      fact.kind !== "publish-result") ||
     !["prepared", "open", "updated", "closed"].includes(fact.state ?? "") ||
     typeof fact.reason !== "string" || fact.reason.length === 0 ||
     !Array.isArray(fact.actions) || !fact.actions.every((item) => typeof item === "string") ||
@@ -260,6 +262,17 @@ function validNoticeRef(
       typeof ref.taskId === "string" && ref.taskId.length > 0 &&
       typeof ref.jobRunId === "string" && ref.jobRunId.length > 0 &&
       Number.isSafeInteger(ref.round) && (ref.round as number) > 0;
+  }
+  if (kind === "publish-result") {
+    return Object.keys(ref).every((key) =>
+      ["assignmentId", "decision", "jobRunId", "kind", "seq", "taskId"].includes(key)) &&
+      Object.keys(ref).length === 6 &&
+      ref.kind === "publish-result" &&
+      typeof ref.taskId === "string" && ref.taskId.length > 0 &&
+      typeof ref.jobRunId === "string" && ref.jobRunId.length > 0 &&
+      typeof ref.assignmentId === "string" && ref.assignmentId.length > 0 &&
+      Number.isSafeInteger(ref.seq) && (ref.seq as number) > 0 &&
+      (ref.decision === "conflicted" || ref.decision === "applied");
   }
   return false;
 }

@@ -52,6 +52,7 @@ import {
   validateSystemJobReservationOrigin,
   waitForResourceAdmissionCandidate,
   type GovernorProjection,
+  type ResourceReservationProjection,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
@@ -631,7 +632,9 @@ export class ExecutorResourceGovernor
       validated,
       ctx,
       "reservation.settle",
-      (state) => this.#terminalDecision(state, validated, "settle"),
+      (state) => validated.parentId === undefined
+        ? this.#terminalDecision(state, validated, "settle")
+        : this.#settleChildSubtreeDecision(state, validated),
     );
   }
 
@@ -685,6 +688,7 @@ export class ExecutorResourceGovernor
     const reports = await this.#operations.run(async () => {
       await this.#synchronizeUnlocked();
       await this.#reconcileAssignmentUsageUnlocked(assignmentId);
+      await this.#finalizeAssignmentDescendantsUnlocked(assignmentId);
       return this.#reportsForAssignment(assignmentId);
     });
     for (const report of reports) {
@@ -783,6 +787,24 @@ export class ExecutorResourceGovernor
         state,
         { rootReservationIds: new Set([root.rootReservationId]) },
       ).map((record) => this.#record(record));
+      return entries.length === 0
+        ? { kind: "return", value: undefined }
+        : { kind: "append", entries, value: undefined };
+    });
+  }
+
+  async #finalizeAssignmentDescendantsUnlocked(assignmentId: string): Promise<void> {
+    await this.#transactUnlocked<void>((state) => {
+      const root = findAssignmentRoot(state, assignmentId);
+      if (!root) throw new Error("Assignment has no executor resource root");
+      const descendants = [...state.reservations.values()]
+        .filter((reservation) =>
+          reservation.rootReservationId === root.rootReservationId &&
+          reservation.depth > 0 &&
+          (reservation.state === "active" || reservation.state === "settled")
+        )
+        .sort((left, right) => right.depth - left.depth);
+      const entries = this.#terminalizeReservations(descendants);
       return entries.length === 0
         ? { kind: "return", value: undefined }
         : { kind: "append", entries, value: undefined };
@@ -1501,6 +1523,61 @@ export class ExecutorResourceGovernor
       value: undefined,
     };
   }
+
+  #settleChildSubtreeDecision(
+    state: GovernorProjection,
+    lease: ResourceLease,
+  ):
+    | { readonly kind: "return"; readonly value: undefined }
+    | {
+        readonly kind: "append";
+        readonly entries: readonly LogicalRecord<GovernorRecord>[];
+        readonly value: undefined;
+      } {
+    const current = state.reservations.get(lease.reservationId);
+    if (!current || canonicalize(current.lease) !== canonicalize(lease)) {
+      throw new TypeError("Executor resource terminal has no matching lease");
+    }
+    if (current.state === "released" || current.state === "reclaimed") {
+      return { kind: "return", value: undefined };
+    }
+    const subtree = [...state.reservations.values()]
+      .filter((reservation) =>
+        reservation.rootReservationId === current.rootReservationId &&
+        isReservationInSubtree(state, reservation.lease.reservationId, lease.reservationId) &&
+        (reservation.state === "active" || reservation.state === "settled")
+      )
+      .sort((left, right) => right.depth - left.depth);
+    const reservationIds = new Set(
+      subtree.map((reservation) => reservation.lease.reservationId),
+    );
+    const entries = conservativeUsageConsumptionRecords(state, { reservationIds })
+      .map((record) => this.#record(record));
+    entries.push(...this.#terminalizeReservations(subtree, lease.reservationId));
+    return entries.length === 0
+      ? { kind: "return", value: undefined }
+      : { kind: "append", entries, value: undefined };
+  }
+
+  #terminalizeReservations(
+    reservations: readonly ResourceReservationProjection[],
+    settleOnlyReservationId?: string,
+  ): LogicalRecord<GovernorRecord>[] {
+    const entries: LogicalRecord<GovernorRecord>[] = [];
+    for (const reservation of reservations) {
+      const reservationId = reservation.lease.reservationId;
+      if (reservation.state === "active") {
+        entries.push(this.#record({ t: "settle", reservationId }));
+      }
+      if (
+        reservationId !== settleOnlyReservationId &&
+        (reservation.state === "active" || reservation.state === "settled")
+      ) {
+        entries.push(this.#record({ t: "release", reservationId }));
+      }
+    }
+    return entries;
+  }
 }
 
 export class ExecutorResourceBackpressureError extends Error {
@@ -1533,6 +1610,24 @@ function findAssignmentRoot(state: GovernorProjection, assignmentId: string) {
       activation?.kind === "assignment" &&
       activation.assignmentId === assignmentId;
   });
+}
+
+function isReservationInSubtree(
+  state: GovernorProjection,
+  reservationId: string,
+  subtreeRootId: string,
+): boolean {
+  let currentId: string | undefined = reservationId;
+  const visited = new Set<string>();
+  while (currentId !== undefined) {
+    if (currentId === subtreeRootId) return true;
+    if (visited.has(currentId)) {
+      throw new TypeError("Resource reservation ancestry contains a cycle");
+    }
+    visited.add(currentId);
+    currentId = state.reservations.get(currentId)?.lease.parentId;
+  }
+  return false;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

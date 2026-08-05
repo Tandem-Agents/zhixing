@@ -57,6 +57,7 @@ import type {
   TaskDefinitionBody,
   StreamFrame,
   UncertainResolutionFact,
+  WorksceneAppliedResult,
 } from "@zhixing/core/contracts";
 import {
   assertProtocolIdentifier as assertIdentifier,
@@ -115,6 +116,7 @@ import {
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
   validateJobMutationBatch,
+  validatePublishDecisionForBatch,
   validateSupersedeProof,
   validateStreamFrame,
   validateSystemJobFence,
@@ -4334,17 +4336,47 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           ...mutationRecords,
         ];
         if (mutationBatch && bundle.body.mutationBatch) {
+          const decision = {
+            t: "publish-decision",
+            assignmentId,
+            batch: { ref: bundle.body.mutationBatch.ref },
+            sessionCount: 0,
+            globalCount: bundle.body.mutationBatch.globalCount,
+            outcomes: publishOutcomes,
+          } satisfies Extract<PublishRecord, { t: "publish-decision" }>;
+          validatePublishDecisionForBatch(decision, mutationBatch);
           entries.push({
             stream: "publish",
-            body: {
-              t: "publish-decision",
-              assignmentId,
-              batch: { ref: bundle.body.mutationBatch.ref },
-              sessionCount: 0,
-              globalCount: bundle.body.mutationBatch.globalCount,
-              outcomes: publishOutcomes,
-            } satisfies Extract<PublishRecord, { t: "publish-decision" }>,
+            body: decision,
           });
+          if (
+            this.#schedulerNotices &&
+            definition.definition.kind === "user"
+          ) {
+            for (const item of publishOutcomes) {
+              const record = mutationBatch.records[item.seq - 1];
+              if (
+                !record ||
+                record.domain !== "global" ||
+                (item.outcome.t === "granted" &&
+                  item.outcome.appliedResult === undefined)
+              ) {
+                continue;
+              }
+              entries.push(...this.#schedulerNotices.prepareRecords(
+                schedulerPublishResultDraft({
+                  taskId: this.#taskId,
+                  jobRunId: occurrence.jobRunId,
+                  assignmentId,
+                  seq: item.seq,
+                  mutation: record.mutation,
+                  outcome: item.outcome,
+                  taskName: definition.definition.spec.name,
+                  at: prefix.at,
+                }),
+              ));
+            }
+          }
         }
         if (current.state === "uncertain") {
           if (!open || open.resolution) throw corruptJobJournal("Uncertain job has no open fact");
@@ -10486,6 +10518,72 @@ function bundleAcknowledgementRecord(
     bundleRef: committed.bundle.ref,
     jobRevision: committed.jobRevision,
   };
+}
+
+function schedulerPublishResultDraft(input: {
+  readonly taskId: string;
+  readonly jobRunId: string;
+  readonly assignmentId: string;
+  readonly seq: number;
+  readonly mutation: Extract<AssignmentRecord, { t: "staged-mutation" }>["mutation"];
+  readonly outcome: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"];
+  readonly taskName: string;
+  readonly at: string;
+}): Parameters<SchedulerUserNoticeJournal["prepareRecords"]>[0] {
+  const decision = input.outcome.t === "conflicted" ? "conflicted" : "applied";
+  const noticeId = `scheduler-publish:${protocolDigest("SchedulerPublishResult", 1, {
+    assignmentId: input.assignmentId,
+    seq: input.seq,
+    outcome: input.outcome,
+  })}`;
+  const reason = input.outcome.t === "conflicted"
+    ? `定时任务「${input.taskName}」未能保存“${publishMutationLabel(input.mutation.kind)}”：${input.outcome.error.message}。`
+    : schedulerAppliedResultText(input.taskName, input.outcome.appliedResult!);
+  return {
+    noticeId,
+    kind: "publish-result",
+    state: "closed",
+    ref: {
+      kind: "publish-result",
+      taskId: input.taskId,
+      jobRunId: input.jobRunId,
+      assignmentId: input.assignmentId,
+      seq: input.seq,
+      decision,
+    },
+    reason,
+    actions: input.outcome.t === "conflicted"
+      ? ["检查当前内容后重试", "放弃这项修改"]
+      : ["查看场景"],
+    at: input.at,
+  };
+}
+
+function schedulerAppliedResultText(
+  taskName: string,
+  result: WorksceneAppliedResult,
+): string {
+  if (result.kind === "workscene-deleted") {
+    return `定时任务「${taskName}」已删除场景。`;
+  }
+  switch (result.operation) {
+    case "create":
+      return `定时任务「${taskName}」已创建场景「${result.scene.name}」。`;
+    case "rename":
+      return `定时任务「${taskName}」已将场景重命名为「${result.scene.name}」。`;
+    case "set-workdir":
+      return result.scene.workspace
+        ? `定时任务「${taskName}」已更新场景「${result.scene.name}」的工作目录。`
+        : `定时任务「${taskName}」已解除场景「${result.scene.name}」的工作目录。`;
+  }
+}
+
+function publishMutationLabel(kind: string): string {
+  if (kind.startsWith("workscene-")) return "场景修改";
+  if (kind.startsWith("memory-")) return "记忆修改";
+  if (kind.startsWith("skill-")) return "技能修改";
+  if (kind.startsWith("schedule-")) return "定时任务修改";
+  return "本轮修改";
 }
 
 function assertLedgerAcknowledgesCommittedBundle(

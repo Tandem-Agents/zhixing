@@ -2,14 +2,14 @@
 
 > **状态**: ✅ 已落地（orchestrator + core + cli + server，含测试拓扑）
 >
-> **定位**: 为 main / work 两类 user-facing 主对话 runtime 实例提供**四阶段生命周期钩子**——**注意力窗口开启 / 每次 run 前 / 每次 run 后 / 注意力窗口结束**。统一"在生命周期边界做注册式介入"的接入点，把散落在装配期、段切换、`/compact`、`/clear`、`/resume`、实例销毁处的各类"边界动作"收敛到同一抽象。首个内置消费者是 skill 索引的**注意力窗口边界重建**（承接 [skill-system.md](./skill-system.md) §3.2 预留、§3.3 描述的 `systemPrompt` 可重建插座）。
+> **定位**: 为 main / work 两类 user-facing 主对话 runtime 实例提供**四阶段生命周期钩子**——**注意力窗口开启 / 每次 run 前 / 每次 run 后 / 注意力窗口结束**。统一"在生命周期边界做注册式介入"的接入点，把散落在装配期、段切换、`/compact`、`/clear`、`/resume`、实例销毁处的各类"边界动作"收敛到同一抽象。skill 索引共享同一窗口边界，但因目录读取需要 assignment `GlobalQuery`，由 runtime 自身刷新而不是 lifecycle subscriber。
 >
 > **绑定单位分两层（与 [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §一一致）**：外层钩子（onWindowOpen / onWindowClose）绑**注意力窗口**，内层钩子（onBeforeRun / onAfterRun）绑 **run**。订阅者**集合**在 runtime 实例装配期注入、实例内恒定（注册单位是实例，触发单位是窗口 / run）。
 >
 > **关联**:
 > - [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) — **生命周期概念的单一权威**：注意力窗口 ⊃ run ⊃ turn；§二四钩子需求。**本 spec 与之冲突一律以它为准。**
 > - [context-management-v3-redesign.md](./context-management-v3-redesign.md) — 注意力窗口、段切换 / 压缩只动 messages、段内 system prompt+tools byte-equal（本 spec 的 cache 边界与之协同）
-> - [skill-system.md](./skill-system.md) — §3 索引进 system prompt 稳定区、§3.2 预留 / §3.3 `systemPrompt` 可重建插座（首个消费者），§3.1 死线本意（窗口内不变、跨窗口可重建）
+> - [skill-system.md](./skill-system.md) — §3 索引进 system prompt 稳定区及 assignment-bound 窗口刷新，§3.1 死线本意（窗口内不变、跨窗口可重建）
 > - [runtime-session-hot-reload.md](./runtime-session-hot-reload.md) — runtime 不可变契约 + reload blue-green swap（实例换代的权威）
 > - [work-mode.md](./work-mode.md) — main↔work 切换、power runtime overlay、turn 边界原子事务
 > - 当前 system prompt 分段实现见 `packages/orchestrator/src/runtime/system-prompt.ts`；早期 prompt 方案见 [archive/prompt-system.md](./archive/prompt-system.md)，仅作历史背景，不作为当前规格依据。
@@ -30,7 +30,7 @@
 
 共同点：**绑在注意力窗口 / run 的生命周期边界上，其中①需要重建即将发送的 system prompt**。现状没有这样的抽象——skill 索引硬编码在装配期（`create-agent-runtime.ts:677` 只装配一次），实例销毁时 runtime 直接失 ref GC（§四④），注意力窗口边界（段切换 / 压缩）只在 core 内改 messages、无对外注册式介入点。
 
-本 spec 定义这套抽象：**Agent Runtime Lifecycle**。它不替代 EventBus（观测仍走 EventBus），而是补齐"生命周期边界、注册式"的介入：订阅者做观测、异步副作用、以及**在合适时机更新上下文**。其意义是把原本硬编码（如 skill 索引只在装配期构造一次）的上下文构建，变成**在生命周期边界暴露的公共介入接口**——onWindowOpen 把"更新 system prompt 段"的能力作为公共接口暴露出来（§3.2、§五），任何订阅者按需调用、用不用与改什么由需求决定；skill 索引重建只是首个消费者。接口形态上只收"段内容"不收"整串"（外部算不出正确整串、拼装归独占段输入的 runtime），这是形态约束、不是把能力私有化。
+本 spec 定义这套抽象：**Agent Runtime Lifecycle**。它不替代 EventBus（观测仍走 EventBus），而是补齐"生命周期边界、注册式"的介入：订阅者做观测、异步副作用、以及**在合适时机更新上下文**。onWindowOpen 把"更新 system prompt 段"的能力作为公共接口暴露出来（§3.2、§五），任何具备自身数据来源的订阅者按需调用；需要 assignment 权限的数据（当前为 skill catalog）由 runtime 在同一窗口边界刷新，不向构造期订阅者扩大权限。接口只收"段内容"不收"整串"，拼装仍归 runtime 独占。
 
 ### 现状缺口一览
 
@@ -211,7 +211,7 @@ interface CreateAgentRuntimeOptions {
 
 **run 入口的窗口延续 vs 换代**：run() 入口 capture 实例权威 prompt 的当前值作为**本 run 局部 prompt**（§五.3）——窗口跨多 run 时若实例权威未变则本 run 取到同值（byte-equal、cache 跨 run 命中），不触发重建；上个 run 末轮切段 / run 外 clear/resume 已更新实例权威时，本 run 自然 capture 到新值。故 run 入口本身不发 onWindowOpen，只做快照；新窗的 onWindowOpen 在其真实换代点（上述三类）触发。
 
-**能力**：为新窗口做准备。ctx 暴露**公共** `updateSystemPromptSegment` 接口（§3.2）——任何订阅者按需贡献自己负责的数据驱动段，runtime 收集后拼装（§五.3）。首个消费者=skill 索引重建（贡献 `skill-index` 段，§九）。
+**能力**：为新窗口做准备。ctx 暴露**公共** `updateSystemPromptSegment` 接口（§3.2）——任何订阅者按需贡献自己负责的数据驱动段，runtime 收集后拼装（§五.3）。需要 assignment `GlobalQuery` 的 skill 索引由 runtime-owned 路径维护（§九），不占用该接口的构造期权限。
 
 **失败语义**：首窗（`instance-start`）抛错 → **让 `createAgentRuntime` 失败**（实例未就绪、安全回滚，对齐 work-mode `session.ts:529`）。其余 reason（run 内 / 外换代）抛错 → 不阻断主对话：run 内走 per-run bus emit `lifecycle:hook_failed`、run 外走命令调用方通道（§十一），继续用当前 prompt 跑（窗口换代失败=该窗 skill 索引陈旧，不致命）。
 
@@ -341,7 +341,7 @@ onWindowOpen 的 ctx 暴露**公共方法** `updateSystemPromptSegment(segment, 
 - **run 内换代**（runTurnBegin 段切换 / pre-flight 压缩 / runTurnEnd 段切换-压缩）：重构改 messages 并发 windowChange → `onChange` 触发 onWindowClose→onWindowOpen → 订阅者贡献段 → 重拼**本 run 局部 prompt** → 下个 LLM call 取新值。段切换摘要 LLM call 在 SegmentManager 内部更早、用换代前的本 run 局部 prompt，与新段独立、不冲突。
 - **并发 run**：A 的换代只改 A 的局部 prompt（+ 单调更新实例权威给后续新 run），B 的局部 prompt 不受影响 → B 窗口内 byte-equal、cache 不破。
 - **run 外 clear / resume / reload**：cli 触发窗口钩子 → 更新实例权威 → 下个 run 入口 capture 新值。
-- **首窗**：装配期 onWindowOpen（`instance-start`）订阅者贡献段（如 skill-index）→ runtime 首次 buildSystemPrompt 建实例权威，第一个 run 入口 capture 它。**skill 索引唯一来源是订阅者贡献，装配期不再硬编码注入**（§九）。
+- **首窗**：装配期 onWindowOpen（`instance-start`）处理通用订阅者贡献；skill 先使用 builtin 段，第一个持有 assignment query 的 run 在 prompt 消费前刷新用户 catalog 并更新实例权威（§九）。
 
 ---
 
@@ -400,42 +400,13 @@ sub-agent 排除理由（[subagent-execution.md](./subagent-execution.md)）：
 
 ---
 
-## 九、首个消费者：skill 索引的注意力窗口边界重建
+## 九、skill 索引的 assignment-bound 窗口刷新
 
-落地验证这套抽象、兑现 [skill-system.md](./skill-system.md) §3.3 的 v2 边界重建。它是 lifecycle 框架的**首个消费者**——用 §3.2/§五.4 的**公共** `updateSystemPromptSegment` 接口贡献 `skill-index` 段，与任何外部订阅者走同一接口。由 `createAgentRuntime` 默认注册（closure 持有 `skillStore` / `skillMode` 读 version）：
+skill 目录读取已经收敛到 assignment `GlobalQuery`，因此构造期和通用 lifecycle subscriber 均无合法目录查询上下文。索引的唯一生产者是 `createAgentRuntime`：新窗口的首个 run 在 prompt 首次消费前查询 catalog；run 内窗口换代由同一 runtime-owned 路径查询。builtin 只读索引在该路径末端拼装，不形成第二个用户目录生产者。
 
-```typescript
-function makeSkillIndexLifecycle(): AgentRuntimeLifecycle {
-  let builtVersion = -1;  // 消费者侧状态：上次贡献所依据的 skill 版本
-  return {
-    id: "skill-index-rebuild",
-    // 挂注意力窗口开启（首窗 + 每次换代）；不挂 onBeforeRun（run 边界在窗口内）
-    onWindowOpen: async (ctx) => {
-      const cur = skillStore.version(skillMode);        // O(1)
-      if (cur === builtVersion) return;                 // 已最新 → 零 IO、零重算、不调接口
-      const next = renderSkillIndex(
-        await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N),
-      );
-      ctx.updateSystemPromptSegment("skill-index", next); // 贡献段；拼装 / byte-equal / 单调提交归 runtime
-      builtVersion = cur;
-    },
-  };
-}
-```
+runtime 以返回的 `catalogRevision` 单调更新实例级 `skill-index` 段和本 run 局部段：旧 revision 不得回退新值；同一窗口后续 run 不查询，保持 system prompt byte-equal；并发 run 的局部 prompt 互不观测，实例权威只接受更晚窗口且不旧于当前 catalog revision 的贡献。技能结构性写在下一窗口刷新生效，usage 不单独触发窗口内重建。
 
-skill 索引的唯一来源是此订阅者：装配期 `createAgentRuntime` **不再硬编码注入 skillIndex**（`:677` 的 `renderSkillIndex(await skillStore.queryTopN(...))` 移进本订阅者闭包），首窗 onWindowOpen 首次贡献、runtime 首次 buildSystemPrompt 即含 skill 段——单一路径、无装配期与订阅者两条路并存。
-
-runtime 侧（`updateSystemPromptSegment` + 重拼）负责：把贡献记入段覆盖视图 → capture 固定段输入重新 `buildSystemPrompt` → 重拼后整串与目标 holder byte-equal 比、不同才换 → 实例级段覆盖的并发写用单调提交（§九 并发安全）。
-
-关键：
-
-- **变更检测靠 `SkillStore` 单调版本号**（前置依赖，§十二 A.10）：任何改变索引投影的**结构性写**（`setState` / `admit` / `archive` / create / update）令 `version` 递增；窗口开启时 O(1) 比对，未变则零 IO、零重算，**绝不在窗口边界扫盘**。version 比对保证**结构性变更绝不漏更新**（论域是结构性变更）。
-- **usage（命中度量）有意不进 version、不触发重建**：`queryTopN` 的 top-N 排序依赖 usage（`rankWithUsage` 按 pinned→`lastHitAt`→`hitCount`，`store.ts:433`），usage 在 `load_skill`→`recordHit`（`store.ts:589`，走 per-id 锁、不碰 index）时写。让 usage 进 version 会使每次 load_skill 后下个窗口重算且极可能换 prompt（recency 上浮改 top-N）、破 cache。这是 cache 安全的承重取舍：放弃"窗口内 usage 重排即时反映"、换 cache 稳定；陈旧仅限当前窗口排序新近度，下次结构性写或新窗即纠正。
-- **version 契约须含 ordering（publish-after-commit）**：`builtVersion` 比对要可靠，要求任一可读到的 `version` V 对应投影（queryTopN 所读）必已 ≥ V。现状 SkillStore 写经 `withIndexLock`→`writeIndex`（已核实），于 `writeIndex` 之后自增 version 即满足；**切忌先 bump 后 write**。
-- **byte-equal 是第二道保险**：version 变但重算结果相同（改了又改回），runtime 重拼后整串 byte-equal 于目标 holder 则不换，cache 不破。
-- 固定段输入（profile / tools / cwd / workspace / segments）装配期 capture——运行体生命周期内不变（tools[] 冻结，[context-management-v3-redesign.md](./context-management-v3-redesign.md) §九 INV-4，reload 级、比注意力窗口更强）。
-- **并发安全（双层分治）**：同一 main runtime 可被并发 run（REPL 前台 + scheduler 定时任务共享 main runtime，`session.ts:355`、ALS 注释）。① **run 局部 prompt 私有**——run 内换代只改本 run 的局部 prompt，并发 run 互不观测对方的换代，**这是窗口内 byte-equal 在并发下成立的根本**（§五.3）。② **实例级段覆盖的并发写**用单调提交收敛：消费者侧 `builtVersion` 避免重复贡献，runtime 侧以"依据 skill version 较新者胜"提交实例权威、不回退（旧 run 的滞后贡献不覆盖新值）。无锁单调提交而非 mutex：窗口换代频率低、并发面小。
-- **为何必须有 holder（而非靠 reload）**：skill 库变化（create / admit / archive）**不触发** reload——`diff.ts` 只比对 config / credentials、无 skill 输入（已核实）。故运行时 skill 变化只能由本实例的窗口边界重建承接，holder 是必要机制。
+通用 lifecycle 的 `updateSystemPromptSegment` 仍服务外部数据驱动订阅者，但不是 skill 目录读取入口；不得为 skill 注入构造期 GlobalQuery 权限。首窗没有 assignment 时先使用 builtin 索引，新窗口首 run 取得 assignment 后再刷新用户目录，且刷新必须先于该 run 的 prompt 消费。
 
 ---
 
@@ -445,7 +416,7 @@ runtime 侧（`updateSystemPromptSegment` + 重拼）负责：把贡献记入段
 2. **窗口内 system prompt byte-equal（按 run 局部成立）**：生效 system prompt 的现取源是 **per-run 局部 prompt**；它在一个 run 内只被本 run 的换代点重建，run 内（含跨多 turn）不动；run 入口 capture 实例权威保证窗口跨多 run 时延续值 byte-equal。**并发 run 各自的局部 prompt 互不干扰**——一个 run 的换代绝不改另一 in-flight run 的生效 prompt。run 入口（onBeforeRun）不重建。
 3. **main 运行体跨 main↔work 持续**：进 work 不触发 main 末窗（main 未销毁）。
 4. **首窗 open / 末窗 close 与实例配对**：任何 onWindowOpen(`instance-start`) 已完成的实例，无论以何路径退场，最终必有且仅有一次末窗 onWindowClose（销毁类 reason）。① reload 换代旧实例末窗 close **必须接在 agent 域 swap 处**（`:651/656`）、**不可依赖 `disposeOldInBackground`**；② 装配回滚（`buildNewResources` 兄弟步骤抛错，`:765`）须对已激活实例补 `dispose("assembly-rollback")`、不静默 GC。
-5. **system prompt 窗口边界重建走公共段更新接口、拼装归 runtime**：只在 onWindowOpen，订阅者经 ctx 公共方法 `updateSystemPromptSegment` 贡献数据驱动段内容（公共、非只读，skill 仅首个消费者）；runtime 经段覆盖视图收集后重拼、自管 byte-equal。不暴露"提交整串"。agent-loop 经 `getSystemPrompt()` 现取**本 run 局部 prompt**（§五.3），不感知窗口。
+5. **system prompt 窗口边界重建由 runtime 统一拼装**：通用订阅者在 onWindowOpen 经 `updateSystemPromptSegment` 贡献自身数据段；assignment-bound skill catalog 由 runtime 在同一窗口边界写入 `skill-index`。两者都不暴露"提交整串"，agent-loop 经 `getSystemPrompt()` 现取本 run 局部 prompt。
 6. **cache 死线不破**：重建一律"检查→变了才换、没变 byte-equal 不动"；skill 没变时段切换 holder byte-equal、保住 v3 段切换 system+tools cache（§5.2）。
 7. **钩子不修改 tools[]**：tools[] 装配后冻结（reload 级，[context-management-v3-redesign.md](./context-management-v3-redesign.md) §九 INV-4），任何阶段不得增删改。
 8. **段覆盖服务数据驱动段**：`updateSystemPromptSegment` 段参数为 `DataDrivenSegment` 子类型（第一版仅 `skill-index`），运行时窗口边界更新只服务数据驱动段；profile 驱动段（identity 等）变化单位是 reload，类型层即排除、不可经此接口覆盖。
@@ -498,7 +469,7 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 8. `AgentRuntime` 接口新增 `dispose(reason): Promise<void>`（`:178`）：`reason` 透传末窗 `onWindowClose`；幂等、按序 `await`；失败由销毁调用方 warn（§十一）。
 9. `AgentRuntime` 接口新增 `onAttentionWindowChange(reason): Promise<void>`（run 外窗口换代入口，供 cli `/clear`·`/resume` 调）：内部按序 `await onWindowClose(旧窗) → onWindowOpen(新窗)`，更新实例权威 prompt。
 10. **前置（属 skill 模块）**：`SkillStore` 暴露 `version(mode): number`，须 **单调递增 + publish-after-commit**（结构性写 `setState`/`admit`/`archive` 等递增；现 `withIndexLock`→`writeIndex` 范式下于 `writeIndex` 之后自增；切忌先 bump 后 write）。现状 SkillStore 只有 `queryTopN` 扫盘投影、**无任何版本 / dirty 信号**（已核实），故此为明确前置；本 spec 只消费不实现。
-11. 内置 skill 订阅者（§九）：`createAgentRuntime` 默认注册 `makeSkillIndexLifecycle()`（closure 持有 `skillStore` / `skillMode` 读 version + `renderSkillIndex`/`SKILL_INDEX_TOP_N`），onWindowOpen 走公共 `ctx.updateSystemPromptSegment("skill-index", ...)`；默认置于 `lifecycle` 列表首位（外部 `options.lifecycle` 追加其后）。
+11. skill 窗口刷新（§九）：`createAgentRuntime` 在新窗口首个 run 及 run 内换代时，用该 assignment 的 `GlobalQuery` 读取 catalog，按 `catalogRevision` 单调更新 `skill-index`；不得注册构造期 skill subscriber 或扩大查询权限。
 
 **B. core — agent-loop per-run 现取 + 窗口换代信号 + turn-begin/turn-end 返回扩展**
 

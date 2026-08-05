@@ -1051,6 +1051,11 @@ async function runServerProcess(
       conversationStatus: (after) =>
         ctx.conversationProtocol?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
+      conversationFinalHistory: async (conversationId, afterCommitRevision) =>
+        (await ctx.conversationProtocol?.finalHistory(
+          conversationId,
+          afterCommitRevision,
+        ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
       jobStatus: (after) =>
         ctx.jobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),

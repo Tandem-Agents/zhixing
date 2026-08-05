@@ -101,6 +101,40 @@ describe("SchedulerUserNoticeJournal", () => {
     expect(notice?.revision).toBeGreaterThan(0);
   });
 
+  it("projects a stable per-item publish result through the existing notice history", async () => {
+    const harness = await createHarness();
+    const records = harness.notices.prepareRecords({
+      noticeId: "scheduler-publish:stable",
+      kind: "publish-result",
+      state: "closed",
+      ref: {
+        kind: "publish-result",
+        taskId: "task-1",
+        jobRunId: "job-1",
+        assignmentId: "assignment-1",
+        seq: 2,
+        decision: "conflicted",
+      },
+      reason: "定时任务未能保存场景修改。",
+      actions: ["检查当前内容后重试"],
+      at: NOW,
+    });
+    await harness.log.append(records);
+
+    expect(await harness.notices.history(0)).toEqual([
+      expect.objectContaining({
+        noticeId: "scheduler-publish:stable",
+        kind: "publish-result",
+        state: "closed",
+        ref: expect.objectContaining({
+          assignmentId: "assignment-1",
+          seq: 2,
+          decision: "conflicted",
+        }),
+      }),
+    ]);
+  });
+
   it("fails closed on an unknown notice field", async () => {
     const harness = await createHarness();
     await harness.log.append([

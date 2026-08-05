@@ -22,6 +22,7 @@ import {
 import type { AuthorityCallContext } from "@zhixing/core/contracts";
 import { ConversationManager } from "@zhixing/owner-kernel";
 import {
+  createControlSessionEventEnvelope,
   createConfirmationBridge,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
@@ -461,6 +462,19 @@ const conversationSurface: AccessSurface = {
           frame.conversationId,
           SESSION_NOTIFICATIONS.final,
           frame,
+        );
+      },
+      onPublishResult: (notice) => {
+        ctx.sessionBroadcastRef.current?.(
+          notice.conversationId,
+          SESSION_NOTIFICATIONS.event,
+          createControlSessionEventEnvelope({
+            conversationId: notice.conversationId,
+            runId: notice.runId,
+            seq: notice.seq,
+            event: "publish:result",
+            payload: notice,
+          }),
         );
       },
       onFirstPartyFrame: (frame) => {

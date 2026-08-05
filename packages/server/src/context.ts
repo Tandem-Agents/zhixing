@@ -16,7 +16,9 @@ import type {
 import type {
   ConversationStatusNotice,
   ExecutionStatusNotice,
+  FinalFrame,
   JobStatusNotice,
+  PublishResultNotice,
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
@@ -116,6 +118,13 @@ export interface RuntimeControlAdapter {
     readonly notices: readonly SchedulerUserNotice[];
     readonly nextRevision: number;
   }>;
+  conversationFinalHistory?: (
+    conversationId: string,
+    afterCommitRevision: number,
+  ) => Promise<readonly {
+    readonly frame: FinalFrame;
+    readonly publishResults: readonly PublishResultNotice[];
+  }[]>;
   resolveDelivery?: (input: {
     readonly requestId: string;
     readonly itemId: string;

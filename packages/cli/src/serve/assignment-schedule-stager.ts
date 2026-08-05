@@ -6,7 +6,11 @@ import type {
   AuthorityCapability,
   GlobalStatePort,
 } from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
+import {
+  protocolDigest,
+  validateGlobalQuery,
+  validateGlobalQueryResult,
+} from "@zhixing/core/protocol";
 import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel";
 import type { ConversationAssignmentLedger } from "@zhixing/executor";
 
@@ -16,12 +20,16 @@ export function createAssignmentGlobalQueryPort(input: {
   readonly anchorEpoch: number;
 }): AssignmentGlobalQueryPort {
   return {
-    read: (query) => input.state.read(query, {
-      principal: { kind: "assignment", capability: input.capability },
-      requestId: `global-read:${protocolDigest("AssignmentGlobalQuery", 1, query)}`,
-      deadlineAt: input.capability.expiry,
-      authority: { domain: "global", anchorEpoch: input.anchorEpoch },
-    }),
+    async read(query) {
+      const validatedQuery = validateGlobalQuery(query);
+      const result = await input.state.read(validatedQuery, {
+        principal: { kind: "assignment", capability: input.capability },
+        requestId: `global-read:${protocolDigest("AssignmentGlobalQuery", 1, validatedQuery)}`,
+        deadlineAt: input.capability.expiry,
+        authority: { domain: "global", anchorEpoch: input.anchorEpoch },
+      });
+      return validateGlobalQueryResult(validatedQuery, result);
+    },
   };
 }
 

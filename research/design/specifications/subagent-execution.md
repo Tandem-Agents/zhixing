@@ -575,4 +575,4 @@ Subagents 不把完整详情塞进原信息栏。活跃期间，在原信息栏�
 - 子 Agent 的全部模型调用只在 child lease 上 reserve/consume，不能继续使用父 meter。孙 Agent 从当前 child lease 继续委派，预算、受众和 lineage 不得跳回根租约。
 - 本机实际执行批次另取 `workload-orchestration` device permit；等待容量、网络等待、用户交互和空闲期不得持有该 permit，也不得在等待容量时持 authority、manifest 或 artifact 锁。
 - 子工具继承父 assignment 的 query、stager 和 overlay，所有权威写仍进入父 MutationBatch；子 Agent 不产生独立提交事实源。
-- completed、failed、aborted 和 timeout 均须先收敛 usage、settle/release child 并释放 permit，再向父返回终态。响应不明按稳定身份重放，任一时刻不得出现第二个 active child。
+- completed、failed、aborted 和 timeout 均须先在现有 governor 日志中保守收敛本 child 子树的 open usage，最深优先 settle/release 后代，再 settle/release 当前 child 并释放 permit，最后向父返回终态。assignment finalizer 在父终态前复用同一事务清理遗留后代；响应不明按稳定身份重放，任一时刻不得出现第二个 active child，也不得新增第二 owner 日志。

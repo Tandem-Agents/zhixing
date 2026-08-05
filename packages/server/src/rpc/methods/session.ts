@@ -2348,12 +2348,13 @@ export function buildSessionDeleteMethod(): MethodEntry {
 
 interface SessionSubscribeParams {
   conversationId?: string;
+  afterCommitRevision?: number;
 }
 
 /**
  * 订阅即 observer 登记——同一名册承担 grace 管理与事件分发(delta / complete /
- * session.event / session.changed 全部按名册组播)。中途加入不回放:订阅起只收
- * 后续增量,turn 完成后经落盘事实流补全视图。
+ * session.event / session.changed 全部按名册组播)。中途加入不回放流式增量；
+ * 已提交 final 及其逐项 publish 结果按 owner revision 从耐久事实补读。
  */
 export function buildSessionSubscribeMethod(): MethodEntry {
   return {
@@ -2361,9 +2362,17 @@ export function buildSessionSubscribeMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<SessionSubscribeResult> {
       const params = (rawParams ?? {}) as SessionSubscribeParams;
-      if (typeof params.conversationId !== "string") {
+      if (
+        typeof params.conversationId !== "string" ||
+        Object.keys(params).some(
+          (key) => key !== "conversationId" && key !== "afterCommitRevision",
+        ) ||
+        (params.afterCommitRevision !== undefined &&
+          (!Number.isSafeInteger(params.afterCommitRevision) ||
+            params.afterCommitRevision < 0))
+      ) {
         throw RpcErrors.invalidParams(
-          "session.subscribe requires 'conversationId'",
+          "session.subscribe requires a conversationId and optional non-negative revision",
         );
       }
       const manager = requireConversations(ctx.server);
@@ -2380,6 +2389,27 @@ export function buildSessionSubscribeMethod(): MethodEntry {
         String(ctx.connection.id),
         { allowInactive: true },
       );
+      if (subscribed) {
+        const history = await ctx.server.runtimeControl?.conversationFinalHistory?.(
+          params.conversationId,
+          params.afterCommitRevision ?? 0,
+        ) ?? [];
+        for (const item of history) {
+          ctx.connection.notify(SESSION_NOTIFICATIONS.final, item.frame);
+          for (const notice of item.publishResults) {
+            ctx.connection.notify(
+              SESSION_NOTIFICATIONS.event,
+              createControlSessionEventEnvelope({
+                conversationId: notice.conversationId,
+                runId: notice.runId,
+                seq: notice.seq,
+                event: "publish:result",
+                payload: notice,
+              }),
+            );
+          }
+        }
+      }
       return { subscribed };
     },
   };

@@ -20,6 +20,7 @@ import type {
   IngressContext,
   InteractionMirrorBatch,
   OwnerControlGrant,
+  PublishResultNotice,
   ConversationInvocation,
   AssignmentResourceLease,
   DispatchResult,
@@ -59,6 +60,7 @@ import {
   type AssignmentSubmissionIdentity,
   type AssignmentSubmissionPreflightPort,
   type ConversationCommitAuthority,
+  type CommittedConversationResult,
   type ConversationMutationPublisher,
   type ConversationManager,
   type ManagedSession,
@@ -174,6 +176,9 @@ export interface ConversationProtocolRuntimeOptions {
   }) => Promise<RunResult>;
   readonly onStatus?: (notice: ConversationStatusNotice) => void | Promise<void>;
   readonly onFinal?: (frame: FinalFrame) => void | Promise<void>;
+  readonly onPublishResult?: (
+    notice: PublishResultNotice,
+  ) => void | Promise<void>;
   readonly onFirstPartyFrame?: (frame: StreamFrame) => void | Promise<void>;
   readonly createFirstPartyFinality?: (
     input: Omit<FirstPartyFinalitySessionOptions, "sources">,
@@ -260,6 +265,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | undefined;
   readonly #onStatus: ((notice: ConversationStatusNotice) => void | Promise<void>) | undefined;
   readonly #onFinal: ((frame: FinalFrame) => void | Promise<void>) | undefined;
+  readonly #onPublishResult:
+    | ((notice: PublishResultNotice) => void | Promise<void>)
+    | undefined;
   readonly #onFirstPartyFrame:
     | ((frame: StreamFrame) => void | Promise<void>)
     | undefined;
@@ -308,6 +316,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
     this.#onStatus = options.onStatus;
     this.#onFinal = options.onFinal;
+    this.#onPublishResult = options.onPublishResult;
     this.#onFirstPartyFrame = options.onFirstPartyFrame;
     this.#createFirstPartyFinality = options.createFirstPartyFinality;
     this.#projectLifecycle = options.projectLifecycle;
@@ -2037,17 +2046,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const journal = this.#journal(conversationId);
       await journal.resumeCommittedProjections();
       if (!this.#onFinal) return 0;
-      return await journal.publishPendingFinals(async (frame) => {
+      return await journal.publishPendingFinals(async (frame, publishResults) => {
         const identity = canonicalize(frame);
         if (this.#firstPartyPublishedFinals.delete(identity)) {
+          for (const notice of publishResults) await this.#onPublishResult?.(notice);
           return;
         }
         if (this.#pendingFirstPartyFinals.has(identity)) {
           await this.#onFinal?.(frame);
+          for (const notice of publishResults) await this.#onPublishResult?.(notice);
           this.#ownerPublishedFirstPartyFinals.add(identity);
           return;
         }
         await this.#onFinal?.(frame);
+        for (const notice of publishResults) await this.#onPublishResult?.(notice);
       });
     } catch (error) {
       this.#markRecovery(conversationId);
@@ -2726,6 +2738,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       envelope.assignmentId,
       structuredClone(envelope.work.ingress),
     );
+  }
+
+  async finalHistory(
+    conversationId: string,
+    afterCommitRevision: number,
+  ): Promise<CommittedConversationResult[]> {
+    return this.#journal(conversationId).finalHistory(afterCommitRevision);
   }
 
   /** 推进取证目标只由 accepted run 的冻结 manifest 与已验签能力目录决定。 */

@@ -55,6 +55,7 @@ import type {
   MutationBatch,
   PublishRecord,
   PublishConflictNotice,
+  PublishResultNotice,
   SealedBundle,
   StreamFrame,
   SupersedeProof,
@@ -116,7 +117,7 @@ import {
   validateStreamFrame,
   validateTranscriptRunRecord,
   validateAuthorityError as validateAuthorityErrorContract,
-  validatePublishDecisionRecord,
+  validatePublishDecisionForBatch,
   type ConversationInteractionMirrorBatch,
   type DataPlaneTicketKind,
   type ProtocolSignatureVerifier,
@@ -500,6 +501,7 @@ export interface ConversationMutationPublisher {
 export interface CommittedConversationResult {
   readonly frame: FinalFrame;
   readonly bundle: SealedBundle & { readonly body: { readonly t: "conversation" } };
+  readonly publishResults: readonly PublishResultNotice[];
 }
 
 export interface PendingConversationDispatch {
@@ -4446,7 +4448,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             runStream(this.#conversationId),
           );
           globalMutationRecords = prepared.records;
-          const globalOutcomes = validateGlobalPublishBatchOutcomes(
+          const globalOutcomes = indexGlobalPublishBatchOutcomes(
             globalRecords,
             prepared.outcomes,
           );
@@ -4530,16 +4532,18 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           body.mutationBatch &&
           publishDecisionRequired(batch.records, outcomes)
         ) {
+          const decision = {
+            t: "publish-decision",
+            assignmentId: bundle.assignmentId,
+            batch: { ref: body.mutationBatch.ref },
+            sessionCount: body.mutationBatch.sessionCount,
+            globalCount: body.mutationBatch.globalCount,
+            outcomes,
+          } satisfies Extract<PublishRecord, { t: "publish-decision" }>;
+          validatePublishDecisionForBatch(decision, batch);
           entries.push({
             stream: "publish",
-            body: {
-              t: "publish-decision",
-              assignmentId: bundle.assignmentId,
-              batch: { ref: body.mutationBatch.ref },
-              sessionCount: body.mutationBatch.sessionCount,
-              globalCount: body.mutationBatch.globalCount,
-              outcomes,
-            },
+            body: decision,
           });
           for (const domain of ["session", "global"] as const) {
             if (
@@ -4798,11 +4802,20 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async publishPendingFinals(
-    publish: (frame: FinalFrame) => Promise<void>,
+    publish: (
+      frame: FinalFrame,
+      publishResults: readonly PublishResultNotice[],
+    ) => Promise<void>,
   ): Promise<number> {
     let published = 0;
     for (const frame of await this.pendingFinalFrames()) {
-      await publish(frame);
+      const assignmentId = await this.#select((state) =>
+        state.assignmentByCommitRevision.get(frame.commitRevision),
+      );
+      const publishResults = assignmentId
+        ? await this.publishResults(assignmentId)
+        : [];
+      await publish(frame, publishResults);
       if (await this.#transitionFinal(frame, "pending", "published")) published += 1;
     }
     return published;
@@ -4998,6 +5011,34 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     };
   }
 
+  async publishResults(assignmentId: string): Promise<PublishResultNotice[]> {
+    assertIdentifier(assignmentId, "Assignment id");
+    const [committed, source] = await Promise.all([
+      this.#select((state) => {
+        const record = state.committedByAssignment.get(assignmentId);
+        return record ? snapshot(record, "Committed assignment") : undefined;
+      }),
+      this.#selectPublish((state) => {
+        const decision = state.decisions.get(assignmentId);
+        const batch = state.batches.get(assignmentId);
+        return decision && batch
+          ? {
+              decision: snapshot(decision, "Publish decision"),
+              batch: snapshot(batch, "Publish mutation batch"),
+            }
+          : undefined;
+      }),
+    ]);
+    if (!committed || !source) return [];
+    return projectPublishResults({
+      conversationId: this.#conversationId,
+      runId: committed.runId,
+      commitRevision: committed.commitRevision,
+      assignmentId,
+      ...source,
+    });
+  }
+
   async finalHistory(afterCommitRevision: number): Promise<CommittedConversationResult[]> {
     assertNonNegativeSafeInteger(afterCommitRevision, "Last-seen commit revision");
     const commits = await this.#select((state) => {
@@ -5006,13 +5047,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         .slice(start)
         .map((committed) => snapshot(committed, "Final history commit"));
     });
-    const conflictCounts = await this.#selectPublish((state) =>
-      new Map(
-        commits.map((committed) => [
-          committed.assignmentId,
-          state.conflictsByAssignment.get(committed.assignmentId)?.length ?? 0,
-        ]),
-      ),
+    const publishSources = await this.#selectPublish((state) =>
+      new Map(commits.flatMap((committed) => {
+        const decision = state.decisions.get(committed.assignmentId);
+        const batch = state.batches.get(committed.assignmentId);
+        return decision && batch
+          ? [[committed.assignmentId, {
+              decision: snapshot(decision, "Final history publish decision"),
+              batch: snapshot(batch, "Final history mutation batch"),
+            }] as const]
+          : [];
+      })),
     );
     const output: CommittedConversationResult[] = [];
     for (const committed of commits) {
@@ -5020,7 +5065,19 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const bundle = validateConversationSealedBundle(
         JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
       );
-      const conflictCount = conflictCounts.get(committed.assignmentId) ?? 0;
+      const source = publishSources.get(committed.assignmentId);
+      const publishResults = source
+        ? projectPublishResults({
+            conversationId: this.#conversationId,
+            runId: committed.runId,
+            commitRevision: committed.commitRevision,
+            assignmentId: committed.assignmentId,
+            ...source,
+          })
+        : [];
+      const conflictCount = publishResults.filter(
+        (notice) => notice.decision.t === "conflicted",
+      ).length;
       output.push({
         frame: {
           v: 1,
@@ -5031,6 +5088,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ...(conflictCount > 0 ? { publishConflicts: conflictCount } : {}),
         },
         bundle,
+        publishResults,
       });
     }
     return output;
@@ -10421,7 +10479,7 @@ type GlobalPublishBatch = ReturnType<
 >;
 type GlobalPublishOutcome = GlobalPublishBatch[number]["outcome"];
 
-function validateGlobalPublishBatchOutcomes(
+function indexGlobalPublishBatchOutcomes(
   records: readonly {
     readonly seq: number;
     readonly mutation: GlobalStagedMutation;
@@ -10438,86 +10496,9 @@ function validateGlobalPublishBatchOutcomes(
     if (item.seq !== records[index]?.seq || outcomes.has(item.seq as number)) {
       throw new TypeError("Global publish batch sequence is incomplete, reordered, or duplicated");
     }
-    outcomes.set(
-      item.seq as number,
-      validateGlobalPublishOutcome(
-        item.outcome as GlobalPublishOutcome,
-        records[index]!.mutation,
-      ),
-    );
+    outcomes.set(item.seq as number, item.outcome as GlobalPublishOutcome);
   }
   return outcomes;
-}
-
-function validateGlobalPublishOutcome(
-  value: GlobalPublishOutcome,
-  mutation?: GlobalStagedMutation,
-): GlobalPublishOutcome {
-  const outcome = snapshot(value, "Global publish outcome");
-  assertPlainRecord(outcome, "Global publish outcome");
-  if (outcome.t === "granted") {
-    assertExactRecordKeys(
-      outcome,
-      outcome.appliedResult === undefined
-        ? ["t", "targetRevision"]
-        : ["appliedResult", "t", "targetRevision"],
-      "Granted publish outcome",
-    );
-    assertPositiveSafeInteger(outcome.targetRevision as number, "Granted target revision");
-    const isWorkscene = mutation?.kind.startsWith("workscene-") ?? false;
-    if (isWorkscene !== (outcome.appliedResult !== undefined)) {
-      throw new TypeError(
-        "Only granted workscene mutations must carry their applied result",
-      );
-    }
-    if (outcome.appliedResult !== undefined) {
-      validateWorksceneAppliedOutcome(outcome.appliedResult);
-    }
-    return outcome as GlobalPublishOutcome;
-  }
-  if (outcome.t === "conflicted") {
-    assertExactRecordKeys(outcome, ["error", "t"], "Conflicted publish outcome");
-    validateAuthorityErrorContract(outcome.error);
-    return outcome as GlobalPublishOutcome;
-  }
-  throw new TypeError("Global publish outcome kind is invalid");
-}
-
-function validateWorksceneAppliedOutcome(value: unknown): void {
-  assertPlainRecord(value, "Workscene applied publish outcome");
-  const result = value as Record<string, unknown>;
-  if (result.kind === "workscene-deleted") {
-    assertExactRecordKeys(
-      result,
-      ["kind", "operation", "previousObjectRevision", "revision", "sceneId"],
-      "Workscene deleted outcome",
-    );
-    if (result.operation !== "delete") {
-      throw new TypeError("Workscene deleted outcome operation is invalid");
-    }
-    assertPositiveSafeInteger(result.revision as number, "Workscene domain revision");
-    assertPositiveSafeInteger(
-      result.previousObjectRevision as number,
-      "Workscene previous object revision",
-    );
-    assertIdentifier(String(result.sceneId), "Workscene outcome scene id");
-    return;
-  }
-  assertExactRecordKeys(
-    result,
-    ["kind", "operation", "revision", "scene"],
-    "Workscene applied outcome",
-  );
-  if (
-    result.kind !== "workscene-applied" ||
-    (result.operation !== "create" &&
-      result.operation !== "rename" &&
-      result.operation !== "set-workdir")
-  ) {
-    throw new TypeError("Workscene applied outcome is invalid");
-  }
-  assertPositiveSafeInteger(result.revision as number, "Workscene domain revision");
-  assertPlainRecord(result.scene, "Workscene applied scene");
 }
 
 function rejected(
@@ -10597,9 +10578,13 @@ function reducePublishBody(
   assertPlainRecord(body, "Publish record");
   if (body.t === "publish-decision") {
     try {
-      validatePublishDecisionRecord(body);
+      const batch = state.batches.get(body.assignmentId);
+      if (!batch || batch.assignmentId !== body.assignmentId) {
+        throw corruptRunJournal("Publish decision has no validated mutation batch");
+      }
+      validatePublishDecisionForBatch(body, batch);
     } catch {
-      throw corruptRunJournal("Publish decision structure is invalid");
+      throw corruptRunJournal("Publish decision does not match its mutation batch");
     }
     if (
       state.decisions.has(body.assignmentId) ||
@@ -10607,22 +10592,16 @@ function reducePublishBody(
     ) {
       throw corruptRunJournal("Publish decision is duplicated");
     }
-    const batch = state.batches.get(body.assignmentId);
-    if (!batch || batch.assignmentId !== body.assignmentId) {
-      throw corruptRunJournal("Publish decision has no validated mutation batch");
-    }
+    const batch = state.batches.get(body.assignmentId)!;
     if (!publishDecisionRequired(batch.records, body.outcomes)) {
       throw corruptRunJournal("Publish decision has no externally published mutation");
     }
     for (const [index, item] of body.outcomes.entries()) {
-      const mutation = batch.records[index];
-      if (!mutation || mutation.seq !== item.seq) {
-        throw corruptRunJournal("Publish decision sequence does not match its mutation batch");
-      }
+      const mutation = batch.records[index]!;
       if (
         mutation.domain === "session" &&
-        (item.outcome.t !== "granted" ||
-          item.outcome.targetRevision !== state.commitRevisions.get(body.assignmentId))
+        item.outcome.t === "granted" &&
+        item.outcome.targetRevision !== state.commitRevisions.get(body.assignmentId)
       ) {
         throw corruptRunJournal("Session mutation decision does not match its conversation commit");
       }
@@ -10862,6 +10841,37 @@ function finalFrame(record: FinalOutboxRecord, publishConflicts = 0): FinalFrame
     digest: record.digest,
     ...(publishConflicts > 0 ? { publishConflicts } : {}),
   };
+}
+
+function projectPublishResults(input: {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly commitRevision: number;
+  readonly assignmentId: string;
+  readonly decision: Extract<PublishRecord, { t: "publish-decision" }>;
+  readonly batch: MutationBatch;
+}): PublishResultNotice[] {
+  const results: PublishResultNotice[] = [];
+  for (const item of input.decision.outcomes) {
+    const record = input.batch.records[item.seq - 1];
+    if (!record || record.domain !== "global") continue;
+    if (item.outcome.t === "granted" && item.outcome.appliedResult === undefined) {
+      continue;
+    }
+    results.push({
+      conversationId: input.conversationId,
+      runId: input.runId,
+      commitRevision: input.commitRevision,
+      assignmentId: input.assignmentId,
+      seq: item.seq,
+      mutation: snapshot(record.mutation, "Publish result mutation") as GlobalStagedMutation,
+      decision: snapshot(
+        item.outcome,
+        "Publish result decision",
+      ) as PublishResultNotice["decision"],
+    });
+  }
+  return results;
 }
 
 async function applyFinalRecord(

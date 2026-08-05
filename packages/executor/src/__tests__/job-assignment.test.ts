@@ -2088,7 +2088,10 @@ describe("user job durable protocol", () => {
   }, 20_000);
 
   it("commits a job while durably conflicting one invalid staged delivery", async () => {
-    const harness = await createUserHarness();
+    const harness = await createUserHarness({ schedulerNotices: true });
+    if (!harness.schedulerNotices) {
+      throw new Error("scheduler notice authority is missing");
+    }
     await start(harness);
     const invalidContent = await harness.artifacts.put(
       Buffer.from("not canonical delivery content", "utf8"),
@@ -2146,6 +2149,20 @@ describe("user job durable protocol", () => {
         },
       ],
     });
+    await expect(harness.schedulerNotices.history(0)).resolves.toMatchObject([
+      {
+        kind: "publish-result",
+        state: "closed",
+        ref: {
+          kind: "publish-result",
+          taskId: TASK_ID,
+          jobRunId: JOB_RUN_ID,
+          assignmentId: ASSIGNMENT_ID,
+          seq: 1,
+          decision: "conflicted",
+        },
+      },
+    ]);
   });
 
   it("rejects a turn-origin delivery mutation at every job trust boundary", async () => {

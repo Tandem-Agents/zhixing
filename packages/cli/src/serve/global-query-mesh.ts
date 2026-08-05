@@ -9,6 +9,8 @@ import {
   canonicalize,
   protocolDigest,
   validateAuthorityCapability,
+  validateGlobalQuery,
+  validateGlobalQueryResult,
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
@@ -34,15 +36,15 @@ export class MeshAssignmentGlobalQueryPort implements AssignmentGlobalQueryPort 
 
   async read(query: GlobalQuery): Promise<GlobalReadResult> {
     const request: GlobalQueryRequest = {
-      query: validateQuery(query),
+      query: validateGlobalQuery(query),
       capability: this.capability,
       anchorEpoch: this.anchorEpoch,
       requestId: `global-read:${protocolDigest("AssignmentGlobalQuery", 1, query)}`,
       deadlineAt: this.capability.expiry,
     };
-    return validateResult(
+    return validateGlobalQueryResult(
+      request.query,
       decode(await this.client.request(GLOBAL_QUERY_SERVICE, encode(request))),
-      query.kind,
     );
   }
 }
@@ -70,7 +72,7 @@ export function registerGlobalQueryMeshService(
         authority: { domain: "global", anchorEpoch: request.anchorEpoch },
       });
       signal.throwIfAborted();
-      return encode(validateResult(result, request.query.kind));
+      return encode(validateGlobalQueryResult(request.query, result));
     },
   });
 }
@@ -90,127 +92,12 @@ function validateRequest(
     throw new TypeError("Global query authority fence is not capability-bound");
   }
   return {
-    query: validateQuery(value.query),
+    query: validateGlobalQuery(value.query),
     capability,
     anchorEpoch,
     requestId: nonEmptyString(value.requestId, "Global query request id"),
     deadlineAt: isoTime(value.deadlineAt, "Global query deadline"),
   };
-}
-
-function validateQuery(input: unknown): GlobalQuery {
-  const value = object(input, "Global query");
-  const kind = nonEmptyString(value.kind, "Global query kind");
-  if (kind === "memory-search") {
-    exactKeys(value, ["kind", "scope", "domain", "query", "limit"]);
-    return {
-      kind,
-      scope: memoryScope(value.scope),
-      domain: memoryDomain(value.domain),
-      query: typeof value.query === "string" ? value.query : invalid("Memory query text"),
-      limit: positiveInteger(value.limit, "Memory query limit"),
-    };
-  }
-  if (kind === "memory-list") {
-    exactKeys(value, ["kind", "scope", "domain", "category"], ["category"]);
-    return {
-      kind,
-      scope: memoryScope(value.scope),
-      domain: memoryDomain(value.domain),
-      ...(value.category === undefined ? {} : { category: memoryCategory(value.category) }),
-    };
-  }
-  if (kind === "memory-stats") {
-    exactKeys(value, ["kind", "scope", "domain"]);
-    const domain = value.domain;
-    if (domain !== "journal" && domain !== "people") invalid("Memory stats domain");
-    return { kind, scope: memoryScope(value.scope), domain };
-  }
-  if (kind === "trust-rules") {
-    exactKeys(value, ["kind", "scope"], ["scope"]);
-    return { kind, ...(value.scope === undefined ? {} : { scope: nonEmptyString(value.scope, "Trust scope") }) };
-  }
-  if (kind === "schedule-list") {
-    exactKeys(value, ["kind", "includeDisabled"], ["includeDisabled"]);
-    return { kind, ...(value.includeDisabled === undefined ? {} : { includeDisabled: boolean(value.includeDisabled, "Schedule disabled flag") }) };
-  }
-  if (kind === "workscene-list") {
-    exactKeys(value, ["kind"]);
-    return { kind };
-  }
-  if (kind === "workscene-get") {
-    exactKeys(value, ["kind", "sceneId"]);
-    return { kind, sceneId: nonEmptyString(value.sceneId, "Workscene id") };
-  }
-  if (kind === "skill-catalog") {
-    exactKeys(value, ["kind", "mode", "includeDisabled", "limit"], [
-      "mode",
-      "includeDisabled",
-      "limit",
-    ]);
-    const mode = value.mode;
-    if (mode !== undefined && mode !== "main" && mode !== "work") {
-      invalid("Skill catalog mode");
-    }
-    return {
-      kind,
-      ...(mode === undefined ? {} : { mode }),
-      ...(value.includeDisabled === undefined
-        ? {}
-        : { includeDisabled: boolean(value.includeDisabled, "Skill disabled flag") }),
-      ...(value.limit === undefined
-        ? {}
-        : { limit: positiveInteger(value.limit, "Skill catalog limit") }),
-    };
-  }
-  if (kind === "skill-get") {
-    exactKeys(value, ["kind", "skillId"]);
-    return { kind, skillId: nonEmptyString(value.skillId, "Skill id") };
-  }
-  if (kind === "config-asset") {
-    exactKeys(value, ["kind", "domain", "key"], ["key"]);
-    const domain = value.domain;
-    if (!["guidance", "channel-registry", "model-profile", "policy", "prompt-assets"].includes(String(domain))) {
-      invalid("Config asset domain");
-    }
-    return { kind, domain: domain as Extract<GlobalQuery, { kind: "config-asset" }>["domain"], ...(value.key === undefined ? {} : { key: nonEmptyString(value.key, "Config asset key") }) };
-  }
-  if (kind === "asset-index") {
-    exactKeys(value, ["kind", "asset"]);
-    const asset = value.asset;
-    if (asset !== "skills" && asset !== "rubrics" && asset !== "prompt-assets") invalid("Asset index kind");
-    return { kind, asset };
-  }
-  return invalid("Global query kind");
-}
-
-function validateResult(input: unknown, expectedKind: GlobalQuery["kind"]): GlobalReadResult {
-  const value = object(input, "Global query result");
-  if (value.kind !== expectedKind) throw new TypeError("Global query response kind mismatch");
-  return structuredClone(value) as unknown as GlobalReadResult;
-}
-
-function memoryScope(input: unknown): Extract<GlobalQuery, { kind: "memory-list" }>["scope"] {
-  const value = object(input, "Memory scope");
-  if (value.kind === "personal") {
-    exactKeys(value, ["kind"]);
-    return { kind: "personal" };
-  }
-  if (value.kind === "workscene") {
-    exactKeys(value, ["kind", "sceneId"]);
-    return { kind: "workscene", sceneId: nonEmptyString(value.sceneId, "Memory scene id") };
-  }
-  return invalid("Memory scope kind");
-}
-
-function memoryDomain(input: unknown): "memory" | "journal" | "people" {
-  if (input !== "memory" && input !== "journal" && input !== "people") invalid("Memory domain");
-  return input;
-}
-
-function memoryCategory(input: unknown): "profile" | "person" | "journal" {
-  if (input !== "profile" && input !== "person" && input !== "journal") invalid("Memory category");
-  return input;
 }
 
 function object(input: unknown, label: string): Record<string, unknown> {
@@ -239,11 +126,6 @@ function isoTime(input: unknown, label: string): string {
   const value = nonEmptyString(input, label);
   if (!Number.isFinite(Date.parse(value))) invalid(label);
   return value;
-}
-
-function boolean(input: unknown, label: string): boolean {
-  if (typeof input !== "boolean") invalid(label);
-  return input;
 }
 
 function invalid(label: string): never {

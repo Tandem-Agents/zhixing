@@ -133,8 +133,13 @@ export {
   MAX_AUTHORITY_ERROR_MESSAGE_BYTES,
   validateCancelBatchControlResultBody,
   validateAuthorityError,
+  validatePublishDecisionForBatch,
   validatePublishDecisionRecord,
 } from "./contract-validation.js";
+export {
+  validateGlobalQuery,
+  validateGlobalQueryResult,
+} from "./global-query-validation.js";
 export {
   validateEnvironmentRequirement,
   validateMessage,

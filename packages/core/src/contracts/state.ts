@@ -643,3 +643,16 @@ export interface PublishConflictNotice {
     error: AuthorityError;
   }>;
 }
+
+/** One user-visible terminal result projected directly from an owner decision. */
+export interface PublishResultNotice {
+  conversationId: string;
+  runId: string;
+  commitRevision: number;
+  assignmentId: string;
+  seq: number;
+  mutation: GlobalStagedMutation;
+  decision:
+    | { t: "conflicted"; error: AuthorityError }
+    | { t: "granted"; targetRevision: number; appliedResult: WorksceneAppliedResult };
+}

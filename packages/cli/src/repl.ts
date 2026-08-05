@@ -94,6 +94,7 @@ import { prepareSessionSendEngage } from "./session-engage.js";
 import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
 import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";
 import { createLifecycleDiagnosticsPresenter } from "./runtime/lifecycle-diagnostics-presenter.js";
+import { createPublishResultPresenter } from "./runtime/publish-result-presenter.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
 import {
   ConversationController,
@@ -628,6 +629,12 @@ export async function startRepl(): Promise<void> {
     flushOutput: () => renderer.stop(),
     filter: (envelope) => watching(envelope.conversationId),
     deduper: lifecycleWarningDeduper,
+  });
+  const publishResultPresenter = createPublishResultPresenter({
+    link: coreHost,
+    writer: cliWriter,
+    flushOutput: () => renderer.stop(),
+    filter: (envelope) => watching(envelope.conversationId),
   });
 
   // ── 当前对话指针:auto-resume 最近可恢复的一条(session.list 新→旧),无则新建 ──
@@ -1879,6 +1886,7 @@ export async function startRepl(): Promise<void> {
   rpcEventBus.dispose();
   advancementControlPresenter.dispose();
   lifecycleDiagnosticsPresenter.dispose();
+  publishResultPresenter.dispose();
   controller.dispose();
 
   if (inputController) {

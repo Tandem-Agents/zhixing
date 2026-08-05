@@ -262,6 +262,7 @@ export class ConversationController {
   private readonly durableRuns = new Map<string, DurableRunWatch>();
   private readonly durableRunByTurn = new Map<string, string>();
   private readonly pendingFinals = new Map<string, FinalFrame>();
+  private readonly finalRevisionByConversation = new Map<string, number>();
   private readonly pendingStatuses = new Map<string, ConversationStatusNotice>();
   private readonly finalLookups = new Map<string, Promise<void>>();
   private readonly pendingAbortByTurn = new Map<
@@ -385,7 +386,10 @@ export class ConversationController {
   private async subscribeActive(): Promise<void> {
     if (this.observedConversationId === this.active.conversationId) return;
     const ok = await this.opts.conversation
-      .subscribe(this.active.conversationId)
+      .subscribe(
+        this.active.conversationId,
+        this.finalRevisionByConversation.get(this.active.conversationId) ?? 0,
+      )
       .catch(() => false);
     this.observedConversationId = ok ? this.active.conversationId : null;
   }
@@ -735,6 +739,10 @@ export class ConversationController {
   }
 
   private consumeFinal(frame: FinalFrame): void {
+    const seen = this.finalRevisionByConversation.get(frame.conversationId) ?? 0;
+    if (frame.commitRevision > seen) {
+      this.finalRevisionByConversation.set(frame.conversationId, frame.commitRevision);
+    }
     const watch = this.durableRuns.get(frame.runId);
     if (!watch) {
       if (this.localTurnsByConversation.has(frame.conversationId)) {
@@ -1174,6 +1182,7 @@ export class ConversationController {
     this.durableRuns.clear();
     this.durableRunByTurn.clear();
     this.pendingFinals.clear();
+    this.finalRevisionByConversation.clear();
     this.pendingStatuses.clear();
     this.finalLookups.clear();
     this.observedConversationId = null;

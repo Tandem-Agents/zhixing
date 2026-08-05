@@ -28,3 +28,12 @@ export {
   MemoryMutationConflictError,
 } from "./global-state-adapter.js";
 export type { AnchorMemoryGlobalStateAdapterOptions } from "./global-state-adapter.js";
+export {
+  compareMemoryLogicalEntries,
+  memoryLogicalEntryDigest,
+  memoryLogicalEntryKey,
+  memoryLogicalEntryMatches,
+  memoryLogicalIdentityKey,
+  projectMemoryLogicalEntry,
+  sameMemoryScope,
+} from "./logical-entry.js";

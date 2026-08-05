@@ -16,6 +16,7 @@ import {
   buildSessionAbortMethod,
   buildSessionResolveMethod,
   buildSessionSendMethod,
+  buildSessionSubscribeMethod,
 } from "../methods/session.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 
@@ -43,6 +44,62 @@ describe("session.send 方法", () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
+  });
+});
+
+describe("session.subscribe publish result history", () => {
+  it("replays the owner final and its stable per-item result after the requested revision", async () => {
+    const notify = vi.fn();
+    const conversationFinalHistory = vi.fn(async () => [{
+      frame: {
+        v: 1 as const,
+        conversationId: "conversation-1",
+        runId: "run-1",
+        commitRevision: 4,
+        digest: `sha256:${"a".repeat(64)}`,
+      },
+      publishResults: [{
+        conversationId: "conversation-1",
+        runId: "run-1",
+        commitRevision: 4,
+        assignmentId: "assignment-1",
+        seq: 2,
+        mutation: { kind: "workscene-create" as const, name: "专注" },
+        decision: {
+          t: "conflicted" as const,
+          error: {
+            code: "revision-conflict" as const,
+            message: "内容已变化",
+            retryable: false,
+          },
+        },
+      }],
+    }]);
+    const method = buildSessionSubscribeMethod();
+
+    await expect(method.handler(
+      { conversationId: "conversation-1", afterCommitRevision: 3 },
+      {
+        server: {
+          conversations: {
+            has: () => true,
+            addObserver: () => true,
+          },
+          runtimeControl: { conversationFinalHistory },
+        } as unknown as ServerContext,
+        connection: { id: "connection-1", notify },
+      } as never,
+    )).resolves.toEqual({ subscribed: true });
+
+    expect(conversationFinalHistory).toHaveBeenCalledWith("conversation-1", 3);
+    expect(notify).toHaveBeenNthCalledWith(1, "session.final", expect.objectContaining({
+      commitRevision: 4,
+    }));
+    expect(notify).toHaveBeenNthCalledWith(2, "session.event", expect.objectContaining({
+      scope: "control",
+      event: "publish:result",
+      payload: expect.objectContaining({ assignmentId: "assignment-1", seq: 2 }),
+    }));
   });
 });
 

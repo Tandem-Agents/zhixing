@@ -326,11 +326,14 @@ export class RpcConversationFacade {
   }
 
   /** observer 登记(订阅即进组播名册);false = 对话身份不存在、未登记。 */
-  async subscribe(conversationId: string): Promise<boolean> {
+  async subscribe(
+    conversationId: string,
+    afterCommitRevision = 0,
+  ): Promise<boolean> {
     const client = await this.link.getClient();
     const result = await client.request<SessionSubscribeResult>(
       "session.subscribe",
-      { conversationId },
+      { conversationId, afterCommitRevision },
     );
     return result.subscribed;
   }

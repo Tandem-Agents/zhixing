@@ -1,5 +1,4 @@
 import type {
-  ArtifactRef,
   AuthorityError,
   GlobalControlCallContext,
   GlobalControlMutation,
@@ -21,12 +20,19 @@ import {
   protocolDigest,
 } from "../protocol/index.js";
 import type {
-  MemoryAppendPayload,
   MemoryCategoryDto,
   MemoryLogicalEntry,
   MemoryScopeRef,
 } from "./contracts.js";
 import { MemoryStore } from "./memory-store.js";
+import {
+  compareMemoryLogicalEntries,
+  memoryLogicalEntryDigest,
+  memoryLogicalEntryKey,
+  memoryLogicalEntryMatches,
+  memoryLogicalIdentityKey,
+  projectMemoryLogicalEntry,
+} from "./logical-entry.js";
 
 const MEMORY_STREAM = "intent:memory-authority";
 
@@ -182,13 +188,14 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     this.#admit(context, "global.read", query.scope);
     await this.#ensureOpen();
     await this.#loadLegacyScope(query.scope);
-    const candidates = [...this.#projection.entries.values()].filter(
-      (entry) =>
-        sameScope(entry.scope, query.scope) &&
-        entry.domain === query.domain &&
-        (query.kind !== "memory-list" ||
-          query.category === undefined ||
-          entry.category === query.category),
+    const candidates = [...this.#projection.entries.values()].filter((entry) =>
+      memoryLogicalEntryMatches(entry, {
+        scope: query.scope,
+        domain: query.domain,
+        ...(query.kind === "memory-list" && query.category !== undefined
+          ? { category: query.category }
+          : {}),
+      })
     );
     if (query.kind === "memory-stats") {
       return {
@@ -203,15 +210,18 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     if (query.kind === "memory-list") {
       return {
         kind: "memory-list",
-        entries: candidates.map(cloneEntry).sort(compareEntries),
+        entries: candidates.map(cloneEntry).sort(compareMemoryLogicalEntries),
       };
     }
-    const needle = query.query.trim().toLocaleLowerCase();
     return {
       kind: "memory-search",
       hits: candidates
-        .filter((entry) => searchable(entry).includes(needle))
-        .sort(compareEntries)
+        .filter((entry) => memoryLogicalEntryMatches(entry, {
+          scope: query.scope,
+          domain: query.domain,
+          query: query.query,
+        }))
+        .sort(compareMemoryLogicalEntries)
         .slice(0, positiveInteger(query.limit, "Memory search limit"))
         .map((entry) => ({ entry: cloneEntry(entry) })),
     };
@@ -304,7 +314,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
           meta: toJsonObject(disk.meta),
           content: disk.content,
           revision: 1,
-          digest: entryDigest({
+          digest: memoryLogicalEntryDigest({
             domain,
             scope,
             ...(domain === "memory" ? { category: "profile" as const } : {}),
@@ -431,7 +441,10 @@ function planMutation(
     return { outcome: conflict("revision-conflict", "Memory entry changed"), record: undefined as never };
   }
   const revision = (current?.revision ?? 0) + 1;
-  const entry = entryFromPayload(mutation.payload, current, revision, at);
+  const entry = projectMemoryLogicalEntry(mutation.payload, current, {
+    revision,
+    updatedAt: at,
+  });
   return {
     outcome: { t: "granted", targetRevision: revision },
     record: {
@@ -464,34 +477,6 @@ function reduceRecord(previous: MemoryProjection, logical: LogicalRecord<MemoryA
   return state;
 }
 
-function entryFromPayload(
-  payload: MemoryAppendPayload,
-  current: MemoryLogicalEntry | undefined,
-  revision: number,
-  at: string,
-): MemoryLogicalEntry {
-  const base = payload.domain === "memory"
-    ? { category: payload.category, id: payload.id, meta: payload.meta, content: payload.content }
-    : payload.domain === "people"
-      ? { id: payload.id, meta: payload.meta as unknown as Record<string, JsonValue>, content: payload.content }
-      : {
-          id: payload.date ?? at.slice(0, 10),
-          meta: { date: payload.date ?? at.slice(0, 10) },
-          content: current?.content ? `${current.content}\n\n---\n\n${payload.content}` : payload.content,
-        };
-  const identity = {
-    domain: payload.domain,
-    scope: payload.scope,
-    ...base,
-  };
-  return {
-    ...structuredClone(identity),
-    revision,
-    digest: entryDigest(identity),
-    updatedAt: at,
-  } as MemoryLogicalEntry;
-}
-
 function normalizeMutation(mutation: MemoryMutation): MemoryMutation {
   const normalized = structuredClone(mutation);
   const scope = memoryScopeOf(normalized);
@@ -506,20 +491,30 @@ function normalizeMutation(mutation: MemoryMutation): MemoryMutation {
 
 function mutationKey(mutation: MemoryMutation): string {
   if (mutation.kind === "memory-delete") {
-    return keyOf(mutation.scope, mutation.domain, mutation.category, mutation.id);
+    return memoryLogicalIdentityKey(
+      mutation.scope,
+      mutation.domain,
+      mutation.category,
+      mutation.id,
+    );
   }
   const payload = mutation.payload;
   const id = payload.domain === "journal"
     ? payload.date ?? new Date().toISOString().slice(0, 10)
     : payload.id;
-  return keyOf(payload.scope, payload.domain, payload.domain === "memory" ? payload.category : undefined, id);
+  return memoryLogicalIdentityKey(
+    payload.scope,
+    payload.domain,
+    payload.domain === "memory" ? payload.category : undefined,
+    id,
+  );
 }
 
 function plannedMutationKey(mutation: MemoryMutation, at: string): string {
   if (mutation.kind === "memory-delete") return mutationKey(mutation);
   const payload = mutation.payload;
   const id = payload.domain === "journal" ? payload.date ?? at.slice(0, 10) : payload.id;
-  return keyOf(
+  return memoryLogicalIdentityKey(
     payload.scope,
     payload.domain,
     payload.domain === "memory" ? payload.category : undefined,
@@ -528,16 +523,7 @@ function plannedMutationKey(mutation: MemoryMutation, at: string): string {
 }
 
 function entryKey(entry: MemoryLogicalEntry): string {
-  return keyOf(entry.scope, entry.domain, entry.category, entry.id);
-}
-
-function keyOf(
-  scope: MemoryScopeRef,
-  domain: "memory" | "journal" | "people",
-  category: MemoryCategoryDto | undefined,
-  id: string,
-): string {
-  return `${scope.kind === "personal" ? "personal" : `workscene:${scope.sceneId}`}\0${domain}\0${category ?? ""}\0${id}`;
+  return memoryLogicalEntryKey(entry);
 }
 
 function memoryScopeOf(mutation: MemoryMutation): MemoryScopeRef {
@@ -549,10 +535,6 @@ function storageCategory(
   category?: MemoryCategoryDto,
 ): "profile" | "person" | "journal" {
   return domain === "journal" ? "journal" : domain === "people" ? "person" : category ?? "profile";
-}
-
-function entryDigest(value: object): ArtifactRef["digest"] {
-  return protocolDigest("MemoryLogicalEntry", 1, value);
 }
 
 function emptyProjection(): MemoryProjection {
@@ -572,19 +554,6 @@ function cloneEntry(entry: MemoryLogicalEntry): MemoryLogicalEntry {
 
 function cloneScope(scope: MemoryScopeRef): MemoryScopeRef {
   return scope.kind === "personal" ? { kind: "personal" } : { ...scope };
-}
-
-function sameScope(left: MemoryScopeRef, right: MemoryScopeRef): boolean {
-  return left.kind === right.kind &&
-    (left.kind === "personal" || (right.kind === "workscene" && left.sceneId === right.sceneId));
-}
-
-function searchable(entry: MemoryLogicalEntry): string {
-  return `${entry.id} ${JSON.stringify(entry.meta)} ${entry.content}`.toLocaleLowerCase();
-}
-
-function compareEntries(left: MemoryLogicalEntry, right: MemoryLogicalEntry): number {
-  return (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "") || left.id.localeCompare(right.id, "en-US");
 }
 
 function isMemoryMutation(mutation: GlobalStagedMutation): mutation is MemoryMutation {

@@ -43,10 +43,12 @@ import {
   type Message,
   type ToolDefinition,
   type SkillCatalogEntry,
+  type MemoryLogicalEntry,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
 import type {
   AssignmentGlobalQueryPort,
+  AssignmentMutationOverlayRecord,
   GlobalQuery,
   GlobalReadResult,
   ModelCallResourceMeter,
@@ -179,7 +181,10 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
 });
 
 // 必须在 vi.mock 之后 import,确保 createAgentRuntime 拿到的是 mock 后的 providers
-const { createAgentRuntime: createAgentRuntimeImpl } = await import("../create-agent-runtime.js");
+const {
+  createAgentRuntime: createAgentRuntimeImpl,
+  resolveMemorySearchOverlay,
+} = await import("../create-agent-runtime.js");
 const createAgentRuntime = (
   options: Omit<Parameters<typeof createAgentRuntimeImpl>[0], "providerConfiguration">,
 ) =>
@@ -197,6 +202,89 @@ beforeEach(() => {
   degradationsRef.current = [];
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
+});
+
+describe("assignment memory search overlay", () => {
+  it("reapplies domain/query/ranking/limit and fills deleted or unmatched base slots", () => {
+    const entry = (
+      id: string,
+      content: string,
+      updatedAt: string,
+    ): MemoryLogicalEntry => ({
+      domain: "memory",
+      scope: { kind: "personal" },
+      category: "profile",
+      id,
+      meta: {},
+      content,
+      revision: 1,
+      digest: `sha256:${id.padEnd(64, id[0] ?? "a").slice(0, 64)}`,
+      updatedAt,
+    });
+    const base = [
+      entry("a", "needle old", "2026-08-05T03:00:00.000Z"),
+      entry("b", "needle removed", "2026-08-05T02:00:00.000Z"),
+      entry("c", "needle fallback", "2026-08-05T01:00:00.000Z"),
+    ];
+    const records: AssignmentMutationOverlayRecord[] = [
+      {
+        recordSeq: 1,
+        domain: "global",
+        requestId: "update-a",
+        mutationDigest: `sha256:${"1".repeat(64)}`,
+        mutation: {
+          kind: "memory-append",
+          payload: {
+            domain: "memory",
+            scope: { kind: "personal" },
+            category: "profile",
+            id: "a",
+            meta: {},
+            content: "no longer relevant",
+            expectedDigest: base[0]!.digest,
+          },
+        },
+      },
+      {
+        recordSeq: 2,
+        domain: "global",
+        requestId: "delete-b",
+        mutationDigest: `sha256:${"2".repeat(64)}`,
+        mutation: {
+          kind: "memory-delete",
+          scope: { kind: "personal" },
+          domain: "memory",
+          category: "profile",
+          id: "b",
+          expectedDigest: base[1]!.digest,
+        },
+      },
+      {
+        recordSeq: 3,
+        domain: "global",
+        requestId: "insert-d",
+        mutationDigest: `sha256:${"3".repeat(64)}`,
+        mutation: {
+          kind: "memory-append",
+          payload: {
+            domain: "memory",
+            scope: { kind: "personal" },
+            category: "profile",
+            id: "d",
+            meta: {},
+            content: "needle newest",
+          },
+        },
+      },
+    ];
+
+    expect(resolveMemorySearchOverlay(base, records, {
+      scope: { kind: "personal" },
+      domain: "memory",
+      query: "needle",
+      limit: 2,
+    }).map((item) => item.id)).toEqual(["d", "c"]);
+  });
 });
 
 /** 装饰器 spy:记录 ctx.bus + 返回可断言的 dispose */

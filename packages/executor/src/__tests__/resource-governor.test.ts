@@ -697,6 +697,134 @@ describe("ExecutorResourceGovernor", () => {
       });
   });
 
+  it("settles an abandoned child subtree deepest-first and replays its terminal response", async () => {
+    const fixture = await createHarness();
+    const root = assignmentLease(
+      "assignment-child-finalize",
+      "run-child-finalize",
+      10,
+      undefined,
+      undefined,
+      2,
+    );
+    const capability = assignmentCapability(
+      "assignment-child-finalize",
+      "cap-child-finalize",
+    );
+    const callContext = assignmentCallContext(capability);
+    await accept(fixture, root, [capability.capId]);
+    const child = await fixture.governor.acquireChild(
+      root,
+      { kind: "orchestration-node", id: "child-finalize", attempt: 1 },
+      { maxCalls: 8 },
+      callContext,
+    );
+    const grandchild = await fixture.governor.acquireChild(
+      child,
+      { kind: "orchestration-node", id: "grandchild-finalize", attempt: 1 },
+      { maxCalls: 5 },
+      callContext,
+    );
+    await fixture.governor.reserveUsage(
+      child,
+      { usageId: "usage-child-open", calls: 1 },
+      callContext,
+    );
+    await fixture.governor.reserveUsage(
+      grandchild,
+      { usageId: "usage-grandchild-open", calls: 3 },
+      callContext,
+    );
+
+    await fixture.governor.settle(child, callContext);
+    let projection = await fixture.governor.snapshot();
+    expect(projection.reservations.get(root.reservationId)?.state).toBe("active");
+    expect(projection.reservations.get(child.reservationId)?.state).toBe("settled");
+    expect(projection.reservations.get(grandchild.reservationId)?.state).toBe("released");
+    expect(projection.usageReservations.get("usage-child-open")?.state).toBe("consumed");
+    expect(projection.usageReservations.get("usage-grandchild-open")?.state).toBe("consumed");
+
+    const restarted = fixture.restart();
+    await expect(restarted.settle(child, callContext)).resolves.toBeUndefined();
+    await expect(restarted.release(child, callContext)).resolves.toBeUndefined();
+    projection = await restarted.snapshot();
+    expect(projection.reservations.get(child.reservationId)?.state).toBe("released");
+    expect([...projection.reservations.values()].filter((reservation) =>
+      reservation.rootReservationId === root.reservationId &&
+      reservation.depth > 0 &&
+      reservation.state === "active"
+    )).toHaveLength(0);
+  });
+
+  it("flushes every abandoned assignment descendant before publishing final usage", async () => {
+    const fixture = await createHarness();
+    const root = assignmentLease(
+      "assignment-flush-descendants",
+      "run-flush-descendants",
+      10,
+      undefined,
+      undefined,
+      2,
+    );
+    const capability = assignmentCapability(
+      "assignment-flush-descendants",
+      "cap-flush-descendants",
+    );
+    const callContext = assignmentCallContext(capability);
+    await accept(fixture, root, [capability.capId]);
+    const child = await fixture.governor.acquireChild(
+      root,
+      { kind: "orchestration-node", id: "flush-child", attempt: 1 },
+      { maxCalls: 8 },
+      callContext,
+    );
+    const grandchild = await fixture.governor.acquireChild(
+      child,
+      { kind: "orchestration-node", id: "flush-grandchild", attempt: 1 },
+      { maxCalls: 5 },
+      callContext,
+    );
+    await fixture.governor.reserveUsage(
+      grandchild,
+      { usageId: "usage-flush-open", calls: 2 },
+      callContext,
+    );
+
+    const restarted = fixture.restart();
+    const reports: UsageReport[] = [];
+    const final = await restarted.flushAssignment(
+      "assignment-flush-descendants",
+      {
+        async submitUsageReport(report) {
+          reports.push(report);
+          return { ackedThroughSeq: report.toUsageSeq };
+        },
+      },
+      (report) => ({
+        principal: { kind: "usage-reporter", executorId: "executor-1" },
+        requestId: `report:${report.digest}`,
+        deadlineAt: "2026-07-20T00:05:00.000Z",
+      }),
+    );
+    const projection = await restarted.snapshot();
+    expect(projection.reservations.get(child.reservationId)?.state).toBe("released");
+    expect(projection.reservations.get(grandchild.reservationId)?.state).toBe("released");
+    expect(projection.usageReservations.get("usage-flush-open")?.state).toBe("consumed");
+    expect(reports.at(-1)?.usages).toContainEqual(expect.objectContaining({
+      usageId: "usage-flush-open",
+      calls: 2,
+    }));
+    await expect(restarted.flushAssignment(
+      "assignment-flush-descendants",
+      { async submitUsageReport(report) { return { ackedThroughSeq: report.toUsageSeq }; } },
+      (report) => ({
+        principal: { kind: "usage-reporter", executorId: "executor-1" },
+        requestId: `report:${report.digest}`,
+        deadlineAt: "2026-07-20T00:05:00.000Z",
+      }),
+    )).resolves.toEqual(final);
+  });
+
   it("rejects host access to an assignment reservation", async () => {
     const fixture = await createHarness();
     const lease = assignmentLease("assignment-host", "run-host", 2);

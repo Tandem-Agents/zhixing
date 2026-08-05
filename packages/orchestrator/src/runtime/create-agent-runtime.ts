@@ -67,6 +67,12 @@ import {
   DEFAULT_WATCHDOG_POLICY,
   type MemoryLogicalEntry,
   type MemoryScopeRef,
+  compareMemoryLogicalEntries,
+  memoryLogicalEntryKey,
+  memoryLogicalEntryMatches,
+  memoryLogicalIdentityKey,
+  projectMemoryLogicalEntry,
+  sameMemoryScope,
   PermissionStore,
   resolveAgentIdentity,
   resolveModelInfo,
@@ -122,7 +128,6 @@ import {
   WEB_FETCH_DEFAULT_RULES,
   type MemoryToolPort,
 } from "@zhixing/tools-builtin";
-import { protocolDigest } from "@zhixing/core/protocol";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
@@ -214,15 +219,6 @@ function safeDispose(label: string, dispose: () => void): void {
   }
 }
 
-/**
- * 内置 skill 索引订阅者 —— lifecycle 框架的首个消费者。每个注意力窗口开启时用
- * O(1) 版本比对决定是否重建：版本未变（绝大多数段切换）零 IO、零重算、不调接口；
- * 版本变了才 queryTopN 渲染、经公共 updateSystemPromptSegment 贡献 skill-index 段，
- * 拼装 / byte-equal / 单调提交归运行体。
- *
- * skill 索引的唯一来源是此订阅者 —— 装配期不再硬编码注入，首窗 onWindowOpen 首次
- * 贡献、运行体首次 buildSystemPrompt 即含 skill 段，单一路径无并存。
- */
 /** 钩子错误转可读消息 —— lifecycle 失败事件 / 销毁调用方 warn 共用。 */
 function lifecycleErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -682,7 +678,8 @@ export interface CreateAgentRuntimeOptions {
   };
   /**
    * 运行体生命周期钩子订阅者集合 —— 装配期注入、实例内恒定（注册单位是实例，
-   * 触发单位是注意力窗口 / run）。内置 skill 索引重建订阅者默认置于列表首位，
+   * 触发单位是注意力窗口 / run）。skill 索引由持有 assignment query 的 runtime
+   * 窗口刷新路径维护，不进入本订阅者列表；
    * 此处传入的订阅者追加其后。第一版不做运行时 register（首窗语义需装配期注入）。
    */
   lifecycle?: readonly AgentRuntimeLifecycle[];
@@ -823,18 +820,7 @@ export async function createAgentRuntime(
       });
     },
     async search(query) {
-      const port = requireGlobalQuery();
-      const result = await port.read({
-        kind: "memory-search",
-        scope: memoryScope,
-        domain: "memory",
-        query,
-        limit: 20,
-      });
-      if (result.kind !== "memory-search") {
-        throw new Error("Memory query returned another result type");
-      }
-      return await readMemoryOverlay(result.hits.map((hit) => hit.entry), memoryScope);
+      return readMemorySearch(memoryScope, "memory", query, 20);
     },
     list: (category) => readMemoryEntries(memoryScope, category),
     async delete(input) {
@@ -1300,6 +1286,11 @@ export async function createAgentRuntime(
       callLLM: lightCallLLM,
       write: async (extraction, operationId) => {
         const mutations = requireAssignmentMutations();
+        const category = extraction.category;
+        const current = category === "journal"
+          ? undefined
+          : (await readMemoryEntries(memoryScope, category))
+              .find((entry) => entry.id === extraction.id);
         const common = {
           scope: memoryScope,
           content: extraction.content,
@@ -1333,6 +1324,7 @@ export async function createAgentRuntime(
                         ? { tags: extraction.meta.tags.map(String) }
                         : {}),
                     },
+                    ...(current ? { expectedDigest: current.digest } : {}),
                   },
                 }
               : {
@@ -1343,6 +1335,7 @@ export async function createAgentRuntime(
                     category: "profile",
                     id: extraction.id,
                     meta: toJsonObject(extraction.meta),
+                    ...(current ? { expectedDigest: current.digest } : {}),
                   },
                 },
         });
@@ -1401,7 +1394,7 @@ export async function createAgentRuntime(
     };
   };
 
-  // 首窗 onWindowOpen（instance-start）—— 订阅者贡献数据驱动段（skill-index 等）,
+  // 首窗 onWindowOpen（instance-start）—— 订阅者贡献自身数据段,
   // 据此首次 buildSystemPrompt 建实例权威 prompt。抛错让装配失败（实例未就绪、
   // 安全回滚,对齐 work-mode）。createAgentRuntime 为 async,此处 await 合法。
   await openInstanceWindow("instance-start", false);
@@ -2356,86 +2349,174 @@ async function readMemoryEntries(
   scope: MemoryScopeRef,
   category: "profile" | "person" | "journal",
 ): Promise<readonly MemoryLogicalEntry[]> {
+  const domain = memoryDomainForCategory(category);
   const result = await requireGlobalQuery().read({
     kind: "memory-list",
     scope,
-    domain: "memory",
-    category,
+    domain,
+    ...(domain === "memory" ? { category } : {}),
   });
   if (result.kind !== "memory-list") {
     throw new Error("Memory list returned another result type");
   }
-  return (await readMemoryOverlay(result.entries, scope)).filter(
-    (entry) => entry.category === category,
+  return (await readMemoryOverlay(result.entries, scope, domain)).filter(
+    (entry) => memoryCategoryForDomain(entry.domain, entry.category) === category,
   );
 }
 
 async function readMemoryOverlay(
   base: readonly MemoryLogicalEntry[],
   scope: MemoryScopeRef,
+  domain: "memory" | "journal" | "people",
 ): Promise<MemoryLogicalEntry[]> {
-  const result = new Map(base.map((entry) => [`${entry.category}:${entry.id}`, entry]));
   const port = runContextStorage.getStore()?.assignmentMutations;
-  if (!port) return [...result.values()];
-  const records = await port.readOverlay();
+  if (!port) return [...base].sort(compareMemoryLogicalEntries);
+  const records = (await port.readOverlay()).filter((record) =>
+    isMemoryOverlayRecordFor(record, scope, domain)
+  );
+  return mergeMemoryOverlay(base, records)
+    .sort(compareOverlayEntries)
+    .map((item) => item.entry);
+}
+
+async function readMemorySearch(
+  scope: MemoryScopeRef,
+  domain: "memory" | "journal" | "people",
+  query: string,
+  limit: number,
+): Promise<readonly MemoryLogicalEntry[]> {
+  const port = requireGlobalQuery();
+  const mutationPort = runContextStorage.getStore()?.assignmentMutations;
+  const records = mutationPort
+    ? (await mutationPort.readOverlay()).filter((record) =>
+        isMemoryOverlayRecordFor(record, scope, domain)
+      )
+    : [];
+  const result = await port.read({
+    kind: "memory-search",
+    scope,
+    domain,
+    query,
+    limit: limit + records.length,
+  });
+  if (result.kind !== "memory-search") {
+    throw new Error("Memory query returned another result type");
+  }
+  return resolveMemorySearchOverlay(
+    result.hits.map((hit) => hit.entry),
+    records,
+    { scope, domain, query, limit },
+  );
+}
+
+type MemoryOverlayRecord = Awaited<
+  ReturnType<AssignmentMutationPort["readOverlay"]>
+>[number];
+
+interface OverlayMemoryEntry {
+  readonly entry: MemoryLogicalEntry;
+  readonly recordSeq?: number;
+}
+
+function mergeMemoryOverlay(
+  base: readonly MemoryLogicalEntry[],
+  records: readonly MemoryOverlayRecord[],
+): OverlayMemoryEntry[] {
+  const result = new Map<string, OverlayMemoryEntry>(
+    base.map((entry) => [memoryLogicalEntryKey(entry), { entry }] as const),
+  );
   for (const record of records) {
-    if (record.domain !== "global") continue;
     const mutation = record.mutation;
     if (mutation.kind === "memory-delete") {
-      if (!sameMemoryScope(mutation.scope, scope)) continue;
-      const category = mutation.category ?? memoryCategoryForDomain(mutation.domain);
-      result.delete(`${category}:${mutation.id}`);
+      result.delete(memoryLogicalIdentityKey(
+        mutation.scope,
+        mutation.domain,
+        mutation.category,
+        mutation.id,
+      ));
       continue;
     }
-    if (mutation.kind !== "memory-append" || !sameMemoryScope(mutation.payload.scope, scope)) {
-      continue;
-    }
+    if (mutation.kind !== "memory-append") continue;
     const payload = mutation.payload;
-    const category = payload.domain === "memory"
-      ? payload.category
-      : memoryCategoryForDomain(payload.domain);
     const id = payload.domain === "journal" ? payload.date : payload.id;
-    if (!id) continue;
-    const key = `${category}:${id}`;
-    const previous = result.get(key);
-    const meta = payload.domain === "memory"
-      ? payload.meta
-      : payload.domain === "people"
-        ? payload.meta as unknown as Record<string, import("@zhixing/core").JsonValue>
-        : { date: id };
-    result.set(key, {
-      domain: payload.domain,
-      scope,
-      category,
+    if (!id) throw new TypeError("Staged journal memory requires an explicit date");
+    const key = memoryLogicalIdentityKey(
+      payload.scope,
+      payload.domain,
+      payload.domain === "memory" ? payload.category : undefined,
       id,
-      meta,
-      content:
-        payload.domain === "journal" && previous
-          ? `${previous.content}\n\n---\n\n${payload.content}`
-          : payload.content,
-      revision: (previous?.revision ?? 0) + 1,
-      digest: protocolDigest("MemoryLogicalEntry", 1, {
-        scope,
-        category,
-        id,
-        meta,
-        content: payload.content,
+    );
+    const previous = result.get(key)?.entry;
+    result.set(key, {
+      entry: projectMemoryLogicalEntry(payload, previous, {
+        revision: (previous?.revision ?? 0) + 1,
       }),
+      recordSeq: record.recordSeq,
     });
   }
   return [...result.values()];
 }
 
-function memoryCategoryForDomain(
-  domain: "memory" | "journal" | "people",
-): "profile" | "person" | "journal" {
-  return domain === "people" ? "person" : domain === "journal" ? "journal" : "profile";
+export function resolveMemorySearchOverlay(
+  base: readonly MemoryLogicalEntry[],
+  records: readonly MemoryOverlayRecord[],
+  input: {
+    readonly scope: MemoryScopeRef;
+    readonly domain: "memory" | "journal" | "people";
+    readonly query: string;
+    readonly limit: number;
+  },
+): MemoryLogicalEntry[] {
+  return mergeMemoryOverlay(base, records)
+    .filter(({ entry }) => memoryLogicalEntryMatches(entry, input))
+    .sort(compareOverlayEntries)
+    .slice(0, input.limit)
+    .map((item) => item.entry);
 }
 
-function sameMemoryScope(left: MemoryScopeRef, right: MemoryScopeRef): boolean {
-  return left.kind === right.kind &&
-    (left.kind === "personal" ||
-      (right.kind === "workscene" && left.sceneId === right.sceneId));
+function isMemoryOverlayRecordFor(
+  record: MemoryOverlayRecord,
+  scope: MemoryScopeRef,
+  domain: "memory" | "journal" | "people",
+): boolean {
+  if (record.domain !== "global") return false;
+  const mutation = record.mutation;
+  if (mutation.kind === "memory-delete") {
+    return mutation.domain === domain && sameMemoryScope(mutation.scope, scope);
+  }
+  return mutation.kind === "memory-append" &&
+    mutation.payload.domain === domain &&
+    sameMemoryScope(mutation.payload.scope, scope);
+}
+
+function compareOverlayEntries(left: OverlayMemoryEntry, right: OverlayMemoryEntry): number {
+  if (left.recordSeq !== undefined || right.recordSeq !== undefined) {
+    if (left.recordSeq === undefined) return 1;
+    if (right.recordSeq === undefined) return -1;
+    return right.recordSeq - left.recordSeq;
+  }
+  return compareMemoryLogicalEntries(left.entry, right.entry);
+}
+
+function memoryDomainForCategory(
+  category: "profile" | "person" | "journal",
+): "memory" | "people" | "journal" {
+  return category === "person"
+    ? "people"
+    : category === "journal"
+      ? "journal"
+      : "memory";
+}
+
+function memoryCategoryForDomain(
+  domain: "memory" | "journal" | "people",
+  category?: "profile" | "person" | "journal",
+): "profile" | "person" | "journal" {
+  return domain === "people"
+    ? "person"
+    : domain === "journal"
+      ? "journal"
+      : category ?? "profile";
 }
 
 function toJsonObject(

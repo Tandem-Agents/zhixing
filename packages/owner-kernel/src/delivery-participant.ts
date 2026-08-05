@@ -24,7 +24,7 @@ import {
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
-  validatePublishDecisionRecord,
+  validatePublishDecisionForBatch,
 } from "@zhixing/core/protocol";
 
 type JobBundle = SealedBundle & {
@@ -472,7 +472,7 @@ function assertJobPublishDecision(
   }
   let body: Extract<PublishRecord, { t: "publish-decision" }>;
   try {
-    body = validatePublishDecisionRecord(matches[0]!.body);
+    body = validatePublishDecisionForBatch(matches[0]!.body, batch);
   } catch (error) {
     throw new Error("Job publish decision structure is invalid", { cause: error });
   }

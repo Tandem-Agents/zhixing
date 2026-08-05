@@ -242,6 +242,48 @@ describe("runChildAgent · assignment child resource boundary", () => {
     expect(capacityComplete).toHaveBeenCalledTimes(1);
     expect(capacityRelease).toHaveBeenCalledTimes(1);
   });
+
+  it("runs the same child terminal path after a provider failure leaves reserved usage open", async () => {
+    const provider = new MockLLMProvider([
+      { error: new Error("provider disconnected") },
+    ]);
+    const parentLease = { reservationId: "parent-failed" } as ResourceLease;
+    const childLease = {
+      reservationId: "child-failed",
+      parentId: parentLease.reservationId,
+      workload: { kind: "orchestration-node", id: "child", attempt: 1 },
+    } as ChildResourceLease;
+    const settle = vi.fn().mockResolvedValue(undefined);
+    const release = vi.fn().mockResolvedValue(undefined);
+    const port = {
+      acquireChild: vi.fn().mockResolvedValue(childLease),
+      reserveUsage: vi.fn().mockResolvedValue(undefined),
+      consume: vi.fn().mockResolvedValue(undefined),
+      settle,
+      release,
+    } as unknown as ResourceReservationPort;
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+
+    const result = await runContextStorage.run(
+      {
+        bus: parentBus,
+        lineage: "main",
+        resourceReservation: {
+          port,
+          parentLease,
+          contextFor: (requestId) => ({ requestId }) as never,
+        },
+      },
+      () => runChildAgent(makeBaseOpts(provider, {
+        parentBus,
+        childOperationId: "failed-provider-call",
+      })),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(settle).toHaveBeenCalledWith(childLease, expect.anything());
+    expect(release).toHaveBeenCalledWith(childLease, expect.anything());
+  });
 });
 
 // ─── failed ───
