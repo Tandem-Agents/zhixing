@@ -16,7 +16,11 @@
  * - memory 工具的 description 指导 AI 何时主动保存记忆
  */
 
-import { type ToolDefinition, type ToolResult } from "@zhixing/core";
+import {
+  canonicalMemoryIdentity,
+  type ToolDefinition,
+  type ToolResult,
+} from "@zhixing/core";
 import type {
   MemoryLogicalEntry,
   MemoryCategory,
@@ -56,7 +60,7 @@ export function createMemoryTool(store: MemoryToolPort): ToolDefinition {
     description:
       "Manage the user's persistent memory across three categories:\n" +
       "  - profile : the user's own identity (id is always 'profile')\n" +
-      "  - person  : people in the user's life (id like 'wife-xiaoli')\n" +
+      "  - person  : people in the user's life (id is a lowercase ASCII slug like 'wife-xiaoli')\n" +
       "\n" +
       "Actions and required fields:\n" +
       "  - save   : category + id + meta + content (create new entry)\n" +
@@ -86,7 +90,7 @@ export function createMemoryTool(store: MemoryToolPort): ToolDefinition {
           type: "string",
           description:
             "Memory ID (filename without .md). For profile, always use 'profile'. " +
-            "For person, use a slug like 'wife-xiaoli'.",
+            "For person, use 1-64 lowercase ASCII letters/digits separated by single hyphens, like 'wife-xiaoli'.",
         },
         meta: {
           type: "object",
@@ -151,19 +155,21 @@ async function handleSave(
   action: "save" | "update",
   operationId: string,
 ): Promise<ToolResult> {
-  const category = input.category as MemoryCategory | undefined;
-  const id = input.id as string | undefined;
+  const category = input.category;
+  const id = input.id;
   const meta = (input.meta as Record<string, unknown>) ?? {};
   const content = (input.content as string) ?? "";
 
-  if (!category) {
+  if (category === undefined) {
     return { content: "Missing required field: category", isError: true };
   }
-  if (!id) {
+  if (typeof id !== "string" || id.length === 0) {
     return { content: "Missing required field: id", isError: true };
   }
 
-  await store.save({ action, category, id, meta, content, operationId });
+  const canonical = canonicalToolIdentity(category, id);
+
+  await store.save({ action, category: canonical.category, id: canonical.id, meta, content, operationId });
   return {
     content:
       action === "save"
@@ -189,7 +195,8 @@ async function handleSearch(
 
   const lines = results.map((entry) => {
     const title = entry.meta.title ?? entry.meta.name ?? entry.id;
-    return `- [${entry.category}] ${title} (${entry.id})`;
+    const category = entry.domain === "memory" ? "profile" : "person";
+    return `- [${category}] ${title} (${entry.id})`;
   });
 
   return {
@@ -201,15 +208,16 @@ async function handleList(
   store: MemoryToolPort,
   input: Record<string, unknown>,
 ): Promise<ToolResult> {
-  const category = input.category as MemoryCategory | undefined;
-  if (!category) {
+  const category = input.category;
+  if (category === undefined) {
     return { content: "Missing required field: category", isError: true };
   }
+  const canonicalCategory = canonicalToolCategory(category);
 
-  const entries = await store.list(category);
+  const entries = await store.list(canonicalCategory);
 
   if (entries.length === 0) {
-    return { content: `No ${category} memories found` };
+    return { content: `No ${canonicalCategory} memories found` };
   }
 
   const lines = entries.map((entry) => {
@@ -219,7 +227,7 @@ async function handleList(
   });
 
   return {
-    content: `${category} memories (${entries.length}):\n${lines.join("\n")}`,
+    content: `${canonicalCategory} memories (${entries.length}):\n${lines.join("\n")}`,
   };
 }
 
@@ -228,21 +236,47 @@ async function handleDelete(
   input: Record<string, unknown>,
   operationId: string,
 ): Promise<ToolResult> {
-  const category = input.category as MemoryCategory | undefined;
-  const id = input.id as string | undefined;
+  const category = input.category;
+  const id = input.id;
 
-  if (!category) {
+  if (category === undefined) {
     return { content: "Missing required field: category", isError: true };
   }
-  if (!id) {
+  if (typeof id !== "string" || id.length === 0) {
     return { content: "Missing required field: id", isError: true };
   }
 
-  const deleted = await store.delete({ category, id, operationId });
+  const canonical = canonicalToolIdentity(category, id);
+
+  const deleted = await store.delete({
+    category: canonical.category,
+    id: canonical.id,
+    operationId,
+  });
   if (deleted) {
     return {
       content: "This memory will be removed when the current turn completes successfully.",
     };
   }
-  return { content: `Memory not found: ${category}/${id}`, isError: true };
+  return { content: `Memory not found: ${canonical.category}/${canonical.id}`, isError: true };
+}
+
+function canonicalToolCategory(value: unknown): Extract<MemoryCategory, "profile" | "person"> {
+  if (value !== "profile" && value !== "person") {
+    throw new TypeError("Memory category must be profile or person");
+  }
+  return value;
+}
+
+function canonicalToolIdentity(
+  category: unknown,
+  id: string,
+): { category: Extract<MemoryCategory, "profile" | "person">; id: string } {
+  const canonicalCategory = canonicalToolCategory(category);
+  const identity = canonicalMemoryIdentity(
+    canonicalCategory === "profile"
+      ? { domain: "memory", category: "profile", id }
+      : { domain: "people", id },
+  );
+  return { category: canonicalCategory, id: identity.id };
 }

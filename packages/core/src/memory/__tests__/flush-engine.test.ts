@@ -68,6 +68,9 @@ describe("parseExtractions", () => {
       { category: "invalid-cat", id: "x", content: "bad category" },
       { category: "person", content: "missing id" },
       { id: "y", content: "missing category" },
+      { category: "profile", id: "main", content: "wrong profile identity" },
+      { category: "person", id: "小丽", content: "unsafe person id" },
+      { category: "journal", id: "2025-02-29", content: "invalid day" },
     ]);
     const result = parseExtractions(input);
     expect(result).toHaveLength(1);

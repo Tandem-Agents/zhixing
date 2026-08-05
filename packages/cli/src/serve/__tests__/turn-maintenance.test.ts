@@ -4,8 +4,8 @@
  * 锁住:
  *   - 单向阀:场景对话(ws:)与 ephemeral 不触发任何个人维护
  *   - 自动命名:仅首轮、仅 name 仍为 id 的对话、改名成功通知 onRenamed
- *   - journal:宿主级全局 single-flight,有凝练计划才走 LLM,失败后可重试
- *   - 运行体无 callText 能力时静默跳过
+ *   - journal:turn 仅唤醒组合根持有的宿主级 lifecycle owner
+ *   - 运行体无 callText 时只跳过命名，不影响 journal owner
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -43,7 +43,7 @@ function makeJournal(_opts?: { condensePlan?: unknown }) {
   const condenseSpy = vi.fn(async () => ({}));
   return {
     journal: {
-      run: condenseSpy,
+      wake: condenseSpy,
     } as never,
     condenseSpy,
   };
@@ -117,7 +117,7 @@ describe("createTurnMaintenance", () => {
     expect(condenseSpy).not.toHaveBeenCalled();
   });
 
-  it("journal:宿主级全局维护成功后不因其它 conversation 重复执行", async () => {
+  it("journal:每个 user turn 只唤醒组合根持有的同一个 lifecycle owner", async () => {
     const { repo } = makeRepo(makeConv("conv-1", "已命名"));
     const { journal, condenseSpy } = makeJournal({ condensePlan: { months: ["2026-01"] } });
     const maintain = createTurnMaintenance({ convRepo: repo, journal });
@@ -126,22 +126,16 @@ describe("createTurnMaintenance", () => {
     maintain(makeInfo({ conversationId: "conv-2", turnCount: 1 }));
     await flush();
 
-    expect(condenseSpy).toHaveBeenCalledTimes(1);
+    expect(condenseSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("journal:运行中触发合并为同一次维护,不并发凝练", async () => {
+  it("journal:turn 层只发送无参数 wake，不持有第二套运行状态", async () => {
     const { repo } = makeRepo(makeConv("conv-1", "已命名"));
-    let release!: () => void;
-    const condenseSpy = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-    );
+    const condenseSpy = vi.fn(async () => ({}));
     const maintain = createTurnMaintenance({
       convRepo: repo,
       journal: {
-        run: condenseSpy,
+        wake: condenseSpy,
       } as never,
     });
 
@@ -150,12 +144,12 @@ describe("createTurnMaintenance", () => {
     maintain(makeInfo({ conversationId: "conv-2", turnCount: 2 }));
     await flush();
 
-    expect(condenseSpy).toHaveBeenCalledTimes(1);
-    release();
-    await flush();
+    expect(condenseSpy).toHaveBeenCalledTimes(2);
+    expect(condenseSpy).toHaveBeenNthCalledWith(1);
+    expect(condenseSpy).toHaveBeenNthCalledWith(2);
   });
 
-  it("journal:维护失败后回到 idle,后续 user turn 可重试", async () => {
+  it("journal:owner 拒绝一次唤醒不阻止后续 user turn 再次唤醒", async () => {
     const { repo } = makeRepo(makeConv("conv-1", "已命名"));
     const condenseSpy = vi
       .fn()
@@ -164,7 +158,7 @@ describe("createTurnMaintenance", () => {
     const maintain = createTurnMaintenance({
       convRepo: repo,
       journal: {
-        run: condenseSpy,
+        wake: condenseSpy,
       } as never,
     });
 
@@ -176,7 +170,7 @@ describe("createTurnMaintenance", () => {
     expect(condenseSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("运行体无 callText 能力时静默跳过", async () => {
+  it("运行体无 callText 只跳过命名，仍唤醒已绑定的 journal owner", async () => {
     const { repo, renames } = makeRepo(makeConv("conv-1"));
     const { journal, condenseSpy } = makeJournal({ condensePlan: {} });
     const maintain = createTurnMaintenance({ convRepo: repo, journal });
@@ -189,6 +183,6 @@ describe("createTurnMaintenance", () => {
     await flush();
 
     expect(renames).toEqual([]);
-    expect(condenseSpy).not.toHaveBeenCalled();
+    expect(condenseSpy).toHaveBeenCalledOnce();
   });
 });

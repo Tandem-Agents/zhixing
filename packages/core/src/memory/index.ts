@@ -19,6 +19,14 @@ export type {
   MemoryScopeRef,
   PersonMetaDto,
 } from "./contracts.js";
+export {
+  assertMemoryStorageIdentity,
+  assertSafePersonId,
+  canonicalMemoryIdentity,
+  isCalendarDay,
+  isCalendarMonth,
+} from "./canonical-identity.js";
+export type { MemoryCanonicalIdentity } from "./canonical-identity.js";
 export { getMemoryDir } from "./types.js";
 export { MemoryFlusher, parseExtractions, FLUSH_EXTRACTION_PROMPT } from "./flush-engine.js";
 export type { FlushExtraction, FlushResult, MemoryFlusherConfig } from "./flush-engine.js";

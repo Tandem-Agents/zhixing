@@ -8,7 +8,6 @@ import type {
   IsoTime,
   JsonValue,
   MemoryAppendPayload,
-  MemoryCategoryDto,
   OutboundContentDto,
   SegmentRecord,
   SkillModeDto,
@@ -137,12 +136,10 @@ export type GlobalQuery =
       query: string;
       limit: number;
     }
-  | {
-      kind: "memory-list";
-      scope: MemoryScopeRef;
-      domain: "memory" | "journal" | "people";
-      category?: MemoryCategoryDto;
-    }
+  | ({ kind: "memory-list"; scope: MemoryScopeRef } & (
+      | { domain: "memory"; category: "profile" }
+      | { domain: "journal" | "people"; category?: never }
+    ))
   | { kind: "memory-stats"; scope: MemoryScopeRef; domain: "journal" | "people" }
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
@@ -335,16 +332,19 @@ export type MemoryJournalCondenseMutation = {
   summary: string;
 };
 
+export type MemoryDeleteMutation = {
+  kind: "memory-delete";
+  scope: MemoryScopeRef;
+  expectedDigest: Digest;
+} & (
+  | { domain: "memory"; category: "profile"; id: "profile" }
+  | { domain: "people"; category?: never; id: string }
+  | { domain: "journal"; category?: never; id: string }
+);
+
 export type GlobalControlMutation =
   | { kind: "memory-append"; payload: MemoryAppendPayload }
-  | {
-      kind: "memory-delete";
-      scope: MemoryScopeRef;
-      domain: "memory" | "journal" | "people";
-      category?: MemoryCategoryDto;
-      id: string;
-      expectedDigest: Digest;
-    }
+  | MemoryDeleteMutation
   | MemoryJournalCondenseMutation
   | ScheduleWriteMutation
   | SkillWriteMutation

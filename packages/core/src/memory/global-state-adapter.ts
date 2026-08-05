@@ -25,6 +25,7 @@ import {
   AuthorityMethodForbiddenError,
   CommittedMutationMaterializationError,
   protocolDigest,
+  validateGlobalQuery,
 } from "../protocol/index.js";
 import type {
   MemoryCategoryDto,
@@ -40,6 +41,11 @@ import {
   memoryLogicalIdentityKey,
   projectMemoryLogicalEntry,
 } from "./logical-entry.js";
+import {
+  canonicalMemoryIdentity,
+  isCalendarDay,
+  isCalendarMonth,
+} from "./canonical-identity.js";
 
 const MEMORY_STREAM = "intent:memory-authority";
 export const MEMORY_AUTHORITY_PROJECTION_ID = "global-memory-authority-v1";
@@ -262,32 +268,33 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
   }
 
   async read(query: GlobalQuery, context: GlobalReadCallContext): Promise<GlobalReadResult> {
-    if (!isMemoryQuery(query)) {
+    const normalizedQuery = validateGlobalQuery(query);
+    if (!isMemoryQuery(normalizedQuery)) {
       throw new TypeError("This global state adapter only owns the memory domain");
     }
-    this.#admit(context, "global.read", query.scope);
+    this.#admit(context, "global.read", normalizedQuery.scope);
     await this.#ensureOpen();
     const entries = await readMemoryEntries(this.#durable);
     const candidates = [...entries.values()].filter((entry) =>
       memoryLogicalEntryMatches(entry, {
-        scope: query.scope,
-        domain: query.domain,
-        ...(query.kind === "memory-list" && query.category !== undefined
-          ? { category: query.category }
+        scope: normalizedQuery.scope,
+        domain: normalizedQuery.domain,
+        ...(normalizedQuery.kind === "memory-list" && normalizedQuery.category !== undefined
+          ? { category: normalizedQuery.category }
           : {}),
       })
     );
-    if (query.kind === "memory-stats") {
+    if (normalizedQuery.kind === "memory-stats") {
       return {
         kind: "memory-stats",
-        domain: query.domain,
+        domain: normalizedQuery.domain,
         count: candidates.length,
         ...(candidates.map((entry) => entry.updatedAt).filter(Boolean).sort().at(-1)
           ? { lastWriteAt: candidates.map((entry) => entry.updatedAt).filter(Boolean).sort().at(-1)! }
           : {}),
       };
     }
-    if (query.kind === "memory-list") {
+    if (normalizedQuery.kind === "memory-list") {
       return {
         kind: "memory-list",
         entries: candidates.map(cloneEntry).sort(compareMemoryLogicalEntries),
@@ -297,12 +304,12 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
       kind: "memory-search",
       hits: candidates
         .filter((entry) => memoryLogicalEntryMatches(entry, {
-          scope: query.scope,
-          domain: query.domain,
-          query: query.query,
+          scope: normalizedQuery.scope,
+          domain: normalizedQuery.domain,
+          query: normalizedQuery.query,
         }))
         .sort(compareMemoryLogicalEntries)
-        .slice(0, positiveInteger(query.limit, "Memory search limit"))
+        .slice(0, positiveInteger(normalizedQuery.limit, "Memory search limit"))
         .map((entry) => ({ entry: cloneEntry(entry) })),
     };
   }
@@ -338,6 +345,16 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     ) {
       throw new AuthorityMethodForbiddenError(
         "Journal condensation is owned by anchor memory maintenance",
+      );
+    }
+    if (
+      memoryMutation.kind === "memory-delete" &&
+      memoryMutation.domain === "journal" &&
+      (context.principal.kind !== "host" ||
+        context.principal.component !== "memory-journal-maintenance")
+    ) {
+      throw new AuthorityMethodForbiddenError(
+        "Journal deletion is owned by anchor memory maintenance",
       );
     }
     this.#admit(context, "global.mutate", memoryScopeOf(memoryMutation));
@@ -713,6 +730,12 @@ function legacyMemorySource(
       ? "journal"
       : "memory";
   const meta = toJsonObject(disk.meta);
+  canonicalMemoryIdentity(
+    domain === "memory"
+      ? { domain, category: "profile", id: disk.id }
+      : { domain, id: disk.id },
+    { allowJournalMonth: true },
+  );
   const identity = {
     domain,
     scope: cloneScope(scope),
@@ -1180,7 +1203,14 @@ function readPendingMemoryRecord(value: unknown): MemoryPendingRecord {
   if (!Number.isSafeInteger(record.revision) || record.revision <= 0) {
     throw new TypeError("Memory authority revision is invalid");
   }
-  normalizeControlMutation(record.mutation);
+  if (
+    record.t === "memory-mutation-applied" &&
+    record.requestId.startsWith("memory-legacy-import:")
+  ) {
+    normalizeStagedMutation(record.mutation, { allowJournalMonth: true });
+  } else {
+    normalizeControlMutation(record.mutation);
+  }
   if (record.t === "memory-journal-condensed") {
     if (
       record.entry.domain !== "journal" ||
@@ -1247,14 +1277,23 @@ function requireStagedMemoryMutation(
 
 function normalizeStagedMutation(
   mutation: StagedMemoryMutation,
+  options: { readonly allowJournalMonth?: boolean } = {},
 ): StagedMemoryMutation {
   const normalized = structuredClone(mutation);
   const scope = memoryScopeOf(normalized);
   if (scope.kind === "workscene") identifier(scope.sceneId, "Memory workscene id");
   if (normalized.kind === "memory-delete") {
-    identifier(normalized.id, "Memory id");
-  } else if (normalized.payload.domain !== "journal") {
-    identifier(normalized.payload.id, "Memory id");
+    canonicalMemoryIdentity(normalized, { allowJournalMonth: false });
+  } else if (normalized.payload.domain === "journal") {
+    if (
+      normalized.payload.date !== undefined &&
+      !isCalendarDay(normalized.payload.date) &&
+      !(options.allowJournalMonth && isCalendarMonth(normalized.payload.date))
+    ) {
+      throw new TypeError("Journal append date must be a real calendar day");
+    }
+  } else {
+    canonicalMemoryIdentity(normalized.payload);
   }
   return normalized;
 }
@@ -1263,6 +1302,11 @@ function normalizeControlMutation(
   mutation: MemoryControlMutation,
 ): MemoryControlMutation {
   if (mutation.kind !== "memory-journal-condense") {
+    if (mutation.kind === "memory-delete" && mutation.domain === "journal") {
+      const normalized = structuredClone(mutation);
+      canonicalMemoryIdentity(normalized, { allowJournalMonth: true });
+      return normalized;
+    }
     return normalizeStagedMutation(mutation);
   }
   const normalized = structuredClone(mutation);
@@ -1291,14 +1335,6 @@ function normalizeControlMutation(
     previous = source.id;
   }
   return normalized;
-}
-
-function isCalendarDay(value: string): boolean {
-  if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/u.test(value)) {
-    return false;
-  }
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 function mutationKey(mutation: StagedMemoryMutation): string {

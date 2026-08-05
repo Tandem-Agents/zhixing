@@ -22,6 +22,7 @@ import {
   splitMessagesPairAware,
 } from "../context/message-turns.js";
 import { MemoryStore, type MemoryCategory } from "./memory-store.js";
+import { canonicalMemoryIdentity } from "./canonical-identity.js";
 
 // ─── 类型 ───
 
@@ -154,7 +155,7 @@ Extract ONLY genuinely important information. Do NOT extract trivial or transien
 
 Return a JSON array of extractions. Each extraction must have:
 - category: one of "profile", "person", "journal"
-- id: a slug identifier (e.g. "wife-xiaoli", "2025-06-15")
+- id: the canonical identifier: profile is exactly "profile"; person is a 1-64 character lowercase ASCII slug using letters, digits and single hyphens; journal is a real YYYY-MM-DD calendar day
 - meta: frontmatter fields appropriate for the category
 - content: markdown body text
 
@@ -241,7 +242,18 @@ export function parseExtractions(raw: string): FlushExtraction[] {
     if (!["profile", "person", "journal"].includes(String(obj.category))) return false;
     if (typeof obj.id !== "string" || !obj.id) return false;
     if (typeof obj.content !== "string") return false;
-    return true;
+    try {
+      canonicalMemoryIdentity(
+        obj.category === "profile"
+          ? { domain: "memory", category: "profile", id: obj.id }
+          : obj.category === "person"
+            ? { domain: "people", id: obj.id }
+            : { domain: "journal", id: obj.id },
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }).map((item) => ({
     category: item.category,
     id: item.id,

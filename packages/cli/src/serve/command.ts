@@ -286,6 +286,8 @@ async function runServerProcess(
     ? createAnchorJournalMaintenance({
         state: () => authorityRuntimeRef.current?.globalState,
         anchorEpoch: () => authorityRuntimeRef.current?.anchorEpoch,
+        onError: (error) =>
+          console.error(chalk.red(`[journal] ${error.message}`)),
       })
     : undefined;
   const memoryDirectory = journalMaintenance
@@ -713,16 +715,7 @@ async function runServerProcess(
     ...(journalMaintenance
       ? {
           journal: {
-            runJournalLifecycle: () => journalMaintenance.run(
-              governControlTextCall(
-                {
-                  governor: ctx.authorityRuntime!.resourceGovernor,
-                  origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
-                  workPrefix: "journal-maintenance",
-                },
-                ephemeralRuntime.callText.bind(ephemeralRuntime),
-              ),
-            ),
+            runJournalLifecycle: () => journalMaintenance.wake(),
           },
         }
       : {}),
@@ -859,7 +852,10 @@ async function runServerProcess(
     const runtime = schedulerRuntime;
     schedulerCleanup = startupRollback.register(
       "scheduler.stop",
-      () => runtime.stop(),
+      async () => {
+        await journalMaintenance?.stop();
+        await runtime.stop();
+      },
     );
     const schedulerGlobalState = new AnchorSchedulerGlobalStateAdapter(
       runtime.scheduler,
@@ -877,7 +873,19 @@ async function runServerProcess(
     );
     ctx.authorityRuntime.installSchedulerGlobalState(schedulerGlobalState);
     schedulerProductRef = schedulerProduct;
+    journalMaintenance?.bind({
+      notices: runtime.schedulerNotices,
+      callText: governControlTextCall(
+        {
+          governor: ctx.authorityRuntime.resourceGovernor,
+          origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
+          workPrefix: "journal-maintenance",
+        },
+        ephemeralRuntime.callText.bind(ephemeralRuntime),
+      ),
+    });
     await runtime.start();
+    await journalMaintenance?.start();
   }
   const scheduler = schedulerProductRef;
 

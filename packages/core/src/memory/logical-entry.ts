@@ -6,12 +6,23 @@ import type {
   MemoryLogicalEntry,
   MemoryScopeRef,
 } from "./contracts.js";
+import { canonicalMemoryIdentity } from "./canonical-identity.js";
 
 export function projectMemoryLogicalEntry(
   payload: MemoryAppendPayload,
   current: MemoryLogicalEntry | undefined,
   options: { readonly revision: number; readonly updatedAt?: string },
 ): MemoryLogicalEntry {
+  const journalId = payload.domain === "journal"
+    ? payload.date ?? requireJournalDate(options.updatedAt)
+    : undefined;
+  canonicalMemoryIdentity(
+    payload.domain === "memory"
+      ? { domain: "memory", category: payload.category, id: payload.id }
+      : payload.domain === "people"
+        ? { domain: "people", id: payload.id }
+        : { domain: "journal", id: journalId! },
+  );
   const base = payload.domain === "memory"
     ? {
         category: payload.category,
@@ -26,8 +37,8 @@ export function projectMemoryLogicalEntry(
           content: payload.content,
         }
       : {
-          id: payload.date ?? requireJournalDate(options.updatedAt),
-          meta: { date: payload.date ?? requireJournalDate(options.updatedAt) },
+          id: journalId!,
+          meta: { date: journalId! },
           content: current?.content
             ? `${current.content}\n\n---\n\n${payload.content}`
             : payload.content,
@@ -67,6 +78,7 @@ export function memoryLogicalIdentityKey(
   category: MemoryCategoryDto | undefined,
   id: string,
 ): string {
+  canonicalMemoryIdentity({ domain, category, id }, { allowJournalMonth: true });
   return `${scope.kind === "personal" ? "personal" : `workscene:${scope.sceneId}`}\0${domain}\0${category ?? ""}\0${id}`;
 }
 
@@ -88,6 +100,7 @@ export function memoryLogicalEntryMatches(
     readonly query?: string;
   },
 ): boolean {
+  canonicalMemoryIdentity(entry, { allowJournalMonth: true });
   if (
     !sameMemoryScope(entry.scope, input.scope) ||
     entry.domain !== input.domain ||

@@ -556,10 +556,21 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
       };
       condense: { months: number; files: number } | null;
       expiredCount: number;
+      maintenance: {
+        state: "prepared" | "open" | "updated" | "closed";
+        ref: {
+          kind: "journal-maintenance";
+          attempt: number;
+          completed: number;
+          monthCount: number;
+        };
+        reason: string;
+        actions: readonly string[];
+      } | null;
     };
     const { stats } = view;
 
-    if (stats.totalFiles === 0) {
+    if (stats.totalFiles === 0 && !view.maintenance) {
       writer.line(
         `\n${chalk.dim("  日志为空。对话中的信息将自动记录到日志中。\n")}`,
       );
@@ -572,6 +583,18 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     writer.line(`  ${chalk.green("●")} 热 (≤30天): ${stats.hotCount}`);
     writer.line(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
     writer.line(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
+
+    if (view.maintenance?.ref.kind === "journal-maintenance") {
+      const marker = view.maintenance.state === "closed"
+        ? chalk.green("✓")
+        : view.maintenance.state === "updated"
+          ? chalk.yellow("●")
+          : chalk.cyan("●");
+      writer.line(`  ${marker} 凝练进度: ${view.maintenance.reason}`);
+      for (const action of view.maintenance.actions) {
+        writer.line(chalk.dim(`    ${action}`));
+      }
+    }
 
     if (view.expiredCount > 0) {
       writer.line(`  ${chalk.red("●")} 过期待删除: ${view.expiredCount}`);

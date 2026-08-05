@@ -167,16 +167,17 @@ export function createMemoryDirectory(deps: {
   };
   const list = async (
     domain: "memory" | "journal" | "people",
-    category?: "profile",
   ) => {
     const current = authority();
     const result = await current.globalState.read(
-      {
-        kind: "memory-list",
-        scope: { kind: "personal" },
-        domain,
-        ...(category ? { category } : {}),
-      },
+      domain === "memory"
+        ? {
+            kind: "memory-list",
+            scope: { kind: "personal" },
+            domain,
+            category: "profile",
+          }
+        : { kind: "memory-list", scope: { kind: "personal" }, domain },
       {
         principal: { kind: "host", component: "memory-management" },
         requestId: `memory-management:${randomUUID()}`,
@@ -191,7 +192,7 @@ export function createMemoryDirectory(deps: {
   };
   return {
     async profileGet() {
-      const profiles = (await list("memory", "profile"))
+      const profiles = (await list("memory"))
         .filter((entry) => entry.id === "profile");
       if (profiles.length > 1) {
         throw new TypeError("Memory authority returned duplicate profiles");
@@ -212,6 +213,7 @@ export function createMemoryDirectory(deps: {
             }
           : null,
         expiredCount: plan.expired.length,
+        maintenance: await deps.journal.latestNotice(),
       };
     },
     peopleList() {

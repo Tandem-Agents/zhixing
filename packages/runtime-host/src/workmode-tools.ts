@@ -26,9 +26,11 @@
  */
 
 import {
+  compareMemoryLogicalEntries,
   getEnabledWorksceneToolActions,
   getWorksceneToolBoundaries,
   getWorksceneToolPostTurnControlKind,
+  memoryLogicalEntryKey,
   normalizeSceneName,
   worksceneToolRequiresExplicitConfirmation,
   type JsonSchema,
@@ -174,19 +176,16 @@ async function readSceneMemory(
       }
       hits.push(...result.hits.map((hit) => hit.entry));
     }
-    return hits;
+    return [
+      ...new Map(hits.map((entry) => [memoryLogicalEntryKey(entry), entry])).values(),
+    ].sort(compareMemoryLogicalEntries).slice(0, 20);
   }
   const entries: MemoryLogicalEntry[] = [];
-  for (const [domain, category] of [
-    ["memory", "profile"],
-    ["people", "person"],
+  for (const memoryQuery of [
+    { kind: "memory-list", scope, domain: "memory", category: "profile" },
+    { kind: "memory-list", scope, domain: "people" },
   ] as const) {
-    const result = await query.read({
-      kind: "memory-list",
-      scope,
-      domain,
-      category,
-    });
+    const result = await query.read(memoryQuery);
     if (result.kind !== "memory-list") {
       throw new Error("工作场景记忆目录返回了错误的结果类型");
     }
@@ -775,7 +774,9 @@ export function createWorksceneMemoryQueryTool(
           const idx: string[] = [];
           for (const category of ["person", "profile"] as const) {
             const categoryEntries = entries.filter(
-              (entry) => entry.category === category,
+              (entry) =>
+                (category === "profile" && entry.domain === "memory") ||
+                (category === "person" && entry.domain === "people"),
             );
             if (categoryEntries.length > 0) {
               idx.push(

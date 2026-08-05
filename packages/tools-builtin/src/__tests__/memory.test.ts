@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import type { ToolDefinition, ToolExecutionContext } from "@zhixing/core";
 import { MemoryStore } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
+import { createMemoryTool, type MemoryToolPort } from "../memory.js";
 
 /**
  * Memory 工具集成测试
@@ -89,3 +90,58 @@ describe("Memory Tool (integration via MemoryStore)", () => {
     expect(entry!.content).toBe("Version 2 content");
   });
 });
+
+describe("Memory Tool canonical product boundary", () => {
+  const ctx: ToolExecutionContext = { workingDirectory: "/tmp" };
+
+  it("rejects a non-canonical person id before calling the producer port", async () => {
+    let writes = 0;
+    const tool = createMemoryTool(fakePort({
+      save: async () => {
+        writes++;
+      },
+    }));
+
+    const result = await tool.call({
+      action: "save",
+      category: "person",
+      id: "小丽",
+      meta: { name: "小丽", relation: "friend" },
+      content: "friend",
+    }, ctx);
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("safe lowercase slug");
+    expect(writes).toBe(0);
+  });
+
+  it("renders canonical domain-backed search results as product categories", async () => {
+    const tool = createMemoryTool(fakePort({
+      search: async () => [{
+        domain: "people",
+        scope: { kind: "personal" },
+        id: "wife-xiaoli",
+        meta: { name: "小丽" },
+        content: "family",
+        revision: 1,
+        digest: `sha256:${"a".repeat(64)}`,
+      }],
+    }));
+
+    const result = await tool.call({ action: "search", query: "小丽" }, ctx);
+
+    expect(result.isError).not.toBe(true);
+    expect(result.content).toContain("[person]");
+    expect(result.content).not.toContain("[undefined]");
+  });
+});
+
+function fakePort(overrides: Partial<MemoryToolPort>): MemoryToolPort {
+  return {
+    save: async () => {},
+    search: async () => [],
+    list: async () => [],
+    delete: async () => false,
+    ...overrides,
+  };
+}

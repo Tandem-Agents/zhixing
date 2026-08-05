@@ -79,6 +79,19 @@ describe("MemoryStore", () => {
         .catch(() => false);
       expect(dirExists).toBe(true);
     });
+
+    it.each([
+      ["profile", "other"],
+      ["person", "../escape"],
+      ["person", "CON"],
+      ["person", "nested/path"],
+      ["journal", "2025-02-29"],
+      ["journal", "../escape"],
+    ] as const)("在最终 I/O 前拒绝非法 %s/%s 身份", async (category, id) => {
+      await expect(store.save({ category, id, meta: {}, content: "blocked" }))
+        .rejects.toThrow();
+      await expect(fs.readdir(tmpDir)).resolves.toEqual([]);
+    });
   });
 
   // ─── load ───

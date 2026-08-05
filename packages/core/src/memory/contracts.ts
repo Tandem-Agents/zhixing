@@ -21,8 +21,8 @@ export type MemoryAppendPayload =
   | {
       domain: "memory";
       scope: MemoryScopeRef;
-      category: MemoryCategoryDto;
-      id: string;
+      category: "profile";
+      id: "profile";
       meta: Record<string, JsonValue>;
       content: string;
       expectedDigest?: Digest;
@@ -37,14 +37,18 @@ export type MemoryAppendPayload =
       expectedDigest?: Digest;
     };
 
-export interface MemoryLogicalEntry {
-  domain: "memory" | "journal" | "people";
+interface MemoryLogicalEntryBase {
   scope: MemoryScopeRef;
-  category?: MemoryCategoryDto;
-  id: string;
   meta: Record<string, JsonValue>;
   content: string;
   revision: number;
   digest: Digest;
   updatedAt?: IsoTime;
 }
+
+export type MemoryLogicalEntry = MemoryLogicalEntryBase &
+  (
+    | { domain: "memory"; category: "profile"; id: "profile" }
+    | { domain: "people"; category?: never; id: string }
+    | { domain: "journal"; category?: never; id: string }
+  );

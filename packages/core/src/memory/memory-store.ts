@@ -11,6 +11,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { ensureDurableDirectory, syncDirectory } from "../persistence/durable-directory.js";
+import { assertMemoryStorageIdentity } from "./canonical-identity.js";
 
 // ─── 类型 ───
 
@@ -194,10 +195,16 @@ export class MemoryStore {
   }
 
   private resolvePath(category: MemoryCategory, id: string): string {
+    assertMemoryStorageIdentity(category, id);
+    const categoryRoot = path.resolve(this.categoryDir(category));
     if (category === "profile") {
-      return path.join(this.baseDir, "profile.md");
+      return path.join(categoryRoot, "profile.md");
     }
-    return path.join(this.categoryDir(category), `${id}.md`);
+    const target = path.resolve(categoryRoot, `${id}.md`);
+    if (path.dirname(target) !== categoryRoot) {
+      throw new TypeError("Memory target must be a direct child of its category directory");
+    }
+    return target;
   }
 
   private async loadStrict(

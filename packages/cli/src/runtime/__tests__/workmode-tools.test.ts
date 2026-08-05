@@ -53,7 +53,6 @@ function memoryEntry(
   return {
     domain: "people",
     scope: { kind: "workscene", sceneId },
-    category: "person",
     id,
     meta: { name: id },
     content,
@@ -412,6 +411,26 @@ describe("workscene path-free reads", () => {
       "workscene-get",
       "memory-search",
       "memory-search",
+    ]);
+  });
+
+  it("无关键词时以 domain 读取人物目录并稳定呈现", async () => {
+    const result = await callInRun(
+      () =>
+        createWorksceneMemoryQueryTool(makeDirectory()).call(
+          { sceneId: "scene-a" },
+          CTX,
+        ),
+      {
+        scenes: [scene("scene-a", "场景A")],
+        memories: [memoryEntry("scene-a", "person-a", "alpha")],
+      },
+    );
+    expect(result.result.content).toContain("person: person-a");
+    expect(result.reads).toEqual([
+      "workscene-get",
+      "memory-list",
+      "memory-list",
     ]);
   });
 

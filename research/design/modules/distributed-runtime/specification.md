@@ -105,7 +105,7 @@ interface TrustRuleSnapshot { snapshotVersion: number; rules: PortableTrustRule[
   generatedAt: IsoTime; digest: Digest; signature: Signature }   // digest 按 §1.2 自摘要；锚点签发；PermissionSnapshotLease.snapshotDigest 指向它
 // 值域 / 小对象快照区：**新上 wire 的领域类型一律在此冻结快照**（协议基座符号如 Message / AgentYield 除外——其演进天然连动顶层 v）。
 // 裁决依据：领域类型演进不得静默扩张 wire——扩张必须显式升版；wire 侧枚举收窄使未知新值 fail-closed 拒绝而非静默通过。
-type MemoryCategoryDto = "profile" | "person" | "journal";                       // ≙ MemoryCategory（memory-store.ts:20）值域快照
+type MemoryCategoryDto = "profile" | "person" | "journal";                       // 只作旧物理存储值域快照；新 wire 身份由 domain 联合冻结
 interface PersonMetaDto { name: string; relation: string; birthday?: string; tags?: string[] }   // ≙ PersonMeta（people-store.ts:21）逐字段快照
 type TaskPriorityDto = "low" | "normal" | "high" | "urgent";                     // ≙ TaskPriority（scheduler/types.ts:16）
 type TaskScheduleDto = { kind: "once"; at: IsoTime } | { kind: "interval"; everyMs: number }
@@ -115,11 +115,15 @@ interface DeliveryTargetDto { channelId: string; to: string; threadId?: string }
 interface OutboundContentDto { text: string; markdown?: string;
   media?: Array<{ ref: ArtifactRef; type: "image"|"file"|"audio"|"video" }> } // ≙ OutboundContent；媒体改内容寻址，外部 URL 不进权威日志
 
+type MemoryScopeRef = { kind: "personal" } | { kind: "workscene"; sceneId: string };
 type MemoryAppendPayload =                        // 三域 path-free 权威写入合同
-  | { domain: "memory";  category: MemoryCategoryDto; id: string; meta: Record<string, JsonValue>; content: string }  // ≙ SaveOptions（meta 收窄为 JsonValue）
-  | { domain: "journal"; content: string; date?: string }
-  | { domain: "people";  id: string; meta: PersonMetaDto; content: string };
-// 三分支逐字段与对应 store 写入签名做 adapter conformance 测试；未知 category、缺 relation 在反序列化层拒绝。
+  | { domain: "memory"; scope: MemoryScopeRef; category: "profile"; id: "profile";
+      meta: Record<string, JsonValue>; content: string; expectedDigest?: Digest }
+  | { domain: "journal"; scope: MemoryScopeRef; content: string; date?: string }
+  | { domain: "people"; scope: MemoryScopeRef; id: string; meta: PersonMetaDto;
+      content: string; expectedDigest?: Digest };
+// profile 唯一身份恒为 memory/profile/profile；people id 是安全小写 slug；公开 journal 只接受真实日历日。
+// producer、codec、planner、overlay、GlobalQuery 与 MemoryStore 末端必须共用同一 canonicalizer/validator；非法联合在副作用前拒绝。
 ```
 
 `GlobalControlMutation / GlobalStagedMutation` 的 memory-append 分支形态随本联合（`domain` 判别即路由），不再另带 domain 字段。
@@ -624,14 +628,20 @@ interface ConfigAssetRecord {                    // 无远程调用方的非秘�
 // secret-free 的机械保证（非注释承诺）：①写入口唯一 host principal（类型层已封）②写入按 schemaId 校验 value 结构，
 // 秘密形字段只允许 SecretRef 形态 ③不变量 6 的 wire / 存储审计扫描覆盖本族。domain 的 schema 演进随其模块 S 节点注册。
 
-type MemoryScopeRef = { kind: "personal" } | { kind: "workscene"; sceneId: string };
-interface MemoryLogicalEntry {                   // path-free authority DTO；文件路径永不上 port / wire
-  domain: "memory"|"journal"|"people"; scope: MemoryScopeRef; category?: MemoryCategoryDto;
-  id: string; meta: Record<string, JsonValue>; content: string;
-  revision: number; digest: Digest; updatedAt?: IsoTime }
+type MemoryLogicalEntry = {                      // path-free authority DTO；文件路径永不上 port / wire
+  scope: MemoryScopeRef; meta: Record<string, JsonValue>; content: string;
+  revision: number; digest: Digest; updatedAt?: IsoTime
+} & (
+  | { domain: "memory"; category: "profile"; id: "profile" }
+  | { domain: "people"; category?: never; id: string }
+  | { domain: "journal"; category?: never; id: string }
+);
 type GlobalQuery =
   | { kind: "memory-search"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people"; query: string; limit: number }
-  | { kind: "memory-list"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people"; category?: MemoryCategoryDto }
+  | ({ kind: "memory-list"; scope: MemoryScopeRef } & (
+      | { domain: "memory"; category: "profile" }
+      | { domain: "journal"|"people"; category?: never }
+    ))
   | { kind: "memory-stats"; scope: MemoryScopeRef; domain: "journal"|"people" }
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
@@ -715,8 +725,11 @@ type TrustWriteMutation =
 
 type GlobalControlMutation =                      // 仅 ControlEnvelope global-write（surface / host）可携
   | { kind: "memory-append"; payload: MemoryAppendPayload }      // domain 判别在 payload 内（§1.3b）
-  | { kind: "memory-delete"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people";
-      category?: MemoryCategoryDto; id: string; expectedDigest: Digest }
+  | ({ kind: "memory-delete"; scope: MemoryScopeRef; expectedDigest: Digest } & (
+      | { domain: "memory"; category: "profile"; id: "profile" }
+      | { domain: "people"; category?: never; id: string }
+      | { domain: "journal"; category?: never; id: string }
+    ))
   | { kind: "memory-journal-condense"; scope: { kind: "personal" }; month: string;
       targetExpectedDigest?: Digest; sources: Array<{ id: string; expectedDigest: Digest }>; summary: string }
   | ScheduleWriteMutation | SkillWriteMutation | RubricWriteMutation | WorksceneWriteMutation | TrustWriteMutation
@@ -724,8 +737,7 @@ type GlobalControlMutation =                      // 仅 ControlEnvelope global-
   | { kind: "config-asset-write"; record: ConfigAssetRecord };   // host（锚点本地配置 adapter）专用
 type GlobalStagedBase =                           // conversation / job 共有的 staged 写面
   | { kind: "memory-append"; payload: MemoryAppendPayload }
-  | { kind: "memory-delete"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people";
-      category?: MemoryCategoryDto; id: string; expectedDigest: Digest }
+  | Extract<GlobalControlMutation, { kind: "memory-delete" }>
   | ScheduleWriteMutation
   | { kind: "skill-usage"; record: SkillUsageRecord }
   | Extract<SkillWriteMutation, { kind: "skill-create"|"skill-update"|"skill-admit" }>   // run 内工具 = save_skill（adapter 拆 create/update）+ admit_skill
@@ -769,7 +781,9 @@ interface GlobalStatePort {
 }
 ```
 
-memory cutover 后，`MemoryLogicalEntry` 是唯一生产事实，旧 Markdown 只承担一次性导入和 anchor 派生兼容视图。`/me`、people、journal 管理面只读 personal `GlobalQuery`；空 profile 引导用户通过现有对话 memory 工具设置，不再把文件编辑当成生产写入。journal 生命周期由 anchor-only、触发源无关且 single-flight 的维护服务拥有：过期提交 digest-bound `memory-delete`；月度凝练只经 host-only `memory-journal-condense`，在同一 memory reducer 事务全量 CAS、原子写月摘要并删除全部来源。该分支不得进入 `GlobalStagedMutation` 或 assignment publish batch。
+memory cutover 后，`MemoryLogicalEntry` 是唯一生产事实，旧 Markdown 只承担一次性导入和 anchor 派生兼容视图。身份联合只有三支：`memory/profile/profile`、`people/<safe-slug>`、`journal/<real-calendar-day>`；内部月摘要只由 host lifecycle 生成 `journal/<real-calendar-month>`，不得进入 assignment staged 写面。`/me`、people、journal 管理面只读 personal `GlobalQuery`；空 profile 引导用户通过现有对话 memory 工具设置，不再把文件编辑当成生产写入。journal 生命周期由 anchor-only、触发源无关且 single-flight 的维护服务拥有：过期提交 digest-bound `memory-delete`；月度凝练只经 host-only `memory-journal-condense`，在同一 memory reducer 事务全量 CAS、原子写月摘要并删除全部来源。该分支不得进入 `GlobalStagedMutation` 或 assignment publish batch。
+
+月度凝练会触发付费 provider 调用，故每次调用前必须先由现有 `SchedulerUserNoticeJournal` 耐久写入同一 `journal-maintenance` notice 的 plan/attempt；成功、失败、重试和重启在同一稳定 noticeId 上单调收敛。组合根是该服务 start/wake/stop 的唯一 owner，live `scheduler.notice`、history、CLI 呈现与 `/journal` 共用同一耐久事实，不得因 turn/system 双触发、响应丢失或连续重启重复计费或重复呈现。零计划不写 notice。
 
 每次 memory 权威提交携完整 path-free 派生 delta 并生成单个 pending。anchor materializer 对目标 save/source delete 全部幂等追平：save 必须同目录耐久临时写后原子替换，delete 仅 `ENOENT` 可视为已完成；全部文件效果全等后才能推进 checkpoint。任一步或 checkpoint 响应失败均保留同一 pending 并在重启后重驱。workscene 在本单元只继承相同派生恢复，不扩展公开管理面或 lifecycle owner。
 

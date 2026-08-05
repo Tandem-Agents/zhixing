@@ -13,6 +13,10 @@ import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateJobCommitFence } from "./job.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
+import {
+  canonicalMemoryIdentity,
+  isCalendarDay,
+} from "../memory/canonical-identity.js";
 
 type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
 type ConversationSealedBundle = SealedBundle & { body: ConversationCommitBundle };
@@ -556,13 +560,14 @@ export function validateGlobalStagedMutation(
         true,
       );
       validateMemoryScope(mutation.scope);
-      if (mutation.domain !== "memory" && mutation.domain !== "journal" && mutation.domain !== "people") {
-        throw new TypeError("Memory delete domain is invalid");
-      }
-      if (mutation.category !== undefined && mutation.category !== "profile" && mutation.category !== "person" && mutation.category !== "journal") {
-        throw new TypeError("Memory delete category is invalid");
-      }
-      assertIdentifier(mutation.id, "Memory delete id");
+      canonicalMemoryIdentity(
+        {
+          domain: mutation.domain,
+          category: mutation.category,
+          id: mutation.id,
+        },
+        { allowJournalMonth: false },
+      );
       assertDigest(mutation.expectedDigest, "Memory delete expected digest");
       return;
     case "schedule-create":
@@ -690,10 +695,14 @@ function validateMemoryAppend(payload: unknown): void {
         true,
       );
       validateMemoryScope(payload.scope);
-      if (payload.category !== "profile" && payload.category !== "person" && payload.category !== "journal") {
-        throw new TypeError("Memory category is invalid");
+      if (payload.category !== "profile" || payload.id !== "profile") {
+        throw new TypeError("Profile memory identity is invalid");
       }
-      assertIdentifier(payload.id, "Memory entry id");
+      canonicalMemoryIdentity({
+        domain: "memory",
+        category: "profile",
+        id: "profile",
+      });
       assertPlainObject(payload.meta, "Memory entry metadata");
       assertString(payload.content, "Memory entry content");
       if (payload.expectedDigest !== undefined) {
@@ -709,7 +718,12 @@ function validateMemoryAppend(payload: unknown): void {
       );
       validateMemoryScope(payload.scope);
       assertString(payload.content, "Journal content");
-      if (payload.date !== undefined) assertString(payload.date, "Journal date");
+      if (
+        payload.date !== undefined &&
+        (typeof payload.date !== "string" || !isCalendarDay(payload.date))
+      ) {
+        throw new TypeError("Journal date must be a real calendar day");
+      }
       return;
     case "people":
       assertExactKeys(
@@ -719,7 +733,8 @@ function validateMemoryAppend(payload: unknown): void {
         true,
       );
       validateMemoryScope(payload.scope);
-      assertIdentifier(payload.id, "Person entry id");
+      assertString(payload.id, "Person entry id");
+      canonicalMemoryIdentity({ domain: "people", id: payload.id });
       assertString(payload.content, "Person entry content");
       assertPlainObject(payload.meta, "Person metadata");
       assertExactKeys(

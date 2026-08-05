@@ -8,24 +8,26 @@ describe("memory logical entry projection", () => {
   it("binds domain into the digest while keeping authority time outside identity", () => {
     const shared = {
       scope: { kind: "personal" as const },
-      id: "same-id",
       content: "same content",
     };
     const memory = projectMemoryLogicalEntry({
       domain: "memory",
       ...shared,
       category: "profile",
+      id: "profile",
       meta: { name: "A" },
     }, undefined, { revision: 1 });
     const people = projectMemoryLogicalEntry({
       domain: "people",
       ...shared,
+      id: "same-id",
       meta: { name: "A", relation: "friend" },
     }, undefined, { revision: 1, updatedAt: "2026-08-05T00:00:00.000Z" });
     const timed = projectMemoryLogicalEntry({
       domain: "memory",
       ...shared,
       category: "profile",
+      id: "profile",
       meta: { name: "A" },
     }, undefined, { revision: 1, updatedAt: "2026-08-05T00:00:00.000Z" });
 

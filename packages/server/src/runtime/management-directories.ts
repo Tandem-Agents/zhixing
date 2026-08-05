@@ -13,6 +13,7 @@ import type {
   SkillCatalogEntry,
   SkillMode,
 } from "@zhixing/core";
+import type { SchedulerUserNotice } from "@zhixing/core/contracts";
 
 /**
  * 信任规则管理 —— 按对话语境列 / 撤用户可管规则(/trust 的上下文相关视角:
@@ -52,6 +53,8 @@ export interface JournalScanView {
   /** 待凝练摘要;无计划为 null */
   condense: { months: number; files: number } | null;
   expiredCount: number;
+  /** 最近一次付费凝练的耐久进度；从 scheduler notice 权威读取。 */
+  maintenance: SchedulerUserNotice | null;
 }
 
 /** 记忆域查看 —— /journal 统计与 /people 关系列表的只读执行体 */

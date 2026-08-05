@@ -48,35 +48,21 @@ export interface TurnMaintenanceDeps {
 export function createTurnMaintenance(
   deps: TurnMaintenanceDeps,
 ): (info: TurnCommittedInfo) => void {
-  // journal 是用户全局资源,不是 conversation 资源。宿主进程生命周期内:
-  // 成功跑完一次即完成;运行中触发直接合并;失败后回到 idle,让后续 turn 重试。
-  let journalState: "idle" | "running" | "done" = "idle";
-
   return (info) => {
     if (info.ephemeral) return;
     if (parseConversationId(info.conversationId).scope.kind !== "user") return;
     const runtime = info.runtime;
-    if (!runtime.callText) return;
-    const rawCallText = runtime.callText.bind(runtime);
-    const callText = deps.governCallText
-      ? deps.governCallText(rawCallText)
-      : rawCallText;
+    const callText = runtime.callText
+      ? deps.governCallText
+        ? deps.governCallText(runtime.callText.bind(runtime))
+        : runtime.callText.bind(runtime)
+      : undefined;
 
-    if (info.turnCount === 1) {
+    if (info.turnCount === 1 && callText) {
       void autoNameFirstTurn(deps, info, callText).catch(() => {});
     }
 
-    if (deps.journal && journalState === "idle") {
-      journalState = "running";
-      void deps.journal.run(callText).then(
-        () => {
-          journalState = "done";
-        },
-        () => {
-          journalState = "idle";
-        },
-      );
-    }
+    if (deps.journal) void deps.journal.wake().catch(() => {});
   };
 }
 

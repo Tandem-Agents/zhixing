@@ -107,6 +107,7 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
       stats: { totalFiles: 2, hotCount: 1, warmCount: 1, condensedCount: 0 },
       condense: null,
       expiredCount: 0,
+      maintenance: null,
     })),
     peopleList: vi.fn(async () => []),
   } as unknown as RpcManagementFacade;

@@ -679,7 +679,9 @@ async function readEntries(
   domain: "memory" | "people" | "journal",
 ) {
   const result = await adapter.read(
-    { kind: "memory-list", scope, domain },
+    domain === "memory"
+      ? { kind: "memory-list", scope, domain, category: "profile" }
+      : { kind: "memory-list", scope, domain },
     readContext(`read-${domain}-${scope.kind}`),
   );
   if (result.kind !== "memory-list") throw new Error("unexpected result");

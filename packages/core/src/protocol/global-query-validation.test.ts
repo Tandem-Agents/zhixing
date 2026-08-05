@@ -162,9 +162,24 @@ describe("GlobalQuery strict request/result contract", () => {
       { kind: "memory-search", hits: [{ entry }] },
     )).toThrow(/bound/u);
     expect(() => validateGlobalQueryResult(
-      { kind: "memory-list", scope: { kind: "personal" }, domain: "memory" },
+      { kind: "memory-list", scope: { kind: "personal" }, domain: "memory", category: "profile" },
       { kind: "memory-list", entries: [{ ...entry, digest: DIGEST_A }] },
     )).toThrow(/digest/u);
+    expect(() => validateGlobalQuery({
+      kind: "memory-list",
+      scope: { kind: "personal" },
+      domain: "memory",
+    })).toThrow(/category/u);
+    expect(() => validateGlobalQuery({
+      kind: "memory-list",
+      scope: { kind: "personal" },
+      domain: "people",
+      category: "person",
+    })).toThrow(/category/u);
+    expect(() => validateGlobalQueryResult(
+      { kind: "memory-search", scope: { kind: "personal" }, domain: "people", query: "hello", limit: 1 },
+      { kind: "memory-search", hits: [{ entry: { ...entry, domain: "people", category: undefined } }] },
+    )).toThrow();
     expect(() => validateGlobalQueryResult(
       { kind: "workscene-get", sceneId: "scene-2" },
       { kind: "workscene-get", scene: { ...scene, workspace: { deviceId: "d", bindingRef: "b", path: "C:\\secret" } } },

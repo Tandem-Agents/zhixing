@@ -23,6 +23,7 @@ import { validateWorksceneDto } from "./contract-validation.js";
 import { validateTaskDefinition } from "./job.js";
 import { validateTrustRuleSnapshot } from "./permission-snapshot.js";
 import { assertProtocolIdentifier } from "./validation.js";
+import { canonicalMemoryIdentity } from "../memory/canonical-identity.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const CONFIG_DOMAINS = new Set([
@@ -49,14 +50,22 @@ export function validateGlobalQuery(input: unknown): GlobalQuery {
       };
     case "memory-list":
       exactKeys(value, ["domain", "kind", "scope"], ["category"]);
-      return {
-        kind,
-        scope: memoryScope(value.scope),
-        domain: memoryDomain(value.domain),
-        ...(value.category === undefined
-          ? {}
-          : { category: memoryCategory(value.category) }),
-      };
+      {
+        const domain = memoryDomain(value.domain);
+        const category = value.category === undefined
+          ? undefined
+          : memoryCategory(value.category);
+        if (
+          (domain === "memory" && category !== "profile") ||
+          (domain !== "memory" && category !== undefined)
+        ) {
+          throw new TypeError("Memory list category does not match its domain");
+        }
+        const scope = memoryScope(value.scope);
+        return domain === "memory"
+          ? { kind, scope, domain, category: "profile" }
+          : { kind, scope, domain };
+      }
     case "memory-stats": {
       exactKeys(value, ["domain", "kind", "scope"]);
       const domain = value.domain;
@@ -341,20 +350,19 @@ function memoryEntry(input: unknown, label: string): MemoryLogicalEntry {
   const category = value.category === undefined
     ? undefined
     : memoryCategory(value.category);
-  if ((domain === "memory") !== (category !== undefined)) {
-    throw new TypeError("Memory entry category does not match its domain");
-  }
   const id = identifier(value.id, `${label} id`);
+  const canonicalIdentity = canonicalMemoryIdentity(
+    { domain, category, id },
+    { allowJournalMonth: true },
+  );
   const meta = plainObject(value.meta, `${label} metadata`);
   validateJson(meta, `${label} metadata`);
   const content = string(value.content, `${label} content`);
   const revision = positiveInteger(value.revision, `${label} revision`);
   const digest = assertDigest(value.digest, `${label} digest`);
   const identity = {
-    domain,
+    ...canonicalIdentity,
     scope,
-    ...(category === undefined ? {} : { category }),
-    id,
     meta: meta as Record<string, JsonValue>,
     content,
   };

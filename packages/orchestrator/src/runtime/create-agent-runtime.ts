@@ -68,6 +68,7 @@ import {
   type MemoryLogicalEntry,
   type MemoryScopeRef,
   compareMemoryLogicalEntries,
+  canonicalMemoryIdentity,
   memoryLogicalEntryKey,
   memoryLogicalEntryMatches,
   memoryLogicalIdentityKey,
@@ -790,6 +791,11 @@ export async function createAgentRuntime(
   const memoryScope: MemoryScopeRef = options.memoryScope ?? { kind: "personal" };
   const memoryPort: MemoryToolPort = {
     async save(input) {
+      const identity = canonicalMemoryIdentity(
+        input.category === "profile"
+          ? { domain: "memory", category: "profile", id: input.id }
+          : { domain: "people", id: input.id },
+      );
       const entries = await readMemoryEntries(memoryScope, input.category);
       const current = entries.find((entry) => entry.id === input.id);
       if (input.action === "save" && current) {
@@ -803,23 +809,53 @@ export async function createAgentRuntime(
         operationId: input.operationId,
         mutation: {
           kind: "memory-append",
-          payload: {
-            domain: "memory",
-            scope: memoryScope,
-            category: input.category,
-            id: input.id,
-            meta: toJsonObject(input.meta),
-            content: input.content,
-            ...(current ? { expectedDigest: current.digest } : {}),
-          },
+          payload: input.category === "profile"
+            ? {
+                domain: "memory",
+                category: "profile",
+                id: "profile",
+                scope: memoryScope,
+                meta: toJsonObject(input.meta),
+                content: input.content,
+                ...(current ? { expectedDigest: current.digest } : {}),
+              }
+            : {
+                domain: "people",
+                id: identity.id,
+                scope: memoryScope,
+                meta: {
+                  name: String(input.meta.name ?? input.id),
+                  relation: String(input.meta.relation ?? "unknown"),
+                  ...(typeof input.meta.birthday === "string"
+                    ? { birthday: input.meta.birthday }
+                    : {}),
+                  ...(Array.isArray(input.meta.tags)
+                    ? { tags: input.meta.tags.map(String) }
+                    : {}),
+                },
+                content: input.content,
+                ...(current ? { expectedDigest: current.digest } : {}),
+              },
         },
       });
     },
     async search(query) {
-      return readMemorySearch(memoryScope, "memory", query, 20);
+      const limit = 20;
+      const candidates = [
+        ...(await readMemorySearch(memoryScope, "memory", query, limit)),
+        ...(await readMemorySearch(memoryScope, "people", query, limit)),
+      ];
+      return [...new Map(candidates.map((entry) => [memoryLogicalEntryKey(entry), entry])).values()]
+        .sort(compareMemoryLogicalEntries)
+        .slice(0, limit);
     },
     list: (category) => readMemoryEntries(memoryScope, category),
     async delete(input) {
+      const identity = canonicalMemoryIdentity(
+        input.category === "profile"
+          ? { domain: "memory", category: "profile", id: input.id }
+          : { domain: "people", id: input.id },
+      );
       const entries = await readMemoryEntries(memoryScope, input.category);
       const current = entries.find((entry) => entry.id === input.id);
       if (!current) return false;
@@ -829,9 +865,7 @@ export async function createAgentRuntime(
         mutation: {
           kind: "memory-delete",
           scope: memoryScope,
-          domain: "memory",
-          category: input.category,
-          id: input.id,
+          ...identity,
           expectedDigest: current.digest,
         },
       });
@@ -1283,6 +1317,13 @@ export async function createAgentRuntime(
       write: async (extraction, operationId) => {
         const mutations = requireAssignmentMutations();
         const category = extraction.category;
+        canonicalMemoryIdentity(
+          category === "profile"
+            ? { domain: "memory", category: "profile", id: extraction.id }
+            : category === "person"
+              ? { domain: "people", id: extraction.id }
+              : { domain: "journal", id: extraction.id },
+        );
         const current = category === "journal"
           ? undefined
           : (await readMemoryEntries(memoryScope, category))
@@ -1329,7 +1370,7 @@ export async function createAgentRuntime(
                     domain: "memory",
                     ...common,
                     category: "profile",
-                    id: extraction.id,
+                    id: "profile",
                     meta: toJsonObject(extraction.meta),
                     ...(current ? { expectedDigest: current.digest } : {}),
                   },
@@ -2346,12 +2387,11 @@ async function readMemoryEntries(
   category: "profile" | "person" | "journal",
 ): Promise<readonly MemoryLogicalEntry[]> {
   const domain = memoryDomainForCategory(category);
-  const result = await requireGlobalQuery().read({
-    kind: "memory-list",
-    scope,
-    domain,
-    ...(domain === "memory" ? { category } : {}),
-  });
+  const result = await requireGlobalQuery().read(
+    domain === "memory"
+      ? { kind: "memory-list", scope, domain, category: "profile" }
+      : { kind: "memory-list", scope, domain },
+  );
   if (result.kind !== "memory-list") {
     throw new Error("Memory list returned another result type");
   }

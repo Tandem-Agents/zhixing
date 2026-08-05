@@ -211,9 +211,8 @@ describe("assignment memory search overlay", () => {
       content: string,
       updatedAt: string,
     ): MemoryLogicalEntry => ({
-      domain: "memory",
+      domain: "people",
       scope: { kind: "personal" },
-      category: "profile",
       id,
       meta: {},
       content,
@@ -235,9 +234,8 @@ describe("assignment memory search overlay", () => {
         mutation: {
           kind: "memory-append",
           payload: {
-            domain: "memory",
+            domain: "people",
             scope: { kind: "personal" },
-            category: "profile",
             id: "a",
             meta: {},
             content: "no longer relevant",
@@ -253,8 +251,7 @@ describe("assignment memory search overlay", () => {
         mutation: {
           kind: "memory-delete",
           scope: { kind: "personal" },
-          domain: "memory",
-          category: "profile",
+          domain: "people",
           id: "b",
           expectedDigest: base[1]!.digest,
         },
@@ -267,9 +264,8 @@ describe("assignment memory search overlay", () => {
         mutation: {
           kind: "memory-append",
           payload: {
-            domain: "memory",
+            domain: "people",
             scope: { kind: "personal" },
-            category: "profile",
             id: "d",
             meta: {},
             content: "needle newest",
@@ -280,7 +276,7 @@ describe("assignment memory search overlay", () => {
 
     expect(resolveMemorySearchOverlay(base, records, {
       scope: { kind: "personal" },
-      domain: "memory",
+      domain: "people",
       query: "needle",
       limit: 2,
     }).map((item) => item.id)).toEqual(["d", "c"]);

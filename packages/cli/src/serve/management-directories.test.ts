@@ -35,6 +35,7 @@ describe("createMemoryDirectory", () => {
         }],
         stats: { hotCount: 2, warmCount: 1, condensedCount: 3, totalFiles: 6 },
       })),
+      latestNotice: vi.fn(async () => null),
     };
     const directory = createMemoryDirectory({
       globalState: () => state as unknown as GlobalStatePort,
@@ -48,6 +49,7 @@ describe("createMemoryDirectory", () => {
       stats: { hotCount: 2, warmCount: 1, condensedCount: 3, totalFiles: 6 },
       condense: { months: 1, files: 1 },
       expiredCount: 1,
+      maintenance: null,
     });
     expect(reads.map(({ query }) => query)).toEqual([
       {

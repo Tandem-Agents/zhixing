@@ -508,7 +508,11 @@ export interface SchedulerUserNotice {
   readonly noticeId: string;
   /** Authority commit LSN; the scalar server.info continuation cursor. */
   readonly revision: number;
-  readonly kind: "missed-summary" | "capability-gap" | "publish-result";
+  readonly kind:
+    | "missed-summary"
+    | "capability-gap"
+    | "publish-result"
+    | "journal-maintenance";
   readonly state: "prepared" | "open" | "updated" | "closed";
   readonly ref:
     | {
@@ -529,6 +533,14 @@ export interface SchedulerUserNotice {
         readonly assignmentId: string;
         readonly seq: number;
         readonly decision: "conflicted" | "applied";
+      }
+    | {
+        readonly kind: "journal-maintenance";
+        readonly planDigest: Digest;
+        readonly monthCount: number;
+        readonly fileCount: number;
+        readonly attempt: number;
+        readonly completed: number;
       };
   readonly reason: string;
   readonly actions: readonly string[];
