@@ -19,6 +19,7 @@ import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { getMemoryDir } from "./types.js";
 import type { JsonValue } from "../contracts/index.js";
 import type { Digest } from "../types/distributed.js";
+import { isSubstantiveJournalContent } from "./canonical-identity.js";
 
 // ─── 类型 ───
 
@@ -147,6 +148,10 @@ export function planJournalLifecycle(
   )) {
     const entry = structuredClone(source);
     assertJournalLifecycleEntry(entry, seenIds);
+    if (!isSubstantiveJournalContent(entry.content)) {
+      expired.push(entry);
+      continue;
+    }
     const phase = classifyJournalPhase(entry.id, entry.meta, now, config);
     if (entry.meta.condensed === true) {
       targets.set(journalDate(entry), entry);

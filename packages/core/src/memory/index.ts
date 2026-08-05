@@ -22,9 +22,11 @@ export type {
 export {
   assertMemoryStorageIdentity,
   assertSafePersonId,
+  assertSubstantiveJournalContent,
   canonicalMemoryIdentity,
   isCalendarDay,
   isCalendarMonth,
+  isSubstantiveJournalContent,
 } from "./canonical-identity.js";
 export type { MemoryCanonicalIdentity } from "./canonical-identity.js";
 export { getMemoryDir } from "./types.js";

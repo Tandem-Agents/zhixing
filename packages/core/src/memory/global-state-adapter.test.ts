@@ -1,20 +1,17 @@
 import path from "node:path";
-import { mkdir, rm, unlink } from "node:fs/promises";
+import { mkdir, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
 import type {
   GlobalControlCallContext,
   GlobalReadCallContext,
   GlobalStagedMutation,
 } from "../contracts/index.js";
-import { protocolDigest } from "../protocol/index.js";
 import { MemoryStore } from "./memory-store.js";
 import { AnchorMemoryGlobalStateAdapter } from "./global-state-adapter.js";
-import {
-  memoryLogicalEntryKey,
-  projectMemoryLogicalEntry,
-} from "./logical-entry.js";
+import { stringifyFrontmatter } from "./frontmatter.js";
+import { projectMemoryLogicalEntry } from "./logical-entry.js";
 import type { MemoryScopeRef } from "./contracts.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
@@ -97,6 +94,8 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
     ).resolves.toMatchObject([{ id: "2026-08-02", content: "workscene journal" }]);
 
     const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.filter((record) => record.body.t === "memory-legacy-cutover-started"))
+      .toHaveLength(1);
     expect(records.filter((record) => record.body.t === "memory-legacy-cutover")).toHaveLength(1);
     expect(records.filter((record) => record.body.t === "memory-mutation-applied"))
       .toHaveLength(6);
@@ -156,44 +155,11 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
 
   it("resumes a partially acknowledged legacy import without duplicating authority facts", async () => {
     const fixture = await createFixture();
-    const importedPayload = {
-      domain: "people" as const,
-      scope: { kind: "personal" as const },
-      id: "alice",
-      meta: { name: "Alice", relation: "friend" },
-      content: "already committed before the response was lost",
-    };
-    const importedEntry = projectMemoryLogicalEntry(
-      importedPayload,
-      undefined,
-      { revision: 1 },
-    );
-    const logicalKey = memoryLogicalEntryKey(importedEntry);
-    const requestId = `memory-legacy-import:${protocolDigest(
-      "MemoryLegacyImportRequest",
-      1,
-      { logicalKey },
-    ).slice("sha256:".length)}`;
-    await fixture.log.append([{
-      stream: "intent:memory-authority",
-      body: {
-        t: "memory-mutation-applied",
-        requestId,
-        mutationDigest: protocolDigest("MemoryLegacyImport", 1, {
-          logicalKey,
-          entry: importedEntry,
-        }),
-        mutation: { kind: "memory-append", payload: importedPayload },
-        revision: 1,
-        entry: importedEntry,
-        at: NOW,
-      },
-    }]);
     await fixture.store.save({
       category: "person",
       id: "alice",
-      meta: importedPayload.meta,
-      content: importedPayload.content,
+      meta: { name: "Alice", relation: "friend" },
+      content: "committed before the response was lost",
     });
     await fixture.store.save({
       category: "person",
@@ -202,10 +168,39 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
       content: "not imported yet",
     });
 
-    await fixture.adapter.initializeStagedPublishing();
+    const transact = fixture.log.transactDurableProjection.bind(fixture.log);
+    let lost = false;
+    const spy = vi.spyOn(fixture.log, "transactDurableProjection").mockImplementation(
+      async (...args: Parameters<typeof transact>) => {
+        const result = await transact(...args);
+        const imports = (await fixture.log.readAll())
+          .flatMap((commit) => commit.entries)
+          .filter((entry) =>
+            entry.body.t === "memory-mutation-applied" &&
+            String(entry.body.requestId).startsWith("memory-legacy-import:")
+          );
+        if (!lost && imports.length === 1) {
+          lost = true;
+          throw new Error("legacy import response lost");
+        }
+        return result;
+      },
+    );
+    await expect(fixture.adapter.initializeStagedPublishing()).rejects.toThrow(
+      "legacy import response lost",
+    );
+    spy.mockRestore();
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+
+    await reopened.initializeStagedPublishing();
 
     await expect(
-      readEntries(fixture.adapter, { kind: "personal" }, "people"),
+      readEntries(reopened, { kind: "personal" }, "people"),
     ).resolves.toMatchObject([
       { id: "alice", revision: 1 },
       { id: "bob", revision: 1 },
@@ -213,8 +208,231 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
     const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
     expect(records.filter((record) => record.body.t === "memory-mutation-applied"))
       .toHaveLength(2);
+    expect(records.filter((record) => record.body.t === "memory-legacy-cutover-started"))
+      .toHaveLength(1);
     expect(records.filter((record) => record.body.t === "memory-legacy-cutover"))
       .toHaveLength(1);
+  });
+
+  it("maps nested legacy identities deterministically and aggregates journal collisions", async () => {
+    const fixture = await createFixture();
+    const peopleRoot = path.join(fixture.root, "memory", "people", "team");
+    const journalRoot = path.join(fixture.root, "memory", "journal", "archive");
+    await mkdir(peopleRoot, { recursive: true });
+    await mkdir(journalRoot, { recursive: true });
+    await writeFile(
+      path.join(peopleRoot, "Alice.md"),
+      stringifyFrontmatter(
+        { name: "Alice", relation: "teammate" },
+        "nested person",
+      ),
+      "utf-8",
+    );
+    await writeFile(
+      path.join(journalRoot, "first.md"),
+      stringifyFrontmatter({ date: "2026-07-01" }, "first source"),
+      "utf-8",
+    );
+    await writeFile(
+      path.join(journalRoot, "second.md"),
+      stringifyFrontmatter({ date: "2026-07-01" }, "second source"),
+      "utf-8",
+    );
+
+    await fixture.adapter.initializeStagedPublishing();
+
+    const people = await readEntries(
+      fixture.adapter,
+      { kind: "personal" },
+      "people",
+    );
+    expect(people).toHaveLength(1);
+    expect(people[0]).toMatchObject({
+      id: expect.stringMatching(/^legacy-[a-f0-9]{40}$/u),
+      content: "nested person",
+      meta: {
+        name: "Alice",
+        relation: "teammate",
+        legacySourceManifest: expect.stringContaining('"originalId":"team/Alice"'),
+      },
+    });
+    const journal = await readEntries(
+      fixture.adapter,
+      { kind: "personal" },
+      "journal",
+    );
+    expect(journal).toHaveLength(1);
+    expect(journal[0]).toMatchObject({
+      id: "2026-07-01",
+      content: "first source\n\n---\n\nsecond source",
+      meta: {
+        legacySourceManifest: expect.stringMatching(
+          /"originalId":"archive\/first".*"originalId":"archive\/second"/u,
+        ),
+      },
+    });
+  });
+
+  it("freezes file mtime as the fallback identity for a legacy journal without a date", async () => {
+    const fixture = await createFixture();
+    const journalRoot = path.join(fixture.root, "memory", "journal", "archive");
+    const source = path.join(journalRoot, "undated.md");
+    await mkdir(journalRoot, { recursive: true });
+    await writeFile(source, stringifyFrontmatter({}, "legacy note"), "utf-8");
+    await utimes(
+      source,
+      new Date("2026-06-15T12:00:00.000Z"),
+      new Date("2026-06-15T12:00:00.000Z"),
+    );
+
+    await fixture.adapter.initializeStagedPublishing();
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([{
+      id: "2026-06-15",
+      content: "legacy note",
+      meta: {
+        legacySourceManifest: expect.stringContaining('"originalId":"archive/undated"'),
+      },
+    }]);
+  });
+
+  it("fails closed when a frozen physical source set changes before terminal cutover", async () => {
+    const fixture = await createFixture();
+    for (const id of ["alice", "bob"]) {
+      await fixture.store.save({
+        category: "person",
+        id,
+        meta: { name: id, relation: "friend" },
+        content: id,
+      });
+    }
+    const transact = fixture.log.transactDurableProjection.bind(fixture.log);
+    let lost = false;
+    const spy = vi.spyOn(fixture.log, "transactDurableProjection").mockImplementation(
+      async (...args: Parameters<typeof transact>) => {
+        const result = await transact(...args);
+        const imports = (await fixture.log.readAll())
+          .flatMap((commit) => commit.entries)
+          .filter((entry) => entry.body.t === "memory-mutation-applied");
+        if (!lost && imports.length === 1) {
+          lost = true;
+          throw new Error("response lost after import");
+        }
+        return result;
+      },
+    );
+    await expect(fixture.adapter.initializeStagedPublishing()).rejects.toThrow(
+      "response lost after import",
+    );
+    spy.mockRestore();
+    await unlink(path.join(fixture.root, "memory", "people", "bob.md"));
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+
+    await expect(reopened.initializeStagedPublishing()).rejects.toThrow(
+      "Legacy memory sources changed after cutover started",
+    );
+    const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.some((entry) => entry.body.t === "memory-legacy-cutover"))
+      .toBe(false);
+  });
+
+  it.each([
+    "memory-legacy-cutover-started",
+    "memory-legacy-cutover",
+  ] as const)("replays the same cutover generation when the %s response is lost", async (type) => {
+    const fixture = await createFixture();
+    await fixture.store.save({
+      category: "person",
+      id: "alice",
+      meta: { name: "Alice", relation: "friend" },
+      content: "legacy person",
+    });
+    const transact = fixture.log.transactDurableProjection.bind(fixture.log);
+    let lost = false;
+    const spy = vi.spyOn(fixture.log, "transactDurableProjection").mockImplementation(
+      async (...args: Parameters<typeof transact>) => {
+        const result = await transact(...args);
+        const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+        if (!lost && records.some((entry) => entry.body.t === type)) {
+          lost = true;
+          throw new Error(`${type} response lost`);
+        }
+        return result;
+      },
+    );
+    await expect(fixture.adapter.initializeStagedPublishing()).rejects.toThrow(
+      `${type} response lost`,
+    );
+    spy.mockRestore();
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+
+    await reopened.initializeStagedPublishing();
+
+    const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.filter((entry) => entry.body.t === "memory-legacy-cutover-started"))
+      .toHaveLength(1);
+    expect(records.filter((entry) => entry.body.t === "memory-mutation-applied"))
+      .toHaveLength(1);
+    expect(records.filter((entry) => entry.body.t === "memory-legacy-cutover"))
+      .toHaveLength(1);
+  });
+
+  it("does not follow links found below a legacy owned root", async () => {
+    const fixture = await createFixture();
+    const outside = path.join(fixture.root, "outside");
+    const people = path.join(fixture.root, "memory", "people");
+    await mkdir(outside, { recursive: true });
+    await mkdir(people, { recursive: true });
+    await writeFile(
+      path.join(outside, "secret.md"),
+      stringifyFrontmatter({ name: "Secret", relation: "unknown" }, "outside"),
+      "utf-8",
+    );
+    try {
+      await symlink(outside, path.join(people, "linked"), "junction");
+    } catch (error) {
+      if ((error as { code?: string }).code === "EPERM") return;
+      throw error;
+    }
+
+    await expect(fixture.adapter.initializeStagedPublishing()).rejects.toThrow(
+      "symbolic links",
+    );
+    const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.some((entry) => entry.body.t === "memory-legacy-cutover-started"))
+      .toBe(false);
+  });
+
+  it("imports an owned legacy filename beginning with dots without treating it as an escape", async () => {
+    const fixture = await createFixture();
+    const people = path.join(fixture.root, "memory", "people");
+    await mkdir(people, { recursive: true });
+    await writeFile(
+      path.join(people, "..alice.md"),
+      stringifyFrontmatter({ name: "Alice", relation: "friend" }, "legacy"),
+      "utf-8",
+    );
+
+    await fixture.adapter.initializeStagedPublishing();
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "people"),
+    ).resolves.toMatchObject([{
+      id: expect.stringMatching(/^legacy-[a-f0-9]{40}$/u),
+      content: "legacy",
+    }]);
   });
 
   it("records an empty cutover so legacy files created later stay out of authority", async () => {
@@ -273,6 +491,56 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
       revision: 2,
       content: "legacy morning\n\n---\n\nauthority afternoon",
     }]);
+  });
+
+  it("imports blank legacy daily and monthly journals for authority cleanup", async () => {
+    const fixture = await createFixture();
+    await fixture.store.save({
+      category: "journal",
+      id: "2026-06-01",
+      meta: { date: "2026-06-01" },
+      content: " \n\t ",
+    });
+    await fixture.store.save({
+      category: "journal",
+      id: "2026-06",
+      meta: { date: "2026-06", condensed: true },
+      content: "",
+    });
+
+    await fixture.adapter.initializeStagedPublishing();
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([
+      { id: "2026-06", content: "", meta: { condensed: true } },
+      { id: "2026-06-01", content: "" },
+    ]);
+  });
+
+  it("rejects blank journal writes at both staged and control authority boundaries", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initializeStagedPublishing();
+    const mutation = {
+      kind: "memory-append" as const,
+      payload: {
+        domain: "journal" as const,
+        scope: { kind: "personal" as const },
+        date: "2026-08-04",
+        content: " \n\t ",
+      },
+    };
+
+    await expect(fixture.adapter.mutate(
+      mutation,
+      controlContext("blank-control-journal"),
+    )).rejects.toThrow("non-whitespace");
+    await expect(prepareStaged(fixture, {
+      records: [{ seq: 1, requestId: "blank-staged-journal", mutation }],
+    })).rejects.toThrow("non-whitespace");
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toEqual([]);
   });
 
   it("fails closed before the cutover marker when a legacy source cannot be read", async () => {

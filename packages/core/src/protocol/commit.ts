@@ -14,6 +14,7 @@ import { validateJobCommitFence } from "./job.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
 import {
+  assertSubstantiveJournalContent,
   canonicalMemoryIdentity,
   isCalendarDay,
 } from "../memory/canonical-identity.js";
@@ -718,6 +719,7 @@ function validateMemoryAppend(payload: unknown): void {
       );
       validateMemoryScope(payload.scope);
       assertString(payload.content, "Journal content");
+      assertSubstantiveJournalContent(payload.content);
       if (
         payload.date !== undefined &&
         (typeof payload.date !== "string" || !isCalendarDay(payload.date))

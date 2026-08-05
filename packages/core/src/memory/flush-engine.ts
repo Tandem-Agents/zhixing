@@ -22,7 +22,10 @@ import {
   splitMessagesPairAware,
 } from "../context/message-turns.js";
 import { MemoryStore, type MemoryCategory } from "./memory-store.js";
-import { canonicalMemoryIdentity } from "./canonical-identity.js";
+import {
+  assertSubstantiveJournalContent,
+  canonicalMemoryIdentity,
+} from "./canonical-identity.js";
 
 // ─── 类型 ───
 
@@ -250,6 +253,9 @@ export function parseExtractions(raw: string): FlushExtraction[] {
             ? { domain: "people", id: obj.id }
             : { domain: "journal", id: obj.id },
       );
+      if (obj.category === "journal") {
+        assertSubstantiveJournalContent(obj.content);
+      }
       return true;
     } catch {
       return false;

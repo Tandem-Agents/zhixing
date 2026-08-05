@@ -1684,7 +1684,11 @@ staged 写按序落 executor 域 log（`staged-mutation` 记录），run 内经�
 
 global staged 的 schedule、memory、skill 与 workscene 统一由锚点 `GlobalMutationCommitCoordinator` 在持有 AuthorityCommitLog 写锁时处理：固定顺序追平四域耐久 read-view，纯规划全部 outcome 与 projection delta，全部准备成功后才以一个 CommitEnvelope / 单次 fsync 提交；fsync 成功即标记 committed、安装已预计算的 tail 并同步发布四域主读投影，此后不得再执行 stat、metadata 或其他可失败 I/O。control 写保留独立产品入口，但复用同一日志栅栏和域 reducer。兼容文件、删除清理与 runtime refresh 是由权威记录和逐域耐久 checkpoint 驱动的派生物化，前台只唤醒，失败不得形成“未提交”假阴性，启动按 pending 有界续扫。
 
-旧 memory 文件的接管发生在 workscene 迁移完成之后、新权威业务写开放之前。锚点严格读取 personal 与全部现存 workscene 的 profile / people / journal，按稳定 import request 和完整内容摘要把尚未 seen 的逻辑键写入同一 memory 权威日志；seen-key 在删除后仍保留。全部来源写入后，以同一日志中的唯一 `memory-legacy-cutover` 终态绑定 scope 集与来源集摘要，空来源也必须落终态。读取错误或同 request 内容漂移 fail-closed；崩溃只重放未完成导入。cutover 后永久禁止 legacy 合并、补导和旧文件复活，不得另建 sidecar checkpoint。
+旧 memory 文件的接管发生在 workscene 迁移完成之后、新权威业务写开放之前。锚点以 no-follow 方式递归读取 personal 与全部现存 workscene 的 owned root，只接纳普通 `.md`；symlink、reparse、越根或读取中变化均 fail-closed。平台不提供 `O_NOFOLLOW` 时，正文读取前仍须以最终 `realpath` containment 和已打开句柄的文件身份反绑消除路径替换窗口。版本化纯 mapper 以 `scope + category + relativePath` 建立稳定物理 source identity：合法新身份原样保留，其他 person 映射为稳定 legacy slug；journal 依次采用与 condensed 标志一致的合法文件身份、合法 frontmatter 日期或冻结 mtime 日期；同目标源按物理身份排序聚合并保留来源身份、元数据与正文，新 canonical 合同不得放宽。
+
+任何目标导入前，锚点先在同一 memory 权威日志写唯一 `memory-legacy-cutover-started`，绑定 mapper version、scope 集、完整物理 source manifest、import plan 摘要及目标数。每个稳定 import request 反绑该 cutover generation 与计划目标；重启时当前扫描必须与 started 全等，否则 fail-stop。terminal 事务逐项核验相同 request 或既有 seen-key 后，才写反绑同一 started 的唯一 `memory-legacy-cutover`；空来源同样落 started 与 terminal。seen-key 在删除后保留，started/import/terminal 的响应丢失只重放同一代际。terminal 后永久禁止 legacy 合并、补导和旧文件复活，不得另建 sidecar checkpoint 或第二事实源。
+
+journal 的生产 append、wire codec、staged/control normalizer 与 host 凝练共用“正文 trim 后非空”的唯一谓词；新空白 daily/monthly 写在任何副作用前拒绝。cutover 导入的既存空白 daily/monthly 由 path-free lifecycle planner 直接规划为 digest-bound authority delete，不进入付费凝练计划、不产生凝练 notice；混合月份只把非空白来源交给模型，权威删除、notice 与重启恢复按实际效果推进。
 
 job owner 在 committed envelope 内把 `publish-decision + MutationBatch` 反绑为按 `(taskId,assignmentId)` 定位的 pending 事实，并以 `publish-progress` 逐 seq 推进；唯一 drain 随锚点 scheduler `start / wake / stop` 管理，按全局 pending 索引公平分页，无需等待新任务即可对暂态失败做有界退避重驱。恢复不扫描任务全历史，只重驱 granted 且仍需外部物化的 global 项，conflicted、delivery-enqueue 与已随 fsync 完成的主投影零 apply；结构损坏或合同坏账必须可见并 fail-stop。物化成功但 progress 响应丢失、owner 连续重启或 executor 离线均回放同一幂等域 driver，settled 后移除 pending；stop 先阻止新唤醒并等待当前 drain 收束，返回后零后台任务。
 

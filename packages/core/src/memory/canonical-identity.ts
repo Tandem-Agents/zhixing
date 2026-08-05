@@ -61,6 +61,16 @@ export function isCalendarMonth(value: string): boolean {
   return CALENDAR_MONTH.test(value);
 }
 
+export function isSubstantiveJournalContent(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function assertSubstantiveJournalContent(value: unknown): asserts value is string {
+  if (!isSubstantiveJournalContent(value)) {
+    throw new TypeError("Journal content must contain non-whitespace text");
+  }
+}
+
 export function assertMemoryStorageIdentity(
   category: "profile" | "person" | "journal",
   id: string,

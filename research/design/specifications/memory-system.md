@@ -310,7 +310,7 @@ Journal 是三支柱之外的**第四个存储区**，但它的本质与三支�
 
 #### 生命周期执行机制
 
-> **当前权威实现（覆盖下方早期文件路径示意）**：生产身份只允许 `memory/profile/profile`、`people/<safe-slug>` 与 `journal/<real-calendar-day>`；内部月摘要只由 host lifecycle 使用真实月份生成。producer、codec、planner、overlay、GlobalQuery 与 MemoryStore 末端共用同一 canonicalizer/validator，非法组合、日历或路径在任何副作前拒绝。lifecycle planner 只消费 path-free authority DTO；turn 完成与 `__journal-gc` 复用同一个 anchor-only、触发源无关且 single-flight 的 journal service。过期由 digest-bound authority delete 完成；月度凝练在一个 control-only authority 事务中全量 CAS、原子替换摘要并删除来源。Markdown 只由 anchor materializer 从权威 delta 派生，全部 save/delete 效果耐久全等后才确认 checkpoint；失败保留 pending 并在重启后重驱。下方文件扫描、文件锁和直接删写描述仅保留为旧实现沿革，不再定义生产语义。
+> **当前权威实现（覆盖下方早期文件路径示意）**：生产身份只允许 `memory/profile/profile`、`people/<safe-slug>` 与 `journal/<real-calendar-day>`；内部月摘要只由 host lifecycle 使用真实月份生成。producer、codec、planner、overlay、GlobalQuery 与 MemoryStore 末端共用同一 canonicalizer/validator，非法组合、日历或路径在任何副作用前拒绝；journal 正文还必须 trim 后非空。lifecycle planner 只消费 path-free authority DTO；既存空白 daily/monthly 直接进入 digest-bound 删除，不调用模型、不产生凝练 notice；混合月份只凝练非空白来源。turn 完成与 `__journal-gc` 复用同一个 anchor-only、触发源无关且 single-flight 的 journal service。月度凝练在一个 control-only authority 事务中全量 CAS、原子替换摘要并删除来源。Markdown 只由 anchor materializer 从权威 delta 派生，全部 save/delete 效果耐久全等后才确认 checkpoint；失败保留 pending 并在重启后重驱。下方文件扫描、文件锁和直接删写描述仅保留为旧实现沿革，不再定义生产语义。
 >
 > 月度凝练的每次付费 provider 调用前，服务必须先在现有 `SchedulerUserNoticeJournal` 中耐久写入同一 plan/attempt 的 `journal-maintenance` notice。成功、失败、重试、响应丢失与重启在同一 noticeId 上单调收敛；组合根唯一管理 start/wake/stop，live/history、CLI 和 `/journal` 共用该事实。零计划不写 notice，不可因双触发或连续重启重复计费或重复呈现。
 
@@ -704,7 +704,7 @@ interface MemoryToolInput {
 
 ### 6.3 数据可控性与派生文件
 
-memory cutover 后，用户通过对话 memory 工具和管理入口修改权威记忆；`~/.zhixing/me/` 下的 Markdown 是可读、可备份的兼容投影，不再反向导入手工编辑。旧文件仅在首次 cutover 前无损导入一次。这样既保留数据可读与可迁移性，也避免用户界面、Agent 检索和 lifecycle maintenance 观察到不同事实。
+memory cutover 后，用户通过对话 memory 工具和管理入口修改权威记忆；`~/.zhixing/me/` 下的 Markdown 是可读、可备份的兼容投影，不再反向导入手工编辑。首次 cutover 以同一权威日志中的 started→imports→terminal 代际完成：started 在导入前冻结 mapper 版本、两类 scope 的 owned-root 物理 source manifest 与 import plan；读取只递归普通 `.md` 且绝不跟随链接，在缺少 `O_NOFOLLOW` 的平台也会于读取正文前反绑最终路径与已打开文件身份；旧非 canonical identity 由版本化纯 mapper 确定性映射并保留来源证据，同目标源稳定聚合。重启只续跑与 started 全等的同一计划，源增删、重映射或越根均 fail-stop；terminal 逐目标核验后关闭旧读面。这样既保证根内旧数据无损可追溯，也避免用户界面、Agent 检索和 lifecycle maintenance 观察到不同事实。
 
 ## 七、"越用越聪明" 的演进路径
 

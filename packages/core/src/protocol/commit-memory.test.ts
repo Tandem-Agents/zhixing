@@ -62,6 +62,10 @@ describe("staged memory canonical identity", () => {
       payload: { domain: "journal", scope, date: "2025-02-29", content: "bad day" },
     },
     {
+      kind: "memory-append",
+      payload: { domain: "journal", scope, date: "2026-08-05", content: " \n\t " },
+    },
+    {
       kind: "memory-delete",
       scope,
       domain: "memory",

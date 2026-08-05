@@ -225,4 +225,45 @@ describe("planJournalLifecycle", () => {
     expect(() => planJournalLifecycle([{ ...valid, meta: { date: "2026-06-02" } }]))
       .toThrow("entry is invalid");
   });
+
+  it("routes blank daily and monthly facts to deletion without polluting paid plans", () => {
+    const blankDaily = {
+      id: "2026-06-01",
+      meta: { date: "2026-06-01" },
+      content: " \n\t ",
+      digest: `sha256:${"2".repeat(64)}` as const,
+    };
+    const validDaily = {
+      id: "2026-06-02",
+      meta: { date: "2026-06-02" },
+      content: "real journal entry",
+      digest: `sha256:${"3".repeat(64)}` as const,
+    };
+    const blankMonthly = {
+      id: "2026-05",
+      meta: { date: "2026-05", condensed: true },
+      content: "",
+      digest: `sha256:${"4".repeat(64)}` as const,
+    };
+
+    const plan = planJournalLifecycle(
+      [blankDaily, validDaily, blankMonthly],
+      { now: new Date("2026-08-05T00:00:00.000Z") },
+    );
+
+    expect(plan.expired.map((entry) => entry.id)).toEqual([
+      "2026-05",
+      "2026-06-01",
+    ]);
+    expect(plan.condense).toMatchObject([{
+      month: "2026-06",
+      sources: [{ id: "2026-06-02", content: "real journal entry" }],
+    }]);
+    expect(plan.stats).toEqual({
+      hotCount: 0,
+      warmCount: 1,
+      condensedCount: 0,
+      totalFiles: 3,
+    });
+  });
 });

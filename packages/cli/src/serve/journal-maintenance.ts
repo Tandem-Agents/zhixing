@@ -215,9 +215,7 @@ export function createAnchorJournalMaintenance(deps: {
         const month = authorityPlan.condense[offset]!;
         const combined = month.sources
           .map((source) => source.content)
-          .filter(Boolean)
           .join("\n\n---\n\n");
-        if (!combined) continue;
         attempt++;
         await record(binding.notices, plan, {
           state: "open",

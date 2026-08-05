@@ -7,6 +7,8 @@
  */
 
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import type { Stats } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
@@ -26,6 +28,12 @@ export interface MemoryEntry {
   content: string;
   /** 文件完整路径 */
   filePath: string;
+}
+
+export interface LegacyMemoryEntry extends MemoryEntry {
+  /** Stable path relative to the owned memory root. */
+  sourceIdentity: string;
+  modifiedAt: string;
 }
 
 export interface SaveOptions {
@@ -175,12 +183,17 @@ export class MemoryStore {
   }
 
   /** Reads the frozen legacy source without converting I/O failures into absence. */
-  async readAuthorityTakeoverSnapshot(): Promise<MemoryEntry[]> {
-    const profile = await this.loadStrict("profile", "profile");
+  async readAuthorityTakeoverSnapshot(): Promise<LegacyMemoryEntry[]> {
+    const profile = await this.readLegacyFile(
+      "profile",
+      "profile",
+      path.join(this.baseDir, "profile.md"),
+      "profile.md",
+    );
     return [
       ...(profile ? [profile] : []),
-      ...(await this.listStrict("person")),
-      ...(await this.listStrict("journal")),
+      ...(await this.readLegacyTree("person")),
+      ...(await this.readLegacyTree("journal")),
     ];
   }
 
@@ -207,47 +220,150 @@ export class MemoryStore {
     return target;
   }
 
-  private async loadStrict(
+  private async readLegacyTree(
+    category: "person" | "journal",
+  ): Promise<LegacyMemoryEntry[]> {
+    const ownedRoot = path.resolve(this.categoryDir(category));
+    const entries: LegacyMemoryEntry[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      const resolved = path.resolve(directory);
+      if (resolved !== ownedRoot && !resolved.startsWith(`${ownedRoot}${path.sep}`)) {
+        throw new Error("Legacy memory source escaped its owned root");
+      }
+      let directoryStat;
+      try {
+        directoryStat = await fs.lstat(resolved);
+      } catch (error) {
+        if (resolved === ownedRoot && isMissingPath(error)) return;
+        throw error;
+      }
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+        throw new Error("Legacy memory owned root contains an unsafe directory entry");
+      }
+      const children = await fs.readdir(resolved, { withFileTypes: true });
+      for (const child of children.sort((left, right) =>
+        left.name.localeCompare(right.name, "en-US")
+      )) {
+        const childPath = path.resolve(resolved, child.name);
+        if (!childPath.startsWith(`${ownedRoot}${path.sep}`)) {
+          throw new Error("Legacy memory source escaped its owned root");
+        }
+        if (child.isSymbolicLink()) {
+          throw new Error("Legacy memory source must not contain symbolic links");
+        }
+        if (child.isDirectory()) {
+          await visit(childPath);
+          continue;
+        }
+        if (!child.isFile() || !child.name.endsWith(".md")) continue;
+        const relative = path.relative(ownedRoot, childPath);
+        const id = relative.slice(0, -3).split(path.sep).join("/");
+        const sourceIdentity = `${category === "person" ? "people" : "journal"}/${relative
+          .split(path.sep)
+          .join("/")}`;
+        const entry = await this.readLegacyFile(
+          category,
+          id,
+          childPath,
+          sourceIdentity,
+        );
+        if (!entry) {
+          throw new Error("Legacy memory changed while its source set was frozen");
+        }
+        entries.push(entry);
+      }
+    };
+    await visit(ownedRoot);
+    return entries;
+  }
+
+  private async readLegacyFile(
     category: MemoryCategory,
     id: string,
-  ): Promise<MemoryEntry | null> {
-    const filePath = this.resolvePath(category, id);
-    let raw: string;
+    filePath: string,
+    sourceIdentity: string,
+  ): Promise<LegacyMemoryEntry | null> {
+    const ownedRoot = path.resolve(this.categoryDir(category));
+    let pathStat: Stats;
+    let resolvedSource: string;
+    let resolvedRoot: string;
     try {
-      raw = await fs.readFile(filePath, "utf-8");
+      [pathStat, resolvedSource, resolvedRoot] = await Promise.all([
+        fs.lstat(filePath),
+        fs.realpath(filePath),
+        fs.realpath(ownedRoot),
+      ]);
     } catch (error) {
       if (isMissingPath(error)) return null;
       throw error;
     }
-    const parsed = parseFrontmatter(raw);
-    return {
-      category,
-      id,
-      meta: parsed.data as Record<string, unknown>,
-      content: parsed.content,
-      filePath,
-    };
-  }
-
-  private async listStrict(category: MemoryCategory): Promise<MemoryEntry[]> {
-    let files: string[];
+    if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
+      throw new Error("Legacy memory source must be a regular owned file");
+    }
+    assertPathInside(resolvedRoot, resolvedSource);
+    let handle;
     try {
-      files = await fs.readdir(this.categoryDir(category));
+      handle = await fs.open(
+        filePath,
+        fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      );
     } catch (error) {
-      if (isMissingPath(error)) return [];
+      if (isMissingPath(error)) return null;
       throw error;
     }
-    const entries: MemoryEntry[] = [];
-    for (const file of files.sort((left, right) => left.localeCompare(right, "en-US"))) {
-      if (!file.endsWith(".md")) continue;
-      const id = file.slice(0, -3);
-      const entry = await this.loadStrict(category, id);
-      if (!entry) {
+    try {
+      const before = await handle.stat();
+      if (!before.isFile()) {
+        throw new Error("Legacy memory source must be a regular file");
+      }
+      const [openedPathStat, openedSource] = await Promise.all([
+        fs.lstat(filePath),
+        fs.realpath(filePath),
+      ]);
+      if (
+        openedPathStat.isSymbolicLink() ||
+        !openedPathStat.isFile() ||
+        before.dev !== openedPathStat.dev ||
+        before.ino !== openedPathStat.ino
+      ) {
+        throw new Error("Legacy memory source changed before its owned read");
+      }
+      assertPathInside(resolvedRoot, openedSource);
+      const raw = await handle.readFile("utf-8");
+      const after = await handle.stat();
+      if (
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs
+      ) {
         throw new Error("Legacy memory changed while its source set was frozen");
       }
-      entries.push(entry);
+      const parsed = parseFrontmatter(raw);
+      return {
+        category,
+        id,
+        meta: parsed.data as Record<string, unknown>,
+        content: parsed.content,
+        filePath,
+        sourceIdentity,
+        modifiedAt: after.mtime.toISOString(),
+      };
+    } finally {
+      await handle.close();
     }
-    return entries;
+  }
+}
+
+function assertPathInside(root: string, candidate: string): void {
+  const relative = path.relative(root, candidate);
+  if (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("Legacy memory source escaped its owned root");
   }
 }
 

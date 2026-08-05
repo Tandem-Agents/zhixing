@@ -84,6 +84,20 @@ describe("parseExtractions", () => {
     const result = parseExtractions(input);
     expect(result[0]!.meta).toEqual({});
   });
+
+  it("过滤空白 journal 正文", () => {
+    const input = JSON.stringify([
+      { category: "journal", id: "2026-04-10", content: " \n\t " },
+      { category: "journal", id: "2026-04-11", content: "real entry" },
+    ]);
+
+    expect(parseExtractions(input)).toEqual([{
+      category: "journal",
+      id: "2026-04-11",
+      meta: {},
+      content: "real entry",
+    }]);
+  });
 });
 
 // ─── MemoryFlusher（提取核心，触发形态无关）───

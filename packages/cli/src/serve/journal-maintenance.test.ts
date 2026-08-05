@@ -40,6 +40,84 @@ describe("createAnchorJournalMaintenance", () => {
     expect(state.mutate).not.toHaveBeenCalled();
   });
 
+  it("deletes blank daily and monthly facts without a paid call or notice", async () => {
+    const mutations: GlobalControlMutation[] = [];
+    const state = {
+      read: vi.fn(async () => ({
+        kind: "memory-list" as const,
+        entries: [
+          journal("2026-06-01", " \n\t ", digest("1")),
+          journal("2026-06", "", digest("2"), true),
+        ],
+      })),
+      mutate: vi.fn(async (mutation: GlobalControlMutation) => {
+        mutations.push(structuredClone(mutation));
+        return { revision: 1 };
+      }),
+    };
+    const noticeHarness = createNoticeHarness();
+    const callText = vi.fn();
+    const maintenance = createAnchorJournalMaintenance({
+      state: () => state as unknown as GlobalStatePort,
+      anchorEpoch: () => 7,
+      clock: () => new Date("2026-08-05T00:00:00.000Z"),
+    });
+    maintenance.bind({ notices: noticeHarness.notices, callText });
+
+    await maintenance.start();
+    await maintenance.stop();
+
+    expect(callText).not.toHaveBeenCalled();
+    expect(noticeHarness.drafts).toEqual([]);
+    expect(mutations).toMatchObject([
+      { kind: "memory-delete", domain: "journal", id: "2026-06" },
+      { kind: "memory-delete", domain: "journal", id: "2026-06-01" },
+    ]);
+  });
+
+  it("keeps source journals retryable when a paid summary is blank", async () => {
+    const entries = [
+      journal("2026-06-01", "first", digest("1")),
+      journal("2026-06-02", "second", digest("2")),
+    ];
+    const state = {
+      read: vi.fn(async () => ({ kind: "memory-list" as const, entries })),
+      mutate: vi.fn(async (mutation: GlobalControlMutation) => {
+        if (
+          mutation.kind === "memory-journal-condense" &&
+          mutation.summary.trim().length === 0
+        ) {
+          throw new TypeError("Journal content must contain non-whitespace text");
+        }
+        return { revision: 1 };
+      }),
+    };
+    const noticeHarness = createNoticeHarness();
+    const failure = vi.fn();
+    const maintenance = createAnchorJournalMaintenance({
+      state: () => state as unknown as GlobalStatePort,
+      anchorEpoch: () => 7,
+      clock: () => new Date("2026-08-05T00:00:00.000Z"),
+      onError: failure,
+    });
+    maintenance.bind({
+      notices: noticeHarness.notices,
+      callText: vi.fn(async () => " \n\t "),
+    });
+
+    await maintenance.start();
+    await vi.waitFor(() => expect(failure).toHaveBeenCalledOnce());
+    await maintenance.stop();
+
+    expect(state.mutate).toHaveBeenCalledOnce();
+    expect(entries).toHaveLength(2);
+    expect(noticeHarness.drafts.at(-1)).toMatchObject({
+      state: "updated",
+      ref: { completed: 0 },
+    });
+    expect(noticeHarness.drafts.some((draft) => draft.state === "closed")).toBe(false);
+  });
+
   it("persists paid-call intent before invoking the model and shares one lifecycle run", async () => {
     const mutations: GlobalControlMutation[] = [];
     const state = {
