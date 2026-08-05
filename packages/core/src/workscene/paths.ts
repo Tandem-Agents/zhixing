@@ -16,26 +16,32 @@ import path from "node:path";
 import { getZhixingHome, toSafePathSegment } from "../paths.js";
 
 /** 工作场景根目录 `<home>/workscenes`。 */
-export function getWorkScenesRoot(): string {
-  return path.join(getZhixingHome(), "workscenes");
+export function getWorkScenesRoot(zhixingHome = getZhixingHome()): string {
+  return path.join(zhixingHome, "workscenes");
 }
 
 /** 注册表主表文件 `<home>/workscenes/index.json`。 */
-export function getWorkSceneIndexPath(): string {
-  return path.join(getWorkScenesRoot(), "index.json");
+export function getWorkSceneIndexPath(zhixingHome = getZhixingHome()): string {
+  return path.join(getWorkScenesRoot(zhixingHome), "index.json");
 }
 
 /** 单个工作场景目录 `<home>/workscenes/<id>`。 */
-export function getWorkSceneDir(id: string): string {
-  return path.join(getWorkScenesRoot(), toSafePathSegment(id));
+export function getWorkSceneDir(id: string, zhixingHome = getZhixingHome()): string {
+  return path.join(getWorkScenesRoot(zhixingHome), toSafePathSegment(id));
 }
 
 /** 工作场景记忆域根 `<home>/workscenes/<id>/me` —— power runtime 个人记忆域。 */
-export function getWorkSceneMemoryDir(id: string): string {
-  return path.join(getWorkSceneDir(id), "me");
+export function getWorkSceneMemoryDir(
+  id: string,
+  zhixingHome = getZhixingHome(),
+): string {
+  return path.join(getWorkSceneDir(id, zhixingHome), "me");
 }
 
 /** 工作场景会话域根 `<home>/workscenes/<id>/conversations`。 */
-export function getWorkSceneConversationsRoot(id: string): string {
-  return path.join(getWorkSceneDir(id), "conversations");
+export function getWorkSceneConversationsRoot(
+  id: string,
+  zhixingHome = getZhixingHome(),
+): string {
+  return path.join(getWorkSceneDir(id, zhixingHome), "conversations");
 }

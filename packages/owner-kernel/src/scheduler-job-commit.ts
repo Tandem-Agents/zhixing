@@ -15,6 +15,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  CommittedMutationMaterializationError,
   mutationBatchArtifact,
   validateJobMutationBatch,
   validatePublishDecisionForBatch,
@@ -42,6 +43,20 @@ export interface SchedulerJobCommitParticipantOptions {
   readonly coordinator: GlobalMutationCommitCoordinator;
   readonly log: AuthorityCommitLog;
   readonly artifacts: ArtifactStore;
+  readonly retryDelayMs?: number;
+  readonly pendingPageSize?: number;
+  readonly onFatal?: (error: Error) => void;
+}
+
+interface DrainResult {
+  readonly needsRetry: boolean;
+}
+
+class PendingJobPublishCorruptionError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PendingJobPublishCorruptionError";
+  }
 }
 
 /** Owns exact-prefix planning and durable redrive of job-derived side effects. */
@@ -51,11 +66,26 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
   readonly #artifacts: ArtifactStore;
   readonly #pending: RebuildableDurableProjectionIndex;
   readonly #running = new Map<string, Promise<void>>();
+  readonly #retryDelayMs: number;
+  readonly #pendingPageSize: number;
+  readonly #onFatal: ((error: Error) => void) | undefined;
+  readonly #wakeWaiters = new Set<() => void>();
+  #wakeVersion = 0;
+  #started = false;
+  #stopping = false;
+  #loop: Promise<void> | undefined;
+  #fatal: Error | undefined;
 
   constructor(options: SchedulerJobCommitParticipantOptions) {
     this.#coordinator = options.coordinator;
     this.#log = options.log;
     this.#artifacts = options.artifacts;
+    this.#retryDelayMs = positiveRetryDelay(options.retryDelayMs ?? 1_000);
+    this.#pendingPageSize = positiveSafeInteger(
+      options.pendingPageSize ?? 64,
+      "Job publish pending page size",
+    );
+    this.#onFatal = options.onFatal;
     this.#pending = options.log.durableProjection({
       projectionId: JOB_PUBLISH_PENDING_PROJECTION_ID,
       reducerVersion: 1,
@@ -124,23 +154,158 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
       () => ({ kind: "return", value: undefined }),
     );
     const prefix = taskId ? `${PENDING_PREFIX}${taskId}:` : PENDING_PREFIX;
-    let continuation: string | undefined;
+    let afterKey: string | undefined;
+    let hasMore: boolean;
     do {
       const page = await this.#pending.scan(
-        { gte: prefix, lt: `${prefix}\uffff` },
-        64,
-        continuation,
+        afterKey === undefined
+          ? { gte: prefix, lt: `${prefix}\uffff` }
+          : { gt: afterKey, lt: `${prefix}\uffff` },
+        this.#pendingPageSize,
       );
       for (const entry of page.entries) {
         const pending = readPending(entry.value);
         await this.#resumeOne(pending);
       }
-      continuation = page.continuation;
-    } while (continuation !== undefined);
+      afterKey = page.entries.at(-1)?.key;
+      hasMore = page.continuation !== undefined && afterKey !== undefined;
+    } while (hasMore);
   }
 
   wakePendingPublishing(taskId: string): void {
-    void this.resumePendingPublishing(taskId).catch(() => undefined);
+    if (!taskId) throw new TypeError("Job publish wake requires a task id");
+    if (!this.#started || this.#stopping) return;
+    this.#wakeVersion += 1;
+    this.#releaseWakeWaiters();
+  }
+
+  async start(): Promise<void> {
+    if (this.#started) return;
+    if (this.#fatal) throw this.#fatal;
+    this.#started = true;
+    this.#stopping = false;
+    const observedWake = this.#wakeVersion;
+    let initial: DrainResult;
+    try {
+      initial = await this.#drainCycle();
+    } catch (error) {
+      const fatal = this.#fail(error);
+      this.#started = false;
+      throw fatal;
+    }
+    this.#loop = this.#runDrainLoop(initial.needsRetry, observedWake);
+  }
+
+  async stop(): Promise<void> {
+    if (!this.#started && !this.#loop) {
+      if (this.#fatal) throw this.#fatal;
+      return;
+    }
+    this.#stopping = true;
+    this.#releaseWakeWaiters();
+    await this.#loop;
+    this.#loop = undefined;
+    this.#started = false;
+    this.#stopping = false;
+    if (this.#fatal) throw this.#fatal;
+  }
+
+  async #runDrainLoop(
+    initialNeedsRetry: boolean,
+    initialWakeVersion: number,
+  ): Promise<void> {
+    let needsRetry = initialNeedsRetry;
+    let observedWake = initialWakeVersion;
+    while (!this.#stopping) {
+      if (this.#wakeVersion === observedWake) {
+        await this.#waitForWake(
+          needsRetry ? this.#retryDelayMs : undefined,
+          observedWake,
+        );
+      }
+      if (this.#stopping) break;
+      observedWake = this.#wakeVersion;
+      try {
+        needsRetry = (await this.#drainCycle()).needsRetry;
+      } catch (error) {
+        this.#fail(error);
+        break;
+      }
+    }
+  }
+
+  async #drainCycle(): Promise<DrainResult> {
+    await this.#log.transactDurableProjection(
+      JOB_PUBLISH_PENDING_PROJECTION_ID,
+      () => ({ kind: "return", value: undefined }),
+    );
+    let afterKey: string | undefined;
+    let hasMore: boolean;
+    let needsRetry = false;
+    do {
+      const page = await this.#pending.scan(
+        afterKey === undefined
+          ? { gte: PENDING_PREFIX, lt: `${PENDING_PREFIX}\uffff` }
+          : { gt: afterKey, lt: `${PENDING_PREFIX}\uffff` },
+        this.#pendingPageSize,
+      );
+      for (const entry of page.entries) {
+        let pending: PendingJobPublish;
+        try {
+          pending = readPending(entry.value);
+        } catch (error) {
+          throw pendingCorruption("Job publish pending index is invalid", error);
+        }
+        try {
+          await this.#resumeOne(pending);
+        } catch (error) {
+          if (error instanceof PendingJobPublishCorruptionError) throw error;
+          if (
+            error instanceof CommittedMutationMaterializationError ||
+            error instanceof TypeError
+          ) {
+            throw pendingCorruption(
+              "Job publish materialization contract is invalid",
+              error,
+            );
+          }
+          needsRetry = true;
+        }
+      }
+      afterKey = page.entries.at(-1)?.key;
+      hasMore = page.continuation !== undefined && afterKey !== undefined;
+    } while (hasMore && !this.#stopping);
+    return { needsRetry };
+  }
+
+  async #waitForWake(
+    delayMs: number | undefined,
+    observedWake: number,
+  ): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const release = () => {
+        if (timer) clearTimeout(timer);
+        this.#wakeWaiters.delete(release);
+        resolve();
+      };
+      this.#wakeWaiters.add(release);
+      if (delayMs !== undefined) timer = setTimeout(release, delayMs);
+      if (this.#stopping || this.#wakeVersion !== observedWake) release();
+    });
+  }
+
+  #releaseWakeWaiters(): void {
+    for (const release of [...this.#wakeWaiters]) release();
+  }
+
+  #fail(error: unknown): Error {
+    const fatal = error instanceof Error ? error : new Error(String(error));
+    if (!this.#fatal) {
+      this.#fatal = fatal;
+      this.#onFatal?.(fatal);
+    }
+    return this.#fatal;
   }
 
   #resumeOne(pending: PendingJobPublish): Promise<void> {
@@ -155,17 +320,26 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
   }
 
   async #redriveOne(pending: PendingJobPublish): Promise<void> {
-    const bytes = await this.#artifacts.get(pending.decision.batch.ref);
-    const text = Buffer.from(bytes).toString("utf8");
-    const batch = validateJobMutationBatch(JSON.parse(text) as MutationBatch);
-    if (
-      canonicalize(mutationBatchArtifact(batch).ref) !==
-        canonicalize(pending.decision.batch.ref) ||
-      canonicalize(batch) !== text
-    ) {
-      throw new Error("Pending job publish batch does not bind its artifact");
+    let batch: MutationBatch;
+    let decision: PublishDecision;
+    try {
+      const bytes = await this.#artifacts.get(pending.decision.batch.ref);
+      const text = Buffer.from(bytes).toString("utf8");
+      batch = validateJobMutationBatch(JSON.parse(text) as MutationBatch);
+      if (
+        canonicalize(mutationBatchArtifact(batch).ref) !==
+          canonicalize(pending.decision.batch.ref) ||
+        canonicalize(batch) !== text
+      ) {
+        throw new Error("Pending job publish batch does not bind its artifact");
+      }
+      decision = validatePublishDecisionForBatch(pending.decision, batch);
+    } catch (error) {
+      throw pendingCorruption(
+        "Pending job publish authority facts are corrupt",
+        error,
+      );
     }
-    const decision = validatePublishDecisionForBatch(pending.decision, batch);
     const finalSeq = decision.outcomes.at(-1)?.seq ?? 0;
     let upToSeq = pending.upToSeq;
     for (const item of decision.outcomes) {
@@ -343,4 +517,22 @@ function isPlainRecord(value: unknown): value is Record<string, JsonValue> {
 
 function conflict(code: AuthorityError["code"], message: string): PublishOutcome {
   return { t: "conflicted", error: { code, message, retryable: false } };
+}
+
+function pendingCorruption(
+  message: string,
+  cause: unknown,
+): PendingJobPublishCorruptionError {
+  return new PendingJobPublishCorruptionError(message, { cause });
+}
+
+function positiveRetryDelay(value: number): number {
+  return positiveSafeInteger(value, "Job publish retry delay");
+}
+
+function positiveSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive integer`);
+  }
+  return value;
 }

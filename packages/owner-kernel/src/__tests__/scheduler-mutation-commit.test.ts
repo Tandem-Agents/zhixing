@@ -10,6 +10,7 @@ import {
   createJobCommitFence,
   createJobSealedBundle,
   createMutationBatch,
+  CommittedMutationMaterializationError,
   mutationBatchArtifact,
   sealedBundleArtifact,
 } from "@zhixing/core/protocol";
@@ -421,4 +422,227 @@ describe("scheduler mutation owners", () => {
     await restarted.resumePendingPublishing("task-1");
     expect(apply).toHaveBeenCalledTimes(1);
   });
+
+  it("fairly redrives transient pending jobs without requiring another task", async () => {
+    const root = await createTempDir("job-publish-lifecycle");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => "2026-08-05T00:00:00.000Z",
+    });
+    await seedPendingPublish(log, artifacts, "task-a", "assignment-a", "request-a");
+    await seedPendingPublish(log, artifacts, "task-b", "assignment-b", "request-b");
+    const attempts = new Map<string, number>();
+    const apply = vi.fn(async (input: { assignmentId: string }) => {
+      const attempt = (attempts.get(input.assignmentId) ?? 0) + 1;
+      attempts.set(input.assignmentId, attempt);
+      if (input.assignmentId === "assignment-a" && attempt < 3) {
+        throw new Error("temporary materializer outage");
+      }
+    });
+    const participant = new SchedulerJobCommitParticipant({
+      coordinator: { readProjectionIds: [], apply } as unknown as GlobalMutationCommitCoordinator,
+      log,
+      artifacts,
+      retryDelayMs: 5,
+      pendingPageSize: 1,
+    });
+
+    await participant.start();
+    await vi.waitFor(() => {
+      expect(attempts.get("assignment-a")).toBe(3);
+      expect(attempts.get("assignment-b")).toBe(1);
+    });
+    await participant.stop();
+    const restarted = new SchedulerJobCommitParticipant({
+      coordinator: { readProjectionIds: [], apply } as unknown as GlobalMutationCommitCoordinator,
+      log,
+      artifacts,
+      retryDelayMs: 5,
+    });
+    await restarted.start();
+    await restarted.stop();
+    expect(attempts.get("assignment-a")).toBe(3);
+    expect(attempts.get("assignment-b")).toBe(1);
+  });
+
+  it("does not lose a producer wake while the global drain is idle", async () => {
+    const root = await createTempDir("job-publish-idle-wake");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => "2026-08-05T00:00:00.000Z",
+    });
+    const apply = vi.fn(async () => {});
+    const participant = new SchedulerJobCommitParticipant({
+      coordinator: { readProjectionIds: [], apply } as unknown as GlobalMutationCommitCoordinator,
+      log,
+      artifacts,
+      retryDelayMs: 5,
+    });
+
+    await participant.start();
+    await seedPendingPublish(log, artifacts, "task-late", "assignment-late", "request-late");
+    participant.wakePendingPublishing("task-late");
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+    await participant.stop();
+  });
+
+  it("stops retry timers and fails startup visibly for corrupt pending authority", async () => {
+    const root = await createTempDir("job-publish-stop");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => "2026-08-05T00:00:00.000Z",
+    });
+    await seedPendingPublish(log, artifacts, "task-a", "assignment-a", "request-a");
+    const apply = vi.fn(async () => {
+      throw new Error("temporary materializer outage");
+    });
+    const participant = new SchedulerJobCommitParticipant({
+      coordinator: { readProjectionIds: [], apply } as unknown as GlobalMutationCommitCoordinator,
+      log,
+      artifacts,
+      retryDelayMs: 5,
+    });
+    await participant.start();
+    expect(apply).toHaveBeenCalledTimes(1);
+    await participant.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(apply).toHaveBeenCalledTimes(1);
+
+    const corruptRoot = await createTempDir("job-publish-corrupt");
+    const corruptArtifacts = new FileArtifactStore(path.join(corruptRoot, "artifacts"));
+    const corruptLog = new FileAuthorityCommitLog(
+      path.join(corruptRoot, "authority"),
+      corruptArtifacts,
+      { clock: () => "2026-08-05T00:00:00.000Z" },
+    );
+    const corruptBatch = await seedPendingPublish(
+      corruptLog,
+      corruptArtifacts,
+      "task-corrupt",
+      "assignment-corrupt",
+      "request-corrupt",
+    );
+    await corruptArtifacts.delete(corruptBatch.ref);
+    const onFatal = vi.fn();
+    const corrupt = new SchedulerJobCommitParticipant({
+      coordinator: { readProjectionIds: [], apply: vi.fn() } as unknown as GlobalMutationCommitCoordinator,
+      log: corruptLog,
+      artifacts: corruptArtifacts,
+      onFatal,
+    });
+    await expect(corrupt.start()).rejects.toThrow(
+      "Pending job publish authority facts are corrupt",
+    );
+    expect(onFatal).toHaveBeenCalledTimes(1);
+  });
+
+  it("fail-stops a durable pending item whose committed materialization contract is invalid", async () => {
+    const root = await createTempDir("job-publish-contract-failure");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => "2026-08-05T00:00:00.000Z",
+    });
+    await seedPendingPublish(log, artifacts, "task-invalid", "assignment-invalid", "request-invalid");
+    const onFatal = vi.fn();
+    const participant = new SchedulerJobCommitParticipant({
+      coordinator: {
+        readProjectionIds: [],
+        apply: async () => {
+          throw new CommittedMutationMaterializationError(
+            "committed mutation has no materialization owner",
+          );
+        },
+      } as unknown as GlobalMutationCommitCoordinator,
+      log,
+      artifacts,
+      onFatal,
+    });
+
+    await expect(participant.start()).rejects.toThrow(
+      "Job publish materialization contract is invalid",
+    );
+    expect(onFatal).toHaveBeenCalledTimes(1);
+  });
 });
+
+async function seedPendingPublish(
+  log: FileAuthorityCommitLog,
+  artifacts: FileArtifactStore,
+  taskId: string,
+  assignmentId: string,
+  requestId: string,
+) {
+  const batch = createMutationBatch(assignmentId, [{
+    v: 1,
+    t: "staged-mutation",
+    seq: 1,
+    domain: "global",
+    requestId,
+    expected: { anchorEpoch: 7 },
+    mutation: { kind: "schedule-create", spec: SPEC },
+  }]);
+  const batchArtifact = mutationBatchArtifact(batch);
+  expect(await artifacts.put(batchArtifact.bytes)).toEqual(batchArtifact.ref);
+  const bundle = createJobSealedBundle({
+    assignmentId,
+    executorId: "executor-1",
+    streamFinal: { finalSeq: 1, streamDigest: `sha256:${"0".repeat(64)}` },
+    usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+    usageFinal: { reportDigest: `sha256:${"0".repeat(64)}`, upToUsageSeq: 0 },
+    dependencyArtifacts: [],
+    body: {
+      t: "job",
+      taskId,
+      jobRunId: `run-${taskId}`,
+      fence: createJobCommitFence({
+        taskId,
+        jobRunId: `run-${taskId}`,
+        scheduledFor: "2026-08-05T00:00:00.000Z",
+        taskRevision: 1,
+        deliveryPlanDigest: `sha256:${"0".repeat(64)}`,
+        anchorEpoch: 7,
+        assignmentId,
+        executorId: "executor-1",
+      }),
+      outcome: { status: "completed", summary: "done" },
+      contentAssets: [],
+      mutationBatch: { ref: batchArtifact.ref, sessionCount: 0, globalCount: 1 },
+    },
+  });
+  const bundleArtifact = sealedBundleArtifact(bundle);
+  expect(await artifacts.put(bundleArtifact.bytes)).toEqual(bundleArtifact.ref);
+  await log.append([
+    {
+      stream: `job:${taskId}`,
+      body: {
+        t: "committed",
+        jobRunId: `run-${taskId}`,
+        assignmentId,
+        bundle: { ref: bundleArtifact.ref },
+        jobRevision: 1,
+      },
+    },
+    {
+      stream: "publish",
+      body: {
+        t: "publish-decision",
+        assignmentId,
+        batch: { ref: batchArtifact.ref },
+        sessionCount: 0,
+        globalCount: 1,
+        outcomes: [{ seq: 1, outcome: { t: "granted", targetRevision: 1 } }],
+      },
+    },
+    {
+      stream: "publish",
+      body: {
+        t: "publish-progress",
+        assignmentId,
+        domain: "global",
+        upToSeq: 0,
+        state: "pending",
+      },
+    },
+  ]);
+  return batchArtifact;
+}

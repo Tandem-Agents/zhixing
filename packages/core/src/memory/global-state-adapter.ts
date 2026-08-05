@@ -23,6 +23,7 @@ import type {
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
+  CommittedMutationMaterializationError,
   protocolDigest,
 } from "../protocol/index.js";
 import type {
@@ -30,7 +31,7 @@ import type {
   MemoryLogicalEntry,
   MemoryScopeRef,
 } from "./contracts.js";
-import { MemoryStore } from "./memory-store.js";
+import { MemoryStore, type MemoryEntry } from "./memory-store.js";
 import {
   compareMemoryLogicalEntries,
   memoryLogicalEntryDigest,
@@ -45,6 +46,8 @@ export const MEMORY_AUTHORITY_PROJECTION_ID = "global-memory-authority-v1";
 const MEMORY_ENTRY_PREFIX = "entry:";
 const MEMORY_REQUEST_PREFIX = "request:";
 const MEMORY_PENDING_PREFIX = "pending:";
+const MEMORY_SEEN_PREFIX = "seen:";
+const MEMORY_LEGACY_CUTOVER_KEY = "legacy-cutover";
 const MEMORY_MATERIALIZATION_STREAM = "intent:memory-materialization";
 
 type MemoryMutation = Extract<
@@ -52,7 +55,7 @@ type MemoryMutation = Extract<
   { kind: "memory-append" | "memory-delete" }
 >;
 
-type MemoryAuthorityRecord = {
+type MemoryMutationAppliedRecord = {
   readonly t: "memory-mutation-applied";
   readonly requestId: string;
   readonly mutationDigest: string;
@@ -61,6 +64,17 @@ type MemoryAuthorityRecord = {
   readonly entry?: MemoryLogicalEntry;
   readonly at: string;
 };
+
+type MemoryLegacyCutoverRecord = {
+  readonly t: "memory-legacy-cutover";
+  readonly scopeSetDigest: string;
+  readonly sourceSetDigest: string;
+  readonly at: string;
+};
+
+type MemoryAuthorityRecord =
+  | MemoryMutationAppliedRecord
+  | MemoryLegacyCutoverRecord;
 
 type MemoryMaterializationRecord = {
   readonly t: "memory-materialized";
@@ -77,6 +91,8 @@ interface MemoryRequestProjection {
 interface MemoryProjection {
   readonly entries: Map<string, MemoryLogicalEntry>;
   readonly requests: Map<string, MemoryRequestProjection>;
+  readonly seenKeys: Set<string>;
+  readonly legacyCutover?: MemoryLegacyCutoverRecord;
 }
 
 export interface AnchorMemoryGlobalStateAdapterOptions {
@@ -96,7 +112,6 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
   #projection: MemoryProjection = emptyProjection();
   #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
-  readonly #loadedLegacyScopes = new Map<string, MemoryScopeRef>();
 
   constructor(options: AnchorMemoryGlobalStateAdapterOptions) {
     this.#log = options.log;
@@ -105,16 +120,19 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#durable = this.#log.durableProjection({
       projectionId: MEMORY_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 1,
+      reducerVersion: 2,
       reduce: reduceMemoryDurableProjection,
     });
   }
 
   readonly stagedProjectionId = MEMORY_AUTHORITY_PROJECTION_ID;
 
-  async initializeStagedPublishing(): Promise<void> {
+  async initializeStagedPublishing(
+    scopes: readonly MemoryScopeRef[] = [{ kind: "personal" }],
+  ): Promise<void> {
     await this.#ensureOpen();
-    await this.#loadLegacyScope({ kind: "personal" });
+    await this.#takeOverLegacyMemory(scopes);
+    await this.refreshStagedMutations([]);
   }
 
   ownsStagedMutation(mutation: GlobalStagedMutation): boolean {
@@ -230,11 +248,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     }
     this.#admit(context, "global.read", query.scope);
     await this.#ensureOpen();
-    await this.#loadLegacyScope(query.scope);
     const entries = await readMemoryEntries(this.#durable);
-    for (const legacy of this.#projection.entries.values()) {
-      if (!entries.has(entryKey(legacy))) entries.set(entryKey(legacy), cloneEntry(legacy));
-    }
     const candidates = [...entries.values()].filter((entry) =>
       memoryLogicalEntryMatches(entry, {
         scope: query.scope,
@@ -300,7 +314,6 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     const memoryMutation = mutation as MemoryMutation;
     this.#admit(context, "global.mutate", memoryScopeOf(memoryMutation));
     await this.#ensureOpen();
-    await this.#loadLegacyScope(memoryScopeOf(memoryMutation));
     const normalized = normalizeMutation(memoryMutation);
     const transaction = await this.#log.transactProjection<
       MemoryProjection,
@@ -315,11 +328,6 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
           [{ requestId: context.requestId, mutation: normalized }],
           transactionContext.at,
         );
-        for (const legacy of this.#projection.entries.values()) {
-          if (!state.entries.has(entryKey(legacy))) {
-            state.entries.set(entryKey(legacy), cloneEntry(legacy));
-          }
-        }
         const planned = planMutation(
           state,
           normalized,
@@ -359,13 +367,17 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
         await this.#durable.get(memoryRequestKey(requestId)),
       );
       if (!replay || (expectedRevision !== undefined && replay.revision !== expectedRevision)) {
-        throw new Error("Committed memory mutation is unavailable or changed");
+        throw new CommittedMutationMaterializationError(
+          "Committed memory mutation is unavailable or changed",
+        );
       }
       return;
     }
     const record = readPendingMemoryRecord(pending);
     if (expectedRevision !== undefined && record.revision !== expectedRevision) {
-      throw new Error("Committed memory mutation is unavailable or changed");
+      throw new CommittedMutationMaterializationError(
+        "Committed memory mutation is unavailable or changed",
+      );
     }
     const mutation = record.mutation;
     const scope = memoryScopeOf(mutation);
@@ -374,7 +386,9 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
       await this.#durable.get(memoryRequestKey(requestId)),
     );
     if (!replay || replay.revision !== record.revision) {
-      throw new Error("Committed memory request has no projection key");
+      throw new CommittedMutationMaterializationError(
+        "Committed memory request has no projection key",
+      );
     }
     const entry = readMemoryEntry(
       await this.#durable.get(memoryEntryKey(replay.entryKey)),
@@ -382,7 +396,11 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     if (mutation.kind === "memory-delete") {
       await store.delete(storageCategory(mutation.domain, mutation.category), mutation.id);
     } else {
-      if (!entry) throw new Error("Committed memory entry is absent from its projection");
+      if (!entry) {
+        throw new CommittedMutationMaterializationError(
+          "Committed memory entry is absent from its projection",
+        );
+      }
       await store.save({
         category: storageCategory(entry.domain, entry.category),
         id: entry.id,
@@ -397,7 +415,9 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
         if (current === undefined) return { kind: "return", value: undefined };
         const currentRecord = readPendingMemoryRecord(current);
         if (currentRecord.revision !== record.revision) {
-          throw new Error("Memory materialization target changed");
+          throw new CommittedMutationMaterializationError(
+            "Memory materialization target changed",
+          );
         }
         return {
           kind: "append",
@@ -415,33 +435,116 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     );
   }
 
-  async #loadLegacyScope(scope: MemoryScopeRef): Promise<void> {
-    this.#loadedLegacyScopes.set(scopeKey(scope), cloneScope(scope));
-    const store = new MemoryStore(this.#scopeRoot(scope));
-    for (const category of ["profile", "person", "journal"] as const) {
-      for (const disk of await store.list(category)) {
-        const domain = category === "person" ? "people" : category === "journal" ? "journal" : "memory";
-        const entry: MemoryLogicalEntry = {
-          domain,
-          scope: cloneScope(scope),
-          ...(domain === "memory" ? { category: "profile" as const } : {}),
-          id: disk.id,
-          meta: toJsonObject(disk.meta),
-          content: disk.content,
-          revision: 1,
-          digest: memoryLogicalEntryDigest({
-            domain,
-            scope,
-            ...(domain === "memory" ? { category: "profile" as const } : {}),
-            id: disk.id,
-            meta: toJsonObject(disk.meta),
-            content: disk.content,
-          }),
-        };
-        const key = entryKey(entry);
-        if (!this.#projection.entries.has(key)) this.#projection.entries.set(key, entry);
-      }
+  async #takeOverLegacyMemory(scopes: readonly MemoryScopeRef[]): Promise<void> {
+    const existing = await this.#log.transactDurableProjection<
+      MemoryAuthorityRecord,
+      MemoryLegacyCutoverRecord | undefined
+    >(
+      MEMORY_AUTHORITY_PROJECTION_ID,
+      async (projection) => ({
+        kind: "return",
+        value: readLegacyCutover(
+          await projection.get(MEMORY_LEGACY_CUTOVER_KEY),
+        ),
+      }),
+    );
+    if (existing.value) return;
+
+    const normalizedScopes = normalizeLegacyScopes(scopes);
+    const sources = await readLegacyMemorySources(
+      normalizedScopes,
+      this.#scopeRoot,
+    );
+    for (const source of sources) {
+      await this.#importLegacySource(source);
     }
+
+    const scopeSetDigest = protocolDigest(
+      "MemoryLegacyScopeSet",
+      1,
+      normalizedScopes,
+    );
+    const sourceSetDigest = protocolDigest(
+      "MemoryLegacySourceSet",
+      1,
+      sources.map(({ entry }) => entry),
+    );
+    await this.#log.transactDurableProjection<MemoryAuthorityRecord, void>(
+      MEMORY_AUTHORITY_PROJECTION_ID,
+      async (projection, context) => {
+        const current = readLegacyCutover(
+          await projection.get(MEMORY_LEGACY_CUTOVER_KEY),
+        );
+        if (current) return { kind: "return", value: undefined };
+        return {
+          kind: "append",
+          entries: [{
+            stream: MEMORY_STREAM,
+            body: {
+              t: "memory-legacy-cutover",
+              scopeSetDigest,
+              sourceSetDigest,
+              at: context.at,
+            },
+          }],
+          value: undefined,
+        };
+      },
+    );
+    await this.#reload();
+  }
+
+  async #importLegacySource(source: LegacyMemorySource): Promise<void> {
+    const logicalKey = entryKey(source.entry);
+    const requestId = legacyImportRequestId(logicalKey);
+    const mutationDigest = protocolDigest("MemoryLegacyImport", 1, {
+      logicalKey,
+      entry: source.entry,
+    });
+    await this.#log.transactDurableProjection<MemoryAuthorityRecord, void>(
+      MEMORY_AUTHORITY_PROJECTION_ID,
+      async (projection, context) => {
+        const replay = readMemoryRequest(
+          await projection.get(memoryRequestKey(requestId)),
+        );
+        if (replay) {
+          if (
+            replay.mutationDigest !== mutationDigest ||
+            replay.entryKey !== logicalKey
+          ) {
+            throw new MemoryMutationConflictError(
+              conflict(
+                "idempotency-conflict",
+                "Legacy memory changed while its authority import was incomplete",
+              ).error,
+            );
+          }
+          return { kind: "return", value: undefined };
+        }
+        if (await projection.get(memorySeenKey(logicalKey))) {
+          return { kind: "return", value: undefined };
+        }
+        if (await projection.get(memoryEntryKey(logicalKey))) {
+          throw new Error("Memory entry exists without its authority seen marker");
+        }
+        return {
+          kind: "append",
+          entries: [{
+            stream: MEMORY_STREAM,
+            body: {
+              t: "memory-mutation-applied",
+              requestId,
+              mutationDigest,
+              mutation: source.mutation,
+              revision: 1,
+              entry: source.entry,
+              at: context.at,
+            },
+          }],
+          value: undefined,
+        };
+      },
+    );
   }
 
   async #ensureOpen(): Promise<void> {
@@ -461,9 +564,6 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     }
     this.#projection = state;
     this.#cursor = snapshot.cursor;
-    for (const scope of this.#loadedLegacyScopes.values()) {
-      await this.#loadLegacyScope(scope);
-    }
   }
 
   #admit(
@@ -498,6 +598,113 @@ function scopeKey(scope: MemoryScopeRef): string {
   return scope.kind === "personal" ? "personal" : `workscene:${scope.sceneId}`;
 }
 
+interface LegacyMemorySource {
+  readonly entry: MemoryLogicalEntry;
+  readonly mutation: MemoryMutation;
+}
+
+function normalizeLegacyScopes(
+  scopes: readonly MemoryScopeRef[],
+): MemoryScopeRef[] {
+  const unique = new Map<string, MemoryScopeRef>();
+  unique.set("personal", { kind: "personal" });
+  for (const scope of scopes) {
+    if (scope.kind === "workscene") {
+      identifier(scope.sceneId, "Legacy memory workscene id");
+    }
+    unique.set(scopeKey(scope), cloneScope(scope));
+  }
+  return [...unique.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, "en-US"))
+    .map(([, scope]) => scope);
+}
+
+async function readLegacyMemorySources(
+  scopes: readonly MemoryScopeRef[],
+  scopeRoot: (scope: MemoryScopeRef) => string,
+): Promise<LegacyMemorySource[]> {
+  const sources = new Map<string, LegacyMemorySource>();
+  for (const scope of scopes) {
+    const store = new MemoryStore(scopeRoot(scope));
+    const entries = (await store.readAuthorityTakeoverSnapshot()).sort((left, right) =>
+      left.category.localeCompare(right.category, "en-US") ||
+      left.id.localeCompare(right.id, "en-US")
+    );
+    for (const disk of entries) {
+      const source = legacyMemorySource(scope, disk);
+      const key = entryKey(source.entry);
+      const existing = sources.get(key);
+      if (existing && existing.entry.digest !== source.entry.digest) {
+        throw new Error("Legacy memory contains duplicate logical identities");
+      }
+      sources.set(key, source);
+    }
+  }
+  return [...sources.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, "en-US"))
+    .map(([, source]) => source);
+}
+
+function legacyMemorySource(
+  scope: MemoryScopeRef,
+  disk: MemoryEntry,
+): LegacyMemorySource {
+  const domain = disk.category === "person"
+    ? "people"
+    : disk.category === "journal"
+      ? "journal"
+      : "memory";
+  const meta = toJsonObject(disk.meta);
+  const identity = {
+    domain,
+    scope: cloneScope(scope),
+    ...(domain === "memory" ? { category: "profile" as const } : {}),
+    id: disk.id,
+    meta,
+    content: disk.content,
+  };
+  const entry: MemoryLogicalEntry = {
+    ...identity,
+    revision: 1,
+    digest: memoryLogicalEntryDigest(identity),
+  } as MemoryLogicalEntry;
+  const mutation = {
+    kind: "memory-append",
+    payload: domain === "memory"
+      ? {
+          domain,
+          scope: cloneScope(scope),
+          category: "profile",
+          id: disk.id,
+          meta,
+          content: disk.content,
+        }
+      : domain === "people"
+        ? {
+            domain,
+            scope: cloneScope(scope),
+            id: disk.id,
+            meta,
+            content: disk.content,
+          }
+        : {
+            domain,
+            scope: cloneScope(scope),
+            date: disk.id,
+            content: disk.content,
+          },
+  } as MemoryMutation;
+  return { entry, mutation };
+}
+
+function legacyImportRequestId(logicalKey: string): string {
+  return `memory-legacy-import:${protocolDigest(
+    "MemoryLegacyImportRequest",
+    1,
+    { logicalKey },
+  ).slice("sha256:".length)}`;
+}
+
 function planMutation(
   state: MemoryProjection,
   mutation: MemoryMutation,
@@ -507,7 +714,7 @@ function planMutation(
   readonly outcome:
     | { readonly t: "granted"; readonly targetRevision: number }
     | { readonly t: "conflicted"; readonly error: AuthorityError };
-  readonly record: MemoryAuthorityRecord;
+  readonly record: MemoryMutationAppliedRecord;
 } {
   const mutationDigest = protocolDigest("MemoryAuthorityMutation", 1, mutation);
   const replay = state.requests.get(requestId);
@@ -545,15 +752,14 @@ function planMutation(
       },
     };
   }
-  const expectedDigest =
-    mutation.payload.domain === "journal"
-      ? undefined
-      : mutation.payload.expectedDigest;
-  if (current && expectedDigest === undefined) {
-    return { outcome: conflict("revision-conflict", "Updating memory requires its current digest"), record: undefined as never };
-  }
-  if ((!current && expectedDigest !== undefined) || (current && current.digest !== expectedDigest)) {
-    return { outcome: conflict("revision-conflict", "Memory entry changed"), record: undefined as never };
+  if (mutation.payload.domain !== "journal") {
+    const expectedDigest = mutation.payload.expectedDigest;
+    if (current && expectedDigest === undefined) {
+      return { outcome: conflict("revision-conflict", "Updating memory requires its current digest"), record: undefined as never };
+    }
+    if ((!current && expectedDigest !== undefined) || (current && current.digest !== expectedDigest)) {
+      return { outcome: conflict("revision-conflict", "Memory entry changed"), record: undefined as never };
+    }
   }
   const revision = (current?.revision ?? 0) + 1;
   const entry = projectMemoryLogicalEntry(mutation.payload, current, {
@@ -577,17 +783,25 @@ function planMutation(
 function reduceRecord(previous: MemoryProjection, logical: LogicalRecord<MemoryAuthorityRecord>): MemoryProjection {
   const state = cloneProjection(previous);
   const record = logical.body;
-  if (record.t !== "memory-mutation-applied" || state.requests.has(record.requestId)) {
+  if (record.t === "memory-legacy-cutover") {
+    if (state.legacyCutover) {
+      throw new TypeError("Memory legacy cutover was duplicated");
+    }
+    return { ...state, legacyCutover: structuredClone(record) };
+  }
+  if (state.requests.has(record.requestId)) {
     throw new TypeError("Memory authority record is invalid or duplicated");
   }
-  if (record.entry) state.entries.set(entryKey(record.entry), cloneEntry(record.entry));
-  else state.entries.delete(plannedMutationKey(record.mutation, record.at));
+  const logicalKey = record.entry
+    ? entryKey(record.entry)
+    : plannedMutationKey(record.mutation, record.at);
+  if (record.entry) state.entries.set(logicalKey, cloneEntry(record.entry));
+  else state.entries.delete(logicalKey);
+  state.seenKeys.add(logicalKey);
   state.requests.set(record.requestId, {
     mutationDigest: record.mutationDigest,
     revision: record.revision,
-    entryKey: record.entry
-      ? entryKey(record.entry)
-      : plannedMutationKey(record.mutation, record.at),
+    entryKey: logicalKey,
   });
   return state;
 }
@@ -611,7 +825,17 @@ async function reduceMemoryDurableProjection(
 
   for (const logical of envelope.entries) {
     if (logical.stream === MEMORY_STREAM) {
-      const record = readPendingMemoryRecord(logical.body);
+      const record = readMemoryAuthorityRecord(logical.body);
+      if (record.t === "memory-legacy-cutover") {
+        if (await get(MEMORY_LEGACY_CUTOVER_KEY)) {
+          throw new TypeError("Memory legacy cutover was duplicated");
+        }
+        put(
+          MEMORY_LEGACY_CUTOVER_KEY,
+          structuredClone(record) as unknown as JsonValue,
+        );
+        continue;
+      }
       const requestKey = memoryRequestKey(record.requestId);
       if (await get(requestKey)) {
         throw new TypeError("Memory authority request was duplicated");
@@ -624,6 +848,7 @@ async function reduceMemoryDurableProjection(
       } else {
         tombstone(memoryEntryKey(logicalKey));
       }
+      put(memorySeenKey(logicalKey), true);
       put(requestKey, {
         mutationDigest: record.mutationDigest,
         revision: record.revision,
@@ -700,6 +925,10 @@ function memoryPendingKey(requestId: string): string {
   return `${MEMORY_PENDING_PREFIX}${requestId}`;
 }
 
+function memorySeenKey(logicalKey: string): string {
+  return `${MEMORY_SEEN_PREFIX}${encodeURIComponent(logicalKey)}`;
+}
+
 function readMemoryRequest(value: JsonValue | undefined): MemoryRequestProjection | undefined {
   if (value === undefined) return undefined;
   if (
@@ -725,19 +954,56 @@ function readMemoryEntry(value: JsonValue | undefined): MemoryLogicalEntry | und
   return cloneEntry(value as unknown as MemoryLogicalEntry);
 }
 
-function readPendingMemoryRecord(value: unknown): MemoryAuthorityRecord {
+function readMemoryAuthorityRecord(value: unknown): MemoryAuthorityRecord {
+  if (
+    typeof value === "object" && value !== null && !Array.isArray(value) &&
+    (value as { t?: unknown }).t === "memory-legacy-cutover"
+  ) {
+    const cutover = readLegacyCutover(value);
+    if (!cutover) {
+      throw new TypeError("Memory legacy cutover record is invalid");
+    }
+    return cutover;
+  }
+  return readPendingMemoryRecord(value);
+}
+
+function readPendingMemoryRecord(value: unknown): MemoryMutationAppliedRecord {
   if (
     typeof value !== "object" || value === null || Array.isArray(value) ||
     (value as { t?: unknown }).t !== "memory-mutation-applied"
   ) {
     throw new TypeError("Memory authority record is invalid");
   }
-  const record = value as MemoryAuthorityRecord;
+  const record = value as MemoryMutationAppliedRecord;
   identifier(record.requestId, "Memory authority requestId");
   if (!Number.isSafeInteger(record.revision) || record.revision <= 0) {
     throw new TypeError("Memory authority revision is invalid");
   }
   normalizeMutation(record.mutation);
+  return structuredClone(record);
+}
+
+function readLegacyCutover(
+  value: JsonValue | undefined | unknown,
+): MemoryLegacyCutoverRecord | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    Object.keys(value).sort().join(",") !==
+      "at,scopeSetDigest,sourceSetDigest,t" ||
+    (value as { t?: unknown }).t !== "memory-legacy-cutover"
+  ) {
+    throw new TypeError("Memory legacy cutover record is invalid");
+  }
+  const record = value as unknown as MemoryLegacyCutoverRecord;
+  if (
+    !/^sha256:[a-f0-9]{64}$/u.test(record.scopeSetDigest) ||
+    !/^sha256:[a-f0-9]{64}$/u.test(record.sourceSetDigest) ||
+    !Number.isFinite(Date.parse(record.at))
+  ) {
+    throw new TypeError("Memory legacy cutover record is invalid");
+  }
   return structuredClone(record);
 }
 
@@ -824,13 +1090,17 @@ function storageCategory(
 }
 
 function emptyProjection(): MemoryProjection {
-  return { entries: new Map(), requests: new Map() };
+  return { entries: new Map(), requests: new Map(), seenKeys: new Set() };
 }
 
 function cloneProjection(source: MemoryProjection): MemoryProjection {
   return {
     entries: new Map([...source.entries].map(([key, value]) => [key, cloneEntry(value)])),
     requests: new Map([...source.requests].map(([key, value]) => [key, { ...value }])),
+    seenKeys: new Set(source.seenKeys),
+    ...(source.legacyCutover
+      ? { legacyCutover: structuredClone(source.legacyCutover) }
+      : {}),
   };
 }
 

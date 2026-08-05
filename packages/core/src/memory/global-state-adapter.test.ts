@@ -1,4 +1,5 @@
 import path from "node:path";
+import { mkdir } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
@@ -7,13 +8,258 @@ import type {
   GlobalReadCallContext,
   GlobalStagedMutation,
 } from "../contracts/index.js";
+import { protocolDigest } from "../protocol/index.js";
 import { MemoryStore } from "./memory-store.js";
 import { AnchorMemoryGlobalStateAdapter } from "./global-state-adapter.js";
-import { projectMemoryLogicalEntry } from "./logical-entry.js";
+import {
+  memoryLogicalEntryKey,
+  projectMemoryLogicalEntry,
+} from "./logical-entry.js";
+import type { MemoryScopeRef } from "./contracts.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 
 describe("AnchorMemoryGlobalStateAdapter", () => {
+  it("takes over every declared legacy scope once and preserves all three memory domains", async () => {
+    const fixture = await createFixture();
+    const worksceneStore = new MemoryStore(fixture.worksceneRoot("scene-a"));
+    await fixture.store.save({
+      category: "profile",
+      id: "profile",
+      meta: { name: "Alice" },
+      content: "personal profile",
+    });
+    await fixture.store.save({
+      category: "person",
+      id: "bob",
+      meta: { name: "Bob", relation: "friend" },
+      content: "personal person",
+    });
+    await fixture.store.save({
+      category: "journal",
+      id: "2026-08-03",
+      meta: { date: "2026-08-03" },
+      content: "personal journal",
+    });
+    await worksceneStore.save({
+      category: "person",
+      id: "carol",
+      meta: { name: "Carol", relation: "teammate" },
+      content: "workscene person",
+    });
+
+    await fixture.adapter.initializeStagedPublishing([
+      { kind: "personal" },
+      { kind: "workscene", sceneId: "scene-a" },
+    ]);
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "memory"),
+    ).resolves.toMatchObject([{ id: "profile", content: "personal profile" }]);
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "people"),
+    ).resolves.toMatchObject([{ id: "bob", content: "personal person" }]);
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([{ id: "2026-08-03", content: "personal journal" }]);
+    await expect(
+      readEntries(
+        fixture.adapter,
+        { kind: "workscene", sceneId: "scene-a" },
+        "people",
+      ),
+    ).resolves.toMatchObject([{ id: "carol", content: "workscene person" }]);
+
+    const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.filter((record) => record.body.t === "memory-legacy-cutover")).toHaveLength(1);
+    expect(records.filter((record) => record.body.t === "memory-mutation-applied")).toHaveLength(4);
+  });
+
+  it("keeps the cutover authoritative across restart so deleted or late legacy files cannot revive", async () => {
+    const fixture = await createFixture();
+    await fixture.store.save({
+      category: "person",
+      id: "bob",
+      meta: { name: "Bob", relation: "friend" },
+      content: "legacy",
+    });
+    await fixture.adapter.initializeStagedPublishing();
+    const imported = await readEntries(
+      fixture.adapter,
+      { kind: "personal" },
+      "people",
+    );
+    const bob = imported[0];
+    if (!bob) throw new Error("legacy person was not imported");
+    await fixture.adapter.mutate(
+      {
+        kind: "memory-delete",
+        scope: { kind: "personal" },
+        domain: "people",
+        id: "bob",
+        expectedDigest: bob.digest,
+      },
+      controlContext("delete-imported"),
+    );
+
+    await fixture.store.save({
+      category: "person",
+      id: "bob",
+      meta: { name: "Bob", relation: "friend" },
+      content: "stale legacy resurrection",
+    });
+    await fixture.store.save({
+      category: "person",
+      id: "late",
+      meta: { name: "Late", relation: "unknown" },
+      content: "created after cutover",
+    });
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+    await reopened.initializeStagedPublishing();
+
+    await expect(
+      readEntries(reopened, { kind: "personal" }, "people"),
+    ).resolves.toEqual([]);
+  });
+
+  it("resumes a partially acknowledged legacy import without duplicating authority facts", async () => {
+    const fixture = await createFixture();
+    const importedPayload = {
+      domain: "people" as const,
+      scope: { kind: "personal" as const },
+      id: "alice",
+      meta: { name: "Alice", relation: "friend" },
+      content: "already committed before the response was lost",
+    };
+    const importedEntry = projectMemoryLogicalEntry(
+      importedPayload,
+      undefined,
+      { revision: 1 },
+    );
+    const logicalKey = memoryLogicalEntryKey(importedEntry);
+    const requestId = `memory-legacy-import:${protocolDigest(
+      "MemoryLegacyImportRequest",
+      1,
+      { logicalKey },
+    ).slice("sha256:".length)}`;
+    await fixture.log.append([{
+      stream: "intent:memory-authority",
+      body: {
+        t: "memory-mutation-applied",
+        requestId,
+        mutationDigest: protocolDigest("MemoryLegacyImport", 1, {
+          logicalKey,
+          entry: importedEntry,
+        }),
+        mutation: { kind: "memory-append", payload: importedPayload },
+        revision: 1,
+        entry: importedEntry,
+        at: NOW,
+      },
+    }]);
+    await fixture.store.save({
+      category: "person",
+      id: "alice",
+      meta: importedPayload.meta,
+      content: importedPayload.content,
+    });
+    await fixture.store.save({
+      category: "person",
+      id: "bob",
+      meta: { name: "Bob", relation: "friend" },
+      content: "not imported yet",
+    });
+
+    await fixture.adapter.initializeStagedPublishing();
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "people"),
+    ).resolves.toMatchObject([
+      { id: "alice", revision: 1 },
+      { id: "bob", revision: 1 },
+    ]);
+    const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.filter((record) => record.body.t === "memory-mutation-applied"))
+      .toHaveLength(2);
+    expect(records.filter((record) => record.body.t === "memory-legacy-cutover"))
+      .toHaveLength(1);
+  });
+
+  it("records an empty cutover so legacy files created later stay out of authority", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initializeStagedPublishing();
+    await fixture.store.save({
+      category: "person",
+      id: "late",
+      meta: { name: "Late", relation: "unknown" },
+      content: "created after the empty cutover",
+    });
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+
+    await reopened.initializeStagedPublishing();
+
+    await expect(
+      readEntries(reopened, { kind: "personal" }, "people"),
+    ).resolves.toEqual([]);
+    const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(records.filter((record) => record.body.t === "memory-legacy-cutover"))
+      .toHaveLength(1);
+  });
+
+  it("appends to a taken-over journal entry on the same day", async () => {
+    const fixture = await createFixture();
+    await fixture.store.save({
+      category: "journal",
+      id: "2026-08-04",
+      meta: { date: "2026-08-04" },
+      content: "legacy morning",
+    });
+    await fixture.adapter.initializeStagedPublishing();
+
+    await fixture.adapter.mutate(
+      {
+        kind: "memory-append",
+        payload: {
+          domain: "journal",
+          scope: { kind: "personal" },
+          date: "2026-08-04",
+          content: "authority afternoon",
+        },
+      },
+      controlContext("same-day-journal-append"),
+    );
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([{
+      id: "2026-08-04",
+      revision: 2,
+      content: "legacy morning\n\n---\n\nauthority afternoon",
+    }]);
+  });
+
+  it("fails closed before the cutover marker when a legacy source cannot be read", async () => {
+    const fixture = await createFixture();
+    await mkdir(path.join(fixture.root, "memory", "profile.md"), {
+      recursive: true,
+    });
+
+    await expect(fixture.adapter.initializeStagedPublishing()).rejects.toThrow();
+    const records = (await fixture.log.readAll<{ readonly t: string }>())
+      .flatMap((commit) => commit.entries);
+    expect(records.some((record) => record.body.t === "memory-legacy-cutover")).toBe(false);
+  });
+
   it("plans staged personal memory, materializes only after commit, and returns path-free DTOs", async () => {
     const fixture = await createFixture();
     const mutation: GlobalStagedMutation = {
@@ -229,18 +475,36 @@ async function createFixture() {
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
   });
-  const memoryRoot = path.join(root, "memory");
+  const personalRoot = path.join(root, "memory");
+  const worksceneRoot = (sceneId: string) => path.join(root, "workscenes", sceneId, "memory");
+  const scopeRoot = (scope: MemoryScopeRef) =>
+    scope.kind === "personal" ? personalRoot : worksceneRoot(scope.sceneId);
   return {
     root,
     log,
-    store: new MemoryStore(memoryRoot),
+    store: new MemoryStore(personalRoot),
+    scopeRoot,
+    worksceneRoot,
     adapter: new AnchorMemoryGlobalStateAdapter({
       log,
       anchorEpoch: 1,
-      scopeRoot: () => memoryRoot,
+      scopeRoot,
       clock: () => NOW,
     }),
   };
+}
+
+async function readEntries(
+  adapter: AnchorMemoryGlobalStateAdapter,
+  scope: MemoryScopeRef,
+  domain: "memory" | "people" | "journal",
+) {
+  const result = await adapter.read(
+    { kind: "memory-list", scope, domain },
+    readContext(`read-${domain}-${scope.kind}`),
+  );
+  if (result.kind !== "memory-list") throw new Error("unexpected result");
+  return result.entries;
 }
 
 function readContext(requestId: string): GlobalReadCallContext {

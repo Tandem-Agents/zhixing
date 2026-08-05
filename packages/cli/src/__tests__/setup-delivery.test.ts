@@ -17,6 +17,7 @@ import {
   AuthorityDeliveryPipeline,
   ChannelRegistry,
   LegacyDeliveryDrainer,
+  MemoryStore,
   OutboxRegistry,
   type PermissionRule,
 } from "@zhixing/core";
@@ -127,6 +128,43 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(stack.authorityDelivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
+  });
+
+  it("takes over legacy memory from the explicitly configured authority home", async () => {
+    const legacy = new MemoryStore(resolve(home, "me"));
+    await legacy.save({
+      category: "person",
+      id: "legacy-person",
+      meta: { name: "Legacy", relation: "friend" },
+      content: "remembered before authority cutover",
+    });
+
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+    });
+    try {
+      const result = await authority.globalState!.read(
+        {
+          kind: "memory-list",
+          scope: { kind: "personal" },
+          domain: "people",
+        },
+        {
+          principal: { kind: "host", component: "setup-memory-cutover-test" },
+          requestId: "setup-memory-cutover-read",
+          deadlineAt: "2099-01-01T00:00:00.000Z",
+          authority: { domain: "global", anchorEpoch: authority.anchorEpoch },
+        },
+      );
+      expect(result).toMatchObject({
+        kind: "memory-list",
+        entries: [{ id: "legacy-person", content: "remembered before authority cutover" }],
+      });
+    } finally {
+      await authority.startupCleanup.run();
+    }
   });
 
   it("freezes an explicit workspace revision and preflights it before local execution", async () => {

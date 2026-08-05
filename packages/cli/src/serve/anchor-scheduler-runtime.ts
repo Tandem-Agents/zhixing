@@ -178,6 +178,14 @@ export class AnchorSchedulerRuntime {
       coordinator: this.#mutationCoordinator,
       log: options.authority.authorityLog,
       artifacts: options.authority.artifacts,
+      onFatal: (error) => {
+        options.onError?.(error);
+        void this.scheduler.stop().catch((stopError) => {
+          options.onError?.(
+            stopError instanceof Error ? stopError : new Error(String(stopError)),
+          );
+        });
+      },
     });
     options.protocol.bindMutationPublisher(
       new SchedulerConversationMutationPublisher({
@@ -213,7 +221,7 @@ export class AnchorSchedulerRuntime {
   async start(): Promise<void> {
     await this.scheduler.prepare();
     await this.#mutationCoordinator.recoverDerivedState();
-    await this.#commitParticipant.resumePendingPublishing();
+    await this.#commitParticipant.start();
   }
 
   activate(): void {
@@ -221,7 +229,17 @@ export class AnchorSchedulerRuntime {
   }
 
   async stop(): Promise<void> {
-    await this.scheduler.stop();
+    let stopFailure: unknown;
+    try {
+      await this.scheduler.stop();
+    } catch (error) {
+      stopFailure = error;
+    }
+    try {
+      await this.#commitParticipant.stop();
+    } catch (error) {
+      stopFailure ??= error;
+    }
     await this.#manualSurfaces.stop();
     await Promise.allSettled(this.#retirementTasks.values());
     await Promise.all(
@@ -239,6 +257,7 @@ export class AnchorSchedulerRuntime {
     this.#executorByAssignment.clear();
     this.#artifactAuthorityByAssignment.clear();
     this.#schedulerNoticeDisposer();
+    if (stopFailure) throw stopFailure;
   }
 
   /** Called after the RPC server exists, so recovered manual surfaces can resume. */

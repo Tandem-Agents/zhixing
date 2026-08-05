@@ -14,6 +14,7 @@ import type {
   TaskDefinition,
 } from "@zhixing/core/contracts";
 import { validateTaskDefinition } from "@zhixing/core/protocol";
+import { CommittedMutationMaterializationError } from "@zhixing/core/protocol";
 import type {
   GlobalMutationCommitParticipant,
   GlobalMutationCommitRecord,
@@ -170,7 +171,9 @@ export class GlobalMutationCommitCoordinator {
       participant.ownsStagedMutation(input.mutation),
     );
     if (owners.length !== 1) {
-      throw new Error("Committed global mutation has no unique anchor owner");
+      throw new CommittedMutationMaterializationError(
+        "Committed global mutation has no unique anchor owner",
+      );
     }
     await owners[0]!.applyStagedMutation(input);
   }
@@ -206,7 +209,9 @@ export class GlobalMutationCommitCoordinator {
     await this.#refreshSchedule([taskId]);
     const definition = this.#scheduleDefinitionFor(taskId);
     if (!definition || definition.taskRevision < targetRevision) {
-      throw new Error("Committed schedule revision is unavailable for projection");
+      throw new CommittedMutationMaterializationError(
+        "Committed schedule revision is unavailable for projection",
+      );
     }
     await this.#log.transactDurableProjection(
       SCHEDULE_AUTHORITY_PROJECTION_ID,

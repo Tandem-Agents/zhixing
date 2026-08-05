@@ -161,6 +161,16 @@ export class MemoryStore {
     return results;
   }
 
+  /** Reads the frozen legacy source without converting I/O failures into absence. */
+  async readAuthorityTakeoverSnapshot(): Promise<MemoryEntry[]> {
+    const profile = await this.loadStrict("profile", "profile");
+    return [
+      ...(profile ? [profile] : []),
+      ...(await this.listStrict("person")),
+      ...(await this.listStrict("journal")),
+    ];
+  }
+
   // ─── 路径工具 ───
 
   private categoryDir(category: MemoryCategory): string {
@@ -177,4 +187,56 @@ export class MemoryStore {
     }
     return path.join(this.categoryDir(category), `${id}.md`);
   }
+
+  private async loadStrict(
+    category: MemoryCategory,
+    id: string,
+  ): Promise<MemoryEntry | null> {
+    const filePath = this.resolvePath(category, id);
+    let raw: string;
+    try {
+      raw = await fs.readFile(filePath, "utf-8");
+    } catch (error) {
+      if (isMissingPath(error)) return null;
+      throw error;
+    }
+    const parsed = parseFrontmatter(raw);
+    return {
+      category,
+      id,
+      meta: parsed.data as Record<string, unknown>,
+      content: parsed.content,
+      filePath,
+    };
+  }
+
+  private async listStrict(category: MemoryCategory): Promise<MemoryEntry[]> {
+    let files: string[];
+    try {
+      files = await fs.readdir(this.categoryDir(category));
+    } catch (error) {
+      if (isMissingPath(error)) return [];
+      throw error;
+    }
+    const entries: MemoryEntry[] = [];
+    for (const file of files.sort((left, right) => left.localeCompare(right, "en-US"))) {
+      if (!file.endsWith(".md")) continue;
+      const id = file.slice(0, -3);
+      const entry = await this.loadStrict(category, id);
+      if (!entry) {
+        throw new Error("Legacy memory changed while its source set was frozen");
+      }
+      entries.push(entry);
+    }
+    return entries;
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
 }

@@ -32,6 +32,7 @@ import type {
   CommitEnvelope,
   DispatchResult,
   GovernorRecord,
+  GlobalStagedMutation,
   JobOccurrence,
   JobChannelChallengeToken,
   JobRunState,
@@ -131,6 +132,7 @@ import {
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import { ManifestSelectionError } from "./conversation-assignment-authority.js";
 import type { AssignmentResourceCoordinator } from "./resource-governor.js";
+import { publishConflictProductCopy } from "./publish-result-product-language.js";
 import {
   compileDeliveryContent,
   DeliveryContentValidationError,
@@ -589,6 +591,7 @@ export interface JobCommitParticipant {
       { readonly t: "granted" }
     >;
   }): Promise<void>;
+  wakePendingPublishing?(taskId: string): void;
   resumePendingPublishing?(taskId: string): Promise<void>;
 }
 
@@ -4136,10 +4139,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         assignmentId,
       });
       this.#assertAssignmentUsageFinal(guardAssigned.record, bundle.usageFinal);
-      if (this.#commitParticipant?.resumePendingPublishing) {
-        void this.#commitParticipant.resumePendingPublishing(this.#taskId)
-          .catch(() => undefined);
-      }
+      this.#commitParticipant?.wakePendingPublishing?.(this.#taskId);
       return { committed: true, commitRevision: guardCommitted.jobRevision };
     }
     let closure: ValidatedJobBundleClosure;
@@ -4398,7 +4398,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
                   jobRunId: occurrence.jobRunId,
                   assignmentId,
                   seq: item.seq,
-                  mutation: record.mutation,
+                  mutation: record.mutation as GlobalStagedMutation,
                   outcome: item.outcome,
                   taskName: definition.definition.spec.name,
                   at: prefix.at,
@@ -4430,10 +4430,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       this.#commitParticipant?.readProjectionIds ?? [],
     );
     if (transaction.value.committed) {
-      if (this.#commitParticipant?.resumePendingPublishing) {
-        void this.#commitParticipant.resumePendingPublishing(this.#taskId)
-          .catch(() => undefined);
-      }
+      this.#commitParticipant?.wakePendingPublishing?.(this.#taskId);
       await this.resumeCompatibilityProjection();
     }
     return transaction.value;
@@ -10555,7 +10552,7 @@ function schedulerPublishResultDraft(input: {
   readonly jobRunId: string;
   readonly assignmentId: string;
   readonly seq: number;
-  readonly mutation: Extract<AssignmentRecord, { t: "staged-mutation" }>["mutation"];
+  readonly mutation: GlobalStagedMutation;
   readonly outcome: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"];
   readonly taskName: string;
   readonly at: string;
@@ -10566,9 +10563,24 @@ function schedulerPublishResultDraft(input: {
     seq: input.seq,
     outcome: input.outcome,
   })}`;
-  const reason = input.outcome.t === "conflicted"
-    ? `定时任务「${input.taskName}」未能保存“${publishMutationLabel(input.mutation.kind)}”：${input.outcome.error.message}。`
-    : schedulerAppliedResultText(input.taskName, input.outcome.appliedResult!);
+  const product = input.outcome.t === "conflicted"
+    ? (() => {
+        const copy = publishConflictProductCopy(
+          input.mutation.kind,
+          input.outcome.error.code,
+        );
+        return {
+          reason: `定时任务「${input.taskName}」未能完成“${copy.mutationLabel}”：${copy.reason}。`,
+          actions: [...copy.actions],
+        };
+      })()
+    : {
+        reason: schedulerAppliedResultText(
+          input.taskName,
+          input.outcome.appliedResult!,
+        ),
+        actions: ["查看场景"],
+      };
   return {
     noticeId,
     kind: "publish-result",
@@ -10581,10 +10593,8 @@ function schedulerPublishResultDraft(input: {
       seq: input.seq,
       decision,
     },
-    reason,
-    actions: input.outcome.t === "conflicted"
-      ? ["检查当前内容后重试", "放弃这项修改"]
-      : ["查看场景"],
+    reason: product.reason,
+    actions: product.actions,
     at: input.at,
   };
 }
@@ -10606,14 +10616,6 @@ function schedulerAppliedResultText(
         ? `定时任务「${taskName}」已更新场景「${result.scene.name}」的工作目录。`
         : `定时任务「${taskName}」已解除场景「${result.scene.name}」的工作目录。`;
   }
-}
-
-function publishMutationLabel(kind: string): string {
-  if (kind.startsWith("workscene-")) return "场景修改";
-  if (kind.startsWith("memory-")) return "记忆修改";
-  if (kind.startsWith("skill-")) return "技能修改";
-  if (kind.startsWith("schedule-")) return "定时任务修改";
-  return "本轮修改";
 }
 
 function assertLedgerAcknowledgesCommittedBundle(

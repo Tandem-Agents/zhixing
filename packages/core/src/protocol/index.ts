@@ -288,6 +288,7 @@ export {
   acceptedRemoteIntervalRemainingMs,
   acceptedRemoteIntervalStatus,
   AuthorityMethodForbiddenError,
+  CommittedMutationMaterializationError,
   assertActivatedAssignmentCapability,
   assertActivePermissionSnapshotLease,
   assertAuthorizedOwnerControlGrant,

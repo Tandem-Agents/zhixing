@@ -823,8 +823,8 @@ export async function setupAuthorityRuntime(
           anchorEpoch,
           scopeRoot: (scope) =>
             scope.kind === "personal"
-              ? getMemoryDir()
-              : getWorkSceneMemoryDir(scope.sceneId),
+              ? getMemoryDir(options.zhixingHome)
+              : getWorkSceneMemoryDir(scope.sceneId, options.zhixingHome),
           clock,
         })
       : undefined;
@@ -863,7 +863,36 @@ export async function setupAuthorityRuntime(
       );
     }
     await worksceneGlobalState?.initializeStagedPublishing();
-    await memoryGlobalState?.initializeStagedPublishing();
+    if (memoryGlobalState) {
+      const memoryScopes: Array<
+        { readonly kind: "personal" } |
+        { readonly kind: "workscene"; readonly sceneId: string }
+      > = [{ kind: "personal" }];
+      if (worksceneGlobalState) {
+        const listed = await worksceneGlobalState.read(
+          { kind: "workscene-list" },
+          {
+            principal: {
+              kind: "host",
+              component: "memory-legacy-cutover",
+            },
+            requestId: "memory-legacy-cutover:workscene-list",
+            deadlineAt: new Date(Date.parse(clock()) + 30_000).toISOString(),
+            authority: { domain: "global", anchorEpoch },
+          },
+        );
+        if (listed.kind !== "workscene-list") {
+          throw new Error("Workscene authority returned another read domain");
+        }
+        memoryScopes.push(
+          ...listed.scenes.map((scene) => ({
+            kind: "workscene" as const,
+            sceneId: scene.id,
+          })),
+        );
+      }
+      await memoryGlobalState.initializeStagedPublishing(memoryScopes);
+    }
     await skillGlobalState?.initializeStagedPublishing();
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,

@@ -1049,13 +1049,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       };
       await handle.writeFile(frame);
       await handle.sync();
-      const committedMetadata = await handle.stat();
       committed = true;
-      this.#verifiedTail = {
-        ...nextTail,
-        modifiedAt: committedMetadata.mtimeMs,
-        changedAt: committedMetadata.ctimeMs,
-      };
+      this.#verifiedTail = nextTail;
       for (const { projection, prepared, checkpoints } of preparedProjections) {
         projection.state.publish(prepared, checkpoints);
       }

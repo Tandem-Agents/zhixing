@@ -39,6 +39,6 @@ export interface ProfileData {
  * 工作场景的 scope 隔离另由装配期 root 注入覆盖（两层分工：本函数负责
  * 默认路径正确，root 注入负责物理隔离）。
  */
-export function getMemoryDir(): string {
-  return path.join(getZhixingHome(), "me");
+export function getMemoryDir(zhixingHome = getZhixingHome()): string {
+  return path.join(zhixingHome, "me");
 }

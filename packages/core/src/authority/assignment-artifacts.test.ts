@@ -192,6 +192,7 @@ describe("assignment artifact closure", () => {
       domain: "global",
       mutation: {
         kind: "skill-create",
+        mode: "main",
         record: {
           name: "inspection",
           description: "Inspect an assignment",

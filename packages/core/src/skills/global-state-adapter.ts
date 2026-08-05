@@ -26,6 +26,7 @@ import type {
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
+  CommittedMutationMaterializationError,
   protocolDigest,
 } from "../protocol/index.js";
 import { skillNameToId } from "./id.js";
@@ -331,7 +332,9 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         !replay ||
         (expectedRevision !== undefined && replay.targetRevision !== expectedRevision)
       ) {
-        throw new Error("Committed skill mutation is unavailable or changed");
+        throw new CommittedMutationMaterializationError(
+          "Committed skill mutation is unavailable or changed",
+        );
       }
       return;
     }
@@ -340,7 +343,9 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
       expectedRevision !== undefined &&
       record.targetRevision !== expectedRevision
     ) {
-      throw new Error("Committed skill mutation is unavailable or changed");
+      throw new CommittedMutationMaterializationError(
+        "Committed skill mutation is unavailable or changed",
+      );
     }
     const mutation = record.mutation;
     const skillId = mutationSkillId(mutation);
@@ -350,7 +355,11 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
       const entry = readSkillEntry(
         await this.#durable.get(skillEntryKey(skillId)),
       );
-      if (!entry) throw new Error("Committed skill entry is absent from its projection");
+      if (!entry) {
+        throw new CommittedMutationMaterializationError(
+          "Committed skill entry is absent from its projection",
+        );
+      }
       if (mutation.kind === "skill-usage" || mutation.kind === "skill-set-state") {
         await this.#store.materializeUsage(entry.id, entry.usage);
         if (mutation.kind === "skill-set-state") {
@@ -372,7 +381,9 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         if (current === undefined) return { kind: "return", value: undefined };
         const currentRecord = readPendingSkillRecord(current);
         if (currentRecord.targetRevision !== record.targetRevision) {
-          throw new Error("Skill materialization target changed");
+          throw new CommittedMutationMaterializationError(
+            "Skill materialization target changed",
+          );
         }
         return {
           kind: "append",

@@ -61,7 +61,11 @@ describe("PublishResultPresenter", () => {
       },
       decision: {
         t: "conflicted",
-        error: { code: "revision-conflict", message: "内容已变化", retryable: false },
+        error: {
+          code: "revision-conflict",
+          message: "anchor owner internal diagnostic",
+          retryable: false,
+        },
       },
     };
 
@@ -69,7 +73,7 @@ describe("PublishResultPresenter", () => {
     emit(structuredClone(notice));
 
     expect(lines).toEqual([
-      "这次未能保存“记忆修改”：内容已变化。请检查当前内容后重试，或放弃这项修改。",
+      "这次未能完成“删除记忆”：相关内容已被其他修改更新。查看最新内容后重试，放弃这项修改。",
     ]);
   });
 

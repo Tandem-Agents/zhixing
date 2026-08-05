@@ -204,6 +204,15 @@ export class AuthorityMethodForbiddenError extends TypeError {
   }
 }
 
+export class CommittedMutationMaterializationError extends Error {
+  readonly reasonCode = "COMMITTED_MUTATION_MATERIALIZATION_INVALID";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CommittedMutationMaterializationError";
+  }
+}
+
 export type HostComponentMethodRegistry = Readonly<
   Record<string, readonly HostMethodId[]>
 >;

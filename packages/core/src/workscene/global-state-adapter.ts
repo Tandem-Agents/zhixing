@@ -23,6 +23,7 @@ import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
   canonicalize,
+  CommittedMutationMaterializationError,
 } from "../protocol/index.js";
 import {
   runInMaintenanceContext,
@@ -150,7 +151,9 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
       replay.revision !== input.targetRevision ||
       canonicalize(replay) !== canonicalize(input.appliedResult)
     ) {
-      throw new Error("Committed workscene result is unavailable or changed");
+      throw new CommittedMutationMaterializationError(
+        "Committed workscene result is unavailable or changed",
+      );
     }
     if (replay.kind === "workscene-deleted") {
       await runInMaintenanceContext("foreground", () =>

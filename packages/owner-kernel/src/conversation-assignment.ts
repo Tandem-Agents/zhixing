@@ -132,6 +132,7 @@ import {
   type CompiledDeliveryContent,
 } from "@zhixing/core";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
+import { productizePublishAuthorityError } from "./publish-result-product-language.js";
 import type {
   ControlAdmissionJournal,
   ControlAdmissionOutcome,
@@ -5003,7 +5004,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       conversationId: this.#conversationId,
       runId: committed.runId,
       commitRevision: committed.commitRevision,
-      conflicts,
+      conflicts: conflicts.map((conflict) => ({
+        ...conflict,
+        error: productizePublishAuthorityError(conflict.error),
+      })),
     };
   }
 
@@ -10854,6 +10858,12 @@ function projectPublishResults(input: {
     if (item.outcome.t === "granted" && item.outcome.appliedResult === undefined) {
       continue;
     }
+    const publicOutcome = item.outcome.t === "conflicted"
+      ? {
+          t: "conflicted" as const,
+          error: productizePublishAuthorityError(item.outcome.error),
+        }
+      : item.outcome;
     results.push({
       conversationId: input.conversationId,
       runId: input.runId,
@@ -10862,7 +10872,7 @@ function projectPublishResults(input: {
       seq: item.seq,
       mutation: snapshot(record.mutation, "Publish result mutation") as GlobalStagedMutation,
       decision: snapshot(
-        item.outcome,
+        publicOutcome,
         "Publish result decision",
       ) as PublishResultNotice["decision"],
     });

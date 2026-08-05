@@ -4,6 +4,7 @@ import {
   validatePublishResultNotice,
 } from "@zhixing/core/protocol";
 import type { PublishResultNotice, WorksceneAppliedResult } from "@zhixing/core/contracts";
+import { publishConflictProductCopy } from "@zhixing/owner-kernel";
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
 import type { CoreHostLink } from "./core-host-connection.js";
@@ -106,7 +107,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function renderPublishResult(notice: PublishResultNotice): string {
   if (notice.decision.t === "conflicted") {
-    return `这次未能保存“${mutationLabel(notice.mutation.kind)}”：${notice.decision.error.message}。请检查当前内容后重试，或放弃这项修改。`;
+    const copy = publishConflictProductCopy(
+      notice.mutation.kind,
+      notice.decision.error.code,
+    );
+    return `这次未能完成“${copy.mutationLabel}”：${copy.reason}。${copy.actions.join("，")}。`;
   }
   return renderWorksceneResult(notice.decision.appliedResult);
 }
@@ -123,14 +128,6 @@ function renderWorksceneResult(result: WorksceneAppliedResult): string {
         ? `场景「${result.scene.name}」的工作目录已更新。`
         : `场景「${result.scene.name}」已解除工作目录。`;
   }
-}
-
-function mutationLabel(kind: PublishResultNotice["mutation"]["kind"]): string {
-  if (kind.startsWith("workscene-")) return "场景修改";
-  if (kind.startsWith("memory-")) return "记忆修改";
-  if (kind.startsWith("skill-")) return "技能修改";
-  if (kind.startsWith("schedule-")) return "定时任务修改";
-  return "本轮修改";
 }
 
 function validatePublishResultEnvelope(envelope: SessionEventEnvelope): {

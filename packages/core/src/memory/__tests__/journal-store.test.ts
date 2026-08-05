@@ -154,9 +154,10 @@ describe("JournalStore", () => {
     };
 
     it("凝练日志并生成月度文件", async () => {
-      // 创建 >30 天前的日志
-      const oldDate1 = daysAgo(35);
-      const oldDate2 = daysAgo(36);
+      // 固定在同一个已结束月份，避免月初时相邻天跨月。
+      const oldMonth = monthsAgo(2);
+      const oldDate1 = `${oldMonth}-01`;
+      const oldDate2 = `${oldMonth}-02`;
       await store.append("Day 1 content", oldDate1);
       await store.append("Day 2 content", oldDate2);
 
