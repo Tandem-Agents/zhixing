@@ -18,7 +18,10 @@ import type {
 import type {
   ArtifactStore,
   AuthorityCommitLog,
+  DurableProjectionMutation,
+  DurableProjectionReadContext,
   ProjectionCursor,
+  RebuildableDurableProjectionIndex,
 } from "../authority/index.js";
 import {
   assertPrincipalAllowsAuthorityMethod,
@@ -30,6 +33,12 @@ import { SkillStore } from "./store.js";
 import type { SkillCatalogEntry } from "./types.js";
 
 const SKILL_STREAM = "intent:skill-authority";
+export const SKILL_AUTHORITY_PROJECTION_ID = "global-skill-authority-v1";
+const SKILL_ENTRY_PREFIX = "entry:";
+const SKILL_REQUEST_PREFIX = "request:";
+const SKILL_PENDING_PREFIX = "pending:";
+const SKILL_META_KEY = "meta:catalog-revision";
+const SKILL_MATERIALIZATION_STREAM = "intent:skill-materialization";
 
 type SkillMutation =
   | Extract<
@@ -48,6 +57,12 @@ type SkillAuthorityRecord = {
   readonly entry?: SkillCatalogEntry;
   readonly removedId?: string;
   readonly at: string;
+};
+
+type SkillMaterializationRecord = {
+  readonly t: "skill-materialized";
+  readonly requestId: string;
+  readonly targetRevision: number;
 };
 
 interface SkillProjection {
@@ -74,6 +89,7 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
   readonly #store: SkillStore;
   readonly #anchorEpoch: number;
   readonly #clock: () => string;
+  readonly #durable: RebuildableDurableProjectionIndex;
   #projection: SkillProjection = emptyProjection();
   #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
@@ -84,7 +100,14 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     this.#store = options.store;
     this.#anchorEpoch = positiveInteger(options.anchorEpoch, "Skill anchor epoch");
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    this.#durable = this.#log.durableProjection({
+      projectionId: SKILL_AUTHORITY_PROJECTION_ID,
+      reducerVersion: 1,
+      reduce: reduceSkillDurableProjection,
+    });
   }
+
+  readonly stagedProjectionId = SKILL_AUTHORITY_PROJECTION_ID;
 
   async initializeStagedPublishing(): Promise<void> {
     await this.#ensureOpen();
@@ -95,21 +118,29 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     return isStagedSkillMutation(mutation);
   }
 
-  prepareStagedMutations(input: {
+  async prepareStagedMutations(input: {
     readonly records: ReadonlyArray<{
       readonly seq: number;
       readonly requestId: string;
       readonly mutation: GlobalStagedMutation;
     }>;
-  }): {
+    readonly authorityProjection: DurableProjectionReadContext;
+    readonly at: string;
+  }): Promise<{
     readonly records: readonly LogicalRecord[];
     readonly outcomes: ReadonlyMap<
       number,
       | { readonly t: "granted"; readonly targetRevision: number }
       | { readonly t: "conflicted"; readonly error: AuthorityError }
     >;
-  } {
-    let overlay = cloneProjection(this.#projection);
+  }> {
+    let overlay = await loadSkillProjectionForMutations(
+      input.authorityProjection,
+      input.records.map((record) => ({
+        requestId: record.requestId,
+        mutation: requireStagedSkillMutation(record.mutation),
+      })),
+    );
     const records: LogicalRecord[] = [];
     const outcomes = new Map<
       number,
@@ -117,14 +148,11 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
       | { readonly t: "conflicted"; readonly error: AuthorityError }
     >();
     for (const item of input.records) {
-      if (!isStagedSkillMutation(item.mutation)) {
-        throw new TypeError("Skill planner received another mutation domain");
-      }
       const planned = planMutation(
         overlay,
-        structuredClone(item.mutation),
+        structuredClone(requireStagedSkillMutation(item.mutation)),
         item.requestId,
-        this.#clock(),
+        input.at,
       );
       outcomes.set(item.seq, planned.outcome);
       if (!planned.record) continue;
@@ -146,21 +174,35 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     if (!isStagedSkillMutation(input.mutation)) {
       throw new TypeError("Skill materializer received another mutation domain");
     }
-    await this.#reload();
-    const replay = this.#projection.requests.get(input.requestId);
-    if (!replay || replay.targetRevision !== input.targetRevision) {
-      throw new Error("Committed skill mutation is unavailable or changed");
-    }
-    await this.#materialize(input.mutation);
+    await this.#materializePending(input.requestId, input.targetRevision);
   }
 
   async refreshStagedMutations(records: ReadonlyArray<{
+    readonly requestId: string;
     readonly mutation: GlobalStagedMutation;
   }>): Promise<void> {
-    await this.#reload();
+    if (records.length === 0) {
+      await this.#log.transactDurableProjection(
+        SKILL_AUTHORITY_PROJECTION_ID,
+        () => ({ kind: "return", value: undefined }),
+      );
+      let continuation: string | undefined;
+      do {
+        const page = await this.#durable.scan(
+          { gte: SKILL_PENDING_PREFIX, lt: `${SKILL_PENDING_PREFIX}\uffff` },
+          128,
+          continuation,
+        );
+        for (const entry of page.entries) {
+          await this.#materializePending(entry.key.slice(SKILL_PENDING_PREFIX.length));
+        }
+        continuation = page.continuation;
+      } while (continuation !== undefined);
+      return;
+    }
     for (const record of records) {
       if (isStagedSkillMutation(record.mutation)) {
-        await this.#materialize(record.mutation);
+        await this.#materializePending(record.requestId);
       }
     }
   }
@@ -174,17 +216,18 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     }
     this.#admit(context, "global.read");
     await this.#ensureOpen();
+    const projection = await readSkillProjection(this.#durable);
     if (query.kind === "skill-get") {
       return {
         kind: "skill-get",
-        catalogRevision: this.#projection.catalogRevision,
-        entry: cloneEntry(this.#projection.entries.get(query.skillId) ?? null),
+        catalogRevision: projection.catalogRevision,
+        entry: cloneEntry(projection.entries.get(query.skillId) ?? null),
       };
     }
     if (query.kind === "asset-index") {
       return {
         kind: "asset-index",
-        entries: [...this.#projection.entries.values()].map((entry) => ({
+        entries: [...projection.entries.values()].map((entry) => ({
           id: entry.id,
           kind: "skills" as const,
           revision: entry.revision,
@@ -192,14 +235,14 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         })),
       };
     }
-    let entries = [...this.#projection.entries.values()];
+    let entries = [...projection.entries.values()];
     if (!query.includeDisabled) entries = entries.filter((entry) => !entry.disabled);
     if (query.mode) entries = entries.filter((entry) => entry.mode === query.mode);
     entries.sort(compareEntries);
     if (query.limit !== undefined) entries = entries.slice(0, query.limit);
     return {
       kind: "skill-catalog",
-      catalogRevision: this.#projection.catalogRevision,
+      catalogRevision: projection.catalogRevision,
       entries: entries.map((entry) => cloneEntry(entry)!),
     };
   }
@@ -236,12 +279,16 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     >(
       this.#projection,
       reduceRecord,
-      (state) => {
+      async (_state, transactionContext) => {
+        const state = await loadSkillProjectionForMutations(
+          transactionContext.readProjection(SKILL_AUTHORITY_PROJECTION_ID),
+          [{ requestId: context.requestId, mutation }],
+        );
         const planned = planMutation(
           state,
           structuredClone(mutation),
           context.requestId,
-          this.#clock(),
+          transactionContext.at,
         );
         if (planned.outcome.t === "conflicted") {
           throw new SkillMutationConflictError(planned.outcome.error);
@@ -256,6 +303,7 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
       {
         cursor: this.#cursor,
         stream: SKILL_STREAM,
+        readProjectionIds: [SKILL_AUTHORITY_PROJECTION_ID],
         candidateReferences: skillCandidateReferences(
           this.#projection,
           mutation,
@@ -264,31 +312,82 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     );
     this.#projection = transaction.state;
     this.#cursor = transaction.cursor;
-    await this.#materialize(mutation);
+    await this.#materializePending(context.requestId, transaction.value.revision).catch(
+      () => undefined,
+    );
     return transaction.value;
   }
 
-  async #materialize(mutation: SkillMutation): Promise<void> {
-    const skillId = mutationSkillId(mutation);
-    if (mutation.kind === "skill-archive") {
-      await this.#store.materializeArchive(skillId);
-      return;
-    }
-    const entry = this.#projection.entries.get(skillId);
-    if (!entry) throw new Error("Committed skill entry is absent from its projection");
-    if (mutation.kind === "skill-usage" || mutation.kind === "skill-set-state") {
-      await this.#store.materializeUsage(entry.id, entry.usage);
-      if (mutation.kind === "skill-set-state") {
-        const document = Buffer.from(await this.#artifacts.get(entry.contentRef)).toString("utf8");
-        await this.#store.materializeAuthority(entry, document);
+  async #materializePending(
+    requestId: string,
+    expectedRevision?: number,
+  ): Promise<void> {
+    const pending = await this.#durable.get(skillPendingKey(requestId));
+    if (pending === undefined) {
+      const replay = readSkillRequest(
+        await this.#durable.get(skillRequestKey(requestId)),
+      );
+      if (
+        !replay ||
+        (expectedRevision !== undefined && replay.targetRevision !== expectedRevision)
+      ) {
+        throw new Error("Committed skill mutation is unavailable or changed");
       }
       return;
     }
-    if (mutation.kind === "skill-update" && mutation.skillId !== entry.id) {
-      await this.#store.materializeArchive(mutation.skillId);
+    const record = readPendingSkillRecord(pending);
+    if (
+      expectedRevision !== undefined &&
+      record.targetRevision !== expectedRevision
+    ) {
+      throw new Error("Committed skill mutation is unavailable or changed");
     }
-    const document = Buffer.from(await this.#artifacts.get(entry.contentRef)).toString("utf8");
-    await this.#store.materializeAuthority(entry, document);
+    const mutation = record.mutation;
+    const skillId = mutationSkillId(mutation);
+    if (mutation.kind === "skill-archive") {
+      await this.#store.materializeArchive(skillId);
+    } else {
+      const entry = readSkillEntry(
+        await this.#durable.get(skillEntryKey(skillId)),
+      );
+      if (!entry) throw new Error("Committed skill entry is absent from its projection");
+      if (mutation.kind === "skill-usage" || mutation.kind === "skill-set-state") {
+        await this.#store.materializeUsage(entry.id, entry.usage);
+        if (mutation.kind === "skill-set-state") {
+          const document = Buffer.from(await this.#artifacts.get(entry.contentRef)).toString("utf8");
+          await this.#store.materializeAuthority(entry, document);
+        }
+      } else {
+        if (mutation.kind === "skill-update" && mutation.skillId !== entry.id) {
+          await this.#store.materializeArchive(mutation.skillId);
+        }
+        const document = Buffer.from(await this.#artifacts.get(entry.contentRef)).toString("utf8");
+        await this.#store.materializeAuthority(entry, document);
+      }
+    }
+    await this.#log.transactDurableProjection<SkillMaterializationRecord, void>(
+      SKILL_AUTHORITY_PROJECTION_ID,
+      async (projection) => {
+        const current = await projection.get(skillPendingKey(requestId));
+        if (current === undefined) return { kind: "return", value: undefined };
+        const currentRecord = readPendingSkillRecord(current);
+        if (currentRecord.targetRevision !== record.targetRevision) {
+          throw new Error("Skill materialization target changed");
+        }
+        return {
+          kind: "append",
+          entries: [{
+            stream: SKILL_MATERIALIZATION_STREAM,
+            body: {
+              t: "skill-materialized",
+              requestId,
+              targetRevision: record.targetRevision,
+            },
+          }],
+          value: undefined,
+        };
+      },
+    );
   }
 
   async #ensureOpen(): Promise<void> {
@@ -519,6 +618,206 @@ function reduceRecord(
     targetRevision: record.targetRevision,
   });
   return { ...state, catalogRevision: record.catalogRevision };
+}
+
+async function reduceSkillDurableProjection(
+  envelope: import("../contracts/index.js").CommitEnvelope<JsonValue>,
+  current: DurableProjectionReadContext,
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const get = async (key: string): Promise<JsonValue | undefined> =>
+    overlay.has(key) ? overlay.get(key) : current.get(key);
+  const put = (key: string, value: JsonValue): void => {
+    overlay.set(key, value);
+    mutations.push({ kind: "put", key, value });
+  };
+  const tombstone = (key: string): void => {
+    overlay.set(key, undefined);
+    mutations.push({ kind: "tombstone", key });
+  };
+
+  for (const logical of envelope.entries) {
+    if (logical.stream === SKILL_STREAM) {
+      const record = readPendingSkillRecord(logical.body);
+      const requestKey = skillRequestKey(record.requestId);
+      if (await get(requestKey)) {
+        throw new TypeError("Skill authority request was duplicated");
+      }
+      const catalogRevision = readCatalogRevision(await get(SKILL_META_KEY));
+      if (record.catalogRevision !== catalogRevision + 1) {
+        throw new TypeError("Skill authority catalog revision is not contiguous");
+      }
+      if (record.removedId) tombstone(skillEntryKey(record.removedId));
+      if (record.entry) {
+        put(skillEntryKey(record.entry.id), cloneEntry(record.entry) as unknown as JsonValue);
+      }
+      put(requestKey, {
+        mutationDigest: record.mutationDigest,
+        targetRevision: record.targetRevision,
+      });
+      put(SKILL_META_KEY, record.catalogRevision);
+      put(skillPendingKey(record.requestId), structuredClone(record) as unknown as JsonValue);
+      continue;
+    }
+    if (logical.stream !== SKILL_MATERIALIZATION_STREAM) continue;
+    const record = readSkillMaterializationRecord(logical.body);
+    const pending = await get(skillPendingKey(record.requestId));
+    if (
+      !pending ||
+      readPendingSkillRecord(pending).targetRevision !== record.targetRevision
+    ) {
+      throw new TypeError("Skill materialization acknowledgement is stale");
+    }
+    tombstone(skillPendingKey(record.requestId));
+  }
+  return mutations;
+}
+
+async function loadSkillProjectionForMutations(
+  projection: DurableProjectionReadContext,
+  records: readonly { readonly requestId: string; readonly mutation: SkillMutation }[],
+): Promise<SkillProjection> {
+  const state: SkillProjection = {
+    ...emptyProjection(),
+    catalogRevision: readCatalogRevision(await projection.get(SKILL_META_KEY)),
+  };
+  const ids = new Set<string>();
+  for (const item of records) {
+    const request = readSkillRequest(
+      await projection.get(skillRequestKey(item.requestId)),
+    );
+    if (request) state.requests.set(item.requestId, request);
+    for (const id of skillMutationLookupIds(item.mutation)) ids.add(id);
+  }
+  for (const id of ids) {
+    const entry = readSkillEntry(await projection.get(skillEntryKey(id)));
+    if (entry) state.entries.set(id, entry);
+  }
+  return state;
+}
+
+async function readSkillProjection(
+  projection: RebuildableDurableProjectionIndex,
+): Promise<SkillProjection> {
+  const state: SkillProjection = {
+    ...emptyProjection(),
+    catalogRevision: readCatalogRevision(await projection.get(SKILL_META_KEY)),
+  };
+  let continuation: string | undefined;
+  do {
+    const page = await projection.scan(
+      { gte: SKILL_ENTRY_PREFIX, lt: `${SKILL_ENTRY_PREFIX}\uffff` },
+      256,
+      continuation,
+    );
+    for (const item of page.entries) {
+      const entry = readSkillEntry(item.value);
+      if (!entry) throw new TypeError("Skill authority projection entry is invalid");
+      state.entries.set(item.key.slice(SKILL_ENTRY_PREFIX.length), entry);
+    }
+    continuation = page.continuation;
+  } while (continuation !== undefined);
+  return state;
+}
+
+function skillMutationLookupIds(mutation: SkillMutation): readonly string[] {
+  if (mutation.kind === "skill-create" || mutation.kind === "skill-admit") {
+    return [requireSkillId(mutation.record.name)];
+  }
+  if (mutation.kind === "skill-update") {
+    return [mutation.skillId, requireSkillId(mutation.record.name)];
+  }
+  return [mutation.kind === "skill-usage" ? mutation.record.skillId : mutation.skillId];
+}
+
+function skillEntryKey(skillId: string): string {
+  return `${SKILL_ENTRY_PREFIX}${skillId}`;
+}
+
+function skillRequestKey(requestId: string): string {
+  return `${SKILL_REQUEST_PREFIX}${requestId}`;
+}
+
+function skillPendingKey(requestId: string): string {
+  return `${SKILL_PENDING_PREFIX}${requestId}`;
+}
+
+function readCatalogRevision(value: JsonValue | undefined): number {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new TypeError("Skill catalog revision projection is invalid");
+  }
+  return Number(value);
+}
+
+function readSkillRequest(value: JsonValue | undefined): {
+  readonly mutationDigest: string;
+  readonly targetRevision: number;
+} | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof value.mutationDigest !== "string" ||
+    !Number.isSafeInteger(value.targetRevision) || Number(value.targetRevision) <= 0
+  ) {
+    throw new TypeError("Skill request projection is invalid");
+  }
+  return {
+    mutationDigest: value.mutationDigest,
+    targetRevision: Number(value.targetRevision),
+  };
+}
+
+function readSkillEntry(value: JsonValue | undefined): SkillCatalogEntry | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Skill entry projection is invalid");
+  }
+  return cloneEntry(value as unknown as SkillCatalogEntry) ?? undefined;
+}
+
+function readPendingSkillRecord(value: unknown): SkillAuthorityRecord {
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    (value as { t?: unknown }).t !== "skill-mutation-applied"
+  ) {
+    throw new TypeError("Skill authority record is invalid");
+  }
+  const record = value as SkillAuthorityRecord;
+  if (
+    typeof record.requestId !== "string" || !record.requestId ||
+    !Number.isSafeInteger(record.targetRevision) || record.targetRevision <= 0 ||
+    !Number.isSafeInteger(record.catalogRevision) || record.catalogRevision <= 0 ||
+    !isSkillMutation(record.mutation)
+  ) {
+    throw new TypeError("Skill authority record is invalid");
+  }
+  return structuredClone(record);
+}
+
+function readSkillMaterializationRecord(value: unknown): SkillMaterializationRecord {
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    (value as { t?: unknown }).t !== "skill-materialized"
+  ) {
+    throw new TypeError("Skill materialization record is invalid");
+  }
+  const record = value as SkillMaterializationRecord;
+  if (
+    typeof record.requestId !== "string" || !record.requestId ||
+    !Number.isSafeInteger(record.targetRevision) || record.targetRevision <= 0
+  ) {
+    throw new TypeError("Skill materialization record is invalid");
+  }
+  return { ...record };
+}
+
+function requireStagedSkillMutation(mutation: GlobalStagedMutation): Extract<SkillMutation, GlobalStagedMutation> {
+  if (!isStagedSkillMutation(mutation)) {
+    throw new TypeError("Skill planner received another mutation domain");
+  }
+  return mutation;
 }
 
 function isSkillQuery(

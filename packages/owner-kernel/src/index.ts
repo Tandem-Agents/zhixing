@@ -11,6 +11,7 @@ export * from "./scheduler-user-notices.js";
 export * from "./scheduler-job-commit.js";
 export * from "./scheduler-conversation-publisher.js";
 export * from "./global-mutation-participant.js";
+export * from "./global-mutation-commit-coordinator.js";
 export * from "./delivery-participant.js";
 export * from "./delivery-control.js";
 export * from "./resource-governor.js";

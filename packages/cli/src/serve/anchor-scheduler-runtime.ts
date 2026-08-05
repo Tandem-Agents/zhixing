@@ -29,6 +29,7 @@ import {
   JobJournal,
   SchedulerJobCommitParticipant,
   SchedulerConversationMutationPublisher,
+  GlobalMutationCommitCoordinator,
   SchedulerUserNoticeJournal,
   assignmentReservationId,
   type AssignmentSubmissionAuthorizer,
@@ -105,6 +106,7 @@ export class AnchorSchedulerRuntime {
   readonly #options: AnchorSchedulerRuntimeOptions;
   readonly #issuer: JobAssignmentAuthority;
   readonly #commitParticipant: SchedulerJobCommitParticipant;
+  readonly #mutationCoordinator: GlobalMutationCommitCoordinator;
   readonly #journals = new Map<string, JobJournal>();
   readonly #executorByAssignment = new Map<string, string>();
   readonly #artifactAuthorityByAssignment = new Map<
@@ -165,16 +167,22 @@ export class AnchorSchedulerRuntime {
       ...(options.now ? { now: options.now } : {}),
       ...(options.onError ? { onError: options.onError } : {}),
     });
-    this.#commitParticipant = new SchedulerJobCommitParticipant({
-      definitionFor: (taskId) => this.scheduler.getDefinition(taskId),
-      applied: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
+    this.#mutationCoordinator = new GlobalMutationCommitCoordinator({
+      log: options.authority.authorityLog,
+      artifacts: options.authority.artifacts,
       participants: options.authority.globalMutationParticipants,
+      refreshSchedule: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
+      scheduleDefinitionFor: (taskId) => this.scheduler.getDefinition(taskId),
+    });
+    this.#commitParticipant = new SchedulerJobCommitParticipant({
+      coordinator: this.#mutationCoordinator,
+      log: options.authority.authorityLog,
+      artifacts: options.authority.artifacts,
     });
     options.protocol.bindMutationPublisher(
       new SchedulerConversationMutationPublisher({
         anchorEpoch: options.authority.anchorEpoch,
-        definitionFor: (taskId) => this.scheduler.getDefinition(taskId),
-        refresh: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
+        coordinator: this.#mutationCoordinator,
         sourceForAssignment: (assignmentId) => {
           const ingress = options.protocol.assignmentIngress(assignmentId);
           const origin =
@@ -189,7 +197,6 @@ export class AnchorSchedulerRuntime {
             createdInTurn: ingress.ingressId,
           };
         },
-        participants: options.authority.globalMutationParticipants,
       }),
     );
   }
@@ -205,6 +212,8 @@ export class AnchorSchedulerRuntime {
 
   async start(): Promise<void> {
     await this.scheduler.prepare();
+    await this.#mutationCoordinator.recoverDerivedState();
+    await this.#commitParticipant.resumePendingPublishing();
   }
 
   activate(): void {

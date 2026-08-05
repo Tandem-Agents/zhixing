@@ -1,3 +1,4 @@
+import type { DurableProjectionReadContext } from "@zhixing/core/authority";
 import type {
   AuthorityError,
   GlobalStagedMutation,
@@ -24,15 +25,18 @@ export interface GlobalMutationCommitRecord {
  * same commit as the run which granted them, then refresh its derived facade.
  */
 export interface GlobalMutationCommitParticipant {
+  /** Durable primary read model used for exact-prefix staged planning. */
+  readonly stagedProjectionId: string;
   ownsStagedMutation(mutation: GlobalStagedMutation): boolean;
   prepareStagedMutations(input: {
     readonly assignmentId: string;
-    readonly authorityPrefixLsn: number;
     readonly records: readonly GlobalMutationCommitRecord[];
-  }): {
+    readonly authorityProjection: DurableProjectionReadContext;
+    readonly at: string;
+  }): Promise<{
     readonly records: readonly LogicalRecord[];
     readonly outcomes: ReadonlyMap<number, GlobalMutationPublishOutcome>;
-  };
+  }>;
   applyStagedMutation(input: {
     readonly assignmentId: string;
     readonly seq: number;
@@ -41,5 +45,8 @@ export interface GlobalMutationCommitParticipant {
     readonly targetRevision: number;
     readonly appliedResult?: WorksceneAppliedResult;
   }): Promise<void>;
-  refreshStagedMutations?(records: readonly GlobalMutationCommitRecord[]): Promise<void>;
+  refreshStagedMutations?(
+    records: readonly GlobalMutationCommitRecord[],
+    requestId?: string,
+  ): Promise<void>;
 }

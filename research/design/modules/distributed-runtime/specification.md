@@ -1469,7 +1469,7 @@ type PublishRecord =       // mutation 发布进度（owner 侧）
   | { t: "publish-decision"; assignmentId: string; batch: { ref: ArtifactRef }; sessionCount: number; globalCount: number;
       outcomes: Array<{ seq: number;                               // 逐条终审（同一 batch 可部分 granted 部分 conflicted）：
         outcome: { t: "granted"; targetRevision: number;
-                    worksceneApplied?: WorksceneAppliedResult }    // workscene staged 启用后必填且与 batch 对应项全等；其他项必须省略
+                    appliedResult?: WorksceneAppliedResult }       // workscene staged 启用后必填且与 batch 对应项全等；其他项必须省略
                 | { t: "conflicted"; error: AuthorityError } }> }  // conflicted = 逐条终态，随 FinalFrame 计入并经控制事件呈现
   | { t: "publish-progress"; assignmentId: string; domain: "session"|"global"; upToSeq: number;
       state: "pending"|"settled" };                                // 只管 granted 项的幂等物化进度（暂时性失败重试、重启续发）
@@ -1649,7 +1649,11 @@ interface DeferredGlobalIntent {         // 本地域离线期间的全局写候
 
 ### 4.4 MutationBatch 与发布收敛
 
-staged 写按序落 executor 域 log（`staged-mutation` 记录），run 内经内存 overlay 读己之写、外界只见 provisional。封包时导出不可变 `MutationBatch { assignmentId, records: staged-mutation[], count, digest }`（digest 按 §1.2 自摘要）为 artifact，**先于提交上传**至 owner 侧 ArtifactStore；bundle 引用其 `ArtifactRef + 分域计数`。**发布收敛（可保证终态）**：owner CAS 前对 batch 内 global 域逐条全量校验——anchorEpoch 当前、CAS 类 expectedRevision 匹配、业务预检通过（global staged 只存在于锚点域 run，owner 即锚点，同进程校验结构性可行）；校验结果由同一 envelope 的 `publish-decision.outcomes` **逐条终审**：granted 分配目标 revision，自此为不可拒绝的权威决定；workscene 项还须在同一 outcome 固化完整 `WorksceneAppliedResult`，该结果的 sceneId / revision 只生成一次，重启物化与响应重放逐字复用。两者的 operation 必须同 kind，existing-object 操作的 sceneId 必须相同，rename / set-workdir 的对象 revision 必须是已校验 expectedRevision 的确定后继，delete 的 previousObjectRevision 必须等于已校验值，外层 revision 必须等于 targetRevision；任一不符，或在非 workscene 项出现 `worksceneApplied`，均按损坏拒绝。发布仅是幂等物化（暂时性失败重试，重启续发）；conflicted 即逐条终态——run 照常 committed（run 结果不为全局写冲突陪葬），冲突计数随 `FinalFrame.publishConflicts` 到达 surface、明细以 `PublishConflictNotice` 经 owner 控制事件通道（`scope:"control"`）投递同会话 observer，由用户重发对应 control 写或放弃，绝不无限 pending。
+staged 写按序落 executor 域 log（`staged-mutation` 记录），run 内经内存 overlay 读己之写、外界只见 provisional。封包时导出不可变 `MutationBatch { assignmentId, records: staged-mutation[], count, digest }`（digest 按 §1.2 自摘要）为 artifact，**先于提交上传**至 owner 侧 ArtifactStore；bundle 引用其 `ArtifactRef + 分域计数`。**发布收敛（可保证终态）**：owner CAS 前对 batch 内 global 域逐条全量校验——anchorEpoch 当前、CAS 类 expectedRevision 匹配、业务预检通过（global staged 只存在于锚点域 run，owner 即锚点，同进程校验结构性可行）；校验结果由同一 envelope 的 `publish-decision.outcomes` **逐条终审**：granted 分配目标 revision，自此为不可拒绝的权威决定；workscene 项还须在同一 outcome 固化完整 `WorksceneAppliedResult`，该结果的 sceneId / revision 只生成一次，重启物化与响应重放逐字复用。两者的 operation 必须同 kind，existing-object 操作的 sceneId 必须相同，rename / set-workdir 的对象 revision 必须是已校验 expectedRevision 的确定后继，delete 的 previousObjectRevision 必须等于已校验值，外层 revision 必须等于 targetRevision；任一不符，或在非 workscene 项出现 `appliedResult`，均按损坏拒绝。发布仅是幂等物化（暂时性失败重试，重启续发）；conflicted 即逐条终态——run 照常 committed（run 结果不为全局写冲突陪葬），冲突计数随 `FinalFrame.publishConflicts` 到达 surface、明细以 `PublishConflictNotice` 经 owner 控制事件通道（`scope:"control"`）投递同会话 observer，由用户重发对应 control 写或放弃，绝不无限 pending。
+
+global staged 的 schedule、memory、skill 与 workscene 统一由锚点 `GlobalMutationCommitCoordinator` 在持有 AuthorityCommitLog 写锁时处理：固定顺序追平四域耐久 read-view，纯规划全部 outcome 与 projection delta，全部准备成功后才以一个 CommitEnvelope / 单次 fsync 提交；fsync 后四域主读投影只发布已准备 delta，不再执行可失败工作。control 写保留独立产品入口，但复用同一日志栅栏和域 reducer。兼容文件、删除清理与 runtime refresh 是由权威记录和逐域耐久 checkpoint 驱动的派生物化，前台只唤醒，失败不得形成“未提交”假阴性，启动按 pending 有界续扫。
+
+job owner 在 committed envelope 内把 `publish-decision + MutationBatch` 反绑为按 `(taskId,assignmentId)` 定位的 pending 事实，并以 `publish-progress` 逐 seq 推进；恢复只分页读取 pending，不扫描任务全历史，只重驱 granted 且仍需外部物化的 global 项，conflicted、delivery-enqueue 与已随 fsync 完成的主投影零 apply。物化成功但 progress 响应丢失、owner 连续重启或 executor 离线均回放同一幂等域 driver，settled 后移除 pending。
 
 ```ts
 interface PublishConflictNotice {                 // 冲突明细的机械合同：surface 可识别失败项、原因与重试对象

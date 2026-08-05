@@ -295,20 +295,24 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | ConversationLosslessDataPlane
     | undefined;
   #mutationPublisher: ConversationMutationPublisher | undefined;
-  readonly #mutationPublisherProxy: ConversationMutationPublisher = {
-    decideGlobalBatchAtPrefix: (input) =>
-      this.#requiredMutationPublisher().decideGlobalBatchAtPrefix(input),
-    prepareGlobalBatchAtPrefix: (input) => {
-      const publisher = this.#requiredMutationPublisher();
-      return publisher.prepareGlobalBatchAtPrefix?.(input) ?? {
-        outcomes: publisher.decideGlobalBatchAtPrefix(input),
-        records: [],
-      };
-    },
-    apply: (input) => this.#requiredMutationPublisher().apply(input),
-  };
+  readonly #mutationPublisherProxy: ConversationMutationPublisher;
 
   constructor(options: ConversationProtocolRuntimeOptions) {
+    const runtime = this;
+    this.#mutationPublisherProxy = {
+      get readProjectionIds() {
+        return runtime.#requiredMutationPublisher().readProjectionIds;
+      },
+      decideGlobalBatchAtPrefix: (input) =>
+        this.#requiredMutationPublisher().decideGlobalBatchAtPrefix(input),
+      prepareGlobalBatchAtPrefix: async (input) => {
+        const publisher = this.#requiredMutationPublisher();
+        return await (publisher.prepareGlobalBatchAtPrefix?.(input) ??
+          Promise.resolve(publisher.decideGlobalBatchAtPrefix(input))
+            .then((outcomes) => ({ outcomes, records: [] })));
+      },
+      apply: (input) => this.#requiredMutationPublisher().apply(input),
+    };
     this.#authority = options.authority;
     this.#manager = options.manager;
     this.#clock = options.clock ?? (() => new Date().toISOString());

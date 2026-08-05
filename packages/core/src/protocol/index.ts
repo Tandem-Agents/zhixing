@@ -135,6 +135,7 @@ export {
   validateAuthorityError,
   validatePublishDecisionForBatch,
   validatePublishDecisionRecord,
+  validatePublishResultNotice,
 } from "./contract-validation.js";
 export {
   validateGlobalQuery,
@@ -191,6 +192,7 @@ export {
   validateAssignmentStagedReceipt,
   validateSealedBundle,
   validateStagedMutationRecord,
+  validateGlobalStagedMutation,
   validateTranscriptRunRecord,
   type ArtifactValue,
 } from "./commit.js";

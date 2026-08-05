@@ -563,12 +563,14 @@ export interface JobCompatibilityProjection {
 }
 
 export interface JobCommitParticipant {
+  readonly readProjectionIds?: readonly string[];
   prepare(input: {
     readonly authorityPrefixLsn: number;
+    readonly authorityContext: ProjectionTransactionContext;
     readonly occurrence: JobOccurrence;
     readonly bundle: JobBundle;
     readonly mutationBatch: MutationBatch;
-  }):
+  }): Promise<
     | {
         readonly accepted: true;
         readonly records: readonly LogicalRecord[];
@@ -577,11 +579,17 @@ export interface JobCommitParticipant {
           Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"]
         >;
       }
-    | { readonly accepted: false; readonly error: AuthorityError };
-  applied?(input: {
+    | { readonly accepted: false; readonly error: AuthorityError }>;
+  applyGranted?(input: {
     readonly assignmentId: string;
+    readonly seq: number;
     readonly mutationBatch: MutationBatch;
+    readonly outcome: Extract<
+      Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"],
+      { readonly t: "granted" }
+    >;
   }): Promise<void>;
+  resumePendingPublishing?(taskId: string): Promise<void>;
 }
 
 export interface SystemJobResourceCoordinator {
@@ -4128,6 +4136,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         assignmentId,
       });
       this.#assertAssignmentUsageFinal(guardAssigned.record, bundle.usageFinal);
+      if (this.#commitParticipant?.resumePendingPublishing) {
+        void this.#commitParticipant.resumePendingPublishing(this.#taskId)
+          .catch(() => undefined);
+      }
       return { committed: true, commitRevision: guardCommitted.jobRevision };
     }
     let closure: ValidatedJobBundleClosure;
@@ -4150,7 +4162,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       | { readonly committed: true; readonly commitRevision: number }
       | { readonly committed: false; readonly error: AuthorityError }
     >(
-      (state, prefix) => {
+      async (state, prefix) => {
         const exact = state.committed.get(assignmentId);
         if (exact) {
           if (canonicalize(exact.bundle) !== canonicalize({ ref: artifact.ref })) {
@@ -4268,8 +4280,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               ),
             };
           }
-          const prepared = this.#commitParticipant.prepare({
+          const prepared = await this.#commitParticipant.prepare({
             authorityPrefixLsn: prefix.lastLsn,
+            authorityContext: prefix,
             occurrence,
             bundle,
             mutationBatch,
@@ -4350,6 +4363,22 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             body: decision,
           });
           if (
+            mutationBatch.records.some((record) =>
+              record.domain === "global" && record.mutation.kind !== "delivery-enqueue"
+            )
+          ) {
+            entries.push({
+              stream: "publish",
+              body: {
+                t: "publish-progress",
+                assignmentId,
+                domain: "global",
+                upToSeq: 0,
+                state: "pending",
+              } satisfies Extract<PublishRecord, { t: "publish-progress" }>,
+            });
+          }
+          if (
             this.#schedulerNotices &&
             definition.definition.kind === "user"
           ) {
@@ -4398,13 +4427,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         };
       },
       [...closure.references, ...compiledDelivery.references],
+      this.#commitParticipant?.readProjectionIds ?? [],
     );
     if (transaction.value.committed) {
-      if (closure.batch && this.#commitParticipant?.applied) {
-        await this.#commitParticipant.applied({
-          assignmentId,
-          mutationBatch: closure.batch,
-        });
+      if (this.#commitParticipant?.resumePendingPublishing) {
+        void this.#commitParticipant.resumePendingPublishing(this.#taskId)
+          .catch(() => undefined);
       }
       await this.resumeCompatibilityProjection();
     }
@@ -5281,8 +5309,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     decide: (
       state: JobProjection,
       prefix: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<unknown, Value>,
+    ) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
     candidateReferences: readonly ArtifactRef[] = [],
+    readProjectionIds: readonly string[] = [],
   ) {
     return this.#operations.run(async () => {
       const cached = this.#projection;
@@ -5295,8 +5324,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         >(
           cached?.state ?? emptyProjection(),
           this.#reduce,
-          (state, context) => {
-            const decision = decide(state, context);
+          async (state, context) => {
+            const decision = await decide(state, context);
             if (decision.kind !== "append") return decision;
             const resourceRecords = this.#prepareAssignmentResourceTerminalRecords(
               state,
@@ -5329,6 +5358,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             stream: jobStream(this.#taskId),
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
+            readProjectionIds,
           },
         ));
         const coordinateSystem = () =>

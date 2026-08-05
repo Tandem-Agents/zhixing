@@ -15,7 +15,10 @@ import type {
   WorksceneWriteMutation,
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
-import type { AuthorityCommitLog } from "../authority/index.js";
+import type {
+  AuthorityCommitLog,
+  DurableProjectionReadContext,
+} from "../authority/index.js";
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
@@ -29,6 +32,7 @@ import {
 } from "../resources/index.js";
 import {
   AnchorWorksceneRegistry,
+  WORKSCENE_AUTHORITY_PROJECTION_ID,
   WorksceneConflictError,
 } from "./authority-registry.js";
 import { IncrementalWorksceneActivityProjection } from "./activity-projection.js";
@@ -97,6 +101,8 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     }
   }
 
+  readonly stagedProjectionId = WORKSCENE_AUTHORITY_PROJECTION_ID;
+
   async initializeStagedPublishing(): Promise<void> {
     await this.#registry.initialize();
   }
@@ -105,23 +111,27 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     return isWorksceneWrite(mutation);
   }
 
-  prepareStagedMutations(input: {
+  async prepareStagedMutations(input: {
     readonly records: ReadonlyArray<{
       readonly seq: number;
       readonly requestId: string;
       readonly mutation: GlobalStagedMutation;
     }>;
-  }): {
+    readonly authorityProjection: DurableProjectionReadContext;
+    readonly at: string;
+  }): Promise<{
     readonly records: readonly LogicalRecord[];
     readonly outcomes: ReturnType<AnchorWorksceneRegistry["planStaged"]>["outcomes"];
-  } {
-    return this.#registry.planStaged(
+  }> {
+    return this.#registry.planStagedAtProjection(
       input.records.map((record) => {
         if (!isWorksceneWrite(record.mutation)) {
           throw new TypeError("Workscene planner received another mutation domain");
         }
         return { ...record, mutation: record.mutation };
       }),
+      input.authorityProjection,
+      input.at,
     );
   }
 
@@ -240,7 +250,7 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     if (result.kind === "workscene-deleted") {
       await runInMaintenanceContext("foreground", () =>
         this.#projectDeletion(result.sceneId, result.revision),
-      );
+      ).catch(() => this.#triggerRecovery());
     }
     return result as WorksceneAppliedResult;
   }

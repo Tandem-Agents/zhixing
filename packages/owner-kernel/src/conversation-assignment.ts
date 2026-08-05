@@ -438,42 +438,37 @@ export type ConversationLifecycleProjection = (
   input: ConversationLifecycleProjectionInput,
 ) => Promise<void>;
 
+export type ConversationGlobalMutationDecision = ReadonlyArray<{
+  readonly seq: number;
+  readonly outcome:
+    | {
+        readonly t: "granted";
+        readonly targetRevision: number;
+        readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
+      }
+    | {
+        readonly t: "conflicted";
+        readonly error: import("@zhixing/core/contracts").AuthorityError;
+      };
+}>;
+
 export interface ConversationMutationPublisher {
-  /**
-   * Pure batch decision over this AuthorityCommitLog projected through authorityPrefixLsn.
-   * The projection must include prior granted publish decisions so revisions are reserved at
-   * the same serialization point as the conversation commit.
-   */
+  readonly readProjectionIds?: readonly string[];
   decideGlobalBatchAtPrefix(input: {
     readonly assignmentId: string;
     readonly authorityPrefixLsn: number;
+    readonly authorityContext: ProjectionTransactionContext;
     readonly records: ReadonlyArray<{
       readonly seq: number;
       readonly mutation: GlobalStagedMutation;
       readonly requestId: string;
       readonly expected: { readonly anchorEpoch: number };
     }>;
-  }): ReadonlyArray<{
-    readonly seq: number;
-    readonly outcome:
-      | {
-          readonly t: "granted";
-          readonly targetRevision: number;
-          readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
-        }
-      | {
-          readonly t: "conflicted";
-          readonly error: import("@zhixing/core/contracts").AuthorityError;
-        };
-  }>;
-  /**
-   * A publisher that owns records in the same physical authority log may
-   * materialize granted mutations atomically with the conversation commit.
-   * Legacy publishers can omit this method and retain post-commit apply.
-   */
+  }): ConversationGlobalMutationDecision | Promise<ConversationGlobalMutationDecision>;
   prepareGlobalBatchAtPrefix?(input: {
     readonly assignmentId: string;
     readonly authorityPrefixLsn: number;
+    readonly authorityContext: ProjectionTransactionContext;
     readonly records: ReadonlyArray<{
       readonly seq: number;
       readonly mutation: GlobalStagedMutation;
@@ -481,11 +476,12 @@ export interface ConversationMutationPublisher {
       readonly expected: { readonly anchorEpoch: number };
     }>;
   }): {
-    readonly outcomes: ReturnType<
-      ConversationMutationPublisher["decideGlobalBatchAtPrefix"]
-    >;
+    readonly outcomes: ConversationGlobalMutationDecision;
     readonly records: readonly LogicalRecord<unknown>[];
-  };
+  } | Promise<{
+    readonly outcomes: ConversationGlobalMutationDecision;
+    readonly records: readonly LogicalRecord<unknown>[];
+  }>;
   /** Granted decisions are final; replaying the same assignment/seq must not duplicate effects. */
   apply(input: {
     readonly assignmentId: string;
@@ -4202,7 +4198,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             readonly error: import("@zhixing/core/contracts").AuthorityError;
           }
       >(
-        (state, authorityPrefix) => {
+        async (state, authorityPrefix) => {
         this.#assertActivatedSubmissionCapability(state, ctx, {
           method: "submission.submitBundle",
           assignmentId,
@@ -4433,16 +4429,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           const globalInput = {
             assignmentId: bundle.assignmentId,
             authorityPrefixLsn: authorityPrefix.lastLsn,
+            authorityContext: authorityPrefix,
             records: globalRecords,
           };
           const prepared =
             globalRecords.length === 0
               ? { outcomes: [] as const, records: [] as const }
-              : this.#publisher!.prepareGlobalBatchAtPrefix?.(globalInput) ?? {
-                  outcomes:
-                    this.#publisher!.decideGlobalBatchAtPrefix(globalInput),
-                  records: [] as const,
-                };
+              : await (this.#publisher!.prepareGlobalBatchAtPrefix?.(globalInput) ??
+                  Promise.resolve(this.#publisher!.decideGlobalBatchAtPrefix(globalInput))
+                    .then((outcomes) => ({ outcomes, records: [] as const })));
           assertGlobalMutationRecords(
             prepared.records,
             runStream(this.#conversationId),
@@ -4580,6 +4575,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         };
         },
         [...references, ...compiledDelivery.references],
+        this.#publisher?.readProjectionIds ?? [],
       ).catch((error: unknown) => {
         if (error instanceof AuthorityStorageError && error.code === "artifact-missing") {
           return undefined;
@@ -7982,8 +7978,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     decide: (
       state: RunProjection,
       authorityPrefix: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<unknown, Value>,
+    ) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
     candidateReferences: readonly ArtifactRef[] = [],
+    readProjectionIds: readonly string[] = [],
   ) {
     return this.#operations.run(async () => {
       try {
@@ -7996,8 +7993,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         >(
           cached?.state ?? emptyProjection(this.#conversationId),
           this.#reduce,
-          (state, context) => {
-            const decision = decide(state, context);
+          async (state, context) => {
+            const decision = await decide(state, context);
             if (decision.kind !== "append") return decision;
             const statuses = conversationStatusDeliveryInputs(
               this.#conversationId,
@@ -8022,6 +8019,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             stream: runStream(this.#conversationId),
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
+            readProjectionIds,
           },
         ));
         const transaction = await (
@@ -10474,9 +10472,7 @@ function canonicalTime(value: IsoTime, label: string): number {
   return timestamp;
 }
 
-type GlobalPublishBatch = ReturnType<
-  ConversationMutationPublisher["decideGlobalBatchAtPrefix"]
->;
+type GlobalPublishBatch = ConversationGlobalMutationDecision;
 type GlobalPublishOutcome = GlobalPublishBatch[number]["outcome"];
 
 function indexGlobalPublishBatchOutcomes(

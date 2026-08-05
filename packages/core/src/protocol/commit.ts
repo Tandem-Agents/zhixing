@@ -540,7 +540,9 @@ function validateSessionStagedMutation(mutation: StagedMutationRecord["mutation"
   }
 }
 
-function validateGlobalStagedMutation(mutation: StagedMutationRecord["mutation"]): void {
+export function validateGlobalStagedMutation(
+  mutation: StagedMutationRecord["mutation"],
+): void {
   switch (mutation.kind) {
     case "memory-append":
       assertExactKeys(mutation, ["kind", "payload"], "Memory staged mutation");

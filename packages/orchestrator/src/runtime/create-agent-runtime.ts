@@ -629,11 +629,7 @@ export interface CreateAgentRuntimeOptions {
    * per-run 上下文通过 runContextStorage 传递。
    */
   profile?: AgentRoleProfile;
-  /**
-   * 个人记忆域作用域 —— 装配期据此解析整域 root，构造单一 MemoryStore
-   * （memory 工具 + flush strategy 共用），后续不可变。缺省 personal
-   * （root = getMemoryDir()，对外行为与历史一致）。
-   */
+  /** Static scope constraining assignment-bound GlobalQuery and staged overlay. */
   memoryScope?:
     | { kind: "personal" }
     | { kind: "workscene"; sceneId: string };

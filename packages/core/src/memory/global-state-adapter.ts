@@ -13,7 +13,13 @@ import type {
   JsonValue,
   LogicalRecord,
 } from "../contracts/index.js";
-import type { AuthorityCommitLog, ProjectionCursor } from "../authority/index.js";
+import type {
+  AuthorityCommitLog,
+  DurableProjectionMutation,
+  DurableProjectionReadContext,
+  ProjectionCursor,
+  RebuildableDurableProjectionIndex,
+} from "../authority/index.js";
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
@@ -35,6 +41,11 @@ import {
 } from "./logical-entry.js";
 
 const MEMORY_STREAM = "intent:memory-authority";
+export const MEMORY_AUTHORITY_PROJECTION_ID = "global-memory-authority-v1";
+const MEMORY_ENTRY_PREFIX = "entry:";
+const MEMORY_REQUEST_PREFIX = "request:";
+const MEMORY_PENDING_PREFIX = "pending:";
+const MEMORY_MATERIALIZATION_STREAM = "intent:memory-materialization";
 
 type MemoryMutation = Extract<
   GlobalStagedMutation,
@@ -51,16 +62,21 @@ type MemoryAuthorityRecord = {
   readonly at: string;
 };
 
+type MemoryMaterializationRecord = {
+  readonly t: "memory-materialized";
+  readonly requestId: string;
+  readonly revision: number;
+};
+
+interface MemoryRequestProjection {
+  readonly mutationDigest: string;
+  readonly revision: number;
+  readonly entryKey: string;
+}
+
 interface MemoryProjection {
   readonly entries: Map<string, MemoryLogicalEntry>;
-  readonly requests: Map<
-    string,
-    {
-      readonly mutationDigest: string;
-      readonly revision: number;
-      readonly entryKey: string;
-    }
-  >;
+  readonly requests: Map<string, MemoryRequestProjection>;
 }
 
 export interface AnchorMemoryGlobalStateAdapterOptions {
@@ -76,6 +92,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
   readonly #anchorEpoch: number;
   readonly #scopeRoot: (scope: MemoryScopeRef) => string;
   readonly #clock: () => string;
+  readonly #durable: RebuildableDurableProjectionIndex;
   #projection: MemoryProjection = emptyProjection();
   #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
@@ -86,7 +103,14 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     this.#anchorEpoch = positiveInteger(options.anchorEpoch, "Memory anchor epoch");
     this.#scopeRoot = options.scopeRoot;
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    this.#durable = this.#log.durableProjection({
+      projectionId: MEMORY_AUTHORITY_PROJECTION_ID,
+      reducerVersion: 1,
+      reduce: reduceMemoryDurableProjection,
+    });
   }
+
+  readonly stagedProjectionId = MEMORY_AUTHORITY_PROJECTION_ID;
 
   async initializeStagedPublishing(): Promise<void> {
     await this.#ensureOpen();
@@ -97,21 +121,30 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     return isMemoryMutation(mutation);
   }
 
-  prepareStagedMutations(input: {
+  async prepareStagedMutations(input: {
     readonly records: ReadonlyArray<{
       readonly seq: number;
       readonly requestId: string;
       readonly mutation: GlobalStagedMutation;
     }>;
-  }): {
+    readonly authorityProjection: DurableProjectionReadContext;
+    readonly at: string;
+  }): Promise<{
     readonly records: readonly LogicalRecord[];
     readonly outcomes: ReadonlyMap<
       number,
       | { readonly t: "granted"; readonly targetRevision: number }
       | { readonly t: "conflicted"; readonly error: AuthorityError }
     >;
-  } {
-    let overlay = cloneProjection(this.#projection);
+  }> {
+    let overlay = await loadMemoryProjectionForMutations(
+      input.authorityProjection,
+      input.records.map((record) => ({
+        requestId: record.requestId,
+        mutation: requireMemoryMutation(record.mutation),
+      })),
+      input.at,
+    );
     const records: LogicalRecord[] = [];
     const outcomes = new Map<
       number,
@@ -119,10 +152,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
       | { readonly t: "conflicted"; readonly error: AuthorityError }
     >();
     for (const item of input.records) {
-      if (!isMemoryMutation(item.mutation)) {
-        throw new TypeError("Memory planner received another mutation domain");
-      }
-      const mutation = normalizeMutation(item.mutation);
+      const mutation = normalizeMutation(requireMemoryMutation(item.mutation));
       const mutationDigest = protocolDigest("MemoryAuthorityMutation", 1, mutation);
       const replay = overlay.requests.get(item.requestId);
       if (replay) {
@@ -137,7 +167,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
         );
         continue;
       }
-      const planned = planMutation(overlay, mutation, item.requestId, this.#clock());
+      const planned = planMutation(overlay, mutation, item.requestId, input.at);
       if (planned.outcome.t === "conflicted") {
         outcomes.set(item.seq, planned.outcome);
         continue;
@@ -161,22 +191,35 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     if (!isMemoryMutation(input.mutation)) {
       throw new TypeError("Memory materializer received another mutation domain");
     }
-    await this.#reload();
-    const replay = this.#projection.requests.get(input.requestId);
-    if (!replay || replay.revision !== input.targetRevision) {
-      throw new Error("Committed memory mutation is unavailable or changed");
-    }
-    await this.#materialize(input.requestId, input.mutation);
+    await this.#materializePending(input.requestId, input.targetRevision);
   }
 
   async refreshStagedMutations(records: ReadonlyArray<{
     readonly requestId: string;
     readonly mutation: GlobalStagedMutation;
   }>): Promise<void> {
-    await this.#reload();
+    if (records.length === 0) {
+      await this.#log.transactDurableProjection(
+        MEMORY_AUTHORITY_PROJECTION_ID,
+        () => ({ kind: "return", value: undefined }),
+      );
+      let continuation: string | undefined;
+      do {
+        const page = await this.#durable.scan(
+          { gte: MEMORY_PENDING_PREFIX, lt: `${MEMORY_PENDING_PREFIX}\uffff` },
+          128,
+          continuation,
+        );
+        for (const entry of page.entries) {
+          await this.#materializePending(entry.key.slice(MEMORY_PENDING_PREFIX.length));
+        }
+        continuation = page.continuation;
+      } while (continuation !== undefined);
+      return;
+    }
     for (const record of records) {
       if (isMemoryMutation(record.mutation)) {
-        await this.#materialize(record.requestId, record.mutation);
+        await this.#materializePending(record.requestId);
       }
     }
   }
@@ -188,7 +231,11 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     this.#admit(context, "global.read", query.scope);
     await this.#ensureOpen();
     await this.#loadLegacyScope(query.scope);
-    const candidates = [...this.#projection.entries.values()].filter((entry) =>
+    const entries = await readMemoryEntries(this.#durable);
+    for (const legacy of this.#projection.entries.values()) {
+      if (!entries.has(entryKey(legacy))) entries.set(entryKey(legacy), cloneEntry(legacy));
+    }
+    const candidates = [...entries.values()].filter((entry) =>
       memoryLogicalEntryMatches(entry, {
         scope: query.scope,
         domain: query.domain,
@@ -262,8 +309,23 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     >(
       this.#projection,
       reduceRecord,
-      (state) => {
-        const planned = planMutation(state, normalized, context.requestId, this.#clock());
+      async (_state, transactionContext) => {
+        const state = await loadMemoryProjectionForMutations(
+          transactionContext.readProjection(MEMORY_AUTHORITY_PROJECTION_ID),
+          [{ requestId: context.requestId, mutation: normalized }],
+          transactionContext.at,
+        );
+        for (const legacy of this.#projection.entries.values()) {
+          if (!state.entries.has(entryKey(legacy))) {
+            state.entries.set(entryKey(legacy), cloneEntry(legacy));
+          }
+        }
+        const planned = planMutation(
+          state,
+          normalized,
+          context.requestId,
+          transactionContext.at,
+        );
         if (planned.outcome.t === "conflicted") {
           throw new MemoryMutationConflictError(planned.outcome.error);
         }
@@ -273,31 +335,84 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
           value: { revision: planned.outcome.targetRevision },
         };
       },
-      { cursor: this.#cursor, stream: MEMORY_STREAM },
+      {
+        cursor: this.#cursor,
+        stream: MEMORY_STREAM,
+        readProjectionIds: [MEMORY_AUTHORITY_PROJECTION_ID],
+      },
     );
     this.#projection = transaction.state;
     this.#cursor = transaction.cursor;
-    await this.#materialize(context.requestId, normalized);
+    await this.#materializePending(context.requestId, transaction.value.revision).catch(
+      () => undefined,
+    );
     return transaction.value;
   }
 
-  async #materialize(requestId: string, mutation: MemoryMutation): Promise<void> {
-    const scope = memoryScopeOf(mutation);
-    const store = new MemoryStore(this.#scopeRoot(scope));
-    const key = this.#projection.requests.get(requestId)?.entryKey;
-    if (!key) throw new Error("Committed memory request has no projection key");
-    const entry = this.#projection.entries.get(key);
-    if (mutation.kind === "memory-delete") {
-      await store.delete(storageCategory(mutation.domain, mutation.category), mutation.id);
+  async #materializePending(
+    requestId: string,
+    expectedRevision?: number,
+  ): Promise<void> {
+    const pending = await this.#durable.get(memoryPendingKey(requestId));
+    if (pending === undefined) {
+      const replay = readMemoryRequest(
+        await this.#durable.get(memoryRequestKey(requestId)),
+      );
+      if (!replay || (expectedRevision !== undefined && replay.revision !== expectedRevision)) {
+        throw new Error("Committed memory mutation is unavailable or changed");
+      }
       return;
     }
-    if (!entry) throw new Error("Committed memory entry is absent from its projection");
-    await store.save({
-      category: storageCategory(entry.domain, entry.category),
-      id: entry.id,
-      meta: structuredClone(entry.meta),
-      content: entry.content,
-    });
+    const record = readPendingMemoryRecord(pending);
+    if (expectedRevision !== undefined && record.revision !== expectedRevision) {
+      throw new Error("Committed memory mutation is unavailable or changed");
+    }
+    const mutation = record.mutation;
+    const scope = memoryScopeOf(mutation);
+    const store = new MemoryStore(this.#scopeRoot(scope));
+    const replay = readMemoryRequest(
+      await this.#durable.get(memoryRequestKey(requestId)),
+    );
+    if (!replay || replay.revision !== record.revision) {
+      throw new Error("Committed memory request has no projection key");
+    }
+    const entry = readMemoryEntry(
+      await this.#durable.get(memoryEntryKey(replay.entryKey)),
+    );
+    if (mutation.kind === "memory-delete") {
+      await store.delete(storageCategory(mutation.domain, mutation.category), mutation.id);
+    } else {
+      if (!entry) throw new Error("Committed memory entry is absent from its projection");
+      await store.save({
+        category: storageCategory(entry.domain, entry.category),
+        id: entry.id,
+        meta: structuredClone(entry.meta),
+        content: entry.content,
+      });
+    }
+    await this.#log.transactDurableProjection<MemoryMaterializationRecord, void>(
+      MEMORY_AUTHORITY_PROJECTION_ID,
+      async (projection) => {
+        const current = await projection.get(memoryPendingKey(requestId));
+        if (current === undefined) return { kind: "return", value: undefined };
+        const currentRecord = readPendingMemoryRecord(current);
+        if (currentRecord.revision !== record.revision) {
+          throw new Error("Memory materialization target changed");
+        }
+        return {
+          kind: "append",
+          entries: [{
+            stream: MEMORY_MATERIALIZATION_STREAM,
+            body: {
+              t: "memory-materialized",
+              requestId,
+              revision: record.revision,
+            },
+          }],
+          value: undefined,
+        };
+      },
+    );
   }
 
   async #loadLegacyScope(scope: MemoryScopeRef): Promise<void> {
@@ -475,6 +590,177 @@ function reduceRecord(previous: MemoryProjection, logical: LogicalRecord<MemoryA
       : plannedMutationKey(record.mutation, record.at),
   });
   return state;
+}
+
+async function reduceMemoryDurableProjection(
+  envelope: import("../contracts/index.js").CommitEnvelope<JsonValue>,
+  current: DurableProjectionReadContext,
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const get = async (key: string): Promise<JsonValue | undefined> =>
+    overlay.has(key) ? overlay.get(key) : current.get(key);
+  const put = (key: string, value: JsonValue): void => {
+    overlay.set(key, value);
+    mutations.push({ kind: "put", key, value });
+  };
+  const tombstone = (key: string): void => {
+    overlay.set(key, undefined);
+    mutations.push({ kind: "tombstone", key });
+  };
+
+  for (const logical of envelope.entries) {
+    if (logical.stream === MEMORY_STREAM) {
+      const record = readPendingMemoryRecord(logical.body);
+      const requestKey = memoryRequestKey(record.requestId);
+      if (await get(requestKey)) {
+        throw new TypeError("Memory authority request was duplicated");
+      }
+      const logicalKey = record.entry
+        ? entryKey(record.entry)
+        : plannedMutationKey(record.mutation, record.at);
+      if (record.entry) {
+        put(memoryEntryKey(logicalKey), cloneEntry(record.entry) as unknown as JsonValue);
+      } else {
+        tombstone(memoryEntryKey(logicalKey));
+      }
+      put(requestKey, {
+        mutationDigest: record.mutationDigest,
+        revision: record.revision,
+        entryKey: logicalKey,
+      });
+      put(memoryPendingKey(record.requestId), structuredClone(record) as unknown as JsonValue);
+      continue;
+    }
+    if (logical.stream !== MEMORY_MATERIALIZATION_STREAM) continue;
+    const record = readMemoryMaterializationRecord(logical.body);
+    const pending = await get(memoryPendingKey(record.requestId));
+    if (!pending || readPendingMemoryRecord(pending).revision !== record.revision) {
+      throw new TypeError("Memory materialization acknowledgement is stale");
+    }
+    tombstone(memoryPendingKey(record.requestId));
+  }
+  return mutations;
+}
+
+async function loadMemoryProjectionForMutations(
+  projection: DurableProjectionReadContext,
+  records: readonly { readonly requestId: string; readonly mutation: MemoryMutation }[],
+  at: string,
+): Promise<MemoryProjection> {
+  const state = emptyProjection();
+  for (const item of records) {
+    const request = readMemoryRequest(
+      await projection.get(memoryRequestKey(item.requestId)),
+    );
+    if (request) state.requests.set(item.requestId, request);
+    const logicalKey = plannedMutationKey(normalizeMutation(item.mutation), at);
+    if (state.entries.has(logicalKey)) continue;
+    const entry = readMemoryEntry(
+      await projection.get(memoryEntryKey(logicalKey)),
+    );
+    if (entry) state.entries.set(logicalKey, entry);
+  }
+  return state;
+}
+
+async function readMemoryEntries(
+  projection: RebuildableDurableProjectionIndex,
+): Promise<Map<string, MemoryLogicalEntry>> {
+  const entries = new Map<string, MemoryLogicalEntry>();
+  let continuation: string | undefined;
+  do {
+    const page = await projection.scan(
+      { gte: MEMORY_ENTRY_PREFIX, lt: `${MEMORY_ENTRY_PREFIX}\uffff` },
+      256,
+      continuation,
+    );
+    for (const item of page.entries) {
+      const entry = readMemoryEntry(item.value);
+      if (!entry) throw new TypeError("Memory authority projection entry is invalid");
+      entries.set(
+        decodeURIComponent(item.key.slice(MEMORY_ENTRY_PREFIX.length)),
+        entry,
+      );
+    }
+    continuation = page.continuation;
+  } while (continuation !== undefined);
+  return entries;
+}
+
+function memoryEntryKey(key: string): string {
+  return `${MEMORY_ENTRY_PREFIX}${encodeURIComponent(key)}`;
+}
+
+function memoryRequestKey(requestId: string): string {
+  return `${MEMORY_REQUEST_PREFIX}${requestId}`;
+}
+
+function memoryPendingKey(requestId: string): string {
+  return `${MEMORY_PENDING_PREFIX}${requestId}`;
+}
+
+function readMemoryRequest(value: JsonValue | undefined): MemoryRequestProjection | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof value.mutationDigest !== "string" ||
+    !Number.isSafeInteger(value.revision) || Number(value.revision) <= 0 ||
+    typeof value.entryKey !== "string"
+  ) {
+    throw new TypeError("Memory authority request projection is invalid");
+  }
+  return {
+    mutationDigest: value.mutationDigest,
+    revision: Number(value.revision),
+    entryKey: value.entryKey,
+  };
+}
+
+function readMemoryEntry(value: JsonValue | undefined): MemoryLogicalEntry | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Memory authority entry projection is invalid");
+  }
+  return cloneEntry(value as unknown as MemoryLogicalEntry);
+}
+
+function readPendingMemoryRecord(value: unknown): MemoryAuthorityRecord {
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    (value as { t?: unknown }).t !== "memory-mutation-applied"
+  ) {
+    throw new TypeError("Memory authority record is invalid");
+  }
+  const record = value as MemoryAuthorityRecord;
+  identifier(record.requestId, "Memory authority requestId");
+  if (!Number.isSafeInteger(record.revision) || record.revision <= 0) {
+    throw new TypeError("Memory authority revision is invalid");
+  }
+  normalizeMutation(record.mutation);
+  return structuredClone(record);
+}
+
+function readMemoryMaterializationRecord(value: unknown): MemoryMaterializationRecord {
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    (value as { t?: unknown }).t !== "memory-materialized"
+  ) {
+    throw new TypeError("Memory materialization record is invalid");
+  }
+  const record = value as MemoryMaterializationRecord;
+  identifier(record.requestId, "Memory materialization requestId");
+  if (!Number.isSafeInteger(record.revision) || record.revision <= 0) {
+    throw new TypeError("Memory materialization revision is invalid");
+  }
+  return { ...record };
+}
+
+function requireMemoryMutation(mutation: GlobalStagedMutation): MemoryMutation {
+  if (!isMemoryMutation(mutation)) {
+    throw new TypeError("Memory planner received another mutation domain");
+  }
+  return mutation;
 }
 
 function normalizeMutation(mutation: MemoryMutation): MemoryMutation {

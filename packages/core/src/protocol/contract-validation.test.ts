@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { MutationBatch, PublishRecord } from "../contracts/records.js";
 import type { WorksceneAppliedResult, WorksceneWriteMutation } from "../contracts/state.js";
 import { createMutationBatch } from "./commit.js";
-import { validatePublishDecisionForBatch } from "./contract-validation.js";
+import {
+  validatePublishDecisionForBatch,
+  validatePublishResultNotice,
+} from "./contract-validation.js";
 
 const NOW = "2026-08-05T00:00:00.000Z";
 const BATCH_REF = { digest: `sha256:${"0".repeat(64)}`, bytes: 1 };
@@ -124,6 +127,45 @@ describe("validatePublishDecisionForBatch", () => {
         batch,
       ),
     ).toThrow();
+  });
+});
+
+describe("validatePublishResultNotice", () => {
+  const valid = {
+    conversationId: "conversation-a",
+    runId: "run-a",
+    commitRevision: 2,
+    assignmentId: "assignment-a",
+    seq: 1,
+    mutation: { kind: "schedule-delete", taskId: "task-a", taskRevision: 1 },
+    decision: {
+      t: "conflicted",
+      error: { code: "revision-conflict", message: "changed", retryable: false },
+    },
+  } as const;
+
+  it("accepts the complete mutation and decision union", () => {
+    expect(validatePublishResultNotice(valid)).toEqual(valid);
+  });
+
+  it.each([
+    { ...valid, extra: true },
+    { ...valid, mutation: { ...valid.mutation, extra: true } },
+    { ...valid, decision: { ...valid.decision, extra: true } },
+    {
+      ...valid,
+      decision: {
+        t: "granted",
+        targetRevision: 2,
+        appliedResult: applied("create", 2, {
+          id: "scene-a",
+          name: "Project",
+          revision: 2,
+        }),
+      },
+    },
+  ])("rejects open or mutation-mismatched notice %#", (variant) => {
+    expect(() => validatePublishResultNotice(variant)).toThrow();
   });
 });
 

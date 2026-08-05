@@ -159,7 +159,7 @@ describe("AnchorWorksceneGlobalStateAdapter", () => {
         },
         context("delete", created.scene.revision),
       ),
-    ).rejects.toThrow("injected cleanup failure");
+    ).resolves.toMatchObject({ kind: "workscene-deleted", revision: 2 });
     await fixture.adapter.recoverPendingDeletions();
     expect(removeScene).toHaveBeenCalledTimes(2);
   });
@@ -193,7 +193,7 @@ describe("AnchorWorksceneGlobalStateAdapter", () => {
           },
           context(`delete-${index}`, created.scene.revision),
         ),
-      ).rejects.toThrow("defer cleanup");
+      ).resolves.toMatchObject({ kind: "workscene-deleted" });
     }
     failCleanup = false;
     await fixture.adapter.recoverPendingDeletions();

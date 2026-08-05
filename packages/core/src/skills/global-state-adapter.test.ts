@@ -23,7 +23,7 @@ describe("AnchorSkillGlobalStateAdapter", () => {
       mode: "main",
       record: { name: "My Skill", description: "Useful", content },
     };
-    const plan = fixture.adapter.prepareStagedMutations({
+    const plan = await prepareStaged(fixture, {
       records: [{ seq: 1, requestId: "skill-create", mutation }],
     });
     expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 1 });
@@ -69,7 +69,7 @@ describe("AnchorSkillGlobalStateAdapter", () => {
       kind: "skill-usage",
       record: { skillId: id, occurredAt: NOW, hitDelta: 1 },
     });
-    const plan = fixture.adapter.prepareStagedMutations({
+    const plan = await prepareStaged(fixture, {
       records: [
         { seq: 1, requestId: "usage-1", mutation: usage("usage-1") },
         { seq: 2, requestId: "usage-2", mutation: usage("usage-2") },
@@ -111,6 +111,29 @@ describe("AnchorSkillGlobalStateAdapter", () => {
     expect(management.kind === "skill-catalog" ? management.entries : []).toHaveLength(1);
   });
 });
+
+async function prepareStaged(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  input: Pick<
+    Parameters<AnchorSkillGlobalStateAdapter["prepareStagedMutations"]>[0],
+    "records"
+  >,
+) {
+  const transaction = await fixture.log.transactProjection(
+    {},
+    (state) => state,
+    async (_state, context) => ({
+      kind: "return" as const,
+      value: await fixture.adapter.prepareStagedMutations({
+        records: input.records,
+        authorityProjection: context.readProjection(fixture.adapter.stagedProjectionId),
+        at: context.at,
+      }),
+    }),
+    { readProjectionIds: [fixture.adapter.stagedProjectionId] },
+  );
+  return transaction.value;
+}
 
 async function createFixture() {
   const root = await createTempDir("zhixing-skill-global-state");

@@ -5,11 +5,12 @@ import type {
   PublishRecord,
 } from "../contracts/records.js";
 import type {
+  PublishResultNotice,
   WorksceneAppliedResult,
   WorksceneDto,
   WorksceneWriteMutation,
 } from "../contracts/state.js";
-import { validateMutationBatch } from "./commit.js";
+import { validateGlobalStagedMutation, validateMutationBatch } from "./commit.js";
 import { assertProtocolIdentifier } from "./validation.js";
 
 export const MAX_AUTHORITY_ERROR_MESSAGE_BYTES = 4 * 1024;
@@ -143,6 +144,50 @@ export function validatePublishDecisionForBatch(
     validateOutcomeForMutation(item.outcome, record.mutation);
   }
   return decision;
+}
+
+/** Strict public-wire contract for one owner-derived publish result. */
+export function validatePublishResultNotice(value: unknown): PublishResultNotice {
+  assertPlainRecord(value, "Publish result notice");
+  assertExactKeys(
+    value,
+    [
+      "assignmentId",
+      "commitRevision",
+      "conversationId",
+      "decision",
+      "mutation",
+      "runId",
+      "seq",
+    ],
+    "Publish result notice",
+  );
+  assertProtocolIdentifier(value.conversationId, "Publish result conversation id");
+  assertProtocolIdentifier(value.runId, "Publish result run id");
+  assertProtocolIdentifier(value.assignmentId, "Publish result assignment id");
+  assertPositiveInteger(value.commitRevision, "Publish result commit revision");
+  assertPositiveInteger(value.seq, "Publish result sequence");
+  validateGlobalStagedMutation(value.mutation as never);
+  assertPlainRecord(value.decision, "Publish result decision");
+  if (value.decision.t === "conflicted") {
+    assertExactKeys(value.decision, ["error", "t"], "Publish result conflict");
+    validateAuthorityError(value.decision.error, "Publish result conflict error");
+  } else if (value.decision.t === "granted") {
+    assertExactKeys(
+      value.decision,
+      ["appliedResult", "t", "targetRevision"],
+      "Publish result grant",
+    );
+    assertPositiveInteger(value.decision.targetRevision, "Publish result target revision");
+    validateWorksceneAppliedResult(value.decision.appliedResult);
+  } else {
+    throw new TypeError("Publish result decision type is invalid");
+  }
+  validateOutcomeForMutation(
+    value.decision as PublishResultNotice["decision"],
+    value.mutation as PublishResultNotice["mutation"],
+  );
+  return value as unknown as PublishResultNotice;
 }
 
 function validateOutcomeForMutation(

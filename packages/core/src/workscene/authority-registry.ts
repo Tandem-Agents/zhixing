@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { AuthorityCommitLog, ProjectionCursor } from "../authority/index.js";
+import type {
+  AuthorityCommitLog,
+  DurableProjectionMutation,
+  DurableProjectionReadContext,
+  ProjectionCursor,
+  RebuildableDurableProjectionIndex,
+} from "../authority/index.js";
 import { AuthorityStorageError } from "../authority/index.js";
 import type {
   AuthorityError,
@@ -14,6 +20,14 @@ import type {
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 
 const REGISTRY_STREAM = "intent:workscene-registry";
+export const WORKSCENE_AUTHORITY_PROJECTION_ID = "global-workscene-authority-v1";
+const WORKSCENE_META_KEY = "meta:registry";
+const WORKSCENE_SCENE_PREFIX = "scene:";
+const WORKSCENE_TOMBSTONE_PREFIX = "tombstone:";
+const WORKSCENE_REQUEST_PREFIX = "request:";
+const WORKSCENE_PENDING_PREFIX = "pending-deletion:";
+const WORKSCENE_LEGACY_META_PREFIX = "legacy-meta:";
+const WORKSCENE_LEGACY_ENTRY_PREFIX = "legacy-entry:";
 
 type WorksceneRegistryRecord =
   | { t: "workscene-registry-established"; at: string }
@@ -129,6 +143,7 @@ export class AnchorWorksceneRegistry {
   readonly #log: AuthorityCommitLog;
   readonly #clock: () => string;
   readonly #sceneIdFactory: (name: string) => string;
+  readonly #durable: RebuildableDurableProjectionIndex;
   #projection: WorksceneRegistryProjection | undefined;
   #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
@@ -139,7 +154,14 @@ export class AnchorWorksceneRegistry {
     this.#sceneIdFactory =
       options.sceneIdFactory ??
       ((name) => `${slugify(name)}-${randomUUID().slice(0, 8)}`);
+    this.#durable = this.#log.durableProjection({
+      projectionId: WORKSCENE_AUTHORITY_PROJECTION_ID,
+      reducerVersion: 1,
+      reduce: reduceWorksceneDurableProjection,
+    });
   }
+
+  readonly stagedProjectionId = WORKSCENE_AUTHORITY_PROJECTION_ID;
 
   /** Opens the durable projection before a synchronous owner commit planner is installed. */
   async initialize(): Promise<void> {
@@ -152,84 +174,58 @@ export class AnchorWorksceneRegistry {
    * method never mutates the live projection or the filesystem.
    */
   planStaged(records: readonly WorksceneStagedMutationRecord[]): WorksceneStagedMutationPlan {
-    let overlay = cloneProjection(this.#state());
-    const planned: LogicalRecord<JsonValue>[] = [];
-    const outcomes = new Map<
-      number,
-      | {
-          readonly t: "granted";
-          readonly targetRevision: number;
-          readonly appliedResult: WorksceneAppliedResult;
-        }
-      | { readonly t: "conflicted"; readonly error: AuthorityError }
-    >();
+    return planWorksceneStaged(
+      cloneProjection(this.#state()),
+      records,
+      () => this.#clock(),
+      this.#sceneIdFactory,
+    );
+  }
 
+  async planStagedAtProjection(
+    records: readonly WorksceneStagedMutationRecord[],
+    projection: DurableProjectionReadContext,
+    at: string,
+  ): Promise<WorksceneStagedMutationPlan> {
+    const createIds = new Map<number, string>();
     for (const record of records) {
-      const normalized = validateMutation(record.mutation);
-      const mutationDigest = protocolDigest(
-        "WorksceneWriteMutation",
-        1,
-        normalized,
-      );
-      const replay = overlay.requests.get(record.requestId);
-      if (replay) {
-        if (replay.mutationDigest !== mutationDigest || !replay.result) {
-          outcomes.set(record.seq, stagedConflict(
-            "idempotency-conflict",
-            "Workscene request identity is already bound to another mutation",
-          ));
-        } else {
-          outcomes.set(record.seq, {
-            t: "granted",
-            targetRevision: replay.result.revision,
-            appliedResult: cloneResult(replay.result),
-          });
-        }
-        continue;
-      }
-
-      try {
-        const at = this.#clock();
-        const result = decideMutation(
-          overlay,
-          normalized,
-          at,
-          this.#sceneIdFactory,
-        );
-        const logical: LogicalRecord<WorksceneRegistryRecord> = {
-          stream: REGISTRY_STREAM,
-          body: {
-            t: "workscene-control-applied",
-            requestId: record.requestId,
-            mutationDigest,
-            mutation: structuredClone(normalized),
-            result: cloneResult(result),
-            at,
-          },
-        };
-        overlay = reduceRegistry(overlay, logical);
-        planned.push(logical as unknown as LogicalRecord<JsonValue>);
-        outcomes.set(record.seq, {
-          t: "granted",
-          targetRevision: result.revision,
-          appliedResult: cloneResult(result),
-        });
-      } catch (error) {
-        outcomes.set(record.seq, worksceneStagedConflict(error));
+      if (record.mutation.kind === "workscene-create") {
+        createIds.set(record.seq, this.#sceneIdFactory(record.mutation.name));
       }
     }
-    return { records: planned, outcomes };
+    const state = await loadWorksceneProjectionForMutations(
+      projection,
+      records,
+      createIds,
+    );
+    let currentSeq = 0;
+    return planWorksceneStaged(
+      state,
+      records,
+      () => at,
+      () => {
+        const sceneId = createIds.get(currentSeq);
+        if (!sceneId) throw new TypeError("Workscene create identity was not frozen");
+        return sceneId;
+      },
+      (seq) => {
+        currentSeq = seq;
+      },
+    );
   }
 
   /** Reloads records atomically appended by an owning run commit. */
   async refreshCommitted(): Promise<void> {
     await this.#ensureOpen();
-    await this.#reload();
+    await this.#log.transactDurableProjection(
+      WORKSCENE_AUTHORITY_PROJECTION_ID,
+      () => ({ kind: "return", value: undefined }),
+    );
   }
 
   async list(): Promise<WorksceneDto[]> {
     await this.#ensureOpen();
-    return [...this.#state().scenes.values()]
+    return [...(await readWorksceneScenes(this.#durable)).values()]
       .map(cloneScene)
       .sort(
         (left, right) =>
@@ -241,14 +237,18 @@ export class AnchorWorksceneRegistry {
   async get(sceneId: string): Promise<WorksceneDto | null> {
     requireIdentifier(sceneId, "Workscene id");
     await this.#ensureOpen();
-    const scene = this.#state().scenes.get(sceneId);
+    const scene = readWorksceneScene(
+      await this.#durable.get(worksceneSceneKey(sceneId)),
+    );
     return scene ? cloneScene(scene) : null;
   }
 
   async replay(requestId: string): Promise<WorksceneAppliedResult | null> {
     requireIdentifier(requestId, "Workscene requestId");
     await this.#ensureOpen();
-    const result = this.#state().requests.get(requestId)?.result;
+    const result = readWorksceneRequest(
+      await this.#durable.get(worksceneRequestKey(requestId)),
+    )?.result;
     return result ? cloneResult(result) : null;
   }
 
@@ -278,24 +278,27 @@ export class AnchorWorksceneRegistry {
       requireRevision(input.after.deletionRevision);
       requireIdentifier(input.after.sceneId, "Workscene deletion cursor scene id");
     }
-    const pending = [...this.#state().pendingDeletions]
-      .map(([sceneId, pending]) => ({ sceneId, ...pending }))
-      .sort(
-        (left, right) =>
-          left.deletionRevision - right.deletionRevision ||
-          left.sceneId.localeCompare(right.sceneId, "en-US"),
-      );
-    const items = pending
-      .filter(
-        (item) =>
-          !input?.after || compareDeletionCursor(item, input.after) > 0,
-      )
-      .slice(0, limit);
+    const page = await this.#durable.scan(
+      input?.after
+        ? {
+            gt: workscenePendingKey(input.after.sceneId),
+            lt: `${WORKSCENE_PENDING_PREFIX}\uffff`,
+          }
+        : { gte: WORKSCENE_PENDING_PREFIX, lt: `${WORKSCENE_PENDING_PREFIX}\uffff` },
+      limit,
+    );
+    const items = page.entries.map((entry) => {
+      const pending = readPendingDeletion(entry.value);
+      if (!pending) throw corruptRegistry("Workscene pending deletion is invalid");
+      return {
+        sceneId: entry.key.slice(WORKSCENE_PENDING_PREFIX.length),
+        ...pending,
+      };
+    });
     const last = items.at(-1);
     return {
       items,
-      ...(last &&
-      pending.some((item) => compareDeletionCursor(item, last) > 0)
+      ...(last && page.continuation !== undefined
         ? {
             next: {
               deletionRevision: last.deletionRevision,
@@ -534,24 +537,472 @@ export class AnchorWorksceneRegistry {
     this.#projection = state;
   }
 
-  async #reload(): Promise<void> {
-    const snapshot = await this.#log.readSnapshot<WorksceneRegistryRecord>();
-    let state = emptyProjection();
-    for (const commit of snapshot.commits) {
-      for (const entry of commit.entries) {
-        if (entry.stream !== REGISTRY_STREAM) continue;
-        state = reduceRegistry(
-          state,
-          entry as LogicalRecord<WorksceneRegistryRecord>,
+}
+
+function planWorksceneStaged(
+  initial: WorksceneRegistryProjection,
+  records: readonly WorksceneStagedMutationRecord[],
+  at: () => string,
+  sceneIdFactory: (name: string) => string,
+  beforeRecord: (seq: number) => void = () => undefined,
+): WorksceneStagedMutationPlan {
+  let overlay = cloneProjection(initial);
+  const planned: LogicalRecord<JsonValue>[] = [];
+  const outcomes = new Map<
+    number,
+    | {
+        readonly t: "granted";
+        readonly targetRevision: number;
+        readonly appliedResult: WorksceneAppliedResult;
+      }
+    | { readonly t: "conflicted"; readonly error: AuthorityError }
+  >();
+
+  for (const record of records) {
+    beforeRecord(record.seq);
+    const normalized = validateMutation(record.mutation);
+    const mutationDigest = protocolDigest(
+      "WorksceneWriteMutation",
+      1,
+      normalized,
+    );
+    const replay = overlay.requests.get(record.requestId);
+    if (replay) {
+      outcomes.set(
+        record.seq,
+        replay.mutationDigest !== mutationDigest || !replay.result
+          ? stagedConflict(
+              "idempotency-conflict",
+              "Workscene request identity is already bound to another mutation",
+            )
+          : {
+              t: "granted",
+              targetRevision: replay.result.revision,
+              appliedResult: cloneResult(replay.result),
+            },
+      );
+      continue;
+    }
+
+    try {
+      const committedAt = at();
+      const result = decideMutation(
+        overlay,
+        normalized,
+        committedAt,
+        sceneIdFactory,
+      );
+      const logical: LogicalRecord<WorksceneRegistryRecord> = {
+        stream: REGISTRY_STREAM,
+        body: {
+          t: "workscene-control-applied",
+          requestId: record.requestId,
+          mutationDigest,
+          mutation: structuredClone(normalized),
+          result: cloneResult(result),
+          at: committedAt,
+        },
+      };
+      overlay = reduceRegistry(overlay, logical);
+      planned.push(logical as unknown as LogicalRecord<JsonValue>);
+      outcomes.set(record.seq, {
+        t: "granted",
+        targetRevision: result.revision,
+        appliedResult: cloneResult(result),
+      });
+    } catch (error) {
+      outcomes.set(record.seq, worksceneStagedConflict(error));
+    }
+  }
+  return { records: planned, outcomes };
+}
+
+async function loadWorksceneProjectionForMutations(
+  projection: DurableProjectionReadContext,
+  records: readonly WorksceneStagedMutationRecord[],
+  createIds: ReadonlyMap<number, string>,
+): Promise<WorksceneRegistryProjection> {
+  const meta = readWorksceneMeta(await projection.get(WORKSCENE_META_KEY));
+  const state = emptyProjection();
+  state.established = meta.established;
+  state.domainRevision = meta.domainRevision;
+  for (const record of records) {
+    const replay = readWorksceneRequest(
+      await projection.get(worksceneRequestKey(record.requestId)),
+    );
+    if (replay) state.requests.set(record.requestId, replay);
+    const sceneId = record.mutation.kind === "workscene-create"
+      ? createIds.get(record.seq)
+      : record.mutation.sceneId;
+    if (!sceneId) continue;
+    const scene = readWorksceneScene(
+      await projection.get(worksceneSceneKey(sceneId)),
+    );
+    if (scene) state.scenes.set(sceneId, scene);
+    if (await projection.get(worksceneTombstoneKey(sceneId))) {
+      state.tombstones.add(sceneId);
+    }
+  }
+  return state;
+}
+
+async function reduceWorksceneDurableProjection(
+  envelope: import("../contracts/index.js").CommitEnvelope<JsonValue>,
+  current: DurableProjectionReadContext,
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const get = async (key: string): Promise<JsonValue | undefined> =>
+    overlay.has(key) ? overlay.get(key) : current.get(key);
+  const put = (key: string, value: JsonValue): void => {
+    overlay.set(key, value);
+    mutations.push({ kind: "put", key, value });
+  };
+  const tombstone = (key: string): void => {
+    overlay.set(key, undefined);
+    mutations.push({ kind: "tombstone", key });
+  };
+  let meta = readWorksceneMeta(await get(WORKSCENE_META_KEY));
+
+  for (const logical of envelope.entries) {
+    if (logical.stream !== REGISTRY_STREAM) continue;
+    const record = validateRecord(
+      logical.body as unknown as WorksceneRegistryRecord,
+    );
+    switch (record.t) {
+      case "workscene-registry-established":
+        if (meta.established) throw corruptRegistry("Workscene registry was established twice");
+        meta = { ...meta, established: true };
+        put(WORKSCENE_META_KEY, meta as unknown as JsonValue);
+        break;
+      case "workscene-control-applied": {
+        if (await get(worksceneRequestKey(record.requestId))) {
+          throw corruptRegistry("Workscene request identity was reused");
+        }
+        if (record.result.revision !== meta.domainRevision + 1) {
+          throw corruptRegistry("Workscene domain revision is not contiguous");
+        }
+        if (record.result.kind === "workscene-applied") {
+          put(
+            worksceneSceneKey(record.result.scene.id),
+            cloneScene(record.result.scene) as unknown as JsonValue,
+          );
+        } else {
+          tombstone(worksceneSceneKey(record.result.sceneId));
+          put(worksceneTombstoneKey(record.result.sceneId), true);
+          put(workscenePendingKey(record.result.sceneId), {
+            deletionRevision: record.result.revision,
+            previousObjectRevision: record.result.previousObjectRevision,
+          });
+        }
+        put(worksceneRequestKey(record.requestId), {
+          mutationDigest: record.mutationDigest,
+          result: cloneResult(record.result),
+        } as unknown as JsonValue);
+        meta = { ...meta, domainRevision: record.result.revision };
+        put(WORKSCENE_META_KEY, meta as unknown as JsonValue);
+        break;
+      }
+      case "workscene-deletion-projected": {
+        const pending = readPendingDeletion(
+          await get(workscenePendingKey(record.sceneId)),
         );
+        if (!pending || pending.deletionRevision !== record.deletionRevision) {
+          throw corruptRegistry("Workscene deletion projection is stale");
+        }
+        tombstone(workscenePendingKey(record.sceneId));
+        break;
+      }
+      case "workscene-legacy-import-opened": {
+        const migrationId = record.mutation.migrationId;
+        const legacy = readLegacyMeta(
+          await get(worksceneLegacyMetaKey(migrationId)),
+        ) ?? {
+          sourceSnapshotToken: record.mutation.sourceSnapshotToken,
+          status: "open" as const,
+        };
+        if (
+          legacy.status !== "open" ||
+          legacy.sourceSnapshotToken !== record.mutation.sourceSnapshotToken ||
+          await get(worksceneLegacyEntryKey(migrationId, record.mutation.scene.id))
+        ) {
+          throw corruptRegistry("Legacy workscene import is inconsistent");
+        }
+        put(worksceneLegacyMetaKey(migrationId), legacy as unknown as JsonValue);
+        put(
+          worksceneLegacyEntryKey(migrationId, record.mutation.scene.id),
+          importedScene(record.mutation.scene) as unknown as JsonValue,
+        );
+        put(worksceneRequestKey(record.requestId), {
+          mutationDigest: record.mutationDigest,
+        });
+        break;
+      }
+      case "workscene-legacy-import-activated": {
+        const migrationId = record.mutation.migrationId;
+        const legacy = readLegacyMeta(
+          await get(worksceneLegacyMetaKey(migrationId)),
+        );
+        if (
+          !legacy || legacy.status !== "open" ||
+          legacy.sourceSnapshotToken !== record.mutation.sourceSnapshotToken
+        ) {
+          throw corruptRegistry("Legacy workscene activation is inconsistent");
+        }
+        const imports = await readLegacyEntries(current, overlay, migrationId);
+        if (importSetDigest(imports) !== record.mutation.importSetDigest) {
+          throw corruptRegistry("Legacy activation does not bind its import set");
+        }
+        for (const [sceneId, scene] of imports) {
+          if (
+            await get(worksceneSceneKey(sceneId)) ||
+            await get(worksceneTombstoneKey(sceneId))
+          ) {
+            throw corruptRegistry("Legacy activation collides with current state");
+          }
+          put(worksceneSceneKey(sceneId), cloneScene(scene) as unknown as JsonValue);
+        }
+        put(worksceneLegacyMetaKey(migrationId), {
+          ...legacy,
+          status: "activated",
+          importSetDigest: record.mutation.importSetDigest,
+        } as unknown as JsonValue);
+        put(worksceneRequestKey(record.requestId), {
+          mutationDigest: record.mutationDigest,
+        });
+        meta = { ...meta, domainRevision: meta.domainRevision + 1 };
+        put(WORKSCENE_META_KEY, meta as unknown as JsonValue);
+        break;
+      }
+      case "workscene-legacy-import-abandoned": {
+        const migrationId = record.mutation.migrationId;
+        const legacy = readLegacyMeta(
+          await get(worksceneLegacyMetaKey(migrationId)),
+        );
+        if (
+          !legacy || legacy.status !== "open" ||
+          legacy.sourceSnapshotToken !== record.mutation.sourceSnapshotToken
+        ) {
+          throw corruptRegistry("Legacy workscene abandonment is inconsistent");
+        }
+        put(worksceneLegacyMetaKey(migrationId), {
+          ...legacy,
+          status: "abandoned",
+        } as unknown as JsonValue);
+        put(worksceneRequestKey(record.requestId), {
+          mutationDigest: record.mutationDigest,
+        });
+        break;
       }
     }
-    if (!state.established) {
-      throw corruptRegistry("Workscene registry lost its establishment record");
-    }
-    this.#projection = state;
-    this.#cursor = snapshot.cursor;
   }
+  return mutations;
+}
+
+async function readWorksceneScenes(
+  projection: RebuildableDurableProjectionIndex,
+): Promise<Map<string, WorksceneDto>> {
+  const scenes = new Map<string, WorksceneDto>();
+  let continuation: string | undefined;
+  do {
+    const page = await projection.scan(
+      { gte: WORKSCENE_SCENE_PREFIX, lt: `${WORKSCENE_SCENE_PREFIX}\uffff` },
+      256,
+      continuation,
+    );
+    for (const item of page.entries) {
+      const scene = readWorksceneScene(item.value);
+      if (!scene) throw corruptRegistry("Workscene durable scene is invalid");
+      scenes.set(item.key.slice(WORKSCENE_SCENE_PREFIX.length), scene);
+    }
+    continuation = page.continuation;
+  } while (continuation !== undefined);
+  return scenes;
+}
+
+async function readLegacyEntries(
+  current: DurableProjectionReadContext,
+  overlay: ReadonlyMap<string, JsonValue | undefined>,
+  migrationId: string,
+): Promise<Map<string, WorksceneDto>> {
+  const prefix = `${WORKSCENE_LEGACY_ENTRY_PREFIX}${migrationId}:`;
+  const imports = new Map<string, WorksceneDto>();
+  let continuation: string | undefined;
+  do {
+    const page = await current.scan(
+      { gte: prefix, lt: `${prefix}\uffff` },
+      256,
+      continuation,
+    );
+    for (const item of page.entries) {
+      const value = overlay.has(item.key) ? overlay.get(item.key) : item.value;
+      const scene = readWorksceneScene(value);
+      if (scene) imports.set(scene.id, scene);
+    }
+    continuation = page.continuation;
+  } while (continuation !== undefined);
+  for (const [key, value] of overlay) {
+    if (!key.startsWith(prefix)) continue;
+    const scene = readWorksceneScene(value);
+    if (scene) imports.set(scene.id, scene);
+    else imports.delete(key.slice(prefix.length));
+  }
+  return imports;
+}
+
+function worksceneSceneKey(sceneId: string): string {
+  return `${WORKSCENE_SCENE_PREFIX}${sceneId}`;
+}
+
+function worksceneTombstoneKey(sceneId: string): string {
+  return `${WORKSCENE_TOMBSTONE_PREFIX}${sceneId}`;
+}
+
+function worksceneRequestKey(requestId: string): string {
+  return `${WORKSCENE_REQUEST_PREFIX}${requestId}`;
+}
+
+function workscenePendingKey(sceneId: string): string {
+  return `${WORKSCENE_PENDING_PREFIX}${sceneId}`;
+}
+
+function worksceneLegacyMetaKey(migrationId: string): string {
+  return `${WORKSCENE_LEGACY_META_PREFIX}${migrationId}`;
+}
+
+function worksceneLegacyEntryKey(migrationId: string, sceneId: string): string {
+  return `${WORKSCENE_LEGACY_ENTRY_PREFIX}${migrationId}:${sceneId}`;
+}
+
+function readWorksceneMeta(value: JsonValue | undefined): {
+  readonly established: boolean;
+  readonly domainRevision: number;
+} {
+  if (value === undefined) return { established: false, domainRevision: 0 };
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof value.established !== "boolean" ||
+    !Number.isSafeInteger(value.domainRevision) || Number(value.domainRevision) < 0
+  ) {
+    throw corruptRegistry("Workscene durable metadata is invalid");
+  }
+  return {
+    established: value.established,
+    domainRevision: Number(value.domainRevision),
+  };
+}
+
+function readWorksceneScene(value: JsonValue | undefined): WorksceneDto | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw corruptRegistry("Workscene durable scene is invalid");
+  }
+  const scene = value as unknown as WorksceneDto;
+  validateScene(scene);
+  return cloneScene(scene);
+}
+
+function readWorksceneRequest(value: JsonValue | undefined): RequestReplay | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof value.mutationDigest !== "string"
+  ) {
+    throw corruptRegistry("Workscene durable request is invalid");
+  }
+  const result = value.result === undefined
+    ? undefined
+    : readStoredAppliedResult(value.result);
+  return {
+    mutationDigest: value.mutationDigest as Digest,
+    ...(result ? { result } : {}),
+  };
+}
+
+function readStoredAppliedResult(value: JsonValue): WorksceneAppliedResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw corruptRegistry("Workscene durable applied result is invalid");
+  }
+  if (value.kind === "workscene-applied") {
+    if (
+      (value.operation !== "create" &&
+        value.operation !== "rename" &&
+        value.operation !== "set-workdir") ||
+      !Number.isSafeInteger(value.revision) ||
+      Number(value.revision) <= 0
+    ) {
+      throw corruptRegistry("Workscene durable applied result is invalid");
+    }
+    const scene = readWorksceneScene(value.scene);
+    if (!scene) {
+      throw corruptRegistry("Workscene durable applied result omitted its scene");
+    }
+    return {
+      kind: "workscene-applied",
+      operation: value.operation,
+      revision: Number(value.revision),
+      scene,
+    };
+  }
+  if (
+    value.kind !== "workscene-deleted" ||
+    value.operation !== "delete" ||
+    typeof value.sceneId !== "string" ||
+    !Number.isSafeInteger(value.revision) ||
+    Number(value.revision) <= 0 ||
+    !Number.isSafeInteger(value.previousObjectRevision) ||
+    Number(value.previousObjectRevision) <= 0
+  ) {
+    throw corruptRegistry("Workscene durable applied result is invalid");
+  }
+  requireIdentifier(value.sceneId, "Workscene id");
+  return {
+    kind: "workscene-deleted",
+    operation: "delete",
+    revision: Number(value.revision),
+    sceneId: value.sceneId,
+    previousObjectRevision: Number(value.previousObjectRevision),
+  };
+}
+
+function readPendingDeletion(value: JsonValue | undefined): {
+  readonly deletionRevision: number;
+  readonly previousObjectRevision: number;
+} | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    !Number.isSafeInteger(value.deletionRevision) || Number(value.deletionRevision) <= 0 ||
+    !Number.isSafeInteger(value.previousObjectRevision) || Number(value.previousObjectRevision) <= 0
+  ) {
+    throw corruptRegistry("Workscene pending deletion is invalid");
+  }
+  return {
+    deletionRevision: Number(value.deletionRevision),
+    previousObjectRevision: Number(value.previousObjectRevision),
+  };
+}
+
+function readLegacyMeta(value: JsonValue | undefined): {
+  readonly sourceSnapshotToken: string;
+  readonly status: "open" | "activated" | "abandoned";
+  readonly importSetDigest?: Digest;
+} | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof value.sourceSnapshotToken !== "string" ||
+    (value.status !== "open" && value.status !== "activated" && value.status !== "abandoned")
+  ) {
+    throw corruptRegistry("Workscene legacy metadata is invalid");
+  }
+  return {
+    sourceSnapshotToken: value.sourceSnapshotToken,
+    status: value.status,
+    ...(typeof value.importSetDigest === "string"
+      ? { importSetDigest: value.importSetDigest as Digest }
+      : {}),
+  };
 }
 
 function worksceneStagedConflict(error: unknown): {
@@ -1395,16 +1846,6 @@ function normalizeName(value: string): string {
     throw new TypeError("Workscene name must be a non-empty bounded string");
   }
   return name;
-}
-
-function compareDeletionCursor(
-  left: { readonly deletionRevision: number; readonly sceneId: string },
-  right: { readonly deletionRevision: number; readonly sceneId: string },
-): number {
-  return (
-    left.deletionRevision - right.deletionRevision ||
-    left.sceneId.localeCompare(right.sceneId, "en-US")
-  );
 }
 
 function requireIdentifier(value: unknown, label: string): string {

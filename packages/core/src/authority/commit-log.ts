@@ -444,7 +444,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     decide: (
       state: State,
       context: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<Body, Value>,
+    ) =>
+      | ProjectionTransactionDecision<Body, Value>
+      | Promise<ProjectionTransactionDecision<Body, Value>>,
     options: ProjectionTransactionOptions = {},
   ): Promise<ProjectionTransactionResult<State, Body, Value>> {
     const selectedStreams = validateProjectionStreams(options);
@@ -459,6 +461,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     const afterLsn = options.cursor?.lsn ?? options.afterLsn ?? 0;
     assertReplayLsn(afterLsn);
+    const readProjectionIds = [...new Set(options.readProjectionIds ?? [])]
+      .map(validateDurableProjectionId)
+      .sort((left, right) => left.localeCompare(right, "en-US"));
 
     const candidateReferences = collectArtifactRefs(
       options.candidateReferences ?? [],
@@ -475,6 +480,19 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const operation = () =>
       this.#withLogLock(() =>
         runPhysicalStep(async () => {
+          const readProjections = new Map<string, DurableProjectionReadContext>();
+          for (const projectionId of readProjectionIds) {
+            const projection = this.#durableProjections.get(projectionId);
+            if (!projection) {
+              throw new TypeError(
+                `Durable projection is not registered: ${projectionId}`,
+              );
+            }
+            await this.#withDurableProjectionRecovery(projection, () =>
+              this.#synchronizeDurableProjection(projection),
+            );
+            readProjections.set(projectionId, projection.read);
+          }
           const replay: Array<{
             record: LogicalRecord<Body>;
             envelope: CommitEnvelope<Body>;
@@ -508,11 +526,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           }
           const at = this.#clock();
           assertCanonicalTime(at);
-          const decision = decide(state, {
-            lastLsn,
-            nextLsn: lastLsn + 1,
-            at,
-          });
+          const decision = await decide(
+            state,
+            projectionTransactionContext(lastLsn, at, readProjections),
+          );
           if (decision.kind === "return") {
             return {
               value: decision.value,
@@ -593,11 +610,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         const lastLsn = await this.#loadLastLsn();
         const at = this.#clock();
         assertCanonicalTime(at);
-        const decision = await decide(projection.read, {
-          lastLsn,
-          nextLsn: lastLsn + 1,
-          at,
-        });
+        const decision = await decide(
+          projection.read,
+          projectionTransactionContext(
+            lastLsn,
+            at,
+            new Map([[projectionId, projection.read]]),
+          ),
+        );
         if (decision.kind === "return") return { value: decision.value };
         const entries = normalizeEntries(decision.entries);
         assertTransactionReferencesProtected(
@@ -2222,6 +2242,32 @@ function advanceProjectionPrefix(
 
 function emptyLogPrefix(logId: string): string {
   return protocolDigest("AuthorityLogPrefix", 1, { logId });
+}
+
+function validateDurableProjectionId(projectionId: string): string {
+  durableProjectionDirectoryName(projectionId);
+  return projectionId;
+}
+
+function projectionTransactionContext(
+  lastLsn: number,
+  at: IsoTime,
+  readProjections: ReadonlyMap<string, DurableProjectionReadContext>,
+): ProjectionTransactionContext {
+  return {
+    lastLsn,
+    nextLsn: lastLsn + 1,
+    at,
+    readProjection(projectionId) {
+      const projection = readProjections.get(projectionId);
+      if (!projection) {
+        throw new TypeError(
+          `Durable projection was not selected for this transaction: ${projectionId}`,
+        );
+      }
+      return projection;
+    },
+  };
 }
 
 function fileReader(

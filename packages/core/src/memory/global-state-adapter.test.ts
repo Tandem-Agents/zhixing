@@ -27,7 +27,7 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
         content: "Prefers concise answers.",
       },
     };
-    const plan = fixture.adapter.prepareStagedMutations({
+    const plan = await prepareStaged(fixture, {
       records: [{ seq: 1, requestId: "memory-save", mutation }],
     });
     expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 1 });
@@ -104,7 +104,7 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
       id: "person-a",
       expectedDigest: "0".repeat(64),
     };
-    const plan = fixture.adapter.prepareStagedMutations({
+    const plan = await prepareStaged(fixture, {
       records: [
         { seq: 1, requestId: "update", mutation: update },
         { seq: 2, requestId: "delete", mutation: remove },
@@ -173,7 +173,7 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
       expectedDigest: current.digest,
     };
     const projected = projectMemoryLogicalEntry(secondPayload, current, { revision: 2 });
-    const plan = fixture.adapter.prepareStagedMutations({
+    const plan = await prepareStaged(fixture, {
       records: [
         {
           seq: 1,
@@ -199,6 +199,29 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
     expect(plan.outcomes.get(2)).toEqual({ t: "granted", targetRevision: 3 });
   });
 });
+
+async function prepareStaged(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  input: Pick<
+    Parameters<AnchorMemoryGlobalStateAdapter["prepareStagedMutations"]>[0],
+    "records"
+  >,
+) {
+  const transaction = await fixture.log.transactProjection(
+    {},
+    (state) => state,
+    async (_state, context) => ({
+      kind: "return" as const,
+      value: await fixture.adapter.prepareStagedMutations({
+        records: input.records,
+        authorityProjection: context.readProjection(fixture.adapter.stagedProjectionId),
+        at: context.at,
+      }),
+    }),
+    { readProjectionIds: [fixture.adapter.stagedProjectionId] },
+  );
+  return transaction.value;
+}
 
 async function createFixture() {
   const root = await createTempDir("zhixing-memory-global-state");

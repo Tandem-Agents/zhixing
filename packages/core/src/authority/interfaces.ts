@@ -7,6 +7,7 @@ import type {
 } from "../contracts/index.js";
 import type {
   DurableProjectionDefinition,
+  DurableProjectionReadContext,
   RebuildableDurableProjectionIndex,
 } from "./durable-projection-index.js";
 
@@ -127,6 +128,8 @@ export interface DurableLogCheckpoint {
 
 export interface ProjectionTransactionOptions extends ProjectionReplayOptions {
   readonly cursor?: ProjectionCursor;
+  /** Durable read models that must be caught up to the locked log prefix. */
+  readonly readProjectionIds?: readonly string[];
   /** Artifact references that a new commit may introduce. */
   readonly candidateReferences?: readonly ArtifactRef[];
   /**
@@ -141,6 +144,8 @@ export interface ProjectionTransactionContext {
   readonly nextLsn: number;
   /** Timestamp that will be written to the envelope if this decision appends. */
   readonly at: IsoTime;
+  /** Reads a projection selected by readProjectionIds at this exact locked prefix. */
+  readProjection(projectionId: string): DurableProjectionReadContext;
 }
 
 export type ProjectionTransactionDecision<Body, Value> =
@@ -189,6 +194,19 @@ export interface AuthorityCommitLog {
   durableProjection<Body = JsonValue>(
     definition: DurableProjectionDefinition<Body>,
   ): RebuildableDurableProjectionIndex;
+  transactDurableProjection<Body = JsonValue, Value = void>(
+    projectionId: string,
+    decide: (
+      current: DurableProjectionReadContext,
+      context: ProjectionTransactionContext,
+    ) =>
+      | ProjectionTransactionDecision<Body, Value>
+      | Promise<ProjectionTransactionDecision<Body, Value>>,
+    options?: Pick<ProjectionTransactionOptions, "candidateReferences">,
+  ): Promise<{
+    readonly value: Value;
+    readonly commit?: CommitEnvelope<Body>;
+  }>;
   rebuildProjection<State, Body = JsonValue>(
     initial: State,
     reducer: ProjectionReducer<State, Body>,
@@ -200,7 +218,9 @@ export interface AuthorityCommitLog {
     decide: (
       state: State,
       context: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<Body, Value>,
+    ) =>
+      | ProjectionTransactionDecision<Body, Value>
+      | Promise<ProjectionTransactionDecision<Body, Value>>,
     options?: ProjectionTransactionOptions,
   ): Promise<ProjectionTransactionResult<State, Body, Value>>;
   collectGarbage(
