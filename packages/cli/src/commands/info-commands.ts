@@ -4,13 +4,11 @@
  * 覆盖 /help /status /me /model /usage /context /journal /people /tasks。
  * 运行时信息(上下文预算 / journal / people)的权威在核心宿主——经会话与
  * 管理面 RPC 取;模型 / provider 显示取本地配置(宿主按同一配置装配)。
- * /me 读本地身份画像(纯只读展示,不构造任何记忆域写仓)。
+ * /me、/journal、/people 只读宿主 memory authority 投影。
  */
 
 import chalk from "chalk";
 import {
-  loadProfile,
-  getMemoryDir,
   isInternal,
   type SchedulerFacade,
   type ChannelStatus,
@@ -19,7 +17,7 @@ import {
   type CommandHandlerContext,
   type CommandDef,
   type CommandCategory,
-  type PersonEntry,
+  type MemoryLogicalEntry,
 } from "@zhixing/core";
 import type { ZhixingConfig } from "@zhixing/providers";
 import type { ProxyDescription } from "@zhixing/network";
@@ -443,29 +441,25 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("me:repl", async () => {
-    const profile = await loadProfile();
+    const profile = await deps.management.profileGet();
     if (!profile) {
-      const memDir = getMemoryDir();
       writer.line(
         `\n${chalk.dim("  未找到身份画像。")}` +
-          `\n${chalk.dim(`  创建 ${memDir}/profile.md 来设置你的身份信息。`)}` +
-          `\n\n${chalk.dim("  示例内容：")}` +
-          `\n${chalk.dim("  ---")}` +
-          `\n${chalk.dim("  name: 你的名字")}` +
-          `\n${chalk.dim("  language: zh-CN")}` +
-          `\n${chalk.dim("  ---")}` +
-          `\n${chalk.dim("  ## 技术栈")}` +
-          `\n${chalk.dim("  TypeScript, React, Node.js\n")}`,
+          `\n${chalk.dim("  在对话中告诉知行你的身份信息或偏好，并请它记住。\n")}`,
       );
       return {};
     }
     writer.line(`\n${chalk.bold("  身份画像")}`);
-    writer.line(`  ${chalk.dim("Name:")} ${chalk.cyan(profile.meta.name)}`);
-    if (profile.meta.language) {
-      writer.line(`  ${chalk.dim("Language:")} ${profile.meta.language}`);
+    writer.line(
+      `  ${chalk.dim("Name:")} ${chalk.cyan(textMeta(profile, "name") ?? profile.id)}`,
+    );
+    const language = textMeta(profile, "language");
+    if (language) {
+      writer.line(`  ${chalk.dim("Language:")} ${language}`);
     }
-    if (profile.meta.timezone) {
-      writer.line(`  ${chalk.dim("Timezone:")} ${profile.meta.timezone}`);
+    const timezone = textMeta(profile, "timezone");
+    if (timezone) {
+      writer.line(`  ${chalk.dim("Timezone:")} ${timezone}`);
     }
     if (profile.content) {
       writer.line("");
@@ -602,7 +596,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("people:repl", async () => {
-    const people = (await deps.management.peopleList()) as PersonEntry[];
+    const people = await deps.management.peopleList();
 
     if (people.length === 0) {
       writer.line(
@@ -616,12 +610,15 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
       `\n${chalk.bold("  关系网络")} ${chalk.dim(`(${people.length} 人)`)}`,
     );
     for (const person of people) {
-      const relation = chalk.dim(` (${person.meta.relation})`);
-      const birthday = person.meta.birthday
-        ? chalk.dim(` 🎂 ${person.meta.birthday}`)
+      const relation = chalk.dim(
+        ` (${textMeta(person, "relation") ?? "未设置关系"})`,
+      );
+      const birthdayText = textMeta(person, "birthday");
+      const birthday = birthdayText
+        ? chalk.dim(` 🎂 ${birthdayText}`)
         : "";
       writer.line(
-        `  ${chalk.cyan("•")} ${person.meta.name}${relation}${birthday}`,
+        `  ${chalk.cyan("•")} ${textMeta(person, "name") ?? person.id}${relation}${birthday}`,
       );
     }
     writer.line("");
@@ -670,4 +667,9 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     writer.line("");
     return {};
   });
+}
+
+function textMeta(entry: MemoryLogicalEntry, key: string): string | undefined {
+  const value = entry.meta[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }

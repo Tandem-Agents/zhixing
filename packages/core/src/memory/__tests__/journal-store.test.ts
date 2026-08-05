@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { JournalStore, type CondenseLLM } from "../journal-store.js";
+import {
+  JournalStore,
+  planJournalLifecycle,
+  type CondenseLLM,
+} from "../journal-store.js";
 
 function daysAgo(n: number): string {
   return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
@@ -204,5 +208,21 @@ describe("JournalStore", () => {
       const plan = await customStore.scan();
       expect(plan.expiredFiles).toHaveLength(1);
     });
+  });
+});
+
+describe("planJournalLifecycle", () => {
+  it("fails closed for malformed or duplicate authority facts", () => {
+    const valid = {
+      id: "2026-06-01",
+      meta: { date: "2026-06-01" },
+      content: "daily",
+      digest: `sha256:${"1".repeat(64)}` as const,
+    };
+    expect(() => planJournalLifecycle([valid, valid])).toThrow("entry is invalid");
+    expect(() => planJournalLifecycle([{ ...valid, id: "2026-02-31", meta: { date: "2026-02-31" } }]))
+      .toThrow("entry is invalid");
+    expect(() => planJournalLifecycle([{ ...valid, meta: { date: "2026-06-02" } }]))
+      .toThrow("entry is invalid");
   });
 });

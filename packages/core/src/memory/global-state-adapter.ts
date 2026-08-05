@@ -50,18 +50,34 @@ const MEMORY_SEEN_PREFIX = "seen:";
 const MEMORY_LEGACY_CUTOVER_KEY = "legacy-cutover";
 const MEMORY_MATERIALIZATION_STREAM = "intent:memory-materialization";
 
-type MemoryMutation = Extract<
+type StagedMemoryMutation = Extract<
   GlobalStagedMutation,
   { kind: "memory-append" | "memory-delete" }
+>;
+
+type MemoryControlMutation = Extract<
+  GlobalControlMutation,
+  { kind: "memory-append" | "memory-delete" | "memory-journal-condense" }
 >;
 
 type MemoryMutationAppliedRecord = {
   readonly t: "memory-mutation-applied";
   readonly requestId: string;
   readonly mutationDigest: string;
-  readonly mutation: MemoryMutation;
+  readonly mutation: StagedMemoryMutation;
   readonly revision: number;
   readonly entry?: MemoryLogicalEntry;
+  readonly at: string;
+};
+
+type MemoryJournalCondensedRecord = {
+  readonly t: "memory-journal-condensed";
+  readonly requestId: string;
+  readonly mutationDigest: string;
+  readonly mutation: Extract<MemoryControlMutation, { kind: "memory-journal-condense" }>;
+  readonly revision: number;
+  readonly entry: MemoryLogicalEntry;
+  readonly deletedEntryKeys: readonly string[];
   readonly at: string;
 };
 
@@ -74,7 +90,10 @@ type MemoryLegacyCutoverRecord = {
 
 type MemoryAuthorityRecord =
   | MemoryMutationAppliedRecord
+  | MemoryJournalCondensedRecord
   | MemoryLegacyCutoverRecord;
+
+type MemoryPendingRecord = MemoryMutationAppliedRecord | MemoryJournalCondensedRecord;
 
 type MemoryMaterializationRecord = {
   readonly t: "memory-materialized";
@@ -120,7 +139,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#durable = this.#log.durableProjection({
       projectionId: MEMORY_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 2,
+      reducerVersion: 3,
       reduce: reduceMemoryDurableProjection,
     });
   }
@@ -136,7 +155,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
   }
 
   ownsStagedMutation(mutation: GlobalStagedMutation): boolean {
-    return isMemoryMutation(mutation);
+    return isStagedMemoryMutation(mutation);
   }
 
   async prepareStagedMutations(input: {
@@ -159,7 +178,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
       input.authorityProjection,
       input.records.map((record) => ({
         requestId: record.requestId,
-        mutation: requireMemoryMutation(record.mutation),
+        mutation: requireStagedMemoryMutation(record.mutation),
       })),
       input.at,
     );
@@ -170,7 +189,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
       | { readonly t: "conflicted"; readonly error: AuthorityError }
     >();
     for (const item of input.records) {
-      const mutation = normalizeMutation(requireMemoryMutation(item.mutation));
+      const mutation = normalizeStagedMutation(requireStagedMemoryMutation(item.mutation));
       const mutationDigest = protocolDigest("MemoryAuthorityMutation", 1, mutation);
       const replay = overlay.requests.get(item.requestId);
       if (replay) {
@@ -206,7 +225,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     readonly mutation: GlobalStagedMutation;
     readonly targetRevision: number;
   }): Promise<void> {
-    if (!isMemoryMutation(input.mutation)) {
+    if (!isStagedMemoryMutation(input.mutation)) {
       throw new TypeError("Memory materializer received another mutation domain");
     }
     await this.#materializePending(input.requestId, input.targetRevision);
@@ -236,7 +255,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
       return;
     }
     for (const record of records) {
-      if (isMemoryMutation(record.mutation)) {
+      if (isStagedMemoryMutation(record.mutation)) {
         await this.#materializePending(record.requestId);
       }
     }
@@ -303,7 +322,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     | GlobalControlMutationResult<GlobalControlMutation>
     | GlobalStagedMutationResult<GlobalStagedMutation>
   > {
-    if (!isMemoryMutation(mutation as GlobalStagedMutation)) {
+    if (!isMemoryControlMutation(mutation)) {
       throw new TypeError("This global state adapter only owns the memory domain");
     }
     if (context.principal.kind === "assignment") {
@@ -311,10 +330,19 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
         "Assignment memory mutations must be staged by the assignment owner",
       );
     }
-    const memoryMutation = mutation as MemoryMutation;
+    const memoryMutation = mutation;
+    if (
+      memoryMutation.kind === "memory-journal-condense" &&
+      (context.principal.kind !== "host" ||
+        context.principal.component !== "memory-journal-maintenance")
+    ) {
+      throw new AuthorityMethodForbiddenError(
+        "Journal condensation is owned by anchor memory maintenance",
+      );
+    }
     this.#admit(context, "global.mutate", memoryScopeOf(memoryMutation));
     await this.#ensureOpen();
-    const normalized = normalizeMutation(memoryMutation);
+    const normalized = normalizeControlMutation(memoryMutation);
     const transaction = await this.#log.transactProjection<
       MemoryProjection,
       MemoryAuthorityRecord,
@@ -328,7 +356,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
           [{ requestId: context.requestId, mutation: normalized }],
           transactionContext.at,
         );
-        const planned = planMutation(
+        const planned = planControlMutation(
           state,
           normalized,
           context.requestId,
@@ -379,8 +407,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
         "Committed memory mutation is unavailable or changed",
       );
     }
-    const mutation = record.mutation;
-    const scope = memoryScopeOf(mutation);
+    const scope = memoryScopeOf(record.mutation);
     const store = new MemoryStore(this.#scopeRoot(scope));
     const replay = readMemoryRequest(
       await this.#durable.get(memoryRequestKey(requestId)),
@@ -390,23 +417,54 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
         "Committed memory request has no projection key",
       );
     }
-    const entry = readMemoryEntry(
-      await this.#durable.get(memoryEntryKey(replay.entryKey)),
-    );
-    if (mutation.kind === "memory-delete") {
-      await store.delete(storageCategory(mutation.domain, mutation.category), mutation.id);
-    } else {
-      if (!entry) {
-        throw new CommittedMutationMaterializationError(
-          "Committed memory entry is absent from its projection",
-        );
+    if (record.t === "memory-journal-condensed") {
+      const currentTarget = readMemoryEntry(
+        await this.#durable.get(memoryEntryKey(replay.entryKey)),
+      );
+      if (
+        currentTarget?.revision === record.revision &&
+        currentTarget.digest === record.entry.digest
+      ) {
+        await store.save({
+          category: "journal",
+          id: currentTarget.id,
+          meta: structuredClone(currentTarget.meta),
+          content: currentTarget.content,
+        });
       }
-      await store.save({
-        category: storageCategory(entry.domain, entry.category),
-        id: entry.id,
-        meta: structuredClone(entry.meta),
-        content: entry.content,
-      });
+      for (const source of record.mutation.sources) {
+        const currentSource = readMemoryEntry(
+          await this.#durable.get(
+            memoryEntryKey(condenseSourceKey(record.mutation, source.id)),
+          ),
+        );
+        if (!currentSource) await store.delete("journal", source.id);
+      }
+    } else {
+      const mutation = record.mutation;
+      const entry = readMemoryEntry(
+        await this.#durable.get(memoryEntryKey(replay.entryKey)),
+      );
+      if (mutation.kind === "memory-delete") {
+        if (!entry) {
+          await store.delete(
+            storageCategory(mutation.domain, mutation.category),
+            mutation.id,
+          );
+        }
+      } else {
+        if (
+          entry?.revision === record.revision &&
+          entry.digest === record.entry?.digest
+        ) {
+          await store.save({
+            category: storageCategory(entry.domain, entry.category),
+            id: entry.id,
+            meta: structuredClone(entry.meta),
+            content: entry.content,
+          });
+        }
+      }
     }
     await this.#log.transactDurableProjection<MemoryMaterializationRecord, void>(
       MEMORY_AUTHORITY_PROJECTION_ID,
@@ -600,7 +658,7 @@ function scopeKey(scope: MemoryScopeRef): string {
 
 interface LegacyMemorySource {
   readonly entry: MemoryLogicalEntry;
-  readonly mutation: MemoryMutation;
+  readonly mutation: StagedMemoryMutation;
 }
 
 function normalizeLegacyScopes(
@@ -693,7 +751,7 @@ function legacyMemorySource(
             date: disk.id,
             content: disk.content,
           },
-  } as MemoryMutation;
+  } as StagedMemoryMutation;
   return { entry, mutation };
 }
 
@@ -707,7 +765,7 @@ function legacyImportRequestId(logicalKey: string): string {
 
 function planMutation(
   state: MemoryProjection,
-  mutation: MemoryMutation,
+  mutation: StagedMemoryMutation,
   requestId: string,
   at: string,
 ): {
@@ -780,6 +838,101 @@ function planMutation(
   };
 }
 
+function planControlMutation(
+  state: MemoryProjection,
+  mutation: MemoryControlMutation,
+  requestId: string,
+  at: string,
+): {
+  readonly outcome:
+    | { readonly t: "granted"; readonly targetRevision: number }
+    | { readonly t: "conflicted"; readonly error: AuthorityError };
+  readonly record: MemoryPendingRecord;
+} {
+  if (mutation.kind !== "memory-journal-condense") {
+    return planMutation(state, mutation, requestId, at);
+  }
+  const mutationDigest = protocolDigest("MemoryAuthorityMutation", 1, mutation);
+  const replay = state.requests.get(requestId);
+  if (replay) {
+    return replay.mutationDigest === mutationDigest
+      ? {
+          outcome: { t: "granted", targetRevision: replay.revision },
+          record: undefined as never,
+        }
+      : {
+          outcome: conflict(
+            "idempotency-conflict",
+            "Memory request identity was reused",
+          ),
+          record: undefined as never,
+        };
+  }
+  const targetKey = condenseTargetKey(mutation);
+  const target = state.entries.get(targetKey);
+  if (
+    (target && target.digest !== mutation.targetExpectedDigest) ||
+    (!target && mutation.targetExpectedDigest !== undefined)
+  ) {
+    return {
+      outcome: conflict("revision-conflict", "Journal summary changed"),
+      record: undefined as never,
+    };
+  }
+  const sources: MemoryLogicalEntry[] = [];
+  for (const source of mutation.sources) {
+    const key = condenseSourceKey(mutation, source.id);
+    const current = state.entries.get(key);
+    if (!current) {
+      return {
+        outcome: conflict("not-found", "Journal source was not found"),
+        record: undefined as never,
+      };
+    }
+    if (current.digest !== source.expectedDigest) {
+      return {
+        outcome: conflict("revision-conflict", "Journal source changed"),
+        record: undefined as never,
+      };
+    }
+    sources.push(current);
+  }
+  const revision = (target?.revision ?? 0) + 1;
+  const identity = {
+    domain: "journal" as const,
+    scope: { kind: "personal" as const },
+    id: mutation.month,
+    meta: {
+      date: mutation.month,
+      condensed: true,
+      condensedFrom: sources.length,
+      condensedAt: at.slice(0, 10),
+    },
+    content: mutation.summary,
+  };
+  const entry: MemoryLogicalEntry = {
+    ...identity,
+    revision,
+    digest: memoryLogicalEntryDigest(identity),
+    updatedAt: at,
+  };
+  return {
+    outcome: { t: "granted", targetRevision: revision },
+    record: {
+      t: "memory-journal-condensed",
+      requestId,
+      mutationDigest,
+      mutation: structuredClone(mutation),
+      revision,
+      entry,
+      deletedEntryKeys: mutation.sources.map((source) =>
+        condenseSourceKey(mutation, source.id)
+      ),
+      at,
+    },
+  };
+}
+
 function reduceRecord(previous: MemoryProjection, logical: LogicalRecord<MemoryAuthorityRecord>): MemoryProjection {
   const state = cloneProjection(previous);
   const record = logical.body;
@@ -791,6 +944,21 @@ function reduceRecord(previous: MemoryProjection, logical: LogicalRecord<MemoryA
   }
   if (state.requests.has(record.requestId)) {
     throw new TypeError("Memory authority record is invalid or duplicated");
+  }
+  if (record.t === "memory-journal-condensed") {
+    const logicalKey = entryKey(record.entry);
+    state.entries.set(logicalKey, cloneEntry(record.entry));
+    state.seenKeys.add(logicalKey);
+    for (const sourceKey of record.deletedEntryKeys) {
+      state.entries.delete(sourceKey);
+      state.seenKeys.add(sourceKey);
+    }
+    state.requests.set(record.requestId, {
+      mutationDigest: record.mutationDigest,
+      revision: record.revision,
+      entryKey: logicalKey,
+    });
+    return state;
   }
   const logicalKey = record.entry
     ? entryKey(record.entry)
@@ -840,6 +1008,22 @@ async function reduceMemoryDurableProjection(
       if (await get(requestKey)) {
         throw new TypeError("Memory authority request was duplicated");
       }
+      if (record.t === "memory-journal-condensed") {
+        const logicalKey = entryKey(record.entry);
+        put(memoryEntryKey(logicalKey), cloneEntry(record.entry) as unknown as JsonValue);
+        put(memorySeenKey(logicalKey), true);
+        for (const sourceKey of record.deletedEntryKeys) {
+          tombstone(memoryEntryKey(sourceKey));
+          put(memorySeenKey(sourceKey), true);
+        }
+        put(requestKey, {
+          mutationDigest: record.mutationDigest,
+          revision: record.revision,
+          entryKey: logicalKey,
+        });
+        put(memoryPendingKey(record.requestId), structuredClone(record) as unknown as JsonValue);
+        continue;
+      }
       const logicalKey = record.entry
         ? entryKey(record.entry)
         : plannedMutationKey(record.mutation, record.at);
@@ -870,7 +1054,7 @@ async function reduceMemoryDurableProjection(
 
 async function loadMemoryProjectionForMutations(
   projection: DurableProjectionReadContext,
-  records: readonly { readonly requestId: string; readonly mutation: MemoryMutation }[],
+  records: readonly { readonly requestId: string; readonly mutation: MemoryControlMutation }[],
   at: string,
 ): Promise<MemoryProjection> {
   const state = emptyProjection();
@@ -879,12 +1063,20 @@ async function loadMemoryProjectionForMutations(
       await projection.get(memoryRequestKey(item.requestId)),
     );
     if (request) state.requests.set(item.requestId, request);
-    const logicalKey = plannedMutationKey(normalizeMutation(item.mutation), at);
-    if (state.entries.has(logicalKey)) continue;
-    const entry = readMemoryEntry(
-      await projection.get(memoryEntryKey(logicalKey)),
-    );
-    if (entry) state.entries.set(logicalKey, entry);
+    const mutation = normalizeControlMutation(item.mutation);
+    const logicalKeys = mutation.kind === "memory-journal-condense"
+      ? [
+          condenseTargetKey(mutation),
+          ...mutation.sources.map((source) => condenseSourceKey(mutation, source.id)),
+        ]
+      : [plannedMutationKey(mutation, at)];
+    for (const logicalKey of logicalKeys) {
+      if (state.entries.has(logicalKey)) continue;
+      const entry = readMemoryEntry(
+        await projection.get(memoryEntryKey(logicalKey)),
+      );
+      if (entry) state.entries.set(logicalKey, entry);
+    }
   }
   return state;
 }
@@ -968,19 +1160,41 @@ function readMemoryAuthorityRecord(value: unknown): MemoryAuthorityRecord {
   return readPendingMemoryRecord(value);
 }
 
-function readPendingMemoryRecord(value: unknown): MemoryMutationAppliedRecord {
+function readPendingMemoryRecord(value: unknown): MemoryPendingRecord {
   if (
     typeof value !== "object" || value === null || Array.isArray(value) ||
-    (value as { t?: unknown }).t !== "memory-mutation-applied"
+    !["memory-mutation-applied", "memory-journal-condensed"].includes(
+      String((value as { t?: unknown }).t),
+    )
   ) {
     throw new TypeError("Memory authority record is invalid");
   }
-  const record = value as MemoryMutationAppliedRecord;
+  const record = value as MemoryPendingRecord;
   identifier(record.requestId, "Memory authority requestId");
+  if (
+    !/^sha256:[a-f0-9]{64}$/u.test(record.mutationDigest) ||
+    !Number.isFinite(Date.parse(record.at))
+  ) {
+    throw new TypeError("Memory authority record identity is invalid");
+  }
   if (!Number.isSafeInteger(record.revision) || record.revision <= 0) {
     throw new TypeError("Memory authority revision is invalid");
   }
-  normalizeMutation(record.mutation);
+  normalizeControlMutation(record.mutation);
+  if (record.t === "memory-journal-condensed") {
+    if (
+      record.entry.domain !== "journal" ||
+      record.entry.scope.kind !== "personal" ||
+      record.entry.id !== record.mutation.month ||
+      record.entry.revision !== record.revision ||
+      record.deletedEntryKeys.length !== record.mutation.sources.length ||
+      record.deletedEntryKeys.some(
+        (key, index) => key !== condenseSourceKey(record.mutation, record.mutation.sources[index]!.id),
+      )
+    ) {
+      throw new TypeError("Memory journal condensation record is invalid");
+    }
+  }
   return structuredClone(record);
 }
 
@@ -1022,14 +1236,18 @@ function readMemoryMaterializationRecord(value: unknown): MemoryMaterializationR
   return { ...record };
 }
 
-function requireMemoryMutation(mutation: GlobalStagedMutation): MemoryMutation {
-  if (!isMemoryMutation(mutation)) {
+function requireStagedMemoryMutation(
+  mutation: GlobalStagedMutation,
+): StagedMemoryMutation {
+  if (!isStagedMemoryMutation(mutation)) {
     throw new TypeError("Memory planner received another mutation domain");
   }
   return mutation;
 }
 
-function normalizeMutation(mutation: MemoryMutation): MemoryMutation {
+function normalizeStagedMutation(
+  mutation: StagedMemoryMutation,
+): StagedMemoryMutation {
   const normalized = structuredClone(mutation);
   const scope = memoryScopeOf(normalized);
   if (scope.kind === "workscene") identifier(scope.sceneId, "Memory workscene id");
@@ -1041,7 +1259,49 @@ function normalizeMutation(mutation: MemoryMutation): MemoryMutation {
   return normalized;
 }
 
-function mutationKey(mutation: MemoryMutation): string {
+function normalizeControlMutation(
+  mutation: MemoryControlMutation,
+): MemoryControlMutation {
+  if (mutation.kind !== "memory-journal-condense") {
+    return normalizeStagedMutation(mutation);
+  }
+  const normalized = structuredClone(mutation);
+  if (
+    normalized.scope.kind !== "personal" ||
+    !/^\d{4}-(0[1-9]|1[0-2])$/u.test(normalized.month) ||
+    normalized.sources.length === 0 ||
+    normalized.sources.length > 366 ||
+    !normalized.summary.trim() ||
+    normalized.summary.length > 1_000_000 ||
+    (normalized.targetExpectedDigest !== undefined &&
+      !/^sha256:[a-f0-9]{64}$/u.test(normalized.targetExpectedDigest))
+  ) {
+    throw new TypeError("Memory journal condensation mutation is invalid");
+  }
+  let previous = "";
+  for (const source of normalized.sources) {
+    if (
+      !isCalendarDay(source.id) ||
+      !source.id.startsWith(`${normalized.month}-`) ||
+      source.id <= previous ||
+      !/^sha256:[a-f0-9]{64}$/u.test(source.expectedDigest)
+    ) {
+      throw new TypeError("Memory journal condensation sources are invalid");
+    }
+    previous = source.id;
+  }
+  return normalized;
+}
+
+function isCalendarDay(value: string): boolean {
+  if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/u.test(value)) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function mutationKey(mutation: StagedMemoryMutation): string {
   if (mutation.kind === "memory-delete") {
     return memoryLogicalIdentityKey(
       mutation.scope,
@@ -1062,7 +1322,7 @@ function mutationKey(mutation: MemoryMutation): string {
   );
 }
 
-function plannedMutationKey(mutation: MemoryMutation, at: string): string {
+function plannedMutationKey(mutation: StagedMemoryMutation, at: string): string {
   if (mutation.kind === "memory-delete") return mutationKey(mutation);
   const payload = mutation.payload;
   const id = payload.domain === "journal" ? payload.date ?? at.slice(0, 10) : payload.id;
@@ -1078,8 +1338,23 @@ function entryKey(entry: MemoryLogicalEntry): string {
   return memoryLogicalEntryKey(entry);
 }
 
-function memoryScopeOf(mutation: MemoryMutation): MemoryScopeRef {
-  return mutation.kind === "memory-delete" ? mutation.scope : mutation.payload.scope;
+function memoryScopeOf(mutation: MemoryControlMutation): MemoryScopeRef {
+  return mutation.kind === "memory-delete" || mutation.kind === "memory-journal-condense"
+    ? mutation.scope
+    : mutation.payload.scope;
+}
+
+function condenseTargetKey(
+  mutation: Extract<MemoryControlMutation, { kind: "memory-journal-condense" }>,
+): string {
+  return memoryLogicalIdentityKey(mutation.scope, "journal", undefined, mutation.month);
+}
+
+function condenseSourceKey(
+  mutation: Extract<MemoryControlMutation, { kind: "memory-journal-condense" }>,
+  id: string,
+): string {
+  return memoryLogicalIdentityKey(mutation.scope, "journal", undefined, id);
 }
 
 function storageCategory(
@@ -1112,8 +1387,18 @@ function cloneScope(scope: MemoryScopeRef): MemoryScopeRef {
   return scope.kind === "personal" ? { kind: "personal" } : { ...scope };
 }
 
-function isMemoryMutation(mutation: GlobalStagedMutation): mutation is MemoryMutation {
+function isStagedMemoryMutation(
+  mutation: GlobalStagedMutation,
+): mutation is StagedMemoryMutation {
   return mutation.kind === "memory-append" || mutation.kind === "memory-delete";
+}
+
+function isMemoryControlMutation(
+  mutation: GlobalControlMutation | GlobalStagedMutation,
+): mutation is MemoryControlMutation {
+  return mutation.kind === "memory-append" ||
+    mutation.kind === "memory-delete" ||
+    mutation.kind === "memory-journal-condense";
 }
 
 function isMemoryQuery(query: GlobalQuery): query is Extract<

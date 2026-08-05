@@ -129,6 +129,13 @@ describe("MemoryStore", () => {
       const result = await store.delete("person", "nonexistent");
       expect(result).toBe(false);
     });
+
+    it("does not acknowledge non-ENOENT deletion failures", async () => {
+      const target = path.join(tmpDir, "people", "blocked.md");
+      await fs.mkdir(target, { recursive: true });
+      await expect(store.delete("person", "blocked")).rejects.toBeDefined();
+      await expect(fs.stat(target)).resolves.toBeDefined();
+    });
   });
 
   // ─── list ───

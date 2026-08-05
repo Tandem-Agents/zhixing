@@ -5,12 +5,10 @@
  * 沉淀的新规则随读即见;撤销落盘后对新建 runtime 实例生效(活跃实例的内存
  * 副本随实例换代刷新,最终一致)。
  *
- * skill:只经 GlobalStatePort 的 path-free query/control 合同读写。
+ * skill/memory:只经 GlobalStatePort 的 path-free query/control 合同读写。
  */
 
 import {
-  JournalStore,
-  PeopleStore,
   PermissionStore,
   parseConversationId,
   type PermissionContextId,
@@ -18,6 +16,7 @@ import {
 } from "@zhixing/core";
 import { randomUUID } from "node:crypto";
 import type { GlobalStatePort } from "@zhixing/core/contracts";
+import type { JournalMaintenance } from "./journal-maintenance.js";
 import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
@@ -153,26 +152,70 @@ export function createSkillDirectory(deps: {
   };
 }
 
-export function createMemoryDirectory(): MemoryDirectory {
+export function createMemoryDirectory(deps: {
+  globalState: () => GlobalStatePort | undefined;
+  anchorEpoch: () => number | undefined;
+  journal: JournalMaintenance;
+}): MemoryDirectory {
+  const authority = (): { globalState: GlobalStatePort; anchorEpoch: number } => {
+    const globalState = deps.globalState();
+    const anchorEpoch = deps.anchorEpoch();
+    if (!globalState || !Number.isSafeInteger(anchorEpoch) || anchorEpoch! <= 0) {
+      throw new Error("Anchor memory authority is not ready");
+    }
+    return { globalState, anchorEpoch: anchorEpoch! };
+  };
+  const list = async (
+    domain: "memory" | "journal" | "people",
+    category?: "profile",
+  ) => {
+    const current = authority();
+    const result = await current.globalState.read(
+      {
+        kind: "memory-list",
+        scope: { kind: "personal" },
+        domain,
+        ...(category ? { category } : {}),
+      },
+      {
+        principal: { kind: "host", component: "memory-management" },
+        requestId: `memory-management:${randomUUID()}`,
+        deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+        authority: { domain: "global", anchorEpoch: current.anchorEpoch },
+      },
+    );
+    if (result.kind !== "memory-list") {
+      throw new TypeError("Memory authority returned another result type");
+    }
+    return result.entries;
+  };
   return {
+    async profileGet() {
+      const profiles = (await list("memory", "profile"))
+        .filter((entry) => entry.id === "profile");
+      if (profiles.length > 1) {
+        throw new TypeError("Memory authority returned duplicate profiles");
+      }
+      return profiles[0] ?? null;
+    },
     async journalStats() {
-      const plan = await new JournalStore().scan();
+      const plan = await deps.journal.scan();
       return {
         stats: plan.stats,
-        condense: plan.condensePlan
+        condense: plan.condense.length > 0
           ? {
-              months: plan.condensePlan.months.length,
-              files: plan.condensePlan.months.reduce(
-                (sum: number, m: { files: string[] }) => sum + m.files.length,
+              months: plan.condense.length,
+              files: plan.condense.reduce(
+                (sum, month) => sum + month.sources.length,
                 0,
               ),
             }
           : null,
-        expiredCount: plan.expiredFiles.length,
+        expiredCount: plan.expired.length,
       };
     },
     peopleList() {
-      return new PeopleStore().listAll();
+      return list("people");
     },
   };
 }

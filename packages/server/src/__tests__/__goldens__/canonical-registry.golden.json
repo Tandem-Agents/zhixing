@@ -35,6 +35,10 @@
         "requiresAuth": true
       },
       {
+        "name": "memory.profileGet",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -234,6 +238,10 @@
       },
       {
         "name": "memory.peopleList",
+        "requiresAuth": true
+      },
+      {
+        "name": "memory.profileGet",
         "requiresAuth": true
       },
       {

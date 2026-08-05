@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, unlink } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
@@ -42,10 +42,22 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
       content: "personal journal",
     });
     await worksceneStore.save({
+      category: "profile",
+      id: "profile",
+      meta: { name: "Scene" },
+      content: "workscene profile",
+    });
+    await worksceneStore.save({
       category: "person",
       id: "carol",
       meta: { name: "Carol", relation: "teammate" },
       content: "workscene person",
+    });
+    await worksceneStore.save({
+      category: "journal",
+      id: "2026-08-02",
+      meta: { date: "2026-08-02" },
+      content: "workscene journal",
     });
 
     await fixture.adapter.initializeStagedPublishing([
@@ -66,13 +78,28 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
       readEntries(
         fixture.adapter,
         { kind: "workscene", sceneId: "scene-a" },
+        "memory",
+      ),
+    ).resolves.toMatchObject([{ id: "profile", content: "workscene profile" }]);
+    await expect(
+      readEntries(
+        fixture.adapter,
+        { kind: "workscene", sceneId: "scene-a" },
         "people",
       ),
     ).resolves.toMatchObject([{ id: "carol", content: "workscene person" }]);
+    await expect(
+      readEntries(
+        fixture.adapter,
+        { kind: "workscene", sceneId: "scene-a" },
+        "journal",
+      ),
+    ).resolves.toMatchObject([{ id: "2026-08-02", content: "workscene journal" }]);
 
     const records = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
     expect(records.filter((record) => record.body.t === "memory-legacy-cutover")).toHaveLength(1);
-    expect(records.filter((record) => record.body.t === "memory-mutation-applied")).toHaveLength(4);
+    expect(records.filter((record) => record.body.t === "memory-mutation-applied"))
+      .toHaveLength(6);
   });
 
   it("keeps the cutover authoritative across restart so deleted or late legacy files cannot revive", async () => {
@@ -444,6 +471,158 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
     expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 2 });
     expect(plan.outcomes.get(2)).toEqual({ t: "granted", targetRevision: 3 });
   });
+
+  it("condenses journal sources atomically and replays one pending materialization after I/O recovery", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initializeStagedPublishing();
+    for (const [date, content] of [
+      ["2026-01-02", "first"],
+      ["2026-01-03", "second"],
+    ] as const) {
+      await fixture.adapter.mutate(
+        {
+          kind: "memory-append",
+          payload: {
+            domain: "journal",
+            scope: { kind: "personal" },
+            date,
+            content,
+          },
+        },
+        controlContext(`append:${date}`),
+      );
+    }
+    const sources = await readEntries(
+      fixture.adapter,
+      { kind: "personal" },
+      "journal",
+    );
+    const journalDir = path.join(fixture.root, "memory", "journal");
+    const blockedSource = path.join(journalDir, "2026-01-03.md");
+    await unlink(blockedSource);
+    await mkdir(blockedSource);
+
+    const mutation = {
+      kind: "memory-journal-condense" as const,
+      scope: { kind: "personal" as const },
+      month: "2026-01",
+      sources: sources.map((source) => ({
+        id: source.id,
+        expectedDigest: source.digest,
+      })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+      summary: "monthly summary",
+    };
+    await fixture.adapter.mutate(
+      mutation,
+      maintenanceContext("condense:2026-01"),
+    );
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([{
+      id: "2026-01",
+      content: "monthly summary",
+      meta: { condensed: true, condensedFrom: 2 },
+    }]);
+    const beforeRecovery = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(beforeRecovery.filter((record) => record.body.t === "memory-journal-condensed"))
+      .toHaveLength(1);
+    expect(beforeRecovery.filter((record) =>
+      record.body.t === "memory-materialized" &&
+      record.body.requestId === "condense:2026-01"
+    )).toHaveLength(0);
+
+    await expect(fixture.store.load("journal", "2026-01")).resolves.toMatchObject({
+      content: "monthly summary",
+    });
+    await expect(fixture.store.load("journal", "2026-01-02")).resolves.toBeNull();
+    await rm(blockedSource, { recursive: true });
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+    await reopened.initializeStagedPublishing();
+
+    await expect(fixture.store.load("journal", "2026-01")).resolves.toMatchObject({
+      content: "monthly summary",
+    });
+    await expect(fixture.store.load("journal", "2026-01-02")).resolves.toBeNull();
+    await expect(fixture.store.load("journal", "2026-01-03")).resolves.toBeNull();
+    const afterRecovery = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(afterRecovery.filter((record) =>
+      record.body.t === "memory-materialized" &&
+      record.body.requestId === "condense:2026-01"
+    )).toHaveLength(1);
+    const reopenedAgain = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: fixture.scopeRoot,
+      clock: () => NOW,
+    });
+    await reopenedAgain.initializeStagedPublishing();
+    const afterSecondRecovery = (await fixture.log.readAll())
+      .flatMap((commit) => commit.entries);
+    expect(afterSecondRecovery.filter((record) =>
+      record.body.t === "memory-materialized" &&
+      record.body.requestId === "condense:2026-01"
+    )).toHaveLength(1);
+  });
+
+  it("keeps condensation control-only and rejects source drift without side effects", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initializeStagedPublishing();
+    await fixture.adapter.mutate(
+      {
+        kind: "memory-append",
+        payload: {
+          domain: "journal",
+          scope: { kind: "personal" },
+          date: "2026-01-02",
+          content: "source",
+        },
+      },
+      controlContext("append-source"),
+    );
+    const [source] = await readEntries(
+      fixture.adapter,
+      { kind: "personal" },
+      "journal",
+    );
+    if (!source) throw new Error("journal source missing");
+    const mutation = {
+      kind: "memory-journal-condense" as const,
+      scope: { kind: "personal" as const },
+      month: "2026-01",
+      sources: [{ id: source.id, expectedDigest: `sha256:${"0".repeat(64)}` }],
+      summary: "summary",
+    };
+
+    await expect(
+      fixture.adapter.mutate(mutation, maintenanceContext("stale-condense")),
+    ).rejects.toMatchObject({
+      authorityError: { code: "revision-conflict" },
+    });
+    await expect(
+      fixture.adapter.mutate(
+        { ...mutation, sources: [{ id: source.id, expectedDigest: source.digest }] },
+        controlContext("wrong-owner"),
+      ),
+    ).rejects.toThrow("owned by anchor memory maintenance");
+    await expect(
+      fixture.adapter.mutate(
+        {
+          ...mutation,
+          month: "2026-02",
+          sources: [{ id: "2026-02-31", expectedDigest: source.digest }],
+        },
+        maintenanceContext("invalid-calendar-day"),
+      ),
+    ).rejects.toThrow("sources are invalid");
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([{ id: "2026-01-02", content: "source" }]);
+  });
 });
 
 async function prepareStaged(
@@ -518,4 +697,11 @@ function readContext(requestId: string): GlobalReadCallContext {
 
 function controlContext(requestId: string): GlobalControlCallContext {
   return readContext(requestId) as GlobalControlCallContext;
+}
+
+function maintenanceContext(requestId: string): GlobalControlCallContext {
+  return {
+    ...controlContext(requestId),
+    principal: { kind: "host", component: "memory-journal-maintenance" },
+  };
 }

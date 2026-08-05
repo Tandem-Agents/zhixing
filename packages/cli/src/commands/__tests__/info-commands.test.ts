@@ -102,6 +102,7 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
       keepAliveWork: [],
     })),
     serverShutdown: vi.fn(async () => {}),
+    profileGet: vi.fn(async () => null),
     journalStats: vi.fn(async () => ({
       stats: { totalFiles: 2, hotCount: 1, warmCount: 1, condensedCount: 0 },
       condense: null,
@@ -237,6 +238,16 @@ describe("registerInfoCommands", () => {
     await h.dispatcher.dispatch("/model", RUNTIME);
     const text = stripAnsi(h.writer.text());
     expect(text).toContain("claude-x");
+  });
+
+  it("/me 只读宿主 authority，空画像引导用户通过对话设置", async () => {
+    const h = setup();
+    await h.dispatcher.dispatch("/me", RUNTIME);
+    expect(h.management.profileGet).toHaveBeenCalledOnce();
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("未找到身份画像");
+    expect(text).toContain("在对话中");
+    expect(text).not.toContain("profile.md");
   });
 
   it("/model 在执行时读取最新配置快照", async () => {

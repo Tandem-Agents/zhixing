@@ -704,8 +704,8 @@ export function createWorksceneClearWorkdirCurrentTool(
 /**
  * workscene_memory_query（main-only，只读）—— 检索任一/全部工作场景记忆域。
  *
- * v1：按 query 子串搜（无 query 则列目录索引），返回 id + 标题 + 截断片段；
- * 各场景独立 readonly MemoryStore，不写。
+ * 按 query 子串搜索（无 query 则列目录索引），返回 id + 标题 + 截断片段；
+ * 各场景只经 assignment-bound GlobalQuery 读取权威逻辑记忆。
  */
 export function createWorksceneMemoryQueryTool(
   _workscenes: Pick<WorksceneToolDirectory, "list" | "get">,

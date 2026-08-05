@@ -8,8 +8,8 @@
 
 import type {
   JournalStats,
+  MemoryLogicalEntry,
   PermissionRule,
-  PersonEntry,
   SkillCatalogEntry,
   SkillMode,
 } from "@zhixing/core";
@@ -56,6 +56,7 @@ export interface JournalScanView {
 
 /** 记忆域查看 —— /journal 统计与 /people 关系列表的只读执行体 */
 export interface MemoryDirectory {
+  profileGet(): Promise<MemoryLogicalEntry | null>;
   journalStats(): Promise<JournalScanView>;
-  peopleList(): Promise<PersonEntry[]>;
+  peopleList(): Promise<MemoryLogicalEntry[]>;
 }

@@ -21,6 +21,16 @@ function requireMemory(server: ServerContext): MemoryDirectory {
   return server.memory;
 }
 
+export function buildMemoryProfileGetMethod(): MethodEntry {
+  return {
+    name: "memory.profileGet",
+    requiresAuth: true,
+    async handler(_params, ctx) {
+      return { profile: await requireMemory(ctx.server).profileGet() };
+    },
+  };
+}
+
 export function buildMemoryJournalStatsMethod(): MethodEntry {
   return {
     name: "memory.journalStats",

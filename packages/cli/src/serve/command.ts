@@ -31,7 +31,6 @@ import {
   type SchedulerFacade,
   type SchedulerBackend,
   LocalSchedulerFacade,
-  JournalStore,
   ConversationRepository,
   parseConversationId,
   ShardedTranscriptStore,
@@ -117,6 +116,7 @@ import {
   createSkillDirectory,
   createMemoryDirectory,
 } from "./management-directories.js";
+import { createAnchorJournalMaintenance } from "./journal-maintenance.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
@@ -282,7 +282,19 @@ async function runServerProcess(
   const trustDirectory = createTrustDirectory({
     config,
   });
-  const memoryDirectory = createMemoryDirectory();
+  const journalMaintenance = bootstrap.mesh.roles.includes("anchor")
+    ? createAnchorJournalMaintenance({
+        state: () => authorityRuntimeRef.current?.globalState,
+        anchorEpoch: () => authorityRuntimeRef.current?.anchorEpoch,
+      })
+    : undefined;
+  const memoryDirectory = journalMaintenance
+    ? createMemoryDirectory({
+        globalState: () => authorityRuntimeRef.current?.globalState,
+        anchorEpoch: () => authorityRuntimeRef.current?.anchorEpoch,
+        journal: journalMaintenance,
+      })
+    : undefined;
 
   // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
   let schedulerRef: SchedulerBackend | null = null;
@@ -598,8 +610,6 @@ async function runServerProcess(
   // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
   // ============================================================================
-  // journal 域仓——turn 后维护(conversation 接入面)与系统维护任务共用。
-  const journalStore = new JournalStore();
   const startupCleanups: AssemblyContext["startupCleanups"] = {};
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
 
@@ -629,7 +639,7 @@ async function runServerProcess(
     taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
     worksceneDirectory,
-    journalStore,
+    ...(journalMaintenance ? { journalMaintenance } : {}),
     sessionBroadcastRef,
     sessionActivityBroadcastRef,
     advancementRecoveryRef,
@@ -700,16 +710,22 @@ async function runServerProcess(
   };
 
   const systemHandlers = buildSystemHandlers({
-    journal: {
-      runJournalLifecycle: async () => {
-        const expired = await journalStore.expireOld();
-        const plan = await journalStore.scan();
-        return {
-          condensed: plan.condensePlan?.months.length ?? 0,
-          expired: expired.deleted,
-        };
-      },
-    },
+    ...(journalMaintenance
+      ? {
+          journal: {
+            runJournalLifecycle: () => journalMaintenance.run(
+              governControlTextCall(
+                {
+                  governor: ctx.authorityRuntime!.resourceGovernor,
+                  origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
+                  workPrefix: "journal-maintenance",
+                },
+                ephemeralRuntime.callText.bind(ephemeralRuntime),
+              ),
+            ),
+          },
+        }
+      : {}),
     transcript: {
       runSweep: async () =>
         runRetentionSweep({ roots: await collectConversationRoots() }),
@@ -940,7 +956,7 @@ async function runServerProcess(
       globalState: authorityRuntime.globalState,
       anchorEpoch: authorityRuntime.anchorEpoch,
     }),
-    memory: memoryDirectory,
+    ...(memoryDirectory ? { memory: memoryDirectory } : {}),
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,

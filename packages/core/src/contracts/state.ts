@@ -321,6 +321,20 @@ export type TrustWriteMutation =
   | { kind: "trust-persist"; rule: TrustRule }
   | { kind: "trust-revoke"; ruleId: string };
 
+/**
+ * Anchor-owned journal lifecycle mutation. It is deliberately absent from the
+ * staged mutation union: lifecycle maintenance must never join an assignment
+ * publish batch.
+ */
+export type MemoryJournalCondenseMutation = {
+  kind: "memory-journal-condense";
+  scope: { kind: "personal" };
+  month: string;
+  targetExpectedDigest?: Digest;
+  sources: Array<{ id: string; expectedDigest: Digest }>;
+  summary: string;
+};
+
 export type GlobalControlMutation =
   | { kind: "memory-append"; payload: MemoryAppendPayload }
   | {
@@ -331,6 +345,7 @@ export type GlobalControlMutation =
       id: string;
       expectedDigest: Digest;
     }
+  | MemoryJournalCondenseMutation
   | ScheduleWriteMutation
   | SkillWriteMutation
   | RubricWriteMutation

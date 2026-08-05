@@ -357,6 +357,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "memory.profileGet",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "schedule.abortRun",
       "outcome": {
         "code": -32602,

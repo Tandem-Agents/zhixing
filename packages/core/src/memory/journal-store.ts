@@ -1,7 +1,5 @@
 /**
- * JournalStore — 日志暂存层
- *
- * Phase M6 核心模块：管理 ~/.zhixing/me/journal/ 下的对话日志。
+ * JournalStore — legacy journal file compatibility layer.
  *
  * 文件结构：
  *   ~/.zhixing/me/journal/YYYY-MM-DD.md  ← 每日日志（热）
@@ -10,16 +8,17 @@
  * 生命周期：
  *   日志（<30天）→ 凝练（31天-12个月）→ 淘汰（>12个月）
  *
- * 设计要点：
- * - scan/expireOld 仅文件系统操作，<50ms
- * - condense 需要 LLM 调用，通过 CondenseLLM 接口解耦
- * - 触发源无关：CLI 和 Server 各自提供不同的触发策略
+ * Production lifecycle decisions use the path-free planner below and commit
+ * through global memory authority. This class remains only for import and
+ * compatibility tests.
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { getMemoryDir } from "./types.js";
+import type { JsonValue } from "../contracts/index.js";
+import type { Digest } from "../types/distributed.js";
 
 // ─── 类型 ───
 
@@ -71,6 +70,26 @@ export interface CondenseMonth {
   files: string[];
 }
 
+/** Path-free journal fact consumed by authority-backed lifecycle planning. */
+export interface JournalLifecycleEntry {
+  id: string;
+  meta: Record<string, JsonValue>;
+  content: string;
+  digest: Digest;
+}
+
+export interface JournalLifecycleMonth {
+  month: string;
+  sources: JournalLifecycleEntry[];
+  target?: JournalLifecycleEntry;
+}
+
+export interface JournalAuthorityLifecyclePlan {
+  expired: JournalLifecycleEntry[];
+  condense: JournalLifecycleMonth[];
+  stats: JournalStats;
+}
+
 export interface CondenserResult {
   condensedMonths: string[];
   deletedFiles: number;
@@ -92,6 +111,82 @@ const DEFAULT_CONFIG: JournalConfig = {
   dailyRetentionDays: 30,
   condensedRetentionMonths: 12,
 };
+
+/**
+ * Pure lifecycle planner. It consumes logical authority DTOs only; paths and
+ * filesystem state cannot influence the decision.
+ */
+export function planJournalLifecycle(
+  entries: readonly JournalLifecycleEntry[],
+  options: {
+    now?: Date;
+    config?: Partial<JournalConfig>;
+  } = {},
+): JournalAuthorityLifecyclePlan {
+  const now = options.now ?? new Date();
+  const config = { ...DEFAULT_CONFIG, ...options.config };
+  if (
+    !Number.isFinite(now.getTime()) ||
+    !Number.isSafeInteger(config.dailyRetentionDays) ||
+    config.dailyRetentionDays < 0 ||
+    !Number.isSafeInteger(config.condensedRetentionMonths) ||
+    config.condensedRetentionMonths < 0
+  ) {
+    throw new TypeError("Journal lifecycle configuration is invalid");
+  }
+  const expired: JournalLifecycleEntry[] = [];
+  const warm = new Map<string, JournalLifecycleEntry[]>();
+  const targets = new Map<string, JournalLifecycleEntry>();
+  let hotCount = 0;
+  let warmCount = 0;
+  let condensedCount = 0;
+  const seenIds = new Set<string>();
+
+  for (const source of [...entries].sort((left, right) =>
+    left.id.localeCompare(right.id, "en-US")
+  )) {
+    const entry = structuredClone(source);
+    assertJournalLifecycleEntry(entry, seenIds);
+    const phase = classifyJournalPhase(entry.id, entry.meta, now, config);
+    if (entry.meta.condensed === true) {
+      targets.set(journalDate(entry), entry);
+    }
+    if (phase === "hot") {
+      hotCount++;
+      continue;
+    }
+    if (phase === "warm") {
+      warmCount++;
+      const month = journalDate(entry).slice(0, 7);
+      const group = warm.get(month) ?? [];
+      group.push(entry);
+      warm.set(month, group);
+      continue;
+    }
+    if (phase === "condensed") {
+      condensedCount++;
+      continue;
+    }
+    expired.push(entry);
+  }
+
+  return {
+    expired,
+    condense: [...warm.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, "en-US"))
+      .map(([month, sources]) => ({
+        month,
+        sources,
+        ...(targets.get(month) ? { target: targets.get(month)! } : {}),
+      })),
+    stats: {
+      hotCount,
+      warmCount,
+      condensedCount,
+      totalFiles: entries.length,
+    },
+  };
+}
 
 // ─── JournalStore ───
 
@@ -186,53 +281,29 @@ export class JournalStore {
    */
   async scan(): Promise<LifecyclePlan> {
     const entries = await this.list();
-    const now = new Date();
-
-    const expiredFiles: string[] = [];
-    const warmDailies: Map<string, string[]> = new Map();
-    let hotCount = 0;
-    let warmCount = 0;
-    let condensedCount = 0;
-
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const plan = planJournalLifecycle(entries.map((entry) => ({
+      id: entry.id,
+      meta: entry.meta as unknown as Record<string, JsonValue>,
+      content: entry.content,
+      digest: `sha256:${"0".repeat(64)}`,
+    })), { config: this.config });
     for (const entry of entries) {
-      const phase = this.classifyPhase(entry.meta, now);
-      entry.phase = phase;
-
-      switch (phase) {
-        case "hot":
-          hotCount++;
-          break;
-        case "warm": {
-          warmCount++;
-          // 按月分组
-          const month = entry.meta.date.slice(0, 7);
-          const group = warmDailies.get(month) ?? [];
-          group.push(entry.filePath);
-          warmDailies.set(month, group);
-          break;
-        }
-        case "condensed":
-          condensedCount++;
-          break;
-        case "expired":
-          expiredFiles.push(entry.filePath);
-          break;
-      }
+      entry.phase = classifyJournalPhase(entry.id, entry.meta as unknown as Record<string, JsonValue>, new Date(), this.config);
     }
-
-    const condensePlan: CondensePlan | null = warmDailies.size > 0
-      ? { months: [...warmDailies.entries()].map(([month, files]) => ({ month, files })) }
+    const condensePlan: CondensePlan | null = plan.condense.length > 0
+      ? {
+          months: plan.condense.map((month) => ({
+            month: month.month,
+            files: month.sources.map((source) => byId.get(source.id)!.filePath),
+          })),
+        }
       : null;
 
     return {
-      expiredFiles,
+      expiredFiles: plan.expired.map((entry) => byId.get(entry.id)!.filePath),
       condensePlan,
-      stats: {
-        hotCount,
-        warmCount,
-        condensedCount,
-        totalFiles: entries.length,
-      },
+      stats: plan.stats,
     };
   }
 
@@ -312,21 +383,12 @@ export class JournalStore {
    * 判断日志所处的生命周期阶段。
    */
   private classifyPhase(meta: JournalMeta, now: Date): JournalPhase {
-    // 凝练文件单独处理
-    if (meta.condensed) {
-      const monthDate = new Date(`${meta.date}-01`);
-      const monthsAgo = (now.getFullYear() - monthDate.getFullYear()) * 12
-        + (now.getMonth() - monthDate.getMonth());
-      return monthsAgo > this.config.condensedRetentionMonths ? "expired" : "condensed";
-    }
-
-    // 日志文件
-    const entryDate = new Date(meta.date);
-    const msPerDay = 86400000;
-    const daysAgo = Math.floor((now.getTime() - entryDate.getTime()) / msPerDay);
-
-    if (daysAgo <= this.config.dailyRetentionDays) return "hot";
-    return "warm";
+    return classifyJournalPhase(
+      meta.date,
+      meta as unknown as Record<string, JsonValue>,
+      now,
+      this.config,
+    );
   }
 
   private parseJournalFile(
@@ -352,4 +414,58 @@ export class JournalStore {
 
     return { id, meta, content: parsed.content, filePath, phase };
   }
+}
+
+function journalDate(entry: Pick<JournalLifecycleEntry, "id" | "meta">): string {
+  const date = entry.meta.date;
+  return typeof date === "string" ? date : entry.id;
+}
+
+function assertJournalLifecycleEntry(
+  entry: JournalLifecycleEntry,
+  seenIds: Set<string>,
+): void {
+  const date = journalDate(entry);
+  const condensed = entry.meta.condensed === true;
+  if (
+    seenIds.has(entry.id) ||
+    date !== entry.id ||
+    !(condensed ? isCalendarMonth(date) : isCalendarDay(date)) ||
+    !/^sha256:[a-f0-9]{64}$/u.test(entry.digest)
+  ) {
+    throw new TypeError("Journal lifecycle entry is invalid");
+  }
+  seenIds.add(entry.id);
+}
+
+function isCalendarMonth(value: string): boolean {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/u.test(value)) return false;
+  const parsed = new Date(`${value}-01T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 7) === value;
+}
+
+function isCalendarDay(value: string): boolean {
+  if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/u.test(value)) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function classifyJournalPhase(
+  id: string,
+  meta: Record<string, JsonValue>,
+  now: Date,
+  config: JournalConfig,
+): JournalPhase {
+  const date = typeof meta.date === "string" ? meta.date : id;
+  if (meta.condensed === true) {
+    const monthDate = new Date(`${date}-01T00:00:00.000Z`);
+    const monthsAgo = (now.getUTCFullYear() - monthDate.getUTCFullYear()) * 12
+      + (now.getUTCMonth() - monthDate.getUTCMonth());
+    return monthsAgo > config.condensedRetentionMonths ? "expired" : "condensed";
+  }
+  const entryDate = new Date(`${date}T00:00:00.000Z`);
+  const daysAgo = Math.floor((now.getTime() - entryDate.getTime()) / 86_400_000);
+  return daysAgo <= config.dailyRetentionDays ? "hot" : "warm";
 }

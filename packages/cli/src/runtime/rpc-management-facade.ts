@@ -7,7 +7,12 @@
  * 此处按消费面做最小结构声明。
  */
 
-import type { ChannelStatus, PermissionRule, SkillMode } from "@zhixing/core";
+import type {
+  ChannelStatus,
+  MemoryLogicalEntry,
+  PermissionRule,
+  SkillMode,
+} from "@zhixing/core";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
@@ -151,6 +156,14 @@ export class RpcManagementFacade {
 
   // ─── memory ───
 
+  async profileGet(): Promise<MemoryLogicalEntry | null> {
+    const client = await this.link.getClient();
+    const result = await client.request<{ profile: MemoryLogicalEntry | null }>(
+      "memory.profileGet",
+    );
+    return result.profile;
+  }
+
   async journalStats(): Promise<unknown> {
     const client = await this.link.getClient();
     const result = await client.request<{ stats: unknown }>(
@@ -159,9 +172,9 @@ export class RpcManagementFacade {
     return result.stats;
   }
 
-  async peopleList(): Promise<unknown[]> {
+  async peopleList(): Promise<MemoryLogicalEntry[]> {
     const client = await this.link.getClient();
-    const result = await client.request<{ people: unknown[] }>(
+    const result = await client.request<{ people: MemoryLogicalEntry[] }>(
       "memory.peopleList",
     );
     return result.people;

@@ -7,11 +7,11 @@
  * 命名约定：双下划线前缀 `__` 表示系统内置（用户不可创建/删除）。
  *
  * 分层纪律：handler 一律是**薄触发壳**——到点调用对应模块自带的维护能力、
- * 把返回转成 `{status, summary}`，自身不含任何维护算法（算法归属各模块：
- * journal 凝练在 JournalStore、transcript 保留清理在持久层 runRetentionSweep）。
+ * 把返回转成 `{status, summary}`，自身不含任何维护算法（journal 生命周期由
+ * 注入的 anchor authority service 管理，transcript 清理由持久层 sweep 管理）。
  *
  * - __health-check：周期性健康自检（不依赖外部资源）
- * - __journal-gc：调用 JournalStore 凝练逻辑（如果 store 可用）
+ * - __journal-gc：触发 anchor journal authority lifecycle service
  * - __transcript-gc：调用持久层时间窗保留清理（分片 + 摘要快照）
  */
 

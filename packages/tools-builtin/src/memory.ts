@@ -1,7 +1,7 @@
 /**
  * Memory 工具 — AI 自主管理记忆
  *
- * Phase M2 核心交付：让 AI 可以保存、查询、更新和删除用户记忆。
+ * 让 AI 通过 assignment-bound authority port 保存、查询、更新和删除用户记忆。
  *
  * 支持的操作：
  * - save: 保存一条记忆（profile / person）
@@ -12,7 +12,7 @@
  *
  * 设计要点：
  * - 所有写操作对用户透明（工具调用在 CLI 中可见）
- * - 记忆文件为 Markdown + YAML frontmatter，用户可用编辑器直接修改
+ * - Markdown 文件只是 anchor 派生兼容视图，不是生产写入入口
  * - memory 工具的 description 指导 AI 何时主动保存记忆
  */
 

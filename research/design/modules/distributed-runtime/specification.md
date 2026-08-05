@@ -73,8 +73,8 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 | `ScheduleTaskSpec` | ≙ 现有 `TaskSpec` @ `packages/core/src/scheduler/facade.ts`（完整型 `ScheduledTask`；进程内领域类型，**不上 wire**——wire 用 §3.2 `ScheduleTaskSpecDto` 显式白名单：action 仅 agent-turn、webhook endpoint 整体 `SecretRef`、origin / system 等权威字段锚点生成） | 调度任务定义源类型（派发另用 §5.2 `JobExecutionInstruction`） |
 | `TaskSchedule` / `TaskPriority` | 现有同名 @ `packages/core/src/scheduler/types.ts`（进程内领域类型，**不上 wire**——wire 用 §1.3b `TaskScheduleDto` / `TaskPriorityDto` 快照） | 调度周期与优先级 |
 | `DeliveryTarget` | 现有同名 @ `packages/core/src/channels/types.ts:48`（进程内领域类型，**不上 wire**——wire 用 §1.3b `DeliveryTargetDto` 快照） | 任务来源投递目标（锚点生成，只读） |
-| `MemoryAppendPayload` | 本文冻结（§1.3b；自三域现有写入签名——memory=`SaveOptions`、journal=`append(content, date?)`、people=`save(id, PersonMeta, content)`——机械归一） | 记忆 / journal / people 追加载体 |
-| `MemoryEntry` / `PersonEntry` / `JournalEntry` | 现有同名 @ `packages/core/src/memory/` | 记忆域实体（读结果载体） |
+| `MemoryAppendPayload` | 本文冻结（§1.3b；现行类型 @ `packages/core/src/memory/contracts.ts`） | 记忆 / journal / people 的 path-free 权威写载体 |
+| `MemoryLogicalEntry` / `MemoryScopeRef` | 现有同名 @ `packages/core/src/memory/contracts.ts` | 记忆域 path-free 权威读结果与 scope |
 | `MemoryCategory` / `PersonMeta` | 现有同名 @ `packages/core/src/memory/`（进程内领域类型，**不上 wire**——wire 用 §1.3b `MemoryCategoryDto` / `PersonMetaDto` 快照） | 记忆分类与人物元数据 |
 | `DeliveryItem` | 现有同名 @ `packages/core/src/delivery/types.ts:31`（由 delivery 流投影生成，不上权威日志） | 渠道发送器兼容投影 |
 | `EnqueueParams` / `IDeliveryPipeline.enqueue` | 现有同名 @ `packages/core/src/delivery/types.ts:100 / :110`；现实现于 `pipeline.ts:199`，唯一生产调用 @ `scheduler.ts:519` | 目标态由六类权威生产者内部构造 enqueued；公开生产入口保留至 scheduler 接入 JobJournal 后随旧路径整体退役（执行计划第 26 项） |
@@ -115,7 +115,7 @@ interface DeliveryTargetDto { channelId: string; to: string; threadId?: string }
 interface OutboundContentDto { text: string; markdown?: string;
   media?: Array<{ ref: ArtifactRef; type: "image"|"file"|"audio"|"video" }> } // ≙ OutboundContent；媒体改内容寻址，外部 URL 不进权威日志
 
-type MemoryAppendPayload =                        // 三域现有写入签名的机械归一（memory-store.ts:58 / journal-store.ts:111 / people-store.ts:81）
+type MemoryAppendPayload =                        // 三域 path-free 权威写入合同
   | { domain: "memory";  category: MemoryCategoryDto; id: string; meta: Record<string, JsonValue>; content: string }  // ≙ SaveOptions（meta 收窄为 JsonValue）
   | { domain: "journal"; content: string; date?: string }
   | { domain: "people";  id: string; meta: PersonMetaDto; content: string };
@@ -624,9 +624,15 @@ interface ConfigAssetRecord {                    // 无远程调用方的非秘�
 // secret-free 的机械保证（非注释承诺）：①写入口唯一 host principal（类型层已封）②写入按 schemaId 校验 value 结构，
 // 秘密形字段只允许 SecretRef 形态 ③不变量 6 的 wire / 存储审计扫描覆盖本族。domain 的 schema 演进随其模块 S 节点注册。
 
+type MemoryScopeRef = { kind: "personal" } | { kind: "workscene"; sceneId: string };
+interface MemoryLogicalEntry {                   // path-free authority DTO；文件路径永不上 port / wire
+  domain: "memory"|"journal"|"people"; scope: MemoryScopeRef; category?: MemoryCategoryDto;
+  id: string; meta: Record<string, JsonValue>; content: string;
+  revision: number; digest: Digest; updatedAt?: IsoTime }
 type GlobalQuery =
-  | { kind: "memory-search"; domain: "memory"|"journal"|"people"; query: string; limit: number }
-  | { kind: "memory-stats"; domain: "journal"|"people" }
+  | { kind: "memory-search"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people"; query: string; limit: number }
+  | { kind: "memory-list"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people"; category?: MemoryCategoryDto }
+  | { kind: "memory-stats"; scope: MemoryScopeRef; domain: "journal"|"people" }
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
   | { kind: "workscene-list" }
@@ -635,8 +641,8 @@ type GlobalQuery =
   | { kind: "asset-index"; asset: "skills"|"rubrics"|"prompt-assets" };
 interface AssetIndexEntry { id: string; kind: "skills"|"rubrics"|"prompt-assets"; revision: number; digest: Digest }
 type GlobalReadResult =
-  | { kind: "memory-search"; hits: Array<{ domain: "memory"|"journal"|"people";
-      entry: MemoryEntry | JournalEntry | PersonEntry; score?: number }> }
+  | { kind: "memory-search"; hits: Array<{ entry: MemoryLogicalEntry; score?: number }> }
+  | { kind: "memory-list"; entries: MemoryLogicalEntry[] }
   | { kind: "memory-stats"; domain: "journal"|"people"; count: number; lastWriteAt?: IsoTime }
   | { kind: "trust-rules"; snapshot: TrustRuleSnapshot }
   | { kind: "schedule-list"; tasks: TaskDefinition[] }   // 仅 user 任务——system 任务经 isInternal 拦在一切用户视图外（既有语义）
@@ -709,11 +715,17 @@ type TrustWriteMutation =
 
 type GlobalControlMutation =                      // 仅 ControlEnvelope global-write（surface / host）可携
   | { kind: "memory-append"; payload: MemoryAppendPayload }      // domain 判别在 payload 内（§1.3b）
+  | { kind: "memory-delete"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people";
+      category?: MemoryCategoryDto; id: string; expectedDigest: Digest }
+  | { kind: "memory-journal-condense"; scope: { kind: "personal" }; month: string;
+      targetExpectedDigest?: Digest; sources: Array<{ id: string; expectedDigest: Digest }>; summary: string }
   | ScheduleWriteMutation | SkillWriteMutation | RubricWriteMutation | WorksceneWriteMutation | TrustWriteMutation
   | WorksceneMigrationMutation                    // host-only；§3.8 单独收紧
   | { kind: "config-asset-write"; record: ConfigAssetRecord };   // host（锚点本地配置 adapter）专用
 type GlobalStagedBase =                           // conversation / job 共有的 staged 写面
   | { kind: "memory-append"; payload: MemoryAppendPayload }
+  | { kind: "memory-delete"; scope: MemoryScopeRef; domain: "memory"|"journal"|"people";
+      category?: MemoryCategoryDto; id: string; expectedDigest: Digest }
   | ScheduleWriteMutation
   | { kind: "skill-usage"; record: SkillUsageRecord }
   | Extract<SkillWriteMutation, { kind: "skill-create"|"skill-update"|"skill-admit" }>   // run 内工具 = save_skill（adapter 拆 create/update）+ admit_skill
@@ -757,6 +769,10 @@ interface GlobalStatePort {
 }
 ```
 
+memory cutover 后，`MemoryLogicalEntry` 是唯一生产事实，旧 Markdown 只承担一次性导入和 anchor 派生兼容视图。`/me`、people、journal 管理面只读 personal `GlobalQuery`；空 profile 引导用户通过现有对话 memory 工具设置，不再把文件编辑当成生产写入。journal 生命周期由 anchor-only、触发源无关且 single-flight 的维护服务拥有：过期提交 digest-bound `memory-delete`；月度凝练只经 host-only `memory-journal-condense`，在同一 memory reducer 事务全量 CAS、原子写月摘要并删除全部来源。该分支不得进入 `GlobalStagedMutation` 或 assignment publish batch。
+
+每次 memory 权威提交携完整 path-free 派生 delta 并生成单个 pending。anchor materializer 对目标 save/source delete 全部幂等追平：save 必须同目录耐久临时写后原子替换，delete 仅 `ENOENT` 可视为已完成；全部文件效果全等后才能推进 checkpoint。任一步或 checkpoint 响应失败均保留同一 pending 并在重启后重驱。workscene 在本单元只继承相同派生恢复，不扩展公开管理面或 lifecycle owner。
+
 workscene control 写只有在权威提交完成后才返回 `WorksceneAppliedResult`：create / rename / set-workdir 返回完整 `WorksceneDto`，delete 返回被删对象身份与删除前对象 revision；其中外层 `revision` 是本次全局域提交 revision，`scene.revision` 是后续对象级 CAS 基线。assignment 的 workscene staged 写只返回 `WorksceneStagedReceipt`，其中 `recordSeq` 只属于本 assignment 的 overlay，既不是全局 revision，也不得作为“已应用”结果展示；其他 staged 域维持既有结果合同，不因本单元改型。到第 28 单元启用 workscene staged 发布时，owner 必须把最终 `WorksceneAppliedResult` 固化在对应 `publish-decision` 的 granted outcome 中，再按该结果幂等物化和呈现；不得在 overlay 阶段预报权威 revision。两条 workscene 路径的同一 requestId 全等重放分别返回原 applied 结果或原 receipt，响应丢失恢复不得重新生成 sceneId、重新查列表猜对象或把活动投影 revision 当管理 revision。
 
 workscene 的对象读取与列表读取分别只经 `GlobalStatePort.read` 的 `workscene-get` / `workscene-list`，不得以全量列表代替 exact get。正常 create / rename / set-workdir / delete 与 host-only 的 legacy import / activate / abandon 均只经 `GlobalStatePort.mutate`、统一 guard 和同一 adapter 进入唯一 registry / reducer。该 adapter 是锚点 workscene 的唯一读写装配：内部组合新 `AnchorWorksceneRegistry` 与 `WorksceneActivityProjection`，在 list / get 结果中合并投影的 `lastActiveAt`；同时装配唯一删除投影维护者，分页读取待投影删除、调用注入的场景会话 / 记忆清理端口、耐久确认完成，并在启动时恢复未完成义务。目录、RPC、环境派生、本地产品入口和迁移器不得持有或直接调用新 registry、投影或删除维护状态。
@@ -776,6 +792,7 @@ workscene 的对象读取与列表读取分别只经 `GlobalStatePort.read` 的 
 | session: conversation-delete | surface | busy 拒绝；连带 §七会话状态行删除语义 |
 | session staged: task-list-op / segment-append | assignment（capability 绑本对话） | 经 staged overlay，永不直接落权威 |
 | global: memory-append / schedule-* / trust-* / skill-* / rubric-* / workscene CRUD | surface；host | update / set-state / delete 类分支携 revision CAS（字段必填，类型层保证） |
+| global: memory-journal-condense | host（memory-journal-maintenance） | 仅 personal；month、目标 digest、全部来源 id+digest 与 summary 全量反绑；不得进入 staged 联合 |
 | global: workscene-import-legacy / workscene-activate-device-registry / workscene-abandon-legacy-import | host | 仅迁移器；不透明源快照 token、导入集合与 cutover 状态全等校验；surface / assignment 恒拒 |
 | global: config-asset-write | host（锚点配置 adapter） | revision 单调 |
 | global staged: 全部 | assignment | 经 staged overlay；capability.methods 含对应方法；job scope 只收 JobGlobalStagedMutation（类型层无 turn-origin 投递） |

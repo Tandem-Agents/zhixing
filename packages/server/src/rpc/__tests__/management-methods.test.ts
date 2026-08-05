@@ -15,6 +15,7 @@ import {
 } from "../methods/skill.js";
 import {
   buildMemoryJournalStatsMethod,
+  buildMemoryProfileGetMethod,
   buildMemoryPeopleListMethod,
 } from "../methods/memory.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -144,12 +145,16 @@ describe("skill.*", () => {
 });
 
 describe("memory.*", () => {
-  it("journalStats / peopleList 只读透传", async () => {
+  it("profileGet / journalStats / peopleList 只读透传", async () => {
     const ctx = makeCtx({
       memory: {
+        profileGet: async () => ({ id: "profile" }) as never,
         journalStats: async () => ({ totalFiles: 3 }) as never,
         peopleList: async () => [{ id: "p1" }] as never,
       },
+    });
+    expect(await call(buildMemoryProfileGetMethod(), {}, ctx)).toEqual({
+      profile: { id: "profile" },
     });
     expect(await call(buildMemoryJournalStatsMethod(), {}, ctx)).toEqual({
       stats: { totalFiles: 3 },

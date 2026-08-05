@@ -1,19 +1,16 @@
 /**
- * MemoryStore — 记忆持久化存储
+ * MemoryStore — filesystem compatibility projection for logical memory.
  *
- * 统一管理 ~/.zhixing/me/ 下所有记忆文件的 CRUD 操作。
- * Phase M2 核心模块，被 memory 工具调用。
- *
- * 存储结构：
- *   ~/.zhixing/me/
- *   ├── profile.md          ← Phase M1
- *   ├── people/<slug>.md    ← Phase M3
- *   └── journal/YYYY-MM-DD.md ← Phase M6
+ * Global memory authority is the production source of truth. The anchor
+ * adapter uses this store only to import legacy Markdown and materialize the
+ * compatibility view.
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
+import { ensureDurableDirectory, syncDirectory } from "../persistence/durable-directory.js";
 
 // ─── 类型 ───
 
@@ -59,10 +56,23 @@ export class MemoryStore {
     const filePath = this.resolvePath(options.category, options.id);
     const dir = path.dirname(filePath);
 
-    await fs.mkdir(dir, { recursive: true });
-
+    await ensureDurableDirectory(dir);
     const fileContent = stringifyFrontmatter(options.meta, options.content);
-    await fs.writeFile(filePath, fileContent, "utf-8");
+    const temporary = path.join(dir, `.${path.basename(filePath)}.${randomUUID()}.tmp`);
+    try {
+      const handle = await fs.open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(fileContent, "utf-8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(temporary, filePath);
+      await syncDirectory(dir);
+    } catch (error) {
+      await fs.unlink(temporary).catch(() => undefined);
+      throw error;
+    }
 
     return filePath;
   }
@@ -101,9 +111,11 @@ export class MemoryStore {
 
     try {
       await fs.unlink(filePath);
+      await syncDirectory(path.dirname(filePath));
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if (isMissingPath(error)) return false;
+      throw error;
     }
   }
 

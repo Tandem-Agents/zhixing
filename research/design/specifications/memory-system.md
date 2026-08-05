@@ -310,6 +310,8 @@ Journal 是三支柱之外的**第四个存储区**，但它的本质与三支�
 
 #### 生命周期执行机制
 
+> **当前权威实现（覆盖下方早期文件路径示意）**：生命周期 planner 只消费 path-free authority DTO；turn 完成与 `__journal-gc` 复用同一个 anchor-only、触发源无关且 single-flight 的 journal service。过期由 digest-bound authority delete 完成；月度凝练在一个 control-only authority 事务中全量 CAS、原子替换摘要并删除来源。Markdown 只由 anchor materializer 从权威 delta 派生，全部 save/delete 效果耐久全等后才确认 checkpoint；失败保留 pending 并在重启后重驱。下方文件扫描、文件锁和直接删写描述仅保留为旧实现沿革，不再定义生产语义。
+
 **架构约束**：生命周期管理的触发逻辑必须与运行模式解耦。知行当前以 CLI 形态运行，但产品定位是个人助手——未来会有常驻服务（Server/Daemon）模式用于定时任务、通道接入（微信等）、主动巡检等场景。生命周期管理的核心操作（扫描、凝练、淘汰）应封装为**触发源无关的接口**，CLI 和 Server 各自提供不同的触发策略。
 
 **设计原则**：
@@ -692,19 +694,15 @@ interface MemoryToolInput {
 ### 6.2 斜杠命令（高效管理）
 
 ```
-/me              查看/编辑个人画像
+/me              查看权威个人画像；修改时引导用户在对话中让知行记住
 /people          列出关系网络
-/people add      添加关系人
 /skills          列出已有技能
 /remember <文本>  快速保存（AI 自动分类到合适的类别）
 ```
 
-### 6.3 直接编辑文件
+### 6.3 数据可控性与派生文件
 
-用户可以用任何编辑器直接编辑 `~/.zhixing/me/` 下的文件。知行下次启动时自动识别变更。这确保了：
-- 批量编辑比逐条对话更高效
-- 用户始终拥有数据的完全控制权
-- 即使知行不可用，数据仍然可读
+memory cutover 后，用户通过对话 memory 工具和管理入口修改权威记忆；`~/.zhixing/me/` 下的 Markdown 是可读、可备份的兼容投影，不再反向导入手工编辑。旧文件仅在首次 cutover 前无损导入一次。这样既保留数据可读与可迁移性，也避免用户界面、Agent 检索和 lifecycle maintenance 观察到不同事实。
 
 ## 七、"越用越聪明" 的演进路径
 
@@ -834,6 +832,8 @@ Phase M7: 召回优化 + 效果反馈（未来）  │
 - 系统提示词扩展（技能进化指导 + 反思引导 + 更新引导）
 
 ### Phase M6: Journal + Auto Flush + 凝练晋升
+
+> 本节交付清单记录早期规划；当前生产实现以本文件“生命周期执行机制”的权威实现裁决及 distributed-runtime specification 为准，不再以文件锁、直接文件写删或文件扫描作为完成判据。
 
 > 技能凝练晋升详细设计见 技能进化系统设计方案（已废弃，见 drafts/skill-module.md）
 

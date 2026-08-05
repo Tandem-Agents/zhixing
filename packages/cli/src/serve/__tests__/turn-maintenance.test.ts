@@ -39,13 +39,11 @@ function makeRepo(conv: Conversation | null) {
   return { repo, renames };
 }
 
-function makeJournal(opts?: { condensePlan?: unknown }) {
+function makeJournal(_opts?: { condensePlan?: unknown }) {
   const condenseSpy = vi.fn(async () => ({}));
   return {
     journal: {
-      expireOld: vi.fn(async () => ({ deleted: 0 })),
-      scan: vi.fn(async () => ({ condensePlan: opts?.condensePlan ?? null })),
-      condense: condenseSpy,
+      run: condenseSpy,
     } as never,
     condenseSpy,
   };
@@ -143,9 +141,7 @@ describe("createTurnMaintenance", () => {
     const maintain = createTurnMaintenance({
       convRepo: repo,
       journal: {
-        expireOld: vi.fn(async () => ({ deleted: 0 })),
-        scan: vi.fn(async () => ({ condensePlan: { months: ["2026-01"] } })),
-        condense: condenseSpy,
+        run: condenseSpy,
       } as never,
     });
 
@@ -168,9 +164,7 @@ describe("createTurnMaintenance", () => {
     const maintain = createTurnMaintenance({
       convRepo: repo,
       journal: {
-        expireOld: vi.fn(async () => ({ deleted: 0 })),
-        scan: vi.fn(async () => ({ condensePlan: { months: ["2026-01"] } })),
-        condense: condenseSpy,
+        run: condenseSpy,
       } as never,
     });
 

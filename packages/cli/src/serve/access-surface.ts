@@ -23,7 +23,6 @@ import type { ZhixingConfig } from "@zhixing/providers";
 import type {
   ChannelRegistry,
   ConversationRepository,
-  JournalStore,
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
@@ -92,6 +91,7 @@ import type {
 } from "./startup-rollback.js";
 import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
 import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
+import type { JournalMaintenance } from "./journal-maintenance.js";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -154,8 +154,8 @@ export interface AssemblyContext {
     current: ConversationProtocolRuntime | undefined;
   };
   readonly worksceneDirectory: WorksceneDirectory;
-  /** journal 域仓——turn 后维护与系统维护任务共用同一实例 */
-  readonly journalStore: JournalStore;
+  /** 仅锚点装配的 journal 权威维护服务，turn 与系统任务共用。 */
+  readonly journalMaintenance?: JournalMaintenance;
   /**
    * 会话组播 lazy ref(runServer 后回填)——turn 后维护的改名通知等运行期
    * 推送经此读最新值;装配期为 null,运行期必已就位。

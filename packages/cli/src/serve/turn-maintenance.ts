@@ -19,19 +19,18 @@ import {
   sanitizeConversationName,
   userMessageOf,
   type Conversation,
-  type JournalStore,
 } from "@zhixing/core";
 import type { TurnCommittedInfo } from "@zhixing/owner-kernel";
+import type { JournalMaintenance } from "./journal-maintenance.js";
 
 /** 自动命名所需的 meta 仓窄面 */
 export interface NamerConversationRepo {
   get(id: string): Promise<Conversation | null>;
   rename(id: string, name: string): Promise<Conversation>;
 }
-
 export interface TurnMaintenanceDeps {
   convRepo: NamerConversationRepo;
-  journal: Pick<JournalStore, "expireOld" | "scan" | "condense">;
+  journal?: JournalMaintenance;
   /** 自动命名成功后的通知挂点(组播 session.changed renamed) */
   onRenamed?: (conversationId: string, name: string) => void;
   /**
@@ -67,9 +66,9 @@ export function createTurnMaintenance(
       void autoNameFirstTurn(deps, info, callText).catch(() => {});
     }
 
-    if (journalState === "idle") {
+    if (deps.journal && journalState === "idle") {
       journalState = "running";
-      void runJournalLifecycle(deps.journal, callText).then(
+      void deps.journal.run(callText).then(
         () => {
           journalState = "done";
         },
@@ -107,21 +106,4 @@ async function autoNameFirstTurn(
 
   await deps.convRepo.rename(info.conversationId, name);
   deps.onRenamed?.(info.conversationId, name);
-}
-
-/** journal 生命周期:删过期凝练文件 + 凝练温日志(LLM light 档)。 */
-async function runJournalLifecycle(
-  journal: Pick<JournalStore, "expireOld" | "scan" | "condense">,
-  callText: (prompt: string, role?: "main" | "light") => Promise<string>,
-): Promise<void> {
-  await journal.expireOld();
-  const plan = await journal.scan();
-  if (!plan.condensePlan) return;
-  await journal.condense(plan.condensePlan, {
-    async condense(dailyContents: string): Promise<string> {
-      return callText(
-        `请将以下日志内容凝练为简洁的月度摘要，保留关键事实和决策，去掉冗余细节。\n\n${dailyContents}`,
-      );
-    },
-  });
 }
