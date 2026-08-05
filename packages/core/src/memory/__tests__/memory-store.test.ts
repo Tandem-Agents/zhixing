@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
@@ -11,6 +11,109 @@ describe("MemoryStore", () => {
   beforeEach(async () => {
     tmpDir = await createTempDir("memory");
     store = new MemoryStore(tmpDir);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe("authority takeover", () => {
+    it("rejects a configured root that is itself a directory link", async () => {
+      const outside = path.join(tmpDir, "outside");
+      const configured = path.join(tmpDir, "configured");
+      await fs.mkdir(path.join(outside, "people"), { recursive: true });
+      await fs.writeFile(path.join(outside, "profile.md"), "outside", "utf-8");
+      if (!(await createDirectoryLink(outside, configured))) return;
+
+      await expect(new MemoryStore(configured).readAuthorityTakeoverSnapshot())
+        .rejects.toThrow("stable directory");
+    });
+
+    it("rejects an owned category root that is itself a directory link", async () => {
+      const configured = path.join(tmpDir, "configured");
+      const outside = path.join(tmpDir, "outside");
+      await fs.mkdir(configured, { recursive: true });
+      await fs.mkdir(outside, { recursive: true });
+      if (!(await createDirectoryLink(outside, path.join(configured, "people")))) return;
+
+      await expect(new MemoryStore(configured).readAuthorityTakeoverSnapshot())
+        .rejects.toThrow("stable directory");
+    });
+
+    it.each(["scope", "category"] as const)(
+      "rejects a %s root replaced while its binding is established",
+      async (rootKind) => {
+        const configured = path.join(tmpDir, "configured");
+        const outside = path.join(tmpDir, "outside");
+        const boundRoot = rootKind === "scope"
+          ? configured
+          : path.join(configured, "people");
+        const original = `${boundRoot}-original`;
+        await fs.mkdir(boundRoot, { recursive: true });
+        await fs.mkdir(outside, { recursive: true });
+        if (!(await supportsDirectoryLinks(tmpDir, outside))) return;
+        const realpath = fs.realpath.bind(fs);
+        let replaced = false;
+        vi.spyOn(fs, "realpath").mockImplementation(async (target) => {
+          if (!replaced && path.resolve(target.toString()) === boundRoot) {
+            replaced = true;
+            await fs.rename(boundRoot, original);
+            await fs.symlink(outside, boundRoot, "junction");
+          }
+          return realpath(target);
+        });
+
+        await expect(new MemoryStore(configured).readAuthorityTakeoverSnapshot())
+          .rejects.toThrow("stable directory");
+      },
+    );
+
+    it("rejects a configured root replaced after binding but before a file read", async () => {
+      const configured = path.join(tmpDir, "configured");
+      const original = path.join(tmpDir, "configured-original");
+      const outside = path.join(tmpDir, "outside");
+      const profile = path.join(configured, "profile.md");
+      await fs.mkdir(configured, { recursive: true });
+      await fs.mkdir(outside, { recursive: true });
+      await fs.writeFile(profile, "owned", "utf-8");
+      await fs.writeFile(path.join(outside, "profile.md"), "outside", "utf-8");
+      if (!(await supportsDirectoryLinks(tmpDir, outside))) return;
+      const lstat = fs.lstat.bind(fs);
+      let replaced = false;
+      vi.spyOn(fs, "lstat").mockImplementation(async (target, options) => {
+        if (!replaced && path.resolve(target.toString()) === profile) {
+          replaced = true;
+          await fs.rename(configured, original);
+          await fs.symlink(outside, configured, "junction");
+        }
+        return lstat(target, options);
+      });
+
+      await expect(new MemoryStore(configured).readAuthorityTakeoverSnapshot())
+        .rejects.toThrow("owned root changed");
+    });
+
+    it("rejects a final file replaced after its handle is opened", async () => {
+      const configured = path.join(tmpDir, "configured");
+      const profile = path.join(configured, "profile.md");
+      const originalProfile = path.join(configured, "profile.original.md");
+      await fs.mkdir(configured, { recursive: true });
+      await fs.writeFile(profile, "owned", "utf-8");
+      const open = fs.open.bind(fs);
+      let replaced = false;
+      vi.spyOn(fs, "open").mockImplementation(async (target, flags, mode) => {
+        const handle = await open(target, flags, mode);
+        if (!replaced && path.resolve(target.toString()) === profile) {
+          replaced = true;
+          await fs.rename(profile, originalProfile);
+          await fs.writeFile(profile, "replacement", "utf-8");
+        }
+        return handle;
+      });
+
+      await expect(new MemoryStore(configured).readAuthorityTakeoverSnapshot())
+        .rejects.toThrow("changed before its owned read");
+    });
   });
 
   // ─── save ───
@@ -243,3 +346,21 @@ describe("MemoryStore", () => {
     });
   });
 });
+
+async function supportsDirectoryLinks(root: string, target: string): Promise<boolean> {
+  const probe = path.join(root, ".junction-probe");
+  return createDirectoryLink(target, probe).then(async (created) => {
+    if (created) await fs.unlink(probe);
+    return created;
+  });
+}
+
+async function createDirectoryLink(target: string, link: string): Promise<boolean> {
+  try {
+    await fs.symlink(target, link, "junction");
+    return true;
+  } catch (error) {
+    if ((error as { code?: string }).code === "EPERM") return false;
+    throw error;
+  }
+}

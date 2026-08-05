@@ -43,6 +43,21 @@ export interface SaveOptions {
   content: string;
 }
 
+interface MissingLegacyRootBinding {
+  readonly kind: "missing";
+  readonly lexicalPath: string;
+}
+
+interface DirectoryLegacyRootBinding {
+  readonly kind: "directory";
+  readonly lexicalPath: string;
+  readonly canonicalPath: string;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+type LegacyRootBinding = MissingLegacyRootBinding | DirectoryLegacyRootBinding;
+
 // ─── MemoryStore ───
 
 export class MemoryStore {
@@ -184,17 +199,41 @@ export class MemoryStore {
 
   /** Reads the frozen legacy source without converting I/O failures into absence. */
   async readAuthorityTakeoverSnapshot(): Promise<LegacyMemoryEntry[]> {
+    const scopeRoot = await this.bindLegacyRoot(this.baseDir);
+    if (scopeRoot.kind === "missing") {
+      await this.assertLegacyRootBinding(scopeRoot);
+      return [];
+    }
+    const personRoot = await this.bindLegacyRoot(
+      this.categoryDir("person"),
+      scopeRoot,
+    );
+    const journalRoot = await this.bindLegacyRoot(
+      this.categoryDir("journal"),
+      scopeRoot,
+    );
+    const bindings = [scopeRoot, personRoot, journalRoot] as const;
+    await this.assertLegacyRootBindings(bindings);
+
     const profile = await this.readLegacyFile(
       "profile",
       "profile",
       path.join(this.baseDir, "profile.md"),
       "profile.md",
+      scopeRoot,
+      [scopeRoot],
     );
-    return [
+    const entries = [
       ...(profile ? [profile] : []),
-      ...(await this.readLegacyTree("person")),
-      ...(await this.readLegacyTree("journal")),
+      ...(personRoot.kind === "directory"
+        ? await this.readLegacyTree("person", scopeRoot, personRoot)
+        : []),
+      ...(journalRoot.kind === "directory"
+        ? await this.readLegacyTree("journal", scopeRoot, journalRoot)
+        : []),
     ];
+    await this.assertLegacyRootBindings(bindings);
+    return entries;
   }
 
   // ─── 路径工具 ───
@@ -222,10 +261,14 @@ export class MemoryStore {
 
   private async readLegacyTree(
     category: "person" | "journal",
+    scopeRootBinding: DirectoryLegacyRootBinding,
+    ownedRootBinding: DirectoryLegacyRootBinding,
   ): Promise<LegacyMemoryEntry[]> {
-    const ownedRoot = path.resolve(this.categoryDir(category));
+    const ownedRoot = ownedRootBinding.lexicalPath;
+    const rootBindings = [scopeRootBinding, ownedRootBinding] as const;
     const entries: LegacyMemoryEntry[] = [];
     const visit = async (directory: string): Promise<void> => {
+      await this.assertLegacyRootBindings(rootBindings);
       const resolved = path.resolve(directory);
       if (resolved !== ownedRoot && !resolved.startsWith(`${ownedRoot}${path.sep}`)) {
         throw new Error("Legacy memory source escaped its owned root");
@@ -240,7 +283,9 @@ export class MemoryStore {
       if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
         throw new Error("Legacy memory owned root contains an unsafe directory entry");
       }
+      await this.assertLegacyRootBindings(rootBindings);
       const children = await fs.readdir(resolved, { withFileTypes: true });
+      await this.assertLegacyRootBindings(rootBindings);
       for (const child of children.sort((left, right) =>
         left.name.localeCompare(right.name, "en-US")
       )) {
@@ -266,6 +311,8 @@ export class MemoryStore {
           id,
           childPath,
           sourceIdentity,
+          ownedRootBinding,
+          rootBindings,
         );
         if (!entry) {
           throw new Error("Legacy memory changed while its source set was frozen");
@@ -274,6 +321,7 @@ export class MemoryStore {
       }
     };
     await visit(ownedRoot);
+    await this.assertLegacyRootBindings(rootBindings);
     return entries;
   }
 
@@ -282,25 +330,31 @@ export class MemoryStore {
     id: string,
     filePath: string,
     sourceIdentity: string,
+    ownedRootBinding: DirectoryLegacyRootBinding,
+    rootBindings: readonly DirectoryLegacyRootBinding[],
   ): Promise<LegacyMemoryEntry | null> {
-    const ownedRoot = path.resolve(this.categoryDir(category));
+    const lexicalSource = path.resolve(filePath);
+    assertPathInside(ownedRootBinding.lexicalPath, lexicalSource);
+    await this.assertLegacyRootBindings(rootBindings);
     let pathStat: Stats;
     let resolvedSource: string;
-    let resolvedRoot: string;
     try {
-      [pathStat, resolvedSource, resolvedRoot] = await Promise.all([
+      [pathStat, resolvedSource] = await Promise.all([
         fs.lstat(filePath),
         fs.realpath(filePath),
-        fs.realpath(ownedRoot),
       ]);
     } catch (error) {
-      if (isMissingPath(error)) return null;
+      if (isMissingPath(error)) {
+        await this.assertLegacyRootBindings(rootBindings);
+        return null;
+      }
       throw error;
     }
     if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
       throw new Error("Legacy memory source must be a regular owned file");
     }
-    assertPathInside(resolvedRoot, resolvedSource);
+    assertPathInside(ownedRootBinding.canonicalPath, resolvedSource);
+    await this.assertLegacyRootBindings(rootBindings);
     let handle;
     try {
       handle = await fs.open(
@@ -308,7 +362,11 @@ export class MemoryStore {
         fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
       );
     } catch (error) {
-      if (isMissingPath(error)) return null;
+      if (isMissingPath(error)) {
+        throw new Error("Legacy memory changed before its owned read", {
+          cause: error,
+        });
+      }
       throw error;
     }
     try {
@@ -328,17 +386,28 @@ export class MemoryStore {
       ) {
         throw new Error("Legacy memory source changed before its owned read");
       }
-      assertPathInside(resolvedRoot, openedSource);
+      assertPathInside(ownedRootBinding.canonicalPath, openedSource);
+      await this.assertLegacyRootBindings(rootBindings);
       const raw = await handle.readFile("utf-8");
-      const after = await handle.stat();
+      const [after, finalPathStat, finalSource] = await Promise.all([
+        handle.stat(),
+        fs.lstat(filePath),
+        fs.realpath(filePath),
+      ]);
       if (
         before.dev !== after.dev ||
         before.ino !== after.ino ||
         before.size !== after.size ||
-        before.mtimeMs !== after.mtimeMs
+        before.mtimeMs !== after.mtimeMs ||
+        finalPathStat.isSymbolicLink() ||
+        !finalPathStat.isFile() ||
+        after.dev !== finalPathStat.dev ||
+        after.ino !== finalPathStat.ino
       ) {
         throw new Error("Legacy memory changed while its source set was frozen");
       }
+      assertPathInside(ownedRootBinding.canonicalPath, finalSource);
+      await this.assertLegacyRootBindings(rootBindings);
       const parsed = parseFrontmatter(raw);
       return {
         category,
@@ -353,6 +422,98 @@ export class MemoryStore {
       await handle.close();
     }
   }
+
+  private async bindLegacyRoot(
+    rootPath: string,
+    parent?: DirectoryLegacyRootBinding,
+  ): Promise<LegacyRootBinding> {
+    const lexicalPath = path.resolve(rootPath);
+    let before: Stats;
+    try {
+      before = await fs.lstat(lexicalPath);
+    } catch (error) {
+      if (isMissingPath(error)) return { kind: "missing", lexicalPath };
+      throw error;
+    }
+    assertSafeLegacyRoot(before);
+    const canonicalPath = await fs.realpath(lexicalPath);
+    const [after, canonical] = await Promise.all([
+      fs.lstat(lexicalPath),
+      fs.stat(canonicalPath),
+    ]);
+    assertSafeLegacyRoot(after);
+    if (
+      !canonical.isDirectory() ||
+      !hasSameFileIdentity(before, after) ||
+      !hasSameFileIdentity(after, canonical)
+    ) {
+      throw new Error("Legacy memory owned root changed while it was bound");
+    }
+    if (parent) assertPathInside(parent.canonicalPath, canonicalPath);
+    return {
+      kind: "directory",
+      lexicalPath,
+      canonicalPath,
+      dev: after.dev,
+      ino: after.ino,
+    };
+  }
+
+  private async assertLegacyRootBindings(
+    bindings: readonly LegacyRootBinding[],
+  ): Promise<void> {
+    for (const binding of bindings) {
+      await this.assertLegacyRootBinding(binding);
+    }
+  }
+
+  private async assertLegacyRootBinding(
+    binding: LegacyRootBinding,
+  ): Promise<void> {
+    if (binding.kind === "missing") {
+      try {
+        await fs.lstat(binding.lexicalPath);
+      } catch (error) {
+        if (isMissingPath(error)) return;
+        throw error;
+      }
+      throw new Error("Legacy memory owned root appeared while its source set was frozen");
+    }
+    let pathStat: Stats;
+    let canonicalPath: string;
+    try {
+      [pathStat, canonicalPath] = await Promise.all([
+        fs.lstat(binding.lexicalPath),
+        fs.realpath(binding.lexicalPath),
+      ]);
+    } catch (error) {
+      throw new Error("Legacy memory owned root changed while its source set was frozen", {
+        cause: error,
+      });
+    }
+    const canonicalStat = await fs.stat(canonicalPath);
+    if (
+      pathStat.isSymbolicLink() ||
+      !pathStat.isDirectory() ||
+      canonicalPath !== binding.canonicalPath ||
+      pathStat.dev !== binding.dev ||
+      pathStat.ino !== binding.ino ||
+      !canonicalStat.isDirectory() ||
+      !hasSameFileIdentity(pathStat, canonicalStat)
+    ) {
+      throw new Error("Legacy memory owned root changed while its source set was frozen");
+    }
+  }
+}
+
+function assertSafeLegacyRoot(stat: Stats): void {
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error("Legacy memory owned root must be a stable directory");
+  }
+}
+
+function hasSameFileIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function assertPathInside(root: string, candidate: string): void {
