@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "roleConfigurations": {
     "anchor-executor": [
       {
@@ -418,5 +418,1469 @@
   "retiredMethods": [
     "workspace.binding.admin",
     "workspace.binding.reset"
-  ]
+  ],
+  "entryCoverage": {
+    "rowIds": [
+      "advancement",
+      "advancement-evidence",
+      "channel-delivery",
+      "channel-inbound",
+      "confirmation-read",
+      "confirmation-resolve",
+      "conversation-manage",
+      "conversation-metadata",
+      "conversation-read",
+      "conversation-window",
+      "device-trust",
+      "environment-select",
+      "global-list-read",
+      "light-inference",
+      "memory-read",
+      "memory-write",
+      "orchestration-child",
+      "permission-persist",
+      "run-cancel",
+      "runtime-config",
+      "runtime-lifecycle",
+      "schedule-manage",
+      "schedule-run",
+      "schedule-timer",
+      "segment-transition",
+      "session-observer",
+      "session-send",
+      "shutdown",
+      "skill-manage",
+      "skill-usage",
+      "status-read",
+      "task-list",
+      "trust-manage",
+      "uncertain-resolution",
+      "workscene-manage",
+      "workscene-switch",
+      "workspace-binding"
+    ],
+    "documents": [
+      {
+        "path": "research/design/drafts/transcript-persistence-and-attention-window-architecture.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/drafts/scheduler-architecture.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/drafts/workscene-management-architecture.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/drafts/task-advancement-rubric-architecture.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/drafts/unified-core-and-access-surfaces.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/specifications/message-outbox.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/specifications/persistent-service.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/specifications/agent-runtime-lifecycle.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/drafts/permission-architecture-evolution.md",
+        "status": "verified-current"
+      },
+      {
+        "path": "research/design/modules/distributed-runtime/specification.md",
+        "status": "verified-current"
+      }
+    ],
+    "entries": [
+      {
+        "configType": "feishu",
+        "adapterType": "feishu",
+        "key": "channel:adapter:feishu",
+        "category": "channel",
+        "target": {
+          "rowId": "channel-inbound"
+        }
+      },
+      {
+        "event": "im.message.receive_v1",
+        "key": "channel:event:feishu:im.message.receive_v1",
+        "category": "channel",
+        "target": {
+          "rowId": "channel-inbound"
+        }
+      },
+      {
+        "source": "packages/server/src/channels/inbound-router.ts",
+        "key": "channel:router:InboundRouter",
+        "category": "channel",
+        "target": {
+          "rowId": "channel-inbound"
+        }
+      },
+      {
+        "role": "common",
+        "id": "authorityRuntime.stopStorageMaintenance",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:authorityRuntime.stopStorageMaintenance",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "channels.dispose",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:channels.dispose",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "deliveryStack.stop",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:deliveryStack.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "heartbeat.clear",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:heartbeat.clear",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "localWorkspaceHost.close",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:localWorkspaceHost.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "mcpHub.dispose",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:mcpHub.dispose",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "releaseLock",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:releaseLock",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "scheduler.stop",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:scheduler.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "stateFile.cleanup",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:stateFile.cleanup",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "stateFile.markStopped",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:stateFile.markStopped",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "common",
+        "id": "stateFile.markStopping",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:common:stateFile.markStopping",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "assetMaintenance.stop",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:assetMaintenance.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "conversationProtocol.stopRecovery",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:conversationProtocol.stopRecovery",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "evidenceHandler.stopAccepting",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:evidenceHandler.stopAccepting",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "execution.abortAllAndWait",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:execution.abortAllAndWait",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "executorDataPlane.close",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:executorDataPlane.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "executorJobOwner.close",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:executorJobOwner.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "idleReaper.clear",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:idleReaper.clear",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "inboundRouter.refuseNew",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:inboundRouter.refuseNew",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "jobStatus.dispose",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:jobStatus.dispose",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "losslessDataPlane.close",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:losslessDataPlane.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "meshRuntime.stop",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:meshRuntime.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "scheduler.stop",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:scheduler.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "runtime",
+        "id": "serverLogLifecycle.stop",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:runtime:serverLogLifecycle.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "server",
+        "id": "releaseLock",
+        "source": "packages/server/src/lifecycle.ts",
+        "key": "cleanup:server:releaseLock",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "server",
+        "id": "scheduler.stop",
+        "source": "packages/server/src/lifecycle.ts",
+        "key": "cleanup:server:scheduler.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "server",
+        "id": "server.close",
+        "source": "packages/server/src/lifecycle.ts",
+        "key": "cleanup:server:server.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "role": "surface",
+        "id": "confirmationBridge.dispose",
+        "source": "packages/cli/src/serve/access-surfaces.ts",
+        "key": "cleanup:surface:confirmationBridge.dispose",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "path": "zhixing",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing pair",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing pair",
+        "category": "cli",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "path": "zhixing serve",
+        "hidden": true,
+        "hasAction": false,
+        "key": "cli:zhixing serve",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing serve logs",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing serve logs",
+        "category": "cli",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
+        }
+      },
+      {
+        "path": "zhixing status",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing status",
+        "category": "cli",
+        "target": {
+          "rowId": "status-read"
+        }
+      },
+      {
+        "path": "zhixing stop",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing stop",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "path": "zhixing workspace",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing workspace",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing workspace create",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace create",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace create-scene",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace create-scene",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace list",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace list",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace remove",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace remove",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace rename",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace rename",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace repath",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace repath",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace reset",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace reset",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "path": "zhixing workspace status",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing workspace status",
+        "category": "cli",
+        "target": {
+          "rowId": "workspace-binding"
+        }
+      },
+      {
+        "phase": "onAfterRun",
+        "key": "lifecycle:agent:onAfterRun",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "runtime-lifecycle"
+        }
+      },
+      {
+        "phase": "onBeforeRun",
+        "key": "lifecycle:agent:onBeforeRun",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "runtime-lifecycle"
+        }
+      },
+      {
+        "phase": "onWindowClose",
+        "key": "lifecycle:agent:onWindowClose",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "runtime-lifecycle"
+        }
+      },
+      {
+        "phase": "onWindowOpen",
+        "key": "lifecycle:agent:onWindowOpen",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "runtime-lifecycle"
+        }
+      },
+      {
+        "phase": "afterSummarize",
+        "key": "lifecycle:segment:afterSummarize",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "segment-transition"
+        }
+      },
+      {
+        "phase": "beforeNewSegmentStart",
+        "key": "lifecycle:segment:beforeNewSegmentStart",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "segment-transition"
+        }
+      },
+      {
+        "phase": "beforeSummarize",
+        "key": "lifecycle:segment:beforeSummarize",
+        "category": "lifecycle",
+        "target": {
+          "rowId": "segment-transition"
+        }
+      },
+      {
+        "name": "auth",
+        "requiresAuth": false,
+        "key": "rpc:auth",
+        "category": "rpc",
+        "target": {
+          "exclusion": "connection",
+          "reason": "连接握手或健康检查，不进入业务落点矩阵"
+        }
+      },
+      {
+        "name": "confirmation.list",
+        "requiresAuth": true,
+        "key": "rpc:confirmation.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "confirmation-read"
+        }
+      },
+      {
+        "name": "confirmation.resolve",
+        "requiresAuth": true,
+        "key": "rpc:confirmation.resolve",
+        "category": "rpc",
+        "target": {
+          "rowId": "confirmation-resolve"
+        }
+      },
+      {
+        "name": "delivery.resolve",
+        "requiresAuth": true,
+        "key": "rpc:delivery.resolve",
+        "category": "rpc",
+        "target": {
+          "rowId": "uncertain-resolution"
+        }
+      },
+      {
+        "name": "health",
+        "requiresAuth": false,
+        "key": "rpc:health",
+        "category": "rpc",
+        "target": {
+          "exclusion": "connection",
+          "reason": "连接握手或健康检查，不进入业务落点矩阵"
+        }
+      },
+      {
+        "name": "llm.complete",
+        "requiresAuth": true,
+        "key": "rpc:llm.complete",
+        "category": "rpc",
+        "target": {
+          "rowId": "light-inference"
+        }
+      },
+      {
+        "name": "memory.journalStats",
+        "requiresAuth": true,
+        "key": "rpc:memory.journalStats",
+        "category": "rpc",
+        "target": {
+          "rowId": "memory-read"
+        }
+      },
+      {
+        "name": "memory.peopleList",
+        "requiresAuth": true,
+        "key": "rpc:memory.peopleList",
+        "category": "rpc",
+        "target": {
+          "rowId": "memory-read"
+        }
+      },
+      {
+        "name": "memory.profileGet",
+        "requiresAuth": true,
+        "key": "rpc:memory.profileGet",
+        "category": "rpc",
+        "target": {
+          "rowId": "memory-read"
+        }
+      },
+      {
+        "name": "schedule.abortRun",
+        "requiresAuth": true,
+        "key": "rpc:schedule.abortRun",
+        "category": "rpc",
+        "target": {
+          "rowId": "schedule-run"
+        }
+      },
+      {
+        "name": "schedule.create",
+        "requiresAuth": true,
+        "key": "rpc:schedule.create",
+        "category": "rpc",
+        "target": {
+          "rowId": "schedule-manage"
+        }
+      },
+      {
+        "name": "schedule.delete",
+        "requiresAuth": true,
+        "key": "rpc:schedule.delete",
+        "category": "rpc",
+        "target": {
+          "rowId": "schedule-manage"
+        }
+      },
+      {
+        "name": "schedule.list",
+        "requiresAuth": true,
+        "key": "rpc:schedule.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "global-list-read"
+        }
+      },
+      {
+        "name": "schedule.run",
+        "requiresAuth": true,
+        "key": "rpc:schedule.run",
+        "category": "rpc",
+        "target": {
+          "rowId": "schedule-run"
+        }
+      },
+      {
+        "name": "schedule.update",
+        "requiresAuth": true,
+        "key": "rpc:schedule.update",
+        "category": "rpc",
+        "target": {
+          "rowId": "schedule-manage"
+        }
+      },
+      {
+        "name": "server.info",
+        "requiresAuth": true,
+        "key": "rpc:server.info",
+        "category": "rpc",
+        "target": {
+          "rowId": "status-read"
+        }
+      },
+      {
+        "name": "server.shutdown",
+        "requiresAuth": true,
+        "key": "rpc:server.shutdown",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "session.abort",
+        "requiresAuth": true,
+        "key": "rpc:session.abort",
+        "category": "rpc",
+        "target": {
+          "rowId": "run-cancel"
+        }
+      },
+      {
+        "name": "session.advancementCancel",
+        "requiresAuth": true,
+        "key": "rpc:session.advancementCancel",
+        "category": "rpc",
+        "target": {
+          "rowId": "advancement"
+        }
+      },
+      {
+        "name": "session.advancementConfirm",
+        "requiresAuth": true,
+        "key": "rpc:session.advancementConfirm",
+        "category": "rpc",
+        "target": {
+          "rowId": "advancement"
+        }
+      },
+      {
+        "name": "session.advancementDetail",
+        "requiresAuth": true,
+        "key": "rpc:session.advancementDetail",
+        "category": "rpc",
+        "target": {
+          "rowId": "advancement"
+        }
+      },
+      {
+        "name": "session.advancementRevise",
+        "requiresAuth": true,
+        "key": "rpc:session.advancementRevise",
+        "category": "rpc",
+        "target": {
+          "rowId": "advancement"
+        }
+      },
+      {
+        "name": "session.clear",
+        "requiresAuth": true,
+        "key": "rpc:session.clear",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-window"
+        }
+      },
+      {
+        "name": "session.compact",
+        "requiresAuth": true,
+        "key": "rpc:session.compact",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-window"
+        }
+      },
+      {
+        "name": "session.contextBudget",
+        "requiresAuth": true,
+        "key": "rpc:session.contextBudget",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "session.delete",
+        "requiresAuth": true,
+        "key": "rpc:session.delete",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-metadata"
+        }
+      },
+      {
+        "name": "session.history",
+        "requiresAuth": true,
+        "key": "rpc:session.history",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "session.list",
+        "requiresAuth": true,
+        "key": "rpc:session.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "name": "session.new",
+        "requiresAuth": true,
+        "key": "rpc:session.new",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "name": "session.rename",
+        "requiresAuth": true,
+        "key": "rpc:session.rename",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-metadata"
+        }
+      },
+      {
+        "name": "session.resolve",
+        "requiresAuth": true,
+        "key": "rpc:session.resolve",
+        "category": "rpc",
+        "target": {
+          "rowId": "uncertain-resolution"
+        }
+      },
+      {
+        "name": "session.resume",
+        "requiresAuth": true,
+        "key": "rpc:session.resume",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "name": "session.security",
+        "requiresAuth": true,
+        "key": "rpc:session.security",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "session.send",
+        "requiresAuth": true,
+        "key": "rpc:session.send",
+        "category": "rpc",
+        "target": {
+          "rowId": "session-send"
+        }
+      },
+      {
+        "name": "session.subscribe",
+        "requiresAuth": true,
+        "key": "rpc:session.subscribe",
+        "category": "rpc",
+        "target": {
+          "rowId": "session-observer"
+        }
+      },
+      {
+        "name": "session.taskList",
+        "requiresAuth": true,
+        "key": "rpc:session.taskList",
+        "category": "rpc",
+        "target": {
+          "rowId": "task-list"
+        }
+      },
+      {
+        "name": "session.taskListUpdate",
+        "requiresAuth": true,
+        "key": "rpc:session.taskListUpdate",
+        "category": "rpc",
+        "target": {
+          "rowId": "task-list"
+        }
+      },
+      {
+        "name": "session.unsubscribe",
+        "requiresAuth": true,
+        "key": "rpc:session.unsubscribe",
+        "category": "rpc",
+        "target": {
+          "rowId": "session-observer"
+        }
+      },
+      {
+        "name": "session.usage",
+        "requiresAuth": true,
+        "key": "rpc:session.usage",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "skill.archive",
+        "requiresAuth": true,
+        "key": "rpc:skill.archive",
+        "category": "rpc",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "name": "skill.list",
+        "requiresAuth": true,
+        "key": "rpc:skill.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "global-list-read"
+        }
+      },
+      {
+        "name": "skill.setState",
+        "requiresAuth": true,
+        "key": "rpc:skill.setState",
+        "category": "rpc",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "name": "trust.list",
+        "requiresAuth": true,
+        "key": "rpc:trust.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "trust-manage"
+        }
+      },
+      {
+        "name": "trust.revoke",
+        "requiresAuth": true,
+        "key": "rpc:trust.revoke",
+        "category": "rpc",
+        "target": {
+          "rowId": "trust-manage"
+        }
+      },
+      {
+        "name": "workscene.create",
+        "requiresAuth": true,
+        "key": "rpc:workscene.create",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "name": "workscene.delete",
+        "requiresAuth": true,
+        "key": "rpc:workscene.delete",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "name": "workscene.enter",
+        "requiresAuth": true,
+        "key": "rpc:workscene.enter",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "name": "workscene.exit",
+        "requiresAuth": true,
+        "key": "rpc:workscene.exit",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "name": "workscene.list",
+        "requiresAuth": true,
+        "key": "rpc:workscene.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "global-list-read"
+        }
+      },
+      {
+        "name": "workscene.rename",
+        "requiresAuth": true,
+        "key": "rpc:workscene.rename",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "name": "workscene.setWorkdir",
+        "requiresAuth": true,
+        "key": "rpc:workscene.setWorkdir",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "id": "advancement:repl",
+        "name": "advancement",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:advancement:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "advancement"
+        }
+      },
+      {
+        "id": "clear:repl",
+        "name": "clear",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:clear:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-window"
+        }
+      },
+      {
+        "id": "compact:repl",
+        "name": "compact",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:compact:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-window"
+        }
+      },
+      {
+        "id": "config:repl",
+        "name": "config",
+        "execution": "local",
+        "source": "packages/cli/src/commands/config-commands.ts",
+        "key": "slash:config:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
+        "id": "context:repl",
+        "name": "context",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:context:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "id": "exit:repl",
+        "name": "exit",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:exit:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "id": "help:repl",
+        "name": "help",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:help:repl",
+        "category": "slash",
+        "target": {
+          "exclusion": "localRender",
+          "reason": "纯本地展示，不产生权威事实"
+        }
+      },
+      {
+        "id": "journal:repl",
+        "name": "journal",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:journal:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "memory-read"
+        }
+      },
+      {
+        "id": "mcp:repl",
+        "name": "mcp",
+        "execution": "local",
+        "source": "packages/cli/src/commands/config-commands.ts",
+        "key": "slash:mcp:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
+        "id": "me:repl",
+        "name": "me",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:me:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "memory-read"
+        }
+      },
+      {
+        "id": "model:repl",
+        "name": "model",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:model:repl",
+        "category": "slash",
+        "target": {
+          "exclusion": "localRender",
+          "reason": "纯本地展示，不产生权威事实"
+        }
+      },
+      {
+        "id": "name:repl",
+        "name": "name",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:name:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-metadata"
+        }
+      },
+      {
+        "id": "new:repl",
+        "name": "new",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:new:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "id": "people:repl",
+        "name": "people",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:people:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "memory-read"
+        }
+      },
+      {
+        "id": "resume:repl",
+        "name": "resume",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:resume:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "id": "security:repl",
+        "name": "security",
+        "execution": "local",
+        "source": "packages/cli/src/commands/config-commands.ts",
+        "key": "slash:security:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "id": "skill:<catalog-id>",
+        "name": "<catalog-id>",
+        "execution": "agent",
+        "source": "packages/cli/src/commands/skill-command-source.ts",
+        "collisionPolicy": "builtin-first",
+        "key": "slash:skill:<catalog-id>",
+        "category": "slash",
+        "target": {
+          "rowId": "session-send"
+        }
+      },
+      {
+        "id": "skills:repl",
+        "name": "skills",
+        "execution": "local",
+        "source": "packages/cli/src/skills/manager-command.ts",
+        "key": "slash:skills:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "id": "status:repl",
+        "name": "status",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:status:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "status-read"
+        }
+      },
+      {
+        "id": "stop:repl",
+        "name": "stop",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:stop:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "id": "task:repl",
+        "name": "task",
+        "execution": "local",
+        "source": "packages/cli/src/commands/task-commands.ts",
+        "key": "slash:task:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "task-list"
+        }
+      },
+      {
+        "id": "tasklist:repl",
+        "name": "tasklist",
+        "execution": "local",
+        "source": "packages/cli/src/commands/task-commands.ts",
+        "key": "slash:tasklist:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "task-list"
+        }
+      },
+      {
+        "id": "tasks:repl",
+        "name": "tasks",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:tasks:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "global-list-read"
+        }
+      },
+      {
+        "id": "trust:repl",
+        "name": "trust",
+        "execution": "local",
+        "source": "packages/cli/src/commands/config-commands.ts",
+        "key": "slash:trust:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "trust-manage"
+        }
+      },
+      {
+        "id": "usage:repl",
+        "name": "usage",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "key": "slash:usage:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "id": "work:repl",
+        "name": "work",
+        "execution": "local",
+        "source": "packages/cli/src/commands/session-commands.ts",
+        "key": "slash:work:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "name": "admit_skill",
+        "key": "tool:builtin:admit_skill",
+        "category": "tool",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "name": "memory",
+        "key": "tool:builtin:memory",
+        "category": "tool",
+        "target": {
+          "rowId": "memory-write"
+        }
+      },
+      {
+        "name": "save_skill",
+        "key": "tool:builtin:save_skill",
+        "category": "tool",
+        "target": {
+          "rowId": "skill-manage"
+        }
+      },
+      {
+        "key": "tool:extra:schedule:manage",
+        "toolName": "schedule",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "schedule-manage"
+        }
+      },
+      {
+        "key": "tool:extra:schedule:run",
+        "toolName": "schedule",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "schedule-run"
+        }
+      },
+      {
+        "key": "tool:extra:task-list",
+        "toolName": "task_list",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "task-list"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:change-approve",
+        "toolName": "workscene_change_approve",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:clear-workdir-current",
+        "toolName": "workscene_clear_workdir_current",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:enter",
+        "toolName": "workmode_enter",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:exit",
+        "toolName": "workmode_exit",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:rename-current",
+        "toolName": "workscene_rename_current",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:set-workdir-current",
+        "toolName": "workscene_set_workdir_current",
+        "authorityWrite": true,
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-manage"
+        }
+      },
+      {
+        "name": "Task",
+        "authorityWrite": true,
+        "key": "tool:orchestrator:Task",
+        "category": "tool",
+        "target": {
+          "rowId": "orchestration-child"
+        }
+      }
+    ]
+  }
 }

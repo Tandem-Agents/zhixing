@@ -40,3 +40,4 @@ export type {
   SegmentTransitionHook,
   TaskListReader,
 } from "./types.js";
+export { SEGMENT_TRANSITION_HOOK_PHASES } from "./types.js";

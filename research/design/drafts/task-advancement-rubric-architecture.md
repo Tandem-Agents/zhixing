@@ -1,5 +1,7 @@
 # 任务推进闭环（Rubric 推进准则）架构
 
+> **S7 当前取证边界：** owner 只把目标 executor 经 EvidenceRequest/Bundle 协议生成、验签并耐久绑定的 canonical evidence 交给裁判运行体；裁判运行体不持直接 evidence provider，也不存在本地取证 fallback 或兼容开关。本文后续 `evidenceProvider` 施工记录属于历史交付说明，不代表当前生产入口。
+
 ## 需求区
 
 ### 任务推进闭环（Rubric 推进准则）

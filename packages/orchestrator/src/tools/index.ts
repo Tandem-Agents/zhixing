@@ -9,6 +9,7 @@
 export {
   createTaskTool,
   formatChildResultAsToolResult,
+  TASK_TOOL_CAPABILITY_DESCRIPTOR,
   TASK_INPUT_SCHEMA,
   TASK_TOOL_PROMPT,
   type TaskToolEnv,

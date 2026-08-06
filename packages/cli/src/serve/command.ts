@@ -431,7 +431,6 @@ async function runServerProcess(
         anchorEpoch: authority.anchorEpoch,
       };
     },
-    deviceCapacity: deviceCapacity.workload("workload-advancement"),
     // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
     // 延迟基线进 serve 日志作观测数据。
     recentContextProvider: async (conversationId) =>

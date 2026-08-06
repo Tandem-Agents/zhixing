@@ -45,6 +45,11 @@ import { runChildAgent, type ChildAgentResult } from "../subagent/factory.js";
 import { formatAbortReasonForLLM } from "../subagent/abort-format.js";
 import { runContextStorage, type RunContext } from "../runtime/run-context.js";
 
+export const TASK_TOOL_CAPABILITY_DESCRIPTOR = {
+  name: "Task",
+  authorityWrite: true,
+} as const;
+
 // ─── env / 工具元信息 ───
 
 /**
@@ -540,7 +545,7 @@ function assertRunContract(
  */
 export function createTaskTool(env: TaskToolEnv): ToolDefinition {
   return {
-    name: "Task",
+    name: TASK_TOOL_CAPABILITY_DESCRIPTOR.name,
     description: buildTaskToolPrompt(env.childToolNames),
     inputSchema: TASK_INPUT_SCHEMA,
     isReadOnly: false,

@@ -9,6 +9,8 @@
 
 import chalk from "chalk";
 import { Command, InvalidArgumentError, Option } from "commander";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
 import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
@@ -84,7 +86,33 @@ function handleStartupResult(result: StartupCheckResult): void {
   }
 }
 
-const program = new Command();
+export const program = new Command();
+
+export interface CliCommandDescriptor {
+  readonly path: string;
+  readonly hidden: boolean;
+  readonly hasAction: boolean;
+}
+
+/** Serializes the real Commander tree; coverage checks never maintain a parallel command list. */
+export function captureCliCommandDescriptor(
+  root: Command = program,
+): readonly CliCommandDescriptor[] {
+  const entries: CliCommandDescriptor[] = [];
+  const visit = (command: Command, parents: readonly string[]): void => {
+    const name = command.name();
+    const path = [...parents, name].join(" ");
+    entries.push({
+      path,
+      hidden: (command as Command & { readonly _hidden?: boolean })._hidden === true,
+      hasAction: command.registeredArguments.length > 0 || command.commands.length === 0 ||
+        command.listeners("action").length > 0,
+    });
+    for (const child of command.commands) visit(child, [...parents, name]);
+  };
+  visit(root, []);
+  return entries.sort((left, right) => left.path.localeCompare(right.path, "en-US"));
+}
 
 function rejectUnknownCommandPath(argv: string[], command: Command): void {
   const unknownCommand = findUnknownCommandPath(argv, command);
@@ -437,17 +465,22 @@ serveCmd
     }
   });
 
-// pnpm run 会将 `--` 原样传递给脚本，导致 Commander 将后续选项误认为位置参数。
-// 移除 argv 中首个独立的 `--`，使 `-p` 等选项正常解析。
-const argv = [...process.argv];
-const dashIdx = argv.indexOf("--", 2);
-if (dashIdx !== -1) {
-  argv.splice(dashIdx, 1);
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+) {
+  // pnpm run 会将 `--` 原样传递给脚本，导致 Commander 将后续选项误认为位置参数。
+  // 移除 argv 中首个独立的 `--`，使 `-p` 等选项正常解析。
+  const argv = [...process.argv];
+  const dashIdx = argv.indexOf("--", 2);
+  if (dashIdx !== -1) {
+    argv.splice(dashIdx, 1);
+  }
+
+  rejectUnknownCommandPath(argv, program);
+
+  program.parseAsync(argv).catch(async (err: unknown) => {
+    await renderActionError(err);
+    process.exit(1);
+  });
 }
-
-rejectUnknownCommandPath(argv, program);
-
-program.parseAsync(argv).catch(async (err: unknown) => {
-  await renderActionError(err);
-  process.exit(1);
-});

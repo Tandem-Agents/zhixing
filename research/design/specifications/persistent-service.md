@@ -738,7 +738,7 @@ Level 1 完整执行规格（概念、竞品调研、架构决策、里程碑拆
 
 ### 4.7 Delivery Pipeline（投递管线）
 
-> **S7 当前边界：** 新投递已由权威 Delivery 日志、outbox 和状态目录接管。旧 `DeliveryPipeline`、`DeliveryQueue` 与磁盘 store 不再是生产写入面，只允许通过一次性 drainer 排空既有记录；记录全部接管后删除旧文件，损坏或未知结构必须 fail-closed。以下内容仅描述历史实现及其演进背景。
+> **S7 当前边界：** 新投递已由权威 Delivery 日志、outbox 和状态目录接管。旧 `DeliveryPipeline`、`DeliveryQueue`、磁盘 store 与一次性 drainer 已整体退役，不再有生产装配或公开导出。以下内容仅描述历史实现及其演进背景。
 
 > **实现偏差：** 核心架构一致，接口细节有演化。`DeliverySender` 取代直接 ChannelRegistry 依赖（可插拔发送）；重试语义区分 channel-not-ready（不消耗 attempts）与 send 失败（指数退避）。详见 [implementation-roadmap.md Step 12](../implementation-roadmap.md)。
 >

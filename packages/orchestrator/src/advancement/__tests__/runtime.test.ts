@@ -20,8 +20,9 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
-  createAdvancementRuntime,
+  createAdvancementRuntime as createProductionAdvancementRuntime,
   type AdvancementEvidenceProvider,
+  type AdvancementRuntimeOptions,
 } from "../index.js";
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
@@ -57,7 +58,7 @@ const UNMET_CRITERIA = [
 ];
 
 describe("AdvancementRuntime", () => {
-  it("canonical-only production mode never calls the legacy direct evidence provider", async () => {
+  it("canonical evidence never consults the test evidence collector", async () => {
     const provider = new MockLLMProvider([{
       toolCalls: [{
         id: "judge-canonical",
@@ -74,7 +75,6 @@ describe("AdvancementRuntime", () => {
       provider,
       model: "mock-model",
       evidenceProvider: direct,
-      canonicalEvidenceOnly: true,
       now: () => NOW,
     });
     const outcome = await runtime.review({
@@ -98,7 +98,6 @@ describe("AdvancementRuntime", () => {
     const runtime = createAdvancementRuntime({
       provider,
       model: "mock-model",
-      canonicalEvidenceOnly: true,
       now: () => NOW,
     });
     const bad = {
@@ -518,26 +517,32 @@ describe("AdvancementRuntime", () => {
         ],
       },
     ]);
-    const runtime = createAdvancementRuntime({
+    const runtime = createProductionAdvancementRuntime({
       provider,
       model: "mock-model",
-      evidenceProvider: providerWithEvidence([
-        {
-          id: "unbound-test-output",
-          kind: "test-result",
-          source: "independent",
-          summary: "测试输出存在，但未被取证层绑定到 Rubric 要求。",
-          passed: true,
-        },
-      ]),
       now: () => NOW,
       idGenerator: () => "review-rebound-evidence",
     });
 
-    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
+    const outcome = await runtime.review(
+      {
+        ...baseInput(),
+        canonicalEvidence: [
+          {
+            id: "unbound-test-output",
+            kind: "test-result",
+            source: "independent",
+            summary: "测试输出存在，但未绑定到 Rubric 要求。",
+            passed: true,
+          },
+        ],
+      },
+      TEST_LEASE,
+      ABORT_SIGNAL,
+    );
 
-    expect(review.decision).toBe("exit");
-    expect(review.exitReason).toBe("system-error");
+    expect(outcome).toMatchObject({ kind: "deferred", cause: "infrastructure" });
+    expect(provider.calls).toHaveLength(0);
   });
 
   it("不同类型的独立证据不能满足必需客观证据", async () => {
@@ -556,27 +561,33 @@ describe("AdvancementRuntime", () => {
         ],
       },
     ]);
-    const runtime = createAdvancementRuntime({
+    const runtime = createProductionAdvancementRuntime({
       provider,
       model: "mock-model",
-      evidenceProvider: providerWithEvidence([
-        {
-          id: "log-ok",
-          kind: "log",
-          requirementId: "tests",
-          source: "independent",
-          summary: "日志中出现 ok。",
-          passed: true,
-        },
-      ]),
       now: () => NOW,
       idGenerator: () => "review-wrong-kind",
     });
 
-    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
+    const outcome = await runtime.review(
+      {
+        ...baseInput(),
+        canonicalEvidence: [
+          {
+            id: "log-ok",
+            kind: "log",
+            requirementId: "tests",
+            source: "independent",
+            summary: "日志中出现 ok。",
+            passed: true,
+          },
+        ],
+      },
+      TEST_LEASE,
+      ABORT_SIGNAL,
+    );
 
-    expect(review.decision).toBe("exit");
-    expect(review.exitReason).toBe("system-error");
+    expect(outcome).toMatchObject({ kind: "deferred", cause: "infrastructure" });
+    expect(provider.calls).toHaveLength(0);
   });
 
   it("拒绝非法的证据引用形态", async () => {
@@ -641,7 +652,23 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-failed",
     });
 
-    const { review } = await runtime.review(baseInput(), TEST_LEASE, ABORT_SIGNAL);
+    const { review } = await runtime.review(
+      {
+        ...baseInput(),
+        canonicalEvidence: [
+          {
+            id: "run-final-response",
+            kind: "test-result",
+            requirementId: "tests",
+            source: "independent",
+            summary: "运行记录包含本轮测试结果。",
+            passed: false,
+          },
+        ],
+      },
+      TEST_LEASE,
+      ABORT_SIGNAL,
+    );
     const prompt = provider.calls[0]?.messages[0]?.content[0];
 
     expect(review.decision).toBe("failed");
@@ -1201,6 +1228,50 @@ function providerWithEvidence(
   return {
     async collect() {
       return evidence;
+    },
+  };
+}
+
+/**
+ * Existing runtime behavior tests describe judge semantics, not the retired production
+ * evidence fallback. This test-only adapter supplies their fixtures through the canonical
+ * input field while the production constructor remains canonical-only.
+ */
+function createAdvancementRuntime(
+  options: AdvancementRuntimeOptions & {
+    readonly evidenceProvider?: AdvancementEvidenceProvider;
+  },
+) {
+  const { evidenceProvider, ...productionOptions } = options;
+  const runtime = createProductionAdvancementRuntime(productionOptions);
+  return {
+    review: async (
+      input: Parameters<typeof runtime.review>[0],
+      lease: Parameters<typeof runtime.review>[1],
+      abort: Parameters<typeof runtime.review>[2],
+    ) => {
+      let canonicalEvidence = input.canonicalEvidence;
+      if (!canonicalEvidence && evidenceProvider) {
+        try {
+          canonicalEvidence = await evidenceProvider.collect({
+            ...input,
+            requirements: input.rubric.content.evidenceRequirements ?? [],
+            abortSignal: abort,
+          });
+        } catch (error) {
+          return {
+            kind: "deferred" as const,
+            cause: "infrastructure" as const,
+            reason: `推进侧取证失败：${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      canonicalEvidence ??= [];
+      return runtime.review(
+        { ...input, canonicalEvidence },
+        lease,
+        abort,
+      );
     },
   };
 }

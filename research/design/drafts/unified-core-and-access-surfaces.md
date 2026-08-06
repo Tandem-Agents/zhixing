@@ -4,6 +4,8 @@
 >
 > **状态**：主线架构已进入实现与实测收口;当前补充运行控制交互设计（`/status` / `/stop` / 普通退出 / 非交互停止安全）已定，待按补充单元实现。
 >
+> **S7 当前拓扑**：CLI 是唯一产品组合根，按配置装配 anchor、executor、surface 角色；owner-kernel / owner-services / rpc / runtime-host 分包只通过正式端口协作。单机使用同一合同的进程内 adapter，未启用角色不加载、不监听，server 与 executor 零互相 import。
+>
 > **与调度器模块的关系**：本模块与 [scheduler-architecture.md](./scheduler-architecture.md) 共享同一地基——「核心宿主（agent core host）」。核心宿主由调度器那一轮先立起（最小形态：仅调度）；本模块在该宿主之上长"会话共享 / 多端协同"这一层，**不重起核心宿主**。两者是同一架构哲学（核心单例 + 多接入面）的不同层：功能上独立、地基上共享。
 >
 > **范围约束**：需求与架构到可执行决策为止;代码级契约随实现各阶段在对应 spec 细化。

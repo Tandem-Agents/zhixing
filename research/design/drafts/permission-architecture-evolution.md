@@ -1,6 +1,8 @@
 # 权限分级与信任区 — 需求与架构
 
 > **性质**：需求确认（第一部分）+ 架构方案（第二部分）。骨架与细化决策均已落地。现状架构见 [security-system.md](../specifications/security-system.md) / [tool-permission-execution.md](../specifications/tool-permission-execution.md)。
+>
+> **S4 当前分布式边界**：锚点以 TrustRuleSnapshot 资产签发 PermissionSnapshotLease，assignment 在 received 前必须取得并验签其绑定版本与摘要；执行期只消费该冻结快照，不读取设备当前规则。缺失为可恢复 capability-gap，错摘要、错签名或越 scope 均 fail-closed。
 
 ## 第一部分 · 已明确的需求
 

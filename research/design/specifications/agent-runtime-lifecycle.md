@@ -4,6 +4,8 @@
 >
 > **定位**: 为 main / work 两类 user-facing 主对话 runtime 实例提供**四阶段生命周期钩子**——**注意力窗口开启 / 每次 run 前 / 每次 run 后 / 注意力窗口结束**。统一"在生命周期边界做注册式介入"的接入点，把散落在装配期、段切换、`/compact`、`/clear`、`/resume`、实例销毁处的各类"边界动作"收敛到同一抽象。skill 索引共享同一窗口边界，但因目录读取需要 assignment `GlobalQuery`，由 runtime 自身刷新而不是 lifecycle subscriber。
 >
+> **S7 写入边界**：生命周期钩子不拥有权威 Store；run 内写类贡献只能进入 assignment stager，并在 owner 权威提交后触发发布或派生刷新。failed、cancelled、uncertain 在裁决前均不得由 onAfterRun/onWindowClose 旁路写入。
+>
 > **绑定单位分两层（与 [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §一一致）**：外层钩子（onWindowOpen / onWindowClose）绑**注意力窗口**，内层钩子（onBeforeRun / onAfterRun）绑 **run**。订阅者**集合**在 runtime 实例装配期注入、实例内恒定（注册单位是实例，触发单位是窗口 / run）。
 >
 > **关联**:

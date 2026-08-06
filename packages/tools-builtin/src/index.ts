@@ -17,10 +17,12 @@ export { createWebFetchTool } from "./web-fetch.js";
 export type { SkillAdmissionPort, SkillSaver } from "./skill.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
 export {
+  BUILTIN_TOOL_CAPABILITIES,
   BUILTIN_TOOL_FACTORIES,
   BUILTIN_TOOL_NAMES,
 } from "./factories.js";
 export type {
+  BuiltinToolCapabilityDescriptor,
   BuiltinToolContext,
   BuiltinToolFactory,
 } from "./factories.js";

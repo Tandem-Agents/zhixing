@@ -3,26 +3,28 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureBuiltinRegistryDescriptor } from "../packages/server/src/rpc/methods/index.ts";
 import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
+import { captureS7EntryCoverage } from "./s7-entry-coverage.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const target = path.join(root, "packages/server/src/__tests__/__goldens__/canonical-registry.golden.json");
 
-export function captureCanonicalRegistryGolden() {
+export async function captureCanonicalRegistryGolden() {
   const hosted = captureBuiltinRegistryDescriptor();
   const registryFor = (roles) =>
     planServeTopology({ roles }) === "anchor-host" ? hosted : [];
   return {
-    version: 1,
+    version: 2,
     roleConfigurations: {
       "anchor-executor": registryFor(["anchor", "executor"]),
       "anchor-surface": registryFor(["anchor", "surface"]),
       "executor-only": registryFor(["executor"]),
     },
     retiredMethods: ["workspace.binding.admin", "workspace.binding.reset"],
+    entryCoverage: await captureS7EntryCoverage(),
   };
 }
 
-const expected = `${JSON.stringify(captureCanonicalRegistryGolden(), null, 2)}\n`;
+const expected = `${JSON.stringify(await captureCanonicalRegistryGolden(), null, 2)}\n`;
 if (process.argv.includes("--write")) {
   await writeFile(target, expected, "utf8");
 } else if (process.argv.includes("--check")) {

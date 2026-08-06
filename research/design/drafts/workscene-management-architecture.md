@@ -1,6 +1,8 @@
 # 工作场景管理能力统一、目录管理与智能创建架构
 
 > **当前权威接入补充**：本文关于 run 内管理工具直接调用服务/注册表，以及 `set_workdir_current`、`clear_workdir_current` 通过 post-turn consumer 落盘并重进的旧实施描述，已由 assignment staged/applied 双阶段取代。run 内 create/rename/setWorkdir/delete 在确认后只写当前 assignment overlay 并返回通用 receipt；receipt、预计 sceneId/revision 与 overlay 均不得表述为已应用，也不得提前切换 runtime。owner 在提交时固化唯一 `WorksceneAppliedResult`，提交后由现有 publish 链幂等物化和反馈。enter/exit 仍沿用 turn-boundary 意图；CLI/RPC 等 run 外管理入口仍走 control。新建场景在 applied 前不能作为后续依赖对象，失败、取消、uncertain 与冲突均不得恢复旧的管理 post-turn 旁路。
+>
+> workspace 现行身份是设备域 `{deviceId, bindingRef}`；first-party 主模式输入以耐久 `ExplicitEnvironmentSelection` 明确选择，原始路径只在目标设备的 WorkspaceBindingAdminPort 内出现。ExecutionManifest 冻结当次 binding revision，远端不得上传路径或暗取宿主目录。
 
 ## 需求区
 

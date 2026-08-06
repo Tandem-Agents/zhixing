@@ -177,3 +177,11 @@ export interface AgentRuntimeLifecycle {
    *  销毁（末窗）时调。收尾 / flush。 */
   onWindowClose?(ctx: LifecycleWindowCloseContext): Promise<void> | void;
 }
+
+/** Canonical phase set consumed by production coverage checks. */
+export const AGENT_RUNTIME_LIFECYCLE_PHASES = [
+  "onWindowOpen",
+  "onBeforeRun",
+  "onAfterRun",
+  "onWindowClose",
+] as const satisfies readonly (keyof AgentRuntimeLifecycle)[];

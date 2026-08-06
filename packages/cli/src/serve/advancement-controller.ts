@@ -34,7 +34,6 @@ import {
   createAdvancementRuntime,
 } from "@zhixing/orchestrator/advancement";
 import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
-import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import { PROTOCOL_BUDGET_DEFAULTS } from "@zhixing/providers";
 import {
   AdvancementController,
@@ -61,7 +60,6 @@ export interface ServeAdvancementControllerDeps {
    * 无权威运行时即 fail-closed，不回退本地文件形态。
    */
   readonly sessionState: () => SessionStatePort | undefined;
-  readonly deviceCapacity?: AgentRuntimeCapacityBinding;
   /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */
   readonly recentContextProvider?: (
     conversationId: string,
@@ -298,11 +296,7 @@ export async function createServeAdvancementController(
       defaultMaxOutputTokens:
         PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol]
           .maxOutputTokens,
-      ...(deps.deviceCapacity
-        ? { deviceCapacity: deps.deviceCapacity }
-        : {}),
       workingDirectory: workspacePath,
-      canonicalEvidenceOnly: true,
       ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
       contextWindow: {
         capability: advancementWindowCapability,

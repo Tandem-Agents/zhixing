@@ -1,5 +1,4 @@
 export {
-  createDefaultAdvancementEvidenceProvider,
   completeMissingRequiredEvidence,
   requiresIndependentEvidence,
   summarizeRunRecord,

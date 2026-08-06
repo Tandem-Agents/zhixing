@@ -29,11 +29,9 @@ import type {
   ResourceLease,
 } from "@zhixing/core/contracts";
 import type { EvidenceCapabilitySet } from "@zhixing/core/advancement";
-import { runWithDeviceCapacity } from "@zhixing/core/resources";
 import { meteredProviderCall } from "../runtime/create-agent-runtime.js";
 import {
   completeMissingRequiredEvidence,
-  createDefaultAdvancementEvidenceProvider,
   summarizeRunRecord,
 } from "./evidence.js";
 import {
@@ -41,7 +39,6 @@ import {
   createAdvancementJudgeTool,
 } from "./judge-tool.js";
 import type {
-  AdvancementEvidenceProvider,
   AdvancementReviewRunInput,
   AdvancementReviewRunOutcome,
   AdvancementRuntime,
@@ -58,15 +55,11 @@ export function createAdvancementRuntime(
 }
 
 class DefaultAdvancementRuntime implements AdvancementRuntime {
-  private readonly evidenceProvider?: AdvancementEvidenceProvider;
   private readonly maxJudgeTurns: number;
   private readonly now: () => Date;
   private readonly idGenerator: () => string;
 
   constructor(private readonly options: AdvancementRuntimeOptions) {
-    this.evidenceProvider = options.canonicalEvidenceOnly
-      ? undefined
-      : options.evidenceProvider ?? createDefaultAdvancementEvidenceProvider();
     this.maxJudgeTurns = options.maxJudgeTurns ?? DEFAULT_MAX_JUDGE_TURNS;
     this.now = options.now ?? (() => new Date());
     this.idGenerator =
@@ -216,36 +209,6 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     );
   }
 
-  /** 本机取证受容量治理:它读工作区文件,是这条流程里唯一的本机批次。 */
-  private async collectEvidenceUnderCapacity(
-    input: AdvancementReviewRunInput,
-    abort: AbortSignal,
-  ): Promise<readonly ReviewEvidence[]> {
-    const collect = () => {
-      if (!this.evidenceProvider) {
-        throw new Error("Canonical advancement evidence is required");
-      }
-      return this.evidenceProvider.collect({
-        ...input,
-        requirements: input.rubric.content.evidenceRequirements ?? [],
-        abortSignal: abort,
-      });
-    };
-    const capacity = this.options.deviceCapacity;
-    if (!capacity) return collect();
-    return runWithDeviceCapacity(
-      capacity.arbiter,
-      {
-        serviceClass: "workload-advancement",
-        atomic: capacity.atomic,
-        preferred: capacity.preferred,
-        maxWaitMs: capacity.maxWaitMs,
-      },
-      abort,
-      collect,
-    );
-  }
-
   private async reviewRunWithCapacityAtEvidence(
     input: AdvancementReviewRunInput,
     abort: AbortSignal,
@@ -254,18 +217,14 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
   ): Promise<AdvancementReviewRunOutcome> {
     let evidence: ReviewEvidence[];
     try {
-      if (input.canonicalEvidence) {
-        assertCanonicalEvidence(input.canonicalEvidence, input.rubric);
+      if (!input.canonicalEvidence) {
+        throw new Error("Canonical advancement evidence is required");
       }
-      evidence = input.canonicalEvidence
-        ? completeMissingRequiredEvidence({
-            requirements: input.rubric.content.evidenceRequirements ?? [],
-            evidence: input.canonicalEvidence,
-          })
-        : completeMissingRequiredEvidence({
-            requirements: input.rubric.content.evidenceRequirements ?? [],
-            evidence: await this.collectEvidenceUnderCapacity(input, abort),
-          });
+      assertCanonicalEvidence(input.canonicalEvidence, input.rubric);
+      evidence = completeMissingRequiredEvidence({
+        requirements: input.rubric.content.evidenceRequirements ?? [],
+        evidence: input.canonicalEvidence,
+      });
     } catch (error) {
       return deferredOutcome(`推进侧取证失败：${errorMessage(error)}`);
     }

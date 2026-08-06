@@ -173,6 +173,13 @@ export interface SegmentTransitionHook {
   beforeNewSegmentStart?(ctx: SegmentTransitionContext): Promise<void>;
 }
 
+/** Canonical phase set consumed by production coverage checks. */
+export const SEGMENT_TRANSITION_HOOK_PHASES = [
+  "beforeSummarize",
+  "afterSummarize",
+  "beforeNewSegmentStart",
+] as const satisfies readonly (keyof SegmentTransitionHook)[];
+
 export interface SegmentTransitionContext {
   /** ephemeral 运行体（定时任务等）无对话身份 —— hook 自行差分持久化副作用 */
   readonly conversationId: string | undefined;

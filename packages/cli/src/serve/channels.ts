@@ -31,19 +31,40 @@ import type {
 
 // ─── Adapter Factory ───
 
-const ADAPTER_FACTORIES: Record<string, () => Promise<ChannelAdapter>> = {
-  feishu: async () => {
-    const { FeishuAdapter } = await import("@zhixing/channel-feishu");
-    return new FeishuAdapter();
+interface ChannelAdapterFactory {
+  readonly adapterType: string;
+  create(): Promise<ChannelAdapter>;
+}
+
+const ADAPTER_FACTORIES: Readonly<Record<string, ChannelAdapterFactory>> = {
+  feishu: {
+    adapterType: "feishu",
+    create: async () => {
+      const { FeishuAdapter } = await import("@zhixing/channel-feishu");
+      return new FeishuAdapter();
+    },
   },
 };
+
+/** Derived from the production factory table, not a separately maintained channel list. */
+export function captureChannelAdapterFactoryDescriptor(): readonly {
+  readonly configType: string;
+  readonly adapterType: string;
+}[] {
+  return Object.entries(ADAPTER_FACTORIES)
+    .map(([configType, factory]) => ({
+      configType,
+      adapterType: factory.adapterType,
+    }))
+    .sort((left, right) => left.configType.localeCompare(right.configType, "en-US"));
+}
 
 function createAdapter(type: string): Promise<ChannelAdapter> {
   const factory = ADAPTER_FACTORIES[type];
   if (!factory) {
     throw new Error(`Unknown channel type: ${type}. Supported: ${Object.keys(ADAPTER_FACTORIES).join(", ")}`);
   }
-  return factory();
+  return factory.create();
 }
 
 // ─── Channel Setup ───

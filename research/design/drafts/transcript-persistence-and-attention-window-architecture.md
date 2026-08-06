@@ -5,6 +5,8 @@
 >
 > **范围约束**:本文聚焦两层的**架构梳理**(各层管什么、按什么触发、如何响应、边界如何划),
 > 不展开与之无关的实现细节;概念的通用生命周期定义见 [lifecycle-concepts.md](lifecycle-concepts.md)。
+>
+> **S7 当前写入边界**：段切换仍在 executor 计算，但 segment 元数据与 MemoryFlush 只写 assignment overlay；owner 权威提交后分别经 SessionStatePort / GlobalStatePort 发布。失败、取消或未裁决 run 不得把 lifecycle 写泄漏到权威状态或文件投影。
 
 ---
 

@@ -155,7 +155,6 @@ describe("advancement review attempt production recovery", () => {
       provider,
       model: "mock-model",
       resourceMeter: resources,
-      canonicalEvidenceOnly: true,
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });
@@ -250,7 +249,6 @@ describe("advancement review attempt production recovery", () => {
       provider,
       model: "mock-model",
       resourceMeter: governor,
-      canonicalEvidenceOnly: true,
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });
@@ -336,7 +334,6 @@ describe("advancement review attempt production recovery", () => {
       provider,
       model: "mock-model",
       resourceMeter: governor,
-      canonicalEvidenceOnly: true,
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });
@@ -426,7 +423,6 @@ describe("advancement review attempt production recovery", () => {
       provider,
       model: "mock-model",
       resourceMeter: governor,
-      canonicalEvidenceOnly: true,
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });
@@ -474,7 +470,6 @@ describe("advancement review attempt production recovery", () => {
       provider,
       model: "mock-model",
       resourceMeter: held.resources,
-      canonicalEvidenceOnly: true,
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });
@@ -536,7 +531,6 @@ describe("advancement review attempt production recovery", () => {
       provider,
       model: "mock-model",
       resourceMeter: held.resources,
-      canonicalEvidenceOnly: true,
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });

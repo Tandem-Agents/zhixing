@@ -77,7 +77,7 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 | `MemoryLogicalEntry` / `MemoryScopeRef` | 现有同名 @ `packages/core/src/memory/contracts.ts` | 记忆域 path-free 权威读结果与 scope |
 | `MemoryCategory` / `PersonMeta` | 现有同名 @ `packages/core/src/memory/`（进程内领域类型，**不上 wire**——wire 用 §1.3b `MemoryCategoryDto` / `PersonMetaDto` 快照） | 记忆分类与人物元数据 |
 | `DeliveryItem` | 现有同名 @ `packages/core/src/delivery/types.ts:31`（由 delivery 流投影生成，不上权威日志） | 渠道发送器兼容投影 |
-| `EnqueueParams` / `IDeliveryPipeline.enqueue` | 现有同名 @ `packages/core/src/delivery/types.ts:100 / :110`；现实现于 `pipeline.ts:199`，唯一生产调用 @ `scheduler.ts:519` | 目标态由六类权威生产者内部构造 enqueued；公开生产入口保留至 scheduler 接入 JobJournal 后随旧路径整体退役（执行计划第 26 项） |
+| `EnqueueParams` / `IDeliveryPipeline.enqueue` | S7 第 26 单元已删除；生产与公开导出均不存在 | 六类权威生产者只在 owner 提交内构造 enqueued，旧公开生产入口不得恢复 |
 | `SkillUsageRecord` | 本文冻结（§1.3b；现有 `SkillUsage` @ `packages/core/src/skills/types.ts:35` 无 skillId，adapter 自 store 的 map 键补齐） | 技能使用记录 |
 | `SkillRecord` / `SkillState` / `SkillMode` | 现有同名 @ `packages/core/src/skills/types.ts` | 技能管理载体（进程内领域类型，**不上 wire**——wire 写面用 §3.2 `SkillWriteDto` / `SkillStatePatch`（mode 用 §1.3b `SkillModeDto`），id / revision / createdAt 等权威字段锚点生成） |
 | `EvidenceKind` | ≙ 现有 `ObjectiveSignalKind` @ `packages/core/src/advancement/types.ts` | 证据类型 |
@@ -1573,7 +1573,7 @@ type DeliveryStreamRecord =                      // delivery 流 = 投递生命�
   | { t: "failed";          itemId: string; attempt: number; error: DeliveryFailure; statusRevision: number }            // 永久失败（可重试类走 retry-scheduled）
   | { t: "delivery-uncertain"; itemId: string; attempt: number; openedAnchorEpoch: number; openedAt: IsoTime; openFactDigest: Digest; statusRevision: number }
   | { t: "delivery-resolved"; fact: DeliveryResolutionFact; statusRevision: number };                                   // 用户裁决不可变，**绝不伪造外部 sent**
-// enqueued 只能由六类权威生产者的内部构造器生成；目标态删除公开生产接口 IDeliveryPipeline.enqueue(EnqueueParams)（现状字段见 §1.3 源码引用），wire DTO 与 mutation
+// enqueued 只能由六类权威生产者的内部构造器生成；旧公开生产接口已在 S7 删除，wire DTO 与 mutation
 // 均不得携 itemId / keyBody / idempotencyKey / intentDigest / createdAt / maxAttempts，反序列化遇这些自报字段即拒绝。内部构造器从同 envelope 的权威事实派生 keyBody，
 // 以 D("DeliveryEnqueueKeyBody",1,keyBody) 生成 idempotencyKey，以 D("DeliveryIntentDto",1,intent) 生成 intentDigest；
 // committed 结果与非 committed 状态使用不同 kind，后者以 journal.statusRevision 定位；迁居 / 重放不改键，不同 revision 不得合并为同一 item。
@@ -2284,45 +2284,45 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 
 单源生成：本矩阵行集由入口单源清单对账生成——RPC registry（`buildBuiltinRegistry` 全部方法）、命令 registry（cli 各域 `registerXxxCommands` + 技能动态命令，命令最终落到 RPC 或本地渲染）、生命周期注册表（AgentRuntimeLifecycle 四点、SegmentTransitionHook 三点、CleanupRegistry）、渠道入站、执行侧写权威工具。S1 起以覆盖 lint 对账：维护一份机器可读映射表（`registry 方法 / 命令 → 矩阵行 id` 或 `→ 显式"本地渲染、无权威写"排除项`），每个入口**恰好命中一次**——无映射、双映射、映射到不存在的行均 lint 失败；纯本地命令（如 /help、渲染类）只能落排除项、不得缺席。`auth / health` 属连接层，不入本矩阵。
 
-| 操作 | 现有入口 | 准入 / 记账 | 执行 | 权威落点 |
-|---|---|---|---|---|
-| 会话输入 send | session.send；渠道入站 | 对话 owner（入口幂等 + 串行；first-party 可携已认证显式环境选择） | executor（完整 run） | owner CAS（input + environment 同步准入） |
-| 主模式 / 无场景 workspace 选择 | first-party 本地会话入口 | 本地路径先经 WorkspaceBindingAdminPort 转引用；owner 验已认证目录后随 input 准入 | owner 选机时冻结 binding revision | admitted environment → ExecutionManifest |
-| run 取消 | session.abort | 对话 owner（cancel-fence） | executor（线性化收束） | owner 落终态 |
-| uncertain / 投递裁决 | `uncertain-resolve` / `delivery-resolve` 控制请求（三选呈现经 ExecutionStatusNotice，§5.5） | 工作所属权威（conversation→owner，job / delivery→锚点） | — | resolution fact + 状态转移 + applied 同一原子提交 |
-| allow-once 确认 | confirmation.resolve（原始 surface 携 run-interact 票据直连；定时 job 经 owner-relay 耐久游标 + ChannelChallengeToken 回调，携 ChannelInteractionGrant 中继） | executor assignment 事务域 | executor 安全管线 | executor；owner 只持 relay / challenge outbox 与审计镜像 |
-| 确认状态读 | confirmation.list | executor assignment 流（pending = `interaction-requested` − `interaction-finished` 差集；经数据面票据直读或 owner 转发） | — | —（读；owner 镜像仅审计，不承载 pending） |
-| 事件订阅 / 退订 | session.subscribe / session.unsubscribe | 对话 owner（observer 名册登记 / 注销，连接级） | — | —（连接态，非权威） |
-| 全局域列表读 | schedule.list / workscene.list / skill.list；/skills 候选 | 锚点 GlobalQuery 读（与 memory 读行同构） | — | —（读） |
-| 持久授权（allow-session / global） | confirmation.resolve 升级路径 | 锚点 control 流 | — | 锚点 permissionStore |
-| 信任规则管理 | trust.list / trust.revoke；/trust | 锚点（global-write；读） | — | 锚点 permissionStore |
-| 对话创建 / 列表 / 切换 | session.new / session.list / session.resume；/new /resume | owner（session-create；读） | owner 就地 | owner |
-| 清空 / 压缩 | session.clear / session.compact；/clear /compact | 对话 owner（session-write window-op） | owner 就地（压缩经 ControlCompletionPort） | owner |
-| 改名 / 删除 | session.rename / session.delete；/name | 对话 owner（session-write） | owner 就地 | owner |
-| 会话读（历史 / 用量 / 安全 / 预算） | session.history / usage / security / contextBudget；/usage /context | 对话 owner 读（SessionStatePort） | — | —（读） |
-| task-list 读写 | session.taskList / taskListUpdate；task_list 工具；/task /tasklist | run 内 staged / run 外 owner session-write | — | 对话 owner |
-| 推进闭环（确认 / 修订 / 取消 / 详情） | session.advancement*；/advancement | 对话 owner 控制面 | owner（Completion / ReviewerPort） | owner advancement 日志 |
-| workscene 注册管理 | workscene.create / rename / setWorkdir / delete；workscene_* 工具 | 锚点（global-write workscene-*；run 内工具经 staged；probe 取得 control lease） | 目录探测在目标 executor（经 WorkspaceProbeRequest + EnvironmentControlGrant，§5.3） | 锚点注册表 |
-| workscene 进出 | workscene.enter / exit；/work /exit | owner 取得/创建 sceneId 静态绑定的场景会话；接入面维护自身当前会话指针 | owner 就地；exit 仅切接入面指针 | owner 持场景会话；指针为各接入面连接态 |
-| schedule CRUD | schedule.create / update / delete；schedule 工具 | 锚点（global-write）；run 内 staged、离线 DeferredGlobalIntent | — | 锚点 TaskDefinition |
-| schedule 手动触发 / 中止 | schedule.run / abortRun；schedule 工具 run | 锚点 job 逻辑流（job-run / job-cancel） | executor（job run） | 锚点 fence CAS |
-| schedule 定时触发 | 锚点时钟 | 锚点 job 逻辑流 | executor（job run） | 锚点 fence CAS |
-| memory 写 | memory 工具；段切换 flush 钩子 | run 内 staged → 提交后经锚点发布 | — | 锚点记忆域 |
-| memory 读 / 统计 | memory.journalStats / peopleList；/journal /people；检索 | 锚点 GlobalQuery | — | —（读） |
-| 技能管理 | skill.setState / archive；save_skill / admit_skill 工具；/skills | 锚点（global-write skill-*；run 内 staged create / update / admit） | — | 锚点资产库 |
-| 技能使用记录 | 运行时内部 | run 内 staged（skill-usage） | — | 锚点资产库 |
-| 段切换与段元数据 | 段钩子（beforeSummarize / afterSummarize / beforeNewSegmentStart） | run 内 staged（segment-append；flush 见 memory 写行） | executor 运行时 | 对话 owner |
-| workspace binding 本地管理与灾难恢复 | 目标设备本地 CLI / 桌面设置 | 普通 CRUD 经 `WorkspaceBindingAdminPort`；不可恢复日志 reset 经独立 `WorkspaceBindingRecoveryPort`、明确确认与世代 fence；均不经 mesh / RPC | 本机容量准入；reset 原子换代并撤回能力，重新授权仍走 AdminPort | executor 本地 binding 事实日志 |
-| 运行体生命周期钩子（onWindowOpen / onBeforeRun / onAfterRun / onWindowClose） | 运行时装配 | 只读注入，不落权威；写类动作必经端口走对应行 | executor / owner 各自 | —（约束行） |
-| 取证 | owner 发起 EvidenceRequest | AdvancementStore 请求态 + lease guard | 目标 executor（只读 provider） | owner 采信入 review |
-| 编排子节点 | 执行侧 runtime Task 工具 | 随父 run（子 lease） | executor 进程内 | 随父 run bundle |
-| 渠道入站 | feishu `im.message.receive_v1`（message_id 幂等） | 锚点（入口幂等）→ 路由 | 按路由派发 | 对话 owner |
-| 渠道出站投递 | DeliveryOutbox drain | 锚点投递队列（delivery 流） | 锚点渠道 adapter | 锚点投递队列 |
-| 状态查询 | server.info；/status、zz status | 只读（按 run / job / delivery 的 statusRevision 补读） | 锚点聚合 | —（快照非权威） |
-| 轻推理 | llm.complete | owner / 锚点 ControlCompletionPort + control-class lease | owner 设备 | —（不产权威事实） |
-| 停机 | server.shutdown（immediate / drain / cancel）；系统信号 | 设备服务生命周期（三路径收束，总纲 §10） | 双端 | 权威保留或转移 |
-| 运行配置管理 | /config、/mcp（本地编辑 + reload） | 设备本地配置面；全局期望配置项经锚点资产同步（S4） | 本设备 | 设备本地 / 锚点（按配置类别） |
-| 配对 / 迁居 / 撤销 | zz pair；引导流 | mesh / 锚点专用流程（trust 流） | 双端 | HomeTrustRecord / transfer 流 |
+| rowId | 操作 | 现有入口 | 准入 / 记账 | 执行 | 权威落点 |
+|---|---|---|---|---|---|
+| `session-send` | 会话输入 send | session.send；渠道入站 | 对话 owner（入口幂等 + 串行；first-party 可携已认证显式环境选择） | executor（完整 run） | owner CAS（input + environment 同步准入） |
+| `environment-select` | 主模式 / 无场景 workspace 选择 | first-party 本地会话入口 | 本地路径先经 WorkspaceBindingAdminPort 转引用；owner 验已认证目录后随 input 准入 | owner 选机时冻结 binding revision | admitted environment → ExecutionManifest |
+| `run-cancel` | run 取消 | session.abort | 对话 owner（cancel-fence） | executor（线性化收束） | owner 落终态 |
+| `uncertain-resolution` | uncertain / 投递裁决 | `uncertain-resolve` / `delivery-resolve` 控制请求（三选呈现经 ExecutionStatusNotice，§5.5） | 工作所属权威（conversation→owner，job / delivery→锚点） | — | resolution fact + 状态转移 + applied 同一原子提交 |
+| `confirmation-resolve` | allow-once 确认 | confirmation.resolve（原始 surface 携 run-interact 票据直连；定时 job 经 owner-relay 耐久游标 + ChannelChallengeToken 回调，携 ChannelInteractionGrant 中继） | executor assignment 事务域 | executor 安全管线 | executor；owner 只持 relay / challenge outbox 与审计镜像 |
+| `confirmation-read` | 确认状态读 | confirmation.list | executor assignment 流（pending = `interaction-requested` − `interaction-finished` 差集；经数据面票据直读或 owner 转发） | — | —（读；owner 镜像仅审计，不承载 pending） |
+| `session-observer` | 事件订阅 / 退订 | session.subscribe / session.unsubscribe | 对话 owner（observer 名册登记 / 注销，连接级） | — | —（连接态，非权威） |
+| `global-list-read` | 全局域列表读 | schedule.list / workscene.list / skill.list；/skills 候选 | 锚点 GlobalQuery 读（与 memory 读行同构） | — | —（读） |
+| `permission-persist` | 持久授权（allow-session / global） | confirmation.resolve 升级路径 | 锚点 control 流 | — | 锚点 permissionStore |
+| `trust-manage` | 信任规则管理 | trust.list / trust.revoke；/trust | 锚点（global-write；读） | — | 锚点 permissionStore |
+| `conversation-manage` | 对话创建 / 列表 / 切换 | session.new / session.list / session.resume；/new /resume | owner（session-create；读） | owner 就地 | owner |
+| `conversation-window` | 清空 / 压缩 | session.clear / session.compact；/clear /compact | 对话 owner（session-write window-op） | owner 就地（压缩经 ControlCompletionPort） | owner |
+| `conversation-metadata` | 改名 / 删除 | session.rename / session.delete；/name | 对话 owner（session-write） | owner 就地 | owner |
+| `conversation-read` | 会话读（历史 / 用量 / 安全 / 预算） | session.history / usage / security / contextBudget；/usage /context | 对话 owner 读（SessionStatePort） | — | —（读） |
+| `task-list` | task-list 读写 | session.taskList / taskListUpdate；task_list 工具；/task /tasklist | run 内 staged / run 外 owner session-write | — | 对话 owner |
+| `advancement` | 推进闭环（确认 / 修订 / 取消 / 详情） | session.advancement*；/advancement | 对话 owner 控制面 | owner（Completion / ReviewerPort） | owner advancement 日志 |
+| `workscene-manage` | workscene 注册管理 | workscene.create / rename / setWorkdir / delete；workscene_* 工具 | 锚点（global-write workscene-*；run 内工具经 staged；probe 取得 control lease） | 目录探测在目标 executor（经 WorkspaceProbeRequest + EnvironmentControlGrant，§5.3） | 锚点注册表 |
+| `workscene-switch` | workscene 进出 | workscene.enter / exit；/work /exit | owner 取得/创建 sceneId 静态绑定的场景会话；接入面维护自身当前会话指针 | owner 就地；exit 仅切接入面指针 | owner 持场景会话；指针为各接入面连接态 |
+| `schedule-manage` | schedule CRUD | schedule.create / update / delete；schedule 工具 | 锚点（global-write）；run 内 staged、离线 DeferredGlobalIntent | — | 锚点 TaskDefinition |
+| `schedule-run` | schedule 手动触发 / 中止 | schedule.run / abortRun；schedule 工具 run | 锚点 job 逻辑流（job-run / job-cancel） | executor（job run） | 锚点 fence CAS |
+| `schedule-timer` | schedule 定时触发 | 锚点时钟 | 锚点 job 逻辑流 | executor（job run） | 锚点 fence CAS |
+| `memory-write` | memory 写 | memory 工具；段切换 flush 钩子 | run 内 staged → 提交后经锚点发布 | — | 锚点记忆域 |
+| `memory-read` | memory 读 / 统计 | memory.journalStats / peopleList；/journal /people；检索 | 锚点 GlobalQuery | — | —（读） |
+| `skill-manage` | 技能管理 | skill.setState / archive；save_skill / admit_skill 工具；/skills | 锚点（global-write skill-*；run 内 staged create / update / admit） | — | 锚点资产库 |
+| `skill-usage` | 技能使用记录 | 运行时内部 | run 内 staged（skill-usage） | — | 锚点资产库 |
+| `segment-transition` | 段切换与段元数据 | 段钩子（beforeSummarize / afterSummarize / beforeNewSegmentStart） | run 内 staged（segment-append；flush 见 memory 写行） | executor 运行时 | 对话 owner |
+| `workspace-binding` | workspace binding 本地管理与灾难恢复 | 目标设备本地 CLI / 桌面设置 | 普通 CRUD 经 `WorkspaceBindingAdminPort`；不可恢复日志 reset 经独立 `WorkspaceBindingRecoveryPort`、明确确认与世代 fence；均不经 mesh / RPC | 本机容量准入；reset 原子换代并撤回能力，重新授权仍走 AdminPort | executor 本地 binding 事实日志 |
+| `runtime-lifecycle` | 运行体生命周期钩子（onWindowOpen / onBeforeRun / onAfterRun / onWindowClose） | 运行时装配 | 只读注入，不落权威；写类动作必经端口走对应行 | executor / owner 各自 | —（约束行） |
+| `advancement-evidence` | 取证 | owner 发起 EvidenceRequest | AdvancementStore 请求态 + lease guard | 目标 executor（只读 provider） | owner 采信入 review |
+| `orchestration-child` | 编排子节点 | 执行侧 runtime Task 工具 | 随父 run（子 lease） | executor 进程内 | 随父 run bundle |
+| `channel-inbound` | 渠道入站 | feishu `im.message.receive_v1`（message_id 幂等） | 锚点（入口幂等）→ 路由 | 按路由派发 | 对话 owner |
+| `channel-delivery` | 渠道出站投递 | DeliveryOutbox drain | 锚点投递队列（delivery 流） | 锚点渠道 adapter | 锚点投递队列 |
+| `status-read` | 状态查询 | server.info；/status、zz status | 只读（按 run / job / delivery 的 statusRevision 补读） | 锚点聚合 | —（快照非权威） |
+| `light-inference` | 轻推理 | llm.complete | owner / 锚点 ControlCompletionPort + control-class lease | owner 设备 | —（不产权威事实） |
+| `shutdown` | 停机 | server.shutdown（immediate / drain / cancel）；系统信号 | 设备服务生命周期（三路径收束，总纲 §10） | 双端 | 权威保留或转移 |
+| `runtime-config` | 运行配置管理 | /config、/mcp（本地编辑 + reload） | 设备本地配置面；全局期望配置项经锚点资产同步（S4） | 本设备 | 设备本地 / 锚点（按配置类别） |
+| `device-trust` | 配对 / 迁居 / 撤销 | zz pair；引导流 | mesh / 锚点专用流程（trust 流） | 双端 | HomeTrustRecord / transfer 流 |
 
 ## 九、能力矩阵（锚点域会话 × 本地域会话）
 

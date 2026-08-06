@@ -94,7 +94,7 @@ export class FeishuAdapter implements ChannelAdapter {
     }
 
     const eventDispatcher = new lark.EventDispatcher({}).register({
-      "im.message.receive_v1": async (data) => {
+      [FEISHU_INBOUND_EVENT_NAMES[0]]: async (data) => {
         try {
           if (ctx.abortSignal.aborted) return;
 
@@ -209,4 +209,6 @@ export class FeishuAdapter implements ChannelAdapter {
     }
   }
 }
+/** Actual Feishu ingress events registered by this adapter. */
+export const FEISHU_INBOUND_EVENT_NAMES = ["im.message.receive_v1"] as const;
 

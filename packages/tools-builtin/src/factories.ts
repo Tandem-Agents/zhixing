@@ -127,6 +127,28 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
   web_fetch: (ctx) => createWebFetchTool({ proxy: ctx.proxy }),
 };
 
+export interface BuiltinToolCapabilityDescriptor {
+  readonly authorityWrite: boolean;
+}
+
+/** Capability classification is exact-key checked against the production factory table. */
+export const BUILTIN_TOOL_CAPABILITIES = {
+  read: { authorityWrite: false },
+  write: { authorityWrite: false },
+  edit: { authorityWrite: false },
+  glob: { authorityWrite: false },
+  grep: { authorityWrite: false },
+  bash: { authorityWrite: false },
+  memory: { authorityWrite: true },
+  load_skill: { authorityWrite: false },
+  save_skill: { authorityWrite: true },
+  admit_skill: { authorityWrite: true },
+  web_fetch: { authorityWrite: false },
+} as const satisfies Record<
+  keyof typeof BUILTIN_TOOL_FACTORIES,
+  BuiltinToolCapabilityDescriptor
+>;
+
 /** 内置工具名集合 —— 用于装配时判断 "name 是否属于 builtin" */
 export const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set(
   Object.keys(BUILTIN_TOOL_FACTORIES),

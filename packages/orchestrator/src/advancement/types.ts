@@ -14,7 +14,6 @@ import type {
   AdvancementReviewerPort,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
-import type { AgentRuntimeCapacityBinding } from "../runtime/governed-agent-runtime.js";
 
 export type {
   AdvancementReviewRunInput,
@@ -33,9 +32,6 @@ export interface AdvancementRuntimeOptions {
   readonly lightProvider?: LLMProvider;
   readonly lightModel?: string;
   readonly lightThinking?: ThinkingConfig;
-  readonly evidenceProvider?: AdvancementEvidenceProvider;
-  /** Production owner path requires already verified evidence and never reads local files. */
-  readonly canonicalEvidenceOnly?: boolean;
   /**
    * 取证能力集事实——喂入裁判 system prompt，让裁判能区分「执行侧还没产出
    * 证据（failed 催证）」与「系统没有核验能力（capability-gap 退出）」。
@@ -47,7 +43,6 @@ export interface AdvancementRuntimeOptions {
   readonly workingDirectory?: string;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
-  readonly deviceCapacity?: AgentRuntimeCapacityBinding;
   /**
    * 租约计量面——裁判与窗口调用沿稳定 usageId 对 review 传入租约预占/消费；
    * 缺省时调用不计量（测试 / 无治理装配）。

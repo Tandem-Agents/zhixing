@@ -3,7 +3,6 @@
  *
  * 职责：
  * - 创建 OutboxRegistry（顺序层，per-target FIFO）
- * - 仅在发现旧队列文件时启动一次性兼容排空器
  * - 组装 conversation 使用的权威 delivery 生产链
  * - 两条链路共享 per-target FIFO Outbox
  *
@@ -12,11 +11,9 @@
  */
 
 import {
-  LegacyDeliveryDrainer,
   AuthorityDeliveryPipeline,
   DeliveryAuthority,
   DeliveryTransportRegistry,
-  DEFAULT_LEGACY_DELIVERY_DRAINER_CONFIG,
   DEFAULT_AUTHORITY_DELIVERY_CONFIG,
   OutboxRegistry,
   type RuntimeExecutionProfile,
@@ -26,7 +23,6 @@ import {
   type ChannelRegistry,
   type AuthorityDeliveryEventMap,
   type AuthorityDeliveryStats,
-  type DeliveryEventMap,
   type DeliveryStatusNotice,
   type OutboxEvent,
   type PermissionRule,
@@ -1676,15 +1672,6 @@ function createGlobalStateRouter(
   };
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fsp.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function normalizeExecutorReadiness(
   input: ExecutorReadiness,
   deviceId: string,
@@ -1896,7 +1883,6 @@ export async function setupDelivery(
   const statusListeners = new Set<
     (notice: DeliveryStatusNotice) => void | Promise<void>
   >();
-  let legacyDrainer: LegacyDeliveryDrainer | undefined;
   let authorityDelivery: AuthorityDeliveryPipeline | undefined;
   const startupRollback = options.startupRollback ?? new StartupRollback();
   const startupCleanup = startupRollback.register(
@@ -1904,7 +1890,6 @@ export async function setupDelivery(
     async () => {
       statusListeners.clear();
       await authorityDelivery?.stop();
-      await legacyDrainer?.stop();
       await outboxRegistry.dispose();
     },
   );
@@ -1925,25 +1910,6 @@ export async function setupDelivery(
       participant,
       controlAdmission,
     } = options.authorityRuntime;
-
-    const legacyQueuePath = path.join(zhixingHome, "delivery-queue.json");
-    if (await pathExists(legacyQueuePath)) {
-      legacyDrainer = new LegacyDeliveryDrainer({
-        sender,
-        eventBus: createEventBus<DeliveryEventMap>(),
-        config: {
-          ...DEFAULT_LEGACY_DELIVERY_DRAINER_CONFIG,
-          queueFilePath: legacyQueuePath,
-        },
-        logger: {
-          debug: () => {},
-          info: (msg: string) => logger.info(`[legacy-delivery] ${msg}`),
-          warn: (msg: string) => logger.warn(`[legacy-delivery] ${msg}`),
-          error: (msg: string) => logger.error(`[legacy-delivery] ${msg}`),
-        },
-      });
-      await legacyDrainer.prepare();
-    }
 
     const transports = new DeliveryTransportRegistry();
     transports.register(channelAuthorityDeliveryTransport(sender));
@@ -1976,19 +1942,10 @@ export async function setupDelivery(
     return {
       authorityDelivery,
       activate: () => {
-        legacyDrainer?.activate();
         authorityDelivery!.activate();
       },
-      stats: () => {
-        const authorityStats = authorityDelivery!.stats();
-        return {
-          ...authorityStats,
-          pending:
-            authorityStats.pending + (legacyDrainer?.stats().queued ?? 0),
-        };
-      },
+      stats: () => authorityDelivery!.stats(),
       flush: async () => {
-        await legacyDrainer?.flush();
         await authorityDelivery!.flush();
       },
       authority,

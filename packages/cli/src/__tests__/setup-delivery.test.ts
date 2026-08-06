@@ -10,13 +10,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AuthorityDeliveryPipeline,
   ChannelRegistry,
-  LegacyDeliveryDrainer,
   MemoryStore,
   OutboxRegistry,
   type PermissionRule,
@@ -328,7 +327,6 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   }, 120_000);
 
   it("rolls back every partially acquired delivery resource when later startup fails", async () => {
-    await writeFile(resolve(home, "delivery-queue.json"), "[]", "utf8");
     const order: string[] = [];
     const authorityPrepare = vi
       .spyOn(AuthorityDeliveryPipeline.prototype, "prepare")
@@ -337,11 +335,6 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       .spyOn(AuthorityDeliveryPipeline.prototype, "stop")
       .mockImplementationOnce(async () => {
         order.push("authority");
-      });
-    const deliveryStop = vi
-      .spyOn(LegacyDeliveryDrainer.prototype, "stop")
-      .mockImplementationOnce(async () => {
-        order.push("delivery");
       });
     const outboxStop = vi
       .spyOn(OutboxRegistry.prototype, "dispose")
@@ -364,14 +357,12 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
         }),
       ).rejects.toThrow("authority delivery failed");
 
-      expect(order).toEqual(["authority", "delivery", "outbox"]);
+      expect(order).toEqual(["authority", "outbox"]);
       expect(authorityStop).toHaveBeenCalledTimes(1);
-      expect(deliveryStop).toHaveBeenCalledTimes(1);
       expect(outboxStop).toHaveBeenCalledTimes(1);
     } finally {
       authorityPrepare.mockRestore();
       authorityStop.mockRestore();
-      deliveryStop.mockRestore();
       outboxStop.mockRestore();
     }
   });

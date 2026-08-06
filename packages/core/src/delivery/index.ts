@@ -1,11 +1,3 @@
-export { LegacyDeliveryDrainer } from "./legacy-drainer.js";
-export type {
-  LegacyDeliveryDrainerConfig,
-  LegacyDeliveryDrainerDeps,
-  LegacyDeliveryDrainerLogger,
-} from "./legacy-drainer.js";
-export { DEFAULT_LEGACY_DELIVERY_DRAINER_CONFIG } from "./legacy-drainer.js";
-
 export { AuthorityDeliveryPipeline } from "./authority-pipeline.js";
 export { channelAuthorityDeliveryTransport } from "./authority-pipeline.js";
 export type {

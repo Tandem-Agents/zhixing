@@ -9,10 +9,6 @@ import type {
   ObjectiveSignalKind,
   ReviewEvidence,
 } from "@zhixing/core/advancement";
-import type {
-  AdvancementEvidenceCollectionInput,
-  AdvancementEvidenceProvider,
-} from "./types.js";
 
 const OBJECTIVE_EVIDENCE_KINDS = new Set<ObjectiveSignalKind>([
   "file-diff",
@@ -24,10 +20,6 @@ const OBJECTIVE_EVIDENCE_KINDS = new Set<ObjectiveSignalKind>([
 
 export function requiresIndependentEvidence(kind: ObjectiveSignalKind): boolean {
   return OBJECTIVE_EVIDENCE_KINDS.has(kind);
-}
-
-export function createDefaultAdvancementEvidenceProvider(): AdvancementEvidenceProvider {
-  return new DefaultAdvancementEvidenceProvider();
 }
 
 export function completeMissingRequiredEvidence(input: {
@@ -83,37 +75,6 @@ export function summarizeRunRecord(runRecord: RunRecordInput): string {
   }
 
   return parts.join("\n\n") || "本轮没有可提取的执行结果。";
-}
-
-class DefaultAdvancementEvidenceProvider implements AdvancementEvidenceProvider {
-  async collect(
-    input: AdvancementEvidenceCollectionInput,
-  ): Promise<readonly ReviewEvidence[]> {
-    const finalText = extractText(finalAssistantMessageOf(input.runRecord.messages)).trim();
-    const evidence: ReviewEvidence[] = [];
-
-    if (finalText) {
-      evidence.push({
-        id: "run-final-response",
-        kind: "conversation-fact",
-        summary: `执行侧最终回复：${truncate(finalText, 800)}`,
-        source: "execution-report",
-      });
-    }
-
-    for (const requirement of input.requirements ?? []) {
-      if (requiresIndependentEvidence(requirement.kind)) continue;
-      evidence.push({
-        id: `conversation-requirement-${requirement.id}`,
-        kind: requirement.kind,
-        requirementId: requirement.id,
-        summary: `该要求需要按对话事实审查：${requirement.description}`,
-        source: "execution-report",
-      });
-    }
-
-    return evidence;
-  }
 }
 
 function summarizeToolResults(messages: readonly Message[]): string[] {
