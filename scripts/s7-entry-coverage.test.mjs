@@ -4,6 +4,7 @@ import test from "node:test";
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import {
   buildWorkspaceOwnerExposure,
+  buildWorkspaceSymbolExposure,
   buildServeRoleConfigurations,
   captureS7EntryCoverage,
   collectCleanupRegistrationsFromSource,
@@ -11,6 +12,7 @@ import {
   discoverSlashRegistrars,
   inspectProductionManifest,
   inspectProductionSource,
+  inspectCleanupRegistryConstructions,
   parseLandingRowIds,
   validateCoverage,
   validateInboundRouterAssembly,
@@ -269,6 +271,126 @@ test("cleanup and channel coverage are bound to actual production calls", async 
   );
 });
 
+async function cleanupConstructionRecords() {
+  const paths = [
+    "packages/server/src/cleanup-registry.ts",
+    "packages/server/src/index.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/server/src/lifecycle.ts",
+  ];
+  return Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+}
+
+test("all production CleanupRegistry constructions bind exact topology owners", async () => {
+  const records = await cleanupConstructionRecords();
+  assert.deepEqual(await inspectCleanupRegistryConstructions(records), []);
+  const mutate = (relative, transform, additions = []) => [
+    ...records.map((record) => record.relative === relative
+      ? { ...record, text: transform(record.text) }
+      : record),
+    ...additions,
+  ];
+  assert.deepEqual(await inspectCleanupRegistryConstructions(mutate(
+    "packages/cli/src/serve/command.ts",
+    (text) => text.replace("new CleanupRegistry({", "new (CleanupRegistry)({"),
+  )), []);
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(/    activeOwners: plan\.activeCleanupOwners,\r?\n/u, ""),
+    ))).join("\n"),
+    /activeOwners must appear exactly once/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("activeOwners: plan.activeCleanupOwners", 'activeOwners: ["anchor-host"]'),
+    ))).join("\n"),
+    /must come from a ServeTopologyPlan parameter/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(/  ServeTopologyPlan,\r?\n/u, ""),
+    ))).join("\n"),
+    /must come from a ServeTopologyPlan parameter/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/server/src/lifecycle.ts",
+      (text) => text.replace('activeOwners: ["standalone-server"]', 'activeOwners: ["anchor-host"]'),
+    ))).join("\n"),
+    /must be exactly standalone-server/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/server/src/lifecycle.ts",
+      (text) => text.replace(
+        'activeOwners: ["standalone-server"],',
+        'activeOwners: ["standalone-server"], activeOwners: ["standalone-server"],',
+      ),
+    ))).join("\n"),
+    /activeOwners must appear exactly once/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/server/src/lifecycle.ts",
+      (text) => text.replace(
+        'activeOwners: ["standalone-server"]',
+        '[ownerKey]: ["standalone-server"]',
+      ),
+    ))).join("\n"),
+    /computed properties|activeOwners must appear exactly once/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions(mutate(
+      "packages/server/src/lifecycle.ts",
+      (text) => text.replace(
+        'activeOwners: ["standalone-server"],',
+        'activeOwners: ["standalone-server"], ...extraOptions,',
+      ),
+    ))).join("\n"),
+    /cannot use spread assignment/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions([
+      ...records,
+      {
+        relative: "packages/cli/src/runtime/unregistered-cleanup.ts",
+        text: 'import { CleanupRegistry as Registry } from "@zhixing/server"; new Registry({ activeOwners: ["anchor-host"] });',
+      },
+    ])).join("\n"),
+    /unregistered production CleanupRegistry construction/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions([
+      ...records,
+      {
+        relative: "packages/cli/src/runtime/namespace-cleanup.ts",
+        text: 'import * as server from "@zhixing/server"; new server.CleanupRegistry({ activeOwners: ["anchor-host"] });',
+      },
+    ])).join("\n"),
+    /unregistered production CleanupRegistry construction/,
+  );
+  assert.match(
+    (await inspectCleanupRegistryConstructions([
+      ...records,
+      {
+        relative: "packages/cli/src/runtime/cleanup-bridge.ts",
+        text: 'import { CleanupRegistry as Local } from "@zhixing/server"; export { Local as Registry };',
+      },
+      {
+        relative: "packages/cli/src/runtime/transduced-cleanup.ts",
+        text: 'import { Registry as Alias } from "./cleanup-bridge.js"; const Constructor = Alias; new Constructor({ activeOwners: ["anchor-host"] });',
+      },
+    ])).join("\n"),
+    /unregistered production CleanupRegistry construction/,
+  );
+});
+
 test("retired entry, writable Store and reverse package dependency mutations fail", () => {
   assert.match(
     inspectProductionSource("packages/orchestrator/src/mutation.ts", 'import { MemoryStore } from "@zhixing/core";')[0],
@@ -280,7 +402,7 @@ test("retired entry, writable Store and reverse package dependency mutations fai
   );
   assert.match(
     inspectProductionSource(
-      "packages/cli/src/runtime/rpc-bad.ts",
+      "packages/cli/src/serve/stop.ts",
       'client.request("session.notRegistered");',
     )[0],
     /CLI forwards to unknown RPC session\.notRegistered/,
@@ -384,7 +506,7 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
   );
   assert.match(
     inspectProductionSource(
-      "packages/cli/src/runtime/rpc-bad.ts",
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
       "client.request(method);",
     ).join("\n"),
     /non-canonical dynamic RPC method/,
@@ -398,7 +520,7 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
   );
   assert.match(
     inspectProductionSource(
-      "packages/cli/src/runtime/rpc-public.ts",
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
       'class PublicFacade { request(method) { return this.client.request(method); } call() { return this.request("session.send"); } }',
     ).join("\n"),
     /non-canonical dynamic RPC method/,
@@ -428,6 +550,110 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
     ).join("\n"),
     /raw RPC capability CoreHostRpcLink re-exported/,
   );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-extra.ts",
+      'import type { CoreHostRpcLink } from "./core-host-connection.js"; class Extra { constructor(private readonly link: CoreHostRpcLink) {} async read() { return this.link.getClient(); } }',
+    ).join("\n"),
+    /raw RPC capability CoreHostRpcLink acquired outside owner/,
+  );
+  const eventBus = await readFile(
+    "packages/cli/src/runtime/rpc-event-bus.ts",
+    "utf8",
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-event-bus.ts",
+      eventBus.replaceAll("CoreHostNotificationLink", "CoreHostRpcLink"),
+    ).join("\n"),
+    /raw RPC capability CoreHostRpcLink acquired outside owner/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
+      conversation.replace(
+        "constructor(private readonly link: CoreHostRpcLink)",
+        "constructor(public readonly link: CoreHostRpcLink)",
+      ),
+    ).join("\n"),
+    /raw RPC capability exposed on parameter property/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-dynamic.ts",
+      'const server = await import("@zhixing/server"); server.createRpcClient({});',
+    ).join("\n"),
+    /raw RPC namespace capability loaded dynamically/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-import-equals.ts",
+      'import server = require("@zhixing/server"); server.createRpcClient({});',
+    ).join("\n"),
+    /raw RPC namespace capability import/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/connection-leak.ts",
+      'import { CoreHostConnection } from "./core-host-connection.js"; new CoreHostConnection({});',
+    ).join("\n"),
+    /raw RPC capability CoreHostConnection acquired outside owner/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
+      'import type { CoreHostRpcLink } from "./core-host-connection.js"; declare const link: CoreHostRpcLink; export = link;',
+    ).join("\n"),
+    /raw RPC capability exported from assignment/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
+      'import type { CoreHostRpcLink } from "./core-host-connection.js"; export function leak(link: CoreHostRpcLink) { return { link }; }',
+    ).join("\n"),
+    /raw RPC capability returned from function/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
+      'import type { CoreHostRpcLink } from "./core-host-connection.js"; export class Leak { constructor(private readonly raw: CoreHostRpcLink) {} readonly value = { raw: this.raw }; }',
+    ).join("\n"),
+    /raw RPC capability exposed on instance member/,
+  );
+  const rpcResolver = await buildWorkspaceSymbolExposure([
+    {
+      relative: "packages/cli/src/runtime/core-host-connection.ts",
+      text: "export interface CoreHostRpcLink { getClient(): unknown }",
+    },
+    {
+      relative: "packages/cli/src/runtime/raw-bridge.ts",
+      text: 'import type { CoreHostRpcLink as Local } from "./core-host-connection.js"; export type { Local as ForwardedLink };',
+    },
+    {
+      relative: "packages/cli/src/runtime/consumer.ts",
+      text: 'import type { ForwardedLink } from "./raw-bridge.js";',
+    },
+  ], new Set(["CoreHostRpcLink"]));
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/consumer.ts",
+      'import type { ForwardedLink } from "./raw-bridge.js"; class Consumer { constructor(private readonly link: ForwardedLink) {} }',
+      { resolveRpcExposure: rpcResolver },
+    ).join("\n"),
+    /raw RPC capability CoreHostRpcLink acquired outside owner/,
+  );
+  for (const compositionOwner of [
+    "packages/cli/src/repl.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+  ]) {
+    assert.deepEqual(
+      inspectProductionSource(
+        compositionOwner,
+        await readFile(compositionOwner, "utf8"),
+      ),
+      [],
+    );
+  }
   const presenter = await readFile(
     "packages/cli/src/runtime/publish-result-presenter.ts",
     "utf8",

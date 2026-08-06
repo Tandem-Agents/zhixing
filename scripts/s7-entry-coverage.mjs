@@ -748,14 +748,19 @@ export async function validateS7Structure() {
     text: await readFile(absolute, "utf8"),
   })));
   const resolveOwnerExposure = await buildWorkspaceOwnerExposure(records);
+  const resolveRpcExposure = await buildWorkspaceSymbolExposure(
+    records,
+    rawRpcSymbols,
+  );
   const failures = [];
   for (const record of records) {
     failures.push(...inspectProductionSource(
       record.relative,
       record.text,
-      { resolveOwnerExposure },
+      { resolveOwnerExposure, resolveRpcExposure },
     ));
   }
+  failures.push(...await inspectCleanupRegistryConstructions(records));
   for (const packageName of [
     "server",
     "executor",
@@ -833,8 +838,31 @@ async function workspacePublicSources(sourceFiles) {
   return result;
 }
 
-export async function buildWorkspaceOwnerExposure(
+function exportedDeclarationName(statement, trackedSymbols) {
+  if (
+    (ts.isClassDeclaration(statement) ||
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isFunctionDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement) ||
+      ts.isEnumDeclaration(statement)) &&
+    statement.name &&
+    trackedSymbols.has(statement.name.text) &&
+    hasModifier(statement, ts.SyntaxKind.ExportKeyword)
+  ) return statement.name.text;
+  if (ts.isVariableStatement(statement) &&
+      hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
+    const names = statement.declarationList.declarations
+      .filter((declaration) =>
+        ts.isIdentifier(declaration.name) && trackedSymbols.has(declaration.name.text))
+      .map((declaration) => declaration.name.text);
+    return names.length === 1 ? names[0] : undefined;
+  }
+  return undefined;
+}
+
+export async function buildWorkspaceSymbolExposure(
   records,
+  trackedSymbols,
   publicSourcesOverride,
 ) {
   const sourceFiles = new Set(records.map((record) => record.relative));
@@ -846,12 +874,8 @@ export async function buildWorkspaceOwnerExposure(
   const exposure = new Map(records.map((record) => [record.relative, new Map()]));
   for (const [relative, source] of sources) {
     for (const statement of source.statements) {
-      if (
-        ts.isClassDeclaration(statement) &&
-        statement.name &&
-        forbiddenWriteOwners.has(statement.name.text) &&
-        statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
-      ) exposure.get(relative).set(statement.name.text, statement.name.text);
+      const name = exportedDeclarationName(statement, trackedSymbols);
+      if (name) exposure.get(relative).set(name, name);
     }
   }
   let changed = true;
@@ -862,9 +886,13 @@ export async function buildWorkspaceOwnerExposure(
       const locals = new Map();
       for (const statement of source.statements) {
         if (
-          ts.isClassDeclaration(statement) &&
+          (ts.isClassDeclaration(statement) ||
+            ts.isInterfaceDeclaration(statement) ||
+            ts.isFunctionDeclaration(statement) ||
+            ts.isTypeAliasDeclaration(statement) ||
+            ts.isEnumDeclaration(statement)) &&
           statement.name &&
-          forbiddenWriteOwners.has(statement.name.text)
+          trackedSymbols.has(statement.name.text)
         ) {
           locals.set(statement.name.text, statement.name.text);
           continue;
@@ -965,6 +993,201 @@ export async function buildWorkspaceOwnerExposure(
   };
 }
 
+export function buildWorkspaceOwnerExposure(records, publicSourcesOverride) {
+  return buildWorkspaceSymbolExposure(
+    records,
+    forbiddenWriteOwners,
+    publicSourcesOverride,
+  );
+}
+
+function propertyNameText(name) {
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+  return undefined;
+}
+
+function enclosingFunction(node) {
+  let current = node.parent;
+  while (current) {
+    if (ts.isFunctionLike(current)) return current;
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function validateCleanupOwnerOptions(relative, node, topologyTypeNames) {
+  const failures = [];
+  if (node.arguments.length !== 1 || !ts.isObjectLiteralExpression(node.arguments[0])) {
+    return [`${relative}: CleanupRegistry options must be one object literal`];
+  }
+  const options = node.arguments[0];
+  if (options.properties.some((property) => ts.isSpreadAssignment(property))) {
+    failures.push(`${relative}: CleanupRegistry options cannot use spread assignment`);
+  }
+  if (options.properties.some((property) =>
+    property.name && ts.isComputedPropertyName(property.name))) {
+    failures.push(`${relative}: CleanupRegistry options cannot use computed properties`);
+  }
+  const activeOwners = options.properties.filter(
+    (property) => ts.isPropertyAssignment(property) &&
+      propertyNameText(property.name) === "activeOwners",
+  );
+  if (activeOwners.length !== 1) {
+    failures.push(`${relative}: CleanupRegistry activeOwners must appear exactly once`);
+    return failures;
+  }
+  const initializer = activeOwners[0].initializer;
+  if (relative === "packages/cli/src/serve/command.ts") {
+    const validAccess = ts.isPropertyAccessExpression(initializer) &&
+      initializer.name.text === "activeCleanupOwners" &&
+      ts.isIdentifier(initializer.expression);
+    const ownerName = validAccess ? initializer.expression.text : undefined;
+    const ownerFunction = enclosingFunction(node);
+    const parameter = ownerFunction?.parameters.find(
+      (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === ownerName,
+    );
+    const typeName = parameter?.type && ts.isTypeReferenceNode(parameter.type) &&
+      ts.isIdentifier(parameter.type.typeName)
+      ? parameter.type.typeName.text
+      : undefined;
+    if (!ownerName || !typeName || !topologyTypeNames.has(typeName)) {
+      failures.push(
+        `${relative}: CleanupRegistry activeOwners must come from a ServeTopologyPlan parameter`,
+      );
+    }
+  } else if (relative === "packages/server/src/lifecycle.ts") {
+    const validStandalone = ts.isArrayLiteralExpression(initializer) &&
+      initializer.elements.length === 1 &&
+      ts.isStringLiteralLike(initializer.elements[0]) &&
+      initializer.elements[0].text === "standalone-server";
+    if (!validStandalone) {
+      failures.push(
+        `${relative}: CleanupRegistry activeOwners must be exactly standalone-server`,
+      );
+    }
+  }
+  return failures;
+}
+
+export async function inspectCleanupRegistryConstructions(
+  records,
+  publicSourcesOverride,
+) {
+  const resolveExposure = await buildWorkspaceSymbolExposure(
+    records,
+    new Set(["CleanupRegistry"]),
+    publicSourcesOverride,
+  );
+  const failures = [];
+  const constructions = [];
+  for (const record of records) {
+    const source = sourceFile(record.relative, record.text);
+    const bindings = new Set();
+    const namespaceBindings = new Map();
+    const topologyTypeNames = new Set();
+    for (const statement of source.statements) {
+      if (!ts.isImportDeclaration(statement) ||
+          !ts.isStringLiteral(statement.moduleSpecifier) ||
+          !statement.importClause) continue;
+      const specifier = statement.moduleSpecifier.text;
+      const exposed = resolveExposure(record.relative, specifier);
+      const named = statement.importClause.namedBindings;
+      if (named && ts.isNamespaceImport(named) &&
+          [...exposed.values()].includes("CleanupRegistry")) {
+        namespaceBindings.set(named.name.text, exposed);
+      } else if (named && ts.isNamedImports(named)) {
+        for (const element of named.elements) {
+          const imported = element.propertyName?.text ?? element.name.text;
+          if (exposed.get(imported) === "CleanupRegistry") {
+            bindings.add(element.name.text);
+          }
+          if (imported === "ServeTopologyPlan" &&
+              specifier.endsWith("role-topology.js")) {
+            topologyTypeNames.add(element.name.text);
+          }
+        }
+      }
+    }
+    const aliases = [];
+    const collectAliases = (node) => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+        aliases.push({ name: node.name.text, initializer: node.initializer });
+      }
+      ts.forEachChild(node, collectAliases);
+    };
+    collectAliases(source);
+    const unwrapConstructor = (expression) => {
+      let current = expression;
+      while (ts.isParenthesizedExpression(current) ||
+             ts.isAsExpression(current) ||
+             ts.isTypeAssertionExpression(current) ||
+             ts.isNonNullExpression(current)) {
+        current = current.expression;
+      }
+      return current;
+    };
+    const isCleanupConstructor = (expression) => {
+      const candidate = unwrapConstructor(expression);
+      if (ts.isIdentifier(candidate)) return bindings.has(candidate.text);
+      if (ts.isPropertyAccessExpression(candidate) &&
+          ts.isIdentifier(candidate.expression)) {
+        const exposed = namespaceBindings.get(candidate.expression.text);
+        return exposed?.get(candidate.name.text) === "CleanupRegistry";
+      }
+      if (ts.isElementAccessExpression(candidate) &&
+          ts.isIdentifier(candidate.expression) && candidate.argumentExpression &&
+          ts.isStringLiteralLike(candidate.argumentExpression)) {
+        const exposed = namespaceBindings.get(candidate.expression.text);
+        return exposed?.get(candidate.argumentExpression.text) === "CleanupRegistry";
+      }
+      return false;
+    };
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const alias of aliases) {
+        if (!bindings.has(alias.name) && isCleanupConstructor(alias.initializer)) {
+          bindings.add(alias.name);
+          changed = true;
+        }
+      }
+    }
+    const visit = (node) => {
+      if (ts.isNewExpression(node) && isCleanupConstructor(node.expression)) {
+        constructions.push({ relative: record.relative, node, topologyTypeNames });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  const expected = new Map([
+    ["packages/cli/src/serve/command.ts", 1],
+    ["packages/server/src/lifecycle.ts", 1],
+  ]);
+  for (const [relative, count] of expected) {
+    const actual = constructions.filter((item) => item.relative === relative).length;
+    if (actual !== count) {
+      failures.push(
+        `${relative}: expected ${count} production CleanupRegistry construction, got ${actual}`,
+      );
+    }
+  }
+  for (const construction of constructions) {
+    if (!expected.has(construction.relative)) {
+      failures.push(
+        `${construction.relative}: unregistered production CleanupRegistry construction`,
+      );
+      continue;
+    }
+    failures.push(...validateCleanupOwnerOptions(
+      construction.relative,
+      construction.node,
+      construction.topologyTypeNames,
+    ));
+  }
+  return failures;
+}
+
 function moduleReference(node) {
   if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
@@ -1044,78 +1267,164 @@ const rawRpcSymbols = new Set([
   "createRpcClient",
 ]);
 
+const coreHostRpcLinkOwners = new Set([
+  "packages/cli/src/runtime/rpc-confirmation-broker.ts",
+  "packages/cli/src/runtime/rpc-conversation-facade.ts",
+  "packages/cli/src/runtime/rpc-management-facade.ts",
+  "packages/cli/src/runtime/rpc-scheduler-facade.ts",
+  "packages/cli/src/runtime/rpc-workscene-facade.ts",
+]);
+const rpcClientOwners = new Set([
+  "packages/cli/src/runtime/core-host-connection.ts",
+  "packages/cli/src/serve/stop.ts",
+]);
+const coreHostConnectionOwners = new Set([
+  "packages/cli/src/repl.ts",
+  "packages/cli/src/runtime/workspace-command.ts",
+]);
+const rpcMethodOwners = new Set([
+  ...coreHostRpcLinkOwners,
+  ...rpcClientOwners,
+]);
+
 function hasModifier(node, kind) {
   return node.modifiers?.some((modifier) => modifier.kind === kind) ?? false;
 }
 
-function isCoreHostModule(specifier) {
-  return specifier.endsWith("core-host-connection.js") ||
-    specifier.endsWith("core-host-connection.ts");
-}
-
-function isRpcFacadeOwner(relative) {
-  return relative.startsWith("packages/cli/src/runtime/rpc-");
+function isCoreHostModule(relative, specifier) {
+  return resolveRelativeTypeScript(relative, specifier) ===
+    "packages/cli/src/runtime/core-host-connection.ts";
 }
 
 function isRpcMethodOwner(relative) {
-  return isRpcFacadeOwner(relative) ||
-    relative === "packages/cli/src/runtime/core-host-connection.ts" ||
-    relative === "packages/cli/src/serve/stop.ts";
+  return rpcMethodOwners.has(relative);
 }
 
 function allowedRpcCapabilityOwner(relative, symbol) {
-  if (symbol === "CoreHostRpcLink") return isRpcFacadeOwner(relative);
-  if (symbol === "RpcClient" || symbol === "createRpcClient") {
-    return relative === "packages/cli/src/runtime/core-host-connection.ts" ||
-      relative === "packages/cli/src/serve/stop.ts";
+  if (symbol === "CoreHostRpcLink") return coreHostRpcLinkOwners.has(relative);
+  if (symbol === "RpcClient" || symbol === "createRpcClient") return rpcClientOwners.has(relative);
+  if (symbol === "CoreHostConnection") return coreHostConnectionOwners.has(relative);
+  return false;
+}
+
+function directRpcExposure(relative, specifier) {
+  if (specifier === "@zhixing/server") {
+    return new Map([
+      ["RpcClient", "RpcClient"],
+      ["createRpcClient", "createRpcClient"],
+    ]);
   }
-  if (symbol === "CoreHostConnection") {
-    return relative === "packages/cli/src/repl.ts" ||
-      relative === "packages/cli/src/runtime/workspace-command.ts";
+  if (isCoreHostModule(relative, specifier)) {
+    return new Map([
+      ["CoreHostConnection", "CoreHostConnection"],
+      ["CoreHostRpcLink", "CoreHostRpcLink"],
+    ]);
+  }
+  return new Map();
+}
+
+function rpcExposure(relative, specifier, resolveRpcExposure) {
+  const resolved = resolveRpcExposure?.(relative, specifier) ?? new Map();
+  const fallback = directRpcExposure(relative, specifier);
+  return new Map(
+    [...fallback, ...resolved].filter(([, symbol]) => rawRpcSymbols.has(symbol)),
+  );
+}
+
+function isPrivateMember(node) {
+  return ts.isPrivateIdentifier(node.name) || hasModifier(node, ts.SyntaxKind.PrivateKeyword);
+}
+
+function isParameterProperty(node) {
+  return ts.isParameter(node) && ts.isConstructorDeclaration(node.parent) &&
+    node.modifiers?.some((modifier) => [
+      ts.SyntaxKind.PublicKeyword,
+      ts.SyntaxKind.ProtectedKeyword,
+      ts.SyntaxKind.PrivateKeyword,
+      ts.SyntaxKind.ReadonlyKeyword,
+    ].includes(modifier.kind));
+}
+
+function isVisibleReturnBoundary(node) {
+  let current = node;
+  while (current) {
+    if (ts.isMethodDeclaration(current) || ts.isGetAccessorDeclaration(current)) {
+      return !isPrivateMember(current);
+    }
+    if (ts.isFunctionDeclaration(current)) {
+      return hasModifier(current, ts.SyntaxKind.ExportKeyword) ||
+        hasModifier(current, ts.SyntaxKind.DefaultKeyword);
+    }
+    if (ts.isFunctionExpression(current) || ts.isArrowFunction(current)) {
+      const declaration = current.parent;
+      const statement = ts.isVariableDeclaration(declaration)
+        ? declaration.parent?.parent
+        : undefined;
+      return !!statement && ts.isVariableStatement(statement) &&
+        hasModifier(statement, ts.SyntaxKind.ExportKeyword);
+    }
+    current = current.parent;
   }
   return false;
 }
 
-function inspectCliRpcCapabilities(relative, source) {
+function inspectCliRpcCapabilities(relative, source, options = {}) {
   if (!relative.startsWith("packages/cli/src/")) return [];
   const failures = [];
   const bindings = new Map();
   for (const statement of source.statements) {
     if (ts.isImportDeclaration(statement) &&
-        ts.isStringLiteral(statement.moduleSpecifier) &&
-        statement.importClause?.namedBindings) {
+        ts.isStringLiteral(statement.moduleSpecifier) && statement.importClause) {
       const specifier = statement.moduleSpecifier.text;
-      const rpcModule = specifier === "@zhixing/server" || isCoreHostModule(specifier);
-      if (!rpcModule) continue;
+      const exposed = rpcExposure(relative, specifier, options.resolveRpcExposure);
+      if (exposed.size === 0) continue;
+      if (statement.importClause.name) {
+        failures.push(`${relative}: raw RPC default capability import`);
+      }
       const named = statement.importClause.namedBindings;
+      if (!named) continue;
       if (ts.isNamespaceImport(named)) {
-        if (!isRpcMethodOwner(relative)) {
-          failures.push(`${relative}: raw RPC namespace capability outside owner`);
-        }
+        failures.push(`${relative}: raw RPC namespace capability import`);
         continue;
       }
       for (const element of named.elements) {
-        const original = element.propertyName?.text ?? element.name.text;
-        if (!rawRpcSymbols.has(original)) continue;
+        const imported = element.propertyName?.text ?? element.name.text;
+        const original = exposed.get(imported);
+        if (!original) continue;
         bindings.set(element.name.text, original);
-        if (!allowedRpcCapabilityOwner(relative, original) &&
-            relative !== "packages/cli/src/runtime/core-host-connection.ts") {
+        if (!allowedRpcCapabilityOwner(relative, original)) {
           failures.push(
             `${relative}: raw RPC capability ${original} acquired outside owner`,
           );
         }
       }
     }
-    if (ts.isExportDeclaration(statement) &&
-        statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) &&
-        (statement.moduleSpecifier.text === "@zhixing/server" ||
-          isCoreHostModule(statement.moduleSpecifier.text))) {
-      if (!statement.exportClause) {
+    if (ts.isImportEqualsDeclaration(statement) &&
+        ts.isExternalModuleReference(statement.moduleReference) &&
+        statement.moduleReference.expression &&
+        ts.isStringLiteralLike(statement.moduleReference.expression) &&
+        rpcExposure(
+          relative,
+          statement.moduleReference.expression.text,
+          options.resolveRpcExposure,
+        ).size > 0) {
+      failures.push(`${relative}: raw RPC namespace capability import`);
+    }
+    if (ts.isExportDeclaration(statement) && statement.moduleSpecifier &&
+        ts.isStringLiteral(statement.moduleSpecifier)) {
+      const exposed = rpcExposure(
+        relative,
+        statement.moduleSpecifier.text,
+        options.resolveRpcExposure,
+      );
+      if (exposed.size === 0) continue;
+      if (!statement.exportClause || ts.isNamespaceExport(statement.exportClause)) {
         failures.push(`${relative}: raw RPC namespace re-export`);
       } else if (ts.isNamedExports(statement.exportClause)) {
         for (const element of statement.exportClause.elements) {
-          const original = element.propertyName?.text ?? element.name.text;
-          if (rawRpcSymbols.has(original)) {
+          const imported = element.propertyName?.text ?? element.name.text;
+          const original = exposed.get(imported);
+          if (original) {
             failures.push(`${relative}: raw RPC capability ${original} re-exported`);
           }
         }
@@ -1151,58 +1460,151 @@ function inspectCliRpcCapabilities(relative, source) {
         ts.isIdentifier(node.name) &&
         typeNames(node.type).some((name) => rawRpcSymbols.has(name))) {
       rawValueNames.add(node.name.text);
-      if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+      if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node) ||
+          isParameterProperty(node)) {
         rawMemberNames.add(node.name.text);
+      }
+      if (ts.isPropertyDeclaration(node) && !isPrivateMember(node)) {
+        failures.push(`${relative}: raw RPC capability exposed on instance member`);
+      }
+      if (isParameterProperty(node) && !hasModifier(node, ts.SyntaxKind.PrivateKeyword)) {
+        failures.push(`${relative}: raw RPC capability exposed on parameter property`);
       }
     }
     ts.forEachChild(node, collectRawMembers);
   };
   collectRawMembers(source);
   const returnsRawCapability = (expression) => {
-    if (ts.isIdentifier(expression) &&
-        (bindings.has(expression.text) || rawValueNames.has(expression.text))) return true;
-    if (ts.isPropertyAccessExpression(expression) &&
-        rawMemberNames.has(expression.name.text)) return true;
-    if (ts.isCallExpression(expression) &&
-        ts.isPropertyAccessExpression(expression.expression) &&
-        (expression.expression.name.text === "getClient" ||
-          expression.expression.name.text === "getConnectedClient")) return true;
+    if (ts.isIdentifier(expression)) {
+      return bindings.has(expression.text) || rawValueNames.has(expression.text);
+    }
+    if (ts.isPropertyAccessExpression(expression)) {
+      return rawMemberNames.has(expression.name.text);
+    }
+    if (ts.isElementAccessExpression(expression) && expression.argumentExpression &&
+        ts.isStringLiteralLike(expression.argumentExpression)) {
+      return rawMemberNames.has(expression.argumentExpression.text);
+    }
+    if (ts.isCallExpression(expression)) {
+      return (ts.isPropertyAccessExpression(expression.expression) &&
+          (expression.expression.name.text === "getClient" ||
+            expression.expression.name.text === "getConnectedClient")) ||
+        (ts.isIdentifier(expression.expression) &&
+          bindings.get(expression.expression.text) === "createRpcClient");
+    }
+    if (ts.isNewExpression(expression)) {
+      return ts.isIdentifier(expression.expression) &&
+        bindings.get(expression.expression.text) === "CoreHostConnection";
+    }
+    if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) ||
+        ts.isTypeAssertionExpression(expression) || ts.isNonNullExpression(expression) ||
+        ts.isAwaitExpression(expression) ||
+        expression.kind === ts.SyntaxKind.SatisfiesExpression) {
+      return returnsRawCapability(expression.expression);
+    }
+    if (ts.isObjectLiteralExpression(expression)) {
+      return expression.properties.some((property) => {
+        if (ts.isShorthandPropertyAssignment(property)) {
+          return rawValueNames.has(property.name.text) || bindings.has(property.name.text);
+        }
+        if (ts.isPropertyAssignment(property) || ts.isSpreadAssignment(property)) {
+          return returnsRawCapability(property.expression ?? property.initializer);
+        }
+        return false;
+      });
+    }
+    if (ts.isArrayLiteralExpression(expression)) {
+      return expression.elements.some((element) =>
+        !ts.isOmittedExpression(element) && returnsRawCapability(element));
+    }
+    if (ts.isConditionalExpression(expression)) {
+      return returnsRawCapability(expression.whenTrue) ||
+        returnsRawCapability(expression.whenFalse);
+    }
+    if (ts.isBinaryExpression(expression) &&
+        expression.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      return returnsRawCapability(expression.right);
+    }
+    if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
+      if (!ts.isBlock(expression.body)) return returnsRawCapability(expression.body);
+      return expression.body.statements.some((statement) =>
+        ts.isReturnStatement(statement) && statement.expression &&
+        returnsRawCapability(statement.expression));
+    }
     return false;
   };
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const collectAliases = (node) => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+          node.initializer && returnsRawCapability(node.initializer) &&
+          !rawValueNames.has(node.name.text)) {
+        rawValueNames.add(node.name.text);
+        changed = true;
+      }
+      ts.forEachChild(node, collectAliases);
+    };
+    collectAliases(source);
+  }
   const visit = (node) => {
+    if (ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
+      const argument = node.arguments[0];
+      if (argument && ts.isStringLiteralLike(argument) &&
+          rpcExposure(relative, argument.text, options.resolveRpcExposure).size > 0) {
+        failures.push(`${relative}: raw RPC namespace capability loaded dynamically`);
+      }
+    }
     if (ts.isExportDeclaration(node) && node.exportClause &&
         ts.isNamedExports(node.exportClause) && !node.moduleSpecifier) {
       for (const element of node.exportClause.elements) {
         const local = element.propertyName?.text ?? element.name.text;
-        if (bindings.has(local)) {
+        if (bindings.has(local) || rawValueNames.has(local)) {
           failures.push(
-            `${relative}: raw RPC capability ${bindings.get(local)} re-exported`,
+            `${relative}: raw RPC capability ${bindings.get(local) ?? local} re-exported`,
           );
         }
       }
     }
-    if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) &&
-        node.type && typeNames(node.type).some((name) => rawRpcSymbols.has(name)) &&
+    if (ts.isPropertyDeclaration(node) && !isPrivateMember(node) &&
+        node.initializer && returnsRawCapability(node.initializer)) {
+      failures.push(`${relative}: raw RPC capability exposed on instance member`);
+    }
+    if (ts.isExportAssignment(node) &&
+        (expressionUsesRawBinding(node.expression) ||
+          returnsRawCapability(node.expression))) {
+      failures.push(`${relative}: raw RPC capability exported from assignment`);
+    }
+    if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ||
+         ts.isGetAccessorDeclaration(node)) && node.type &&
+        typeNames(node.type).some((name) => rawRpcSymbols.has(name)) &&
+        isVisibleReturnBoundary(node) &&
         relative !== "packages/cli/src/runtime/core-host-connection.ts") {
       failures.push(`${relative}: raw RPC capability returned from public boundary`);
     }
     if (ts.isVariableStatement(node) &&
         hasModifier(node, ts.SyntaxKind.ExportKeyword)) {
       for (const declaration of node.declarationList.declarations) {
-        if (declaration.initializer && expressionUsesRawBinding(declaration.initializer)) {
+        if ((declaration.initializer &&
+              (expressionUsesRawBinding(declaration.initializer) ||
+                returnsRawCapability(declaration.initializer))) ||
+            (declaration.type &&
+              typeNames(declaration.type).some((name) => rawRpcSymbols.has(name)))) {
           failures.push(`${relative}: raw RPC capability exported from variable`);
         }
       }
     }
     if (ts.isReturnStatement(node) && node.expression &&
         returnsRawCapability(node.expression) &&
+        isVisibleReturnBoundary(node) &&
         relative !== "packages/cli/src/runtime/core-host-connection.ts") {
       failures.push(`${relative}: raw RPC capability returned from function`);
     }
     if (ts.isPropertyAccessExpression(node) &&
         (node.name.text === "getClient" || node.name.text === "getConnectedClient") &&
-        !isRpcFacadeOwner(relative) &&
-        relative !== "packages/cli/src/runtime/core-host-connection.ts") {
+        !isRpcMethodOwner(relative)) {
       failures.push(`${relative}: raw RPC client accessed outside facade owner`);
     }
     ts.forEachChild(node, visit);
@@ -1267,7 +1669,7 @@ export function inspectProductionSource(relative, text, options = {}) {
   const guarded = guardedRoots.some((prefix) => relative.startsWith(prefix));
   const dependencyGuarded = relative.startsWith("packages/server/") || relative.startsWith("packages/executor/");
   const source = sourceFile(relative, text);
-  failures.push(...inspectCliRpcCapabilities(relative, source));
+  failures.push(...inspectCliRpcCapabilities(relative, source, options));
   const rpcGuarded = isRpcMethodOwner(relative);
   if (!guarded && !dependencyGuarded && !rpcGuarded) return failures;
   const allowedForwarders = rpcGuarded ? safeRpcForwarders(source) : new Set();
