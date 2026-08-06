@@ -215,4 +215,56 @@ describe("DurableConversationInteractionObserver", () => {
     release();
     await expect(Promise.all([first, duplicate])).resolves.toEqual([true, true]);
   });
+
+  it("lists only runtime-bound requests that remain pending in the authority ledger", async () => {
+    const binding = {
+      assignmentId: "assignment-pending",
+      surfacePrincipal: "surface:origin",
+      ledger: {
+        requestInteraction: vi.fn(async () => ({
+          accepted: true,
+          recordSeq: 1,
+          display: { title: "Approve", lines: ["write file"] },
+        })),
+        pendingInteractionRequests: vi.fn(async () => [{
+          assignmentId: "assignment-pending",
+          request: {
+            v: 1,
+            t: "interaction-requested",
+            requestId: "request-pending",
+            toolName: "Write",
+            display: { title: "Approve", lines: ["write file"] },
+            issuedAt: "2026-07-23T00:00:00.000Z",
+            ttlMs: 60_000,
+            expiresAt: "2026-07-23T00:01:00.000Z",
+          },
+        }]),
+        interactionStreamEvents: vi.fn(async () => []),
+      },
+      submission: { finishAndMirror: vi.fn(async () => undefined) },
+      context: {},
+      stream: { append: vi.fn(async () => undefined) },
+      streamMeta: {},
+    } as unknown as DurableInteractionBinding;
+    const request = {
+      id: "request-pending",
+      tool: "Write",
+      display: { title: "Approve", body: { path: "report.md" } },
+      createdAt: Date.parse("2026-07-23T00:00:00.000Z"),
+      expiresAt: Date.parse("2026-07-23T00:01:00.000Z"),
+    } as never;
+    const observer = new DurableConversationInteractionObserver();
+    await observer.withBinding(binding, () => observer.beforeRequest(request));
+
+    await expect(observer.pendingInteractions()).resolves.toEqual([
+      expect.objectContaining({
+        assignmentId: binding.assignmentId,
+        request: expect.objectContaining({ requestId: request.id }),
+      }),
+    ]);
+    await observer.afterResolved(request, { kind: "deny", reason: "no" }, {
+      kind: "surface",
+    });
+    await expect(observer.pendingInteractions()).resolves.toEqual([]);
+  });
 });

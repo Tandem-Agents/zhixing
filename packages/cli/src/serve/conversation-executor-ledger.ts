@@ -21,19 +21,27 @@ export interface ConversationAssignmentLedgerConstructor {
 
 export interface ConversationExecutorLedgerOptions {
   readonly Constructor: ConversationAssignmentLedgerConstructor;
-  readonly authority: Pick<
-    ConversationOwnerRuntimeStack,
-    | "executorLog"
-    | "artifacts"
-    | "executorId"
-    | "signer"
-    | "verifier"
-    | "executorCapabilities"
-    | "permissionSnapshotFor"
-    | "executorResources"
-    | "preflightLocalConversationEnvironment"
-    | "validateLocalConversationManifest"
-  >;
+  readonly authority: Omit<
+    Pick<
+      ConversationOwnerRuntimeStack,
+      | "executorLog"
+      | "artifacts"
+      | "executorId"
+      | "signer"
+      | "verifier"
+      | "executorCapabilities"
+      | "permissionSnapshotFor"
+      | "executorResources"
+      | "preflightLocalConversationEnvironment"
+      | "validateLocalConversationManifest"
+    >,
+    "executorLog" | "executorResources"
+  > & {
+    readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
+    readonly executorResources: NonNullable<
+      ConversationOwnerRuntimeStack["executorResources"]
+    >;
+  };
   readonly clock?: () => string;
   readonly usageFinal: (
     assignmentId: string,

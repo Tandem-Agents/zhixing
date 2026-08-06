@@ -19,6 +19,7 @@ import type { ConversationRunJournal } from "./conversation-assignment.js";
 
 export interface AnchorSessionStateAdapterOptions {
   readonly journalFor: (conversationId: string) => ConversationRunJournal;
+  readonly sessionExists?: (conversationId: string) => Promise<boolean>;
   readonly mutateControl?: (
     conversationId: string,
     mutation: Exclude<SessionControlMutation, { readonly kind: "advancement-event" }>,
@@ -68,7 +69,20 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
       if (ctx.principal.kind !== "host") {
         throw authorityError("unauthorized", "Advancement events are host-only");
       }
-      const result = await this.#journal(conversationId).applyAdvancementEvents({
+      const journal = this.#journal(conversationId);
+      const existing = await journal.advancementWriteRequest(ctx.requestId);
+      if (!existing) {
+        const authority = await journal.authorityState();
+        const exists = authority.hasDurableIdentity ||
+          (await this.#options.sessionExists?.(conversationId)) === true;
+        if (!exists) {
+          throw authorityError(
+            "not-found",
+            `Session does not exist: ${conversationId}`,
+          );
+        }
+      }
+      const result = await journal.applyAdvancementEvents({
         requestId: ctx.requestId,
         events: mutation.events,
       });

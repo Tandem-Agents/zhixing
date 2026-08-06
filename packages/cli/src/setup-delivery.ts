@@ -34,6 +34,7 @@ import type {
   DeviceIdentity,
   EnvironmentPort,
   EnvironmentRequirement,
+  ExecutionAssetBundle,
   ExecutionManifest,
   ExplicitEnvironmentSelection,
   GlobalStatePort,
@@ -128,6 +129,10 @@ import {
   StartupRollback,
   type StartupCleanupHandle,
 } from "./serve/startup-rollback.js";
+import {
+  FileExecutionAssetCache,
+  type ExecutionAssetCatalogPort,
+} from "./serve/execution-asset-cache.js";
 
 export interface AuthorityRuntimeStack {
   readonly anchorEpoch: number;
@@ -142,6 +147,7 @@ export interface AuthorityRuntimeStack {
   readonly verifier: ProtocolSignatureVerifier;
   readonly authority: DeliveryAuthority;
   readonly authorityLog: FileAuthorityCommitLog;
+  readonly localExecutorEnabled: boolean;
   readonly executorLog: FileAuthorityCommitLog;
   readonly artifacts: FileArtifactStore;
   readonly surfaceAssets: SurfaceAssetCoordinator;
@@ -182,6 +188,11 @@ export interface AuthorityRuntimeStack {
     digest: string,
   ) => TrustRuleSnapshot | undefined;
   readonly latestPermissionSnapshot: () => Promise<TrustRuleSnapshot | undefined>;
+  readonly executionAssetCatalog: ExecutionAssetCatalogPort;
+  readonly currentExecutionAssetBundle: () => Promise<ExecutionAssetBundle | undefined>;
+  readonly installExecutionAssetBundle: (
+    bundle: ExecutionAssetBundle,
+  ) => Promise<ExecutorCapabilitySnapshot>;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
   readonly installPermissionSnapshot: (
     snapshot: TrustRuleSnapshot,
@@ -204,6 +215,7 @@ export interface AuthorityRuntimeStack {
       readonly deviceId: string;
       readonly synchronizePermission: (
         snapshot: TrustRuleSnapshot,
+        executionAssets?: ExecutionAssetBundle,
       ) => Promise<ExecutorCapabilitySnapshot>;
     }[];
   }) => Promise<PreparedConversationAssignmentAuthority>;
@@ -224,6 +236,7 @@ export interface AuthorityRuntimeStack {
       readonly deviceId: string;
       readonly synchronizePermission: (
         snapshot: TrustRuleSnapshot,
+        executionAssets?: ExecutionAssetBundle,
       ) => Promise<ExecutorCapabilitySnapshot>;
     }[];
   }) => Promise<{
@@ -504,6 +517,11 @@ export async function setupAuthorityRuntime(
       path.join(authorityRoot, "permission-snapshots"),
       verifier,
     );
+    const executionAssets = new FileExecutionAssetCache(
+      path.join(authorityRoot, "execution-assets.json"),
+      artifacts,
+      verifier,
+    );
     const executorCapabilities = await ExecutorCapabilityDirectory.open({
       verifier,
       store: capabilityDirectoryStore,
@@ -643,9 +661,11 @@ export async function setupAuthorityRuntime(
         workspaces,
         workspaceCatalog,
       );
+      const executionAssetSnapshot = await executionAssets.current().catch(() => undefined);
       const inventoryDigest = protocolDigest("LocalTransitionInventory", 1, {
         deviceDigest,
         permissionSnapshotHighWater,
+        executionAssetDigest: executionAssetSnapshot?.digest ?? null,
       });
       const versionResolution = await versionStore.synchronize(
         executorId,
@@ -685,9 +705,15 @@ export async function setupAuthorityRuntime(
             policyRev: capabilityRevision,
           },
           assetVersions: {
-            skillsRev: capabilityRevision,
-            rubricsRev: capabilityRevision,
-            promptAssetsRev: capabilityRevision,
+            skillsRev:
+              executionAssetSnapshot?.snapshotRevision ??
+              FileExecutionAssetCache.emptyRevision(),
+            rubricsRev:
+              executionAssetSnapshot?.snapshotRevision ??
+              FileExecutionAssetCache.emptyRevision(),
+            promptAssetsRev:
+              executionAssetSnapshot?.snapshotRevision ??
+              FileExecutionAssetCache.emptyRevision(),
           },
           permissionSnapshotHighWater,
           credentialBindingRevisions: versionedCredentialBindings.map(
@@ -946,6 +972,12 @@ export async function setupAuthorityRuntime(
       await permissionSnapshots.publish(snapshot);
       return currentExecutorSnapshot();
     };
+    const installExecutionAssetBundle = async (
+      bundle: ExecutionAssetBundle,
+    ): Promise<ExecutorCapabilitySnapshot> => {
+      await executionAssets.installBundle(bundle);
+      return currentExecutorSnapshot();
+    };
     const acceptExecutorSnapshot = async (
       snapshot: ExecutorCapabilitySnapshot,
     ): Promise<void> => {
@@ -965,9 +997,10 @@ export async function setupAuthorityRuntime(
       readonly targets?: readonly {
         readonly executorId: string;
         readonly deviceId: string;
-        readonly synchronizePermission: (
-          snapshot: TrustRuleSnapshot,
-        ) => Promise<ExecutorCapabilitySnapshot>;
+      readonly synchronizePermission: (
+        snapshot: TrustRuleSnapshot,
+        executionAssets?: ExecutionAssetBundle,
+      ) => Promise<ExecutorCapabilitySnapshot>;
       }[];
     }): Promise<PreparedConversationAssignmentAuthority> => {
       if (!anchorEnabled) {
@@ -1070,6 +1103,7 @@ export async function setupAuthorityRuntime(
         try {
           const synchronized = await candidate.synchronizePermission(
             permissionPublication.snapshot,
+            await executionAssets.bundle(),
           );
           if (synchronized.descriptor.executorId !== candidate.executorId) {
             throw new TypeError(
@@ -1270,6 +1304,7 @@ export async function setupAuthorityRuntime(
         try {
           const synchronized = await candidate.synchronizePermission(
             permissionPublication.snapshot,
+            await executionAssets.bundle(),
           );
           if (synchronized.descriptor.executorId !== candidate.executorId) {
             throw new TypeError(
@@ -1586,6 +1621,17 @@ export async function setupAuthorityRuntime(
           rubricGlobalState,
         )
       : undefined;
+    if (routedGlobalState) {
+      await executionAssets
+        .publishFromAuthority({
+          state: routedGlobalState,
+          anchorEpoch,
+          signer: key,
+          generatedAt: canonicalTime(clock(), "Execution asset snapshot time"),
+        })
+        .catch(() => undefined);
+      if (localExecutorEnabled) await refreshLocalExecutorSnapshot();
+    }
     return {
       anchorEpoch,
       localDomainId,
@@ -1595,6 +1641,7 @@ export async function setupAuthorityRuntime(
       identityKey: key,
       identity,
       executorId,
+      localExecutorEnabled,
       signer: key,
       verifier,
       get authority() {
@@ -1695,6 +1742,9 @@ export async function setupAuthorityRuntime(
       permissionSnapshotFor: (digest) =>
         permissionSnapshots.snapshotFor(digest),
       latestPermissionSnapshot: () => permissionSnapshots.latest(),
+      executionAssetCatalog: executionAssets,
+      currentExecutionAssetBundle: () => executionAssets.bundle(),
+      installExecutionAssetBundle,
       currentExecutorSnapshot,
       installPermissionSnapshot,
       acceptExecutorSnapshot,

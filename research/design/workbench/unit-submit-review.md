@@ -175,22 +175,22 @@
 #### 目标模式：审查并收敛问题列表
 
 ```
-目标：只收敛第 29 单元正式问题列表中同根重开的 U29-01 一个 P1，使其真正命中角色 cleanup 适用集合与 CLI 公开 RPC receiver 仍由 lint 启发式代替生产边界的根因，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U29-02～U29-03 的既有结论直接复用。
+目标：只收敛第 30 单元正式问题列表中的 U30-02～U30-06 五个 P1 和 U30-01 一个 P2，使六项真正命中设备账本单一所有权、本地域 interaction/finality 消费、SessionState 会话身份、只读资产缓存、构造期全局能力隔离及必要 conformance 闭包的根因，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 29 单元正式文件中的 U29-01，只依据该问题最新的事实、价值裁决、方案、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 30 单元正式文件中的 U30-01～U30-06，只依据六项问题最新的事实、价值裁决、方案、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词完成条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 从权威架构、规格、当前 lint 调用链与生产装配图重建 U29-01 的事实链，分别核准 `planServeTopology`、anchor/executor host、`CleanupRegistry` 注册、`CoreHostLink`/`RpcClient`、RPC facade、canonical registry 与 `serve stop` 的真实边界、稳定入口键、消费门禁、失败终态、当前损失、受影响审查项、P1 评级和中工作量；明确区分“当前运行时已损坏”与“本单元核心门禁可绿色假通过”。既有价值裁决未被新生产事实触发时不得恢复已否定的运行时事故或扩面方案。
-2. 穷尽直接变体：角色侧覆盖 anchor+executor、anchor-only、anchor+surface、executor-only、disabled，及 cleanup 新增、删除、错属、条件装配；RPC 侧覆盖现有 facade、core host、`serve stop`、本地 wrapper/re-export、未知字面量、动态 method、合法 canonical 方法与 mesh request。每格必须指出生产 owner、捕获输入、角色适用集合或 receiver 身份、期望终态和直接验收；无法解释即继续修正根因。
-3. 以锁定范围内的最优架构审查方案：角色集合只复用现有 topology plan、host 装配与 cleanup descriptor，由实际 host 所有权生成 entry key；公开 RPC 只复用现有 `CoreHostLink`、RPC facade、canonical registry 与 `serve stop`，限制 raw-client 能力边界并检查全部 method，按 receiver 排除 mesh request。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增自动发现框架、运行时 registry、通用调用图、第二 RPC 框架、监控、诊断、benchmark 或信息采集。发现缺口时直接修正 U29-01，使执行者无需实现猜测即可一次完成。
-4. U29-01 看似闭合后，对同一份未修改记录执行四路冷启动对抗复审：真实 host topology 与角色适用集合、cleanup owner 与条件装配 exact-set、CLI raw-client/receiver 与 canonical RPC 闭包、用户体验及范围价值。各路必须抛开前轮结论，从当前合同和源码主动构造第 2 步反例；发现真实反证则修正原记录并重新执行四路复审。
+1. 按 `U30-01 → U30-02 → U30-03 → U30-04 → U30-05 → U30-06` 从权威架构、规格和当前生产调用图重建事实链，核准生产入口、唯一 owner/事实源、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断现有描述命中根因还是表象。U30-01 不得恢复已被共享日志、投影复用和读路径证伪的数据面漏读主张；U30-06 必须与 U30-02～U30-05 的生产根因分离，只承载独立的必要证据闭包。
+2. 穷尽直接变体：U30-01 覆盖 anchor+executor、executor-only、两 domain assignment、binding guard、interaction/abort、响应丢失和重启；U30-02/03 覆盖确认、取消、final-outbox、未知/已删除会话、九类 SessionState 写、并发和连续恢复；U30-04/05 覆盖 skill/rubric/prompt cache 有无/过期、local-draft、全局保存拒绝及 global capability 的 import/构造/binder/call；U30-06 覆盖双域、两生产根、八配置 exact-set、workspace 两形态和必要故障。每格必须指出稳定身份、耐久事实、拒绝副作用、消费终态和直接验收；无法解释即继续修正根因。
+3. 以锁定范围内的最优架构审查方案：优先复用 executor 组合根与同一 ledger/log、现有 confirmation/interaction/final-outbox、SessionState directory guard、S4 只读 catalog/ArtifactStore、构造期 capability 判别、现有 S7 gate 和 owner/protocol conformance。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；八配置只验证装配 exact-set，完整故障矩阵只落在两生产根。不得新增第二事实源、公开离线 surface、全局写/保存能力、通用 registry/调用图、测试 runner、监控、诊断、benchmark 或信息采集。发现缺口时直接修正对应原问题，使执行者无需实现猜测即可一次完成。
+4. 六项看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：device ledger/data-plane 单一所有权、本地域 interaction/finality 与 SessionState 生命周期、advancement 只读缓存与构造期能力隔离、双域/双拓扑 conformance 及范围价值。各路必须抛开前轮结论，从当前合同和源码主动构造第 2 步反例，并核查 `U30-01↔U30-02`、`U30-02↔U30-03`、`U30-04↔U30-05`、`U30-02～U30-05↔U30-06` 的直接交界；发现真实反证则修正原记录并重新执行四路复审。
 
 只有现有架构无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或单元边界时才暂停；其余架构选择按整体最优且不留债务自主收敛。
 
-完成条件：同一份未修改的 U29-01 记录通过四路冷启动对抗复审；全部受支持 topology、cleanup 所有权、公开 RPC receiver、间接调用与排除边界均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会因同根残留继续局部返工。满足后明确回复“U29-01 重开问题的根因与最优方案已闭合”并立即停止。
+完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U30-01～U30-06 的全部受支持 topology、owner/身份、消费终态、缓存与能力边界、故障恢复和必要证据均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会因同根残留继续局部返工。满足后明确回复“U30-01～U30-06 的根因与最优方案已闭合”并立即停止。
 
 完成任务之后，根据最新的问题情况，把“目标模式：解决问题并完成多角色对抗收口”提示词内容改成本次的问题，格式、规则不变；
 ```
@@ -235,21 +235,21 @@
 ### 2.9 目标模式：解决问题并完成多角色对抗收口
 
 ```text
-目标：彻底解决第 29 单元同根重开的 U29-01 一个 P1，闭合 P29-05 及 cleanup registry 构造 owner 反绑、CLI raw-RPC 精确能力边界的全部同根直接变体；不得扩展到其他问题或全单元流程，U29-02～U29-03 的既有结论直接复用。
+目标：彻底解决第 30 单元 U30-02～U30-06 五个 P1，闭合本地域 interaction/finality、SessionState 会话身份、S4 只读执行资产、构造期全局能力隔离和必要 conformance 的全部同根直接变体；不得扩展到其他问题或全单元流程。U30-01 已转为 EX30-01，重开条件未被新事实触发时禁止实施单 ledger 对象改造。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 29 单元正式文件中的 U29-01，只依据该问题最新的根因、价值裁决、固定矩阵、方案、验收条件、反证账和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 30 单元正式文件中的 U30-02～U30-06、EX30-01，只依据五项问题最新的根因、价值裁决、固定矩阵、方案、验收条件、反证账和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词结束条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 修复前从权威架构、规格与当前 lint/生产装配图重建 F29-01～F29-10 固定矩阵。cleanup 侧逐格核准 anchor 与 standalone 两个生产 `CleanupRegistry` 构造、八种角色配置、`ServeTopologyPlan.activeCleanupOwners`、descriptor owner 与稳定 entry key；RPC 侧逐格核准 `CoreHostRpcLink`、`RpcClient/createRpcClient`、`CoreHostConnection` 的有限 owner，现行 facade/broker、core connection、`serve stop`、repl/workspace composition owner、notification-only consumer、wrapper/re-export、raw value 逸出、字面/动态 method、canonical registry 与 mesh receiver。覆盖 P29-05 及正式记录列出的全部正反变体。
-2. 只扩展现有 S7 AST 门禁与直接测试。复用现有有限 export/re-export resolver 恢复 `CleanupRegistry` 原始符号，覆盖 named/namespace alias 与本地转导；扫描全部生产构造，仅允许 anchor 与 standalone 两点，anchor 的 `activeOwners` 必须取自 `ServeTopologyPlan` 参数的 `.activeCleanupOwners`，standalone 必须为唯一 `standalone-server`，缺失、重复、计算属性、替换或新增构造均拒绝。删除 `rpc-*` 路径前缀授权，按 raw symbol 建精确 owner：`CoreHostRpcLink` 仅五个现行 facade/broker，`RpcClient/createRpcClient` 仅 core connection 与 stop，`CoreHostConnection` 仅 repl 与 workspace command；method owner 仅五个 facade/broker、core connection 与 stop，repl/workspace 只可构造和注入。精确 owner 之外的取得/import 与任何 re-export 均拒绝；允许私有 DI，但 public/protected 实例成员、getter/方法、变量导出或返回值不得泄漏 raw runtime value；notification-only 与 mesh 按精确 receiver 放行。同步直接测试和必要说明，现有生产装配、capture 与 golden 语义不得改变。同根残留并入 U29-01，禁止修改运行时架构或扩建自动发现、运行时 registry、通用调用图、第二 RPC 框架、新 lint、监控、诊断、benchmark 或信息采集。每个实质阶段完成后立即更新正式状态与证据。
-3. 按验证手册运行 `s7-entry-coverage` 直接测试、S7 lint 与 canonical golden 检查；只执行受影响闭包的最小必要验证。真实反例必须直接变异两处 registry 构造、owner 注入、同前缀新文件、event bus/presenter 扩权、精确 facade 公开 raw link、wrapper/re-export、未知/动态 method 与 mesh receiver，不得只给 validator 自报答案；正例必须覆盖八配置、现行 facade/core/stop/repl/workspace、standalone、私有 DI、notification-only 与 mesh。失败先归因，实现问题直接修复并回到第 2 步；不得运行包全测、模块回归或与 U29-01 验收无关的验证。
-4. 验证通过后冻结当前交付物指纹，整轮只读地逐格重建 U29-01 事实链；测试通过不得代替功能判断，矩阵全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：全部 registry 构造与 topology owner 反绑、cleanup descriptor/条件装配 exact-set、CLI raw symbol owner/receiver 与 canonical RPC 闭包、用户体验及范围价值。各角色须抛开既有结论，主动重造第 1 步全部适用反例。
-5. 新发现首次出现即以稳定编号写入正式问题证据与反证账；收口前对 P29-05、专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正 U29-01 的根因、方案、验收和矩阵，再回到第 2 步；任何交付物修改都会使冻结指纹与对抗结论失效。
+1. 修复前从权威架构、规格与当前生产装配图重建五项固定矩阵。U30-02 覆盖 pending interaction、ticket answer、取消竞态、status/history、final-outbox、响应丢失与 stop；U30-03 覆盖全部 control/staged mutation、未知/已删除会话、并发 create/delete 与 exact replay；U30-04 覆盖 skill/rubric/prompt index/content 的版本、digest、缺失、过期、损坏、重启与 local-draft；U30-05 覆盖 local runtime/assembly/两组合根的禁用能力 import、构造、注入、binder、call 和 port exposure；U30-06 覆盖双域、两生产根、八配置 exact-set、workspace 两形态及必要故障。逐格绑定唯一事实源、稳定身份、线性化点、消费终态、零副作用边界和直接证据，并持续核对 EX30-01 的排除前提。
+2. 按 `U30-03 → U30-04 → U30-02 → U30-05 → U30-06` 一次完成。给 SessionState 普通 control 与 advancement journal 事务单源化“exact replay 先于 fresh identity guard”的顺序，staged 继续反绑 active assignment；在既有 S4 execution snapshot 安装链补齐与 inventory revision 全等绑定、正文落现有 ArtifactStore 的签名三类 index snapshot，并以窄只读 catalog 接入 local rubric、skill window 与 prompt consumer，坏/缺缓存只按无匹配继续 local-draft；复用 observer、ledger、status/history 和 final-outbox 建立 internal-only interaction/finality port，final 只由同一权威 history 验真并由现有 outbox落唯一 published 回执；收窄 local port 的 protocol 暴露面，并扩展现有 S7 AST gate 到 local runtime/assembly/两生产根的真实禁用能力闭包；最后用现有 owner/protocol 场景形成共享 conformance 表与两生产根、八配置证据。同步直接相关架构、规格和测试。同根残留并入原问题，禁止合并 domain 私有 ledger facade、恢复公开离线入口、GlobalState/DeferredIntent/global save，或扩建第二事实源、通用同步/registry/调用图/测试 runner、监控、诊断、benchmark 和信息采集。每个实质阶段完成后立即更新正式状态与证据。
+3. 按验证手册运行受影响闭包的最小必要类型检查、直接合同/场景测试、现有 S7 lint 与必要派生资产检查；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须直接覆盖 U30-02～U30-05 的生产边界，双域完整功能/故障矩阵只运行真实 anchor+executor 与 executor-only 根，八配置只验证装配 exact-set；不得运行包全测、模块回归或与五项验收无关的验证。失败先归因，实现问题直接修复并回到第 2 步。
+4. 验证通过后冻结当前交付物指纹，整轮只读地逐格重建 U30-02～U30-06 事实链；测试通过不得代替功能判断，矩阵全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：device ledger/data-plane 单一所有权、本地域 interaction/finality 与 SessionState 生命周期、advancement 只读缓存与构造期能力隔离、双域/双拓扑 conformance 及范围价值。各角色须抛开既有结论，主动重造第 1 步全部适用反例，并核查 `EX30-01↔U30-02`、`U30-02↔U30-03`、`U30-04↔U30-05`、`U30-02～U30-05↔U30-06` 的直接交界。
+5. 新发现首次出现即以稳定编号写入正式问题证据与反证账；收口前对历轮反证、专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案、验收和矩阵，再回到第 2 步；任何交付物修改都会使冻结指纹与对抗结论失效。
 
-结束条件：同一冻结指纹上的 U29-01 方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；P29-05 及新增同根反证全部有耐久处置，证明全部生产 `CleanupRegistry` 构造与真实 topology owner 全等，构造或 owner 注入的缺失、替换、新增及条件漂移均 fail-closed；三类 raw symbol 只在各自有限 owner 内可达，路径前缀不再授权，wrapper/re-export/公开逸出、未知字面量和未闭合动态方法均失败，合法 facade/core/stop/repl/workspace、私有 DI、notification-only 与 mesh receiver 零误杀；现有运行装配、用户能力、capture 与 golden 语义不变；U29-01 已更新为“已验证”。满足后明确报告“U29-01 重开问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
+结束条件：同一冻结指纹上的 U30-02～U30-06 五项方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；累计反证全部有耐久处置，证明 internal confirmation/finality 在响应丢失与连续恢复后恰一终态，未知/已删除会话 fresh write 零追加且 exact replay 全等，三类只读缓存按冻结版本安全消费且 local-draft 不被坏/缺缓存阻断，local 构造闭包零全局写能力，双域两生产根和八配置取得成比例证据，EX30-01 重开条件仍不成立；五项均已更新为“已验证”。满足后明确报告“U30-02～U30-06 五项问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
 
 完成任务之后，根据变更文件范围更新审查清单状态；
 ```
@@ -260,13 +260,13 @@
 
 - **当前单元**：第 30 单元 · generation 1
 - **权威来源**：`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md` 与当前定稿开发清单 D30-01～D30-07；其他模块文档不是本单元架构依据
-- **交付基线**：起点 HEAD `2526d6e8`；当前暂存区 39 个路径中，36 个属于第 30 单元生产实现、直接测试、合同同步与开发状态，2 个为上一单元归档及本工作台流程文档，`.agents/skills/project-onboarding/SKILL.md` 为用户另行授权的 Skill 规则修正；后三者均不属于第 30 单元功能交付物
+- **交付基线**：起点 `2526d6e8`；当前冻结输入共 56 个变化路径，其中 50 个属于第 30 单元生产实现、直接测试与合同同步，5 个为工作台/归档状态，`.agents/skills/project-onboarding/SKILL.md` 为用户另行授权的 Skill 规则修正；后 6 个路径均不属于第 30 单元功能交付物
 - **目标提交边界**：第 30 单元（S8）本地域 owner 同构装配；每个 executor-enabled 生产拓扑恰有一个 device-local owner，复用 owner-kernel、owner-services、会话耐久协议、完整 SessionState、执行账本、数据面与设备容量，同时物理隔离 GlobalState/global publish/external delivery
 - **明确排除**：第 31 单元 DeferredGlobalIntent；第 32 单元公开离线会话创建、查询、迁居与接管；第 33～38 单元；离线全局读副本或新缓存同步；本地全局写、渠道和全局 registry；第二套 kernel/protocol、空 global port、通用基础设施、监控、诊断与 benchmark
-- **当前任务进度**：0%（0 / 34 项完成独立审查；34 项 [ ]，0 项 [x]，0 项 [!]，0 项 [~]）
+- **当前任务进度**：21%（7 / 34 项结论仍可直接复用；0 项 [ ]，7 项 [x]，0 项 [!]，27 项 [~]）
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论
 
-> **清单状态**：第 30 单元 generation 1 已定稿，尚未执行独立审查。清单定稿只表示范围完整、有限且可判定，不代表实现已经通过。
+> **清单状态**：U30-02～U30-06 已在正式问题列表更新为“已验证”，EX30-01 重开条件未触发；按本次 50 个交付路径的影响闭包，27 项旧结论失效并改为 `[~]`，其余 7 项事实未变继续复用。当前无 `[!]`，下一轮只审 `[~]`。
 
 ### 来源覆盖
 
@@ -365,46 +365,48 @@
 | 规格 §15 第 30 项 | 适用 | 本地域 owner 实现、装配、隔离和验收归入 IR30-01～IR30-34。 |
 | 规格 §15 第 31～38 项 | 不适用 | 后续单元，不得成为当前门禁。 |
 | `unit-development-workbench.md` 静态目标/边界与 D30-01～D30-07 | 适用 | 七项生产、消费、边界和直接测试义务反向归入 IR30-01～IR30-34。 |
-| 当前暂存区 39 个路径 | 事实来源 | 36 个 D30 路径逐一归入 IR30-01～IR30-34；第 29 单元归档、本工作台和 `project-onboarding/SKILL.md` 三个流程/规则路径明确排除，不参与功能通过判定。 |
+| 当前完整交付物 HEAD `b7d56ab8` 的 39 个路径 | 事实来源 | 36 个 D30 路径逐一归入 IR30-01～IR30-34；第 29 单元归档、本工作台和 `project-onboarding/SKILL.md` 三个流程/规则路径明确排除，不参与功能通过判定。 |
 
 ### 审查项
 
 | 编号 | 状态 | 审查对象 | 有限审查范围与通过条件 | 证据记录 |
 | ---- | ---- | -------- | ---------------------- | -------- |
-| IR30-01 | [ ] | 单元身份、边界与完整交付物 | 冻结当前 39 路径清单，确认其中 36 个是 D30 生产/测试/合同交付，2 个是流程文档，`project-onboarding/SKILL.md` 是单元外规则变更；D30 交付物不得含第 31～38 单元、公开离线产品能力或无依据框架。本项在路径归属二元落定后停止，义务映射留给 IR30-34。 | 待审：39 路径逐项归属与 3 个单元外路径依据。 |
-| IR30-02 | [ ] | domain-neutral owner 同构内核 | `ConversationOwnerRuntimeStack` 必须由 anchor/local 合同复用同一 owner-kernel、owner-services、协议、reducer、状态机和错误语义；差异只来自显式 authority/identity/capability 注入，不得复制内核或建立第二语义。 | 待审：构造图、类型边界与 anchor/local 差异表。 |
-| IR30-03 | [ ] | local owner 合同与物理隔离 | local 构造期只能持会话、环境、资源、内容与执行依赖；`GlobalStatePort`、DeferredGlobalIntent、global publisher、delivery、channel、transfer 均无字段、实例或可达调用，不能用空实现或运行时约定代替。 | 待审：合同字段、构造参数、实例和 import/call 图。 |
-| IR30-04 | [ ] | 本地域 canonical identity | conversationId 严格为 `local-<设备指纹载荷前 8 位>-<Ulid>`，localDomainId 为 `local:<deviceId>`；非法格式、跨设备、anchor id、路径/秘密混入及错域请求均在首个耐久/资源/I/O 副作用前拒绝。 | 待审：ID 工厂、validator、codec 与有限正反例。 |
-| IR30-05 | [ ] | epoch、namespace 与逻辑流隔离 | ownerEpoch 与可恢复的 localGovernorEpoch 在正常重启中保持、只按各自合法重置前进；operation/attempt identity 及 control/run/session-activity/publish/final-outbox 流只属于本地域，anchor/local 不碰撞、不串流、不互相重放。 | 待审：epoch 存储、key/stream 生成、重启/重置/错绑场景。 |
-| IR30-06 | [ ] | 共享设备基础设施与单一所有权 | local owner 复用 executor 已有的 AuthorityCommitLog、ArtifactStore、data plane、DeviceCapacityArbiter 与 shutdown 所有权，同时以逻辑流隔离事实；不得重复打开、重复治理或建立第二物理事实源。 | 待审：两生产组合根的实例身份、依赖注入和所有权。 |
-| IR30-07 | [ ] | 会话目录、创建与恢复 | internal create/list/lookup 的唯一耐久事实、线性化点、幂等键和投影闭合；空目录、重复创建、响应丢失、坏尾、恢复中崩溃与连续重启最终恰一会话，且恢复完成前不 accepting。 | 待审：create 记录、目录投影、recovery/readiness 证据。 |
-| IR30-08 | [ ] | 完整 SessionState 读面 | meta、transcript/history、task-list、advancement、window、lifecycle、run/control/final 均从同一会话权威日志/投影读取；空值、分页、重放和重启全等，不降级为最小壳或 anchor 远程读。 | 待审：端口全方法、adapter 与实际 consumer 调用图。 |
-| IR30-09 | [ ] | SessionState mutation 与 guard | SessionStatePort 的 meta、window、task-list、segment、advancement、rename、compact、clear、delete 写分支共用 domain、ownerEpoch、revision、stream、principal 和严格 codec 守卫；错域、stale、畸形、重复与并发请求零副作用且终态确定。 | 待审：判别联合、guard/reducer 与九类写分支负例。 |
-| IR30-10 | [ ] | 创建后会话生命周期线性化 | rename、compact、clear、delete 的状态组合、冲突排序、投影与恢复闭合；关闭/删除后不再准入或复活，效果后响应丢失和并发管理请求按稳定身份幂等收敛。创建与目录恢复只由 IR30-07 判定。 | 待审：四类 lifecycle reducer、manager、并发/恢复证据。 |
-| IR30-11 | [ ] | 内容资产、保留与 finality | transcript/artifact/evidence 由同一 ArtifactStore 与日志引用闭合；缺失、重复、引用回收、投影滞后、写后崩溃、读取校验和重建不产生假终态、悬空引用或跨域可见。 | 待审：资产引用、索引/保留、GC 与 final 交界。 |
-| IR30-12 | [ ] | ingress、准入与幂等 | internal send/admit/assign 反绑 local conversation、ownerEpoch、operation identity、环境与权限；重复、乱序、断线、响应丢失和恢复只产生一个 accepted run，错域请求零资源/执行副作用。 | 待审：admission journal、manager、protocol ingress。 |
-| IR30-13 | [ ] | 环境、workspace binding 与 readiness | 本地域环境选择与 manifest 只消费现行 EnvironmentPort/WorkspaceBinding 接缝；无 workspace、缺失/过期/冲突 binding、准备失败、重启和 stop 竞态均有确定终态，完整 runtime 未 ready 不得派发。 | 待审：binding/environment adapter、readiness 与恢复顺序。 |
-| IR30-14 | [ ] | 权限、ControlLease 与秘密 | local 会话只读最近有效的 anchor 签名权限/执行资产缓存并使用 local ControlLease；过期、错设备/scope、缺权限 cache、验签失败均 fail-closed，allow-once 只接受已认证原始 surface 且逐次线性化，秘密/路径不上 wire 或错误日志。 | 待审：cache/lease/secret 调用图与有限故障矩阵。 |
-| IR30-15 | [ ] | local root lease 与计量 | 每个 local run 的 root lease 绑定 localDomainId、ownerEpoch、可恢复 localGovernorEpoch；reserve/consume/settle/release/reclaim 由本地 governor 唯一拥有，不依赖 global budget、不产生 anchor usage debt，重放不重复计量。 | 待审：governor identity、usage records、终态和重启。 |
-| IR30-16 | [ ] | child resource 与设备容量 | nested/并发 child 在父租约与共享 DeviceCapacityArbiter 下有界运行；provider 提前结束、abort、timeout、open usage、子先父后、崩溃与停机最终零 active child/root/permit。 | 待审：child lease、finalizer、capacity permit 与恢复。 |
-| IR30-17 | [ ] | 本机 dispatch、ledger 与数据面 | local run 只派到出生设备 executor，复用 execution ledger/data plane；manifest、permission、environment、lease 全通过后才执行，重复 dispatch、断线、executor 重启和 payload 缺失按同一 attempt 收敛。 | 待审：dispatcher、ledger、data plane 与故障时序。 |
-| IR30-18 | [ ] | run commit、CAS 与 finality | assistant output、usage、session mutation 与 run terminal 按现行线性化顺序提交；stale revision、半提交、响应丢失、exact replay、投影滞后和连续恢复最终恰一可见终态。 | 待审：commit envelope、session adapter、ledger/final record。 |
-| IR30-19 | [ ] | 取消、确认与竞态 | user/system cancel、confirmation request/read/resolve 反绑 local run/attempt/权限；重复、错绑、迟到确认与取消/provider 终态竞态有唯一胜者、零多余执行和可恢复终态。 | 待审：control records、provider abort 与竞态排列。 |
-| IR30-20 | [ ] | uncertain 与三方恢复 | owner、executor、ledger 对 assigned/running/committing/uncertain 的判定与重驱一致；已封包只重提交，可证未 started 才新派发，结果不明只写 open→closed resolution，任一点崩溃、坏尾、连续重启或 stop 不重复 provider、不泄漏资源。 | 待审：三分恢复表、resolution facts 与崩溃点。 |
-| IR30-21 | [ ] | owner-services 完整装配 | ConversationManager、ConversationProtocolRuntime、advancement controller、reviewer/evidence client 与 advancement recovery 均复用现行生产实现并取得真实依赖；不得以测试 stub、空 adapter 或跳过任一 consumer 形成表面可启动的残缺 owner。 | 待审：五类服务的 exports、组合根、consumer 与缺依赖失败。 |
-| IR30-22 | [ ] | advancement、review 与资源收敛 | advancement 在 local owner 下复用 canonical evidence、review attempt、local governor 与 SessionState；deferred/throw、typed stale、capability-gap、响应丢失、重复、崩溃和恢复不重复计量或遗留 root。 | 待审：controller、evidence/reviewer、session 与 governor 交界。 |
-| IR30-23 | [ ] | local-draft 与只读缓存语义 | skill/rubric/prompt 缓存只读且按冻结版本消费；缓存缺失/过期/无匹配时 local-draft 仍继续并立即在会话生效，不能被误判为阻断；全局保存、刷新或假成功明确不可用，权限 cache 失败另由 IR30-14 fail-closed。 | 待审：library/cache consumer、local-draft 与拒绝路径。 |
-| IR30-24 | [ ] | session-only mutation profile | task-list、segment、advancement、meta、window 五类执行侧写只进入当前 local SessionState；operation identity、read-own-writes、冲突和重放与 anchor 同构，不生成 Global MutationBatch 或 DeferredGlobalIntent。 | 待审：五类 mutation port、stager、profile 与重放。 |
-| IR30-25 | [ ] | 全局能力负向闭包 | memory、skill/workscene/schedule 全局写、global registry/query/publish/delivery、permission persist、channel、DeferredGlobalIntent、transfer 的构造、端口、RPC/CLI/tool 入口均不可达；禁用发生在日志、资源与 I/O 副作用前。 | 待审：类型/import、实例、注册源、工具装配和负例。 |
-| IR30-26 | [ ] | anchor 会话与设备域隔离 | anchor 不可达时不得枚举、接管、写入或伪造 anchor 会话；本设备 local 会话不被其他设备或 anchor namespace 消费，列表、恢复与路由保持域隔离，且不建设可选离线副本。 | 待审：lookup/list/routing/domain guard 与断网场景。 |
-| IR30-27 | [ ] | 生产 topology 恰一装配 | 对 `planServeTopology` 的八种受支持配置核对两条生产根：anchor+executor（含 surface 等价配置）经 `access-surfaces.ts`、executor-only 经 `runExecutorRole` 各恰一 local owner；anchor-only/surface-only/disabled 为零，重复注册或缺依赖确定失败。 | 待审：两组合根、八配置与实例计数。 |
-| IR30-28 | [ ] | 包依赖与结构隔离 | 装配只沿 cli→owner-kernel/owner-services/executor/runtime-host/core 正式边；server 不反向依赖 executor，owner 层不取得 CLI/global Store，新增 exports 不暴露实现细节或形成环。 | 待审：生产 import/export、manifest 与组合根。 |
-| IR30-29 | [ ] | prepare/start 与失败回滚 | 两生产根均须先取得 executor log、ArtifactStore、local governor、完整 runtime/readiness、data plane/evidence 依赖，再依次恢复 session 目录、assignment、final-outbox 与 protocol readiness，完成 advancement recovery 后启动 recovery loop，最后 accepting；任一步失败、重复/并发 start 或 shutdown 介入均逆序回滚，无半活 owner。 | 待审：两根 lifecycle、五类恢复、依赖 ready 与回滚故障。 |
-| IR30-30 | [ ] | stop、cleanup 与后台归零 | stop 先拒绝新准入，再收束 run/confirmation/final-outbox/recovery loop，最后按依赖逆序 dispose；重复 stop、部分失败和进程关闭最终零 timer/listener/permit/root/可写入口。 | 待审：shutdown-chain、cleanup owner、资源计数与重入。 |
-| IR30-31 | [ ] | internal-only 与产品边界 | 只暴露组合根内部/conformance port；不得注册公开 CLI/RPC/channel/status/session-observer、离线 create/list/adopt、产品术语或隐式 fallback，现有 anchor 用户路径和错误语言不改变。 | 待审：registry、public exports、presenter 和路由。 |
-| IR30-32 | [ ] | S7 入口/结构门禁交界 | `localConversationOwner.close` cleanup descriptor 进入现有 capture/golden，local runtime/assembly 两个生产源由现有 S7 结构规则证明 global capabilities 不可达；不得新增第二 lint、改变入口映射语义或遗漏真实 cleanup owner。 | 待审：一个 cleanup key、两个隔离源、golden 与结构负例。 |
-| IR30-33 | [ ] | 双域同构 conformance | 同一有限套件比较 anchor/local 的 create/list/meta/history/window/rename/compact/clear/delete、run/cancel/confirmation/uncertain、task-list/segment/advancement、content/final、replay/recovery/stop；允许差异仅为 authority/identity/capability/cache，无 workspace 与 workspace 两形态均覆盖。 | 待审：双 runtime 合同套件与差异白名单。 |
-| IR30-34 | [ ] | 开发义务、合同与路径反向闭包 | D30-01～D30-07、总纲本地域当前段、规格当前条款和 36 个 D30 路径必须双向全等：每项有生产端、消费端、装配、异常/恢复和直接证据落点，每条实现路径有当前架构依据；不存在未归项义务、范围外实现或历史/未来文字冒充现行合同。 | 待审：D30/来源/36 路径三向映射及每项证据位置。 |
+| IR30-01 | [~] | 单元身份、边界与完整交付物 | 冻结当前 56 路径清单，确认其中 50 个是 D30 生产/测试/合同交付，5 个是工作台/归档状态，`project-onboarding/SKILL.md` 是单元外规则变更；D30 交付物不得含第 31～38 单元、公开离线产品能力或无依据框架。本项在路径归属二元落定后停止，义务映射留给 IR30-34。 | HEAD `b7d56ab8` 的 39 路径已逐项归属：36 个 D30 代码/测试/合同路径，unit-29 归档与本工作台为流程状态，project-onboarding 为用户明确授权的单元外 Skill 规则；未出现第 31～38 单元或公开离线入口。 |
+| IR30-02 | [~] | domain-neutral owner 同构内核 | `ConversationOwnerRuntimeStack` 必须由 anchor/local 合同复用同一 owner-kernel、owner-services、协议、reducer、状态机和错误语义；差异只来自显式 authority/identity/capability 注入，不得复制内核或建立第二语义。 | `anchorConversationOwnerRuntime` / `localConversationOwnerRuntime` 共同注入 `ConversationProtocolRuntime`、`ConversationManager`、同一 SessionState adapter 与 owner-services；本地域差异集中在显式 domain、日志、资源与 capability 组合。 |
+| IR30-03 | [~] | local owner 合同与物理隔离 | local 构造期只能持会话、环境、资源、内容与执行依赖；`GlobalStatePort`、DeferredGlobalIntent、global publisher、delivery、channel、transfer 均无字段、实例或可达调用，不能用空实现或运行时约定代替。 | P1 事实：local 类型虽把四项能力收窄为 `never`，共享 protocol 仍公开 `bindMutationPublisher`，并以 `globalPublishing` / `allowGlobal` 运行时分支关闭全局 mutation；现有 S7 只查接口声明，不能证明构造期物理不可达。 |
+| IR30-04 | [x] | 本地域 canonical identity | conversationId 严格为 `local-<设备指纹载荷前 8 位>-<Ulid>`，localDomainId 为 `local:<deviceId>`；非法格式、跨设备、anchor id、路径/秘密混入及错域请求均在首个耐久/资源/I/O 副作用前拒绝。 | `scope-id.ts` 以唯一 Crockford ULID 判别和设备前缀构造/校验 local id，local runtime 在 journal 前执行设备反绑，anchor runtime 拒绝全部 local id；正反例覆盖 fingerprint、异设备和非法 ULID。 |
+| IR30-05 | [x] | epoch、namespace 与逻辑流隔离 | ownerEpoch 与可恢复的 localGovernorEpoch 在正常重启中保持、只按各自合法重置前进；operation/attempt identity 及 control/run/session-activity/publish/final-outbox 流只属于本地域，anchor/local 不碰撞、不串流、不互相重放。 | 当前单元没有 domain reset 入口；正常重启由同一设备身份重建稳定 localDomainId/epoch，conversation id 与各会话流按 owner domain guard 过滤，anchor/local 不相互接纳或重放。 |
+| IR30-06 | [~] | 共享设备基础设施与单一所有权 | local owner 复用 executor 已有的 AuthorityCommitLog、ArtifactStore、data plane、DeviceCapacityArbiter 与 shutdown 所有权，同时以逻辑流隔离事实；不得重复打开、重复治理或建立第二物理事实源。 | P2 事实：anchor+executor 根创建两个 `ConversationAssignmentLedger` 实例，违反单一 live owner；但两者复用同一 `FileAuthorityCommitLog`，同名 durable projection 被日志按 id 去重，读写经同一日志锁和流重放收敛，未证实此前所称的数据面漏读或耐久性失败。 |
+| IR30-07 | [~] | 会话目录、创建与恢复 | internal create/list/lookup 的唯一耐久事实、线性化点、幂等键和投影闭合；空目录、重复创建、响应丢失、坏尾、恢复中崩溃与连续重启最终恰一会话，且恢复完成前不 accepting。 | P1 事实：SessionState control adapter 将 `conversationExists` 固定为 `true`；任意格式合法但未创建的 local id 可绕过目录存在性，在无 durable identity 时写入 session/lifecycle 权威记录，形成不经 create 线性化点的孤儿状态。 |
+| IR30-08 | [x] | 完整 SessionState 读面 | meta、transcript/history、task-list、advancement、window、lifecycle、run/control/final 均从同一会话权威日志/投影读取；空值、分页、重放和重启全等，不降级为最小壳或 anchor 远程读。 | `ConversationSessionStateAdapter` 的 meta/transcript/task-list/advancement 与 mutation 读回均接同一 protocol journal；local history、directory 和 advancement consumer 复用该端口，分页与重启 smoke 读取同一 executor log。 |
+| IR30-09 | [~] | SessionState mutation 与 guard | SessionStatePort 的 meta、window、task-list、segment、advancement、rename、compact、clear、delete 写分支共用 domain、ownerEpoch、revision、stream、principal 和严格 codec 守卫；错域、stale、畸形、重复与并发请求零副作用且终态确定。 | P1 事实：判别联合、principal/revision/stream guard 已复用，但 control mutation 的存在性回调恒真，使未知 local id 的 meta/window/task/segment/advancement/lifecycle 写可在首个 append 前绕过目录 guard。 |
+| IR30-10 | [~] | 创建后会话生命周期线性化 | rename、compact、clear、delete 的状态组合、冲突排序、投影与恢复闭合；关闭/删除后不再准入或复活，效果后响应丢失和并发管理请求按稳定身份幂等收敛。创建与目录恢复只由 IR30-07 判定。 | P1 事实：已存在会话的 reducer/投影与幂等请求链可恢复，但未知 local id 的 clear/delete 同样因恒真存在性回调落下 lifecycle 事实或 tombstone，生命周期不再严格从目录 create 之后开始。 |
+| IR30-11 | [~] | 内容资产、保留与 finality | transcript/artifact/evidence 由同一 ArtifactStore 与日志引用闭合；缺失、重复、引用回收、投影滞后、写后崩溃、读取校验和重建不产生假终态、悬空引用或跨域可见。 | P1 事实：local assembly 未注入 `onFinal`；`publishPendingFinals` 因此直接返回 0，已提交 revision 的 final-outbox 永不推进到 published/expired，内容终态在恢复判据中永久欠账。 |
+| IR30-12 | [x] | ingress、准入与幂等 | internal send/admit/assign 反绑 local conversation、ownerEpoch、operation identity、环境与权限；重复、乱序、断线、响应丢失和恢复只产生一个 accepted run，错域请求零资源/执行副作用。 | local manager 通过同一 durable protocol 准入，run/assignment 身份由 conversation+attempt 稳定派生；设备 id guard、admission journal 与响应丢失重放先于资源派发，local smoke 证明一次执行和重启零第二 run。 |
+| IR30-13 | [~] | 环境、workspace binding 与 readiness | 本地域环境选择与 manifest 只消费现行 EnvironmentPort/WorkspaceBinding 接缝；无 workspace、缺失/过期/冲突 binding、准备失败、重启和 stop 竞态均有确定终态，完整 runtime 未 ready 不得派发。 | `prepareLocalConversationAssignment` 将 workspace 限定出生设备并反绑 executor snapshot 的 binding revision，能力/凭据/manifest 全等后才返回；local owner 在 protocol/readiness/advancement recovery 后才 accepting。 |
+| IR30-14 | [~] | 权限、ControlLease 与秘密 | local 会话只读最近有效的 anchor 签名权限/执行资产缓存并使用 local ControlLease；过期、错设备/scope、缺权限 cache、验签失败均 fail-closed，allow-once 只接受已认证原始 surface 且逐次线性化，秘密/路径不上 wire 或错误日志。 | 本地域只从签名快照目录取 latest，缺失或请求规则不全等即 capability-gap；签发的 PermissionSnapshotLease/ControlLease 反绑 local conversation、assignment、executor 与 expiry，executor 在 received 前按 digest/签名验权。 |
+| IR30-15 | [x] | local root lease 与计量 | 每个 local run 的 root lease 绑定 localDomainId、ownerEpoch、可恢复 localGovernorEpoch；reserve/consume/settle/release/reclaim 由本地 governor 唯一拥有，不依赖 global budget、不产生 anchor usage debt，重放不重复计量。 | local runtime 把 root/usage/finalize 全部指向 executor governor，lease 反绑 localDomainId/localGovernorEpoch 与 conversation ownerEpoch；`finalizeLocalAssignment` 不经过 anchor governor，exact replay 与错域拒绝有直接 governor 证据。 |
+| IR30-16 | [x] | child resource 与设备容量 | nested/并发 child 在父租约与共享 DeviceCapacityArbiter 下有界运行；provider 提前结束、abort、timeout、open usage、子先父后、崩溃与停机最终零 active child/root/permit。 | 本地域复用同一 executor governor 与设备容量 workload；现有 descendant deepest-first finalizer、open usage 对账、超深/超额拒绝、重启重建和 exact terminal replay 直接覆盖 local root 的共享协议。 |
+| IR30-17 | [~] | 本机 dispatch、ledger 与数据面 | local run 只派到出生设备 executor，复用 execution ledger/data plane；manifest、permission、environment、lease 全通过后才执行，重复 dispatch、断线、executor 重启和 payload 缺失按同一 attempt 收敛。 | dispatch、ticket 与 data-plane 均使用同一 executor log；第二 ledger 的缓存游标通过 `transactProjection` 从共享日志补齐，未发现本地域 durable activation 对已绑定 ledger 不可见。双实例的 owner 分裂作为 P2 归入 P30-01。 |
+| IR30-18 | [~] | run commit、CAS 与 finality | assistant output、usage、session mutation 与 run terminal 按现行线性化顺序提交；stale revision、半提交、响应丢失、exact replay、投影滞后和连续恢复最终恰一可见终态。 | P1 事实：run/session/usage 提交仍由共享 journal 原子化，但 local 没有 final consumer，pending final 无法进入终态；重启的 `discoverRecoveryConversations` 持续把该 commit 判为未收敛，不能形成恰一完整可见终态。 |
+| IR30-19 | [~] | 取消、确认与竞态 | user/system cancel、confirmation request/read/resolve 反绑 local run/attempt/权限；重复、错绑、迟到确认与取消/provider 终态竞态有唯一胜者、零多余执行和可恢复终态。 | P1 事实：local port 只暴露 manager/protocol/advancement，assembly 未装 ConfirmationHub、status consumer 或 interaction answer 边界；protocol 自身没有公开 answer 方法，故本地域产生确认后没有当前 internal conformance 消费链可提交 resolve。 |
+| IR30-20 | [~] | uncertain 与三方恢复 | owner、executor、ledger 对 assigned/running/committing/uncertain 的判定与重驱一致；已封包只重提交，可证未 started 才新派发，结果不明只写 open→closed resolution，任一点崩溃、坏尾、连续重启或 stop 不重复 provider、不泄漏资源。 | P1 事实：三分恢复代码由同一 protocol/ledger 复用，但 local committed run 因 final-outbox 永不终态会在每次启动重新进入恢复集合；ledger 双实例经共享日志可见，不再作为本项阻断事实。 |
+| IR30-21 | [~] | owner-services 完整装配 | ConversationManager、ConversationProtocolRuntime、advancement controller、reviewer/evidence client 与 advancement recovery 均复用现行生产实现并取得真实依赖；不得以测试 stub、空 adapter 或跳过任一 consumer 形成表面可启动的残缺 owner。 | P1 事实：manager/protocol/advancement/reviewer/evidence/recovery 均为生产实现，但组合根跳过 mandatory local final/interaction consumer，并以 `rubricScope:"local"` 直接省略只读 rubric catalog，形成可启动但终态与缓存能力不完整的 owner。 |
+| IR30-22 | [~] | advancement、review 与资源收敛 | advancement 在 local owner 下复用 canonical evidence、review attempt、local governor 与 SessionState；deferred/throw、typed stale、capability-gap、响应丢失、重复、崩溃和恢复不重复计量或遗留 root。 | P1 必要证据缺口：组合根虽注入真实 SessionState、local governor 与同机 evidence client，但没有任何本地域 advancement/review/evidence/lease 的直接执行与恢复测试；现有 anchor 单测不能证明 local domain、缓存与 consumer 差异下仍收敛。 |
+| IR30-23 | [~] | local-draft 与只读缓存语义 | skill/rubric/prompt 缓存只读且按冻结版本消费；缓存缺失/过期/无匹配时 local-draft 仍继续并立即在会话生效，不能被误判为阻断；全局保存、刷新或假成功明确不可用，权限 cache 失败另由 IR30-14 fail-closed。 | P1 事实：local advancement 通过空配置同时移除 `GlobalRubricCatalog` 与 publication，却没有注入任何 S4 skill/rubric/prompt 只读 cache/ArtifactStore consumer；离线只能新生成 local-draft，合法同步资产在本地域完全不可见。 |
+| IR30-24 | [~] | session-only mutation profile | task-list、segment、advancement、meta、window 五类执行侧写只进入当前 local SessionState；operation identity、read-own-writes、冲突和重放与 anchor 同构，不生成 Global MutationBatch 或 DeferredGlobalIntent。 | local protocol 使用同一 SessionState reducer/stager；`allowGlobal:false` 在 ledger append 前拒绝 global union，session 五类写保留 operation identity、overlay/read-own-writes 与 CAS 重放，直接负例证明全局写零 ledger 追加。 |
+| IR30-25 | [~] | 全局能力负向闭包 | memory、skill/workscene/schedule 全局写、global registry/query/publish/delivery、permission persist、channel、DeferredGlobalIntent、transfer 的构造、端口、RPC/CLI/tool 入口均不可达；禁用发生在日志、资源与 I/O 副作用前。 | P1 事实：当前实例未注入 GlobalState/delivery/channel/transfer，公开注册源也为零；但 local 仍持有包含 global 分支的共享 protocol/mutation port，只靠布尔值在运行时拒绝，未满足冻结的 by-construction 安全合同。 |
+| IR30-26 | [x] | anchor 会话与设备域隔离 | anchor 不可达时不得枚举、接管、写入或伪造 anchor 会话；本设备 local 会话不被其他设备或 anchor namespace 消费，列表、恢复与路由保持域隔离，且不建设可选离线副本。 | anchor runtime 明确拒绝 local id，local runtime 只接受出生设备前缀；目录/recovery 对共享 log 再按 `acceptsConversationId` 过滤，local 组合无 anchor directory、远端 execution 或离线副本入口。 |
+| IR30-27 | [~] | 生产 topology 恰一装配 | 对 `planServeTopology` 的八种受支持配置核对两条生产根：anchor+executor（含 surface 等价配置）经 `access-surfaces.ts`、executor-only 经 `runExecutorRole` 各恰一 local owner；anchor-only/surface-only/disabled 为零，重复注册或缺依赖确定失败。 | P1 必要证据缺口：源码两根的条件分支可推出 executor-enabled 恰一 owner，但新增测试只覆盖一个 mock anchor+executor 与无 executor，不覆盖 executor-only、surface 等价、八配置、重复启动及缺依赖；无法安全证明真实拓扑 exact-set。 |
+| IR30-28 | [~] | 包依赖与结构隔离 | 装配只沿 cli→owner-kernel/owner-services/executor/runtime-host/core 正式边；server 不反向依赖 executor，owner 层不取得 CLI/global Store，新增 exports 不暴露实现细节或形成环。 | 新增生产实现集中在 cli 组合根，owner-kernel/core/executor 仅扩展正式合同与原语；server 只提供既有 owner-services adapter，未反向导入 executor，package manifests 与 S7 结构边未出现新环或 CLI 下沉。 |
+| IR30-29 | [~] | prepare/start 与失败回滚 | 两生产根均须先取得 executor log、ArtifactStore、local governor、完整 runtime/readiness、data plane/evidence 依赖，再依次恢复 session 目录、assignment、final-outbox 与 protocol readiness，完成 advancement recovery 后启动 recovery loop，最后 accepting；任一步失败、重复/并发 start 或 shutdown 介入均逆序回滚，无半活 owner。 | P1 事实：依赖检查、rollback 注册及 accepting 顺序存在，但 final consumer 缺失使启动恢复无法收完 final-outbox 仍进入 accepting；且没有任一生产根的部分失败/并发 start/连续恢复直接证据。 |
+| IR30-30 | [~] | stop、cleanup 与后台归零 | stop 先拒绝新准入，再收束 run/confirmation/final-outbox/recovery loop，最后按依赖逆序 dispose；重复 stop、部分失败和进程关闭最终零 timer/listener/permit/root/可写入口。 | P1 事实：close 会先停 recovery loop 并 dispose manager，但不会终结 pending final-outbox，故“outbox 与执行义务归零后关闭”不成立；ledger 双实例只构成非阻断的所有权分裂。 |
+| IR30-31 | [~] | internal-only 与产品边界 | 只暴露组合根内部/conformance port；不得注册公开 CLI/RPC/channel/status/session-observer、离线 create/list/adopt、产品术语或隐式 fallback，现有 anchor 用户路径和错误语言不改变。 | local owner 只挂在 cli 内部 assembly/context，port 未进入 canonical RPC、Commander、dynamic skill、channel、status 或 presenter 注册源；现有 anchor 用户入口与错误语言未增加离线 fallback。 |
+| IR30-32 | [~] | S7 入口/结构门禁交界 | `localConversationOwner.close` cleanup descriptor 进入现有 capture/golden，local runtime/assembly 两个生产源由现有 S7 结构规则证明 global capabilities 不可达；不得新增第二 lint、改变入口映射语义或遗漏真实 cleanup owner。 | P1 事实：cleanup key 已进入 capture/golden；但 `inspectLocalConversationOwnerIsolation` 只检查两个 interface 的属性名/类型与 owner 参数名，不扫描实际 import、constructor、instance、binder 或调用，加入真实 GlobalState/DeferredIntent/global Store 仍可绿色通过。 |
+| IR30-33 | [~] | 双域同构 conformance | 同一有限套件比较 anchor/local 的 create/list/meta/history/window/rename/compact/clear/delete、run/cancel/confirmation/uncertain、task-list/segment/advancement、content/final、replay/recovery/stop；允许差异仅为 authority/identity/capability/cache，无 workspace 与 workspace 两形态均覆盖。 | P1 必要证据缺口：交付物没有同一套件驱动 anchor/local；新增 local 测试仅覆盖一次 run、少量 SessionState 与重启，未覆盖 cancel/confirmation/uncertain/advancement/content-final/stop、workspace 双形态及故障矩阵，现有生产缺陷正位于这些空白。 |
+| IR30-34 | [~] | 开发义务、合同与路径反向闭包 | D30-01～D30-07、总纲本地域当前段、规格当前条款和 50 个 D30 路径必须双向全等：每项有生产端、消费端、装配、异常/恢复和直接证据落点，每条实现路径有当前架构依据；不存在未归项义务、范围外实现或历史/未来文字冒充现行合同。 | P1 事实：36 个 D30 路径均有来源，但 terminal consumer、只读资产 cache、构造隔离及双域/拓扑/故障证据没有完整落点；单一 ledger 另构成 P2 所有权偏差。不存在范围外未来功能，缺口均属当前冻结义务。 |
+
+> 本轮全部 `[~]` 行的原证据统一标为失效，只保留为历史事实；下一轮必须基于当前 50 个交付路径重新记录结论。`[x]` 行的登记输入与本轮修改无直接交界，原证据继续有效。
 
 ---
 

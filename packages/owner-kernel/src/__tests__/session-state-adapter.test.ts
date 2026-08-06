@@ -88,7 +88,11 @@ async function createHarness(conversationId = "conv-1") {
       clock: () => NOW,
     });
   const journal = makeJournal();
-  const adapter = new AnchorSessionStateAdapter({ journalFor: () => journal });
+  let directoryExists = true;
+  const adapter = new AnchorSessionStateAdapter({
+    journalFor: () => journal,
+    sessionExists: async () => directoryExists,
+  });
   let requestSeq = 0;
   const write = (events: readonly AdvancementControlEvent[], requestId?: string) =>
     adapter.mutate(
@@ -98,7 +102,18 @@ async function createHarness(conversationId = "conv-1") {
     );
   const read = () =>
     adapter.readAdvancementState(conversationId, hostCtx(`req-read-${++requestSeq}`));
-  return { artifacts, log, journal, adapter, makeJournal, write, read };
+  return {
+    artifacts,
+    log,
+    journal,
+    adapter,
+    makeJournal,
+    write,
+    read,
+    removeDirectoryIdentity: () => {
+      directoryExists = false;
+    },
+  };
 }
 
 function hostCtx(requestId: string): AuthorityCallContext {  return {
@@ -378,6 +393,34 @@ describe("AnchorSessionStateAdapter advancement", () => {
         hostCtx("req-write-1"),
       ),
     ).rejects.toThrow("conflicting durable payloads");
+  });
+
+  it("fresh 推进写入要求会话身份，既有 request 在身份删除后仍可全等回放", async () => {
+    const { adapter, log, removeDirectoryIdentity } = await createHarness();
+    removeDirectoryIdentity();
+
+    await expect(
+      adapter.mutate(
+        "conv-1",
+        { kind: "advancement-event", events: [createdEvent()] },
+        hostCtx("req-unknown"),
+      ),
+    ).rejects.toMatchObject({ code: "not-found" });
+    expect(await log.readAll()).toHaveLength(0);
+
+    const known = await createHarness("conv-known");
+    const first = await known.adapter.mutate(
+      "conv-known",
+      { kind: "advancement-event", events: [createdEvent()] },
+      hostCtx("req-replay"),
+    );
+    known.removeDirectoryIdentity();
+    const replay = await known.adapter.mutate(
+      "conv-known",
+      { kind: "advancement-event", events: [createdEvent()] },
+      hostCtx("req-replay"),
+    );
+    expect(replay).toEqual(first);
   });
 
   it("非 host principal 与其它 mutation kind 被拒绝", async () => {

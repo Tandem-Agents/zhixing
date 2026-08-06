@@ -18,6 +18,7 @@ describe("conversation owner domain composition", () => {
       localGovernorEpoch: 4,
       deviceId: "device-abcdef",
       executorId: "executor-1",
+      localExecutorEnabled: true,
       signer: {},
       verifier: {},
       authorityLog: { id: "anchor-log" },
@@ -72,5 +73,40 @@ describe("conversation owner domain composition", () => {
       upToUsageSeq: 0,
     });
     expect(finalizeLocalAssignment).toHaveBeenCalledWith("assignment-local");
+  });
+
+  it("does not evaluate executor-only capabilities for an anchor-only topology", () => {
+    const authority = {
+      anchorEpoch: 9,
+      localExecutorEnabled: false,
+      deviceId: "device-anchor",
+      executorId: "executor-remote",
+      signer: {},
+      verifier: {},
+      authorityLog: {},
+      artifacts: {},
+      controlAdmission: {},
+      executorCapabilities: {},
+      resourceGovernor: {},
+      surfaceAssets: {},
+      participant: {},
+      permissionSnapshotFor: vi.fn(),
+      prepareConversationAssignment: vi.fn(),
+      validateConversationRuntimeBinding: vi.fn(),
+      preflightLocalConversationEnvironment: vi.fn(),
+      releaseLocalConversationEnvironmentPreflight: vi.fn(),
+      validateLocalConversationManifest: vi.fn(),
+      get executorLog() {
+        throw new Error("executor log was evaluated");
+      },
+      get executorResourceGovernor() {
+        throw new Error("executor resources were evaluated");
+      },
+    } as unknown as AuthorityRuntimeStack;
+
+    expect(() => anchorConversationOwnerRuntime(authority)).not.toThrow();
+    const runtime = anchorConversationOwnerRuntime(authority);
+    expect(runtime.executorLog).toBeUndefined();
+    expect(runtime.executorResourceGovernor).toBeUndefined();
   });
 });

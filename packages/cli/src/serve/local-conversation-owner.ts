@@ -7,8 +7,10 @@ import {
 } from "@zhixing/core";
 import type {
   EvidenceHandlerPort,
+  FinalFrame,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
+import { canonicalize } from "@zhixing/core/protocol";
 import {
   ConversationManager,
   type RuntimeFactory,
@@ -39,13 +41,55 @@ import { DurableConversationInteractionObserver } from "./durable-conversation-i
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
+
+export interface LocalConversationConsumerPort {
+  pendingInteractions(): ReturnType<DurableConversationInteractionObserver["pendingInteractions"]>;
+  answerInteractionWithTicket(
+    input: Parameters<DurableConversationInteractionObserver["answerInteractionWithTicket"]>[0],
+  ): Promise<void>;
+  resolveNoInteractiveSurface(
+    input: Parameters<DurableConversationInteractionObserver["resolveNoInteractiveSurface"]>[0],
+  ): Promise<void>;
+  statusHistory(
+    requests: Parameters<ConversationProtocolRuntime["statusHistory"]>[0],
+  ): ReturnType<ConversationProtocolRuntime["statusHistory"]>;
+  finalHistory(
+    conversationId: string,
+    afterCommitRevision: number,
+  ): ReturnType<ConversationProtocolRuntime["finalHistory"]>;
+}
+
+export type LocalConversationProtocolPort = Pick<
+  ConversationProtocolRuntime,
+  | "sessionState"
+  | "ensureSession"
+  | "listSessions"
+  | "sessionExists"
+  | "statusHistory"
+  | "finalHistory"
+>;
+
+export async function verifyLocalConversationFinal(
+  protocol: Pick<ConversationProtocolRuntime, "finalHistory">,
+  frame: FinalFrame,
+): Promise<void> {
+  const committed = await protocol.finalHistory(
+    frame.conversationId,
+    Math.max(0, frame.commitRevision - 1),
+  );
+  if (!committed.some((item) => canonicalize(item.frame) === canonicalize(frame))) {
+    throw new Error("Local final frame is not present in authoritative history");
+  }
+}
 
 export interface LocalConversationOwnerPort {
   createConversation(): Promise<string>;
   listConversations(): Promise<readonly string[]>;
   readonly manager: ConversationManager;
-  readonly protocol: ConversationProtocolRuntime;
+  readonly protocol: LocalConversationProtocolPort;
   readonly advancement: AdvancementController;
+  readonly consumer: LocalConversationConsumerPort;
 }
 
 export interface LocalConversationOwnerAssemblyOptions {
@@ -75,6 +119,7 @@ export class LocalConversationOwnerAssembly {
   readonly #protocol: ConversationProtocolRuntime;
   readonly #manager: ConversationManager;
   readonly #advancement: AdvancementController;
+  readonly #consumer: LocalConversationConsumerPort;
   readonly #recovery: AdvancementRecoveryMaintenance;
   #accepting = false;
   #closed = false;
@@ -84,12 +129,14 @@ export class LocalConversationOwnerAssembly {
     readonly protocol: ConversationProtocolRuntime;
     readonly manager: ConversationManager;
     readonly advancement: AdvancementController;
+    readonly consumer: LocalConversationConsumerPort;
     readonly recovery: AdvancementRecoveryMaintenance;
   }) {
     this.#owner = input.options.owner;
     this.#protocol = input.protocol;
     this.#manager = input.manager;
     this.#advancement = input.advancement;
+    this.#consumer = input.consumer;
     this.#recovery = input.recovery;
   }
 
@@ -103,7 +150,8 @@ export class LocalConversationOwnerAssembly {
     let reviewCommitted: ((info: TurnCommittedInfo) => void) | undefined;
     const projectedRuns = new Set<string>();
 
-    const protocol = new ConversationProtocolRuntime({
+    let protocol!: ConversationProtocolRuntime;
+    protocol = new ConversationProtocolRuntime({
       owner,
       manager: () => manager,
       interactions: options.interactions,
@@ -115,6 +163,7 @@ export class LocalConversationOwnerAssembly {
         dataPlaneTickets: options.dataPlane.tickets,
         createStream: (input) => options.dataPlane.createStream(input),
       },
+      onFinal: (frame) => verifyLocalConversationFinal(protocol, frame),
       projectLifecycle: async ({ conversationId, mutation }) => {
         if (!manager.has(conversationId)) return;
         if (mutation === "clear") {
@@ -179,6 +228,12 @@ export class LocalConversationOwnerAssembly {
       governor: () => owner.resources,
       sessionState: () => protocol.sessionState,
       rubricScope: "local",
+      rubricCatalog: new GlobalRubricCatalog({
+        globalState: () => undefined,
+        artifacts: () => undefined,
+        anchorEpoch: () => undefined,
+        executionAssets: () => owner.executionAssetCatalog,
+      }),
       recentContextProvider: async (conversationId) =>
         renderRecentContextFromMessages(manager.getHistory(conversationId, 6)),
       evidenceRuntime: () => ({
@@ -250,12 +305,24 @@ export class LocalConversationOwnerAssembly {
         recovery.recoverConversation(conversationId, options),
     });
 
+    const consumer: LocalConversationConsumerPort = {
+      pendingInteractions: () => options.interactions.pendingInteractions(),
+      answerInteractionWithTicket: (input) =>
+        options.interactions.answerInteractionWithTicket(input),
+      resolveNoInteractiveSurface: (input) =>
+        options.interactions.resolveNoInteractiveSurface(input),
+      statusHistory: (requests) => protocol.statusHistory(requests),
+      finalHistory: (conversationId, afterCommitRevision) =>
+        protocol.finalHistory(conversationId, afterCommitRevision),
+    };
+
     return new LocalConversationOwnerAssembly({
       options,
       protocol,
       manager,
       advancement,
       recovery,
+      consumer,
     });
   }
 
@@ -296,6 +363,7 @@ export class LocalConversationOwnerAssembly {
       manager: this.#manager,
       protocol: this.#protocol,
       advancement: this.#advancement,
+      consumer: this.#consumer,
     };
   }
 }

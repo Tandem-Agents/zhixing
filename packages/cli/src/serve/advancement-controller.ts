@@ -5,6 +5,7 @@ import {
   LLMRubricDraftGenerationStrategy,
   LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
+  type RubricCatalogPort,
   userMessage,
   validateThinkingConfig,
   type LLMRole,
@@ -86,6 +87,7 @@ export interface ServeAdvancementControllerDeps {
     | undefined;
   /** Local owners use local-draft contracts and never imply a global save. */
   readonly rubricScope?: "global" | "local";
+  readonly rubricCatalog?: RubricCatalogPort;
 }
 
 /** 惰性解析的治理端口代理——每次调用时解析真实 governor，缺失即拒绝。 */
@@ -215,9 +217,11 @@ export async function createServeAdvancementController(
     anchorEpoch: () => deps.rubricRuntime?.()?.anchorEpoch,
   };
   const contractBuilder = new RubricContractBuilder({
-    ...(deps.rubricScope === "local"
-      ? {}
-      : { rubricCatalog: new GlobalRubricCatalog(rubricLibrary) }),
+    ...(deps.rubricCatalog
+      ? { rubricCatalog: deps.rubricCatalog }
+      : deps.rubricScope === "local"
+        ? {}
+        : { rubricCatalog: new GlobalRubricCatalog(rubricLibrary) }),
     generationStrategy: new LLMRubricDraftGenerationStrategy({
       complete: (prompt) => completeViaPort("main", prompt),
     }),

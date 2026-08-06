@@ -1866,6 +1866,18 @@ interface ExecutorVersionInventory {     // 高频版本清单，绑定 capabili
   credentialBindingRevisions: Array<{ bindingId: string; revision: number }>;
   at: IsoTime; signature: Signature }
 
+interface ExecutionAssetSnapshot {       // executor 只读执行资产；非全局事实源
+  snapshotRevision: number;
+  skillCatalogRevision: number;
+  skills: SkillCatalogEntry[];
+  rubrics: AssetIndexEntry[];
+  promptAssets: AssetIndexEntry[];
+  generatedAt: IsoTime; digest: Digest; signature: Signature }
+
+interface ExecutionAssetBundle {
+  snapshot: ExecutionAssetSnapshot;
+  artifacts: Array<{ digest: Digest; bytesBase64: string }> }
+
 interface CredentialBindingDescriptor { bindingId: string; service: string; resource?: string;
   principalFingerprint?: Digest; tenant?: string; scopes?: string[];
   verification: "service-verified"|"user-alias"; revision: number }
@@ -1921,6 +1933,8 @@ workscene 远程管理只能从目标 executor 已认证的 `CapabilityDescripto
 由此单 executor 同时承载多个会话各自冻结的权限快照：任一会话的权限变化只发布新快照并推进高水位，既不影响其它在途 assignment 的引用有效性，也不得抬升设备代际层任何版本。
 
 **能力快照同步纪律**：`CapabilityDescriptor` 与 `ExecutorVersionInventory` 作为同一设备签名的元数据快照发布，必须同 executor、同签名设备且 `descriptor.revision === inventory.capabilityRevision`；`EnvironmentRequirement.deviceId` 与该签名设备身份匹配，不与可独立命名的 executor 身份混同。manifest 的独立 `protocolVersion`、tools、MCP、凭据与七类版本均由同一 matcher 按上述两层语义核对，协议版本为 uint64 范围内的规范正十进制字符串并与 mesh 协商共用同一校验谓词；job instruction 的 tools 必为 manifest.tools 子集。所有集合型字段按规范 JSON 字符串码元序冻结排序；credential bindingId 在每个集合内全局唯一，workspace binding revision 为正整数。
+
+**只读执行资产安装纪律**：锚点签发的 `ExecutionAssetSnapshot.snapshotRevision` 必须与 inventory 的 `skillsRev / rubricsRev / promptAssetsRev` 三值全等；正文继续存入既有 `ArtifactStore`，传输 bundle 不携带路径，executor 必须先验签、核对精确 digest 集并写入全部正文，再原子安装 snapshot。回退、错绑、缺失或损坏的缓存均按“无匹配”处理，不得伪造资产命中、取得 `GlobalStatePort` 或阻断本地域 local-draft；空缓存使用保留 revision 1，首个真实快照从 revision 2 开始单调前进。
 
 owner 目录耐久绑定 executorId 与获授权设备谱系，只接受原版本语义重放或 `inventoryRevision` 严格前进的更新，拒绝同版本内容改写、任一配置/资产/权限/凭据 revision 回退。凭据 bindingId 的同 revision 语义身份不可改写，删除后保留高水位墓碑，重建必须提高 revision。目录恢复时状态缺失或损坏 fail-closed；版本源显式耐久“首次引导未完成/目录已建立”标记，只有前者可建立空目录，目录接受首份快照后才将标记推进为已建立，故任一崩溃点可恢复且已建立目录丢失绝不静默重建。查询时复核当前设备信任，撤销或角色移除立即失效，换设备只经显式谱系迁移。`at` 与签名可在语义内容不变时刷新。
 
@@ -2334,8 +2348,12 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | memory 写 / 蒸馏 | 可用 | 禁产——收编后由锚点补蒸馏 |
 | schedule 注册 / 修改 | 可用 | DeferredGlobalIntent（经 §3.2b 端口落 `intent:<convId>` 流、随对话收编；重校验，timeSensitive 再确认） |
 | workscene 注册管理 | 可用（锚点 workscene-* 写） | 不可用（明示；不产生 DeferredGlobalIntent——离线禁产，intent 类型层仅限 schedule 与 rubric 沉淀两域） |
-| 技能 / Rubric / prompt 资产 | 可用 | 同步缓存版本只读 |
+| 技能 / Rubric / prompt 资产 | 可用 | 经签名 execution asset snapshot + 既有 ArtifactStore 同步缓存只读；缺失、错绑或损坏均按无匹配继续 local-draft，不取得全局写能力 |
 | 渠道 / 全局名录 / 迁居 | 可用 | 不可用（明示） |
+
+本地域 owner 只向同设备内部组合暴露 `LocalConversationConsumerPort`：pending interaction 由 executor ledger 列读并仅凭既有 surface ticket 终结，status/final 只按游标补读同一 conversation journal。`onFinal` 必须先与权威 final history 全等验真，再由既有 final-outbox 写唯一 `published` 回执；回调失败或响应丢失保持 pending 供恢复重驱。该端口不得注册为 RPC、CLI 或 channel surface，也不得建立第二份 interaction/finality 耐久事实。
+
+`LocalConversationOwnerPort.protocol` 只暴露 session identity/state、status/final 补读的冻结窄面；global mutation binder、delivery drain 和完整 protocol runtime 不得逸出 local 组合根。现有 S7 结构门禁必须直接核对 local runtime、assembly、anchor+executor 与 executor-only 两个生产构造点：禁用的 GlobalState/DeferredIntent/global publisher/delivery/可写 Store 不得被 import、构造、注入或经 port 暴露，两个构造点只能接收 `localConversationOwnerRuntime`，合法 SessionState、ArtifactStore 与只读 execution asset cache 不得误杀。
 | 内容资产 | owner 治理 ArtifactStore | 本地 owner 治理，随收编转移 |
 | 资源治理 | anchor + executor 双半边 | executor 半边 + 本地 governor 签发本地域 lease（不扣全局预算） |
 | 锚点域既有对话 | 读写 | 不可写；只读副本可选（无副本明示"需连接值班设备"） |

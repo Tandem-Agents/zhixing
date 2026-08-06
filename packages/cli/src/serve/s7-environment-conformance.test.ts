@@ -220,6 +220,7 @@ async function runChain(topology: "in-process" | "mesh") {
             publisher: {
               currentCapability: executor.currentExecutorSnapshot,
               installPermission: executor.installPermissionSnapshot,
+              installAssets: executor.installExecutionAssetBundle,
             },
             executorVerifier: executor.verifier,
             ownerVerifier: anchor.verifier,
@@ -275,8 +276,8 @@ async function runChain(topology: "in-process" | "mesh") {
               {
                 executorId: executor.executorId,
                 deviceId: executor.deviceId,
-                synchronizePermission: (snapshot) =>
-                  mesh!.snapshots.installPermission(snapshot),
+                synchronizePermission: (snapshot, executionAssets) =>
+                  mesh!.snapshots.installPermission(snapshot, executionAssets),
               },
             ],
           }
@@ -508,8 +509,8 @@ async function runChain(topology: "in-process" | "mesh") {
       meshAuthorize:
         topology === "in-process" ||
         (mesh!.calls.get("environment.probe") === 2 &&
-          mesh!.calls.get("execution.snapshot") === 2 &&
-          mesh!.authorizationChecks === 4 &&
+          mesh!.calls.get("execution.snapshot") === 3 &&
+          mesh!.authorizationChecks === 5 &&
           unauthorizedProbeRejected),
       activityMerged:
         !!scene &&
@@ -615,6 +616,13 @@ function createMeshEnvironmentAdapters(input: {
       >[0],
     ): ReturnType<
       Awaited<ReturnType<typeof setupAuthorityRuntime>>["installPermissionSnapshot"]
+    >;
+    installAssets(
+      bundle: Parameters<
+        Awaited<ReturnType<typeof setupAuthorityRuntime>>["installExecutionAssetBundle"]
+      >[0],
+    ): ReturnType<
+      Awaited<ReturnType<typeof setupAuthorityRuntime>>["installExecutionAssetBundle"]
     >;
   };
   executorVerifier: ProtocolSignatureVerifier,

@@ -10,6 +10,7 @@ import type {
   MemoryAppendPayload,
   OutboundContentDto,
   SegmentRecord,
+  Signature,
   SkillModeDto,
   SkillUsageRecord,
   TaskListOp,
@@ -407,6 +408,25 @@ export interface WorksceneStagedReceipt {
   requestId: string;
   recordSeq: number;
   mutationDigest: Digest;
+}
+
+/** Anchor-signed, path-free index for the execution assets cached on an executor. */
+export interface ExecutionAssetSnapshot
+  extends WireSchemaV1<"ExecutionAssetSnapshot"> {
+  snapshotRevision: number;
+  skillCatalogRevision: number;
+  skills: import("../skills/types.js").SkillCatalogEntry[];
+  rubrics: AssetIndexEntry[];
+  promptAssets: AssetIndexEntry[];
+  generatedAt: IsoTime;
+  digest: Digest;
+  signature: Signature;
+}
+
+/** Artifact bodies travel with the signed index; paths never cross the wire. */
+export interface ExecutionAssetBundle extends WireSchemaV1<"ExecutionAssetBundle"> {
+  snapshot: ExecutionAssetSnapshot;
+  artifacts: Array<{ ref: ArtifactRef; contentBase64: string }>;
 }
 
 /**

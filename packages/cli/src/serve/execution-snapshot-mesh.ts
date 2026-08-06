@@ -1,7 +1,11 @@
-import type { TrustRuleSnapshot } from "@zhixing/core/contracts";
+import type {
+  ExecutionAssetBundle,
+  TrustRuleSnapshot,
+} from "@zhixing/core/contracts";
 import {
   canonicalize,
   type ExecutorCapabilitySnapshot,
+  validateExecutionAssetSnapshot,
   validateExecutorCapabilitySnapshot,
   validateTrustRuleSnapshot,
   type ProtocolSignatureVerifier,
@@ -17,11 +21,17 @@ type ExecutionSnapshotRequest =
       readonly v: 1;
       readonly method: "install-permission";
       readonly snapshot: TrustRuleSnapshot;
+    }
+  | {
+      readonly v: 1;
+      readonly method: "install-assets";
+      readonly bundle: ExecutionAssetBundle;
     };
 
 export interface ExecutionSnapshotPublisher {
   currentCapability(): Promise<ExecutorCapabilitySnapshot>;
   installPermission(snapshot: TrustRuleSnapshot): Promise<ExecutorCapabilitySnapshot>;
+  installAssets(bundle: ExecutionAssetBundle): Promise<ExecutorCapabilitySnapshot>;
 }
 
 /** Synchronizes already frozen S4 snapshots before an assignment becomes remotely receivable. */
@@ -44,10 +54,11 @@ export class MeshExecutionSnapshotClient {
 
   async installPermission(
     snapshot: TrustRuleSnapshot,
+    executionAssets?: ExecutionAssetBundle,
     signal?: AbortSignal,
   ): Promise<ExecutorCapabilitySnapshot> {
     const validated = validateTrustRuleSnapshot(snapshot, this.verifier);
-    return validateExecutorCapabilitySnapshot(
+    const permissionResult = validateExecutorCapabilitySnapshot(
       decode(await this.client.request(
         EXECUTION_SNAPSHOT_SERVICE,
         encode({
@@ -55,6 +66,16 @@ export class MeshExecutionSnapshotClient {
           method: "install-permission",
           snapshot: validated,
         } satisfies ExecutionSnapshotRequest),
+        signal,
+      )) as ExecutorCapabilitySnapshot,
+      this.verifier,
+    );
+    if (!executionAssets) return permissionResult;
+    const bundle = decodeExecutionAssetBundle(executionAssets, this.verifier);
+    return validateExecutorCapabilitySnapshot(
+      decode(await this.client.request(
+        EXECUTION_SNAPSHOT_SERVICE,
+        encode({ v: 1, method: "install-assets", bundle } satisfies ExecutionSnapshotRequest),
         signal,
       )) as ExecutorCapabilitySnapshot,
       this.verifier,
@@ -80,7 +101,9 @@ export function registerExecutionSnapshotMeshService(
       }
       const snapshot = request.method === "read-capability"
         ? await publisher.currentCapability()
-        : await publisher.installPermission(request.snapshot);
+        : request.method === "install-permission"
+          ? await publisher.installPermission(request.snapshot)
+          : await publisher.installAssets(request.bundle);
       signal.throwIfAborted();
       return encode(validateExecutorCapabilitySnapshot(snapshot, verifier));
     },
@@ -107,7 +130,49 @@ function decodeRequest(
       snapshot: validateTrustRuleSnapshot(value.snapshot, verifier),
     };
   }
+  if (value.method === "install-assets") {
+    assertExactKeys(value, ["bundle", "method", "v"]);
+    return {
+      v: 1,
+      method: "install-assets",
+      bundle: decodeExecutionAssetBundle(value.bundle, verifier),
+    };
+  }
   throw new TypeError("Execution snapshot method is unsupported");
+}
+
+function decodeExecutionAssetBundle(
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): ExecutionAssetBundle {
+  if (!isRecord(input)) throw new TypeError("Execution asset bundle is invalid");
+  assertExactKeys(input, ["artifacts", "snapshot", "v"]);
+  if (input.v !== 1 || !Array.isArray(input.artifacts)) {
+    throw new TypeError("Execution asset bundle is invalid");
+  }
+  const artifacts = input.artifacts.map((item) => {
+    if (!isRecord(item)) throw new TypeError("Execution asset bundle artifact is invalid");
+    assertExactKeys(item, ["contentBase64", "ref"]);
+    if (!isRecord(item.ref)) throw new TypeError("Execution asset bundle ref is invalid");
+    assertExactKeys(item.ref, ["bytes", "digest"]);
+    if (
+      typeof item.ref.digest !== "string" ||
+      !Number.isSafeInteger(item.ref.bytes) ||
+      (item.ref.bytes as number) < 0 ||
+      typeof item.contentBase64 !== "string"
+    ) {
+      throw new TypeError("Execution asset bundle artifact fields are invalid");
+    }
+    return {
+      ref: { digest: item.ref.digest, bytes: item.ref.bytes as number },
+      contentBase64: item.contentBase64,
+    };
+  });
+  return {
+    v: 1,
+    snapshot: validateExecutionAssetSnapshot(input.snapshot, verifier),
+    artifacts,
+  };
 }
 
 function encode(value: unknown): Uint8Array {

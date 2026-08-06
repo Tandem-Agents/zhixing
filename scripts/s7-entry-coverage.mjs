@@ -827,6 +827,52 @@ export function inspectLocalConversationOwnerIsolation(records) {
   }
 
   const assemblySource = sourceFile(assemblyRecord.relative, assemblyRecord.text);
+  const ownerPort = assemblySource.statements.find(
+    (node) => ts.isInterfaceDeclaration(node) &&
+      node.name.text === "LocalConversationOwnerPort",
+  );
+  const localProtocol = assemblySource.statements.find(
+    (node) => ts.isTypeAliasDeclaration(node) &&
+      node.name.text === "LocalConversationProtocolPort",
+  );
+  if (!ownerPort || !localProtocol) {
+    failures.push(`${assemblyRecord.relative}: narrowed local protocol port is missing`);
+  } else {
+    const protocol = ownerPort.members.find(
+      (member) => ts.isPropertySignature(member) &&
+        propertyNameText(member.name) === "protocol",
+    );
+    if (
+      !protocol?.type ||
+      !ts.isTypeReferenceNode(protocol.type) ||
+      !ts.isIdentifier(protocol.type.typeName) ||
+      protocol.type.typeName.text !== "LocalConversationProtocolPort"
+    ) {
+      failures.push(`${assemblyRecord.relative}: local owner must expose only LocalConversationProtocolPort`);
+    }
+    const allowed = new Set([
+      "sessionState",
+      "ensureSession",
+      "listSessions",
+      "sessionExists",
+      "statusHistory",
+      "finalHistory",
+    ]);
+    const selected = new Set();
+    const collect = (node) => {
+      if (ts.isLiteralTypeNode(node) && ts.isStringLiteralLike(node.literal)) {
+        selected.add(node.literal.text);
+      }
+      ts.forEachChild(node, collect);
+    };
+    collect(localProtocol.type);
+    if (
+      selected.size !== allowed.size ||
+      [...selected].some((name) => !allowed.has(name))
+    ) {
+      failures.push(`${assemblyRecord.relative}: local protocol capability set is not the frozen read/session surface`);
+    }
+  }
   const assemblyOptions = assemblySource.statements.find(
     (node) => ts.isInterfaceDeclaration(node) &&
       node.name.text === "LocalConversationOwnerAssemblyOptions",
@@ -854,6 +900,142 @@ export function inspectLocalConversationOwnerIsolation(records) {
       failures.push(
         `${assemblyRecord.relative}: assembly cannot receive the anchor authority stack`,
       );
+    }
+  }
+
+  const forbiddenAssemblySymbols = new Set([
+    "AuthorityRuntimeStack",
+    "GlobalStatePort",
+    "DeferredGlobalIntent",
+    "DeferredGlobalIntentPort",
+    "GlobalMutationCommitCoordinator",
+    "GlobalMutationCommitParticipant",
+    "ConversationDeliveryParticipant",
+    "SurfaceAssetCoordinator",
+    "MemoryStore",
+    "SkillStore",
+    "AnchorWorksceneRegistry",
+  ]);
+  const visitAssembly = (node) => {
+    if (ts.isIdentifier(node) && forbiddenAssemblySymbols.has(node.text)) {
+      failures.push(`${assemblyRecord.relative}: local assembly references forbidden capability ${node.text}`);
+    }
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ["bindMutationPublisher", "bindDeliveryDrain"].includes(node.name.text)
+    ) {
+      failures.push(`${assemblyRecord.relative}: local assembly calls forbidden protocol binder ${node.name.text}`);
+    }
+    ts.forEachChild(node, visitAssembly);
+  };
+  visitAssembly(assemblySource);
+
+  const localRuntimeFunction = runtimeSource.statements.find(
+    (node) => ts.isFunctionDeclaration(node) &&
+      node.name?.text === "localConversationOwnerRuntime",
+  );
+  const forbiddenRuntimeProperties = new Set([
+    "surfaceAssets",
+    "delivery",
+    "participant",
+    "globalState",
+  ]);
+  if (!localRuntimeFunction?.body) {
+    failures.push(`${runtimeRecord.relative}: local runtime constructor is missing`);
+  } else {
+    const visitRuntime = (node) => {
+      if (
+        ts.isReturnStatement(node) &&
+        node.expression &&
+        ts.isObjectLiteralExpression(node.expression)
+      ) {
+        for (const property of node.expression.properties) {
+          if (property.name && forbiddenRuntimeProperties.has(propertyNameText(property.name))) {
+            failures.push(`${runtimeRecord.relative}: local runtime constructs forbidden capability ${propertyNameText(property.name)}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visitRuntime);
+    };
+    visitRuntime(localRuntimeFunction.body);
+  }
+
+  const productionRoots = new Set([
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ]);
+  const allowedCreateProperties = new Set([
+    "owner",
+    "ledger",
+    "ConversationAssignmentLedger",
+    "InProcessAssignmentSubmission",
+    "runtimeFactory",
+    "interactions",
+    "config",
+    "credentials",
+    "evidence",
+    "dataPlane",
+  ]);
+  for (const record of records.filter(({ relative }) => productionRoots.has(relative))) {
+    const source = sourceFile(record.relative, record.text);
+    let createCount = 0;
+    const visitRoot = (node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === "LocalConversationOwnerAssembly" &&
+        node.expression.name.text === "create"
+      ) {
+        createCount += 1;
+        const options = node.arguments[0];
+        if (!options || !ts.isObjectLiteralExpression(options)) {
+          failures.push(`${record.relative}: local owner construction must use one object literal`);
+        } else {
+          const properties = new Map();
+          for (const property of options.properties) {
+            if (!property.name || ts.isSpreadAssignment(property)) {
+              failures.push(`${record.relative}: local owner construction cannot use spread or anonymous properties`);
+              continue;
+            }
+            const name = propertyNameText(property.name);
+            if (!name || properties.has(name) || !allowedCreateProperties.has(name)) {
+              failures.push(`${record.relative}: local owner construction has forbidden or duplicate capability ${name ?? "computed"}`);
+            }
+            properties.set(name, property);
+          }
+          const owner = properties.get("owner");
+          const initializer = owner && ts.isPropertyAssignment(owner) ? owner.initializer : undefined;
+          if (
+            !initializer ||
+            !ts.isCallExpression(initializer) ||
+            !ts.isIdentifier(initializer.expression) ||
+            initializer.expression.text !== "localConversationOwnerRuntime"
+          ) {
+            failures.push(`${record.relative}: local owner construction must receive localConversationOwnerRuntime`);
+          }
+          for (const required of [
+            "owner",
+            "ConversationAssignmentLedger",
+            "InProcessAssignmentSubmission",
+            "runtimeFactory",
+            "interactions",
+            "config",
+            "credentials",
+            "evidence",
+            "dataPlane",
+          ]) {
+            if (!properties.has(required)) {
+              failures.push(`${record.relative}: local owner construction is missing ${required}`);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visitRoot);
+    };
+    visitRoot(source);
+    if (createCount !== 1) {
+      failures.push(`${record.relative}: expected one local owner production construction, got ${createCount}`);
     }
   }
   return failures;

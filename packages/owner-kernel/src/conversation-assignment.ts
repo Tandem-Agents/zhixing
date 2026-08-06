@@ -1052,6 +1052,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => state.sessionMutationDigests.get(requestId));
   }
 
+  async advancementWriteRequest(requestId: string): Promise<
+    { readonly eventsDigest: string; readonly domainRevision: number } | undefined
+  > {
+    assertIdentifier(requestId, "Advancement write request id");
+    return this.#select((state) => state.advancementWrites.get(requestId));
+  }
+
   async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
     return this.#select((state) =>
       [...state.channelInteractions.preparedByChallenge.values()]

@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
-import { LocalConversationOwnerAssembly } from "../local-conversation-owner.js";
+import {
+  LocalConversationOwnerAssembly,
+  verifyLocalConversationFinal,
+} from "../local-conversation-owner.js";
 import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
 
@@ -58,6 +61,26 @@ describe("local conversation owner production surface", () => {
     await unit.setup(ctx);
     expect(create).not.toHaveBeenCalled();
     expect(ctx.localConversationOwner).toBeUndefined();
+  });
+
+  it("accepts only a final frame that is already present in authoritative history", async () => {
+    const frame = {
+      v: 1,
+      t: "FinalFrame",
+      conversationId: "local:device-abcdefgh:01J00000000000000000000000",
+      runId: "run-final",
+      commitRevision: 7,
+      digest: `sha256:${"a".repeat(64)}`,
+    } as const;
+    const finalHistory = vi.fn(async () => [{ frame }]);
+    const valid = { finalHistory } as never;
+    await expect(verifyLocalConversationFinal(valid, frame)).resolves.toBeUndefined();
+    expect(finalHistory).toHaveBeenCalledWith(frame.conversationId, 6);
+
+    const absent = { finalHistory: vi.fn(async () => []) } as never;
+    await expect(verifyLocalConversationFinal(absent, frame)).rejects.toThrow(
+      "not present in authoritative history",
+    );
   });
 });
 

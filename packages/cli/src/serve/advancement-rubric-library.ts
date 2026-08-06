@@ -9,6 +9,7 @@ import {
 } from "@zhixing/core";
 import type { FileArtifactStore } from "@zhixing/core/authority";
 import type {
+  AssignmentGlobalQueryPort,
   Digest,
   GlobalControlCallContext,
   GlobalReadCallContext,
@@ -23,6 +24,11 @@ export interface AdvancementRubricLibraryOptions {
   readonly globalState: () => GlobalStatePort | undefined;
   readonly artifacts: () => FileArtifactStore | undefined;
   readonly anchorEpoch: () => number | undefined;
+  readonly executionAssets?: () =>
+    | (AssignmentGlobalQueryPort & {
+        readArtifact(digest: string): Promise<Uint8Array | undefined>;
+      })
+    | undefined;
   readonly now?: () => string;
 }
 
@@ -36,24 +42,26 @@ export class GlobalRubricCatalog implements RubricCatalogPort {
   }
 
   async listForMatching(): Promise<readonly RubricIndexEntry[]> {
-    const result = await this.#state().read(
-      { kind: "asset-index", asset: "rubrics" },
-      this.#readContext(),
-    );
+    const result = await this.#readIndex();
     if (result.kind !== "asset-index") {
       throw new TypeError("Rubric catalog returned another global read result");
     }
-    const assets = await Promise.all(result.entries.map((entry) => this.#loadEntry(entry)));
-    return assets.map(({ id, title, description, source, createdAt, updatedAt }) => ({
-      id, title, description, source, createdAt, updatedAt,
+    const assets = await Promise.all(result.entries.map(async (entry) => {
+      try {
+        return await this.#loadEntry(entry);
+      } catch (error) {
+        if (this.#options.executionAssets?.()) return undefined;
+        throw error;
+      }
     }));
+    return assets.filter((asset): asset is NonNullable<typeof asset> => asset !== undefined)
+      .map(({ id, title, description, source, createdAt, updatedAt }) => ({
+      id, title, description, source, createdAt, updatedAt,
+      }));
   }
 
   async load(id: string) {
-    const result = await this.#state().read(
-      { kind: "asset-index", asset: "rubrics" },
-      this.#readContext(),
-    );
+    const result = await this.#readIndex();
     if (result.kind !== "asset-index") {
       throw new TypeError("Rubric catalog returned another global read result");
     }
@@ -67,10 +75,11 @@ export class GlobalRubricCatalog implements RubricCatalogPort {
     readonly revision: number;
     readonly digest: Digest;
   }) {
-    const artifacts = this.#artifacts();
-    const ref = await artifacts.referenceForDigest(entry.digest);
-    if (!ref) throw new Error(`Rubric "${entry.id}" content asset is missing`);
-    const bytes = await artifacts.get(ref);
+    const cache = this.#options.executionAssets?.();
+    const bytes = cache
+      ? await cache.readArtifact(entry.digest)
+      : await this.#readGlobalArtifact(entry.digest);
+    if (!bytes) throw new Error(`Rubric "${entry.id}" content asset is missing`);
     const document = parseRubricDocument(Buffer.from(bytes).toString("utf8"));
     if (rubricDocumentId(document) !== entry.id) {
       throw new TypeError(`Rubric "${entry.id}" content identity is inconsistent`);
@@ -87,6 +96,22 @@ export class GlobalRubricCatalog implements RubricCatalogPort {
       updatedAt: `revision:${entry.revision}`,
       document,
     };
+  }
+
+  async #readIndex() {
+    const cache = this.#options.executionAssets?.();
+    return cache
+      ? cache.read({ kind: "asset-index", asset: "rubrics" })
+      : this.#state().read(
+          { kind: "asset-index", asset: "rubrics" },
+          this.#readContext(),
+        );
+  }
+
+  async #readGlobalArtifact(digest: Digest): Promise<Uint8Array | undefined> {
+    const artifacts = this.#artifacts();
+    const ref = await artifacts.referenceForDigest(digest);
+    return ref ? artifacts.get(ref) : undefined;
   }
 
   #state(): GlobalStatePort {

@@ -12,6 +12,7 @@ import type {
 import type {
   AuthorityCapability,
   AuthorityCallContext,
+  AuthorityError,
   AssignmentActivationProof,
   CommitEnvelope,
   ControlLease,
@@ -24,6 +25,7 @@ import type {
   ConversationInvocation,
   AssignmentResourceLease,
   DispatchResult,
+  ExecutionAssetBundle,
   LedgerEvidencePage,
   LedgerSnapshot,
   RunDispatchArguments,
@@ -137,7 +139,10 @@ export interface RemoteConversationExecutionTarget {
   readonly executorId: string;
   readonly deviceId: string;
   readonly executor: RunExecutorPort;
-  synchronizePermission(snapshot: TrustRuleSnapshot): Promise<ExecutorCapabilitySnapshot>;
+  synchronizePermission(
+    snapshot: TrustRuleSnapshot,
+    executionAssets?: ExecutionAssetBundle,
+  ): Promise<ExecutorCapabilitySnapshot>;
 }
 
 export interface RemoteConversationExecutionDirectory {
@@ -339,10 +344,23 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       options.localExecutor?.InProcessAssignmentSubmission;
     this.#createStream = options.localExecutor?.createStream;
     this.#localRuntimeFactory = options.localExecutor?.runtimeFactory;
+    const executorAuthority = authority.executorLog && authority.executorResources
+      ? authority as ConversationOwnerRuntimeStack & {
+          readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
+          readonly executorResources: NonNullable<
+            ConversationOwnerRuntimeStack["executorResources"]
+          >;
+        }
+      : undefined;
+    if (options.localExecutor?.ConversationAssignmentLedger && !executorAuthority) {
+      throw new Error(
+        "Local executor ledger requires executor authority log and resources",
+      );
+    }
     this.#ledger = options.localExecutor?.ledger ?? (options.localExecutor?.ConversationAssignmentLedger
       ? createConversationExecutorLedger({
       Constructor: options.localExecutor.ConversationAssignmentLedger,
-      authority,
+      authority: executorAuthority!,
       assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
       usageFinal: (assignmentId) =>
         authority.finalizeUsage(
@@ -1035,7 +1053,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         targets: remoteTargets.map((target) => ({
           executorId: target.executorId,
           deviceId: target.deviceId,
-          synchronizePermission: (snapshot) => target.synchronizePermission(snapshot),
+          synchronizePermission: (snapshot, executionAssets) =>
+            target.synchronizePermission(snapshot, executionAssets),
         })),
       });
       const targetExecutorId = preparedAuthority.executorId;
@@ -1389,7 +1408,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
                   anchorEpoch: this.#authority.ownerEpoch,
                 }),
               }
-            : {}),
+            : this.#authority.executionAssetCatalog
+              ? { globalQuery: this.#authority.executionAssetCatalog }
+              : {}),
           authorizeToolExecution: () =>
             localLedger!.authorizeToolExecution(
               assignmentId,
@@ -1398,7 +1419,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           modelCallResourceMeter: {
             reserve: async ({ callIndex, tokenUpperBound }) => {
               const usageId = `usage:${assignmentId}:model:${callIndex}`;
-              await this.#authority.executorResourceGovernor.reserveUsage(
+              await this.#requireExecutorResourceGovernor().reserveUsage(
                 dispatch.envelope.resourceLease,
                 { usageId, tokens: tokenUpperBound, calls: 1 },
                 resourceSubmissionContext,
@@ -1406,7 +1427,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               return { usageId };
             },
             consume: async ({ usageId, tokens }) => {
-              await this.#authority.executorResourceGovernor.consume(
+              await this.#requireExecutorResourceGovernor().consume(
                 dispatch.envelope.resourceLease,
                 { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
                 resourceSubmissionContext,
@@ -2003,7 +2024,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const queue = [...this.#recoveryConversations.entries()];
     let recovered = await this.#authority.resourceGovernor.reclaimExpired();
     if (this.#ledger) {
-      if (this.#authority.executorResourceGovernor !== this.#authority.resourceGovernor) {
+      if (
+        this.#authority.executorResourceGovernor &&
+        this.#authority.executorResourceGovernor !== this.#authority.resourceGovernor
+      ) {
         recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
       }
     }
@@ -2238,6 +2262,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!this.#sessionState) {
       this.#sessionState = new ConversationSessionStateAdapter({
         journalFor: (conversationId) => this.#journal(conversationId),
+        sessionExists: (conversationId) => this.sessionExists(conversationId),
         mutateControl: async (conversationId, mutation, ctx) => {
           const principal = ctx.principal.kind === "surface"
             ? {
@@ -2260,10 +2285,23 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             requestId: ctx.requestId,
             mutation,
             principal,
-            conversationExists: async () => true,
+            conversationExists: () => this.sessionExists(conversationId),
           });
+          if (result.status === "not-found") {
+            const error: AuthorityError = {
+              code: "not-found",
+              message: `Session does not exist: ${conversationId}`,
+              retryable: false,
+            };
+            throw error;
+          }
           if (result.status !== "accepted") {
-            throw new Error(`Session mutation was not accepted: ${result.status}`);
+            const error: AuthorityError = {
+              code: "busy",
+              message: `Session mutation is busy: ${conversationId}`,
+              retryable: true,
+            };
+            throw error;
           }
           return { revision: result.domainRevision };
         },
@@ -2907,6 +2945,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       envelope.assignmentId,
       structuredClone(envelope.work.ingress),
     );
+  }
+
+  #requireExecutorResourceGovernor() {
+    const resources = this.#authority.executorResourceGovernor;
+    if (!resources) {
+      throw new Error("Local executor resource authority is unavailable");
+    }
+    return resources;
   }
 
   async finalHistory(

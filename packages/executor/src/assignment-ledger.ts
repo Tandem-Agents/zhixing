@@ -411,6 +411,11 @@ export interface InteractionStreamProjectionReceipt {
   readonly checkpoint: StreamVerifierCheckpoint;
 }
 
+export interface PendingAssignmentInteraction {
+  readonly assignmentId: string;
+  readonly request: Extract<AssignmentRecord, { readonly t: "interaction-requested" }>;
+}
+
 interface FinishedInteraction {
   readonly body: Extract<AssignmentRecord, { t: "interaction-finished" }>;
   readonly recordSeq: number;
@@ -1559,6 +1564,19 @@ export class ConversationAssignmentLedger implements
         ? snapshot(finished.body.outcome, "Interaction outcome")
         : undefined;
     });
+  }
+
+  async pendingInteractionRequests(
+    assignmentId: string,
+  ): Promise<readonly PendingAssignmentInteraction[]> {
+    return this.#select(assignmentId, (state) =>
+      [...state.pendingRequests.values()]
+        .sort((left, right) => left.recordSeq - right.recordSeq)
+        .map(({ body }) => ({
+          assignmentId,
+          request: snapshot(body, "Pending interaction request"),
+        })),
+    );
   }
 
   async interactionStreamEvents(

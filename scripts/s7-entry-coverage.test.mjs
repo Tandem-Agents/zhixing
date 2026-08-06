@@ -396,6 +396,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   const paths = [
     "packages/cli/src/serve/conversation-owner-runtime.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -421,6 +423,53 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       ),
     )).join("\n"),
     /narrowed local owner contract|cannot receive the anchor authority stack/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "readonly protocol: LocalConversationProtocolPort;",
+        "readonly protocol: ConversationProtocolRuntime;",
+      ),
+    )).join("\n"),
+    /expose only LocalConversationProtocolPort/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => `import type { GlobalStatePort } from "@zhixing/core/contracts";\n${text}`,
+    )).join("\n"),
+    /forbidden capability GlobalStatePort/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "owner: localConversationOwnerRuntime(ctx.authorityRuntime),",
+        "owner: localConversationOwnerRuntime(ctx.authorityRuntime),\n      globalState: ctx.authorityRuntime.globalState,",
+      ),
+    )).join("\n"),
+    /forbidden or duplicate capability globalState/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "owner: localConversationOwnerRuntime(authority),",
+        "owner: authority,",
+      ),
+    )).join("\n"),
+    /must receive localConversationOwnerRuntime/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/conversation-owner-runtime.ts",
+      (text) => text.replace(
+        "executionAssetCatalog: authority.executionAssetCatalog,\n    globalPublishing: false,",
+        "executionAssetCatalog: authority.executionAssetCatalog,\n    globalState: authority.globalState,\n    globalPublishing: false,",
+      ),
+    )).join("\n"),
+    /constructs forbidden capability globalState/,
   );
 });
 

@@ -22,6 +22,7 @@ import {
 import {
   type ConversationAssignmentLedger,
   type InProcessAssignmentSubmission,
+  type PendingAssignmentInteraction,
 } from "@zhixing/executor";
 import {
   AssignmentInteractionProjector,
@@ -295,6 +296,37 @@ export class DurableConversationInteractionObserver
       ...binding,
       projectionDomain: "conversation",
     });
+  }
+
+  async pendingInteractions(): Promise<readonly PendingAssignmentInteraction[]> {
+    const active = new Map<
+      string,
+      { readonly ledger: ConversationAssignmentLedger; readonly requestIds: Set<string> }
+    >();
+    for (const [requestId, binding] of this.#requests) {
+      const existing = active.get(binding.assignmentId);
+      if (existing) {
+        if (existing.ledger !== binding.ledger) {
+          throw new Error("Interaction assignment is bound to multiple ledgers");
+        }
+        existing.requestIds.add(requestId);
+      } else {
+        active.set(binding.assignmentId, {
+          ledger: binding.ledger,
+          requestIds: new Set([requestId]),
+        });
+      }
+    }
+    const pending: PendingAssignmentInteraction[] = [];
+    for (const [assignmentId, binding] of active) {
+      for (const item of await binding.ledger.pendingInteractionRequests(assignmentId)) {
+        if (binding.requestIds.has(item.request.requestId)) pending.push(item);
+      }
+    }
+    return pending.sort((left, right) =>
+      left.assignmentId.localeCompare(right.assignmentId) ||
+      left.request.requestId.localeCompare(right.request.requestId),
+    );
   }
 
   releaseAssignment(assignmentId: string): void {

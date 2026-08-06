@@ -462,6 +462,31 @@ describe("ConversationProtocolRuntime", () => {
       ownerContext("local-owner-test:delete"),
     );
     await expect(restartedProtocol.sessionExists(deleteConversationId)).resolves.toBe(false);
+    await expect(
+      restartedProtocol.sessionState.mutate(
+        deleteConversationId,
+        { kind: "conversation-delete" },
+        ownerContext("local-owner-test:delete"),
+      ),
+    ).resolves.toEqual({ revision: 1 });
+    await expect(
+      restartedProtocol.sessionState.mutate(
+        deleteConversationId,
+        { kind: "session-meta", patch: { name: "must not resurrect" } },
+        ownerContext("local-owner-test:after-delete"),
+      ),
+    ).rejects.toMatchObject({ code: "not-found" });
+    const missingConversationId = localConversationId(
+      restartedAuthority.deviceId,
+      "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+    );
+    await expect(
+      restartedProtocol.sessionState.mutate(
+        missingConversationId,
+        { kind: "window-op", op: "compact" },
+        ownerContext("local-owner-test:missing"),
+      ),
+    ).rejects.toMatchObject({ code: "not-found" });
     await expect(restartedProtocol.ensureSession("conversation-anchor")).rejects.toThrow(
       "does not belong to this owner domain",
     );

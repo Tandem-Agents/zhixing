@@ -142,6 +142,11 @@ export {
   validateGlobalQueryResult,
 } from "./global-query-validation.js";
 export {
+  createSignedExecutionAssetSnapshot,
+  validateExecutionAssetSnapshot,
+  type UnsignedExecutionAssetSnapshot,
+} from "./execution-asset-snapshot.js";
+export {
   validateEnvironmentRequirement,
   validateMessage,
   validateMessages,

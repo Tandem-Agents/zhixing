@@ -28,6 +28,7 @@ import type {
   AuthorityRuntimeStack,
   PreparedConversationAssignmentAuthority,
 } from "../setup-delivery.js";
+import type { ExecutionAssetCatalogPort } from "./execution-asset-cache.js";
 
 export type ConversationOwnerDomain =
   | { readonly kind: "anchor"; readonly anchorEpoch: number }
@@ -54,18 +55,19 @@ export interface ConversationOwnerRuntimeStack {
   readonly log: AuthorityCommitLog;
   /** Compatibility aliases kept inside the composition boundary while consumers are domain-neutral. */
   readonly authorityLog: AuthorityCommitLog;
-  readonly executorLog: AuthorityCommitLog;
+  readonly executorLog?: AuthorityCommitLog;
   readonly artifacts: ArtifactStore;
   readonly controlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
   readonly resources: ConversationOwnerResourceAuthority;
   readonly resourceGovernor: ConversationOwnerResourceAuthority;
-  readonly executorResources: ExecutorResourceGovernor;
-  readonly executorResourceGovernor: ExecutorResourceGovernor;
+  readonly executorResources?: ExecutorResourceGovernor;
+  readonly executorResourceGovernor?: ExecutorResourceGovernor;
   readonly surfaceAssets?: SurfaceAssetCoordinator;
   readonly delivery?: ConversationDeliveryParticipant;
   readonly participant?: ConversationDeliveryParticipant;
   readonly globalState?: GlobalStatePort;
+  readonly executionAssetCatalog?: ExecutionAssetCatalogPort;
   readonly globalPublishing: boolean;
   readonly anchorEpoch: number;
   acceptsConversationId(conversationId: string): boolean;
@@ -100,6 +102,10 @@ export interface LocalConversationOwnerRuntimeStack
   readonly delivery?: never;
   readonly participant?: never;
   readonly globalState?: never;
+  readonly executorLog: AuthorityCommitLog;
+  readonly executorResources: ExecutorResourceGovernor;
+  readonly executorResourceGovernor: ExecutorResourceGovernor;
+  readonly executionAssetCatalog: ExecutionAssetCatalogPort;
   readonly globalPublishing: false;
 }
 
@@ -115,18 +121,25 @@ export function anchorConversationOwnerRuntime(
     verifier: authority.verifier,
     log: authority.authorityLog,
     authorityLog: authority.authorityLog,
-    executorLog: authority.executorLog,
+    ...(authority.localExecutorEnabled
+      ? { executorLog: authority.executorLog }
+      : {}),
     artifacts: authority.artifacts,
     controlAdmission: authority.controlAdmission,
     executorCapabilities: authority.executorCapabilities,
     resources: authority.resourceGovernor,
     resourceGovernor: authority.resourceGovernor,
-    executorResources: authority.executorResourceGovernor,
-    executorResourceGovernor: authority.executorResourceGovernor,
+    ...(authority.localExecutorEnabled
+      ? {
+          executorResources: authority.executorResourceGovernor,
+          executorResourceGovernor: authority.executorResourceGovernor,
+        }
+      : {}),
     surfaceAssets: authority.surfaceAssets,
     delivery: authority.participant,
     participant: authority.participant,
     ...(authority.globalState ? { globalState: authority.globalState } : {}),
+    executionAssetCatalog: authority.executionAssetCatalog,
     globalPublishing: true,
     anchorEpoch: authority.anchorEpoch,
     acceptsConversationId: (conversationId) => !isLocalConversationId(conversationId),
@@ -179,6 +192,7 @@ export function localConversationOwnerRuntime(
     resourceGovernor: resources,
     executorResources: authority.executorResourceGovernor,
     executorResourceGovernor: authority.executorResourceGovernor,
+    executionAssetCatalog: authority.executionAssetCatalog,
     globalPublishing: false,
     anchorEpoch: authority.localOwnerEpoch,
     acceptsConversationId(conversationId) {

@@ -391,6 +391,7 @@ export class MeshRuntimeAssembly {
         {
           currentCapability: options.authority.currentExecutorSnapshot,
           installPermission: options.authority.installPermissionSnapshot,
+          installAssets: options.authority.installExecutionAssetBundle,
         },
         (deviceId) => this.#peerHasRole(deviceId, "anchor"),
         options.authority.verifier,
@@ -576,7 +577,8 @@ export class MeshRuntimeAssembly {
     return (await directory.candidates()).map((target) => ({
       executorId: target.executorId,
       deviceId: target.deviceId,
-      synchronizePermission: (snapshot) => target.synchronizePermission(snapshot),
+      synchronizePermission: (snapshot, executionAssets) =>
+        target.synchronizePermission(snapshot, executionAssets),
     }));
   }
 
@@ -640,7 +642,8 @@ export class MeshRuntimeAssembly {
           authorizationFor: (assignmentId) =>
             this.options.protocol!.assignmentArtifactAuthority(assignmentId),
         }),
-        synchronizePermission: (snapshot) => snapshots.installPermission(snapshot),
+        synchronizePermission: (snapshot, executionAssets) =>
+          snapshots.installPermission(snapshot, executionAssets),
       } satisfies RemoteConversationExecutionTarget;
       targets.set(executorId, target);
       return target;
