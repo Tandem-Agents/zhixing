@@ -48,6 +48,7 @@ import {
   ServerStateFile,
   ServerLogLifecycle,
   CleanupRegistry,
+  registerCleanup,
   createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
@@ -596,7 +597,11 @@ async function runServerProcess(
   });
   startupRegistry = registry;
   if (serverLogLifecycle) {
-    registry.register("serverLogLifecycle.stop", () => serverLogCleanup!.run());
+    registerCleanup(
+      registry,
+      { role: "runtime", id: "serverLogLifecycle.stop" },
+      () => serverLogCleanup!.run(),
+    );
   }
 
   // 4a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
@@ -1172,31 +1177,31 @@ async function runServerProcess(
   //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
 
   if (ctx.meshRuntime) {
-    registry.register("meshRuntime.stop", async () => {
+    registerCleanup(registry, { role: "runtime", id: "meshRuntime.stop" }, async () => {
       await startupCleanups.meshRuntime!.run();
     });
   }
 
   if (ctx.executorDataPlane) {
-    registry.register("executorDataPlane.close", async () => {
+    registerCleanup(registry, { role: "runtime", id: "executorDataPlane.close" }, async () => {
       await startupCleanups.executorDataPlane!.run();
     });
   }
 
   if (ctx.jobStatus) {
-    registry.register("jobStatus.dispose", async () => {
+    registerCleanup(registry, { role: "runtime", id: "jobStatus.dispose" }, async () => {
       await startupCleanups.jobStatus!.run();
     });
   }
 
   if (ctx.assetMaintenance) {
-    registry.register("assetMaintenance.stop", async () => {
+    registerCleanup(registry, { role: "runtime", id: "assetMaintenance.stop" }, async () => {
       await startupCleanups.assetMaintenance!.run();
     });
   }
 
   if (ctx.executorJobOwner) {
-    registry.register("executorJobOwner.close", async () => {
+    registerCleanup(registry, { role: "runtime", id: "executorJobOwner.close" }, async () => {
       await startupCleanups.jobOwner!.run();
     });
   }
@@ -1204,7 +1209,7 @@ async function runServerProcess(
   // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
   // 更晚注册，仍会先停止新工作并收束在途执行。
   if (ctx.losslessDataPlane) {
-    registry.register("losslessDataPlane.close", async () => {
+    registerCleanup(registry, { role: "runtime", id: "losslessDataPlane.close" }, async () => {
       await startupCleanups.losslessDataPlane!.run();
     });
   }
@@ -1216,7 +1221,7 @@ async function runServerProcess(
   //                                 （partial yields + RunResult + 取消反馈）
   // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
   // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
-  registry.register("execution.abortAllAndWait", async () => {
+  registerCleanup(registry, { role: "runtime", id: "execution.abortAllAndWait" }, async () => {
     await Promise.all([
       ...(ctx.conversations
         ? [
@@ -1231,7 +1236,7 @@ async function runServerProcess(
 
   if (ctx.conversationProtocol) {
     const protocol = ctx.conversationProtocol;
-    registry.register("conversationProtocol.stopRecovery", async () => {
+    registerCleanup(registry, { role: "runtime", id: "conversationProtocol.stopRecovery" }, async () => {
       await protocol.stopRecoveryLoop();
     });
   }
@@ -1240,21 +1245,21 @@ async function runServerProcess(
   // executor/job/channel owners are released so no new occurrence can enter
   // while every accepted assignment is already durable and restartable.
   if (schedulerCleanup) {
-    registry.register("scheduler.stop", async () => {
+    registerCleanup(registry, { role: "runtime", id: "scheduler.stop" }, async () => {
       await schedulerCleanup!.run();
     });
   }
 
   if (ctx.inboundRouter) {
     const router = ctx.inboundRouter;
-    registry.register("inboundRouter.refuseNew", () => {
+    registerCleanup(registry, { role: "runtime", id: "inboundRouter.refuseNew" }, () => {
       router.refuseNewMessages();
     });
   }
 
   if (ctx.evidenceHandler) {
     const evidenceHandler = ctx.evidenceHandler;
-    registry.register("evidenceHandler.stopAccepting", () => {
+    registerCleanup(registry, { role: "runtime", id: "evidenceHandler.stopAccepting" }, () => {
       evidenceHandler.stopAccepting();
     });
   }
@@ -1338,7 +1343,11 @@ async function runServerProcess(
       }
     }, IDLE_CHECK_MS);
     idleTimer.unref();
-    registry.register("idleReaper.clear", () => clearInterval(idleTimer));
+    registerCleanup(
+      registry,
+      { role: "runtime", id: "idleReaper.clear" },
+      () => clearInterval(idleTimer),
+    );
   }
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成

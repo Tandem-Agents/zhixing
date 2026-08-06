@@ -53,6 +53,11 @@ import {
  */
 const SHUTDOWN_REFUSAL_NOTICE_ZH = "服务暂时不可用,请稍后重新发送。";
 
+/** 生产路由入口 descriptor；类本体与 S7 覆盖门禁共同消费。 */
+export const INBOUND_ROUTER_ENTRY_DESCRIPTOR = {
+  name: "InboundRouter",
+} as const;
+
 export interface InboundRouterOptions {
   conversations: ConversationManager;
   channels: ChannelRegistry;
@@ -94,6 +99,8 @@ export interface InboundRouterOptions {
 }
 
 export class InboundRouter {
+  static readonly entryDescriptor = INBOUND_ROUTER_ENTRY_DESCRIPTOR;
+
   private readonly conversations: ConversationManager;
   private readonly channels: ChannelRegistry;
   private readonly logger: ChannelLogger;

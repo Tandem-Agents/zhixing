@@ -16,7 +16,7 @@
  *   4. 可扩展——新资源加在哪一层由"何时 ready"决定（runServer 前还是后）
  */
 
-import { readLock, releaseLock } from "@zhixing/server";
+import { readLock, registerCleanup, releaseLock } from "@zhixing/server";
 import type {
   CleanupRegistry,
   ServerStateFile,
@@ -85,17 +85,17 @@ export function registerTailCleanup(
   //
   // 修复：读 PID 文件，只有 pid === process.pid 才 unlink。非本进程的锁 / 没有锁
   // 文件（acquire 根本没跑）时 no-op。
-  registry.register("releaseLock", async () => {
+  registerCleanup(registry, { role: "common", id: "releaseLock" }, async () => {
     const current = await readLock(resources.lockPaths).catch(() => null);
     if (current?.pid === process.pid) {
       await releaseLock(resources.lockPaths);
     }
   });
   if (resources.stateFile) {
-    registry.register("stateFile.cleanup", async () => {
+    registerCleanup(registry, { role: "common", id: "stateFile.cleanup" }, async () => {
       await resources.stateFile!.cleanup();
     });
-    registry.register("stateFile.markStopped", async () => {
+    registerCleanup(registry, { role: "common", id: "stateFile.markStopped" }, async () => {
       await resources.stateFile!.markStopped();
     });
   }
@@ -122,30 +122,34 @@ export function registerCoreCleanup(
   resources: ShutdownChainResources,
 ): void {
   if (resources.authorityRuntime) {
-    registry.register("authorityRuntime.stopStorageMaintenance", async () => {
-      const cleanup = resources.startupCleanups?.authorityRuntime;
-      if (cleanup) await cleanup.run();
-      else await resources.authorityRuntime!.stopStorageMaintenance();
-    });
+    registerCleanup(
+      registry,
+      { role: "common", id: "authorityRuntime.stopStorageMaintenance" },
+      async () => {
+        const cleanup = resources.startupCleanups?.authorityRuntime;
+        if (cleanup) await cleanup.run();
+        else await resources.authorityRuntime!.stopStorageMaintenance();
+      },
+    );
   }
   if (resources.startupCleanups?.localWorkspaceHost) {
-    registry.register("localWorkspaceHost.close", async () => {
+    registerCleanup(registry, { role: "common", id: "localWorkspaceHost.close" }, async () => {
       await resources.startupCleanups!.localWorkspaceHost!.run();
     });
   }
-  registry.register("heartbeat.clear", () => {
+  registerCleanup(registry, { role: "common", id: "heartbeat.clear" }, () => {
     const t = resources.heartbeatTimerRef.current;
     if (t) clearInterval(t);
   });
   if (resources.channels) {
-    registry.register("channels.dispose", async () => {
+    registerCleanup(registry, { role: "common", id: "channels.dispose" }, async () => {
       const cleanup = resources.startupCleanups?.channels;
       if (cleanup) await cleanup.run();
       else await resources.channels!.dispose();
     });
   }
   if (resources.deliveryStack) {
-    registry.register("deliveryStack.stop", async () => {
+    registerCleanup(registry, { role: "common", id: "deliveryStack.stop" }, async () => {
       const cleanup = resources.startupCleanups?.deliveryStack;
       if (cleanup) await cleanup.run();
       else await resources.deliveryStack!.stop();
@@ -155,21 +159,21 @@ export function registerCoreCleanup(
     // LIFO 执行落在 scheduler.stop 之后、channels.dispose 之前：先停调度（不再有
     // 新 turn）→ 关 MCP 连接 / 子进程。in-flight turn 已由 graceful shutdown 等待
     // 完成，此刻关 hub 不会切断进行中的 MCP 调用。
-    registry.register("mcpHub.dispose", async () => {
+    registerCleanup(registry, { role: "common", id: "mcpHub.dispose" }, async () => {
       const cleanup = resources.startupCleanups?.mcp;
       if (cleanup) await cleanup.run();
       else await resources.mcpHub!.dispose();
     });
   }
   if (resources.scheduler) {
-    registry.register("scheduler.stop", async () => {
+    registerCleanup(registry, { role: "common", id: "scheduler.stop" }, async () => {
       const cleanup = resources.startupCleanups?.scheduler;
       if (cleanup) await cleanup.run();
       else await resources.scheduler!.stop();
     });
   }
   if (resources.stateFile) {
-    registry.register("stateFile.markStopping", async (reason) => {
+    registerCleanup(registry, { role: "common", id: "stateFile.markStopping" }, async (reason) => {
       await resources.stateFile!.markStopping(mapReasonToExit(reason));
     });
   }

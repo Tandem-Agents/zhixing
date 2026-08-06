@@ -32,6 +32,17 @@ export interface CleanupRegistryOptions {
 
 export type CleanupFn = (reason: string) => Promise<void> | void;
 
+export type CleanupRegistrationRole =
+  | "server"
+  | "runtime"
+  | "common"
+  | "surface";
+
+export interface CleanupRegistrationDescriptor {
+  readonly role: CleanupRegistrationRole;
+  readonly id: string;
+}
+
 interface CleanupEntry {
   name: string;
   fn: CleanupFn;
@@ -94,4 +105,16 @@ export class CleanupRegistry {
   get finished(): boolean {
     return this.ran;
   }
+}
+
+/**
+ * 以生产 descriptor 注册清理项。role 只描述装配归属，运行时仍由同一 registry
+ * 按 id 执行；覆盖门禁直接读取这些真实调用，不维护平行清单。
+ */
+export function registerCleanup(
+  registry: CleanupRegistry,
+  descriptor: CleanupRegistrationDescriptor,
+  fn: CleanupFn,
+): void {
+  registry.register(descriptor.id, fn);
 }

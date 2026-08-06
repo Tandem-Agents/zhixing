@@ -15,7 +15,7 @@
 - 手动触发与 timer 都先耐久写入稳定 `jobRunId`。手动受理立即发布该身份，现有等待式 facade 只依据对应 job 的权威状态与结果投影完成；断线不取消，重试不产生第二个 job。
 - 用户 job 经统一 assignment 协议派发到 local/mesh executor；system job 由锚点按封闭 handler 注册表在本地执行，禁止经 RPC 创建、读取、触发或取消。
 - 手动 job 的交互资格来自首次耐久 ingress，可签发原 surface 的数据面票据；定时 job 无 ingress，只能走已冻结的渠道 grant。两类路径不得试探或互相降级。
-- 新投递统一由权威 Delivery 日志、outbox 与状态目录驱动。旧 `DeliveryPipeline` / queue / store 只允许一次性排空迁移，排空后删除且永不接收新写入。
+- 新投递只由现行 `AuthorityDelivery` 日志、outbox 与状态目录驱动，是唯一生产链。旧 `DeliveryPipeline` / queue / store 已整体退役，生产装配与公开入口均不存在；旧迁移排空入口已删除，不得复活。
 - 停机按“拒绝新入口 → 停止 timer 触发 → 收敛或耐久化已接管执行 → 释放 transport”推进；不得用一个全局 abort 同时终止业务执行和可重建恢复尝试。
 
 ---

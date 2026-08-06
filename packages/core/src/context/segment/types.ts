@@ -180,6 +180,15 @@ export const SEGMENT_TRANSITION_HOOK_PHASES = [
   "beforeNewSegmentStart",
 ] as const satisfies readonly (keyof SegmentTransitionHook)[];
 
+type MissingSegmentTransitionHookPhase = Exclude<
+  keyof SegmentTransitionHook,
+  (typeof SEGMENT_TRANSITION_HOOK_PHASES)[number]
+>;
+const segmentTransitionHookPhasesAreExhaustive: MissingSegmentTransitionHookPhase extends never
+  ? true
+  : never = true;
+void segmentTransitionHookPhasesAreExhaustive;
+
 export interface SegmentTransitionContext {
   /** ephemeral 运行体（定时任务等）无对话身份 —— hook 自行差分持久化副作用 */
   readonly conversationId: string | undefined;

@@ -105,8 +105,9 @@ export function captureCliCommandDescriptor(
     entries.push({
       path,
       hidden: (command as Command & { readonly _hidden?: boolean })._hidden === true,
-      hasAction: command.registeredArguments.length > 0 || command.commands.length === 0 ||
-        command.listeners("action").length > 0,
+      hasAction:
+        typeof (command as Command & { readonly _actionHandler?: unknown })
+          ._actionHandler === "function",
     });
     for (const child of command.commands) visit(child, [...parents, name]);
   };

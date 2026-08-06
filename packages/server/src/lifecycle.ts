@@ -47,7 +47,7 @@ import {
   type AcquireLockOptions,
   type ProcessLockPaths,
 } from "./process-lock.js";
-import { CleanupRegistry } from "./cleanup-registry.js";
+import { CleanupRegistry, registerCleanup } from "./cleanup-registry.js";
 
 export interface RunServerOptions extends StartServerOptions {
   /** Scheduler 实例（已 start）。独立模式会在 registry 中注册 scheduler.stop */
@@ -131,24 +131,22 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
 
   // 4. 注册 server-internal cleanup
   //    LIFO 语义：后注册者先执行 = 注册顺序是期望执行顺序的倒序。
-  if (injected) {
-    // 注入模式：只管 server.close，其他由调用方在此前/此后注册
-    registry.register("server.close", async () => {
-      await server.close();
-    });
-  } else {
+  if (!injected) {
     // 独立模式：保持 M3 之前的 shutdown 顺序（scheduler.stop → server.close → releaseLock）
     // 注册顺序（倒序）：releaseLock → server.close → scheduler.stop
     if (!opts.skipProcessLock) {
-      registry.register("releaseLock", async () => {
+      registerCleanup(registry, { role: "server", id: "releaseLock" }, async () => {
         await releaseLock(opts.lockPaths);
       });
     }
-    registry.register("server.close", async () => {
-      await server.close();
-    });
+  }
+  // 两种模式都由同一 production descriptor 注册 server.close。
+  registerCleanup(registry, { role: "server", id: "server.close" }, async () => {
+    await server.close();
+  });
+  if (!injected) {
     if (opts.scheduler) {
-      registry.register("scheduler.stop", async () => {
+      registerCleanup(registry, { role: "server", id: "scheduler.stop" }, async () => {
         await opts.scheduler!.stop();
       });
     }

@@ -44,30 +44,59 @@ import {
 } from "./workmode-tools.js";
 
 export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
-  { key: "schedule:manage", toolName: "schedule", authorityWrite: true },
-  { key: "schedule:run", toolName: "schedule", authorityWrite: true },
-  { key: "task-list", toolName: "task_list", authorityWrite: true },
-  { key: "workscene:enter", toolName: "workmode_enter", authorityWrite: true },
-  { key: "workscene:exit", toolName: "workmode_exit", authorityWrite: true },
+  {
+    key: "schedule:manage",
+    toolName: "schedule",
+    authorityWrite: true,
+    runtimeKinds: ["main", "workscene"],
+  },
+  {
+    key: "schedule:run",
+    toolName: "schedule",
+    authorityWrite: true,
+    runtimeKinds: ["main", "workscene"],
+  },
+  {
+    key: "task-list",
+    toolName: "task_list",
+    authorityWrite: true,
+    runtimeKinds: ["main", "workscene"],
+  },
+  {
+    key: "workscene:enter",
+    toolName: "workmode_enter",
+    authorityWrite: true,
+    runtimeKinds: ["main"],
+  },
+  {
+    key: "workscene:exit",
+    toolName: "workmode_exit",
+    authorityWrite: true,
+    runtimeKinds: ["workscene"],
+  },
   {
     key: "workscene:change-approve",
     toolName: "workscene_change_approve",
     authorityWrite: true,
+    runtimeKinds: ["main"],
   },
   {
     key: "workscene:rename-current",
     toolName: "workscene_rename_current",
     authorityWrite: true,
+    runtimeKinds: ["workscene"],
   },
   {
     key: "workscene:set-workdir-current",
     toolName: "workscene_set_workdir_current",
     authorityWrite: true,
+    runtimeKinds: ["workscene"],
   },
   {
     key: "workscene:clear-workdir-current",
     toolName: "workscene_clear_workdir_current",
     authorityWrite: true,
+    runtimeKinds: ["workscene"],
   },
 ] as const;
 

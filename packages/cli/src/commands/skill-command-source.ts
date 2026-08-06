@@ -24,8 +24,14 @@ import type {
   SkillRecord,
 } from "@zhixing/core";
 
-/** 动态源 id —— 命令 id 前缀 `skill:` 与之对应,registry 据此归属本源。 */
-const SOURCE_ID = "skill";
+/** 动态技能命令的生产 descriptor；注册源与覆盖门禁共同消费。 */
+export const SKILL_COMMAND_SOURCE_DESCRIPTOR = {
+  sourceId: "skill",
+  entryId: "skill:<catalog-id>",
+  name: "<catalog-id>",
+  execution: "agent",
+  collisionPolicy: "builtin-first",
+} as const;
 
 /** SkillCommandSource 的最小依赖(接口隔离,便于单测注入 stub)。 */
 export interface SkillCommandSourceDeps {
@@ -39,7 +45,7 @@ export interface SkillCommandSourceDeps {
 }
 
 export class SkillCommandSource implements DynamicCommandSource {
-  readonly id = SOURCE_ID;
+  readonly id = SKILL_COMMAND_SOURCE_DESCRIPTOR.sourceId;
 
   constructor(private readonly deps: SkillCommandSourceDeps) {}
 
@@ -48,18 +54,21 @@ export class SkillCommandSource implements DynamicCommandSource {
     const commands: CommandDef[] = [];
     for (const s of skills) {
       const clash = this.deps.findExisting(s.id);
-      if (clash && !clash.id.startsWith(`${SOURCE_ID}:`)) {
+      if (
+        clash &&
+        !clash.id.startsWith(`${SKILL_COMMAND_SOURCE_DESCRIPTOR.sourceId}:`)
+      ) {
         // 与非技能命令撞名:让核心命令优先,本技能不注册为 slash 命令。
         continue;
       }
       commands.push({
-        id: `${SOURCE_ID}:${s.id}`,
+        id: `${SKILL_COMMAND_SOURCE_DESCRIPTOR.sourceId}:${s.id}`,
         name: s.id,
         aliases: s.name !== s.id ? [s.name] : undefined,
         description: s.description,
         category: "plugin",
         tag: "plugin",
-        execution: "agent",
+        execution: SKILL_COMMAND_SOURCE_DESCRIPTOR.execution,
       });
     }
     return commands;

@@ -185,3 +185,12 @@ export const AGENT_RUNTIME_LIFECYCLE_PHASES = [
   "onAfterRun",
   "onWindowClose",
 ] as const satisfies readonly (keyof AgentRuntimeLifecycle)[];
+
+type MissingAgentRuntimeLifecyclePhase = Exclude<
+  Exclude<keyof AgentRuntimeLifecycle, "id">,
+  (typeof AGENT_RUNTIME_LIFECYCLE_PHASES)[number]
+>;
+const agentRuntimeLifecyclePhasesAreExhaustive: MissingAgentRuntimeLifecyclePhase extends never
+  ? true
+  : never = true;
+void agentRuntimeLifecyclePhasesAreExhaustive;

@@ -65,6 +65,7 @@ import {
   EvidenceJournal,
   ExecutorEvidenceHandler,
 } from "@zhixing/orchestrator/advancement";
+import { registerCleanup } from "@zhixing/server";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -883,9 +884,13 @@ const confirmationBridgeSurface: AccessSurface = {
       hub: confirmationHub,
       conversations,
     });
-    cleanup.register("confirmationBridge.dispose", () => {
-      confirmationBridge.dispose();
-    });
+    registerCleanup(
+      cleanup,
+      { role: "surface", id: "confirmationBridge.dispose" },
+      () => {
+        confirmationBridge.dispose();
+      },
+    );
   },
 };
 
