@@ -18,7 +18,7 @@ import {
   RpcClientError,
 } from "@zhixing/server";
 import type { SessionSecurityResult } from "@zhixing/rpc";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 /** skill.list 条目——补全候选与管理器消费的最小面(宿主返回 SkillStore 全集) */
 export interface SkillListEntry {
@@ -90,7 +90,7 @@ export interface ServerShutdownRequest {
 }
 
 export class RpcManagementFacade {
-  constructor(private readonly link: CoreHostLink) {}
+  constructor(private readonly link: CoreHostRpcLink) {}
 
   // ─── trust ───
 

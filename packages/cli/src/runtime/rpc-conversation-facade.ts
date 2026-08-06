@@ -2,7 +2,7 @@
  * RpcConversationFacade —— cli 经 RPC 接入核心宿主的会话域方法门面。
  *
  * 对标 RpcSchedulerFacade:facade 是方法域封装、不持连接——连接是进程级
- * 共享的 CoreHostLink(调度 / 会话 / 确认域共用一条已认证连接),建立 /
+ * 共享的 CoreHostRpcLink(调度 / 会话 / 确认域共用一条已认证连接),建立 /
  * 重连 / 释放归连接持有者。
  *
  * 方法调用按需 ensure 宿主;通知订阅(onDelta / onComplete / onChanged /
@@ -55,7 +55,7 @@ import {
   RPC_ERROR_CODES,
 } from "@zhixing/server";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface SessionHistoryOptions {
   /** 单页 run 数上限(宿主默认 20、上限 200) */
@@ -71,7 +71,7 @@ export interface ConversationStatusCursor {
 }
 
 export class RpcConversationFacade {
-  constructor(private readonly link: CoreHostLink) {}
+  constructor(private readonly link: CoreHostRpcLink) {}
 
   // ─── 方法域 ───
 

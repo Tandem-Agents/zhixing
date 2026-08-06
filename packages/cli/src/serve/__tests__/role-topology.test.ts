@@ -43,7 +43,12 @@ describe("serve role topology", () => {
     expect(harness.anchorHost).toHaveBeenCalledOnce();
     expect(harness.executorHost).not.toHaveBeenCalled();
     expect(harness.executor).toHaveBeenCalledOnce();
-    expect(harness.run).toHaveBeenCalledWith(options, bootstrap, harness.executorModule);
+    expect(harness.run).toHaveBeenCalledWith(
+      options,
+      bootstrap,
+      harness.executorModule,
+      planServeTopology({ roles: ["anchor", "executor"] }),
+    );
   });
 
   it.each([
@@ -89,7 +94,12 @@ describe("serve role topology", () => {
     expect(harness.anchorHost).toHaveBeenCalledOnce();
     expect(harness.executorHost).not.toHaveBeenCalled();
     expect(harness.executor).not.toHaveBeenCalled();
-    expect(harness.run).toHaveBeenCalledWith({}, bootstrap, undefined);
+    expect(harness.run).toHaveBeenCalledWith(
+      {},
+      bootstrap,
+      undefined,
+      planServeTopology({ roles: ["anchor"] }),
+    );
   });
 
   it("loads only the executor host for an executor-only device", async () => {
@@ -105,7 +115,12 @@ describe("serve role topology", () => {
     expect(harness.anchorHost).not.toHaveBeenCalled();
     expect(harness.executorHost).toHaveBeenCalledOnce();
     expect(harness.executor).toHaveBeenCalledOnce();
-    expect(harness.run).toHaveBeenCalledWith({}, bootstrap, harness.executorModule);
+    expect(harness.run).toHaveBeenCalledWith(
+      {},
+      bootstrap,
+      harness.executorModule,
+      planServeTopology({ roles: ["executor"] }),
+    );
   });
 
   it("evaluates the anchor entry without evaluating the executor package", async () => {
@@ -131,15 +146,35 @@ describe("serve role topology", () => {
   });
 
   it("derives topology from the role set without a second mode flag", () => {
-    expect(planServeTopology({ roles: [] })).toBe("disabled");
-    expect(planServeTopology({ roles: ["surface"] })).toBe("disabled");
-    expect(planServeTopology({ roles: ["anchor", "executor"] })).toBe(
-      "anchor-host",
-    );
-    expect(planServeTopology({ roles: ["executor", "anchor"] })).toBe(
-      "anchor-host",
-    );
-    expect(planServeTopology({ roles: ["anchor"] })).toBe("anchor-host");
-    expect(planServeTopology({ roles: ["executor"] })).toBe("executor-host");
+    expect(planServeTopology({ roles: [] })).toEqual({
+      host: "disabled",
+      loadExecutor: false,
+      activeCleanupOwners: [],
+    });
+    expect(planServeTopology({ roles: ["surface"] })).toEqual({
+      host: "disabled",
+      loadExecutor: false,
+      activeCleanupOwners: [],
+    });
+    expect(planServeTopology({ roles: ["anchor", "executor"] })).toEqual({
+      host: "anchor-host",
+      loadExecutor: true,
+      activeCleanupOwners: ["anchor-host", "anchor-local-executor"],
+    });
+    expect(planServeTopology({ roles: ["executor", "anchor"] })).toEqual({
+      host: "anchor-host",
+      loadExecutor: true,
+      activeCleanupOwners: ["anchor-host", "anchor-local-executor"],
+    });
+    expect(planServeTopology({ roles: ["anchor"] })).toEqual({
+      host: "anchor-host",
+      loadExecutor: false,
+      activeCleanupOwners: ["anchor-host"],
+    });
+    expect(planServeTopology({ roles: ["executor"] })).toEqual({
+      host: "executor-host",
+      loadExecutor: true,
+      activeCleanupOwners: [],
+    });
   });
 });

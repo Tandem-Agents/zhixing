@@ -5,11 +5,11 @@ import {
   type RpcClient,
 } from "@zhixing/server";
 import { RpcManagementFacade } from "../rpc-management-facade.js";
-import type { CoreHostLink } from "../core-host-connection.js";
+import type { CoreHostRpcLink } from "../core-host-connection.js";
 
 function linkWithRequest(
   request: RpcClient["request"],
-): CoreHostLink {
+): CoreHostRpcLink {
   return {
     getClient: async () => ({ request }) as RpcClient,
     onNotification: () => () => {},

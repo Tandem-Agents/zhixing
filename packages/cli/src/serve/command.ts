@@ -89,6 +89,7 @@ import {
 import type {
   ExecutorRoleModule,
   ServeBootstrapContext,
+  ServeTopologyPlan,
 } from "./role-topology.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
@@ -154,15 +155,17 @@ export interface ServeOptions {
 export async function runServeCommand(
   opts: ServeOptions,
   bootstrap: ServeBootstrapContext,
-  executor?: ExecutorRoleModule,
+  executor: ExecutorRoleModule | undefined,
+  plan: ServeTopologyPlan,
 ): Promise<void> {
-  await runServerProcess(opts, bootstrap, executor);
+  await runServerProcess(opts, bootstrap, executor, plan);
 }
 
 async function runServerProcess(
   opts: ServeOptions,
   bootstrap: ServeBootstrapContext,
   executor: ExecutorRoleModule | undefined,
+  plan: ServeTopologyPlan,
 ): Promise<void> {
   const startupRollback = new StartupRollback();
   let startupRegistry: CleanupRegistry | undefined;
@@ -589,6 +592,7 @@ async function runServerProcess(
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
   //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
   const registry = new CleanupRegistry({
+    activeOwners: plan.activeCleanupOwners,
     logger: {
       info: (msg) => console.log(chalk.dim(`[cleanup] ${msg}`)),
       error: (msg, err) =>
@@ -599,7 +603,7 @@ async function runServerProcess(
   if (serverLogLifecycle) {
     registerCleanup(
       registry,
-      { role: "runtime", id: "serverLogLifecycle.stop" },
+      { owner: "anchor-host", role: "runtime", id: "serverLogLifecycle.stop" },
       () => serverLogCleanup!.run(),
     );
   }
@@ -1177,31 +1181,31 @@ async function runServerProcess(
   //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
 
   if (ctx.meshRuntime) {
-    registerCleanup(registry, { role: "runtime", id: "meshRuntime.stop" }, async () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {
       await startupCleanups.meshRuntime!.run();
     });
   }
 
   if (ctx.executorDataPlane) {
-    registerCleanup(registry, { role: "runtime", id: "executorDataPlane.close" }, async () => {
+    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorDataPlane.close" }, async () => {
       await startupCleanups.executorDataPlane!.run();
     });
   }
 
   if (ctx.jobStatus) {
-    registerCleanup(registry, { role: "runtime", id: "jobStatus.dispose" }, async () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "jobStatus.dispose" }, async () => {
       await startupCleanups.jobStatus!.run();
     });
   }
 
   if (ctx.assetMaintenance) {
-    registerCleanup(registry, { role: "runtime", id: "assetMaintenance.stop" }, async () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "assetMaintenance.stop" }, async () => {
       await startupCleanups.assetMaintenance!.run();
     });
   }
 
   if (ctx.executorJobOwner) {
-    registerCleanup(registry, { role: "runtime", id: "executorJobOwner.close" }, async () => {
+    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorJobOwner.close" }, async () => {
       await startupCleanups.jobOwner!.run();
     });
   }
@@ -1209,7 +1213,7 @@ async function runServerProcess(
   // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
   // 更晚注册，仍会先停止新工作并收束在途执行。
   if (ctx.losslessDataPlane) {
-    registerCleanup(registry, { role: "runtime", id: "losslessDataPlane.close" }, async () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close" }, async () => {
       await startupCleanups.losslessDataPlane!.run();
     });
   }
@@ -1221,7 +1225,7 @@ async function runServerProcess(
   //                                 （partial yields + RunResult + 取消反馈）
   // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
   // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
-  registerCleanup(registry, { role: "runtime", id: "execution.abortAllAndWait" }, async () => {
+  registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "execution.abortAllAndWait" }, async () => {
     await Promise.all([
       ...(ctx.conversations
         ? [
@@ -1236,7 +1240,7 @@ async function runServerProcess(
 
   if (ctx.conversationProtocol) {
     const protocol = ctx.conversationProtocol;
-    registerCleanup(registry, { role: "runtime", id: "conversationProtocol.stopRecovery" }, async () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "conversationProtocol.stopRecovery" }, async () => {
       await protocol.stopRecoveryLoop();
     });
   }
@@ -1245,21 +1249,21 @@ async function runServerProcess(
   // executor/job/channel owners are released so no new occurrence can enter
   // while every accepted assignment is already durable and restartable.
   if (schedulerCleanup) {
-    registerCleanup(registry, { role: "runtime", id: "scheduler.stop" }, async () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "scheduler.stop" }, async () => {
       await schedulerCleanup!.run();
     });
   }
 
   if (ctx.inboundRouter) {
     const router = ctx.inboundRouter;
-    registerCleanup(registry, { role: "runtime", id: "inboundRouter.refuseNew" }, () => {
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "inboundRouter.refuseNew" }, () => {
       router.refuseNewMessages();
     });
   }
 
   if (ctx.evidenceHandler) {
     const evidenceHandler = ctx.evidenceHandler;
-    registerCleanup(registry, { role: "runtime", id: "evidenceHandler.stopAccepting" }, () => {
+    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "evidenceHandler.stopAccepting" }, () => {
       evidenceHandler.stopAccepting();
     });
   }
@@ -1345,7 +1349,7 @@ async function runServerProcess(
     idleTimer.unref();
     registerCleanup(
       registry,
-      { role: "runtime", id: "idleReaper.clear" },
+      { owner: "anchor-host", role: "runtime", id: "idleReaper.clear" },
       () => clearInterval(idleTimer),
     );
   }

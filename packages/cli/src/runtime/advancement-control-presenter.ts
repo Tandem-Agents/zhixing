@@ -14,11 +14,11 @@
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
 import { renderAdvancementControlEventLines } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostNotificationLink } from "./core-host-connection.js";
 
 export interface AdvancementControlPresenterOptions {
   /** 进程级共享的核心宿主连接。 */
-  link: CoreHostLink;
+  link: CoreHostNotificationLink;
   writer: Pick<CliWriter, "ensureSegmentBreak" | "line">;
   /** 信封级过滤（如「只呈现当前对话」）。缺省全收。 */
   filter?: (envelope: SessionEventEnvelope) => boolean;

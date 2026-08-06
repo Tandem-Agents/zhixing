@@ -11,13 +11,18 @@ const target = path.join(root, "packages/server/src/__tests__/__goldens__/canoni
 export async function captureCanonicalRegistryGolden() {
   const hosted = captureBuiltinRegistryDescriptor();
   const registryFor = (roles) =>
-    planServeTopology({ roles }) === "anchor-host" ? hosted : [];
+    planServeTopology({ roles }).host === "anchor-host" ? hosted : [];
   return {
     version: 2,
     roleConfigurations: {
       "anchor-executor": registryFor(["anchor", "executor"]),
+      "anchor-executor-surface": registryFor(["anchor", "executor", "surface"]),
+      "anchor-only": registryFor(["anchor"]),
       "anchor-surface": registryFor(["anchor", "surface"]),
       "executor-only": registryFor(["executor"]),
+      "executor-surface": registryFor(["executor", "surface"]),
+      "disabled-empty": registryFor([]),
+      "surface-only": registryFor(["surface"]),
     },
     retiredMethods: ["workspace.binding.admin", "workspace.binding.reset"],
     entryCoverage: await captureS7EntryCoverage(),

@@ -7,12 +7,12 @@ import type { PublishResultNotice, WorksceneAppliedResult } from "@zhixing/core/
 import { publishConflictProductCopy } from "@zhixing/owner-kernel";
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostNotificationLink } from "./core-host-connection.js";
 
 const MAX_SEEN_RESULTS = 1_024;
 
 export interface PublishResultPresenterOptions {
-  readonly link: CoreHostLink;
+  readonly link: CoreHostNotificationLink;
   readonly writer: Pick<CliWriter, "ensureSegmentBreak" | "line">;
   readonly filter?: (envelope: SessionEventEnvelope) => boolean;
   readonly flushOutput?: () => void;

@@ -8,11 +8,11 @@ import {
   type LifecycleWarningDeduper,
 } from "../lifecycle-diagnostics-presentation.js";
 import type { CliWriter } from "../screen/index.js";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostNotificationLink } from "./core-host-connection.js";
 import type { AgentEventMap } from "@zhixing/core";
 
 export interface LifecycleDiagnosticsPresenterOptions {
-  readonly link: CoreHostLink;
+  readonly link: CoreHostNotificationLink;
   readonly writer: Pick<CliWriter, "ensureSegmentBreak" | "line">;
   readonly filter?: (envelope: SessionEventEnvelope) => boolean;
   readonly flushOutput?: () => void;

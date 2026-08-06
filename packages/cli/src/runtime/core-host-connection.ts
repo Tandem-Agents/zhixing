@@ -89,18 +89,18 @@ interface EstablishedClient {
   lifecycleNotices?: readonly CoreHostLifecycleNotice[];
 }
 
-/**
- * 连接的窄面 —— 各域设施(RpcSchedulerFacade / RpcConversationFacade /
- * RpcEventBus 等)依赖此接口而非具体类:设施只需要「请求 + 持久订阅」,
- * 连接的建立 / 重连 / 释放归进程级持有者,测试也无需绕完整连接装配。
- */
-export interface CoreHostLink {
+/** 只读 notification 窄面；presenter 与 event bus 不持有原始请求能力。 */
+export interface CoreHostNotificationLink {
+  /** 持久订阅一个 notification(跨重连有效、被动——不为订阅拉起宿主)。 */
+  onNotification(method: string, handler: NotificationHandler): () => void;
+}
+
+/** 仅 RPC facade/broker 可持有的原始请求能力。 */
+export interface CoreHostRpcLink extends CoreHostNotificationLink {
   /** 返回可用的已认证 client;无则发现 / 拉起并连上。 */
   getClient(): Promise<RpcClient>;
   /** 返回当前已连接 client；不发现、不拉起宿主。 */
   getConnectedClient?(): RpcClient | null;
-  /** 持久订阅一个 notification(跨重连有效、被动——不为订阅拉起宿主)。 */
-  onNotification(method: string, handler: NotificationHandler): () => void;
 }
 
 export interface CoreHostConnectionDeps {
@@ -176,7 +176,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
   };
 }
 
-export class CoreHostConnection implements CoreHostLink {
+export class CoreHostConnection implements CoreHostRpcLink {
   private readonly clientInstanceId: string;
   private client: RpcClient | null = null;
   private endpoint: ServerEndpoint | null = null;

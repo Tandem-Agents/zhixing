@@ -1,5 +1,6 @@
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
+import type { CleanupRegistrationOwner } from "@zhixing/server";
 import type { StartupCheckResult } from "../startup.js";
 import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
@@ -65,7 +66,8 @@ export interface ServiceHostModule<Options> {
   run(
     options: Options,
     bootstrap: ServeBootstrapContext,
-    executor?: ExecutorRoleModule,
+    executor: ExecutorRoleModule | undefined,
+    plan: ServeTopologyPlan,
   ): Promise<void>;
 }
 
@@ -75,7 +77,13 @@ export interface ServeRoleLoaders<Options> {
   readonly executor: () => Promise<ExecutorRoleModule>;
 }
 
-export type ServeTopologyPlan = "disabled" | "anchor-host" | "executor-host";
+export type ServeHostKind = "disabled" | "anchor-host" | "executor-host";
+
+export interface ServeTopologyPlan {
+  readonly host: ServeHostKind;
+  readonly loadExecutor: boolean;
+  readonly activeCleanupOwners: readonly CleanupRegistrationOwner[];
+}
 
 export function planServeTopology(
   configuration: ServeRoleConfiguration,
@@ -90,8 +98,27 @@ export function planServeTopology(
 
   const hasAnchor = roles.has("anchor");
   const hasExecutor = roles.has("executor");
-  if (!hasAnchor && !hasExecutor) return "disabled";
-  return hasAnchor ? "anchor-host" : "executor-host";
+  if (!hasAnchor && !hasExecutor) {
+    return {
+      host: "disabled",
+      loadExecutor: false,
+      activeCleanupOwners: [],
+    };
+  }
+  if (!hasAnchor) {
+    return {
+      host: "executor-host",
+      loadExecutor: true,
+      activeCleanupOwners: [],
+    };
+  }
+  return {
+    host: "anchor-host",
+    loadExecutor: hasExecutor,
+    activeCleanupOwners: hasExecutor
+      ? ["anchor-host", "anchor-local-executor"]
+      : ["anchor-host"],
+  };
 }
 
 /** 先完成角色规划与按需模块加载，再允许产品宿主产生运行时副作用。 */
@@ -102,13 +129,13 @@ export async function runConfiguredServeTopology<Options>(
   bootstrap: ServeBootstrapContext,
 ): Promise<void> {
   const plan = planServeTopology(configuration);
-  if (plan === "disabled") return;
+  if (plan.host === "disabled") return;
 
   const [host, executor] = await Promise.all([
-    plan === "anchor-host" ? loaders.anchorHost() : loaders.executorHost(),
-    configuration.roles.includes("executor")
+    plan.host === "anchor-host" ? loaders.anchorHost() : loaders.executorHost(),
+    plan.loadExecutor
       ? loaders.executor()
       : Promise.resolve(undefined),
   ]);
-  await host.run(options, bootstrap, executor);
+  await host.run(options, bootstrap, executor, plan);
 }

@@ -886,7 +886,7 @@ const confirmationBridgeSurface: AccessSurface = {
     });
     registerCleanup(
       cleanup,
-      { role: "surface", id: "confirmationBridge.dispose" },
+      { owner: "anchor-host", role: "surface", id: "confirmationBridge.dispose" },
       () => {
         confirmationBridge.dispose();
       },

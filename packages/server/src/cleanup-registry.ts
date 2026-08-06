@@ -28,6 +28,11 @@ export interface CleanupLogger {
 
 export interface CleanupRegistryOptions {
   logger?: CleanupLogger;
+  /**
+   * 当前宿主实际装配的 cleanup owner。未提供时 registry 保持通用容器语义；
+   * 产品组合根必须显式提供，令 descriptor 与真实宿主反绑。
+   */
+  activeOwners?: readonly CleanupRegistrationOwner[];
 }
 
 export type CleanupFn = (reason: string) => Promise<void> | void;
@@ -38,7 +43,13 @@ export type CleanupRegistrationRole =
   | "common"
   | "surface";
 
+export type CleanupRegistrationOwner =
+  | "anchor-host"
+  | "anchor-local-executor"
+  | "standalone-server";
+
 export interface CleanupRegistrationDescriptor {
+  readonly owner: CleanupRegistrationOwner;
   readonly role: CleanupRegistrationRole;
   readonly id: string;
 }
@@ -52,11 +63,15 @@ export class CleanupRegistry {
   private entries: CleanupEntry[] = [];
   private ran = false;
   private logger: CleanupLogger;
+  private readonly activeOwners?: ReadonlySet<CleanupRegistrationOwner>;
 
   constructor(opts: CleanupRegistryOptions = {}) {
     this.logger = opts.logger ?? {
       error: (msg, err) => console.error(`[cleanup] ${msg}`, err ?? ""),
     };
+    this.activeOwners = opts.activeOwners
+      ? new Set(opts.activeOwners)
+      : undefined;
   }
 
   /**
@@ -66,7 +81,16 @@ export class CleanupRegistry {
    *
    * `fn` 抛错不中断链——错误由 logger 记录。
    */
-  register(name: string, fn: CleanupFn): void {
+  register(
+    name: string,
+    fn: CleanupFn,
+    owner?: CleanupRegistrationOwner,
+  ): void {
+    if (this.activeOwners && (!owner || !this.activeOwners.has(owner))) {
+      throw new Error(
+        `cleanup owner "${owner ?? "missing"}" is not active for "${name}"`,
+      );
+    }
     if (this.ran) {
       this.logger.error(`register("${name}") after runAll — ignored`);
       return;
@@ -108,13 +132,13 @@ export class CleanupRegistry {
 }
 
 /**
- * 以生产 descriptor 注册清理项。role 只描述装配归属，运行时仍由同一 registry
- * 按 id 执行；覆盖门禁直接读取这些真实调用，不维护平行清单。
+ * 以生产 descriptor 注册清理项。owner 必须命中组合根给 registry 的实际宿主集合；
+ * 覆盖门禁读取同一 descriptor，不维护平行的角色适用语义。
  */
 export function registerCleanup(
   registry: CleanupRegistry,
   descriptor: CleanupRegistrationDescriptor,
   fn: CleanupFn,
 ): void {
-  registry.register(descriptor.id, fn);
+  registry.register(descriptor.id, fn, descriptor.owner);
 }

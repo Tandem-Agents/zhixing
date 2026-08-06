@@ -1,11 +1,11 @@
 import type { SchedulerUserNotice } from "@zhixing/core/contracts";
 import type { CliWriter } from "../screen/index.js";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostNotificationLink } from "./core-host-connection.js";
 
 const MAX_SEEN_REVISIONS = 1_024;
 
 export interface JournalMaintenancePresenterOptions {
-  readonly link: CoreHostLink;
+  readonly link: CoreHostNotificationLink;
   readonly writer: Pick<CliWriter, "ensureSegmentBreak" | "line">;
   readonly flushOutput?: () => void;
 }

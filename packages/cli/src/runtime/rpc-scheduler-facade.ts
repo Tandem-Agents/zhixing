@@ -1,7 +1,7 @@
 /**
  * RpcSchedulerFacade —— cli 经 RPC 接入核心宿主的 SchedulerFacade 实现。
  *
- * facade 是方法域封装、不持连接:连接是进程级共享的 CoreHostLink(调度 /
+ * facade 是方法域封装、不持连接:连接是进程级共享的 CoreHostRpcLink(调度 /
  * 会话 / 确认域共用一条已认证连接),建立 / 重连 / 释放归连接持有者。
  *
  * 读写分离：
@@ -21,18 +21,18 @@ import {
   type SchedulerFacadeEventHandler,
   type ScheduleMutationContext,
 } from "@zhixing/core";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostRpcLink } from "./core-host-connection.js";
 import { readSchedulerTasksSync } from "./scheduler-projection.js";
 
 export interface RpcSchedulerFacadeOptions {
   /** 进程级共享的核心宿主连接。 */
-  connection: CoreHostLink;
+  connection: CoreHostRpcLink;
   /** scheduler.json 路径（读投影用）；默认 getSchedulerStorePath()。 */
   storePath?: string;
 }
 
 export class RpcSchedulerFacade implements SchedulerFacade {
-  private readonly link: CoreHostLink;
+  private readonly link: CoreHostRpcLink;
   private readonly storePath: string;
   private readonly observedRevisions = new Map<string, number>();
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { CleanupRegistry } from "../cleanup-registry.js";
+import { CleanupRegistry, registerCleanup } from "../cleanup-registry.js";
 
 describe("CleanupRegistry", () => {
   it("runs entries in LIFO order", async () => {
@@ -97,6 +97,27 @@ describe("CleanupRegistry", () => {
 
     await r.runAll("SIGTERM");
     expect(seen).toEqual(["SIGTERM"]);
+  });
+
+  it("rejects cleanup descriptors owned by an inactive host", () => {
+    const r = new CleanupRegistry({
+      logger: quietLogger(),
+      activeOwners: ["anchor-host"],
+    });
+
+    expect(() => registerCleanup(
+      r,
+      { owner: "anchor-local-executor", role: "runtime", id: "executor.stop" },
+      () => {},
+    )).toThrow(/owner.*anchor-local-executor.*not active/);
+    expect(r.size).toBe(0);
+
+    registerCleanup(
+      r,
+      { owner: "anchor-host", role: "runtime", id: "anchor.stop" },
+      () => {},
+    );
+    expect(r.size).toBe(1);
   });
 });
 

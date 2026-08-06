@@ -4,6 +4,7 @@ import test from "node:test";
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import {
   buildWorkspaceOwnerExposure,
+  buildServeRoleConfigurations,
   captureS7EntryCoverage,
   collectCleanupRegistrationsFromSource,
   collectSlashCommandsFromRegistrar,
@@ -30,22 +31,42 @@ test("production descriptors form a complete exact-set coverage catalog", async 
   assert.deepEqual(catalog.entries, [...catalog.entries].sort((a, b) => a.key.localeCompare(b.key, "en-US")));
   assert.deepEqual(Object.keys(catalog.roleConfigurations), [
     "anchor-executor",
+    "anchor-executor-surface",
     "anchor-only",
     "anchor-surface",
     "executor-only",
+    "executor-surface",
+    "disabled-empty",
+    "surface-only",
   ]);
   const anchorExecutor = catalog.roleConfigurations["anchor-executor"].entryKeys;
+  const anchorExecutorSurface = catalog.roleConfigurations["anchor-executor-surface"].entryKeys;
   const anchorOnly = catalog.roleConfigurations["anchor-only"].entryKeys;
   const anchorSurface = catalog.roleConfigurations["anchor-surface"].entryKeys;
   const executorOnly = catalog.roleConfigurations["executor-only"].entryKeys;
+  const executorSurface = catalog.roleConfigurations["executor-surface"].entryKeys;
+  const disabledEmpty = catalog.roleConfigurations["disabled-empty"].entryKeys;
+  const surfaceOnly = catalog.roleConfigurations["surface-only"].entryKeys;
+  assert.deepEqual(anchorExecutorSurface, anchorExecutor);
+  assert.deepEqual(anchorSurface, anchorOnly);
+  assert.deepEqual(executorSurface, executorOnly);
+  assert.deepEqual(surfaceOnly, disabledEmpty);
   assert.ok(anchorExecutor.includes("rpc:session.send"));
   assert.ok(anchorExecutor.includes("tool:builtin:memory"));
+  assert.ok(anchorExecutor.includes(
+    "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
+  ));
   assert.ok(anchorOnly.includes("rpc:session.send"));
   assert.ok(!anchorOnly.includes("tool:builtin:memory"));
+  assert.ok(!anchorOnly.includes(
+    "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
+  ));
   assert.ok(anchorSurface.includes("rpc:session.send"));
   assert.ok(!anchorSurface.includes("tool:builtin:memory"));
   assert.ok(!executorOnly.includes("rpc:session.send"));
   assert.ok(executorOnly.includes("tool:builtin:memory"));
+  assert.ok(!executorOnly.some((key) => key.startsWith("cleanup:")));
+  assert.ok(!disabledEmpty.some((key) => key.startsWith("cleanup:")));
 });
 
 test("landing rows and mapping tuples preserve multiplicity until validation", () => {
@@ -192,7 +213,7 @@ test("cleanup and channel coverage are bound to actual production calls", async 
     () => collectCleanupRegistrationsFromSource(
       "packages/cli/src/serve/command.ts",
       command.replace(
-        'registerCleanup(registry, { role: "runtime", id: "meshRuntime.stop" }, async () => {',
+        'registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {',
         'registry.register("meshRuntime.stop", async () => {',
       ),
     ),
@@ -202,12 +223,42 @@ test("cleanup and channel coverage are bound to actual production calls", async 
     () => collectCleanupRegistrationsFromSource(
       "packages/cli/src/serve/command.ts",
       command.replace(
-        'registerCleanup(registry, { role: "runtime", id: "meshRuntime.stop" }, async () => {',
+        'registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {',
         'const shutdowns = registry; shutdowns.register("meshRuntime.stop", async () => {',
       ),
     ),
     /bypasses registerCleanup descriptor/,
   );
+  assert.throws(
+    () => collectCleanupRegistrationsFromSource(
+      "packages/cli/src/serve/command.ts",
+      command.replace('owner: "anchor-host", role: "runtime", id: "meshRuntime.stop"', 'role: "runtime", id: "meshRuntime.stop"'),
+    ),
+    /owner\/role\/id must be literal/,
+  );
+  assert.throws(
+    () => collectCleanupRegistrationsFromSource(
+      "packages/cli/src/serve/command.ts",
+      command.replace('owner: "anchor-host", role: "runtime", id: "meshRuntime.stop"', 'owner: "unknown-host", role: "runtime", id: "meshRuntime.stop"'),
+    ),
+    /unknown cleanup owner unknown-host/,
+  );
+  const roleEntries = descriptors.map((item) => ({
+    ...item,
+    key: `cleanup:${item.owner}:${item.role}:${item.id}`,
+    category: "cleanup",
+  })).sort((left, right) => left.key.localeCompare(right.key, "en-US"));
+  const roles = buildServeRoleConfigurations(roleEntries);
+  assert.ok(roles["anchor-only"].entryKeys.includes(
+    "cleanup:anchor-host:runtime:meshRuntime.stop",
+  ));
+  assert.ok(!roles["anchor-only"].entryKeys.includes(
+    "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
+  ));
+  assert.ok(roles["anchor-executor"].entryKeys.includes(
+    "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
+  ));
+  assert.equal(roles["executor-only"].entryKeys.length, 0);
   const channels = await readFile("packages/cli/src/serve/channels.ts", "utf8");
   validateInboundRouterAssembly(channels);
   assert.throws(
@@ -343,7 +394,7 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
       "packages/cli/src/serve/aliased-client.ts",
       'import { createRpcClient as connect } from "@zhixing/server"; const client = connect({}); client.request(method);',
     ).join("\n"),
-    /non-canonical dynamic RPC method/,
+    /raw RPC capability createRpcClient acquired outside owner/,
   );
   assert.match(
     inspectProductionSource(
@@ -360,6 +411,42 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
     inspectProductionSource(
       "packages/cli/src/runtime/rpc-conversation-facade.ts",
       conversation,
+    ),
+    [],
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/raw-wrapper.ts",
+      'import type { CoreHostRpcLink } from "./core-host-connection.js"; export function leak(link: CoreHostRpcLink) { return link; }',
+    ).join("\n"),
+    /raw RPC capability CoreHostRpcLink acquired outside owner|raw RPC capability returned/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/runtime/rpc-leak.ts",
+      'export { CoreHostRpcLink as PublicLink } from "./core-host-connection.js";',
+    ).join("\n"),
+    /raw RPC capability CoreHostRpcLink re-exported/,
+  );
+  const presenter = await readFile(
+    "packages/cli/src/runtime/publish-result-presenter.ts",
+    "utf8",
+  );
+  assert.deepEqual(
+    inspectProductionSource(
+      "packages/cli/src/runtime/publish-result-presenter.ts",
+      presenter,
+    ),
+    [],
+  );
+  const mesh = await readFile(
+    "packages/cli/src/serve/assignment-mesh-adapter.ts",
+    "utf8",
+  );
+  assert.deepEqual(
+    inspectProductionSource(
+      "packages/cli/src/serve/assignment-mesh-adapter.ts",
+      mesh,
     ),
     [],
   );

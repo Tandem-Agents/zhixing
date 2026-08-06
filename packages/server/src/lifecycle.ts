@@ -124,6 +124,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
   const registry =
     opts.cleanupRegistry ??
     new CleanupRegistry({
+      activeOwners: ["standalone-server"],
       logger: {
         error: (msg, err) => logger.error(`${msg}${err ? ": " + errMsg(err) : ""}`),
       },
@@ -135,18 +136,24 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     // 独立模式：保持 M3 之前的 shutdown 顺序（scheduler.stop → server.close → releaseLock）
     // 注册顺序（倒序）：releaseLock → server.close → scheduler.stop
     if (!opts.skipProcessLock) {
-      registerCleanup(registry, { role: "server", id: "releaseLock" }, async () => {
+      registerCleanup(registry, { owner: "standalone-server", role: "server", id: "releaseLock" }, async () => {
         await releaseLock(opts.lockPaths);
       });
     }
   }
-  // 两种模式都由同一 production descriptor 注册 server.close。
-  registerCleanup(registry, { role: "server", id: "server.close" }, async () => {
-    await server.close();
-  });
+  // 两种模式执行同一动作，但 owner 必须反映实际 registry 所属宿主。
+  if (injected) {
+    registerCleanup(registry, { owner: "anchor-host", role: "server", id: "server.close" }, async () => {
+      await server.close();
+    });
+  } else {
+    registerCleanup(registry, { owner: "standalone-server", role: "server", id: "server.close" }, async () => {
+      await server.close();
+    });
+  }
   if (!injected) {
     if (opts.scheduler) {
-      registerCleanup(registry, { role: "server", id: "scheduler.stop" }, async () => {
+      registerCleanup(registry, { owner: "standalone-server", role: "server", id: "scheduler.stop" }, async () => {
         await opts.scheduler!.stop();
       });
     }

@@ -13,10 +13,10 @@ import type {
   WorksceneListResult,
   WorksceneSummary,
 } from "@zhixing/rpc";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export class RpcWorksceneFacade {
-  constructor(private readonly link: CoreHostLink) {}
+  constructor(private readonly link: CoreHostRpcLink) {}
 
   /** 场景候选列表(/work 选择器数据源)。 */
   async list(): Promise<WorksceneSummary[]> {

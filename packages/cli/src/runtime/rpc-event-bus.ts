@@ -32,13 +32,13 @@ import type {
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator";
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostNotificationLink } from "./core-host-connection.js";
 
 const AGENT_RUN_END_EVENT = "agent:run_end";
 
 export interface RpcEventBusOptions {
   /** 进程级共享的核心宿主连接。 */
-  link: CoreHostLink;
+  link: CoreHostNotificationLink;
   /** per-run 装饰钩子(渲染订阅挂载)——与本地 runtime 的 decorateRunBus 同形。 */
   decorate: DecorateRunBusFn;
   /**

@@ -337,6 +337,11 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
   }
   const result = [];
   const failures = [];
+  const cleanupOwners = new Set([
+    "anchor-host",
+    "anchor-local-executor",
+    "standalone-server",
+  ]);
   const visit = (node) => {
     if (ts.isCallExpression(node)) {
       if (
@@ -347,12 +352,15 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
         if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
           failures.push(`${relative}: cleanup descriptor must be an object literal`);
         } else {
+          const owner = literalProperty(descriptor, "owner");
           const role = literalProperty(descriptor, "role");
           const id = literalProperty(descriptor, "id");
-          if (!role || !id) {
-            failures.push(`${relative}: cleanup descriptor role/id must be literal`);
+          if (!owner || !role || !id) {
+            failures.push(`${relative}: cleanup descriptor owner/role/id must be literal`);
+          } else if (!cleanupOwners.has(owner)) {
+            failures.push(`${relative}: unknown cleanup owner ${owner}`);
           } else {
-            result.push({ role, id, source: relative });
+            result.push({ owner, role, id, source: relative });
           }
         }
       }
@@ -385,10 +393,13 @@ async function collectCleanupRegistrations() {
       ),
     );
   }
-  assertUnique(result.map((item) => `${item.role}:${item.id}`), "cleanup descriptor");
+  assertUnique(result.map((item) => `${item.owner}:${item.role}:${item.id}`), "cleanup descriptor");
   if (result.length === 0) throw new Error("cleanup descriptor set is empty");
   return result.sort((left, right) =>
-    `${left.role}:${left.id}`.localeCompare(`${right.role}:${right.id}`, "en-US"),
+    `${left.owner}:${left.role}:${left.id}`.localeCompare(
+      `${right.owner}:${right.role}:${right.id}`,
+      "en-US",
+    ),
   );
 }
 
@@ -554,24 +565,46 @@ function coverageEntry(key, category, detail) {
 
 const serveRoleConfigurations = {
   "anchor-executor": ["anchor", "executor"],
+  "anchor-executor-surface": ["anchor", "executor", "surface"],
   "anchor-only": ["anchor"],
   "anchor-surface": ["anchor", "surface"],
   "executor-only": ["executor"],
+  "executor-surface": ["executor", "surface"],
+  "disabled-empty": [],
+  "surface-only": ["surface"],
 };
 
 function entryAppliesToRoles(entry, roles) {
-  const topology = planServeTopology({ roles });
+  const plan = planServeTopology({ roles });
   if (entry.category === "rpc" || entry.category === "channel") {
-    return topology === "anchor-host";
+    return plan.host === "anchor-host";
   }
   if (entry.category === "lifecycle" || entry.category === "tool") {
-    return roles.includes("executor");
+    return plan.loadExecutor;
   }
   if (entry.category === "cleanup") {
-    if (entry.role === "surface") return topology === "anchor-host";
-    return topology !== "disabled";
+    return plan.activeCleanupOwners.includes(entry.owner);
   }
   return true;
+}
+
+export function buildServeRoleConfigurations(entries) {
+  return Object.fromEntries(
+    Object.entries(serveRoleConfigurations).map(([name, roles]) => {
+      const plan = planServeTopology({ roles });
+      return [
+        name,
+        {
+          roles,
+          topology: plan.host,
+          activeCleanupOwners: plan.activeCleanupOwners,
+          entryKeys: entries
+            .filter((entry) => entryAppliesToRoles(entry, roles))
+            .map((entry) => entry.key),
+        },
+      ];
+    }),
+  );
 }
 
 export async function captureS7EntryCoverage() {
@@ -596,7 +629,7 @@ export async function captureS7EntryCoverage() {
     ...constants.inboundEvents.map((event) => coverageEntry(`channel:event:feishu:${event}`, "channel", { event })),
     ...agentLifecyclePhases.map((phase) => coverageEntry(`lifecycle:agent:${phase}`, "lifecycle", { phase })),
     ...segmentLifecyclePhases.map((phase) => coverageEntry(`lifecycle:segment:${phase}`, "lifecycle", { phase })),
-    ...cleanup.map((item) => coverageEntry(`cleanup:${item.role}:${item.id}`, "cleanup", item)),
+    ...cleanup.map((item) => coverageEntry(`cleanup:${item.owner}:${item.role}:${item.id}`, "cleanup", item)),
     ...constants.builtinTools.map((name) => coverageEntry(`tool:builtin:${name}`, "tool", { name })),
     ...constants.extraTools.map((item) => coverageEntry(`tool:extra:${item.key}`, "tool", item)),
     coverageEntry(`tool:orchestrator:${constants.taskName}`, "tool", { name: constants.taskName, authorityWrite: true }),
@@ -604,7 +637,7 @@ export async function captureS7EntryCoverage() {
   const mappingTuples = [
     ...baseMappingTuples,
     ...cleanup.map((item) => [
-      `cleanup:${item.role}:${item.id}`,
+      `cleanup:${item.owner}:${item.role}:${item.id}`,
       { rowId: "shutdown" },
     ]),
   ];
@@ -612,18 +645,7 @@ export async function captureS7EntryCoverage() {
   const documents = await validateDueDocuments();
   entries.sort((left, right) => left.key.localeCompare(right.key, "en-US"));
   const result = validateCoverage({ entries, mappings: mappingTuples, rowIds });
-  const roleConfigurations = Object.fromEntries(
-    Object.entries(serveRoleConfigurations).map(([name, roles]) => [
-      name,
-      {
-        roles,
-        topology: planServeTopology({ roles }),
-        entryKeys: result.entries
-          .filter((entry) => entryAppliesToRoles(entry, roles))
-          .map((entry) => entry.key),
-      },
-    ]),
-  );
+  const roleConfigurations = buildServeRoleConfigurations(result.entries);
   return {
     rowIds: [...rowIds].sort(),
     documents,
@@ -1015,20 +1037,178 @@ function safeRpcForwarders(source) {
   }));
 }
 
-function importsServerRpcClient(source) {
-  return source.statements.some((statement) => {
-    if (
-      !ts.isImportDeclaration(statement) ||
-      !ts.isStringLiteral(statement.moduleSpecifier) ||
-      statement.moduleSpecifier.text !== "@zhixing/server" ||
-      !statement.importClause?.namedBindings ||
-      !ts.isNamedImports(statement.importClause.namedBindings)
-    ) return false;
-    return statement.importClause.namedBindings.elements.some((element) =>
-      ["createRpcClient", "RpcClient"].includes(
-        element.propertyName?.text ?? element.name.text,
-      ));
-  });
+const rawRpcSymbols = new Set([
+  "CoreHostConnection",
+  "CoreHostRpcLink",
+  "RpcClient",
+  "createRpcClient",
+]);
+
+function hasModifier(node, kind) {
+  return node.modifiers?.some((modifier) => modifier.kind === kind) ?? false;
+}
+
+function isCoreHostModule(specifier) {
+  return specifier.endsWith("core-host-connection.js") ||
+    specifier.endsWith("core-host-connection.ts");
+}
+
+function isRpcFacadeOwner(relative) {
+  return relative.startsWith("packages/cli/src/runtime/rpc-");
+}
+
+function isRpcMethodOwner(relative) {
+  return isRpcFacadeOwner(relative) ||
+    relative === "packages/cli/src/runtime/core-host-connection.ts" ||
+    relative === "packages/cli/src/serve/stop.ts";
+}
+
+function allowedRpcCapabilityOwner(relative, symbol) {
+  if (symbol === "CoreHostRpcLink") return isRpcFacadeOwner(relative);
+  if (symbol === "RpcClient" || symbol === "createRpcClient") {
+    return relative === "packages/cli/src/runtime/core-host-connection.ts" ||
+      relative === "packages/cli/src/serve/stop.ts";
+  }
+  if (symbol === "CoreHostConnection") {
+    return relative === "packages/cli/src/repl.ts" ||
+      relative === "packages/cli/src/runtime/workspace-command.ts";
+  }
+  return false;
+}
+
+function inspectCliRpcCapabilities(relative, source) {
+  if (!relative.startsWith("packages/cli/src/")) return [];
+  const failures = [];
+  const bindings = new Map();
+  for (const statement of source.statements) {
+    if (ts.isImportDeclaration(statement) &&
+        ts.isStringLiteral(statement.moduleSpecifier) &&
+        statement.importClause?.namedBindings) {
+      const specifier = statement.moduleSpecifier.text;
+      const rpcModule = specifier === "@zhixing/server" || isCoreHostModule(specifier);
+      if (!rpcModule) continue;
+      const named = statement.importClause.namedBindings;
+      if (ts.isNamespaceImport(named)) {
+        if (!isRpcMethodOwner(relative)) {
+          failures.push(`${relative}: raw RPC namespace capability outside owner`);
+        }
+        continue;
+      }
+      for (const element of named.elements) {
+        const original = element.propertyName?.text ?? element.name.text;
+        if (!rawRpcSymbols.has(original)) continue;
+        bindings.set(element.name.text, original);
+        if (!allowedRpcCapabilityOwner(relative, original) &&
+            relative !== "packages/cli/src/runtime/core-host-connection.ts") {
+          failures.push(
+            `${relative}: raw RPC capability ${original} acquired outside owner`,
+          );
+        }
+      }
+    }
+    if (ts.isExportDeclaration(statement) &&
+        statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) &&
+        (statement.moduleSpecifier.text === "@zhixing/server" ||
+          isCoreHostModule(statement.moduleSpecifier.text))) {
+      if (!statement.exportClause) {
+        failures.push(`${relative}: raw RPC namespace re-export`);
+      } else if (ts.isNamedExports(statement.exportClause)) {
+        for (const element of statement.exportClause.elements) {
+          const original = element.propertyName?.text ?? element.name.text;
+          if (rawRpcSymbols.has(original)) {
+            failures.push(`${relative}: raw RPC capability ${original} re-exported`);
+          }
+        }
+      }
+    }
+  }
+
+  const expressionUsesRawBinding = (node) => {
+    let found = false;
+    const visit = (child) => {
+      if (ts.isIdentifier(child) && bindings.has(child.text)) found = true;
+      if (!found) ts.forEachChild(child, visit);
+    };
+    visit(node);
+    return found;
+  };
+  const typeNames = (node) => {
+    const names = [];
+    const visit = (child) => {
+      if (ts.isTypeReferenceNode(child) && ts.isIdentifier(child.typeName)) {
+        names.push(bindings.get(child.typeName.text) ?? child.typeName.text);
+      }
+      ts.forEachChild(child, visit);
+    };
+    if (node) visit(node);
+    return names;
+  };
+  const rawMemberNames = new Set();
+  const rawValueNames = new Set();
+  const collectRawMembers = (node) => {
+    if ((ts.isPropertyDeclaration(node) || ts.isPropertySignature(node) ||
+         ts.isParameter(node) || ts.isVariableDeclaration(node)) &&
+        ts.isIdentifier(node.name) &&
+        typeNames(node.type).some((name) => rawRpcSymbols.has(name))) {
+      rawValueNames.add(node.name.text);
+      if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+        rawMemberNames.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, collectRawMembers);
+  };
+  collectRawMembers(source);
+  const returnsRawCapability = (expression) => {
+    if (ts.isIdentifier(expression) &&
+        (bindings.has(expression.text) || rawValueNames.has(expression.text))) return true;
+    if (ts.isPropertyAccessExpression(expression) &&
+        rawMemberNames.has(expression.name.text)) return true;
+    if (ts.isCallExpression(expression) &&
+        ts.isPropertyAccessExpression(expression.expression) &&
+        (expression.expression.name.text === "getClient" ||
+          expression.expression.name.text === "getConnectedClient")) return true;
+    return false;
+  };
+  const visit = (node) => {
+    if (ts.isExportDeclaration(node) && node.exportClause &&
+        ts.isNamedExports(node.exportClause) && !node.moduleSpecifier) {
+      for (const element of node.exportClause.elements) {
+        const local = element.propertyName?.text ?? element.name.text;
+        if (bindings.has(local)) {
+          failures.push(
+            `${relative}: raw RPC capability ${bindings.get(local)} re-exported`,
+          );
+        }
+      }
+    }
+    if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) &&
+        node.type && typeNames(node.type).some((name) => rawRpcSymbols.has(name)) &&
+        relative !== "packages/cli/src/runtime/core-host-connection.ts") {
+      failures.push(`${relative}: raw RPC capability returned from public boundary`);
+    }
+    if (ts.isVariableStatement(node) &&
+        hasModifier(node, ts.SyntaxKind.ExportKeyword)) {
+      for (const declaration of node.declarationList.declarations) {
+        if (declaration.initializer && expressionUsesRawBinding(declaration.initializer)) {
+          failures.push(`${relative}: raw RPC capability exported from variable`);
+        }
+      }
+    }
+    if (ts.isReturnStatement(node) && node.expression &&
+        returnsRawCapability(node.expression) &&
+        relative !== "packages/cli/src/runtime/core-host-connection.ts") {
+      failures.push(`${relative}: raw RPC capability returned from function`);
+    }
+    if (ts.isPropertyAccessExpression(node) &&
+        (node.name.text === "getClient" || node.name.text === "getConnectedClient") &&
+        !isRpcFacadeOwner(relative) &&
+        relative !== "packages/cli/src/runtime/core-host-connection.ts") {
+      failures.push(`${relative}: raw RPC client accessed outside facade owner`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return failures;
 }
 
 function isPackageOrSubpath(specifier, packageName) {
@@ -1087,10 +1267,8 @@ export function inspectProductionSource(relative, text, options = {}) {
   const guarded = guardedRoots.some((prefix) => relative.startsWith(prefix));
   const dependencyGuarded = relative.startsWith("packages/server/") || relative.startsWith("packages/executor/");
   const source = sourceFile(relative, text);
-  const rpcGuarded =
-    relative.startsWith("packages/cli/src/runtime/rpc-") ||
-    relative === "packages/cli/src/runtime/core-host-connection.ts" ||
-    (relative.startsWith("packages/cli/src/") && importsServerRpcClient(source));
+  failures.push(...inspectCliRpcCapabilities(relative, source));
+  const rpcGuarded = isRpcMethodOwner(relative);
   if (!guarded && !dependencyGuarded && !rpcGuarded) return failures;
   const allowedForwarders = rpcGuarded ? safeRpcForwarders(source) : new Set();
   const visit = (node) => {

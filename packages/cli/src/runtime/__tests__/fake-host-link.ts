@@ -1,12 +1,12 @@
 /**
- * CoreHostLink 的测试替身——RPC 设施测试共用。
+ * CoreHostRpcLink 的测试替身——RPC 设施测试共用。
  *
  * 记录 request 调用、可注入响应、可模拟宿主推送 notification;
  * getClient 可替换为抛错实现以断言"不连宿主"的被动语义。
  */
 
 import type { RpcClient } from "@zhixing/server";
-import type { CoreHostLink } from "../core-host-connection.js";
+import type { CoreHostRpcLink } from "../core-host-connection.js";
 
 export interface RecordedRequest {
   method: string;
@@ -26,7 +26,7 @@ export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
     },
   } as unknown as RpcClient;
 
-  const link: CoreHostLink = {
+  const link: CoreHostRpcLink = {
     getClient: async () => client,
     getConnectedClient: () => (connected ? client : null),
     onNotification: (method, handler) => {
@@ -61,7 +61,7 @@ export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
 }
 
 /** getClient 即抛错的 link——断言读路径 / 订阅不主动连宿主。 */
-export function makeUnreachableHostLink(): CoreHostLink {
+export function makeUnreachableHostLink(): CoreHostRpcLink {
   return {
     getClient: async () => {
       throw new Error("不应连接宿主");

@@ -24,11 +24,11 @@ import type {
 } from "@zhixing/core";
 import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc";
 import { RpcClientClosedError } from "@zhixing/server";
-import type { CoreHostLink } from "./core-host-connection.js";
+import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface RpcConfirmationBrokerOptions {
   /** 进程级共享的核心宿主连接。 */
-  link: CoreHostLink;
+  link: CoreHostRpcLink;
   /** resolve 回程失败的上报(如面板提示"应答未送达")。 */
   onResolveError?: (error: unknown, requestId: string) => void;
 }
