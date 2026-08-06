@@ -13,6 +13,7 @@ import {
   inspectProductionManifest,
   inspectProductionSource,
   inspectCleanupRegistryConstructions,
+  inspectLocalConversationOwnerIsolation,
   parseLandingRowIds,
   validateCoverage,
   validateInboundRouterAssembly,
@@ -388,6 +389,38 @@ test("all production CleanupRegistry constructions bind exact topology owners", 
       },
     ])).join("\n"),
     /unregistered production CleanupRegistry construction/,
+  );
+});
+
+test("local conversation owner remains isolated from anchor capabilities by construction", async () => {
+  const paths = [
+    "packages/cli/src/serve/conversation-owner-runtime.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectLocalConversationOwnerIsolation(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/conversation-owner-runtime.ts",
+      (text) => text.replace("readonly globalState?: never;", "readonly globalState?: GlobalStatePort;"),
+    )).join("\n"),
+    /globalState must remain never/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "readonly owner: LocalConversationOwnerRuntimeStack;",
+        "readonly authority: AuthorityRuntimeStack;",
+      ),
+    )).join("\n"),
+    /narrowed local owner contract|cannot receive the anchor authority stack/,
   );
 });
 

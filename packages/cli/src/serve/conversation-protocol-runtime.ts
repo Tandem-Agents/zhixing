@@ -80,7 +80,7 @@ import {
   type DurableConversationTurnExecutor,
   type DurableConversationTurnInput,
   type InProcessDispatchContextFactory,
-  AnchorSessionStateAdapter,
+  ConversationSessionStateAdapter,
 } from "@zhixing/owner-kernel";
 import {
   DurableConversationAdmissionRejectedError,
@@ -94,6 +94,10 @@ import type {
   AuthorityRuntimeStack,
   ConversationRuntimeBinding,
 } from "../setup-delivery.js";
+import {
+  anchorConversationOwnerRuntime,
+  type ConversationOwnerRuntimeStack,
+} from "./conversation-owner-runtime.js";
 import type { ExecutorCapabilitySnapshot } from "@zhixing/core/protocol";
 import type { SessionStatePort } from "@zhixing/core/contracts";
 import {
@@ -142,12 +146,14 @@ export interface RemoteConversationExecutionDirectory {
 }
 
 export interface ConversationProtocolRuntimeOptions {
-  readonly authority: AuthorityRuntimeStack;
+  readonly authority?: AuthorityRuntimeStack;
+  readonly owner?: ConversationOwnerRuntimeStack;
   readonly manager: () => ConversationManager;
   readonly clock?: () => string;
   readonly maxPendingInteractions?: number;
   readonly interactions: DurableConversationInteractionObserver;
   readonly localExecutor?: {
+    readonly ledger?: ConversationAssignmentLedger;
     readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
     readonly dataPlaneTickets?: ConstructorParameters<
@@ -222,7 +228,7 @@ type ConversationLosslessDataPlane = Pick<
 
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
-  readonly #authority: AuthorityRuntimeStack;
+  readonly #authority: ConversationOwnerRuntimeStack;
   readonly #manager: () => ConversationManager;
   readonly #clock: () => string;
   #sessionState: SessionStatePort | undefined;
@@ -298,10 +304,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #mutationPublisherProxy: ConversationMutationPublisher;
 
   constructor(options: ConversationProtocolRuntimeOptions) {
+    if ((options.authority === undefined) === (options.owner === undefined)) {
+      throw new Error("Conversation protocol requires exactly one owner runtime");
+    }
+    const authority = options.owner ?? anchorConversationOwnerRuntime(options.authority!);
     const runtime = this;
     this.#mutationPublisherProxy = {
       get readProjectionIds() {
-        return runtime.#requiredMutationPublisher().readProjectionIds;
+        return runtime.#mutationPublisher?.readProjectionIds ?? [];
       },
       decideGlobalBatchAtPrefix: (input) =>
         this.#requiredMutationPublisher().decideGlobalBatchAtPrefix(input),
@@ -313,7 +323,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       },
       apply: (input) => this.#requiredMutationPublisher().apply(input),
     };
-    this.#authority = options.authority;
+    this.#authority = authority;
     this.#manager = options.manager;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#interactions = options.interactions;
@@ -329,24 +339,23 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       options.localExecutor?.InProcessAssignmentSubmission;
     this.#createStream = options.localExecutor?.createStream;
     this.#localRuntimeFactory = options.localExecutor?.runtimeFactory;
-    this.#ledger = options.localExecutor?.ConversationAssignmentLedger
+    this.#ledger = options.localExecutor?.ledger ?? (options.localExecutor?.ConversationAssignmentLedger
       ? createConversationExecutorLedger({
       Constructor: options.localExecutor.ConversationAssignmentLedger,
-      authority: options.authority,
+      authority,
       assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
       usageFinal: (assignmentId) =>
-        options.authority.executorResourceGovernor.flushAssignment(
+        authority.finalizeUsage(
           assignmentId,
-          options.authority.resourceGovernor,
           (report) =>
             usageReporterContext(report.reporterId, report.digest, this.#clock()),
         ),
       runtimeBindingGuard: ({ assignmentId, manifest }) => {
         const binding = this.#assignmentRuntimeBindings.get(assignmentId);
         if (binding === undefined) {
-          return options.authority.validateLocalConversationManifest(manifest);
+          return authority.validateLocalConversationManifest(manifest);
         }
-        return options.authority.validateConversationRuntimeBinding({
+        return authority.validateConversationRuntimeBinding({
           assignmentId,
           manifest,
           binding,
@@ -360,18 +369,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ? {}
         : { maxPendingInteractions: options.maxPendingInteractions }),
         })
-      : undefined;
+      : undefined);
     this.#issuer = new ConversationAssignmentAuthority({
-      signer: options.authority.signer,
-      verifier: options.authority.verifier,
+      signer: authority.signer,
+      verifier: authority.verifier,
       snapshotFor: (executorId) =>
-        options.authority.executorCapabilities.snapshotFor(executorId),
+        authority.executorCapabilities.snapshotFor(executorId),
       clock: this.#clock,
     });
     this.#contexts = createDispatchContexts({
-      signer: options.authority.signer,
-      deviceId: options.authority.deviceId,
-      ownerEpoch: options.authority.anchorEpoch,
+      signer: authority.signer,
+      deviceId: authority.deviceId,
+      ownerEpoch: authority.ownerEpoch,
       clock: this.#clock,
       conversationIdFor: (assignmentId) =>
         this.#conversationForAssignment(assignmentId),
@@ -379,6 +388,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   bindRemoteExecution(directory: RemoteConversationExecutionDirectory): void {
+    if (this.#authority.domain.kind !== "anchor") {
+      throw new Error("Local conversation owners cannot bind remote execution");
+    }
     if (this.#remoteExecution && this.#remoteExecution !== directory) {
       throw new Error("Remote conversation execution is already bound");
     }
@@ -395,6 +407,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   bindMutationPublisher(publisher: ConversationMutationPublisher): void {
+    if (!this.#authority.globalPublishing) {
+      throw new Error("Local conversation owners cannot bind global mutation publishing");
+    }
     if (this.#mutationPublisher && this.#mutationPublisher !== publisher) {
       throw new Error("Conversation mutation publisher is already bound");
     }
@@ -535,6 +550,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    * concurrent activation replay the original authority decision.
    */
   ensureSession(conversationId: string): Promise<void> {
+    if (!this.#authority.acceptsConversationId(conversationId)) {
+      return Promise.reject(
+        new Error("Conversation identity does not belong to this owner domain"),
+      );
+    }
     const existing = this.#sessionIdentities.get(conversationId);
     if (existing) return existing;
     const establishing = this.#establishSession(conversationId);
@@ -683,7 +703,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           t: "cancel",
           conversationId: input.conversationId,
           runId,
-          ownerEpoch: this.#authority.anchorEpoch,
+          ownerEpoch: this.#authority.ownerEpoch,
         },
       }),
       source,
@@ -742,7 +762,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         body: {
           t: "cancel-batch",
           conversationId: input.conversationId,
-          ownerEpoch: this.#authority.anchorEpoch,
+          ownerEpoch: this.#authority.ownerEpoch,
           ...(input.response
             ? { response: { replyTarget: input.response.replyTarget } }
             : {}),
@@ -844,7 +864,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     input: DurableConversationSessionWriteInput,
   ): Promise<DurableConversationSessionWriteResult> {
     const journal = this.#journal(input.conversationId);
-    const existing = await journal.lifecycleRequest(input.requestId);
+    const lifecycleMutation =
+      input.mutation.kind === "conversation-delete" ||
+      (input.mutation.kind === "window-op" && input.mutation.op === "clear");
+    const existingLifecycle = lifecycleMutation
+      ? await journal.lifecycleRequest(input.requestId)
+      : undefined;
+    const existingMutation = lifecycleMutation
+      ? undefined
+      : await journal.sessionMutationRequest(input.requestId);
+    const existing = existingLifecycle ?? existingMutation;
     const authority = existing ? undefined : await journal.authorityState();
     if (
       !existing &&
@@ -867,7 +896,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           t: "session-write",
           conversationId: input.conversationId,
           mutation: input.mutation,
-          ownerEpoch: this.#authority.anchorEpoch,
+          ownerEpoch: this.#authority.ownerEpoch,
           domainRevision,
         },
       }),
@@ -891,7 +920,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (outcome.result.body.t !== "session-write") {
       throw new Error("Session write returned another control result");
     }
-    this.#markRecovery(input.conversationId);
+    if (lifecycleMutation) this.#markRecovery(input.conversationId);
     return {
       status: "accepted",
       domainRevision: outcome.result.body.revision,
@@ -1039,7 +1068,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         scopeBinding: {
           kind: "conversation",
           conversationId: input.conversationId,
-          ownerEpoch: this.#authority.anchorEpoch,
+          ownerEpoch: this.#authority.ownerEpoch,
         },
         budget: preparedAuthority.policy.budget,
         }, origin, resourceContext);
@@ -1048,7 +1077,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         assignmentId,
         executorId: targetExecutorId,
         conversationId: input.conversationId,
-        ownerEpoch: this.#authority.anchorEpoch,
+        ownerEpoch: this.#authority.ownerEpoch,
         baseRevision: authority.commitRevision,
         attempt,
         resourceLease,
@@ -1115,9 +1144,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const submissionContext = assignmentContext(dispatch.envelope);
       const resourceSubmissionContext = assignmentResourceContext(dispatch.envelope);
       const flushResourceUsage = () =>
-        this.#authority.executorResourceGovernor.flushAssignment(
+        this.#authority.finalizeUsage(
           assignmentId,
-          this.#authority.resourceGovernor,
           (report) => usageReporterContext(report.reporterId, report.digest, this.#clock()),
         );
       const dispatcher = new InProcessConversationDispatcher({
@@ -1179,7 +1207,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         execution: "conversation",
         conversationId: input.conversationId,
         runId,
-        ownerEpoch: this.#authority.anchorEpoch,
+        ownerEpoch: this.#authority.ownerEpoch,
       } as const;
       if (
         executionIngress.kind === "channel" &&
@@ -1208,7 +1236,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               execution: "conversation",
               conversationId: input.conversationId,
               runId,
-              ownerEpoch: this.#authority.anchorEpoch,
+              ownerEpoch: this.#authority.ownerEpoch,
             },
             ticket,
             journal,
@@ -1318,27 +1346,36 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             );
           },
           toolSideEffectObserver: this.#interactions,
-          stageScheduleMutation: createAssignmentScheduleStager(
-            localLedger!,
-            assignmentId,
-            this.#authority.anchorEpoch,
-            "conversation",
-            assignmentGlobalCapability({
-              assignmentId,
-              execution: "conversation",
-              capabilities: dispatch.envelope.capabilities,
-            }),
-          ),
+          ...(this.#authority.globalPublishing
+            ? {
+                stageScheduleMutation: createAssignmentScheduleStager(
+                  localLedger!,
+                  assignmentId,
+                  this.#authority.ownerEpoch,
+                  "conversation",
+                  assignmentGlobalCapability({
+                    assignmentId,
+                    execution: "conversation",
+                    capabilities: dispatch.envelope.capabilities,
+                  }),
+                ),
+              }
+            : {}),
           assignmentMutations: createAssignmentMutationPort({
             ledger: localLedger!,
             assignmentId,
             execution: "conversation",
-            anchorEpoch: this.#authority.anchorEpoch,
-            capability: assignmentGlobalCapability({
-              assignmentId,
-              execution: "conversation",
-              capabilities: dispatch.envelope.capabilities,
-            }),
+            anchorEpoch: this.#authority.ownerEpoch,
+            allowGlobal: this.#authority.globalPublishing,
+            ...(this.#authority.globalPublishing
+              ? {
+                  capability: assignmentGlobalCapability({
+                    assignmentId,
+                    execution: "conversation",
+                    capabilities: dispatch.envelope.capabilities,
+                  }),
+                }
+              : {}),
           }),
           ...(this.#authority.globalState
             ? {
@@ -1349,7 +1386,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
                     execution: "conversation",
                     capabilities: dispatch.envelope.capabilities,
                   }),
-                  anchorEpoch: this.#authority.anchorEpoch,
+                  anchorEpoch: this.#authority.ownerEpoch,
                 }),
               }
             : {}),
@@ -1622,7 +1659,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           "Conversation ingress is already bound to another invocation",
         );
       }
-      await this.#authority.surfaceAssets.markAdopted(durablePending.attachments);
+      await this.#markAttachmentsAdopted(durablePending.attachments);
       return {
         runId: durablePending.runId,
         ingress: durablePending.ingress,
@@ -1659,7 +1696,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ...(input.environment
           ? { environment: structuredClone(input.environment) }
           : {}),
-        ownerEpoch: this.#authority.anchorEpoch,
+        ownerEpoch: this.#authority.ownerEpoch,
       },
     });
     const control = {
@@ -1692,7 +1729,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw new Error("Conversation input admission returned another control result");
       }
       const replayedAttachments = [...(input.attachments ?? [])];
-      await this.#authority.surfaceAssets.markAdopted(replayedAttachments);
+      await this.#markAttachmentsAdopted(replayedAttachments);
       return {
         runId: appliedReplay.result.body.runId,
         ingress,
@@ -1708,11 +1745,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       && input.attachments
       && input.attachments.length > 0
     ) {
-      await this.#authority.surfaceAssets.assertUploadAdoption({
+      await this.#assertUploadAdoption({
         scope: {
           domain: "conversation",
           conversationId: input.conversationId,
-          ownerEpoch: this.#authority.anchorEpoch,
+          ownerEpoch: this.#authority.ownerEpoch,
         },
         surfacePrincipal: ingress.surfacePrincipal,
         requestId,
@@ -1778,7 +1815,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           : undefined;
       }
     }
-    await this.#authority.surfaceAssets.markAdopted(durableAttachments);
+    await this.#markAttachmentsAdopted(durableAttachments);
     return {
       runId: admittedRunId,
       ingress: durableIngress,
@@ -1812,13 +1849,63 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       .sort();
   }
 
+  async #markAttachmentsAdopted(
+    attachments: PendingConversationInput["attachments"],
+  ): Promise<void> {
+    if (this.#authority.surfaceAssets) {
+      await this.#authority.surfaceAssets.markAdopted(attachments);
+      return;
+    }
+    for (const attachment of attachments) {
+      if (!await this.#authority.artifacts.has(attachment)) {
+        throw new Error(`Conversation attachment is unavailable: ${attachment.digest}`);
+      }
+    }
+  }
+
+  async #assertUploadAdoption(
+    input: Parameters<
+      import("@zhixing/core/authority").SurfaceAssetCoordinator["assertUploadAdoption"]
+    >[0],
+  ): Promise<void> {
+    if (this.#authority.surfaceAssets) {
+      await this.#authority.surfaceAssets.assertUploadAdoption(input);
+      return;
+    }
+    for (const asset of input.assets) {
+      if (!await this.#authority.artifacts.has(asset)) {
+        throw new Error(`Conversation attachment is unavailable: ${asset.digest}`);
+      }
+    }
+  }
+
+  /** Internal owner-domain directory; no public RPC or channel registration. */
+  async listSessions(): Promise<readonly string[]> {
+    const ids = await this.#authority.controlAdmission.listCreatedConversationIds();
+    const active: string[] = [];
+    for (const conversationId of ids) {
+      if (!this.#authority.acceptsConversationId(conversationId)) continue;
+      const state = await this.#journalForQuery(conversationId).authorityState();
+      if (!state.deleted) active.push(conversationId);
+    }
+    return active;
+  }
+
+  async sessionExists(conversationId: string): Promise<boolean> {
+    if (!this.#authority.acceptsConversationId(conversationId)) return false;
+    const ids = await this.#authority.controlAdmission.listCreatedConversationIds();
+    if (!ids.includes(conversationId)) return false;
+    return !(await this.#journalForQuery(conversationId).authorityState()).deleted;
+  }
+
   async #establishSession(conversationId: string): Promise<void> {
     const scope = {
       domain: "conversation" as const,
       conversationId,
-      ownerEpoch: this.#authority.anchorEpoch,
+      ownerEpoch: this.#authority.ownerEpoch,
     };
-    if (await this.#authority.surfaceAssets.ownsScope(scope)) return;
+    if (this.#authority.surfaceAssets &&
+      await this.#authority.surfaceAssets.ownsScope(scope)) return;
 
     const parsed = parseConversationId(conversationId);
     const source = {
@@ -1916,7 +2003,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const queue = [...this.#recoveryConversations.entries()];
     let recovered = await this.#authority.resourceGovernor.reclaimExpired();
     if (this.#ledger) {
-      recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
+      if (this.#authority.executorResourceGovernor !== this.#authority.resourceGovernor) {
+        recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
+      }
     }
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
@@ -2085,6 +2174,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       readonly afterStatusRevision: number;
     }[];
   }> {
+    for (const request of requests) {
+      if (!this.#authority.acceptsConversationId(request.conversationId)) {
+        throw new Error("Conversation identity does not belong to this owner domain");
+      }
+    }
     const snapshot = await this.#authority.authorityLog.readSnapshot();
     const conversationSnapshots = partitionConversationSnapshots(snapshot);
     const grouped = new Map<
@@ -2142,14 +2236,76 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    */
   get sessionState(): SessionStatePort {
     if (!this.#sessionState) {
-      this.#sessionState = new AnchorSessionStateAdapter({
+      this.#sessionState = new ConversationSessionStateAdapter({
         journalFor: (conversationId) => this.#journal(conversationId),
+        mutateControl: async (conversationId, mutation, ctx) => {
+          const principal = ctx.principal.kind === "surface"
+            ? {
+                surfacePrincipal: ctx.principal.surfacePrincipal,
+                connectionId: ctx.principal.connectionId,
+                deviceId: this.#authority.deviceId,
+              }
+            : ctx.principal.kind === "host"
+              ? {
+                  surfacePrincipal: `owner:${ctx.principal.component}`,
+                  connectionId: `owner:${ctx.principal.component}`,
+                  deviceId: this.#authority.deviceId,
+                }
+              : undefined;
+          if (!principal) {
+            throw new Error("Session control mutation requires a surface or host principal");
+          }
+          const result = await this.writeSession({
+            conversationId,
+            requestId: ctx.requestId,
+            mutation,
+            principal,
+            conversationExists: async () => true,
+          });
+          if (result.status !== "accepted") {
+            throw new Error(`Session mutation was not accepted: ${result.status}`);
+          }
+          return { revision: result.domainRevision };
+        },
+        stageAssignment: async (conversationId, mutation, ctx) => {
+          if (ctx.principal.kind !== "assignment") {
+            throw new Error("Staged session mutation requires an assignment principal");
+          }
+          const capability = validateAuthorityCapability(
+            ctx.principal.capability,
+            this.#authority.verifier,
+          );
+          if (capability.scope.execution !== "conversation") {
+            throw new Error("Assignment capability does not authorize this session mutation");
+          }
+          if (
+            capability.scope.conversationId !== conversationId ||
+            !("ownerEpoch" in capability) ||
+            capability.ownerEpoch !== this.#authority.ownerEpoch ||
+            this.#assignmentConversations.get(capability.assignmentId) !== conversationId ||
+            !capability.methods.includes("session.mutate")
+          ) {
+            throw new Error("Assignment capability does not authorize this session mutation");
+          }
+          const staged = await this.#requireLocalLedger().stageMutation(
+            capability.assignmentId,
+            {
+              domain: "session",
+              mutation,
+              requestId: ctx.requestId,
+            },
+          );
+          return { revision: staged.recordSeq };
+        },
       });
     }
-    return this.#sessionState;
+    return this.#sessionState!;
   }
 
   #journal(conversationId: string): ConversationRunJournal {
+    if (!this.#authority.acceptsConversationId(conversationId)) {
+      throw new Error("Conversation identity does not belong to this owner domain");
+    }
     const existing = this.#journals.get(conversationId);
     if (existing) return existing;
     const journal = this.#createJournal(conversationId);
@@ -2158,13 +2314,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   #journalForQuery(conversationId: string): ConversationRunJournal {
+    if (!this.#authority.acceptsConversationId(conversationId)) {
+      throw new Error("Conversation identity does not belong to this owner domain");
+    }
     return this.#journals.get(conversationId) ?? this.#createJournal(conversationId);
   }
 
   #createJournal(conversationId: string): ConversationRunJournal {
     const journal = new ConversationRunJournal({
       conversationId,
-      ownerEpoch: this.#authority.anchorEpoch,
+      ownerEpoch: this.#authority.ownerEpoch,
       log: this.#authority.authorityLog,
       artifacts: this.#authority.artifacts,
       signer: this.#authority.signer,
@@ -2179,8 +2338,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       projection: {
         project: (projection) => this.#manager().project(projection),
       },
-      publisher: this.#mutationPublisherProxy,
-      delivery: this.#authority.participant,
+      ...(this.#authority.globalPublishing
+        ? { publisher: this.#mutationPublisherProxy }
+        : {}),
+      ...(this.#authority.participant
+        ? { delivery: this.#authority.participant }
+        : {}),
       resources: this.#authority.resourceGovernor,
       clock: this.#clock,
     });
@@ -2195,7 +2358,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       decideAtPrefix: (decision) => {
         if (
           decision.conversationId !== conversationId ||
-          decision.ownerEpoch !== this.#authority.anchorEpoch
+          decision.ownerEpoch !== this.#authority.ownerEpoch
         ) {
           return {
             committed: false,
@@ -2569,7 +2732,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#recoveryDiscovered) return 0;
     const snapshot = await this.#authority.authorityLog.readSnapshot();
     const conversationSnapshots = partitionConversationSnapshots(snapshot);
-    const conversationIds = discoverRecoveryConversations(snapshot.commits);
+    const conversationIds = new Set(
+      [...discoverRecoveryConversations(snapshot.commits)].filter((conversationId) =>
+        this.#authority.acceptsConversationId(conversationId),
+      ),
+    );
     for (const conversationId of conversationIds) {
       this.#markRecovery(conversationId);
       await this.#journal(conversationId).primeRecoverySnapshot(
@@ -2633,9 +2800,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     const projected = await journal.resumeLifecycleProjections(async (input) => {
       if (input.mutation === "delete") {
-        await this.#authority.surfaceAssets.revokeConversation(
-          input.conversationId,
-        );
+        await this.#authority.surfaceAssets?.revokeConversation(input.conversationId);
       }
       await this.#projectLifecycle!(input);
     });

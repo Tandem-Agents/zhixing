@@ -84,6 +84,8 @@ export interface ServeAdvancementControllerDeps {
         readonly anchorEpoch: number;
       }
     | undefined;
+  /** Local owners use local-draft contracts and never imply a global save. */
+  readonly rubricScope?: "global" | "local";
 }
 
 /** 惰性解析的治理端口代理——每次调用时解析真实 governor，缺失即拒绝。 */
@@ -213,7 +215,9 @@ export async function createServeAdvancementController(
     anchorEpoch: () => deps.rubricRuntime?.()?.anchorEpoch,
   };
   const contractBuilder = new RubricContractBuilder({
-    rubricCatalog: new GlobalRubricCatalog(rubricLibrary),
+    ...(deps.rubricScope === "local"
+      ? {}
+      : { rubricCatalog: new GlobalRubricCatalog(rubricLibrary) }),
     generationStrategy: new LLMRubricDraftGenerationStrategy({
       complete: (prompt) => completeViaPort("main", prompt),
     }),
@@ -269,7 +273,9 @@ export async function createServeAdvancementController(
     }),
     resources: governor,
     ...(evidence ? { evidence } : {}),
-    rubricPublication: new GlobalRubricPublication(rubricLibrary),
+    ...(deps.rubricScope === "local"
+      ? {}
+      : { rubricPublication: new GlobalRubricPublication(rubricLibrary) }),
     ...(deps.recentContextProvider
       ? { recentContextProvider: deps.recentContextProvider }
       : {}),

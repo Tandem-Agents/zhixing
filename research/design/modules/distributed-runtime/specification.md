@@ -19,7 +19,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25519
 ```
 
-- id 前缀规则：`run- / asg- / jobrun- / req- / rsv- / use- / xfer- / cap- / tkt- / grt- / ich- / dlv- / int- / offer-` + Ulid。conversationId 沿既有；本地域对话恒为 `local-<deviceId 前 8 位>-<Ulid>`。
+- id 前缀规则：`run- / asg- / jobrun- / req- / rsv- / use- / xfer- / cap- / tkt- / grt- / ich- / dlv- / int- / offer-` + Ulid。conversationId 沿既有；本地域对话恒为 `local-<设备指纹载荷前 8 位>-<Ulid>`，不把 `fp:u` 等方案前缀或分隔符带入路径身份。
 - 协议标识符统一为非空且不超过 480 个 UTF-16 code unit；所有生产端、wire validator、耐久 reducer 与恢复投影复用同一判定。自由文本和原始字节使用各自字段合同，不套用标识符上界。
 - epoch 规则（uint64、单调、永不回退）：`anchorEpoch`（迁居 / 换代 +1）、`trustEpoch`（issuer-transition +1）、`ownerEpoch`（对话权威转移 +1）、`localGovernorEpoch`（设备级治理域 epoch，仅本地域整体重置时 +1；单个对话被收编不改变它，对话级 fencing 由该对话自己的 `ownerEpoch` 承担）、`streamEpoch`（assignment 数据面重连 +1）。`localDomainId = "local:"+deviceId`。
 - 时钟：协议时间戳恒为签发者时钟；跨设备只用 `issuedAt + TTL` 换算单调 deadline；`maxClockSkewMs = 120_000`（初值，S2 标定）。权威侧时间判定恒用**不可回退有效时钟** `max(本地墙钟, 锚定时间 + 单调流逝, 该权威日志重放出的时间前沿)`——锚定时间为进程内任一次有效时钟观测值与其单调时钟读数的配对，流逝由单调时钟承载，故回拨既不能回退、也不能冻结在线时间；跨重启的停机流逝无法自证，由前沿粘滞与短 TTL 兜底。"已过期"是权威观测后不可逆的事实，墙钟回拨不得使任何已过期身份或授权复活；executor 票据 retirement 前沿、owner 票据 expiry 前沿与 surface 授权时间前沿（§2.2）都是同一不变量的实例，各归其权威日志，不另建时间存储。
@@ -2523,7 +2523,7 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 | 27（S7） | advancement 与独立取证 | 接入 AdvancementSnapshot/Event、ControlCompletion/Reviewer、review 子租约、EvidenceRequest/Bundle/ObservationToken、local-draft rubric 快照 | stale 有限重试、缺证据不判通过、PathGuard/binding revision、离线契约立即生效与全局沉淀延后测试通过 |
 | 28（S7） | 编排、memory、技能与生命周期接入 | 编排节点使用父 run 子租约；memory/skill/workscene/task-list/segment 的所有写按落点矩阵进入 staged/control；workscene staged 只返回 overlay receipt，最终 applied 结果随 publish-decision 耐久回传；写类 lifecycle 只在权威提交后触发 | 各模块既有测试 + 双拓扑 adapter 套件通过；workscene staged 零伪 applied、响应丢失不重生 sceneId/revision；failed/cancelled/uncertain 零外泄；executor 零全局 Store 写实例 |
 | 29（S7） | 入口覆盖 lint 与模块文档同步 | 建机器可读“registry/命令→落点行或排除项”单源，补齐 §十三列出的模块文档与公开契约，清除旧入口和兼容适配 | 每个 RPC、命令、渠道、生命周期钩子和执行侧写工具恰命中一次；无映射/双映射失败；依赖 lint、全量测试/build 通过 |
-| 30（S8） | 本地域 owner 同构装配 | executor 内装配 owner-kernel + owner-services + 本地 governor；本地域不装配 GlobalStatePort；对话 id/ownerEpoch 空间隔离 | 本地域 conversation 的 run/取消/确认/advancement 双拓扑测试通过；全局写实例扫描为零；锚点域既有会话离线时不可写 |
+| 30（S8） | 本地域 owner 同构装配 | executor 内以显式本地域 owner 合同装配 owner-kernel + owner-services + 本地 governor，复用 executor 的设备日志、ArtifactStore、数据面与容量原语；本地域不装配 GlobalStatePort、全局发布或外部投递，对话 id/ownerEpoch/逻辑流与锚点域隔离；仅开放内部组合与 conformance 端口 | 本地域 conversation 的 run/取消/确认/advancement 双拓扑测试通过；全局写与 delivery 实例扫描为零；锚点域既有会话离线时不可写；启用 executor 的拓扑恰一实例，停机收束后零后台任务；公开离线入口仍关闭 |
 | 31（S8） | DeferredGlobalIntent 与离线能力矩阵 | 落 intent 流/端口，只允许 schedule 与 rubric 沉淀；收编前可查可撤，timeSensitive 收编后必须再确认 | 非法 mutation 类型不可构造；锚点域 record 拒绝；重放、撤销、重校验冲突与用户文案测试通过 |
 | 32（S8） | conversation 收编与离线能力启用 | 落 conversation AuthorityTransfer 双端 transfer 流、freeze/checkpoint/import/commit/tombstone；收编携完整会话域与 intent，最后开放离线新建/收编旅程；按 §5.7 把 EvidenceRequest current-owner verifier 作为 local / mesh 生产组合根必注入依赖，并前置于 journal exact replay（该增量工作量中） | 6.3 conversation 各边、任意步崩溃重入、旧 owner fencing、资产/意向零遗漏、收编复核和双拓扑产品旅程通过；旧 owner 的 fresh 与 exact-replay 取证请求均在 journal / workspace 读取前拒绝，当前 owner 原 bundle 可幂等重放；S8 到此启用 |
 | 33（S9） | 全量一致性检查点与周期备份 | 在 S2 的 root-activation 检查点合同上扩展完整权威 scope、分块资产、readiness 投影、周期/迁居前强制检查点及保留策略，不新造第二种信封 | 分块篡改、错 key/nonce/target/digest、复制/回读中断、链头变化与当前根 readiness 测试通过；秘密与环境事实不入备份 |

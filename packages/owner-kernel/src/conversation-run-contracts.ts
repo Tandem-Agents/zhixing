@@ -16,7 +16,9 @@ import type {
   IngressContext,
   JobRunState,
   JobUncertainClosure,
+  SessionControlMutation,
   SessionInternalRecord,
+  SessionStagedMutation,
   SupersedeProof,
   UncertainResolutionFact,
   UserTurnInput,
@@ -67,6 +69,14 @@ export type ConversationRunJournalRecord =
       readonly requestId: string;
       readonly sceneId: string;
       readonly lastActiveAt: string;
+    }
+  | {
+      readonly t: "session-control";
+      readonly domainRevision: number;
+      readonly requestId: string;
+      readonly mutation:
+        | Exclude<SessionControlMutation, { readonly kind: "advancement-event" }>
+        | SessionStagedMutation;
     }
   | {
       readonly t: "admitted";
@@ -248,6 +258,9 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
       "t",
     ],
   },
+  "session-control": {
+    required: ["domainRevision", "mutation", "requestId", "t"],
+  },
   admitted: {
     required: [
       "ingress",
@@ -410,6 +423,14 @@ export function validateConversationRunRecord(
         assertIdentifier(value.requestId, "Session metadata request id");
         assertIdentifier(value.sceneId, "Session metadata scene id");
         assertCanonicalTime(value.lastActiveAt, "Session metadata activity time");
+        break;
+      case "session-control":
+        assertPositiveSafeInteger(
+          value.domainRevision,
+          "Session control domain revision",
+        );
+        assertIdentifier(value.requestId, "Session control request id");
+        validateSessionMutation(value.mutation);
         break;
       case "admitted": {
         assertIdentifier(value.ingressKey, "Admitted ingress key");
@@ -1682,6 +1703,72 @@ function assertCanonicalTime(value: unknown, label: string): asserts value is st
   if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
     throw corruptRunJournal(`${label} must be a canonical ISO timestamp`);
   }
+}
+
+function validateSessionMutation(value: unknown): void {
+  assertPlainRecord(value, "Session mutation");
+  if (value.kind === "task-list-op") {
+    assertExactRecordKeys(value, ["kind", "op"], "Task-list mutation");
+    assertPlainRecord(value.op, "Task-list operation");
+    assertExactRecordKeys(value.op, ["op", "state"], "Task-list operation");
+    if (value.op.op !== "set") throw corruptRunJournal("Task-list operation is invalid");
+    assertPlainRecord(value.op.state, "Task-list state");
+    assertExactRecordKeys(value.op.state, ["items"], "Task-list state");
+    if (!Array.isArray(value.op.state.items)) {
+      throw corruptRunJournal("Task-list items must be an array");
+    }
+    const ids = new Set<string>();
+    for (const item of value.op.state.items) {
+      assertPlainRecord(item, "Task-list item");
+      assertExactRecordKeys(item, ["content", "id", "status"], "Task-list item");
+      assertIdentifier(item.id, "Task-list item id");
+      if (ids.has(item.id)) throw corruptRunJournal("Task-list item ids are duplicated");
+      ids.add(item.id);
+      if (typeof item.content !== "string" || item.content.trim().length === 0) {
+        throw corruptRunJournal("Task-list item content must be non-empty");
+      }
+      if (!new Set(["pending", "in_progress", "completed"]).has(String(item.status))) {
+        throw corruptRunJournal("Task-list item status is invalid");
+      }
+    }
+    return;
+  }
+  if (value.kind === "segment-append") {
+    assertExactRecordKeys(value, ["kind", "segment"], "Segment mutation");
+    assertPlainRecord(value.segment, "Segment record");
+    assertExactRecordKeys(
+      value.segment,
+      ["segmentId", "timestamp", "tokensAfter", "tokensBefore"],
+      "Segment record",
+    );
+    assertIdentifier(value.segment.segmentId, "Segment id");
+    assertCanonicalTime(value.segment.timestamp, "Segment timestamp");
+    assertNonNegativeSafeInteger(value.segment.tokensBefore, "Segment tokens before");
+    assertNonNegativeSafeInteger(value.segment.tokensAfter, "Segment tokens after");
+    return;
+  }
+  if (value.kind === "session-meta") {
+    assertExactRecordKeys(value, ["kind", "patch"], "Session metadata mutation");
+    assertPlainRecord(value.patch, "Session metadata patch");
+    assertRecordKeys(value.patch, [], ["name", "viewLayerState"], "Session metadata patch");
+    if (value.patch.name !== undefined &&
+      (typeof value.patch.name !== "string" || value.patch.name.trim().length === 0)) {
+      throw corruptRunJournal("Session name must be non-empty");
+    }
+    if (value.patch.viewLayerState !== undefined &&
+      typeof value.patch.viewLayerState !== "string") {
+      throw corruptRunJournal("Session view-layer state must be text");
+    }
+    return;
+  }
+  if (value.kind === "window-op") {
+    assertExactRecordKeys(value, ["kind", "op"], "Window mutation");
+    if (value.op !== "compact") {
+      throw corruptRunJournal("Only non-lifecycle window compaction may use session-control");
+    }
+    return;
+  }
+  throw corruptRunJournal("Session control mutation kind is invalid");
 }
 
 function isStoredReference(value: unknown): value is { readonly ref: ArtifactRef } {

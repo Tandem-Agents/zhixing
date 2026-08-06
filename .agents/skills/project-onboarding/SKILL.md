@@ -1,6 +1,6 @@
 ---
 name: project-onboarding
-description: 当用户需要让 agent 快速了解当前项目核心、建立继续开发或审查前的项目上下文时使用。
+description: 仅当用户明确要求使用本 Skill 熟悉当前项目时使用；不得根据首次接手、上下文不足、开发、审查或制定清单等情形自行触发。
 metadata:
   stepped-skill.version: "0.1"
   stepped-skill.entry: "steps/01-project-overview.md"

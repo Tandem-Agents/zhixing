@@ -43,6 +43,7 @@ import {
   emptyGovernorProjection,
   isBusinessOwnedResourceReservation,
   protocolDigest,
+  queuedTerminalDequeueRecord,
   ResourceAdmissionDeferredError,
   resourceBudgetUsage,
   rootResourceWorkloadKey,
@@ -95,19 +96,38 @@ interface LocalCandidateOccupancy {
 export interface ExecutorAssignmentResourceCoordinator {
   coordinate<T>(operation: () => Promise<T>): Promise<T>;
   prepareReceipt(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
+  prepareActivation(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
+  prepareQueuedTerminal(input: {
+    readonly workload: RootResourceWorkload;
+    readonly reason: Extract<GovernorRecord, { t: "dequeue" }>["reason"];
+  }): readonly LogicalRecord<GovernorRecord>[];
   prepareTerminal(input: {
     readonly lease: AssignmentResourceLease;
-    readonly mode: "settle-release" | "release";
+    readonly mode: "settle-release" | "release" | "reclaim";
   }): readonly LogicalRecord<GovernorRecord>[];
   assertReceiptRecords(input: {
     readonly lease: AssignmentResourceLease;
     readonly records: readonly LogicalRecord<unknown>[];
     readonly acceptedAt?: string;
   }): void;
+  assertActivationRecords(input: {
+    readonly lease: AssignmentResourceLease;
+    readonly records: readonly LogicalRecord<unknown>[];
+    readonly acceptedAt?: string;
+  }): void;
   assertTerminalRecords(input: {
     readonly reservationId: string;
-    readonly mode: "settle-release" | "release";
+    readonly mode: "settle-release" | "release" | "reclaim";
     readonly records: readonly LogicalRecord<unknown>[];
+  }): void;
+  assertUsageFinal(input: {
+    readonly reservationId: string;
+    readonly assignmentId: string;
+    readonly executorId: string;
+    readonly usageFinal: {
+      readonly reportDigest: string;
+      readonly upToUsageSeq: number;
+    };
   }): void;
   usageFinal(assignmentId: string): {
     readonly reportDigest: string;
@@ -214,6 +234,21 @@ export class ExecutorResourceGovernor
   ): readonly LogicalRecord<GovernorRecord>[] {
     const validated = this.#validateAcceptedRoot(lease);
     this.#validateLeaseAcceptance(validated, this.#clock());
+    const existing = this.#projection?.state.reservations.get(
+      validated.reservationId,
+    );
+    if (existing) {
+      if (
+        validated.domain.kind !== "local" ||
+        existing.state !== "active" ||
+        canonicalize(existing.lease) !== canonicalize(validated)
+      ) {
+        throw new TypeError(
+          "Executor resource receipt conflicts with its durable activation",
+        );
+      }
+      return [this.#record({ t: "reserve", lease: validated })];
+    }
     this.#assertCapacity(validated.reservationId);
     if (validated.domain.kind === "local") {
       this.#assertCurrentCandidate(validated);
@@ -227,6 +262,22 @@ export class ExecutorResourceGovernor
       }),
       this.#record({ t: "reserve", lease: validated }),
     ];
+    this.#preflight(records);
+    return records;
+  }
+
+  /** In a local owner domain the owner activation and executor receipt are one fact. */
+  prepareActivation(
+    lease: AssignmentResourceLease,
+  ): readonly LogicalRecord<GovernorRecord>[] {
+    return this.prepareReceipt(lease);
+  }
+
+  prepareQueuedTerminal(input: {
+    readonly workload: RootResourceWorkload;
+    readonly reason: Extract<GovernorRecord, { t: "dequeue" }>["reason"];
+  }): readonly LogicalRecord<GovernorRecord>[] {
+    const records = [queuedTerminalDequeueRecord(input.workload, input.reason)];
     this.#preflight(records);
     return records;
   }
@@ -248,9 +299,25 @@ export class ExecutorResourceGovernor
       this.#record({ t: "reserve", lease }),
     ];
     const actual = input.records.filter((record) => record.stream === this.#stream);
-    if (canonicalize(actual) !== canonicalize(expected)) {
+    const localActivationReceipt =
+      lease.domain.kind === "local"
+        ? [this.#record({ t: "reserve", lease })]
+        : undefined;
+    if (
+      canonicalize(actual) !== canonicalize(expected) &&
+      (localActivationReceipt === undefined ||
+        canonicalize(actual) !== canonicalize(localActivationReceipt))
+    ) {
       throw new TypeError("Executor resource receipt records are incomplete or conflicting");
     }
+  }
+
+  assertActivationRecords(input: {
+    readonly lease: AssignmentResourceLease;
+    readonly records: readonly LogicalRecord<unknown>[];
+    readonly acceptedAt?: string;
+  }): void {
+    this.assertReceiptRecords(input);
   }
 
   prepareTerminal(input: {
@@ -272,6 +339,26 @@ export class ExecutorResourceGovernor
     const actual = input.records.filter((record) => record.stream === this.#stream);
     if (canonicalize(actual) !== canonicalize(expected)) {
       throw new TypeError("Executor resource terminal records are incomplete or conflicting");
+    }
+  }
+
+  assertUsageFinal(input: {
+    readonly reservationId: string;
+    readonly assignmentId: string;
+    readonly executorId: string;
+    readonly usageFinal: {
+      readonly reportDigest: string;
+      readonly upToUsageSeq: number;
+    };
+  }): void {
+    if (
+      input.reservationId !== `reservation:${input.assignmentId}` ||
+      input.executorId !== this.#executorId
+    ) {
+      throw new TypeError("Final usage does not bind the local assignment root");
+    }
+    if (canonicalize(this.usageFinal(input.assignmentId)) !== canonicalize(input.usageFinal)) {
+      throw new TypeError("Final usage does not match the local durable watermark");
     }
   }
 
@@ -698,6 +785,28 @@ export class ExecutorResourceGovernor
       }
     }
     return this.usageFinal(assignmentId);
+  }
+
+  /** Finalizes the complete local reservation subtree without creating anchor usage debt. */
+  async finalizeLocalAssignment(
+    assignmentId: string,
+  ): Promise<{ readonly reportDigest: string; readonly upToUsageSeq: number }> {
+    await this.#operations.run(async () => {
+      await this.#synchronizeUnlocked();
+      await this.#reconcileAssignmentUsageUnlocked(assignmentId);
+      await this.#finalizeAssignmentDescendantsUnlocked(assignmentId);
+    });
+    return this.usageFinal(assignmentId);
+  }
+
+  async assignmentDomain(
+    assignmentId: string,
+  ): Promise<AssignmentResourceLease["domain"] | undefined> {
+    return this.#operations.run(async () => {
+      await this.#synchronizeUnlocked();
+      const root = findAssignmentRoot(this.#projection!.state, assignmentId);
+      return root ? structuredClone(root.lease.domain) : undefined;
+    });
   }
 
   usageFinal(assignmentId: string): {
@@ -1295,7 +1404,7 @@ export class ExecutorResourceGovernor
 
   #terminalRecords(
     reservationId: string,
-    mode: "settle-release" | "release",
+    mode: "settle-release" | "release" | "reclaim",
   ): readonly LogicalRecord<GovernorRecord>[] {
     requireIdentifier(reservationId, "Terminal reservationId");
     return mode === "settle-release"
@@ -1303,7 +1412,12 @@ export class ExecutorResourceGovernor
           this.#record({ t: "settle", reservationId }),
           this.#record({ t: "release", reservationId }),
         ]
-      : [this.#record({ t: "release", reservationId })];
+      : [
+          this.#record({
+            t: mode === "reclaim" ? "reclaim" : "release",
+            reservationId,
+          }),
+        ];
   }
 
   #validateLeaseAcceptance(lease: ResourceLease, acceptedAt: string): number {

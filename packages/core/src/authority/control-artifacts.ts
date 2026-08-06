@@ -187,20 +187,8 @@ function assertAdmittedControlRequest(value: unknown): asserts value is ControlR
     assertNonNegativeInteger(value.ownerEpoch, "session-write ownerEpoch");
     assertNonNegativeInteger(value.domainRevision, "session-write domainRevision");
     assertPlainRecord(value.mutation, "session-write mutation");
-    if (
-      value.mutation.kind === "window-op" &&
-      (value.mutation.op === "clear" || value.mutation.op === "compact") &&
-      Object.keys(value.mutation).sort().join(",") === "kind,op"
-    ) {
-      return;
-    }
-    if (
-      value.mutation.kind === "conversation-delete" &&
-      Object.keys(value.mutation).length === 1
-    ) {
-      return;
-    }
-    throw new TypeError("session-write mutation is not supported by conversation authority");
+    validateSessionWriteMutation(value.mutation);
+    return;
   }
   if (value.t === "job-run") {
     assertExactKeys(value, ["anchorEpoch", "t", "taskId"], "job-run request");
@@ -344,6 +332,78 @@ function snapshot(value: unknown, label: string): unknown {
       cause: error,
     });
   }
+}
+
+function validateSessionWriteMutation(value: Record<string, unknown>): void {
+  if (value.kind === "window-op") {
+    assertExactKeys(value, ["kind", "op"], "session window mutation");
+    if (value.op !== "clear" && value.op !== "compact") {
+      throw new TypeError("session window operation is invalid");
+    }
+    return;
+  }
+  if (value.kind === "conversation-delete") {
+    assertExactKeys(value, ["kind"], "session deletion mutation");
+    return;
+  }
+  if (value.kind === "task-list-op") {
+    assertExactKeys(value, ["kind", "op"], "task-list mutation");
+    assertPlainRecord(value.op, "task-list operation");
+    assertExactKeys(value.op, ["op", "state"], "task-list operation");
+    if (value.op.op !== "set") throw new TypeError("task-list operation is invalid");
+    assertPlainRecord(value.op.state, "task-list state");
+    assertExactKeys(value.op.state, ["items"], "task-list state");
+    if (!Array.isArray(value.op.state.items)) {
+      throw new TypeError("task-list items must be an array");
+    }
+    for (const item of value.op.state.items) {
+      assertPlainRecord(item, "task-list item");
+      assertExactKeys(item, ["content", "id", "status"], "task-list item");
+      assertIdentifier(item.id, "task-list item id");
+      assertNonEmptyString(item.content, "task-list item content");
+      if (item.status !== "pending" && item.status !== "in_progress" &&
+        item.status !== "completed") {
+        throw new TypeError("task-list item status is invalid");
+      }
+    }
+    return;
+  }
+  if (value.kind === "segment-append") {
+    assertExactKeys(value, ["kind", "segment"], "segment mutation");
+    assertPlainRecord(value.segment, "segment record");
+    assertExactKeys(
+      value.segment,
+      ["segmentId", "timestamp", "tokensAfter", "tokensBefore"],
+      "segment record",
+    );
+    assertIdentifier(value.segment.segmentId, "segment id");
+    assertCanonicalTime(value.segment.timestamp, "segment timestamp");
+    assertNonNegativeInteger(value.segment.tokensBefore, "segment tokens before");
+    assertNonNegativeInteger(value.segment.tokensAfter, "segment tokens after");
+    return;
+  }
+  if (value.kind === "session-meta") {
+    assertExactKeys(value, ["kind", "patch"], "session metadata mutation");
+    assertPlainRecord(value.patch, "session metadata patch");
+    assertAllowedKeys(value.patch, ["name", "viewLayerState"], "session metadata patch");
+    if (value.patch.name !== undefined) {
+      assertNonEmptyString(value.patch.name, "session name");
+    }
+    if (value.patch.viewLayerState !== undefined &&
+      typeof value.patch.viewLayerState !== "string") {
+      throw new TypeError("session view-layer state must be text");
+    }
+    return;
+  }
+  if (value.kind === "advancement-event") {
+    // Advancement has its own signed event validator at the owner journal boundary.
+    assertExactKeys(value, ["events", "kind"], "advancement mutation");
+    if (!Array.isArray(value.events) || value.events.length === 0) {
+      throw new TypeError("advancement mutation events must be non-empty");
+    }
+    return;
+  }
+  throw new TypeError("session-write mutation is not supported by conversation authority");
 }
 
 function assertPlainRecord(

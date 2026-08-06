@@ -394,6 +394,22 @@ export class FileTrustRuleSnapshotCatalog {
     return snapshot === undefined ? undefined : structuredClone(snapshot);
   }
 
+  /** Latest accepted anchor-signed snapshot, or undefined before first synchronization. */
+  async latest(): Promise<TrustRuleSnapshot | undefined> {
+    const release = await acquireFileLock(`${this.#directoryPath}.lock`, {
+      staleMs: 30_000,
+      waitMs: 10_000,
+      resourceName: "Permission snapshot catalog",
+    });
+    try {
+      await this.#reload();
+      const latest = this.#snapshotsByVersion.get(this.#highWater());
+      return latest === undefined ? undefined : structuredClone(latest);
+    } finally {
+      await release();
+    }
+  }
+
   async highWater(): Promise<number> {
     const release = await acquireFileLock(`${this.#directoryPath}.lock`, {
       staleMs: 30_000,

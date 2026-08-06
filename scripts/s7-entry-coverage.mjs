@@ -761,6 +761,7 @@ export async function validateS7Structure() {
     ));
   }
   failures.push(...await inspectCleanupRegistryConstructions(records));
+  failures.push(...inspectLocalConversationOwnerIsolation(records));
   for (const packageName of [
     "server",
     "executor",
@@ -779,6 +780,83 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+export function inspectLocalConversationOwnerIsolation(records) {
+  const failures = [];
+  const runtimeRecord = records.find(
+    ({ relative }) => relative === "packages/cli/src/serve/conversation-owner-runtime.ts",
+  );
+  const assemblyRecord = records.find(
+    ({ relative }) => relative === "packages/cli/src/serve/local-conversation-owner.ts",
+  );
+  if (!runtimeRecord || !assemblyRecord) {
+    return ["local conversation owner isolation sources are missing"];
+  }
+
+  const runtimeSource = sourceFile(runtimeRecord.relative, runtimeRecord.text);
+  const localRuntime = runtimeSource.statements.find(
+    (node) => ts.isInterfaceDeclaration(node) &&
+      node.name.text === "LocalConversationOwnerRuntimeStack",
+  );
+  if (!localRuntime) {
+    failures.push(`${runtimeRecord.relative}: local owner runtime contract is missing`);
+  } else {
+    const properties = new Map(
+      localRuntime.members
+        .filter((member) => ts.isPropertySignature(member) && ts.isIdentifier(member.name))
+        .map((member) => [member.name.text, member]),
+    );
+    for (const capability of ["surfaceAssets", "delivery", "participant", "globalState"]) {
+      if (properties.get(capability)?.type?.kind !== ts.SyntaxKind.NeverKeyword) {
+        failures.push(
+          `${runtimeRecord.relative}: local owner capability ${capability} must remain never`,
+        );
+      }
+    }
+    const globalPublishing = properties.get("globalPublishing")?.type;
+    if (
+      !globalPublishing ||
+      !ts.isLiteralTypeNode(globalPublishing) ||
+      globalPublishing.literal.kind !== ts.SyntaxKind.FalseKeyword
+    ) {
+      failures.push(
+        `${runtimeRecord.relative}: local owner globalPublishing must remain false`,
+      );
+    }
+  }
+
+  const assemblySource = sourceFile(assemblyRecord.relative, assemblyRecord.text);
+  const assemblyOptions = assemblySource.statements.find(
+    (node) => ts.isInterfaceDeclaration(node) &&
+      node.name.text === "LocalConversationOwnerAssemblyOptions",
+  );
+  if (!assemblyOptions) {
+    failures.push(`${assemblyRecord.relative}: local owner assembly contract is missing`);
+  } else {
+    const properties = new Map(
+      assemblyOptions.members
+        .filter((member) => ts.isPropertySignature(member) && ts.isIdentifier(member.name))
+        .map((member) => [member.name.text, member]),
+    );
+    const owner = properties.get("owner")?.type;
+    if (
+      !owner ||
+      !ts.isTypeReferenceNode(owner) ||
+      !ts.isIdentifier(owner.typeName) ||
+      owner.typeName.text !== "LocalConversationOwnerRuntimeStack"
+    ) {
+      failures.push(
+        `${assemblyRecord.relative}: assembly must receive the narrowed local owner contract`,
+      );
+    }
+    if (properties.has("authority")) {
+      failures.push(
+        `${assemblyRecord.relative}: assembly cannot receive the anchor authority stack`,
+      );
+    }
+  }
+  return failures;
 }
 
 function resolveSourceSpecifier(importer, specifier, sourceFiles, publicSources) {

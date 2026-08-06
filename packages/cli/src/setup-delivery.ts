@@ -54,6 +54,7 @@ import {
   EXECUTION_PROTOCOL_VERSION,
   ExecutorCapabilityDirectory,
   matchManifest,
+  normalizeTrustRulesForSnapshot,
   protocolDigest,
   type ExecutorCapabilitySnapshot,
   type ProtocolSignatureVerifier,
@@ -130,6 +131,9 @@ import {
 
 export interface AuthorityRuntimeStack {
   readonly anchorEpoch: number;
+  readonly localDomainId: string;
+  readonly localOwnerEpoch: number;
+  readonly localGovernorEpoch: number;
   readonly deviceId: string;
   readonly identityKey: DeviceKey;
   readonly identity: DeviceIdentity;
@@ -143,6 +147,7 @@ export interface AuthorityRuntimeStack {
   readonly surfaceAssets: SurfaceAssetCoordinator;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
+  readonly localControlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
   readonly resourceGovernor: AnchorResourceGovernor;
   readonly executorResourceGovernor: ExecutorResourceGovernor;
@@ -176,6 +181,7 @@ export interface AuthorityRuntimeStack {
   readonly permissionSnapshotFor: (
     digest: string,
   ) => TrustRuleSnapshot | undefined;
+  readonly latestPermissionSnapshot: () => Promise<TrustRuleSnapshot | undefined>;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
   readonly installPermissionSnapshot: (
     snapshot: TrustRuleSnapshot,
@@ -200,6 +206,12 @@ export interface AuthorityRuntimeStack {
         snapshot: TrustRuleSnapshot,
       ) => Promise<ExecutorCapabilitySnapshot>;
     }[];
+  }) => Promise<PreparedConversationAssignmentAuthority>;
+  readonly prepareLocalConversationAssignment: (input: {
+    readonly conversationId: string;
+    readonly executionProfile: RuntimeExecutionProfile;
+    readonly permissionRules: readonly PermissionRule[];
+    readonly environment?: ExplicitEnvironmentSelection;
   }) => Promise<PreparedConversationAssignmentAuthority>;
   readonly prepareJobAssignment: (input: {
     readonly instruction: JobExecutionInstruction;
@@ -390,7 +402,7 @@ export async function setupAuthorityRuntime(
         )
       : undefined;
     const localExecutorEnabled = options.enableLocalExecutor ?? true;
-    const anchorRuntime = anchorEnabled
+    const ownerRuntime = anchorEnabled || localExecutorEnabled
       ? await import("@zhixing/owner-kernel")
       : undefined;
     const executorRuntime = localExecutorEnabled
@@ -411,10 +423,13 @@ export async function setupAuthorityRuntime(
       ? new DeliveryAuthority({ log: authorityLog, anchorEpoch })
       : undefined;
     const participant = authority
-      ? new anchorRuntime!.OwnerDeliveryParticipant({ authority })
+      ? new ownerRuntime!.OwnerDeliveryParticipant({ authority })
       : undefined;
     const controlAdmission = authorityLog
-      ? new anchorRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
+      ? new ownerRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
+      : undefined;
+    const localControlAdmission = executorLog
+      ? new ownerRuntime!.ControlAdmissionJournal(executorLog, artifacts)
       : undefined;
     const key =
       options.deviceKey ?? (await loadOrCreateDeviceKey(options.secretStore));
@@ -517,7 +532,7 @@ export async function setupAuthorityRuntime(
       ],
     });
     const resourceGovernor = authorityLog
-      ? new anchorRuntime!.AnchorResourceGovernor({
+      ? new ownerRuntime!.AnchorResourceGovernor({
           log: authorityLog,
           signer: key,
           verifier,
@@ -533,6 +548,9 @@ export async function setupAuthorityRuntime(
           clock,
         })
       : undefined;
+    const localOwnerEpoch = 1;
+    const localGovernorEpoch = 1;
+    const localDomainId = `local:${key.deviceId}`;
     const executorResourceGovernor = executorLog
       ? new executorRuntime!.ExecutorResourceGovernor({
           log: executorLog,
@@ -540,8 +558,8 @@ export async function setupAuthorityRuntime(
           verifier,
           guard: resourceGuard,
           executorId,
-          localDomainId: `local:${key.deviceId}`,
-          localGovernorEpoch: 1,
+          localDomainId,
+          localGovernorEpoch,
           ...(options.resourceCandidateTtlMs === undefined
             ? {}
             : { candidateTtlMs: options.resourceCandidateTtlMs }),
@@ -1127,6 +1145,111 @@ export async function setupAuthorityRuntime(
         selection.environment,
       );
     };
+    const prepareLocalConversationAssignment: AuthorityRuntimeStack["prepareLocalConversationAssignment"] =
+      async (input) => {
+        if (!localExecutorEnabled) {
+          throw new Error("Local executor role is not enabled on this device");
+        }
+        const permissionSnapshot = await permissionSnapshots.latest();
+        if (!permissionSnapshot) {
+          throw new SchedulerCapabilityGapError(
+            "Local conversation is waiting for a synchronized permission snapshot",
+            1,
+          );
+        }
+        const requestedRules = normalizeTrustRulesForSnapshot(input.permissionRules);
+        const cachedRules = normalizeTrustRulesForSnapshot(permissionSnapshot.rules);
+        if (canonicalize(requestedRules) !== canonicalize(cachedRules)) {
+          throw new SchedulerCapabilityGapError(
+            "Local conversation permissions are not present in the synchronized cache",
+            permissionSnapshot.snapshotVersion,
+          );
+        }
+        const environment = deriveEnvironmentRequirement({
+          ...(input.environment ? { explicit: input.environment } : {}),
+        });
+        if (
+          environment.workspace &&
+          environment.workspace.deviceId !== key.deviceId
+        ) {
+          throw new TypeError(
+            "Local conversation workspace must belong to its birth device",
+          );
+        }
+        const executionProfile = executionProfileForEnvironment(
+          normalizeRuntimeExecutionProfile(input.executionProfile),
+          environment,
+        );
+        const publication = await refreshLocalExecutorSnapshot();
+        const target = publication.snapshot;
+        assertRuntimeAvailable(executionProfile, {
+          tools: target.descriptor.tools,
+          mcpServers: target.descriptor.mcpServers,
+          credentialBindings: target.descriptor.credentialBindings,
+          credentialGeneration: null,
+        });
+        const credentialBindings = requiredBindingsForRuntime(
+          executionProfile,
+          target.descriptor.credentialBindings,
+        );
+        const frozenWorkspace = environment.workspace
+          ? target.descriptor.workspaces.find(
+              (workspace) =>
+                workspace.bindingRef === environment.workspace!.bindingRef &&
+                target.descriptor.signature.keyId === environment.workspace!.deviceId,
+            )
+          : undefined;
+        if (environment.workspace && !frozenWorkspace) {
+          throw new SchedulerCapabilityGapError(
+            "Local conversation workspace binding is not present in the synchronized executor snapshot",
+            permissionSnapshot.snapshotVersion,
+          );
+        }
+        const frozenEnvironment: EnvironmentRequirement = {
+          ...(environment.deviceId === undefined
+            ? {}
+            : { deviceId: environment.deviceId }),
+          ...(environment.evidenceKinds === undefined
+            ? {}
+            : { evidenceKinds: environment.evidenceKinds }),
+          ...(environment.workspace
+            ? {
+                workspace: {
+                  deviceId: environment.workspace!.deviceId,
+                  bindingRef: frozenWorkspace!.bindingRef,
+                  workspaceBindingRevision:
+                    frozenWorkspace!.workspaceBindingRevision,
+                },
+              }
+            : {}),
+          credentialBindings: credentialBindings.map(
+            ({ service, bindingId }) => ({ service, bindingId }),
+          ),
+        };
+        return {
+          executorId,
+          policy: {
+            credentialTtlMs: 24 * 60 * 60 * 1_000,
+            manifestRequires: {
+              ...target.inventory.configVersions,
+              ...target.inventory.assetVersions,
+            },
+            manifestCapabilities: {
+              protocolVersion: target.descriptor.protocolVersion,
+              tools: executionProfile.tools,
+              mcpServers: executionProfile.mcpServers,
+              credentialBindings,
+            },
+            permissionSnapshot,
+            budget: { maxCalls: 64, maxTokens: 256_000 },
+          },
+          binding: {
+            executionProfile,
+            deviceDigest: publication.deviceDigest,
+          },
+          environment: frozenEnvironment,
+        };
+      };
     const prepareJobAssignment: AuthorityRuntimeStack["prepareJobAssignment"] = async (
       input,
     ) => {
@@ -1465,6 +1588,9 @@ export async function setupAuthorityRuntime(
       : undefined;
     return {
       anchorEpoch,
+      localDomainId,
+      localOwnerEpoch,
+      localGovernorEpoch,
       deviceId: key.deviceId,
       identityKey: key,
       identity,
@@ -1499,6 +1625,11 @@ export async function setupAuthorityRuntime(
         if (!controlAdmission)
           throw new Error("Anchor authority role is not enabled");
         return controlAdmission;
+      },
+      get localControlAdmission() {
+        if (!localControlAdmission)
+          throw new Error("Local executor role is not enabled");
+        return localControlAdmission;
       },
       executorCapabilities,
       get resourceGovernor() {
@@ -1563,6 +1694,7 @@ export async function setupAuthorityRuntime(
           ),
       permissionSnapshotFor: (digest) =>
         permissionSnapshots.snapshotFor(digest),
+      latestPermissionSnapshot: () => permissionSnapshots.latest(),
       currentExecutorSnapshot,
       installPermissionSnapshot,
       acceptExecutorSnapshot,
@@ -1588,6 +1720,7 @@ export async function setupAuthorityRuntime(
         for (const deviceId of deviceIds) authorizedDeviceIds.add(deviceId);
       },
       prepareConversationAssignment,
+      prepareLocalConversationAssignment,
       prepareJobAssignment,
       validateConversationRuntimeBinding,
       preflightLocalConversationEnvironment,
@@ -1849,7 +1982,7 @@ function deviceScopedUserAliasBindingId(
 export async function setupDelivery(
   options: SetupDeliveryOptions,
 ): Promise<DeliveryStack> {
-  const { channels, zhixingHome, logger } = options;
+  const { channels, logger } = options;
   const { applyDeliveryResolutionControl, createDeliveryControlEnvelope } =
     await import("@zhixing/owner-kernel");
 

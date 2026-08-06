@@ -389,6 +389,36 @@ describe("ControlAdmissionJournal", () => {
     expect(await log.readAll()).toHaveLength(2);
   });
 
+  it("rebuilds the local session directory from durable applied controls", async () => {
+    const { artifacts, log, journal } = await createHarness();
+    for (const [requestId, conversationId] of [
+      ["request-local-b", "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FB0"],
+      ["request-local-a", "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+    ] as const) {
+      await journal.apply({
+        envelope: sessionEnvelope(requestId),
+        source: sessionSource(),
+        prepare: () => ({ result: sessionResult(conversationId), authorityRevision: 1 }),
+      });
+    }
+    await expect(journal.listCreatedConversationIds()).resolves.toEqual([
+      "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FB0",
+    ]);
+
+    const restarted = new ControlAdmissionJournal(
+      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+      artifacts,
+    );
+    await expect(restarted.listCreatedConversationIds()).resolves.toEqual([
+      "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FB0",
+    ]);
+  });
+
   it("maps at-least-once ingress retries to one run even if requestId changes", async () => {
     const { log, journal } = await createHarness();
     const originalSource = inputSource("platform-message-1");

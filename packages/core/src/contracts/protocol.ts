@@ -49,6 +49,7 @@ import type {
   DeliveryResolutionFact,
   GlobalControlMutation,
   SessionControlMutation,
+  SessionStagedMutation,
 } from "./state.js";
 
 export interface ControlEnvelope extends WireSchemaV1<"ControlEnvelope"> {
@@ -126,7 +127,7 @@ export type ControlRequest =
   | {
       t: "session-write";
       conversationId: string;
-      mutation: SessionControlMutation;
+      mutation: SessionControlMutation | SessionStagedMutation;
       ownerEpoch: number;
       domainRevision: number;
     }

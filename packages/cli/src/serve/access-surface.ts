@@ -92,6 +92,8 @@ import type {
 import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
 import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import type { JournalMaintenance } from "./journal-maintenance.js";
+import type { ProviderCredentialProjection } from "@zhixing/providers";
+import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -108,6 +110,7 @@ export interface AssemblyStartupCleanups {
   channels?: StartupCleanupHandle;
   deliveryStack?: StartupCleanupHandle;
   localWorkspaceHost?: StartupCleanupHandle;
+  localConversationOwner?: StartupCleanupHandle;
 }
 
 /**
@@ -122,6 +125,7 @@ export interface AssemblyContext {
   readonly profile: ServerProfile;
   readonly enabledRoles: readonly DeviceRole[];
   readonly config: ZhixingConfig;
+  readonly providerCredentials?: ProviderCredentialProjection;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly durableInteractions: DurableConversationInteractionObserver;
@@ -206,6 +210,7 @@ export interface AssemblyContext {
   ) => FirstPartyFinalitySession;
   assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
+  localConversationOwner?: LocalConversationOwnerAssembly;
   jobStatus?: JobStatusDirectory;
   deliveryStack?: DeliveryStack;
 

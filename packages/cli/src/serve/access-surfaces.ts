@@ -66,6 +66,8 @@ import {
   ExecutorEvidenceHandler,
 } from "@zhixing/orchestrator/advancement";
 import { registerCleanup } from "@zhixing/server";
+import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
+import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -637,6 +639,52 @@ const conversationSurface: AccessSurface = {
   },
 };
 
+/** Device-local owner: internal-only and present exactly when an executor is loaded. */
+const localConversationOwnerUnit: CoreAssemblyUnit = {
+  name: "local-conversation-owner",
+  phase: "pre-server",
+  kind: "core",
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("executor")) return;
+    if (
+      !ctx.authorityRuntime ||
+      !ctx.executorRoleModule ||
+      !ctx.executorDataPlane ||
+      !ctx.evidenceHandler
+    ) {
+      throw new Error(
+        "Local conversation owner requires authority, executor, data-plane, and evidence runtime",
+      );
+    }
+    if (ctx.localConversationOwner) {
+      throw new Error("Local conversation owner is already assembled");
+    }
+    const assembly = await LocalConversationOwnerAssembly.create({
+      owner: localConversationOwnerRuntime(ctx.authorityRuntime),
+      ConversationAssignmentLedger:
+        ctx.executorRoleModule.ConversationAssignmentLedger,
+      InProcessAssignmentSubmission:
+        ctx.executorRoleModule.InProcessAssignmentSubmission,
+      runtimeFactory: ctx.assignmentRuntimeFactory,
+      interactions: ctx.durableInteractions,
+      config: ctx.config,
+      credentials: ctx.providerCredentials ?? {},
+      dataPlane: ctx.executorDataPlane,
+      evidence: ctx.evidenceHandler,
+    });
+    const cleanup = ctx.startupRollback.register(
+      "localConversationOwner.close",
+      async () => {
+        assembly.stopAccepting();
+        await assembly.close();
+      },
+    );
+    ctx.startupCleanups.localConversationOwner = cleanup;
+    await assembly.start();
+    ctx.localConversationOwner = assembly;
+  },
+};
+
 /**
  * Stable executor-owned job convergence owner.
  *
@@ -917,6 +965,7 @@ export function createAssemblyUnits(
     authorityRuntimeSurface,
     executorDataPlaneSurface,
     conversationSurface,
+    localConversationOwnerUnit,
     executorJobOwnerUnit,
     assetMaintenanceSurface,
     meshSurface,

@@ -281,6 +281,9 @@ async function runServerProcess(
       return mesh.workspaceProbeForDevice(deviceId).probe(request);
     },
   });
+  const providerCredentials = credentials.providers
+    ? { providers: credentials.providers }
+    : {};
   // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 经锚点
   // GlobalStatePort 的 path-free query/control 合同装配。
   const trustDirectory = createTrustDirectory({
@@ -391,9 +394,6 @@ async function runServerProcess(
     taskListService: builtinExtraTools.taskListService,
   });
 
-  const providerCredentials = credentials.providers
-    ? { providers: credentials.providers }
-    : {};
   const channelCredentials = credentials.channels
     ? { channels: credentials.channels }
     : {};
@@ -626,6 +626,7 @@ async function runServerProcess(
   const ctx: AssemblyContext = {
     profile,
     config,
+    providerCredentials,
     zhixingHome,
     secretStore: startupResult.secretStore,
     durableInteractions,
@@ -1166,6 +1167,7 @@ async function runServerProcess(
     startupCleanups: {
       authorityRuntime: startupCleanups.authorityRuntime,
       localWorkspaceHost: startupCleanups.localWorkspaceHost,
+      localConversationOwner: startupCleanups.localConversationOwner,
       channels: startupCleanups.channels,
       deliveryStack: startupCleanups.deliveryStack,
       mcp: startupCleanups.mcp,

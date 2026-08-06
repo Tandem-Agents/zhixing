@@ -61,7 +61,13 @@ import type {
   SupersedeProof,
   CancelProofBody,
   SessionInternalRecord,
+  SessionControlMutation,
+  SessionMeta,
   SessionStagedMutation,
+  SegmentRecord,
+  TaskListState,
+  TranscriptCursor,
+  TranscriptPage,
   TranscriptRunRecord,
   UserTurnInput,
   UncertainResolutionFact,
@@ -364,7 +370,7 @@ export interface ConversationRunJournalOptions {
   readonly authority: ConversationCommitAuthority;
   readonly projection: ConversationCommitProjection;
   readonly publisher?: ConversationMutationPublisher;
-  readonly delivery: ConversationDeliveryParticipant;
+  readonly delivery?: ConversationDeliveryParticipant;
   readonly resources?: AssignmentResourceCoordinator;
   readonly clock?: () => string;
   readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
@@ -641,6 +647,15 @@ interface RunProjection {
     string,
     { readonly domainRevision: number; readonly eventsDigest: string }
   >;
+  readonly sessionMutationDigests: Map<
+    string,
+    { readonly digest: string; readonly domainRevision: number }
+  >;
+  taskList: TaskListState;
+  readonly segments: SegmentRecord[];
+  readonly transcript: TranscriptRunRecord[];
+  sessionName?: string;
+  lastActiveAt?: string;
   sessionMeta?: Extract<
     ConversationRunJournalRecord,
     { t: "session-meta" }
@@ -943,7 +958,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   readonly #authority: ConversationCommitAuthority;
   readonly #projection: ConversationCommitProjection;
   readonly #publisher: ConversationMutationPublisher | undefined;
-  readonly #delivery: ConversationDeliveryParticipant;
+  readonly #delivery: ConversationDeliveryParticipant | undefined;
   readonly #resources: AssignmentResourceCoordinator | undefined;
   readonly #clock: () => string;
   readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
@@ -981,6 +996,60 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#legacyAbortTickets = options.legacyAbortTickets;
+  }
+
+  async sessionMeta(): Promise<SessionMeta> {
+    return this.#select((state) => {
+      const scope = parseConversationId(this.#conversationId).scope;
+      return {
+        conversationId: this.#conversationId,
+        ownerEpoch: this.#ownerEpoch,
+        baseRevision: state.commits.at(-1)?.commitRevision ?? 0,
+        ...(state.sessionName ? { name: state.sessionName } : {}),
+        ...(scope.kind === "workscene" ? { sceneId: scope.sceneId } : {}),
+        turnCount: state.transcript.length,
+        lastActiveAt:
+          state.sessionMeta?.lastActiveAt ??
+          state.lastActiveAt ??
+          "1970-01-01T00:00:00.000Z",
+      };
+    });
+  }
+
+  async transcriptTail(
+    cursor?: TranscriptCursor,
+    limit = 50,
+  ): Promise<TranscriptPage> {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
+      throw new TypeError("Transcript page limit must be between 1 and 500");
+    }
+    if (cursor && cursor.shardId !== "owner-log") {
+      throw new TypeError("Transcript cursor belongs to another session store");
+    }
+    return this.#select((state) => {
+      const eligible = cursor
+        ? state.transcript.filter((record) => record.runIndex < cursor.runIndex)
+        : state.transcript;
+      const records = eligible.slice(Math.max(0, eligible.length - limit));
+      const hasEarlier = eligible.length > records.length;
+      return {
+        records: snapshot(records, "Session transcript page"),
+        ...(hasEarlier && records[0]
+          ? { next: { shardId: "owner-log", runIndex: records[0].runIndex } }
+          : {}),
+      };
+    });
+  }
+
+  async taskList(): Promise<TaskListState> {
+    return this.#select((state) => snapshot(state.taskList, "Session task list"));
+  }
+
+  async sessionMutationRequest(requestId: string): Promise<
+    { readonly digest: string; readonly domainRevision: number } | undefined
+  > {
+    assertIdentifier(requestId, "Session mutation request id");
+    return this.#select((state) => state.sessionMutationDigests.get(requestId));
   }
 
   async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
@@ -1703,7 +1772,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       label: "Control input attachments",
     });
     const prepared = await prepareStored(userInput, this.#artifacts);
-    return this.#delivery.coordinate(() => input.admission.applyAuthority<
+    const apply = () => input.admission.applyAuthority<
       RunProjection,
       InitialControlEnvelope
     >({
@@ -1718,7 +1787,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
       candidateReferences: prepared.references,
-      companionStreams: ["delivery"],
+      companionStreams: this.#delivery ? ["delivery"] : [],
       prepareCompanions: (state, context, plan) => {
         const statuses = conversationStatusDeliveryInputs(
           this.#conversationId,
@@ -1726,7 +1795,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           plan.authorityEntries ?? [],
           context.authorityPrefix.at,
         );
-        const delivery = this.#delivery.prepareConversationStatuses(statuses);
+        const delivery = this.#delivery?.prepareConversationStatuses(statuses) ??
+          { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!delivery.accepted) throw corruptRunJournal(delivery.error.message);
         return delivery.records;
       },
@@ -1853,7 +1923,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ],
         };
       },
-    }));
+    });
+    return this.#delivery ? this.#delivery.coordinate(apply) : apply();
   }
 
   async assign(
@@ -2476,7 +2547,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly envelope: ConversationControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
-    const apply = () => this.#delivery.coordinate(() => input.admission.applyAuthority<
+    const applyAuthority = () => input.admission.applyAuthority<
       RunProjection,
       ConversationControlEnvelope
     >({
@@ -2490,7 +2561,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           record as LogicalRecord<ConversationCommitLogRecord>,
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
-      companionStreams: ["delivery", "governor"],
+      companionStreams: this.#delivery ? ["delivery", "governor"] : ["governor"],
       prepareCompanions: (state, context, plan) => {
         const statuses = conversationStatusDeliveryInputs(
           this.#conversationId,
@@ -2498,7 +2569,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           plan.authorityEntries ?? [],
           context.authorityPrefix.at,
         );
-        const prepared = this.#delivery.prepareConversationStatuses(statuses);
+        const prepared = this.#delivery?.prepareConversationStatuses(statuses) ??
+          { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!prepared.accepted) throw corruptRunJournal(prepared.error.message);
         const controlResponses = conversationControlResponseDeliveryInputs(
           this.#conversationId,
@@ -2515,7 +2587,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           return [...resourceRecords, ...prepared.records];
         }
         const preparedResponses =
-          this.#delivery.prepareConversationControlResponses(controlResponses);
+          this.#delivery?.prepareConversationControlResponses(controlResponses) ??
+          { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!preparedResponses.accepted) {
           throw corruptRunJournal(preparedResponses.error.message);
         }
@@ -2569,20 +2642,20 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               ),
             };
           }
-          const mutation =
+          if (body.mutation.kind === "advancement-event") {
+            return {
+              result: rejectedControl(
+                "invalid",
+                "Advancement events use the signed advancement owner path",
+              ),
+            };
+          }
+          const lifecycleMutation =
             body.mutation.kind === "window-op" && body.mutation.op === "clear"
               ? "clear"
               : body.mutation.kind === "conversation-delete"
                 ? "delete"
                 : undefined;
-          if (!mutation) {
-            return {
-              result: rejectedControl(
-                "invalid",
-                "Session write mutation is not implemented by this owner",
-              ),
-            };
-          }
           const hasOpenRun = [...state.stateByRun.values()].some(({ state: runState }) =>
             runState === "queued" ||
             runState === "dispatched" ||
@@ -2590,7 +2663,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             runState === "cancel-requested" ||
             runState === "uncertain"
           );
-          if (hasOpenRun) {
+          if (lifecycleMutation !== undefined && hasOpenRun) {
             return {
               result: rejectedControl(
                 "busy",
@@ -2600,8 +2673,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           }
           const revision = state.domainRevision + 1;
           const scope = parseConversationId(this.#conversationId).scope;
-          const authorityEntries =
-            mutation === "delete" && scope.kind === "workscene"
+          const authorityEntries = lifecycleMutation === undefined
+            ? [
+                runRecord(this.#conversationId, {
+                  t: "session-control",
+                  domainRevision: revision,
+                  requestId: context.canonicalRequestId,
+                  mutation: body.mutation,
+                }),
+              ]
+            : lifecycleMutation === "delete" && scope.kind === "workscene"
               ? worksceneSessionMetaEntries(this.#conversationId, {
                   t: "session-meta",
                   operation: "delete",
@@ -2613,7 +2694,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               : [
                   runRecord(this.#conversationId, {
                     t: "session-lifecycle",
-                    mutation,
+                    mutation: lifecycleMutation,
                     domainRevision: revision,
                     requestId: context.canonicalRequestId,
                   }),
@@ -2800,7 +2881,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ],
         };
       },
-    }));
+    });
+    const apply = () => this.#delivery
+      ? this.#delivery.coordinate(applyAuthority)
+      : applyAuthority();
     return this.#resources ? this.#resources.coordinate(apply) : apply();
   }
 
@@ -4407,7 +4491,22 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           stagedContents: compiledDelivery.stagedContents,
           stagedContentErrors: compiledDelivery.stagedContentErrors,
         };
-        const deliveryDecision = this.#delivery.prepareConversationCommit(deliveryInput);
+        if (
+          !this.#delivery &&
+          (deliveryInput.ingress.kind === "channel" ||
+            batch?.records.some((record) => record.mutation.kind === "delivery-enqueue"))
+        ) {
+          return {
+            kind: "return",
+            value: rejected(
+              "capability-gap",
+              "This conversation owner has no durable external delivery capability",
+              false,
+            ),
+          };
+        }
+        const deliveryDecision = this.#delivery?.prepareConversationCommit(deliveryInput) ??
+          { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!deliveryDecision.accepted) {
           return {
             kind: "return",
@@ -5482,6 +5581,29 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         return state;
       }
+      case "session-control": {
+        const digest = protocolDigest("SessionControlMutation", 1, body.mutation);
+        const existing = state.sessionMutationDigests.get(body.requestId);
+        if (existing !== undefined) {
+          if (existing.digest !== digest || existing.domainRevision !== body.domainRevision) {
+            throw corruptRunJournal(
+              "Session mutation request is already bound to another payload",
+            );
+          }
+          return state;
+        }
+        if (body.domainRevision !== state.domainRevision + 1 || state.deleted) {
+          throw corruptRunJournal("Session mutation revision or terminal state is invalid");
+        }
+        state.domainRevision = body.domainRevision;
+        state.sessionMutationDigests.set(body.requestId, {
+          digest,
+          domainRevision: body.domainRevision,
+        });
+        applyProjectedSessionMutation(state, body.mutation);
+        state.lastActiveAt = envelope.at;
+        return state;
+      }
       case "session-lifecycle": {
         if (
           body.domainRevision !== state.domainRevision + 1 ||
@@ -5493,7 +5615,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.domainRevision = body.domainRevision;
         state.lifecycleByRequest.set(body.requestId, body);
         state.pendingLifecycleProjections.set(body.domainRevision, body);
-        if (body.mutation === "delete") state.deleted = true;
+        if (body.mutation === "clear") {
+          state.taskList = { items: [] };
+          state.segments.length = 0;
+          state.transcript.length = 0;
+        } else {
+          state.deleted = true;
+        }
+        state.lastActiveAt = envelope.at;
         return state;
       }
       case "admitted": {
@@ -6299,7 +6428,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           throw corruptRunJournal("Run state has no admitted run");
         }
         try {
-          this.#delivery.assertConversationStatuses(
+          this.#delivery?.assertConversationStatuses(
             [
               {
                 at: envelope.at,
@@ -6806,7 +6935,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const admitted = state.admittedByRun.get(body.runId);
         if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
         try {
-          this.#delivery.assertConversationCommit(
+          this.#delivery?.assertConversationCommit(
             {
               at: envelope.at,
               conversationId: this.#conversationId,
@@ -6832,6 +6961,29 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.commits.push(body);
         state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
         state.pendingCommitProjections.set(body.assignmentId, body);
+        state.transcript.push(snapshot(closure.runRecord, "Committed transcript record"));
+        for (const record of closure.batch?.records ?? []) {
+          if (record.domain !== "session") continue;
+          const digest = protocolDigest("SessionStagedMutation", 1, record.mutation);
+          const existing = state.sessionMutationDigests.get(record.requestId);
+          if (existing !== undefined && existing.digest !== digest) {
+            throw corruptRunJournal(
+              "Staged session request is already bound to another payload",
+            );
+          }
+          if (existing === undefined) {
+            state.domainRevision += 1;
+            state.sessionMutationDigests.set(record.requestId, {
+              digest,
+              domainRevision: state.domainRevision,
+            });
+            applyProjectedSessionMutation(
+              state,
+              record.mutation as SessionStagedMutation,
+            );
+          }
+        }
+        state.lastActiveAt = envelope.at;
         return state;
       }
       case "bundle-ack-observed": {
@@ -7989,8 +8141,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#operations.run(async () => {
       try {
         const cached = this.#runProjection;
-        const transact = () => this.#delivery.coordinate(() =>
-          this.#log.transactProjection<
+        const runTransaction = () => this.#log.transactProjection<
           RunProjection,
           unknown,
           Value
@@ -8006,7 +8157,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               decision.entries,
               context.at,
             );
-            const prepared = this.#delivery.prepareConversationStatuses(statuses);
+            const prepared = this.#delivery?.prepareConversationStatuses(statuses) ??
+              { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
             if (!prepared.accepted) {
               throw corruptRunJournal(prepared.error.message);
             }
@@ -8024,8 +8176,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
             readProjectionIds,
-          },
-        ));
+          });
+        const transact = () => this.#delivery
+          ? this.#delivery.coordinate(runTransaction)
+          : runTransaction();
         const transaction = await (
           this.#resources ? this.#resources.coordinate(transact) : transact()
         );
@@ -8678,6 +8832,10 @@ function emptyProjection(conversationId: string): RunProjection {
     deleted: false,
     advancementSessions: new Map(),
     advancementWrites: new Map(),
+    sessionMutationDigests: new Map(),
+    taskList: { items: [] },
+    segments: [],
+    transcript: [],
     sessionMeta: undefined,
     sessionMetaByRequest: new Map(),
     lifecycleByRequest: new Map(),
@@ -8725,6 +8883,41 @@ function emptyProjection(conversationId: string): RunProjection {
     closedAssignments: new Set(),
     channelInteractions: createChannelInteractionJournalState("conversation"),
   };
+}
+
+function applyProjectedSessionMutation(
+  state: RunProjection,
+  mutation:
+    | Exclude<SessionControlMutation, { readonly kind: "advancement-event" }>
+    | SessionStagedMutation,
+): void {
+  switch (mutation.kind) {
+    case "task-list-op":
+      state.taskList = snapshot(mutation.op.state, "Task-list state");
+      return;
+    case "segment-append": {
+      const previous = state.segments.at(-1);
+      if (
+        previous &&
+        (previous.segmentId === mutation.segment.segmentId ||
+          Date.parse(previous.timestamp) > Date.parse(mutation.segment.timestamp))
+      ) {
+        throw corruptRunJournal("Segment history is duplicated or non-monotonic");
+      }
+      state.segments.push(snapshot(mutation.segment, "Segment record"));
+      return;
+    }
+    case "session-meta":
+      if (mutation.patch.name !== undefined) state.sessionName = mutation.patch.name;
+      return;
+    case "window-op":
+      if (mutation.op !== "compact") {
+        throw corruptRunJournal("Lifecycle window clear was written as a session mutation");
+      }
+      return;
+    case "conversation-delete":
+      throw corruptRunJournal("Conversation delete was written as a session mutation");
+  }
 }
 
 function emptySubmissionGuardProjection(): SubmissionGuardProjection {

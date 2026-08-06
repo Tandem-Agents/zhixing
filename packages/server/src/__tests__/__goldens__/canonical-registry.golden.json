@@ -957,6 +957,7 @@
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
           "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
           "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
+          "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
           "cli:zhixing pair",
           "cli:zhixing serve",
@@ -1112,6 +1113,7 @@
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
           "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
           "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
+          "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
           "cli:zhixing pair",
           "cli:zhixing serve",
@@ -2031,6 +2033,17 @@
         "id": "executorJobOwner.close",
         "source": "packages/cli/src/serve/command.ts",
         "key": "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-local-executor",
+        "role": "runtime",
+        "id": "localConversationOwner.close",
+        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "key": "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"

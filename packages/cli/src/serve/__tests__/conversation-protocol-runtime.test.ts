@@ -5,13 +5,18 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   ConfirmationBroker,
+  localConversationId,
   userMessageFromTurnInput,
   type AgentYield,
   type Message,
   type PermissionRule,
   type RunResult,
 } from "@zhixing/core";
-import { StreamDigestChain, protocolDigest } from "@zhixing/core/protocol";
+import {
+  createSignedTrustRuleSnapshot,
+  StreamDigestChain,
+  protocolDigest,
+} from "@zhixing/core/protocol";
 import {
   ConversationManager,
   ConversationRunJournal,
@@ -35,6 +40,7 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
+import { localConversationOwnerRuntime } from "../conversation-owner-runtime.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -233,6 +239,234 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("runs and recovers a device-local conversation entirely on the executor authority domain", async () => {
+    const home = await createTempDir("conversation-protocol-local-owner");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    await authority.installPermissionSnapshot(
+      createSignedTrustRuleSnapshot(
+        {
+          snapshotVersion: 1,
+          rules: [],
+          generatedAt: new Date().toISOString(),
+        },
+        authority.signer,
+      ),
+    );
+    const conversationId = localConversationId(
+      authority.deviceId,
+      "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    );
+    let executions = 0;
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-local-owner",
+      async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+        executions += 1;
+        const assistant: Message = {
+          role: "assistant",
+          content: [{ type: "text", text: "local done" }],
+        };
+        return {
+          agentResult: {
+            reason: "completed",
+            message: assistant,
+            usage: { inputTokens: 2, outputTokens: 2 },
+          },
+          runRecord: {
+            timestamp: new Date().toISOString(),
+            messages: [messages.at(-1)!, assistant],
+            usage: { inputTokens: 2, outputTokens: 2 },
+            source: "interactive",
+          },
+          newMessages: [assistant],
+          durationMs: 1,
+        };
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    const factory: RuntimeFactory = { create: vi.fn(async () => runtime) };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      owner: localConversationOwnerRuntime(authority),
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      localExecutor: {
+        ...TEST_LOCAL_EXECUTOR,
+        runtimeFactory: factory,
+      },
+    });
+    manager = new ConversationManager(factory, undefined, {
+      ensureConversation: (id) => protocol.ensureSession(id),
+      initTranscript: (id) => protocol.ensureSession(id),
+      appendRun: async () => {
+        throw new Error("local owner must not use legacy transcript persistence");
+      },
+      appendCommittedRun: async (_id, record) => ({
+        runIndex: record.runIndex,
+        shardId: "owner-log",
+        appended: true,
+      }),
+      durableTurnExecutor: protocol,
+    });
+    await protocol.ensureSession(conversationId);
+    const managed = await manager.getOrCreate(conversationId);
+    const first = await projectSessionTurn({
+      manager,
+      managed,
+      text: "run locally",
+      turnId: "local:turn:1",
+      runOptions: {
+        source: "interactive",
+        turnContext: { turnId: "local:turn:1" },
+      },
+      notify: () => {},
+    });
+    expectSettled(first);
+    expect(executions).toBe(1);
+
+    const executorEntries = (await authority.executorLog.readAll()).flatMap(
+      (commit) => commit.entries,
+    );
+    expect(
+      executorEntries.some((entry) => entry.stream === `run:${conversationId}`),
+    ).toBe(true);
+    expect(
+      executorEntries.some((entry) => entry.stream.includes(conversationId)),
+    ).toBe(true);
+    expect(
+      (await authority.authorityLog.readAll())
+        .flatMap((commit) => commit.entries)
+        .some((entry) => entry.stream.includes(conversationId)),
+    ).toBe(false);
+    const restartedAuthority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore,
+    });
+    let restartedManager!: ConversationManager;
+    const restartedProtocol = createProtocol({
+      owner: localConversationOwnerRuntime(restartedAuthority),
+      manager: () => restartedManager,
+      interactions: new DurableConversationInteractionObserver(),
+      localExecutor: {
+        ...TEST_LOCAL_EXECUTOR,
+        runtimeFactory: factory,
+      },
+    });
+    restartedManager = new ConversationManager(factory, undefined, {
+      ensureConversation: (id) => restartedProtocol.ensureSession(id),
+      initTranscript: (id) => restartedProtocol.ensureSession(id),
+      appendRun: async () => {
+        throw new Error("local owner must not use legacy transcript persistence");
+      },
+      appendCommittedRun: async (_id, record) => ({
+        runIndex: record.runIndex,
+        shardId: "owner-log",
+        appended: false,
+      }),
+      durableTurnExecutor: restartedProtocol,
+    });
+    await restartedProtocol.recover();
+    expect(await restartedProtocol.listSessions()).toEqual([conversationId]);
+    const meta = await restartedProtocol.sessionState.readSessionMeta(
+      conversationId,
+      {
+        principal: { kind: "host", component: "local-owner-test" },
+        requestId: "local-owner-test:meta",
+        deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+      },
+    );
+    expect(meta.turnCount).toBe(1);
+    expect(executions).toBe(1);
+
+    const ownerContext = (requestId: string) => ({
+      principal: { kind: "host" as const, component: "local-owner-test" },
+      requestId,
+      deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+    await restartedProtocol.sessionState.mutate(
+      conversationId,
+      {
+        kind: "task-list-op",
+        op: {
+          op: "set",
+          state: {
+            items: [
+              { id: "local-task", content: "finish locally", status: "in_progress" },
+            ],
+          },
+        },
+      },
+      ownerContext("local-owner-test:task-list"),
+    );
+    await restartedProtocol.sessionState.mutate(
+      conversationId,
+      { kind: "session-meta", patch: { name: "Local durable session" } },
+      ownerContext("local-owner-test:rename"),
+    );
+    await restartedProtocol.sessionState.mutate(
+      conversationId,
+      { kind: "window-op", op: "compact" },
+      ownerContext("local-owner-test:compact"),
+    );
+    expect(
+      await restartedProtocol.sessionState.readTaskList(
+        conversationId,
+        ownerContext("local-owner-test:read-task-list"),
+      ),
+    ).toEqual({
+      items: [
+        { id: "local-task", content: "finish locally", status: "in_progress" },
+      ],
+    });
+    const transcript = await restartedProtocol.sessionState.readTranscriptTail(
+      conversationId,
+      ownerContext("local-owner-test:read-transcript"),
+      undefined,
+      10,
+    );
+    expect(transcript.records).toHaveLength(1);
+    expect(
+      await restartedProtocol.sessionState.readSessionMeta(
+        conversationId,
+        ownerContext("local-owner-test:read-renamed-meta"),
+      ),
+    ).toMatchObject({ name: "Local durable session", turnCount: 1 });
+
+    await restartedProtocol.sessionState.mutate(
+      conversationId,
+      { kind: "window-op", op: "clear" },
+      ownerContext("local-owner-test:clear"),
+    );
+    expect(
+      await restartedProtocol.sessionState.readTaskList(
+        conversationId,
+        ownerContext("local-owner-test:read-cleared-task-list"),
+      ),
+    ).toEqual({ items: [] });
+    expect(
+      await restartedProtocol.sessionState.readSessionMeta(
+        conversationId,
+        ownerContext("local-owner-test:read-cleared-meta"),
+      ),
+    ).toMatchObject({ turnCount: 0 });
+    const deleteConversationId = localConversationId(
+      restartedAuthority.deviceId,
+      "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+    );
+    await restartedProtocol.ensureSession(deleteConversationId);
+    await restartedProtocol.sessionState.mutate(
+      deleteConversationId,
+      { kind: "conversation-delete" },
+      ownerContext("local-owner-test:delete"),
+    );
+    await expect(restartedProtocol.sessionExists(deleteConversationId)).resolves.toBe(false);
+    await expect(restartedProtocol.ensureSession("conversation-anchor")).rejects.toThrow(
+      "does not belong to this owner domain",
+    );
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("establishes the owner session identity before the first input and workscene activity", async () => {
     const home = await createTempDir("conversation-protocol-session-identity");
     const authority = await setupAuthorityRuntime({

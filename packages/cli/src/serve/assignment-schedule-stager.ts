@@ -39,8 +39,17 @@ export function createAssignmentMutationPort(input: {
   readonly execution: "conversation" | "job";
   readonly anchorEpoch: number;
   readonly capability?: AuthorityCapability;
+  /** Local conversation owners never acquire or stage global authority. */
+  readonly allowGlobal?: boolean;
 }): AssignmentMutationPort {
-  const { ledger, assignmentId, execution, anchorEpoch, capability } = input;
+  const {
+    ledger,
+    assignmentId,
+    execution,
+    anchorEpoch,
+    capability,
+    allowGlobal = true,
+  } = input;
   return {
     assignmentId,
     execution,
@@ -50,6 +59,9 @@ export function createAssignmentMutationPort(input: {
       }
       if (request.operationId.trim().length === 0) {
         throw new TypeError("Assignment mutation operationId must be durable and non-empty");
+      }
+      if (request.domain === "global" && !allowGlobal) {
+        throw new Error("Global mutations are unavailable in this conversation domain");
       }
       if (request.domain === "global" && capability) {
         assertGlobalMutationCapability(

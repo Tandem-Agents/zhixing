@@ -31,6 +31,7 @@ import type {
   ContentAssetRef,
   ExplicitEnvironmentSelection,
   SessionControlMutation,
+  SessionStagedMutation,
 } from "@zhixing/core/contracts";
 
 // ─── Hooks ───
@@ -178,10 +179,7 @@ export interface DurableConversationResolutionResult {
 export interface DurableConversationSessionWriteInput {
   readonly conversationId: string;
   readonly requestId: string;
-  readonly mutation: Extract<
-    SessionControlMutation,
-    { kind: "window-op" | "conversation-delete" }
-  >;
+  readonly mutation: SessionControlMutation | SessionStagedMutation;
   readonly principal: DurableConversationControlPrincipal;
   /** Transition-time identity source used only before the first durable lifecycle fact. */
   readonly conversationExists: () => Promise<boolean>;

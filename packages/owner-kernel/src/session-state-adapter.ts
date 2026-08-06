@@ -19,14 +19,24 @@ import type { ConversationRunJournal } from "./conversation-assignment.js";
 
 export interface AnchorSessionStateAdapterOptions {
   readonly journalFor: (conversationId: string) => ConversationRunJournal;
+  readonly mutateControl?: (
+    conversationId: string,
+    mutation: Exclude<SessionControlMutation, { readonly kind: "advancement-event" }>,
+    ctx: AuthorityCallContext,
+  ) => Promise<{ readonly revision: number }>;
+  readonly stageAssignment?: (
+    conversationId: string,
+    mutation: SessionStagedMutation,
+    ctx: AuthorityCallContext,
+  ) => Promise<{ readonly revision: number }>;
 }
 
 /**
- * 锚点会话状态端口（生产进程内适配器）——本单元承载 advancement 切片：
- * 推进事件只由 host principal 写入（经统一 authority guard），读取折叠自
- * 对话权威日志。其余读写面随所属单元逐片接入；未接入面按能力缺口拒绝。
+ * Domain-neutral session-state adapter. Every read folds the conversation
+ * owner journal; control and assignment writes retain their distinct guarded
+ * entry points while sharing the same session reducer.
  */
-export class AnchorSessionStateAdapter implements SessionStatePort {
+export class ConversationSessionStateAdapter implements SessionStatePort {
   readonly #options: AnchorSessionStateAdapterOptions;
 
   constructor(options: AnchorSessionStateAdapterOptions) {
@@ -54,23 +64,35 @@ export class AnchorSessionStateAdapter implements SessionStatePort {
     assertProtocolIdentifier(conversationId, "Session conversationId");
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.mutate");
     assertProtocolIdentifier(ctx.requestId, "Session mutation requestId");
-    if (mutation.kind !== "advancement-event") {
-      throw authorityError(
-        "capability-gap",
-        `Session mutation kind is not routed in this unit: ${mutation.kind}`,
-      );
+    if (mutation.kind === "advancement-event") {
+      if (ctx.principal.kind !== "host") {
+        throw authorityError("unauthorized", "Advancement events are host-only");
+      }
+      const result = await this.#journal(conversationId).applyAdvancementEvents({
+        requestId: ctx.requestId,
+        events: mutation.events,
+      });
+      return { revision: result.domainRevision };
     }
-    if (ctx.principal.kind !== "host") {
+    if (
+      ctx.principal.kind === "assignment" &&
+      (mutation.kind === "task-list-op" || mutation.kind === "segment-append")
+    ) {
+      if (!this.#options.stageAssignment) {
+        throw unavailable("session.mutate assignment staging", conversationId);
+      }
+      return this.#options.stageAssignment(conversationId, mutation, ctx);
+    }
+    if (mutation.kind === "segment-append") {
       throw authorityError(
         "unauthorized",
-        "Advancement events are host-only",
+        "Segment history can only be staged by its active assignment",
       );
     }
-    const result = await this.#journal(conversationId).applyAdvancementEvents({
-      requestId: ctx.requestId,
-      events: mutation.events,
-    });
-    return { revision: result.domainRevision };
+    if (!this.#options.mutateControl) {
+      throw unavailable("session.mutate control", conversationId);
+    }
+    return this.#options.mutateControl(conversationId, mutation, ctx);
   }
 
   #journal(conversationId: string): ConversationRunJournal {
@@ -84,15 +106,15 @@ export class AnchorSessionStateAdapter implements SessionStatePort {
     return journal;
   }
 
-  readSessionMeta(
+  async readSessionMeta(
     conversationId: string,
     ctx: AuthorityCallContext,
   ): Promise<SessionMeta> {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.readSessionMeta");
-    throw unavailable("session.readSessionMeta", conversationId);
+    return this.#journal(conversationId).sessionMeta();
   }
 
-  readTranscriptTail(
+  async readTranscriptTail(
     conversationId: string,
     ctx: AuthorityCallContext,
     _cursor?: TranscriptCursor,
@@ -101,17 +123,20 @@ export class AnchorSessionStateAdapter implements SessionStatePort {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind,
       "session.readTranscriptTail",
     );
-    throw unavailable("session.readTranscriptTail", conversationId);
+    return this.#journal(conversationId).transcriptTail(_cursor, _limit);
   }
 
-  readTaskList(
+  async readTaskList(
     conversationId: string,
     ctx: AuthorityCallContext,
   ): Promise<TaskListState> {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.readTaskList");
-    throw unavailable("session.readTaskList", conversationId);
+    return this.#journal(conversationId).taskList();
   }
 }
+
+/** Backward-compatible name for the anchor composition; behavior is domain-neutral. */
+export class AnchorSessionStateAdapter extends ConversationSessionStateAdapter {}
 
 function unavailable(method: string, conversationId: string): AuthorityError {
   return authorityError(

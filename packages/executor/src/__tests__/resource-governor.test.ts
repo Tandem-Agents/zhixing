@@ -156,7 +156,21 @@ describe("ExecutorResourceGovernor", () => {
     );
     const lease = await fixture.governor.prepareAssignmentRoot(request, origin, context);
     await fixture.governor.coordinate(async () => {
-      await fixture.log.append(fixture.governor.prepareReceipt(lease));
+      await fixture.log.append(fixture.governor.prepareActivation(lease));
+    });
+    await fixture.governor.coordinate(async () => {
+      const receipt = fixture.governor.prepareReceipt(lease);
+      expect(receipt.map((record) => record.body.t)).toEqual(["reserve"]);
+      fixture.governor.assertReceiptRecords({ lease, records: receipt });
+      await fixture.log.append(receipt);
+    });
+
+    await expect(
+      fixture.governor.assignmentDomain(request.assignmentId),
+    ).resolves.toEqual({
+      kind: "local",
+      localDomainId: "local-1",
+      localGovernorEpoch: 1,
     });
 
     await expect(fixture.restart().prepareAssignmentRoot(request, origin, context))

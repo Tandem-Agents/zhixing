@@ -51,6 +51,7 @@ export interface ShutdownChainResources {
   startupCleanups?: {
     readonly authorityRuntime?: StartupCleanupHandle;
     readonly localWorkspaceHost?: StartupCleanupHandle;
+    readonly localConversationOwner?: StartupCleanupHandle;
     readonly scheduler?: StartupCleanupHandle;
     readonly channels?: StartupCleanupHandle;
     readonly deliveryStack?: StartupCleanupHandle;
@@ -135,6 +136,11 @@ export function registerCoreCleanup(
   if (resources.startupCleanups?.localWorkspaceHost) {
     registerCleanup(registry, { owner: "anchor-local-executor", role: "common", id: "localWorkspaceHost.close" }, async () => {
       await resources.startupCleanups!.localWorkspaceHost!.run();
+    });
+  }
+  if (resources.startupCleanups?.localConversationOwner) {
+    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "localConversationOwner.close" }, async () => {
+      await resources.startupCleanups!.localConversationOwner!.run();
     });
   }
   registerCleanup(registry, { owner: "anchor-host", role: "common", id: "heartbeat.clear" }, () => {

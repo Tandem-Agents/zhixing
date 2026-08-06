@@ -13,11 +13,63 @@
 import type { ConversationScope } from "./types.js";
 
 export const WORKSCENE_CONVERSATION_PREFIX = "ws:";
+export const LOCAL_CONVERSATION_PREFIX = "local-";
+
+const LOCAL_CONVERSATION_ID_PATTERN =
+  /^local-([A-Za-z0-9_-]{8})-([0-7][0-9A-HJKMNP-TV-Z]{25})$/u;
 
 export interface ParsedConversationId {
   scope: ConversationScope;
   /** scope 库内的对话目录名 */
   localId: string;
+}
+
+export interface LocalConversationIdentity {
+  readonly devicePrefix: string;
+  readonly ulid: string;
+}
+
+function localDevicePrefix(deviceId: string): string {
+  const fingerprint = /^fp:u([A-Za-z0-9_-]{8})/u.exec(deviceId)?.[1];
+  if (fingerprint) return fingerprint;
+  const prefix = deviceId.slice(0, 8);
+  if (!/^[A-Za-z0-9_-]{8}$/u.test(prefix)) {
+    throw new TypeError("Device id cannot form a path-safe local prefix");
+  }
+  return prefix;
+}
+
+/** Parses the frozen device-local conversation identity without consulting a registry. */
+export function parseLocalConversationId(
+  id: string,
+): LocalConversationIdentity | undefined {
+  const matched = LOCAL_CONVERSATION_ID_PATTERN.exec(id);
+  return matched
+    ? { devicePrefix: matched[1]!, ulid: matched[2]! }
+    : undefined;
+}
+
+/** Local identities are accepted only by the device that minted them. */
+export function assertLocalConversationIdForDevice(
+  id: string,
+  deviceId: string,
+): LocalConversationIdentity {
+  const identity = parseLocalConversationId(id);
+  if (!identity || identity.devicePrefix !== localDevicePrefix(deviceId)) {
+    throw new TypeError("Conversation id does not belong to this local device");
+  }
+  return identity;
+}
+
+export function isLocalConversationId(id: string): boolean {
+  return parseLocalConversationId(id) !== undefined;
+}
+
+/** Constructs the frozen device-local identity from a validated Crockford ULID. */
+export function localConversationId(deviceId: string, ulid: string): string {
+  const id = `${LOCAL_CONVERSATION_PREFIX}${localDevicePrefix(deviceId)}-${ulid}`;
+  assertLocalConversationIdForDevice(id, deviceId);
+  return id;
 }
 
 /** 构造场景对话的全域键 */

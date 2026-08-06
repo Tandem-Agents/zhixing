@@ -8,7 +8,7 @@ import type {
   ConversationAssignmentLedger,
   ExecutorResourceGovernor,
 } from "@zhixing/executor";
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
+import type { ConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { createOwnerControlAuthorizer } from "./owner-control-authorizer.js";
 
 /** The production cutover is shared by every local executor composition root. */
@@ -22,7 +22,7 @@ export interface ConversationAssignmentLedgerConstructor {
 export interface ConversationExecutorLedgerOptions {
   readonly Constructor: ConversationAssignmentLedgerConstructor;
   readonly authority: Pick<
-    AuthorityRuntimeStack,
+    ConversationOwnerRuntimeStack,
     | "executorLog"
     | "artifacts"
     | "executorId"
@@ -30,7 +30,7 @@ export interface ConversationExecutorLedgerOptions {
     | "verifier"
     | "executorCapabilities"
     | "permissionSnapshotFor"
-    | "executorResourceGovernor"
+    | "executorResources"
     | "preflightLocalConversationEnvironment"
     | "validateLocalConversationManifest"
   >;
@@ -61,7 +61,7 @@ export function createConversationExecutorLedger(
     signer: options.authority.signer,
     verifier: options.authority.verifier,
     ownerControl: createOwnerControlAuthorizer(options.authority.verifier, clock),
-    resources: options.authority.executorResourceGovernor as ExecutorResourceGovernor,
+    resources: options.authority.executorResources as ExecutorResourceGovernor,
     usageFinal: options.usageFinal,
     snapshotFor: (executorId: string): ExecutorCapabilitySnapshot | undefined =>
       options.authority.executorCapabilities.snapshotFor(executorId),

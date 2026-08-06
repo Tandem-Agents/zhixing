@@ -5,6 +5,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  assertLocalConversationIdForDevice,
+  isLocalConversationId,
+  localConversationId,
+  parseLocalConversationId,
   parseConversationId,
   worksceneConversationId,
 } from "../scope-id.js";
@@ -39,5 +43,37 @@ describe("conversation scope-id", () => {
     for (const bad of ["ws:", "ws:only-scene", "ws::conv", "ws:s1:"]) {
       expect(parseConversationId(bad).scope).toEqual({ kind: "user" });
     }
+  });
+
+  it("本地域身份只被出生设备接受，且非法 ULID 不形成路由身份", () => {
+    const ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const id = localConversationId("device-abcdef", ulid);
+    expect(id).toBe(`local-device-a-${ulid}`);
+    expect(parseLocalConversationId(id)).toEqual({
+      devicePrefix: "device-a",
+      ulid,
+    });
+    expect(assertLocalConversationIdForDevice(id, "device-abcdef")).toEqual({
+      devicePrefix: "device-a",
+      ulid,
+    });
+    const fingerprintId = localConversationId(
+      "fp:uAbcdefghijklmnopqrstuvwxyz0123456789",
+      ulid,
+    );
+    expect(fingerprintId).toBe(`local-Abcdefgh-${ulid}`);
+    expect(
+      assertLocalConversationIdForDevice(
+        fingerprintId,
+        "fp:uAbcdefghijklmnopqrstuvwxyz0123456789",
+      ),
+    ).toEqual({ devicePrefix: "Abcdefgh", ulid });
+    expect(() =>
+      assertLocalConversationIdForDevice(id, "another-device"),
+    ).toThrow("does not belong");
+    expect(() => localConversationId("bad:id-value", ulid)).toThrow(
+      "path-safe local prefix",
+    );
+    expect(isLocalConversationId("local-device-a-not-a-ulid")).toBe(false);
   });
 });

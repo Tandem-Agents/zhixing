@@ -19,9 +19,15 @@ export {
 export { ConversationRepository, conversationsDir } from "./repository.js";
 
 export {
+  LOCAL_CONVERSATION_PREFIX,
   WORKSCENE_CONVERSATION_PREFIX,
+  assertLocalConversationIdForDevice,
+  isLocalConversationId,
+  localConversationId,
+  parseLocalConversationId,
   worksceneConversationId,
   parseConversationId,
+  type LocalConversationIdentity,
   type ParsedConversationId,
 } from "./scope-id.js";
 

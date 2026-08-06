@@ -22,6 +22,7 @@ import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
   createConversationExecutorLedger,
 } from "./conversation-executor-ledger.js";
+import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
@@ -45,6 +46,7 @@ import {
   EvidenceJournal,
   ExecutorEvidenceHandler,
 } from "@zhixing/orchestrator/advancement";
+import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 
 export async function runExecutorRole(
   _options: ServeOptions,
@@ -82,6 +84,7 @@ export async function runExecutorRole(
   let dataPlane: ExecutorDataPlaneRuntime | undefined;
   let localWorkspaceHost: LocalWorkspaceManagementHost | undefined;
   let evidenceHandler: ExecutorEvidenceHandler | undefined;
+  let localConversationOwner: LocalConversationOwnerAssembly | undefined;
   let roleFailure: unknown;
   try {
     const interactions = new DurableConversationInteractionObserver();
@@ -169,10 +172,18 @@ export async function runExecutorRole(
     });
     const ledger = createConversationExecutorLedger({
       Constructor: executor.ConversationAssignmentLedger,
-      authority,
+      authority: localConversationOwnerRuntime(authority),
       dataPlaneTickets: dataPlane.tickets,
       assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
-      usageFinal: (assignmentId) => {
+      usageFinal: async (assignmentId) => {
+        const domain = await authority!.executorResourceGovernor.assignmentDomain(
+          assignmentId,
+        );
+        if (domain?.kind === "local") {
+          return authority!.executorResourceGovernor.finalizeLocalAssignment(
+            assignmentId,
+          );
+        }
         if (!mesh) throw new Error("Executor mesh runtime is not ready");
         return mesh.finalizeExecutorUsage(assignmentId);
       },
@@ -188,6 +199,18 @@ export async function runExecutorRole(
     });
     const runtimeFactory =
       executor.createInProcessAssignmentRuntimeFactory(role);
+    localConversationOwner = await LocalConversationOwnerAssembly.create({
+      owner: localConversationOwnerRuntime(authority),
+      ledger,
+      ConversationAssignmentLedger: executor.ConversationAssignmentLedger,
+      InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+      runtimeFactory,
+      interactions,
+      config: startup.config,
+      credentials: providerCredentials,
+      evidence: evidenceHandler,
+      dataPlane,
+    });
     jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
@@ -239,11 +262,18 @@ export async function runExecutorRole(
       mesh,
     );
     await jobOwnerLifecycle.start();
+    await localConversationOwner.start();
     await waitForRoleShutdown();
   } catch (error) {
     roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
+  try {
+    localConversationOwner?.stopAccepting();
+    await localConversationOwner?.close();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
   try {
     evidenceHandler?.stopAccepting();
   } catch (error) {

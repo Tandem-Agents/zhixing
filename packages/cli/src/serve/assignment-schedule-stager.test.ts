@@ -115,6 +115,36 @@ describe("assignment mutation composition", () => {
       }),
     ).toThrow("no unique");
   });
+
+  it("rejects global writes in a session-only domain before touching the ledger", async () => {
+    const stageMutation = vi.fn();
+    const ledger = {
+      stageMutation,
+      readStagedMutationOverlay: async () => [],
+    } as unknown as ConversationAssignmentLedger;
+    const port = createAssignmentMutationPort({
+      ledger,
+      assignmentId: "local-assignment",
+      execution: "conversation",
+      anchorEpoch: 1,
+      allowGlobal: false,
+    });
+
+    await expect(
+      port.stage({
+        domain: "global",
+        operationId: "forbidden-memory-write",
+        mutation: {
+          kind: "memory-delete",
+          scope: { kind: "personal" },
+          domain: "people",
+          id: "person-a",
+          expectedDigest: "a".repeat(64),
+        },
+      }),
+    ).rejects.toThrow("unavailable");
+    expect(stageMutation).not.toHaveBeenCalled();
+  });
 });
 
 function authorityCapability(input: {

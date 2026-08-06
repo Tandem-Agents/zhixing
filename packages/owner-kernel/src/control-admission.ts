@@ -384,6 +384,44 @@ export class ControlAdmissionJournal {
     this.#artifacts = artifacts;
   }
 
+  /**
+   * Enumerates durably applied session identities from the control owner itself.
+   * Consumers use this projection instead of maintaining a second conversation
+   * registry; artifact-backed results are materialized through the same store.
+   */
+  async listCreatedConversationIds(): Promise<readonly string[]> {
+    return this.#operations.run(async () => {
+      const transaction = await this.#transact<readonly Stored<ControlResult>[]>(
+        (state) => {
+          const requests = new Map(state.base.requests);
+          for (const [requestId, request] of state.requests) {
+            requests.set(requestId, request);
+          }
+          const results = [...requests.values()]
+            .filter(
+              (request) =>
+                request.requestType === "session-create" &&
+                request.storedResult !== undefined,
+            )
+            .map((request) => request.storedResult!);
+          return { kind: "return", value: results };
+        },
+        [],
+      );
+      const ids = new Set<string>();
+      for (const stored of transaction.value) {
+        const result = await loadStored(stored, this.#artifacts, "ControlResult");
+        if (
+          result.status === "ok" &&
+          result.body.t === "session-create"
+        ) {
+          ids.add(result.body.conversationId);
+        }
+      }
+      return [...ids].sort();
+    });
+  }
+
   async lookup(input: {
     readonly envelope: AdmittedControlEnvelope;
     readonly source: TrustedControlSource;
