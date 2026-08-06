@@ -11,18 +11,18 @@
 
 ## 当前状态
 
-- **当前状态**:U28-01～U28-18 已验证；U28-17 root-identity 专项收口完成，受影响独立审查项待重审
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（U28-17 root-identity 专项收口指纹已冻结；受影响独立审查项须按清单重审）
+- **当前状态**:已完成并封版；U28-01～U28-18 已验证，独立审查清单 45 / 45、两轮冻结终审、全单元独立功能审查与单元提交验证均绑定当前指纹通过；模块回归未触发且不阻断本单元
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（派生资产预检、两轮终审、独立功能审查与单元提交验证均绑定当前指纹；第 28 单元已封版）
 - **交付物文件集**:第 28 单元起点 HEAD `e0a56fad` 至当前工作区的 164 个非工作台路径，删除 0；CLI 44、core 48、executor 5、orchestrator 11、owner-kernel 18、runtime-host 5、server 13、tools-builtin 10、架构与规格 10
-- **当前交付物指纹**:`git-delivery-manifest-v1:edb3a1ee745891a4f1fbe24b4d6cbf545b43ab5b7b295c0454bf6bf02908632f`；路径集 SHA-256 `2e352424a2e9c0f999c8892900345494cdfdafee544061eba14729c730473a4b`
+- **当前交付物指纹**:`git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d`；路径集 SHA-256 `2e352424a2e9c0f999c8892900345494cdfdafee544061eba14729c730473a4b`
 - **架构来源**:分布式运行时总纲、可执行规格、持续在线需求与 S2 安全评审；memory、skill、workscene、work mode、runtime lifecycle、transcript/attention window、Task 子 agent、文件编排及其直接上游合同；第 12～27 单元冻结合同、适用排除项/迟发现教训及第 28 单元定稿开发清单
 
 ## 固定边界
 
 - **功能范围**:第 28 单元（S7）编排、memory、skill、workscene、task-list、segment 与 lifecycle 的 staged/commit/publish 接入，以及 Task/DAG 子租约和双拓扑生产装配
 - **架构不变量**:run 内写只进入 assignment staged overlay；owner 决策与 CommitEnvelope 是唯一提交事实；锚点 adapter 是 global 唯一物化点；failed/cancelled/uncertain 不外泄；同机与 mesh 只换 transport 不换语义；子租约按子先父后收敛
-- **验收条件**:第 28 单元定稿开发清单 D28-01～D28-09 与独立审查清单 IR28-01～IR28-45；P0/P1 清零后按工作台完成冻结终审、独立功能审查和必要验证
+- **验收条件**:第 28 单元定稿开发清单 D28-01～D28-09 与独立审查清单 IR28-01～IR28-45；P0/P1 清零后按工作台完成冻结终审、独立功能审查和单元提交验证
 - **必要上下游**:core 合同与严格 codec、executor assignment ledger/ResourceGovernor、owner-kernel conversation/job commit 与恢复、runtime-host/orchestrator/tools staged/query 消费、CLI/server/RPC 产品反馈及双拓扑装配
 - **明确不属于本单元**:第 29～38 单元能力；通用 outbox/事件总线、监控、诊断、benchmark、性能采集或未来扩展框架；改变 memory、skill、workscene、task-list、segment 的既有产品能力与确认边界
 
@@ -32,6 +32,15 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
+| core 48 路径 | 公共合同、authority、memory、skill、workscene 的导出、严格 schema 与直接测试必须同源 | `runtime:package-exports`、`contracts:typecheck`、`contracts:lint` 通过；公共导出与合同测试已归入 IR28-03～28、35～45 | 通过 |
+| owner-kernel 18 路径 | conversation/job commit、publish feedback、scheduler notice 的公共导出与直接消费者必须同步 | package exports 通过；生产者、重放、notice 与直接测试归入 IR28-04～11、24～36、42～45 | 通过 |
+| executor 5 路径 | assignment ledger 与 ResourceGovernor 的记录联合、资源终态和测试必须同步 | package exports 通过；资源与 assignment 证据归入 IR28-12～16、29～36、43～45 | 通过 |
+| orchestrator 11 路径 | runtime staged/query、Task/DAG child 与消费测试必须同步 | package exports 通过；runtime、子 agent 与编排证据归入 IR28-12～36、43～45 | 通过 |
+| runtime-host 5 路径 | runtime 端口装配、segment/workmode 工具与下游 CLI 消费必须同步 | package exports 通过；装配与结构证据归入 IR28-17～33、41～45 | 通过 |
+| tools-builtin 10 路径 | memory、skill、task-list 工具合同、产品语言和测试必须同步 | package exports 通过；工具与 staged/query 证据归入 IR28-17～23、31～37、43、45 | 通过 |
+| CLI 44 路径 | 单机/mesh 组合根、management、journal、publish presenter 与 runtime lifecycle golden 必须同步 | package exports 通过；CLI runtime lifecycle golden 1/1 通过；装配与产品消费归入 IR28-03～23、29～45 | 通过 |
+| server 13 路径（含 3 份 golden） | canonical registry、distributed-runtime behavior/structure 与 RPC/management 生产入口必须同步 | canonical registry check 通过；behavior 3/3、structure 1/1 通过；结构 golden 差异仅反映当前合同字段与已审包依赖边 | 通过 |
+| 架构与规格 10 路径 | 总纲、执行规格及八份直接模块文档须与当前合同和生产调用图一致 | 来源覆盖表与 IR28-39、43～45 双向核对通过；无 lockfile、独立 schema、快照或生成文档变化 | 不适用:无其他派生产物 |
 
 ## 关键原语核查
 
@@ -59,6 +68,15 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R28-01 | assignment staged/overlay 与 task-list、segment 隔离；状态、入口、异常终态 | core staged 合同与 segment；executor ledger；orchestrator/runtime-host/tools/CLI stager、overlay、读己之写和直接测试 | 整体交付 manifest（保守失效）`git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 任一 staged kind、receipt、assignment identity、overlay、commit/abort 可见性或生产装配变化 | 通过 | 2/2 | 第一轮正向核对 D28-01、03 与 IR28-03～05、17～18；第二轮反向构造错绑、failed/cancelled/uncertain、响应丢失和重放，零旁路写、零提交前外泄 |
+| R28-02 | owner commit/publish、逐项反馈与恢复；并发、崩溃、消费者 | core commit/validation；owner conversation/job/coordinator/participant；CLI/server presenter、history/live；直接测试 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | decision/batch/outcome 联合、AuthorityCommitLog、materialization progress、notice 或 consumer 变化 | 通过 | 2/2 | 第一轮闭合 D28-02 与 IR28-06～11、23、30；第二轮重造部分冲突、prepare/fsync/派生失败、错绑 notice、连续重启，权威终态与产品反馈全等 |
+| R28-03 | memory canonical identity、CAS/overlay、cutover、lifecycle、query 与路径安全 | core memory 全部 48 路径中的相关实现/测试；orchestrator flush/search；tools、CLI management/journal/setup、server RPC 与规格 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | memory identity/scope/domain、legacy reader、cutover 代际、journal planner/materializer、GlobalQuery 或公开管理链变化 | 通过 | 2/2 | 第一轮核对 D28-04、07 与 IR28-19、24～28、35～42；第二轮重造 CAS 竞争、旧数据混代、root/file 替换、空白内容、付费失败与连续恢复，未发现残留 |
+| R28-04 | skill 目录、资产、usage、窗口刷新与管理体验；模块边界 | core skill adapter/store；orchestrator assignment skill port/runtime；tools/CLI manager、artifact 与直接测试、skill 规格 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | catalog/content/usage 合同、window generation、artifact 依赖、管理入口或 anchor 物化变化 | 通过 | 2/2 | 第一轮核对 D28-05 与 IR28-20～22；第二轮重造 disabled/pinned/own-builtin、响应丢失、临时件和窗口换代，唯一 owner 与产品语义闭合 |
+| R28-05 | workscene staged/applied、task/segment 与 lifecycle 消费闭环；兼容与体验 | core workscene/segment；runtime-host/tools；CLI/server management；owner applied result 与直接测试、相关规格 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | workscene mutation/applied result、run/control 边界、segment/task 管理或 lifecycle hook 变化 | 通过 | 2/2 | 第一轮核对 D28-03、06、07 与 IR28-17～18、23～28、31～40；第二轮重造 create 后依赖、确认取消、冲突、hook 失败和旧旁路，零伪 applied |
+| R28-06 | Task/DAG 子租约、usage、容量 permit 与父子终态；资源与安全 | executor governor/ledger；orchestrator subagent/DAG/task；CLI executor/mesh 装配及直接测试、subagent/orchestration 规格 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | reservation identity、delegation、metering、device permit、factory/finalizer 或 parent terminal 变化 | 通过 | 2/2 | 第一轮核对 D28-08 与 IR28-12～16、44；第二轮重造 provider/abort/timeout、open usage、嵌套 child、终结响应不明和重启，父终态前零 active descendant |
+| R28-07 | local/mesh 同构、严格 wire、生产装配、安全与结构/导出基线 | CLI/server 组合根与 mesh；core GlobalQuery validator；全部包 exports、三份 server golden、CLI lifecycle golden、D28-09 测试 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 角色、transport、public type/import edge、golden、RPC/management 入口或 package export 变化 | 通过 | 2/2 | 第一轮核对 D28-09 与 IR28-29～45、164 路径归项；第二轮重造角色缺失、畸形 wire、路径泄漏和装配旁路；结构 golden 同步后机械预检通过 |
+| R28-08 | 架构/规格、测试与验收一致性；范围、回归、产品体验 | 总纲、specification、八份模块文档、D28-01～09、IR28-01～45、U28-01～18、全部直接/专项/对抗证据 | 同上 `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 权威来源、单元边界、问题/排除/教训、验收口径或任一交付路径变化 | 通过 | 2/2 | 第一轮逐项反绑权威来源和产品旅程；第二轮从最小完整产品反查范围价值，未引入后续单元、通用框架、信息采集或低价值门禁 |
+| R28-09 | 常设跨项组合：commit→派生→surface、memory/skill/workscene→lifecycle、child→parent、local↔mesh | 汇总 R28-01～R28-08 的当前输入、结论、关键原语、IR28-45 与全部跨包集成/结构证据 | `sha256(R28-01..08 当前整体指纹+结论)=git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 任一 R28-01～08 新增、边界/输入/状态/结论变化 | 通过 | 2/2 | 两轮均在其他八项完成后独立推演；权威提交、派生恢复、产品反馈、资源终结和双拓扑间无第二事实源、半提交、漏恢复或范围扩张 |
 
 ## 问题列表
 
@@ -203,13 +221,15 @@
 | A28-27 | 冷启动角色：cutover 零副作用与崩溃恢复 | 重造 started 前非法根、started/import 后根漂移、响应丢失及连续重启 | U28-17 当前冻结 cutover 调用图 | 对抗复审 / 小 | 非法根在 started 前零记录；既有代际恢复失败不新增 import/terminal且 writer 不开放；合法响应丢失继续由稳定代际收敛，未发现残留 | git-delivery-manifest-v1:edb3a1ee745891a4f1fbe24b4d6cbf545b43ab5b7b295c0454bf6bf02908632f | 有效 |
 | A28-28 | 冷启动角色：用户数据可控性与范围价值 | 重造根外正文进入管理视图、检索和模型上下文及通用设施扩面 | U28-17 当前冻结生产装配与消费者 | 对抗复审 / 小 | root/file 身份闭包阻止根外正文进入 authority；方案局限于现有 MemoryStore reader，无协议、sidecar 或通用框架，用户体验与架构均达标 | git-delivery-manifest-v1:edb3a1ee745891a4f1fbe24b4d6cbf545b43ab5b7b295c0454bf6bf02908632f | 有效 |
 | D28-07 | U28-17 P28-19 反证差异审计 | 对账 P28-19、M28-26、F28-29～F28-30 与 A28-25～A28-28 | U28-17 当前记录、直接测试及当前冻结指纹 | 专项收口 / 小 | configured/owned root 静态链接、绑定/遍历/读取中替换、最终文件替换与越根均由同根修复后复核通过；未发现新增独立根因，历轮发现零消失、零未处置反证 | git-delivery-manifest-v1:edb3a1ee745891a4f1fbe24b4d6cbf545b43ab5b7b295c0454bf6bf02908632f | 有效 |
+| M28-27 | 当前完整交付物的派生资产、合同与导出预检 | canonical registry、runtime behavior/structure golden、package exports、contract typecheck/lint、manifest 与 diff check | 当前 164 路径完整交付物；结构 golden 同步后再冻结 | 冻结准备 / 小 | canonical registry、behavior 3/3、structure 1/1、CLI lifecycle 1/1、package exports、contract typecheck/lint、工作区与暂存区 diff check 全部通过；结构 golden 仅同步当前 `SessionSubscribeParams` 与已审依赖边；manifest 为 164 路径、0 删除 | git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d | 有效 |
+| M28-28 | 当前冻结交付物满足单元提交验证 | 复用 M28-26 的最小必要类型检查、直接测试与构建证据，复用本轮已完成的 workspace build，并对账 M28-27 的派生资产、合同、差异卫生与 manifest | 当前 164 路径冻结交付物；生产源码在 workspace build 后未变化，后续仅同步已审结构 golden 与工作台状态 | 单元提交验证 / 小 / 仅证据对账 | core root-identity 直接矩阵 52/52、类型检查与 Biome 通过；workspace build 17/17 通过；canonical registry、behavior/structure、CLI lifecycle、package exports、contract typecheck/lint、diff check 与 manifest 均通过。全部证据覆盖当前输入，无缺失闭包；未运行包全测或模块回归 | git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 通过：D28-01～09、IR28-01～45、164 路径及 R28-01～09 正向闭合，零新增 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 通过：抛开第一轮结论反向重造失败机制，R28-01～09 达到 2/2，零新增 |
 
 ## 独立审查覆盖表
 
@@ -217,5 +237,13 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF28-01 | 高风险：权威提交、精确前缀、主投影与派生账的原子性/线性化失效 | AuthorityCommitLog、四域 planner/reducer、conversation/job/control writer、decision/batch/progress；`git-delivery-manifest-v1:78ab206b940cd1ec77cf2838668d3ebb4cf9c1ccd852977ad88753d568e4d21d` | 已覆盖 | 从竞争、prepare 失败、fsync 后崩溃、部分冲突、响应丢失与连续重启独立重建；每对象唯一后继、主投影零半套，派生欠账有界重驱 | commit log、planner/reducer、writer、decision/progress 或相关测试变化 |
+| IF28-02 | 高风险：assignment 隔离、read-own-writes、abort/uncertain 可见性与旧写旁路 | staged 合同、executor ledger、runtime stager/overlay、task-list/segment/memory/skill/workscene 生产入口与消费者；同一指纹 | 已覆盖 | 逐域重造错 assignment/capability/fence、同键异载荷、failed/cancelled/uncertain 和 run/control 竞争；提交前零外泄，旧生产旁路零可达 | staged kind/receipt/overlay、生产入口、control 边界或消费缓存变化 |
+| IF28-03 | 高风险：memory 数据接管、canonical identity、journal 维护和派生 I/O 的耐久恢复 | memory canonicalizer/store/adapter/cutover/planner/service/materializer、CLI setup/management、GlobalQuery 与 C28/P28 历轮证据；同一指纹 | 已覆盖 | 独立覆盖旧源混代、root/file 替换、非法 identity、CAS、空白内容、付费失败、部分派生与连续恢复；权威/用户视图全等，越根零正文 | memory identity/scope、legacy reader、cutover、journal lifecycle、materializer 或公开读面变化 |
+| IF28-04 | 高风险：strict wire、路径/秘密、错误语言和 live/history 错绑/重复 | GlobalQuery/PublishResult validators、mesh server/client、RPC envelope、presenter/writer、MemoryStore containment 与结构证据；同一指纹 | 已覆盖 | 重造额外/嵌套错形字段、串线响应、路径泄漏、内部术语和 live/history 重复；所有边界 fail-closed，合法反馈可行动且稳定去重 | 公共联合、codec/envelope、mesh、presenter、路径边界或 schema/golden 变化 |
+| IF28-05 | 高风险：Task/DAG 子树资源、usage、容量与父终态的泄漏/重复 | ResourceGovernor、assignment finalizer、Task/DAG factory、device permit、生产装配和直接测试；同一指纹 | 已覆盖 | 重造 provider/abort/timeout、open usage、嵌套/并发 child、终结半提交和恢复；最深优先、usage 不漏不重、父终态前零 active descendant | governor 日志、delegation/metering、finalizer、permit 或 Task/DAG 入口变化 |
+| IF28-06 | 一般风险：用户管理/反馈/维护体验与权威事实分叉 | conversation/job notice、CLI/server management、workscene applied、memory/skill 视图、journal notice 与产品文案测试；同一指纹 | 已覆盖 | 从首次使用、冲突、断线补读、空态、失败重试与停机检查；不虚报 applied/完成，不静默收费或失败，不暴露内部 staged/authority 术语 | 公开 DTO、notice/presenter、management RPC、产品文案或用户旅程变化 |
+| IF28-07 | 高风险：单机/mesh 角色折叠、模块写权限、结构/导出/文档漂移 | CLI/server 组合根、executor/runtime-host/orchestrator/tools 依赖图、三份 server golden、CLI lifecycle golden、10 份文档；同一指纹 | 已覆盖 | 角色缺失、断线、重启、local/mesh 交叉与生产依赖反查通过；anchor 为唯一全局物化点，结构 golden、exports 与当前合同一致 | 组合根、角色/transport、包依赖、golden/export 或架构规格变化 |
+| IF28-08 | 高风险常设跨区组合：commit→materialize→surface、staged→lifecycle、child→parent、local↔mesh | 汇总 IF28-01～07 当前输入与结论、R28-09、IR28-45；同一指纹 | 已覆盖 | 在其他风险区完成后重新组合故障插点；未发现跨区第二事实源、半提交、漏通知、资源遗留、安全绕过或范围外基础设施 | 任一 IF28-01～07 边界、输入、状态或结论变化 |
 
 <!-- registration-complete: unit-28.gen-1 -->

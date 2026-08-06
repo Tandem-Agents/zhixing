@@ -951,7 +951,8 @@
     },
     {
       "definition": [
-        "conversationId?: string;"
+        "conversationId?: string;",
+        "afterCommitRevision?: number;"
       ],
       "kind": "interface",
       "name": "SessionSubscribeParams"
@@ -1095,7 +1096,7 @@
     },
     {
       "kind": "import",
-      "references": 19,
+      "references": 20,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1125,13 +1126,19 @@
     },
     {
       "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "import",
       "references": 2,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/providers"
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 6,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/rpc"
     },
@@ -1149,7 +1156,7 @@
     },
     {
       "kind": "type-import",
-      "references": 16,
+      "references": 18,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1221,7 +1228,7 @@
     },
     {
       "kind": "import",
-      "references": 84,
+      "references": 86,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1299,7 +1306,7 @@
     },
     {
       "kind": "type-import",
-      "references": 83,
+      "references": 84,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1329,7 +1336,7 @@
     },
     {
       "kind": "type-import",
-      "references": 13,
+      "references": 14,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1467,7 +1474,7 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 5,
       "sourceZone": "orchestrator/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1503,13 +1510,13 @@
     },
     {
       "kind": "import",
-      "references": 48,
+      "references": 51,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 34,
+      "references": 39,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
@@ -1719,7 +1726,7 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 4,
       "sourceZone": "server/runtime",
       "target": "package:@zhixing/core"
     }
