@@ -660,7 +660,32 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       throw new Error("Local conversation owner is already assembled");
     }
     const assembly = await LocalConversationOwnerAssembly.create({
-      owner: localConversationOwnerRuntime(ctx.authorityRuntime),
+      owner: localConversationOwnerRuntime({
+        artifacts: ctx.authorityRuntime.artifacts,
+        deviceId: ctx.authorityRuntime.deviceId,
+        executorCapabilities: ctx.authorityRuntime.executorCapabilities,
+        executorId: ctx.authorityRuntime.executorId,
+        executorLog: ctx.authorityRuntime.executorLog,
+        executorResourceGovernor: ctx.authorityRuntime.executorResourceGovernor,
+        executionAssetCatalog: ctx.authorityRuntime.executionAssetCatalog,
+        localControlAdmission: ctx.authorityRuntime.localControlAdmission,
+        localDomainId: ctx.authorityRuntime.localDomainId,
+        localGovernorEpoch: ctx.authorityRuntime.localGovernorEpoch,
+        localOwnerEpoch: ctx.authorityRuntime.localOwnerEpoch,
+        permissionSnapshotFor: ctx.authorityRuntime.permissionSnapshotFor,
+        preflightLocalConversationEnvironment:
+          ctx.authorityRuntime.preflightLocalConversationEnvironment,
+        prepareLocalConversationAssignment:
+          ctx.authorityRuntime.prepareLocalConversationAssignment,
+        releaseLocalConversationEnvironmentPreflight:
+          ctx.authorityRuntime.releaseLocalConversationEnvironmentPreflight,
+        signer: ctx.authorityRuntime.signer,
+        validateConversationRuntimeBinding:
+          ctx.authorityRuntime.validateConversationRuntimeBinding,
+        validateLocalConversationManifest:
+          ctx.authorityRuntime.validateLocalConversationManifest,
+        verifier: ctx.authorityRuntime.verifier,
+      }),
       ConversationAssignmentLedger:
         ctx.executorRoleModule.ConversationAssignmentLedger,
       InProcessAssignmentSubmission:
@@ -674,10 +699,7 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
     });
     const cleanup = ctx.startupRollback.register(
       "localConversationOwner.close",
-      async () => {
-        assembly.stopAccepting();
-        await assembly.close();
-      },
+      () => assembly.close(),
     );
     ctx.startupCleanups.localConversationOwner = cleanup;
     await assembly.start();

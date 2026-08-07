@@ -1478,6 +1478,21 @@ export class ConversationManager implements ConversationCommitProjection {
     return true;
   }
 
+  /**
+   * 停机收束的保守判定:任一会话 busy、任一 pending 队列非空或存在在飞
+   * 任务即视为仍有工作。调用方在拒新准入后读取;true 表示不能宣称收束。
+   */
+  hasActiveWork(): boolean {
+    if (this.activeTasks.size > 0) return true;
+    for (const queue of this.pendingQueues.values()) {
+      if (queue.length > 0) return true;
+    }
+    for (const session of this.sessions.values()) {
+      if (session.busy) return true;
+    }
+    return false;
+  }
+
   // ─── Run 记录 + 晋升（单向数据流） ───
 
   /**

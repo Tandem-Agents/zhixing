@@ -428,11 +428,21 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/local-conversation-owner.ts",
       (text) => text.replace(
-        "readonly protocol: LocalConversationProtocolPort;",
-        "readonly protocol: ConversationProtocolRuntime;",
+        "  readonly sessionState: LocalConversationSessionReadPort;",
+        "  readonly manager: ConversationManager;\n  readonly sessionState: LocalConversationSessionReadPort;",
       ),
     )).join("\n"),
-    /expose only LocalConversationProtocolPort/,
+    /must not expose raw manager/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        '    | "readAdvancementState"\n  >\n>;',
+        '    | "readAdvancementState"\n    | "mutate"\n  >\n>;',
+      ),
+    )).join("\n"),
+    /frozen read set/,
   );
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
@@ -445,8 +455,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "owner: localConversationOwnerRuntime(ctx.authorityRuntime),",
-        "owner: localConversationOwnerRuntime(ctx.authorityRuntime),\n      globalState: ctx.authorityRuntime.globalState,",
+        "      ConversationAssignmentLedger:\n        ctx.executorRoleModule.ConversationAssignmentLedger,",
+        "      globalState: ctx.authorityRuntime.globalState,\n      ConversationAssignmentLedger:\n        ctx.executorRoleModule.ConversationAssignmentLedger,",
       ),
     )).join("\n"),
     /forbidden or duplicate capability globalState/,
@@ -455,21 +465,137 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/executor-role-runtime.ts",
       (text) => text.replace(
-        "owner: localConversationOwnerRuntime(authority),",
+        "owner: localOwnerRuntime,",
         "owner: authority,",
       ),
     )).join("\n"),
-    /must receive localConversationOwnerRuntime/,
+    /must receive the single local runtime construction/,
   );
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/conversation-owner-runtime.ts",
       (text) => text.replace(
-        "executionAssetCatalog: authority.executionAssetCatalog,\n    globalPublishing: false,",
-        "executionAssetCatalog: authority.executionAssetCatalog,\n    globalState: authority.globalState,\n    globalPublishing: false,",
+        "    executionAssetCatalog: deps.executionAssetCatalog,\n    globalPublishing: false,",
+        "    executionAssetCatalog: deps.executionAssetCatalog,\n    globalState: deps.globalState,\n    globalPublishing: false,",
       ),
     )).join("\n"),
     /constructs forbidden capability globalState/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/conversation-owner-runtime.ts",
+      (text) => text.replace(
+        "  deps: LocalConversationOwnerRuntimeDependencies,",
+        "  deps: AuthorityRuntimeStack,",
+      ),
+    )).join("\n"),
+    /must take LocalConversationOwnerRuntimeDependencies/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/conversation-owner-runtime.ts",
+      (text) => text.replace('  | "verifier"\n>;', ">;"),
+    )).join("\n"),
+    /must be exactly the frozen key set/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "        verifier: ctx.authorityRuntime.verifier,\n      }),",
+        "        verifier: ctx.authorityRuntime.verifier,\n        globalState: ctx.authorityRuntime.globalState,\n      }),",
+      ),
+    )).join("\n"),
+    /forbidden or duplicate dependency globalState/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace("        verifier: ctx.authorityRuntime.verifier,\n", ""),
+    )).join("\n"),
+    /missing dependency verifier/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "        deviceId: ctx.authorityRuntime.deviceId,",
+        "        deviceId: ctx.authorityRuntime.executorId,",
+      ),
+    )).join("\n"),
+    /dependency deviceId must bind ctx\.authorityRuntime\.deviceId/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        /(const localOwnerRuntime = localConversationOwnerRuntime\(\{[\s\S]*?deviceId:\s*)authority\.deviceId/,
+        "$1injectedDeviceId",
+      ),
+    )).join("\n"),
+    /dependency deviceId must bind authority\.deviceId/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "      owner: localConversationOwnerRuntime({\n",
+        "      owner: localConversationOwnerRuntime({\n        ...ctx.authorityRuntime,\n",
+      ),
+    )).join("\n"),
+    /spread or shorthand/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text
+        .replace(
+          "      owner: localConversationOwnerRuntime({\n",
+          "      owner: localConversationOwnerRuntime(Object.assign(ctx.authorityRuntime, {\n",
+        )
+        .replace(
+          "        verifier: ctx.authorityRuntime.verifier,\n      }),",
+          "        verifier: ctx.authorityRuntime.verifier,\n      })),",
+        ),
+    )).join("\n"),
+    /must receive one explicit dependency object literal/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "authority: localOwnerRuntime,",
+        "authority: localConversationOwnerRuntime({}),",
+      ),
+    )).join("\n"),
+    /exactly one local runtime construction, got 2/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "authority: localOwnerRuntime,",
+        "authority: driftedLocalRuntime,",
+      ),
+    )).join("\n"),
+    /executor ledger must receive the same single local runtime construction/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace("    await assembly.start();", "    await Promise.resolve();"),
+    )).join("\n"),
+    /assembly must start exactly once, got 0/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "    await localConversationOwner?.close();",
+        "    await Promise.resolve();",
+      ),
+    )).join("\n"),
+    /assembly must close exactly once, got 0/,
   );
 });
 

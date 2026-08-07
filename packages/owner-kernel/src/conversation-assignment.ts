@@ -8648,13 +8648,20 @@ export class InProcessConversationDispatcher {
         if (!ledger.failure) {
           throw new Error("Failed executor assignment has no durable failure fact");
         }
-        await this.#journal.failAssignedRun(
+        // 取消栅栏先赢时,迟到的失败报告是 fence-loser,由取消路径收束,
+        // 不得用失败终态覆盖取消中/已取消。
+        const currentRunState = await this.#journal.runState(
           candidate.dispatch.envelope.work.runId,
-          candidate.assignmentId,
-          ledger.failure.reason,
-          ledger.failure.usageFinal,
         );
-        recovered += 1;
+        if (currentRunState !== "cancel-requested" && currentRunState !== "cancelled") {
+          await this.#journal.failAssignedRun(
+            candidate.dispatch.envelope.work.runId,
+            candidate.assignmentId,
+            ledger.failure.reason,
+            ledger.failure.usageFinal,
+          );
+          recovered += 1;
+        }
         continue;
       }
       if (ledger.cancelProof) {

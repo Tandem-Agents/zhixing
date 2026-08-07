@@ -1566,6 +1566,30 @@ export class ConversationAssignmentLedger implements
     });
   }
 
+  async conversationInteractionOutcome(
+    assignmentId: string,
+    requestId: string,
+  ): Promise<ConversationInteractionOutcome | undefined> {
+    assertIdentifier(requestId, "Interaction requestId");
+    return this.#select(assignmentId, (state) => {
+      if (
+        state.received?.body.activation.ref.execution !== "conversation" ||
+        !state.requested.has(requestId)
+      ) {
+        throw new Error(
+          "Conversation interaction outcome has no durable conversation request",
+        );
+      }
+      const finished = state.finished.get(requestId);
+      return finished
+        ? snapshot(
+            validateConversationInteractionOutcome(finished.body.outcome),
+            "Interaction outcome",
+          )
+        : undefined;
+    });
+  }
+
   async pendingInteractionRequests(
     assignmentId: string,
   ): Promise<readonly PendingAssignmentInteraction[]> {

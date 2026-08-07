@@ -166,58 +166,86 @@ export function anchorConversationOwnerRuntime(
   };
 }
 
+/**
+ * 本地域 owner 工厂实际读取的依赖全集:两个生产组合根各以显式对象字面量
+ * 构造传入,完整 AuthorityRuntimeStack 不作为运行值进入本地域构造闭包;
+ * 键集冻结,由结构门禁对工厂参数与两处字面量逐键机械核对。
+ */
+export type LocalConversationOwnerRuntimeDependencies = Pick<
+  AuthorityRuntimeStack,
+  | "artifacts"
+  | "deviceId"
+  | "executorCapabilities"
+  | "executorId"
+  | "executorLog"
+  | "executorResourceGovernor"
+  | "executionAssetCatalog"
+  | "localControlAdmission"
+  | "localDomainId"
+  | "localGovernorEpoch"
+  | "localOwnerEpoch"
+  | "permissionSnapshotFor"
+  | "preflightLocalConversationEnvironment"
+  | "prepareLocalConversationAssignment"
+  | "releaseLocalConversationEnvironmentPreflight"
+  | "signer"
+  | "validateConversationRuntimeBinding"
+  | "validateLocalConversationManifest"
+  | "verifier"
+>;
+
 export function localConversationOwnerRuntime(
-  authority: AuthorityRuntimeStack,
+  deps: LocalConversationOwnerRuntimeDependencies,
 ): LocalConversationOwnerRuntimeStack {
-  const resources = authority.executorResourceGovernor as ConversationOwnerResourceAuthority;
+  const resources = deps.executorResourceGovernor as ConversationOwnerResourceAuthority;
   return {
     domain: {
       kind: "local",
-      localDomainId: authority.localDomainId,
-      localOwnerEpoch: authority.localOwnerEpoch,
-      localGovernorEpoch: authority.localGovernorEpoch,
+      localDomainId: deps.localDomainId,
+      localOwnerEpoch: deps.localOwnerEpoch,
+      localGovernorEpoch: deps.localGovernorEpoch,
     },
-    ownerEpoch: authority.localOwnerEpoch,
-    deviceId: authority.deviceId,
-    executorId: authority.executorId,
-    signer: authority.signer,
-    verifier: authority.verifier,
-    log: authority.executorLog,
-    authorityLog: authority.executorLog,
-    executorLog: authority.executorLog,
-    artifacts: authority.artifacts,
-    controlAdmission: authority.localControlAdmission,
-    executorCapabilities: authority.executorCapabilities,
+    ownerEpoch: deps.localOwnerEpoch,
+    deviceId: deps.deviceId,
+    executorId: deps.executorId,
+    signer: deps.signer,
+    verifier: deps.verifier,
+    log: deps.executorLog,
+    authorityLog: deps.executorLog,
+    executorLog: deps.executorLog,
+    artifacts: deps.artifacts,
+    controlAdmission: deps.localControlAdmission,
+    executorCapabilities: deps.executorCapabilities,
     resources,
     resourceGovernor: resources,
-    executorResources: authority.executorResourceGovernor,
-    executorResourceGovernor: authority.executorResourceGovernor,
-    executionAssetCatalog: authority.executionAssetCatalog,
+    executorResources: deps.executorResourceGovernor,
+    executorResourceGovernor: deps.executorResourceGovernor,
+    executionAssetCatalog: deps.executionAssetCatalog,
     globalPublishing: false,
-    anchorEpoch: authority.localOwnerEpoch,
+    anchorEpoch: deps.localOwnerEpoch,
     acceptsConversationId(conversationId) {
       try {
-        assertLocalConversationIdForDevice(conversationId, authority.deviceId);
+        assertLocalConversationIdForDevice(conversationId, deps.deviceId);
         return true;
       } catch {
         return false;
       }
     },
-    permissionSnapshotFor: authority.permissionSnapshotFor,
+    permissionSnapshotFor: deps.permissionSnapshotFor,
     prepareConversationAssignment: (input) =>
-      authority.prepareLocalConversationAssignment({
+      deps.prepareLocalConversationAssignment({
         conversationId: input.conversationId,
         executionProfile: input.executionProfile,
         permissionRules: input.permissionRules,
         ...(input.environment ? { environment: input.environment } : {}),
       }),
-    validateConversationRuntimeBinding: authority.validateConversationRuntimeBinding,
+    validateConversationRuntimeBinding: deps.validateConversationRuntimeBinding,
     preflightLocalConversationEnvironment:
-      authority.preflightLocalConversationEnvironment,
+      deps.preflightLocalConversationEnvironment,
     releaseLocalConversationEnvironmentPreflight:
-      authority.releaseLocalConversationEnvironmentPreflight,
-    validateLocalConversationManifest: authority.validateLocalConversationManifest,
+      deps.releaseLocalConversationEnvironmentPreflight,
+    validateLocalConversationManifest: deps.validateLocalConversationManifest,
     finalizeUsage: (assignmentId) =>
-      authority.executorResourceGovernor.finalizeLocalAssignment(assignmentId),
+      deps.executorResourceGovernor.finalizeLocalAssignment(assignmentId),
   };
 }

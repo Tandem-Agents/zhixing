@@ -33,9 +33,6 @@ describe("local conversation owner production surface", () => {
       start: vi.fn(async () => {
         events.push("start");
       }),
-      stopAccepting: vi.fn(() => {
-        events.push("stop-accepting");
-      }),
       close: vi.fn(async () => {
         events.push("close");
       }),
@@ -52,7 +49,7 @@ describe("local conversation owner production surface", () => {
     expect(events).toEqual(["start"]);
     await expect(unit.setup(ctx)).rejects.toThrow("already assembled");
     await rollback.rollback();
-    expect(events).toEqual(["start", "stop-accepting", "close"]);
+    expect(events).toEqual(["start", "close"]);
   });
 
   it("does not construct an owner when the executor role is absent", async () => {

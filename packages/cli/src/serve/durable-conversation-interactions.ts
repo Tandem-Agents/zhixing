@@ -148,18 +148,33 @@ export class DurableConversationInteractionObserver
     if (!active) {
       throw new Error(`Confirmation interaction ${request.id} has no durable binding`);
     }
-    await active.submission.finishAndMirror(
-      active.assignmentId,
-      request.id,
-      interactionOutcome(
-        request,
-        decision,
-        source,
-        active.surfacePrincipal,
-        this.#surfaceAnswers.get(request.id),
-      ),
-      active.context,
+    const outcome = interactionOutcome(
+      request,
+      decision,
+      source,
+      active.surfacePrincipal,
+      this.#surfaceAnswers.get(request.id),
     );
+    try {
+      await active.submission.finishAndMirror(
+        active.assignmentId,
+        request.id,
+        outcome,
+        active.context,
+      );
+    } catch (error) {
+      const durable = await active.ledger.conversationInteractionOutcome(
+        active.assignmentId,
+        request.id,
+      );
+      if (!durableResolutionSupersedesRuntime(durable, outcome, source)) {
+        throw error;
+      }
+      await active.submission.flushInteractionMirrors(
+        active.assignmentId,
+        active.context,
+      );
+    }
     await this.drainAssignment(active);
     this.#requests.delete(request.id);
     this.#surfaceAnswers.delete(request.id);
@@ -431,4 +446,20 @@ function interactionOutcome(
     decisionDigest: confirmationDecisionDigest(request.id, decision),
     by: surfaceAnswer?.surfacePrincipal ?? surfacePrincipal,
   };
+}
+
+function durableResolutionSupersedesRuntime(
+  durable: ConversationInteractionOutcome | undefined,
+  runtime: ConversationInteractionOutcome,
+  source: ConfirmationResolutionSource,
+): boolean {
+  if (!durable) return false;
+  if (canonicalize(durable) === canonicalize(runtime)) return true;
+  return (
+    source.kind === "cancel" &&
+    runtime.t === "cancelled" &&
+    runtime.via === "run-end" &&
+    durable.t === "cancelled" &&
+    (durable.via === "cancel-fence" || durable.via === "abort-ticket")
+  );
 }

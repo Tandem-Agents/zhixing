@@ -88,6 +88,7 @@ import {
   DurableConversationAdmissionRejectedError,
   runTurnWithCommit,
 } from "@zhixing/owner-kernel/run-turn";
+import { SerialTaskQueue } from "@zhixing/core/persistence";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -269,6 +270,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #ownerPublishedFirstPartyFinals = new Set<string>();
   readonly #pendingFirstPartyFinals = new Set<string>();
   readonly #preparedAdmissions = new Map<string, PreparedConversationAdmission>();
+  readonly #terminalOperations = new SerialTaskQueue();
   readonly #contexts: InProcessDispatchContextFactory;
   readonly #interactions: DurableConversationInteractionObserver;
   readonly #executeRecoveredPerspective:
@@ -298,6 +300,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #readinessRecovery: Promise<number> | undefined;
   #recoveryStopped = false;
   #recoveryDiscovered = false;
+  #shutdownDraining = false;
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
   readonly #sessionIdentities = new Map<string, Promise<void>>();
@@ -504,6 +507,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#deliveryDrain = drain;
   }
 
+  /** Fences recovery from scheduling new provider work while durable shutdown drains. */
+  beginShutdownDrain(): void {
+    this.#shutdownDraining = true;
+  }
+
   startRecoveryLoop(intervalMs = 5_000): void {
     if (this.#recoveryTimer || this.#recoveryRunning) return;
     this.#recoveryStopped = false;
@@ -646,15 +654,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       runId,
       requestId: `cancel:pending:${runId}`,
     };
+    const journal = this.#journal(conversationId);
     try {
-      await this.#journal(conversationId).cancelRun(request);
+      await this.#terminalOperations.run(() =>
+        this.#driveCancellation(journal, request)
+      );
       this.#clearRunClaims(runId);
       this.#markRecovery(conversationId);
       this.#kickDelivery();
     } catch (firstError) {
       this.#markRecovery(conversationId);
       try {
-        await this.#journal(conversationId).cancelRun(request);
+        await this.#terminalOperations.run(() =>
+          this.#driveCancellation(journal, request)
+        );
         this.#clearRunClaims(runId);
         this.#markRecovery(conversationId);
         this.#kickDelivery();
@@ -705,6 +718,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async cancel(
     input: DurableConversationCancelInput,
   ): Promise<DurableConversationCancellationResult> {
+    return this.#terminalOperations.run(() => this.#cancelInternal(input));
+  }
+
+  async #cancelInternal(
+    input: DurableConversationCancelInput,
+  ): Promise<DurableConversationCancellationResult> {
     const journal = this.#journal(input.conversationId);
     if (!input.runId) return this.#cancelBatch(input, journal);
     const candidate = await journal.runControlDescriptor(input.runId);
@@ -738,6 +757,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     if (outcome.result.body.t !== "cancel") {
       throw new Error("Conversation cancellation returned another control result");
+    }
+    if (outcome.result.body.runState === "cancel-requested") {
+      await this.#drivePendingCancellations(journal);
     }
     const local = this.#manager().applyDurableCancellation(
       input.conversationId,
@@ -802,6 +824,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error(
         "Conversation batch cancellation returned another control result",
       );
+    }
+    if (outcome.result.body.runs.some((run) => run.runState === "cancel-requested")) {
+      await this.#drivePendingCancellations(journal);
     }
     const dispositions: DurableConversationCancellationDisposition[] = [];
     for (const run of outcome.result.body.runs) {
@@ -1339,6 +1364,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
+      const yieldToDurableCancellation = async (): Promise<boolean> => {
+        const state = await journal.runState(runId);
+        if (state !== "cancel-requested" && state !== "cancelled") return false;
+        if (state === "cancel-requested") {
+          await this.#drivePendingCancellations(journal);
+        }
+        await stream.markTerminal?.();
+        this.#markRecovery(input.conversationId);
+        this.#kickDelivery(input.hooks?.onFinalPublishFailure);
+        return true;
+      };
       let toolCalls = 0;
       const interactionBinding: DurableInteractionBinding = {
         assignmentId,
@@ -1454,6 +1490,51 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       } catch (error) {
         await controlHeartbeat.stop();
         try {
+          await this.#terminalOperations.run(async () => {
+            if (await yieldToDurableCancellation()) return;
+            const usageFinal = await flushResourceUsage();
+            if (await localLedger!.hasOpenSideEffects(assignmentId)) {
+              await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
+            } else {
+              await this.#prepareRunEndUntilAvailable(
+                assignmentId,
+                submission,
+                submissionContext,
+                interactionBinding,
+              );
+              await stream.final(streamMeta);
+              const failure = await localLedger!.failExecution(assignmentId, {
+                reason: executionFailureReason(error),
+                usageFinal,
+              });
+              if (failure) {
+                const currentState = await journal.runState(runId);
+                if (currentState === "dispatched" || currentState === "running") {
+                  await journal.failAssignedRun(
+                    runId,
+                    assignmentId,
+                    failure.reason,
+                    failure.usageFinal,
+                  );
+                }
+              }
+              await stream.markTerminal?.();
+            }
+            this.#kickDelivery();
+          });
+        } catch (settlementError) {
+          throw new AggregateError(
+            [error, settlementError],
+            `Conversation execution failed (${executionFailureReason(error)}) and durable failure settlement failed (${executionFailureReason(settlementError)})`,
+          );
+        }
+        throw error;
+      }
+      await controlHeartbeat.stop();
+
+      if (runResult.agentResult.reason !== "completed") {
+        const cancelled = await this.#terminalOperations.run(async () => {
+          if (await yieldToDurableCancellation()) return true;
           const usageFinal = await flushResourceUsage();
           if (await localLedger!.hasOpenSideEffects(assignmentId)) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
@@ -1466,12 +1547,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             );
             await stream.final(streamMeta);
             const failure = await localLedger!.failExecution(assignmentId, {
-              reason: executionFailureReason(error),
+              reason: runFailureReason(runResult.agentResult),
               usageFinal,
             });
             if (failure) {
               const currentState = await journal.runState(runId);
-              if (currentState === "dispatched" || currentState === "running") {
+              if (
+                currentState === "dispatched" ||
+                currentState === "running"
+              ) {
                 await journal.failAssignedRun(
                   runId,
                   assignmentId,
@@ -1482,97 +1566,65 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             }
             await stream.markTerminal?.();
           }
-          this.#kickDelivery();
-        } catch (settlementError) {
-          throw new AggregateError(
-            [error, settlementError],
-            `Conversation execution failed (${executionFailureReason(error)}) and durable failure settlement failed (${executionFailureReason(settlementError)})`,
-          );
-        }
-        throw error;
-      }
-      await controlHeartbeat.stop();
-
-      if (runResult.agentResult.reason !== "completed") {
-        const usageFinal = await flushResourceUsage();
-        if (await localLedger!.hasOpenSideEffects(assignmentId)) {
-          await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
-        } else {
-          await this.#prepareRunEndUntilAvailable(
-            assignmentId,
-            submission,
-            submissionContext,
-            interactionBinding,
-          );
-          await stream.final(streamMeta);
-          const failure = await localLedger!.failExecution(assignmentId, {
-            reason: runFailureReason(runResult.agentResult),
-            usageFinal,
-          });
-          if (failure) {
-            const currentState = await journal.runState(runId);
-            if (
-              currentState === "dispatched" ||
-              currentState === "running"
-            ) {
-              await journal.failAssignedRun(
-                runId,
-                assignmentId,
-                failure.reason,
-                failure.usageFinal,
-              );
-            }
-          }
-          await stream.markTerminal?.();
-        }
+          return false;
+        });
+        if (cancelled) return cancelledRunResult(runResult);
         this.#kickDelivery(input.hooks?.onFinalPublishFailure, runResult);
         return runResult;
       }
 
-      await this.#prepareRunEndUntilAvailable(
-        assignmentId,
-        submission,
-        submissionContext,
-        interactionBinding,
-      );
-      const sourceValue = runResult.runRecord.source ?? input.options?.source;
-      const advancement =
-        runResult.runRecord.advancement ?? input.options?.advancement;
-      const transcriptRun: TranscriptRunRecord = {
-        ...runResult.runRecord,
-        type: "run",
-        runId,
-        runIndex: input.baseRevision,
-        ...(sourceValue ? { source: sourceValue } : {}),
-        ...(advancement ? { advancement } : {}),
-      };
-      const usageFinal = await flushResourceUsage();
-      const bundle = await localLedger!.sealConversationBundle(assignmentId, {
-        runRecord: transcriptRun,
-        ...(runResult.windowCompact
-          ? { windowCompact: runResult.windowCompact }
-          : {}),
-        contentAssets: [...appliedAdmission.attachments],
-        streamFinal: await stream.final(streamMeta),
-        usage: {
-          inputTokens: runResult.agentResult.usage.inputTokens,
-          outputTokens: runResult.agentResult.usage.outputTokens,
-          toolCalls,
-        },
-        usageFinal,
-      });
-      const committed = await submission.submitSealedBundle(
-        assignmentId,
-        submissionContext,
-      );
-      if (!committed.committed) {
-        const error = new Error(
-          `Conversation commit rejected: ${committed.error.message}`,
+      const terminal = await this.#terminalOperations.run(async () => {
+        if (await yieldToDurableCancellation()) {
+          return { kind: "cancelled" as const };
+        }
+        await this.#prepareRunEndUntilAvailable(
+          assignmentId,
+          submission,
+          submissionContext,
+          interactionBinding,
         );
-        input.hooks?.onCommitFailure?.(error, runResult);
-        throw error;
-      }
-      await stream.markTerminal?.();
+        const sourceValue = runResult.runRecord.source ?? input.options?.source;
+        const advancement =
+          runResult.runRecord.advancement ?? input.options?.advancement;
+        const transcriptRun: TranscriptRunRecord = {
+          ...runResult.runRecord,
+          type: "run",
+          runId,
+          runIndex: input.baseRevision,
+          ...(sourceValue ? { source: sourceValue } : {}),
+          ...(advancement ? { advancement } : {}),
+        };
+        const usageFinal = await flushResourceUsage();
+        const bundle = await localLedger!.sealConversationBundle(assignmentId, {
+          runRecord: transcriptRun,
+          ...(runResult.windowCompact
+            ? { windowCompact: runResult.windowCompact }
+            : {}),
+          contentAssets: [...appliedAdmission.attachments],
+          streamFinal: await stream.final(streamMeta),
+          usage: {
+            inputTokens: runResult.agentResult.usage.inputTokens,
+            outputTokens: runResult.agentResult.usage.outputTokens,
+            toolCalls,
+          },
+          usageFinal,
+        });
+        const committed = await submission.submitSealedBundle(
+          assignmentId,
+          submissionContext,
+        );
+        if (!committed.committed) {
+          const error = new Error(
+            `Conversation commit rejected: ${committed.error.message}`,
+          );
+          input.hooks?.onCommitFailure?.(error, runResult);
+          throw error;
+        }
+        await stream.markTerminal?.();
+        return { kind: "committed" as const, bundle, committed };
+      });
+      if (terminal.kind === "cancelled") return cancelledRunResult(runResult);
+      const { bundle, committed } = terminal;
       if (firstPartySurfaceSession && firstPartyFinalitySession) {
         const final = (await journal.pendingFinalFrames()).find(
           (candidate) =>
@@ -2045,77 +2097,21 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           this.#retireConversation(conversationId);
           return 0;
         }
-        for (const candidate of await journal.assignmentsAwaitingRecovery()) {
-          this.#rememberAssignment(
-            candidate.dispatch.envelope,
-            candidate.dispatch.activation,
-          );
-        }
-        for (const candidate of await journal.pendingDispatches()) {
-          this.#rememberAssignment(candidate.envelope, candidate.activation);
-        }
-        const submission = this.#ledger
-          ? this.#createLocalSubmission(journal)
-          : undefined;
-        const routedExecutor = new RoutedRunExecutorPort(
-          (executorId) => this.#executorFor(executorId),
-          (assignmentId) => this.#executorForAssignment(assignmentId),
-        );
-        const dispatcher = new InProcessConversationDispatcher({
-          enabled: true,
-          journal,
-          executor: routedExecutor,
-          contexts: this.#contexts,
-          cancellationSubmission: {
-            submitCancellation: async (assignmentId) => {
-              if (this.#isLocalAssignment(assignmentId)) {
-                if (!submission) return false;
-                return submission.submitCancellation(
-                  assignmentId,
-                  this.#submissionContext(assignmentId),
-                );
-              }
-              const snapshot = await routedExecutor.queryLedger(
-                assignmentId,
-                this.#contexts.create(assignmentId, "executor.queryLedger", {
-                  requestId: `ledger:${assignmentId}:cancel-proof`,
-                  body: { range: null },
-                }),
-              );
-              if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
-              await journal.submitCancelProof(
-                assignmentId,
-                snapshot.cancelProof,
-                this.#submissionContext(assignmentId),
-              );
-              return true;
-            },
-          },
-          bundleSubmission: {
-            submitSealedBundle: (assignmentId) => {
-              if (!this.#isLocalAssignment(assignmentId)) {
-                return Promise.resolve(remoteBundleSubmissionDeferred());
-              }
-              if (!submission) {
-                throw new Error("Local assignment submission is unavailable");
-              }
-              return submission.submitSealedBundle(
-                assignmentId,
-                this.#submissionContext(assignmentId),
-              );
-            },
-          },
-        });
+        await this.#primeAssignmentRouting(journal);
+        const routedExecutor = this.#routedExecutor();
+        const dispatcher = this.#recoveryDispatcher(journal, routedExecutor);
         if (this.#recoveryStopped) return count;
         count += await journal.resumeCommittedProjections();
         if (this.#recoveryStopped) return count;
         count += await journal.resumePendingPublishing();
         if (this.#recoveryStopped) return count;
-        count += await dispatcher.dispatchPending().then((items) => items.length);
-        if (this.#recoveryStopped) return count;
-        count += await dispatcher.recoverAssignments();
-        if (this.#recoveryStopped) return count;
         count += await dispatcher.recoverCancellations();
+        if (this.#recoveryStopped) return count;
+        if (!this.#shutdownDraining) {
+          count += await dispatcher.dispatchPending().then((items) => items.length);
+          if (this.#recoveryStopped) return count;
+        }
+        count += await dispatcher.recoverAssignments();
         if (this.#recoveryStopped) return count;
         count += await dispatcher.recoverSupersedes();
         if (this.#recoveryStopped) return count;
@@ -2125,7 +2121,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           routedExecutor,
         );
         if (this.#recoveryStopped) return count;
-        count += await this.#resumeQueuedInputs(conversationId, journal);
+        if (!this.#shutdownDraining) {
+          count += await this.#resumeQueuedInputs(conversationId, journal);
+        }
         if (this.#recoveryStopped) return count;
         count += await this.publishPendingFinals(conversationId);
         await this.#retireSettledAssignments(conversationId, journal);
@@ -2182,6 +2180,50 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#markRecovery(conversationId);
       throw error;
     }
+  }
+
+  /**
+   * 停机收束核对:全部会话的未发布 final 总数与恢复积压会话数。
+   * 在恢复循环停止后读取;两者皆零才可宣称 durable 义务已收束。
+   */
+  async pendingClosureWork(): Promise<{
+    readonly pendingFinals: number;
+    readonly pendingAssignments: number;
+    readonly recoveryBacklog: number;
+    readonly activeLocalLeases: number;
+  }> {
+    let pendingFinals = 0;
+    let pendingAssignments = 0;
+    for (const conversationId of await this.listSessions()) {
+      const journal = this.#journal(conversationId);
+      pendingFinals += (await journal.pendingFinalFrames()).length;
+      pendingAssignments += (await journal.assignmentsAwaitingRecovery()).length;
+    }
+    let activeLocalLeases = 0;
+    const governor = this.#authority.executorResourceGovernor;
+    if (governor) {
+      const projection = await governor.snapshot();
+      for (const reservation of projection.reservations.values()) {
+        const scope = reservation.lease.scopeBinding;
+        if (
+          reservation.state === "active" &&
+          scope.kind === "conversation" &&
+          scope.ownerEpoch === this.#authority.ownerEpoch &&
+          this.#authority.acceptsConversationId(scope.conversationId)
+        ) {
+          activeLocalLeases += 1;
+        }
+      }
+    }
+    return {
+      pendingFinals,
+      pendingAssignments,
+      recoveryBacklog:
+        this.#recoveryConversations.size +
+        this.#activeRecoveryClaims.size +
+        (this.#recoveryRunning ? 1 : 0),
+      activeLocalLeases,
+    };
   }
 
   async statusHistory(
@@ -2438,6 +2480,94 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     });
   }
 
+  async #primeAssignmentRouting(journal: ConversationRunJournal): Promise<void> {
+    for (const candidate of await journal.assignmentsAwaitingRecovery()) {
+      this.#rememberAssignment(
+        candidate.dispatch.envelope,
+        candidate.dispatch.activation,
+      );
+    }
+    for (const candidate of await journal.pendingDispatches()) {
+      this.#rememberAssignment(candidate.envelope, candidate.activation);
+    }
+  }
+
+  #routedExecutor(): RoutedRunExecutorPort {
+    return new RoutedRunExecutorPort(
+      (executorId) => this.#executorFor(executorId),
+      (assignmentId) => this.#executorForAssignment(assignmentId),
+    );
+  }
+
+  #recoveryDispatcher(
+    journal: ConversationRunJournal,
+    routedExecutor = this.#routedExecutor(),
+  ): InProcessConversationDispatcher {
+    const submission = this.#ledger
+      ? this.#createLocalSubmission(journal)
+      : undefined;
+    return new InProcessConversationDispatcher({
+      enabled: true,
+      journal,
+      executor: routedExecutor,
+      contexts: this.#contexts,
+      cancellationSubmission: {
+        submitCancellation: async (assignmentId) => {
+          if (this.#isLocalAssignment(assignmentId)) {
+            if (!submission) return false;
+            return submission.submitCancellation(
+              assignmentId,
+              this.#submissionContext(assignmentId),
+            );
+          }
+          const snapshot = await routedExecutor.queryLedger(
+            assignmentId,
+            this.#contexts.create(assignmentId, "executor.queryLedger", {
+              requestId: `ledger:${assignmentId}:cancel-proof`,
+              body: { range: null },
+            }),
+          );
+          if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
+          await journal.submitCancelProof(
+            assignmentId,
+            snapshot.cancelProof,
+            this.#submissionContext(assignmentId),
+          );
+          return true;
+        },
+      },
+      bundleSubmission: {
+        submitSealedBundle: (assignmentId) => {
+          if (!this.#isLocalAssignment(assignmentId)) {
+            return Promise.resolve(remoteBundleSubmissionDeferred());
+          }
+          if (!submission) {
+            throw new Error("Local assignment submission is unavailable");
+          }
+          return submission.submitSealedBundle(
+            assignmentId,
+            this.#submissionContext(assignmentId),
+          );
+        },
+      },
+    });
+  }
+
+  async #driveCancellation(
+    journal: ConversationRunJournal,
+    request: Parameters<InProcessConversationDispatcher["cancelRun"]>[0],
+  ): Promise<void> {
+    await this.#primeAssignmentRouting(journal);
+    await this.#recoveryDispatcher(journal).cancelRun(request);
+  }
+
+  async #drivePendingCancellations(
+    journal: ConversationRunJournal,
+  ): Promise<number> {
+    await this.#primeAssignmentRouting(journal);
+    return this.#recoveryDispatcher(journal).recoverCancellations();
+  }
+
   #executorFor(executorId: string): RunExecutorPort {
     if (executorId === this.#authority.executorId) {
       return this.#requireLocalLedger();
@@ -2595,6 +2725,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     conversationId: string,
     pending: PendingConversationInput,
   ): Promise<void> {
+    if (this.#shutdownDraining) return;
     if (this.#scheduledRuns.has(pending.runId)) return;
     if (this.#schedulingRuns.has(pending.runId)) {
       throw new Error(`Conversation run ${pending.runId} is still entering the scheduler`);
@@ -3337,6 +3468,17 @@ function runFailureReason(result: RunResult["agentResult"]): string {
 
 function executionFailureReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function cancelledRunResult(result: RunResult): RunResult {
+  if (result.agentResult.reason === "aborted") return result;
+  return {
+    ...result,
+    agentResult: {
+      reason: "aborted",
+      usage: result.agentResult.usage,
+    },
+  };
 }
 
 function replayCommittedRun(

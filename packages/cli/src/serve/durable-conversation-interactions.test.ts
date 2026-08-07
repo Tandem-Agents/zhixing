@@ -267,4 +267,57 @@ describe("DurableConversationInteractionObserver", () => {
     });
     await expect(observer.pendingInteractions()).resolves.toEqual([]);
   });
+
+  it("accepts an authority cancellation that wins before the runtime broker settles", async () => {
+    const terminalConflict = new Error(
+      "Interaction requestId already has a different terminal result",
+    );
+    const finishAndMirror = vi.fn(async () => {
+      throw terminalConflict;
+    });
+    const flushInteractionMirrors = vi.fn(async () => 0);
+    const binding = {
+      assignmentId: "assignment-cancelled",
+      surfacePrincipal: "surface:origin",
+      ledger: {
+        requestInteraction: vi.fn(async () => ({
+          accepted: true,
+          recordSeq: 1,
+          display: { title: "Approve", lines: ["write file"] },
+        })),
+        conversationInteractionOutcome: vi.fn(async () => ({
+          t: "cancelled" as const,
+          via: "cancel-fence" as const,
+        })),
+        interactionStreamEvents: vi.fn(async () => []),
+      },
+      submission: { finishAndMirror, flushInteractionMirrors },
+      context: {},
+      stream: { append: vi.fn(async () => undefined) },
+      streamMeta: {},
+    } as unknown as DurableInteractionBinding;
+    const request = {
+      id: "request-cancelled",
+      tool: "Write",
+      display: { title: "Approve", body: { path: "report.md" } },
+      createdAt: Date.parse("2026-07-23T00:00:00.000Z"),
+      expiresAt: Date.parse("2026-07-23T00:01:00.000Z"),
+    } as never;
+    const observer = new DurableConversationInteractionObserver();
+    await observer.withBinding(binding, () => observer.beforeRequest(request));
+
+    await expect(
+      observer.afterResolved(
+        request,
+        { kind: "cancelled", cause: "aborted" },
+        { kind: "cancel", cause: "aborted" },
+      ),
+    ).resolves.toBeUndefined();
+    expect(finishAndMirror).toHaveBeenCalledOnce();
+    expect(flushInteractionMirrors).toHaveBeenCalledWith(
+      binding.assignmentId,
+      binding.context,
+    );
+    await expect(observer.pendingInteractions()).resolves.toEqual([]);
+  });
 });

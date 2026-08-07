@@ -170,9 +170,35 @@ export async function runExecutorRole(
       storageMaintenance: deviceCapacity.storage,
       onError: (error) => writer.notify(`[data-plane] ${error.message}`),
     });
+    const localOwnerRuntime = localConversationOwnerRuntime({
+      artifacts: authority.artifacts,
+      deviceId: authority.deviceId,
+      executorCapabilities: authority.executorCapabilities,
+      executorId: authority.executorId,
+      executorLog: authority.executorLog,
+      executorResourceGovernor: authority.executorResourceGovernor,
+      executionAssetCatalog: authority.executionAssetCatalog,
+      localControlAdmission: authority.localControlAdmission,
+      localDomainId: authority.localDomainId,
+      localGovernorEpoch: authority.localGovernorEpoch,
+      localOwnerEpoch: authority.localOwnerEpoch,
+      permissionSnapshotFor: authority.permissionSnapshotFor,
+      preflightLocalConversationEnvironment:
+        authority.preflightLocalConversationEnvironment,
+      prepareLocalConversationAssignment:
+        authority.prepareLocalConversationAssignment,
+      releaseLocalConversationEnvironmentPreflight:
+        authority.releaseLocalConversationEnvironmentPreflight,
+      signer: authority.signer,
+      validateConversationRuntimeBinding:
+        authority.validateConversationRuntimeBinding,
+      validateLocalConversationManifest:
+        authority.validateLocalConversationManifest,
+      verifier: authority.verifier,
+    });
     const ledger = createConversationExecutorLedger({
       Constructor: executor.ConversationAssignmentLedger,
-      authority: localConversationOwnerRuntime(authority),
+      authority: localOwnerRuntime,
       dataPlaneTickets: dataPlane.tickets,
       assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
       usageFinal: async (assignmentId) => {
@@ -200,7 +226,7 @@ export async function runExecutorRole(
     const runtimeFactory =
       executor.createInProcessAssignmentRuntimeFactory(role);
     localConversationOwner = await LocalConversationOwnerAssembly.create({
-      owner: localConversationOwnerRuntime(authority),
+      owner: localOwnerRuntime,
       ledger,
       ConversationAssignmentLedger: executor.ConversationAssignmentLedger,
       InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
@@ -269,7 +295,6 @@ export async function runExecutorRole(
   }
   const cleanupFailures: unknown[] = [];
   try {
-    localConversationOwner?.stopAccepting();
     await localConversationOwner?.close();
   } catch (error) {
     cleanupFailures.push(error);

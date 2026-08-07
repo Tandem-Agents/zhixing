@@ -2,12 +2,15 @@ import { randomBytes } from "node:crypto";
 import {
   buildStartupBootstrapPair,
   localConversationId,
+  userTurnInputFromText,
   type Conversation,
   type RunRecordRef,
 } from "@zhixing/core";
 import type {
   EvidenceHandlerPort,
+  ExplicitEnvironmentSelection,
   FinalFrame,
+  SessionStatePort,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
@@ -35,6 +38,10 @@ import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
+import {
+  projectSessionTurn,
+  type ProjectedSessionTurnResult,
+} from "@zhixing/rpc";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
@@ -43,31 +50,15 @@ import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-ru
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
 
-export interface LocalConversationConsumerPort {
-  pendingInteractions(): ReturnType<DurableConversationInteractionObserver["pendingInteractions"]>;
-  answerInteractionWithTicket(
-    input: Parameters<DurableConversationInteractionObserver["answerInteractionWithTicket"]>[0],
-  ): Promise<void>;
-  resolveNoInteractiveSurface(
-    input: Parameters<DurableConversationInteractionObserver["resolveNoInteractiveSurface"]>[0],
-  ): Promise<void>;
-  statusHistory(
-    requests: Parameters<ConversationProtocolRuntime["statusHistory"]>[0],
-  ): ReturnType<ConversationProtocolRuntime["statusHistory"]>;
-  finalHistory(
-    conversationId: string,
-    afterCommitRevision: number,
-  ): ReturnType<ConversationProtocolRuntime["finalHistory"]>;
-}
-
-export type LocalConversationProtocolPort = Pick<
-  ConversationProtocolRuntime,
-  | "sessionState"
-  | "ensureSession"
-  | "listSessions"
-  | "sessionExists"
-  | "statusHistory"
-  | "finalHistory"
+/** 本地域 port 的会话只读面:冻结读取子集;写入只能经 port 的命令 wrapper。 */
+export type LocalConversationSessionReadPort = Readonly<
+  Pick<
+    SessionStatePort,
+    | "readSessionMeta"
+    | "readTranscriptTail"
+    | "readTaskList"
+    | "readAdvancementState"
+  >
 >;
 
 export async function verifyLocalConversationFinal(
@@ -83,13 +74,39 @@ export async function verifyLocalConversationFinal(
   }
 }
 
+/**
+ * 本地域 owner 的 internal-only 消费面。只读视图冻结;mutation / answer /
+ * admission 逐项经命令 wrapper,副作用前共用同一生命周期栅栏;不暴露任何
+ * raw 可写对象(manager / protocol / advancement / consumer)。
+ */
 export interface LocalConversationOwnerPort {
   createConversation(): Promise<string>;
+  ensureSession(conversationId: string): Promise<void>;
   listConversations(): Promise<readonly string[]>;
-  readonly manager: ConversationManager;
-  readonly protocol: LocalConversationProtocolPort;
-  readonly advancement: AdvancementController;
-  readonly consumer: LocalConversationConsumerPort;
+  mutateSession: SessionStatePort["mutate"];
+  cancelTurns(input: {
+    readonly conversationId: string;
+    readonly requestId: string;
+  }): Promise<void>;
+  runTurn(input: {
+    readonly conversationId: string;
+    readonly text: string;
+    readonly turnId: string;
+    readonly environment?: ExplicitEnvironmentSelection;
+  }): Promise<ProjectedSessionTurnResult>;
+  answerInteractionWithTicket(
+    input: Parameters<DurableConversationInteractionObserver["answerInteractionWithTicket"]>[0],
+  ): Promise<void>;
+  resolveNoInteractiveSurface(
+    input: Parameters<DurableConversationInteractionObserver["resolveNoInteractiveSurface"]>[0],
+  ): Promise<void>;
+  readonly sessionState: LocalConversationSessionReadPort;
+  readonly statusHistory: ConversationProtocolRuntime["statusHistory"];
+  readonly finalHistory: ConversationProtocolRuntime["finalHistory"];
+  readonly pendingInteractions: DurableConversationInteractionObserver["pendingInteractions"];
+  readonly rubricCatalog: Readonly<
+    Pick<GlobalRubricCatalog, "listForMatching" | "load">
+  >;
 }
 
 export interface LocalConversationOwnerAssemblyOptions {
@@ -108,6 +125,8 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly credentials: ProviderCredentialProjection;
   readonly evidence: EvidenceHandlerPort;
   readonly dataPlane: Pick<ExecutorDataPlaneRuntime, "tickets" | "createStream">;
+  /** 关闭时 drain 的判定预算;默认 30s,只在无法证明收束时决定失败收场时机。 */
+  readonly closeDrainBudgetMs?: number;
 }
 
 /**
@@ -118,26 +137,166 @@ export class LocalConversationOwnerAssembly {
   readonly #owner: LocalConversationOwnerRuntimeStack;
   readonly #protocol: ConversationProtocolRuntime;
   readonly #manager: ConversationManager;
-  readonly #advancement: AdvancementController;
-  readonly #consumer: LocalConversationConsumerPort;
   readonly #recovery: AdvancementRecoveryMaintenance;
-  #accepting = false;
-  #closed = false;
+  readonly #port: LocalConversationOwnerPort;
+  readonly #closeDrainBudgetMs: number;
+  #state: "created" | "starting" | "ready" | "closing" | "closed" = "created";
+  #started = false;
+  #starting: Promise<void> | undefined;
+  #closing: Promise<void> | undefined;
+  #activeCommands = 0;
+  #commandDrain: Promise<void> | undefined;
+  #resolveCommandDrain: (() => void) | undefined;
 
   private constructor(input: {
     readonly options: LocalConversationOwnerAssemblyOptions;
     readonly protocol: ConversationProtocolRuntime;
     readonly manager: ConversationManager;
-    readonly advancement: AdvancementController;
-    readonly consumer: LocalConversationConsumerPort;
     readonly recovery: AdvancementRecoveryMaintenance;
+    readonly rubricCatalog: GlobalRubricCatalog;
   }) {
     this.#owner = input.options.owner;
     this.#protocol = input.protocol;
     this.#manager = input.manager;
-    this.#advancement = input.advancement;
-    this.#consumer = input.consumer;
     this.#recovery = input.recovery;
+    this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
+    const interactions = input.options.interactions;
+    const sessionState = this.#protocol.sessionState;
+    const rubricCatalog = input.rubricCatalog;
+    const sessionReadPort: LocalConversationSessionReadPort = Object.freeze({
+      readSessionMeta: (conversationId, context) =>
+        sessionState.readSessionMeta(conversationId, context),
+      readTranscriptTail: (conversationId, context, before, limit) =>
+        sessionState.readTranscriptTail(conversationId, context, before, limit),
+      readTaskList: (conversationId, context) =>
+        sessionState.readTaskList(conversationId, context),
+      readAdvancementState: (conversationId, context) =>
+        sessionState.readAdvancementState(conversationId, context),
+    });
+    const rubricReadPort = Object.freeze({
+      listForMatching: () => rubricCatalog.listForMatching(),
+      load: (id: string) => rubricCatalog.load(id),
+    });
+    this.#port = Object.freeze<LocalConversationOwnerPort>({
+      createConversation: async () => {
+        return this.#runCommand(async () => {
+          const conversationId = localConversationId(
+            this.#owner.deviceId,
+            createUlid(),
+          );
+          await this.#protocol.ensureSession(conversationId);
+          return conversationId;
+        });
+      },
+      ensureSession: async (conversationId) => {
+        await this.#runCommand(() => this.#protocol.ensureSession(conversationId));
+      },
+      listConversations: () => this.#protocol.listSessions(),
+      mutateSession: async (conversationId, mutation, context) => {
+        return this.#runCommand(() =>
+          sessionState.mutate(conversationId, mutation, context)
+        );
+      },
+      cancelTurns: async (input) => {
+        await this.#runCommand(() =>
+          this.#manager.cancelDurableRuns({
+            conversationId: input.conversationId,
+            requestId: input.requestId,
+            principal: {
+              surfacePrincipal: "surface:local:internal",
+              deviceId: this.#owner.deviceId,
+              connectionId: "local-owner-internal",
+            },
+          })
+        );
+      },
+      runTurn: async (input) => {
+        const releaseCommand = this.#beginCommand();
+        let settle!: (result: ProjectedSessionTurnResult) => void;
+        const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
+          settle = resolve;
+        });
+        try {
+          const admission = await this.#manager.admitTurn({
+          conversationId: input.conversationId,
+          source: "interactive",
+          beforeEnqueue: (managed) =>
+            this.#manager.admitDurableTurn({
+              conversationId: managed.conversationId,
+              input: userTurnInputFromText(input.text),
+              invocation: { kind: "agent", source: "interactive" },
+              ...(input.environment
+                ? { environment: structuredClone(input.environment) }
+                : {}),
+              options: {
+                turnContext: { turnId: input.turnId },
+                source: "interactive",
+                surfacePrincipal: "surface:local:internal",
+              },
+              surfacePrincipal: "surface:local:internal",
+            }),
+          makeTask: (managed) => ({
+            source: "interactive" as const,
+            execute: async () => {
+              try {
+                settle(
+                  await projectSessionTurn({
+                    manager: this.#manager,
+                    managed,
+                    text: input.text,
+                    turnId: input.turnId,
+                    runOptions: {
+                      source: "interactive",
+                      turnContext: { turnId: input.turnId },
+                      surfacePrincipal: "surface:local:internal",
+                    },
+                    ...(input.environment
+                      ? { environment: input.environment }
+                      : {}),
+                    notify: () => {},
+                  }),
+                );
+              } catch (error) {
+                settle({ kind: "error", error });
+              } finally {
+                this.#manager.setBusy(input.conversationId, false);
+              }
+            },
+            cancel: () => settle({ kind: "aborted" }),
+          }),
+        });
+          if (admission.status === "immediate") {
+            void admission.task.execute();
+          } else if (admission.status !== "queued") {
+            settle({
+              kind: "error",
+              error: new Error(
+                `Local conversation turn admission failed: ${admission.status}`,
+              ),
+            });
+          }
+        } finally {
+          releaseCommand();
+        }
+        return outcome;
+      },
+      answerInteractionWithTicket: async (input) => {
+        await this.#runCommand(() =>
+          interactions.answerInteractionWithTicket(input)
+        );
+      },
+      resolveNoInteractiveSurface: async (input) => {
+        await this.#runCommand(() =>
+          interactions.resolveNoInteractiveSurface(input)
+        );
+      },
+      sessionState: sessionReadPort,
+      statusHistory: (requests) => this.#protocol.statusHistory(requests),
+      finalHistory: (conversationId, afterCommitRevision) =>
+        this.#protocol.finalHistory(conversationId, afterCommitRevision),
+      pendingInteractions: () => interactions.pendingInteractions(),
+      rubricCatalog: rubricReadPort,
+    });
   }
 
   static async create(
@@ -222,18 +381,19 @@ export class LocalConversationOwnerAssembly {
       durableTurnExecutor: protocol,
     });
 
+    const rubricCatalog = new GlobalRubricCatalog({
+      globalState: () => undefined,
+      artifacts: () => undefined,
+      anchorEpoch: () => undefined,
+      executionAssets: () => owner.executionAssetCatalog,
+    });
     advancement = await createServeAdvancementController({
       config: options.config,
       credentials: options.credentials,
       governor: () => owner.resources,
       sessionState: () => protocol.sessionState,
       rubricScope: "local",
-      rubricCatalog: new GlobalRubricCatalog({
-        globalState: () => undefined,
-        artifacts: () => undefined,
-        anchorEpoch: () => undefined,
-        executionAssets: () => owner.executionAssetCatalog,
-      }),
+      rubricCatalog,
       recentContextProvider: async (conversationId) =>
         renderRecentContextFromMessages(manager.getHistory(conversationId, 6)),
       evidenceRuntime: () => ({
@@ -305,66 +465,175 @@ export class LocalConversationOwnerAssembly {
         recovery.recoverConversation(conversationId, options),
     });
 
-    const consumer: LocalConversationConsumerPort = {
-      pendingInteractions: () => options.interactions.pendingInteractions(),
-      answerInteractionWithTicket: (input) =>
-        options.interactions.answerInteractionWithTicket(input),
-      resolveNoInteractiveSurface: (input) =>
-        options.interactions.resolveNoInteractiveSurface(input),
-      statusHistory: (requests) => protocol.statusHistory(requests),
-      finalHistory: (conversationId, afterCommitRevision) =>
-        protocol.finalHistory(conversationId, afterCommitRevision),
-    };
-
     return new LocalConversationOwnerAssembly({
       options,
       protocol,
       manager,
-      advancement,
       recovery,
-      consumer,
+      rubricCatalog,
     });
   }
 
   async start(): Promise<void> {
-    if (this.#closed) throw new Error("Local conversation owner is closed");
-    if (this.#accepting) return;
-    await this.#protocol.recoverReadinessProjections();
-    await this.#protocol.recover();
-    await this.#recovery.recoverAllOpenSessions();
-    this.#protocol.startRecoveryLoop();
-    this.#accepting = true;
+    if (this.#state === "ready") return;
+    if (this.#state === "closing" || this.#state === "closed") {
+      throw new Error("Local conversation owner is closed");
+    }
+    if (this.#starting) return this.#starting;
+    this.#state = "starting";
+    this.#started = true;
+    const starting = (async () => {
+      try {
+        await this.#protocol.recoverReadinessProjections();
+        await this.#protocol.recover();
+        await this.#recovery.recoverAllOpenSessions();
+        this.#protocol.startRecoveryLoop();
+        if (this.#state !== "starting") {
+          // close 已介入:停掉刚起的恢复循环,由 close 统一收束。
+          await this.#protocol.stopRecoveryLoop();
+          throw new Error("Local conversation owner is closing");
+        }
+        this.#state = "ready";
+      } catch (error) {
+        if (this.#state === "starting") this.#state = "created";
+        throw error;
+      }
+    })();
+    this.#starting = starting;
+    starting.catch(() => {
+      // 失败允许重试:仅当状态已复位且句柄未被替换时清理。
+      if (this.#state === "created" && this.#starting === starting) {
+        this.#starting = undefined;
+      }
+    });
+    return starting;
   }
 
-  stopAccepting(): void {
-    this.#accepting = false;
+  /**
+   * 关闭只有一个结果:原子进入 closing → 可判定 drain → 驱动 protocol /
+   * advancement 到稳定检查点 → 停恢复循环 → 核对零 active/queued、零恢复
+   * 积压、final 与本地租约终态 → dispose。期限内证明不了收束时仍以同一
+   * promise 失败收场:停掉已拥有后台、保留耐久 pending 供下次 start 重驱,
+   * 绝不伪造成功。重复与并发调用取得同一结果。
+   */
+  close(): Promise<void> {
+    if (!this.#closing) this.#closing = this.#settle();
+    return this.#closing;
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#accepting = false;
-    await this.#protocol.stopRecoveryLoop();
-    await this.#manager.disposeAll();
+  async #settle(): Promise<void> {
+    if (this.#state === "closed") return;
+    const neverStarted = !this.#started;
+    this.#state = "closing";
+    this.#protocol.beginShutdownDrain();
+    const starting = this.#starting;
+    if (starting) await starting.catch(() => {});
+    await this.#waitForCommandDrain();
+    if (neverStarted) {
+      await this.#protocol.stopRecoveryLoop().catch(() => {});
+      await this.#manager.disposeAll().catch(() => {});
+      this.#state = "closed";
+      return;
+    }
+    const deadline = Date.now() + this.#closeDrainBudgetMs;
+    let failure: unknown;
+    let lastReadings = "";
+    const probe = async (): Promise<boolean> => {
+      const closure = await this.#protocol.pendingClosureWork();
+      const activeWork = this.#manager.hasActiveWork();
+      lastReadings =
+        `activeWork=${activeWork} pendingFinals=${closure.pendingFinals}` +
+        ` pendingAssignments=${closure.pendingAssignments}` +
+        ` recoveryBacklog=${closure.recoveryBacklog}` +
+        ` activeLocalLeases=${closure.activeLocalLeases}`;
+      return (
+        !activeWork &&
+        closure.pendingFinals === 0 &&
+        closure.pendingAssignments === 0 &&
+        closure.recoveryBacklog === 0 &&
+        closure.activeLocalLeases === 0
+      );
+    };
+    try {
+      // 一次性 drain:active/queued 只取消一轮,避免与恢复重放互相重标。
+      await this.#manager.abortAllAndWait(
+        { kind: "external", origin: "local-owner-close" },
+        Math.max(1, deadline - Date.now()),
+      );
+      // 恢复 owner 保持存活:把 drain 产生的取消/提交义务驱动到检查点再读取;
+      // 恢复对同一 pending 输入至多重放一次,后续轮次自然静默。
+      while (true) {
+        await this.#protocol.recover();
+        await this.#recovery.recoverAllOpenSessions();
+        if (await probe()) break;
+        if (Date.now() >= deadline) {
+          failure = new Error(
+            `Local conversation owner close is not provably settled: ${lastReadings}`,
+          );
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } catch (error) {
+      failure = error;
+    }
+    await this.#protocol.stopRecoveryLoop().catch(() => {});
+    if (failure === undefined) {
+      // 循环停止后无任何新标记来源,复读一次确认静止。
+      const quiet = await probe().catch(() => false);
+      if (!quiet) {
+        failure = new Error(
+          `Local conversation owner close is not provably settled: ${lastReadings}`,
+        );
+      }
+    }
+    await this.#manager.disposeAll().catch(() => {});
+    if (failure !== undefined) throw failure;
+    this.#state = "closed";
   }
 
   port(): LocalConversationOwnerPort {
-    return {
-      createConversation: async () => {
-        if (!this.#accepting) throw new Error("Local conversation owner is not accepting work");
-        const conversationId = localConversationId(
-          this.#owner.deviceId,
-          createUlid(),
-        );
-        await this.#protocol.ensureSession(conversationId);
-        return conversationId;
-      },
-      listConversations: () => this.#protocol.listSessions(),
-      manager: this.#manager,
-      protocol: this.#protocol,
-      advancement: this.#advancement,
-      consumer: this.#consumer,
+    return this.#port;
+  }
+
+  #requireReady(): void {
+    if (this.#state !== "ready") {
+      throw new Error("Local conversation owner is not ready");
+    }
+  }
+
+  #beginCommand(): () => void {
+    this.#requireReady();
+    if (this.#activeCommands === 0) {
+      this.#commandDrain = new Promise<void>((resolve) => {
+        this.#resolveCommandDrain = resolve;
+      });
+    }
+    this.#activeCommands += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#activeCommands -= 1;
+      if (this.#activeCommands === 0) {
+        this.#resolveCommandDrain?.();
+        this.#resolveCommandDrain = undefined;
+        this.#commandDrain = undefined;
+      }
     };
+  }
+
+  async #runCommand<T>(operation: () => Promise<T>): Promise<T> {
+    const release = this.#beginCommand();
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async #waitForCommandDrain(): Promise<void> {
+    await this.#commandDrain;
   }
 }
 
