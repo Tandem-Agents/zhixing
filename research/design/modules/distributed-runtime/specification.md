@@ -828,6 +828,8 @@ interface DeferredGlobalIntentPort {             // 离线全局意向的唯一�
 
 intent 流按 conversation 落**该对话 owner** 的 `intent:<conversationId>` 逻辑流（§4.1，本地域与锚点域流枚举均含）——随 AuthorityTransfer freeze / checkpoint 一并导出导入，收编零遗漏、归属零歧义。类型层只接 schedule 与 Rubric 两族（`DeferredGlobalIntent.mutation` 已封）。双拓扑测试随 S8。
 
+当前生产装配中，每个本地域 owner 只构造一个基于 executor AuthorityCommitLog 的 repository，schedule producer、rubric publication 与内部 list/discard 共用它；启动先恢复其 DurableProjectionIndex，全部写经既有 lifecycle gate。锚点只构造一个 anchor-mode repository 与 internal-only review service，`record` 在锚点恒拒绝；review 先经 locator 与 current-owner guard 定位 imported intent，再在同一 AuthorityCommitLog 事务提交全局 reducer 结果、control applied 与 intent confirmed。CLI、RPC 与渠道均不注册意向入口。
+
 ### 3.3 EnvironmentPort（executor 本地）
 
 ```ts
@@ -2353,7 +2355,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 
 本地域 owner 只向同设备内部组合暴露 `LocalConversationConsumerPort`：pending interaction 由 executor ledger 列读并仅凭既有 surface ticket 终结，status/final 只按游标补读同一 conversation journal。`onFinal` 必须先与权威 final history 全等验真，再由既有 final-outbox 写唯一 `published` 回执；回调失败或响应丢失保持 pending 供恢复重驱。该端口不得注册为 RPC、CLI 或 channel surface，也不得建立第二份 interaction/finality 耐久事实。
 
-`LocalConversationOwnerPort.protocol` 只暴露 session identity/state、status/final 补读的冻结窄面；global mutation binder、delivery drain 和完整 protocol runtime 不得逸出 local 组合根。现有 S7 结构门禁必须直接核对 local runtime、assembly、anchor+executor 与 executor-only 两个生产构造点：禁用的 GlobalState/DeferredIntent/global publisher/delivery/可写 Store 不得被 import、构造、注入或经 port 暴露，两个构造点只能接收 `localConversationOwnerRuntime`，合法 SessionState、ArtifactStore 与只读 execution asset cache 不得误杀。
+`LocalConversationOwnerPort` 只暴露 session 只读面、既有会话命令及窄化的 schedule-intent、intent list/discard 命令；raw `DeferredGlobalIntentPort`、global mutation binder、delivery drain 和完整 protocol runtime 不得逸出 local 组合根。现有 S7 结构门禁必须直接核对 local runtime、assembly、anchor+executor 与 executor-only 两个生产构造点：禁用的 GlobalState/global publisher/delivery/可写 Store 不得被 import、构造、注入或经 port 暴露；只放行 local assembly 内唯一 intent repository 及共用它的 schedule/rubric producer，两个构造点只能接收 `localConversationOwnerRuntime`，合法 SessionState、ArtifactStore 与只读 execution asset cache 不得误杀。
 | 内容资产 | owner 治理 ArtifactStore | 本地 owner 治理，随收编转移 |
 | 资源治理 | anchor + executor 双半边 | executor 半边 + 本地 governor 签发本地域 lease（不扣全局预算） |
 | 锚点域既有对话 | 读写 | 不可写；只读副本可选（无副本明示"需连接值班设备"） |
@@ -2542,7 +2544,7 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 | 28（S7） | 编排、memory、技能与生命周期接入 | 编排节点使用父 run 子租约；memory/skill/workscene/task-list/segment 的所有写按落点矩阵进入 staged/control；workscene staged 只返回 overlay receipt，最终 applied 结果随 publish-decision 耐久回传；写类 lifecycle 只在权威提交后触发 | 各模块既有测试 + 双拓扑 adapter 套件通过；workscene staged 零伪 applied、响应丢失不重生 sceneId/revision；failed/cancelled/uncertain 零外泄；executor 零全局 Store 写实例 |
 | 29（S7） | 入口覆盖 lint 与模块文档同步 | 建机器可读“registry/命令→落点行或排除项”单源，补齐 §十三列出的模块文档与公开契约，清除旧入口和兼容适配 | 每个 RPC、命令、渠道、生命周期钩子和执行侧写工具恰命中一次；无映射/双映射失败；依赖 lint、全量测试/build 通过 |
 | 30（S8） | 本地域 owner 同构装配 | executor 内以显式本地域 owner 合同装配 owner-kernel + owner-services + 本地 governor，复用 executor 的设备日志、ArtifactStore、数据面与容量原语；本地域不装配 GlobalStatePort、全局发布或外部投递，对话 id/ownerEpoch/逻辑流与锚点域隔离；仅开放内部组合与 conformance 端口 | 本地域 conversation 的 run/取消/确认/advancement 双拓扑测试通过；全局写与 delivery 实例扫描为零；锚点域既有会话离线时不可写；启用 executor 的拓扑恰一实例，停机收束后零后台任务；公开离线入口仍关闭 |
-| 31（S8） | DeferredGlobalIntent 与离线能力矩阵 | 落 intent 流/端口，只允许 schedule 与 rubric 沉淀；收编前可查可撤，timeSensitive 收编后必须再确认 | 非法 mutation 类型不可构造；锚点域 record 拒绝；重放、撤销、重校验冲突与用户文案测试通过 |
+| 31（S8） | DeferredGlobalIntent 与离线能力矩阵 | 落 intent 流/端口，只允许完整 schedule 写与 rubric save-own/update-own；本地域唯一 repository 供两 producer 共用，收编前可查可撤；锚点 internal review 复用现有全局 reducer 与 control admission，timeSensitive 收编后必须由 authenticated surface 再确认 | 严格联合与错流前置拒绝；锚点域 record、assignment 与公开入口拒绝；exact replay、响应丢失、撤销、投影重建、资产/CAS 冲突、全局效果与 confirmed 原子性、双生产根及产品文案测试通过 |
 | 32（S8） | conversation 收编与离线能力启用 | 落 conversation AuthorityTransfer 双端 transfer 流、freeze/checkpoint/import/commit/tombstone；收编携完整会话域与 intent，最后开放离线新建/收编旅程；按 §5.7 把 EvidenceRequest current-owner verifier 作为 local / mesh 生产组合根必注入依赖，并前置于 journal exact replay（该增量工作量中） | 6.3 conversation 各边、任意步崩溃重入、旧 owner fencing、资产/意向零遗漏、收编复核和双拓扑产品旅程通过；旧 owner 的 fresh 与 exact-replay 取证请求均在 journal / workspace 读取前拒绝，当前 owner 原 bundle 可幂等重放；S8 到此启用 |
 | 33（S9） | 全量一致性检查点与周期备份 | 在 S2 的 root-activation 检查点合同上扩展完整权威 scope、分块资产、readiness 投影、周期/迁居前强制检查点及保留策略，不新造第二种信封 | 分块篡改、错 key/nonce/target/digest、复制/回读中断、链头变化与当前根 readiness 测试通过；秘密与环境事实不入备份 |
 | 34（S9） | planned anchor 迁居 | 落 SourceFreezeProof、authority catalog、TrustTransition、ready proof、planned AnchorTransferCommit 与旧端 tombstone | 6.3 planned 全边、准入关闭/在途收束、导入校验、提交前后崩溃、旧签发者/旧 epoch 拒绝和迁居回滚边界通过 |

@@ -1,29 +1,43 @@
 import { randomBytes } from "node:crypto";
+import { Buffer } from "node:buffer";
 import {
   buildStartupBootstrapPair,
   localConversationId,
+  parseRubricDocument,
+  projectRubricContractDraft,
+  rubricDocumentId,
+  stringifyRubricDraft,
   userTurnInputFromText,
   type Conversation,
+  type RubricContractDraftSnapshot,
+  type RubricDraftPersistenceChoice,
   type RunRecordRef,
 } from "@zhixing/core";
 import type {
+  DeferredGlobalIntent,
   EvidenceHandlerPort,
   ExplicitEnvironmentSelection,
   FinalFrame,
+  ScheduleWriteMutation,
   SessionStatePort,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
+import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   ConversationManager,
+  DeferredGlobalIntentRepository,
   type RuntimeFactory,
   type TurnCommittedInfo,
 } from "@zhixing/owner-kernel";
 import {
   createAdvancementRecoveryMaintenance,
+  DeferredRubricPublication,
+  DeferredScheduleIntentProducer,
   renderRecentContextFromMessages,
   type AdvancementController,
   type AdvancementRecoveryMaintenance,
+  type DeferredScheduleIntentResult,
 } from "@zhixing/owner-services";
 import {
   createAdvancementEventSink,
@@ -100,6 +114,13 @@ export interface LocalConversationOwnerPort {
   resolveNoInteractiveSurface(
     input: Parameters<DurableConversationInteractionObserver["resolveNoInteractiveSurface"]>[0],
   ): Promise<void>;
+  deferSchedule(input: {
+    readonly conversationId: string;
+    readonly requestId: string;
+    readonly mutation: ScheduleWriteMutation;
+  }): Promise<DeferredScheduleIntentResult>;
+  listDeferredIntents(conversationId: string): Promise<readonly DeferredGlobalIntent[]>;
+  discardDeferredIntent(intentId: string): Promise<void>;
   readonly sessionState: LocalConversationSessionReadPort;
   readonly statusHistory: ConversationProtocolRuntime["statusHistory"];
   readonly finalHistory: ConversationProtocolRuntime["finalHistory"];
@@ -138,6 +159,7 @@ export class LocalConversationOwnerAssembly {
   readonly #protocol: ConversationProtocolRuntime;
   readonly #manager: ConversationManager;
   readonly #recovery: AdvancementRecoveryMaintenance;
+  readonly #intents: DeferredGlobalIntentRepository;
   readonly #port: LocalConversationOwnerPort;
   readonly #closeDrainBudgetMs: number;
   #state: "created" | "starting" | "ready" | "closing" | "closed" = "created";
@@ -153,12 +175,15 @@ export class LocalConversationOwnerAssembly {
     readonly protocol: ConversationProtocolRuntime;
     readonly manager: ConversationManager;
     readonly recovery: AdvancementRecoveryMaintenance;
+    readonly intents: DeferredGlobalIntentRepository;
+    readonly scheduleIntents: DeferredScheduleIntentProducer;
     readonly rubricCatalog: GlobalRubricCatalog;
   }) {
     this.#owner = input.options.owner;
     this.#protocol = input.protocol;
     this.#manager = input.manager;
     this.#recovery = input.recovery;
+    this.#intents = input.intents;
     this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
     const interactions = input.options.interactions;
     const sessionState = this.#protocol.sessionState;
@@ -290,6 +315,23 @@ export class LocalConversationOwnerAssembly {
           interactions.resolveNoInteractiveSurface(input)
         );
       },
+      deferSchedule: (schedule) =>
+        this.#runCommand(() => input.scheduleIntents.record(schedule)),
+      listDeferredIntents: (conversationId) =>
+        this.#runCommand(() =>
+          this.#intents.list(
+            conversationId,
+            hostContext("local-intent-list"),
+          )
+        ),
+      discardDeferredIntent: (intentId) =>
+        this.#runCommand(() =>
+          this.#intents.decide(
+            intentId,
+            "discarded",
+            hostContext("local-intent-discard"),
+          )
+        ),
       sessionState: sessionReadPort,
       statusHistory: (requests) => this.#protocol.statusHistory(requests),
       finalHistory: (conversationId, afterCommitRevision) =>
@@ -387,6 +429,24 @@ export class LocalConversationOwnerAssembly {
       anchorEpoch: () => undefined,
       executionAssets: () => owner.executionAssetCatalog,
     });
+    const intents = new DeferredGlobalIntentRepository({
+      log: owner.executorLog,
+      localDomainId: owner.domain.localDomainId,
+      mode: "local",
+      acceptsConversationId: (conversationId) => owner.acceptsConversationId(conversationId),
+      conversationExists: (conversationId) => protocol.sessionExists(conversationId),
+      isCurrentOwner: (conversationId) => protocol.sessionExists(conversationId),
+    });
+    const scheduleIntents = new DeferredScheduleIntentProducer({ intents });
+    const rubricPublication = new DeferredRubricPublication({
+      intents,
+      prepareMutation: (input) =>
+        prepareDeferredRubricMutation({
+          ...input,
+          catalog: rubricCatalog,
+          artifacts: owner.artifacts,
+        }),
+    });
     advancement = await createServeAdvancementController({
       config: options.config,
       credentials: options.credentials,
@@ -394,6 +454,7 @@ export class LocalConversationOwnerAssembly {
       sessionState: () => protocol.sessionState,
       rubricScope: "local",
       rubricCatalog,
+      rubricPublication,
       recentContextProvider: async (conversationId) =>
         renderRecentContextFromMessages(manager.getHistory(conversationId, 6)),
       evidenceRuntime: () => ({
@@ -470,6 +531,8 @@ export class LocalConversationOwnerAssembly {
       protocol,
       manager,
       recovery,
+      intents,
+      scheduleIntents,
       rubricCatalog,
     });
   }
@@ -484,6 +547,7 @@ export class LocalConversationOwnerAssembly {
     this.#started = true;
     const starting = (async () => {
       try {
+        await this.#intents.recover();
         await this.#protocol.recoverReadinessProjections();
         await this.#protocol.recover();
         await this.#recovery.recoverAllOpenSessions();
@@ -679,4 +743,45 @@ function createUlid(now = Date.now()): string {
     value >>= 5n;
   }
   return encoded;
+}
+
+async function prepareDeferredRubricMutation(input: {
+  readonly draft: RubricContractDraftSnapshot;
+  readonly persistence: RubricDraftPersistenceChoice;
+  readonly catalog: GlobalRubricCatalog;
+  readonly artifacts: ArtifactStore;
+}): Promise<DeferredGlobalIntent["mutation"]> {
+  let expectedRevision: number | undefined;
+  if (input.persistence.kind === "update-existing") {
+    const existing = await input.catalog.load(input.persistence.rubricId);
+    const match = /^revision:(\d+)$/.exec(existing.updatedAt);
+    if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) < 1) {
+      throw new TypeError("Deferred rubric update target has no valid cached revision");
+    }
+    expectedRevision = Number(match[1]);
+  }
+  const targetId = input.persistence.kind === "update-existing"
+    ? input.persistence.rubricId
+    : undefined;
+  const projected = projectRubricContractDraft(input.draft, targetId);
+  const raw = stringifyRubricDraft(projected);
+  const document = parseRubricDocument(raw);
+  const rubricId = rubricDocumentId(document);
+  if (targetId !== undefined && rubricId !== targetId) {
+    throw new TypeError("Deferred rubric update changed the target identity");
+  }
+  const content = await input.artifacts.put(Buffer.from(raw, "utf8"));
+  const rubric = {
+    title: document.title,
+    description: document.description,
+    content,
+  };
+  return input.persistence.kind === "update-existing"
+    ? {
+        kind: "rubric-update-own",
+        rubricId: input.persistence.rubricId,
+        rubric,
+        expectedRevision: expectedRevision!,
+      }
+    : { kind: "rubric-save-own", rubric };
 }

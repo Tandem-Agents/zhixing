@@ -778,7 +778,7 @@ describe("ConversationController", () => {
       status: "confirmed",
       advancementSessionId: "adv-1",
       runStatus: "immediate",
-      rubricPublicationMessage: "准则已用于本任务，连接值班设备后保存。",
+      rubricPublicationMessage: "已用于本任务，连接值班设备后保存",
     });
 
     const acceptedTurn = await controller.confirmRubricContract(pending, {
@@ -802,7 +802,7 @@ describe("ConversationController", () => {
     });
     expect(settled).toBe(false);
     expect(acceptedTurn.rubricPublicationMessage).toBe(
-      "准则已用于本任务，连接值班设备后保存。",
+      "已用于本任务，连接值班设备后保存",
     );
 
     f.emit.complete({

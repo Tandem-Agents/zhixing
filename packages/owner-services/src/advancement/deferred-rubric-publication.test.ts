@@ -48,7 +48,7 @@ describe("DeferredRubricPublication", () => {
 
     expect(publication.acceptanceOutcome()).toEqual({
       kind: "deferred",
-      message: "准则已用于本任务，连接值班设备后保存。",
+      message: "已用于本任务，连接值班设备后保存",
     });
     await expect(publication.publish({
       conversationId: "conv-1",
@@ -84,5 +84,44 @@ describe("DeferredRubricPublication", () => {
       persistence: { kind: "save-new" },
     })).rejects.toThrow("local content asset is unavailable");
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it("把 update 目标写入稳定操作身份，避免同草案的不同目标被误判重放", async () => {
+    const record = vi.fn<DeferredGlobalIntentPort["record"]>(async () => ({
+      intentId: "intent-1",
+    }));
+    const mutation = {
+      kind: "rubric-update-own" as const,
+      rubricId: "rubric-1",
+      expectedRevision: 2,
+      rubric: {
+        title: "交付验收",
+        description: "判断任务是否完成。",
+        content: { digest: `sha256:${"b".repeat(64)}`, bytes: 128 },
+      },
+    };
+    const publication = new DeferredRubricPublication({
+      intents: { record, list: async () => [], decide: async () => {} },
+      prepareMutation: async () => mutation,
+      now: () => NOW,
+    });
+
+    await publication.publish({
+      conversationId: "conv-1",
+      draft: draft(),
+      persistence: {
+        kind: "update-existing",
+        rubricId: "rubric-1",
+      },
+    });
+
+    expect(record).toHaveBeenCalledWith(
+      "conv-1",
+      mutation,
+      false,
+      expect.objectContaining({
+        requestId: "rubric-intent:conv-1:draft-1:update-existing:rubric-1",
+      }),
+    );
   });
 });

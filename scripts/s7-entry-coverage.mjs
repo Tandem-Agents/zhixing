@@ -842,9 +842,12 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "answerInteractionWithTicket",
       "cancelTurns",
       "createConversation",
+      "deferSchedule",
+      "discardDeferredIntent",
       "ensureSession",
       "finalHistory",
       "listConversations",
+      "listDeferredIntents",
       "mutateSession",
       "pendingInteractions",
       "resolveNoInteractiveSurface",
@@ -921,7 +924,6 @@ export function inspectLocalConversationOwnerIsolation(records) {
   const forbiddenAssemblySymbols = new Set([
     "AuthorityRuntimeStack",
     "GlobalStatePort",
-    "DeferredGlobalIntent",
     "DeferredGlobalIntentPort",
     "GlobalMutationCommitCoordinator",
     "GlobalMutationCommitParticipant",
@@ -944,6 +946,160 @@ export function inspectLocalConversationOwnerIsolation(records) {
     ts.forEachChild(node, visitAssembly);
   };
   visitAssembly(assemblySource);
+
+  let localIntentRepository;
+  let localIntentRepositoryCount = 0;
+  const intentConsumers = new Map([
+    ["DeferredScheduleIntentProducer", 0],
+    ["DeferredRubricPublication", 0],
+  ]);
+  const visitIntentAssembly = (node) => {
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "DeferredGlobalIntentRepository"
+    ) {
+      localIntentRepositoryCount += 1;
+      if (
+        ts.isVariableDeclaration(node.parent) &&
+        ts.isIdentifier(node.parent.name) &&
+        node.parent.initializer === node
+      ) {
+        localIntentRepository = node.parent.name.text;
+      }
+      const options = node.arguments?.[0];
+      const mode = options && ts.isObjectLiteralExpression(options)
+        ? options.properties.find((property) =>
+            ts.isPropertyAssignment(property) && propertyNameText(property.name) === "mode"
+          )
+        : undefined;
+      if (
+        !mode || !ts.isPropertyAssignment(mode) ||
+        !ts.isStringLiteralLike(mode.initializer) || mode.initializer.text !== "local"
+      ) {
+        failures.push(`${assemblyRecord.relative}: local intent repository must use local mode`);
+      }
+    }
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      intentConsumers.has(node.expression.text)
+    ) {
+      const options = node.arguments?.[0];
+      const intentProperty = options && ts.isObjectLiteralExpression(options)
+        ? options.properties.find((property) =>
+            property.name && propertyNameText(property.name) === "intents"
+          )
+        : undefined;
+      const initializer = intentProperty && ts.isShorthandPropertyAssignment(intentProperty)
+        ? intentProperty.name
+        : intentProperty && ts.isPropertyAssignment(intentProperty)
+          ? intentProperty.initializer
+          : undefined;
+      if (
+        !initializer || !ts.isIdentifier(initializer) ||
+        initializer.text !== localIntentRepository
+      ) {
+        failures.push(`${assemblyRecord.relative}: ${node.expression.text} must share the single local intent repository`);
+      }
+      intentConsumers.set(node.expression.text, intentConsumers.get(node.expression.text) + 1);
+    }
+    ts.forEachChild(node, visitIntentAssembly);
+  };
+  visitIntentAssembly(assemblySource);
+  if (localIntentRepositoryCount !== 1 || !localIntentRepository) {
+    failures.push(`${assemblyRecord.relative}: expected exactly one bound local intent repository`);
+  }
+  for (const [consumer, count] of intentConsumers) {
+    if (count !== 1) {
+      failures.push(`${assemblyRecord.relative}: expected exactly one ${consumer}, got ${count}`);
+    }
+  }
+
+  const anchorIntentRecord = records.find(
+    ({ relative }) => relative === "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+  );
+  if (!anchorIntentRecord) {
+    failures.push("packages/cli/src/serve/anchor-scheduler-runtime.ts: anchor intent review source is missing");
+  } else {
+    const source = sourceFile(anchorIntentRecord.relative, anchorIntentRecord.text);
+    let repositoryCount = 0;
+    let reviewCount = 0;
+    const visitAnchorIntent = (node) => {
+      if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
+        if (node.expression.text === "DeferredGlobalIntentRepository") {
+          repositoryCount += 1;
+          const options = node.arguments?.[0];
+          const mode = options && ts.isObjectLiteralExpression(options)
+            ? options.properties.find((property) =>
+                ts.isPropertyAssignment(property) && propertyNameText(property.name) === "mode"
+              )
+            : undefined;
+          if (
+            !mode || !ts.isPropertyAssignment(mode) ||
+            !ts.isStringLiteralLike(mode.initializer) || mode.initializer.text !== "anchor"
+          ) {
+            failures.push(`${anchorIntentRecord.relative}: anchor intent repository must use anchor mode`);
+          }
+        }
+        if (node.expression.text === "DeferredGlobalIntentAnchorReviewService") {
+          reviewCount += 1;
+          const options = node.arguments?.[0];
+          const repository = options && ts.isObjectLiteralExpression(options)
+            ? options.properties.find((property) =>
+                ts.isPropertyAssignment(property) && propertyNameText(property.name) === "repository"
+              )
+            : undefined;
+          if (
+            !repository || !ts.isPropertyAssignment(repository) ||
+            repository.initializer.getText(source) !== "this.#intentRepository"
+          ) {
+            failures.push(`${anchorIntentRecord.relative}: anchor review must share the single anchor intent repository`);
+          }
+        }
+      }
+      ts.forEachChild(node, visitAnchorIntent);
+    };
+    visitAnchorIntent(source);
+    if (repositoryCount !== 1) {
+      failures.push(`${anchorIntentRecord.relative}: expected exactly one anchor intent repository, got ${repositoryCount}`);
+    }
+    if (reviewCount !== 1) {
+      failures.push(`${anchorIntentRecord.relative}: expected exactly one anchor intent review service, got ${reviewCount}`);
+    }
+  }
+
+  const internalIntentFiles = new Set([
+    "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+  ]);
+  const publicIntentTokens = new Set([
+    "deferSchedule",
+    "listDeferredIntents",
+    "discardDeferredIntent",
+    "DeferredGlobalIntentAnchorReviewService",
+    "DeferredGlobalIntentRepository",
+  ]);
+  for (const record of records) {
+    if (
+      internalIntentFiles.has(record.relative) ||
+      !(
+        record.relative.startsWith("packages/cli/src/") ||
+        record.relative.startsWith("packages/rpc/src/") ||
+        record.relative.startsWith("packages/channels/")
+      )
+    ) {
+      continue;
+    }
+    const source = sourceFile(record.relative, record.text);
+    const visitPublicIntent = (node) => {
+      if (ts.isIdentifier(node) && publicIntentTokens.has(node.text)) {
+        failures.push(`${record.relative}: deferred intent capability is exposed outside its internal owner seam`);
+      }
+      ts.forEachChild(node, visitPublicIntent);
+    };
+    visitPublicIntent(source);
+  }
 
   const frozenDependencyKeys = [
     "artifacts",

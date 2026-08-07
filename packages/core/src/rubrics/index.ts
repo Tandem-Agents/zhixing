@@ -15,6 +15,9 @@ export {
 export { RubricStore } from "./store.js";
 export {
   AnchorRubricGlobalStateAdapter,
+  RUBRIC_AUTHORITY_PROJECTION_ID,
+  RUBRIC_AUTHORITY_STREAM,
   type AnchorRubricGlobalStateAdapterOptions,
+  type RubricAuthorityRecord,
 } from "./global-state-adapter.js";
 export * from "./types.js";

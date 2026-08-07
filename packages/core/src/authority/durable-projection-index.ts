@@ -494,8 +494,12 @@ export class FileDurableProjectionIndex {
   ): Promise<void> {
     const frozenInput = {
       emptyCheckpoints,
-      currentGeneration: this.#manifest?.generation,
-      currentCheckpoints: this.#manifest?.checkpoints,
+      ...(this.#manifest === undefined
+        ? {}
+        : {
+            currentGeneration: this.#manifest.generation,
+            currentCheckpoints: this.#manifest.checkpoints,
+          }),
     };
     await this.#runMaintenanceObligation(
       "projection-rebuild",
@@ -766,7 +770,9 @@ export class FileDurableProjectionIndex {
       const frozenInput = {
         manifestGeneration: manifest.generation,
         manifestCheckpoints: manifest.checkpoints,
-        targetCheckpoints: this.#currentCheckpoints,
+        ...(this.#currentCheckpoints === undefined
+          ? {}
+          : { targetCheckpoints: this.#currentCheckpoints }),
       };
       await this.#runMaintenanceObligation(
         "projection-flush",

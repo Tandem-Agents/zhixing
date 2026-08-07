@@ -313,6 +313,17 @@ export {
   type HostComponentMethodRegistry,
 } from "./authority.js";
 export {
+  DEFERRED_INTENT_STREAM_PREFIX,
+  deferredGlobalIntentDigest,
+  deferredIntentMutationDigest,
+  deferredIntentStream,
+  isDeferredIntentStream,
+  reduceDeferredGlobalIntent,
+  validateDeferredGlobalIntent,
+  validateDeferredIntentMutation,
+  validateIntentStreamRecord,
+} from "./deferred-global-intent.js";
+export {
   ADMISSION_CLASSES,
   DEFAULT_ADMISSION_WEIGHTS,
   GOVERNOR_TERMINAL_RETENTION_MS,

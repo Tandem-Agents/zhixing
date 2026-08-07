@@ -54,11 +54,13 @@ type JobControlRequest = Extract<
   { t: "job-run" | "job-cancel" | "uncertain-resolve" }
 >;
 type DeliveryControlRequest = Extract<ControlRequest, { t: "delivery-resolve" }>;
+type GlobalControlRequest = Extract<ControlRequest, { t: "global-write" }>;
 type CreateJobControlRequest = JobControlRequest;
 type AuthorityControlRequest =
   | ConversationControlRequest
   | JobControlRequest
-  | DeliveryControlRequest;
+  | DeliveryControlRequest
+  | GlobalControlRequest;
 type AdmittedControlRequest = InitialControlRequest | AuthorityControlRequest;
 
 export type InitialControlEnvelope = Omit<ControlEnvelope, "body"> & {
@@ -73,10 +75,14 @@ export type JobControlEnvelope = Omit<ControlEnvelope, "body"> & {
 export type DeliveryControlEnvelope = Omit<ControlEnvelope, "body"> & {
   readonly body: DeliveryControlRequest;
 };
+export type GlobalControlEnvelope = Omit<ControlEnvelope, "body"> & {
+  readonly body: GlobalControlRequest;
+};
 export type AuthorityControlEnvelope =
   | ConversationControlEnvelope
   | JobControlEnvelope
-  | DeliveryControlEnvelope;
+  | DeliveryControlEnvelope
+  | GlobalControlEnvelope;
 type AdmittedControlEnvelope =
   | InitialControlEnvelope
   | AuthorityControlEnvelope;
@@ -359,6 +365,39 @@ export function channelSurfacePrincipal(responder: ChannelResponderRef): string 
   return channelResponderPrincipal(validateChannelResponderRef(responder));
 }
 
+export function createGlobalControlEnvelope(input: {
+  readonly requestId: string;
+  readonly source: TrustedControlSource;
+  readonly body: GlobalControlRequest;
+  readonly at?: string;
+}): GlobalControlEnvelope {
+  const source = snapshotTrustedSource(input.source);
+  if (source.ingress !== undefined) {
+    throw new TypeError("Global control requests do not accept ingress context");
+  }
+  const body = snapshot(input.body, "Global control request");
+  const dependencyArtifacts = [...describeControlArtifactClosure(body).dependencies];
+  const at = input.at ?? new Date().toISOString();
+  const envelope = {
+    v: 1 as const,
+    requestId: input.requestId,
+    principal: source.principal,
+    dependencyArtifacts,
+    payloadDigest: protocolDigest("ControlEnvelopePayload", 1, {
+      body,
+      dependencyArtifacts,
+    }),
+    at,
+    body,
+  };
+  const validated = snapshotAdmittedControlEnvelope(envelope);
+  if (!isGlobalControlEnvelope(validated)) {
+    throw new TypeError("Global control envelope requires global-write");
+  }
+  assertTrustedSourceMatches(validated, source);
+  return validated;
+}
+
 /**
  * Durable request and ingress idempotency for the control plane.
  * Initial requests can commit a prepared result, while domain-bound requests
@@ -508,9 +547,10 @@ export class ControlAdmissionJournal {
     readonly decide: (
       state: State,
       context: AtomicControlApplicationContext<Envelope>,
-    ) => AtomicControlApplicationPlan;
+    ) => AtomicControlApplicationPlan | Promise<AtomicControlApplicationPlan>;
     readonly candidateReferences?: readonly ArtifactRef[];
     readonly companionStreams?: readonly string[];
+    readonly readProjectionIds?: readonly string[];
     readonly observe?: (
       record: LogicalRecord<unknown>,
       commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
@@ -592,9 +632,10 @@ export class ControlAdmissionJournal {
     readonly decide: (
       state: State,
       context: AtomicControlApplicationContext<Envelope>,
-    ) => AtomicControlApplicationPlan;
+    ) => AtomicControlApplicationPlan | Promise<AtomicControlApplicationPlan>;
     readonly candidateReferences?: readonly ArtifactRef[];
     readonly companionStreams?: readonly string[];
+    readonly readProjectionIds?: readonly string[];
     readonly observe?: (
       record: LogicalRecord<unknown>,
       commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
@@ -647,7 +688,7 @@ export class ControlAdmissionJournal {
           }
           return state;
         },
-        (state, authorityPrefix) => {
+        async (state, authorityPrefix) => {
           const request = getRequest(state.control, input.canonicalRequestId);
           if (!request) {
             throw invalidControlRecord("Atomic control request has no received record");
@@ -666,7 +707,7 @@ export class ControlAdmissionJournal {
             ...(request.ingress === undefined ? {} : { ingress: request.ingress }),
           };
           const plan = snapshot(
-            input.decide(state.target, context),
+            await input.decide(state.target, context),
             "Atomic control application plan",
           );
           const result = snapshotControlResult(plan.result, canonicalEnvelope.body.t);
@@ -703,7 +744,10 @@ export class ControlAdmissionJournal {
           };
         },
         {
-          streams: ["control", input.stream],
+          streams: ["control", input.stream, ...(input.companionStreams ?? [])],
+          ...(input.readProjectionIds
+            ? { readProjectionIds: input.readProjectionIds }
+            : {}),
           ...(cached ? { cursor: cached.cursor } : {}),
           candidateReferences: collectArtifactRefs([
             ...input.preparedEnvelope.references,
@@ -1552,6 +1596,12 @@ function isDeliveryControlEnvelope(
   return envelope.body.t === "delivery-resolve";
 }
 
+function isGlobalControlEnvelope(
+  envelope: AdmittedControlEnvelope,
+): envelope is GlobalControlEnvelope {
+  return envelope.body.t === "global-write";
+}
+
 function snapshotTrustedSource(value: TrustedControlSource): TrustedControlSource {
   const source = snapshot(value, "Trusted control source");
   assertPlainRecord(source, "Trusted control source");
@@ -1601,6 +1651,7 @@ function assertTrustedSourceMatches(
     envelope.body.t === "job-cancel" ||
     envelope.body.t === "uncertain-resolve" ||
     envelope.body.t === "delivery-resolve" ||
+    envelope.body.t === "global-write" ||
     envelope.body.t === "session-write"
   ) {
     if (source.ingress !== undefined) {
@@ -1750,6 +1801,17 @@ function snapshotControlResult(
       !/^sha256:[a-f0-9]{64}$/u.test(result.body.factDigest)
     ) {
       throw new TypeError("uncertain-resolve factDigest is invalid");
+    }
+  } else if (requestType === "global-write") {
+    assertExactKeys(result.body, ["revision", "t"], "global-write result");
+    if (result.body.t !== "global-write") {
+      throw new TypeError("global-write requires a matching result body");
+    }
+    if (
+      !Number.isSafeInteger(result.body.revision) ||
+      (result.body.revision as number) <= 0
+    ) {
+      throw new TypeError("global-write revision must be a positive safe integer");
     }
   } else {
     assertExactKeys(result.body, ["applied", "t"], "delivery-resolve result");

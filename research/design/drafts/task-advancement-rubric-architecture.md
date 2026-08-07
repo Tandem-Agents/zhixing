@@ -306,7 +306,7 @@ interface ConfirmedRubricSnapshot {
 
 **通过标准条目化（裁决）**：条目 id 在**契约快照层**分配——快照不可变，故 id 在整个推进会话内恒稳，是归因引用（§4.6 `criterionId`）、跨轮机械对比（§7 死胡同检测）、收场标准矩阵（§7）的稳定锚。资产层 `RUBRIC.md` 与草案阶段保持自然列表（`string[]`），不给用户与生成策略加编号负担；id 由确认固化这一步机械分配。没有稳定 id 时，这三个消费者全靠裁判 LLM 逐字复述标准文本——复述漂移一次全链路断。
 
-命中已有 Rubric 时，会话保存 `source:library` 的不可变快照并记录库身份与版本。未命中时，用户确认先把 `source:local-draft` 的 `snapshotId + contentDigest` 随 advancement 事件写入当前对话 owner，并立即启动原任务；保存或修订全局 Rubric 是独立后续动作，失败或离线不得回滚已经采用的会话契约。锚点在线时正文先进入 ArtifactStore，再经 GlobalStatePort 写目录；本地域离线时只经注入的 DeferredGlobalIntentPort 登记意向，提示“已用于本任务，连接值班设备后保存”。后续 link 只关联库身份，不改写 active 快照内容。`evidenceRequirements` 是推进侧独立取证的协议入口；并非每类任务都必须有客观证据，但一旦任务存在文件、日志、差异或产物等当前可只读核对的信号，Rubric 草案应尽量把证据要求写入契约，供推进侧独立验收。
+命中已有 Rubric 时，会话保存 `source:library` 的不可变快照并记录库身份与版本。未命中时，用户确认先把 `source:local-draft` 的 `snapshotId + contentDigest` 随 advancement 事件写入当前对话 owner，并立即启动原任务；保存或修订全局 Rubric 是独立后续动作，失败或离线不得回滚已经采用的会话契约。锚点在线时正文先进入 ArtifactStore，再经 GlobalStatePort 写目录；本地域离线时先把规范正文写入当前 owner 的既有 ArtifactStore，再由 advancement 注入的 publication 与 schedule producer 共用唯一 DeferredGlobalIntent repository 登记非时效意向，提示“已用于本任务，连接值班设备后保存”。save-new 不依赖目录命中；update-existing 的稳定操作身份包含目标 rubricId，并反绑只读缓存中的 expectedRevision，缺失、过期或损坏目标不得盲写。后续 link 只关联库身份，不改写 active 快照内容。`evidenceRequirements` 是推进侧独立取证的协议入口；并非每类任务都必须有客观证据，但一旦任务存在文件、日志、差异或产物等当前可只读核对的信号，Rubric 草案应尽量把证据要求写入契约，供推进侧独立验收。
 
 #### 4.5 AdvancementRunReview
 

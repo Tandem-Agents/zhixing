@@ -11,9 +11,9 @@
 
 ## 当前状态
 
-- **当前状态**:U30-05～U30-07 已验证；U30-02～U30-04 与 EX30-01 既有结论继续复用；未进入全单元终审或单元提交验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（仅冻结 U30-05～U30-07 专项交付输入；全单元终审尚未开始）
+- **当前状态**:第 30 单元已完成并封版；同一冻结指纹已通过两轮终审、独立功能审查与单元提交验证，可以提交
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（全单元 53 个交付路径已冻结；后续终审、独立功能审查与提交验证均绑定当前指纹）
 - **交付物文件集**:相对第 30 单元基线 `2526d6e8` 的 53 个生产、测试与合同路径；工作台、`AGENTS.md`、`agent-board.md` 与 `.agents/skills/project-onboarding/SKILL.md` 不入本专项交付物
 - **当前交付物指纹**:`sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3`（按排序后的 `路径\0文件 SHA-256` 聚合）
 - **架构来源**:`distributed-runtime-charter.md`、`specification.md`、第 30 单元定稿开发清单、当前生产装配与源码、第 30 单元独立审查清单
@@ -32,6 +32,12 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
+| `packages/core` 8 路合同、identity、control-artifact 与 execution-asset snapshot/exports | 无 lockfile/package manifest 变化；类型与导出消费由同输入 workspace build 覆盖，scope-id 与 snapshot 合同由直接测试覆盖 | V30-07～V30-09；相对基线的 package/lockfile 差异为空 | 通过 |
+| `packages/owner-kernel` 8 路 SessionState、control admission、run/assignment/manager 合同与直接测试 | 无生成文件；公共合同消费者已归入 CLI protocol/assembly 与 executor 事实链 | V30-07、R30-02～R30-03 登记输入 | 通过 |
+| `packages/executor` 3 路 assignment ledger、resource governor 与直接测试 | 无生成文件；账本/资源导出由同输入 build 与 local lifecycle 直接证据覆盖 | V30-07、V30-09 | 通过 |
+| `packages/cli` 29 路生产组合、缓存、protocol、lifecycle、两生产根 fixture 与直接测试 | 无独立 schema/lockfile；生产装配、consumer 与测试均纳入 R30-02～R30-07，构建后未再修改生产或导出源码 | V30-06～V30-09 | 通过 |
+| `scripts/s7-entry-coverage.mjs`、直接变异测试与 canonical registry golden | S7 capture/validator 变化必须与 `canonical-registry.golden.json` 全等 | 2026-08-07 当场执行 `pnpm s7:registry-golden`，18.7 秒通过；V30-06 的 S7 gate/15 项变异仍绑定同一输入 | 通过 |
+| `distributed-runtime-charter.md`、`specification.md` 当前 D30 合同 | 直接规范同步，无派生文档或生成索引；不得把第 31～38 单元未来合同写成现行入口 | IR30-34、R30-08 双向映射 | 通过 |
 
 ## 关键原语核查
 
@@ -39,6 +45,13 @@
 
 | 关键原语 | 唯一事实源 | 生效/线性化点 | 崩溃与竞争插点 | 生产者/消费者 | 时间、空间、重放与队列上界 | 结论 |
 | -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
+| local identity、目录与 SessionState | 设备绑定的 localDomainId/conversationId、conversation journal 与 directory identity | create/ensure 建立身份；exact replay 先于 fresh identity guard；同 journal append 生效 | 并发 create/delete、响应丢失、坏尾、删除后 replay、未知/错设备 fresh write | local protocol/SessionState adapter → manager、advancement、history/recovery | 每会话独立流；requestId 幂等；分页/恢复有界且未知身份零追加 | 通过 |
+| executor assignment、run commit 与 data plane | 设备唯一 AuthorityCommitLog、assignment projection 与同一 executor ledger | assigned/started、cancel fence、seal/CAS/terminal 与 CancelProof 的日志锁内顺序 | dispatch/ack 丢失、provider 返回与取消竞态、seal 后崩溃、uncertain、连续重启 | local protocol/dispatcher → executor/data plane/finality consumer | assignmentId/attemptId 幂等；已封包只重提，不能证明未 started 时不重跑 provider | 通过 |
+| interaction 与 final-outbox | assignment interaction ledger、conversation final history、既有 final-outbox | ticket 终态；history 全等验真后 published 回执唯一生效 | 取消/迟答、效果后响应丢失、consumer 暂态失败、stop/restart | observer/protocol → internal-only consumer、history/status、recovery | pending 按当前 runtime-bound 集合有界列读；游标单调；回执恰一 | 通过 |
+| local resource lease、child 与设备容量 | executor ResourceGovernor 耐久账本及设备唯一 capacity arbiter | reserve/consume/settle/release/reclaim 与 permit acquire/release | provider 提前结束、open usage、子先父后、取消、崩溃与关闭期限耗尽 | run/advancement/child finalizer → provider/executor guards、shutdown checkpoint | 预算与并发由 lease/capacity 上界；usageId 幂等；成功关闭零 active，失败保留 pending | 通过 |
+| execution asset snapshot 与只读 cache | inventory 三 revision、签名 path-free snapshot、ArtifactStore digest | 全部正文验真后原子安装 snapshot；consumer 只读冻结版本 | 缺失/过期/错绑/损坏、安装响应丢失、重启 | S4 installation/mesh → local skill/rubric/prompt/advancement | 精确 digest 集；坏/缺缓存降为无匹配，不阻断 local-draft、不产生全局写 | 通过 |
+| local assembly lifecycle、topology 与 cleanup | `planServeTopology`、两生产根唯一 assembly、单一 lifecycle/closing promise | ready 后 accepting；closing 栅栏先于 drain；稳定检查点后才停 loop/dispose | start 中 stop、部分启动失败、active/queued/confirmation、final/resource 暂态失败、重复 close | access-surfaces/executor-role → gated port、recovery owner、cleanup registry | 八配置 exact-set；两生产根各一实例；关闭有界，失败不伪造成功且零本实例后台 | 通过 |
+| 构造期能力隔离与 S7 门禁 | `LocalConversationOwnerRuntimeDependencies` 19 键合同、两根 object literal、唯一 S7 capture/golden | 调用 local runtime 工厂前完成能力裁剪；lint 在交付前 fail-closed | 键增删替换、spread/别名、完整 authority、双构造、禁用 import/binder/port | 两生产根 → local ledger/assembly；S7 lint/CI | 有限 owner/文件/键集；无通用调用图；合法 anchor/只读 local 能力零误杀 | 通过 |
 
 ## 审查结论复用表
 
@@ -50,6 +63,15 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R30-01 | 本地域身份、epoch、目录与公开合同边界；状态/安全/兼容 | core contracts/state、scope-id、conversation exports 与 scope-id test；两生产根 identity 注入及 protocol 消费 | 排序 `路径\0文件 SHA-256`：`sha256:e6b17a4627d38b55004096cdd6e470ace83207df1ff68c6b5a99a646de054841` | identity/epoch/contract/export 或任一生产 consumer 变化；出现跨域反证 | 通过 | 2/2 | 终审一：identity 与两根合同闭合。终审二：从异形 ULID、错设备、anchor/local 互投、重启 epoch 与路径混入反推，所有拒绝均先于日志/资源/I/O，未见跨域可达路径。 |
+| R30-02 | SessionState、目录、interaction/finality 完整事实链；生产者/消费者/异常终态 | core control-artifacts；owner-kernel admission/adapter 与 tests；CLI protocol、executor ledger、durable interactions 及 tests | 同算法：`sha256:874dd140d96204338572ab06f67a1c175d50c0c93d87c5d83ca3f67a52bbd157` | SessionState 联合、identity/replay 顺序、ticket/history/outbox 或直接测试变化 | 通过 | 2/2 | 终审一：SessionState/interaction/final 正向链闭合。终审二：未知/删除会话、并发 create/delete、响应丢失、取消迟答、非权威 final 与 outbox 暂态失败均由现有 guard/terminal/pending 重驱二元落定。 |
+| R30-03 | run/dispatch/commit/cancel/uncertain 与资源终态；并发/崩溃/上界 | owner assignment/manager/contracts/run-turn；executor ledger/governor；CLI protocol/local assembly、interaction 与 lifecycle tests | 同算法：`sha256:b08baddff070acfd356bcd303e72a00752521ebb968ab295cc1a0d2ff0f46448` | 终态顺序、CancelProof、usage/lease、recovery 或任一生产/测试输入变化 | 通过 | 2/2 | 终审一：run/cancel/resource 正向顺序闭合。终审二：主动交错 provider fail/completed、owner cancel、executor fence、seal/CAS、usage flush、child/root settle 与重启，串行终态和 durable identity 排除竞争双终态与资源泄漏。 |
+| R30-04 | execution asset snapshot、只读 cache 与 advancement；状态/兼容/消费 | core control-artifact/snapshot exports；CLI snapshot store/mesh/cache、advancement、stager、setup-delivery 与 tests | 同算法：`sha256:8481732eff594875a0bde01c932324826f8741fc4173871c0197fbb7efb2905b` | snapshot/inventory/digest 合同、安装、consumer、local-draft 或测试变化 | 通过 | 2/2 | 终审一：snapshot/install/consumer 正向链闭合。终审二：错签名、错 revision/digest、缺/重复正文、回退、安装中断与损坏 cache 均不产生可消费伪命中；既有本地执行按无匹配继续。 |
+| R30-05 | 两生产根装配、topology、start/stop/cleanup；生命周期/非默认配置 | access-surface(s)、executor-role、local assembly、mesh/command/shutdown/setup-delivery；lifecycle/surface/topology tests | 同算法：`sha256:57d288958c45e2804196078ef54ad72e2bc8cb3bce6b8b7a90dde58ae6010a25` | root/topology/lifecycle/cleanup/port 或直接测试变化；出现半活/后台遗留反证 | 通过 | 2/2 | 终审一：两根生命周期正向闭合。终审二：从 start 中 stop、重复 close、栅栏后各写面、active/queued/confirmation、drain 到期、final/resource 失败与恢复反推，成功/失败关闭边界诚实且两根 cleanup 必经。 |
+| R30-06 | 构造期全局能力隔离与结构门禁；安全/模块边界/派生资产 | owner-runtime、两生产根、local assembly、相关 tests；S7 gate/变异与 canonical golden | 同算法：`sha256:0ff295bf8642502e582b28d401d4f67e78583e75f5f58096bd5f2cc8a7660efe` | 19 键合同、owner/receiver、生产路径、S7/golden 或禁用能力集合变化 | 通过 | 2/2 | 终审一：窄合同与门禁正向闭合。终审二：完整 authority、键增删替换、spread/Object.assign、双构造、禁用 import/binder/return/re-export 与 golden 漂移均有有限确定失败入口，未发现路径启发式旁路。 |
+| R30-07 | 双域/双生产根 conformance 与证据比例；测试与验收 | production-profile fixture、owner-domain、environment、role-topology、lifecycle/surface/protocol tests 与两根 builder | 同算法：`sha256:23b93e23bfbe2b291794684784032b770186d6d1f3ccb83a2843f918c8fdaf60` | profile、fixture、根 builder/lifecycle、共享语义或直接证据变化 | 通过 | 2/2 | 终审一：共享矩阵与真实 profile 分层闭合。终审二：分别移除根 builder/lifecycle、consumer/cache/guard/stop，并核对 mock 与 production fixture 边界；每个生产交界漂移至少命中 S7 或真实 assembly 小表，重复全矩阵无新增价值。 |
+| R30-08 | 当前架构/规格、exports 与实现双向闭包；范围/文档/兼容 | charter、specification 当前 D30 段；core contract/protocol/conversation exports 与全部 R30-01～R30-07 生产落点 | 同算法：`sha256:f18eada56c67b3ca722cde11ee0e2dc425b262ed7092b6189ca7bb9df45c5dc6` | 当前规范、公开导出、单元边界或任一实现义务映射变化 | 通过 | 2/2 | 终审一：规范与实现正向全等。终审二：从新增公开入口、intent/transfer/global write、第二 owner/registry、anchor 失联接管和缺失 consumer 反向扫描，均无生产可达点；53 路径全部有 D30 依据。 |
+| R30-09 | 跨项组合：identity×SessionState×run/resource×asset×lifecycle×isolation×conformance | 汇总 R30-01～R30-08 当前输入、结论与 EX30-01～EX30-02 重开前提 | `编号\0子项指纹` 聚合：`sha256:bd390b74afcfc60830911ebf4772a1c42600b8ddf5f3eef6c8e55c9b78ead3ad` | 任一子项新增、边界/输入/结论变化或排除前提触发 | 通过 | 2/2 | 终审一：跨项正向组合无断点。终审二：错域 identity×replay、取消×interaction×final×lease、坏 cache×advancement、close×recovery、两根×S7 组合均收敛于既有唯一事实源；两项排除条件仍为假。 |
 
 ## 问题列表
 
@@ -71,6 +93,7 @@
 | 编号 | 原疑点与已验证事实 | 排除依据与适用边界 | 证据与输入基线 | 重开条件 | 最终裁决 |
 | ---- | ------------------ | ------------------ | -------------- | -------- | -------- |
 | EX30-01 | 原主张：anchor+executor 中两个 `ConversationAssignmentLedger` 对象构成两个设备账本 owner，会导致 local activation 对 data plane 不可见，并需合并为单实例。已验证：两对象不拥有独立文件、维护线程或终态事实，均经同一 executor `AuthorityCommitLog`、同名 durable projection 和日志锁读写；data-plane 绑定的 ledger 会从同一日志折叠 local activation。两 domain 的 runtime-binding guard 仅在各自 fresh dispatch 前校验其 protocol 私有 binding，不能安全合并成一个共享内存 registry。 | 适用于当前 anchor+executor 的两个无生命周期 facade 及 executor-only 的单 facade；唯一耐久 owner 是共享 executor log/projection，D30 要求的是同一物理账本与逻辑域隔离，不要求共享一个带 domain 私有 guard 的 JS 对象。删除 U30-01，禁止为“对象恰一”改造组合根。 | `local-conversation-owner.ts` 的显式 ledger 选择、`conversation-protocol-runtime.ts` 的 domain binding guard、`assignment-ledger.ts` 的 log-backed select/transact、`commit-log.ts` 的 projectionId 复用、`executor-data-plane-runtime.ts` 的同日志读路径；2026-08-06 当前生产图。 | 任一 facade 改为独立物理日志/投影、出现同一 assignment 的跨实例不可见或冲突耐久终态、对象新增独立后台/lifecycle owner，或 data plane 不再从共享日志重建 binding。 | 已排除 |
+| EX30-02 | 原主张 P30-10：必要验收闭包被收窄，应新增逐阶段启动失败注错及 anchor/local 全功能同表，评级 P1／中。已验证：该主张只证明特定测试组织未出现，没有证明生产缺陷；启动失败在 ready 前复位，两生产根均有必经 cleanup，双域复用同一 protocol、manager、SessionState 与 reducer，完整组件矩阵已覆盖共享语义，两份真实生产 profile 与 S7 门禁覆盖生产交界。 | 适用于当前共享实现、两生产根 cleanup、组件矩阵、两份真实 profile 与结构门禁均保持成立的边界。不处理不会改变受支持启动、关闭、双域输入的用户可见或耐久终态；复制全功能矩阵只增加耗时和维护面，无当前产品价值。删除问题，不修改实现、不扩测试。 | 当前冻结交付物 `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3`；`LocalConversationOwnerAssembly.start/close`、两根 lifecycle/cleanup、共享组件矩阵、两份 production profile、S7 root/lifecycle gate；独立审查 IR30-29、IR30-33～IR30-34 的价值裁决。 | 出现启动阶段失败后仍可写或遗留 recovery/session/resource；任一生产根缺失 cleanup；anchor/local 对同一受支持输入产生无法由 identity/capability/cache 解释的权威终态差异；或新增域专属实现绕过共享组件与结构门禁。 | 已排除 |
 
 ## 迟发现教训
 
@@ -182,13 +205,18 @@
 | V30-10 | 专项冻结一致性与差异卫生 | 聚合 53 文件 SHA-256；`git diff --check` / `git diff --cached --check` | 相对 `2526d6e8` 的专项交付物，排除工作台、AGENTS/board 与独立 Skill 修正 | 冻结准备 / <1 分钟 | 空白错误 0；四路只读审查期间交付物未修改 | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 有效 |
 | V30-11 | pending confirmation 等待预算归因 | lifecycle pending-confirmation 定向单例 | 真实 authority/ledger/broker/close 场景 | 诊断 / 首次 10 秒等待上限 | 首次只因 durable pending 在冷 I/O 下晚于 10 秒出现而超时；未见生产错误。仅该场景改用 30 秒有界预算后 1/1 通过，未放宽全局预算 | 当前冻结测试输入 | 诊断 |
 | V30-12 | conformance interaction 路径归因 | 两 production profile 定向小表 | fixture internal consumer 与 data-plane ticket 边界 | 诊断 / 首次方案 | 首次选择 surface-ticket answer，因 fixture 明确未装配 ticket authorization 而 2/2 确定失败；改用本地域已支持的 internal no-surface fail-closed consumer 后 2/2 通过，无生产修改或能力扩张 | 当前冻结测试输入 | 诊断 |
+| V30-13 | 全单元派生闭包、文件集与冻结一致性 | `pnpm s7:registry-golden`；聚合 53 文件 SHA-256；`git diff --check` / `git diff --cached --check`；核对 package/lockfile 差异 | 相对 `2526d6e8` 的 53 个 D30 路径；排除 8 个工作台/规则/协作路径 | 冻结准备 / <1 分钟 / 18.7 秒 + 低成本检查 | golden 全等；53 路径全部归入派生闭包，package/lockfile 无变化，空白错误 0；全单元指纹与专项指纹全等 | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 有效 |
+| V30-14 | 单元提交验证：复用有效功能证据并确认最终一致性 | 复用 V30-06 的类型/S7/变异、V30-07 lifecycle/cancellation、V30-08 两根 conformance、V30-09 build、V30-13 golden；执行 `git diff --check`、`git diff --cached --check`、53 路径集合与聚合指纹复算 | 同一 53 路径冻结输入；构建输入为 V30-09 的生产源码/导出/lockfile，后续只改直接测试与工作台 | 单元提交验证 / <2 分钟 | 两项 diff check 均为 0；相对基线 61 路径精确分为 53 个交付路径与 8 个排除路径，未归类 0、缺失 0；聚合指纹全等。无包全测、模块回归或重复构建 | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 有效 |
+| V30-15 | 第一轮冻结终审：需求、架构、功能闭环、状态与回归 | 只读重建 R30-01～R30-08 全部输入，再最后推演 R30-09；核对 EX30-01～EX30-02 与适用教训 | 53 路径冻结交付物、关键原语、直接证据与当前规范 | 冻结终审一 / 只读 | 9/9 审查链无新增问题；全部当前输入取得第一次独立深审，排除记录未触发且迟发现教训表无适用项 | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 有效 |
+| V30-16 | 第二轮冻结终审：并发、崩溃、安全、资源上界、异常终态与测试盲区 | 不复用第一轮判断，从负向故障与对抗交错重建 R30-01～R30-08，再最后推演 R30-09；核对排除重开条件 | 同一 53 路径冻结交付物与第一轮相同输入 | 冻结终审二 / 只读 | 9/9 审查链无新增问题并达到 2/2；所有负向变体均有唯一事实源、拒绝边界或确定重驱，EX30-01～EX30-02 未重开 | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 有效 |
+| V30-17 | 独立功能审查：按失效机制重建完整用户链 | 独立核对身份与权威、终态恢复、资源与资产、装配隔离、双根一致性及跨机制组合，不复用 R30 分区结论 | 同一 53 路径冻结交付物、当前规范、生产装配与有效直接证据 | 独立功能审查 / 只读 | I30-01～I30-06 全部已覆盖；受支持的正常、边界、故障、恢复与对抗场景均有确定终态，未发现新问题，EX30-01～EX30-02 未重开 | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 通过 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 通过 |
 
 ## 独立审查覆盖表
 
@@ -196,5 +224,11 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| I30-01 | 身份伪造、错域写入、fresh/replay 次序与权威事实分叉 | local identity、SessionState directory/admission、assignment/executor ledger；`sha256:15b4e287ba13983e2cc2d56edf5623ac9067f6f754ec8fd6d0d49931ec3a89b3` | 已覆盖 | 两域稳定身份均在 append 前校验；fresh 请求必须命中 durable identity，exact replay 先返回既有全等结果；错设备、未知或已删除会话零追加。 | identity、directory/admission、replay 次序或 ledger 事实源变化 |
+| I30-02 | 取消、确认、final、响应丢失、重启与停机竞态造成双终态或永久 pending | manager/protocol/observer、interaction journal、final history/outbox、local lifecycle；同一冻结指纹 | 已覆盖 | terminal queue 串行化 cancel/fail/seal/commit；权威 history 验真 final，pending 由 recovery 重驱；close 栅栏、可判定 drain 与同一 closing promise 不伪造成功。 | terminal 顺序、interaction/final owner、recovery、close/drain 变化 |
+| I30-03 | lease/usage 泄漏、资源失配、坏资产或过期快照污染执行 | ResourceGovernor/executor ledger、execution snapshot/cache/ArtifactStore、advancement consumer；同一冻结指纹 | 已覆盖 | 资源终态绑定 durable assignment/fence；资产签名、revision、digest 集合与正文逐项全等后单调安装，坏缺 cache 只降为无匹配且不阻断 local-draft。 | resource finalizer、snapshot/install、digest 或 cache consumer 变化 |
+| I30-04 | 本地域获得全局能力、公开 surface 泄漏、错误 topology 或 cleanup 遗留后台 | 19 键窄依赖、两生产根、frozen port、topology/cleanup、S7 gate/golden；同一冻结指纹 | 已覆盖 | 两根仅交付显式 exact-set，executor-only 单实例复用；禁用 import/binder/port/完整 authority 均 fail-closed；内部 owner 无公开 RPC/channel 入口且两根 cleanup 必经。 | local dependency/port、生产根、topology/cleanup 或 S7/golden 变化 |
+| I30-05 | anchor+executor 与 executor-only 在 workspace、cache、interaction/final、恢复或关闭上行为漂移 | 两份真实 production profile、真实 assembly fixture、owner-domain/S7 environment/topology 证据；同一冻结指纹 | 已覆盖 | 两生产 profile 均穿过真实 create/start/port/close，小表覆盖 workspace 有无、资产消费、internal interaction/final、响应丢失恢复；组件矩阵和八配置 exact-set 成比例复用。 | profile/fixture、任一生产 builder/lifecycle 或共享 consumer 变化 |
+| I30-06 | 跨机制组合：错域身份×取消×资源×坏缓存×恢复×停机×双根装配 | I30-01～I30-05 的当前生产链与 EX30-01～EX30-02；同一冻结指纹 | 已覆盖 | 组合反例最终均落到同一 durable identity、串行终态、资源 fence、资产验证、closing gate 或结构门禁；无第二事实源、半终态或绿色假通过，排除条件仍为假。 | 任一独立风险区输入/结论变化，或任一排除记录重开条件成立 |
 
 <!-- registration-complete: unit-30.gen-1 -->

@@ -41,6 +41,7 @@ import {
   AdvancementEvidenceCoordinator,
   SessionAdvancementStore,
   type AdvancementEvidenceTarget,
+  type RubricPublicationPort,
 } from "@zhixing/owner-services";
 import {
   GlobalRubricCatalog,
@@ -88,6 +89,7 @@ export interface ServeAdvancementControllerDeps {
   /** Local owners use local-draft contracts and never imply a global save. */
   readonly rubricScope?: "global" | "local";
   readonly rubricCatalog?: RubricCatalogPort;
+  readonly rubricPublication?: RubricPublicationPort;
 }
 
 /** 惰性解析的治理端口代理——每次调用时解析真实 governor，缺失即拒绝。 */
@@ -277,9 +279,11 @@ export async function createServeAdvancementController(
     }),
     resources: governor,
     ...(evidence ? { evidence } : {}),
-    ...(deps.rubricScope === "local"
-      ? {}
-      : { rubricPublication: new GlobalRubricPublication(rubricLibrary) }),
+    ...(deps.rubricPublication
+      ? { rubricPublication: deps.rubricPublication }
+      : deps.rubricScope === "local"
+        ? {}
+        : { rubricPublication: new GlobalRubricPublication(rubricLibrary) }),
     ...(deps.recentContextProvider
       ? { recentContextProvider: deps.recentContextProvider }
       : {}),

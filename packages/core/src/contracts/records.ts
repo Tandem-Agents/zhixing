@@ -24,6 +24,7 @@ import type {
   SurfaceAssetGrant,
 } from "./authorization.js";
 import type {
+  DeferredGlobalIntent,
   GlobalStagedMutation,
   JobGlobalStagedMutation,
   SessionStagedMutation,
@@ -92,6 +93,12 @@ export type ControlRecord =
       t: "authority-time-frontier";
       frontier: IsoTime;
     };
+
+/** Latest-wins snapshot in one conversation-owned deferred-intent stream. */
+export type IntentStreamRecord = {
+  t: "intent";
+  intent: DeferredGlobalIntent;
+};
 
 export interface DispatchRejectionProof
   extends WireSchemaV1<"DispatchRejectionProof"> {

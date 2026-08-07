@@ -19,3 +19,5 @@ export * from "./resource-governor.js";
 export * from "./channel-interaction-records.js";
 export * from "./channel-challenge-outbox.js";
 export * from "./session-state-adapter.js";
+export * from "./deferred-global-intents.js";
+export * from "./deferred-global-intent-review.js";

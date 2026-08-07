@@ -9,7 +9,7 @@ import type {
   RubricPublicationPort,
 } from "./controller.js";
 
-const DEFERRED_MESSAGE = "准则已用于本任务，连接值班设备后保存。";
+const DEFERRED_MESSAGE = "已用于本任务，连接值班设备后保存";
 
 export interface DeferredRubricPublicationOptions {
   readonly intents: DeferredGlobalIntentPort;
@@ -56,9 +56,12 @@ export class DeferredRubricPublication implements RubricPublicationPort {
   #context(
     input: Parameters<RubricPublicationPort["publish"]>[0],
   ): AuthorityCallContext {
+    const persistenceIdentity = input.persistence.kind === "update-existing"
+      ? `${input.persistence.kind}:${input.persistence.rubricId}`
+      : input.persistence.kind;
     return {
       principal: { kind: "host", component: "advancement-rubric-intent" },
-      requestId: `rubric-intent:${input.conversationId}:${input.draft.draftId}:${input.persistence.kind}`,
+      requestId: `rubric-intent:${input.conversationId}:${input.draft.draftId}:${persistenceIdentity}`,
       deadlineAt: new Date(Date.parse(this.#now()) + 30_000).toISOString(),
     };
   }

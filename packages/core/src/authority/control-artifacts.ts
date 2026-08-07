@@ -10,6 +10,7 @@ import {
   validateContentAssetRefs,
   validateConversationInvocation,
   validateExplicitEnvironmentSelection,
+  validateDeferredIntentMutation,
   validateNonEmptyUserTurnInput,
 } from "../protocol/index.js";
 import { assertDeliveryItemId } from "../delivery/validation.js";
@@ -271,6 +272,22 @@ function assertAdmittedControlRequest(value: unknown): asserts value is ControlR
     ) {
       throw new TypeError("delivery-resolve decision is invalid");
     }
+    return;
+  }
+  if (value.t === "global-write") {
+    assertExactKeys(
+      value,
+      ["anchorEpoch", "domainRevision", "mutation", "t"],
+      "global-write request",
+    );
+    assertPositiveInteger(value.anchorEpoch, "global-write anchorEpoch");
+    assertNonNegativeInteger(value.domainRevision, "global-write domainRevision");
+    assertPlainRecord(value.mutation, "global-write mutation");
+    const kind = value.mutation.kind;
+    validateDeferredIntentMutation(
+      value.mutation as never,
+      typeof kind === "string" && kind.startsWith("schedule-"),
+    );
     return;
   }
   if (value.t !== "input") {

@@ -164,6 +164,7 @@ export interface AuthorityRuntimeStack {
   readonly workspaceProbe?: WorkspaceProbePort;
   readonly environmentProbeOwner?: EnvironmentProbeOwner;
   readonly globalState?: GlobalStatePort;
+  readonly rubricGlobalState?: AnchorRubricGlobalStateAdapter;
   readonly globalMutationParticipants: readonly GlobalMutationCommitParticipant[];
   readonly installSchedulerGlobalState: (state: GlobalStatePort) => void;
   readonly recoverWorksceneState: () => Promise<void>;
@@ -1697,6 +1698,7 @@ export async function setupAuthorityRuntime(
       workspaceProbe,
       environmentProbeOwner,
       globalState: routedGlobalState,
+      rubricGlobalState,
       globalMutationParticipants: worksceneGlobalState && memoryGlobalState && skillGlobalState
         ? [worksceneGlobalState, memoryGlobalState, skillGlobalState]
         : [],

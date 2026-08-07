@@ -31,7 +31,7 @@ export const SCHEDULE_AUTHORITY_PROJECTION_ID = "global-schedule-authority-v1";
 
 const SCHEDULE_DEFINITION_PREFIX = "definition:";
 const SCHEDULE_PENDING_PREFIX = "pending:";
-const SCHEDULE_MATERIALIZATION_STREAM = "schedule-materialization";
+const SCHEDULE_MATERIALIZATION_STREAM = "job:schedule-materialization";
 
 type CoordinatorOutcome = GlobalMutationPublishOutcome | SchedulePublishOutcome;
 
@@ -150,6 +150,51 @@ export class GlobalMutationCommitCoordinator {
       for (const [seq, outcome] of prepared.outcomes) outcomes.set(seq, outcome);
     }
     return { records: plannedRecords, outcomes };
+  }
+
+  async prepareDeferredScheduleIntent(input: {
+    readonly intentId: string;
+    readonly requestId: string;
+    readonly mutation: ScheduleWriteMutation;
+    readonly context: ProjectionTransactionContext;
+  }): Promise<{
+    readonly records: readonly LogicalRecord[];
+    readonly targetRevision: number;
+    readonly taskId: string;
+  }> {
+    const prepared = await this.prepare({
+      assignmentId: `deferred-intent:${input.intentId}`,
+      records: [{ seq: 1, requestId: input.requestId, mutation: input.mutation }],
+      context: input.context,
+      source: {},
+    });
+    const outcome = prepared.outcomes.get(1);
+    if (!outcome || outcome.t !== "granted") {
+      const message = outcome?.t === "conflicted"
+        ? outcome.error.message
+        : "Deferred schedule intent has no authority outcome";
+      throw new TypeError(`Deferred schedule intent remains pending: ${message}`);
+    }
+    return {
+      records: prepared.records,
+      targetRevision: outcome.targetRevision,
+      taskId: scheduleMutationTaskId(input.mutation, input.requestId),
+    };
+  }
+
+  applyDeferredScheduleIntent(input: {
+    readonly intentId: string;
+    readonly requestId: string;
+    readonly mutation: ScheduleWriteMutation;
+    readonly targetRevision: number;
+  }): Promise<void> {
+    return this.apply({
+      assignmentId: `deferred-intent:${input.intentId}`,
+      seq: 1,
+      mutation: input.mutation,
+      requestId: input.requestId,
+      targetRevision: input.targetRevision,
+    });
   }
 
   async apply(input: {

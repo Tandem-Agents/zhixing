@@ -396,6 +396,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   const paths = [
     "packages/cli/src/serve/conversation-owner-runtime.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
   ];
@@ -596,6 +597,40 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       ),
     )).join("\n"),
     /assembly must close exactly once, got 0/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "    const scheduleIntents = new DeferredScheduleIntentProducer({ intents });",
+        "    const duplicateIntents = new DeferredGlobalIntentRepository({});\n    const scheduleIntents = new DeferredScheduleIntentProducer({ intents });",
+      ),
+    )).join("\n"),
+    /expected exactly one bound local intent repository/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "new DeferredScheduleIntentProducer({ intents })",
+        "new DeferredScheduleIntentProducer({ intents: otherIntents })",
+      ),
+    )).join("\n"),
+    /DeferredScheduleIntentProducer must share the single local intent repository/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace('      mode: "anchor",', '      mode: "local",'),
+    )).join("\n"),
+    /anchor intent repository must use anchor mode/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => `${text}\nconst publicDeferredIntent = deferSchedule;\n`,
+    )).join("\n"),
+    /deferred intent capability is exposed outside its internal owner seam/,
   );
 });
 

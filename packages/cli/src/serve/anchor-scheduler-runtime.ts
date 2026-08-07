@@ -31,6 +31,8 @@ import {
   SchedulerConversationMutationPublisher,
   GlobalMutationCommitCoordinator,
   SchedulerUserNoticeJournal,
+  DeferredGlobalIntentAnchorReviewService,
+  DeferredGlobalIntentRepository,
   assignmentReservationId,
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
@@ -103,10 +105,12 @@ export interface AnchorSchedulerRuntimeOptions {
 export class AnchorSchedulerRuntime {
   readonly scheduler: AnchorScheduler;
   readonly schedulerNotices: SchedulerUserNoticeJournal;
+  readonly deferredIntents: DeferredGlobalIntentAnchorReviewService;
   readonly #options: AnchorSchedulerRuntimeOptions;
   readonly #issuer: JobAssignmentAuthority;
   readonly #commitParticipant: SchedulerJobCommitParticipant;
   readonly #mutationCoordinator: GlobalMutationCommitCoordinator;
+  readonly #intentRepository: DeferredGlobalIntentRepository;
   readonly #journals = new Map<string, JobJournal>();
   readonly #executorByAssignment = new Map<string, string>();
   readonly #artifactAuthorityByAssignment = new Map<
@@ -174,6 +178,29 @@ export class AnchorSchedulerRuntime {
       refreshSchedule: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
       scheduleDefinitionFor: (taskId) => this.scheduler.getDefinition(taskId),
     });
+    const rubricGlobalState = options.authority.rubricGlobalState;
+    if (!rubricGlobalState) {
+      throw new Error("Anchor deferred intent review requires the rubric authority");
+    }
+    this.#intentRepository = new DeferredGlobalIntentRepository({
+      log: options.authority.authorityLog,
+      localDomainId: options.authority.localDomainId,
+      mode: "anchor",
+      acceptsConversationId: () => true,
+      conversationExists: (conversationId) => options.protocol.sessionExists(conversationId),
+      isCurrentOwner: (conversationId) => options.protocol.sessionExists(conversationId),
+      clock: this.#clock,
+    });
+    this.deferredIntents = new DeferredGlobalIntentAnchorReviewService({
+      repository: this.#intentRepository,
+      admission: options.authority.controlAdmission,
+      coordinator: this.#mutationCoordinator,
+      rubrics: rubricGlobalState,
+      anchorEpoch: options.authority.anchorEpoch,
+      deviceId: options.authority.deviceId,
+      isCurrentOwner: (conversationId) => options.protocol.sessionExists(conversationId),
+      now: this.#clock,
+    });
     this.#commitParticipant = new SchedulerJobCommitParticipant({
       coordinator: this.#mutationCoordinator,
       log: options.authority.authorityLog,
@@ -219,6 +246,7 @@ export class AnchorSchedulerRuntime {
   }
 
   async start(): Promise<void> {
+    await this.#intentRepository.recover();
     await this.scheduler.prepare();
     await this.#mutationCoordinator.recoverDerivedState();
     await this.#commitParticipant.start();

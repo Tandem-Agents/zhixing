@@ -129,11 +129,63 @@ describe("conversation owner domain conformance", () => {
       let restarted:
         | Awaited<ReturnType<typeof createLocalOwnerAssemblyFixture>>
         | undefined;
+      let deferredIntentId: string | undefined;
       try {
         await fixture.assembly.start();
         const conversationId = await fixture.port.createConversation();
         await fixture.port.ensureSession(conversationId);
         expect(Boolean(fixture.environment)).toBe(withWorkspace);
+        const scheduleRequest = {
+          conversationId,
+          requestId: `production-schedule-${profile}`,
+          mutation: {
+            kind: "schedule-create" as const,
+            spec: {
+              name: `Deferred schedule ${profile}`,
+              enabled: true,
+              priority: "normal" as const,
+              schedule: {
+                kind: "cron" as const,
+                expr: "0 9 * * *",
+                tz: "Asia/Shanghai",
+              },
+              action: {
+                kind: "agent-turn" as const,
+                prompt: "summarize current work",
+              },
+            },
+          },
+        };
+        const scheduleEffectLog = profile === "anchor-executor"
+          ? fixture.authority.authorityLog
+          : fixture.authority.executorLog;
+        const scheduleEffectsBefore = await scheduleEffectCount(scheduleEffectLog);
+        const deferred = await fixture.port.deferSchedule(scheduleRequest);
+        deferredIntentId = deferred.intentId;
+        expect(deferred).toMatchObject({
+          kind: "deferred",
+          message: "已记录但尚未生效，连接值班设备后需确认",
+        });
+        const afterFirstRecord = await fixture.authority.executorLog.readAll();
+        await expect(fixture.port.deferSchedule(scheduleRequest)).resolves.toEqual(deferred);
+        expect(await fixture.authority.executorLog.readAll()).toEqual(afterFirstRecord);
+        await expect(fixture.port.listDeferredIntents(conversationId)).resolves.toEqual([
+          expect.objectContaining({
+            intentId: deferred.intentId,
+            conversationId,
+            timeSensitive: true,
+            status: "pending",
+            mutation: scheduleRequest.mutation,
+          }),
+        ]);
+        expect(await scheduleEffectCount(scheduleEffectLog)).toBe(scheduleEffectsBefore);
+        await fixture.port.discardDeferredIntent(deferred.intentId);
+        await expect(fixture.port.listDeferredIntents(conversationId)).resolves.toEqual([
+          expect.objectContaining({
+            intentId: deferred.intentId,
+            status: "discarded",
+          }),
+        ]);
         const advancement = advancementCreatedEvent(conversationId, profile);
         await fixture.port.mutateSession(
           conversationId,
@@ -191,6 +243,12 @@ describe("conversation owner domain conformance", () => {
         await expect(restarted.port.listConversations()).resolves.toEqual([
           conversationId,
         ]);
+        await expect(restarted.port.listDeferredIntents(conversationId)).resolves.toEqual([
+          expect.objectContaining({
+            intentId: deferredIntentId,
+            status: "discarded",
+          }),
+        ]);
         await expect(restarted.port.finalHistory(conversationId, 0)).resolves.toEqual(
           committed,
         );
@@ -207,6 +265,14 @@ describe("conversation owner domain conformance", () => {
     120_000,
   );
 });
+
+async function scheduleEffectCount(
+  log: Awaited<ReturnType<typeof createLocalOwnerAssemblyFixture>>["authority"]["authorityLog"],
+): Promise<number> {
+  return (await log.readAll()).flatMap((envelope) => envelope.entries).filter(
+    (entry) => entry.stream.startsWith("task:") || entry.stream.startsWith("job:"),
+  ).length;
+}
 
 function advancementCreatedEvent(
   conversationId: string,

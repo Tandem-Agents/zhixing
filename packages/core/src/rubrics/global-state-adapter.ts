@@ -15,17 +15,24 @@ import type { ArtifactRef, Digest, IsoTime } from "../contracts/foundation.js";
 import type {
   ArtifactStore,
   AuthorityCommitLog,
+  DurableProjectionMutation,
+  DurableProjectionReadContext,
   ProjectionCursor,
 } from "../authority/index.js";
+import type { JsonValue, LogicalRecord } from "../contracts/index.js";
 import {
   assertPrincipalAllowsAuthorityMethod,
   protocolDigest,
 } from "../protocol/index.js";
 import { parseRubricDocument, rubricDocumentId } from "./document.js";
 
-const RUBRIC_STREAM = "intent:rubric-registry";
+export const RUBRIC_AUTHORITY_STREAM = "intent:rubric-registry";
+export const RUBRIC_AUTHORITY_PROJECTION_ID = "global-rubric-authority-v1";
+const RUBRIC_ENTRY_PREFIX = "entry:";
+const RUBRIC_REQUEST_PREFIX = "request:";
+const RUBRIC_REVISION_KEY = "revision";
 
-type RubricAuthorityRecord =
+export type RubricAuthorityRecord =
   | {
       readonly t: "rubric-upserted";
       readonly requestId: string;
@@ -74,6 +81,84 @@ export class AnchorRubricGlobalStateAdapter implements GlobalStatePort {
     this.#artifacts = options.artifacts;
     this.#anchorEpoch = options.anchorEpoch;
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    options.log.durableProjection<RubricAuthorityRecord>({
+      projectionId: RUBRIC_AUTHORITY_PROJECTION_ID,
+      reducerVersion: 1,
+      reduce: reduceRubricDurableProjection,
+    });
+  }
+
+  get deferredIntentProjectionId(): string {
+    return RUBRIC_AUTHORITY_PROJECTION_ID;
+  }
+
+  async prepareDeferredIntentMutation(input: {
+    readonly mutation: Extract<
+      RubricWriteMutation,
+      { kind: "rubric-save-own" | "rubric-update-own" }
+    >;
+    readonly requestId: string;
+    readonly at: IsoTime;
+    readonly projection: DurableProjectionReadContext;
+  }): Promise<{
+    readonly records: readonly LogicalRecord<RubricAuthorityRecord>[];
+    readonly revision: number;
+    readonly candidateReferences: readonly ArtifactRef[];
+  }> {
+    const mutationDigest = protocolDigest("RubricWriteMutation", 1, input.mutation);
+    const replay = readRubricRequest(
+      await input.projection.get(rubricRequestKey(input.requestId)),
+    );
+    if (replay) {
+      if (replay.mutationDigest !== mutationDigest) {
+        throw new TypeError("Rubric request id was reused with another mutation");
+      }
+      return { records: [], revision: replay.revision, candidateReferences: [] };
+    }
+    const bytes = await this.#artifacts.get(input.mutation.rubric.content);
+    const document = parseRubricDocument(Buffer.from(bytes).toString("utf8"));
+    if (
+      document.title !== input.mutation.rubric.title ||
+      document.description !== input.mutation.rubric.description
+    ) {
+      throw new TypeError("Rubric metadata does not match its content artifact");
+    }
+    const derivedId = rubricDocumentId(document);
+    const targetId = input.mutation.kind === "rubric-update-own"
+      ? input.mutation.rubricId
+      : derivedId;
+    if (derivedId !== targetId) {
+      throw new TypeError("Rubric content id does not match the update target");
+    }
+    const existing = readRubricEntry(
+      await input.projection.get(rubricEntryKey(targetId)),
+    );
+    if (input.mutation.kind === "rubric-save-own") {
+      if (existing && !existing.archived) throw new TypeError("Rubric already exists");
+    } else if (
+      !existing || existing.archived ||
+      existing.revision !== input.mutation.expectedRevision
+    ) {
+      throw new TypeError("Rubric revision is stale or unavailable");
+    }
+    const currentRevision = readRubricRevision(
+      await input.projection.get(RUBRIC_REVISION_KEY),
+    );
+    const revision = currentRevision + 1;
+    const record: RubricAuthorityRecord = {
+      t: "rubric-upserted",
+      requestId: input.requestId,
+      mutationDigest,
+      id: targetId,
+      revision,
+      content: input.mutation.rubric.content,
+      at: input.at,
+    };
+    return {
+      records: [{ stream: RUBRIC_AUTHORITY_STREAM, body: record }],
+      revision,
+      candidateReferences: [input.mutation.rubric.content],
+    };
   }
 
   async read(
@@ -166,12 +251,12 @@ export class AnchorRubricGlobalStateAdapter implements GlobalStatePort {
             };
         return {
           kind: "append",
-          entries: [{ stream: RUBRIC_STREAM, body: record }],
+          entries: [{ stream: RUBRIC_AUTHORITY_STREAM, body: record }],
           value: revision,
         };
       },
       {
-        stream: RUBRIC_STREAM,
+        stream: RUBRIC_AUTHORITY_STREAM,
         ...(this.#cursor ? { cursor: this.#cursor } : {}),
         ...(prepared.kind === "upsert"
           ? { candidateReferences: [prepared.content] }
@@ -230,7 +315,7 @@ export class AnchorRubricGlobalStateAdapter implements GlobalStatePort {
       reduceRubricAuthority,
       () => ({ kind: "return", value: undefined }),
       {
-        stream: RUBRIC_STREAM,
+        stream: RUBRIC_AUTHORITY_STREAM,
         ...(this.#cursor ? { cursor: this.#cursor } : {}),
       },
     );
@@ -264,7 +349,7 @@ function reduceRubricAuthority(
   state: RubricAuthorityState,
   logical: { readonly stream: string; readonly body: RubricAuthorityRecord },
 ): RubricAuthorityState {
-  if (logical.stream !== RUBRIC_STREAM) return state;
+  if (logical.stream !== RUBRIC_AUTHORITY_STREAM) return state;
   const next: RubricAuthorityState = {
     entries: new Map(state.entries),
     requests: new Map(state.requests),
@@ -296,6 +381,107 @@ function reduceRubricAuthority(
   });
   next.revision = record.revision;
   return next;
+}
+
+async function reduceRubricDurableProjection(
+  envelope: import("../contracts/index.js").CommitEnvelope<RubricAuthorityRecord>,
+  current: DurableProjectionReadContext,
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const read = (key: string): Promise<JsonValue | undefined> =>
+    overlay.has(key) ? Promise.resolve(overlay.get(key)) : current.get(key);
+  const put = (key: string, value: JsonValue): void => {
+    overlay.set(key, value);
+    mutations.push({ kind: "put", key, value });
+  };
+  for (const logical of envelope.entries) {
+    if (logical.stream !== RUBRIC_AUTHORITY_STREAM) continue;
+    const record = logical.body;
+    const revision = readRubricRevision(await read(RUBRIC_REVISION_KEY));
+    if (record.revision !== revision + 1) {
+      throw new TypeError("Rubric authority revision is not contiguous");
+    }
+    if (await read(rubricRequestKey(record.requestId)) !== undefined) {
+      throw new TypeError("Rubric authority log contains a duplicate request id");
+    }
+    const request = {
+      mutationDigest: record.mutationDigest,
+      revision: record.revision,
+    };
+    if (record.t === "rubric-upserted") {
+      put(rubricEntryKey(record.id), {
+        archived: false,
+        content: record.content as unknown as JsonValue,
+        revision: record.revision,
+      });
+    } else {
+      const existing = readRubricEntry(await read(rubricEntryKey(record.id)));
+      if (!existing || existing.archived) {
+        throw new TypeError("Rubric authority log archives an unknown Rubric");
+      }
+      put(rubricEntryKey(record.id), {
+        archived: true,
+        content: existing.content as unknown as JsonValue,
+        revision: record.revision,
+      });
+    }
+    put(rubricRequestKey(record.requestId), request);
+    put(RUBRIC_REVISION_KEY, record.revision);
+  }
+  return mutations;
+}
+
+function rubricEntryKey(id: string): string {
+  return `${RUBRIC_ENTRY_PREFIX}${id}`;
+}
+
+function rubricRequestKey(requestId: string): string {
+  return `${RUBRIC_REQUEST_PREFIX}${requestId}`;
+}
+
+function readRubricRevision(value: JsonValue | undefined): number {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new TypeError("Rubric authority projection revision is invalid");
+  }
+  return Number(value);
+}
+
+function readRubricEntry(value: JsonValue | undefined):
+  | { readonly revision: number; readonly content: ArtifactRef; readonly archived: boolean }
+  | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof (value as { archived?: unknown }).archived !== "boolean" ||
+    !Number.isSafeInteger((value as { revision?: unknown }).revision)
+  ) {
+    throw new TypeError("Rubric authority projection entry is invalid");
+  }
+  const entry = value as unknown as {
+    readonly revision: number;
+    readonly content: ArtifactRef;
+    readonly archived: boolean;
+  };
+  if (!entry.content || typeof entry.content.digest !== "string") {
+    throw new TypeError("Rubric authority projection content is invalid");
+  }
+  return entry;
+}
+
+function readRubricRequest(value: JsonValue | undefined):
+  | { readonly mutationDigest: Digest; readonly revision: number }
+  | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof (value as { mutationDigest?: unknown }).mutationDigest !== "string" ||
+    !Number.isSafeInteger((value as { revision?: unknown }).revision)
+  ) {
+    throw new TypeError("Rubric authority projection request is invalid");
+  }
+  return value as unknown as { readonly mutationDigest: Digest; readonly revision: number };
 }
 
 function isRubricMutation(
