@@ -302,6 +302,7 @@ export async function createLocalOwnerAssemblyFixture(
         throw new Error("fixture: evidence unavailable");
       },
     },
+    currentAnchorDeviceId: () => authority.deviceId,
     dataPlane: {
       createStream: async ({ assignmentId }: { readonly assignmentId: string }) =>
         new StreamDigestChain(assignmentId),

@@ -225,13 +225,28 @@ type AnchorTransferCommit =                      // 锚点切换的唯一提交�
                                                  // 权威切换与信任换代恒为同一原子事实，两模式此项一致
       nextAnchorEpoch: number; nextTrustEpoch: number; targetIssuerPublicKey: string;
       readyProofDigest: Digest; signature: Signature /* 恢复根签名 */; at: IsoTime };
-interface SourceFreezeProof {                    // 源端权威签发：准入已关、在途已收束、导出即此检查点
+interface SourceFreezeProof extends WireSchemaV1<"SourceFreezeProof"> { // 源端权威签发：准入已关、在途已收束、导出即此检查点
   transferId: string; scope: "conversation"|"anchor"; subject: string;
   sourceEpoch: number; checkpointDigest: Digest; lastLsn: number; signature: Signature }
-interface ConversationTransferCommit {           // 收编（conversation 域）的唯一切换事实，目标锚点签发
-  transferId: string; conversationId: string; sourceDeviceId: string;
+interface ConversationTransferCommit extends WireSchemaV1<"ConversationTransferCommit"> { // 收编唯一切换事实，目标锚点签发
+  transferId: string; conversationId: string; sourceDeviceId: string; targetDeviceId: string;
   freezeProofDigest: Digest; checkpointDigest: Digest;
   sourceOwnerEpoch: number; nextOwnerEpoch: number; signature: Signature; at: IsoTime }
+interface ConversationTransferManifest extends WireSchemaV1<"ConversationTransferManifest"> {
+  requestId: string; transferId: string; sourceDeviceId: string; targetDeviceId: string;
+  conversationId: string; sourceOwnerEpoch: number; nextOwnerEpoch: number; lastLsn: number;
+  authorityBase: { checkpoint: DurableLogCheckpoint; records: ArtifactRef;
+    sessionState: ArtifactRef; reducerVersion: string };
+  streams: Array<{ stream: string; firstLsn: number; lastLsn: number;
+    recordCount: number; digest: Digest }>;
+  contentAssets: ArtifactRef[];
+}
+interface ConversationTransferAbort extends WireSchemaV1<"ConversationTransferAbort"> {
+  requestId: string; transferId: string; sourceDeviceId: string; targetDeviceId: string;
+  conversationId: string; sourceOwnerEpoch: number;
+  reason: "source-resumed"|"target-rejected"|"operator-cancelled";
+  at: IsoTime; signature: Signature;
+}
 
 interface PairingOffer { offerId: Ulid; homeId: Ulid;
   protocolVersion: string; issuer: { deviceId: string; keyFingerprint: Digest }; issuerNonce: string;
@@ -828,7 +843,7 @@ interface DeferredGlobalIntentPort {             // 离线全局意向的唯一�
 
 intent 流按 conversation 落**该对话 owner** 的 `intent:<conversationId>` 逻辑流（§4.1，本地域与锚点域流枚举均含）——随 AuthorityTransfer freeze / checkpoint 一并导出导入，收编零遗漏、归属零歧义。类型层只接 schedule 与 Rubric 两族（`DeferredGlobalIntent.mutation` 已封）。双拓扑测试随 S8。
 
-当前生产装配中，每个本地域 owner 只构造一个基于 executor AuthorityCommitLog 的 repository，schedule producer、rubric publication 与内部 list/discard 共用它；repository 只能经当前 `ConversationRunJournal` 暴露的窄 intent 事务写入。该事务在同一锁定前缀联合读取 control `session-create` 的耐久派生 identity、journal 已准入/工作场景 identity 与 delete 状态，固定按 exact replay → durable identity / delete / ownerEpoch guard → intent append 排序，使 conversation delete 与 fresh intent 唯一线性化，terminal replay 不依赖删除后的派生目录存在性。启动先恢复其 DurableProjectionIndex，全部写经既有 lifecycle gate。锚点只构造一个 anchor-mode repository 与 internal-only review service，`record` 在锚点恒拒绝；review 先经 locator 与 current-owner guard 定位 imported intent，再在同一 AuthorityCommitLog 事务提交全局 reducer 结果、control applied 与 intent confirmed。schedule confirmed 的首次决定与同终态 replay 在返回前必须经同一 durable pending materializer 追平原 task revision；失败保留 pending 供同进程重试或启动恢复，旧目标不得清除较新 pending。CLI、RPC 与渠道均不注册意向入口。
+当前生产装配中，每个本地域 owner 只构造一个基于 executor AuthorityCommitLog 的 repository，schedule producer、rubric publication 与内部 list/discard 共用它；repository 只能经当前 `ConversationRunJournal` 暴露的窄 intent 事务写入。该事务在同一锁定前缀联合读取 control `session-create` 的耐久派生 identity、journal 已准入/工作场景 identity 与 delete 状态，固定按 exact replay → durable identity / delete / ownerEpoch guard → intent append 排序，使 conversation delete 与 fresh intent 唯一线性化，terminal replay 不依赖删除后的派生目录存在性。启动先恢复其 DurableProjectionIndex，全部写经既有 lifecycle gate。锚点只构造一个 anchor-mode repository 与 internal-only review service，`record` 在锚点恒拒绝；review 先经 locator 与 current-owner guard 定位 imported intent，再在同一 AuthorityCommitLog 事务提交全局 reducer 结果、control applied 与 intent confirmed。schedule confirmed 的首次决定与同终态 replay 在返回前必须经同一 durable pending materializer 追平原 task revision；失败保留 pending 供同进程重试或启动恢复，旧目标不得清除较新 pending。CLI、RPC 与渠道均不注册意向入口。S8 收编提交或恢复安装完成后，由锚点组合根的单一 adoption coordinator 调用该 internal review：无冲突 rubric 自动落定，time-sensitive schedule 只经现有 `ConfirmationHub` 绑定当前已认证第一方接入面再确认；`session.resume` 在 observer 建立后返回稳定产品摘要，并由既有 `confirmation.list` 重浮现该连接错过的 pending，仍不形成公开 intent RPC、第二 pending 来源或新的通知协议。
 
 ### 3.3 EnvironmentPort（executor 本地）
 
@@ -1520,13 +1535,17 @@ type GovernorRecord =
 // 在线预检与 anchor / executor 重放必须先调用同一运行时 validator：按 t 精确封闭顶层字段并校验嵌套 workload / lease / usage；未知判别值、缺失字段和额外字段一律 fail-closed。
 // 幂等键：reserve=reservationId；dequeue=workload(kind+id+attempt)（重复同因幂等返回，异因拒绝）；usage-reserved/consume=usageId；settle/release/reclaim=reservationId+t（重复即幂等返回）
 
-type TransferRecord =      // 物理流固定 transfer:<transferId>；prepared 后各记录校验 scope / subject / epoch 不变；源 / 目标两端各自落流
-  | { t: "prepared";   transferId: string; scope: "conversation"|"anchor"; subject: string; sourceEpoch: number }
-  | { t: "frozen";     transferId: string; proof: SourceFreezeProof }
-  | { t: "imported";   transferId: string; checkpointDigest: Digest }
-  | { t: "committed";  transferId: string; commit: AnchorTransferCommit | ConversationTransferCommit; targetEpoch: number }
-  | { t: "tombstoned"; transferId: string }
-  | { t: "aborted";    transferId: string; abort: { decidedBy: string; reason: string; signature: Signature } };
+type TransferRecord = WireSchemaV1<"TransferRecord"> & ( // 当前已启用的 conversation 分支；物理流固定 transfer:<transferId>
+  | { t: "prepared"; requestId: string; transferId: string; sourceDeviceId: string;
+      targetDeviceId: string; conversationId: string; sourceOwnerEpoch: number; nextOwnerEpoch: number }
+  | { t: "frozen"; transferId: string; manifest: ArtifactRef; proof: SourceFreezeProof }
+  | { t: "imported"; transferId: string; manifestDigest: Digest; importedRecordBase: ArtifactRef }
+  | { t: "committed"; transferId: string; commit: ConversationTransferCommit }
+  | { t: "tombstoned"; transferId: string; commitDigest: Digest; at: IsoTime }
+  | { t: "aborted"; transferId: string; abort: ConversationTransferAbort }
+);
+// planned / disaster-recovery 的 anchor 分支仍由第 33～35 单元按 CheckpointEnvelope、
+// TrustTransition 与 ReadyProof 冻结；不得复用当前 conversation manifest 或伪装成已启用 wire。
 
 type TrustStreamRecord    = { t: "trust-event"; event: HomeTrustEvent };
 type PairingStreamRecord  =
@@ -2247,6 +2266,8 @@ system job 无 assignment、无 manifest / capability、无 CancelProof——执
 | 6 | imported | TransferAbort | 当前权威（DR 为恢复根）签发 | aborted | 源端（如在）恢复准入；目标 staging 隔离并幂等清理 |
 | 7 | committed | 旧端清理完成（DR 为旧设备隔离 / 擦除确认） | — | tombstoned | 旧端拒写并重定向 |
 | 8 | committed | TransferAbort 迟到 | —（不可中止） | committed | 拒绝并记录（逐边可测）；只允许更高 epoch 正向再迁居，epoch 永不回滚 |
+
+当前启用范围仅为 conversation 收编：源端与锚点目标各以同一 `transferId` 在自己的 `AuthorityCommitLog` 写 `TransferRecord`，manifest 规范字节与记录基底进入既有 `ArtifactStore`；目标在全量摘要、计数、资产和 reducer version 校验完成前只维护隔离 staging，`ConversationTransferCommit` 是目录可见性、current owner 与 next ownerEpoch 的唯一切换事实。启动先从 commit 恢复不可变历史基底和收编后记忆消费，再开放 mesh 准入；旧端接受同 commit 后永久 fencing 并可落 tombstone。planned anchor 迁居、灾难恢复、`CheckpointEnvelope`、`TrustTransition` 与 ReadyProof 仍属第 33～35 单元，当前 wire 与生产装配均不得接受。
 
 ### 6.4 设备状态与 UncertainResolution
 

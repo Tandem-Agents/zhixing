@@ -21,3 +21,4 @@ export * from "./channel-challenge-outbox.js";
 export * from "./session-state-adapter.js";
 export * from "./deferred-global-intents.js";
 export * from "./deferred-global-intent-review.js";
+export * from "./conversation-transfer.js";

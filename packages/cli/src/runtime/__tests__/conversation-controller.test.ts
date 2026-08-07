@@ -309,20 +309,53 @@ describe("ConversationController", () => {
     expect(conversation.resumeIfExists).toHaveBeenCalledWith("conv-stale");
   });
 
+  it("selectInitialConversation:本机模式必须先取得一次明确同意", async () => {
+    let enabled = false;
+    const conversation = {
+      list: vi.fn(async () => []),
+      requiresLocalContinuation: vi.fn(() => !enabled),
+      enableLocalContinuation: vi.fn(() => {
+        enabled = true;
+      }),
+      resumeIfExists: vi.fn(async () => null),
+      newConversation: vi.fn(async () => ({
+        conversationId: "conv-local",
+        name: "本机对话",
+      })),
+    };
+
+    await expect(
+      selectInitialConversation(conversation, {
+        confirmLocalContinuation: async () => false,
+      }),
+    ).rejects.toThrow("已取消在这台电脑继续");
+    expect(conversation.newConversation).not.toHaveBeenCalled();
+
+    await expect(
+      selectInitialConversation(conversation, {
+        confirmLocalContinuation: async () => true,
+      }),
+    ).resolves.toMatchObject({
+      active: { conversationId: "conv-local" },
+    });
+    expect(conversation.enableLocalContinuation).toHaveBeenCalledOnce();
+    expect(conversation.newConversation).toHaveBeenCalledOnce();
+  });
+
   it("start / resume / newConversation 维护当前对话 observer 订阅", async () => {
     const f = makeFakes();
     const { controller } = makeController(f);
 
     await controller.start();
-    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-1");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-1", 0);
 
     await controller.resume("conv-2");
     expect(f.conversation.unsubscribe).toHaveBeenCalledWith("conv-1");
-    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-2");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-2", 0);
 
     await controller.newConversation();
     expect(f.conversation.unsubscribe).toHaveBeenCalledWith("conv-2");
-    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-new");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-new", 0);
   });
 
   it("reattachActiveObserver:宿主换代后强制重挂当前对话 observer", async () => {
@@ -334,8 +367,8 @@ describe("ConversationController", () => {
 
     expect(f.conversation.unsubscribe).not.toHaveBeenCalled();
     expect(f.conversation.subscribe).toHaveBeenCalledTimes(2);
-    expect(f.conversation.subscribe).toHaveBeenNthCalledWith(1, "conv-1");
-    expect(f.conversation.subscribe).toHaveBeenNthCalledWith(2, "conv-1");
+    expect(f.conversation.subscribe).toHaveBeenNthCalledWith(1, "conv-1", 0);
+    expect(f.conversation.subscribe).toHaveBeenNthCalledWith(2, "conv-1", 0);
   });
 
   it("uses the authority run id for an explicit durable abort", async () => {
@@ -1236,7 +1269,7 @@ describe("ConversationController", () => {
 
     expect(result.kind).toBe("set-failed");
     expect(f.conversation.unsubscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
-    expect(f.conversation.subscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("ws:scene-1:conv-9", 0);
     expect(controller.current.conversationId).toBe("ws:scene-1:conv-9");
   });
 
@@ -1317,7 +1350,7 @@ describe("ConversationController", () => {
     );
     expect(f.conversation.resumeIfExists).toHaveBeenCalledWith("conv-latest");
     expect(f.conversation.resume).toHaveBeenCalledWith("conv-latest");
-    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-latest");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-latest", 0);
   });
 
   it("exitScene:无可用 main 对话时新建一个,不保留悬挂返回指针", async () => {
@@ -1336,7 +1369,7 @@ describe("ConversationController", () => {
       mode: { kind: "main" },
     });
     expect(f.conversation.newConversation).toHaveBeenCalled();
-    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-new");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-new", 0);
   });
 
   it("isWatching 在切换型 RPC 期间放行目标对话，完成后收敛回当前对话", async () => {

@@ -30,6 +30,7 @@ import type {
   SessionActivityBroadcast,
   SessionBroadcast,
 } from "@zhixing/rpc/session-broadcast";
+import type { SessionAdoptionReviewResult } from "@zhixing/rpc";
 import type { ServerConfig } from "./types.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 import type { PerspectivesController } from "./perspectives/index.js";
@@ -42,6 +43,26 @@ import type {
 } from "./runtime/management-directories.js";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
+
+/**
+ * 第一方会话 RPC 的窄覆盖点。只有不承载锚点会话域的生产宿主才注入；
+ * 方法仍须存在于 canonical RPC registry，认证与 wire 分发仍由 server 拥有。
+ */
+export interface FirstPartyConversationRpcRouter {
+  dispatch(input: {
+    readonly method: string;
+    readonly params: unknown;
+    readonly connection: {
+      readonly id: number;
+      readonly closed: boolean;
+      notify(method: string, params: unknown): void;
+      onClose(handler: () => void): () => void;
+    };
+  }): Promise<
+    | { readonly handled: false }
+    | { readonly handled: true; readonly result: unknown }
+  >;
+}
 
 export interface RuntimeControlAdapter {
   openFirstPartyFinality?: (input: {
@@ -222,6 +243,17 @@ export interface ServerContext {
   confirmationHub?: ConfirmationHub;
   /** 运行控制需要的可选事实源与动作钩子，由宿主装配层注入。 */
   runtimeControl?: RuntimeControlAdapter;
+  /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
+  conversationRpc?: FirstPartyConversationRpcRouter;
+  /**
+   * 收编后复核的窄接缝。session.resume 在 observer 身份成立后调用，需用户
+   * 再确认的排程由现有 confirmation 链定向交给当前已认证接入面。
+   */
+  conversationAdoptionReview?: (input: {
+    readonly conversationId: string;
+    readonly surfacePrincipal: string;
+    readonly connectionId: string;
+  }) => Promise<SessionAdoptionReviewResult | undefined>;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
   /**
@@ -264,6 +296,7 @@ export interface CreateContextOptions {
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   confirmationHub?: ConfirmationHub;
   runtimeControl?: RuntimeControlAdapter;
+  conversationRpc?: FirstPartyConversationRpcRouter;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -291,5 +324,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     channelHttpRoutes: opts.channelHttpRoutes,
     confirmationHub: opts.confirmationHub,
     runtimeControl: opts.runtimeControl,
+    conversationRpc: opts.conversationRpc,
   };
 }

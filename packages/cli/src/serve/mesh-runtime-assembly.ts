@@ -1,5 +1,9 @@
 import path from "node:path";
 import {
+  assertLocalConversationIdForDevice,
+  parseLocalConversationId,
+} from "@zhixing/core";
+import {
   FileResumableArtifactReceiver,
 } from "@zhixing/core/authority";
 import type {
@@ -22,6 +26,10 @@ import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import type {
   AssignmentSubmissionPreflightPort,
   RuntimeFactory,
+} from "@zhixing/owner-kernel";
+import {
+  ConversationTransferTarget,
+  listConversationTransferStates,
 } from "@zhixing/owner-kernel";
 import type {
   ConversationAssignmentLedger,
@@ -74,6 +82,16 @@ import {
   EvidenceMeshClient,
   registerEvidenceMeshService,
 } from "./evidence-mesh.js";
+import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
+import {
+  ConversationTransferMeshClient,
+  registerConversationTransferMeshService,
+} from "./conversation-transfer-mesh.js";
+import type { PostAdoptionMemoryPort } from "./post-adoption-memory.js";
+
+export interface PostAdoptionReviewPort {
+  reviewAfterAdoption(conversationId: string): Promise<unknown>;
+}
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
@@ -143,6 +161,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly authority: AuthorityRuntimeStack;
   readonly protocol?: ConversationProtocolRuntime;
+  readonly localConversationOwner?: LocalConversationOwnerAssembly;
   readonly jobRelays?: JobRelayObligationDirectory;
   readonly executor?: {
     readonly ledger: ConversationAssignmentLedger;
@@ -167,7 +186,10 @@ export class MeshRuntimeAssembly {
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
+  readonly #transferTarget: ConversationTransferTarget | undefined;
   readonly #disposers: Array<() => void> = [];
+  #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
+  #postAdoptionReview: PostAdoptionReviewPort | undefined;
   #started = false;
   #closed = false;
 
@@ -260,6 +282,23 @@ export class MeshRuntimeAssembly {
           ...routedSubmissionMeshRole(options.protocol!, options.jobRelays),
           globalState: anchorGlobalState!,
         }
+      : undefined;
+    this.#transferTarget = roles.has("anchor")
+      ? new ConversationTransferTarget({
+          deviceId: options.authority.deviceId,
+          log: options.authority.authorityLog,
+          artifacts: options.authority.artifacts,
+          signer: options.authority.signer,
+          verifier: options.authority.verifier,
+          isActiveSource: (deviceId) => this.#peerHasRole(deviceId, "executor"),
+          acceptsSourceConversationId: (deviceId, conversationId) => {
+            assertLocalConversationIdForDevice(conversationId, deviceId);
+            return true;
+          },
+          conversationExists: (conversationId) => options.protocol!.sessionExists(conversationId),
+          sourceOwnerEpoch: () => undefined,
+          reducerVersion: "conversation-session-state-v1",
+        })
       : undefined;
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
@@ -447,6 +486,29 @@ export class MeshRuntimeAssembly {
       );
     }
 
+    if (this.#transferTarget || options.localConversationOwner) {
+      this.#disposers.push(
+        registerConversationTransferMeshService(this.services, {
+          ...(options.localConversationOwner
+            ? { source: options.localConversationOwner.transferSource() }
+            : {}),
+          ...(this.#transferTarget ? { target: this.#transferTarget } : {}),
+          signer: options.authority.signer,
+          verifier: options.authority.verifier,
+          clientFor: (deviceId) => this.connections.client(deviceId),
+          authorizePeer: (deviceId) =>
+            this.#peerHasRole(deviceId, "anchor") || this.#peerHasRole(deviceId, "executor"),
+          ...(this.#transferTarget
+            ? {
+                afterCommit: async (base) => {
+                  await this.#installCommittedTransfer(base);
+                },
+              }
+            : {}),
+        }),
+      );
+    }
+
     this.#control = new ProductionMeshControlPlane({
       localIdentity: options.authority.identityKey,
       trust: options.trust,
@@ -481,7 +543,10 @@ export class MeshRuntimeAssembly {
       onConnection: async (connection) => {
         await fulfillConnectionLifetimeObligation({
           connectionClosed: connection.closed,
-          attempt: () => this.#finalizePairingBootstrap(connection.peer.deviceId),
+          attempt: async () => {
+            await this.#finalizePairingBootstrap(connection.peer.deviceId);
+            await this.#adoptLocalConversations(connection.peer.deviceId);
+          },
           shouldRetry: () => true,
           onError: (error) => options.onError?.(
             error instanceof Error ? error : new Error(String(error)),
@@ -525,10 +590,35 @@ export class MeshRuntimeAssembly {
     );
   }
 
+  /** Binds the anchor-only consumer and catches up every durable commit. */
+  async bindPostAdoptionMemory(port: PostAdoptionMemoryPort): Promise<void> {
+    if (!this.#transferTarget || !this.options.protocol) {
+      throw new Error("Post-adoption memory requires the anchor transfer target");
+    }
+    if (this.#postAdoptionMemory && this.#postAdoptionMemory !== port) {
+      throw new Error("Post-adoption memory is already bound");
+    }
+    this.#postAdoptionMemory = port;
+    await this.#restoreCommittedTransfers();
+  }
+
+  /** Binds the anchor review seam and catches up every durable commit. */
+  async bindPostAdoptionReview(port: PostAdoptionReviewPort): Promise<void> {
+    if (!this.#transferTarget || !this.options.protocol) {
+      throw new Error("Post-adoption review requires the anchor transfer target");
+    }
+    if (this.#postAdoptionReview && this.#postAdoptionReview !== port) {
+      throw new Error("Post-adoption review is already bound");
+    }
+    this.#postAdoptionReview = port;
+    await this.#restoreCommittedTransfers();
+  }
+
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
+      await this.#restoreCommittedTransfers();
       await this.#control.start();
       await this.#worker?.recover();
       this.#started = true;
@@ -798,6 +888,94 @@ export class MeshRuntimeAssembly {
       bindingId: `pairing:${offerId}`,
     });
     await continuations.clear(offerId);
+  }
+
+  async #restoreCommittedTransfers(): Promise<void> {
+    if (!this.#transferTarget || !this.options.protocol) return;
+    const states = await listConversationTransferStates(
+      this.options.authority.authorityLog,
+      this.options.authority.verifier,
+    );
+    for (const state of states) {
+      if (state.phase !== "committed" && state.phase !== "tombstoned") continue;
+      const base = await this.#transferTarget.committedBase(state.identity.transferId);
+      await this.#installCommittedTransfer(base);
+    }
+  }
+
+  async #installCommittedTransfer(base: {
+    readonly manifest: import("@zhixing/core/contracts").ConversationTransferManifest;
+    readonly records: readonly import("@zhixing/owner-kernel").ConversationTransferAuthorityRecord[];
+  }): Promise<void> {
+    const protocol = this.options.protocol;
+    if (!protocol) throw new Error("Conversation transfer target has no owner protocol");
+    await protocol.installCommittedConversationTransfer(base);
+    await Promise.all([
+      this.#postAdoptionMemory
+        ? this.#postAdoptionMemory.flush(
+            await protocol.conversationMemoryFlushes(base.manifest.conversationId),
+          )
+        : Promise.resolve(),
+      this.#postAdoptionReview
+        ? this.#postAdoptionReview.reviewAfterAdoption(base.manifest.conversationId)
+        : Promise.resolve(),
+    ]);
+  }
+
+  async #adoptLocalConversations(peerDeviceId: string): Promise<void> {
+    const owner = this.options.localConversationOwner;
+    if (
+      !owner ||
+      peerDeviceId !== this.options.trust.issuer.deviceId ||
+      !this.#peerHasRole(peerDeviceId, "anchor")
+    ) {
+      return;
+    }
+    const identity = owner.transferIdentity();
+    const source = owner.transferSource();
+    const client = new ConversationTransferMeshClient(
+      this.connections.client(peerDeviceId),
+      this.options.authority.signer,
+      this.options.authority.verifier,
+    );
+    const states = await listConversationTransferStates(
+      this.options.authority.executorLog,
+      this.options.authority.verifier,
+    );
+    for (const conversationId of await owner.port().listConversations()) {
+      const parsed = parseLocalConversationId(conversationId);
+      if (!parsed) continue;
+      const prior = states.find((state) =>
+        state.identity.conversationId === conversationId &&
+        state.identity.targetDeviceId === peerDeviceId &&
+        state.phase !== "aborted"
+      );
+      if (prior?.phase === "committed" || prior?.phase === "tombstoned") continue;
+      const transferId = prior?.identity.transferId ?? `xfer-${parsed.ulid}`;
+      const requestId = prior?.identity.requestId ?? `adopt:${conversationId}`;
+      const prepared = {
+        v: 1 as const,
+        t: "prepared" as const,
+        requestId,
+        transferId,
+        sourceDeviceId: identity.deviceId,
+        targetDeviceId: peerDeviceId,
+        conversationId,
+        sourceOwnerEpoch: identity.ownerEpoch,
+        nextOwnerEpoch: identity.ownerEpoch + 1,
+      };
+      await client.prepare(prepared);
+      await source.prepare({
+        requestId,
+        transferId,
+        targetDeviceId: peerDeviceId,
+        conversationId,
+        sourceOwnerEpoch: identity.ownerEpoch,
+      });
+      const frozen = await source.freeze(transferId);
+      const commit = await client.importAndCommit(frozen);
+      await source.acceptCommit({ manifest: frozen.manifest, commit });
+    }
   }
 
 

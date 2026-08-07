@@ -24,7 +24,12 @@ import { createConfirmationBridge } from "@zhixing/rpc";
 
 function makeFakeConnection(
   id: number,
-  opts?: { authenticated?: boolean; closed?: boolean; loopback?: boolean },
+  opts?: {
+    authenticated?: boolean;
+    closed?: boolean;
+    loopback?: boolean;
+    surfacePrincipal?: string;
+  },
 ): RpcConnection & {
   notifications: Array<{ method: string; params: unknown }>;
 } {
@@ -36,6 +41,7 @@ function makeFakeConnection(
     authenticated: opts?.authenticated ?? true,
     loopback: opts?.loopback ?? false,
     clientInfo: undefined,
+    surfacePrincipal: opts?.surfacePrincipal,
     sendSuccess: vi.fn(),
     sendError: vi.fn(),
     notify: (method: string, params: unknown) => {
@@ -164,6 +170,36 @@ describe("ConfirmationBridge — observer-scoped 推送", () => {
     expect(remotePending.operationSummary).toBeDefined();
 
     broker.resolve("r1", { kind: "allow-once" });
+    await promise;
+    bridge.dispose();
+  });
+
+  it("第一方稳定身份重连后仍取得原 pending 的完整请求", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("adoption", broker);
+    const current = makeFakeConnection(9, {
+      loopback: true,
+      surfacePrincipal: "rpc:zhixing-cli:stable",
+    });
+    const bridge = createConfirmationBridge({
+      connections: new Set([current]),
+      hub,
+      conversations: makeFakeConversations(new Map()),
+    });
+
+    const promise = broker.requestConfirmation(makeRequest(
+      "r-stable",
+      "确认离线期间保存的排程",
+      { channel: "rpc", triggeredBy: "rpc:zhixing-cli:stable" },
+    ));
+
+    expect(current.notifications[0]).toMatchObject({
+      method: "confirmation.pending",
+      params: { request: { id: "r-stable" } },
+    });
+    broker.resolve("r-stable", { kind: "allow-once" });
     await promise;
     bridge.dispose();
   });

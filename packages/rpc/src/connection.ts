@@ -4,5 +4,6 @@ export interface RpcNotificationConnection {
   readonly authenticated: boolean;
   readonly loopback: boolean;
   readonly closed: boolean;
+  readonly surfacePrincipal?: string;
   notify(method: string, params?: unknown): void;
 }

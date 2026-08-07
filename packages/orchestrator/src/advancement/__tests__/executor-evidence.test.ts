@@ -53,6 +53,7 @@ describe("ExecutorEvidenceHandler", () => {
     await fs.writeFile(path.join(root, "workspace", "logs", "run.log"), "passed\n");
     let now = "2026-08-03T00:10:00.000Z";
     let environmentCalls = 0;
+    let currentOwner = true;
     const environment = environmentFor(path.join(root, "workspace"), () => environmentCalls++);
     const journal = new EvidenceJournal({
       file: path.join(root, "evidence.jsonl"),
@@ -65,6 +66,9 @@ describe("ExecutorEvidenceHandler", () => {
       journal,
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {
+        if (!currentOwner) throw new TypeError("stale owner");
+      },
       now: () => now,
     });
     const input = request();
@@ -79,6 +83,12 @@ describe("ExecutorEvidenceHandler", () => {
     now = "2026-08-03T02:00:00.000Z";
     const replay = await handler.collect(input, new AbortController().signal);
     expect(replay).toEqual(first);
+    expect(environmentCalls).toBe(2);
+
+    currentOwner = false;
+    await expect(handler.collect(input, new AbortController().signal)).rejects.toThrow(
+      "stale owner",
+    );
     expect(environmentCalls).toBe(2);
   });
 
@@ -95,6 +105,7 @@ describe("ExecutorEvidenceHandler", () => {
       }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
     });
 
@@ -119,6 +130,7 @@ describe("ExecutorEvidenceHandler", () => {
       }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
     });
 
@@ -147,6 +159,7 @@ describe("ExecutorEvidenceHandler", () => {
       }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
       betweenObservations: () => fs.writeFile(log, "after\n"),
     });
@@ -176,6 +189,7 @@ describe("ExecutorEvidenceHandler", () => {
       }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
       afterFileOpened: async (canonicalPath) => {
         if (replaced) return;
@@ -211,6 +225,7 @@ describe("ExecutorEvidenceHandler", () => {
       journal: new EvidenceJournal({ file: path.join(root, "journal.jsonl"), verifier: identity }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
     });
 
@@ -231,6 +246,7 @@ describe("ExecutorEvidenceHandler", () => {
       journal: new EvidenceJournal({ file: path.join(root, "journal.jsonl"), verifier: identity }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
     });
     const mismatch = request({
@@ -272,6 +288,7 @@ describe("ExecutorEvidenceHandler", () => {
         }),
         signer: identity,
         verifier: identity,
+        verifyCurrentOwner: () => {},
         now: () => "2026-08-03T00:10:00.000Z",
       });
     const first = await makeHandler("first.jsonl").collect(
@@ -323,6 +340,7 @@ describe("ExecutorEvidenceHandler", () => {
       journal: new EvidenceJournal({ file, verifier: identity }),
       signer: identity,
       verifier: identity,
+      verifyCurrentOwner: () => {},
       now: () => "2026-08-03T00:10:00.000Z",
     });
     const input = request();

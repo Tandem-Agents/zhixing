@@ -68,6 +68,7 @@ import {
 import { registerCleanup } from "@zhixing/server";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
+import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
 const mcpSurface: AccessSurface = {
@@ -154,6 +155,13 @@ const authorityRuntimeSurface: AccessSurface = {
         }),
         signer: authorityRuntime.signer,
         verifier: authorityRuntime.verifier,
+        verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({
+          authority: authorityRuntime,
+          currentAnchorDeviceId: () =>
+            ctx.meshBootstrap.mode === "trusted-home"
+              ? ctx.meshBootstrap.trust.issuer.deviceId
+              : authorityRuntime.deviceId,
+        }),
         capacity: ctx.advancementCapacity,
       });
     }
@@ -271,6 +279,9 @@ const meshSurface: AccessSurface = {
       bootstrapStore: bootstrap.bootstrapStore,
       authority: ctx.authorityRuntime,
       protocol: ctx.conversationProtocol,
+      ...(ctx.localConversationOwner
+        ? { localConversationOwner: ctx.localConversationOwner }
+        : {}),
       ...(ctx.jobRelayObligations
         ? { jobRelays: ctx.jobRelayObligations }
         : {}),
@@ -696,6 +707,10 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       credentials: ctx.providerCredentials ?? {},
       dataPlane: ctx.executorDataPlane,
       evidence: ctx.evidenceHandler,
+      currentAnchorDeviceId: () =>
+        ctx.meshBootstrap.mode === "trusted-home"
+          ? ctx.meshBootstrap.trust.issuer.deviceId
+          : ctx.authorityRuntime!.deviceId,
     });
     const cleanup = ctx.startupRollback.register(
       "localConversationOwner.close",

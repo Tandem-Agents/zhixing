@@ -71,6 +71,9 @@ export interface ConversationStatusCursor {
 }
 
 export class RpcConversationFacade {
+  #localContinuation = false;
+  #localOnly = false;
+
   constructor(private readonly link: CoreHostRpcLink) {}
 
   // ─── 方法域 ───
@@ -104,6 +107,7 @@ export class RpcConversationFacade {
       turnId,
       surfaceCapabilities: { postTurnControl: true },
       ...(options.engage ? { engage: options.engage } : {}),
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 
@@ -111,7 +115,16 @@ export class RpcConversationFacade {
   async list(): Promise<SessionConversationEntry[]> {
     const client = await this.link.getClient();
     const result = await client.request<SessionListResult>("session.list");
+    this.#localOnly = result.availability?.mode === "local-only";
     return result.conversations;
+  }
+
+  requiresLocalContinuation(): boolean {
+    return this.#localOnly && !this.#localContinuation;
+  }
+
+  enableLocalContinuation(): void {
+    this.#localContinuation = true;
   }
 
   /** 倒读落盘事实流(新→旧分页),不要求会话活跃。 */
@@ -133,6 +146,7 @@ export class RpcConversationFacade {
     return client.request<SessionRenameResult>("session.rename", {
       conversationId,
       name,
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 
@@ -141,6 +155,7 @@ export class RpcConversationFacade {
     await this.#requestWithReconnect("session.delete", {
       conversationId,
       requestId: `delete:${generateTurnId()}`,
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 
@@ -154,6 +169,7 @@ export class RpcConversationFacade {
       conversationId,
       requestId,
       ...(runId ? { runId } : {}),
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 
@@ -232,7 +248,9 @@ export class RpcConversationFacade {
   /** 建一个新对话(宿主写 meta + transcript 壳),返回身份供切指针。 */
   async newConversation(): Promise<SessionNewResult> {
     const client = await this.link.getClient();
-    return client.request<SessionNewResult>("session.new");
+    return client.request<SessionNewResult>("session.new", {
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+    });
   }
 
   /** 清空对话(宿主先盘后窗;busy 时 BUSY 拒绝);断线以同一 requestId 重放。 */
@@ -240,6 +258,7 @@ export class RpcConversationFacade {
     await this.#requestWithReconnect("session.clear", {
       conversationId,
       requestId: `clear:${generateTurnId()}`,
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 
@@ -248,6 +267,7 @@ export class RpcConversationFacade {
     const client = await this.link.getClient();
     return client.request<SessionCompactResult>("session.compact", {
       conversationId,
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 
@@ -256,10 +276,14 @@ export class RpcConversationFacade {
     conversationId: string,
     action: SessionTaskListAction,
   ): Promise<SessionTaskListUpdateResult> {
-    const client = await this.link.getClient();
-    return client.request<SessionTaskListUpdateResult>(
+    return this.#requestWithReconnect<SessionTaskListUpdateResult>(
       "session.taskListUpdate",
-      { conversationId, action },
+      {
+        conversationId,
+        action,
+        requestId: `task-list:${generateTurnId()}`,
+        ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      },
     );
   }
 
@@ -306,6 +330,7 @@ export class RpcConversationFacade {
     const client = await this.link.getClient();
     return client.request<SessionResumeResult>("session.resume", {
       conversationId,
+      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
     });
   }
 

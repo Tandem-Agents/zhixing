@@ -52,7 +52,8 @@ export interface ExecutorEvidenceHandlerOptions {
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
   readonly capacity?: AgentRuntimeCapacityBinding;
-  readonly authorizeOwner?: (request: EvidenceRequest) => Promise<boolean> | boolean;
+  /** Must reject stale authority before any journal or workspace read. */
+  readonly verifyCurrentOwner: (request: EvidenceRequest) => Promise<void> | void;
   readonly now?: () => string;
   /** 测试故障注入：pre 采样完成后、post 采样前执行。 */
   readonly betweenObservations?: () => Promise<void>;
@@ -81,12 +82,10 @@ export class ExecutorEvidenceHandler implements EvidenceHandlerPort {
     }
     const request = validateEvidenceRequest(raw, this.#options.verifier);
     this.#assertRequestBinding(request);
+    await this.#options.verifyCurrentOwner(request);
     const replay = await this.#options.journal.replay(request);
     if (replay) return replay;
     this.#assertRequestFresh(request);
-    if (this.#options.authorizeOwner && !(await this.#options.authorizeOwner(request))) {
-      throw new TypeError("Evidence request owner is not current or trusted");
-    }
     const existing = this.#inflight.get(request.requestId);
     if (existing) return await existing;
     const operation = this.#collectOnce(request, abort).finally(() => {

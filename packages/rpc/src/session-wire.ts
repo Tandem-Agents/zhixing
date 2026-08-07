@@ -278,6 +278,13 @@ export interface SessionConversationEntry {
 
 export interface SessionListResult {
   conversations: SessionConversationEntry[];
+  /** 第一方入口当前可用的会话范围；省略等价于完整值班能力。 */
+  availability?:
+    | { mode: "anchor" }
+    | {
+        mode: "local-only";
+        unavailableCapabilities: readonly string[];
+      };
 }
 
 export interface SessionRenameResult {
@@ -302,6 +309,27 @@ export interface SessionNewResult {
   name: string;
 }
 
+/**
+ * 本机对话被值班设备接管后的用户可见复核摘要。
+ * 这里只承载产品语言与计数；可执行确认继续复用 confirmation.* 既有链路。
+ */
+export type SessionAdoptionReviewResult =
+  | {
+      status: "ready";
+      mergedConversationCount: number;
+      appliedRuleCount: number;
+      pendingScheduleCount: number;
+      pendingRuleCount: number;
+      message: string;
+    }
+  | {
+      status: "retry";
+      mergedConversationCount: number;
+      pendingScheduleCount: number;
+      pendingRuleCount: number;
+      message: string;
+    };
+
 export interface SessionResumeResult {
   conversationId: string;
   name: string;
@@ -309,6 +337,7 @@ export interface SessionResumeResult {
   active: boolean;
   busy: boolean;
   advancement?: SessionAdvancementStateSnapshot;
+  adoptionReview?: SessionAdoptionReviewResult;
 }
 
 /** /task new·done 的动作形(执行体在宿主,语义单一定义于装配实现) */

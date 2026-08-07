@@ -35,7 +35,8 @@ export interface RpcConfirmationBrokerOptions {
 
 export class RpcConfirmationBroker implements ConfirmationRendererPort {
   private readonly listeners = new Set<RequestListener>();
-  private readonly unsubscribe: () => void;
+  private readonly unsubscribes: readonly (() => void)[];
+  private readonly visible = new Set<string>();
   /**
    * requestId → conversationId,取自 pending 推送:重试携带它让宿主在
    * entry 已出索引(丢响应/重启)时按耐久 interaction outcome 回放原结果。
@@ -48,30 +49,34 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
   private disposed = false;
 
   constructor(private readonly opts: RpcConfirmationBrokerOptions) {
-    this.unsubscribe = opts.link.onNotification(
-      CONFIRMATION_NOTIFICATIONS.pending,
-      (params) => {
-        if (this.disposed) return;
-        const payload = params as {
-          request?: ConfirmationRequest;
-          conversationId?: string;
-        };
-        if (!payload.request) return;
-        if (payload.conversationId) {
-          if (
-            this.pendingConversations.size >=
-            RpcConfirmationBroker.MAX_PENDING_CONVERSATIONS
-          ) {
-            const oldest = this.pendingConversations.keys().next().value;
-            if (oldest !== undefined) this.pendingConversations.delete(oldest);
-          }
-          this.pendingConversations.set(payload.request.id, payload.conversationId);
-        }
-        for (const listener of [...this.listeners]) {
-          listener(payload.request);
-        }
-      },
-    );
+    this.unsubscribes = [
+      opts.link.onNotification(
+        CONFIRMATION_NOTIFICATIONS.pending,
+        (params) => this.acceptPending(params),
+      ),
+      opts.link.onNotification(
+        CONFIRMATION_NOTIFICATIONS.resolved,
+        (params) => {
+          const requestId = (params as { requestId?: unknown }).requestId;
+          if (typeof requestId !== "string") return;
+          this.visible.delete(requestId);
+          this.pendingConversations.delete(requestId);
+        },
+      ),
+    ];
+  }
+
+  /** Replays pending requests after a missed notification or host reconnect. */
+  async refresh(): Promise<void> {
+    if (this.disposed) return;
+    const client = await this.opts.link.getClient();
+    const result = await client.request<{
+      readonly items: readonly {
+        readonly conversationId?: string;
+        readonly request?: ConfirmationRequest;
+      }[];
+    }>("confirmation.list");
+    for (const item of result.items) this.acceptPending(item);
   }
 
   onRequest(listener: RequestListener): () => void {
@@ -83,9 +88,11 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
 
   resolve(requestId: string, decision: ConfirmationDecision): boolean {
     if (this.disposed) return false;
-    void this.resolveWithReconnect(requestId, decision).catch((err) =>
-      this.opts.onResolveError?.(err, requestId),
-    );
+    void this.resolveWithReconnect(requestId, decision).catch((err) => {
+      this.visible.delete(requestId);
+      this.opts.onResolveError?.(err, requestId);
+      void this.refresh().catch(() => {});
+    });
     return true;
   }
 
@@ -122,8 +129,30 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.unsubscribe();
+    for (const unsubscribe of this.unsubscribes) unsubscribe();
     this.listeners.clear();
     this.pendingConversations.clear();
+    this.visible.clear();
+  }
+
+  private acceptPending(params: unknown): void {
+    if (this.disposed) return;
+    const payload = params as {
+      request?: ConfirmationRequest;
+      conversationId?: string;
+    };
+    if (!payload.request || this.visible.has(payload.request.id)) return;
+    this.visible.add(payload.request.id);
+    if (payload.conversationId) {
+      if (
+        this.pendingConversations.size >=
+        RpcConfirmationBroker.MAX_PENDING_CONVERSATIONS
+      ) {
+        const oldest = this.pendingConversations.keys().next().value;
+        if (oldest !== undefined) this.pendingConversations.delete(oldest);
+      }
+      this.pendingConversations.set(payload.request.id, payload.conversationId);
+    }
+    for (const listener of [...this.listeners]) listener(payload.request);
   }
 }

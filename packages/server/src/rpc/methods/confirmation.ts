@@ -18,6 +18,7 @@ import type { ConfirmationDecision, ConfirmationRequest } from "@zhixing/core";
 import { confirmationDecisionDigest } from "@zhixing/core/protocol";
 import type { HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 import type { MethodEntry } from "../handlers.js";
+import type { RpcConnection } from "../connection.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
@@ -69,6 +70,8 @@ interface ConfirmationListItem {
   riskLevel?: string;
   expiresAt: number;
   turnOrigin?: unknown;
+  /** 仅当前已认证本机发起面可取得完整可执行请求。 */
+  request?: ConfirmationRequest;
 }
 
 interface ConfirmationListResult {
@@ -99,9 +102,13 @@ export function buildConfirmationListMethod(): MethodEntry {
           visible = all.filter((e) => e.conversationId === params.conversationId);
         }
       } else {
-        // 未指定：返回"caller 是 observer 的所有会话"的 pending；ephemeral（无 convId）不暴露
+        // 未指定：返回 caller 观察中的会话请求，以及明确绑定当前连接的宿主请求。
+        // 后者用于进程重启/通知丢失后重浮现收编复核，不把无归属 ephemeral
+        // 请求广播给其它连接。
         visible = all.filter((e) => {
-          if (!e.conversationId) return false;
+          if (!e.conversationId) {
+            return rpcOriginMatches(e.request, ctx.connection);
+          }
           const observerIds = conversations.getObserverConnectionIds(
             e.conversationId,
           );
@@ -109,7 +116,9 @@ export function buildConfirmationListMethod(): MethodEntry {
         });
       }
 
-      return { items: visible.map(toListItem) };
+      return { items: visible.map((entry) =>
+        toListItem(entry, ctx.connection)
+      ) };
     },
   };
 }
@@ -176,9 +185,7 @@ export function buildConfirmationResolveMethod(): MethodEntry {
         return replayDurableOutcome(ctx.server, params);
       }
 
-      const callerId = String(ctx.connection.id);
-      const origin = entry.request.turnOrigin;
-      if (origin?.channel !== "rpc" || origin.triggeredBy !== callerId) {
+      if (!rpcOriginMatches(entry.request, ctx.connection)) {
         throw RpcErrors.unauthorized(
           "Only the originating surface may resolve this confirmation",
         );
@@ -293,7 +300,10 @@ function requireConversations(server: ServerContext) {
   return server.conversations;
 }
 
-function toListItem(entry: HubEntry): ConfirmationListItem {
+function toListItem(
+  entry: HubEntry,
+  connection: RpcConnection,
+): ConfirmationListItem {
   const req: ConfirmationRequest = entry.request;
   return {
     requestId: req.id,
@@ -303,5 +313,21 @@ function toListItem(entry: HubEntry): ConfirmationListItem {
     riskLevel: req.decision?.riskLevel,
     expiresAt: req.expiresAt,
     turnOrigin: req.turnOrigin,
+    ...(connection.authenticated &&
+    connection.loopback &&
+    rpcOriginMatches(req, connection)
+      ? { request: req }
+      : {}),
   };
+}
+
+function rpcOriginMatches(
+  request: ConfirmationRequest,
+  connection: RpcConnection,
+): boolean {
+  const origin = request.turnOrigin;
+  return origin?.channel === "rpc" && (
+    origin.triggeredBy === String(connection.id) ||
+    origin.triggeredBy === connection.surfacePrincipal
+  );
 }

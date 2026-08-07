@@ -125,7 +125,8 @@ function canReceiveFullRequest(
     !conn.closed &&
     conn.loopback === true &&
     origin?.channel === "rpc" &&
-    origin.triggeredBy === String(conn.id)
+    (origin.triggeredBy === String(conn.id) ||
+      origin.triggeredBy === conn.surfacePrincipal)
   );
 }
 

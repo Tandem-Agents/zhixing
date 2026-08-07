@@ -46,10 +46,23 @@ import {
   EvidenceJournal,
   ExecutorEvidenceHandler,
 } from "@zhixing/orchestrator/advancement";
+import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
+import { LocalConversationRpcRouter } from "./local-conversation-rpc.js";
+import {
+  createServerContext,
+  DEFAULT_SERVER_CONFIG,
+  getDefaultLogPath,
+  runServer,
+  ServerStateFile,
+  type RunningServer,
+} from "@zhixing/server";
+import { loadOrCreateToken } from "./token.js";
+import { homeToPort } from "./host-port.js";
+import { isDaemonChild } from "./self-exec.js";
 
 export async function runExecutorRole(
-  _options: ServeOptions,
+  options: ServeOptions,
   bootstrap: ServeBootstrapContext,
   executor?: ExecutorRoleModule,
 ): Promise<void> {
@@ -63,6 +76,7 @@ export async function runExecutorRole(
   ) {
     throw new Error("Executor-only host received an incompatible role projection");
   }
+  const currentAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
 
   const startup = bootstrap.startup;
   const zhixingHome = getZhixingHome();
@@ -85,6 +99,9 @@ export async function runExecutorRole(
   let localWorkspaceHost: LocalWorkspaceManagementHost | undefined;
   let evidenceHandler: ExecutorEvidenceHandler | undefined;
   let localConversationOwner: LocalConversationOwnerAssembly | undefined;
+  let localConversationServer: RunningServer | undefined;
+  let localServerState: ServerStateFile | undefined;
+  let localServerHeartbeat: NodeJS.Timeout | undefined;
   let roleFailure: unknown;
   try {
     const interactions = new DurableConversationInteractionObserver();
@@ -161,6 +178,10 @@ export async function runExecutorRole(
       }),
       signer: authority.signer,
       verifier: authority.verifier,
+      verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({
+        authority,
+        currentAnchorDeviceId: () => currentAnchorDeviceId,
+      }),
       capacity: deviceCapacity.workload("workload-advancement"),
     });
     dataPlane = new ExecutorDataPlaneRuntime({
@@ -235,6 +256,7 @@ export async function runExecutorRole(
       config: startup.config,
       credentials: providerCredentials,
       evidence: evidenceHandler,
+      currentAnchorDeviceId: () => currentAnchorDeviceId,
       dataPlane,
     });
     jobOwnerAssembly = new ExecutorJobOwnerAssembly({
@@ -269,6 +291,7 @@ export async function runExecutorRole(
       transportPeers: bootstrap.mesh.transportPeers,
       bootstrapStore: bootstrap.mesh.bootstrapStore,
       authority,
+      localConversationOwner,
       executor: {
         ledger,
         runtimeFactory,
@@ -289,11 +312,73 @@ export async function runExecutorRole(
     );
     await jobOwnerLifecycle.start();
     await localConversationOwner.start();
+    const token = await loadOrCreateToken();
+    const localConversationRpc = new LocalConversationRpcRouter({
+      deviceId: authority.deviceId,
+      owner: localConversationOwner.port(),
+    });
+    const serverContext = createServerContext({
+      config: {
+        ...DEFAULT_SERVER_CONFIG,
+        port: options.port ?? homeToPort(zhixingHome),
+        host: options.host ?? DEFAULT_SERVER_CONFIG.host,
+      },
+      version: ZHIXING_CLI_VERSION,
+      token: token.token,
+      conversationRpc: localConversationRpc,
+      runtimeControl: {
+        conversationStatus: (after) =>
+          localConversationOwner!.port().statusHistory(after),
+        conversationFinalHistory: (conversationId, afterCommitRevision) =>
+          localConversationOwner!.port().finalHistory(
+            conversationId,
+            afterCommitRevision,
+          ),
+      },
+      hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath() : undefined },
+    });
+    localConversationServer = await runServer({
+      context: serverContext,
+      skipSignalHandlers: true,
+      processInfo: {
+        version: ZHIXING_CLI_VERSION,
+        kind: "zhixing-local-conversation-host",
+        ...(isDaemonChild() ? { logPath: getDefaultLogPath() } : {}),
+      },
+      logger: {
+        info: (message) => writer.notify(`[local-session] ${message}`),
+        warn: (message) => writer.notify(`[local-session] ${message}`),
+        error: (message) => writer.notify(`[local-session] ${message}`),
+      },
+    });
+    if (isDaemonChild()) {
+      localServerState = new ServerStateFile();
+      await localServerState.markReady({
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        port: localConversationServer.server.port,
+        host: localConversationServer.server.host,
+      });
+      await localServerState.markRunning();
+      localServerHeartbeat = setInterval(() => {
+        void localServerState?.heartbeat();
+      }, 60_000);
+      localServerHeartbeat.unref();
+    }
     await waitForRoleShutdown();
   } catch (error) {
     roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
+  try {
+    if (localServerHeartbeat) clearInterval(localServerHeartbeat);
+    await localServerState?.markStopping("graceful");
+    await localConversationServer?.shutdown("executor-role-stop");
+    await localServerState?.markStopped();
+    await localServerState?.cleanup();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
   try {
     await localConversationOwner?.close();
   } catch (error) {

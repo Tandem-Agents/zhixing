@@ -119,6 +119,8 @@ import {
   createMemoryDirectory,
 } from "./management-directories.js";
 import { createAnchorJournalMaintenance } from "./journal-maintenance.js";
+import { createPostAdoptionMemoryPort } from "./post-adoption-memory.js";
+import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
@@ -698,6 +700,23 @@ async function runServerProcess(
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
   const ephemeralRuntime = await runtimeHost.createEphemeralRuntime();
 
+  if (ctx.meshRuntime && ctx.authorityRuntime?.globalState) {
+    await ctx.meshRuntime.bindPostAdoptionMemory(
+      createPostAdoptionMemoryPort({
+        globalState: ctx.authorityRuntime.globalState,
+        anchorEpoch: ctx.authorityRuntime.anchorEpoch,
+        callText: governControlTextCall(
+          {
+            governor: ctx.authorityRuntime.resourceGovernor,
+            origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
+            workPrefix: "post-adoption-memory",
+          },
+          ephemeralRuntime.callText.bind(ephemeralRuntime),
+        ),
+      }),
+    );
+  }
+
   // Scheduler job 由 executor owner 的耐久数据面执行；管理用 ephemeral
   // runtime 只服务 llm.complete，不再充当 scheduler runtime 或确认 broker。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
@@ -743,6 +762,7 @@ async function runServerProcess(
   // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
   // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
   let schedulerRuntime: AnchorSchedulerRuntime | undefined;
+  let adoptionReview: PostAdoptionReviewCoordinator | undefined;
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
   if (ctx.enabledRoles.includes("anchor")) {
     if (
@@ -862,6 +882,7 @@ async function runServerProcess(
     schedulerCleanup = startupRollback.register(
       "scheduler.stop",
       async () => {
+        adoptionReview?.close();
         await journalMaintenance?.stop();
         await runtime.stop();
       },
@@ -894,6 +915,14 @@ async function runServerProcess(
       ),
     });
     await runtime.start();
+    adoptionReview = new PostAdoptionReviewCoordinator({
+      review: runtime.deferredIntents,
+      hub: confirmationHub,
+      workingDirectory: ephemeralRuntime.resolvedWorkspace.path ?? process.cwd(),
+    });
+    if (ctx.meshRuntime) {
+      await ctx.meshRuntime.bindPostAdoptionReview(adoptionReview);
+    }
     await journalMaintenance?.start();
   }
   const scheduler = schedulerProductRef;
@@ -1015,6 +1044,14 @@ async function runServerProcess(
     channels: ctx.channels,
     channelHttpRoutes,
     confirmationHub,
+    ...(adoptionReview
+      ? {
+          conversationAdoptionReview: (
+            input: Parameters<PostAdoptionReviewCoordinator["reviewForSurface"]>[0],
+          ) =>
+            adoptionReview!.reviewForSurface(input),
+        }
+      : {}),
     runtimeControl: {
       openFirstPartyFinality: async (input) => {
         const factory = ctx.firstPartyFinality;

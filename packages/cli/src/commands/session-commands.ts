@@ -25,7 +25,10 @@ import {
   type ArgSchema,
   type PostTurnControlIntent,
 } from "@zhixing/core";
-import type { SessionAdvancementStateSnapshot } from "@zhixing/rpc";
+import type {
+  SessionAdoptionReviewResult,
+  SessionAdvancementStateSnapshot,
+} from "@zhixing/rpc";
 import { renderAdvancementDetailLines } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
@@ -47,6 +50,10 @@ export interface SessionCommandsDeps {
    */
   readonly onResumedAdvancement?: (
     snapshot: SessionAdvancementStateSnapshot,
+  ) => void | Promise<void>;
+  /** 收编摘要与待确认提醒；内容已在宿主边界净化为产品语言。 */
+  readonly onAdoptionReview?: (
+    result: SessionAdoptionReviewResult,
   ) => void | Promise<void>;
   /**
    * 本接入面主动发起 /clear 前的标记钩子。宿主会把 cleared 组播回发起端,
@@ -223,6 +230,9 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       });
       if (resumed.advancement) {
         await deps.onResumedAdvancement?.(resumed.advancement);
+      }
+      if (resumed.adoptionReview) {
+        await deps.onAdoptionReview?.(resumed.adoptionReview);
       }
     } catch (err) {
       writer.line(

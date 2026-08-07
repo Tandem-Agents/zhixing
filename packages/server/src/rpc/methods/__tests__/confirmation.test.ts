@@ -28,13 +28,16 @@ import {
 
 function makeConnection(
   id: number,
-  opts?: { loopback?: boolean },
+  opts?: { loopback?: boolean; surfacePrincipal?: string },
 ): RpcConnection {
   return {
     id,
     authenticated: true,
     // 测试主路径默认可信面(本机 loopback);受限面测试显式传 false
     loopback: opts?.loopback ?? true,
+    ...(opts?.surfacePrincipal
+      ? { surfacePrincipal: opts.surfacePrincipal, surfaceGeneration: 1 }
+      : {}),
     sendSuccess: vi.fn(),
     sendError: vi.fn(),
     notify: vi.fn(),
@@ -178,7 +181,7 @@ describe("confirmation.list", () => {
     await p;
   });
 
-  it("ephemeral（无 conversationId）默认不暴露", async () => {
+  it("无会话请求只向其绑定的本机发起面恢复完整请求", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});
@@ -194,12 +197,60 @@ describe("confirmation.list", () => {
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationListMethod();
-    const result = await invoke<{ items: unknown[] }>(method, {}, ctx);
+    const result = await invoke<{
+      items: Array<{ requestId: string; request?: ConfirmationRequest }>;
+    }>(method, {}, ctx);
 
-    expect(result.items).toHaveLength(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      requestId: "rE",
+      request: { id: "rE" },
+    });
+
+    const other = await invoke<{ items: unknown[] }>(
+      method,
+      {},
+      makeContext(server, makeConnection(2)),
+    );
+    expect(other.items).toHaveLength(0);
+
+    const remote = await invoke<{
+      items: Array<{ request?: ConfirmationRequest }>;
+    }>(method, {}, makeContext(server, makeConnection(1, { loopback: false })));
+    expect(remote.items).toHaveLength(1);
+    expect(remote.items[0]!.request).toBeUndefined();
 
     broker.resolve("rE", { kind: "allow-once" });
     await p;
+  });
+
+  it("稳定第一方身份在换连接后仍可恢复并应答原 pending", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("adoption", broker);
+    const p = broker.requestConfirmation(makeRequest("rStable", {
+      channel: "rpc",
+      triggeredBy: "rpc:zhixing-cli:stable",
+    }));
+    const server = {
+      confirmationHub: hub,
+      conversations: makeFakeConversations(new Map()),
+    } as unknown as ServerContext;
+    const connection = makeConnection(77, {
+      surfacePrincipal: "rpc:zhixing-cli:stable",
+    });
+
+    const listed = await invoke<{
+      items: Array<{ request?: ConfirmationRequest }>;
+    }>(buildConfirmationListMethod(), {}, makeContext(server, connection));
+    expect(listed.items[0]!.request?.id).toBe("rStable");
+    await expect(invoke(
+      buildConfirmationResolveMethod(),
+      { requestId: "rStable", decision: { kind: "allow-once" } },
+      makeContext(server, connection),
+    )).resolves.toEqual({ ok: true });
+    await expect(p).resolves.toEqual({ kind: "allow-once" });
   });
 
   it("hub 未配置 → INTERNAL_ERROR", () => {

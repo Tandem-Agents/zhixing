@@ -89,7 +89,10 @@ import {
 } from "./runtime/rpc-management-facade.js";
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
-import type { SessionAdvancementStateSnapshot } from "@zhixing/rpc";
+import type {
+  SessionAdoptionReviewResult,
+  SessionAdvancementStateSnapshot,
+} from "@zhixing/rpc";
 import { prepareSessionSendEngage } from "./session-engage.js";
 import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
 import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";
@@ -648,7 +651,30 @@ export async function startRepl(): Promise<void> {
     active: initialActive,
     resumedConversationName,
     advancement: resumedAdvancement,
-  } = await selectInitialConversation(conversationFacade);
+    adoptionReview: initialAdoptionReview,
+  } = await selectInitialConversation(conversationFacade, {
+    confirmLocalContinuation: async () => {
+      cliWriter.line(
+        chalk.yellow(
+          `${layout.contentPrefix}值班设备暂时无法连接。排程、全局记忆和旧设备对话暂不可用。`,
+        ),
+      );
+      if (!process.stdin.isTTY) return false;
+      const prompt = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: true,
+      });
+      try {
+        const answer = await prompt.question(
+          chalk.green(`${layout.contentPrefix}继续在这台电脑工作（新对话）？[y/N] `),
+        );
+        return /^(?:y|yes|是)$/iu.test(answer.trim());
+      } finally {
+        prompt.close();
+      }
+    },
+  });
 
   // 会话控制器——当前对话指针 + turn 编排(send → delta 喂渲染 → complete)。
   controller = new ConversationController(
@@ -703,6 +729,13 @@ export async function startRepl(): Promise<void> {
       // 尾巴是纯增益展示,绝不因它阻塞启动
     }
   }
+  if (initialAdoptionReview) {
+    cliWriter.line(
+      initialAdoptionReview.status === "ready"
+        ? chalk.cyan(`${layout.contentPrefix}${initialAdoptionReview.message}`)
+        : chalk.yellow(`${layout.contentPrefix}${initialAdoptionReview.message}`),
+    );
+  }
 
   // 清屏回到刚进入交互模式的初始态 —— `/clear` 在清完数据后调用。chrome 终端
   // 走 renderScreen.rebuildAfterResize(整屏清 + scrollback 全清 + chrome 自适应
@@ -756,6 +789,7 @@ export async function startRepl(): Promise<void> {
   //
   // **NB**: inputController 在闭包内通过 let 引用（声明在下方）—— beforeShow/afterShow
   // 在 confirmation 实际触发时才求值，那时 inputController 已 start()，可选链兜底 null。
+  let inputController: InputController | null = null;
   const confirmationRenderer = renderScreen
     ? new TerminalConfirmationRenderer({
         screen: renderScreen,
@@ -816,6 +850,7 @@ export async function startRepl(): Promise<void> {
     if (notice.kind === "reconnected" && notice.reason === "manual-reconnect") return;
     await controller.reattachActiveObserver();
     await syncCurrentTaskListView();
+    await rpcConfirmationBroker.refresh().catch(() => {});
   });
   conversationFacade.onChanged((p) => {
     if (p.change === "taskList") {
@@ -1065,8 +1100,16 @@ export async function startRepl(): Promise<void> {
   // 交互层（补全 broker + 渲染）才依 chrome 分叉。
   const tRegistry = new DefaultCommandRegistry();
   const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
-  let inputController: InputController | null = null;
   let stopRequested = false;
+  if (confirmationRenderer) {
+    await rpcConfirmationBroker.refresh().catch((error) => {
+      cliWriter.notify(
+        chalk.yellow(
+          `  待确认事项暂时无法加载：${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    });
+  }
   const selectionService = createSelectionService({
     screen: renderScreen ?? undefined,
     stdin: process.stdin,
@@ -1155,6 +1198,15 @@ export async function startRepl(): Promise<void> {
     }
   };
 
+  const presentAdoptionReview = (result: SessionAdoptionReviewResult): void => {
+    cliWriter.ensureSegmentBreak();
+    cliWriter.line(
+      result.status === "ready"
+        ? chalk.cyan(`${layout.contentPrefix}${result.message}`)
+        : chalk.yellow(`${layout.contentPrefix}${result.message}`),
+    );
+  };
+
   // controller 持当前对话指针。/resume 的对话选择器在模块内构造;inline 删除的
   // 物理执行由下方交互层 onCandidateDelete 承担。
   registerSessionCommands({
@@ -1164,6 +1216,7 @@ export async function startRepl(): Promise<void> {
     controller,
     onConversationChanged: syncCurrentTaskListView,
     onResumedAdvancement: presentResumedAdvancement,
+    onAdoptionReview: presentAdoptionReview,
     markLocalClear: (conversationId) => {
       locallyClearingConversations.add(conversationId);
       return (outcome) => {

@@ -24,6 +24,11 @@ import type {
   SurfaceAssetGrant,
 } from "./authorization.js";
 import type {
+  ConversationTransferAbort,
+  ConversationTransferCommit,
+  SourceFreezeProof,
+} from "./identity.js";
+import type {
   DeferredGlobalIntent,
   GlobalStagedMutation,
   JobGlobalStagedMutation,
@@ -478,3 +483,45 @@ export interface FinalOutboxRecord {
   digest: Digest;
   state: "pending" | "published" | "expired";
 }
+
+export type TransferRecord = WireSchemaV1<"TransferRecord"> &
+  (
+    | {
+        t: "prepared";
+        requestId: string;
+        transferId: string;
+        sourceDeviceId: string;
+        targetDeviceId: string;
+        conversationId: string;
+        sourceOwnerEpoch: number;
+        nextOwnerEpoch: number;
+      }
+    | {
+        t: "frozen";
+        transferId: string;
+        manifest: ArtifactRef;
+        proof: SourceFreezeProof;
+      }
+    | {
+        t: "imported";
+        transferId: string;
+        manifestDigest: Digest;
+        importedRecordBase: ArtifactRef;
+      }
+    | {
+        t: "committed";
+        transferId: string;
+        commit: ConversationTransferCommit;
+      }
+    | {
+        t: "tombstoned";
+        transferId: string;
+        commitDigest: Digest;
+        at: IsoTime;
+      }
+    | {
+        t: "aborted";
+        transferId: string;
+        abort: ConversationTransferAbort;
+      }
+  );

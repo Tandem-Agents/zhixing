@@ -176,6 +176,7 @@ export interface ConversationTransferCommit
   transferId: string;
   conversationId: string;
   sourceDeviceId: string;
+  targetDeviceId: string;
   freezeProofDigest: Digest;
   checkpointDigest: Digest;
   sourceOwnerEpoch: number;
@@ -183,6 +184,170 @@ export interface ConversationTransferCommit
   signature: Signature;
   at: IsoTime;
 }
+
+export interface ConversationTransferStreamRange {
+  stream: string;
+  firstLsn: number;
+  lastLsn: number;
+  recordCount: number;
+  digest: Digest;
+}
+
+export interface ConversationTransferAuthorityBase {
+  checkpoint: {
+    logId: string;
+    lsn: number;
+    frameEndOffset: number;
+    prefixDigest: Digest;
+  };
+  records: ArtifactRef;
+  sessionState: ArtifactRef;
+  reducerVersion: string;
+}
+
+/** Canonical, content-addressed description of one frozen conversation domain. */
+export interface ConversationTransferManifest
+  extends WireSchemaV1<"ConversationTransferManifest"> {
+  requestId: string;
+  transferId: string;
+  sourceDeviceId: string;
+  targetDeviceId: string;
+  conversationId: string;
+  sourceOwnerEpoch: number;
+  nextOwnerEpoch: number;
+  lastLsn: number;
+  authorityBase: ConversationTransferAuthorityBase;
+  streams: ConversationTransferStreamRange[];
+  contentAssets: ArtifactRef[];
+}
+
+export interface ConversationTransferAbort
+  extends WireSchemaV1<"ConversationTransferAbort"> {
+  requestId: string;
+  transferId: string;
+  sourceDeviceId: string;
+  targetDeviceId: string;
+  conversationId: string;
+  sourceOwnerEpoch: number;
+  reason: "source-resumed" | "target-rejected" | "operator-cancelled";
+  at: IsoTime;
+  signature: Signature;
+}
+
+export type ConversationTransferCommand =
+  WireSchemaV1<"ConversationTransferCommand"> &
+    (
+      | {
+          op: "prepare";
+          requestId: string;
+          transferId: string;
+          sourceDeviceId: string;
+          targetDeviceId: string;
+          conversationId: string;
+          sourceOwnerEpoch: number;
+          nextOwnerEpoch: number;
+          signature: Signature;
+        }
+      | {
+          op: "freeze";
+          requestId: string;
+          transferId: string;
+          manifest: ArtifactRef;
+          proof: SourceFreezeProof;
+          signature: Signature;
+        }
+      | {
+          op: "probe";
+          requestId: string;
+          transferId: string;
+          ref: ArtifactRef;
+          signature: Signature;
+        }
+      | {
+          op: "read-range";
+          requestId: string;
+          transferId: string;
+          ref: ArtifactRef;
+          offset: number;
+          length: number;
+          signature: Signature;
+        }
+      | {
+          op: "import";
+          requestId: string;
+          transferId: string;
+          manifest: ArtifactRef;
+          signature: Signature;
+        }
+      | {
+          op: "commit";
+          requestId: string;
+          transferId: string;
+          commit: ConversationTransferCommit;
+          signature: Signature;
+        }
+      | {
+          op: "abort";
+          requestId: string;
+          transferId: string;
+          abort: ConversationTransferAbort;
+          signature: Signature;
+        }
+      | {
+          op: "status";
+          requestId: string;
+          transferId: string;
+          signature: Signature;
+        }
+    );
+
+export type ConversationTransferResult =
+  WireSchemaV1<"ConversationTransferResult"> &
+    (
+      | {
+          status: "ok";
+          requestId: string;
+          transferId: string;
+          state:
+            | "prepared"
+            | "frozen"
+            | "imported"
+            | "committed"
+            | "tombstoned"
+            | "aborted";
+          ref?: ArtifactRef;
+          commit?: ConversationTransferCommit;
+          data?: never;
+          error?: never;
+        }
+      | {
+          status: "range";
+          requestId: string;
+          transferId: string;
+          ref: ArtifactRef;
+          offset: number;
+          data: string;
+          state?: never;
+          error?: never;
+        }
+      | {
+          status: "rejected";
+          requestId: string;
+          transferId: string;
+          error: {
+            code:
+              | "unauthorized"
+              | "invalid"
+              | "not-found"
+              | "conflict"
+              | "unavailable";
+            retryable: boolean;
+          };
+          state?: never;
+          ref?: never;
+          data?: never;
+        }
+    );
 
 export interface PairingOffer extends WireSchemaV1<"PairingOffer"> {
   offerId: Ulid;

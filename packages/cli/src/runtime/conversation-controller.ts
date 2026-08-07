@@ -41,6 +41,7 @@ import type {
   WireAgentResult,
   WorksceneSummary,
   SessionAdvancementDetailResult,
+  SessionAdoptionReviewResult,
   SessionAdvancementStateSnapshot,
   SessionRubricPersistenceChoice,
   SessionAwaitingRubricResult,
@@ -187,6 +188,14 @@ export interface InitialConversationSelection {
   resumedConversationName: string | null;
   /** 恢复对话的推进状态快照——awaiting 浮现与 active 提示的素材。 */
   advancement?: SessionAdvancementStateSnapshot;
+  adoptionReview?: SessionAdoptionReviewResult;
+}
+
+export class OfflineContinuationDeclinedError extends Error {
+  constructor() {
+    super("已取消在这台电脑继续；连接值班设备后可恢复完整能力。");
+    this.name = "OfflineContinuationDeclinedError";
+  }
 }
 
 export interface ObservedTurnNotification {
@@ -226,9 +235,24 @@ export async function selectInitialConversation(
   conversation: Pick<
     RpcConversationFacade,
     "list" | "resumeIfExists" | "newConversation"
-  >,
+  > &
+    Partial<
+      Pick<
+        RpcConversationFacade,
+        "requiresLocalContinuation" | "enableLocalContinuation"
+      >
+    >,
+  options: {
+    readonly confirmLocalContinuation?: () => boolean | Promise<boolean>;
+  } = {},
 ): Promise<InitialConversationSelection> {
-  for (const candidate of await conversation.list()) {
+  const candidates = await conversation.list();
+  if (conversation.requiresLocalContinuation?.()) {
+    const accepted = await options.confirmLocalContinuation?.();
+    if (accepted !== true) throw new OfflineContinuationDeclinedError();
+    conversation.enableLocalContinuation?.();
+  }
+  for (const candidate of candidates) {
     if (!isMainConversationId(candidate.conversationId)) continue;
     const resumed = await conversation.resumeIfExists(candidate.conversationId);
     if (!resumed) continue;
@@ -236,6 +260,9 @@ export async function selectInitialConversation(
       active: toActiveConversation(resumed),
       resumedConversationName: resumed.name,
       ...(resumed.advancement ? { advancement: resumed.advancement } : {}),
+      ...(resumed.adoptionReview
+        ? { adoptionReview: resumed.adoptionReview }
+        : {}),
     };
   }
 
@@ -969,6 +996,7 @@ export class ConversationController {
   async resume(conversationId: string): Promise<{
     active: ActiveConversation;
     advancement?: SessionAdvancementStateSnapshot;
+    adoptionReview?: SessionAdoptionReviewResult;
   }> {
     this.pendingSwitchTarget = (id) => id === conversationId;
     try {
@@ -977,6 +1005,9 @@ export class ConversationController {
       return {
         active: this.active,
         ...(resumed.advancement ? { advancement: resumed.advancement } : {}),
+        ...(resumed.adoptionReview
+          ? { adoptionReview: resumed.adoptionReview }
+          : {}),
       };
     } finally {
       this.pendingSwitchTarget = null;

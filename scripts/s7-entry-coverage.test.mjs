@@ -13,6 +13,7 @@ import {
   inspectProductionManifest,
   inspectProductionSource,
   inspectCleanupRegistryConstructions,
+  inspectConversationAdoptionAssembly,
   inspectLocalConversationOwnerIsolation,
   parseLandingRowIds,
   validateCoverage,
@@ -662,6 +663,107 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       (text) => `${text}\nconst publicDeferredIntent = deferSchedule;\n`,
     )).join("\n"),
     /deferred intent capability is exposed outside its internal owner seam/,
+  );
+});
+
+test("conversation adoption stays bound to the two production roots and ordered recovery", async () => {
+  const paths = [
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/conversation-evidence-authority.ts",
+    "packages/cli/src/serve/local-conversation-rpc.ts",
+    "packages/cli/src/serve/post-adoption-review.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/runtime/rpc-confirmation-broker.ts",
+    "packages/cli/src/repl.ts",
+    "packages/rpc/src/confirmation-bridge.ts",
+    "packages/server/src/context.ts",
+    "packages/server/src/rpc/handlers.ts",
+    "packages/server/src/rpc/methods/session.ts",
+    "packages/server/src/rpc/methods/confirmation.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectConversationAdoptionAssembly(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace('this.#transferTarget = roles.has("anchor")', 'this.#transferTarget = roles.has("executor")'),
+    )).join("\n"),
+    /owned only by the active anchor role/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "      await this.#restoreCommittedTransfers();\n      await this.#control.start();",
+        "      await this.#control.start();\n      await this.#restoreCommittedTransfers();",
+      ),
+    )).join("\n"),
+    /restore before mesh admission opens/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace("verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({", "verifyCurrentOwner: async () => {"),
+    )).join("\n"),
+    /current-owner evidence verifier injection/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("conversationRpc: localConversationRpc,", "conversationRpc: undefined,"),
+    )).join("\n"),
+    /first-party local conversation router injection/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/conversation-evidence-authority.ts",
+      (text) => text.replace("current.ownerEpoch !== request.ownerEpoch", "false"),
+    )).join("\n"),
+    /bind both owner identity and owner epoch/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("await ctx.meshRuntime.bindPostAdoptionMemory(", "await Promise.resolve("),
+    )).join("\n"),
+    /anchor post-adoption memory binding/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("await ctx.meshRuntime.bindPostAdoptionReview(", "await Promise.resolve("),
+    )).join("\n"),
+    /anchor post-adoption review binding/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace("ctx.server.conversationAdoptionReview?.({", "Promise.resolve({"),
+    )).join("\n"),
+    /session resume must bind the authenticated observer before adoption review/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/runtime/rpc-confirmation-broker.ts",
+      (text) => text.replace('"confirmation.list"', '"confirmation.missing"'),
+    )).join("\n"),
+    /must recover missed pending requests/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/rpc/src/confirmation-bridge.ts",
+      (text) => text.replace("origin.triggeredBy === conn.surfacePrincipal", "false"),
+    )).join("\n"),
+    /must follow the stable authenticated surface across reconnects/,
   );
 });
 

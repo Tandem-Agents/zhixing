@@ -133,10 +133,14 @@ import {
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
+  calculateMessageTurns,
   compileDeliveryContent,
+  createAttentionWindow,
   DeliveryContentValidationError,
   parseConversationId,
   type CompiledDeliveryContent,
+  type Message,
+  type ParsedSummary,
 } from "@zhixing/core";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
 import { productizePublishAuthorityError } from "./publish-result-product-language.js";
@@ -156,6 +160,11 @@ import {
   conversationIdentityExistsAt,
   registerConversationIdentityProjection,
 } from "./control-admission.js";
+import {
+  CONVERSATION_TRANSFER_PROJECTION_ID,
+  assertConversationTransferWriteAuthority,
+  registerConversationTransferProjection,
+} from "./conversation-transfer.js";
 import {
   assertAdmissionReplayContract,
   assertCancelFenceReplayContract,
@@ -384,6 +393,7 @@ export interface ConversationRunJournalOptions {
   readonly resources?: AssignmentResourceCoordinator;
   readonly clock?: () => string;
   readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
+  readonly currentAuthority?: { readonly deviceId: string };
 }
 
 export interface ConversationAbortTicketAuthorizer {
@@ -951,6 +961,18 @@ export interface ConversationChannelFrameAdoption {
   >;
 }
 
+/**
+ * A committed segment boundary whose evicted source messages can be replayed
+ * into the anchor memory pipeline after conversation adoption.
+ */
+export interface ConversationSegmentMemoryFlush {
+  readonly conversationId: string;
+  readonly segmentId: string;
+  readonly tokensBefore: number;
+  readonly messages: readonly Message[];
+  readonly summary: ParsedSummary;
+}
+
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
 export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
   readonly #conversationId: string;
@@ -972,6 +994,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   readonly #resources: AssignmentResourceCoordinator | undefined;
   readonly #clock: () => string;
   readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
+  readonly #currentAuthority: { readonly deviceId: string } | undefined;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
     (notice: ConversationStatusNotice) => void | Promise<void>
@@ -1006,7 +1029,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#legacyAbortTickets = options.legacyAbortTickets;
+    this.#currentAuthority = options.currentAuthority;
     registerConversationIdentityProjection(options.log, options.artifacts);
+    if (options.currentAuthority) {
+      registerConversationTransferProjection(options.log, options.verifier);
+    }
   }
 
   async sessionMeta(): Promise<SessionMeta> {
@@ -1050,6 +1077,60 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           : {}),
       };
     });
+  }
+
+  /**
+   * Rebuilds segment-memory inputs from committed run facts only. The result is
+   * a derived view: imported caches and source-side memory are never consulted.
+   */
+  async segmentMemoryFlushes(): Promise<readonly ConversationSegmentMemoryFlush[]> {
+    const transcript = await this.#select((state) =>
+      snapshot(state.transcript, "Conversation segment memory transcript"),
+    );
+    const window = createAttentionWindow({ conversationId: this.#conversationId });
+    const flushes: ConversationSegmentMemoryFlush[] = [];
+
+    for (const record of transcript) {
+      const committed = await this.committedRun(record.runId);
+      if (!committed) {
+        throw new Error(`Committed run ${record.runId} is unavailable`);
+      }
+      const compact = committed.windowCompact;
+      if (compact?.segmentId && compact.structuredSummary) {
+        const beforeCompact = [
+          ...window.getMessages().map((message) => structuredClone(message)),
+          ...committed.runRecord.messages.map((message) => structuredClone(message)),
+        ];
+        const turns = calculateMessageTurns(beforeCompact);
+        let end = 0;
+        while (
+          end < beforeCompact.length &&
+          (turns[end] ?? Number.POSITIVE_INFINITY) <= compact.pairsCompacted
+        ) {
+          end++;
+        }
+        const messages = beforeCompact.slice(0, end);
+        if (messages.length === 0) {
+          throw new Error(
+            `Committed segment ${compact.segmentId} has no reconstructable source messages`,
+          );
+        }
+        flushes.push({
+          conversationId: this.#conversationId,
+          segmentId: compact.segmentId,
+          tokensBefore: compact.tokensBefore,
+          messages,
+          summary: structuredClone(compact.structuredSummary),
+        });
+      }
+      window.acceptRun({
+        runMessages: committed.runRecord.messages,
+        runIndex: record.runIndex,
+        ...(compact ? { windowCompact: compact } : {}),
+      });
+    }
+
+    return snapshot(flushes, "Conversation segment memory flushes");
   }
 
   async taskList(): Promise<TaskListState> {
@@ -8207,6 +8288,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           cached?.state ?? emptyProjection(this.#conversationId),
           this.#reduce,
           async (state, context) => {
+            if (this.#currentAuthority) {
+              await assertConversationTransferWriteAuthority(
+                context.readProjection(CONVERSATION_TRANSFER_PROJECTION_ID),
+                this.#conversationId,
+                {
+                  deviceId: this.#currentAuthority.deviceId,
+                  ownerEpoch: this.#ownerEpoch,
+                },
+              );
+            }
             const decision = await decide(state, context);
             if (decision.kind !== "append") return decision;
             const statuses = conversationStatusDeliveryInputs(
@@ -8233,7 +8324,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             stream: runStream(this.#conversationId),
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
-            readProjectionIds,
+            readProjectionIds: this.#currentAuthority
+              ? [
+                  ...new Set([
+                    ...readProjectionIds,
+                    CONVERSATION_TRANSFER_PROJECTION_ID,
+                  ]),
+                ]
+              : readProjectionIds,
           });
         const transact = () => this.#delivery
           ? this.#delivery.coordinate(runTransaction)

@@ -2675,6 +2675,26 @@ describe("session.* RPC (S2.D)", () => {
           return { status: "no-pending-recovery" };
         },
       },
+      conversationAdoptionReview: async (input: {
+        conversationId: string;
+        surfacePrincipal: string;
+        connectionId: string;
+      }) => {
+        calls.push("reviewAdoption");
+        expect(input).toEqual({
+          conversationId: "conv-order",
+          surfacePrincipal: "rpc:test-cli",
+          connectionId: "7",
+        });
+        return {
+          status: "ready" as const,
+          mergedConversationCount: 1,
+          appliedRuleCount: 0,
+          pendingScheduleCount: 1,
+          pendingRuleCount: 0,
+          message: "已合并 1 个本机对话；1 项排程等待确认。",
+        };
+      },
     } as never;
 
     const { buildSessionResumeMethod } = await import(
@@ -2682,10 +2702,17 @@ describe("session.* RPC (S2.D)", () => {
     );
     await buildSessionResumeMethod().handler(
       { conversationId: "conv-order" },
-      { server: serverCtx, connection: { id: 7 } } as never,
+      {
+        server: serverCtx,
+        connection: { id: 7, clientInfo: { id: "test-cli" } },
+      } as never,
     );
 
-    expect(calls).toEqual(["addObserver", "recoverConversation"]);
+    expect(calls).toEqual([
+      "addObserver",
+      "recoverConversation",
+      "reviewAdoption",
+    ]);
   });
 
   it("session.clear:清空活跃会话并组播 session.changed cleared;busy 时拒绝", async () => {

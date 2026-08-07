@@ -12,6 +12,7 @@ import {
   type RubricContractDraftSnapshot,
   type RubricDraftPersistenceChoice,
   type RunRecordRef,
+  type UserTurnInput,
 } from "@zhixing/core";
 import type {
   DeferredGlobalIntent,
@@ -26,7 +27,9 @@ import { canonicalize } from "@zhixing/core/protocol";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   ConversationManager,
+  ConversationTransferSource,
   DeferredGlobalIntentRepository,
+  listConversationTransferStates,
   type RuntimeFactory,
   type TurnCommittedInfo,
 } from "@zhixing/owner-kernel";
@@ -55,6 +58,7 @@ import type {
 import {
   projectSessionTurn,
   type ProjectedSessionTurnResult,
+  type SessionTurnNotify,
 } from "@zhixing/rpc";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
@@ -107,7 +111,19 @@ export interface LocalConversationOwnerPort {
     readonly text: string;
     readonly turnId: string;
     readonly environment?: ExplicitEnvironmentSelection;
+    readonly notify?: SessionTurnNotify;
   }): Promise<ProjectedSessionTurnResult>;
+  admitTurn(input: {
+    readonly conversationId: string;
+    readonly input: UserTurnInput;
+    readonly turnId: string;
+    readonly environment?: ExplicitEnvironmentSelection;
+    readonly notify: SessionTurnNotify;
+  }): Promise<{
+    readonly status: "immediate" | "queued" | "replayed";
+    readonly runId?: string;
+    readonly outcome: Promise<ProjectedSessionTurnResult>;
+  }>;
   answerInteractionWithTicket(
     input: Parameters<DurableConversationInteractionObserver["answerInteractionWithTicket"]>[0],
   ): Promise<void>;
@@ -145,6 +161,7 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly config: ZhixingConfig;
   readonly credentials: ProviderCredentialProjection;
   readonly evidence: EvidenceHandlerPort;
+  readonly currentAnchorDeviceId: () => string | undefined;
   readonly dataPlane: Pick<ExecutorDataPlaneRuntime, "tickets" | "createStream">;
   /** 关闭时 drain 的判定预算;默认 30s,只在无法证明收束时决定失败收场时机。 */
   readonly closeDrainBudgetMs?: number;
@@ -160,6 +177,7 @@ export class LocalConversationOwnerAssembly {
   readonly #manager: ConversationManager;
   readonly #recovery: AdvancementRecoveryMaintenance;
   readonly #intents: DeferredGlobalIntentRepository;
+  readonly #transferSource: ConversationTransferSource;
   readonly #port: LocalConversationOwnerPort;
   readonly #closeDrainBudgetMs: number;
   #state: "created" | "starting" | "ready" | "closing" | "closed" = "created";
@@ -169,6 +187,7 @@ export class LocalConversationOwnerAssembly {
   #activeCommands = 0;
   #commandDrain: Promise<void> | undefined;
   #resolveCommandDrain: (() => void) | undefined;
+  readonly #transferringConversations = new Set<string>();
 
   private constructor(input: {
     readonly options: LocalConversationOwnerAssemblyOptions;
@@ -185,6 +204,79 @@ export class LocalConversationOwnerAssembly {
     this.#recovery = input.recovery;
     this.#intents = input.intents;
     this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
+    this.#transferSource = new ConversationTransferSource({
+      deviceId: this.#owner.deviceId,
+      log: this.#owner.executorLog,
+      artifacts: this.#owner.artifacts,
+      signer: this.#owner.signer,
+      verifier: this.#owner.verifier,
+      acceptsConversationId: (conversationId) =>
+        this.#owner.acceptsConversationId(conversationId),
+      accepting: () => this.#state === "ready",
+      isCurrentAnchor: (deviceId) =>
+        input.options.currentAnchorDeviceId() === deviceId,
+      conversationState: async (conversationId) => {
+        if (!this.#protocol.sessionExists(conversationId)) {
+          return { exists: false, deleted: false, ownerEpoch: this.#owner.ownerEpoch };
+        }
+        const authority = await this.#protocol.sessionAuthorityState(conversationId);
+        return {
+          exists: authority.hasDurableIdentity,
+          deleted: authority.deleted,
+          ownerEpoch: this.#owner.ownerEpoch,
+        };
+      },
+      settleConversation: async (conversationId) => {
+        this.#transferringConversations.add(conversationId);
+        await this.#waitForCommandDrain();
+        await this.#manager.abortConversationAndWait(
+          conversationId,
+          { kind: "external", origin: "conversation-transfer" },
+          this.#closeDrainBudgetMs,
+        );
+        const deadline = Date.now() + this.#closeDrainBudgetMs;
+        while (true) {
+          await this.#protocol.recoverConversation(conversationId);
+          await this.#recovery.recoverConversation(conversationId);
+          const closure = await this.#protocol.pendingClosureWork(conversationId);
+          if (
+            !this.#manager.hasActiveWork(conversationId) &&
+            closure.pendingFinals === 0 &&
+            closure.pendingAssignments === 0 &&
+            closure.recoveryBacklog === 0 &&
+            closure.activeLocalLeases === 0
+          ) break;
+          if (Date.now() >= deadline) {
+            throw new Error("Conversation transfer could not reach a stable freeze point");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      },
+      resumeConversation: (conversationId) => {
+        this.#transferringConversations.delete(conversationId);
+      },
+      snapshotSessionState: async (conversationId) => {
+        const [meta, transcript, taskList, advancement] = await Promise.all([
+          this.#protocol.sessionState.readSessionMeta(
+            conversationId,
+            hostContext("conversation-transfer-snapshot"),
+          ),
+          readAllTranscript(this.#protocol, conversationId),
+          this.#protocol.sessionState.readTaskList(
+            conversationId,
+            hostContext("conversation-transfer-snapshot"),
+          ),
+          this.#protocol.sessionState.readAdvancementState(
+            conversationId,
+            hostContext("conversation-transfer-snapshot"),
+          ),
+        ]);
+        return {
+          reducerVersion: "conversation-session-state-v1",
+          value: JSON.parse(canonicalize({ meta, transcript, taskList, advancement })),
+        };
+      },
+    });
     const interactions = input.options.interactions;
     const sessionState = this.#protocol.sessionState;
     const rubricCatalog = input.rubricCatalog;
@@ -202,6 +294,99 @@ export class LocalConversationOwnerAssembly {
       listForMatching: () => rubricCatalog.listForMatching(),
       load: (id: string) => rubricCatalog.load(id),
     });
+    const admitLocalTurn: LocalConversationOwnerPort["admitTurn"] = async (
+      turn,
+    ) => {
+      this.#assertConversationWritable(turn.conversationId);
+      const releaseCommand = this.#beginCommand();
+      let settle!: (result: ProjectedSessionTurnResult) => void;
+      const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
+        settle = resolve;
+      });
+      try {
+        const admission = await this.#manager.admitTurn({
+          conversationId: turn.conversationId,
+          exists: () => this.#protocol.sessionExists(turn.conversationId),
+          source: "interactive",
+          beforeEnqueue: (managed) =>
+            this.#manager.admitDurableTurn({
+              conversationId: managed.conversationId,
+              input: turn.input,
+              invocation: { kind: "agent", source: "interactive" },
+              ...(turn.environment
+                ? { environment: structuredClone(turn.environment) }
+                : {}),
+              options: {
+                turnContext: { turnId: turn.turnId },
+                source: "interactive",
+                surfacePrincipal: "surface:local:first-party",
+              },
+              surfacePrincipal: "surface:local:first-party",
+            }),
+          makeTask: (managed) => ({
+            source: "interactive" as const,
+            execute: async () => {
+              try {
+                settle(
+                  await projectSessionTurn({
+                    manager: this.#manager,
+                    managed,
+                    input: turn.input,
+                    turnId: turn.turnId,
+                    runOptions: {
+                      source: "interactive",
+                      turnContext: { turnId: turn.turnId },
+                      surfacePrincipal: "surface:local:first-party",
+                    },
+                    ...(turn.environment ? { environment: turn.environment } : {}),
+                    notify: turn.notify,
+                    onPostTurnControlIntent: (control) => {
+                      turn.notify("session.postTurnControlIntent", {
+                        conversationId: turn.conversationId,
+                        turnId: turn.turnId,
+                        intent: control.intent,
+                        ...(control.conflict ? { conflict: control.conflict } : {}),
+                      });
+                    },
+                  }),
+                );
+              } catch (error) {
+                settle({ kind: "error", error });
+              } finally {
+                this.#manager.setBusy(turn.conversationId, false);
+              }
+            },
+            cancel: () => {
+              turn.notify("session.complete", {
+                conversationId: turn.conversationId,
+                sessionId: turn.conversationId,
+                turnId: turn.turnId,
+                result: {
+                  reason: "error",
+                  error: { name: "Cancelled", message: "Pending turn cancelled" },
+                  usage: { inputTokens: 0, outputTokens: 0 },
+                },
+              });
+              settle({ kind: "aborted" });
+            },
+          }),
+        });
+        if (admission.status === "not-found") {
+          throw new Error("Conversation is not available on this device");
+        }
+        if (admission.status === "full") {
+          throw new Error("Conversation has too many pending messages");
+        }
+        if (admission.status === "immediate") void admission.task.execute();
+        return {
+          status: admission.status,
+          ...(admission.runId ? { runId: admission.runId } : {}),
+          outcome,
+        };
+      } finally {
+        releaseCommand();
+      }
+    };
     this.#port = Object.freeze<LocalConversationOwnerPort>({
       createConversation: async () => {
         return this.#runCommand(async () => {
@@ -214,15 +399,18 @@ export class LocalConversationOwnerAssembly {
         });
       },
       ensureSession: async (conversationId) => {
+        this.#assertConversationWritable(conversationId);
         await this.#runCommand(() => this.#protocol.ensureSession(conversationId));
       },
       listConversations: () => this.#protocol.listSessions(),
       mutateSession: async (conversationId, mutation, context) => {
+        this.#assertConversationWritable(conversationId);
         return this.#runCommand(() =>
           sessionState.mutate(conversationId, mutation, context)
         );
       },
       cancelTurns: async (input) => {
+        this.#assertConversationWritable(input.conversationId);
         await this.#runCommand(() =>
           this.#manager.cancelDurableRuns({
             conversationId: input.conversationId,
@@ -236,75 +424,16 @@ export class LocalConversationOwnerAssembly {
         );
       },
       runTurn: async (input) => {
-        const releaseCommand = this.#beginCommand();
-        let settle!: (result: ProjectedSessionTurnResult) => void;
-        const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
-          settle = resolve;
-        });
-        try {
-          const admission = await this.#manager.admitTurn({
+        const admitted = await admitLocalTurn({
           conversationId: input.conversationId,
-          source: "interactive",
-          beforeEnqueue: (managed) =>
-            this.#manager.admitDurableTurn({
-              conversationId: managed.conversationId,
-              input: userTurnInputFromText(input.text),
-              invocation: { kind: "agent", source: "interactive" },
-              ...(input.environment
-                ? { environment: structuredClone(input.environment) }
-                : {}),
-              options: {
-                turnContext: { turnId: input.turnId },
-                source: "interactive",
-                surfacePrincipal: "surface:local:internal",
-              },
-              surfacePrincipal: "surface:local:internal",
-            }),
-          makeTask: (managed) => ({
-            source: "interactive" as const,
-            execute: async () => {
-              try {
-                settle(
-                  await projectSessionTurn({
-                    manager: this.#manager,
-                    managed,
-                    text: input.text,
-                    turnId: input.turnId,
-                    runOptions: {
-                      source: "interactive",
-                      turnContext: { turnId: input.turnId },
-                      surfacePrincipal: "surface:local:internal",
-                    },
-                    ...(input.environment
-                      ? { environment: input.environment }
-                      : {}),
-                    notify: () => {},
-                  }),
-                );
-              } catch (error) {
-                settle({ kind: "error", error });
-              } finally {
-                this.#manager.setBusy(input.conversationId, false);
-              }
-            },
-            cancel: () => settle({ kind: "aborted" }),
-          }),
+          input: userTurnInputFromText(input.text),
+          turnId: input.turnId,
+          ...(input.environment ? { environment: input.environment } : {}),
+          notify: input.notify ?? (() => {}),
         });
-          if (admission.status === "immediate") {
-            void admission.task.execute();
-          } else if (admission.status !== "queued") {
-            settle({
-              kind: "error",
-              error: new Error(
-                `Local conversation turn admission failed: ${admission.status}`,
-              ),
-            });
-          }
-        } finally {
-          releaseCommand();
-        }
-        return outcome;
+        return admitted.outcome;
       },
+      admitTurn: admitLocalTurn,
       answerInteractionWithTicket: async (input) => {
         await this.#runCommand(() =>
           interactions.answerInteractionWithTicket(input)
@@ -316,7 +445,10 @@ export class LocalConversationOwnerAssembly {
         );
       },
       deferSchedule: (schedule) =>
-        this.#runCommand(() => input.scheduleIntents.record(schedule)),
+        this.#runCommand(() => {
+          this.#assertConversationWritable(schedule.conversationId);
+          return input.scheduleIntents.record(schedule);
+        }),
       listDeferredIntents: (conversationId) =>
         this.#runCommand(() =>
           this.#intents.list(
@@ -550,6 +682,17 @@ export class LocalConversationOwnerAssembly {
     const starting = (async () => {
       try {
         await this.#intents.recover();
+        for (const transfer of await listConversationTransferStates(
+          this.#owner.executorLog,
+          this.#owner.verifier,
+        )) {
+          if (
+            transfer.phase !== "aborted" &&
+            transfer.phase !== "tombstoned"
+          ) {
+            this.#transferringConversations.add(transfer.identity.conversationId);
+          }
+        }
         await this.#protocol.recoverReadinessProjections();
         await this.#protocol.recover();
         await this.#recovery.recoverAllOpenSessions();
@@ -660,6 +803,23 @@ export class LocalConversationOwnerAssembly {
 
   port(): LocalConversationOwnerPort {
     return this.#port;
+  }
+
+  transferSource(): ConversationTransferSource {
+    return this.#transferSource;
+  }
+
+  transferIdentity(): {
+    readonly deviceId: string;
+    readonly ownerEpoch: number;
+  } {
+    return { deviceId: this.#owner.deviceId, ownerEpoch: this.#owner.ownerEpoch };
+  }
+
+  #assertConversationWritable(conversationId: string): void {
+    if (this.#transferringConversations.has(conversationId)) {
+      throw new Error("Conversation is being moved to the always-on device");
+    }
   }
 
   #requireReady(): void {

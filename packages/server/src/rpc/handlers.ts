@@ -118,6 +118,13 @@ export class HandlerRegistry {
       throw RpcErrors.unauthorized(`Method requires authentication: ${method}`);
     }
 
+    const routed = await ctx.server.conversationRpc?.dispatch({
+      method,
+      params,
+      connection: ctx.connection,
+    });
+    if (routed?.handled) return routed.result;
+
     return await entry.handler(params, ctx);
   }
 }

@@ -3,6 +3,7 @@
  *
  * 锁住:
  *   - pending 推送(含完整 request 投影)还原为 onRequest 通知
+ *   - refresh 恢复连接建立前错过的、只属于当前接入面的 pending
  *   - 无完整投影的 pending 不进面板(非可信投影防御)
  *   - resolve 走 confirmation.resolve RPC 回程;失败经 onResolveError 上报
  *   - dispose 退订且迟到 resolve 本地拒绝、不连宿主
@@ -87,6 +88,53 @@ describe("RpcConfirmationBroker", () => {
     await flush();
     expect(errors).toEqual([{ requestId: "r2" }]);
 
+    broker.dispose();
+  });
+
+  it("refresh 恢复错过的 pending 且不重复展示已可见请求", async () => {
+    const fake = makeFakeHostLink();
+    const request = makeRequest("r-missed");
+    fake.setResponder((method) => method === "confirmation.list"
+      ? { items: [{ requestId: request.id, request }] }
+      : { ok: true });
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    const received: string[] = [];
+    broker.onRequest((entry) => received.push(entry.id));
+
+    await broker.refresh();
+    await broker.refresh();
+
+    expect(received).toEqual(["r-missed"]);
+    expect(fake.requests).toEqual([
+      { method: "confirmation.list", params: undefined },
+      { method: "confirmation.list", params: undefined },
+    ]);
+    broker.dispose();
+  });
+
+  it("决定失败后重新拉取仍耐久 pending", async () => {
+    const fake = makeFakeHostLink();
+    const request = makeRequest("r-requeued");
+    const errors: unknown[] = [];
+    fake.setResponder((method) => {
+      if (method === "confirmation.resolve") throw new Error("暂时未生效");
+      if (method === "confirmation.list") {
+        return { items: [{ requestId: request.id, request }] };
+      }
+      return {};
+    });
+    const broker = new RpcConfirmationBroker({
+      link: fake.link,
+      onResolveError: (error) => errors.push(error),
+    });
+    const received: string[] = [];
+    broker.onRequest((entry) => received.push(entry.id));
+    fake.notify("confirmation.pending", { request });
+
+    broker.resolve(request.id, { kind: "allow-once" });
+
+    await vi.waitFor(() => expect(received).toEqual([request.id, request.id]));
+    expect(errors).toHaveLength(1);
     broker.dispose();
   });
 

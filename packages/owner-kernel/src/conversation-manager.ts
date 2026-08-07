@@ -1471,6 +1471,41 @@ export class ConversationManager implements ConversationCommitProjection {
     return aborted;
   }
 
+  /**
+   * Freeze one conversation without disturbing peer sessions. Durable
+   * cancellation is requested before local abort, and success means its active
+   * and queued work has reached the ordinary cleanup edge.
+   */
+  async abortConversationAndWait(
+    conversationId: string,
+    reason: AbortReason,
+    timeoutMs = 30_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const queue = this.pendingQueues.get(conversationId) ?? [];
+    this.pendingQueues.delete(conversationId);
+    const active = this.activeTasks.get(conversationId);
+    const tasks = [...queue, ...(active ? [active] : [])];
+    for (const task of tasks) {
+      await task.cancelDurably?.();
+      const cancelled = this.applyDurableCancellation(
+        conversationId,
+        task.durableRunId,
+        reason,
+      );
+      if (!cancelled.abortedInFlight && queue.includes(task)) {
+        (task.cancelLocally ?? task.cancel)();
+      }
+    }
+    if (tasks.length === 0) this.abortInFlight(conversationId, reason);
+    while (this.hasActiveWork(conversationId)) {
+      if (Date.now() >= deadline) {
+        throw new Error("Conversation transfer could not settle active work");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   private sessionsAllIdle(): boolean {
     for (const session of this.sessions.values()) {
       if (session.busy) return false;
@@ -1482,7 +1517,12 @@ export class ConversationManager implements ConversationCommitProjection {
    * 停机收束的保守判定:任一会话 busy、任一 pending 队列非空或存在在飞
    * 任务即视为仍有工作。调用方在拒新准入后读取;true 表示不能宣称收束。
    */
-  hasActiveWork(): boolean {
+  hasActiveWork(conversationId?: string): boolean {
+    if (conversationId !== undefined) {
+      if (this.activeTasks.has(conversationId)) return true;
+      if ((this.pendingQueues.get(conversationId)?.length ?? 0) > 0) return true;
+      return this.sessions.get(conversationId)?.busy ?? false;
+    }
     if (this.activeTasks.size > 0) return true;
     for (const queue of this.pendingQueues.values()) {
       if (queue.length > 0) return true;

@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U31-01～U31-02 已验证；本轮修复闭包完成，待后续受影响范围独立复审
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（仅冻结 U31-01～U31-02 的 14 文件修复闭包，不代表进入全单元终审）
-- **交付物文件集**:3 个 CLI 生产装配文件、4 个 owner-kernel 生产文件、2 个直接测试、2 个 S7 文件、3 个现行架构/规格文件；工作台状态文件不计入交付指纹
-- **当前交付物指纹**:`sha256:b6ad14d08aa0d86d6bac67ae776d570db272f637a42706c159a37d1cb46c0a6f`
+- **当前状态**:已完成（第 31 单元已封版）
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（第 31 单元完整功能闭包；工作台状态文件不计入指纹）
+- **交付物文件集**:`6410de0a` 至当前工作树共 41 个变化路径；其中 34 个功能路径为 28 个生产/直接测试文件、2 个 S7 文件、4 个现行架构/规格文件，另 7 个 workbench 路径仅为流程状态
+- **当前交付物指纹**:`sha256:9edbf987c57f5f5a10353806860d9e486e213c535fc067e49b6922723621e32e`
 - **架构来源**:`distributed-runtime-charter.md`、`specification.md`、scheduler/rubric 当前架构、第 31 单元定稿开发清单、当前生产调用图与第 31 单元独立审查清单
 
 ## 固定边界
@@ -32,10 +32,11 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
-| owner-kernel intent/journal/control/review 生产实现 | owner-kernel 类型声明、同一 AuthorityCommitLog 的 durable projection 与 schedule pending reducer | owner-kernel build、类型检查、repository/review 直接测试 12/12 | 通过 |
-| CLI local/anchor/protocol 装配 | owner-kernel `dist`、两生产根、S7 结构门禁 | 上游包重建后两生产根 2/2；S7 15/15 与 golden | 通过 |
-| 直接测试与 S7 变异测试 | 无生成快照；S7 canonical registry golden 必须保持全等 | `pnpm s7:lint` 通过，golden 无漂移 | 通过 |
-| specification、scheduler、rubric 当前段 | 当前实现、EX31-01 与第 32 单元边界 | 三文档双向对账；历史段未升级，Unit32 禁止项未进入实现 diff | 通过 |
+| core intent 严格联合、durable projection、rubric authority adapter | core 导出、codec/validator、manifest/checkpoint、ArtifactStore 引用闭包 | core 合同测试与既有 build 证据；当前 diff 无 schema/golden 生成物 | 通过 |
+| owner-kernel intent/journal/control/review/coordinator | owner-kernel 导出、同一 AuthorityCommitLog 的 identity/intent/schedule pending 投影 | owner-kernel build；repository/review 定向测试 13/13 | 通过 |
+| owner-services schedule/rubric producer 与 CLI 消费 | producer 合同、advancement 文案、两生产根装配与 lifecycle | producer 5/5、两生产根 2/2、conversation consumer 定向证据 | 通过 |
+| S7 门禁与变异测试 | canonical registry golden、local/anchor mode/epoch/authority/public-zero 边界 | `pnpm s7:lint` 15/15，golden 无漂移 | 通过 |
+| charter/specification/scheduler/rubric 当前段 | 当前实现、EX31-01 与第 32 单元边界 | 四文档双向对账；历史段未升级，Unit32 禁止项未进入实现 diff | 通过 |
 
 ## 关键原语核查
 
@@ -56,6 +57,11 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R31-01 | intent 合同、身份、会话生命周期与 repository 线性化；覆盖状态、并发、崩溃、安全 | core intent codec/reducer；control identity、ConversationRunJournal、repository；local/anchor record/list/decide；repository/协议测试 | 路径+内容 SHA-256 `e3b606697f94467e3d7fdbcebb4f3f122176b65be515de882c242b1371d48935` | 任一合同、identity/delete、ownerEpoch、replay、投影或直接测试变化 | 通过 | 2/2 | 终审二从反例重建：伪 identity、错 epoch、delete 先/后、相同/异载荷、终态后删除及部分投影恢复均不能形成第二合法 append；matching replay 唯一且不依赖快照目录，零新问题。 |
+| R31-02 | schedule/rubric producer、ArtifactStore 与产品终态；覆盖消费者、恢复、异常语言 | 两 producer、rubric adapter、advancement/controller、CLI consumer、相关测试与 rubric 当前文档 | 路径+内容 SHA-256 `5afc488e3bbe4751c5ffffce9997ba85c1bfe755395765286d858f1b895ab279` | producer、资产引用、采用/沉淀顺序、消费文案或测试变化 | 通过 | 2/2 | 终审二从失败消费反推：缺/坏/旧 rubric asset、prepare/record 失败、schedule 不完整写、publication 响应丢失均不会回滚 local-draft 或声称全局生效；无内部术语公开，零新问题。 |
+| R31-03 | anchor 原子复核、CAS 与 schedule pending 物化；覆盖权威、并发、响应丢失与恢复 | anchor runtime、review、control admission/coordinator 直接边界、故障测试、scheduler 当前文档 | 路径+内容 SHA-256 `529d084b09f1fc75772b2b4dbcbce0c3de3574d0ac8ce2060c8ea2d3bc4f9960` | review/atomic plan、target revision、pending/materialized reducer、启动恢复或测试变化 | 通过 | 2/2 | 终审二主动构造 CAS 冲突、refresh 效果前/后抛错、materialized 响应丢失、旧/新 pending 交错与连续重启：权威事实不重复，未追平不返回完成，新目标不被旧 replay 清除。 |
+| R31-04 | 双生产根、能力隔离、公开零入口、包/文档/S7 闭包；覆盖入口、生命周期、结构与验收 | CLI local/protocol/anchor 装配、conformance、DurableProjectionIndex、S7、charter/spec | 路径+内容 SHA-256 `f0af444057cffed898dc645bb0a862ac971b1224df81540783c1945c7c42b926` | 生产装配、公开 registry、包依赖、S7、文档边界或派生资产变化 | 通过 | 2/2 | 终审二从装配漂移反推：重复/错 mode/错 authority/错 epoch、公开 token、禁用全局能力及 Unit32 提前注册均被现有有限 S7 或生产图拒绝；两根合法路径与文档合同一致。 |
+| R31-05 | 跨项组合：record→review→global commit→materialize、delete/replay、rubric asset 与 Unit32 接缝 | R31-01～R31-04 的当前输入、问题/排除记录、34 路径总闭包 | 总路径+内容 SHA-256 `9edbf987c57f5f5a10353806860d9e486e213c535fc067e49b6922723621e32e` | 任一 R31-01～R31-04 输入、状态或结论变化，或出现新反证 | 通过 | 2/2 | 终审二以跨域故障序列重建 record→delete/replay→review→commit→materialize 与 rubric asset 链：每步唯一事实源和失败终态可组合，生命周期/恢复无空窗；EX31-01 与 Unit32 边界均未触发。 |
 
 ## 问题列表
 
@@ -98,13 +104,14 @@
 | A31-03 | 冷启动：schedule pending/崩溃恢复 | 只读重造四 mutation、refresh 前后失败、较新 pending、连续重启 | review helper、coordinator pending reducer、故障测试 | 专项对抗 / 低 | 首次/terminal 共用原 target；旧 replay 不清新 pending，失败保留并可同进程/启动追平，revision 零重复 | `sha256:b6ad14d0…0a6f` | 有效 |
 | A31-04 | 冷启动：产品价值与范围边界 | 实现 diff、三现行文档、EX31-01 与 Unit32 禁止项双向对账 | 14 文件冻结闭包 | 专项对抗 / 低 | 未新增公开入口、结果联合、transfer/current-owner 切换或广义 conformance；EX31-01 重开条件不成立 | `sha256:b6ad14d0…0a6f` | 有效 |
 | A31-05 | 反证差异审计 | P31-01/P31-03、C31-R01、专项矩阵逐项归并 | 正式问题、测试与四路记录 | 收口 / 低 | P31-01/P31-03 修复后复核通过；C31-R01 同根合并并复核通过；零悬空反证 | `sha256:b6ad14d0…0a6f` | 有效 |
+| V31-07 | 单元提交验证：复用同输入构建、直接测试和 S7，核对差异卫生、闭包与指纹一致性 | `git diff --cached --check`、`git diff --check`、41/34/7 路径二元归属、34 路径 SHA-256；V31-01～V31-06 与原开发证据逐项复用 | 完整 34 功能路径；7 个 workbench 状态路径排除 | 提交验证 / 低 / 6.1s | staged/worktree diff check 通过；41 个变化路径全等分为 34 个功能路径与 7 个状态路径；功能指纹全等，零未暂存功能路径、零未跟踪文件；未重复包测、模块回归或 build | `sha256:9edbf987…1e32e` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `sha256:9edbf987…1e32e` | 通过；R31-01～R31-05 各 1/2 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `sha256:9edbf987…1e32e` | 通过；R31-01～R31-05 各 2/2 |
 
 ## 独立审查覆盖表
 
@@ -112,5 +119,10 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF31-01 | **高风险：权威身份与并发写。** conversation identity、ownerEpoch、delete、fresh/exact/terminal intent 的同日志排序 | identity/journal/repository 全链；`e3b60669…d48935` | 已覆盖 | 从失效机制重建错身份、错 epoch、双序竞争、响应丢失与投影重建；fresh 写只有一个合法线性化点，matching replay 不被后续删除破坏，零新增。 | identity 来源、journal 事务、replay 顺序或 owner 转移前提变化 |
+| IF31-02 | **高风险：原子确认与派生最终性。** global/control/confirmed 原子提交、schedule pending/materialized 恢复 | review/coordinator 全链；`529d084b…f9960` | 已覆盖 | 对 CAS 冲突、四 mutation、refresh 前后失败、响应丢失、较新 pending 和连续重启逐项反推；权威不重复、未物化不报完成、旧目标不清新目标。 | atomic plan、target revision、pending reducer 或 scheduler consumer 变化 |
+| IF31-03 | **一般风险：产品消费与资产闭包。** schedule/rubric producer、local-draft、ArtifactRef、有限文案 | producer/asset/consumer；`5afc488e…ab279` | 已覆盖 | 缺件、损坏、过期、prepare/record 失败和 replay 均落到诚实终态；本地采用不被全局沉淀失败回滚，公开文案无内部术语。 | producer 联合、资产引用、采用顺序或公开 consumer 变化 |
+| IF31-04 | **高风险：生产装配与能力隔离。** 两生产根、internal-only、S7、包依赖与 Unit32 边界 | assembly/S7/docs；`f0af4440…2b926` | 已覆盖 | local/anchor owner 集合、mode/epoch/authority 绑定、禁用能力和公开 registry 双向对账；合法两根恰一装配，公开零入口，第 32 单元能力未提前。 | topology、composition root、公开 registry、S7 或模块合同变化 |
+| IF31-05 | **高风险跨区组合。** record→delete/replay→anchor review→global commit→materialize 与 rubric asset/生命周期交界 | IF31-01～IF31-04、EX31-01、34 路径；`9edbf987…1e32e` | 已覆盖 | 跨区故障序列不存在第二事实源、半提交、错误成功或恢复空窗；证据按直接失效边界成比例，EX31-01 重开条件不成立，零未登记风险机制。 | 任一独立风险区输入/结论变化或出现生产交界反证 |
 
 <!-- registration-complete: unit-31.gen-1 -->

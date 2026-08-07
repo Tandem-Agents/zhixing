@@ -9,13 +9,24 @@
  * ephemeral 段切换同样触发：记忆是用户域资产，与对话域持久化差分无关。
  */
 
-import type { SegmentTransitionHook } from "../context/segment/types.js";
+import type {
+  ParsedSummary,
+  SegmentTransitionContext,
+  SegmentTransitionHook,
+} from "../context/segment/types.js";
 import type { MemoryFlusher } from "./flush-engine.js";
 
 export interface MemoryFlushHookConfig {
   readonly flusher: MemoryFlusher;
   /** 被摘段少于该消息数不值得花一次提取 LLM 调用（默认 6） */
   readonly minMessages?: number;
+  /** 非默认挂载点可把幂等身份绑定到自身的耐久来源事实。 */
+  readonly operationIdFor?: (
+    ctx: SegmentTransitionContext,
+    summary: ParsedSummary,
+  ) => string;
+  /** 恢复驱动需要观察部分写失败；正常段切换保持原来的降级语义。 */
+  readonly requireAllSaved?: boolean;
 }
 
 export function createMemoryFlushHook(
@@ -23,12 +34,16 @@ export function createMemoryFlushHook(
 ): SegmentTransitionHook {
   const minMessages = config.minMessages ?? 6;
   return {
-    async afterSummarize(ctx) {
+    async afterSummarize(ctx, summary) {
       if (ctx.messages.length < minMessages) return;
-      await config.flusher.flush(ctx.messages, {
+      const result = await config.flusher.flush(ctx.messages, {
         abortSignal: ctx.abortSignal,
-        operationId: `segment-memory:${ctx.segmentId}`,
+        operationId: config.operationIdFor?.(ctx, summary) ??
+          `segment-memory:${ctx.segmentId}`,
       });
+      if (config.requireAllSaved && result.errors.length > 0) {
+        throw new Error(`Memory flush did not settle: ${result.errors.join("; ")}`);
+      }
     },
   };
 }

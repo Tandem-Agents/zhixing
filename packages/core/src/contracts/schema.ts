@@ -4,6 +4,10 @@ import type {
   AnchorTransferCommit,
   CheckpointEnvelope,
   ConversationTransferCommit,
+  ConversationTransferAbort,
+  ConversationTransferCommand,
+  ConversationTransferManifest,
+  ConversationTransferResult,
   HomeTrustEvent,
   HomeTrustRecord,
   MeshEndpointDescriptor,
@@ -59,6 +63,7 @@ import type {
   InteractionMirrorBatch,
   MutationBatch,
   SupersedeProof,
+  TransferRecord,
 } from "./records.js";
 import type {
   DispatchResult,
@@ -75,6 +80,10 @@ export interface WireSchemaMap {
   AnchorTransferCommit: AnchorTransferCommit;
   SourceFreezeProof: SourceFreezeProof;
   ConversationTransferCommit: ConversationTransferCommit;
+  ConversationTransferAbort: ConversationTransferAbort;
+  ConversationTransferCommand: ConversationTransferCommand;
+  ConversationTransferManifest: ConversationTransferManifest;
+  ConversationTransferResult: ConversationTransferResult;
   PairingOffer: PairingOffer;
   PairingJoin: PairingJoin;
   PakeRound: PakeRound;
@@ -122,6 +131,7 @@ export interface WireSchemaMap {
   AssignmentRecord: AssignmentRecord;
   InteractionMirrorBatch: InteractionMirrorBatch;
   MutationBatch: MutationBatch;
+  TransferRecord: TransferRecord;
   LedgerSnapshot: LedgerSnapshot;
   LedgerEvidencePage: LedgerEvidencePage;
   DispatchResult: DispatchResult;

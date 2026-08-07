@@ -762,6 +762,7 @@ export async function validateS7Structure() {
   }
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
+  failures.push(...inspectConversationAdoptionAssembly(records));
   for (const packageName of [
     "server",
     "executor",
@@ -839,6 +840,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     failures.push(`${assemblyRecord.relative}: narrowed local owner port contract is missing`);
   } else {
     const allowedPortCapabilities = new Set([
+      "admitTurn",
       "answerInteractionWithTicket",
       "cancelTurns",
       "createConversation",
@@ -1270,6 +1272,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "evidence",
     "dataPlane",
     "closeDrainBudgetMs",
+    "currentAnchorDeviceId",
   ]);
   for (const record of records.filter(({ relative }) => productionRoots.has(relative))) {
     const source = sourceFile(record.relative, record.text);
@@ -1472,6 +1475,172 @@ export function inspectLocalConversationOwnerIsolation(records) {
       }
     }
   }
+  return failures;
+}
+
+export function inspectConversationAdoptionAssembly(records) {
+  const failures = [];
+  const required = new Map([
+    ["packages/cli/src/serve/mesh-runtime-assembly.ts", undefined],
+    ["packages/cli/src/serve/access-surfaces.ts", undefined],
+    ["packages/cli/src/serve/executor-role-runtime.ts", undefined],
+    ["packages/cli/src/serve/conversation-evidence-authority.ts", undefined],
+    ["packages/cli/src/serve/local-conversation-rpc.ts", undefined],
+    ["packages/cli/src/serve/post-adoption-review.ts", undefined],
+    ["packages/cli/src/serve/command.ts", undefined],
+    ["packages/cli/src/runtime/rpc-confirmation-broker.ts", undefined],
+    ["packages/cli/src/repl.ts", undefined],
+    ["packages/rpc/src/confirmation-bridge.ts", undefined],
+    ["packages/server/src/context.ts", undefined],
+    ["packages/server/src/rpc/handlers.ts", undefined],
+    ["packages/server/src/rpc/methods/session.ts", undefined],
+    ["packages/server/src/rpc/methods/confirmation.ts", undefined],
+  ]);
+  for (const record of records) {
+    if (required.has(record.relative)) required.set(record.relative, record);
+  }
+  for (const [relative, record] of required) {
+    if (!record) failures.push(`${relative}: S8 production assembly source is missing`);
+  }
+  if (failures.length > 0) return failures;
+
+  const count = (text, pattern) => [...text.matchAll(pattern)].length;
+  const requireCount = (record, pattern, expected, description) => {
+    const actual = count(record.text, pattern);
+    if (actual !== expected) {
+      failures.push(`${record.relative}: expected ${expected} ${description}, got ${actual}`);
+    }
+  };
+
+  const mesh = required.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  requireCount(mesh, /new\s+ConversationTransferTarget\s*\(/gu, 1, "anchor transfer target construction");
+  requireCount(mesh, /registerConversationTransferMeshService\s*\(/gu, 1, "conversation transfer mesh registration");
+  requireCount(mesh, /options\.localConversationOwner\.transferSource\s*\(\s*\)/gu, 1, "local transfer source binding");
+  requireCount(mesh, /afterCommit\s*:\s*async\s*\(base\)[\s\S]*?this\.#installCommittedTransfer\s*\(base\)/gu, 1, "post-commit authority installation");
+  if (!/this\.#transferTarget\s*=\s*roles\.has\("anchor"\)\s*\?[\s\S]*?new\s+ConversationTransferTarget\s*\(/u.test(mesh.text)) {
+    failures.push(`${mesh.relative}: transfer target must be owned only by the active anchor role`);
+  }
+  const startBoundary = mesh.text.indexOf("  async start(): Promise<void> {");
+  const stopBoundary = mesh.text.indexOf("  async stop(): Promise<void> {");
+  if (startBoundary < 0 || stopBoundary < 0 || startBoundary > stopBoundary) {
+    failures.push(`${mesh.relative}: mesh lifecycle start/stop boundary is missing`);
+  } else {
+    const startBody = mesh.text.slice(startBoundary, stopBoundary);
+    const restore = startBody.indexOf("await this.#restoreCommittedTransfers()");
+    const admission = startBody.indexOf("await this.#control.start()");
+    if (restore < 0 || admission < 0 || restore > admission) {
+      failures.push(`${mesh.relative}: committed transfers must restore before mesh admission opens`);
+    }
+  }
+  if (!/async\s+bindPostAdoptionMemory\s*\([\s\S]*?this\.#postAdoptionMemory\s*=\s*port;\s*await\s+this\.#restoreCommittedTransfers\s*\(\s*\)/u.test(mesh.text)) {
+    failures.push(`${mesh.relative}: post-adoption memory must bind before replaying durable commits`);
+  }
+  if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?this\.#postAdoptionMemory[\s\S]*?\.flush\s*\(/u.test(mesh.text)) {
+    failures.push(`${mesh.relative}: committed authority must install before post-adoption memory consumption`);
+  }
+  if (!/async\s+bindPostAdoptionReview\s*\([\s\S]*?this\.#postAdoptionReview\s*=\s*port;\s*await\s+this\.#restoreCommittedTransfers\s*\(\s*\)/u.test(mesh.text)) {
+    failures.push(`${mesh.relative}: post-adoption review must bind before replaying durable commits`);
+  }
+  if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?this\.#postAdoptionReview[\s\S]*?\.reviewAfterAdoption\s*\(/u.test(mesh.text)) {
+    failures.push(`${mesh.relative}: committed authority must install before deferred-intent review`);
+  }
+
+  const productionRoots = [
+    required.get("packages/cli/src/serve/access-surfaces.ts"),
+    required.get("packages/cli/src/serve/executor-role-runtime.ts"),
+  ];
+  for (const rootRecord of productionRoots) {
+    requireCount(rootRecord, /new\s+MeshRuntimeAssembly\s*\(/gu, 1, "mesh runtime production construction");
+    requireCount(rootRecord, /createConversationEvidenceAuthorityVerifier\s*\(/gu, 1, "current-owner evidence verifier injection");
+    if (!/localConversationOwner\s*[:,]/u.test(rootRecord.text)) {
+      failures.push(`${rootRecord.relative}: mesh production root must bind its local conversation source`);
+    }
+  }
+
+  const executorRoot = required.get("packages/cli/src/serve/executor-role-runtime.ts");
+  requireCount(executorRoot, /new\s+LocalConversationRpcRouter\s*\(/gu, 1, "first-party local conversation router construction");
+  requireCount(executorRoot, /conversationRpc\s*:\s*localConversationRpc/gu, 1, "first-party local conversation router injection");
+
+  const evidence = required.get("packages/cli/src/serve/conversation-evidence-authority.ts");
+  if (!/resolveCurrentConversationAuthority\s*\([\s\S]*?request\.conversationId/u.test(evidence.text)) {
+    failures.push(`${evidence.relative}: evidence verifier must resolve the durable current conversation authority`);
+  }
+  if (!/current\.deviceId\s*!==\s*request\.signature\.keyId[\s\S]*?current\.ownerEpoch\s*!==\s*request\.ownerEpoch/u.test(evidence.text)) {
+    failures.push(`${evidence.relative}: evidence verifier must bind both owner identity and owner epoch`);
+  }
+
+  const router = required.get("packages/cli/src/serve/local-conversation-rpc.ts");
+  if (!/params\.continueLocally\s*!==\s*true/u.test(router.text) || !/assertLocalConversationIdForDevice\s*\(/u.test(router.text)) {
+    failures.push(`${router.relative}: local session writes must require user consent and a local conversation identity`);
+  }
+  const context = required.get("packages/server/src/context.ts");
+  if (!/conversationRpc\?\s*:\s*FirstPartyConversationRpcRouter/u.test(context.text)) {
+    failures.push(`${context.relative}: server context must expose the narrow first-party conversation router`);
+  }
+  const handlers = required.get("packages/server/src/rpc/handlers.ts");
+  if (!/ctx\.server\.conversationRpc\?\.dispatch\s*\(/u.test(handlers.text)) {
+    failures.push(`${handlers.relative}: canonical RPC dispatch must consult the first-party conversation router`);
+  }
+
+  const command = required.get("packages/cli/src/serve/command.ts");
+  requireCount(command, /bindPostAdoptionMemory\s*\(/gu, 1, "anchor post-adoption memory binding");
+  requireCount(command, /new\s+PostAdoptionReviewCoordinator\s*\(/gu, 1, "anchor post-adoption review construction");
+  requireCount(command, /bindPostAdoptionReview\s*\(/gu, 1, "anchor post-adoption review binding");
+  if (!/ctx\.meshRuntime\s*&&\s*ctx\.authorityRuntime\?\.globalState/u.test(command.text)) {
+    failures.push(`${command.relative}: post-adoption memory must be limited to an anchor with GlobalState`);
+  }
+  const memoryBinding = command.text.indexOf("await ctx.meshRuntime.bindPostAdoptionMemory(");
+  const reviewBinding = command.text.indexOf("await ctx.meshRuntime.bindPostAdoptionReview(");
+  const publicServer = command.text.indexOf("runner = await runServer(");
+  if (
+    memoryBinding < 0 || reviewBinding < 0 || publicServer < 0 ||
+    memoryBinding > publicServer || reviewBinding > publicServer
+  ) {
+    failures.push(`${command.relative}: adoption recovery consumers must bind before public server admission`);
+  }
+  if (!/conversationAdoptionReview\s*:[\s\S]*?adoptionReview!\.reviewForSurface\s*\(input\)/u.test(command.text)) {
+    failures.push(`${command.relative}: public resume must reuse the authenticated anchor review coordinator`);
+  }
+
+  const review = required.get("packages/cli/src/serve/post-adoption-review.ts");
+  if (
+    !/parseLocalConversationId\s*\(input\.conversationId\)/u.test(review.text) ||
+    !/this\.#review\.decide\s*\(intent\.intentId,\s*"confirmed"/u.test(review.text) ||
+    !/this\.#hub\.attach\s*\("post-adoption-review",\s*this\.#broker\)/u.test(review.text) ||
+    !/triggeredBy:\s*surfacePrincipal\s*\(context\)/u.test(review.text)
+  ) {
+    failures.push(`${review.relative}: adoption review must remain local-conversation scoped and reuse the durable review/confirmation seams`);
+  }
+
+  const session = required.get("packages/server/src/rpc/methods/session.ts");
+  const addObserver = session.text.indexOf("manager.addObserver(params.conversationId");
+  const reviewSurface = session.text.indexOf("ctx.server.conversationAdoptionReview?.({");
+  if (addObserver < 0 || reviewSurface < 0 || addObserver > reviewSurface) {
+    failures.push(`${session.relative}: session resume must bind the authenticated observer before adoption review`);
+  }
+
+  const confirmation = required.get("packages/server/src/rpc/methods/confirmation.ts");
+  if (
+    !/!e\.conversationId[\s\S]*?rpcOriginMatches\s*\(e\.request,\s*ctx\.connection\)/u.test(confirmation.text) ||
+    !/origin\.triggeredBy\s*===\s*String\(connection\.id\)[\s\S]*?origin\.triggeredBy\s*===\s*connection\.surfacePrincipal/u.test(confirmation.text) ||
+    !/connection\.authenticated[\s\S]*?connection\.loopback[\s\S]*?rpcOriginMatches\(req,\s*connection\)/u.test(confirmation.text)
+  ) {
+    failures.push(`${confirmation.relative}: missed confirmations must be recoverable only by their authenticated local surface`);
+  }
+  const bridge = required.get("packages/rpc/src/confirmation-bridge.ts");
+  if (!/origin\.triggeredBy\s*===\s*String\(conn\.id\)[\s\S]*?origin\.triggeredBy\s*===\s*conn\.surfacePrincipal/u.test(bridge.text)) {
+    failures.push(`${bridge.relative}: confirmation notifications must follow the stable authenticated surface across reconnects`);
+  }
+
+  const broker = required.get("packages/cli/src/runtime/rpc-confirmation-broker.ts");
+  if (!/async\s+refresh\s*\(\s*\)[\s\S]*?request[\s\S]*?"confirmation\.list"[\s\S]*?this\.acceptPending/u.test(broker.text)) {
+    failures.push(`${broker.relative}: the first-party confirmation renderer must recover missed pending requests`);
+  }
+  const repl = required.get("packages/cli/src/repl.ts");
+  if (!/initialAdoptionReview[\s\S]*?\.message/u.test(repl.text) || !/rpcConfirmationBroker\.refresh\s*\(\s*\)/u.test(repl.text)) {
+    failures.push(`${repl.relative}: the first-party REPL must present adoption summaries and recover pending confirmations`);
+  }
+
   return failures;
 }
 

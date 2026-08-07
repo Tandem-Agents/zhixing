@@ -2858,6 +2858,11 @@ export function buildSessionResumeMethod(): MethodEntry {
         params.conversationId,
       );
       const active = manager.getSession(params.conversationId);
+      const adoptionReview = await ctx.server.conversationAdoptionReview?.({
+        conversationId: params.conversationId,
+        surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
+        connectionId: String(ctx.connection.id),
+      });
       return {
         // 返回入参全域键——与 rename 同纪律,目录契约返回库内身份
         conversationId: params.conversationId,
@@ -2868,6 +2873,7 @@ export function buildSessionResumeMethod(): MethodEntry {
           ctx.server,
           params.conversationId,
         ),
+        ...(adoptionReview ? { adoptionReview } : {}),
       };
     },
   };
