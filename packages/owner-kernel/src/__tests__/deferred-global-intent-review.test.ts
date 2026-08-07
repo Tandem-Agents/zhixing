@@ -11,6 +11,7 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
+import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
@@ -23,7 +24,11 @@ import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { ControlAdmissionJournal } from "../control-admission.js";
 import { DeferredGlobalIntentAnchorReviewService } from "../deferred-global-intent-review.js";
-import { DeferredGlobalIntentRepository } from "../deferred-global-intents.js";
+import {
+  DEFERRED_INTENT_PROJECTION_ID,
+  DeferredGlobalIntentRepository,
+  type DeferredIntentConversationAuthority,
+} from "../deferred-global-intents.js";
 import { GlobalMutationCommitCoordinator } from "../global-mutation-commit-coordinator.js";
 
 const NOW = "2026-08-07T11:00:00.000Z";
@@ -50,6 +55,27 @@ function context(kind: "host" | "surface", requestId: string): AuthorityCallCont
   };
 }
 
+function conversationAuthority(
+  log: AuthorityCommitLog,
+): DeferredIntentConversationAuthority {
+  return {
+    async transact(input) {
+      const result = await log.transactDurableProjection(
+        DEFERRED_INTENT_PROJECTION_ID,
+        (projection, transaction) => input.decide(
+          { ownerEpoch: input.ownerEpoch, hasDurableIdentity: true, deleted: false },
+          projection,
+          transaction,
+        ),
+        input.candidateReferences
+          ? { candidateReferences: input.candidateReferences }
+          : undefined,
+      );
+      return result.value;
+    },
+  };
+}
+
 async function harness(currentOwner = true) {
   const root = await createTempDir("deferred-intent-review");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
@@ -62,26 +88,34 @@ async function harness(currentOwner = true) {
   const local = new DeferredGlobalIntentRepository({
     log,
     localDomainId: "local:device-a",
+    ownerEpoch: 1,
     mode: "local",
     acceptsConversationId: () => true,
     conversationExists: () => true,
     isCurrentOwner: () => true,
+    conversationAuthority: conversationAuthority(log),
     clock: () => NOW,
   });
   const anchor = new DeferredGlobalIntentRepository({
     log,
     localDomainId: "local:device-a",
+    ownerEpoch: 1,
     mode: "anchor",
     acceptsConversationId: () => true,
     conversationExists: () => true,
     isCurrentOwner: () => currentOwner,
+    conversationAuthority: conversationAuthority(log),
     clock: () => NOW,
   });
   let definitions = new Map<string, TaskDefinition>();
-  const coordinator = new GlobalMutationCommitCoordinator({
+  let nextRefreshFailure: "before" | "after" | undefined;
+  const createCoordinator = () => new GlobalMutationCommitCoordinator({
     log,
     artifacts,
     refreshSchedule: async () => {
+      const failure = nextRefreshFailure;
+      nextRefreshFailure = undefined;
+      if (failure === "before") throw new Error("refresh failed before effect");
       const next = new Map<string, TaskDefinition>();
       for (const commit of await log.readAll()) {
         for (const entry of commit.entries) {
@@ -93,9 +127,11 @@ async function harness(currentOwner = true) {
         }
       }
       definitions = next;
+      if (failure === "after") throw new Error("refresh failed after effect");
     },
     scheduleDefinitionFor: (taskId) => definitions.get(taskId),
   });
+  const coordinator = createCoordinator();
   const rubrics = new AnchorRubricGlobalStateAdapter({
     log,
     artifacts,
@@ -112,7 +148,19 @@ async function harness(currentOwner = true) {
     isCurrentOwner: () => currentOwner,
     now: () => NOW,
   });
-  return { anchor, artifacts, local, log, service };
+  return {
+    anchor,
+    artifacts,
+    local,
+    log,
+    service,
+    failNextRefresh(failure: "before" | "after") {
+      nextRefreshFailure = failure;
+    },
+    recoverAfterRestart() {
+      return createCoordinator().recoverDerivedState();
+    },
+  };
 }
 
 describe("DeferredGlobalIntentAnchorReviewService", () => {
@@ -215,5 +263,188 @@ describe("DeferredGlobalIntentAnchorReviewService", () => {
       intentId,
       context("surface", "review-non-owner"),
     )).rejects.toThrow("not owned by this anchor");
+  });
+
+  it.each(["before", "after"] as const)(
+    "retries a confirmed schedule in the same process after refresh fails %s the effect",
+    async (failure) => {
+      const fixture = await harness();
+      const { intentId } = await fixture.local.record(
+        CONVERSATION,
+        { kind: "schedule-create", spec: SPEC },
+        true,
+        context("host", `record-${failure}`),
+      );
+      fixture.failNextRefresh(failure);
+      await expect(fixture.service.decide(
+        intentId,
+        "confirmed",
+        context("surface", `confirm-${failure}`),
+      )).rejects.toThrow(`refresh failed ${failure} effect`);
+      expect((await fixture.anchor.locate(intentId)).intent.status).toBe("confirmed");
+      const afterFailure = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+      expect(afterFailure.filter((entry) =>
+        (entry.body as { t?: string }).t === "task-revision"
+      )).toHaveLength(1);
+      expect(afterFailure.filter((entry) =>
+        (entry.body as { t?: string }).t === "schedule-materialized"
+      )).toHaveLength(0);
+
+      await expect(fixture.service.decide(
+        intentId,
+        "confirmed",
+        context("surface", `retry-${failure}`),
+      )).resolves.toEqual(expect.objectContaining({ status: "confirmed" }));
+      const settled = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+      expect(settled.filter((entry) =>
+        (entry.body as { t?: string }).t === "task-revision"
+      )).toHaveLength(1);
+      expect(settled.filter((entry) =>
+        (entry.body as { t?: string }).t === "schedule-materialized"
+      )).toHaveLength(1);
+    },
+  );
+
+  it("keeps confirmed schedule pending across failed restarts and settles it once", async () => {
+    const fixture = await harness();
+    const { intentId } = await fixture.local.record(
+      CONVERSATION,
+      { kind: "schedule-create", spec: SPEC },
+      true,
+      context("host", "record-restart"),
+    );
+    fixture.failNextRefresh("before");
+    await expect(fixture.service.decide(
+      intentId,
+      "confirmed",
+      context("surface", "confirm-restart"),
+    )).rejects.toThrow("refresh failed before effect");
+
+    fixture.failNextRefresh("before");
+    await expect(fixture.recoverAfterRestart()).rejects.toThrow("refresh failed before effect");
+    await expect(fixture.recoverAfterRestart()).resolves.toBeUndefined();
+    await expect(fixture.recoverAfterRestart()).resolves.toBeUndefined();
+
+    const settled = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(settled.filter((entry) =>
+      (entry.body as { t?: string }).t === "task-revision"
+    )).toHaveLength(1);
+    expect(settled.filter((entry) =>
+      (entry.body as { t?: string }).t === "schedule-materialized"
+    )).toHaveLength(1);
+  });
+
+  it("does not let an older terminal replay clear a newer schedule pending target", async () => {
+    const fixture = await harness();
+    const created = await fixture.local.record(
+      CONVERSATION,
+      { kind: "schedule-create", spec: SPEC },
+      true,
+      context("host", "record-create"),
+    );
+    await fixture.service.decide(
+      created.intentId,
+      "confirmed",
+      context("surface", "confirm-create"),
+    );
+    const taskRevision = (await fixture.log.readAll()).flatMap((commit) => commit.entries)
+      .map((entry) => entry.body as { t?: string; def?: TaskDefinition })
+      .find((body) => body.t === "task-revision")!.def!;
+    const updatedSpec = { ...SPEC, name: "updated daily summary" };
+    const updated = await fixture.local.record(
+      CONVERSATION,
+      {
+        kind: "schedule-update",
+        taskId: taskRevision.taskId,
+        spec: updatedSpec,
+        taskRevision: 1,
+      },
+      true,
+      context("host", "record-update"),
+    );
+    fixture.failNextRefresh("before");
+    await expect(fixture.service.decide(
+      updated.intentId,
+      "confirmed",
+      context("surface", "confirm-update"),
+    )).rejects.toThrow("refresh failed before effect");
+
+    const materializedBeforeOldReplay = (await fixture.log.readAll()).flatMap((commit) => commit.entries)
+      .filter((entry) => (entry.body as { t?: string }).t === "schedule-materialized").length;
+    await fixture.service.decide(
+      created.intentId,
+      "confirmed",
+      context("surface", "replay-create"),
+    );
+    expect((await fixture.log.readAll()).flatMap((commit) => commit.entries)
+      .filter((entry) => (entry.body as { t?: string }).t === "schedule-materialized")).toHaveLength(
+        materializedBeforeOldReplay,
+      );
+    await fixture.service.decide(
+      updated.intentId,
+      "confirmed",
+      context("surface", "retry-update"),
+    );
+    const settled = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(settled.filter((entry) =>
+      (entry.body as { t?: string }).t === "task-revision"
+    )).toHaveLength(2);
+    expect(settled.filter((entry) =>
+      (entry.body as { t?: string }).t === "schedule-materialized"
+    )).toHaveLength(materializedBeforeOldReplay + 1);
+  });
+
+  it("reconstructs the original target revision for every terminal schedule mutation replay", async () => {
+    const fixture = await harness();
+    const created = await fixture.local.record(
+      CONVERSATION,
+      { kind: "schedule-create", spec: SPEC },
+      true,
+      context("host", "record-target-create"),
+    );
+    await fixture.service.decide(
+      created.intentId,
+      "confirmed",
+      context("surface", "confirm-target-create"),
+    );
+    const taskId = (await fixture.log.readAll()).flatMap((commit) => commit.entries)
+      .map((entry) => entry.body as { t?: string; def?: TaskDefinition })
+      .find((body) => body.t === "task-revision")!.def!.taskId;
+    const mutations: readonly DeferredGlobalIntent["mutation"][] = [
+      {
+        kind: "schedule-update",
+        taskId,
+        taskRevision: 1,
+        spec: { ...SPEC, name: "updated summary" },
+      },
+      { kind: "schedule-set-state", taskId, taskRevision: 2, state: "disabled" },
+      { kind: "schedule-delete", taskId, taskRevision: 3 },
+    ];
+    for (const [index, mutation] of mutations.entries()) {
+      const recorded = await fixture.local.record(
+        CONVERSATION,
+        mutation,
+        true,
+        context("host", `record-target-${index}`),
+      );
+      fixture.failNextRefresh("before");
+      await expect(fixture.service.decide(
+        recorded.intentId,
+        "confirmed",
+        context("surface", `confirm-target-${index}`),
+      )).rejects.toThrow("refresh failed before effect");
+      await expect(fixture.service.decide(
+        recorded.intentId,
+        "confirmed",
+        context("surface", `retry-target-${index}`),
+      )).resolves.toEqual(expect.objectContaining({ status: "confirmed" }));
+    }
+    const settled = (await fixture.log.readAll()).flatMap((commit) => commit.entries);
+    expect(settled.filter((entry) =>
+      (entry.body as { t?: string }).t === "task-revision"
+    )).toHaveLength(4);
+    expect(settled.filter((entry) =>
+      (entry.body as { t?: string }).t === "schedule-materialized"
+    )).toHaveLength(4);
   });
 });

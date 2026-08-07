@@ -145,7 +145,7 @@
 - agent-turn 任务由宿主的**无会话执行面**（`ephemeralRuntime`）执行；任务的 **workspace / 上下文是任务自身的属性**（见防债注记），不是宿主进程的隐式 cwd。**cli 交互的对话本模块仍走 cli 本地 `agentRuntime`**（`session.ts:158`）——本模块只把 **scheduler** 从「cli 自起」改成「RPC client 接入宿主」，**不迁 cli 对话**；「cli 对话迁成宿主会话执行面的 client」属 unified-core 的承重件迁移（与本决策同量级，见核心宿主定位的诚实标注），不在本模块。任务结果回用户：在线走 RPC 事件 `schedule.completed`（现成）；离线补传归「使用侧、未来」（现有 delivery / origin 为 channel 设计，cli 终端不是 channel、不走 delivery）。
 - 性质：**拓扑层重构**（「每进程自起」→「单一权威 + 多 client」），落点在接入方式与生命周期协调——接口与基础设施现成，重构实体是 cli 接入逻辑 + ensure / 生命周期机制。
 
-本地域会话离线时不取得 SchedulerFacade，也不创建 TaskView：四种完整 schedule 写只经 owner 内的窄 producer 记录为 time-sensitive `DeferredGlobalIntent`，成功文案必须明确“已记录但尚未生效，连接值班设备后需确认”。producer 不读取或合成全局任务状态，不触达 scheduler、job journal 或 delivery；收编到锚点后仍以原 mutation/revision 重校验，并由 authenticated surface 对同一 intent 再确认。
+本地域会话离线时不取得 SchedulerFacade，也不创建 TaskView：四种完整 schedule 写只经 owner 内的窄 producer 记录为 time-sensitive `DeferredGlobalIntent`，成功文案必须明确“已记录但尚未生效，连接值班设备后需确认”。producer 不读取或合成全局任务状态，不触达 scheduler、job journal 或 delivery；intent 写经当前 conversation journal 与 delete 在同一日志前缀排序。收编到锚点后仍以原 mutation/revision 重校验，并由 authenticated surface 对同一 intent 再确认；confirmed 首次决定和同终态 replay 在返回前共用既有 schedule pending materializer，失败保留 pending，旧 replay 不清除较新目标。
 
 **决策 2 —— missed = 按来源分流：用户任务记录不补、维护补跑一次**（按第一部分需求）
 

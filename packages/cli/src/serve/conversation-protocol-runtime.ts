@@ -81,6 +81,8 @@ import {
   type DurableConversationSessionWriteResult,
   type DurableConversationTurnExecutor,
   type DurableConversationTurnInput,
+  type DeferredIntentConversationAuthority,
+  type DeferredIntentConversationTransaction,
   type InProcessDispatchContextFactory,
   ConversationSessionStateAdapter,
 } from "@zhixing/owner-kernel";
@@ -310,6 +312,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | undefined;
   #mutationPublisher: ConversationMutationPublisher | undefined;
   readonly #mutationPublisherProxy: ConversationMutationPublisher;
+  readonly deferredIntentAuthority: DeferredIntentConversationAuthority;
 
   constructor(options: ConversationProtocolRuntimeOptions) {
     if ((options.authority === undefined) === (options.owner === undefined)) {
@@ -333,6 +336,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
     this.#authority = authority;
     this.#manager = options.manager;
+    const protocol = this;
+    this.deferredIntentAuthority = Object.freeze({
+      transact<Value>(input: DeferredIntentConversationTransaction<Value>) {
+        return protocol.#journal(input.conversationId).transactDeferredIntent(input);
+      },
+    });
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#interactions = options.interactions;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;

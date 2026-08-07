@@ -979,6 +979,23 @@ export function inspectLocalConversationOwnerIsolation(records) {
       ) {
         failures.push(`${assemblyRecord.relative}: local intent repository must use local mode`);
       }
+      if (options && ts.isObjectLiteralExpression(options)) {
+        const requiredBindings = new Map([
+          ["ownerEpoch", "owner.ownerEpoch"],
+          ["conversationAuthority", "protocol.deferredIntentAuthority"],
+        ]);
+        for (const [name, expected] of requiredBindings) {
+          const property = options.properties.find((candidate) =>
+            ts.isPropertyAssignment(candidate) && propertyNameText(candidate.name) === name
+          );
+          if (
+            !property || !ts.isPropertyAssignment(property) ||
+            property.initializer.getText(assemblySource) !== expected
+          ) {
+            failures.push(`${assemblyRecord.relative}: local intent repository ${name} must bind ${expected}`);
+          }
+        }
+      }
     }
     if (
       ts.isNewExpression(node) &&
@@ -1041,6 +1058,23 @@ export function inspectLocalConversationOwnerIsolation(records) {
           ) {
             failures.push(`${anchorIntentRecord.relative}: anchor intent repository must use anchor mode`);
           }
+          if (options && ts.isObjectLiteralExpression(options)) {
+            const requiredBindings = new Map([
+              ["ownerEpoch", "options.authority.anchorEpoch"],
+              ["conversationAuthority", "options.protocol.deferredIntentAuthority"],
+            ]);
+            for (const [name, expected] of requiredBindings) {
+              const property = options.properties.find((candidate) =>
+                ts.isPropertyAssignment(candidate) && propertyNameText(candidate.name) === name
+              );
+              if (
+                !property || !ts.isPropertyAssignment(property) ||
+                property.initializer.getText(source) !== expected
+              ) {
+                failures.push(`${anchorIntentRecord.relative}: anchor intent repository ${name} must bind ${expected}`);
+              }
+            }
+          }
         }
         if (node.expression.text === "DeferredGlobalIntentAnchorReviewService") {
           reviewCount += 1;
@@ -1069,9 +1103,41 @@ export function inspectLocalConversationOwnerIsolation(records) {
     }
   }
 
+  const protocolIntentRecord = records.find(
+    ({ relative }) => relative === "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  );
+  if (!protocolIntentRecord) {
+    failures.push("packages/cli/src/serve/conversation-protocol-runtime.ts: intent authority adapter source is missing");
+  } else {
+    const source = sourceFile(protocolIntentRecord.relative, protocolIntentRecord.text);
+    let adapterCount = 0;
+    const visitAdapter = (node) => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        node.left.getText(source) === "this.deferredIntentAuthority"
+      ) {
+        adapterCount += 1;
+        const binding = node.right.getText(source);
+        if (
+          !binding.includes("Object.freeze") ||
+          !binding.includes("protocol.#journal(input.conversationId).transactDeferredIntent(input)")
+        ) {
+          failures.push(`${protocolIntentRecord.relative}: intent authority adapter must route the current conversation journal narrow transaction`);
+        }
+      }
+      ts.forEachChild(node, visitAdapter);
+    };
+    visitAdapter(source);
+    if (adapterCount !== 1) {
+      failures.push(`${protocolIntentRecord.relative}: expected exactly one intent authority adapter binding, got ${adapterCount}`);
+    }
+  }
+
   const internalIntentFiles = new Set([
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
   ]);
   const publicIntentTokens = new Set([
     "deferSchedule",

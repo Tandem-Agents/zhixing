@@ -185,10 +185,12 @@ export class AnchorSchedulerRuntime {
     this.#intentRepository = new DeferredGlobalIntentRepository({
       log: options.authority.authorityLog,
       localDomainId: options.authority.localDomainId,
+      ownerEpoch: options.authority.anchorEpoch,
       mode: "anchor",
       acceptsConversationId: () => true,
       conversationExists: (conversationId) => options.protocol.sessionExists(conversationId),
       isCurrentOwner: (conversationId) => options.protocol.sessionExists(conversationId),
+      conversationAuthority: options.protocol.deferredIntentAuthority,
       clock: this.#clock,
     });
     this.deferredIntents = new DeferredGlobalIntentAnchorReviewService({

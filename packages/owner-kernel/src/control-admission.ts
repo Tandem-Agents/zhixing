@@ -8,6 +8,8 @@ import {
   validateAdmittedControlEnvelope,
   type ArtifactStore,
   type AuthorityCommitLog,
+  type DurableProjectionMutation,
+  type DurableProjectionReadContext,
   type ProjectionCursor,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
@@ -15,11 +17,13 @@ import {
 import type {
   ArtifactRef,
   ChannelResponderRef,
+  CommitEnvelope,
   ControlEnvelope,
   ControlRecord,
   ControlRequest,
   ControlResult,
   IngressContext,
+  JsonValue,
   LogicalRecord,
 } from "@zhixing/core/contracts";
 import {
@@ -40,6 +44,9 @@ import {
 } from "@zhixing/core/delivery";
 
 const MAX_AUTHORITY_PROJECTION_CACHES = 8;
+export const CONVERSATION_IDENTITY_PROJECTION_ID = "conversation-identities-v1";
+const CONVERSATION_IDENTITY_PREFIX = "identity:";
+const CONVERSATION_IDENTITY_REQUEST_PREFIX = "request:";
 
 type InitialControlRequest = Extract<
   ControlRequest,
@@ -421,6 +428,7 @@ export class ControlAdmissionJournal {
   constructor(log: AuthorityCommitLog, artifacts: ArtifactStore) {
     this.#log = log;
     this.#artifacts = artifacts;
+    registerConversationIdentityProjection(log, artifacts);
   }
 
   /**
@@ -1594,6 +1602,104 @@ function isDeliveryControlEnvelope(
   envelope: AdmittedControlEnvelope,
 ): envelope is DeliveryControlEnvelope {
   return envelope.body.t === "delivery-resolve";
+}
+
+export function registerConversationIdentityProjection(
+  log: AuthorityCommitLog,
+  artifacts: ArtifactStore,
+): void {
+  log.durableProjection<ControlRecord>({
+    projectionId: CONVERSATION_IDENTITY_PROJECTION_ID,
+    reducerVersion: 1,
+    reduce: (envelope, current) =>
+      reduceConversationIdentityProjection(envelope, current, artifacts),
+  });
+}
+
+export async function conversationIdentityExistsAt(
+  projection: DurableProjectionReadContext,
+  conversationId: string,
+): Promise<boolean> {
+  const value = await projection.get(conversationIdentityKey(conversationId));
+  if (value === undefined) return false;
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).sort().join(",") !== "conversationId" ||
+    value.conversationId !== conversationId
+  ) {
+    throw invalidControlRecord("Conversation identity projection is invalid");
+  }
+  return true;
+}
+
+async function reduceConversationIdentityProjection(
+  envelope: CommitEnvelope<ControlRecord>,
+  current: DurableProjectionReadContext,
+  artifacts: ArtifactStore,
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const get = (key: string) => overlay.has(key) ? overlay.get(key) : current.get(key);
+  const put = (key: string, value: JsonValue) => {
+    overlay.set(key, value);
+    mutations.push({ kind: "put" as const, key, value });
+  };
+  const tombstone = (key: string) => {
+    overlay.set(key, undefined);
+    mutations.push({ kind: "tombstone" as const, key });
+  };
+  for (const entry of envelope.entries) {
+    if (entry.stream !== "control") continue;
+    if (entry.body.t === "received") {
+      const admitted = snapshotAdmittedControlEnvelope(
+        await loadStored(
+          snapshotStored<AdmittedControlEnvelope>(entry.body.envelope),
+          artifacts,
+          "ControlEnvelope",
+        ),
+      );
+      if (admitted.body.t === "session-create") {
+        put(conversationIdentityRequestKey(entry.body.requestId), {
+          requestId: admitted.requestId,
+        });
+      }
+      continue;
+    }
+    if (entry.body.t !== "applied") continue;
+    const requestKey = conversationIdentityRequestKey(entry.body.requestId);
+    const request = await get(requestKey);
+    if (request === undefined) continue;
+    if (
+      !isPlainRecord(request) ||
+      Object.keys(request).sort().join(",") !== "requestId" ||
+      request.requestId !== entry.body.requestId
+    ) {
+      throw invalidControlRecord("Conversation identity request projection is invalid");
+    }
+    const result = await loadStored(
+      snapshotStored<ControlResult>(entry.body.result),
+      artifacts,
+      "ControlResult",
+    );
+    if (result.status === "ok") {
+      if (result.body.t !== "session-create") {
+        throw invalidControlRecord("Conversation identity result does not bind its request");
+      }
+      put(conversationIdentityKey(result.body.conversationId), {
+        conversationId: result.body.conversationId,
+      });
+    }
+    tombstone(requestKey);
+  }
+  return mutations;
+}
+
+function conversationIdentityKey(conversationId: string): string {
+  return `${CONVERSATION_IDENTITY_PREFIX}${conversationId}`;
+}
+
+function conversationIdentityRequestKey(requestId: string): string {
+  return `${CONVERSATION_IDENTITY_REQUEST_PREFIX}${requestId}`;
 }
 
 function isGlobalControlEnvelope(

@@ -395,6 +395,7 @@ test("all production CleanupRegistry constructions bind exact topology owners", 
 test("local conversation owner remains isolated from anchor capabilities by construction", async () => {
   const paths = [
     "packages/cli/src/serve/conversation-owner-runtime.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/access-surfaces.ts",
@@ -624,6 +625,36 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       (text) => text.replace('      mode: "anchor",', '      mode: "local",'),
     )).join("\n"),
     /anchor intent repository must use anchor mode/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "conversationAuthority: protocol.deferredIntentAuthority,",
+        "conversationAuthority: driftedIntentAuthority,",
+      ),
+    )).join("\n"),
+    /local intent repository conversationAuthority must bind protocol\.deferredIntentAuthority/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "conversationAuthority: options.protocol.deferredIntentAuthority,",
+        "conversationAuthority: driftedIntentAuthority,",
+      ),
+    )).join("\n"),
+    /anchor intent repository conversationAuthority must bind options\.protocol\.deferredIntentAuthority/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "protocol.#journal(input.conversationId).transactDeferredIntent(input)",
+        "driftedJournal.transactDeferredIntent(input)",
+      ),
+    )).join("\n"),
+    /intent authority adapter must route the current conversation journal narrow transaction/,
   );
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(

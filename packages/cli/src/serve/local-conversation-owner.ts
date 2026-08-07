@@ -432,10 +432,12 @@ export class LocalConversationOwnerAssembly {
     const intents = new DeferredGlobalIntentRepository({
       log: owner.executorLog,
       localDomainId: owner.domain.localDomainId,
+      ownerEpoch: owner.ownerEpoch,
       mode: "local",
       acceptsConversationId: (conversationId) => owner.acceptsConversationId(conversationId),
       conversationExists: (conversationId) => protocol.sessionExists(conversationId),
       isCurrentOwner: (conversationId) => protocol.sessionExists(conversationId),
+      conversationAuthority: protocol.deferredIntentAuthority,
     });
     const scheduleIntents = new DeferredScheduleIntentProducer({ intents });
     const rubricPublication = new DeferredRubricPublication({

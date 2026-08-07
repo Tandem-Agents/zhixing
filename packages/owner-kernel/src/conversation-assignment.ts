@@ -48,6 +48,7 @@ import type {
   DispatchRejectionProof,
   ExplicitEnvironmentSelection,
   IngressContext,
+  IntentStreamRecord,
   IsoTime,
   LedgerSnapshot,
   LedgerEvidencePage,
@@ -139,12 +140,21 @@ import {
 } from "@zhixing/core";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
 import { productizePublishAuthorityError } from "./publish-result-product-language.js";
+import {
+  DEFERRED_INTENT_PROJECTION_ID,
+  type DeferredIntentConversationAuthorityState,
+} from "./deferred-global-intents.js";
 import type {
   ControlAdmissionJournal,
   ControlAdmissionOutcome,
   ConversationControlEnvelope,
   InitialControlEnvelope,
   TrustedControlSource,
+} from "./control-admission.js";
+import {
+  CONVERSATION_IDENTITY_PROJECTION_ID,
+  conversationIdentityExistsAt,
+  registerConversationIdentityProjection,
 } from "./control-admission.js";
 import {
   assertAdmissionReplayContract,
@@ -996,6 +1006,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#legacyAbortTickets = options.legacyAbortTickets;
+    registerConversationIdentityProjection(options.log, options.artifacts);
   }
 
   async sessionMeta(): Promise<SessionMeta> {
@@ -1415,6 +1426,46 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.lifecycleByRequest.size > 0,
       pendingLifecycleProjections: state.pendingLifecycleProjections.size,
     }));
+  }
+
+  async transactDeferredIntent<Value>(input: {
+    readonly ownerEpoch: number;
+    readonly candidateReferences?: readonly ArtifactRef[];
+    readonly decide: (
+      state: DeferredIntentConversationAuthorityState,
+      projection: import("@zhixing/core/authority").DurableProjectionReadContext,
+      transaction: ProjectionTransactionContext,
+    ) =>
+      | ProjectionTransactionDecision<IntentStreamRecord, Value>
+      | Promise<ProjectionTransactionDecision<IntentStreamRecord, Value>>;
+  }): Promise<Value> {
+    if (input.ownerEpoch !== this.#ownerEpoch) {
+      throw new TypeError("Deferred intent transaction belongs to another owner epoch");
+    }
+    const transaction = await this.#transact<Value>(
+      async (state, authorityPrefix) => input.decide(
+        {
+          ownerEpoch: this.#ownerEpoch,
+          hasDurableIdentity:
+            state.sessionMeta !== undefined ||
+            state.admittedByRun.size > 0 ||
+            state.lifecycleByRequest.size > 0 ||
+            await conversationIdentityExistsAt(
+              authorityPrefix.readProjection(CONVERSATION_IDENTITY_PROJECTION_ID),
+              this.#conversationId,
+            ),
+          deleted: state.deleted,
+        },
+        authorityPrefix.readProjection(DEFERRED_INTENT_PROJECTION_ID),
+        authorityPrefix,
+      ),
+      input.candidateReferences ?? [],
+      [
+        CONVERSATION_IDENTITY_PROJECTION_ID,
+        DEFERRED_INTENT_PROJECTION_ID,
+      ],
+    );
+    return transaction.value;
   }
 
   async touchWorksceneSession(input: {

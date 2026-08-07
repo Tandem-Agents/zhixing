@@ -14,6 +14,7 @@ import type {
   DurableProjectionMutation,
   DurableProjectionReadContext,
   ProjectionTransactionContext,
+  ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import {
   assertPrincipalAllowsAuthorityMethod,
@@ -38,13 +39,38 @@ interface StoredIntent {
   readonly firstLsn: number;
 }
 
+export interface DeferredIntentConversationAuthorityState {
+  readonly ownerEpoch: number;
+  readonly hasDurableIdentity: boolean;
+  readonly deleted: boolean;
+}
+
+export interface DeferredIntentConversationTransaction<Value> {
+  readonly conversationId: string;
+  readonly ownerEpoch: number;
+  readonly candidateReferences?: readonly ArtifactRef[];
+  readonly decide: (
+    state: DeferredIntentConversationAuthorityState,
+    projection: DurableProjectionReadContext,
+    transaction: ProjectionTransactionContext,
+  ) =>
+    | ProjectionTransactionDecision<IntentStreamRecord, Value>
+    | Promise<ProjectionTransactionDecision<IntentStreamRecord, Value>>;
+}
+
+export interface DeferredIntentConversationAuthority {
+  transact<Value>(input: DeferredIntentConversationTransaction<Value>): Promise<Value>;
+}
+
 export interface DeferredGlobalIntentRepositoryOptions {
   readonly log: AuthorityCommitLog;
   readonly localDomainId: string;
+  readonly ownerEpoch: number;
   readonly mode: "local" | "anchor";
   readonly acceptsConversationId: (conversationId: string) => boolean;
   readonly conversationExists: (conversationId: string) => boolean | Promise<boolean>;
   readonly isCurrentOwner?: (conversationId: string) => boolean | Promise<boolean>;
+  readonly conversationAuthority: DeferredIntentConversationAuthority;
   readonly clock?: () => string;
 }
 
@@ -57,6 +83,9 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
   constructor(options: DeferredGlobalIntentRepositoryOptions) {
     if (!options.localDomainId.startsWith("local:")) {
       throw new TypeError("Deferred intent repository requires a local domain id");
+    }
+    if (!Number.isSafeInteger(options.ownerEpoch) || options.ownerEpoch <= 0) {
+      throw new TypeError("Deferred intent repository requires a positive owner epoch");
     }
     this.#options = options;
     this.#clock = options.clock ?? (() => new Date().toISOString());
@@ -88,7 +117,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
     if (this.#options.mode !== "local") {
       throw new TypeError("Anchor owners cannot record deferred global intents");
     }
-    await this.#assertOwnedConversation(conversationId);
+    this.#assertAcceptedConversation(conversationId);
     validateDeferredIntentMutation(mutation, timeSensitive);
     const mutationDigest = deferredIntentMutationDigest(mutation, timeSensitive);
     const intentId = intentIdFor({
@@ -97,9 +126,11 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
       requestId: context.requestId,
     });
     const candidateReferences = mutationReferences(mutation);
-    return this.#options.log.transactDurableProjection<IntentStreamRecord, { intentId: string }>(
-      DEFERRED_INTENT_PROJECTION_ID,
-      async (projection, transaction) => {
+    return this.#options.conversationAuthority.transact({
+      conversationId,
+      ownerEpoch: this.#options.ownerEpoch,
+      ...(candidateReferences.length > 0 ? { candidateReferences } : {}),
+      decide: async (authority, projection, transaction) => {
         const existing = readStoredIntent(
           await projection.get(intentKey(intentId)),
         );
@@ -116,6 +147,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
           }
           return { kind: "return", value: { intentId } };
         }
+        this.#assertFreshConversationAuthority(authority);
         const intent: DeferredGlobalIntent = {
           intentId,
           localDomainId: this.#options.localDomainId,
@@ -134,8 +166,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
           value: { intentId },
         };
       },
-      candidateReferences.length > 0 ? { candidateReferences } : undefined,
-    ).then((result) => result.value);
+    });
   }
 
   async list(
@@ -176,13 +207,14 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
   ): Promise<void> {
     this.#admit(context, "intent.decide");
     const located = await this.locate(intentId);
-    await this.#assertOwnedConversation(located.intent.conversationId);
+    this.#assertAcceptedConversation(located.intent.conversationId);
     if (decision === "confirmed") {
       throw new TypeError("Deferred intent confirmation requires the anchor review service");
     }
-    await this.#options.log.transactDurableProjection<IntentStreamRecord, void>(
-      DEFERRED_INTENT_PROJECTION_ID,
-      async (projection, transaction) => {
+    await this.#options.conversationAuthority.transact({
+      conversationId: located.intent.conversationId,
+      ownerEpoch: this.#options.ownerEpoch,
+      decide: async (authority, projection, transaction) => {
         const stored = readStoredIntent(
           await projection.get(intentKey(intentId)),
           true,
@@ -193,6 +225,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
         if (stored.intent.status !== "pending") {
           throw new TypeError("Deferred intent already has the opposite terminal decision");
         }
+        this.#assertFreshConversationAuthority(authority);
         return {
           kind: "append",
           entries: [{
@@ -209,7 +242,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
           value: undefined,
         };
       },
-    );
+    });
   }
 
   async locate(intentId: string): Promise<StoredIntent> {
@@ -258,9 +291,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
   }
 
   async #assertOwnedConversation(conversationId: string): Promise<void> {
-    if (!this.#options.acceptsConversationId(conversationId)) {
-      throw new TypeError("Deferred intent conversation belongs to another domain");
-    }
+    this.#assertAcceptedConversation(conversationId);
     if (!(await this.#options.conversationExists(conversationId))) {
       throw new TypeError("Deferred intent conversation does not exist");
     }
@@ -269,6 +300,24 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
       !(await this.#options.isCurrentOwner(conversationId))
     ) {
       throw new TypeError("Deferred intent conversation is not owned by this owner");
+    }
+  }
+
+  #assertAcceptedConversation(conversationId: string): void {
+    if (!this.#options.acceptsConversationId(conversationId)) {
+      throw new TypeError("Deferred intent conversation belongs to another domain");
+    }
+  }
+
+  #assertFreshConversationAuthority(
+    authority: DeferredIntentConversationAuthorityState,
+  ): void {
+    if (
+      authority.ownerEpoch !== this.#options.ownerEpoch ||
+      !authority.hasDurableIdentity ||
+      authority.deleted
+    ) {
+      throw new TypeError("Deferred intent conversation is not a current durable owner identity");
     }
   }
 }

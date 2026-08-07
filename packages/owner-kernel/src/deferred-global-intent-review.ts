@@ -80,7 +80,10 @@ export class DeferredGlobalIntentAnchorReviewService {
     const located = await this.#options.repository.locate(intentId);
     const intent = located.intent;
     if (intent.status !== "pending") {
-      if (intent.status === decision) return structuredClone(intent);
+      if (intent.status === decision) {
+        await this.#materializeConfirmedSchedule(intent);
+        return structuredClone(intent);
+      }
       throw new TypeError("Deferred intent already has the opposite terminal decision");
     }
     if (decision === "discarded") {
@@ -184,19 +187,22 @@ export class DeferredGlobalIntentAnchorReviewService {
     if (outcome.kind === "rejected") {
       throw new TypeError(`Deferred intent remains pending: ${outcome.result.error.message}`);
     }
-    if (
-      intent.timeSensitive &&
-      outcome.result.status === "ok" &&
-      outcome.result.body.t === "global-write"
-    ) {
-      await this.#options.coordinator.applyDeferredScheduleIntent({
-        intentId,
-        requestId: controlRequestId,
-        mutation: intent.mutation as ScheduleWriteMutation,
-        targetRevision: outcome.result.body.revision,
-      });
-    }
+    await this.#materializeConfirmedSchedule(intent);
     return structuredClone((await this.#options.repository.locate(intentId)).intent);
+  }
+
+  async #materializeConfirmedSchedule(intent: DeferredGlobalIntent): Promise<void> {
+    if (!intent.timeSensitive || intent.status === "discarded") return;
+    const mutation = intent.mutation as ScheduleWriteMutation;
+    const mutationDigest = deferredIntentMutationDigest(mutation, true);
+    await this.#options.coordinator.applyDeferredScheduleIntent({
+      intentId: intent.intentId,
+      requestId: `intent-apply:${intent.intentId}:${mutationDigest}`,
+      mutation,
+      targetRevision: mutation.kind === "schedule-create"
+        ? 1
+        : mutation.taskRevision + 1,
+    });
   }
 
   #admit(
