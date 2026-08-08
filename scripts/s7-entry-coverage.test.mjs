@@ -827,6 +827,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   const paths = [
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/mesh-bootstrap-store.ts",
     "packages/cli/src/serve/backup-runtime-owner.ts",
     "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
     "packages/cli/src/serve/mesh-control-plane.ts",
@@ -964,6 +965,36 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
       (text) => text.replace("replayRootActivation:", "missingRootActivationReplay:"),
     )).join("\n"),
     /signed activation replay must remain durably bound/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => text.replace(
+        "return context.store.loadRecoveryRootActivationReplay({",
+        "await context.store.loadTrustEvents();\n  return undefined; // latest-head fallback",
+      ),
+    )).join("\n"),
+    /originating commit and same-LSN historical trust tuple/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-bootstrap-store.ts",
+      (text) => text.replace(
+        "verifyHomeTrustRecord(record, historical)",
+        "verifyHomeTrustRecord(record, current)",
+      ),
+    )).join("\n"),
+    /originating commit and same-LSN historical trust tuple/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-bootstrap-store.ts",
+      (text) => text.replace(
+        "const event = plan.rootEvent;",
+        "const event = (await this.loadTrustEvents()).at(-1)!;",
+      ),
+    )).join("\n"),
+    /originating commit and same-LSN historical trust tuple/,
   );
 });
 

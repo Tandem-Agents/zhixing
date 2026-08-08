@@ -907,6 +907,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const owner = byPath.get("packages/cli/src/serve/backup-runtime-owner.ts");
   const backup = byPath.get("packages/cli/src/serve/backup-command.ts");
+  const bootstrapStore = byPath.get("packages/cli/src/serve/mesh-bootstrap-store.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
   const rootEstablishment = byPath.get(
@@ -922,7 +923,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
-    !command || !owner || !backup || !bootstrap || !topology || !rootEstablishment ||
+    !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !rootEstablishment ||
     !rootActivation || !controlPlane ||
     !runtime || !pairing || !checkpointService || !checkpointOwner || !pairedTarget
   ) {
@@ -1045,6 +1046,41 @@ export function inspectRecoveryBackupAssembly(records) {
     !rootActivation.includes("isExactRecoveryRootActivationReplay(")
   ) {
     failures.push("paired root-establishment staging and signed activation replay must remain durably bound");
+  }
+  const replayHelperStart = backup.indexOf("async function currentPairedRootActivation(");
+  const replayHelperEnd = replayHelperStart < 0
+    ? -1
+    : backup.indexOf("\nasync function ", replayHelperStart + 1);
+  const replayHelper = replayHelperStart < 0
+    ? ""
+    : backup.slice(replayHelperStart, replayHelperEnd < 0 ? backup.length : replayHelperEnd);
+  const replayQueryStart = bootstrapStore.indexOf("  async loadRecoveryRootActivationReplay(input:");
+  const replayQueryEnd = replayQueryStart < 0
+    ? -1
+    : bootstrapStore.indexOf("\n  async ", replayQueryStart + 1);
+  const replayQuery = replayQueryStart < 0
+    ? ""
+    : bootstrapStore.slice(replayQueryStart, replayQueryEnd < 0 ? bootstrapStore.length : replayQueryEnd);
+  if (
+    !replayQuery.includes('body.t === "recovery-activation-committed"') ||
+    !replayQuery.includes('protocolDigest("RecoveryActivationPlan", 1, body.commit.plan)') ||
+    !replayQuery.includes("envelope.lsn > match.lsn") ||
+    !replayQuery.includes("verifyHomeTrustRecord(record, historical)") ||
+    !replayQuery.includes("current.recoveryActivationDigest !== input.activationDigest") ||
+    !replayQuery.includes("const event = plan.rootEvent") ||
+    !replayQuery.includes("const record = activationRecords[0]!") ||
+    replayQuery.includes("loadTrustRecord(") ||
+    replayQuery.includes("loadCheckpointRecords(") ||
+    replayQuery.includes(".at(-1)") ||
+    replayQuery.includes(".reverse()") ||
+    !replayHelper.includes("return context.store.loadRecoveryRootActivationReplay({") ||
+    replayHelper.includes("loadTrustEvents(") ||
+    replayHelper.includes("loadTrustRecord(") ||
+    replayHelper.includes("loadCheckpointRecords(") ||
+    replayHelper.includes(".at(-1)") ||
+    replayHelper.includes(".reverse()")
+  ) {
+    failures.push("paired root activation replay must use the originating commit and same-LSN historical trust tuple");
   }
   const ownerDescriptor = frozenLiteralDescriptor(
     "packages/mesh/src/checkpoint-owner.ts",

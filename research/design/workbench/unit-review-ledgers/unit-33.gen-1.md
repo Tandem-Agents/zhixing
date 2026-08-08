@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U33-04、U33-05、U33-10 已在最终专项冻结指纹上完成实现、最小必要验证、F33-30～F33-40 只读事实重建与四路冷启动对抗，三项均为“已验证”；其余 U33 问题与 EX33-01 既有结论继续复用。受变更影响的独立审查项已标为 `[~]` 等待后续独立审查，本轮未进入全单元终审或单元提交验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（仅作为 U33-04、U33-05、U33-10 专项修复与对抗收口基线；不代表全单元冻结终审已开始）
-- **交付物文件集**:`git diff HEAD --name-only -- . ':(exclude)research/design/workbench/**'` 与非工作台未跟踪路径并集排序所得 22 个生产实现、直接测试、S7 与架构/规格文件；`research/design/workbench/` 流程账本路径不参与功能指纹
-- **当前交付物指纹**:`92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`；算法为对排序后的 22 个非工作台路径逐文件计算 SHA-256，以 `path<TAB>hash`、LF 与末尾 LF 形成 UTF-8 清单后再计算 SHA-256
+- **当前状态**:第 33 单元已完成并封版。同一份未修改交付物已通过两轮冻结终审、独立功能审查与单元提交验证；U33-01～U33-13 均为“已验证”，P0/P1 清零，独立审查清单 36/36 通过且两类问题列表为空
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（第 33 单元完整交付物冻结；流程账本不参与指纹）
+- **交付物文件集**:`git diff --name-only dd50eec8..HEAD` 的 67 个路径：61 个生产实现、直接测试、S7 与架构/规格文件，另 6 个 `research/design/workbench/` 流程账本路径不参与功能指纹
+- **当前交付物指纹**:`027fb83d24912a5d7885af61abd7d5029d5505f024107641d31298d6994868be`；算法为对排序后的 61 个非工作台路径逐文件计算 SHA-256，以 `path<TAB>hash`、LF 与末尾 LF 形成 UTF-8 清单后再计算 SHA-256
 - **架构来源**:`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md`、`research/design/modules/distributed-runtime/s2-security-supply-chain-review.md`，以及已定稿开发清单 D33-01～D33-08
 
 ## 固定边界
@@ -40,7 +40,7 @@
 | 两份 distributed-runtime 架构/规格文档 | 当前 S9 合同、兼容和后继边界与实现全等 | 文档—合同逐项对账 | 通过 |
 | `scripts/s7-entry-coverage.mjs`、`.test.mjs` | 生产入口/角色 exact-set、owner/receiver 与 golden 消费 | S7 直接测试和 lint | 通过 |
 | `packages/mesh/src/__tests__/full-authority-checkpoint.test.ts` 及 CLI/server 直接测试 | U33-01～U33-12 的必要证据闭包 | 按问题验收逐项反绑，不扩成包全测 | 通过 |
-| 3 个 `research/design/workbench/` 路径 | 仅流程状态与历史归档，不影响功能派生资产 | 核对不进入交付指纹 | 不适用:流程账本不参与功能通过判定 |
+| 6 个 `research/design/workbench/` 路径 | 仅流程状态与历史归档，不影响功能派生资产 | 核对不进入交付指纹 | 不适用:流程账本不参与功能通过判定 |
 
 ## 关键原语核查
 
@@ -51,11 +51,11 @@
 | full capture 与 retained artifact closure | `AuthorityCommitLog` 冻结前缀 + `ArtifactLifecycleIndex` + retention 分类原语 | 同一 `DurableLogCheckpoint` 后、created 前形成可验真闭包 | index 落后/损坏、删除竞争、缺 ref、共享/嵌套/大资产 | owner/capture → checkpoint service/verify/readiness | 不递归包含 checkpoint；分页/chunk 有界 | 通过 |
 | root/chain generation 与 readiness | lifecycle created/verified 事实及 payload root/chain/source prefix | candidate identity 创建及 verified 投影 | 同日 rotate、同 root 链变化、丢响应、重启 | owner/service → status、后继窄接缝 | 每 generation 唯一且旧代不计 current ready | 通过 |
 | candidate single-flight | owner 当前执行事实 | 按 candidate identity 加入或拒绝 | daily/forced 双序与重放 | daily/forced producer → 内部 forced consumer | 同 key 恰一执行，不同 key 稳定拒绝 | 通过 |
-| target binding 与 checkpoint lifecycle | 耐久 target binding map + lifecycle facts | owner 按 targetId 解析并重驱至终态 | 目标切换、旧 target 离线、效果后丢响应、重启/到期 | setup/owner/service → verify/cleanup/status | 旧 binding 只保留未终态义务；source-local 与 target retention 事实分层 | 通过 |
+| target binding 与 checkpoint lifecycle | 耐久 target binding map + lifecycle facts | owner 按 targetId 解析并重驱至终态；无根 paired 双端重放以 originating activation commit 同 LSN tuple 为键 | 目标切换、旧 target 离线、效果后丢响应、trust chain 前进、重启/到期 | setup/owner/service → verify/cleanup/status | 旧 binding 只保留未终态义务；source-local 与 target retention 事实分层；错误/歧义重放零 trust 副作用 | 通过 |
 | storage governor 与 lifecycle abort | current anchor storage governor + owner abort signal | 每个物理 I/O step 前取得 permit | 大资产、容量/磁盘不足、网络挂起、stop | capture/CAS/target/transport → owner lifecycle | 总驻留与 permit 同界；permit 不跨网络或 authority/store 锁 | 通过 |
 | directory/paired root 与文件身份 | 冻结 root binding、opened handle identity、durable progress | no-follow handle-relative operation、同 handle fsync、exact-set 核对后推进 | parent/root/file 替换、begin 崩溃、乱序/丢响应 | 两 target adapter → owner/service | staging/文件集合有界且可重驱，根外零副作用 | 通过 |
 | compatibility、秘密输入、公开状态与可选 owner | v1/v2 codec、TTY secret reader、status owner、backup runtime state | 严格 decode/无回显读取/稳定 DTO/owner unavailable | 旧包、非 TTY、原始错误、坏配置/离线 target | CLI/mesh/server → 用户与现有 S2 replay | 零秘密输出；可选失败不阻塞 serve | 通过 |
-| S7 生产 exact-set 与必要证据 | 实际 registrar/topology descriptor + 真实 log/store/index 场景 | lint/golden 与直接场景验收 | 删除/错角色/错顺序/绕过、门禁绿色假通过 | CLI/mesh/server producer → S7 gate/提交门禁 | 有限入口集合与两生产根小表，不建笛卡尔积 | 通过 |
+| S7 生产 exact-set 与必要证据 | 实际 registrar/topology descriptor + 真实 log/store/index 场景 | lint/golden 与直接场景验收 | 删除/错角色/错顺序/绕过、terminal replay 回退 latest/current | CLI/mesh/server producer → S7 gate/提交门禁 | 有限入口集合与两生产根小表；helper/store 历史 tuple 变异 fail-closed，不建笛卡尔积 | 通过 |
 
 ## 审查结论复用表
 
@@ -67,19 +67,19 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
-| R33-01 | full capture 与 retention 闭包 | core retention/index；mesh full capture/owner/service；真实 log/store/index 测试 | `c66cd68d…`（32 文件内容清单） | 相关分类、index、capture 或验证输入变化 | 失效 | 0/2 | U33-01 专项修复与直接证据通过；输入已变化，待后续正式独立审查 |
-| R33-02 | root/chain generation 与 current readiness | lifecycle facts、recovery payload、status/readiness、rotate/重启测试 | `c66cd68d…`（32 文件内容清单） | identity、verification、readiness 输入变化 | 失效 | 0/2 | U33-02 专项修复与直接证据通过；输入已变化，待后续正式独立审查 |
-| R33-03 | daily/forced candidate 关联 | owner single-flight、daily/forced producers 与双序测试 | `c66cd68d…`（32 文件内容清单） | owner active identity 或 forced 接缝变化 | 失效 | 0/2 | U33-03 专项修复通过；P2 边界与第 34 单元排除保持不变 |
-| R33-04 | target binding、重驱与 retention | binding config、target resolver、owner/service、setup/status/cleanup | `92953a6e…`（22 文件内容清单） | target 配置、resolver、lifecycle/cleanup 输入变化 | 失效 | 0/2 | U33-04 已在专项指纹上修复并通过直接验证与四路对抗；生产输入已变化，待后续独立审查 |
-| R33-05 | I/O 资源治理与 stop | governor、capture/CAS、directory/paired transport、lifecycle signal | `92953a6e…`（22 文件内容清单） | 物理 I/O、permit 或 stop 顺序变化 | 失效 | 0/2 | U33-05 已在专项指纹上修复并通过直接验证与四路对抗；生产输入已变化，待后续独立审查 |
-| R33-06 | root/file identity 与 durable progress | directory/paired adapter、staging、fsync/progress、故障测试 | `c66cd68d…`（32 文件内容清单） | root binding、open/fsync/progress 输入变化 | 失效 | 0/2 | U33-06 专项句柄桥、adapter 直接验证与同指纹物理身份对抗通过；因生产输入变化，留待后续正式独立审查 |
-| R33-07 | paired result 严格解码 | result codec、pairing socket/client 与命令关联断言 | `c66cd68d…`（32 文件内容清单） | codec 或任一推进字段变化 | 失效 | 0/2 | U33-07 专项修复通过；P2 价值边界未扩大 |
-| R33-08 | v1 recovery package 兼容 | recovery codec、backup/pairing 入口、S2 mesh-ready replay | `c66cd68d…`（32 文件内容清单） | v1/v2 codec 或旧 replay 消费路径变化 | 失效 | 0/2 | U33-08 专项修复通过；v1 仍只产生 S2 mesh-ready |
-| R33-09 | 恢复秘密输入边界 | backup verify/pairing CLI、TTY reader、输出与错误路径 | `c66cd68d…`（32 文件内容清单） | 输入 reader 或 CLI 输出路径变化 | 失效 | 0/2 | U33-09 专项修复通过；两入口共用无回显 reader |
-| R33-10 | 公开状态与稳定错误 | owner status、server.info、CLI status、verification failure | `92953a6e…`（22 文件内容清单） | DTO、认证边界或错误映射变化 | 失效 | 0/2 | U33-10 已在专项指纹上修复并通过直接验证与四路对抗；既有泄露裁决未恢复，待后续独立审查 |
-| R33-11 | 可选 backup owner 与普通业务隔离 | CLI/server 两生产根、配置解析、paired runtime 与 unavailable 状态 | `c66cd68d…`（32 文件内容清单） | 组合根装配或错误边界变化 | 失效 | 0/2 | U33-11 专项修复通过；availability 与 trust/root fail-stop 分层 |
-| R33-12 | 入口 exact-set 与必要恢复证据 | S7 capture/validator/golden、实际 owner/receiver/CLI descriptor、两生产根小表 | `c66cd68d…`（32 文件内容清单） | 生产入口、角色、门禁或必要证据变化 | 失效 | 0/2 | U33-12 专项修复、S7 与两个 P0 小表通过；待后续正式独立审查 |
-| R33-13 | 跨项组合推演 | R33-01～R33-12 当前输入、结论及交界 | `92953a6e…`（R33-01～R33-12 当前输入汇总） | 任一前置项边界、输入或结论变化 | 失效 | 0/2 | 三项直接交界已在专项四路对抗闭合；前置项输入变化，待后续独立审查整体重审 |
+| R33-01 | full capture 与 retention 闭包 | core retention/index；mesh full capture/owner/service；真实 log/store/index 测试 | `027fb83d…`（61 文件内容清单） | 相关分类、index、capture 或验证输入变化 | 通过 | 2/2 | 第二轮冻结终审：从删除竞争、index 越头、部分读取与崩溃重放重新推演，零错误 full-ready、无新增问题 |
+| R33-02 | root/chain generation 与 current readiness | lifecycle facts、recovery payload、status/readiness、rotate/重启测试 | `027fb83d…`（61 文件内容清单） | identity、verification、readiness 输入变化 | 通过 | 2/2 | 第二轮冻结终审：同日 rotate、chain/target 变化、效果后丢响应和连续重启均保持代际隔离，无新增问题 |
+| R33-03 | daily/forced candidate 关联 | owner single-flight、daily/forced producers 与双序测试 | `027fb83d…`（61 文件内容清单） | owner active identity 或 forced 接缝变化 | 通过 | 2/2 | 第二轮冻结终审：并发 join/busy、stop abort 与 terminal replay 不生成第二 candidate，无新增问题 |
+| R33-04 | target binding、重驱与 retention | binding config、target resolver、owner/service、setup/status/cleanup、历史 activation tuple | `027fb83d…`（61 文件内容清单） | target 配置、resolver、lifecycle/cleanup 或 historical replay 输入变化 | 通过 | 2/2 | 第二轮冻结终审：独立重造 source 提交前/后、target 效果前/后、trust 前进/换代及歧义输入；原 tuple 可重放，错误输入 fail-closed |
+| R33-05 | I/O 资源治理与 stop | governor、capture/CAS、directory/paired transport、lifecycle signal | `027fb83d…`（61 文件内容清单） | 物理 I/O、permit 或 stop 顺序变化 | 通过 | 2/2 | 第二轮冻结终审：容量拒绝/取消、网络挂起、并发 chunk 与 stop 均保持固定驻留上界和零 permit 泄漏 |
+| R33-06 | root/file identity 与 durable progress | directory/paired adapter、staging、fsync/progress、故障测试 | `027fb83d…`（61 文件内容清单） | root binding、open/fsync/progress 输入变化 | 通过 | 2/2 | 第二轮冻结终审：逐 child 调用前 parent/file 替换、部分 I/O 与重启仍锚定物理身份，错误路径零 progress |
+| R33-07 | paired result 严格解码 | result codec、pairing socket/client 与命令关联断言 | `027fb83d…`（61 文件内容清单） | codec 或任一推进字段变化 | 通过 | 2/2 | 第二轮冻结终审：错 state/checkpoint/seq/offset/progress/digest 与额外字段均不能跨命令推进，无新增问题 |
+| R33-08 | v1 recovery package 兼容 | recovery codec、backup/pairing 入口、S2 mesh-ready replay | `027fb83d…`（61 文件内容清单） | v1/v2 codec 或旧 replay 消费路径变化 | 通过 | 2/2 | 第二轮冻结终审：v1 fresh/响应丢失/terminal replay 与 v2 分流均只进入既有正确线性化点，无范围越界 |
+| R33-09 | 恢复秘密输入边界 | backup verify/pairing CLI、TTY reader、输出与错误路径 | `027fb83d…`（61 文件内容清单） | 输入 reader 或 CLI 输出路径变化 | 通过 | 2/2 | 第二轮冻结终审：paste/backspace/Enter/Ctrl-C、异常和非 TTY 路径均不回显、不入错误且有界清零 |
+| R33-10 | 公开状态与稳定错误 | owner status、server.info、CLI status、verification failure | `027fb83d…`（61 文件内容清单） | DTO、认证边界或错误映射变化 | 通过 | 2/2 | 第二轮冻结终审：离线/重连、runtime 缺失与 generation 漂移只影响各自维度，公开 DTO/错误无私有信息 |
+| R33-11 | 可选 backup owner 与普通业务隔离 | CLI/server 两生产根、配置解析、paired runtime 与 unavailable 状态 | `027fb83d…`（61 文件内容清单） | 组合根装配或错误边界变化 | 通过 | 2/2 | 第二轮冻结终审：两生产根的配置/target/runtime 故障不阻普通业务，安全身份破坏不被错误降级 |
+| R33-12 | 入口 exact-set 与必要恢复证据 | S7 capture/validator/golden、实际 owner/receiver/CLI descriptor、两生产根小表 | `027fb83d…`（61 文件内容清单） | 生产入口、角色、门禁或必要证据变化 | 通过 | 2/2 | 第二轮冻结终审：删除/重复/错 owner/错序/governor 旁路/latest-head 回退均由现有有限门禁和真实场景拒绝 |
+| R33-13 | 跨项组合推演 | R33-01～R33-12 当前输入、结论及交界 | `027fb83d…`（R33-01～R33-12 当前输入汇总） | 任一前置项边界、输入或结论变化 | 通过 | 2/2 | 第二轮冻结终审：从崩溃、安全、资源和用户可行动终态重建全部直接交界，EX33-01 与后继边界继续成立 |
 
 ## 问题列表
 
@@ -90,7 +90,7 @@
 | U33-01 | **P0/中。**`captureFullAuthorityCheckpoint` 把冻结前缀内全部非 checkpoint record 原样纳入，又以“≤8 MiB canonical JSON 通用 ref 递归”自行推断资产；当前 `ArtifactLifecycleIndex` 只在 surface-asset authority 内拥有真正的删除/保留投影，capture 没有读取同一冻结 source-head 的窄端口。因此已删除会话资产可被带入，非通用 JSON 或大于阈值但仍受保留的注册资产可被漏掉，随后仍能真解封并宣告 full verified。**价值裁决记录：**原 P0/大命中根因，但“需要新 capture 规划”被现有分类与 lifecycle 原语证伪；方案收窄为复用接入，改为 P0/中，重开扩面条件为现有原语无法表达任一当前必备内容类。**收敛记录（2026-08-08）：**“取当前 index”仍会与先前冻结前缀错代；必须由现有 index 提供精确 source-head 快照，若 index 已越过该头则整次 capture 以新前缀重试，禁止回退或猜测历史状态。 | coverage 标签、注册型 retention 分类和删除投影没有共享一个精确 source-head vector；通用爬取因此成为第二套保留谓词。 | **生产端：**core retention/index、current-anchor assembly、mesh capture/owner/service。**组合：**六类权威内容、会话删除、共享/嵌套/外置/大资产、index 落后/损坏/越代、缺 ref、checkpoint 防递归。**消费者：**verify/readiness及第 34 单元只读窄接缝。**异常终态：**缺类或携带已删除内容却 full-ready。**直接证据：**真实 `AuthorityCommitLog`/`ArtifactStore`/`ArtifactLifecycleIndex`，并发追加/删除与连续重启；IR33-06/07/33/36。 | 在现有 `ArtifactLifecycleIndex` 增加只读 checkpoint-retention 端口并由 current-anchor 组合根注入 capture：先冻结 index 全部 source heads，按主 `DurableLogCheckpoint` 读取恰好该前缀；只用 `classifyRetainedRecordReferences`、`collectRegisteredArtifactRoots` 及其注册型解析器生成候选传递闭包，再由 index 在同一 source-head vector 过滤 live retention。index 落后则追平到该头，损坏则既有 rebuild 后重试，已越头/任一源变化则丢弃本轮并冻结新头；禁止通用 JSON 扫描。所有 ref 逐项验 digest/bytes，checkpoint stream 不入候选；任何不可分类、deferred、缺失或损坏均在 `checkpoint-created` 前零副作用失败。验收覆盖六类、删除、共享/嵌套/外置/>8 MiB、index 落后/损坏/越代、缺 ref、并发与重启，载荷 retention 与冻结快照全等。 | 已验证 |
 | U33-02 | **P0/中。**daily ID 只含 home/issuer/target/date，不含 recovery root 与 trust chain；`checkpoint-created` 未耐久冻结完整 root/chain/source identity，`status()` 又只看 recipient、verification 签名和 full envelope，不打开/反绑加密 payload 的 `trustChainHead`。同日 rotate 会复用旧 ID 冲突，同一 root 下 chain 推进后旧 verified 仍可投影 current ready。价值裁决保留 P0/中。 | root generation、chain generation、source prefix 与 request identity 没有成为 created→verified→readiness 共用的稳定代际键。 | **生产端：**owner candidate、service/lifecycle records、recovery payload/status。**组合：**同日 root rotate、同 root chain 变化、daily/forced、source prefix、fresh/exact replay。**消费者：**verify、status、`fullBackupReady`、第 34 单元窄接缝。**异常终态：**旧代误报 ready或新代无法创建。**直接证据：**响应丢失、并发、连续重启；IR33-17/22/26/29。 | 在现有 checkpoint lifecycle 定义唯一 generation binding：`rootKeyId + recipientKeyId + trustChainHead + targetId`；入口 request key 固定为 `daily:<UTC day>` 或 `forced:<requestId>`。service 先按二者 exact replay，fresh 才冻结 U33-01 的 source checkpoint，并以 `generation + request + source(logId/lsn/prefixDigest/frameEndOffset)` 派生最终 checkpointId；`checkpoint-created` 耐久写齐这些字段并与 envelope/payload 全等。verify 在同一日志事务核对 created/replicated、当前 root/chain、source 与已解 payload后写 terminal；readiness 只接受当前 root/chain 的全等 created+verified，不需持秘密重新解封。root/chain 变化使旧代只留历史，不计 current ready、不 rewrap、不提前误删。验收覆盖同日 rotate、同 root chain 推进、daily/forced、效果后丢响应、terminal replay和连续重启，新旧代及 source prefix 不混用。 | 已验证 |
 | U33-03 | **P2/小。**owner 只有无 key 的全局 `#active`，forced 在 daily 运行时会加入并返回 daily checkpoint；当前没有公开 forced consumer，损失限于内部请求关联。**价值裁决记录：**原 P1 以第 34 单元未来消费者为当前损失，举证不足，降为 P2/小；重开条件为本单元出现实际 forced consumer或第 34 单元启用该接缝。 | single-flight 未绑定 U33-02 的 generation/request candidate key，不同请求被错误当成同一执行。 | **生产端：**daily/forced owner。**组合：**同 key/不同 key、daily→forced/forced→daily、响应丢失、stop/restart。**消费者：**内部 forced 接缝。**异常终态：**返回非 originating candidate但当前无公开数据损失。**直接证据：**双序与 replay；IR33-09/10/19。 | 将 `#active` 收为 `{candidateKey,promise,abort}`；candidateKey 直接复用 U33-02 的 generation+request key。同 key 加入同 promise；不同 key 立即返回稳定、可重试的 `checkpoint-candidate-busy`，不排队、不串行代替、不新增队列。完成/失败只清同 key，stop 只取消当前 key；后续同 request 由 lifecycle exact replay。验收覆盖双入口双序、同/异 key、响应丢失、stop 与重启，绝不把一个 candidate 作为另一个返回，且不启用第 34 单元消费者。 | 已验证 |
-| U33-04 | **P1/中。**已有 active paired device、home 尚无恢复根时，`runBackupSetupCommand` 在严格读取恢复包前先用临时 root/recipient 连接 target；source 的 `prepareMeshRuntimeBootstrap` 会因无 recovery root 直接拒绝，target active assembly 又只在已有 `recoveryBackupPublicKey` 时注册 paired receiver，因此两端在首个 checkpoint command 前均不可达，v1 包内 legacy checkpoint/root 与 v2 包内真实 recipient 也来不及成为 transport/receiver 身份。**历史裁决继续有效：**历史 target 验证、setup 空成功、startup recover window 已闭合；cleanup 不恢复为启动门禁，也不新增 IPC/watcher/reload RPC。**本轮价值裁决记录（2026-08-08）：**保持现状会让明确支持的已有配对设备首次备份及 v1 第二 root-activation 永久不可用；删除支持会迫使用户改用目录或重新配对，体验与单目标 adapter 架构均不达标。复用现有 control plane、receiver/staging 和 coordinator 可闭合，不需第二套配对或恢复框架，维持 P1/中。**修复后同根收窄：**真实链进一步证明 source coordinator 单边提交不足以让 target 形成可重启的 root；该缺口仍属于同一 root-establishment lifecycle，不新增问题。 | paired setup 错把“已有 recovery root”这一正常 mesh ready 前提用于建立首个 root 的前置传输；package identity、current-issuer 授权、target 私有 staging 绑定、双端 root activation 与有限 topology 退役没有形成同一可重驱 lifecycle。 | **生产端：**`backup setup --device`、source mesh bootstrap、target active assembly/receiver、paired staging、`RecoveryActivationCoordinator`、现有 S7 receiver 门禁。**类型组合：**已有配对/无恢复根的 v1/v2、正确/错误 recipient、receiver 缺失/建立/退役、断连、并发、响应丢失、连续重启与 terminal replay；目录 setup、新设备 onboarding 为回归边界。**消费者：**首次 durable replica、source/target root activation、S2 mesh-ready。**异常终态：**合法 setup 在首个 I/O 前失败，或 source 已激活而 target 重启后仍无 root；错 issuer/recipient/identity 必须零 checkpoint 副作用，normal business mesh 在激活前保持关闭。**受影响审查项：**IR33-03、IR33-16、IR33-23、IR33-33、IR33-34、IR33-36。 | 将包生成/无回显回读/严格解码提前到连接前，以 v1 legacy checkpoint/root 或 v2 root/recipient 冻结真实身份；在既有 `ProductionMeshControlPlane`、service registry、paired receiver/staging 上增加仅供“已配对、无 root、current issuer”的 root-establishment 模式，只暴露现有 strict checkpoint commands，不放开普通 mesh/business service，正常 ready gate 不变。receiver 首个 begin 在现有私有 staging 耐久绑定 `{homeId,source=currentIssuer,targetId,checkpointId,recipientKeyId}`，同载荷 exact replay、冲突稳定拒绝、重启续驱；真实回读与 source coordinator 原子激活后，以同一 strict service 提交与 checkpoint plan 全等的签名 root event/trust record，target 用现有 bootstrap store 耐久验真，效果后丢响应由 active receiver 只读 exact replay，有限连接完成应答后退役并重载正常 topology。同步现有 S7 有限 descriptor/validator 反绑该分支。验收覆盖全部上述变体：合法路径双端恰一副本/根事实且 target 重启可运行，断连/丢响应/重启可重驱，错误输入零副作用，目录 setup 与新设备 onboarding 零回归。 | 已验证 |
+| U33-04 | **P1/中。**已有 active paired device、home 尚无恢复根时，首次 v1/v2 setup、有限 strict checkpoint transport、双端 root 提交与激活后 topology 切换均已落地；历史 target 验证、setup 空成功、startup recover window 也已闭合。**历史裁决继续有效：**cleanup 不恢复为启动门禁，不新增 IPC/watcher/reload RPC。**价值裁决记录（2026-08-08）：**保持旧不可达入口会让已有配对设备首次备份及 v1 第二 root-activation 永久不可用；复用现有 control plane、receiver/staging 和 coordinator 是同时满足体验与架构的最小完整方案，维持 P1/中。**修复后同根收窄：**source coordinator 单边提交不足以让 target 形成可重启 root，已纳入同一 root-establishment lifecycle。**同根重开 P33-21（2026-08-09）：**`runBackupSetupCommand` 在 source 完成 root-activation checkpoint 真验证与本地原子激活后才调用 target `activate-root`；target 提交前断连会形成 source 已有根、target 仍无根。重试入口 `currentPairedRootActivation()` 只取 `loadTrustEvents().at(-1)`、要求它等于 current chain head并使用最新 `HomeTrustRecord`；source 随后追加合法非根 trust event后，原 checkpoint 的 root event 与激活时 record虽仍耐久存在，却不再可达，重试跳过 initial prepare且不能让 finite target提交原终态。现有测试只覆盖 root event仍最新的 immediate replay，S7也只检查调用/token，都会绿色漏过。**价值裁决记录（2026-08-09）：**该路径不依赖未来能力；禁止后续合法 trust 写、允许 target 无根开展业务或要求用户重配对都不满足当前体验/安全合同。现有同一原子 envelope 已耐久写入 `recovery-activation-committed(checkpointId)`、对应 `checkpoint-verified(targetId, activationDigest)`、原 `recovery-root(establish)` event 与同链头 `HomeTrustRecord`，无需新增事实源。保留 P1/中；只有生产事实证明 target commit不可在 source root可见后中断，或现有入口已能在 current head前进后按原 checkpoint全等重放，才重开删除/降级裁决。**本次收敛定稿（2026-08-09）：**originating identity必须从 `recovery-activation-committed` 取得，历史 event/record只可按该提交的同一 authority LSN验真；禁止从 checkpoint-verified 反向任选“最新匹配项”，也禁止以 current head/current record替代原 tuple。**修复验证记录（2026-08-09）：**已在冻结交付指纹 `1b2df67629a3e9269b40a275a6784a3dc63708c5` 落地按 originating activation commit 与同 LSN 历史 trust tuple 的窄查询；v1/v2 真实双端故障场景证明 source 激活后、target 提交前断连并推进合法非根 trust event 后仍可跨重启恰一收敛，finite/active exact replay 全等；现有 S7 同时反绑 helper 与 store 查询并拒绝 latest-head/current-record 回退。C33-C50～C33-C52 已耐久处置，P1/中评级与历史范围裁决不变。** | paired root-establishment lifecycle 的 terminal replay 没有以 originating checkpoint 的 durable activation commit为键；source 用“最新 trust event/current record”启发式替代 checkpoint→atomic commit→historical event/record 关联，令双端终态在 chain head前进后失去唯一可重驱输入。 | **生产端：**`backup setup --device`、`currentPairedRootActivation()`、`FileMeshBootstrapStore`/`FileBootstrapAuthority`、source `RecoveryActivationCoordinator`、target finite/active receiver与S7。**类型组合：**已有配对/无根v1/v2，source提交前后失败，target提交前断连、效果后丢响应，合法非根trust更新，进程重启/重连，finite/active terminal replay，同/异checkpoint及错activationDigest/targetId/event/record；目录setup与新设备onboarding仅作回归边界。**消费者：**target `activateRoot`、finite→normal topology、首次durable replica与普通业务。**异常终态：**source已激活而target永久无根，重复setup无可行动出口；错误或歧义输入必须零trust副作用。**直接证据：**真实双设备store/transport故障链、同LSN历史tuple查询和latest-head门禁变异。**受影响审查项：**IR33-16、IR33-19、IR33-23、IR33-27、IR33-28、IR33-30、IR33-33、IR33-34、IR33-35。 | 在现有 `FileMeshBootstrapStore` 增加唯一只读窄查询 `loadRecoveryRootActivationReplay({ activationDigest, targetId })`：从 checkpoint流定位恰一 `recovery-activation-committed`，要求其plan为`establish`、plan digest全等activationDigest、verification的checkpointId/targetId全等且包含同义verified证据；再以该提交LSN从trust流取得全等root event与同链头`HomeTrustRecord`，重放至该LSN并验record签名/投影，同时确认它仍是current trust的祖先且current activationDigest未换代；零项返回undefined，多项、错LSN、错event/record或冲突一律fail-closed。`currentPairedRootActivation()`只委托该查询并返回原checkpointId/event/record，随后复用现有`activateRoot`、staging plan校验、finite fresh commit与active exact replay；不改`BootstrapAuthorityPort`、不新增trust fact、队列或同步框架。验收以v1/v2参数化真实双端store/transport覆盖：source提交前失败零activation tuple；source提交后target提交前断连，随后追加合法非根trust event并重启/重连，原checkpoint恰一激活target并进入normal topology；target效果后丢响应由finite/active同tuple replay；并发同checkpoint全等，异checkpoint及错digest/target/event/record零副作用，root换代不回放旧establish；目录setup与onboarding全等。扩展现有S7有限规则反绑store查询、helper唯一委托及禁止latest-head/current-record回退，真实变异须失败。 | 已验证 |
 | U33-05 | **P2/小。**既有 O(备份总量) 驻留已由 checkpoint 专用有界 source/sink 闭合；当前残留精确限定为 `backup-command.ts` 的 backup setup client 与 `mesh-pair-command.ts` 的首次 pairing client 两处构造 `PairedRecoveryCheckpointTarget` 时未传入各自已经持有的 `storageMaintenance`，而 runtime owner 构造点已正确注入，故固定上限的 range decode 仅在两条第一方路径绕过设备唯一容量准入。**本轮价值裁决记录（2026-08-08）：**没有 O(total)、伪终态或已证实用户可见故障，不恢复原 P1/大与通用 streaming 扩面；两处一参注入即可消除生产分叉，维持 P2/小。 | paired target 的三个生产 client owner 没有共用同一构造合同；两个入口遗漏现有 governor，使有限 `network-range-decode` step 的 capacity fact 分叉。 | **生产端：**backup setup、首次 pairing、runtime owner、`PairedRecoveryCheckpointTarget`。**类型组合：**两遗漏构造点及已正确构造点、容量成功/拒绝/取消、并发 range 消费、网络等待。**消费者：**固定 range part 的 decode/消费。**异常终态：**设备饱和时两入口仍可额外占用有限 buffer/I/O；wire/chunk、总量驻留与 lifecycle 终态不在本问题内。**受影响审查项：**IR33-08、IR33-15、IR33-32、IR33-33、IR33-36。 | 在 backup command 传入 `context.capacity.storage`、首次 pairing 传入 `input.storageMaintenance`，保持 runtime owner 现状；沿用现有 target 逻辑使网络请求先完成，再仅以同一 governor 包住固定 range decode/消费，交付后释放且不跨网络、authority/store/lifecycle 锁。不改 wire/chunk、完成值或 source/sink。验收直接穿过两生产构造，覆盖准入拒绝/取消/成功与并发消费，并证明网络等待零 permit、固定 buffer 受唯一 governor 约束、既有有界语义不回退。 | 已验证 |
 | U33-06 | **P1/大。**directory/paired staging 已冻结 configured/owned root并拒绝 root link/reparse，最终文件也有 no-follow handle 复核；但 root 首次 `ensureDurableDirectory`及全部 child `mkdir/open/rename/rm`仍由字符串路径发起，父目录 `assertCheckpointDirectoryIdentity` 与副作用不是同一系统调用，最终 handle 不能阻止父组件在间隙被 symlink/junction/reparse/rename 替换。**既有价值裁决记录：**额外文件与 staging retention 未满足 P1 重开条件，不得恢复；P1仅覆盖物理身份与 progress。**独立审查重开与价值裁决记录（2026-08-08）：**新父目录 TOCTOU 触发同根重开。**本次收敛记录（2026-08-08）：**仓库的 Node 22 `fs` 表面没有 dir-handle-relative create/rename/unlink，且无既有 native bridge；仅改 TypeScript 无法满足零根外副作用。锁定方案因此必须含 mesh 包内专用跨平台句柄桥，工作量由中～大核定为大；它只暴露 checkpoint 固定操作，不得扩成通用文件系统框架。 | 安全边界冻结了“路径所指对象”，root 建立与 child I/O却仍按可再次解析的路径执行；缺少把 parent identity 与副作用原子绑定的 OS 原语。 | **生产端：**directory setup/open、directory target、paired staging/receiver及其 publish/retire/cleanup。**组合：**configured root 创建、configured/owned parent 在每个边界被 symlink/junction/reparse/rename 替换、最终文件替换、越根、响应丢失与重启。**消费者：**owner/service续传、验证和 cleanup。**异常终态：**根外创建、正文、发布或删除已经发生后才被事后检查发现。**直接证据：**当前 `freezeCheckpointDirectory(..., true)`、`checkpoint-target.ts`/`paired-checkpoint-target.ts` 的 assert→字符串系统调用及 IR33-12/13/15/31/32/33/36。 | 保留 frozen binding，在 `@zhixing/mesh` 内增加唯一 checkpoint-child native bridge：POSIX 用冻结 dirfd 的 `mkdirat/openat/openat2 + renameat + unlinkat + fsync`（逐组件 no-follow/beneath），Windows 用冻结 filesystem/drive root handle起步的 `NtCreateFile(RootDirectory)`、handle rename/disposition、FileId/volume/reparse 复核与 flush。配置路径不存在时只由该桥从已打开 filesystem root逐组件创建/打开并拒绝链接；已存在时直接冻结最终 handle。桥随后只接受已校验单组件名并提供 mkdir/open/read/write、同父/双父 rename、已知 exact-set 递归删除和 sync；两 adapter 禁止再对 root/child 调用路径版 create/open/rename/rm。运行中路径替换只能改变名字，不能改变冻结对象；child nlink/type/identity、同 handle fsync 与 exact-set 成功后才追加 progress。验收逐格覆盖 F33-24～F33-26，在 POSIX 与 Windows 实际于 root 建立及每个 child 调用前替换 parent/final file，证明根外零创建/正文/发布/删除、漂移零 progress，正常 commit/read/retire及连续重启零误杀；不恢复额外文件主张。 | 已验证 |
 | U33-07 | **P2/小。**普通 mesh transport 会调用 `assertPairedResult`，pairing socket 只核对外层 frame 后把内部 result 强转；现有 target 客户端随后已逐命令反绑 type、checkpointId、seq/offset/progress、bytes/digest，因此当前额外字段不会错误推进 activation。**价值裁决记录：**原 P1 的“跨命令结果可推进”被现有断言证伪，降为 P2/小；重开条件为发现任一未手工反绑字段可影响 durable/activation。 | 同一 wire 联合在普通 mesh 与 onboarding pairing socket 走了不同 decoder，严格 exact keys 形成双实现。 | **生产端：**paired result codec、Mesh transport、pairing socket transport。**组合：**begun/progress/appended/stored/manifest/range/retired、额外/缺失字段及错关联。**消费者：**paired target client。**异常终态：**当前仅严格性分叉，无错误 activation。**直接证据：**IR33-04/05/14/31。 | 从现有 paired module 导出唯一严格 result decoder；普通 mesh 与 pairing socket 都在返回给 client 前调用它，client 继续反绑 originating command 的 checkpointId/seq/offset/progress/bytes/digest/supersededBy。验收覆盖全部合法 state、额外/缺失字段、错 command/checkpoint/seq/offset/progress/digest，非法结果零 progress、合法两 transport 零误杀。 | 已验证 |
@@ -101,6 +101,43 @@
 | U33-12 | **P1/中。**S7 `recovery-backup` 组只从 Commander 捕获 setup/verify/status；daily/forced 与 paired put/get/retire 没有生产 descriptor，owner/receiver 仅被 token/字符串启发式检查。直接测试也没有真实 lifecycle index 的 U33-01 retention 分叉与 U33-02 root/chain readiness，故门禁可在两个 P0 存在时保持绿色。**价值裁决记录：**原方案“覆盖 P33-01～P33-11”可能扩成重复矩阵，现收窄为实际入口 exact-set 与 P0 必要证据，维持 P1/中；重开扩面条件为新增生产入口或现有直接证据无法覆盖另一个阻断根因。 | 标签/happy path 代替有限生产注册源 exact-set 与两个核心恢复不变量，结构门禁和提交证据没有同一来源。 | **生产端：**setup/verify/status、owner daily/forced、paired put(begin/progress/append/commit)/get(get/range)/retire、onboarding/active receiver、两生产根。**组合：**角色、顺序、删除、重复、错 owner、绕过。**消费者：**S7 lint/golden与直接验收。**异常终态：**入口漂移或 P0 数据缺口不被拒绝。**直接证据：**IR33-30/33/36。 | 保留现有 S7 lint：Commander CLI 继续由真实注册捕获；checkpoint owner 与 paired receiver 各导出并实际驱动一个冻结窄 descriptor，分别声明 daily/forced 和 put/get/retire 的 wire phase exact-set、owner/role与顺序，S7 只解析这些有限 literal并与架构 row/golden 双向全等，删除/重复/错角色/错序/旁路均失败。直接证据只增加两张小表：真实 log/store/index 的六类 retention+删除，以及 directory/paired 两生产 profile 的 root/chain rotate readiness；其余 codec/target/TTY/status 场景复用各问题直接测试。验收要求实际生产变异 fail-closed、合法拓扑零误杀；不建新 lint/runner、全问题复制矩阵或配置×故障笛卡尔积。 | 已验证 |
 
 | U33-13 | **P2/小。**`checkpoint-superseded` 已在 verification 同一 CommitEnvelope 内使 source-local `checkpoint:<id>` owner 死亡，`ArtifactLifecycleIndex` 可于通用 24 小时 GC 后释放本地 CAS；独立 target 仍由 service 依据同一 superseded fact 保留 27 天。当前 `cleanupExpired`却在 target retire 后再查本地 retention并追加 `local-released`，该晚到事实不控制实际释放。**价值裁决记录（2026-08-08）：**原 P33-16 以“本地与 target 都须保留 27 天”评 P1/小～中；生产事实证明 source-local 只是同设备缓存，独立 target 才是恢复副本，故降为 P2/小。只有证明 source-local 是唯一独立恢复源，或 target 可在 27 天前消失且只能靠它恢复，才重开 P1。**本次收敛记录（2026-08-08）：**原方案在“superseded 或同 envelope 即时 local-released”之间留了两种实现；现唯一确定 `checkpoint-superseded` 为 source-local release fact，历史 `local-released`只兼容读取、当前不再生产。 | 同一 source-local 所有权存在 superseded、GC 和 27 天后 local-released 三个不同时间点；独立 target retention 与本地 cache release 被错误共用一个 progress 阶段。 | **生产端：**checkpoint verification/cleanup、checkpoint reducer、`ArtifactLifecycleIndex` classifier与通用 GC。**组合：**verified→superseded、24 小时 local GC、27 天 target retire、共享业务 ref、丢响应和连续重启。**消费者：**cleanup/status、审计与恢复判断。**异常终态：**恢复副本安全但 lifecycle 对本地释放时间陈述失真。**直接证据：**`deletedConversationOf(checkpoint-superseded)`、`cleanupExpired`及 IR33-25/32/33/36。 | 同步总纲/规格与 reducer：`checkpoint-superseded`是唯一当前 source-local release fact并继续驱动 LifecycleIndex；`cleanupExpired`删除 local retention 查询和新 `local-released`写入，只在满 27 天后按 created.targetId 幂等 retire target并写 `target-retired`。为已有日志保留 `local-released` decoder/record key，但将其视为兼容 no-op，不参与 retention、status或完成判断。验收逐格覆盖 F33-27～F33-29：supersede 后 24 小时本地 GC、27 天前 target 仍可读、离线 retire 重试、共享业务 ref零误删、verification/retire 丢响应与连续重启；本地与 target 各自恰一事实且不新增清理器。 | 已验证 |
+
+## U33-04 P33-21 同根重开收敛固定矩阵
+
+> 本节是 U33-04 当前根因、方案与验收的组成部分；基线为上方已更新且此后未修改的 U33-04 记录。U33-05、U33-10、其余 U33 与 EX33-01 直接复用，不恢复历史已否定主张。
+
+| 编号 | 固定变体与生产入口 | originating identity 与唯一耐久事实 | 双端线性化、零副作用边界和消费终态 | 直接验收 |
+| ---- | ------------------ | ----------------------------------- | ---------------------------------------- | -------- |
+| F33-41 | 已有 active paired device、home/target均无root；v1/v2；source原子激活前失败 | 包内checkpoint/root/recipient；尚无`recovery-activation-committed` | source/target均保持无根；旧候选只可按既有规则续做或GC，不得伪造terminal replay | 两版本在created/replicated/readback/verification/atomic commit前注错，查询不得返回tuple且target零trust追加 |
+| F33-42 | source已原子激活、target提交前断连；root event仍为最新 | `recovery-activation-committed(checkpointId)`及同authority LSN的verified/event/record | source线性化于activation commit；target线性化于本地trust append；重试只重放原tuple | immediate replay仍成功，checkpointId/event/record全等且source/target均零重复 |
+| F33-43 | F33-42后source追加合法非root trust event，再重启/重连 | current activationDigest选择原activation commit；同LSN历史event/record而非current head/record | 后续trust事实不改原checkpoint身份；finite target取得原tuple后恰一提交并切normal topology | v1/v2真实双端故障链，至少推进一条合法非root event并连续重启；原checkpoint仍成功，latest-head实现必须失败 |
+| F33-44 | target root效果已提交但响应丢失；有限连接或重启后的active receiver重放 | target staging binding + 原checkpoint/event/record；target本地terminal trust fact | finite/active都只接受同tuple exact replay；不追加第二root，不要求source保持旧head | 在target append后丢响应，分别经finite与active重试，结果全等、trust记录数不增 |
+| F33-45 | 并发同checkpoint；异checkpoint、错activationDigest/targetId | originating activation commit是唯一选择键；零项为无pending，多项/冲突为损坏 | 同checkpoint可join/幂等；禁止按reverse/latest任选；歧义和错关联在transport前或target append前拒绝 | 同tuple并发恰一；替换任一身份字段、制造第二匹配commit均稳定拒绝且零target副作用 |
+| F33-46 | 错event/record/同LSN关系，历史record签名或投影不符 | activation commit所在authority LSN及其trust prefix；record.chainHead=原root event digest | event、record、commit和verified必须四向全等；current trust只证明原prefix仍为祖先 | 移动record到异LSN、替换event/record/签名/chainHead均fail-closed；合法后继event零误杀 |
+| F33-47 | current root rotate/invalidate/domain换代或issuer不再满足当前入口 | current projection的activationDigest/current issuer/member与原commit | 只恢复当前establish代；旧root不得因历史commit可读而复活，后继transfer/sync不进入方案 | activationDigest换代、target撤销/错issuer均不返回replay；普通合法非root推进仍返回原tuple |
+| F33-48 | source/target进程重启；target finite→active切换；S7结构门禁 | store查询、backup helper唯一委托、finite/active同一strict command | 重启只从耐久log/staging恢复；禁止helper直接读latest trust或自行反向选verified | 真实双store连续重启；删除/替换查询、恢复`.at(-1)`/current record或旁路helper的变异均由既有S7失败 |
+| F33-49 | directory setup、新设备onboarding、U33-05 governor、U33-10 readiness及EX33-01边界 | 各链既有identity/fact直接复用 | 新查询只服务paired无根terminal replay；不改变目录/onboarding、容量/readiness或后继单元合同 | 既有两条入口零行为变化；无新receiver/fact/队列/同步，cleanup启动门禁与第34～38单元符号不进入 |
+
+### U33-04 P33-21 收敛反证账
+
+| 编号 | 首次反证与归属 | 耐久处置 |
+| ---- | -------------- | -------- |
+| C33-C50 | 仅按`checkpoint-verified.activationDigest/targetId`反向找历史event仍可能在多条匹配记录间选择“最新一条”，继续丢失originating request身份 | 唯一从已存在的`recovery-activation-committed(checkpointId)`取得原plan/verification；verified只作全等证据，不作为选主来源 |
+| C33-C51 | 只按event digest找`HomeTrustRecord`不能证明它与activation commit原子同批，损坏或错配日志可拼出看似有效的历史tuple | 查询要求commit、root event、record处于同一authority LSN，并以截至该LSN的trust prefix验签record；错LSN、缺项、重复或冲突统一fail-closed |
+| C33-C52 | 第一版门禁只约束 backup helper 委托，store 查询内部仍可重新引入 latest-head/current-record 回退并保留无效历史 token，使结构检查绿色假通过 | 同根扩展现有 `inspectRecoveryBackupAssembly`：同时切片查询本体，要求 commit 选主、同 LSN 历史验签与 current digest guard，禁止 `.at(-1)`、reverse 和 current record；增加 store 内部 latest-head 真实变异，首个冻结指纹作废后重新验证并冻结 |
+
+### U33-04 P33-21 四路冷启动对抗复审
+
+> 四路均以冻结交付指纹 `1b2df67629a3e9269b40a275a6784a3dc63708c5`、同一份未修改 U33-04 记录和 F33-41～F33-49 为输入，重新从当前合同与生产源码推导，不以既有测试通过代替功能判断。首个指纹因 C33-C52 被判无效，本表只记录门禁修正并重新冻结后的结论。
+
+| 冷启动角色 | 独立重造的反例与交界 | 结论 |
+| ---------- | -------------------- | ---- |
+| originating checkpoint / 历史trust tuple | 从source atomic commit反向枚举checkpoint commit、verified、event、record和authority LSN；主动制造多个verified、同digest异checkpoint、错LSN record、current head前进与root换代 | 通过；C33-C50/C51已同根处置，选主只来自originating activation commit；同 envelope 的 verified/event/record 与截至该 LSN 的签名投影全等，完整 current replay和 activationDigest guard证明原前缀仍为当前祖先，latest/reverse启发式均被排除 |
+| source/target terminal replay / 连续恢复 | 独立排列source提交前失败、source提交后target前断连、target效果后丢响应、合法非root推进、finite/active、并发与双端连续重启 | 通过；每个前缀都有唯一耐久出口：未提交不返回tuple，source已提交按原tuple推进target，target已提交只exact replay，错误输入零追加 |
+| topology / S7 / 真实证据 | 从无根有限receiver、激活后active receiver、backup helper与store查询四点重造删除、旁路和`.at(-1)`/current-record回退；核查v1/v2参数化真实双端故障链是否穿过store/transport/staging/target trust append | 通过；C33-C52后现有S7同时反绑helper与查询本体，真实故障场景穿过两份`FileMeshBootstrapStore`；不建新lint/runner，门禁与功能证据分别拒绝结构漂移和绿色假通过 |
+| 产品体验 / 范围价值 / 历史边界 | 比较保持现状、禁止后续trust写、要求重配对、复用现有commit和新增同步框架；核查U33-05/U33-10、EX33-01及第34～38单元交界 | 通过；只新增一个只读窄查询、helper委托、有限门禁和直接场景即恢复可行动终态，用户体验与锁定范围内架构同时达标；`BootstrapAuthorityPort`、trust fact、队列、同步、cleanup、O(total)、内部状态与后继能力均未扩张 |
+
+**同一冻结指纹结论：**U33-04 的方案已落地；F33-41～F33-49全部在同一输入上取得稳定身份、耐久事实、线性化点、零副作用边界与直接证据，C33-C50～C33-C52已同根闭合。问题状态更新为“已验证”；该专项结论不替代全单元终审、独立功能审查或单元提交验证。
 
 ## U33-04、U33-05、U33-10 重开收敛固定矩阵
 
@@ -146,9 +183,9 @@
 - **交界差异审计**：U33-04 激活成功后由 U33-10 的同一 current generation 投影 readiness；U33-04 的有限 paired transport 复用 U33-05 已受治理的 target client；U33-10 不以 target buffer 可用性决定耐久事实。C33-C36～C33-C40 均已同根合并，无未处置反证。
 - **同一版本结论**：问题列表无需再修改即可交付执行；U33-04、U33-10 保持 P1/中、P1/小，U33-05 保持 P2/小，三项状态均为待修复。
 
-## U33-04、U33-05、U33-10 修复后专项收口（2026-08-09）
+## U33-04、U33-05、U33-10 修复后专项收口（历史；U33-04 已于 2026-08-09 同根重开）
 
-> 本节只证明三项问题在同一份未修改交付物上完成实现、最小必要验证和专项对抗；不计入全单元冻结终审、独立功能审查或单元提交验证。
+> 本节只记录三项曾在同一份未修改交付物上完成实现、最小必要验证和专项对抗；P33-21 已证明 U33-04 的 terminal replay 仍有同根缺口，本节不得作为 U33-04 现行通过结论，也不计入全单元冻结终审、独立功能审查或单元提交验证。
 
 - **冻结指纹**：`92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`；22 个非工作台交付文件，算法见“当前状态”。
 - **实现落点**：U33-05 将 backup setup、首次 pairing 与 runtime owner 三个 paired client 精确反绑同一设备 governor；U33-10 抽取 current-generation 耐久 readiness projector，并由 service、unavailable slot 与 public mapper 共用；U33-04 将 v1/v2 包内 identity 冻结提前到连接前，以既有 control plane、strict receiver/staging 与 coordinator 建立 current-issuer-only 的无根有限通道，并用与已存 checkpoint plan 全等的签名 event/record 让 target 复用既有 bootstrap store 耐久激活；效果后丢响应由 active receiver exact replay，有限连接应答后退役并重载正常 topology，激活前普通业务仍关闭。
@@ -187,7 +224,7 @@
 
 - **直接验证**：CLI 无根 paired 真实双设备 v1/v2、target 激活与进程重启 terminal replay 2/2；CLI recovery-root/bootstrap/owner 支撑场景 9/9；mesh strict codec/有界恢复 2/2（其余 12 项按过滤跳过）；mesh `tsc --noEmit` 零错误；CLI `tsc --noEmit` 仅保留 8 个既有 config-editor/startup credential 类型错误且零触及文件错误；`pnpm s7:lint` 17/17 与 canonical golden 通过；同输入 `pnpm build` 17/17 workspace 成功；`git diff --check` 无错误。
 - **差异审计**：C33-C36～C33-C49 只能且均已按“修复后复核通过”关闭；U33-04↔U33-10 以 target 已耐久激活后的同一 current generation 衔接，U33-04↔U33-05 共用受治理 paired client，U33-10 不以 target buffer 或在线性改写耐久事实；无未处置同根反证。
-- **专项结论**：U33-04、U33-05、U33-10 均为“已验证”；后续仅按变更范围执行独立审查，不得把本专项当作全单元终审或提交验证。
+- **历史专项结论**：U33-04、U33-05、U33-10 曾均为“已验证”；P33-21 已同根重开 U33-04，现行状态以文件顶部与问题列表为准，且不得把本专项当作全单元终审或提交验证。
 
 ## U33-04～U33-06、U33-13 重开收敛固定矩阵
 
@@ -233,7 +270,7 @@
 | C33-C34 | U33-05：capture 两遍都以 64 个 commit 调用 `readTail`，单个 WAL frame 可达 16 MiB，故一次返回可驻留约 1 GiB，且与声明的 16 MiB governor step 不全等；总量虽不随 checkpoint 总长增长，仍违反固定生产页上界 | 保持 wire 中每页最多 64 commit，但两遍都按单 commit `readTail(..., 1)` 顺序读取；首遍增量计算同一规范数组的 page digest/bytes 与 retention，第二遍按相同分隔逐 commit 推入 1 MiB chunker，每次只驻留一个受 WAL 上限约束的 commit，最终 descriptor/digest/wire 全等 |
 | C33-C35 | U33-05/core 直接交界：versioned `AuthorityCommitLog.readTail` 在 limit 截断时把部分 `lastLsn/prefixDigest` 与整份 WAL 的 `frameEndOffset` 组合成返回 checkpoint，下一页必以 `commit-log-corrupt` 失败；既有 64-commit capture 因小日志未分页而掩盖 | `readTail` 只有扫描到真实 tail 才更新 verified tail；limit 截断时直接返回 `scanLogFrom` 已证明的 frame boundary/LSN/prefix，新增真实 versioned WAL 逐条分页测试，capture 两遍可复用同一耐久 cursor且不修改 authority log 格式 |
 
-### 实施进度账（2026-08-08）
+### 实施进度账（历史，2026-08-08）
 
 | 阶段 | 当前事实与证据 | 状态 |
 | --- | --- | --- |
@@ -242,7 +279,7 @@
 | U33-05 bounded checkpoint residency | 两遍冻结 capture、逐项 1 MiB header 预算、单 commit durable pagination、ArtifactStore.readRange 与窄 ChunkSource/Sink 已贯穿 CAS/target/activation；完成值不携带 materialized chunks | 已验证：core pagination 1/1、core/mesh 类型检查、mesh 13/13、17 项 workspace build 通过 |
 | U33-06 physical parent-child identity | checkpoint 专用 POSIX/Windows 句柄桥从 filesystem/drive root 逐组件建立 frozen root，directory/paired 的 child create/read/write/rename/unlink/sync 全部 handle-relative；Windows volume-root 创建权限已补齐 | 已验证：Windows helper 构建与 mesh 13/13 通过，POSIX/Windows 原语只读对抗无新反证 |
 
-## U33-04～U33-06、U33-13 四路冷启动对抗复审
+## U33-04～U33-06、U33-13 四路冷启动对抗复审（历史）
 
 > 基线为上方同一份未修改问题列表、F33-17～F33-29 与 C33-C17～C33-C27；本轮只重建事实链和反例，不修改实现，不运行构建或测试，也不复用先前十二项专项收口结论代替判断。
 
@@ -254,9 +291,9 @@
 | local / target retention 事实与范围价值 | verified→superseded、24 小时 source-local GC、27 天独立 target retire、共享业务 ref、legacy local-released、响应丢失和连续恢复；并核查 U33-04↔U33-13、四项↔EX33-01 及第 34～38 单元边界 | 通过。`checkpoint-superseded` 唯一表达 source-local release，`target-retired` 唯一表达独立目标终态；legacy `local-released` 仅兼容 no-op。U33-13 保持 P2/小，U33-04/05/06 分别保持 P1/中、P1/大、P1/大；未恢复单源 27 天本地保留，也未并入 planned/disaster transfer、恢复应用、全局同步或生命周期能力。 |
 
 - **交界差异审计**：U33-04↔U33-13 以 created.targetId 和 target-retired 维持历史 target 义务；U33-04↔U33-05 以轻量 checkpoint source 贯穿 setup/verify/startup；U33-05↔U33-06 以句柄桥承载有界 source/sink 的真实 I/O。C33-C17～C33-C27 均已“同根合并”，无未处置反证。
-- **同一版本结论**：四项事实、根因、影响、评级、工作量、最优方案与 F33-17～F33-29 验收条件闭合；记录无需再次修改即可交由执行者一次实施。
+- **历史同一版本结论**：四项在当时输入上的事实、根因、影响、评级、工作量、最优方案与 F33-17～F33-29 验收条件曾闭合；P33-21 已同根重开 U33-04，本段不得作为其现行结论。
 
-## U33-04～U33-06、U33-13 修复后冻结专项收口（2026-08-08）
+## U33-04～U33-06、U33-13 修复后冻结专项收口（历史，2026-08-08）
 
 > 本节只证明四项正式问题在同一未修改交付指纹上完成实现、最小必要验证、专项事实链与四路冷启动对抗；不替代、不计入全单元两轮冻结终审、正式独立功能审查或单元提交验证。
 
@@ -294,7 +331,7 @@
 
 - C33-C17～C33-C35 均以“修复后复核通过”关闭：C17～C31 的 lifecycle、轻量 source/sink、handle owner与历史 target直接变体已由生产链及定向场景复核；C32 逐项 header预算、C33 Windows volume-root权限、C34 单 commit驻留、C35 durable pagination均有当前源码和直接测试。
 - 最小必要验证：core/mesh `tsc --noEmit` 通过；core versioned WAL pagination 1/1；mesh full-authority 13/13；Windows bridge构建通过；CLI 受影响定向场景14/14；S7 17/17与 canonical golden 在未变化输入上复用；当前输入 `pnpm build` 17/17，163.8 秒通过。
-- **专项结论**：U33-04、U33-05、U33-06、U33-13 均为“已验证”；四项专项范围内不存在未处置同根反证。
+- **历史专项结论**：U33-04、U33-05、U33-06、U33-13 在当时指纹上曾均为“已验证”；P33-21 已同根重开 U33-04，当前结论以文件顶部和问题列表为准。
 
 ## U33-01～U33-12 收敛固定矩阵
 
@@ -367,6 +404,7 @@
 
 | 编号 | 对应问题与先前通过轮次 | 遗漏机制 | 后续必做的检测动作与适用范围 | 应用记录（轮次:证据） |
 | ---- | ---------------------- | -------- | ---------------------------- | --------------------- |
+| L33-01 | U33-04；F33-30～F33-40 专项事实重建与四路对抗曾判通过 | terminal replay 只覆盖 root event 仍是最新事件的 immediate replay；S7 只检查调用/token存在，没有验证 replay 输入可由 originating checkpoint 在 trust chain 前进后重建 | 凡跨设备终态由一端先提交、另一端后提交：在两端间注入断连/丢响应，推进 source 权威链并重启两端，再以原 request/checkpoint exact replay；同时把 loader 变异为 latest-head 查询，要求直接场景与现有结构门禁共同失败 | 当前独立审查：IR33-16/19/23/27/28/30/33/34/35 以 source 激活→target 提交前断连→合法 trust 更新→连续重启反例重开 U33-04；P33-21 已同根转存 ；U33-04 修复：v1/v2 真实双端故障场景已执行，latest-head helper/store 查询变异均由现有 S7 拒绝，专项指纹 `1b2df676…` |
 
 ## 验证计划与证据账本
 
@@ -387,11 +425,16 @@
 | V33-10 | U33-05 单 commit pagination 与 checkpoint 固定驻留上界 | core durable pagination 单例、core/mesh类型检查、mesh full-authority 直接文件 | core commit-log；mesh full capture/crypto/source-sink | 修复直接验证 | core pagination 1/1，core/mesh tsc 0 error，mesh 13/13 | `8156307a701608189b5e97d0badba4c773900bd1edef92cce793f17f3b14e23b`（27 文件） | 有效 |
 | V33-11 | U33-06 checkpoint-child bridge 与 adapter物理身份 | Windows helper构建、mesh物理替换直接场景、POSIX/Windows源码对抗 | native bridge、TS wrapper、directory/paired adapters | 修复直接验证与只读专项 | helper build、mesh 13/13通过；两平台句柄语义无新反证 | `8156307a701608189b5e97d0badba4c773900bd1edef92cce793f17f3b14e23b`（27 文件） | 有效 |
 | V33-12 | 当前生产源码、跨包导出、派生门禁与差异一致性 | `pnpm build`；S7/golden复用；指纹与diff检查 | 17个workspace项目、未变化S7输入、27文件清单 | 当前专项最终构建；163.8s | workspace 17/17；S7 17/17+golden有效；交付指纹冻结 | `8156307a701608189b5e97d0badba4c773900bd1edef92cce793f17f3b14e23b`（27 文件） | 有效 |
-| V33-13 | U33-04 无根 paired 首次恢复根、双端 root fact、有限 receiver 与 durable binding | CLI 真实双设备 v1/v2 setup/active replay；CLI recovery-root runtime/bootstrap/owner；mesh strict codec/有界恢复 | backup setup、有限 control plane/service exact-set、paired receiver/staging、source coordinator、target bootstrap store 与 normal topology reload | 修复直接验证 | v1/v2 2/2、CLI 支撑 9/9、mesh 过滤 2/2；包内身份、双端根事实、current issuer、exact replay/conflict、响应丢失/重启与普通业务关闭均有直接证据 | `92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`（22 文件） | 有效 |
+| V33-13 | U33-04 无根 paired 首次恢复根、双端 root fact、有限 receiver 与 durable binding | CLI 真实双设备 v1/v2 setup/active replay；CLI recovery-root runtime/bootstrap/owner；mesh strict codec/有界恢复 | backup setup、有限 control plane/service exact-set、paired receiver/staging、source coordinator、target bootstrap store 与 normal topology reload | 修复直接验证 | 既有用例只覆盖 root event 仍为最新时的 immediate replay；P33-21 证明缺少“source 激活→target 提交前断连→trust chain 前进→重启重放原 checkpoint”真实双端证据 | `0c9c6d20b6cdc1a51974c1fac25bb6d5d2176f74e40dbefc1ace398a0c83b1b1`（61 文件） | 失效 |
 | V33-14 | U33-10 current-generation 耐久 readiness 与 unavailable/public 消费 | mesh generation readiness + CLI owner unavailable 真实日志/目标场景 | projector、AuthorityCommitLog、本地 full envelope、slot/public mapper | 修复直接验证 | mesh 2/2；CLI 真实 verified checkpoint 在 runtime unavailable 时仍 ready，改 target generation 为 false；本轮后续代码未触及 projector 输入 | `92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`（22 文件） | 有效 |
 | V33-15 | U33-05 三个 paired client governor exact-set 与 range permit 生命周期 | mesh paired governor 定向场景 + S7 真实构造变异 | backup command、首次 pairing、runtime owner、paired range decode | 修复直接验证/派生预检 | 网络挂起零 permit、decode 受准入并释放；三个构造删除/替换/新增由单一 S7 gate fail-closed；本轮后续代码未改变 permit 边界 | `92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`（22 文件） | 有效 |
-| V33-16 | 受影响类型、S7/golden、workspace 构建与差异卫生 | mesh/CLI `tsc --noEmit`；`pnpm s7:lint`；`pnpm build`；`git diff --check` | 22 个交付文件及直接依赖 | 修复直接验证与当前输入构建 | mesh 零错误；CLI 仅 8 个既有 credential 类型基线且零触及文件错误；S7 17/17+golden；workspace 17/17；diff check 通过 | `92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`（22 文件） | 有效 |
-| V33-17 | F33-30～F33-40 与四路冷启动对抗、历史裁决和后继边界 | 同一指纹只读重建四路并审计 C33-C36～C33-C49 | 22 个交付文件、权威架构/规格、三项正式记录与 EX33-01 | 专项只读复审；不计全单元终审 | 四路通过；十四个反证均修复后复核通过；历史否定项与第 34～38 单元边界未改变 | `92953a6e3f7d5cd179f9c5c5a933f844487036541d5710b2d4effaab7a4e488e`（22 文件） | 有效 |
+| V33-16 | 受影响类型、S7/golden、workspace 构建与差异卫生 | mesh/CLI `tsc --noEmit`；`pnpm s7:lint`；`pnpm build`；`git diff --check` | 61 个交付文件及直接依赖 | 修复直接验证与当前输入构建 | 构建与旧 S7 结果不证明 terminal replay 输入边界；现有 S7 对 `.at(-1)` latest-head 实现绿色假通过，须由 U33-04 修复后补证 | `0c9c6d20b6cdc1a51974c1fac25bb6d5d2176f74e40dbefc1ace398a0c83b1b1`（61 文件） | 失效 |
+| V33-17 | F33-30～F33-40 与四路冷启动对抗、历史裁决和后继边界 | 同一指纹只读重建四路并审计 C33-C36～C33-C49 | 当前 61 个交付文件、权威架构/规格、正式问题与 EX33-01 | 专项只读复审；不计全单元终审 | P33-21 反证旧专项遗漏 trust chain 前进后的原 checkpoint replay；U33-04 重开后须在新指纹重新执行受影响专项与对抗 | `0c9c6d20b6cdc1a51974c1fac25bb6d5d2176f74e40dbefc1ace398a0c83b1b1`（61 文件） | 失效 |
+| V33-18 | U33-04 originating checkpoint 在 trust 前进后的双端耐久重放 | `node node_modules/vitest/vitest.mjs run src/serve/backup-command.test.ts`；新增歧义断言后定向 `-t "replays the originating"` | backup command/helper、两份真实 bootstrap store、finite/active runtime、paired transport/staging、target trust append | 修复直接验证；完整文件 33.89s，最终增量定向 | 完整文件 4/4 通过；最终指纹上 v1/v2 新故障场景 2/2 通过，覆盖 source/target 分叉、合法非根 trust 前进、重启、finite/active replay、错 target 与重复 commit 歧义 | `1b2df67629a3e9269b40a275a6784a3dc63708c5`（7 个 U33-04 非工作台交付文件） | 有效 |
+| V33-19 | helper/store 查询结构反绑、latest-head 变异与架构 golden | `pnpm s7:lint`；`pnpm s7:registry-golden` | S7 validator/tests、backup helper、bootstrap store 查询、架构 recovery-backup 行 | 派生资产/合同预检 | C33-C52 修正后 S7 17/17 与 canonical golden 通过；helper和查询内部 `.at(-1)`/current-record 变异均 fail-closed | `1b2df67629a3e9269b40a275a6784a3dc63708c5`（7 文件） | 有效 |
+| V33-20 | 受影响 CLI 类型与当前源码构建可消费 | CLI `tsc --noEmit` 诊断；`pnpm cli:build` | 三个 CLI 源码/测试及其直接类型依赖 | 修复直接验证与必要构建 | U33-04 触及文件零新增类型错误；命令仍仅有 8 个既有 config-editor/startup `ZhixingCredentials` 基线错误。当前输入 CLI build 成功；同输入不重复构建 | `1b2df67629a3e9269b40a275a6784a3dc63708c5`（7 文件） | 有效 |
+| V33-21 | F33-41～F33-49、四路冷启动对抗、C33-C50～C33-C52与范围边界 | 冻结后只读重建 originating tuple、双端重放、finite/active/S7、产品价值四路；`git diff --check` | 7 个 U33-04 交付文件、权威架构/规格、正式问题、EX33-01与U33-05/U33-10交界 | 专项只读复审；不计全单元终审 | 四路通过；C33-C50～C33-C52均同根关闭，EX33-01及第34～38单元边界不变；diff check通过 | `1b2df67629a3e9269b40a275a6784a3dc63708c5`（7 文件） | 有效 |
+| V33-22 | 第 33 单元当前冻结输入的提交验证 | 复用 V33-10/11/14/15/18～20；执行一次 `pnpm build`；随后 `git diff --check`、61 路径闭包与内容指纹复算 | 当前 61 个非工作台交付文件，冻结指纹 `027fb83d24912a5d7885af61abd7d5029d5505f024107641d31298d6994868be` | 单元提交验证 | `pnpm build` 17/17 workspace 成功（147.9 秒）；`git diff --check` 无错误；61 个功能交付路径与 6 个流程路径全量归项，指纹复算全等，零临时结果；未运行包全测、模块回归或重复直接测试 | `027fb83d24912a5d7885af61abd7d5029d5505f024107641d31298d6994868be`（61 文件） | 有效 |
 
 ## U33-01～U33-12 专项修复收口记录（历史）
 
@@ -408,8 +451,8 @@
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `027fb83d…` | 通过；逐项应用 EX33-01 与 L33-01，无新增问题 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `027fb83d…` | 通过；独立重造失败序列并再次应用 L33-01，无新增问题 |
 
 ## 独立审查覆盖表
 
@@ -417,11 +460,11 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
-| IF33-01 | full capture、retention 与 root generation 安全 | core/mesh capture、index、lifecycle、readiness；当前专项指纹 `c66cd68d…` | 失效 | U33-01/U33-02 已专项修复；输入变化后尚未执行正式独立功能审查 | capture/index/root/chain/readiness 任一变化 |
-| IF33-02 | target 生命周期、物理路径与资源故障 | config/binding、directory/paired adapter、governor/abort；当前专项指纹 `92953a6e…` | 失效 | U33-04/U33-05 已专项修复并通过直接验证；输入变化后须执行正式独立功能审查 | binding、I/O、root/file identity 或 stop 变化 |
-| IF33-03 | compatibility、秘密输入、状态与可选 owner 隔离 | recovery codec、CLI TTY、status、两生产根；当前专项指纹 `92953a6e…` | 失效 | U33-04/U33-10 已专项修复并通过直接验证；既有秘密/raw error 裁决未恢复，输入变化后须正式独立审查 | codec、输入、DTO、装配错误边界变化 |
-| IF33-04 | wire 严格性、single-flight 与产品范围价值 | paired result、daily/forced owner；当前专项指纹 `c66cd68d…` | 失效 | U33-03/U33-07 已专项修复，P2 价值边界保持；待正式独立功能审查 | candidate consumer或任一推进字段变化 |
-| IF33-05 | 生产入口 exact-set 与必要证据 | S7 descriptor/golden、真实 log/store/index 与两生产根；当前专项指纹 `c66cd68d…` | 失效 | U33-12 已专项修复且直接门禁通过；待正式独立功能审查 | 入口、角色、门禁或必要证据变化 |
-| IF33-06 | 跨区组合核查 | IF33-01～IF33-05 当前边界、输入与结论；当前专项指纹 `92953a6e…` | 失效 | 三条前置风险已在专项四路对抗闭合；任一前置风险输入变化使本项等待正式独立组合审查 | 任一前置风险面边界、输入、状态或结论变化 |
+| IF33-01 | full capture、retention 与 root generation 安全 | core/mesh capture、index、lifecycle、readiness；冻结指纹 `027fb83d…` | 已覆盖 | 独立按“错误 full-ready”失效机制重建：同 source-head retention、generation 与 verified/readiness 全链闭合，落后/越头/损坏/换代均 fail-closed；无新增问题 | capture/index/root/chain/readiness 任一变化 |
+| IF33-02 | target 生命周期、物理路径与资源故障 | config/binding、directory/paired adapter、governor/abort；冻结指纹 `027fb83d…` | 已覆盖 | 独立按“根外副作用或不可恢复半提交”重建：历史 target、originating tuple、句柄 I/O、governor/abort 均有唯一耐久出口；无新增问题 | binding、I/O、root/file identity 或 stop 变化 |
+| IF33-03 | compatibility、秘密输入、状态与可选 owner 隔离 | recovery codec、CLI TTY、status、两生产根；冻结指纹 `027fb83d…` | 已覆盖 | 独立按“兼容输入降防或可选故障扩散”重建：v1/v2、finite/active、无回显、公开 DTO、availability/readiness 与 fail-stop 分层无漂移 | codec、输入、DTO、装配错误边界变化 |
+| IF33-04 | wire 严格性、single-flight 与产品范围价值 | paired result、daily/forced owner；冻结指纹 `027fb83d…` | 已覆盖 | 独立按“错响应推进或重复候选”重建：严格 decoder、originating command 反绑与 keyed single-flight 闭合；P2 处置没有扩大提交门禁 | candidate consumer或任一推进字段变化 |
+| IF33-05 | 生产入口 exact-set 与必要证据 | S7 descriptor/golden、真实 log/store/index 与两生产根；冻结指纹 `027fb83d…` | 已覆盖 | 独立从删除、替换、新增、错 owner/顺序/governor、latest-head 回退构造漂移；有限 S7/golden 与真实小表共同 fail-closed | 入口、角色、门禁或必要证据变化 |
+| IF33-06 | 跨区组合核查 | IF33-01～IF33-05 当前边界、输入与结论；冻结指纹 `027fb83d…` | 已覆盖 | 独立贯通 capture→generation→target→readiness、v1/v2→finite/active 与资源/证据交界；EX33-01、L33-01 和第34～38单元边界均已应用，无新增问题 | 任一前置风险面边界、输入、状态或结论变化 |
 
 <!-- registration-complete: unit-33.gen-1 -->

@@ -21,7 +21,7 @@ import {
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
 } from "@zhixing/core/authority";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { ensureDurableDirectory, SerialTaskQueue, syncDirectory } from "@zhixing/core/persistence";
 import {
@@ -87,6 +87,12 @@ interface PersistedTransportTrust {
 
 export interface FileMeshBootstrapStoreOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+}
+
+export interface RecoveryRootActivationReplay {
+  readonly checkpointId: string;
+  readonly event: Extract<RecoveryActivationPlan, { kind: "establish" }>["rootEvent"];
+  readonly record: HomeTrustRecord;
 }
 
 /** Durable device-domain bootstrap state sharing the authority log's trust stream. */
@@ -194,6 +200,122 @@ export class FileMeshBootstrapStore {
       return latest;
     }
     throw new Error("Home trust projection record is missing or stale");
+  }
+
+  async loadRecoveryRootActivationReplay(input: {
+    readonly activationDigest: string;
+    readonly targetId: string;
+  }): Promise<RecoveryRootActivationReplay | undefined> {
+    const snapshot = await this.#log.readSnapshot<RecoveryStreamRecord>();
+    const matches: Array<{
+      readonly lsn: number;
+      readonly commit: RecoveryActivationAtomicCommit;
+    }> = [];
+    const trustEvents: HomeTrustEvent[] = [];
+
+    for (const envelope of snapshot.commits) {
+      for (const entry of envelope.entries) {
+        const body = entry.body;
+        if (entry.stream === "trust" && body.t === "home-trust-event") {
+          trustEvents.push(body.event);
+          continue;
+        }
+        if (
+          entry.stream === "checkpoint" &&
+          body.t === "recovery-activation-committed" &&
+          body.commit.plan.kind === "establish" &&
+          protocolDigest("RecoveryActivationPlan", 1, body.commit.plan) === input.activationDigest &&
+          body.commit.verification.targetId === input.targetId
+        ) {
+          matches.push({ lsn: envelope.lsn, commit: body.commit });
+        }
+      }
+    }
+
+    if (trustEvents.length === 0) return undefined;
+    const current = replayTrustChain(trustEvents);
+    if (current.recoveryActivationDigest !== input.activationDigest) return undefined;
+    if (matches.length === 0) return undefined;
+    if (matches.length !== 1) {
+      throw new Error("Recovery root activation replay identity is ambiguous");
+    }
+
+    const match = matches[0]!;
+    const commit = match.commit;
+    const plan = commit.plan;
+    if (plan.kind !== "establish") {
+      throw new Error("Recovery root activation replay is not an establishment plan");
+    }
+    const verification = commit.verification;
+    const verified = commit.checkpointRecords[0];
+    const expectedVerified: Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }> = {
+      t: "checkpoint-verified",
+      checkpointId: verification.checkpointId,
+      recipientKeyId: verification.recipientKeyId,
+      purpose: verification.purpose,
+      targetId: verification.targetId,
+      envelopeDigest: verification.envelopeDigest,
+      verification,
+    };
+    if (
+      verification.purpose.kind !== "root-activation" ||
+      verification.purpose.activationDigest !== input.activationDigest ||
+      verification.targetId !== input.targetId ||
+      !verified ||
+      canonicalize(verified) !== canonicalize(expectedVerified)
+    ) {
+      throw new Error("Recovery root activation commit evidence is inconsistent");
+    }
+
+    const activationEnvelope = snapshot.commits.find((envelope) => envelope.lsn === match.lsn);
+    if (!activationEnvelope) {
+      throw new Error("Recovery root activation commit envelope is missing");
+    }
+    const committed = activationEnvelope.entries.filter((entry) =>
+      entry.stream === "checkpoint" &&
+      entry.body.t === "recovery-activation-committed" &&
+      canonicalize(entry.body.commit) === canonicalize(commit));
+    const verifiedEvidence = activationEnvelope.entries.filter((entry) =>
+      entry.stream === "checkpoint" &&
+      canonicalize(entry.body) === canonicalize(expectedVerified));
+    const activationEvents = activationEnvelope.entries.flatMap((entry) =>
+      entry.stream === "trust" && entry.body.t === "home-trust-event"
+        ? [entry.body.event]
+        : []);
+    const activationRecords = activationEnvelope.entries.flatMap((entry) =>
+      entry.stream === "trust" && entry.body.t === "home-trust-record"
+        ? [entry.body.record]
+        : []);
+    if (
+      committed.length !== 1 ||
+      verifiedEvidence.length !== 1 ||
+      activationEvents.length !== 1 ||
+      activationRecords.length !== 1 ||
+      canonicalize(activationEvents[0]) !== canonicalize(plan.rootEvent)
+    ) {
+      throw new Error("Recovery root activation historical tuple is incomplete");
+    }
+
+    const historicalEvents: HomeTrustEvent[] = [];
+    for (const envelope of snapshot.commits) {
+      if (envelope.lsn > match.lsn) break;
+      for (const entry of envelope.entries) {
+        if (entry.stream === "trust" && entry.body.t === "home-trust-event") {
+          historicalEvents.push(entry.body.event);
+        }
+      }
+    }
+    const historical = replayTrustChain(historicalEvents);
+    const event = plan.rootEvent;
+    const record = activationRecords[0]!;
+    if (
+      historical.chainHead.seq !== event.seq ||
+      historical.chainHead.eventDigest !== homeTrustEventDigest(event)
+    ) {
+      throw new Error("Recovery root activation event is not the committed trust head");
+    }
+    verifyHomeTrustRecord(record, historical);
+    return { checkpointId: verification.checkpointId, event, record };
   }
 
   async initializeLocalHome(input: {

@@ -165,7 +165,7 @@ executor = 新包组合（runtime-host + mesh + 执行账本 + 数据面服务�
 
 ### §12.1 S9 首次恢复根与备份状态边界
 
-已有配对设备建立首个恢复根时，source 必须先完成恢复包的无回显回读与严格解码，再以包内 root、recipient 与 checkpoint 身份连接 target；无恢复根阶段只允许 current issuer 经既有认证控制面调用 strict checkpoint service，普通 mesh 与业务服务继续关闭。target 的首个 begin 在既有私有 staging 耐久绑定该身份，同载荷重放幂等、冲突稳定拒绝；checkpoint 回读与 source 原子激活完成后，同一 strict service 只提交与该 checkpoint plan 全等的签名 root event 和 trust record，target 耐久验真后有限通道退役，已激活 runtime 只接受同一终态重放。恢复备份 readiness 只由 current root/chain/target generation 对应的耐久 created、replicated、verified 与本地 full envelope 投影，目标或 runtime 离线只降低 availability，不得改写 readiness。三个 paired checkpoint client 生产构造点必须注入同一设备 storage governor；网络等待不持 permit，固定 range 的解码与消费受准入并在交付后释放。
+已有配对设备建立首个恢复根时，source 必须先完成恢复包的无回显回读与严格解码，再以包内 root、recipient 与 checkpoint 身份连接 target；无恢复根阶段只允许 current issuer 经既有认证控制面调用 strict checkpoint service，普通 mesh 与业务服务继续关闭。target 的首个 begin 在既有私有 staging 耐久绑定该身份，同载荷重放幂等、冲突稳定拒绝；checkpoint 回读与 source 原子激活完成后，同一 strict service 只提交与该 checkpoint plan 全等的签名 root event 和 trust record，target 耐久验真后有限通道退役，已激活 runtime 只接受同一终态重放。source 的 originating activation commit 是双端重放的唯一身份；target 尚未提交时，即使 source trust chain 已合法前进，也必须从该提交的同一 authority LSN 验真并重放原 checkpoint、root event 与 trust record，禁止用最新链头或当前 record 替代。恢复备份 readiness 只由 current root/chain/target generation 对应的耐久 created、replicated、verified 与本地 full envelope 投影，目标或 runtime 离线只降低 availability，不得改写 readiness。三个 paired checkpoint client 生产构造点必须注入同一设备 storage governor；网络等待不持 permit，固定 range 的解码与消费受准入并在交付后释放。
 
 ### §13 不变量清单（机械可验，进测试）
 

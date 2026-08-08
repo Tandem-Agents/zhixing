@@ -428,21 +428,11 @@ async function currentPairedRootActivation(
   readonly event: Parameters<PairedRecoveryCheckpointTarget["activateRoot"]>[0]["event"];
   readonly record: HomeTrustRecord;
 } | undefined> {
-  const event = (await context.store.loadTrustEvents()).at(-1);
-  if (
-    !event ||
-    event.body.t !== "recovery-root" ||
-    event.body.op !== "establish" ||
-    event.seq !== context.trust.chainHead.seq ||
-    !context.projection.recoveryActivationDigest
-  ) return undefined;
-  const verified = [...await context.store.loadCheckpointRecords()].reverse().find((record) =>
-    record.t === "checkpoint-verified" &&
-    record.targetId === targetId &&
-    record.purpose.kind === "root-activation" &&
-    record.purpose.activationDigest === context.projection.recoveryActivationDigest);
-  if (!verified) return undefined;
-  return { checkpointId: verified.checkpointId, event, record: context.trust };
+  if (!context.projection.recoveryActivationDigest) return undefined;
+  return context.store.loadRecoveryRootActivationReplay({
+    activationDigest: context.projection.recoveryActivationDigest,
+    targetId,
+  });
 }
 
 async function openTargetBinding(

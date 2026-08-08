@@ -87,7 +87,16 @@ describe("paired recovery backup setup", () => {
         await expect(target.read(verified!.checkpointId)).resolves.toMatchObject({
           envelope: { checkpointId: verified!.checkpointId },
         });
-        const event = (await fixture.sourceBootstrap.bootstrapStore.loadTrustEvents()).at(-1)!;
+        const sourceProjection = await fixture.sourceBootstrap.bootstrapStore.loadTrustProjection();
+        if (!sourceProjection?.recoveryActivationDigest) {
+          throw new Error("source recovery activation was not persisted");
+        }
+        const activation = await fixture.sourceBootstrap.bootstrapStore
+          .loadRecoveryRootActivationReplay({
+            activationDigest: sourceProjection.recoveryActivationDigest,
+            targetId: `backup-device:${fixture.targetDeviceId}`,
+          });
+        if (!activation) throw new Error("source recovery activation replay was not found");
         const receiver = new PairedCheckpointReceiver({
           homeId: sourceTrust!.homeId,
           sourceDeviceId: sourceTrust!.issuer.deviceId,
@@ -118,16 +127,19 @@ describe("paired recovery backup setup", () => {
           storageMaintenance: fixture.sourceStorage,
         });
         await expect(replayTarget.activateRoot({
-          checkpointId: verified!.checkpointId,
-          event,
-          record: sourceTrust!,
+          checkpointId: activation.checkpointId,
+          event: activation.event,
+          record: activation.record,
         })).resolves.toBeUndefined();
         await expect(replayTarget.activateRoot({
-          checkpointId: verified!.checkpointId,
-          event,
+          checkpointId: activation.checkpointId,
+          event: activation.event,
           record: {
-            ...sourceTrust!,
-            chainHead: { ...sourceTrust!.chainHead, seq: sourceTrust!.chainHead.seq + 1 },
+            ...activation.record,
+            chainHead: {
+              ...activation.record.chainHead,
+              seq: activation.record.chainHead.seq + 1,
+            },
           },
         })).rejects.toThrow(/terminal replay|record|result/);
         expect(await fixture.targetBootstrap.bootstrapStore.loadTrustRecord()).toEqual(targetTrust);
@@ -153,6 +165,165 @@ describe("paired recovery backup setup", () => {
         record.t === "checkpoint-created" &&
         record.purpose.kind === "periodic" &&
         record.targetId === `backup-device:${fixture.targetDeviceId}`)).toBe(true);
+    },
+  );
+
+  it.each(["v1", "v2"] as const)(
+    "replays the originating %s checkpoint after source trust advances before target commit",
+    async (version) => {
+      const fixture = await pairedHomeWithoutRecoveryRoot(version);
+      const firstRuntime = new RecoveryRootEstablishmentRuntime({
+        zhixingHome: fixture.targetHome,
+        mesh: fixture.targetBootstrap,
+        secretStore: fixture.targetSecrets,
+        storageMaintenance: fixture.targetStorage,
+      });
+      const mutableTargetLog = fixture.targetBootstrap.bootstrapStore.authorityLog() as unknown as {
+        transactProjection: (...args: unknown[]) => Promise<unknown>;
+      };
+      const originalTargetTransaction = mutableTargetLog.transactProjection.bind(
+        fixture.targetBootstrap.bootstrapStore.authorityLog(),
+      );
+      let failTargetCommit = true;
+      let displayedPackage: string | undefined;
+      try {
+        await firstRuntime.start();
+        mutableTargetLog.transactProjection = async (...args: unknown[]) => {
+          if (failTargetCommit) {
+            failTargetCommit = false;
+            throw new Error("injected target root commit disconnect");
+          }
+          return originalTargetTransaction(...args);
+        };
+        await expect(runBackupSetupCommand(
+          { pairedDeviceId: fixture.targetDeviceId },
+          {
+            zhixingHome: fixture.sourceHome,
+            secretStore: fixture.sourceSecrets,
+            storageMaintenance: fixture.sourceStorage,
+            writeLine: (line) => {
+              if (line.startsWith("恢复包：")) displayedPackage = line.slice("恢复包：".length);
+            },
+            readRecoveryPackage: async () => {
+              if (version === "v1") return fixture.legacyPackage!;
+              if (!displayedPackage) throw new Error("recovery package was not displayed before read-back");
+              return displayedPackage;
+            },
+          },
+        )).rejects.toThrow("Mesh service failed");
+        expect(failTargetCommit).toBe(false);
+      } finally {
+        mutableTargetLog.transactProjection = originalTargetTransaction;
+        await firstRuntime.stop();
+      }
+
+      const sourceAfterActivation = await fixture.sourceBootstrap.bootstrapStore.loadTrustProjection();
+      const targetBeforeReplay = await fixture.targetBootstrap.bootstrapStore.loadTrustProjection();
+      if (!sourceAfterActivation?.recoveryActivationDigest || !targetBeforeReplay) {
+        throw new Error("fault scenario did not preserve the expected source/target trust split");
+      }
+      expect(sourceAfterActivation.recoveryRootPublicKey).toBeDefined();
+      expect(targetBeforeReplay.recoveryRootPublicKey).toBeUndefined();
+
+      const roleChange = createSignedTrustEvent({
+        current: sourceAfterActivation,
+        body: {
+          t: "role-change",
+          deviceId: fixture.targetDeviceId,
+          roles: ["executor", "surface"],
+        },
+        at: new Date(Date.now() + 1_000).toISOString(),
+        signer: fixture.sourceBootstrap.deviceKey,
+      });
+      const advanced = await fixture.sourceBootstrap.bootstrapStore.appendTrustEvent({
+        event: roleChange,
+        issuerKey: fixture.sourceBootstrap.deviceKey,
+      });
+      expect(advanced.chainHead.seq).toBeGreaterThan(sourceAfterActivation.chainHead.seq);
+      expect(advanced.recoveryActivationDigest).toBe(sourceAfterActivation.recoveryActivationDigest);
+
+      const historical = await fixture.sourceBootstrap.bootstrapStore
+        .loadRecoveryRootActivationReplay({
+          activationDigest: sourceAfterActivation.recoveryActivationDigest,
+          targetId: `backup-device:${fixture.targetDeviceId}`,
+        });
+      expect(historical).toBeDefined();
+      expect(historical!.event.seq).toBe(sourceAfterActivation.chainHead.seq);
+      expect(historical!.record.chainHead).toEqual(sourceAfterActivation.chainHead);
+      await expect(fixture.sourceBootstrap.bootstrapStore.loadRecoveryRootActivationReplay({
+        activationDigest: sourceAfterActivation.recoveryActivationDigest,
+        targetId: "backup-device:wrong-target",
+      })).resolves.toBeUndefined();
+
+      const restartedTarget = await prepareMeshRuntimeBootstrap({
+        zhixingHome: fixture.targetHome,
+        secretStore: fixture.targetSecrets,
+        storageMaintenance: fixture.targetStorage,
+        configuration: { enabledRoles: ["executor"] },
+      });
+      if (restartedTarget.mode !== "trusted-home") throw new Error("expected trusted target home");
+      const replayRuntime = new RecoveryRootEstablishmentRuntime({
+        zhixingHome: fixture.targetHome,
+        mesh: restartedTarget,
+        secretStore: fixture.targetSecrets,
+        storageMaintenance: fixture.targetStorage,
+      });
+      let finiteReplay: Promise<void> | undefined;
+      let finiteReplayOutcome: Promise<void> | undefined;
+      try {
+        await replayRuntime.start();
+        finiteReplay = runBackupSetupCommand(
+          { pairedDeviceId: fixture.targetDeviceId },
+          {
+            zhixingHome: fixture.sourceHome,
+            secretStore: fixture.sourceSecrets,
+            storageMaintenance: fixture.sourceStorage,
+            writeLine: () => undefined,
+          },
+        );
+        finiteReplayOutcome = finiteReplay.catch(() => undefined);
+        await withTimeout(replayRuntime.waitUntilActivated(), "target did not replay the historical root");
+        await replayRuntime.stop();
+        await withTimeout(
+          finiteReplayOutcome,
+          "source setup did not leave the finite root-establishment topology",
+        );
+      } finally {
+        await replayRuntime.stop();
+        await finiteReplayOutcome;
+      }
+
+      const targetAfterReplay = await fixture.targetBootstrap.bootstrapStore.loadTrustRecord();
+      expect(targetAfterReplay?.chainHead).toEqual(historical!.record.chainHead);
+      const active = await startActiveCheckpointReceiver(fixture);
+      try {
+        await runBackupSetupCommand(
+          { pairedDeviceId: fixture.targetDeviceId },
+          {
+            zhixingHome: fixture.sourceHome,
+            secretStore: fixture.sourceSecrets,
+            storageMaintenance: fixture.sourceStorage,
+            writeLine: () => undefined,
+          },
+        );
+      } finally {
+        await active.stop();
+      }
+      expect(await fixture.targetBootstrap.bootstrapStore.loadTrustRecord()).toEqual(targetAfterReplay);
+
+      const committed = await fixture.sourceBootstrap.bootstrapStore
+        .bootstrapAuthority()
+        .loadRecoveryActivation(historical!.checkpointId);
+      if (!committed) throw new Error("originating activation commit was not persisted");
+      await fixture.sourceBootstrap.bootstrapStore.authorityLog().append([{
+        stream: "checkpoint",
+        body: { t: "recovery-activation-committed" as const, commit: committed.commit },
+      }]);
+      await expect(fixture.sourceBootstrap.bootstrapStore.loadRecoveryRootActivationReplay({
+        activationDigest: sourceAfterActivation.recoveryActivationDigest,
+        targetId: `backup-device:${fixture.targetDeviceId}`,
+      })).rejects.toThrow("Recovery root activation replay identity is ambiguous");
+      expect(await fixture.targetBootstrap.bootstrapStore.loadTrustRecord()).toEqual(targetAfterReplay);
     },
   );
 });
