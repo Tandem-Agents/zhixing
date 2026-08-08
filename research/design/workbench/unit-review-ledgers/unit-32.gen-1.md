@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U32-01～U32-07 专项修复已验证（不代表第 32 单元终审或单元提交验证完成）
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（仅冻结 U32-01～U32-07 专项修复输入；第 32 单元全量终审仍未开始）
-- **交付物文件集**:36 个生产实现、直接测试、S7 门禁及当前架构/规格文件；workbench 状态文件不计入交付指纹
-- **当前交付物指纹**:`sha256:0f9bdf8555b09678aa72e273f63cd79ef4c3c03c61454a9e2c68b5fb080dc8e8`（36 文件；逐文件内容哈希组成冻结 manifest；工作台文件排除）
+- **当前状态**:已完成（第 32 单元已封版）
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（第 32 单元完整功能闭包；workbench 状态文件不计入指纹）
+- **交付物文件集**:`4f843748`→`dd50eec8` 共 67 个变化路径；61 个功能路径为 50 个既有交付路径加修复后新增的 11 个生产/直接测试路径，另 6 个 workbench 路径仅承载流程状态
+- **当前交付物指纹**:`sha256:672bccf28ba22de252754a5437c29963262569af543204a5f473605a18371913`（61 个功能路径；按相对路径排序后哈希 `path\0contentSha256` manifest；workbench 文件排除）
 - **集中修复与验证证据**:2026-08-08，U32-01～U32-07 方案全部进入两生产根。直接闭包：core transfer 5/5、storage maintenance 20/20、owner run contracts 60/60、owner transfer 5/5、CLI 受影响场景 33/33、post-adoption memory 最终输入 7/7、S7 16/16 与 canonical golden 全部通过；owner-kernel TypeScript 5.9 零错，CLI 仅保留 8 个既有 config-editor/startup 基线错误且无 U32 新错；最终同输入 `pnpm build` 187.1s 成功，`git diff --check` 零错。反证账：C32-R01（U32-04 同根）把 abort staging cleanup 的无效 governor obligation 改为耐久 abort 后的 `committed` cleanup；C32-R02（U32-01/U32-05 交界）补回 canonical local confirmation，并与 current-owner 远端分区稳定合并；C32-R03（U32-06 同根）发现只有 discovery 水位但未冻结输入时，未完成 segment 仍会重建 transcript，已改为同一 AuthorityCommitLog transaction 原子冻结 discovery 与全部规范输入/attempt，恢复只消费未完成 operation 的耐久 input。三项均由真实边界直接复核通过。
 - **专项固定矩阵与四路对抗复审**:同一冻结指纹逐格覆盖七项正式记录的 topology、owner/surface/transfer/asset/segment/effect identity、线性化点、拒绝副作用、响应丢失、连续重启及后继范围。A current-owner/第一方 session+confirmation：全部 source 写面、候选/列表、canonical local 与远端路由只消费同一耐久 authority，零残留；B private staging/commit/governor：私有目录、完整 closure 提升、同 envelope committed-base、可取消容量步骤与锁序全等，零共享误删；C surface/memory：同 requestId 串行接管、conversation 定向、原子 discovery+input、首胜 plan、逐效果 exact replay 与 completed 水位全等，C32-R03 修复后二次冷启动零新增；D strict wire/范围价值：逐 state exact keys、originating command 全关联、retryable 保留，EX32-01 前提仍成立且后继 transfer/同步/生命周期能力零进入。四路均零未处置反证。
 - **架构来源**:`always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`；scheduler/rubric/transcript/lifecycle 直接上游合同；第 32 单元定稿开发清单与独立审查清单
@@ -34,10 +34,12 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
-| core/owner-kernel transfer、identity 与 storage maintenance | core/owner-kernel 可消费导出、strict codec、S7 owner/role 约束 | core transfer 5/5、storage maintenance 20/20、owner transfer 5/5、workspace build 通过 | 通过 |
-| CLI 两生产根、current-owner router、first-party relay、review/memory | server/RPC 注册、canonical registry、生产装配及消费者直接测试 | CLI 受影响场景 33/33，memory 最终 7/7，S7 16/16 + golden | 通过 |
-| distributed-runtime 总纲、规格与 S7 门禁 | 当前事实、后继边界、结构检查与真实变异必须同步 | 文档逐项对账；S7/golden 通过；EX32-01 与后继范围未变化 | 通过 |
-| workbench 状态文件 | 仅记录流程，不参与交付指纹和功能判断 | 本轮只更新问题状态、反证、专项复审与清单失效范围 | 不适用:流程状态不进入运行产物 |
+| core 11 路径：transfer/identity/storage/memory hook 与直接测试 | core 导出、strict codec、签名摘要、storage-maintenance kind 与消费声明 | core transfer 5/5、storage maintenance 20/20、workspace build；组指纹 `2ab3fefe…a6379` | 通过 |
+| owner-kernel 7 路径：transfer/current authority/confirmation/run journal 与直接测试 | owner-kernel 导出、同一 AuthorityCommitLog 的 transfer/base/memory/confirmation 投影 | owner transfer 5/5、run contracts 60/60、owner-kernel TS 零错；组指纹 `f6ff7353…1044a` | 通过 |
+| CLI 27 路径：两生产根、coordinator、private staging、router/relay、review/memory 与直接测试 | server canonical dispatch、两根装配、current-owner 路由、启动恢复与消费者 | CLI 受影响场景 33/33、memory 7/7、workspace build；组指纹 `4ab8eafc…533ea` | 通过 |
+| rpc/server 10 路径与 orchestrator evidence 2 路径 | session/confirmation wire、Hub/Bridge/broker、Evidence current-owner guard 与第一方公开面 | 直接场景证据与 workspace build；组指纹分别 `ebbe2133…5836`、`61a1276a…0a09` | 通过 |
+| distributed-runtime 总纲/规格与 S7 两文件 | 当前事实、后继边界、结构检查、canonical golden 与真实变异 | 文档逐项对账；S7 16/16+golden；支持组指纹 `6d831041…bb63` | 通过 |
+| 6 个 workbench 状态路径 | 只记录开发清单、单元账本/清单归档及当前审查，不进入运行产物 | 封版准备重新计算 67/61/6，零功能路径落入流程排除集 | 不适用:流程状态不进入交付指纹 |
 
 ## 关键原语核查
 
@@ -61,6 +63,12 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R32-01 | core transfer 严格合同、稳定身份、状态机、签名摘要与容量原语；覆盖状态、安全、资源、wire | core 11 路径、owner/CLI 对应 consumer、core transfer/storage 直接测试 | 路径+内容 SHA-256 `2ab3fefee47a442028bd27a2b1f10308fa986c46bc18d0391f00e0061c0a6379` | DTO/state/signature/correlation/storage kind、导出或直接测试变化 | 通过 | 2/2 | 终审二从错 request/transfer/ref/range/commit/abort、跨 state 字段、异载荷重放和响应丢失主动反推：client 在分类前反绑 originating command，reducer 仅接受相邻或 exact replay；retryable 保留且不能越过签名/摘要，零新问题。 |
+| R32-02 | owner-kernel transfer/current-authority/confirmation/memory journal；覆盖权威、并发、崩溃与恢复 | owner-kernel 7 路径、两日志 producer、CLI protocol consumers、owner 直接测试 | 路径+内容 SHA-256 `f6ff735359ca2fdbf751a13f5020dcea0aacd81506d99c7bd124b600e371044a` | journal/reducer/current owner/base/confirmation/memory projection 或测试变化 | 通过 | 2/2 | 终审二构造 delete/write、prepare 后崩溃、abort/commit 双序、commit sync 前后故障、外置 control 与 memory plan/effect 漂移：同日志前缀或 signed terminal 唯一裁决，base/水位可恢复，commit 后旧 owner 永久拒绝，零新问题。 |
+| R32-03 | CLI 两生产根、source/target/coordinator、private staging、current-owner router/relay、review/memory；覆盖入口、生命周期与产品旅程 | CLI 27 路径、两组合根、canonical server consumer、全部 CLI 直接场景测试 | 路径+内容 SHA-256 `4ab8eafc84b1c07ec18eb5cf08cf3a0f48f2a17992dc853199d41a16fcd533ea` | 任一 production root、路由、staging、commit publish、surface、memory、启动/关闭或测试变化 | 通过 | 2/2 | 终审二重造共享 digest、部分导入/提升、磁盘满/取消、publication 失败、旧 owner 重启、remote route 丢响应和连续恢复：abort 只删私有目录、permit 不跨网络/锁、sync 后零 I/O，路由只消费 durable current owner，零半套或双 owner。 |
+| R32-04 | RPC/server/confirmation/evidence 的第一方消费闭包；覆盖消费者、连接换代、安全与公开终态 | rpc/server 10 路径、orchestrator evidence 2 路径、CLI broker/facade、直接测试 | 路径+内容 SHA-256 `ebbe21333f06a5f05aea4137cb86e0a7da3fa4b773d7dacadf93328d2a535836` + `61a1276a9a45f797abd15c6f784ec59fa01be73921192d742e103bfde12c0a09` | session/confirmation registry、connection identity、evidence guard、公开结果或测试变化 | 通过 | 2/2 | 终审二从同身份重连、进程重启、跨 surface/owner、迟到应答、无参 list/resolve、旧 evidence request 与任意 RPC 反推：generation 关闭旧 relay，conversationId 精确路由 current Hub，旧 origin/owner 在首个读取前失败，零串会话。 |
+| R32-05 | 架构规格、S7、包边界与后继能力守界；覆盖结构、派生资产和验收 | charter/spec、S7 gate/test、全部 package groups 与 canonical golden | 路径+内容 SHA-256 `6d83104199da7b13499c0e7d04a1b9051cc1b3253bf749c3554b8e1ae7e6bb63` | 当前文档、S7/golden、包依赖、future denylist 或交付路径集合变化 | 通过 | 2/2 | 终审二主动尝试删除/替换两根依赖、改为共享 staging、漏 governor/current guard、放宽 relay、移除 memory input/watermark 或加入后继符号：现有有限 S7/denylist 均有对应失败谓词，合法现行图无误杀，零新问题。 |
+| R32-06 | 跨项组合：offline local→transfer→current owner→session/confirmation→review/memory，以及 abort/commit/容量/重启交界 | R32-01～R32-05、U32-01～U32-07、EX32-01、61 路径完整闭包 | 总路径+内容 SHA-256 `672bccf28ba22de252754a5437c29963262569af543204a5f473605a18371913` | 任一 R32-01～R32-05 输入/状态/结论变化，或出现新反证 | 通过 | 2/2 | 终审二以部分 staging→目标拒绝/commit 竞争→source 重启→surface 换代→review/memory 效果后丢响应的跨域序列反推：每段终态可组合，失败保留唯一可重驱事实，未出现双 owner、误删、错误完成或后继扩面；EX32-01 未重开。 |
 
 ## 问题列表
 
@@ -90,6 +98,7 @@
 
 | 编号 | 对应问题与先前通过轮次 | 遗漏机制 | 后续必做的检测动作与适用范围 | 应用记录（轮次:证据） |
 | ---- | ---------------------- | -------- | ---------------------------- | --------------------- |
+| L32-01 | 独立审查清单已通过后，封版准备发现交付路径计数仍停在 030508e1 的 54/50/4 | 清单失效更新了功能项状态，却复用了生成清单时的旧路径总数，未在封版前以 baseline→frozen HEAD 重新计算集合差 | 每次冻结准备必须重新计算 baseline→HEAD 全路径、功能/流程二元集合及相对上一清单基线的新增/删除集合；每个新增功能路径逐一反绑既有项或新增项，禁止复制旧计数 | 冻结准备：重算 67/61/6 并同步 IR32-01/40；终审一：11 路径逐一按正向功能链反绑；终审二：从错装配、漏消费、资源与恢复反例重审同 11 路径，零未审或错误排除。 |
 
 ## 验证计划与证据账本
 
@@ -97,13 +106,27 @@
 
 | 编号 | 证明目标与当前缺口 | 最小命令或检查 | 输入闭包 | 阶段 / 成本 / 实耗 | 结果 | 证据输入指纹 | 状态 |
 | ---- | ------------------ | -------------- | -------- | ------------------ | ---- | ------------ | ---- |
+| V32-01 | strict transfer/state/correlation 与 storage governor 直接闭包 | 复用 core transfer 与 storage-maintenance 直接测试 | core 11 路径及相关 owner/CLI consumer | 修复直接验证 / 低 | core transfer 5/5、storage maintenance 20/20 通过 | `sha256:672bccf2…1913` | 有效 |
+| V32-02 | 双日志、current-owner、selector/base、fencing 与 memory journal 直接闭包 | 复用 owner run contracts、owner transfer 与类型检查 | owner-kernel 7 路径、对应 CLI protocol consumer | 修复直接验证 / 中 | run contracts 60/60、owner transfer 5/5、owner-kernel TypeScript 5.9 零错 | `sha256:672bccf2…1913` | 有效 |
+| V32-03 | 两生产根、first-party route/surface、review 与异常恢复 | 复用 CLI 受影响直接场景 | CLI 27 路径、rpc/server consumer 与测试 | 修复直接验证 / 中 | CLI 受影响场景 33/33 通过 | `sha256:672bccf2…1913` | 有效 |
+| V32-04 | durable post-adoption memory 输入/plan/effect/completed 水位 | 复用 post-adoption memory 最终直接集 | memory hook、run contracts、CLI memory consumer/test | 修复直接验证 / 低 | 7/7 通过 | `sha256:672bccf2…1913` | 有效 |
+| V32-05 | 生产装配、current-owner 闭包、private staging/governor、surface/memory 与后继 denylist | 复用 `pnpm s7:lint` 及 canonical golden | S7 两文件、全部真实生产点与文档 | 派生资产预检 / 中 | 16/16 与 canonical golden 通过，零漂移 | `sha256:672bccf2…1913` | 有效 |
+| V32-06 | CLI 类型影响诊断 | 复用 `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` | 最终上游 dist 与 CLI 源码 | 诊断 / 低 | 仅 8 条既有 config-editor/startup 基线错误，U32 零新增 | `sha256:672bccf2…1913` | 诊断 |
+| V32-07 | 最终源码与声明的 workspace 可消费性 | 复用同输入 `pnpm build` | dd50eec8 的 17 包工作区源码与 lockfile | 最终构建证据 / 中 / 187.1s | 17/17 成功 | `sha256:672bccf2…1913` | 有效 |
+| A32-01 | current-owner/第一方 session+confirmation 专项对抗 | 复用正式专项矩阵 A | U32-01/U32-05、两根、surface 与当前 router | 专项对抗 / 低 | 全部 source 写面、候选/列表、local/remote route 与定向 confirmation 全等，零残留 | `sha256:672bccf2…1913` | 有效 |
+| A32-02 | private staging/commit/governor 专项对抗 | 复用正式专项矩阵 B | U32-02～U32-04、真实 FileArtifactStore/AuthorityCommitLog/governor | 专项对抗 / 低 | 私有验真/提升、同 envelope base、取消与锁序全等，零共享误删 | `sha256:672bccf2…1913` | 有效 |
+| A32-03 | surface takeover 与 durable memory 专项对抗 | 复用正式专项矩阵 C | U32-05/U32-06、Hub/relay/GlobalState、C32-R03 | 专项对抗 / 低 | 同 requestId 串行接管、原子 input、首胜 plan、effect replay 与水位全等 | `sha256:672bccf2…1913` | 有效 |
+| A32-04 | strict wire、范围价值与 EX32-01 专项对抗 | 复用正式专项矩阵 D | U32-07、全部 command/result、文档与 future denylist | 专项对抗 / 低 | strict correlation、retryable 保留；EX32-01 未重开，后继能力零进入 | `sha256:672bccf2…1913` | 有效 |
+| A32-05 | 反证差异审计 | C32-R01～R03、U32-01～U32-07 与四路记录逐项归并 | 正式问题、测试和专项矩阵 | 收口 / 低 | 三项同根反证修复后复核通过，零悬空反证 | `sha256:672bccf2…1913` | 有效 |
+| V32-08 | 独立提交审查清单完整性 | 复用当前 40 项逐项源码审查；重新执行 L32-01 路径集合检测 | 61 功能路径、全部来源与 IR32-01～IR32-40 | 冻结准备 / 低 | 40/40 `[x]`，两类问题列表为空；67/61/6 与新增 11 路径已纠正并反绑 | `sha256:672bccf2…1913` | 有效 |
+| V32-09 | 单元提交验证：复用 V32-01～V32-08，只核对差异卫生、闭包与指纹 | `git diff --cached --check`、`git diff --check`、baseline→HEAD 路径二元归属、61 路径 manifest hash、未跟踪与功能工作树差异 | 完整 61 功能路径；workbench 状态路径排除 | 提交验证 / 低 / 3.7s | staged/worktree diff check 退出码均为 0（仅 Git 行尾转换提示，无空白错误）；67 个变化路径全等分为 61 个功能路径与 6 个流程路径，61 路径均存在且 manifest 指纹全等；零功能工作树差异、零未跟踪文件；40/40 独立清单、7/7 已验证问题、6/6 复用项 2/2、6/6 独立风险区和两轮终审状态全等。未重复包测、模块回归或 build。 | `sha256:672bccf2…1913` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `sha256:672bccf2…1913` | 通过；R32-01～R32-06 各 1/2 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `sha256:672bccf2…1913` | 通过；R32-01～R32-06 各 2/2 |
 
 ## 独立审查覆盖表
 
@@ -111,5 +134,11 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF32-01 | **高风险：权威所有权、transfer 状态竞争与第一方准入。** 覆盖 source/target current-owner、全部本地写面、candidate/list/router、prepare/freeze/abort/commit/tombstone、delete/write 与响应丢失/连续重启。 | owner-kernel transfer/current-authority 与 CLI 两生产根、local router/mesh coordinator；总指纹 `sha256:672bccf2…1913` | 已覆盖 | 从旧 owner 重启、delete/write 双序、pre-commit abort 丢响应、commit 后 source 复活和 stable/transient reject 独立反推：准入逐次读取同一耐久 current owner，commit 后永久 fencing；安全 abort 两端签名事实全等且不存在双 owner。 | current-authority reducer、任一 source 写入口、candidate/list/router、transfer terminal 或生产根装配变化；出现旧 owner 可写或双 owner 反证。 |
+| IF32-02 | **高风险：私有 staging、物理 I/O、容量与 authority 原子发布。** 覆盖 shared digest、partial import/promote、路径/范围、磁盘满、取消/stop、锁序、prepared base 与 commit sync 前后故障。 | core artifact/storage 原语、owner-kernel transfer、CLI private store/receiver/governor 与真实 AuthorityCommitLog/FileArtifactStore；总指纹 `sha256:672bccf2…1913` | 已覆盖 | 从共享 digest 误删、部分接收后 abort、网络等待持 permit、publication I/O 失败与 committed-base 恢复独立反推：transfer 只拥有私有目录，完整验真后幂等提升；permit 不跨网络/log/store 锁；signed committed 与 committed-base 同一 fsync 生效，sync 后零发布 I/O。 | staging root/cleanup、receiver/promote、governor kind/work key、selector/base/commit envelope、启动恢复或物理 I/O 边界变化。 |
+| IF32-03 | **高风险：第一方 surface、confirmation 身份与接管。** 覆盖同身份重连、客户端重启、跨 surface/current-owner、无参/指定 list、resolve、迟到应答、通知与 terminal replay。 | ConfirmationHub/Bridge、RPC connection/broker、FirstPartyConversationSurface、post-adoption review 与 CLI consumer；总指纹 `sha256:672bccf2…1913` | 已覆盖 | 从旧 generation 迟到应答、无 conversationId 的 list→resolve、跨 owner 本地 Hub 分叉和 relay 关闭后残留独立反推：conversationId 与 current owner 决定唯一目标，同 requestId 串行接管；pending/resolved 仅向当前 ingress 定向，旧 surface 无新决定能力。 | surfacePrincipal/connection generation、Hub conversation index、list/resolve correlation、relay 生命周期或 broker 接管规则变化；出现跨会话广播或双 pending。 |
+| IF32-04 | **高风险：耐久派生恢复与非确定 memory 消费。** 覆盖零/单/多 segment、LLM 输出漂移/重排、CAS 冲突、部分效果、效果后丢响应、并发唤醒与连续重启。 | conversation run stream 的 discovery/attempt/plan/effect/completed、post-adoption memory consumer 与 GlobalState；总指纹 `sha256:672bccf2…1913` | 已覆盖 | 从未完成 operation 重读 transcript、首轮 plan 后输出变化、effect 成功后响应丢失和较新 digest 冲突独立反推：discovery 与全部规范 input 原子冻结，首个耐久 plan 胜出；每个 effect 先落 attempt 再调用，只有明确零效果冲突创建新 attempt，全部 granted 后才推进 completed 水位。 | run record 联合/projection、input/plan/effect identity、GlobalState CAS 语义、恢复扫描或完成水位变化；出现重复 revision、重复付费或假完成。 |
+| IF32-05 | **一般风险：strict wire、公开错误、结构门禁与范围守界。** 覆盖每个 command/state 的 key 集、错 requestId/transferId/ref/range/commit/abort、retryable、两生产根/S7 与后继 denylist。 | core transfer codec/client、CLI mesh service、公开 facade/controller、架构规格与 S7/golden；总指纹 `sha256:672bccf2…1913` | 已覆盖 | 从跨 state 多字段、错 originating command、动态放宽 receiver、漏 governor/current guard 及后继符号混入独立反推：codec 严格联合与 client correlation 在副作用前 fail-closed，结构化 retryable 保留；现有 S7 对两生产根和 future denylist 全等，合法当前能力零误杀。 | DTO/codec/client/service、公开错误映射、S7/golden、生产装配、文档当前段或后继边界变化。 |
+| IF32-06 | **高风险跨区组合：offline local→transfer→current owner→session/confirmation→review/memory。** 组合私有 staging、容量失败、abort/commit、source 重启、surface 换代、派生响应丢失，并核对 EX32-01。 | IF32-01～IF32-05、U32-01～U32-07、EX32-01、61 功能路径完整闭包；总指纹 `sha256:672bccf2…1913` | 已覆盖 | 独立串联“部分 staging→目标拒绝/commit 竞争→source 重启→原 surface 重连/换代→review 与 memory 效果后丢响应”：每段以唯一耐久事实衔接并可重驱，用户始终只见一个 current owner 与一个可操作 pending；无共享误删、假完成或范围扩张。EX32-01 重开条件未触发。 | 任一 IF32-01～IF32-05 输入、边界、状态或结论变化；EX32-01 前提变化；出现跨区组合反证。 |
 
 <!-- registration-complete: unit-32.gen-1 -->

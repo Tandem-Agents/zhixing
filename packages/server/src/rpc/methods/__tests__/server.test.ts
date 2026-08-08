@@ -377,6 +377,15 @@ describe("server.info", () => {
     ]);
   });
 
+  it("只投影用户级恢复备份状态", async () => {
+    const ctx = mkCtx({
+      recoveryBackupStatus: async () => ({ state: "recoverable" }),
+    });
+    const result = await buildServerInfoMethod().handler({}, ctx) as any;
+    expect(result.recoveryBackup).toEqual({ state: "recoverable" });
+    expect(JSON.stringify(result.recoveryBackup)).not.toMatch(/root|lsn|digest/iu);
+  });
+
   it("hands first-party status history over to one live projection per connection", async () => {
     const close = vi.fn();
     const notify = vi.fn();

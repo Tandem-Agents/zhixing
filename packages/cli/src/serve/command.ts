@@ -134,6 +134,7 @@ import { DurableConversationInteractionObserver } from "./conversation-protocol-
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import { StartupRollback } from "./startup-rollback.js";
+import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
 import {
   governControlTextCall,
   type GovernedTextCall,
@@ -669,6 +670,17 @@ async function runServerProcess(
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
   // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
   await setupAssemblyUnits(assemblyUnits, ctx, "pre-server");
+  ctx.authorityCheckpointOwner = await createConfiguredCheckpointOwner({
+    zhixingHome,
+    mesh: ctx.meshBootstrap,
+    ...(ctx.meshRuntime ? { meshRuntime: ctx.meshRuntime } : {}),
+    storageMaintenance: ctx.storageMaintenance,
+    onError: (error) => console.error(
+      chalk.red("[recovery-backup]"),
+      error instanceof Error ? error.message : String(error),
+    ),
+  });
+  ctx.authorityCheckpointOwner?.start();
   authorityRuntimeRef.current = ctx.authorityRuntime;
   meshRuntimeRef.current = ctx.meshRuntime;
   conversationsRef.current = ctx.conversations ?? null;
@@ -1011,6 +1023,9 @@ async function runServerProcess(
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
       logPath: daemonLogPath,
     },
+    recoveryBackupStatus: async () => ctx.authorityCheckpointOwner
+      ? await ctx.authorityCheckpointOwner.status()
+      : { state: "not-configured" as const },
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => mcpHub.serverStatuses(),
     // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；
@@ -1163,6 +1178,13 @@ async function runServerProcess(
           connection,
           server: serverCtx,
         }),
+    });
+  }
+
+  if (ctx.authorityCheckpointOwner) {
+    const checkpointOwner = ctx.authorityCheckpointOwner;
+    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "authorityCheckpointOwner.stop" }, async () => {
+      await checkpointOwner.stop();
     });
   }
 

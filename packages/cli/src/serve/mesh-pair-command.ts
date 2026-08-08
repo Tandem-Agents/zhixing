@@ -5,7 +5,9 @@ import { createInterface } from "node:readline/promises";
 import {
   getZhixingHome,
 } from "@zhixing/core";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
+  CheckpointStreamRecord,
   DeviceIdentity,
   DeviceRole,
   HomeTrustEvent,
@@ -31,9 +33,21 @@ import { PairingCommitCoordinator } from "@zhixing/mesh/bootstrap-authority";
 import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
 import {
   createCheckpointId,
-  createRootActivationCheckpoint,
   type CheckpointPackage,
 } from "@zhixing/mesh/checkpoint";
+import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
+import {
+  FilePairedCheckpointStaging,
+  PairedCheckpointReceiver,
+  PairedRecoveryCheckpointTarget,
+  type PairedCheckpointCommand,
+  type PairedCheckpointResult,
+  type PairedCheckpointTransport,
+} from "@zhixing/mesh/paired-checkpoint-target";
+import {
+  decodeRecoveryPackage,
+  encodeRecoveryPackage,
+} from "@zhixing/mesh/recovery-package";
 import {
   enrollDeviceIdentity,
   verifyDeviceSignature,
@@ -62,11 +76,13 @@ import {
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig, writeConfig } from "@zhixing/providers";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import {
   FileMeshPairingContinuationStore,
@@ -148,16 +164,28 @@ interface PairingResumeMessage {
   readonly joinerProof: PairingAcceptance["finished"]["joiner"];
 }
 
-interface EncodedRecoveryPackage {
-  readonly v: 1;
-  readonly recoverySecret: string;
-  readonly checkpoint: {
-    readonly envelope: CheckpointPackage["envelope"];
-    readonly chunks: readonly {
-      readonly seq: number;
-      readonly bytes: string;
-    }[];
-  };
+interface RecoveryOnboardingStartMessage {
+  readonly t: "recovery-onboarding-start";
+  readonly homeId: string;
+  readonly sourceDeviceId: string;
+  readonly targetDeviceId: string;
+  readonly checkpointId: string;
+  readonly recipientKeyId: string;
+}
+
+interface RecoveryOnboardingCommandMessage {
+  readonly t: "recovery-onboarding-command";
+  readonly command: PairedCheckpointCommand;
+}
+
+interface RecoveryOnboardingResultMessage {
+  readonly t: "recovery-onboarding-result";
+  readonly result: PairedCheckpointResult;
+}
+
+interface RecoveryOnboardingCompleteMessage {
+  readonly t: "recovery-onboarding-complete";
+  readonly checkpointId: string;
 }
 
 /** Runs the same executable as pairing issuer or joiner without loading the agent runtime. */
@@ -187,6 +215,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       key,
       store,
       continuations,
+      storageMaintenance: deviceCapacity.storage,
       writeLine,
     });
     return;
@@ -198,6 +227,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     key,
     store,
     continuations,
+    storageMaintenance: deviceCapacity.storage,
     writeLine,
   });
 }
@@ -207,79 +237,80 @@ export async function activateInitialRecoveryRoot(input: {
   readonly issuerKey: DeviceKey;
   readonly issuerIdentity: DeviceIdentity;
   readonly current: TrustProjection;
+  readonly targetId: string;
+  readonly targetIndependenceDomain: string;
+  readonly createTarget: (binding: {
+    readonly checkpointId: string;
+    readonly recipientKeyId: string;
+  }) => Promise<import("@zhixing/mesh/bootstrap-authority").RecoveryCheckpointTarget>;
   readonly writeLine: (line: string) => void;
   readonly confirmRecoveryPackage?: (recoveryPackage: string) => Promise<string>;
 }): Promise<TrustProjection> {
   if (input.current.recoveryRootPublicKey || input.current.recoveryBackupPublicKey) {
     throw new Error("Recovery root is already active");
   }
-  const recoveryRoot = RecoveryRoot.generate();
-  const createdAt = new Date().toISOString();
-  const rootEvent = createRecoveryRootEvent({
-    current: input.current,
-    op: "establish",
-    candidate: recoveryRoot,
-    outerSigner: input.issuerKey,
-    at: createdAt,
-  });
-  const plan = {
+  const pending = await loadPendingFullRootActivation(
+    input.store,
+    input.current,
+    input.targetId,
+  );
+  const recoveryRoot = pending ? undefined : RecoveryRoot.generate();
+  const recoveryPackage = recoveryRoot ? encodeRecoveryPackage(recoveryRoot) : "";
+  if (recoveryPackage) input.writeLine(`Recovery package: ${recoveryPackage}`);
+  else input.writeLine("Resume recovery activation with the recovery package saved earlier.");
+  const confirm = input.confirmRecoveryPackage ?? promptRecoveryPackage;
+  const decoded = decodeRecoveryPackage(await confirm(recoveryPackage));
+  const candidateRoot = decoded.root;
+  if (pending && (
+    pending.plan.rootEvent.body.backupPublicKey !== candidateRoot.backupPublicKey ||
+    pending.plan.rootEvent.body.rootPublicKey !== candidateRoot.rootPublicKey
+  )) throw new Error("Recovery package does not match the pending root activation");
+  if (recoveryRoot && (
+    recoveryRoot.backupPublicKey !== candidateRoot.backupPublicKey ||
+    recoveryRoot.rootPublicKey !== candidateRoot.rootPublicKey
+  )) throw new Error("Recovery package read-back does not match the generated recovery root");
+  const createdAt = pending?.checkpoint.envelope.createdAt ?? new Date().toISOString();
+  const plan = pending?.plan ?? {
     v: 1 as const,
     kind: "establish" as const,
-    rootEvent,
+    rootEvent: createRecoveryRootEvent({
+      current: input.current,
+      op: "establish",
+      candidate: candidateRoot,
+      outerSigner: input.issuerKey,
+      at: createdAt,
+    }),
   };
-  const checkpoint = createRootActivationCheckpoint({
+  const trust = await input.store.loadTrustRecord();
+  if (!trust) throw new Error("Recovery activation requires the local home trust record");
+  const checkpoint = pending?.checkpoint ?? (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
-    plan,
-    recoveryRoot,
-    issuer: input.issuerKey,
-    scope: ["trust"],
-    domainRevisions: { trust: input.current.chainHead.seq },
-    upToLsn: input.current.chainHead.seq,
-    plaintextChunks: [
-      Buffer.from(canonicalize(await input.store.loadTrustEvents()), "utf8"),
-    ],
+    purpose: { kind: "root-activation", plan },
+    trust,
+    issuer: Object.assign({}, input.issuerIdentity, {
+      sign: input.issuerKey.sign.bind(input.issuerKey),
+    }),
+    recipient: candidateRoot.publicIdentity(),
+    log: input.store.authorityLog(),
+    artifacts: input.store.artifactStore(),
+  })).checkpoint;
+  const target = await input.createTarget({
+    checkpointId: checkpoint.envelope.checkpointId,
+    recipientKeyId: checkpoint.envelope.recipientKeyId,
   });
-  const recoveryPackage = encodeRecoveryPackage(recoveryRoot, checkpoint);
-  input.writeLine(`Recovery package: ${recoveryPackage}`);
-
-  let independentCopy: CheckpointPackage | undefined;
-  const confirm = input.confirmRecoveryPackage ?? promptRecoveryPackage;
+  if (
+    target.targetId !== input.targetId ||
+    target.independenceDomain !== input.targetIndependenceDomain
+  ) throw new Error("Recovery target changed during root activation");
   const coordinator = new RecoveryActivationCoordinator(input.store.bootstrapAuthority());
   const next = await coordinator.activatePrepared({
     current: input.current,
     plan,
     checkpoint,
-    candidateRoot: recoveryRoot,
+    candidateRoot,
     issuerIdentity: input.issuerIdentity,
-    target: {
-      targetId: `user-recovery-package:${checkpoint.envelope.checkpointId}`,
-      independenceDomain: "offline:user-held-recovery-package",
-      writeDurable: async (candidate) => {
-        if (canonicalCheckpoint(candidate) !== canonicalCheckpoint(checkpoint)) {
-          throw new Error("Recovery checkpoint changed before independent copy verification");
-        }
-        const confirmed = await confirm(recoveryPackage);
-        const decoded = decodeRecoveryPackage(confirmed);
-        if (
-          decoded.root.rootPublicKey !== recoveryRoot.rootPublicKey ||
-          decoded.root.backupPublicKey !== recoveryRoot.backupPublicKey ||
-          canonicalCheckpoint(decoded.checkpoint) !== canonicalCheckpoint(checkpoint)
-        ) {
-          throw new Error("Recovery package read-back does not match the generated package");
-        }
-        independentCopy = decoded.checkpoint;
-      },
-      read: async (checkpointId) => {
-        if (
-          !independentCopy ||
-          independentCopy.envelope.checkpointId !== checkpointId
-        ) {
-          throw new Error("Recovery package has not survived independent read-back");
-        }
-        return independentCopy;
-      },
-    },
+    target,
     sourceIndependenceDomain: `device:${input.issuerKey.deviceId}`,
     now: () => new Date().toISOString(),
   });
@@ -293,6 +324,7 @@ async function issuePairing(input: PairCommandOptions & {
   readonly key: DeviceKey;
   readonly store: FileMeshBootstrapStore;
   readonly continuations: FileMeshPairingContinuationStore;
+  readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly writeLine: (line: string) => void;
 }): Promise<void> {
   const config = loadConfig({ homeDir: input.zhixingHome });
@@ -319,23 +351,6 @@ async function issuePairing(input: PairCommandOptions & {
       throw new Error("Only the active home anchor may issue a pairing invitation");
     }
     identity = local.device;
-  }
-
-  if (!projection.recoveryRootPublicKey) {
-    projection = await activateInitialRecoveryRoot({
-      store: input.store,
-      issuerKey: input.key,
-      issuerIdentity: identity,
-      current: projection,
-      writeLine: input.writeLine,
-      ...(input.confirmRecoveryPackage
-        ? { confirmRecoveryPackage: input.confirmRecoveryPackage }
-        : {}),
-    });
-    trustRecord = await input.store.loadTrustRecord();
-    if (!trustRecord?.recoveryRootPublicKey) {
-      throw new Error("Recovery root activation did not produce a trusted projection");
-    }
   }
 
   let continuation = await input.continuations.load();
@@ -572,6 +587,58 @@ async function issuePairing(input: PairCommandOptions & {
       sessionKey = material.secret;
     }
 
+    if (!projection.recoveryRootPublicKey) {
+      const targetDeviceId = joinMessage.join.device.deviceId;
+      const homeId = projection.homeId;
+      let activatedCheckpointId: string | undefined;
+      projection = await activateInitialRecoveryRoot({
+        store: input.store,
+        issuerKey: input.key,
+        issuerIdentity: identity,
+        current: projection,
+        targetId: `backup-device:${targetDeviceId}`,
+        targetIndependenceDomain: `device:${targetDeviceId}`,
+        createTarget: async ({ checkpointId, recipientKeyId }) => {
+          activatedCheckpointId = checkpointId;
+          await sendPairingFrame(transport!, {
+            t: "recovery-onboarding-start",
+            homeId,
+            sourceDeviceId: identity.deviceId,
+            targetDeviceId,
+            checkpointId,
+            recipientKeyId,
+          } satisfies RecoveryOnboardingStartMessage);
+          return new PairedRecoveryCheckpointTarget({
+            homeId,
+            sourceDeviceId: identity.deviceId,
+            targetDeviceId,
+            recipientKeyId,
+            transport: new PairingSocketCheckpointTransport(transport!),
+          });
+        },
+        writeLine: input.writeLine,
+        ...(input.confirmRecoveryPackage
+          ? { confirmRecoveryPackage: input.confirmRecoveryPackage }
+          : {}),
+      });
+      if (!activatedCheckpointId) {
+        throw new Error("Recovery activation did not select its pairing target");
+      }
+      await sendPairingFrame(transport, {
+        t: "recovery-onboarding-complete",
+        checkpointId: activatedCheckpointId,
+      } satisfies RecoveryOnboardingCompleteMessage);
+      trustRecord = await input.store.loadTrustRecord();
+      if (!trustRecord?.recoveryRootPublicKey) {
+        throw new Error("Recovery root activation did not produce a trusted projection");
+      }
+    }
+    await selectInitialPairingBackupTarget({
+      zhixingHome: input.zhixingHome,
+      store: input.store,
+      targetDeviceId: joinMessage.join.device.deviceId,
+    });
+
     const transcriptDigest = pairingTranscriptDigest(material.offer, joinMessage.join, pakeRounds);
     const acceptedAt = new Date().toISOString();
     const trustEvent = createSignedTrustEvent({
@@ -711,6 +778,7 @@ async function joinPairing(input: PairCommandOptions & {
   readonly key: DeviceKey;
   readonly store: FileMeshBootstrapStore;
   readonly continuations: FileMeshPairingContinuationStore;
+  readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly writeLine: (line: string) => void;
 }): Promise<void> {
   let persisted = await input.continuations.load();
@@ -810,7 +878,14 @@ async function joinPairing(input: PairCommandOptions & {
         rootCertificatePem: input.key.rootCertificatePem,
       } satisfies JoinMessage);
     }
-    const challenge = asChallenge(await receivePairingFrame(socket));
+    const challenge = await receiveChallengeAfterRecoveryOnboarding({
+      socket,
+      first: await receivePairingFrame(socket),
+      invitation,
+      identity,
+      zhixingHome: input.zhixingHome,
+      storageMaintenance: input.storageMaintenance,
+    });
     validateChallenge(invitation, join, pakeRounds, challenge);
     const proof = createPairingAcceptanceProof({
       acceptance: challenge.acceptance,
@@ -1051,6 +1126,123 @@ async function completeJoinerBootstrap(input: {
   await deletePairingSecret(input.input.secretStore, input.invitation.offer.offerId);
   await input.input.continuations.clear(input.invitation.offer.offerId);
   input.input.writeLine(`Joined home: ${input.committed.trustRecord.homeId}`);
+}
+
+async function selectInitialPairingBackupTarget(input: {
+  readonly zhixingHome: string;
+  readonly store: FileMeshBootstrapStore;
+  readonly targetDeviceId: string;
+}): Promise<void> {
+  const targets = new FileBackupTargetConfiguration(input.zhixingHome);
+  if (await targets.load()) return;
+  const targetId = `backup-device:${input.targetDeviceId}`;
+  const records = await input.store.loadCheckpointRecords();
+  const created = [...records].reverse().find((record) =>
+    record.t === "checkpoint-created" &&
+    record.targetId === targetId &&
+    record.purpose.kind === "root-activation");
+  if (!created || !records.some((record) =>
+    record.t === "checkpoint-verified" &&
+    record.checkpointId === created.checkpointId &&
+    record.targetId === targetId)) return;
+  await targets.select({
+    kind: "paired-device",
+    targetId,
+    deviceId: input.targetDeviceId,
+  });
+}
+
+class PairingSocketCheckpointTransport implements PairedCheckpointTransport {
+  constructor(private readonly socket: Socket) {}
+
+  async request(command: PairedCheckpointCommand): Promise<PairedCheckpointResult> {
+    await sendPairingFrame(this.socket, {
+      t: "recovery-onboarding-command",
+      command,
+    } satisfies RecoveryOnboardingCommandMessage);
+    const frame = await receivePairingFrame(this.socket);
+    if (!isRecord(frame) || frame.t !== "recovery-onboarding-result" || !isRecord(frame.result)) {
+      throw new Error("Pairing target returned an invalid recovery checkpoint result");
+    }
+    assertObjectKeys(frame, ["result", "t"], "Recovery onboarding result");
+    return frame.result as unknown as PairedCheckpointResult;
+  }
+}
+
+async function receiveChallengeAfterRecoveryOnboarding(input: {
+  readonly socket: Socket;
+  readonly first: unknown;
+  readonly invitation: PairingInvitation;
+  readonly identity: DeviceIdentity;
+  readonly zhixingHome: string;
+  readonly storageMaintenance: StorageMaintenanceGovernorPort;
+}): Promise<PairingChallengeMessage> {
+  if (isRecord(input.first) && input.first.t === "challenge") {
+    return asChallenge(input.first);
+  }
+  const start = recoveryOnboardingStart(input.first);
+  if (
+    start.homeId !== input.invitation.offer.homeId ||
+    start.sourceDeviceId !== input.invitation.issuer.deviceId ||
+    start.targetDeviceId !== input.identity.deviceId
+  ) throw new Error("Recovery onboarding target does not match this pairing session");
+  const targetRoot = `${input.zhixingHome}/distributed-runtime/recovery-checkpoints`;
+  const target = await FileRecoveryCheckpointTarget.openPaired({
+    targetRoot,
+    targetDeviceId: input.identity.deviceId,
+    storageMaintenance: input.storageMaintenance,
+  });
+  const receiver = new PairedCheckpointReceiver({
+    homeId: start.homeId,
+    sourceDeviceId: start.sourceDeviceId,
+    targetDeviceId: start.targetDeviceId,
+    recipientKeyId: start.recipientKeyId,
+    staging: new FilePairedCheckpointStaging({
+      root: `${input.zhixingHome}/distributed-runtime/recovery-checkpoint-incoming`,
+      target,
+      storageMaintenance: input.storageMaintenance,
+    }),
+  });
+  while (true) {
+    const frame = await receivePairingFrame(input.socket);
+    if (isRecord(frame) && frame.t === "recovery-onboarding-complete") {
+      assertObjectKeys(frame, ["checkpointId", "t"], "Recovery onboarding completion");
+      if (frame.checkpointId !== start.checkpointId) {
+        throw new Error("Recovery onboarding completed another checkpoint");
+      }
+      return asChallenge(await receivePairingFrame(input.socket));
+    }
+    if (!isRecord(frame) || frame.t !== "recovery-onboarding-command" || !isRecord(frame.command)) {
+      throw new Error("Pairing issuer sent an invalid recovery checkpoint command");
+    }
+    assertObjectKeys(frame, ["command", "t"], "Recovery onboarding command");
+    const result = await receiver.request(frame.command as unknown as PairedCheckpointCommand);
+    await sendPairingFrame(input.socket, {
+      t: "recovery-onboarding-result",
+      result,
+    } satisfies RecoveryOnboardingResultMessage);
+  }
+}
+
+function recoveryOnboardingStart(value: unknown): RecoveryOnboardingStartMessage {
+  if (
+    !isRecord(value) ||
+    value.t !== "recovery-onboarding-start" ||
+    typeof value.homeId !== "string" ||
+    typeof value.sourceDeviceId !== "string" ||
+    typeof value.targetDeviceId !== "string" ||
+    typeof value.checkpointId !== "string" ||
+    typeof value.recipientKeyId !== "string"
+  ) throw new Error("Pairing issuer did not provide a valid recovery onboarding target");
+  assertObjectKeys(value, [
+    "checkpointId",
+    "homeId",
+    "recipientKeyId",
+    "sourceDeviceId",
+    "t",
+    "targetDeviceId",
+  ], "Recovery onboarding start");
+  return value as unknown as RecoveryOnboardingStartMessage;
 }
 
 function validateChallenge(
@@ -1604,6 +1796,55 @@ async function loadPairingSecret(
   return value as unknown as PersistedPairingSecret;
 }
 
+async function loadPendingFullRootActivation(
+  store: FileMeshBootstrapStore,
+  current: TrustProjection,
+  targetId: string,
+): Promise<{
+  readonly checkpoint: CheckpointPackage;
+  readonly plan: Extract<
+    CheckpointPackage["envelope"]["manifest"]["purpose"],
+    { kind: "root-activation" }
+  >["plan"];
+} | undefined> {
+  const records = await store.loadCheckpointRecords();
+  const terminal = new Set(records
+    .filter((record) => record.t === "checkpoint-verified")
+    .map((record) => record.checkpointId));
+  const created = [...records].reverse().find((record): record is Extract<
+    CheckpointStreamRecord,
+    { t: "checkpoint-created" }
+  > =>
+    record.t === "checkpoint-created" &&
+    record.targetId === targetId &&
+    record.purpose.kind === "root-activation" &&
+    !terminal.has(record.checkpointId));
+  if (!created) return undefined;
+  const envelopeBytes = await store.artifactStore().get(created.envelopeRef);
+  const envelopeText = Buffer.from(envelopeBytes).toString("utf8");
+  const envelope = JSON.parse(envelopeText) as CheckpointPackage["envelope"];
+  if (
+    canonicalize(envelope) !== envelopeText ||
+    envelope.checkpointId !== created.checkpointId ||
+    envelope.digest !== created.envelopeDigest ||
+    envelope.manifest.purpose.kind !== "root-activation" ||
+    envelope.manifest.purpose.plan.rootEvent.homeId !== current.homeId ||
+    envelope.manifest.purpose.plan.rootEvent.seq !== current.chainHead.seq + 1 ||
+    envelope.manifest.purpose.plan.rootEvent.prevEventDigest !== current.chainHead.eventDigest
+  ) throw new Error("Pending recovery activation does not match the current trust prefix");
+  const chunks = await Promise.all(envelope.chunks.map(async (descriptor) => ({
+    seq: descriptor.seq,
+    bytes: Buffer.from(await store.artifactStore().get({
+      digest: descriptor.digest,
+      bytes: descriptor.bytes,
+    })),
+  })));
+  return {
+    checkpoint: { envelope, chunks },
+    plan: envelope.manifest.purpose.plan,
+  };
+}
+
 function deletePairingSecret(store: SecretStorePort, offerId: string): Promise<void> {
   return store.delete({ kind: "rendezvous", bindingId: `pairing:${offerId}` });
 }
@@ -1619,90 +1860,6 @@ function sessionKeyFromSecret(
     throw new Error("Pairing PAKE session key is invalid");
   }
   return decoded;
-}
-
-function encodeRecoveryPackage(
-  root: RecoveryRoot,
-  checkpoint: CheckpointPackage,
-): string {
-  const payload: EncodedRecoveryPackage = {
-    v: 1,
-    recoverySecret: root.exportSecret(),
-    checkpoint: {
-      envelope: checkpoint.envelope,
-      chunks: checkpoint.chunks.map((chunk) => ({
-        seq: chunk.seq,
-        bytes: Buffer.from(chunk.bytes).toString("base64url"),
-      })),
-    },
-  };
-  return `zxrp1:${Buffer.from(canonicalize(payload), "utf8").toString("base64url")}`;
-}
-
-function decodeRecoveryPackage(value: string): {
-  readonly root: RecoveryRoot;
-  readonly checkpoint: CheckpointPackage;
-} {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("zxrp1:")) {
-    throw new TypeError("Recovery package has an unsupported format");
-  }
-  const encoded = trimmed.slice("zxrp1:".length);
-  const bytes = Buffer.from(encoded, "base64url");
-  if (bytes.byteLength === 0 || bytes.toString("base64url") !== encoded) {
-    throw new TypeError("Recovery package is not canonical base64url");
-  }
-  const text = bytes.toString("utf8");
-  let valueObject: unknown;
-  try {
-    valueObject = JSON.parse(text);
-  } catch {
-    throw new TypeError("Recovery package is not valid JSON");
-  }
-  if (
-    canonicalize(valueObject) !== text ||
-    !isRecord(valueObject) ||
-    valueObject.v !== 1 ||
-    typeof valueObject.recoverySecret !== "string" ||
-    !isRecord(valueObject.checkpoint) ||
-    !isRecord(valueObject.checkpoint.envelope) ||
-    !Array.isArray(valueObject.checkpoint.chunks)
-  ) {
-    throw new TypeError("Recovery package shape is invalid");
-  }
-  assertObjectKeys(valueObject, ["checkpoint", "recoverySecret", "v"], "Recovery package");
-  assertObjectKeys(valueObject.checkpoint, ["chunks", "envelope"], "Recovery checkpoint");
-  const chunks = valueObject.checkpoint.chunks.map((entry, expectedSeq) => {
-    if (
-      !isRecord(entry) ||
-      entry.seq !== expectedSeq ||
-      typeof entry.bytes !== "string"
-    ) {
-      throw new TypeError("Recovery checkpoint chunk is invalid");
-    }
-    assertObjectKeys(entry, ["bytes", "seq"], "Recovery checkpoint chunk");
-    const chunkBytes = Buffer.from(entry.bytes, "base64url");
-    if (chunkBytes.toString("base64url") !== entry.bytes) {
-      throw new TypeError("Recovery checkpoint chunk is not canonical base64url");
-    }
-    return { seq: expectedSeq, bytes: chunkBytes };
-  });
-  const checkpoint: CheckpointPackage = {
-    envelope: valueObject.checkpoint.envelope as unknown as CheckpointPackage["envelope"],
-    chunks,
-  };
-  const root = RecoveryRoot.importSecret(valueObject.recoverySecret);
-  return { root, checkpoint };
-}
-
-function canonicalCheckpoint(checkpoint: CheckpointPackage): string {
-  return canonicalize({
-    envelope: checkpoint.envelope,
-    chunks: checkpoint.chunks.map((chunk) => ({
-      seq: chunk.seq,
-      bytes: Buffer.from(chunk.bytes).toString("base64url"),
-    })),
-  });
 }
 
 async function promptRecoveryPackage(_recoveryPackage: string): Promise<string> {

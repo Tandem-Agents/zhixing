@@ -475,6 +475,54 @@ export type RecoveryCheckpointPurpose =
   | { kind: "periodic" }
   | { kind: "root-activation"; activationDigest: Digest };
 
+export type FullAuthorityCheckpointCoverage =
+  | "global-authority"
+  | "conversation-authority"
+  | "conversation-content"
+  | "execution-assets";
+
+export interface FullAuthorityCheckpointPayload
+  extends WireSchemaV1<"FullAuthorityCheckpointPayload"> {
+  checkpointId: Ulid;
+  createdAt: IsoTime;
+  homeId: Ulid;
+  issuer: { deviceId: string; keyId: string };
+  recipientKeyId: string;
+  purpose:
+    | { kind: "periodic" }
+    | { kind: "root-activation"; plan: RecoveryActivationPlan };
+  source: {
+    logId: string;
+    lsn: number;
+    frameEndOffset: number;
+    prefixDigest: Digest;
+  };
+  trustChainHead: { seq: number; eventDigest: Digest };
+  coverage: {
+    version: 1;
+    classes: readonly FullAuthorityCheckpointCoverage[];
+  };
+  records: {
+    pages: readonly {
+      seq: number;
+      firstLsn: number;
+      lastLsn: number;
+      recordCount: number;
+      bytes: number;
+      digest: Digest;
+    }[];
+    count: number;
+    bytes: number;
+    digest: Digest;
+  };
+  retainedArtifacts: {
+    entries: readonly ArtifactRef[];
+    count: number;
+    bytes: number;
+    digest: Digest;
+  };
+}
+
 export interface RecoveryCheckpointVerification
   extends WireSchemaV1<"RecoveryCheckpointVerification"> {
   checkpointId: Ulid;
@@ -496,6 +544,8 @@ export type CheckpointStreamRecord =
       envelopeRef: ArtifactRef;
       upToLsn: number;
       envelopeDigest: Digest;
+      /** Full checkpoints bind their durable destination; legacy S2 records omit it. */
+      targetId?: string;
     }
   | {
       t: "checkpoint-replicated";

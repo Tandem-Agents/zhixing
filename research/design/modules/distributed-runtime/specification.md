@@ -2315,9 +2315,20 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
   chunks: Array<{ seq: number; digest: Digest; bytes: number }>;   // 分块内容寻址，断点续传
   digest: Digest; signature: Signature }         // digest 按 §1.2 CheckpointEnvelope 自摘要；当前锚点签发者签名（真实性与保密性分属两键）
 // 加密载荷首块内含一次性 `verificationNonce`（随机 256-bit）——只有真解封才能读出，是 RecoveryCheckpointVerification 的防伪锚（§4.3）。
+
+interface FullAuthorityCheckpointPayload { v: 1; checkpointId: Ulid; createdAt: IsoTime;
+  homeId: string; issuer: { deviceId: DeviceId; keyId: string }; recipientKeyId: string;
+  purpose: { kind: "periodic" } | { kind: "root-activation"; plan: RecoveryActivationPlan };
+  source: DurableLogCheckpoint; trustChainHead: { seq: number; eventDigest: Digest };
+  coverage: { version: 1; classes: ["global-authority","conversation-authority","conversation-content","execution-assets"] };
+  records: { pages: Array<{seq:number;firstLsn:number;lastLsn:number;recordCount:number;bytes:number;digest:Digest}>;
+    count: number; bytes: number; digest: Digest };
+  retainedArtifacts: { entries: ArtifactRef[]; count: number; bytes: number; digest: Digest } }
 ```
 
 创建即写 `checkpoint` 流记录（§4.3）；周期每日一次 + 迁居前强制一次。**根激活原子边界**：首次 establish / rotate 先生成一条已签名但未生效的 root event；恢复包丢失则先生成连续且均已签名的 `domain-reset + establish` 计划，reset 不得提前单独入链。以候选 `recoveryBackupPublicKey` 生成包含该计划的全量 `CheckpointEnvelope`，耐久写 created，复制到 ≥1 个独立目标；持候选主秘密的引导端必须从该目标实际回读、解封、校验 envelope / manifest / 分块摘要并签 `RecoveryCheckpointVerification`。只有 created→replicated→verification 全链逐字段通过后，锚点才在**同一 CommitEnvelope**原子写入计划内全部 trust event、`checkpoint-verified` 与旧检查点 `checkpoint-superseded`；该提交是新根唯一激活点。rotate / domain-reset 在此之前旧 trust 状态不变，首次 establish 在此之前仍为 no-root / not-ready，任何网格能力不得提前开放。任一前置步骤失败或崩溃只留下未激活候选，可按 checkpointId 幂等续做或 GC，不改变当前根；原子提交后投影必同时得到“当前根 + 对应已验证独立备份”，不存在链上有效新根而备份未验证的窗口。提交响应丢失时，权威端按 checkpointId 从同一日志重建提交与当前 trust 投影并幂等返回，不要求调用方保留旧链头；异内容重试拒绝。旧根封装备份激活后标记不可用，**不假设可 rewrap**。恢复 = 用户主秘密派生封装私钥解 DEK → 校验 manifest / 分块摘要并应用已绑定的 activation plan → 安全域换代（总纲 §9）；恢复端到端验收随 S9（候选创建 / 复制 / 回读 / 签证 / 原子激活各点崩溃注入，伪造 verification、错 checkpoint / key / digest / target / nonce、计划断链、目标不可达重试、新旧根选择）。
+
+当前全量备份只允许一个版本化目标绑定：独立目录冻结 canonical filesystem identity 并拒绝与 authority root 同物理域，paired device 只经认证 mesh 的有限 put/get/retire 服务；两者都按 checkpointId 私有临时发布、真实逐字节回读，并由目标设备唯一 storage governor 治理。full payload 只从冻结日志前缀及其保留资产闭包生成，`checkpoint` 流自身引用不递归进入新闭包，环境事实、本地秘密、设备缓存和非权威缓存不可表示。恢复包新编码只含恢复主秘密/根身份；旧 secret+trust-only checkpoint 包仅保留解码与 S2 mesh-ready 兼容，不得令 `fullBackupReady` 为真。新代只有在当前根、独立目标、created/replicated 与真解封 verification 全等后替换旧代；superseded 目标副本满 27 天才回收，失败保留重试义务。`zz backup setup/verify/status` 只呈现未配置、待验证、可恢复和下一动作，不暴露内部 root、LSN 或 digest；planned/disaster transfer 与恢复应用仍由后继单元启用。
 
 ## 八、落点矩阵（入口 / 操作 × 落点）
 
@@ -2362,6 +2373,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 | `shutdown` | 停机 | server.shutdown（immediate / drain / cancel）；系统信号 | 设备服务生命周期（三路径收束，总纲 §10） | 双端 | 权威保留或转移 |
 | `runtime-config` | 运行配置管理 | /config、/mcp（本地编辑 + reload） | 设备本地配置面；全局期望配置项经锚点资产同步（S4） | 本设备 | 设备本地 / 锚点（按配置类别） |
 | `device-trust` | 配对 / 迁居 / 撤销 | zz pair；引导流 | mesh / 锚点专用流程（trust 流） | 双端 | HomeTrustRecord / transfer 流 |
+| `recovery-backup` | 恢复备份配置、真解封验证与状态 | zz backup setup / verify / status；当前锚点每日与迁居前强制接缝 | 当前锚点唯一 checkpoint owner；独立目录或受限 paired-device checkpoint service | 当前锚点创建，目标设备仅持受限副本 | checkpoint 流 + 同一 CheckpointEnvelope |
 
 ## 九、能力矩阵（锚点域会话 × 本地域会话）
 

@@ -75,6 +75,9 @@ export interface ServerInfoResult {
   memoryRssBytes: number;
   workspace?: string | null;
   logPath?: string;
+  recoveryBackup?: {
+    state: "not-configured" | "pending-verification" | "recoverable";
+  };
   channels?: ChannelStatus[];
   accessSurfaces?: ServerAccessSurfaces;
   activeWork?: ServerActiveWork;

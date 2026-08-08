@@ -189,6 +189,20 @@ describe("registerInfoCommands", () => {
     expect(text).toContain("feishu: 连接中");
   });
 
+  it("/status 用用户语言显示恢复备份状态和下一动作", async () => {
+    const h = setup();
+    (h.management.serverInfo as any).mockResolvedValueOnce({
+      recoveryBackup: { state: "pending-verification" },
+    } as never);
+
+    await h.dispatcher.dispatch("/status", RUNTIME);
+
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("恢复备份: 待验证");
+    expect(text).toContain("zz backup verify");
+    expect(text).not.toMatch(/root|LSN|digest/iu);
+  });
+
   it("/stop 经选择服务发出停止请求", async () => {
     const choose = vi.fn(async () => ({ kind: "selected", value: "stop" as const }));
     const requestExit = vi.fn();

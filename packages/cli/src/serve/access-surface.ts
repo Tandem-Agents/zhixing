@@ -213,6 +213,7 @@ export interface AssemblyContext {
   localConversationOwner?: LocalConversationOwnerAssembly;
   jobStatus?: JobStatusDirectory;
   deliveryStack?: DeliveryStack;
+  authorityCheckpointOwner?: import("@zhixing/mesh/checkpoint-owner").AuthorityCheckpointOwner;
 
   // ── post-server 输入（runServer resolve 后填，供 post-server 接入面读） ──
   runner?: RunningServer;

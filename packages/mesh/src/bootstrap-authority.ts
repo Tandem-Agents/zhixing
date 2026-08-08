@@ -1,5 +1,6 @@
 import type {
   ArtifactRef,
+  CheckpointEnvelope,
   CheckpointStreamRecord,
   DeviceIdentity,
   HomeTrustEvent,
@@ -15,6 +16,7 @@ import {
   checkpointPurpose,
   assertRecoveryRootMatchesPlan,
   createRecoveryCheckpointVerification,
+  openFullAuthorityCheckpoint,
   openRootActivationCheckpoint,
   type CheckpointPackage,
   verifyRecoveryCheckpointVerification,
@@ -512,7 +514,7 @@ export class RecoveryActivationCoordinator {
     const purpose = checkpointPurpose(envelope);
     const replay = await this.authority.loadRecoveryActivation(envelope.checkpointId);
     if (replay) {
-      const opened = openRootActivationCheckpoint({
+      const opened = openPreparedActivationCheckpoint({
         package: input.checkpoint,
         recoveryRoot: input.candidateRoot,
         issuer: input.issuerIdentity,
@@ -555,6 +557,9 @@ export class RecoveryActivationCoordinator {
       envelopeRef: persistedEnvelopeRef,
       upToLsn: envelope.manifest.upToLsn,
       envelopeDigest: envelope.digest,
+      ...(isFullCheckpointEnvelope(envelope)
+        ? { targetId: input.target.targetId }
+        : {}),
     };
     await this.authority.appendCheckpoint(created);
     await input.onStep?.("created");
@@ -583,9 +588,9 @@ export class RecoveryActivationCoordinator {
     if (!isCanonicalTime(verifiedAt) || Date.parse(verifiedAt) < replicatedTime) {
       throw new TypeError("Recovery checkpoint verification time is invalid");
     }
-    let opened: ReturnType<typeof openRootActivationCheckpoint>;
+    let opened: ReturnType<typeof openPreparedActivationCheckpoint>;
     try {
-      opened = openRootActivationCheckpoint({
+      opened = openPreparedActivationCheckpoint({
         package: readBack,
         recoveryRoot: input.candidateRoot,
         issuer: input.issuerIdentity,
@@ -651,6 +656,15 @@ export class RecoveryActivationCoordinator {
     await input.onStep?.("committed");
     return next;
   }
+}
+
+function isFullCheckpointEnvelope(envelope: CheckpointPackage["envelope"]): boolean {
+  return canonicalize(envelope.manifest.scope) === canonicalize([
+    "global-authority",
+    "conversation-authority",
+    "conversation-content",
+    "execution-assets",
+  ]);
 }
 
 function assertCurrentIssuer(
@@ -731,9 +745,26 @@ function recoveryPlanBounds(plan: RecoveryActivationPlan): {
   };
 }
 
-function clearOpenedCheckpoint(opened: ReturnType<typeof openRootActivationCheckpoint>): void {
+function openPreparedActivationCheckpoint(input: {
+  readonly package: CheckpointPackage;
+  readonly recoveryRoot: RecoveryRoot;
+  readonly issuer: DeviceIdentity;
+}): ReturnType<typeof openRootActivationCheckpoint> | ReturnType<typeof openFullAuthorityCheckpoint> {
+  return isFullCheckpointEnvelope(input.package.envelope)
+    ? openFullAuthorityCheckpoint(input)
+    : openRootActivationCheckpoint(input);
+}
+
+function clearOpenedCheckpoint(
+  opened: ReturnType<typeof openRootActivationCheckpoint> | ReturnType<typeof openFullAuthorityCheckpoint>,
+): void {
   opened.verificationNonce.fill(0);
-  for (const chunk of opened.plaintextChunks) chunk.fill(0);
+  if ("plaintextChunks" in opened) {
+    for (const chunk of opened.plaintextChunks) chunk.fill(0);
+  } else {
+    for (const page of opened.recordPages) page.fill(0);
+    for (const artifact of opened.retainedArtifacts) artifact.fill(0);
+  }
 }
 
 export function validateRecoveryActivationPlan(
@@ -771,14 +802,21 @@ export interface RecoveryReadinessProjection {
   readonly checkpointId?: string;
   readonly targetId?: string;
   readonly ready: boolean;
+  readonly fullBackupReady: boolean;
+  readonly fullCheckpointId?: string;
+  readonly fullTargetId?: string;
+  readonly fullCreatedAt?: string;
+  readonly fullUpToLsn?: number;
 }
 
 export function projectRecoveryReadiness(input: {
   trust: TrustProjection;
   verifiedRecords: readonly Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>[];
+  createdRecords?: readonly Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>[];
+  checkpointEnvelopes?: readonly CheckpointEnvelope[];
 }): RecoveryReadinessProjection {
   if (!input.trust.recoveryRootPublicKey || !input.trust.recoveryBackupPublicKey) {
-    return Object.freeze({ ready: false });
+    return Object.freeze({ ready: false, fullBackupReady: false });
   }
   const rootKeyId = keyIdForPublicKey(input.trust.recoveryRootPublicKey);
   const expectedKeyId = keyIdForPublicKey(input.trust.recoveryBackupPublicKey);
@@ -791,12 +829,50 @@ export function projectRecoveryReadiness(input: {
         candidate.purpose.activationDigest === input.trust.recoveryActivationDigest &&
         isValidCurrentRootVerification(candidate, input.trust.recoveryRootPublicKey!),
     );
-  if (!record) return Object.freeze({ rootKeyId, ready: false });
+  const full = [...input.verifiedRecords]
+    .reverse()
+    .map((candidate) => {
+      if (
+        candidate.recipientKeyId !== expectedKeyId ||
+        !isValidCurrentRootVerification(candidate, input.trust.recoveryRootPublicKey!)
+      ) return undefined;
+      const created = input.createdRecords?.find((entry) =>
+        entry.checkpointId === candidate.checkpointId &&
+        entry.recipientKeyId === candidate.recipientKeyId &&
+        entry.targetId === candidate.targetId &&
+        entry.envelopeDigest === candidate.envelopeDigest &&
+        canonicalize(entry.purpose) === canonicalize(candidate.purpose));
+      const envelope = input.checkpointEnvelopes?.find((entry) =>
+        entry.checkpointId === candidate.checkpointId &&
+        entry.digest === candidate.envelopeDigest);
+      if (
+        !created?.targetId ||
+        !envelope ||
+        envelope.recipientKeyId !== expectedKeyId ||
+        canonicalize(envelope.manifest.scope) !== canonicalize([
+          "global-authority",
+          "conversation-authority",
+          "conversation-content",
+          "execution-assets",
+        ])
+      ) return undefined;
+      return { created, envelope };
+    })
+    .find((candidate) => candidate !== undefined);
+  if (!record && !full) return Object.freeze({ rootKeyId, ready: false, fullBackupReady: false });
   return Object.freeze({
     rootKeyId,
-    checkpointId: record.checkpointId,
-    targetId: record.targetId,
-    ready: true,
+    ...(record ? { checkpointId: record.checkpointId, targetId: record.targetId } : {}),
+    ready: record !== undefined,
+    fullBackupReady: full !== undefined,
+    ...(full
+      ? {
+          fullCheckpointId: full.created.checkpointId,
+          fullTargetId: full.created.targetId!,
+          fullCreatedAt: full.envelope.createdAt,
+          fullUpToLsn: full.created.upToLsn,
+        }
+      : {}),
   });
 }
 

@@ -1,0 +1,434 @@
+import { randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import path from "node:path";
+import { ensureDurableDirectory, syncDirectory } from "@zhixing/core/persistence";
+import {
+  runStorageMaintenanceStep,
+  runWithMaintenanceUrgency,
+  storageMaintenanceRequest,
+  type StorageMaintenanceGovernorPort,
+} from "@zhixing/core/resources";
+import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
+import {
+  checkpointEnvelopeArtifact,
+  type CheckpointPackage,
+} from "./checkpoint.js";
+import type { RecoveryCheckpointTarget } from "./bootstrap-authority.js";
+
+interface FrozenDirectoryIdentity {
+  readonly lexicalPath: string;
+  readonly canonicalPath: string;
+  readonly dev: string;
+  readonly ino: string;
+}
+
+interface PersistedCheckpointTargetManifest {
+  readonly v: 1;
+  readonly targetId: string;
+  readonly checkpointId: string;
+  readonly envelopeRef: { readonly digest: string; readonly bytes: number };
+  readonly chunks: readonly { readonly seq: number; readonly digest: string; readonly bytes: number }[];
+}
+
+export interface RetirableRecoveryCheckpointTarget extends RecoveryCheckpointTarget {
+  retire(checkpointId: string, supersededBy: string): Promise<void>;
+}
+
+export interface FileRecoveryCheckpointTargetOptions {
+  readonly targetRoot: string;
+  readonly sourceRoot: string;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+}
+
+export interface PairedFileRecoveryCheckpointTargetOptions {
+  readonly targetRoot: string;
+  readonly targetDeviceId: string;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+}
+
+/** Independent-directory checkpoint target with frozen filesystem identity and atomic publication. */
+export class FileRecoveryCheckpointTarget implements RetirableRecoveryCheckpointTarget {
+  readonly targetId: string;
+  readonly independenceDomain: string;
+  readonly #root: FrozenDirectoryIdentity;
+  readonly #storageMaintenance?: StorageMaintenanceGovernorPort;
+
+  private constructor(
+    root: FrozenDirectoryIdentity,
+    targetId: string,
+    independenceDomain: string,
+    storageMaintenance?: StorageMaintenanceGovernorPort,
+  ) {
+    this.#root = root;
+    this.#storageMaintenance = storageMaintenance;
+    this.targetId = targetId;
+    this.independenceDomain = independenceDomain;
+  }
+
+  static async open(options: FileRecoveryCheckpointTargetOptions): Promise<FileRecoveryCheckpointTarget> {
+    const source = await freezeDirectory(options.sourceRoot, false);
+    const target = await freezeDirectory(options.targetRoot, true);
+    if (
+      source.dev === target.dev ||
+      isContainedPath(source.canonicalPath, target.canonicalPath) ||
+      isContainedPath(target.canonicalPath, source.canonicalPath)
+    ) {
+      throw new TypeError("Recovery checkpoint directory is not physically independent");
+    }
+    return new FileRecoveryCheckpointTarget(
+      target,
+      `backup-dir:${protocolDigest("RecoveryCheckpointDirectoryTarget", 1, {
+        canonicalPathIdentity: { dev: target.dev, ino: target.ino },
+      })}`,
+      `filesystem:${target.dev}`,
+      options.storageMaintenance,
+    );
+  }
+
+  static async openPaired(
+    options: PairedFileRecoveryCheckpointTargetOptions,
+  ): Promise<FileRecoveryCheckpointTarget> {
+    if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(options.targetDeviceId)) {
+      throw new TypeError("Paired recovery target device id is invalid");
+    }
+    const target = await freezeDirectory(options.targetRoot, true);
+    return new FileRecoveryCheckpointTarget(
+      target,
+      `backup-device:${options.targetDeviceId}`,
+      `device:${options.targetDeviceId}`,
+      options.storageMaintenance,
+    );
+  }
+
+  async writeDurable(checkpoint: CheckpointPackage): Promise<void> {
+    await runWithMaintenanceUrgency(() => "foreground", new AbortController().signal, async () => {
+      await this.#assertRoot();
+      const checkpointId = safeCheckpointId(checkpoint.envelope.checkpointId);
+      const finalDir = path.join(this.#root.lexicalPath, checkpointId);
+      const existing = await this.#readIfPresent(checkpointId);
+      if (existing) {
+        if (canonicalPackage(existing) !== canonicalPackage(checkpoint)) {
+          throw new TypeError("Checkpoint target already contains different content for this id");
+        }
+        return;
+      }
+      const temporary = path.join(
+        this.#root.lexicalPath,
+        `.${checkpointId}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
+      );
+      await this.#step(`mkdir:${checkpointId}`, 1, () => mkdir(temporary, { recursive: false }));
+      try {
+        const temporaryBinding = await freezeOwnedDirectory(temporary, this.#root);
+        const manifest: PersistedCheckpointTargetManifest = {
+          v: 1,
+          targetId: this.targetId,
+          checkpointId,
+          envelopeRef: checkpointEnvelopeArtifact(checkpoint.envelope),
+          chunks: checkpoint.envelope.chunks.map((chunk) => ({ ...chunk })),
+        };
+        await this.#writeFile(
+          temporaryBinding,
+          "envelope.json",
+          Buffer.from(canonicalize(checkpoint.envelope), "utf8"),
+        );
+        for (const descriptor of checkpoint.envelope.chunks) {
+          const chunk = checkpoint.chunks.find((candidate) => candidate.seq === descriptor.seq);
+          if (
+            !chunk ||
+            chunk.bytes.byteLength !== descriptor.bytes ||
+            byteDigest(chunk.bytes) !== descriptor.digest
+          ) {
+            throw new TypeError("Checkpoint target input has an invalid chunk exact-set");
+          }
+          await this.#writeFile(temporaryBinding, chunkFile(descriptor.seq), chunk.bytes);
+        }
+        if (checkpoint.chunks.length !== checkpoint.envelope.chunks.length) {
+          throw new TypeError("Checkpoint target input has duplicate or undeclared chunks");
+        }
+        await this.#writeFile(
+          temporaryBinding,
+          "manifest.json",
+          Buffer.from(canonicalize(manifest), "utf8"),
+        );
+        await this.#step(`publish:${checkpointId}`, 1, async () => {
+          await this.#assertRoot();
+          try {
+            await rename(temporary, finalDir);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          }
+          await syncDirectory(this.#root.lexicalPath);
+        });
+        const published = await this.read(checkpointId);
+        if (canonicalPackage(published) !== canonicalPackage(checkpoint)) {
+          throw new TypeError("Checkpoint target read-back changed after publication");
+        }
+      } finally {
+        await rm(temporary, { recursive: true, force: true });
+      }
+    });
+  }
+
+  async read(checkpointId: string): Promise<CheckpointPackage> {
+    const value = await this.#readIfPresent(safeCheckpointId(checkpointId));
+    if (!value) throw new Error("Recovery checkpoint is not present on the configured target");
+    return value;
+  }
+
+  async retire(checkpointId: string, supersededBy: string): Promise<void> {
+    const safeId = safeCheckpointId(checkpointId);
+    if (safeId === safeCheckpointId(supersededBy)) {
+      throw new TypeError("A checkpoint cannot supersede itself");
+    }
+    await this.#step(`retire:${safeId}:${supersededBy}`, 1, async () => {
+      await this.#assertRoot();
+      const directory = path.join(this.#root.lexicalPath, safeId);
+      try {
+        await freezeOwnedDirectory(directory, this.#root);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      await rm(directory, { recursive: true, force: false });
+      await syncDirectory(this.#root.lexicalPath);
+    });
+  }
+
+  async #readIfPresent(checkpointId: string): Promise<CheckpointPackage | undefined> {
+    await this.#assertRoot();
+    const directory = path.join(this.#root.lexicalPath, checkpointId);
+    let binding: FrozenDirectoryIdentity;
+    try {
+      binding = await freezeOwnedDirectory(directory, this.#root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    let manifestText: string;
+    try {
+      manifestText = await this.#step(`read-manifest:${checkpointId}`, 1024 * 1024, () =>
+        this.#readFile(binding, "manifest.json", 1024 * 1024).then((bytes) => bytes.toString("utf8")),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const manifest = JSON.parse(manifestText) as PersistedCheckpointTargetManifest;
+    if (
+      canonicalize(manifest) !== manifestText ||
+      !isRecord(manifest) ||
+      manifest.v !== 1 ||
+      manifest.targetId !== this.targetId ||
+      manifest.checkpointId !== checkpointId ||
+      !Array.isArray(manifest.chunks)
+    ) {
+      throw new TypeError("Checkpoint target manifest is invalid");
+    }
+    assertExactKeys(manifest, ["checkpointId", "chunks", "envelopeRef", "targetId", "v"]);
+    const envelopeText = await this.#step(`read-envelope:${checkpointId}`, manifest.envelopeRef.bytes, () =>
+      this.#readFile(binding, "envelope.json", manifest.envelopeRef.bytes).then((bytes) => bytes.toString("utf8")),
+    );
+    const envelope = JSON.parse(envelopeText) as CheckpointPackage["envelope"];
+    if (
+      canonicalize(envelope) !== envelopeText ||
+      canonicalize(checkpointEnvelopeArtifact(envelope)) !== canonicalize(manifest.envelopeRef) ||
+      envelope.checkpointId !== checkpointId ||
+      canonicalize(envelope.chunks) !== canonicalize(manifest.chunks)
+    ) {
+      throw new TypeError("Checkpoint target envelope is invalid");
+    }
+    const chunks = [];
+    for (const descriptor of envelope.chunks) {
+      const bytes = await this.#step(`read-chunk:${checkpointId}:${descriptor.seq}`, descriptor.bytes, () =>
+        this.#readFile(binding, chunkFile(descriptor.seq), descriptor.bytes),
+      );
+      if (bytes.byteLength !== descriptor.bytes || byteDigest(bytes) !== descriptor.digest) {
+        throw new TypeError("Checkpoint target chunk is corrupt");
+      }
+      chunks.push({ seq: descriptor.seq, bytes });
+    }
+    const finalBinding = await freezeOwnedDirectory(directory, this.#root);
+    if (canonicalize(finalBinding) !== canonicalize(binding)) {
+      throw new TypeError("Recovery checkpoint changed during target read-back");
+    }
+    await this.#assertRoot();
+    return { envelope, chunks: Object.freeze(chunks) };
+  }
+
+  async #writeFile(directory: FrozenDirectoryIdentity, name: string, bytes: Uint8Array): Promise<void> {
+    await this.#step(`write:${name}`, bytes.byteLength, async () => {
+      await this.#assertRoot();
+      const filePath = path.join(directory.lexicalPath, name);
+      await writeFile(filePath, bytes, { flag: "wx" });
+      const handle = await open(filePath, "r+");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      const after = await freezeOwnedDirectory(directory.lexicalPath, this.#root);
+      if (canonicalize(after) !== canonicalize(directory)) {
+        throw new TypeError("Recovery checkpoint staging directory identity changed");
+      }
+    });
+  }
+
+  async #readFile(
+    directory: FrozenDirectoryIdentity,
+    name: string,
+    maximumBytes: number,
+  ): Promise<Buffer> {
+    await this.#assertRoot();
+    const filePath = path.join(directory.lexicalPath, name);
+    const lexical = await lstat(filePath);
+    const resolved = await realpath(filePath);
+    if (
+      lexical.isSymbolicLink() ||
+      !lexical.isFile() ||
+      !isContainedPath(directory.canonicalPath, resolved)
+    ) throw new TypeError("Recovery checkpoint target file left its owned directory");
+    const handle = await open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const before = await handle.stat();
+      if (
+        !before.isFile() ||
+        String(before.dev) !== String(lexical.dev) ||
+        String(before.ino) !== String(lexical.ino) ||
+        before.size > maximumBytes
+      ) throw new TypeError("Recovery checkpoint target file identity is invalid");
+      const bytes = await handle.readFile();
+      const [after, finalLexical, finalResolved] = await Promise.all([
+        handle.stat(),
+        lstat(filePath),
+        realpath(filePath),
+      ]);
+      if (
+        String(before.dev) !== String(after.dev) ||
+        String(before.ino) !== String(after.ino) ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        finalLexical.isSymbolicLink() ||
+        !finalLexical.isFile() ||
+        String(after.dev) !== String(finalLexical.dev) ||
+        String(after.ino) !== String(finalLexical.ino) ||
+        !isContainedPath(directory.canonicalPath, finalResolved)
+      ) throw new TypeError("Recovery checkpoint target file changed during read-back");
+      const finalDirectory = await freezeOwnedDirectory(directory.lexicalPath, this.#root);
+      if (canonicalize(finalDirectory) !== canonicalize(directory)) {
+        throw new TypeError("Recovery checkpoint target directory identity changed");
+      }
+      await this.#assertRoot();
+      return bytes;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async #assertRoot(): Promise<void> {
+    const current = await freezeDirectory(this.#root.lexicalPath, false);
+    if (canonicalize(current) !== canonicalize(this.#root)) {
+      throw new TypeError("Recovery checkpoint directory identity changed");
+    }
+  }
+
+  #step<T>(identity: string, bytes: number, operation: () => Promise<T>): Promise<T> {
+    return runStorageMaintenanceStep(
+      this.#storageMaintenance,
+      storageMaintenanceRequest(
+        "authority-checkpoint",
+        this.targetId,
+        { identity, bytes },
+        { obligation: "pre-commit" },
+      ),
+      operation,
+    );
+  }
+}
+
+async function freezeDirectory(directory: string, create: boolean): Promise<FrozenDirectoryIdentity> {
+  const lexicalPath = path.resolve(directory);
+  if (create) await ensureDurableDirectory(lexicalPath);
+  const first = await lstat(lexicalPath);
+  if (!first.isDirectory() || first.isSymbolicLink()) {
+    throw new TypeError("Recovery checkpoint root must be a real directory");
+  }
+  const canonicalPath = await realpath(lexicalPath);
+  const canonical = await stat(canonicalPath);
+  const second = await lstat(lexicalPath);
+  if (
+    !second.isDirectory() ||
+    second.isSymbolicLink() ||
+    String(first.dev) !== String(second.dev) ||
+    String(first.ino) !== String(second.ino) ||
+    String(second.dev) !== String(canonical.dev) ||
+    String(second.ino) !== String(canonical.ino)
+  ) {
+    throw new TypeError("Recovery checkpoint root identity is unstable");
+  }
+  return {
+    lexicalPath,
+    canonicalPath,
+    dev: String(canonical.dev),
+    ino: String(canonical.ino),
+  };
+}
+
+async function freezeOwnedDirectory(
+  directory: string,
+  owner: FrozenDirectoryIdentity,
+): Promise<FrozenDirectoryIdentity> {
+  const binding = await freezeDirectory(directory, false);
+  if (!isContainedPath(owner.lexicalPath, binding.lexicalPath) ||
+    !isContainedPath(owner.canonicalPath, binding.canonicalPath)) {
+    throw new TypeError("Recovery checkpoint directory left its owned root");
+  }
+  return binding;
+}
+
+function isContainedPath(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function safeCheckpointId(value: string): string {
+  if (!/^[A-Za-z0-9_-]{1,96}$/u.test(value)) {
+    throw new TypeError("Checkpoint id is not safe for target storage");
+  }
+  return value;
+}
+
+function chunkFile(seq: number): string {
+  if (!Number.isSafeInteger(seq) || seq < 0) throw new TypeError("Checkpoint chunk sequence is invalid");
+  return `chunk-${String(seq).padStart(10, "0")}.bin`;
+}
+
+function canonicalPackage(checkpoint: CheckpointPackage): string {
+  return canonicalize({
+    envelope: checkpoint.envelope,
+    chunks: checkpoint.chunks.map((chunk) => ({
+      seq: chunk.seq,
+      digest: byteDigest(chunk.bytes),
+      bytes: chunk.bytes.byteLength,
+    })),
+  });
+}
+
+function assertExactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  if (canonicalize(Object.keys(value).sort()) !== canonicalize([...expected].sort())) {
+    throw new TypeError("Recovery checkpoint target value has missing or unknown fields");
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

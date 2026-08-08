@@ -100,6 +100,7 @@ const coverageGroups = [
   ["shutdown", ["rpc:server.shutdown", "cli:zhixing stop", "slash:stop:repl"]],
   ["runtime-config", ["slash:config:repl", "slash:mcp:repl"]],
   ["device-trust", ["cli:zhixing pair"]],
+  ["recovery-backup", ["cli:zhixing backup setup", "cli:zhixing backup verify", "cli:zhixing backup status"]],
 ];
 
 const baseMappingTuples = [
@@ -114,6 +115,7 @@ const baseMappingTuples = [
     { exclusion: "composition", reason: exclusions.composition },
   ],
   ["cli:zhixing serve", { exclusion: "composition", reason: exclusions.composition }],
+  ["cli:zhixing backup", { exclusion: "composition", reason: exclusions.composition }],
   [
     "cli:zhixing serve logs",
     { exclusion: "diagnostic", reason: exclusions.diagnostic },
@@ -763,6 +765,7 @@ export async function validateS7Structure() {
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
+  failures.push(...inspectRecoveryBackupAssembly(records));
   for (const packageName of [
     "server",
     "executor",
@@ -781,6 +784,56 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+export function inspectRecoveryBackupAssembly(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const command = byPath.get("packages/cli/src/serve/command.ts");
+  const owner = byPath.get("packages/cli/src/serve/backup-runtime-owner.ts");
+  const runtime = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
+  if (!command || !owner || !runtime || !pairing) {
+    return ["recovery backup production assembly sources are missing"];
+  }
+  const count = (text, token) => text.split(token).length - 1;
+  if (
+    count(command, "createConfiguredCheckpointOwner({") !== 1 ||
+    count(command, "ctx.authorityCheckpointOwner?.start()") !== 1 ||
+    count(command, 'id: "authorityCheckpointOwner.stop"') !== 1
+  ) {
+    failures.push("packages/cli/src/serve/command.ts: recovery checkpoint owner must have one create/start/stop lifecycle");
+  }
+  for (const token of [
+    "trust.issuer.deviceId !== input.mesh.deviceKey.deviceId",
+    "new FileBackupTargetConfiguration(input.zhixingHome).load()",
+    "currentAnchor: true",
+    "return new AuthorityCheckpointOwner({",
+  ]) {
+    if (!owner.includes(token)) {
+      failures.push(`packages/cli/src/serve/backup-runtime-owner.ts: missing owner boundary ${token}`);
+    }
+  }
+  if (
+    count(runtime, "registerPairedCheckpointMeshService(") !== 1 ||
+    count(runtime, "new PairedCheckpointReceiver({") !== 1 ||
+    !runtime.includes('member.device.deviceId === options.authority.deviceId') ||
+    !runtime.includes('member.state === "active"')
+  ) {
+    failures.push("packages/cli/src/serve/mesh-runtime-assembly.ts: active paired backup receiver boundary drifted");
+  }
+  const onboardingStart = pairing.indexOf('t: "recovery-onboarding-start"');
+  const onboardingTarget = pairing.indexOf("return new PairedRecoveryCheckpointTarget({", onboardingStart);
+  const enrollment = pairing.indexOf("const trustEvent = createSignedTrustEvent", onboardingTarget);
+  if (
+    onboardingStart < 0 ||
+    onboardingTarget < onboardingStart ||
+    enrollment < onboardingTarget ||
+    count(pairing, "new PairedCheckpointReceiver({") !== 1
+  ) {
+    failures.push("packages/cli/src/serve/mesh-pair-command.ts: authenticated onboarding checkpoint must precede business enrollment");
+  }
+  return failures;
 }
 
 export function inspectLocalConversationOwnerIsolation(records) {

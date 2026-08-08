@@ -47,6 +47,11 @@ export type RegisteredArtifactRoot =
       readonly schema: "DeliveryContent";
       readonly ref: ArtifactRef;
       readonly itemId: string;
+    }
+  | {
+      readonly schema: "CheckpointEnvelope";
+      readonly ref: ArtifactRef;
+      readonly checkpointId: string;
     };
 
 export function collectRegisteredArtifactRoots(
@@ -77,6 +82,14 @@ export function collectRegisteredArtifactRoots(
           itemId: requiredDeliveryItemId(body.itemId),
         });
       }
+      continue;
+    }
+    if (record.stream === "checkpoint" && body?.t === "checkpoint-created") {
+      roots.push({
+        schema: "CheckpointEnvelope",
+        ref: requiredArtifactRef(body.envelopeRef, "Checkpoint envelope ref"),
+        checkpointId: requiredString(body.checkpointId, "Checkpoint id"),
+      });
       continue;
     }
     if (record.stream.startsWith("run:") || record.stream.startsWith("job:")) {
@@ -193,6 +206,37 @@ export function classifyRegisteredArtifactReferences(
       validateOutboundContentDto(value);
       return unconditionalOnly(value as OutboundContentDto);
     }
+    if (root.schema === "CheckpointEnvelope") {
+      if (
+        envelope?.v !== 1 ||
+        envelope.checkpointId !== root.checkpointId ||
+        !Array.isArray(envelope.chunks)
+      ) {
+        throw new TypeError("checkpoint envelope does not match its authority record");
+      }
+      const chunks = envelope.chunks.map((chunk, index) => {
+        const descriptor = plainRecord(chunk);
+        if (
+          descriptor?.seq !== index ||
+          typeof descriptor.digest !== "string" ||
+          !Number.isSafeInteger(descriptor.bytes) ||
+          (descriptor.bytes as number) < 0
+        ) {
+          throw new TypeError("checkpoint envelope has an invalid chunk exact-set");
+        }
+        return requiredArtifactRef(
+          { digest: descriptor.digest, bytes: descriptor.bytes },
+          "Checkpoint chunk ref",
+        );
+      });
+      return {
+        unconditional: [],
+        conversationLeaves: chunks.map((ref) => ({
+          ref,
+          conversationId: checkpointArtifactOwner(root.checkpointId),
+        })),
+      };
+    }
     if (root.schema === "ControlEnvelope") {
       const control = validateAdmittedControlEnvelope(value);
       if (control.requestId !== root.requestId) {
@@ -276,6 +320,17 @@ export function classifyRetainedRecordReferences(
     return { unconditional: [], conversationLeaves: [] };
   }
   const body = plainRecord(record.body);
+  if (record.stream === "checkpoint" && body?.t === "checkpoint-created") {
+    return {
+      unconditional: [],
+      conversationLeaves: [{
+        ref: requiredArtifactRef(body.envelopeRef, "Checkpoint envelope ref"),
+        conversationId: checkpointArtifactOwner(
+          requiredString(body.checkpointId, "Checkpoint id"),
+        ),
+      }],
+    };
+  }
   if (record.stream.startsWith("run:") && body) {
     const conversationId = requiredString(
       record.stream.slice("run:".length),
@@ -325,11 +380,18 @@ export function classifyRetainedRecordReferences(
 export function deletedConversationOf(
   record: LogicalRecord<unknown>,
 ): string | undefined {
-  if (!record.stream.startsWith("run:")) return undefined;
   const body = plainRecord(record.body);
+  if (record.stream === "checkpoint" && body?.t === "checkpoint-superseded") {
+    return checkpointArtifactOwner(requiredString(body.checkpointId, "Checkpoint id"));
+  }
+  if (!record.stream.startsWith("run:")) return undefined;
   return body?.t === "session-lifecycle" && body.mutation === "delete"
     ? record.stream.slice("run:".length)
     : undefined;
+}
+
+function checkpointArtifactOwner(checkpointId: string): string {
+  return `checkpoint:${checkpointId}`;
 }
 
 function classifiedReferences(

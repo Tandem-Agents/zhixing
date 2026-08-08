@@ -1,5 +1,6 @@
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
@@ -72,6 +73,12 @@ describe("production mesh runtime bootstrap", () => {
       issuerKey: local.deviceKey,
       issuerIdentity: identity,
       current: initialized.projection,
+      targetId: "backup-device:test-recovery-target",
+      targetIndependenceDomain: "device:test-recovery-target",
+      createTarget: () => FileRecoveryCheckpointTarget.openPaired({
+        targetRoot: `${root}/recovery-target`,
+        targetDeviceId: "test-recovery-target",
+      }),
       writeLine: () => undefined,
       confirmRecoveryPackage: async (value) => value,
     });
@@ -126,6 +133,12 @@ describe("production mesh runtime bootstrap", () => {
       issuerKey: local.deviceKey,
       issuerIdentity: identity,
       current: initialized.projection,
+      targetId: "backup-device:test-recovery-target",
+      targetIndependenceDomain: "device:test-recovery-target",
+      createTarget: () => FileRecoveryCheckpointTarget.openPaired({
+        targetRoot: `${root}/recovery-target`,
+        targetDeviceId: "test-recovery-target",
+      }),
       writeLine: () => undefined,
       confirmRecoveryPackage: async (value) => value,
     });

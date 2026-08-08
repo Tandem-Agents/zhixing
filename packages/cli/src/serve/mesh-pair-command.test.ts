@@ -1,10 +1,12 @@
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { loadConfig } from "@zhixing/providers";
 import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { createTempDir } from "@zhixing/test-utils";
 import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
 import { runPairCommand } from "./mesh-pair-command.js";
 
@@ -61,19 +63,30 @@ describe("production mesh pairing command", () => {
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("keeps mesh disabled when the recovery package does not survive read-back", async () => {
-    const home = await createTempDir("mesh-pair-recovery-readback");
-    let invitationPublished = false;
-    await expect(runPairCommand({
-      zhixingHome: home,
+    const anchorHome = await createTempDir("mesh-pair-recovery-readback-anchor");
+    const targetHome = await createTempDir("mesh-pair-recovery-readback-target");
+    const invitation = deferred<string>();
+    const issuer = runPairCommand({
+      zhixingHome: anchorHome,
       secretStore: new MemorySecretStore(),
       advertise: "127.0.0.1:0",
       confirmRecoveryPackage: async (recoveryPackage) => `${recoveryPackage}x`,
       writeLine: (line) => {
-        if (line.startsWith("Pairing invitation: ")) invitationPublished = true;
+        if (line.startsWith("Pairing invitation: ")) {
+          invitation.resolve(line.slice("Pairing invitation: ".length));
+        }
       },
-    })).rejects.toThrow("Recovery package");
-    expect(invitationPublished).toBe(false);
-    expect((await new FileMeshBootstrapStore(home).loadTrustRecord())?.recoveryRootPublicKey)
+    });
+    const joiner = runPairCommand({
+      zhixingHome: targetHome,
+      secretStore: new MemorySecretStore(),
+      invitation: await invitation.promise,
+      writeLine: () => undefined,
+    });
+    const [issuerResult, joinerResult] = await Promise.allSettled([issuer, joiner]);
+    expect(issuerResult).toMatchObject({ status: "rejected" });
+    expect(joinerResult).toMatchObject({ status: "rejected" });
+    expect((await new FileMeshBootstrapStore(anchorHome).loadTrustRecord())?.recoveryRootPublicKey)
       .toBeUndefined();
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
@@ -124,10 +137,27 @@ describe("production mesh pairing command", () => {
       ]);
       const anchorId = anchorTrust!.issuer.deviceId;
       const executorId = anchorTrust!.members.find((member) => member.device.deviceId !== anchorId)!.device.deviceId;
+      const checkpointRecords = await anchorStore.loadCheckpointRecords();
+      const created = checkpointRecords.find((record) =>
+        record.t === "checkpoint-created" && record.targetId === `backup-device:${executorId}`);
+      expect(created?.purpose.kind).toBe("root-activation");
+      expect(checkpointRecords.some((record) =>
+        record.t === "checkpoint-verified" && record.checkpointId === created?.checkpointId)).toBe(true);
+      const target = await FileRecoveryCheckpointTarget.openPaired({
+        targetRoot: `${executorHome}/distributed-runtime/recovery-checkpoints`,
+        targetDeviceId: executorId,
+      });
+      await expect(target.read(created!.checkpointId)).resolves.toMatchObject({
+        envelope: { checkpointId: created!.checkpointId },
+      });
       expect(await anchorSecrets.get({ kind: "rendezvous", bindingId: executorId }))
         .toBe(await executorSecrets.get({ kind: "rendezvous", bindingId: anchorId }));
       expect(loadConfig({ homeDir: anchorHome }).mesh?.enabledRoles).toEqual(["anchor", "executor"]);
       expect(loadConfig({ homeDir: executorHome }).mesh?.enabledRoles).toEqual(["executor"]);
+      await expect(new FileBackupTargetConfiguration(anchorHome).load()).resolves.toMatchObject({
+        currentTargetId: `backup-device:${executorId}`,
+        bindings: [{ kind: "paired-device", deviceId: executorId }],
+      });
     },
     TEST_DURABLE_IO_TIMEOUT_MS,
   );

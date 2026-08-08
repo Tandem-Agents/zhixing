@@ -17,6 +17,30 @@
       "types": "./dist/checkpoint.d.ts",
       "import": "./dist/checkpoint.js"
     },
+    "./full-checkpoint": {
+      "types": "./dist/full-checkpoint.d.ts",
+      "import": "./dist/full-checkpoint.js"
+    },
+    "./checkpoint-target": {
+      "types": "./dist/checkpoint-target.d.ts",
+      "import": "./dist/checkpoint-target.js"
+    },
+    "./recovery-package": {
+      "types": "./dist/recovery-package.d.ts",
+      "import": "./dist/recovery-package.js"
+    },
+    "./checkpoint-service": {
+      "types": "./dist/checkpoint-service.d.ts",
+      "import": "./dist/checkpoint-service.js"
+    },
+    "./checkpoint-owner": {
+      "types": "./dist/checkpoint-owner.d.ts",
+      "import": "./dist/checkpoint-owner.js"
+    },
+    "./paired-checkpoint-target": {
+      "types": "./dist/paired-checkpoint-target.d.ts",
+      "import": "./dist/paired-checkpoint-target.js"
+    },
     "./bootstrap-authority": {
       "types": "./dist/bootstrap-authority.d.ts",
       "import": "./dist/bootstrap-authority.js"

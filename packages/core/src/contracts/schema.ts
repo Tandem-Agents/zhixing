@@ -3,6 +3,7 @@ import type { CommitEnvelope } from "./commit-log.js";
 import type {
   AnchorTransferCommit,
   CheckpointEnvelope,
+  FullAuthorityCheckpointPayload,
   ConversationTransferCommit,
   ConversationTransferAbort,
   ConversationTransferCommand,
@@ -91,6 +92,7 @@ export interface WireSchemaMap {
   RecoveryActivationPlan: RecoveryActivationPlan;
   RecoveryCheckpointVerification: RecoveryCheckpointVerification;
   CheckpointEnvelope: CheckpointEnvelope;
+  FullAuthorityCheckpointPayload: FullAuthorityCheckpointPayload;
   TrustRuleSnapshot: TrustRuleSnapshot;
   DataPlaneTicket: DataPlaneTicket;
   SurfaceAssetGrant: SurfaceAssetGrant;

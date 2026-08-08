@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectLocalConversationOwnerIsolation,
+  inspectRecoveryBackupAssembly,
   parseLandingRowIds,
   validateCoverage,
   validateInboundRouterAssembly,
@@ -819,6 +820,51 @@ test("conversation adoption stays bound to the two production roots and ordered 
       (text) => text.replace("origin.triggeredBy === conn.surfacePrincipal", "false"),
     )).join("\n"),
     /must follow the stable authenticated surface across reconnects/,
+  );
+});
+
+test("recovery backup stays bound to one current-anchor owner and finite paired receivers", async () => {
+  const paths = [
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/backup-runtime-owner.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectRecoveryBackupAssembly(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("ctx.authorityCheckpointOwner?.start()", "void 0"),
+    )).join("\n"),
+    /one create\/start\/stop lifecycle/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-runtime-owner.ts",
+      (text) => text.replace("currentAnchor: true", "currentAnchor: false"),
+    )).join("\n"),
+    /missing owner boundary currentAnchor: true/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replaceAll('member.state === "active"', 'member.state === "revoked"'),
+    )).join("\n"),
+    /active paired backup receiver boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-pair-command.ts",
+      (text) => text.replace("return new PairedRecoveryCheckpointTarget({", "return new UnboundedTarget({"),
+    )).join("\n"),
+    /onboarding checkpoint must precede business enrollment/,
   );
 });
 

@@ -373,12 +373,15 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
             .map(formatChannelStatus)
             .join("\n    ")}`
         : "";
+    const recoveryBackupLine = hostInfo?.recoveryBackup
+      ? `\n  ${chalk.dim("恢复备份:")} ${formatRecoveryBackupState(hostInfo.recoveryBackup.state)}`
+      : "";
     writer.line(
       `\n  ${chalk.dim("Session:")} ${current.name}${modeText}` +
         `\n  ${chalk.dim("Model:")} ${chalk.cyan(modelDisplay)}` +
         `\n  ${chalk.dim("Provider:")} ${providerDisplay}` +
         `\n  ${chalk.dim("Network proxy:")} ${proxyText}` +
-        `${channelLines}\n`,
+        `${channelLines}${recoveryBackupLine}\n`,
     );
     renderRuntimeControlStatus(hostInfo, writer);
     return {};
@@ -690,6 +693,14 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     writer.line("");
     return {};
   });
+}
+
+function formatRecoveryBackupState(
+  state: "not-configured" | "pending-verification" | "recoverable",
+): string {
+  if (state === "recoverable") return "可恢复";
+  if (state === "pending-verification") return "待验证（运行 zz backup verify）";
+  return "未配置（运行 zz backup setup）";
 }
 
 function textMeta(entry: MemoryLogicalEntry, key: string): string | undefined {

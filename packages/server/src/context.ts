@@ -212,6 +212,10 @@ export interface ServerContext {
   memory?: MemoryDirectory;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
+  /** 用户级恢复备份状态；不暴露 root、日志水位或摘要。 */
+  recoveryBackupStatus?: () => Promise<{
+    state: "not-configured" | "pending-verification" | "recoverable";
+  }>;
   /**
    * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。
    * 结构与 MCP hub 的 serverStatuses 兼容(server 不依赖 mcp 包,结构形声明)。
@@ -304,6 +308,7 @@ export interface CreateContextOptions {
   skills?: SkillDirectory;
   memory?: MemoryDirectory;
   hostInfo?: { workspace?: string; logPath?: string };
+  recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   taskListUpdate?: ServerContext["taskListUpdate"];
@@ -332,6 +337,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     skills: opts.skills,
     memory: opts.memory,
     hostInfo: opts.hostInfo,
+    recoveryBackupStatus: opts.recoveryBackupStatus,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
     taskListUpdate: opts.taskListUpdate,

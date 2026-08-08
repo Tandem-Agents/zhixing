@@ -292,6 +292,57 @@ program
     }
   });
 
+const backupCmd = program
+  .command("backup")
+  .description("管理恢复备份");
+
+backupCmd
+  .command("setup")
+  .description("选择独立目录或配对设备并创建恢复备份")
+  .option("--directory <path>", "使用物理独立目录")
+  .option("--device <device-id>", "使用一台已配对设备")
+  .action(async (options: { directory?: string; device?: string }) => {
+    try {
+      const { runBackupSetupCommand } = await import("./serve/backup-command.js");
+      await runBackupSetupCommand({
+        ...(options.directory ? { directory: options.directory } : {}),
+        ...(options.device ? { pairedDeviceId: options.device } : {}),
+      });
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+backupCmd
+  .command("verify")
+  .description("从实际目标回读并验证恢复备份")
+  .action(async () => {
+    try {
+      const { runBackupVerifyCommand } = await import("./serve/backup-command.js");
+      await runBackupVerifyCommand();
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+backupCmd
+  .command("status")
+  .description("查看恢复备份状态和下一步操作")
+  .action(async () => {
+    try {
+      const { runBackupStatusCommand } = await import("./serve/backup-command.js");
+      await runBackupStatusCommand();
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
 const workspaceCmd = program
   .command("workspace")
   .description("管理本机已授权工作区");

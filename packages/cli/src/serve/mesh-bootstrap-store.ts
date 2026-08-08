@@ -105,6 +105,19 @@ export class FileMeshBootstrapStore {
     this.#log.stopStorageMaintenance();
   }
 
+  authorityLog(): FileAuthorityCommitLog {
+    return this.#log;
+  }
+
+  artifactStore(): FileArtifactStore {
+    return this.#artifacts;
+  }
+
+  async loadCheckpointRecords(): Promise<readonly CheckpointStreamRecord[]> {
+    return (await this.#log.readStream<CheckpointStreamRecord>("checkpoint"))
+      .map((record) => record.body);
+  }
+
   async loadTrustEvents(): Promise<readonly HomeTrustEvent[]> {
     const records = await this.#log.readStream<TrustStreamRecord>("trust");
     const events: HomeTrustEvent[] = [];

@@ -854,6 +854,7 @@
       "memory-write",
       "orchestration-child",
       "permission-persist",
+      "recovery-backup",
       "run-cancel",
       "runtime-config",
       "runtime-lifecycle",
@@ -942,6 +943,7 @@
           "cleanup:anchor-host:common:stateFile.markStopped",
           "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:idleReaper.clear",
@@ -959,6 +961,10 @@
           "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
           "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1098,6 +1104,7 @@
           "cleanup:anchor-host:common:stateFile.markStopped",
           "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:idleReaper.clear",
@@ -1115,6 +1122,10 @@
           "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
           "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1251,6 +1262,7 @@
           "cleanup:anchor-host:common:stateFile.markStopped",
           "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:idleReaper.clear",
@@ -1263,6 +1275,10 @@
           "cleanup:anchor-host:server:server.close",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1380,6 +1396,7 @@
           "cleanup:anchor-host:common:stateFile.markStopped",
           "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:idleReaper.clear",
@@ -1392,6 +1409,10 @@
           "cleanup:anchor-host:server:server.close",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1493,6 +1514,10 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1564,6 +1589,10 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1632,6 +1661,10 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1682,6 +1715,10 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing backup",
+          "cli:zhixing backup setup",
+          "cli:zhixing backup status",
+          "cli:zhixing backup verify",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1868,6 +1905,17 @@
         "id": "assetMaintenance.stop",
         "source": "packages/cli/src/serve/command.ts",
         "key": "cleanup:anchor-host:runtime:assetMaintenance.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
+        "id": "authorityCheckpointOwner.stop",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -2091,6 +2139,47 @@
         "target": {
           "exclusion": "composition",
           "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing backup",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing backup",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing backup setup",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup setup",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-backup"
+        }
+      },
+      {
+        "path": "zhixing backup status",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup status",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-backup"
+        }
+      },
+      {
+        "path": "zhixing backup verify",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup verify",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-backup"
         }
       },
       {

@@ -96,6 +96,13 @@ import {
   registerFirstPartyConversationMeshService,
 } from "./first-party-conversation-mesh.js";
 import type { CanonicalFirstPartyConversationSurface } from "@zhixing/server";
+import {
+  FilePairedCheckpointStaging,
+  PairedCheckpointReceiver,
+  registerPairedCheckpointMeshService,
+} from "@zhixing/mesh/paired-checkpoint-target";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
@@ -535,6 +542,36 @@ export class MeshRuntimeAssembly {
         this.services,
         this.#firstPartyConversationTarget,
         (deviceId) => this.#peerHasRole(deviceId, "executor"),
+      ));
+    }
+
+    if (
+      options.trust.recoveryBackupPublicKey &&
+      options.trust.issuer.deviceId !== options.authority.deviceId &&
+      options.trust.members.some((member) =>
+        member.device.deviceId === options.authority.deviceId && member.state === "active")
+    ) {
+      const pairedTarget = deferredPairedCheckpointTarget({
+        zhixingHome: options.zhixingHome,
+        deviceId: options.authority.deviceId,
+        storageMaintenance: options.authority.storageMaintenance,
+      });
+      this.#disposers.push(registerPairedCheckpointMeshService(
+        this.services,
+        new PairedCheckpointReceiver({
+          homeId: options.trust.homeId,
+          sourceDeviceId: options.trust.issuer.deviceId,
+          targetDeviceId: options.authority.deviceId,
+          recipientKeyId: keyIdForPublicKey(options.trust.recoveryBackupPublicKey),
+          staging: new FilePairedCheckpointStaging({
+            root: path.join(options.zhixingHome, "distributed-runtime", "recovery-checkpoint-incoming"),
+            target: pairedTarget,
+            storageMaintenance: options.authority.storageMaintenance,
+          }),
+        }),
+        (deviceId) =>
+          deviceId === options.trust.issuer.deviceId &&
+          this.#peerHasRole(deviceId, "anchor"),
       ));
     }
 
@@ -1074,6 +1111,26 @@ export class MeshRuntimeAssembly {
       member.state === "active" &&
       member.roles.includes(role));
   }
+}
+
+function deferredPairedCheckpointTarget(input: {
+  readonly zhixingHome: string;
+  readonly deviceId: string;
+  readonly storageMaintenance?: import("@zhixing/core/resources").StorageMaintenanceGovernorPort;
+}): import("@zhixing/mesh/checkpoint-target").RetirableRecoveryCheckpointTarget {
+  const open = () => FileRecoveryCheckpointTarget.openPaired({
+    targetRoot: path.join(input.zhixingHome, "distributed-runtime", "recovery-checkpoints"),
+    targetDeviceId: input.deviceId,
+    ...(input.storageMaintenance ? { storageMaintenance: input.storageMaintenance } : {}),
+  });
+  return {
+    targetId: `backup-device:${input.deviceId}`,
+    independenceDomain: `device:${input.deviceId}`,
+    writeDurable: async (checkpoint) => (await open()).writeDurable(checkpoint),
+    read: async (checkpointId) => (await open()).read(checkpointId),
+    retire: async (checkpointId, supersededBy) =>
+      (await open()).retire(checkpointId, supersededBy),
+  };
 }
 
 export function executorIdForDevice(deviceId: string): string {

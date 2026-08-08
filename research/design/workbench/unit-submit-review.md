@@ -260,154 +260,178 @@
 
 ### 当前状态
 
-- **当前单元**：第 32 单元 · generation 1
-- **权威来源**：research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md、distributed-runtime-charter.md、specification.md；直接上游合同为 scheduler-architecture.md、task-advancement-rubric-architecture.md、rubric-protocol.md、transcript-persistence-and-attention-window-architecture.md 及其引用的 lifecycle-concepts.md；执行边界以已定稿开发清单 D32-01～D32-08 为准
-- **交付基线**：父提交 4f843748 → 当前工作树；共 54 个变化路径，其中 50 个属于第 32 单元生产实现、直接测试、S7 门禁与当前架构/规格同步，4 个 research/design/workbench 路径只承载开发清单、第 31 单元台账/清单归档及当前审查清单，不参与功能通过判定
-- **生产装配关系**：本地域 owner 提供唯一 transfer source，锚点提供唯一 target/coordinator；双方通过既有认证 mesh request channel、各自 AuthorityCommitLog 与设备 ArtifactStore 协调，ConversationTransferCommit 唯一切换 current owner；同一 current-owner verifier 前置于 local/mesh evidence 读取；提交恢复后才驱动公开 local session 路由、收编复核与锚点记忆蒸馏
-- **目标提交边界**：只交付 conversation scope 的双端耐久收编、完整会话域与 conversation-owned intent 搬运、唯一 ownerEpoch 切换、旧 owner fencing、current-owner evidence 门禁，以及收编闭合后的第一方离线新建/查询/恢复、自动收编、复核与记忆补驱动
-- **明确排除**：anchor scope planned/disaster transfer、AnchorTransferCommit、TrustTransition、ReadyProof、全量/周期 CheckpointEnvelope、恢复根与凭据轮换；第 36～38 单元服务生命周期、设备移除/卸载、升级与发布；锚点域既有会话离线写、非权威只读副本、秘密/环境事实/缓存迁移、全局预算追认；第二事实源、通用事务/同步/备份/registry/事件总线/调用图/测试 runner、监控、诊断、benchmark 与信息采集；干活电脑不新增渠道宿主
-- **当前任务进度**：U32-01～U32-07 修复后状态已失效重算（0 项 [ ]，5 项 [x]，0 项 [!]，35 项 [~]）
+- **当前单元**：第 33 单元 · generation 1
+- **权威来源**：`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`、`s2-security-supply-chain-review.md`，以及已定稿开发清单 D33-01～D33-08；上游只按现行 S2 root-activation `CheckpointEnvelope`、`RecoveryActivationCoordinator` / `RecoveryCheckpointTarget`、`FileMeshBootstrapStore`、当前 anchor 唯一 `AuthorityCommitLog` / `ArtifactStore` / ArtifactLifecycleIndex / storage governor 合同消费，下游只冻结第 34 单元取得“当前根、已验证、全量”检查点的窄接缝与第 35 单元解封载荷合同
+- **交付基线**：当前 HEAD `dd50eec8` → 当前完整工作区交付物；共 42 个变化路径，其中 38 个属于第 33 单元生产实现、直接测试、S7 门禁与当前架构/规格同步，4 个 `research/design/workbench/` 路径只承载开发清单、上一单元台账/清单归档和当前审查清单，不参与功能通过判定
+- **生产装配关系**：trusted-home current anchor 或显式启用备份的单机 current anchor 复用同一 authority log、artifact store、storage governor 与 root-activation 加密内核，装配恰一 `AuthorityCheckpointOwner` / `AuthorityCheckpointService`；owner 捕获冻结日志前缀及保留资产闭包，复制到用户配置的独立目录或 active paired device，第一方 `zz backup setup/verify/status` 从真实目标回读并真解封，readiness 投影再供 `/status` 与后继强制检查点窄接缝消费；首次配对只在业务 mesh 开放前装配受限 onboarding receiver
+- **目标提交边界**：只交付同一 `CheckpointEnvelope.v1` 下的全量 authority payload、每日与迁居前强制创建/复制接缝、单目标目录/配对设备 adapter、恢复包真解封、`fullBackupReady`、新代替换与 27 天回收，以及两生产根的唯一 owner、生命周期、管理入口、S7 门禁和直接证据
+- **明确排除**：第 34 单元 `SourceFreezeProof(anchor)`、AuthorityCatalog 导入、`TrustTransition`、`ReadyProof`、planned `AnchorTransferCommit`、旧锚点 tombstone 与 current-anchor 切换；第 35 单元恢复应用、disaster-recovery commit、domain-reset/reenroll、凭据轮换与灾难恢复旅程；第 36～38 单元；环境事实、设备秘密、SecretStore 内容、workspace 原始路径、本机执行缓存、非权威缓存与旧 checkpoint 自身递归闭包；未显式启用单机备份时新增恢复概念；多目标 quorum、云存储、连续同步及通用事务/outbox/事件总线/registry/扫描/备份框架、监控、诊断、benchmark 和信息采集
+- **当前任务进度**：0%（0 / 36 项已审；36 项 [ ]，0 项 [x]，0 项 [!]，0 项 [~]）
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论
 
-> **清单状态**：U32-01～U32-07 已在正式账本更新为“已验证”；本轮 36 文件修复使 35 个直接或交界审查项失效为 `[~]`，仅 IR32-03、IR32-04、IR32-19、IR32-20、IR32-24 的登记输入与事实未变化，继续复用 `[x]`。下一轮只审 `[~]`，不得把本次专项对抗复审冒充全单元独立审查。
+> **清单状态**：第 33 单元独立审查清单已通过定稿复审，尚未执行独立审查。清单逐章判定四份模块文档，逐项反绑 D33-01～D33-08，并将 38 个功能路径和 4 个流程路径 exact-set 双向对账；生产装配、正常/边界/故障/恢复与对抗路径均有有限落点，两类问题列表保持空表。
 
 ### 来源覆盖
 
 | 来源 | 判定 | 归入审查项或不适用依据 |
 | ---- | ---- | ---------------------- |
-| always-online-and-local-execution-requirements.md §一 | 适用 | 持续在线与本机真实环境并存的产品目标归入 IR32-01、IR32-21～IR32-28、IR32-37。 |
-| 需求文档 §二～§五 | 不适用 | 外部项目转述、事实核验与方案形成过程不是本单元规范性合同。 |
-| 需求文档 §六～§七 | 适用 | 两种部署形态体验平权、失联时本机继续工作及重连后收编归入 IR32-21～IR32-28、IR32-31、IR32-37。 |
-| distributed-runtime 目录的 s2-security-supply-chain-review.md 全文 | 不适用 | 本单元未新增、升级或改变 mesh 安全依赖及供应链装配；只复用既有认证 mesh，安全依赖门禁不得扩成当前功能审查。 |
-| distributed-runtime-charter.md 当前版本交付原则、一、二 | 适用 | 最小完整产品、单一产品和当前用户价值归入 IR32-01、IR32-21～IR32-28、IR32-37～IR32-40。 |
-| 总纲 §1 | 适用 | 单机是分布式退化形态、会话权威唯一及角色复用归入 IR32-01、IR32-15～IR32-18、IR32-31、IR32-37。 |
-| 总纲 §2 | 适用 | anchor、executor、surface 角色与 source/target/公开接入边界归入 IR32-06～IR32-18、IR32-21～IR32-26、IR32-31。 |
-| 总纲 §3 | 适用 | core→owner-kernel→rpc/cli 的无环依赖和组合根职责归入 IR32-02～IR32-04、IR32-31～IR32-34、IR32-37。 |
-| 总纲 §4 | 适用（复用边界） | 设备身份、认证 mesh、签名、最小权限和 old-owner fencing 归入 IR32-02～IR32-05、IR32-11、IR32-17～IR32-20、IR32-33、IR32-35；不重审配对和信任链实现。 |
-| 总纲 §5 | 适用 | 会话域完整权威、conversation-owned intent、全局 memory 与 schedule/rubric owner 分界归入 IR32-08、IR32-13～IR32-17、IR32-24～IR32-25、IR32-29～IR32-30。 |
-| 总纲 §6 | 适用（交界） | freeze 前 active/queued/confirmation/finality 收束及旧能力拒绝归入 IR32-07、IR32-16～IR32-18、IR32-32；不扩写 run/job 协议。 |
-| 总纲 §7 | 不适用（守边界） | 环境路由是既有 S7 能力；本单元只在 IR32-08、IR32-20、IR32-35 检查 workspace/环境事实不被迁移或越权读取。 |
-| 总纲 §8 | 适用（交界） | mesh 无损请求、确认最终性和响应丢失恢复归入 IR32-10～IR32-14、IR32-18、IR32-23～IR32-26、IR32-33。 |
-| 总纲 §9 | 适用 | conversation AuthorityTransfer、current-owner 切换、公开离线旅程、复核与 post-adoption memory 全量归入 IR32-02～IR32-33。 |
-| 总纲 §10 | 适用（局部） | 启动恢复先于准入、停机拒绝新 transfer 并保留耐久事实归入 IR32-10、IR32-14、IR32-18、IR32-30、IR32-32；托管服务/移除/卸载属于后续单元。 |
-| 总纲 §11 | 适用 | “值班设备/干活的电脑”语言、明确同意、可行动错误与待确认重浮现归入 IR32-21～IR32-28。 |
-| 总纲 §12 | 适用（直接行） | transfer 任意步中断、网络/响应丢失、重启、旧 owner、坏尾、磁盘满、版本偏斜及确认重连归入 IR32-04～IR32-20、IR32-23～IR32-26、IR32-30～IR32-36。 |
-| 总纲 §12 的灾难恢复、设备撤销和渠道投递专属行 | 不适用 | 分别属于第 33～38 单元或既有 S6/S7；本单元只验证未借收编提前启用。 |
-| 总纲 §13 不变量 1、4～6、8、11～17及 2～3 的 freeze 交界 | 适用 | 唯一 owner、executor 零全局写、角色零装配、秘密不迁移、old-owner fencing、双拓扑、完成语义、包边界、staged 隔离、能力校验及在途 run 身份/栅栏兼容归入 IR32-02～IR32-20、IR32-31～IR32-37；job 专属部分不扩写。 |
-| 总纲 §13 的 job、delivery 与完整资源治理专属部分 | 不适用 | 不属于 conversation 收编；只在 IR32-34、IR32-36 检查复用既有治理且不建旁路。 |
-| 总纲 §14 S8 第 32 单元 | 适用 | 当前实施顺序与停止条件归入 IR32-01～IR32-40。 |
-| 总纲 §14 既有上游与第 33～38 单元 | 不适用（边界） | 上游仅按现行端口消费；后继 transfer/backup/service 能力不得提前成为提交内容，归 IR32-38 守界。 |
-| 总纲 §15 | 适用 | 双拓扑、故障、安全、零术语与成比例证据归入 IR32-02～IR32-40。 |
-| specification.md §1.1 | 适用 | xfer/request/conversation/device identity、ownerEpoch、localDomainId 与规范时间归入 IR32-02、IR32-05、IR32-15～IR32-18、IR32-22～IR32-23、IR32-29。 |
-| 规格 §1.2 | 适用 | JCS、严格未知字段、Digest/ArtifactRef、签名域与引用目标归入 IR32-02～IR32-05、IR32-09、IR32-12～IR32-14、IR32-33、IR32-35。 |
-| 规格 §1.3、§1.3b | 适用 | conversation、SessionState、segment、Evidence、memory、schedule/rubric 外部符号与冻结字段归入 IR32-02、IR32-08、IR32-13、IR32-19、IR32-24～IR32-25、IR32-29。 |
-| 规格 §1.4～§1.5 | 适用 | 构件名、AuthorityError 与公开稳定结果边界归入 IR32-04、IR32-20～IR32-28、IR32-38。 |
-| 规格 §2.1 | 适用 | device/current owner、SourceFreezeProof、ConversationTransferCommit/Manifest/Abort 与 TransferRecord 身份归入 IR32-02～IR32-05、IR32-11～IR32-18。 |
-| 规格 §2.2 | 适用（复用） | source/target 签名、受众、scope、expiry 和 replay 防护归入 IR32-03～IR32-05、IR32-11、IR32-17～IR32-20、IR32-33、IR32-35。 |
-| 规格 §2.3～§2.4 | 不适用 | SecretStore 与 CredentialExposureRecord 不迁移、不修改；IR32-08、IR32-35 只审秘密零进入 transfer。 |
-| 规格 §2.5 | 适用（既有接缝） | 两生产根复用已认证 mesh bootstrap、角色授权与连接恢复归入 IR32-11、IR32-18、IR32-31、IR32-33、IR32-37。 |
-| 规格 §3.1 | 适用 | 完整 SessionState 重建、会话 mutation/current-owner guard 与本地域公开能力归入 IR32-08、IR32-13、IR32-15～IR32-17、IR32-21～IR32-22。 |
-| 规格 §3.2 | 适用（消费） | 收编后 rubric/schedule review 与 MemoryFlush 只能走锚点既有 GlobalStatePort 归入 IR32-24～IR32-25、IR32-29～IR32-30；source/target 不得获得全局写能力。 |
-| 规格 §3.8、§3.2b | 适用 | intent 随 conversation 搬运、current-owner 定位、收编后 internal review 与 authenticated confirmation 归入 IR32-08、IR32-13、IR32-16、IR32-23～IR32-26。 |
-| 规格 §3.3～§3.4b | 适用（守边界） | 环境事实不迁移，transfer 拉取与 staging 复用设备容量/存储治理归入 IR32-08、IR32-12、IR32-34～IR32-36。 |
-| 规格 §3.5 | 不适用 | ControlCompletionPort / AdvancementReviewerPort 是既有推进裁判端口；收编后 rubric/schedule 复核走 §3.2b internal review 与 ConfirmationHub，memory 走 GlobalStatePort，不得借本单元改写 §3.5。 |
-| 规格 §3.6～§3.7 | 适用（交界） | freeze 前 run/assignment/finality 收束、commit 后旧 owner 能力拒绝归入 IR32-07、IR32-16～IR32-18；不新增派发协议。 |
-| 规格 §4.1 | 适用 | 双端各自唯一 AuthorityCommitLog、transfer 逻辑流、投影重建、日志前缀与 commit 发布归入 IR32-04～IR32-18、IR32-30。 |
-| 规格 §4.2 | 适用 | manifest/记录基底/内容资产进入既有 ArtifactStore、先资产后引用、共享 digest 保留归入 IR32-09、IR32-11～IR32-14、IR32-17、IR32-34。 |
-| 规格 §4.3 | 适用 | transfer、conversation、intent、final、segment 与 activity 流的完整选择/导入归入 IR32-04、IR32-08、IR32-13～IR32-18、IR32-29。 |
-| 规格 §4.4 | 适用 | commit 前准备全部派生 delta、一次权威切换与恢复一致性归入 IR32-14～IR32-18。 |
-| 规格 §4.5 | 适用 | staging 清理、共享资产保留、tombstone 与 memory 水位恢复归入 IR32-10、IR32-14、IR32-17、IR32-29～IR32-30。 |
-| 规格 §5.1 | 适用 | transfer command/result、公开 session/confirmation 请求的严格 envelope 与幂等归入 IR32-02、IR32-04、IR32-21～IR32-26、IR32-33。 |
-| 规格 §5.2～§5.6 | 适用（交界） | source freeze 收束 assignment/interaction/final，公开重连补终态且不重复归入 IR32-07、IR32-17～IR32-18、IR32-23～IR32-26；不改现有派发/stream 合同。 |
-| 规格 §5.7 | 适用 | current-owner EvidenceRequest verifier 必须先于 journal exact replay、workspace/path 和文件读取归入 IR32-19～IR32-20、IR32-31、IR32-34。 |
-| 规格 §6.1 | 适用（交界） | active/queued/confirmation/finality 在 freeze 前达到可判定终态归入 IR32-07、IR32-10、IR32-18。 |
-| 规格 §6.2、§6.2b | 不适用 | user/system job 不属于 conversation scope transfer。 |
-| 规格 §6.3 | 适用 | prepared→frozen→imported→committed→tombstoned 与 pre-commit aborted 的逐边状态机归入 IR32-04～IR32-18、IR32-39。 |
-| 规格 §6.4 | 不适用 | 设备状态与 UncertainResolution 没有被本单元扩写。 |
-| 规格 §7 六类覆盖表 | 适用（conversation 行） | 会话状态与会话内容资产的转移/删除/保留分类、环境事实与秘密及非权威缓存不转移归入 IR32-08、IR32-13～IR32-17、IR32-35；全局状态与执行资产不由 conversation transfer 搬运。 |
-| 规格 §7 CheckpointEnvelope 与 root activation 块 | 不适用 | 全量加密检查点、恢复根激活、复制回读和 TrustTransition 属第 33～35 单元；当前 manifest/wire/装配必须拒绝提前承载，归 IR32-38 守界。 |
-| 规格 §8 | 适用（有限落点） | transfer/evidence/session/confirmation/memory 的生产入口与消费落点归入 IR32-19～IR32-33；其他 S7 入口只做兼容边界。 |
-| 规格 §9 | 适用 | 锚点域/本地域会话能力矩阵、失联可用性与收编后能力归入 IR32-15～IR32-28、IR32-31、IR32-37。 |
-| 规格 §10、§10.1 | 适用 | staging 拉取、ArtifactStore 写入、memory 消费及恢复不得绕过容量与锁顺序归入 IR32-12、IR32-29～IR32-30、IR32-34。 |
-| 规格 §11 | 适用 | 离线新建/恢复、自动收编、冲突/暂态失败、待确认和内部术语净化归入 IR32-21～IR32-28。 |
-| 规格 §12 对应总纲不变量 1、4～6、8、11～17及 2～3 的 freeze 交界 | 适用 | identity、幂等、唯一 owner、old-owner fence、strict wire、两根、角色零装配、完成语义、安全、恢复及在途 run 身份/栅栏兼容归入 IR32-02～IR32-39。 |
-| 规格 §12 的 job/channel/anchor disaster 专属矩阵 | 不适用 | 不属于当前 conversation 收编；只检查未提前启用或误装配。 |
-| 规格 §13 的 transcript、scheduler、rubric 行 | 适用 | segment MemoryFlush、schedule/rubric review 与 current evidence 边界归入 IR32-19、IR32-24～IR32-25、IR32-29～IR32-30、IR32-38。 |
-| 规格 §13 的其他模块行 | 不适用 | 当前交付未改变对应模块合同。 |
-| 规格 §14 | 不适用 | S1 历史开工清单不是第 32 单元现行合同。 |
-| 规格 §15 第 30～32 项 | 适用 | 第 30/31 单元为前置，第 32 项是当前实现与验收，归入 IR32-01～IR32-40。 |
-| 规格 §15 第 33～38 项及其专属枚举行 | 不适用 | 后继检查点、迁居、灾难恢复、服务生命周期和发布不得成为当前实现或门禁。 |
-| scheduler-architecture.md 当前生产架构、§一及§三现行 schedule authority 合同 | 适用（上游） | 收编后的四类 schedule intent 只能经既有锚点 authority/CAS 和认证确认生效，归入 IR32-24～IR32-26、IR32-37。 |
-| scheduler 文档 §二、历史推演与待根治项 | 不适用 | 旧实现分析和 scheduler 专项技术债不是本单元义务。 |
-| task-advancement-rubric-architecture.md 页首取证边界、需求区、§0～§3 | 适用（上游） | canonical evidence、会话契约与本地域/锚点角色边界归入 IR32-19～IR32-20、IR32-24、IR32-37。 |
-| rubric 文档 §4.1～§4.7 | 适用（搬运/恢复） | SessionState、confirmed snapshot、advancement 生命周期必须随会话完整重建且不成为第二事实源，归入 IR32-08、IR32-13、IR32-37。 |
-| rubric 文档 §5.1～§5.6 | 适用（交界） | freeze 收束、resume 快照和 canonical evidence 归入 IR32-07、IR32-19～IR32-20、IR32-26、IR32-37。 |
-| rubric 文档 §6～§7 | 适用（有限兼容） | imported awaiting/active/closed advancement 状态、恢复 owner 与退出边界必须保持现行语义，归入 IR32-07～IR32-08、IR32-13、IR32-37；不重做推进执行体或全局预算。 |
-| rubric 文档 §8～§10 | 适用 | local-draft、ArtifactRef、intent review、confirmation 与产品显示归入 IR32-08、IR32-23～IR32-28、IR32-37。 |
-| rubric 文档 §11～§14 | 适用（有限上游） | 包边界、生产测试拓扑和稳定不变量归入 IR32-31、IR32-37～IR32-39。 |
-| rubric 文档 §15、C1～C18 | 不适用 | 历史提交/施工记录不是第 32 单元现行义务；当前接口仅按上游合同消费。 |
-| rubric-protocol.md 〇～二 | 适用（上游） | rubric 的稳定资产身份、title/description/content 基础结构必须随 intent 资产完整搬运且不被收编层重解释，归入 IR32-08、IR32-13、IR32-24、IR32-37。 |
-| rubric 协议 §三～§六 | 适用（上游） | 通过标准、证据要求、失败处理和运行契约只能由既有 anchor review 校验/消费，收编协调器不得绕过或改写，归入 IR32-24、IR32-37。 |
-| rubric 协议 §七、§九 | 适用（上游） | ArtifactRef 闭包、稳定身份、保存态校验与既有资产管线归入 IR32-08、IR32-13～IR32-14、IR32-24、IR32-37。 |
-| rubric 协议 §八 | 不适用 | 退出边界、优先级与版本信息是协议扩展点，本单元不得因收编预实现。 |
-| rubric 协议 §十 | 适用（负边界） | 收编不得把 rubric 变成执行方案、权限规则或每轮重新确认的协议，归入 IR32-24、IR32-35、IR32-37。 |
-| transcript-persistence-and-attention-window-architecture.md 页首 S7 写入边界、§3.1.2～§3.1.5 | 适用（上游） | transcript/run/segment 的权威表示、崩溃恢复、读取和保留边界归入 IR32-08、IR32-13～IR32-17、IR32-29～IR32-30。 |
-| transcript 文档 §3.2.1～§3.2.2 | 适用（上游） | 收编会话 resume 必须从 imported transcript/segment 权威基底重建注意力窗口，不得把 source 的瞬态窗口当权威搬运，归入 IR32-13、IR32-22、IR32-28、IR32-37。 |
-| transcript 文档 §3.2.3～§3.2.5、§3.3～§3.5 | 适用（直接交界） | segment flush hook、resume 与不变量归入 IR32-26、IR32-29～IR32-30、IR32-37。 |
-| transcript 文档信息梳理、§一～§二、§3.0～§3.1.1、分布式 assignment 历史说明 | 不适用 | 形成过程、目录形态与既有 assignment 施工说明不由本单元修改。 |
-| lifecycle-concepts.md 维护约定 | 不适用 | 文档维护规则不是第 32 单元产品、架构或验收义务。 |
-| lifecycle-concepts.md §一 attention window 与 turn | 适用（术语边界） | imported transcript 只重建派生 attention window，freeze 收束对象不能把单个 turn 或窗口误当完整 run，归入 IR32-07、IR32-13、IR32-28、IR32-37。 |
-| lifecycle-concepts.md run | 适用 | source drain 必须等待一次 runtime.run 的完整往返及其资源终态，而不是仅等待最后一次 LLM turn，归入 IR32-07、IR32-18、IR32-32。 |
-| lifecycle-concepts.md §二需求与钩子 | 不适用 | 本单元不新增或改写 AgentRuntimeLifecycle 钩子；transfer/review/memory 只消费既有 owner/segment 接缝。 |
-| unit-development-workbench.md 静态目标/边界与 D32-01～D32-08 | 适用 | 八项生产、消费、装配、异常/恢复和直接测试义务反向归入 IR32-01～IR32-40。 |
-| 当前完整交付物 HEAD 4f843748 与工作树 54 个变化路径 | 事实来源 | 50 个第 32 单元功能路径逐一归入 IR32-01～IR32-40；开发工作台、第 31 单元台账/清单归档及当前审查清单 4 个流程路径明确排除，不参与功能通过判定。 |
+| always-online-and-local-execution-requirements.md §一 | 适用 | 持续在线值班设备与本机真实工作环境并存的核心问题归入 IR33-01、IR33-17、IR33-27、IR33-34。 |
+| 需求文档 §二 | 不适用 | 对外部回复的原始信息整理是需求形成材料，不是第 33 单元规范性合同。 |
+| 需求文档 §三 | 不适用 | 对既有执行事实的阶段性核验不是 S9 字段、状态或验收合同。 |
+| 需求文档 §四 | 不适用 | 架构者历史审核过程不独立产生当前实现义务，现行义务以总纲和规格为准。 |
+| 需求文档 §五 | 不适用 | 对历史现状的归纳不是本单元交付合同。 |
+| 需求文档 §六 | 适用 | “持续在线值班设备 + 本机真实工作环境”的目标及用户自持恢复能力归入 IR33-17、IR33-21～IR33-23、IR33-27、IR33-34。 |
+| 需求文档 §七 | 适用 | 两种形态的当前价值、范围收敛与不牺牲用户体验归入 IR33-01、IR33-23、IR33-27、IR33-34～IR33-36。 |
+| s2-security-supply-chain-review.md「裁决」 | 适用（兼容边界） | 当前交付修改 `@zhixing/mesh` manifest/exports 并复用 Node crypto；须确认既有三个生产依赖和一个受控开发依赖的用途边界、精确版本与生产隔离未被改变，归入 IR33-34。 |
+| S2 供应链评审「强制门禁」 | 适用（兼容边界） | `packages/mesh/package.json` 与构建子入口变化不得改变受管依赖 owner、精确锁版或把 PAKE 适配器带入生产 export/build；复用既有 supply-chain gate，不新增门禁，归入 IR33-30、IR33-34。 |
+| S2 供应链评审「接受依据」 | 适用（兼容边界） | S9 不新增密码依赖、不改证书/PAKE 实时边界，full checkpoint 仅复用既有 Node crypto 和已审 mesh 通道，归入 IR33-09、IR33-34。 |
+| distributed-runtime-charter.md「当前版本交付原则」 | 适用 | 最小完整产品、锁定范围内最优架构及不得预建未来框架归入 IR33-01、IR33-35～IR33-36。 |
+| 总纲「一、架构概况」 | 适用 | 单一产品、单机/分布式同构与用户持有恢复能力归入 IR33-01、IR33-17、IR33-27、IR33-34。 |
+| 总纲「二、凝练后的需求点」 | 适用 | 值班设备持续在线、设备扩展和可恢复性的当前产品目标归入 IR33-17、IR33-21～IR33-23、IR33-27、IR33-34。 |
+| 总纲 §1 | 适用 | 单机是分布式退化形态、current anchor 唯一权威与角色复用归入 IR33-01、IR33-17、IR33-27、IR33-34。 |
+| 总纲 §2 | 适用 | anchor/executor/surface 角色、issuer/paired target 与组合根边界归入 IR33-11～IR33-17、IR33-27～IR33-30。 |
+| 总纲 §3 | 适用 | core→mesh→cli/server 的无环依赖、共享原语和组合根职责归入 IR33-02～IR33-10、IR33-27、IR33-30、IR33-34。 |
+| 总纲 §4 | 适用（复用边界） | 恢复根、设备身份、签名、认证 mesh、最小权限与秘密隔离归入 IR33-02～IR33-04、IR33-09～IR33-16、IR33-20～IR33-22、IR33-31、IR33-34；不重审既有配对密码学。 |
+| 总纲 §5 | 适用 | 六类权威所有权、完整 authority scope 与禁止类别归入 IR33-02、IR33-05～IR33-07、IR33-31。 |
+| 总纲 §6 | 不适用（守边界） | run/job 派发、提交与 finality 不是全量备份的新能力；S9 只保存其已提交权威记录，不审 run 协议行为。 |
+| 总纲 §7 | 适用（负边界） | 环境事实、workspace 原始路径和设备本地缓存永不入备份，归入 IR33-07、IR33-31；环境选择与路由行为不重审。 |
+| 总纲 §8 | 适用（有限交界） | paired target 只复用认证 mesh 的有限 request/response、响应丢失与重连语义，归入 IR33-14～IR33-16、IR33-28、IR33-31。 |
+| 总纲 §9 | 适用（当前 S9 块） | 全量检查点、单目标、真回读、恢复包、双 readiness、替换与保留全量归入 IR33-02～IR33-26。planned/disaster transfer 与恢复应用不适用，归 IR33-35 守界。 |
+| 总纲 §10 | 适用（当前生命周期交界） | 启动先恢复 checkpoint 义务、关闭拒绝新创建并释放资源归入 IR33-17～IR33-19、IR33-27～IR33-29；托管服务、移除与卸载属于后继单元。 |
+| 总纲 §11 | 适用 | “恢复备份”的用户语言、明确配置、待验证/可恢复和下一动作归入 IR33-21～IR33-23。 |
+| 总纲 §12 的 checkpoint 直接故障与共同边界 | 适用 | owner/进程崩溃、日志坏尾、磁盘满、paired 传输中断/重连/响应丢失、active target 撤销或角色失效、版本偏斜和 anchor 时钟偏斜逐项归入 IR33-03～IR33-05、IR33-10～IR33-18、IR33-20、IR33-23、IR33-28、IR33-32～IR33-34。 |
+| 总纲 §12 的 run/assignment/final、S8 本地域/收编、planned transfer/旧锚点、灾难恢复、外部凭据清退与渠道专属故障 | 不适用 | 分别是既有能力或第 34～38 单元义务；S9 仅在 IR33-34～IR33-35 检查共同装配不回归、后继能力未提前启用。 |
+| 总纲 §13 不变量 5、6、11～14、18 | 适用 | 角色零装配、秘密零入备份、双生产形态同构、用户完成语义、依赖边界与设备容量治理逐条归入 IR33-06～IR33-10、IR33-17、IR33-21～IR33-23、IR33-27、IR33-30～IR33-34。 |
+| 总纲 §13 不变量 1～4、7～10、15～17 | 不适用（守边界） | conversation/run/job/transfer/capability/control 专属断言不由 S9 修改；共同装配点只做 IR33-34 的有限兼容核对。 |
+| 总纲 §14 S9 第 33 单元 | 适用 | 当前实施顺序、前置能力、下游接缝与停止条件归入 IR33-01～IR33-36。 |
+| 总纲 §14 其他单元 | 不适用（边界） | 上游仅消费现行合同；第 34～38 单元能力不得进入当前装配、wire 或验收门禁，归 IR33-35。 |
+| 总纲 §15 | 适用 | 双生产形态、故障/安全矩阵、用户语言和成比例证据归入 IR33-27～IR33-36。 |
+| specification.md §1.1 | 适用 | checkpoint/home/device/key/target/log/LSN/ref 的规范身份与时间归入 IR33-02～IR33-05、IR33-11、IR33-17～IR33-20。 |
+| 规格 §1.2 | 适用 | JCS、严格未知字段、Digest/ArtifactRef、自摘要、签名域和 exact-set 归入 IR33-02～IR33-04、IR33-06、IR33-09～IR33-16、IR33-20。 |
+| 规格 §1.3 | 适用（引用边界） | 既有 conversation/global/execution 符号只按权威模块身份被 checkpoint 覆盖判别消费，归入 IR33-02、IR33-05～IR33-07；不复制或改写上游类型。 |
+| 规格 §1.3b | 适用（覆盖边界） | 与检查点保留闭包相关的权威记录/资产身份必须保持冻结字段语义，非权威派生状态不得入载荷，归入 IR33-02、IR33-06～IR33-07。 |
+| 规格 §1.4 | 适用 | 总纲与规格构件名必须与 checkpoint/target/readiness 代码合同一一对应，归入 IR33-02～IR33-04、IR33-17、IR33-35。 |
+| 规格 §1.5 | 适用 | backup 管理、target/codec 与耐久重放错误必须结构化、稳定且不泄密，归入 IR33-04、IR33-11～IR33-16、IR33-20～IR33-23、IR33-31。 |
+| 规格 §2.1 | 适用 | recovery root、activation plan、checkpoint envelope/verification 与 checkpoint stream 身份归入 IR33-02～IR33-04、IR33-09～IR33-10、IR33-18～IR33-21。 |
+| 规格 §2.2 | 适用 | issuer/recipient、purpose、scope、签名、受众和 replay 防护归入 IR33-02～IR33-04、IR33-09～IR33-16、IR33-20、IR33-31。 |
+| 规格 §2.3 | 适用（负边界） | 恢复主秘密不得进入现有 SecretStore/credentials 迁移、配置、argv/env 或日志；创建/复制端不持主秘密，归入 IR33-03、IR33-21、IR33-31。 |
+| 规格 §2.4 | 不适用（守边界） | CredentialExposureRecord 与第三方凭据撤销不由 S9 修改；设备秘密零入备份由 §2.3/§7 承载。 |
+| 规格 §2.5 | 适用（复用） | paired target 与首次 onboarding 复用既有认证 mesh、成员状态和角色授权，归入 IR33-14～IR33-16、IR33-27、IR33-31、IR33-34。 |
+| 规格 §3.1 | 不适用（数据只经日志覆盖） | SessionStatePort 行为不由 S9 调用或改写；已提交会话事实是否入备份由 §4/§7 和 IR33-05～IR33-07 审查。 |
+| 规格 §3.2 | 不适用（数据只经日志覆盖） | GlobalStatePort 行为不由 S9 调用或改写；已提交全局事实是否入备份由 §4/§7 判定。 |
+| 规格 §3.8 | 不适用 | mutation principal/guard 表不是 checkpoint 管理入口；S9 不新增业务 mutation。 |
+| 规格 §3.2b | 不适用（数据只经日志覆盖） | DeferredGlobalIntentPort 不由 S9 执行；已提交 intent 仅作为 conversation authority 记录随冻结前缀覆盖。 |
+| 规格 §3.3 | 适用（负边界） | EnvironmentPort 的路径、环境事实与设备域状态不可进入 payload/wire，归入 IR33-07、IR33-31；不审环境路由行为。 |
+| 规格 §3.4 | 不适用 | ResourceReservationPort 是用户工作负载授权；checkpoint 物理工作只用设备本地 storage governor。 |
+| 规格 §3.4b | 适用 | capture、目标写/读、paired staging 与 retention 复用设备唯一 storage governor，归入 IR33-08、IR33-12～IR33-16、IR33-25、IR33-28、IR33-32。 |
+| 规格 §3.5 | 不适用 | ControlCompletion/AdvancementReviewer 不参与 checkpoint。 |
+| 规格 §3.6 | 不适用 | RunExecutorPort 不参与 checkpoint 创建、复制或验证。 |
+| 规格 §3.7 | 不适用 | RunSubmissionPort 不参与 checkpoint 创建、复制或验证。 |
+| 规格 §4.1 | 适用 | 当前 anchor 唯一 AuthorityCommitLog、冻结 `DurableLogCheckpoint`、checkpoint 流和投影恢复归入 IR33-05、IR33-17～IR33-20、IR33-24～IR33-29。 |
+| 规格 §4.2 | 适用 | ArtifactStore、内容寻址、先资产后引用、保留闭包与共享 ref 安全归入 IR33-06～IR33-10、IR33-13～IR33-15、IR33-25。 |
+| 规格 §4.3 的 checkpoint 逻辑流与信封块 | 适用 | `CheckpointEnvelope`、full payload、created→replicated→verified→superseded、readiness 和 root activation 原子边界归入 IR33-02～IR33-26。 |
+| 规格 §4.3 的 control/run/job/assignment/publish/final/delivery 等其他逻辑流 | 不适用（覆盖边界） | S9 只备份这些流中已提交且按 §7 应保留的记录，不执行或改写各自生命周期；其完整纳入由 IR33-05～IR33-07 判定。 |
+| 规格 §4.4 | 不适用 | 业务 mutation 提交模型不由备份修改；checkpoint service 只追加自身权威记录。 |
+| 规格 §4.5 | 适用 | checkpoint 终态保留、ArtifactLifecycleIndex 复核、远端回收失败重试归入 IR33-06～IR33-07、IR33-24～IR33-26。 |
+| 规格 §5.1 | 不适用 | 本节是既有 ControlEnvelope 控制请求，不是 paired checkpoint 协议；backup CLI 为本机管理入口，paired finite wire 由 §1.2/§7/§8 承载。 |
+| 规格 §5.2 | 不适用 | conversation/job 派发协议不由 S9 修改。 |
+| 规格 §5.3 | 不适用 | 既有 capability/版本匹配不由 S9 修改；paired receiver 只复用认证成员/角色边界。 |
+| 规格 §5.4 | 不适用 | run/job 提交 CAS 不由 S9 修改。 |
+| 规格 §5.5 | 不适用 | run/job/delivery 终态与状态投递不由 S9 修改。 |
+| 规格 §5.6 | 不适用 | run stream 不由 S9 修改。 |
+| 规格 §5.7 | 不适用 | EvidenceRequest/止损不由 S9 修改。 |
+| 规格 §6.1 | 不适用 | conversation run 状态机不是 checkpoint 状态机。 |
+| 规格 §6.2 | 不适用 | user job 状态机不是 checkpoint 状态机。 |
+| 规格 §6.2b | 不适用 | system job 状态机不是 checkpoint 状态机。 |
+| 规格 §6.3 | 不适用（守边界） | AuthorityTransfer 属第 32/34 单元；IR33-29、IR33-35 只检查 forced 接缝不提前执行迁居。 |
+| 规格 §6.4 | 不适用 | 设备状态与 UncertainResolution 不由 S9 修改。 |
+| 规格 §7 六类权威覆盖表 | 适用 | 完整 authority scope、保留资产、禁止秘密/环境/缓存类别及旧 checkpoint 防递归归入 IR33-02、IR33-05～IR33-07。 |
+| 规格 §7 CheckpointEnvelope 与全量备份块 | 适用 | 单一信封、全量 payload、目标绑定、分块、真回读、双 readiness、新旧恢复包和 27 天保留归入 IR33-02～IR33-26。 |
+| 规格 §8 `recovery-backup` 行 | 适用 | setup/verify/status、daily/forced 接缝、current anchor owner 与 paired receiver 的生产落点归入 IR33-17、IR33-21～IR33-23、IR33-27～IR33-30。 |
+| 规格 §8 `status-read` 行 | 适用（共同消费端） | server.info、`/status` 与 `zz status` 对双 readiness 的同一只读聚合和兼容归入 IR33-22～IR33-23、IR33-30、IR33-34。 |
+| 规格 §8 `device-trust` 行 | 适用（首次 pairing 交界） | 只审 `zz pair` 首次 onboarding 在 full checkpoint 真回读后才开放业务 mesh，归入 IR33-16、IR33-19、IR33-30、IR33-34；迁居/撤销能力不在本单元。 |
+| 规格 §8 `shutdown` 行 | 适用（共同生命周期入口） | 只审既有 serve stop/shutdown 能拒绝新 checkpoint、等待安全边界并释放 owner/receiver/permit，归入 IR33-28、IR33-30、IR33-34；不实现 S10 三路径协议。 |
+| 规格 §8 其余落点 exact-set | 不适用（兼容边界） | `session-send`、`environment-select`、`run-cancel`、`uncertain-resolution`、`confirmation-resolve`、`confirmation-read`、`session-observer`、`global-list-read`、`permission-persist`、`trust-manage`、`conversation-manage`、`conversation-window`、`conversation-metadata`、`conversation-read`、`task-list`、`advancement`、`workscene-manage`、`workscene-switch`、`schedule-manage`、`schedule-run`、`schedule-timer`、`memory-write`、`memory-read`、`skill-manage`、`skill-usage`、`segment-transition`、`workspace-binding`、`runtime-lifecycle`、`advancement-evidence`、`orchestration-child`、`channel-inbound`、`channel-delivery`、`light-inference`、`runtime-config` 不因 S9 新增能力；只在 IR33-30、IR33-34 检查现有映射未被备份入口误接入或绕过。 |
+| 规格 §9 | 不适用 | 会话域能力矩阵不是备份管理面合同；本单元只保存已提交权威事实，不新增会话能力。 |
+| 规格 §10 | 适用（通用上界） | checkpoint 明文/密文/目录/网络工作必须保持有界、可取消、无锁序反转，归入 IR33-08、IR33-10、IR33-12～IR33-16、IR33-28、IR33-32。 |
+| 规格 §10.1 | 适用 | capture、目标写/读、paired staging 与 retention 作为 `authority-checkpoint` maintenance kind 复用唯一 storage governor，归入 IR33-08、IR33-13～IR33-16、IR33-25、IR33-28、IR33-32。 |
+| 规格 §11 | 适用（当前相关行） | 开箱零恢复概念及首次 pairing 的恢复包展示、回读验证后才继续归入 IR33-16、IR33-21、IR33-23、IR33-34；后续 `zz backup` 文案以总纲 §11 和规格 §7 为依据。 |
+| 规格 §12 不变量 5、6、11～14、18 | 适用 | 角色零装配、秘密零入 wire/backup、双拓扑同构、用户完成语义、依赖边界与设备容量治理归入 IR33-08、IR33-17、IR33-21～IR33-23、IR33-27、IR33-30～IR33-34。 |
+| 规格 §12 不变量 1～4、7～10、15～17 | 不适用（守边界） | conversation/run/job/transfer/capability/control 专属断言不由 S9 修改；共同装配点只做 IR33-34 的有限兼容核对。 |
+| 规格 §13 | 不适用 | 模块文档影响表没有 S9 目标行；当前仅同步本模块总纲/规格，不得据此横扫 scheduler、transcript、delivery 等其他模块文档。 |
+| 规格 §14 | 不适用 | S1 历史开工清单不是第 33 单元现行合同。 |
+| 规格 §15 第 33 单元 | 适用 | 当前实现范围、顺序与验收枚举行归入 IR33-01～IR33-36。 |
+| 规格 §15 第 34～38 单元 | 不适用（边界） | AuthorityCatalog/import/restore/TrustTransition/ReadyProof/current-anchor 切换与服务发布不得提前实施，归 IR33-29、IR33-35。 |
+| S2 root-activation 生产合同：checkpoint.ts、bootstrap-authority.ts、mesh-bootstrap-store.ts、mesh-pair-command.ts | 适用（上游） | periodic/full 与 root-activation 共用信封、密码内核、真回读、原子 root activation 和旧 trust-only 兼容归入 IR33-03～IR33-04、IR33-09～IR33-10、IR33-16、IR33-19、IR33-21、IR33-34。 |
+| 当前 authority/storage 生产合同：AuthorityCommitLog、ArtifactStore、ArtifactLifecycleIndex、storage governor | 适用（上游） | 唯一事实源、前缀、资产闭包、引用安全、容量和回收归入 IR33-05～IR33-08、IR33-13、IR33-18～IR33-20、IR33-24～IR33-25、IR33-32。 |
+| 第 34/35 单元下游接缝 | 适用（仅冻结接口） | 第 34 单元只能查询/必要时创建当前根的 verified full checkpoint，第 35 单元只能消费既有 full payload 解封合同；不得在当前单元实现 import/restore/transfer，归 IR33-29、IR33-35。 |
+| unit-development-workbench.md 静态目标/边界 | 适用 | 第 33 单元身份、单元边界、明确排除与清单状态约定归入 IR33-01、IR33-35～IR33-36。 |
+| D33-01 | 适用 | full payload、唯一信封、targetId、恢复包与 strict codec 归入 IR33-02～IR33-04、IR33-07、IR33-18。 |
+| D33-02 | 适用 | 同一日志前缀、六类覆盖、保留资产闭包、防递归与捕获资源治理归入 IR33-05～IR33-08。 |
+| D33-03 | 适用 | periodic/root-activation 共用密码内核、分块落盘、篡改拒绝、清零与 S2 回归归入 IR33-09～IR33-10、IR33-34。 |
+| D33-04 | 适用 | 单目标配置、目录/paired adapter、物理独立、原子发布、续传/回读及 target 资源治理归入 IR33-11～IR33-16、IR33-32。 |
+| D33-05 | 适用 | 唯一 daily/forced owner、耐久候选、首次单机/配对 root activation、重放与两根装配归入 IR33-16～IR33-19、IR33-27～IR33-29。 |
+| D33-06 | 适用 | 真解封 verification、恢复主秘密边界、双 readiness 与用户可行动状态归入 IR33-20～IR33-23。 |
+| D33-07 | 适用 | verified 后替换、27 天保留、跨根/目标代际与共享 ref 零误删归入 IR33-24～IR33-26。 |
+| D33-08 | 适用 | 生产拓扑/lifecycle、S7 落点、文档同步、直接证据和后继能力 denylist 归入 IR33-27～IR33-36。 |
+| 当前完整交付物 `dd50eec8`→当前工作区的 42 个变化路径 | 事实来源 | 38 个功能路径逐一归入 IR33-01～IR33-36；4 个 workbench 流程路径明确排除，不参与功能通过判定。 |
+
+### 交付路径反向覆盖
+
+| 路径组 | 当前功能交付路径 exact-set | 归入审查项 |
+| ------ | -------------------------- | ---------- |
+| core 合同、保留与容量 | `packages/core/src/authority/artifact-retention.ts`、`packages/core/src/contracts/identity.ts`、`packages/core/src/contracts/schema.ts`、`packages/core/src/resources/storage-maintenance.ts` | IR33-02～IR33-08、IR33-18、IR33-24～IR33-25、IR33-31～IR33-35 |
+| mesh capture、密码、owner/service/target 与恢复包 | `packages/mesh/src/bootstrap-authority.ts`、`packages/mesh/src/checkpoint-owner.ts`、`packages/mesh/src/checkpoint-service.ts`、`packages/mesh/src/checkpoint-target.ts`、`packages/mesh/src/checkpoint.ts`、`packages/mesh/src/full-checkpoint.ts`、`packages/mesh/src/recovery-package.ts` | IR33-02～IR33-13、IR33-16～IR33-29、IR33-31～IR33-35 |
+| mesh paired target 与公开构建边界 | `packages/mesh/package.json`、`packages/mesh/src/index.ts`、`packages/mesh/src/paired-checkpoint-target.ts`、`packages/mesh/tsup.config.ts` | IR33-04、IR33-11、IR33-14～IR33-16、IR33-25、IR33-28、IR33-30～IR33-35 |
+| CLI 管理、配置、配对、装配与生命周期 | `packages/cli/src/commands/__tests__/info-commands.test.ts`、`packages/cli/src/commands/info-commands.ts`、`packages/cli/src/index.ts`、`packages/cli/src/runtime/rpc-management-facade.ts`、`packages/cli/src/serve/access-surface.ts`、`packages/cli/src/serve/backup-command.ts`、`packages/cli/src/serve/backup-runtime-owner.ts`、`packages/cli/src/serve/backup-target-config.ts`、`packages/cli/src/serve/command.ts`、`packages/cli/src/serve/mesh-bootstrap-store.ts`、`packages/cli/src/serve/mesh-pair-command.test.ts`、`packages/cli/src/serve/mesh-pair-command.ts`、`packages/cli/src/serve/mesh-runtime-assembly.ts`、`packages/cli/src/serve/mesh-runtime-bootstrap.test.ts` | IR33-03～IR33-04、IR33-11～IR33-23、IR33-27～IR33-35 |
+| server readiness/status 消费链 | `packages/server/src/__tests__/__goldens__/canonical-registry.golden.json`、`packages/server/src/context.ts`、`packages/server/src/rpc/methods/__tests__/server.test.ts`、`packages/server/src/rpc/methods/server.ts` | IR33-22～IR33-23、IR33-30、IR33-34～IR33-35 |
+| 当前架构与可执行规格 | `research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md` | IR33-01～IR33-36 |
+| S7 入口、结构与 golden 门禁 | `scripts/s7-entry-coverage.mjs`、`scripts/s7-entry-coverage.test.mjs` | IR33-27、IR33-30、IR33-33～IR33-35 |
+| full checkpoint 直接证据 | `packages/mesh/src/__tests__/full-authority-checkpoint.test.ts` | IR33-02～IR33-26、IR33-32～IR33-34 |
+| 流程文档（明确排除） | `research/design/workbench/unit-development-workbench.md`、`research/design/workbench/unit-review-checklists/distributed-runtime/unit-32.gen-1.md`、`research/design/workbench/unit-review-ledgers/unit-32.gen-1.md`、`research/design/workbench/unit-submit-review.md` | 只承载开发清单、上一单元归档/台账和当前审查清单；不参与第 33 单元功能通过判定。 |
 
 ### 审查项
 
 | 编号 | 状态 | 审查对象 | 有限审查范围与通过条件 | 证据记录 |
 | ---- | ---- | -------- | ---------------------- | -------- |
-| IR32-01 | [~] | 单元身份、边界与完整交付物 | 冻结父提交 4f843748 到当前工作树的 54 个变化路径并二元归属；50 个功能路径必须全部反绑 D32-01～D32-08，4 个流程路径不参与功能判定；不得含第 33～38 单元能力或无依据框架。本项在路径、来源与边界对账完成后停止。 | 已核对 4f843748→030508e1 的 54 个路径：50 个功能路径均落在 D32-01～D32-08 的合同、生产链、体验、门禁或直接测试，4 个工作台/归档路径仅维护流程；未见第 33～38 单元 wire、装配或新增通用框架。 |
-| IR32-02 | [~] | transfer 严格判别联合与导出合同 | SourceFreezeProof、ConversationTransferCommit、ConversationTransferManifest、ConversationTransferAbort、TransferRecord、command/result 必须具备唯一 v1 字段集、封闭判别、稳定导出与递归严格 validator；未知/缺失/多余字段、错类型和跨分支组合在副作用前拒绝。 | 核心 DTO/record/command 均具备 exact-key、递归校验与签名/摘要反绑。F32-01 仍允许 `ok` state 动态夹带 ref/commit；但 authenticated request channel 将响应绑定单次调用，错 commit 在 source `acceptCommit` 的全身份校验前不会产生权威副作用，当前影响为 wire 健壮性/兼容性，评为 P2，不改变本项通过状态。 |
-| IR32-03 | [x] | 规范摘要、签名与引用反绑 | JCS、schema/version 域、对象身份摘要、ArtifactRef 原始字节摘要、source/target 签名、freezeProofDigest/checkpointDigest/manifestDigest/commitDigest 必须按规格唯一计算并逐引用核对；重签、篡改、错 key/target/version 均 fail-closed。 | 已核对 canonicalize/byteDigest/protocolDigest、三类签名 validator、manifest 原始字节 ref、proof→manifest、imported→manifest、commit→proof/checkpoint 与 tombstone→commit 的逐级反绑；错误 schema/version、签名、目标、epoch 或 digest 均在对应追加/复制/提交前失败。F32-01 属于 result 分支/响应身份闭包，不改变这些已签对象及引用摘要本身的结论。 |
-| IR32-04 | [x] | transfer reducer 与状态边 | 双端 transfer:<transferId> 只允许 prepared→frozen→imported→committed→tombstoned 及 commit 前 aborted；prepared 后双端身份、conversation、epoch 和 payload 不漂移；同载荷重放幂等，异载荷、越级、回退、late abort、坏尾恢复零非法状态。 | 已逐分支核对 `reduceConversationTransfer` 与 durable projection：首记录、相邻 phase、同 kind digest replay、generation 继承、commit/abort/tombstone 反绑均封闭；异载荷、越级、回退、late abort 和不兼容后继在投影提交前失败，坏尾由 AuthorityCommitLog 恢复边界处理。 |
-| IR32-05 | [~] | 稳定操作身份与请求重放 | requestId、xfer-ULID、source/target device、conversation、sourceOwnerEpoch/nextOwnerEpoch 必须在发起、wire、双日志、恢复和响应中全等；并发同请求、异载荷复用、效果后响应丢失和连续重启不得产生第二 transfer 或 epoch。 | 发起、manifest、双日志、reducer 与 source commit 接受点保持稳定身份并拒绝异载荷。F32-01 中 client 未复核 result 外层 requestId/transferId，但错误响应只能在更深层无副作用失败，不能生成第二 transfer/epoch，评为 P2；本项无 P0/P1。 |
-| IR32-06 | [~] | 源端资格、双方 prepared 与准入线性化 | 仅当前本地域 owner 可把设备前缀全等的 local conversation 收编到已认证当前锚点；双方 prepared 对账后，源日志同一顺序重验会话未删除/无在途 transfer 并耐久关闭 fresh admission；错 owner/目标/epoch/会话在首个副作用前拒绝。 | 发现 F32-02：source `prepare()` 先以进程内 set 关闭部分写面并完成 settle，之后才向 source log 追加 prepared；准入关闭未与会话身份/删除和 transfer prepared 在同一日志前缀线性化，崩溃后 set 丢失。`answerInteractionWithTicket`、`resolveNoInteractiveSurface`、按 intentId discard 等写入口亦未反绑该 conversation gate。设备前缀、当前锚点和初始 epoch 的静态资格校验成立。 |
-| IR32-07 | [~] | freeze 前在途工作收束 | active/queued 的完整 runtime.run（不是单个 turn/attention window）、pending confirmation、interaction、final-outbox、advancement 与资源/finality 必须达到既有可判定终态或明确裁决后才冻结；drain 超时、取消竞态、final 暂态失败和并发新写不得产生假 frozen 或半终态。 | F32-02 同根：settle 会 abort run 并轮询 active work、final、assignment、recovery 与 lease，但 gate 只覆盖显式携带 conversationId 的部分 port；interaction 回答/无 surface 裁决和 intent discard 可在 command drain 后并发追加，因此“探针为零→freeze”之间仍有写入窗口，不能证明 frozen 前所有受支持写面已收束。 |
-| IR32-08 | [~] | 完整 conversation-owned 选择器 | manifest 必须覆盖 meta/transcript、run/control/publish/final-outbox、task-list/segment/advancement、session-activity、content-asset-index、intent 及 rubric 资产；共享流逐字段反绑会话，无法归属 fail-closed；GlobalState/job/trust/delivery、秘密、环境事实和缓存零进入。 | 发现 F32-03：selector 能覆盖 run/intent/session-activity、可见 conversationId 的 control、关联 publish/final-outbox，并从 SessionState snapshot 带出 meta/transcript/task/advancement、递归收集 rubric/content ref；但超过 inline 上限的 control `received` 只保存 `{ref}`，共享流记录中不再含 conversationId，当前 selector 不加载该 authority artifact 反绑，导致合法大 control 的 exact-replay 基底被静默漏出 manifest，而非 fail-closed。范围外 job/trust/delivery 未被选入。 |
-| IR32-09 | [~] | checkpoint、manifest 与窄取件口 | 同一 AuthorityCommitLog 前缀生成 DurableLogCheckpoint、规范 manifest artifact、记录基底和 SourceFreezeProof；checkpointDigest 必须等于 manifest ArtifactRef digest；read port 只允许 proof 绑定目标按声明 ref/range 读取，越范围、任意路径和任意 ArtifactStore 访问均拒绝。 | 已核对 source 以同一 executor log checkpoint 过滤 `lsn<=checkpoint.lsn`，规范化 records/session/manifest 后签 proof，proof checkpointDigest 等于 manifest ref digest；read port 每次从 durable transfer state 重验 phase、prepared target 与 manifest ref exact-set，并执行范围边界，未暴露路径或任意 ArtifactStore。 |
-| IR32-10 | [~] | 源端 abort、冻结恢复与重入 | 仅 pre-commit 合法 abort 可恢复源端原 epoch 准入并要求目标 staging 隔离清理；frozen 后不得自行重开写，commit 后 abort 恒拒绝；崩溃、网络/响应丢失、重复发起、坏尾和连续重启只从源 transfer 流追平。 | F32-02 同根：reducer/API 能拒绝 late abort，source restart 也会为非终态 transfer 恢复进程 gate；但生产 adoption 失败链从未调用 source abort 或 mesh abort，永久 target rejection 只被连接 obligation 无限重试，源会话没有可达的 pre-commit 恢复终态。进程 gate 仍非日志原子且覆盖不全，不能证明冻结恢复闭包。 |
-| IR32-11 | [~] | 目标资格与隔离 staging | target 仅存在于 anchor，且只接受 home 内 active source、正确 local conversation 前缀、source epoch 和无冲突目标/transfer；先落 target prepared，再建 transfer 私有 staging；imported/commit 前 session 目录、owner 查询、intent review 和业务写零可见。 | 发现 F32-04：target 角色和 active-source/local-id/现存会话/transfer 冲突检查成立，prepared 前业务不可见；但所谓 `ConversationTransferStagingStore` 实际直接注入 anchor 共用 `authority.artifacts`，没有 transfer 私有所有权或 namespace。import 前复制物已进入共享内容寻址库，abort 清理无法区分本次副本与既有保留对象。 |
-| IR32-12 | [~] | 拉取、容量、背压与锁顺序 | target 只经认证 transfer mesh 按 manifest 顺序 probe/range 拉取，分块接收复用 putVerifiedStream、storage governor 与设备唯一 arbiter；容量等待、取消、磁盘满、backpressure 不持 authority/ArtifactStore 锁，不得绕过治理或误报成功。 | 发现 F32-05：认证 mesh、manifest exact refs、256 KiB range 与 `putVerifiedStream` 摘要校验成立，复制发生在 authority transaction 外；但生产构造未向 target 传 `capacityStep`，因此流入和 abort 物理 I/O 使用默认裸 operation，未经过设备唯一 storage governor/arbiter，也没有 transfer 级取消信号。磁盘/容量失败会抛错而非误报，但治理合同被绕过。 |
-| IR32-13 | [~] | 全量校验与会话读面重建 | imported 前必须全验双端身份、proof、manifest 规范字节、lastLsn、各流计数/摘要、记录基底、全部 ArtifactRef、reducer version 和 source checkpoint；导入记录保持源 envelope 分组、LSN/时间顺序和 exact replay 身份，与目标后继无碰撞、漏序或重复；ConversationRunJournal/SessionState/attention window 只由 manifest+commit 指向的权威记录重建，不产生第二事实源。 | F32-03 同根：manifest/proof/ref/reducerVersion/stream count+digest 与 JSON 形状会校验，安装时按 source lsn+at 重组 immutable journal base；但大 control authority record 可在选择阶段漏失，target 校验只验证已声明集合，无法发现该漏项，也未把 imported control replay 基底安装进共享 ControlAdmission 投影。故完整 exact-replay 身份和全量 authority base 不成立。 |
-| IR32-14 | [~] | 部分导入、幂等追平与隔离清理 | 空/大资产、共享 digest、重复/乱序分块、部分导入、响应丢失和连续重启必须从同一 staging 追平；缺件、多列、损坏、错会话/epoch/digest/version 失败封闭；pre-commit abort 幂等清理私有 staging，不污染既有会话或共享资产。 | F32-04 同根：content-addressed has/probe/range 可幂等追平并对缺件/损坏/身份/version 失败封闭；但 `cleanupAborted` 对共享 store 中 manifest、records、sessionState 直接 `discard`。相同 digest 已被另一已提交 transfer 或权威对象保留时，abort 会物理删除共享副本，产生可达数据损坏；该清理不是私有 staging 幂等清理。 |
-| IR32-15 | [~] | 唯一 commit 与不可分可见性 | 仅 imported 全验后由目标签发 ConversationTransferCommit；同一 anchor AuthorityCommitLog 事务唯一切换目录可见性、current owner 与 nextOwnerEpoch，fsync 后投影和不可变历史基底零假阴性、零半套，重启可由 commit→manifest 确定恢复。 | 发现 F32-06：target 仅从 imported 签发并耐久追加唯一 commit，重启可由 commit→manifest 重新加载；但该 fsync 只切换 transfer/current-authority 投影，session 目录、adopted ownerEpoch 与 immutable history base 要在随后 `afterCommit → installCommittedConversationTransfer` 的进程内步骤才安装。commit 后安装失败/并发读取会出现 resolver 已指向 target 而 session 尚不存在的半套与假阴性。 |
-| IR32-16 | [~] | current-authority resolver 闭包 | conversation admission、run/assignment capability、control/session mutation、intent review、final/history、evidence 和公开 owner-aware route 必须读取同一窄 current-conversation-authority resolver；普通会话保持原 epoch，收编会话取 commit epoch，禁止 anchorEpoch/进程 local epoch 代替。 | F32-02/F32-06 同根：assignment 写守卫与 evidence verifier 使用 durable resolver，target protocol 安装后也按 adopted epoch 工作；但 source 的 session/control/interaction/intent 写面只看进程 set，target session admission 又依赖 commit 后内存安装，未共同读取同一 resolver。普通 fallback 与收编 epoch 计算局部正确，完整消费闭包不成立。 |
-| IR32-17 | [~] | 旧 owner 永久 fencing 与 tombstone | 源端只接受身份/proof/checkpoint 全等的当前锚点 commit；随后 fresh write、exact replay、intent/evidence/control/assignment 能力全部按旧 epoch 拒绝并返回有限重定向；共享 artifact 不误删，释放源引用和 tombstone 可重驱，commit 后只允许更高 epoch 前滚。 | F32-02 为直接 P0 反例：`acceptCommit` 会严格反绑并把 source 流推进 tombstoned，但 source 启动恢复明确跳过 tombstoned，进程 `#transferringConversations` 因而为空；本地 session 仍存在，port 的 create/ensure/mutate/run/interaction/intent 路径又未统一查 durable resolver。重启后旧设备可重新列出并写原会话，造成已收编会话双 owner/分叉；有限重定向也未实现。 |
-| IR32-18 | [~] | 双日志 coordinator 与崩溃恢复 | source/target/coordinator 以同 transferId 在各自日志协调；任一 fsync/ACK/网络边界崩溃、双方交错重启、重复往返、tombstone 失败均不得双 owner、丢 owner、重复会话/intent/task revision、资产误删或 epoch 回滚。 | 同根汇总：stable transferId 与双日志 replay 能恢复常规响应丢失；但 F32-06 在 target commit→安装窗口可形成暂时无可用 owner，F32-02 在 source tombstone 后重启可形成双 owner，F32-04 abort 可误删共享 artifact，F32-03 会漏 exact-replay 基底。故跨 fsync/重启的核心安全与耐久终态不成立。 |
-| IR32-19 | [x] | current-owner evidence verifier 装配顺序 | local ExecutorEvidenceHandler 与 mesh evidence service 两生产根必须注入同一 verifier；每次请求在 EvidenceJournal exact replay、workspace binding/路径解析及任何文件读取前核对 current device、ownerEpoch、conversation 与静态签名绑定。 | 已核对 access-surfaces 与 executor-role 两根均构造同一 `createConversationEvidenceAuthorityVerifier` 并把同一 handler 交给 local/mesh；`collect()` 顺序为 strict request/signature→executor/lease 静态绑定→durable current-owner resolver→EvidenceJournal replay→freshness→workspace/capability/path/file，旧 owner 在任何 journal/workspace/file 读取前失败。 |
-| IR32-20 | [x] | evidence replay、拒绝副作用与读取安全 | 旧 owner fresh 和历史 requestId 均零 journal/workspace/file 读取；current owner exact replay 返回原 bundle，异载荷冲突；错 device/conversation/workspace revision、过期或撤销均稳定拒绝，不泄漏物理路径、文件内容或内部 owner 事实。 | 已核对旧 owner 连历史 requestId 也先过 current-owner verifier；current exact replay 由 EvidenceJournal 返回，异载荷沿 request digest 冲突。workspace revision/capability/expiry、canonical root、open-handle 身份及读后复核均封闭，公开结果仅 bundle/capability-gap/stale 产品摘要，不返回绝对路径或 owner 内部事实。 |
-| IR32-21 | [~] | 第一方 owner-aware 路由与用户同意 | 仅现有第一方 session.new/list/resume、/new、/resume、REPL facade 可进入 owner-aware route；值班设备可达保持原路径，不可达必须先明确说明“继续在这台电脑工作（新对话）”及能力限制并取得显式同意；未知动态方法、渠道或工具不得旁路。 | 发现 F32-08：离线说明、显式确认、facade `continueLocally` 与有限 `LOCAL_METHODS` exact-set 均成立；但 executor-only server 永久注入 `LocalConversationRpcRouter`，该 router 对这些方法始终本地处理，mesh 重连后没有按 durable current owner 转发至 anchor 的分支。所谓 owner-aware route 实际只会选 local owner，成功收编后第一方入口无法继续原会话。 |
-| IR32-22 | [~] | local session 新建、查询与恢复 | 失联时只创建/列出/恢复本机 local-<device>-<ULID> 会话；锚点既有会话仍不可写，收编提交后原会话退出 local 可写/候选集合并只按 current owner 路由；错域/未知/已删除/冲突/忙碌具有确定终态；多接入面、响应丢失、重启和 resume 指针切换不得重复会话、双列或串 owner。 | F32-02/F32-08 同根：local id、显式 consent、错域/未知与本机 CRUD 基本成立；但 commit 后 `listConversations()` 未过滤 transfer current owner，运行中仍列出被冻结会话，tombstone 后重启甚至恢复可写；router 又不转发 anchor。因此“退出 local 候选并按 current owner 路由”完全缺失，可形成双列、不可写死路或双 owner。 |
-| IR32-23 | [~] | 自动收编候选与重连恢复 | 唯一 adoption coordinator 只选择当前设备未收编且用户明确同意的 local conversation，稳定复用原 transfer 身份；重连、并发触发、效果后响应丢失和连续重启不得漏收、重复收编或把失败/未完成显示为完成。 | coordinator 在认证 anchor 重连时按 local conversation ULID 稳定派生 transferId/requestId，并复用非 aborted durable state；但 F32-08 使完成后的 current-owner 旅程没有回到同一第一方入口，F32-02 又让本地候选不消失。故即使传输事实 committed，用户侧仍可能持续看到本地项/操作失败，无法把“收编完成”闭合为可继续使用的终态。 |
-| IR32-24 | [x] | 收编后 rubric 复核 | commit/安装恢复完成后才调用第 31 单元 internal review；收编层不得自行解析、改写或绕过 rubric-protocol 的保存态校验与运行契约；无冲突 rubric 可由有限 host 自动落定，资产缺失/协议无效/CAS/暂态失败保持可重试且不改 active snapshot；不得开放公开 intent RPC、第二 review 事实源或提前读取 staging。 | 已核对 review 仅由 `#installCommittedTransfer` 在 committed base 安装后触发，直接复用第 31 单元 DeferredIntent review/list/decide；非 time-sensitive intent 用稳定 host request 自动确认，失败保持 durable pending，time-sensitive 不自动应用。未新增公开 intent RPC、rubric 解析器、第二事实源或 staging 读取。F32-06 会影响触发时机可用性，但不会让 review 提前或越权执行。 |
-| IR32-25 | [~] | schedule 再确认与权威终态 | 四类 time-sensitive schedule intent 必须绑定当前 authenticated surface、原 intent/mutation/revision 并走现有 ConfirmationHub 和 anchor reducer；错 surface、过期、冲突、响应丢失、terminal replay 和物化失败不得重复 task revision或把 pending 显示完成。 | 发现 F32-07（价值裁决后收窄）：四类 intent、稳定 requestId、ConfirmationHub 与既有 durable decide/materializer 复用成立，失败会重排而非伪成功；`turnOrigin.triggeredBy` 实际绑定稳定 `surfacePrincipal`，因此同 client id 的普通断线重连可经 `confirmation.list` 继续处理。但进程级 `#requested` 把 intent 永久锁在首次创建 request 的 surfacePrincipal；服务端仍运行时若第一方 CLI 进程重启或由另一当前认证第一方 surface 恢复会话，新 surface 无法重建/接管该 pending，直到旧请求过期。 |
-| IR32-26 | [~] | observer、待确认重浮现与去重 | session.resume 必须先建立 observer/当前接入面身份再触发 adoption review；confirmation.list、live/history 与 RPC broker 复用同一 pending/decision 事实，连接切换、响应丢失和连续重启恰一次重浮现，不漏帧、不重复确认。 | resume 的确先 `addObserver` 再 review；post-adoption request 虽未绑定 conversation，但其 origin 使用稳定 surfacePrincipal，所以同身份网络重连能由 `confirmation.list` 补取。F32-07 的真实缺口是 surface 身份更换：CLI 进程重启会生成新的 clientInstanceId，或另一认证第一方面接管时，旧 ephemeral request 对新 surface 不可操作，而 `#requested` 又禁止按同 intent 重新绑定；服务端不重启时待确认项无法重浮现给当前 surface。 |
-| IR32-27 | [~] | 公开结果联合与零术语产品语言 | not-found、busy、invalid、identity/version conflict、temporary failure、adoption/review pending/success 必须映射为稳定、可行动且一致的产品终态；不得泄漏 anchor/owner/epoch/intent/CAS/stream/staging 等内部术语，不得把 provisional/pending/失败说成完成。 | local-only 能力限制、RPC 错误包装及 adoption review ready/retry 文案均为产品语言；但 F32-08 收编后仍命中 local router，真实 current-owner 路由缺失只会变成“本机操作没有完成”等泛化失败，不能区分已迁移/应在值班设备继续；F32-06 的 committed-but-not-installed 窗口也可落入既有 `Session not found: <id>`。公开终态不完整且不可行动。 |
-| IR32-28 | [~] | CLI/REPL 会话旅程完整性 | session facade、controller、commands 和 REPL 的启动 auto-resume、/new、/resume、收编摘要、能力限制与 pending confirmation 必须消费同一公开合同；单机在线行为不退化，多连接目标切换与早到事件不丢失或串会话。 | facade/controller/commands/REPL 已统一消费 availability、显式离线确认、adoptionReview 与早到事件切换窗口，在线 anchor 路径未被直接改写；但 F32-08 使 executor-only host 重连后仍只提供 local router，无法 resume 已收编 target 会话，F32-07 又会让第一方 CLI 进程重启或 surface 身份切换后的 schedule pending 不可操作，核心“失联继续→重连收编→继续原会话”旅程断裂。 |
-| IR32-29 | [~] | post-adoption memory 身份与触发边界 | 只在 ConversationTransferCommit 生效并安装权威 transcript/segment 后补驱动既有 MemoryFlush；operationId 由 conversationId+segment identity+原文/摘要 digest 稳定派生，transferId 不进幂等身份；staging/commit 前和源端生成的全局 memory 零消费。 | 已核对 memory 只从 `installCommittedConversationTransfer` 后重建的 `ConversationRunJournal.segmentMemoryFlushes()` 取得 committed segment，manifest 不携全局 memory；operationId 固定绑定 conversationId、segmentId、源消息 digest 与摘要 digest，不含 transferId，因而同一 segment 跨 transfer 身份稳定。F32-06 会影响 committed base 的可见时机，但没有形成 staging/source memory 的提前消费路径。 |
-| IR32-30 | [~] | memory 水位、失败与恢复 | 零/单/多 segment、已/未蒸馏混合、同 segment 跨 transfer、并行 intent review、LLM/GlobalState 效果前后失败、响应丢失和 anchor 连续重启必须保留可重建水位并最终追平，既有 segment 不重复 memory revision，后续 turn 沿同一水位继续。 | 发现 F32-09：post-adoption memory 只有进程内 `completed`/`inFlight`，启动恢复会重新遍历全部 committed transfer、完整 transcript 与全部 segment，并在每次重启重新调用非确定 LLM；GlobalState requestId 仅按 segment+输出序号稳定。某次 mutation 已生效但响应丢失后，重启若 LLM 输出内容、顺序或数量变化，同 requestId 会产生异载荷冲突，或新序号产生重复 revision，且不存在耐久 extraction 计划/segment 水位来证明已蒸馏。多 transfer/多 segment 还会同步无界扫描与重复付费，无法保证连续重启最终追平。 |
-| IR32-31 | [~] | 双生产根与角色 exact-set | anchor+executor 与 executor-only/远端 anchor 两根分别只能装配适用的 source、target、coordinator、evidence verifier、public router、review/memory consumer；同机复用正确日志/ArtifactStore/mesh，非 anchor 零 target/global consumer，八种 topology 的角色集合全等。 | transfer target、global memory/review 只在 anchor，source 与 evidence verifier 在两生产根按角色装配，日志/ArtifactStore 复用关系基本成立；但 F32-08 使 executor-only 根装配的公开 router 永久绑定 local owner，没有 current-owner/远端 anchor 路由能力。角色对象数量虽符合表面 exact-set，核心 public-router 角色语义不全等，重连收编后同一入口仍停留在旧 source。 |
-| IR32-32 | [~] | 启动、恢复与关闭顺序 | 启动必须先恢复 transfer 投影与 committed authority/历史基底再开放 mesh，并在公开业务准入前追平 post-adoption memory/review；派生消费者允许在 mesh 后绑定，但必须从耐久 commit 补扫且不得让公开面误报完成。关闭先拒绝新 transfer/公开写，停止后台但保留未终态耐久事实供重启重驱；不得遗留双 loop 或伪终态。 | F32-10 经价值裁决排除：`start()` 在开放 mesh control 前已恢复/安装 committed base，memory/review 随后绑定会补扫全部耐久 commit，且两者均早于公开 HTTP server；启动失败只导致整体服务暂不可用，下一次启动仍可追平，没有数据丢失、双 owner或错误公开完成。阻断仍来自 F32-06：current-owner commit fsync 后还依赖可失败的 session/history 安装步骤，commit 本身尚未形成可直接服务的完整 authority base。关闭能先停 control 并保留日志。 |
-| IR32-33 | [~] | transfer mesh 与 RPC 注册边界 | conversation.transfer 仅通过既有认证 mesh request channel，command/result 严格校验且 receiver/role 有限；session/confirmation 注册表与 local router exact-set 清晰，未知方法、错角色、未认证 source、任意 artifact/path 请求均 fail-closed。 | conversation.transfer 仅注册在 authenticated negotiated-version write channel，peer role/source device、manifest-bound ref/range 与 local session exact-set 均前置校验；未知方法、错角色、未认证 source 和任意 ref/path 均拒绝。F32-01 的 result correlation 缺口评为 P2，未构成注册面 P0/P1。 |
-| IR32-34 | [~] | S7 结构门禁与真实变异 | 现有单一 S7 gate/golden 必须反绑两根 source/target/coordinator、恢复顺序、current-owner verifier、public session exact-set、post-adoption review/memory 与 future-unit denylist；删除、重复、错角色、错顺序、绕过或新增入口真实变异失败，合法装配零误杀。 | 现有 S7 能检出 target 错角色、两根 verifier 缺失、local router 删除、bind 缺失和局部语句换序；但它把“存在 LocalConversationRpcRouter”当 owner-aware 路由完成（漏 F32-08），也未反绑 private staging、capacityStep、完整 current-owner 写面、schedule surface 重绑定与 durable memory 水位（漏 F32-02/F32-04/F32-05/F32-07/F32-09）。F32-10 所要求的“派生消费者必须先于 mesh”经价值裁决删除，不再建设对应门禁；其余真实生产缺陷仍可在当前 golden 下绿色，必要结构闭包不成立。 |
-| IR32-35 | [~] | 安全、最小权限与秘密/路径隔离 | 有限核对 transfer command/result/manifest/read-range、EvidenceRequest/Bundle、session adoption result 与 confirmation list/resolve：只含各自冻结身份和内容引用；秘密、环境事实、绝对路径、任意 workspace、raw repository/ArtifactStore 与 rubric 权限能力不迁移不逸出；签名受众、scope、epoch、deadline、capacity 与 path guard 在该链首次副作用前校验。 | manifest selector 不迁移 SecretStore、环境事实、绝对路径或 raw repository，evidence 也在 workspace/file 前验 current owner；但 F32-04 将所谓 staging 注入共享 ArtifactStore 并允许 abort 对共享 digest 直接物理删除，破坏最小权限/所有权隔离；F32-05 又使接收与清理 I/O 未在首次物理副作用前取得 capacity/governor permit；F32-01 允许 result 身份/commit 与外层请求错绑。安全边界仍有可达缺口。 |
-| IR32-36 | [~] | 资源、并发与容量失败 | 仅核对 transfer 拉取/staging、投影重建和 post-adoption memory 三类新增负载：必须复用既有 governor/arbiter，锁顺序无死锁、等待可取消、并发 single-flight/分页有界，磁盘满、容量不足和资源失败保留可恢复事实且不静默成功。 | F32-05：生产 target 未注入 `capacityStep`，transfer put/discard 绕过设备 governor/arbiter且无取消信号。F32-09：恢复按 committed transfer→全 transcript→全 segment 同步扫描，只有单进程逐 segment single-flight，无分页/耐久水位，连续启动会重复全部 LLM 工作；失败虽会抛出且日志事实保留，不会静默成功，但大历史可无界拖慢启动并重复消耗资源。 |
-| IR32-37 | [~] | 有限上游与既有产品兼容 | 两种部署形态完成同一核心旅程；普通锚点/本地域会话、在线 session.new/list/resume、confirmation.list/resolve、advancement resume/evidence、segment MemoryFlush 与现有 mesh 请求是有限回归集合；schedule/rubric、transcript/segment、SessionState、ArtifactStore、EvidenceJournal、ConfirmationHub 和第 31 单元 intent seam 只按现行合同消费，不增加渠道宿主、公开 intent 或全局写能力。 | 上游端口总体按现行合同复用，未新增渠道宿主、公开 intent 或本地域全局写能力；普通 anchor 会话和纯离线 local 会话也无直接退化。但 F32-08 使 executor-only 重连收编后的第一方 session 路径仍固定指向旧 local owner，两种部署形态无法完成同一“离线继续→自动收编→原会话继续”核心旅程；F32-07 同时破坏 CLI 进程重启/新 surface 接管后的既有 confirmation 重浮现。兼容闭包未通过。 |
-| IR32-38 | [~] | 架构、规格、wire 与后继边界同步 | 总纲 §9/§14、规格 transfer DTO/TransferRecord/§3.2b/§6.3/§15、core exports、session wire 与生产调用图必须全等；历史段保持非现行，AnchorTransferCommit、CheckpointEnvelope、TrustTransition、ReadyProof、灾难恢复和服务生命周期均未被当前 wire/装配接受。 | 后继 AnchorTransferCommit/CheckpointEnvelope/TrustTransition/ReadyProof、灾难恢复与服务生命周期没有进入当前 conversation mesh/生产装配，历史边界清晰；但当前总纲/规格要求的 private staging、唯一 commit 可见性、永久 fencing、owner-aware 第一方路由与耐久 memory 水位，生产调用图分别存在 F32-04/F32-06/F32-02/F32-08/F32-09。F32-10 仅反映过强的派生恢复顺序文字，已改按“authority base 先于 mesh、派生追平先于公开准入”的必要边界判定；其余现行架构与实际生效合同仍不全等。 |
-| IR32-39 | [~] | 成比例的直接验收证据 | 证据计划必须覆盖 strict codec/digest/签名与 §6.3 第 1～8 行、真实双日志 source/delete/write 竞争、target staging/容量/损坏/恢复、commit/fencing/evidence 读取 spy、两生产根公开开箱/失联继续/重连收编/异常恢复四时刻、review/confirmation/memory 故障和 S7 真实变异；八配置只验证 exact-set，不做配置×故障笛卡尔积。 | 现有直接证据只有 core codec/reducer 5 例、owner source/target 3 例、local router 3 例、review 3 例、memory 4 例及有限 S7 文本变异；没有真实双日志 delete/write/freeze 竞争、共享 digest abort、capacity、commit→安装故障、tombstone 重启旧写、两根 end-to-end 重连收编后继续、surface 身份更换后的 confirmation 接管或非确定 memory replay。它们正是 F32-02/F32-04～F32-09 的可达失败，现有绿色证据实际漏过 P0/P1，无法安全提交；F32-10 的过强启动顺序测试不再要求，八配置也无需扩成故障笛卡尔积。 |
-| IR32-40 | [~] | 来源、D32 义务与路径反向闭包 | D32-01～D32-08、全部适用来源条款及 50 个功能路径必须按 core 合同/协议与 memory hook、owner-kernel transfer/assignment/manager、CLI transfer/assembly、current-owner evidence、server/RPC/session/confirmation、CLI 会话体验、架构规格同步、S7 门禁与直接测试九组逐一归入 IR32-01～IR32-39；每组有生产端、消费端、共享原语、装配、正常/异常/恢复和直接证据落点，每条实现有当前架构依据；不存在未判定来源、遗漏、重复、越界或以测试存在代替功能判断。 | 已将 D32-01～D32-08、全部适用来源与 baseline→HEAD 的 50 个功能路径反向对入九组：core 合同/协议+memory、owner-kernel transfer/assignment/manager、CLI transfer/assembly、current-owner evidence、server/RPC/session/confirmation、CLI 产品旅程、架构规格、S7 与直接测试。每组的生产/消费/装配/故障恢复/证据均已有 IR32-01～IR32-39 有限落点；本轮发现的是落点内实现失败而非新的未归项功能链，也未发现后继能力或范围外增强混入。 |
+| IR33-01 | [ ] | 单元身份、边界与完整交付物 | 冻结 HEAD `dd50eec8` 到当前工作区的 42 个变化路径并二元归属；38 个功能路径必须全部反绑 D33-01～D33-08，4 个 workbench 路径不参与功能判定；不得混入第 34～38 单元、通用备份/同步框架或未配置单机的新恢复概念。 | — |
+| IR33-02 | [ ] | full payload 身份、覆盖与唯一信封 | `FullAuthorityCheckpointPayload.v1` 必须逐字段绑定 checkpoint/home/issuer/recipient/purpose、精确 `DurableLogCheckpoint`、trust chain head、四类 coverage、records 与 retainedArtifacts 目录；periodic/root-activation 共用唯一 `CheckpointEnvelope.v1`，少列、多列、乱序、重复、错 root/log/target/coverage 均 fail-closed。 | — |
+| IR33-03 | [ ] | 恢复包版本与旧 S2 兼容 | 新编码只含版本化高熵恢复主秘密与根身份，不内嵌全量密文；旧 secret+trust-only package 仍可严格解码和完成既有 mesh-ready 重放，但不能由新编码器生成、不能被识别为 full payload 或令 `fullBackupReady` 为真；未知版本/字段/非规范编码拒绝。 | — |
+| IR33-04 | [ ] | checkpoint/verification strict codec 与关联 | envelope、full payload、stream record、verification、paired command/result 必须是严格判别联合并逐字段反绑 originating checkpoint/purpose/issuer/recipient/target/ref/digest/nonce/seq；异载荷 exact replay、错关联与未知字段在任何耐久推进或 I/O 前拒绝。 | — |
+| IR33-05 | [ ] | 唯一 authority 前缀冻结与复验 | capture 只能从 current anchor 唯一 `AuthorityCommitLog` 固定一个 logId/lsn/frameEndOffset/prefixDigest，按规范页读取恰至该前缀并在返回前复验；并发追加进入下一代，坏尾、错 log/prefix、越 LSN、读中漂移在 `checkpoint-created` 前零事实、零目标写。 | — |
+| IR33-06 | [ ] | 六类权威覆盖与保留资产闭包 | 逐行核对 §7 六类：四类应入内容完整、环境/秘密与非权威缓存零进入；ArtifactLifecycleIndex 必须追平并绑定 IR33-05 的同一 log checkpoint 后再生成当前保留记录及传递 `ArtifactRef` 闭包。共享/嵌套/外置/大资产去重且完整，缺 ref、错 bytes/digest、索引落后/损坏或覆盖缺口均 fail-closed，不从投影文件或缓存补事实。 | — |
+| IR33-07 | [ ] | 禁止类别与 checkpoint 防递归 | 环境事实、SecretStore/设备秘密、workspace 原始路径、设备/执行缓存、非权威缓存和旧 checkpoint envelope/chunks 不可表示；checkpoint lifecycle 的旧引用不得递归进入新载荷，但当前候选本地 envelope/chunks 仍由生命周期索引正确保留。 | — |
+| IR33-08 | [ ] | 捕获与本地资产资源治理 | 日志页、资产页、明文块、临时空间和 ArtifactStore I/O 必须逐步使用现有 `authority-checkpoint` storage governor；permit 不跨 authority/store/lifecycle 锁，等待可取消，容量不足/磁盘满/stop 保持零伪成功和可重驱事实。 | — |
+| IR33-09 | [ ] | periodic/root-activation 共用密码内核 | 两种 purpose 必须复用唯一 X25519-HKDF-SHA256、AES-256-GCM create/open 内核及 ephemeral enc、wrapped DEK、nonce/AAD、verificationNonce、自摘要和 issuer 签名；periodic 不接受 plan，root-activation 必须全等绑定完整 plan，跨 purpose replay 拒绝。 | — |
+| IR33-10 | [ ] | 分块落盘顺序、exact-set、篡改拒绝与清零 | 固定上限的 plaintext/ciphertext chunk 必须连续 exact-set、逐块 bytes/digest/nonce/AAD 全等；每块先写入并回验 current ArtifactStore，envelope 最后耐久，`checkpoint-created` 只能引用已在场的 envelope/chunks，部分本地写仅形成可回收孤儿。截断、重排、重复、超界、错 key/enc/wrappedDek/signature/payload 任一失败零 verified/激活推进，DEK、共享秘密、nonce 与已解明文在成功/失败路径均清零且不落持久明文。 | — |
+| IR33-11 | [ ] | 单目标配置与稳定 target identity | `zz backup setup` 一次只允许独立目录或一台 active paired device；版本化 targetId→binding 严格解析、稳定持久化，targetId 不泄漏/反推路径；切换配置不丢仍有 created/replicated/superseded 未清理代际的旧映射，异身份/异载荷重放拒绝。 | — |
+| IR33-12 | [ ] | 目录目标物理独立与路径安全 | configured root 必须冻结 lexical/canonical path 与 filesystem identity，拒绝与 authority root 同物理域、root 自身 link/reparse、非目录、越根及绑定/遍历/打开/读后替换；最终文件 no-follow、handle identity 与 frozen containment 全程一致，非法路径零根外读写。 | — |
+| IR33-13 | [ ] | 目录目标原子耐久发布与真回读 | 每个 checkpoint 使用私有临时目录，逐文件写入/fsync、manifest/envelope/chunk exact-set 校验、原子 rename 与目录 fsync 后才可见；同载荷幂等、异载荷冲突、部分/崩溃发布不可见，read 必须逐字节回读同包，retire 只删除指定 superseded 代际。 | — |
+| IR33-14 | [ ] | paired 有限协议与认证边界 | paired service 只暴露 begin/progress/append/commit/get/range/retire 有限命令，严格绑定 home、source/target active device、recipient、checkpoint/ref/range/seq 与结果类型；未知命令、已撤销或失去 active target 角色、错成员/身份、任意 path/ArtifactStore 或越界 range 在业务 I/O 前拒绝。 | — |
+| IR33-15 | [ ] | paired 断点续传、staging 与真实回读 | 传输按有界 part 续做，receiver 只写 target 私有 staging，exact-set 完整验真后才原子提升目标；断连、乱序、重复、部分 append/commit、响应丢失和连续重启复用同 checkpoint 身份且不重复/串包；get/range 必须从已发布目标逐字节回读，retire 不误删共享内容。 | — |
+| IR33-16 | [ ] | 首次配对 onboarding 顺序 | 新设备在业务成员/mesh 能力开放前只运行受限认证 onboarding receiver；issuer 以同 checkpointId 写入、真回读、解封验证并原子激活恢复根后才发布业务信任，恢复包读回失败、链变化、断连或响应丢失不得出现 mesh-ready 但无已验证 full backup 的窗口。 | — |
+| IR33-17 | [ ] | 周期 owner exact-set 与 stable due identity | trusted-home current anchor 或显式启用备份的单机 current anchor 恰一 owner；UTC 日历日/forced request 与当前 root+target 共同确定唯一候选，同根同目标的同日并发与 daily/forced single-flight，墙钟回拨及 root/target 切换不得另造或误重放候选；无根、无目标、非 current anchor、executor-only、surface、target 已撤销和未启用单机零周期事实并返回稳定可行动状态。 | — |
+| IR33-18 | [ ] | created→replicated 耐久生命周期与重放 | 创建前捕获可重算；`checkpoint-created` 后 checkpoint/source/recipient/target/envelopeRef 全冻结，复制只重驱同一代，目标 durable 后才写 `checkpoint-replicated`；效果前后失败、取消、响应丢失、配置切换、停机与连续重启不另造候选或伪造复制。 | — |
+| IR33-19 | [ ] | root/chain 变化与 activation 原子性 | 首次单机目录 setup、首次配对 onboarding 及后续 establish/rotate 均复用现有 coordinator；未激活候选在 root/chain/target 变化时失效并安全重建，已提交激活 exact replay；created/replicated/verification/trust event 的原子边界保持既有 S2 合同，不得出现当前根有效但相应独立备份未验证的窗口。 | — |
+| IR33-20 | [ ] | 真实目标回读、真解封与 verified 事务 | verify 只能按 created 绑定的真实 target/checkpoint 回读，完整打开 envelope/payload 并核对 root、chain、scope、source、target、recipient、nonce/digests；随后同一 `AuthorityCommitLog` 事务幂等写全等 verification，错包/旧根/旧链/效果后丢响应零错误推进。 | — |
+| IR33-21 | [ ] | 恢复主秘密输入与零持久化 | 第一方 verify/setup 只经保密交互临时读取/生成恢复包；主秘密不得进入 argv、env、配置、SecretStore、日志、status、RPC 或错误文本，使用后清零；创建/复制/日常 owner 不接触主秘密，只有真解封路径能取得 verificationNonce。 | — |
+| IR33-22 | [ ] | 双 readiness 投影 | 既有 S2 `ready` 继续只表示 mesh/root activation；`fullBackupReady` 必须由当前 root、独立 target、全量 scope 的 created+replicated+真解封 verified 全等派生，并给出有限 checkpoint/target/time/lsn 内部投影；旧 trust-only、仅复制、验证失败、旧根/链或每日过期不得冒充或改变冻结 ready 谓词。 | — |
+| IR33-23 | [ ] | backup CLI、/status 与产品语言 | `zz backup setup/verify/status`、server.info 与 `/status` 必须消费同一 readiness/status 合同，稳定显示未配置/待验证/可恢复和下一动作；错包、目标不可达、容量/暂态失败可行动且不把 pending/失败说成完成，不暴露 root、LSN、digest、CAS、target 内部路径等实现术语。 | — |
+| IR33-24 | [ ] | verified 后替换与最少一代可恢复 | 只有同 current root 的新 full checkpoint 从独立目标真解封并 verified，才能在同一 checkpoint 事务把旧代标记 superseded；较新候选失败、仅 replicated、旧根或非 full 不替换，首次 ready 后始终保留至少一个维持 `fullBackupReady` 的代际。 | — |
+| IR33-25 | [ ] | 27 天 retention 与本地/远端清理 | superseded 满 27 天后才以 storage-maintenance single-flight 回收本地 envelope/chunks 与原 target 副本；远端不可达/删除失败保留重试义务且不影响新代 ready，未发布临时目录可清，created/replicated 未替换候选可续做；ArtifactLifecycleIndex 复核保证共享业务 ref 零误删。 | — |
+| IR33-26 | [ ] | 跨根、跨目标与代际恢复 | root rotate 后旧根包立即不计 ready且不 rewrap；新根 full verified 前不得清唯一旧代物理副本，目标切换仍能按耐久 targetId 找回/清理旧代；并发 verify/supersede/cleanup、响应丢失和连续重启必须收敛到单调代际，无 ready 回滚或跨 target 误删。 | — |
+| IR33-27 | [ ] | 两生产根、角色与 receiver exact-set | 显式启用单机 current anchor、anchor+executor、anchor-only/远端 executor 中只有 current anchor 恰一 service/capture/target client；首次 pairing onboarding receiver 与 active paired backup receiver 按阶段各恰一，executor-only、surface、非 current anchor 和未启用单机零 owner/权威读取。 | — |
+| IR33-28 | [ ] | 启动恢复、公开准入与关闭 | 启动在 backup 管理入口和第 34 单元接缝前恢复 created/replicated/verified/superseded/cleanup 与 target binding/readiness；关闭先拒绝新创建，在安全页/块边界取消并等待 active work、停 timer/receiver、释放 permit，未终态耐久事实留给重启重驱，不遗留双 owner/loop 或伪终态。 | — |
+| IR33-29 | [ ] | 迁居前 forced 窄接缝 | 下游只能查询当前 root 的 verified full checkpoint或以稳定 request 请求当前 owner 创建/复制同一候选；无 recovery package 时不得假装 verified，失败保留可重试状态；接缝不得读取/导入 catalog、冻结 source、提交 transfer、切换 current anchor 或执行 restore。 | — |
+| IR33-30 | [ ] | S7 入口、装配与角色门禁 | 现有单一 S7 gate/golden 必须逐项反绑规格 recovery-backup 行的 setup/verify/status、daily/forced trigger、paired put/get/retire，及生产 owner create/start/stop、current-anchor guard、onboarding/active receiver 顺序和角色 exact-set；删除、重复、错角色、错顺序、绕过或新增入口的真实变异 fail-closed，合法两根和未启用配置零误杀，不建新 lint/发现框架。 | — |
+| IR33-31 | [ ] | 安全、最小权限与 wire/path 隔离 | 有限核对 full payload、envelope、recovery package、directory manifest、paired command/result、status/RPC：只含冻结身份和内容引用；秘密、环境事实、绝对路径、raw store/log 与通用读取/删除能力不逸出，签名/受众/role/root/target/ref/range/path guard 均在该链首次副作用前验证。 | — |
+| IR33-32 | [ ] | 资源、并发与故障终态 | 空/大资产、并发 capture/verify/cleanup、容量饱和、磁盘满、取消、stop、网络等待和锁序必须有界；网络不持 permit，permit 不跨 authority/store/lifecycle 锁，single-flight/分页/chunk 有上限；每个失败要么零耐久副作用，要么留下可恢复的唯一 checkpoint 事实且不静默成功。 | — |
+| IR33-33 | [ ] | 成比例的直接验收证据 | 证据计划必须覆盖 strict codec/恢复包、真实 AuthorityCommitLog/FileArtifactStore/ArtifactLifecycleIndex、六类覆盖与防递归、共用 crypto/篡改、目录/paired 目标、created→verified/替换/清理、容量/停机、根/链变化、双 readiness、两生产根与 S7 真实变异；配置只做角色 exact-set，不做配置×故障笛卡尔积。 | — |
+| IR33-34 | [ ] | 上游 S2 与共同装配点兼容 | 有限核对既有 trust-only root activation package、恢复包读取、mesh-ready、首次配对、单机/anchor serve 启动、canonical registry 与 server.info 共同装配点；full checkpoint 只扩展同一信封/日志/状态，不改旧签名语义、不要求已部署用户立刻配置备份、不把 backup 失败变成普通业务不可用。`@zhixing/mesh` manifest/tsup 新出口不得改变受管安全依赖精确版本/owner或暴露 PAKE 适配器；不把全部 session/confirmation/transfer 协议回归扩成 S9 门禁。 | — |
+| IR33-35 | [ ] | 架构/规格同步与后继能力守界 | 总纲 S9、规格 full payload/§7/§8/§15、core exports、mesh/CLI/server 合同和生产调用图必须全等；第 34/35 单元只见冻结窄接缝/载荷，`SourceFreezeProof(anchor)`、AuthorityCatalog import、TrustTransition、ReadyProof、AnchorTransferCommit、restore/domain-reset/reenroll/credential rotation 未进入当前 wire、CLI 或装配。 | — |
+| IR33-36 | [ ] | 来源、D33 义务与路径反向闭包 | D33-01～D33-08、全部适用来源条款及 38 个功能路径必须按 core 合同/retention/governor、mesh full capture/crypto/service/target/owner、paired/onboarding、CLI config/commands/assembly、server/status、架构规格、S7 与直接测试八组逐一归入 IR33-01～IR33-35；每组具生产端、消费端、共享原语、装配、正常/异常/恢复和证据落点，不得有未判定、重复、越界或以测试存在代替功能判断。 | — |
 
-> 第 32 单元本轮独立审查已完成：12 项 `[x]`、28 项 `[!]`、0 项 `[ ]`、0 项 `[~]`。阻断问题已转入第 32 单元正式问题列表，当前交付未通过独立审查。
+> 第 33 单元独立审查清单已定稿：36 项 `[ ]`、0 项 `[x]`、0 项 `[!]`、0 项 `[~]`。当前尚未执行独立审查，两类问题列表为空不代表审查结论。
 
 ---
 

@@ -31,6 +31,7 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "ticket-retirement",
   "stream-spool-reclaim",
   "conversation-transfer",
+  "authority-checkpoint",
 ] as const;
 
 export type StorageMaintenanceKind =
@@ -51,6 +52,7 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "ticket-retirement": "executor-data-plane",
   "stream-spool-reclaim": "executor-data-plane",
   "conversation-transfer": "conversation-transfer-owner",
+  "authority-checkpoint": "authority-checkpoint-owner",
 } as const satisfies Readonly<
   Record<StorageMaintenanceKind, string>
 >;
@@ -482,6 +484,8 @@ const STORAGE_STEP_BUDGETS: Readonly<
   "stream-spool-reclaim": budget(16 * MIB, 0, 256 * MIB, 256 * MIB, 4_096),
   // conversation transfer = one bounded network chunk followed by one local durable write.
   "conversation-transfer": budget(16 * MIB, 0, 32 * MIB, 32 * MIB, 256),
+  // authority checkpoint = one bounded log/artifact page or one durable target step.
+  "authority-checkpoint": budget(16 * MIB, 16 * MIB, 16 * MIB, 16 * MIB, 256),
 };
 
 export function storageMaintenanceRequest(
