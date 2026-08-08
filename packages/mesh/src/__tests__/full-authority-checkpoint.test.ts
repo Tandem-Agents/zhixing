@@ -8,6 +8,10 @@ import {
   FileArtifactTemporaryPresenceStore,
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
+  type ArtifactCheckpointRetentionPort,
+  type ArtifactStore,
+  type AuthorityCommitLog,
+  type DurableLogCheckpoint,
 } from "@zhixing/core/authority";
 import { MAX_SURFACE_ASSET_BYTES, type CheckpointStreamRecord, type HomeTrustRecord } from "@zhixing/core/contracts";
 import type {
@@ -20,7 +24,11 @@ import { byteDigest, canonicalize, protocolDigest } from "../canonical.js";
 import { AuthorityCheckpointService } from "../checkpoint-service.js";
 import { AuthorityCheckpointOwner } from "../checkpoint-owner.js";
 import { FileRecoveryCheckpointTarget, type RetirableRecoveryCheckpointTarget } from "../checkpoint-target.js";
-import { openFullAuthorityCheckpoint, type CheckpointPackage } from "../checkpoint.js";
+import {
+  openFullAuthorityCheckpoint,
+  readCheckpointChunk,
+  type CheckpointPackage,
+} from "../checkpoint.js";
 import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
 import { captureFullAuthorityCheckpoint } from "../full-checkpoint.js";
 import {
@@ -75,6 +83,16 @@ describe("full authority recovery checkpoints", () => {
 
   it("captures one exact authority prefix, encrypts it, and excludes checkpoint recursion", async () => {
     const fixture = await authorityFixture();
+    const readLimits: number[] = [];
+    const boundedLog = {
+      originCheckpoint: fixture.log.originCheckpoint.bind(fixture.log),
+      checkpoint: fixture.log.checkpoint.bind(fixture.log),
+      readEnvelopeAt: fixture.log.readEnvelopeAt.bind(fixture.log),
+      readTail: async (checkpoint: DurableLogCheckpoint, limit: number) => {
+        readLimits.push(limit);
+        return fixture.log.readTail(checkpoint, limit);
+      },
+    } as unknown as AuthorityCommitLog;
     const business = Buffer.from("retained-business-asset");
     const businessRef = await fixture.artifacts.put(business);
     const oldCheckpoint = Buffer.from("old-checkpoint-envelope");
@@ -94,10 +112,12 @@ describe("full authority recovery checkpoints", () => {
       trust: fixture.trust,
       issuer: fixture.issuer,
       recipient: fixture.root.publicIdentity(),
-      log: fixture.log,
+      log: boundedLog,
       artifacts: fixture.artifacts,
       retention: fixture.lifecycle,
     });
+    expect(readLimits.length).toBeGreaterThanOrEqual(2);
+    expect(readLimits.every((limit) => limit === 1)).toBe(true);
     await fixture.log.append([{ stream: "control", body: { t: "later" } }]);
 
     expect(captured.source.payload.source.lsn).toBe(1);
@@ -108,8 +128,9 @@ describe("full authority recovery checkpoints", () => {
       "conversation-content",
       "execution-assets",
     ]);
+    const materialized = await materializePackage(captured.checkpoint);
     const opened = openFullAuthorityCheckpoint({
-      package: captured.checkpoint,
+      package: materialized,
       recoveryRoot: fixture.root,
       issuer: fixture.identity,
     });
@@ -123,7 +144,7 @@ describe("full authority recovery checkpoints", () => {
       opened.recordPages.forEach((bytes) => bytes.fill(0));
       opened.retainedArtifacts.forEach((bytes) => bytes.fill(0));
     }
-    const tampered = clonePackage(captured.checkpoint);
+    const tampered = clonePackage(materialized);
     tampered.chunks[0]!.bytes[0] ^= 1;
     expect(() => openFullAuthorityCheckpoint({
       package: tampered,
@@ -131,7 +152,7 @@ describe("full authority recovery checkpoints", () => {
       issuer: fixture.identity,
     })).toThrow(/chunk content/);
 
-    const unknownHeader = clonePackage(captured.checkpoint);
+    const unknownHeader = clonePackage(materialized);
     (unknownHeader.envelope as unknown as Record<string, unknown>).unexpected = true;
     expect(() => openFullAuthorityCheckpoint({
       package: unknownHeader,
@@ -139,7 +160,7 @@ describe("full authority recovery checkpoints", () => {
       issuer: fixture.identity,
     })).toThrow(/missing or unknown fields/);
 
-    const duplicateChunk = clonePackage(captured.checkpoint);
+    const duplicateChunk = clonePackage(materialized);
     duplicateChunk.chunks.push({
       seq: duplicateChunk.chunks[0]!.seq,
       bytes: Buffer.from(duplicateChunk.chunks[0]!.bytes),
@@ -184,6 +205,71 @@ describe("full authority recovery checkpoints", () => {
 
     expect(captured.source.payload.retainedArtifacts.entries).toContainEqual(large);
     expect(captured.source.payload.retainedArtifacts.entries).not.toContainEqual(deleted);
+  }, 120_000);
+
+  it("rejects an oversized retention directory while refs are entering the fixed header budget", async () => {
+    const fixture = await authorityFixture();
+    const origin: DurableLogCheckpoint = {
+      logId: "header-budget",
+      lsn: 0,
+      frameEndOffset: 0,
+      prefixDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    };
+    const target: DurableLogCheckpoint = {
+      ...origin,
+      lsn: 1,
+      frameEndOffset: 1,
+      prefixDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    };
+    const commit = {
+      v: 1 as const,
+      t: "CommitEnvelope" as const,
+      lsn: 1,
+      at: AT,
+      envelopeDigest: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      entries: Array.from({ length: 12_000 }, (_, index) => ({
+      stream: "control",
+      body: {
+        t: "global-state-write",
+        ref: {
+          digest: `sha256:${index.toString(16).padStart(64, "0")}`,
+          bytes: 1,
+        },
+      },
+      })),
+    };
+    const log = {
+      originCheckpoint: async () => origin,
+      checkpoint: async () => target,
+      readTail: async (_checkpoint: DurableLogCheckpoint, limit: number) => {
+        expect(limit).toBe(1);
+        return { commits: [commit], checkpoint: target, hasMore: false };
+      },
+      readEnvelopeAt: async () => commit,
+    } as unknown as AuthorityCommitLog;
+    const retention = {
+      checkpointRetentionSnapshot: async () => ({ sourceHeads: { [target.logId]: target } }),
+      retainedAtCheckpoint: async () => {
+        throw new Error("Retention filtering must not run after the header budget is exhausted");
+      },
+    } as ArtifactCheckpointRetentionPort;
+    const artifacts = {
+      readRange: async () => {
+        throw new Error("Artifact content must not be read after the header budget is exhausted");
+      },
+    } as unknown as ArtifactStore;
+
+    await expect(captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000012",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log,
+      artifacts,
+      retention,
+    })).rejects.toThrow(/payload header exceeds/);
   }, 120_000);
 
   it("derives distinct current-ready generations for chain changes and same-day root rotation", async () => {
@@ -279,7 +365,10 @@ describe("full authority recovery checkpoints", () => {
       createdAt: "2026-08-09T00:00:00.000Z",
     });
     await service.verify({ checkpointId: second.envelope.checkpointId, recoveryRoot: fixture.root });
-    expect(await service.verificationCandidate()).toBe(second.envelope.checkpointId);
+    expect(await service.verificationCandidate()).toEqual({
+      checkpointId: second.envelope.checkpointId,
+      targetId: target.targetId,
+    });
     expect((await checkpointRecords(fixture.log)).some((record) =>
       record.t === "checkpoint-superseded" &&
       record.checkpointId === first.envelope.checkpointId &&
@@ -294,6 +383,32 @@ describe("full authority recovery checkpoints", () => {
       ...second.envelope.chunks.map(({ digest, bytes }) => ({ digest, bytes })),
     ])).toHaveLength(second.envelope.chunks.length);
 
+    await fixture.log.append([{
+      stream: "checkpoint",
+      body: {
+        t: "checkpoint-cleanup-progress",
+        checkpointId: first.envelope.checkpointId,
+        supersededBy: second.envelope.checkpointId,
+        targetId: target.targetId,
+        phase: "local-released",
+        at: "2026-08-10T00:00:00.000Z",
+      } satisfies CheckpointStreamRecord,
+    }, {
+      stream: "checkpoint",
+      body: {
+        t: "checkpoint-cleanup-progress",
+        checkpointId: first.envelope.checkpointId,
+        supersededBy: second.envelope.checkpointId,
+        targetId: target.targetId,
+        phase: "local-released",
+        at: "2026-08-11T00:00:00.000Z",
+      } satisfies CheckpointStreamRecord,
+    }]);
+    expect(await service.status()).toMatchObject({
+      state: "recoverable",
+      checkpointId: second.envelope.checkpointId,
+    });
+
     await service.cleanupExpired("2026-09-05T23:59:59.999Z");
     expect(target.has(first.envelope.checkpointId)).toBe(true);
     await service.cleanupExpired("2026-09-06T00:00:00.000Z");
@@ -301,7 +416,7 @@ describe("full authority recovery checkpoints", () => {
     expect(target.has(second.envelope.checkpointId)).toBe(true);
   }, 120_000);
 
-  it("replays an old target obligation and records both cleanup phases after a binding switch", async () => {
+  it("replays an old target obligation and records only target retirement after a binding switch", async () => {
     const fixture = await authorityFixture();
     const oldTarget = new ResponseLossTarget("backup-dir:old", "filesystem:old");
     const oldService = checkpointService(fixture, oldTarget);
@@ -337,7 +452,11 @@ describe("full authority recovery checkpoints", () => {
       record.t === "checkpoint-replicated" &&
       record.checkpointId === oldCreated.checkpointId &&
       record.targetId === oldTarget.targetId)).toBe(true);
-    await oldService.verify({ checkpointId: oldCreated.checkpointId, recoveryRoot: fixture.root });
+    expect(await currentService.verificationCandidate()).toEqual({
+      checkpointId: oldCreated.checkpointId,
+      targetId: oldTarget.targetId,
+    });
+    await currentService.verify({ checkpointId: oldCreated.checkpointId, recoveryRoot: fixture.root });
 
     const current = await currentService.createAndReplicate({
       request: { kind: "daily", day: "2026-08-09" },
@@ -352,7 +471,7 @@ describe("full authority recovery checkpoints", () => {
     const progress = (await checkpointRecords(fixture.log)).filter((record) =>
       record.t === "checkpoint-cleanup-progress" && record.checkpointId === oldCreated.checkpointId);
     expect(progress.map((record) => record.t === "checkpoint-cleanup-progress" ? record.phase : ""))
-      .toEqual(["target-retired", "local-released"]);
+      .toEqual(["target-retired"]);
     expect(oldTarget.has(oldCreated.checkpointId)).toBe(false);
   }, 120_000);
 
@@ -399,18 +518,22 @@ describe("full authority recovery checkpoints", () => {
       storageMaintenance: sourceGovernor.port,
     });
     await target.writeDurable(captured.checkpoint);
-    const staleRetired = path.join(root, "incoming",
+    const incoming = path.join(root, "incoming");
+    await rename(incoming, `${incoming}.original`);
+    await mkdir(incoming);
+    const staleRetired = path.join(`${incoming}.original`,
       `.${captured.checkpoint.envelope.checkpointId}.${byteDigest(
         Buffer.from(canonicalize(captured.checkpoint.envelope), "utf8"),
       ).slice(7, 23)}.retired`);
     await mkdir(staleRetired);
-    await writeFile(path.join(staleRetired, "interrupted"), "stale");
+    await writeFile(path.join(staleRetired, "envelope.json"), canonicalize(captured.checkpoint.envelope));
     await target.writeDurable(captured.checkpoint);
-    expect((await readdir(path.join(root, "incoming"))).some((entry) => entry.endsWith(".retired")))
+    expect(await readdir(incoming)).toEqual([]);
+    expect((await readdir(`${incoming}.original`)).some((entry) => entry.endsWith(".retired")))
       .toBe(false);
-    expect(canonicalPackage(await target.read(captured.checkpoint.envelope.checkpointId))).toBe(
-      canonicalPackage(captured.checkpoint),
-    );
+    const remote = await materializePackage(await target.read(captured.checkpoint.envelope.checkpointId));
+    const local = await materializePackage(captured.checkpoint);
+    expect(materializedBytes(remote)).toEqual(materializedBytes(local));
     await target.retire(captured.checkpoint.envelope.checkpointId, "01J00000000000000000000005");
     await expect(target.read(captured.checkpoint.envelope.checkpointId)).rejects.toThrow(/not present/);
     expect(governor.requests.length).toBeGreaterThan(0);
@@ -441,15 +564,23 @@ describe("full authority recovery checkpoints", () => {
     await expect(FileRecoveryCheckpointTarget.open({ sourceRoot: source, targetRoot: target }))
       .rejects.toThrow(/physically independent/);
 
+    const missing = path.join(root, "missing-target");
+    await expect(FileRecoveryCheckpointTarget.open({
+      sourceRoot: source,
+      targetRoot: missing,
+      create: false,
+    })).rejects.toThrow();
+    expect(await readdir(root)).not.toContain("missing-target");
+
     const linked = path.join(root, "linked-target");
     await symlink(target, linked, process.platform === "win32" ? "junction" : "dir");
     await expect(FileRecoveryCheckpointTarget.openPaired({
       targetRoot: linked,
       targetDeviceId: "device-target",
-    })).rejects.toThrow(/symbolic link|real directory/);
+    })).rejects.toThrow(/symbolic link|real directory|reparse point/);
   });
 
-  it("rejects configured-root replacement and final-file hard links before external effects", async () => {
+  it("keeps configured-root replacement on the frozen object and rejects final-file hard links", async () => {
     const fixture = await authorityFixture();
     const captured = await captureFullAuthorityCheckpoint({
       checkpointId: "01J00000000000000000000012",
@@ -471,8 +602,9 @@ describe("full authority recovery checkpoints", () => {
     });
     await rename(replacedRoot, `${replacedRoot}.original`);
     await mkdir(replacedRoot);
-    await expect(replacedTarget.writeDurable(captured.checkpoint)).rejects.toThrow(/identity changed/);
+    await replacedTarget.writeDurable(captured.checkpoint);
     expect(await readdir(replacedRoot)).toEqual([]);
+    expect(await readdir(`${replacedRoot}.original`)).toContain(captured.checkpoint.envelope.checkpointId);
 
     const stableRoot = path.join(root, "stable");
     const stableTarget = await FileRecoveryCheckpointTarget.openPaired({
@@ -486,7 +618,7 @@ describe("full authority recovery checkpoints", () => {
     const staleStaging = path.join(stableRoot,
       `.${captured.checkpoint.envelope.checkpointId}.${stagingIdentity}.tmp`);
     await mkdir(staleStaging);
-    await writeFile(path.join(staleStaging, "interrupted"), "stale");
+    await writeFile(path.join(staleStaging, "envelope.json"), canonicalize(captured.checkpoint.envelope));
     await stableTarget.writeDurable(captured.checkpoint);
     expect((await readdir(stableRoot)).some((entry) => entry.endsWith(".tmp"))).toBe(false);
     const manifest = path.join(stableRoot, captured.checkpoint.envelope.checkpointId, "manifest.json");
@@ -688,12 +820,12 @@ class MemoryTarget implements RetirableRecoveryCheckpointTarget {
     if (existing && canonicalPackage(existing) !== canonicalPackage(checkpoint)) {
       throw new TypeError("checkpoint conflict");
     }
-    this.#values.set(checkpoint.envelope.checkpointId, clonePackage(checkpoint));
+    this.#values.set(checkpoint.envelope.checkpointId, checkpoint);
   }
   async read(checkpointId: string) {
     const value = this.#values.get(checkpointId);
     if (!value) throw new Error("checkpoint not present");
-    return clonePackage(value);
+    return value;
   }
   async retire(checkpointId: string) {
     this.#values.delete(checkpointId);
@@ -745,20 +877,28 @@ class FailingReadTarget extends MemoryTarget {
 }
 
 function clonePackage(checkpoint: CheckpointPackage): { envelope: CheckpointPackage["envelope"]; chunks: { seq: number; bytes: Buffer }[] } {
+  if (!checkpoint.chunks) throw new TypeError("test package is not materialized");
   return {
     envelope: JSON.parse(JSON.stringify(checkpoint.envelope)) as CheckpointPackage["envelope"],
     chunks: checkpoint.chunks.map((chunk) => ({ seq: chunk.seq, bytes: Buffer.from(chunk.bytes) })),
   };
 }
 
+async function materializePackage(checkpoint: CheckpointPackage): Promise<CheckpointPackage> {
+  const chunks = [];
+  for (const descriptor of checkpoint.envelope.chunks) {
+    chunks.push({ seq: descriptor.seq, bytes: await readCheckpointChunk(checkpoint, descriptor.seq) });
+  }
+  return { envelope: checkpoint.envelope, chunks };
+}
+
 function canonicalPackage(checkpoint: CheckpointPackage): string {
-  return canonicalize({
-    envelope: checkpoint.envelope,
-    chunks: checkpoint.chunks.map((chunk) => ({
-      seq: chunk.seq,
-      digest: Buffer.from(chunk.bytes).toString("base64url"),
-    })),
-  });
+  return canonicalize(checkpoint.envelope);
+}
+
+function materializedBytes(checkpoint: CheckpointPackage): readonly string[] {
+  if (!checkpoint.chunks) throw new TypeError("test package is not materialized");
+  return checkpoint.chunks.map((chunk) => Buffer.from(chunk.bytes).toString("base64url"));
 }
 
 function recordingGovernor(): {

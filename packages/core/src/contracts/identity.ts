@@ -608,6 +608,7 @@ export type CheckpointStreamRecord =
       checkpointId: Ulid;
       supersededBy: Ulid;
       targetId: string;
+      /** `local-released` is accepted only when replaying historical logs. */
       phase: "target-retired" | "local-released";
       at: IsoTime;
     };

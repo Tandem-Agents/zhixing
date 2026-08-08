@@ -16,8 +16,8 @@ import {
   checkpointPurpose,
   assertRecoveryRootMatchesPlan,
   createRecoveryCheckpointVerification,
-  openFullAuthorityCheckpoint,
   openRootActivationCheckpoint,
+  verifyStoredFullAuthorityCheckpoint,
   type CheckpointPackage,
   verifyRecoveryCheckpointVerification,
 } from "./checkpoint.js";
@@ -514,7 +514,7 @@ export class RecoveryActivationCoordinator {
     const purpose = checkpointPurpose(envelope);
     const replay = await this.authority.loadRecoveryActivation(envelope.checkpointId);
     if (replay) {
-      const opened = openPreparedActivationCheckpoint({
+      const opened = await openPreparedActivationCheckpoint({
         package: input.checkpoint,
         recoveryRoot: input.candidateRoot,
         issuer: input.issuerIdentity,
@@ -588,9 +588,9 @@ export class RecoveryActivationCoordinator {
     if (!isCanonicalTime(verifiedAt) || Date.parse(verifiedAt) < replicatedTime) {
       throw new TypeError("Recovery checkpoint verification time is invalid");
     }
-    let opened: ReturnType<typeof openPreparedActivationCheckpoint>;
+    let opened: Awaited<ReturnType<typeof openPreparedActivationCheckpoint>>;
     try {
-      opened = openPreparedActivationCheckpoint({
+      opened = await openPreparedActivationCheckpoint({
         package: readBack,
         recoveryRoot: input.candidateRoot,
         issuer: input.issuerIdentity,
@@ -745,25 +745,26 @@ function recoveryPlanBounds(plan: RecoveryActivationPlan): {
   };
 }
 
-function openPreparedActivationCheckpoint(input: {
+async function openPreparedActivationCheckpoint(input: {
   readonly package: CheckpointPackage;
   readonly recoveryRoot: RecoveryRoot;
   readonly issuer: DeviceIdentity;
-}): ReturnType<typeof openRootActivationCheckpoint> | ReturnType<typeof openFullAuthorityCheckpoint> {
+}): Promise<
+  ReturnType<typeof openRootActivationCheckpoint> |
+  Awaited<ReturnType<typeof verifyStoredFullAuthorityCheckpoint>>
+> {
   return isFullCheckpointEnvelope(input.package.envelope)
-    ? openFullAuthorityCheckpoint(input)
+    ? verifyStoredFullAuthorityCheckpoint(input)
     : openRootActivationCheckpoint(input);
 }
 
 function clearOpenedCheckpoint(
-  opened: ReturnType<typeof openRootActivationCheckpoint> | ReturnType<typeof openFullAuthorityCheckpoint>,
+  opened: ReturnType<typeof openRootActivationCheckpoint> |
+    Awaited<ReturnType<typeof verifyStoredFullAuthorityCheckpoint>>,
 ): void {
   opened.verificationNonce.fill(0);
   if ("plaintextChunks" in opened) {
     for (const chunk of opened.plaintextChunks) chunk.fill(0);
-  } else {
-    for (const page of opened.recordPages) page.fill(0);
-    for (const artifact of opened.retainedArtifacts) artifact.fill(0);
   }
 }
 

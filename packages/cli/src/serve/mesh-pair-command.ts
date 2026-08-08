@@ -1202,35 +1202,39 @@ async function receiveChallengeAfterRecoveryOnboarding(input: {
     targetDeviceId: input.identity.deviceId,
     storageMaintenance: input.storageMaintenance,
   });
-  const receiver = new PairedCheckpointReceiver({
-    homeId: start.homeId,
-    sourceDeviceId: start.sourceDeviceId,
-    targetDeviceId: start.targetDeviceId,
-    recipientKeyId: start.recipientKeyId,
-    staging: new FilePairedCheckpointStaging({
-      root: `${input.zhixingHome}/distributed-runtime/recovery-checkpoint-incoming`,
-      target,
-      storageMaintenance: input.storageMaintenance,
-    }),
-  });
-  while (true) {
-    const frame = await receivePairingFrame(input.socket);
-    if (isRecord(frame) && frame.t === "recovery-onboarding-complete") {
-      assertObjectKeys(frame, ["checkpointId", "t"], "Recovery onboarding completion");
-      if (frame.checkpointId !== start.checkpointId) {
-        throw new Error("Recovery onboarding completed another checkpoint");
+  try {
+    const receiver = new PairedCheckpointReceiver({
+      homeId: start.homeId,
+      sourceDeviceId: start.sourceDeviceId,
+      targetDeviceId: start.targetDeviceId,
+      recipientKeyId: start.recipientKeyId,
+      staging: new FilePairedCheckpointStaging({
+        root: `${input.zhixingHome}/distributed-runtime/recovery-checkpoint-incoming`,
+        target,
+        storageMaintenance: input.storageMaintenance,
+      }),
+    });
+    while (true) {
+      const frame = await receivePairingFrame(input.socket);
+      if (isRecord(frame) && frame.t === "recovery-onboarding-complete") {
+        assertObjectKeys(frame, ["checkpointId", "t"], "Recovery onboarding completion");
+        if (frame.checkpointId !== start.checkpointId) {
+          throw new Error("Recovery onboarding completed another checkpoint");
+        }
+        return asChallenge(await receivePairingFrame(input.socket));
       }
-      return asChallenge(await receivePairingFrame(input.socket));
+      if (!isRecord(frame) || frame.t !== "recovery-onboarding-command" || !isRecord(frame.command)) {
+        throw new Error("Pairing issuer sent an invalid recovery checkpoint command");
+      }
+      assertObjectKeys(frame, ["command", "t"], "Recovery onboarding command");
+      const result = await receiver.request(frame.command as unknown as PairedCheckpointCommand);
+      await sendPairingFrame(input.socket, {
+        t: "recovery-onboarding-result",
+        result,
+      } satisfies RecoveryOnboardingResultMessage);
     }
-    if (!isRecord(frame) || frame.t !== "recovery-onboarding-command" || !isRecord(frame.command)) {
-      throw new Error("Pairing issuer sent an invalid recovery checkpoint command");
-    }
-    assertObjectKeys(frame, ["command", "t"], "Recovery onboarding command");
-    const result = await receiver.request(frame.command as unknown as PairedCheckpointCommand);
-    await sendPairingFrame(input.socket, {
-      t: "recovery-onboarding-result",
-      result,
-    } satisfies RecoveryOnboardingResultMessage);
+  } finally {
+    await target.close();
   }
 }
 

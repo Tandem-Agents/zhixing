@@ -115,11 +115,12 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "build/Release/checkpoint_child_bridge.*"
   ],
   "scripts": {
-    "build": "tsup",
-    "pretest": "node ../../scripts/check-mesh-live-tls-tests.mjs",
+    "build": "node scripts/build-checkpoint-child-bridge.mjs && tsup",
+    "pretest": "node scripts/build-checkpoint-child-bridge.mjs && node ../../scripts/check-mesh-live-tls-tests.mjs",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },

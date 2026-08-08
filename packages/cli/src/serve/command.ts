@@ -686,7 +686,7 @@ async function runServerProcess(
       error instanceof Error ? error.message : String(error),
     ),
   });
-  ctx.authorityCheckpointOwner?.start();
+  await ctx.authorityCheckpointOwner?.start();
   authorityRuntimeRef.current = ctx.authorityRuntime;
   meshRuntimeRef.current = ctx.meshRuntime;
   conversationsRef.current = ctx.conversations ?? null;

@@ -333,10 +333,19 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             scanned.validBytes,
           );
         }
-        await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+        if (!scanned.stopped) {
+          await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+        }
         return {
           commits: commits as Array<CommitEnvelope<Body>>,
-          checkpoint: this.#durableCheckpoint(scanned.lastLsn),
+          checkpoint: scanned.stopped
+            ? {
+              logId: this.#requireLogId(),
+              lsn: scanned.lastLsn,
+              frameEndOffset: scanned.validBytes,
+              prefixDigest: scanned.prefixDigest,
+            }
+            : this.#durableCheckpoint(scanned.lastLsn),
           hasMore: scanned.stopped === true,
         };
       }),

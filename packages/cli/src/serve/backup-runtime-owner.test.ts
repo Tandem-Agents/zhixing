@@ -95,6 +95,7 @@ describe("public recovery backup status", () => {
       storageMaintenance: maintenance,
     });
     expect(owner).toBeDefined();
+    await owner!.start();
     await expect(owner!.status()).resolves.toEqual({
       state: "unavailable",
       fullBackupReady: false,
@@ -119,11 +120,14 @@ describe("public recovery backup status", () => {
       mesh,
       storageMaintenance: maintenance,
     });
+    await withoutRuntime!.start();
     await expect(withoutRuntime!.status()).resolves.toEqual({
       state: "unavailable",
       fullBackupReady: false,
       code: "runtime-unavailable",
     });
+    await owner!.stop();
+    await withoutRuntime!.stop();
   });
 });
 

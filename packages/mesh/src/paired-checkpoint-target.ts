@@ -1,7 +1,5 @@
-import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
-import { syncDirectory } from "@zhixing/core/persistence";
 import {
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
@@ -13,14 +11,19 @@ import type { MeshServiceRegistry } from "./service-registry.js";
 import { byteDigest, canonicalize } from "./canonical.js";
 import {
   assertCheckpointEnvelopeShape,
+  readCheckpointChunkRange,
   type CheckpointPackage,
 } from "./checkpoint.js";
 import {
   assertCheckpointDirectoryIdentity,
   freezeCheckpointDirectory,
   freezeOwnedCheckpointDirectory,
+  isCheckpointChildMissing,
   readCheckpointFile,
+  readCheckpointFileRange,
+  removeCheckpointDirectoryExactSet,
   writeCheckpointFile,
+  writeCheckpointFileRange,
   type FrozenCheckpointDirectoryIdentity,
   type RetirableRecoveryCheckpointTarget,
 } from "./checkpoint-target.js";
@@ -127,10 +130,6 @@ export class PairedRecoveryCheckpointTarget implements RetirableRecoveryCheckpoi
       envelope: checkpoint.envelope,
     }, signal), "checkpoint.begun", checkpointId);
     for (const descriptor of checkpoint.envelope.chunks) {
-      const chunk = checkpoint.chunks.find((candidate) => candidate.seq === descriptor.seq);
-      if (!chunk || chunk.bytes.byteLength !== descriptor.bytes || byteDigest(chunk.bytes) !== descriptor.digest) {
-        throw new TypeError("Paired recovery checkpoint has an invalid chunk exact-set");
-      }
       const progress = await this.options.transport.request({
         ...this.#binding(),
         t: "checkpoint.progress",
@@ -138,20 +137,40 @@ export class PairedRecoveryCheckpointTarget implements RetirableRecoveryCheckpoi
         seq: descriptor.seq,
       }, signal);
       assertProgress(progress, "checkpoint.progress", checkpointId, descriptor.seq, descriptor.bytes);
-      let offset = progress.receivedBytes;
+      const hash = createHash("sha256");
+      let offset = 0;
       while (offset < descriptor.bytes) {
-        const part = chunk.bytes.subarray(offset, Math.min(offset + TRANSFER_PART_BYTES, descriptor.bytes));
-        const appended = await this.options.transport.request({
-          ...this.#binding(),
-          t: "checkpoint.append",
-          checkpointId,
-          seq: descriptor.seq,
+        const replayBoundary = progress.receivedBytes > offset
+          ? progress.receivedBytes - offset
+          : descriptor.bytes - offset;
+        const part = await readCheckpointChunkRange(
+          checkpoint,
+          descriptor.seq,
           offset,
-          bytes: Buffer.from(part).toString("base64url"),
-        }, signal);
-        assertProgress(appended, "checkpoint.appended", checkpointId, descriptor.seq, descriptor.bytes);
-        if (appended.receivedBytes <= offset) throw new TypeError("Paired recovery upload made no progress");
-        offset = appended.receivedBytes;
+          Math.min(TRANSFER_PART_BYTES, descriptor.bytes - offset, replayBoundary),
+          signal,
+        );
+        try {
+          hash.update(part);
+          if (offset >= progress.receivedBytes) {
+            const appended = await this.options.transport.request({
+              ...this.#binding(),
+              t: "checkpoint.append",
+              checkpointId,
+              seq: descriptor.seq,
+              offset,
+              bytes: part.toString("base64url"),
+            }, signal);
+            assertProgress(appended, "checkpoint.appended", checkpointId, descriptor.seq, descriptor.bytes);
+            if (appended.receivedBytes <= offset) throw new TypeError("Paired recovery upload made no progress");
+          }
+          offset += part.byteLength;
+        } finally {
+          part.fill(0);
+        }
+      }
+      if (`sha256:${hash.digest("hex")}` !== descriptor.digest) {
+        throw new TypeError("Paired recovery checkpoint has an invalid chunk exact-set");
       }
     }
     assertResult(await this.options.transport.request({
@@ -170,41 +189,55 @@ export class PairedRecoveryCheckpointTarget implements RetirableRecoveryCheckpoi
     if (manifest.t !== "checkpoint.manifest" || manifest.checkpointId !== checkpointId) {
       throw new TypeError("Paired recovery target returned an unrelated manifest");
     }
-    const chunks = [];
-    for (const descriptor of manifest.envelope.chunks) {
-      const bytes = Buffer.allocUnsafe(descriptor.bytes);
-      let offset = 0;
-      while (offset < descriptor.bytes) {
-        const limit = Math.min(TRANSFER_PART_BYTES, descriptor.bytes - offset);
-        const result = await this.options.transport.request({
-          ...this.#binding(),
-          t: "checkpoint.range",
-          checkpointId,
-          seq: descriptor.seq,
-          offset,
-          limit,
-        }, signal);
-        if (
-          result.t !== "checkpoint.range" ||
-          result.checkpointId !== checkpointId ||
-          result.seq !== descriptor.seq ||
-          result.offset !== offset
-        ) throw new TypeError("Paired recovery target returned an unrelated range");
-        const part = await this.#decodeRange(checkpointId, descriptor.seq, offset, limit, result.bytes, signal);
-        try {
-          part.copy(bytes, offset);
-          offset += part.byteLength;
-        } finally {
-          part.fill(0);
-        }
-      }
-      if (bytes.byteLength !== descriptor.bytes || byteDigest(bytes) !== descriptor.digest) {
-        bytes.fill(0);
-        throw new TypeError("Paired recovery target read-back is corrupt");
-      }
-      chunks.push({ seq: descriptor.seq, bytes });
-    }
-    const checkpoint = { envelope: manifest.envelope, chunks: Object.freeze(chunks) };
+    const checkpoint: CheckpointPackage = {
+      envelope: manifest.envelope,
+      source: {
+        read: async (seq, offset, limit, rangeSignal) => {
+          const descriptor = manifest.envelope.chunks[seq];
+          if (!descriptor || descriptor.seq !== seq || offset < 0 || offset > descriptor.bytes) {
+            throw new RangeError("Paired checkpoint range is outside the selected chunk");
+          }
+          const expected = Math.min(limit, descriptor.bytes - offset);
+          if (expected === 0) return Buffer.alloc(0);
+          const output = Buffer.allocUnsafe(expected);
+          let copied = 0;
+          try {
+            while (copied < expected) {
+              const bounded = Math.min(TRANSFER_PART_BYTES, expected - copied);
+              const currentOffset = offset + copied;
+              const result = await this.options.transport.request({
+                ...this.#binding(),
+                t: "checkpoint.range",
+                checkpointId,
+                seq,
+                offset: currentOffset,
+                limit: bounded,
+              }, rangeSignal ?? signal);
+              if (
+                result.t !== "checkpoint.range" || result.checkpointId !== checkpointId ||
+                result.seq !== seq || result.offset !== currentOffset
+              ) throw new TypeError("Paired recovery target returned an unrelated range");
+              const bytes = await this.#decodeRange(
+                checkpointId, seq, currentOffset, bounded, result.bytes, rangeSignal ?? signal,
+              );
+              try {
+                if (bytes.byteLength !== bounded) {
+                  throw new TypeError("Paired recovery target returned a truncated range");
+                }
+                bytes.copy(output, copied);
+                copied += bytes.byteLength;
+              } finally {
+                bytes.fill(0);
+              }
+            }
+            return output;
+          } catch (error) {
+            output.fill(0);
+            throw error;
+          }
+        },
+      },
+    };
     this.#assertCheckpoint(checkpoint);
     return checkpoint;
   }
@@ -235,9 +268,7 @@ export class PairedRecoveryCheckpointTarget implements RetirableRecoveryCheckpoi
   #assertCheckpoint(checkpoint: CheckpointPackage): void {
     if (
       checkpoint.envelope.recipientKeyId !== this.options.recipientKeyId ||
-      checkpoint.envelope.checkpointId.length === 0 ||
-      canonicalize(checkpoint.envelope.chunks.map((chunk) => chunk.seq)) !==
-        canonicalize(checkpoint.chunks.map((chunk) => chunk.seq))
+      checkpoint.envelope.checkpointId.length === 0
     ) throw new TypeError("Paired recovery checkpoint is not bound to this target");
   }
 
@@ -294,47 +325,76 @@ export class FilePairedCheckpointStaging {
     const { owner, checkpoint } = await this.#checkpointRoot(envelope.checkpointId, true, signal);
     const text = canonicalize(envelope);
     try {
-      const existing = (await this.#step(
-        envelope.checkpointId,
-        { step: "envelope-read", bytes: 16 * 1024 * 1024 },
-        signal,
-        () => readCheckpointFile(checkpoint, owner, "envelope.json", 16 * 1024 * 1024),
-      )).toString("utf8");
-      if (existing !== text) throw new TypeError("Paired checkpoint replay changed its envelope");
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        const existing = (await this.#step(
+          envelope.checkpointId,
+          { step: "envelope-read", bytes: 16 * 1024 * 1024 },
+          signal,
+          () => readCheckpointFile(checkpoint, owner, "envelope.json", 16 * 1024 * 1024),
+        )).toString("utf8");
+        if (existing !== text) throw new TypeError("Paired checkpoint replay changed its envelope");
+        return;
+      } catch (error) {
+        if (!isCheckpointChildMissing(error)) throw error;
+      }
+      await this.#step(envelope.checkpointId, { step: "envelope", bytes: Buffer.byteLength(text) }, signal, () =>
+        writeCheckpointFile(checkpoint, owner, "envelope.json", Buffer.from(text, "utf8")));
+      await this.#step(envelope.checkpointId, { step: "envelope-sync", bytes: 1 }, signal, () =>
+        checkpoint.handle.sync());
+    } finally {
+      await checkpoint.handle.close();
     }
-    await this.#step(envelope.checkpointId, { step: "envelope", bytes: Buffer.byteLength(text) }, signal, () =>
-      writeCheckpointFile(checkpoint, owner, "envelope.json", Buffer.from(text, "utf8")));
-    await this.#step(envelope.checkpointId, { step: "envelope-sync", bytes: 1 }, signal, () =>
-      syncDirectory(checkpoint.canonicalPath));
   }
 
   async progress(checkpointId: string, seq: number, signal?: AbortSignal) {
     const session = await this.#session(checkpointId, signal);
-    return this.#chunkProgress(session, chunkRef(session.envelope, seq), signal);
+    try {
+      return await this.#chunkProgress(session, chunkRef(session.envelope, seq), signal);
+    } finally {
+      await session.checkpoint.handle.close();
+    }
   }
 
   async append(checkpointId: string, seq: number, offset: number, bytes: Uint8Array, signal?: AbortSignal) {
     const session = await this.#session(checkpointId, signal);
-    return this.#appendChunk(session, chunkRef(session.envelope, seq), offset, bytes, signal);
+    try {
+      return await this.#appendChunk(session, chunkRef(session.envelope, seq), offset, bytes, signal);
+    } finally {
+      await session.checkpoint.handle.close();
+    }
   }
 
   async commit(checkpointId: string, signal?: AbortSignal): Promise<void> {
     const session = await this.#session(checkpointId, signal);
     const { envelope } = session;
-    const chunks = [];
-    for (const descriptor of envelope.chunks) {
-      const progress = await this.#chunkProgress(session, descriptor, signal);
-      if (!progress.complete) throw new Error("Paired recovery checkpoint upload is incomplete");
-      const bytes = await this.#step(checkpointId, { step: "chunk-read", seq: descriptor.seq, bytes: descriptor.bytes }, signal, () =>
-        readCheckpointFile(session.checkpoint, session.owner, partialFile(descriptor.seq), descriptor.bytes));
-      if (byteDigest(bytes) !== descriptor.digest) throw new TypeError("Paired recovery chunk is corrupt");
-      chunks.push({ seq: descriptor.seq, bytes });
+    try {
+      for (const descriptor of envelope.chunks) {
+        const progress = await this.#chunkProgress(session, descriptor, signal);
+        if (!progress.complete) throw new Error("Paired recovery checkpoint upload is incomplete");
+      }
+      await this.options.target.writeDurable({
+        envelope,
+        source: {
+          read: (seq, offset, limit) => {
+            const descriptor = envelope.chunks[seq];
+            if (!descriptor || descriptor.seq !== seq) {
+              return Promise.reject(new TypeError("Paired staging chunk sequence is invalid"));
+            }
+            return readCheckpointFileRange(
+              session.checkpoint,
+              session.owner,
+              partialFile(seq),
+              descriptor.bytes,
+              offset,
+              limit,
+            );
+          },
+        },
+      }, signal);
+      await this.#retireStaging(session, signal);
+    } finally {
+      await session.checkpoint.handle.close();
     }
-    await this.options.target.writeDurable({ envelope, chunks: Object.freeze(chunks) }, signal);
-    await this.#retireStaging(session, signal);
   }
 
   read(checkpointId: string, signal?: AbortSignal): Promise<CheckpointPackage> {
@@ -347,17 +407,22 @@ export class FilePairedCheckpointStaging {
 
   async #session(checkpointId: string, signal?: AbortSignal): Promise<PairedStagingSession> {
     const { owner, checkpoint } = await this.#checkpointRoot(checkpointId, false);
-    const text = (await this.#step(
-      checkpointId,
-      { step: "envelope-read", bytes: 16 * 1024 * 1024 },
-      signal,
-      () => readCheckpointFile(checkpoint, owner, "envelope.json", 16 * 1024 * 1024),
-    )).toString("utf8");
-    const envelope = JSON.parse(text) as CheckpointPackage["envelope"];
-    if (canonicalize(envelope) !== text || envelope.checkpointId !== checkpointId) {
-      throw new TypeError("Paired recovery staging envelope is invalid");
+    try {
+      const text = (await this.#step(
+        checkpointId,
+        { step: "envelope-read", bytes: 16 * 1024 * 1024 },
+        signal,
+        () => readCheckpointFile(checkpoint, owner, "envelope.json", 16 * 1024 * 1024),
+      )).toString("utf8");
+      const envelope = JSON.parse(text) as CheckpointPackage["envelope"];
+      if (canonicalize(envelope) !== text || envelope.checkpointId !== checkpointId) {
+        throw new TypeError("Paired recovery staging envelope is invalid");
+      }
+      return { owner, checkpoint, envelope };
+    } catch (error) {
+      await checkpoint.handle.close();
+      throw error;
     }
-    return { owner, checkpoint, envelope };
   }
 
   async #checkpointRoot(checkpointId: string, create: boolean, signal?: AbortSignal): Promise<{
@@ -370,12 +435,9 @@ export class FilePairedCheckpointStaging {
     const directory = path.join(owner.canonicalPath, checkpointId);
     if (create) {
       await this.#step(checkpointId, { step: "staging-directory", bytes: 1 }, signal, async () => {
-        try {
-          await mkdir(directory, { recursive: false });
-          await syncDirectory(owner.canonicalPath);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
+        const child = await owner.handle.openDirectory(checkpointId, true);
+        await child.close();
+        await owner.handle.sync();
       });
     }
     return { owner, checkpoint: await freezeOwnedCheckpointDirectory(directory, owner) };
@@ -386,28 +448,25 @@ export class FilePairedCheckpointStaging {
     descriptor: CheckpointPackage["envelope"]["chunks"][number],
     signal?: AbortSignal,
   ): Promise<{ receivedBytes: number; complete: boolean }> {
-    let lexical;
+    let bytes: Buffer;
     try {
-      lexical = await this.#step(session.envelope.checkpointId, {
+      bytes = await this.#step(session.envelope.checkpointId, {
         step: "chunk-progress", seq: descriptor.seq, bytes: descriptor.bytes,
-      }, signal, () => lstat(path.join(session.checkpoint.canonicalPath, partialFile(descriptor.seq))));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { receivedBytes: 0, complete: false };
-      throw error;
-    }
-    if (!lexical.isFile() || lexical.isSymbolicLink() || lexical.size > descriptor.bytes) {
-      throw new TypeError("Paired recovery partial file is invalid");
-    }
-    await assertCheckpointDirectoryIdentity(session.checkpoint, session.owner);
-    if (lexical.size === descriptor.bytes) {
-      const bytes = await this.#step(session.envelope.checkpointId, {
-        step: "chunk-verify", seq: descriptor.seq, bytes: descriptor.bytes,
       }, signal, () => readCheckpointFile(
         session.checkpoint, session.owner, partialFile(descriptor.seq), descriptor.bytes,
       ));
-      if (byteDigest(bytes) !== descriptor.digest) throw new TypeError("Paired recovery partial digest is invalid");
+    } catch (error) {
+      if (isCheckpointChildMissing(error)) return { receivedBytes: 0, complete: false };
+      throw error;
     }
-    return { receivedBytes: lexical.size, complete: lexical.size === descriptor.bytes };
+    try {
+      if (bytes.byteLength === descriptor.bytes && byteDigest(bytes) !== descriptor.digest) {
+        throw new TypeError("Paired recovery partial digest is invalid");
+      }
+      return { receivedBytes: bytes.byteLength, complete: bytes.byteLength === descriptor.bytes };
+    } finally {
+      bytes.fill(0);
+    }
   }
 
   async #appendChunk(
@@ -422,64 +481,28 @@ export class FilePairedCheckpointStaging {
     }
     await this.#step(session.envelope.checkpointId, {
       step: "chunk-append", seq: descriptor.seq, offset, bytes: bytes.byteLength,
-    }, signal, async () => {
-      await assertCheckpointDirectoryIdentity(session.checkpoint, session.owner);
-      const filePath = path.join(session.checkpoint.canonicalPath, partialFile(descriptor.seq));
-      let created = false;
-      let handle;
-      try {
-        handle = await open(filePath, fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        handle = await open(filePath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_RDWR |
-          (fsConstants.O_NOFOLLOW ?? 0), 0o600);
-        created = true;
-      }
-      try {
-        const before = await handle.stat();
-        if (!before.isFile() || before.nlink !== 1 || before.size > descriptor.bytes) {
-          throw new TypeError("Paired recovery partial identity is invalid");
-        }
-        if (offset < before.size) {
-          if (offset + bytes.byteLength > before.size) throw new RangeError("Paired recovery chunk overlaps its durable prefix");
-          const replay = Buffer.alloc(bytes.byteLength);
-          await handle.read(replay, 0, replay.byteLength, offset);
-          if (!replay.equals(bytes)) throw new TypeError("Paired recovery replay changed durable bytes");
-        } else {
-          if (offset !== before.size) throw new RangeError("Paired recovery chunk skipped its durable prefix");
-          let written = 0;
-          while (written < bytes.byteLength) {
-            const result = await handle.write(bytes, written, bytes.byteLength - written, offset + written);
-            if (result.bytesWritten === 0) throw new Error("Paired recovery chunk write made no progress");
-            written += result.bytesWritten;
-          }
-          await handle.sync();
-        }
-        const after = await handle.stat();
-        const lexical = await lstat(filePath);
-        if (lexical.isSymbolicLink() || !lexical.isFile() || after.nlink !== 1 || lexical.nlink !== 1 ||
-          String(after.dev) !== String(lexical.dev) || String(after.ino) !== String(lexical.ino)) {
-          throw new TypeError("Paired recovery partial changed during write");
-        }
-      } finally {
-        await handle.close();
-      }
-      if (created) await syncDirectory(session.checkpoint.canonicalPath);
-      await assertCheckpointDirectoryIdentity(session.checkpoint, session.owner);
-    });
+    }, signal, () => writeCheckpointFileRange(
+      session.checkpoint,
+      session.owner,
+      partialFile(descriptor.seq),
+      descriptor.bytes,
+      offset,
+      bytes,
+    ).then(() => undefined));
     return this.#chunkProgress(session, descriptor, signal);
   }
 
   async #retireStaging(session: PairedStagingSession, signal?: AbortSignal): Promise<void> {
-    const retired = retiredStagingPath(session.owner, session.envelope);
+    const retired = retiredStagingName(session.envelope);
     await this.#step(session.envelope.checkpointId, { step: "staging-retire", bytes: 1 }, signal, async () => {
       await assertCheckpointDirectoryIdentity(session.checkpoint, session.owner);
+      await session.checkpoint.handle.close();
       try {
-        await rename(session.checkpoint.canonicalPath, retired);
+        await session.owner.handle.renameTo(session.envelope.checkpointId, session.owner.handle, retired);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (!isCheckpointChildMissing(error)) throw error;
       }
-      await syncDirectory(session.owner.canonicalPath);
+      await session.owner.handle.sync();
     });
     await this.#step(session.envelope.checkpointId, { step: "staging-cleanup", bytes: 1 }, signal, () =>
       this.#removeRetiredStaging(session.owner, session.envelope));
@@ -489,13 +512,10 @@ export class FilePairedCheckpointStaging {
     owner: FrozenCheckpointDirectoryIdentity,
     envelope: CheckpointPackage["envelope"],
   ): Promise<void> {
-    try {
-      const binding = await freezeOwnedCheckpointDirectory(retiredStagingPath(owner, envelope), owner);
-      await rm(binding.canonicalPath, { recursive: true, force: false });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await syncDirectory(owner.canonicalPath);
+    await removeCheckpointDirectoryExactSet(owner, retiredStagingName(envelope), [
+      "envelope.json",
+      ...envelope.chunks.map((descriptor) => partialFile(descriptor.seq)),
+    ]);
   }
 
   #step<T>(checkpointId: string, identity: unknown, signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
@@ -558,17 +578,28 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
     if (command.t === "checkpoint.range") {
       if (command.limit < 1 || command.limit > TRANSFER_PART_BYTES) throw new RangeError("Paired checkpoint range limit is invalid");
       const checkpoint = await this.options.staging.read(command.checkpointId, signal);
-      const chunk = checkpoint.chunks.find((candidate) => candidate.seq === command.seq);
-      if (!chunk || command.offset < 0 || command.offset > chunk.bytes.byteLength) {
+      const descriptor = checkpoint.envelope.chunks[command.seq];
+      if (!descriptor || descriptor.seq !== command.seq || command.offset < 0 || command.offset >= descriptor.bytes) {
         throw new RangeError("Paired checkpoint range is outside the selected chunk");
       }
-      return {
-        t: "checkpoint.range",
-        checkpointId: command.checkpointId,
-        seq: command.seq,
-        offset: command.offset,
-        bytes: Buffer.from(chunk.bytes.subarray(command.offset, command.offset + command.limit)).toString("base64url"),
-      };
+      const bytes = await readCheckpointChunkRange(
+        checkpoint,
+        command.seq,
+        command.offset,
+        Math.min(command.limit, descriptor.bytes - command.offset),
+        signal,
+      );
+      try {
+        return {
+          t: "checkpoint.range",
+          checkpointId: command.checkpointId,
+          seq: command.seq,
+          offset: command.offset,
+          bytes: bytes.toString("base64url"),
+        };
+      } finally {
+        bytes.fill(0);
+      }
     }
     await this.options.staging.retire(command.checkpointId, command.supersededBy, signal);
     return { t: "checkpoint.retired", checkpointId: command.checkpointId, supersededBy: command.supersededBy };
@@ -630,12 +661,8 @@ function partialFile(seq: number): string {
   return `chunk-${String(seq).padStart(10, "0")}.partial`;
 }
 
-function retiredStagingPath(
-  owner: FrozenCheckpointDirectoryIdentity,
-  envelope: CheckpointPackage["envelope"],
-): string {
-  return path.join(owner.canonicalPath,
-    `.${envelope.checkpointId}.${byteDigest(Buffer.from(canonicalize(envelope), "utf8")).slice(7, 23)}.retired`);
+function retiredStagingName(envelope: CheckpointPackage["envelope"]): string {
+  return `.${envelope.checkpointId}.${byteDigest(Buffer.from(canonicalize(envelope), "utf8")).slice(7, 23)}.retired`;
 }
 
 function assertResult(

@@ -227,6 +227,9 @@ describe("production mesh runtime bootstrap", () => {
       record.t === "checkpoint-created");
     const verifiedRecords = records.filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }> =>
       record.t === "checkpoint-verified");
+    const durableLegacy = await local.bootstrapStore.bootstrapAuthority()
+      .loadCheckpointPackage(createdRecords[0]!.envelopeRef);
+    expect(durableLegacy?.chunks).toHaveLength(legacyCheckpoint.envelope.chunks.length);
     expect(projectRecoveryReadiness({
       trust: activated,
       createdRecords,

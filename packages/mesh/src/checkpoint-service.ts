@@ -19,7 +19,8 @@ import {
   checkpointPurpose,
   deriveCheckpointId,
   createRecoveryCheckpointVerification,
-  openFullAuthorityCheckpoint,
+  readCheckpointChunk,
+  verifyStoredFullAuthorityCheckpoint,
   verifyRecoveryCheckpointVerification,
   type CheckpointPackage,
   type CheckpointRecipient,
@@ -51,6 +52,11 @@ export interface RecoveryBackupStatus {
   readonly targetId?: string;
   readonly createdAt?: string;
   readonly upToLsn?: number;
+}
+
+export interface RecoveryCheckpointVerificationCandidate {
+  readonly checkpointId: string;
+  readonly targetId: string;
 }
 
 export interface AuthorityCheckpointServiceOptions {
@@ -100,7 +106,7 @@ export class AuthorityCheckpointService {
     };
     const existing = await this.#createdFor(generation, request);
     if (existing) {
-      this.#assertCreatedBinding(existing);
+      this.#assertCreatedForCurrentTarget(existing);
       const checkpoint = await this.#loadLocalPackage(existing, input.abort);
       await this.#replicate(checkpoint, existing, input.abort);
       return checkpoint;
@@ -158,32 +164,28 @@ export class AuthorityCheckpointService {
     this.#assertEnabled();
     const created = await this.#created(input.checkpointId);
     if (!created) throw new Error("Recovery backup has not been created");
-    this.#assertCreatedBinding(created);
+    this.#assertCreatedAuthority(created);
     const records = await this.#records();
     const existing = records.find((record): record is Extract<
       CheckpointStreamRecord,
       { t: "checkpoint-verified" }
     > => record.t === "checkpoint-verified" && record.checkpointId === input.checkpointId);
-    let opened: ReturnType<typeof openFullAuthorityCheckpoint> | undefined;
+    let opened: Awaited<ReturnType<typeof verifyStoredFullAuthorityCheckpoint>> | undefined;
+    let target: RetirableRecoveryCheckpointTarget | undefined;
     try {
-      const target = await this.#target(created.targetId, created.recipientKeyId);
+      target = await this.#target(created.targetId, created.recipientKeyId);
       const checkpoint = await target.read(input.checkpointId);
-      opened = await this.#artifactStep(
-        `open:${input.checkpointId}`,
-        checkpoint.chunks.reduce((sum, chunk) => sum + chunk.bytes.byteLength, 0),
-        undefined,
-        async () => openFullAuthorityCheckpoint({
-          package: checkpoint,
-          recoveryRoot: input.recoveryRoot,
-          issuer: this.options.issuer,
-        }),
-      );
+      opened = await verifyStoredFullAuthorityCheckpoint({
+        package: checkpoint,
+        recoveryRoot: input.recoveryRoot,
+        issuer: this.options.issuer,
+      });
       assertFullBinding(created, checkpoint, opened.payload, this.options.trust);
       if (existing) {
         verifyRecoveryCheckpointVerification({
           verification: existing.verification,
           envelope: checkpoint.envelope,
-          targetId: this.options.target.targetId,
+          targetId: created.targetId!,
           verificationNonce: opened.verificationNonce,
           recoveryRootPublicKey: input.recoveryRoot.rootPublicKey,
         });
@@ -192,12 +194,12 @@ export class AuthorityCheckpointService {
       const replicated = records.find((record) =>
         record.t === "checkpoint-replicated" &&
         record.checkpointId === input.checkpointId &&
-        record.targetId === this.options.target.targetId);
+        record.targetId === created.targetId);
       if (!replicated) throw new Error("Recovery backup has not reached its configured target");
       const verifiedAt = input.verifiedAt ?? this.#clock();
       const verification = createRecoveryCheckpointVerification({
         envelope: checkpoint.envelope,
-        targetId: this.options.target.targetId,
+        targetId: created.targetId!,
         verificationNonce: opened.verificationNonce,
         verifiedAt,
         recoveryRoot: input.recoveryRoot,
@@ -205,7 +207,7 @@ export class AuthorityCheckpointService {
       verifyRecoveryCheckpointVerification({
         verification,
         envelope: checkpoint.envelope,
-        targetId: this.options.target.targetId,
+        targetId: created.targetId!,
         verificationNonce: opened.verificationNonce,
         recoveryRootPublicKey: input.recoveryRoot.rootPublicKey,
       });
@@ -223,7 +225,7 @@ export class AuthorityCheckpointService {
           checkpointId: input.checkpointId,
           recipientKeyId: created.recipientKeyId,
           purpose: created.purpose,
-          targetId: this.options.target.targetId,
+          targetId: created.targetId!,
           envelopeDigest: created.envelopeDigest,
           verification,
         },
@@ -237,7 +239,7 @@ export class AuthorityCheckpointService {
           checkpointId: input.checkpointId,
           recipientKeyId: created.recipientKeyId,
           purpose: created.purpose,
-          targetId: this.options.target.targetId,
+          targetId: created.targetId!,
           envelopeDigest: created.envelopeDigest,
           reason: checkpointVerificationFailureCode(error),
           at: input.verifiedAt ?? this.#clock(),
@@ -246,8 +248,7 @@ export class AuthorityCheckpointService {
       throw error;
     } finally {
       opened?.verificationNonce.fill(0);
-      for (const page of opened?.recordPages ?? []) page.fill(0);
-      for (const artifact of opened?.retainedArtifacts ?? []) artifact.fill(0);
+      if (target && target !== this.options.target) await target.close?.();
     }
   }
 
@@ -268,7 +269,7 @@ export class AuthorityCheckpointService {
           { t: "checkpoint-created" }
         > => record.t === "checkpoint-created" &&
           record.checkpointId === verified.checkpointId &&
-          canonicalize(record.generation) === canonicalize(generation)),
+          record.generation !== undefined && sameAuthorityGeneration(record.generation, generation)),
       }))
       .find(({ created, verified }) =>
         created?.targetId !== undefined && validVerificationSignature(verified, this.options.trust));
@@ -304,22 +305,27 @@ export class AuthorityCheckpointService {
   }
 
   /** Returns the newest durable target copy, including a terminal replay candidate. */
-  async verificationCandidate(): Promise<string | undefined> {
+  async verificationCandidate(): Promise<RecoveryCheckpointVerificationCandidate | undefined> {
     this.#assertEnabled();
     const records = await this.#records();
     const generation = this.#generation();
     const replicated = new Set(records
       .filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-replicated" }> =>
         record.t === "checkpoint-replicated" &&
-        record.targetId === this.options.target.targetId &&
         record.recipientKeyId === this.options.recipient.backupKeyId)
-      .map((record) => record.checkpointId));
-    return [...records].reverse().find((record): record is Extract<
+      .map((record) => `${record.checkpointId}:${record.targetId}`));
+    const created = [...records].reverse().find((record): record is Extract<
       CheckpointStreamRecord,
       { t: "checkpoint-created" }
     > => record.t === "checkpoint-created" &&
-      canonicalize(record.generation) === canonicalize(generation) &&
-      replicated.has(record.checkpointId))?.checkpointId;
+      record.targetId !== undefined &&
+      record.generation !== undefined &&
+      record.generation.targetId === record.targetId &&
+      sameAuthorityGeneration(record.generation, generation) &&
+      replicated.has(`${record.checkpointId}:${record.targetId}`));
+    return created?.targetId
+      ? { checkpointId: created.checkpointId, targetId: created.targetId }
+      : undefined;
   }
 
   async cleanupExpired(now = this.#clock(), abort?: AbortSignal): Promise<void> {
@@ -343,31 +349,21 @@ export class AuthorityCheckpointService {
         candidate.phase === "target-retired");
       if (!targetRetired) {
         const target = await this.#target(created.targetId, created.recipientKeyId);
-        await target.retire(record.checkpointId, record.supersededBy, abort);
-        throwIfAborted(abort);
-        await appendCheckpointRecords(this.options.log, [{
-          t: "checkpoint-cleanup-progress",
-          checkpointId: record.checkpointId,
-          supersededBy: record.supersededBy,
-          targetId: created.targetId,
-          phase: "target-retired",
-          at: now,
-        }]);
+        try {
+          await target.retire(record.checkpointId, record.supersededBy, abort);
+          throwIfAborted(abort);
+          await appendCheckpointRecords(this.options.log, [{
+            t: "checkpoint-cleanup-progress",
+            checkpointId: record.checkpointId,
+            supersededBy: record.supersededBy,
+            targetId: created.targetId,
+            phase: "target-retired",
+            at: now,
+          }]);
+        } finally {
+          if (target !== this.options.target) await target.close?.();
+        }
       }
-      const latest = await this.#records();
-      if (latest.some((candidate) => candidate.t === "checkpoint-cleanup-progress" &&
-        candidate.checkpointId === record.checkpointId && candidate.phase === "local-released")) continue;
-      const snapshot = await this.options.retention.checkpointRetentionSnapshot();
-      const retained = await this.options.retention.retainedAtCheckpoint(snapshot, [created.envelopeRef]);
-      if (retained.status !== "current" || retained.retained.length > 0) continue;
-      await appendCheckpointRecords(this.options.log, [{
-        t: "checkpoint-cleanup-progress",
-        checkpointId: record.checkpointId,
-        supersededBy: record.supersededBy,
-        targetId: created.targetId,
-        phase: "local-released",
-        at: now,
-      }]);
     }
   }
 
@@ -379,8 +375,12 @@ export class AuthorityCheckpointService {
       if (records.some((record) => record.t === "checkpoint-replicated" &&
         record.checkpointId === created.checkpointId && record.targetId === created.targetId)) continue;
       const checkpoint = await this.#loadLocalPackage(created, abort);
-      await this.#replicate(checkpoint, created, abort,
-        await this.#target(created.targetId, created.recipientKeyId));
+      const target = await this.#target(created.targetId, created.recipientKeyId);
+      try {
+        await this.#replicate(checkpoint, created, abort, target);
+      } finally {
+        if (target !== this.options.target) await target.close?.();
+      }
     }
   }
 
@@ -420,20 +420,20 @@ export class AuthorityCheckpointService {
 
   async #persistLocalPackage(checkpoint: CheckpointPackage, abort?: AbortSignal): Promise<ArtifactRef> {
     for (const descriptor of checkpoint.envelope.chunks) {
-      const chunk = checkpoint.chunks.find((candidate) => candidate.seq === descriptor.seq);
-      if (!chunk) throw new TypeError("Checkpoint package has an incomplete chunk exact-set");
-      const stored = await this.#artifactStep(
-        `local-put:${checkpoint.envelope.checkpointId}:${descriptor.seq}`,
-        descriptor.bytes,
-        abort,
-        () => this.options.artifacts.put(chunk.bytes),
-      );
-      if (canonicalize(stored) !== canonicalize({ digest: descriptor.digest, bytes: descriptor.bytes })) {
-        throw new TypeError("Checkpoint chunk changed while entering the local artifact store");
+      const chunk = await readCheckpointChunk(checkpoint, descriptor.seq, abort);
+      try {
+        const stored = await this.#artifactStep(
+          `local-put:${checkpoint.envelope.checkpointId}:${descriptor.seq}`,
+          descriptor.bytes,
+          abort,
+          () => this.options.artifacts.put(chunk),
+        );
+        if (canonicalize(stored) !== canonicalize({ digest: descriptor.digest, bytes: descriptor.bytes })) {
+          throw new TypeError("Checkpoint chunk changed while entering the local artifact store");
+        }
+      } finally {
+        chunk.fill(0);
       }
-    }
-    if (checkpoint.chunks.length !== checkpoint.envelope.chunks.length) {
-      throw new TypeError("Checkpoint package contains undeclared chunks");
     }
     const bytes = Buffer.from(canonicalize(checkpoint.envelope), "utf8");
     const stored = await this.#artifactStep(
@@ -452,13 +452,14 @@ export class AuthorityCheckpointService {
     created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>,
     abort?: AbortSignal,
   ): Promise<CheckpointPackage> {
-    const envelopeBytes = await this.#artifactStep(
+    const envelopeBytes = Buffer.from(await this.#artifactStep(
       `local-get:${created.checkpointId}:envelope`,
       created.envelopeRef.bytes,
       abort,
       () => this.options.artifacts.get(created.envelopeRef),
-    );
-    const text = Buffer.from(envelopeBytes).toString("utf8");
+    ));
+    const text = envelopeBytes.toString("utf8");
+    envelopeBytes.fill(0);
     const envelope = JSON.parse(text) as CheckpointEnvelope;
     if (
       canonicalize(envelope) !== text ||
@@ -466,16 +467,27 @@ export class AuthorityCheckpointService {
       envelope.digest !== created.envelopeDigest ||
       canonicalize(checkpointEnvelopeArtifact(envelope)) !== canonicalize(created.envelopeRef)
     ) throw new TypeError("Stored checkpoint envelope does not match its created fact");
-    const chunks = await Promise.all(envelope.chunks.map(async (descriptor) => ({
-      seq: descriptor.seq,
-      bytes: await this.#artifactStep(
-        `local-get:${created.checkpointId}:${descriptor.seq}`,
-        descriptor.bytes,
-        abort,
-        () => this.options.artifacts.get({ digest: descriptor.digest, bytes: descriptor.bytes }),
-      ),
-    })));
-    return { envelope, chunks };
+    return {
+      envelope,
+      source: {
+        read: (seq, offset, limit, signal) => {
+          const descriptor = envelope.chunks[seq];
+          if (!descriptor || descriptor.seq !== seq) {
+            return Promise.reject(new TypeError("Stored checkpoint chunk sequence is invalid"));
+          }
+          return this.#artifactStep(
+            `local-get:${created.checkpointId}:${seq}:${offset}`,
+            Math.min(limit, Math.max(0, descriptor.bytes - offset)),
+            signal ?? abort,
+            () => this.options.artifacts.readRange(
+              { digest: descriptor.digest, bytes: descriptor.bytes },
+              offset,
+              limit,
+            ),
+          );
+        },
+      },
+    };
   }
 
   #artifactStep<T>(
@@ -525,7 +537,7 @@ export class AuthorityCheckpointService {
       canonicalize(record.request) === canonicalize(request));
   }
 
-  #assertCreatedBinding(record: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>): void {
+  #assertCreatedForCurrentTarget(record: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>): void {
     if (
       record.targetId !== this.options.target.targetId ||
       record.recipientKeyId !== this.options.recipient.backupKeyId ||
@@ -534,9 +546,24 @@ export class AuthorityCheckpointService {
     ) throw new TypeError("Checkpoint replay belongs to another recovery target or root");
   }
 
+  #assertCreatedAuthority(record: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>): void {
+    if (
+      !record.targetId ||
+      !record.generation ||
+      record.generation.targetId !== record.targetId ||
+      record.recipientKeyId !== this.options.recipient.backupKeyId ||
+      !sameAuthorityGeneration(record.generation, this.#generation()) ||
+      !record.source ||
+      !record.request
+    ) throw new TypeError("Checkpoint replay belongs to another recovery root or authority generation");
+  }
+
   #target(targetId: string | undefined, recipientKeyId: string): Promise<RetirableRecoveryCheckpointTarget> {
     if (!targetId) return Promise.reject(new TypeError("Checkpoint target binding is missing"));
-    if (targetId === this.options.target.targetId) return Promise.resolve(this.options.target);
+    if (
+      targetId === this.options.target.targetId &&
+      recipientKeyId === this.options.recipient.backupKeyId
+    ) return Promise.resolve(this.options.target);
     if (!this.options.resolveTarget) return Promise.reject(new Error("Recovery checkpoint target binding is unavailable"));
     return this.options.resolveTarget(targetId, recipientKeyId);
   }
@@ -604,6 +631,9 @@ function reduceRecords(
   state: readonly CheckpointStreamRecord[],
   record: CheckpointStreamRecord,
 ): readonly CheckpointStreamRecord[] {
+  if (record.t === "checkpoint-cleanup-progress" && record.phase === "local-released") {
+    return state;
+  }
   const existing = state.find((candidate) => checkpointRecordKey(candidate) === checkpointRecordKey(record));
   if (!existing) return [...state, record];
   if (canonicalize(existing) !== canonicalize(record)) {
@@ -666,6 +696,15 @@ function currentFullVerified(
   > => record.t === "checkpoint-verified" &&
     record.recipientKeyId === recipientKeyId &&
     !superseded.has(record.checkpointId));
+}
+
+function sameAuthorityGeneration(
+  left: RecoveryCheckpointGeneration,
+  right: RecoveryCheckpointGeneration,
+): boolean {
+  return left.rootKeyId === right.rootKeyId &&
+    left.recipientKeyId === right.recipientKeyId &&
+    canonicalize(left.trustChainHead) === canonicalize(right.trustChainHead);
 }
 
 function validVerificationSignature(

@@ -55,9 +55,21 @@ export interface EncryptedCheckpointChunk {
   readonly bytes: Uint8Array;
 }
 
+/** Checkpoint-only bounded reader. Returned bytes are caller-owned and are cleared after consumption. */
+export interface CheckpointChunkSource {
+  read(
+    seq: number,
+    offset: number,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array>;
+}
+
 export interface CheckpointPackage {
   readonly envelope: CheckpointEnvelope;
-  readonly chunks: readonly EncryptedCheckpointChunk[];
+  /** Present only for legacy/small in-memory packages. Full checkpoints use `source`. */
+  readonly chunks?: readonly EncryptedCheckpointChunk[];
+  readonly source?: CheckpointChunkSource;
 }
 
 export interface CheckpointRecipient {
@@ -76,6 +88,62 @@ export interface OpenedFullAuthorityCheckpoint {
   readonly payload: FullAuthorityCheckpointPayload;
   readonly recordPages: readonly Buffer[];
   readonly retainedArtifacts: readonly Buffer[];
+}
+
+export interface VerifiedFullAuthorityCheckpoint {
+  readonly verificationNonce: Buffer;
+  readonly payload: FullAuthorityCheckpointPayload;
+}
+
+export async function readCheckpointChunkRange(
+  checkpoint: CheckpointPackage,
+  seq: number,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const descriptor = checkpoint.envelope.chunks[seq];
+  if (
+    !descriptor || descriptor.seq !== seq ||
+    !Number.isSafeInteger(offset) || offset < 0 ||
+    !Number.isSafeInteger(limit) || limit <= 0 || offset > descriptor.bytes
+  ) {
+    throw new TypeError("Checkpoint chunk range is invalid");
+  }
+  const expected = Math.min(limit, descriptor.bytes - offset);
+  let bytes: Buffer;
+  if (checkpoint.source) {
+    const sourceBytes = await checkpoint.source.read(seq, offset, limit, signal);
+    bytes = Buffer.from(sourceBytes);
+    Buffer.from(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength).fill(0);
+  } else {
+    bytes = Buffer.from(checkpoint.chunks?.find((candidate) => candidate.seq === seq)?.bytes ?? [])
+      .subarray(offset, offset + expected);
+  }
+  if (bytes.byteLength !== expected) {
+    bytes.fill(0);
+    throw new TypeError("Checkpoint chunk source returned an invalid range");
+  }
+  return bytes;
+}
+
+export async function readCheckpointChunk(
+  checkpoint: CheckpointPackage,
+  seq: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const descriptor = checkpoint.envelope.chunks[seq];
+  if (!descriptor || descriptor.seq !== seq) {
+    throw new TypeError("Checkpoint chunk sequence is invalid");
+  }
+  return readCheckpointChunkRange(checkpoint, seq, 0, descriptor.bytes || 1, signal);
+}
+
+export function checkpointPackageFromChunks(
+  envelope: CheckpointEnvelope,
+  chunks: readonly EncryptedCheckpointChunk[],
+): CheckpointPackage {
+  return Object.freeze({ envelope, chunks: Object.freeze([...chunks]) });
 }
 
 /** Creates the canonical identifier used by a newly prepared checkpoint. */
@@ -177,6 +245,111 @@ export function createFullAuthorityCheckpoint(input: {
     upToLsn: payload.source.lsn,
     plaintextChunks,
   });
+}
+
+/** Encrypts a full checkpoint one fixed plaintext chunk at a time into its existing local CAS. */
+export async function createStoredFullAuthorityCheckpoint(input: {
+  readonly payload: FullAuthorityCheckpointPayload;
+  readonly recipient: CheckpointRecipient;
+  readonly issuer: CheckpointSigner;
+  readonly plaintextChunks: AsyncIterable<Uint8Array>;
+  readonly persistChunk: (seq: number, bytes: Uint8Array) => Promise<void>;
+  readonly source: CheckpointChunkSource;
+}): Promise<CheckpointPackage> {
+  const payload = input.payload;
+  assertFullAuthorityCheckpointPayload(payload);
+  if (payload.recipientKeyId !== input.recipient.backupKeyId) {
+    throw new TypeError("Full checkpoint recipient does not match the recovery root");
+  }
+  if (payload.issuer.deviceId !== input.issuer.deviceId) {
+    throw new TypeError("Full checkpoint issuer does not match the signing device");
+  }
+  const header = Buffer.from(canonicalize(payload), "utf8");
+  if (header.byteLength > FULL_CHECKPOINT_CHUNK_BYTES) {
+    throw new TypeError("Full checkpoint payload header exceeds the fixed chunk bound");
+  }
+  header.fill(0);
+
+  assertCanonicalTime(payload.createdAt, "Checkpoint creation time");
+  const manifest = {
+    scope: [...payload.coverage.classes],
+    domainRevisions: { authority: payload.source.lsn },
+    upToLsn: payload.source.lsn,
+    purpose: payload.purpose,
+  };
+  const purpose: RecoveryCheckpointPurpose = payload.purpose.kind === "periodic"
+    ? { kind: "periodic" }
+    : {
+        kind: "root-activation",
+        activationDigest: protocolDigest("RecoveryActivationPlan", 1, payload.purpose.plan),
+      };
+  const identity = input.recipient;
+  const dek = randomBytes(32);
+  const nonceBase = randomBytes(12);
+  const verificationNonce = randomBytes(VERIFICATION_NONCE_BYTES);
+  const ephemeral = generateKeyPairSync("x25519");
+  const enc = encodeX25519PublicKey(ephemeral.publicKey);
+  const sharedSecret = diffieHellman({
+    privateKey: ephemeral.privateKey,
+    publicKey: importEncodedPublicKey(identity.backupPublicKey, "x25519"),
+  });
+  const kek = deriveKek(sharedSecret, identity.backupKeyId, payload.checkpointId);
+  const descriptors: CheckpointEnvelope["chunks"][number][] = [];
+  let seq = 0;
+  try {
+    for await (const inputChunk of input.plaintextChunks) {
+      if (seq >= WRAP_COUNTER) throw new TypeError("Checkpoint has too many chunks");
+      const plaintext = seq === 0
+        ? Buffer.concat([VERIFICATION_HEADER, verificationNonce, Buffer.from(inputChunk)])
+        : Buffer.from(inputChunk);
+      let encrypted: Buffer | undefined;
+      try {
+        encrypted = encryptAead(
+          dek,
+          chunkNonce(nonceBase, seq),
+          checkpointAad(payload.checkpointId, identity.backupKeyId, purpose, seq),
+          plaintext,
+        );
+        await input.persistChunk(seq, encrypted);
+        descriptors.push({ seq, digest: byteDigest(encrypted), bytes: encrypted.byteLength });
+      } finally {
+        plaintext.fill(0);
+        encrypted?.fill(0);
+      }
+      seq += 1;
+    }
+    if (seq === 0) throw new TypeError("Checkpoint requires at least one chunk");
+    const wrappedDek = encryptAead(
+      kek,
+      chunkNonce(nonceBase, WRAP_COUNTER),
+      checkpointAad(payload.checkpointId, identity.backupKeyId, purpose, WRAP_COUNTER),
+      dek,
+    ).toString("base64url");
+    const body = {
+      v: 1 as const,
+      checkpointId: payload.checkpointId,
+      createdAt: payload.createdAt,
+      alg: { kem: "X25519-HKDF-SHA256" as const, aead: "AES-256-GCM" as const },
+      recipientKeyId: identity.backupKeyId,
+      enc,
+      wrappedDek,
+      nonceBase: nonceBase.toString("base64url"),
+      manifest,
+      chunks: descriptors,
+    };
+    const digest = protocolDigest("CheckpointEnvelope", 1, body);
+    const signed = { ...body, digest };
+    const envelope: CheckpointEnvelope = Object.freeze({
+      ...signed,
+      signature: input.issuer.sign("CheckpointEnvelope", 1, signed),
+    });
+    return Object.freeze({ envelope, source: input.source });
+  } finally {
+    dek.fill(0);
+    kek.fill(0);
+    sharedSecret.fill(0);
+    verificationNonce.fill(0);
+  }
 }
 
 function createCheckpoint(input: {
@@ -385,6 +558,153 @@ export function openFullAuthorityCheckpoint(input: {
   }
 }
 
+/** Verifies a full checkpoint without materializing its declared record or artifact bodies. */
+export async function verifyStoredFullAuthorityCheckpoint(input: {
+  package: CheckpointPackage;
+  recoveryRoot: RecoveryRoot;
+  issuer: DeviceIdentity;
+  signal?: AbortSignal;
+}): Promise<VerifiedFullAuthorityCheckpoint> {
+  const { envelope } = input.package;
+  assertEnvelopeShape(envelope);
+  const identity = input.recoveryRoot.publicIdentity();
+  if (envelope.recipientKeyId !== identity.backupKeyId) {
+    throw new TypeError("Checkpoint recipient does not match the recovery root");
+  }
+  const { signature, digest, ...body } = envelope;
+  if (digest !== protocolDigest("CheckpointEnvelope", 1, body)) {
+    throw new TypeError("Checkpoint envelope digest is invalid");
+  }
+  verifyDeviceSignature(input.issuer, "CheckpointEnvelope", 1, { ...body, digest }, signature);
+  const purpose = checkpointPurpose(envelope);
+  if (purpose.kind === "root-activation") {
+    const activationDigest = protocolDigest(
+      "RecoveryActivationPlan",
+      1,
+      envelope.manifest.purpose.kind === "root-activation"
+        ? envelope.manifest.purpose.plan
+        : undefined,
+    );
+    if (purpose.activationDigest !== activationDigest) {
+      throw new TypeError("Checkpoint activation plan digest is invalid");
+    }
+  }
+  const nonceBase = decodeCanonicalBase64Url(envelope.nonceBase, "Checkpoint nonce base");
+  if (nonceBase.byteLength !== 12) throw new TypeError("Checkpoint nonce base must be 96 bits");
+  const sharedSecret = input.recoveryRoot.decapsulate(envelope.enc);
+  const kek = deriveKek(sharedSecret, envelope.recipientKeyId, envelope.checkpointId);
+  let dek: Buffer | undefined;
+  let verificationNonce: Buffer | undefined;
+  let payload: FullAuthorityCheckpointPayload | undefined;
+  let declared: readonly { readonly bytes: number; readonly digest: string }[] = [];
+  let contentIndex = 0;
+  let contentOffset = 0;
+  let contentHash = createHash("sha256");
+  const advanceEmptyContents = (): void => {
+    while (declared[contentIndex]?.bytes === 0) {
+      if (`sha256:${contentHash.digest("hex")}` !== declared[contentIndex]!.digest) {
+        throw new TypeError("Full checkpoint declared content digest is invalid");
+      }
+      contentIndex += 1;
+      contentHash = createHash("sha256");
+    }
+  };
+  try {
+    dek = decryptAead(
+      kek,
+      chunkNonce(nonceBase, WRAP_COUNTER),
+      checkpointAad(envelope.checkpointId, envelope.recipientKeyId, purpose, WRAP_COUNTER),
+      decodeCanonicalBase64Url(envelope.wrappedDek, "Wrapped checkpoint DEK"),
+    );
+    if (dek.byteLength !== 32) throw new TypeError("Checkpoint DEK has an invalid length");
+    for (let seq = 0; seq < envelope.chunks.length; seq += 1) {
+      if (input.signal?.aborted) throw input.signal.reason ?? new Error("Checkpoint verification was cancelled");
+      const descriptor = envelope.chunks[seq]!;
+      if (descriptor.seq !== seq) throw new TypeError("Checkpoint chunk sequence is not contiguous");
+      const encrypted = await readCheckpointChunk(input.package, seq, input.signal);
+      let plaintext: Buffer | undefined;
+      try {
+        if (encrypted.byteLength !== descriptor.bytes || byteDigest(encrypted) !== descriptor.digest) {
+          throw new TypeError("Checkpoint chunk content does not match its manifest");
+        }
+        plaintext = decryptAead(
+          dek,
+          chunkNonce(nonceBase, seq),
+          checkpointAad(envelope.checkpointId, envelope.recipientKeyId, purpose, seq),
+          encrypted,
+        );
+        let content = plaintext;
+        if (seq === 0) {
+          if (
+            plaintext.byteLength < VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES ||
+            !plaintext.subarray(0, VERIFICATION_HEADER.byteLength).equals(VERIFICATION_HEADER)
+          ) throw new TypeError("Checkpoint verification nonce header is missing");
+          verificationNonce = Buffer.from(plaintext.subarray(
+            VERIFICATION_HEADER.byteLength,
+            VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES,
+          ));
+          content = plaintext.subarray(VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES);
+          const text = content.toString("utf8");
+          const value = JSON.parse(text) as unknown;
+          if (canonicalize(value) !== text) {
+            throw new TypeError("Full checkpoint payload header is not canonical");
+          }
+          assertFullAuthorityCheckpointPayload(value);
+          if (
+            value.checkpointId !== envelope.checkpointId ||
+            value.createdAt !== envelope.createdAt ||
+            value.recipientKeyId !== envelope.recipientKeyId ||
+            value.source.lsn !== envelope.manifest.upToLsn ||
+            canonicalize(value.purpose) !== canonicalize(envelope.manifest.purpose) ||
+            canonicalize(value.coverage.classes) !== canonicalize(envelope.manifest.scope)
+          ) throw new TypeError("Full checkpoint payload is not bound to its envelope");
+          payload = value;
+          declared = [...payload.records.pages, ...payload.retainedArtifacts.entries];
+          advanceEmptyContents();
+          continue;
+        }
+        if (!payload) throw new TypeError("Full checkpoint payload header is missing");
+        let offset = 0;
+        while (offset < content.byteLength) {
+          const current = declared[contentIndex];
+          if (!current) throw new TypeError("Full checkpoint plaintext contains undeclared bytes");
+          const take = Math.min(content.byteLength - offset, current.bytes - contentOffset);
+          contentHash.update(content.subarray(offset, offset + take));
+          offset += take;
+          contentOffset += take;
+          if (contentOffset === current.bytes) {
+            if (`sha256:${contentHash.digest("hex")}` !== current.digest) {
+              throw new TypeError("Full checkpoint declared content digest is invalid");
+            }
+            contentIndex += 1;
+            contentOffset = 0;
+            contentHash = createHash("sha256");
+            advanceEmptyContents();
+          }
+        }
+      } finally {
+        encrypted.fill(0);
+        plaintext?.fill(0);
+      }
+    }
+    if (!verificationNonce || !payload) {
+      throw new TypeError("Full checkpoint payload header is missing");
+    }
+    advanceEmptyContents();
+    if (contentIndex !== payload.records.pages.length + payload.retainedArtifacts.entries.length || contentOffset !== 0) {
+      throw new TypeError("Full checkpoint plaintext is truncated");
+    }
+    return { verificationNonce, payload };
+  } catch (error) {
+    verificationNonce?.fill(0);
+    throw error;
+  } finally {
+    sharedSecret.fill(0);
+    kek.fill(0);
+    dek?.fill(0);
+  }
+}
+
 function openCheckpoint(input: {
   package: CheckpointPackage;
   recoveryRoot: RecoveryRoot;
@@ -433,9 +753,13 @@ function visitCheckpointPlaintext(
       throw new TypeError("Checkpoint activation plan digest is invalid");
     }
   }
-  const encryptedBySeq = new Map(input.package.chunks.map((chunk) => [chunk.seq, chunk]));
+  const materialized = input.package.chunks;
+  if (!materialized) {
+    throw new TypeError("Synchronous checkpoint opening requires a materialized legacy package");
+  }
+  const encryptedBySeq = new Map(materialized.map((chunk) => [chunk.seq, chunk]));
   if (
-    input.package.chunks.length !== envelope.chunks.length ||
+    materialized.length !== envelope.chunks.length ||
     encryptedBySeq.size !== envelope.chunks.length
   ) {
     throw new TypeError("Checkpoint package chunk set is incomplete or duplicated");

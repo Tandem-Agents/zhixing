@@ -735,6 +735,26 @@ describe("FileAuthorityCommitLog", () => {
     ]);
   });
 
+  it("returns reusable durable checkpoints while paginating a versioned WAL", async () => {
+    const { log } = await createStores();
+    for (const value of ["one", "two", "three"]) {
+      await log.append([{ stream: "control", body: { t: value } }]);
+    }
+
+    let cursor = await log.originCheckpoint();
+    const observed: string[] = [];
+    while (cursor.lsn < 3) {
+      const page = await log.readTail<{ t: string }>(cursor, 1);
+      expect(page.commits).toHaveLength(1);
+      observed.push(page.commits[0]!.entries[0]!.body.t);
+      expect(page.checkpoint.lsn).toBe(cursor.lsn + 1);
+      cursor = page.checkpoint;
+    }
+
+    expect(observed).toEqual(["one", "two", "three"]);
+    expect(cursor).toEqual(await log.checkpoint());
+  });
+
   it("fails closed when a legacy WAL and its sidecar identity diverge", async () => {
     const corrupted = await createStores();
     // 同上:sidecar identity 只在 legacy 日志上存在。

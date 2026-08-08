@@ -1123,13 +1123,35 @@ function deferredPairedCheckpointTarget(input: {
     targetDeviceId: input.deviceId,
     ...(input.storageMaintenance ? { storageMaintenance: input.storageMaintenance } : {}),
   });
+  const use = async <T>(operation: (target: FileRecoveryCheckpointTarget) => Promise<T>): Promise<T> => {
+    const target = await open();
+    try {
+      return await operation(target);
+    } finally {
+      await target.close();
+    }
+  };
   return {
     targetId: `backup-device:${input.deviceId}`,
     independenceDomain: `device:${input.deviceId}`,
-    writeDurable: async (checkpoint) => (await open()).writeDurable(checkpoint),
-    read: async (checkpointId) => (await open()).read(checkpointId),
+    writeDurable: (checkpoint) => use((target) => target.writeDurable(checkpoint)),
+    read: async (checkpointId, signal) => {
+      const initial = await use((target) => target.read(checkpointId, signal));
+      // Legacy trust-only checkpoints are deliberately materialized within a strict cap.
+      if (initial.chunks) return initial;
+      return {
+        envelope: initial.envelope,
+        source: {
+          read: (seq, offset, limit, rangeSignal) => use(async (target) => {
+            const current = await target.read(checkpointId, rangeSignal ?? signal);
+            if (!current.source) throw new TypeError("Paired checkpoint source is unavailable");
+            return current.source.read(seq, offset, limit, rangeSignal ?? signal);
+          }),
+        },
+      };
+    },
     retire: async (checkpointId, supersededBy) =>
-      (await open()).retire(checkpointId, supersededBy),
+      use((target) => target.retire(checkpointId, supersededBy)),
   };
 }
 

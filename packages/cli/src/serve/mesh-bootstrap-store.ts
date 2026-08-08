@@ -56,6 +56,8 @@ import type {
 } from "@zhixing/mesh/bootstrap-authority";
 import {
   checkpointEnvelopeArtifact,
+  checkpointPackageFromChunks,
+  readCheckpointChunk,
   type CheckpointPackage,
 } from "@zhixing/mesh/checkpoint";
 import { validateRecoveryActivationPlan } from "@zhixing/mesh/bootstrap-authority";
@@ -64,6 +66,14 @@ import { pairingOfferDigest } from "@zhixing/mesh/pairing";
 type TrustStreamRecord =
   | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
   | { readonly t: "home-trust-record"; readonly record: HomeTrustRecord };
+
+const FULL_AUTHORITY_CHECKPOINT_SCOPE = Object.freeze([
+  "global-authority",
+  "conversation-authority",
+  "conversation-content",
+  "execution-assets",
+] as const);
+const MAX_MATERIALIZED_LEGACY_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
 interface PersistedEndpointDirectory {
   readonly v: 1;
@@ -670,16 +680,16 @@ class FileBootstrapAuthority implements BootstrapAuthorityPort {
   }
 
   async persistCheckpointPackage(checkpoint: CheckpointPackage): Promise<ArtifactRef> {
-    for (const chunk of checkpoint.chunks) {
-      const expected = checkpoint.envelope.chunks.find((entry) => entry.seq === chunk.seq);
-      if (!expected) throw new TypeError("Checkpoint package contains an undeclared chunk");
-      const stored = await this.artifacts.put(chunk.bytes);
-      if (stored.digest !== expected.digest || stored.bytes !== expected.bytes) {
-        throw new TypeError("Checkpoint chunk does not match its signed manifest");
+    for (const descriptor of checkpoint.envelope.chunks) {
+      const bytes = await readCheckpointChunk(checkpoint, descriptor.seq);
+      try {
+        const stored = await this.artifacts.put(bytes);
+        if (stored.digest !== descriptor.digest || stored.bytes !== descriptor.bytes) {
+          throw new TypeError("Checkpoint chunk does not match its signed manifest");
+        }
+      } finally {
+        bytes.fill(0);
       }
-    }
-    if (checkpoint.chunks.length !== checkpoint.envelope.chunks.length) {
-      throw new TypeError("Checkpoint package is missing a signed chunk");
     }
     const expectedEnvelope = checkpointEnvelopeArtifact(checkpoint.envelope);
     const storedEnvelope = await this.artifacts.put(
@@ -709,13 +719,46 @@ class FileBootstrapAuthority implements BootstrapAuthorityPort {
     ) {
       throw new Error("Checkpoint envelope artifact is not canonical or self-consistent");
     }
-    const chunks = await Promise.all(
-      envelope.chunks.map(async (entry) => ({
-        seq: entry.seq,
-        bytes: await this.artifacts.get({ digest: entry.digest, bytes: entry.bytes }),
-      })),
-    );
-    return { envelope, chunks };
+    if (canonicalize(envelope.manifest.scope) !== canonicalize(FULL_AUTHORITY_CHECKPOINT_SCOPE)) {
+      let totalBytes = 0;
+      for (const descriptor of envelope.chunks) {
+        totalBytes += descriptor.bytes;
+        if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_MATERIALIZED_LEGACY_CHECKPOINT_BYTES) {
+          throw new TypeError("Legacy checkpoint exceeds its bounded materialization limit");
+        }
+      }
+      const chunks: { seq: number; bytes: Uint8Array }[] = [];
+      try {
+        for (const descriptor of envelope.chunks) {
+          chunks.push({
+            seq: descriptor.seq,
+            bytes: await this.artifacts.get({ digest: descriptor.digest, bytes: descriptor.bytes }),
+          });
+        }
+        return checkpointPackageFromChunks(envelope, chunks);
+      } catch (error) {
+        for (const chunk of chunks) {
+          Buffer.from(chunk.bytes.buffer, chunk.bytes.byteOffset, chunk.bytes.byteLength).fill(0);
+        }
+        throw error;
+      }
+    }
+    return {
+      envelope,
+      source: {
+        read: (seq, offset, limit) => {
+          const descriptor = envelope.chunks[seq];
+          if (!descriptor || descriptor.seq !== seq) {
+            return Promise.reject(new TypeError("Stored checkpoint chunk sequence is invalid"));
+          }
+          return this.artifacts.readRange(
+            { digest: descriptor.digest, bytes: descriptor.bytes },
+            offset,
+            limit,
+          );
+        },
+      },
+    };
   }
 
   async appendCheckpoint(record: CheckpointStreamRecord): Promise<void> {

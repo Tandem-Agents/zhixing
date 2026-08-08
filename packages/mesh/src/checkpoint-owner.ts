@@ -23,7 +23,7 @@ export interface AuthorityCheckpointOwnerOptions {
 }
 
 export interface AuthorityCheckpointOwnerPort {
-  start(schedule?: boolean): void;
+  start(schedule?: boolean): Promise<void>;
   ensureDaily(): Promise<CheckpointPackage>;
   force(requestId: string): Promise<CheckpointPackage>;
   status(): Promise<RecoveryBackupStatus>;
@@ -47,7 +47,7 @@ export class AuthorityCheckpointOwner implements AuthorityCheckpointOwnerPort {
     this.#retryMs = options.retryMs ?? 60 * 60 * 1000;
   }
 
-  start(schedule = true): void {
+  async start(schedule = true): Promise<void> {
     if (!this.#stopped) return;
     this.#stopped = false;
     if (schedule) this.#schedule(0);

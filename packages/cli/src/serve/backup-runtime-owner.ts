@@ -45,7 +45,12 @@ export async function createConfiguredCheckpointOwner(input: {
 type RuntimeSlot =
   | { readonly kind: "disabled" }
   | { readonly kind: "unavailable"; readonly code: BackupUnavailableCode }
-  | { readonly kind: "available"; readonly fingerprint: string; readonly owner: AuthorityCheckpointOwner };
+  | {
+      readonly kind: "available";
+      readonly fingerprint: string;
+      readonly owner: AuthorityCheckpointOwner;
+      readonly target: RetirableRecoveryCheckpointTarget;
+    };
 
 type BackupUnavailableCode =
   | "configuration-invalid"
@@ -102,9 +107,10 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     readonly onError?: (error: unknown) => void;
   }) {}
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
+    await this.#reload();
     this.#schedule(0);
   }
 
@@ -129,7 +135,13 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     this.#started = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
-    if (this.#slot.kind === "available") await this.#slot.owner.stop();
+    if (this.#slot.kind === "available") {
+      try {
+        await this.#slot.owner.stop();
+      } finally {
+        await this.#slot.target.close?.();
+      }
+    }
     this.#slot = { kind: "disabled" };
   }
 
@@ -186,7 +198,10 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       root: trust.recoveryRootPublicKey,
       recipientKeyId,
     });
-    if (this.#slot.kind === "available" && this.#slot.fingerprint === fingerprint) return this.#slot;
+    if (this.#slot.kind === "available" && this.#slot.fingerprint === fingerprint) {
+      await target.close?.();
+      return this.#slot;
+    }
 
     const member = trust.members.find((candidate) =>
       candidate.state === "active" && candidate.device.deviceId === this.input.mesh.deviceKey.deviceId)!;
@@ -215,14 +230,30 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       identitySeed: `${trust.homeId}:${trust.issuer.deviceId}:${binding.targetId}`,
       ...(this.input.onError ? { onError: this.input.onError } : {}),
     });
-    owner.start(false);
-    return this.#replace({ kind: "available", fingerprint, owner });
+    try {
+      await service.recoverPending();
+      await owner.start(false);
+      return this.#replace({ kind: "available", fingerprint, owner, target });
+    } catch (error) {
+      try {
+        await owner.stop();
+      } finally {
+        await target.close?.();
+      }
+      if (error instanceof TypeError) throw error;
+      this.input.onError?.(error);
+      return this.#replace({ kind: "unavailable", code: "target-unavailable" });
+    }
   }
 
   async #replace(next: RuntimeSlot): Promise<RuntimeSlot> {
     if (this.#slot.kind === "available" &&
       (next.kind !== "available" || next.owner !== this.#slot.owner)) {
-      await this.#slot.owner.stop();
+      try {
+        await this.#slot.owner.stop();
+      } finally {
+        await this.#slot.target.close?.();
+      }
     }
     this.#slot = next;
     return next;
@@ -265,9 +296,13 @@ async function targetForBinding(
   const target = await FileRecoveryCheckpointTarget.open({
     targetRoot: binding.directory,
     sourceRoot: path.join(input.zhixingHome, "distributed-runtime", "authority"),
+    create: false,
     storageMaintenance: input.storageMaintenance,
   });
-  if (target.targetId !== binding.targetId) throw new Error("Recovery backup target physical identity changed");
+  if (target.targetId !== binding.targetId) {
+    await target.close();
+    throw new Error("Recovery backup target physical identity changed");
+  }
   return target;
 }
 
