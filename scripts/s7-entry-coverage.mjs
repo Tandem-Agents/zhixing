@@ -849,6 +849,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "ensureSession",
       "finalHistory",
       "listConversations",
+      "listConversationAuthorities",
       "listDeferredIntents",
       "mutateSession",
       "pendingInteractions",
@@ -857,6 +858,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "runTurn",
       "sessionState",
       "statusHistory",
+      "currentAuthority",
     ]);
     for (const member of ownerPort.members) {
       if (
@@ -1186,6 +1188,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "prepareLocalConversationAssignment",
     "releaseLocalConversationEnvironmentPreflight",
     "signer",
+    "storageMaintenance",
     "validateConversationRuntimeBinding",
     "validateLocalConversationManifest",
     "verifier",
@@ -1485,7 +1488,10 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/cli/src/serve/access-surfaces.ts", undefined],
     ["packages/cli/src/serve/executor-role-runtime.ts", undefined],
     ["packages/cli/src/serve/conversation-evidence-authority.ts", undefined],
+    ["packages/cli/src/serve/conversation-transfer-mesh.ts", undefined],
+    ["packages/cli/src/serve/first-party-conversation-mesh.ts", undefined],
     ["packages/cli/src/serve/local-conversation-rpc.ts", undefined],
+    ["packages/cli/src/serve/post-adoption-memory.ts", undefined],
     ["packages/cli/src/serve/post-adoption-review.ts", undefined],
     ["packages/cli/src/serve/command.ts", undefined],
     ["packages/cli/src/runtime/rpc-confirmation-broker.ts", undefined],
@@ -1495,6 +1501,7 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/server/src/rpc/handlers.ts", undefined],
     ["packages/server/src/rpc/methods/session.ts", undefined],
     ["packages/server/src/rpc/methods/confirmation.ts", undefined],
+    ["packages/owner-kernel/src/conversation-transfer.ts", undefined],
   ]);
   for (const record of records) {
     if (required.has(record.relative)) required.set(record.relative, record);
@@ -1520,6 +1527,17 @@ export function inspectConversationAdoptionAssembly(records) {
   if (!/this\.#transferTarget\s*=\s*roles\.has\("anchor"\)\s*\?[\s\S]*?new\s+ConversationTransferTarget\s*\(/u.test(mesh.text)) {
     failures.push(`${mesh.relative}: transfer target must be owned only by the active anchor role`);
   }
+  if (
+    !/staging:\s*new\s+FileConversationTransferStagingArea\s*\([\s\S]*?storageMaintenance:\s*options\.authority\.storageMaintenance,[\s\S]*?abortSignal:\s*\(\)\s*=>\s*this\.#transferAbort\.signal/u.test(mesh.text)
+  ) {
+    failures.push(`${mesh.relative}: anchor transfer target must use private staging and the authority governor/lifecycle abort`);
+  }
+  if (
+    !/this\.#firstPartyConversationTarget\s*=\s*roles\.has\("anchor"\)[\s\S]*?new\s+FirstPartyConversationMeshTarget\s*\(\s*\)/u.test(mesh.text) ||
+    !/registerFirstPartyConversationMeshService\s*\([\s\S]*?this\.#firstPartyConversationTarget/u.test(mesh.text)
+  ) {
+    failures.push(`${mesh.relative}: anchor must own the single finite first-party conversation relay target`);
+  }
   const startBoundary = mesh.text.indexOf("  async start(): Promise<void> {");
   const stopBoundary = mesh.text.indexOf("  async stop(): Promise<void> {");
   if (startBoundary < 0 || stopBoundary < 0 || startBoundary > stopBoundary) {
@@ -1537,6 +1555,9 @@ export function inspectConversationAdoptionAssembly(records) {
   }
   if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?this\.#postAdoptionMemory[\s\S]*?\.flush\s*\(/u.test(mesh.text)) {
     failures.push(`${mesh.relative}: committed authority must install before post-adoption memory consumption`);
+  }
+  if (!/loadCandidates:\s*\(\)\s*=>\s*protocol\.conversationMemoryFlushes\s*\(/u.test(mesh.text)) {
+    failures.push(`${mesh.relative}: completed post-adoption memory watermarks must be checked before loading candidate history`);
   }
   if (!/async\s+bindPostAdoptionReview\s*\([\s\S]*?this\.#postAdoptionReview\s*=\s*port;\s*await\s+this\.#restoreCommittedTransfers\s*\(\s*\)/u.test(mesh.text)) {
     failures.push(`${mesh.relative}: post-adoption review must bind before replaying durable commits`);
@@ -1556,8 +1577,21 @@ export function inspectConversationAdoptionAssembly(records) {
       failures.push(`${rootRecord.relative}: mesh production root must bind its local conversation source`);
     }
   }
-
+  const accessRoot = required.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = required.get("packages/cli/src/serve/executor-role-runtime.ts");
+  if (
+    !/storageMaintenance:\s*ctx\.authorityRuntime\.storageMaintenance/u.test(accessRoot.text) ||
+    !/authority:\s*ctx\.authorityRuntime/u.test(accessRoot.text)
+  ) {
+    failures.push(`${accessRoot.relative}: combined production root must share one authority storage governor with source and target`);
+  }
+  if (
+    !/storageMaintenance:\s*authority\.storageMaintenance/u.test(executorRoot.text) ||
+    !/authority,\s*[\r\n]+\s*localConversationOwner,/u.test(executorRoot.text)
+  ) {
+    failures.push(`${executorRoot.relative}: executor-only production root must share one authority storage governor with source and target`);
+  }
+
   requireCount(executorRoot, /new\s+LocalConversationRpcRouter\s*\(/gu, 1, "first-party local conversation router construction");
   requireCount(executorRoot, /conversationRpc\s*:\s*localConversationRpc/gu, 1, "first-party local conversation router injection");
 
@@ -1572,6 +1606,14 @@ export function inspectConversationAdoptionAssembly(records) {
   const router = required.get("packages/cli/src/serve/local-conversation-rpc.ts");
   if (!/params\.continueLocally\s*!==\s*true/u.test(router.text) || !/assertLocalConversationIdForDevice\s*\(/u.test(router.text)) {
     failures.push(`${router.relative}: local session writes must require user consent and a local conversation identity`);
+  }
+  if (
+    !/this\.input\.owner\.currentAuthority\s*\(conversationId\)/u.test(router.text) ||
+    !/this\.input\.owner\.listConversationAuthorities\s*\(\s*\)/u.test(router.text) ||
+    !/this\.#remoteFor\s*\(authority\.deviceId\)\.dispatch/u.test(router.text) ||
+    !/dispatchCanonical[\s\S]*?#listAllConfirmations/u.test(router.text)
+  ) {
+    failures.push(`${router.relative}: first-party session and confirmation routing must share current-owner resolution and canonical local dispatch`);
   }
   const context = required.get("packages/server/src/context.ts");
   if (!/conversationRpc\?\s*:\s*FirstPartyConversationRpcRouter/u.test(context.text)) {
@@ -1606,10 +1648,64 @@ export function inspectConversationAdoptionAssembly(records) {
   if (
     !/parseLocalConversationId\s*\(input\.conversationId\)/u.test(review.text) ||
     !/this\.#review\.decide\s*\(intent\.intentId,\s*"confirmed"/u.test(review.text) ||
-    !/this\.#hub\.attach\s*\("post-adoption-review",\s*this\.#broker\)/u.test(review.text) ||
+    !/this\.#hub\.attach\s*\("post-adoption-review",\s*this\.#broker,\s*\{/u.test(review.text) ||
+    !/conversationIdFor:\s*\(request\)\s*=>/u.test(review.text) ||
     !/triggeredBy:\s*surfacePrincipal\s*\(context\)/u.test(review.text)
   ) {
     failures.push(`${review.relative}: adoption review must remain local-conversation scoped and reuse the durable review/confirmation seams`);
+  }
+
+  const firstParty = required.get("packages/cli/src/serve/first-party-conversation-mesh.ts");
+  if (
+    !/const\s+METHODS\s*=\s*new\s+Set\s*\(\[/u.test(firstParty.text) ||
+    !/METHODS\.has\(command\.method\)/u.test(firstParty.text) ||
+    !/connection\.peer\.deviceId/u.test(firstParty.text) ||
+    !/surface generation is stale/u.test(firstParty.text) ||
+    !/prior\.close\s*\(\s*\)/u.test(firstParty.text)
+  ) {
+    failures.push(`${firstParty.relative}: first-party mesh relay must remain finite, peer-bound and single-generation`);
+  }
+
+  const transferMesh = required.get("packages/cli/src/serve/conversation-transfer-mesh.ts");
+  if (
+    !/result\.requestId\s*!==\s*command\.requestId\s*\|\|\s*result\.transferId\s*!==\s*command\.transferId/u.test(transferMesh.text) ||
+    !/class\s+ConversationTransferRejectedError[\s\S]*?readonly\s+retryable/u.test(transferMesh.text) ||
+    !/okAborted\(command,\s*aborted\.abort\)/u.test(transferMesh.text)
+  ) {
+    failures.push(`${transferMesh.relative}: transfer results must retain strict originating-command correlation and signed abort facts`);
+  }
+
+  const transferOwner = required.get("packages/owner-kernel/src/conversation-transfer.ts");
+  const settle = transferOwner.text.indexOf("await this.#options.settleConversation(input.conversationId)");
+  const revalidate = transferOwner.text.indexOf("const settled = await this.#options.conversationState(input.conversationId)", settle);
+  const appendPrepared = transferOwner.text.indexOf("t: \"prepared\"", revalidate);
+  if (settle < 0 || revalidate < 0 || appendPrepared < 0 || !(settle < revalidate && revalidate < appendPrepared)) {
+    failures.push(`${transferOwner.relative}: source prepare must revalidate durable identity after settling and before append`);
+  }
+  if (
+    !/class\s+FileConversationTransferStagingArea[\s\S]*?path\.join\(this\.#rootDir,\s*transferId/u.test(transferOwner.text) ||
+    !/promoteTransferClosure\s*\([\s\S]*?putVerifiedStream/u.test(transferOwner.text) ||
+    !/step:\s*"staging-cleanup"[\s\S]*?obligation:\s*"committed"/u.test(transferOwner.text)
+  ) {
+    failures.push(`${transferOwner.relative}: transfer-private staging, shared promotion and committed cleanup must remain distinct`);
+  }
+
+  const memory = required.get("packages/cli/src/serve/post-adoption-memory.ts");
+  for (const kind of ["discovery", "attempt", "plan", "effect", "completed"]) {
+    if (!memory.text.includes(`post-adoption-memory-${kind}`)) {
+      failures.push(`${memory.relative}: durable post-adoption memory ${kind} record is missing`);
+    }
+  }
+  const projectionRead = memory.text.indexOf("const beforeLoad = await readProjection");
+  const candidateLoad = memory.text.indexOf("input.candidates ?? await input.loadCandidates?.()", projectionRead);
+  if (
+    projectionRead < 0 ||
+    candidateLoad < 0 ||
+    projectionRead > candidateLoad ||
+    !/if\s*\(!durableDiscovery\)\s*\{[\s\S]*?input\.candidates\s*\?\?\s*await input\.loadCandidates\?\.\(\)[\s\S]*?appendDiscoveryWithAttempts/u.test(memory.text) ||
+    !/for\s*\(const operationId of durableDiscovery\.operationIds\)[\s\S]*?operation\?\.completed[\s\S]*?operation\?\.attempt\?\.input/u.test(memory.text)
+  ) {
+    failures.push(`${memory.relative}: durable discovery inputs must be frozen atomically and only incomplete operations may be re-driven without reloading history`);
   }
 
   const session = required.get("packages/server/src/rpc/methods/session.ts");

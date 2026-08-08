@@ -691,6 +691,7 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
         releaseLocalConversationEnvironmentPreflight:
           ctx.authorityRuntime.releaseLocalConversationEnvironmentPreflight,
         signer: ctx.authorityRuntime.signer,
+        storageMaintenance: ctx.authorityRuntime.storageMaintenance,
         validateConversationRuntimeBinding:
           ctx.authorityRuntime.validateConversationRuntimeBinding,
         validateLocalConversationManifest:

@@ -18,6 +18,7 @@ import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
 } from "@zhixing/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import type {
   AssignmentResourceCoordinator,
@@ -106,6 +107,7 @@ export interface LocalConversationOwnerRuntimeStack
   readonly executorResources: ExecutorResourceGovernor;
   readonly executorResourceGovernor: ExecutorResourceGovernor;
   readonly executionAssetCatalog: ExecutionAssetCatalogPort;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly globalPublishing: false;
 }
 
@@ -189,6 +191,7 @@ export type LocalConversationOwnerRuntimeDependencies = Pick<
   | "prepareLocalConversationAssignment"
   | "releaseLocalConversationEnvironmentPreflight"
   | "signer"
+  | "storageMaintenance"
   | "validateConversationRuntimeBinding"
   | "validateLocalConversationManifest"
   | "verifier"
@@ -221,6 +224,7 @@ export function localConversationOwnerRuntime(
     executorResources: deps.executorResourceGovernor,
     executorResourceGovernor: deps.executorResourceGovernor,
     executionAssetCatalog: deps.executionAssetCatalog,
+    storageMaintenance: deps.storageMaintenance,
     globalPublishing: false,
     anchorEpoch: deps.localOwnerEpoch,
     acceptsConversationId(conversationId) {

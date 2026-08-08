@@ -150,6 +150,7 @@ export interface AuthorityRuntimeStack {
   readonly localExecutorEnabled: boolean;
   readonly executorLog: FileAuthorityCommitLog;
   readonly artifacts: FileArtifactStore;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly surfaceAssets: SurfaceAssetCoordinator;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
@@ -1659,6 +1660,7 @@ export async function setupAuthorityRuntime(
         return executorLog;
       },
       artifacts,
+      storageMaintenance: options.storageMaintenance,
       get surfaceAssets() {
         if (!surfaceAssets)
           throw new Error("Anchor authority role is not enabled");

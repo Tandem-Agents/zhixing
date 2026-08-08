@@ -1,6 +1,7 @@
 import { AuthorityStorageError } from "@zhixing/core/authority";
 import { isAdvancementControlEvent } from "@zhixing/core/advancement";
 import type { AdvancementControlEvent } from "@zhixing/core/advancement";
+import type { Message, ParsedSummary } from "@zhixing/core";
 import type {
   ArtifactRef,
   AssignmentTerminationProof,
@@ -16,6 +17,8 @@ import type {
   IngressContext,
   JobRunState,
   JobUncertainClosure,
+  JsonValue,
+  MemoryAppendPayload,
   SessionControlMutation,
   SessionInternalRecord,
   SessionStagedMutation,
@@ -43,7 +46,9 @@ import {
   validateDispatchConflictProof,
   validateIngressContext,
   validateExplicitEnvironmentSelection,
+  validateMessages,
   validateNonEmptyUserTurnInput,
+  validateGlobalStagedMutation,
   validateSupersedeProof,
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
@@ -230,6 +235,105 @@ export type ConversationRunInternalRecord =
       readonly mutation: "clear" | "delete";
       readonly domainRevision: number;
       readonly requestId: string;
+    }
+  | PostAdoptionMemoryRecord;
+
+export interface PostAdoptionMemoryExtraction {
+  readonly category: "profile" | "person" | "journal";
+  readonly id: string;
+  readonly meta: Record<string, JsonValue>;
+  readonly content: string;
+}
+
+export interface PostAdoptionMemoryInput {
+  readonly conversationId: string;
+  readonly segmentId: string;
+  readonly tokensBefore: number;
+  readonly messages: readonly Message[];
+  readonly summary: ParsedSummary;
+}
+
+export function postAdoptionMemoryInputDigest(
+  input: PostAdoptionMemoryInput,
+): Digest {
+  return protocolDigest("PostAdoptionMemoryInput", 1, input);
+}
+
+export function postAdoptionMemoryOperationId(
+  input: PostAdoptionMemoryInput,
+): string {
+  return `post-adoption-memory:${protocolDigest("PostAdoptionSegmentMemory", 1, {
+    conversationId: input.conversationId,
+    segmentId: input.segmentId,
+    sourceDigest: protocolDigest("PostAdoptionSegmentSource", 1, input.messages),
+    summaryDigest: protocolDigest("PostAdoptionSegmentSummary", 1, input.summary),
+  })}`;
+}
+
+function assertPostAdoptionMemoryInput(
+  input: unknown,
+): asserts input is PostAdoptionMemoryInput {
+  assertPlainRecord(input, "Post-adoption memory input");
+  assertExactRecordKeys(
+    input,
+    ["conversationId", "messages", "segmentId", "summary", "tokensBefore"],
+    "Post-adoption memory input",
+  );
+  assertIdentifier(input.conversationId, "Memory input conversation id");
+  assertIdentifier(input.segmentId, "Memory input segment id");
+  assertNonNegativeSafeInteger(input.tokensBefore, "Memory input tokens before");
+  validateMessages(input.messages, "Memory input messages");
+  assertPlainRecord(input.summary, "Memory input summary");
+  assertExactRecordKeys(
+    input.summary,
+    ["active", "facts", "state"],
+    "Memory input summary",
+  );
+  for (const key of ["active", "facts", "state"] as const) {
+    if (typeof input.summary[key] !== "string") {
+      throw corruptRunJournal(`Memory input summary ${key} must be a string`);
+    }
+  }
+}
+
+export type PostAdoptionMemoryRecord =
+  | {
+      readonly kind: "post-adoption-memory-discovery";
+      readonly conversationId: string;
+      readonly transferId: string;
+      readonly checkpointDigest: Digest;
+      readonly operationIds: readonly string[];
+      readonly operationsDigest: Digest;
+    }
+  | {
+      readonly kind: "post-adoption-memory-attempt";
+      readonly operationId: string;
+      readonly attemptOrdinal: number;
+      readonly inputDigest: Digest;
+      readonly input: PostAdoptionMemoryInput;
+    }
+  | {
+      readonly kind: "post-adoption-memory-plan";
+      readonly operationId: string;
+      readonly attemptOrdinal: number;
+      readonly resultDigest: Digest;
+      readonly extractions: readonly PostAdoptionMemoryExtraction[];
+    }
+  | {
+      readonly kind: "post-adoption-memory-effect";
+      readonly operationId: string;
+      readonly effectId: string;
+      readonly effectIndex: number;
+      readonly attemptOrdinal: number;
+      readonly requestId: string;
+      readonly expectedDigest: Digest | null;
+      readonly status: "prepared" | "revision-conflict" | "granted";
+      readonly mutation: { readonly kind: "memory-append"; readonly payload: MemoryAppendPayload };
+    }
+  | {
+      readonly kind: "post-adoption-memory-completed";
+      readonly operationId: string;
+      readonly resultDigest: Digest;
     };
 
 export const CONVERSATION_RUN_INTERNAL_RECORD_TYPES = [
@@ -237,6 +341,11 @@ export const CONVERSATION_RUN_INTERNAL_RECORD_TYPES = [
   "session-activity",
   "conversation-commit-projection",
   "conversation-lifecycle-projection",
+  "post-adoption-memory-discovery",
+  "post-adoption-memory-attempt",
+  "post-adoption-memory-plan",
+  "post-adoption-memory-effect",
+  "post-adoption-memory-completed",
 ] as const satisfies readonly ConversationRunInternalRecord["kind"][];
 
 interface RecordShape {
@@ -710,6 +819,153 @@ export function validateConversationRunInternalRecord(
       "Session activity revision",
     );
     assertCanonicalTime(value.lastActiveAt, "Session activity time");
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "post-adoption-memory-discovery") {
+    assertExactRecordKeys(
+      value,
+      [
+        "checkpointDigest",
+        "conversationId",
+        "kind",
+        "operationIds",
+        "operationsDigest",
+        "transferId",
+      ],
+      "Post-adoption memory discovery",
+    );
+    assertIdentifier(value.conversationId, "Memory discovery conversation id");
+    assertIdentifier(value.transferId, "Memory discovery transfer id");
+    assertDigest(value.checkpointDigest, "Memory discovery checkpoint digest");
+    assertDigest(value.operationsDigest, "Memory discovery operations digest");
+    if (!Array.isArray(value.operationIds)) {
+      throw corruptRunJournal("Memory discovery operation ids must be an array");
+    }
+    let previous: string | undefined;
+    for (const operationId of value.operationIds) {
+      assertIdentifier(operationId, "Memory discovery operation id");
+      if (previous !== undefined && previous >= operationId) {
+        throw corruptRunJournal("Memory discovery operation ids must be unique and sorted");
+      }
+      previous = operationId;
+    }
+    if (
+      value.operationsDigest !==
+      protocolDigest("PostAdoptionMemoryOperations", 1, value.operationIds)
+    ) {
+      throw corruptRunJournal("Memory discovery operations digest does not match");
+    }
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "post-adoption-memory-attempt") {
+    assertExactRecordKeys(
+      value,
+      ["attemptOrdinal", "input", "inputDigest", "kind", "operationId"],
+      "Post-adoption memory attempt",
+    );
+    assertIdentifier(value.operationId, "Memory attempt operation id");
+    assertPositiveSafeInteger(value.attemptOrdinal, "Memory attempt ordinal");
+    assertDigest(value.inputDigest, "Memory attempt input digest");
+    assertPostAdoptionMemoryInput(value.input);
+    if (value.operationId !== postAdoptionMemoryOperationId(value.input)) {
+      throw corruptRunJournal("Memory attempt operation id does not bind its input");
+    }
+    if (value.inputDigest !== postAdoptionMemoryInputDigest(value.input)) {
+      throw corruptRunJournal("Memory attempt input digest does not match");
+    }
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "post-adoption-memory-plan") {
+    assertExactRecordKeys(
+      value,
+      ["attemptOrdinal", "extractions", "kind", "operationId", "resultDigest"],
+      "Post-adoption memory plan",
+    );
+    assertIdentifier(value.operationId, "Memory plan operation id");
+    assertPositiveSafeInteger(value.attemptOrdinal, "Memory plan attempt ordinal");
+    assertDigest(value.resultDigest, "Memory plan result digest");
+    if (!Array.isArray(value.extractions)) {
+      throw corruptRunJournal("Memory plan extractions must be an array");
+    }
+    let previousExtraction: string | undefined;
+    for (const extraction of value.extractions) {
+      assertPlainRecord(extraction, "Memory plan extraction");
+      assertExactRecordKeys(
+        extraction,
+        ["category", "content", "id", "meta"],
+        "Memory plan extraction",
+      );
+      if (!["profile", "person", "journal"].includes(String(extraction.category))) {
+        throw corruptRunJournal("Memory plan extraction category is invalid");
+      }
+      assertIdentifier(extraction.id, "Memory plan extraction id");
+      if (typeof extraction.content !== "string") {
+        throw corruptRunJournal("Memory plan extraction content must be a string");
+      }
+      assertPlainRecord(extraction.meta, "Memory plan extraction metadata");
+      const encoded = canonicalize(extraction);
+      if (previousExtraction !== undefined && previousExtraction >= encoded) {
+        throw corruptRunJournal("Memory plan extractions must be unique and sorted");
+      }
+      previousExtraction = encoded;
+    }
+    if (
+      value.resultDigest !==
+      protocolDigest("PostAdoptionMemoryPlan", 1, value.extractions)
+    ) {
+      throw corruptRunJournal("Memory plan result digest does not match");
+    }
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "post-adoption-memory-effect") {
+    assertExactRecordKeys(
+      value,
+      [
+        "attemptOrdinal",
+        "effectId",
+        "effectIndex",
+        "expectedDigest",
+        "kind",
+        "mutation",
+        "operationId",
+        "requestId",
+        "status",
+      ],
+      "Post-adoption memory effect",
+    );
+    assertIdentifier(value.operationId, "Memory effect operation id");
+    assertIdentifier(value.effectId, "Memory effect id");
+    assertNonNegativeSafeInteger(value.effectIndex, "Memory effect index");
+    assertPositiveSafeInteger(value.attemptOrdinal, "Memory effect attempt ordinal");
+    assertIdentifier(value.requestId, "Memory effect request id");
+    if (value.expectedDigest !== null) {
+      assertDigest(value.expectedDigest, "Memory effect expected digest");
+    }
+    if (!['prepared', 'revision-conflict', 'granted'].includes(String(value.status))) {
+      throw corruptRunJournal("Memory effect status is invalid");
+    }
+    assertPlainRecord(value.mutation, "Memory effect mutation");
+    validateGlobalStagedMutation(value.mutation as never);
+    if (value.mutation.kind !== "memory-append") {
+      throw corruptRunJournal("Memory effect must contain a memory append");
+    }
+    assertPlainRecord(value.mutation.payload, "Memory effect payload");
+    const payloadExpected = value.mutation.payload.domain === "journal"
+      ? null
+      : value.mutation.payload.expectedDigest ?? null;
+    if (payloadExpected !== value.expectedDigest) {
+      throw corruptRunJournal("Memory effect expected digest does not bind its mutation");
+    }
+    return value as ConversationRunInternalRecord;
+  }
+  if (value.kind === "post-adoption-memory-completed") {
+    assertExactRecordKeys(
+      value,
+      ["kind", "operationId", "resultDigest"],
+      "Post-adoption memory completion",
+    );
+    assertIdentifier(value.operationId, "Memory completion operation id");
+    assertDigest(value.resultDigest, "Memory completion result digest");
     return value as ConversationRunInternalRecord;
   }
   if (value.kind !== "content-asset-index") {

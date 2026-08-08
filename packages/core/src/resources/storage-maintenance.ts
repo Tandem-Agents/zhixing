@@ -30,6 +30,7 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "workspace-probe-retirement",
   "ticket-retirement",
   "stream-spool-reclaim",
+  "conversation-transfer",
 ] as const;
 
 export type StorageMaintenanceKind =
@@ -49,6 +50,7 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "workspace-probe-retirement": "workspace-probe-owner",
   "ticket-retirement": "executor-data-plane",
   "stream-spool-reclaim": "executor-data-plane",
+  "conversation-transfer": "conversation-transfer-owner",
 } as const satisfies Readonly<
   Record<StorageMaintenanceKind, string>
 >;
@@ -478,6 +480,8 @@ const STORAGE_STEP_BUDGETS: Readonly<
   "ticket-retirement": budget(16 * MIB, 0, 64 * MIB, 16 * MIB, 4_096),
   // spool 回收 = 单 assignment 目录的墓碑写与物理删除。
   "stream-spool-reclaim": budget(16 * MIB, 0, 256 * MIB, 256 * MIB, 4_096),
+  // conversation transfer = one bounded network chunk followed by one local durable write.
+  "conversation-transfer": budget(16 * MIB, 0, 32 * MIB, 32 * MIB, 256),
 };
 
 export function storageMaintenanceRequest(

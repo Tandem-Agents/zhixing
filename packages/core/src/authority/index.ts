@@ -25,6 +25,7 @@ export {
   type AssignmentArtifactDescriptor,
   type AssignmentArtifactSchema,
   type FileResumableArtifactReceiverOptions,
+  type IdentifiedPhysicalStepRunner,
 } from "./assignment-artifacts.js";
 export {
   FileArtifactStore,

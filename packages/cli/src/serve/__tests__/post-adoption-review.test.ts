@@ -166,4 +166,41 @@ describe("PostAdoptionReviewCoordinator", () => {
     expect(fixture.intents[0]!.status).toBe("pending");
     expect(fixture.hub.findEntry(requestId)).toBeDefined();
   });
+
+  it("serially transfers one durable request to the current authenticated surface", async () => {
+    const fixture = harness();
+    await fixture.coordinator.reviewForSurface({
+      conversationId: CONVERSATION,
+      surfacePrincipal: "rpc:zhixing-cli:old",
+      connectionId: "old-connection",
+    });
+    const original = fixture.hub.listAllPending()[0]!;
+    expect(original.conversationId).toBe(CONVERSATION);
+
+    await Promise.all([
+      fixture.coordinator.reviewForSurface({
+        conversationId: CONVERSATION,
+        surfacePrincipal: "rpc:zhixing-cli:new",
+        connectionId: "new-connection",
+      }),
+      fixture.coordinator.reviewForSurface({
+        conversationId: CONVERSATION,
+        surfacePrincipal: "rpc:zhixing-cli:new",
+        connectionId: "new-connection",
+      }),
+    ]);
+
+    const pending = fixture.hub.listAllPending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      conversationId: CONVERSATION,
+      request: {
+        id: original.request.id,
+        turnOrigin: {
+          channel: "rpc",
+          triggeredBy: "rpc:zhixing-cli:new",
+        },
+      },
+    });
+  });
 });

@@ -55,13 +55,29 @@ export interface FirstPartyConversationRpcRouter {
     readonly connection: {
       readonly id: number;
       readonly closed: boolean;
+      readonly authenticated: boolean;
+      readonly loopback: boolean;
+      readonly clientInfo?: { readonly id?: string; readonly version?: string };
+      readonly surfacePrincipal?: string;
+      readonly surfaceGeneration?: number;
       notify(method: string, params: unknown): void;
       onClose(handler: () => void): () => void;
     };
+    /** Executes this same registered method locally without re-entering the ingress router. */
+    readonly dispatchCanonical: () => Promise<unknown>;
   }): Promise<
     | { readonly handled: false }
     | { readonly handled: true; readonly result: unknown }
   >;
+}
+
+/** Canonical server method surface reused by the authenticated mesh relay. */
+export interface CanonicalFirstPartyConversationSurface {
+  dispatch(input: {
+    readonly method: string;
+    readonly params: unknown;
+    readonly connection: import("./rpc/connection.js").RpcConnection;
+  }): Promise<unknown>;
 }
 
 export interface RuntimeControlAdapter {

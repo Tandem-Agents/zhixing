@@ -28,6 +28,7 @@ import type {
   RuntimeFactory,
 } from "@zhixing/owner-kernel";
 import {
+  FileConversationTransferStagingArea,
   ConversationTransferTarget,
   listConversationTransferStates,
 } from "@zhixing/owner-kernel";
@@ -85,9 +86,16 @@ import {
 import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import {
   ConversationTransferMeshClient,
+  ConversationTransferRejectedError,
   registerConversationTransferMeshService,
 } from "./conversation-transfer-mesh.js";
 import type { PostAdoptionMemoryPort } from "./post-adoption-memory.js";
+import {
+  FirstPartyConversationMeshClient,
+  FirstPartyConversationMeshTarget,
+  registerFirstPartyConversationMeshService,
+} from "./first-party-conversation-mesh.js";
+import type { CanonicalFirstPartyConversationSurface } from "@zhixing/server";
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
@@ -187,6 +195,8 @@ export class MeshRuntimeAssembly {
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
   readonly #transferTarget: ConversationTransferTarget | undefined;
+  readonly #firstPartyConversationTarget: FirstPartyConversationMeshTarget | undefined;
+  readonly #transferAbort = new AbortController();
   readonly #disposers: Array<() => void> = [];
   #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
   #postAdoptionReview: PostAdoptionReviewPort | undefined;
@@ -288,6 +298,11 @@ export class MeshRuntimeAssembly {
           deviceId: options.authority.deviceId,
           log: options.authority.authorityLog,
           artifacts: options.authority.artifacts,
+          staging: new FileConversationTransferStagingArea(
+            path.join(path.dirname(options.authority.artifacts.rootDir), "conversation-transfer-staging"),
+          ),
+          storageMaintenance: options.authority.storageMaintenance,
+          abortSignal: () => this.#transferAbort.signal,
           signer: options.authority.signer,
           verifier: options.authority.verifier,
           isActiveSource: (deviceId) => this.#peerHasRole(deviceId, "executor"),
@@ -298,7 +313,12 @@ export class MeshRuntimeAssembly {
           conversationExists: (conversationId) => options.protocol!.sessionExists(conversationId),
           sourceOwnerEpoch: () => undefined,
           reducerVersion: "conversation-session-state-v1",
+          preparePublication: (base) =>
+            options.protocol!.prepareCommittedConversationTransfer(base),
         })
+      : undefined;
+    this.#firstPartyConversationTarget = roles.has("anchor")
+      ? new FirstPartyConversationMeshTarget()
       : undefined;
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
@@ -503,10 +523,19 @@ export class MeshRuntimeAssembly {
                 afterCommit: async (base) => {
                   await this.#installCommittedTransfer(base);
                 },
+                onBackgroundError: (error) => options.onError?.(error),
               }
             : {}),
         }),
       );
+    }
+
+    if (this.#firstPartyConversationTarget) {
+      this.#disposers.push(registerFirstPartyConversationMeshService(
+        this.services,
+        this.#firstPartyConversationTarget,
+        (deviceId) => this.#peerHasRole(deviceId, "executor"),
+      ));
     }
 
     this.#control = new ProductionMeshControlPlane({
@@ -614,6 +643,21 @@ export class MeshRuntimeAssembly {
     await this.#restoreCommittedTransfers();
   }
 
+  bindFirstPartyConversationSurface(surface: CanonicalFirstPartyConversationSurface): void {
+    if (!this.#firstPartyConversationTarget) {
+      throw new Error("First-party conversation surface requires the anchor transfer target");
+    }
+    this.#firstPartyConversationTarget.bind(surface);
+  }
+
+  firstPartyConversationFor(deviceId: string): FirstPartyConversationMeshClient {
+    return new FirstPartyConversationMeshClient(
+      this.connections.client(deviceId),
+      this.options.authority.deviceId,
+      (error) => this.options.onError?.(error),
+    );
+  }
+
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
@@ -632,9 +676,11 @@ export class MeshRuntimeAssembly {
     if (this.#closed) return;
     this.#closed = true;
     this.#started = false;
+    this.#transferAbort.abort(new Error("Conversation transfer runtime is stopping"));
     this.#worker?.stopAccepting();
     await this.#control.stop();
     await this.#worker?.close();
+    this.#firstPartyConversationTarget?.close();
     this.#composition.close();
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
   }
@@ -912,9 +958,12 @@ export class MeshRuntimeAssembly {
     await protocol.installCommittedConversationTransfer(base);
     await Promise.all([
       this.#postAdoptionMemory
-        ? this.#postAdoptionMemory.flush(
-            await protocol.conversationMemoryFlushes(base.manifest.conversationId),
-          )
+        ? this.#postAdoptionMemory.flush({
+            manifest: base.manifest,
+            loadCandidates: () => protocol.conversationMemoryFlushes(
+              base.manifest.conversationId,
+            ),
+          })
         : Promise.resolve(),
       this.#postAdoptionReview
         ? this.#postAdoptionReview.reviewAfterAdoption(base.manifest.conversationId)
@@ -942,7 +991,7 @@ export class MeshRuntimeAssembly {
       this.options.authority.executorLog,
       this.options.authority.verifier,
     );
-    for (const conversationId of await owner.port().listConversations()) {
+    for (const conversationId of await owner.transferCandidates()) {
       const parsed = parseLocalConversationId(conversationId);
       if (!parsed) continue;
       const prior = states.find((state) =>
@@ -964,17 +1013,57 @@ export class MeshRuntimeAssembly {
         sourceOwnerEpoch: identity.ownerEpoch,
         nextOwnerEpoch: identity.ownerEpoch + 1,
       };
-      await client.prepare(prepared);
-      await source.prepare({
-        requestId,
-        transferId,
-        targetDeviceId: peerDeviceId,
-        conversationId,
-        sourceOwnerEpoch: identity.ownerEpoch,
-      });
-      const frozen = await source.freeze(transferId);
-      const commit = await client.importAndCommit(frozen);
-      await source.acceptCommit({ manifest: frozen.manifest, commit });
+      try {
+        const resumedTarget = prior ? await client.status(transferId).catch(() => undefined) : undefined;
+        if (resumedTarget?.state === "committed" || resumedTarget?.state === "tombstoned") {
+          if (!resumedTarget.commit) {
+            throw new Error("Committed transfer recovery is incomplete");
+          }
+          const frozen = await source.freeze(transferId);
+          await source.acceptCommit({ manifest: frozen.manifest, commit: resumedTarget.commit });
+          continue;
+        }
+        if (resumedTarget?.state === "aborted") {
+          await source.acceptAbort(resumedTarget.abort);
+          continue;
+        }
+        if (!prior) {
+          await client.prepare(prepared);
+          await source.prepare({
+            requestId,
+            transferId,
+            targetDeviceId: peerDeviceId,
+            conversationId,
+            sourceOwnerEpoch: identity.ownerEpoch,
+          });
+        }
+        const frozen = await source.freeze(transferId);
+        const commit = await client.importAndCommit(frozen);
+        await source.acceptCommit({ manifest: frozen.manifest, commit });
+      } catch (error) {
+        const durable = await listConversationTransferStates(
+          this.options.authority.executorLog,
+          this.options.authority.verifier,
+        ).then((items) => items.find((item) => item.identity.transferId === transferId));
+        if (!durable) continue;
+        const target = await client.status(transferId).catch(() => undefined);
+        if (target?.state === "committed" || target?.state === "tombstoned") {
+          if (!target.commit || !durable.manifest) throw new Error("Committed transfer recovery is incomplete");
+          const manifest = await source.freeze(transferId);
+          await source.acceptCommit({ manifest: manifest.manifest, commit: target.commit });
+          continue;
+        }
+        if (target?.state === "aborted") {
+          await source.acceptAbort(target.abort);
+          continue;
+        }
+        if (!(error instanceof ConversationTransferRejectedError) || error.retryable) {
+          throw error;
+        }
+        const abort = await source.prepareAbort(transferId, "target-rejected");
+        const acknowledged = await client.abort(abort);
+        await source.acceptAbort(acknowledged);
+      }
     }
   }
 

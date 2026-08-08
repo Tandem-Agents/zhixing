@@ -26,7 +26,10 @@ interface DeferredIntentReviewPort {
 
 interface PendingSurfaceDecision {
   readonly intentId: string;
+  readonly conversationId: string;
+  readonly surfacePrincipal: string;
   readonly context: AuthorityCallContext;
+  requestPromise?: Promise<ConfirmationDecision>;
 }
 
 /** Anchor-only adoption consumer. Durable state remains the imported intent stream. */
@@ -37,6 +40,7 @@ export class PostAdoptionReviewCoordinator {
   readonly #workingDirectory: string;
   readonly #now: () => number;
   readonly #surfaceDecisions = new Map<string, PendingSurfaceDecision>();
+  readonly #surfaceTransitions = new Map<string, Promise<void>>();
   readonly #requested = new Set<string>();
   #closed = false;
 
@@ -83,7 +87,10 @@ export class PostAdoptionReviewCoordinator {
       maxQueueDepth: 128,
       now: this.#now,
     });
-    this.#hub.attach("post-adoption-review", this.#broker);
+    this.#hub.attach("post-adoption-review", this.#broker, {
+      conversationIdFor: (request) =>
+        this.#surfaceDecisions.get(request.id)?.conversationId,
+    });
   }
 
   /** Runs immediately after commit/recovery; rubric writes need no user gesture. */
@@ -109,7 +116,7 @@ export class PostAdoptionReviewCoordinator {
     }
     for (const intent of intents) {
       if (intent.status !== "pending" || !intent.timeSensitive) continue;
-      this.#requestScheduleConfirmation(intent, context);
+      await this.#requestScheduleConfirmation(intent, context);
     }
     return summary;
   }
@@ -123,6 +130,7 @@ export class PostAdoptionReviewCoordinator {
     });
     this.#requested.clear();
     this.#surfaceDecisions.clear();
+    this.#surfaceTransitions.clear();
   }
 
   async #reviewConversation(
@@ -162,17 +170,49 @@ export class PostAdoptionReviewCoordinator {
     );
   }
 
-  #requestScheduleConfirmation(
+  async #requestScheduleConfirmation(
     intent: DeferredGlobalIntent,
     context: AuthorityCallContext,
-  ): void {
+  ): Promise<void> {
     const requestId = `adoption-review:${intent.intentId}`;
-    if (this.#requested.has(requestId)) return;
+    const previous = this.#surfaceTransitions.get(requestId) ?? Promise.resolve();
+    const transition = previous.catch(() => {}).then(() =>
+      this.#replaceScheduleConfirmation(requestId, intent, context));
+    this.#surfaceTransitions.set(requestId, transition);
+    try {
+      await transition;
+    } finally {
+      if (this.#surfaceTransitions.get(requestId) === transition) {
+        this.#surfaceTransitions.delete(requestId);
+      }
+    }
+  }
+
+  async #replaceScheduleConfirmation(
+    requestId: string,
+    intent: DeferredGlobalIntent,
+    context: AuthorityCallContext,
+  ): Promise<void> {
+    const principal = surfacePrincipal(context);
+    const existing = this.#surfaceDecisions.get(requestId);
+    if (existing?.surfacePrincipal === principal) return;
+    if (existing) {
+      this.#broker.cancel(requestId, "session-end");
+      await existing.requestPromise?.catch(() => undefined);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const current = await this.#review.list(intent.conversationId, context);
+      if (!current.some((item) => item.intentId === intent.intentId && item.status === "pending")) {
+        return;
+      }
+    }
     this.#requested.add(requestId);
-    this.#surfaceDecisions.set(requestId, {
+    const pending: PendingSurfaceDecision = {
       intentId: intent.intentId,
+      conversationId: intent.conversationId,
+      surfacePrincipal: principal,
       context,
-    });
+    };
+    this.#surfaceDecisions.set(requestId, pending);
     const createdAt = this.#now();
     const request: ConfirmationRequest = {
       id: requestId,
@@ -204,11 +244,14 @@ export class PostAdoptionReviewCoordinator {
         triggeredBy: surfacePrincipal(context),
       },
     };
-    void this.#broker.requestConfirmation(request)
+    pending.requestPromise = this.#broker.requestConfirmation(request);
+    void pending.requestPromise
       .catch(() => {})
       .finally(() => {
-        this.#requested.delete(requestId);
-        this.#surfaceDecisions.delete(requestId);
+        if (this.#surfaceDecisions.get(requestId) === pending) {
+          this.#requested.delete(requestId);
+          this.#surfaceDecisions.delete(requestId);
+        }
       });
   }
 }

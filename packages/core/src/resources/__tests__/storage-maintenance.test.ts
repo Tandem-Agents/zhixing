@@ -136,6 +136,7 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
         "artifact-lifecycle-index",
         "anchor-asset-maintainer",
         "anchor-workscene-owner",
+        "conversation-transfer-owner",
         "executor-data-plane",
         "local-workspace-management-host",
         "workspace-binding-migrator",

@@ -478,8 +478,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/conversation-owner-runtime.ts",
       (text) => text.replace(
-        "    executionAssetCatalog: deps.executionAssetCatalog,\n    globalPublishing: false,",
-        "    executionAssetCatalog: deps.executionAssetCatalog,\n    globalState: deps.globalState,\n    globalPublishing: false,",
+        "    executionAssetCatalog: deps.executionAssetCatalog,\n    storageMaintenance: deps.storageMaintenance,\n    globalPublishing: false,",
+        "    executionAssetCatalog: deps.executionAssetCatalog,\n    storageMaintenance: deps.storageMaintenance,\n    globalState: deps.globalState,\n    globalPublishing: false,",
       ),
     )).join("\n"),
     /constructs forbidden capability globalState/,
@@ -672,7 +672,10 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/conversation-evidence-authority.ts",
+    "packages/cli/src/serve/conversation-transfer-mesh.ts",
+    "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
+    "packages/cli/src/serve/post-adoption-memory.ts",
     "packages/cli/src/serve/post-adoption-review.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/runtime/rpc-confirmation-broker.ts",
@@ -682,6 +685,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/server/src/rpc/handlers.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/server/src/rpc/methods/confirmation.ts",
+    "packages/owner-kernel/src/conversation-transfer.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -698,6 +702,16 @@ test("conversation adoption stays bound to the two production roots and ordered 
       (text) => text.replace('this.#transferTarget = roles.has("anchor")', 'this.#transferTarget = roles.has("executor")'),
     )).join("\n"),
     /owned only by the active anchor role/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "storageMaintenance: options.authority.storageMaintenance,",
+        "storageMaintenance: undefined,",
+      ),
+    )).join("\n"),
+    /must use private staging and the authority governor\/lifecycle abort/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
@@ -722,6 +736,47 @@ test("conversation adoption stays bound to the two production roots and ordered 
       (text) => text.replace("conversationRpc: localConversationRpc,", "conversationRpc: undefined,"),
     )).join("\n"),
     /first-party local conversation router injection/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replaceAll(
+        "this.input.owner.currentAuthority(conversationId)",
+        "this.input.owner.cachedAuthority(conversationId)",
+      ),
+    )).join("\n"),
+    /must share current-owner resolution and canonical local dispatch/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/first-party-conversation-mesh.ts",
+      (text) => text.replaceAll("METHODS.has(command.method)", "true"),
+    )).join("\n"),
+    /must remain finite, peer-bound and single-generation/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/conversation-transfer-mesh.ts",
+      (text) => text.replace(
+        "result.requestId !== command.requestId || result.transferId !== command.transferId",
+        "false",
+      ),
+    )).join("\n"),
+    /strict originating-command correlation and signed abort facts/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/owner-kernel/src/conversation-transfer.ts",
+      (text) => text.replace('{ obligation: "committed" }', '{ obligation: "cleanup" }'),
+    )).join("\n"),
+    /transfer-private staging, shared promotion and committed cleanup/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/post-adoption-memory.ts",
+      (text) => text.replace("if (!durableDiscovery) {", "if (true) {"),
+    )).join("\n"),
+    /durable discovery inputs must be frozen atomically and only incomplete operations may be re-driven without reloading history/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(

@@ -211,6 +211,7 @@ export async function runExecutorRole(
       releaseLocalConversationEnvironmentPreflight:
         authority.releaseLocalConversationEnvironmentPreflight,
       signer: authority.signer,
+      storageMaintenance: authority.storageMaintenance,
       validateConversationRuntimeBinding:
         authority.validateConversationRuntimeBinding,
       validateLocalConversationManifest:
@@ -316,6 +317,7 @@ export async function runExecutorRole(
     const localConversationRpc = new LocalConversationRpcRouter({
       deviceId: authority.deviceId,
       owner: localConversationOwner.port(),
+      remoteFor: (deviceId) => mesh!.firstPartyConversationFor(deviceId),
     });
     const serverContext = createServerContext({
       config: {

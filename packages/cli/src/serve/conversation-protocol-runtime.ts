@@ -460,6 +460,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     readonly manifest: ConversationTransferManifest;
     readonly records: readonly ConversationTransferAuthorityRecord[];
   }): Promise<void> {
+    const prepared = await this.prepareCommittedConversationTransfer(input);
+    prepared.publish();
+  }
+
+  /**
+   * Performs every fallible read/reduction before the owner switch. Publishing
+   * the returned token only swaps already-built in-memory views and cannot do I/O.
+   */
+  async prepareCommittedConversationTransfer(input: {
+    readonly manifest: ConversationTransferManifest;
+    readonly records: readonly ConversationTransferAuthorityRecord[];
+  }): Promise<{ readonly publish: () => void }> {
     if (input.manifest.targetDeviceId !== this.#authority.deviceId) {
       throw new TypeError("Conversation transfer target does not match this owner");
     }
@@ -477,14 +489,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ownerEpoch: input.manifest.nextOwnerEpoch,
       records: input.records.map((record) => structuredClone(record)),
     };
-    this.#adoptedConversations.set(conversationId, adopted);
-    this.#journals.delete(conversationId);
-    const journal = this.#journal(conversationId);
+    const journal = this.#createJournal(conversationId, adopted.ownerEpoch);
     await journal.primeRecoverySnapshot(
       await this.#snapshotWithImportedBase(adopted.records),
     );
-    this.#sessionIdentities.set(conversationId, Promise.resolve());
-    this.#markRecovery(conversationId);
+    return Object.freeze({
+      publish: () => {
+        this.#adoptedConversations.set(conversationId, adopted);
+        this.#journals.set(conversationId, journal);
+        this.#sessionIdentities.set(conversationId, Promise.resolve());
+        this.#markRecovery(conversationId);
+      },
+    });
   }
 
   /** Derived post-adoption memory inputs from the installed authority prefix. */
@@ -498,6 +514,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const ingress = this.#assignmentIngress.get(assignmentId);
     if (!ingress) throw new Error(`Unknown conversation assignment ${assignmentId}`);
     return structuredClone(ingress);
+  }
+
+  conversationIdForAssignment(assignmentId: string): string {
+    return this.#conversationForAssignment(assignmentId);
   }
 
   executorMeshRole(): {
@@ -2525,10 +2545,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return this.#journals.get(conversationId) ?? this.#createJournal(conversationId);
   }
 
-  #createJournal(conversationId: string): ConversationRunJournal {
+  #createJournal(
+    conversationId: string,
+    ownerEpoch = this.#ownerEpochFor(conversationId),
+  ): ConversationRunJournal {
     const journal = new ConversationRunJournal({
       conversationId,
-      ownerEpoch: this.#ownerEpochFor(conversationId),
+      ownerEpoch,
       log: this.#authority.authorityLog,
       artifacts: this.#authority.artifacts,
       signer: this.#authority.signer,

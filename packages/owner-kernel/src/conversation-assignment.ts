@@ -139,8 +139,6 @@ import {
   DeliveryContentValidationError,
   parseConversationId,
   type CompiledDeliveryContent,
-  type Message,
-  type ParsedSummary,
 } from "@zhixing/core";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
 import { productizePublishAuthorityError } from "./publish-result-product-language.js";
@@ -234,7 +232,18 @@ import {
   type ChannelInteractionJournalState,
 } from "./channel-interaction-records.js";
 
-export type { ConversationRunJournalRecord } from "./conversation-run-contracts.js";
+export type {
+  ConversationRunInternalRecord,
+  ConversationRunJournalRecord,
+  PostAdoptionMemoryExtraction,
+  PostAdoptionMemoryInput,
+  PostAdoptionMemoryRecord,
+} from "./conversation-run-contracts.js";
+export {
+  assertConversationRunInternalRecord,
+  postAdoptionMemoryInputDigest,
+  postAdoptionMemoryOperationId,
+} from "./conversation-run-contracts.js";
 type ConversationUncertainResolutionFact = Extract<
   UncertainResolutionFact,
   { subject: { execution: "conversation" } }
@@ -965,13 +974,8 @@ export interface ConversationChannelFrameAdoption {
  * A committed segment boundary whose evicted source messages can be replayed
  * into the anchor memory pipeline after conversation adoption.
  */
-export interface ConversationSegmentMemoryFlush {
-  readonly conversationId: string;
-  readonly segmentId: string;
-  readonly tokensBefore: number;
-  readonly messages: readonly Message[];
-  readonly summary: ParsedSummary;
-}
+export type ConversationSegmentMemoryFlush =
+  import("./conversation-run-contracts.js").PostAdoptionMemoryInput;
 
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
 export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
@@ -5655,6 +5659,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         throw corruptRunJournal(
           "Session activity record was written to the run stream",
         );
+      }
+      if (body.kind !== "content-asset-index") {
+        return state;
       }
       const committed = state.commits.at(-1);
       if (

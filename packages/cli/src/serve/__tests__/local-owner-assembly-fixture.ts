@@ -109,6 +109,7 @@ export function fixtureLocalOwnerRuntime(
     releaseLocalConversationEnvironmentPreflight:
       authority.releaseLocalConversationEnvironmentPreflight,
     signer: authority.signer,
+    storageMaintenance: authority.storageMaintenance,
     validateConversationRuntimeBinding:
       authority.validateConversationRuntimeBinding,
     validateLocalConversationManifest:

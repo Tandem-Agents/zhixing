@@ -122,8 +122,31 @@ export class HandlerRegistry {
       method,
       params,
       connection: ctx.connection,
+      dispatchCanonical: () => this.dispatchCanonical(method, params, ctx),
     });
     if (routed?.handled) return routed.result;
+
+    return this.dispatchCanonical(method, params, ctx);
+  }
+
+  /** Dispatches the registered method without re-entering an ingress router. */
+  async dispatchCanonical(
+    method: string,
+    params: unknown,
+    ctx: HandlerContext,
+  ): Promise<unknown> {
+    const entry = this.entries.get(method);
+    if (!entry) {
+      throw new RpcAppError(
+        RPC_ERROR_CODES.METHOD_NOT_FOUND,
+        `Method not found: ${method}`,
+      );
+    }
+
+    const requiresAuth = entry.requiresAuth ?? true;
+    if (requiresAuth && !ctx.connection.authenticated) {
+      throw RpcErrors.unauthorized(`Method requires authentication: ${method}`);
+    }
 
     return await entry.handler(params, ctx);
   }

@@ -60,7 +60,7 @@ export interface ArtifactReceiveProgress {
   readonly complete: boolean;
 }
 
-type IdentifiedPhysicalStepRunner = <T>(
+export type IdentifiedPhysicalStepRunner = <T>(
   inputIdentity: unknown,
   operation: () => Promise<T>,
 ) => Promise<T>;
@@ -307,6 +307,8 @@ export class FileResumableArtifactReceiver {
     ref: ArtifactRef,
     offset: number,
     bytes: Uint8Array,
+    runPhysicalStep: IdentifiedPhysicalStepRunner = (_identity, operation) =>
+      operation(),
   ): Promise<ArtifactReceiveProgress> {
     this.#assertAcceptable(ref);
     assertRangeInteger(offset, "Artifact chunk offset");
@@ -319,7 +321,13 @@ export class FileResumableArtifactReceiver {
     if (bytes.byteLength === 0 && offset !== ref.bytes) {
       throw new RangeError("An empty artifact chunk may only finalize a complete prefix");
     }
-    return this.#serial(ref.digest, async () => {
+    return this.#serial(ref.digest, async () => runPhysicalStep(
+      {
+        step: "temporary-append",
+        digest: ref.digest,
+        bytes: bytes.byteLength,
+      },
+      async () => {
       if (await this.store.has(ref)) {
         return { receivedBytes: ref.bytes, complete: true };
       }
@@ -369,7 +377,8 @@ export class FileResumableArtifactReceiver {
         return { receivedBytes, complete: false };
       }
       return this.#finalizePartial(ref);
-    });
+      },
+    ));
   }
 
   async discardPartialsBefore(cutoff: Date): Promise<number> {

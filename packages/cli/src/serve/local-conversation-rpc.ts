@@ -24,6 +24,10 @@ import {
   type FirstPartyConversationRpcRouter,
 } from "@zhixing/server";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
+import {
+  FirstPartyConversationMeshClient,
+  type FirstPartyIngressConnection,
+} from "./first-party-conversation-mesh.js";
 
 const LOCAL_METHODS = new Set([
   "session.abort",
@@ -47,6 +51,8 @@ const LOCAL_METHODS = new Set([
   "session.taskListUpdate",
   "session.unsubscribe",
   "session.usage",
+  "confirmation.list",
+  "confirmation.resolve",
 ]);
 
 const LOCAL_ONLY_CAPABILITIES = Object.freeze([
@@ -61,11 +67,13 @@ export class LocalConversationRpcRouter
 {
   readonly #observers = new Map<string, Map<number, FirstPartyConnection>>();
   readonly #connections = new Map<number, () => void>();
+  readonly #remote = new Map<string, FirstPartyConversationMeshClient>();
 
   constructor(
     private readonly input: {
       readonly deviceId: string;
       readonly owner: LocalConversationOwnerPort;
+      readonly remoteFor: (deviceId: string) => FirstPartyConversationMeshClient;
     },
   ) {}
 
@@ -73,6 +81,7 @@ export class LocalConversationRpcRouter
     readonly method: string;
     readonly params: unknown;
     readonly connection: FirstPartyConnection;
+    readonly dispatchCanonical?: () => Promise<unknown>;
   }): Promise<
     | { readonly handled: false }
     | { readonly handled: true; readonly result: unknown }
@@ -80,6 +89,13 @@ export class LocalConversationRpcRouter
     if (!LOCAL_METHODS.has(input.method)) return { handled: false };
     this.#trackConnection(input.connection);
     try {
+      const routed = await this.#routeCurrentOwner(
+        input.method,
+        input.params,
+        input.connection,
+        input.dispatchCanonical,
+      );
+      if (routed.handled) return routed;
       return {
         handled: true,
         result: await this.#handle(input.method, input.params, input.connection),
@@ -91,6 +107,148 @@ export class LocalConversationRpcRouter
         "这次本机操作没有完成，请稍后重试；重新连接后会继续处理已保存的内容。",
       );
     }
+  }
+
+  async #routeCurrentOwner(
+    method: string,
+    rawParams: unknown,
+    connection: FirstPartyConnection,
+    dispatchCanonical?: () => Promise<unknown>,
+  ): Promise<
+    | { readonly handled: false }
+    | { readonly handled: true; readonly result: unknown }
+  > {
+    const params = objectParams(rawParams);
+    if (method === "session.list") {
+      return { handled: true, result: await this.#listAllOwners(connection) };
+    }
+    if (method === "session.new") return { handled: false };
+    if (method === "confirmation.list" && params.conversationId === undefined) {
+      return {
+        handled: true,
+        result: await this.#listAllConfirmations(connection, dispatchCanonical),
+      };
+    }
+    const value = params.conversationId ?? params.sessionId;
+    if (typeof value !== "string") {
+      if (method === "confirmation.resolve") {
+        throw RpcErrors.invalidParams(
+          "confirmation.resolve requires 'conversationId' from the pending item",
+        );
+      }
+      return { handled: false };
+    }
+    const conversationId = this.#conversationId(params, method);
+    const authority = await this.input.owner.currentAuthority(conversationId);
+    if (
+      authority.state === "current" &&
+      authority.deviceId === this.input.deviceId
+    ) {
+      if (method.startsWith("confirmation.")) {
+        if (!dispatchCanonical) {
+          throw new Error("Canonical confirmation dispatch is unavailable");
+        }
+        return { handled: true, result: await dispatchCanonical() };
+      }
+      return { handled: false };
+    }
+    if (authority.state === "frozen" || authority.state === "importing") {
+      throw RpcErrors.busy(
+        "这个对话正在安全接管中，请稍后重试；已保存内容不会丢失。",
+      );
+    }
+    if (authority.deviceId === this.input.deviceId) {
+      throw RpcErrors.notFound("这个对话已不可用，请从列表中重新选择。");
+    }
+    const result = await this.#remoteFor(authority.deviceId).dispatch(
+      method,
+      { ...params, conversationId },
+      connection,
+    );
+    if (method === "session.resume" || method === "session.subscribe") {
+      this.#subscribe(conversationId, connection);
+    } else if (method === "session.unsubscribe") {
+      this.#observers.get(conversationId)?.delete(connection.id);
+    }
+    return { handled: true, result };
+  }
+
+  async #listAllOwners(connection: FirstPartyConnection): Promise<SessionListResult> {
+    const local = await this.#list();
+    const routes = await this.input.owner.listConversationAuthorities();
+    const byDevice = new Map<string, Set<string>>();
+    for (const route of routes) {
+      if (
+        route.authority.deviceId === this.input.deviceId ||
+        route.authority.state !== "fenced"
+      ) continue;
+      let ids = byDevice.get(route.authority.deviceId);
+      if (!ids) {
+        ids = new Set();
+        byDevice.set(route.authority.deviceId, ids);
+      }
+      ids.add(route.conversationId);
+    }
+    const conversations = [...local.conversations];
+    for (const [deviceId, ids] of byDevice) {
+      const remote = await this.#remoteFor(deviceId).dispatch(
+        "session.list",
+        {},
+        connection,
+      ) as SessionListResult;
+      conversations.push(...remote.conversations.filter((item) => ids.has(item.conversationId)));
+    }
+    conversations.sort((left, right) =>
+      right.lastActiveAt.localeCompare(left.lastActiveAt, "en-US") ||
+      left.conversationId.localeCompare(right.conversationId, "en-US")
+    );
+    return { ...local, conversations };
+  }
+
+  async #listAllConfirmations(
+    connection: FirstPartyConnection,
+    dispatchCanonical?: () => Promise<unknown>,
+  ): Promise<{
+    readonly items: readonly unknown[];
+  }> {
+    if (!dispatchCanonical) {
+      throw new Error("Canonical confirmation dispatch is unavailable");
+    }
+    const local = await dispatchCanonical() as { readonly items?: readonly unknown[] };
+    const byDevice = new Map<string, string[]>();
+    for (const [conversationId, observers] of this.#observers) {
+      if (!observers.has(connection.id)) continue;
+      const authority = await this.input.owner.currentAuthority(conversationId);
+      if (authority.deviceId === this.input.deviceId || authority.state !== "fenced") continue;
+      const values = byDevice.get(authority.deviceId) ?? [];
+      values.push(conversationId);
+      byDevice.set(authority.deviceId, values);
+    }
+    const items: unknown[] = [...(local.items ?? [])];
+    for (const [deviceId, conversationIds] of [...byDevice].sort(([a], [b]) => a.localeCompare(b, "en-US"))) {
+      for (const conversationId of conversationIds.sort()) {
+        const result = await this.#remoteFor(deviceId).dispatch(
+          "confirmation.list",
+          { conversationId },
+          connection,
+        ) as { readonly items?: readonly unknown[] };
+        items.push(...(result.items ?? []));
+      }
+    }
+    items.sort((left, right) => confirmationItemKey(left).localeCompare(
+      confirmationItemKey(right),
+      "en-US",
+    ));
+    return { items };
+  }
+
+  #remoteFor(deviceId: string): FirstPartyConversationMeshClient {
+    let client = this.#remote.get(deviceId);
+    if (!client) {
+      client = this.input.remoteFor(deviceId);
+      this.#remote.set(deviceId, client);
+    }
+    return client;
   }
 
   async #handle(
@@ -406,12 +564,13 @@ export class LocalConversationRpcRouter
       for (const observers of this.#observers.values()) {
         observers.delete(connection.id);
       }
+      for (const client of this.#remote.values()) void client.close(connection);
     });
     this.#connections.set(connection.id, remove);
   }
 }
 
-interface FirstPartyConnection {
+interface FirstPartyConnection extends FirstPartyIngressConnection {
   readonly id: number;
   readonly closed: boolean;
   notify(method: string, params: unknown): void;
@@ -492,6 +651,18 @@ function stableRequest(kind: string, payload: unknown): string {
     .update(canonicalize(payload))
     .digest("hex")
     .slice(0, 32)}`;
+}
+
+function confirmationItemKey(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `~:${canonicalize(value)}`;
+  }
+  const item = value as Record<string, unknown>;
+  const conversationId = typeof item.conversationId === "string"
+    ? item.conversationId
+    : "";
+  const requestId = typeof item.requestId === "string" ? item.requestId : "";
+  return `${conversationId}:${requestId}:${canonicalize(value)}`;
 }
 
 function locateTask(items: readonly TaskItem[], token: string): TaskItem | undefined {

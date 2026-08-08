@@ -9,14 +9,20 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
+import type {
+  StorageMaintenanceGovernorPort,
+  StorageMaintenanceRequest,
+} from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_TRANSFER_PROJECTION_ID,
   ConversationTransferSource,
   ConversationTransferTarget,
+  FileConversationTransferStagingArea,
   assertConversationTransferWriteAuthority,
   readConversationTransferState,
+  type ConversationTransferSourceOptions,
 } from "../conversation-transfer.js";
 
 const TRANSFER_ID = "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -52,6 +58,27 @@ const verifier: ProtocolSignatureVerifier = {
 };
 
 describe("conversation transfer source and target", () => {
+  it("revalidates the source identity after settling before appending prepared", async () => {
+    let deleted = false;
+    const fixture = await sourceHarness({
+      conversationState: async (conversationId) => ({
+        exists: conversationId === CONVERSATION,
+        deleted,
+        ownerEpoch: 4,
+      }),
+      settleConversation: async () => {
+        deleted = true;
+      },
+    });
+
+    await expect(fixture.source.prepare(prepareRecord())).rejects.toThrow(
+      "identity changed while settling",
+    );
+    await expect(
+      readConversationTransferState(fixture.log, TRANSFER_ID, verifier),
+    ).resolves.toBeUndefined();
+  });
+
   it("freezes only the conversation domain and serves only manifest-bound refs", async () => {
     const fixture = await sourceHarness();
     const content = await fixture.artifacts.put(Buffer.from("attachment", "utf8"));
@@ -174,6 +201,7 @@ describe("conversation transfer source and target", () => {
       deviceId: "device-target",
       log: targetLog,
       artifacts: targetArtifacts,
+      staging: new FileConversationTransferStagingArea(path.join(targetRoot, "staging")),
       signer: targetSigner,
       verifier,
       isActiveSource: (deviceId) => deviceId === "device-source",
@@ -245,6 +273,7 @@ describe("conversation transfer source and target", () => {
       deviceId: "device-target",
       log: targetLog,
       artifacts: targetArtifacts,
+      staging: new FileConversationTransferStagingArea(path.join(targetRoot, "stale-staging")),
       signer: targetSigner,
       verifier,
       isActiveSource: () => true,
@@ -257,9 +286,78 @@ describe("conversation transfer source and target", () => {
       staleTarget.prepare({ ...preparedRecord(), transferId: "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAW" }),
     ).rejects.toThrow("stale");
   });
+
+  it("cleans only transfer-private staging and preserves promoted shared digests", async () => {
+    const maintenance = recordingGovernor();
+    const source = await sourceHarness({ storageMaintenance: maintenance.port });
+    const targetRoot = await createTempDir("conversation-transfer-private-staging");
+    const targetArtifacts = new FileArtifactStore(path.join(targetRoot, "artifacts"), {
+      lockWaitMs: 2_000,
+    });
+    const targetLog = new FileAuthorityCommitLog(
+      path.join(targetRoot, "authority"),
+      targetArtifacts,
+      { clock: () => NOW, lockWaitMs: 2_000 },
+    );
+    const staging = new FileConversationTransferStagingArea(
+      path.join(targetRoot, "transfer-staging"),
+    );
+    const shared = await source.artifacts.put(Buffer.from("shared-attachment", "utf8"));
+    await source.log.append([
+      {
+        stream: `run:${CONVERSATION}`,
+        body: { t: "identity", conversationId: CONVERSATION, attachment: shared },
+      },
+    ]);
+    await source.source.prepare(prepareRecord());
+    const frozen = await source.source.freeze(TRANSFER_ID);
+    await targetArtifacts.putVerifiedStream(
+      shared,
+      (async function* () {
+        yield Buffer.from("shared-attachment", "utf8");
+      })(),
+    );
+    const target = new ConversationTransferTarget({
+      deviceId: "device-target",
+      log: targetLog,
+      artifacts: targetArtifacts,
+      staging,
+      storageMaintenance: maintenance.port,
+      signer: targetSigner,
+      verifier,
+      isActiveSource: (deviceId) => deviceId === "device-source",
+      acceptsSourceConversationId: (deviceId, conversationId) =>
+        deviceId === "device-source" && conversationId === CONVERSATION,
+      conversationExists: () => false,
+      sourceOwnerEpoch: () => 4,
+      reducerVersion: "session-state-v1",
+    });
+    await target.prepare(preparedRecord());
+    await target.import({
+      transferId: TRANSFER_ID,
+      manifestRef: frozen.manifestRef,
+      proof: frozen.proof,
+      source: source.source.readPort,
+    });
+    const abort = await source.source.prepareAbort(TRANSFER_ID, "operator-cancelled");
+    await target.recordAbort(abort);
+    await expect(target.cleanupAborted(TRANSFER_ID)).resolves.toBeGreaterThan(0);
+
+    await expect(targetArtifacts.has(shared)).resolves.toBe(true);
+    await expect(staging.storeFor(TRANSFER_ID).list()).resolves.toEqual([]);
+    expect(maintenance.requests.length).toBeGreaterThan(0);
+    expect(maintenance.requests.every((request) => request.kind === "conversation-transfer"))
+      .toBe(true);
+    expect(new Set(maintenance.requests.map((request) => request.workKey)).size)
+      .toBeGreaterThan(1);
+  });
 });
 
-async function sourceHarness() {
+async function sourceHarness(options: {
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly conversationState?: ConversationTransferSourceOptions["conversationState"];
+  readonly settleConversation?: ConversationTransferSourceOptions["settleConversation"];
+} = {}) {
   const root = await createTempDir("conversation-transfer-source");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
@@ -277,14 +375,15 @@ async function sourceHarness() {
     verifier,
     acceptsConversationId: (conversationId) => conversationId === CONVERSATION,
     isCurrentAnchor: (deviceId) => deviceId === "device-target",
-    conversationState: async (conversationId) => ({
+    storageMaintenance: options.storageMaintenance,
+    conversationState: options.conversationState ?? (async (conversationId) => ({
       exists: conversationId === CONVERSATION,
       deleted: false,
       ownerEpoch: 4,
-    }),
-    settleConversation: async (conversationId) => {
+    })),
+    settleConversation: options.settleConversation ?? (async (conversationId) => {
       settled.push(conversationId);
-    },
+    }),
     snapshotSessionState: async () => ({
       reducerVersion: "session-state-v1",
       value: { conversationId: CONVERSATION, revision: 3 },
@@ -292,6 +391,39 @@ async function sourceHarness() {
     clock: () => NOW,
   });
   return { artifacts, log, settled, source };
+}
+
+function recordingGovernor(): {
+  readonly port: StorageMaintenanceGovernorPort;
+  readonly requests: StorageMaintenanceRequest[];
+} {
+  const requests: StorageMaintenanceRequest[] = [];
+  return {
+    requests,
+    port: {
+      acquire: async (request, signal) => {
+        if (signal.aborted) return { kind: "cancelled" };
+        requests.push(request);
+        return {
+          kind: "granted",
+          permit: {
+            granted: request.preferred,
+            tryBegin: () => ({ claim: () => undefined, complete: () => undefined }),
+            release: () => undefined,
+          },
+        };
+      },
+      snapshot: () => ({
+        queued: {},
+        inFlight: {},
+        estimatedDebt: {
+          occupancy: { memoryReservationBytes: 0, temporaryBytes: 0, slots: 0 },
+          quantum: { readBytes: 0, writeBytes: 0, ioOperations: 0 },
+        },
+        capacity: {} as never,
+      }),
+    },
+  };
 }
 
 function prepareRecord() {

@@ -1,0 +1,115 @@
+# 单元登记:第 32 单元 · generation 1
+
+<!-- 身份头部:登记时填写,登记后不可变 -->
+
+- **unitId**:32
+- **generation**:1(仅经用户显式授权递增;同单元的修复、复审、终审轮复位是本文件内的状态推进,不产生新登记)
+- **登记时间**:2026-08-08
+- **登记来源**:用户要求将第 32 单元独立审查及价值裁决后的当前问题与已删除问题转入正式账本
+
+> 本文件是该单元代际的唯一状态源;登记协议、写序纪律与幂等判定见工作台主文档静态区。以下节结构、各表说明与表头、审查结论复用表、问题/排除/教训表、两轮终审行是固定骨架,只维护字段值与数据行。
+
+## 当前状态
+
+- **当前状态**:U32-01～U32-07 专项修复已验证（不代表第 32 单元终审或单元提交验证完成）
+- **连续无新增问题轮数**:0 / 2
+- **交付物是否冻结**:是（仅冻结 U32-01～U32-07 专项修复输入；第 32 单元全量终审仍未开始）
+- **交付物文件集**:36 个生产实现、直接测试、S7 门禁及当前架构/规格文件；workbench 状态文件不计入交付指纹
+- **当前交付物指纹**:`sha256:0f9bdf8555b09678aa72e273f63cd79ef4c3c03c61454a9e2c68b5fb080dc8e8`（36 文件；逐文件内容哈希组成冻结 manifest；工作台文件排除）
+- **集中修复与验证证据**:2026-08-08，U32-01～U32-07 方案全部进入两生产根。直接闭包：core transfer 5/5、storage maintenance 20/20、owner run contracts 60/60、owner transfer 5/5、CLI 受影响场景 33/33、post-adoption memory 最终输入 7/7、S7 16/16 与 canonical golden 全部通过；owner-kernel TypeScript 5.9 零错，CLI 仅保留 8 个既有 config-editor/startup 基线错误且无 U32 新错；最终同输入 `pnpm build` 187.1s 成功，`git diff --check` 零错。反证账：C32-R01（U32-04 同根）把 abort staging cleanup 的无效 governor obligation 改为耐久 abort 后的 `committed` cleanup；C32-R02（U32-01/U32-05 交界）补回 canonical local confirmation，并与 current-owner 远端分区稳定合并；C32-R03（U32-06 同根）发现只有 discovery 水位但未冻结输入时，未完成 segment 仍会重建 transcript，已改为同一 AuthorityCommitLog transaction 原子冻结 discovery 与全部规范输入/attempt，恢复只消费未完成 operation 的耐久 input。三项均由真实边界直接复核通过。
+- **专项固定矩阵与四路对抗复审**:同一冻结指纹逐格覆盖七项正式记录的 topology、owner/surface/transfer/asset/segment/effect identity、线性化点、拒绝副作用、响应丢失、连续重启及后继范围。A current-owner/第一方 session+confirmation：全部 source 写面、候选/列表、canonical local 与远端路由只消费同一耐久 authority，零残留；B private staging/commit/governor：私有目录、完整 closure 提升、同 envelope committed-base、可取消容量步骤与锁序全等，零共享误删；C surface/memory：同 requestId 串行接管、conversation 定向、原子 discovery+input、首胜 plan、逐效果 exact replay 与 completed 水位全等，C32-R03 修复后二次冷启动零新增；D strict wire/范围价值：逐 state exact keys、originating command 全关联、retryable 保留，EX32-01 前提仍成立且后继 transfer/同步/生命周期能力零进入。四路均零未处置反证。
+- **架构来源**:`always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`；scheduler/rubric/transcript/lifecycle 直接上游合同；第 32 单元定稿开发清单与独立审查清单
+
+## 固定边界
+
+- **功能范围**:conversation scope 双端耐久收编、完整会话域与 conversation-owned intent 搬运、current owner/ownerEpoch 唯一切换、旧 owner fencing、current-owner evidence 门禁，以及收编闭合后的第一方离线新建/查询/恢复、自动收编、复核与 post-adoption memory
+- **架构不变量**:ConversationTransferCommit 是唯一 owner 切换点；source/target 各自 AuthorityCommitLog 是唯一耐久事实源；staging 与共享 ArtifactStore 所有权隔离；旧 owner 永久拒写；第一方路由、确认与记忆派生均从 current owner/耐久 commit 恢复；物理 I/O 复用设备唯一容量治理
+- **验收条件**:U32-01～U32-06 的 P0/P1 根因与直接变体全部修复，U32-07 按非阻断规则处置；EX32-01 不触发重开；随后完成受影响范围复审、冻结准备、两轮终审、独立功能审查与单元提交验证
+- **必要上下游**:第 30～31 单元本地域 owner/DeferredGlobalIntent，AuthorityCommitLog、ArtifactStore、SessionState、ConfirmationHub、GlobalState/MemoryFlush，anchor+executor 与 executor-only 两生产根，认证 mesh、RPC/session/CLI 第一方入口
+- **明确不属于本单元**:anchor scope planned/disaster transfer、AnchorTransferCommit、TrustTransition、ReadyProof、全量/周期 CheckpointEnvelope、恢复根与凭据轮换；第 36～38 单元服务生命周期、设备移除/卸载、升级与发布；锚点既有会话离线写、只读副本、秘密/环境事实/缓存迁移、全局预算追认；第二事实源、通用事务/同步/备份/registry/事件总线/调用图/测试 runner、监控、诊断、benchmark 与信息采集
+
+## 派生产物闭包
+
+> 表头固定。交付物文件集中的每个文件或同类组至少落入一行;派生项包括 lockfile、golden、schema/快照、生成清单及结构/导出基线。结论只允许“待核查”“通过”或“不适用:依据”;存在未归类文件或待核查项不得冻结。
+
+| 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
+| ------------------------ | ------------------------- | ---------------- | ---- |
+| core/owner-kernel transfer、identity 与 storage maintenance | core/owner-kernel 可消费导出、strict codec、S7 owner/role 约束 | core transfer 5/5、storage maintenance 20/20、owner transfer 5/5、workspace build 通过 | 通过 |
+| CLI 两生产根、current-owner router、first-party relay、review/memory | server/RPC 注册、canonical registry、生产装配及消费者直接测试 | CLI 受影响场景 33/33，memory 最终 7/7，S7 16/16 + golden | 通过 |
+| distributed-runtime 总纲、规格与 S7 门禁 | 当前事实、后继边界、结构检查与真实变异必须同步 | 文档逐项对账；S7/golden 通过；EX32-01 与后继范围未变化 | 通过 |
+| workbench 状态文件 | 仅记录流程，不参与交付指纹和功能判断 | 本轮只更新问题状态、反证、专项复审与清单失效范围 | 不适用:流程状态不进入运行产物 |
+
+## 关键原语核查
+
+> 表头固定,每个关键原语一行;五项必须落到具体事实,结论只允许“待核查”“通过”或“有问题:编号”。任一行未通过,问题盘点不得结束。
+
+| 关键原语 | 唯一事实源 | 生效/线性化点 | 崩溃与竞争插点 | 生产者/消费者 | 时间、空间、重放与队列上界 | 结论 |
+| -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
+| current conversation authority | source/target 各自 AuthorityCommitLog 的 transfer/current-owner projection | source prepared/frozen/abort 与 target committed-base 同各自唯一 log prefix；commit 后旧 owner 永久 fenced | prepare/freeze/abort/commit 响应丢失、delete/write 竞争、连续重启 | local owner 全 port、候选/列表、第一方 session/confirmation router、evidence/review/memory | 有限 current-owner 查询；无第二 owner 表 | 通过 |
+| transfer private staging 与共享 CAS | authority root 下每 transfer 私有 FileArtifactStore；共享 CAS 仅承载验真后内容 | 全 closure 私有验真后逐 ref 幂等提升；abort 只删私有目录 | 分块/提升/cleanup 故障、共享 digest、磁盘满、stop | source read、target receiver/promoter、其它共享 CAS 消费者 | 256 KiB 有界 chunk；governor permit 不跨网络或 authority/store 锁 | 通过 |
+| committed authority base | target AuthorityCommitLog 同 envelope 的 signed committed + committed-base | 单次 fsync 同时切换 current owner 与可恢复 base；publish token 仅交换已构建内存视图 | preparePublication 失败、sync 前后崩溃、exact replay、启动恢复 | target protocol/session/history/control 与公开准入 | 启动在 mesh/public 准入前恢复；sync 后零发布 I/O | 通过 |
+| confirmation current surface | durable intent + current-owner ConfirmationHub；requestId 固定为 intentId | 同 requestId 的串行 surface takeover，旧 request cancel 后重读 durable pending | 同身份重连、跨 principal/owner、迟到应答、过期、响应丢失 | session.resume、list/resolve、定向 pending/resolved | 每 intent 恰一 pending；relay 关闭撤销连接代理 | 通过 |
+| post-adoption memory | conversation AuthorityCommitLog 的 discovery/input/attempt/plan/effect/completed projection | discovery 与全部规范输入/attempt 同事务；effect prepared 先于 GlobalState，全部 granted 后 completed | LLM 漂移、CAS 冲突、效果后丢响应、部分效果、连续重启 | committed segment、GlobalState personal memory/people/journal | 仅重驱未 completed operation；完成后不再读 transcript 或调用模型 | 通过 |
+
+## 审查结论复用表
+
+> 每行一个可独立失效的完整功能或合同事实链，生产端、事实源、消费者、异常终态和测试不得拆开；无法独立指纹、独立失效或需重读多数其他项时合并。整表须覆盖固定边界、全部交付文件、关键原语和九类核查面。
+>
+> 常设一项跨项组合推演。其他项均已取得或复用本轮结论后，再审查组合项；组合项按编号汇总各项当前输入指纹与结论。任一其他项新增，或其边界、输入指纹、结论变化时连带失效。
+>
+> 只有覆盖全部登记输入且该项结论无问题的问题盘点或冻结终审可计次，每轮每项至多一次，证据列须引用审查轮及证据；某项发现问题只清零该项，同一输入达到 2/2 后才可持续复用。状态只允许“待审”“审查中”“通过”“失效”“有问题:编号”，独立深审只允许“0/2”“1/2”“2/2”。
+
+| 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
+| ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+
+## 问题列表
+
+> 每个根因只保留一行;“完整影响面”固定写明生产端、类型组合、消费者、异常终态和测试;状态只允许“待裁决、待修复、修复中、待验证、已验证”。已解决问题保留到单元完成。
+
+| 编号 | 事实与证据 | 根本原因 | 完整影响面 | 最优解决方案与验收条件 | 状态 |
+| ---- | ---------- | -------- | ---------- | ---------------------- | ---- |
+| U32-01 | **P0｜工作量大｜来源 P32-01。** `local-conversation-owner.ts` 只用进程内 `#transferringConversations` 封部分命令，启动恢复又跳过 tombstoned；interaction answer/no-surface、intent list/discard、收编候选/用户列表与 `LocalConversationRpcRouter` 未共同读取耐久 current-owner。executor-only 的第一方 router 只截获固定 `session.*`，`confirmation.list/resolve` 及 pending/resolved 推送仍消费本机 Hub/Bridge；CLI refresh 的 list 又不带 conversationId，resolve 也未保留 pending 的 conversationId，故即使 session 被转发，收编后的确认操作面仍会分叉或无法精确选 owner。`ConversationTransferMeshClient` 丢弃 rejected 的 `retryable`，adoption 重试只无限重试、没有可证明零 target commit 的 pre-commit abort 收束；当前 aborted status 也不返回签名 abort，响应丢失后不能证明 target 与 source 将落同一终态。 | current-owner/ownerEpoch 没有成为 source 准入、收编候选、用户会话投影、第一方会话/确认 surface 路由与失败恢复的单一权威谓词；进程 gate、transfer 投影、公开 router、Hub/Bridge、客户端 pending/result correlation 与重试器各自解释 owner 状态。 | **生产端：**local owner 全 port、source prepare/freeze/abort/acceptCommit、server dispatch/LocalConversationRpcRouter、confirmation Hub/Bridge/list/resolve 与 RpcConfirmationBroker、认证 mesh transfer 与 adoption coordinator。**组合：**prepared/frozen/imported/aborted/committed/tombstoned，全部 session/interaction/intent/evidence 写读面及会话绑定确认控制/通知，同进程、响应丢失、连接关闭、连续重启，两生产根及旧/当前 ownerEpoch。**消费者：**session.new/list/resume/history/send/maintenance、confirmation.list/resolve/pending/resolved、CLI `/new`/`/resume`、确认与后续 memory/review。**异常终态：**旧 owner 重启复活写面、用户列表和写路由分叉、已收编会话从原 surface 消失、session 到新 owner 而确认仍落旧 Hub、无 conversationId 时确认误路由、永久拒绝无限冻结或错误恢复成双 owner。**直接证据：**全部 port 与 delete/freeze 竞争、target stable/transient reject、abort/commit 响应丢失、两根完整“失联继续→收编→原 surface 继续 session+确认”。**受影响审查项：**IR32-06～07、10、16～18、21～23、25～28、31、34、37～39。 | 抽取只读 `CurrentConversationAuthorityPort` 复用现有 transfer projection，在同一 log prefix 返回 owner device/epoch/phase；local owner 全 port、收编候选、用户列表与第一方 router 必须逐次消费。local current 执行本地，frozen/importing 返回有限可重试状态；committed/tombstoned 从收编候选永久移除并拒旧写，但用户 session.list 继续按投影保留为可路由的 target-current 会话。target current 复用现有 server dispatch 与认证 mesh request/stream 建立按连接关闭的窄 `FirstPartyConversationSurface`，只允许 canonical session exact-set、会话绑定的 confirmation.list/resolve 及其 session/confirmation 通知，携带并验证原 ingress device、surfacePrincipal、connection identity 与 conversationId，由 target 的真实 manager/Hub 执行、再把定向通知送回该 ingress connection。无参 confirmation.list 只按该连接已 subscribe/resume 的会话集合逐项解析 current owner、分区查询并稳定合并；pending/list 必须携带 conversationId，client resolve 原样回传后再按 owner 路由，禁止凭 requestId 猜 owner、任意 RPC、宿主广播或第二 Hub。mesh client 保留 U32-07 的结构化 code/retryable 与严格状态事实；仅显式 non-retryable 且 status 证明 target 未 commit 时，source 生成同一签名 abort，target 先幂等落 abort并返回/回放该 abort，source 验证全等后再落同一 abort并恢复原 epoch，任一步丢响应都按耐久状态续跑，commit 后永不 abort。验收为全部 topology/入口在同进程与连续重启只命中一个 current owner，prepare/freeze 零新写、aborted 完整恢复、commit/tombstone 永久 fencing，target-first abort 无双 owner且两端 abort 全等；已收编会话在原第一方连接或重连的用户列表、session、无参/指定 confirmation.list、resolve 与 pending/resolved 定向全等且连接关闭即撤销代理，零错 owner/跨会话广播；不新增通用路由或第二 owner 状态。 | 已验证 |
+| U32-02 | **P0｜工作量中｜来源 P32-02。** production target 把共享 `authority.artifacts` 作为 staging；import 直接写共享 CAS，abort cleanup 无条件 discard manifest/records/session ref，且同 digest 可被其它已提交事实共享。现有 copy 还把 network range iterator 放进共享 FileArtifactStore 排他段，部分导入身份与本 transfer 私有所有权没有物理边界。 | transfer 没有按 transferId 拥有私有 staging，却把共享内容寻址对象误当作本次可独占清理的临时副本。 | **生产端：**anchor target、认证 transfer import/abort、FileArtifactStore/FileResumableArtifactReceiver、共享 CAS。**组合：**已有/新/共享 digest，manifest/base/contentAssets，部分/完整 import、abort/cleanup、提升中故障与连续恢复。**消费者：**其它会话、control/session authority base 及共享 ArtifactStore 全部读取者。**异常终态：**abort 删除权威共享内容，或 commit 引用未完整提升资产；部分 staging 无法安全判定归属。**直接证据：**共享 digest、每个 closure ref、部分接收/提升、重复 cleanup、各步响应丢失与重启。**受影响审查项：**IR32-11、14、18、34～35、39。 | 在 authority root 下按已校验 transferId 派生唯一私有目录，复用 `FileArtifactStore` 加 `FileResumableArtifactReceiver` 保存 partial 与完整 staging；网络 range 先返回有界 chunk，再写私有 receiver，import 全程不触达共享 CAS。manifest、records、sessionState 与全部 contentAssets 验真后，按冻结 closure 从私有 store 向共享 CAS 幂等 `putVerifiedStream`，逐 ref 校验 `has`，仅在全部共享 ref 就绪后允许 commit；abort/cleanup 只耐久删除该 transfer 私有目录，提升出的无引用共享 digest 留给既有 lifecycle，绝不 discard 共享 ref。验收为新/已有/共享 digest、部分导入、提升故障、重复 abort 与连续重启均零共享数据丢失，commit 前业务零可见、commit 时 closure 全在场、commit 后所有引用可读；无 sidecar、第二事实源或新存储框架。 | 已验证 |
+| U32-03 | **P1｜工作量大｜来源 P32-03。** selector 只在 control record 的 inline body 搜 conversationId；外置 `received.envelope={ref}` 未解引用，故合法大 control 的 received/applied exact-replay 对会漏出 manifest。target `committed` fsync 后才由 `afterCommit→installCommittedConversationTransfer()` 读 log/base、安装 adopted map/journal；该 I/O 可失败，使 current-owner 已切换而目录/history/control base 同进程不可见。 | authority base 完整性、current-owner 切换和会话可服务性没有共享一个预备闭包与 commit 线性化点；commit 后仍有决定会话是否存在的可失败发布。 | **生产端：**source selector/manifest、control externalization、target import/commit/restore、ConversationProtocolRuntime。**组合：**inline/外置 received/result、write/delete 双序、commit 前后 I/O 故障、exact replay、响应丢失与连续重启。**消费者：**ControlAdmission、session directory、ConversationRunJournal/history、review/memory。**异常终态：**control 身份缺失导致重复副作用，或 commit 成功后暂时没有可服务 owner。**直接证据：**外置 envelope/result、完整 request 对、预备失败、commit sync 后故障与两根恢复。**受影响审查项：**IR32-08、13、15～16、18、27、32、34、38～39。 | selector 复用 control codec 与 ArtifactStore，解引用并严格验证 `received.envelope` 后按 conversationId 收齐 requestId 对应 received/applied 及其 refs。target 在 imported 阶段加载并验证 records/session/control base 与全部共享 refs，交给 protocol 生成不可变 publication token，并在 commit 前注册为不可见 prepared base；会话查询只在对应 committed-base 投影存在时激活该 token。commit 用同一 AuthorityCommitLog transaction 在一个 envelope 同时追加 signed committed 与窄 committed-base 记录，使 transfer/current-owner projection 和 adopted directory/base projection 在同一 fsync 生效，candidateReferences 反绑完整 closure；sync 后无需发布动作或 I/O，响应仅回放该 commit。append 失败则 prepared token 永不公开并可清理；进程崩溃则启动在公开准入前从 committed-base 与共享 closure 重建 token，review/memory 仅非阻塞唤醒。验收为所有 control 形态和 request 对全量迁移，write/delete 只有一个 log-prefix 胜者，预备失败零 commit，sync 后任意故障均不出现 target not-found 或假失败且 replay 零重复；ArtifactStore 和后继 transfer 范围不扩张。 | 已验证 |
+| U32-04 | **P1｜工作量中｜来源 P32-04。** target `capacityStep` 可选且生产未注入；source freeze/base 写与 range 读、target partial/staging/promote/cleanup 均存在裸物理 I/O。现有 copy 让 `putVerifiedStream` 的排他段和 permit 跨 network range 等待，transfer 也未把 mesh/stop cancellation 传到容量等待。 | conversation transfer 没有作为现有 storage governor 的有限工作类别进入两端组合根，物理步骤、锁序、取消和稳定 work identity 均未单源化。 | **生产端：**两生产根中的 source/anchor target、transfer mesh、私有 receiver、共享/私有 FileArtifactStore。**组合：**零/大资产、并发 transfer、容量饱和、磁盘满、取消/停机、响应丢失；source freeze/read 与 target append/promote/cleanup。**消费者：**同设备其它 ArtifactStore、spool、migration 与维护负载。**异常终态：**资源不公平、permit 横跨网络或锁等待、停机悬挂、磁盘失败误完成。**直接证据：**稳定 work key、每叶物理步骤 budget/permit、网络等待零 permit、锁内零等待背压、取消与重驱。**受影响审查项：**IR32-12、34～36、39。 | 在现有 `STORAGE_MAINTENANCE_KINDS` 增加有限 `conversation-transfer` 及唯一 owner，两生产根把同一 `StorageMaintenanceGovernorPort` 和 lifecycle abort 作为 source/target 必需依赖；义务按 transferId，叶步骤按 transferId/ref/step/offset 生成 work key。source 生成 base/manifest 与本地 range 读、target 私有 receiver append/finalize、共享提升和私有 cleanup 均调用现有 maintenance step；网络 probe/range 等待先结束再申请本地写 permit，任何 permit 都不跨网络、authority log 锁或其它 store 锁，锁内背压零等待并在锁外重驱。验收为缺 governor 的生产装配被现有 S7 拒绝，零/大资产和并发 transfer 公平有界，取消/stop 清空等待与 permit，磁盘满只保留可恢复 transfer/staging、不误报 commit且无锁序死锁；不新增 governor 或资源框架。 | 已验证 |
+| U32-05 | **P1｜工作量中｜来源 P32-05。** request origin 已绑定稳定 `surfacePrincipal`，故同 client id 的网络重连可继续；但全局 post-adoption broker 未给 Hub 提供 conversationId，pending 摘要会落入宿主级广播，`#requested` 又只按 intent 去重。服务端存活时 CLI 进程重启或另一认证第一方 surface resume，同一耐久 intent 仍固定旧 surface；旧请求与重绑也没有串行终态。收编后 current owner 在 anchor、当前 surface 仍接在 executor-only server 时，session 与本机 `confirmation.list/resolve`/Bridge 更会命中不同 Hub；客户端又未在 resolve 保留 list/pending 的 conversationId。**价值裁决记录：**原结论把故障表述为“旧连接断开后新连接不可见”，并要求泛化可重新绑定视图。反方复核证实同 surfacePrincipal 的普通断线重连无失败；真正反例是客户端进程重启/当前 surface 更换、会话定向缺失及跨 current-owner surface 分叉。新决定改写事实、影响和方案，保留 P1/中：该受支持旅程会令排程确认在 30 分钟内不可操作并产生跨会话摘要暴露，复用现有 Hub/broker/intents 与 U32-01 窄 surface 路由即可比例性根治；用户体验和架构当前均不达标，所列方案两者均达标。仅当 clientInstanceId 已跨进程耐久且产品禁止其它认证 surface 接管，或现有 confirmation 已能在 current owner 按耐久 intent 安全定向重绑时重开裁决。 | schedule 收编确认缺少“current owner conversation + 当前第一方 surface”的单一操作面身份；进程 request 去重错误地同时承担 intent 幂等、会话归属与 surface 所有权，本地 Hub 与无 conversation correlation 又被误当成跨 owner 权威。 | **生产端：**PostAdoptionReviewCoordinator、session.resume、U32-01 FirstPartyConversationSurface、ConfirmationHub/Bridge/list/resolve、RpcConfirmationBroker、CoreHostConnection surface identity。**组合：**同身份重连、客户端进程重启、跨 surface/跨 owner 接管、旧应答与接管竞争、连接关闭、过期、响应丢失、terminal replay、连续服务。**消费者：**会话 observer、CLI/REPL pending panel 与 anchor schedule review。**异常终态：**当前 surface 无可操作 pending、旧 surface 仍可竞答、session 与确认落不同 owner、摘要投给无关会话/宿主连接。**直接证据：**稳定 requestId、current-owner conversation 定向、无参 list 后 resolve、两 surface 双序、同/异决定与 task revision。**受影响审查项：**IR32-25～26、28、34、37、39。 | 复用耐久 intent、current owner 上单个 post-adoption broker/ConfirmationHub 及 U32-01 窄 surface 路由：给该 Hub registration 增加 `conversationIdFor(request)` 元数据解析，request index 固定本 intent 的 conversationId，不占用 runtime broker 的 conversation 唯一槽；RpcConfirmationBroker 保存 pending/list 返回的 conversationId 并随 resolve 回传。session.resume 把已认证 ingress surface 元数据交给 current owner，按 intent 串行记录 current surface、relay 与 request promise。同 surface 复用 `adoption-review:<intentId>`；surface 改变或 relay 关闭则 cancel 旧 request、等待其非用户终态，重读 intent 仍 pending 后用同一 requestId/decision 身份和新 origin 重建。pending/resolved 仅由 current-owner Bridge 经该 relay 定向，list/resolve 按 conversationId 始终在 current owner Hub 执行；pending 接管期间旧 origin 必须拒绝，intent 已终态后只允许现有同决定耐久 replay，最终 decide 只写 intent 权威。验收为同身份重连、进程重启、跨 surface/owner 与接管竞争始终每会话恰一可操作 pending，无参 list 后 resolve 精确命中 owner，旧 surface 不能产生新决定，连接关闭零残留代理，过期/丢响应/terminal same-decision replay 零第二 decision/task revision；不新增确认框架、通用通知隧道或耐久 pending。 | 已验证 |
+| U32-06 | **P1｜工作量大｜来源 P32-06。** `post-adoption-memory.ts` 只用进程内 `completed/inFlight`；恢复反复重建完整 transcript 并调用非确定 LLM。逐 mutation requestId 由 operationId 加当轮输出序号产生，既无 transfer/segment 发现水位，也无耐久 extraction result 与 apply attempt；输出重排会同 id 异载荷，数量变化会新增 revision，profile/person 的 expectedDigest 冲突还会使固定 payload 永久卡死。**修复反证 C32-R03：**首次修复只耐久 discovery 与 inputDigest，未把规范 segment input 同 envelope 冻结；任一未完成 operation 恢复仍会重读完整 transcript，水位不能真正截断历史。该反例已并入本根因并改为 discovery+全部 input/attempt 原子落账。 | 非确定提取计划、并发写所需的效果尝试身份及 segment 消费水位都不在 conversation AuthorityCommitLog；GlobalState 单 mutation 幂等无法证明一个 segment 按同一计划最终全等。 | **生产端：**committed transfer restore、ConversationRunJournal segment flush、LLM extraction、GlobalState read/mutate。**组合：**零/单/多 segment，输出变化/重排/数量变化，profile/person 并发 digest 漂移，部分写、效果后丢响应、多 transfer、并发唤醒与连续重启。**消费者：**personal memory/people/journal 主投影及后续 turn。**异常终态：**幂等冲突、重复 revision、已完成历史重复付费与无界启动扫描、永久 pending。**直接证据：**零集 discovery、attempt/plan 首胜、逐效果 CAS attempt、完成水位、分页恢复。**受影响审查项：**IR32-30、34、36、38～39。 | 在现有 conversation run stream 增加窄 `post-adoption-memory-discovery/attempt/plan/effect/completed` internal records 与 projection。按 transferId+checkpoint 发现 segment，并在首次 LLM 前用同一 AuthorityCommitLog transaction 原子追加 discovery 与全部规范化 input/attempt：每个 operationId 绑定 conversationId、segmentId、消息、摘要与 inputDigest，零 segment 也形成耐久完成水位；发现事实存在后禁止再读 transcript，只重驱其中未 completed 的耐久 input。LLM 成功响应先规范化并耐久冻结有序 extractions/resultDigest；崩溃在 plan 前可对同一耐久 input 重调但尚无 memory 副作用，同 operation 的首个耐久 plan 胜出，之后禁止换 plan。journal 使用固定 effect requestId；profile/person 每次先把当前 expectedDigest、完整 mutation、attempt ordinal/requestId 落 log，再调用 GlobalState，丢响应 exact replay，明确 revision-conflict 且零效果才以同一 plan+新 digest 追加下一 attempt。全部 effect 已证明 granted 后追加 completed；启动/turn 只重驱 projection 中未完成 operation；不新增队列、第二 memory 事实源或监控。 | 已验证 |
+| U32-07 | **P2｜工作量小｜来源 P32-07。** `ConversationTransferResult` 的 ok 分支允许任意 state 携带可选 ref/commit，且 aborted 不返回签名 abort；mesh client 在 rejected 前不核对外层 requestId/transferId，也未统一反绑 probe/range ref、长度和 commit/abort 对原命令。认证 request channel 当前仍把响应交回单次调用，后继权威校验会在副作用前拒绝多数错绑，故没有已证实错误提交。 | codec 的 state shape 与 client 的 originating-command correlation 分叉，缺少一份能表达恢复所需耐久事实的严格结果联合及单一关联检查。 | **生产端：**core transfer contract/codec、MeshClient/Service。**组合：**prepared/frozen/imported/committed/tombstoned/aborted、probe/range/status、错 requestId/transferId/ref/offset/length/commit/abort 与合法 result。**消费者：**source coordinator、target/source 状态机和 U32-01 abort 分类/恢复。**异常终态：**畸形响应多走流程、retryable 丢失并产生模糊错误，或 abort 响应丢失后无法证明两端同一终态；当前不会错误提交。**直接证据：**真实 codec/service/client 的逐分支正反例。**受影响审查项：**IR32-02、05、33、35。 | 将 ok 收为 state 判别联合并给 result 增加窄 abort 字段：prepared 无附加字段，frozen/imported 必须且只含 ref，committed/tombstoned 必须且只含 commit，aborted 必须且只含已验签 abort；range 只含 ref/offset/data，service 的 probe/status/abort 同步该形态。client 解码后先统一要求 requestId/transferId 与命令全等，再按 originating op 核对 state；probe/range/status 的 ref，range offset 与 `min(request.length, ref.bytes-offset)` 字节数，commit 的 transfer/conversation/source/target/epoch/checkpoint，abort 的 request/transfer/conversation/source/target/epoch 及预期 digest 都必须全等。rejected 保留 code/retryable 为结构化错误供 U32-01 消费。验收为全部错关联在调用任何 source/target 状态动作前稳定拒绝，缺/多字段 codec fail-closed，abort 响应丢失可回放同一签名事实，合法 prepare/probe/range/freeze/abort/status 零误杀且公开错误沿用现有产品语言。 | 已验证 |
+
+## 已排除问题
+
+> 保存已证伪疑点供复审复用;使用与重开规则见工作台静态区。裁决只允许“已排除”或“已重开→问题编号”,重开时保留原行。
+
+| 编号 | 原疑点与已验证事实 | 排除依据与适用边界 | 证据与输入基线 | 重开条件 | 最终裁决 |
+| ---- | ------------------ | ------------------ | -------------- | -------- | -------- |
+| EX32-01 | 原主张 P32-08：MeshRuntimeAssembly 在 post-adoption memory/review 尚未绑定时开放 mesh control，弱于“全部派生恢复先于 mesh”的文字要求；原评 P2/小，主张调整装配顺序并增加启动中 transfer 测试。已验证：`mesh.start()` 在开放 control 前恢复 transfer 投影并安装全部 committed authority base；后续 bind 从耐久 commit 补扫 memory/review，且两者均早于公开 HTTP/业务准入。 | 适用于当前 authority base restore、durable commit 补扫与公开 server 启动顺序。窗口不丢事实、不形成双 owner，也不向用户误报派生效果完成；后续启动阶段失败只使整个服务未开放，下次启动仍可追平。仅以更强文字顺序不能证明当前处理价值。必要规则为“authority base 先于 mesh，派生消费者可从耐久 commit 补扫且先于公开业务准入追平”。 | 第 32 单元独立审查 F32-10 价值裁决；`mesh-runtime-assembly.ts` 的 start/restore/bind 调用图与 `command.ts` 的公开 server 启动顺序；2026-08-08 当前工作树。 | consumer 无法从 durable commit 补扫；公开业务在派生追平前开放；mesh ACK 对外宣称 memory/review 已完成；或该窗口出现不可恢复事实丢失、双 owner或错误公开完成。 | 已排除 |
+
+## 迟发现教训
+
+> 仅登记“先前通过后才发现”的真实遗漏。检测动作必须可执行并写明适用范围;每个适用轮次追加执行证据。
+
+| 编号 | 对应问题与先前通过轮次 | 遗漏机制 | 后续必做的检测动作与适用范围 | 应用记录（轮次:证据） |
+| ---- | ---------------------- | -------- | ---------------------------- | --------------------- |
+
+## 验证计划与证据账本
+
+> 状态只允许“待执行、有效、失效、诊断”。“待执行”必须写明当前证据缺口,输入闭包必须具体到可重复计算指纹;执行按各行输入闭包计算独立指纹。
+
+| 编号 | 证明目标与当前缺口 | 最小命令或检查 | 输入闭包 | 阶段 / 成本 / 实耗 | 结果 | 证据输入指纹 | 状态 |
+| ---- | ------------------ | -------------- | -------- | ------------------ | ---- | ------------ | ---- |
+
+## 终审记录
+
+| 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
+| ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+
+## 独立审查覆盖表
+
+> 本表只记录独立审查覆盖进度，执行规则见工作台静态区“独立功能审查”。本表按失效机制划分，禁止照抄审查结论复用表；必须常设跨区组合核查行。状态只允许“待审”“审查中”“已覆盖”“失效”“有问题”。
+
+| 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
+| ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+
+<!-- registration-complete: unit-32.gen-1 -->

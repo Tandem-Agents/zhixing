@@ -15,6 +15,7 @@ describe("LocalConversationRpcRouter", () => {
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
       owner: ownerPort(),
+      remoteFor: () => { throw new Error("unexpected remote route"); },
     });
     const connection = fakeConnection();
 
@@ -39,6 +40,7 @@ describe("LocalConversationRpcRouter", () => {
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
       owner: port,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
     });
     const connection = fakeConnection();
 
@@ -94,6 +96,7 @@ describe("LocalConversationRpcRouter", () => {
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
       owner: ownerPort(),
+      remoteFor: () => { throw new Error("unexpected remote route"); },
     });
     const connection = fakeConnection();
     const promise = router.dispatch({
@@ -106,6 +109,126 @@ describe("LocalConversationRpcRouter", () => {
     });
     await expect(promise).rejects.not.toThrow(/anchor|owner|epoch|intent|CAS|stream/iu);
   });
+
+  it("本机 current-owner 确认只调用同一 canonical handler", async () => {
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: ownerPort(),
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    const dispatchCanonical = vi.fn(async () => ({
+      items: [{ requestId: "confirm-local", conversationId: CONVERSATION_ID }],
+    }));
+
+    await expect(router.dispatch({
+      method: "confirmation.list",
+      params: { conversationId: CONVERSATION_ID },
+      connection: fakeConnection(),
+      dispatchCanonical,
+    })).resolves.toMatchObject({
+      handled: true,
+      result: { items: [{ requestId: "confirm-local" }] },
+    });
+    expect(dispatchCanonical).toHaveBeenCalledTimes(1);
+  });
+
+  it("按耐久 current owner 转发会话与会话绑定确认", async () => {
+    const remoteDeviceId = "device-anchor";
+    const owner = ownerPort();
+    owner.listConversations = vi.fn(async () => []);
+    owner.listConversationAuthorities = vi.fn(async () => [{
+      conversationId: CONVERSATION_ID,
+      authority: {
+        deviceId: remoteDeviceId,
+        ownerEpoch: 2,
+        transferId: "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        state: "fenced",
+      },
+    }]);
+    owner.currentAuthority = vi.fn(async () => ({
+      deviceId: remoteDeviceId,
+      ownerEpoch: 2,
+      transferId: "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      state: "fenced",
+    }));
+    const dispatch = vi.fn(async (method: string) => {
+      if (method === "session.list") {
+        return {
+          conversations: [{
+            conversationId: CONVERSATION_ID,
+            name: "已收编对话",
+            createdAt: "2026-08-07T00:00:00.000Z",
+            lastActiveAt: "2026-08-08T00:00:00.000Z",
+            active: false,
+            busy: false,
+            observerCount: 0,
+            pendingCount: 1,
+          }],
+        };
+      }
+      if (method === "confirmation.list") {
+        return { items: [{ requestId: "confirm-1", conversationId: CONVERSATION_ID }] };
+      }
+      return { conversationId: CONVERSATION_ID };
+    });
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner,
+      remoteFor: () => ({ dispatch, close: vi.fn() }) as never,
+    });
+    const connection = fakeConnection();
+
+    await expect(router.dispatch({
+      method: "session.list",
+      params: {},
+      connection,
+    })).resolves.toMatchObject({
+      handled: true,
+      result: { conversations: [{ conversationId: CONVERSATION_ID }] },
+    });
+    await router.dispatch({
+      method: "session.resume",
+      params: { conversationId: CONVERSATION_ID },
+      connection,
+    });
+    const dispatchCanonical = vi.fn(async () => ({
+      items: [{ requestId: "confirm-local", conversationId: "local-current" }],
+    }));
+    await expect(router.dispatch({
+      method: "confirmation.list",
+      params: {},
+      connection,
+      dispatchCanonical,
+    })).resolves.toMatchObject({
+      result: {
+        items: expect.arrayContaining([
+          { requestId: "confirm-local", conversationId: "local-current" },
+          { requestId: "confirm-1", conversationId: CONVERSATION_ID },
+        ]),
+      },
+    });
+    await router.dispatch({
+      method: "confirmation.resolve",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId: "confirm-1",
+        decision: "allow",
+      },
+      connection,
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      "confirmation.list",
+      { conversationId: CONVERSATION_ID },
+      connection,
+    );
+    expect(dispatchCanonical).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(
+      "confirmation.resolve",
+      expect.objectContaining({ conversationId: CONVERSATION_ID }),
+      connection,
+    );
+  });
 });
 
 function ownerPort(): LocalConversationOwnerPort {
@@ -113,6 +236,15 @@ function ownerPort(): LocalConversationOwnerPort {
     createConversation: vi.fn(async () => CONVERSATION_ID),
     ensureSession: vi.fn(async () => {}),
     listConversations: vi.fn(async () => [CONVERSATION_ID]),
+    listConversationAuthorities: vi.fn(async () => [{
+      conversationId: CONVERSATION_ID,
+      authority: { deviceId: DEVICE_ID, ownerEpoch: 1, state: "current" },
+    }]),
+    currentAuthority: vi.fn(async () => ({
+      deviceId: DEVICE_ID,
+      ownerEpoch: 1,
+      state: "current",
+    })),
     mutateSession: vi.fn(async () => ({ revision: 1 })),
     cancelTurns: vi.fn(async () => {}),
     runTurn: vi.fn(async () => ({ kind: "aborted" })),
@@ -161,6 +293,11 @@ function fakeConnection() {
   return {
     id: 7,
     closed: false,
+    authenticated: true,
+    loopback: true,
+    clientInfo: { id: "test", version: "1" },
+    surfacePrincipal: "rpc:test",
+    surfaceGeneration: 1,
     notify: vi.fn(),
     onClose: vi.fn(() => () => {}),
   };

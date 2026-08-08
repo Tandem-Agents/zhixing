@@ -328,12 +328,23 @@ export function validateConversationTransferResult(
   assertProtocolIdentifier(value.requestId, "Conversation transfer result requestId");
   assertTransferId(value.transferId, "Conversation transfer result transferId");
   if (value.status === "ok") {
+    const state = value.state as ConversationTransferPhase;
+    if (!TRANSFER_PHASES.has(state)) {
+      throw new TypeError("Conversation transfer result state is invalid");
+    }
+    const stateKeys =
+      state === "prepared"
+        ? []
+        : state === "frozen" || state === "imported"
+          ? ["ref"]
+          : state === "committed" || state === "tombstoned"
+            ? ["commit"]
+            : ["abort"];
     assertExactKeys(
       value,
       [
         "requestId",
-        ...(value.ref === undefined ? [] : ["ref"]),
-        ...(value.commit === undefined ? [] : ["commit"]),
+        ...stateKeys,
         "state",
         "status",
         "transferId",
@@ -341,15 +352,18 @@ export function validateConversationTransferResult(
       ],
       "Conversation transfer result",
     );
-    if (!TRANSFER_PHASES.has(value.state as ConversationTransferPhase)) {
-      throw new TypeError("Conversation transfer result state is invalid");
-    }
-    if (value.ref !== undefined) assertArtifactRef(value.ref, "Conversation transfer result ref");
-    if (value.commit !== undefined) {
+    if (state === "frozen" || state === "imported") {
+      assertArtifactRef(value.ref, "Conversation transfer result ref");
+    } else if (state === "committed" || state === "tombstoned") {
       if (!verifier) {
         throw new TypeError("Conversation transfer commit result requires a verifier");
       }
       validateConversationTransferCommit(value.commit, verifier);
+    } else if (state === "aborted") {
+      if (!verifier) {
+        throw new TypeError("Conversation transfer abort result requires a verifier");
+      }
+      validateConversationTransferAbort(value.abort, verifier);
     }
   } else if (value.status === "range") {
     assertExactKeys(

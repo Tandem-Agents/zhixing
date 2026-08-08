@@ -44,6 +44,7 @@ import {
   createServerContext,
   runServer,
   buildSystemHandlers,
+  buildBuiltinRegistry,
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
   ServerLogLifecycle,
@@ -704,6 +705,7 @@ async function runServerProcess(
     await ctx.meshRuntime.bindPostAdoptionMemory(
       createPostAdoptionMemoryPort({
         globalState: ctx.authorityRuntime.globalState,
+        authorityLog: ctx.authorityRuntime.authorityLog,
         anchorEpoch: ctx.authorityRuntime.anchorEpoch,
         callText: governControlTextCall(
           {
@@ -986,6 +988,7 @@ async function runServerProcess(
     throw new Error("Skill management requires the anchor global-state authority");
   }
 
+  const serverRegistry = buildBuiltinRegistry();
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
@@ -1153,6 +1156,16 @@ async function runServerProcess(
     },
   });
 
+  if (ctx.meshRuntime) {
+    ctx.meshRuntime.bindFirstPartyConversationSurface({
+      dispatch: ({ method, params, connection }) =>
+        serverRegistry.dispatchCanonical(method, params, {
+          connection,
+          server: serverCtx,
+        }),
+    });
+  }
+
   ctx.deliveryStack?.onStatus((notice) => {
     serverCtx.broadcastAll?.("delivery.status", notice);
   });
@@ -1163,6 +1176,7 @@ async function runServerProcess(
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
   runner = await runServer({
       context: serverCtx,
+      registry: serverRegistry,
       ...(scheduler ? { scheduler } : {}),
       schedulerEventBus,
       cleanupRegistry: registry,

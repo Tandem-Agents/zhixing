@@ -304,22 +304,39 @@ export type ConversationTransferCommand =
 export type ConversationTransferResult =
   WireSchemaV1<"ConversationTransferResult"> &
     (
-      | {
+      | ({
           status: "ok";
           requestId: string;
           transferId: string;
-          state:
-            | "prepared"
-            | "frozen"
-            | "imported"
-            | "committed"
-            | "tombstoned"
-            | "aborted";
-          ref?: ArtifactRef;
-          commit?: ConversationTransferCommit;
           data?: never;
           error?: never;
-        }
+        } &
+          (
+            | {
+                state: "prepared";
+                ref?: never;
+                commit?: never;
+                abort?: never;
+              }
+            | {
+                state: "frozen" | "imported";
+                ref: ArtifactRef;
+                commit?: never;
+                abort?: never;
+              }
+            | {
+                state: "committed" | "tombstoned";
+                commit: ConversationTransferCommit;
+                ref?: never;
+                abort?: never;
+              }
+            | {
+                state: "aborted";
+                abort: ConversationTransferAbort;
+                ref?: never;
+                commit?: never;
+              }
+          ))
       | {
           status: "range";
           requestId: string;
@@ -328,6 +345,7 @@ export type ConversationTransferResult =
           offset: number;
           data: string;
           state?: never;
+          abort?: never;
           error?: never;
         }
       | {
@@ -346,6 +364,7 @@ export type ConversationTransferResult =
           state?: never;
           ref?: never;
           data?: never;
+          abort?: never;
         }
     );
 

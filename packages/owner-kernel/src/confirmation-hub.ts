@@ -58,6 +58,7 @@ interface BrokerRegistration {
   readonly brokerId: BrokerId;
   readonly broker: IConfirmationBroker;
   readonly conversationId?: string;
+  readonly conversationIdFor?: (request: ConfirmationRequest) => string | undefined;
   readonly unsubscribeOnRequest: () => void;
   readonly unsubscribeOnResolved: () => void;
 }
@@ -67,6 +68,7 @@ interface BrokerRegistration {
 export class ConfirmationHub {
   private readonly brokers = new Map<BrokerId, BrokerRegistration>();
   private readonly requestIndex = new Map<ConfirmationRequestId, BrokerId>();
+  private readonly requestConversationIndex = new Map<ConfirmationRequestId, string>();
   /** conversationId → brokerId 反向索引，InboundRouter pending-aware 拦截的 O(1) 路径 */
   private readonly conversationIndex = new Map<string, BrokerId>();
   private readonly listeners = new Set<(event: HubEvent) => void>();
@@ -80,7 +82,10 @@ export class ConfirmationHub {
   attach(
     brokerId: BrokerId,
     broker: IConfirmationBroker,
-    opts?: { conversationId?: string },
+    opts?: {
+      conversationId?: string;
+      conversationIdFor?: (request: ConfirmationRequest) => string | undefined;
+    },
   ): void {
     if (this.brokers.has(brokerId)) {
       throw new Error(
@@ -96,19 +101,29 @@ export class ConfirmationHub {
 
     const unsubReq = broker.onRequest((request) => {
       this.requestIndex.set(request.id, brokerId);
+      const requestConversationId = convId ?? opts?.conversationIdFor?.(request);
+      if (requestConversationId) {
+        this.requestConversationIndex.set(request.id, requestConversationId);
+      }
       this.emit({
         type: "request",
-        entry: { request, brokerId, conversationId: convId },
+        entry: {
+          request,
+          brokerId,
+          ...(requestConversationId ? { conversationId: requestConversationId } : {}),
+        },
       });
     });
 
     const unsubRes = broker.onResolved((requestId, decision) => {
       this.requestIndex.delete(requestId);
+      const requestConversationId = this.requestConversationIndex.get(requestId) ?? convId;
+      this.requestConversationIndex.delete(requestId);
       this.emit({
         type: "resolved",
         requestId,
         brokerId,
-        conversationId: convId,
+        ...(requestConversationId ? { conversationId: requestConversationId } : {}),
         decision,
       });
     });
@@ -116,7 +131,8 @@ export class ConfirmationHub {
     this.brokers.set(brokerId, {
       brokerId,
       broker,
-      conversationId: convId,
+      ...(convId ? { conversationId: convId } : {}),
+      ...(opts?.conversationIdFor ? { conversationIdFor: opts.conversationIdFor } : {}),
       unsubscribeOnRequest: unsubReq,
       unsubscribeOnResolved: unsubRes,
     });
@@ -152,7 +168,10 @@ export class ConfirmationHub {
 
     // 清理 requestIndex 里属于此 broker 的条目
     for (const [reqId, bId] of this.requestIndex) {
-      if (bId === brokerId) this.requestIndex.delete(reqId);
+      if (bId === brokerId) {
+        this.requestIndex.delete(reqId);
+        this.requestConversationIndex.delete(reqId);
+      }
     }
     if (reg.conversationId) this.conversationIndex.delete(reg.conversationId);
     this.brokers.delete(brokerId);
@@ -163,10 +182,11 @@ export class ConfirmationHub {
     const out: HubEntry[] = [];
     for (const reg of this.brokers.values()) {
       for (const p of reg.broker.listPending()) {
+        const conversationId = reg.conversationId ?? reg.conversationIdFor?.(p.request);
         out.push({
           request: p.request,
           brokerId: reg.brokerId,
-          conversationId: reg.conversationId,
+          ...(conversationId ? { conversationId } : {}),
         });
       }
     }
@@ -249,7 +269,9 @@ export class ConfirmationHub {
     return {
       request: pending.request,
       brokerId: reg.brokerId,
-      conversationId: reg.conversationId,
+      ...(this.requestConversationIndex.get(requestId) ?? reg.conversationId
+        ? { conversationId: this.requestConversationIndex.get(requestId) ?? reg.conversationId }
+        : {}),
     };
   }
 

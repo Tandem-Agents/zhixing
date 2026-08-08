@@ -30,6 +30,8 @@ import {
   ConversationTransferSource,
   DeferredGlobalIntentRepository,
   listConversationTransferStates,
+  resolveCurrentConversationAuthority,
+  type CurrentConversationAuthority,
   type RuntimeFactory,
   type TurnCommittedInfo,
 } from "@zhixing/owner-kernel";
@@ -101,6 +103,11 @@ export interface LocalConversationOwnerPort {
   createConversation(): Promise<string>;
   ensureSession(conversationId: string): Promise<void>;
   listConversations(): Promise<readonly string[]>;
+  listConversationAuthorities(): Promise<readonly {
+    readonly conversationId: string;
+    readonly authority: CurrentConversationAuthority;
+  }[]>;
+  currentAuthority(conversationId: string): Promise<CurrentConversationAuthority>;
   mutateSession: SessionStatePort["mutate"];
   cancelTurns(input: {
     readonly conversationId: string;
@@ -188,6 +195,7 @@ export class LocalConversationOwnerAssembly {
   #commandDrain: Promise<void> | undefined;
   #resolveCommandDrain: (() => void) | undefined;
   readonly #transferringConversations = new Set<string>();
+  readonly #transferAbort = new AbortController();
 
   private constructor(input: {
     readonly options: LocalConversationOwnerAssemblyOptions;
@@ -209,6 +217,8 @@ export class LocalConversationOwnerAssembly {
       log: this.#owner.executorLog,
       artifacts: this.#owner.artifacts,
       signer: this.#owner.signer,
+      storageMaintenance: this.#owner.storageMaintenance,
+      abortSignal: () => this.#transferAbort.signal,
       verifier: this.#owner.verifier,
       acceptsConversationId: (conversationId) =>
         this.#owner.acceptsConversationId(conversationId),
@@ -281,14 +291,22 @@ export class LocalConversationOwnerAssembly {
     const sessionState = this.#protocol.sessionState;
     const rubricCatalog = input.rubricCatalog;
     const sessionReadPort: LocalConversationSessionReadPort = Object.freeze({
-      readSessionMeta: (conversationId, context) =>
-        sessionState.readSessionMeta(conversationId, context),
-      readTranscriptTail: (conversationId, context, before, limit) =>
-        sessionState.readTranscriptTail(conversationId, context, before, limit),
-      readTaskList: (conversationId, context) =>
-        sessionState.readTaskList(conversationId, context),
-      readAdvancementState: (conversationId, context) =>
-        sessionState.readAdvancementState(conversationId, context),
+      readSessionMeta: async (conversationId, context) => {
+        await this.#assertConversationCurrent(conversationId);
+        return sessionState.readSessionMeta(conversationId, context);
+      },
+      readTranscriptTail: async (conversationId, context, before, limit) => {
+        await this.#assertConversationCurrent(conversationId);
+        return sessionState.readTranscriptTail(conversationId, context, before, limit);
+      },
+      readTaskList: async (conversationId, context) => {
+        await this.#assertConversationCurrent(conversationId);
+        return sessionState.readTaskList(conversationId, context);
+      },
+      readAdvancementState: async (conversationId, context) => {
+        await this.#assertConversationCurrent(conversationId);
+        return sessionState.readAdvancementState(conversationId, context);
+      },
     });
     const rubricReadPort = Object.freeze({
       listForMatching: () => rubricCatalog.listForMatching(),
@@ -297,13 +315,13 @@ export class LocalConversationOwnerAssembly {
     const admitLocalTurn: LocalConversationOwnerPort["admitTurn"] = async (
       turn,
     ) => {
-      this.#assertConversationWritable(turn.conversationId);
       const releaseCommand = this.#beginCommand();
       let settle!: (result: ProjectedSessionTurnResult) => void;
       const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
         settle = resolve;
       });
       try {
+        await this.#assertConversationCurrent(turn.conversationId);
         const admission = await this.#manager.admitTurn({
           conversationId: turn.conversationId,
           exists: () => this.#protocol.sessionExists(turn.conversationId),
@@ -399,20 +417,42 @@ export class LocalConversationOwnerAssembly {
         });
       },
       ensureSession: async (conversationId) => {
-        this.#assertConversationWritable(conversationId);
-        await this.#runCommand(() => this.#protocol.ensureSession(conversationId));
+        await this.#runCommand(async () => {
+          await this.#assertConversationCurrent(conversationId);
+          await this.#protocol.ensureSession(conversationId);
+        });
       },
-      listConversations: () => this.#protocol.listSessions(),
+      listConversations: async () => {
+        const current: string[] = [];
+        for (const conversationId of await this.#protocol.listSessions()) {
+          if (await this.#isConversationCurrent(conversationId)) current.push(conversationId);
+        }
+        return current;
+      },
+      listConversationAuthorities: async () => {
+        const authorities: Array<{
+          readonly conversationId: string;
+          readonly authority: CurrentConversationAuthority;
+        }> = [];
+        for (const conversationId of await this.#protocol.listSessions()) {
+          authorities.push({
+            conversationId,
+            authority: await this.#currentAuthority(conversationId),
+          });
+        }
+        return authorities;
+      },
+      currentAuthority: (conversationId) => this.#currentAuthority(conversationId),
       mutateSession: async (conversationId, mutation, context) => {
-        this.#assertConversationWritable(conversationId);
-        return this.#runCommand(() =>
-          sessionState.mutate(conversationId, mutation, context)
-        );
+        return this.#runCommand(async () => {
+          await this.#assertConversationCurrent(conversationId);
+          return sessionState.mutate(conversationId, mutation, context);
+        });
       },
       cancelTurns: async (input) => {
-        this.#assertConversationWritable(input.conversationId);
-        await this.#runCommand(() =>
-          this.#manager.cancelDurableRuns({
+        await this.#runCommand(async () => {
+          await this.#assertConversationCurrent(input.conversationId);
+          await this.#manager.cancelDurableRuns({
             conversationId: input.conversationId,
             requestId: input.requestId,
             principal: {
@@ -420,8 +460,8 @@ export class LocalConversationOwnerAssembly {
               deviceId: this.#owner.deviceId,
               connectionId: "local-owner-internal",
             },
-          })
-        );
+          });
+        });
       },
       runTurn: async (input) => {
         const admitted = await admitLocalTurn({
@@ -435,40 +475,65 @@ export class LocalConversationOwnerAssembly {
       },
       admitTurn: admitLocalTurn,
       answerInteractionWithTicket: async (input) => {
-        await this.#runCommand(() =>
-          interactions.answerInteractionWithTicket(input)
-        );
+        await this.#runCommand(async () => {
+          await this.#assertConversationCurrent(
+            this.#protocol.conversationIdForAssignment(input.assignmentId),
+          );
+          await interactions.answerInteractionWithTicket(input);
+        });
       },
       resolveNoInteractiveSurface: async (input) => {
-        await this.#runCommand(() =>
-          interactions.resolveNoInteractiveSurface(input)
-        );
+        await this.#runCommand(async () => {
+          await this.#assertConversationCurrent(
+            this.#protocol.conversationIdForAssignment(input.assignmentId),
+          );
+          await interactions.resolveNoInteractiveSurface(input);
+        });
       },
       deferSchedule: (schedule) =>
-        this.#runCommand(() => {
-          this.#assertConversationWritable(schedule.conversationId);
+        this.#runCommand(async () => {
+          await this.#assertConversationCurrent(schedule.conversationId);
           return input.scheduleIntents.record(schedule);
         }),
       listDeferredIntents: (conversationId) =>
-        this.#runCommand(() =>
-          this.#intents.list(
+        this.#runCommand(async () => {
+          await this.#assertConversationCurrent(conversationId);
+          return this.#intents.list(
             conversationId,
             hostContext("local-intent-list"),
-          )
-        ),
+          );
+        }),
       discardDeferredIntent: (intentId) =>
-        this.#runCommand(() =>
-          this.#intents.decide(
+        this.#runCommand(async () => {
+          await this.#assertConversationCurrent(
+            await this.#intents.locateConversation(intentId),
+          );
+          return this.#intents.decide(
             intentId,
             "discarded",
             hostContext("local-intent-discard"),
-          )
-        ),
+          );
+        }),
       sessionState: sessionReadPort,
-      statusHistory: (requests) => this.#protocol.statusHistory(requests),
-      finalHistory: (conversationId, afterCommitRevision) =>
-        this.#protocol.finalHistory(conversationId, afterCommitRevision),
-      pendingInteractions: () => interactions.pendingInteractions(),
+      statusHistory: async (requests) => {
+        for (const request of requests) {
+          await this.#assertConversationCurrent(request.conversationId);
+        }
+        return this.#protocol.statusHistory(requests);
+      },
+      finalHistory: async (conversationId, afterCommitRevision) => {
+        await this.#assertConversationCurrent(conversationId);
+        return this.#protocol.finalHistory(conversationId, afterCommitRevision);
+      },
+      pendingInteractions: async () => {
+        const pending = await interactions.pendingInteractions();
+        const visible: (typeof pending)[number][] = [];
+        for (const item of pending) {
+          const conversationId = this.#protocol.conversationIdForAssignment(item.assignmentId);
+          if (await this.#isConversationCurrent(conversationId)) visible.push(item);
+        }
+        return visible;
+      },
       rubricCatalog: rubricReadPort,
     });
   }
@@ -734,6 +799,7 @@ export class LocalConversationOwnerAssembly {
     if (this.#state === "closed") return;
     const neverStarted = !this.#started;
     this.#state = "closing";
+    this.#transferAbort.abort(new Error("Local conversation transfer source is stopping"));
     this.#protocol.beginShutdownDrain();
     const starting = this.#starting;
     if (starting) await starting.catch(() => {});
@@ -816,10 +882,39 @@ export class LocalConversationOwnerAssembly {
     return { deviceId: this.#owner.deviceId, ownerEpoch: this.#owner.ownerEpoch };
   }
 
-  #assertConversationWritable(conversationId: string): void {
-    if (this.#transferringConversations.has(conversationId)) {
-      throw new Error("Conversation is being moved to the always-on device");
+  async transferCandidates(): Promise<readonly string[]> {
+    const candidates: string[] = [];
+    for (const { conversationId, authority } of await this.#port.listConversationAuthorities()) {
+      if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
+        candidates.push(conversationId);
+      }
     }
+    return candidates;
+  }
+
+  async #assertConversationCurrent(conversationId: string): Promise<void> {
+    if (!(await this.#isConversationCurrent(conversationId))) {
+      throw new Error("Conversation is available on the always-on device");
+    }
+  }
+
+  async #isConversationCurrent(conversationId: string): Promise<boolean> {
+    const authority = await this.#currentAuthority(conversationId);
+    return (
+      !this.#transferringConversations.has(conversationId) &&
+      authority.state === "current" &&
+      authority.deviceId === this.#owner.deviceId &&
+      authority.ownerEpoch === this.#owner.ownerEpoch
+    );
+  }
+
+  #currentAuthority(conversationId: string): Promise<CurrentConversationAuthority> {
+    return resolveCurrentConversationAuthority(
+      this.#owner.executorLog,
+      this.#owner.verifier,
+      conversationId,
+      { deviceId: this.#owner.deviceId, ownerEpoch: this.#owner.ownerEpoch },
+    );
   }
 
   #requireReady(): void {
