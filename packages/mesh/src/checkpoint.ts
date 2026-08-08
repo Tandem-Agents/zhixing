@@ -1,4 +1,5 @@
 import {
+  createHash,
   createCipheriv,
   createDecipheriv,
   diffieHellman,
@@ -80,6 +81,35 @@ export interface OpenedFullAuthorityCheckpoint {
 /** Creates the canonical identifier used by a newly prepared checkpoint. */
 export function createCheckpointId(now = Date.now()): string {
   return createUlid(now);
+}
+
+const CHECKPOINT_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+export function deriveCheckpointId(identity: string, time: number): string {
+  if (identity.length === 0 || !Number.isFinite(time) || time < 0) {
+    throw new TypeError("Checkpoint identity is invalid");
+  }
+  const bytes = createHash("sha256").update(identity).digest();
+  let timestamp = Math.floor(time);
+  let head = "";
+  for (let index = 0; index < 10; index += 1) {
+    head = CHECKPOINT_BASE32[timestamp % 32]! + head;
+    timestamp = Math.floor(timestamp / 32);
+  }
+  let tail = "";
+  let bits = 0;
+  let bitCount = 0;
+  for (const byte of bytes) {
+    bits = (bits << 8) | byte;
+    bitCount += 8;
+    while (bitCount >= 5 && tail.length < 16) {
+      bitCount -= 5;
+      tail += CHECKPOINT_BASE32[(bits >>> bitCount) & 31]!;
+      bits &= (1 << bitCount) - 1;
+    }
+    if (tail.length === 16) break;
+  }
+  return `${head}${tail}`;
 }
 
 export function createRootActivationCheckpoint(input: {
@@ -277,58 +307,80 @@ export function openFullAuthorityCheckpoint(input: {
   recoveryRoot: RecoveryRoot;
   issuer: DeviceIdentity;
 }): OpenedFullAuthorityCheckpoint {
-  const opened = openCheckpoint(input);
-  let assembledBody: Buffer | undefined;
+  let verificationNonce: Buffer | undefined;
+  let payload: FullAuthorityCheckpointPayload | undefined;
+  let declaredContents: Buffer[] | undefined;
+  let contentIndex = 0;
+  let contentOffset = 0;
   try {
-    const header = opened.plaintextChunks[0];
-    if (!header) throw new TypeError("Full checkpoint payload header is missing");
-    const text = header.toString("utf8");
-    const value = JSON.parse(text) as unknown;
-    if (canonicalize(value) !== text) {
-      throw new TypeError("Full checkpoint payload header is not canonical");
+    const opened = visitCheckpointPlaintext(input, (seq, plaintext) => {
+      if (seq === 0) {
+        const text = plaintext.toString("utf8");
+        const value = JSON.parse(text) as unknown;
+        if (canonicalize(value) !== text) {
+          throw new TypeError("Full checkpoint payload header is not canonical");
+        }
+        assertFullAuthorityCheckpointPayload(value);
+        const envelope = input.package.envelope;
+        if (
+          value.checkpointId !== envelope.checkpointId ||
+          value.createdAt !== envelope.createdAt ||
+          value.recipientKeyId !== envelope.recipientKeyId ||
+          value.source.lsn !== envelope.manifest.upToLsn ||
+          canonicalize(value.purpose) !== canonicalize(envelope.manifest.purpose) ||
+          canonicalize(value.coverage.classes) !== canonicalize(envelope.manifest.scope)
+        ) {
+          throw new TypeError("Full checkpoint payload is not bound to its envelope");
+        }
+        payload = value;
+        declaredContents = [
+          ...value.records.pages.map((descriptor) => Buffer.allocUnsafe(descriptor.bytes)),
+          ...value.retainedArtifacts.entries.map((descriptor) => Buffer.allocUnsafe(descriptor.bytes)),
+        ];
+        return;
+      }
+      if (!declaredContents) throw new TypeError("Full checkpoint payload header is missing");
+      let sourceOffset = 0;
+      while (sourceOffset < plaintext.byteLength) {
+        while (declaredContents[contentIndex]?.byteLength === contentOffset) {
+          contentIndex += 1;
+          contentOffset = 0;
+        }
+        const content = declaredContents[contentIndex];
+        if (!content) throw new TypeError("Full checkpoint plaintext contains undeclared bytes");
+        const take = Math.min(
+          plaintext.byteLength - sourceOffset,
+          content.byteLength - contentOffset,
+        );
+        plaintext.copy(content, contentOffset, sourceOffset, sourceOffset + take);
+        sourceOffset += take;
+        contentOffset += take;
+      }
+    });
+    verificationNonce = opened.verificationNonce;
+    if (!payload || !declaredContents) {
+      throw new TypeError("Full checkpoint payload header is missing");
     }
-    assertFullAuthorityCheckpointPayload(value);
-    const payload = value;
-    const envelope = input.package.envelope;
-    if (
-      payload.checkpointId !== envelope.checkpointId ||
-      payload.createdAt !== envelope.createdAt ||
-      payload.recipientKeyId !== envelope.recipientKeyId ||
-      payload.source.lsn !== envelope.manifest.upToLsn ||
-      canonicalize(payload.purpose) !== canonicalize(envelope.manifest.purpose) ||
-      canonicalize(payload.coverage.classes) !== canonicalize(envelope.manifest.scope)
-    ) {
-      throw new TypeError("Full checkpoint payload is not bound to its envelope");
+    while (declaredContents[contentIndex]?.byteLength === contentOffset) {
+      contentIndex += 1;
+      contentOffset = 0;
     }
-    const body = Buffer.concat(opened.plaintextChunks.slice(1));
-    assembledBody = body;
-    const recordPages: Buffer[] = [];
-    const retainedArtifacts: Buffer[] = [];
-    let offset = 0;
-    for (const descriptor of payload.records.pages) {
-      recordPages.push(Buffer.from(body.subarray(offset, offset + descriptor.bytes)));
-      offset += descriptor.bytes;
+    if (contentIndex !== declaredContents.length || contentOffset !== 0) {
+      throw new TypeError("Full checkpoint plaintext is truncated");
     }
-    for (const descriptor of payload.retainedArtifacts.entries) {
-      retainedArtifacts.push(Buffer.from(body.subarray(offset, offset + descriptor.bytes)));
-      offset += descriptor.bytes;
-    }
-    if (offset !== body.byteLength) {
-      throw new TypeError("Full checkpoint plaintext contains undeclared bytes");
-    }
+    const recordPages = declaredContents.slice(0, payload.records.pages.length);
+    const retainedArtifacts = declaredContents.slice(payload.records.pages.length);
     verifyFullPayloadContent(payload, recordPages, retainedArtifacts);
-    body.fill(0);
-    assembledBody = undefined;
-    for (const chunk of opened.plaintextChunks) chunk.fill(0);
+    declaredContents = undefined;
     return {
-      verificationNonce: opened.verificationNonce,
+      verificationNonce,
       payload,
       recordPages: Object.freeze(recordPages),
       retainedArtifacts: Object.freeze(retainedArtifacts),
     };
   } catch (error) {
-    assembledBody?.fill(0);
-    clearOpened(opened);
+    for (const content of declaredContents ?? []) content.fill(0);
+    verificationNonce?.fill(0);
     throw error;
   }
 }
@@ -338,6 +390,26 @@ function openCheckpoint(input: {
   recoveryRoot: RecoveryRoot;
   issuer: DeviceIdentity;
 }): { verificationNonce: Buffer; plaintextChunks: readonly Buffer[] } {
+  const plaintextChunks: Buffer[] = [];
+  try {
+    const opened = visitCheckpointPlaintext(input, (_seq, plaintext) => {
+      plaintextChunks.push(Buffer.from(plaintext));
+    });
+    return { verificationNonce: opened.verificationNonce, plaintextChunks: Object.freeze(plaintextChunks) };
+  } catch (error) {
+    for (const plaintext of plaintextChunks) plaintext.fill(0);
+    throw error;
+  }
+}
+
+function visitCheckpointPlaintext(
+  input: {
+    package: CheckpointPackage;
+    recoveryRoot: RecoveryRoot;
+    issuer: DeviceIdentity;
+  },
+  visitor: (seq: number, plaintext: Buffer) => void,
+): { verificationNonce: Buffer } {
   const { envelope } = input.package;
   assertEnvelopeShape(envelope);
   const identity = input.recoveryRoot.publicIdentity();
@@ -381,7 +453,7 @@ function openCheckpoint(input: {
       decodeCanonicalBase64Url(envelope.wrappedDek, "Wrapped checkpoint DEK"),
     );
     if (dek.byteLength !== 32) throw new TypeError("Checkpoint DEK has an invalid length");
-    const plaintextChunks: Buffer[] = [];
+    let verificationNonce: Buffer | undefined;
     try {
       for (let expectedSeq = 0; expectedSeq < envelope.chunks.length; expectedSeq += 1) {
         const descriptor = envelope.chunks[expectedSeq]!;
@@ -396,35 +468,41 @@ function openCheckpoint(input: {
         ) {
           throw new TypeError("Checkpoint chunk content does not match its manifest");
         }
-        plaintextChunks.push(
-          decryptAead(
-            dek,
-            chunkNonce(nonceBase, descriptor.seq),
-            checkpointAad(envelope.checkpointId, envelope.recipientKeyId, purpose, descriptor.seq),
-            Buffer.from(chunk.bytes),
-          ),
+        const plaintext = decryptAead(
+          dek,
+          chunkNonce(nonceBase, descriptor.seq),
+          checkpointAad(envelope.checkpointId, envelope.recipientKeyId, purpose, descriptor.seq),
+          Buffer.from(chunk.bytes),
         );
+        try {
+          if (expectedSeq === 0) {
+            if (
+              plaintext.byteLength < VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES ||
+              !plaintext.subarray(0, VERIFICATION_HEADER.byteLength).equals(VERIFICATION_HEADER)
+            ) {
+              throw new TypeError("Checkpoint verification nonce header is missing");
+            }
+            verificationNonce = Buffer.from(
+              plaintext.subarray(
+                VERIFICATION_HEADER.byteLength,
+                VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES,
+              ),
+            );
+            visitor(
+              expectedSeq,
+              plaintext.subarray(VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES),
+            );
+          } else {
+            visitor(expectedSeq, plaintext);
+          }
+        } finally {
+          plaintext.fill(0);
+        }
       }
-      const first = plaintextChunks[0]!;
-      if (
-        first.byteLength < VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES ||
-        !first.subarray(0, VERIFICATION_HEADER.byteLength).equals(VERIFICATION_HEADER)
-      ) {
-        throw new TypeError("Checkpoint verification nonce header is missing");
-      }
-      const verificationNonce = Buffer.from(
-        first.subarray(
-          VERIFICATION_HEADER.byteLength,
-          VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES,
-        ),
-      );
-      plaintextChunks[0] = Buffer.from(
-        first.subarray(VERIFICATION_HEADER.byteLength + VERIFICATION_NONCE_BYTES),
-      );
-      first.fill(0);
-      return { verificationNonce, plaintextChunks: Object.freeze(plaintextChunks) };
+      if (!verificationNonce) throw new TypeError("Checkpoint verification nonce header is missing");
+      return { verificationNonce };
     } catch (error) {
-      for (const plaintext of plaintextChunks) plaintext.fill(0);
+      verificationNonce?.fill(0);
       throw error;
     }
   } finally {

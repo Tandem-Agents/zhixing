@@ -829,6 +829,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/backup-runtime-owner.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/mesh/src/checkpoint-owner.ts",
+    "packages/mesh/src/paired-checkpoint-target.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -865,6 +867,34 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
       (text) => text.replace("return new PairedRecoveryCheckpointTarget({", "return new UnboundedTarget({"),
     )).join("\n"),
     /onboarding checkpoint must precede business enrollment/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/mesh/src/checkpoint-owner.ts",
+      (text) => text.replace('Object.freeze(["daily", "forced"])', 'Object.freeze(["daily", "daily"])'),
+    )).join("\n"),
+    /recovery owner descriptor exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/mesh/src/checkpoint-owner.ts",
+      (text) => text.replace("RECOVERY_CHECKPOINT_OWNER_DESCRIPTOR.phases", "[].phases"),
+    )).join("\n"),
+    /recovery owner descriptor exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/mesh/src/paired-checkpoint-target.ts",
+      (text) => text.replace('owner: "paired-target"', 'owner: "current-anchor"'),
+    )).join("\n"),
+    /paired receiver descriptor exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/mesh/src/paired-checkpoint-target.ts",
+      (text) => text.replace('    "checkpoint.retire",\n  ]),', '    "checkpoint.retire",\n    "checkpoint.extra",\n  ]),'),
+    )).join("\n"),
+    /paired receiver descriptor exact-set or production binding drifted/,
   );
 });
 

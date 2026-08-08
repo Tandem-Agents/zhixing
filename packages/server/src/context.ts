@@ -214,7 +214,9 @@ export interface ServerContext {
   hostInfo?: { workspace?: string; logPath?: string };
   /** 用户级恢复备份状态；不暴露 root、日志水位或摘要。 */
   recoveryBackupStatus?: () => Promise<{
-    state: "not-configured" | "pending-verification" | "recoverable";
+    state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
+    fullBackupReady: boolean;
+    nextAction?: string;
   }>;
   /**
    * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。

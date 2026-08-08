@@ -535,6 +535,24 @@ export interface RecoveryCheckpointVerification
   signature: Signature;
 }
 
+export interface RecoveryCheckpointGeneration {
+  rootKeyId: string;
+  recipientKeyId: string;
+  trustChainHead: { seq: number; eventDigest: Digest };
+  targetId: string;
+}
+
+export type RecoveryCheckpointRequest =
+  | { kind: "daily"; day: string }
+  | { kind: "forced"; requestId: string };
+
+export interface RecoveryCheckpointSource {
+  logId: string;
+  lsn: number;
+  frameEndOffset: number;
+  prefixDigest: Digest;
+}
+
 export type CheckpointStreamRecord =
   | {
       t: "checkpoint-created";
@@ -546,6 +564,10 @@ export type CheckpointStreamRecord =
       envelopeDigest: Digest;
       /** Full checkpoints bind their durable destination; legacy S2 records omit it. */
       targetId?: string;
+      /** Current full checkpoints bind one exact root/chain/target generation and source prefix. */
+      generation?: RecoveryCheckpointGeneration;
+      request?: RecoveryCheckpointRequest;
+      source?: RecoveryCheckpointSource;
     }
   | {
       t: "checkpoint-replicated";
@@ -579,6 +601,14 @@ export type CheckpointStreamRecord =
       t: "checkpoint-superseded";
       checkpointId: Ulid;
       supersededBy: Ulid;
+      at: IsoTime;
+    }
+  | {
+      t: "checkpoint-cleanup-progress";
+      checkpointId: Ulid;
+      supersededBy: Ulid;
+      targetId: string;
+      phase: "target-retired" | "local-released";
       at: IsoTime;
     };
 

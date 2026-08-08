@@ -1,7 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces, hostname, platform } from "node:os";
 import { connect, createServer, type Server, type Socket } from "node:net";
-import { createInterface } from "node:readline/promises";
 import {
   getZhixingHome,
 } from "@zhixing/core";
@@ -38,6 +37,7 @@ import {
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import {
   FilePairedCheckpointStaging,
+  decodePairedCheckpointResult,
   PairedCheckpointReceiver,
   PairedRecoveryCheckpointTarget,
   type PairedCheckpointCommand,
@@ -84,6 +84,7 @@ import { createStdoutWriter } from "../screen/index.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
+import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import {
   FileMeshPairingContinuationStore,
   type DurablePairingInvitation,
@@ -258,19 +259,22 @@ export async function activateInitialRecoveryRoot(input: {
   const recoveryPackage = recoveryRoot ? encodeRecoveryPackage(recoveryRoot) : "";
   if (recoveryPackage) input.writeLine(`Recovery package: ${recoveryPackage}`);
   else input.writeLine("Resume recovery activation with the recovery package saved earlier.");
-  const confirm = input.confirmRecoveryPackage ?? promptRecoveryPackage;
-  const decoded = decodeRecoveryPackage(await confirm(recoveryPackage));
+  const decoded = input.confirmRecoveryPackage
+    ? decodeRecoveryPackage(await input.confirmRecoveryPackage(recoveryPackage))
+    : await readRecoveryPackageFromTty({
+        prompt: "Save the recovery package independently, then paste the complete package to verify it: ",
+      });
   const candidateRoot = decoded.root;
   if (pending && (
     pending.plan.rootEvent.body.backupPublicKey !== candidateRoot.backupPublicKey ||
     pending.plan.rootEvent.body.rootPublicKey !== candidateRoot.rootPublicKey
   )) throw new Error("Recovery package does not match the pending root activation");
-  if (recoveryRoot && (
+  if (recoveryRoot && !decoded.legacyCheckpoint && (
     recoveryRoot.backupPublicKey !== candidateRoot.backupPublicKey ||
     recoveryRoot.rootPublicKey !== candidateRoot.rootPublicKey
   )) throw new Error("Recovery package read-back does not match the generated recovery root");
   const createdAt = pending?.checkpoint.envelope.createdAt ?? new Date().toISOString();
-  const plan = pending?.plan ?? {
+  const generatedPlan = {
     v: 1 as const,
     kind: "establish" as const,
     rootEvent: createRecoveryRootEvent({
@@ -281,9 +285,14 @@ export async function activateInitialRecoveryRoot(input: {
       at: createdAt,
     }),
   };
+  const legacyPurpose = decoded.legacyCheckpoint?.envelope.manifest.purpose;
+  if (legacyPurpose && legacyPurpose.kind !== "root-activation") {
+    throw new Error("Legacy recovery package does not contain a root activation plan");
+  }
+  const plan = pending?.plan ?? (legacyPurpose?.kind === "root-activation" ? legacyPurpose.plan : generatedPlan);
   const trust = await input.store.loadTrustRecord();
   if (!trust) throw new Error("Recovery activation requires the local home trust record");
-  const checkpoint = pending?.checkpoint ?? (await captureFullAuthorityCheckpoint({
+  const checkpoint = pending?.checkpoint ?? decoded.legacyCheckpoint ?? (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
     purpose: { kind: "root-activation", plan },
@@ -294,6 +303,7 @@ export async function activateInitialRecoveryRoot(input: {
     recipient: candidateRoot.publicIdentity(),
     log: input.store.authorityLog(),
     artifacts: input.store.artifactStore(),
+    retention: input.store.checkpointRetention(),
   })).checkpoint;
   const target = await input.createTarget({
     checkpointId: checkpoint.envelope.checkpointId,
@@ -1165,7 +1175,7 @@ class PairingSocketCheckpointTransport implements PairedCheckpointTransport {
       throw new Error("Pairing target returned an invalid recovery checkpoint result");
     }
     assertObjectKeys(frame, ["result", "t"], "Recovery onboarding result");
-    return frame.result as unknown as PairedCheckpointResult;
+    return decodePairedCheckpointResult(frame.result);
   }
 }
 
@@ -1860,17 +1870,6 @@ function sessionKeyFromSecret(
     throw new Error("Pairing PAKE session key is invalid");
   }
   return decoded;
-}
-
-async function promptRecoveryPackage(_recoveryPackage: string): Promise<string> {
-  const prompt = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await prompt.question(
-      "Save the recovery package independently, then paste the complete package to verify it: ",
-    );
-  } finally {
-    prompt.close();
-  }
 }
 
 function createPairingResumeMessage(

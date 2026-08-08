@@ -1,6 +1,5 @@
 import { hostname, platform } from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline/promises";
 import { getZhixingHome } from "@zhixing/core";
 import type {
   DeviceIdentity,
@@ -34,6 +33,7 @@ import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
+import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 
 export interface BackupCommandOptions {
   readonly zhixingHome?: string;
@@ -82,7 +82,12 @@ export async function runBackupSetupCommand(
     return;
   }
   const service = createService(context, context.trust, target);
-  const checkpoint = await service.createAndReplicate();
+  const checkpoint = await service.createAndReplicate({
+    request: {
+      kind: "forced",
+      requestId: `backup-setup:${target.targetId}:${context.trust.chainHead.eventDigest}`,
+    },
+  });
   context.writeLine(`恢复备份已写入目标，仍需运行 zz backup verify 完成验证（${checkpoint.envelope.checkpointId}）。`);
 }
 
@@ -106,8 +111,7 @@ export async function runBackupVerifyCommand(options: BackupCommandOptions = {})
     const service = createService(context, context.trust, connection.target);
     const checkpointId = await service.verificationCandidate();
     if (!checkpointId) throw new Error("当前目标没有待验证的恢复备份");
-    const readPackage = options.readRecoveryPackage ?? promptRecoveryPackage;
-    const decoded = decodeRecoveryPackage(await readPackage());
+    const decoded = await readDecodedRecoveryPackage(options.readRecoveryPackage);
     await service.verify({ checkpointId, recoveryRoot: decoded.root });
     context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
   } finally {
@@ -217,13 +221,15 @@ async function establishInitialRoot(
   const root = RecoveryRoot.generate();
   const recoveryPackage = encodeRecoveryPackage(root);
   context.writeLine(`恢复包：${recoveryPackage}`);
-  const decoded = decodeRecoveryPackage(await (readRecoveryPackage ?? promptRecoveryPackage)());
+  const decoded = await readDecodedRecoveryPackage(readRecoveryPackage);
   if (
-    decoded.root.rootPublicKey !== root.rootPublicKey ||
-    decoded.root.backupPublicKey !== root.backupPublicKey
+    !decoded.legacyCheckpoint && (
+      decoded.root.rootPublicKey !== root.rootPublicKey ||
+      decoded.root.backupPublicKey !== root.backupPublicKey
+    )
   ) throw new Error("回读的恢复包与本次生成的恢复根不一致");
   const createdAt = new Date().toISOString();
-  const plan = {
+  const generatedPlan = {
     v: 1 as const,
     kind: "establish" as const,
     rootEvent: createRecoveryRootEvent({
@@ -234,23 +240,29 @@ async function establishInitialRoot(
       at: createdAt,
     }),
   };
+  const legacyPurpose = decoded.legacyCheckpoint?.envelope.manifest.purpose;
+  if (legacyPurpose && legacyPurpose.kind !== "root-activation") {
+    throw new Error("旧版恢复包不包含恢复根激活计划");
+  }
+  const plan = legacyPurpose?.kind === "root-activation" ? legacyPurpose.plan : generatedPlan;
   const issuer = checkpointIssuer(context.identity, context.key);
-  const captured = await captureFullAuthorityCheckpoint({
+  const checkpoint = decoded.legacyCheckpoint ?? (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
     purpose: { kind: "root-activation", plan },
     trust: context.trust,
     issuer,
-    recipient: root.publicIdentity(),
+    recipient: decoded.root.publicIdentity(),
     log: context.store.authorityLog(),
     artifacts: context.store.artifactStore(),
+    retention: context.store.checkpointRetention(),
     storageMaintenance: context.capacity.storage,
-  });
+  })).checkpoint;
   await new RecoveryActivationCoordinator(context.store.bootstrapAuthority()).activatePrepared({
     current: context.projection,
     plan,
-    checkpoint: captured.checkpoint,
-    candidateRoot: root,
+    checkpoint,
+    candidateRoot: decoded.root,
     issuerIdentity: context.identity,
     target,
     sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
@@ -271,6 +283,7 @@ function createService(
   return new AuthorityCheckpointService({
     log: context.store.authorityLog(),
     artifacts: context.store.artifactStore(),
+    retention: context.store.checkpointRetention(),
     target,
     trust,
     issuer: checkpointIssuer(context.identity, context.key),
@@ -366,16 +379,10 @@ async function sourceDevice(store: FileMeshBootstrapStore): Promise<string> {
   return String((await store.authorityLog().originCheckpoint()).logId);
 }
 
-async function promptRecoveryPackage(): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("恢复包只能通过交互式保密输入提供");
-  }
-  const prompt = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await prompt.question("请输入恢复包以完成真实回读验证：");
-  } finally {
-    prompt.close();
-  }
+async function readDecodedRecoveryPackage(
+  injected?: () => Promise<string>,
+): Promise<ReturnType<typeof decodeRecoveryPackage>> {
+  return injected ? decodeRecoveryPackage(await injected()) : readRecoveryPackageFromTty();
 }
 
 function devicePlatform(): "linux" | "windows" | "macos" | "headless" {

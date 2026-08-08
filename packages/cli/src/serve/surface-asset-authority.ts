@@ -13,6 +13,7 @@ import {
   surfaceAssetRequestKey,
   validateAdmittedControlEnvelope,
   type DurableLogCheckpoint,
+  type ArtifactCheckpointRetentionPort,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
   type DurableProjectionSource,
@@ -58,9 +59,13 @@ export interface CreateSurfaceAssetAuthorityOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
 }
 
+export type SurfaceAssetAuthority = SurfaceAssetCoordinator & {
+  readonly checkpointRetention: ArtifactCheckpointRetentionPort;
+};
+
 export function createSurfaceAssetAuthority(
   options: CreateSurfaceAssetAuthorityOptions,
-): SurfaceAssetCoordinator {
+): SurfaceAssetAuthority {
   const temporaryArtifacts = new FileArtifactStore(
     path.join(options.authorityRoot, "surface-asset-temporary"),
   );
@@ -89,7 +94,7 @@ export function createSurfaceAssetAuthority(
     options.anchorEpoch,
     lifecycle,
   );
-  return SurfaceAssetCoordinator.forStore({
+  const coordinator = SurfaceAssetCoordinator.forStore({
     artifacts: options.artifacts,
     temporaryArtifacts,
     receiver,
@@ -117,6 +122,7 @@ export function createSurfaceAssetAuthority(
       : {}),
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  return Object.assign(coordinator, { checkpointRetention: lifecycle });
 }
 
 class SurfaceAssetProjection implements SurfaceAssetGrantLedger {

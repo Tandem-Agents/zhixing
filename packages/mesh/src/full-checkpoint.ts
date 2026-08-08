@@ -5,10 +5,14 @@ import type {
   DeviceIdentity,
   FullAuthorityCheckpointPayload,
   HomeTrustRecord,
+  LogicalRecord,
 } from "@zhixing/core/contracts";
 import {
-  collectArtifactRefs,
+  classifyRegisteredArtifactReferences,
+  classifyRetainedRecordReferences,
+  collectRegisteredArtifactRoots,
   type ArtifactStore,
+  type ArtifactCheckpointRetentionPort,
   type AuthorityCommitLog,
   type DurableLogCheckpoint,
 } from "@zhixing/core/authority";
@@ -28,7 +32,7 @@ import {
 } from "./checkpoint.js";
 
 const RECORD_PAGE_COMMITS = 64;
-const ARTIFACT_PARSE_BYTES = 8 * 1024 * 1024;
+const MAX_RETENTION_SNAPSHOT_ATTEMPTS = 4;
 const COVERAGE = Object.freeze([
   "global-authority",
   "conversation-authority",
@@ -37,7 +41,9 @@ const COVERAGE = Object.freeze([
 ] as const);
 
 export interface FullAuthorityCheckpointCaptureOptions {
-  readonly checkpointId: string;
+  readonly checkpointId?: string;
+  readonly checkpointIdForSource?: (source: DurableLogCheckpoint) => string;
+  readonly captureIdentity?: string;
   readonly createdAt: string;
   readonly purpose: CheckpointEnvelope["manifest"]["purpose"];
   readonly trust: HomeTrustRecord;
@@ -45,6 +51,7 @@ export interface FullAuthorityCheckpointCaptureOptions {
   readonly recipient: CheckpointRecipient;
   readonly log: AuthorityCommitLog;
   readonly artifacts: ArtifactStore;
+  readonly retention: ArtifactCheckpointRetentionPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly abort?: AbortSignal;
 }
@@ -58,11 +65,32 @@ export interface CapturedFullAuthorityCheckpoint {
 export async function captureFullAuthorityCheckpoint(
   input: FullAuthorityCheckpointCaptureOptions,
 ): Promise<CapturedFullAuthorityCheckpoint> {
+  for (let attempt = 0; attempt < MAX_RETENTION_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    try {
+      return await captureFullAuthorityCheckpointAttempt(input);
+    } catch (error) {
+      if (!(error instanceof RetentionSnapshotMoved)) throw error;
+    }
+  }
+  throw new Error("Artifact retention source changed repeatedly while capturing a checkpoint");
+}
+
+async function captureFullAuthorityCheckpointAttempt(
+  input: FullAuthorityCheckpointCaptureOptions,
+): Promise<CapturedFullAuthorityCheckpoint> {
   const abort = input.abort ?? new AbortController().signal;
   return runWithMaintenanceUrgency(() => "foreground", abort, async () => {
     throwIfAborted(abort);
-    const target = await runStep(input, "head", 1, () => input.log.checkpoint());
+    const retentionSnapshot = await runStep(input, "retention-heads", 1, () =>
+      input.retention.checkpointRetentionSnapshot(),
+    );
     const origin = await runStep(input, "origin", 1, () => input.log.originCheckpoint());
+    const target = retentionSnapshot.sourceHeads[origin.logId];
+    if (!target) throw new TypeError("Artifact retention snapshot does not contain the authority log");
+    if ((input.checkpointId === undefined) === (input.checkpointIdForSource === undefined)) {
+      throw new TypeError("Authority checkpoint capture requires exactly one checkpoint identity source");
+    }
+    const checkpointId = input.checkpointId ?? input.checkpointIdForSource!(cloneCheckpoint(target));
     if (origin.logId !== target.logId || origin.lsn > target.lsn) {
       throw new TypeError("Authority checkpoint source has an invalid origin");
     }
@@ -70,6 +98,7 @@ export async function captureFullAuthorityCheckpoint(
     const recordPages: Buffer[] = [];
     const pageDescriptors: FullAuthorityCheckpointPayload["records"]["pages"][number][] = [];
     const retained = new Map<string, ArtifactRef>();
+    const classifiedRoots = new Set<string>();
     let cursor = origin;
     let recordCount = 0;
 
@@ -104,7 +133,7 @@ export async function captureFullAuthorityCheckpoint(
       });
       recordPages.push(bytes);
       recordCount += count;
-      collectRetainedRoots(page.commits, retained);
+      await collectRetainedCandidates(input, page.commits, retained, classifiedRoots);
       cursor = page.checkpoint;
     }
 
@@ -115,7 +144,11 @@ export async function captureFullAuthorityCheckpoint(
       await runStep(input, `verify:${target.lsn}`, 1024 * 1024, () => input.log.readEnvelopeAt(target));
     }
 
-    const retainedArtifacts = await collectArtifactClosure(input, retained, abort);
+    const retention = await runStep(input, "retention-filter", 1, () =>
+      input.retention.retainedAtCheckpoint(retentionSnapshot, [...retained.values()]),
+    );
+    if (retention.status !== "current") throw new RetentionSnapshotMoved();
+    const retainedArtifacts = [...retention.retained].sort(compareRefs);
     const retainedBytes = await Promise.all(
       retainedArtifacts.map((ref, index) =>
         runStep(input, `artifact-final:${index}:${ref.digest}`, ref.bytes, () => input.artifacts.get(ref)),
@@ -136,7 +169,7 @@ export async function captureFullAuthorityCheckpoint(
 
     const payload: FullAuthorityCheckpointPayload = {
       v: 1,
-      checkpointId: input.checkpointId,
+      checkpointId,
       createdAt: input.createdAt,
       homeId: input.trust.homeId,
       issuer: { deviceId: input.issuer.deviceId, keyId: input.issuer.deviceId },
@@ -174,52 +207,40 @@ export async function captureFullAuthorityCheckpoint(
   });
 }
 
-function collectRetainedRoots(
+async function collectRetainedCandidates(
+  input: FullAuthorityCheckpointCaptureOptions,
   commits: readonly CommitEnvelope<unknown>[],
   retained: Map<string, ArtifactRef>,
-): void {
+  classifiedRoots: Set<string>,
+): Promise<void> {
   for (const commit of commits) {
     for (const entry of commit.entries) {
       if (entry.stream === "checkpoint") continue;
-      for (const ref of collectArtifactRefs(entry.body)) addRef(retained, ref);
+      const record = entry as LogicalRecord<unknown>;
+      addClassifiedReferences(retained, classifyRetainedRecordReferences(record));
+      for (const root of collectRegisteredArtifactRoots([record])) {
+        addRef(retained, root.ref);
+        const identity = `${root.schema}:${root.ref.digest}`;
+        if (classifiedRoots.has(identity)) continue;
+        classifiedRoots.add(identity);
+        const bytes = await runStep(input, `artifact-root:${identity}`, root.ref.bytes, () =>
+          input.artifacts.get(root.ref),
+        );
+        if (bytes.byteLength !== root.ref.bytes || byteDigest(bytes) !== root.ref.digest) {
+          throw new TypeError("Authority checkpoint registered artifact content is corrupt");
+        }
+        addClassifiedReferences(retained, classifyRegisteredArtifactReferences(root, bytes));
+      }
     }
   }
 }
 
-async function collectArtifactClosure(
-  input: FullAuthorityCheckpointCaptureOptions,
-  roots: Map<string, ArtifactRef>,
-  abort: AbortSignal,
-): Promise<ArtifactRef[]> {
-  const queue = [...roots.values()];
-  for (let index = 0; index < queue.length; index += 1) {
-    throwIfAborted(abort);
-    const ref = queue[index]!;
-    const bytes = await runStep(input, `artifact:${index}:${ref.digest}`, ref.bytes, () =>
-      input.artifacts.get(ref),
-    );
-    if (bytes.byteLength !== ref.bytes || byteDigest(bytes) !== ref.digest) {
-      throw new TypeError("Authority checkpoint artifact content is corrupt");
-    }
-    if (bytes.byteLength > ARTIFACT_PARSE_BYTES) continue;
-    const nested = parseCanonicalObject(bytes);
-    if (nested === undefined) continue;
-    for (const child of collectArtifactRefs(nested)) {
-      if (addRef(roots, child)) queue.push(child);
-    }
-  }
-  return [...roots.values()].sort(compareRefs);
-}
-
-function parseCanonicalObject(bytes: Uint8Array): unknown | undefined {
-  const text = Buffer.from(bytes).toString("utf8");
-  let value: unknown;
-  try {
-    value = JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-  return canonicalize(value) === text ? value : undefined;
+function addClassifiedReferences(
+  retained: Map<string, ArtifactRef>,
+  classified: ReturnType<typeof classifyRetainedRecordReferences>,
+): void {
+  for (const ref of classified.unconditional) addRef(retained, ref);
+  for (const leaf of classified.conversationLeaves) addRef(retained, leaf.ref);
 }
 
 function addRef(target: Map<string, ArtifactRef>, ref: ArtifactRef): boolean {
@@ -256,7 +277,7 @@ async function runStep<T>(
     storageMaintenanceRequest(
       "authority-checkpoint",
       input.trust.homeId,
-      { checkpointId: input.checkpointId, identity, bytes },
+      { checkpointId: input.checkpointId ?? input.captureIdentity ?? "source-freeze", identity, bytes },
       { obligation: "pre-commit" },
     ),
     operation,
@@ -266,3 +287,5 @@ async function runStep<T>(
 function throwIfAborted(abort: AbortSignal): void {
   if (abort.aborted) throw abort.reason ?? new Error("Authority checkpoint capture was cancelled");
 }
+
+class RetentionSnapshotMoved extends Error {}

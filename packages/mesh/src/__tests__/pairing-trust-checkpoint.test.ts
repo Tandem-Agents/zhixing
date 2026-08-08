@@ -1554,5 +1554,7 @@ function checkpointRecordIdentity(record: CheckpointStreamRecord): string {
       return `${record.t}:${canonicalize(record)}`;
     case "checkpoint-superseded":
       return `${record.t}:${record.checkpointId}`;
+    case "checkpoint-cleanup-progress":
+      return `${record.t}:${record.checkpointId}:${record.targetId}:${record.phase}`;
   }
 }

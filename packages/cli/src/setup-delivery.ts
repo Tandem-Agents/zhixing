@@ -152,6 +152,7 @@ export interface AuthorityRuntimeStack {
   readonly artifacts: FileArtifactStore;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly surfaceAssets: SurfaceAssetCoordinator;
+  readonly checkpointRetention: import("@zhixing/core/authority").ArtifactCheckpointRetentionPort;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
   readonly localControlAdmission: ControlAdmissionJournal;
@@ -1665,6 +1666,11 @@ export async function setupAuthorityRuntime(
         if (!surfaceAssets)
           throw new Error("Anchor authority role is not enabled");
         return surfaceAssets;
+      },
+      get checkpointRetention() {
+        if (!surfaceAssets)
+          throw new Error("Anchor authority role is not enabled");
+        return surfaceAssets.checkpointRetention;
       },
       get participant() {
         if (!participant)

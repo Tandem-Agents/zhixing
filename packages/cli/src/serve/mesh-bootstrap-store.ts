@@ -12,10 +12,14 @@ import type {
   PairingStreamRecord,
   RecoveryActivationPlan,
 } from "@zhixing/core/contracts";
+import { MAX_SURFACE_ASSET_BYTES } from "@zhixing/core/contracts";
 import {
+  ArtifactLifecycleIndex,
   collectArtifactRefs,
   FileArtifactStore,
+  FileArtifactTemporaryPresenceStore,
   FileAuthorityCommitLog,
+  FileResumableArtifactReceiver,
 } from "@zhixing/core/authority";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
@@ -82,6 +86,7 @@ export class FileMeshBootstrapStore {
   readonly #endpointFile: string;
   readonly #peerFile: string;
   readonly #completionFile: string;
+  readonly #checkpointLifecycle: ArtifactLifecycleIndex;
   readonly #endpointWrites = new SerialTaskQueue();
 
   constructor(
@@ -96,12 +101,34 @@ export class FileMeshBootstrapStore {
       this.#artifacts,
       { storageMaintenance: options.storageMaintenance },
     );
+    const temporaryArtifacts = new FileArtifactStore(
+      path.join(distributedRoot, "surface-asset-temporary"),
+    );
+    const receiver = new FileResumableArtifactReceiver(
+      temporaryArtifacts,
+      path.join(distributedRoot, "surface-asset-partials"),
+      { maxArtifactBytes: MAX_SURFACE_ASSET_BYTES },
+    );
+    this.#checkpointLifecycle = new ArtifactLifecycleIndex({
+      rootDir: path.join(distributedRoot, "derived"),
+      logs: [this.#log],
+      artifacts: this.#artifacts,
+      temporaryArtifacts,
+      temporaryPresence: new FileArtifactTemporaryPresenceStore(
+        path.join(temporaryArtifacts.rootDir, ".presence"),
+        { storageMaintenance: options.storageMaintenance },
+      ),
+      receiver,
+      storageMaintenance: options.storageMaintenance,
+      maintenanceResourceId: this.#artifacts.rootDir,
+    });
     this.#endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
     this.#peerFile = path.join(distributedRoot, "mesh-peers.json");
     this.#completionFile = path.join(distributedRoot, "mesh-bootstrap-completions.json");
   }
 
   stopStorageMaintenance(): void {
+    this.#checkpointLifecycle.stopStorageMaintenance();
     this.#log.stopStorageMaintenance();
   }
 
@@ -111,6 +138,10 @@ export class FileMeshBootstrapStore {
 
   artifactStore(): FileArtifactStore {
     return this.#artifacts;
+  }
+
+  checkpointRetention(): ArtifactLifecycleIndex {
+    return this.#checkpointLifecycle;
   }
 
   async loadCheckpointRecords(): Promise<readonly CheckpointStreamRecord[]> {
@@ -885,6 +916,8 @@ function checkpointRecordIdentity(record: CheckpointStreamRecord): string {
     case "checkpoint-created":
     case "checkpoint-superseded":
       return `${record.t}:${record.checkpointId}`;
+    case "checkpoint-cleanup-progress":
+      return `${record.t}:${record.checkpointId}:${record.targetId}:${record.phase}`;
     case "checkpoint-replicated":
     case "checkpoint-verified":
       return `${record.t}:${record.checkpointId}:${record.targetId}`;

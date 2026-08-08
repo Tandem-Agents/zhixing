@@ -1,6 +1,12 @@
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type { CheckpointStreamRecord } from "@zhixing/core/contracts";
+import { canonicalize } from "@zhixing/core/protocol";
+import { projectRecoveryReadiness } from "@zhixing/mesh/bootstrap-authority";
+import { createRootActivationCheckpoint } from "@zhixing/mesh/checkpoint";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import { createRecoveryRootEvent } from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
@@ -150,6 +156,84 @@ describe("production mesh runtime bootstrap", () => {
       },
     })).rejects.toThrow("not authorized");
   });
+
+  it("replays a legacy trust-only checkpoint without claiming full backup readiness", async () => {
+    const root = await createTempDir("mesh-runtime-legacy-recovery");
+    const secrets = new MemorySecretStore();
+    const local = await prepareMeshRuntimeBootstrap({ zhixingHome: root, secretStore: secrets });
+    const identity = enrollDeviceIdentity(local.deviceKey, {
+      displayName: "legacy home anchor",
+      platform: "headless",
+      enrolledAt: "2026-08-08T00:00:00.000Z",
+    });
+    const initialized = await local.bootstrapStore.initializeLocalHome({
+      key: local.deviceKey,
+      identity,
+      roles: ["anchor", "executor"],
+    });
+    const legacyRoot = RecoveryRoot.generate();
+    const plan = {
+      v: 1 as const,
+      kind: "establish" as const,
+      rootEvent: createRecoveryRootEvent({
+        current: initialized.projection,
+        op: "establish",
+        candidate: legacyRoot,
+        outerSigner: local.deviceKey,
+        at: "2026-08-08T00:00:01.000Z",
+      }),
+    };
+    const legacyCheckpoint = createRootActivationCheckpoint({
+      checkpointId: "01J00000000000000000000020",
+      createdAt: "2026-08-08T00:00:01.000Z",
+      plan,
+      recoveryRoot: legacyRoot,
+      issuer: local.deviceKey,
+      scope: ["trust"],
+      domainRevisions: { trust: initialized.projection.chainHead.seq },
+      upToLsn: initialized.projection.chainHead.seq,
+      plaintextChunks: [Buffer.from("legacy trust checkpoint")],
+    });
+    const legacyPackage = `zxrp1:${Buffer.from(canonicalize({
+      checkpoint: {
+        chunks: legacyCheckpoint.chunks.map((chunk) => ({
+          seq: chunk.seq,
+          bytes: Buffer.from(chunk.bytes).toString("base64url"),
+        })),
+        envelope: legacyCheckpoint.envelope,
+      },
+      recoverySecret: legacyRoot.exportSecret(),
+      v: 1,
+    }), "utf8").toString("base64url")}`;
+    const activate = () => activateInitialRecoveryRoot({
+      store: local.bootstrapStore,
+      issuerKey: local.deviceKey,
+      issuerIdentity: identity,
+      current: initialized.projection,
+      targetId: "backup-device:legacy-recovery-target",
+      targetIndependenceDomain: "device:legacy-recovery-target",
+      createTarget: () => FileRecoveryCheckpointTarget.openPaired({
+        targetRoot: `${root}/legacy-recovery-target`,
+        targetDeviceId: "legacy-recovery-target",
+      }),
+      writeLine: () => undefined,
+      confirmRecoveryPackage: async () => legacyPackage,
+    });
+    const activated = await activate();
+    const replayed = await activate();
+    expect(replayed.chainHead).toEqual(activated.chainHead);
+    const records = await local.bootstrapStore.loadCheckpointRecords();
+    const createdRecords = records.filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> =>
+      record.t === "checkpoint-created");
+    const verifiedRecords = records.filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }> =>
+      record.t === "checkpoint-verified");
+    expect(projectRecoveryReadiness({
+      trust: activated,
+      createdRecords,
+      verifiedRecords,
+      checkpointEnvelopes: [legacyCheckpoint.envelope],
+    })).toMatchObject({ ready: true, fullBackupReady: false });
+  }, 120_000);
 });
 
 class MemorySecretStore implements SecretStorePort {

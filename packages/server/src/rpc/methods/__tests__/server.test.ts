@@ -379,10 +379,10 @@ describe("server.info", () => {
 
   it("只投影用户级恢复备份状态", async () => {
     const ctx = mkCtx({
-      recoveryBackupStatus: async () => ({ state: "recoverable" }),
+      recoveryBackupStatus: async () => ({ state: "recoverable", fullBackupReady: true }),
     });
     const result = await buildServerInfoMethod().handler({}, ctx) as any;
-    expect(result.recoveryBackup).toEqual({ state: "recoverable" });
+    expect(result.recoveryBackup).toEqual({ state: "recoverable", fullBackupReady: true });
     expect(JSON.stringify(result.recoveryBackup)).not.toMatch(/root|lsn|digest/iu);
   });
 

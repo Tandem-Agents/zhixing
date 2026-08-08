@@ -135,6 +135,90 @@ function sourceFile(relative, text) {
   return ts.createSourceFile(relative, text, ts.ScriptTarget.Latest, true);
 }
 
+function unwrapExpression(expression) {
+  let current = expression;
+  while (
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isParenthesizedExpression(current) ||
+    ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function frozenLiteralDescriptor(relative, text, name) {
+  const source = sourceFile(relative, text);
+  let declaration;
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    declaration = statement.declarationList.declarations.find(
+      (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === name,
+    );
+    if (declaration) break;
+  }
+  if (!declaration?.initializer) return undefined;
+  const initializer = unwrapExpression(declaration.initializer);
+  if (
+    !ts.isCallExpression(initializer) ||
+    initializer.expression.getText(source) !== "Object.freeze" ||
+    initializer.arguments.length !== 1
+  ) return undefined;
+  const object = unwrapExpression(initializer.arguments[0]);
+  if (!ts.isObjectLiteralExpression(object)) return undefined;
+  const result = {};
+  for (const property of object.properties) {
+    if (!ts.isPropertyAssignment(property)) return undefined;
+    const key = property.name.getText(source).replaceAll(/["']/g, "");
+    const value = unwrapExpression(property.initializer);
+    if (ts.isStringLiteralLike(value)) {
+      result[key] = value.text;
+      continue;
+    }
+    if (
+      ts.isCallExpression(value) &&
+      value.expression.getText(source) === "Object.freeze" &&
+      value.arguments.length === 1
+    ) {
+      const array = unwrapExpression(value.arguments[0]);
+      if (
+        !ts.isArrayLiteralExpression(array) ||
+        array.elements.some((element) => !ts.isStringLiteralLike(element))
+      ) return undefined;
+      result[key] = array.elements.map((element) => element.text);
+      continue;
+    }
+    return undefined;
+  }
+  return result;
+}
+
+function descriptorDrivesPhase(relative, text, descriptorName, inputText) {
+  const source = sourceFile(relative, text);
+  let found = false;
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "includes" &&
+      node.arguments.length === 1 &&
+      node.arguments[0].getText(source) === inputText
+    ) {
+      let usesDescriptor = false;
+      const findDescriptor = (child) => {
+        if (ts.isIdentifier(child) && child.text === descriptorName) usesDescriptor = true;
+        ts.forEachChild(child, findDescriptor);
+      };
+      findDescriptor(node.expression.expression);
+      if (usesDescriptor) found = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
 function resolveRelativeTypeScript(importer, specifier) {
   if (!specifier.startsWith(".")) return undefined;
   const resolved = path.posix.normalize(
@@ -793,7 +877,9 @@ export function inspectRecoveryBackupAssembly(records) {
   const owner = byPath.get("packages/cli/src/serve/backup-runtime-owner.ts");
   const runtime = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
-  if (!command || !owner || !runtime || !pairing) {
+  const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
+  const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
+  if (!command || !owner || !runtime || !pairing || !checkpointOwner || !pairedTarget) {
     return ["recovery backup production assembly sources are missing"];
   }
   const count = (text, token) => text.split(token).length - 1;
@@ -805,14 +891,72 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("packages/cli/src/serve/command.ts: recovery checkpoint owner must have one create/start/stop lifecycle");
   }
   for (const token of [
-    "trust.issuer.deviceId !== input.mesh.deviceKey.deviceId",
-    "new FileBackupTargetConfiguration(input.zhixingHome).load()",
+    "assertHomeAuthority(trust, input.mesh.deviceKey.deviceId)",
+    "assertHomeAuthority(trust, this.input.mesh.deviceKey.deviceId)",
+    "return new ConfiguredCheckpointOwnerSlot(input)",
+    "resolveTarget",
     "currentAnchor: true",
-    "return new AuthorityCheckpointOwner({",
   ]) {
     if (!owner.includes(token)) {
       failures.push(`packages/cli/src/serve/backup-runtime-owner.ts: missing owner boundary ${token}`);
     }
+  }
+  const ownerDescriptor = frozenLiteralDescriptor(
+    "packages/mesh/src/checkpoint-owner.ts",
+    checkpointOwner,
+    "RECOVERY_CHECKPOINT_OWNER_DESCRIPTOR",
+  );
+  const expectedOwnerDescriptor = {
+    owner: "current-anchor",
+    roles: ["single-machine", "anchor-executor"],
+    phases: ["daily", "forced"],
+    order: ["recover-pending", "create-replicate", "cleanup-expired"],
+  };
+  if (
+    JSON.stringify(ownerDescriptor) !== JSON.stringify(expectedOwnerDescriptor) ||
+    !descriptorDrivesPhase(
+      "packages/mesh/src/checkpoint-owner.ts",
+      checkpointOwner,
+      "RECOVERY_CHECKPOINT_OWNER_DESCRIPTOR",
+      "request.kind",
+    )
+  ) {
+    failures.push("packages/mesh/src/checkpoint-owner.ts: recovery owner descriptor exact-set or production binding drifted");
+  }
+  const receiverDescriptor = frozenLiteralDescriptor(
+    "packages/mesh/src/paired-checkpoint-target.ts",
+    pairedTarget,
+    "PAIRED_CHECKPOINT_RECEIVER_DESCRIPTOR",
+  );
+  const expectedReceiverDescriptor = {
+    owner: "paired-target",
+    roles: ["onboarding", "active"],
+    phases: [
+      "checkpoint.begin",
+      "checkpoint.progress",
+      "checkpoint.append",
+      "checkpoint.commit",
+      "checkpoint.get",
+      "checkpoint.range",
+      "checkpoint.retire",
+    ],
+    order: [
+      "checkpoint.begin",
+      "checkpoint.progress",
+      "checkpoint.append",
+      "checkpoint.commit",
+    ],
+  };
+  if (
+    JSON.stringify(receiverDescriptor) !== JSON.stringify(expectedReceiverDescriptor) ||
+    !descriptorDrivesPhase(
+      "packages/mesh/src/paired-checkpoint-target.ts",
+      pairedTarget,
+      "PAIRED_CHECKPOINT_RECEIVER_DESCRIPTOR",
+      "command.t",
+    )
+  ) {
+    failures.push("packages/mesh/src/paired-checkpoint-target.ts: paired receiver descriptor exact-set or production binding drifted");
   }
   if (
     count(runtime, "registerPairedCheckpointMeshService(") !== 1 ||

@@ -450,8 +450,8 @@ export interface RecoveryCheckpointTarget {
   readonly targetId: string;
   readonly independenceDomain: string;
   /** Resolves only after an idempotent checkpointId write is durable. */
-  writeDurable(checkpoint: CheckpointPackage): Promise<void>;
-  read(checkpointId: string): Promise<CheckpointPackage>;
+  writeDurable(checkpoint: CheckpointPackage, signal?: AbortSignal): Promise<void>;
+  read(checkpointId: string, signal?: AbortSignal): Promise<CheckpointPackage>;
 }
 
 export type RecoveryActivationStep =
@@ -847,6 +847,13 @@ export function projectRecoveryReadiness(input: {
         entry.digest === candidate.envelopeDigest);
       if (
         !created?.targetId ||
+        canonicalize(created.generation) !== canonicalize({
+          rootKeyId,
+          recipientKeyId: expectedKeyId,
+          trustChainHead: input.trust.chainHead,
+          targetId: created.targetId,
+        }) ||
+        !created.source || !created.request ||
         !envelope ||
         envelope.recipientKeyId !== expectedKeyId ||
         canonicalize(envelope.manifest.scope) !== canonicalize([

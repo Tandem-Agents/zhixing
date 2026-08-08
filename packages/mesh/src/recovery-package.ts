@@ -16,8 +16,10 @@ export function encodeRecoveryPackage(root: RecoveryRoot): string {
   return `zxrp2:${Buffer.from(canonicalize(payload), "utf8").toString("base64url")}`;
 }
 
-export function decodeRecoveryPackage(value: string): DecodedRecoveryPackage {
-  const trimmed = value.trim();
+export function decodeRecoveryPackage(value: string | Uint8Array): DecodedRecoveryPackage {
+  const trimmed = typeof value === "string"
+    ? value.trim()
+    : Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("utf8").trim();
   if (trimmed.startsWith("zxrp2:")) return decodeCurrent(trimmed.slice(6));
   if (trimmed.startsWith("zxrp1:")) return decodeLegacy(trimmed.slice(6));
   throw new TypeError("Recovery package has an unsupported format");
@@ -77,15 +79,19 @@ function decodeLegacy(encoded: string): DecodedRecoveryPackage {
 
 function decodeCanonicalPayload(encoded: string): unknown {
   const bytes = decodeCanonicalBase64(encoded, "Recovery package");
-  const text = bytes.toString("utf8");
-  let value: unknown;
   try {
-    value = JSON.parse(text) as unknown;
-  } catch {
-    throw new TypeError("Recovery package is not valid JSON");
+    const text = bytes.toString("utf8");
+    let value: unknown;
+    try {
+      value = JSON.parse(text) as unknown;
+    } catch {
+      throw new TypeError("Recovery package is not valid JSON");
+    }
+    if (canonicalize(value) !== text) throw new TypeError("Recovery package is not canonical");
+    return value;
+  } finally {
+    bytes.fill(0);
   }
-  if (canonicalize(value) !== text) throw new TypeError("Recovery package is not canonical");
-  return value;
 }
 
 function decodeCanonicalBase64(value: string, label: string): Buffer {

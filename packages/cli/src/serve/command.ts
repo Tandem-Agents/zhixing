@@ -134,7 +134,10 @@ import { DurableConversationInteractionObserver } from "./conversation-protocol-
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import { StartupRollback } from "./startup-rollback.js";
-import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
+import {
+  createConfiguredCheckpointOwner,
+  projectRecoveryBackupStatus,
+} from "./backup-runtime-owner.js";
 import {
   governControlTextCall,
   type GovernedTextCall,
@@ -675,6 +678,9 @@ async function runServerProcess(
     mesh: ctx.meshBootstrap,
     ...(ctx.meshRuntime ? { meshRuntime: ctx.meshRuntime } : {}),
     storageMaintenance: ctx.storageMaintenance,
+    ...(ctx.authorityRuntime
+      ? { checkpointRetention: ctx.authorityRuntime.checkpointRetention }
+      : {}),
     onError: (error) => console.error(
       chalk.red("[recovery-backup]"),
       error instanceof Error ? error.message : String(error),
@@ -1023,9 +1029,9 @@ async function runServerProcess(
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
       logPath: daemonLogPath,
     },
-    recoveryBackupStatus: async () => ctx.authorityCheckpointOwner
+    recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
-      : { state: "not-configured" as const },
+      : { state: "not-configured" as const, fullBackupReady: false }),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => mcpHub.serverStatuses(),
     // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；

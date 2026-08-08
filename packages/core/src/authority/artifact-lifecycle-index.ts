@@ -135,6 +135,18 @@ type LifecycleSourceHeads = Readonly<
   Record<string, DurableLogCheckpoint>
 >;
 
+export interface ArtifactCheckpointRetentionSnapshot {
+  readonly sourceHeads: LifecycleSourceHeads;
+}
+
+export interface ArtifactCheckpointRetentionPort {
+  checkpointRetentionSnapshot(): Promise<ArtifactCheckpointRetentionSnapshot>;
+  retainedAtCheckpoint(
+    snapshot: ArtifactCheckpointRetentionSnapshot,
+    candidates: readonly ArtifactRef[],
+  ): Promise<ArtifactRetentionSnapshot>;
+}
+
 interface LifecycleDigestState {
   readonly ref: ArtifactRef;
   readonly liveOwners: number;
@@ -453,6 +465,40 @@ export class ArtifactLifecycleIndex {
           if (state.unconditionalFacts > 0 || state.liveOwners > 0) {
             retained.push(ref);
           }
+        }
+        return { status: "current", retained };
+      } catch (error) {
+        if (error instanceof DurableProjectionStorageError) {
+          this.#retentionRebuildRequired = true;
+          return { status: "deferred" };
+        }
+        throw error;
+      }
+    });
+  }
+
+  async checkpointRetentionSnapshot(): Promise<ArtifactCheckpointRetentionSnapshot> {
+    await this.synchronize();
+    return this.#queue.run(async () => ({
+      sourceHeads: cloneSourceHeads(this.#index.checkpoints()),
+    }));
+  }
+
+  async retainedAtCheckpoint(
+    snapshot: ArtifactCheckpointRetentionSnapshot,
+    candidates: readonly ArtifactRef[],
+  ): Promise<ArtifactRetentionSnapshot> {
+    return this.#queue.run(async () => {
+      try {
+        if (!sameSourceHeads(this.#index.checkpoints(), snapshot.sourceHeads)) {
+          return { status: "deferred" };
+        }
+        const retained: ArtifactRef[] = [];
+        for (const ref of deduplicateReferences(candidates)) {
+          const state = await this.#state(ref.digest);
+          if (!state) continue;
+          assertCompatibleReference(state.ref, ref);
+          if (state.unconditionalFacts > 0 || state.liveOwners > 0) retained.push(ref);
         }
         return { status: "current", retained };
       } catch (error) {
@@ -3035,6 +3081,20 @@ function sameCheckpoint(
     left.frameEndOffset === right.frameEndOffset &&
     left.prefixDigest === right.prefixDigest
   );
+}
+
+function cloneSourceHeads(sourceHeads: LifecycleSourceHeads): LifecycleSourceHeads {
+  return Object.fromEntries(Object.entries(sourceHeads).map(([id, checkpoint]) => [
+    id,
+    { ...checkpoint },
+  ]));
+}
+
+function sameSourceHeads(left: LifecycleSourceHeads, right: LifecycleSourceHeads): boolean {
+  const leftIds = Object.keys(left).sort();
+  const rightIds = Object.keys(right).sort();
+  return canonicalize(leftIds) === canonicalize(rightIds) &&
+    leftIds.every((id) => sameCheckpoint(left[id], right[id]!));
 }
 
 function encode(value: string): string {

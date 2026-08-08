@@ -1,12 +1,18 @@
-import { createHash } from "node:crypto";
 import type { CheckpointPackage } from "./checkpoint.js";
+import type { RecoveryCheckpointRequest } from "@zhixing/core/contracts";
 import type {
   AuthorityCheckpointService,
   RecoveryBackupStatus,
 } from "./checkpoint-service.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+export const RECOVERY_CHECKPOINT_OWNER_DESCRIPTOR = Object.freeze({
+  owner: "current-anchor",
+  roles: Object.freeze(["single-machine", "anchor-executor"]),
+  phases: Object.freeze(["daily", "forced"]),
+  order: Object.freeze(["recover-pending", "create-replicate", "cleanup-expired"]),
+} as const);
 
 export interface AuthorityCheckpointOwnerOptions {
   readonly service: AuthorityCheckpointService;
@@ -16,13 +22,24 @@ export interface AuthorityCheckpointOwnerOptions {
   readonly onError?: (error: unknown) => void;
 }
 
+export interface AuthorityCheckpointOwnerPort {
+  start(schedule?: boolean): void;
+  ensureDaily(): Promise<CheckpointPackage>;
+  force(requestId: string): Promise<CheckpointPackage>;
+  status(): Promise<RecoveryBackupStatus>;
+  stop(): Promise<void>;
+}
+
 /** Owns the one daily obligation and the narrow pre-migration forced seam. */
-export class AuthorityCheckpointOwner {
+export class AuthorityCheckpointOwner implements AuthorityCheckpointOwnerPort {
   readonly #clock: () => Date;
   readonly #retryMs: number;
   #timer: ReturnType<typeof setTimeout> | undefined;
-  #active: Promise<CheckpointPackage> | undefined;
-  #abort: AbortController | undefined;
+  #active: {
+    readonly candidateKey: string;
+    readonly promise: Promise<CheckpointPackage>;
+    readonly abort: AbortController;
+  } | undefined;
   #stopped = true;
 
   constructor(private readonly options: AuthorityCheckpointOwnerOptions) {
@@ -30,21 +47,21 @@ export class AuthorityCheckpointOwner {
     this.#retryMs = options.retryMs ?? 60 * 60 * 1000;
   }
 
-  start(): void {
+  start(schedule = true): void {
     if (!this.#stopped) return;
     this.#stopped = false;
-    this.#schedule(0);
+    if (schedule) this.#schedule(0);
   }
 
   async ensureDaily(): Promise<CheckpointPackage> {
     const now = this.#clock();
     const day = now.toISOString().slice(0, 10);
-    return this.#run(stableCheckpointId(`${this.options.identitySeed}:daily:${day}`, Date.parse(`${day}T00:00:00.000Z`)));
+    return this.#run({ kind: "daily", day });
   }
 
   async force(requestId: string): Promise<CheckpointPackage> {
     if (requestId.length === 0) throw new TypeError("Forced checkpoint request id is required");
-    return this.#run(stableCheckpointId(`${this.options.identitySeed}:forced:${requestId}`, 0));
+    return this.#run({ kind: "forced", requestId });
   }
 
   status(): Promise<RecoveryBackupStatus> {
@@ -55,25 +72,31 @@ export class AuthorityCheckpointOwner {
     this.#stopped = true;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
-    this.#abort?.abort(new Error("Authority checkpoint owner stopped"));
-    await this.#active?.catch(() => undefined);
+    this.#active?.abort.abort(new Error("Authority checkpoint owner stopped"));
+    await this.#active?.promise.catch(() => undefined);
   }
 
-  #run(checkpointId: string): Promise<CheckpointPackage> {
+  #run(request: RecoveryCheckpointRequest): Promise<CheckpointPackage> {
+    if (!(RECOVERY_CHECKPOINT_OWNER_DESCRIPTOR.phases as readonly string[]).includes(request.kind)) {
+      return Promise.reject(new TypeError("Unsupported recovery checkpoint owner phase"));
+    }
     if (this.#stopped) return Promise.reject(new Error("Authority checkpoint owner is stopped"));
-    if (this.#active) return this.#active;
+    const candidateKey = this.options.service.candidateKey(request);
+    if (this.#active) {
+      return this.#active.candidateKey === candidateKey
+        ? this.#active.promise
+        : Promise.reject(new Error("checkpoint-candidate-busy"));
+    }
     const abort = new AbortController();
-    this.#abort = abort;
-    const promise = this.options.service
-      .createAndReplicate({ checkpointId, abort: abort.signal })
+    const promise = this.options.service.recoverPending(abort.signal)
+      .then(() => this.options.service.createAndReplicate({ request, abort: abort.signal }))
       .then(async (checkpoint) => {
-        await this.options.service.cleanupExpired();
+        await this.options.service.cleanupExpired(undefined, abort.signal);
         return checkpoint;
       });
-    this.#active = promise;
+    this.#active = { candidateKey, promise, abort };
     void promise.finally(() => {
-      if (this.#active === promise) this.#active = undefined;
-      if (this.#abort === abort) this.#abort = undefined;
+      if (this.#active?.promise === promise) this.#active = undefined;
     }).catch(() => undefined);
     return promise;
   }
@@ -88,29 +111,4 @@ export class AuthorityCheckpointOwner {
     }, delay);
     this.#timer.unref?.();
   }
-}
-
-function stableCheckpointId(identity: string, time: number): string {
-  if (!Number.isFinite(time) || time < 0) throw new TypeError("Checkpoint identity time is invalid");
-  const bytes = createHash("sha256").update(identity).digest();
-  let timestamp = Math.floor(time);
-  let head = "";
-  for (let index = 0; index < 10; index += 1) {
-    head = CROCKFORD[timestamp % 32]! + head;
-    timestamp = Math.floor(timestamp / 32);
-  }
-  let tail = "";
-  let bits = 0;
-  let bitCount = 0;
-  for (const byte of bytes) {
-    bits = (bits << 8) | byte;
-    bitCount += 8;
-    while (bitCount >= 5 && tail.length < 16) {
-      bitCount -= 5;
-      tail += CROCKFORD[(bits >>> bitCount) & 31]!;
-      bits &= (1 << bitCount) - 1;
-    }
-    if (tail.length === 16) break;
-  }
-  return `${head}${tail}`;
 }

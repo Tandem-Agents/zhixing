@@ -137,7 +137,7 @@ export function buildServerInfoMethod(): MethodEntry {
       const schedulerNoticePage =
         (await ctx.server.runtimeControl?.schedulerNotices?.(statusAfter.scheduler)) ??
         { notices: [], nextRevision: statusAfter.scheduler };
-      const recoveryBackup = await ctx.server.recoveryBackupStatus?.().catch(() => undefined);
+      const recoveryBackup = await ctx.server.recoveryBackupStatus?.();
       const openFinality = ctx.server.runtimeControl?.openFirstPartyFinality;
       const hasStatusCursors =
         Object.keys(statusAfter.delivery).length > 0 ||

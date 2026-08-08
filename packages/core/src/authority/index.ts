@@ -39,8 +39,17 @@ export {
 export {
   ArtifactLifecycleIndex,
   type ArtifactLifecycleIndexOptions,
+  type ArtifactCheckpointRetentionPort,
+  type ArtifactCheckpointRetentionSnapshot,
   type ArtifactReleaseCandidate,
 } from "./artifact-lifecycle-index.js";
+export {
+  classifyRegisteredArtifactReferences,
+  classifyRetainedRecordReferences,
+  collectRegisteredArtifactRoots,
+  type ClassifiedArtifactReferences,
+  type RegisteredArtifactRoot,
+} from "./artifact-retention.js";
 export {
   DurableProjectionRecordBindingError,
   DurableProjectionStorageError,
