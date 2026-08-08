@@ -17,6 +17,7 @@ import {
   assertRecoveryRootMatchesPlan,
   createRecoveryCheckpointVerification,
   openRootActivationCheckpoint,
+  readCheckpointChunk,
   verifyStoredFullAuthorityCheckpoint,
   type CheckpointPackage,
   verifyRecoveryCheckpointVerification,
@@ -753,9 +754,25 @@ async function openPreparedActivationCheckpoint(input: {
   ReturnType<typeof openRootActivationCheckpoint> |
   Awaited<ReturnType<typeof verifyStoredFullAuthorityCheckpoint>>
 > {
-  return isFullCheckpointEnvelope(input.package.envelope)
-    ? verifyStoredFullAuthorityCheckpoint(input)
-    : openRootActivationCheckpoint(input);
+  if (isFullCheckpointEnvelope(input.package.envelope)) {
+    return verifyStoredFullAuthorityCheckpoint(input);
+  }
+  if (input.package.chunks) return openRootActivationCheckpoint(input);
+  const chunks: { seq: number; bytes: Buffer }[] = [];
+  try {
+    for (const descriptor of input.package.envelope.chunks) {
+      chunks.push({
+        seq: descriptor.seq,
+        bytes: await readCheckpointChunk(input.package, descriptor.seq),
+      });
+    }
+    return openRootActivationCheckpoint({
+      ...input,
+      package: { envelope: input.package.envelope, chunks },
+    });
+  } finally {
+    for (const chunk of chunks) chunk.bytes.fill(0);
+  }
 }
 
 function clearOpenedCheckpoint(

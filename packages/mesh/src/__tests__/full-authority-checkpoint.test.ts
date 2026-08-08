@@ -36,6 +36,7 @@ import {
   PairedCheckpointReceiver,
   PairedRecoveryCheckpointTarget,
   decodePairedCheckpointResult,
+  type PairedCheckpointTransport,
 } from "../paired-checkpoint-target.js";
 import { decodeRecoveryPackage, encodeRecoveryPackage } from "../recovery-package.js";
 import { RecoveryRoot, keyIdForPublicKey } from "../recovery-root.js";
@@ -72,6 +73,11 @@ describe("full authority recovery checkpoints", () => {
       { t: "checkpoint.manifest", checkpointId: "checkpoint-1", envelope: manifest.checkpoint.envelope },
       { t: "checkpoint.range", checkpointId: "checkpoint-1", seq: 0, offset: 0, bytes: "YQ" },
       { t: "checkpoint.retired", checkpointId: "checkpoint-1", supersededBy: "checkpoint-2" },
+      {
+        t: "checkpoint.root-activated",
+        checkpointId: "checkpoint-1",
+        chainHead: { seq: 2, eventDigest: `sha256:${"2".repeat(64)}` },
+      },
     ] as const;
     for (const result of valid) expect(decodePairedCheckpointResult(result)).toEqual(result);
     for (const result of valid) {
@@ -280,6 +286,12 @@ describe("full authority recovery checkpoints", () => {
     const first = await original.createAndReplicate({ request, createdAt: AT });
     await original.verify({ checkpointId: first.envelope.checkpointId, recoveryRoot: fixture.root });
     expect(await original.status()).toMatchObject({ state: "recoverable", fullBackupReady: true });
+
+    const changedTarget = checkpointService(
+      fixture,
+      new MemoryTarget("backup-dir:replacement", "filesystem:replacement"),
+    );
+    expect(await changedTarget.status()).toEqual({ state: "not-configured", fullBackupReady: false });
 
     const chainEvent = createSignedTrustEvent({
       current: fixture.projection,
@@ -534,6 +546,53 @@ describe("full authority recovery checkpoints", () => {
     const remote = await materializePackage(await target.read(captured.checkpoint.envelope.checkpointId));
     const local = await materializePackage(captured.checkpoint);
     expect(materializedBytes(remote)).toEqual(materializedBytes(local));
+
+    const rootEstablishmentStaging = path.join(root, "root-establishment-incoming");
+    const rootEstablishmentReceiver = () => new PairedCheckpointReceiver({
+      homeId: fixture.trust.homeId,
+      sourceDeviceId: fixture.identity.deviceId,
+      targetDeviceId: "device-target",
+      rootEstablishment: true,
+      staging: new FilePairedCheckpointStaging({
+        root: rootEstablishmentStaging,
+        target: durable,
+        storageMaintenance: governor.port,
+      }),
+    });
+    const rootEstablishmentTarget = (receiver: PairedCheckpointReceiver) =>
+      new PairedRecoveryCheckpointTarget({
+        homeId: fixture.trust.homeId,
+        sourceDeviceId: fixture.identity.deviceId,
+        targetDeviceId: "device-target",
+        recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+        transport: receiver,
+        storageMaintenance: sourceGovernor.port,
+      });
+    await rootEstablishmentTarget(rootEstablishmentReceiver()).writeDurable(captured.checkpoint);
+    const restartedReceiver = rootEstablishmentReceiver();
+    await expect(restartedReceiver.request({
+      v: 1,
+      t: "checkpoint.begin",
+      homeId: fixture.trust.homeId,
+      sourceDeviceId: fixture.identity.deviceId,
+      targetDeviceId: "device-target",
+      envelope: captured.checkpoint.envelope,
+    })).resolves.toEqual({
+      t: "checkpoint.begun",
+      checkpointId: captured.checkpoint.envelope.checkpointId,
+    });
+    await expect(restartedReceiver.request({
+      v: 1,
+      t: "checkpoint.begin",
+      homeId: fixture.trust.homeId,
+      sourceDeviceId: fixture.identity.deviceId,
+      targetDeviceId: "device-target",
+      envelope: {
+        ...captured.checkpoint.envelope,
+        checkpointId: "01J00000000000000000000006",
+      },
+    })).rejects.toThrow(/already bound/);
+
     await target.retire(captured.checkpoint.envelope.checkpointId, "01J00000000000000000000005");
     await expect(target.read(captured.checkpoint.envelope.checkpointId)).rejects.toThrow(/not present/);
     expect(governor.requests.length).toBeGreaterThan(0);
@@ -554,6 +613,83 @@ describe("full authority recovery checkpoints", () => {
       checkpointId: captured.checkpoint.envelope.checkpointId,
     } as never)).rejects.toThrow(/unsupported/);
   }, 15_000);
+
+  it("holds no capacity permit during paired range I/O and fails before decode when admission is unavailable", async () => {
+    const fixture = await authorityFixture();
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000007",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention: fixture.lifecycle,
+    });
+    const descriptor = captured.checkpoint.envelope.chunks[0]!;
+    const chunk = await readCheckpointChunk(captured.checkpoint, descriptor.seq);
+    try {
+      for (const admission of [
+        { kind: "capacity-gap", blockedBy: "memoryReservationBytes", required: 1, available: 0 },
+        { kind: "cancelled" },
+      ] as const) {
+        let finishRange!: () => void;
+        let markRequested!: () => void;
+        const rangeGate = new Promise<void>((resolve) => { finishRange = resolve; });
+        const requested = new Promise<void>((resolve) => { markRequested = resolve; });
+        const transport: PairedCheckpointTransport = {
+          request: async (command) => {
+            if (command.t === "checkpoint.get") {
+              return {
+                t: "checkpoint.manifest",
+                checkpointId: command.checkpointId,
+                envelope: captured.checkpoint.envelope,
+              };
+            }
+            if (command.t !== "checkpoint.range") throw new Error("unexpected command");
+            markRequested();
+            await rangeGate;
+            return {
+              t: "checkpoint.range",
+              checkpointId: command.checkpointId,
+              seq: command.seq,
+              offset: command.offset,
+              bytes: chunk.subarray(command.offset, command.offset + command.limit).toString("base64url"),
+            };
+          },
+        };
+        let acquireCalls = 0;
+        const target = new PairedRecoveryCheckpointTarget({
+          homeId: fixture.trust.homeId,
+          sourceDeviceId: fixture.identity.deviceId,
+          targetDeviceId: "capacity-target",
+          recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+          transport,
+          storageMaintenance: {
+            acquire: async () => {
+              acquireCalls += 1;
+              return admission as DeviceCapacityAdmission;
+            },
+            snapshot: () => ({ queued: {}, inFlight: {} }),
+          },
+        });
+        const remote = await target.read(captured.checkpoint.envelope.checkpointId);
+        const reading = remote.source!.read(
+          descriptor.seq,
+          0,
+          Math.min(descriptor.bytes, 256 * 1024),
+        );
+        await requested;
+        expect(acquireCalls).toBe(0);
+        finishRange();
+        await expect(reading).rejects.toThrow(/capacity|cancelled/i);
+        expect(acquireCalls).toBe(1);
+      }
+    } finally {
+      chunk.fill(0);
+    }
+  }, 120_000);
 
   it("rejects non-independent or linked directory roots before writing", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-directory-"));

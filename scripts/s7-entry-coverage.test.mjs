@@ -826,9 +826,16 @@ test("conversation adoption stays bound to the two production roots and ordered 
 test("recovery backup stays bound to one current-anchor owner and finite paired receivers", async () => {
   const paths = [
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/backup-command.ts",
     "packages/cli/src/serve/backup-runtime-owner.ts",
+    "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+    "packages/cli/src/serve/mesh-control-plane.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
+    "packages/cli/src/serve/recovery-root-activation.ts",
+    "packages/cli/src/serve/topology-command.ts",
+    "packages/mesh/src/checkpoint-service.ts",
     "packages/mesh/src/checkpoint-owner.ts",
     "packages/mesh/src/paired-checkpoint-target.ts",
   ];
@@ -839,6 +846,58 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.deepEqual(inspectRecoveryBackupAssembly(records), []);
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-runtime-owner.ts",
+      (text) => text.replace("fullBackupReady: status.fullBackupReady", "fullBackupReady: false"),
+    )).join("\n"),
+    /durable recovery readiness projector or unavailable consumer drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => text.replace("prepared.checkpoint.envelope.recipientKeyId", '"temporary-recipient"'),
+    )).join("\n"),
+    /freeze package identity before target connection/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
+      (text) => text.replace("rootEstablishment: true", "rootEstablishment: false"),
+    )).join("\n"),
+    /root-establishment receiver exact-set or current-issuer boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/topology-command.ts",
+      (text) => text.replace("await runRecoveryRootEstablishmentTopology({", "await runConfiguredServeTopology({"),
+    )).join("\n"),
+    /finite pre-business topology/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => text.replace(
+        /(transport: new MeshPairedCheckpointTransport\(control\.connections\.client\(targetDeviceId\)\),\r?\n\s*)storageMaintenance: context\.capacity\.storage/u,
+        "$1storageMaintenance: undefined",
+      ),
+    )).join("\n"),
+    /backup-command\.ts: paired checkpoint client must use the device storage governor/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-pair-command.ts",
+      (text) => text.replace("storageMaintenance: input.storageMaintenance", "storageMaintenance: undefined"),
+    )).join("\n"),
+    /mesh-pair-command\.ts: paired checkpoint client must use the device storage governor/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-runtime-owner.ts",
+      (text) => text.replace("storageMaintenance: input.storageMaintenance", "storageMaintenance: undefined"),
+    )).join("\n"),
+    /backup-runtime-owner\.ts: paired checkpoint client must use the device storage governor/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
@@ -892,9 +951,19 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/mesh/src/paired-checkpoint-target.ts",
-      (text) => text.replace('    "checkpoint.retire",\n  ]),', '    "checkpoint.retire",\n    "checkpoint.extra",\n  ]),'),
+      (text) => text.replace(
+        '    "checkpoint.activate-root",\n  ]),',
+        '    "checkpoint.activate-root",\n    "checkpoint.extra",\n  ]),',
+      ),
     )).join("\n"),
     /paired receiver descriptor exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace("replayRootActivation:", "missingRootActivationReplay:"),
+    )).join("\n"),
+    /signed activation replay must remain durably bound/,
   );
 });
 

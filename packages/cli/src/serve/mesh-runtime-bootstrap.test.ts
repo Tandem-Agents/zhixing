@@ -30,7 +30,7 @@ describe("production mesh runtime bootstrap", () => {
     expect(secrets.values.size).toBe(0);
   });
 
-  it("does not start a trusted-home mesh before recovery-root activation", async () => {
+  it("exposes only the trusted-home bootstrap needed for recovery-root establishment", async () => {
     const root = await createTempDir("mesh-runtime-recovery-root-guard");
     const secrets = new MemorySecretStore();
     const local = await prepareMeshRuntimeBootstrap({ zhixingHome: root, secretStore: secrets });
@@ -44,14 +44,18 @@ describe("production mesh runtime bootstrap", () => {
       identity,
       roles: ["anchor", "executor"],
     });
-    await expect(prepareMeshRuntimeBootstrap({
+    const bootstrap = await prepareMeshRuntimeBootstrap({
       zhixingHome: root,
       secretStore: secrets,
       configuration: {
         enabledRoles: ["anchor"],
         anchorListen: { bind: { host: "127.0.0.1", port: 7443 } },
       },
-    })).rejects.toThrow("recovery root is not activated");
+    });
+    expect(bootstrap.mode).toBe("trusted-home");
+    if (bootstrap.mode !== "trusted-home") throw new Error("expected trusted home");
+    expect(bootstrap.trust.recoveryRootPublicKey).toBeUndefined();
+    expect(bootstrap.trust.recoveryBackupPublicKey).toBeUndefined();
   });
 
   it("keeps the pre-genesis topology local and switches permanently to trust-authorized roles", async () => {

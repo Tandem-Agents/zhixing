@@ -56,6 +56,7 @@ export interface ProductionMeshControlPlaneOptions {
     record: HomeTrustRecord,
   ) => void | Promise<void>;
   readonly onConnectionError?: (error: Error) => void;
+  readonly watchTrust?: boolean;
 }
 
 /** Owns direct listeners, relay registrations and the non-anchor reconnect loop. */
@@ -102,7 +103,7 @@ export class ProductionMeshControlPlane {
     } else if (this.#roles.has("executor") || this.#roles.has("surface")) {
       this.#startDialer();
     }
-    this.#track(this.#watchTrust());
+    if (this.options.watchTrust !== false) this.#track(this.#watchTrust());
   }
 
   async stop(): Promise<void> {

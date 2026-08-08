@@ -77,8 +77,8 @@ export async function prepareMeshRuntimeBootstrap(input: {
   if (!trust || !configuration) {
     throw new Error("Trusted-home mesh bootstrap is incomplete");
   }
-  if (!trust.recoveryRootPublicKey || !trust.recoveryBackupPublicKey) {
-    throw new Error("Trusted-home recovery root is not activated");
+  if (!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey) {
+    throw new Error("Trusted-home recovery root identity is inconsistent");
   }
   let endpoints = await bootstrapStore.loadEndpoints();
   let localEndpoint: MeshEndpointDescriptor | undefined;

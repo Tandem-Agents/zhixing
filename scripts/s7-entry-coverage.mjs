@@ -166,6 +166,10 @@ function frozenLiteralDescriptor(relative, text, name) {
     initializer.arguments.length !== 1
   ) return undefined;
   const object = unwrapExpression(initializer.arguments[0]);
+  if (
+    ts.isArrayLiteralExpression(object) &&
+    object.elements.every((element) => ts.isStringLiteralLike(element))
+  ) return object.elements.map((element) => element.text);
   if (!ts.isObjectLiteralExpression(object)) return undefined;
   const result = {};
   for (const property of object.properties) {
@@ -217,6 +221,33 @@ function descriptorDrivesPhase(relative, text, descriptorName, inputText) {
   };
   visit(source);
   return found;
+}
+
+function newExpressionPropertyBindings(relative, text, constructorName, propertyName) {
+  const source = sourceFile(relative, text);
+  const bindings = [];
+  const visit = (node) => {
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === constructorName
+    ) {
+      const options = node.arguments?.[0];
+      const property = options && ts.isObjectLiteralExpression(options)
+        ? options.properties.find((candidate) =>
+            ts.isPropertyAssignment(candidate) && propertyNameText(candidate.name) === propertyName
+          )
+        : undefined;
+      bindings.push(
+        property && ts.isPropertyAssignment(property)
+          ? property.initializer.getText(source)
+          : undefined,
+      );
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return bindings;
 }
 
 function resolveRelativeTypeScript(importer, specifier) {
@@ -875,11 +906,26 @@ export function inspectRecoveryBackupAssembly(records) {
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const owner = byPath.get("packages/cli/src/serve/backup-runtime-owner.ts");
+  const backup = byPath.get("packages/cli/src/serve/backup-command.ts");
+  const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
+  const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
+  const rootEstablishment = byPath.get(
+    "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
+  );
+  const rootActivation = byPath.get(
+    "packages/cli/src/serve/recovery-root-activation.ts",
+  );
+  const controlPlane = byPath.get("packages/cli/src/serve/mesh-control-plane.ts");
   const runtime = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
+  const checkpointService = byPath.get("packages/mesh/src/checkpoint-service.ts");
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
-  if (!command || !owner || !runtime || !pairing || !checkpointOwner || !pairedTarget) {
+  if (
+    !command || !owner || !backup || !bootstrap || !topology || !rootEstablishment ||
+    !rootActivation || !controlPlane ||
+    !runtime || !pairing || !checkpointService || !checkpointOwner || !pairedTarget
+  ) {
     return ["recovery backup production assembly sources are missing"];
   }
   const count = (text, token) => text.split(token).length - 1;
@@ -895,11 +941,110 @@ export function inspectRecoveryBackupAssembly(records) {
     "assertHomeAuthority(trust, this.input.mesh.deviceKey.deviceId)",
     "return new ConfiguredCheckpointOwnerSlot(input)",
     "resolveTarget",
-    "currentAnchor: true",
   ]) {
     if (!owner.includes(token)) {
       failures.push(`packages/cli/src/serve/backup-runtime-owner.ts: missing owner boundary ${token}`);
     }
+  }
+  if (count(owner, "currentAnchor: true") !== 2) {
+    failures.push("packages/cli/src/serve/backup-runtime-owner.ts: missing owner boundary currentAnchor: true");
+  }
+  const pairedClientConstructions = records.filter(({ text }) =>
+    text.includes("new PairedRecoveryCheckpointTarget({")
+  );
+  const expectedPairedClientOwners = new Map([
+    ["packages/cli/src/serve/backup-command.ts", "context.capacity.storage"],
+    ["packages/cli/src/serve/backup-runtime-owner.ts", "input.storageMaintenance"],
+    ["packages/cli/src/serve/mesh-pair-command.ts", "input.storageMaintenance"],
+  ]);
+  if (
+    pairedClientConstructions.length !== expectedPairedClientOwners.size ||
+    pairedClientConstructions.some(({ relative }) => !expectedPairedClientOwners.has(relative))
+  ) {
+    failures.push("paired checkpoint client production owner exact-set drifted");
+  }
+  for (const [relative, governorBinding] of expectedPairedClientOwners) {
+    const text = byPath.get(relative);
+    if (
+      !text ||
+      JSON.stringify(newExpressionPropertyBindings(
+        relative,
+        text,
+        "PairedRecoveryCheckpointTarget",
+        "storageMaintenance",
+      )) !== JSON.stringify([governorBinding])
+    ) {
+      failures.push(`${relative}: paired checkpoint client must use the device storage governor`);
+    }
+  }
+  if (
+    !checkpointService.includes("export async function projectDurableRecoveryBackupStatus(") ||
+    !checkpointService.includes("canonicalize(record.generation) === canonicalize(generation)") ||
+    count(checkpointService, "return projectDurableRecoveryBackupStatus({") !== 1 ||
+    !owner.includes("projectDurableRecoveryBackupStatus({") ||
+    count(owner, "fullBackupReady: status.fullBackupReady") !== 2
+  ) {
+    failures.push("durable recovery readiness projector or unavailable consumer drifted");
+  }
+  const prepareIdentity = backup.indexOf("await prepareInitialRoot(context, options.readRecoveryPackage)");
+  const pairedConnect = backup.indexOf("await connectPairedTarget(", prepareIdentity);
+  if (
+    prepareIdentity < 0 ||
+    pairedConnect < prepareIdentity ||
+    !backup.includes("prepared.checkpoint.envelope.recipientKeyId")
+  ) {
+    failures.push("paired root establishment must freeze package identity before target connection");
+  }
+  const limitedBranch = topology.indexOf("await runRecoveryRootEstablishmentTopology({");
+  const workspaceAdmission = topology.indexOf("await acquireExecutorLocalWorkspaceOwner(");
+  const normalTopology = topology.indexOf("await runConfiguredServeTopology(");
+  if (
+    !bootstrap.includes("!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey") ||
+    limitedBranch < 0 ||
+    workspaceAdmission < limitedBranch ||
+    normalTopology < workspaceAdmission
+  ) {
+    failures.push("trusted-home root establishment must remain a finite pre-business topology");
+  }
+  if (
+    count(topology, "mesh = await prepareMeshRuntimeBootstrap({") !== 2 ||
+    !rootEstablishment.includes("watchTrust: false") ||
+    !backup.includes("watchTrust: false") ||
+    !controlPlane.includes("this.options.watchTrust !== false")
+  ) {
+    failures.push("root-establishment transport must stay stable through signed activation and reload normal topology");
+  }
+  const expectedRootServices = frozenLiteralDescriptor(
+    "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
+    rootEstablishment,
+    "ROOT_ESTABLISHMENT_SERVICE_EXACT_SET",
+  );
+  if (
+    JSON.stringify(expectedRootServices) !== JSON.stringify([
+      "mesh.endpoint",
+      "recovery.checkpoint",
+    ]) ||
+    count(rootEstablishment, "registerPairedCheckpointMeshService(") !== 1 ||
+    count(rootEstablishment, "new PairedCheckpointReceiver({") !== 1 ||
+    !rootEstablishment.includes("rootEstablishment: true") ||
+    !rootEstablishment.includes("commitRootActivation:") ||
+    !rootEstablishment.includes("deviceId === input.mesh.trust.issuer.deviceId") ||
+    rootEstablishment.includes("new MeshRuntimeAssembly(")
+  ) {
+    failures.push("root-establishment receiver exact-set or current-issuer boundary drifted");
+  }
+  if (
+    !pairedTarget.includes("bindRootEstablishment(") ||
+    !pairedTarget.includes("root-establishment.pending.json") ||
+    !pairedTarget.includes("assertRootEstablishment(") ||
+    !pairedTarget.includes('t: "checkpoint.activate-root"') ||
+    !backup.includes("activationConnection.target.activateRoot(replay)") ||
+    !backup.includes("await connection.target.activateRoot({") ||
+    !runtime.includes("replayRootActivation:") ||
+    !rootActivation.includes("appendTrustEvent({ event, record })") ||
+    !rootActivation.includes("isExactRecoveryRootActivationReplay(")
+  ) {
+    failures.push("paired root-establishment staging and signed activation replay must remain durably bound");
   }
   const ownerDescriptor = frozenLiteralDescriptor(
     "packages/mesh/src/checkpoint-owner.ts",
@@ -939,6 +1084,7 @@ export function inspectRecoveryBackupAssembly(records) {
       "checkpoint.get",
       "checkpoint.range",
       "checkpoint.retire",
+      "checkpoint.activate-root",
     ],
     order: [
       "checkpoint.begin",

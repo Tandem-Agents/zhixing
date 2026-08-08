@@ -4,10 +4,15 @@ import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
+import { decodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
+import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
+import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import {
   createConfiguredCheckpointOwner,
   projectRecoveryBackupStatus,
@@ -43,9 +48,10 @@ describe("public recovery backup status", () => {
     for (const code of ["configuration-invalid", "runtime-unavailable", "target-unavailable"] as const) {
       const projected = projectRecoveryBackupStatus({
         state: "unavailable",
-        fullBackupReady: false,
+        fullBackupReady: true,
         code,
       });
+      expect(projected.fullBackupReady).toBe(true);
       expect(Object.keys(projected).sort()).toEqual(["fullBackupReady", "nextAction", "state"]);
     }
   });
@@ -129,6 +135,96 @@ describe("public recovery backup status", () => {
     await owner!.stop();
     await withoutRuntime!.stop();
   });
+
+  it("preserves durable readiness when the paired runtime is unavailable", async () => {
+    const home = await createTempDir("recovery-owner-durable-unavailable");
+    const key = await DeviceKey.generate();
+    const identity = enrollDeviceIdentity(key, {
+      displayName: "anchor",
+      platform: "headless",
+      enrolledAt: "2026-08-08T00:00:00.000Z",
+    });
+    const store = new FileMeshBootstrapStore(home, key);
+    const initialized = await store.initializeLocalHome({
+      key,
+      identity,
+      roles: ["anchor", "executor"],
+      homeId: "home-durable-unavailable",
+    });
+    let target: FileRecoveryCheckpointTarget | undefined;
+    let recoveryRoot: RecoveryRoot | undefined;
+    await activateInitialRecoveryRoot({
+      store,
+      issuerKey: key,
+      issuerIdentity: identity,
+      current: initialized.projection,
+      targetId: "backup-device:target",
+      targetIndependenceDomain: "device:target",
+      createTarget: async () => {
+        target = await FileRecoveryCheckpointTarget.openPaired({
+          targetRoot: path.join(home, "paired-target"),
+          targetDeviceId: "target",
+        });
+        return target;
+      },
+      writeLine: () => undefined,
+      confirmRecoveryPackage: async (value) => {
+        recoveryRoot = decodeRecoveryPackage(value).root;
+        return value;
+      },
+    });
+    await target?.close();
+    if (!recoveryRoot) throw new Error("expected recovery root");
+    const trust = await store.loadTrustRecord();
+    if (!trust?.recoveryBackupPublicKey) throw new Error("expected activated recovery root");
+    target = await FileRecoveryCheckpointTarget.openPaired({
+      targetRoot: path.join(home, "paired-target"),
+      targetDeviceId: "target",
+    });
+    const service = new AuthorityCheckpointService({
+      log: store.authorityLog(),
+      artifacts: store.artifactStore(),
+      retention: store.checkpointRetention(),
+      target,
+      trust,
+      issuer: Object.assign({}, identity, { sign: key.sign.bind(key) }),
+      recipient: {
+        backupPublicKey: trust.recoveryBackupPublicKey,
+        backupKeyId: keyIdForPublicKey(trust.recoveryBackupPublicKey),
+      },
+      currentAnchor: true,
+      storageMaintenance: allowMaintenance(),
+    });
+    const checkpoint = await service.createAndReplicate({
+      request: { kind: "forced", requestId: "durable-unavailable" },
+    });
+    await service.verify({
+      checkpointId: checkpoint.envelope.checkpointId,
+      recoveryRoot,
+    });
+    await target.close();
+    await new FileBackupTargetConfiguration(home).select({
+      kind: "paired-device",
+      targetId: "backup-device:target",
+      deviceId: "target",
+    });
+    const mesh = {
+      deviceKey: key,
+      bootstrapStore: store,
+    } as unknown as MeshRuntimeBootstrap;
+    const owner = await createConfiguredCheckpointOwner({
+      zhixingHome: home,
+      mesh,
+      storageMaintenance: allowMaintenance(),
+    });
+    await owner!.start();
+    await expect(owner!.status()).resolves.toEqual({
+      state: "unavailable",
+      fullBackupReady: true,
+      code: "runtime-unavailable",
+    });
+    await owner!.stop();
+  }, 120_000);
 });
 
 function allowMaintenance(): StorageMaintenanceGovernorPort {

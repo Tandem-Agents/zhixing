@@ -10,6 +10,7 @@ import {
 } from "@zhixing/mesh/checkpoint-owner";
 import {
   AuthorityCheckpointService,
+  projectDurableRecoveryBackupStatus,
   type RecoveryBackupStatus,
 } from "@zhixing/mesh/checkpoint-service";
 import {
@@ -44,7 +45,11 @@ export async function createConfiguredCheckpointOwner(input: {
 
 type RuntimeSlot =
   | { readonly kind: "disabled" }
-  | { readonly kind: "unavailable"; readonly code: BackupUnavailableCode }
+  | {
+      readonly kind: "unavailable";
+      readonly code: BackupUnavailableCode;
+      readonly fullBackupReady: boolean;
+    }
   | {
       readonly kind: "available";
       readonly fingerprint: string;
@@ -76,7 +81,7 @@ export function projectRecoveryBackupStatus(status: RecoveryBackupStatus): Publi
     case "unavailable":
       return {
         state: "unavailable",
-        fullBackupReady: false,
+        fullBackupReady: status.fullBackupReady,
         nextAction: status.code === "configuration-invalid"
           ? "repair-backup-configuration"
           : status.code === "runtime-unavailable"
@@ -126,7 +131,11 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     const slot = await this.#reload();
     if (slot.kind === "disabled") return { state: "not-configured", fullBackupReady: false };
     if (slot.kind === "unavailable") {
-      return { state: "unavailable", fullBackupReady: false, code: slot.code };
+      return {
+        state: "unavailable",
+        fullBackupReady: slot.fullBackupReady,
+        code: slot.code,
+      };
     }
     return slot.owner.status();
   }
@@ -171,11 +180,21 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     try {
       config = await targets.load();
     } catch {
-      return this.#replace({ kind: "unavailable", code: "configuration-invalid" });
+      return this.#replace({
+        kind: "unavailable",
+        code: "configuration-invalid",
+        fullBackupReady: false,
+      });
     }
     if (!config) return this.#replace({ kind: "disabled" });
     const binding = config.bindings.find((candidate) => candidate.targetId === config.currentTargetId);
-    if (!binding) return this.#replace({ kind: "unavailable", code: "configuration-invalid" });
+    if (!binding) {
+      return this.#replace({
+        kind: "unavailable",
+        code: "configuration-invalid",
+        fullBackupReady: false,
+      });
+    }
     const recipientKeyId = keyIdForPublicKey(trust.recoveryBackupPublicKey);
     let target: RetirableRecoveryCheckpointTarget;
     try {
@@ -190,7 +209,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
         ? "runtime-unavailable"
         : "target-unavailable";
       this.input.onError?.(error);
-      return this.#replace({ kind: "unavailable", code });
+      return this.#replace(await this.#unavailable(code, binding, trust));
     }
     const fingerprint = canonicalize({
       binding,
@@ -242,8 +261,24 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       }
       if (error instanceof TypeError) throw error;
       this.input.onError?.(error);
-      return this.#replace({ kind: "unavailable", code: "target-unavailable" });
+      return this.#replace(await this.#unavailable("target-unavailable", binding, trust));
     }
+  }
+
+  async #unavailable(
+    code: BackupUnavailableCode,
+    binding: BackupTargetBinding,
+    trust: HomeTrustRecord,
+  ): Promise<Extract<RuntimeSlot, { kind: "unavailable" }>> {
+    const status = await projectDurableRecoveryBackupStatus({
+      log: this.input.mesh.bootstrapStore.authorityLog(),
+      artifacts: this.input.mesh.bootstrapStore.artifactStore(),
+      trust,
+      currentAnchor: true,
+      targetId: binding.targetId,
+      storageMaintenance: this.input.storageMaintenance,
+    });
+    return { kind: "unavailable", code, fullBackupReady: status.fullBackupReady };
   }
 
   async #replace(next: RuntimeSlot): Promise<RuntimeSlot> {

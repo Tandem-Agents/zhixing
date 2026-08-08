@@ -101,8 +101,9 @@ import {
   PairedCheckpointReceiver,
   registerPairedCheckpointMeshService,
 } from "@zhixing/mesh/paired-checkpoint-target";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
+import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
+import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.js";
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
@@ -563,6 +564,8 @@ export class MeshRuntimeAssembly {
           sourceDeviceId: options.trust.issuer.deviceId,
           targetDeviceId: options.authority.deviceId,
           recipientKeyId: keyIdForPublicKey(options.trust.recoveryBackupPublicKey),
+          replayRootActivation: ({ event, record }) =>
+            assertRecoveryRootActivationReplay(options.bootstrapStore, event, record),
           staging: new FilePairedCheckpointStaging({
             root: path.join(options.zhixingHome, "distributed-runtime", "recovery-checkpoint-incoming"),
             target: pairedTarget,
@@ -1111,48 +1114,6 @@ export class MeshRuntimeAssembly {
       member.state === "active" &&
       member.roles.includes(role));
   }
-}
-
-function deferredPairedCheckpointTarget(input: {
-  readonly zhixingHome: string;
-  readonly deviceId: string;
-  readonly storageMaintenance?: import("@zhixing/core/resources").StorageMaintenanceGovernorPort;
-}): import("@zhixing/mesh/checkpoint-target").RetirableRecoveryCheckpointTarget {
-  const open = () => FileRecoveryCheckpointTarget.openPaired({
-    targetRoot: path.join(input.zhixingHome, "distributed-runtime", "recovery-checkpoints"),
-    targetDeviceId: input.deviceId,
-    ...(input.storageMaintenance ? { storageMaintenance: input.storageMaintenance } : {}),
-  });
-  const use = async <T>(operation: (target: FileRecoveryCheckpointTarget) => Promise<T>): Promise<T> => {
-    const target = await open();
-    try {
-      return await operation(target);
-    } finally {
-      await target.close();
-    }
-  };
-  return {
-    targetId: `backup-device:${input.deviceId}`,
-    independenceDomain: `device:${input.deviceId}`,
-    writeDurable: (checkpoint) => use((target) => target.writeDurable(checkpoint)),
-    read: async (checkpointId, signal) => {
-      const initial = await use((target) => target.read(checkpointId, signal));
-      // Legacy trust-only checkpoints are deliberately materialized within a strict cap.
-      if (initial.chunks) return initial;
-      return {
-        envelope: initial.envelope,
-        source: {
-          read: (seq, offset, limit, rangeSignal) => use(async (target) => {
-            const current = await target.read(checkpointId, rangeSignal ?? signal);
-            if (!current.source) throw new TypeError("Paired checkpoint source is unavailable");
-            return current.source.read(seq, offset, limit, rangeSignal ?? signal);
-          }),
-        },
-      };
-    },
-    retire: async (checkpointId, supersededBy) =>
-      use((target) => target.retire(checkpointId, supersededBy)),
-  };
 }
 
 export function executorIdForDevice(deviceId: string): string {

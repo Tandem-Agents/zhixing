@@ -59,6 +59,109 @@ export interface RecoveryCheckpointVerificationCandidate {
   readonly targetId: string;
 }
 
+export interface DurableRecoveryBackupStatusOptions {
+  readonly log: AuthorityCommitLog;
+  readonly artifacts: MutableArtifactStore;
+  readonly trust: HomeTrustRecord;
+  readonly currentAnchor: boolean;
+  readonly targetId: string;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly abort?: AbortSignal;
+}
+
+export async function projectDurableRecoveryBackupStatus(
+  options: DurableRecoveryBackupStatusOptions,
+): Promise<RecoveryBackupStatus> {
+  if (
+    !options.currentAnchor ||
+    !options.trust.recoveryRootPublicKey ||
+    !options.trust.recoveryBackupPublicKey
+  ) {
+    return { state: "not-configured", fullBackupReady: false };
+  }
+  const recipientKeyId = keyIdForPublicKey(options.trust.recoveryBackupPublicKey);
+  const generation: RecoveryCheckpointGeneration = {
+    rootKeyId: keyIdForPublicKey(options.trust.recoveryRootPublicKey),
+    recipientKeyId,
+    trustChainHead: { ...options.trust.chainHead },
+    targetId: options.targetId,
+  };
+  const records = (await options.log.readStream<CheckpointStreamRecord>("checkpoint"))
+    .map((entry) => entry.body);
+  const verifiedPair = currentFullVerified(records, recipientKeyId)
+    .toReversed()
+    .map((verified) => ({
+      verified,
+      created: records.find((record): record is Extract<
+        CheckpointStreamRecord,
+        { t: "checkpoint-created" }
+      > => record.t === "checkpoint-created" &&
+        record.checkpointId === verified.checkpointId &&
+        record.targetId === options.targetId &&
+        record.generation !== undefined &&
+        canonicalize(record.generation) === canonicalize(generation)),
+    }))
+    .find(({ created, verified }) =>
+      created !== undefined &&
+      verified.targetId === options.targetId &&
+      verified.envelopeDigest === created.envelopeDigest &&
+      validVerificationSignature(verified, options.trust));
+  if (verifiedPair?.created) {
+    const created = verifiedPair.created;
+    const abort = options.abort ?? new AbortController().signal;
+    const envelopeBytes = Buffer.from(await runWithMaintenanceUrgency(
+      () => "foreground",
+      abort,
+      () => runStorageMaintenanceStep(
+        options.storageMaintenance,
+        storageMaintenanceRequest(
+          "authority-checkpoint",
+          options.trust.homeId,
+          { identity: `local-get:${created.checkpointId}:envelope`, bytes: created.envelopeRef.bytes },
+          { obligation: "committed" },
+        ),
+        () => options.artifacts.get(created.envelopeRef),
+      ),
+    ));
+    const text = envelopeBytes.toString("utf8");
+    envelopeBytes.fill(0);
+    const envelope = JSON.parse(text) as CheckpointEnvelope;
+    if (
+      canonicalize(envelope) !== text ||
+      envelope.checkpointId !== created.checkpointId ||
+      envelope.digest !== created.envelopeDigest ||
+      canonicalize(checkpointEnvelopeArtifact(envelope)) !== canonicalize(created.envelopeRef)
+    ) {
+      throw new TypeError("Stored checkpoint envelope does not match its created fact");
+    }
+    if (isFullEnvelope(envelope)) {
+      return {
+        state: "recoverable",
+        fullBackupReady: true,
+        checkpointId: created.checkpointId,
+        targetId: created.targetId,
+        createdAt: envelope.createdAt,
+        upToLsn: created.upToLsn,
+      };
+    }
+  }
+  const pending = [...records].reverse().find((record): record is Extract<
+    CheckpointStreamRecord,
+    { t: "checkpoint-created" }
+  > => record.t === "checkpoint-created" &&
+    record.generation !== undefined &&
+    canonicalize(record.generation) === canonicalize(generation));
+  return pending
+    ? {
+        state: "pending-verification",
+        fullBackupReady: false,
+        checkpointId: pending.checkpointId,
+        targetId: pending.targetId,
+        upToLsn: pending.upToLsn,
+      }
+    : { state: "not-configured", fullBackupReady: false };
+}
+
 export interface AuthorityCheckpointServiceOptions {
   readonly log: AuthorityCommitLog;
   readonly artifacts: MutableArtifactStore;
@@ -253,55 +356,16 @@ export class AuthorityCheckpointService {
   }
 
   async status(): Promise<RecoveryBackupStatus> {
-    if (!this.options.currentAnchor) return { state: "not-configured", fullBackupReady: false };
-    if (!this.options.trust.recoveryBackupPublicKey) {
-      return { state: "not-configured", fullBackupReady: false };
-    }
-    const records = await this.#records();
-    const recipientKeyId = keyIdForPublicKey(this.options.trust.recoveryBackupPublicKey);
-    const generation = this.#generation();
-    const verifiedPair = currentFullVerified(records, recipientKeyId)
-      .toReversed()
-      .map((verified) => ({
-        verified,
-        created: records.find((record): record is Extract<
-          CheckpointStreamRecord,
-          { t: "checkpoint-created" }
-        > => record.t === "checkpoint-created" &&
-          record.checkpointId === verified.checkpointId &&
-          record.generation !== undefined && sameAuthorityGeneration(record.generation, generation)),
-      }))
-      .find(({ created, verified }) =>
-        created?.targetId !== undefined && validVerificationSignature(verified, this.options.trust));
-    if (verifiedPair?.created) {
-      const created = verifiedPair.created;
-        const checkpoint = await this.#loadLocalPackage(created);
-        if (isFullEnvelope(checkpoint.envelope)) {
-          return {
-            state: "recoverable",
-            fullBackupReady: true,
-            checkpointId: created.checkpointId,
-            targetId: created.targetId,
-            createdAt: checkpoint.envelope.createdAt,
-            upToLsn: created.upToLsn,
-          };
-        }
-    }
-    const pending = [...records].reverse().find((record): record is Extract<
-      CheckpointStreamRecord,
-      { t: "checkpoint-created" }
-    > =>
-      record.t === "checkpoint-created" &&
-      canonicalize(record.generation) === canonicalize(generation));
-    return pending
-      ? {
-          state: "pending-verification",
-          fullBackupReady: false,
-          checkpointId: pending.checkpointId,
-          targetId: pending.targetId,
-          upToLsn: pending.upToLsn,
-        }
-      : { state: "not-configured", fullBackupReady: false };
+    return projectDurableRecoveryBackupStatus({
+      log: this.options.log,
+      artifacts: this.options.artifacts,
+      trust: this.options.trust,
+      currentAnchor: this.options.currentAnchor,
+      targetId: this.options.target.targetId,
+      ...(this.options.storageMaintenance
+        ? { storageMaintenance: this.options.storageMaintenance }
+        : {}),
+    });
   }
 
   /** Returns the newest durable target copy, including a terminal replay candidate. */
@@ -533,6 +597,8 @@ export class AuthorityCheckpointService {
       CheckpointStreamRecord,
       { t: "checkpoint-created" }
     > => record.t === "checkpoint-created" &&
+      record.generation !== undefined &&
+      record.request !== undefined &&
       canonicalize(record.generation) === canonicalize(generation) &&
       canonicalize(record.request) === canonicalize(request));
   }
@@ -541,8 +607,10 @@ export class AuthorityCheckpointService {
     if (
       record.targetId !== this.options.target.targetId ||
       record.recipientKeyId !== this.options.recipient.backupKeyId ||
-      canonicalize(record.generation) !== canonicalize(this.#generation()) ||
-      !record.source || !record.request
+      !record.generation ||
+      !record.source ||
+      !record.request ||
+      canonicalize(record.generation) !== canonicalize(this.#generation())
     ) throw new TypeError("Checkpoint replay belongs to another recovery target or root");
   }
 

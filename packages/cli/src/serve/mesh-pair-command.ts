@@ -624,6 +624,7 @@ async function issuePairing(input: PairCommandOptions & {
             targetDeviceId,
             recipientKeyId,
             transport: new PairingSocketCheckpointTransport(transport!),
+            storageMaintenance: input.storageMaintenance,
           });
         },
         writeLine: input.writeLine,

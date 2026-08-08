@@ -7,6 +7,7 @@ import type {
   MeshRoleBootConfig,
   SecretStorePort,
 } from "@zhixing/core/contracts";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig } from "@zhixing/providers";
 import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
@@ -43,6 +44,7 @@ export interface BackupCommandOptions {
   readonly secretStore?: SecretStorePort;
   readonly writeLine?: (line: string) => void;
   readonly readRecoveryPackage?: () => Promise<string>;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
 }
 
 export async function runBackupSetupCommand(
@@ -64,19 +66,50 @@ export async function runBackupSetupCommand(
       targetId: `backup-device:${member.device.deviceId}`,
       deviceId: member.device.deviceId,
     } as const;
-    await context.targets.select(binding);
-    const preparedRoot = !context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey
-      ? RecoveryRoot.generate()
+    const prepared = !context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey
+      ? await prepareInitialRoot(context, options.readRecoveryPackage)
       : undefined;
+    await context.targets.select(binding);
+    if (!prepared) {
+      const replay = await currentPairedRootActivation(context, binding.targetId);
+      if (replay) {
+        const activationConnection = await connectPairedTarget(
+          context,
+          binding.deviceId,
+          keyIdForPublicKey(context.trust.recoveryBackupPublicKey!),
+        );
+        try {
+          await activationConnection.target.activateRoot(replay);
+        } finally {
+          await activationConnection.close();
+        }
+      }
+    }
     const connection = await connectPairedTarget(
       context,
       binding.deviceId,
-      preparedRoot
-        ? keyIdForPublicKey(preparedRoot.backupPublicKey)
+      prepared
+        ? prepared.checkpoint.envelope.recipientKeyId
         : keyIdForPublicKey(context.trust.recoveryBackupPublicKey!),
     );
     try {
-      await completeBackupSetup(context, connection.target, options.readRecoveryPackage, preparedRoot);
+      await completeBackupSetup(
+        context,
+        connection.target,
+        options.readRecoveryPackage,
+        prepared,
+      );
+      if (prepared) {
+        const record = await context.store.loadTrustRecord();
+        if (!record || prepared.plan.kind !== "establish") {
+          throw new Error("恢复根激活后缺少可提交的 current-issuer 信任事实");
+        }
+        await connection.target.activateRoot({
+          checkpointId: prepared.checkpoint.envelope.checkpointId,
+          event: prepared.plan.rootEvent,
+          record,
+        });
+      }
     } finally {
       await connection.close();
     }
@@ -150,7 +183,7 @@ interface BackupContext {
   readonly trust: HomeTrustRecord;
   readonly projection: TrustProjection;
   readonly store: FileMeshBootstrapStore;
-  readonly capacity: ReturnType<typeof createDeviceCapacityRuntime>;
+  readonly capacity: { readonly storage: StorageMaintenanceGovernorPort };
   readonly targets: FileBackupTargetConfiguration;
   readonly writeLine: (line: string) => void;
 }
@@ -162,7 +195,9 @@ async function openContext(options: BackupCommandOptions, initialize = true): Pr
     throw new Error("设备秘密存储解锁后才能管理恢复备份");
   }
   const key = await loadOrCreateDeviceKey(secretStore);
-  const capacity = createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity"));
+  const capacity = options.storageMaintenance
+    ? { storage: options.storageMaintenance }
+    : createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity"));
   const store = new FileMeshBootstrapStore(home, key, { storageMaintenance: capacity.storage });
   let projection = await store.loadTrustProjection();
   let trust = await store.loadTrustRecord();
@@ -209,13 +244,17 @@ async function openContext(options: BackupCommandOptions, initialize = true): Pr
   };
 }
 
-async function establishInitialRoot(
+interface PreparedInitialRoot {
+  readonly root: RecoveryRoot;
+  readonly plan: Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["plan"];
+  readonly checkpoint: Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["checkpoint"];
+}
+
+async function prepareInitialRoot(
   context: BackupContext,
-  target: RetirableRecoveryCheckpointTarget,
   readRecoveryPackage?: () => Promise<string>,
-  preparedRoot?: RecoveryRoot,
-): Promise<void> {
-  const root = preparedRoot ?? RecoveryRoot.generate();
+): Promise<PreparedInitialRoot> {
+  const root = RecoveryRoot.generate();
   const recoveryPackage = encodeRecoveryPackage(root);
   context.writeLine(`恢复包：${recoveryPackage}`);
   const decoded = await readDecodedRecoveryPackage(readRecoveryPackage);
@@ -255,11 +294,24 @@ async function establishInitialRoot(
     retention: context.store.checkpointRetention(),
     storageMaintenance: context.capacity.storage,
   })).checkpoint;
+  if (checkpoint.envelope.recipientKeyId !== keyIdForPublicKey(decoded.root.backupPublicKey)) {
+    throw new Error("恢复包与恢复 checkpoint 的 recipient 身份不一致");
+  }
+  return { root: decoded.root, plan, checkpoint };
+}
+
+async function establishInitialRoot(
+  context: BackupContext,
+  target: RetirableRecoveryCheckpointTarget,
+  readRecoveryPackage?: () => Promise<string>,
+  prepared?: PreparedInitialRoot,
+): Promise<void> {
+  const initial = prepared ?? await prepareInitialRoot(context, readRecoveryPackage);
   await new RecoveryActivationCoordinator(context.store.bootstrapAuthority()).activatePrepared({
     current: context.projection,
-    plan,
-    checkpoint,
-    candidateRoot: decoded.root,
+    plan: initial.plan,
+    checkpoint: initial.checkpoint,
+    candidateRoot: initial.root,
     issuerIdentity: context.identity,
     target,
     sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
@@ -271,10 +323,10 @@ async function completeBackupSetup(
   context: BackupContext,
   target: RetirableRecoveryCheckpointTarget,
   readRecoveryPackage?: () => Promise<string>,
-  preparedRoot?: RecoveryRoot,
+  prepared?: PreparedInitialRoot,
 ): Promise<void> {
   if (!context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey) {
-    await establishInitialRoot(context, target, readRecoveryPackage, preparedRoot);
+    await establishInitialRoot(context, target, readRecoveryPackage, prepared);
     context.writeLine("恢复备份已创建、回读并验证，可用于恢复。");
     return;
   }
@@ -316,7 +368,10 @@ async function connectPairedTarget(
   recipientKeyId = context.trust.recoveryBackupPublicKey
     ? keyIdForPublicKey(context.trust.recoveryBackupPublicKey)
     : undefined,
-): Promise<{ readonly target: RetirableRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
+): Promise<{
+  readonly target: PairedRecoveryCheckpointTarget;
+  readonly close: () => Promise<void>;
+}> {
   const member = context.trust.members.find((candidate) =>
     candidate.state === "active" && candidate.device.deviceId === targetDeviceId);
   if (!member || targetDeviceId === context.key.deviceId) {
@@ -341,6 +396,7 @@ async function connectPairedTarget(
     secretStore: context.secretStore,
     bootstrapStore: bootstrap.bootstrapStore,
     services: new MeshServiceRegistry(),
+    watchTrust: false,
     ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
   });
   try {
@@ -354,6 +410,7 @@ async function connectPairedTarget(
         targetDeviceId,
         recipientKeyId,
         transport: new MeshPairedCheckpointTransport(control.connections.client(targetDeviceId)),
+        storageMaintenance: context.capacity.storage,
       }),
       close: () => control.stop(),
     };
@@ -361,6 +418,31 @@ async function connectPairedTarget(
     await control.stop().catch(() => undefined);
     throw error;
   }
+}
+
+async function currentPairedRootActivation(
+  context: BackupContext,
+  targetId: string,
+): Promise<{
+  readonly checkpointId: string;
+  readonly event: Parameters<PairedRecoveryCheckpointTarget["activateRoot"]>[0]["event"];
+  readonly record: HomeTrustRecord;
+} | undefined> {
+  const event = (await context.store.loadTrustEvents()).at(-1);
+  if (
+    !event ||
+    event.body.t !== "recovery-root" ||
+    event.body.op !== "establish" ||
+    event.seq !== context.trust.chainHead.seq ||
+    !context.projection.recoveryActivationDigest
+  ) return undefined;
+  const verified = [...await context.store.loadCheckpointRecords()].reverse().find((record) =>
+    record.t === "checkpoint-verified" &&
+    record.targetId === targetId &&
+    record.purpose.kind === "root-activation" &&
+    record.purpose.activationDigest === context.projection.recoveryActivationDigest);
+  if (!verified) return undefined;
+  return { checkpointId: verified.checkpointId, event, record: context.trust };
 }
 
 async function openTargetBinding(

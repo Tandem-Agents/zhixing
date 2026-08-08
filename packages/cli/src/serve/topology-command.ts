@@ -14,6 +14,7 @@ import {
   type ServeRoleConfiguration,
 } from "./role-topology.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
+import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
 import {
   acquireExecutorLocalWorkspaceOwner,
   defineLocalWorkspaceAssemblyIdentity,
@@ -43,7 +44,7 @@ export async function runServeCommand(
   }
   const deviceCapacity = createDeviceCapacityRuntime(`${zhixingHome}/distributed-runtime/capacity`);
   let mesh: Awaited<ReturnType<typeof prepareMeshRuntimeBootstrap>> | undefined;
-  let localWorkspaceOwner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>>;
+  let localWorkspaceOwner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>> | undefined;
   try {
     mesh = await prepareMeshRuntimeBootstrap({
       zhixingHome,
@@ -51,6 +52,31 @@ export async function runServeCommand(
       storageMaintenance: deviceCapacity.storage,
       ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
     });
+    if (
+      mesh.mode === "trusted-home" &&
+      !mesh.trust.recoveryRootPublicKey &&
+      !mesh.trust.recoveryBackupPublicKey
+    ) {
+      writer.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
+      await runRecoveryRootEstablishmentTopology({
+        zhixingHome,
+        mesh,
+        secretStore,
+        storageMaintenance: deviceCapacity.storage,
+      });
+      mesh.bootstrapStore.stopStorageMaintenance();
+      mesh = await prepareMeshRuntimeBootstrap({
+        zhixingHome,
+        secretStore,
+        storageMaintenance: deviceCapacity.storage,
+        ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
+      });
+      if (
+        mesh.mode !== "trusted-home" ||
+        !mesh.trust.recoveryRootPublicKey ||
+        !mesh.trust.recoveryBackupPublicKey
+      ) throw new Error("恢复根激活后未形成可运行的耐久信任状态");
+    }
     localWorkspaceOwner = await acquireExecutorLocalWorkspaceOwner(
       zhixingHome,
       mesh.roles,
