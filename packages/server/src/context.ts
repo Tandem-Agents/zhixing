@@ -218,6 +218,13 @@ export interface ServerContext {
     fullBackupReady: boolean;
     nextAction?: string;
   }>;
+  /** 用户主动迁移值班设备；仅暴露设备与用户可理解的阶段。 */
+  dutyMigration?: {
+    targets(): Promise<readonly { readonly deviceId: string; readonly displayName: string }[]>;
+    prepare(input: { readonly requestId: string; readonly transferId: string; readonly targetDeviceId: string }): Promise<{ readonly stage: "ready" }>;
+    commit(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "completed" }>;
+    cancel(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "cancelled" }>;
+  };
   /**
    * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。
    * 结构与 MCP hub 的 serverStatuses 兼容(server 不依赖 mcp 包,结构形声明)。
@@ -311,6 +318,7 @@ export interface CreateContextOptions {
   memory?: MemoryDirectory;
   hostInfo?: { workspace?: string; logPath?: string };
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
+  dutyMigration?: ServerContext["dutyMigration"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   taskListUpdate?: ServerContext["taskListUpdate"];
@@ -340,6 +348,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     memory: opts.memory,
     hostInfo: opts.hostInfo,
     recoveryBackupStatus: opts.recoveryBackupStatus,
+    dutyMigration: opts.dutyMigration,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
     taskListUpdate: opts.taskListUpdate,

@@ -43,7 +43,11 @@ export type ConversationTransferPhase =
   | "tombstoned"
   | "aborted";
 
-type TransferRecordKind = TransferRecord["t"];
+type ConversationTransferRecord = Extract<
+  TransferRecord,
+  { t: "prepared" | "frozen" | "imported" | "committed" | "tombstoned" | "aborted" }
+>;
+type TransferRecordKind = ConversationTransferRecord["t"];
 
 export interface ConversationTransferIdentity {
   readonly requestId: string;
@@ -648,7 +652,7 @@ function validateUnsignedConversationTransferCommand(
   return value as unknown as UnsignedConversationTransferCommand;
 }
 
-function validateTransferRecordShape(input: unknown): TransferRecord {
+function validateTransferRecordShape(input: unknown): ConversationTransferRecord {
   const value = clone(input, "Transfer record");
   assertVersion(value.v, "Transfer record");
   if (value.t === "prepared") {
@@ -667,10 +671,10 @@ function validateTransferRecordShape(input: unknown): TransferRecord {
     throw new TypeError("Transfer record state is invalid");
   }
   assertTransferId(value.transferId, "Transfer record transferId");
-  return value as unknown as TransferRecord;
+  return value as unknown as ConversationTransferRecord;
 }
 
-function assertPreparedRecord(record: Extract<TransferRecord, { t: "prepared" }>): void {
+function assertPreparedRecord(record: Extract<ConversationTransferRecord, { t: "prepared" }>): void {
   assertProtocolIdentifier(record.requestId, "Prepared transfer requestId");
   assertProtocolIdentifier(record.sourceDeviceId, "Prepared transfer sourceDeviceId");
   assertProtocolIdentifier(record.targetDeviceId, "Prepared transfer targetDeviceId");
@@ -679,7 +683,7 @@ function assertPreparedRecord(record: Extract<TransferRecord, { t: "prepared" }>
 }
 
 function preparedIdentity(
-  record: Extract<TransferRecord, { t: "prepared" }>,
+  record: Extract<ConversationTransferRecord, { t: "prepared" }>,
 ): ConversationTransferIdentity {
   return {
     requestId: record.requestId,
@@ -692,7 +696,7 @@ function preparedIdentity(
   };
 }
 
-function assertRecordIdentity(identity: ConversationTransferIdentity, record: TransferRecord): void {
+function assertRecordIdentity(identity: ConversationTransferIdentity, record: ConversationTransferRecord): void {
   if (record.t === "frozen") {
     return;
   }

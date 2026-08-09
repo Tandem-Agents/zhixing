@@ -291,6 +291,9 @@ export async function runExecutorRole(
       endpoints: bootstrap.mesh.endpoints,
       transportPeers: bootstrap.mesh.transportPeers,
       bootstrapStore: bootstrap.mesh.bootstrapStore,
+      ...(bootstrap.mesh.anchorIssuerKey
+        ? { plannedAnchorIssuerKey: bootstrap.mesh.anchorIssuerKey }
+        : {}),
       authority,
       localConversationOwner,
       executor: {

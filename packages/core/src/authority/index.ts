@@ -93,6 +93,7 @@ export {
   type AuthorityStorageErrorCode,
 } from "./errors.js";
 export type {
+  AuthorityAppendAdmissionGuard,
   ArtifactGarbageCollectionResult,
   ArtifactDeletionResult,
   ArtifactRetentionSnapshot,

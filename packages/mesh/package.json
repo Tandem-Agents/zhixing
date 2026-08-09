@@ -45,6 +45,10 @@
       "types": "./dist/bootstrap-authority.d.ts",
       "import": "./dist/bootstrap-authority.js"
     },
+    "./anchor-transfer-ready": {
+      "types": "./dist/anchor-transfer-ready.d.ts",
+      "import": "./dist/anchor-transfer-ready.js"
+    },
     "./blind-relay": {
       "types": "./dist/blind-relay.d.ts",
       "import": "./dist/blind-relay.js"

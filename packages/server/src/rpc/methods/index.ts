@@ -54,6 +54,10 @@ import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
   buildDeliveryResolveMethod,
+  buildDutyMigrationTargetsMethod,
+  buildDutyMigrationPrepareMethod,
+  buildDutyMigrationCommitMethod,
+  buildDutyMigrationCancelMethod,
   buildLlmCompleteMethod,
 } from "./server.js";
 import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
@@ -131,6 +135,10 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildServerShutdownMethod(),
     buildServerInfoMethod(),
     buildDeliveryResolveMethod(),
+    buildDutyMigrationTargetsMethod(),
+    buildDutyMigrationPrepareMethod(),
+    buildDutyMigrationCommitMethod(),
+    buildDutyMigrationCancelMethod(),
     buildLlmCompleteMethod(),
     // trust.*（信任规则管理面）
     buildTrustListMethod(),

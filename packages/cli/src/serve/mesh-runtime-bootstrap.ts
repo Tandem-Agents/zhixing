@@ -15,6 +15,7 @@ import {
 import { canonicalize } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
@@ -32,6 +33,7 @@ export type MeshRuntimeBootstrap =
       readonly mode: "trusted-home";
       readonly roles: readonly DeviceRole[];
       readonly deviceKey: DeviceKey;
+      readonly anchorIssuerKey?: DeviceKey;
       readonly bootstrapStore: FileMeshBootstrapStore;
       readonly trust: HomeTrustRecord;
       readonly configuration: MeshRoleBootConfig;
@@ -77,6 +79,16 @@ export async function prepareMeshRuntimeBootstrap(input: {
   if (!trust || !configuration) {
     throw new Error("Trusted-home mesh bootstrap is incomplete");
   }
+  let anchorIssuerKey: DeviceKey | undefined;
+  if (trust.issuer.deviceId === deviceKey.deviceId) {
+    anchorIssuerKey = trust.issuer.issuerKeyId === deviceKey.deviceId
+      ? deviceKey
+      : await loadActiveAnchorIssuerKey(input.secretStore, trust.issuer.issuerKeyId) ?? undefined;
+    if (!anchorIssuerKey || anchorIssuerKey.publicKey !== trust.issuer.issuerPublicKey) {
+      throw new Error("Current duty device is missing its active issuer key");
+    }
+    bootstrapStore.bindIssuerKey(anchorIssuerKey);
+  }
   if (!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey) {
     throw new Error("Trusted-home recovery root identity is inconsistent");
   }
@@ -104,6 +116,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
     mode: "trusted-home",
     roles: effective.roles,
     deviceKey,
+    ...(anchorIssuerKey ? { anchorIssuerKey } : {}),
     bootstrapStore,
     trust,
     configuration,

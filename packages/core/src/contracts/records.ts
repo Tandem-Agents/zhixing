@@ -24,8 +24,14 @@ import type {
   SurfaceAssetGrant,
 } from "./authorization.js";
 import type {
+  AnchorTransferAbort,
+  AnchorTransferCommit,
+  AuthorityCatalog,
   ConversationTransferAbort,
   ConversationTransferCommit,
+  HomeTrustEventBody,
+  HomeTrustEventWithBody,
+  ReadyProof,
   SourceFreezeProof,
 } from "./identity.js";
 import type {
@@ -523,5 +529,62 @@ export type TransferRecord = WireSchemaV1<"TransferRecord"> &
         t: "aborted";
         transferId: string;
         abort: ConversationTransferAbort;
+      }
+    | {
+        t: "anchor-prepared";
+        mode: "planned";
+        requestId: string;
+        transferId: string;
+        sourceDeviceId: string;
+        targetDeviceId: string;
+        sourceAnchorEpoch: number;
+        nextAnchorEpoch: number;
+        readyProof: ReadyProof;
+        trustTransition: HomeTrustEventWithBody<
+          Extract<HomeTrustEventBody, { t: "issuer-transition"; reason: "migration" }>
+        >;
+      }
+    | {
+        t: "anchor-fenced";
+        mode: "planned";
+        transferId: string;
+        sourceAnchorEpoch: number;
+        recoveryCheckpointDigest: Digest;
+        at: IsoTime;
+      }
+    | {
+        t: "anchor-frozen";
+        mode: "planned";
+        transferId: string;
+        checkpoint: ArtifactRef;
+        catalog: AuthorityCatalog;
+        catalogRef: ArtifactRef;
+        proof: SourceFreezeProof;
+      }
+    | {
+        t: "anchor-imported";
+        mode: "planned";
+        transferId: string;
+        checkpointDigest: Digest;
+        authorityCatalogDigest: Digest;
+      }
+    | {
+        t: "anchor-committed";
+        mode: "planned";
+        transferId: string;
+        commit: Extract<AnchorTransferCommit, { mode: "planned" }>;
+      }
+    | {
+        t: "anchor-tombstoned";
+        mode: "planned";
+        transferId: string;
+        commitDigest: Digest;
+        at: IsoTime;
+      }
+    | {
+        t: "anchor-aborted";
+        mode: "planned";
+        transferId: string;
+        abort: AnchorTransferAbort;
       }
   );

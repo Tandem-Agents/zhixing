@@ -292,6 +292,70 @@ program
     }
   });
 
+const dutyCmd = program
+  .command("duty")
+  .description("迁移当前值班设备");
+
+dutyCmd
+  .command("targets")
+  .description("列出可以接班的已配对设备")
+  .action(async () => {
+    try {
+      const { listDutyMigrationTargets } = await import("./runtime/duty-migration-command.js");
+      await listDutyMigrationTargets();
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+dutyCmd
+  .command("migrate")
+  .description("把值班职责迁移到指定设备")
+  .argument("<device-id>", "目标设备编号")
+  .option("--prepare-only", "只准备迁移，保留取消机会")
+  .action(async (deviceId: string, options: { prepareOnly?: boolean }) => {
+    try {
+      const { prepareDutyMigration } = await import("./runtime/duty-migration-command.js");
+      await prepareDutyMigration(deviceId, options.prepareOnly !== true);
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+dutyCmd
+  .command("continue")
+  .description("继续已准备的值班设备迁移")
+  .argument("<transfer-id>", "迁移编号")
+  .action(async (transferId: string) => {
+    try {
+      const { continueDutyMigration } = await import("./runtime/duty-migration-command.js");
+      await continueDutyMigration(transferId);
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+dutyCmd
+  .command("cancel")
+  .description("取消尚未切换的值班设备迁移")
+  .argument("<transfer-id>", "迁移编号")
+  .action(async (transferId: string) => {
+    try {
+      const { cancelDutyMigration } = await import("./runtime/duty-migration-command.js");
+      await cancelDutyMigration(transferId);
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
 const backupCmd = program
   .command("backup")
   .description("管理恢复备份");

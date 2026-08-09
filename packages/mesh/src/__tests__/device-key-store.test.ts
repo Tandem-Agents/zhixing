@@ -2,9 +2,13 @@ import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { describe, expect, it } from "vitest";
 import { DeviceKey } from "../device-identity.js";
 import {
+  anchorIssuerKeyRef,
+  deleteAnchorIssuerKey,
   deleteDeviceKey,
   deviceKeyRef,
+  loadAnchorIssuerKey,
   loadDeviceKey,
+  loadOrCreateAnchorIssuerKey,
   persistDeviceKey,
 } from "../device-key-store.js";
 
@@ -65,6 +69,33 @@ describe("device key SecretStore binding", () => {
       "retained the deleted device key",
     );
     expect(store.values.has(key(ref))).toBe(true);
+  });
+
+  it("binds one private issuer key to one transfer and reuses it across concurrent replay", async () => {
+    const store = new MemoryStore();
+    const [first, second] = await Promise.all([
+      loadOrCreateAnchorIssuerKey(store, "xfer-01J00000000000000000000001"),
+      loadOrCreateAnchorIssuerKey(store, "xfer-01J00000000000000000000001"),
+    ]);
+    const other = await loadOrCreateAnchorIssuerKey(
+      store,
+      "xfer-01J00000000000000000000002",
+    );
+    expect(second.deviceId).toBe(first.deviceId);
+    expect(other.deviceId).not.toBe(first.deviceId);
+    expect(anchorIssuerKeyRef("xfer-01J00000000000000000000001").bindingId)
+      .toContain("anchor-issuer/v1/");
+  });
+
+  it("deletes only the uncommitted transfer key with the expected identity", async () => {
+    const store = new MemoryStore();
+    const transferId = "xfer-01J00000000000000000000003";
+    const key = await loadOrCreateAnchorIssuerKey(store, transferId);
+    await expect(deleteAnchorIssuerKey(store, transferId, "fp:u" + "A".repeat(43)))
+      .rejects.toThrow("different identity");
+    expect((await loadAnchorIssuerKey(store, transferId))?.deviceId).toBe(key.deviceId);
+    await deleteAnchorIssuerKey(store, transferId, key.deviceId);
+    expect(await loadAnchorIssuerKey(store, transferId)).toBeNull();
   });
 });
 

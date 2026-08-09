@@ -10,6 +10,7 @@ export * from "./checkpoint-service.js";
 export * from "./checkpoint-owner.js";
 export * from "./paired-checkpoint-target.js";
 export * from "./bootstrap-authority.js";
+export * from "./anchor-transfer-ready.js";
 export * from "./device-identity.js";
 export * from "./device-key-store.js";
 export * from "./device-readiness.js";

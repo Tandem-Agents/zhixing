@@ -52,4 +52,42 @@ describe("RpcManagementFacade · 基础宿主信息面", () => {
     await expect(facade.serverInfoIfConnected()).resolves.toBeNull();
     expect(fake.requests).toEqual([]);
   });
+
+  it("值班设备迁移只使用四个 canonical 管理方法", async () => {
+    const fake = makeFakeHostLink();
+    fake.setResponder((method) => {
+      if (method === "dutyMigration.targets") {
+        return { devices: [{ deviceId: "device-ready", displayName: "客厅主机" }] };
+      }
+      if (method === "dutyMigration.prepare") return { stage: "ready" };
+      if (method === "dutyMigration.commit") return { stage: "completed" };
+      if (method === "dutyMigration.cancel") return { stage: "cancelled" };
+      throw new Error(`unexpected method: ${method}`);
+    });
+    const facade = new RpcManagementFacade(fake.link);
+    const identity = { requestId: "request:duty-1", transferId: "duty-1" };
+
+    await expect(facade.dutyMigrationTargets()).resolves.toEqual([
+      { deviceId: "device-ready", displayName: "客厅主机" },
+    ]);
+    await expect(facade.dutyMigrationPrepare({
+      ...identity,
+      targetDeviceId: "device-ready",
+    })).resolves.toEqual({ stage: "ready" });
+    await expect(facade.dutyMigrationCommit(identity)).resolves.toEqual({
+      stage: "completed",
+    });
+    await expect(facade.dutyMigrationCancel(identity)).resolves.toEqual({
+      stage: "cancelled",
+    });
+    expect(fake.requests).toEqual([
+      { method: "dutyMigration.targets", params: undefined },
+      {
+        method: "dutyMigration.prepare",
+        params: { ...identity, targetDeviceId: "device-ready" },
+      },
+      { method: "dutyMigration.commit", params: identity },
+      { method: "dutyMigration.cancel", params: identity },
+    ]);
+  });
 });

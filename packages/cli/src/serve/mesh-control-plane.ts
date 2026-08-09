@@ -98,9 +98,13 @@ export class ProductionMeshControlPlane {
     if (this.#started) return;
     this.#started = true;
     await this.options.onTrustReconciled?.(this.#trust);
-    if (this.#roles.has("anchor")) {
+    if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
-    } else if (this.#roles.has("executor") || this.#roles.has("surface")) {
+    } else if (
+      this.#roles.has("anchor") ||
+      this.#roles.has("executor") ||
+      this.#roles.has("surface")
+    ) {
       this.#startDialer();
     }
     if (this.options.watchTrust !== false) this.#track(this.#watchTrust());
@@ -213,9 +217,13 @@ export class ProductionMeshControlPlane {
       this.#stopPeerTask(peerId, new Error("Mesh trust topology changed"));
     }
     await this.#closeTransport(new Error("Mesh trust topology changed"));
-    if (this.#roles.has("anchor")) {
+    if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
-    } else if (this.#roles.has("executor") || this.#roles.has("surface")) {
+    } else if (
+      this.#roles.has("anchor") ||
+      this.#roles.has("executor") ||
+      this.#roles.has("surface")
+    ) {
       this.#startDialer();
     }
   }
@@ -237,7 +245,7 @@ export class ProductionMeshControlPlane {
   }
 
   async #startAnchor(): Promise<void> {
-    const trustedPeers = this.#authorizedPeers(["executor", "surface"]);
+    const trustedPeers = this.#authorizedPeers(["anchor", "executor", "surface"]);
     if (trustedPeers.length === 0) return;
     const listen = this.options.configuration.anchorListen;
     if (listen) {
@@ -300,7 +308,7 @@ export class ProductionMeshControlPlane {
 
   #startDialer(): void {
     const anchors = this.#authorizedPeers(["anchor"]);
-    const issuerId = this.options.trust.issuer.deviceId;
+    const issuerId = this.#trust.issuer.deviceId;
     const anchor = anchors.find((candidate) => candidate.identity.deviceId === issuerId);
     if (!anchor) throw new Error("Mesh executor has no active issuer anchor peer");
     if (!this.options.endpoints.get(anchor.identity.deviceId)) {
@@ -430,13 +438,20 @@ export class ProductionMeshControlPlane {
       trustedPeers,
       replayWindow: this.#replayWindow,
       authorizePeer: (identity: { deviceId: string }) =>
-        this.#isAuthorized(identity.deviceId, ["executor", "surface"]),
+        this.#isAuthorized(identity.deviceId, this.#compatiblePeerRoles()),
       onHandshakeError: (error: Error) => this.#report(error),
     };
   }
 
   #compatiblePeerRoles(): readonly DeviceRole[] {
-    return this.#roles.has("anchor") ? ["executor", "surface"] : ["anchor"];
+    return this.#isCurrentAnchor()
+      ? ["anchor", "executor", "surface"]
+      : ["anchor"];
+  }
+
+  #isCurrentAnchor(): boolean {
+    return this.#roles.has("anchor") &&
+      this.#trust.issuer.deviceId === this.options.localIdentity.deviceId;
   }
 
   #track(task: Promise<void>): void {

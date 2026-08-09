@@ -99,7 +99,17 @@ const coverageGroups = [
   ["light-inference", ["rpc:llm.complete"]],
   ["shutdown", ["rpc:server.shutdown", "cli:zhixing stop", "slash:stop:repl"]],
   ["runtime-config", ["slash:config:repl", "slash:mcp:repl"]],
-  ["device-trust", ["cli:zhixing pair"]],
+  ["device-trust", [
+    "cli:zhixing pair",
+    "cli:zhixing duty targets",
+    "cli:zhixing duty migrate",
+    "cli:zhixing duty continue",
+    "cli:zhixing duty cancel",
+    "rpc:dutyMigration.targets",
+    "rpc:dutyMigration.prepare",
+    "rpc:dutyMigration.commit",
+    "rpc:dutyMigration.cancel",
+  ]],
   ["recovery-backup", ["cli:zhixing backup setup", "cli:zhixing backup verify", "cli:zhixing backup status"]],
 ];
 
@@ -115,6 +125,7 @@ const baseMappingTuples = [
     { exclusion: "composition", reason: exclusions.composition },
   ],
   ["cli:zhixing serve", { exclusion: "composition", reason: exclusions.composition }],
+  ["cli:zhixing duty", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing backup", { exclusion: "composition", reason: exclusions.composition }],
   [
     "cli:zhixing serve logs",
@@ -881,6 +892,7 @@ export async function validateS7Structure() {
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectRecoveryBackupAssembly(records));
+  failures.push(...inspectPlannedAnchorTransferAssembly(records));
   for (const packageName of [
     "server",
     "executor",
@@ -1158,6 +1170,121 @@ export function inspectRecoveryBackupAssembly(records) {
     count(pairing, "new PairedCheckpointReceiver({") !== 1
   ) {
     failures.push("packages/cli/src/serve/mesh-pair-command.ts: authenticated onboarding checkpoint must precede business enrollment");
+  }
+  return failures;
+}
+
+export function inspectPlannedAnchorTransferAssembly(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const assembly = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const mesh = byPath.get("packages/cli/src/serve/planned-anchor-transfer-mesh.ts");
+  const transfer = byPath.get("packages/cli/src/serve/planned-anchor-transfer.ts");
+  const command = byPath.get("packages/cli/src/serve/command.ts");
+  const server = byPath.get("packages/server/src/rpc/methods/server.ts");
+  const facade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
+  const product = byPath.get("packages/cli/src/runtime/duty-migration-command.ts");
+  const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
+  const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
+  if (
+    !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
+    !accessRoot || !executorRoot
+  ) {
+    return ["planned anchor transfer production assembly sources are missing"];
+  }
+  const count = (text, token) => text.split(token).length - 1;
+  const descriptor = frozenLiteralDescriptor(
+    "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
+    mesh,
+    "PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR",
+  );
+  const expectedDescriptor = {
+    owner: "current-duty-device",
+    receiver: "prepared-duty-target",
+    roles: ["anchor-executor", "anchor-only"],
+    targetPhases: ["prepare", "status", "freeze", "import", "commit", "abort"],
+    sourcePhases: ["probe", "read-range"],
+    order: ["ready", "prepare", "freeze", "import", "commit"],
+  };
+  if (
+    JSON.stringify(descriptor) !== JSON.stringify(expectedDescriptor) ||
+    count(mesh, "PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR.targetPhases.includes(") !== 1 ||
+    count(mesh, "PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR.sourcePhases.includes(") !== 1
+  ) {
+    failures.push("planned anchor transfer owner/receiver phase exact-set drifted");
+  }
+
+  const roots = records.filter(({ text }) => text.includes("new MeshRuntimeAssembly({"));
+  const expectedRoots = new Set([
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ]);
+  if (
+    roots.length !== expectedRoots.size ||
+    roots.some(({ relative }) => !expectedRoots.has(relative)) ||
+    count(accessRoot, "new MeshRuntimeAssembly({") !== 1 ||
+    count(executorRoot, "new MeshRuntimeAssembly({") !== 1 ||
+    count(accessRoot, "plannedAnchorIssuerKey: bootstrap.anchorIssuerKey") !== 1 ||
+    count(executorRoot, "plannedAnchorIssuerKey: bootstrap.mesh.anchorIssuerKey") !== 1
+  ) {
+    failures.push("planned anchor transfer two production roots exact-set drifted");
+  }
+
+  const ownerConstructions = records.filter(({ text }) =>
+    text.includes("new PlannedAnchorTransferOwner({"));
+  const targetConstructions = records.filter(({ text }) =>
+    text.includes("new PlannedAnchorTransferTarget({"));
+  if (
+    ownerConstructions.length !== 1 ||
+    ownerConstructions[0]?.relative !== "packages/cli/src/serve/mesh-runtime-assembly.ts" ||
+    targetConstructions.length !== 1 ||
+    targetConstructions[0]?.relative !== "packages/cli/src/serve/mesh-runtime-assembly.ts" ||
+    count(assembly, "registerPlannedAnchorTransferSourceMeshService(") !== 1 ||
+    count(assembly, "registerPlannedAnchorTransferMeshServices(") !== 1 ||
+    count(
+      assembly,
+      'const roleEnabled = this.options.configuration.enabledRoles.includes("anchor")',
+    ) !== 1 ||
+    !assembly.includes('local?.state === "active" && local.roles.includes("anchor")')
+  ) {
+    failures.push("planned anchor transfer owner/receiver topology exact-set drifted");
+  }
+
+  const recovery = assembly.indexOf("await this.#plannedAnchorOwner?.recoverBeforeAdmission()");
+  const admission = assembly.indexOf("await this.#control.start()", recovery);
+  const freeze = assembly.indexOf("await owner.freeze(input)");
+  const commitCall = assembly.indexOf("return owner.commit(input)", freeze);
+  if (
+    recovery < 0 || admission < recovery || freeze < 0 || commitCall < freeze ||
+    !transfer.includes("await this.options.onInstalled?.(trustRecord)") ||
+    !assembly.includes("await this.#control.reconcileTrust(record)")
+  ) {
+    failures.push("planned anchor transfer recovery/commit/admission order drifted");
+  }
+
+  const publicMethods = [
+    "dutyMigration.targets",
+    "dutyMigration.prepare",
+    "dutyMigration.commit",
+    "dutyMigration.cancel",
+  ];
+  if (
+    publicMethods.some((method) =>
+      count(server, `name: "${method}"`) !== 1 ||
+      count(facade, `"${method}"`) !== 1) ||
+    count(command, "dutyMigration: {") !== 1 ||
+    !product.includes("正在检查目标设备并准备迁移") ||
+    !product.includes("此时仍可取消") ||
+    !product.includes("正在收束当前任务并传输耐久状态") ||
+    !product.includes("后续操作将由新设备处理")
+  ) {
+    failures.push("planned anchor transfer public journey or canonical RPC exact-set drifted");
+  }
+  const publicText = [...product.matchAll(
+    /(?:console\.log|TypeError)\((?:`([^`]*)`|"([^"]*)"|'([^']*)')/gu,
+  )].map((match) => match[1] ?? match[2] ?? match[3] ?? "").join(" ");
+  if (/anchor|epoch|issuer|catalog/iu.test(publicText)) {
+    failures.push("planned anchor transfer public journey leaks internal topology terms");
   }
   return failures;
 }
@@ -2618,6 +2745,7 @@ const rpcClientOwners = new Set([
 ]);
 const coreHostConnectionOwners = new Set([
   "packages/cli/src/repl.ts",
+  "packages/cli/src/runtime/duty-migration-command.ts",
   "packages/cli/src/runtime/workspace-command.ts",
 ]);
 const rpcMethodOwners = new Set([

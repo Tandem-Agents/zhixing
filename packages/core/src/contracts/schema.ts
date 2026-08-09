@@ -2,6 +2,10 @@ import type { TrustRuleSnapshot } from "../security/types.js";
 import type { CommitEnvelope } from "./commit-log.js";
 import type {
   AnchorTransferCommit,
+  AnchorTransferAbort,
+  AnchorTransferCommand,
+  AnchorTransferResult,
+  AuthorityCatalog,
   CheckpointEnvelope,
   FullAuthorityCheckpointPayload,
   ConversationTransferCommit,
@@ -18,6 +22,7 @@ import type {
   PakeRound,
   RecoveryActivationPlan,
   RecoveryCheckpointVerification,
+  ReadyProof,
   SourceFreezeProof,
 } from "./identity.js";
 import type {
@@ -79,6 +84,10 @@ export interface WireSchemaMap {
   HomeTrustRecord: HomeTrustRecord;
   MeshEndpointDescriptor: MeshEndpointDescriptor;
   AnchorTransferCommit: AnchorTransferCommit;
+  AnchorTransferAbort: AnchorTransferAbort;
+  AnchorTransferCommand: AnchorTransferCommand;
+  AnchorTransferResult: AnchorTransferResult;
+  AuthorityCatalog: AuthorityCatalog;
   SourceFreezeProof: SourceFreezeProof;
   ConversationTransferCommit: ConversationTransferCommit;
   ConversationTransferAbort: ConversationTransferAbort;
@@ -91,6 +100,7 @@ export interface WireSchemaMap {
   PairingAcceptance: PairingAcceptance;
   RecoveryActivationPlan: RecoveryActivationPlan;
   RecoveryCheckpointVerification: RecoveryCheckpointVerification;
+  ReadyProof: ReadyProof;
   CheckpointEnvelope: CheckpointEnvelope;
   FullAuthorityCheckpointPayload: FullAuthorityCheckpointPayload;
   TrustRuleSnapshot: TrustRuleSnapshot;

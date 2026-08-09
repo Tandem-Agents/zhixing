@@ -687,6 +687,7 @@ async function runServerProcess(
     ),
   });
   await ctx.authorityCheckpointOwner?.start();
+  ctx.meshRuntime?.bindAuthorityCheckpointOwner(ctx.authorityCheckpointOwner);
   authorityRuntimeRef.current = ctx.authorityRuntime;
   meshRuntimeRef.current = ctx.meshRuntime;
   conversationsRef.current = ctx.conversations ?? null;
@@ -935,6 +936,26 @@ async function runServerProcess(
       ),
     });
     await runtime.start();
+    ctx.meshRuntime?.bindPlannedAnchorLifecycle({
+      stopAccepting: async () => {
+        ctx.inboundRouter?.refuseNewMessages();
+        await runtime.scheduler.pauseForAuthorityTransfer();
+      },
+      drainAccepted: async () => {
+        await ctx.conversations?.abortAllAndWait(
+          { kind: "external", origin: "planned-duty-migration" },
+          30_000,
+        );
+        await ctx.executorJobOwner?.drain();
+        await ctx.deliveryStack?.flush();
+        await ctx.conversationProtocol?.stopRecoveryLoop();
+      },
+      resumeAfterAbort: () => {
+        ctx.conversationProtocol?.startRecoveryLoop();
+        runtime.scheduler.resumeAfterAuthorityTransfer();
+        ctx.inboundRouter?.resumeNewMessages();
+      },
+    });
     adoptionReview = new PostAdoptionReviewCoordinator({
       review: runtime.deferredIntents,
       hub: confirmationHub,
@@ -1032,6 +1053,29 @@ async function runServerProcess(
     recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
+    ...(ctx.meshRuntime
+      ? {
+          dutyMigration: {
+            targets: async () => ctx.meshRuntime!.plannedAnchorTargets(),
+            prepare: async (input: {
+              readonly requestId: string;
+              readonly transferId: string;
+              readonly targetDeviceId: string;
+            }) => {
+              await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
+              return { stage: "ready" as const };
+            },
+            commit: async (input: { readonly requestId: string; readonly transferId: string }) => {
+              await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
+              return { stage: "completed" as const };
+            },
+            cancel: async (input: { readonly requestId: string; readonly transferId: string }) => {
+              await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
+              return { stage: "cancelled" as const };
+            },
+          },
+        }
+      : {}),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => mcpHub.serverStatuses(),
     // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；

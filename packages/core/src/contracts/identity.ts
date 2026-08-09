@@ -90,6 +90,8 @@ export type HomeTrustEventBody =
       nextTrustEpoch: number;
       fromIssuerKeyId: string;
       toIssuerKeyId: string;
+      /** Present when the issuer key is distinct from the target device identity key. */
+      toIssuerPublicKey?: string;
       toDeviceId: string;
     } &
       (
@@ -116,7 +118,7 @@ export interface HomeTrustRecord extends WireSchemaV1<"HomeTrustRecord"> {
   homeId: Ulid;
   trustEpoch: number;
   chainHead: { seq: number; eventDigest: Digest };
-  issuer: { deviceId: string; issuerKeyId: string };
+  issuer: { deviceId: string; issuerKeyId: string; issuerPublicKey?: string };
   recoveryRootPublicKey?: string;
   recoveryBackupPublicKey?: string;
   members: Array<{
@@ -170,6 +172,204 @@ export interface SourceFreezeProof extends WireSchemaV1<"SourceFreezeProof"> {
   lastLsn: number;
   signature: Signature;
 }
+
+export interface ReadyProof extends WireSchemaV1<"ReadyProof"> {
+  transferId: string;
+  homeId: string;
+  targetDeviceId: string;
+  trustEpoch: number;
+  trustChainHead: { seq: number; eventDigest: Digest };
+  targetIssuerKeyId: string;
+  targetIssuerPublicKey: string;
+  roles: readonly DeviceRole[];
+  configuredCapabilities: {
+    providers: readonly string[];
+    mcpServers: readonly string[];
+    channels: readonly string[];
+  };
+  protocolRevision: string;
+  assetRevision: string;
+  serviceRevision: string;
+  secretStore: "unlocked";
+  issuedAt: IsoTime;
+  expiresAt: IsoTime;
+  /** Existing device identity proves which paired target produced the proof. */
+  signature: Signature;
+  /** The transfer-bound issuer key proves possession without exposing private material. */
+  issuerPossession: Signature;
+}
+
+export type AuthorityCatalogCoverage =
+  | "global-authority"
+  | "conversation-authority"
+  | "conversation-content"
+  | "execution-assets"
+  | "trust-and-anchor"
+  | "pending-obligations";
+
+export interface AuthorityCatalogStreamRange {
+  stream: string;
+  firstLsn: number;
+  lastLsn: number;
+  recordCount: number;
+  digest: Digest;
+}
+
+/** Canonical inventory of one frozen anchor-authority prefix. */
+export interface AuthorityCatalog extends WireSchemaV1<"AuthorityCatalog"> {
+  transferId: string;
+  sourceDeviceId: string;
+  targetDeviceId: string;
+  sourceAnchorEpoch: number;
+  source: {
+    logId: string;
+    lsn: number;
+    frameEndOffset: number;
+    prefixDigest: Digest;
+  };
+  trust: {
+    homeId: string;
+    trustEpoch: number;
+    chainHead: { seq: number; eventDigest: Digest };
+    issuerDeviceId: string;
+    issuerKeyId: string;
+  };
+  coverage: readonly AuthorityCatalogCoverage[];
+  streams: readonly AuthorityCatalogStreamRange[];
+  authorityRecords: ArtifactRef;
+  retainedArtifacts: readonly ArtifactRef[];
+  pendingObligations: readonly {
+    kind: "assignment" | "interaction" | "final" | "delivery" | "intent" | "confirmation";
+    id: string;
+  }[];
+}
+
+export interface AnchorTransferAbort
+  extends WireSchemaV1<"AnchorTransferAbort"> {
+  requestId: string;
+  transferId: string;
+  sourceDeviceId: string;
+  targetDeviceId: string;
+  sourceAnchorEpoch: number;
+  reason: "source-resumed" | "target-rejected" | "operator-cancelled";
+  at: IsoTime;
+  signature: Signature;
+}
+
+export type AnchorTransferCommand = WireSchemaV1<"AnchorTransferCommand"> &
+  (
+    | {
+        op: "prepare";
+        requestId: string;
+        transferId: string;
+        sourceDeviceId: string;
+        targetDeviceId: string;
+        sourceAnchorEpoch: number;
+        nextAnchorEpoch: number;
+        readyProof: ReadyProof;
+        trustTransition: HomeTrustEventWithBody<
+          Extract<HomeTrustEventBody, { t: "issuer-transition"; reason: "migration" }>
+        >;
+        signature: Signature;
+      }
+    | {
+        op: "freeze";
+        requestId: string;
+        transferId: string;
+        recoveryCheckpointDigest: Digest;
+        checkpoint: ArtifactRef;
+        catalog: ArtifactRef;
+        proof: SourceFreezeProof;
+        signature: Signature;
+      }
+    | {
+        op: "probe";
+        requestId: string;
+        transferId: string;
+        ref: ArtifactRef;
+        signature: Signature;
+      }
+    | {
+        op: "read-range";
+        requestId: string;
+        transferId: string;
+        ref: ArtifactRef;
+        offset: number;
+        length: number;
+        signature: Signature;
+      }
+    | {
+        op: "import";
+        requestId: string;
+        transferId: string;
+        checkpoint: ArtifactRef;
+        catalog: ArtifactRef;
+        signature: Signature;
+      }
+    | {
+        op: "commit";
+        requestId: string;
+        transferId: string;
+        commit: Extract<AnchorTransferCommit, { mode: "planned" }>;
+        signature: Signature;
+      }
+    | {
+        op: "abort";
+        requestId: string;
+        transferId: string;
+        abort: AnchorTransferAbort;
+        signature: Signature;
+      }
+    | {
+        op: "status";
+        requestId: string;
+        transferId: string;
+        signature: Signature;
+      }
+  );
+
+export type AnchorTransferResult = WireSchemaV1<"AnchorTransferResult"> &
+  (
+    | ({
+        status: "ok";
+        requestId: string;
+        transferId: string;
+      } & (
+        | { state: "prepared"; ref?: never; commit?: never; abort?: never }
+        | { state: "frozen" | "imported"; ref: ArtifactRef; commit?: never; abort?: never }
+        | {
+            state: "committed" | "tombstoned";
+            commit: Extract<AnchorTransferCommit, { mode: "planned" }>;
+            ref?: never;
+            abort?: never;
+          }
+        | { state: "aborted"; abort: AnchorTransferAbort; ref?: never; commit?: never }
+      ))
+    | {
+        status: "range";
+        requestId: string;
+        transferId: string;
+        ref: ArtifactRef;
+        offset: number;
+        data: string;
+      }
+    | {
+        status: "rejected";
+        requestId: string;
+        transferId: string;
+        error: {
+          code:
+            | "unauthorized"
+            | "invalid"
+            | "not-found"
+            | "conflict"
+            | "unavailable"
+            | "not-ready"
+            | "committed";
+          retryable: boolean;
+        };
+      }
+  );
 
 export interface ConversationTransferCommit
   extends WireSchemaV1<"ConversationTransferCommit"> {

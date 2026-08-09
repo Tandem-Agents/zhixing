@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectLocalConversationOwnerIsolation,
+  inspectPlannedAnchorTransferAssembly,
   inspectRecoveryBackupAssembly,
   parseLandingRowIds,
   validateCoverage,
@@ -405,7 +406,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
-    text: await readFile(relative, "utf8"),
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
   })));
   assert.deepEqual(inspectLocalConversationOwnerIsolation(records), []);
   const mutate = (relative, transform) => records.map((record) =>
@@ -442,7 +443,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/local-conversation-owner.ts",
       (text) => text.replace(
-        '    | "readAdvancementState"\n  >\n>;',
+        /    \| "readAdvancementState"\r?\n  >\r?\n>;/u,
         '    | "readAdvancementState"\n    | "mutate"\n  >\n>;',
       ),
     )).join("\n"),
@@ -953,7 +954,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     inspectRecoveryBackupAssembly(mutate(
       "packages/mesh/src/paired-checkpoint-target.ts",
       (text) => text.replace(
-        '    "checkpoint.activate-root",\n  ]),',
+        /    "checkpoint\.activate-root",\r?\n  \]\),/u,
         '    "checkpoint.activate-root",\n    "checkpoint.extra",\n  ]),',
       ),
     )).join("\n"),
@@ -995,6 +996,83 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
       ),
     )).join("\n"),
     /originating commit and same-LSN historical trust tuple/,
+  );
+});
+
+test("planned duty migration stays bound to two production roots and a finite owner/receiver exact-set", async () => {
+  const paths = [
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/planned-anchor-transfer.ts",
+    "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/runtime/rpc-management-facade.ts",
+    "packages/cli/src/runtime/duty-migration-command.ts",
+    "packages/server/src/rpc/methods/server.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  assert.deepEqual(inspectPlannedAnchorTransferAssembly(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
+      (text) => text.replace('"anchor-only"', '"executor-only"'),
+    )).join("\n"),
+    /phase exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace("plannedAnchorIssuerKey: bootstrap.anchorIssuerKey", "missingIssuerKey: bootstrap.anchorIssuerKey"),
+    )).join("\n"),
+    /two production roots exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => `${text}\nvoid new PlannedAnchorTransferOwner({});`,
+    )).join("\n"),
+    /owner\/receiver topology exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        'const roleEnabled = this.options.configuration.enabledRoles.includes("anchor")',
+        'const roleEnabled = this.options.configuration.enabledRoles.includes("executor")',
+      ),
+    )).join("\n"),
+    /owner\/receiver topology exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "await this.#plannedAnchorOwner?.recoverBeforeAdmission()",
+        "void this.#plannedAnchorOwner?.recoverBeforeAdmission()",
+      ),
+    )).join("\n"),
+    /recovery\/commit\/admission order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/runtime/rpc-management-facade.ts",
+      (text) => text.replace('"dutyMigration.commit"', '"dutyMigration.unregistered"'),
+    )).join("\n"),
+    /public journey or canonical RPC exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/runtime/duty-migration-command.ts",
+      (text) => text.replace("值班设备迁移完成", "anchor 迁移完成"),
+    )).join("\n"),
+    /leaks internal topology terms/,
   );
 });
 

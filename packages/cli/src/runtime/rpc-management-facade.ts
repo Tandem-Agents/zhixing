@@ -92,6 +92,11 @@ export interface ServerShutdownRequest {
   strategy?: ServerShutdownStrategy;
 }
 
+export interface DutyMigrationTarget {
+  deviceId: string;
+  displayName: string;
+}
+
 export class RpcManagementFacade {
   constructor(private readonly link: CoreHostRpcLink) {}
 
@@ -195,6 +200,39 @@ export class RpcManagementFacade {
     const client = this.link.getConnectedClient?.();
     if (!client) return null;
     return client.request<ServerInfoResult>("server.info").catch(() => null);
+  }
+
+  async dutyMigrationTargets(): Promise<DutyMigrationTarget[]> {
+    const client = await this.link.getClient();
+    const result = await client.request<{ devices: DutyMigrationTarget[] }>(
+      "dutyMigration.targets",
+    );
+    return result.devices;
+  }
+
+  async dutyMigrationPrepare(input: {
+    requestId: string;
+    transferId: string;
+    targetDeviceId: string;
+  }): Promise<{ stage: "ready" }> {
+    const client = await this.link.getClient();
+    return client.request<{ stage: "ready" }>("dutyMigration.prepare", input);
+  }
+
+  async dutyMigrationCommit(input: {
+    requestId: string;
+    transferId: string;
+  }): Promise<{ stage: "completed" }> {
+    const client = await this.link.getClient();
+    return client.request<{ stage: "completed" }>("dutyMigration.commit", input);
+  }
+
+  async dutyMigrationCancel(input: {
+    requestId: string;
+    transferId: string;
+  }): Promise<{ stage: "cancelled" }> {
+    const client = await this.link.getClient();
+    return client.request<{ stage: "cancelled" }>("dutyMigration.cancel", input);
   }
 
   /** 请求宿主优雅退出(flush 落盘)——/config 热重载与运行控制共用通道。 */

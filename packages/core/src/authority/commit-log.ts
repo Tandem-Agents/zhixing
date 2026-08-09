@@ -16,6 +16,7 @@ import type {
   JsonValue,
   LogicalRecord,
 } from "../contracts/index.js";
+import type { AuthorityAppendAdmissionGuard } from "./interfaces.js";
 import {
   acquireFileLock,
   ensureDurableDirectory,
@@ -165,6 +166,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
+  readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
   readonly #retainedReferenceIndex: RebuildableDurableProjectionIndex;
   #verifiedTail: VerifiedLogTail | undefined;
   #logId: string | undefined;
@@ -287,6 +289,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const lastLsn = await this.#loadLastLsn();
       return this.#durableCheckpoint(lastLsn);
     });
+  }
+
+  registerAppendAdmissionGuard(guard: AuthorityAppendAdmissionGuard): () => void {
+    if (typeof guard !== "function") {
+      throw new TypeError("Authority append admission guard must be callable");
+    }
+    this.#appendAdmissionGuards.add(guard);
+    return () => this.#appendAdmissionGuards.delete(guard);
   }
 
   async originCheckpoint(): Promise<DurableLogCheckpoint> {
@@ -940,6 +950,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     committedAt?: IsoTime,
     preparedEnvelope?: CommitEnvelope<Body>,
   ): Promise<CommitEnvelope<Body>> {
+    for (const guard of this.#appendAdmissionGuards) {
+      guard(entries as Array<LogicalRecord<unknown>>);
+    }
     for (const projection of this.#durableProjections.values()) {
       await this.#withDurableProjectionRecovery(projection, () =>
         this.#synchronizeDurableProjection(projection),

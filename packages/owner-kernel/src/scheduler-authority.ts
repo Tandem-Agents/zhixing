@@ -302,6 +302,29 @@ export class AnchorScheduler {
     this.#prepared = false;
   }
 
+  /** Closes fresh triggers while preserving every durable schedule fact for pre-commit rollback. */
+  async pauseForAuthorityTransfer(): Promise<void> {
+    if (!this.#accepting) return;
+    this.#accepting = false;
+    if (this.#timer) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    await this.#activationRecovery?.catch(() => undefined);
+    this.#activationRecovery = undefined;
+    await Promise.allSettled(this.#completionTrackers.values());
+  }
+
+  /** Reopens the same owner only after the source has durably aborted before commit. */
+  resumeAfterAuthorityTransfer(): void {
+    if (!this.#prepared || this.#accepting) return;
+    this.#accepting = true;
+    this.#activationRecovery = this.#recoverAfterActivation().catch((error) => {
+      this.#options.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
+    this.#arm();
+  }
+
   async createTask(
     spec: TaskSpec,
     requestId = `schedule-create-${randomUUID()}`,

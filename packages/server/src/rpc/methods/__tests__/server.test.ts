@@ -5,6 +5,10 @@ import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
   buildDeliveryResolveMethod,
+  buildDutyMigrationCancelMethod,
+  buildDutyMigrationCommitMethod,
+  buildDutyMigrationPrepareMethod,
+  buildDutyMigrationTargetsMethod,
   buildLlmCompleteMethod,
 } from "../server.js";
 import type { HandlerContext } from "../../handlers.js";
@@ -131,6 +135,106 @@ describe("server.shutdown", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("dutyMigration.*", () => {
+  it("只暴露用户可理解的目标和阶段，并原样绑定稳定请求身份", async () => {
+    const targets = vi.fn(async () => [
+      { deviceId: "device-ready", displayName: "客厅主机" },
+    ]);
+    const prepare = vi.fn(async () => ({ stage: "ready" as const }));
+    const commit = vi.fn(async () => ({ stage: "completed" as const }));
+    const cancel = vi.fn(async () => ({ stage: "cancelled" as const }));
+    const ctx = mkCtx({ dutyMigration: { targets, prepare, commit, cancel } });
+    const identity = {
+      requestId: "request:duty-1",
+      transferId: "duty-1",
+    };
+
+    await expect(buildDutyMigrationTargetsMethod().handler({}, ctx)).resolves.toEqual({
+      devices: [{ deviceId: "device-ready", displayName: "客厅主机" }],
+    });
+    await expect(buildDutyMigrationPrepareMethod().handler(
+      { ...identity, targetDeviceId: "device-ready" },
+      ctx,
+    )).resolves.toEqual({ stage: "ready" });
+    await expect(buildDutyMigrationCommitMethod().handler(identity, ctx)).resolves.toEqual({
+      stage: "completed",
+    });
+    await expect(buildDutyMigrationCancelMethod().handler(identity, ctx)).resolves.toEqual({
+      stage: "cancelled",
+    });
+    expect(prepare).toHaveBeenCalledWith({ ...identity, targetDeviceId: "device-ready" });
+    expect(commit).toHaveBeenCalledWith(identity);
+    expect(cancel).toHaveBeenCalledWith(identity);
+    for (const entry of [
+      buildDutyMigrationTargetsMethod(),
+      buildDutyMigrationPrepareMethod(),
+      buildDutyMigrationCommitMethod(),
+      buildDutyMigrationCancelMethod(),
+    ]) {
+      expect(entry.requiresAuth).toBe(true);
+    }
+  });
+
+  it("严格拒绝未知字段和不稳定身份", async () => {
+    const ctx = mkCtx({
+      dutyMigration: {
+        targets: vi.fn(async () => []),
+        prepare: vi.fn(async () => ({ stage: "ready" as const })),
+        commit: vi.fn(async () => ({ stage: "completed" as const })),
+        cancel: vi.fn(async () => ({ stage: "cancelled" as const })),
+      },
+    });
+    await expect(buildDutyMigrationTargetsMethod().handler({ extra: true }, ctx))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(buildDutyMigrationPrepareMethod().handler({
+      requestId: "request:duty-1",
+      transferId: "duty-1",
+      targetDeviceId: "device-ready",
+      extra: true,
+    }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(buildDutyMigrationCommitMethod().handler({
+      requestId: "",
+      transferId: "duty-1",
+    }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+  });
+
+  it("把目标缺口、结果不明和提交后取消投影为可行动文案", async () => {
+    const ctx = mkCtx({
+      dutyMigration: {
+        targets: vi.fn(async () => []),
+        prepare: vi.fn(async () => {
+          throw new Error("Target credentials are not unlocked");
+        }),
+        commit: vi.fn(async () => {
+          throw new Error("target unavailable after source commit");
+        }),
+        cancel: vi.fn(async () => {
+          throw new Error("committed transfer rejects abort");
+        }),
+      },
+    });
+    const identity = { requestId: "request:duty-1", transferId: "duty-1" };
+    const errors = await Promise.all([
+      buildDutyMigrationPrepareMethod().handler(
+        { ...identity, targetDeviceId: "device-ready" },
+        ctx,
+      ).catch((error) => error as RpcAppError),
+      buildDutyMigrationCommitMethod().handler(identity, ctx)
+        .catch((error) => error as RpcAppError),
+      buildDutyMigrationCancelMethod().handler(identity, ctx)
+        .catch((error) => error as RpcAppError),
+    ]);
+    expect(errors.map((error) => error.message)).toEqual([
+      "目标设备的本地配置尚未解锁，请先在目标设备启动知行并完成配置",
+      "迁移暂时未完成。系统会保持安全状态，请确认两台设备在线后使用同一迁移编号继续",
+      "设备接管已经开始，不能取消；请继续完成本次迁移，之后可再次迁移",
+    ]);
+    expect(errors.map((error) => error.message).join(" ")).not.toMatch(
+      /anchor|epoch|issuer|catalog|commit|abort/iu,
+    );
   });
 });
 

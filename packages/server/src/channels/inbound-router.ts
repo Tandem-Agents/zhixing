@@ -208,6 +208,11 @@ export class InboundRouter {
     this.acceptingNew = false;
   }
 
+  /** Reopens the same admission gate after a pre-commit duty-device migration abort. */
+  resumeNewMessages(): void {
+    this.acceptingNew = true;
+  }
+
   async handleMessage(msg: InboundMessage): Promise<void> {
     const adapter = this.channels.get(msg.channelId);
     if (!adapter) {

@@ -15,6 +15,7 @@ export default defineConfig({
     "src/paired-checkpoint-target.ts",
     "src/recovery-package.ts",
     "src/bootstrap-authority.ts",
+    "src/anchor-transfer-ready.ts",
     "src/device-identity.ts",
     "src/device-key-store.ts",
     "src/device-readiness.ts",

@@ -15,6 +15,11 @@ export type PhysicalStorageStepRunner = <T>(
   operation: () => Promise<T>,
 ) => Promise<T>;
 
+/** Synchronous guard evaluated inside the AuthorityCommitLog append lock. */
+export type AuthorityAppendAdmissionGuard = (
+  entries: readonly LogicalRecord<unknown>[],
+) => void;
+
 export interface ArtifactStore {
   put(bytes: Uint8Array): Promise<ArtifactRef>;
   /**

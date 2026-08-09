@@ -334,6 +334,148 @@ export function buildDeliveryResolveMethod(): MethodEntry {
   };
 }
 
+export function buildDutyMigrationTargetsMethod(): MethodEntry {
+  return {
+    name: "dutyMigration.targets",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      parseEmptyParams(params, "dutyMigration.targets");
+      const migration = ctx.server.dutyMigration;
+      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
+      return runDutyMigrationOperation("targets", async () => ({
+        devices: await migration.targets(),
+      }));
+    },
+  };
+}
+
+export function buildDutyMigrationPrepareMethod(): MethodEntry {
+  return {
+    name: "dutyMigration.prepare",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const migration = ctx.server.dutyMigration;
+      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
+      const input = parseDutyMigrationParams(params, true);
+      return runDutyMigrationOperation("prepare", () => migration.prepare(input));
+    },
+  };
+}
+
+export function buildDutyMigrationCommitMethod(): MethodEntry {
+  return {
+    name: "dutyMigration.commit",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const migration = ctx.server.dutyMigration;
+      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
+      const input = parseDutyMigrationParams(params, false);
+      return runDutyMigrationOperation("commit", () => migration.commit(input));
+    },
+  };
+}
+
+export function buildDutyMigrationCancelMethod(): MethodEntry {
+  return {
+    name: "dutyMigration.cancel",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const migration = ctx.server.dutyMigration;
+      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
+      const input = parseDutyMigrationParams(params, false);
+      return runDutyMigrationOperation("cancel", () => migration.cancel(input));
+    },
+  };
+}
+
+type DutyMigrationOperation = "targets" | "prepare" | "commit" | "cancel";
+
+async function runDutyMigrationOperation<T>(
+  operation: DutyMigrationOperation,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof RpcAppError) throw error;
+    const detail = error instanceof Error ? error.message.toLowerCase() : "";
+    if (/another|already.*progress|busy/u.test(detail)) {
+      throw RpcErrors.busy("已有一项值班设备迁移正在进行，请先继续或取消现有迁移");
+    }
+    if (operation === "prepare") {
+      if (/credential|secret|unlock/u.test(detail)) {
+        throw RpcErrors.internal(
+          "目标设备的本地配置尚未解锁，请先在目标设备启动知行并完成配置",
+        );
+      }
+      if (/connect|offline|unavailable|timeout/u.test(detail)) {
+        throw RpcErrors.internal(
+          "暂时联系不上目标设备，请确认它在线且已与当前设备配对后重试",
+        );
+      }
+      throw RpcErrors.internal(
+        "目标设备尚未准备好，请确认它在线、已配对并完成值班配置后重试",
+      );
+    }
+    if (operation === "commit") {
+      throw RpcErrors.internal(
+        "迁移暂时未完成。系统会保持安全状态，请确认两台设备在线后使用同一迁移编号继续",
+      );
+    }
+    if (operation === "cancel") {
+      if (/commit|install|tombstone|abort.*reject/u.test(detail)) {
+        throw RpcErrors.invalidParams(
+          "设备接管已经开始，不能取消；请继续完成本次迁移，之后可再次迁移",
+        );
+      }
+      throw RpcErrors.internal(
+        "取消结果暂时无法确认，请使用同一迁移编号重试；确认取消前不要重新发起迁移",
+      );
+    }
+    throw RpcErrors.internal(
+      "暂时无法读取可迁移设备，请确认当前值班设备运行正常后重试",
+    );
+  }
+}
+
+function parseDutyMigrationParams(
+  raw: unknown,
+  withTarget: true,
+): { requestId: string; transferId: string; targetDeviceId: string };
+function parseDutyMigrationParams(
+  raw: unknown,
+  withTarget: false,
+): { requestId: string; transferId: string };
+function parseDutyMigrationParams(raw: unknown, withTarget: boolean) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw RpcErrors.invalidParams("值班设备迁移参数必须是对象");
+  }
+  const value = raw as Record<string, unknown>;
+  const fields = withTarget
+    ? ["requestId", "transferId", "targetDeviceId"]
+    : ["requestId", "transferId"];
+  if (
+    Object.keys(value).length !== fields.length ||
+    fields.some((field) => !isProtocolIdentifier(value[field]))
+  ) {
+    throw RpcErrors.invalidParams("值班设备迁移参数无效");
+  }
+  return withTarget
+    ? {
+        requestId: value.requestId as string,
+        transferId: value.transferId as string,
+        targetDeviceId: value.targetDeviceId as string,
+      }
+    : { requestId: value.requestId as string, transferId: value.transferId as string };
+}
+
+function parseEmptyParams(raw: unknown, method: string): void {
+  if (raw === undefined || raw === null) return;
+  if (typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length > 0) {
+    throw RpcErrors.invalidParams(`${method} params must be empty`);
+  }
+}
+
 function parseDeliveryResolveParams(raw: unknown): {
   requestId: string;
   itemId: string;

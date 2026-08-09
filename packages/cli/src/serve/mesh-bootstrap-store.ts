@@ -107,9 +107,10 @@ export class FileMeshBootstrapStore {
 
   constructor(
     readonly rootDir: string,
-    readonly issuerKey?: DeviceKey,
+    issuerKey?: DeviceKey,
     options: FileMeshBootstrapStoreOptions = {},
   ) {
+    this.issuerKey = issuerKey;
     const distributedRoot = path.join(path.resolve(rootDir), "distributed-runtime");
     this.#artifacts = new FileArtifactStore(path.join(distributedRoot, "artifacts"));
     this.#log = new FileAuthorityCommitLog(
@@ -141,6 +142,12 @@ export class FileMeshBootstrapStore {
     this.#endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
     this.#peerFile = path.join(distributedRoot, "mesh-peers.json");
     this.#completionFile = path.join(distributedRoot, "mesh-bootstrap-completions.json");
+  }
+
+  issuerKey?: DeviceKey;
+
+  bindIssuerKey(key: DeviceKey): void {
+    this.issuerKey = key;
   }
 
   stopStorageMaintenance(): void {

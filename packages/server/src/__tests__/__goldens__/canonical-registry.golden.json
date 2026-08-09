@@ -19,6 +19,22 @@
         "requiresAuth": true
       },
       {
+        "name": "dutyMigration.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.commit",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.prepare",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.targets",
+        "requiresAuth": true
+      },
+      {
         "name": "health",
         "requiresAuth": false
       },
@@ -222,6 +238,22 @@
       },
       {
         "name": "delivery.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.commit",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.prepare",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.targets",
         "requiresAuth": true
       },
       {
@@ -431,6 +463,22 @@
         "requiresAuth": true
       },
       {
+        "name": "dutyMigration.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.commit",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.prepare",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.targets",
+        "requiresAuth": true
+      },
+      {
         "name": "health",
         "requiresAuth": false
       },
@@ -634,6 +682,22 @@
       },
       {
         "name": "delivery.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.commit",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.prepare",
+        "requiresAuth": true
+      },
+      {
+        "name": "dutyMigration.targets",
         "requiresAuth": true
       },
       {
@@ -965,6 +1029,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -990,6 +1059,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:dutyMigration.cancel",
+          "rpc:dutyMigration.commit",
+          "rpc:dutyMigration.prepare",
+          "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:memory.journalStats",
@@ -1126,6 +1199,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1151,6 +1229,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:dutyMigration.cancel",
+          "rpc:dutyMigration.commit",
+          "rpc:dutyMigration.prepare",
+          "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:memory.journalStats",
@@ -1279,6 +1361,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1297,6 +1384,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:dutyMigration.cancel",
+          "rpc:dutyMigration.commit",
+          "rpc:dutyMigration.prepare",
+          "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:memory.journalStats",
@@ -1413,6 +1504,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1431,6 +1527,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:dutyMigration.cancel",
+          "rpc:dutyMigration.commit",
+          "rpc:dutyMigration.prepare",
+          "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:memory.journalStats",
@@ -1518,6 +1618,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1593,6 +1698,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1665,6 +1775,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1719,6 +1834,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing duty",
+          "cli:zhixing duty cancel",
+          "cli:zhixing duty continue",
+          "cli:zhixing duty migrate",
+          "cli:zhixing duty targets",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2183,6 +2303,57 @@
         }
       },
       {
+        "path": "zhixing duty",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing duty",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing duty cancel",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing duty cancel",
+        "category": "cli",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "path": "zhixing duty continue",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing duty continue",
+        "category": "cli",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "path": "zhixing duty migrate",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing duty migrate",
+        "category": "cli",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "path": "zhixing duty targets",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing duty targets",
+        "category": "cli",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
         "path": "zhixing pair",
         "hidden": false,
         "hasAction": true,
@@ -2416,6 +2587,42 @@
         "category": "rpc",
         "target": {
           "rowId": "uncertain-resolution"
+        }
+      },
+      {
+        "name": "dutyMigration.cancel",
+        "requiresAuth": true,
+        "key": "rpc:dutyMigration.cancel",
+        "category": "rpc",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "name": "dutyMigration.commit",
+        "requiresAuth": true,
+        "key": "rpc:dutyMigration.commit",
+        "category": "rpc",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "name": "dutyMigration.prepare",
+        "requiresAuth": true,
+        "key": "rpc:dutyMigration.prepare",
+        "category": "rpc",
+        "target": {
+          "rowId": "device-trust"
+        }
+      },
+      {
+        "name": "dutyMigration.targets",
+        "requiresAuth": true,
+        "key": "rpc:dutyMigration.targets",
+        "category": "rpc",
+        "target": {
+          "rowId": "device-trust"
         }
       },
       {

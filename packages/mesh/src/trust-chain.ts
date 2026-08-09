@@ -21,7 +21,11 @@ export interface TrustProjection {
   readonly homeId: string;
   readonly trustEpoch: number;
   readonly chainHead: { readonly seq: number; readonly eventDigest: string };
-  readonly issuer: { readonly deviceId: string; readonly issuerKeyId: string };
+  readonly issuer: {
+    readonly deviceId: string;
+    readonly issuerKeyId: string;
+    readonly issuerPublicKey?: string;
+  };
   readonly recoveryRootPublicKey?: string;
   readonly recoveryBackupPublicKey?: string;
   readonly recoveryActivationDigest?: string;
@@ -282,15 +286,23 @@ export function applyTrustEvent(
         throw new TypeError("Issuer transition does not follow the current trust epoch");
       }
       const target = requiredActiveMember(members, event.body.toDeviceId);
+      const issuerPublicKey = event.body.toIssuerPublicKey;
+      const issuerKeyMatches = issuerPublicKey
+        ? deviceIdFromPublicKey(issuerPublicKey) === event.body.toIssuerKeyId
+        : event.body.toIssuerKeyId === target.device.deviceId;
       if (
-        event.body.toIssuerKeyId !== target.device.deviceId ||
+        !issuerKeyMatches ||
         event.body.toDeviceId === current.issuer.deviceId ||
         !target.roles.includes("anchor")
       ) {
         throw new TypeError("Issuer transition target is invalid");
       }
       trustEpoch = event.body.nextTrustEpoch;
-      issuer = { deviceId: target.device.deviceId, issuerKeyId: event.body.toIssuerKeyId };
+      issuer = {
+        deviceId: target.device.deviceId,
+        issuerKeyId: event.body.toIssuerKeyId,
+        ...(issuerPublicKey ? { issuerPublicKey } : {}),
+      };
       break;
     }
     default:
@@ -418,7 +430,7 @@ export function buildHomeTrustRecord(
   projection: TrustProjection,
   signer: DeviceTrustSigner,
 ): HomeTrustRecord {
-  if (signer.deviceId !== projection.issuer.deviceId) {
+  if (signer.deviceId !== projection.issuer.issuerKeyId) {
     throw new TypeError("Only the current issuer can sign a trust projection");
   }
   const unsigned = {
@@ -446,12 +458,9 @@ export function verifyHomeTrustRecord(
   record: HomeTrustRecord,
   projection: TrustProjection,
 ): void {
-  const issuer = requiredActiveMember(
-    projection.members.map((member) => ({ ...member, roles: [...member.roles] })),
-    projection.issuer.deviceId,
-  );
+  const issuer = issuerSigningIdentity(projection);
   const { signature, ...unsigned } = record;
-  verifyDeviceSignature(issuer.device, "HomeTrustRecord", 1, unsigned, signature);
+  verifyDeviceSignature(issuer, "HomeTrustRecord", 1, unsigned, signature);
   const expected = buildComparableProjection(projection);
   if (canonicalize(unsigned) !== canonicalize(expected)) {
     throw new TypeError("Trust record does not match its event-chain projection");
@@ -500,11 +509,7 @@ function verifyOuterSignature(current: TrustProjection, event: HomeTrustEvent): 
     );
     return;
   }
-  const issuer = requiredActiveMember(
-    current.members.map((member) => ({ ...member, roles: [...member.roles] })),
-    current.issuer.deviceId,
-  );
-  verifyDeviceSignature(issuer.device, "HomeTrustEvent", 1, unsigned, signature);
+  verifyDeviceSignature(issuerSigningIdentity(current), "HomeTrustEvent", 1, unsigned, signature);
 }
 
 function assertEventPosition(current: TrustProjection, event: HomeTrustEvent): void {
@@ -595,7 +600,7 @@ function freezeProjection(input: {
   homeId: string;
   trustEpoch: number;
   chainHead: { seq: number; eventDigest: string };
-  issuer: { deviceId: string; issuerKeyId: string };
+  issuer: { deviceId: string; issuerKeyId: string; issuerPublicKey?: string };
   recoveryRootPublicKey?: string;
   recoveryBackupPublicKey?: string;
   recoveryActivationDigest?: string;
@@ -612,6 +617,22 @@ function freezeProjection(input: {
       ),
     ),
   });
+}
+
+function issuerSigningIdentity(projection: TrustProjection): DeviceIdentity {
+  const member = requiredActiveMember(
+    projection.members.map((candidate) => ({ ...candidate, roles: [...candidate.roles] })),
+    projection.issuer.deviceId,
+  );
+  if (!projection.issuer.issuerPublicKey) return member.device;
+  if (deviceIdFromPublicKey(projection.issuer.issuerPublicKey) !== projection.issuer.issuerKeyId) {
+    throw new TypeError("Trust projection issuer key does not match its public key");
+  }
+  return {
+    ...member.device,
+    deviceId: projection.issuer.issuerKeyId,
+    publicKey: projection.issuer.issuerPublicKey,
+  };
 }
 
 function buildComparableProjection(projection: TrustProjection): Omit<HomeTrustRecord, "signature"> {

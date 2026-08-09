@@ -15,6 +15,7 @@ import type {
   RunExecutorPort,
   RunSubmissionPort,
   EvidenceHandlerPort,
+  CheckpointStreamRecord,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
@@ -22,6 +23,8 @@ import {
   MeshEndpointDirectory,
 } from "@zhixing/mesh/bootstrap";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
+import type { DeviceKey } from "@zhixing/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import type {
   AssignmentSubmissionPreflightPort,
@@ -104,6 +107,17 @@ import {
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
 import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.js";
+import {
+  PlannedAnchorTransferOwner,
+  PlannedAnchorTransferTarget,
+} from "./planned-anchor-transfer.js";
+import {
+  PlannedAnchorTransferMeshClient,
+  registerPlannedAnchorTransferMeshServices,
+  registerPlannedAnchorTransferSourceMeshService,
+} from "./planned-anchor-transfer-mesh.js";
+import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
+import type { PlannedAnchorTransferLifecycle } from "./planned-anchor-transfer.js";
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
@@ -175,6 +189,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly transportPeers: readonly TrustedMeshPeer[];
   readonly localEndpoint?: MeshEndpointDescriptor;
   readonly bootstrapStore: FileMeshBootstrapStore;
+  readonly plannedAnchorIssuerKey?: DeviceKey;
   readonly authority: AuthorityRuntimeStack;
   readonly protocol?: ConversationProtocolRuntime;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -206,12 +221,21 @@ export class MeshRuntimeAssembly {
   readonly #firstPartyConversationTarget: FirstPartyConversationMeshTarget | undefined;
   readonly #transferAbort = new AbortController();
   readonly #disposers: Array<() => void> = [];
+  #plannedAnchorOwner: PlannedAnchorTransferOwner | undefined;
+  #plannedAnchorTarget: PlannedAnchorTransferTarget | undefined;
+  #disposePlannedAnchorTarget: (() => void) | undefined;
+  #disposePlannedAnchorSource: (() => void) | undefined;
+  #plannedAnchorRole = "";
+  #plannedAnchorCheckpointOwner: AuthorityCheckpointOwnerPort | undefined;
+  #plannedAnchorLifecycle: PlannedAnchorTransferLifecycle | undefined;
+  #plannedAnchorIssuerKey: DeviceKey | undefined;
   #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
   #postAdoptionReview: PostAdoptionReviewPort | undefined;
   #started = false;
   #closed = false;
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
+    this.#plannedAnchorIssuerKey = options.plannedAnchorIssuerKey;
     const roles = new Set(options.configuration.enabledRoles);
     if (roles.has("anchor") && !options.protocol) {
       throw new Error("Anchor mesh role requires the conversation owner protocol");
@@ -597,6 +621,7 @@ export class MeshRuntimeAssembly {
             .map((member) => member.device.deviceId),
         );
         if (roles.has("anchor")) {
+          this.#installPlannedAnchorRole(record);
           for (const member of record.members) {
             if (
               member.state !== "active" ||
@@ -626,6 +651,7 @@ export class MeshRuntimeAssembly {
     });
 
     if (roles.has("anchor")) {
+      this.#installPlannedAnchorRole(options.trust);
       options.protocol!.bindRemoteExecution(this.#remoteDirectory());
     }
   }
@@ -698,10 +724,74 @@ export class MeshRuntimeAssembly {
     );
   }
 
+  plannedAnchorTargets(): readonly {
+    readonly deviceId: string;
+    readonly displayName: string;
+  }[] {
+    if (!this.#plannedAnchorOwner) return [];
+    return this.#control.currentTrust().members
+      .filter((member) =>
+        member.state === "active" &&
+        member.device.deviceId !== this.options.authority.deviceId &&
+        member.roles.includes("anchor"))
+      .map((member) => ({
+        deviceId: member.device.deviceId,
+        displayName: member.device.displayName,
+      }))
+      .sort((left, right) => left.displayName.localeCompare(right.displayName));
+  }
+
+  preparePlannedAnchorTransfer(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }) {
+    const owner = this.#plannedAnchorOwner;
+    if (!owner) throw new Error("This device is not the current duty device");
+    return owner.prepare(input);
+  }
+
+  fencePlannedAnchorTransfer(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+  }) {
+    const owner = this.#plannedAnchorOwner;
+    if (!owner) throw new Error("This device is not the current duty device");
+    return owner.fence(input);
+  }
+
+  async commitPlannedAnchorTransfer(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+  }) {
+    const owner = this.#plannedAnchorOwner;
+    if (!owner) throw new Error("This device is not the current duty device");
+    await owner.freeze(input);
+    return owner.commit(input);
+  }
+
+  abortPlannedAnchorTransfer(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+  }) {
+    const owner = this.#plannedAnchorOwner;
+    if (!owner) throw new Error("This device is not the current duty device");
+    return owner.abort({ ...input, reason: "operator-cancelled" });
+  }
+
+  bindAuthorityCheckpointOwner(owner: AuthorityCheckpointOwnerPort | undefined): void {
+    this.#plannedAnchorCheckpointOwner = owner;
+  }
+
+  bindPlannedAnchorLifecycle(lifecycle: PlannedAnchorTransferLifecycle): void {
+    this.#plannedAnchorLifecycle = lifecycle;
+  }
+
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
+      await this.#plannedAnchorOwner?.recoverBeforeAdmission();
       await this.#restoreCommittedTransfers();
       await this.#control.start();
       await this.#worker?.recover();
@@ -720,6 +810,12 @@ export class MeshRuntimeAssembly {
     this.#worker?.stopAccepting();
     await this.#control.stop();
     await this.#worker?.close();
+    this.#disposePlannedAnchorTarget?.();
+    this.#disposePlannedAnchorSource?.();
+    this.#disposePlannedAnchorTarget = undefined;
+    this.#disposePlannedAnchorSource = undefined;
+    this.#plannedAnchorOwner = undefined;
+    this.#plannedAnchorTarget = undefined;
     this.#firstPartyConversationTarget?.close();
     this.#composition.close();
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
@@ -953,6 +1049,146 @@ export class MeshRuntimeAssembly {
     return this.#peerHasRole(deviceId, "executor")
       ? executorIdForDevice(deviceId)
       : undefined;
+  }
+
+  #installPlannedAnchorRole(trust: HomeTrustRecord): void {
+    const roleEnabled = this.options.configuration.enabledRoles.includes("anchor");
+    const local = trust.members.find((member) =>
+      member.device.deviceId === this.options.authority.deviceId);
+    const role = roleEnabled && local?.state === "active" && local.roles.includes("anchor")
+      ? trust.issuer.deviceId === this.options.authority.deviceId
+        ? `owner:${trust.trustEpoch}:${trust.issuer.issuerKeyId}`
+        : `target:${trust.trustEpoch}:${trust.issuer.deviceId}`
+      : "disabled";
+    if (role === this.#plannedAnchorRole) return;
+    this.#plannedAnchorRole = role;
+    this.#disposePlannedAnchorTarget?.();
+    this.#disposePlannedAnchorSource?.();
+    this.#disposePlannedAnchorTarget = undefined;
+    this.#disposePlannedAnchorSource = undefined;
+    this.#plannedAnchorOwner = undefined;
+    this.#plannedAnchorTarget = undefined;
+    if (role.startsWith("owner:")) {
+      this.#plannedAnchorOwner = new PlannedAnchorTransferOwner({
+        deviceId: this.options.authority.deviceId,
+        anchorEpoch: () => this.options.authority.anchorEpoch,
+        identityKey: this.#plannedAnchorIssuerKey ?? this.options.authority.identityKey,
+        bootstrapStore: this.options.bootstrapStore,
+        log: this.options.authority.authorityLog,
+        signer: this.#plannedAnchorIssuerKey ?? this.options.authority.signer,
+        verifier: this.options.authority.verifier,
+        targetFor: (deviceId) => {
+          const member = this.#control.currentTrust().members.find((candidate) =>
+            candidate.device.deviceId === deviceId);
+          if (
+            !member ||
+            member.state !== "active" ||
+            !member.roles.includes("anchor") ||
+            deviceId === this.options.authority.deviceId
+          ) {
+            throw new TypeError("Migration target is not an active paired duty-capable device");
+          }
+          return new PlannedAnchorTransferMeshClient(
+            this.connections.client(deviceId),
+            this.options.authority.deviceId,
+            deviceId,
+            this.options.authority.verifier,
+          );
+        },
+        artifacts: this.options.authority.artifacts,
+        ensureRecoveryCheckpoint: (transferId) =>
+          this.#ensureRecoveryCheckpoint(transferId),
+        lifecycle: {
+          stopAccepting: () => this.#requirePlannedAnchorLifecycle().stopAccepting(),
+          drainAccepted: () => this.#requirePlannedAnchorLifecycle().drainAccepted(),
+          resumeAfterAbort: () => this.#requirePlannedAnchorLifecycle().resumeAfterAbort(),
+        },
+      });
+      this.#disposePlannedAnchorSource = registerPlannedAnchorTransferSourceMeshService(
+        this.services,
+        {
+          source: () => this.#plannedAnchorOwner,
+          authorizeTarget: (deviceId) => {
+            const member = this.#control.currentTrust().members.find((candidate) =>
+              candidate.device.deviceId === deviceId);
+            return member?.state === "active" && member.roles.includes("anchor");
+          },
+          verifier: this.options.authority.verifier,
+        },
+      );
+      return;
+    }
+    if (!role.startsWith("target:")) return;
+    this.#plannedAnchorTarget = new PlannedAnchorTransferTarget({
+      deviceId: this.options.authority.deviceId,
+      identityKey: this.options.authority.identityKey,
+      secretStore: this.options.secretStore,
+      bootstrapStore: this.options.bootstrapStore,
+      authorityLog: this.options.authority.authorityLog,
+      artifacts: this.options.authority.artifacts,
+      stagingRoot: path.join(
+        this.options.zhixingHome,
+        "distributed-runtime",
+        "anchor-transfer-staging",
+      ),
+      sourceFor: (deviceId) => new PlannedAnchorTransferMeshClient(
+        this.connections.client(deviceId),
+        this.options.authority.deviceId,
+        deviceId,
+        this.options.authority.verifier,
+      ),
+      storageMaintenance: this.options.authority.storageMaintenance,
+      signer: this.options.authority.signer,
+      verifier: this.options.authority.verifier,
+      readiness: this.options.authority.plannedAnchorReadiness,
+      onInstalled: async (record) => {
+        const issuerKey = await loadActiveAnchorIssuerKey(
+          this.options.secretStore,
+          record.issuer.issuerKeyId,
+        );
+        if (!issuerKey || issuerKey.publicKey !== record.issuer.issuerPublicKey) {
+          throw new Error("Installed duty device is missing its active issuer key");
+        }
+        this.#plannedAnchorIssuerKey = issuerKey;
+        this.options.bootstrapStore.bindIssuerKey(issuerKey);
+        await this.#control.reconcileTrust(record);
+      },
+    });
+    this.#disposePlannedAnchorTarget = registerPlannedAnchorTransferMeshServices(
+      this.services,
+      {
+        target: () => this.#plannedAnchorTarget,
+        targetDeviceId: this.options.authority.deviceId,
+        currentSourceDeviceId: () => this.#control.currentTrust().issuer.deviceId,
+        verifier: this.options.authority.verifier,
+      },
+    );
+  }
+
+  #requirePlannedAnchorLifecycle(): PlannedAnchorTransferLifecycle {
+    if (!this.#plannedAnchorLifecycle) {
+      throw new Error("Duty-device migration lifecycle is not bound");
+    }
+    return this.#plannedAnchorLifecycle;
+  }
+
+  async #ensureRecoveryCheckpoint(transferId: string): Promise<string> {
+    const owner = this.#plannedAnchorCheckpointOwner;
+    if (!owner) throw new Error("Recovery backup owner is unavailable");
+    const status = await owner.status();
+    if (status.fullBackupReady && status.checkpointId) {
+      const records = await this.options.authority.authorityLog
+        .readStream<CheckpointStreamRecord>("checkpoint");
+      const verified = records.toReversed().find((entry) =>
+        entry.body.t === "checkpoint-verified" &&
+        entry.body.checkpointId === status.checkpointId &&
+        entry.body.targetId === status.targetId,
+      );
+      if (verified?.body.t === "checkpoint-verified") {
+        return verified.body.envelopeDigest;
+      }
+    }
+    return (await owner.force(`planned-anchor:${transferId}`)).envelope.digest;
   }
 
   async #finalizePairingBootstrap(peerDeviceId: string): Promise<void> {

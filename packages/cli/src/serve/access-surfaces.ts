@@ -277,6 +277,9 @@ const meshSurface: AccessSurface = {
       endpoints: bootstrap.endpoints,
       transportPeers: bootstrap.transportPeers,
       bootstrapStore: bootstrap.bootstrapStore,
+      ...(bootstrap.anchorIssuerKey
+        ? { plannedAnchorIssuerKey: bootstrap.anchorIssuerKey }
+        : {}),
       authority: ctx.authorityRuntime,
       protocol: ctx.conversationProtocol,
       ...(ctx.localConversationOwner

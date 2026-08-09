@@ -197,6 +197,16 @@ export interface AuthorityRuntimeStack {
     bundle: ExecutionAssetBundle,
   ) => Promise<ExecutorCapabilitySnapshot>;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
+  readonly plannedAnchorReadiness: () => Promise<{
+    readonly configuredCapabilities: {
+      readonly providers: readonly string[];
+      readonly mcpServers: readonly string[];
+      readonly channels: readonly string[];
+    };
+    readonly protocolRevision: string;
+    readonly assetRevision: string;
+    readonly serviceRevision: string;
+  }>;
   readonly installPermissionSnapshot: (
     snapshot: TrustRuleSnapshot,
   ) => Promise<ExecutorCapabilitySnapshot>;
@@ -969,6 +979,24 @@ export async function setupAuthorityRuntime(
     };
     const currentExecutorSnapshot = async () =>
       (await refreshLocalExecutorSnapshot()).snapshot;
+    const plannedAnchorReadiness = async () => {
+      const configured = plannedAnchorCapabilities(options.configurationSnapshot);
+      const assetSnapshot = await executionAssets.current().catch(() => undefined);
+      return {
+        configuredCapabilities: configured.capabilities,
+        protocolRevision: protocolDigest("PlannedAnchorProtocolRevision", 1, {
+          executableVersion: configured.executableVersion,
+          executionProtocolVersion: EXECUTION_PROTOCOL_VERSION,
+        }),
+        assetRevision: assetSnapshot?.digest ??
+          protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
+        serviceRevision: protocolDigest("PlannedAnchorServiceRevision", 1, {
+          capabilities: configured.capabilities,
+          anchor: anchorEnabled,
+          executor: localExecutorEnabled,
+        }),
+      };
+    };
     const installPermissionSnapshot = async (
       snapshot: TrustRuleSnapshot,
     ): Promise<ExecutorCapabilitySnapshot> => {
@@ -1754,6 +1782,7 @@ export async function setupAuthorityRuntime(
       latestPermissionSnapshot: () => permissionSnapshots.latest(),
       executionAssetCatalog: executionAssets,
       currentExecutionAssetBundle: () => executionAssets.bundle(),
+      plannedAnchorReadiness,
       installExecutionAssetBundle,
       currentExecutorSnapshot,
       installPermissionSnapshot,
@@ -1796,6 +1825,47 @@ export async function setupAuthorityRuntime(
     await startupCleanup.run().catch(() => undefined);
     throw error;
   }
+}
+
+function plannedAnchorCapabilities(input: unknown): {
+  readonly executableVersion: string;
+  readonly capabilities: {
+    readonly providers: readonly string[];
+    readonly mcpServers: readonly string[];
+    readonly channels: readonly string[];
+  };
+} {
+  const snapshot = isPlainRecord(input) ? input : {};
+  const config = isPlainRecord(snapshot.config) ? snapshot.config : {};
+  const llm = isPlainRecord(config.llm) ? config.llm : {};
+  const providers = ["main", "light", "power"]
+    .flatMap((role) => {
+      const value = isPlainRecord(llm[role]) ? llm[role] : undefined;
+      return typeof value?.provider === "string" ? [value.provider] : [];
+    });
+  const mcp = isPlainRecord(config.mcp) ? config.mcp : {};
+  const servers = isPlainRecord(mcp.servers) ? Object.keys(mcp.servers) : [];
+  const messaging = isPlainRecord(config.messaging) ? Object.keys(config.messaging) : [];
+  return {
+    executableVersion:
+      typeof snapshot.executableVersion === "string"
+        ? snapshot.executableVersion
+        : "unknown",
+    capabilities: {
+      providers: canonicalIdentifiers(providers),
+      mcpServers: canonicalIdentifiers(servers),
+      channels: canonicalIdentifiers(messaging),
+    },
+  };
+}
+
+function canonicalIdentifiers(values: readonly string[]): readonly string[] {
+  return [...new Set(values)].sort((left, right) =>
+    compareCanonicalStrings(left, right));
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 interface NormalizedExecutorReadiness {
