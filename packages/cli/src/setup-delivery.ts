@@ -359,6 +359,8 @@ export interface DeliveryStack {
   activate(): void;
   stats(): AuthorityDeliveryStats;
   flush(): Promise<void>;
+  quiesceForAuthorityTransfer(): Promise<void>;
+  resumeAfterAuthorityTransfer(): Promise<void>;
   recoverInstalledAuthority(): Promise<void>;
   authority: DeliveryAuthority;
   authorityLog: FileAuthorityCommitLog;
@@ -2260,6 +2262,10 @@ export async function setupDelivery(
       flush: async () => {
         await authorityDelivery!.flush();
       },
+      quiesceForAuthorityTransfer: () =>
+        authorityDelivery!.quiesceForAuthorityTransfer(),
+      resumeAfterAuthorityTransfer: () =>
+        authorityDelivery!.resumeAfterAuthorityTransfer(),
       recoverInstalledAuthority: async () => {
         if (activated) await authorityDelivery!.flush();
       },

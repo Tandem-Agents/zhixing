@@ -110,6 +110,7 @@ import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.j
 import {
   completePlannedAnchorInstallationBeforeBootstrap,
   finishPlannedAnchorPostInstall,
+  readBackPlannedAnchorPostInstallObligations,
   PlannedAnchorTransferOwner,
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
@@ -132,16 +133,20 @@ export interface PostAdoptionReviewPort {
 export interface PlannedAnchorPostInstallConsumers {
   readonly recoverScheduler: (
     obligations: readonly { readonly kind: "assignment" | "intent"; readonly id: string }[],
-  ) => Promise<void>;
+  ) => Promise<readonly { readonly kind: "assignment" | "intent"; readonly id: string }[]>;
   readonly recoverConversation: (
     obligations: readonly {
       readonly kind: "interaction" | "confirmation" | "final";
       readonly id: string;
     }[],
-  ) => Promise<void>;
+  ) => Promise<readonly {
+    readonly kind: "interaction" | "confirmation" | "final";
+    readonly id: string;
+  }[]>;
   readonly recoverDelivery: (
     obligations: readonly { readonly kind: "delivery"; readonly id: string }[],
-  ) => Promise<void>;
+  ) => Promise<readonly { readonly kind: "delivery"; readonly id: string }[]>;
+  readonly openCurrentOwnerSurfaces: () => Promise<void>;
 }
 
 export interface PlannedAnchorPostInstallGroups {
@@ -157,6 +162,21 @@ export interface PlannedAnchorPostInstallGroups {
     readonly kind: "delivery";
     readonly id: string;
   }[];
+}
+
+function assertPlannedAnchorConsumerReceipt(
+  expected: readonly { readonly kind: string; readonly id: string }[],
+  actual: readonly { readonly kind: string; readonly id: string }[],
+  consumer: string,
+): void {
+  if (
+    actual.length !== expected.length ||
+    actual.some((item, index) =>
+      item.kind !== expected[index]?.kind || item.id !== expected[index]?.id
+    )
+  ) {
+    throw new Error(`Installed migration ${consumer} consumer receipt changed its obligation exact-set`);
+  }
 }
 
 /** Single finite partition consumed by startup and live planned completion. */
@@ -1362,15 +1382,35 @@ export class MeshRuntimeAssembly {
     const consumers = this.#plannedAnchorPostInstallConsumers;
     if (!consumers) return;
     const groups = partitionPlannedAnchorPostInstall(completion.pendingObligations);
-    await consumers.recoverScheduler(groups.scheduler);
-    await consumers.recoverConversation(groups.conversation);
-    await consumers.recoverDelivery(groups.delivery);
+    assertPlannedAnchorConsumerReceipt(
+      groups.scheduler,
+      await consumers.recoverScheduler(groups.scheduler),
+      "scheduler",
+    );
+    assertPlannedAnchorConsumerReceipt(
+      groups.conversation,
+      await consumers.recoverConversation(groups.conversation),
+      "conversation",
+    );
+    assertPlannedAnchorConsumerReceipt(
+      groups.delivery,
+      await consumers.recoverDelivery(groups.delivery),
+      "delivery",
+    );
+    const readBack = await readBackPlannedAnchorPostInstallObligations({
+      log: this.options.authority.authorityLog,
+      obligations: completion.pendingObligations,
+    });
+    if (readBack.length !== completion.pendingObligations.length) {
+      throw new Error("Installed migration obligations were not completely read back");
+    }
     await finishPlannedAnchorPostInstall({
       zhixingHome: this.options.zhixingHome,
       transferId: completion.installation.transferId,
       readiness: this.options.authority.plannedAnchorReadiness,
     });
     this.#plannedAnchorPostInstall = undefined;
+    await consumers.openCurrentOwnerSurfaces();
     if (this.#started) await this.#startControl();
   }
 

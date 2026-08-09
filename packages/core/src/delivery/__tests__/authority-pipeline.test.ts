@@ -119,6 +119,44 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.pipeline.stop();
   });
 
+  it("quiesces new external sends, waits the active flush, and resumes only on abort", async () => {
+    let release!: () => void;
+    let markSending!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sending = new Promise<void>((resolve) => { markSending = resolve; });
+    const send = vi.fn<DeliveryEndpointTransport["send"]>(async () => {
+      if (send.mock.calls.length === 1) {
+        markSending();
+        await gate;
+      }
+      return { success: true, retryable: false };
+    });
+    const fixture = await createPipeline(transport(send));
+    const first = await fixture.enqueue();
+    if (!first.accepted) throw new Error("fixture enqueue failed");
+
+    const flush = fixture.pipeline.flush();
+    await sending;
+    const quiesced = fixture.pipeline.quiesceForAuthorityTransfer();
+    await expect(fixture.pipeline.flush()).rejects.toThrow(/state="quiesced"/);
+    release();
+    await Promise.all([flush, quiesced]);
+
+    const second = await fixture.enqueue(deliveryTestInput({}, {
+      kind: "conversation-final-delivery",
+      conversationId: "conversation-2",
+      runId: "run-2",
+      commitRevision: 1,
+    }));
+    if (!second.accepted) throw new Error("fixture second enqueue failed");
+    await expect(fixture.pipeline.flush()).rejects.toThrow(/state="quiesced"/);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await fixture.pipeline.resumeAfterAuthorityTransfer();
+    expect(send).toHaveBeenCalledTimes(2);
+    await fixture.pipeline.stop();
+  });
+
   it("schedules a new attempt only after an explicit retryable failure", async () => {
     const send = vi
       .fn<DeliveryEndpointTransport["send"]>()

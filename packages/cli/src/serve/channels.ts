@@ -105,12 +105,18 @@ export interface SetupChannelsOptions {
   sessionActivityBroadcast?: () => SessionActivityBroadcast | null;
   onChallengeAction?: (action: ChannelChallengeAction) => Promise<void>;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
+  /** Final callback guard; defaults to current-owner for non-mesh callers. */
+  isCurrentOwner?: () => boolean;
+  /** Registration is always completed; physical connections may be deferred. */
+  connectImmediately?: boolean;
 }
 
 export interface SetupChannelsResult {
   registry: ChannelRegistry;
   router: InboundRouter | null;
   connectionTask: Promise<void>;
+  connectConfigured(): Promise<void>;
+  disconnectConfigured(): Promise<void>;
 }
 
 export async function setupChannels(
@@ -127,9 +133,19 @@ export async function setupChannels(
     sessionActivityBroadcast,
     onChallengeAction,
     registerHttpRoute,
+    isCurrentOwner,
+    connectImmediately = true,
   } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
+  const currentOwnerChallengeAction = onChallengeAction
+    ? async (action: ChannelChallengeAction) => {
+        if (isCurrentOwner?.() === false) {
+          throw new Error("Channel interaction is not owned by this device");
+        }
+        await onChallengeAction(action);
+      }
+    : undefined;
 
   let router: InboundRouter | null = null;
   const connectionJobs: Array<{
@@ -148,7 +164,7 @@ export async function setupChannels(
           });
         }
       : undefined,
-    onChallengeAction,
+    onChallengeAction: currentOwnerChallengeAction,
     registerHttpRoute,
   });
 
@@ -173,6 +189,7 @@ export async function setupChannels(
       intentClassifier,
       sessionBroadcast,
       sessionActivityBroadcast,
+      isCurrentOwner,
     });
   }
 
@@ -213,13 +230,33 @@ export async function setupChannels(
     });
   }
 
-  const connectionTask = connectConfiguredChannels({
-    registry,
-    jobs: connectionJobs,
-    logger,
-  });
+  let transition: Promise<void> = Promise.resolve();
+  const serialize = (operation: () => Promise<void>): Promise<void> => {
+    const current = transition.then(operation, operation);
+    transition = current.catch(() => undefined);
+    return current;
+  };
+  const connectConfigured = () => serialize(() => connectConfiguredChannels({
+      registry,
+      jobs: connectionJobs,
+      logger,
+    }));
+  const disconnectConfigured = () => serialize(() => disconnectConfiguredChannels({
+      registry,
+      jobs: connectionJobs,
+      logger,
+    }));
+  const connectionTask = connectImmediately
+    ? connectConfigured()
+    : Promise.resolve();
 
-  return { registry, router, connectionTask };
+  return {
+    registry,
+    router,
+    connectionTask,
+    connectConfigured,
+    disconnectConfigured,
+  };
 }
 
 async function connectConfiguredChannels(options: {
@@ -243,6 +280,29 @@ async function connectConfiguredChannels(options: {
           configId,
           err instanceof Error ? err.message : String(err),
         );
+      }
+    }),
+  );
+}
+
+async function disconnectConfiguredChannels(options: {
+  registry: ChannelRegistry;
+  jobs: readonly { configId: string; adapterId: string }[];
+  logger: ChannelLogger;
+}): Promise<void> {
+  const { registry, jobs, logger } = options;
+  await Promise.all(
+    jobs.map(async ({ configId, adapterId }) => {
+      try {
+        await registry.disconnect(adapterId);
+        logger.info("Channel '%s' disconnected", configId);
+      } catch (err) {
+        logger.error(
+          "Channel '%s' failed to disconnect: %s",
+          configId,
+          err instanceof Error ? err.message : String(err),
+        );
+        throw err;
       }
     }),
   );

@@ -2904,6 +2904,69 @@ describe("ConversationProtocolRuntime", () => {
     ).resolves.toEqual({ status: "not-found" });
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("rediscovers a newly installed authority generation after prior live discovery", async () => {
+    const home = await createTempDir("conversation-protocol-installed-generation");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    const projected = vi.fn(async () => {});
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      projectLifecycle: projected,
+    });
+    manager = new ConversationManager(
+      { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
+      undefined,
+      { durableTurnExecutor: protocol },
+    );
+    await protocol.recoverReadinessProjections();
+
+    const conversationId = "conversation-installed-generation";
+    await registerActiveConversation(
+      authority,
+      conversationId,
+      "2026-07-24T00:00:00.000Z",
+    );
+    let writerManager!: ConversationManager;
+    const writer = createProtocol({
+      authority,
+      manager: () => writerManager,
+      interactions: new DurableConversationInteractionObserver(),
+      projectLifecycle: async () => {
+        throw new Error("writer must not consume the installed projection");
+      },
+    });
+    writerManager = new ConversationManager(
+      { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
+      undefined,
+      { durableTurnExecutor: writer },
+    );
+    await writer.writeSession({
+      conversationId,
+      requestId: "lifecycle:installed-generation:1",
+      mutation: { kind: "conversation-delete" },
+      principal: writer.controlPrincipal({
+        surfacePrincipal: "rpc:owner",
+        connectionId: "connection:installed-generation",
+      }),
+      conversationExists: async () => true,
+    });
+    expect(projected).not.toHaveBeenCalled();
+
+    await protocol.recoverInstalledAuthority();
+    expect(projected).toHaveBeenCalledWith({
+      conversationId,
+      requestId: "lifecycle:installed-generation:1",
+      mutation: "delete",
+      domainRevision: 1,
+    });
+    await protocol.stopRecoveryLoop();
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("rejects a new lifecycle request for an unknown conversation before authority append", async () => {
     const home = await createTempDir("conversation-protocol-lifecycle-identity");
     const authority = await setupAuthorityRuntime({

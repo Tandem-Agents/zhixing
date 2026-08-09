@@ -194,6 +194,10 @@ export interface AssemblyContext {
   advancement?: AdvancementController;
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
+  channelConnections?: {
+    connectConfigured(): Promise<void>;
+    disconnectConfigured(): Promise<void>;
+  };
   authorityRuntime?: AuthorityRuntimeStack;
   executorDataPlane?: ExecutorDataPlaneRuntime;
   evidenceHandler?: EvidenceHandlerPort & { stopAccepting(): void };

@@ -111,4 +111,50 @@ describe("setupChannels", () => {
       "bad credentials",
     );
   });
+
+  it("可先完成配置注册，再由 current-owner 生命周期显式连接和断开", async () => {
+    mockFeishu.connect.mockResolvedValue(undefined);
+
+    const result = await setupChannels({
+      entries: { feishu: { type: "feishu" } },
+      credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
+      logger,
+      connectImmediately: false,
+    });
+    await result.connectionTask;
+
+    expect(result.registry.get("feishu")).toBeDefined();
+    expect(mockFeishu.connect).not.toHaveBeenCalled();
+
+    await result.connectConfigured();
+    expect(mockFeishu.connect).toHaveBeenCalledOnce();
+    expect(result.registry.getStatus("feishu")?.state).toBe("connected");
+
+    await result.disconnectConfigured();
+    expect(mockFeishu.disconnect).toHaveBeenCalledOnce();
+    expect(result.registry.getStatus("feishu")?.state).toBe("disconnected");
+  });
+
+  it("连接切换竞态中的 confirmation challenge 也在副作用前复核 current owner", async () => {
+    let current = true;
+    const onChallengeAction = vi.fn(async () => {});
+    mockFeishu.connect.mockResolvedValue(undefined);
+
+    const result = await setupChannels({
+      entries: { feishu: { type: "feishu" } },
+      credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
+      logger,
+      isCurrentOwner: () => current,
+      onChallengeAction,
+    });
+    await result.connectionTask;
+    const context = mockFeishu.connect.mock.calls[0]?.[0];
+    expect(context).toBeDefined();
+
+    current = false;
+    await expect(context!.onChallengeAction({} as never)).rejects.toThrow(
+      "not owned by this device",
+    );
+    expect(onChallengeAction).not.toHaveBeenCalled();
+  });
 });

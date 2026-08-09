@@ -879,6 +879,14 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         error: (msg: string, ...args: unknown[]) =>
           console.error(chalk.red(`[channel] ${msg}`), ...args),
       };
+      const isCurrentChannelOwner = () => {
+        if (ctx.meshBootstrap.mode === "single-machine") return true;
+        const currentDeviceId = ctx.meshRuntime?.currentAnchorDeviceId() ??
+          ctx.meshBootstrap.trust.issuer.deviceId;
+        const ready = ctx.meshRuntime?.plannedCurrentOwnerReady() ??
+          ctx.meshBootstrap.plannedAnchorPostInstall === undefined;
+        return currentDeviceId === ctx.meshBootstrap.deviceKey.deviceId && ready;
+      };
       try {
         const result = await setupChannels({
           entries: config.messaging,
@@ -906,10 +914,16 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
             }
             ctx.channelHttpRoutes.set(path, handler);
           },
+          isCurrentOwner: isCurrentChannelOwner,
+          connectImmediately: isCurrentChannelOwner(),
         });
         losslessDataPlane.bindChannels(result.registry);
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
+        ctx.channelConnections = {
+          connectConfigured: result.connectConfigured,
+          disconnectConfigured: result.disconnectConfigured,
+        };
         // 渠道在场后恢复耐久开放义务(job relay 会话按权威日志重建;
         // conversation 义务由协议恢复循环幂等重开)。
         await ctx.channelCoordinator?.recover();

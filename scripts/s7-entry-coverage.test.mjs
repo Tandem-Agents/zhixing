@@ -1022,11 +1022,15 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/local-conversation-rpc.ts",
     "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/channels.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
     "packages/cli/src/setup-delivery.ts",
+    "packages/core/src/delivery/authority-pipeline.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/runtime/duty-migration-command.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/rpc/methods/index.ts",
+    "packages/server/src/channels/inbound-router.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1112,6 +1116,26 @@ test("planned duty migration stays bound to two production roots and a finite ow
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
+        "const state = await this.#journal.prepareCandidate(preparedRecord(command));",
+        "const state = await this.#journal.append(preparedRecord(command));",
+      ),
+    )).join("\n"),
+    /terminal\/prepared durable ordering drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
+        "const phase = await context.journal.state(release.identity.transferId);",
+        "const phase = undefined;",
+      ),
+    )).join("\n"),
+    /terminal\/prepared durable ordering drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
       (text) => text.replace(
         "await completePlannedAnchorInstallationBeforeBootstrap({",
@@ -1119,6 +1143,63 @@ test("planned duty migration stays bound to two production roots and a finite ow
       ),
     )).join("\n"),
     /pre-bootstrap\/post-install completion closure drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "await ctx.deliveryStack?.quiesceForAuthorityTransfer();",
+        "await ctx.deliveryStack?.recoverInstalledAuthority();",
+      ),
+    )).join("\n"),
+    /source quiesce or installed consumer read-back order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("return obligations;", "return [];"),
+    )).join("\n"),
+    /source quiesce or installed consumer read-back order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "const readBack = await readBackPlannedAnchorPostInstallObligations({",
+        "const readBack = await Promise.resolve([{",
+      ),
+    )).join("\n"),
+    /source quiesce or installed consumer read-back order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "isCurrentOwner: isCurrentChannelOwner,",
+        "isCurrentOwner: () => true,",
+      ),
+    )).join("\n"),
+    /channel current-owner connection or final guard drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => text.replace(
+        "if (!this.isCurrentOwner())",
+        "if (false)",
+      ),
+    )).join("\n"),
+    /channel current-owner connection or final guard drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/channels.ts",
+      (text) => text.replace(
+        "if (isCurrentOwner?.() === false)",
+        "if (false)",
+      ),
+    )).join("\n"),
+    /channel current-owner connection or final guard drifted/,
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(

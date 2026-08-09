@@ -171,6 +171,7 @@ type PlannedAnchorCandidateTerminal = "committed" | "aborted" | "released";
 interface PlannedAnchorCandidateState {
   readonly identity: PlannedAnchorCandidateIdentity;
   readonly readyProof?: ReadyProof;
+  readonly prepared?: true;
   readonly terminal?: PlannedAnchorCandidateTerminal;
   readonly releaseDelivered?: true;
 }
@@ -186,6 +187,11 @@ type PlannedAnchorCandidateRecord =
       readonly t: "planned-anchor-candidate-ready";
       readonly identity: PlannedAnchorCandidateIdentity;
       readonly readyProof: ReadyProof;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "planned-anchor-candidate-prepared";
+      readonly identity: PlannedAnchorCandidateIdentity;
     }
   | {
       readonly v: 1;
@@ -375,6 +381,9 @@ class FilePlannedAnchorCandidateJournal {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration candidate terminal has no durable claim");
       assertCandidateIdentity(existing.identity, identity);
+      if (terminal === "released" && existing.prepared) {
+        throw new Error("Prepared migration candidate requires a signed transfer abort");
+      }
       if (existing.terminal !== undefined) {
         if (existing.terminal !== terminal) {
           throw new Error("Migration candidate terminal decision conflicts with replay");
@@ -391,6 +400,62 @@ class FilePlannedAnchorCandidateJournal {
         kind: "append",
         entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
         value: { ...existing, terminal },
+      };
+    })).value;
+  }
+
+  async markPrepared(
+    identityInput: PlannedAnchorCandidateIdentity,
+  ): Promise<PlannedAnchorCandidateState> {
+    const identity = validateCandidateIdentity(identityInput);
+    return (await this.#transact((projection) => {
+      const existing = projection.claims.get(identity.transferId);
+      if (!existing) throw new Error("Migration prepare has no durable candidate claim");
+      assertCandidateIdentity(existing.identity, identity);
+      if (existing.terminal !== undefined) {
+        throw new Error("Terminal migration candidate cannot be prepared");
+      }
+      if (existing.prepared) return { kind: "return", value: existing };
+      const record: PlannedAnchorCandidateRecord = {
+        v: 1,
+        t: "planned-anchor-candidate-prepared",
+        identity,
+      };
+      return {
+        kind: "append",
+        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        value: { ...existing, prepared: true as const },
+      };
+    })).value;
+  }
+
+  async releaseUnprepared(
+    identityInput: PlannedAnchorCandidateIdentity,
+  ): Promise<PlannedAnchorCandidateState> {
+    const identity = validateCandidateIdentity(identityInput);
+    return (await this.#transact((projection) => {
+      const existing = projection.claims.get(identity.transferId);
+      if (!existing) throw new Error("Migration candidate release has no durable claim");
+      assertCandidateIdentity(existing.identity, identity);
+      if (existing.terminal !== undefined) {
+        if (existing.terminal !== "released") {
+          throw new Error("Migration candidate terminal decision conflicts with release");
+        }
+        return { kind: "return", value: existing };
+      }
+      if (existing.prepared || projection.transfers.has(identity.transferId)) {
+        throw new Error("Prepared migration candidate requires a signed transfer abort");
+      }
+      const record: PlannedAnchorCandidateRecord = {
+        v: 1,
+        t: "planned-anchor-candidate-terminal",
+        identity,
+        terminal: "released",
+      };
+      return {
+        kind: "append",
+        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        value: { ...existing, terminal: "released" as const },
       };
     })).value;
   }
@@ -489,6 +554,62 @@ export class FilePlannedAnchorTransferJournal {
     terminal: PlannedAnchorCandidateTerminal,
   ): Promise<PlannedAnchorCandidateState> {
     return this.#candidates.terminal(identity, terminal);
+  }
+
+  releaseUnpreparedCandidate(
+    identity: PlannedAnchorCandidateIdentity,
+  ): Promise<PlannedAnchorCandidateState> {
+    return this.#candidates.releaseUnprepared(identity);
+  }
+
+  async prepareCandidate(
+    record: Extract<PlannedRecord, { t: "anchor-prepared" }>,
+  ): Promise<PlannedAnchorTransferState> {
+    const next = reducePlannedAnchorTransfer(undefined, record, this.verifier);
+    const identity = candidateIdentityFromState(next);
+    const result = await this.log.transactProjection<
+      PlannedAnchorCandidateProjection,
+      unknown,
+      PlannedAnchorTransferState
+    >(
+      emptyCandidateProjection(),
+      (projection, entry) => reduceCandidateProjection(
+        projection,
+        entry,
+        this.verifier,
+        true,
+      ),
+      (projection) => {
+        const candidate = projection.claims.get(record.transferId);
+        if (!candidate) throw new Error("Migration prepare has no durable candidate claim");
+        assertCandidateIdentity(candidate.identity, identity);
+        if (candidate.terminal !== undefined) {
+          throw new Error("Terminal migration candidate cannot be prepared");
+        }
+        const current = projection.transfers.get(record.transferId);
+        const prepared = reducePlannedAnchorTransfer(current, record, this.verifier);
+        if (current === prepared && candidate.prepared) {
+          return { kind: "return", value: prepared };
+        }
+        const entries: LogicalRecord<unknown>[] = [];
+        if (!candidate.prepared) {
+          entries.push({
+            stream: ANCHOR_CANDIDATE_STREAM,
+            body: {
+              v: 1,
+              t: "planned-anchor-candidate-prepared",
+              identity,
+            } satisfies PlannedAnchorCandidateRecord,
+          });
+        }
+        if (current !== prepared) {
+          entries.push({ stream: ANCHOR_TRANSFER_STREAM, body: record });
+        }
+        return { kind: "append", entries, value: prepared };
+      },
+      { streams: [ANCHOR_CANDIDATE_STREAM, ANCHOR_TRANSFER_STREAM] },
+    );
+    return result.value;
   }
 
   markCandidateReleaseDelivered(
@@ -796,14 +917,12 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     const candidate = await this.#candidates.state(release.identity.transferId);
     if (!candidate) throw new Error("Migration candidate release has no target claim");
     assertCandidateIdentity(candidate.identity, release.identity);
-    const context = this.#contexts.get(release.identity.transferId);
-    if (context) {
-      const phase = await context.journal.state(release.identity.transferId);
-      if (phase && phase.phase !== "aborted") {
-        throw new Error("Prepared migration candidate requires a signed transfer abort");
-      }
+    const context = this.#context(release.identity.transferId);
+    const phase = await context.journal.state(release.identity.transferId);
+    if (phase) {
+      throw new Error("Prepared migration candidate requires a signed transfer abort");
     }
-    await this.#candidates.terminal(release.identity, "released");
+    await this.#candidates.releaseUnprepared(release.identity);
     const issuerKey = await loadAnchorIssuerKey(
       this.options.secretStore,
       release.identity.transferId,
@@ -879,6 +998,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       throw new Error("Migration issuer key no longer matches its ready proof");
     }
     applyTrustEvent(trust, command.trustTransition);
+    await this.#candidates.markPrepared(candidate.identity);
     const state = await context.journal.append(preparedRecord(command));
     return this.#result(command, state);
   }
@@ -1490,7 +1610,7 @@ export class PlannedAnchorTransferOwner {
     if (command.op !== "prepare") {
       throw new TypeError("Migration prepare command was not preserved by validation");
     }
-    const state = await this.#journal.append(preparedRecord(command));
+    const state = await this.#journal.prepareCandidate(preparedRecord(command));
     await this.#sendPrepared(state);
     return state;
   }
@@ -1775,7 +1895,7 @@ export class PlannedAnchorTransferOwner {
       if (candidate.terminal !== undefined && candidate.terminal !== "released") {
         throw new Error("Terminal migration candidate cannot be released");
       }
-      await this.#journal.terminalCandidate(candidate.identity, "released");
+      await this.#journal.releaseUnpreparedCandidate(candidate.identity);
       await this.#deliverCandidateRelease(candidate.identity, input.reason);
       return undefined;
     }
@@ -2622,6 +2742,36 @@ async function projectPendingObligations(
   return pending.snapshot();
 }
 
+export async function readBackPlannedAnchorPostInstallObligations(input: {
+  readonly log: FileAuthorityCommitLog;
+  readonly obligations: AuthorityCatalog["pendingObligations"];
+}): Promise<readonly {
+  readonly kind: AuthorityCatalog["pendingObligations"][number]["kind"];
+  readonly id: string;
+  readonly disposition: "current-owner" | "terminal";
+}[]> {
+  const seen = new Set<string>();
+  for (const obligation of input.obligations) {
+    const key = `${obligation.kind}:${obligation.id}`;
+    if (seen.has(key)) {
+      throw new Error("Installed migration catalog repeats a pending obligation");
+    }
+    seen.add(key);
+  }
+  const pending = await projectPendingObligations(
+    input.log,
+    await input.log.checkpoint(),
+  );
+  const current = new Set(pending.map((item) => `${item.kind}:${item.id}`));
+  return Object.freeze(input.obligations.map((obligation) => Object.freeze({
+    kind: obligation.kind,
+    id: obligation.id,
+    disposition: current.has(`${obligation.kind}:${obligation.id}`)
+      ? "current-owner" as const
+      : "terminal" as const,
+  })));
+}
+
 async function loadPlannedSourceClosure(
   log: FileAuthorityCommitLog,
   artifacts: FileArtifactStore,
@@ -2966,7 +3116,19 @@ function reduceCandidateProjection(
       claims.set(record.identity.transferId, { ...existing, readyProof: record.readyProof });
       return { ...projection, claims };
     }
+    if (record.t === "planned-anchor-candidate-prepared") {
+      if (existing.terminal !== undefined) {
+        throw new Error("Terminal migration candidate cannot be prepared");
+      }
+      if (existing.prepared) return projection;
+      const claims = new Map(projection.claims);
+      claims.set(record.identity.transferId, { ...existing, prepared: true });
+      return { ...projection, claims };
+    }
     if (record.t === "planned-anchor-candidate-terminal") {
+      if (record.terminal === "released" && existing.prepared) {
+        throw new Error("Prepared migration candidate requires a signed transfer abort");
+      }
       if (existing.terminal !== undefined && existing.terminal !== record.terminal) {
         throw new Error("Migration candidate has conflicting terminal decisions");
       }
@@ -3014,6 +3176,7 @@ function validateCandidateRecord(value: unknown): PlannedAnchorCandidateRecord {
     ![
       "planned-anchor-candidate-claimed",
       "planned-anchor-candidate-ready",
+      "planned-anchor-candidate-prepared",
       "planned-anchor-candidate-terminal",
       "planned-anchor-candidate-release-delivered",
     ].includes(String(record.t)) ||

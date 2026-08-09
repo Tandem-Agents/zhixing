@@ -62,6 +62,8 @@ export interface InboundRouterOptions {
   conversations: ConversationManager;
   channels: ChannelRegistry;
   logger: ChannelLogger;
+  /** Final side-effect gate for channel callbacks racing a current-owner switch. */
+  isCurrentOwner?: () => boolean;
   /**
    * 可选 Outbox 顺序层。提供时，所有发往用户的回复经 Outbox.post 串行化；
    * 未提供时降级为直接 adapter.send（测试/尚未接入 Outbox 的场景）。
@@ -104,6 +106,7 @@ export class InboundRouter {
   private readonly conversations: ConversationManager;
   private readonly channels: ChannelRegistry;
   private readonly logger: ChannelLogger;
+  private readonly isCurrentOwner: () => boolean;
   private outboxRegistry?: OutboxRegistry;
   private readonly confirmationHub?: ConfirmationHub;
   private readonly intentClassifier: IntentClassifier;
@@ -114,11 +117,14 @@ export class InboundRouter {
     | undefined;
   /** graceful shutdown 期间拒新标记 —— `refuseNewMessages()` 置 false */
   private acceptingNew = true;
+  private acceptedInFlight = 0;
+  private readonly acceptedDrainWaiters = new Set<() => void>();
 
   constructor(options: InboundRouterOptions) {
     this.conversations = options.conversations;
     this.channels = options.channels;
     this.logger = options.logger;
+    this.isCurrentOwner = options.isCurrentOwner ?? (() => true);
     this.outboxRegistry = options.outboxRegistry;
     this.confirmationHub = options.confirmationHub;
     this.sessionBroadcast = options.sessionBroadcast;
@@ -213,7 +219,18 @@ export class InboundRouter {
     this.acceptingNew = true;
   }
 
+  async drainAcceptedMessages(): Promise<void> {
+    if (this.acceptedInFlight === 0) return;
+    await new Promise<void>((resolve) => this.acceptedDrainWaiters.add(resolve));
+  }
+
   async handleMessage(msg: InboundMessage): Promise<void> {
+    if (!this.isCurrentOwner()) {
+      this.logger.info(
+        `[非当前owner拒绝] channel=${msg.channelId} from=${msg.from}`,
+      );
+      return;
+    }
     const adapter = this.channels.get(msg.channelId);
     if (!adapter) {
       this.logger.warn(`No adapter found for channel: ${msg.channelId}`);
@@ -234,94 +251,103 @@ export class InboundRouter {
       return;
     }
 
-    const conversationId = resolveConversationId(msg, adapter.bindingPolicy);
-    this.logger.info(`[收到] "${msg.text}" from=${msg.from} conv=${conversationId}`);
+    this.acceptedInFlight += 1;
+    try {
+      const conversationId = resolveConversationId(msg, adapter.bindingPolicy);
+      this.logger.info(`[收到] "${msg.text}" from=${msg.from} conv=${conversationId}`);
 
     // ── 控制意图前置识别(优先于一切其它路径) ──
     // 词集互斥由 IntentClassifier 启动期校验,不会与下方 confirmation 词集冲突;
     // 识别为 non-control 时让原 confirmation / agent 路径接管。
-    const intent = this.intentClassifier.classify(msg);
-    if (intent.kind === "control") {
-      await this.handleControlIntent(intent.control, conversationId, msg);
-      return;
-    }
+      const intent = this.intentClassifier.classify(msg);
+      if (intent.kind === "control") {
+        await this.handleControlIntent(intent.control, conversationId, msg);
+        return;
+      }
 
     // ── pending-aware 拦截 ──
     // 必须在 conversations.getOrCreate / enqueue **之前**：
     //   · 不占队列位（用户回复不是对 agent 的提问）
     //   · 不触发会话创建（会话已 idle release 的场景 "好" 不应重建会话）
     //   · 不进入 agent 推理（避免把 "好" 当成用户提问走 LLM）
-    if (this.confirmationHub) {
-      const handled = await this.tryHandleAsConfirmationReply(msg, conversationId);
-      if (handled) return;
-    }
+      if (this.confirmationHub) {
+        const handled = await this.tryHandleAsConfirmationReply(msg, conversationId);
+        if (handled) return;
+      }
 
-    if (this.conversations.usesDurableTurnProtocol() && !msg.messageId) {
-      throw new Error("Durable channel admission requires a stable platform message id");
-    }
+      if (this.conversations.usesDurableTurnProtocol() && !msg.messageId) {
+        throw new Error("Durable channel admission requires a stable platform message id");
+      }
 
-    const replyTarget = buildReplyTarget(msg);
-    const turnId = msg.messageId
-      ? `channel:${msg.channelId}:${msg.messageId}`
-      : generateTurnId();
-    const turnContext = buildChannelTurnContext(
-      msg,
-      conversationId,
-      turnId,
-      replyTarget,
-      this.outboxRegistry,
-    );
-    let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
-    try {
-      admission = await this.conversations.admitTurn({
+      const replyTarget = buildReplyTarget(msg);
+      const turnId = msg.messageId
+        ? `channel:${msg.channelId}:${msg.messageId}`
+        : generateTurnId();
+      const turnContext = buildChannelTurnContext(
+        msg,
         conversationId,
-        source: "channel",
-        beforeEnqueue: (managed) =>
-          this.conversations.admitDurableTurn({
-            conversationId: managed.conversationId,
-            input: msg.text,
-            invocation: { kind: "agent", source: "channel" },
-            options: { turnContext, source: "channel" },
-          }),
-        makeTask: (managed) => ({
+        turnId,
+        replyTarget,
+        this.outboxRegistry,
+      );
+      let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
+      try {
+        admission = await this.conversations.admitTurn({
+          conversationId,
           source: "channel",
-          execute: () =>
-            this.runChannelTurn(managed, msg, { replyTarget, turnId, turnContext }),
-          cancel: () => {
-            this.logger.info(`[排队取消] conv=${conversationId}`);
+          beforeEnqueue: (managed) =>
+            this.conversations.admitDurableTurn({
+              conversationId: managed.conversationId,
+              input: msg.text,
+              invocation: { kind: "agent", source: "channel" },
+              options: { turnContext, source: "channel" },
+            }),
+          makeTask: (managed) => ({
+            source: "channel",
+            execute: () =>
+              this.runChannelTurn(managed, msg, { replyTarget, turnId, turnContext }),
+            cancel: () => {
+              this.logger.info(`[排队取消] conv=${conversationId}`);
+            },
+          }),
+        });
+      } catch (err) {
+        this.logger.error(`Failed to admit conversation ${conversationId}: ${errMsg(err)}`);
+        await this.emitReply(
+          replyTarget,
+          { text: "场景正在切换或目录变更，请稍后重试。" },
+          { kind: "system", handler: "conversation-admission-failed" },
+        ).catch(() => {});
+        return;
+      }
+
+      if (admission.status === "not-found") return;
+      const status = admission.status;
+
+      this.logger.info(`[调度] status=${status} conv=${conversationId}`);
+
+      if (status === "full") {
+        this.logger.warn(`[丢弃] status=${status} conv=${conversationId}`);
+        await this.emitReply(
+          replyTarget,
+          { text: "消息队列已满，请稍后再试。" },
+          {
+            kind: "system",
+            handler: "conversation-queue-full",
           },
-        }),
-      });
-    } catch (err) {
-      this.logger.error(`Failed to admit conversation ${conversationId}: ${errMsg(err)}`);
-      await this.emitReply(
-        replyTarget,
-        { text: "场景正在切换或目录变更，请稍后重试。" },
-        { kind: "system", handler: "conversation-admission-failed" },
-      ).catch(() => {});
-      return;
-    }
+        ).catch((e) => this.logger.error(`Failed to send busy reply: ${errMsg(e)}`));
+        return;
+      }
 
-    if (admission.status === "not-found") return;
-    const status = admission.status;
-
-    this.logger.info(`[调度] status=${status} conv=${conversationId}`);
-
-    if (status === "full") {
-      this.logger.warn(`[丢弃] status=${status} conv=${conversationId}`);
-      await this.emitReply(
-        replyTarget,
-        { text: "消息队列已满，请稍后再试。" },
-        {
-          kind: "system",
-          handler: "conversation-queue-full",
-        },
-      ).catch((e) => this.logger.error(`Failed to send busy reply: ${errMsg(e)}`));
-      return;
-    }
-
-    if (status === "immediate") {
-      void admission.task.execute();
+      if (status === "immediate") {
+        void admission.task.execute();
+      }
+    } finally {
+      this.acceptedInFlight -= 1;
+      if (this.acceptedInFlight === 0) {
+        for (const resolve of this.acceptedDrainWaiters) resolve();
+        this.acceptedDrainWaiters.clear();
+      }
     }
   }
 

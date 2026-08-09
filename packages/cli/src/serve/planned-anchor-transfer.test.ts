@@ -35,6 +35,7 @@ import {
   PlannedAnchorTransferTarget,
   completePlannedAnchorInstallationBeforeBootstrap,
   type PlannedAnchorTransferTargetPort,
+  type PlannedAnchorCandidateRelease,
 } from "./planned-anchor-transfer.js";
 import {
   PlannedAnchorTransferMeshClient,
@@ -169,6 +170,80 @@ describe("planned anchor transfer prepared phase", () => {
       transferId: TRANSFER_ID,
       reason: "operator-cancelled",
     })).resolves.toBeUndefined();
+  });
+
+  it("orders claim-only cancellation before the first prepared record in one source transaction", async () => {
+    const fixture = await createFixture();
+    let releaseReady!: () => void;
+    let readyReached!: () => void;
+    const readyGate = new Promise<void>((resolve) => {
+      releaseReady = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      readyReached = resolve;
+    });
+    const delayedTarget: PlannedAnchorTransferTargetPort = {
+      summary: () => fixture.target.summary(),
+      ready: async (input) => {
+        const proof = await fixture.target.ready(input);
+        readyReached();
+        await readyGate;
+        return proof;
+      },
+      releaseCandidate: (input) => fixture.target.releaseCandidate(input),
+      apply: (command) => fixture.target.apply(command),
+    };
+    const owner = fixture.createOwner(delayedTarget);
+    const preparing = owner.prepare({
+      requestId: "request-cancel-wins",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    await reached;
+    await expect(owner.abort({
+      requestId: "request-cancel-wins",
+      transferId: TRANSFER_ID,
+      reason: "operator-cancelled",
+    })).resolves.toBeUndefined();
+    releaseReady();
+    await expect(preparing).rejects.toThrow("Terminal migration candidate cannot be prepared");
+    expect(await fixture.sourceJournal.state(TRANSFER_ID)).toBeUndefined();
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).toBeNull();
+  });
+
+  it("rejects a delayed claim-only release after target restart once prepare is durable", async () => {
+    const fixture = await createFixture();
+    await fixture.owner.prepare({
+      requestId: "request-prepared-wins",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    const identity = {
+      homeId: fixture.sourceTrust.homeId,
+      requestId: "request-prepared-wins",
+      transferId: TRANSFER_ID,
+      sourceDeviceId: fixture.sourceKey.deviceId,
+      targetDeviceId: fixture.targetKey.deviceId,
+      trustEpoch: fixture.sourceTrust.trustEpoch,
+      trustChainHead: fixture.sourceTrust.chainHead,
+      sourceAnchorEpoch: 1,
+    };
+    const payload = {
+      v: 1 as const,
+      t: "planned-anchor-candidate-release" as const,
+      identity,
+      reason: "operator-cancelled" as const,
+    };
+    const release: PlannedAnchorCandidateRelease = {
+      ...payload,
+      signature: fixture.sourceKey.sign("PlannedAnchorCandidateRelease", 1, payload),
+    };
+    const restartedTarget = fixture.createTarget();
+    await expect(restartedTarget.releaseCandidate(release)).rejects.toThrow(
+      "Prepared migration candidate requires a signed transfer abort",
+    );
+    expect((await fixture.targetJournal.state(TRANSFER_ID))?.phase).toBe("prepared");
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).not.toBeNull();
   });
 
   it("crosses the strict mesh service and authorizes only the current source", async () => {

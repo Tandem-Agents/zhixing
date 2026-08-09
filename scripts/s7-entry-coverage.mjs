@@ -1191,10 +1191,15 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const setup = byPath.get("packages/cli/src/setup-delivery.ts");
+  const channels = byPath.get("packages/cli/src/serve/channels.ts");
+  const inboundRouter = byPath.get("packages/server/src/channels/inbound-router.ts");
+  const conversationProtocol = byPath.get("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const deliveryPipeline = byPath.get("packages/core/src/delivery/authority-pipeline.ts");
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
     !accessRoot || !executorRoot || !setup || !firstParty || !localRouter ||
-    !registry || !bootstrap
+    !registry || !bootstrap || !channels || !inboundRouter || !conversationProtocol ||
+    !deliveryPipeline
   ) {
     return ["planned anchor transfer production assembly sources are missing"];
   }
@@ -1258,7 +1263,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor transfer owner/receiver topology exact-set drifted");
   }
   if (
-    count(accessRoot, "ctx.meshRuntime?.currentAnchorDeviceId()") !== 2 ||
+    count(accessRoot, "ctx.meshRuntime?.currentAnchorDeviceId()") !== 3 ||
     count(executorRoot, "mesh?.currentAnchorDeviceId()") !== 1 ||
     count(assembly, "currentSourceDeviceId: () => this.#control.currentTrust().issuer.deviceId") !== 1 ||
     count(assembly, "this.#plannedCommittedTargetDeviceId ??") !== 1 ||
@@ -1299,6 +1304,28 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   ) {
     failures.push("planned anchor candidate durable single-flight or claim-before-effect drifted");
   }
+  const targetRelease = transfer.indexOf("async releaseCandidate(input: PlannedAnchorCandidateRelease)");
+  const targetReleaseContext = transfer.indexOf(
+    "const context = this.#context(release.identity.transferId);",
+    targetRelease,
+  );
+  const targetReleasePhase = transfer.indexOf(
+    "const phase = await context.journal.state(release.identity.transferId);",
+    targetReleaseContext,
+  );
+  const targetReleaseDecision = transfer.indexOf(
+    "await this.#candidates.releaseUnprepared(release.identity);",
+    targetReleasePhase,
+  );
+  if (
+    count(transfer, "const state = await this.#journal.prepareCandidate(preparedRecord(command));") !== 1 ||
+    count(transfer, "await this.#journal.releaseUnpreparedCandidate(candidate.identity);") !== 1 ||
+    count(transfer, "await this.#candidates.markPrepared(candidate.identity);") !== 1 ||
+    targetRelease < 0 || targetReleaseContext < targetRelease ||
+    targetReleasePhase < targetReleaseContext || targetReleaseDecision < targetReleasePhase
+  ) {
+    failures.push("planned anchor candidate terminal/prepared durable ordering drifted");
+  }
 
   const completion = transfer.indexOf("export async function completePlannedAnchorInstallationBeforeBootstrap(");
   const loadInstall = transfer.indexOf("loadCurrentPlannedAnchorInstallation(", completion);
@@ -1318,6 +1345,60 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(firstParty, "this.input.isReady?.() === false") !== 1
   ) {
     failures.push("planned anchor pre-bootstrap/post-install completion closure drifted");
+  }
+  const stopInbound = command.indexOf("ctx.inboundRouter?.refuseNewMessages()");
+  const drainInbound = command.indexOf(
+    "await ctx.inboundRouter?.drainAcceptedMessages()",
+    stopInbound,
+  );
+  const disconnectChannels = command.indexOf(
+    "await ctx.channelConnections?.disconnectConfigured()",
+    drainInbound,
+  );
+  const quiesceDelivery = command.indexOf(
+    "await ctx.deliveryStack?.quiesceForAuthorityTransfer()",
+    disconnectChannels,
+  );
+  const postInstallReadBack = assembly.indexOf(
+    "const readBack = await readBackPlannedAnchorPostInstallObligations({",
+  );
+  const postInstallFinish = assembly.indexOf(
+    "await finishPlannedAnchorPostInstall({",
+    postInstallReadBack,
+  );
+  const postInstallOpen = assembly.indexOf(
+    "await consumers.openCurrentOwnerSurfaces()",
+    postInstallFinish,
+  );
+  if (
+    stopInbound < 0 || drainInbound < stopInbound || disconnectChannels < drainInbound ||
+    quiesceDelivery < disconnectChannels ||
+    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 1 ||
+    count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
+    count(command, "return obligations;") !== 4 ||
+    count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
+    count(deliveryPipeline, "async quiesceForAuthorityTransfer(): Promise<void>") !== 1 ||
+    count(deliveryPipeline, "async resumeAfterAuthorityTransfer(): Promise<void>") !== 1 ||
+    postInstallReadBack < 0 || postInstallFinish < postInstallReadBack ||
+    postInstallOpen < postInstallFinish
+  ) {
+    failures.push("planned anchor source quiesce or installed consumer read-back order drifted");
+  }
+  if (
+    count(accessRoot, "isCurrentOwner: isCurrentChannelOwner") !== 1 ||
+    count(accessRoot, "connectImmediately: isCurrentChannelOwner()") !== 1 ||
+    count(accessRoot, "connectConfigured: result.connectConfigured") !== 1 ||
+    count(accessRoot, "disconnectConfigured: result.disconnectConfigured") !== 1 ||
+    count(channels, "isCurrentOwner,") !== 2 ||
+    count(channels, "connectImmediately = true") !== 1 ||
+    count(channels, "if (isCurrentOwner?.() === false)") !== 1 ||
+    count(channels, "onChallengeAction: currentOwnerChallengeAction") !== 1 ||
+    count(channels, "connectConfigured,") !== 2 ||
+    count(channels, "disconnectConfigured,") !== 1 ||
+    count(inboundRouter, "if (!this.isCurrentOwner())") !== 1 ||
+    count(inboundRouter, "async drainAcceptedMessages(): Promise<void>") !== 1
+  ) {
+    failures.push("planned anchor channel current-owner connection or final guard drifted");
   }
 
   const recoveryCall = "await this.#plannedAnchorOwner?.recoverBeforeAdmission()";

@@ -940,6 +940,9 @@ async function runServerProcess(
     ctx.meshRuntime?.bindPlannedAnchorLifecycle({
       stopAccepting: async () => {
         ctx.inboundRouter?.refuseNewMessages();
+        await ctx.inboundRouter?.drainAcceptedMessages();
+        await ctx.channelConnections?.disconnectConfigured();
+        await ctx.deliveryStack?.quiesceForAuthorityTransfer();
         await runtime.scheduler.pauseForAuthorityTransfer();
       },
       drainAccepted: async () => {
@@ -951,13 +954,14 @@ async function runServerProcess(
           throw new Error("Duty-device migration could not drain accepted conversation work");
         }
         await ctx.executorJobOwner?.drain();
-        await ctx.deliveryStack?.flush();
         await ctx.conversationProtocol?.stopRecoveryLoop();
       },
-      resumeAfterAbort: () => {
+      resumeAfterAbort: async () => {
+        await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
         ctx.conversationProtocol?.startRecoveryLoop();
         runtime.scheduler.resumeAfterAuthorityTransfer();
         ctx.inboundRouter?.resumeNewMessages();
+        await ctx.channelConnections?.connectConfigured();
       },
     });
     adoptionReview = new PostAdoptionReviewCoordinator({
@@ -974,19 +978,22 @@ async function runServerProcess(
       throw new Error("Planned anchor post-install requires the scheduler runtime");
     }
     await ctx.meshRuntime?.bindPlannedAnchorPostInstallConsumers({
-      recoverScheduler: async (_obligations) => {
+      recoverScheduler: async (obligations) => {
         await installedSchedulerRuntime.recoverInstalledAuthority();
+        return obligations;
       },
-      recoverConversation: async (_obligations) => {
+      recoverConversation: async (obligations) => {
         const protocol = ctx.conversationProtocol;
-        if (!protocol) return;
-        await protocol.stopRecoveryLoop();
-        await protocol.recoverReadinessProjections();
-        protocol.startRecoveryLoop();
-        await protocol.recover();
+        if (!protocol) return obligations;
+        await protocol.recoverInstalledAuthority();
+        return obligations;
       },
-      recoverDelivery: async (_obligations) => {
+      recoverDelivery: async (obligations) => {
         await ctx.deliveryStack?.recoverInstalledAuthority();
+        return obligations;
+      },
+      openCurrentOwnerSurfaces: async () => {
+        await ctx.channelConnections?.connectConfigured();
       },
     });
   }

@@ -119,6 +119,7 @@ describe("InboundRouter", () => {
     durableTurnExecutor?: DurableConversationTurnExecutor;
     sessionBroadcast?: SessionBroadcast;
     sessionActivityBroadcast?: SessionActivityBroadcast;
+    isCurrentOwner?: () => boolean;
   }) {
     const adapter = options?.adapter ?? createMockAdapter();
     const factory = createMockRuntimeFactory(options?.runtime);
@@ -150,6 +151,7 @@ describe("InboundRouter", () => {
       sessionActivityBroadcast: options?.sessionActivityBroadcast
         ? () => options.sessionActivityBroadcast
         : undefined,
+      isCurrentOwner: options?.isCurrentOwner,
     });
 
     return { adapter, factory, conversations, channels, router };
@@ -1415,6 +1417,46 @@ describe("InboundRouter", () => {
       expect((content as { text: string }).text).toBe(
         "服务暂时不可用,请稍后重新发送。",
       );
+    });
+
+    it("非 current owner 在任何 channel 副作用前稳定拒绝", async () => {
+      const isCurrentOwner = vi.fn(() => false);
+      const { adapter, conversations, router } = setup({ isCurrentOwner });
+      const admitSpy = vi.spyOn(conversations, "admitTurn");
+      const getOrCreateSpy = vi.spyOn(conversations, "getOrCreate");
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+
+      expect(isCurrentOwner).toHaveBeenCalledOnce();
+      expect(admitSpy).not.toHaveBeenCalled();
+      expect(getOrCreateSpy).not.toHaveBeenCalled();
+      expect(adapter.send).not.toHaveBeenCalled();
+    });
+
+    it("drainAcceptedMessages 等待已越过 owner/admission gate 的消息完成准入", async () => {
+      const { conversations, router } = setup();
+      let resolveAdmission!: (value: { status: "not-found" }) => void;
+      const admission = new Promise<{ status: "not-found" }>((resolve) => {
+        resolveAdmission = resolve;
+      });
+      vi.spyOn(conversations, "admitTurn").mockReturnValue(admission as never);
+
+      const handling = router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+      await vi.waitFor(() => {
+        expect(conversations.admitTurn).toHaveBeenCalledOnce();
+      });
+
+      router.refuseNewMessages();
+      let drained = false;
+      const draining = router.drainAcceptedMessages().then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+
+      resolveAdmission({ status: "not-found" });
+      await Promise.all([handling, draining]);
+      expect(drained).toBe(true);
     });
   });
 

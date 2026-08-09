@@ -61,7 +61,7 @@ const PRIORITY_ORDER: Record<AuthorityDeliveryItem["priority"], number> = {
 };
 const MAX_TIMER_INTERVAL_MS = 2_147_483_647;
 
-type PipelineState = "unstarted" | "prepared" | "running" | "stopped";
+type PipelineState = "unstarted" | "prepared" | "running" | "quiesced" | "stopped";
 
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
 export class AuthorityDeliveryPipeline {
@@ -124,21 +124,40 @@ export class AuthorityDeliveryPipeline {
         code: safePipelineFailureCode(error),
       });
     });
-    if (this.#config.flushIntervalMs > 0) {
-      this.#flushTimer = setInterval(() => {
-        if (this.#state !== "running") return;
-        void this.flush().catch((error) => {
-          this.#logger.error("Delivery drain failed", {
-            code: safePipelineFailureCode(error),
-          });
-        });
-      }, this.#config.flushIntervalMs);
+    this.#startFlushTimer();
+  }
+
+  async quiesceForAuthorityTransfer(): Promise<void> {
+    if (this.#state === "quiesced") {
+      await this.#activeFlush?.catch(() => undefined);
+      return;
     }
+    if (this.#state !== "running") {
+      throw new Error(`Pipeline.quiesceForAuthorityTransfer: illegal transition from state="${this.#state}"`);
+    }
+    this.#state = "quiesced";
+    if (this.#flushTimer) clearInterval(this.#flushTimer);
+    this.#flushTimer = undefined;
+    await this.#activeFlush?.catch(() => undefined);
+  }
+
+  async resumeAfterAuthorityTransfer(): Promise<void> {
+    if (this.#state === "running") return;
+    if (this.#state !== "quiesced") {
+      throw new Error(`Pipeline.resumeAfterAuthorityTransfer: illegal transition from state="${this.#state}"`);
+    }
+    this.#state = "running";
+    this.#startFlushTimer();
+    await this.flush();
   }
 
   async stop(): Promise<void> {
     if (this.#state === "stopped") return;
-    if (this.#state !== "running" && this.#state !== "prepared") {
+    if (
+      this.#state !== "running" &&
+      this.#state !== "prepared" &&
+      this.#state !== "quiesced"
+    ) {
       throw new Error(`Pipeline.stop: illegal transition from state="${this.#state}"`);
     }
     this.#state = "stopped";
@@ -176,6 +195,18 @@ export class AuthorityDeliveryPipeline {
         (item) => item.state === "failed" || item.state === "abandoned",
       ).length,
     };
+  }
+
+  #startFlushTimer(): void {
+    if (this.#config.flushIntervalMs <= 0 || this.#flushTimer) return;
+    this.#flushTimer = setInterval(() => {
+      if (this.#state !== "running") return;
+      void this.flush().catch((error) => {
+        this.#logger.error("Delivery drain failed", {
+          code: safePipelineFailureCode(error),
+        });
+      });
+    }, this.#config.flushIntervalMs);
   }
 
   async #drain(): Promise<void> {

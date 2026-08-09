@@ -629,6 +629,44 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
   }
 
+  /** Rebuilds every recovery-derived view after a planned authority-base install. */
+  async recoverInstalledAuthority(): Promise<number> {
+    await this.stopRecoveryLoop();
+    await this.#readinessRecovery?.catch(() => 0);
+    await Promise.all(
+      [...this.#lifecycleProjectionClaims.values()].map((claim) => claim.catch(() => 0)),
+    );
+    if (this.#activeRecoveryClaims.size > 0) {
+      throw new Error("Installed authority recovery still has active prior-generation claims");
+    }
+
+    this.#recoveryGeneration += 1;
+    this.#readinessRecovery = undefined;
+    this.#recoveryDiscovered = false;
+    this.#recoveryConversations.clear();
+    this.#journals.clear();
+    this.#adoptedConversations.clear();
+    this.#sessionIdentities.clear();
+    for (const assignmentId of [...this.#assignmentConversations.keys()]) {
+      this.#forgetAssignment(assignmentId);
+    }
+    this.#assignmentRuntimeBindings.clear();
+    this.#schedulingRuns.clear();
+    this.#scheduledRuns.clear();
+    this.#firstPartyPublishedFinals.clear();
+    this.#ownerPublishedFirstPartyFinals.clear();
+    this.#pendingFirstPartyFinals.clear();
+    this.#preparedAdmissions.clear();
+    this.#pendingConversationRetirements.clear();
+    this.#shutdownDraining = false;
+    this.#recoveryStopped = false;
+
+    const discovered = await this.recoverReadinessProjections();
+    const recovered = await this.recover();
+    this.startRecoveryLoop();
+    return discovered + recovered;
+  }
+
   controlPrincipal(input: {
     readonly surfacePrincipal: string;
     readonly connectionId: string;
