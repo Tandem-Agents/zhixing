@@ -313,12 +313,12 @@ dutyCmd
 dutyCmd
   .command("migrate")
   .description("把值班职责迁移到指定设备")
-  .argument("<device-id>", "目标设备编号")
+  .argument("[device-name]", "目标设备名称；交互终端可省略后按序号选择")
   .option("--prepare-only", "只准备迁移，保留取消机会")
-  .action(async (deviceId: string, options: { prepareOnly?: boolean }) => {
+  .action(async (deviceName: string | undefined, options: { prepareOnly?: boolean }) => {
     try {
       const { prepareDutyMigration } = await import("./runtime/duty-migration-command.js");
-      await prepareDutyMigration(deviceId, options.prepareOnly !== true);
+      await prepareDutyMigration(deviceName, options.prepareOnly !== true);
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

@@ -8,6 +8,7 @@ import {
   RpcAppError,
   toJsonRpcError,
   type CanonicalFirstPartyConversationSurface,
+  type FirstPartyConversationRpcRouter,
   type RpcConnection,
 } from "@zhixing/server";
 
@@ -25,6 +26,7 @@ const METHODS = new Set([
   "session.delete",
   "session.history",
   "session.list",
+  "session.new",
   "session.rename",
   "session.resume",
   "session.security",
@@ -36,6 +38,10 @@ const METHODS = new Set([
   "session.usage",
   "confirmation.list",
   "confirmation.resolve",
+  "dutyMigration.targets",
+  "dutyMigration.prepare",
+  "dutyMigration.commit",
+  "dutyMigration.cancel",
 ]);
 
 interface SurfaceIdentity {
@@ -167,6 +173,41 @@ export interface FirstPartyIngressConnection {
   readonly surfaceGeneration?: number;
   notify(method: string, params: unknown): void;
   onClose(handler: () => void): () => void;
+}
+
+/** Routes the finite first-party authority surface to the current duty device. */
+export class CurrentAnchorFirstPartyRpcRouter
+  implements FirstPartyConversationRpcRouter
+{
+  readonly #remote = new Map<string, FirstPartyConversationMeshClient>();
+
+  constructor(private readonly input: {
+    readonly deviceId: string;
+    readonly currentAnchorDeviceId: () => string;
+    readonly remoteFor: (deviceId: string) => FirstPartyConversationMeshClient;
+  }) {}
+
+  async dispatch(input: {
+    readonly method: string;
+    readonly params: unknown;
+    readonly connection: FirstPartyIngressConnection;
+  }): Promise<
+    | { readonly handled: false }
+    | { readonly handled: true; readonly result: unknown }
+  > {
+    if (!METHODS.has(input.method)) return { handled: false };
+    const current = this.input.currentAnchorDeviceId();
+    if (current === this.input.deviceId) return { handled: false };
+    let remote = this.#remote.get(current);
+    if (!remote) {
+      remote = this.input.remoteFor(current);
+      this.#remote.set(current, remote);
+    }
+    return {
+      handled: true,
+      result: await remote.dispatch(input.method, input.params, input.connection),
+    };
+  }
 }
 
 export class FirstPartyConversationMeshClient {

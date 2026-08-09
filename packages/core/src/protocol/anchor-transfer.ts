@@ -302,12 +302,13 @@ export function validateAnchorTransferResult(
     const state = value.state as PlannedAnchorTransferPhase;
     const field = state === "prepared" || state === "fenced" ? [] :
       state === "frozen" || state === "imported" ? ["ref"] :
-        state === "committed" || state === "tombstoned" ? ["commit"] : ["abort"];
+        state === "committed" || state === "tombstoned" ? ["commit", "trustRecord"] : ["abort"];
     exact(value, ["requestId", ...field, "state", "status", "transferId", "v"], "Anchor transfer result");
     if (state === "frozen" || state === "imported") artifact(value.ref, "Anchor transfer result ref");
     if (state === "committed" || state === "tombstoned") {
       if (!verifier) throw new TypeError("Committed result requires a verifier");
       const commit = validatePlannedAnchorTransferCommit(value.commit, verifier);
+      object(value.trustRecord, "Anchor transfer result trust record");
       if (command.op === "commit" && canonicalize(commit) !== canonicalize(command.commit)) {
         throw new TypeError("Committed result changes the originating commit");
       }

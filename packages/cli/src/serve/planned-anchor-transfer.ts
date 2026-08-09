@@ -1,4 +1,6 @@
 import path from "node:path";
+import type { Dirent } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import type {
   AnchorTransferCommand,
   AnchorTransferCommit,
@@ -15,14 +17,19 @@ import type {
   SecretStorePort,
   TransferRecord,
 } from "@zhixing/core/contracts";
-import type { DurableLogCheckpoint } from "@zhixing/core/authority";
+import type {
+  ArtifactCheckpointRetentionPort,
+  DurableLogCheckpoint,
+} from "@zhixing/core/authority";
 import {
   collectArtifactRefs,
   FileArtifactStore,
+  FileResumableArtifactReceiver,
 } from "@zhixing/core/authority";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   runStorageMaintenanceStep,
+  runWithMaintenanceUrgency,
   storageMaintenanceRequest,
 } from "@zhixing/core/resources";
 import {
@@ -57,17 +64,94 @@ import {
   applyTrustEvent,
   buildHomeTrustRecord,
   createSignedTrustEvent,
-  replayTrustChain,
+  verifyHomeTrustRecord,
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 const ANCHOR_TRANSFER_STREAM = "transfer:anchor";
+const SOURCE_CLOSURE_STREAM = "transfer:anchor-closure";
+const READY_RESERVATION_STREAM = "transfer:anchor-ready-reservation";
+const TRANSFER_CHUNK_BYTES = 512 * 1024;
+const MAX_TRANSFER_ARTIFACT_BYTES = 512 * 1024 * 1024 * 1024;
+const TRANSFER_EXPORT_PAGE_COMMITS = 64;
+const TRANSFER_HEADER_BYTES = 1024 * 1024;
 
 type PlannedRecord = Extract<TransferRecord, { mode: "planned" }>;
 type MigrationTransition = HomeTrustEventWithBody<
   Extract<HomeTrustEventBody, { t: "issuer-transition"; reason: "migration" }>
 >;
+
+interface ReadyReservation {
+  readonly v: 1;
+  readonly t: "planned-anchor-ready-reserved";
+  readonly transferId: string;
+  readonly targetDeviceId: string;
+  readonly proofDigest: string;
+  readonly snapshotDigest: string;
+  readonly expiresAt: string;
+}
+
+interface PlannedAuthorityExportPage {
+  readonly seq: number;
+  readonly firstLsn: number;
+  readonly lastLsn: number;
+  readonly recordCount: number;
+  readonly ref: ArtifactRef;
+}
+
+interface PlannedAuthorityExportPageBody {
+  readonly v: 1;
+  readonly seq: number;
+  readonly commits: readonly CommitEnvelope<unknown>[];
+}
+
+interface PlannedAuthorityExport {
+  readonly v: 2;
+  readonly checkpoint: DurableLogCheckpoint;
+  readonly pages: readonly PlannedAuthorityExportPage[];
+}
+
+interface CatalogStreamAccumulator {
+  readonly stream: string;
+  readonly firstLsn: number;
+  readonly lastLsn: number;
+  readonly recordCount: number;
+  readonly digest: string;
+}
+
+interface PlannedAuthorityCapture {
+  readonly manifest: PlannedAuthorityExport;
+  readonly manifestRef: ArtifactRef;
+  readonly retainedArtifacts: readonly ArtifactRef[];
+  readonly streams: readonly CatalogStreamAccumulator[];
+  readonly pendingObligations: AuthorityCatalog["pendingObligations"];
+}
+
+interface PlannedSourceClosure {
+  readonly v: 1;
+  readonly t: "planned-anchor-source-closure";
+  readonly transferId: string;
+  readonly acceptedTokens: readonly PlannedAcceptedToken[];
+  readonly pendingObligations: AuthorityCatalog["pendingObligations"];
+  readonly sourceHead: DurableLogCheckpoint;
+}
+
+interface PlannedAcceptedToken {
+  readonly transferId: string;
+  readonly kind: AuthorityCatalog["pendingObligations"][number]["kind"];
+  readonly id: string;
+  readonly requestId: string;
+}
+
+interface PlannedSourceClosureRecord {
+  readonly v: 1;
+  readonly t: "planned-anchor-source-closure-recorded";
+  readonly transferId: string;
+  readonly sourceHead: DurableLogCheckpoint;
+  readonly closure: ArtifactRef;
+  readonly closureDigest: string;
+}
 
 export interface PlannedAnchorTransferLifecycle {
   stopAccepting(): void | Promise<void>;
@@ -76,6 +160,7 @@ export interface PlannedAnchorTransferLifecycle {
 }
 
 export interface PlannedAnchorTransferTargetPort {
+  summary(): Promise<PlannedAnchorTargetReadinessSummary>;
   ready(input: {
     readonly transferId: string;
     readonly sourceDeviceId: string;
@@ -83,8 +168,51 @@ export interface PlannedAnchorTransferTargetPort {
   apply(command: AnchorTransferCommand): Promise<AnchorTransferResult>;
 }
 
+export interface PlannedAnchorReadinessPort {
+  snapshot(): Promise<AnchorTransferReadySnapshot>;
+  reserve(input: {
+    readonly transferId: string;
+    readonly expiresAt: string;
+  }): Promise<AnchorTransferReadySnapshot>;
+  release(transferId: string): Promise<void>;
+}
+
+export interface PlannedAnchorTargetReadinessSummary {
+  readonly ready: true;
+}
+
 export interface PlannedAnchorTransferArtifactSourcePort {
   applyArtifactCommand(command: AnchorTransferCommand): Promise<AnchorTransferResult>;
+}
+
+/** Assembly-owned gate for every planned-transfer command and physical step. */
+export class PlannedAnchorTransferRuntimeLifecycle {
+  readonly #abort = new AbortController();
+  readonly #inFlight = new Set<Promise<unknown>>();
+  #closing: Promise<void> | undefined;
+  #accepting = true;
+
+  run<T>(operation: () => Promise<T>): Promise<T> {
+    if (!this.#accepting) {
+      return Promise.reject(new Error("Duty-device migration runtime is stopping"));
+    }
+    const promise = runWithMaintenanceUrgency(
+      () => "foreground",
+      this.#abort.signal,
+      operation,
+    );
+    this.#inFlight.add(promise);
+    void promise.finally(() => this.#inFlight.delete(promise)).catch(() => undefined);
+    return promise;
+  }
+
+  close(): Promise<void> {
+    if (this.#closing) return this.#closing;
+    this.#accepting = false;
+    this.#abort.abort(new Error("Duty-device migration runtime is stopping"));
+    this.#closing = Promise.allSettled([...this.#inFlight]).then(() => undefined);
+    return this.#closing;
+  }
 }
 
 export class FilePlannedAnchorTransferJournal {
@@ -111,6 +239,7 @@ export class FilePlannedAnchorTransferJournal {
   async append(
     record: PlannedRecord,
     extraEntries: readonly LogicalRecord<unknown>[] = [],
+    beforeAppend?: () => void,
   ): Promise<PlannedAnchorTransferState> {
     const entries = [
       ...extraEntries,
@@ -127,6 +256,7 @@ export class FilePlannedAnchorTransferJournal {
         const current = states.get(record.transferId);
         const next = reducePlannedAnchorTransfer(current, record, this.verifier);
         if (current === next) return { kind: "return", value: next };
+        beforeAppend?.();
         return {
           kind: "append",
           entries,
@@ -152,11 +282,66 @@ export class FilePlannedAnchorTransferJournal {
       }
     }
   }
+
+  async readyReservation(transferId: string): Promise<ReadyReservation | undefined> {
+    const reservations = await this.log.rebuildProjection<
+      ReadonlyMap<string, ReadyReservation>,
+      ReadyReservation
+    >(new Map(), (current, entry) => {
+      if (entry.stream !== READY_RESERVATION_STREAM) return current;
+      const record = validateReadyReservation(entry.body);
+      const next = new Map(current);
+      const existing = next.get(record.transferId);
+      if (existing && canonicalize(existing) !== canonicalize(record)) {
+        throw new Error("Migration ready reservation changed its durable identity");
+      }
+      next.set(record.transferId, record);
+      return next;
+    }, { stream: READY_RESERVATION_STREAM });
+    return reservations.get(transferId);
+  }
+
+  async reserveReady(record: ReadyReservation): Promise<ReadyReservation> {
+    const valid = validateReadyReservation(record);
+    const result = await this.log.transactProjection<
+      ReadonlyMap<string, ReadyReservation>,
+      ReadyReservation,
+      ReadyReservation
+    >(new Map(), (current, entry) => {
+      if (entry.stream !== READY_RESERVATION_STREAM) return current;
+      const next = new Map(current);
+      const observed = validateReadyReservation(entry.body);
+      next.set(observed.transferId, observed);
+      return next;
+    }, (current) => {
+      const existing = current.get(valid.transferId);
+      if (existing) {
+        if (canonicalize(existing) !== canonicalize(valid)) {
+          throw new Error("Migration ready reservation conflicts with its durable replay");
+        }
+        return { kind: "return", value: existing };
+      }
+      return {
+        kind: "append",
+        entries: [{ stream: READY_RESERVATION_STREAM, body: valid }],
+        value: valid,
+      };
+    }, { stream: READY_RESERVATION_STREAM });
+    return result.value;
+  }
+}
+
+interface TargetTransferContext {
+  readonly transferId: string;
+  readonly privateRoot: string;
+  readonly artifacts: FileArtifactStore;
+  readonly receiver: FileResumableArtifactReceiver;
+  readonly promotionReceiver: FileResumableArtifactReceiver;
+  readonly journal: FilePlannedAnchorTransferJournal;
 }
 
 export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetPort {
-  readonly #journal: FilePlannedAnchorTransferJournal;
-  readonly #stagingArtifacts: FileArtifactStore;
+  readonly #contexts = new Map<string, TargetTransferContext>();
 
   constructor(private readonly options: {
     readonly deviceId: string;
@@ -170,35 +355,60 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     readonly storageMaintenance?: StorageMaintenanceGovernorPort;
     readonly signer: ProtocolSigner;
     readonly verifier: ProtocolSignatureVerifier;
-    readonly readiness: () => Promise<AnchorTransferReadySnapshot>;
+    readonly readiness: PlannedAnchorReadinessPort;
     readonly onInstalled?: (record: HomeTrustRecord) => void | Promise<void>;
     readonly now?: () => number;
   }) {
     if (options.identityKey.deviceId !== options.deviceId) {
       throw new TypeError("Migration target identity key belongs to another device");
     }
-    this.#stagingArtifacts = new FileArtifactStore(
-      path.join(options.stagingRoot, "artifacts"),
-    );
-    this.#journal = new FilePlannedAnchorTransferJournal(
-      new FileAuthorityCommitLog(
-        path.join(options.stagingRoot, "journal"),
-        this.#stagingArtifacts,
-        { storageMaintenance: options.storageMaintenance },
-      ),
-      options.verifier,
-    );
   }
 
   state(transferId: string): Promise<PlannedAnchorTransferState | undefined> {
-    return this.#journal.state(transferId);
+    return this.#context(transferId).journal.state(transferId);
+  }
+
+  /** Restores durable late-ready exclusions before public target admission. */
+  async recoverBeforeAdmission(): Promise<void> {
+    const journalsRoot = path.join(this.options.stagingRoot, "journals");
+    let entries: Dirent[];
+    try {
+      entries = await readdir(journalsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (isMissingPath(error)) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      assertTransferStorageId(entry.name);
+      const context = this.#context(entry.name);
+      const state = await context.journal.state(entry.name);
+      if (
+        !state ||
+        state.phase === "aborted" ||
+        state.phase === "committed" ||
+        state.phase === "tombstoned"
+      ) continue;
+      const reservation = await context.journal.readyReservation(entry.name);
+      if (!reservation) continue;
+      await this.options.readiness.reserve({
+        transferId: reservation.transferId,
+        expiresAt: reservation.expiresAt,
+      });
+    }
+  }
+
+  async summary(): Promise<PlannedAnchorTargetReadinessSummary> {
+    await this.options.readiness.snapshot();
+    return Object.freeze({ ready: true as const });
   }
 
   async ready(input: {
     readonly transferId: string;
     readonly sourceDeviceId: string;
   }): Promise<ReadyProof> {
-    const existing = await this.#journal.state(input.transferId);
+    const context = this.#context(input.transferId);
+    const existing = await context.journal.state(input.transferId);
     if (existing) {
       if (
         existing.identity.sourceDeviceId !== input.sourceDeviceId ||
@@ -206,32 +416,72 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       ) {
         throw new Error("Migration ready replay conflicts with its durable identity");
       }
+      if (existing.phase === "aborted") {
+        throw new Error("Cancelled migration cannot reserve target readiness");
+      }
+      if (existing.phase !== "committed" && existing.phase !== "tombstoned") {
+        const trust = await currentTrust(this.options.bootstrapStore);
+        if (trust.issuer.deviceId !== input.sourceDeviceId) {
+          throw new Error("Only the current duty device can reserve migration readiness");
+        }
+        const snapshot = await this.options.readiness.reserve({
+          transferId: input.transferId,
+          expiresAt: existing.readyProof.expiresAt,
+        });
+        try {
+          validateAnchorTransferReadyProof({
+            proof: existing.readyProof,
+            trust,
+            targetDeviceId: this.options.deviceId,
+            expected: snapshot,
+            now: this.options.now?.(),
+          });
+          const issuerKey = await loadAnchorIssuerKey(this.options.secretStore, input.transferId);
+          if (
+            !issuerKey ||
+            issuerKey.deviceId !== existing.readyProof.targetIssuerKeyId ||
+            issuerKey.publicKey !== existing.readyProof.targetIssuerPublicKey
+          ) {
+            throw new Error("Migration issuer key no longer matches its ready proof");
+          }
+          await context.journal.reserveReady(readyReservation(
+            existing.readyProof,
+            snapshot,
+          ));
+        } catch (error) {
+          await this.options.readiness.release(input.transferId);
+          throw error;
+        }
+      }
       return existing.readyProof;
     }
     const trust = await currentTrust(this.options.bootstrapStore);
     if (trust.issuer.deviceId !== input.sourceDeviceId) {
       throw new Error("Only the current duty device can prepare a migration target");
     }
-    await this.#journal.assertNoCompetingTransfer(input.transferId);
+    await this.#assertNoCompetingTransfer(input.transferId);
     return (await createAnchorTransferReadyProof({
       transferId: input.transferId,
       targetIdentityKey: this.options.identityKey,
       trust,
       secretStore: this.options.secretStore,
-      snapshot: await this.options.readiness(),
+      snapshot: await this.options.readiness.snapshot(),
       now: this.options.now?.(),
     })).proof;
   }
 
   async apply(commandInput: AnchorTransferCommand): Promise<AnchorTransferResult> {
     const command = validateAnchorTransferCommand(commandInput, this.options.verifier);
-    if (command.op === "status") return resultFor(command, await this.#journal.state(command.transferId));
+    const context = this.#context(command.transferId);
+    if (command.op === "status") {
+      return this.#result(command, await context.journal.state(command.transferId));
+    }
     if (command.op === "freeze") return this.#freeze(command);
     if (command.op === "import") return this.#import(command);
     if (command.op === "commit") return this.#commit(command);
     if (command.op === "abort") return this.#abort(command);
     if (command.op !== "prepare") throw new Error("Migration target has not enabled this transfer phase yet");
-    await this.#journal.assertNoCompetingTransfer(command.transferId);
+    await this.#assertNoCompetingTransfer(command.transferId);
     const trust = await currentTrust(this.options.bootstrapStore);
     if (
       command.sourceDeviceId !== trust.issuer.deviceId ||
@@ -243,7 +493,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       proof: command.readyProof,
       trust,
       targetDeviceId: this.options.deviceId,
-      expected: await this.options.readiness(),
+      expected: await this.options.readiness.snapshot(),
       now: this.options.now?.(),
     });
     const issuerKey = await loadAnchorIssuerKey(this.options.secretStore, command.transferId);
@@ -255,16 +505,17 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       throw new Error("Migration issuer key no longer matches its ready proof");
     }
     applyTrustEvent(trust, command.trustTransition);
-    const state = await this.#journal.append(preparedRecord(command));
-    return resultFor(command, state);
+    const state = await context.journal.append(preparedRecord(command));
+    return this.#result(command, state);
   }
 
   async #freeze(
     command: Extract<AnchorTransferCommand, { op: "freeze" }>,
   ): Promise<AnchorTransferResult> {
+    const context = this.#context(command.transferId);
     const state = await this.#requiredPrepared(command.transferId);
     if (state.phase !== "prepared" && state.phase !== "fenced") {
-      return resultFor(command, state);
+      return this.#result(command, state);
     }
     if (
       command.proof.sourceEpoch !== state.identity.sourceAnchorEpoch ||
@@ -273,7 +524,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       throw new TypeError("Migration freeze proof changes its prepared source identity");
     }
     const source = this.options.sourceFor(state.identity.sourceDeviceId);
-    await this.#journal.append({
+    await context.journal.append({
       v: 1,
       mode: "planned",
       t: "anchor-fenced",
@@ -283,13 +534,23 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       at: new Date().toISOString(),
     });
     await Promise.all([
-      this.#pull(source, command, command.checkpoint),
-      this.#pull(source, command, command.catalog),
+      this.#pull(context, source, command, command.checkpoint),
+      this.#pull(context, source, command, command.catalog),
     ]);
-    const catalog = parseAuthorityCatalog(await this.#stagingArtifacts.get(command.catalog));
-    const exported = parseAuthorityExport(await this.#stagingArtifacts.get(command.checkpoint));
+    const catalog = parseAuthorityCatalog(await context.artifacts.get(command.catalog));
+    const exported = parseAuthorityExport(await context.artifacts.get(command.checkpoint));
+    for (const page of exported.pages) {
+      await this.#pull(context, source, command, page.ref);
+      validateAuthorityExportPage(
+        await context.artifacts.get(page.ref),
+        page,
+      );
+    }
+    for (const reference of catalog.retainedArtifacts) {
+      await this.#pull(context, source, command, reference);
+    }
     assertExportBinding(catalog, exported, command.proof, state);
-    const next = await this.#journal.append({
+    const next = await context.journal.append({
       v: 1,
       mode: "planned",
       t: "anchor-frozen",
@@ -299,14 +560,15 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       catalogRef: command.catalog,
       proof: command.proof,
     });
-    return resultFor(command, next);
+    return this.#result(command, next);
   }
 
   async #import(
     command: Extract<AnchorTransferCommand, { op: "import" }>,
   ): Promise<AnchorTransferResult> {
+    const context = this.#context(command.transferId);
     const state = await this.#requiredPrepared(command.transferId);
-    if (state.phase === "imported") return resultFor(command, state);
+    if (state.phase === "imported") return this.#result(command, state);
     if (
       state.phase !== "frozen" ||
       state.checkpoint?.digest !== command.checkpoint.digest ||
@@ -314,7 +576,34 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     ) {
       throw new TypeError("Migration import does not bind the frozen artifacts");
     }
-    const next = await this.#journal.append({
+    for (const ref of state.catalog?.retainedArtifacts ?? []) {
+      await this.#pull(
+        context,
+        this.options.sourceFor(state.identity.sourceDeviceId),
+        createSignedAnchorTransferCommand({
+          v: 1,
+          op: "freeze",
+          requestId: state.identity.requestId,
+          transferId: state.identity.transferId,
+          recoveryCheckpointDigest: state.recoveryCheckpointDigest!,
+          checkpoint: state.checkpoint!,
+          catalog: state.catalogRef!,
+          proof: state.proof!,
+        }, this.options.signer) as Extract<AnchorTransferCommand, { op: "freeze" }>,
+        ref,
+      );
+    }
+    const importedRefs = uniqueRefs([
+      state.checkpoint!,
+      state.catalogRef!,
+      ...(state.catalog?.retainedArtifacts ?? []),
+    ]);
+    for (const ref of importedRefs) {
+      if (!(await context.artifacts.has(ref))) {
+        throw new Error(`Migration private import is missing ${ref.digest}`);
+      }
+    }
+    const next = await context.journal.append({
       v: 1,
       mode: "planned",
       t: "anchor-imported",
@@ -322,18 +611,20 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       checkpointDigest: command.checkpoint.digest,
       authorityCatalogDigest: command.catalog.digest,
     });
-    return resultFor(command, next);
+    return this.#result(command, next);
   }
 
   async #commit(
     command: Extract<AnchorTransferCommand, { op: "commit" }>,
   ): Promise<AnchorTransferResult> {
+    const context = this.#context(command.transferId);
     const state = await this.#requiredPrepared(command.transferId);
     if (state.phase === "committed" || state.phase === "tombstoned") {
       if (canonicalize(state.commit) !== canonicalize(command.commit)) {
         throw new TypeError("Migration commit replay changes the signed decision");
       }
-      return resultFor(command, state);
+      const trustRecord = await this.#completeInstallation(context, state);
+      return resultFor(command, state, trustRecord);
     }
     if (state.phase !== "imported" || !state.checkpoint || !state.catalogRef || !state.catalog) {
       throw new Error("Migration target cannot commit before its private import is complete");
@@ -362,6 +653,22 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     ) {
       throw new Error("Migration target trust generation changed before commit installation");
     }
+    const snapshot = await this.options.readiness.reserve({
+      transferId: command.transferId,
+      expiresAt: state.readyProof.expiresAt,
+    });
+    validateAnchorTransferReadyProof({
+      proof: state.readyProof,
+      trust: current,
+      targetDeviceId: this.options.deviceId,
+      expected: snapshot,
+      now: this.options.now?.(),
+    });
+    const reservation = await context.journal.readyReservation(command.transferId);
+    const expectedReservation = readyReservation(state.readyProof, snapshot);
+    if (!reservation || canonicalize(reservation) !== canonicalize(expectedReservation)) {
+      throw new Error("Migration commit has no current durable readiness reservation");
+    }
     const transition = requireMigrationTransition(state.trustTransition);
     const nextTrust = applyTrustEvent(current, transition);
     if (nextTrust.trustEpoch !== command.commit.nextTrustEpoch) {
@@ -374,37 +681,40 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       state.catalog.authorityRecords,
       ...state.catalog.retainedArtifacts,
     ]);
-    for (const reference of references) await this.#promote(reference, command.transferId);
-    const exported = parseAuthorityExport(await this.#stagingArtifacts.get(state.checkpoint));
-    await installPlannedAuthorityBase({
-      log: this.options.authorityLog,
-      transferId: command.transferId,
-      commits: exported.commits,
+    for (const reference of references) await this.#promote(context, reference, command.transferId);
+    const exported = parseAuthorityExport(await context.artifacts.get(state.checkpoint));
+    const installation = plannedAnchorInstallation({
+      commit: command.commit,
+      transition,
+      trustRecord,
+      checkpoint: state.checkpoint,
+      catalog: state.catalogRef,
+      sourceHead: exported.checkpoint,
+    });
+    await this.options.authorityLog.installPlannedAnchorPrefix({
+      source: importedAuthorityEnvelopes(context.artifacts, exported),
+      sourceHead: exported.checkpoint,
+      installationEntries: [
+        { stream: "trust", body: { t: "home-trust-event", event: transition } },
+        { stream: "trust", body: { t: "home-trust-record", record: trustRecord } },
+        { stream: "transfer:anchor-current", body: installation },
+      ],
+      candidateReferences: references,
     });
     await activateAnchorIssuerKey(
       this.options.secretStore,
       command.transferId,
       state.readyProof.targetIssuerKeyId,
     );
-    await installPlannedAnchorAuthority({
-      log: this.options.authorityLog,
-      verifier: this.options.verifier,
-      current,
-      transition,
-      record: trustRecord,
-      commit: command.commit,
-      checkpoint: state.checkpoint,
-      catalog: state.catalogRef,
-      candidateReferences: references,
-    });
-    const next = await this.#journal.append(committedRecord);
-    await this.options.onInstalled?.(trustRecord);
-    return resultFor(command, next);
+    const next = await context.journal.append(committedRecord);
+    await this.#completeInstallation(context, next, trustRecord);
+    return resultFor(command, next, trustRecord);
   }
 
   async #abort(
     command: Extract<AnchorTransferCommand, { op: "abort" }>,
   ): Promise<AnchorTransferResult> {
+    const context = this.#context(command.transferId);
     const state = await this.#requiredPrepared(command.transferId);
     if (state.phase === "committed" || state.phase === "tombstoned") {
       throw new Error("Committed migration cannot be cancelled");
@@ -413,7 +723,8 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       if (canonicalize(state.abort) !== canonicalize(command.abort)) {
         throw new TypeError("Migration abort replay changes the signed decision");
       }
-      return resultFor(command, state);
+      await this.#cleanupAborted(context, state);
+      return this.#result(command, state);
     }
     const record: Extract<PlannedRecord, { t: "anchor-aborted" }> = {
       v: 1,
@@ -423,30 +734,77 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       abort: command.abort,
     };
     reducePlannedAnchorTransfer(state, record, this.options.verifier);
-    const next = await this.#journal.append(record);
+    const next = await context.journal.append(record);
+    await this.#cleanupAborted(context, state);
+    return this.#result(command, next);
+  }
+
+  async #cleanupAborted(
+    context: TargetTransferContext,
+    state: PlannedAnchorTransferState,
+  ): Promise<void> {
     const references = uniqueRefs([
       ...(state.checkpoint ? [state.checkpoint] : []),
       ...(state.catalogRef ? [state.catalogRef] : []),
       ...(state.catalog?.retainedArtifacts ?? []),
     ]);
     for (const reference of references) {
-      await this.#stagingArtifacts.delete(reference);
+      await context.artifacts.delete(reference);
     }
     await deleteAnchorIssuerKey(
       this.options.secretStore,
-      command.transferId,
+      state.identity.transferId,
       state.readyProof.targetIssuerKeyId,
     );
-    return resultFor(command, next);
+    await rm(context.privateRoot, { recursive: true, force: true });
+    await this.options.readiness.release(state.identity.transferId);
+  }
+
+  async #completeInstallation(
+    context: TargetTransferContext,
+    state: PlannedAnchorTransferState,
+    trustRecord?: HomeTrustRecord,
+  ): Promise<HomeTrustRecord> {
+    if (!state.commit) throw new Error("Migration installation has no signed commit");
+    const record = trustRecord ?? await loadInstalledAnchorTrustRecord(
+      this.options.authorityLog,
+      state.identity.transferId,
+    );
+    if (!record || record.issuer.deviceId !== state.identity.targetDeviceId) {
+      throw new Error("Committed migration has no installed target trust record");
+    }
+    await this.options.bootstrapStore.reconcileTrustEvent({
+      event: state.trustTransition,
+      record,
+    });
+    await this.options.onInstalled?.(record);
+    await rm(context.privateRoot, { recursive: true, force: true });
+    await this.options.readiness.release(state.identity.transferId);
+    return record;
+  }
+
+  async #result(
+    command: AnchorTransferCommand,
+    state: PlannedAnchorTransferState | undefined,
+  ): Promise<AnchorTransferResult> {
+    const trustRecord = state &&
+      (state.phase === "committed" || state.phase === "tombstoned")
+      ? await loadInstalledAnchorTrustRecord(
+          this.options.authorityLog,
+          state.identity.transferId,
+        )
+      : undefined;
+    return resultFor(command, state, trustRecord);
   }
 
   async #requiredPrepared(transferId: string): Promise<PlannedAnchorTransferState> {
-    const state = await this.#journal.state(transferId);
+    const state = await this.#context(transferId).journal.state(transferId);
     if (!state) throw new Error("Migration target has no prepared state");
     return state;
   }
 
   async #pull(
+    context: TargetTransferContext,
     source: PlannedAnchorTransferArtifactSourcePort,
     origin: Extract<AnchorTransferCommand, { op: "freeze" }>,
     ref: ArtifactRef,
@@ -454,7 +812,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     const self = this;
     async function* chunks(): AsyncGenerator<Uint8Array> {
       for (let offset = 0; offset < ref.bytes;) {
-        const length = Math.min(512 * 1024, ref.bytes - offset);
+        const length = Math.min(TRANSFER_CHUNK_BYTES, ref.bytes - offset);
         const command = createSignedAnchorTransferCommand({
           v: 1,
           op: "read-range",
@@ -468,59 +826,138 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         const result = await source.applyArtifactCommand(command);
         if (result.status !== "range") throw new Error("Migration source did not return an artifact range");
         const bytes = Buffer.from(result.data, "base64");
-        offset += bytes.byteLength;
-        yield bytes;
+        const progress = await context.receiver.append(
+          ref,
+          offset,
+          bytes,
+          (_identity, operation) => runStorageMaintenanceStep(
+            self.options.storageMaintenance,
+            storageMaintenanceRequest(
+              "authority-checkpoint",
+              self.options.deviceId,
+              { transferId: origin.transferId, ref, offset },
+              { obligation: "pre-commit" },
+            ),
+            operation,
+          ),
+        );
+        offset = progress.receivedBytes;
       }
     }
-    await this.#stagingArtifacts.putVerifiedStream(
-      ref,
-      chunks(),
-      (operation) => runStorageMaintenanceStep(
-        this.options.storageMaintenance,
-        storageMaintenanceRequest(
-          "authority-checkpoint",
-          this.options.deviceId,
-          { transferId: origin.transferId, ref },
-          { obligation: "pre-commit" },
-        ),
-        operation,
-      ),
-    );
+    const progress = await context.receiver.progress(ref);
+    if (progress.complete) return;
+    for await (const _ of chunks()) void _;
   }
 
-  async #promote(ref: ArtifactRef, transferId: string): Promise<void> {
+  async #promote(
+    context: TargetTransferContext,
+    ref: ArtifactRef,
+    transferId: string,
+  ): Promise<void> {
     if (await this.options.artifacts.has(ref)) return;
-    const source = this.#stagingArtifacts;
-    async function* chunks(): AsyncGenerator<Uint8Array> {
-      for (let offset = 0; offset < ref.bytes;) {
-        const length = Math.min(512 * 1024, ref.bytes - offset);
-        const bytes = await source.readRange(ref, offset, length);
-        offset += bytes.byteLength;
-        yield bytes;
-      }
-    }
-    await this.options.artifacts.putVerifiedStream(
-      ref,
-      chunks(),
-      (operation) => runStorageMaintenanceStep(
+    let progress = await context.promotionReceiver.progress(ref);
+    while (!progress.complete) {
+      const offset = progress.receivedBytes;
+      const length = Math.min(TRANSFER_CHUNK_BYTES, ref.bytes - offset);
+      const bytes = await runStorageMaintenanceStep(
         this.options.storageMaintenance,
         storageMaintenanceRequest(
           "authority-checkpoint",
           this.options.deviceId,
-          { transferId, ref, phase: "promote" },
+          { transferId, ref, offset, phase: "promote-read" },
           { obligation: "committed" },
         ),
-        operation,
+        () => context.artifacts.readRange(ref, offset, length),
+      );
+      progress = await context.promotionReceiver.append(
+        ref,
+        offset,
+        bytes,
+        (_identity, operation) => runStorageMaintenanceStep(
+          this.options.storageMaintenance,
+          storageMaintenanceRequest(
+            "authority-checkpoint",
+            this.options.deviceId,
+            { transferId, ref, offset, phase: "promote-write" },
+            { obligation: "committed" },
+          ),
+          operation,
+        ),
+      );
+    }
+  }
+
+  #context(transferId: string): TargetTransferContext {
+    assertTransferStorageId(transferId);
+    const existing = this.#contexts.get(transferId);
+    if (existing) return existing;
+    const privateRoot = path.join(this.options.stagingRoot, "transfers", transferId);
+    const artifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
+    const context: TargetTransferContext = {
+      transferId,
+      privateRoot,
+      artifacts,
+      receiver: new FileResumableArtifactReceiver(
+        artifacts,
+        path.join(privateRoot, "partials"),
+        {
+          maxArtifactBytes: MAX_TRANSFER_ARTIFACT_BYTES,
+          maxChunkBytes: TRANSFER_CHUNK_BYTES,
+        },
       ),
-    );
+      promotionReceiver: new FileResumableArtifactReceiver(
+        this.options.artifacts,
+        path.join(privateRoot, "promotion-partials"),
+        {
+          maxArtifactBytes: MAX_TRANSFER_ARTIFACT_BYTES,
+          maxChunkBytes: TRANSFER_CHUNK_BYTES,
+        },
+      ),
+      journal: new FilePlannedAnchorTransferJournal(
+        new FileAuthorityCommitLog(
+          path.join(this.options.stagingRoot, "journals", transferId),
+          artifacts,
+          { storageMaintenance: this.options.storageMaintenance },
+        ),
+        this.options.verifier,
+      ),
+    };
+    this.#contexts.set(transferId, context);
+    return context;
+  }
+
+  async #assertNoCompetingTransfer(transferId: string): Promise<void> {
+    const ids = new Set(this.#contexts.keys());
+    try {
+      const entries = await readdir(path.join(this.options.stagingRoot, "journals"), {
+        withFileTypes: true,
+      });
+      for (const entry of entries) {
+        if (entry.isDirectory()) ids.add(entry.name);
+      }
+    } catch (error) {
+      if (!isMissingPath(error)) throw error;
+    }
+    for (const id of ids) {
+      assertTransferStorageId(id);
+      const state = await this.#context(id).journal.state(id);
+      if (
+        id !== transferId &&
+        state &&
+        state.phase !== "aborted" &&
+        state.phase !== "tombstoned"
+      ) {
+        throw new Error("Another duty-device migration is already in progress");
+      }
+    }
   }
 }
 
 export class PlannedAnchorTransferOwner {
   readonly #journal: FilePlannedAnchorTransferJournal;
-  #fenceMode: "open" | "draining" | "frozen" | "committed" = "open";
   #fencedTransferId: string | undefined;
   #disposeFence: (() => void) | undefined;
+  #installingFence: Promise<void> | undefined;
 
   constructor(private readonly options: {
     readonly deviceId: string;
@@ -532,8 +969,12 @@ export class PlannedAnchorTransferOwner {
     readonly verifier: ProtocolSignatureVerifier;
     readonly targetFor: (deviceId: string) => PlannedAnchorTransferTargetPort;
     readonly artifacts: FileArtifactStore;
+    readonly retention: ArtifactCheckpointRetentionPort;
+    readonly storageMaintenance?: StorageMaintenanceGovernorPort;
     readonly ensureRecoveryCheckpoint: (transferId: string) => Promise<string>;
     readonly lifecycle: PlannedAnchorTransferLifecycle;
+    readonly onSourceCommitted?: (targetDeviceId: string) => void | Promise<void>;
+    readonly onCommitted?: (record: HomeTrustRecord) => void | Promise<void>;
     readonly now?: () => string;
   }) {
     this.#journal = new FilePlannedAnchorTransferJournal(options.log, options.verifier);
@@ -549,22 +990,12 @@ export class PlannedAnchorTransferOwner {
         state.phase === "committed" ||
         state.phase === "tombstoned"
       ) {
-        this.#installFence(
-          transferId,
-          state.phase === "committed" || state.phase === "tombstoned"
-            ? "committed"
-          : "frozen",
-        );
+        await this.#installFence(transferId);
       }
-      if (state.phase === "committed" && state.commit) {
-        await this.#sendCommitted(state).catch(() => undefined);
-      } else if (state.phase === "aborted" && state.abort) {
-        await this.#sendAbort(state).catch(() => undefined);
-        if (!this.#fencedTransferId || this.#fencedTransferId === transferId) {
-          this.#clearFence();
-          await this.options.lifecycle.resumeAfterAbort();
-        }
+      if (state.phase === "committed" || state.phase === "tombstoned") {
+        await this.options.onSourceCommitted?.(state.identity.targetDeviceId);
       }
+      await this.#drive(state).catch(() => undefined);
     }
   }
 
@@ -582,7 +1013,7 @@ export class PlannedAnchorTransferOwner {
       ) {
         throw new Error("Migration prepare replay conflicts with its durable identity");
       }
-      return existing;
+      return this.#drive(existing);
     }
     const trust = await currentTrust(this.options.bootstrapStore);
     if (
@@ -622,10 +1053,7 @@ export class PlannedAnchorTransferOwner {
       throw new TypeError("Migration prepare command was not preserved by validation");
     }
     const state = await this.#journal.append(preparedRecord(command));
-    const result = await target.apply(command);
-    if (result.status !== "ok" || result.state !== "prepared") {
-      throw new Error("Migration target did not durably prepare");
-    }
+    await this.#sendPrepared(state);
     return state;
   }
 
@@ -640,11 +1068,11 @@ export class PlannedAnchorTransferOwner {
     }
     if (state.phase === "aborted") throw new Error("Aborted migration cannot be fenced");
     if (state.phase === "committed" || state.phase === "tombstoned") {
-      this.#installFence(input.transferId, "committed");
+      await this.#installFence(input.transferId);
       return this.options.log.checkpoint();
     }
     if (state.phase !== "prepared") {
-      this.#installFence(input.transferId, "frozen");
+      await this.#installFence(input.transferId);
       return this.options.log.checkpoint();
     }
 
@@ -655,7 +1083,42 @@ export class PlannedAnchorTransferOwner {
     try {
       await this.options.lifecycle.stopAccepting();
       admissionClosed = true;
-      this.#installFence(input.transferId, "draining");
+      await this.options.lifecycle.drainAccepted();
+      // Register before taking the checkpoint. Appends already inside the log
+      // lock finish first and are included; every later fresh append is rejected.
+      await this.#installFence(input.transferId);
+      const sourceHead = await this.options.log.checkpoint();
+      const pendingObligations = await projectPendingObligations(
+        this.options.log,
+        sourceHead,
+      );
+      const closure: PlannedSourceClosure = {
+        v: 1,
+        t: "planned-anchor-source-closure",
+        transferId: input.transferId,
+        acceptedTokens: pendingObligations.map((obligation) => ({
+          transferId: input.transferId,
+          kind: obligation.kind,
+          id: obligation.id,
+          requestId: `planned-accepted:${obligation.kind}:${obligation.id}`,
+        })),
+        pendingObligations,
+        sourceHead,
+      };
+      const closureBytes = Buffer.from(canonicalize(closure), "utf8");
+      if (closureBytes.byteLength > TRANSFER_HEADER_BYTES) {
+        throw new Error("Migration accepted-work closure exceeds its fixed header budget");
+      }
+      const closureRef = await runStorageMaintenanceStep(
+        this.options.storageMaintenance,
+        storageMaintenanceRequest(
+          "authority-checkpoint",
+          this.options.deviceId,
+          { transferId: input.transferId, phase: "source-closure" },
+          { obligation: "pre-commit" },
+        ),
+        () => this.options.artifacts.put(closureBytes),
+      );
       await this.#journal.append({
         v: 1,
         mode: "planned",
@@ -664,9 +1127,17 @@ export class PlannedAnchorTransferOwner {
         sourceAnchorEpoch: state.identity.sourceAnchorEpoch,
         recoveryCheckpointDigest,
         at: this.options.now?.() ?? new Date().toISOString(),
-      });
-      await this.options.lifecycle.drainAccepted();
-      this.#fenceMode = "frozen";
+      }, [{
+        stream: SOURCE_CLOSURE_STREAM,
+        body: {
+          v: 1,
+          t: "planned-anchor-source-closure-recorded",
+          transferId: input.transferId,
+          sourceHead,
+          closure: closureRef,
+          closureDigest: protocolDigest("PlannedAnchorSourceClosure", 1, closure),
+        } satisfies PlannedSourceClosureRecord,
+      }]);
       return this.options.log.checkpoint();
     } catch (error) {
       const durable = await this.#journal.state(input.transferId).catch(() => undefined);
@@ -687,40 +1158,52 @@ export class PlannedAnchorTransferOwner {
     if (frozen.identity.requestId !== input.requestId) {
       throw new Error("Migration freeze replay changes request identity");
     }
-    if (frozen.phase === "frozen" || frozen.phase === "imported") return frozen;
+    if (frozen.phase === "frozen" || frozen.phase === "imported") {
+      return this.#drive(frozen);
+    }
     if (frozen.phase !== "prepared" && frozen.phase !== "fenced") {
       throw new Error(`Migration cannot freeze from ${frozen.phase}`);
     }
     const checkpoint = await this.fence(input);
     const state = await this.#journal.state(input.transferId);
     if (!state || state.phase !== "fenced") throw new Error("Migration fence is unavailable");
-    const snapshot = await this.options.log.readSnapshot<unknown>();
-    if (snapshot.cursor.lsn !== checkpoint.lsn) {
-      throw new Error("Frozen authority snapshot changed after its durable checkpoint");
+    const closure = await loadPlannedSourceClosure(
+      this.options.log,
+      this.options.artifacts,
+      input.transferId,
+    );
+    if (closure.sourceHead.lsn + 1 !== checkpoint.lsn) {
+      throw new Error("Migration source closure does not bind the durable fence envelope");
     }
-    const exportBytes = Buffer.from(canonicalExport({
-      v: 1,
+    const capture = await capturePlannedAuthority({
+      log: this.options.log,
+      artifacts: this.options.artifacts,
+      retention: this.options.retention,
+      storageMaintenance: this.options.storageMaintenance,
+      deviceId: this.options.deviceId,
+      transferId: input.transferId,
       checkpoint,
-      commits: snapshot.commits,
-    }), "utf8");
-    const checkpointRef = await this.options.artifacts.put(exportBytes);
+    });
     const trust = await currentTrust(this.options.bootstrapStore);
-    const retainedArtifacts = collectArtifactRefs(snapshot.commits)
-      .sort(compareRefs);
-    for (const ref of retainedArtifacts) {
-      if (!(await this.options.artifacts.has(ref))) {
-        throw new Error(`Frozen authority references a missing artifact: ${ref.digest}`);
-      }
-    }
     const catalog = buildAuthorityCatalog({
       state,
       checkpoint,
-      commits: snapshot.commits,
-      authorityRecords: checkpointRef,
-      retainedArtifacts,
+      streams: capture.streams,
+      authorityRecords: capture.manifestRef,
+      retainedArtifacts: capture.retainedArtifacts,
+      pendingObligations: capture.pendingObligations,
       trust,
     });
+    if (
+      canonicalize(capture.pendingObligations) !==
+      canonicalize(closure.pendingObligations)
+    ) {
+      throw new Error("Migration pending obligations changed after accepted-work closure");
+    }
     const preparedCatalog = prepareAuthorityCatalog(catalog);
+    if (preparedCatalog.bytes.byteLength > TRANSFER_HEADER_BYTES) {
+      throw new Error("Migration authority catalog exceeds its fixed header budget");
+    }
     await this.options.artifacts.put(preparedCatalog.bytes);
     const proof = createSignedSourceFreezeProof({
       v: 1,
@@ -728,7 +1211,7 @@ export class PlannedAnchorTransferOwner {
       scope: "anchor",
       subject: state.identity.sourceDeviceId,
       sourceEpoch: state.identity.sourceAnchorEpoch,
-      checkpointDigest: checkpointRef.digest,
+      checkpointDigest: capture.manifestRef.digest,
       lastLsn: checkpoint.lsn,
     }, this.options.signer);
     const next = await this.#journal.append({
@@ -736,48 +1219,12 @@ export class PlannedAnchorTransferOwner {
       mode: "planned",
       t: "anchor-frozen",
       transferId: input.transferId,
-      checkpoint: checkpointRef,
+      checkpoint: capture.manifestRef,
       catalog,
       catalogRef: preparedCatalog.ref,
       proof,
     });
-    const target = this.options.targetFor(state.identity.targetDeviceId);
-    const freezeCommand = createSignedAnchorTransferCommand({
-      v: 1,
-      op: "freeze",
-      requestId: input.requestId,
-      transferId: input.transferId,
-      recoveryCheckpointDigest: state.recoveryCheckpointDigest!,
-      checkpoint: checkpointRef,
-      catalog: preparedCatalog.ref,
-      proof,
-    }, this.options.signer);
-    if (freezeCommand.op !== "freeze") throw new TypeError("Migration freeze command changed operation");
-    const freezeResult = await target.apply(freezeCommand);
-    if (freezeResult.status !== "ok" || freezeResult.state !== "frozen") {
-      throw new Error("Migration target did not durably freeze its private import");
-    }
-    const importCommand = createSignedAnchorTransferCommand({
-      v: 1,
-      op: "import",
-      requestId: input.requestId,
-      transferId: input.transferId,
-      checkpoint: checkpointRef,
-      catalog: preparedCatalog.ref,
-    }, this.options.signer);
-    if (importCommand.op !== "import") throw new TypeError("Migration import command changed operation");
-    const importResult = await target.apply(importCommand);
-    if (importResult.status !== "ok" || importResult.state !== "imported") {
-      throw new Error("Migration target did not durably import the authority base");
-    }
-    return this.#journal.append({
-      v: 1,
-      mode: "planned",
-      t: "anchor-imported",
-      transferId: input.transferId,
-      checkpointDigest: next.checkpoint!.digest,
-      authorityCatalogDigest: next.catalogRef!.digest,
-    });
+    return this.#drive(next);
   }
 
   async commit(input: {
@@ -795,8 +1242,16 @@ export class PlannedAnchorTransferOwner {
         throw new Error("Migration cannot commit before both sides finish the private import");
       }
       const trust = await currentTrust(this.options.bootstrapStore);
+      const target = this.options.targetFor(state.identity.targetDeviceId);
+      const lateReadyProof = await target.ready({
+        transferId: state.identity.transferId,
+        sourceDeviceId: state.identity.sourceDeviceId,
+      });
+      if (readyProofDigest(lateReadyProof) !== readyProofDigest(state.readyProof)) {
+        throw new Error("Migration target readiness changed before the source commit");
+      }
       validateAnchorTransferReadyProof({
-        proof: state.readyProof,
+        proof: lateReadyProof,
         trust,
         targetDeviceId: state.identity.targetDeviceId,
       });
@@ -848,8 +1303,17 @@ export class PlannedAnchorTransferOwner {
             },
           },
         ],
+        () => {
+          const now = Date.parse(this.options.now?.() ?? new Date().toISOString());
+          if (!Number.isFinite(now) || Date.parse(lateReadyProof.expiresAt) <= now) {
+            throw new Error("Migration readiness reservation expired before source commit");
+          }
+        },
       );
-      this.#installFence(input.transferId, "committed");
+      await this.options.onSourceCommitted?.(state.identity.targetDeviceId);
+      await this.#installFence(input.transferId);
+    } else {
+      await this.options.onSourceCommitted?.(state.identity.targetDeviceId);
     }
     await this.#sendCommitted(state);
     return state;
@@ -887,10 +1351,125 @@ export class PlannedAnchorTransferOwner {
         abort,
       });
     }
-    await this.#sendAbort(state);
     this.#clearFence();
     await this.options.lifecycle.resumeAfterAbort();
+    await this.#sendAbort(state);
     return state;
+  }
+
+  async #drive(
+    input: PlannedAnchorTransferState,
+  ): Promise<PlannedAnchorTransferState> {
+    let state = input;
+    if (state.phase === "prepared") {
+      await this.#sendPrepared(state);
+      return state;
+    }
+    if (state.phase === "fenced") {
+      return this.freeze({
+        requestId: state.identity.requestId,
+        transferId: state.identity.transferId,
+      });
+    }
+    if (state.phase === "frozen" || state.phase === "imported") {
+      await this.#sendPrepared(state);
+      await this.#sendFrozen(state);
+      await this.#sendImported(state);
+      if (state.phase === "frozen") {
+        state = await this.#journal.append({
+          v: 1,
+          mode: "planned",
+          t: "anchor-imported",
+          transferId: state.identity.transferId,
+          checkpointDigest: state.checkpoint!.digest,
+          authorityCatalogDigest: state.catalogRef!.digest,
+        });
+      }
+      return state;
+    }
+    if (state.phase === "committed" || state.phase === "tombstoned") {
+      await this.#sendCommitted(state);
+      return state;
+    }
+    if (state.phase === "aborted") {
+      if (!this.#fencedTransferId || this.#fencedTransferId === state.identity.transferId) {
+        this.#clearFence();
+        await this.options.lifecycle.resumeAfterAbort();
+      }
+      await this.#sendAbort(state);
+    }
+    return state;
+  }
+
+  async #sendPrepared(state: PlannedAnchorTransferState): Promise<void> {
+    const command = createSignedAnchorTransferCommand({
+      v: 1,
+      op: "prepare",
+      requestId: state.identity.requestId,
+      transferId: state.identity.transferId,
+      sourceDeviceId: state.identity.sourceDeviceId,
+      targetDeviceId: state.identity.targetDeviceId,
+      sourceAnchorEpoch: state.identity.sourceAnchorEpoch,
+      nextAnchorEpoch: state.identity.nextAnchorEpoch,
+      readyProof: state.readyProof,
+      trustTransition: requireMigrationTransition(state.trustTransition),
+    }, this.options.signer);
+    if (command.op !== "prepare") {
+      throw new TypeError("Migration prepare command changed operation");
+    }
+    const result = await this.options.targetFor(state.identity.targetDeviceId).apply(command);
+    if (
+      result.status !== "ok" ||
+      result.state === "aborted"
+    ) {
+      throw new Error("Migration target did not durably retain its prepared decision");
+    }
+  }
+
+  async #sendFrozen(state: PlannedAnchorTransferState): Promise<void> {
+    if (!state.checkpoint || !state.catalogRef || !state.proof || !state.recoveryCheckpointDigest) {
+      throw new Error("Migration frozen replay is missing its durable artifacts");
+    }
+    const command = createSignedAnchorTransferCommand({
+      v: 1,
+      op: "freeze",
+      requestId: state.identity.requestId,
+      transferId: state.identity.transferId,
+      recoveryCheckpointDigest: state.recoveryCheckpointDigest,
+      checkpoint: state.checkpoint,
+      catalog: state.catalogRef,
+      proof: state.proof,
+    }, this.options.signer);
+    if (command.op !== "freeze") throw new TypeError("Migration freeze command changed operation");
+    const result = await this.options.targetFor(state.identity.targetDeviceId).apply(command);
+    if (
+      result.status !== "ok" ||
+      !["frozen", "imported", "committed", "tombstoned"].includes(result.state)
+    ) {
+      throw new Error("Migration target did not durably freeze its private import");
+    }
+  }
+
+  async #sendImported(state: PlannedAnchorTransferState): Promise<void> {
+    if (!state.checkpoint || !state.catalogRef) {
+      throw new Error("Migration import replay is missing its durable artifacts");
+    }
+    const command = createSignedAnchorTransferCommand({
+      v: 1,
+      op: "import",
+      requestId: state.identity.requestId,
+      transferId: state.identity.transferId,
+      checkpoint: state.checkpoint,
+      catalog: state.catalogRef,
+    }, this.options.signer);
+    if (command.op !== "import") throw new TypeError("Migration import command changed operation");
+    const result = await this.options.targetFor(state.identity.targetDeviceId).apply(command);
+    if (
+      result.status !== "ok" ||
+      !["imported", "committed", "tombstoned"].includes(result.state)
+    ) {
+      throw new Error("Migration target did not durably import the authority base");
+    }
   }
 
   async #sendCommitted(state: PlannedAnchorTransferState): Promise<void> {
@@ -911,6 +1490,27 @@ export class PlannedAnchorTransferOwner {
     ) {
       throw new Error("Migration target did not install the signed commit");
     }
+    const current = await currentTrust(this.options.bootstrapStore);
+    const projection = current.trustEpoch === result.trustRecord.trustEpoch &&
+        canonicalize(current.chainHead) === canonicalize(result.trustRecord.chainHead)
+      ? current
+      : applyTrustEvent(
+          current,
+          requireMigrationTransition(state.trustTransition),
+        );
+    verifyHomeTrustRecord(result.trustRecord, projection);
+    if (
+      result.trustRecord.issuer.deviceId !== state.identity.targetDeviceId ||
+      result.trustRecord.issuer.issuerKeyId !== state.readyProof.targetIssuerKeyId ||
+      result.trustRecord.issuer.issuerPublicKey !== state.readyProof.targetIssuerPublicKey
+    ) {
+      throw new Error("Migration target returned another current duty identity");
+    }
+    await this.options.bootstrapStore.reconcileTrustEvent({
+      event: requireMigrationTransition(state.trustTransition),
+      record: result.trustRecord,
+    });
+    await this.options.onCommitted?.(result.trustRecord);
   }
 
   async #sendAbort(state: PlannedAnchorTransferState): Promise<void> {
@@ -945,14 +1545,33 @@ export class PlannedAnchorTransferOwner {
     if (command.signature.keyId !== state.identity.targetDeviceId) {
       throw new TypeError("Migration artifact command is not signed by its prepared target");
     }
-    const allowed = [state.checkpoint!, state.catalogRef!, ...(state.catalog?.retainedArtifacts ?? [])]
-      .some((ref) => ref.digest === command.ref.digest && ref.bytes === command.ref.bytes);
+    const manifest = parseAuthorityExport(await this.options.artifacts.get(state.checkpoint!));
+    const allowed = [
+      state.checkpoint!,
+      state.catalogRef!,
+      ...manifest.pages.map((page) => page.ref),
+      ...(state.catalog?.retainedArtifacts ?? []),
+    ].some((ref) => ref.digest === command.ref.digest && ref.bytes === command.ref.bytes);
     if (!allowed) throw new TypeError("Migration artifact is outside the frozen catalog");
     if (command.op === "probe") return resultFor(command, state);
-    const bytes = await this.options.artifacts.readRange(
-      command.ref,
-      command.offset,
-      command.length,
+    const bytes = await runStorageMaintenanceStep(
+      this.options.storageMaintenance,
+      storageMaintenanceRequest(
+        "authority-checkpoint",
+        this.options.deviceId,
+        {
+          transferId: command.transferId,
+          ref: command.ref,
+          offset: command.offset,
+          phase: "source-read",
+        },
+        { obligation: "pre-commit" },
+      ),
+      () => this.options.artifacts.readRange(
+        command.ref,
+        command.offset,
+        command.length,
+      ),
     );
     return {
       v: 1,
@@ -965,43 +1584,58 @@ export class PlannedAnchorTransferOwner {
     };
   }
 
-  #installFence(
-    transferId: string,
-    mode: "draining" | "frozen" | "committed",
-  ): void {
+  async #installFence(transferId: string): Promise<void> {
     if (this.#fencedTransferId && this.#fencedTransferId !== transferId) {
       throw new Error("Another duty-device migration owns the authority fence");
     }
     this.#fencedTransferId = transferId;
-    this.#fenceMode = mode;
     if (this.#disposeFence) return;
-    this.#disposeFence = this.options.log.registerAppendAdmissionGuard((entries) => {
-      if (this.#fenceMode === "draining") return;
-      const transferEntries = entries.filter((entry) =>
+    if (this.#installingFence) return this.#installingFence;
+    const installation = this.options.log.installAppendAdmissionGuard((entries) => {
+      const belongsToFence = (entry: LogicalRecord<unknown>) =>
         entry.stream === ANCHOR_TRANSFER_STREAM &&
         typeof entry.body === "object" &&
         entry.body !== null &&
         "transferId" in entry.body &&
-        entry.body.transferId === this.#fencedTransferId,
-      );
+        entry.body.transferId === this.#fencedTransferId;
+      const transferEntries = entries.filter(belongsToFence);
       const commitsTransfer = transferEntries.some((entry) =>
         "t" in (entry.body as object) &&
         (entry.body as { t?: string }).t === "anchor-committed",
       );
+      const fencesTransfer = transferEntries.some((entry) =>
+        "t" in (entry.body as object) &&
+        (entry.body as { t?: string }).t === "anchor-fenced",
+      );
       const permitted = entries.every((entry) =>
-        entry.stream === ANCHOR_TRANSFER_STREAM ||
+        belongsToFence(entry) ||
+        (fencesTransfer &&
+          entry.stream === SOURCE_CLOSURE_STREAM &&
+          isRecord(entry.body) &&
+          entry.body.transferId === this.#fencedTransferId) ||
         (commitsTransfer && (entry.stream === "trust" || entry.stream === "transfer:anchor-current")),
       );
       if (!permitted) {
         throw new Error("Duty-device migration has frozen authority writes");
       }
+    }).then((dispose) => {
+      if (this.#fencedTransferId === transferId) {
+        this.#disposeFence = dispose;
+      } else {
+        dispose();
+      }
     });
+    this.#installingFence = installation;
+    try {
+      await installation;
+    } finally {
+      if (this.#installingFence === installation) this.#installingFence = undefined;
+    }
   }
 
   #clearFence(): void {
     this.#disposeFence?.();
     this.#disposeFence = undefined;
-    this.#fenceMode = "open";
     this.#fencedTransferId = undefined;
   }
 }
@@ -1017,170 +1651,45 @@ interface PlannedAnchorInstallation {
   readonly trustRecord: HomeTrustRecord;
   readonly checkpoint: ArtifactRef;
   readonly catalog: ArtifactRef;
+  readonly sourceHead: DurableLogCheckpoint;
+  readonly baseDigest: string;
 }
 
-async function installPlannedAuthorityBase(input: {
-  readonly log: FileAuthorityCommitLog;
-  readonly transferId: string;
-  readonly commits: readonly CommitEnvelope<unknown>[];
-}): Promise<void> {
-  type Progress = ReadonlyMap<number, string>;
-  for (const source of input.commits) {
-    const entries = source.entries.filter((entry) =>
-      entry.stream !== "trust" &&
-      entry.stream !== ANCHOR_TRANSFER_STREAM &&
-      entry.stream !== "transfer:anchor-current" &&
-      entry.stream !== "transfer:anchor-import");
-    const progress = {
-      v: 1 as const,
-      t: "planned-anchor-base-envelope" as const,
-      transferId: input.transferId,
-      sourceLsn: source.lsn,
-      envelopeDigest: source.envelopeDigest,
-    };
-    await input.log.transactProjection<Progress, unknown, void>(
-      new Map(),
-      (projection, entry) => {
-        if (
-          entry.stream !== "transfer:anchor-import" ||
-          !isBaseImportProgress(entry.body) ||
-          entry.body.transferId !== input.transferId
-        ) return projection;
-        const next = new Map(projection);
-        const existing = next.get(entry.body.sourceLsn);
-        if (existing && existing !== entry.body.envelopeDigest) {
-          throw new Error("Imported authority base changed a source envelope identity");
-        }
-        next.set(entry.body.sourceLsn, entry.body.envelopeDigest);
-        return next;
-      },
-      (projection) => {
-        const existing = projection.get(source.lsn);
-        if (existing) {
-          if (existing !== source.envelopeDigest) {
-            throw new Error("Authority base replay conflicts with a previously imported source envelope");
-          }
-          return { kind: "return", value: undefined };
-        }
-        return {
-          kind: "append",
-          entries: [...entries, { stream: "transfer:anchor-import", body: progress }],
-          value: undefined,
-        };
-      },
-      {
-        stream: "transfer:anchor-import",
-        candidateReferences: collectArtifactRefs(entries),
-      },
-    );
-  }
-}
-
-function isBaseImportProgress(value: unknown): value is {
-  readonly v: 1;
-  readonly t: "planned-anchor-base-envelope";
-  readonly transferId: string;
-  readonly sourceLsn: number;
-  readonly envelopeDigest: string;
-} {
-  return typeof value === "object" && value !== null &&
-    (value as { v?: unknown }).v === 1 &&
-    (value as { t?: unknown }).t === "planned-anchor-base-envelope" &&
-    typeof (value as { transferId?: unknown }).transferId === "string" &&
-    Number.isSafeInteger((value as { sourceLsn?: unknown }).sourceLsn) &&
-    typeof (value as { envelopeDigest?: unknown }).envelopeDigest === "string";
-}
-
-async function installPlannedAnchorAuthority(input: {
-  readonly log: FileAuthorityCommitLog;
-  readonly verifier: ProtocolSignatureVerifier;
-  readonly current: TrustProjection;
-  readonly transition: MigrationTransition;
-  readonly record: HomeTrustRecord;
+function plannedAnchorInstallation(input: {
   readonly commit: PlannedCommit;
+  readonly transition: MigrationTransition;
+  readonly trustRecord: HomeTrustRecord;
   readonly checkpoint: ArtifactRef;
   readonly catalog: ArtifactRef;
-  readonly candidateReferences: readonly ArtifactRef[];
-}): Promise<void> {
-  const installation: PlannedAnchorInstallation = {
+  readonly sourceHead: DurableLogCheckpoint;
+}): PlannedAnchorInstallation {
+  return {
     v: 1,
     t: "planned-anchor-installed",
     transferId: input.commit.transferId,
     commit: input.commit,
     transition: input.transition,
-    trustRecord: input.record,
+    trustRecord: input.trustRecord,
     checkpoint: input.checkpoint,
     catalog: input.catalog,
+    sourceHead: input.sourceHead,
+    baseDigest: protocolDigest("PlannedAnchorAuthorityBase", 1, {
+      checkpoint: input.checkpoint,
+      sourceHead: input.sourceHead,
+    }),
   };
-  type Projection = {
-    readonly trustEvents: readonly HomeTrustEvent[];
-    readonly installations: ReadonlyMap<string, PlannedAnchorInstallation>;
-  };
-  await input.log.transactProjection<Projection, unknown, void>(
-    { trustEvents: [], installations: new Map() },
-    (projection, entry) => {
-      if (entry.stream === "trust" && isTrustEventRecord(entry.body)) {
-        const trustEvents = [...projection.trustEvents, entry.body.event];
-        replayTrustChain(trustEvents);
-        return { ...projection, trustEvents };
-      }
-      if (entry.stream === "transfer:anchor-current" && isPlannedInstallation(entry.body)) {
-        const installations = new Map(projection.installations);
-        const existing = installations.get(entry.body.transferId);
-        if (existing && canonicalize(existing) !== canonicalize(entry.body)) {
-          throw new Error("Installed duty-device migration changed its durable decision");
-        }
-        installations.set(entry.body.transferId, entry.body);
-        return { ...projection, installations };
-      }
-      return projection;
-    },
-    (projection) => {
-      const existing = projection.installations.get(input.commit.transferId);
-      if (existing) {
-        if (canonicalize(existing) !== canonicalize(installation)) {
-          throw new Error("Duty-device migration install replay conflicts with the committed authority base");
-        }
-        return { kind: "return", value: undefined };
-      }
-      if (projection.trustEvents.length === 0) {
-        throw new Error("Migration target trust chain is missing");
-      }
-      const current = replayTrustChain(projection.trustEvents);
-      if (canonicalize(current) !== canonicalize(input.current)) {
-        throw new Error("Migration target trust chain changed before atomic installation");
-      }
-      const next = applyTrustEvent(current, input.transition);
-      if (
-        next.trustEpoch !== input.commit.nextTrustEpoch ||
-        next.issuer.deviceId !== input.commit.targetDeviceId ||
-        next.issuer.issuerPublicKey !== input.commit.targetIssuerPublicKey
-      ) {
-        throw new TypeError("Migration target transition does not produce the committed authority");
-      }
-      return {
-        kind: "append",
-        entries: [
-          { stream: "trust", body: { t: "home-trust-event", event: input.transition } },
-          { stream: "trust", body: { t: "home-trust-record", record: input.record } },
-          { stream: "transfer:anchor-current", body: installation },
-        ],
-        value: undefined,
-      };
-    },
-    {
-      streams: ["trust", "transfer:anchor-current"],
-      candidateReferences: input.candidateReferences,
-    },
-  );
 }
 
-function isTrustEventRecord(
-  value: unknown,
-): value is { readonly t: "home-trust-event"; readonly event: HomeTrustEvent } {
-  return typeof value === "object" && value !== null &&
-    (value as { t?: unknown }).t === "home-trust-event" &&
-    typeof (value as { event?: unknown }).event === "object";
+async function loadInstalledAnchorTrustRecord(
+  log: FileAuthorityCommitLog,
+  transferId: string,
+): Promise<HomeTrustRecord | undefined> {
+  const records = await log.readStream<unknown>("transfer:anchor-current");
+  const installation = records.toReversed().find(({ body }) =>
+    isPlannedInstallation(body) && body.transferId === transferId);
+  return installation && isPlannedInstallation(installation.body)
+    ? installation.body.trustRecord
+    : undefined;
 }
 
 function isPlannedInstallation(value: unknown): value is PlannedAnchorInstallation {
@@ -1218,12 +1727,6 @@ function uniqueRefs(refs: readonly ArtifactRef[]): readonly ArtifactRef[] {
   return [...unique.values()].sort(compareRefs);
 }
 
-interface PlannedAuthorityExport {
-  readonly v: 1;
-  readonly checkpoint: DurableLogCheckpoint;
-  readonly commits: readonly CommitEnvelope<unknown>[];
-}
-
 function canonicalExport(value: PlannedAuthorityExport): string {
   return canonicalize(value);
 }
@@ -1231,10 +1734,74 @@ function canonicalExport(value: PlannedAuthorityExport): string {
 function parseAuthorityExport(bytes: Uint8Array): PlannedAuthorityExport {
   const text = Buffer.from(bytes).toString("utf8");
   const value = JSON.parse(text) as PlannedAuthorityExport;
-  if (canonicalExport(value) !== text || value.v !== 1 || !Array.isArray(value.commits)) {
+  if (
+    canonicalExport(value) !== text ||
+    value.v !== 2 ||
+    !Array.isArray(value.pages) ||
+    value.pages.some((page, index) =>
+      page.seq !== index ||
+      !Number.isSafeInteger(page.firstLsn) ||
+      !Number.isSafeInteger(page.lastLsn) ||
+      !Number.isSafeInteger(page.recordCount) ||
+      page.recordCount <= 0 ||
+      page.firstLsn <= 0 ||
+      page.lastLsn < page.firstLsn ||
+      typeof page.ref?.digest !== "string" ||
+      !Number.isSafeInteger(page.ref?.bytes) ||
+      page.ref.bytes <= 0)
+  ) {
     throw new TypeError("Planned authority export is not canonical");
   }
   return value;
+}
+
+function validateAuthorityExportPage(
+  bytes: Uint8Array,
+  descriptor: PlannedAuthorityExportPage,
+): PlannedAuthorityExportPageBody {
+  const text = Buffer.from(bytes).toString("utf8");
+  const value = JSON.parse(text) as PlannedAuthorityExportPageBody;
+  if (
+    canonicalize(value) !== text ||
+    value.v !== 1 ||
+    value.seq !== descriptor.seq ||
+    !Array.isArray(value.commits) ||
+    value.commits.length !== descriptor.recordCount ||
+    value.commits[0]?.lsn !== descriptor.firstLsn ||
+    value.commits.at(-1)?.lsn !== descriptor.lastLsn
+  ) {
+    throw new TypeError("Planned authority export page does not match its descriptor");
+  }
+  for (let index = 0; index < value.commits.length; index += 1) {
+    const commit = value.commits[index]!;
+    if (commit.lsn !== descriptor.firstLsn + index) {
+      throw new TypeError("Planned authority export page is not contiguous");
+    }
+  }
+  return value;
+}
+
+async function* importedAuthorityEnvelopes(
+  artifacts: FileArtifactStore,
+  exported: PlannedAuthorityExport,
+): AsyncGenerator<CommitEnvelope<unknown>> {
+  let expectedLsn = 1;
+  for (const descriptor of exported.pages) {
+    const page = validateAuthorityExportPage(
+      await artifacts.get(descriptor.ref),
+      descriptor,
+    );
+    for (const commit of page.commits) {
+      if (commit.lsn !== expectedLsn) {
+        throw new TypeError("Planned authority export has a non-contiguous source prefix");
+      }
+      expectedLsn += 1;
+      yield commit;
+    }
+  }
+  if (expectedLsn - 1 !== exported.checkpoint.lsn) {
+    throw new TypeError("Planned authority export does not reach its source checkpoint");
+  }
 }
 
 function parseAuthorityCatalog(bytes: Uint8Array): AuthorityCatalog {
@@ -1247,22 +1814,291 @@ function parseAuthorityCatalog(bytes: Uint8Array): AuthorityCatalog {
   return prepared.catalog;
 }
 
+async function capturePlannedAuthority(input: {
+  readonly log: FileAuthorityCommitLog;
+  readonly artifacts: FileArtifactStore;
+  readonly retention: ArtifactCheckpointRetentionPort;
+  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly deviceId: string;
+  readonly transferId: string;
+  readonly checkpoint: DurableLogCheckpoint;
+}): Promise<PlannedAuthorityCapture> {
+  const retentionSnapshot = await input.retention.checkpointRetentionSnapshot();
+  let cursor = await input.log.originCheckpoint();
+  const pages: PlannedAuthorityExportPage[] = [];
+  const references = new Map<string, ArtifactRef>();
+  const streams = new Map<string, CatalogStreamAccumulator>();
+  const pending = new PendingObligationTracker();
+  while (cursor.lsn < input.checkpoint.lsn) {
+    const page = await input.log.readTail<unknown>(
+      cursor,
+      TRANSFER_EXPORT_PAGE_COMMITS,
+      (operation) => runStorageMaintenanceStep(
+        input.storageMaintenance,
+        storageMaintenanceRequest(
+          "authority-checkpoint",
+          input.deviceId,
+          { transferId: input.transferId, page: pages.length, phase: "export-read" },
+          { obligation: "pre-commit" },
+        ),
+        operation,
+      ),
+    );
+    if (
+      page.commits.length === 0 ||
+      page.checkpoint.lsn > input.checkpoint.lsn
+    ) {
+      throw new Error("Migration export crossed its frozen authority checkpoint");
+    }
+    const body: PlannedAuthorityExportPageBody = {
+      v: 1,
+      seq: pages.length,
+      commits: page.commits,
+    };
+    const bytes = Buffer.from(canonicalize(body), "utf8");
+    const ref = await runStorageMaintenanceStep(
+      input.storageMaintenance,
+      storageMaintenanceRequest(
+        "authority-checkpoint",
+        input.deviceId,
+        { transferId: input.transferId, page: pages.length, phase: "export-write" },
+        { obligation: "pre-commit" },
+      ),
+      () => input.artifacts.put(bytes),
+    );
+    pages.push({
+      seq: body.seq,
+      firstLsn: page.commits[0]!.lsn,
+      lastLsn: page.commits.at(-1)!.lsn,
+      recordCount: page.commits.length,
+      ref,
+    });
+    for (const commit of page.commits) {
+      pending.accept(commit);
+      for (const reference of collectArtifactRefs(commit.entries)) {
+        const existing = references.get(reference.digest);
+        if (existing && existing.bytes !== reference.bytes) {
+          throw new TypeError("Frozen authority contains a conflicting artifact identity");
+        }
+        references.set(reference.digest, reference);
+      }
+      for (const entry of commit.entries) {
+        const current = streams.get(entry.stream);
+        streams.set(entry.stream, {
+          stream: entry.stream,
+          firstLsn: current?.firstLsn ?? commit.lsn,
+          lastLsn: commit.lsn,
+          recordCount: (current?.recordCount ?? 0) + 1,
+          digest: protocolDigest("AuthorityCatalogStream", 1, {
+            stream: entry.stream,
+            ...(current ? { previousDigest: current.digest } : {}),
+            lsn: commit.lsn,
+            body: entry.body,
+          }),
+        });
+      }
+    }
+    cursor = page.checkpoint;
+  }
+  if (
+    canonicalize(cursor) !== canonicalize(input.checkpoint)
+  ) {
+    throw new Error("Migration export did not end at its frozen authority checkpoint");
+  }
+  const retained = await input.retention.retainedAtCheckpoint(
+    retentionSnapshot,
+    [...references.values()],
+  );
+  if (retained.status !== "current") {
+    throw new Error("Migration retention projection changed while freezing authority");
+  }
+  const retainedArtifacts = uniqueRefs(retained.retained);
+  for (const reference of retainedArtifacts) {
+    if (!(await input.artifacts.has(reference))) {
+      throw new Error(`Frozen authority references a missing artifact: ${reference.digest}`);
+    }
+  }
+  const manifest: PlannedAuthorityExport = {
+    v: 2,
+    checkpoint: input.checkpoint,
+    pages,
+  };
+  const manifestBytes = Buffer.from(canonicalExport(manifest), "utf8");
+  if (manifestBytes.byteLength > TRANSFER_HEADER_BYTES) {
+    throw new Error("Migration authority export exceeds its fixed header budget");
+  }
+  const manifestRef = await runStorageMaintenanceStep(
+    input.storageMaintenance,
+    storageMaintenanceRequest(
+      "authority-checkpoint",
+      input.deviceId,
+      { transferId: input.transferId, phase: "export-manifest" },
+      { obligation: "pre-commit" },
+    ),
+    () => input.artifacts.put(manifestBytes),
+  );
+  return {
+    manifest,
+    manifestRef,
+    retainedArtifacts,
+    streams: [...streams.values()],
+    pendingObligations: pending.snapshot(),
+  };
+}
+
+async function projectPendingObligations(
+  log: FileAuthorityCommitLog,
+  checkpoint: DurableLogCheckpoint,
+): Promise<AuthorityCatalog["pendingObligations"]> {
+  const pending = new PendingObligationTracker();
+  let cursor = await log.originCheckpoint();
+  while (cursor.lsn < checkpoint.lsn) {
+    const page = await log.readTail<unknown>(cursor, TRANSFER_EXPORT_PAGE_COMMITS);
+    if (page.commits.length === 0 || page.checkpoint.lsn > checkpoint.lsn) {
+      throw new Error("Migration pending projection crossed its source checkpoint");
+    }
+    for (const commit of page.commits) pending.accept(commit);
+    cursor = page.checkpoint;
+  }
+  if (canonicalize(cursor) !== canonicalize(checkpoint)) {
+    throw new Error("Migration pending projection did not reach its source checkpoint");
+  }
+  return pending.snapshot();
+}
+
+async function loadPlannedSourceClosure(
+  log: FileAuthorityCommitLog,
+  artifacts: FileArtifactStore,
+  transferId: string,
+): Promise<PlannedSourceClosure> {
+  const records = await log.readStream<unknown>(SOURCE_CLOSURE_STREAM);
+  const matches = records.filter(({ body }) =>
+    isRecord(body) &&
+    body.v === 1 &&
+    body.t === "planned-anchor-source-closure-recorded" &&
+    body.transferId === transferId);
+  if (matches.length !== 1) {
+    throw new Error("Migration source closure is missing or ambiguous");
+  }
+  const record = matches[0]!.body as unknown as PlannedSourceClosureRecord;
+  const bytes = await artifacts.get(record.closure);
+  const text = Buffer.from(bytes).toString("utf8");
+  const closure = JSON.parse(text) as PlannedSourceClosure;
+  const expectedTokens = Array.isArray(closure.pendingObligations)
+    ? closure.pendingObligations.map((obligation) => ({
+        transferId,
+        kind: obligation.kind,
+        id: obligation.id,
+        requestId: `planned-accepted:${obligation.kind}:${obligation.id}`,
+      }))
+    : [];
+  if (
+    canonicalize(closure) !== text ||
+    closure.v !== 1 ||
+    closure.t !== "planned-anchor-source-closure" ||
+    closure.transferId !== transferId ||
+    canonicalize(Object.keys(closure).sort()) !== canonicalize([
+      "acceptedTokens",
+      "pendingObligations",
+      "sourceHead",
+      "t",
+      "transferId",
+      "v",
+    ]) ||
+    !Array.isArray(closure.acceptedTokens) ||
+    !Array.isArray(closure.pendingObligations) ||
+    canonicalize(closure.acceptedTokens) !== canonicalize(expectedTokens) ||
+    canonicalize(closure.sourceHead) !== canonicalize(record.sourceHead) ||
+    protocolDigest("PlannedAnchorSourceClosure", 1, closure) !== record.closureDigest
+  ) {
+    throw new TypeError("Migration source closure is invalid");
+  }
+  return closure;
+}
+
+class PendingObligationTracker {
+  readonly #pending = new Map<string, AuthorityCatalog["pendingObligations"][number]>();
+
+  accept(commit: CommitEnvelope<unknown>): void {
+    for (const entry of commit.entries) {
+      if (!isRecord(entry.body)) continue;
+      const body = entry.body;
+      if (entry.stream.startsWith("assignment:")) {
+        const assignmentId = entry.stream.slice("assignment:".length);
+        if (body.t === "received") this.#set("assignment", assignmentId);
+        if (["acked", "halted", "execution-failed", "dispatch-rejected"].includes(String(body.t))) {
+          this.#delete("assignment", assignmentId);
+        }
+        if (body.t === "interaction-requested" && typeof body.requestId === "string") {
+          this.#set("interaction", body.requestId);
+        }
+        if (body.t === "interaction-finished" && typeof body.requestId === "string") {
+          this.#delete("interaction", body.requestId);
+        }
+      }
+      if (
+        entry.stream === "final-outbox" &&
+        body.t === "final" &&
+        typeof body.conversationId === "string" &&
+        typeof body.runId === "string" &&
+        Number.isSafeInteger(body.commitRevision)
+      ) {
+        const id = `${body.conversationId}:${body.runId}:${body.commitRevision}`;
+        body.state === "pending" ? this.#set("final", id) : this.#delete("final", id);
+      }
+      if (entry.stream === "delivery" && typeof body.itemId === "string") {
+        if (["sent", "failed", "delivery-resolved"].includes(String(body.t))) {
+          this.#delete("delivery", body.itemId);
+        } else if (["enqueued", "attempt-started", "retry-scheduled", "delivery-uncertain"].includes(String(body.t))) {
+          this.#set("delivery", body.itemId);
+        }
+      }
+      if (
+        entry.stream.startsWith("intent:") &&
+        body.t === "intent" &&
+        isRecord(body.intent) &&
+        typeof body.intent.intentId === "string"
+      ) {
+        body.intent.status === "pending"
+          ? this.#set("intent", body.intent.intentId)
+          : this.#delete("intent", body.intent.intentId);
+      }
+      if (body.t === "confirmation-requested" && typeof body.requestId === "string") {
+        this.#set("confirmation", body.requestId);
+      }
+      if (body.t === "confirmation-resolved" && typeof body.requestId === "string") {
+        this.#delete("confirmation", body.requestId);
+      }
+    }
+  }
+
+  snapshot(): AuthorityCatalog["pendingObligations"] {
+    return [...this.#pending.values()].sort((left, right) =>
+      left.kind.localeCompare(right.kind, "en-US") || left.id.localeCompare(right.id, "en-US"));
+  }
+
+  #set(kind: AuthorityCatalog["pendingObligations"][number]["kind"], id: string): void {
+    this.#pending.set(`${kind}:${id}`, { kind, id });
+  }
+
+  #delete(kind: AuthorityCatalog["pendingObligations"][number]["kind"], id: string): void {
+    this.#pending.delete(`${kind}:${id}`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function buildAuthorityCatalog(input: {
   readonly state: PlannedAnchorTransferState;
   readonly checkpoint: DurableLogCheckpoint;
-  readonly commits: readonly CommitEnvelope<unknown>[];
+  readonly streams: readonly CatalogStreamAccumulator[];
   readonly authorityRecords: ArtifactRef;
   readonly retainedArtifacts: readonly ArtifactRef[];
+  readonly pendingObligations: AuthorityCatalog["pendingObligations"];
   readonly trust: TrustProjection;
 }): AuthorityCatalog {
-  const streams = new Map<string, Array<{ readonly lsn: number; readonly body: unknown }>>();
-  for (const commit of input.commits) {
-    for (const entry of commit.entries) {
-      const records = streams.get(entry.stream) ?? [];
-      records.push({ lsn: commit.lsn, body: entry.body });
-      streams.set(entry.stream, records);
-    }
-  }
   return prepareAuthorityCatalog({
     v: 1,
     transferId: input.state.identity.transferId,
@@ -1281,17 +2117,11 @@ function buildAuthorityCatalog(input: {
       "conversation-authority", "conversation-content", "execution-assets",
       "global-authority", "pending-obligations", "trust-and-anchor",
     ],
-    streams: [...streams].sort(([left], [right]) => left.localeCompare(right, "en-US"))
-      .map(([stream, records]) => ({
-        stream,
-        firstLsn: records[0]!.lsn,
-        lastLsn: records.at(-1)!.lsn,
-        recordCount: records.length,
-        digest: protocolDigest("AuthorityCatalogStream", 1, { stream, records }),
-      })),
+    streams: [...input.streams].sort((left, right) =>
+      left.stream.localeCompare(right.stream, "en-US")),
     authorityRecords: input.authorityRecords,
     retainedArtifacts: input.retainedArtifacts,
-    pendingObligations: [],
+    pendingObligations: input.pendingObligations,
   }).catalog;
 }
 
@@ -1308,7 +2138,10 @@ function assertExportBinding(
     catalog.source.lsn !== proof.lastLsn ||
     exported.checkpoint.lsn !== proof.lastLsn ||
     exported.checkpoint.prefixDigest !== catalog.source.prefixDigest ||
-    exported.commits.at(-1)?.lsn !== proof.lastLsn
+    exported.checkpoint.logId !== catalog.source.logId ||
+    (proof.lastLsn === 0
+      ? exported.pages.length !== 0
+      : exported.pages.at(-1)?.lastLsn !== proof.lastLsn)
   ) {
     throw new TypeError("Planned authority export does not bind its frozen source prefix");
   }
@@ -1316,6 +2149,69 @@ function assertExportBinding(
 
 function compareRefs(left: ArtifactRef, right: ArtifactRef): number {
   return left.digest.localeCompare(right.digest, "en-US") || left.bytes - right.bytes;
+}
+
+function readyReservation(
+  proof: ReadyProof,
+  snapshot: AnchorTransferReadySnapshot,
+): ReadyReservation {
+  return Object.freeze({
+    v: 1,
+    t: "planned-anchor-ready-reserved",
+    transferId: proof.transferId,
+    targetDeviceId: proof.targetDeviceId,
+    proofDigest: readyProofDigest(proof),
+    snapshotDigest: protocolDigest("PlannedAnchorReadySnapshot", 1, {
+      configuredCapabilities: {
+        providers: [...snapshot.configuredCapabilities.providers].sort(),
+        mcpServers: [...snapshot.configuredCapabilities.mcpServers].sort(),
+        channels: [...snapshot.configuredCapabilities.channels].sort(),
+      },
+      protocolRevision: snapshot.protocolRevision,
+      assetRevision: snapshot.assetRevision,
+      serviceRevision: snapshot.serviceRevision,
+    }),
+    expiresAt: proof.expiresAt,
+  });
+}
+
+function validateReadyReservation(value: unknown): ReadyReservation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Migration ready reservation must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(record).sort()) !== canonicalize([
+      "expiresAt",
+      "proofDigest",
+      "snapshotDigest",
+      "t",
+      "targetDeviceId",
+      "transferId",
+      "v",
+    ]) ||
+    record.v !== 1 ||
+    record.t !== "planned-anchor-ready-reserved" ||
+    typeof record.transferId !== "string" ||
+    typeof record.targetDeviceId !== "string" ||
+    typeof record.proofDigest !== "string" ||
+    typeof record.snapshotDigest !== "string" ||
+    typeof record.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(record.expiresAt))
+  ) {
+    throw new TypeError("Migration ready reservation fields are invalid");
+  }
+  return record as unknown as ReadyReservation;
+}
+
+function assertTransferStorageId(transferId: string): void {
+  if (!/^xfer-[0-9A-HJKMNP-TV-Z]{26}$/u.test(transferId)) {
+    throw new TypeError("Migration transfer id is not safe for private storage");
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function preparedRecord(
@@ -1375,6 +2271,7 @@ function reduceJournal(
 function resultFor(
   command: AnchorTransferCommand,
   state: PlannedAnchorTransferState | undefined,
+  trustRecord?: HomeTrustRecord,
 ): AnchorTransferResult {
   if (!state) {
     return {
@@ -1392,7 +2289,18 @@ function resultFor(
     return { v: 1, status: "ok", requestId: command.requestId, transferId: command.transferId, state: state.phase, ref: state.checkpoint! };
   }
   if (state.phase === "committed" || state.phase === "tombstoned") {
-    return { v: 1, status: "ok", requestId: command.requestId, transferId: command.transferId, state: state.phase, commit: state.commit! };
+    if (!trustRecord) {
+      throw new Error("Committed migration result has no signed trust projection");
+    }
+    return {
+      v: 1,
+      status: "ok",
+      requestId: command.requestId,
+      transferId: command.transferId,
+      state: state.phase,
+      commit: state.commit!,
+      trustRecord,
+    };
   }
   return { v: 1, status: "ok", requestId: command.requestId, transferId: command.transferId, state: "aborted", abort: state.abort! };
 }

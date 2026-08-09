@@ -340,6 +340,7 @@ export type AnchorTransferResult = WireSchemaV1<"AnchorTransferResult"> &
         | {
             state: "committed" | "tombstoned";
             commit: Extract<AnchorTransferCommit, { mode: "planned" }>;
+            trustRecord: HomeTrustRecord;
             ref?: never;
             abort?: never;
           }

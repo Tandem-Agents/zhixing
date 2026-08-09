@@ -145,6 +145,7 @@ import {
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
 import { AnchorSchedulerRuntime } from "./anchor-scheduler-runtime.js";
+import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mesh.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -946,6 +947,9 @@ async function runServerProcess(
           { kind: "external", origin: "planned-duty-migration" },
           30_000,
         );
+        if (ctx.conversations?.hasActiveWork()) {
+          throw new Error("Duty-device migration could not drain accepted conversation work");
+        }
         await ctx.executorJobOwner?.drain();
         await ctx.deliveryStack?.flush();
         await ctx.conversationProtocol?.stopRecoveryLoop();
@@ -1032,6 +1036,15 @@ async function runServerProcess(
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
+    ...(ctx.meshRuntime && ctx.authorityRuntime
+      ? {
+          conversationRpc: new CurrentAnchorFirstPartyRpcRouter({
+            deviceId: ctx.authorityRuntime.deviceId,
+            currentAnchorDeviceId: () => ctx.meshRuntime!.currentAnchorDeviceId(),
+            remoteFor: (deviceId) => ctx.meshRuntime!.firstPartyConversationFor(deviceId),
+          }),
+        }
+      : {}),
     ...(scheduler ? { scheduler } : {}),
     conversations: ctx.conversations,
     advancement: ctx.advancement,

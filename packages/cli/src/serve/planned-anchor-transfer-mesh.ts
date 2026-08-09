@@ -1,23 +1,33 @@
 import type {
   AnchorTransferCommand,
   AnchorTransferResult,
+  HomeTrustEvent,
+  HomeTrustRecord,
   ReadyProof,
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  protocolDigest,
   validateAnchorTransferCommand,
   validateAnchorTransferResult,
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+import { currentMaintenanceAbortSignal } from "@zhixing/core/resources";
 import type {
   PlannedAnchorTransferArtifactSourcePort,
+  PlannedAnchorTransferRuntimeLifecycle,
+  PlannedAnchorTargetReadinessSummary,
   PlannedAnchorTransferTargetPort,
 } from "./planned-anchor-transfer.js";
+import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 export const PLANNED_ANCHOR_TRANSFER_READY_SERVICE = "anchor.transfer.ready";
+export const PLANNED_ANCHOR_TRANSFER_SUMMARY_SERVICE = "anchor.transfer.summary";
 export const PLANNED_ANCHOR_TRANSFER_SERVICE = "anchor.transfer";
+export const PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE =
+  "anchor.transfer.trust-reconciliation";
 
 export const PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR = Object.freeze({
   owner: "current-duty-device",
@@ -33,6 +43,8 @@ export const PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR = Object.freeze({
   ]),
   sourcePhases: Object.freeze(["probe", "read-range"]),
   order: Object.freeze(["ready", "prepare", "freeze", "import", "commit"]),
+  trustReconciliation: "single-planned-issuer-transition",
+  readinessReservation: "target-lifecycle",
 });
 
 interface ReadyRequest {
@@ -40,6 +52,24 @@ interface ReadyRequest {
   readonly transferId: string;
   readonly sourceDeviceId: string;
   readonly targetDeviceId: string;
+}
+
+interface SummaryRequest {
+  readonly v: 1;
+  readonly sourceDeviceId: string;
+  readonly targetDeviceId: string;
+}
+
+interface TrustReconciliationRequest {
+  readonly v: 1;
+  readonly homeId: string;
+  readonly chainHead: HomeTrustRecord["chainHead"];
+}
+
+interface TrustReconciliationResult {
+  readonly v: 1;
+  readonly events: readonly HomeTrustEvent[];
+  readonly record: HomeTrustRecord;
 }
 
 /** Authenticated mesh client; command/result correlation remains in the strict protocol codec. */
@@ -51,6 +81,28 @@ export class PlannedAnchorTransferMeshClient
     private readonly targetDeviceId: string,
     private readonly verifier: ProtocolSignatureVerifier,
   ) {}
+
+  async summary(): Promise<PlannedAnchorTargetReadinessSummary> {
+    const value = decode(await this.client.request(
+      PLANNED_ANCHOR_TRANSFER_SUMMARY_SERVICE,
+      encode({
+        v: 1,
+        sourceDeviceId: this.sourceDeviceId,
+        targetDeviceId: this.targetDeviceId,
+      } satisfies SummaryRequest),
+      currentMaintenanceAbortSignal(),
+    ));
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      canonicalize(Object.keys(value).sort()) !== canonicalize(["ready"]) ||
+      (value as { ready?: unknown }).ready !== true
+    ) {
+      throw new TypeError("Migration target readiness summary is invalid");
+    }
+    return Object.freeze({ ready: true as const });
+  }
 
   async ready(input: {
     readonly transferId: string;
@@ -67,6 +119,7 @@ export class PlannedAnchorTransferMeshClient
         sourceDeviceId: this.sourceDeviceId,
         targetDeviceId: this.targetDeviceId,
       } satisfies ReadyRequest),
+      currentMaintenanceAbortSignal(),
     )) as ReadyProof;
   }
 
@@ -75,6 +128,7 @@ export class PlannedAnchorTransferMeshClient
       decode(await this.client.request(
         PLANNED_ANCHOR_TRANSFER_SERVICE,
         encode(command),
+        currentMaintenanceAbortSignal(),
       )),
       command,
       this.verifier,
@@ -94,10 +148,34 @@ export function registerPlannedAnchorTransferMeshServices(
     readonly targetDeviceId: string;
     readonly currentSourceDeviceId: () => string;
     readonly verifier: ProtocolSignatureVerifier;
+    readonly lifecycle?: PlannedAnchorTransferRuntimeLifecycle;
   },
 ): () => void {
   const authorize = (deviceId: string) =>
     deviceId === options.currentSourceDeviceId();
+  const disposeSummary = registry.register(
+    PLANNED_ANCHOR_TRANSFER_SUMMARY_SERVICE,
+    {
+      access: "read",
+      availability: "negotiated-version",
+      authorize: (connection) => authorize(connection.peer.deviceId),
+      handler: async (payload, connection) => {
+        const request = summaryRequest(decode(payload));
+        if (
+          request.sourceDeviceId !== connection.peer.deviceId ||
+          request.sourceDeviceId !== options.currentSourceDeviceId() ||
+          request.targetDeviceId !== options.targetDeviceId
+        ) {
+          throw new TypeError("Migration summary request does not bind its authenticated devices");
+        }
+        const target = options.target();
+        if (!target) throw new Error("Migration target receiver is unavailable");
+        return encode(await (options.lifecycle
+          ? options.lifecycle.run(() => target.summary())
+          : target.summary()));
+      },
+    },
+  );
   const disposeReady = registry.register(
     PLANNED_ANCHOR_TRANSFER_READY_SERVICE,
     {
@@ -115,7 +193,9 @@ export function registerPlannedAnchorTransferMeshServices(
         }
         const target = options.target();
         if (!target) throw new Error("Migration target receiver is unavailable");
-        return encode(await target.ready(request));
+        return encode(await (options.lifecycle
+          ? options.lifecycle.run(() => target.ready(request))
+          : target.ready(request)));
       },
     },
   );
@@ -139,12 +219,15 @@ export function registerPlannedAnchorTransferMeshServices(
       }
       const target = options.target();
       if (!target) throw new Error("Migration target receiver is unavailable");
-      return encode(await target.apply(command));
+      return encode(await (options.lifecycle
+        ? options.lifecycle.run(() => target.apply(command))
+        : target.apply(command)));
     },
   });
   return () => {
     disposeCommand();
     disposeReady();
+    disposeSummary();
   };
 }
 
@@ -154,6 +237,7 @@ export function registerPlannedAnchorTransferSourceMeshService(
     readonly source: () => PlannedAnchorTransferArtifactSourcePort | undefined;
     readonly authorizeTarget: (deviceId: string) => boolean;
     readonly verifier: ProtocolSignatureVerifier;
+    readonly lifecycle?: PlannedAnchorTransferRuntimeLifecycle;
   },
 ): () => void {
   return registry.register(PLANNED_ANCHOR_TRANSFER_SERVICE, {
@@ -172,9 +256,92 @@ export function registerPlannedAnchorTransferSourceMeshService(
       }
       const source = options.source();
       if (!source) throw new Error("Migration artifact source is unavailable");
-      return encode(await source.applyArtifactCommand(command));
+      return encode(await (options.lifecycle
+        ? options.lifecycle.run(() => source.applyArtifactCommand(command))
+        : source.applyArtifactCommand(command)));
     },
   });
+}
+
+/** Replays only the single planned issuer transition missed by an authenticated peer. */
+export function registerPlannedAnchorTrustReconciliationService(
+  registry: MeshServiceRegistry,
+  options: {
+    readonly store: FileMeshBootstrapStore;
+    readonly authorizePeer: (deviceId: string) => boolean;
+  },
+): () => void {
+  return registry.register(PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE, {
+    access: "read",
+    availability: "negotiated-version",
+    authorize: (connection) => options.authorizePeer(connection.peer.deviceId),
+    handler: async (payload) => {
+      const request = trustReconciliationRequest(decode(payload));
+      const events = await options.store.loadTrustEvents();
+      const record = await options.store.loadTrustRecord();
+      if (!record || record.homeId !== request.homeId) {
+        throw new Error("Planned anchor trust reconciliation has no matching home");
+      }
+      const prefix = request.chainHead.seq === 0
+        ? undefined
+        : events.find((event) => event.seq === request.chainHead.seq);
+      if (
+        (request.chainHead.seq > 0 && !prefix) ||
+        (prefix && protocolEventDigest(prefix) !== request.chainHead.eventDigest)
+      ) {
+        throw new Error("Planned anchor trust reconciliation prefix is not current");
+      }
+      const suffix = events.filter((event) => event.seq > request.chainHead.seq);
+      if (
+        suffix.length > 1 ||
+        suffix.some((event) =>
+          event.body.t !== "issuer-transition" ||
+          event.body.reason !== "migration" ||
+          event.body.signedBy !== "issuer")
+      ) {
+        throw new Error("Planned anchor trust reconciliation exceeds its finite transition");
+      }
+      return encode({ v: 1, events: suffix, record } satisfies TrustReconciliationResult);
+    },
+  });
+}
+
+export async function reconcilePlannedAnchorTrustFromPeer(
+  client: MeshServiceClient,
+  options: {
+    readonly store: FileMeshBootstrapStore;
+    readonly localDeviceId: string;
+  },
+): Promise<HomeTrustRecord> {
+  const local = await options.store.loadTrustRecord();
+  if (!local) throw new Error("Local trust record is unavailable");
+  const result = trustReconciliationResult(decode(await client.request(
+    PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE,
+    encode({
+      v: 1,
+      homeId: local.homeId,
+      chainHead: local.chainHead,
+    } satisfies TrustReconciliationRequest),
+    currentMaintenanceAbortSignal(),
+  )));
+  if (result.record.homeId !== local.homeId) {
+    throw new Error("Planned anchor trust reconciliation returned another home");
+  }
+  if (result.record.chainHead.seq < local.chainHead.seq) return local;
+  if (
+    result.record.chainHead.seq === local.chainHead.seq &&
+    result.record.chainHead.eventDigest !== local.chainHead.eventDigest
+  ) {
+    throw new Error("Planned anchor trust reconciliation returned a conflicting chain head");
+  }
+  await options.store.reconcileTrustSuffix({
+    events: result.events,
+    record: result.record,
+    localDeviceId: options.localDeviceId,
+  });
+  const reconciled = await options.store.loadTrustRecord();
+  if (!reconciled) throw new Error("Reconciled planned anchor trust record is unavailable");
+  return reconciled;
 }
 
 function readyRequest(input: unknown): ReadyRequest {
@@ -193,6 +360,74 @@ function readyRequest(input: unknown): ReadyRequest {
     throw new TypeError("Migration ready request fields are incomplete or unknown");
   }
   return value as unknown as ReadyRequest;
+}
+
+function summaryRequest(input: unknown): SummaryRequest {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Migration summary request must be an object");
+  }
+  const value = input as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(value).sort()) !==
+      canonicalize(["sourceDeviceId", "targetDeviceId", "v"]) ||
+    value.v !== 1 ||
+    typeof value.sourceDeviceId !== "string" ||
+    typeof value.targetDeviceId !== "string"
+  ) {
+    throw new TypeError("Migration summary request fields are incomplete or unknown");
+  }
+  return value as unknown as SummaryRequest;
+}
+
+function trustReconciliationRequest(input: unknown): TrustReconciliationRequest {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Planned anchor trust reconciliation request must be an object");
+  }
+  const value = input as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(value).sort()) !== canonicalize(["chainHead", "homeId", "v"]) ||
+    value.v !== 1 ||
+    typeof value.homeId !== "string" ||
+    value.chainHead === null ||
+    typeof value.chainHead !== "object" ||
+    Array.isArray(value.chainHead)
+  ) {
+    throw new TypeError("Planned anchor trust reconciliation request fields are invalid");
+  }
+  const chainHead = value.chainHead as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(chainHead).sort()) !== canonicalize(["eventDigest", "seq"]) ||
+    !Number.isSafeInteger(chainHead.seq) ||
+    (chainHead.seq as number) < 0 ||
+    typeof chainHead.eventDigest !== "string"
+  ) {
+    throw new TypeError("Planned anchor trust reconciliation chain head is invalid");
+  }
+  return value as unknown as TrustReconciliationRequest;
+}
+
+function trustReconciliationResult(input: unknown): TrustReconciliationResult {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Planned anchor trust reconciliation result must be an object");
+  }
+  const value = input as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(value).sort()) !== canonicalize(["events", "record", "v"]) ||
+    value.v !== 1 ||
+    !Array.isArray(value.events) ||
+    value.events.length > 1 ||
+    value.record === null ||
+    typeof value.record !== "object" ||
+    Array.isArray(value.record)
+  ) {
+    throw new TypeError("Planned anchor trust reconciliation result fields are invalid");
+  }
+  return value as unknown as TrustReconciliationResult;
+}
+
+function protocolEventDigest(event: HomeTrustEvent): string {
+  const { signature: _signature, ...unsigned } = event;
+  return protocolDigest("HomeTrustEvent", 1, unsigned);
 }
 
 function encode(value: unknown): Uint8Array {

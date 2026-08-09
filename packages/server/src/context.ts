@@ -45,7 +45,7 @@ import type {
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
 /**
- * 第一方会话 RPC 的窄覆盖点。只有不承载锚点会话域的生产宿主才注入；
+ * 第一方权威 RPC 的窄覆盖点。非当前锚点宿主只转发冻结的有限方法集；
  * 方法仍须存在于 canonical RPC registry，认证与 wire 分发仍由 server 拥有。
  */
 export interface FirstPartyConversationRpcRouter {
@@ -220,7 +220,12 @@ export interface ServerContext {
   }>;
   /** 用户主动迁移值班设备；仅暴露设备与用户可理解的阶段。 */
   dutyMigration?: {
-    targets(): Promise<readonly { readonly deviceId: string; readonly displayName: string }[]>;
+    targets(): Promise<readonly {
+      readonly deviceId: string;
+      readonly displayName: string;
+      readonly ready: boolean;
+      readonly code?: "unavailable";
+    }[]>;
     prepare(input: { readonly requestId: string; readonly transferId: string; readonly targetDeviceId: string }): Promise<{ readonly stage: "ready" }>;
     commit(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "completed" }>;
     cancel(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "cancelled" }>;

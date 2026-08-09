@@ -105,6 +105,13 @@ export interface FileAuthorityCommitLogOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
 }
 
+export interface PlannedAnchorPrefixInstallation<Body> {
+  readonly source: AsyncIterable<CommitEnvelope<Body>>;
+  readonly sourceHead: DurableLogCheckpoint;
+  readonly installationEntries: readonly LogicalRecord<Body>[];
+  readonly candidateReferences: readonly ArtifactRef[];
+}
+
 export interface RetainedReferenceQueryOptions {
   /**
    * 额外的会话删除 tombstone(来自持有削除事实的权威日志):内容叶所有权
@@ -291,12 +298,154 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
   }
 
+  /**
+   * Publishes one frozen source prefix and its target-side install decision as one
+   * physical WAL replacement. The imported envelopes keep their source LSN and
+   * envelope digest; only this log's frame-prefix chain is rebuilt.
+   */
+  async installPlannedAnchorPrefix<Body>(
+    input: PlannedAnchorPrefixInstallation<Body>,
+  ): Promise<CommitEnvelope<Body>> {
+    const installationEntries = normalizeEntries(input.installationEntries);
+    if (installationEntries.length === 0) {
+      throw new TypeError("Planned anchor installation requires a publication entry");
+    }
+    const candidateReferences = deduplicateReferences(input.candidateReferences);
+    const protectedReferences = new Map(
+      candidateReferences.map((reference) => [reference.digest, reference.bytes]),
+    );
+    const operation = () => this.#withLogLock(async () => {
+      for (const guard of this.#appendAdmissionGuards) {
+        guard(installationEntries as Array<LogicalRecord<unknown>>);
+      }
+
+      let replay: CommitEnvelope<Body> | undefined;
+      await this.#readAndRecover((envelope) => {
+        if (
+          envelope.lsn === input.sourceHead.lsn + 1 &&
+          canonicalize(envelope.entries) === canonicalize(installationEntries)
+        ) {
+          replay = envelope as CommitEnvelope<Body>;
+        }
+      });
+      if (replay) return replay;
+
+      const logId = this.#requireLogId();
+      const temporaryPath = path.join(
+        this.rootDir,
+        `.authority-planned-${randomBytes(8).toString("hex")}.tmp`,
+      );
+      const target = await open(temporaryPath, "wx", 0o600);
+      let sourcePrefix = emptyLogPrefix(input.sourceHead.logId);
+      let targetPrefix = emptyLogPrefix(logId);
+      let lastLsn = 0;
+      let frameEndOffset = AUTHORITY_WAL_FILE_HEADER_BYTES;
+      try {
+        await target.writeFile(encodeAuthorityWalFileHeader(
+          Buffer.from(logId, "base64url"),
+        ));
+        for await (const imported of input.source) {
+          const envelope = parseEnvelope(
+            Buffer.from(canonicalize(imported), "utf8"),
+          ) as CommitEnvelope<Body>;
+          if (envelope.lsn !== lastLsn + 1 || envelope.lsn > input.sourceHead.lsn) {
+            throw new AuthorityStorageError(
+              "commit-log-corrupt",
+              "Planned anchor source prefix is not contiguous",
+            );
+          }
+          assertTransactionReferencesProtected(
+            collectRetainedArtifactRefs(envelope.entries),
+            protectedReferences,
+          );
+          sourcePrefix = advanceProjectionPrefix(
+            input.sourceHead.logId,
+            sourcePrefix,
+            envelope,
+          );
+          targetPrefix = advanceProjectionPrefix(logId, targetPrefix, envelope);
+          const frame = encodeAuthorityWalFrame(
+            Buffer.from(canonicalize(envelope), "utf8"),
+            { lsn: envelope.lsn, prefixDigest: targetPrefix },
+          );
+          await target.writeFile(frame);
+          frameEndOffset += frame.byteLength;
+          lastLsn = envelope.lsn;
+        }
+        if (
+          lastLsn !== input.sourceHead.lsn ||
+          sourcePrefix !== input.sourceHead.prefixDigest
+        ) {
+          throw new AuthorityStorageError(
+            "commit-log-corrupt",
+            "Planned anchor source prefix does not match its frozen checkpoint",
+          );
+        }
+        const installation = createCommitEnvelope(
+          lastLsn + 1,
+          this.#clock(),
+          installationEntries,
+        );
+        assertTransactionReferencesProtected(
+          collectRetainedArtifactRefs(installation.entries),
+          protectedReferences,
+        );
+        targetPrefix = advanceProjectionPrefix(logId, targetPrefix, installation);
+        const installationFrame = encodeAuthorityWalFrame(
+          Buffer.from(canonicalize(installation), "utf8"),
+          { lsn: installation.lsn, prefixDigest: targetPrefix },
+        );
+        await target.writeFile(installationFrame);
+        frameEndOffset += installationFrame.byteLength;
+        await target.sync();
+        await target.close();
+        await rename(temporaryPath, this.logPath);
+        await syncDirectory(this.rootDir);
+
+        this.#verifiedTail = undefined;
+        this.#logId = undefined;
+        this.#logFormat = undefined;
+        await this.#ensureInitialized();
+        for (const projection of this.#durableProjections.values()) {
+          await projection.state.reset({ authority: this.#durableCheckpoint(0) });
+        }
+        const verifiedLsn = await this.#readAndRecover(() => undefined);
+        if (verifiedLsn !== installation.lsn) {
+          throw new AuthorityStorageError(
+            "commit-log-corrupt",
+            "Planned anchor installation did not publish its complete WAL",
+          );
+        }
+        return installation;
+      } catch (error) {
+        await target.close().catch(() => undefined);
+        await unlink(temporaryPath).catch(() => undefined);
+        throw error;
+      }
+    });
+    return candidateReferences.length === 0
+      ? operation()
+      : this.artifactStore.withPresentReferences(candidateReferences, operation);
+  }
+
   registerAppendAdmissionGuard(guard: AuthorityAppendAdmissionGuard): () => void {
     if (typeof guard !== "function") {
       throw new TypeError("Authority append admission guard must be callable");
     }
     this.#appendAdmissionGuards.add(guard);
     return () => this.#appendAdmissionGuards.delete(guard);
+  }
+
+  async installAppendAdmissionGuard(
+    guard: AuthorityAppendAdmissionGuard,
+  ): Promise<() => void> {
+    if (typeof guard !== "function") {
+      throw new TypeError("Authority append admission guard must be callable");
+    }
+    return this.#withLogLock(async () => {
+      this.#appendAdmissionGuards.add(guard);
+      return () => this.#appendAdmissionGuards.delete(guard);
+    });
   }
 
   async originCheckpoint(): Promise<DurableLogCheckpoint> {
@@ -2192,6 +2341,22 @@ function collectRetainedArtifactRefs<Body>(
   records: readonly LogicalRecord<Body>[],
 ): ArtifactRef[] {
   return collectArtifactRefs(retainingAuthorityRecords(records));
+}
+
+function deduplicateReferences(
+  references: readonly ArtifactRef[],
+): ArtifactRef[] {
+  const unique = new Map<string, ArtifactRef>();
+  for (const reference of references) {
+    const existing = unique.get(reference.digest);
+    if (existing && existing.bytes !== reference.bytes) {
+      throw new TypeError(
+        `Artifact digest has conflicting byte counts: ${reference.digest}`,
+      );
+    }
+    unique.set(reference.digest, reference);
+  }
+  return [...unique.values()];
 }
 
 function invalidEnvelope(message: string): AuthorityStorageError {

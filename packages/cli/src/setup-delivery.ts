@@ -134,6 +134,65 @@ import {
   type ExecutionAssetCatalogPort,
 } from "./serve/execution-asset-cache.js";
 
+export interface PlannedAnchorReadySnapshot {
+  readonly configuredCapabilities: {
+    readonly providers: readonly string[];
+    readonly mcpServers: readonly string[];
+    readonly channels: readonly string[];
+  };
+  readonly protocolRevision: string;
+  readonly assetRevision: string;
+  readonly serviceRevision: string;
+}
+
+export interface PlannedAnchorReadinessPort {
+  snapshot(): Promise<PlannedAnchorReadySnapshot>;
+  reserve(input: {
+    readonly transferId: string;
+    readonly expiresAt: string;
+  }): Promise<PlannedAnchorReadySnapshot>;
+  release(transferId: string): Promise<void>;
+}
+
+export function createPlannedAnchorReadinessCoordinator(
+  snapshot: () => Promise<PlannedAnchorReadySnapshot>,
+): {
+  readonly port: PlannedAnchorReadinessPort;
+  runRevisionChange<T>(operation: () => Promise<T>): Promise<T>;
+} {
+  const operations = new SerialTaskQueue();
+  let reservation: {
+    readonly transferId: string;
+    readonly expiresAt: string;
+  } | undefined;
+  const port: PlannedAnchorReadinessPort = Object.freeze({
+    snapshot: () => operations.run(snapshot),
+    reserve: (input: {
+      readonly transferId: string;
+      readonly expiresAt: string;
+    }) => operations.run(async () => {
+      if (reservation && reservation.transferId !== input.transferId) {
+        throw new Error("Another duty-device migration owns the readiness reservation");
+      }
+      const current = await snapshot();
+      reservation = Object.freeze({ ...input });
+      return current;
+    }),
+    release: (transferId: string) => operations.run(async () => {
+      if (reservation?.transferId === transferId) reservation = undefined;
+    }),
+  });
+  return Object.freeze({
+    port,
+    runRevisionChange: <T>(operation: () => Promise<T>) => operations.run(async () => {
+      if (reservation) {
+        throw new Error("Execution assets are reserved by a duty-device migration");
+      }
+      return operation();
+    }),
+  });
+}
+
 export interface AuthorityRuntimeStack {
   readonly anchorEpoch: number;
   readonly localDomainId: string;
@@ -197,16 +256,7 @@ export interface AuthorityRuntimeStack {
     bundle: ExecutionAssetBundle,
   ) => Promise<ExecutorCapabilitySnapshot>;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
-  readonly plannedAnchorReadiness: () => Promise<{
-    readonly configuredCapabilities: {
-      readonly providers: readonly string[];
-      readonly mcpServers: readonly string[];
-      readonly channels: readonly string[];
-    };
-    readonly protocolRevision: string;
-    readonly assetRevision: string;
-    readonly serviceRevision: string;
-  }>;
+  readonly plannedAnchorReadiness: PlannedAnchorReadinessPort;
   readonly installPermissionSnapshot: (
     snapshot: TrustRuleSnapshot,
   ) => Promise<ExecutorCapabilitySnapshot>;
@@ -979,7 +1029,7 @@ export async function setupAuthorityRuntime(
     };
     const currentExecutorSnapshot = async () =>
       (await refreshLocalExecutorSnapshot()).snapshot;
-    const plannedAnchorReadiness = async () => {
+    const plannedAnchorReadinessSnapshot = async (): Promise<PlannedAnchorReadySnapshot> => {
       const configured = plannedAnchorCapabilities(options.configurationSnapshot);
       const assetSnapshot = await executionAssets.current().catch(() => undefined);
       return {
@@ -997,6 +1047,9 @@ export async function setupAuthorityRuntime(
         }),
       };
     };
+    const plannedAnchorReadiness = createPlannedAnchorReadinessCoordinator(
+      plannedAnchorReadinessSnapshot,
+    );
     const installPermissionSnapshot = async (
       snapshot: TrustRuleSnapshot,
     ): Promise<ExecutorCapabilitySnapshot> => {
@@ -1005,10 +1058,10 @@ export async function setupAuthorityRuntime(
     };
     const installExecutionAssetBundle = async (
       bundle: ExecutionAssetBundle,
-    ): Promise<ExecutorCapabilitySnapshot> => {
+    ): Promise<ExecutorCapabilitySnapshot> => plannedAnchorReadiness.runRevisionChange(async () => {
       await executionAssets.installBundle(bundle);
       return currentExecutorSnapshot();
-    };
+    });
     const acceptExecutorSnapshot = async (
       snapshot: ExecutorCapabilitySnapshot,
     ): Promise<void> => {
@@ -1782,7 +1835,7 @@ export async function setupAuthorityRuntime(
       latestPermissionSnapshot: () => permissionSnapshots.latest(),
       executionAssetCatalog: executionAssets,
       currentExecutionAssetBundle: () => executionAssets.bundle(),
-      plannedAnchorReadiness,
+      plannedAnchorReadiness: plannedAnchorReadiness.port,
       installExecutionAssetBundle,
       currentExecutorSnapshot,
       installPermissionSnapshot,

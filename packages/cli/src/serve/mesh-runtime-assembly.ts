@@ -109,10 +109,13 @@ import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
 import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.js";
 import {
   PlannedAnchorTransferOwner,
+  PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
 } from "./planned-anchor-transfer.js";
 import {
   PlannedAnchorTransferMeshClient,
+  reconcilePlannedAnchorTrustFromPeer,
+  registerPlannedAnchorTrustReconciliationService,
   registerPlannedAnchorTransferMeshServices,
   registerPlannedAnchorTransferSourceMeshService,
 } from "./planned-anchor-transfer-mesh.js";
@@ -220,6 +223,7 @@ export class MeshRuntimeAssembly {
   readonly #transferTarget: ConversationTransferTarget | undefined;
   readonly #firstPartyConversationTarget: FirstPartyConversationMeshTarget | undefined;
   readonly #transferAbort = new AbortController();
+  readonly #plannedTransferRuntime = new PlannedAnchorTransferRuntimeLifecycle();
   readonly #disposers: Array<() => void> = [];
   #plannedAnchorOwner: PlannedAnchorTransferOwner | undefined;
   #plannedAnchorTarget: PlannedAnchorTransferTarget | undefined;
@@ -229,6 +233,7 @@ export class MeshRuntimeAssembly {
   #plannedAnchorCheckpointOwner: AuthorityCheckpointOwnerPort | undefined;
   #plannedAnchorLifecycle: PlannedAnchorTransferLifecycle | undefined;
   #plannedAnchorIssuerKey: DeviceKey | undefined;
+  #plannedCommittedTargetDeviceId: string | undefined;
   #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
   #postAdoptionReview: PostAdoptionReviewPort | undefined;
   #started = false;
@@ -368,7 +373,7 @@ export class MeshRuntimeAssembly {
               ...executorRole,
               verifier: options.authority.verifier,
               authorizePeer: (deviceId) =>
-                deviceId === options.trust.issuer.deviceId &&
+                deviceId === this.#currentAnchorDeviceId() &&
                 this.#peerHasRole(deviceId, "anchor"),
               onDispatchAccepted: (envelope) => {
                 if (envelope.execution === "conversation") {
@@ -392,7 +397,7 @@ export class MeshRuntimeAssembly {
     });
 
     if (roles.has("executor")) {
-      const anchorId = options.trust.issuer.deviceId;
+      const anchorId = () => this.#currentAnchorDeviceId();
       worker = new ConversationAssignmentWorker({
         ledger: options.executor!.ledger,
         runtimeFactory: options.executor!.runtimeFactory,
@@ -407,7 +412,7 @@ export class MeshRuntimeAssembly {
             assignmentId,
           ),
         artifacts: options.authority.artifacts,
-        submissionFor: () => this.#composition.submissionPort(anchorId),
+        submissionFor: () => this.#composition.submissionPort(anchorId()),
         globalQueryFor: (capability, anchorEpoch) =>
           roles.has("anchor")
             ? createAssignmentGlobalQueryPort({
@@ -415,7 +420,7 @@ export class MeshRuntimeAssembly {
                 capability,
                 anchorEpoch,
               })
-            : this.#composition.globalQueryPort(anchorId, capability, anchorEpoch),
+            : this.#composition.globalQueryPort(anchorId(), capability, anchorEpoch),
         resourceGovernor: options.authority.executorResourceGovernor,
         InProcessAssignmentSubmission:
           options.executor!.InProcessAssignmentSubmission,
@@ -444,7 +449,7 @@ export class MeshRuntimeAssembly {
             tickets: dataPlane.tickets,
             surfacePrincipalFor,
             ownerMayPresentSurfaceTicket: (connection) =>
-              connection.peer.deviceId === options.trust.issuer.deviceId &&
+              connection.peer.deviceId === this.#currentAnchorDeviceId() &&
               this.#peerHasRole(connection.peer.deviceId, "anchor"),
             authorizeOwnerRelay: async (request) => {
               if (request.consumer.kind !== "owner-relay") {
@@ -469,7 +474,7 @@ export class MeshRuntimeAssembly {
           verifier: options.authority.verifier,
           operations,
           authorizeOwner: (connection) =>
-            connection.peer.deviceId === options.trust.issuer.deviceId &&
+            connection.peer.deviceId === this.#currentAnchorDeviceId() &&
             this.#peerHasRole(connection.peer.deviceId, "anchor"),
           surfacePrincipalFor,
           authorizePeer: (deviceId) =>
@@ -494,7 +499,7 @@ export class MeshRuntimeAssembly {
             options.authority.workspaceProbe,
             options.authority.verifier,
             (deviceId) =>
-              deviceId === options.trust.issuer.deviceId &&
+              deviceId === this.#currentAnchorDeviceId() &&
               this.#peerHasRole(deviceId, "anchor"),
           ),
         );
@@ -506,7 +511,7 @@ export class MeshRuntimeAssembly {
             options.executor!.evidence,
             options.authority.verifier,
             (deviceId) =>
-              deviceId === options.trust.issuer.deviceId &&
+              deviceId === this.#currentAnchorDeviceId() &&
               this.#peerHasRole(deviceId, "anchor"),
           ),
         );
@@ -517,7 +522,7 @@ export class MeshRuntimeAssembly {
             answers: jobOwner!,
             verifier: options.authority.verifier,
             authorizeOwner: (connection) =>
-              connection.peer.deviceId === options.trust.issuer.deviceId &&
+              connection.peer.deviceId === this.#currentAnchorDeviceId() &&
               this.#peerHasRole(connection.peer.deviceId, "anchor"),
             authorizePeer: (deviceId) => this.#peerHasRole(deviceId, "anchor"),
           }),
@@ -566,7 +571,9 @@ export class MeshRuntimeAssembly {
       this.#disposers.push(registerFirstPartyConversationMeshService(
         this.services,
         this.#firstPartyConversationTarget,
-        (deviceId) => this.#peerHasRole(deviceId, "executor"),
+        (deviceId) =>
+          this.#peerHasRole(deviceId, "executor") ||
+          this.#peerHasRole(deviceId, "anchor"),
       ));
     }
 
@@ -601,6 +608,15 @@ export class MeshRuntimeAssembly {
           this.#peerHasRole(deviceId, "anchor"),
       ));
     }
+
+    this.#disposers.push(registerPlannedAnchorTrustReconciliationService(
+      this.services,
+      {
+        store: options.bootstrapStore,
+        authorizePeer: (deviceId) => this.#control.currentTrust().members.some((member) =>
+          member.device.deviceId === deviceId && member.state === "active"),
+      },
+    ));
 
     this.#control = new ProductionMeshControlPlane({
       localIdentity: options.authority.identityKey,
@@ -638,6 +654,21 @@ export class MeshRuntimeAssembly {
         await fulfillConnectionLifetimeObligation({
           connectionClosed: connection.closed,
           attempt: async () => {
+            if (this.#control.currentTrust().members.some((member) =>
+              member.device.deviceId === connection.peer.deviceId &&
+              member.state === "active")) {
+              const reconciled = await reconcilePlannedAnchorTrustFromPeer(
+                this.connections.client(connection.peer.deviceId),
+                {
+                  store: options.bootstrapStore,
+                  localDeviceId: options.authority.deviceId,
+                },
+              );
+              await this.#control.reconcileTrust(reconciled);
+            }
+            await this.#plannedTransferRuntime.run(async () => {
+              await this.#plannedAnchorOwner?.recoverBeforeAdmission();
+            });
             await this.#finalizePairingBootstrap(connection.peer.deviceId);
             await this.#adoptLocalConversations(connection.peer.deviceId);
           },
@@ -664,14 +695,14 @@ export class MeshRuntimeAssembly {
     }
     return this.options.authority.executorResourceGovernor.flushAssignment(
       assignmentId,
-      this.#composition.usageIntake(this.options.trust.issuer.deviceId),
+      this.#composition.usageIntake(this.#currentAnchorDeviceId()),
       (report) => usageReporterContext(report.reporterId, report.digest),
     );
   }
 
   /** Executor role 组合根用它绑定 owner submission；mesh 本身不持有 worker 生命周期。 */
   submissionForAnchor(): JobSubmissionOwner {
-    return this.#composition.submissionPort(this.options.trust.issuer.deviceId);
+    return this.#composition.submissionPort(this.#currentAnchorDeviceId());
   }
 
   globalQueryForAnchor(
@@ -679,7 +710,7 @@ export class MeshRuntimeAssembly {
     anchorEpoch: number,
   ): import("@zhixing/core/contracts").AssignmentGlobalQueryPort {
     return this.#composition.globalQueryPort(
-      this.options.trust.issuer.deviceId,
+      this.#currentAnchorDeviceId(),
       capability,
       anchorEpoch,
     );
@@ -724,21 +755,45 @@ export class MeshRuntimeAssembly {
     );
   }
 
-  plannedAnchorTargets(): readonly {
+  async plannedAnchorTargets(): Promise<readonly {
     readonly deviceId: string;
     readonly displayName: string;
-  }[] {
+    readonly ready: boolean;
+    readonly code?: "unavailable";
+  }[]> {
     if (!this.#plannedAnchorOwner) return [];
-    return this.#control.currentTrust().members
-      .filter((member) =>
-        member.state === "active" &&
-        member.device.deviceId !== this.options.authority.deviceId &&
-        member.roles.includes("anchor"))
-      .map((member) => ({
-        deviceId: member.device.deviceId,
-        displayName: member.device.displayName,
-      }))
-      .sort((left, right) => left.displayName.localeCompare(right.displayName));
+    return this.#plannedTransferRuntime.run(async () => {
+      const sourceDeviceId = this.#currentAnchorDeviceId();
+      const candidates = this.#control.currentTrust().members
+        .filter((member) =>
+          member.state === "active" &&
+          member.device.deviceId !== this.options.authority.deviceId &&
+          member.roles.includes("anchor"))
+        .sort((left, right) =>
+          left.device.displayName.localeCompare(right.device.displayName, "zh-CN"));
+      return Promise.all(candidates.map(async (member) => {
+        try {
+          await new PlannedAnchorTransferMeshClient(
+            this.connections.client(member.device.deviceId),
+            sourceDeviceId,
+            member.device.deviceId,
+            this.options.authority.verifier,
+          ).summary();
+          return Object.freeze({
+            deviceId: member.device.deviceId,
+            displayName: member.device.displayName,
+            ready: true,
+          });
+        } catch {
+          return Object.freeze({
+            deviceId: member.device.deviceId,
+            displayName: member.device.displayName,
+            ready: false,
+            code: "unavailable" as const,
+          });
+        }
+      }));
+    });
   }
 
   preparePlannedAnchorTransfer(input: {
@@ -748,7 +803,7 @@ export class MeshRuntimeAssembly {
   }) {
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
-    return owner.prepare(input);
+    return this.#plannedTransferRuntime.run(() => owner.prepare(input));
   }
 
   fencePlannedAnchorTransfer(input: {
@@ -757,7 +812,7 @@ export class MeshRuntimeAssembly {
   }) {
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
-    return owner.fence(input);
+    return this.#plannedTransferRuntime.run(() => owner.fence(input));
   }
 
   async commitPlannedAnchorTransfer(input: {
@@ -766,8 +821,10 @@ export class MeshRuntimeAssembly {
   }) {
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
-    await owner.freeze(input);
-    return owner.commit(input);
+    return this.#plannedTransferRuntime.run(async () => {
+      await owner.freeze(input);
+      return owner.commit(input);
+    });
   }
 
   abortPlannedAnchorTransfer(input: {
@@ -776,7 +833,8 @@ export class MeshRuntimeAssembly {
   }) {
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
-    return owner.abort({ ...input, reason: "operator-cancelled" });
+    return this.#plannedTransferRuntime.run(() =>
+      owner.abort({ ...input, reason: "operator-cancelled" }));
   }
 
   bindAuthorityCheckpointOwner(owner: AuthorityCheckpointOwnerPort | undefined): void {
@@ -791,7 +849,10 @@ export class MeshRuntimeAssembly {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
-      await this.#plannedAnchorOwner?.recoverBeforeAdmission();
+      await this.#plannedTransferRuntime.run(async () => {
+        await this.#plannedAnchorTarget?.recoverBeforeAdmission();
+        await this.#plannedAnchorOwner?.recoverBeforeAdmission();
+      });
       await this.#restoreCommittedTransfers();
       await this.#control.start();
       await this.#worker?.recover();
@@ -807,6 +868,7 @@ export class MeshRuntimeAssembly {
     this.#closed = true;
     this.#started = false;
     this.#transferAbort.abort(new Error("Conversation transfer runtime is stopping"));
+    await this.#plannedTransferRuntime.close();
     this.#worker?.stopAccepting();
     await this.#control.stop();
     await this.#worker?.close();
@@ -976,7 +1038,7 @@ export class MeshRuntimeAssembly {
     }
     if (grant.direction === "owner-to-executor") {
       if (
-        grant.sourceDeviceId !== this.options.trust.issuer.deviceId ||
+        grant.sourceDeviceId !== this.#currentAnchorDeviceId() ||
         activation.signature.keyId !== grant.sourceDeviceId ||
         capability.signature.keyId !== grant.sourceDeviceId ||
         capability.executorId !== executorIdForDevice(grant.targetDeviceId) ||
@@ -993,7 +1055,7 @@ export class MeshRuntimeAssembly {
       return;
     }
     if (
-      grant.targetDeviceId !== this.options.trust.issuer.deviceId ||
+      grant.targetDeviceId !== this.#currentAnchorDeviceId() ||
       activation.signature.keyId !== grant.targetDeviceId ||
       capability.signature.keyId !== grant.targetDeviceId ||
       capability.executorId !== executorIdForDevice(grant.sourceDeviceId) ||
@@ -1096,6 +1158,8 @@ export class MeshRuntimeAssembly {
           );
         },
         artifacts: this.options.authority.artifacts,
+        retention: this.options.authority.checkpointRetention,
+        storageMaintenance: this.options.authority.storageMaintenance,
         ensureRecoveryCheckpoint: (transferId) =>
           this.#ensureRecoveryCheckpoint(transferId),
         lifecycle: {
@@ -1103,6 +1167,10 @@ export class MeshRuntimeAssembly {
           drainAccepted: () => this.#requirePlannedAnchorLifecycle().drainAccepted(),
           resumeAfterAbort: () => this.#requirePlannedAnchorLifecycle().resumeAfterAbort(),
         },
+        onSourceCommitted: (targetDeviceId) => {
+          this.#plannedCommittedTargetDeviceId = targetDeviceId;
+        },
+        onCommitted: (record) => this.#control.reconcileTrust(record),
       });
       this.#disposePlannedAnchorSource = registerPlannedAnchorTransferSourceMeshService(
         this.services,
@@ -1114,6 +1182,7 @@ export class MeshRuntimeAssembly {
             return member?.state === "active" && member.roles.includes("anchor");
           },
           verifier: this.options.authority.verifier,
+          lifecycle: this.#plannedTransferRuntime,
         },
       );
       return;
@@ -1161,8 +1230,13 @@ export class MeshRuntimeAssembly {
         targetDeviceId: this.options.authority.deviceId,
         currentSourceDeviceId: () => this.#control.currentTrust().issuer.deviceId,
         verifier: this.options.authority.verifier,
+        lifecycle: this.#plannedTransferRuntime,
       },
     );
+  }
+
+  currentAnchorDeviceId(): string {
+    return this.#currentAnchorDeviceId();
   }
 
   #requirePlannedAnchorLifecycle(): PlannedAnchorTransferLifecycle {
@@ -1251,7 +1325,7 @@ export class MeshRuntimeAssembly {
     const owner = this.options.localConversationOwner;
     if (
       !owner ||
-      peerDeviceId !== this.options.trust.issuer.deviceId ||
+      peerDeviceId !== this.#currentAnchorDeviceId() ||
       !this.#peerHasRole(peerDeviceId, "anchor")
     ) {
       return;
@@ -1349,6 +1423,11 @@ export class MeshRuntimeAssembly {
       member.device.deviceId === deviceId &&
       member.state === "active" &&
       member.roles.includes(role));
+  }
+
+  #currentAnchorDeviceId(): string {
+    return this.#plannedCommittedTargetDeviceId ??
+      this.#control.currentTrust().issuer.deviceId;
   }
 }
 

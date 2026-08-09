@@ -95,6 +95,8 @@ export interface ServerShutdownRequest {
 export interface DutyMigrationTarget {
   deviceId: string;
   displayName: string;
+  ready: boolean;
+  code?: "unavailable";
 }
 
 export class RpcManagementFacade {
@@ -204,10 +206,10 @@ export class RpcManagementFacade {
 
   async dutyMigrationTargets(): Promise<DutyMigrationTarget[]> {
     const client = await this.link.getClient();
-    const result = await client.request<{ devices: DutyMigrationTarget[] }>(
+    const result = await client.request<unknown>(
       "dutyMigration.targets",
     );
-    return result.devices;
+    return decodeDutyMigrationTargets(result);
   }
 
   async dutyMigrationPrepare(input: {
@@ -288,4 +290,43 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("aborted");
+}
+
+function decodeDutyMigrationTargets(input: unknown): DutyMigrationTarget[] {
+  if (!isPlainRecord(input) || !hasExactKeys(input, ["devices"]) || !Array.isArray(input.devices)) {
+    throw new TypeError("Duty-device migration target response is invalid");
+  }
+  return input.devices.map((candidate) => {
+    if (!isPlainRecord(candidate)) {
+      throw new TypeError("Duty-device migration target must be an object");
+    }
+    const keys = candidate.code === undefined
+      ? ["deviceId", "displayName", "ready"]
+      : ["code", "deviceId", "displayName", "ready"];
+    if (
+      !hasExactKeys(candidate, keys) ||
+      typeof candidate.deviceId !== "string" ||
+      typeof candidate.displayName !== "string" ||
+      typeof candidate.ready !== "boolean" ||
+      (candidate.code !== undefined && candidate.code !== "unavailable")
+    ) {
+      throw new TypeError("Duty-device migration target fields are invalid");
+    }
+    return Object.freeze({
+      deviceId: candidate.deviceId,
+      displayName: candidate.displayName,
+      ready: candidate.ready,
+      ...(candidate.code === undefined ? {} : { code: candidate.code }),
+    });
+  });
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
 }

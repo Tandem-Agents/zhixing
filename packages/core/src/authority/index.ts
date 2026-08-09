@@ -87,6 +87,7 @@ export {
   FileAuthorityCommitLog,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type FileAuthorityCommitLogOptions,
+  type PlannedAnchorPrefixInstallation,
 } from "./commit-log.js";
 export {
   AuthorityStorageError,

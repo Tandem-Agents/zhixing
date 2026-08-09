@@ -141,7 +141,7 @@ describe("server.shutdown", () => {
 describe("dutyMigration.*", () => {
   it("只暴露用户可理解的目标和阶段，并原样绑定稳定请求身份", async () => {
     const targets = vi.fn(async () => [
-      { deviceId: "device-ready", displayName: "客厅主机" },
+      { deviceId: "device-ready", displayName: "客厅主机", ready: true },
     ]);
     const prepare = vi.fn(async () => ({ stage: "ready" as const }));
     const commit = vi.fn(async () => ({ stage: "completed" as const }));
@@ -153,7 +153,7 @@ describe("dutyMigration.*", () => {
     };
 
     await expect(buildDutyMigrationTargetsMethod().handler({}, ctx)).resolves.toEqual({
-      devices: [{ deviceId: "device-ready", displayName: "客厅主机" }],
+      devices: [{ deviceId: "device-ready", displayName: "客厅主机", ready: true }],
     });
     await expect(buildDutyMigrationPrepareMethod().handler(
       { ...identity, targetDeviceId: "device-ready" },

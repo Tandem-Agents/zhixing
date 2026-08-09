@@ -1184,11 +1184,13 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const server = byPath.get("packages/server/src/rpc/methods/server.ts");
   const facade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
   const product = byPath.get("packages/cli/src/runtime/duty-migration-command.ts");
+  const firstParty = byPath.get("packages/cli/src/serve/first-party-conversation-mesh.ts");
   const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
+  const setup = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
-    !accessRoot || !executorRoot
+    !accessRoot || !executorRoot || !setup || !firstParty
   ) {
     return ["planned anchor transfer production assembly sources are missing"];
   }
@@ -1205,6 +1207,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     targetPhases: ["prepare", "status", "freeze", "import", "commit", "abort"],
     sourcePhases: ["probe", "read-range"],
     order: ["ready", "prepare", "freeze", "import", "commit"],
+    trustReconciliation: "single-planned-issuer-transition",
+    readinessReservation: "target-lifecycle",
   };
   if (
     JSON.stringify(descriptor) !== JSON.stringify(expectedDescriptor) ||
@@ -1249,17 +1253,72 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   ) {
     failures.push("planned anchor transfer owner/receiver topology exact-set drifted");
   }
+  if (
+    count(accessRoot, "ctx.meshRuntime?.currentAnchorDeviceId()") !== 2 ||
+    count(executorRoot, "mesh?.currentAnchorDeviceId()") !== 1 ||
+    count(assembly, "currentSourceDeviceId: () => this.#control.currentTrust().issuer.deviceId") !== 1 ||
+    count(assembly, "this.#plannedCommittedTargetDeviceId ??") !== 1 ||
+    count(assembly, "this.#plannedCommittedTargetDeviceId = targetDeviceId") !== 1 ||
+    count(transfer, "this.options.onSourceCommitted?.(state.identity.targetDeviceId)") !== 3
+  ) {
+    failures.push("planned anchor transfer current-owner resolver exact-set drifted");
+  }
+  const forwardedMethods = [
+    "session.new",
+    "dutyMigration.targets",
+    "dutyMigration.prepare",
+    "dutyMigration.commit",
+    "dutyMigration.cancel",
+  ];
+  if (
+    count(command, "conversationRpc: new CurrentAnchorFirstPartyRpcRouter({") !== 1 ||
+    count(firstParty, "export class CurrentAnchorFirstPartyRpcRouter") !== 1 ||
+    count(firstParty, "const current = this.input.currentAnchorDeviceId()") !== 1 ||
+    count(firstParty, "result: await remote.dispatch(input.method, input.params, input.connection)") !== 1 ||
+    forwardedMethods.some((method) => count(firstParty, `  "${method}",`) !== 1) ||
+    !assembly.includes('this.#peerHasRole(deviceId, "executor") ||') ||
+    !assembly.includes('this.#peerHasRole(deviceId, "anchor")')
+  ) {
+    failures.push("planned anchor transfer first-party current-owner relay drifted");
+  }
 
-  const recovery = assembly.indexOf("await this.#plannedAnchorOwner?.recoverBeforeAdmission()");
+  const recoveryCall = "await this.#plannedAnchorOwner?.recoverBeforeAdmission()";
+  const targetRecoveryCall = "await this.#plannedAnchorTarget?.recoverBeforeAdmission()";
+  const connectionRecoveryGate = /this\.\#plannedTransferRuntime\.run\(async \(\) => \{\s+await this\.\#plannedAnchorOwner\?\.recoverBeforeAdmission\(\);\s+\}\)/;
+  const startupRecoveryGate = /this\.\#plannedTransferRuntime\.run\(async \(\) => \{\s+await this\.\#plannedAnchorTarget\?\.recoverBeforeAdmission\(\);\s+await this\.\#plannedAnchorOwner\?\.recoverBeforeAdmission\(\);\s+\}\)/;
+  const recovery = assembly.lastIndexOf(recoveryCall);
+  const targetRecovery = assembly.indexOf(targetRecoveryCall);
   const admission = assembly.indexOf("await this.#control.start()", recovery);
+  const reconcile = assembly.indexOf("await reconcilePlannedAnchorTrustFromPeer(");
+  const connectionRecovery = assembly.indexOf(
+    recoveryCall,
+    reconcile,
+  );
   const freeze = assembly.indexOf("await owner.freeze(input)");
   const commitCall = assembly.indexOf("return owner.commit(input)", freeze);
   if (
-    recovery < 0 || admission < recovery || freeze < 0 || commitCall < freeze ||
-    !transfer.includes("await this.options.onInstalled?.(trustRecord)") ||
+    count(assembly, recoveryCall) !== 2 || count(assembly, targetRecoveryCall) !== 1 ||
+    !connectionRecoveryGate.test(assembly) || !startupRecoveryGate.test(assembly) ||
+    targetRecovery < 0 || targetRecovery > recovery || recovery < 0 || admission < recovery || reconcile < 0 ||
+    connectionRecovery < reconcile || freeze < 0 || commitCall < freeze ||
+    count(assembly, "registerPlannedAnchorTrustReconciliationService(") !== 1 ||
+    count(assembly, "reconcilePlannedAnchorTrustFromPeer(") !== 1 ||
+    !transfer.includes("await this.options.onInstalled?.(record)") ||
     !assembly.includes("await this.#control.reconcileTrust(record)")
   ) {
     failures.push("planned anchor transfer recovery/commit/admission order drifted");
+  }
+
+  if (
+    count(setup, "const plannedAnchorReadiness = createPlannedAnchorReadinessCoordinator(") !== 1 ||
+    count(setup, "plannedAnchorReadiness: plannedAnchorReadiness.port") !== 1 ||
+    count(setup, "plannedAnchorReadiness.runRevisionChange(") !== 1 ||
+    count(assembly, "readiness: this.options.authority.plannedAnchorReadiness") !== 1 ||
+    count(transfer, "this.options.readiness.reserve({") !== 3 ||
+    count(transfer, "this.options.readiness.release(") !== 3 ||
+    count(mesh, "options.lifecycle.run(() => target.") !== 3
+  ) {
+    failures.push("planned anchor transfer readiness reservation assembly drifted");
   }
 
   const publicMethods = [
@@ -1279,6 +1338,18 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     !product.includes("后续操作将由新设备处理")
   ) {
     failures.push("planned anchor transfer public journey or canonical RPC exact-set drifted");
+  }
+  const targetsStart = assembly.indexOf("async plannedAnchorTargets(): Promise");
+  const targetsEnd = assembly.indexOf("preparePlannedAnchorTransfer(input:", targetsStart);
+  const targetsBlock = targetsStart >= 0 && targetsEnd > targetsStart
+    ? assembly.slice(targetsStart, targetsEnd)
+    : "";
+  if (
+    count(targetsBlock, "this.#plannedTransferRuntime.run(") !== 1 ||
+    count(product, "const transferId = createDutyMigrationTransferId();") !== 1 ||
+    !product.includes("return `xfer-${encoded}`;")
+  ) {
+    failures.push("planned anchor transfer stop gate or strict product identity drifted");
   }
   const publicText = [...product.matchAll(
     /(?:console\.log|TypeError)\((?:`([^`]*)`|"([^"]*)"|'([^']*)')/gu,

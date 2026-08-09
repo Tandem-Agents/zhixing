@@ -8,6 +8,13 @@ import type {
   Signature,
 } from "@zhixing/core/contracts";
 import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
+import {
+  currentMaintenanceAbortSignal,
+  DefaultDeviceCapacityArbiter,
+  DefaultStorageMaintenanceGovernor,
+  type DeviceCapacityPolicy,
+  type StorageMaintenanceGovernorPort,
+} from "@zhixing/core/resources";
 import type { SecureMeshConnection } from "@zhixing/mesh";
 import type {
   MeshServiceDefinition,
@@ -24,13 +31,20 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   FilePlannedAnchorTransferJournal,
   PlannedAnchorTransferOwner,
+  PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
   type PlannedAnchorTransferTargetPort,
 } from "./planned-anchor-transfer.js";
 import {
   PlannedAnchorTransferMeshClient,
+  reconcilePlannedAnchorTrustFromPeer,
+  registerPlannedAnchorTrustReconciliationService,
   registerPlannedAnchorTransferMeshServices,
 } from "./planned-anchor-transfer-mesh.js";
+import {
+  createPlannedAnchorReadinessCoordinator,
+  type PlannedAnchorReadySnapshot,
+} from "../setup-delivery.js";
 
 const roots: string[] = [];
 const NOW = Date.now();
@@ -120,6 +134,7 @@ describe("planned anchor transfer prepared phase", () => {
       verifier: fixture.verifier,
       targetFor: () => client,
       artifacts: fixture.sourceStore.artifactStore(),
+      retention: fixture.sourceStore.checkpointRetention(),
       ensureRecoveryCheckpoint: async () => digest("mesh-recovery"),
       lifecycle: noOpLifecycle(),
     });
@@ -144,7 +159,10 @@ describe("planned anchor transfer prepared phase", () => {
     });
     fixture.onDrain.current = async () => {
       await fixture.sourceStore.authorityLog().append([
-        { stream: "run:test", body: { accepted: true } },
+        {
+          stream: "control",
+          body: { t: "confirmation-requested", requestId: "confirm-accepted" },
+        },
       ]);
     };
 
@@ -155,6 +173,24 @@ describe("planned anchor transfer prepared phase", () => {
 
     expect((await fixture.sourceJournal.state(TRANSFER_ID))?.phase).toBe("fenced");
     expect(checkpoint).toEqual(await fixture.sourceStore.authorityLog().checkpoint());
+    const closureRecord = (await fixture.sourceStore.authorityLog()
+      .readStream<Record<string, unknown>>("transfer:anchor-closure")).at(-1)?.body;
+    const closureRef = closureRecord?.closure as { digest: string; bytes: number };
+    const closure = JSON.parse(Buffer.from(
+      await fixture.sourceStore.artifactStore().get(closureRef),
+    ).toString("utf8")) as {
+      acceptedTokens: unknown[];
+      pendingObligations: unknown[];
+    };
+    expect(closure.pendingObligations).toEqual([
+      { kind: "confirmation", id: "confirm-accepted" },
+    ]);
+    expect(closure.acceptedTokens).toEqual([{
+      transferId: TRANSFER_ID,
+      kind: "confirmation",
+      id: "confirm-accepted",
+      requestId: "planned-accepted:confirmation:confirm-accepted",
+    }]);
     await expect(fixture.sourceStore.authorityLog().append([
       { stream: "run:test", body: { fresh: true } },
     ])).rejects.toThrow("frozen authority writes");
@@ -164,6 +200,27 @@ describe("planned anchor transfer prepared phase", () => {
     await expect(fixture.sourceStore.authorityLog().append([
       { stream: "control", body: { fresh: true } },
     ])).rejects.toThrow("frozen authority writes");
+  }, 10_000);
+
+  it("linearizes the source append fence after accepted writes and before fresh writes", async () => {
+    const fixture = await createFixture();
+    const log = fixture.sourceStore.authorityLog();
+    const accepted = log.append([
+      { stream: "control", body: { requestId: "accepted-before-fence" } },
+    ]);
+    const install = log.installAppendAdmissionGuard(() => {
+      throw new Error("planned source fence rejects fresh authority writes");
+    });
+    const fresh = log.append([
+      { stream: "control", body: { requestId: "fresh-after-fence" } },
+    ]);
+
+    await expect(accepted).resolves.toBeDefined();
+    const dispose = await install;
+    await expect(fresh).rejects.toThrow("rejects fresh authority writes");
+    expect((await log.readStream<{ requestId: string }>("control")).map((entry) =>
+      entry.body.requestId)).toContain("accepted-before-fence");
+    dispose();
   });
 
   it("exports one catalog-bound prefix and imports it only into target-private staging", async () => {
@@ -195,8 +252,14 @@ describe("planned anchor transfer prepared phase", () => {
 
   it("commits once on the source and atomically installs the migrated authority on the target", async () => {
     const fixture = await createFixture();
+    const retainedBytes = Buffer.from("shared-retained-authority", "utf8");
+    const retainedRef = await fixture.sourceStore.artifactStore().put(retainedBytes);
+    await fixture.targetStore.artifactStore().put(retainedBytes);
     await fixture.sourceStore.authorityLog().append([
-      { stream: "control", body: { t: "test-authority-base", value: "preserved" } },
+      {
+        stream: "control",
+        body: { t: "test-authority-base", value: "preserved", retainedRef },
+      },
     ]);
     await fixture.owner.prepare({
       requestId: "request-commit",
@@ -230,12 +293,90 @@ describe("planned anchor transfer prepared phase", () => {
     ))?.publicKey).toBe(committed.readyProof.targetIssuerPublicKey);
     expect(await fixture.targetStore.artifactStore().has(imported.checkpoint!)).toBe(true);
     expect(await fixture.targetStore.artifactStore().has(imported.catalogRef!)).toBe(true);
+    expect(imported.catalog?.retainedArtifacts).toContainEqual(retainedRef);
+    expect(await fixture.targetStore.artifactStore().has(retainedRef)).toBe(true);
     expect((await fixture.targetStore.authorityLog().readStream("control"))
       .some((entry) => (entry.body as { t?: string }).t === "test-authority-base"))
       .toBe(true);
     await expect(fixture.sourceStore.authorityLog().append([
       { stream: "control", body: { staleSource: true } },
     ])).rejects.toThrow("frozen authority writes");
+  }, 10_000);
+
+  it("holds the target readiness revision across the source commit window", async () => {
+    const fixture = await createFixture();
+    await fixture.owner.prepare({
+      requestId: "request-reservation",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    await fixture.owner.freeze({
+      requestId: "request-reservation",
+      transferId: TRANSFER_ID,
+    });
+    await fixture.target.ready({
+      transferId: TRANSFER_ID,
+      sourceDeviceId: fixture.sourceKey.deviceId,
+    });
+
+    const restartedReadiness = createPlannedAnchorReadinessCoordinator(async () =>
+      fixture.readinessSnapshot.current);
+    const restartedTarget = fixture.createTarget(restartedReadiness.port);
+    await restartedTarget.recoverBeforeAdmission();
+    await expect(restartedReadiness.runRevisionChange(async () => {}))
+      .rejects.toThrow("reserved by a duty-device migration");
+
+    await expect(fixture.readiness.runRevisionChange(async () => {
+      fixture.readinessSnapshot.current = {
+        ...fixture.readinessSnapshot.current,
+        assetRevision: "assets-v2",
+      };
+    })).rejects.toThrow("reserved by a duty-device migration");
+    expect(fixture.readinessSnapshot.current.assetRevision).toBe("assets-v1");
+
+    await fixture.owner.commit({
+      requestId: "request-reservation",
+      transferId: TRANSFER_ID,
+    });
+    await fixture.readiness.runRevisionChange(async () => {
+      fixture.readinessSnapshot.current = {
+        ...fixture.readinessSnapshot.current,
+        assetRevision: "assets-v2",
+      };
+    });
+    expect(fixture.readinessSnapshot.current.assetRevision).toBe("assets-v2");
+  }, 10_000);
+
+  it("checks ready-proof expiry inside the source commit transaction", async () => {
+    const fixture = await createFixture();
+    let sourceNow = AT;
+    const expiringTarget: PlannedAnchorTransferTargetPort = {
+      summary: () => fixture.target.summary(),
+      ready: async (input) => {
+        const proof = await fixture.target.ready(input);
+        sourceNow = proof.expiresAt;
+        return proof;
+      },
+      apply: (command) => fixture.target.apply(command),
+    };
+    const owner = fixture.createOwner(expiringTarget, () => sourceNow);
+    await owner.prepare({
+      requestId: "request-expiry",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    await owner.freeze({ requestId: "request-expiry", transferId: TRANSFER_ID });
+
+    await expect(owner.commit({
+      requestId: "request-expiry",
+      transferId: TRANSFER_ID,
+    })).rejects.toThrow("expired before source commit");
+    expect((await fixture.sourceJournal.state(TRANSFER_ID))?.phase).toBe("imported");
+    await expect(owner.abort({
+      requestId: "request-expiry",
+      transferId: TRANSFER_ID,
+      reason: "target-rejected",
+    })).resolves.toMatchObject({ phase: "aborted" });
   });
 
   it("durably cancels before commit, clears private state, and reopens the source", async () => {
@@ -263,8 +404,10 @@ describe("planned anchor transfer prepared phase", () => {
 
   it("keeps the source fenced and replays forward after a lost target commit response", async () => {
     const fixture = await createFixture();
+    const committedTargets: string[] = [];
     let loseCommitResponse = true;
     const lossyTarget: PlannedAnchorTransferTargetPort = {
+      summary: () => fixture.target.summary(),
       ready: (input) => fixture.target.ready(input),
       apply: async (command) => {
         const result = await fixture.target.apply(command);
@@ -275,7 +418,11 @@ describe("planned anchor transfer prepared phase", () => {
         return result;
       },
     };
-    const owner = fixture.createOwner(lossyTarget);
+    const owner = fixture.createOwner(
+      lossyTarget,
+      undefined,
+      (targetDeviceId) => committedTargets.push(targetDeviceId),
+    );
     await owner.prepare({
       requestId: "request-recover",
       transferId: TRANSFER_ID,
@@ -288,9 +435,16 @@ describe("planned anchor transfer prepared phase", () => {
     })).rejects.toThrow("simulated response loss");
     expect((await fixture.sourceJournal.state(TRANSFER_ID))?.phase).toBe("committed");
     expect((await fixture.target.state(TRANSFER_ID))?.phase).toBe("committed");
+    expect(committedTargets).toEqual([fixture.targetKey.deviceId]);
 
-    const restarted = fixture.createOwner();
+    const recoveredTargets: string[] = [];
+    const restarted = fixture.createOwner(
+      fixture.target,
+      undefined,
+      (targetDeviceId) => recoveredTargets.push(targetDeviceId),
+    );
     await restarted.recoverBeforeAdmission();
+    expect(recoveredTargets).toContain(fixture.targetKey.deviceId);
     await expect(restarted.commit({
       requestId: "request-recover",
       transferId: TRANSFER_ID,
@@ -300,19 +454,131 @@ describe("planned anchor transfer prepared phase", () => {
       transferId: TRANSFER_ID,
       reason: "operator-cancelled",
     })).rejects.toThrow("only move forward");
+  }, 10_000);
+
+  it("does not hold target capacity while a fixed artifact range waits on the network", async () => {
+    const targetGovernor = governor();
+    const fixture = await createFixture({ targetStorageMaintenance: targetGovernor });
+    await fixture.owner.prepare({
+      requestId: "request-capacity",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    let releaseNetwork!: () => void;
+    const network = new Promise<void>((resolve) => {
+      releaseNetwork = resolve;
+    });
+    let enteredNetwork!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredNetwork = resolve;
+    });
+    fixture.sourceArtifactCommand.current = async (command) => {
+      enteredNetwork();
+      await network;
+      return fixture.owner.applyArtifactCommand(command);
+    };
+
+    const freezing = fixture.owner.freeze({
+      requestId: "request-capacity",
+      transferId: TRANSFER_ID,
+    });
+    await entered;
+    expect(targetGovernor.snapshot().inFlight["authority-checkpoint"] ?? 0).toBe(0);
+    releaseNetwork();
+    await freezing;
+    expect(targetGovernor.snapshot().inFlight["authority-checkpoint"] ?? 0).toBe(0);
+  });
+
+  it("closes the planned runtime once, cancels in-flight I/O and rejects later work", async () => {
+    const lifecycle = new PlannedAnchorTransferRuntimeLifecycle();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const running = lifecycle.run(async () => {
+      const signal = currentMaintenanceAbortSignal();
+      entered();
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    await started;
+    const first = lifecycle.close();
+    const replay = lifecycle.close();
+    expect(replay).toBe(first);
+    await expect(running).rejects.toThrow("stopping");
+    await expect(first).resolves.toBeUndefined();
+    await expect(lifecycle.run(async () => undefined)).rejects.toThrow("stopping");
+  });
+
+  it("reconciles one missed planned issuer transition to a stale active peer", async () => {
+    const fixture = await createFixture();
+    await fixture.owner.prepare({
+      requestId: "request-peer",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    await fixture.owner.freeze({ requestId: "request-peer", transferId: TRANSFER_ID });
+    await fixture.owner.commit({ requestId: "request-peer", transferId: TRANSFER_ID });
+
+    const definitions = new Map<string, MeshServiceDefinition>();
+    const registry = {
+      register(serviceId: string, definition: MeshServiceDefinition) {
+        definitions.set(serviceId, definition);
+        return () => definitions.delete(serviceId);
+      },
+    } as MeshServiceRegistry;
+    registerPlannedAnchorTrustReconciliationService(registry, {
+      store: fixture.targetStore,
+      authorizePeer: (deviceId) => deviceId === fixture.peerKey.deviceId,
+    });
+    const connection = {
+      peer: { deviceId: fixture.peerKey.deviceId },
+    } as unknown as SecureMeshConnection;
+    const client = {
+      request: async (serviceId: string, payload: Uint8Array) => {
+        const service = definitions.get(serviceId);
+        if (!service || service.authorize?.(connection) === false) {
+          throw new Error("unauthorized test service");
+        }
+        return service.handler(payload, connection, new AbortController().signal);
+      },
+    };
+
+    const first = await reconcilePlannedAnchorTrustFromPeer(client, {
+      store: fixture.peerStore,
+      localDeviceId: fixture.peerKey.deviceId,
+    });
+    const replay = await reconcilePlannedAnchorTrustFromPeer(client, {
+      store: fixture.peerStore,
+      localDeviceId: fixture.peerKey.deviceId,
+    });
+    expect(first.issuer.deviceId).toBe(fixture.targetKey.deviceId);
+    expect(replay).toEqual(first);
+    expect((await fixture.peerStore.loadTrustEvents()).at(-1)?.body).toMatchObject({
+      t: "issuer-transition",
+      reason: "migration",
+      toDeviceId: fixture.targetKey.deviceId,
+    });
   });
 });
 
-async function createFixture() {
+async function createFixture(options: {
+  readonly sourceStorageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly targetStorageMaintenance?: StorageMaintenanceGovernorPort;
+} = {}) {
   const sourceRoot = await temporary("anchor-source-");
   const targetRoot = await temporary("anchor-target-");
   const sourceKey = await DeviceKey.generate();
   const targetKey = await DeviceKey.generate();
+  const peerKey = await DeviceKey.generate();
   const identities = new Map<string, DeviceIdentity>();
   const sourceIdentity = enroll(sourceKey, "source");
   const targetIdentity = enroll(targetKey, "target");
+  const peerIdentity = enroll(peerKey, "peer");
   identities.set(sourceIdentity.deviceId, sourceIdentity);
   identities.set(targetIdentity.deviceId, targetIdentity);
+  identities.set(peerIdentity.deviceId, peerIdentity);
   const verifier: ProtocolSignatureVerifier = {
     verify: (schemaId: string, version: number, payload: unknown, signature: Signature) => {
       const identity = identities.get(signature.keyId);
@@ -322,6 +588,8 @@ async function createFixture() {
   };
   const sourceStore = new FileMeshBootstrapStore(sourceRoot, sourceKey);
   const targetStore = new FileMeshBootstrapStore(targetRoot, targetKey);
+  const peerRoot = await temporary("anchor-peer-");
+  const peerStore = new FileMeshBootstrapStore(peerRoot, peerKey);
   let initialized = await sourceStore.initializeLocalHome({
     key: sourceKey,
     identity: sourceIdentity,
@@ -335,8 +603,18 @@ async function createFixture() {
     at: AT,
     body: { t: "enroll", device: targetIdentity, roles: ["anchor"] },
   });
-  const sourceTrust = await sourceStore.appendTrustEvent({
+  let sourceTrust = await sourceStore.appendTrustEvent({
     event: enrollTarget,
+    issuerKey: sourceKey,
+  });
+  const enrollPeer = createSignedTrustEvent({
+    current: sourceTrust,
+    signer: sourceKey,
+    at: AT,
+    body: { t: "enroll", device: peerIdentity, roles: ["executor"] },
+  });
+  sourceTrust = await sourceStore.appendTrustEvent({
+    event: enrollPeer,
     issuerKey: sourceKey,
   });
   await targetStore.importTrustBootstrap({
@@ -344,9 +622,30 @@ async function createFixture() {
     record: (await sourceStore.loadTrustRecord())!,
     localDeviceId: targetKey.deviceId,
   });
+  await peerStore.importTrustBootstrap({
+    events: await sourceStore.loadTrustEvents(),
+    record: (await sourceStore.loadTrustRecord())!,
+    localDeviceId: peerKey.deviceId,
+  });
   const secrets = new MemoryStore();
+  const readinessSnapshot: { current: PlannedAnchorReadySnapshot } = {
+    current: {
+      configuredCapabilities: { providers: [], mcpServers: [], channels: [] },
+      protocolRevision: "protocol-v1",
+      assetRevision: "assets-v1",
+      serviceRevision: "services-v1",
+    },
+  };
+  const readiness = createPlannedAnchorReadinessCoordinator(async () =>
+    readinessSnapshot.current);
   let owner!: PlannedAnchorTransferOwner;
-  const target = new PlannedAnchorTransferTarget({
+  const sourceArtifactCommand = {
+    current: (command: Parameters<PlannedAnchorTransferOwner["applyArtifactCommand"]>[0]) =>
+      owner.applyArtifactCommand(command),
+  };
+  const createTarget = (
+    readinessPort: import("../setup-delivery.js").PlannedAnchorReadinessPort = readiness.port,
+  ) => new PlannedAnchorTransferTarget({
     deviceId: targetKey.deviceId,
     identityKey: targetKey,
     secretStore: secrets,
@@ -354,19 +653,20 @@ async function createFixture() {
     authorityLog: targetStore.authorityLog(),
     artifacts: targetStore.artifactStore(),
     stagingRoot: path.join(targetRoot, "anchor-transfer-staging"),
-    sourceFor: () => ({ applyArtifactCommand: (command) => owner.applyArtifactCommand(command) }),
+    sourceFor: () => ({ applyArtifactCommand: (command) => sourceArtifactCommand.current(command) }),
+    storageMaintenance: options.targetStorageMaintenance,
     signer: targetKey,
     verifier,
-    readiness: async () => ({
-      configuredCapabilities: { providers: [], mcpServers: [], channels: [] },
-      protocolRevision: "protocol-v1",
-      assetRevision: "assets-v1",
-      serviceRevision: "services-v1",
-    }),
+    readiness: readinessPort,
     now: () => NOW,
   });
+  const target = createTarget();
   const onDrain = { current: async () => {} };
-  const createOwner = (targetPort: PlannedAnchorTransferTargetPort = target) => new PlannedAnchorTransferOwner({
+  const createOwner = (
+    targetPort: PlannedAnchorTransferTargetPort = target,
+    now?: () => string,
+    onSourceCommitted?: (targetDeviceId: string) => void,
+  ) => new PlannedAnchorTransferOwner({
       deviceId: sourceKey.deviceId,
       anchorEpoch: () => 1,
       identityKey: sourceKey,
@@ -376,18 +676,22 @@ async function createFixture() {
       verifier,
       targetFor: () => targetPort,
       artifacts: sourceStore.artifactStore(),
+      retention: sourceStore.checkpointRetention(),
+      storageMaintenance: options.sourceStorageMaintenance,
       ensureRecoveryCheckpoint: async () => digest("verified-recovery"),
       lifecycle: {
         stopAccepting: () => {},
         drainAccepted: () => onDrain.current(),
         resumeAfterAbort: () => {},
       },
+      onSourceCommitted,
+      now,
     });
   owner = createOwner();
   return {
-    sourceKey, targetKey, sourceStore, targetStore, sourceTrust, secrets,
-    owner, createOwner, onDrain,
-    target,
+    sourceKey, targetKey, peerKey, sourceStore, targetStore, peerStore, sourceTrust, secrets,
+    owner, createOwner, onDrain, readiness, readinessSnapshot, sourceArtifactCommand,
+    target, createTarget,
     verifier,
     sourceJournal: new FilePlannedAnchorTransferJournal(sourceStore.authorityLog(), verifier),
     targetJournal: { state: (transferId: string) => target.state(transferId) },
@@ -425,4 +729,53 @@ function noOpLifecycle() {
 
 function digest(seed: string) {
   return `sha256:${Buffer.from(seed).toString("hex").padEnd(64, "0").slice(0, 64)}`;
+}
+
+function governor(): DefaultStorageMaintenanceGovernor {
+  const classWeights = {
+    "workload-interactive": 1,
+    "workload-advancement": 1,
+    "workload-scheduler": 1,
+    "workload-orchestration": 1,
+    "storage-foreground": 1,
+    "storage-recovery": 1,
+    "storage-background": 1,
+  } satisfies DeviceCapacityPolicy["classWeights"];
+  const mib = 1024 * 1024;
+  return new DefaultStorageMaintenanceGovernor({
+    capacity: new DefaultDeviceCapacityArbiter({
+      policy: {
+        version: 1,
+        occupancy: {
+          memoryReservationBytes: 256 * mib,
+          temporaryBytes: 256 * mib,
+          slots: 8,
+          memorySafetyReserveBytes: 0,
+          temporarySafetyReserveBytes: 0,
+        },
+        quantum: {
+          readBytes: 1024 * mib,
+          writeBytes: 1024 * mib,
+          ioOperations: 1_000_000,
+        },
+        quantumRefillPerSecond: {
+          readBytes: 1024 * mib,
+          writeBytes: 1024 * mib,
+          ioOperations: 1_000_000,
+        },
+        pressure: {
+          maxCpuBusyRatio: 1,
+          minimumAvailableMemoryBytes: 0,
+        },
+        retryAfterMs: 1,
+        classWeights,
+      },
+      probe: () => ({
+        cpuBusyRatio: 0,
+        availableMemoryBytes: 256 * mib,
+        processRssBytes: 0,
+        temporaryBytesAvailable: 256 * mib,
+      }),
+    }),
+  });
 }

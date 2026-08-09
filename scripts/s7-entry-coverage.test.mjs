@@ -403,6 +403,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/setup-delivery.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1006,7 +1007,9 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/planned-anchor-transfer.ts",
     "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
+    "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/runtime/duty-migration-command.ts",
     "packages/server/src/rpc/methods/server.ts",
@@ -1042,6 +1045,43 @@ test("planned duty migration stays bound to two production roots and a finite ow
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "ctx.meshRuntime?.currentAnchorDeviceId()",
+        "ctx.meshBootstrap.trust.issuer.deviceId",
+      ),
+    )).join("\n"),
+    /current-owner resolver exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "this.#plannedCommittedTargetDeviceId ??",
+        "undefined ??",
+      ),
+    )).join("\n"),
+    /current-owner resolver exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "conversationRpc: new CurrentAnchorFirstPartyRpcRouter({",
+        "conversationRpc: undefined,",
+      ),
+    )).join("\n"),
+    /first-party current-owner relay drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/first-party-conversation-mesh.ts",
+      (text) => text.replace('  "dutyMigration.targets",', '  "dutyMigration.legacyTargets",'),
+    )).join("\n"),
+    /first-party current-owner relay drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
       (text) => text.replace(
         'const roleEnabled = this.options.configuration.enabledRoles.includes("anchor")',
@@ -1062,10 +1102,90 @@ test("planned duty migration stays bound to two production roots and a finite ow
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "await this.#plannedTransferRuntime.run(async () => {\n              await this.#plannedAnchorOwner?.recoverBeforeAdmission();\n            });",
+        "await this.#plannedAnchorOwner?.recoverBeforeAdmission();",
+      ),
+    )).join("\n"),
+    /recovery\/commit\/admission order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "await this.#plannedTransferRuntime.run(async () => {\n        await this.#plannedAnchorTarget?.recoverBeforeAdmission();\n        await this.#plannedAnchorOwner?.recoverBeforeAdmission();\n      });",
+        "await this.#plannedAnchorTarget?.recoverBeforeAdmission();\n      await this.#plannedAnchorOwner?.recoverBeforeAdmission();",
+      ),
+    )).join("\n"),
+    /recovery\/commit\/admission order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "await this.#plannedAnchorTarget?.recoverBeforeAdmission()",
+        "void this.#plannedAnchorTarget?.recoverBeforeAdmission()",
+      ),
+    )).join("\n"),
+    /recovery\/commit\/admission order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "await reconcilePlannedAnchorTrustFromPeer(",
+        "await reconcileSomeOtherTrustFromPeer(",
+      ),
+    )).join("\n"),
+    /recovery\/commit\/admission order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        "plannedAnchorReadiness: plannedAnchorReadiness.port",
+        "plannedAnchorReadiness: plannedAnchorReadinessSnapshot",
+      ),
+    )).join("\n"),
+    /readiness reservation assembly drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
+      (text) => text.replace(
+        "options.lifecycle.run(() => target.summary())",
+        "target.summary()",
+      ),
+    )).join("\n"),
+    /readiness reservation assembly drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/runtime/rpc-management-facade.ts",
       (text) => text.replace('"dutyMigration.commit"', '"dutyMigration.unregistered"'),
     )).join("\n"),
     /public journey or canonical RPC exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "return this.#plannedTransferRuntime.run(async () => {",
+        "return (async () => {",
+      ),
+    )).join("\n"),
+    /stop gate or strict product identity drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/runtime/duty-migration-command.ts",
+      (text) => text.replace(
+        "return `xfer-${encoded}`;",
+        "return `duty-${encoded}`;",
+      ),
+    )).join("\n"),
+    /stop gate or strict product identity drifted/,
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(

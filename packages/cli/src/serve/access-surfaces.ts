@@ -159,7 +159,8 @@ const authorityRuntimeSurface: AccessSurface = {
           authority: authorityRuntime,
           currentAnchorDeviceId: () =>
             ctx.meshBootstrap.mode === "trusted-home"
-              ? ctx.meshBootstrap.trust.issuer.deviceId
+              ? ctx.meshRuntime?.currentAnchorDeviceId() ??
+                ctx.meshBootstrap.trust.issuer.deviceId
               : authorityRuntime.deviceId,
         }),
         capacity: ctx.advancementCapacity,
@@ -713,7 +714,8 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       evidence: ctx.evidenceHandler,
       currentAnchorDeviceId: () =>
         ctx.meshBootstrap.mode === "trusted-home"
-          ? ctx.meshBootstrap.trust.issuer.deviceId
+          ? ctx.meshRuntime?.currentAnchorDeviceId() ??
+            ctx.meshBootstrap.trust.issuer.deviceId
           : ctx.authorityRuntime!.deviceId,
     });
     const cleanup = ctx.startupRollback.register(

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   AnchorTransferCommand,
   AuthorityCatalog,
+  HomeTrustRecord,
   HomeTrustEventWithBody,
   HomeTrustEventBody,
   TransferRecord,
@@ -114,14 +115,23 @@ describe("planned anchor transfer protocol", () => {
     const command = signedCommand({
       v: 1, op: "commit", requestId: "request-2", transferId: TRANSFER_ID, commit,
     });
+    const record = trustRecord();
     expect(() => validateAnchorTransferResult({
       v: 1, status: "ok", requestId: "request-2", transferId: TRANSFER_ID,
-      state: "committed", commit: { ...commit, checkpointDigest: digest("other") },
+      state: "committed", commit: { ...commit, checkpointDigest: digest("other") }, trustRecord: record,
     }, command, source)).toThrow();
     expect(() => validateAnchorTransferResult({
       v: 1, status: "ok", requestId: "wrong-request", transferId: TRANSFER_ID,
-      state: "committed", commit,
+      state: "committed", commit, trustRecord: record,
     }, command, source)).toThrow("originating command");
+    expect(validateAnchorTransferResult({
+      v: 1, status: "ok", requestId: "request-2", transferId: TRANSFER_ID,
+      state: "committed", commit, trustRecord: record,
+    }, command, source)).toMatchObject({ state: "committed", trustRecord: record });
+    expect(() => validateAnchorTransferResult({
+      v: 1, status: "ok", requestId: "request-2", transferId: TRANSFER_ID,
+      state: "committed", commit,
+    }, command, source)).toThrow("incomplete or unknown");
   });
 
   it("rejects planned/disaster and command state confusion before side effects", () => {
@@ -178,6 +188,40 @@ function transition(): HomeTrustEventWithBody<Extract<HomeTrustEventBody, { t: "
     at: AT,
   };
   return { ...unsigned, signature: source.sign("HomeTrustEvent", 1, unsigned) };
+}
+
+function trustRecord(): HomeTrustRecord {
+  const event = transition();
+  const { signature: _eventSignature, ...unsignedEvent } = event;
+  const unsigned = {
+    v: 1 as const,
+    homeId: "home-1",
+    trustEpoch: 4,
+    chainHead: {
+      seq: event.seq,
+      eventDigest: protocolDigest("HomeTrustEvent", 1, unsignedEvent),
+    },
+    issuer: {
+      deviceId: TARGET,
+      issuerKeyId: ISSUER,
+      issuerPublicKey: "ed25519:target-issuer-public-key",
+    },
+    members: [{
+      device: {
+        deviceId: TARGET,
+        publicKey: "ed25519:target-device-public-key",
+        displayName: "Target",
+        platform: "linux" as const,
+        enrolledAt: AT,
+      },
+      roles: ["anchor" as const],
+      state: "active" as const,
+    }],
+  };
+  return {
+    ...unsigned,
+    signature: targetIssuer.sign("HomeTrustRecord", 1, unsigned),
+  };
 }
 
 function catalog(): AuthorityCatalog {

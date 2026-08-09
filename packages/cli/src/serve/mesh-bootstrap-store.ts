@@ -424,6 +424,109 @@ export class FileMeshBootstrapStore {
     return result.value;
   }
 
+  /** Idempotently appends one already-authorized trust transition and its signed projection. */
+  async reconcileTrustEvent(input: {
+    readonly event: HomeTrustEvent;
+    readonly record: HomeTrustRecord;
+  }): Promise<TrustProjection> {
+    const result = await this.#log.transactProjection<
+      readonly HomeTrustEvent[],
+      TrustStreamRecord,
+      TrustProjection
+    >(
+      [],
+      (events, logical) => {
+        if (logical.body.t !== "home-trust-event") return events;
+        const next = [...events, logical.body.event];
+        replayTrustChain(next);
+        return next;
+      },
+      (events) => {
+        if (events.length === 0) throw new Error("Trust chain genesis is missing");
+        const current = replayTrustChain(events);
+        if (
+          current.homeId === input.record.homeId &&
+          current.trustEpoch === input.record.trustEpoch &&
+          canonicalize(current.chainHead) === canonicalize(input.record.chainHead)
+        ) {
+          verifyHomeTrustRecord(input.record, current);
+          return { kind: "return", value: current };
+        }
+        const projection = applyTrustEvent(current, input.event);
+        verifyHomeTrustRecord(input.record, projection);
+        return {
+          kind: "append",
+          entries: [
+            { stream: "trust", body: { t: "home-trust-event", event: input.event } },
+            { stream: "trust", body: { t: "home-trust-record", record: input.record } },
+          ],
+          value: projection,
+        };
+      },
+      { stream: "trust" },
+    );
+    return result.value;
+  }
+
+  /** Appends a peer-supplied trust suffix after replaying it against the local prefix. */
+  async reconcileTrustSuffix(input: {
+    readonly events: readonly HomeTrustEvent[];
+    readonly record: HomeTrustRecord;
+    readonly localDeviceId: string;
+  }): Promise<TrustProjection> {
+    const result = await this.#log.transactProjection<
+      readonly HomeTrustEvent[],
+      TrustStreamRecord,
+      TrustProjection
+    >(
+      [],
+      (events, logical) => {
+        if (logical.body.t !== "home-trust-event") return events;
+        const next = [...events, logical.body.event];
+        replayTrustChain(next);
+        return next;
+      },
+      (events) => {
+        if (events.length === 0) throw new Error("Trust chain genesis is missing");
+        const current = replayTrustChain(events);
+        if (input.record.homeId !== current.homeId) {
+          throw new Error("Peer trust suffix belongs to another home");
+        }
+        const suffix = input.events.filter((event) => event.seq > current.chainHead.seq);
+        if (
+          suffix.length !== input.events.length ||
+          suffix.some((event, index) => event.seq !== current.chainHead.seq + index + 1)
+        ) {
+          throw new Error("Peer trust suffix does not continue the local prefix");
+        }
+        const projection = suffix.length === 0
+          ? current
+          : replayTrustChain([...events, ...suffix]);
+        verifyHomeTrustRecord(input.record, projection);
+        if (!input.record.members.some((member) =>
+          member.device.deviceId === input.localDeviceId && member.state === "active")) {
+          throw new Error("Peer trust suffix does not keep the local device active");
+        }
+        if (suffix.length === 0) {
+          return { kind: "return", value: projection };
+        }
+        return {
+          kind: "append",
+          entries: [
+            ...suffix.map((event) => ({
+              stream: "trust",
+              body: { t: "home-trust-event" as const, event },
+            })),
+            { stream: "trust", body: { t: "home-trust-record" as const, record: input.record } },
+          ],
+          value: projection,
+        };
+      },
+      { stream: "trust" },
+    );
+    return result.value;
+  }
+
   async importTrustBootstrap(input: {
     readonly events: readonly HomeTrustEvent[];
     readonly record: HomeTrustRecord;

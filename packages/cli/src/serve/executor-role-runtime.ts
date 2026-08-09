@@ -76,8 +76,6 @@ export async function runExecutorRole(
   ) {
     throw new Error("Executor-only host received an incompatible role projection");
   }
-  const currentAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
-
   const startup = bootstrap.startup;
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
@@ -91,7 +89,10 @@ export async function runExecutorRole(
   await mcpHub.connectAll();
   const writer = createStdoutWriter();
 
+  const initialAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
   let mesh: MeshRuntimeAssembly | undefined;
+  const currentAnchorDeviceId = () =>
+    mesh?.currentAnchorDeviceId() ?? initialAnchorDeviceId;
   let jobOwnerAssembly: ExecutorJobOwnerAssembly | undefined;
   let jobOwnerLifecycle: ExecutorJobOwnerLifecycle | undefined;
   let authority: AuthorityRuntimeStack | undefined;
@@ -180,7 +181,7 @@ export async function runExecutorRole(
       verifier: authority.verifier,
       verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({
         authority,
-        currentAnchorDeviceId: () => currentAnchorDeviceId,
+        currentAnchorDeviceId,
       }),
       capacity: deviceCapacity.workload("workload-advancement"),
     });
@@ -257,7 +258,7 @@ export async function runExecutorRole(
       config: startup.config,
       credentials: providerCredentials,
       evidence: evidenceHandler,
-      currentAnchorDeviceId: () => currentAnchorDeviceId,
+      currentAnchorDeviceId,
       dataPlane,
     });
     jobOwnerAssembly = new ExecutorJobOwnerAssembly({

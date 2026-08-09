@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { canonicalize } from "@zhixing/core/protocol";
-import { FirstPartyConversationMeshTarget } from "../first-party-conversation-mesh.js";
+import {
+  CurrentAnchorFirstPartyRpcRouter,
+  FirstPartyConversationMeshTarget,
+} from "../first-party-conversation-mesh.js";
 
 describe("first-party conversation mesh", () => {
   it("relays only the finite canonical surface and closes the prior generation", async () => {
@@ -71,6 +74,49 @@ describe("first-party conversation mesh", () => {
     ));
     expect(result).toMatchObject({ ok: false });
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("routes the finite current-anchor surface after planned migration", async () => {
+    let current = "device-source";
+    const remoteDispatch = vi.fn(async () => ({ stage: "ready" }));
+    const router = new CurrentAnchorFirstPartyRpcRouter({
+      deviceId: "device-source",
+      currentAnchorDeviceId: () => current,
+      remoteFor: () => ({ dispatch: remoteDispatch }) as never,
+    });
+    const connection = {
+      id: 1,
+      closed: false,
+      authenticated: true,
+      loopback: true,
+      surfacePrincipal: "rpc:client-1",
+      surfaceGeneration: 1,
+      notify: vi.fn(),
+      onClose: () => () => {},
+    };
+
+    await expect(router.dispatch({
+      method: "session.new",
+      params: { operationId: "operation-1" },
+      connection,
+    })).resolves.toEqual({ handled: false });
+
+    current = "device-target";
+    await expect(router.dispatch({
+      method: "dutyMigration.targets",
+      params: {},
+      connection,
+    })).resolves.toEqual({ handled: true, result: { stage: "ready" } });
+    expect(remoteDispatch).toHaveBeenCalledWith(
+      "dutyMigration.targets",
+      {},
+      connection,
+    );
+    await expect(router.dispatch({
+      method: "workspace.binding.admin",
+      params: {},
+      connection,
+    })).resolves.toEqual({ handled: false });
   });
 });
 

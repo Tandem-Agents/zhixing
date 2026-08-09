@@ -57,7 +57,9 @@ describe("RpcManagementFacade · 基础宿主信息面", () => {
     const fake = makeFakeHostLink();
     fake.setResponder((method) => {
       if (method === "dutyMigration.targets") {
-        return { devices: [{ deviceId: "device-ready", displayName: "客厅主机" }] };
+        return {
+          devices: [{ deviceId: "device-ready", displayName: "客厅主机", ready: true }],
+        };
       }
       if (method === "dutyMigration.prepare") return { stage: "ready" };
       if (method === "dutyMigration.commit") return { stage: "completed" };
@@ -68,7 +70,7 @@ describe("RpcManagementFacade · 基础宿主信息面", () => {
     const identity = { requestId: "request:duty-1", transferId: "duty-1" };
 
     await expect(facade.dutyMigrationTargets()).resolves.toEqual([
-      { deviceId: "device-ready", displayName: "客厅主机" },
+      { deviceId: "device-ready", displayName: "客厅主机", ready: true },
     ]);
     await expect(facade.dutyMigrationPrepare({
       ...identity,
@@ -89,5 +91,23 @@ describe("RpcManagementFacade · 基础宿主信息面", () => {
       { method: "dutyMigration.commit", params: identity },
       { method: "dutyMigration.cancel", params: identity },
     ]);
+  });
+
+  it("严格拒绝目标列表中的内部或未知字段", async () => {
+    const fake = makeFakeHostLink();
+    fake.setResponder((method) => {
+      if (method !== "dutyMigration.targets") throw new Error(`unexpected method: ${method}`);
+      return {
+        devices: [{
+          deviceId: "device-ready",
+          displayName: "客厅主机",
+          ready: true,
+          issuerKeyId: "must-not-cross-the-public-dto",
+        }],
+      };
+    });
+
+    await expect(new RpcManagementFacade(fake.link).dutyMigrationTargets())
+      .rejects.toThrow("fields are invalid");
   });
 });
