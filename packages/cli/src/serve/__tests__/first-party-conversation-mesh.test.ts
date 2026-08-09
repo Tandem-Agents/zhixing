@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
+  captureCurrentAnchorRelayMethods,
+  DEVICE_LOCAL_RPC_METHODS,
+} from "@zhixing/server";
+import {
+  CURRENT_ANCHOR_RELAY_METHODS,
   CurrentAnchorFirstPartyRpcRouter,
   FirstPartyConversationMeshTarget,
+  isCurrentAnchorRelayMethod,
 } from "../first-party-conversation-mesh.js";
 
 describe("first-party conversation mesh", () => {
@@ -117,6 +123,47 @@ describe("first-party conversation mesh", () => {
       params: {},
       connection,
     })).resolves.toEqual({ handled: false });
+  });
+
+  it("derives the relay exact-set from the canonical registry and excludes only device-local methods", () => {
+    expect(CURRENT_ANCHOR_RELAY_METHODS).toEqual(captureCurrentAnchorRelayMethods());
+    for (const method of CURRENT_ANCHOR_RELAY_METHODS) {
+      expect(isCurrentAnchorRelayMethod(method), method).toBe(true);
+    }
+    for (const method of DEVICE_LOCAL_RPC_METHODS) {
+      expect(isCurrentAnchorRelayMethod(method), method).toBe(false);
+    }
+    expect(isCurrentAnchorRelayMethod("unknown.method")).toBe(false);
+  });
+
+  it("keeps the target unavailable until planned post-install consumers complete", async () => {
+    let ready = false;
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const target = new FirstPartyConversationMeshTarget({ isReady: () => ready });
+    target.bind({ dispatch } as never);
+    const request = encode({
+      v: 1,
+      op: "dispatch",
+      surface: identity(1, "connection-1"),
+      method: "schedule.list",
+      params: {},
+    });
+    const connection = { peer: { deviceId: "device-source" } } as never;
+
+    expect(decode(await target.handle(
+      request,
+      connection,
+      new AbortController().signal,
+    ))).toMatchObject({ ok: false });
+    expect(dispatch).not.toHaveBeenCalled();
+
+    ready = true;
+    expect(decode(await target.handle(
+      request,
+      connection,
+      new AbortController().signal,
+    ))).toMatchObject({ ok: true, result: { ok: true } });
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 });
 

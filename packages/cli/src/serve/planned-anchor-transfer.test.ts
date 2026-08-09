@@ -33,6 +33,7 @@ import {
   PlannedAnchorTransferOwner,
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
+  completePlannedAnchorInstallationBeforeBootstrap,
   type PlannedAnchorTransferTargetPort,
 } from "./planned-anchor-transfer.js";
 import {
@@ -91,6 +92,83 @@ describe("planned anchor transfer prepared phase", () => {
       transferId: "xfer-01J00000000000000000000002",
       targetDeviceId: fixture.targetKey.deviceId,
     })).rejects.toThrow("already in progress");
+  });
+
+  it("claims one candidate durably across concurrent source and target transfers", async () => {
+    const fixture = await createFixture();
+    const transferA = TRANSFER_ID;
+    const transferB = "xfer-01J00000000000000000000002";
+    const sourceResults = await Promise.allSettled([
+      fixture.owner.prepare({
+        requestId: "request-source-a",
+        transferId: transferA,
+        targetDeviceId: fixture.targetKey.deviceId,
+      }),
+      fixture.createOwner().prepare({
+        requestId: "request-source-b",
+        transferId: transferB,
+        targetDeviceId: fixture.targetKey.deviceId,
+      }),
+    ]);
+    expect(sourceResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(sourceResults.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+    const isolated = await createFixture();
+    const candidate = (requestId: string, transferId: string) => ({
+      homeId: isolated.sourceTrust.homeId,
+      requestId,
+      transferId,
+      sourceDeviceId: isolated.sourceKey.deviceId,
+      targetDeviceId: isolated.targetKey.deviceId,
+      trustEpoch: isolated.sourceTrust.trustEpoch,
+      trustChainHead: isolated.sourceTrust.chainHead,
+      sourceAnchorEpoch: 1,
+    });
+    const targetResults = await Promise.allSettled([
+      isolated.target.ready({ candidate: candidate("request-target-a", transferA) }),
+      isolated.target.ready({ candidate: candidate("request-target-b", transferB) }),
+    ]);
+    expect(targetResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(targetResults.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const loser = targetResults[0]!.status === "rejected" ? transferA : transferB;
+    expect(await loadAnchorIssuerKey(isolated.secrets, loser)).toBeNull();
+  });
+
+  it("durably releases a claim-only candidate after a lost ready response", async () => {
+    const fixture = await createFixture();
+    let loseReady = true;
+    const lossyTarget: PlannedAnchorTransferTargetPort = {
+      summary: () => fixture.target.summary(),
+      ready: async (input) => {
+        const proof = await fixture.target.ready(input);
+        if (loseReady) {
+          loseReady = false;
+          throw new Error("simulated ready response loss");
+        }
+        return proof;
+      },
+      releaseCandidate: (input) => fixture.target.releaseCandidate(input),
+      apply: (command) => fixture.target.apply(command),
+    };
+    const owner = fixture.createOwner(lossyTarget);
+    await expect(owner.prepare({
+      requestId: "request-claim-only",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    })).rejects.toThrow("simulated ready response loss");
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).not.toBeNull();
+
+    await expect(owner.abort({
+      requestId: "request-claim-only",
+      transferId: TRANSFER_ID,
+      reason: "operator-cancelled",
+    })).resolves.toBeUndefined();
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).toBeNull();
+    await expect(owner.abort({
+      requestId: "request-claim-only",
+      transferId: TRANSFER_ID,
+      reason: "operator-cancelled",
+    })).resolves.toBeUndefined();
   });
 
   it("crosses the strict mesh service and authorizes only the current source", async () => {
@@ -160,8 +238,37 @@ describe("planned anchor transfer prepared phase", () => {
     fixture.onDrain.current = async () => {
       await fixture.sourceStore.authorityLog().append([
         {
+          stream: "assignment:assignment-accepted",
+          body: { t: "received" },
+        },
+        {
+          stream: "assignment:assignment-accepted",
+          body: { t: "interaction-requested", requestId: "interaction-accepted" },
+        },
+        {
           stream: "control",
           body: { t: "confirmation-requested", requestId: "confirm-accepted" },
+        },
+        {
+          stream: "intent:intent-accepted",
+          body: {
+            t: "intent",
+            intent: { intentId: "intent-accepted", status: "pending" },
+          },
+        },
+        {
+          stream: "final-outbox",
+          body: {
+            t: "final",
+            conversationId: "conversation-accepted",
+            runId: "run-accepted",
+            commitRevision: 1,
+            state: "pending",
+          },
+        },
+        {
+          stream: "delivery",
+          body: { t: "enqueued", itemId: "delivery-accepted" },
         },
       ]);
     };
@@ -183,14 +290,24 @@ describe("planned anchor transfer prepared phase", () => {
       pendingObligations: unknown[];
     };
     expect(closure.pendingObligations).toEqual([
+      { kind: "assignment", id: "assignment-accepted" },
       { kind: "confirmation", id: "confirm-accepted" },
+      { kind: "delivery", id: "delivery-accepted" },
+      {
+        kind: "final",
+        id: "conversation-accepted:run-accepted:1",
+      },
+      { kind: "intent", id: "intent-accepted" },
+      { kind: "interaction", id: "interaction-accepted" },
     ]);
-    expect(closure.acceptedTokens).toEqual([{
-      transferId: TRANSFER_ID,
-      kind: "confirmation",
-      id: "confirm-accepted",
-      requestId: "planned-accepted:confirmation:confirm-accepted",
-    }]);
+    expect(closure.acceptedTokens).toEqual(
+      closure.pendingObligations.map((obligation: { kind: string; id: string }) => ({
+        transferId: TRANSFER_ID,
+        kind: obligation.kind,
+        id: obligation.id,
+        requestId: `planned-accepted:${obligation.kind}:${obligation.id}`,
+      })),
+    );
     await expect(fixture.sourceStore.authorityLog().append([
       { stream: "run:test", body: { fresh: true } },
     ])).rejects.toThrow("frozen authority writes");
@@ -305,7 +422,7 @@ describe("planned anchor transfer prepared phase", () => {
 
   it("holds the target readiness revision across the source commit window", async () => {
     const fixture = await createFixture();
-    await fixture.owner.prepare({
+    const prepared = await fixture.owner.prepare({
       requestId: "request-reservation",
       transferId: TRANSFER_ID,
       targetDeviceId: fixture.targetKey.deviceId,
@@ -315,8 +432,16 @@ describe("planned anchor transfer prepared phase", () => {
       transferId: TRANSFER_ID,
     });
     await fixture.target.ready({
-      transferId: TRANSFER_ID,
-      sourceDeviceId: fixture.sourceKey.deviceId,
+      candidate: {
+        homeId: prepared.readyProof.homeId,
+        requestId: prepared.identity.requestId,
+        transferId: prepared.identity.transferId,
+        sourceDeviceId: prepared.identity.sourceDeviceId,
+        targetDeviceId: prepared.identity.targetDeviceId,
+        trustEpoch: prepared.readyProof.trustEpoch,
+        trustChainHead: prepared.readyProof.trustChainHead,
+        sourceAnchorEpoch: prepared.identity.sourceAnchorEpoch,
+      },
     });
 
     const restartedReadiness = createPlannedAnchorReadinessCoordinator(async () =>
@@ -357,6 +482,7 @@ describe("planned anchor transfer prepared phase", () => {
         sourceNow = proof.expiresAt;
         return proof;
       },
+      releaseCandidate: (input) => fixture.target.releaseCandidate(input),
       apply: (command) => fixture.target.apply(command),
     };
     const owner = fixture.createOwner(expiringTarget, () => sourceNow);
@@ -409,6 +535,7 @@ describe("planned anchor transfer prepared phase", () => {
     const lossyTarget: PlannedAnchorTransferTargetPort = {
       summary: () => fixture.target.summary(),
       ready: (input) => fixture.target.ready(input),
+      releaseCandidate: (input) => fixture.target.releaseCandidate(input),
       apply: async (command) => {
         const result = await fixture.target.apply(command);
         if (command.op === "commit" && loseCommitResponse) {
@@ -560,7 +687,53 @@ describe("planned anchor transfer prepared phase", () => {
       reason: "migration",
       toDeviceId: fixture.targetKey.deviceId,
     });
-  });
+  }, 120_000);
+
+  it("replays an installed target before bootstrap after active-key activation fails", async () => {
+    const fixture = await createFixture();
+    await fixture.owner.prepare({
+      requestId: "request-pre-bootstrap",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    });
+    await fixture.owner.freeze({
+      requestId: "request-pre-bootstrap",
+      transferId: TRANSFER_ID,
+    });
+    fixture.secrets.failActivePutOnce = true;
+
+    await expect(fixture.owner.commit({
+      requestId: "request-pre-bootstrap",
+      transferId: TRANSFER_ID,
+    })).rejects.toThrow("simulated active issuer activation failure");
+    const imported = await fixture.target.state(TRANSFER_ID);
+    const issuerKeyId = imported?.readyProof.targetIssuerKeyId;
+    if (!issuerKeyId) throw new Error("expected imported target issuer identity");
+    expect(await loadActiveAnchorIssuerKey(fixture.secrets, issuerKeyId)).toBeNull();
+    expect(await fixture.targetStore.authorityLog().readStream(
+      "transfer:anchor-current",
+    )).toHaveLength(1);
+    expect(imported?.phase).toBe("imported");
+
+    const complete = () => completePlannedAnchorInstallationBeforeBootstrap({
+      zhixingHome: fixture.targetRoot,
+      deviceId: fixture.targetKey.deviceId,
+      secretStore: fixture.secrets,
+      bootstrapStore: fixture.targetStore,
+      verifier: fixture.verifier,
+      stagingRoot: path.join(fixture.targetRoot, "anchor-transfer-staging"),
+    });
+    const recovered = await complete();
+    const replay = await complete();
+    expect(recovered?.installation.transferId).toBe(TRANSFER_ID);
+    expect(recovered?.state.phase).toBe("committed");
+    expect(recovered?.requiresPostInstallCompletion).toBe(true);
+    expect(replay).toEqual(recovered);
+    expect((await loadActiveAnchorIssuerKey(
+      fixture.secrets,
+      issuerKeyId,
+    ))?.deviceId).toBe(issuerKeyId);
+  }, 120_000);
 });
 
 async function createFixture(options: {
@@ -689,6 +862,7 @@ async function createFixture(options: {
     });
   owner = createOwner();
   return {
+    sourceRoot, targetRoot,
     sourceKey, targetKey, peerKey, sourceStore, targetStore, peerStore, sourceTrust, secrets,
     owner, createOwner, onDrain, readiness, readinessSnapshot, sourceArtifactCommand,
     target, createTarget,
@@ -710,7 +884,18 @@ async function temporary(prefix: string) {
 
 class MemoryStore implements SecretStorePort {
   readonly values = new Map<string, string>();
-  async put(ref: SecretRef, value: string) { this.values.set(id(ref), value); }
+  failActivePutOnce = false;
+  async put(ref: SecretRef, value: string) {
+    if (
+      this.failActivePutOnce &&
+      ref.kind === "device-key" &&
+      ref.bindingId.startsWith("anchor-issuer-active/v1/")
+    ) {
+      this.failActivePutOnce = false;
+      throw new Error("simulated active issuer activation failure");
+    }
+    this.values.set(id(ref), value);
+  }
   async get(ref: SecretRef) { return this.values.get(id(ref)) ?? null; }
   async delete(ref: SecretRef) { this.values.delete(id(ref)); }
   async list() { return []; }

@@ -111,7 +111,6 @@ import {
   DeviceKey,
   deviceIdFromPublicKey,
   enrollDeviceIdentity,
-  verifyDeviceSignature,
 } from "@zhixing/mesh/device-identity";
 
 import * as fsp from "node:fs/promises";
@@ -123,6 +122,7 @@ import {
 } from "./executor-snapshot-version-store.js";
 import { loadOrCreateDeviceKey } from "./serve/mesh-device-key.js";
 import { createSurfaceAssetAuthority } from "./serve/surface-asset-authority.js";
+import { createTrustedDeviceProtocolVerifier } from "./serve/trusted-device-protocol-verifier.js";
 import { migrateLegacyWorkscenes } from "./serve/workscene-legacy-migration.js";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import {
@@ -359,6 +359,7 @@ export interface DeliveryStack {
   activate(): void;
   stats(): AuthorityDeliveryStats;
   flush(): Promise<void>;
+  recoverInstalledAuthority(): Promise<void>;
   authority: DeliveryAuthority;
   authorityLog: FileAuthorityCommitLog;
   artifacts: FileArtifactStore;
@@ -529,16 +530,9 @@ export async function setupAuthorityRuntime(
       options.authorizedDeviceIds ?? [...trustedIdentities.keys()],
     );
     authorizedDeviceIds.add(identity.deviceId);
-    const verifier: ProtocolSignatureVerifier = {
-      verify(schemaId, version, payload, signature) {
-        const signer = trustedIdentities.get(signature.keyId);
-        if (!signer)
-          throw new TypeError(
-            "Protocol signature belongs to an untrusted device",
-          );
-        verifyDeviceSignature(signer, schemaId, version, payload, signature);
-      },
-    };
+    const verifier = createTrustedDeviceProtocolVerifier(
+      [...trustedIdentities.values()],
+    );
     const clock = options.clock ?? (() => new Date().toISOString());
     surfaceAssets = authorityLog
       ? createSurfaceAssetAuthority({
@@ -2200,6 +2194,7 @@ export async function setupDelivery(
     (notice: DeliveryStatusNotice) => void | Promise<void>
   >();
   let authorityDelivery: AuthorityDeliveryPipeline | undefined;
+  let activated = false;
   const startupRollback = options.startupRollback ?? new StartupRollback();
   const startupCleanup = startupRollback.register(
     "deliveryStack.stop",
@@ -2259,10 +2254,14 @@ export async function setupDelivery(
       authorityDelivery,
       activate: () => {
         authorityDelivery!.activate();
+        activated = true;
       },
       stats: () => authorityDelivery!.stats(),
       flush: async () => {
         await authorityDelivery!.flush();
+      },
+      recoverInstalledAuthority: async () => {
+        if (activated) await authorityDelivery!.flush();
       },
       authority,
       authorityLog,

@@ -45,7 +45,12 @@ export class RpcSurfaceRegistry {
   }
 }
 
-export function requireRpcSurfacePrincipal(connection: RpcConnection): string {
+export function requireRpcSurfacePrincipal(
+  connection: Pick<
+    RpcConnection,
+    "surfacePrincipal" | "surfaceGeneration" | "clientInfo"
+  >,
+): string {
   if (connection.surfacePrincipal && connection.surfaceGeneration) {
     return connection.surfacePrincipal;
   }

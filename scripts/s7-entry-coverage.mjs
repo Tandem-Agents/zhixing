@@ -1185,12 +1185,16 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const facade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
   const product = byPath.get("packages/cli/src/runtime/duty-migration-command.ts");
   const firstParty = byPath.get("packages/cli/src/serve/first-party-conversation-mesh.ts");
+  const localRouter = byPath.get("packages/cli/src/serve/local-conversation-rpc.ts");
+  const registry = byPath.get("packages/server/src/rpc/methods/index.ts");
+  const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
   const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const setup = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
-    !accessRoot || !executorRoot || !setup || !firstParty
+    !accessRoot || !executorRoot || !setup || !firstParty || !localRouter ||
+    !registry || !bootstrap
   ) {
     return ["planned anchor transfer production assembly sources are missing"];
   }
@@ -1263,23 +1267,57 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   ) {
     failures.push("planned anchor transfer current-owner resolver exact-set drifted");
   }
-  const forwardedMethods = [
-    "session.new",
-    "dutyMigration.targets",
-    "dutyMigration.prepare",
-    "dutyMigration.commit",
-    "dutyMigration.cancel",
-  ];
   if (
     count(command, "conversationRpc: new CurrentAnchorFirstPartyRpcRouter({") !== 1 ||
+    count(executorRoot, "new CurrentAnchorFirstPartyRpcRouter({") !== 1 ||
+    count(executorRoot, "new ExecutorFirstPartyRpcRouter({") !== 1 ||
     count(firstParty, "export class CurrentAnchorFirstPartyRpcRouter") !== 1 ||
     count(firstParty, "const current = this.input.currentAnchorDeviceId()") !== 1 ||
     count(firstParty, "result: await remote.dispatch(input.method, input.params, input.connection)") !== 1 ||
-    forwardedMethods.some((method) => count(firstParty, `  "${method}",`) !== 1) ||
+    count(firstParty, "captureCurrentAnchorRelayMethods()") !== 1 ||
+    count(registry, ".filter((name) => !local.has(name))") !== 1 ||
+    count(localRouter, "export class ExecutorFirstPartyRpcRouter") !== 1 ||
+    count(localRouter, "if (LOCAL_METHODS.has(input.method))") !== 1 ||
+    count(localRouter, "if (isCurrentAnchorRelayMethod(input.method))") !== 1 ||
     !assembly.includes('this.#peerHasRole(deviceId, "executor") ||') ||
     !assembly.includes('this.#peerHasRole(deviceId, "anchor")')
   ) {
     failures.push("planned anchor transfer first-party current-owner relay drifted");
+  }
+
+  const sourceClaim = transfer.indexOf("const candidate = await this.#journal.claimCandidate({");
+  const remoteReady = transfer.indexOf("proof: await target.ready({", sourceClaim);
+  const targetClaim = transfer.indexOf("const candidate = await this.#candidates.claimCandidate(identity);");
+  const targetContext = transfer.indexOf("const context = this.#context(identity.transferId);", targetClaim);
+  const targetKey = transfer.indexOf("await createAnchorTransferReadyProof({", targetClaim);
+  if (
+    sourceClaim < 0 || remoteReady < sourceClaim ||
+    targetClaim < 0 || targetContext < targetClaim || targetKey < targetClaim ||
+    count(transfer, "planned-anchor-candidate-release-delivered") !== 3 ||
+    count(mesh, "PLANNED_ANCHOR_CANDIDATE_RELEASE_SERVICE") !== 3 ||
+    count(assembly, "registerPlannedAnchorTransferMeshServices(") !== 1
+  ) {
+    failures.push("planned anchor candidate durable single-flight or claim-before-effect drifted");
+  }
+
+  const completion = transfer.indexOf("export async function completePlannedAnchorInstallationBeforeBootstrap(");
+  const loadInstall = transfer.indexOf("loadCurrentPlannedAnchorInstallation(", completion);
+  const activateKey = transfer.indexOf("await activateAnchorIssuerKey(", completion);
+  const committed = transfer.indexOf('t: "anchor-committed"', completion);
+  const bootstrapCompletion = bootstrap.indexOf("completePlannedAnchorInstallationBeforeBootstrap({");
+  const activeGate = bootstrap.indexOf("loadActiveAnchorIssuerKey(", bootstrapCompletion);
+  if (
+    completion < 0 || loadInstall < completion || activateKey < loadInstall || committed < activateKey ||
+    bootstrapCompletion < 0 || activeGate < bootstrapCompletion ||
+    count(assembly, "bindPlannedAnchorPostInstallConsumers(") !== 1 ||
+    count(command, "bindPlannedAnchorPostInstallConsumers({") !== 1 ||
+    !assembly.includes('kind: "assignment" | "intent"') ||
+    !assembly.includes('kind: "interaction" | "confirmation" | "final"') ||
+    !assembly.includes('kind: "delivery"') ||
+    count(assembly, "await finishPlannedAnchorPostInstall({") !== 1 ||
+    count(firstParty, "this.input.isReady?.() === false") !== 1
+  ) {
+    failures.push("planned anchor pre-bootstrap/post-install completion closure drifted");
   }
 
   const recoveryCall = "await this.#plannedAnchorOwner?.recoverBeforeAdmission()";
@@ -1313,10 +1351,10 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(setup, "const plannedAnchorReadiness = createPlannedAnchorReadinessCoordinator(") !== 1 ||
     count(setup, "plannedAnchorReadiness: plannedAnchorReadiness.port") !== 1 ||
     count(setup, "plannedAnchorReadiness.runRevisionChange(") !== 1 ||
-    count(assembly, "readiness: this.options.authority.plannedAnchorReadiness") !== 1 ||
+    count(assembly, "readiness: this.options.authority.plannedAnchorReadiness") !== 2 ||
     count(transfer, "this.options.readiness.reserve({") !== 3 ||
-    count(transfer, "this.options.readiness.release(") !== 3 ||
-    count(mesh, "options.lifecycle.run(() => target.") !== 3
+    count(transfer, "this.options.readiness.release(") !== 4 ||
+    count(mesh, "options.lifecycle.run(() => target.") !== 4
   ) {
     failures.push("planned anchor transfer readiness reservation assembly drifted");
   }
@@ -1430,6 +1468,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "listDeferredIntents",
       "mutateSession",
       "pendingInteractions",
+      "resolveDurableUncertain",
       "resolveNoInteractiveSurface",
       "rubricCatalog",
       "runTurn",
@@ -2076,6 +2115,7 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/rpc/src/confirmation-bridge.ts", undefined],
     ["packages/server/src/context.ts", undefined],
     ["packages/server/src/rpc/handlers.ts", undefined],
+    ["packages/server/src/rpc/methods/index.ts", undefined],
     ["packages/server/src/rpc/methods/session.ts", undefined],
     ["packages/server/src/rpc/methods/confirmation.ts", undefined],
     ["packages/owner-kernel/src/conversation-transfer.ts", undefined],
@@ -2110,7 +2150,7 @@ export function inspectConversationAdoptionAssembly(records) {
     failures.push(`${mesh.relative}: anchor transfer target must use private staging and the authority governor/lifecycle abort`);
   }
   if (
-    !/this\.#firstPartyConversationTarget\s*=\s*roles\.has\("anchor"\)[\s\S]*?new\s+FirstPartyConversationMeshTarget\s*\(\s*\)/u.test(mesh.text) ||
+    !/this\.#firstPartyConversationTarget\s*=\s*roles\.has\("anchor"\)[\s\S]*?new\s+FirstPartyConversationMeshTarget\s*\(\s*\{[\s\S]*?isReady:\s*\(\)\s*=>\s*this\.plannedCurrentOwnerReady\(\)/u.test(mesh.text) ||
     !/registerFirstPartyConversationMeshService\s*\([\s\S]*?this\.#firstPartyConversationTarget/u.test(mesh.text)
   ) {
     failures.push(`${mesh.relative}: anchor must own the single finite first-party conversation relay target`);
@@ -2122,7 +2162,7 @@ export function inspectConversationAdoptionAssembly(records) {
   } else {
     const startBody = mesh.text.slice(startBoundary, stopBoundary);
     const restore = startBody.indexOf("await this.#restoreCommittedTransfers()");
-    const admission = startBody.indexOf("await this.#control.start()");
+    const admission = startBody.indexOf("await this.#startControl()");
     if (restore < 0 || admission < 0 || restore > admission) {
       failures.push(`${mesh.relative}: committed transfers must restore before mesh admission opens`);
     }
@@ -2170,7 +2210,9 @@ export function inspectConversationAdoptionAssembly(records) {
   }
 
   requireCount(executorRoot, /new\s+LocalConversationRpcRouter\s*\(/gu, 1, "first-party local conversation router construction");
-  requireCount(executorRoot, /conversationRpc\s*:\s*localConversationRpc/gu, 1, "first-party local conversation router injection");
+  requireCount(executorRoot, /new\s+ExecutorFirstPartyRpcRouter\s*\(/gu, 1, "first-party executor ownership composite construction");
+  requireCount(executorRoot, /new\s+CurrentAnchorFirstPartyRpcRouter\s*\(/gu, 1, "first-party current-anchor router construction");
+  requireCount(executorRoot, /conversationRpc\s*,/gu, 1, "first-party ownership composite injection");
 
   const evidence = required.get("packages/cli/src/serve/conversation-evidence-authority.ts");
   if (!/resolveCurrentConversationAuthority\s*\([\s\S]*?request\.conversationId/u.test(evidence.text)) {
@@ -2191,6 +2233,14 @@ export function inspectConversationAdoptionAssembly(records) {
     !/dispatchCanonical[\s\S]*?#listAllConfirmations/u.test(router.text)
   ) {
     failures.push(`${router.relative}: first-party session and confirmation routing must share current-owner resolution and canonical local dispatch`);
+  }
+  const registry = required.get("packages/server/src/rpc/methods/index.ts");
+  if (
+    !/captureCurrentAnchorRelayMethods\s*\(\)[\s\S]*?captureBuiltinRegistryDescriptor\s*\(\)[\s\S]*?\.filter\(\(name\)\s*=>\s*!local\.has\(name\)\)/u.test(registry.text) ||
+    !/export\s+const\s+LOCAL_CONVERSATION_RPC_METHODS[\s\S]*?"session\.resolve"/u.test(router.text) ||
+    !/if\s*\(LOCAL_METHODS\.has\(input\.method\)\)\s*return\s+this\.input\.local\.dispatch\(input\);[\s\S]*?if\s*\(isCurrentAnchorRelayMethod\(input\.method\)\)/u.test(router.text)
+  ) {
+    failures.push("packages/cli/src/serve/local-conversation-rpc.ts: executor-only first-party method ownership exact-set drifted");
   }
   const context = required.get("packages/server/src/context.ts");
   if (!/conversationRpc\?\s*:\s*FirstPartyConversationRpcRouter/u.test(context.text)) {
@@ -2234,7 +2284,7 @@ export function inspectConversationAdoptionAssembly(records) {
 
   const firstParty = required.get("packages/cli/src/serve/first-party-conversation-mesh.ts");
   if (
-    !/const\s+METHODS\s*=\s*new\s+Set\s*\(\[/u.test(firstParty.text) ||
+    !/const\s+METHODS\s*=\s*new\s+Set\s*\(CURRENT_ANCHOR_RELAY_METHODS\)/u.test(firstParty.text) ||
     !/METHODS\.has\(command\.method\)/u.test(firstParty.text) ||
     !/connection\.peer\.deviceId/u.test(firstParty.text) ||
     !/surface generation is stale/u.test(firstParty.text) ||

@@ -21,15 +21,17 @@ import {
   RPC_ERROR_CODES,
   RpcAppError,
   RpcErrors,
+  requireRpcSurfacePrincipal,
   type FirstPartyConversationRpcRouter,
 } from "@zhixing/server";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
 import {
   FirstPartyConversationMeshClient,
+  isCurrentAnchorRelayMethod,
   type FirstPartyIngressConnection,
 } from "./first-party-conversation-mesh.js";
 
-const LOCAL_METHODS = new Set([
+export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.abort",
   "session.advancementCancel",
   "session.advancementConfirm",
@@ -43,6 +45,7 @@ const LOCAL_METHODS = new Set([
   "session.list",
   "session.new",
   "session.rename",
+  "session.resolve",
   "session.resume",
   "session.security",
   "session.send",
@@ -53,7 +56,9 @@ const LOCAL_METHODS = new Set([
   "session.usage",
   "confirmation.list",
   "confirmation.resolve",
-]);
+] as const);
+
+const LOCAL_METHODS = new Set<string>(LOCAL_CONVERSATION_RPC_METHODS);
 
 const LOCAL_ONLY_CAPABILITIES = Object.freeze([
   "排程与全局记忆暂不可用",
@@ -309,6 +314,14 @@ export class LocalConversationRpcRouter
         const requestId = requiredIdentifier(params.requestId, "取消请求");
         await this.input.owner.cancelTurns({ conversationId, requestId });
         return undefined;
+      }
+      case "session.resolve": {
+        const value = parseSessionResolve(params);
+        return this.input.owner.resolveDurableUncertain({
+          ...value,
+          surfacePrincipal: requireRpcSurfacePrincipal(connection),
+          connectionId: String(connection.id),
+        });
       }
       case "session.rename": {
         requireLocalConsent(params);
@@ -570,6 +583,24 @@ export class LocalConversationRpcRouter
   }
 }
 
+/** Executor-only composition selects exactly one owner before dispatch. */
+export class ExecutorFirstPartyRpcRouter
+  implements FirstPartyConversationRpcRouter
+{
+  constructor(private readonly input: {
+    readonly local: FirstPartyConversationRpcRouter;
+    readonly currentAnchor: FirstPartyConversationRpcRouter;
+  }) {}
+
+  dispatch(input: Parameters<FirstPartyConversationRpcRouter["dispatch"]>[0]) {
+    if (LOCAL_METHODS.has(input.method)) return this.input.local.dispatch(input);
+    if (isCurrentAnchorRelayMethod(input.method)) {
+      return this.input.currentAnchor.dispatch(input);
+    }
+    return Promise.resolve({ handled: false } as const);
+  }
+}
+
 interface FirstPartyConnection extends FirstPartyIngressConnection {
   readonly id: number;
   readonly closed: boolean;
@@ -606,6 +637,48 @@ function requiredIdentifier(value: unknown, label: string): string {
     throw RpcErrors.invalidParams(`${label}缺少有效的请求标识。`);
   }
   return value;
+}
+
+function parseSessionResolve(params: Record<string, unknown>): {
+  readonly requestId: string;
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly ownerEpoch: number;
+  readonly openFactDigest: string;
+  readonly decision:
+    | "user-verified-side-effects"
+    | "user-abandoned"
+    | "user-retry-acknowledged";
+} {
+  const fields = [
+    "requestId",
+    "conversationId",
+    "runId",
+    "ownerEpoch",
+    "openFactDigest",
+    "decision",
+  ];
+  const decisions = new Set([
+    "user-verified-side-effects",
+    "user-abandoned",
+    "user-retry-acknowledged",
+  ]);
+  if (
+    Object.keys(params).some((key) => !fields.includes(key)) ||
+    fields.some((key) => !(key in params)) ||
+    !isProtocolIdentifier(params.requestId) ||
+    !isProtocolIdentifier(params.conversationId) ||
+    !isProtocolIdentifier(params.runId) ||
+    !Number.isSafeInteger(params.ownerEpoch) ||
+    (params.ownerEpoch as number) < 0 ||
+    typeof params.openFactDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/u.test(params.openFactDigest) ||
+    typeof params.decision !== "string" ||
+    !decisions.has(params.decision)
+  ) {
+    throw RpcErrors.invalidParams("session.resolve params are invalid");
+  }
+  return params as ReturnType<typeof parseSessionResolve>;
 }
 
 function nonEmptyText(value: unknown, label: string): string {

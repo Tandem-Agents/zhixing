@@ -254,6 +254,26 @@ export class AnchorSchedulerRuntime {
     await this.#commitParticipant.start();
   }
 
+  async recoverInstalledAuthority(): Promise<void> {
+    for (const dispatcher of this.#dispatchers.values()) {
+      await dispatcher.stopRecoveryLoop();
+    }
+    for (const dispose of this.#relayDisposers.values()) dispose();
+    for (const dispose of this.#statusDisposers.values()) dispose();
+    for (const dispose of this.#journalLifecycleDisposers.values()) dispose();
+    this.#dispatchers.clear();
+    this.#relayDisposers.clear();
+    this.#statusDisposers.clear();
+    this.#journalLifecycleDisposers.clear();
+    this.#journals.clear();
+    this.#executorByAssignment.clear();
+    this.#artifactAuthorityByAssignment.clear();
+    await this.#intentRepository.recover();
+    await this.scheduler.recoverInstalledAuthority();
+    await this.#mutationCoordinator.recoverDerivedState();
+    await this.#commitParticipant.start();
+  }
+
   activate(): void {
     this.scheduler.activate();
   }

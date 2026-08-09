@@ -168,3 +168,19 @@ export function captureBuiltinRegistryDescriptor(): readonly {
     .map(({ name, requiresAuth = true }) => ({ name, requiresAuth }))
     .sort((left, right) => left.name.localeCompare(right.name, "en-US"));
 }
+
+export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
+  "auth",
+  "health",
+  "server.shutdown",
+] as const);
+
+/** Canonical finite authority surface relayed to the current duty device. */
+export function captureCurrentAnchorRelayMethods(): readonly string[] {
+  const local = new Set<string>(DEVICE_LOCAL_RPC_METHODS);
+  return Object.freeze(
+    captureBuiltinRegistryDescriptor()
+      .map(({ name }) => name)
+      .filter((name) => !local.has(name)),
+  );
+}

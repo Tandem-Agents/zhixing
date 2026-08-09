@@ -5,7 +5,9 @@ import type {
   MeshServiceRegistry,
 } from "@zhixing/mesh/service-registry";
 import {
+  captureCurrentAnchorRelayMethods,
   RpcAppError,
+  RpcErrors,
   toJsonRpcError,
   type CanonicalFirstPartyConversationSurface,
   type FirstPartyConversationRpcRouter,
@@ -14,35 +16,14 @@ import {
 
 export const FIRST_PARTY_CONVERSATION_MESH_SERVICE = "conversation.first-party";
 
-const METHODS = new Set([
-  "session.abort",
-  "session.advancementCancel",
-  "session.advancementConfirm",
-  "session.advancementDetail",
-  "session.advancementRevise",
-  "session.clear",
-  "session.compact",
-  "session.contextBudget",
-  "session.delete",
-  "session.history",
-  "session.list",
-  "session.new",
-  "session.rename",
-  "session.resume",
-  "session.security",
-  "session.send",
-  "session.subscribe",
-  "session.taskList",
-  "session.taskListUpdate",
-  "session.unsubscribe",
-  "session.usage",
-  "confirmation.list",
-  "confirmation.resolve",
-  "dutyMigration.targets",
-  "dutyMigration.prepare",
-  "dutyMigration.commit",
-  "dutyMigration.cancel",
-]);
+export const CURRENT_ANCHOR_RELAY_METHODS = Object.freeze(
+  captureCurrentAnchorRelayMethods(),
+);
+const METHODS = new Set(CURRENT_ANCHOR_RELAY_METHODS);
+
+export function isCurrentAnchorRelayMethod(method: string): boolean {
+  return METHODS.has(method);
+}
 
 interface SurfaceIdentity {
   readonly deviceId: string;
@@ -69,6 +50,8 @@ export class FirstPartyConversationMeshTarget {
   readonly #currentByPrincipal = new Map<string, RelayConnection>();
   #surface: CanonicalFirstPartyConversationSurface | undefined;
 
+  constructor(private readonly input: { readonly isReady?: () => boolean } = {}) {}
+
   bind(surface: CanonicalFirstPartyConversationSurface): void {
     if (this.#surface && this.#surface !== surface) {
       throw new Error("First-party conversation surface is already bound");
@@ -83,6 +66,11 @@ export class FirstPartyConversationMeshTarget {
   ): Promise<Uint8Array> {
     try {
       const command = validateCommand(decode(payload), connection.peer.deviceId);
+      if (this.input.isReady?.() === false) {
+        throw RpcErrors.busy(
+          "The current duty device is completing durable migration recovery",
+        );
+      }
       if (command.op === "close") {
         const relay = this.#relays.get(surfaceKey(command.surface));
         if (!relay) return encode({ v: 1, ok: true, notifications: [] });
@@ -184,6 +172,7 @@ export class CurrentAnchorFirstPartyRpcRouter
   constructor(private readonly input: {
     readonly deviceId: string;
     readonly currentAnchorDeviceId: () => string;
+    readonly currentOwnerReady?: () => boolean;
     readonly remoteFor: (deviceId: string) => FirstPartyConversationMeshClient;
   }) {}
 
@@ -197,7 +186,14 @@ export class CurrentAnchorFirstPartyRpcRouter
   > {
     if (!METHODS.has(input.method)) return { handled: false };
     const current = this.input.currentAnchorDeviceId();
-    if (current === this.input.deviceId) return { handled: false };
+    if (current === this.input.deviceId) {
+      if (this.input.currentOwnerReady?.() === false) {
+        throw RpcErrors.busy(
+          "The current duty device is completing durable migration recovery",
+        );
+      }
+      return { handled: false };
+    }
     let remote = this.#remote.get(current);
     if (!remote) {
       remote = this.input.remoteFor(current);

@@ -19,6 +19,11 @@ import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import {
+  completePlannedAnchorInstallationBeforeBootstrap,
+  type PlannedAnchorPostInstallDescriptor,
+} from "./planned-anchor-transfer.js";
+import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 
 export type MeshRuntimeBootstrap =
   | {
@@ -42,6 +47,7 @@ export type MeshRuntimeBootstrap =
       readonly trustedIdentities: readonly DeviceIdentity[];
       readonly authorizedDeviceIds: readonly string[];
       readonly localEndpoint?: MeshEndpointDescriptor;
+      readonly plannedAnchorPostInstall?: PlannedAnchorPostInstallDescriptor;
     };
 
 /** Resolves durable trust before loading any role-specific production listener. */
@@ -61,6 +67,20 @@ export async function prepareMeshRuntimeBootstrap(input: {
     { storageMaintenance: input.storageMaintenance },
   );
   const trust = await bootstrapStore.loadTrustRecord();
+  const plannedAnchorPostInstall = trust
+    ? await completePlannedAnchorInstallationBeforeBootstrap({
+        zhixingHome: input.zhixingHome,
+        deviceId: deviceKey.deviceId,
+        secretStore: input.secretStore,
+        bootstrapStore,
+        verifier: createTrustedDeviceProtocolVerifier(
+          trust.members.map((member) => member.device),
+        ),
+        ...(input.storageMaintenance
+          ? { storageMaintenance: input.storageMaintenance }
+          : {}),
+      })
+    : undefined;
   const effective = resolveEffectiveMeshRoles({
     localDeviceId: deviceKey.deviceId,
     ...(configuration ? { configuration } : {}),
@@ -129,5 +149,8 @@ export async function prepareMeshRuntimeBootstrap(input: {
       .filter((member) => member.state === "active")
       .map((member) => member.device.deviceId),
     ...(localEndpoint ? { localEndpoint } : {}),
+    ...(plannedAnchorPostInstall?.requiresPostInstallCompletion
+      ? { plannedAnchorPostInstall }
+      : {}),
   };
 }

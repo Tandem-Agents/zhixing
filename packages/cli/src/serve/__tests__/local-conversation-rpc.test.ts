@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { localConversationId } from "@zhixing/core";
 import { RpcAppError } from "@zhixing/server";
-import { LocalConversationRpcRouter } from "../local-conversation-rpc.js";
+import {
+  ExecutorFirstPartyRpcRouter,
+  LocalConversationRpcRouter,
+} from "../local-conversation-rpc.js";
 import type { LocalConversationOwnerPort } from "../local-conversation-owner.js";
 
 const DEVICE_ID = "device-abcdef";
@@ -229,6 +232,74 @@ describe("LocalConversationRpcRouter", () => {
       connection,
     );
   });
+
+  it("在本机 owner 上以同一 surface identity 解析 durable uncertain run", async () => {
+    const owner = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    const input = {
+      requestId: "resolve-request-1",
+      conversationId: CONVERSATION_ID,
+      runId: "run-local-1",
+      ownerEpoch: 1,
+      openFactDigest: `sha256:${"a".repeat(64)}`,
+      decision: "user-abandoned" as const,
+    };
+
+    await expect(router.dispatch({
+      method: "session.resolve",
+      params: input,
+      connection: fakeConnection(),
+    })).resolves.toMatchObject({
+      handled: true,
+      result: { state: "cancelled" },
+    });
+    expect(owner.resolveDurableUncertain).toHaveBeenCalledWith({
+      ...input,
+      surfacePrincipal: "rpc:test",
+      connectionId: "7",
+    });
+  });
+
+  it("executor-only 按 method ownership 二选一且 local false 不串到 current anchor", async () => {
+    const local = { dispatch: vi.fn(async () => ({ handled: false as const })) };
+    const currentAnchor = {
+      dispatch: vi.fn(async () => ({ handled: true as const, result: "remote" })),
+    };
+    const router = new ExecutorFirstPartyRpcRouter({ local, currentAnchor });
+    const connection = fakeConnection();
+
+    await expect(router.dispatch({
+      method: "session.new",
+      params: {},
+      connection,
+    })).resolves.toEqual({ handled: false });
+    expect(local.dispatch).toHaveBeenCalledTimes(1);
+    expect(currentAnchor.dispatch).not.toHaveBeenCalled();
+
+    await expect(router.dispatch({
+      method: "schedule.list",
+      params: {},
+      connection,
+    })).resolves.toEqual({ handled: true, result: "remote" });
+    expect(currentAnchor.dispatch).toHaveBeenCalledTimes(1);
+
+    await expect(router.dispatch({
+      method: "health",
+      params: {},
+      connection,
+    })).resolves.toEqual({ handled: false });
+    await expect(router.dispatch({
+      method: "unknown.method",
+      params: {},
+      connection,
+    })).resolves.toEqual({ handled: false });
+    expect(local.dispatch).toHaveBeenCalledTimes(1);
+    expect(currentAnchor.dispatch).toHaveBeenCalledTimes(1);
+  });
 });
 
 function ownerPort(): LocalConversationOwnerPort {
@@ -247,6 +318,10 @@ function ownerPort(): LocalConversationOwnerPort {
     })),
     mutateSession: vi.fn(async () => ({ revision: 1 })),
     cancelTurns: vi.fn(async () => {}),
+    resolveDurableUncertain: vi.fn(async () => ({
+      state: "cancelled",
+      factDigest: `sha256:${"b".repeat(64)}`,
+    })),
     runTurn: vi.fn(async () => ({ kind: "aborted" })),
     admitTurn: vi.fn(async (input) => {
       input.notify("session.complete", {

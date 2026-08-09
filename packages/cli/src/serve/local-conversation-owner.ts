@@ -113,6 +113,15 @@ export interface LocalConversationOwnerPort {
     readonly conversationId: string;
     readonly requestId: string;
   }): Promise<void>;
+  resolveDurableUncertain(
+    input: Omit<
+      Parameters<ConversationManager["resolveDurableUncertain"]>[0],
+      "principal"
+    > & {
+      readonly surfacePrincipal: string;
+      readonly connectionId: string;
+    },
+  ): ReturnType<ConversationManager["resolveDurableUncertain"]>;
   runTurn(input: {
     readonly conversationId: string;
     readonly text: string;
@@ -460,6 +469,23 @@ export class LocalConversationOwnerAssembly {
               deviceId: this.#owner.deviceId,
               connectionId: "local-owner-internal",
             },
+          });
+        });
+      },
+      resolveDurableUncertain: async (input) => {
+        return this.#runCommand(async () => {
+          await this.#assertConversationCurrent(input.conversationId);
+          return this.#manager.resolveDurableUncertain({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            requestId: input.requestId,
+            ownerEpoch: input.ownerEpoch,
+            openFactDigest: input.openFactDigest,
+            decision: input.decision,
+            principal: this.#manager.durableControlPrincipal({
+              surfacePrincipal: input.surfacePrincipal,
+              connectionId: input.connectionId,
+            }),
           });
         });
       },

@@ -686,6 +686,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/rpc/src/confirmation-bridge.ts",
     "packages/server/src/context.ts",
     "packages/server/src/rpc/handlers.ts",
+    "packages/server/src/rpc/methods/index.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/server/src/rpc/methods/confirmation.ts",
     "packages/owner-kernel/src/conversation-transfer.ts",
@@ -720,8 +721,8 @@ test("conversation adoption stays bound to the two production roots and ordered 
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
       (text) => text.replace(
-        "      await this.#restoreCommittedTransfers();\n      await this.#control.start();",
-        "      await this.#control.start();\n      await this.#restoreCommittedTransfers();",
+        "      await this.#restoreCommittedTransfers();",
+        "      await this.#startControl();\n      await this.#restoreCommittedTransfers();",
       ),
     )).join("\n"),
     /restore before mesh admission opens/,
@@ -736,9 +737,9 @@ test("conversation adoption stays bound to the two production roots and ordered 
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/executor-role-runtime.ts",
-      (text) => text.replace("conversationRpc: localConversationRpc,", "conversationRpc: undefined,"),
+      (text) => text.replace("      conversationRpc,", "      conversationRpc: undefined,"),
     )).join("\n"),
-    /first-party local conversation router injection/,
+    /first-party ownership composite injection/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
@@ -749,6 +750,16 @@ test("conversation adoption stays bound to the two production roots and ordered 
       ),
     )).join("\n"),
     /must share current-owner resolution and canonical local dispatch/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "if (LOCAL_METHODS.has(input.method)) return this.input.local.dispatch(input);",
+        "if (false) return this.input.local.dispatch(input);",
+      ),
+    )).join("\n"),
+    /method ownership exact-set drifted/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
@@ -1008,11 +1019,14 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/planned-anchor-transfer.ts",
     "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
+    "packages/cli/src/serve/local-conversation-rpc.ts",
+    "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/runtime/duty-migration-command.ts",
     "packages/server/src/rpc/methods/server.ts",
+    "packages/server/src/rpc/methods/index.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1076,9 +1090,35 @@ test("planned duty migration stays bound to two production roots and a finite ow
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/first-party-conversation-mesh.ts",
-      (text) => text.replace('  "dutyMigration.targets",', '  "dutyMigration.legacyTargets",'),
+      (text) => text.replace(
+        "captureCurrentAnchorRelayMethods(),",
+        '["dutyMigration.targets"],',
+      ),
     )).join("\n"),
     /first-party current-owner relay drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
+        "const candidate = await this.#candidates.claimCandidate(identity);",
+        "const context = this.#context(identity.transferId);\n    const candidate = await this.#candidates.claimCandidate(identity);",
+      ).replace(
+        "    const context = this.#context(identity.transferId);\n    const existing = await context.journal.state(identity.transferId);",
+        "    const existing = await context.journal.state(identity.transferId);",
+      ),
+    )).join("\n"),
+    /candidate durable single-flight or claim-before-effect drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+      (text) => text.replace(
+        "await completePlannedAnchorInstallationBeforeBootstrap({",
+        "await Promise.resolve(undefined as never)({",
+      ),
+    )).join("\n"),
+    /pre-bootstrap\/post-install completion closure drifted/,
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(

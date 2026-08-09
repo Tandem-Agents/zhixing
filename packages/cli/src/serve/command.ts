@@ -969,6 +969,26 @@ async function runServerProcess(
       await ctx.meshRuntime.bindPostAdoptionReview(adoptionReview);
     }
     await journalMaintenance?.start();
+    const installedSchedulerRuntime = schedulerRuntime;
+    if (!installedSchedulerRuntime) {
+      throw new Error("Planned anchor post-install requires the scheduler runtime");
+    }
+    await ctx.meshRuntime?.bindPlannedAnchorPostInstallConsumers({
+      recoverScheduler: async (_obligations) => {
+        await installedSchedulerRuntime.recoverInstalledAuthority();
+      },
+      recoverConversation: async (_obligations) => {
+        const protocol = ctx.conversationProtocol;
+        if (!protocol) return;
+        await protocol.stopRecoveryLoop();
+        await protocol.recoverReadinessProjections();
+        protocol.startRecoveryLoop();
+        await protocol.recover();
+      },
+      recoverDelivery: async (_obligations) => {
+        await ctx.deliveryStack?.recoverInstalledAuthority();
+      },
+    });
   }
   const scheduler = schedulerProductRef;
 
@@ -1041,6 +1061,7 @@ async function runServerProcess(
           conversationRpc: new CurrentAnchorFirstPartyRpcRouter({
             deviceId: ctx.authorityRuntime.deviceId,
             currentAnchorDeviceId: () => ctx.meshRuntime!.currentAnchorDeviceId(),
+            currentOwnerReady: () => ctx.meshRuntime!.plannedCurrentOwnerReady(),
             remoteFor: (deviceId) => ctx.meshRuntime!.firstPartyConversationFor(deviceId),
           }),
         }

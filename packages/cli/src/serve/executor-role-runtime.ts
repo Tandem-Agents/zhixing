@@ -48,7 +48,11 @@ import {
 } from "@zhixing/orchestrator/advancement";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
-import { LocalConversationRpcRouter } from "./local-conversation-rpc.js";
+import {
+  ExecutorFirstPartyRpcRouter,
+  LocalConversationRpcRouter,
+} from "./local-conversation-rpc.js";
+import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mesh.js";
 import {
   createServerContext,
   DEFAULT_SERVER_CONFIG,
@@ -323,6 +327,15 @@ export async function runExecutorRole(
       owner: localConversationOwner.port(),
       remoteFor: (deviceId) => mesh!.firstPartyConversationFor(deviceId),
     });
+    const conversationRpc = new ExecutorFirstPartyRpcRouter({
+      local: localConversationRpc,
+      currentAnchor: new CurrentAnchorFirstPartyRpcRouter({
+        deviceId: authority.deviceId,
+        currentAnchorDeviceId: () => mesh!.currentAnchorDeviceId(),
+        currentOwnerReady: () => mesh!.plannedCurrentOwnerReady(),
+        remoteFor: (deviceId) => mesh!.firstPartyConversationFor(deviceId),
+      }),
+    });
     const serverContext = createServerContext({
       config: {
         ...DEFAULT_SERVER_CONFIG,
@@ -331,7 +344,7 @@ export async function runExecutorRole(
       },
       version: ZHIXING_CLI_VERSION,
       token: token.token,
-      conversationRpc: localConversationRpc,
+      conversationRpc,
       runtimeControl: {
         conversationStatus: (after) =>
           localConversationOwner!.port().statusHistory(after),

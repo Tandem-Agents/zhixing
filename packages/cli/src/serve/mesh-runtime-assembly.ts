@@ -108,9 +108,12 @@ import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
 import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.js";
 import {
+  completePlannedAnchorInstallationBeforeBootstrap,
+  finishPlannedAnchorPostInstall,
   PlannedAnchorTransferOwner,
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
+  type PlannedAnchorPostInstallDescriptor,
 } from "./planned-anchor-transfer.js";
 import {
   PlannedAnchorTransferMeshClient,
@@ -124,6 +127,66 @@ import type { PlannedAnchorTransferLifecycle } from "./planned-anchor-transfer.j
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
+}
+
+export interface PlannedAnchorPostInstallConsumers {
+  readonly recoverScheduler: (
+    obligations: readonly { readonly kind: "assignment" | "intent"; readonly id: string }[],
+  ) => Promise<void>;
+  readonly recoverConversation: (
+    obligations: readonly {
+      readonly kind: "interaction" | "confirmation" | "final";
+      readonly id: string;
+    }[],
+  ) => Promise<void>;
+  readonly recoverDelivery: (
+    obligations: readonly { readonly kind: "delivery"; readonly id: string }[],
+  ) => Promise<void>;
+}
+
+export interface PlannedAnchorPostInstallGroups {
+  readonly scheduler: readonly {
+    readonly kind: "assignment" | "intent";
+    readonly id: string;
+  }[];
+  readonly conversation: readonly {
+    readonly kind: "interaction" | "confirmation" | "final";
+    readonly id: string;
+  }[];
+  readonly delivery: readonly {
+    readonly kind: "delivery";
+    readonly id: string;
+  }[];
+}
+
+/** Single finite partition consumed by startup and live planned completion. */
+export function partitionPlannedAnchorPostInstall(
+  obligations: PlannedAnchorPostInstallDescriptor["pendingObligations"],
+): PlannedAnchorPostInstallGroups {
+  const scheduler: Array<{ kind: "assignment" | "intent"; id: string }> = [];
+  const conversation: Array<{
+    kind: "interaction" | "confirmation" | "final";
+    id: string;
+  }> = [];
+  const delivery: Array<{ kind: "delivery"; id: string }> = [];
+  for (const obligation of obligations) {
+    if (obligation.kind === "assignment" || obligation.kind === "intent") {
+      scheduler.push({ kind: obligation.kind, id: obligation.id });
+    } else if (
+      obligation.kind === "interaction" ||
+      obligation.kind === "confirmation" ||
+      obligation.kind === "final"
+    ) {
+      conversation.push({ kind: obligation.kind, id: obligation.id });
+    } else {
+      delivery.push({ kind: obligation.kind, id: obligation.id });
+    }
+  }
+  return Object.freeze({
+    scheduler: Object.freeze(scheduler),
+    conversation: Object.freeze(conversation),
+    delivery: Object.freeze(delivery),
+  });
 }
 
 const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
@@ -193,6 +256,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly localEndpoint?: MeshEndpointDescriptor;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly plannedAnchorIssuerKey?: DeviceKey;
+  readonly plannedAnchorPostInstall?: PlannedAnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
   readonly protocol?: ConversationProtocolRuntime;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -233,14 +297,18 @@ export class MeshRuntimeAssembly {
   #plannedAnchorCheckpointOwner: AuthorityCheckpointOwnerPort | undefined;
   #plannedAnchorLifecycle: PlannedAnchorTransferLifecycle | undefined;
   #plannedAnchorIssuerKey: DeviceKey | undefined;
+  #plannedAnchorPostInstall: PlannedAnchorPostInstallDescriptor | undefined;
+  #plannedAnchorPostInstallConsumers: PlannedAnchorPostInstallConsumers | undefined;
   #plannedCommittedTargetDeviceId: string | undefined;
   #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
   #postAdoptionReview: PostAdoptionReviewPort | undefined;
   #started = false;
+  #controlStarted = false;
   #closed = false;
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
     this.#plannedAnchorIssuerKey = options.plannedAnchorIssuerKey;
+    this.#plannedAnchorPostInstall = options.plannedAnchorPostInstall;
     const roles = new Set(options.configuration.enabledRoles);
     if (roles.has("anchor") && !options.protocol) {
       throw new Error("Anchor mesh role requires the conversation owner protocol");
@@ -355,7 +423,9 @@ export class MeshRuntimeAssembly {
         })
       : undefined;
     this.#firstPartyConversationTarget = roles.has("anchor")
-      ? new FirstPartyConversationMeshTarget()
+      ? new FirstPartyConversationMeshTarget({
+          isReady: () => this.plannedCurrentOwnerReady(),
+        })
       : undefined;
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
@@ -761,6 +831,7 @@ export class MeshRuntimeAssembly {
     readonly ready: boolean;
     readonly code?: "unavailable";
   }[]> {
+    this.#requirePlannedCurrentOwnerReady();
     if (!this.#plannedAnchorOwner) return [];
     return this.#plannedTransferRuntime.run(async () => {
       const sourceDeviceId = this.#currentAnchorDeviceId();
@@ -801,6 +872,7 @@ export class MeshRuntimeAssembly {
     readonly transferId: string;
     readonly targetDeviceId: string;
   }) {
+    this.#requirePlannedCurrentOwnerReady();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(() => owner.prepare(input));
@@ -810,6 +882,7 @@ export class MeshRuntimeAssembly {
     readonly requestId: string;
     readonly transferId: string;
   }) {
+    this.#requirePlannedCurrentOwnerReady();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(() => owner.fence(input));
@@ -819,6 +892,7 @@ export class MeshRuntimeAssembly {
     readonly requestId: string;
     readonly transferId: string;
   }) {
+    this.#requirePlannedCurrentOwnerReady();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(async () => {
@@ -831,10 +905,21 @@ export class MeshRuntimeAssembly {
     readonly requestId: string;
     readonly transferId: string;
   }) {
+    this.#requirePlannedCurrentOwnerReady();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(() =>
       owner.abort({ ...input, reason: "operator-cancelled" }));
+  }
+
+  async bindPlannedAnchorPostInstallConsumers(
+    consumers: PlannedAnchorPostInstallConsumers,
+  ): Promise<void> {
+    if (this.#plannedAnchorPostInstallConsumers) {
+      throw new Error("Planned anchor post-install consumers are already bound");
+    }
+    this.#plannedAnchorPostInstallConsumers = consumers;
+    await this.#completePlannedAnchorPostInstall();
   }
 
   bindAuthorityCheckpointOwner(owner: AuthorityCheckpointOwnerPort | undefined): void {
@@ -854,9 +939,11 @@ export class MeshRuntimeAssembly {
         await this.#plannedAnchorOwner?.recoverBeforeAdmission();
       });
       await this.#restoreCommittedTransfers();
-      await this.#control.start();
       await this.#worker?.recover();
       this.#started = true;
+      if (!this.#plannedAnchorPostInstall) {
+        await this.#startControl();
+      }
     } catch (error) {
       await this.stop();
       throw error;
@@ -870,10 +957,12 @@ export class MeshRuntimeAssembly {
     this.#transferAbort.abort(new Error("Conversation transfer runtime is stopping"));
     await this.#plannedTransferRuntime.close();
     this.#worker?.stopAccepting();
-    await this.#control.stop();
+    if (this.#controlStarted) await this.#control.stop();
+    this.#controlStarted = false;
     await this.#worker?.close();
     this.#disposePlannedAnchorTarget?.();
     this.#disposePlannedAnchorSource?.();
+    this.#plannedAnchorTarget?.close();
     this.#disposePlannedAnchorTarget = undefined;
     this.#disposePlannedAnchorSource = undefined;
     this.#plannedAnchorOwner = undefined;
@@ -1126,6 +1215,7 @@ export class MeshRuntimeAssembly {
     this.#plannedAnchorRole = role;
     this.#disposePlannedAnchorTarget?.();
     this.#disposePlannedAnchorSource?.();
+    this.#plannedAnchorTarget?.close();
     this.#disposePlannedAnchorTarget = undefined;
     this.#disposePlannedAnchorSource = undefined;
     this.#plannedAnchorOwner = undefined;
@@ -1211,6 +1301,23 @@ export class MeshRuntimeAssembly {
       verifier: this.options.authority.verifier,
       readiness: this.options.authority.plannedAnchorReadiness,
       onInstalled: async (record) => {
+        const completion = await completePlannedAnchorInstallationBeforeBootstrap({
+          zhixingHome: this.options.zhixingHome,
+          deviceId: this.options.authority.deviceId,
+          secretStore: this.options.secretStore,
+          bootstrapStore: this.options.bootstrapStore,
+          verifier: this.options.authority.verifier,
+          ...(this.options.authority.storageMaintenance
+            ? { storageMaintenance: this.options.authority.storageMaintenance }
+            : {}),
+        });
+        if (
+          !completion ||
+          completion.installation.trustRecord.issuer.deviceId !== record.issuer.deviceId
+        ) {
+          throw new Error("Installed duty device has no exact post-install descriptor");
+        }
+        this.#plannedAnchorPostInstall = completion;
         const issuerKey = await loadActiveAnchorIssuerKey(
           this.options.secretStore,
           record.issuer.issuerKeyId,
@@ -1221,6 +1328,7 @@ export class MeshRuntimeAssembly {
         this.#plannedAnchorIssuerKey = issuerKey;
         this.options.bootstrapStore.bindIssuerKey(issuerKey);
         await this.#control.reconcileTrust(record);
+        await this.#completePlannedAnchorPostInstall();
       },
     });
     this.#disposePlannedAnchorTarget = registerPlannedAnchorTransferMeshServices(
@@ -1233,6 +1341,43 @@ export class MeshRuntimeAssembly {
         lifecycle: this.#plannedTransferRuntime,
       },
     );
+  }
+
+  plannedCurrentOwnerReady(): boolean {
+    return this.#plannedAnchorPostInstall === undefined;
+  }
+
+  #requirePlannedCurrentOwnerReady(): void {
+    if (!this.plannedCurrentOwnerReady()) {
+      throw new Error("Current duty device is completing its durable migration consumers");
+    }
+  }
+
+  async #completePlannedAnchorPostInstall(): Promise<void> {
+    const completion = this.#plannedAnchorPostInstall;
+    if (!completion) {
+      if (this.#started) await this.#startControl();
+      return;
+    }
+    const consumers = this.#plannedAnchorPostInstallConsumers;
+    if (!consumers) return;
+    const groups = partitionPlannedAnchorPostInstall(completion.pendingObligations);
+    await consumers.recoverScheduler(groups.scheduler);
+    await consumers.recoverConversation(groups.conversation);
+    await consumers.recoverDelivery(groups.delivery);
+    await finishPlannedAnchorPostInstall({
+      zhixingHome: this.options.zhixingHome,
+      transferId: completion.installation.transferId,
+      readiness: this.options.authority.plannedAnchorReadiness,
+    });
+    this.#plannedAnchorPostInstall = undefined;
+    if (this.#started) await this.#startControl();
+  }
+
+  async #startControl(): Promise<void> {
+    if (this.#controlStarted || this.#closed) return;
+    await this.#control.start();
+    this.#controlStarted = true;
   }
 
   currentAnchorDeviceId(): string {

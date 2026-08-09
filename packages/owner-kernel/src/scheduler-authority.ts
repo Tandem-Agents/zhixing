@@ -325,6 +325,25 @@ export class AnchorScheduler {
     this.#arm();
   }
 
+  /** Rebuilds every disposable scheduler projection after an authority base install. */
+  async recoverInstalledAuthority(): Promise<void> {
+    await this.pauseForAuthorityTransfer();
+    for (const unsubscribe of this.#lifecycleUnsubscribers.values()) unsubscribe();
+    this.#lifecycleUnsubscribers.clear();
+    this.#journals.clear();
+    this.#views.clear();
+    this.#definitions.clear();
+    this.#nextRunByTask.clear();
+    this.#activeRunCountByTask.clear();
+    this.#queuedRunsByTask.clear();
+    this.#taskByRun.clear();
+    this.#recoveringTaskIds.clear();
+    this.#prepared = false;
+    await this.prepare();
+    this.activate();
+    await this.#activationRecovery;
+  }
+
   async createTask(
     spec: TaskSpec,
     requestId = `schedule-create-${randomUUID()}`,

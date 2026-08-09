@@ -281,6 +281,9 @@ const meshSurface: AccessSurface = {
       ...(bootstrap.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.anchorIssuerKey }
         : {}),
+      ...(bootstrap.plannedAnchorPostInstall
+        ? { plannedAnchorPostInstall: bootstrap.plannedAnchorPostInstall }
+        : {}),
       authority: ctx.authorityRuntime,
       protocol: ctx.conversationProtocol,
       ...(ctx.localConversationOwner

@@ -17,6 +17,8 @@ import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { currentMaintenanceAbortSignal } from "@zhixing/core/resources";
 import type {
   PlannedAnchorTransferArtifactSourcePort,
+  PlannedAnchorCandidateIdentity,
+  PlannedAnchorCandidateRelease,
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTargetReadinessSummary,
   PlannedAnchorTransferTargetPort,
@@ -26,6 +28,8 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 export const PLANNED_ANCHOR_TRANSFER_READY_SERVICE = "anchor.transfer.ready";
 export const PLANNED_ANCHOR_TRANSFER_SUMMARY_SERVICE = "anchor.transfer.summary";
 export const PLANNED_ANCHOR_TRANSFER_SERVICE = "anchor.transfer";
+export const PLANNED_ANCHOR_CANDIDATE_RELEASE_SERVICE =
+  "anchor.transfer.candidate-release";
 export const PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE =
   "anchor.transfer.trust-reconciliation";
 
@@ -49,8 +53,7 @@ export const PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR = Object.freeze({
 
 interface ReadyRequest {
   readonly v: 1;
-  readonly transferId: string;
-  readonly sourceDeviceId: string;
+  readonly candidate: PlannedAnchorCandidateIdentity;
   readonly targetDeviceId: string;
 }
 
@@ -105,22 +108,44 @@ export class PlannedAnchorTransferMeshClient
   }
 
   async ready(input: {
-    readonly transferId: string;
-    readonly sourceDeviceId: string;
+    readonly candidate: PlannedAnchorCandidateIdentity;
   }): Promise<ReadyProof> {
-    if (input.sourceDeviceId !== this.sourceDeviceId) {
+    if (input.candidate.sourceDeviceId !== this.sourceDeviceId) {
       throw new TypeError("Migration ready request changed its source device");
+    }
+    if (input.candidate.targetDeviceId !== this.targetDeviceId) {
+      throw new TypeError("Migration ready request changed its target device");
     }
     return decode(await this.client.request(
       PLANNED_ANCHOR_TRANSFER_READY_SERVICE,
       encode({
         v: 1,
-        transferId: input.transferId,
-        sourceDeviceId: this.sourceDeviceId,
+        candidate: input.candidate,
         targetDeviceId: this.targetDeviceId,
       } satisfies ReadyRequest),
       currentMaintenanceAbortSignal(),
     )) as ReadyProof;
+  }
+
+  async releaseCandidate(input: PlannedAnchorCandidateRelease): Promise<void> {
+    if (
+      input.identity.sourceDeviceId !== this.sourceDeviceId ||
+      input.identity.targetDeviceId !== this.targetDeviceId
+    ) {
+      throw new TypeError("Migration candidate release changed its authenticated devices");
+    }
+    const value = decode(await this.client.request(
+      PLANNED_ANCHOR_CANDIDATE_RELEASE_SERVICE,
+      encode(input),
+      currentMaintenanceAbortSignal(),
+    ));
+    if (
+      value === null || typeof value !== "object" || Array.isArray(value) ||
+      canonicalize(Object.keys(value).sort()) !== canonicalize(["released"]) ||
+      (value as { released?: unknown }).released !== true
+    ) {
+      throw new TypeError("Migration candidate release result is invalid");
+    }
   }
 
   async apply(command: AnchorTransferCommand): Promise<AnchorTransferResult> {
@@ -185,8 +210,9 @@ export function registerPlannedAnchorTransferMeshServices(
       handler: async (payload, connection) => {
         const request = readyRequest(decode(payload));
         if (
-          request.sourceDeviceId !== connection.peer.deviceId ||
-          request.sourceDeviceId !== options.currentSourceDeviceId() ||
+          request.candidate.sourceDeviceId !== connection.peer.deviceId ||
+          request.candidate.sourceDeviceId !== options.currentSourceDeviceId() ||
+          request.candidate.targetDeviceId !== options.targetDeviceId ||
           request.targetDeviceId !== options.targetDeviceId
         ) {
           throw new TypeError("Migration ready request does not bind its authenticated devices");
@@ -194,8 +220,8 @@ export function registerPlannedAnchorTransferMeshServices(
         const target = options.target();
         if (!target) throw new Error("Migration target receiver is unavailable");
         return encode(await (options.lifecycle
-          ? options.lifecycle.run(() => target.ready(request))
-          : target.ready(request)));
+          ? options.lifecycle.run(() => target.ready({ candidate: request.candidate }))
+          : target.ready({ candidate: request.candidate })));
       },
     },
   );
@@ -224,7 +250,33 @@ export function registerPlannedAnchorTransferMeshServices(
         : target.apply(command)));
     },
   });
+  const disposeRelease = registry.register(
+    PLANNED_ANCHOR_CANDIDATE_RELEASE_SERVICE,
+    {
+      access: "write",
+      availability: "negotiated-version",
+      authorize: (connection) => authorize(connection.peer.deviceId),
+      handler: async (payload, connection) => {
+        const release = candidateReleaseRequest(decode(payload));
+        if (
+          release.identity.sourceDeviceId !== connection.peer.deviceId ||
+          release.identity.targetDeviceId !== options.targetDeviceId
+        ) {
+          throw new TypeError(
+            "Migration candidate release does not bind its authenticated devices",
+          );
+        }
+        const target = options.target();
+        if (!target) throw new Error("Migration target receiver is unavailable");
+        await (options.lifecycle
+          ? options.lifecycle.run(() => target.releaseCandidate(release))
+          : target.releaseCandidate(release));
+        return encode({ released: true });
+      },
+    },
+  );
   return () => {
+    disposeRelease();
     disposeCommand();
     disposeReady();
     disposeSummary();
@@ -351,15 +403,34 @@ function readyRequest(input: unknown): ReadyRequest {
   const value = input as Record<string, unknown>;
   if (
     canonicalize(Object.keys(value).sort()) !==
-      canonicalize(["sourceDeviceId", "targetDeviceId", "transferId", "v"]) ||
+      canonicalize(["candidate", "targetDeviceId", "v"]) ||
     value.v !== 1 ||
-    typeof value.transferId !== "string" ||
-    typeof value.sourceDeviceId !== "string" ||
+    !value.candidate || typeof value.candidate !== "object" ||
+    Array.isArray(value.candidate) ||
     typeof value.targetDeviceId !== "string"
   ) {
     throw new TypeError("Migration ready request fields are incomplete or unknown");
   }
   return value as unknown as ReadyRequest;
+}
+
+function candidateReleaseRequest(input: unknown): PlannedAnchorCandidateRelease {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Migration candidate release request must be an object");
+  }
+  const value = input as Partial<PlannedAnchorCandidateRelease> & Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(value).sort()) !==
+      canonicalize(["identity", "reason", "signature", "t", "v"]) ||
+    value.v !== 1 ||
+    value.t !== "planned-anchor-candidate-release" ||
+    !value.identity || typeof value.identity !== "object" ||
+    Array.isArray(value.identity) ||
+    !value.signature || typeof value.signature !== "object"
+  ) {
+    throw new TypeError("Migration candidate release request fields are invalid");
+  }
+  return value as PlannedAnchorCandidateRelease;
 }
 
 function summaryRequest(input: unknown): SummaryRequest {
