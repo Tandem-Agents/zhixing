@@ -2,14 +2,14 @@ import path from "node:path";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   FileRecoveryCheckpointTarget,
-  type RetirableRecoveryCheckpointTarget,
+  type InventoryRecoveryCheckpointTarget,
 } from "@zhixing/mesh/checkpoint-target";
 
 export function deferredPairedCheckpointTarget(input: {
   readonly zhixingHome: string;
   readonly deviceId: string;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
-}): RetirableRecoveryCheckpointTarget {
+}): InventoryRecoveryCheckpointTarget {
   const open = () => FileRecoveryCheckpointTarget.openPaired({
     targetRoot: path.join(input.zhixingHome, "distributed-runtime", "recovery-checkpoints"),
     targetDeviceId: input.deviceId,
@@ -41,6 +41,7 @@ export function deferredPairedCheckpointTarget(input: {
         },
       };
     },
+    inventory: (requestId, signal) => use((target) => target.inventory(requestId, signal)),
     retire: async (checkpointId, supersededBy) =>
       use((target) => target.retire(checkpointId, supersededBy)),
   };

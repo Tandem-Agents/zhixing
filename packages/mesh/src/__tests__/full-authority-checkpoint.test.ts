@@ -27,6 +27,7 @@ import { FileRecoveryCheckpointTarget, type RetirableRecoveryCheckpointTarget } 
 import {
   openFullAuthorityCheckpoint,
   readCheckpointChunk,
+  verifyStoredFullAuthorityCheckpoint,
   type CheckpointPackage,
 } from "../checkpoint.js";
 import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
@@ -71,6 +72,13 @@ describe("full authority recovery checkpoints", () => {
       { t: "checkpoint.progress", checkpointId: "checkpoint-1", seq: 0, receivedBytes: 0, complete: false },
       { t: "checkpoint.appended", checkpointId: "checkpoint-1", seq: 0, receivedBytes: 1, complete: true },
       { t: "checkpoint.manifest", checkpointId: "checkpoint-1", envelope: manifest.checkpoint.envelope },
+      {
+        t: "checkpoint.inventory",
+        requestId: "request-1",
+        targetId: "backup-device:device-target",
+        recipientKeyId: manifest.checkpoint.envelope.recipientKeyId,
+        entries: [{ checkpointId: manifest.checkpoint.envelope.checkpointId, envelope: manifest.checkpoint.envelope }],
+      },
       { t: "checkpoint.range", checkpointId: "checkpoint-1", seq: 0, offset: 0, bytes: "YQ" },
       { t: "checkpoint.retired", checkpointId: "checkpoint-1", supersededBy: "checkpoint-2" },
       {
@@ -177,6 +185,57 @@ describe("full authority recovery checkpoints", () => {
       issuer: fixture.identity,
     })).toThrow(/incomplete or duplicated/);
   });
+
+  it("streams verified full contents into a transfer-private artifact store", async () => {
+    const fixture = await authorityFixture();
+    const retained = Buffer.alloc(2 * 1024 * 1024 + 17, 0x5a);
+    const retainedRef = await fixture.artifacts.put(retained);
+    await fixture.log.append([{ stream: "control", body: { t: "global-state-write", ref: retainedRef } }]);
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J0000000000000000000000S",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention: fixture.lifecycle,
+    });
+    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-private-import-"));
+    const store = new FileArtifactStore(path.join(root, "artifacts"));
+    const receiver = new FileResumableArtifactReceiver(store, path.join(root, "partials"), {
+      maxArtifactBytes: MAX_SURFACE_ASSET_BYTES,
+      maxChunkBytes: 1024 * 1024,
+    });
+    const writes: number[] = [];
+    const verified = await verifyStoredFullAuthorityCheckpoint({
+      package: captured.checkpoint,
+      recoveryRoot: fixture.root,
+      issuer: fixture.identity,
+      sink: {
+        write: async (content, offset, bytes) => {
+          writes.push(bytes.byteLength);
+          const progress = await receiver.append(content.ref, offset, bytes);
+          if (offset + bytes.byteLength === content.ref.bytes && !progress.complete) {
+            throw new Error("Private checkpoint content did not finalize");
+          }
+        },
+      },
+    });
+    try {
+      expect(verified.payload.source).toEqual(captured.source.payload.source);
+      expect(Math.max(...writes)).toBeLessThanOrEqual(1024 * 1024);
+      expect(await store.get(retainedRef)).toEqual(retained);
+      for (const page of verified.payload.records.pages) {
+        expect(await store.has({ digest: page.digest, bytes: page.bytes })).toBe(true);
+      }
+    } finally {
+      verified.verificationNonce.fill(0);
+      retained.fill(0);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("captures the lifecycle-index retention set at one source head, including large leaves and deletion", async () => {
     const fixture = await authorityFixture();
@@ -613,6 +672,84 @@ describe("full authority recovery checkpoints", () => {
       checkpointId: captured.checkpoint.envelope.checkpointId,
     } as never)).rejects.toThrow(/unsupported/);
   }, 15_000);
+
+  it("inventories only complete full checkpoints and strictly binds paired inventory results", async () => {
+    const fixture = await authorityFixture();
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000031",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention: fixture.lifecycle,
+    });
+    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-inventory-"));
+    const targetRoot = path.join(root, "target");
+    const durable = await FileRecoveryCheckpointTarget.openPaired({
+      targetRoot,
+      targetDeviceId: "device-target",
+    });
+    await durable.writeDurable(captured.checkpoint);
+
+    const trustOnly = clonePackage(await materializePackage(captured.checkpoint));
+    trustOnly.envelope = {
+      ...trustOnly.envelope,
+      checkpointId: "01J00000000000000000000032",
+      manifest: { ...trustOnly.envelope.manifest, scope: ["trust"] },
+    };
+    await durable.writeDurable(trustOnly);
+    await mkdir(path.join(targetRoot, "01J00000000000000000000033"));
+    await writeFile(path.join(targetRoot, "01J00000000000000000000033", "envelope.json"), "{}");
+    await writeFile(path.join(targetRoot, "unrelated.txt"), "not a checkpoint");
+
+    await expect(durable.inventory("inventory-1")).resolves.toEqual([{
+      checkpointId: captured.checkpoint.envelope.checkpointId,
+      targetId: "backup-device:device-target",
+      recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+      envelope: captured.checkpoint.envelope,
+    }]);
+
+    const receiver = new PairedCheckpointReceiver({
+      homeId: fixture.trust.homeId,
+      sourceDeviceId: fixture.identity.deviceId,
+      targetDeviceId: "device-target",
+      recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+      staging: new FilePairedCheckpointStaging({
+        root: path.join(root, "incoming"),
+        target: durable,
+      }),
+    });
+    const paired = new PairedRecoveryCheckpointTarget({
+      homeId: fixture.trust.homeId,
+      sourceDeviceId: fixture.identity.deviceId,
+      targetDeviceId: "device-target",
+      recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+      transport: receiver,
+    });
+    await expect(paired.inventory("inventory-2")).resolves.toHaveLength(1);
+    const unrelated = new PairedRecoveryCheckpointTarget({
+      homeId: fixture.trust.homeId,
+      sourceDeviceId: fixture.identity.deviceId,
+      targetDeviceId: "device-target",
+      recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+      transport: {
+        request: async () => ({
+          t: "checkpoint.inventory",
+          requestId: "other-request",
+          targetId: "backup-device:device-target",
+          recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+          entries: [],
+        }),
+      },
+    });
+    await expect(unrelated.inventory("inventory-3")).rejects.toThrow(/unrelated inventory/);
+
+    await durable.retire(captured.checkpoint.envelope.checkpointId, "01J00000000000000000000034");
+    await expect(durable.inventory("inventory-4")).resolves.toEqual([]);
+  }, 120_000);
 
   it("holds no capacity permit during paired range I/O and fails before decode when admission is unavailable", async () => {
     const fixture = await authorityFixture();

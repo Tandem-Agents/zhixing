@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <winternl.h>
 #else
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -85,6 +86,16 @@ void Set(napi_env env, napi_value object, const char* name, napi_value value) {
 napi_value String(napi_env env, const std::string& value) {
   napi_value result;
   Check(env, napi_create_string_utf8(env, value.c_str(), value.size(), &result), "Unable to create string");
+  return result;
+}
+
+napi_value Strings(napi_env env, const std::vector<std::string>& values) {
+  napi_value result;
+  Check(env, napi_create_array_with_length(env, values.size(), &result), "Unable to create string array");
+  for (size_t index = 0; index < values.size(); ++index) {
+    Check(env, napi_set_element(env, result, static_cast<uint32_t>(index), String(env, values[index])),
+      "Unable to append string array entry");
+  }
   return result;
 }
 
@@ -282,6 +293,74 @@ void Flush(NativeHandle handle) {
   if (fsync(handle) < 0) throw std::runtime_error("Unable to flush checkpoint handle");
 }
 
+std::vector<std::string> ListEntries(NativeHandle parent, size_t maximumEntries) {
+  std::vector<std::string> result;
+#ifdef _WIN32
+  std::vector<unsigned char> buffer(64 * 1024);
+  auto infoClass = FileIdBothDirectoryRestartInfo;
+  size_t count = 0;
+  while (true) {
+    if (!GetFileInformationByHandleEx(parent, infoClass, buffer.data(), static_cast<DWORD>(buffer.size()))) {
+      if (GetLastError() == ERROR_NO_MORE_FILES) break;
+      throw std::runtime_error("Unable to enumerate checkpoint directory by handle");
+    }
+    auto* entry = reinterpret_cast<FILE_ID_BOTH_DIR_INFO*>(buffer.data());
+    while (true) {
+      const std::wstring wide(entry->FileName, entry->FileNameLength / sizeof(wchar_t));
+      if (wide != L"." && wide != L"..") {
+        if (++count > maximumEntries) throw std::runtime_error("Checkpoint directory inventory exceeds its bound");
+        const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(),
+          static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+        if (bytes > 0) {
+          std::string name(bytes, '\0');
+          WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), static_cast<int>(wide.size()),
+            name.data(), bytes, nullptr, nullptr);
+          if (!name.empty() && name.size() <= 160 && name.find('/') == std::string::npos &&
+              name.find('\\') == std::string::npos && name.find('\0') == std::string::npos) {
+            result.push_back(name);
+          }
+        }
+      }
+      if (entry->NextEntryOffset == 0) break;
+      entry = reinterpret_cast<FILE_ID_BOTH_DIR_INFO*>(
+        reinterpret_cast<unsigned char*>(entry) + entry->NextEntryOffset);
+    }
+    infoClass = FileIdBothDirectoryInfo;
+  }
+#else
+  const int copy = dup(parent);
+  if (copy < 0) throw std::runtime_error("Unable to duplicate checkpoint directory handle");
+  DIR* directory = fdopendir(copy);
+  if (!directory) {
+    close(copy);
+    throw std::runtime_error("Unable to enumerate checkpoint directory by handle");
+  }
+  size_t count = 0;
+  try {
+    errno = 0;
+    while (auto* entry = readdir(directory)) {
+      const std::string name(entry->d_name);
+      if (name == "." || name == "..") continue;
+      if (++count > maximumEntries) {
+        throw std::runtime_error("Checkpoint directory inventory exceeds its bound");
+      }
+      if (!name.empty() && name.size() <= 160 && name.find('/') == std::string::npos &&
+          name.find('\\') == std::string::npos && name.find('\0') == std::string::npos) {
+        result.push_back(name);
+      }
+      errno = 0;
+    }
+    if (errno != 0) throw std::runtime_error("Unable to enumerate checkpoint directory by handle");
+    closedir(directory);
+  } catch (...) {
+    closedir(directory);
+    throw;
+  }
+#endif
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 void RenameNoReplace(
   NativeHandle sourceParent,
   const std::string& source,
@@ -410,6 +489,16 @@ napi_value ReadFileCall(napi_env env, napi_callback_info info) {
   } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 }
 
+napi_value ListEntriesCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 2; napi_value args[2]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    int64_t maximum = 0;
+    Check(env, napi_get_value_int64(env, args[1], &maximum), "Invalid checkpoint directory entry bound");
+    if (maximum < 1 || maximum > 100000) throw std::runtime_error("Checkpoint directory entry bound is invalid");
+    return Strings(env, ListEntries(Handle(U64(env, args[0])), static_cast<size_t>(maximum)));
+  } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+}
+
 napi_value WriteRangeCall(napi_env env, napi_callback_info info) {
   try {
     size_t argc = 5; napi_value args[5]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
@@ -534,6 +623,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"identity", nullptr, IdentityCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"writeFile", nullptr, WriteFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readFile", nullptr, ReadFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listEntries", nullptr, ListEntriesCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"writeRange", nullptr, WriteRangeCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"renameEntry", nullptr, RenameCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"unlinkEntry", nullptr, UnlinkCall, nullptr, nullptr, nullptr, napi_default, nullptr},

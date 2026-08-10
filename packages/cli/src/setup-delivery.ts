@@ -128,6 +128,7 @@ import {
 import { createTrustedDeviceProtocolVerifier } from "./serve/trusted-device-protocol-verifier.js";
 import { migrateLegacyWorkscenes } from "./serve/workscene-legacy-migration.js";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
+import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
   StartupRollback,
   type StartupCleanupHandle,
@@ -822,6 +823,16 @@ export async function setupAuthorityRuntime(
         throw new Error(
           `Local executor capability snapshot rejected: ${snapshotUpdate.error.message}`,
         );
+      }
+      if (authorityLog) {
+        await new CredentialExposureAuthority({
+          deviceId: key.deviceId,
+          log: authorityLog,
+          secretStore: options.secretStore,
+        }).publishActiveBindings({
+          bindings: descriptor.credentialBindings,
+          markedAt: descriptor.at,
+        });
       }
       await versionStore.markCapabilityDirectoryEstablished({
         executorId,

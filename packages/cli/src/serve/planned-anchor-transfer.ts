@@ -72,9 +72,18 @@ import {
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import {
+  ANCHOR_CANDIDATE_STREAM,
+  assertTargetWideAnchorCandidateAvailable,
+  emptyTargetWideAnchorCandidates,
+  reduceTargetWideAnchorCandidateRecord,
+  reduceTargetWideAnchorCandidates,
+  targetWideAnchorCandidateClaim,
+  targetWideAnchorCandidateTerminal,
+  type TargetWideAnchorCandidateState,
+} from "./target-wide-anchor-candidate.js";
 
 const ANCHOR_TRANSFER_STREAM = "transfer:anchor";
-const ANCHOR_CANDIDATE_STREAM = "transfer:anchor-candidate";
 const SOURCE_CLOSURE_STREAM = "transfer:anchor-closure";
 const READY_RESERVATION_STREAM = "transfer:anchor-ready-reservation";
 const TRANSFER_CHUNK_BYTES = 512 * 1024;
@@ -290,6 +299,7 @@ export class PlannedAnchorTransferRuntimeLifecycle {
 
 interface PlannedAnchorCandidateProjection {
   readonly claims: ReadonlyMap<string, PlannedAnchorCandidateState>;
+  readonly targetWideClaims: ReadonlyMap<string, TargetWideAnchorCandidateState>;
   readonly transfers: ReadonlyMap<string, PlannedAnchorTransferState>;
   readonly installedTransfers: ReadonlySet<string>;
 }
@@ -313,16 +323,29 @@ class FilePlannedAnchorCandidateJournal {
     identityInput: PlannedAnchorCandidateIdentity,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
+    const targetWideIdentity = plannedTargetWideCandidateIdentity(identity);
     const record: PlannedAnchorCandidateRecord = {
       v: 1,
       t: "planned-anchor-candidate-claimed",
       identity,
     };
     return (await this.#transact((projection) => {
+      const targetWide = assertTargetWideAnchorCandidateAvailable(
+        projection.targetWideClaims,
+        targetWideIdentity,
+      );
       const existing = projection.claims.get(identity.transferId);
       if (existing) {
         assertCandidateIdentity(existing.identity, identity);
-        return { kind: "return", value: existing };
+        if (targetWide) return { kind: "return", value: existing };
+        return {
+          kind: "append",
+          entries: [{
+            stream: ANCHOR_CANDIDATE_STREAM,
+            body: targetWideAnchorCandidateClaim(targetWideIdentity),
+          }],
+          value: existing,
+        };
       }
       for (const candidate of projection.claims.values()) {
         if (
@@ -346,7 +369,13 @@ class FilePlannedAnchorCandidateJournal {
       }
       return {
         kind: "append",
-        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        entries: [
+          {
+            stream: ANCHOR_CANDIDATE_STREAM,
+            body: targetWideAnchorCandidateClaim(targetWideIdentity),
+          },
+          { stream: ANCHOR_CANDIDATE_STREAM, body: record },
+        ],
         value: { identity },
       };
     })).value;
@@ -390,6 +419,7 @@ class FilePlannedAnchorCandidateJournal {
     abortInput?: AnchorTransferAbort,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
+    const targetWideIdentity = plannedTargetWideCandidateIdentity(identity);
     const abort = terminal === "aborted"
       ? validateCandidateAbort(abortInput, identity, this.verifier)
       : undefined;
@@ -431,7 +461,16 @@ class FilePlannedAnchorCandidateJournal {
           };
       return {
         kind: "append",
-        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        entries: [
+          { stream: ANCHOR_CANDIDATE_STREAM, body: record },
+          {
+            stream: ANCHOR_CANDIDATE_STREAM,
+            body: targetWideAnchorCandidateTerminal(
+              targetWideIdentity,
+              terminal,
+            ),
+          },
+        ],
         value: abort ? { ...existing, terminal, abort } : { ...existing, terminal },
       };
     })).value;
@@ -475,6 +514,7 @@ class FilePlannedAnchorCandidateJournal {
     abortInput: AnchorTransferAbort,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
+    const targetWideIdentity = plannedTargetWideCandidateIdentity(identity);
     const abort = validateCandidateAbort(abortInput, identity, this.verifier);
     return (await this.#transact((projection) => {
       const existing = projection.claims.get(identity.transferId);
@@ -499,7 +539,13 @@ class FilePlannedAnchorCandidateJournal {
       };
       return {
         kind: "append",
-        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        entries: [
+          { stream: ANCHOR_CANDIDATE_STREAM, body: record },
+          {
+            stream: ANCHOR_CANDIDATE_STREAM,
+            body: targetWideAnchorCandidateTerminal(targetWideIdentity, "aborted"),
+          },
+        ],
         value: { ...existing, terminal: "aborted" as const, abort },
       };
     })).value;
@@ -509,6 +555,7 @@ class FilePlannedAnchorCandidateJournal {
     identityInput: PlannedAnchorCandidateIdentity,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
+    const targetWideIdentity = plannedTargetWideCandidateIdentity(identity);
     return (await this.#transact((projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration candidate release has no durable claim");
@@ -530,7 +577,13 @@ class FilePlannedAnchorCandidateJournal {
       };
       return {
         kind: "append",
-        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        entries: [
+          { stream: ANCHOR_CANDIDATE_STREAM, body: record },
+          {
+            stream: ANCHOR_CANDIDATE_STREAM,
+            body: targetWideAnchorCandidateTerminal(targetWideIdentity, "released"),
+          },
+        ],
         value: { ...existing, terminal: "released" as const },
       };
     })).value;
@@ -2670,12 +2723,14 @@ async function loadCurrentPlannedAnchorInstallation(
   readonly installation: PlannedAnchorInstallation;
   readonly installLsn: number;
 } | undefined> {
-  const installations = (await log.readStream<unknown>("transfer:anchor-current"))
+  const records = await log.readStream<unknown>("transfer:anchor-current");
+  const latest = records.at(-1);
+  if (!latest || !isPlannedInstallation(latest.body)) return undefined;
+  const installations = records
     .filter((candidate): candidate is typeof candidate & {
       readonly body: PlannedAnchorInstallation;
     } => isPlannedInstallation(candidate.body));
-  const current = installations.at(-1);
-  if (!current) return undefined;
+  const current = { ...latest, body: latest.body };
   const duplicates = installations.filter((candidate) =>
     candidate.body.transferId === current.body.transferId);
   if (duplicates.length !== 1) {
@@ -3044,7 +3099,7 @@ async function loadPlannedSourceClosure(
   return closure;
 }
 
-class PendingObligationTracker {
+export class PendingObligationTracker {
   readonly #pending = new Map<string, AuthorityCatalog["pendingObligations"][number]>();
 
   accept(commit: CommitEnvelope<unknown>): void {
@@ -3299,6 +3354,7 @@ function reduceJournal(
 function emptyCandidateProjection(): PlannedAnchorCandidateProjection {
   return {
     claims: new Map(),
+    targetWideClaims: emptyTargetWideAnchorCandidates(),
     transfers: new Map(),
     installedTransfers: new Set(),
   };
@@ -3310,17 +3366,44 @@ function reduceCandidateProjection(
   verifier: ProtocolSignatureVerifier,
   includeTransferState: boolean,
 ): PlannedAnchorCandidateProjection {
+  const targetWideClaims = reduceTargetWideAnchorCandidates(
+    projection.targetWideClaims,
+    entry,
+  );
+  const candidateTag = entry.body && typeof entry.body === "object" && !Array.isArray(entry.body)
+    ? (entry.body as { readonly t?: unknown }).t
+    : undefined;
+  if (
+    entry.stream === ANCHOR_CANDIDATE_STREAM &&
+    (candidateTag === "anchor-candidate-mode-claimed" ||
+      candidateTag === "anchor-candidate-mode-terminal")
+  ) {
+    return targetWideClaims === projection.targetWideClaims
+      ? projection
+      : { ...projection, targetWideClaims };
+  }
+  const base = targetWideClaims === projection.targetWideClaims
+    ? projection
+    : { ...projection, targetWideClaims };
   if (entry.stream === ANCHOR_CANDIDATE_STREAM) {
     const record = validateCandidateRecord(entry.body, verifier);
-    const existing = projection.claims.get(record.identity.transferId);
+    const existing = base.claims.get(record.identity.transferId);
     if (record.t === "planned-anchor-candidate-claimed") {
+      const legacyTargetWide = base.targetWideClaims.has(record.identity.transferId)
+        ? base.targetWideClaims
+        : reduceTargetWideAnchorCandidateRecord(
+            base.targetWideClaims,
+            targetWideAnchorCandidateClaim(plannedTargetWideCandidateIdentity(record.identity)),
+          );
       if (existing) {
         assertCandidateIdentity(existing.identity, record.identity);
-        return projection;
+        return legacyTargetWide === base.targetWideClaims
+          ? base
+          : { ...base, targetWideClaims: legacyTargetWide };
       }
-      const claims = new Map(projection.claims);
+      const claims = new Map(base.claims);
       claims.set(record.identity.transferId, { identity: record.identity });
-      return { ...projection, claims };
+      return { ...base, claims, targetWideClaims: legacyTargetWide };
     }
     if (!existing) throw new Error("Migration candidate progress has no durable claim");
     assertCandidateIdentity(existing.identity, record.identity);
@@ -3334,9 +3417,9 @@ function reduceCandidateProjection(
       ) {
         throw new Error("Migration candidate ready proof changed across replay");
       }
-      const claims = new Map(projection.claims);
+      const claims = new Map(base.claims);
       claims.set(record.identity.transferId, { ...existing, readyProof: record.readyProof });
-      return { ...projection, claims };
+      return { ...base, claims };
     }
     if (record.t === "planned-anchor-candidate-prepared") {
       if (existing.terminal !== undefined) {
@@ -3346,11 +3429,11 @@ function reduceCandidateProjection(
         if (canonicalize(existing.prepared) !== canonicalize(record.prepared)) {
           throw new Error("Migration candidate has conflicting prepared decisions");
         }
-        return projection;
+        return base;
       }
-      const claims = new Map(projection.claims);
+      const claims = new Map(base.claims);
       claims.set(record.identity.transferId, { ...existing, prepared: record.prepared });
-      return { ...projection, claims };
+      return { ...base, claims };
     }
     if (record.t === "planned-anchor-candidate-terminal") {
       if (record.terminal === "released" && existing.prepared) {
@@ -3366,37 +3449,46 @@ function reduceCandidateProjection(
       ) {
         throw new Error("Migration candidate has conflicting abort decisions");
       }
-      const claims = new Map(projection.claims);
+      const claims = new Map(base.claims);
       claims.set(
         record.identity.transferId,
         record.terminal === "aborted"
           ? { ...existing, terminal: record.terminal, abort: record.abort }
           : { ...existing, terminal: record.terminal },
       );
-      return { ...projection, claims };
+      const legacyTargetWide = existing.terminal === undefined
+        ? reduceTargetWideAnchorCandidateRecord(
+            base.targetWideClaims,
+            targetWideAnchorCandidateTerminal(
+              plannedTargetWideCandidateIdentity(record.identity),
+              record.terminal,
+            ),
+          )
+        : base.targetWideClaims;
+      return { ...base, claims, targetWideClaims: legacyTargetWide };
     }
     if (existing.terminal !== "released") {
       throw new Error("Migration candidate cleanup completion precedes release");
     }
-    const claims = new Map(projection.claims);
+    const claims = new Map(base.claims);
     claims.set(record.identity.transferId, { ...existing, releaseDelivered: true });
-    return { ...projection, claims };
+    return { ...base, claims };
   }
-  if (!includeTransferState) return projection;
+  if (!includeTransferState) return base;
   if (entry.stream === ANCHOR_TRANSFER_STREAM) {
     const record = entry.body as PlannedRecord;
-    const transfers = reduceJournal(projection.transfers, {
+    const transfers = reduceJournal(base.transfers, {
       stream: ANCHOR_TRANSFER_STREAM,
       body: record,
     }, verifier);
-    return { ...projection, transfers };
+    return { ...base, transfers };
   }
   if (entry.stream === "transfer:anchor-current" && isPlannedInstallation(entry.body)) {
-    const installedTransfers = new Set(projection.installedTransfers);
+    const installedTransfers = new Set(base.installedTransfers);
     installedTransfers.add(entry.body.transferId);
-    return { ...projection, installedTransfers };
+    return { ...base, installedTransfers };
   }
-  return projection;
+  return base;
 }
 
 function validateCandidateRecord(
@@ -3549,6 +3641,17 @@ function assertCandidateIdentity(
   if (canonicalize(actual) !== canonicalize(expected)) {
     throw new Error("Migration candidate replay conflicts with its durable identity");
   }
+}
+
+function plannedTargetWideCandidateIdentity(
+  identity: PlannedAnchorCandidateIdentity,
+) {
+  return Object.freeze({
+    mode: "planned" as const,
+    homeId: identity.homeId,
+    transferId: identity.transferId,
+    identityDigest: protocolDigest("PlannedAnchorCandidateIdentity", 1, identity),
+  });
 }
 
 function assertCandidateTrust(

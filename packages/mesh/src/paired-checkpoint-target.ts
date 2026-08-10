@@ -8,7 +8,11 @@ import {
 } from "@zhixing/core/resources";
 import type { MeshServiceClient } from "./request-channel.js";
 import type { MeshServiceRegistry } from "./service-registry.js";
-import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing/core/contracts";
+import type {
+  HomeTrustEvent,
+  HomeTrustRecord,
+  RecoveryActivationPlan,
+} from "@zhixing/core/contracts";
 import { byteDigest, canonicalize } from "./canonical.js";
 import {
   assertCheckpointEnvelopeShape,
@@ -26,7 +30,8 @@ import {
   writeCheckpointFile,
   writeCheckpointFileRange,
   type FrozenCheckpointDirectoryIdentity,
-  type RetirableRecoveryCheckpointTarget,
+  type InventoryRecoveryCheckpointTarget,
+  type RecoveryCheckpointInventoryEntry,
 } from "./checkpoint-target.js";
 
 export const PAIRED_CHECKPOINT_SERVICE = "recovery.checkpoint";
@@ -41,6 +46,7 @@ export const PAIRED_CHECKPOINT_RECEIVER_DESCRIPTOR = Object.freeze({
     "checkpoint.append",
     "checkpoint.commit",
     "checkpoint.get",
+    "checkpoint.inventory",
     "checkpoint.range",
     "checkpoint.retire",
     "checkpoint.activate-root",
@@ -65,6 +71,11 @@ export type PairedCheckpointCommand =
     }
   | PairedBinding & { readonly t: "checkpoint.commit"; readonly checkpointId: string }
   | PairedBinding & { readonly t: "checkpoint.get"; readonly checkpointId: string }
+  | PairedBinding & {
+      readonly t: "checkpoint.inventory";
+      readonly requestId: string;
+      readonly recipientKeyId: string;
+    }
   | PairedBinding & {
       readonly t: "checkpoint.range";
       readonly checkpointId: string;
@@ -97,6 +108,16 @@ export type PairedCheckpointResult =
   | { readonly t: "checkpoint.appended"; readonly checkpointId: string; readonly seq: number; readonly receivedBytes: number; readonly complete: boolean }
   | { readonly t: "checkpoint.stored"; readonly checkpointId: string }
   | { readonly t: "checkpoint.manifest"; readonly checkpointId: string; readonly envelope: CheckpointPackage["envelope"] }
+  | {
+      readonly t: "checkpoint.inventory";
+      readonly requestId: string;
+      readonly targetId: string;
+      readonly recipientKeyId: string;
+      readonly entries: readonly {
+        readonly checkpointId: string;
+        readonly envelope: CheckpointPackage["envelope"];
+      }[];
+    }
   | { readonly t: "checkpoint.range"; readonly checkpointId: string; readonly seq: number; readonly offset: number; readonly bytes: string }
   | { readonly t: "checkpoint.retired"; readonly checkpointId: string; readonly supersededBy: string }
   | {
@@ -132,30 +153,49 @@ type PairedCheckpointReceiverOptions = {
   | {
       readonly recipientKeyId: string;
       readonly rootEstablishment?: false;
+      readonly rootLifecycle?: false;
       readonly replayRootActivation?: (
         input: {
           readonly checkpointId: string;
           readonly event: HomeTrustEvent;
           readonly record: HomeTrustRecord;
+          readonly plan: RecoveryActivationPlan;
         },
         signal?: AbortSignal,
       ) => Promise<void>;
     }
   | {
       readonly rootEstablishment: true;
+      readonly rootLifecycle?: false;
       readonly recipientKeyId?: never;
       readonly commitRootActivation: (
         input: {
           readonly checkpointId: string;
           readonly event: HomeTrustEvent;
           readonly record: HomeTrustRecord;
+          readonly plan: RecoveryActivationPlan;
         },
         signal?: AbortSignal,
       ) => Promise<void>;
     }
+  | {
+      readonly recipientKeyId: string;
+      readonly rootEstablishment?: false;
+      readonly rootLifecycle: true;
+      readonly commitRootActivation: (
+        input: {
+          readonly checkpointId: string;
+          readonly event: HomeTrustEvent;
+          readonly record: HomeTrustRecord;
+          readonly plan: RecoveryActivationPlan;
+        },
+        signal?: AbortSignal,
+      ) => Promise<void>;
+      readonly replayRootActivation?: never;
+    }
 );
 
-export class PairedRecoveryCheckpointTarget implements RetirableRecoveryCheckpointTarget {
+export class PairedRecoveryCheckpointTarget implements InventoryRecoveryCheckpointTarget {
   readonly targetId: string;
   readonly independenceDomain: string;
 
@@ -295,6 +335,38 @@ export class PairedRecoveryCheckpointTarget implements RetirableRecoveryCheckpoi
     return checkpoint;
   }
 
+  async inventory(requestId: string, signal?: AbortSignal): Promise<readonly RecoveryCheckpointInventoryEntry[]> {
+    assertRequestId(requestId);
+    const result = await this.options.transport.request({
+      ...this.#binding(),
+      t: "checkpoint.inventory",
+      requestId,
+      recipientKeyId: this.options.recipientKeyId,
+    }, signal);
+    if (
+      result.t !== "checkpoint.inventory" ||
+      result.requestId !== requestId ||
+      result.targetId !== this.targetId ||
+      result.recipientKeyId !== this.options.recipientKeyId
+    ) throw new TypeError("Paired recovery target returned an unrelated inventory");
+    const seen = new Set<string>();
+    return result.entries.map((entry) => {
+      assertCheckpointEnvelopeShape(entry.envelope);
+      if (
+        entry.checkpointId !== entry.envelope.checkpointId ||
+        entry.envelope.recipientKeyId !== this.options.recipientKeyId ||
+        seen.has(entry.checkpointId)
+      ) throw new TypeError("Paired recovery target returned an invalid inventory entry");
+      seen.add(entry.checkpointId);
+      return {
+        checkpointId: entry.checkpointId,
+        targetId: result.targetId,
+        recipientKeyId: result.recipientKeyId,
+        envelope: entry.envelope,
+      };
+    });
+  }
+
   async retire(checkpointId: string, supersededBy: string, signal?: AbortSignal): Promise<void> {
     const result = await this.options.transport.request({
       ...this.#binding(),
@@ -383,7 +455,7 @@ export class FilePairedCheckpointStaging {
 
   constructor(private readonly options: {
     readonly root: string;
-    readonly target: RetirableRecoveryCheckpointTarget;
+    readonly target: InventoryRecoveryCheckpointTarget;
     readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   }) {
     this.#root = freezeCheckpointDirectory(options.root, true);
@@ -492,6 +564,62 @@ export class FilePairedCheckpointStaging {
     );
   }
 
+  bindRootLifecycle(
+    binding: RootEstablishmentCheckpointBinding,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.#serializeBinding(async () => {
+      assertRootEstablishmentBinding(binding);
+      const owner = await this.#root;
+      await assertCheckpointDirectoryIdentity(owner);
+      const publishedName = rootLifecycleBindingName(binding.checkpointId);
+      const pendingName = `${publishedName}.pending`;
+      const expected = canonicalize(binding);
+      const existing = await this.#readRootEstablishmentBinding(owner, publishedName, signal);
+      if (existing !== undefined) {
+        if (canonicalize(existing) !== expected) {
+          throw new TypeError("Paired root lifecycle changed its checkpoint binding");
+        }
+        return;
+      }
+      await this.#step(binding.checkpointId, {
+        step: "root-lifecycle-binding",
+        bytes: Buffer.byteLength(expected),
+      }, signal, async () => {
+        await owner.handle.writeFile(pendingName, Buffer.from(expected, "utf8"));
+        await owner.handle.sync();
+        await owner.handle.renameTo(pendingName, owner.handle, publishedName);
+        await owner.handle.sync();
+      });
+      const published = await this.#readRootEstablishmentBinding(owner, publishedName, signal);
+      if (canonicalize(published) !== expected) {
+        throw new TypeError("Paired root lifecycle binding was not published durably");
+      }
+    });
+  }
+
+  async assertRootLifecycle(
+    binding: RootEstablishmentCheckpointBinding,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    assertRootEstablishmentBinding(binding);
+    const existing = await this.rootLifecycleBinding(binding.checkpointId, signal);
+    if (!existing || canonicalize(existing) !== canonicalize(binding)) {
+      throw new TypeError("Paired root lifecycle command changed its durable binding");
+    }
+  }
+
+  async rootLifecycleBinding(
+    checkpointId: string,
+    signal?: AbortSignal,
+  ): Promise<RootEstablishmentCheckpointBinding | undefined> {
+    return this.#readRootEstablishmentBinding(
+      await this.#root,
+      rootLifecycleBindingName(checkpointId),
+      signal,
+    );
+  }
+
   async progress(checkpointId: string, seq: number, signal?: AbortSignal) {
     const session = await this.#session(checkpointId, signal);
     try {
@@ -545,6 +673,10 @@ export class FilePairedCheckpointStaging {
 
   read(checkpointId: string, signal?: AbortSignal): Promise<CheckpointPackage> {
     return this.options.target.read(checkpointId, signal);
+  }
+
+  inventory(requestId: string, signal?: AbortSignal): Promise<readonly RecoveryCheckpointInventoryEntry[]> {
+    return this.options.target.inventory(requestId, signal);
   }
 
   retire(checkpointId: string, supersededBy: string, signal?: AbortSignal): Promise<void> {
@@ -726,12 +858,23 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
     this.#assertBinding(command);
     if (command.t === "checkpoint.begin") {
       if (
-        (!this.options.rootEstablishment &&
+        (!this.options.rootEstablishment && !this.options.rootLifecycle &&
           command.envelope.recipientKeyId !== this.options.recipientKeyId) ||
         command.envelope.manifest.scope.length === 0
       ) throw new TypeError("Paired recovery envelope is not authorized for this target");
+      if (this.options.rootLifecycle && command.envelope.manifest.purpose.kind !== "root-activation") {
+        throw new TypeError("Paired root lifecycle accepts only root activation checkpoints");
+      }
       if (this.options.rootEstablishment) {
         await this.options.staging.bindRootEstablishment({
+          homeId: command.homeId,
+          sourceDeviceId: command.sourceDeviceId,
+          targetId: `backup-device:${command.targetDeviceId}`,
+          checkpointId: command.envelope.checkpointId,
+          recipientKeyId: command.envelope.recipientKeyId,
+        }, signal);
+      } else if (this.options.rootLifecycle) {
+        await this.options.staging.bindRootLifecycle({
           homeId: command.homeId,
           sourceDeviceId: command.sourceDeviceId,
           targetId: `backup-device:${command.targetDeviceId}`,
@@ -742,14 +885,35 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
       await this.options.staging.begin(command.envelope, signal);
       return { t: "checkpoint.begun", checkpointId: command.envelope.checkpointId };
     }
-    if (this.options.rootEstablishment) {
-      await this.options.staging.assertRootEstablishment({
+    if (command.t === "checkpoint.inventory") {
+      if (this.options.rootEstablishment || command.recipientKeyId !== this.options.recipientKeyId) {
+        throw new TypeError("Checkpoint inventory is not authorized for this target generation");
+      }
+      const entries = await this.options.staging.inventory(command.requestId, signal);
+      return {
+        t: "checkpoint.inventory",
+        requestId: command.requestId,
+        targetId: `backup-device:${command.targetDeviceId}`,
+        recipientKeyId: command.recipientKeyId,
+        entries: entries.map((entry) => ({
+          checkpointId: entry.checkpointId,
+          envelope: entry.envelope,
+        })),
+      };
+    }
+    if (this.options.rootEstablishment || this.options.rootLifecycle) {
+      const binding = {
         homeId: command.homeId,
         sourceDeviceId: command.sourceDeviceId,
         targetId: `backup-device:${command.targetDeviceId}`,
         checkpointId: command.checkpointId,
-        recipientKeyId: await this.#rootEstablishmentRecipient(command.checkpointId, signal),
-      }, signal);
+        recipientKeyId: await this.#rootActivationRecipient(command.checkpointId, signal),
+      };
+      if (this.options.rootEstablishment) {
+        await this.options.staging.assertRootEstablishment(binding, signal);
+      } else {
+        await this.options.staging.assertRootLifecycle(binding, signal);
+      }
     }
     if (command.t === "checkpoint.progress") {
       const progress = await this.options.staging.progress(command.checkpointId, command.seq, signal);
@@ -797,30 +961,33 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
     }
     if (command.t === "checkpoint.activate-root") {
       const checkpoint = await this.options.staging.read(command.checkpointId, signal);
-      const binding = await this.options.staging.rootEstablishmentBinding(signal);
+      const binding = this.options.rootLifecycle
+        ? await this.options.staging.rootLifecycleBinding(command.checkpointId, signal)
+        : await this.options.staging.rootEstablishmentBinding(signal);
       if (
         !binding ||
         binding.checkpointId !== command.checkpointId ||
         binding.recipientKeyId !== checkpoint.envelope.recipientKeyId
       ) throw new TypeError("Paired root activation is not durably bound to this checkpoint");
-      if (!this.options.rootEstablishment && !this.options.replayRootActivation) {
+      if (!this.options.rootEstablishment && !this.options.rootLifecycle && !this.options.replayRootActivation) {
         throw new TypeError("Root activation is only available during root establishment");
       }
       const purpose = checkpoint.envelope.manifest.purpose;
       if (
         purpose.kind !== "root-activation" ||
-        purpose.plan.kind !== "establish" ||
+        (!this.options.rootLifecycle && purpose.plan.kind !== "establish") ||
         canonicalize(purpose.plan.rootEvent) !== canonicalize(command.event)
       ) {
         throw new TypeError("Paired root activation does not match the durably stored checkpoint");
       }
-      const operation = this.options.rootEstablishment
+      const operation = this.options.rootEstablishment || this.options.rootLifecycle
         ? this.options.commitRootActivation
         : this.options.replayRootActivation!;
       await operation({
         checkpointId: command.checkpointId,
         event: command.event,
         record: command.record,
+        plan: purpose.plan,
       }, signal);
       return {
         t: "checkpoint.root-activated",
@@ -841,11 +1008,13 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
     ) throw new TypeError("Paired recovery command is not authorized for this device pair");
   }
 
-  async #rootEstablishmentRecipient(
+  async #rootActivationRecipient(
     checkpointId: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    const binding = await this.options.staging.rootEstablishmentBinding(signal);
+    const binding = this.options.rootLifecycle
+      ? await this.options.staging.rootLifecycleBinding(checkpointId, signal)
+      : await this.options.staging.rootEstablishmentBinding(signal);
     if (!binding || binding.checkpointId !== checkpointId) {
       throw new TypeError("Paired root establishment checkpoint is not durably bound");
     }
@@ -952,6 +1121,13 @@ function assertPairedCommand(value: unknown): asserts value is PairedCheckpointC
       assertExactKeys(value, [...common, "checkpointId"]);
       assertCheckpointId(value.checkpointId);
       return;
+    case "checkpoint.inventory":
+      assertExactKeys(value, [...common, "recipientKeyId", "requestId"]);
+      assertRequestId(value.requestId);
+      if (!nonEmptyString(value.recipientKeyId)) {
+        throw new TypeError("Paired recovery inventory generation is invalid");
+      }
+      return;
     case "checkpoint.progress":
       assertExactKeys(value, [...common, "checkpointId", "seq"]);
       assertCheckpointId(value.checkpointId);
@@ -1009,6 +1185,25 @@ export function decodePairedCheckpointResult(value: unknown): PairedCheckpointRe
       assertCheckpointId(value.checkpointId);
       assertCheckpointEnvelopeShape(value.envelope);
       return value as Extract<PairedCheckpointResult, { t: "checkpoint.manifest" }>;
+    case "checkpoint.inventory": {
+      assertExactKeys(value, ["entries", "recipientKeyId", "requestId", "t", "targetId"]);
+      assertRequestId(value.requestId);
+      if (!nonEmptyString(value.targetId) || !nonEmptyString(value.recipientKeyId) || !Array.isArray(value.entries)) {
+        throw new TypeError("Paired recovery inventory is invalid");
+      }
+      const seen = new Set<string>();
+      for (const entry of value.entries) {
+        if (!isRecord(entry)) throw new TypeError("Paired recovery inventory entry is invalid");
+        assertExactKeys(entry, ["checkpointId", "envelope"]);
+        assertCheckpointId(entry.checkpointId);
+        assertCheckpointEnvelopeShape(entry.envelope);
+        if (entry.envelope.checkpointId !== entry.checkpointId || seen.has(entry.checkpointId)) {
+          throw new TypeError("Paired recovery inventory entry is not uniquely bound");
+        }
+        seen.add(entry.checkpointId);
+      }
+      return value as Extract<PairedCheckpointResult, { t: "checkpoint.inventory" }>;
+    }
     case "checkpoint.range":
       assertExactKeys(value, ["bytes", "checkpointId", "offset", "seq", "t"]);
       assertCheckpointId(value.checkpointId);
@@ -1064,8 +1259,10 @@ function assertRootActivationPayload(
     !Number.isSafeInteger(event.trustEpoch) || Number(event.trustEpoch) < 1 ||
     !nonEmptyString(event.at) ||
     event.body.t !== "recovery-root" ||
-    event.body.op !== "establish" ||
-    event.body.signedBy !== "issuer" ||
+    !(
+      (event.body.op === "establish" && event.body.signedBy === "issuer") ||
+      (event.body.op === "rotate" && event.body.signedBy === "recovery-root")
+    ) ||
     !nonEmptyString(event.body.rootPublicKey) ||
     !nonEmptyString(event.body.backupPublicKey) ||
     !isRecord(event.signature) ||
@@ -1152,9 +1349,20 @@ function assertRootEstablishmentBinding(
   assertCheckpointId(value.checkpointId);
 }
 
+function rootLifecycleBindingName(checkpointId: string): string {
+  assertCheckpointId(checkpointId);
+  return `root-lifecycle-${checkpointId}.json`;
+}
+
 function assertCheckpointId(value: unknown): asserts value is string {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,96}$/u.test(value)) {
     throw new TypeError("Paired recovery checkpoint id is invalid");
+  }
+}
+
+function assertRequestId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,192}$/u.test(value)) {
+    throw new TypeError("Paired recovery inventory request id is invalid");
   }
 }
 

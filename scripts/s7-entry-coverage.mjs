@@ -111,6 +111,13 @@ const coverageGroups = [
     "rpc:dutyMigration.cancel",
   ]],
   ["recovery-backup", ["cli:zhixing backup setup", "cli:zhixing backup verify", "cli:zhixing backup status"]],
+  ["disaster-recovery", ["cli:zhixing backup recover", "cli:zhixing backup recover-finish"]],
+  ["recovery-root-lifecycle", [
+    "cli:zhixing backup root rotate",
+    "cli:zhixing backup root invalidate",
+    "cli:zhixing backup root approve-reset",
+    "cli:zhixing backup root reset",
+  ]],
 ];
 
 const baseMappingTuples = [
@@ -127,6 +134,7 @@ const baseMappingTuples = [
   ["cli:zhixing serve", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing duty", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing backup", { exclusion: "composition", reason: exclusions.composition }],
+  ["cli:zhixing backup root", { exclusion: "composition", reason: exclusions.composition }],
   [
     "cli:zhixing serve logs",
     { exclusion: "diagnostic", reason: exclusions.diagnostic },
@@ -931,13 +939,21 @@ export function inspectRecoveryBackupAssembly(records) {
   const controlPlane = byPath.get("packages/cli/src/serve/mesh-control-plane.ts");
   const runtime = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
+  const disasterCommand = byPath.get("packages/cli/src/serve/disaster-recovery-command.ts");
+  const disasterTarget = byPath.get("packages/cli/src/serve/disaster-recovery-target.ts");
+  const rootLifecycle = byPath.get("packages/cli/src/serve/recovery-root-lifecycle.ts");
+  const exposureAuthority = byPath.get("packages/cli/src/serve/credential-exposure-authority.ts");
+  const startup = byPath.get("packages/cli/src/startup.ts");
+  const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   const checkpointService = byPath.get("packages/mesh/src/checkpoint-service.ts");
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
     !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !rootEstablishment ||
     !rootActivation || !controlPlane ||
-    !runtime || !pairing || !checkpointService || !checkpointOwner || !pairedTarget
+    !runtime || !pairing || !disasterCommand || !disasterTarget || !rootLifecycle ||
+    !exposureAuthority || !startup || !setupDelivery || !checkpointService ||
+    !checkpointOwner || !pairedTarget
   ) {
     return ["recovery backup production assembly sources are missing"];
   }
@@ -969,6 +985,7 @@ export function inspectRecoveryBackupAssembly(records) {
     ["packages/cli/src/serve/backup-command.ts", "context.capacity.storage"],
     ["packages/cli/src/serve/backup-runtime-owner.ts", "input.storageMaintenance"],
     ["packages/cli/src/serve/mesh-pair-command.ts", "input.storageMaintenance"],
+    ["packages/cli/src/serve/disaster-recovery-command.ts", "context.storageMaintenance"],
   ]);
   if (
     pairedClientConstructions.length !== expectedPairedClientOwners.size ||
@@ -1053,7 +1070,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !pairedTarget.includes('t: "checkpoint.activate-root"') ||
     !backup.includes("activationConnection.target.activateRoot(replay)") ||
     !backup.includes("await connection.target.activateRoot({") ||
-    !runtime.includes("replayRootActivation:") ||
+    !runtime.includes("rootLifecycle: true") ||
+    !runtime.includes("commitRootActivation:") ||
     !rootActivation.includes("appendTrustEvent({ event, record })") ||
     !rootActivation.includes("isExactRecoveryRootActivationReplay(")
   ) {
@@ -1130,6 +1148,7 @@ export function inspectRecoveryBackupAssembly(records) {
       "checkpoint.append",
       "checkpoint.commit",
       "checkpoint.get",
+      "checkpoint.inventory",
       "checkpoint.range",
       "checkpoint.retire",
       "checkpoint.activate-root",
@@ -1152,6 +1171,60 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("packages/mesh/src/paired-checkpoint-target.ts: paired receiver descriptor exact-set or production binding drifted");
   }
+  const disasterDescriptor = frozenLiteralDescriptor(
+    "packages/cli/src/serve/disaster-recovery-target.ts",
+    disasterTarget,
+    "DISASTER_RECOVERY_TARGET_DESCRIPTOR",
+  );
+  const expectedDisasterDescriptor = {
+    owner: "eligible-recovery-target",
+    roles: ["anchor-executor", "anchor-only"],
+    phases: ["prepare", "commit", "abort", "tombstone"],
+    order: [
+      "claim",
+      "verify",
+      "private-import",
+      "atomic-install",
+      "generation-rebind",
+      "consumer-recovery",
+      "credential-guard",
+      "open",
+    ],
+  };
+  if (
+    JSON.stringify(disasterDescriptor) !== JSON.stringify(expectedDisasterDescriptor) ||
+    count(disasterTarget, "async prepareAndImport(") !== 1 ||
+    count(disasterTarget, "async commit(") !== 1 ||
+    count(disasterTarget, "async abort(") !== 1 ||
+    count(disasterTarget, "async tombstone(") !== 1 ||
+    count(disasterCommand, "new DisasterRecoveryTarget({") !== 2 ||
+    !disasterCommand.includes("discoverDisasterRecoveryCandidates({") ||
+    !disasterCommand.includes("await target.prepareAndImport({") ||
+    !disasterCommand.includes("await target.commit({ transferId, recoveryRoot: decoded.root })") ||
+    !disasterCommand.includes("await target.tombstone({")
+  ) {
+    failures.push("disaster recovery target owner, inventory, phase or public journey exact-set drifted");
+  }
+  const rootLifecycleDescriptor = frozenLiteralDescriptor(
+    "packages/cli/src/serve/recovery-root-lifecycle.ts",
+    rootLifecycle,
+    "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR",
+  );
+  const expectedRootLifecycleDescriptor = {
+    owner: "current-issuer",
+    roles: ["anchor-executor", "anchor-only"],
+    operations: ["rotate", "invalidate", "domain-reset-establish"],
+    checkpointed: ["rotate", "domain-reset-establish"],
+  };
+  if (
+    JSON.stringify(rootLifecycleDescriptor) !== JSON.stringify(expectedRootLifecycleDescriptor) ||
+    count(rootLifecycle, "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR.operations[0]") !== 1 ||
+    count(rootLifecycle, "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR.operations[1]") !== 1 ||
+    count(rootLifecycle, "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR.operations[2]") !== 1 ||
+    count(backup, "new RecoveryRootLifecycleService({") !== 1
+  ) {
+    failures.push("recovery root lifecycle owner, plan exact-set or production binding drifted");
+  }
   if (
     count(runtime, "registerPairedCheckpointMeshService(") !== 1 ||
     count(runtime, "new PairedCheckpointReceiver({") !== 1 ||
@@ -1160,9 +1233,64 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("packages/cli/src/serve/mesh-runtime-assembly.ts: active paired backup receiver boundary drifted");
   }
+  const pairingDescriptor = frozenLiteralDescriptor(
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    pairing,
+    "PAIRING_TRUST_EVENT_DESCRIPTOR",
+  );
+  const expectedPairingDescriptor = {
+    owner: "current-issuer",
+    initial: "enroll",
+    reenrollment: "reenroll",
+    eligibleState: "pending-reenroll",
+    proof: "fresh-pairing-transcript",
+  };
+  if (
+    JSON.stringify(pairingDescriptor) !== JSON.stringify(expectedPairingDescriptor) ||
+    count(pairing, "PAIRING_TRUST_EVENT_DESCRIPTOR.eligibleState") !== 1 ||
+    count(pairing, "PAIRING_TRUST_EVENT_DESCRIPTOR.reenrollment") !== 1 ||
+    count(pairing, "PAIRING_TRUST_EVENT_DESCRIPTOR.initial") !== 1 ||
+    count(pairing, "createPairingTrustEvent({") !== 1
+  ) {
+    failures.push("pairing enroll and pending-reenroll exact-set drifted");
+  }
+  const exposureDescriptor = frozenLiteralDescriptor(
+    "packages/cli/src/serve/credential-exposure-authority.ts",
+    exposureAuthority,
+    "CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR",
+  );
+  const expectedExposureDescriptor = {
+    owner: "current-device",
+    protectedKinds: ["provider", "channel", "mcp", "webhook", "rendezvous"],
+    excludedKinds: ["device-key"],
+    states: ["active", "compromised", "rotated"],
+  };
+  if (
+    JSON.stringify(exposureDescriptor) !== JSON.stringify(expectedExposureDescriptor) ||
+    count(exposureAuthority, "CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR.excludedKinds") !== 1 ||
+    count(exposureAuthority, "CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR.protectedKinds") !== 1 ||
+    count(startup, "const credentialReadGuard = await createCredentialReadGuard(") !== 1 ||
+    count(startup, "authorizeCredentialRead: credentialReadGuard") !== 1 ||
+    count(setupDelivery, ").publishActiveBindings({") !== 1 ||
+    count(pairing, "exposureGuardedSecretStore(") !== 1 ||
+    !disasterCommand.includes("credentialRouteGuard: new CredentialExposureAuthority({")
+  ) {
+    failures.push("credential exposure projection, guard or production read route exact-set drifted");
+  }
+  const disasterCompletion = runtime.indexOf('completion.installation.t === "disaster-anchor-installed"');
+  const disasterFinish = runtime.indexOf("await finishDisasterRecoveryPostInstall({", disasterCompletion);
+  const surfaceOpen = runtime.indexOf("await consumers.openCurrentOwnerSurfaces()", disasterFinish);
+  if (
+    !bootstrap.includes("const disasterRecoveryPostInstall = trust") ||
+    !bootstrap.includes("await completeDisasterRecoveryInstallationBeforeBootstrap({") ||
+    !bootstrap.includes("disasterRecoveryPostInstall ?? plannedAnchorPostInstall") ||
+    disasterCompletion < 0 || disasterFinish < disasterCompletion || surfaceOpen < disasterFinish
+  ) {
+    failures.push("disaster installation completion, consumer recovery or public-open order drifted");
+  }
   const onboardingStart = pairing.indexOf('t: "recovery-onboarding-start"');
   const onboardingTarget = pairing.indexOf("return new PairedRecoveryCheckpointTarget({", onboardingStart);
-  const enrollment = pairing.indexOf("const trustEvent = createSignedTrustEvent", onboardingTarget);
+  const enrollment = pairing.indexOf("const trustEvent = createPairingTrustEvent", onboardingTarget);
   if (
     onboardingStart < 0 ||
     onboardingTarget < onboardingStart ||
@@ -1412,7 +1540,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     JSON.stringify(generationParticipants) !== JSON.stringify(expectedGenerationParticipants) ||
     count(
       bootstrap,
-      "installedAuthorityGeneration: plannedAnchorPostInstall.installedGeneration",
+      "installedAuthorityGeneration: anchorPostInstall.installedGeneration",
     ) !== 1 ||
     count(
       accessRoot,
@@ -1520,7 +1648,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(setup, "const plannedAnchorReadiness = createPlannedAnchorReadinessCoordinator(") !== 1 ||
     count(setup, "plannedAnchorReadiness: plannedAnchorReadiness.port") !== 1 ||
     count(setup, "plannedAnchorReadiness.runRevisionChange(") !== 1 ||
-    count(assembly, "readiness: this.options.authority.plannedAnchorReadiness") !== 2 ||
+    count(assembly, "readiness: this.options.authority.plannedAnchorReadiness") !== 3 ||
     count(transfer, "this.options.readiness.reserve({") !== 3 ||
     count(transfer, "this.options.readiness.release(") !== 5 ||
     count(mesh, "options.lifecycle.run(() => target.") !== 4

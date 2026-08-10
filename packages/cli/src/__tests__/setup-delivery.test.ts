@@ -600,6 +600,14 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
           revision: 1,
         }],
       });
+    expect((await authority.authorityLog.readStream("exposure")).map((entry) => entry.body))
+      .toMatchObject([{
+        deviceId: authority.deviceId,
+        bindingId: expectedBindingId,
+        bindingRevision: 1,
+        service: "provider-main",
+        state: "active",
+      }]);
   });
 
   it("does not infer user-alias credential equivalence across devices", async () => {

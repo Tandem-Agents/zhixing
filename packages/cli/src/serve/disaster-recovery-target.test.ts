@@ -1,0 +1,312 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type {
+  DeviceIdentity,
+  DisasterRecoveryCommand,
+  SecretRef,
+  SecretStorePort,
+} from "@zhixing/core/contracts";
+import {
+  createSignedDisasterRecoveryAbort,
+  createSignedDisasterRecoveryCommand,
+} from "@zhixing/core/protocol";
+import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import {
+  createRecoveryRootEvent,
+  createSignedTrustEvent,
+} from "@zhixing/mesh/trust-chain";
+import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
+import { createPlannedAnchorReadinessCoordinator } from "../setup-delivery.js";
+import { FileDisasterRecoveryCandidateJournal } from "./disaster-recovery-candidate.js";
+import { loadCurrentDisasterRecoveryInstallation } from "./disaster-recovery-installation.js";
+import {
+  completeDisasterRecoveryInstallationBeforeBootstrap,
+  DisasterRecoveryTarget,
+} from "./disaster-recovery-target.js";
+import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+
+const AT = "2026-08-10T00:00:00.000Z";
+const NOW = Date.parse("2026-08-10T01:00:00.000Z");
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("disaster recovery target", () => {
+  it("durably single-flights the selected source-less checkpoint before private effects", async () => {
+    const fixture = await createFixture();
+    const journal = new FileDisasterRecoveryCandidateJournal(
+      fixture.targetStore.authorityLog(),
+      fixture.recoveryRoot.rootPublicKey,
+    );
+    const first = prepareCommand(fixture, "request-first", "xfer-01KXPWTM80BYB4SH423EJT1CV1");
+    expect(await journal.claim(first)).toEqual({ prepare: first });
+    expect(await journal.claim(first)).toEqual({ prepare: first });
+
+    const second = prepareCommand(fixture, "request-second", "xfer-01KXPWTM80BYB4SH423EJT1CV2");
+    await expect(journal.claim(second)).rejects.toThrow(/candidate|progress|active/i);
+    expect(await fixture.secrets.list()).toEqual([]);
+  }, 120_000);
+
+  it("truly unseals, privately imports, atomically installs and replays one disaster generation", async () => {
+    const fixture = await createFixture();
+    const target = fixture.createTarget();
+    const prepare = prepareCommand(fixture, "request-recover", "xfer-01KXPWTM80BYB4SH423EJT1CV3");
+    const imported = await target.prepareAndImport({
+      prepare,
+      checkpoint: fixture.checkpoint,
+      recoveryRoot: fixture.recoveryRoot,
+      trustEvidence: [await fixture.targetStore.loadTrustEvents()],
+    });
+    expect(imported.state.phase).toBe("imported");
+    expect(imported.state.imported?.onsiteVerification.targetId).toBe("backup-dir:test");
+    expect(imported.state.imported?.catalog.pendingObligations).toBeDefined();
+    expect(await loadCurrentDisasterRecoveryInstallation(fixture.targetStore.authorityLog()))
+      .toBeUndefined();
+
+    const committed = await target.commit({
+      transferId: prepare.transferId,
+      recoveryRoot: fixture.recoveryRoot,
+    });
+    expect(committed.state.phase).toBe("committed");
+    expect(committed.trustRecord.issuer.deviceId).toBe(fixture.targetIdentity.deviceId);
+    expect(committed.trustRecord.anchorEpoch).toBeUndefined();
+    expect(committed.trustRecord.members.find((member) =>
+      member.device.deviceId === fixture.sourceIdentity.deviceId)?.state).toBe("revoked");
+    expect((await loadCurrentDisasterRecoveryInstallation(
+      fixture.targetStore.authorityLog(),
+    ))?.installation.transferId).toBe(prepare.transferId);
+
+    const replayTarget = fixture.createTarget();
+    const replay = await replayTarget.commit({
+      transferId: prepare.transferId,
+      recoveryRoot: fixture.recoveryRoot,
+    });
+    expect(replay.installation).toEqual(committed.installation);
+    const descriptor = await completeDisasterRecoveryInstallationBeforeBootstrap({
+      zhixingHome: fixture.targetRoot,
+      deviceId: fixture.targetIdentity.deviceId,
+      secretStore: fixture.secrets,
+      bootstrapStore: fixture.targetStore,
+      stagingRoot: fixture.stagingRoot,
+      now: () => NOW,
+    });
+    expect(descriptor?.installedGeneration).toMatchObject({
+      mode: "disaster-recovery",
+      transferId: prepare.transferId,
+      anchorEpoch: 2,
+    });
+
+    await expect(replayTarget.tombstone({
+      transferId: prepare.transferId,
+      userConfirmedOldDeviceIsolated: false,
+    })).rejects.toThrow(/确认旧设备/);
+    const tombstoned = await replayTarget.tombstone({
+      transferId: prepare.transferId,
+      userConfirmedOldDeviceIsolated: true,
+      at: "2026-08-10T01:05:00.000Z",
+    });
+    expect(tombstoned.phase).toBe("tombstoned");
+    expect(await replayTarget.tombstone({
+      transferId: prepare.transferId,
+      userConfirmedOldDeviceIsolated: true,
+    })).toEqual(tombstoned);
+  }, 120_000);
+
+  it("persists a root-signed abort before cleanup and rejects late commit", async () => {
+    const fixture = await createFixture();
+    const target = fixture.createTarget();
+    const prepare = prepareCommand(fixture, "request-abort", "xfer-01KXPWTM80BYB4SH423EJT1CV4");
+    await target.prepareAndImport({
+      prepare,
+      checkpoint: fixture.checkpoint,
+      recoveryRoot: fixture.recoveryRoot,
+      trustEvidence: [await fixture.targetStore.loadTrustEvents()],
+    });
+    const abort = createSignedDisasterRecoveryAbort({
+      v: 1,
+      mode: "disaster-recovery",
+      requestId: prepare.requestId,
+      transferId: prepare.transferId,
+      targetDeviceId: prepare.targetDeviceId,
+      checkpointTargetId: prepare.checkpointTargetId,
+      checkpointEnvelopeDigest: prepare.checkpointEnvelope.digest,
+      reason: "operator-cancelled",
+      at: "2026-08-10T01:02:00.000Z",
+    }, fixture.recoveryRoot);
+    const state = await target.abort({ abort, recoveryRoot: fixture.recoveryRoot });
+    expect(state.phase).toBe("aborted");
+    expect(await target.abort({ abort, recoveryRoot: fixture.recoveryRoot })).toEqual(state);
+    await expect(target.commit({
+      transferId: prepare.transferId,
+      recoveryRoot: fixture.recoveryRoot,
+    })).rejects.toThrow(/verified|imported|terminal/i);
+  }, 120_000);
+});
+
+async function createFixture() {
+  const sourceRoot = await temporary("zhixing-disaster-source-");
+  const targetRoot = await temporary("zhixing-disaster-target-");
+  const sourceKey = await DeviceKey.generate();
+  const targetKey = await DeviceKey.generate();
+  const sourceIdentity = enroll(sourceKey, "lost anchor");
+  const targetIdentity = enroll(targetKey, "recovery anchor");
+  const sourceStore = new FileMeshBootstrapStore(sourceRoot, sourceKey);
+  const targetStore = new FileMeshBootstrapStore(targetRoot, targetKey);
+  let trust = await sourceStore.initializeLocalHome({
+    key: sourceKey,
+    identity: sourceIdentity,
+    roles: ["anchor"],
+    at: AT,
+    homeId: "home-disaster",
+  });
+  const enrollTarget = createSignedTrustEvent({
+    current: trust.projection,
+    signer: sourceKey,
+    at: "2026-08-10T00:01:00.000Z",
+    body: { t: "enroll", device: targetIdentity, roles: ["anchor"] },
+  });
+  trust = await sourceStore.appendTrustEvent({ event: enrollTarget, issuerKey: sourceKey });
+  const recoveryRoot = RecoveryRoot.generate();
+  const rootEvent = createRecoveryRootEvent({
+    current: trust,
+    op: "establish",
+    candidate: recoveryRoot,
+    outerSigner: sourceKey,
+    at: "2026-08-10T00:02:00.000Z",
+  });
+  trust = await sourceStore.appendTrustEvent({ event: rootEvent, issuerKey: sourceKey });
+  const trustRecord = await sourceStore.loadTrustRecord();
+  if (!trustRecord) throw new Error("fixture trust record is missing");
+  await targetStore.importTrustBootstrap({
+    events: await sourceStore.loadTrustEvents(),
+    record: trustRecord,
+    localDeviceId: targetIdentity.deviceId,
+  });
+  const activeExposure = createCredentialExposureRecord({
+    deviceId: sourceIdentity.deviceId,
+    bindingId: "provider:test",
+    service: "provider",
+    verifiedPrincipal: {
+      verification: "service-verified",
+      canonicalProviderPrincipal: "test@example.invalid",
+    },
+    markedAt: "2026-08-10T00:03:00.000Z",
+  });
+  await sourceStore.authorityLog().append([{ stream: "exposure", body: activeExposure }]);
+  const checkpoint = (await captureFullAuthorityCheckpoint({
+    checkpointId: "01J000000000000000000000D1",
+    createdAt: "2026-08-10T00:04:00.000Z",
+    purpose: { kind: "periodic" },
+    trust: trustRecord,
+    issuer: Object.assign({}, sourceIdentity, { sign: sourceKey.sign.bind(sourceKey) }),
+    recipient: recoveryRoot.publicIdentity(),
+    log: sourceStore.authorityLog(),
+    artifacts: sourceStore.artifactStore(),
+    retention: sourceStore.checkpointRetention(),
+  })).checkpoint;
+  const secrets = new MemorySecretStore();
+  const readiness = createPlannedAnchorReadinessCoordinator(async () => ({
+    configuredCapabilities: { providers: [], mcpServers: [], channels: [] },
+    protocolRevision: "protocol-disaster-v1",
+    assetRevision: "assets-disaster-v1",
+    serviceRevision: "services-disaster-v1",
+  }));
+  const stagingRoot = path.join(targetRoot, "disaster-recovery-staging");
+  const createTarget = () => new DisasterRecoveryTarget({
+    deviceId: targetIdentity.deviceId,
+    identity: targetIdentity,
+    identityKey: targetKey,
+    secretStore: secrets,
+    sharedArtifacts: targetStore.artifactStore(),
+    authorityLog: targetStore.authorityLog(),
+    stagingRoot,
+    readiness: readiness.port,
+    now: () => NOW,
+  });
+  return {
+    sourceRoot,
+    targetRoot,
+    sourceIdentity,
+    targetIdentity,
+    sourceStore,
+    targetStore,
+    recoveryRoot,
+    checkpoint,
+    secrets,
+    stagingRoot,
+    createTarget,
+  };
+}
+
+function prepareCommand(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  requestId: string,
+  transferId: string,
+): Extract<DisasterRecoveryCommand, { op: "prepare" }> {
+  const root = fixture.recoveryRoot.publicIdentity();
+  return createSignedDisasterRecoveryCommand({
+    v: 1,
+    op: "prepare",
+    requestId,
+    transferId,
+    targetDeviceId: fixture.targetIdentity.deviceId,
+    checkpointTargetId: "backup-dir:test",
+    recoveryRoot: {
+      homeId: "home-disaster",
+      rootKeyId: root.rootKeyId,
+      recipientKeyId: root.backupKeyId,
+    },
+    checkpointEnvelope: fixture.checkpoint.envelope,
+  }, fixture.recoveryRoot) as Extract<DisasterRecoveryCommand, { op: "prepare" }>;
+}
+
+function enroll(key: DeviceKey, displayName: string): DeviceIdentity {
+  return enrollDeviceIdentity(key, {
+    displayName,
+    platform: "headless",
+    enrolledAt: AT,
+  });
+}
+
+async function temporary(prefix: string): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), prefix));
+  roots.push(root);
+  return root;
+}
+
+class MemorySecretStore implements SecretStorePort {
+  readonly #values = new Map<string, string>();
+
+  async put(ref: SecretRef, value: string): Promise<void> {
+    this.#values.set(secretId(ref), value);
+  }
+
+  async get(ref: SecretRef): Promise<string | null> {
+    return this.#values.get(secretId(ref)) ?? null;
+  }
+
+  async delete(ref: SecretRef): Promise<void> {
+    this.#values.delete(secretId(ref));
+  }
+
+  async list(): Promise<readonly SecretRef[]> {
+    return [...this.#values.keys()].map((value) => {
+      const [kind, ...binding] = value.split("/");
+      return { kind: kind as SecretRef["kind"], bindingId: binding.join("/") };
+    });
+  }
+
+  async unlockState(): Promise<"unlocked"> {
+    return "unlocked";
+  }
+}
+
+function secretId(ref: SecretRef): string {
+  return `${ref.kind}/${ref.bindingId}`;
+}

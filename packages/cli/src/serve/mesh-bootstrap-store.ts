@@ -424,6 +424,48 @@ export class FileMeshBootstrapStore {
     return result.value;
   }
 
+  async commitRecoveryRootLifecycle(input: {
+    readonly events: readonly HomeTrustEvent[];
+    readonly record: HomeTrustRecord;
+  }): Promise<void> {
+    if (input.events.length < 1 || input.events.length > 2) {
+      throw new TypeError("Recovery root lifecycle requires one or two trust events");
+    }
+    await this.#log.transactProjection<
+      { readonly events: readonly HomeTrustEvent[]; readonly record?: HomeTrustRecord },
+      TrustStreamRecord,
+      void
+    >(
+      { events: [] },
+      (state, entry) => entry.body.t === "home-trust-event"
+        ? { ...state, events: [...state.events, entry.body.event] }
+        : { ...state, record: entry.body.record },
+      (state) => {
+        const exactEvents = state.events.slice(-input.events.length);
+        if (
+          state.record && canonicalize(exactEvents) === canonicalize(input.events) &&
+          canonicalize(state.record) === canonicalize(input.record)
+        ) return { kind: "return", value: undefined };
+        if (state.events.length === 0) throw new Error("Recovery root lifecycle trust chain is missing");
+        let next = replayTrustChain(state.events);
+        for (const event of input.events) next = applyTrustEvent(next, event);
+        verifyHomeTrustRecord(input.record, next);
+        return {
+          kind: "append",
+          entries: [
+            ...input.events.map((event) => ({
+              stream: "trust",
+              body: { t: "home-trust-event" as const, event },
+            })),
+            { stream: "trust", body: { t: "home-trust-record" as const, record: input.record } },
+          ],
+          value: undefined,
+        };
+      },
+      { stream: "trust" },
+    );
+  }
+
   /** Idempotently appends one already-authorized trust transition and its signed projection. */
   async reconcileTrustEvent(input: {
     readonly event: HomeTrustEvent;

@@ -911,6 +911,7 @@
       "conversation-read",
       "conversation-window",
       "device-trust",
+      "disaster-recovery",
       "environment-select",
       "global-list-read",
       "light-inference",
@@ -919,6 +920,7 @@
       "orchestration-child",
       "permission-persist",
       "recovery-backup",
+      "recovery-root-lifecycle",
       "run-cancel",
       "runtime-config",
       "runtime-lifecycle",
@@ -1026,6 +1028,13 @@
           "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1196,6 +1205,13 @@
           "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1358,6 +1374,13 @@
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1501,6 +1524,13 @@
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1615,6 +1645,13 @@
         "entryKeys": [
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1695,6 +1732,13 @@
         "entryKeys": [
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1772,6 +1816,13 @@
         "entryKeys": [
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -1831,6 +1882,13 @@
         "entryKeys": [
           "cli:zhixing",
           "cli:zhixing backup",
+          "cli:zhixing backup recover",
+          "cli:zhixing backup recover-finish",
+          "cli:zhixing backup root",
+          "cli:zhixing backup root approve-reset",
+          "cli:zhixing backup root invalidate",
+          "cli:zhixing backup root reset",
+          "cli:zhixing backup root rotate",
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
@@ -2270,6 +2328,77 @@
         "target": {
           "exclusion": "composition",
           "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing backup recover",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup recover",
+        "category": "cli",
+        "target": {
+          "rowId": "disaster-recovery"
+        }
+      },
+      {
+        "path": "zhixing backup recover-finish",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup recover-finish",
+        "category": "cli",
+        "target": {
+          "rowId": "disaster-recovery"
+        }
+      },
+      {
+        "path": "zhixing backup root",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing backup root",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing backup root approve-reset",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup root approve-reset",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-root-lifecycle"
+        }
+      },
+      {
+        "path": "zhixing backup root invalidate",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup root invalidate",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-root-lifecycle"
+        }
+      },
+      {
+        "path": "zhixing backup root reset",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup root reset",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-root-lifecycle"
+        }
+      },
+      {
+        "path": "zhixing backup root rotate",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing backup root rotate",
+        "category": "cli",
+        "target": {
+          "rowId": "recovery-root-lifecycle"
         }
       },
       {

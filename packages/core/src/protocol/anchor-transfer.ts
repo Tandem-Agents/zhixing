@@ -6,8 +6,15 @@ import type {
   ArtifactRef,
   AuthorityCatalog,
   AuthorityCatalogCoverage,
+  CheckpointEnvelope,
+  DisasterRecoveryAbort,
+  DisasterRecoveryBaseline,
+  DisasterRecoveryCommand,
+  DisasterRecoveryResult,
   Digest,
   HomeTrustEvent,
+  HomeTrustRecord,
+  RecoveryCheckpointVerification,
   ReadyProof,
   Signature,
   SourceFreezeProof,
@@ -32,15 +39,58 @@ const COVERAGE: readonly AuthorityCatalogCoverage[] = Object.freeze([
   "pending-obligations",
   "trust-and-anchor",
 ]);
+const FULL_CHECKPOINT_SCOPE = Object.freeze([
+  "global-authority",
+  "conversation-authority",
+  "conversation-content",
+  "execution-assets",
+] as const);
 
 type PlannedCommit = Extract<AnchorTransferCommit, { mode: "planned" }>;
 type PlannedRecord = Extract<TransferRecord, { mode: "planned" }>;
+type DisasterCommit = Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
+type DisasterRecord = Extract<TransferRecord, { mode: "disaster-recovery" }>;
 type WithoutSignature<T> = T extends { signature: Signature } ? Omit<T, "signature"> : never;
 
 export type UnsignedReadyProof = Omit<ReadyProof, "signature" | "issuerPossession">;
 export type UnsignedPlannedAnchorTransferCommit = Omit<PlannedCommit, "signature">;
 export type UnsignedAnchorTransferAbort = Omit<AnchorTransferAbort, "signature">;
 export type UnsignedAnchorTransferCommand = WithoutSignature<AnchorTransferCommand>;
+export type UnsignedDisasterRecoveryAbort = Omit<DisasterRecoveryAbort, "signature">;
+export type UnsignedDisasterRecoveryCommand = WithoutSignature<DisasterRecoveryCommand>;
+export type UnsignedDisasterRecoveryCommit = Omit<DisasterCommit, "signature">;
+
+export interface DisasterRecoveryVerifiers {
+  readonly recoveryRoot: ProtocolSignatureVerifier;
+  readonly targetDevice: ProtocolSignatureVerifier;
+  readonly targetIssuer: ProtocolSignatureVerifier;
+}
+
+export type DisasterRecoveryPhase =
+  | "prepared"
+  | "imported"
+  | "committed"
+  | "tombstoned"
+  | "aborted";
+
+export interface DisasterRecoveryState {
+  readonly identity: {
+    readonly requestId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+    readonly checkpointTargetId: string;
+    readonly homeId: string;
+    readonly rootKeyId: string;
+    readonly recipientKeyId: string;
+    readonly checkpointEnvelopeDigest: Digest;
+  };
+  readonly phase: DisasterRecoveryPhase;
+  readonly prepare: Extract<DisasterRecoveryCommand, { op: "prepare" }>;
+  readonly imported?: Extract<DisasterRecoveryCommand, { op: "import" }>;
+  readonly commit?: DisasterCommit;
+  readonly abort?: DisasterRecoveryAbort;
+  readonly recordDigests: Readonly<Record<string, Digest>>;
+}
 
 export type PlannedAnchorTransferPhase =
   | "prepared"
@@ -199,9 +249,151 @@ export function validatePlannedAnchorTransferCommit(
   return value as unknown as PlannedCommit;
 }
 
-export function anchorTransferCommitDigest(commit: PlannedCommit): Digest {
+export function anchorTransferCommitDigest(commit: AnchorTransferCommit): Digest {
   const { signature: _, ...payload } = commit;
   return protocolDigest("AnchorTransferCommit", 1, payload);
+}
+
+export function createSignedDisasterRecoveryCommit(
+  input: UnsignedDisasterRecoveryCommit,
+  signer: ProtocolSigner,
+): DisasterCommit {
+  const payload = validateUnsignedDisasterCommit(input);
+  return { ...payload, signature: signer.sign("AnchorTransferCommit", 1, payload) };
+}
+
+export function validateDisasterRecoveryCommit(
+  input: unknown,
+  recoveryRoot: ProtocolSignatureVerifier,
+): DisasterCommit {
+  const value = clone(input, "Disaster recovery commit");
+  exact(value, [
+    "at", "authorityCatalogDigest", "checkpointEnvelopeDigest", "mode",
+    "nextAnchorEpoch", "nextTrustEpoch", "readyProofDigest", "signature",
+    "targetDeviceId", "targetIssuerPublicKey", "transferId", "trustTransitionDigest", "v",
+  ], "Disaster recovery commit");
+  signature(value.signature, "Disaster recovery commit signature");
+  const { signature: signed, ...unsigned } = value;
+  const payload = validateUnsignedDisasterCommit(unsigned as unknown as UnsignedDisasterRecoveryCommit);
+  recoveryRoot.verify("AnchorTransferCommit", 1, payload, signed);
+  return value as unknown as DisasterCommit;
+}
+
+export function createSignedDisasterRecoveryAbort(
+  input: UnsignedDisasterRecoveryAbort,
+  signer: ProtocolSigner,
+): DisasterRecoveryAbort {
+  const payload = validateUnsignedDisasterAbort(input);
+  return { ...payload, signature: signer.sign("DisasterRecoveryAbort", 1, payload) };
+}
+
+export function validateDisasterRecoveryAbort(
+  input: unknown,
+  recoveryRoot: ProtocolSignatureVerifier,
+): DisasterRecoveryAbort {
+  const value = clone(input, "Disaster recovery abort");
+  exact(value, [
+    "at", "checkpointEnvelopeDigest", "checkpointTargetId", "mode", "reason", "requestId", "signature",
+    "targetDeviceId", "transferId", "v",
+  ], "Disaster recovery abort");
+  signature(value.signature, "Disaster recovery abort signature");
+  const { signature: signed, ...unsigned } = value;
+  const payload = validateUnsignedDisasterAbort(unsigned as unknown as UnsignedDisasterRecoveryAbort);
+  recoveryRoot.verify("DisasterRecoveryAbort", 1, payload, signed);
+  return value as unknown as DisasterRecoveryAbort;
+}
+
+export function disasterRecoveryAbortDigest(abort: DisasterRecoveryAbort): Digest {
+  const { signature: _, ...payload } = abort;
+  return protocolDigest("DisasterRecoveryAbort", 1, payload);
+}
+
+export function createSignedDisasterRecoveryCommand(
+  input: UnsignedDisasterRecoveryCommand,
+  signer: ProtocolSigner,
+): DisasterRecoveryCommand {
+  const payload = validateUnsignedDisasterCommand(input);
+  return {
+    ...payload,
+    signature: signer.sign("DisasterRecoveryCommand", 1, payload),
+  } as DisasterRecoveryCommand;
+}
+
+export function validateDisasterRecoveryCommand(
+  input: unknown,
+  verifiers: DisasterRecoveryVerifiers,
+  now = Date.now(),
+): DisasterRecoveryCommand {
+  const value = clone(input, "Disaster recovery command");
+  signature(value.signature, "Disaster recovery command signature");
+  const { signature: signed, ...unsigned } = value;
+  const payload = validateUnsignedDisasterCommand(unsigned as unknown as UnsignedDisasterRecoveryCommand);
+  verifiers.recoveryRoot.verify("DisasterRecoveryCommand", 1, payload, signed);
+  if (payload.op === "prepare") {
+    if (signed.keyId !== payload.recoveryRoot.rootKeyId) {
+      throw new TypeError("Disaster prepare is not signed by its recovery root");
+    }
+  } else if (payload.op === "import") {
+    validateImportedDisasterFacts(payload, verifiers, now);
+  } else if (payload.op === "commit") {
+    const commit = validateDisasterRecoveryCommit(payload.commit, verifiers.recoveryRoot);
+    if (commit.transferId !== payload.transferId) {
+      throw new TypeError("Disaster commit command changes transferId");
+    }
+  } else if (payload.op === "abort") {
+    const abort = validateDisasterRecoveryAbort(payload.abort, verifiers.recoveryRoot);
+    if (abort.transferId !== payload.transferId) {
+      throw new TypeError("Disaster abort command changes transferId");
+    }
+  }
+  return value as unknown as DisasterRecoveryCommand;
+}
+
+export function validateDisasterRecoveryResult(
+  input: unknown,
+  command: DisasterRecoveryCommand,
+  recoveryRoot?: ProtocolSignatureVerifier,
+): DisasterRecoveryResult {
+  const value = clone(input, "Disaster recovery result");
+  version(value.v, "Disaster recovery result");
+  identifier(value.requestId, "Disaster recovery result requestId");
+  transferId(value.transferId, "Disaster recovery result transferId");
+  if (value.requestId !== command.requestId || value.transferId !== command.transferId) {
+    throw new TypeError("Disaster recovery result does not bind its originating command");
+  }
+  if (value.status === "rejected") {
+    exact(value, ["error", "requestId", "status", "transferId", "v"], "Disaster recovery rejected result");
+    object(value.error, "Disaster recovery result error");
+    exact(value.error, ["code", "retryable"], "Disaster recovery result error");
+    if (!ERROR_CODES.has(value.error.code as string) || typeof value.error.retryable !== "boolean") {
+      throw new TypeError("Disaster recovery result error is invalid");
+    }
+    return value as unknown as DisasterRecoveryResult;
+  }
+  if (value.status !== "ok" || !DISASTER_PHASES.has(value.state as DisasterRecoveryPhase)) {
+    throw new TypeError("Disaster recovery result status is invalid");
+  }
+  const state = value.state as DisasterRecoveryPhase;
+  const fields = state === "prepared" ? [] : state === "imported" ? ["ref"] :
+    state === "committed" || state === "tombstoned" ? ["commit", "trustRecord"] : ["abort"];
+  exact(value, ["requestId", ...fields, "state", "status", "transferId", "v"], "Disaster recovery result");
+  if (state === "imported") artifact(value.ref, "Disaster recovery result ref");
+  if (state === "committed" || state === "tombstoned") {
+    if (!recoveryRoot) throw new TypeError("Committed disaster result requires a recovery-root verifier");
+    const commit = validateDisasterRecoveryCommit(value.commit, recoveryRoot);
+    trustRecord(value.trustRecord, "Disaster recovery result trust record");
+    if (command.op === "commit" && canonicalize(commit) !== canonicalize(command.commit)) {
+      throw new TypeError("Disaster recovery result changes the originating commit");
+    }
+  }
+  if (state === "aborted") {
+    if (!recoveryRoot) throw new TypeError("Aborted disaster result requires a recovery-root verifier");
+    const abort = validateDisasterRecoveryAbort(value.abort, recoveryRoot);
+    if (command.op === "abort" && canonicalize(abort) !== canonicalize(command.abort)) {
+      throw new TypeError("Disaster recovery result changes the originating abort");
+    }
+  }
+  return value as unknown as DisasterRecoveryResult;
 }
 
 export function createSignedAnchorTransferAbort(
@@ -414,6 +606,278 @@ export function reducePlannedAnchorTransfer(
   return assertNever(record);
 }
 
+export function reduceDisasterRecovery(
+  current: DisasterRecoveryState | undefined,
+  input: unknown,
+  verifiers: DisasterRecoveryVerifiers,
+  now = Date.now(),
+): DisasterRecoveryState {
+  const record = disasterRecord(input);
+  const recordDigest = protocolDigest("TransferRecord", 1, record);
+  const prior = current?.recordDigests[record.t];
+  if (prior) {
+    if (prior !== recordDigest) throw new TypeError(`Conflicting ${record.t} disaster record`);
+    return current!;
+  }
+  if (current && record.transferId !== current.identity.transferId) {
+    throw new TypeError("Disaster recovery identity changed");
+  }
+  if (record.t === "anchor-prepared") {
+    if (current) throw new TypeError("Disaster prepared must be the first record");
+    const prepare = validateDisasterRecoveryCommand(record.prepare, verifiers, now);
+    if (prepare.op !== "prepare" || prepare.transferId !== record.transferId) {
+      throw new TypeError("Disaster prepared record has another identity");
+    }
+    return {
+      identity: {
+        requestId: prepare.requestId,
+        transferId: prepare.transferId,
+        targetDeviceId: prepare.targetDeviceId,
+        checkpointTargetId: prepare.checkpointTargetId,
+        homeId: prepare.recoveryRoot.homeId,
+        rootKeyId: prepare.recoveryRoot.rootKeyId,
+        recipientKeyId: prepare.recoveryRoot.recipientKeyId,
+        checkpointEnvelopeDigest: prepare.checkpointEnvelope.digest,
+      },
+      phase: "prepared",
+      prepare,
+      recordDigests: { [record.t]: recordDigest },
+    };
+  }
+  if (!current) throw new TypeError("Disaster recovery has no prepared record");
+  if (record.t === "anchor-imported") {
+    disasterPhase(current, "prepared", "imported");
+    const imported = validateDisasterRecoveryCommand(record.imported, verifiers, now);
+    if (imported.op !== "import") throw new TypeError("Disaster imported record has no import command");
+    assertDisasterImportedBinding(current, imported);
+    return advanceDisaster(current, "imported", record, { imported });
+  }
+  if (record.t === "anchor-committed") {
+    disasterPhase(current, "imported", "committed");
+    if (!current.imported) throw new TypeError("Disaster recovery has no imported facts");
+    const commit = validateDisasterRecoveryCommit(record.commit, verifiers.recoveryRoot);
+    assertDisasterCommitBinding(current.imported, commit);
+    return advanceDisaster(current, "committed", record, { commit });
+  }
+  if (record.t === "anchor-tombstoned") {
+    disasterPhase(current, "committed", "tombstoned");
+    if (!current.commit || record.commitDigest !== anchorTransferCommitDigest(current.commit)) {
+      throw new TypeError("Disaster tombstone changes commit identity");
+    }
+    return advanceDisaster(current, "tombstoned", record);
+  }
+  if (record.t === "anchor-aborted") {
+    if (current.phase === "committed" || current.phase === "tombstoned" || current.phase === "aborted") {
+      throw new TypeError("Committed or terminal disaster recovery cannot abort");
+    }
+    const abort = validateDisasterRecoveryAbort(record.abort, verifiers.recoveryRoot);
+    if (
+      abort.requestId !== current.identity.requestId ||
+      abort.transferId !== current.identity.transferId ||
+      abort.targetDeviceId !== current.identity.targetDeviceId ||
+      abort.checkpointTargetId !== current.identity.checkpointTargetId ||
+      abort.checkpointEnvelopeDigest !== current.identity.checkpointEnvelopeDigest
+    ) throw new TypeError("Disaster abort changes candidate identity");
+    return advanceDisaster(current, "aborted", record, { abort });
+  }
+  return assertNeverDisaster(record);
+}
+
+function assertDisasterImportedBinding(
+  state: DisasterRecoveryState,
+  imported: Extract<DisasterRecoveryCommand, { op: "import" }>,
+): void {
+  if (
+    imported.requestId !== state.identity.requestId ||
+    imported.transferId !== state.identity.transferId ||
+    imported.targetDeviceId !== state.identity.targetDeviceId ||
+    imported.checkpointTargetId !== state.identity.checkpointTargetId ||
+    imported.checkpointEnvelopeDigest !== state.identity.checkpointEnvelopeDigest ||
+    imported.baseline.homeId !== state.identity.homeId ||
+    imported.baseline.recoveryRoot.rootKeyId !== state.identity.rootKeyId ||
+    imported.baseline.recoveryRoot.recipientKeyId !== state.identity.recipientKeyId
+  ) throw new TypeError("Disaster import changes candidate identity");
+}
+
+function assertDisasterCommitBinding(
+  imported: Extract<DisasterRecoveryCommand, { op: "import" }>,
+  commit: DisasterCommit,
+): void {
+  if (
+    commit.transferId !== imported.transferId ||
+    commit.targetDeviceId !== imported.targetDeviceId ||
+    commit.checkpointEnvelopeDigest !== imported.checkpointEnvelopeDigest ||
+    commit.authorityCatalogDigest !== authorityCatalogDigest(imported.catalog) ||
+    commit.trustTransitionDigest !== protocolDigest("HomeTrustEvent", 1, unsignedEvent(imported.trustTransition)) ||
+    commit.nextAnchorEpoch !== imported.nextAnchorEpoch ||
+    commit.nextTrustEpoch !== imported.nextTrustEpoch ||
+    commit.targetIssuerPublicKey !== imported.targetIssuerPublicKey ||
+    commit.readyProofDigest !== readyProofDigest(imported.readyProof)
+  ) throw new TypeError("Disaster commit does not bind imported facts");
+}
+
+function validateUnsignedDisasterCommit(
+  input: UnsignedDisasterRecoveryCommit,
+): UnsignedDisasterRecoveryCommit {
+  const value = clone(input, "Unsigned disaster recovery commit");
+  exact(value, [
+    "at", "authorityCatalogDigest", "checkpointEnvelopeDigest", "mode",
+    "nextAnchorEpoch", "nextTrustEpoch", "readyProofDigest", "targetDeviceId",
+    "targetIssuerPublicKey", "transferId", "trustTransitionDigest", "v",
+  ], "Unsigned disaster recovery commit");
+  version(value.v, "Disaster recovery commit");
+  if (value.mode !== "disaster-recovery") throw new TypeError("Disaster recovery commit mode is invalid");
+  transferId(value.transferId, "Disaster recovery commit transferId");
+  identifier(value.targetDeviceId, "Disaster recovery commit targetDeviceId");
+  for (const field of ["checkpointEnvelopeDigest", "authorityCatalogDigest", "trustTransitionDigest", "readyProofDigest"] as const) {
+    digest(value[field], `Disaster recovery commit ${field}`);
+  }
+  positive(value.nextAnchorEpoch, "Disaster recovery commit nextAnchorEpoch");
+  positive(value.nextTrustEpoch, "Disaster recovery commit nextTrustEpoch");
+  if (typeof value.targetIssuerPublicKey !== "string" || !value.targetIssuerPublicKey.startsWith("ed25519:")) {
+    throw new TypeError("Disaster recovery issuer public key is invalid");
+  }
+  time(value.at, "Disaster recovery commit time");
+  return value as unknown as UnsignedDisasterRecoveryCommit;
+}
+
+function validateUnsignedDisasterAbort(
+  input: UnsignedDisasterRecoveryAbort,
+): UnsignedDisasterRecoveryAbort {
+  const value = clone(input, "Unsigned disaster recovery abort");
+  exact(value, [
+    "at", "checkpointEnvelopeDigest", "checkpointTargetId", "mode", "reason", "requestId",
+    "targetDeviceId", "transferId", "v",
+  ], "Unsigned disaster recovery abort");
+  version(value.v, "Disaster recovery abort");
+  if (value.mode !== "disaster-recovery") throw new TypeError("Disaster recovery abort mode is invalid");
+  identifier(value.requestId, "Disaster recovery abort requestId");
+  transferId(value.transferId, "Disaster recovery abort transferId");
+  identifier(value.targetDeviceId, "Disaster recovery abort targetDeviceId");
+  identifier(value.checkpointTargetId, "Disaster recovery abort checkpointTargetId");
+  digest(value.checkpointEnvelopeDigest, "Disaster recovery abort checkpointEnvelopeDigest");
+  if (!DISASTER_ABORT_REASONS.has(value.reason as string)) {
+    throw new TypeError("Disaster recovery abort reason is invalid");
+  }
+  time(value.at, "Disaster recovery abort time");
+  return value as unknown as UnsignedDisasterRecoveryAbort;
+}
+
+function validateUnsignedDisasterCommand(
+  input: UnsignedDisasterRecoveryCommand,
+): UnsignedDisasterRecoveryCommand {
+  const value = clone(input, "Unsigned disaster recovery command");
+  version(value.v, "Disaster recovery command");
+  identifier(value.requestId, "Disaster recovery command requestId");
+  transferId(value.transferId, "Disaster recovery command transferId");
+  if (value.op === "prepare") {
+    exact(value, [
+      "checkpointEnvelope", "checkpointTargetId", "op", "recoveryRoot", "requestId", "targetDeviceId", "transferId", "v",
+    ], "Disaster prepare command");
+    identifier(value.targetDeviceId, "Disaster prepare targetDeviceId");
+    identifier(value.checkpointTargetId, "Disaster prepare checkpointTargetId");
+    object(value.recoveryRoot, "Disaster prepare recovery root");
+    exact(value.recoveryRoot, ["homeId", "recipientKeyId", "rootKeyId"], "Disaster prepare recovery root");
+    identifier(value.recoveryRoot.homeId, "Disaster prepare homeId");
+    identifier(value.recoveryRoot.rootKeyId, "Disaster prepare rootKeyId");
+    identifier(value.recoveryRoot.recipientKeyId, "Disaster prepare recipientKeyId");
+    checkpointEnvelope(value.checkpointEnvelope, "Disaster prepare checkpoint envelope");
+    if (value.checkpointEnvelope.recipientKeyId !== value.recoveryRoot.recipientKeyId) {
+      throw new TypeError("Disaster prepare uses another recovery-root generation");
+    }
+  } else if (value.op === "import") {
+    exact(value, [
+      "baseline", "catalog", "catalogRef", "checkpointEnvelopeDigest", "nextAnchorEpoch",
+      "nextTrustEpoch", "onsiteVerification", "op", "readyProof", "requestId", "checkpointTargetId",
+      "targetDeviceId", "targetIssuerPublicKey", "transferId", "trustTransition", "v",
+    ], "Disaster import command");
+    identifier(value.targetDeviceId, "Disaster import targetDeviceId");
+    identifier(value.checkpointTargetId, "Disaster import checkpointTargetId");
+    digest(value.checkpointEnvelopeDigest, "Disaster import checkpointEnvelopeDigest");
+    baseline(value.baseline, "Disaster import baseline");
+    verification(value.onsiteVerification, "Disaster import onsite verification");
+    validateAuthorityCatalog(value.catalog);
+    artifact(value.catalogRef, "Disaster import catalog ref");
+    if (canonicalize(prepareAuthorityCatalog(value.catalog).ref) !== canonicalize(value.catalogRef)) {
+      throw new TypeError("Disaster import catalog ref does not bind catalog bytes");
+    }
+    object(value.readyProof, "Disaster import ready proof");
+    disasterTransition(value.trustTransition, "Disaster import trust transition");
+    positive(value.nextAnchorEpoch, "Disaster import nextAnchorEpoch");
+    positive(value.nextTrustEpoch, "Disaster import nextTrustEpoch");
+    if (typeof value.targetIssuerPublicKey !== "string" || !value.targetIssuerPublicKey.startsWith("ed25519:")) {
+      throw new TypeError("Disaster import issuer public key is invalid");
+    }
+  } else if (value.op === "commit") {
+    exact(value, ["commit", "op", "requestId", "transferId", "v"], "Disaster commit command");
+    object(value.commit, "Disaster commit payload");
+  } else if (value.op === "abort") {
+    exact(value, ["abort", "op", "requestId", "transferId", "v"], "Disaster abort command");
+    object(value.abort, "Disaster abort payload");
+  } else if (value.op === "tombstone") {
+    exact(value, ["at", "commitDigest", "op", "requestId", "transferId", "v"], "Disaster tombstone command");
+    digest(value.commitDigest, "Disaster tombstone commitDigest");
+    time(value.at, "Disaster tombstone time");
+  } else if (value.op === "status") {
+    exact(value, ["op", "requestId", "transferId", "v"], "Disaster status command");
+  } else {
+    throw new TypeError("Disaster recovery command operation is invalid");
+  }
+  return value as unknown as UnsignedDisasterRecoveryCommand;
+}
+
+function validateImportedDisasterFacts(
+  imported: Extract<UnsignedDisasterRecoveryCommand, { op: "import" }>,
+  verifiers: DisasterRecoveryVerifiers,
+  now: number,
+): void {
+  const proof = validateReadyProof(imported.readyProof, verifiers.targetDevice, verifiers.targetIssuer, now);
+  verifiers.recoveryRoot.verify(
+    "RecoveryCheckpointVerification",
+    1,
+    unsignedVerification(imported.onsiteVerification),
+    imported.onsiteVerification.signature,
+  );
+  verifiers.recoveryRoot.verify(
+    "HomeTrustEvent",
+    1,
+    unsignedEvent(imported.trustTransition),
+    imported.trustTransition.signature,
+  );
+  const catalog = validateAuthorityCatalog(imported.catalog);
+  const baselineValue = imported.baseline;
+  const transition = imported.trustTransition;
+  if (
+    imported.onsiteVerification.envelopeDigest !== imported.checkpointEnvelopeDigest ||
+    imported.onsiteVerification.targetId !== imported.checkpointTargetId ||
+    catalog.transferId !== imported.transferId ||
+    catalog.targetDeviceId !== imported.targetDeviceId ||
+    catalog.sourceAnchorEpoch !== baselineValue.anchorEpoch ||
+    catalog.trust.homeId !== baselineValue.homeId ||
+    catalog.trust.trustEpoch !== baselineValue.trustEpoch ||
+    catalog.trust.chainHead.seq !== baselineValue.chainHead.seq ||
+    catalog.trust.chainHead.eventDigest !== baselineValue.chainHead.eventDigest ||
+    catalog.trust.issuerDeviceId !== baselineValue.issuer.deviceId ||
+    catalog.trust.issuerKeyId !== baselineValue.issuer.issuerKeyId ||
+    proof.transferId !== imported.transferId ||
+    proof.homeId !== baselineValue.homeId ||
+    proof.targetDeviceId !== imported.targetDeviceId ||
+    proof.trustEpoch !== baselineValue.trustEpoch ||
+    proof.trustChainHead.seq !== baselineValue.chainHead.seq ||
+    proof.trustChainHead.eventDigest !== baselineValue.chainHead.eventDigest ||
+    transition.homeId !== baselineValue.homeId ||
+    transition.trustEpoch !== baselineValue.trustEpoch ||
+    transition.body.fromIssuerKeyId !== baselineValue.issuer.issuerKeyId ||
+    transition.body.toDeviceId !== imported.targetDeviceId ||
+    transition.body.toIssuerKeyId !== proof.targetIssuerKeyId ||
+    transition.body.toIssuerPublicKey !== imported.targetIssuerPublicKey ||
+    transition.body.nextTrustEpoch !== imported.nextTrustEpoch ||
+    imported.nextAnchorEpoch !== baselineValue.anchorEpoch + 1 ||
+    imported.nextTrustEpoch !== baselineValue.trustEpoch + 1 ||
+    imported.targetIssuerPublicKey !== proof.targetIssuerPublicKey
+  ) throw new TypeError("Disaster imported facts do not share one recovery identity");
+}
+
 function assertCommitBinding(state: PlannedAnchorTransferState, commit: PlannedCommit): void {
   if (
     !state.proof || !state.catalogRef || !state.checkpoint ||
@@ -552,6 +1016,218 @@ function plannedRecord(input: unknown): PlannedRecord {
   return value as unknown as PlannedRecord;
 }
 
+function disasterRecord(input: unknown): DisasterRecord {
+  const value = clone(input, "Disaster recovery record");
+  version(value.v, "Disaster recovery record");
+  if (value.mode !== "disaster-recovery") throw new TypeError("Disaster recovery record mode is invalid");
+  const keys: Record<string, readonly string[]> = {
+    "anchor-prepared": ["mode", "prepare", "t", "transferId", "v"],
+    "anchor-imported": ["imported", "mode", "t", "transferId", "v"],
+    "anchor-committed": ["commit", "mode", "t", "transferId", "v"],
+    "anchor-tombstoned": ["at", "commitDigest", "mode", "t", "transferId", "v"],
+    "anchor-aborted": ["abort", "mode", "t", "transferId", "v"],
+  };
+  const expected = keys[value.t as string];
+  if (!expected) throw new TypeError("Disaster recovery record kind is invalid");
+  exact(value, expected, "Disaster recovery record");
+  transferId(value.transferId, "Disaster recovery record transferId");
+  if (value.t === "anchor-tombstoned") {
+    digest(value.commitDigest, "Disaster recovery tombstone commitDigest");
+    time(value.at, "Disaster recovery tombstone time");
+  }
+  return value as unknown as DisasterRecord;
+}
+
+function advanceDisaster(
+  current: DisasterRecoveryState,
+  next: DisasterRecoveryPhase,
+  record: DisasterRecord,
+  fields: Partial<DisasterRecoveryState> = {},
+): DisasterRecoveryState {
+  return {
+    ...current,
+    ...fields,
+    phase: next,
+    recordDigests: {
+      ...current.recordDigests,
+      [record.t]: protocolDigest("TransferRecord", 1, record),
+    },
+  };
+}
+
+function disasterPhase(
+  state: DisasterRecoveryState,
+  expected: DisasterRecoveryPhase,
+  next: DisasterRecoveryPhase,
+): void {
+  if (state.phase !== expected) {
+    throw new TypeError(`Disaster recovery cannot enter ${next} from ${state.phase}`);
+  }
+}
+
+function baseline(input: unknown, label: string): asserts input is DisasterRecoveryBaseline {
+  object(input, label);
+  exact(input, ["anchorEpoch", "chainHead", "homeId", "issuer", "recoveryRoot", "trustEpoch"], label);
+  identifier(input.homeId, `${label} homeId`);
+  positive(input.anchorEpoch, `${label} anchorEpoch`);
+  positive(input.trustEpoch, `${label} trustEpoch`);
+  chainHead(input.chainHead, `${label} chainHead`);
+  object(input.issuer, `${label} issuer`);
+  exact(input.issuer, ["deviceId", "issuerKeyId"], `${label} issuer`);
+  identifier(input.issuer.deviceId, `${label} issuer deviceId`);
+  identifier(input.issuer.issuerKeyId, `${label} issuer keyId`);
+  object(input.recoveryRoot, `${label} recovery root`);
+  exact(input.recoveryRoot, ["recipientKeyId", "rootKeyId"], `${label} recovery root`);
+  identifier(input.recoveryRoot.rootKeyId, `${label} recovery root keyId`);
+  identifier(input.recoveryRoot.recipientKeyId, `${label} recovery recipient keyId`);
+}
+
+function verification(input: unknown, label: string): asserts input is RecoveryCheckpointVerification {
+  object(input, label);
+  exact(input, [
+    "checkpointId", "envelopeDigest", "nonceDigest", "purpose", "recipientKeyId",
+    "signature", "targetId", "verifiedAt", "v",
+  ], label);
+  version(input.v, label);
+  identifier(input.checkpointId, `${label} checkpointId`);
+  identifier(input.recipientKeyId, `${label} recipientKeyId`);
+  identifier(input.targetId, `${label} targetId`);
+  digest(input.envelopeDigest, `${label} envelopeDigest`);
+  digest(input.nonceDigest, `${label} nonceDigest`);
+  object(input.purpose, `${label} purpose`);
+  if (input.purpose.kind === "periodic") {
+    exact(input.purpose, ["kind"], `${label} purpose`);
+  } else if (input.purpose.kind === "root-activation") {
+    exact(input.purpose, ["activationDigest", "kind"], `${label} purpose`);
+    digest(input.purpose.activationDigest, `${label} activationDigest`);
+  } else {
+    throw new TypeError(`${label} purpose is invalid`);
+  }
+  time(input.verifiedAt, `${label} verifiedAt`);
+  signature(input.signature, `${label} signature`);
+}
+
+function disasterTransition(input: unknown, label: string): asserts input is HomeTrustEvent {
+  object(input, label);
+  exact(input, ["at", "body", "homeId", "prevEventDigest", "seq", "signature", "trustEpoch", "v"], label);
+  version(input.v, label);
+  identifier(input.homeId, `${label} homeId`);
+  nonnegative(input.seq, `${label} seq`);
+  digest(input.prevEventDigest, `${label} prevEventDigest`);
+  positive(input.trustEpoch, `${label} trustEpoch`);
+  time(input.at, `${label} at`);
+  signature(input.signature, `${label} signature`);
+  object(input.body, `${label} body`);
+  exact(input.body, [
+    "fromIssuerKeyId", "nextTrustEpoch", "reason", "signedBy", "t", "toDeviceId",
+    "toIssuerKeyId", "toIssuerPublicKey",
+  ], `${label} body`);
+  if (
+    input.body.t !== "issuer-transition" ||
+    input.body.reason !== "disaster-recovery" ||
+    input.body.signedBy !== "recovery-root"
+  ) throw new TypeError(`${label} must be a recovery-root disaster transition`);
+  identifier(input.body.fromIssuerKeyId, `${label} fromIssuerKeyId`);
+  identifier(input.body.toIssuerKeyId, `${label} toIssuerKeyId`);
+  identifier(input.body.toDeviceId, `${label} toDeviceId`);
+  positive(input.body.nextTrustEpoch, `${label} nextTrustEpoch`);
+  if (typeof input.body.toIssuerPublicKey !== "string" || !input.body.toIssuerPublicKey.startsWith("ed25519:")) {
+    throw new TypeError(`${label} target issuer public key is invalid`);
+  }
+}
+
+function checkpointEnvelope(input: unknown, label: string): asserts input is CheckpointEnvelope {
+  object(input, label);
+  exact(input, [
+    "alg", "checkpointId", "chunks", "createdAt", "digest", "enc", "manifest", "nonceBase",
+    "recipientKeyId", "signature", "v", "wrappedDek",
+  ], label);
+  version(input.v, label);
+  identifier(input.checkpointId, `${label} checkpointId`);
+  time(input.createdAt, `${label} createdAt`);
+  identifier(input.recipientKeyId, `${label} recipientKeyId`);
+  object(input.alg, `${label} algorithm`);
+  exact(input.alg, ["aead", "kem"], `${label} algorithm`);
+  if (input.alg.kem !== "X25519-HKDF-SHA256" || input.alg.aead !== "AES-256-GCM") {
+    throw new TypeError(`${label} algorithm is unsupported`);
+  }
+  for (const field of ["enc", "wrappedDek", "nonceBase"] as const) {
+    identifier(input[field], `${label} ${field}`);
+  }
+  object(input.manifest, `${label} manifest`);
+  exact(input.manifest, ["domainRevisions", "purpose", "scope", "upToLsn"], `${label} manifest`);
+  if (canonicalize(input.manifest.scope) !== canonicalize(FULL_CHECKPOINT_SCOPE)) {
+    throw new TypeError(`${label} scope is not the full authority exact-set`);
+  }
+  object(input.manifest.domainRevisions, `${label} domain revisions`);
+  for (const [key, value] of Object.entries(input.manifest.domainRevisions)) {
+    identifier(key, `${label} domain revision key`);
+    nonnegative(value, `${label} domain revision`);
+  }
+  nonnegative(input.manifest.upToLsn, `${label} upToLsn`);
+  object(input.manifest.purpose, `${label} purpose`);
+  if (input.manifest.purpose.kind === "periodic") {
+    exact(input.manifest.purpose, ["kind"], `${label} purpose`);
+  } else if (input.manifest.purpose.kind === "root-activation") {
+    exact(input.manifest.purpose, ["kind", "plan"], `${label} purpose`);
+    object(input.manifest.purpose.plan, `${label} activation plan`);
+  } else {
+    throw new TypeError(`${label} purpose is invalid`);
+  }
+  if (!Array.isArray(input.chunks) || input.chunks.length === 0) throw new TypeError(`${label} chunks must be non-empty`);
+  for (const [index, chunk] of input.chunks.entries()) {
+    object(chunk, `${label} chunk ${index}`);
+    exact(chunk, ["bytes", "digest", "seq"], `${label} chunk ${index}`);
+    nonnegative(chunk.seq, `${label} chunk ${index} seq`);
+    positive(chunk.bytes, `${label} chunk ${index} bytes`);
+    digest(chunk.digest, `${label} chunk ${index} digest`);
+    if (chunk.seq !== index) throw new TypeError(`${label} chunks must be contiguous`);
+  }
+  digest(input.digest, `${label} digest`);
+  signature(input.signature, `${label} signature`);
+}
+
+function trustRecord(input: unknown, label: string): asserts input is HomeTrustRecord {
+  object(input, label);
+  const recordKeys = ["chainHead", "homeId", "issuer", "members", "signature", "trustEpoch", "v"];
+  if (Object.hasOwn(input, "recoveryRootPublicKey")) recordKeys.push("recoveryRootPublicKey");
+  if (Object.hasOwn(input, "recoveryBackupPublicKey")) recordKeys.push("recoveryBackupPublicKey");
+  exact(input, recordKeys, label);
+  version(input.v, label);
+  identifier(input.homeId, `${label} homeId`);
+  positive(input.trustEpoch, `${label} trustEpoch`);
+  chainHead(input.chainHead, `${label} chainHead`);
+  object(input.issuer, `${label} issuer`);
+  const issuerKeys = Object.hasOwn(input.issuer, "issuerPublicKey")
+    ? ["deviceId", "issuerKeyId", "issuerPublicKey"]
+    : ["deviceId", "issuerKeyId"];
+  exact(input.issuer, issuerKeys, `${label} issuer`);
+  identifier(input.issuer.deviceId, `${label} issuer deviceId`);
+  identifier(input.issuer.issuerKeyId, `${label} issuer keyId`);
+  if (input.issuer.issuerPublicKey !== undefined) identifier(input.issuer.issuerPublicKey, `${label} issuer public key`);
+  if (input.recoveryRootPublicKey !== undefined) identifier(input.recoveryRootPublicKey, `${label} root public key`);
+  if (input.recoveryBackupPublicKey !== undefined) identifier(input.recoveryBackupPublicKey, `${label} backup public key`);
+  if (!Array.isArray(input.members)) throw new TypeError(`${label} members must be an array`);
+  for (const [index, member] of input.members.entries()) {
+    object(member, `${label} member ${index}`);
+    exact(member, ["device", "roles", "state"], `${label} member ${index}`);
+    object(member.device, `${label} member ${index} device`);
+    exact(member.device, ["deviceId", "displayName", "enrolledAt", "platform", "publicKey"], `${label} member ${index} device`);
+    for (const field of ["deviceId", "displayName", "platform", "publicKey"] as const) identifier(member.device[field], `${label} member ${index} ${field}`);
+    time(member.device.enrolledAt, `${label} member ${index} enrolledAt`);
+    canonicalStringArray(member.roles, `${label} member ${index} roles`, new Set(["anchor", "executor", "surface"]));
+    if (!new Set(["active", "revoked", "pending-reenroll"]).has(member.state as string)) {
+      throw new TypeError(`${label} member ${index} state is invalid`);
+    }
+  }
+  signature(input.signature, `${label} signature`);
+}
+
+function unsignedVerification(value: RecoveryCheckpointVerification): unknown {
+  const { signature: _, ...unsigned } = value;
+  return unsigned;
+}
+
 function pickIdentity(record: Extract<PlannedRecord, { t: "anchor-prepared" }>) {
   return {
     requestId: record.requestId, transferId: record.transferId,
@@ -625,7 +1301,10 @@ function object(input: unknown, label: string): asserts input is Record<string, 
 function exact(input: Record<string, unknown>, keys: readonly string[], label: string): void { if (canonicalize(Object.keys(input).sort()) !== canonicalize([...keys].sort())) throw new TypeError(`${label} fields are incomplete or unknown`); }
 function clone(input: unknown, label: string): Record<string, unknown> { try { return JSON.parse(canonicalize(input)) as Record<string, unknown>; } catch (error) { throw new TypeError(`${label} must be canonical JSON data`, { cause: error }); } }
 function assertNever(value: never): never { throw new TypeError(`Unknown planned anchor transfer record: ${canonicalize(value)}`); }
+function assertNeverDisaster(value: never): never { throw new TypeError(`Unknown disaster recovery record: ${canonicalize(value)}`); }
 
 const PHASES = new Set<PlannedAnchorTransferPhase>(["prepared", "fenced", "frozen", "imported", "committed", "tombstoned", "aborted"]);
+const DISASTER_PHASES = new Set<DisasterRecoveryPhase>(["prepared", "imported", "committed", "tombstoned", "aborted"]);
 const ERROR_CODES = new Set(["unauthorized", "invalid", "not-found", "conflict", "unavailable", "not-ready", "committed"]);
 const ABORT_REASONS = new Set(["source-resumed", "target-rejected", "operator-cancelled"]);
+const DISASTER_ABORT_REASONS = new Set(["target-rejected", "operator-cancelled"]);

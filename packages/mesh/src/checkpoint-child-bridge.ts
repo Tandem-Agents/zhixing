@@ -9,6 +9,7 @@ interface NativeCheckpointChildBridge {
   identity(handle: bigint): string;
   writeFile(parent: bigint, name: string, bytes: Buffer): void;
   readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number): Buffer;
+  listEntries(parent: bigint, maximumEntries: number): string[];
   writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer): number;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): void;
   unlinkEntry(parent: bigint, name: string, directory: boolean): void;
@@ -22,6 +23,7 @@ interface BridgeApi {
   identity(handle: bigint): Promise<string>;
   writeFile(parent: bigint, name: string, bytes: Buffer): Promise<void>;
   readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number): Promise<Buffer>;
+  listEntries(parent: bigint, maximumEntries: number): Promise<readonly string[]>;
   writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer): Promise<number>;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): Promise<void>;
   unlinkEntry(parent: bigint, name: string, directory: boolean): Promise<void>;
@@ -61,6 +63,18 @@ export class CheckpointDirectoryHandle {
   async readFile(name: string, declaredBytes: number, offset: number, limit: number): Promise<Buffer> {
     await this.#assertOpen();
     return bridge.readFile(this[handle], childName(name), declaredBytes, offset, limit);
+  }
+
+  async listEntries(maximumEntries: number): Promise<readonly string[]> {
+    await this.#assertOpen();
+    if (!Number.isSafeInteger(maximumEntries) || maximumEntries < 1) {
+      throw new TypeError("Checkpoint directory entry bound is invalid");
+    }
+    const entries = await bridge.listEntries(this[handle], maximumEntries);
+    if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) {
+      throw new TypeError("Checkpoint directory entries are invalid");
+    }
+    return [...entries].sort();
   }
 
   async writeRange(name: string, maximumBytes: number, offset: number, bytes: Uint8Array): Promise<number> {
@@ -112,6 +126,7 @@ function nativeBridge(): BridgeApi {
     identity: async (...args) => native.identity(...args),
     writeFile: async (...args) => native.writeFile(...args),
     readFile: async (...args) => native.readFile(...args),
+    listEntries: async (...args) => native.listEntries(...args),
     writeRange: async (...args) => native.writeRange(...args),
     renameEntry: async (...args) => native.renameEntry(...args),
     unlinkEntry: async (...args) => native.unlinkEntry(...args),
@@ -180,6 +195,9 @@ function windowsBridge(): BridgeApi {
       await request<string>("readFile", { parent: id(parent), name, declaredBytes, offset, limit }),
       "base64",
     ),
+    listEntries: (parent, maximumEntries) => request<readonly string[]>("listEntries", {
+      parent: id(parent), maximumEntries,
+    }),
     writeRange: (parent, name, maximumBytes, offset, bytes) => request<number>("writeRange", {
       parent: id(parent), name, maximumBytes, offset, data: bytes.toString("base64"),
     }),

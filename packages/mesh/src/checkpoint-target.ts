@@ -7,6 +7,7 @@ import {
 } from "@zhixing/core/resources";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import {
+  assertCheckpointEnvelopeShape,
   checkpointEnvelopeArtifact,
   checkpointPackageFromChunks,
   readCheckpointChunk,
@@ -38,10 +39,22 @@ const FULL_AUTHORITY_SCOPE = Object.freeze([
   "execution-assets",
 ] as const);
 const MAX_MATERIALIZED_LEGACY_CHECKPOINT_BYTES = 16 * 1024 * 1024;
+const MAX_CHECKPOINT_INVENTORY_ENTRIES = 4096;
+
+export interface RecoveryCheckpointInventoryEntry {
+  readonly checkpointId: string;
+  readonly targetId: string;
+  readonly recipientKeyId: string;
+  readonly envelope: CheckpointPackage["envelope"];
+}
 
 export interface RetirableRecoveryCheckpointTarget extends RecoveryCheckpointTarget {
   retire(checkpointId: string, supersededBy: string, signal?: AbortSignal): Promise<void>;
   close?(): Promise<void>;
+}
+
+export interface InventoryRecoveryCheckpointTarget extends RetirableRecoveryCheckpointTarget {
+  inventory(requestId: string, signal?: AbortSignal): Promise<readonly RecoveryCheckpointInventoryEntry[]>;
 }
 
 export interface FileRecoveryCheckpointTargetOptions {
@@ -58,7 +71,7 @@ export interface PairedFileRecoveryCheckpointTargetOptions {
 }
 
 /** Independent-directory checkpoint target with frozen filesystem identity and atomic publication. */
-export class FileRecoveryCheckpointTarget implements RetirableRecoveryCheckpointTarget {
+export class FileRecoveryCheckpointTarget implements InventoryRecoveryCheckpointTarget {
   readonly targetId: string;
   readonly independenceDomain: string;
   readonly #root: FrozenCheckpointDirectoryIdentity;
@@ -191,6 +204,35 @@ export class FileRecoveryCheckpointTarget implements RetirableRecoveryCheckpoint
     return value;
   }
 
+  async inventory(requestId: string, signal?: AbortSignal): Promise<readonly RecoveryCheckpointInventoryEntry[]> {
+    if (!/^[A-Za-z0-9._:-]{1,192}$/u.test(requestId)) {
+      throw new TypeError("Recovery checkpoint inventory request id is invalid");
+    }
+    const operationSignal = signal ?? new AbortController().signal;
+    await this.#assertRoot();
+    const entries: RecoveryCheckpointInventoryEntry[] = [];
+    for (const name of await this.#root.handle.listEntries(MAX_CHECKPOINT_INVENTORY_ENTRIES)) {
+      if (!/^[A-Za-z0-9_-]{1,96}$/u.test(name)) continue;
+      try {
+        const checkpoint = await this.#readIfPresent(name, operationSignal);
+        if (!checkpoint || !isFullAuthorityEnvelope(checkpoint.envelope)) continue;
+        await this.#verifyPackageContents(checkpoint, operationSignal);
+        entries.push({
+          checkpointId: checkpoint.envelope.checkpointId,
+          targetId: this.targetId,
+          recipientKeyId: checkpoint.envelope.recipientKeyId,
+          envelope: checkpoint.envelope,
+        });
+      } catch (error) {
+        if (operationSignal.aborted) throw operationSignal.reason ?? error;
+        if (!isCheckpointInventoryOmission(error)) throw error;
+      }
+    }
+    return entries.sort((left, right) =>
+      right.envelope.createdAt.localeCompare(left.envelope.createdAt) ||
+      left.checkpointId.localeCompare(right.checkpointId));
+  }
+
   async retire(checkpointId: string, supersededBy: string, signal?: AbortSignal): Promise<void> {
     const operationSignal = signal ?? new AbortController().signal;
     const safeId = safeCheckpointId(checkpointId);
@@ -251,6 +293,7 @@ export class FileRecoveryCheckpointTarget implements RetirableRecoveryCheckpoint
         readCheckpointFile(binding, this.#root, "envelope.json", manifest.envelopeRef.bytes).then((bytes) => bytes.toString("utf8")),
       );
       const envelope = JSON.parse(envelopeText) as CheckpointPackage["envelope"];
+      assertCheckpointEnvelopeShape(envelope);
       if (
         canonicalize(envelope) !== envelopeText ||
         canonicalize(checkpointEnvelopeArtifact(envelope)) !== canonicalize(manifest.envelopeRef) ||
@@ -611,4 +654,8 @@ function assertExactKeys(value: Record<string, unknown>, expected: readonly stri
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCheckpointInventoryOmission(error: unknown): boolean {
+  return error instanceof TypeError || isCheckpointChildMissing(error);
 }

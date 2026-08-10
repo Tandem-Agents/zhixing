@@ -25,6 +25,10 @@ import {
   type PlannedAnchorPostInstallDescriptor,
 } from "./planned-anchor-transfer.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
+import {
+  completeDisasterRecoveryInstallationBeforeBootstrap,
+  type DisasterRecoveryPostInstallDescriptor,
+} from "./disaster-recovery-target.js";
 
 export type MeshRuntimeBootstrap =
   | {
@@ -49,7 +53,9 @@ export type MeshRuntimeBootstrap =
       readonly authorizedDeviceIds: readonly string[];
       readonly localEndpoint?: MeshEndpointDescriptor;
       readonly installedAuthorityGeneration?: InstalledAuthorityGeneration;
-      readonly plannedAnchorPostInstall?: PlannedAnchorPostInstallDescriptor;
+      readonly plannedAnchorPostInstall?:
+        | PlannedAnchorPostInstallDescriptor
+        | DisasterRecoveryPostInstallDescriptor;
     };
 
 /** Resolves durable trust before loading any role-specific production listener. */
@@ -69,7 +75,18 @@ export async function prepareMeshRuntimeBootstrap(input: {
     { storageMaintenance: input.storageMaintenance },
   );
   const trust = await bootstrapStore.loadTrustRecord();
-  const plannedAnchorPostInstall = trust
+  const disasterRecoveryPostInstall = trust
+    ? await completeDisasterRecoveryInstallationBeforeBootstrap({
+        zhixingHome: input.zhixingHome,
+        deviceId: deviceKey.deviceId,
+        secretStore: input.secretStore,
+        bootstrapStore,
+        ...(input.storageMaintenance
+          ? { storageMaintenance: input.storageMaintenance }
+          : {}),
+      })
+    : undefined;
+  const plannedAnchorPostInstall = trust && !disasterRecoveryPostInstall
     ? await completePlannedAnchorInstallationBeforeBootstrap({
         zhixingHome: input.zhixingHome,
         deviceId: deviceKey.deviceId,
@@ -83,6 +100,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
           : {}),
       })
     : undefined;
+  const anchorPostInstall = disasterRecoveryPostInstall ?? plannedAnchorPostInstall;
   const effective = resolveEffectiveMeshRoles({
     localDeviceId: deviceKey.deviceId,
     ...(configuration ? { configuration } : {}),
@@ -103,10 +121,12 @@ export async function prepareMeshRuntimeBootstrap(input: {
   }
   let anchorIssuerKey: DeviceKey | undefined;
   if (trust.issuer.deviceId === deviceKey.deviceId) {
+    const issuerPublicKey = trust.issuer.issuerPublicKey ?? trust.members.find((member) =>
+      member.device.deviceId === trust.issuer.deviceId)?.device.publicKey;
     anchorIssuerKey = trust.issuer.issuerKeyId === deviceKey.deviceId
       ? deviceKey
       : await loadActiveAnchorIssuerKey(input.secretStore, trust.issuer.issuerKeyId) ?? undefined;
-    if (!anchorIssuerKey || anchorIssuerKey.publicKey !== trust.issuer.issuerPublicKey) {
+    if (!anchorIssuerKey || anchorIssuerKey.publicKey !== issuerPublicKey) {
       throw new Error("Current duty device is missing its active issuer key");
     }
     bootstrapStore.bindIssuerKey(anchorIssuerKey);
@@ -151,11 +171,15 @@ export async function prepareMeshRuntimeBootstrap(input: {
       .filter((member) => member.state === "active")
       .map((member) => member.device.deviceId),
     ...(localEndpoint ? { localEndpoint } : {}),
-    ...(plannedAnchorPostInstall
-      ? { installedAuthorityGeneration: plannedAnchorPostInstall.installedGeneration }
+    ...(anchorPostInstall
+      ? { installedAuthorityGeneration: anchorPostInstall.installedGeneration }
       : {}),
-    ...(plannedAnchorPostInstall?.requiresPostInstallCompletion
-      ? { plannedAnchorPostInstall }
+    ...(anchorPostInstall && (
+      anchorPostInstall.installation.t === "disaster-anchor-installed" ||
+      ("requiresPostInstallCompletion" in anchorPostInstall &&
+        anchorPostInstall.requiresPostInstallCompletion)
+    )
+      ? { plannedAnchorPostInstall: anchorPostInstall }
       : {}),
   };
 }

@@ -57,6 +57,12 @@ export interface ProductionMeshControlPlaneOptions {
   ) => void | Promise<void>;
   readonly onConnectionError?: (error: Error) => void;
   readonly watchTrust?: boolean;
+  readonly credentialRouteGuard?: {
+    assertRoute(input: {
+      readonly ref: { readonly kind: "rendezvous"; readonly bindingId: string };
+      readonly service: "rendezvous";
+    }): Promise<void>;
+  };
 }
 
 /** Owns direct listeners, relay registrations and the non-anchor reconnect loop. */
@@ -260,10 +266,12 @@ export class ProductionMeshControlPlane {
     const relay = this.options.configuration.relayRegistration;
     if (!relay) return;
     for (const peer of trustedPeers) {
-      const secret = await this.options.secretStore.get({
+      const ref = {
         kind: "rendezvous",
         bindingId: peer.identity.deviceId,
-      });
+      } as const;
+      await this.options.credentialRouteGuard?.assertRoute({ ref, service: "rendezvous" });
+      const secret = await this.options.secretStore.get(ref);
       if (!secret) continue;
       this.#trackPeerTask(peer.identity.deviceId, (signal) =>
         this.#maintainRelayWindows(peer, secret, relay, signal));
@@ -353,10 +361,12 @@ export class ProductionMeshControlPlane {
             signal,
           });
         }
-        const secret = await this.options.secretStore.get({
+        const ref = {
           kind: "rendezvous",
           bindingId: anchor.identity.deviceId,
-        });
+        } as const;
+        await this.options.credentialRouteGuard?.assertRoute({ ref, service: "rendezvous" });
+        const secret = await this.options.secretStore.get(ref);
         if (!secret) throw new Error("Anchor relay rendezvous secret is unavailable");
         for (const key of currentAndPreviousRendezvousKeys(secret)) {
           try {

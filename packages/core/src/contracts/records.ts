@@ -27,6 +27,8 @@ import type {
   AnchorTransferAbort,
   AnchorTransferCommit,
   AuthorityCatalog,
+  DisasterRecoveryAbort,
+  DisasterRecoveryCommand,
   ConversationTransferAbort,
   ConversationTransferCommit,
   HomeTrustEventBody,
@@ -586,5 +588,36 @@ export type TransferRecord = WireSchemaV1<"TransferRecord"> &
         mode: "planned";
         transferId: string;
         abort: AnchorTransferAbort;
+      }
+    | {
+        t: "anchor-prepared";
+        mode: "disaster-recovery";
+        transferId: string;
+        prepare: Extract<DisasterRecoveryCommand, { op: "prepare" }>;
+      }
+    | {
+        t: "anchor-imported";
+        mode: "disaster-recovery";
+        transferId: string;
+        imported: Extract<DisasterRecoveryCommand, { op: "import" }>;
+      }
+    | {
+        t: "anchor-committed";
+        mode: "disaster-recovery";
+        transferId: string;
+        commit: Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
+      }
+    | {
+        t: "anchor-tombstoned";
+        mode: "disaster-recovery";
+        transferId: string;
+        commitDigest: Digest;
+        at: IsoTime;
+      }
+    | {
+        t: "anchor-aborted";
+        mode: "disaster-recovery";
+        transferId: string;
+        abort: DisasterRecoveryAbort;
       }
   );

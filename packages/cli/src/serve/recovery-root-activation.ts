@@ -1,4 +1,8 @@
-import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing/core/contracts";
+import type {
+  HomeTrustEvent,
+  HomeTrustRecord,
+  RecoveryActivationPlan,
+} from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   applyTrustEvent,
@@ -41,6 +45,17 @@ export async function assertRecoveryRootActivationReplay(
   if (!(await isExactRecoveryRootActivationReplay(store, event, record))) {
     throw new TypeError("Recovery root activation is not an exact terminal replay");
   }
+}
+
+export async function commitRecoveryRootLifecycleActivation(
+  store: FileMeshBootstrapStore,
+  plan: RecoveryActivationPlan,
+  record: HomeTrustRecord,
+): Promise<void> {
+  const events = plan.kind === "domain-reset-establish"
+    ? [plan.resetEvent, plan.rootEvent]
+    : [plan.rootEvent];
+  await store.commitRecoveryRootLifecycle({ events, record });
 }
 
 async function isExactRecoveryRootActivationReplay(

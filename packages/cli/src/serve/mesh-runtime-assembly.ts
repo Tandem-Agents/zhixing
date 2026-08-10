@@ -62,6 +62,7 @@ import {
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
+import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { registerSurfaceAssetMeshService } from "./surface-asset-mesh.js";
 import {
   AssignmentStreamMeshClient,
@@ -110,7 +111,7 @@ import {
 } from "@zhixing/mesh/paired-checkpoint-target";
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
-import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.js";
+import { commitRecoveryRootLifecycleActivation } from "./recovery-root-activation.js";
 import {
   completePlannedAnchorInstallationBeforeBootstrap,
   finishPlannedAnchorPostInstall,
@@ -130,6 +131,14 @@ import {
 } from "./planned-anchor-transfer-mesh.js";
 import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
 import type { PlannedAnchorTransferLifecycle } from "./planned-anchor-transfer.js";
+import {
+  finishDisasterRecoveryPostInstall,
+  type DisasterRecoveryPostInstallDescriptor,
+} from "./disaster-recovery-target.js";
+
+type AnchorPostInstallDescriptor =
+  | PlannedAnchorPostInstallDescriptor
+  | DisasterRecoveryPostInstallDescriptor;
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
@@ -284,7 +293,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly localEndpoint?: MeshEndpointDescriptor;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly plannedAnchorIssuerKey?: DeviceKey;
-  readonly plannedAnchorPostInstall?: PlannedAnchorPostInstallDescriptor;
+  readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
   readonly protocol?: ConversationProtocolRuntime;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -325,7 +334,7 @@ export class MeshRuntimeAssembly {
   #plannedAnchorCheckpointOwner: AuthorityCheckpointOwnerPort | undefined;
   #plannedAnchorLifecycle: PlannedAnchorTransferLifecycle | undefined;
   #plannedAnchorIssuerKey: DeviceKey | undefined;
-  #plannedAnchorPostInstall: PlannedAnchorPostInstallDescriptor | undefined;
+  #plannedAnchorPostInstall: AnchorPostInstallDescriptor | undefined;
   #plannedAnchorPostInstallConsumers: PlannedAnchorPostInstallConsumers | undefined;
   #plannedCommittedTargetDeviceId: string | undefined;
   #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
@@ -693,8 +702,9 @@ export class MeshRuntimeAssembly {
           sourceDeviceId: options.trust.issuer.deviceId,
           targetDeviceId: options.authority.deviceId,
           recipientKeyId: keyIdForPublicKey(options.trust.recoveryBackupPublicKey),
-          replayRootActivation: ({ event, record }) =>
-            assertRecoveryRootActivationReplay(options.bootstrapStore, event, record),
+          rootLifecycle: true,
+          commitRootActivation: ({ plan, record }) =>
+            commitRecoveryRootLifecycleActivation(options.bootstrapStore, plan, record),
           staging: new FilePairedCheckpointStaging({
             root: path.join(options.zhixingHome, "distributed-runtime", "recovery-checkpoint-incoming"),
             target: pairedTarget,
@@ -726,6 +736,11 @@ export class MeshRuntimeAssembly {
       bootstrapStore: options.bootstrapStore,
       services: this.services,
       connections: this.connections,
+      credentialRouteGuard: new CredentialExposureAuthority({
+        deviceId: options.authority.deviceId,
+        log: options.bootstrapStore.authorityLog(),
+        secretStore: options.secretStore,
+      }),
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
       onTrustReconciled: async (record) => {
         options.authority.reconcileTrustedDevices(
@@ -1431,11 +1446,19 @@ export class MeshRuntimeAssembly {
     if (readBack.length !== completion.pendingObligations.length) {
       throw new Error("Installed migration obligations were not completely read back");
     }
-    await finishPlannedAnchorPostInstall({
-      zhixingHome: this.options.zhixingHome,
-      transferId: completion.installation.transferId,
-      readiness: this.options.authority.plannedAnchorReadiness,
-    });
+    if (completion.installation.t === "disaster-anchor-installed") {
+      await finishDisasterRecoveryPostInstall({
+        zhixingHome: this.options.zhixingHome,
+        transferId: completion.installation.transferId,
+        readiness: this.options.authority.plannedAnchorReadiness,
+      });
+    } else {
+      await finishPlannedAnchorPostInstall({
+        zhixingHome: this.options.zhixingHome,
+        transferId: completion.installation.transferId,
+        readiness: this.options.authority.plannedAnchorReadiness,
+      });
+    }
     this.#plannedAnchorPostInstall = undefined;
     await consumers.openCurrentOwnerSurfaces();
     if (this.#started) await this.#startControl();

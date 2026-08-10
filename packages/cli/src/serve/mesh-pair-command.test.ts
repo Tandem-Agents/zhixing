@@ -2,17 +2,92 @@ import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { loadConfig } from "@zhixing/providers";
 import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
 import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import {
+  applyTrustEvent,
+  createDomainResetEvent,
+  createRecoveryRootEvent,
+  createSignedTrustEvent,
+  createTrustGenesisEvent,
+  initializeTrustChain,
+} from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
 import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
-import { runPairCommand } from "./mesh-pair-command.js";
+import { createPairingTrustEvent, runPairCommand } from "./mesh-pair-command.js";
 
 const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
 
 describe("production mesh pairing command", () => {
+  it("turns a fresh pairing transcript into reenroll for the same pending device", async () => {
+    const issuerKey = await DeviceKey.generate();
+    const peerKey = await DeviceKey.generate();
+    const issuer = enrollDeviceIdentity(issuerKey, {
+      displayName: "issuer",
+      platform: "headless",
+      enrolledAt: "2026-08-10T00:00:00.000Z",
+    });
+    const peer = enrollDeviceIdentity(peerKey, {
+      displayName: "peer",
+      platform: "headless",
+      enrolledAt: "2026-08-10T00:00:00.000Z",
+    });
+    let trust = initializeTrustChain(createTrustGenesisEvent({
+      homeId: "home-reenroll",
+      issuer,
+      signer: issuerKey,
+      at: "2026-08-10T00:00:00.000Z",
+    }));
+    trust = applyTrustEvent(trust, createSignedTrustEvent({
+      current: trust,
+      signer: issuerKey,
+      at: "2026-08-10T00:01:00.000Z",
+      body: { t: "enroll", device: peer, roles: ["executor"] },
+    }));
+    const recoveryRoot = RecoveryRoot.generate();
+    trust = applyTrustEvent(trust, createRecoveryRootEvent({
+      current: trust,
+      op: "establish",
+      candidate: recoveryRoot,
+      outerSigner: issuerKey,
+      at: "2026-08-10T00:01:30.000Z",
+    }));
+    trust = applyTrustEvent(trust, createDomainResetEvent({
+      current: trust,
+      issuer: issuerKey,
+      coSigner: peerKey,
+      at: "2026-08-10T00:02:00.000Z",
+    }));
+    trust = applyTrustEvent(trust, createRecoveryRootEvent({
+      current: trust,
+      op: "establish",
+      candidate: RecoveryRoot.generate(),
+      outerSigner: issuerKey,
+      at: "2026-08-10T00:02:30.000Z",
+    }));
+
+    const event = createPairingTrustEvent({
+      current: trust,
+      device: peer,
+      roles: ["anchor"],
+      pairingTranscriptDigest: "sha256:fresh-pairing-transcript",
+      at: "2026-08-10T00:03:00.000Z",
+      issuerKey,
+    });
+
+    expect(event.body).toEqual({
+      t: "reenroll",
+      deviceId: peer.deviceId,
+      pairingTranscriptDigest: "sha256:fresh-pairing-transcript",
+    });
+    expect(applyTrustEvent(trust, event).members.find((member) =>
+      member.device.deviceId === peer.deviceId)?.state).toBe("active");
+  });
+
   it("persists the offer secret before exposing a resumable issuer continuation", async () => {
     const home = await createTempDir("mesh-pair-offer-write-order");
     const entered = deferred<void>();

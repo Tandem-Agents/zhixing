@@ -8,10 +8,15 @@ import type {
   SecretStorePort,
 } from "@zhixing/core/contracts";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { canonicalize } from "@zhixing/core/protocol";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig } from "@zhixing/providers";
 import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
-import { createCheckpointId, type CheckpointSigner } from "@zhixing/mesh/checkpoint";
+import {
+  createCheckpointId,
+  type CheckpointPackage,
+  type CheckpointSigner,
+} from "@zhixing/mesh/checkpoint";
 import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
 import {
   FileRecoveryCheckpointTarget,
@@ -20,13 +25,25 @@ import {
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import { decodeRecoveryPackage, encodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
 import { enrollDeviceIdentity, type DeviceKey } from "@zhixing/mesh/device-identity";
+import {
+  activateAnchorIssuerKey,
+  loadActiveAnchorIssuerKey,
+  persistAnchorIssuerKey,
+} from "@zhixing/mesh/device-key-store";
 import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import {
   MeshPairedCheckpointTransport,
   PairedRecoveryCheckpointTarget,
 } from "@zhixing/mesh/paired-checkpoint-target";
-import { createRecoveryRootEvent, type TrustProjection } from "@zhixing/mesh/trust-chain";
+import {
+  applyTrustEvent,
+  createDomainResetApproval,
+  createDomainResetEventFromApproval,
+  createRecoveryRootEvent,
+  type DomainResetApproval,
+  type TrustProjection,
+} from "@zhixing/mesh/trust-chain";
 import { createStdoutWriter } from "../screen/index.js";
 import {
   FileBackupTargetConfiguration,
@@ -38,6 +55,8 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
+import { RecoveryRootLifecycleService } from "./recovery-root-lifecycle.js";
 
 export interface BackupCommandOptions {
   readonly zhixingHome?: string;
@@ -45,19 +64,39 @@ export interface BackupCommandOptions {
   readonly writeLine?: (line: string) => void;
   readonly readRecoveryPackage?: () => Promise<string>;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly now?: () => string;
+  readonly openRecoveryTarget?: (
+    binding: BackupTargetBinding,
+    recipientKeyId: string,
+  ) => Promise<{
+    readonly target: RetirableRecoveryCheckpointTarget;
+    readonly close: () => Promise<void>;
+  }>;
 }
 
 export async function runBackupSetupCommand(
-  selection: { readonly directory?: string; readonly pairedDeviceId?: string },
+  selection: {
+    readonly directory?: string;
+    readonly pairedDeviceName?: string;
+    /** Internal test/adapter identity; public callers use pairedDeviceName. */
+    readonly pairedDeviceId?: string;
+  },
   options: BackupCommandOptions = {},
 ): Promise<void> {
-  if ((selection.directory === undefined) === (selection.pairedDeviceId === undefined)) {
+  const selectedDevice = selection.pairedDeviceName ?? selection.pairedDeviceId;
+  if ((selection.directory === undefined) === (selectedDevice === undefined)) {
     throw new TypeError("请选择一个独立目录或一台已配对设备作为恢复备份目标");
   }
   const context = await openContext(options);
-  if (selection.pairedDeviceId) {
-    const member = context.trust.members.find((candidate) =>
-      candidate.state === "active" && candidate.device.deviceId === selection.pairedDeviceId);
+  if (selectedDevice) {
+    const matches = context.trust.members.filter((candidate) =>
+      candidate.state === "active" && (
+        selection.pairedDeviceId
+          ? candidate.device.deviceId === selectedDevice
+          : candidate.device.displayName === selectedDevice
+      ));
+    if (matches.length > 1) throw new Error("存在同名配对设备，请先修改设备名称后重试");
+    const member = matches[0];
     if (!member || member.device.deviceId === context.key.deviceId) {
       throw new Error("恢复备份目标必须是另一台已配对且仍有效的设备");
     }
@@ -133,6 +172,117 @@ export async function runBackupSetupCommand(
   }
 }
 
+export async function runRecoveryRootRotateCommand(
+  input: { readonly userConfirmed: boolean },
+  options: BackupCommandOptions = {},
+): Promise<void> {
+  if (!input.userConfirmed) throw new Error("请先确认已准备保存新的恢复码");
+  const context = await openContext(options, false);
+  const currentPackage = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+  const candidate = await prepareReplacementRoot(context, options);
+  const target = await openCurrentTarget(context, candidate.root, options);
+  try {
+    const at = context.now();
+    const rootEvent = createRecoveryRootEvent({
+      current: context.projection,
+      op: "rotate",
+      candidate: candidate.root,
+      outerSigner: currentPackage.root,
+      at,
+    });
+    const checkpoint = await captureRootLifecycleCheckpoint(context, {
+      v: 1,
+      kind: "rotate",
+      rootEvent,
+    }, candidate.root, at);
+    await (await lifecycle(context)).rotate({
+      currentRoot: currentPackage.root,
+      candidateRoot: candidate.root,
+      rootEvent,
+      checkpoint,
+      target: target.target,
+      supersedeCheckpointIds: await currentRootCheckpointIds(context, target.target.targetId),
+    });
+    context.writeLine("新的恢复码已回读验证并启用；旧恢复码已永久失效。");
+  } finally {
+    await target.close();
+  }
+}
+
+export async function runRecoveryRootInvalidateCommand(
+  input: { readonly userConfirmed: boolean },
+  options: BackupCommandOptions = {},
+): Promise<void> {
+  if (!input.userConfirmed) throw new Error("请先确认立即停用当前恢复码");
+  const context = await openContext(options, false);
+  const decoded = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+  await (await lifecycle(context)).invalidate(decoded.root);
+  context.writeLine("当前恢复码已停用；创建新恢复码前，恢复备份不可用于接管值班。");
+}
+
+export async function runRecoveryRootApproveResetCommand(
+  input: { readonly userConfirmed: boolean },
+  options: BackupCommandOptions = {},
+): Promise<void> {
+  if (!input.userConfirmed) throw new Error("请先在另一台已加入设备上确认重置恢复码");
+  const context = await openContext(options, false, false);
+  const approval = createDomainResetApproval({
+    current: context.projection,
+    coSigner: context.key,
+    at: context.now(),
+  });
+  context.writeLine(`重置确认码：${encodeResetApproval(approval)}`);
+  context.writeLine("请把确认码交给当前主设备，并立即在那里完成恢复码重置。");
+}
+
+export async function runRecoveryRootResetCommand(
+  input: { readonly approval: string; readonly userConfirmed: boolean },
+  options: BackupCommandOptions = {},
+): Promise<void> {
+  if (!input.userConfirmed) throw new Error("请先确认旧恢复码已永久丢失并准备保存新恢复码");
+  const context = await openContext(options, false);
+  const resetEvent = createDomainResetEventFromApproval({
+    current: context.projection,
+    issuer: context.issuerKey,
+    approval: decodeResetApproval(input.approval),
+  });
+  const afterReset = applyTrustEvent(context.projection, resetEvent);
+  const candidate = await prepareReplacementRoot(context, options);
+  const rootEvent = createRecoveryRootEvent({
+    current: afterReset,
+    op: "establish",
+    candidate: candidate.root,
+    outerSigner: context.issuerKey,
+    at: context.now(),
+  });
+  const target = await openCurrentTarget(context, candidate.root, options);
+  try {
+    const checkpoint = await captureRootLifecycleCheckpoint(context, {
+      v: 1,
+      kind: "domain-reset-establish",
+      resetEvent,
+      rootEvent,
+    }, candidate.root, rootEvent.at);
+    await (await lifecycle(context)).reset({
+      resetEvent,
+      rootEvent,
+      candidateRoot: candidate.root,
+      checkpoint,
+      target: target.target,
+      supersedeCheckpointIds: await currentRootCheckpointIds(context, target.target.targetId),
+    });
+    context.writeLine("新的恢复码已在独立目标回读验证并启用；其他设备需要重新加入。");
+  } finally {
+    await target.close();
+  }
+}
+
+export function recoveryRootPublicError(_error: unknown): Error {
+  return new Error(
+    "恢复码操作未完成。请核对当前设备状态、独立备份和确认码后重试；系统不会绕过共同确认或自动重置安全域。",
+  );
+}
+
 export async function runBackupVerifyCommand(options: BackupCommandOptions = {}): Promise<void> {
   const context = await openContext(options, false);
   const configured = await context.targets.load();
@@ -179,6 +329,7 @@ interface BackupContext {
   readonly secretStore: SecretStorePort;
   readonly meshConfiguration?: MeshRoleBootConfig;
   readonly key: DeviceKey;
+  readonly issuerKey: DeviceKey;
   readonly identity: DeviceIdentity;
   readonly trust: HomeTrustRecord;
   readonly projection: TrustProjection;
@@ -186,9 +337,14 @@ interface BackupContext {
   readonly capacity: { readonly storage: StorageMaintenanceGovernorPort };
   readonly targets: FileBackupTargetConfiguration;
   readonly writeLine: (line: string) => void;
+  readonly now: () => string;
 }
 
-async function openContext(options: BackupCommandOptions, initialize = true): Promise<BackupContext> {
+async function openContext(
+  options: BackupCommandOptions,
+  initialize = true,
+  requireIssuer = true,
+): Promise<BackupContext> {
   const home = options.zhixingHome ?? getZhixingHome();
   const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: home });
   if (await secretStore.unlockState() !== "unlocked") {
@@ -222,18 +378,30 @@ async function openContext(options: BackupCommandOptions, initialize = true): Pr
     if (!member) throw new Error("当前设备不在有效的 home 信任成员中");
     identity = member.device;
   }
-  if (trust.issuer.deviceId !== key.deviceId) {
+  if (requireIssuer && trust.issuer.deviceId !== key.deviceId) {
     throw new Error("只有当前主设备可以管理恢复备份");
   }
   const config = loadConfig({ homeDir: home });
   if (config.mesh?.enabledRoles && !config.mesh.enabledRoles.includes("anchor")) {
     throw new Error("只有当前主设备可以管理恢复备份");
   }
+  let issuerKey = await loadActiveAnchorIssuerKey(secretStore, trust.issuer.issuerKeyId);
+  if (!issuerKey && trust.issuer.issuerKeyId === key.deviceId) {
+    const bootstrapKeyId = `home-bootstrap:${trust.homeId}`;
+    await persistAnchorIssuerKey(secretStore, bootstrapKeyId, key);
+    await activateAnchorIssuerKey(secretStore, bootstrapKeyId, key.deviceId);
+    issuerKey = key;
+  }
+  if (!issuerKey || issuerKey.deviceId !== trust.issuer.issuerKeyId) {
+    throw new Error("当前主设备缺少可用的值班签发密钥");
+  }
+  store.bindIssuerKey(issuerKey);
   return {
     home,
     secretStore,
     ...(config.mesh ? { meshConfiguration: config.mesh } : {}),
     key,
+    issuerKey,
     identity,
     trust,
     projection,
@@ -241,6 +409,7 @@ async function openContext(options: BackupCommandOptions, initialize = true): Pr
     capacity,
     targets: new FileBackupTargetConfiguration(home),
     writeLine: options.writeLine ?? createStdoutWriter().line,
+    now: options.now ?? (() => new Date().toISOString()),
   };
 }
 
@@ -272,7 +441,7 @@ async function prepareInitialRoot(
       current: context.projection,
       op: "establish",
       candidate: root,
-      outerSigner: context.key,
+      outerSigner: context.issuerKey,
       at: createdAt,
     }),
   };
@@ -281,7 +450,7 @@ async function prepareInitialRoot(
     throw new Error("旧版恢复包不包含恢复根激活计划");
   }
   const plan = legacyPurpose?.kind === "root-activation" ? legacyPurpose.plan : generatedPlan;
-  const issuer = checkpointIssuer(context.identity, context.key);
+  const issuer = checkpointIssuer(currentIssuerIdentity(context), context.issuerKey);
   const checkpoint = decoded.legacyCheckpoint ?? (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
@@ -312,7 +481,7 @@ async function establishInitialRoot(
     plan: initial.plan,
     checkpoint: initial.checkpoint,
     candidateRoot: initial.root,
-    issuerIdentity: context.identity,
+    issuerIdentity: currentIssuerIdentity(context),
     target,
     sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
     now: () => new Date().toISOString(),
@@ -355,7 +524,7 @@ function createService(
     retention: context.store.checkpointRetention(),
     target,
     trust,
-    issuer: checkpointIssuer(context.identity, context.key),
+    issuer: checkpointIssuer(currentIssuerIdentity(context), context.issuerKey),
     recipient,
     currentAnchor: trust.issuer.deviceId === context.key.deviceId,
     storageMaintenance: context.capacity.storage,
@@ -396,6 +565,11 @@ async function connectPairedTarget(
     secretStore: context.secretStore,
     bootstrapStore: bootstrap.bootstrapStore,
     services: new MeshServiceRegistry(),
+    credentialRouteGuard: new CredentialExposureAuthority({
+      deviceId: context.key.deviceId,
+      log: context.store.authorityLog(),
+      secretStore: context.secretStore,
+    }),
     watchTrust: false,
     ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
   });
@@ -438,8 +612,11 @@ async function currentPairedRootActivation(
 async function openTargetBinding(
   context: BackupContext,
   binding: BackupTargetBinding,
+  recipientKeyId?: string,
 ): Promise<{ readonly target: RetirableRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
-  if (binding.kind === "paired-device") return connectPairedTarget(context, binding.deviceId);
+  if (binding.kind === "paired-device") {
+    return connectPairedTarget(context, binding.deviceId, recipientKeyId);
+  }
   const target = await FileRecoveryCheckpointTarget.open({
     targetRoot: binding.directory,
     sourceRoot: path.join(context.home, "distributed-runtime", "authority"),
@@ -497,6 +674,144 @@ async function readDecodedRecoveryPackage(
   injected?: () => Promise<string>,
 ): Promise<ReturnType<typeof decodeRecoveryPackage>> {
   return injected ? decodeRecoveryPackage(await injected()) : readRecoveryPackageFromTty();
+}
+
+function currentIssuerIdentity(context: BackupContext): DeviceIdentity {
+  if (context.issuerKey.deviceId === context.identity.deviceId) return context.identity;
+  return Object.freeze({
+    ...context.identity,
+    deviceId: context.issuerKey.deviceId,
+    publicKey: context.issuerKey.publicKey,
+  });
+}
+
+async function prepareReplacementRoot(
+  context: BackupContext,
+  options: BackupCommandOptions,
+): Promise<{ readonly root: RecoveryRoot }> {
+  const generated = RecoveryRoot.generate();
+  context.writeLine(`新的恢复码：${encodeRecoveryPackage(generated)}`);
+  const readBack = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+  if (
+    readBack.root.rootPublicKey !== generated.rootPublicKey ||
+    readBack.root.backupPublicKey !== generated.backupPublicKey
+  ) throw new Error("回读的恢复码与本次生成的新恢复码不一致");
+  return { root: readBack.root };
+}
+
+async function openCurrentTarget(
+  context: BackupContext,
+  recipient: RecoveryRoot,
+  options: BackupCommandOptions,
+): Promise<{ readonly target: RetirableRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
+  const configured = await context.targets.load();
+  if (!configured) throw new Error("尚未配置独立恢复备份目标");
+  const binding = configured.bindings.find((candidate) =>
+    candidate.targetId === configured.currentTargetId);
+  if (!binding) throw new Error("恢复备份目标配置缺少当前绑定");
+  const recipientKeyId = keyIdForPublicKey(recipient.backupPublicKey);
+  if (options.openRecoveryTarget) return options.openRecoveryTarget(binding, recipientKeyId);
+  return openTargetBinding(context, binding, recipientKeyId);
+}
+
+async function captureRootLifecycleCheckpoint(
+  context: BackupContext,
+  plan: Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["plan"],
+  candidateRoot: RecoveryRoot,
+  createdAt: string,
+): Promise<CheckpointPackage> {
+  return (await captureFullAuthorityCheckpoint({
+    checkpointId: createCheckpointId(),
+    createdAt,
+    purpose: { kind: "root-activation", plan },
+    trust: context.trust,
+    issuer: checkpointIssuer(currentIssuerIdentity(context), context.issuerKey),
+    recipient: candidateRoot.publicIdentity(),
+    log: context.store.authorityLog(),
+    artifacts: context.store.artifactStore(),
+    retention: context.store.checkpointRetention(),
+    storageMaintenance: context.capacity.storage,
+  })).checkpoint;
+}
+
+async function currentRootCheckpointIds(
+  context: BackupContext,
+  targetId: string,
+): Promise<readonly string[]> {
+  if (!context.projection.recoveryActivationDigest) return [];
+  const replay = await context.store.loadRecoveryRootActivationReplay({
+    activationDigest: context.projection.recoveryActivationDigest,
+    targetId,
+  });
+  return replay ? [replay.checkpointId] : [];
+}
+
+async function lifecycle(context: BackupContext): Promise<RecoveryRootLifecycleService> {
+  return new RecoveryRootLifecycleService({
+    store: context.store,
+    issuerKey: context.issuerKey,
+    issuerIdentity: currentIssuerIdentity(context),
+    sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
+    now: context.now,
+  });
+}
+
+const RESET_APPROVAL_PREFIX = "zxra1:";
+
+function encodeResetApproval(approval: DomainResetApproval): string {
+  return `${RESET_APPROVAL_PREFIX}${Buffer.from(canonicalize(approval), "utf8").toString("base64url")}`;
+}
+
+function decodeResetApproval(value: string): DomainResetApproval {
+  if (!value.startsWith(RESET_APPROVAL_PREFIX)) throw new TypeError("重置确认码格式无效");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(value.slice(RESET_APPROVAL_PREFIX.length), "base64url").toString("utf8"));
+  } catch {
+    throw new TypeError("重置确认码格式无效");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new TypeError("重置确认码格式无效");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(record).sort()) !== canonicalize([
+      "at", "coSign", "homeId", "prevEventDigest", "seq", "trustEpoch", "v",
+    ]) ||
+    record.v !== 1 || typeof record.homeId !== "string" ||
+    typeof record.prevEventDigest !== "string" || typeof record.seq !== "number" ||
+    typeof record.trustEpoch !== "number" || typeof record.at !== "string" ||
+    !record.coSign || typeof record.coSign !== "object" || Array.isArray(record.coSign)
+  ) throw new TypeError("重置确认码格式无效");
+  const coSign = record.coSign as Record<string, unknown>;
+  const signature = coSign.sig;
+  if (
+    canonicalize(Object.keys(coSign).sort()) !== canonicalize(["deviceId", "sig"]) ||
+    typeof coSign.deviceId !== "string" || !signature || typeof signature !== "object" ||
+    Array.isArray(signature)
+  ) throw new TypeError("重置确认码格式无效");
+  const signatureRecord = signature as Record<string, unknown>;
+  if (
+    canonicalize(Object.keys(signatureRecord).sort()) !== canonicalize(["alg", "keyId", "sig"]) ||
+    typeof signatureRecord.alg !== "string" || typeof signatureRecord.keyId !== "string" ||
+    typeof signatureRecord.sig !== "string"
+  ) throw new TypeError("重置确认码格式无效");
+  return Object.freeze({
+    v: 1,
+    homeId: record.homeId,
+    seq: record.seq,
+    prevEventDigest: record.prevEventDigest,
+    trustEpoch: record.trustEpoch,
+    at: record.at,
+    coSign: Object.freeze({
+      deviceId: coSign.deviceId,
+      sig: Object.freeze({
+        alg: signatureRecord.alg,
+        keyId: signatureRecord.keyId,
+        sig: signatureRecord.sig,
+      }),
+    }),
+  });
 }
 
 function devicePlatform(): "linux" | "windows" | "macos" | "headless" {

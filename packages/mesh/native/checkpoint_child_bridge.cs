@@ -17,7 +17,7 @@ internal static class CheckpointChildBridge {
   const uint FILE_DIRECTORY_FILE = 1, FILE_SYNCHRONOUS_IO_NONALERT = 0x20, FILE_NON_DIRECTORY_FILE = 0x40, FILE_OPEN_REPARSE_POINT = 0x00200000;
   const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
   const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
-  const int FileRenameInfo = 3, FileDispositionInfo = 4;
+  const int FileRenameInfo = 3, FileDispositionInfo = 4, FileIdBothDirectoryInfo = 10, FileIdBothDirectoryRestartInfo = 11;
 
   [StructLayout(LayoutKind.Sequential)] struct UNICODE_STRING { public ushort Length, MaximumLength; public IntPtr Buffer; }
   [StructLayout(LayoutKind.Sequential)] struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory, ObjectName; public uint Attributes; public IntPtr SecurityDescriptor, SecurityQualityOfService; }
@@ -33,6 +33,7 @@ internal static class CheckpointChildBridge {
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr handle);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr handle, out BY_HANDLE_FILE_INFORMATION info);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandleEx(IntPtr handle, int cls, IntPtr info, uint size);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(IntPtr handle, int cls, IntPtr info, uint size);
   [DllImport("ntdll.dll")]
   static extern int NtCreateFile(out IntPtr handle, uint access, ref OBJECT_ATTRIBUTES attributes, out IO_STATUS_BLOCK status,
@@ -68,6 +69,7 @@ internal static class CheckpointChildBridge {
     if (op == "identity") return Identity(Get(r, "handle"));
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
     if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit")));
+    if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
     if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")));
     if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName")); return true; }
     if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory")); return true; }
@@ -151,6 +153,45 @@ internal static class CheckpointChildBridge {
     } finally { CloseHandle(file); }
   }
 
+  static string[] ListEntries(IntPtr parent, long maximumEntries) {
+    if (maximumEntries < 1 || maximumEntries > 100000) throw new InvalidOperationException("Checkpoint directory entry bound is invalid");
+    const int bufferSize = 64 * 1024, fileNameLengthOffset = 60, fileNameOffset = 104;
+    var buffer = Marshal.AllocHGlobal(bufferSize);
+    var values = new List<string>();
+    var total = 0L;
+    try {
+      var infoClass = FileIdBothDirectoryRestartInfo;
+      while (true) {
+        if (!GetFileInformationByHandleEx(parent, infoClass, buffer, bufferSize)) {
+          if (Marshal.GetLastWin32Error() == 18) break;
+          throw Win32("Unable to enumerate checkpoint directory by handle");
+        }
+        var offset = 0;
+        while (true) {
+          var current = IntPtr.Add(buffer, offset);
+          var nameBytes = Marshal.ReadInt32(current, fileNameLengthOffset);
+          if (nameBytes < 0 || (nameBytes & 1) != 0 || fileNameOffset + nameBytes > bufferSize - offset) {
+            throw new InvalidOperationException("Checkpoint directory entry is invalid");
+          }
+          var name = Marshal.PtrToStringUni(IntPtr.Add(current, fileNameOffset), nameBytes / 2);
+          if (name != "." && name != "..") {
+            if (++total > maximumEntries) throw new InvalidOperationException("Checkpoint directory inventory exceeds its bound");
+            if (ValidName(name)) values.Add(name);
+          }
+          var next = Marshal.ReadInt32(current, 0);
+          if (next == 0) break;
+          if (next < fileNameOffset || offset + next >= bufferSize) {
+            throw new InvalidOperationException("Checkpoint directory entry offset is invalid");
+          }
+          offset += next;
+        }
+        infoClass = FileIdBothDirectoryInfo;
+      }
+      values.Sort(StringComparer.Ordinal);
+      return values.ToArray();
+    } finally { Marshal.FreeHGlobal(buffer); }
+  }
+
   static long WriteRange(IntPtr parent, string name, long maximum, long offset, byte[] bytes) {
     if (maximum < 0 || offset < 0 || offset > maximum || offset + bytes.LongLength > maximum) throw new InvalidOperationException("Checkpoint file range is invalid");
     var file = OpenRelative(parent, name, false, true, false);
@@ -214,6 +255,7 @@ internal static class CheckpointChildBridge {
   static string Text(Dictionary<string, object> r, string name) { return Convert.ToString(r[name]); }
   static bool Flag(Dictionary<string, object> r, string name) { return Convert.ToBoolean(r[name]); }
   static void ExactName(string name) { if (String.IsNullOrEmpty(name) || name.Length > 160 || name == "." || name == ".." || name.IndexOfAny(new[] {'/', '\\', '\0'}) >= 0) throw new InvalidOperationException("Checkpoint child name is invalid"); }
+  static bool ValidName(string name) { return !String.IsNullOrEmpty(name) && name.Length <= 160 && name != "." && name != ".." && name.IndexOfAny(new[] {'/', '\\', '\0'}) < 0; }
   static Exception Win32(string message) { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), message); }
   static void Reply(Dictionary<string, object> request, bool ok, object value, string error) { var response = new Dictionary<string, object> { {"id", request != null && request.ContainsKey("id") ? request["id"] : 0}, {"ok", ok} }; if (ok) response["value"] = value; else response["error"] = error; Console.WriteLine(Json.Serialize(response)); Console.Out.Flush(); }
 }

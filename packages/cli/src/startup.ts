@@ -18,7 +18,7 @@
  */
 
 import path from "node:path";
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import {
   ConfigSchemaError,
@@ -36,6 +36,8 @@ import {
   type ZhixingCredentials,
 } from "@zhixing/providers";
 import { createPlatformSecretStore } from "@zhixing/secrets";
+import { FileMeshBootstrapStore } from "./serve/mesh-bootstrap-store.js";
+import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
   checkModel,
   runConfigEditor,
@@ -132,9 +134,16 @@ export async function runStartupCheck(
         message: `SecretStore 当前状态：${secretState}`,
       };
     }
+    const credentialReadGuard = await createCredentialReadGuard(
+      credentialsHomeDir,
+      secretStore,
+    );
     const preparedCredentials = await loadCredentialsWithLegacyMigration({
       store: secretStore,
       homeDir: credentialsHomeDir,
+      ...(credentialReadGuard
+        ? { authorizeCredentialRead: credentialReadGuard }
+        : {}),
     });
     credentials = preparedCredentials.credentials;
     credentialGeneration = preparedCredentials.generation;
@@ -198,9 +207,16 @@ export async function runStartupCheck(
       homeDir: explicitHomeDir,
       env,
     });
+    const updatedCredentialReadGuard = await createCredentialReadGuard(
+      credentialsHomeDir,
+      secretStore,
+    );
     const updatedCredentialSnapshot = await loadCredentialsWithLegacyMigration({
       store: secretStore,
       homeDir: credentialsHomeDir,
+      ...(updatedCredentialReadGuard
+        ? { authorizeCredentialRead: updatedCredentialReadGuard }
+        : {}),
     });
     return {
       kind: "ready",
@@ -217,6 +233,46 @@ export async function runStartupCheck(
 
   // editorResult.kind === "non-tty"——此处理论上不到达（前面已检查 isTTY）
   return { kind: "non-tty", missingLabels };
+}
+
+async function createCredentialReadGuard(
+  home: string,
+  secretStore: SecretStorePort,
+): Promise<
+  | ((input: {
+      readonly kind: "provider" | "channel" | "mcp";
+      readonly id: string;
+      readonly ref: SecretRef;
+    }) => Promise<boolean>)
+  | undefined
+> {
+  const store = new FileMeshBootstrapStore(home);
+  const trust = await store.loadTrustRecord();
+  if (!trust) return undefined;
+  const deviceRefs = await secretStore.list("device-key/device/v1/");
+  if (deviceRefs.length !== 1) return undefined;
+  const deviceId = deviceRefs[0]!.bindingId.slice("device/v1/".length);
+  if (!trust.members.some((member) =>
+    member.device.deviceId === deviceId && member.state === "active")) return undefined;
+  const authority = new CredentialExposureAuthority({
+    deviceId,
+    log: store.authorityLog(),
+    secretStore,
+  });
+  return async ({ kind, id }) => {
+    try {
+      await authority.assertRoute({
+        ref: {
+          kind,
+          bindingId: `credential-${kind}-${id}`,
+        },
+        service: kind,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
 }
 
 function validateMeshConfiguration(config: ZhixingConfig): ConfigSemanticIssue[] {

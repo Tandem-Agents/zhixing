@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U34-04（P0/大）与 U34-09（P1/中）已在专项冻结指纹 `7f9ba3badb9c1558d0b2d2b93ebb0f456d8b667d0b11aced53d9747f54d6269a` 上完成修复、最小必要验证、逐格专项复核与四路冷启动对抗，两项均为“已验证”；U34-03、U34-01～U34-02、U34-05～U34-08 的既有验证结论继续保留，EX34-01 不重开。尚未进入两轮冻结终审、独立功能审查或单元提交验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（仅冻结 U34-04/U34-09 修复专项交付用于逐格复核与四路对抗；尚未进入全单元两轮冻结终审）
-- **交付物文件集**:当前工作区 U34-04/U34-09 专项交付共 23 个非工作台路径：`packages/cli` 16、`packages/core` 3、架构/规格 2、S7 2；工作台文件不参与功能指纹
-- **当前交付物指纹**:`7f9ba3badb9c1558d0b2d2b93ebb0f456d8b667d0b11aced53d9747f54d6269a`
+- **当前状态**:第 34 单元已封版。U34-01～U34-09 均为“已验证”，P0/P1 与非阻断问题列表为空，EX34-01 不重开；同一全量冻结指纹已完成两轮零新增冻结终审、独立功能审查和单元提交验证
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（第 34 单元完整交付已冻结并封版）
+- **交付物文件集**:以第 33 单元封版提交 `735a3dcd4996f5f7dfd4902eb8cf7ea6115fe596` 为基线，当前完整交付共 74 个非工作台路径：`packages/core` 15、`packages/mesh` 9、`packages/owner-kernel` 1、`packages/cli` 36、`packages/server` 8、架构/规格 3、S7 2；工作台文件不参与功能指纹
+- **当前交付物指纹**:`daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0`（排序后的 `path<TAB>file-sha256` 清单以 LF 连接后再取 SHA-256）
 - **架构来源**:`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md`、`research/design/modules/distributed-runtime/s2-security-supply-chain-review.md`，以及已定稿开发清单 D34-01～D34-08
 
 ## 固定边界
@@ -32,10 +32,13 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
-| `packages/core` 3 路径 | stable surface authority rebind 导出、实现与直接测试；无新增 schema 或生成文件 | core 定向测试、CLI 消费构建与 workspace build | 通过 |
-| `packages/cli` 16 路径 | installed-generation bootstrap/runtime rebind、candidate prepared/abort durable ordering、生产装配及直接测试；无独立生成物 | planned-transfer、两 profile generation/cursor 定向测试与 workspace build | 通过 |
-| 架构/规格 2 路径 | installed generation、runtime participant exact-set、candidate terminal 排序与范围边界须相互全等 | 两份文档与冻结实现逐项对账 | 通过 |
-| S7 2 路径 | generation 来源/participant/order、candidate prepared/abort/恢复的 descriptor、validator 与变异表 | `pnpm s7:lint`：18/18 及 registry golden 通过 | 通过 |
+| `packages/core` 15 路径 | strict planned protocol、AuthorityCatalog/records/schema、原子 prefix install、delivery/scheduler/surface generation 消费及直接测试；无独立生成文件 | protocol/commit-log/delivery/surface 直接证据、CLI 消费与 workspace build | 通过 |
+| `packages/mesh` 9 路径 | ReadyProof、transfer-bound issuer key、trust transition、package export/build 入口；依赖集合与 lockfile 不得漂移 | mesh 直接测试、package export/tsup 对账；`pnpm-lock.yaml` 无变化，workspace build 通过 | 通过 |
+| `packages/owner-kernel` 1 路径 | scheduler authority 准入与 accepted-work 收束由 CLI 组合根消费；无新增导出基线 | owner/CLI 消费链与 workspace build | 通过 |
+| `packages/cli` 36 路径 | source/target phase、private staging、installed-generation runtime rebind、first-party/current-owner、管理入口、两生产根及直接测试；无独立生成物 | planned-transfer、两 profile generation/cursor、router/CLI/assembly 直接证据与 workspace build | 通过 |
+| `packages/server` 8 路径 | authenticated management RPC、canonical registry golden、channel current-owner 与公开 DTO | server/channel 定向证据、registry golden 与 workspace build | 通过 |
+| 架构/规格 3 路径 | 总纲、需求和可执行规格须与 planned transfer、generation、candidate terminal、范围边界全等 | 三份文档与 74 路径冻结实现逐项对账 | 通过 |
+| S7 2 路径 | 两生产根、入口/participant/order/candidate/recovery exact-set 的 descriptor、validator、变异与 registry golden | `pnpm s7:lint`：18/18 及 registry golden 通过 | 通过 |
 
 ## 关键原语核查
 
@@ -62,6 +65,16 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R34-01 | strict identity、ReadyProof、issuer transition 与用户目标选择 | core strict codec/reducer；mesh ready/key/trust；CLI selector/facade；server DTO；对应直接测试 | SHA-256 `daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0` | 任一 wire 字段、签名域、readiness revision、selector/DTO 或消费入口变化 | 通过 | 2/2 | 第一轮 V34-24 核对需求/合同/产品闭环；第二轮 V34-25 重造错 identity、过期 proof、重名与泄露反例，零新增。 |
+| R34-02 | source fence、accepted-work closure 与冻结 prefix | 两生产根全部 writer/trigger、append guard、accepted token、AuthorityCatalog、source recovery 与直接测试 | 同上 | source writer/trigger、guard/closure、catalog coverage、drain/恢复或测试变化 | 通过 | 2/2 | V34-24 证明 fresh 零追加且 accepted 恰一终态/落点；V34-25 覆盖竞争、drain timeout、abort、丢响应与连续重启，零新增。 |
+| R34-03 | retained exact-set、target 私有导入与 composite authority 原子发布 | FileArtifactStore/private journal、prefix installer、retained refs、installation/base/current consumers 与真实测试 | 同上 | import/store/publish envelope、retained classifier、base consumer 或恢复顺序变化 | 通过 | 2/2 | V34-24 核对私有不可见、原 envelope/LSN 与单 envelope 发布；V34-25 覆盖共享 ref、部分 I/O、sync 前后失败与坏尾，零新增。 |
+| R34-04 | candidate 单飞、late-ready、prepare/abort/commit 双端终态 | source/target journal、candidate transaction、ReadyProof/key/reservation、phase driver、cleanup 与 20 项直接测试 | 同上 | candidate/phase 状态、identity guard、reservation、cleanup、startup scan 或测试变化 | 通过 | 2/2 | V34-24 核对 claim-before-key 与唯一认证终态；V34-25 覆盖异 transfer、claim-only、prepared/abort 竞争、过期 proof、已清/错绑 key、响应丢失与重启，零新增。 |
+| R34-05 | signed current-owner/trust、first-party 路由与双端 phase 收敛 | HomeTrustRecord/current-authority resolver、canonical registry、mesh/router/channel、live/startup driver 与三设备测试 | 同上 | trust/current owner、registry、路由/notification surface、phase 投递或生产根变化 | 通过 | 2/2 | V34-24 核对新 owner 唯一路由和 source forward-only；V34-25 重造旧 source/第三设备/target 离线/未知与设备本地方法，零误代理、零回退。 |
+| R34-06 | InstalledAuthorityGeneration、runtime projection/cursor 与六类 obligation 消费闭包 | installation 投影、两 current-anchor profile、9 participant、scheduler/conversation/delivery recovery、AuthorityCatalog read-back | 同上 | participant/consumer exact-set、anchor/trust epoch、WAL replacement、cursor/cache 或公开 gate 变化 | 通过 | 2/2 | V34-24 核对 installation 驱动统一重绑与开放顺序；V34-25 覆盖 cursor 已推进、epoch 1→2→3、六类非空 pending、任一 participant/consumer 失败和连续重启，零新增。 |
+| R34-07 | governor、stop、生命周期、异常恢复与上界 | storageMaintenance、fixed-range source/sink、AbortSignal/in-flight/closing、key/staging cleanup 与直接测试 | 同上 | chunk/buffer/permit、锁序、stop/start、cleanup 或失败语义变化 | 通过 | 2/2 | V34-24 核对固定块、网络等待零 permit、stop 后零新 I/O；V34-25 覆盖容量/磁盘/网络挂起、取消、cleanup 失败和连续恢复，零新增。 |
+| R34-08 | 安全、分层、兼容、公开体验与范围边界 | secret/path/error 隔离、core/mesh/owner/server/CLI 分层、Unit33 接缝、Unit35～38 排除与 package export | 同上 | secret/路径/错误面、依赖/export、上游合同、公开文案或单元边界变化 | 通过 | 2/2 | V34-24 核对最小完整范围和产品旅程；V34-25 核对无新依赖/lockfile、无越界能力、无内部身份/raw error/注释债务，零新增。 |
+| R34-09 | 两生产根、S7/golden、直接证据与 74 路径交付闭包 | anchor+executor/anchor-only、canonical registry、S7 descriptor/mutation、全部生产/测试/文档路径 | 同上 | 生产 root、入口/role/order、S7/golden、测试矩阵、文件集或派生产物变化 | 通过 | 2/2 | V34-24 完成 74 路径正反向归项；V34-25 核对 S7 18/18、registry golden、direct evidence 与 build 同输入有效，零漏项。 |
+| R34-X | 跨项组合：fence→private publish→generation 接管与 candidate→ready→abort/commit | R34-01～R34-09 的当前指纹、边界和结论；U34-01～U34-09、EX34-01、上下游交界 | 同上 | 任一 R34-01～R34-09 输入/结论/边界变化，或新增生产事实 | 通过 | 2/2 | V34-24 从正常旅程组合推演，V34-25 从双端切点、WAL 换代、旧 owner、资源 stop 与重放组合重造反例；无矛盾、双写、无终态或范围扩张。 |
 
 ## 问题列表
 
@@ -358,13 +371,18 @@
 | V34-20 | U34-04：两current-anchor profile的installed generation、真实Delivery cursor与stable surface authority rebind | setup-delivery两profile定向测试；core surface-assets rebind定向测试 | `setup-delivery.ts`及参数化直接测试、core surface authority实现/导出/直接测试、真实 `AuthorityCommitLog` | 修复直接验证；setup 23.84s | 两profile2/2、core1/1通过；换代前真实cursor已推进，epoch 1→2→3后新authority读取新前缀，stable coordinator只消费current binding | `7f9ba3ba…54d6269a` | 有效 |
 | V34-21 | generation/candidate有限装配gate、跨包导出与当前源码可构建 | `pnpm s7:lint`；CLI `tsc --noEmit`诊断；`pnpm build` | 23个非工作台路径、S7 descriptor/mutation/golden、当前workspace源码及包导出 | 派生资产/类型诊断/常驻必要构建；S7 83.6s，build 221.1s | S7 18/18及registry golden通过；CLI新增错误0，仅余8个既有无关`ZhixingCredentials`错误；workspace 17 packages build exit 0。cursor测试增补未改生产/构建输入，构建证据直接复用 | `7f9ba3ba…54d6269a` | 有效 |
 | V34-22 | F34-23～F34-30、C34-C35～C34-C45与两项直接交界在同一输入逐格闭合 | 最终指纹复算 + 四个相互隔离的只读冷启动角色 + 历轮反证差异审计 | 23个非工作台路径、正式矩阵/反证账及U34/EX/后继边界 | 修复专项收口 | 四路均通过；C34-C45同根证据残留补证后重新冻结，无未处置反证；U34-04/U34-09均已验证 | `7f9ba3badb9c1558d0b2d2b93ebb0f456d8b667d0b11aced53d9747f54d6269a` | 有效 |
+| V34-23 | 全单元冻结准备：文件集、派生产物、精确验证计划与同输入证据有效性 | 基线→HEAD 74 路径正反向归类、全量指纹复算、lockfile/export/S7/build 输入核对 | 74 个非工作台路径；工作台排除 | 冻结准备；低成本只读检查 | 74 路径全部归入 7 组派生闭包；lockfile 无变化；全量指纹稳定 | `daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0` | 有效 |
+| V34-24 | 第一轮冻结终审：需求、架构、功能闭环、状态与回归 | 权威来源→R34-01～R34-09→交付路径双向对账；R34-X 组合推演 | 同一 74 路径冻结输入及正式问题/排除记录 | 冻结终审第一轮；只读深审 | 矩阵完整，0 个新增问题；全部复用项取得第 1 次有效独立深审 | `daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0` | 有效 |
+| V34-25 | 第二轮冻结终审：并发、崩溃、安全、资源上界、异常终态与测试盲区 | 双端切点、WAL 换代、旧 owner、资源 stop、严格 identity 与派生资产对抗复核；R34-X 再推演 | 同一 74 路径冻结输入及第一轮结论 | 冻结终审第二轮；只读深审 | 矩阵完整，0 个新增问题；全部复用项达到 2/2 | `daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0` | 有效 |
+| V34-26 | 独立功能审查覆盖全部来源、功能链、交付路径与范围边界 | `unit-submit-review.md` IR34-01～IR34-36；17 项旧结论复用、19 项受影响范围复审 | 同一 74 路径冻结输入 | 独立功能审查；只读 | 36/36 `[x]`，0 `[ ]/[!]/[~]`；P0/P1 与非阻断问题列表均为空，EX34-01 不重开 | `daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0` | 有效 |
+| V34-27 | 单元提交验证：派生资产、必要构建/直接证据复用、差异卫生、交付闭包与指纹一致 | 复用当前源码输入的 V34-01～V34-22、尤其 V34-19～V34-21；`git diff --check`、74 路径/指纹/工作区核对 | 当前非工作台源码、导出/构建配置、直接测试、S7/golden；工作台排除 | 单元提交验证；无重复 build/全包回归 | 同输入 S7 18/18+golden、workspace 17 packages build exit 0、planned 20/20、generation 两 profile 2/2、core 1/1 继续有效；diff hygiene、74 路径闭包与指纹一致通过 | `daa82f4b2419ac172a6a464c7d7e3d61a3b36cb5ca8d61f87ffecc352b6ef9c0` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0        | `daa82f4b…ef9c0` | 通过；V34-24，R34-01～R34-X 均 1/2 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0        | `daa82f4b…ef9c0` | 通过；V34-25，R34-01～R34-X 均 2/2 |
 
 ## 独立审查覆盖表
 
@@ -372,5 +390,10 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF34-01 | 权威身份、source fence、retained/private 与原子发布失效 | IR34-02、IR34-04～IR34-19；core/mesh/CLI真实 log/store/index/staging；`daa82f4b…ef9c0` | 已覆盖 | V34-26：strict identity、accepted closure、exact-set 与单 envelope publication 均二元落定，无问题。 | wire/identity、writer/guard、retention/import、publication 或事实源变化。 |
+| IF34-02 | installed generation、current-owner、consumer/cursor 与双端 phase 恢复失效 | IR34-20～IR34-28；两 current-anchor profile、router/channel、candidate/phase journal与六类 pending；`daa82f4b…ef9c0` | 已覆盖 | V34-26：live/startup、旧 source/第三设备、epoch/cursor、terminal replay与连续重启均无可达失败。 | installation/generation、owner/router、consumer/pending、phase/recovery 或生产 root 变化。 |
+| IF34-03 | 并发、故障、资源、stop、安全与严格关联失效 | IR34-09、IR34-13～IR34-16、IR34-20～IR34-22、IR34-26～IR34-30、IR34-34；`daa82f4b…ef9c0` | 已覆盖 | V34-26：竞争、响应丢失、部分 I/O、容量/磁盘/网络、stop、秘密/路径/错误隔离均有确定终态且无问题。 | 锁序、buffer/permit、lifecycle、cleanup、签名/关联或公开数据边界变化。 |
+| IF34-04 | 产品旅程、兼容分层、证据与范围价值失效 | IR34-01、IR34-03、IR34-31～IR34-36；CLI/server、package export、S7/golden、74 路径与上下游边界；`daa82f4b…ef9c0` | 已覆盖 | V34-26：设备名选择、稳定错误、两根 exact-set、Unit33 接缝及 Unit35～38 排除均有落点，零越界。 | 用户目标/文案、DTO/export/依赖、S7/golden、文件集或单元边界变化。 |
+| IF34-X | 跨区组合：双端迁居切点 × WAL 换代 × owner 接管 × 资源停止 | IF34-01～IF34-04 当前输入与结论、U34-01～U34-09、EX34-01；`daa82f4b…ef9c0` | 已覆盖 | V34-26：从正常、边界、故障、恢复与对抗路径组合复核，无双权威、无公开半态、无无终态 candidate、无旧 cursor/epoch 写入。 | 任一独立风险区失效、新生产事实或问题/排除边界变化。 |
 
 <!-- registration-complete: unit-34.gen-1 -->

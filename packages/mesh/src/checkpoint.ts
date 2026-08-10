@@ -8,6 +8,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import type {
+  ArtifactRef,
   CheckpointEnvelope,
   DeviceIdentity,
   FullAuthorityCheckpointPayload,
@@ -93,6 +94,22 @@ export interface OpenedFullAuthorityCheckpoint {
 export interface VerifiedFullAuthorityCheckpoint {
   readonly verificationNonce: Buffer;
   readonly payload: FullAuthorityCheckpointPayload;
+}
+
+export interface FullAuthorityCheckpointContent {
+  readonly kind: "record-page" | "retained-artifact";
+  readonly index: number;
+  readonly ref: ArtifactRef;
+}
+
+/** Transfer-private sink used while a full checkpoint is decrypted and verified. */
+export interface FullAuthorityCheckpointSink {
+  write(
+    content: FullAuthorityCheckpointContent,
+    offset: number,
+    bytes: Uint8Array,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 export async function readCheckpointChunkRange(
@@ -563,6 +580,7 @@ export async function verifyStoredFullAuthorityCheckpoint(input: {
   package: CheckpointPackage;
   recoveryRoot: RecoveryRoot;
   issuer: DeviceIdentity;
+  sink?: FullAuthorityCheckpointSink;
   signal?: AbortSignal;
 }): Promise<VerifiedFullAuthorityCheckpoint> {
   const { envelope } = input.package;
@@ -596,15 +614,17 @@ export async function verifyStoredFullAuthorityCheckpoint(input: {
   let dek: Buffer | undefined;
   let verificationNonce: Buffer | undefined;
   let payload: FullAuthorityCheckpointPayload | undefined;
-  let declared: readonly { readonly bytes: number; readonly digest: string }[] = [];
+  let declared: readonly FullAuthorityCheckpointContent[] = [];
   let contentIndex = 0;
   let contentOffset = 0;
   let contentHash = createHash("sha256");
-  const advanceEmptyContents = (): void => {
-    while (declared[contentIndex]?.bytes === 0) {
-      if (`sha256:${contentHash.digest("hex")}` !== declared[contentIndex]!.digest) {
+  const advanceEmptyContents = async (): Promise<void> => {
+    while (declared[contentIndex]?.ref.bytes === 0) {
+      const current = declared[contentIndex]!;
+      if (`sha256:${contentHash.digest("hex")}` !== current.ref.digest) {
         throw new TypeError("Full checkpoint declared content digest is invalid");
       }
+      await input.sink?.write(current, 0, Buffer.alloc(0), input.signal);
       contentIndex += 1;
       contentHash = createHash("sha256");
     }
@@ -659,8 +679,19 @@ export async function verifyStoredFullAuthorityCheckpoint(input: {
             canonicalize(value.coverage.classes) !== canonicalize(envelope.manifest.scope)
           ) throw new TypeError("Full checkpoint payload is not bound to its envelope");
           payload = value;
-          declared = [...payload.records.pages, ...payload.retainedArtifacts.entries];
-          advanceEmptyContents();
+          declared = [
+            ...payload.records.pages.map((page, index) => ({
+              kind: "record-page" as const,
+              index,
+              ref: { digest: page.digest, bytes: page.bytes },
+            })),
+            ...payload.retainedArtifacts.entries.map((ref, index) => ({
+              kind: "retained-artifact" as const,
+              index,
+              ref,
+            })),
+          ];
+          await advanceEmptyContents();
           continue;
         }
         if (!payload) throw new TypeError("Full checkpoint payload header is missing");
@@ -668,18 +699,20 @@ export async function verifyStoredFullAuthorityCheckpoint(input: {
         while (offset < content.byteLength) {
           const current = declared[contentIndex];
           if (!current) throw new TypeError("Full checkpoint plaintext contains undeclared bytes");
-          const take = Math.min(content.byteLength - offset, current.bytes - contentOffset);
-          contentHash.update(content.subarray(offset, offset + take));
+          const take = Math.min(content.byteLength - offset, current.ref.bytes - contentOffset);
+          const slice = content.subarray(offset, offset + take);
+          contentHash.update(slice);
+          await input.sink?.write(current, contentOffset, slice, input.signal);
           offset += take;
           contentOffset += take;
-          if (contentOffset === current.bytes) {
-            if (`sha256:${contentHash.digest("hex")}` !== current.digest) {
+          if (contentOffset === current.ref.bytes) {
+            if (`sha256:${contentHash.digest("hex")}` !== current.ref.digest) {
               throw new TypeError("Full checkpoint declared content digest is invalid");
             }
             contentIndex += 1;
             contentOffset = 0;
             contentHash = createHash("sha256");
-            advanceEmptyContents();
+            await advanceEmptyContents();
           }
         }
       } finally {
@@ -690,7 +723,7 @@ export async function verifyStoredFullAuthorityCheckpoint(input: {
     if (!verificationNonce || !payload) {
       throw new TypeError("Full checkpoint payload header is missing");
     }
-    advanceEmptyContents();
+    await advanceEmptyContents();
     if (contentIndex !== payload.records.pages.length + payload.retainedArtifacts.entries.length || contentOffset !== 0) {
       throw new TypeError("Full checkpoint plaintext is truncated");
     }

@@ -92,6 +92,10 @@ import {
   type PairingIssuerContinuation,
   type PairingJoinerContinuation,
 } from "./mesh-pairing-continuation.js";
+import {
+  CredentialExposureAuthority,
+  exposureGuardedSecretStore,
+} from "./credential-exposure-authority.js";
 
 const PAIRING_TIMEOUT_MS = 120_000;
 const MAX_PAIRING_FRAME_BYTES = 1024 * 1024;
@@ -203,6 +207,14 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   const store = new FileMeshBootstrapStore(zhixingHome, key, {
     storageMaintenance: deviceCapacity.storage,
   });
+  const routedSecretStore = exposureGuardedSecretStore(
+    secretStore,
+    new CredentialExposureAuthority({
+      deviceId: key.deviceId,
+      log: store.authorityLog(),
+      secretStore,
+    }),
+  );
   const continuations = new FileMeshPairingContinuationStore(zhixingHome);
   const writeLine: (line: string) => void =
     options.writeLine ?? createStdoutWriter().line;
@@ -212,7 +224,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       ...options,
       ...(options.invitation ? { invitation: options.invitation } : {}),
       zhixingHome,
-      secretStore,
+      secretStore: routedSecretStore,
       key,
       store,
       continuations,
@@ -224,7 +236,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   await issuePairing({
     ...options,
     zhixingHome,
-    secretStore,
+    secretStore: routedSecretStore,
     key,
     store,
     continuations,
@@ -652,16 +664,13 @@ async function issuePairing(input: PairCommandOptions & {
 
     const transcriptDigest = pairingTranscriptDigest(material.offer, joinMessage.join, pakeRounds);
     const acceptedAt = new Date().toISOString();
-    const trustEvent = createSignedTrustEvent({
+    const trustEvent = createPairingTrustEvent({
       current: projection,
-      body: {
-        t: "enroll",
-        device: joinMessage.join.device,
-        roles: [...normalizeGrantedRoles(input.roles)],
-        pairingTranscriptDigest: transcriptDigest,
-      },
+      device: joinMessage.join.device,
+      roles: normalizeGrantedRoles(input.roles),
+      pairingTranscriptDigest: transcriptDigest,
       at: acceptedAt,
-      signer: input.key,
+      issuerKey: input.key,
     });
     const acceptanceBody: Omit<PairingAcceptance, "finished"> = {
       v: 1,
@@ -781,6 +790,52 @@ async function issuePairing(input: PairCommandOptions & {
     transport?.destroy();
     if (listener) await closeServer(listener.server);
   }
+}
+
+export const PAIRING_TRUST_EVENT_DESCRIPTOR = Object.freeze({
+  owner: "current-issuer",
+  initial: "enroll",
+  reenrollment: "reenroll",
+  eligibleState: "pending-reenroll",
+  proof: "fresh-pairing-transcript",
+});
+
+export function createPairingTrustEvent(input: {
+  readonly current: TrustProjection;
+  readonly device: DeviceIdentity;
+  readonly roles: readonly DeviceRole[];
+  readonly pairingTranscriptDigest: string;
+  readonly at: string;
+  readonly issuerKey: DeviceKey;
+}): HomeTrustEvent {
+  const member = input.current.members.find((candidate) =>
+    candidate.device.deviceId === input.device.deviceId);
+  if (member?.state === PAIRING_TRUST_EVENT_DESCRIPTOR.eligibleState) {
+    if (canonicalize(member.device) !== canonicalize(input.device)) {
+      throw new TypeError("Reenrollment device identity changed");
+    }
+    return createSignedTrustEvent({
+      current: input.current,
+      body: {
+        t: PAIRING_TRUST_EVENT_DESCRIPTOR.reenrollment,
+        deviceId: input.device.deviceId,
+        pairingTranscriptDigest: input.pairingTranscriptDigest,
+      },
+      at: input.at,
+      signer: input.issuerKey,
+    });
+  }
+  return createSignedTrustEvent({
+    current: input.current,
+    body: {
+      t: PAIRING_TRUST_EVENT_DESCRIPTOR.initial,
+      device: input.device,
+      roles: [...input.roles],
+      pairingTranscriptDigest: input.pairingTranscriptDigest,
+    },
+    at: input.at,
+    signer: input.issuerKey,
+  });
 }
 
 async function joinPairing(input: PairCommandOptions & {

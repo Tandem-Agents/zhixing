@@ -395,7 +395,35 @@ export function createDomainResetEvent(input: {
   coSigner: DeviceTrustSigner;
   at: string;
 }): HomeTrustEventWithBody<Extract<HomeTrustEventBody, { t: "domain-reset" }>> {
-  if (input.coSigner.deviceId === input.issuer.deviceId) {
+  return createDomainResetEventFromApproval({
+    current: input.current,
+    issuer: input.issuer,
+    approval: createDomainResetApproval({
+      current: input.current,
+      coSigner: input.coSigner,
+      at: input.at,
+    }),
+  });
+}
+
+export interface DomainResetApproval {
+  readonly v: 1;
+  readonly homeId: string;
+  readonly seq: number;
+  readonly prevEventDigest: string;
+  readonly trustEpoch: number;
+  readonly at: string;
+  readonly coSign: { readonly deviceId: string; readonly sig: Signature };
+}
+
+export function createDomainResetApproval(input: {
+  current: TrustProjection;
+  coSigner: DeviceTrustSigner;
+  at: string;
+}): DomainResetApproval {
+  const coMember = input.current.members.find((member) =>
+    member.device.deviceId === input.coSigner.deviceId && member.state === "active");
+  if (!coMember || input.coSigner.deviceId === input.current.issuer.deviceId) {
     throw new TypeError("Domain reset requires another active device");
   }
   const eventBase = {
@@ -411,19 +439,52 @@ export function createDomainResetEvent(input: {
     nextTrustEpoch: input.current.trustEpoch + 1,
     reason: "recovery-root-lost" as const,
   };
-  const coSign = {
+  return Object.freeze({
+    ...eventBase,
+    coSign: Object.freeze({
     deviceId: input.coSigner.deviceId,
     sig: input.coSigner.sign("HomeTrustDomainResetCoSign", 1, {
       ...eventBase,
       body: bodyWithoutCoSign,
     }),
-  };
-  return createSignedTrustEvent({
-    current: input.current,
-    at: input.at,
-    signer: input.issuer,
-    body: { ...bodyWithoutCoSign, coSign },
+    }),
   });
+}
+
+export function createDomainResetEventFromApproval(input: {
+  current: TrustProjection;
+  issuer: DeviceTrustSigner;
+  approval: DomainResetApproval;
+}): HomeTrustEventWithBody<Extract<HomeTrustEventBody, { t: "domain-reset" }>> {
+  const expected = {
+    v: 1 as const,
+    homeId: input.current.homeId,
+    seq: input.current.chainHead.seq + 1,
+    prevEventDigest: input.current.chainHead.eventDigest,
+    trustEpoch: input.current.trustEpoch,
+  };
+  if (
+    input.issuer.deviceId !== input.current.issuer.issuerKeyId ||
+    input.approval.v !== expected.v ||
+    input.approval.homeId !== expected.homeId ||
+    input.approval.seq !== expected.seq ||
+    input.approval.prevEventDigest !== expected.prevEventDigest ||
+    input.approval.trustEpoch !== expected.trustEpoch
+  ) throw new TypeError("Domain reset approval does not match the current trust generation");
+  const body: Extract<HomeTrustEventBody, { t: "domain-reset" }> = {
+    t: "domain-reset",
+    nextTrustEpoch: input.current.trustEpoch + 1,
+    reason: "recovery-root-lost",
+    coSign: input.approval.coSign,
+  };
+  const event = createSignedTrustEvent({
+    current: input.current,
+    at: input.approval.at,
+    signer: input.issuer,
+    body,
+  });
+  applyTrustEvent(input.current, event);
+  return event;
 }
 
 export function buildHomeTrustRecord(

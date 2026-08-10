@@ -21,12 +21,19 @@ import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { createRecoveryRootEvent, createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { runBackupSetupCommand } from "./backup-command.js";
+import {
+  runBackupSetupCommand,
+  runRecoveryRootInvalidateCommand,
+  runRecoveryRootRotateCommand,
+} from "./backup-command.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
 import { RecoveryRootEstablishmentRuntime } from "./recovery-root-establishment-runtime.js";
-import { assertRecoveryRootActivationReplay } from "./recovery-root-activation.js";
+import {
+  assertRecoveryRootActivationReplay,
+  commitRecoveryRootLifecycleActivation,
+} from "./recovery-root-activation.js";
 
 vi.setConfig({ testTimeout: 120_000 });
 
@@ -328,8 +335,126 @@ describe("paired recovery backup setup", () => {
   );
 });
 
+describe("recovery root public lifecycle", () => {
+  it("rotates through a verified independent checkpoint and can then invalidate the new code", async () => {
+    const fixture = await pairedHomeWithoutRecoveryRoot("v2");
+    const initialRuntime = new RecoveryRootEstablishmentRuntime({
+      zhixingHome: fixture.targetHome,
+      mesh: fixture.targetBootstrap,
+      secretStore: fixture.targetSecrets,
+      storageMaintenance: fixture.targetStorage,
+    });
+    let currentCode: string | undefined;
+    try {
+      await initialRuntime.start();
+      await runBackupSetupCommand(
+        { pairedDeviceId: fixture.targetDeviceId },
+        {
+          zhixingHome: fixture.sourceHome,
+          secretStore: fixture.sourceSecrets,
+          storageMaintenance: fixture.sourceStorage,
+          writeLine: (line) => {
+            if (line.startsWith("恢复包：")) currentCode = line.slice("恢复包：".length);
+          },
+          readRecoveryPackage: async () => {
+            if (!currentCode) throw new Error("recovery code was not displayed");
+            return currentCode;
+          },
+        },
+      );
+      await withTimeout(initialRuntime.waitUntilActivated(), "target did not activate initial root");
+    } finally {
+      await initialRuntime.stop();
+    }
+    const oldCode = currentCode!;
+    let reads = 0;
+    await runRecoveryRootRotateCommand(
+        { userConfirmed: true },
+        {
+          zhixingHome: fixture.sourceHome,
+          secretStore: fixture.sourceSecrets,
+          storageMaintenance: fixture.sourceStorage,
+          writeLine: (line) => {
+            if (line.startsWith("新的恢复码：")) currentCode = line.slice("新的恢复码：".length);
+          },
+          readRecoveryPackage: async () => {
+            reads += 1;
+            if (reads === 1) return oldCode;
+            if (!currentCode) throw new Error("new recovery code was not displayed");
+            return currentCode;
+          },
+          openRecoveryTarget: async (_binding, recipientKeyId) => {
+            const storedTarget = deferredPairedCheckpointTarget({
+              zhixingHome: fixture.targetHome,
+              deviceId: fixture.targetDeviceId,
+              storageMaintenance: fixture.targetStorage,
+            });
+            const receiver = new PairedCheckpointReceiver({
+              homeId: (await fixture.targetBootstrap.bootstrapStore.loadTrustRecord())!.homeId,
+              sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
+              targetDeviceId: fixture.targetDeviceId,
+              recipientKeyId: keyIdForPublicKey(
+                (await fixture.targetBootstrap.bootstrapStore.loadTrustRecord())!.recoveryBackupPublicKey!,
+              ),
+              rootLifecycle: true,
+              commitRootActivation: ({ plan, record }) =>
+                commitRecoveryRootLifecycleActivation(
+                  fixture.targetBootstrap.bootstrapStore,
+                  plan,
+                  record,
+                ),
+              staging: new FilePairedCheckpointStaging({
+                root: path.join(
+                  fixture.targetHome,
+                  "distributed-runtime",
+                  "recovery-checkpoint-incoming",
+                ),
+                target: storedTarget,
+                storageMaintenance: fixture.targetStorage,
+              }),
+            });
+            return {
+              target: new PairedRecoveryCheckpointTarget({
+                homeId: (await fixture.sourceBootstrap.bootstrapStore.loadTrustRecord())!.homeId,
+                sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
+                targetDeviceId: fixture.targetDeviceId,
+                recipientKeyId,
+                transport: receiver,
+                storageMaintenance: fixture.sourceStorage,
+              }),
+              close: async () => undefined,
+            };
+          },
+        },
+      );
+    expect(currentCode).not.toBe(oldCode);
+
+    await expect(runRecoveryRootInvalidateCommand(
+      { userConfirmed: true },
+      {
+        zhixingHome: fixture.sourceHome,
+        secretStore: fixture.sourceSecrets,
+        storageMaintenance: fixture.sourceStorage,
+        writeLine: () => undefined,
+        readRecoveryPackage: async () => currentCode!,
+      },
+    )).resolves.toBeUndefined();
+    const bootstrap = await prepareMeshRuntimeBootstrap({
+      zhixingHome: fixture.sourceHome,
+      secretStore: fixture.sourceSecrets,
+      storageMaintenance: fixture.sourceStorage,
+      configuration: { enabledRoles: ["executor"] },
+    });
+    expect(bootstrap.mode).toBe("trusted-home");
+    if (bootstrap.mode !== "trusted-home") return;
+    expect(bootstrap.trust.recoveryRootPublicKey).toBeUndefined();
+    expect(bootstrap.trust.recoveryBackupPublicKey).toBeUndefined();
+  });
+});
+
 async function startActiveCheckpointReceiver(
   fixture: Awaited<ReturnType<typeof pairedHomeWithoutRecoveryRoot>>,
+  onError?: (error: Error) => void,
 ): Promise<ProductionMeshControlPlane> {
   const mesh = await prepareMeshRuntimeBootstrap({
     zhixingHome: fixture.targetHome,
@@ -347,15 +472,20 @@ async function startActiveCheckpointReceiver(
     deviceId: fixture.targetDeviceId,
     storageMaintenance: fixture.targetStorage,
   });
-  registerPairedCheckpointMeshService(
-    services,
-    new PairedCheckpointReceiver({
+  const receiver = new PairedCheckpointReceiver({
       homeId: mesh.trust.homeId,
       sourceDeviceId: mesh.trust.issuer.deviceId,
       targetDeviceId: fixture.targetDeviceId,
       recipientKeyId: keyIdForPublicKey(mesh.trust.recoveryBackupPublicKey),
-      replayRootActivation: ({ event, record }) =>
-        assertRecoveryRootActivationReplay(mesh.bootstrapStore, event, record),
+      rootLifecycle: true,
+      commitRootActivation: async ({ plan, record }) => {
+        try {
+          await commitRecoveryRootLifecycleActivation(mesh.bootstrapStore, plan, record);
+        } catch (error) {
+          onError?.(error instanceof Error ? error : new Error(String(error)));
+          throw error;
+        }
+      },
       staging: new FilePairedCheckpointStaging({
         root: path.join(
           fixture.targetHome,
@@ -365,7 +495,19 @@ async function startActiveCheckpointReceiver(
         target,
         storageMaintenance: fixture.targetStorage,
       }),
-    }),
+    });
+  registerPairedCheckpointMeshService(
+    services,
+    {
+      request: async (command, signal) => {
+        try {
+          return await receiver.request(command, signal);
+        } catch (error) {
+          onError?.(error instanceof Error ? error : new Error(String(error)));
+          throw error;
+        }
+      },
+    },
     (deviceId) => deviceId === mesh.trust.issuer.deviceId,
   );
   const control = new ProductionMeshControlPlane({
@@ -377,6 +519,7 @@ async function startActiveCheckpointReceiver(
     secretStore: fixture.targetSecrets,
     bootstrapStore: mesh.bootstrapStore,
     services,
+    ...(onError ? { onConnectionError: onError } : {}),
     ...(mesh.localEndpoint ? { localEndpoint: mesh.localEndpoint } : {}),
   });
   await control.start();

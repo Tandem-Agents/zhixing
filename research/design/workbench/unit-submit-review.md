@@ -2,7 +2,7 @@
 
 > **维护原则**
 >
-> - 以独占一行的“审查清单”标题为界：此前为静态区，保存长期稳定的规则；该标题及其后为动态区，保存当前开发单元的独立审查内容。
+> - 以文件中唯一且独占一行的 `## 审查清单` 为界：此前为静态区，保存长期稳定的规则；该标题及其后为动态区，保存当前开发单元的独立审查内容。定位时必须整行全等匹配；匹配数不是 `1` 时立即停止。
 > - 动态区只固定“当前状态”“来源覆盖”“审查项”“P0/P1 阻断问题列表”“非阻断级问题列表”及其空表。来源分类、审查分区和审查项均须按当前单元重新生成，不得继承上一单元。
 > - 历史动态区统一归档到 `research/design/workbench/unit-review-checklists/<module-id>/unit-<N>.gen-<G>.md`，避免跨模块同号单元冲突。
 > - 重置步骤：从独占一行的“审查清单”标题起，将当前动态区原样写入同路径的 `.pending` 文件，完整校验单元身份、全部数据行及两类问题列表（包括空表）后原子改名为正式归档；正式归档已存在时，内容一致则复用，不一致则停止。归档完成后，才将当前状态改为下一单元，删除全部来源分类、审查分区和数据行，只保留固定空表，并将进度恢复为 `0%`。
@@ -24,7 +24,7 @@
 
 每轮独立审查必须逐项执行完整清单并记录结论。发现问题只登记，不得提前结束；整轮完成后一次性汇总全部真实问题。清单未走完、存在未判定项，或发现交付边界尚未进入清单时，不得给出通过结论。
 
-## 审查清单定稿条件
+## 定稿与重定稿条件
 
 清单同时满足以下条件即定稿，停止继续补充：
 
@@ -260,188 +260,159 @@
 
 ### 当前状态
 
-- **当前单元**：第 34 单元 · generation 1
-- **单元身份**：S9 planned anchor 迁居；只支持用户从 current anchor 主动迁往另一台已配对、active、启用 anchor 角色且 ReadyProof 就绪的设备。
-- **权威来源**：`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`、`s2-security-supply-chain-review.md`，以及已定稿开发清单 D34-01～D34-08；上游只消费第 33 单元 current verified full recovery checkpoint、唯一 `AuthorityCommitLog` / `ArtifactStore` / storage governor、S2 trust/mesh/SecretStore 合同，下游只为第 35 单元保留已提交 authority/trust 基线，不提前实现灾难恢复。
-- **交付基线**：第 34 单元完整交付边界不变；U34-04/U34-09 最新修复影响 23 个非工作台生产、直接测试、架构/规格与 S7 路径，按排序后的 `path<TAB>file-sha256` 清单冻结内容指纹 `7f9ba3badb9c1558d0b2d2b93ebb0f456d8b667d0b11aced53d9747f54d6269a`。工作台文件不参与功能指纹；未受影响路径继续复用原结论。
-- **生产装配关系**：anchor+executor 与 anchor-only/current-anchor 两个生产组合根复用同一 authority log、artifact store、device storage governor、trust/mesh 与 checkpoint owner，动态装配恰一 planned source/recovery owner；合格的 non-current active anchor 只可暴露有限 readiness/strict transfer receiver，首条 `prepared` 才把迁居耐久状态、私有 staging 与 recovery 义务绑定到唯一 target。executor-only、surface、disabled、非 anchor 设备及未被选中的候选零 source owner、零非终态迁居事实；目标提交成功后新 issuer/current anchor/authority base 同步生效，旧 source 永久 fenced。
-- **目标提交边界**：交付 strict planned transfer 合同、ReadyProof 与 transfer-bound issuer key、source 准入关闭和在途收束、独立 planned export/AuthorityCatalog/SourceFreezeProof、target 私有导入、唯一 AnchorTransferCommit、双端恢复与 forward-only、CLI/server 值班设备迁居入口、两生产根 exact-set/S7 与成比例直接证据。
-- **明确排除**：第 35 单元 source-less/disaster recovery、恢复应用、`domain-reset`、pending-reenroll、凭据轮换与恢复旅程；第 36～38 单元托管服务、移除/卸载、升级发布；anchor 自动故障转移、quorum/witness、多目标/云、连续全局同步；环境事实、SecretStore 内容、workspace 原始路径、设备缓存与非权威缓存；第二事实源、通用迁移/路由/存储/事务/outbox/事件总线/registry、监控、诊断、benchmark 或信息采集。
-- **当前任务进度**：U34-04（P0/大）与 U34-09（P1/中）已在正式问题列表更新为“已验证”；依据 23 个变更路径的实现、共享原语、装配、架构/规格、S7 与直接证据影响闭包，将 19 项改为 `[~]` 等待受影响范围复审，其余 17 项 `[x]` 结论继续复用。未开始全单元独立审查、冻结终审或提交验证。
+- **当前单元**：第 35 单元 · generation 1
+- **单元身份**：S9 人工灾难恢复与安全域换代；只支持值班设备永久丢失后，由另一台 active anchor-role 设备基于用户明确选择的完整 checkpoint 副本和无回显恢复包，执行 source-less 恢复、旧安全域撤销、恢复根生命周期与逐设备重新加入。
+- **权威来源**：`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`、`s2-security-supply-chain-review.md`，以及已定稿开发清单 D35-01～D35-09。上游只消费第 33 单元完整可恢复 checkpoint、恢复根激活与 retention 合同，以及第 34 单元 composite authority、installed-generation/current-owner、target-wide candidate、私有 staging、storage governor 和 post-install closure；下游第 36～38 单元能力不进入本清单。
+- **交付基线**：以第 34 单元封版代码提交 `972f363e` 为基线，当前 Unit 35 完整交付为 54 个变更路径：core 8、mesh 9、CLI 29、providers 1、server golden 1、S7 2、架构 2、工作台 2。同期变更的 Unit 34 历史归档与正式封版账本属于上一单元收口记录，不计入 Unit 35 功能交付；两者仍在下方路径对账中明确排除，不能无依据消失。审查必须覆盖完整生产调用图与 54 条 Unit 35 路径，不得仅审新增文件或默认命令路径。
+- **生产装配关系**：`zz backup recover/recover-finish` 与 `zz backup root rotate/invalidate/approve-reset/reset` 是用户入口；checkpoint directory/paired inventory 提供候选，strict disaster command、target-wide candidate journal、per-transfer journal、私有 `FileArtifactStore` 与本地 `AuthorityCommitLog` 形成目标恢复链；`MeshRuntimeBootstrap` 与 `MeshRuntimeAssembly` 在 anchor+executor、anchor-only 两个 current-anchor profile 中消费 disaster installation，先完成 installed-generation/runtime/consumer 重绑再开放 current-owner surface。Credential exposure authority 同时接入 capability publication、provider/channel/MCP/webhook/rendezvous 秘密读取与 pairing/bootstrap 路由。
+- **目标提交边界**：交付 source-less checkpoint inventory、恢复根真解封与现场验证、no-rollback baseline、私有完整导入、root-signed commit/abort、原子 composite authority 安装、旧 issuer/epoch/route/binding fencing、旧设备隔离后 tombstone、恢复根 rotate/invalidate/domain-reset-establish、pending-reenroll/fresh pairing、公开零术语旅程、两生产根 exact-set/S7 与必要直接证据。
+- **明确排除**：自动 failover、quorum/witness、自动升主、持续或全局同步、恢复应用、业务数据恢复向导、多目标/云备份、通用 transfer/registry/lifecycle/事务/outbox/事件总线；第 36 单元托管服务与角色自恢复、第 37 单元停机/移除/卸载、第 38 单元升级发布；单设备原地重置、issuer 与恢复包同时丢失后的绕过；监控、诊断、benchmark 与信息采集。
+- **架构空洞判定**：总纲 §9、规格 §6.3/§6.4/§7/§8/§15 与 D35-01～D35-09 已唯一确定本单元产品、状态、安全、拓扑和交付边界；当前没有需以实现假设补齐的真实需求空洞。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论。
 
-> **清单状态**：修复后影响范围已登记；0 项 `[ ]`、17 项 `[x]`、0 项 `[!]`、19 项 `[~]`。问题列表 P0/P1 已清零，但受影响范围尚未复审，因此尚未判定独立审查通过；EX34-01 继续排除。
+> **清单状态**：38 项 `[ ]`、0 项 `[x]`、0 项 `[!]`、0 项 `[~]`；清单已定稿、尚未执行独立审查。两类问题列表为空仅表示尚未审查，不表示单元已通过。
 
 ### 来源覆盖
 
 | 来源 | 判定 | 归入审查项或不适用依据 |
 | ---- | ---- | ---------------------- |
-| always-online-and-local-execution-requirements.md §一 | 适用 | 持续在线值班设备与本机真实工作设备并存的核心目标归入 IR34-01、IR34-23、IR34-31。 |
-| 需求文档 §二 | 不适用 | 外部回复的信息整理是需求形成材料，不独立产生第 34 单元合同。 |
-| 需求文档 §三 | 不适用 | 对历史实现的核验不是当前迁居字段、状态或验收要求。 |
-| 需求文档 §四 | 不适用 | 历史架构审核过程不替代现行总纲与规格。 |
-| 需求文档 §五 | 不适用 | 历史现状归纳不产生当前交付义务。 |
-| 需求文档 §六 | 适用 | “值班设备可切换、干活设备保留真实环境”的用户目标归入 IR34-03、IR34-23、IR34-31。 |
-| 需求文档 §七 | 适用 | 当前产品价值、最小完整范围与体验优先级归入 IR34-01、IR34-31、IR34-35。 |
-| 需求文档 §八 | 适用 | 目标列表、可行动 readiness 缺口、准备/收束/传输/接管阶段、切换前取消、失败后继续及零内部术语逐条归入 IR34-03、IR34-20～IR34-21、IR34-31。 |
-| s2-security-supply-chain-review.md 范围说明 | 适用（兼容边界） | 当前交付改动 `@zhixing/mesh` 的 package export/build；评审只约束其既有四项受管依赖，不得借本单元宣称仓库级供应链结论，归入 IR34-32。 |
-| s2-security-supply-chain-review.md「裁决」 | 适用（兼容边界） | 当前交付修改 `@zhixing/mesh` export/build 并复用既有密码与连接面，须确认三项生产依赖和受控 PAKE 开发依赖用途边界不漂移，归入 IR34-30、IR34-32。 |
-| S2 供应链评审「强制门禁」 | 适用（兼容边界） | 精确锁版、依赖 owner、PAKE 非生产隔离及既有 supply-chain gate 不得因新 mesh 子入口被绕过，归入 IR34-32～IR34-33。 |
-| S2 供应链评审「接受依据」 | 适用（兼容边界） | planned transfer 不新增密码依赖、不改变 TLS/证书/PAKE 实时边界，归入 IR34-05、IR34-30、IR34-32。 |
-| distributed-runtime-charter.md「当前版本交付原则」 | 适用 | 最小完整产品、锁定范围内最优架构与禁止未来框架预建归入 IR34-01、IR34-35～IR34-36。 |
-| 总纲「一、架构概况」 | 适用 | 单一产品、唯一 current anchor、单机/分布式同构及恢复能力归入 IR34-01、IR34-23、IR34-28。 |
-| 总纲「二、凝练后的需求点」 | 适用 | 值班/干活角色、跨机一致体验与可信迁居归入 IR34-03、IR34-23、IR34-31。 |
-| 总纲 §1 架构结论 | 适用 | current anchor 唯一权威、设备间同一协议内核与不造第二路径归入 IR34-17～IR34-19、IR34-23。 |
-| 总纲 §2 角色模型 | 适用 | anchor/executor/surface 角色与 enabled/disabled topology exact-set 归入 IR34-03、IR34-28。 |
-| 总纲 §3 包与依赖边界 | 适用 | core/mesh/owner-kernel/server/cli 分层、无环依赖与组合根职责归入 IR34-28、IR34-32、IR34-36。 |
-| 总纲 §4 设备网格与安全协议 | 适用 | trust generation、签发者、设备认证、签名和旧 issuer 拒绝归入 IR34-02～IR34-05、IR34-25、IR34-30。 |
-| 总纲 §5 权威矩阵与执行清单 | 适用 | 全局域随 anchor 迁居、会话/执行/资产/义务完整覆盖归入 IR34-11～IR34-12、IR34-18、IR34-24。 |
-| 总纲 §6 run 派发协议 | 适用（上游边界） | 不重审既有 run 协议；只审 fresh 准入关闭、已接受 run/job/interaction/final/delivery 的可证明终态和迁后重建，归入 IR34-08～IR34-09、IR34-24。 |
-| 总纲 §7 环境模型与路由 | 适用（负边界） | 环境事实、workspace 原始路径和本机能力不得进入 catalog/wire，迁后只按目标本地配置重建，归入 IR34-11、IR34-30。 |
-| 总纲 §8 双平面通信 | 适用（传输边界） | mesh 只换传输路径、不成为权威；断连/重连/重投保持同一 transfer 身份，归入 IR34-05、IR34-14、IR34-21、IR34-27。 |
-| 总纲 §9 离线本地会话、收编与迁居 | 适用（直接） | planned AuthorityTransfer 全状态、ReadyProof、SourceFreezeProof、AuthorityCatalog、TrustTransition、唯一 commit、abort/forward-only 与 owner/receiver exact-set 归入 IR34-02～IR34-29。 |
-| 总纲 §10 凭据与服务生命周期 | 适用（有限） | ReadyProof 的 SecretStore unlocked/服务 revision 和 transfer issuer key 生命周期直接适用；第 36～38 单元服务托管/卸载不适用，归入 IR34-03～IR34-04、IR34-19、IR34-35。 |
-| 总纲 §11 产品体验设计 | 适用 | 用户只见“值班设备”、目标缺口、阶段、取消/继续和诚实终态，归入 IR34-31。 |
-| 总纲 §12 故障矩阵 | 适用（逐个相关故障） | 迁居任意步中断、旧锚点/旧 epoch、磁盘满、网络分区、响应丢失、版本偏斜和时钟边界归入 IR34-09、IR34-13～IR34-29、IR34-34。 |
-| 总纲 §12.1 S9 恢复根与备份状态边界 | 适用（上游窄接缝） | 迁居前只取得 current verified full checkpoint；不得改写 Unit 33 envelope/readiness/retention，归入 IR34-07、IR34-32、IR34-35。 |
-| 总纲 §13 不变量清单 | 适用 | 唯一权威、旧 epoch 永拒、同 envelope 原子性、秘密隔离、资源治理、零未启用 owner 等相关不变量归入 IR34-08～IR34-30、IR34-34。 |
-| 总纲 §14 实施序列 | 适用（Unit 34） | S9 Unit 34 全部适用；Unit 35 disaster recovery 与 Unit 36～38 明确不适用，归入 IR34-01、IR34-35。 |
-| 总纲 §15 验收纲 | 适用 | 正常、边界、故障、恢复、对抗、双拓扑与零认知旅程的成比例证据归入 IR34-33～IR34-34。 |
-| specification.md §1.1 | 适用 | requestId/transferId/deviceId、anchor/trust epoch 与时间有效期归入 IR34-02～IR34-03、IR34-27。 |
-| 规格 §1.2 | 适用 | JCS、schema/version、digest/signature 域及 freeze/transition/ready/catalog/checkpoint 引用逐项归入 IR34-02、IR34-10～IR34-17、IR34-27。 |
-| 规格 §1.3 | 适用（兼容边界） | 外部符号仍从权威包消费，禁止复制或改造上游合同，归入 IR34-32。 |
-| 规格 §1.3b | 不适用 | S1 新建符号清单已交付，且本章没有 planned anchor transfer 新符号；现有符号兼容由规格 §1.3 与 IR34-32 承载，不从本章恢复字段设计。 |
-| 规格 §1.4 | 适用 | `AnchorTransferCommit`、TrustTransition 等总纲名与字段级合同必须全等，归入 IR34-02、IR34-17～IR34-19。 |
-| 规格 §1.5 | 适用 | stable/transient/conflict/unauthorized 等内部结果须在公开面映射为稳定可行动错误，归入 IR34-27、IR34-31。 |
-| 规格 §2.1 | 适用 | `HomeTrustEvent/Record`、planned `AnchorTransferCommit` 与 `SourceFreezeProof` 的严格联合、签发者、epoch 和链头归入 IR34-02、IR34-04、IR34-16～IR34-19、IR34-25。 |
-| 规格 §2.2 | 适用（上游边界） | 活跃 capability/lease/ticket 是待收束/迁移义务；不得由迁居伪造、放宽或另建凭证，归入 IR34-09、IR34-24、IR34-30。 |
-| 规格 §2.3 | 适用 | transfer issuer 私钥只入 SecretStore，锁定/删除/激活/重放均不出 wire，归入 IR34-04、IR34-30。 |
-| 规格 §2.4 | 不适用 | 凭据暴露记录属于设备撤销收束，不是 planned migration 交付；凭据轮换禁入本单元的依据来自总纲/规格 Unit 35 边界，由 IR34-35 承载。 |
-| 规格 §2.5 | 适用（复用边界） | 只复用生产 mesh bootstrap、认证连接与 negotiated service；不新建连接/中继体系，归入 IR34-05、IR34-25、IR34-28、IR34-32。 |
-| 规格 §3.1 | 适用（权威覆盖） | SessionState 写在 source fence 后不得 fresh append，既有会话权威事实须完整迁移并在 target 恢复，归入 IR34-08、IR34-11、IR34-18、IR34-24。 |
-| 规格 §3.2 | 适用（权威覆盖） | GlobalState 写在 source fence 后不得 fresh append，既有全局权威事实须完整迁移并在 target 恢复，归入 IR34-08、IR34-11、IR34-18、IR34-24。 |
-| 规格 §3.2b | 适用（权威覆盖） | DeferredIntent 的已接受/未终态事实须进入 catalog 并按原身份在 target 恢复，fresh intent 受 source fence，归入 IR34-08、IR34-11、IR34-18、IR34-24。 |
-| 规格 §3.8 | 适用（安全边界） | 会话、全局状态及 control guard 必须在 fresh 写与迁后公开准入前维持身份、owner 与权限约束，归入 IR34-08、IR34-22、IR34-30。 |
-| 规格 §3.3 | 适用（负边界） | EnvironmentPort 与原始本地路径不迁移，归入 IR34-11、IR34-30。 |
-| 规格 §3.4 | 适用（上游终态边界） | 业务 ResourceLease 协议不改型；现有 active/queued/settled/reclaimed 身份只作为 accepted work 收束与迁后 pending 恢复输入，归入 IR34-09、IR34-24。 |
-| 规格 §3.4b | 适用 | checkpoint/export/staging/import 每个物理步骤使用现有设备 storage governor，等待可取消且 permit 不跨网络/锁，归入 IR34-13、IR34-29。 |
-| 规格 §3.5 | 适用（上游终态边界） | control/reviewer 的已接受 completion 只作为 drain 与可恢复 pending 输入，不新建迁居端口，归入 IR34-09、IR34-24。 |
-| 规格 §3.6 | 适用（上游终态边界） | executor dispatch/commit/final 的已接受义务必须可判定收束或按原身份迁移，归入 IR34-09、IR34-24。 |
-| 规格 §3.7 | 适用（上游终态边界） | submission/mirror 的已接受义务必须可判定收束或按原身份迁移，不改变既有协议，归入 IR34-09、IR34-24。 |
-| 规格 §4.1 | 适用 | 唯一 `AuthorityCommitLog`、同 envelope/单次 sync、投影重建、source prefix 与 append fence 归入 IR34-06、IR34-10～IR34-12、IR34-17～IR34-19、IR34-26。 |
-| 规格 §4.2 | 适用 | artifact 先耐久后引用、retained closure、私有 staging、共享 CAS 提升和缺件拒绝归入 IR34-11～IR34-15。 |
-| 规格 §4.3 | 适用 | planned transfer records、trust/current-anchor/install/progress 事实必须 strict、单调、可重放，归入 IR34-02、IR34-06、IR34-14～IR34-27。 |
-| 规格 §4.3 delivery 生命周期 | 适用（待办覆盖） | 不改 delivery 状态机；只核对所有未终态 delivery/final/outbox 均在 catalog 与迁后恢复中有落点，归入 IR34-09、IR34-24。 |
-| 规格 §4.4 | 适用（兼容边界） | 迁居不得发布 staged mutation 或改变既有 CAS；仅迁移已提交/待办事实，归入 IR34-09、IR34-24、IR34-32。 |
-| 规格 §4.5 | 适用（有限） | commit/abort 后 source/target staging、旧 source tombstone 与 artifact owner 必须按既有保留/GC 不误删共享 ref，归入 IR34-15、IR34-21、IR34-29。 |
-| 规格 §5.1 | 适用（准入边界） | 既有控制请求入口全部受 source fence；迁居管理命令走独立 strict surface，归入 IR34-08、IR34-27、IR34-31。 |
-| 规格 §5.2 | 适用（在途边界） | 既有派发协议不改型；已接受 dispatch 与未终态事实须可判定收束或迁移，归入 IR34-09、IR34-24。 |
-| 规格 §5.3 | 适用（能力边界） | 既有 capability/lease/ticket 不扩权；活跃能力事实须作为 drain 或 pending 输入，归入 IR34-09、IR34-24、IR34-30。 |
-| 规格 §5.4 | 适用（提交边界） | 既有 execution commit 不改型；效果前后失败、uncertain 与 exact replay 须在 drain/catalog 中闭合，归入 IR34-09、IR34-24、IR34-27。 |
-| 规格 §5.5 | 适用（终态边界） | final/status/delivery 的已接受义务须可判定终态或按原身份迁移，归入 IR34-09、IR34-24。 |
-| 规格 §5.6 | 适用（stream 边界） | 既有 stream 水位与重放语义不改；未消费终态须纳入迁后恢复，归入 IR34-09、IR34-24。 |
-| 规格 §5.7 | 适用（取证/止损边界） | 已接受的 evidence/stop-loss 义务不得因 fence 丢失，须可收束或按原身份迁移，归入 IR34-09、IR34-11、IR34-24。 |
-| 规格 §6.1 | 适用（conversation run 矩阵） | 36 行逐边判定见下表；fresh trigger 关闭，所有非终态/uncertain/待办不得简单丢弃，归入 IR34-08～IR34-09、IR34-24、IR34-34。 |
-| 规格 §6.2 | 适用（user job 矩阵） | 38 行逐边判定见下表；fresh trigger 关闭，所有非终态/uncertain/delivery 义务完整，归入 IR34-08～IR34-09、IR34-24、IR34-34。 |
-| 规格 §6.2b | 适用（system job 矩阵） | 6 行逐边判定见下表；fresh trigger 关闭，queued/running/fence/terminal/resource 事实完整，归入 IR34-08～IR34-09、IR34-24、IR34-34。 |
-| 规格 §6.3 | 适用（直接） | planned 的 prepare→frozen→imported→committed→tombstoned、pre-commit abort、late abort 与断点重放逐边归入 IR34-06～IR34-27。conversation/disaster 分支只作类型隔离边界。 |
-| 规格 §6.4 | 适用（逐行判定） | paired/configured/ready/degraded 的目标资格和 ReadyProof 适用；domain-reset/pending-reenroll 属第 35 单元且逐行判为不适用，归入 IR34-03、IR34-25、IR34-35。 |
-| 规格 §7 | 适用 | 六类权威覆盖逐行决定 catalog 中应迁移、禁止迁移与重建内容，归入 IR34-11～IR34-12、IR34-18、IR34-24、IR34-30。CheckpointEnvelope 只作上游安全保障。 |
-| 规格 §8 | 适用 | `device-trust` 的四个 RPC/CLI 与迁居 owner/receiver 直接适用；其余入口用于反向确认 source 写面和 pending obligation 无旁路，归入 IR34-08、IR34-23～IR34-24、IR34-28、IR34-31、IR34-36。 |
-| 规格 §9 | 适用（兼容边界） | 本地域/锚点域能力矩阵不因 current anchor 切换扩权；executor-only 仍零全局写与 migration owner，归入 IR34-23、IR34-28、IR34-30。 |
-| 规格 §10 | 适用 | workload/lease 终态表逐行约束 accepted work 的 drain 与迁后恢复，归入 IR34-09、IR34-24。 |
-| 规格 §10.1 | 适用 | 设备 storage-maintenance 的容量、取消、stop、锁序和公平边界归入 IR34-13、IR34-29。 |
-| 规格 §11 | 适用 | planned migration 产品旅程必须零内部术语且诚实表达可取消/不可取消与继续，归入 IR34-31。 |
-| 规格 §12 | 适用 | 相关不变量、6.3 planned 逐边、签名篡改、崩溃点、双拓扑与零副作用对抗证据归入 IR34-27、IR34-33～IR34-34。 |
-| 规格 §13 | 不适用 | 模块文档影响清单没有独立 S9 planned migration 条目；本单元不得据此扩写其他模块文档，当前总纲/规格/需求同步另由 D34-08 与 IR34-32 判定。 |
-| 规格 §14 | 不适用 | S1 开工清单已完成且不属于第 34 单元。 |
-| 规格 §15 | 适用（Unit 34） | 通用提交纪律和第 34 项全部适用；第 35～38 项不适用并受范围门禁，归入 IR34-01、IR34-33～IR34-35。 |
-| unit-development-workbench.md 维护原则、§一 | 适用（流程/身份来源） | 用于确认当前动态区、Unit 34 身份与已定稿开发清单，不产生运行时合同，归入 IR34-01、IR34-36。 |
-| 开发工作台 §二「目标与边界」「交付优先级与扩张门禁」 | 适用（范围来源） | 最小完整交付、架构优先、禁止未来能力扩面归入 IR34-01、IR34-35～IR34-36。 |
-| 开发工作台 §二「架构与需求空洞裁决」 | 适用（边界来源） | 当前来源已唯一确定 planned migration 范围；如审查清单无法判定产品/单元边界才登记空洞，归入 IR34-01、IR34-36。 |
-| 开发工作台 §三 | 不适用 | 生成/审查/开发提示词是过程模板，不新增 Unit 34 产品、架构或运行时验收合同。 |
-| D34-01 | 适用 | strict transfer/ready/catalog/commit/abort/command/result/record 合同归入 IR34-02、IR34-27、IR34-32。 |
-| D34-02 | 适用 | 目标资格、transfer issuer key、ReadyProof、prepared/staging 归入 IR34-03～IR34-06、IR34-14。 |
-| D34-03 | 适用 | source checkpoint、准入 fence、drain、source prefix 与 freeze proof 归入 IR34-07～IR34-10。 |
-| D34-04 | 适用 | AuthorityCatalog、planned export、private import、coverage exact-set 与资源边界归入 IR34-11～IR34-15。 |
-| D34-05 | 适用 | source 唯一 commit、target authority base/install、TrustTransition/current anchor 原子发布归入 IR34-16～IR34-19。 |
-| D34-06 | 适用 | takeover、pending 恢复、旧端 fencing、peer trust catch-up/tombstone 归入 IR34-21～IR34-25。 |
-| D34-07 | 适用 | pre-commit abort、post-commit forward-only、启动恢复、并发/响应丢失、关闭归入 IR34-20～IR34-21、IR34-26～IR34-29。 |
-| D34-08 | 适用 | CLI/server 产品旅程、两生产根 exact-set、S7/golden 与直接证据归入 IR34-28、IR34-31、IR34-33～IR34-34。 |
-| 当前完整交付物 28 个非工作台路径 | 适用（生产事实） | core 5、CLI 16、server 2、架构 3、S7 2 个路径逐组反向归入 IR34-01～IR34-36；测试只作证据对象，不替代功能判断。 |
-
-#### 适用枚举行逐条落点
-
-| 枚举来源 | 逐条判定与审查项 |
-| -------- | ---------------- |
-| 规格 §6.1 conversation run 行 1～36 | 既有逐边语义不在本单元重审；每行产生或消费的 `queued/dispatched/running/cancel-requested/uncertain` 均是 IR34-09 的 drain 输入，terminal、outbox、interaction/effect 与 exact replay 是 IR34-24 的迁后义务，相关直接证据归 IR34-34。 |
-| 规格 §6.2 user job 行 1～38 | 行 1～2 的 fresh trigger 受 IR34-08 fence；其余每行的非终态/terminal/uncertain/delivery 义务逐项归 IR34-09、IR34-24，既有状态语义不改，直接证据归 IR34-34。 |
-| 规格 §6.2b system job 行 1～6 | 行 1 fresh trigger 受 IR34-08 fence；行 2～6 的 queued/running/fence/terminal/resource 事实逐项归 IR34-09、IR34-24，直接证据归 IR34-34。 |
-| 规格 §6.3 AuthorityTransfer | planned 行 `0a/1/2/3a/4/5a/6/7/8` 分别归 IR34-06、IR34-08～IR34-10、IR34-14～IR34-21、IR34-27、IR34-34；disaster 行 `0b/3b/5b` 不适用，只作为 IR34-02/IR34-35 的 mode 隔离反例。 |
-| 规格 §6.4 设备状态行 1～11 | 行 2～5 的 configured/ready/degraded 是 IR34-03/IR34-16 的直接 readiness 输入；行 1、6～9 只作为既有 paired/active/revoked trust 投影输入归 IR34-03/IR34-25，不在本单元新增转移；行 10～11 `domain-reset/pending-reenroll` 不适用并归 IR34-35 负边界。 |
-| 规格 §7 六类覆盖行 | `全局状态与期望配置`→IR34-11/18/24；`会话状态`→IR34-11/18/24；`会话内容资产`→IR34-11/12/15/18；`环境事实与本地秘密`→IR34-11/30（禁止）；`执行资产`→IR34-11/12/18；`非权威缓存`→IR34-11/30（禁止/重建）。 |
-| 规格 §8 `device-trust` | 直接 planned 产品入口及 owner/receiver 落点归 IR34-03、IR34-06、IR34-20～IR34-21、IR34-28、IR34-31。 |
-| 规格 §8 权威写/待办行 | `session-send/run-cancel/uncertain-resolution/confirmation-resolve/permission-persist/trust-manage/conversation-manage/conversation-window/conversation-metadata/task-list/advancement/workscene-manage/workscene-switch/schedule-manage/schedule-run/schedule-timer/memory-write/skill-manage/skill-usage/segment-transition/orchestration-child/channel-inbound/channel-delivery` 逐行归 IR34-08、IR34-09、IR34-24；fence 后只允许已接受义务的有限收束。 |
-| 规格 §8 只读/路由行 | `confirmation-read/session-observer/global-list-read/conversation-read/memory-read/status-read/light-inference` 逐行归 IR34-23～IR34-24；切换后只解析 current anchor，且不得借只读入口取得写能力。 |
-| 规格 §8 本地/负边界行 | `environment-select/workspace-binding/runtime-lifecycle/advancement-evidence/runtime-config` 逐行归 IR34-09、IR34-24、IR34-30、IR34-35；仅迁移已接受的耐久义务，不迁环境、路径、秘密或本地配置。 |
-| 规格 §8 `shutdown` / `recovery-backup` | `shutdown`→IR34-29；`recovery-backup` 仅作 Unit 33 current verified full checkpoint 上游接缝→IR34-07/IR34-32/IR34-35。 |
-| 规格 §10 workload 终结表全部行 | run/job 的 committed、两类 cancelled、两类 failed/expired、uncertain→terminal、uncertain→queued、uncertain pending，以及 system job/control/evidence/orchestration-node 各行逐项归 IR34-09、IR34-24；本单元不改变既有 lease 终结语义。 |
-| 规格 §12 不变量行 1～18 | `1/4/8`→IR34-17～IR34-23；`2/3/9/13/15/17`→IR34-08～IR34-09、IR34-18～IR34-24、IR34-27；`5/11/12/14`→IR34-28/32/33；`6/10/16`→IR34-03/16/22/30/32；`7`→IR34-05/21/27；`18`→IR34-09/13/29。全部只取 planned migration 的直接交界，不重审上游状态机。 |
+| always-online-and-local-execution-requirements.md §一 | 适用 | 持续在线值班设备、真实本机执行与灾后恢复核心目标归入 IR35-01、IR35-24、IR35-33。 |
+| 需求文档 §二 | 不适用 | 外部回答汇总是需求形成材料，不独立产生 Unit 35 规范。 |
+| 需求文档 §三 | 不适用 | 历史实现核验不替代当前灾难恢复合同。 |
+| 需求文档 §四 | 不适用 | 历史架构审核过程不产生当前字段、状态或验收门禁。 |
+| 需求文档 §五 | 不适用 | 历史现状归纳不产生本单元义务。 |
+| 需求文档 §六 | 适用 | 值班设备可替换、用户拥有恢复控制权和真实设备环境不迁移归入 IR35-01、IR35-08、IR35-24。 |
+| 需求文档 §七 | 适用 | 最小完整产品、正确性/安全性/体验优先级归入 IR35-01、IR35-33、IR35-37。 |
+| 需求文档 §八 | 不适用（直接） | 本章描述 planned migration 的目标列表与迁居阶段；Unit 35 仅继承“设备名、可行动状态、零内部术语”的通用体验，由总纲 §11 和 IR35-33 承载，不把 planned source 流程并入 DR。 |
+| s2-security-supply-chain-review.md「范围说明」 | 适用（兼容边界） | 当前交付修改 `@zhixing/mesh` trust/checkpoint/native bridge；只核对既有受管依赖边界，不宣称仓库级供应链结论，归入 IR35-35。 |
+| S2 评审「裁决」 | 适用（兼容边界） | 三项生产依赖与 PAKE 开发依赖用途不得因恢复入口漂移，归入 IR35-06、IR35-29、IR35-35。 |
+| S2 评审「强制门禁」 | 适用（兼容边界） | 精确锁版、owner、PAKE 非生产隔离与 package import/export/build 门禁归入 IR35-35～IR35-36。 |
+| S2 评审「接受依据」 | 适用（兼容边界） | 恢复不新增密码依赖，不改变 TLS/证书/PAKE 边界，归入 IR35-06、IR35-29、IR35-35。 |
+| distributed-runtime-charter.md「当前版本交付原则」 | 适用 | 最小完整范围、架构优先和禁止未来框架预建归入 IR35-01、IR35-37～IR35-38。 |
+| 总纲「一、架构概况」「二、凝练需求」 | 适用 | 单一产品、唯一 current anchor、恢复控制权和“值班/干活”语言归入 IR35-01、IR35-24、IR35-33。 |
+| 总纲 §1 架构结论 | 适用 | 唯一权威、同一协议内核、source-less 恢复后单 current owner 归入 IR35-12～IR35-18、IR35-24。 |
+| 总纲 §2 角色模型 | 适用 | eligible anchor target、current issuer、paired receiver、pending-reenroll 与未启用角色 exact-set 归入 IR35-03、IR35-24、IR35-34。 |
+| 总纲 §3 包与依赖边界 | 适用 | core/mesh/providers/server/CLI 分层、组合根职责与无环依赖归入 IR35-35～IR35-38。 |
+| 总纲 §4 设备网格与安全协议 | 适用 | 恢复根、trust event/record、签名、设备撤销、issuer/epoch 换代归入 IR35-04、IR35-13～IR35-16、IR35-25～IR35-29。 |
+| 总纲 §5 权威矩阵与执行清单 | 适用 | 全局/会话/内容/执行资产恢复，环境/秘密/缓存排除归入 IR35-08～IR35-12、IR35-19。 |
+| 总纲 §6 run 派发协议 | 适用（消费闭包） | 不改 run 协议；只审 installation 后既有 assignment/final/interaction 等义务归新代际且旧 epoch 拒绝，归入 IR35-17～IR35-18。 |
+| 总纲 §7 环境模型与路由 | 适用（负边界） | 环境事实、workspace 路径和设备缓存不得进入 checkpoint/catalog/import，归入 IR35-08、IR35-29。 |
+| 总纲 §8 双平面通信 | 适用（传输边界） | directory/paired target 与认证 mesh 只传输同一冻结恢复身份，不成为事实源，归入 IR35-03、IR35-05～IR35-07、IR35-22。 |
+| 总纲 §9 离线本地会话、收编与迁居 | 适用（最高直接依据） | 人工 DR 的 inventory、真解封、baseline、私有导入、原子 commit、generation closure、credential exposure、tombstone、root lifecycle、pending-reenroll 逐项归入 IR35-02～IR35-28。planned/conversation 分支只作严格模式隔离。 |
+| 总纲 §10 凭据与服务生命周期 | 适用（Unit 35 部分） | compromised/rotated exposure 与逐 binding 路由阻断直接适用；托管服务/卸载属 Unit 36～38，归入 IR35-19～IR35-21、IR35-37。 |
+| 总纲 §11 产品体验设计 | 适用 | 用户明确选备份、无回显回读、旧设备隔离确认、恢复码管理及零术语错误归入 IR35-02、IR35-23、IR35-33。 |
+| 总纲 §12 故障矩阵 | 适用 | 旧锚点丢失、伪 verification、网络/磁盘/响应丢失、重启、错身份、旧根与凭据泄露归入 IR35-04～IR35-32、IR35-36。 |
+| 总纲 §12.1 S9 恢复根与备份状态边界 | 适用（上游合同） | 只消费 current verified full checkpoint、真解封与 root-activation；不得改写 Unit 33 retention/readiness，归入 IR35-03～IR35-08、IR35-35。 |
+| 总纲 §13 不变量清单 | 适用 | 唯一权威、旧 epoch 永拒、原子事实、秘密隔离、资源治理、零未启用 owner 等归入 IR35-09～IR35-32、IR35-34～IR35-36。 |
+| 总纲 §14 实施序列 | 适用（Unit 35） | S9 Unit 35 全部适用；Unit 36～38 不适用，归入 IR35-01、IR35-37。 |
+| 总纲 §15 验收纲 | 适用 | 正常、边界、故障、恢复、对抗、双拓扑与零认知恢复演练归入 IR35-32～IR35-36。 |
+| specification.md §1.1 | 适用 | request/transfer/checkpoint/target/root identity、anchor/trust epoch、时间与幂等归入 IR35-02～IR35-05、IR35-13、IR35-30。 |
+| 规格 §1.2 | 适用 | JCS、schema/version、digest/signature/ref 与 checkpoint/trust/commit 摘要域归入 IR35-04～IR35-16、IR35-29～IR35-30。 |
+| 规格 §1.3、§1.3b | 适用（兼容边界） | 新合同从 core 权威导出，既有冻结符号不复制；S1 符号清单本身不新增 Unit 35 义务，归入 IR35-35。 |
+| 规格 §1.4 | 适用 | DisasterRecoveryCommand/Result、AnchorTransferCommit、HomeTrustRecord 等总纲名与实现名全等，归入 IR35-04、IR35-13～IR35-15。 |
+| 规格 §1.5 | 适用 | unauthorized/conflict/unavailable/not-ready 等稳定内部分类映射为安全公开错误，归入 IR35-04、IR35-30、IR35-33。 |
+| 规格 §2.1 | 适用 | recovery-root establish/rotate/invalidate、domain-reset、issuer-transition、DR commit、HomeTrustRecord 严格合同归入 IR35-13～IR35-16、IR35-25～IR35-28。 |
+| 规格 §2.2 | 适用（换代边界） | 旧 capability/lease/ticket 不得恢复写权；新代际按既有激活事实重建，归入 IR35-17～IR35-18、IR35-29。 |
+| 规格 §2.3 | 适用 | 恢复主秘密、issuer key 与第三方秘密只进 SecretStore、锁定时 fail-closed，归入 IR35-02、IR35-06、IR35-19～IR35-21、IR35-29。 |
+| 规格 §2.4 | 适用（直接） | active/compromised/rotated exposure、latest projection、设备撤销清单与 binding route guard 归入 IR35-19～IR35-21。 |
+| 规格 §2.5 | 适用（复用边界） | pairing/reenroll、认证 mesh、strict receiver、rendezvous guard 与连接重放归入 IR35-22、IR35-28～IR35-29、IR35-34。 |
+| 规格 §3.1、§3.2、§3.2b | 适用（恢复覆盖） | SessionState/GlobalState/DeferredIntent 已提交事实和待办须由 composite authority 与 post-install consumer 完整恢复，归入 IR35-09～IR35-12、IR35-17。 |
+| 规格 §3.3 | 适用（负边界） | EnvironmentPort 与原始设备路径不恢复、不迁移，归入 IR35-08、IR35-29。 |
+| 规格 §3.4、§3.4b | 适用 | 业务租约按新 epoch 恢复/拒绝；inventory/unseal/import/cleanup 使用唯一 storage governor、可取消且 permit 不跨网络/锁，归入 IR35-17、IR35-22、IR35-31。 |
+| 规格 §3.5～§3.8 | 适用（消费与安全边界） | completion、dispatch/submission/mirror/control guard 的既有 pending/终态只由当前 owner 恢复，归入 IR35-17～IR35-18、IR35-29。 |
+| 规格 §4.1 | 适用 | 唯一 `AuthorityCommitLog`、原 envelope 解码、composite base、单 envelope/单 sync 原子发布与投影重建归入 IR35-07、IR35-09～IR35-18。 |
+| 规格 §4.2 | 适用 | artifact 先耐久后引用、private store、retained exact-set、共享 CAS 提升和缺件拒绝归入 IR35-05～IR35-11。 |
+| 规格 §4.3 | 适用 | DR transfer、trust、checkpoint、exposure、installation、pending 记录严格单调可重放，归入 IR35-04、IR35-12～IR35-22、IR35-25～IR35-28。 |
+| 规格 §4.3 delivery 生命周期 | 适用（消费闭包） | 不改十五行 delivery 状态机；只核对其未终态义务随 installed generation 归新 owner，归入 IR35-17～IR35-18。 |
+| 规格 §4.4 | 适用（兼容边界） | 恢复不得重判 staged/publish 事实，只恢复已提交 authority/pending，归入 IR35-09、IR35-17。 |
+| 规格 §4.5 | 适用 | private staging abort 清理、共享 ref 保留、tombstone 与 exposure 历史不可误删，归入 IR35-11、IR35-16、IR35-21～IR35-22。 |
+| 规格 §5.1～§5.7 | 适用（入口/消费/终态边界） | 控制、派发、提交、status/final/stream/evidence 均不得绕过 current-owner 与新 generation；不改既有 wire，归入 IR35-17～IR35-18、IR35-24、IR35-29。 |
+| 规格 §6.1、§6.2、§6.2b | 适用（安装后消费边界） | 不重审各行业务状态机；逐行确认六类未终态 obligation 在 post-install 有唯一恢复 owner，旧 epoch 不可继续，归入 IR35-17～IR35-18、IR35-32。 |
+| 规格 §6.3 | 适用（直接枚举行） | DR 行 0b、2、3b、5b、6、7、8 分别归入 IR35-04～IR35-16；planned/conversation 行只用于模式隔离与共用 primitive 边界，归入 IR35-04、IR35-35。 |
+| 规格 §6.4 | 适用（逐行） | 行 1～5 是目标 active/ready 前置；行 6～9 是撤销/旧设备安全域换代；行 10～11 是 domain-reset→pending-reenroll→fresh reenroll，归入 IR35-03、IR35-16、IR35-19、IR35-25～IR35-28、IR35-32。 |
+| 规格 §7 | 适用（六类逐行） | 全局、会话、会话资产、环境/秘密、执行资产、非权威缓存六类分别决定恢复/禁止恢复/重建与完整 checkpoint coverage，归入 IR35-08～IR35-11、IR35-29。 |
+| 规格 §8 | 适用（入口 exact-set） | `disaster-recovery`、`recovery-root-lifecycle` 直接适用；`recovery-backup`/`device-trust` 为上游与 reenroll；其余 registry 行用于反向核对 post-install/current-owner 消费面，归入 IR35-02、IR35-17～IR35-18、IR35-23～IR35-28、IR35-34。 |
+| 规格 §9 | 适用（拓扑兼容） | anchor/current-owner 恢复后能力矩阵不扩权；executor-only/local-domain/纯 surface 不得成为 DR owner，归入 IR35-18、IR35-24、IR35-29、IR35-34。 |
+| 规格 §10 | 适用（既有资源终态边界） | 恢复后的业务 lease 只按原状态机处理，不伪造重放授权，归入 IR35-17～IR35-18、IR35-31。 |
+| 规格 §10.1 | 适用（直接资源边界） | inventory、unseal、import、CAS、native I/O、cleanup 的容量、取消、stop、锁序与物理步骤上界归入 IR35-05～IR35-07、IR35-22、IR35-31。 |
+| 规格 §11 | 适用 | 恢复/撤销/换密钥/双重灾难文案与用户选择归入 IR35-02、IR35-19、IR35-23、IR35-25～IR35-28、IR35-33。 |
+| 规格 §12 | 适用 | 相关不变量、6.3/6.4 逐边、签名篡改、崩溃点、双拓扑与零副作用证据归入 IR35-29～IR35-36。 |
+| 规格 §13 | 不适用（独立新增文档） | 模块文档影响清单没有 Unit 35 独立条目；当前总纲/规格同步由 D35-09 与 IR35-35 判定，不据此扩写其他模块文档。 |
+| 规格 §14 | 不适用 | S1 开工清单已完成且不属于 Unit 35。 |
+| 规格 §15 | 适用（Unit 35） | 通用提交纪律、第 35 项及 33→35 前置顺序全部适用；第 36～38 项不适用，归入 IR35-01、IR35-35～IR35-37。 |
+| unit-development-workbench.md 静态规则、§一～§三 | 适用（身份/范围/流程来源） | 确认当前 Unit 35、最小完整边界、架构空洞裁决与已完成开发状态；不产生独立运行时合同，归入 IR35-01、IR35-37～IR35-38。 |
+| 开发清单 D35-01 | 适用 | strict DR mode、command/result、状态、identity、commit/abort 归入 IR35-04、IR35-13～IR35-16、IR35-30。 |
+| 开发清单 D35-02 | 适用 | source-less inventory、公开投影与用户选择归入 IR35-02～IR35-03、IR35-23、IR35-33。 |
+| 开发清单 D35-03 | 适用 | candidate claim、真解封、现场 verification、baseline 与异常归入 IR35-03～IR35-07、IR35-30～IR35-32。 |
+| 开发清单 D35-04 | 适用 | ReadyProof、catalog、private import、retained closure 与 CAS 归入 IR35-08～IR35-11、IR35-22。 |
+| 开发清单 D35-05 | 适用 | root-signed commit、atomic install、old issuer revoke、exposure compromised 归入 IR35-12～IR35-16、IR35-19。 |
+| 开发清单 D35-06 | 适用 | installed generation、consumer closure、current-owner 路由、tombstone 归入 IR35-16～IR35-18、IR35-23～IR35-24。 |
+| 开发清单 D35-07 | 适用 | rotate/invalidate/domain-reset-establish/pending-reenroll 归入 IR35-25～IR35-28。 |
+| 开发清单 D35-08 | 适用 | exposure lifecycle、per-binding guard、第三方 rotation readiness 归入 IR35-19～IR35-21。 |
+| 开发清单 D35-09 | 适用 | CLI UX、topology/S7 exact-set、架构同步与必要证据归入 IR35-23、IR35-33～IR35-38。 |
+| 当前完整交付物 54 路径 | 适用（反向闭包） | core 8、mesh 9、CLI 29、providers 1、server golden 1、S7 2、架构 2、工作台 2 均须归入 IR35-01～IR35-37；路径新增、遗漏、重复或越界由 IR35-38 单独判定。 |
 
 ### 交付路径反向覆盖
 
-| 路径组 | 当前交付角色 | 归入审查项 |
-| ------ | ------------ | ---------- |
-| `packages/core` 5 路径 | `authority/{commit-log,index}.ts`、`contracts/identity.ts`、`protocol/{anchor-transfer,anchor-transfer.test}.ts`：strict identity/result、append fence、composite prefix install、exports 与协议证据各恰归一次。 | IR34-02、IR34-06、IR34-08～IR34-12、IR34-17～IR34-19、IR34-27、IR34-32～IR34-34 |
-| `packages/cli` 16 路径 | `src/index.ts`；runtime duty command/facade及测试；serve 的 first-party router、两生产根、bootstrap store、planned owner/target/mesh/测试与 setup delivery。source/target、private import、phase、current-owner、lifecycle、CLI/DTO 与真实故障证据各恰归一次。 | IR34-03～IR34-34、IR34-36 |
-| `packages/server` 2 路径 | `src/context.ts`、`src/rpc/methods/__tests__/server.test.ts`：management context、公开 DTO consumer 与直接证据。 | IR34-23、IR34-27、IR34-31、IR34-33～IR34-34 |
-| 架构/需求/规格 3 路径 | `always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`：planned 边界、字段、状态机、landing row、用户旅程与验收。 | IR34-01～IR34-36 |
-| S7 2 路径 | `scripts/s7-entry-coverage.mjs`、`scripts/s7-entry-coverage.test.mjs`：owner/receiver/role/order/RPC exact-set 与真实装配变异。 | IR34-28、IR34-33～IR34-36 |
+| 路径组 | 数量 | 当前路径（每条只出现一次） | 归入审查项 |
+| ------ | ---- | -------------------------- | ------------ |
+| CLI 公开入口与用户旅程 | 6 | `packages/cli/src/index.ts`、`packages/cli/src/serve/backup-command.ts`、`packages/cli/src/serve/backup-command.test.ts`、`packages/cli/src/serve/recovery-public-errors.test.ts`、`packages/cli/src/setup-delivery.ts`、`packages/cli/src/__tests__/setup-delivery.test.ts` | IR35-02、IR35-16、IR35-23、IR35-25～IR35-28、IR35-30、IR35-33～IR35-36 |
+| CLI disaster authority、candidate、inventory 与 target | 8 | `packages/cli/src/serve/disaster-recovery-authority.ts`、`packages/cli/src/serve/disaster-recovery-candidate.ts`、`packages/cli/src/serve/disaster-recovery-command.ts`、`packages/cli/src/serve/disaster-recovery-installation.ts`、`packages/cli/src/serve/disaster-recovery-inventory.ts`、`packages/cli/src/serve/disaster-recovery-inventory.test.ts`、`packages/cli/src/serve/disaster-recovery-target.ts`、`packages/cli/src/serve/disaster-recovery-target.test.ts` | IR35-03～IR35-16、IR35-22、IR35-24、IR35-29～IR35-32、IR35-35～IR35-36 |
+| CLI trust、pairing 与 root lifecycle | 8 | `packages/cli/src/serve/mesh-bootstrap-store.ts`、`packages/cli/src/serve/mesh-control-plane.ts`、`packages/cli/src/serve/mesh-pair-command.ts`、`packages/cli/src/serve/mesh-pair-command.test.ts`、`packages/cli/src/serve/paired-checkpoint-runtime.ts`、`packages/cli/src/serve/recovery-root-activation.ts`、`packages/cli/src/serve/recovery-root-establishment-runtime.ts`、`packages/cli/src/serve/recovery-root-lifecycle.ts` | IR35-06～IR35-07、IR35-15、IR35-18、IR35-24～IR35-31、IR35-34～IR35-36 |
+| CLI runtime、installed generation 与 exposure 装配 | 7 | `packages/cli/src/serve/credential-exposure-authority.ts`、`packages/cli/src/serve/credential-exposure-authority.test.ts`、`packages/cli/src/serve/mesh-runtime-assembly.ts`、`packages/cli/src/serve/mesh-runtime-bootstrap.ts`、`packages/cli/src/serve/planned-anchor-transfer.ts`、`packages/cli/src/serve/target-wide-anchor-candidate.ts`、`packages/cli/src/startup.ts` | IR35-05、IR35-14、IR35-17～IR35-22、IR35-24、IR35-29～IR35-31、IR35-34～IR35-36 |
+| core authority、严格合同与 reducer | 8 | `packages/core/src/authority/commit-log.ts`、`packages/core/src/authority/index.ts`、`packages/core/src/contracts/identity.ts`、`packages/core/src/contracts/records.ts`、`packages/core/src/contracts/schema.ts`、`packages/core/src/protocol/anchor-transfer.ts`、`packages/core/src/protocol/anchor-transfer.test.ts`、`packages/core/src/protocol/index.ts` | IR35-04、IR35-07～IR35-16、IR35-19、IR35-30、IR35-32、IR35-35～IR35-36 |
+| mesh 冻结物理根与 child bridge | 3 | `packages/mesh/native/checkpoint_child_bridge.cc`、`packages/mesh/native/checkpoint_child_bridge.cs`、`packages/mesh/src/checkpoint-child-bridge.ts` | IR35-03、IR35-10～IR35-11、IR35-22、IR35-29、IR35-31、IR35-35～IR35-36 |
+| mesh checkpoint capture、inventory 与 paired target | 4 | `packages/mesh/src/__tests__/full-authority-checkpoint.test.ts`、`packages/mesh/src/checkpoint-target.ts`、`packages/mesh/src/checkpoint.ts`、`packages/mesh/src/paired-checkpoint-target.ts` | IR35-03、IR35-06、IR35-08、IR35-10～IR35-11、IR35-22、IR35-29～IR35-31、IR35-35～IR35-36 |
+| mesh trust 与 credential exposure | 2 | `packages/mesh/src/credential-exposure.ts`、`packages/mesh/src/trust-chain.ts` | IR35-07、IR35-19～IR35-21、IR35-25～IR35-30、IR35-35～IR35-36 |
+| provider credential 读取守卫 | 1 | `packages/providers/src/credentials-loader.ts` | IR35-20～IR35-21、IR35-29、IR35-35 |
+| server canonical registry golden | 1 | `packages/server/src/__tests__/__goldens__/canonical-registry.golden.json` | IR35-23、IR35-33～IR35-34、IR35-36 |
+| 既有 S7 descriptor/validator 与变异证据 | 2 | `scripts/s7-entry-coverage.mjs`、`scripts/s7-entry-coverage.test.mjs` | IR35-24、IR35-29～IR35-30、IR35-34～IR35-36 |
+| 权威架构与可执行规格 | 2 | `research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md` | 由上方逐章来源表归入 IR35-01～IR35-38 |
+| 当前单元工作台 | 2 | `research/design/workbench/unit-development-workbench.md`、`research/design/workbench/unit-submit-review.md` | 前者归入 IR35-01、IR35-37～IR35-38；后者只承载本清单与 IR35-38 的路径闭包，不作为运行时事实证据 |
+| 上一单元收口记录（明确排除） | 2 | `research/design/workbench/unit-review-checklists/distributed-runtime/unit-34.gen-1.md`、`research/design/workbench/unit-review-ledgers/unit-34.gen-1.md` | 已分别归档 Unit 34 清单与记录 Unit 34 封版事实；不属于 Unit 35 功能、测试或验收义务，不计入上方 54 条，只有文件身份或内容越界进入 Unit 35 时才重开范围判定 |
 
 ### 审查项
 
-> `[~]` 行的“证据记录”保留上一轮审查事实，仅供定位重审输入；因本轮合同、生产实现、装配或证据已经变化，它们不代表当前冻结交付物的通过/失败结论。后续独立审查必须基于当前指纹重新二元判定。
-
-| 编号 | 状态 | 审查对象 | 有限审查范围与通过条件 | 证据记录 |
-| ---- | ---- | -------- | ---------------------- | -------- |
-| IR34-01 | [x] | 单元身份、边界与完整交付物 | 冻结当前 28 个非工作台路径并逐一反绑 D34-01～D34-08；只交付 planned current-anchor 迁居，不得混入 Unit 35 disaster/source-less recovery、Unit 36～38 生命周期或通用迁移/同步框架。 | 当前指纹 `6415cc1fb0e23841d0c7093f8a1dbd3868ff39e9` 工作区干净；HEAD 的 28 个非工作台路径与清单 core 5、CLI 16、server 2、架构 3、S7 2 分组全等。实现只开放 planned 迁居及既有 Unit 33 接缝，未发现后继恢复、连续同步或通用框架越界。 |
-| IR34-02 | [x] | strict 合同、身份与摘要关联 | `ReadyProof`、`AuthorityCatalog`、planned `AnchorTransferCommit/Abort/Command/Result/TransferRecord` 与 `SourceFreezeProof` 必须是 exact-key 判别联合；request/transfer/source/target/epoch/ref/offset/commit/abort 逐字段反绑 originating command，JCS/digest/signature/schema/version 全等，planned/disaster/conversation 混型在副作用前拒绝。 | 复核 core strict decoder、mesh client/server 与 journal reducer：命令和结果先做 exact-key、schema/version、mode/state、签名、digest、originating request/transfer/device/epoch/ref/offset 全字段关联，再进入 I/O 或日志副作用；planned/disaster/conversation 混型稳定拒绝，未见 P0/P1。 |
-| IR34-03 | [x] | 目标资格与 readiness | 候选/list/prepare 只接受另一台已配对、active、启用 anchor 角色的设备；ReadyProof 同时冻结 current home/trust generation、角色、配置能力、protocol/asset/service revision、SecretStore unlocked、有效期与目标身份，任一漂移/过期/离线给出稳定拒绝且零 prepared。 | 候选、summary、ready 与 prepare 均反绑另一 active anchor-role 成员、current home/trust chain、角色、配置能力、protocol/asset/service revision、SecretStore unlocked、期限和目标身份；漂移、过期、离线在 prepared 写前稳定拒绝。并发单飞缺口单列 IR34-04/06，不改变本项资格判定。 |
-| IR34-04 | [~] | transfer issuer key 生命周期 | 目标 issuer key 必须在目标本机按 transfer 单飞生成、SecretStore 回读验真并以 possession proof 绑定 ReadyProof；prepare replay 同 key，pre-commit abort 只删该未激活 key，commit 原子激活后按 issuerKeyId 重载，私钥零 wire/log/status/error，设备 identity 与 issuer identity 不混同。 | P1：迟到 release 已改为从稳定 context 重读 per-transfer journal，旧反证关闭；但 source 在本地 `prepareCandidate()` 已耐久 prepared、remote `apply(prepare)` 尚未发生的合法切点取消时，只能写 signed abort。target 此时只有 claim/ReadyProof/key、无 per-transfer phase，`#abort()` 经 `#requiredPrepared()` 拒绝，因而未激活 issuer key 与 target-wide claim 无法终结并永久阻断后续迁居。 |
-| IR34-05 | [x] | 有限 mesh transport 与认证 | ready/transfer/source-range 只经现有认证 mesh 与 negotiated service；连接 peer、current source、prepared target、签名 keyId、phase exact-set 全等，未知/错方向/错设备/错命令在 target/source I/O 前拒绝，传输断连只重放同一 durable identity且不产生第二权威。 | ready/target/source-range 三个 negotiated service 均在 handler 前验证 authenticated peer、current source、prepared target、签名 keyId、phase 与 range allow-list；未知服务、错方向/设备/签名/命令零业务 I/O，传输不持第二权威，未见 P0/P1。 |
-| IR34-06 | [~] | prepare、竞争与双端 durable identity | source/target `prepared` 必须共享稳定 requestId/transferId/source/target/sourceEpoch/nextEpoch/ready/transition；同载荷 exact replay，异载荷冲突；同一 home 同时至多一项非终态迁居，竞争在关闭准入或创建第二 issuer/staging 前拒绝。 | P1：source candidate terminal 与首次 prepared 已合入同一 `AuthorityCommitLog` 投影事务，旧竞争反证关闭；但双端 prepared 仍有缺口：source durable prepared 先于 remote prepare，二者之间的取消生成 signed abort，而 target 无 prepared phase 不接受该 abort。source 已 aborted、target claim 仍 nonterminal，双端 durable identity 不能唯一收敛。 |
-| IR34-07 | [x] | Unit 33 checkpoint 前置接缝 | source 只能消费 current root/current generation 的 verified full recovery checkpoint，或以 stable transfer request 复用既有 owner 强制取得；checkpoint envelope digest 仅作安全保障，不可替代 planned export/catalog/proof，未验证/旧 root/owner unavailable 不得进入 fence/commit。 | 已核对 `ensureRecoveryCheckpoint` 与 Unit 33 owner/status 接缝：仅复用 current generation 的 verified full checkpoint，缺失时以稳定 transfer request 调既有 force；返回的 envelope digest 只进入 prepared 安全前置，后续仍独立冻结/export/catalog/proof。未验证、旧代或 owner unavailable 不会进入 fence，未见 P0/P1。 |
-| IR34-08 | [x] | source fresh admission 全写面栅栏 | 从 fence 线性化点起，第一方 RPC、channel input、session/global/task/intent、新 confirmation/interaction 生产、scheduler timer/manual trigger、新 delivery 生产及所有 `AuthorityCommitLog` 旁路均不得产生 fresh 权威事实；IR34-09 已耐久接受的 interaction/final/delivery 等只可走原身份有限收束，另只允许该 transfer 的 recovery/commit/abort 记录；abort 前无 durable fence 时可安全恢复。 | stopAccepting 先拒 channel ingress并暂停 scheduler，drain 后 append guard 在取得 source checkpoint 前串行安装；guard 只允许同 transfer、同 envelope closure 及 commit 的 trust/current entries，其余 RPC/global/task/intent/direct-log fresh append 均在日志锁内拒绝。durable abort 才清 guard并恢复原 owner/loops，未见 fresh 旁路。 |
-| IR34-09 | [x] | accepted work drain 与终态诚实性 | fence 前已接受的 conversation/user job/system job、queued/active run、interaction/confirmation、staged publish、final/delivery/outbox/uncertain 必须逐类收束到可证明终态或作为明确 pending obligation 冻结；timeout/abortAll/flush/recovery-loop 失败不得伪造 drain 成功或丢弃义务。 | lifecycle 在 stopAccepting 后执行 conversation abort/drain并复核 `hasActiveWork()`、executor job drain、delivery flush，再停止 recovery loop；不可判定 active work 直接阻止 fence。剩余 assignment/interaction/final/delivery/intent/confirmation 从同一日志 checkpoint 投影为 pending，不伪造终态。 |
-| IR34-10 | [x] | 唯一 source prefix 与 SourceFreezeProof | admission durable closed 且 IR34-09 完成后，source 只从同一 `AuthorityCommitLog` 取得一个 `{logId,lsn,frameEndOffset,prefixDigest}`；snapshot、export、catalog 与 `SourceFreezeProof(scope:"anchor")` 必须全等绑定同一 prefix，追加/坏尾/缺 ref/错 epoch 时 created/frozen/target import 零错误推进。 | guard 安装后取得唯一 DurableLogCheckpoint；分页 export、catalog.source、closure 与 signed `SourceFreezeProof(anchor)` 全等反绑 logId/lsn/frameEndOffset/prefixDigest/source epoch，target 再验证 canonical prefix与页尾。追加、坏尾、错 epoch/ref 均不能推进，未见 P0/P1。 |
-| IR34-11 | [x] | AuthorityCatalog 六类覆盖 | 逐行核对规格 §7：global、conversation authority/content、execution assets、trust/current anchor 与全部 pending obligations 完整；环境事实、SecretStore、workspace raw path、设备/非权威缓存不可表示。streams、coverage、record/ref/count/digest canonical exact-set，少列、多列、重复、乱序、空置真实义务均 fail-closed。 | builder 从同一冻结前缀逐 envelope 统计 stream/count/digest、authority records、retained refs、trust/current 与六类 coverage；`PendingObligationTracker` 按 assignment/interaction/final/delivery/intent/confirmation 的生产记录和终态增删 exact-set。类型不表示环境、秘密、raw path或缓存；target 重算/反绑 catalog，未见少列或空置真实义务。 |
-| IR34-12 | [x] | planned export 与 retained artifact 闭包 | 独立 planned export 只含 IR34-10 prefix 的 canonical commit envelopes，catalog 的 authorityRecords/retainedArtifacts 与真实引用闭包全等；artifact 先耐久后引用，共享/嵌套/大资产去重且 bytes/digest 全验，恢复 checkpoint 内容不得冒充 export，缺件不得 freeze/import/commit。 | source export 只序列化冻结前缀原 envelope并以 lifecycle index 枚举去重 retained exact-set；target freeze/import 在 transfer-private store逐 ref 拉取并验 bytes/digest/coverage，缺件或恢复 checkpoint 混绑不能写 imported。共享 CAS 仅在 commit 前从已验私有对象幂等提升，未见 P0/P1。 |
-| IR34-13 | [x] | 容量治理与有界传输 | export、source range、target pull/private staging、promotion/install 每个物理步骤必须使用同一设备 `storageMaintenance` governor 与 lifecycle abort；buffer/part 固定上界，网络等待零 permit，permit 不跨 authority/store/lifecycle 锁；容量拒绝、磁盘满、取消/stop 要么零事实，要么保留唯一可重驱事实。 | export 以固定 commit page 落 ArtifactStore，manifest 受 header 上界；source range、target decode/write、promotion read/write 与 install 分别进入同一 governor。target 先完成网络 range 再持 permit 写本地，permit 不跨网络或外层锁；runtime AbortSignal/closing promise覆盖端口与恢复，失败保留 durable phase，未见 P0/P1。 |
-| IR34-14 | [x] | target 私有 staging 与冻结验真 | target 只在该 transfer 私有 authority root/journal/ArtifactStore 接受 export/catalog/retained refs；range 连续且关联原 ref/offset/length，完整 bytes/digest/catalog/source-prefix/coverage exact-set 验真后才写 frozen/imported；部分、重复、重排、响应丢失和重启不串 transfer、不使共享 CAS/当前 authority 可见。 | `#context(transferId)` 固定独立 transfers/<id> 私有 root、ArtifactStore、partials/promotion-partials 与 journals/<id>；range 反绑 ref/offset/length并由 resumable receiver 校验连续性/digest。export/catalog/pages/retained exact-set 全验后才 imported，部分、重排、响应丢失和重启不进入共享 authority。竞争单飞缺口归 IR34-06。 |
-| IR34-15 | [~] | import、共享 CAS 提升与清理边界 | imported 必须反绑 frozen export/catalog，promotion 对已有/共享 digest 幂等且不覆盖异 bytes；pre-commit abort 仅清私有 staging和未激活 key，绝不删共享业务 CAS；commit 后 retained refs 仍有唯一 owner，部分 base import/progress 可重驱且不形成可服务的半 authority。 | imported 反绑 frozen checkpoint/catalog/proof与完整 retained refs；promotion 先 `has(ref)`，否则由 digest-verifying receiver 幂等写共享 CAS，异 bytes 拒绝。abort terminal replay持续清私有 refs/key/root且不删共享 store；base 在 pointer sync 前不可见。post-install consumer缺口另归 IR34-19/21/24。 |
-| IR34-16 | [~] | commit 前最终复验 | source 签 commit 前重新验证 current issuer/home/trust chain、ReadyProof 未过期且 capability/revision 未漂移、target/import/catalog/freeze/transition 全等、next epochs 单调；任一改变保持 source fenced 或可安全 abort，零 signed commit。 | existing-transfer `ready` 在目标 lifecycle 内重读完整 snapshot、secret/key并更新同 journal durable reservation；source commit前重调同 transfer ready，要求 proof digest/expiry/current snapshot全等，target commit再核对 reservation。trust/catalog/freeze/transition/epochs同步复验，revision change与 reservation互斥，未见响应窗口旁路。 |
-| IR34-17 | [x] | source 唯一原子 commit 切点 | 当前 issuer 只能在 source 同一 `AuthorityCommitLog` envelope/一次 sync 原子追加唯一 signed planned commit，并使该 commit 所绑定的 prepared issuer-transition、next anchor/trust epochs 与 current-anchor 投影共同生效；不得另造第二切换事实。重复同决定零追加，异决定冲突；该 sync 后 append fence 永久 committed，旧 source 不因 target 未应答恢复。 | owner 在 journal 单次 transaction/envelope 同写 signed `anchor-committed`、prepared issuer-transition 与 `planned-anchor-source-committed` current projection；同决定回放零追加、异决定冲突。sync 后 committed fence永久保留且 `onSourceCommitted`先更新 resolver，target响应不明不恢复旧 source，未见第二切点。 |
-| IR34-18 | [x] | authority base 导入与不可见性 | target 导入原 source commits 时必须保持 source LSN/envelope identity、stream exact-set和引用在场，可幂等断点续做；在最终安装 envelope sync 前，导入进度、records、投影和旧 current-owner 均不可被公开服务当作已接管 authority，冲突 progress fail-closed。 | target保留 source export 的原 envelope/LSN/digest并只从私有 artifacts提供 async source；`installPlannedAnchorPrefix` 在 log 锁内重建候选 WAL、逐封包验证原前缀，再以原子 rename+directory sync 一次发布 source base和installation envelope。sync 前 live reader/projection不可见候选，冲突/坏尾 fail-closed。 |
-| IR34-19 | [~] | target 原子安装与服务开放 | target 逐字段验证同一 commit/transition/catalog/export/issuer key 后，在一个本地 `AuthorityCommitLog` envelope 原子发布 trust event/record、planned install、authority base/current anchor/next epochs；sync 后才激活 issuer、reconcile trust和开放服务，sync 后无决定性外部 I/O，效果后响应丢失只 exact replay。 | P0：conversation 的旧缓存已显式换代重建，原反证关闭；但 live target 的 `DeliveryAuthority` 在安装前已持旧 WAL projection/cursor，`installPlannedAnchorPrefix()` 原子替换文件后仅重置 log 自身 durable projection，不重置该 consumer。post-install `flush()` 会以旧 prefix cursor 读取新 composite WAL并稳定报 `commit-log-corrupt`，source 已提交而 target 无法在本进程开放服务。并且 `AuthorityRuntimeStack.anchorEpoch` 装配未读取 installation 的 `nextAnchorEpoch`，target 即使重启也继续使用默认旧代际。 |
-| IR34-20 | [~] | pre-commit abort | prepared/fenced/frozen/imported 均只接受 current source 对同 request/transfer/sourceEpoch 的签名 abort；source 的 durable abort 是清 fence、以原 epoch 恢复准入/recovery/scheduler 的唯一线性化点，不等待跨设备物理清理。target 收到同一 abort 后先耐久隔离该 transfer 并拒绝任何后继 commit，再幂等清私有 staging、删除未激活 key；target 离线、清理失败、断连/丢响应/重启均保留同一投递/清理义务，异 abort 冲突。 | source 先在同一 journal 耐久写 signed abort，再立即清 append guard、恢复 recovery/scheduler/inbound，随后投递 target；启动和连接恢复会对同一 aborted state 重投。target 先写 terminal aborted，terminal replay继续删除私有 artifacts/key/root并释放 reservation；异 abort/late commit 冲突。跨设备清理失败不伪造 source 权威终态，未见独立 P0/P1。 |
-| IR34-21 | [~] | post-commit forward-only 与 tombstone | source commit 后 late abort 永久拒绝；target 未提交、效果后丢响应、离线和连续重启只重发同 commit直至安装，source始终拒写；target已提交只 exact replay。旧 source cleanup/tombstone不得改变 authority或恢复 issuer，后续迁回只能新 transfer/更高 epoch。 | P0：source delivery 已在 fence 前 quiesce，原 producer-loop 反证关闭；但 source commit 后 target live completion会因 stale delivery cursor失败，source只能持续重投同 commit，target在当前进程每次都以同一 cursor mismatch失败。重启虽可刷新 cursor，runtime仍捕获旧 `anchorEpoch`，因此 terminal replay不能形成正确的新代际 owner，forward-only 无正确终点。 |
-| IR34-22 | [~] | 旧 source 全能力永久 fencing | commit 后逐项核对 control/session/global/job/delivery/confirmation/intent/assignment/signing/mesh receiver与直接 log append：旧 anchor、旧 issuer、旧 anchorEpoch/trustEpoch 全部 fail-closed，允许的重定向只基于已认证 current-anchor 事实且不得代理旧写。 | P0：source 的 channel/delivery/scheduler/protocol 已在 commit 前关停且 append fence永久保留，旧 loop 反证关闭；但 target runtime未采用 install 的 `nextAnchorEpoch`，仍以默认旧 `anchorEpoch` 构造 DeliveryAuthority、scheduler/global/control 等生产 owner。旧代际没有在迁后能力面被排除，新 target会继续生成或校验错误代际事实，故“旧 epoch 永拒”未成立。 |
-| IR34-23 | [x] | current anchor 路由与第一方接管 | target 安装后 CLI/server/channel/scheduler/global state、会话列表/创建、确认/通知、任务及所有第一方管理入口只解析唯一 current anchor；source/target/其他设备对相同请求不会双写或显示两套值班事实，单机与分布式 surface 语义等价。 | canonical builtin registry 去除 `auth/health/server.shutdown` 后形成唯一 relay exact-set；anchor+executor逐方法委托 current-anchor router，executor-only先处理冻结 local session/confirmation集合再委托current anchor，未知/设备本地方法不代理。channel注册与连接分离，连接、`InboundRouter`副作用前及challenge最终动作均重读current owner/post-install gate；source先拒新并drain、target只在consumer完成后连接，三设备与离线分支未见旁路。 |
-| IR34-24 | [~] | pending obligations 迁移与恢复 | AuthorityCatalog 必须从耐久事实枚举 assignment、interaction、final、delivery、intent、confirmation 等实际非终态 exact-set；target 接管后以原稳定 identity、水位和重试语义恢复，terminal replay不追加，源端无遗留 producer/loop，遗漏/多列/错 owner 在开放服务前失败。 | P0：六类 durable exact-set、scheduler恢复、conversation代际重建与source loop quiesce均已落地；但delivery consumer只有 `flush()`，没有在 composite WAL install 后清空自身旧 projection/cursor。含任一 delivery obligation 的live迁居在consumer gate稳定失败，且receipt只是原样回传输入，不能证明该obligation已由新代际owner接管；迁后完整消费闭包仍不成立。 |
-| IR34-25 | [x] | trust/peer 收敛与旧 issuer 拒绝 | issuer-transition 必须由旧 current issuer签名、指向 active anchor target的 transfer issuer public key并产生 next trust epoch；target `HomeTrustRecord` 可验签，在线/离线 peer重连后只接受新链头/issuer，旧签名和旧 epoch永久拒绝，合法既有 device-key transition兼容不漂移。 | source 在 target commit 回执验签后耐久 reconcile 同一 migration transition/record；target 安装同一 record。任一 active peer 重连时只可请求本地 chain head 后至多一个 signed migration issuer-transition，服务端验证祖先前缀，客户端用既有 `reconcileTrustSuffix` 验签/落盘；冲突链头、非 migration、多事件、旧 issuer均 fail-closed，未见独立 P0/P1。 |
-| IR34-26 | [~] | 启动恢复顺序 | source 重启必须在任何公开 producer 前重装 durable fence并重驱 commit/abort；target重启从私有 journal/base progress恢复并在原子安装前保持服务关闭；双端事实不对称、坏尾、缺 artifact/key、冲突/歧义 fail-closed，连续重启最终唯一收敛且无双 owner。 | P1：target release 已稳定重读磁盘 phase，旧重启反证关闭；但 source durable prepared/aborted 与 target claim-only 的不对称可跨连续重启永久存在。source 只重驱 signed abort，target 每次都因无 prepared journal拒绝；target claim/key不终结且新 candidate稳定 busy，启动恢复无法唯一收敛。 |
-| IR34-27 | [~] | 并发、重放与严格结果终态 | prepare/fence/freeze/import/commit/abort/status/read-range 的并发、重复、异载荷、错 request/transfer/ref/offset/state和效果前后失败都二元落定；result先与 originating command关联再分类，stable conflict与retryable不混淆，任何拒绝在对应权威/存储副作用前发生。 | P1：source cancel↔prepared 已在同事务排序、target release也会重读 durable phase；但 source prepared 效果成功后、remote prepare 效果前的故障/取消尚未二元落定。signed abort在target claim-only状态被拒绝，既非可重试终结也非安全回滚，响应丢失与连续重放仍不能收敛。 |
-| IR34-28 | [~] | 两生产根与角色 exact-set | anchor+executor 与 anchor-only/current-anchor 各恰一 source/recovery owner，source range receiver 仅 current source；合格 non-current active anchor 可各有一个有限 readiness/strict receiver，但在首条 `prepared` 前零 transfer record/staging/recovery owner，prepared 后只有命中 targetId 的设备可持该非终态迁居。executor-only、surface、disabled、非 anchor 与未命中 target 的候选零迁居 owner/耐久状态；trust 换代时旧实例退役、新实例单次安装，零重复 listener/service。 | 两个生产组合根都只经 `MeshRuntimeAssembly` 动态安装当前 source owner或 active non-current anchor target；source/target negotiated services各唯一，角色变化先 dispose旧服务再安装新角色。executor-only、surface、disabled、非 anchor均无 planned owner；候选仅有有限 summary/ready入口。竞争线性化缺陷归 IR34-04/06，不是装配数量漂移，未见独立 P0/P1。 |
-| IR34-29 | [~] | 生命周期、关闭与资源收束 | start 须先恢复 fence/transfer 再接公开流量；stop 先拒绝 fresh 管理/业务写，安全取消或等待当前物理 step，停止 owner/receiver/retry loop 并释放 permit/key handle/disposer；未终态事实留给重启。cleanup 失败不得伪造 abort/commit，也不得阻断已原子安装 target 或无迁居角色设备的普通业务；source 一旦 committed 仍永久 fenced，不得以“普通业务”名义复权。 | `PlannedAnchorTransferRuntimeLifecycle` 为全部 owner/receiver物理步骤提供单一 accepting gate、AbortSignal、in-flight集合与同一 closing promise；assembly.stop 先关闭该 runtime并等待全部在途 settled，之后才停 control/worker并 dispose服务。网络等待和 governor均消费同 signal，未终态 journal留待重启；source committed guard不会由 stop 清除，未见独立 P0/P1。 |
-| IR34-30 | [~] | 安全、最小权限与数据隔离 | wire/log/catalog/export/RPC/错误只含必要稳定身份与ArtifactRef；秘密、恢复主秘密、SecretStore内容、环境、workspace绝对路径、设备缓存、raw store/log/通用读取删除能力零逸出；签名、peer、role、epoch、ref与path/容量guard均在首次对应副作用前验证。 | strict wire/records/catalog/RPC只携稳定 identity、签名对象和 ArtifactRef；issuer私钥只由 transfer-bound SecretStore helpers读写，raw log/store、环境和路径没有进入 public surface。认证 peer、role/epoch/ref/range与容量约束在对应 I/O 前验证，server/CLI映射稳定产品错误；并发单飞属于生命周期一致性而非秘密泄露，未见独立 P0/P1。 |
-| IR34-31 | [x] | CLI/server 产品旅程 | `zz duty targets/migrate/continue/cancel` 与四个 authenticated `dutyMigration.*` 必须同源：列表稳定且 CLI/用户渲染只展示目标 `displayName`（opaque `targetDeviceId` 仅作内部选择关联，不直接展示），ready 缺口可行动，prepare 后明确仍可取消，commit 展示收束/传输/接管且结果不明可同编号继续，commit 后取消诚实拒绝；公开 exact keys/错误零 anchor/epoch/issuer/catalog/CAS/stream/secret/path/raw error 术语。 | 四个 RPC 与 CLI共用同一 management facade；target投影返回 displayName/ready，TTY按序号/设备名选择，非TTY只接受唯一名称，重名稳定拒绝，内部 deviceId仅在选中后传 strict prepare且不渲染。文案区分可取消、继续与 commit 后拒绝，公开错误不泄露内部术语，旧 P2 已修复，未见 P0/P1。 |
-| IR34-32 | [~] | 分层、导出与上游兼容 | core strict合同、mesh trust/key/ready、owner-kernel drain、server投影、CLI组合根依赖方向无环且无复制事实源；Unit33 checkpoint/S2 trust/SecretStore/mesh/现有conversation transfer兼容，package export/build与供应链隔离不漂移。 | strict identity/protocol/commit-log留在 core，认证 mesh与key/readiness原语由既有层提供，server只定义/投影RPC，CLI持生产 owner、transport和组合根；没有反向依赖或复制权威事实源。Unit33 checkpoint、SecretStore、conversation transfer和S2受管依赖边界未改型，当前功能缺陷不要求破坏该分层，未见独立 P0/P1。 |
-| IR34-33 | [~] | S7、registry 与 golden exact-set | 现有单一 S7 gate必须反绑两生产根issuer key注入、owner/target构造、service phase/role/order、recovery-before-admission、四CLI RPC与canonical server registry；新增/删除/重复/换序/绕过/错误root和动态未注册方法均fail-closed，合法拓扑/golden零误杀，不建新lint/发现框架。 | P1：现有 gate 已覆盖 source candidate事务、target release磁盘phase、conversation换代、delivery quiesce、channel/current-router exact-set，旧缺口关闭；但仍只要求 signed abort函数和consumer调用“存在”。它不会拒绝 target claim-only状态拒绝 signed abort，也不会拒绝post-install delivery继续持旧projection cursor或runtime `anchorEpoch` 沿用旧代际；两个真实根因仍可在 S7 全绿下保留。 |
-| IR34-34 | [~] | 成比例的直接验收证据 | 必须有strict codec/reducer、ReadyProof/issuer transition、真实双端AuthorityCommitLog/FileArtifactStore/private staging、checkpoint接缝、source drain/fence、catalog/pending exact-set、双端commit/abort/response-loss/restart、旧epoch拒绝、两生产根与S7真实变异的直接证据；测试通过不得替代逐格功能判断，不做配置×故障笛卡尔积。 | P1：现有直接证据已覆盖 cancel胜出、target重启迟到release、conversation换代、delivery quiesce、channel gate与六类分组；但未覆盖 source prepared落盘后/remote prepare前取消、真实target delivery projection在WAL替换后的live恢复，或nextAnchorEpoch贯穿两生产根的写/再迁居。当前测试均可在两个根因及其三处直接表现存在时通过，必要故障/代际证据仍缺。 |
-| IR34-35 | [~] | 后继能力与非目标边界 | 逐路径确认未实现source-less/disaster recovery、restore/domain-reset/pending-reenroll/credential rotation、自动failover/quorum、continuous sync、服务托管/卸载/升级，也未改变Unit33 checkpoint语义或新增通用迁移/路由/事务/outbox/registry/监控诊断框架。 | 当前28路径只实现planned current-source迁居、Unit33 verified checkpoint窄接缝与有限管理/mesh面；未出现source-less/disaster、restore/reset/reenroll/rotation、自动failover/quorum/continuous sync或Unit36～38生命周期能力，也未建设通用框架，未见越界问题。 |
-| IR34-36 | [~] | 来源、D34义务与路径反向闭包 | D34-01～D34-08、全部适用来源条款与28个非工作台路径必须按core合同、CLI source-target/assembly/management、server RPC、架构规格、S7和直接测试逐一归入IR34-01～IR34-35；零未判定来源/条款/枚举行/功能链/交付路径，零重复或无法独立判定条目。 | 已重读四份权威来源、定稿开发清单与当前交付；HEAD `6415cc1f…` 的非工作台路径实数为 core 5、CLI 16、server 2、架构 3、S7 2，共28项，与登记分组全等。所有适用章节、§6.1/6.2/6.2b/6.3/6.4枚举行、D34-01～08及生产路径均落入IR34-01～35；本轮反证已落在IR34-04/06/19/21～24/26～27/33～34，无未判定来源或路径。 |
-
-> U34-04/U34-09 已在专项冻结指纹 `7f9ba3badb9c1558d0b2d2b93ebb0f456d8b667d0b11aced53d9747f54d6269a` 上完成修复与直接验证；根据当前实现、装配、共享原语、架构/规格、S7及证据影响闭包，相关 19 项统一标为 `[~]`，须在后续独立审查中基于当前输入重新二元判定。其余 17 项 `[x]` 继续复用，EX34-01及第35～38单元边界未被新事实触发。
+| 编号 | 状态 | 审查主题 | 独立判定对象、停止条件与证据 |
+| ---- | ---- | -------- | ---------------------------- |
+| IR35-01 | [ ] | 单元身份、架构与范围 | 以总纲 §9 为最高依据，对账 Unit 35、D35-01～D35-09、规格第 35 项及明确排除；全部当前交付路径可反绑本单元必要性，未提前实现 Unit 36～38 或通用未来框架，且无需求空洞时通过。证据：来源条款、开发清单、路径分类。 |
+| IR35-02 | [ ] | 恢复包与公开入口前置 | `backup recover/recover-finish` 及 root 四命令只在明确用户动作后运行；恢复包仅经共享无回显 TTY reader 读取，不入 argv/log/wire/错误；非 TTY、取消、空输入、错包、v1/v2 和重放均有明确终态时通过。证据：CLI registry、command、TTY/codec 测试。 |
+| IR35-03 | [ ] | source-less inventory 与候选选择 | directory/paired 只枚举 durable、完整、full-authority checkpoint；冻结 location/time/order/action 与内部 checkpoint/target identity，唯一候选可确定选择、多候选须显式序号、空/损坏/越界/重复不被选中且公开不泄 raw id 时通过。证据：native handle inventory、target adapters、public projector/测试。 |
+| IR35-04 | [ ] | strict DR command/result 与状态联合 | `prepare/import/commit/abort/tombstone/status`、`prepared/imported/committed/tombstoned/aborted/rejected` exact keys、schema/version、签名者、originating request/transfer 关联完整；planned/conversation/DR 不可混型，非法输入在任何副作用前拒绝时通过。证据：core types/codec/reducer/逐字段污染。 |
+| IR35-05 | [ ] | target-wide candidate 单飞 | 同 home 同时只存在一个有效 planned 或 disaster candidate；DR claim 在 key、reservation、private root、journal 之前耐久，same identity exact replay，异 transfer/mode/identity 稳定冲突；取消/终态/响应丢失/重启释放不产生双 candidate 时通过。证据：target-wide journal、DR candidate journal、真实并发/重放。 |
+| IR35-06 | [ ] | 恢复根真解封与现场验证 | 只有与冻结 recipient/root/checkpoint 全等的恢复根可逐块解封；manifest、scope、nonce、chunk、payload、issuer 签名和 RecoveryCheckpointVerification 全验，伪造/错 key/nonce/digest/target/verification、截断/重排均零 authority/trust 副作用时通过。证据：checkpoint crypto/sink、strict validators、篡改场景。 |
+| IR35-07 | [ ] | authority/trust 前缀重放与 no-rollback baseline | 原 envelope bytes/LSN/digest 严格解码重放；本地及可达 active peer 的已签事实按唯一规则选择不回滚 baseline，chain/home/issuer/epoch/source-head 冲突或歧义 fail-closed，离线 peer 不得伪造更旧基线时通过。证据：baseline selector、commit-log decoder、trust replay/peer 场景。 |
+| IR35-08 | [ ] | 六类 checkpoint 覆盖与禁止内容 | §7 六类逐行对账：全局、会话、会话资产、执行资产全量恢复；环境事实、本地秘密、设备缓存、非权威缓存不可表示；checkpoint recursion/缺 ref/多 ref/retention 漂移均拒绝发布 import 时通过。证据：payload/catalog/ArtifactLifecycleIndex/closure exact-set。 |
+| IR35-09 | [ ] | 无秘密 AuthorityCatalog 与 pending exact-set | catalog 六类 coverage、records、retained refs、pending obligations、trust/current anchor 与冻结 baseline 全等且规范排序；少列/多列/乱序/重复/错 digest 失败，catalog 不含 secret/path/cache 时通过。证据：catalog builder/validator、真实 log/index。 |
+| IR35-10 | [ ] | transfer 私有完整导入 | 每 transfer 独立 root/journal/FileArtifactStore 接收 record pages 与 retained artifacts，内容/size/digest/coverage 全验前对共享 CAS 和 authority consumer 零可见；部分写、磁盘满、重复 chunk、断连/重启可重驱时通过。证据：private sink/store/journal、故障注入。 |
+| IR35-11 | [ ] | 共享 CAS 提升与 cleanup 边界 | 仅全验后的私有对象幂等提升；已有/新/共享 digest 均不误删、不覆盖；abort/tombstone/cleanup 只触及 transfer-owned 私有对象，业务共享 ref 与上游 retention owner 保持有效时通过。证据：ArtifactStore 引用、private/public root、cleanup 场景。 |
+| IR35-12 | [ ] | immutable/composite authority base | source prefix 的原 bytes/LSN/digest 形成不可见 immutable base，target tail/install 不混入旧本地 authority；pointer 可见后所有 snapshot/tail/stream/projection 读取同一 composite base，pointer 前零 consumer 可见时通过。证据：base writer/reader、AuthorityCommitLog、安装前后读面。 |
+| IR35-13 | [ ] | DR commit 身份与签名 | commit 仅由当前恢复根签发，逐字段绑定 transfer、checkpoint envelope、catalog、ReadyProof、issuer transition、target、next epochs 和 issuer public key；旧根、错 target/digest/proof/transition/epoch 均零提交时通过。证据：codec/verifier/reducer、签名篡改矩阵。 |
+| IR35-14 | [ ] | 单 envelope 原子安全域发布 | target 同一 `AuthorityCommitLog` envelope/单次 sync 原子发布 committed base pointer、commit、trust/current owner、next epochs、old issuer revoke、active exposure compromised 与 installed generation；sync 前全无、sync 后全有，post-sync 决定性 I/O 为零时通过。证据：commit envelope 内容、崩溃点、重放。 |
+| IR35-15 | [ ] | 双端 phase、abort 与 forward-only | 规格 §6.3 DR 行 0b/2/3b/5b/6/7/8 各有唯一终态；root-signed abort 先耐久再 cleanup，commit 后 late abort 永拒；效果前后失败、响应丢失、同/异载荷、连续重启只收敛到一个 authenticated terminal 时通过。证据：candidate/per-transfer reducer、strict result、逐边场景。 |
+| IR35-16 | [ ] | 旧设备隔离确认与 tombstone | commit 只建立新权威并永久 fence 旧 issuer/epoch；只有用户明确确认旧设备已隔离/擦除后才 tombstone，未确认、重复、错 transfer/commit 或迟到请求零 tombstone，tombstone 不回滚新 authority 时通过。证据：recover-finish、tombstone guard、terminal replay。 |
+| IR35-17 | [ ] | installed-generation 与 post-install 消费闭包 | startup/live 从 durable disaster installation 派生不可清除 generation，在 gate 内重绑 `runtime-epoch`、`delivery-authority`、`control-admission`、`resource-governor`、`surface-assets`、workscene/memory/skill/rubric global-state 九个固定 participant；再恢复 scheduler+intent+assignment、conversation+interaction+confirmation+final、delivery 三组及六类 pending。九个 participant 回执与逐 obligation read-back 均归当前代际后才 cleanup/open/respond 时通过。证据：bootstrap/assembly/coordinator、两 profile、九项 receipt 与非空 pending。 |
+| IR35-18 | [ ] | current-owner 路由与旧代际 fencing | canonical registry/S7 冻结的 session、global、task、channel、confirmation、notification、management 七组入口，以及 registry 外的直接 log append 与 credential route 两个写面，均在副作用前解析 signed current owner；旧 source/issuer/epoch/route 永拒，target 离线不回退旧 source，未知/设备本地/local-domain 方法不误代理时通过。证据：canonical registry、resolver/router、九组入口的三设备/两 profile 路由表。 |
+| IR35-19 | [ ] | exposure compromised 原子投影 | recovery commit 只把旧设备当前 active exposures 标为 compromised，latest projection 无歧义、无时间/revision 回退；设备/服务/binding/principal/tenant/scopes 身份不串线，撤销清单可行动且不暴露秘密时通过。证据：exposure authority/projection、commit envelope、设备撤销场景。 |
+| IR35-20 | [ ] | 每条秘密读取路径的 binding guard | provider、channel、MCP、webhook、rendezvous 五类在 SecretRef 解引用或外调前共用 latest exposure guard；compromised 仅阻断命中 binding，其他 binding 与普通业务继续，device-key 明确排除且无旁路构造点时通过。证据：credentials loader、startup、mesh control/pairing、route descriptor/S7。 |
+| IR35-21 | [ ] | 第三方凭据轮换闭环 | 只有 service-verified principal、严格前进 binding revision、SecretStore 写后回读和 readiness 全过，才以一个 authority envelope 同时写新设备 active 与旧 exposure rotated；效果/响应丢失 exact replay，错服务/identity/revision/secret 零恢复路由时通过。证据：CredentialExposureAuthority、capability publication、rotation 测试。 |
+| IR35-22 | [ ] | 资源、物理 I/O、取消与 stop | inventory、unseal、private import、CAS、directory/paired range、cleanup 每个物理步骤经同一设备 storage governor/lifecycle abort；固定 chunk/header 上界，网络等待零 permit，容量等待不持 authority/store 锁，stop 后零新 I/O、未终态由耐久事实恢复时通过。证据：governor 注入 exact-set、native bridge、取消/容量/磁盘/网络场景。 |
+| IR35-23 | [ ] | 用户恢复旅程与公开 DTO | CLI/server 只展示位置、备份时间、序号、待验证/可行动状态和“值班设备”；不展示 root key、raw device/checkpoint/target/transfer id、digest、epoch、路径或 raw error；恢复完成后诚实提示旧设备隔离与逐项轮换时通过。证据：命令输出、public error mapper、golden。 |
+| IR35-24 | [ ] | topology 与 owner/receiver exact-set | 仅 eligible active anchor-role target 可持 disaster owner；directory/paired target 只提供 checkpoint-owned inventory/副本；anchor+executor、anchor-only 各恰一路径，executor-only、surface、disabled、旧 source、非 anchor、未选候选零 DR owner/listener/非终态状态时通过。证据：组合根、role transitions、descriptor/S7。 |
+| IR35-25 | [ ] | 恢复根 rotate 原子计划 | rotate 由 current issuer/当前根授权，经新恢复包无回显回读、独立 checkpoint created→replicated→verified 后，同 envelope 激活新 root 并 supersede 旧 checkpoint；任一前置失败保持旧根有效，响应丢失按 checkpointId 重放时通过。证据：lifecycle service、activation coordinator、崩溃点。 |
+| IR35-26 | [ ] | 恢复根 invalidate | 只有 current issuer 与当前 root、明确用户确认可停用；同 envelope 写合法 invalidate，随后 root/readiness/mesh 能力如实降级；错包/旧根/重复/响应丢失不产生分叉或提前开启替代能力时通过。证据：trust event/reducer、command/状态投影。 |
+| IR35-27 | [ ] | domain-reset + establish 原子计划 | 恢复包丢失只接受 current issuer 与另一台 distinct active device 的签名 approval；reset 与新 establish 连续、同 checkpoint activation plan、同 envelope 原子生效，单事件提前落链、同设备共签、旧 chain approval、错 epoch/record 均拒绝时通过。证据：DomainResetApproval、trust verifier、root activation。 |
+| IR35-28 | [ ] | pending-reenroll 与 fresh pairing | domain-reset 后除 issuer 外设备全部投影 pending-reenroll、连接终止、旧会话/凭证/路由不恢复；仅 fresh pairing transcript 可生成 reenroll 回 paired，再经既有 configured→ready；单设备或 issuer+恢复包双失只返回 rebuild-home，不存在原地绕过时通过。证据：trust reducer、pairing event、两设备/单设备场景。 |
+| IR35-29 | [ ] | 安全、最小权限与数据隔离 | 恢复包、wire/log/catalog/error/ArtifactRef 仅含必要稳定字段；恢复主秘密、issuer/第三方秘密、环境、路径、缓存、raw store/log 不逸出；签名、principal、role、epoch、identity、ref、path/容量 guard 均先于首个副作用，拒绝零写时通过。证据：wire 扫描、SecretRef、negative tests。 |
+| IR35-30 | [ ] | 并发、重放、错误关联与 fail-closed | prepare/import/commit/abort/tombstone/status/inventory/root lifecycle 的并发、错 request/transfer/checkpoint/target/root/event/record/digest/epoch、效果/响应丢失均二元落定；exact replay 返回原结果，异载荷稳定冲突，损坏/歧义 fail-closed且不泄内部错误时通过。证据：严格 codec/reducer/journal、对抗矩阵。 |
+| IR35-31 | [ ] | lifecycle、启动、停机与连续恢复 | 启动在公开准入前恢复 candidate/per-transfer/install/generation/consumer/exposure/root lifecycle；stop 拒新工作、取消并等待在途安全点、释放 permit/handle/listener；坏尾、缺 artifact/key、offline target/peer、连续重启保留唯一可重驱义务，不伪造成功时通过。证据：startup/assembly/lifecycle、崩溃注入。 |
+| IR35-32 | [ ] | 状态机枚举行与必要故障证据 | §6.3 DR 七条适用边、§6.4 十一行、root lifecycle 三操作、exposure 三状态、DR 五成功态+rejected 均有直接转移或拒绝证据；整个有限矩阵覆盖适用的正常、边界、故障、恢复与对抗路径，不要求为每一行机械建立五类场景笛卡尔积。核心安全与耐久结论须直接穿过真实 log/store/staging/trust/SecretStore/governor，不以 mock 自报事实时通过。证据：逐行场景表、共享反例映射与命中证明。 |
+| IR35-33 | [ ] | 产品体验与范围价值 | 完整用户恢复演练无需理解 anchor/epoch/CAS/stream 等术语；每个停顿都有可行动下一步，取消/不可回滚/旧设备隔离/换密钥/双重灾难诚实；范围外增强未成为提交门禁时通过。证据：TTY/非TTY/CLI/server golden 与明确排除对账。 |
+| IR35-34 | [ ] | S7、registry、descriptor 与生产 exact-set | 既有 S7 单源反绑 disaster owner/phase/order、root lifecycle、pairing reenroll、credential route、bootstrap-before-open、CLI 命令与 canonical registry；新增/删除/重复/换序/绕过变异失败，合法两生产根零误杀，不新建 runner 时通过。证据：descriptor、validator、mutation tests、server golden。 |
+| IR35-35 | [ ] | 分层、上游兼容与供应链 | core strict合同、mesh crypto/trust/native、providers guard、CLI组合根、server golden、S7 依赖方向无环；Unit 33 checkpoint/retention与Unit 34 planned/current-owner语义不退化，`@zhixing/mesh` 受管依赖/PAKE隔离不漂移时通过。证据：exports/imports、兼容场景、供应链门禁。 |
+| IR35-36 | [ ] | 成比例的直接验收闭包 | 必须具备 strict codec/reducer、完整 inventory/unseal/private import/atomic install、真实双端/两 profile、credential guard/rotation、root lifecycle/reenroll、崩溃/响应丢失/连续重启及 S7 变异证据；证据可复核且覆盖实际生产入口，不以构建通过代替功能判断时通过。证据：直接测试文件、生产入口命中表与既有 S7 变异表。 |
+| IR35-37 | [ ] | 后继能力与非目标边界 | 逐路径确认未实现自动 failover、quorum/witness、continuous sync、恢复应用、多目标/云、Unit36～38服务/卸载/发布、通用 transfer/registry/lifecycle/事务/outbox/事件总线及观测设施；单设备/双失灾难只重建 home 时通过。证据：依赖/入口/路径扫描与明确排除。 |
+| IR35-38 | [ ] | 来源、D35义务与交付路径反向闭包 | 四份权威文档全部章节、规格规范枚举行、D35-01～D35-09 和 54 条 Unit 35 路径逐一归入 IR35-01～IR35-37；两条 Unit 34 收口记录有明确排除依据。任何未判定来源/条款/枚举行/功能链/路径、重复条目、不可独立判定项或架构空洞均使本项失败。证据：双向追踪表与逐路径清单。 |
 
 ---
 

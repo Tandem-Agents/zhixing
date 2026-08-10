@@ -8,6 +8,7 @@ import {
 } from "@zhixing/mesh/paired-checkpoint-target";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
+import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
 import { commitRecoveryRootActivation } from "./recovery-root-activation.js";
@@ -77,6 +78,11 @@ export class RecoveryRootEstablishmentRuntime {
       secretStore: input.secretStore,
       bootstrapStore: input.mesh.bootstrapStore,
       services: this.services,
+      credentialRouteGuard: new CredentialExposureAuthority({
+        deviceId: input.mesh.deviceKey.deviceId,
+        log: input.mesh.bootstrapStore.authorityLog(),
+        secretStore: input.secretStore,
+      }),
       watchTrust: false,
       ...(input.mesh.localEndpoint ? { localEndpoint: input.mesh.localEndpoint } : {}),
       onTrustReconciled: (record) => {

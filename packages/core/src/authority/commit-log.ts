@@ -2229,7 +2229,7 @@ function normalizeEntries<Body>(
   return normalized as Array<LogicalRecord<Body>>;
 }
 
-function parseEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValue> {
+export function decodeCommitEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValue> {
   let value: unknown;
   try {
     value = JSON.parse(Buffer.from(bytes).toString("utf8"));
@@ -2342,6 +2342,8 @@ function collectRetainedArtifactRefs<Body>(
 ): ArtifactRef[] {
   return collectArtifactRefs(retainingAuthorityRecords(records));
 }
+
+const parseEnvelope = decodeCommitEnvelope;
 
 function deduplicateReferences(
   references: readonly ArtifactRef[],

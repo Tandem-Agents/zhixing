@@ -104,6 +104,11 @@ export class CredentialCommitStateUnknownError extends Error {
 
 interface CredentialStoreOptions {
   readonly store: SecretStorePort;
+  readonly authorizeCredentialRead?: (input: {
+    readonly kind: CredentialKind;
+    readonly id: string;
+    readonly ref: SecretRef;
+  }) => Promise<boolean>;
 }
 
 export interface CredentialStoreCoordinator {
@@ -169,6 +174,8 @@ async function loadCredentialsUnlocked(
   }
   for (const { kind, id } of manifest.entries) {
     const ref = credentialSecretRef(kind, manifest.generation, id);
+    if (options.authorizeCredentialRead &&
+      !(await options.authorizeCredentialRead({ kind, id, ref }))) continue;
     const encoded = await options.store.get(ref);
     if (encoded === null) throw new Error("SecretStore active credential generation is incomplete");
     const entry = parseStoredEntry(encoded, kind, id);
@@ -259,7 +266,7 @@ async function migrateLegacyCredentialsUnlocked(
   const entries = credentialEntries(credentials);
   const activeManifest = await options.store.get(MANIFEST_REF);
   if (activeManifest !== null) {
-    const active = await loadCredentialsUnlocked(options);
+    const active = await loadCredentialsUnlocked({ store: options.store });
     if (!sameValue(canonicalJson(active), canonicalJson(credentials))) {
       throw new CredentialsSchemaError(
         "SecretStore 已有不同凭据，拒绝用旧明文文件覆盖；请通过显式恢复流程裁决。",

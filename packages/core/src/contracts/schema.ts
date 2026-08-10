@@ -6,6 +6,9 @@ import type {
   AnchorTransferCommand,
   AnchorTransferResult,
   AuthorityCatalog,
+  DisasterRecoveryAbort,
+  DisasterRecoveryCommand,
+  DisasterRecoveryResult,
   CheckpointEnvelope,
   FullAuthorityCheckpointPayload,
   ConversationTransferCommit,
@@ -88,6 +91,9 @@ export interface WireSchemaMap {
   AnchorTransferCommand: AnchorTransferCommand;
   AnchorTransferResult: AnchorTransferResult;
   AuthorityCatalog: AuthorityCatalog;
+  DisasterRecoveryAbort: DisasterRecoveryAbort;
+  DisasterRecoveryCommand: DisasterRecoveryCommand;
+  DisasterRecoveryResult: DisasterRecoveryResult;
   SourceFreezeProof: SourceFreezeProof;
   ConversationTransferCommit: ConversationTransferCommit;
   ConversationTransferAbort: ConversationTransferAbort;

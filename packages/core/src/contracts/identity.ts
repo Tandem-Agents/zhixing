@@ -256,6 +256,132 @@ export interface AnchorTransferAbort
   signature: Signature;
 }
 
+export interface DisasterRecoveryBaseline {
+  homeId: string;
+  anchorEpoch: number;
+  trustEpoch: number;
+  chainHead: { seq: number; eventDigest: Digest };
+  issuer: { deviceId: string; issuerKeyId: string };
+  recoveryRoot: { rootKeyId: string; recipientKeyId: string };
+}
+
+export interface DisasterRecoveryAbort
+  extends WireSchemaV1<"DisasterRecoveryAbort"> {
+  mode: "disaster-recovery";
+  requestId: string;
+  transferId: string;
+  targetDeviceId: string;
+  checkpointTargetId: string;
+  checkpointEnvelopeDigest: Digest;
+  reason: "target-rejected" | "operator-cancelled";
+  at: IsoTime;
+  signature: Signature;
+}
+
+export type DisasterRecoveryCommand = WireSchemaV1<"DisasterRecoveryCommand"> &
+  (
+    | {
+        op: "prepare";
+        requestId: string;
+        transferId: string;
+        targetDeviceId: string;
+        checkpointTargetId: string;
+        recoveryRoot: {
+          homeId: string;
+          rootKeyId: string;
+          recipientKeyId: string;
+        };
+        checkpointEnvelope: CheckpointEnvelope;
+        signature: Signature;
+      }
+    | {
+        op: "import";
+        requestId: string;
+        transferId: string;
+        targetDeviceId: string;
+        checkpointTargetId: string;
+        checkpointEnvelopeDigest: Digest;
+        baseline: DisasterRecoveryBaseline;
+        onsiteVerification: RecoveryCheckpointVerification;
+        catalog: AuthorityCatalog;
+        catalogRef: ArtifactRef;
+        readyProof: ReadyProof;
+        trustTransition: HomeTrustEventWithBody<
+          Extract<HomeTrustEventBody, { t: "issuer-transition"; reason: "disaster-recovery" }>
+        >;
+        nextAnchorEpoch: number;
+        nextTrustEpoch: number;
+        targetIssuerPublicKey: string;
+        signature: Signature;
+      }
+    | {
+        op: "commit";
+        requestId: string;
+        transferId: string;
+        commit: Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
+        signature: Signature;
+      }
+    | {
+        op: "abort";
+        requestId: string;
+        transferId: string;
+        abort: DisasterRecoveryAbort;
+        signature: Signature;
+      }
+    | {
+        op: "tombstone";
+        requestId: string;
+        transferId: string;
+        commitDigest: Digest;
+        at: IsoTime;
+        signature: Signature;
+      }
+    | {
+        op: "status";
+        requestId: string;
+        transferId: string;
+        signature: Signature;
+      }
+  );
+
+export type DisasterRecoveryResult = WireSchemaV1<"DisasterRecoveryResult"> &
+  (
+    | ({ status: "ok"; requestId: string; transferId: string } &
+        (
+          | { state: "prepared"; ref?: never; commit?: never; abort?: never }
+          | { state: "imported"; ref: ArtifactRef; commit?: never; abort?: never }
+          | {
+              state: "committed" | "tombstoned";
+              commit: Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
+              trustRecord: HomeTrustRecord;
+              ref?: never;
+              abort?: never;
+            }
+          | {
+              state: "aborted";
+              abort: DisasterRecoveryAbort;
+              ref?: never;
+              commit?: never;
+            }
+        ))
+    | {
+        status: "rejected";
+        requestId: string;
+        transferId: string;
+        error: {
+          code:
+            | "unauthorized"
+            | "invalid"
+            | "not-found"
+            | "conflict"
+            | "unavailable"
+            | "not-ready"
+            | "committed";
+          retryable: boolean;
+        };
+      }
+  );
+
 export type AnchorTransferCommand = WireSchemaV1<"AnchorTransferCommand"> &
   (
     | {
@@ -854,6 +980,7 @@ export interface SecretStorePort {
 export interface CredentialExposureRecord {
   deviceId: string;
   bindingId: string;
+  bindingRevision?: number;
   service: string;
   principalFingerprint?: Digest;
   tenant?: string;

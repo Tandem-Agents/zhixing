@@ -85,6 +85,7 @@ export {
   type SurfaceAssetGrantLedgerSnapshot,
 } from "./surface-assets.js";
 export {
+  decodeCommitEnvelope,
   FileAuthorityCommitLog,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type FileAuthorityCommitLogOptions,

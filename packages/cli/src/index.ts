@@ -364,13 +364,13 @@ backupCmd
   .command("setup")
   .description("选择独立目录或配对设备并创建恢复备份")
   .option("--directory <path>", "使用物理独立目录")
-  .option("--device <device-id>", "使用一台已配对设备")
+  .option("--device <device-name>", "使用列表中名称唯一的已配对设备")
   .action(async (options: { directory?: string; device?: string }) => {
     try {
       const { runBackupSetupCommand } = await import("./serve/backup-command.js");
       await runBackupSetupCommand({
         ...(options.directory ? { directory: options.directory } : {}),
-        ...(options.device ? { pairedDeviceId: options.device } : {}),
+        ...(options.device ? { pairedDeviceName: options.device } : {}),
       });
       process.exit(0);
     } catch (err) {
@@ -403,6 +403,131 @@ backupCmd
       process.exit(0);
     } catch (err) {
       await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+backupCmd
+  .command("recover")
+  .description("值班设备丢失后，从完整恢复备份接管值班")
+  .option("--directory <path>", "从指定备份目录恢复")
+  .option("--device <device-name>", "从列表中唯一命名的已配对备份设备恢复")
+  .option("--backup <number>", "多个备份存在时选择显示的序号")
+  .action(async (options: { directory?: string; device?: string; backup?: string }) => {
+    try {
+      const { runDisasterRecoveryCommand } = await import(
+        "./serve/disaster-recovery-command.js"
+      );
+      const backupNumber = options.backup === undefined
+        ? undefined
+        : Number(options.backup);
+      await runDisasterRecoveryCommand({
+        ...(options.directory ? { directory: options.directory } : {}),
+        ...(options.device ? { pairedDeviceName: options.device } : {}),
+        ...(backupNumber !== undefined ? { backupNumber } : {}),
+      });
+      process.exit(0);
+    } catch (err) {
+      const { disasterRecoveryPublicError } = await import(
+        "./serve/disaster-recovery-command.js"
+      );
+      await renderActionError(disasterRecoveryPublicError(err));
+      process.exit(1);
+    }
+  });
+
+backupCmd
+  .command("recover-finish")
+  .description("确认旧值班设备已隔离并完成恢复")
+  .option("--confirm-old-device-isolated", "确认旧设备已隔离或擦除")
+  .action(async (options: { confirmOldDeviceIsolated?: boolean }) => {
+    try {
+      const { runDisasterRecoveryFinishCommand } = await import(
+        "./serve/disaster-recovery-command.js"
+      );
+      await runDisasterRecoveryFinishCommand({
+        userConfirmedOldDeviceIsolated: options.confirmOldDeviceIsolated === true,
+      });
+      process.exit(0);
+    } catch (err) {
+      const { disasterRecoveryPublicError } = await import(
+        "./serve/disaster-recovery-command.js"
+      );
+      await renderActionError(disasterRecoveryPublicError(err));
+      process.exit(1);
+    }
+  });
+
+const recoveryRootCmd = backupCmd
+  .command("root")
+  .description("轮换、停用或重置恢复码");
+
+recoveryRootCmd
+  .command("rotate")
+  .description("验证当前恢复码并生成、回读和启用新的恢复码")
+  .option("--confirm-save-new-code", "确认现在保存并回读新的恢复码")
+  .action(async (options: { confirmSaveNewCode?: boolean }) => {
+    try {
+      const { runRecoveryRootRotateCommand } = await import("./serve/backup-command.js");
+      await runRecoveryRootRotateCommand({
+        userConfirmed: options.confirmSaveNewCode === true,
+      });
+      process.exit(0);
+    } catch (err) {
+      const { recoveryRootPublicError } = await import("./serve/backup-command.js");
+      await renderActionError(recoveryRootPublicError(err));
+      process.exit(1);
+    }
+  });
+
+recoveryRootCmd
+  .command("invalidate")
+  .description("恢复码泄露且暂不能换新时，立即停用当前恢复码")
+  .option("--confirm-disable", "确认立即停用当前恢复码")
+  .action(async (options: { confirmDisable?: boolean }) => {
+    try {
+      const { runRecoveryRootInvalidateCommand } = await import("./serve/backup-command.js");
+      await runRecoveryRootInvalidateCommand({ userConfirmed: options.confirmDisable === true });
+      process.exit(0);
+    } catch (err) {
+      const { recoveryRootPublicError } = await import("./serve/backup-command.js");
+      await renderActionError(recoveryRootPublicError(err));
+      process.exit(1);
+    }
+  });
+
+recoveryRootCmd
+  .command("approve-reset")
+  .description("在另一台已加入设备上确认恢复码丢失")
+  .option("--confirm-reset", "确认协助当前主设备重置恢复码")
+  .action(async (options: { confirmReset?: boolean }) => {
+    try {
+      const { runRecoveryRootApproveResetCommand } = await import("./serve/backup-command.js");
+      await runRecoveryRootApproveResetCommand({ userConfirmed: options.confirmReset === true });
+      process.exit(0);
+    } catch (err) {
+      const { recoveryRootPublicError } = await import("./serve/backup-command.js");
+      await renderActionError(recoveryRootPublicError(err));
+      process.exit(1);
+    }
+  });
+
+recoveryRootCmd
+  .command("reset")
+  .description("由当前主设备使用另一台设备的确认码建立新的恢复码")
+  .requiredOption("--approval <code>", "另一台已加入设备生成的重置确认码")
+  .option("--confirm-save-new-code", "确认旧恢复码已丢失并准备保存新恢复码")
+  .action(async (options: { approval: string; confirmSaveNewCode?: boolean }) => {
+    try {
+      const { runRecoveryRootResetCommand } = await import("./serve/backup-command.js");
+      await runRecoveryRootResetCommand({
+        approval: options.approval,
+        userConfirmed: options.confirmSaveNewCode === true,
+      });
+      process.exit(0);
+    } catch (err) {
+      const { recoveryRootPublicError } = await import("./serve/backup-command.js");
+      await renderActionError(recoveryRootPublicError(err));
       process.exit(1);
     }
   });

@@ -846,6 +846,12 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/mesh-control-plane.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/disaster-recovery-target.ts",
+    "packages/cli/src/serve/recovery-root-lifecycle.ts",
+    "packages/cli/src/serve/credential-exposure-authority.ts",
+    "packages/cli/src/startup.ts",
+    "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
     "packages/cli/src/serve/recovery-root-activation.ts",
     "packages/cli/src/serve/topology-command.ts",
@@ -975,7 +981,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
-      (text) => text.replace("replayRootActivation:", "missingRootActivationReplay:"),
+      (text) => text.replace("commitRootActivation:", "missingRootActivationCommit:"),
     )).join("\n"),
     /signed activation replay must remain durably bound/,
   );
@@ -1008,6 +1014,44 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
       ),
     )).join("\n"),
     /originating commit and same-LSN historical trust tuple/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace('owner: "eligible-recovery-target"', 'owner: "unknown"'),
+    )).join("\n"),
+    /disaster recovery target owner, inventory, phase or public journey exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/recovery-root-lifecycle.ts",
+      (text) => text.replace('"domain-reset-establish"', '"domain-reset-bypass"'),
+    )).join("\n"),
+    /recovery root lifecycle owner, plan exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-pair-command.ts",
+      (text) => text.replace('reenrollment: "reenroll"', 'reenrollment: "enroll"'),
+    )).join("\n"),
+    /pairing enroll and pending-reenroll exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/credential-exposure-authority.ts",
+      (text) => text.replace('"webhook", ', ""),
+    )).join("\n"),
+    /credential exposure projection, guard or production read route exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+      (text) => text.replace(
+        "disasterRecoveryPostInstall ?? plannedAnchorPostInstall",
+        "plannedAnchorPostInstall",
+      ),
+    )).join("\n"),
+    /disaster installation completion, consumer recovery or public-open order drifted/,
   );
 });
 
@@ -1187,7 +1231,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
       (text) => text.replace(
-        "installedAuthorityGeneration: plannedAnchorPostInstall.installedGeneration",
+        "installedAuthorityGeneration: anchorPostInstall.installedGeneration",
         "installedAuthorityGeneration: undefined",
       ),
     )).join("\n"),
