@@ -46,6 +46,7 @@ import {
   deleteAnchorIssuerKey,
   loadActiveAnchorIssuerKey,
   loadAnchorIssuerKey,
+  loadOrCreateAnchorIssuerKey,
 } from "@zhixing/mesh/device-key-store";
 import {
   type DeviceKey,
@@ -73,6 +74,9 @@ import {
 } from "./disaster-recovery-authority.js";
 import {
   FileDisasterRecoveryCandidateJournal,
+  type DisasterRecoveryCandidateState,
+  type DisasterRecoveryInstallDecision,
+  type DisasterRecoveryVerifiedCandidate,
 } from "./disaster-recovery-candidate.js";
 import {
   createDisasterRecoveryInstallation,
@@ -239,13 +243,27 @@ export class DisasterRecoveryTarget {
       throw new TypeError("Disaster recovery command targets another device");
     }
     assertRecoveryRoot(input.prepare, input.recoveryRoot);
+    if (input.checkpoint.envelope.digest !== input.prepare.checkpointEnvelope.digest) {
+      throw new TypeError("Disaster recovery checkpoint changes its originating prepare identity");
+    }
     const candidate = this.#candidateFor(input.recoveryRoot.rootPublicKey);
-    await candidate.claim(input.prepare);
+    const claimed = await candidate.claim(input.prepare);
+    if (claimed.terminal === "aborted") {
+      throw new Error("Disaster recovery candidate was durably aborted");
+    }
 
     const context = await this.#context(
       input.prepare.transferId,
       input.recoveryRoot.rootPublicKey,
     );
+    if (claimed.verified) {
+      return this.#importVerifiedCandidate({
+        prepare: input.prepare,
+        candidate: claimed,
+        context,
+        recoveryRoot: input.recoveryRoot,
+      });
+    }
     const preparedRecord: DisasterRecord = {
       v: 1,
       mode: "disaster-recovery",
@@ -271,19 +289,87 @@ export class DisasterRecoveryTarget {
       ...(input.signal ? { signal: input.signal } : {}),
       now: this.options.now?.(),
     });
+    await loadOrCreateAnchorIssuerKey(this.options.secretStore, input.prepare.transferId);
+    const verified = await candidate.recordVerified(input.prepare.transferId, {
+      baseline: staged.baseline,
+      baselineEvents: staged.baselineEvents,
+      reachabilityCut: input.trustEvidence.cut,
+      trustEvidence: input.trustEvidence.evidence,
+      trustEvidenceDigest: input.trustEvidence.digest,
+      onsiteVerification: staged.onsiteVerification,
+      authorityRecordsRef: staged.authorityRecordsRef,
+      catalog: staged.catalog,
+      catalogRef: staged.catalogRef,
+    });
+    return this.#importVerifiedCandidate({
+      prepare: input.prepare,
+      candidate: verified,
+      context,
+      recoveryRoot: input.recoveryRoot,
+    });
+  }
+
+  async #importVerifiedCandidate(input: {
+    readonly prepare: PrepareCommand;
+    readonly candidate: DisasterRecoveryCandidateState;
+    readonly context: {
+      readonly root: string;
+      readonly artifacts: FileArtifactStore;
+      readonly journal: FileDisasterRecoveryTransferJournal;
+    };
+    readonly recoveryRoot: RecoveryRoot;
+  }): Promise<DisasterRecoveryImportedState> {
+    const verified = input.candidate.verified;
+    if (!verified) throw new Error("Disaster recovery candidate is not verified");
+    const existing = await input.context.journal.state(input.prepare.transferId);
+    if (!existing) {
+      throw new Error("Verified disaster candidate has no durable private prepare state");
+    }
+    if (existing.phase === "aborted" || input.candidate.terminal === "aborted") {
+      throw new Error("Disaster recovery candidate was durably aborted");
+    }
+    const allowShared = input.candidate.terminal === "committed";
+    const stored = await this.#readVerifiedCandidateArtifacts(
+      input.context.artifacts,
+      verified,
+      allowShared,
+    );
+    if (existing.imported) {
+      if (
+        existing.phase !== "imported" && existing.phase !== "committed" &&
+        existing.phase !== "tombstoned"
+      ) throw new Error("Disaster imported replay has an invalid private phase");
+      return Object.freeze({
+        state: existing,
+        authorityRecords: stored.authorityRecords,
+        baselineEvents: verified.baselineEvents,
+      });
+    }
+    if (existing.phase !== "prepared") {
+      throw new Error("Verified disaster candidate cannot resume private import");
+    }
+    const issuerKey = await loadAnchorIssuerKey(
+      this.options.secretStore,
+      input.prepare.transferId,
+    );
+    if (!issuerKey) {
+      throw new Error("Verified disaster candidate is missing its durable issuer key");
+    }
+    const trust = replayTrustChain(verified.baselineEvents);
     const readyNow = this.options.now?.() ?? Date.now();
-    const { proof: readyProof, issuerKey } = await createAnchorTransferReadyProof({
+    const { proof: readyProof } = await createAnchorTransferReadyProof({
       requestId: input.prepare.requestId,
       transferId: input.prepare.transferId,
       candidateDigest: disasterReadyCandidateDigest({
         prepare: input.prepare,
-        baseline: staged.baseline,
-        onsiteVerification: staged.onsiteVerification,
-        trustEvidenceDigest: input.trustEvidence.digest,
+        baseline: verified.baseline,
+        onsiteVerification: verified.onsiteVerification,
+        trustEvidenceDigest: verified.trustEvidenceDigest,
       }),
       targetIdentityKey: this.options.identityKey,
-      trust: staged.trust,
+      trust,
       secretStore: this.options.secretStore,
+      issuerKey,
       snapshot: await this.options.readiness.reserve({
         transferId: input.prepare.transferId,
         expiresAt: new Date(readyNow + 5 * 60_000).toISOString(),
@@ -291,13 +377,13 @@ export class DisasterRecoveryTarget {
       now: readyNow,
     });
     const transition = createSignedTrustEvent({
-      current: staged.trust,
+      current: trust,
       at: new Date(this.options.now?.() ?? Date.now()).toISOString(),
       signer: input.recoveryRoot,
       body: {
         t: "issuer-transition",
-        nextTrustEpoch: staged.baseline.trustEpoch + 1,
-        fromIssuerKeyId: staged.baseline.issuer.issuerKeyId,
+        nextTrustEpoch: verified.baseline.trustEpoch + 1,
+        fromIssuerKeyId: verified.baseline.issuer.issuerKeyId,
         toIssuerKeyId: issuerKey.deviceId,
         toIssuerPublicKey: issuerKey.publicKey,
         toDeviceId: this.options.deviceId,
@@ -313,14 +399,14 @@ export class DisasterRecoveryTarget {
       targetDeviceId: this.options.deviceId,
       checkpointTargetId: input.prepare.checkpointTargetId,
       checkpointEnvelopeDigest: input.prepare.checkpointEnvelope.digest,
-      baseline: staged.baseline,
-      onsiteVerification: staged.onsiteVerification,
-      catalog: staged.catalog,
-      catalogRef: staged.catalogRef,
+      baseline: verified.baseline,
+      onsiteVerification: verified.onsiteVerification,
+      catalog: verified.catalog,
+      catalogRef: verified.catalogRef,
       readyProof,
       trustTransition: transition,
-      nextAnchorEpoch: staged.baseline.anchorEpoch + 1,
-      nextTrustEpoch: staged.baseline.trustEpoch + 1,
+      nextAnchorEpoch: verified.baseline.anchorEpoch + 1,
+      nextTrustEpoch: verified.baseline.trustEpoch + 1,
       targetIssuerPublicKey: issuerKey.publicKey,
     }, input.recoveryRoot) as Extract<DisasterRecoveryCommand, { op: "import" }>;
     const importedContext = await this.#context(
@@ -328,17 +414,6 @@ export class DisasterRecoveryTarget {
       input.recoveryRoot.rootPublicKey,
       issuerKey,
     );
-    await candidate.recordVerified(input.prepare.transferId, {
-      baseline: staged.baseline,
-      baselineEvents: staged.baselineEvents,
-      reachabilityCut: input.trustEvidence.cut,
-      trustEvidence: input.trustEvidence.evidence,
-      trustEvidenceDigest: input.trustEvidence.digest,
-      onsiteVerification: staged.onsiteVerification,
-      authorityRecordsRef: staged.authorityRecordsRef,
-      catalog: staged.catalog,
-      catalogRef: staged.catalogRef,
-    });
     const state = await importedContext.journal.append({
       v: 1,
       mode: "disaster-recovery",
@@ -346,15 +421,52 @@ export class DisasterRecoveryTarget {
       transferId: input.prepare.transferId,
       imported,
     }, [
-      staged.authorityRecordsRef,
-      staged.catalogRef,
-      ...staged.catalog.retainedArtifacts,
+      verified.authorityRecordsRef,
+      verified.catalogRef,
+      ...verified.catalog.retainedArtifacts,
     ]);
     return Object.freeze({
       state,
-      authorityRecords: staged.authorityRecords,
-      baselineEvents: staged.baselineEvents,
+      authorityRecords: stored.authorityRecords,
+      baselineEvents: verified.baselineEvents,
     });
+  }
+
+  async #readVerifiedCandidateArtifacts(
+    privateArtifacts: FileArtifactStore,
+    verified: DisasterRecoveryVerifiedCandidate,
+    allowShared: boolean,
+  ): Promise<{ readonly authorityRecords: DisasterAuthorityRecordSet }> {
+    const read = async (ref: ArtifactRef): Promise<Uint8Array> => {
+      if (await privateArtifacts.has(ref)) return privateArtifacts.get(ref);
+      if (allowShared && await this.options.sharedArtifacts.has(ref)) {
+        return this.options.sharedArtifacts.get(ref);
+      }
+      throw new Error("Verified disaster candidate is missing a private artifact");
+    };
+    const authorityRecords = parseDisasterAuthorityRecordSet(
+      await read(verified.authorityRecordsRef),
+    );
+    const catalogText = Buffer.from(await read(verified.catalogRef)).toString("utf8");
+    const rawCatalog = JSON.parse(catalogText) as unknown;
+    if (canonicalize(rawCatalog) !== catalogText) {
+      throw new Error("Verified disaster catalog is not canonical");
+    }
+    const catalog = prepareAuthorityCatalog(rawCatalog).catalog;
+    if (
+      canonicalize(catalog) !== canonicalize(verified.catalog) ||
+      canonicalize(authorityRecords.source) !== canonicalize(verified.catalog.source)
+    ) throw new Error("Verified disaster artifacts change their durable exact-set");
+    for (const ref of uniqueRefs([
+      ...authorityRecords.pages.map((page) => page.ref),
+      ...verified.catalog.retainedArtifacts,
+    ])) {
+      if (
+        !await privateArtifacts.has(ref) &&
+        !(allowShared && await this.options.sharedArtifacts.has(ref))
+      ) throw new Error("Verified disaster candidate has a missing private reference");
+    }
+    return { authorityRecords };
   }
 
   async commit(input: {
@@ -366,18 +478,42 @@ export class DisasterRecoveryTarget {
     readonly trustRecord: HomeTrustRecord;
     readonly installation: DisasterRecoveryInstallation;
   }> {
-    const installed = await loadCurrentDisasterRecoveryInstallation(this.options.authorityLog);
-    if (installed?.installation.transferId === input.transferId) {
-      return this.#completeInstalled(input.transferId, input.recoveryRoot, installed.installation);
-    }
     const candidate = this.#candidateFor(input.recoveryRoot.rootPublicKey);
     const claimed = await candidate.state(input.transferId);
     if (!claimed?.verified) throw new Error("Disaster recovery candidate is not verified");
     assertRecoveryRoot(claimed.prepare, input.recoveryRoot);
     const context = await this.#context(input.transferId, input.recoveryRoot.rootPublicKey);
     const state = await context.journal.state(input.transferId);
-    if (!state?.imported || state.phase !== "imported") {
+    if (claimed.terminal === "aborted" || state?.phase === "aborted") {
+      throw new Error("Terminal-aborted disaster recovery cannot be committed");
+    }
+    if (!state?.imported) {
       throw new Error("Disaster recovery authority is not privately imported");
+    }
+    if (claimed.terminal === "committed") {
+      if (!claimed.installDecision) {
+        throw new Error("Committed disaster candidate has no durable install decision");
+      }
+      if (state.phase !== "committed" && state.phase !== "tombstoned") {
+        throw new Error("Committed disaster candidate has no private committed state");
+      }
+      return {
+        state,
+        trustRecord: claimed.installDecision.installation.trustRecord,
+        installation: claimed.installDecision.installation,
+      };
+    }
+    if (claimed.installDecision) {
+      return this.#forwardInstallDecision({
+        transferId: input.transferId,
+        recoveryRoot: input.recoveryRoot,
+        candidate,
+        decision: claimed.installDecision,
+        context,
+      });
+    }
+    if (state.phase !== "imported") {
+      throw new Error("Disaster recovery install decision is missing from private progress");
     }
     const imported = state.imported;
     const current = replayTrustChain(claimed.verified.baselineEvents);
@@ -491,34 +627,42 @@ export class DisasterRecoveryTarget {
       now: this.options.now?.(),
     });
     input.signal?.throwIfAborted();
-    await candidate.terminal(input.transferId, "committed");
-    await this.options.authorityLog.installPlannedAnchorPrefix({
-      source: disasterAuthorityEnvelopes(context.artifacts, records),
-      sourceHead: records.source,
-      installationEntries: [
-        ...missingTrust.map((event) => ({
-          stream: "trust",
-          body: { t: "home-trust-event", event },
-        })),
-        { stream: "trust", body: { t: "home-trust-event", event: imported.trustTransition } },
-        { stream: "trust", body: { t: "home-trust-event", event: revoke } },
-        { stream: "trust", body: { t: "home-trust-record", record: trustRecord } },
-        ...compromised.map((record) => ({ stream: "exposure", body: record })),
-        {
-          stream: DISASTER_TRANSFER_STREAM,
-          body: {
-            v: 1,
-            mode: "disaster-recovery",
-            t: "anchor-committed",
-            transferId: input.transferId,
-            commit,
-          } satisfies DisasterRecord,
-        },
-        { stream: "transfer:anchor-current", body: installation },
-      ],
+    const installationEntries: readonly LogicalRecord<unknown>[] = [
+      ...missingTrust.map((event) => ({
+        stream: "trust",
+        body: { t: "home-trust-event", event },
+      })),
+      { stream: "trust", body: { t: "home-trust-event", event: imported.trustTransition } },
+      { stream: "trust", body: { t: "home-trust-event", event: revoke } },
+      { stream: "trust", body: { t: "home-trust-record", record: trustRecord } },
+      ...compromised.map((record) => ({ stream: "exposure", body: record })),
+      {
+        stream: DISASTER_TRANSFER_STREAM,
+        body: {
+          v: 1,
+          mode: "disaster-recovery",
+          t: "anchor-committed",
+          transferId: input.transferId,
+          commit,
+        } satisfies DisasterRecord,
+      },
+      { stream: "transfer:anchor-current", body: installation },
+    ];
+    const decided = await candidate.decideInstall(input.transferId, {
+      installationEntries,
+      installation,
       candidateReferences: references,
     });
-    return this.#completeInstalled(input.transferId, input.recoveryRoot, installation);
+    if (!decided.installDecision) {
+      throw new Error("Disaster candidate did not retain its install decision");
+    }
+    return this.#forwardInstallDecision({
+      transferId: input.transferId,
+      recoveryRoot: input.recoveryRoot,
+      candidate,
+      decision: decided.installDecision,
+      context,
+    });
   }
 
   async abort(input: {
@@ -604,15 +748,84 @@ export class DisasterRecoveryTarget {
     });
   }
 
+  async #forwardInstallDecision(input: {
+    readonly transferId: string;
+    readonly recoveryRoot: RecoveryRoot;
+    readonly candidate: FileDisasterRecoveryCandidateJournal;
+    readonly decision: DisasterRecoveryInstallDecision;
+    readonly context: {
+      readonly root: string;
+      readonly artifacts: FileArtifactStore;
+      readonly journal: FileDisasterRecoveryTransferJournal;
+    };
+  }): Promise<{
+    readonly state: DisasterRecoveryState;
+    readonly trustRecord: HomeTrustRecord;
+    readonly installation: DisasterRecoveryInstallation;
+  }> {
+    let installed = await loadCurrentDisasterRecoveryInstallation(this.options.authorityLog);
+    if (installed) {
+      if (
+        installed.installation.transferId !== input.transferId ||
+        canonicalize(installed.installation) !== canonicalize(input.decision.installation)
+      ) throw new Error("Another authority generation is current before disaster completion");
+    } else {
+      const claimed = await input.candidate.state(input.transferId);
+      if (!claimed?.verified || !claimed.installDecision) {
+        throw new Error("Disaster authority install has no durable decision");
+      }
+      if (canonicalize(claimed.installDecision) !== canonicalize(input.decision)) {
+        throw new Error("Disaster authority install decision conflicts with replay");
+      }
+      const stored = await this.#readVerifiedCandidateArtifacts(
+        input.context.artifacts,
+        claimed.verified,
+        false,
+      );
+      if (
+        canonicalize(stored.authorityRecords.source) !==
+        canonicalize(input.decision.installation.sourceHead)
+      ) throw new Error("Disaster authority source differs from its install decision");
+      await this.options.authorityLog.installPlannedAnchorPrefix({
+        source: disasterAuthorityEnvelopes(input.context.artifacts, stored.authorityRecords),
+        sourceHead: input.decision.installation.sourceHead,
+        installationEntries: input.decision.installationEntries,
+        candidateReferences: input.decision.candidateReferences,
+      });
+      installed = await loadCurrentDisasterRecoveryInstallation(this.options.authorityLog);
+    }
+    if (
+      !installed ||
+      canonicalize(installed.installation) !== canonicalize(input.decision.installation)
+    ) throw new Error("Disaster authority installation failed exact read-back");
+    return this.#completeInstalled(
+      input.transferId,
+      input.recoveryRoot,
+      input.decision,
+    );
+  }
+
   async #completeInstalled(
     transferId: string,
     recoveryRoot: RecoveryRoot,
-    installation: DisasterRecoveryInstallation,
+    decision: DisasterRecoveryInstallDecision,
   ): Promise<{
     readonly state: DisasterRecoveryState;
     readonly trustRecord: HomeTrustRecord;
     readonly installation: DisasterRecoveryInstallation;
   }> {
+    const installation = decision.installation;
+    const candidate = this.#candidateFor(recoveryRoot.rootPublicKey);
+    const durableCandidate = await candidate.state(transferId);
+    if (
+      !durableCandidate?.installDecision ||
+      canonicalize(durableCandidate.installDecision) !== canonicalize(decision)
+    ) throw new Error("Installed disaster recovery has no matching candidate decision");
+    const installed = await loadCurrentDisasterRecoveryInstallation(this.options.authorityLog);
+    if (
+      !installed ||
+      canonicalize(installed.installation) !== canonicalize(installation)
+    ) throw new Error("Installed disaster recovery is not current authority");
     const context = await this.#context(transferId, recoveryRoot.rootPublicKey);
     let state = await context.journal.state(transferId);
     if (!state) throw new Error("Installed disaster recovery has no private replay state");
@@ -633,7 +846,14 @@ export class DisasterRecoveryTarget {
     if (state.phase !== "committed" && state.phase !== "tombstoned") {
       throw new Error("Installed disaster recovery journal is not committed");
     }
-    await this.#candidateFor(recoveryRoot.rootPublicKey).terminal(transferId, "committed");
+    const activeKey = await loadActiveAnchorIssuerKey(
+      this.options.secretStore,
+      installation.trustRecord.issuer.issuerKeyId,
+    );
+    if (!activeKey || activeKey.publicKey !== installation.trustRecord.issuer.issuerPublicKey) {
+      throw new Error("Installed disaster recovery issuer key is not active");
+    }
+    await candidate.terminal(transferId, "committed");
     return { state, trustRecord: installation.trustRecord, installation };
   }
 
@@ -770,53 +990,65 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
     log: authorityLog,
     generation: installed.generation,
   });
-  let state: DisasterRecoveryState | undefined;
-  if (!receipt) {
-    const stagingRoot = input.stagingRoot ?? path.join(
-      input.zhixingHome,
-      "distributed-runtime",
-      "disaster-recovery-staging",
+  const stagingRoot = input.stagingRoot ?? path.join(
+    input.zhixingHome,
+    "distributed-runtime",
+    "disaster-recovery-staging",
+  );
+  const privateRoot = path.join(stagingRoot, "transfers", installation.transferId);
+  const privateArtifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
+  const transferKey = await loadAnchorIssuerKey(input.secretStore, installation.transferId);
+  const privateLog = new FileAuthorityCommitLog(
+    path.join(stagingRoot, "journals", installation.transferId),
+    privateArtifacts,
+    { storageMaintenance: input.storageMaintenance },
+  );
+  const storedIssuer = transferKey ?? await loadStoredTargetIssuer(privateLog);
+  const journal = new FileDisasterRecoveryTransferJournal(
+    privateLog,
+    disasterVerifiers(
+      installation.recoveryRootPublicKey,
+      target.device,
+      storedIssuer,
+    ),
+    input.now ?? Date.now,
+  );
+  let state = await journal.state(installation.transferId);
+  if (!state) throw new Error("Installed disaster recovery has no exact private replay state");
+  if (state.phase === "imported") {
+    if (
+      !transferKey || transferKey.deviceId !== installation.trustRecord.issuer.issuerKeyId ||
+      transferKey.publicKey !== installation.commit.targetIssuerPublicKey
+    ) throw new Error("Installed disaster recovery is missing its exact issuer key");
+    await activateAnchorIssuerKey(
+      input.secretStore,
+      installation.transferId,
+      installation.trustRecord.issuer.issuerKeyId,
     );
-    const privateRoot = path.join(stagingRoot, "transfers", installation.transferId);
-    const privateArtifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
-    const transferKey = await loadAnchorIssuerKey(input.secretStore, installation.transferId);
-    const journal = new FileDisasterRecoveryTransferJournal(
-      new FileAuthorityCommitLog(
-        path.join(stagingRoot, "journals", installation.transferId),
-        privateArtifacts,
-        { storageMaintenance: input.storageMaintenance },
-      ),
-      disasterVerifiers(
-        installation.recoveryRootPublicKey,
-        target.device,
-        transferKey ?? undefined,
-      ),
-      input.now ?? Date.now,
-    );
-    state = await journal.state(installation.transferId);
-    if (!state) throw new Error("Installed disaster recovery has no exact private replay state");
-    if (state.phase === "imported") {
-      if (
-        !transferKey || transferKey.deviceId !== installation.trustRecord.issuer.issuerKeyId ||
-        transferKey.publicKey !== installation.commit.targetIssuerPublicKey
-      ) throw new Error("Installed disaster recovery is missing its exact issuer key");
-      await activateAnchorIssuerKey(
-        input.secretStore,
-        installation.transferId,
-        installation.trustRecord.issuer.issuerKeyId,
-      );
-      state = await journal.append({
-        v: 1,
-        mode: "disaster-recovery",
-        t: "anchor-committed",
-        transferId: installation.transferId,
-        commit: installation.commit,
-      });
-    }
-    if (state.phase !== "committed" && state.phase !== "tombstoned") {
-      throw new Error("Installed disaster recovery private journal is not committed");
-    }
+    state = await journal.append({
+      v: 1,
+      mode: "disaster-recovery",
+      t: "anchor-committed",
+      transferId: installation.transferId,
+      commit: installation.commit,
+    });
   }
+  if (state.phase !== "committed" && state.phase !== "tombstoned") {
+    throw new Error("Installed disaster recovery private journal is not committed");
+  }
+  const candidate = new FileDisasterRecoveryCandidateJournal(
+    new FileAuthorityCommitLog(
+      path.join(stagingRoot, "candidate-claims"),
+      input.bootstrapStore.artifactStore(),
+      { storageMaintenance: input.storageMaintenance },
+    ),
+    installation.recoveryRootPublicKey,
+  );
+  const candidateState = await candidate.state(installation.transferId);
+  if (
+    !candidateState?.installDecision ||
+    canonicalize(candidateState.installDecision.installation) !== canonicalize(installation)
+  ) throw new Error("Installed disaster recovery has no matching target-wide decision");
   const activeKey = await loadActiveAnchorIssuerKey(
     input.secretStore,
     installation.trustRecord.issuer.issuerKeyId,
@@ -824,6 +1056,7 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
   if (!activeKey || activeKey.publicKey !== installation.trustRecord.issuer.issuerPublicKey) {
     throw new Error("Installed disaster recovery issuer key is not active");
   }
+  await candidate.terminal(installation.transferId, "committed");
   input.bootstrapStore.bindIssuerKey(activeKey);
   const catalogText = Buffer.from(
     await input.bootstrapStore.artifactStore().get(installation.catalog),
@@ -1041,7 +1274,8 @@ function uniqueRefs(refs: readonly ArtifactRef[]): readonly ArtifactRef[] {
     if (prior && prior.bytes !== ref.bytes) throw new Error("Artifact digest has conflicting sizes");
     unique.set(ref.digest, ref);
   }
-  return [...unique.values()];
+  return [...unique.values()].sort((left, right) =>
+    left.digest.localeCompare(right.digest, "en-US"));
 }
 
 function unsignedTrustEvent(event: HomeTrustEvent): Omit<HomeTrustEvent, "signature"> {

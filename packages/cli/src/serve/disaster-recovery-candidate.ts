@@ -8,12 +8,17 @@ import type {
   LogicalRecord,
   RecoveryCheckpointVerification,
 } from "@zhixing/core/contracts";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
 import {
+  assertArtifactRef,
+  FileAuthorityCommitLog,
+} from "@zhixing/core/authority";
+import {
+  authorityCatalogDigest,
   canonicalize,
   prepareAuthorityCatalog,
   protocolDigest,
   type ProtocolSignatureVerifier,
+  validateDisasterRecoveryCommit,
   validateDisasterRecoveryAbort,
   validateDisasterRecoveryCommand,
 } from "@zhixing/core/protocol";
@@ -33,6 +38,10 @@ import {
 } from "./target-wide-anchor-candidate.js";
 import type { DisasterRecoveryPeerEvidence } from
   "./disaster-recovery-trust-evidence.js";
+import {
+  createDisasterRecoveryInstallation,
+  type DisasterRecoveryInstallation,
+} from "./disaster-recovery-installation.js";
 
 const DISASTER_CANDIDATE_STREAM = "transfer:anchor-disaster-candidate";
 
@@ -50,9 +59,16 @@ export interface DisasterRecoveryVerifiedCandidate {
   readonly catalogRef: ArtifactRef;
 }
 
+export interface DisasterRecoveryInstallDecision {
+  readonly installationEntries: readonly LogicalRecord<unknown>[];
+  readonly installation: DisasterRecoveryInstallation;
+  readonly candidateReferences: readonly ArtifactRef[];
+}
+
 export interface DisasterRecoveryCandidateState {
   readonly prepare: PrepareCommand;
   readonly verified?: DisasterRecoveryVerifiedCandidate;
+  readonly installDecision?: DisasterRecoveryInstallDecision;
   readonly terminal?: "committed" | "aborted";
   readonly abort?: DisasterRecoveryAbort;
 }
@@ -68,6 +84,12 @@ type DisasterCandidateRecord =
       readonly t: "disaster-recovery-candidate-verified";
       readonly transferId: string;
       readonly verifiedJson: string;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "disaster-recovery-candidate-install-decided";
+      readonly transferId: string;
+      readonly decisionJson: string;
     }
   | {
       readonly v: 1;
@@ -181,6 +203,45 @@ export class FileDisasterRecoveryCandidateJournal {
     })).value;
   }
 
+  async decideInstall(
+    transferId: string,
+    input: DisasterRecoveryInstallDecision,
+  ): Promise<DisasterRecoveryCandidateState> {
+    return (await this.#transact((projection) => {
+      const existing = projection.candidates.get(transferId);
+      if (!existing) throw new Error("Disaster install decision has no durable candidate claim");
+      if (!existing.verified) throw new Error("Disaster install decision has no verified candidate");
+      const installDecision = validateInstallDecision(
+        existing.prepare,
+        existing.verified,
+        input,
+        this.recoveryRootPublicKey,
+      );
+      if (existing.installDecision) {
+        if (canonicalize(existing.installDecision) !== canonicalize(installDecision)) {
+          throw new Error("Disaster install decision conflicts with replay");
+        }
+        return { kind: "return", value: existing };
+      }
+      if (existing.terminal !== undefined) {
+        throw new Error("Terminal disaster candidate cannot gain an install decision");
+      }
+      return {
+        kind: "append",
+        entries: [{
+          stream: DISASTER_CANDIDATE_STREAM,
+          body: {
+            v: 1,
+            t: "disaster-recovery-candidate-install-decided",
+            transferId,
+            decisionJson: canonicalize(installDecision),
+          } satisfies DisasterCandidateRecord,
+        }],
+        value: { ...existing, installDecision },
+      };
+    }, input.candidateReferences)).value;
+  }
+
   async terminal(
     transferId: string,
     terminal: "committed" | "aborted",
@@ -198,6 +259,12 @@ export class FileDisasterRecoveryCandidateJournal {
         : undefined;
       if (terminal !== "aborted" && abortInput !== undefined) {
         throw new TypeError("Committed disaster candidate cannot store an abort");
+      }
+      if (terminal === "committed" && !existing.installDecision) {
+        throw new Error("Committed disaster candidate has no durable install decision");
+      }
+      if (terminal === "aborted" && existing.installDecision) {
+        throw new Error("Install-decided disaster candidate cannot be aborted");
       }
       if (existing.terminal !== undefined) {
         if (
@@ -337,8 +404,34 @@ function reduceProjection(
     candidates.set(record.transferId, { ...existing, verified });
     return { ...base, candidates };
   }
+  if (record.t === "disaster-recovery-candidate-install-decided") {
+    if (!existing.verified) {
+      throw new Error("Disaster install decision precedes candidate verification");
+    }
+    if (existing.terminal !== undefined) {
+      throw new Error("Terminal disaster candidate cannot gain an install decision");
+    }
+    const installDecision = parseStoredInstallDecision(
+      record.decisionJson,
+      existing.prepare,
+      existing.verified,
+      recoveryRootPublicKey,
+    );
+    if (
+      existing.installDecision &&
+      canonicalize(existing.installDecision) !== canonicalize(installDecision)
+    ) throw new Error("Disaster candidate has conflicting install decisions");
+    candidates.set(record.transferId, { ...existing, installDecision });
+    return { ...base, candidates };
+  }
   if (existing.terminal !== undefined && existing.terminal !== record.terminal) {
     throw new Error("Disaster candidate has conflicting terminal decisions");
+  }
+  if (record.terminal === "committed" && !existing.installDecision) {
+    throw new Error("Disaster committed terminal has no install decision");
+  }
+  if (record.terminal === "aborted" && existing.installDecision) {
+    throw new Error("Disaster abort conflicts with an install decision");
   }
   if (
     record.terminal === "aborted" &&
@@ -403,6 +496,30 @@ function validateRecord(
       verifiedJson: canonicalize(parseStoredVerified(
         record.verifiedJson,
         candidate.prepare,
+        recoveryRootPublicKey,
+      )),
+    };
+  }
+  if (record.t === "disaster-recovery-candidate-install-decided") {
+    assertExactKeys(record, ["decisionJson", "t", "transferId", "v"]);
+    if (typeof record.transferId !== "string") {
+      throw new TypeError("Disaster candidate transfer is invalid");
+    }
+    if (typeof record.decisionJson !== "string") {
+      throw new TypeError("Disaster install decision bytes are invalid");
+    }
+    const candidate = candidates.get(record.transferId);
+    if (!candidate?.verified) {
+      throw new Error("Disaster install decision precedes candidate verification");
+    }
+    return {
+      v: 1,
+      t: record.t,
+      transferId: record.transferId,
+      decisionJson: canonicalize(parseStoredInstallDecision(
+        record.decisionJson,
+        candidate.prepare,
+        candidate.verified,
         recoveryRootPublicKey,
       )),
     };
@@ -565,6 +682,219 @@ function validateVerifiedCandidate(
     catalog,
     catalogRef: structuredClone(value.catalogRef as ArtifactRef),
   });
+}
+
+function parseStoredInstallDecision(
+  input: string,
+  prepare: PrepareCommand,
+  verified: DisasterRecoveryVerifiedCandidate,
+  recoveryRootPublicKey: string,
+): DisasterRecoveryInstallDecision {
+  const raw = JSON.parse(input) as unknown;
+  if (canonicalize(raw) !== input) {
+    throw new TypeError("Disaster install decision bytes are not canonical");
+  }
+  return validateInstallDecision(prepare, verified, raw, recoveryRootPublicKey);
+}
+
+function validateInstallDecision(
+  prepare: PrepareCommand,
+  verified: DisasterRecoveryVerifiedCandidate,
+  input: unknown,
+  recoveryRootPublicKey: string,
+): DisasterRecoveryInstallDecision {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Disaster install decision must be an object");
+  }
+  const value = input as Partial<DisasterRecoveryInstallDecision> & Record<string, unknown>;
+  assertExactKeys(value, ["candidateReferences", "installation", "installationEntries"]);
+  if (!Array.isArray(value.installationEntries) || !Array.isArray(value.candidateReferences)) {
+    throw new TypeError("Disaster install decision is incomplete");
+  }
+  const installation = validateDecisionInstallation(
+    prepare,
+    verified,
+    value.installation,
+    recoveryRootPublicKey,
+  );
+  const candidateReferences = canonicalReferences(value.candidateReferences);
+  const requiredReferences = [
+    verified.authorityRecordsRef,
+    verified.catalogRef,
+    ...verified.catalog.retainedArtifacts,
+  ];
+  for (const required of requiredReferences) {
+    if (!candidateReferences.some((candidate) => canonicalize(candidate) === canonicalize(required))) {
+      throw new TypeError("Disaster install decision omits a verified candidate reference");
+    }
+  }
+  const installationEntries = canonicalInstallationEntries(value.installationEntries);
+  validateInstallationEntries(installationEntries, installation, verified);
+  return Object.freeze({
+    installationEntries,
+    installation,
+    candidateReferences,
+  });
+}
+
+function validateDecisionInstallation(
+  prepare: PrepareCommand,
+  verified: DisasterRecoveryVerifiedCandidate,
+  input: unknown,
+  recoveryRootPublicKey: string,
+): DisasterRecoveryInstallation {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Disaster recovery installation must be an object");
+  }
+  const value = input as Partial<DisasterRecoveryInstallation> & Record<string, unknown>;
+  assertExactKeys(value, [
+    "authorityRecords",
+    "baseDigest",
+    "catalog",
+    "commit",
+    "recoveryRootPublicKey",
+    "revoke",
+    "sourceHead",
+    "t",
+    "transferId",
+    "transition",
+    "trustRecord",
+    "v",
+  ]);
+  const verifier = recoveryRootVerifier(recoveryRootPublicKey);
+  const commit = validateDisasterRecoveryCommit(value.commit, verifier);
+  const transition = value.transition as HomeTrustEvent;
+  const revoke = value.revoke as HomeTrustEvent;
+  const trustRecord = value.trustRecord as import("@zhixing/core/contracts").HomeTrustRecord;
+  const authorityRecords = value.authorityRecords as ArtifactRef;
+  const catalog = value.catalog as ArtifactRef;
+  assertArtifactRef(authorityRecords);
+  assertArtifactRef(catalog);
+  const sourceHead = value.sourceHead as import("@zhixing/core/authority").DurableLogCheckpoint;
+  if (
+    value.v !== 1 || value.t !== "disaster-anchor-installed" ||
+    value.transferId !== prepare.transferId ||
+    value.recoveryRootPublicKey !== recoveryRootPublicKey ||
+    commit.transferId !== prepare.transferId ||
+    commit.targetDeviceId !== prepare.targetDeviceId ||
+    commit.checkpointEnvelopeDigest !== prepare.checkpointEnvelope.digest ||
+    commit.authorityCatalogDigest !== authorityCatalogDigest(verified.catalog) ||
+    commit.nextAnchorEpoch !== verified.baseline.anchorEpoch + 1 ||
+    commit.nextTrustEpoch !== verified.baseline.trustEpoch + 1 ||
+    canonicalize(authorityRecords) !== canonicalize(verified.authorityRecordsRef) ||
+    canonicalize(catalog) !== canonicalize(verified.catalogRef) ||
+    canonicalize(sourceHead) !== canonicalize(verified.catalog.source)
+  ) throw new TypeError("Disaster installation changes its verified candidate identity");
+  const trust = replayTrustChain([...verified.baselineEvents, transition, revoke]);
+  verifyHomeTrustRecord(trustRecord, trust);
+  if (
+    trustRecord.issuer.deviceId !== prepare.targetDeviceId ||
+    trustRecord.issuer.issuerPublicKey !== commit.targetIssuerPublicKey
+  ) throw new TypeError("Disaster installation changes its target issuer identity");
+  const installation = createDisasterRecoveryInstallation({
+    commit,
+    recoveryRootPublicKey,
+    transition,
+    revoke,
+    trustRecord,
+    authorityRecords,
+    catalog,
+    sourceHead,
+  });
+  if (canonicalize(installation) !== canonicalize(value)) {
+    throw new TypeError("Disaster installation is not canonical or internally complete");
+  }
+  return installation;
+}
+
+function canonicalInstallationEntries(
+  input: readonly unknown[],
+): readonly LogicalRecord<unknown>[] {
+  const normalized = JSON.parse(canonicalize(input)) as unknown;
+  if (!Array.isArray(normalized) || normalized.length < 5) {
+    throw new TypeError("Disaster install decision has incomplete installation entries");
+  }
+  for (const item of normalized) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError("Disaster installation entry must be an object");
+    }
+    const entry = item as Record<string, unknown>;
+    assertExactKeys(entry, ["body", "stream"]);
+    if (typeof entry.stream !== "string" || entry.stream.length === 0) {
+      throw new TypeError("Disaster installation entry stream is invalid");
+    }
+  }
+  return Object.freeze(normalized as LogicalRecord<unknown>[]);
+}
+
+function validateInstallationEntries(
+  entries: readonly LogicalRecord<unknown>[],
+  installation: DisasterRecoveryInstallation,
+  verified: DisasterRecoveryVerifiedCandidate,
+): void {
+  const transitionIndex = entries.findIndex((entry) =>
+    entry.stream === "trust" && canonicalize(entry.body) === canonicalize({
+      t: "home-trust-event",
+      event: installation.transition,
+    }));
+  if (transitionIndex < 0 || transitionIndex + 4 > entries.length) {
+    throw new TypeError("Disaster installation entries omit the issuer transition");
+  }
+  const missingTrust = entries.slice(0, transitionIndex);
+  const expectedMissing = verified.baselineEvents.slice(
+    verified.baselineEvents.length - missingTrust.length,
+  ).map((event) => ({ stream: "trust", body: { t: "home-trust-event", event } }));
+  if (
+    missingTrust.length > verified.baselineEvents.length ||
+    canonicalize(missingTrust) !== canonicalize(expectedMissing) ||
+    canonicalize(entries[transitionIndex + 1]) !== canonicalize({
+      stream: "trust",
+      body: { t: "home-trust-event", event: installation.revoke },
+    }) ||
+    canonicalize(entries[transitionIndex + 2]) !== canonicalize({
+      stream: "trust",
+      body: { t: "home-trust-record", record: installation.trustRecord },
+    }) ||
+    canonicalize(entries.at(-2)) !== canonicalize({
+      stream: "transfer:anchor-disaster",
+      body: {
+        v: 1,
+        mode: "disaster-recovery",
+        t: "anchor-committed",
+        transferId: installation.transferId,
+        commit: installation.commit,
+      },
+    }) ||
+    canonicalize(entries.at(-1)) !== canonicalize({
+      stream: "transfer:anchor-current",
+      body: installation,
+    })
+  ) throw new TypeError("Disaster installation entries do not match the frozen decision");
+  for (const entry of entries.slice(transitionIndex + 3, -2)) {
+    const exposure = entry.body as Record<string, unknown>;
+    if (
+      entry.stream !== "exposure" || exposure.state !== "compromised" ||
+      exposure.deviceId !== verified.baseline.issuer.deviceId
+    ) throw new TypeError("Disaster installation contains an unrelated exposure decision");
+  }
+}
+
+function canonicalReferences(input: readonly unknown[]): readonly ArtifactRef[] {
+  const unique = new Map<string, ArtifactRef>();
+  for (const item of input) {
+    assertArtifactRef(item);
+    const prior = unique.get(item.digest);
+    if (prior && prior.bytes !== item.bytes) {
+      throw new TypeError("Disaster candidate reference digest has conflicting sizes");
+    }
+    unique.set(item.digest, Object.freeze({ ...item }));
+  }
+  const result = [...unique.values()].sort((left, right) =>
+    left.digest.localeCompare(right.digest, "en-US"));
+  if (canonicalize(input) !== canonicalize(result)) {
+    throw new TypeError("Disaster candidate references are not a canonical exact-set");
+  }
+  return Object.freeze(result);
 }
 
 function validateCandidateAbort(

@@ -1255,6 +1255,69 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("disaster pre-commit signal or authenticated candidate terminal order drifted");
   }
+  const verifiedReplay = disasterTarget.indexOf("if (claimed.verified) {");
+  const freshVerification = disasterTarget.indexOf(
+    "verifyAndStageDisasterRecoveryAuthority({",
+    verifiedReplay,
+  );
+  const installDecision = disasterTarget.indexOf("candidate.decideInstall(");
+  const authorityInstall = disasterTarget.indexOf(
+    "this.options.authorityLog.installPlannedAnchorPrefix({",
+    installDecision,
+  );
+  const committedTerminals = [...disasterTarget.matchAll(
+    /candidate\.terminal\([^\n]+,\s*"committed"\)/g,
+  )].map((match) => match.index ?? -1);
+  const liveCompletion = disasterTarget.indexOf("async #completeInstalled(");
+  const livePrivateCommitted = disasterTarget.indexOf(
+    't: "anchor-committed"',
+    liveCompletion,
+  );
+  const liveActiveKeyReadBack = disasterTarget.indexOf(
+    "await loadActiveAnchorIssuerKey(",
+    livePrivateCommitted,
+  );
+  const liveTerminal = disasterTarget.indexOf(
+    'candidate.terminal(transferId, "committed")',
+    liveCompletion,
+  );
+  const startupCompletion = disasterTarget.indexOf(
+    "export async function completeDisasterRecoveryInstallationBeforeBootstrap(",
+  );
+  const startupPrivateCommitted = disasterTarget.indexOf(
+    't: "anchor-committed"',
+    startupCompletion,
+  );
+  const startupActiveKeyReadBack = disasterTarget.indexOf(
+    "await loadActiveAnchorIssuerKey(",
+    startupPrivateCommitted,
+  );
+  const startupTerminal = disasterTarget.indexOf(
+    'candidate.terminal(installation.transferId, "committed")',
+    startupCompletion,
+  );
+  if (
+    verifiedReplay < 0 || freshVerification < 0 || verifiedReplay > freshVerification ||
+    !disasterTarget.includes("#importVerifiedCandidate({") ||
+    !disasterTarget.includes("issuerKey,") ||
+    !disasterCandidate.includes('t: "disaster-recovery-candidate-install-decided"') ||
+    disasterCandidate.includes("disaster-recovery-candidate-prepared") ||
+    !disasterCandidate.includes("async decideInstall(") ||
+    !disasterCandidate.includes("installationEntries") ||
+    !disasterCandidate.includes("candidateReferences") ||
+    !disasterCandidate.includes("Committed disaster candidate has no durable install decision") ||
+    !disasterCandidate.includes("Install-decided disaster candidate cannot be aborted") ||
+    installDecision < 0 || authorityInstall < installDecision ||
+    committedTerminals.length === 0 ||
+    committedTerminals.some((index) => index < authorityInstall) ||
+    liveCompletion < 0 || livePrivateCommitted < liveCompletion ||
+    liveActiveKeyReadBack < livePrivateCommitted || liveTerminal < liveActiveKeyReadBack ||
+    startupCompletion < 0 || startupPrivateCommitted < startupCompletion ||
+    startupActiveKeyReadBack < startupPrivateCommitted ||
+    startupTerminal < startupActiveKeyReadBack
+  ) {
+    failures.push("disaster verified replay, install decision or target-wide terminal order drifted");
+  }
   const rootLifecycleDescriptor = frozenLiteralDescriptor(
     "packages/cli/src/serve/recovery-root-lifecycle.ts",
     rootLifecycle,

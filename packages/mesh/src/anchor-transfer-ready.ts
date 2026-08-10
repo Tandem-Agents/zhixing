@@ -13,7 +13,10 @@ import {
   deviceIdFromPublicKey,
   verifyDeviceSignature,
 } from "./device-identity.js";
-import { loadOrCreateAnchorIssuerKey } from "./device-key-store.js";
+import {
+  loadAnchorIssuerKey,
+  loadOrCreateAnchorIssuerKey,
+} from "./device-key-store.js";
 import type { TrustProjection } from "./trust-chain.js";
 
 export interface AnchorTransferReadySnapshot {
@@ -35,6 +38,7 @@ export async function createAnchorTransferReadyProof(input: {
   readonly targetIdentityKey: DeviceKey;
   readonly trust: TrustProjection;
   readonly secretStore: SecretStorePort;
+  readonly issuerKey?: DeviceKey;
   readonly snapshot: AnchorTransferReadySnapshot;
   readonly now?: number;
   readonly ttlMs?: number;
@@ -51,10 +55,17 @@ export async function createAnchorTransferReadyProof(input: {
   if ((await input.secretStore.unlockState()) !== "unlocked") {
     throw new Error("Target credentials are not unlocked");
   }
-  const issuerKey = await loadOrCreateAnchorIssuerKey(
+  const issuerKey = input.issuerKey ?? await loadOrCreateAnchorIssuerKey(
     input.secretStore,
     input.transferId,
   );
+  if (input.issuerKey) {
+    const persisted = await loadAnchorIssuerKey(input.secretStore, input.transferId);
+    if (
+      !persisted ||
+      JSON.stringify(persisted.exportMaterial()) !== JSON.stringify(input.issuerKey.exportMaterial())
+    ) throw new Error("Ready proof issuer key is not the persisted transfer key");
+  }
   const proof = createSignedReadyProof({
     v: 1,
     requestId: input.requestId,

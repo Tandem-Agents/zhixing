@@ -1,7 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it, vi } from "vitest";
 import type {
   DeviceIdentity,
   DisasterRecoveryCommand,
@@ -33,12 +32,6 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 const AT = "2026-08-10T00:00:00.000Z";
 const NOW = Date.parse("2026-08-10T01:00:00.000Z");
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
 describe("disaster recovery target", () => {
   it("durably single-flights the selected source-less checkpoint before private effects", async () => {
     const fixture = await createFixture();
@@ -121,6 +114,111 @@ describe("disaster recovery target", () => {
       transferId: prepare.transferId,
       userConfirmedOldDeviceIsolated: true,
     })).toEqual(tombstoned);
+  }, 120_000);
+
+  it("resumes a durable verified candidate without recomputing verification or imported bytes", async () => {
+    const fixture = await createFixture({ retainedArtifact: true });
+    const target = fixture.createTarget();
+    const prepare = prepareCommand(fixture, "request-verified-replay", "xfer-01KXPWTM80BYB4SH423EJT1CV7");
+    const originalRecordVerified = FileDisasterRecoveryCandidateJournal.prototype.recordVerified;
+    const verifiedFault = vi.spyOn(
+      FileDisasterRecoveryCandidateJournal.prototype,
+      "recordVerified",
+    ).mockImplementationOnce(async function(
+      this: FileDisasterRecoveryCandidateJournal,
+      transferId,
+      verified,
+    ) {
+      await originalRecordVerified.call(this, transferId, verified);
+      throw new Error("injected failure after verified sync");
+    });
+    await expect(target.prepareAndImport({
+      prepare,
+      checkpoint: fixture.checkpoint,
+      recoveryRoot: fixture.recoveryRoot,
+      trustEvidence: await localTrustEvidence(fixture),
+    })).rejects.toThrow(/after verified sync/);
+    verifiedFault.mockRestore();
+
+    const journal = fixture.candidateJournal();
+    const frozenVerified = (await journal.state(prepare.transferId))?.verified;
+    expect(frozenVerified).toBeDefined();
+    fixture.advanceNow(60_000);
+    const imported = await fixture.createTarget().prepareAndImport({
+      prepare,
+      checkpoint: fixture.checkpoint,
+      recoveryRoot: fixture.recoveryRoot,
+      trustEvidence: await localTrustEvidence(fixture),
+    });
+    expect(imported.state.phase).toBe("imported");
+    expect((await journal.state(prepare.transferId))?.verified).toEqual(frozenVerified);
+    fixture.advanceNow(60_000);
+    expect(await fixture.createTarget().prepareAndImport({
+      prepare,
+      checkpoint: fixture.checkpoint,
+      recoveryRoot: fixture.recoveryRoot,
+      trustEvidence: await localTrustEvidence(fixture),
+    })).toEqual(imported);
+  }, 120_000);
+
+  it("holds the target-wide claim from install decision through startup private completion", async () => {
+    const fixture = await createFixture();
+    const target = fixture.createTarget();
+    const prepare = prepareCommand(fixture, "request-install-replay", "xfer-01KXPWTM80BYB4SH423EJT1CV8");
+    await target.prepareAndImport({
+      prepare,
+      checkpoint: fixture.checkpoint,
+      recoveryRoot: fixture.recoveryRoot,
+      trustEvidence: await localTrustEvidence(fixture),
+    });
+    const originalInstall = fixture.targetAuthorityLog.installPlannedAnchorPrefix.bind(
+      fixture.targetAuthorityLog,
+    );
+    const installFault = vi.spyOn(
+      fixture.targetAuthorityLog,
+      "installPlannedAnchorPrefix",
+    ).mockImplementationOnce(async (input) => {
+      await originalInstall(input);
+      throw new Error("injected lost install response");
+    });
+    await expect(target.commit({
+      transferId: prepare.transferId,
+      recoveryRoot: fixture.recoveryRoot,
+    })).rejects.toThrow(/lost install response/);
+    installFault.mockRestore();
+
+    const journal = fixture.candidateJournal();
+    const decided = await journal.state(prepare.transferId);
+    expect(decided).toMatchObject({
+      installDecision: { installation: { transferId: prepare.transferId } },
+    });
+    expect(decided?.terminal).toBeUndefined();
+    const next = prepareCommand(fixture, "request-blocked", "xfer-01KXPWTM80BYB4SH423EJT1CV9");
+    await expect(journal.claim(next)).rejects.toThrow(/candidate|progress/i);
+    await expect(target.abort({
+      abort: abortCommand(fixture, prepare),
+      recoveryRoot: fixture.recoveryRoot,
+    })).rejects.toThrow(/committed disaster recovery cannot be cancelled/i);
+
+    const descriptor = await completeDisasterRecoveryInstallationBeforeBootstrap({
+      zhixingHome: fixture.targetRoot,
+      deviceId: fixture.targetIdentity.deviceId,
+      secretStore: fixture.secrets,
+      bootstrapStore: fixture.targetStore,
+      stagingRoot: fixture.stagingRoot,
+      now: fixture.now,
+    });
+    expect(descriptor?.state?.phase).toBe("committed");
+    expect(await journal.state(prepare.transferId)).toMatchObject({
+      installDecision: { installation: { transferId: prepare.transferId } },
+      terminal: "committed",
+    });
+    expect(await journal.claim(next)).toEqual({ prepare: next });
+    const replay = await fixture.createTarget().commit({
+      transferId: prepare.transferId,
+      recoveryRoot: fixture.recoveryRoot,
+    });
+    expect(replay.installation).toEqual(descriptor?.installation);
   }, 120_000);
 
   it("persists a root-signed abort before cleanup and rejects late commit", async () => {
@@ -216,9 +314,9 @@ async function localTrustEvidence(fixture: Awaited<ReturnType<typeof createFixtu
   });
 }
 
-async function createFixture() {
-  const sourceRoot = await temporary("zhixing-disaster-source-");
-  const targetRoot = await temporary("zhixing-disaster-target-");
+async function createFixture(options: { readonly retainedArtifact?: boolean } = {}) {
+  const sourceRoot = await createTempDir("disaster-source");
+  const targetRoot = await createTempDir("disaster-target");
   const sourceKey = await DeviceKey.generate();
   const targetKey = await DeviceKey.generate();
   const sourceIdentity = enroll(sourceKey, "lost anchor");
@@ -266,6 +364,13 @@ async function createFixture() {
     markedAt: "2026-08-10T00:03:00.000Z",
   });
   await sourceStore.authorityLog().append([{ stream: "exposure", body: activeExposure }]);
+  if (options.retainedArtifact) {
+    const retained = await sourceStore.artifactStore().put(Buffer.from("retained-disaster-state"));
+    await sourceStore.authorityLog().append([{
+      stream: "control",
+      body: { t: "global-state-write", ref: retained },
+    }]);
+  }
   const checkpoint = (await captureFullAuthorityCheckpoint({
     checkpointId: "01J000000000000000000000D1",
     createdAt: "2026-08-10T00:04:00.000Z",
@@ -286,16 +391,18 @@ async function createFixture() {
     credentialRevision: "credentials-disaster-v1",
   }));
   const stagingRoot = path.join(targetRoot, "disaster-recovery-staging");
+  const targetAuthorityLog = targetStore.authorityLog();
+  let now = NOW;
   const createTarget = () => new DisasterRecoveryTarget({
     deviceId: targetIdentity.deviceId,
     identity: targetIdentity,
     identityKey: targetKey,
     secretStore: secrets,
     sharedArtifacts: targetStore.artifactStore(),
-    authorityLog: targetStore.authorityLog(),
+    authorityLog: targetAuthorityLog,
     stagingRoot,
     readiness: readiness.port,
-    now: () => NOW,
+    now: () => now,
   });
   return {
     sourceRoot,
@@ -308,6 +415,18 @@ async function createFixture() {
     checkpoint,
     secrets,
     stagingRoot,
+    targetAuthorityLog,
+    now: () => now,
+    advanceNow: (milliseconds: number) => {
+      now += milliseconds;
+    },
+    candidateJournal: () => new FileDisasterRecoveryCandidateJournal(
+      new FileAuthorityCommitLog(
+        path.join(stagingRoot, "candidate-claims"),
+        targetStore.artifactStore(),
+      ),
+      recoveryRoot.rootPublicKey,
+    ),
     createTarget,
   };
 }
@@ -334,18 +453,29 @@ function prepareCommand(
   }, fixture.recoveryRoot) as Extract<DisasterRecoveryCommand, { op: "prepare" }>;
 }
 
+function abortCommand(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  prepare: Extract<DisasterRecoveryCommand, { op: "prepare" }>,
+) {
+  return createSignedDisasterRecoveryAbort({
+    v: 1,
+    mode: "disaster-recovery",
+    requestId: prepare.requestId,
+    transferId: prepare.transferId,
+    targetDeviceId: prepare.targetDeviceId,
+    checkpointTargetId: prepare.checkpointTargetId,
+    checkpointEnvelopeDigest: prepare.checkpointEnvelope.digest,
+    reason: "operator-cancelled",
+    at: "2026-08-10T01:02:00.000Z",
+  }, fixture.recoveryRoot);
+}
+
 function enroll(key: DeviceKey, displayName: string): DeviceIdentity {
   return enrollDeviceIdentity(key, {
     displayName,
     platform: "headless",
     enrolledAt: AT,
   });
-}
-
-async function temporary(prefix: string): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), prefix));
-  roots.push(root);
-  return root;
 }
 
 class MemorySecretStore implements SecretStorePort {

@@ -1068,6 +1068,56 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace("if (claimed.verified) {", "if (false) {"),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace(
+        "const activeKey = await loadActiveAnchorIssuerKey(\n      this.options.secretStore,",
+        'await candidate.terminal(transferId, "committed");\n' +
+          "    const activeKey = await loadActiveAnchorIssuerKey(\n      this.options.secretStore,",
+      ),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace(
+        "const activeKey = await loadActiveAnchorIssuerKey(\n    input.secretStore,",
+        'await candidate.terminal(installation.transferId, "committed");\n' +
+          "  const activeKey = await loadActiveAnchorIssuerKey(\n    input.secretStore,",
+      ),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-candidate.ts",
+      (text) => text.replaceAll(
+        "disaster-recovery-candidate-install-decided",
+        "disaster-recovery-candidate-prepared",
+      ),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace(
+        "const decided = await candidate.decideInstall(input.transferId, {",
+        'await candidate.terminal(input.transferId, "committed");\n' +
+          "    const decided = await candidate.decideInstall(input.transferId, {",
+      ),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/recovery-root-lifecycle.ts",
       (text) => text.replace('"domain-reset-establish"', '"domain-reset-bypass"'),
     )).join("\n"),

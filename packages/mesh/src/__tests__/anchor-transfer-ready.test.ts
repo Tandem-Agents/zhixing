@@ -40,8 +40,20 @@ describe("anchor migration ready proof", () => {
       secretStore: fixture.secrets,
       snapshot: snapshot(),
       now: NOW,
+      issuerKey: first.issuerKey,
     });
     expect(replay.issuerKey.deviceId).toBe(first.issuerKey.deviceId);
+    await expect(createAnchorTransferReadyProof({
+      requestId: REQUEST_ID,
+      transferId: TRANSFER_ID,
+      candidateDigest: CANDIDATE_DIGEST,
+      targetIdentityKey: fixture.targetKey,
+      trust: fixture.trust,
+      secretStore: fixture.secrets,
+      snapshot: snapshot(),
+      now: NOW,
+      issuerKey: await DeviceKey.generate(),
+    })).rejects.toThrow(/persisted transfer key/i);
     expect(validateAnchorTransferReadyProof({
       proof: first.proof,
       trust: fixture.trust,
