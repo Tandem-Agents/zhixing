@@ -120,7 +120,10 @@ import {
   createMemoryDirectory,
 } from "./management-directories.js";
 import { createAnchorJournalMaintenance } from "./journal-maintenance.js";
-import { createPostAdoptionMemoryPort } from "./post-adoption-memory.js";
+import {
+  createPostAdoptionMemoryPort,
+  type PostAdoptionMemoryPort,
+} from "./post-adoption-memory.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
@@ -316,6 +319,25 @@ async function runServerProcess(
   // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
   let schedulerRef: SchedulerBackend | null = null;
   let schedulerProductRef: SchedulerBackend | undefined;
+  const currentSchedulerProduct = (): SchedulerBackend => {
+    if (!schedulerProductRef) throw new Error("Scheduler generation is not installed");
+    return schedulerProductRef;
+  };
+  const schedulerBackend: SchedulerBackend = {
+    start: () => currentSchedulerProduct().start(),
+    stop: () => currentSchedulerProduct().stop(),
+    createTask: (...args) => currentSchedulerProduct().createTask(...args),
+    listTasks: () => currentSchedulerProduct().listTasks(),
+    updateTask: (...args) => currentSchedulerProduct().updateTask(...args),
+    deleteTask: (...args) => currentSchedulerProduct().deleteTask(...args),
+    runTask: (...args) => currentSchedulerProduct().runTask(...args),
+    getTask: (id) => currentSchedulerProduct().getTask(id),
+    abortRun: (runId, requestId, source) =>
+      currentSchedulerProduct().abortRun?.(runId, requestId, source) ?? false,
+    get activeTaskCount() {
+      return currentSchedulerProduct().activeTaskCount;
+    },
+  };
   // schedule 工具经门面接入锚点唯一 scheduler 权威。实例化落点在权威创建后；
   // per-runtime 工具只持 getter，不持第二套 scheduler 状态。
   let schedulerFacadeRef: LocalSchedulerFacade | null = null;
@@ -680,7 +702,17 @@ async function runServerProcess(
     ...(ctx.meshRuntime ? { meshRuntime: ctx.meshRuntime } : {}),
     storageMaintenance: ctx.storageMaintenance,
     ...(ctx.authorityRuntime
-      ? { checkpointRetention: ctx.authorityRuntime.checkpointRetention }
+      ? {
+          checkpointRetention: {
+            checkpointRetentionSnapshot: () =>
+              ctx.authorityRuntime!.checkpointRetention.checkpointRetentionSnapshot(),
+            retainedAtCheckpoint: (snapshot, candidates) =>
+              ctx.authorityRuntime!.checkpointRetention.retainedAtCheckpoint(
+                snapshot,
+                candidates,
+              ),
+          },
+        }
       : {}),
     onError: (error) => console.error(
       chalk.red("[recovery-backup]"),
@@ -721,22 +753,33 @@ async function runServerProcess(
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
   const ephemeralRuntime = await runtimeHost.createEphemeralRuntime();
 
+  let postAdoptionMemory: PostAdoptionMemoryPort | undefined;
+  const rebuildPostAdoptionMemory = () => {
+    if (!ctx.authorityRuntime?.globalState) return;
+    postAdoptionMemory = createPostAdoptionMemoryPort({
+      globalState: ctx.authorityRuntime.globalState,
+      authorityLog: ctx.authorityRuntime.authorityLog,
+      anchorEpoch: ctx.authorityRuntime.anchorEpoch,
+      callText: governControlTextCall(
+        {
+          governor: ctx.authorityRuntime.resourceGovernor,
+          origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
+          workPrefix: "post-adoption-memory",
+        },
+        ephemeralRuntime.callText.bind(ephemeralRuntime),
+      ),
+    });
+  };
   if (ctx.meshRuntime && ctx.authorityRuntime?.globalState) {
-    await ctx.meshRuntime.bindPostAdoptionMemory(
-      createPostAdoptionMemoryPort({
-        globalState: ctx.authorityRuntime.globalState,
-        authorityLog: ctx.authorityRuntime.authorityLog,
-        anchorEpoch: ctx.authorityRuntime.anchorEpoch,
-        callText: governControlTextCall(
-          {
-            governor: ctx.authorityRuntime.resourceGovernor,
-            origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
-            workPrefix: "post-adoption-memory",
-          },
-          ephemeralRuntime.callText.bind(ephemeralRuntime),
-        ),
-      }),
-    );
+    rebuildPostAdoptionMemory();
+    await ctx.meshRuntime.bindPostAdoptionMemory({
+      flush: (input) => {
+        if (!postAdoptionMemory) {
+          throw new Error("Post-adoption memory generation is unavailable");
+        }
+        return postAdoptionMemory.flush(input);
+      },
+    });
   }
 
   // Scheduler job 由 executor owner 的耐久数据面执行；管理用 ephemeral
@@ -797,13 +840,13 @@ async function runServerProcess(
         "Anchor scheduler requires authority, protocol, job status, and relay owners",
       );
     }
-    schedulerRuntime = await AnchorSchedulerRuntime.create({
-      authority: ctx.authorityRuntime,
-      protocol: ctx.conversationProtocol,
+    const createSchedulerRuntime = () => AnchorSchedulerRuntime.create({
+      authority: ctx.authorityRuntime!,
+      protocol: ctx.conversationProtocol!,
       eventBus: schedulerEventBus,
       compatibilityStore: new JsonTaskStore(),
-      jobStatus: ctx.jobStatus,
-      jobRelays: ctx.jobRelayObligations,
+      jobStatus: ctx.jobStatus!,
+      jobRelays: ctx.jobRelayObligations!,
       openManualJobSurface: async (input) => {
         const coordinator = ctx.channelCoordinator;
         if (!coordinator) {
@@ -900,50 +943,67 @@ async function runServerProcess(
       onError: (error) =>
         console.error(chalk.red(`[scheduler] ${error.message}`)),
     });
-    const runtime = schedulerRuntime;
+    schedulerRuntime = await createSchedulerRuntime();
     schedulerCleanup = startupRollback.register(
       "scheduler.stop",
       async () => {
         adoptionReview?.close();
         await journalMaintenance?.stop();
-        await runtime.stop();
+        await schedulerRuntime?.stop();
       },
     );
-    const schedulerGlobalState = new AnchorSchedulerGlobalStateAdapter(
-      runtime.scheduler,
-      ctx.authorityRuntime.anchorEpoch,
-    );
-    const schedulerProduct = new AnchorSchedulerProductPort(
-      runtime.scheduler,
-      schedulerGlobalState,
-      ctx.authorityRuntime.anchorEpoch,
-    );
-    schedulerRef = schedulerProduct;
-    schedulerFacadeRef = new LocalSchedulerFacade(
-      schedulerProduct,
-      schedulerEventBus,
-    );
-    ctx.authorityRuntime.installSchedulerGlobalState(schedulerGlobalState);
-    schedulerProductRef = schedulerProduct;
+    const installSchedulerGeneration = async (
+      runtime: AnchorSchedulerRuntime,
+      activate: boolean,
+    ) => {
+      const schedulerGlobalState = new AnchorSchedulerGlobalStateAdapter(
+        runtime.scheduler,
+        ctx.authorityRuntime!.anchorEpoch,
+      );
+      const schedulerProduct = new AnchorSchedulerProductPort(
+        runtime.scheduler,
+        schedulerGlobalState,
+        ctx.authorityRuntime!.anchorEpoch,
+      );
+      schedulerProductRef = schedulerProduct;
+      schedulerRef = schedulerBackend;
+      schedulerFacadeRef ??= new LocalSchedulerFacade(
+        schedulerBackend,
+        schedulerEventBus,
+      );
+      ctx.authorityRuntime!.installSchedulerGlobalState(schedulerGlobalState);
+      await runtime.start();
+      if (activate) {
+        runtime.activate();
+        await runtime.resumeManualJobSurfaces();
+      }
+      adoptionReview?.close();
+      adoptionReview = new PostAdoptionReviewCoordinator({
+        review: runtime.deferredIntents,
+        hub: confirmationHub,
+        workingDirectory: ephemeralRuntime.resolvedWorkspace.path ?? process.cwd(),
+      });
+    };
     journalMaintenance?.bind({
-      notices: runtime.schedulerNotices,
-      callText: governControlTextCall(
-        {
-          governor: ctx.authorityRuntime.resourceGovernor,
-          origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
-          workPrefix: "journal-maintenance",
-        },
-        ephemeralRuntime.callText.bind(ephemeralRuntime),
-      ),
+      notices: () => schedulerRuntime!.schedulerNotices,
+      callText: (prompt, role) =>
+        governControlTextCall(
+          {
+            governor: ctx.authorityRuntime!.resourceGovernor,
+            origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
+            workPrefix: "journal-maintenance",
+          },
+          ephemeralRuntime.callText.bind(ephemeralRuntime),
+        )(prompt, role),
     });
-    await runtime.start();
+    await installSchedulerGeneration(schedulerRuntime, false);
     ctx.meshRuntime?.bindPlannedAnchorLifecycle({
       stopAccepting: async () => {
         ctx.inboundRouter?.refuseNewMessages();
         await ctx.inboundRouter?.drainAcceptedMessages();
         await ctx.channelConnections?.disconnectConfigured();
         await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-        await runtime.scheduler.pauseForAuthorityTransfer();
+        await schedulerRuntime!.scheduler.pauseForAuthorityTransfer();
       },
       drainAccepted: async () => {
         await ctx.conversations?.abortAllAndWait(
@@ -959,27 +1019,41 @@ async function runServerProcess(
       resumeAfterAbort: async () => {
         await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
         ctx.conversationProtocol?.startRecoveryLoop();
-        runtime.scheduler.resumeAfterAuthorityTransfer();
+        schedulerRuntime!.scheduler.resumeAfterAuthorityTransfer();
         ctx.inboundRouter?.resumeNewMessages();
         await ctx.channelConnections?.connectConfigured();
       },
     });
-    adoptionReview = new PostAdoptionReviewCoordinator({
-      review: runtime.deferredIntents,
-      hub: confirmationHub,
-      workingDirectory: ephemeralRuntime.resolvedWorkspace.path ?? process.cwd(),
-    });
     if (ctx.meshRuntime) {
-      await ctx.meshRuntime.bindPostAdoptionReview(adoptionReview);
+      await ctx.meshRuntime.bindPostAdoptionReview({
+        reviewAfterAdoption: (conversationId) => {
+          if (!adoptionReview) {
+            throw new Error("Post-adoption review generation is unavailable");
+          }
+          return adoptionReview.reviewAfterAdoption(conversationId);
+        },
+      });
     }
     await journalMaintenance?.start();
-    const installedSchedulerRuntime = schedulerRuntime;
-    if (!installedSchedulerRuntime) {
-      throw new Error("Planned anchor post-install requires the scheduler runtime");
-    }
     await ctx.meshRuntime?.bindPlannedAnchorPostInstallConsumers({
+      rebindAuthorityGeneration: async (generation) => {
+        const previousAnchorEpoch = ctx.authorityRuntime!.anchorEpoch;
+        const receipt = await ctx.authorityRuntime!.rebindInstalledAuthority(generation);
+        if (previousAnchorEpoch !== receipt.generation.anchorEpoch) {
+          ctx.conversationProtocol!.beginInstalledAuthorityGeneration();
+          rebuildPostAdoptionMemory();
+        }
+        return receipt;
+      },
       recoverScheduler: async (obligations) => {
-        await installedSchedulerRuntime.recoverInstalledAuthority();
+        if (schedulerRuntime!.anchorEpoch !== ctx.authorityRuntime!.anchorEpoch) {
+          await schedulerRuntime!.stop();
+          const replacement = await createSchedulerRuntime();
+          schedulerRuntime = replacement;
+          await installSchedulerGeneration(replacement, runner !== undefined);
+        } else {
+          await schedulerRuntime!.recoverInstalledAuthority();
+        }
         return obligations;
       },
       recoverConversation: async (obligations) => {
@@ -997,7 +1071,8 @@ async function runServerProcess(
       },
     });
   }
-  const scheduler = schedulerProductRef;
+  const scheduler: SchedulerBackend | undefined =
+    ctx.enabledRoles.includes("anchor") ? schedulerBackend : undefined;
 
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
@@ -1082,8 +1157,8 @@ async function runServerProcess(
     workscenes: worksceneDirectory,
     trust: trustDirectory,
     skills: createSkillDirectory({
-      globalState: authorityRuntime.globalState,
-      anchorEpoch: authorityRuntime.anchorEpoch,
+      globalState: () => authorityRuntime.globalState!,
+      anchorEpoch: () => authorityRuntime.anchorEpoch,
     }),
     ...(memoryDirectory ? { memory: memoryDirectory } : {}),
     hostInfo: {

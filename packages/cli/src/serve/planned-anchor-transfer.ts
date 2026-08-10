@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Dirent } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import type {
+  AnchorTransferAbort,
   AnchorTransferCommand,
   AnchorTransferCommit,
   AnchorTransferResult,
@@ -44,6 +45,7 @@ import {
   readyProofDigest,
   reducePlannedAnchorTransfer,
   sourceFreezeProofDigest,
+  validateAnchorTransferAbort,
   validateAnchorTransferCommand,
   type PlannedAnchorTransferState,
   type ProtocolSignatureVerifier,
@@ -167,12 +169,14 @@ export interface PlannedAnchorCandidateRelease {
 }
 
 type PlannedAnchorCandidateTerminal = "committed" | "aborted" | "released";
+type PlannedAnchorPreparedRecord = Extract<PlannedRecord, { t: "anchor-prepared" }>;
 
 interface PlannedAnchorCandidateState {
   readonly identity: PlannedAnchorCandidateIdentity;
   readonly readyProof?: ReadyProof;
-  readonly prepared?: true;
+  readonly prepared?: PlannedAnchorPreparedRecord;
   readonly terminal?: PlannedAnchorCandidateTerminal;
+  readonly abort?: AnchorTransferAbort;
   readonly releaseDelivered?: true;
 }
 
@@ -192,12 +196,20 @@ type PlannedAnchorCandidateRecord =
       readonly v: 1;
       readonly t: "planned-anchor-candidate-prepared";
       readonly identity: PlannedAnchorCandidateIdentity;
+      readonly prepared: PlannedAnchorPreparedRecord;
     }
   | {
       readonly v: 1;
       readonly t: "planned-anchor-candidate-terminal";
       readonly identity: PlannedAnchorCandidateIdentity;
-      readonly terminal: PlannedAnchorCandidateTerminal;
+      readonly terminal: "committed" | "released";
+    }
+  | {
+      readonly v: 1;
+      readonly t: "planned-anchor-candidate-terminal";
+      readonly identity: PlannedAnchorCandidateIdentity;
+      readonly terminal: "aborted";
+      readonly abort: AnchorTransferAbort;
     }
   | {
       readonly v: 1;
@@ -375,8 +387,15 @@ class FilePlannedAnchorCandidateJournal {
   async terminal(
     identityInput: PlannedAnchorCandidateIdentity,
     terminal: PlannedAnchorCandidateTerminal,
+    abortInput?: AnchorTransferAbort,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
+    const abort = terminal === "aborted"
+      ? validateCandidateAbort(abortInput, identity, this.verifier)
+      : undefined;
+    if (terminal !== "aborted" && abortInput !== undefined) {
+      throw new TypeError("Non-aborted migration candidate cannot store an abort decision");
+    }
     return (await this.#transact((projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration candidate terminal has no durable claim");
@@ -388,26 +407,42 @@ class FilePlannedAnchorCandidateJournal {
         if (existing.terminal !== terminal) {
           throw new Error("Migration candidate terminal decision conflicts with replay");
         }
+        if (
+          terminal === "aborted" &&
+          canonicalize(existing.abort) !== canonicalize(abort)
+        ) {
+          throw new Error("Migration candidate abort decision conflicts with replay");
+        }
         return { kind: "return", value: existing };
       }
-      const record: PlannedAnchorCandidateRecord = {
-        v: 1,
-        t: "planned-anchor-candidate-terminal",
-        identity,
-        terminal,
-      };
+      const record: PlannedAnchorCandidateRecord = terminal === "aborted"
+        ? {
+            v: 1,
+            t: "planned-anchor-candidate-terminal",
+            identity,
+            terminal,
+            abort: abort!,
+          }
+        : {
+            v: 1,
+            t: "planned-anchor-candidate-terminal",
+            identity,
+            terminal,
+          };
       return {
         kind: "append",
         entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
-        value: { ...existing, terminal },
+        value: abort ? { ...existing, terminal, abort } : { ...existing, terminal },
       };
     })).value;
   }
 
   async markPrepared(
     identityInput: PlannedAnchorCandidateIdentity,
+    preparedInput: PlannedAnchorPreparedRecord,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
+    const prepared = validateCandidatePrepared(preparedInput, identity, this.verifier);
     return (await this.#transact((projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration prepare has no durable candidate claim");
@@ -415,16 +450,57 @@ class FilePlannedAnchorCandidateJournal {
       if (existing.terminal !== undefined) {
         throw new Error("Terminal migration candidate cannot be prepared");
       }
-      if (existing.prepared) return { kind: "return", value: existing };
+      if (existing.prepared) {
+        if (canonicalize(existing.prepared) !== canonicalize(prepared)) {
+          throw new Error("Migration candidate prepared decision conflicts with replay");
+        }
+        return { kind: "return", value: existing };
+      }
       const record: PlannedAnchorCandidateRecord = {
         v: 1,
         t: "planned-anchor-candidate-prepared",
         identity,
+        prepared,
       };
       return {
         kind: "append",
         entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
-        value: { ...existing, prepared: true as const },
+        value: { ...existing, prepared },
+      };
+    })).value;
+  }
+
+  async decideRemoteAbort(
+    identityInput: PlannedAnchorCandidateIdentity,
+    abortInput: AnchorTransferAbort,
+  ): Promise<PlannedAnchorCandidateState> {
+    const identity = validateCandidateIdentity(identityInput);
+    const abort = validateCandidateAbort(abortInput, identity, this.verifier);
+    return (await this.#transact((projection) => {
+      const existing = projection.claims.get(identity.transferId);
+      if (!existing) throw new Error("Migration abort has no durable candidate claim");
+      assertCandidateIdentity(existing.identity, identity);
+      if (existing.terminal !== undefined) {
+        if (
+          existing.terminal !== "aborted" ||
+          canonicalize(existing.abort) !== canonicalize(abort)
+        ) {
+          throw new Error("Migration candidate terminal decision conflicts with abort");
+        }
+        return { kind: "return", value: existing };
+      }
+      if (existing.prepared) return { kind: "return", value: existing };
+      const record: PlannedAnchorCandidateRecord = {
+        v: 1,
+        t: "planned-anchor-candidate-terminal",
+        identity,
+        terminal: "aborted",
+        abort,
+      };
+      return {
+        kind: "append",
+        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        value: { ...existing, terminal: "aborted" as const, abort },
       };
     })).value;
   }
@@ -552,8 +628,9 @@ export class FilePlannedAnchorTransferJournal {
   terminalCandidate(
     identity: PlannedAnchorCandidateIdentity,
     terminal: PlannedAnchorCandidateTerminal,
+    abort?: AnchorTransferAbort,
   ): Promise<PlannedAnchorCandidateState> {
-    return this.#candidates.terminal(identity, terminal);
+    return this.#candidates.terminal(identity, terminal, abort);
   }
 
   releaseUnpreparedCandidate(
@@ -599,6 +676,7 @@ export class FilePlannedAnchorTransferJournal {
               v: 1,
               t: "planned-anchor-candidate-prepared",
               identity,
+              prepared: record,
             } satisfies PlannedAnchorCandidateRecord,
           });
         }
@@ -777,6 +855,21 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
 
   /** Restores durable late-ready exclusions before public target admission. */
   async recoverBeforeAdmission(): Promise<void> {
+    for (const candidate of (await this.#candidates.states()).values()) {
+      const context = this.#context(candidate.identity.transferId);
+      const phase = await context.journal.state(candidate.identity.transferId);
+      if (candidate.terminal === "aborted" && !phase) {
+        await this.#cleanupClaimOnlyCandidate(candidate);
+        continue;
+      }
+      if (candidate.terminal === "released" && !phase) {
+        await this.#cleanupClaimOnlyCandidate(candidate);
+        continue;
+      }
+      if (candidate.prepared && candidate.terminal === undefined && !phase) {
+        await context.journal.append(candidate.prepared);
+      }
+    }
     const journalsRoot = path.join(this.options.stagingRoot, "journals");
     let entries: Dirent[];
     try {
@@ -794,7 +887,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       const identity = candidateIdentityFromState(state);
       await this.#candidates.claimCandidate(identity);
       if (state.phase === "aborted") {
-        await this.#candidates.terminal(identity, "aborted");
+        await this.#candidates.terminal(identity, "aborted", state.abort!);
         continue;
       }
       if (state.phase === "committed" || state.phase === "tombstoned") {
@@ -952,6 +1045,9 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     if (command.op === "status") {
       const candidate = await this.#candidates.state(command.transferId);
       if (!candidate) return resultFor(command, undefined);
+      if (candidate.terminal === "aborted" && candidate.abort) {
+        return candidateAbortResult(command, candidate.abort);
+      }
       const context = this.#context(command.transferId);
       return this.#result(command, await context.journal.state(command.transferId));
     }
@@ -998,8 +1094,9 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       throw new Error("Migration issuer key no longer matches its ready proof");
     }
     applyTrustEvent(trust, command.trustTransition);
-    await this.#candidates.markPrepared(candidate.identity);
-    const state = await context.journal.append(preparedRecord(command));
+    const prepared = preparedRecord(command);
+    const decision = await this.#candidates.markPrepared(candidate.identity, prepared);
+    const state = await context.journal.append(decision.prepared!);
     return this.#result(command, state);
   }
 
@@ -1246,8 +1343,38 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
   async #abort(
     command: Extract<AnchorTransferCommand, { op: "abort" }>,
   ): Promise<AnchorTransferResult> {
+    const candidate = await this.#candidates.state(command.transferId);
+    if (!candidate) throw new Error("Migration abort has no durable candidate claim");
+    if (
+      command.requestId !== candidate.identity.requestId ||
+      command.signature.keyId !== candidate.identity.sourceDeviceId
+    ) {
+      throw new TypeError("Migration abort command changes its durable candidate identity");
+    }
+    const abort = validateCandidateAbort(
+      command.abort,
+      candidate.identity,
+      this.options.verifier,
+    );
+    assertCandidateReadyProofIdentity(candidate);
+    await this.#assertCandidateIssuerKey(candidate);
+
     const context = this.#context(command.transferId);
-    const state = await this.#requiredPrepared(command.transferId);
+    let state = await context.journal.state(command.transferId);
+    if (!state) {
+      const decision = await this.#candidates.decideRemoteAbort(
+        candidate.identity,
+        abort,
+      );
+      if (decision.terminal === "aborted") {
+        await this.#cleanupClaimOnlyCandidate(decision);
+        return candidateAbortResult(command, decision.abort!);
+      }
+      if (!decision.prepared) {
+        throw new Error("Migration abort lost its durable prepare/abort decision");
+      }
+      state = await context.journal.append(decision.prepared);
+    }
     if (state.phase === "committed" || state.phase === "tombstoned") {
       throw new Error("Committed migration cannot be cancelled");
     }
@@ -1255,7 +1382,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       if (canonicalize(state.abort) !== canonicalize(command.abort)) {
         throw new TypeError("Migration abort replay changes the signed decision");
       }
-      await this.#candidates.terminal(candidateIdentityFromState(state), "aborted");
+      await this.#candidates.terminal(
+        candidateIdentityFromState(state),
+        "aborted",
+        state.abort!,
+      );
       await this.#cleanupAborted(context, state);
       return this.#result(command, state);
     }
@@ -1264,13 +1395,62 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       mode: "planned",
       t: "anchor-aborted",
       transferId: command.transferId,
-      abort: command.abort,
+      abort,
     };
     reducePlannedAnchorTransfer(state, record, this.options.verifier);
     const next = await context.journal.append(record);
-    await this.#candidates.terminal(candidateIdentityFromState(next), "aborted");
+    await this.#candidates.terminal(
+      candidateIdentityFromState(next),
+      "aborted",
+      next.abort!,
+    );
     await this.#cleanupAborted(context, next);
     return this.#result(command, next);
+  }
+
+  async #assertCandidateIssuerKey(candidate: PlannedAnchorCandidateState): Promise<void> {
+    const proof = candidate.readyProof!;
+    const issuerKey = await loadAnchorIssuerKey(
+      this.options.secretStore,
+      candidate.identity.transferId,
+    );
+    if (
+      issuerKey &&
+      (
+        issuerKey.deviceId !== proof.targetIssuerKeyId ||
+        issuerKey.publicKey !== proof.targetIssuerPublicKey
+      )
+    ) {
+      throw new Error("Migration candidate issuer key conflicts with its durable ready proof");
+    }
+  }
+
+  async #cleanupClaimOnlyCandidate(candidate: PlannedAnchorCandidateState): Promise<void> {
+    assertCandidateReadyProofIdentity(candidate);
+    await this.#assertCandidateIssuerKey(candidate);
+    const proof = candidate.readyProof!;
+    const issuerKey = await loadAnchorIssuerKey(
+      this.options.secretStore,
+      candidate.identity.transferId,
+    );
+    if (issuerKey) {
+      await deleteAnchorIssuerKey(
+        this.options.secretStore,
+        candidate.identity.transferId,
+        proof.targetIssuerKeyId,
+      );
+    }
+    await rm(path.join(
+      this.options.stagingRoot,
+      "transfers",
+      candidate.identity.transferId,
+    ), { recursive: true, force: true });
+    await rm(path.join(
+      this.options.stagingRoot,
+      "journals",
+      candidate.identity.transferId,
+    ), { recursive: true, force: true });
+    await this.options.readiness.release(candidate.identity.transferId);
   }
 
   async #cleanupAborted(
@@ -1511,7 +1691,7 @@ export class PlannedAnchorTransferOwner {
         await this.#journal.terminalCandidate(identity, "committed");
         await this.options.onSourceCommitted?.(state.identity.targetDeviceId);
       } else if (state.phase === "aborted") {
-        await this.#journal.terminalCandidate(identity, "aborted");
+        await this.#journal.terminalCandidate(identity, "aborted", state.abort!);
       }
       await this.#drive(state).catch(() => undefined);
     }
@@ -1924,7 +2104,11 @@ export class PlannedAnchorTransferOwner {
         abort,
       });
     }
-    await this.#journal.terminalCandidate(candidateIdentityFromState(state), "aborted");
+    await this.#journal.terminalCandidate(
+      candidateIdentityFromState(state),
+      "aborted",
+      state.abort!,
+    );
     this.#clearFence();
     await this.options.lifecycle.resumeAfterAbort();
     await this.#sendAbort(state);
@@ -1973,6 +2157,7 @@ export class PlannedAnchorTransferOwner {
       await this.#journal.terminalCandidate(
         candidateIdentityFromState(state),
         "aborted",
+        state.abort!,
       );
       if (!this.#fencedTransferId || this.#fencedTransferId === state.identity.transferId) {
         this.#clearFence();
@@ -2303,9 +2488,27 @@ export function isPlannedInstallation(value: unknown): value is PlannedAnchorIns
 
 export interface PlannedAnchorPostInstallDescriptor {
   readonly installation: PlannedAnchorInstallation;
+  readonly installedGeneration: InstalledAuthorityGeneration;
   readonly state: PlannedAnchorTransferState;
   readonly pendingObligations: AuthorityCatalog["pendingObligations"];
   readonly requiresPostInstallCompletion: boolean;
+}
+
+/**
+ * Immutable runtime identity of the authority prefix installed by one planned
+ * transfer.  Post-install cleanup is deliberately absent: this projection is
+ * reconstructed from the durable installation on every bootstrap.
+ */
+export interface InstalledAuthorityGeneration {
+  readonly transferId: string;
+  readonly commitDigest: string;
+  readonly baseDigest: string;
+  readonly sourceHead: DurableLogCheckpoint;
+  readonly targetLogId: string;
+  readonly installLsn: number;
+  readonly anchorEpoch: number;
+  readonly trustEpoch: number;
+  readonly trustChainHead: HomeTrustRecord["chainHead"];
 }
 
 /**
@@ -2321,10 +2524,11 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly stagingRoot?: string;
 }): Promise<PlannedAnchorPostInstallDescriptor | undefined> {
-  const installation = await loadCurrentPlannedAnchorInstallation(
+  const installed = await loadCurrentPlannedAnchorInstallation(
     input.bootstrapStore.authorityLog(),
   );
-  if (!installation) return undefined;
+  if (!installed) return undefined;
+  const { installation, installLsn } = installed;
   if (installation.trustRecord.issuer.deviceId !== input.deviceId) {
     return undefined;
   }
@@ -2427,6 +2631,17 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
   }
   return Object.freeze({
     installation,
+    installedGeneration: Object.freeze({
+      transferId: installation.transferId,
+      commitDigest: protocolDigest("PlannedAnchorInstalledCommit", 1, installation.commit),
+      baseDigest: installation.baseDigest,
+      sourceHead: Object.freeze({ ...installation.sourceHead }),
+      targetLogId: (await input.bootstrapStore.authorityLog().originCheckpoint()).logId,
+      installLsn,
+      anchorEpoch: installation.commit.nextAnchorEpoch,
+      trustEpoch: installation.trustRecord.trustEpoch,
+      trustChainHead: Object.freeze({ ...installation.trustRecord.chainHead }),
+    }),
     state,
     pendingObligations: catalog.pendingObligations,
     requiresPostInstallCompletion: await pathExists(privateRoot),
@@ -2451,18 +2666,25 @@ export async function finishPlannedAnchorPostInstall(input: {
 
 async function loadCurrentPlannedAnchorInstallation(
   log: FileAuthorityCommitLog,
-): Promise<PlannedAnchorInstallation | undefined> {
+): Promise<{
+  readonly installation: PlannedAnchorInstallation;
+  readonly installLsn: number;
+} | undefined> {
   const installations = (await log.readStream<unknown>("transfer:anchor-current"))
-    .map(({ body }) => body)
-    .filter(isPlannedInstallation);
+    .filter((candidate): candidate is typeof candidate & {
+      readonly body: PlannedAnchorInstallation;
+    } => isPlannedInstallation(candidate.body));
   const current = installations.at(-1);
   if (!current) return undefined;
   const duplicates = installations.filter((candidate) =>
-    candidate.transferId === current.transferId);
+    candidate.body.transferId === current.body.transferId);
   if (duplicates.length !== 1) {
     throw new Error("Current planned migration installation is ambiguous");
   }
-  return current;
+  return {
+    installation: current.body,
+    installLsn: current.lsn,
+  };
 }
 
 async function pathExists(target: string): Promise<boolean> {
@@ -3089,7 +3311,7 @@ function reduceCandidateProjection(
   includeTransferState: boolean,
 ): PlannedAnchorCandidateProjection {
   if (entry.stream === ANCHOR_CANDIDATE_STREAM) {
-    const record = validateCandidateRecord(entry.body);
+    const record = validateCandidateRecord(entry.body, verifier);
     const existing = projection.claims.get(record.identity.transferId);
     if (record.t === "planned-anchor-candidate-claimed") {
       if (existing) {
@@ -3120,9 +3342,14 @@ function reduceCandidateProjection(
       if (existing.terminal !== undefined) {
         throw new Error("Terminal migration candidate cannot be prepared");
       }
-      if (existing.prepared) return projection;
+      if (existing.prepared) {
+        if (canonicalize(existing.prepared) !== canonicalize(record.prepared)) {
+          throw new Error("Migration candidate has conflicting prepared decisions");
+        }
+        return projection;
+      }
       const claims = new Map(projection.claims);
-      claims.set(record.identity.transferId, { ...existing, prepared: true });
+      claims.set(record.identity.transferId, { ...existing, prepared: record.prepared });
       return { ...projection, claims };
     }
     if (record.t === "planned-anchor-candidate-terminal") {
@@ -3132,8 +3359,20 @@ function reduceCandidateProjection(
       if (existing.terminal !== undefined && existing.terminal !== record.terminal) {
         throw new Error("Migration candidate has conflicting terminal decisions");
       }
+      if (
+        record.terminal === "aborted" &&
+        existing.abort &&
+        canonicalize(existing.abort) !== canonicalize(record.abort)
+      ) {
+        throw new Error("Migration candidate has conflicting abort decisions");
+      }
       const claims = new Map(projection.claims);
-      claims.set(record.identity.transferId, { ...existing, terminal: record.terminal });
+      claims.set(
+        record.identity.transferId,
+        record.terminal === "aborted"
+          ? { ...existing, terminal: record.terminal, abort: record.abort }
+          : { ...existing, terminal: record.terminal },
+      );
       return { ...projection, claims };
     }
     if (existing.terminal !== "released") {
@@ -3160,7 +3399,10 @@ function reduceCandidateProjection(
   return projection;
 }
 
-function validateCandidateRecord(value: unknown): PlannedAnchorCandidateRecord {
+function validateCandidateRecord(
+  value: unknown,
+  verifier: ProtocolSignatureVerifier,
+): PlannedAnchorCandidateRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("Migration candidate record must be an object");
   }
@@ -3168,8 +3410,12 @@ function validateCandidateRecord(value: unknown): PlannedAnchorCandidateRecord {
   const common = ["identity", "t", "v"];
   const expected = record.t === "planned-anchor-candidate-ready"
     ? [...common, "readyProof"]
+    : record.t === "planned-anchor-candidate-prepared"
+      ? [...common, "prepared"]
     : record.t === "planned-anchor-candidate-terminal"
-      ? [...common, "terminal"]
+      ? record.terminal === "aborted"
+        ? [...common, "abort", "terminal"]
+        : [...common, "terminal"]
       : common;
   if (
     record.v !== 1 ||
@@ -3191,13 +3437,57 @@ function validateCandidateRecord(value: unknown): PlannedAnchorCandidateRecord {
   ) {
     throw new TypeError("Migration candidate ready record has no proof");
   }
+  if (record.t === "planned-anchor-candidate-prepared") {
+    validateCandidatePrepared(
+      record.prepared,
+      record.identity as PlannedAnchorCandidateIdentity,
+      verifier,
+    );
+  }
   if (
     record.t === "planned-anchor-candidate-terminal" &&
     !["committed", "aborted", "released"].includes(String(record.terminal))
   ) {
     throw new TypeError("Migration candidate terminal is invalid");
   }
+  if (record.t === "planned-anchor-candidate-terminal" && record.terminal === "aborted") {
+    validateCandidateAbort(
+      record.abort,
+      record.identity as PlannedAnchorCandidateIdentity,
+      verifier,
+    );
+  }
   return record as PlannedAnchorCandidateRecord;
+}
+
+function validateCandidatePrepared(
+  value: unknown,
+  identity: PlannedAnchorCandidateIdentity,
+  verifier: ProtocolSignatureVerifier,
+): PlannedAnchorPreparedRecord {
+  const prepared = value as PlannedAnchorPreparedRecord;
+  const state = reducePlannedAnchorTransfer(undefined, prepared, verifier);
+  assertCandidateIdentity(candidateIdentityFromState(state), identity);
+  return structuredClone(prepared);
+}
+
+function validateCandidateAbort(
+  value: unknown,
+  identity: PlannedAnchorCandidateIdentity,
+  verifier: ProtocolSignatureVerifier,
+): AnchorTransferAbort {
+  const abort = validateAnchorTransferAbort(value, verifier);
+  if (
+    abort.requestId !== identity.requestId ||
+    abort.transferId !== identity.transferId ||
+    abort.sourceDeviceId !== identity.sourceDeviceId ||
+    abort.targetDeviceId !== identity.targetDeviceId ||
+    abort.sourceAnchorEpoch !== identity.sourceAnchorEpoch ||
+    abort.signature.keyId !== identity.sourceDeviceId
+  ) {
+    throw new TypeError("Migration candidate abort changes its durable identity");
+  }
+  return abort;
 }
 
 function validateCandidateIdentity(
@@ -3272,6 +3562,22 @@ function assertCandidateTrust(
     identity.sourceDeviceId !== trust.issuer.deviceId
   ) {
     throw new Error("Migration candidate no longer binds the current trust generation");
+  }
+}
+
+function assertCandidateReadyProofIdentity(
+  candidate: PlannedAnchorCandidateState,
+): asserts candidate is PlannedAnchorCandidateState & { readonly readyProof: ReadyProof } {
+  const proof = candidate.readyProof;
+  if (
+    !proof ||
+    proof.homeId !== candidate.identity.homeId ||
+    proof.transferId !== candidate.identity.transferId ||
+    proof.targetDeviceId !== candidate.identity.targetDeviceId ||
+    proof.trustEpoch !== candidate.identity.trustEpoch ||
+    canonicalize(proof.trustChainHead) !== canonicalize(candidate.identity.trustChainHead)
+  ) {
+    throw new TypeError("Migration candidate ready proof changes its durable identity");
   }
 }
 
@@ -3379,6 +3685,20 @@ function resultFor(
     };
   }
   return { v: 1, status: "ok", requestId: command.requestId, transferId: command.transferId, state: "aborted", abort: state.abort! };
+}
+
+function candidateAbortResult(
+  command: AnchorTransferCommand,
+  abort: AnchorTransferAbort,
+): AnchorTransferResult {
+  return {
+    v: 1,
+    status: "ok",
+    requestId: command.requestId,
+    transferId: command.transferId,
+    state: "aborted",
+    abort,
+  };
 }
 
 async function currentTrust(store: FileMeshBootstrapStore): Promise<TrustProjection> {

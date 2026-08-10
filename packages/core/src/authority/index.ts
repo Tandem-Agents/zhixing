@@ -77,6 +77,7 @@ export {
   type SurfaceAssetAdoptionRequest,
   type SurfaceAssetCollectionResult,
   type SurfaceAssetCoordinatorOptions,
+  type SurfaceAssetAuthorityBinding,
   type SurfaceAssetGrantIssueRequest,
   type SurfaceAssetGrantLedger,
   type SurfaceAssetGrantLedgerAppendResult,

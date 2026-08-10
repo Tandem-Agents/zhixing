@@ -39,7 +39,11 @@ import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
+import {
+  INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
+  type AuthorityRuntimeStack,
+  type InstalledAuthorityGenerationReceipt,
+} from "../setup-delivery.js";
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
 import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
 import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
@@ -115,6 +119,7 @@ import {
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
   type PlannedAnchorPostInstallDescriptor,
+  type InstalledAuthorityGeneration,
 } from "./planned-anchor-transfer.js";
 import {
   PlannedAnchorTransferMeshClient,
@@ -131,6 +136,9 @@ export interface PostAdoptionReviewPort {
 }
 
 export interface PlannedAnchorPostInstallConsumers {
+  readonly rebindAuthorityGeneration: (
+    generation: InstalledAuthorityGeneration,
+  ) => Promise<InstalledAuthorityGenerationReceipt>;
   readonly recoverScheduler: (
     obligations: readonly { readonly kind: "assignment" | "intent"; readonly id: string }[],
   ) => Promise<readonly { readonly kind: "assignment" | "intent"; readonly id: string }[]>;
@@ -623,7 +631,7 @@ export class MeshRuntimeAssembly {
     if (roles.has("anchor")) {
       this.#disposers.push(
         registerSurfaceAssetMeshService(this.services, {
-          coordinator: options.authority.surfaceAssets,
+          coordinator: () => options.authority.surfaceAssets,
           verifier: options.authority.verifier,
           surfacePrincipalFor: (connection) =>
             `surface:device:${connection.peer.deviceId}`,
@@ -1268,7 +1276,15 @@ export class MeshRuntimeAssembly {
           );
         },
         artifacts: this.options.authority.artifacts,
-        retention: this.options.authority.checkpointRetention,
+        retention: {
+          checkpointRetentionSnapshot: () =>
+            this.options.authority.checkpointRetention.checkpointRetentionSnapshot(),
+          retainedAtCheckpoint: (snapshot, candidates) =>
+            this.options.authority.checkpointRetention.retainedAtCheckpoint(
+              snapshot,
+              candidates,
+            ),
+        },
         storageMaintenance: this.options.authority.storageMaintenance,
         ensureRecoveryCheckpoint: (transferId) =>
           this.#ensureRecoveryCheckpoint(transferId),
@@ -1381,6 +1397,17 @@ export class MeshRuntimeAssembly {
     }
     const consumers = this.#plannedAnchorPostInstallConsumers;
     if (!consumers) return;
+    const generationReceipt = await consumers.rebindAuthorityGeneration(
+      completion.installedGeneration,
+    );
+    if (
+      canonicalize(generationReceipt.generation) !==
+        canonicalize(completion.installedGeneration) ||
+      canonicalize(generationReceipt.participants) !==
+        canonicalize(INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS)
+    ) {
+      throw new Error("Installed migration authority generation receipt is incomplete");
+    }
     const groups = partitionPlannedAnchorPostInstall(completion.pendingObligations);
     assertPlannedAnchorConsumerReceipt(
       groups.scheduler,

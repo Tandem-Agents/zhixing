@@ -29,7 +29,7 @@ type CallText = (prompt: string, role?: "main" | "light") => Promise<string>;
 export interface JournalMaintenance {
   scan(): Promise<JournalAuthorityLifecyclePlan>;
   bind(input: {
-    notices: SchedulerUserNoticeJournal;
+    notices: SchedulerUserNoticeJournal | (() => SchedulerUserNoticeJournal);
     callText: CallText;
   }): void;
   start(): Promise<void>;
@@ -44,7 +44,10 @@ export function createAnchorJournalMaintenance(deps: {
   clock?: () => Date;
   onError?: (error: Error) => void;
 }): JournalMaintenance {
-  let notices: SchedulerUserNoticeJournal | undefined;
+  let notices:
+    | SchedulerUserNoticeJournal
+    | (() => SchedulerUserNoticeJournal)
+    | undefined;
   let callText: CallText | undefined;
   let running: Promise<JournalMaintenanceResult> | undefined;
   let accepting = false;
@@ -78,7 +81,10 @@ export function createAnchorJournalMaintenance(deps: {
     if (!notices || !callText) {
       throw new Error("Journal maintenance lifecycle is not bound");
     }
-    return { notices, callText };
+    return {
+      notices: typeof notices === "function" ? notices() : notices,
+      callText,
+    };
   };
 
   const record = async (
@@ -343,7 +349,8 @@ export function createAnchorJournalMaintenance(deps: {
     },
     async latestNotice() {
       if (!notices) return null;
-      return (await notices.journalMaintenanceStates()).at(-1)?.notice ?? null;
+      const current = typeof notices === "function" ? notices() : notices;
+      return (await current.journalMaintenanceStates()).at(-1)?.notice ?? null;
     },
   };
 }

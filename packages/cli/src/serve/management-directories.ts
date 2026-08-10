@@ -76,18 +76,22 @@ export function createTrustDirectory(deps: {
 }
 
 export function createSkillDirectory(deps: {
-  globalState: GlobalStatePort;
-  anchorEpoch: number;
+  globalState: GlobalStatePort | (() => GlobalStatePort);
+  anchorEpoch: number | (() => number);
 }): SkillDirectory {
   let structuralVersion = 0;
+  const globalState = () =>
+    typeof deps.globalState === "function" ? deps.globalState() : deps.globalState;
+  const anchorEpoch = () =>
+    typeof deps.anchorEpoch === "function" ? deps.anchorEpoch() : deps.anchorEpoch;
   const context = (requestId: string) => ({
     principal: { kind: "host" as const, component: "skill-management" },
     requestId,
     deadlineAt: new Date(Date.now() + 30_000).toISOString(),
-    authority: { domain: "global" as const, anchorEpoch: deps.anchorEpoch },
+    authority: { domain: "global" as const, anchorEpoch: anchorEpoch() },
   });
   const readCatalog = async () => {
-    const result = await deps.globalState.read(
+    const result = await globalState().read(
       { kind: "skill-catalog", includeDisabled: true },
       context(`skill-list:${randomUUID()}`),
     );
@@ -98,7 +102,7 @@ export function createSkillDirectory(deps: {
     return result.entries;
   };
   const readEntry = async (id: string) => {
-    const result = await deps.globalState.read(
+    const result = await globalState().read(
       { kind: "skill-get", skillId: id },
       context(`skill-get:${randomUUID()}`),
     );
@@ -120,7 +124,7 @@ export function createSkillDirectory(deps: {
         : patch.pinned !== undefined
           ? { pinned: patch.pinned, ...(patch.disabled !== undefined ? { disabled: patch.disabled } : {}) }
           : { disabled: patch.disabled! };
-      await deps.globalState.mutate(
+      await globalState().mutate(
         {
           kind: "skill-set-state",
           skillId: id,
@@ -135,7 +139,7 @@ export function createSkillDirectory(deps: {
     async archive(id): Promise<boolean> {
       const current = await readEntry(id);
       if (!current) return false;
-      await deps.globalState.mutate(
+      await globalState().mutate(
         {
           kind: "skill-archive",
           skillId: id,

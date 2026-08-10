@@ -96,6 +96,12 @@ const authorityRuntimeSurface: AccessSurface = {
       trustedIdentities: bootstrap.trustedIdentities,
       authorizedDeviceIds: bootstrap.authorizedDeviceIds,
       executorId: executorIdForDevice(bootstrap.deviceKey.deviceId),
+      ...(bootstrap.mode === "trusted-home" && bootstrap.installedAuthorityGeneration
+        ? {
+            anchorEpoch: bootstrap.installedAuthorityGeneration.anchorEpoch,
+            installedAuthorityGeneration: bootstrap.installedAuthorityGeneration,
+          }
+        : {}),
       configurationSnapshot: {
         config: ctx.config,
         executableVersion: ZHIXING_CLI_VERSION,
@@ -248,7 +254,7 @@ const assetMaintenanceSurface: AccessSurface = {
     // 治理端口注入协调器而非调度器:容量在协调器内部的叶级物理步骤取得,
     // 调度器只声明这轮回收的阻塞关系。
     const maintenance = new SurfaceAssetMaintenance({
-      surfaceAssets: authority.surfaceAssets,
+      surfaceAssets: () => authority.surfaceAssets,
       onError: (error) =>
         console.warn(chalk.yellow(`[assets] ${error.message}`)),
     });

@@ -455,6 +455,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#mutationPublisher = publisher;
   }
 
+  /** Drops the old scheduler publisher while the planned current-owner gate is closed. */
+  beginInstalledAuthorityGeneration(): void {
+    if (!this.#authority.globalPublishing) {
+      throw new Error("Local conversation owners have no installed authority generation");
+    }
+    this.#mutationPublisher = undefined;
+  }
+
   /** Installs a committed immutable source prefix before exposing the adopted session. */
   async installCommittedConversationTransfer(input: {
     readonly manifest: ConversationTransferManifest;

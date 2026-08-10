@@ -1024,8 +1024,10 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/channels.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/surface-asset-authority.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/core/src/delivery/authority-pipeline.ts",
+    "packages/core/src/authority/surface-assets.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/runtime/duty-migration-command.ts",
     "packages/server/src/rpc/methods/server.ts",
@@ -1128,6 +1130,36 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/planned-anchor-transfer.ts",
       (text) => text.replace(
+        "readonly prepared?: PlannedAnchorPreparedRecord;",
+        "readonly prepared?: true;",
+      ),
+    )).join("\n"),
+    /signed abort or candidate terminal recovery drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
+        "const decision = await this.#candidates.decideRemoteAbort(",
+        "const decision = await this.#candidates.terminal(",
+      ),
+    )).join("\n"),
+    /signed abort or candidate terminal recovery drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
+        "for (const candidate of (await this.#candidates.states()).values())",
+        "for (const candidate of [])",
+      ),
+    )).join("\n"),
+    /signed abort or candidate terminal recovery drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
         "const phase = await context.journal.state(release.identity.transferId);",
         "const phase = undefined;",
       ),
@@ -1143,6 +1175,33 @@ test("planned duty migration stays bound to two production roots and a finite ow
       ),
     )).join("\n"),
     /pre-bootstrap\/post-install completion closure drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace('  "delivery-authority",\n', ""),
+    )).join("\n"),
+    /installed authority generation rebind exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+      (text) => text.replace(
+        "installedAuthorityGeneration: plannedAnchorPostInstall.installedGeneration",
+        "installedAuthorityGeneration: undefined",
+      ),
+    )).join("\n"),
+    /installed authority generation rebind exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "const receipt = await ctx.authorityRuntime!.rebindInstalledAuthority(generation);",
+        "const receipt = { generation };",
+      ),
+    )).join("\n"),
+    /installed authority generation rebind exact-set drifted/,
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(

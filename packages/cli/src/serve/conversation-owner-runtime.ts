@@ -115,35 +115,59 @@ export function anchorConversationOwnerRuntime(
   authority: AuthorityRuntimeStack,
 ): ConversationOwnerRuntimeStack {
   return {
-    domain: { kind: "anchor", anchorEpoch: authority.anchorEpoch },
-    ownerEpoch: authority.anchorEpoch,
+    get domain() {
+      return { kind: "anchor" as const, anchorEpoch: authority.anchorEpoch };
+    },
+    get ownerEpoch() {
+      return authority.anchorEpoch;
+    },
     deviceId: authority.deviceId,
     executorId: authority.executorId,
     signer: authority.signer,
     verifier: authority.verifier,
-    log: authority.authorityLog,
-    authorityLog: authority.authorityLog,
+    get log() {
+      return authority.authorityLog;
+    },
+    get authorityLog() {
+      return authority.authorityLog;
+    },
     ...(authority.localExecutorEnabled
       ? { executorLog: authority.executorLog }
       : {}),
     artifacts: authority.artifacts,
-    controlAdmission: authority.controlAdmission,
+    get controlAdmission() {
+      return authority.controlAdmission;
+    },
     executorCapabilities: authority.executorCapabilities,
-    resources: authority.resourceGovernor,
-    resourceGovernor: authority.resourceGovernor,
+    get resources() {
+      return authority.resourceGovernor;
+    },
+    get resourceGovernor() {
+      return authority.resourceGovernor;
+    },
     ...(authority.localExecutorEnabled
       ? {
           executorResources: authority.executorResourceGovernor,
           executorResourceGovernor: authority.executorResourceGovernor,
         }
       : {}),
-    surfaceAssets: authority.surfaceAssets,
-    delivery: authority.participant,
-    participant: authority.participant,
-    ...(authority.globalState ? { globalState: authority.globalState } : {}),
+    get surfaceAssets() {
+      return authority.surfaceAssets;
+    },
+    get delivery() {
+      return authority.participant;
+    },
+    get participant() {
+      return authority.participant;
+    },
+    get globalState() {
+      return authority.globalState;
+    },
     executionAssetCatalog: authority.executionAssetCatalog,
     globalPublishing: true,
-    anchorEpoch: authority.anchorEpoch,
+    get anchorEpoch() {
+      return authority.anchorEpoch;
+    },
     acceptsConversationId: (conversationId) => !isLocalConversationId(conversationId),
     permissionSnapshotFor: authority.permissionSnapshotFor,
     prepareConversationAssignment: authority.prepareConversationAssignment,

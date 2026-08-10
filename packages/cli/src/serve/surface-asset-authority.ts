@@ -20,6 +20,8 @@ import {
   type FileAuthorityCommitLog,
   type RebuildableDurableProjectionIndex,
   type SurfaceAssetGrantLedger,
+  type SurfaceAssetAuthorityBinding,
+  type SurfaceAssetCoordinatorOptions,
   type SurfaceAssetGrantLedgerAppendResult,
   type SurfaceAssetGrantLedgerIssuedResult,
   type SurfaceAssetGrantLedgerSnapshot,
@@ -66,6 +68,38 @@ export type SurfaceAssetAuthority = SurfaceAssetCoordinator & {
 export function createSurfaceAssetAuthority(
   options: CreateSurfaceAssetAuthorityOptions,
 ): SurfaceAssetAuthority {
+  const built = buildSurfaceAssetAuthority(options);
+  const coordinator = SurfaceAssetCoordinator.forStore(built.coordinatorOptions);
+  return Object.assign(coordinator, { checkpointRetention: built.lifecycle });
+}
+
+export async function rebindSurfaceAssetAuthority(
+  authority: SurfaceAssetAuthority,
+  options: CreateSurfaceAssetAuthorityOptions,
+): Promise<SurfaceAssetAuthority> {
+  const built = buildSurfaceAssetAuthority(options);
+  const source = built.coordinatorOptions;
+  const binding: SurfaceAssetAuthorityBinding = {
+    ledger: source.ledger,
+    signer: source.signer,
+    verifier: source.verifier,
+    createGrantId: source.createGrantId,
+    canDownload: source.canDownload,
+    authorizeScope: source.authorizeScope,
+    deleteUnreferencedArtifacts: source.deleteUnreferencedArtifacts,
+    listReleasedArtifacts: source.listReleasedArtifacts,
+    markReleasedArtifactsReclaimed: source.markReleasedArtifactsReclaimed,
+  };
+  await authority.rebindAuthority(binding);
+  return Object.assign(authority, { checkpointRetention: built.lifecycle });
+}
+
+function buildSurfaceAssetAuthority(
+  options: CreateSurfaceAssetAuthorityOptions,
+): {
+  readonly coordinatorOptions: SurfaceAssetCoordinatorOptions;
+  readonly lifecycle: ArtifactLifecycleIndex;
+} {
   const temporaryArtifacts = new FileArtifactStore(
     path.join(options.authorityRoot, "surface-asset-temporary"),
   );
@@ -94,7 +128,7 @@ export function createSurfaceAssetAuthority(
     options.anchorEpoch,
     lifecycle,
   );
-  const coordinator = SurfaceAssetCoordinator.forStore({
+  const coordinatorOptions: SurfaceAssetCoordinatorOptions = {
     artifacts: options.artifacts,
     temporaryArtifacts,
     receiver,
@@ -121,8 +155,8 @@ export function createSurfaceAssetAuthority(
       }
       : {}),
     ...(options.clock ? { clock: options.clock } : {}),
-  });
-  return Object.assign(coordinator, { checkpointRetention: lifecycle });
+  };
+  return { coordinatorOptions, lifecycle };
 }
 
 class SurfaceAssetProjection implements SurfaceAssetGrantLedger {

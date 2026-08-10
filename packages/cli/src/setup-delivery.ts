@@ -121,7 +121,10 @@ import {
   FileTrustRuleSnapshotCatalog,
 } from "./executor-snapshot-version-store.js";
 import { loadOrCreateDeviceKey } from "./serve/mesh-device-key.js";
-import { createSurfaceAssetAuthority } from "./serve/surface-asset-authority.js";
+import {
+  createSurfaceAssetAuthority,
+  rebindSurfaceAssetAuthority,
+} from "./serve/surface-asset-authority.js";
 import { createTrustedDeviceProtocolVerifier } from "./serve/trusted-device-protocol-verifier.js";
 import { migrateLegacyWorkscenes } from "./serve/workscene-legacy-migration.js";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
@@ -133,6 +136,24 @@ import {
   FileExecutionAssetCache,
   type ExecutionAssetCatalogPort,
 } from "./serve/execution-asset-cache.js";
+import type { InstalledAuthorityGeneration } from "./serve/planned-anchor-transfer.js";
+
+export const INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS = Object.freeze([
+  "runtime-epoch",
+  "delivery-authority",
+  "control-admission",
+  "resource-governor",
+  "surface-assets",
+  "workscene-global-state",
+  "memory-global-state",
+  "skill-global-state",
+  "rubric-global-state",
+] as const);
+
+export interface InstalledAuthorityGenerationReceipt {
+  readonly generation: InstalledAuthorityGeneration;
+  readonly participants: typeof INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS;
+}
 
 export interface PlannedAnchorReadySnapshot {
   readonly configuredCapabilities: {
@@ -228,6 +249,9 @@ export interface AuthorityRuntimeStack {
   readonly rubricGlobalState?: AnchorRubricGlobalStateAdapter;
   readonly globalMutationParticipants: readonly GlobalMutationCommitParticipant[];
   readonly installSchedulerGlobalState: (state: GlobalStatePort) => void;
+  readonly rebindInstalledAuthority: (
+    generation: InstalledAuthorityGeneration,
+  ) => Promise<InstalledAuthorityGenerationReceipt>;
   readonly recoverWorksceneState: () => Promise<void>;
   readonly replayWorksceneMutation: (
     requestId: string,
@@ -416,6 +440,7 @@ export interface SetupAuthorityRuntimeOptions {
   readonly authorizedDeviceIds?: readonly string[];
   readonly executorId?: string;
   readonly anchorEpoch?: number;
+  readonly installedAuthorityGeneration?: InstalledAuthorityGeneration;
   readonly configurationSnapshot?: unknown;
   /**
    * Omit only for the target-device local workspace settings process. In that
@@ -497,14 +522,21 @@ export async function setupAuthorityRuntime(
           },
         )
       : undefined;
-    const anchorEpoch = options.anchorEpoch ?? 1;
-    const authority = authorityLog
+    let anchorEpoch = options.anchorEpoch ?? 1;
+    if (
+      options.installedAuthorityGeneration &&
+      options.installedAuthorityGeneration.anchorEpoch !== anchorEpoch
+    ) {
+      throw new Error("Installed authority generation does not match the configured anchor epoch");
+    }
+    let installedAuthorityGeneration = options.installedAuthorityGeneration;
+    let authority = authorityLog
       ? new DeliveryAuthority({ log: authorityLog, anchorEpoch })
       : undefined;
-    const participant = authority
+    let participant = authority
       ? new ownerRuntime!.OwnerDeliveryParticipant({ authority })
       : undefined;
-    const controlAdmission = authorityLog
+    let controlAdmission = authorityLog
       ? new ownerRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
       : undefined;
     const localControlAdmission = executorLog
@@ -608,7 +640,7 @@ export async function setupAuthorityRuntime(
         "reservation.release",
       ],
     });
-    const resourceGovernor = authorityLog
+    let resourceGovernor = authorityLog
       ? new ownerRuntime!.AnchorResourceGovernor({
           log: authorityLog,
           signer: key,
@@ -1694,13 +1726,185 @@ export async function setupAuthorityRuntime(
     };
     const routedGlobalState = worksceneGlobalState && memoryGlobalState && skillGlobalState && rubricGlobalState
       ? createGlobalStateRouter(
-          worksceneGlobalState,
-          memoryGlobalState,
-          skillGlobalState,
+          () => worksceneGlobalState!,
+          () => memoryGlobalState!,
+          () => skillGlobalState!,
           () => schedulerGlobalState,
-          rubricGlobalState,
+          () => rubricGlobalState!,
         )
       : undefined;
+    const rebindInstalledAuthority = async (
+      generation: InstalledAuthorityGeneration,
+    ): Promise<InstalledAuthorityGenerationReceipt> => {
+      if (!authorityLog || !ownerRuntime || !anchorEnabled || !routedGlobalState) {
+        throw new Error("Installed authority generation requires the anchor runtime");
+      }
+      if (
+        installedAuthorityGeneration &&
+        canonicalize(installedAuthorityGeneration) === canonicalize(generation)
+      ) {
+        return Object.freeze({
+          generation: installedAuthorityGeneration,
+          participants: INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
+        });
+      }
+      if (
+        !Number.isSafeInteger(generation.anchorEpoch) ||
+        generation.anchorEpoch <= anchorEpoch ||
+        generation.trustEpoch <= 0 ||
+        generation.installLsn <= 0
+      ) {
+        throw new Error("Installed authority generation is stale or invalid");
+      }
+      const targetOrigin = await authorityLog.originCheckpoint();
+      if (targetOrigin.logId !== generation.targetLogId) {
+        throw new Error("Installed authority generation targets another authority log");
+      }
+
+      worksceneGlobalState?.stop();
+
+      const nextAuthority = new DeliveryAuthority({
+        log: authorityLog,
+        anchorEpoch: generation.anchorEpoch,
+      });
+      const nextParticipant = new ownerRuntime.OwnerDeliveryParticipant({
+        authority: nextAuthority,
+      });
+      const nextControlAdmission = new ownerRuntime.ControlAdmissionJournal(
+        authorityLog,
+        artifacts,
+      );
+      const nextSurfaceAssetOptions = {
+        authorityRoot,
+        log: authorityLog,
+        retentionLogs: [authorityLog, ...(executorLog ? [executorLog] : [])],
+        artifacts,
+        signer: key,
+        verifier,
+        anchorEpoch: generation.anchorEpoch,
+        storageMaintenance: options.storageMaintenance,
+        clock,
+      } satisfies Parameters<typeof createSurfaceAssetAuthority>[0];
+      const nextResourceGovernor = new ownerRuntime.AnchorResourceGovernor({
+        log: authorityLog,
+        signer: key,
+        verifier,
+        guard: resourceGuard,
+        anchorEpoch: generation.anchorEpoch,
+        localExecutorId: executorId,
+        reporterKeyFor: (candidateExecutorId) =>
+          executorCapabilities.snapshotFor(candidateExecutorId)?.descriptor
+            .signature.keyId,
+        ...(options.resourceCandidateTtlMs === undefined
+          ? {}
+          : { candidateTtlMs: options.resourceCandidateTtlMs }),
+        clock,
+      });
+      const nextWorkscene = new AnchorWorksceneGlobalStateAdapter({
+        log: authorityLog,
+        anchorEpoch: generation.anchorEpoch,
+        removeScene: (sceneId, conversationIds) => {
+          if (!worksceneCleanup) {
+            throw new Error("Workscene cleanup owner is not installed");
+          }
+          return worksceneCleanup(sceneId, conversationIds);
+        },
+        storageMaintenance: options.storageMaintenance,
+        clock,
+      });
+      const nextMemory = new AnchorMemoryGlobalStateAdapter({
+        log: authorityLog,
+        anchorEpoch: generation.anchorEpoch,
+        scopeRoot: (scope) =>
+          scope.kind === "personal"
+            ? getMemoryDir(options.zhixingHome)
+            : getWorkSceneMemoryDir(scope.sceneId, options.zhixingHome),
+        clock,
+      });
+      const nextSkill = new AnchorSkillGlobalStateAdapter({
+        log: authorityLog,
+        artifacts,
+        store: new SkillStore(getSkillsRoot()),
+        anchorEpoch: generation.anchorEpoch,
+        clock,
+      });
+      const nextRubric = new AnchorRubricGlobalStateAdapter({
+        log: authorityLog,
+        artifacts,
+        anchorEpoch: generation.anchorEpoch,
+        clock,
+      });
+
+      try {
+        await nextWorkscene.initializeStagedPublishing();
+        const memoryScopes: Array<
+          { readonly kind: "personal" } |
+          { readonly kind: "workscene"; readonly sceneId: string }
+        > = [{ kind: "personal" }];
+        const listed = await nextWorkscene.read(
+          { kind: "workscene-list" },
+          {
+            principal: { kind: "host", component: "installed-generation" },
+            requestId: `installed-generation:${generation.transferId}:workscenes`,
+            deadlineAt: new Date(Date.parse(clock()) + 30_000).toISOString(),
+            authority: { domain: "global", anchorEpoch: generation.anchorEpoch },
+          },
+        );
+        if (listed.kind !== "workscene-list") {
+          throw new Error("Installed authority returned another workscene read domain");
+        }
+        memoryScopes.push(...listed.scenes.map((scene) => ({
+          kind: "workscene" as const,
+          sceneId: scene.id,
+        })));
+        await nextMemory.initializeStagedPublishing(memoryScopes);
+        await nextSkill.initializeStagedPublishing();
+      } catch (error) {
+        nextWorkscene.stop();
+        throw error;
+      }
+
+      const nextGlobalState = createGlobalStateRouter(
+        () => nextWorkscene,
+        () => nextMemory,
+        () => nextSkill,
+        () => undefined,
+        () => nextRubric,
+      );
+      try {
+        await executionAssets.publishFromAuthority({
+          state: nextGlobalState,
+          anchorEpoch: generation.anchorEpoch,
+          signer: key,
+          generatedAt: canonicalTime(clock(), "Execution asset snapshot time"),
+        });
+      } catch (error) {
+        nextWorkscene.stop();
+        throw error;
+      }
+
+      const nextSurfaceAssets = await runInMaintenanceContext(
+        "recovery",
+        () => rebindSurfaceAssetAuthority(surfaceAssets!, nextSurfaceAssetOptions),
+      );
+
+      authority = nextAuthority;
+      participant = nextParticipant;
+      controlAdmission = nextControlAdmission;
+      surfaceAssets = nextSurfaceAssets;
+      resourceGovernor = nextResourceGovernor;
+      worksceneGlobalState = nextWorkscene;
+      memoryGlobalState = nextMemory;
+      skillGlobalState = nextSkill;
+      rubricGlobalState = nextRubric;
+      schedulerGlobalState = undefined;
+      anchorEpoch = generation.anchorEpoch;
+      installedAuthorityGeneration = Object.freeze(structuredClone(generation));
+      return Object.freeze({
+        generation: installedAuthorityGeneration,
+        participants: INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
+      });
+    };
     if (routedGlobalState) {
       await executionAssets
         .publishFromAuthority({
@@ -1713,7 +1917,9 @@ export async function setupAuthorityRuntime(
       if (localExecutorEnabled) await refreshLocalExecutorSnapshot();
     }
     return {
-      anchorEpoch,
+      get anchorEpoch() {
+        return anchorEpoch;
+      },
       localDomainId,
       localOwnerEpoch,
       localGovernorEpoch,
@@ -1783,16 +1989,21 @@ export async function setupAuthorityRuntime(
       workspaceProbe,
       environmentProbeOwner,
       globalState: routedGlobalState,
-      rubricGlobalState,
-      globalMutationParticipants: worksceneGlobalState && memoryGlobalState && skillGlobalState
-        ? [worksceneGlobalState, memoryGlobalState, skillGlobalState]
-        : [],
+      get rubricGlobalState() {
+        return rubricGlobalState;
+      },
+      get globalMutationParticipants() {
+        return worksceneGlobalState && memoryGlobalState && skillGlobalState
+          ? [worksceneGlobalState, memoryGlobalState, skillGlobalState]
+          : [];
+      },
       installSchedulerGlobalState: (state) => {
         if (schedulerGlobalState) {
           throw new Error("Scheduler global state owner is already installed");
         }
         schedulerGlobalState = state;
       },
+      rebindInstalledAuthority,
       recoverWorksceneState: async () => {
         await worksceneGlobalState?.recoverPendingDeletions();
       },
@@ -1928,19 +2139,19 @@ interface NormalizedExecutorReadiness {
 }
 
 function createGlobalStateRouter(
-  workscene: GlobalStatePort,
-  memory: GlobalStatePort,
-  skills: GlobalStatePort,
+  workscene: () => GlobalStatePort,
+  memory: () => GlobalStatePort,
+  skills: () => GlobalStatePort,
   scheduler: () => GlobalStatePort | undefined,
-  rubrics: GlobalStatePort,
+  rubrics: () => GlobalStatePort,
 ): GlobalStatePort {
   const routeMutation = (
     mutation: Parameters<GlobalStatePort["mutate"]>[0],
   ): GlobalStatePort => {
-    if (mutation.kind.startsWith("rubric-")) return rubrics;
-    if (mutation.kind.startsWith("memory-")) return memory;
-    if (mutation.kind.startsWith("skill-")) return skills;
-    if (!mutation.kind.startsWith("schedule-")) return workscene;
+    if (mutation.kind.startsWith("rubric-")) return rubrics();
+    if (mutation.kind.startsWith("memory-")) return memory();
+    if (mutation.kind.startsWith("skill-")) return skills();
+    if (!mutation.kind.startsWith("schedule-")) return workscene();
     const owner = scheduler();
     if (!owner) {
       throw new Error("Scheduler authority is not ready");
@@ -1950,20 +2161,20 @@ function createGlobalStateRouter(
   return {
     read: (query, context) => {
       if (query.kind.startsWith("memory-")) {
-        return memory.read(query, context);
+        return memory().read(query, context);
       }
       if (query.kind === "asset-index" && query.asset === "rubrics") {
-        return rubrics.read(query, context);
+        return rubrics().read(query, context);
       }
       if (
         query.kind === "skill-catalog" ||
         query.kind === "skill-get" ||
         (query.kind === "asset-index" && query.asset === "skills")
       ) {
-        return skills.read(query, context);
+        return skills().read(query, context);
       }
       if (query.kind !== "schedule-list") {
-        return workscene.read(query, context);
+        return workscene().read(query, context);
       }
       const owner = scheduler();
       if (!owner) {
@@ -2216,13 +2427,7 @@ export async function setupDelivery(
       },
     });
 
-    const {
-      artifacts,
-      authorityLog,
-      authority,
-      participant,
-      controlAdmission,
-    } = options.authorityRuntime;
+    const { artifacts, authorityLog } = options.authorityRuntime;
 
     const transports = new DeliveryTransportRegistry();
     transports.register(channelAuthorityDeliveryTransport(sender));
@@ -2235,25 +2440,32 @@ export async function setupDelivery(
     eventBus.on("delivery:notice", ({ notice }) => publishNotice(notice));
 
     // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
-    authorityDelivery = new AuthorityDeliveryPipeline({
-      authority,
-      artifacts,
-      transport: transports,
-      eventBus,
-      config: {
-        ...DEFAULT_AUTHORITY_DELIVERY_CONFIG,
-      },
-      logger: {
-        debug: () => {},
-        info: (msg: string) => logger.info(`[delivery] ${msg}`),
-        warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
-        error: (msg: string) => logger.error(`[delivery] ${msg}`),
-      },
-    });
-    await authorityDelivery.prepare();
+    const buildAuthorityDelivery = async () => {
+      const pipeline = new AuthorityDeliveryPipeline({
+        authority: options.authorityRuntime.authority,
+        artifacts,
+        transport: transports,
+        eventBus,
+        config: {
+          ...DEFAULT_AUTHORITY_DELIVERY_CONFIG,
+        },
+        logger: {
+          debug: () => {},
+          info: (msg: string) => logger.info(`[delivery] ${msg}`),
+          warn: (msg: string) => logger.warn(`[delivery] ${msg}`),
+          error: (msg: string) => logger.error(`[delivery] ${msg}`),
+        },
+      });
+      await pipeline.prepare();
+      if (activated) pipeline.activate();
+      return pipeline;
+    };
+    authorityDelivery = await buildAuthorityDelivery();
 
     return {
-      authorityDelivery,
+      get authorityDelivery() {
+        return authorityDelivery!;
+      },
       activate: () => {
         authorityDelivery!.activate();
         activated = true;
@@ -2267,15 +2479,25 @@ export async function setupDelivery(
       resumeAfterAuthorityTransfer: () =>
         authorityDelivery!.resumeAfterAuthorityTransfer(),
       recoverInstalledAuthority: async () => {
-        if (activated) await authorityDelivery!.flush();
+        const previous = authorityDelivery!;
+        const replacement = await buildAuthorityDelivery();
+        authorityDelivery = replacement;
+        await previous.stop();
       },
-      authority,
+      get authority() {
+        return options.authorityRuntime.authority;
+      },
       authorityLog,
       artifacts,
-      participant,
-      controlAdmission,
+      get participant() {
+        return options.authorityRuntime.participant;
+      },
+      get controlAdmission() {
+        return options.authorityRuntime.controlAdmission;
+      },
       outboxRegistry,
-      statusHistory: (afterByItem = {}) => authority.statusNotices(afterByItem),
+      statusHistory: (afterByItem = {}) =>
+        options.authorityRuntime.authority.statusNotices(afterByItem),
       onStatus: (listener) => {
         statusListeners.add(listener);
         return () => statusListeners.delete(listener);
@@ -2283,8 +2505,8 @@ export async function setupDelivery(
       resolve: (input) => {
         const envelope = createDeliveryControlEnvelope(input);
         return applyDeliveryResolutionControl({
-          admission: controlAdmission,
-          authority,
+          admission: options.authorityRuntime.controlAdmission,
+          authority: options.authorityRuntime.authority,
           envelope,
           source: input.source,
           onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),

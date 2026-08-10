@@ -7,7 +7,11 @@ import type {
   SecretStorePort,
   Signature,
 } from "@zhixing/core/contracts";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
+import {
+  createSignedAnchorTransferAbort,
+  createSignedAnchorTransferCommand,
+  type ProtocolSignatureVerifier,
+} from "@zhixing/core/protocol";
 import {
   currentMaintenanceAbortSignal,
   DefaultDeviceCapacityArbiter,
@@ -244,6 +248,98 @@ describe("planned anchor transfer prepared phase", () => {
     );
     expect((await fixture.targetJournal.state(TRANSFER_ID))?.phase).toBe("prepared");
     expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).not.toBeNull();
+  });
+
+  it("durably aborts source-prepared target-claim-only state before cleanup and across restarts", async () => {
+    const fixture = await createFixture();
+    let activeTarget = fixture.target;
+    let blockRemotePrepare = true;
+    let loseAbortResponse = true;
+    const interruptedTarget: PlannedAnchorTransferTargetPort = {
+      summary: () => activeTarget.summary(),
+      ready: (input) => activeTarget.ready(input),
+      releaseCandidate: (input) => activeTarget.releaseCandidate(input),
+      apply: async (command) => {
+        if (command.op === "prepare" && blockRemotePrepare) {
+          blockRemotePrepare = false;
+          throw new Error("simulated remote prepare effect failure");
+        }
+        const result = await activeTarget.apply(command);
+        if (command.op === "abort" && loseAbortResponse) {
+          loseAbortResponse = false;
+          throw new Error("simulated abort response loss");
+        }
+        return result;
+      },
+    };
+    const owner = fixture.createOwner(interruptedTarget);
+    await expect(owner.prepare({
+      requestId: "request-claim-abort",
+      transferId: TRANSFER_ID,
+      targetDeviceId: fixture.targetKey.deviceId,
+    })).rejects.toThrow("simulated remote prepare effect failure");
+    expect((await fixture.sourceJournal.state(TRANSFER_ID))?.phase).toBe("prepared");
+    expect(await fixture.targetJournal.state(TRANSFER_ID)).toBeUndefined();
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).not.toBeNull();
+
+    const wrongAbort = createSignedAnchorTransferAbort({
+      v: 1,
+      requestId: "request-wrong",
+      transferId: TRANSFER_ID,
+      sourceDeviceId: fixture.sourceKey.deviceId,
+      targetDeviceId: fixture.targetKey.deviceId,
+      sourceAnchorEpoch: 1,
+      reason: "operator-cancelled",
+      at: AT,
+    }, fixture.sourceKey);
+    const wrongCommand = createSignedAnchorTransferCommand({
+      v: 1,
+      op: "abort",
+      requestId: "request-wrong",
+      transferId: TRANSFER_ID,
+      abort: wrongAbort,
+    }, fixture.sourceKey);
+    await expect(activeTarget.apply(wrongCommand)).rejects.toThrow(
+      "changes its durable candidate identity",
+    );
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).not.toBeNull();
+
+    activeTarget = fixture.createTarget(
+      fixture.readiness.port,
+      () => NOW + 24 * 60 * 60 * 1_000,
+    );
+    await expect(owner.abort({
+      requestId: "request-claim-abort",
+      transferId: TRANSFER_ID,
+      reason: "operator-cancelled",
+    })).rejects.toThrow("simulated abort response loss");
+    expect((await fixture.sourceJournal.state(TRANSFER_ID))?.phase).toBe("aborted");
+    expect(await fixture.targetJournal.state(TRANSFER_ID)).toBeUndefined();
+    expect(await loadAnchorIssuerKey(fixture.secrets, TRANSFER_ID)).toBeNull();
+
+    activeTarget = fixture.createTarget(
+      fixture.readiness.port,
+      () => NOW + 24 * 60 * 60 * 1_000,
+    );
+    await activeTarget.recoverBeforeAdmission();
+    await fixture.createTarget(
+      fixture.readiness.port,
+      () => NOW + 48 * 60 * 60 * 1_000,
+    ).recoverBeforeAdmission();
+    const restartedOwner = fixture.createOwner(interruptedTarget);
+    await restartedOwner.recoverBeforeAdmission();
+    await expect(restartedOwner.abort({
+      requestId: "request-claim-abort",
+      transferId: TRANSFER_ID,
+      reason: "operator-cancelled",
+    })).resolves.toMatchObject({ phase: "aborted" });
+
+    activeTarget = fixture.createTarget();
+    await expect(restartedOwner.prepare({
+      requestId: "request-next",
+      transferId: "xfer-01J00000000000000000000002",
+      targetDeviceId: fixture.targetKey.deviceId,
+    })).resolves.toMatchObject({ phase: "prepared" });
   });
 
   it("crosses the strict mesh service and authorizes only the current source", async () => {
@@ -803,7 +899,22 @@ describe("planned anchor transfer prepared phase", () => {
     expect(recovered?.installation.transferId).toBe(TRANSFER_ID);
     expect(recovered?.state.phase).toBe("committed");
     expect(recovered?.requiresPostInstallCompletion).toBe(true);
+    expect(recovered?.installedGeneration).toMatchObject({
+      transferId: TRANSFER_ID,
+      anchorEpoch: 2,
+      trustEpoch: recovered?.installation.trustRecord.trustEpoch,
+      targetLogId: (await fixture.targetStore.authorityLog().originCheckpoint()).logId,
+    });
     expect(replay).toEqual(recovered);
+    await rm(path.join(
+      fixture.targetRoot,
+      "anchor-transfer-staging",
+      "transfers",
+      TRANSFER_ID,
+    ), { recursive: true, force: true });
+    const afterPrivateCleanup = await complete();
+    expect(afterPrivateCleanup?.requiresPostInstallCompletion).toBe(false);
+    expect(afterPrivateCleanup?.installedGeneration).toEqual(recovered?.installedGeneration);
     expect((await loadActiveAnchorIssuerKey(
       fixture.secrets,
       issuerKeyId,
@@ -893,6 +1004,7 @@ async function createFixture(options: {
   };
   const createTarget = (
     readinessPort: import("../setup-delivery.js").PlannedAnchorReadinessPort = readiness.port,
+    now: () => number = () => NOW,
   ) => new PlannedAnchorTransferTarget({
     deviceId: targetKey.deviceId,
     identityKey: targetKey,
@@ -906,7 +1018,7 @@ async function createFixture(options: {
     signer: targetKey,
     verifier,
     readiness: readinessPort,
-    now: () => NOW,
+    now,
   });
   const target = createTarget();
   const onDrain = { current: async () => {} };

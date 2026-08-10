@@ -31,10 +31,12 @@ import {
 import { createTempDir } from "@zhixing/test-utils";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import {
+  INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
   setupAuthorityRuntime,
   setupDelivery,
   type DeliveryStack,
 } from "../setup-delivery.js";
+import type { InstalledAuthorityGeneration } from "../serve/planned-anchor-transfer.js";
 import {
   FileExecutionSnapshotVersionStore,
   FileTrustRuleSnapshotCatalog,
@@ -718,6 +720,78 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(() => runtime.executorResourceGovernor).toThrow(
       "Local executor role is not enabled",
     );
+  });
+
+  it.each([
+    { profile: "anchor+executor", enableLocalExecutor: true },
+    { profile: "anchor-only", enableLocalExecutor: false },
+  ])("rebinds every fixed authority owner to installed generations in the $profile profile", async ({
+    enableLocalExecutor,
+  }) => {
+    const runtime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+      enableAnchor: true,
+      enableLocalExecutor,
+    });
+    try {
+      const origin = await runtime.authorityLog.originCheckpoint();
+      const initial = {
+        authority: runtime.authority,
+        controlAdmission: runtime.controlAdmission,
+        resourceGovernor: runtime.resourceGovernor,
+        surfaceAssets: runtime.surfaceAssets,
+        checkpointRetention: runtime.checkpointRetention,
+        rubricGlobalState: runtime.rubricGlobalState,
+        globalMutationParticipants: runtime.globalMutationParticipants,
+      };
+      await initial.authority.list();
+      const generation = (epoch: number): InstalledAuthorityGeneration => ({
+        transferId: `xfer-01J0000000000000000000000${epoch}`,
+        commitDigest: protocolDigest("InstalledGenerationCommit", 1, { epoch }),
+        baseDigest: protocolDigest("InstalledGenerationBase", 1, { epoch }),
+        sourceHead: origin,
+        targetLogId: origin.logId,
+        installLsn: epoch,
+        anchorEpoch: epoch,
+        trustEpoch: epoch,
+        trustChainHead: {
+          seq: epoch,
+          eventDigest: protocolDigest("InstalledGenerationTrust", 1, { epoch }),
+        },
+      });
+
+      const second = generation(2);
+      const receipt = await runtime.rebindInstalledAuthority(second);
+      expect(receipt).toEqual({
+        generation: second,
+        participants: INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
+      });
+      expect(runtime.anchorEpoch).toBe(2);
+      expect(runtime.authority).not.toBe(initial.authority);
+      expect(runtime.controlAdmission).not.toBe(initial.controlAdmission);
+      expect(runtime.resourceGovernor).not.toBe(initial.resourceGovernor);
+      expect(runtime.surfaceAssets).toBe(initial.surfaceAssets);
+      expect(runtime.checkpointRetention).not.toBe(initial.checkpointRetention);
+      expect(runtime.rubricGlobalState).not.toBe(initial.rubricGlobalState);
+      expect(runtime.globalMutationParticipants).toHaveLength(
+        initial.globalMutationParticipants.length,
+      );
+      for (const [index, participant] of runtime.globalMutationParticipants.entries()) {
+        expect(participant).not.toBe(initial.globalMutationParticipants[index]);
+      }
+      await expect(runtime.authority.list()).resolves.toEqual([]);
+      expect(await runtime.rebindInstalledAuthority(structuredClone(second))).toEqual(receipt);
+
+      const third = generation(3);
+      await expect(runtime.rebindInstalledAuthority(third)).resolves.toMatchObject({
+        generation: { anchorEpoch: 3, trustEpoch: 3 },
+      });
+      expect(runtime.anchorEpoch).toBe(3);
+    } finally {
+      await runtime.startupCleanup.run().catch(() => undefined);
+    }
   });
 
   it("selects only the compatible executor named by owner affinity", async () => {

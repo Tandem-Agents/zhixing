@@ -1195,11 +1195,13 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const inboundRouter = byPath.get("packages/server/src/channels/inbound-router.ts");
   const conversationProtocol = byPath.get("packages/cli/src/serve/conversation-protocol-runtime.ts");
   const deliveryPipeline = byPath.get("packages/core/src/delivery/authority-pipeline.ts");
+  const surfaceAssetAuthority = byPath.get("packages/cli/src/serve/surface-asset-authority.ts");
+  const surfaceAssets = byPath.get("packages/core/src/authority/surface-assets.ts");
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
     !accessRoot || !executorRoot || !setup || !firstParty || !localRouter ||
     !registry || !bootstrap || !channels || !inboundRouter || !conversationProtocol ||
-    !deliveryPipeline
+    !deliveryPipeline || !surfaceAssetAuthority || !surfaceAssets
   ) {
     return ["planned anchor transfer production assembly sources are missing"];
   }
@@ -1320,11 +1322,48 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   if (
     count(transfer, "const state = await this.#journal.prepareCandidate(preparedRecord(command));") !== 1 ||
     count(transfer, "await this.#journal.releaseUnpreparedCandidate(candidate.identity);") !== 1 ||
-    count(transfer, "await this.#candidates.markPrepared(candidate.identity);") !== 1 ||
+    count(
+      transfer,
+      "const decision = await this.#candidates.markPrepared(candidate.identity, prepared);",
+    ) !== 1 ||
+    count(transfer, "const state = await context.journal.append(decision.prepared!);") !== 1 ||
     targetRelease < 0 || targetReleaseContext < targetRelease ||
     targetReleasePhase < targetReleaseContext || targetReleaseDecision < targetReleasePhase
   ) {
     failures.push("planned anchor candidate terminal/prepared durable ordering drifted");
+  }
+
+  const remoteAbort = transfer.indexOf(
+    "const decision = await this.#candidates.decideRemoteAbort(",
+  );
+  const remoteAbortCleanup = transfer.indexOf(
+    "await this.#cleanupClaimOnlyCandidate(decision);",
+    remoteAbort,
+  );
+  const remotePreparedMaterialization = transfer.indexOf(
+    "state = await context.journal.append(decision.prepared);",
+    remoteAbort,
+  );
+  const candidateRecovery = transfer.indexOf(
+    "for (const candidate of (await this.#candidates.states()).values())",
+  );
+  const phaseRecovery = transfer.indexOf(
+    "const journalsRoot = path.join(this.options.stagingRoot, \"journals\");",
+    candidateRecovery,
+  );
+  if (
+    count(transfer, "readonly prepared?: PlannedAnchorPreparedRecord;") !== 1 ||
+    count(transfer, "readonly abort?: AnchorTransferAbort;") !== 1 ||
+    count(transfer, "prepared: PlannedAnchorPreparedRecord;") !== 1 ||
+    count(transfer, "readonly abort: AnchorTransferAbort;") !== 1 ||
+    count(transfer, "async decideRemoteAbort(") !== 1 ||
+    remoteAbort < 0 || remoteAbortCleanup < remoteAbort ||
+    remotePreparedMaterialization < remoteAbort ||
+    candidateRecovery < 0 || phaseRecovery < candidateRecovery ||
+    count(transfer, "assertCandidateReadyProofIdentity(candidate);") !== 2 ||
+    count(transfer, "await this.#assertCandidateIssuerKey(candidate);") !== 2
+  ) {
+    failures.push("planned anchor signed abort or candidate terminal recovery drifted");
   }
 
   const completion = transfer.indexOf("export async function completePlannedAnchorInstallationBeforeBootstrap(");
@@ -1345,6 +1384,55 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(firstParty, "this.input.isReady?.() === false") !== 1
   ) {
     failures.push("planned anchor pre-bootstrap/post-install completion closure drifted");
+  }
+  const generationParticipants = frozenLiteralDescriptor(
+    "packages/cli/src/setup-delivery.ts",
+    setup,
+    "INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS",
+  );
+  const expectedGenerationParticipants = [
+    "runtime-epoch",
+    "delivery-authority",
+    "control-admission",
+    "resource-governor",
+    "surface-assets",
+    "workscene-global-state",
+    "memory-global-state",
+    "skill-global-state",
+    "rubric-global-state",
+  ];
+  const generationRebind = command.indexOf(
+    "const receipt = await ctx.authorityRuntime!.rebindInstalledAuthority(generation);",
+  );
+  const schedulerRecovery = command.indexOf("recoverScheduler: async", generationRebind);
+  const assemblyGenerationRebind = assembly.indexOf(
+    "const generationReceipt = await consumers.rebindAuthorityGeneration(",
+  );
+  if (
+    JSON.stringify(generationParticipants) !== JSON.stringify(expectedGenerationParticipants) ||
+    count(
+      bootstrap,
+      "installedAuthorityGeneration: plannedAnchorPostInstall.installedGeneration",
+    ) !== 1 ||
+    count(
+      accessRoot,
+      "installedAuthorityGeneration: bootstrap.installedAuthorityGeneration",
+    ) !== 1 ||
+    count(setup, "const rebindInstalledAuthority = async (") !== 1 ||
+    count(setup, "installedAuthorityGeneration = Object.freeze(structuredClone(generation));") !== 1 ||
+    count(
+      setup,
+      "rebindSurfaceAssetAuthority(surfaceAssets!, nextSurfaceAssetOptions)",
+    ) !== 1 ||
+    count(surfaceAssetAuthority, "await authority.rebindAuthority(binding);") !== 1 ||
+    count(surfaceAssets, "async rebindAuthority(binding: SurfaceAssetAuthorityBinding)") !== 1 ||
+    generationRebind < 0 || schedulerRecovery < generationRebind ||
+    assemblyGenerationRebind < 0 ||
+    assemblyGenerationRebind > assembly.indexOf(
+      "const readBack = await readBackPlannedAnchorPostInstallObligations({",
+    )
+  ) {
+    failures.push("planned anchor installed authority generation rebind exact-set drifted");
   }
   const stopInbound = command.indexOf("ctx.inboundRouter?.refuseNewMessages()");
   const drainInbound = command.indexOf(
@@ -1434,7 +1522,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(setup, "plannedAnchorReadiness.runRevisionChange(") !== 1 ||
     count(assembly, "readiness: this.options.authority.plannedAnchorReadiness") !== 2 ||
     count(transfer, "this.options.readiness.reserve({") !== 3 ||
-    count(transfer, "this.options.readiness.release(") !== 4 ||
+    count(transfer, "this.options.readiness.release(") !== 5 ||
     count(mesh, "options.lifecycle.run(() => target.") !== 4
   ) {
     failures.push("planned anchor transfer readiness reservation assembly drifted");

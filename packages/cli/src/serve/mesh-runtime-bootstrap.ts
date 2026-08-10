@@ -21,6 +21,7 @@ import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   completePlannedAnchorInstallationBeforeBootstrap,
+  type InstalledAuthorityGeneration,
   type PlannedAnchorPostInstallDescriptor,
 } from "./planned-anchor-transfer.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
@@ -47,6 +48,7 @@ export type MeshRuntimeBootstrap =
       readonly trustedIdentities: readonly DeviceIdentity[];
       readonly authorizedDeviceIds: readonly string[];
       readonly localEndpoint?: MeshEndpointDescriptor;
+      readonly installedAuthorityGeneration?: InstalledAuthorityGeneration;
       readonly plannedAnchorPostInstall?: PlannedAnchorPostInstallDescriptor;
     };
 
@@ -149,6 +151,9 @@ export async function prepareMeshRuntimeBootstrap(input: {
       .filter((member) => member.state === "active")
       .map((member) => member.device.deviceId),
     ...(localEndpoint ? { localEndpoint } : {}),
+    ...(plannedAnchorPostInstall
+      ? { installedAuthorityGeneration: plannedAnchorPostInstall.installedGeneration }
+      : {}),
     ...(plannedAnchorPostInstall?.requiresPostInstallCompletion
       ? { plannedAnchorPostInstall }
       : {}),

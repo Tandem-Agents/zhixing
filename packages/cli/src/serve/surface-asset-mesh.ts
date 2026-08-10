@@ -59,7 +59,7 @@ type SurfaceAssetRequest =
     };
 
 export interface SurfaceAssetMeshServiceOptions {
-  readonly coordinator: SurfaceAssetCoordinator;
+  readonly coordinator: SurfaceAssetCoordinator | (() => SurfaceAssetCoordinator);
   readonly verifier: ProtocolSignatureVerifier;
   readonly surfacePrincipalFor: (connection: SecureMeshConnection) => string;
   readonly authorizePeer?: (deviceId: string) => boolean;
@@ -93,10 +93,13 @@ export function createSurfaceAssetMeshServiceHandler(
     signal.throwIfAborted();
     const request = decodeRequest(payload, options.verifier);
     const principal = options.surfacePrincipalFor(connection);
+    const coordinator = typeof options.coordinator === "function"
+      ? options.coordinator()
+      : options.coordinator;
     if (request.t === "issue") {
       const grant =
         request.kind === "asset-upload"
-          ? await options.coordinator.issue({
+          ? await coordinator.issue({
               kind: "asset-upload",
               scope: request.scope,
               surfacePrincipal: principal,
@@ -104,7 +107,7 @@ export function createSurfaceAssetMeshServiceHandler(
               assets: request.assets,
               payloadDigest: request.payloadDigest,
             })
-          : await options.coordinator.issue({
+          : await coordinator.issue({
               kind: "asset-download",
               scope: request.scope,
               surfacePrincipal: principal,
@@ -127,7 +130,7 @@ export function createSurfaceAssetMeshServiceHandler(
             surfacePrincipal: principal,
           };
     if (request.t === "probe") {
-      const progress = await options.coordinator.probe(
+      const progress = await coordinator.probe(
         request.grant,
         use,
         request.ref,
@@ -135,7 +138,7 @@ export function createSurfaceAssetMeshServiceHandler(
       return encode({ v: 1, t: "progress", ...progress });
     }
     if (request.t === "append") {
-      const progress = await options.coordinator.append(
+      const progress = await coordinator.append(
         request.grant,
         use,
         request.ref,
@@ -144,7 +147,7 @@ export function createSurfaceAssetMeshServiceHandler(
       );
       return encode({ v: 1, t: "progress", ...progress });
     }
-    const bytes = await options.coordinator.read(
+    const bytes = await coordinator.read(
       request.grant,
       use,
       request.ref,

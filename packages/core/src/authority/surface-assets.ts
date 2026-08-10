@@ -191,6 +191,19 @@ export interface SurfaceAssetCoordinatorOptions {
   readonly maintenanceResourceId?: string;
 }
 
+export type SurfaceAssetAuthorityBinding = Pick<
+  SurfaceAssetCoordinatorOptions,
+  | "ledger"
+  | "signer"
+  | "verifier"
+  | "createGrantId"
+  | "canDownload"
+  | "authorizeScope"
+  | "deleteUnreferencedArtifacts"
+  | "listReleasedArtifacts"
+  | "markReleasedArtifactsReclaimed"
+>;
+
 interface OperationPin {
   readonly id: symbol;
   readonly ref: ArtifactRef;
@@ -220,7 +233,7 @@ export class SurfaceAssetCoordinator {
   readonly #maintenanceResourceId: string;
   #recovered = false;
 
-  private constructor(private readonly options: SurfaceAssetCoordinatorOptions) {
+  private constructor(private options: SurfaceAssetCoordinatorOptions) {
     this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
       options.storageMaintenance,
     );
@@ -259,6 +272,14 @@ export class SurfaceAssetCoordinator {
     const created = new SurfaceAssetCoordinator(options);
     coordinators.set(options.artifacts, created);
     return created;
+  }
+
+  async rebindAuthority(binding: SurfaceAssetAuthorityBinding): Promise<void> {
+    await this.#queue.run(async () => {
+      this.options = { ...this.options, ...binding };
+      this.#recovered = false;
+      await this.#recoverLocked();
+    });
   }
 
   /**

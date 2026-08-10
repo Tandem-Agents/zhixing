@@ -587,6 +587,31 @@ function later(left: string | undefined, right: string): string {
 }
 
 describe("surface asset coordinator", () => {
+  it("rebinds the stable store coordinator to one new authority generation", async () => {
+    const current = await fixture({ authorizeScope: () => false });
+    expect(await current.coordinator.ownsScope(scope)).toBe(false);
+
+    const nextLedger = new MemoryLedger(
+      () => "2026-07-24T00:00:00.000Z",
+      () => true,
+    );
+    await current.coordinator.rebindAuthority({
+      ledger: nextLedger,
+      signer,
+      verifier,
+      createGrantId: () => "grt-01J00000000000000000000000",
+      canDownload: () => true,
+      authorizeScope: () => true,
+      deleteUnreferencedArtifacts: async (refs) =>
+        refs.map((reference) => ({ ref: reference, disposition: "missing" as const })),
+      listReleasedArtifacts: async () => [],
+      markReleasedArtifactsReclaimed: async () => undefined,
+    });
+
+    expect(await current.coordinator.ownsScope(scope)).toBe(true);
+    expect(nextLedger.synchronizeCalls).toBe(1);
+  });
+
   it("persists before return and replays only an identical durable request", async () => {
     const { coordinator, ledger } = await fixture();
     const asset = ref(Buffer.from("asset"));

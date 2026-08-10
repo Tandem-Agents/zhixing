@@ -103,6 +103,7 @@ export interface AnchorSchedulerRuntimeOptions {
  * ledger, executor job owner and durable submission protocol.
  */
 export class AnchorSchedulerRuntime {
+  readonly anchorEpoch: number;
   readonly scheduler: AnchorScheduler;
   readonly schedulerNotices: SchedulerUserNoticeJournal;
   readonly deferredIntents: DeferredGlobalIntentAnchorReviewService;
@@ -132,6 +133,7 @@ export class AnchorSchedulerRuntime {
     legacyTasks: readonly ScheduledTask[],
   ) {
     this.#options = options;
+    this.anchorEpoch = options.authority.anchorEpoch;
     this.#legacyTasks = legacyTasks;
     this.#clock = () => (options.now?.() ?? new Date()).toISOString();
     this.#manualSurfaces = new ManualJobSurfaceLifecycle({
