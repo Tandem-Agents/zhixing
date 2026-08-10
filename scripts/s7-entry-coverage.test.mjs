@@ -846,10 +846,14 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/mesh-control-plane.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/disaster-recovery-candidate.ts",
     "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/disaster-recovery-installation.ts",
     "packages/cli/src/serve/disaster-recovery-target.ts",
+    "packages/cli/src/serve/disaster-recovery-trust-evidence.ts",
     "packages/cli/src/serve/recovery-root-lifecycle.ts",
     "packages/cli/src/serve/credential-exposure-authority.ts",
+    "packages/cli/src/serve/credential-rotation-publication.ts",
     "packages/cli/src/startup.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
@@ -1024,6 +1028,46 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "registerDisasterRecoveryTrustEvidenceService(",
+        "registerUntrustedRecoveryEvidenceService(",
+      ),
+    )).join("\n"),
+    /no-rollback evidence producer, authenticated cut or candidate binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => text.replace(
+        "return createProductionAnchorReadySnapshot({",
+        "return createSyntheticAnchorReadySnapshot({",
+      ),
+    )).join("\n"),
+    /shared production snapshot and exact candidate identity/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace(
+        'candidate.terminal(input.abort.transferId, "aborted", abort)',
+        "Promise.resolve({ abort })",
+      ),
+    )).join("\n"),
+    /pre-commit signal or authenticated candidate terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => text.replace(
+        "openInventoryTargets(context, selection, signal)",
+        "openInventoryTargets(context, selection)",
+      ),
+    )).join("\n"),
+    /pre-commit signal or authenticated candidate terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/recovery-root-lifecycle.ts",
       (text) => text.replace('"domain-reset-establish"', '"domain-reset-bypass"'),
     )).join("\n"),
@@ -1045,10 +1089,47 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "await publishRequiredCredentialRotations({",
+        "await skipRequiredCredentialRotations({",
+      ),
+    )).join("\n"),
+    /credential rotation read-back, service verification or production caller exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => text.replace(
+        "await loadDeviceKey(secretStore, deviceId)",
+        "await loadOrCreateDeviceKey(secretStore)",
+      ),
+    )).join("\n"),
+    /reset approval minimum-privilege distinct co-signer boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-installation.ts",
+      (text) => text.replace("input.log.transactProjection<", "Promise.resolve<"),
+    )).join("\n"),
+    /disaster installation completion, consumer recovery or public-open order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
       (text) => text.replace(
         "disasterRecoveryPostInstall ?? plannedAnchorPostInstall",
         "plannedAnchorPostInstall",
+      ),
+    )).join("\n"),
+    /disaster installation completion, consumer recovery or public-open order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => text.replace(
+        "const context = await openRecoveryContext(options, false)",
+        "const context = await openRecoveryContext(options)",
       ),
     )).join("\n"),
     /disaster installation completion, consumer recovery or public-open order drifted/,

@@ -79,7 +79,11 @@ import {
   renderRecentContextFromMessages,
   type AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import {
+  loadCredentials,
+  type ZhixingConfig,
+  type ZhixingCredentials,
+} from "@zhixing/providers";
 import fsp from "node:fs/promises";
 import chalk from "chalk";
 import {
@@ -149,6 +153,8 @@ import { ZHIXING_CLI_VERSION } from "../version.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
 import { AnchorSchedulerRuntime } from "./anchor-scheduler-runtime.js";
 import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mesh.js";
+import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
+import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -752,6 +758,27 @@ async function runServerProcess(
   // （任务 AI 自创建子任务非用户发起），TaskListProvider 闭包内 ALS 取不到
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
   const ephemeralRuntime = await runtimeHost.createEphemeralRuntime();
+
+  if (ctx.authorityRuntime) {
+    await publishRequiredCredentialRotations({
+      authority: new CredentialExposureAuthority({
+        deviceId: ctx.authorityRuntime.deviceId,
+        log: ctx.authorityRuntime.authorityLog,
+        secretStore: ctx.secretStore,
+      }),
+      deviceId: ctx.authorityRuntime.deviceId,
+      config,
+      credentials,
+      credentialGeneration,
+      readCredentials: async () =>
+        loadCredentials({ store: startupResult.secretStore }),
+      mcpStatuses: () => ctx.mcpHub.serverStatuses(),
+      channelStatuses: () => ctx.channels?.listStatuses() ?? [],
+      ...(ctx.channelConnections
+        ? { waitForChannels: () => ctx.channelConnections!.ready }
+        : {}),
+    });
+  }
 
   let postAdoptionMemory: PostAdoptionMemoryPort | undefined;
   const rebuildPostAdoptionMemory = () => {

@@ -23,6 +23,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   runBackupSetupCommand,
+  runRecoveryRootApproveResetCommand,
   runRecoveryRootInvalidateCommand,
   runRecoveryRootRotateCommand,
 } from "./backup-command.js";
@@ -333,6 +334,37 @@ describe("paired recovery backup setup", () => {
       expect(await fixture.targetBootstrap.bootstrapStore.loadTrustRecord()).toEqual(targetAfterReplay);
     },
   );
+});
+
+describe("recovery root reset co-signer", () => {
+  it("uses only the distinct active device key and current signed trust", async () => {
+    const fixture = await pairedHomeWithoutRecoveryRoot("v2");
+    const beforeRefs = await fixture.targetSecrets.list();
+    const beforeEvents = await fixture.targetBootstrap.bootstrapStore.loadTrustEvents();
+    const output: string[] = [];
+
+    await runRecoveryRootApproveResetCommand(
+      { userConfirmed: true },
+      {
+        zhixingHome: fixture.targetHome,
+        secretStore: fixture.targetSecrets,
+        writeLine: (line) => output.push(line),
+        now: () => "2026-08-10T00:10:00.000Z",
+      },
+    );
+
+    expect(output[0]).toMatch(/^重置确认码：/u);
+    expect(await fixture.targetSecrets.list()).toEqual(beforeRefs);
+    expect(await fixture.targetBootstrap.bootstrapStore.loadTrustEvents()).toEqual(beforeEvents);
+    await expect(runRecoveryRootApproveResetCommand(
+      { userConfirmed: true },
+      {
+        zhixingHome: fixture.sourceHome,
+        secretStore: fixture.sourceSecrets,
+        writeLine: () => undefined,
+      },
+    )).rejects.toThrow(/主设备|第二台/u);
+  });
 });
 
 describe("recovery root public lifecycle", () => {

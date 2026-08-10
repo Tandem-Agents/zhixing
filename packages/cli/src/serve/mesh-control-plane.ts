@@ -57,6 +57,7 @@ export interface ProductionMeshControlPlaneOptions {
   ) => void | Promise<void>;
   readonly onConnectionError?: (error: Error) => void;
   readonly watchTrust?: boolean;
+  readonly recoveryEvidencePeerIds?: readonly string[];
   readonly credentialRouteGuard?: {
     assertRoute(input: {
       readonly ref: { readonly kind: "rendezvous"; readonly bindingId: string };
@@ -104,7 +105,9 @@ export class ProductionMeshControlPlane {
     if (this.#started) return;
     this.#started = true;
     await this.options.onTrustReconciled?.(this.#trust);
-    if (this.#isCurrentAnchor()) {
+    if (this.options.recoveryEvidencePeerIds !== undefined) {
+      this.#startRecoveryEvidenceDialers();
+    } else if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
     } else if (
       this.#roles.has("anchor") ||
@@ -338,8 +341,30 @@ export class ProductionMeshControlPlane {
     this.#trackPeerTask(anchor.identity.deviceId, (signal) => tunnel.run(signal));
   }
 
+  #startRecoveryEvidenceDialers(): void {
+    const deviceIds = [...new Set(this.options.recoveryEvidencePeerIds ?? [])].sort();
+    for (const deviceId of deviceIds) {
+      const peer = this.#peers.get(deviceId);
+      const descriptor = this.options.endpoints.get(deviceId);
+      if (!peer || !descriptor) continue;
+      const tunnel = new OutboundMeshTunnel({
+        open: (signal) => this.#openPeer(peer, descriptor, signal),
+        onConnection: (connection) => this.#accept(connection),
+      });
+      this.#trackPeerTask(deviceId, (signal) => tunnel.run(signal));
+    }
+  }
+
   async #openAnchor(
     anchor: TrustedMeshPeer,
+    descriptor: MeshEndpointDescriptor,
+    signal: AbortSignal,
+  ): Promise<SecureMeshConnection> {
+    return this.#openPeer(anchor, descriptor, signal);
+  }
+
+  async #openPeer(
+    peer: TrustedMeshPeer,
     descriptor: MeshEndpointDescriptor,
     signal: AbortSignal,
   ): Promise<SecureMeshConnection> {
@@ -354,7 +379,7 @@ export class ProductionMeshControlPlane {
           return await connectAuthenticatedMesh({
             host: transport.host,
             port: transport.port,
-            trustedPeer: anchor,
+            trustedPeer: peer,
             identity: this.options.localIdentity,
             protocolRange: PROTOCOL_RANGE,
             authorizePeer: (identity) => this.#isAuthorized(identity.deviceId, ["anchor"]),
@@ -363,7 +388,7 @@ export class ProductionMeshControlPlane {
         }
         const ref = {
           kind: "rendezvous",
-          bindingId: anchor.identity.deviceId,
+          bindingId: peer.identity.deviceId,
         } as const;
         await this.options.credentialRouteGuard?.assertRoute({ ref, service: "rendezvous" });
         const secret = await this.options.secretStore.get(ref);
@@ -373,7 +398,7 @@ export class ProductionMeshControlPlane {
             const socket = await openRelaySocket(transport.relay, key, signal);
             return await connectAuthenticatedMesh({
               socket,
-              trustedPeer: anchor,
+              trustedPeer: peer,
               identity: this.options.localIdentity,
               protocolRange: PROTOCOL_RANGE,
               authorizePeer: (identity) => this.#isAuthorized(identity.deviceId, ["anchor"]),
@@ -387,7 +412,7 @@ export class ProductionMeshControlPlane {
         failures.push(asError(error));
       }
     }
-    throw new AggregateError(failures, "All authenticated anchor endpoints failed");
+    throw new AggregateError(failures, "All authenticated mesh peer endpoints failed");
   }
 
   async #accept(connection: SecureMeshConnection): Promise<void> {
@@ -432,6 +457,9 @@ export class ProductionMeshControlPlane {
   }
 
   #isAuthorized(deviceId: string, requiredRoles?: readonly DeviceRole[]): boolean {
+    if (this.options.recoveryEvidencePeerIds !== undefined) {
+      return this.options.recoveryEvidencePeerIds.includes(deviceId) && this.#peers.has(deviceId);
+    }
     const member = this.#trust.members.find((candidate) =>
       candidate.device.deviceId === deviceId);
     return Boolean(
@@ -454,6 +482,9 @@ export class ProductionMeshControlPlane {
   }
 
   #compatiblePeerRoles(): readonly DeviceRole[] {
+    if (this.options.recoveryEvidencePeerIds !== undefined) {
+      return ["anchor", "executor", "surface"];
+    }
     return this.#isCurrentAnchor()
       ? ["anchor", "executor", "surface"]
       : ["anchor"];

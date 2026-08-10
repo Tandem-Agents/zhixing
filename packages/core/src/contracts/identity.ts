@@ -174,8 +174,10 @@ export interface SourceFreezeProof extends WireSchemaV1<"SourceFreezeProof"> {
 }
 
 export interface ReadyProof extends WireSchemaV1<"ReadyProof"> {
+  requestId: string;
   transferId: string;
   homeId: string;
+  candidateDigest: Digest;
   targetDeviceId: string;
   trustEpoch: number;
   trustChainHead: { seq: number; eventDigest: Digest };
@@ -190,6 +192,7 @@ export interface ReadyProof extends WireSchemaV1<"ReadyProof"> {
   protocolRevision: string;
   assetRevision: string;
   serviceRevision: string;
+  credentialRevision: string;
   secretStore: "unlocked";
   issuedAt: IsoTime;
   expiresAt: IsoTime;

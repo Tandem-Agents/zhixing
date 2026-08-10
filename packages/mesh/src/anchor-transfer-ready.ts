@@ -25,10 +25,13 @@ export interface AnchorTransferReadySnapshot {
   readonly protocolRevision: string;
   readonly assetRevision: string;
   readonly serviceRevision: string;
+  readonly credentialRevision: string;
 }
 
 export async function createAnchorTransferReadyProof(input: {
+  readonly requestId: string;
   readonly transferId: string;
+  readonly candidateDigest: string;
   readonly targetIdentityKey: DeviceKey;
   readonly trust: TrustProjection;
   readonly secretStore: SecretStorePort;
@@ -54,8 +57,10 @@ export async function createAnchorTransferReadyProof(input: {
   );
   const proof = createSignedReadyProof({
     v: 1,
+    requestId: input.requestId,
     transferId: input.transferId,
     homeId: input.trust.homeId,
+    candidateDigest: input.candidateDigest,
     targetDeviceId: member.device.deviceId,
     trustEpoch: input.trust.trustEpoch,
     trustChainHead: { ...input.trust.chainHead },
@@ -70,6 +75,7 @@ export async function createAnchorTransferReadyProof(input: {
     protocolRevision: stableRevision(input.snapshot.protocolRevision, "protocol"),
     assetRevision: stableRevision(input.snapshot.assetRevision, "asset"),
     serviceRevision: stableRevision(input.snapshot.serviceRevision, "service"),
+    credentialRevision: stableRevision(input.snapshot.credentialRevision, "credential"),
     secretStore: "unlocked",
     issuedAt: new Date(now).toISOString(),
     expiresAt: new Date(now + ttlMs).toISOString(),
@@ -82,6 +88,10 @@ export function validateAnchorTransferReadyProof(input: {
   readonly trust: TrustProjection;
   readonly targetDeviceId: string;
   readonly expected?: AnchorTransferReadySnapshot;
+  readonly expectedIdentity?: {
+    readonly requestId: string;
+    readonly candidateDigest: string;
+  };
   readonly now?: number;
 }): ReadyProof {
   const member = readyTarget(input.trust, input.targetDeviceId);
@@ -91,6 +101,9 @@ export function validateAnchorTransferReadyProof(input: {
   const candidate = input.proof as Partial<ReadyProof>;
   if (
     candidate.targetDeviceId !== input.targetDeviceId ||
+    (input.expectedIdentity !== undefined &&
+      (candidate.requestId !== input.expectedIdentity.requestId ||
+        candidate.candidateDigest !== input.expectedIdentity.candidateDigest)) ||
     candidate.homeId !== input.trust.homeId ||
     candidate.trustEpoch !== input.trust.trustEpoch ||
     canonicalize(candidate.trustChainHead) !== canonicalize(input.trust.chainHead) ||
@@ -121,6 +134,7 @@ export function validateAnchorTransferReadyProof(input: {
       protocolRevision: proof.protocolRevision,
       assetRevision: proof.assetRevision,
       serviceRevision: proof.serviceRevision,
+      credentialRevision: proof.credentialRevision,
     };
     const expected = {
       configuredCapabilities: {
@@ -131,6 +145,7 @@ export function validateAnchorTransferReadyProof(input: {
       protocolRevision: input.expected.protocolRevision,
       assetRevision: input.expected.assetRevision,
       serviceRevision: input.expected.serviceRevision,
+      credentialRevision: input.expected.credentialRevision,
     };
     if (canonicalize(actual) !== canonicalize(expected)) {
       throw new TypeError("Ready proof configuration changed before migration");

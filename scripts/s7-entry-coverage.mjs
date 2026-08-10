@@ -940,9 +940,13 @@ export function inspectRecoveryBackupAssembly(records) {
   const runtime = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
   const disasterCommand = byPath.get("packages/cli/src/serve/disaster-recovery-command.ts");
+  const disasterCandidate = byPath.get("packages/cli/src/serve/disaster-recovery-candidate.ts");
+  const disasterEvidence = byPath.get("packages/cli/src/serve/disaster-recovery-trust-evidence.ts");
+  const disasterInstallation = byPath.get("packages/cli/src/serve/disaster-recovery-installation.ts");
   const disasterTarget = byPath.get("packages/cli/src/serve/disaster-recovery-target.ts");
   const rootLifecycle = byPath.get("packages/cli/src/serve/recovery-root-lifecycle.ts");
   const exposureAuthority = byPath.get("packages/cli/src/serve/credential-exposure-authority.ts");
+  const credentialRotation = byPath.get("packages/cli/src/serve/credential-rotation-publication.ts");
   const startup = byPath.get("packages/cli/src/startup.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   const checkpointService = byPath.get("packages/mesh/src/checkpoint-service.ts");
@@ -951,8 +955,9 @@ export function inspectRecoveryBackupAssembly(records) {
   if (
     !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !rootEstablishment ||
     !rootActivation || !controlPlane ||
-    !runtime || !pairing || !disasterCommand || !disasterTarget || !rootLifecycle ||
-    !exposureAuthority || !startup || !setupDelivery || !checkpointService ||
+    !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
+    !disasterInstallation || !disasterTarget || !rootLifecycle || !exposureAuthority ||
+    !credentialRotation || !startup || !setupDelivery || !checkpointService ||
     !checkpointOwner || !pairedTarget
   ) {
     return ["recovery backup production assembly sources are missing"];
@@ -1197,13 +1202,58 @@ export function inspectRecoveryBackupAssembly(records) {
     count(disasterTarget, "async commit(") !== 1 ||
     count(disasterTarget, "async abort(") !== 1 ||
     count(disasterTarget, "async tombstone(") !== 1 ||
-    count(disasterCommand, "new DisasterRecoveryTarget({") !== 2 ||
+    count(disasterCommand, "new DisasterRecoveryTarget({") !== 1 ||
     !disasterCommand.includes("discoverDisasterRecoveryCandidates({") ||
     !disasterCommand.includes("await target.prepareAndImport({") ||
-    !disasterCommand.includes("await target.commit({ transferId, recoveryRoot: decoded.root })") ||
+    !disasterCommand.includes("await target.commit({ transferId, recoveryRoot: decoded.root, signal })") ||
     !disasterCommand.includes("await target.tombstone({")
   ) {
     failures.push("disaster recovery target owner, inventory, phase or public journey exact-set drifted");
+  }
+  if (
+    count(runtime, "registerDisasterRecoveryTrustEvidenceService(") !== 1 ||
+    count(disasterCommand, "collectDisasterRecoveryTrustEvidence({") !== 1 ||
+    count(disasterCommand, "recoveryEvidencePeerIds: peerIds") !== 1 ||
+    !disasterEvidence.includes('"anchor.disaster-recovery.trust-evidence"') ||
+    count(disasterEvidence, "registerDisasterRecoveryTrustEvidenceService(") !== 1 ||
+    count(disasterEvidence, "collectDisasterRecoveryTrustEvidence(") !== 1 ||
+    !disasterEvidence.includes("const peerEvidence = await Promise.all(") ||
+    !disasterEvidence.includes("verifyHomeTrustRecord(record, projection)") ||
+    !disasterCandidate.includes('"reachabilityCut"') ||
+    !disasterCandidate.includes('"trustEvidenceDigest"') ||
+    !disasterTarget.includes("trustEvidenceDigest: input.trustEvidence.digest")
+  ) {
+    failures.push("disaster no-rollback evidence producer, authenticated cut or candidate binding drifted");
+  }
+  if (
+    count(setupDelivery, "export function createProductionAnchorReadySnapshot(") !== 1 ||
+    count(disasterCommand, "return createProductionAnchorReadySnapshot({") !== 1 ||
+    !disasterCommand.includes("credentialGeneration: credentials.generation") ||
+    !disasterCommand.includes("credentialRevision,") ||
+    !disasterTarget.includes("candidateDigest: disasterReadyCandidateDigest({") ||
+    count(disasterTarget, "expectedIdentity: {") !== 2
+  ) {
+    failures.push("disaster readiness must use the shared production snapshot and exact candidate identity");
+  }
+  const abortTerminal = disasterTarget.indexOf(
+    'candidate.terminal(input.abort.transferId, "aborted", abort)',
+  );
+  const abortCleanup = disasterTarget.indexOf(
+    'rm(path.join(this.options.stagingRoot, "transfers", input.abort.transferId)',
+    abortTerminal,
+  );
+  if (
+    !disasterCommand.includes("const ownedAbort = options.signal ? undefined : new AbortController()") ||
+    !disasterCommand.includes("discoverDisasterRecoveryCandidates({") ||
+    !disasterCommand.includes("openInventoryTargets(context, selection, signal)") ||
+    !disasterCommand.includes("waitForPeer(control, pairedDeviceId, 30_000, signal)") ||
+    !disasterCommand.includes("selected.target.read(selected.entry.checkpointId, signal)") ||
+    !disasterCommand.includes("createSignedDisasterRecoveryAbort({") ||
+    !disasterCommand.includes("await target.abort({ abort, recoveryRoot: decoded.root })") ||
+    abortTerminal < 0 || abortCleanup < abortTerminal ||
+    !disasterCandidate.includes("terminal: record.terminal, abort: record.abort")
+  ) {
+    failures.push("disaster pre-commit signal or authenticated candidate terminal order drifted");
   }
   const rootLifecycleDescriptor = frozenLiteralDescriptor(
     "packages/cli/src/serve/recovery-root-lifecycle.ts",
@@ -1277,13 +1327,51 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("credential exposure projection, guard or production read route exact-set drifted");
   }
+  if (
+    count(command, "await publishRequiredCredentialRotations({") !== 1 ||
+    count(credentialRotation, "export async function publishRequiredCredentialRotations(") !== 1 ||
+    count(credentialRotation, "options.authority.publishRotation({") !== 1 ||
+    !credentialRotation.includes("const stored = await options.readCredentials()") ||
+    !credentialRotation.includes('verification: "service-verified"') ||
+    !credentialRotation.includes('binding("provider"') ||
+    !credentialRotation.includes('binding("mcp"') ||
+    !credentialRotation.includes('binding("channel"')
+  ) {
+    failures.push("credential rotation read-back, service verification or production caller exact-set drifted");
+  }
+  const approvalStart = backup.indexOf("async function openResetApprovalContext(");
+  const approvalEnd = approvalStart < 0
+    ? -1
+    : backup.indexOf("\nasync function ", approvalStart + 1);
+  const approvalContext = approvalStart < 0
+    ? ""
+    : backup.slice(approvalStart, approvalEnd < 0 ? backup.length : approvalEnd);
+  if (
+    count(backup, "const context = await openResetApprovalContext(options)") !== 1 ||
+    !approvalContext.includes("await loadDeviceKey(secretStore, deviceId)") ||
+    !approvalContext.includes("store.loadTrustProjection()") ||
+    !approvalContext.includes('member.state !== "active"') ||
+    !approvalContext.includes("projection.issuer.deviceId === key.deviceId") ||
+    approvalContext.includes("loadOrCreateDeviceKey(") ||
+    approvalContext.includes("authorityLog(")
+  ) {
+    failures.push("recovery reset approval minimum-privilege distinct co-signer boundary drifted");
+  }
   const disasterCompletion = runtime.indexOf('completion.installation.t === "disaster-anchor-installed"');
   const disasterFinish = runtime.indexOf("await finishDisasterRecoveryPostInstall({", disasterCompletion);
   const surfaceOpen = runtime.indexOf("await consumers.openCurrentOwnerSurfaces()", disasterFinish);
+  const synchronousGate = runtime.indexOf("this.#postInstallTransitionPending = true;");
+  const liveAwait = runtime.indexOf("await this.#loadLiveDisasterPostInstall(record)", synchronousGate);
   if (
     !bootstrap.includes("const disasterRecoveryPostInstall = trust") ||
     !bootstrap.includes("await completeDisasterRecoveryInstallationBeforeBootstrap({") ||
     !bootstrap.includes("disasterRecoveryPostInstall ?? plannedAnchorPostInstall") ||
+    !disasterInstallation.includes('t: "disaster-post-install-completed"') ||
+    !disasterInstallation.includes("input.log.transactProjection<") ||
+    count(disasterCommand, "const context = await openRecoveryContext(options, false)") !== 2 ||
+    !disasterCommand.includes("context.trust.issuer.deviceId === context.key.deviceId") ||
+    !disasterCommand.includes("await waitForDisasterRecoveryPostInstallReceipt({") ||
+    synchronousGate < 0 || liveAwait < synchronousGate ||
     disasterCompletion < 0 || disasterFinish < disasterCompletion || surfaceOpen < disasterFinish
   ) {
     failures.push("disaster installation completion, consumer recovery or public-open order drifted");

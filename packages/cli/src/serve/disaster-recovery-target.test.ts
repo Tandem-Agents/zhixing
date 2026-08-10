@@ -8,9 +8,11 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
+import { FileAuthorityCommitLog } from "@zhixing/core/authority";
 import {
   createSignedDisasterRecoveryAbort,
   createSignedDisasterRecoveryCommand,
+  protocolDigest,
 } from "@zhixing/core/protocol";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
@@ -41,7 +43,10 @@ describe("disaster recovery target", () => {
   it("durably single-flights the selected source-less checkpoint before private effects", async () => {
     const fixture = await createFixture();
     const journal = new FileDisasterRecoveryCandidateJournal(
-      fixture.targetStore.authorityLog(),
+      new FileAuthorityCommitLog(
+        path.join(fixture.stagingRoot, "candidate-claims"),
+        fixture.targetStore.artifactStore(),
+      ),
       fixture.recoveryRoot.rootPublicKey,
     );
     const first = prepareCommand(fixture, "request-first", "xfer-01KXPWTM80BYB4SH423EJT1CV1");
@@ -61,7 +66,7 @@ describe("disaster recovery target", () => {
       prepare,
       checkpoint: fixture.checkpoint,
       recoveryRoot: fixture.recoveryRoot,
-      trustEvidence: [await fixture.targetStore.loadTrustEvents()],
+      trustEvidence: await localTrustEvidence(fixture),
     });
     expect(imported.state.phase).toBe("imported");
     expect(imported.state.imported?.onsiteVerification.targetId).toBe("backup-dir:test");
@@ -126,7 +131,7 @@ describe("disaster recovery target", () => {
       prepare,
       checkpoint: fixture.checkpoint,
       recoveryRoot: fixture.recoveryRoot,
-      trustEvidence: [await fixture.targetStore.loadTrustEvents()],
+      trustEvidence: await localTrustEvidence(fixture),
     });
     const abort = createSignedDisasterRecoveryAbort({
       v: 1,
@@ -147,7 +152,69 @@ describe("disaster recovery target", () => {
       recoveryRoot: fixture.recoveryRoot,
     })).rejects.toThrow(/verified|imported|terminal/i);
   }, 120_000);
+
+  it("persists a root-signed claim-only abort before any private phase exists", async () => {
+    const fixture = await createFixture();
+    const journal = new FileDisasterRecoveryCandidateJournal(
+      new FileAuthorityCommitLog(
+        path.join(fixture.stagingRoot, "candidate-claims"),
+        fixture.targetStore.artifactStore(),
+      ),
+      fixture.recoveryRoot.rootPublicKey,
+    );
+    const prepare = prepareCommand(fixture, "request-claim-abort", "xfer-01KXPWTM80BYB4SH423EJT1CV5");
+    await journal.claim(prepare);
+    const target = fixture.createTarget();
+    const abort = createSignedDisasterRecoveryAbort({
+      v: 1,
+      mode: "disaster-recovery",
+      requestId: prepare.requestId,
+      transferId: prepare.transferId,
+      targetDeviceId: prepare.targetDeviceId,
+      checkpointTargetId: prepare.checkpointTargetId,
+      checkpointEnvelopeDigest: prepare.checkpointEnvelope.digest,
+      reason: "operator-cancelled",
+      at: "2026-08-10T01:02:00.000Z",
+    }, fixture.recoveryRoot);
+
+    const aborted = await target.abort({ abort, recoveryRoot: fixture.recoveryRoot });
+    expect(aborted).toMatchObject({ phase: "aborted", transferId: prepare.transferId, abort });
+    expect(await target.abort({ abort, recoveryRoot: fixture.recoveryRoot })).toEqual(aborted);
+    expect(await fixture.secrets.list()).toEqual([]);
+    expect(await journal.claim(prepare)).toEqual({
+      prepare,
+      terminal: "aborted",
+      abort,
+    });
+    const next = prepareCommand(fixture, "request-after-abort", "xfer-01KXPWTM80BYB4SH423EJT1CV6");
+    expect(await journal.claim(next)).toEqual({ prepare: next });
+  }, 120_000);
 });
+
+async function localTrustEvidence(fixture: Awaited<ReturnType<typeof createFixture>>) {
+  const events = await fixture.targetStore.loadTrustEvents();
+  const record = await fixture.targetStore.loadTrustRecord();
+  if (!record) throw new Error("fixture trust record is missing");
+  const cut = Object.freeze([fixture.targetIdentity.deviceId]);
+  const evidence = Object.freeze([Object.freeze({
+    deviceId: fixture.targetIdentity.deviceId,
+    events,
+    record,
+  })]);
+  return Object.freeze({
+    cut,
+    evidence,
+    digest: protocolDigest("DisasterRecoveryReachabilityEvidence", 1, {
+      cut,
+      evidence: evidence.map((item) => ({
+        deviceId: item.deviceId,
+        chainHead: item.record.chainHead,
+        trustEpoch: item.record.trustEpoch,
+        recordDigest: protocolDigest("HomeTrustRecord", 1, item.record),
+      })),
+    }),
+  });
+}
 
 async function createFixture() {
   const sourceRoot = await temporary("zhixing-disaster-source-");
@@ -216,6 +283,7 @@ async function createFixture() {
     protocolRevision: "protocol-disaster-v1",
     assetRevision: "assets-disaster-v1",
     serviceRevision: "services-disaster-v1",
+    credentialRevision: "credentials-disaster-v1",
   }));
   const stagingRoot = path.join(targetRoot, "disaster-recovery-staging");
   const createTarget = () => new DisasterRecoveryTarget({

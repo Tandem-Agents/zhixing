@@ -132,9 +132,11 @@ import {
 import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
 import type { PlannedAnchorTransferLifecycle } from "./planned-anchor-transfer.js";
 import {
+  completeDisasterRecoveryInstallationBeforeBootstrap,
   finishDisasterRecoveryPostInstall,
   type DisasterRecoveryPostInstallDescriptor,
 } from "./disaster-recovery-target.js";
+import { registerDisasterRecoveryTrustEvidenceService } from "./disaster-recovery-trust-evidence.js";
 
 type AnchorPostInstallDescriptor =
   | PlannedAnchorPostInstallDescriptor
@@ -342,8 +344,11 @@ export class MeshRuntimeAssembly {
   #started = false;
   #controlStarted = false;
   #closed = false;
+  #postInstallTransitionPending = false;
+  #observedIssuerDeviceId: string;
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
+    this.#observedIssuerDeviceId = options.trust.issuer.deviceId;
     this.#plannedAnchorIssuerKey = options.plannedAnchorIssuerKey;
     this.#plannedAnchorPostInstall = options.plannedAnchorPostInstall;
     const roles = new Set(options.configuration.enabledRoles);
@@ -725,6 +730,14 @@ export class MeshRuntimeAssembly {
           member.device.deviceId === deviceId && member.state === "active"),
       },
     ));
+    this.#disposers.push(registerDisasterRecoveryTrustEvidenceService(
+      this.services,
+      {
+        store: options.bootstrapStore,
+        authorizePeer: (deviceId) => this.#control.currentTrust().members.some((member) =>
+          member.device.deviceId === deviceId && member.state === "active"),
+      },
+    ));
 
     this.#control = new ProductionMeshControlPlane({
       localIdentity: options.authority.identityKey,
@@ -743,6 +756,13 @@ export class MeshRuntimeAssembly {
       }),
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
       onTrustReconciled: async (record) => {
+        const becameCurrentIssuer =
+          this.#observedIssuerDeviceId !== options.authority.deviceId &&
+          record.issuer.deviceId === options.authority.deviceId;
+        this.#observedIssuerDeviceId = record.issuer.deviceId;
+        if (becameCurrentIssuer && this.#plannedAnchorPostInstall === undefined) {
+          this.#postInstallTransitionPending = true;
+        }
         options.authority.reconcileTrustedDevices(
           record.members.map((member) => member.device),
           record.members
@@ -751,6 +771,9 @@ export class MeshRuntimeAssembly {
         );
         if (roles.has("anchor")) {
           this.#installPlannedAnchorRole(record);
+          if (this.#postInstallTransitionPending) {
+            await this.#loadLiveDisasterPostInstall(record);
+          }
           for (const member of record.members) {
             if (
               member.state !== "active" ||
@@ -1395,7 +1418,7 @@ export class MeshRuntimeAssembly {
   }
 
   plannedCurrentOwnerReady(): boolean {
-    return this.#plannedAnchorPostInstall === undefined;
+    return this.#plannedAnchorPostInstall === undefined && !this.#postInstallTransitionPending;
   }
 
   #requirePlannedCurrentOwnerReady(): void {
@@ -1407,6 +1430,7 @@ export class MeshRuntimeAssembly {
   async #completePlannedAnchorPostInstall(): Promise<void> {
     const completion = this.#plannedAnchorPostInstall;
     if (!completion) {
+      if (this.#postInstallTransitionPending) return;
       if (this.#started) await this.#startControl();
       return;
     }
@@ -1447,10 +1471,18 @@ export class MeshRuntimeAssembly {
       throw new Error("Installed migration obligations were not completely read back");
     }
     if (completion.installation.t === "disaster-anchor-installed") {
+      if (!("mode" in completion.installedGeneration) ||
+        completion.installedGeneration.mode !== "disaster-recovery") {
+        throw new Error("Disaster installation generation is invalid");
+      }
       await finishDisasterRecoveryPostInstall({
         zhixingHome: this.options.zhixingHome,
         transferId: completion.installation.transferId,
         readiness: this.options.authority.plannedAnchorReadiness,
+        authorityLog: this.options.authority.authorityLog,
+        installedGeneration: completion.installedGeneration,
+        participants: generationReceipt.participants,
+        readBack,
       });
     } else {
       await finishPlannedAnchorPostInstall({
@@ -1460,8 +1492,43 @@ export class MeshRuntimeAssembly {
       });
     }
     this.#plannedAnchorPostInstall = undefined;
+    this.#postInstallTransitionPending = false;
     await consumers.openCurrentOwnerSurfaces();
     if (this.#started) await this.#startControl();
+  }
+
+  async #loadLiveDisasterPostInstall(record: HomeTrustRecord): Promise<void> {
+    const completion = await completeDisasterRecoveryInstallationBeforeBootstrap({
+      zhixingHome: this.options.zhixingHome,
+      deviceId: this.options.authority.deviceId,
+      secretStore: this.options.secretStore,
+      bootstrapStore: this.options.bootstrapStore,
+      ...(this.options.authority.storageMaintenance
+        ? { storageMaintenance: this.options.authority.storageMaintenance }
+        : {}),
+    });
+    if (
+      !completion ||
+      completion.installation.trustRecord.issuer.deviceId !== record.issuer.deviceId ||
+      canonicalize(completion.installation.trustRecord) !== canonicalize(record)
+    ) {
+      throw new Error("Current disaster recovery installation has no exact live descriptor");
+    }
+    const issuerKey = await loadActiveAnchorIssuerKey(
+      this.options.secretStore,
+      record.issuer.issuerKeyId,
+    );
+    if (!issuerKey || issuerKey.publicKey !== record.issuer.issuerPublicKey) {
+      throw new Error("Current disaster recovery installation is missing its active issuer key");
+    }
+    this.#plannedAnchorIssuerKey = issuerKey;
+    this.options.bootstrapStore.bindIssuerKey(issuerKey);
+    if (!completion.requiresPostInstallCompletion) {
+      this.#postInstallTransitionPending = false;
+      return;
+    }
+    this.#plannedAnchorPostInstall = completion;
+    await this.#completePlannedAnchorPostInstall();
   }
 
   async #startControl(): Promise<void> {

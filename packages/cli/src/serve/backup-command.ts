@@ -28,6 +28,7 @@ import { enrollDeviceIdentity, type DeviceKey } from "@zhixing/mesh/device-ident
 import {
   activateAnchorIssuerKey,
   loadActiveAnchorIssuerKey,
+  loadDeviceKey,
   persistAnchorIssuerKey,
 } from "@zhixing/mesh/device-key-store";
 import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
@@ -225,7 +226,7 @@ export async function runRecoveryRootApproveResetCommand(
   options: BackupCommandOptions = {},
 ): Promise<void> {
   if (!input.userConfirmed) throw new Error("请先在另一台已加入设备上确认重置恢复码");
-  const context = await openContext(options, false, false);
+  const context = await openResetApprovalContext(options);
   const approval = createDomainResetApproval({
     current: context.projection,
     coSigner: context.key,
@@ -233,6 +234,48 @@ export async function runRecoveryRootApproveResetCommand(
   });
   context.writeLine(`重置确认码：${encodeResetApproval(approval)}`);
   context.writeLine("请把确认码交给当前主设备，并立即在那里完成恢复码重置。");
+}
+
+async function openResetApprovalContext(options: BackupCommandOptions): Promise<{
+  readonly key: DeviceKey;
+  readonly projection: TrustProjection;
+  readonly writeLine: (line: string) => void;
+  readonly now: () => string;
+}> {
+  const home = options.zhixingHome ?? getZhixingHome();
+  const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: home });
+  if (await secretStore.unlockState() !== "unlocked") {
+    throw new Error("设备秘密存储解锁后才能共同确认恢复码重置");
+  }
+  const refs = await secretStore.list("device-key/device/v1/");
+  if (refs.length !== 1 || !refs[0]!.bindingId.startsWith("device/v1/")) {
+    throw new Error("当前设备必须且只能持有一个既有设备身份");
+  }
+  const deviceId = refs[0]!.bindingId.slice("device/v1/".length);
+  const key = await loadDeviceKey(secretStore, deviceId);
+  if (!key) throw new Error("当前设备身份不可用");
+  const store = new FileMeshBootstrapStore(home, key);
+  const [projection, record] = await Promise.all([
+    store.loadTrustProjection(),
+    store.loadTrustRecord(),
+  ]);
+  if (!projection || !record || canonicalize(projection.chainHead) !== canonicalize(record.chainHead)) {
+    throw new Error("当前设备缺少可验证的最新信任记录");
+  }
+  const member = projection.members.find((candidate) =>
+    candidate.device.deviceId === key.deviceId);
+  if (!member || member.state !== "active") {
+    throw new Error("只有当前安全域中的有效设备可以共同确认恢复码重置");
+  }
+  if (projection.issuer.deviceId === key.deviceId) {
+    throw new Error("当前主设备不能同时作为第二台共同确认设备");
+  }
+  return {
+    key,
+    projection,
+    writeLine: options.writeLine ?? createStdoutWriter().line,
+    now: options.now ?? (() => new Date().toISOString()),
+  };
 }
 
 export async function runRecoveryRootResetCommand(

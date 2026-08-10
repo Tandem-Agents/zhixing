@@ -256,7 +256,9 @@ describe("disaster recovery protocol", () => {
 function readyProof() {
   return createSignedReadyProof({
     v: 1,
+    requestId: "request-ready-proof",
     transferId: TRANSFER_ID,
+    candidateDigest: digest("candidate"),
     homeId: "home-1",
     targetDeviceId: TARGET,
     trustEpoch: 3,
@@ -268,6 +270,7 @@ function readyProof() {
     protocolRevision: "protocol-1",
     assetRevision: "assets-1",
     serviceRevision: "services-1",
+    credentialRevision: "credentials-1",
     secretStore: "unlocked",
     issuedAt: AT,
     expiresAt: EXPIRES,

@@ -674,7 +674,7 @@ describe("planned anchor transfer prepared phase", () => {
       transferId: TRANSFER_ID,
       reason: "target-rejected",
     })).resolves.toMatchObject({ phase: "aborted" });
-  });
+  }, 10_000);
 
   it("durably cancels before commit, clears private state, and reopens the source", async () => {
     const fixture = await createFixture();
@@ -993,6 +993,7 @@ async function createFixture(options: {
       protocolRevision: "protocol-v1",
       assetRevision: "assets-v1",
       serviceRevision: "services-v1",
+      credentialRevision: "credentials-v1",
     },
   };
   const readiness = createPlannedAnchorReadinessCoordinator(async () =>

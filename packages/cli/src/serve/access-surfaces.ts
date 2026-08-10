@@ -927,6 +927,7 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
         ctx.channelConnections = {
+          ready: result.connectionTask,
           connectConfigured: result.connectConfigured,
           disconnectConfigured: result.disconnectConfigured,
         };

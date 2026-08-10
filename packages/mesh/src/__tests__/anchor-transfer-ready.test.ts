@@ -15,12 +15,16 @@ import {
 
 const NOW = Date.parse("2026-08-09T00:00:00.000Z");
 const TRANSFER_ID = "xfer-01J00000000000000000000001";
+const REQUEST_ID = "request-ready-1";
+const CANDIDATE_DIGEST = `sha256:${"a".repeat(64)}`;
 
 describe("anchor migration ready proof", () => {
   it("binds current trust, exact target capabilities and a transfer-local issuer key", async () => {
     const fixture = await readyFixture();
     const first = await createAnchorTransferReadyProof({
+      requestId: REQUEST_ID,
       transferId: TRANSFER_ID,
+      candidateDigest: CANDIDATE_DIGEST,
       targetIdentityKey: fixture.targetKey,
       trust: fixture.trust,
       secretStore: fixture.secrets,
@@ -28,7 +32,9 @@ describe("anchor migration ready proof", () => {
       now: NOW,
     });
     const replay = await createAnchorTransferReadyProof({
+      requestId: REQUEST_ID,
       transferId: TRANSFER_ID,
+      candidateDigest: CANDIDATE_DIGEST,
       targetIdentityKey: fixture.targetKey,
       trust: fixture.trust,
       secretStore: fixture.secrets,
@@ -41,8 +47,34 @@ describe("anchor migration ready proof", () => {
       trust: fixture.trust,
       targetDeviceId: fixture.targetKey.deviceId,
       expected: snapshot(),
+      expectedIdentity: {
+        requestId: REQUEST_ID,
+        candidateDigest: CANDIDATE_DIGEST,
+      },
       now: NOW + 1,
     })).toEqual(first.proof);
+    expect(() => validateAnchorTransferReadyProof({
+      proof: first.proof,
+      trust: fixture.trust,
+      targetDeviceId: fixture.targetKey.deviceId,
+      expected: snapshot(),
+      expectedIdentity: {
+        requestId: "request-ready-other",
+        candidateDigest: CANDIDATE_DIGEST,
+      },
+      now: NOW + 1,
+    })).toThrow(/bind|generation/i);
+    expect(() => validateAnchorTransferReadyProof({
+      proof: first.proof,
+      trust: fixture.trust,
+      targetDeviceId: fixture.targetKey.deviceId,
+      expected: { ...snapshot(), credentialRevision: "credentials-v2" },
+      expectedIdentity: {
+        requestId: REQUEST_ID,
+        candidateDigest: CANDIDATE_DIGEST,
+      },
+      now: NOW + 1,
+    })).toThrow(/bind|generation|configuration|snapshot|readiness/i);
     const wire = canonicalize(first.proof);
     expect(wire).not.toContain("pkcs8");
     expect(wire).not.toContain("rootCertificatePem");
@@ -51,7 +83,9 @@ describe("anchor migration ready proof", () => {
   it("rejects expiry, trust-generation drift and a non-anchor target before use", async () => {
     const fixture = await readyFixture();
     const { proof } = await createAnchorTransferReadyProof({
+      requestId: REQUEST_ID,
       transferId: TRANSFER_ID,
+      candidateDigest: CANDIDATE_DIGEST,
       targetIdentityKey: fixture.targetKey,
       trust: fixture.trust,
       secretStore: fixture.secrets,
@@ -97,6 +131,7 @@ function snapshot() {
     protocolRevision: "protocol-v1",
     assetRevision: "assets-v1",
     serviceRevision: "services-v1",
+    credentialRevision: "credentials-v1",
   };
 }
 

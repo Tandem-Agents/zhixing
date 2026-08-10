@@ -76,10 +76,14 @@ import {
 } from "./disaster-recovery-candidate.js";
 import {
   createDisasterRecoveryInstallation,
+  loadDisasterRecoveryPostInstallReceipt,
   loadCurrentDisasterRecoveryInstallation,
+  recordDisasterRecoveryPostInstallReceipt,
   type DisasterRecoveryInstallation,
 } from "./disaster-recovery-installation.js";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import type { DisasterRecoveryReachabilityEvidence } from
+  "./disaster-recovery-trust-evidence.js";
 
 const DISASTER_TRANSFER_STREAM = "transfer:anchor-disaster";
 const TRANSFER_CHUNK_BYTES = 1024 * 1024;
@@ -115,11 +119,20 @@ export interface DisasterRecoveryImportedState {
   readonly baselineEvents: readonly HomeTrustEvent[];
 }
 
+export type DisasterRecoveryAbortState =
+  | DisasterRecoveryState
+  | {
+      readonly phase: "aborted";
+      readonly transferId: string;
+      readonly abort: import("@zhixing/core/contracts").DisasterRecoveryAbort;
+    };
+
 export interface DisasterRecoveryPostInstallDescriptor {
   readonly installation: DisasterRecoveryInstallation;
   readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
-  readonly state: DisasterRecoveryState;
+  readonly state?: DisasterRecoveryState;
   readonly pendingObligations: import("@zhixing/core/contracts").AuthorityCatalog["pendingObligations"];
+  readonly requiresPostInstallCompletion: boolean;
 }
 
 export class FileDisasterRecoveryTransferJournal {
@@ -218,9 +231,10 @@ export class DisasterRecoveryTarget {
     readonly prepare: PrepareCommand;
     readonly checkpoint: CheckpointPackage;
     readonly recoveryRoot: RecoveryRoot;
-    readonly trustEvidence: readonly (readonly HomeTrustEvent[])[];
+    readonly trustEvidence: DisasterRecoveryReachabilityEvidence;
     readonly signal?: AbortSignal;
   }): Promise<DisasterRecoveryImportedState> {
+    input.signal?.throwIfAborted();
     if (input.prepare.targetDeviceId !== this.options.deviceId) {
       throw new TypeError("Disaster recovery command targets another device");
     }
@@ -248,7 +262,7 @@ export class DisasterRecoveryTarget {
       checkpointTargetId: input.prepare.checkpointTargetId,
       checkpoint: input.checkpoint,
       recoveryRoot: input.recoveryRoot,
-      trustEvidence: input.trustEvidence,
+      trustEvidence: input.trustEvidence.evidence.map((item) => item.events),
       privateArtifacts: context.artifacts,
       privatePartialsRoot: path.join(context.root, "partials"),
       ...(this.options.storageMaintenance
@@ -259,7 +273,14 @@ export class DisasterRecoveryTarget {
     });
     const readyNow = this.options.now?.() ?? Date.now();
     const { proof: readyProof, issuerKey } = await createAnchorTransferReadyProof({
+      requestId: input.prepare.requestId,
       transferId: input.prepare.transferId,
+      candidateDigest: disasterReadyCandidateDigest({
+        prepare: input.prepare,
+        baseline: staged.baseline,
+        onsiteVerification: staged.onsiteVerification,
+        trustEvidenceDigest: input.trustEvidence.digest,
+      }),
       targetIdentityKey: this.options.identityKey,
       trust: staged.trust,
       secretStore: this.options.secretStore,
@@ -310,6 +331,9 @@ export class DisasterRecoveryTarget {
     await candidate.recordVerified(input.prepare.transferId, {
       baseline: staged.baseline,
       baselineEvents: staged.baselineEvents,
+      reachabilityCut: input.trustEvidence.cut,
+      trustEvidence: input.trustEvidence.evidence,
+      trustEvidenceDigest: input.trustEvidence.digest,
       onsiteVerification: staged.onsiteVerification,
       authorityRecordsRef: staged.authorityRecordsRef,
       catalog: staged.catalog,
@@ -366,6 +390,15 @@ export class DisasterRecoveryTarget {
       trust: current,
       targetDeviceId: this.options.deviceId,
       expected: snapshot,
+      expectedIdentity: {
+        requestId: claimed.prepare.requestId,
+        candidateDigest: disasterReadyCandidateDigest({
+          prepare: claimed.prepare,
+          baseline: claimed.verified.baseline,
+          onsiteVerification: claimed.verified.onsiteVerification,
+          trustEvidenceDigest: claimed.verified.trustEvidenceDigest,
+        }),
+      },
       now: this.options.now?.(),
     });
     const issuerKey = await loadAnchorIssuerKey(this.options.secretStore, input.transferId);
@@ -437,6 +470,28 @@ export class DisasterRecoveryTarget {
     for (const reference of references) {
       await this.#promote(context, reference, input.signal);
     }
+    const finalSnapshot = await this.options.readiness.reserve({
+      transferId: input.transferId,
+      expiresAt: imported.readyProof.expiresAt,
+    });
+    validateAnchorTransferReadyProof({
+      proof: imported.readyProof,
+      trust: current,
+      targetDeviceId: this.options.deviceId,
+      expected: finalSnapshot,
+      expectedIdentity: {
+        requestId: claimed.prepare.requestId,
+        candidateDigest: disasterReadyCandidateDigest({
+          prepare: claimed.prepare,
+          baseline: claimed.verified.baseline,
+          onsiteVerification: claimed.verified.onsiteVerification,
+          trustEvidenceDigest: claimed.verified.trustEvidenceDigest,
+        }),
+      },
+      now: this.options.now?.(),
+    });
+    input.signal?.throwIfAborted();
+    await candidate.terminal(input.transferId, "committed");
     await this.options.authorityLog.installPlannedAnchorPrefix({
       source: disasterAuthorityEnvelopes(context.artifacts, records),
       sourceHead: records.source,
@@ -469,7 +524,7 @@ export class DisasterRecoveryTarget {
   async abort(input: {
     readonly abort: import("@zhixing/core/contracts").DisasterRecoveryAbort;
     readonly recoveryRoot: RecoveryRoot;
-  }): Promise<DisasterRecoveryState> {
+  }): Promise<DisasterRecoveryAbortState> {
     const candidate = this.#candidateFor(input.recoveryRoot.rootPublicKey);
     const claimed = await candidate.state(input.abort.transferId);
     if (!claimed) throw new Error("Disaster recovery abort has no durable candidate claim");
@@ -478,21 +533,31 @@ export class DisasterRecoveryTarget {
       verify: (schemaId, version, payload, signature) =>
         verifyRecoverySignature(input.recoveryRoot.rootPublicKey, schemaId, version, payload, signature),
     });
+    const installed = await loadCurrentDisasterRecoveryInstallation(this.options.authorityLog);
+    if (installed?.installation.transferId === input.abort.transferId) {
+      throw new Error("Committed disaster recovery cannot be cancelled");
+    }
+    const terminal = await candidate.terminal(input.abort.transferId, "aborted", abort);
     const context = await this.#context(input.abort.transferId, input.recoveryRoot.rootPublicKey);
     const current = await context.journal.state(input.abort.transferId);
     if (current?.phase === "committed" || current?.phase === "tombstoned") {
       throw new Error("Committed disaster recovery cannot be cancelled");
     }
-    const state = current?.phase === "aborted"
-      ? current
-      : await context.journal.append({
+    const state: DisasterRecoveryAbortState = current === undefined
+      ? Object.freeze({
+          phase: "aborted" as const,
+          transferId: input.abort.transferId,
+          abort: terminal.abort!,
+        })
+      : current.phase === "aborted"
+        ? current
+        : await context.journal.append({
           v: 1,
           mode: "disaster-recovery",
           t: "anchor-aborted",
           transferId: input.abort.transferId,
           abort,
         });
-    await candidate.terminal(input.abort.transferId, "aborted", abort);
     if (current?.imported) {
       await deleteAnchorIssuerKey(
         this.options.secretStore,
@@ -660,6 +725,24 @@ export class DisasterRecoveryTarget {
   }
 }
 
+function disasterReadyCandidateDigest(input: {
+  readonly prepare: PrepareCommand;
+  readonly baseline: import("@zhixing/core/contracts").DisasterRecoveryBaseline;
+  readonly onsiteVerification: import("@zhixing/core/contracts").RecoveryCheckpointVerification;
+  readonly trustEvidenceDigest: string;
+}): string {
+  return protocolDigest("DisasterRecoveryReadyCandidate", 1, {
+    requestId: input.prepare.requestId,
+    transferId: input.prepare.transferId,
+    targetDeviceId: input.prepare.targetDeviceId,
+    checkpointTargetId: input.prepare.checkpointTargetId,
+    checkpointEnvelopeDigest: input.prepare.checkpointEnvelope.digest,
+    baseline: input.baseline,
+    onsiteVerification: input.onsiteVerification,
+    trustEvidenceDigest: input.trustEvidenceDigest,
+  });
+}
+
 export async function completeDisasterRecoveryInstallationBeforeBootstrap(input: {
   readonly zhixingHome: string;
   readonly deviceId: string;
@@ -669,9 +752,8 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
   readonly stagingRoot?: string;
   readonly now?: () => number;
 }): Promise<DisasterRecoveryPostInstallDescriptor | undefined> {
-  const installed = await loadCurrentDisasterRecoveryInstallation(
-    input.bootstrapStore.authorityLog(),
-  );
+  const authorityLog = input.bootstrapStore.authorityLog();
+  const installed = await loadCurrentDisasterRecoveryInstallation(authorityLog);
   if (!installed || installed.installation.trustRecord.issuer.deviceId !== input.deviceId) {
     return undefined;
   }
@@ -684,49 +766,56 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
   if (!target || target.state !== "active" || !target.roles.includes("anchor")) {
     throw new Error("Installed disaster recovery target is not current-duty eligible");
   }
-  const stagingRoot = input.stagingRoot ?? path.join(
-    input.zhixingHome,
-    "distributed-runtime",
-    "disaster-recovery-staging",
-  );
-  const privateRoot = path.join(stagingRoot, "transfers", installation.transferId);
-  const privateArtifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
-  const transferKey = await loadAnchorIssuerKey(input.secretStore, installation.transferId);
-  const journal = new FileDisasterRecoveryTransferJournal(
-    new FileAuthorityCommitLog(
-      path.join(stagingRoot, "journals", installation.transferId),
-      privateArtifacts,
-      { storageMaintenance: input.storageMaintenance },
-    ),
-    disasterVerifiers(
-      installation.recoveryRootPublicKey,
-      target.device,
-      transferKey ?? undefined,
-    ),
-    input.now ?? Date.now,
-  );
-  let state = await journal.state(installation.transferId);
-  if (!state) throw new Error("Installed disaster recovery has no exact private replay state");
-  if (state.phase === "imported") {
-    if (
-      !transferKey || transferKey.deviceId !== installation.trustRecord.issuer.issuerKeyId ||
-      transferKey.publicKey !== installation.commit.targetIssuerPublicKey
-    ) throw new Error("Installed disaster recovery is missing its exact issuer key");
-    await activateAnchorIssuerKey(
-      input.secretStore,
-      installation.transferId,
-      installation.trustRecord.issuer.issuerKeyId,
+  const receipt = await loadDisasterRecoveryPostInstallReceipt({
+    log: authorityLog,
+    generation: installed.generation,
+  });
+  let state: DisasterRecoveryState | undefined;
+  if (!receipt) {
+    const stagingRoot = input.stagingRoot ?? path.join(
+      input.zhixingHome,
+      "distributed-runtime",
+      "disaster-recovery-staging",
     );
-    state = await journal.append({
-      v: 1,
-      mode: "disaster-recovery",
-      t: "anchor-committed",
-      transferId: installation.transferId,
-      commit: installation.commit,
-    });
-  }
-  if (state.phase !== "committed" && state.phase !== "tombstoned") {
-    throw new Error("Installed disaster recovery private journal is not committed");
+    const privateRoot = path.join(stagingRoot, "transfers", installation.transferId);
+    const privateArtifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
+    const transferKey = await loadAnchorIssuerKey(input.secretStore, installation.transferId);
+    const journal = new FileDisasterRecoveryTransferJournal(
+      new FileAuthorityCommitLog(
+        path.join(stagingRoot, "journals", installation.transferId),
+        privateArtifacts,
+        { storageMaintenance: input.storageMaintenance },
+      ),
+      disasterVerifiers(
+        installation.recoveryRootPublicKey,
+        target.device,
+        transferKey ?? undefined,
+      ),
+      input.now ?? Date.now,
+    );
+    state = await journal.state(installation.transferId);
+    if (!state) throw new Error("Installed disaster recovery has no exact private replay state");
+    if (state.phase === "imported") {
+      if (
+        !transferKey || transferKey.deviceId !== installation.trustRecord.issuer.issuerKeyId ||
+        transferKey.publicKey !== installation.commit.targetIssuerPublicKey
+      ) throw new Error("Installed disaster recovery is missing its exact issuer key");
+      await activateAnchorIssuerKey(
+        input.secretStore,
+        installation.transferId,
+        installation.trustRecord.issuer.issuerKeyId,
+      );
+      state = await journal.append({
+        v: 1,
+        mode: "disaster-recovery",
+        t: "anchor-committed",
+        transferId: installation.transferId,
+        commit: installation.commit,
+      });
+    }
+    if (state.phase !== "committed" && state.phase !== "tombstoned") {
+      throw new Error("Installed disaster recovery private journal is not committed");
+    }
   }
   const activeKey = await loadActiveAnchorIssuerKey(
     input.secretStore,
@@ -751,8 +840,9 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
   return Object.freeze({
     installation,
     installedGeneration: installed.generation,
-    state,
+    ...(state ? { state } : {}),
     pendingObligations: catalog.pendingObligations,
+    requiresPostInstallCompletion: receipt === undefined,
   });
 }
 
@@ -760,7 +850,21 @@ export async function finishDisasterRecoveryPostInstall(input: {
   readonly zhixingHome: string;
   readonly transferId: string;
   readonly readiness: PlannedAnchorReadinessPort;
+  readonly authorityLog: FileAuthorityCommitLog;
+  readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
+  readonly participants: readonly string[];
+  readonly readBack: readonly {
+    readonly kind: import("@zhixing/core/contracts").AuthorityCatalog["pendingObligations"][number]["kind"];
+    readonly id: string;
+    readonly disposition: "current-owner" | "terminal";
+  }[];
 }): Promise<void> {
+  await recordDisasterRecoveryPostInstallReceipt({
+    log: input.authorityLog,
+    generation: input.installedGeneration,
+    participants: input.participants,
+    readBack: input.readBack,
+  });
   await rm(path.join(
     input.zhixingHome,
     "distributed-runtime",

@@ -3,6 +3,7 @@ import type {
   AuthorityCatalog,
   HomeTrustEvent,
   HomeTrustRecord,
+  LogicalRecord,
 } from "@zhixing/core/contracts";
 import type {
   DurableLogCheckpoint,
@@ -16,6 +17,7 @@ import {
 import type { AnchorTransferCommit } from "@zhixing/core/contracts";
 
 type DisasterCommit = Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
+const DISASTER_POST_INSTALL_STREAM = "transfer:anchor-disaster-post-install";
 
 export interface DisasterRecoveryInstallation {
   readonly v: 1;
@@ -43,6 +45,15 @@ export interface DisasterInstalledAuthorityGeneration {
   readonly anchorEpoch: number;
   readonly trustEpoch: number;
   readonly trustChainHead: HomeTrustRecord["chainHead"];
+}
+
+export interface DisasterRecoveryPostInstallReceipt {
+  readonly v: 1;
+  readonly t: "disaster-post-install-completed";
+  readonly transferId: string;
+  readonly generationDigest: string;
+  readonly participantsDigest: string;
+  readonly readBackDigest: string;
 }
 
 export function createDisasterRecoveryInstallation(input: {
@@ -139,6 +150,88 @@ export async function loadCurrentDisasterRecoveryInstallation(
   });
 }
 
+export async function recordDisasterRecoveryPostInstallReceipt(input: {
+  readonly log: FileAuthorityCommitLog;
+  readonly generation: DisasterInstalledAuthorityGeneration;
+  readonly participants: readonly string[];
+  readonly readBack: readonly {
+    readonly kind: AuthorityCatalog["pendingObligations"][number]["kind"];
+    readonly id: string;
+    readonly disposition: "current-owner" | "terminal";
+  }[];
+}): Promise<DisasterRecoveryPostInstallReceipt> {
+  const receipt = createPostInstallReceipt(input);
+  return (await input.log.transactProjection<
+    ReadonlyMap<string, DisasterRecoveryPostInstallReceipt>,
+    DisasterRecoveryPostInstallReceipt,
+    DisasterRecoveryPostInstallReceipt
+  >(
+    new Map(),
+    reducePostInstallReceipts,
+    (current) => {
+      const existing = current.get(receipt.transferId);
+      if (existing) {
+        if (canonicalize(existing) !== canonicalize(receipt)) {
+          throw new Error("Disaster recovery post-install receipt conflicts with replay");
+        }
+        return { kind: "return", value: existing };
+      }
+      return {
+        kind: "append",
+        entries: [{ stream: DISASTER_POST_INSTALL_STREAM, body: receipt }],
+        value: receipt,
+      };
+    },
+    { stream: DISASTER_POST_INSTALL_STREAM },
+  )).value;
+}
+
+export async function loadDisasterRecoveryPostInstallReceipt(input: {
+  readonly log: FileAuthorityCommitLog;
+  readonly generation: DisasterInstalledAuthorityGeneration;
+}): Promise<DisasterRecoveryPostInstallReceipt | undefined> {
+  const receipts = await input.log.rebuildProjection(
+    new Map<string, DisasterRecoveryPostInstallReceipt>(),
+    reducePostInstallReceipts,
+    { stream: DISASTER_POST_INSTALL_STREAM },
+  );
+  const receipt = receipts.get(input.generation.transferId);
+  if (!receipt) return undefined;
+  const generationDigest = installedGenerationDigest(input.generation);
+  if (receipt.generationDigest !== generationDigest) {
+    throw new Error("Disaster recovery post-install receipt belongs to another generation");
+  }
+  return receipt;
+}
+
+export async function waitForDisasterRecoveryPostInstallReceipt(input: {
+  readonly log: FileAuthorityCommitLog;
+  readonly generation: DisasterInstalledAuthorityGeneration;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+}): Promise<DisasterRecoveryPostInstallReceipt> {
+  const deadline = Date.now() + input.timeoutMs;
+  while (true) {
+    if (input.signal?.aborted) throw input.signal.reason;
+    const receipt = await loadDisasterRecoveryPostInstallReceipt(input);
+    if (receipt) return receipt;
+    if (Date.now() >= deadline) {
+      throw new Error("Current duty runtime has not completed disaster recovery adoption");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(finish, Math.min(100, Math.max(1, deadline - Date.now())));
+      const onAbort = () => finish(input.signal?.reason);
+      function finish(error?: unknown): void {
+        clearTimeout(timer);
+        input.signal?.removeEventListener("abort", onAbort);
+        if (error !== undefined) reject(error);
+        else resolve();
+      }
+      input.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+}
+
 export function parseInstalledAuthorityCatalog(
   bytes: Uint8Array,
   installation: DisasterRecoveryInstallation,
@@ -157,4 +250,70 @@ export function parseInstalledAuthorityCatalog(
 function unsignedEvent(event: HomeTrustEvent): Omit<HomeTrustEvent, "signature"> {
   const { signature: _, ...unsigned } = event;
   return unsigned;
+}
+
+function createPostInstallReceipt(input: {
+  readonly generation: DisasterInstalledAuthorityGeneration;
+  readonly participants: readonly string[];
+  readonly readBack: readonly {
+    readonly kind: AuthorityCatalog["pendingObligations"][number]["kind"];
+    readonly id: string;
+    readonly disposition: "current-owner" | "terminal";
+  }[];
+}): DisasterRecoveryPostInstallReceipt {
+  return Object.freeze({
+    v: 1,
+    t: "disaster-post-install-completed",
+    transferId: input.generation.transferId,
+    generationDigest: installedGenerationDigest(input.generation),
+    participantsDigest: protocolDigest("DisasterPostInstallParticipants", 1, input.participants),
+    readBackDigest: protocolDigest("DisasterPostInstallReadBack", 1, input.readBack),
+  });
+}
+
+function installedGenerationDigest(generation: DisasterInstalledAuthorityGeneration): string {
+  return protocolDigest("DisasterInstalledAuthorityGeneration", 1, generation);
+}
+
+function reducePostInstallReceipts(
+  current: ReadonlyMap<string, DisasterRecoveryPostInstallReceipt>,
+  entry: LogicalRecord<unknown>,
+): ReadonlyMap<string, DisasterRecoveryPostInstallReceipt> {
+  if (entry.stream !== DISASTER_POST_INSTALL_STREAM) return current;
+  const receipt = validatePostInstallReceipt(entry.body);
+  const existing = current.get(receipt.transferId);
+  if (existing) {
+    if (canonicalize(existing) !== canonicalize(receipt)) {
+      throw new Error("Disaster recovery has conflicting post-install receipts");
+    }
+    return current;
+  }
+  const next = new Map(current);
+  next.set(receipt.transferId, receipt);
+  return next;
+}
+
+function validatePostInstallReceipt(value: unknown): DisasterRecoveryPostInstallReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Disaster recovery post-install receipt is invalid");
+  }
+  const receipt = value as Partial<DisasterRecoveryPostInstallReceipt> & Record<string, unknown>;
+  if (
+    receipt.v !== 1 || receipt.t !== "disaster-post-install-completed" ||
+    typeof receipt.transferId !== "string" || receipt.transferId.length === 0 ||
+    typeof receipt.generationDigest !== "string" ||
+    typeof receipt.participantsDigest !== "string" ||
+    typeof receipt.readBackDigest !== "string" ||
+    canonicalize(Object.keys(receipt).sort()) !== canonicalize([
+      "generationDigest", "participantsDigest", "readBackDigest", "t", "transferId", "v",
+    ])
+  ) throw new TypeError("Disaster recovery post-install receipt is invalid");
+  return Object.freeze({
+    v: 1,
+    t: receipt.t,
+    transferId: receipt.transferId,
+    generationDigest: receipt.generationDigest,
+    participantsDigest: receipt.participantsDigest,
+    readBackDigest: receipt.readBackDigest,
+  });
 }

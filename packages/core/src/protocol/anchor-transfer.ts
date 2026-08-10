@@ -196,8 +196,9 @@ export function validateReadyProof(
 ): ReadyProof {
   const value = clone(input, "Ready proof");
   exact(value, [
-    "assetRevision", "configuredCapabilities", "expiresAt", "homeId", "issuedAt",
-    "issuerPossession", "protocolRevision", "roles", "secretStore", "serviceRevision",
+    "assetRevision", "candidateDigest", "configuredCapabilities", "credentialRevision",
+    "expiresAt", "homeId", "issuedAt", "issuerPossession", "protocolRevision", "requestId",
+    "roles", "secretStore", "serviceRevision",
     "signature", "targetDeviceId", "targetIssuerKeyId", "targetIssuerPublicKey",
     "transferId", "trustChainHead", "trustEpoch", "v",
   ], "Ready proof");
@@ -898,13 +899,16 @@ function assertCommitBinding(state: PlannedAnchorTransferState, commit: PlannedC
 function validateUnsignedReadyProof(input: UnsignedReadyProof): UnsignedReadyProof {
   const value = clone(input, "Unsigned ready proof");
   exact(value, [
-    "assetRevision", "configuredCapabilities", "expiresAt", "homeId", "issuedAt",
-    "protocolRevision", "roles", "secretStore", "serviceRevision", "targetDeviceId",
+    "assetRevision", "candidateDigest", "configuredCapabilities", "credentialRevision",
+    "expiresAt", "homeId", "issuedAt", "protocolRevision", "requestId", "roles",
+    "secretStore", "serviceRevision", "targetDeviceId",
     "targetIssuerKeyId", "targetIssuerPublicKey", "transferId", "trustChainHead", "trustEpoch", "v",
   ], "Unsigned ready proof");
   version(value.v, "Ready proof");
   transferId(value.transferId, "Ready proof transferId");
+  identifier(value.requestId, "Ready proof requestId");
   identifier(value.homeId, "Ready proof homeId");
+  digest(value.candidateDigest, "Ready proof candidateDigest");
   identifier(value.targetDeviceId, "Ready proof targetDeviceId");
   identifier(value.targetIssuerKeyId, "Ready proof targetIssuerKeyId");
   if (typeof value.targetIssuerPublicKey !== "string" || !value.targetIssuerPublicKey.startsWith("ed25519:")) throw new TypeError("Ready proof issuer public key is invalid");
@@ -920,6 +924,7 @@ function validateUnsignedReadyProof(input: UnsignedReadyProof): UnsignedReadyPro
   identifier(value.protocolRevision, "Ready proof protocolRevision");
   identifier(value.assetRevision, "Ready proof assetRevision");
   identifier(value.serviceRevision, "Ready proof serviceRevision");
+  identifier(value.credentialRevision, "Ready proof credentialRevision");
   if (value.secretStore !== "unlocked") throw new TypeError("Ready proof requires an unlocked SecretStore");
   time(value.issuedAt, "Ready proof issuedAt");
   time(value.expiresAt, "Ready proof expiresAt");

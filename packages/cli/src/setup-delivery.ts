@@ -165,6 +165,7 @@ export interface PlannedAnchorReadySnapshot {
   readonly protocolRevision: string;
   readonly assetRevision: string;
   readonly serviceRevision: string;
+  readonly credentialRevision: string;
 }
 
 export interface PlannedAnchorReadinessPort {
@@ -174,6 +175,30 @@ export interface PlannedAnchorReadinessPort {
     readonly expiresAt: string;
   }): Promise<PlannedAnchorReadySnapshot>;
   release(transferId: string): Promise<void>;
+}
+
+export function createProductionAnchorReadySnapshot(input: {
+  readonly configurationSnapshot: unknown;
+  readonly assetRevision: string;
+  readonly credentialRevision: string;
+  readonly anchorEnabled: boolean;
+  readonly executorEnabled: boolean;
+}): PlannedAnchorReadySnapshot {
+  const configured = plannedAnchorCapabilities(input.configurationSnapshot);
+  return Object.freeze({
+    configuredCapabilities: configured.capabilities,
+    protocolRevision: protocolDigest("PlannedAnchorProtocolRevision", 1, {
+      executableVersion: configured.executableVersion,
+      executionProtocolVersion: EXECUTION_PROTOCOL_VERSION,
+    }),
+    assetRevision: input.assetRevision,
+    serviceRevision: protocolDigest("PlannedAnchorServiceRevision", 1, {
+      capabilities: configured.capabilities,
+      anchor: input.anchorEnabled,
+      executor: input.executorEnabled,
+    }),
+    credentialRevision: input.credentialRevision,
+  });
 }
 
 export function createPlannedAnchorReadinessCoordinator(
@@ -1069,22 +1094,23 @@ export async function setupAuthorityRuntime(
     const currentExecutorSnapshot = async () =>
       (await refreshLocalExecutorSnapshot()).snapshot;
     const plannedAnchorReadinessSnapshot = async (): Promise<PlannedAnchorReadySnapshot> => {
-      const configured = plannedAnchorCapabilities(options.configurationSnapshot);
       const assetSnapshot = await executionAssets.current().catch(() => undefined);
-      return {
-        configuredCapabilities: configured.capabilities,
-        protocolRevision: protocolDigest("PlannedAnchorProtocolRevision", 1, {
-          executableVersion: configured.executableVersion,
-          executionProtocolVersion: EXECUTION_PROTOCOL_VERSION,
-        }),
+      const snapshot = isPlainRecord(options.configurationSnapshot)
+        ? options.configurationSnapshot
+        : {};
+      return createProductionAnchorReadySnapshot({
+        configurationSnapshot: options.configurationSnapshot,
         assetRevision: assetSnapshot?.digest ??
           protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
-        serviceRevision: protocolDigest("PlannedAnchorServiceRevision", 1, {
-          capabilities: configured.capabilities,
-          anchor: anchorEnabled,
-          executor: localExecutorEnabled,
+        credentialRevision: protocolDigest("PlannedAnchorCredentialRevision", 1, {
+          generation: typeof snapshot.credentialGeneration === "string"
+            ? snapshot.credentialGeneration
+            : null,
+          capabilities: plannedAnchorCapabilities(options.configurationSnapshot).capabilities,
         }),
-      };
+        anchorEnabled,
+        executorEnabled: localExecutorEnabled,
+      });
     };
     const plannedAnchorReadiness = createPlannedAnchorReadinessCoordinator(
       plannedAnchorReadinessSnapshot,

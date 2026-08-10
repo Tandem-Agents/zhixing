@@ -123,13 +123,18 @@ export class CredentialExposureAuthority {
   async publishRotation(input: {
     readonly requestId: string;
     readonly oldDeviceId: string;
+    readonly oldBindingId?: string;
     readonly ref: SecretRef;
     readonly service: string;
     readonly bindingRevision: number;
-    readonly verifiedPrincipal: {
+    readonly verifiedPrincipal?: {
       readonly verification: "service-verified";
       readonly canonicalProviderPrincipal: string;
     };
+    readonly verifyPrincipal?: () => Promise<{
+      readonly verification: "service-verified";
+      readonly canonicalProviderPrincipal: string;
+    }>;
     readonly tenant?: string;
     readonly scopes?: readonly string[];
     readonly rotationHint?: string;
@@ -139,7 +144,13 @@ export class CredentialExposureAuthority {
     if (!/^[A-Za-z0-9._:-]{1,192}$/u.test(input.requestId)) {
       throw new TypeError("Credential rotation request identity is invalid");
     }
+    if ((input.verifiedPrincipal === undefined) === (input.verifyPrincipal === undefined)) {
+      throw new TypeError("Credential rotation requires exactly one principal verifier");
+    }
     await input.publishAndReadBack();
+    const verifiedPrincipal = input.verifyPrincipal
+      ? await input.verifyPrincipal()
+      : input.verifiedPrincipal!;
     await input.readiness();
     const markedAt = this.options.now?.() ?? new Date().toISOString();
     const active = createCredentialExposureRecord({
@@ -147,7 +158,7 @@ export class CredentialExposureAuthority {
       bindingId: input.ref.bindingId,
       bindingRevision: input.bindingRevision,
       service: input.service,
-      verifiedPrincipal: input.verifiedPrincipal,
+      verifiedPrincipal,
       ...(input.tenant ? { tenant: input.tenant } : {}),
       ...(input.scopes ? { scopes: input.scopes } : {}),
       ...(input.rotationHint ? { rotationHint: input.rotationHint } : {}),
@@ -163,7 +174,8 @@ export class CredentialExposureAuthority {
       (records) => {
         const projected = projectCredentialExposures(records);
         const old = projected.records.find((record) =>
-          record.deviceId === input.oldDeviceId && record.bindingId === input.ref.bindingId &&
+          record.deviceId === input.oldDeviceId &&
+          record.bindingId === (input.oldBindingId ?? input.ref.bindingId) &&
           record.service === input.service && record.state === "compromised");
         if (!old) {
           const current = projected.records.find((record) =>

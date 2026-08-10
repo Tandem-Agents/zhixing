@@ -195,6 +195,7 @@ export interface AssemblyContext {
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
   channelConnections?: {
+    readonly ready: Promise<void>;
     connectConfigured(): Promise<void>;
     disconnectConfigured(): Promise<void>;
   };

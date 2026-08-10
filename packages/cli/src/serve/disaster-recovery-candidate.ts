@@ -17,7 +17,7 @@ import {
   validateDisasterRecoveryAbort,
   validateDisasterRecoveryCommand,
 } from "@zhixing/core/protocol";
-import { replayTrustChain } from "@zhixing/mesh/trust-chain";
+import { replayTrustChain, verifyHomeTrustRecord } from "@zhixing/mesh/trust-chain";
 import {
   verifyRecoverySignature,
 } from "@zhixing/mesh/recovery-root";
@@ -31,6 +31,8 @@ import {
   targetWideAnchorCandidateTerminal,
   type TargetWideAnchorCandidateState,
 } from "./target-wide-anchor-candidate.js";
+import type { DisasterRecoveryPeerEvidence } from
+  "./disaster-recovery-trust-evidence.js";
 
 const DISASTER_CANDIDATE_STREAM = "transfer:anchor-disaster-candidate";
 
@@ -39,6 +41,9 @@ type PrepareCommand = Extract<DisasterRecoveryCommand, { op: "prepare" }>;
 export interface DisasterRecoveryVerifiedCandidate {
   readonly baseline: DisasterRecoveryBaseline;
   readonly baselineEvents: readonly HomeTrustEvent[];
+  readonly reachabilityCut: readonly string[];
+  readonly trustEvidence: readonly DisasterRecoveryPeerEvidence[];
+  readonly trustEvidenceDigest: string;
   readonly onsiteVerification: RecoveryCheckpointVerification;
   readonly authorityRecordsRef: ArtifactRef;
   readonly catalog: AuthorityCatalog;
@@ -146,9 +151,6 @@ export class FileDisasterRecoveryCandidateJournal {
     return (await this.#transact((projection) => {
       const existing = projection.candidates.get(transferId);
       if (!existing) throw new Error("Disaster verification has no durable candidate claim");
-      if (existing.terminal !== undefined) {
-        throw new Error("Terminal disaster candidate cannot gain verification");
-      }
       const verified = validateVerifiedCandidate(
         existing.prepare,
         input,
@@ -159,6 +161,9 @@ export class FileDisasterRecoveryCandidateJournal {
           throw new Error("Disaster candidate verification conflicts with replay");
         }
         return { kind: "return", value: existing };
+      }
+      if (existing.terminal !== undefined) {
+        throw new Error("Terminal disaster candidate cannot gain verification");
       }
       return {
         kind: "append",
@@ -471,13 +476,18 @@ function validateVerifiedCandidate(
     "authorityRecordsRef",
     "baseline",
     "baselineEvents",
+    "reachabilityCut",
+    "trustEvidence",
+    "trustEvidenceDigest",
     "catalog",
     "catalogRef",
     "onsiteVerification",
   ]);
   if (
     !value.baseline || !value.onsiteVerification || !value.catalog ||
-    !value.catalogRef || !value.authorityRecordsRef || !Array.isArray(value.baselineEvents)
+    !value.catalogRef || !value.authorityRecordsRef || !Array.isArray(value.baselineEvents) ||
+    !Array.isArray(value.reachabilityCut) || !Array.isArray(value.trustEvidence) ||
+    typeof value.trustEvidenceDigest !== "string"
   ) throw new TypeError("Disaster verified candidate is incomplete");
   const baseline = value.baseline as DisasterRecoveryBaseline;
   const verification = value.onsiteVerification as RecoveryCheckpointVerification;
@@ -513,9 +523,43 @@ function validateVerifiedCandidate(
     canonicalize(projection.chainHead) !== canonicalize(baseline.chainHead) ||
     canonicalize(projection.issuer) !== canonicalize(baseline.issuer)
   ) throw new TypeError("Disaster baseline evidence does not reproduce its snapshot");
+  const cut = Object.freeze([...(value.reachabilityCut as string[])]);
+  const evidence = Object.freeze((value.trustEvidence as DisasterRecoveryPeerEvidence[])
+    .map((item) => {
+      const evidenceProjection = replayTrustChain(item.events);
+      verifyHomeTrustRecord(item.record, evidenceProjection);
+      if (
+        evidenceProjection.homeId !== baseline.homeId ||
+        !evidenceProjection.members.some((member) =>
+          member.device.deviceId === item.deviceId && member.state === "active")
+      ) throw new TypeError("Disaster reachability evidence is not an active home member");
+      return Object.freeze({
+        deviceId: item.deviceId,
+        events: Object.freeze(item.events.map((event) => structuredClone(event))),
+        record: structuredClone(item.record),
+      });
+    })
+    .sort((left, right) => left.deviceId.localeCompare(right.deviceId, "en-US")));
+  if (
+    canonicalize(cut) !== canonicalize([...cut].sort((left, right) =>
+      left.localeCompare(right, "en-US"))) ||
+    canonicalize(cut) !== canonicalize(evidence.map((item) => item.deviceId)) ||
+    protocolDigest("DisasterRecoveryReachabilityEvidence", 1, {
+      cut,
+      evidence: evidence.map((item) => ({
+        deviceId: item.deviceId,
+        chainHead: item.record.chainHead,
+        trustEpoch: item.record.trustEpoch,
+        recordDigest: protocolDigest("HomeTrustRecord", 1, item.record),
+      })),
+    }) !== value.trustEvidenceDigest
+  ) throw new TypeError("Disaster reachability evidence digest is invalid");
   return Object.freeze({
     baseline: structuredClone(baseline),
     baselineEvents: events,
+    reachabilityCut: cut,
+    trustEvidence: evidence,
+    trustEvidenceDigest: value.trustEvidenceDigest,
     onsiteVerification: structuredClone(verification),
     authorityRecordsRef: structuredClone(value.authorityRecordsRef as ArtifactRef),
     catalog,

@@ -174,11 +174,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
     ...(anchorPostInstall
       ? { installedAuthorityGeneration: anchorPostInstall.installedGeneration }
       : {}),
-    ...(anchorPostInstall && (
-      anchorPostInstall.installation.t === "disaster-anchor-installed" ||
-      ("requiresPostInstallCompletion" in anchorPostInstall &&
-        anchorPostInstall.requiresPostInstallCompletion)
-    )
+    ...(anchorPostInstall && anchorPostInstall.requiresPostInstallCompletion
       ? { plannedAnchorPostInstall: anchorPostInstall }
       : {}),
   };

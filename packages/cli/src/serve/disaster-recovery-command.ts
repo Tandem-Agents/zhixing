@@ -5,10 +5,18 @@ import type {
   MeshRoleBootConfig,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import { protocolDigest, createSignedDisasterRecoveryCommand } from "@zhixing/core/protocol";
+import {
+  protocolDigest,
+  createSignedDisasterRecoveryAbort,
+  createSignedDisasterRecoveryCommand,
+} from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createPlatformSecretStore } from "@zhixing/secrets";
-import { loadConfig } from "@zhixing/providers";
+import {
+  loadConfig,
+  loadCredentialsWithLegacyMigration,
+  type CredentialStoreCoordinator,
+} from "@zhixing/providers";
 import {
   FileRecoveryCheckpointTarget,
   type InventoryRecoveryCheckpointTarget,
@@ -20,7 +28,11 @@ import {
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { createStdoutWriter } from "../screen/index.js";
-import { createPlannedAnchorReadinessCoordinator } from "../setup-delivery.js";
+import {
+  createPlannedAnchorReadinessCoordinator,
+  createProductionAnchorReadySnapshot,
+} from "../setup-delivery.js";
+import { ZHIXING_CLI_VERSION } from "../version.js";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import {
@@ -29,23 +41,32 @@ import {
   type DisasterRecoveryInventoryTarget,
 } from "./disaster-recovery-inventory.js";
 import { DisasterRecoveryTarget } from "./disaster-recovery-target.js";
-import { loadCurrentDisasterRecoveryInstallation } from "./disaster-recovery-installation.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
+import { FileExecutionAssetCache } from "./execution-asset-cache.js";
+import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
+import { collectDisasterRecoveryTrustEvidence } from "./disaster-recovery-trust-evidence.js";
+import {
+  loadCurrentDisasterRecoveryInstallation,
+  waitForDisasterRecoveryPostInstallReceipt,
+} from "./disaster-recovery-installation.js";
 
 export interface DisasterRecoveryCommandOptions {
   readonly zhixingHome?: string;
-  readonly secretStore?: SecretStorePort;
+  readonly secretStore?: SecretStorePort & CredentialStoreCoordinator;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly writeLine?: (line: string) => void;
   readonly readRecoveryPackage?: () => Promise<string>;
   readonly inventoryTargets?: readonly DisasterRecoveryInventoryTarget[];
   readonly target?: DisasterRecoveryTarget;
   readonly now?: () => number;
+  readonly signal?: AbortSignal;
+  readonly reachabilityDiscoveryMs?: number;
+  readonly postInstallTimeoutMs?: number;
 }
 
 export async function runDisasterRecoveryCommand(
@@ -61,11 +82,43 @@ export async function runDisasterRecoveryCommand(
     .filter((value) => value !== undefined).length > 1) {
     throw new TypeError("恢复时只能选择一个备份目录或一台备份设备");
   }
-  const context = await openRecoveryContext(options);
-  const opened = options.inventoryTargets
-    ? { targets: options.inventoryTargets, close: async () => undefined }
-    : await openInventoryTargets(context, selection);
+  const ownedAbort = options.signal ? undefined : new AbortController();
+  const signal = options.signal ?? ownedAbort!.signal;
+  const onSignal = () => ownedAbort?.abort(new Error("Disaster recovery was cancelled"));
+  if (ownedAbort) {
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+  }
+  let evidenceMesh: Awaited<ReturnType<typeof openRecoveryEvidenceMesh>> = {
+    peerIds: [],
+    close: async () => undefined,
+  };
+  let opened: Awaited<ReturnType<typeof openInventoryTargets>> = {
+    targets: [],
+    close: async () => undefined,
+  };
   try {
+    signal.throwIfAborted();
+    const context = await openRecoveryContext(options, false);
+    signal.throwIfAborted();
+    if (context.trust.issuer.deviceId === context.key.deviceId) {
+      const installed = await loadCurrentDisasterRecoveryInstallation(context.store.authorityLog());
+      if (!installed || installed.installation.trustRecord.issuer.deviceId !== context.key.deviceId) {
+        throw new Error("当前设备仍在值班，无需执行无源恢复");
+      }
+      await waitForDisasterRecoveryPostInstallReceipt({
+        log: context.store.authorityLog(),
+        generation: installed.generation,
+        timeoutMs: options.postInstallTimeoutMs ?? 30_000,
+        signal,
+      });
+      await reportDisasterRecoveryCompleted(context);
+      return;
+    }
+    evidenceMesh = await openRecoveryEvidenceMesh(context, options, signal);
+    opened = options.inventoryTargets
+      ? { targets: options.inventoryTargets, close: async () => undefined }
+      : await openInventoryTargets(context, selection, signal);
     context.writeLine("正在查找完整的恢复备份……");
     const requestId = `recover:${protocolDigest("DisasterRecoveryDiscovery", 1, {
       homeId: context.trust.homeId,
@@ -74,6 +127,7 @@ export async function runDisasterRecoveryCommand(
     const candidates = await discoverDisasterRecoveryCandidates({
       requestId,
       targets: opened.targets,
+      signal,
     });
     for (const candidate of candidates) {
       context.writeLine(
@@ -115,51 +169,85 @@ export async function runDisasterRecoveryCommand(
       { op: "prepare" }
     >;
     context.writeLine("正在验证备份……");
-    const checkpoint = await selected.target.read(selected.entry.checkpointId);
-    const target = options.target ?? new DisasterRecoveryTarget({
-      deviceId: context.key.deviceId,
-      identity: context.identity,
-      identityKey: context.key,
-      secretStore: context.secretStore,
-      sharedArtifacts: context.store.artifactStore(),
-      authorityLog: context.store.authorityLog(),
-      stagingRoot: path.join(
-        context.home,
-        "distributed-runtime",
-        "disaster-recovery-staging",
-      ),
-      readiness: recoveryReadiness(context.configuration).port,
-      storageMaintenance: context.storageMaintenance,
-      ...(options.now ? { now: options.now } : {}),
+    const checkpoint = await selected.target.read(selected.entry.checkpointId, signal);
+    const trustEvidence = await collectDisasterRecoveryTrustEvidence({
+      store: context.store,
+      localDeviceId: context.key.deviceId,
+      peers: evidenceMesh.peerIds
+        .filter((deviceId) => evidenceMesh.control?.connections.has(deviceId))
+        .map((deviceId) => ({
+          deviceId,
+          client: evidenceMesh.control!.connections.client(deviceId),
+        })),
+      signal,
     });
-    await target.prepareAndImport({
-      prepare,
-      checkpoint,
-      recoveryRoot: decoded.root,
-      trustEvidence: [await context.store.loadTrustEvents()],
-    });
-    context.writeLine("备份验证完成，正在恢复数据并接管值班……");
-    await target.commit({ transferId, recoveryRoot: decoded.root });
-    context.writeLine("恢复数据已安全提交；旧值班设备已失权。");
-    const affected = await new CredentialExposureAuthority({
-      deviceId: context.key.deviceId,
-      log: context.store.authorityLog(),
-      secretStore: context.secretStore,
-    }).rotationRequired();
-    if (affected.length === 0) {
-      context.writeLine("没有需要立即轮换的第三方账号。");
-    } else {
-      context.writeLine("请处理以下受旧设备影响的第三方账号：");
-      for (const item of affected) {
-        context.writeLine(`- ${item.service}${item.tenant ? `（${item.tenant}）` : ""}：${
-          item.rotationHint ?? "在对应服务中撤销旧凭据并发布新凭据"
-        }`);
+    const target = options.target ?? createRecoveryTarget(context, options);
+    try {
+      await target.prepareAndImport({
+        prepare,
+        checkpoint,
+        recoveryRoot: decoded.root,
+        trustEvidence,
+        signal,
+      });
+      context.writeLine("备份验证完成，正在恢复数据并接管值班……");
+      await target.commit({ transferId, recoveryRoot: decoded.root, signal });
+      const installed = await loadCurrentDisasterRecoveryInstallation(context.store.authorityLog());
+      if (!installed || installed.installation.transferId !== transferId) {
+        throw new Error("Disaster recovery installation is not the current authority generation");
       }
+      await waitForDisasterRecoveryPostInstallReceipt({
+        log: context.store.authorityLog(),
+        generation: installed.generation,
+        timeoutMs: options.postInstallTimeoutMs ?? 30_000,
+        signal,
+      });
+    } catch (error) {
+      const abort = createSignedDisasterRecoveryAbort({
+        v: 1,
+        mode: "disaster-recovery",
+        requestId,
+        transferId,
+        targetDeviceId: context.key.deviceId,
+        checkpointTargetId: selected.entry.targetId,
+        checkpointEnvelopeDigest: selected.entry.envelope.digest,
+        reason: "operator-cancelled",
+        at: new Date(options.now?.() ?? Date.now()).toISOString(),
+      }, decoded.root);
+      await target.abort({ abort, recoveryRoot: decoded.root }).catch(() => undefined);
+      throw error;
     }
-    context.writeLine("确认旧设备已隔离或擦除后，运行 zz backup recover-finish。");
+    await reportDisasterRecoveryCompleted(context);
   } finally {
-    await opened.close();
+    if (ownedAbort) {
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    }
+    await Promise.all([
+      opened.close(),
+      evidenceMesh.close(),
+    ]);
   }
+}
+
+async function reportDisasterRecoveryCompleted(context: RecoveryContext): Promise<void> {
+  context.writeLine("恢复数据已安全提交；旧值班设备已失权。");
+  const affected = await new CredentialExposureAuthority({
+    deviceId: context.key.deviceId,
+    log: context.store.authorityLog(),
+    secretStore: context.secretStore,
+  }).rotationRequired();
+  if (affected.length === 0) {
+    context.writeLine("没有需要立即轮换的第三方账号。");
+  } else {
+    context.writeLine("请处理以下受旧设备影响的第三方账号：");
+    for (const item of affected) {
+      context.writeLine(`- ${item.service}${item.tenant ? `（${item.tenant}）` : ""}：${
+        item.rotationHint ?? "在对应服务中撤销旧凭据并发布新凭据"
+      }`);
+    }
+  }
+  context.writeLine("确认旧设备已隔离或擦除后，运行 zz backup recover-finish。");
 }
 
 export async function runDisasterRecoveryFinishCommand(
@@ -186,12 +274,13 @@ export function disasterRecoveryPublicError(_error: unknown): Error {
 
 interface RecoveryContext {
   readonly home: string;
-  readonly secretStore: SecretStorePort;
+  readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
   readonly key: Awaited<ReturnType<typeof loadOrCreateDeviceKey>>;
   readonly identity: DeviceIdentity;
   readonly trust: NonNullable<Awaited<ReturnType<FileMeshBootstrapStore["loadTrustRecord"]>>>;
   readonly store: FileMeshBootstrapStore;
   readonly configuration?: MeshRoleBootConfig;
+  readonly config: ReturnType<typeof loadConfig>;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly writeLine: (line: string) => void;
 }
@@ -228,9 +317,67 @@ async function openRecoveryContext(
     trust,
     store,
     ...(config.mesh ? { configuration: config.mesh } : {}),
+    config,
     storageMaintenance,
     writeLine: options.writeLine ?? createStdoutWriter().line,
   };
+}
+
+async function openRecoveryEvidenceMesh(
+  context: RecoveryContext,
+  options: DisasterRecoveryCommandOptions,
+  signal: AbortSignal,
+): Promise<{
+  readonly control?: ProductionMeshControlPlane;
+  readonly peerIds: readonly string[];
+  readonly close: () => Promise<void>;
+}> {
+  if (!context.configuration) {
+    return { peerIds: [], close: async () => undefined };
+  }
+  const bootstrap = await prepareMeshRuntimeBootstrap({
+    zhixingHome: context.home,
+    secretStore: context.secretStore,
+    storageMaintenance: context.storageMaintenance,
+    configuration: context.configuration,
+  });
+  if (bootstrap.mode !== "trusted-home") {
+    throw new Error("认证设备网络尚未建立");
+  }
+  const peerIds = Object.freeze(bootstrap.transportPeers
+    .map((peer) => peer.identity.deviceId)
+    .filter((deviceId) => deviceId !== context.key.deviceId)
+    .sort((left, right) => left.localeCompare(right, "en-US")));
+  if (peerIds.length === 0) {
+    return { peerIds, close: async () => undefined };
+  }
+  const control = new ProductionMeshControlPlane({
+    localIdentity: bootstrap.deviceKey,
+    trust: bootstrap.trust,
+    configuration: bootstrap.configuration,
+    endpoints: bootstrap.endpoints,
+    transportPeers: bootstrap.transportPeers,
+    secretStore: context.secretStore,
+    bootstrapStore: bootstrap.bootstrapStore,
+    services: new MeshServiceRegistry(),
+    recoveryEvidencePeerIds: peerIds,
+    watchTrust: false,
+    credentialRouteGuard: new CredentialExposureAuthority({
+      deviceId: context.key.deviceId,
+      log: context.store.authorityLog(),
+      secretStore: context.secretStore,
+    }),
+  });
+  signal.throwIfAborted();
+  await control.start();
+  try {
+    signal.throwIfAborted();
+    await abortableDelay(options.reachabilityDiscoveryMs ?? 500, signal);
+    return { control, peerIds, close: () => control.stop() };
+  } catch (error) {
+    await control.stop().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function openInventoryTargets(
@@ -240,10 +387,12 @@ async function openInventoryTargets(
     readonly pairedDeviceId?: string;
     readonly pairedDeviceName?: string;
   },
+  signal: AbortSignal,
 ): Promise<{
   readonly targets: readonly DisasterRecoveryInventoryTarget[];
   readonly close: () => Promise<void>;
 }> {
+  signal.throwIfAborted();
   if (selection.directory) {
     const target = await FileRecoveryCheckpointTarget.open({
       targetRoot: selection.directory,
@@ -251,12 +400,17 @@ async function openInventoryTargets(
       create: false,
       storageMaintenance: context.storageMaintenance,
     });
+    if (signal.aborted) {
+      await target.close();
+      signal.throwIfAborted();
+    }
     return {
       targets: [{ displayName: path.basename(path.resolve(selection.directory)), target }],
       close: () => target.close(),
     };
   }
   const configured = await new FileBackupTargetConfiguration(context.home).load();
+  signal.throwIfAborted();
   const configuredPaired = configured?.bindings.find((binding) =>
     binding.targetId === configured.currentTargetId && binding.kind === "paired-device");
   const named = selection.pairedDeviceName === undefined
@@ -287,6 +441,7 @@ async function openInventoryTargets(
     storageMaintenance: context.storageMaintenance,
     ...(context.configuration ? { configuration: context.configuration } : {}),
   });
+  signal.throwIfAborted();
   if (bootstrap.mode !== "trusted-home") throw new Error("认证设备网络尚未建立");
   const control = new ProductionMeshControlPlane({
     localIdentity: bootstrap.deviceKey,
@@ -305,9 +460,11 @@ async function openInventoryTargets(
     watchTrust: false,
     ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
   });
+  signal.throwIfAborted();
   await control.start();
   try {
-    await waitForPeer(control, pairedDeviceId, 30_000);
+    signal.throwIfAborted();
+    await waitForPeer(control, pairedDeviceId, 30_000, signal);
     const target = new PairedRecoveryCheckpointTarget({
       homeId: context.trust.homeId,
       sourceDeviceId: context.key.deviceId,
@@ -338,42 +495,79 @@ function createRecoveryTarget(
     sharedArtifacts: context.store.artifactStore(),
     authorityLog: context.store.authorityLog(),
     stagingRoot: path.join(context.home, "distributed-runtime", "disaster-recovery-staging"),
-    readiness: recoveryReadiness(context.configuration).port,
+    readiness: productionRecoveryReadiness(context).port,
     storageMaintenance: context.storageMaintenance,
     ...(options.now ? { now: options.now } : {}),
   });
 }
 
-function recoveryReadiness(configuration?: MeshRoleBootConfig) {
-  const capabilities = {
-    providers: [] as string[],
-    mcpServers: [] as string[],
-    channels: [] as string[],
-  };
-  const revision = protocolDigest("DisasterRecoveryLocalReadiness", 1, {
-    enabledRoles: configuration?.enabledRoles ?? ["anchor", "executor"],
-    capabilities,
+function productionRecoveryReadiness(context: RecoveryContext) {
+  return createPlannedAnchorReadinessCoordinator(async () => {
+    if (!context.configuration?.enabledRoles.includes("anchor")) {
+      throw new Error("恢复目标没有启用真实值班角色配置");
+    }
+    const credentials = await loadCredentialsWithLegacyMigration({
+      store: context.secretStore,
+      homeDir: context.home,
+    });
+    const verifier = createTrustedDeviceProtocolVerifier(
+      context.trust.members.map((member) => member.device),
+    );
+    const assets = new FileExecutionAssetCache(
+      path.join(context.home, "distributed-runtime", "execution-assets.json"),
+      context.store.artifactStore(),
+      verifier,
+    );
+    const assetSnapshot = await assets.current();
+    const credentialRevision = protocolDigest("PlannedAnchorCredentialRevision", 1, {
+      generation: credentials.generation,
+      providers: Object.keys(credentials.credentials.providers ?? {}).sort(),
+      mcpServers: Object.keys(credentials.credentials.mcp ?? {}).sort(),
+    });
+    return createProductionAnchorReadySnapshot({
+      configurationSnapshot: {
+        config: context.config,
+        executableVersion: ZHIXING_CLI_VERSION,
+        credentialGeneration: credentials.generation,
+      },
+      assetRevision: assetSnapshot?.digest ??
+        protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
+      credentialRevision,
+      anchorEnabled: true,
+      executorEnabled: context.configuration.enabledRoles.includes("executor"),
+    });
   });
-  return createPlannedAnchorReadinessCoordinator(async () => ({
-    configuredCapabilities: capabilities,
-    protocolRevision: revision,
-    assetRevision: revision,
-    serviceRevision: revision,
-  }));
 }
 
 async function waitForPeer(
   control: ProductionMeshControlPlane,
   deviceId: string,
   timeoutMs: number,
+  signal: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!control.connections.has(deviceId)) {
+    signal.throwIfAborted();
     if (Date.now() >= deadline) {
       throw new Error("配对备份设备未上线，请确认设备正在运行后重试");
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    await abortableDelay(100, signal);
   }
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(), milliseconds);
+    const onAbort = () => finish(signal.reason);
+    const finish = (error?: unknown) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export type DisasterRecoveryInventoryPort = InventoryRecoveryCheckpointTarget;

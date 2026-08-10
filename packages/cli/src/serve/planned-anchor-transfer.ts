@@ -999,6 +999,10 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
             trust,
             targetDeviceId: this.options.deviceId,
             expected: snapshot,
+            expectedIdentity: {
+              requestId: identity.requestId,
+              candidateDigest: plannedReadyCandidateDigest(identity),
+            },
             now: this.options.now?.(),
           });
           const issuerKey = await loadAnchorIssuerKey(
@@ -1029,6 +1033,10 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         trust,
         targetDeviceId: this.options.deviceId,
         expected: await this.options.readiness.snapshot(),
+        expectedIdentity: {
+          requestId: identity.requestId,
+          candidateDigest: plannedReadyCandidateDigest(identity),
+        },
         now: this.options.now?.(),
       });
       const issuerKey = await loadAnchorIssuerKey(
@@ -1045,7 +1053,9 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       return candidate.readyProof;
     }
     const readyProof = (await createAnchorTransferReadyProof({
+      requestId: identity.requestId,
       transferId: identity.transferId,
+      candidateDigest: plannedReadyCandidateDigest(identity),
       targetIdentityKey: this.options.identityKey,
       trust,
       secretStore: this.options.secretStore,
@@ -1136,6 +1146,10 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       trust,
       targetDeviceId: this.options.deviceId,
       expected: await this.options.readiness.snapshot(),
+      expectedIdentity: {
+        requestId: command.requestId,
+        candidateDigest: plannedReadyCandidateDigest(candidate.identity),
+      },
       now: this.options.now?.(),
     });
     const issuerKey = await loadAnchorIssuerKey(this.options.secretStore, command.transferId);
@@ -1822,6 +1836,10 @@ export class PlannedAnchorTransferOwner {
       }),
       trust,
       targetDeviceId: identity.targetDeviceId,
+      expectedIdentity: {
+        requestId: identity.requestId,
+        candidateDigest: plannedReadyCandidateDigest(identity),
+      },
     });
     const trustTransition = createMigrationTransition(
       trust,
@@ -2044,6 +2062,10 @@ export class PlannedAnchorTransferOwner {
         proof: lateReadyProof,
         trust,
         targetDeviceId: state.identity.targetDeviceId,
+        expectedIdentity: {
+          requestId: state.identity.requestId,
+          candidateDigest: plannedReadyCandidateDigest(candidateIdentityFromState(state)),
+        },
       });
       if (
         state.catalog?.trust.homeId !== trust.homeId ||
@@ -3253,6 +3275,7 @@ function readyReservation(
       protocolRevision: snapshot.protocolRevision,
       assetRevision: snapshot.assetRevision,
       serviceRevision: snapshot.serviceRevision,
+      credentialRevision: snapshot.credentialRevision,
     }),
     expiresAt: proof.expiresAt,
   });
@@ -3652,6 +3675,10 @@ function plannedTargetWideCandidateIdentity(
     transferId: identity.transferId,
     identityDigest: protocolDigest("PlannedAnchorCandidateIdentity", 1, identity),
   });
+}
+
+function plannedReadyCandidateDigest(identity: PlannedAnchorCandidateIdentity): string {
+  return protocolDigest("PlannedAnchorCandidateIdentity", 1, identity);
 }
 
 function assertCandidateTrust(
