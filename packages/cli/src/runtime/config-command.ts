@@ -61,7 +61,7 @@ export interface ConfigCommandDeps {
    * 配置落盘后触发核心宿主按新配置换代(优雅退出 flush 落盘 → 重新拉起)。
    * 活跃会话窗口经启动装填从盘上事实流重建——与崩溃恢复同一路径。
    */
-  requestHostReload: () => Promise<HostReloadResult | void>;
+  requestHostReload: (options?: HostReloadOptions) => Promise<HostReloadResult | void>;
   /** 仅 stop 接口——结构子类型，与 cli/render 的 Renderer 实现兼容 */
   renderer: { stop: () => void };
   /** 写屏 sink——所有反馈（成功 / 失败 / 防御性提示）经此协调，避免推走 chrome */
@@ -77,6 +77,38 @@ export interface HostReloadResult {
   channels?: readonly ChannelStatus[];
 }
 
+export interface HostReloadOptions {
+  readonly launchSelectionChanged: boolean;
+}
+
+export async function reloadCoreHostAfterConfig(input: {
+  readonly options?: HostReloadOptions;
+  readonly requestDrainShutdown: () => Promise<void>;
+  readonly reconnect: (options: { readonly beforeTurnover?: () => Promise<void> }) => Promise<void>;
+  readonly prepareManagedServiceTurnover: () => Promise<void>;
+  readonly refresh: () => Promise<HostReloadResult | void>;
+}): Promise<HostReloadResult | void> {
+  const shutdownError = await input.requestDrainShutdown()
+    .then(() => undefined, (error: unknown) => error);
+  const reconnectError = await input.reconnect({
+    ...(input.options?.launchSelectionChanged
+      ? { beforeTurnover: input.prepareManagedServiceTurnover }
+      : {}),
+  }).then(() => undefined, (error: unknown) => error);
+  if (reconnectError !== undefined) {
+    if (shutdownError !== undefined) {
+      throw new AggregateError(
+        [shutdownError, reconnectError],
+        "核心宿主停机请求与连接换代均未确认",
+      );
+    }
+    throw reconnectError;
+  }
+  const result = await input.refresh();
+  if (shutdownError !== undefined) throw shutdownError;
+  return result;
+}
+
 export type ConfigPostCommitEffect<T> =
   | { readonly status: "succeeded"; readonly value: T }
   | { readonly status: "failed"; readonly error: unknown };
@@ -90,10 +122,12 @@ export interface ConfigPostCommitEffects {
 
 export async function settleConfigPostCommitEffects(input: {
   readonly launchSelectionChanged: boolean;
-  readonly reload: () => Promise<HostReloadResult | void>;
+  readonly reload: (options?: HostReloadOptions) => Promise<HostReloadResult | void>;
   readonly reconcile: () => Promise<unknown>;
 }): Promise<ConfigPostCommitEffects> {
-  const reload = await captureConfigPostCommitEffect(input.reload);
+  const reload = await captureConfigPostCommitEffect(() => input.reload({
+    launchSelectionChanged: input.launchSelectionChanged,
+  }));
   const reconcile = input.launchSelectionChanged
     ? await captureConfigPostCommitEffect(async () => {
         await input.reconcile();

@@ -255,7 +255,11 @@ export class CoreHostConnection implements CoreHostRpcLink {
    * 用于配置热重载 / 协议换代这类"旧宿主已被要求退出,必须连到新 owner"
    * 的场景。它不是 dispose:订阅表仍是接入面的声明面,新连接建立后自动重挂。
    */
-  async reconnect(opts: { timeoutMs?: number; pollIntervalMs?: number } = {}): Promise<void> {
+  async reconnect(opts: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    beforeTurnover?: () => Promise<void>;
+  } = {}): Promise<void> {
     if (this.disposed) throw new Error("CoreHostConnection 已释放");
     if (this.reconnecting) {
       await this.reconnecting;
@@ -799,10 +803,15 @@ export class CoreHostConnection implements CoreHostRpcLink {
   }
 
   private async performReconnect(
-    opts: { timeoutMs?: number; pollIntervalMs?: number },
+    opts: {
+      timeoutMs?: number;
+      pollIntervalMs?: number;
+      beforeTurnover?: () => Promise<void>;
+    },
   ): Promise<void> {
     this.lifecycleEpoch += 1;
     const staleEndpoint = await this.closeCurrentClient();
+    await opts.beforeTurnover?.();
     await this.waitForEndpointTurnover(staleEndpoint, opts);
     await this.getClientNow();
     await this.emitNotice({ kind: "reconnected", reason: "manual-reconnect" });

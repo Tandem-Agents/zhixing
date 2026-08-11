@@ -92,9 +92,10 @@ export function buildServerShutdownMethod(): MethodEntry {
       if (strategy === "immediate") {
         trigger(reason);
       } else {
-        void runShutdownStrategy(strategy, timeoutMs, ctx).finally(() => {
-          trigger(`${reason}:${strategy}`);
-        });
+        void runShutdownStrategy(strategy, timeoutMs, ctx).then(
+          () => trigger(`${reason}:${strategy}`),
+          () => undefined,
+        );
       }
 
       return {
@@ -693,6 +694,8 @@ async function runShutdownStrategy(
     return;
   }
   if (strategy === "drain") {
+    await runBeforeDeadline(ctx.server.runtimeControl?.beginDrain, deadline);
+    await runBeforeDeadline(ctx.server.runtimeControl?.drainAcceptedWork, deadline);
     await waitForActiveWorkToDrain(ctx, deadline);
     await flushDeliveryBeforeDeadline(ctx, deadline);
   }
@@ -706,6 +709,7 @@ async function waitForActiveWorkToDrain(
     if (currentCancellableWorkCount(ctx) === 0) return;
     await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
   }
+  throw new Error("Server accepted work did not drain before the shutdown deadline");
 }
 
 async function flushDeliveryBeforeDeadline(
@@ -714,9 +718,22 @@ async function flushDeliveryBeforeDeadline(
 ): Promise<void> {
   const flushDelivery = ctx.server.runtimeControl?.flushDelivery;
   if (!flushDelivery) return;
+  await runBeforeDeadline(flushDelivery, deadline);
+}
+
+async function runBeforeDeadline(
+  operation: (() => Promise<void>) | undefined,
+  deadline: number,
+): Promise<void> {
+  if (!operation) return;
   const remaining = Math.max(0, deadline - Date.now());
-  if (remaining <= 0) return;
-  await Promise.race([flushDelivery().catch(() => {}), sleep(remaining)]);
+  if (remaining <= 0) throw new Error("Server shutdown deadline elapsed");
+  await Promise.race([
+    operation(),
+    sleep(remaining).then(() => {
+      throw new Error("Server shutdown operation did not finish before the deadline");
+    }),
+  ]);
 }
 
 async function sleep(ms: number): Promise<void> {

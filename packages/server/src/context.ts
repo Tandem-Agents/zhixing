@@ -176,6 +176,8 @@ export interface RuntimeControlAdapter {
       readonly connectionId: string;
     };
   }) => Promise<unknown>;
+  beginDrain?: () => Promise<void>;
+  drainAcceptedWork?: () => Promise<void>;
   flushDelivery?: () => Promise<void>;
 }
 

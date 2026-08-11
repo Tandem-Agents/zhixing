@@ -147,6 +147,19 @@ export async function reconcileCurrentManagedService(
   });
 }
 
+export async function prepareCurrentManagedServiceConfigTurnover(
+  signal: AbortSignal = new AbortController().signal,
+): Promise<void> {
+  const homeDir = getZhixingHome();
+  const current = await loadCurrentManagedServiceState("activate", homeDir);
+  if (resolveHostLaunchPlan(current).mode === "managed" || !current.spec) return;
+  const capacity = createDeviceCapacityRuntime(
+    path.join(homeDir, "distributed-runtime", "capacity"),
+  );
+  await createManagedServiceAdapter({ storageGovernor: capacity.storage })
+    .disableFuture(current.spec, signal);
+}
+
 export async function coordinateManagedHostTrustTransition(
   deps: ManagedHostTrustTransitionDeps,
 ): Promise<"retained" | "stopped"> {

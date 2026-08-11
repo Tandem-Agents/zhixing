@@ -1622,6 +1622,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/topology-command.ts",
     "packages/cli/src/runtime/core-host-connection.ts",
+    "packages/cli/src/repl.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
     "packages/secrets/src/platform-secret-store.ts",
     "packages/cli/src/serve/status.ts",
@@ -1629,6 +1630,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/server/src/routes.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/core/src/protocol/manifest.ts",
+    "packages/server/src/context.ts",
+    "packages/server/src/rpc/methods/server.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1677,21 +1680,40 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
         'Buffer.from(spec.definition, "utf8")',
       ),
     )).join("\n"),
-    /Windows bytes or HRESULT classifier drifted/,
+    /Windows bytes, strict projection or HRESULT classifier drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/managed-service.ts",
       (text) => text.replace('args: [...args, "/HRESULT"]', "args"),
     )).join("\n"),
-    /Windows bytes or HRESULT classifier drifted/,
+    /Windows bytes, strict projection or HRESULT classifier drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/managed-service.ts",
       (text) => text.replace("hresult === 0x80070002", "hresult === 1"),
     )).join("\n"),
-    /Windows bytes or HRESULT classifier drifted/,
+    /Windows bytes, strict projection or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace("projection.triggers.length === 1", "projection.triggers.length > 0"),
+    )).join("\n"),
+    /Windows bytes, strict projection or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/runtime/core-host-connection.ts",
+      (text) => text
+        .replace("    await opts.beforeTurnover?.();\n", "")
+        .replace(
+          "    await this.waitForEndpointTurnover(staleEndpoint, opts);\n",
+          "    await this.waitForEndpointTurnover(staleEndpoint, opts);\n    await opts.beforeTurnover?.();\n",
+        ),
+    )).join("\n"),
+    /accepted-work drain or generation-safe turnover order drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

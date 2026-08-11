@@ -996,10 +996,18 @@ describe("CoreHostConnection", () => {
     await conn.getClient();
     const received: unknown[] = [];
     conn.onNotification("session.delta", (p) => received.push(p));
+    const beforeTurnover = vi.fn(async () => {});
 
-    await conn.reconnect({ timeoutMs: 1000, pollIntervalMs: 1 });
+    await conn.reconnect({ timeoutMs: 1000, pollIntervalMs: 1, beforeTurnover });
 
     expect(c1.close).toHaveBeenCalledOnce();
+    expect(beforeTurnover).toHaveBeenCalledOnce();
+    expect(beforeTurnover.mock.invocationCallOrder[0]).toBeGreaterThan(
+      c1.close.mock.invocationCallOrder[0]!,
+    );
+    expect(beforeTurnover.mock.invocationCallOrder[0]).toBeLessThan(
+      discover.mock.invocationCallOrder[1]!,
+    );
     expect(sleep).toHaveBeenCalledWith(1);
     expect(await conn.getClient()).toBe(asClient(c2));
     c2.emit("session.delta", { n: 1 });

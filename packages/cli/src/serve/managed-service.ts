@@ -39,6 +39,7 @@ export interface ManagedServiceInspection {
 export interface ManagedServiceAdapter {
   inspect(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   install(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
+  disableFuture(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   disable(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   start(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
 }
@@ -271,6 +272,25 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     return after;
   }
 
+  async disableFuture(
+    spec: ManagedServiceSpec,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection> {
+    this.assertSpec(spec);
+    const before = await this.inspect(spec, signal);
+    if (before.state === "absent") return before;
+    if (!before.matches) {
+      throw new ManagedServiceError("definition-drift", "Existing managed service belongs to another installation");
+    }
+    if (before.state === "disabled") return before;
+    await this.disableFutureManager(spec, signal);
+    const after = await this.inspect(spec, signal);
+    if (after.state === "enabled") {
+      throw new ManagedServiceError("read-back-failed", "Managed service future disable could not be verified");
+    }
+    return after;
+  }
+
   async start(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection> {
     this.assertSpec(spec);
     const before = await this.inspect(spec, signal);
@@ -297,25 +317,18 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
   ): Promise<ManagedServiceInspection> {
     if (this.platform === "win32") {
       const query = await this.command(
-        windowsTaskSchedulerCommand(["/Query", "/TN", spec.serviceId, "/XML"]),
+        windowsTaskInspectionCommand(spec.serviceId),
         signal,
       );
       if (query.code !== 0) {
         this.requireDefiniteAbsence(query);
         return { state: "absent", running: false, matches: true };
       }
-      const enabled = !/<Enabled>false<\/Enabled>/iu.test(query.stdout);
-      const status = await this.command(
-        windowsTaskSchedulerCommand(["/Query", "/TN", spec.serviceId, "/FO", "CSV", "/NH"]),
-        signal,
-      );
-      if (status.code !== 0) {
-        this.throwManagerFailure(status);
-      }
+      const projection = decodeWindowsTaskInspection(query.stdout);
       return {
-        state: enabled ? "enabled" : "disabled",
-        running: status.code === 0 && /running/iu.test(status.stdout),
-        matches: windowsTaskDefinitionMatches(spec, query.stdout),
+        state: projection.enabled ? "enabled" : "disabled",
+        running: windowsTaskStateIsRunning(projection.state),
+        matches: windowsTaskDefinitionMatches(spec, projection),
       };
     }
     if (this.platform === "darwin") {
@@ -417,10 +430,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     signal: AbortSignal,
   ): Promise<void> {
     if (this.platform === "win32") {
-      await this.requireCommand(
-        windowsTaskSchedulerCommand(["/Change", "/TN", spec.serviceId, "/DISABLE"]),
-        signal,
-      );
+      await this.disableFutureManager(spec, signal);
       if (before.running) {
         await this.requireStopCommand(
           windowsTaskSchedulerCommand(["/End", "/TN", spec.serviceId]),
@@ -431,10 +441,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     }
     if (this.platform === "darwin") {
       const service = `gui/${spec.uid ?? 0}/${spec.serviceId}`;
-      await this.requireCommand({
-        command: "/bin/launchctl",
-        args: ["disable", service],
-      }, signal);
+      await this.disableFutureManager(spec, signal);
       if (before.running) {
         await this.requireStopCommand({
           command: "/bin/launchctl",
@@ -446,6 +453,30 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     await this.requireCommand({
       command: "systemctl",
       args: ["--user", "disable", "--now", spec.serviceId],
+    }, signal);
+  }
+
+  private async disableFutureManager(
+    spec: ManagedServiceSpec,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.platform === "win32") {
+      await this.requireCommand(
+        windowsTaskSchedulerCommand(["/Change", "/TN", spec.serviceId, "/DISABLE"]),
+        signal,
+      );
+      return;
+    }
+    if (this.platform === "darwin") {
+      await this.requireCommand({
+        command: "/bin/launchctl",
+        args: ["disable", `gui/${spec.uid ?? 0}/${spec.serviceId}`],
+      }, signal);
+      return;
+    }
+    await this.requireCommand({
+      command: "systemctl",
+      args: ["--user", "disable", spec.serviceId],
     }, signal);
   }
 
@@ -733,85 +764,261 @@ function windowsTaskSchedulerCommand(
   return { command: "schtasks.exe", args: [...args, "/HRESULT"] };
 }
 
-function windowsTaskDefinitionMatches(spec: ManagedServiceSpec, xml: string): boolean {
-  const task = singleXmlNode(xml, "Task");
-  const principals = task && singleXmlNode(task.content, "Principals");
-  const principal = principals && singleXmlNode(principals.content, "Principal");
-  const triggers = task && singleXmlNode(task.content, "Triggers");
-  const trigger = triggers && singleXmlNode(triggers.content, "LogonTrigger");
-  const settings = task && singleXmlNode(task.content, "Settings");
-  const actions = task && singleXmlNode(task.content, "Actions");
-  const exec = actions && singleXmlNode(actions.content, "Exec");
-  if (!task || !principal || !trigger || !settings || !actions || !exec) return false;
+interface WindowsTaskInspection {
+  readonly taskName: string;
+  readonly taskPath: string;
+  readonly enabled: boolean;
+  readonly state: number;
+  readonly currentUser: { readonly sid: string; readonly name: string };
+  readonly principal: {
+    readonly id: string;
+    readonly userId: string;
+    readonly logonType: number;
+    readonly runLevel: number;
+  };
+  readonly triggers: readonly {
+    readonly type: number;
+    readonly enabled: boolean;
+    readonly userId: string | null;
+  }[];
+  readonly actions: {
+    readonly context: string;
+    readonly items: readonly {
+      readonly type: number;
+      readonly path: string | null;
+      readonly arguments: string | null;
+      readonly workingDirectory: string | null;
+    }[];
+  };
+  readonly settings: {
+    readonly enabled: boolean;
+    readonly multipleInstances: number;
+    readonly restartInterval: string;
+    readonly restartCount: number;
+  };
+}
 
-  const principalUser = singleXmlText(principal.content, "UserId");
-  const triggerUser = singleXmlText(trigger.content, "UserId");
-  const runLevel = optionalXmlText(principal.content, "RunLevel");
-  const triggerEnabled = optionalXmlText(trigger.content, "Enabled");
-  const taskEnabled = optionalXmlText(settings.content, "Enabled");
-  return xmlAttribute(principal.attributes, "id") === "CurrentUser" &&
-    xmlAttribute(actions.attributes, "Context") === "CurrentUser" &&
-    singleXmlText(principal.content, "LogonType") === "InteractiveToken" &&
-    (runLevel === undefined || runLevel === "LeastPrivilege") &&
-    principalUser !== undefined &&
-    (/^S-\d(?:-\d+)+$/u.test(principalUser) || windowsAccountMatches(principalUser, spec.osUser)) &&
-    triggerUser !== undefined &&
-    windowsAccountMatches(triggerUser, spec.osUser) &&
-    (triggerEnabled === undefined || triggerEnabled === "true") &&
-    (taskEnabled === undefined || taskEnabled === "true") &&
-    singleXmlText(settings.content, "MultipleInstancesPolicy") === "IgnoreNew" &&
-    singleXmlText(settings.content, "Interval") === "PT1M" &&
-    singleXmlText(settings.content, "Count") === "999" &&
-    singleXmlText(exec.content, "Command") === spec.command &&
-    singleXmlText(exec.content, "Arguments") === windowsCommandArguments(spec);
+const WINDOWS_TASK_INSPECTION_SCRIPT = String.raw`
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false)
+try {
+  $identity=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+  $service=New-Object -ComObject Schedule.Service
+  $service.Connect()
+  $task=$service.GetFolder('\').GetTask('__ZHIXING_TASK_NAME__')
+  $definition=$task.Definition
+  $triggers=@($definition.Triggers | ForEach-Object {
+    [ordered]@{
+      type=[int]$_.Type
+      enabled=[bool]$_.Enabled
+      userId=$(if ([int]$_.Type -eq 9) { [string]$_.UserId } else { $null })
+    }
+  })
+  $actions=@($definition.Actions | ForEach-Object {
+    [ordered]@{
+      type=[int]$_.Type
+      path=$(if ([int]$_.Type -eq 0) { [string]$_.Path } else { $null })
+      arguments=$(if ([int]$_.Type -eq 0) { [string]$_.Arguments } else { $null })
+      workingDirectory=$(if ([int]$_.Type -eq 0) { [string]$_.WorkingDirectory } else { $null })
+    }
+  })
+  $result=[ordered]@{
+    taskName=[string]$task.Name
+    taskPath=[string]$task.Path
+    enabled=[bool]$task.Enabled
+    state=[int]$task.State
+    currentUser=[ordered]@{sid=[string]$identity.User.Value;name=[string]$identity.Name}
+    principal=[ordered]@{
+      id=[string]$definition.Principal.Id
+      userId=[string]$definition.Principal.UserId
+      logonType=[int]$definition.Principal.LogonType
+      runLevel=[int]$definition.Principal.RunLevel
+    }
+    triggers=$triggers
+    actions=[ordered]@{context=[string]$definition.Actions.Context;items=$actions}
+    settings=[ordered]@{
+      enabled=[bool]$definition.Settings.Enabled
+      multipleInstances=[int]$definition.Settings.MultipleInstances
+      restartInterval=[string]$definition.Settings.RestartInterval
+      restartCount=[int]$definition.Settings.RestartCount
+    }
+  }
+  [Console]::Out.Write(($result | ConvertTo-Json -Compress -Depth 6))
+} catch {
+  $hresult=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$_.Exception.HResult),0)
+  [Console]::Error.Write($hresult.ToString([Globalization.CultureInfo]::InvariantCulture))
+  exit 1
+}`.trim();
+
+function windowsTaskInspectionCommand(
+  serviceId: string,
+): { readonly command: string; readonly args: readonly string[] } {
+  if (!/^dev\.zhixing\.host\.[a-f0-9]{24}$/u.test(serviceId)) {
+    throw new ManagedServiceError("definition-drift", "Windows managed service identity is invalid");
+  }
+  return {
+    command: "powershell.exe",
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      WINDOWS_TASK_INSPECTION_SCRIPT.replace("__ZHIXING_TASK_NAME__", serviceId),
+    ],
+  };
+}
+
+function decodeWindowsTaskInspection(raw: string): WindowsTaskInspection {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new ManagedServiceError("read-back-failed", "Windows managed service inspection is invalid");
+  }
+  try {
+    const root = exactRecord(value, [
+      "taskName", "taskPath", "enabled", "state", "currentUser", "principal", "triggers", "actions", "settings",
+    ]);
+    const currentUser = exactRecord(root.currentUser, ["sid", "name"]);
+    const principal = exactRecord(root.principal, ["id", "userId", "logonType", "runLevel"]);
+    const actions = exactRecord(root.actions, ["context", "items"]);
+    const settings = exactRecord(root.settings, [
+      "enabled", "multipleInstances", "restartInterval", "restartCount",
+    ]);
+    const triggers = strictArray(root.triggers).map((entry) => {
+      const trigger = exactRecord(entry, ["type", "enabled", "userId"]);
+      return {
+        type: strictInteger(trigger.type),
+        enabled: strictBoolean(trigger.enabled),
+        userId: strictNullableString(trigger.userId),
+      };
+    });
+    const items = strictArray(actions.items).map((entry) => {
+      const action = exactRecord(entry, ["type", "path", "arguments", "workingDirectory"]);
+      return {
+        type: strictInteger(action.type),
+        path: strictNullableString(action.path),
+        arguments: strictNullableString(action.arguments),
+        workingDirectory: strictNullableString(action.workingDirectory),
+      };
+    });
+    const state = strictInteger(root.state);
+    if (state < 0 || state > 4) throw new TypeError("state");
+    return {
+      taskName: strictString(root.taskName),
+      taskPath: strictString(root.taskPath),
+      enabled: strictBoolean(root.enabled),
+      state,
+      currentUser: {
+        sid: strictNonEmptyString(currentUser.sid),
+        name: strictNonEmptyString(currentUser.name),
+      },
+      principal: {
+        id: strictString(principal.id),
+        userId: strictNonEmptyString(principal.userId),
+        logonType: strictInteger(principal.logonType),
+        runLevel: strictInteger(principal.runLevel),
+      },
+      triggers,
+      actions: { context: strictString(actions.context), items },
+      settings: {
+        enabled: strictBoolean(settings.enabled),
+        multipleInstances: strictInteger(settings.multipleInstances),
+        restartInterval: strictString(settings.restartInterval),
+        restartCount: strictInteger(settings.restartCount),
+      },
+    };
+  } catch (error) {
+    if (error instanceof ManagedServiceError) throw error;
+    throw new ManagedServiceError("read-back-failed", "Windows managed service inspection is invalid");
+  }
+}
+
+function windowsTaskStateIsRunning(state: number): boolean {
+  if (state === 2 || state === 4) return true;
+  if (state === 1 || state === 3) return false;
+  throw new ManagedServiceError("read-back-failed", "Windows managed service state is unknown");
+}
+
+function windowsTaskDefinitionMatches(
+  spec: ManagedServiceSpec,
+  projection: WindowsTaskInspection,
+): boolean {
+  const trigger = projection.triggers[0];
+  const action = projection.actions.items[0];
+  const currentUserIdentities = [
+    projection.currentUser.sid,
+    projection.currentUser.name,
+    spec.osUser,
+  ];
+  const isCurrentUserIdentity = (identity: string): boolean =>
+    currentUserIdentities.some((candidate) => windowsIdentityMatches(identity, candidate));
+  return projection.taskName === spec.serviceId &&
+    projection.taskPath === `\\${spec.serviceId}` &&
+    projection.principal.id === "CurrentUser" &&
+    isCurrentUserIdentity(projection.principal.userId) &&
+    projection.principal.logonType === 3 &&
+    projection.principal.runLevel === 0 &&
+    projection.actions.context === "CurrentUser" &&
+    projection.triggers.length === 1 && trigger?.type === 9 && trigger.enabled &&
+    trigger.userId !== null && isCurrentUserIdentity(trigger.userId) &&
+    projection.actions.items.length === 1 && action?.type === 0 &&
+    action.path === spec.command &&
+    action.arguments === windowsCommandArguments(spec) &&
+    (action.workingDirectory === "" || action.workingDirectory === null) &&
+    projection.settings.enabled &&
+    projection.settings.multipleInstances === 2 &&
+    projection.settings.restartInterval === "PT1M" &&
+    projection.settings.restartCount === 999;
 }
 
 function windowsCommandArguments(spec: Pick<ManagedServiceSpec, "args">): string {
   return spec.args.map(quoteWindowsArgument).join(" ");
 }
 
-function windowsAccountMatches(actual: string, expected: string): boolean {
-  const normalizedActual = actual.toLocaleLowerCase("en-US");
-  const normalizedExpected = expected.toLocaleLowerCase("en-US");
-  return normalizedActual === normalizedExpected ||
-    (!normalizedExpected.includes("\\") && normalizedActual.endsWith(`\\${normalizedExpected}`));
+function windowsIdentityMatches(actual: string, expected: string): boolean {
+  return actual.toLocaleLowerCase("en-US") === expected.toLocaleLowerCase("en-US");
 }
 
-function singleXmlNode(
-  source: string,
-  name: string,
-): { readonly attributes: string; readonly content: string } | undefined {
-  const pattern = new RegExp(`<${name}(?:\\s+([^>]*))?>([\\s\\S]*?)</${name}>`, "gu");
-  const matches = [...source.matchAll(pattern)];
-  if (matches.length !== 1) return undefined;
-  return { attributes: matches[0]![1] ?? "", content: matches[0]![2] ?? "" };
+function exactRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("record");
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new TypeError("keys");
+  }
+  return value as Record<string, unknown>;
 }
 
-function singleXmlText(source: string, name: string): string | undefined {
-  const node = singleXmlNode(source, name);
-  if (!node || /[<>]/u.test(node.content)) return undefined;
-  return xmlUnescape(node.content.trim());
+function strictArray(value: unknown): readonly unknown[] {
+  if (!Array.isArray(value)) throw new TypeError("array");
+  return value;
 }
 
-function optionalXmlText(source: string, name: string): string | undefined {
-  const pattern = new RegExp(`<${name}(?:\\s+[^>]*)?>`, "gu");
-  if (![...source.matchAll(pattern)].length) return undefined;
-  return singleXmlText(source, name);
+function strictString(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("string");
+  return value;
 }
 
-function xmlAttribute(attributes: string, name: string): string | undefined {
-  const pattern = new RegExp(`(?:^|\\s)${name}="([^"]*)"(?:\\s|$)`, "u");
-  const match = pattern.exec(attributes);
-  return match ? xmlUnescape(match[1]!) : undefined;
+function strictNonEmptyString(value: unknown): string {
+  const result = strictString(value);
+  if (result.length === 0) throw new TypeError("non-empty string");
+  return result;
 }
 
-function xmlUnescape(value: string): string {
-  return value
-    .replace(/&quot;/gu, '"')
-    .replace(/&apos;/gu, "'")
-    .replace(/&lt;/gu, "<")
-    .replace(/&gt;/gu, ">")
-    .replace(/&amp;/gu, "&");
+function strictNullableString(value: unknown): string | null {
+  if (value === null) return null;
+  return strictString(value);
+}
+
+function strictBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new TypeError("boolean");
+  return value;
+}
+
+function strictInteger(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) throw new TypeError("integer");
+  return value;
 }
 
 function canonicalAbsolutePath(value: string, platform: NodeJS.Platform): string {

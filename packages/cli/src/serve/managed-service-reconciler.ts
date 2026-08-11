@@ -42,7 +42,12 @@ export interface ManagedServiceCurrentState {
 export interface ManagedServiceReconcileResult {
   readonly plan: HostLaunchPlan;
   readonly service: ManagedServiceInspection | undefined;
-  readonly action: "installed-and-started" | "started" | "disabled" | "unchanged";
+  readonly action:
+    | "installed-and-started"
+    | "started"
+    | "future-disabled"
+    | "disabled"
+    | "unchanged";
 }
 
 interface ReconcileWorker {
@@ -124,7 +129,11 @@ async function reconcileCurrent(
     if (initial.spec) {
       const current = await input.adapter.inspect(initial.spec, input.signal);
       if (current.state !== "absent" && current.matches) {
-        await input.adapter.disable(initial.spec, input.signal);
+        if (input.trigger === "local-role-config-committed") {
+          await input.adapter.disableFuture(initial.spec, input.signal);
+        } else {
+          await input.adapter.disable(initial.spec, input.signal);
+        }
       }
     }
     throw error;
@@ -161,6 +170,10 @@ async function reconcileCurrent(
   }
   if (before.state === "absent" || (before.state === "disabled" && !before.running)) {
     return { plan, service: before, action: "unchanged" };
+  }
+  if (input.trigger === "local-role-config-committed") {
+    const disabled = await input.adapter.disableFuture(initial.spec, input.signal);
+    return { plan, service: disabled, action: "future-disabled" };
   }
   const disabled = await input.adapter.disable(initial.spec, input.signal);
   return { plan, service: disabled, action: "disabled" };

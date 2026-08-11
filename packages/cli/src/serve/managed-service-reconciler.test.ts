@@ -53,8 +53,9 @@ describe("managed service reconciliation", () => {
         signal: new AbortController().signal,
       });
       expect(result.plan.mode).toBe(roles.includes("executor") ? "on-demand" : "none");
-      expect(result.action).toBe("disabled");
-      expect(adapter.calls).toEqual(["inspect", "disable"]);
+      expect(result.action).toBe("future-disabled");
+      expect(result.service).toMatchObject({ state: "disabled", running: true });
+      expect(adapter.calls).toEqual(["inspect", "disable-future"]);
     }
   });
 
@@ -243,6 +244,10 @@ describe("managed service reconciliation", () => {
         service = { state: "enabled", running: true, matches: true };
         throw new Error("start response lost");
       },
+      disableFuture: async () => {
+        service = { ...service, state: "disabled" };
+        return service;
+      },
       disable: async () => {
         service = { state: "disabled", running: false, matches: true };
         return service;
@@ -351,6 +356,11 @@ function fakeAdapter(
     start: async () => {
       calls.push("start");
       state = { state: "enabled", running: true, matches: true };
+      return state;
+    },
+    disableFuture: async () => {
+      calls.push("disable-future");
+      state = { ...state, state: "disabled" };
       return state;
     },
     disable: async () => {

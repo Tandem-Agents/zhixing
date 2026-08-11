@@ -39,6 +39,7 @@ import {
   registerModeCommands,
 } from "./commands/session-commands.js";
 import { registerConfigCommands } from "./commands/config-commands.js";
+import { reloadCoreHostAfterConfig } from "./runtime/config-command.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
@@ -118,6 +119,7 @@ import { TerminalConfirmationRenderer } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 import { attachKeyboardSource } from "./interrupt/keyboard-source.js";
 import { renderReadOnlyConversationBrowser } from "./runtime/read-only-conversation-browser.js";
+import { prepareCurrentManagedServiceConfigTurnover } from "./serve/managed-service-runtime.js";
 import {
   createWorksceneCreateSelectionRequest,
   runWorksceneCreateAssist,
@@ -1258,16 +1260,25 @@ export async function startRepl(): Promise<void> {
     getActiveTurnPromise: () => state.activeTurnPromise,
     management: managementFacade,
     getConversationId: () => controller.current.conversationId,
-    requestHostReload: async () => {
+    requestHostReload: async (options) => {
       // 配置热重载 = 宿主换代:请求优雅退出(flush 落盘)→ 重新 ensure 拉起
       // 新宿主(按新配置装配)。重连后刷新本地派生视图并重挂当前会话 observer。
-      await managementFacade.serverShutdown("config-reload").catch(() => {});
-      await coreHost.reconnect();
-      const reloadStatus = await waitForReloadStatus(managementFacade);
-      await localView.refresh();
-      await controller.reattachActiveObserver();
-      await syncCurrentTaskListView();
-      return reloadStatus ? { channels: reloadStatus.channels } : undefined;
+      return reloadCoreHostAfterConfig({
+        options,
+        requestDrainShutdown: () => managementFacade.serverShutdown({
+          reason: "config-reload",
+          strategy: "drain",
+        }),
+        reconnect: (reloadOptions) => coreHost.reconnect(reloadOptions),
+        prepareManagedServiceTurnover: prepareCurrentManagedServiceConfigTurnover,
+        refresh: async () => {
+          const reloadStatus = await waitForReloadStatus(managementFacade);
+          await localView.refresh();
+          await controller.reattachActiveObserver();
+          await syncCurrentTaskListView();
+          return reloadStatus ? { channels: reloadStatus.channels } : undefined;
+        },
+      });
     },
   });
 

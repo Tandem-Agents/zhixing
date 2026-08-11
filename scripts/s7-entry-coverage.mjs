@@ -934,6 +934,7 @@ export function inspectManagedHostAssembly(records) {
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
+  const repl = byPath.get("packages/cli/src/repl.ts");
   const surfaceLink = byPath.get("packages/cli/src/runtime/surface-core-host-link.ts");
   const secrets = byPath.get("packages/secrets/src/platform-secret-store.ts");
   const status = byPath.get("packages/cli/src/serve/status.ts");
@@ -941,10 +942,12 @@ export function inspectManagedHostAssembly(records) {
   const statusRoute = byPath.get("packages/server/src/routes.ts");
   const scheduler = byPath.get("packages/cli/src/serve/anchor-scheduler-runtime.ts");
   const manifest = byPath.get("packages/core/src/protocol/manifest.ts");
+  const serverContext = byPath.get("packages/server/src/context.ts");
+  const serverShutdown = byPath.get("packages/server/src/rpc/methods/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !topology || !connection || !surfaceLink || !secrets || !status || !publicStatus ||
-    !statusRoute || !scheduler || !manifest
+    !command || !topology || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
   const descriptor = frozenLiteralDescriptor(
@@ -976,9 +979,9 @@ export function inspectManagedHostAssembly(records) {
     count(pairing, 'reconcileAfterPairing(options, "pairing-issuer-committed")') !== 1 ||
     count(pairing, 'reconcileAfterPairing(options, "pairing-joiner-committed")') !== 1 ||
     count(config, 'reconcileCurrentManagedService("local-role-config-committed")') !== 1 ||
-    !config.includes("const reload = await captureConfigPostCommitEffect(input.reload);") ||
+    !config.includes("const reload = await captureConfigPostCommitEffect(() => input.reload({") ||
     !config.includes("const reconcile = input.launchSelectionChanged") ||
-    config.indexOf("const reload = await captureConfigPostCommitEffect(input.reload);") >=
+    config.indexOf("const reload = await captureConfigPostCommitEffect(() => input.reload({") >=
       config.indexOf("const reconcile = input.launchSelectionChanged") ||
     count(serviceRuntime, 'reconcile("current-trust-applied")') !== 1 ||
     serviceRuntime.indexOf("await deps.requestShutdown()") >=
@@ -992,7 +995,7 @@ export function inspectManagedHostAssembly(records) {
     count(service, "<UserId>${osUser}</UserId>") !== 2 ||
     !service.includes("const osUser = xmlEscape(spec.osUser);") ||
     !serviceRuntime.includes('export type ManagedServiceStateLoadIntent = "inspect" | "activate";') ||
-    count(serviceRuntime, 'loadCurrentManagedServiceState("activate", homeDir)') !== 1 ||
+    count(serviceRuntime, 'loadCurrentManagedServiceState("activate", homeDir)') !== 2 ||
     count(serviceRuntime, 'loadCurrent("activate")') !== 1 ||
     count(serviceRuntime, 'loadCurrent("activate", homeDir)') !== 1 ||
     count(topology, 'loadCurrentManagedServiceState("activate")') !== 2 ||
@@ -1002,13 +1005,17 @@ export function inspectManagedHostAssembly(records) {
     !service.includes('\'<?xml version="1.0" encoding="UTF-16"?>\'') ||
     !service.includes("Buffer.from([0xff, 0xfe])") ||
     !service.includes('Buffer.from(spec.definition, "utf16le")') ||
-    count(service, "windowsTaskSchedulerCommand([") !== 6 ||
+    count(service, "windowsTaskSchedulerCommand([") !== 4 ||
     count(service, 'args: [...args, "/HRESULT"]') !== 1 ||
     count(service, "hresult === 0x80070002") !== 1 ||
-    count(service, "hresult === 0x80070005") !== 1
-  ) failures.push("managed host Windows bytes or HRESULT classifier drifted");
+    count(service, "hresult === 0x80070005") !== 1 ||
+    !service.includes("windowsTaskInspectionCommand(spec.serviceId)") ||
+    !service.includes("currentUserIdentities.some((candidate) => windowsIdentityMatches(identity, candidate))") ||
+    !service.includes("projection.triggers.length === 1") ||
+    !service.includes("projection.actions.items.length === 1")
+  ) failures.push("managed host Windows bytes, strict projection or HRESULT classifier drifted");
   if (
-    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 1 ||
+    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 2 ||
     !service.includes('"managed-service-reconcile"') ||
     !service.includes("export function managedServiceDefinitionBytes(") ||
     !service.includes('"--managed-home"') ||
@@ -1023,6 +1030,24 @@ export function inspectManagedHostAssembly(records) {
     count(reconciler, "if (!allowSuccessor) throw error;") !== 1 ||
     count(service, "await this.requireCommand(startCommand(spec), signal);") !== 1
   ) failures.push("managed host bounded successor or start classifier drifted");
+  const closeOldClient = connection.indexOf("const staleEndpoint = await this.closeCurrentClient();");
+  const disableFuture = connection.indexOf("await opts.beforeTurnover?.();", closeOldClient);
+  const oldTurnover = connection.indexOf("await this.waitForEndpointTurnover(staleEndpoint, opts);", disableFuture);
+  const successor = connection.indexOf("await this.getClientNow();", oldTurnover);
+  if (
+    count(reconciler, "input.adapter.disableFuture(initial.spec, input.signal)") !== 2 ||
+    !serviceRuntime.includes(".disableFuture(current.spec, signal)") ||
+    !config.includes("? { beforeTurnover: input.prepareManagedServiceTurnover }") ||
+    !repl.includes('strategy: "drain"') ||
+    !repl.includes("prepareManagedServiceTurnover: prepareCurrentManagedServiceConfigTurnover") ||
+    !serverContext.includes("beginDrain?: () => Promise<void>") ||
+    !serverContext.includes("drainAcceptedWork?: () => Promise<void>") ||
+    !serverShutdown.includes("await runBeforeDeadline(ctx.server.runtimeControl?.beginDrain, deadline);") ||
+    !serverShutdown.includes("await runBeforeDeadline(ctx.server.runtimeControl?.drainAcceptedWork, deadline);") ||
+    !command.includes("beginDrain: async () => {") ||
+    !command.includes("drainAcceptedWork: async () => {") ||
+    closeOldClient < 0 || disableFuture < closeOldClient || oldTurnover < disableFuture || successor < oldTurnover
+  ) failures.push("managed host accepted-work drain or generation-safe turnover order drifted");
   if (
     !bootstrap.includes("export function resolveHostLaunchPlan(") ||
     !bootstrap.includes("configuration.executorAutoStart === true") ||
@@ -1913,7 +1938,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   ) {
     failures.push("planned anchor installed authority generation rebind exact-set drifted");
   }
-  const stopInbound = command.indexOf("ctx.inboundRouter?.refuseNewMessages()");
+  const plannedLifecycle = command.indexOf("ctx.meshRuntime?.bindPlannedAnchorLifecycle({");
+  const stopInbound = command.indexOf("ctx.inboundRouter?.refuseNewMessages()", plannedLifecycle);
   const drainInbound = command.indexOf(
     "await ctx.inboundRouter?.drainAcceptedMessages()",
     stopInbound,
@@ -1926,6 +1952,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "await ctx.deliveryStack?.quiesceForAuthorityTransfer()",
     disconnectChannels,
   );
+  const drainAccepted = command.indexOf("drainAccepted: async () => {", quiesceDelivery);
   const postInstallReadBack = assembly.indexOf(
     "const readBack = await readBackPlannedAnchorPostInstallObligations({",
   );
@@ -1938,8 +1965,9 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     postInstallFinish,
   );
   if (
-    stopInbound < 0 || drainInbound < stopInbound || disconnectChannels < drainInbound ||
-    quiesceDelivery < disconnectChannels ||
+    plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
+    disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
+    drainAccepted < quiesceDelivery ||
     count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 1 ||
     count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 4 ||

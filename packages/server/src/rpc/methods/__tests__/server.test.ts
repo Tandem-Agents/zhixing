@@ -90,12 +90,17 @@ describe("server.shutdown", () => {
     try {
       const trigger = vi.fn();
       let busy = true;
+      const order: string[] = [];
       const ctx = mkCtx({
         requestShutdown: trigger,
         conversations: {
           list: () => [{ conversationId: "conv-1", busy, pendingCount: 0 }],
         } as never,
-        runtimeControl: { flushDelivery: vi.fn(async () => {}) },
+        runtimeControl: {
+          beginDrain: vi.fn(async () => { order.push("refuse"); }),
+          drainAcceptedWork: vi.fn(async () => { order.push("accepted"); }),
+          flushDelivery: vi.fn(async () => { order.push("delivery"); }),
+        },
       });
 
       const result = buildServerShutdownMethod().handler(
@@ -108,19 +113,24 @@ describe("server.shutdown", () => {
       busy = false;
       await vi.advanceTimersByTimeAsync(200);
       expect(trigger).toHaveBeenCalledWith("user-stop:drain");
+      expect(order).toEqual(["refuse", "accepted", "delivery"]);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("drain strategy does not let delivery flush block shutdown forever", async () => {
+  it("drain timeout keeps the current host alive with admission closed", async () => {
     vi.useFakeTimers();
     try {
       const trigger = vi.fn();
       const ctx = mkCtx({
         requestShutdown: trigger,
         conversations: { list: () => [] } as never,
-        runtimeControl: { flushDelivery: vi.fn(() => new Promise<void>(() => {})) },
+        runtimeControl: {
+          beginDrain: vi.fn(async () => {}),
+          drainAcceptedWork: vi.fn(async () => {}),
+          flushDelivery: vi.fn(() => new Promise<void>(() => {})),
+        },
       });
 
       const result = buildServerShutdownMethod().handler(
@@ -131,7 +141,7 @@ describe("server.shutdown", () => {
       expect(result.strategy).toBe("drain");
       expect(trigger).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(100);
-      expect(trigger).toHaveBeenCalledWith("user-stop:drain");
+      expect(trigger).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

@@ -175,22 +175,22 @@
 #### 目标模式：审查并收敛问题列表
 
 ```
-目标：只收敛第 36 单元正式问题列表中的 U36-11～U36-13 三个 P1，使 U36-11/U36-12 两个 P1/小和 U36-13 一个 P1/中真正命中 Windows Task Scheduler 稳定 OS 用户 principal、配置耐久提交后 reload/reconcile 独立义务及 current-state loader 的只读投影/SecretStore activation 意图分离，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U36-01～U36-06、U36-10 与 EX36-01～EX36-04 除非被本轮直接反证，否则复用；被直接反证的原问题自动重开，不视为扩面。U36-11 已降级的 P0 主张、U36-13 已收窄的“status 写入单独构成 P1”主张、EX36-04 已删除的三平台 lifecycle 拆分及专用 coordinator、第二 SecretStore 事实源、状态 DTO 扩面不得恢复，第 37～38 单元能力不得提前并入本单元。
+目标：只收敛第 36 单元正式问题列表中的 U36-14～U36-16，使 U36-14/U36-15 两个 P1/中和 U36-16 一个 P2/小真正命中 Windows supervisor 稳定严格的系统读投影、配置换代 accepted-work 安全点前 future-enabled/current-running 分序，以及 guest-platform 测试语义路径与宿主物理路径隔离，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U36-01～U36-13 与 EX36-01～EX36-03 的既有结论直接复用，EX36-04 只按已登记的新生产事实重开为 U36-15；已验证的 Windows UTF-16LE bytes/UserId 写入/HRESULT 分类、配置 reload/reconcile 独立执行、三平台 disable 双事实及价值裁决否定的通用系统管理/lifecycle、状态 DTO、新 runner 不得恢复或扩面，第 37～38 单元能力不得提前并入本单元。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 36 单元正式文件中的 U36-11～U36-13、EX36-01～EX36-04，只依据三项问题最新的事实、价值裁决、方案、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 36 单元正式文件中的 U36-14～U36-16、EX36-04，只依据三项问题最新的事实、价值裁决、方案、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词完成条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 按 `U36-11 → U36-12 → U36-13` 从权威架构、规格和当前生产调用图重建事实链，核准 `ManagedServiceSpec.osUser`、canonical Windows definition bytes、principal/LogonTrigger/Action context，配置耐久提交、active-turn、host reload 与 reconcile trigger，以及 binding/backing key、existing-only unlock、inspect/activation intent、launch spec/trust snapshot 的唯一事实源、稳定 identity、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断当前描述命中根因还是局部表象。同根内容必须合并，独立根因不得互相遮蔽；历史修复与价值裁决未被新生产事实触发时不得恢复旧评级、旧方案或扩面。
-2. 穷尽直接变体：U36-11 覆盖普通/需转义 OS 用户、principal 与当前用户 LogonTrigger/Action context、首次/exact replay、`/Create` 效果/响应丢失、错误/缺失 UserId 与系统 read-back；U36-12 覆盖 launch selection 未变/变化、reload 发送前失败/效果后丢响应/成功、reconcile 成功/失败、两义务组合、active-turn 与连续重启；U36-13 覆盖 inspect/activation、fresh/legacy/bound、受支持 backend 的 binding/backing/vault 有无与歧义、managed/foreground、expected backend、回填前后、CLI/server status、首次 preflight、响应丢失与重启。每格必须指出稳定 identity、耐久事实、唯一线性化点、零副作用边界、消费终态和直接验收；无法解释即继续修正根因。
-3. 以锁定范围内的最优架构审查方案：U36-11 只让现有 Windows renderer 把同一 `spec.osUser` 投影到 principal 与当前用户 LogonTrigger，并保持 writer/identity/`Create` 共用 canonical bytes；U36-12 只在现有配置提交控制流中保持 reload-before-reconcile 次序，同时让耐久配置变化后的两项义务分别终结、互不跳过；U36-13 只给现有 loader 增加窄 inspect/activation 意图并共享纯 projection，status existing-only 零写，允许的 legacy activation 回填后同次重读 binding 并重建 spec/trust identity。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增 renderer、触发/lifecycle 框架、第二 SecretStore 事实源、状态 DTO/mapper、新 lint/test runner、监控、诊断、benchmark 或信息采集。发现缺口时直接修正对应原问题，使执行者无需实现猜测即可一次完成。
-4. 三项看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：Windows principal/trigger/action 稳定身份与最终 bytes、配置提交后 reload/reconcile 独立终态、current-state inspect/activation 与 legacy 同次恢复、生产证据/产品体验/范围价值及历史裁决边界。各路必须抛开前轮结论，从当前合同和源码主动构造第 2 步反例，并核查 `U36-11↔U36-12`、`U36-12↔U36-13`、`U36-11↔U36-13` 以及三项与其余 U36、EX36-01～EX36-04、第 33～35 单元既有合同及第 37～38 单元边界的直接交界；发现真实反证则修正原记录并重新执行四路复审。
+1. 按 `U36-14 → U36-15 → U36-16` 从权威架构、规格和当前生产调用图重建事实链，核准 Windows definition/Task Scheduler state 与 current SID 的唯一读投影，配置耐久提交、shutdown ack、endpoint turnover、reconcile 与 supervisor 双事实，以及 guest-platform spec、宿主 definitionPath 和 temp fixture 的稳定 identity、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断当前描述命中根因还是局部表象。同根内容必须合并，独立根因不得互相遮蔽；历史修复与价值裁决未被新生产事实触发时不得恢复旧评级、旧方案或扩面。
+2. 穷尽直接变体：U36-14 覆盖英文/非英文 Windows、numeric running/queued/ready、enabled/disabled、current/wrong/missing SID、缺失/重复/额外 typed trigger/action、definition drift、效果/响应丢失与重启；U36-15 覆盖 selection 变化、remote/channel/scheduler/delivery accepted work、immediate/drain、发送失败、ack/效果丢失、turnover 超时、future-enabled/current-running 四组合及连续重驱；U36-16 覆盖 macOS/Linux fake runner、干净/残留宿主路径、单次/连续/并发执行与真实平台边界。每格必须指出稳定 identity、唯一事实、效果排序、零副作用边界、消费终态和直接验收；无法解释即继续修正根因。
+3. 以锁定范围内的最优架构审查方案：U36-14 只让现有 runner 执行固定 PowerShell/Task Scheduler COM 只读查询并 strict decode numeric state、current SID 与 typed exact-set；U36-15 只在既有 config effect→reconciler 内把 future-enabled 收束与 current-running 安全停止按 drain/turnover/blocker 事实分序；U36-16 只复用现有 temp fixture 隔离 fake-runner 宿主路径。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增通用系统管理/lifecycle、公开状态 DTO/mapper、新 runner/test framework、监控、诊断、benchmark 或信息采集。发现缺口时直接修正对应原问题，使执行者无需实现猜测即可一次完成。
+4. 三项看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：Windows numeric state/current SID/typed exact-set、配置换代 accepted-work 与 supervisor 双事实、跨平台测试路径与重复证据、生产体验/范围价值及历史裁决边界。各路必须抛开前轮结论，从当前合同和源码主动构造第 2 步反例，并核查 `U36-14↔U36-15`、`U36-14↔U36-16`、`U36-15↔U36-16` 以及三项与其余 U36、EX36-01～EX36-04、第 33～35 单元既有合同及第 37～38 单元边界的直接交界；发现真实反证则修正原记录并重新执行四路复审。
 
 只有现有架构无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或单元边界时才暂停；其余架构选择按整体最优且不留债务自主收敛。
 
-完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U36-11～U36-13 的全部受支持 Windows 用户身份/注册重放、配置 reload/reconcile 组合终态、fresh/legacy/bound 的只读状态与首次 managed 激活均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会恢复已降级/删除主张，也不会因逐 UserId、逐失败分支或逐 SecretStore 调用点补丁继续返工。满足后明确回复“U36-11～U36-13 的根因与最优方案已闭合”并立即停止。
+完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U36-14～U36-16 的全部受支持 Windows supervisor read-back、配置换代安全停机与跨平台直接证据变体均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会恢复已验证的写入/分类/独立义务或扩建通用框架，也不会因逐 locale、逐入口或逐测试路径补丁继续返工。满足后明确回复“U36-14～U36-16 的根因与最优方案已闭合”并立即停止。
 
 完成任务之后，根据最新的问题情况，把“目标模式：解决问题并完成多角色对抗收口”提示词内容改成本次的问题，格式、规则不变；
 ```
@@ -236,27 +236,25 @@
 ### 2.9 目标模式：解决问题并完成多角色对抗收口
 
 ```text
-目标：彻底解决第 36 单元 U36-11～U36-13 三个 P1，使 U36-11/U36-12 两个 P1/小和 U36-13 一个 P1/中闭合 Windows Task Scheduler 稳定 OS 用户 principal、配置耐久提交后 reload/reconcile 独立终态及 current-state loader 的只读投影/SecretStore activation 意图分离的全部同根直接变体；不得扩展到其他问题或全单元流程。U36-01～U36-06、U36-10 与 EX36-01～EX36-04 除非被本轮直接反证，否则复用；被直接反证的原问题自动重开，不视为扩面。U36-11 已降级的 P0 主张、U36-13 已收窄的“status 写入单独构成 P1”主张、EX36-04 已删除的三平台 lifecycle 拆分及专用 coordinator、第二 SecretStore 事实源、状态 DTO 扩面不得恢复；第 37～38 单元能力不得提前实施。
+目标：彻底解决第 36 单元 U36-14～U36-16，使 U36-14/U36-15 两个 P1/中和 U36-16 一个 P2/小闭合 Windows supervisor 稳定严格的系统读投影、配置换代 accepted-work 安全点前 future-enabled/current-running 分序，以及 guest-platform 测试语义路径与宿主物理路径隔离的全部同根直接变体；不得扩展到其他问题或全单元流程。U36-01～U36-13 与 EX36-01～EX36-03 的既有结论直接复用，EX36-04 只按已登记的新生产事实重开为 U36-15。已验证的 Windows UTF-16LE bytes/UserId 写入/HRESULT 分类、配置 reload/reconcile 独立执行、三平台 supervisor 双事实，以及价值裁决否定的账户解析、通用系统管理/lifecycle、状态 DTO、新 runner 不得恢复或扩面；第 37～38 单元能力不得提前实施。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 36 单元正式文件中的 U36-11～U36-13、EX36-01～EX36-04，只依据三项问题最新的根因、价值裁决、F36-25～F36-36 固定矩阵、C36-C20～C36-C29 反证账、最优方案执行合同、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 36 单元正式文件中的 U36-14～U36-16、EX36-04，只依据三项问题最新的根因、价值裁决、F36-37～F36-45 固定矩阵、C36-C32～C36-C41 反证账、最优方案执行合同、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词结束条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 修复前从权威架构、规格与当前生产调用图重建 F36-25～F36-36 固定矩阵。U36-11覆盖普通/需转义 OS 用户、principal/LogonTrigger/Action context、首次/exact replay、`/Create`各效果/响应窗口、错误/缺失 UserId与系统read-back；U36-12覆盖launch selection未变/变化、active-turn、reload发送前失败/效果后丢响应/成功、reconcile成功/失败、两义务组合及连续重启；U36-13覆盖inspect/activation、fresh/legacy/bound、四backend的binding/backing/vault有无/歧义、managed/foreground、expected backend、回填前后、CLI/server status与首次preflight。逐格绑定service/user/config/binding/spec/trust identity，唯一耐久事实、线性化点、零副作用终态和直接证据，并持续核对其余U36、EX36-01～EX36-04、第33～35与第37～38单元边界。
-2. 按 `U36-11 → U36-12 → U36-13` 一次完成。先只改现有 Windows renderer：对同一 `spec.osUser` XML-escape 一次并分别写入 `Principal/UserId` 与 `LogonTrigger/UserId`，`Actions Context` 继续引用该 Principal；definition identity、writer、比较和 `/Create` 仍只消费同一 canonical UTF-8 bytes，不增加SID或账户解析能力。
+1. 修复前从权威架构、规格与当前生产调用图重建 F36-37～F36-45 固定矩阵。U36-14覆盖英文/非英文 Windows、numeric unknown/disabled/queued/ready/running、enabled独立事实、current/wrong/missing SID、普通/系统规范化 trigger账户、缺失/重复/额外 typed trigger/action、definition drift与各query响应窗口；U36-15覆盖selection变化、remote/channel/scheduler/delivery accepted work、explicit drain、发送/ack/效果丢失、exact endpoint turnover成功/超时、future-enabled/current-running四组合、旧turnover后新on-demand/managed endpoint与连续重驱；U36-16覆盖macOS/Linux guest spec、干净/残留宿主路径、单次/连续/并发fake执行与真实平台边界。逐格绑定service/current-token/endpoint/platform/temp identity，唯一事实、线性化点、零副作用终态和直接证据，并持续核对其余U36、EX36-01～EX36-04、第33～35与第37～38单元边界。
+2. 按 `U36-14 → U36-15 → U36-16` 一次完成。先只替换现有 Windows inspect 读侧：现有 command runner 执行一条固定非交互 PowerShell/Task Scheduler COM 只读查询，输出有限 strict JSON，包含task enabled/numeric state、current token SID/name、Principal Id/UserId/LogonType/RunLevel、完整Trigger/Action collection、Actions context、Exec与既有Settings；脚本catch只输出numeric HRESULT，spawn/非canonical JSON均fail-closed。unknown/越界/缺字段fail-closed，queued/running均视为current execution。先反绑current token name末段与冻结`spec.osUser`，再要求principal UserId=current SID、`Principal.Id=Actions.Context=CurrentUser`；trigger只允许current SID/current full name/spec.osUser；恰一enabled type=9 LogonTrigger、恰一type=0 ExecAction，额外/歧义与command/arguments/settings drift均拒绝。只有documented HRESULT not-found复用既有absent分类；renderer/writer/`Create`、公开DTO与其他平台不变，不新增账户解析。
 
-   再保留配置耐久提交、active-turn 与 reload-before-reconcile 次序，在 `config-command.ts` 内抽取可直接测试的窄提交后效果收束点：独立捕获 reload outcome；仅当 launch selection 变化时，无论 reload outcome 如何都恰好调用一次现有 `reconcileCurrentManagedService("local-role-config-committed")`；最后统一投影两项 outcome，任一失败不得输出重启成功，selection未变零reconcile。进程在两效果间退出时只复用耐久配置与既有startup/preflight/host-missing重建，不新增journal或trigger。
+   再只收紧既有config effect→shutdown/reconnect→reconciler链：对exact stale endpoint显式请求`server.shutdown(strategy:"drain")`并分别保留send、turnover、reconnect/refresh outcome。drain等待前复用现有role/inbound/scheduler拒新与accepted-work/delivery收束，只有全部完成才触发shutdown，超时/失败保持旧endpoint存活且gate关闭；accepted ack永不授权。selection变化的supervisor义务仍独立终结：desired managed保持future enabled；desired non-managed在等待old turnover与`getClientNow()`前先执行future-only disable（Windows`/DISABLE`、macOS`disable`、Linux`disable`）并read-back。随后才等待exact old endpoint turnover；它只终结旧serving instance，禁止生成或携带按serviceId调用`/End`、`bootout`、`systemctl stop`的跨代permit。turnover成功后按新plan reconnect/refresh；超时/失败保持disabled+old running/stopping、报失败并由后继同trigger重驱，禁止强杀fallback或状态DTO扩面。发送效果丢响应但turnover成功可前滚且仍诚实保留send失败。
 
-   最后给现有 `loadCurrentManagedServiceState()` 增加必填 `inspect|activate` 意图并抽取只消费最终 `{config,binding,key,trust}` 的纯projection。`buildManagedHostStatusSnapshot()`固定用inspect：无binding不打开store并复用`credentials-locked`，有binding只existing-only；reconcile、managed preflight/wait、admission capture/verify与trust transition固定用activate。activate对既有错误binding先拒；无binding时仅复用现有legacy/首次foreground许可，managed fresh empty仍零写；unlock成功后重读binding、再验expected backend并同次构造spec/trust/admission。
+   最后保留guest-platform definition/command语义，只统一fake-runner `platformSpec(platform,tempDir)`：canonical spec构造后把`definitionPath`覆盖为该例temp fixture下唯一宿主原生路径，所有读写与cleanup共用该值；只有真实平台system test保留真实OS路径。同步直接相关架构、规格、现有S7有限descriptor与直接测试；同根残留并入原问题，禁止新增账户解析、通用系统管理/lifecycle、公开DTO/mapper、新runner/test framework、监控、诊断、benchmark或信息采集。每个实质阶段完成后立即更新正式状态与证据。
+3. 按验证手册运行受影响闭包的最小必要类型检查、Windows production inspect/真实Task Scheduler read-back、config post-commit→drain→turnover→supervisor split、三平台adapter双事实与guest-platform fixture直接合同/场景测试，现有S7 lint与必要派生资产检查；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须穿过production runner/strict decoder、真实post-commit与CoreHostConnection old endpoint、server drain/accepted-work事实、三平台adapter及真实temp filesystem；直接注入locale无关numeric state、queued/wrong SID/extra typed set、四类accepted work、发送/效果丢失、turnover超时、连续重驱、固定根残留与并发fake实例。不得以mock自报current SID/safe-point/turnover/零残留或只验证返回值，不得运行包全测、模块回归、平台配置笛卡尔积或与三项验收无关的验证。失败先归因，实现问题直接修复并回到第2步。
+4. 验证通过后冻结当前交付物指纹，整轮只读逐格重建 U36-14～U36-16 事实链；测试通过不得代替功能判断，F36-37～F36-45全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：Windows numeric state/current SID/typed exact-set、配置换代accepted-work与supervisor双事实、跨平台测试路径与重复证据、生产体验/范围价值及历史裁决边界。各角色须抛开既有结论，主动重造第1步全部适用反例，并核查`U36-14↔U36-15`、`U36-14↔U36-16`、`U36-15↔U36-16`以及三项与其余U36、EX36-01～EX36-04、第33～35单元既有合同及第37～38单元边界的直接交界。
+5. 新发现首次出现即以C36-C42起的稳定编号写入正式问题证据与反证账；收口前对C36-C32～C36-C41、历轮专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案、验收和矩阵，再回到第2步；任何交付物修改都会使冻结指纹与对抗结论失效。
 
-   同步直接相关架构、规格、现有S7有限descriptor与直接测试；同根残留并入原问题，禁止新增renderer、账户解析、第二SecretStore事实源、专用coordinator、通用trigger/lifecycle/IPC/registry、状态DTO/mapper、新lint/test runner、监控、诊断、benchmark或信息采集。每个实质阶段完成后立即更新正式状态与证据。
-3. 按验证手册运行受影响闭包的最小必要类型检查、Windows definition bytes/adapter、config post-commit effects、current-state intent/四backend SecretStore/managed preflight与CLI/server status直接合同及场景测试，现有S7 lint与必要派生资产检查；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须穿过production renderer/writer/adapter、配置提交收束点的两生产调用、真实临时home与`BoundPlatformMasterKeyProvider`/vault、reconcile/preflight和status snapshot；直接注入转义UserId、`/Create`效果丢响应、reload/reconcile四组合、fresh/legacy/bound、binding/backing缺失/歧义、回填效果丢响应、expected backend错误及连续重启。不得以mock自报principal/reconcile/binding/spec或只验证返回值，不得运行包全测、模块回归、backend×平台笛卡尔积或与三项验收无关的验证。失败先归因，实现问题直接修复并回到第2步。
-4. 验证通过后冻结当前交付物指纹，整轮只读逐格重建 U36-11～U36-13 事实链；测试通过不得代替功能判断，F36-25～F36-36全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：Windows principal/trigger/action稳定身份与最终bytes、配置提交后reload/reconcile独立终态、current-state inspect/activation与legacy同次恢复、生产证据/产品体验/范围价值及历史裁决边界。各角色须抛开既有结论，主动重造第1步全部适用反例，并核查`U36-11↔U36-12`、`U36-12↔U36-13`、`U36-11↔U36-13`以及三项与其余U36、EX36-01～EX36-04、第33～35单元既有合同及第37～38单元边界的直接交界。
-5. 新发现首次出现即以C36-C30起的稳定编号写入正式问题证据与反证账；收口前对C36-C20～C36-C29、历轮专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案、验收和矩阵，再回到第2步；任何交付物修改都会使冻结指纹与对抗结论失效。
-
-结束条件：同一冻结指纹上的 U36-11～U36-13 方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；C36-C20～C36-C29及新增同根反证全部有耐久处置，证明Windows final bytes中的principal与当前用户LogonTrigger由同一稳定`spec.osUser`绑定，Action只在该Principal上下文运行且注册/响应丢失可重放；配置耐久提交后的reload与selection变化reconcile有序但独立终结，任一失败不跳过另一项或谎报成功；status inspect在fresh/legacy/bound与四backend下零写，允许的activation回填后同次重读binding并生成单代spec/trust/admission，错误/歧义输入零副作用。其余U36与EX36-01～EX36-04结论不变，第37～38单元能力未提前实施，三项均已更新为“已验证”。满足后明确报告“U36-11～U36-13 三项问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
+结束条件：同一冻结指纹上的 U36-14～U36-16 方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；C36-C32～C36-C41及新增同根反证全部有耐久处置，证明Windows supervisor read-back在locale、queued、wrong/missing SID、额外typed set、响应丢失与重启下只产生严格同源事实；配置换代先拒新并收束accepted work，non-managed future launch在old turnover/reconnect前独立禁用，exact old endpoint turnover只终结旧代且零跨代manager stop，ack/失败/超时零强停并由后继trigger唯一收敛；guest-platform fake tests的宿主路径逐例隔离，连续/并发执行零共享根残留。其余U36与EX36-01～EX36-03结论不变，EX36-04只由U36-15闭合，第37～38单元能力未提前实施，三项均已更新为“已验证”。满足后明确报告“U36-14～U36-16 三项问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
 
 完成任务之后，执行“修复后更新独立审查清单状态”：凡受本轮生产实现、公共合同或直接测试变更影响的 `[!]`、`[x]` 节点一律改为 `[~]` 并作废旧证据，未受影响的 `[x]` 保持不变；修复验证、问题“已验证”、专项功能审查或多角色对抗通过均不得直接产生 `[x]`。若本轮修改了生产文件却没有任何受影响节点变为 `[~]`，立即停止并报告状态映射错误。
 ```
@@ -268,14 +266,14 @@
 - **当前单元**：第 36 单元 · generation 1
 - **单元身份**：S10 托管服务与角色自恢复；只把现有单一 `serve` 生产组合根接入当前用户的跨平台 OS supervisor，使 current anchor 可自恢复、用户选择的 executor 可在登录/开机后上线，并保持纯 surface 与按需单机零额外常驻。
 - **权威来源**：`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`distributed-runtime-charter.md`、`specification.md`、`s2-security-supply-chain-review.md`，以及已定稿开发清单 D36-01～D36-09。上游只消费第 33～35 单元已封版的 current trust/current owner、角色解析、SecretStore、installed-generation 恢复、pending obligation/outbox、inventory/capability 与 credential readiness；下游第 37～38 单元能力不进入本清单。
-- **交付基线**：以第 35 单元功能封版提交 `b6323cb8`、第 36 单元功能提交 `cb71a3ef`、既有修复提交 `b6d9baf2` 与当前同根修复提交 `5b1802f7` 为代码基线；本轮 30 个产品文件冻结为 `sha256:ecc94ed506544667799d2dbe43322195ccdb2470e82ad0129ed2ce5472ac6ed0`，工作台、正式账本与本清单只属流程维护，不作为 Unit 36 产品指纹输入。
+- **交付基线**：以第 35 单元功能封版提交 `b6323cb8`、第 36 单元功能提交 `cb71a3ef`、既有修复提交 `b6d9baf2` 与当前同根修复提交 `5b1802f7` 为代码基线；U36-14～U36-16 本轮 20 个产品/规格/直接测试/S7 文件冻结为 `sha256:4bc0b2627feeda6eaa6962eff9ff82c4204130d9e3a7057873e531dbdcc00c51`，工作台、正式账本与本清单只属流程维护，不作为 Unit 36 产品指纹输入。
 - **生产装配关系**：`zz pair` 与受支持本机配置提交写入 `MeshRoleBootConfig`；`resolveHostLaunchPlan()`以 current signed trust/current issuer、本机 active member、严格 `enabledRoles`和 `executorAutoStart`派生 `managed | on-demand | none`。`reconcileManagedService()`按 canonical home 以 dirty-loop 驱动 Windows Task Scheduler、macOS LaunchAgent 或 Linux systemd user/linger；managed child 仍唯一委托既有 `runServeCommand`/runtime，并在 listener 前复验冻结 admission identity。既有 SecretStore binding 只 existing-only；pure surface/empty 经认证 current-anchor finite relay 消费；CLI/server 只消费同一只读 managed-status snapshot。
 - **目标提交边界**：冻结 launch plan 与配置合同、同 SecretStore backend 的跨平台服务定义、全部生产 reconcile 触发、单实例托管启动、ready/rollback、自恢复 authority closure、executor 自动上线与原 `turnOrigin`续驱、角色变化安全关停、公开零术语状态、S7/registry exact-set 与成比例直接证据。
 - **明确排除**：第 37 单元的只停本次、长期关闭值班、设备移除/卸载、authority/identity/cache/export 清理和三路径停机协议；第 38 单元升级、兼容、原子替换、健康门禁、自动回滚、发布矩阵、支持包与仓库级最终 CI；自动 failover、quorum/witness、多 active anchor、全局/持续同步、恢复应用、第二事实源、多进程分角色、通用进程/生命周期/IPC/路由/registry；surface 常驻、强制按需单机后台化、监控、诊断、benchmark、信息采集、新 runner 或非必要依赖。
 - **架构空洞判定**：总纲 §10/§11/§12/§13/§14/§15、规格 §2.3/§2.5/§3.4b/§6.4/§8/§10.1/§11/§12/§15 第 36 行与 D36-01～D36-09 已唯一确定产品、角色、秘密、资源、恢复、体验和交付边界；当前没有需要以实现假设补齐、且会改变产品需求或单元边界的真实架构空洞。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1 阻断问题；[~] 输入变化，须重审，旧证据不代表当前结论。
 
-> **清单状态**：本轮生产实现、公共合同、直接测试与 S7 输入已变化。0 项 `[ ]`、4 项 `[x]`、0 项 `[!]`、31 项 `[~]`；IR36-03、IR36-19、IR36-22～IR36-23 输入未变并继续复用，其余节点旧证据均已作废、待独立重审。C36-C30～C36-C31 已按直接反证规则重开 U36-10/U36-01 并完成修复，修复专项产品指纹为 `sha256:ca2748bccba0df9276d96416f2718bb5ed0a878895a7f629f9d244ecf67eeb9e`；该修复验证不得把 `[~]` 提前改为 `[x]`，提交 `5b1802f7` 与旧产品指纹均不再代表当前交付物。下方待转入问题表仍为空，避免与正式账本重复维护。
+> **清单状态**：U36-14～U36-16 已在冻结产品指纹 `4bc0b262` 上完成修复与专项验证，但该证据不得代替独立审查。按生产实现、公共合同、权威来源、直接测试与 S7 的实际变更闭包，IR36-01、IR36-04～IR36-05、IR36-07～IR36-09、IR36-11～IR36-16、IR36-20～IR36-21、IR36-24～IR36-25、IR36-28～IR36-35 共 24 项改为 `[~]` 并作废旧证据；其余 11 项 `[x]` 可证明输入未受影响而保留。当前 0 项 `[ ]`、11 项 `[x]`、0 项 `[!]`、24 项 `[~]`；须独立重审全部 `[~]` 后才能判断是否通过。
 
 ### 来源覆盖
 
@@ -426,7 +424,7 @@
 | 分类 | 数量 | 路径 exact-set | 归入审查项 |
 | ---- | ---- | ------------- | ---------- |
 | CLI入口与选项 | 1 | `packages/cli/src/index.ts` | IR36-04、IR36-15、IR36-17、IR36-24～IR36-25、IR36-32、IR36-34 |
-| 本机配置提交 | 1 | `packages/cli/src/runtime/config-command.ts` | IR36-04、IR36-12～IR36-13、IR36-20、IR36-24、IR36-34 |
+| 本机配置提交与 reload 消费 | 4 | `packages/cli/src/commands/config-commands.ts`、`packages/cli/src/repl.ts`、`packages/cli/src/runtime/config-command.ts`、`packages/cli/src/runtime/__tests__/config-command.test.ts` | IR36-04、IR36-12～IR36-13、IR36-20～IR36-21、IR36-24、IR36-30、IR36-32、IR36-34 |
 | host缺失恢复 | 2 | `packages/cli/src/runtime/core-host-connection.ts`、`packages/cli/src/runtime/__tests__/core-host-connection.test.ts` | IR36-12～IR36-14、IR36-16、IR36-30、IR36-34 |
 | pure surface current-anchor消费 | 2 | `packages/cli/src/runtime/surface-core-host-link.ts`、`packages/cli/src/runtime/__tests__/surface-core-host-link.test.ts` | IR36-14、IR36-26～IR36-28、IR36-30、IR36-32、IR36-34～IR36-35 |
 | 进程形态测试 | 1 | `packages/cli/src/serve/__tests__/self-exec.test.ts` | IR36-15、IR36-34 |
@@ -465,7 +463,8 @@
 | master-key existing-only合同 | 1 | `packages/secrets/src/master-key.ts` | IR36-06、IR36-17、IR36-28、IR36-31、IR36-33 |
 | SecretStore binding实现 | 1 | `packages/secrets/src/platform-secret-store.ts` | IR36-06、IR36-17、IR36-28、IR36-31、IR36-33 |
 | server状态测试 | 1 | `packages/server/src/__tests__/server.test.ts` | IR36-25～IR36-26、IR36-34 |
-| server状态依赖注入 | 1 | `packages/server/src/context.ts` | IR36-25～IR36-26、IR36-31 |
+| server上下文与运行控制合同 | 1 | `packages/server/src/context.ts` | IR36-20～IR36-21、IR36-25～IR36-26、IR36-29～IR36-31、IR36-34～IR36-35 |
+| server shutdown drain 与直接测试 | 2 | `packages/server/src/rpc/methods/server.ts`、`packages/server/src/rpc/methods/__tests__/server.test.ts` | IR36-20～IR36-21、IR36-29～IR36-31、IR36-34～IR36-35 |
 | server公开导出 | 1 | `packages/server/src/index.ts` | IR36-25～IR36-26、IR36-31 |
 | server状态mapper | 1 | `packages/server/src/managed-host-status.ts` | IR36-25～IR36-26、IR36-32、IR36-34～IR36-35 |
 | server状态路由 | 1 | `packages/server/src/routes.ts` | IR36-25～IR36-26、IR36-31、IR36-34 |
@@ -480,41 +479,41 @@
 
 | 编号 | 状态 | 审查对象 | 独立通过条件与可复核证据 |
 | ---- | ---- | -------- | ------------------------ |
-| IR36-01 | [~] | 单元目标、身份与有限边界 | 本轮修改 Windows 身份投影、配置提交效果与 current-state intent 合同，旧边界证据已作废；待独立重审。 |
-| IR36-02 | [~] | launch plan 权威输入与严格配置合同 | 本轮修改 current-state loader 对 plan/spec/binding 的消费边界，旧权威输入证据已作废；待独立重审。 |
+| IR36-01 | [~] | 单元目标、身份与有限边界 | U36-14～U36-16 同步修改权威需求、总纲与规格，旧边界证据不再代表当前输入；须重审窄 supervisor read/drain/fixture 合同仍未引入 Unit37～38 或通用框架。 |
+| IR36-02 | [x] | launch plan 权威输入与严格配置合同 | `resolveHostLaunchPlan()` 只消费 current signed trust、本机唯一 active member、严格 `enabledRoles` 与 `executorAutoStart`；非法/歧义/越权组合 fail-closed，current-state projector 未建立第二 plan 事实源。无 P0/P1。 |
 | IR36-03 | [x] | `managed / on-demand / none`判别矩阵 | 三态由 current role 与 durable executorAutoStart 分离判定，anchor+executor、anchor-only、executor/surface/empty 的有限真值表未漂移。无 P0/P1。 |
-| IR36-04 | [~] | executor自动上线选择与配置提交 | 本轮重构配置耐久提交后的 reload/reconcile 收束点，旧触发与终态证据已作废；待独立重审。 |
-| IR36-05 | [~] | ManagedServiceSpec稳定身份、日志与秘密最小化 | 本轮修改 Windows `osUser` principal/trigger 投影，旧稳定身份与秘密最小化证据已作废；待独立重审。 |
-| IR36-06 | [~] | SecretStore backend binding与managed上下文 | 本轮引入 inspect/activate 意图并重读 binding，旧 backend/context 证据已作废；待独立重审。 |
-| IR36-07 | [~] | Windows托管适配器 | 本轮修改 canonical Windows definition 的 principal/trigger 字节，旧适配器证据已作废；待独立重审。 |
-| IR36-08 | [~] | macOS托管适配器 | 本轮修改三平台 adapter 共用生产文件与直接测试，旧 macOS 适配器证据已作废；待独立重审。 |
-| IR36-09 | [~] | Linux桌面与无头托管适配器 | 本轮修改三平台 adapter 共用生产文件与直接测试，旧 Linux 适配器证据已作废；待独立重审。 |
-| IR36-10 | [~] | 服务定义物理写入与容量准入 | 本轮改变 Windows definition canonical bytes 及其 writer/read-back 直接证据，旧物理写入证据已作废；待独立重审。 |
-| IR36-11 | [~] | 适配器错误、read-back与幂等终态 | 本轮修改 Windows 注册输入并新增真实系统反证，旧 read-back/幂等证据已作废；待独立重审。 |
-| IR36-12 | [~] | reconcile生产触发exact-set | 本轮修改配置入口效果级触发控制流，旧 exact-set 证据已作废；待独立重审。 |
-| IR36-13 | [~] | reconcile状态机、single-flight与计划复验 | 本轮修改 config-command 生产触发及 current plan/spec 消费，旧 reconcile 证据已作废；待独立重审。 |
-| IR36-14 | [~] | host-missing三分支消费 | 本轮修改 topology-command 的 activation preflight 路径，旧 host-missing 分支证据已作废；待独立重审。 |
-| IR36-15 | [~] | foreground/on-demand/managed唯一serve组合根 | 本轮修改 topology-command 与 S7 组合根输入，旧三形态装配证据已作废；待独立重审。 |
-| IR36-16 | [~] | 单实例owner与existing host交接 | 本轮修改 topology-command 的 preflight/交接消费，旧单实例证据已作废；待独立重审。 |
-| IR36-17 | [~] | managed启动ready门禁与逆序rollback | 本轮修改 managed preflight 的 activation loader 与单代投影，旧 ready/rollback 证据已作废；待独立重审。 |
-| IR36-18 | [~] | anchor崩溃、登录/开机与连续重启恢复 | 本轮修改 startup/preflight 的 activation binding 恢复路径，旧连续重启证据已作废；待独立重审。 |
+| IR36-04 | [~] | executor自动上线选择与配置提交 | config command、REPL reload、server drain、exact turnover 与 supervisor future-disable 顺序已变化；旧 P1 证据作废，须独立重审完整配置提交旅程。 |
+| IR36-05 | [~] | ManagedServiceSpec稳定身份、日志与秘密最小化 | Windows strict system projection 与 current identity exact-set 已变化；旧 SID/部分 matcher 证据作废，须独立重审 spec、principal、trigger、日志与秘密边界。 |
+| IR36-06 | [x] | SecretStore backend binding与managed上下文 | `inspect` 无 binding 时不打开 store；有 binding 时 delegate 只 existing-only；`activate` 仅按既有 legacy/首次 foreground 许可创建并在 unlock 后重读 binding，managed fresh empty 零写。无 P0/P1。 |
+| IR36-07 | [~] | Windows托管适配器 | inspect 已替换为 fixed PowerShell/COM strict projection，并新增 future-only disable；旧 localized/partial matcher 结论作废，须独立重审全部 Windows adapter 终态。 |
+| IR36-08 | [~] | macOS托管适配器 | 新增 future-only `launchctl disable` 与独立 read-back，且共享 adapter 合同改变；旧 disable→bootout 证据不足以代表当前输入，须重审。 |
+| IR36-09 | [~] | Linux桌面与无头托管适配器 | 新增 future-only `systemctl --user disable` 并与 current-running 收束分离；旧 `disable --now` 单路径证据作废，须重审桌面/无头边界。 |
+| IR36-10 | [x] | 服务定义物理写入与容量准入 | canonical bytes 经设备 storage governor 写临时文件、fsync、rename、目录 fsync 和 byte-for-byte read-back；已有全等文件 exact replay、冲突稳定拒绝，permit 不跨 manager I/O。无 P0/P1。 |
+| IR36-11 | [~] | 适配器错误、read-back与幂等终态 | Windows strict read projection、三平台 future-only disable 与直接测试输入均变化；旧 read-back/P1 证据作废，须独立重审有限错误和幂等终态。 |
+| IR36-12 | [~] | reconcile生产触发exact-set | config trigger 增加 drain、prepare-turnover 与 future-disable 路径，S7 descriptor 同步变化；旧触发链证据作废，须重审六 trigger exact-set。 |
+| IR36-13 | [~] | reconcile状态机、single-flight与计划复验 | non-managed config trigger 改为 future-only disable，其他 trigger 保留完整 disable；旧状态机结论作废，须重审 dirty-loop、分序与 latest plan/spec 复验。 |
+| IR36-14 | [~] | host-missing三分支消费 | `CoreHostConnection.reconnect()` 的 exact old client、before-turnover 与 successor 顺序及直接测试已变化；旧三分支消费证据作废，须重审默认调用保持原语义。 |
+| IR36-15 | [~] | foreground/on-demand/managed唯一serve组合根 | 唯一 serve 组合根新增 runtime drain hooks，S7 managed-host descriptor 也变化；旧 19/19 证据作废，须独立重审三进程形态仍只进同一组合根。 |
+| IR36-16 | [~] | 单实例owner与existing host交接 | reconnect 现显式 close stale client→beforeTurnover→wait exact turnover→successor；旧交接证据作废，须重审同 home owner 与后继实例隔离。 |
+| IR36-17 | [x] | managed启动ready门禁与逆序rollback | activation loader、startup check、mesh/bootstrap、role composition 与 listener 前 admission 全等复验按序执行；失败走 StartupRollback，未见先公开后回滚。无 P0/P1。 |
+| IR36-18 | [x] | anchor崩溃、登录/开机与连续重启恢复 | managed startup 每次从 durable trust/binding/installation 读取同一 runtime，authority consumer 在准入前恢复；崩溃与连续重启不创建第二 authority 或重判业务终态。无 P0/P1。 |
 | IR36-19 | [x] | authority consumer、pending与outbox完整闭包 | 三组 consumer、六类 pending、cursor/outbox 与 original identity 仍由同一 assembly 在准入前恢复，本轮未发现 reducer/终态缺口。无 P0/P1。 |
-| IR36-20 | [~] | trust/current-authority/role/选择变化安全协调 | 本轮修改配置提交后的 reload/reconcile 独立终态，旧角色/选择协调证据已作废；待独立重审。 |
-| IR36-21 | [~] | 当前安全关闭与Unit37边界 | 旧证据作废：配置提交后的 reload/reconcile 控制流已变化，reload 失败后仍可进入 supervisor reconcile；须重新核对 active-turn、准入关闭、graceful shutdown 与平台 disable 的完整顺序。Unit37 边界结论不因此扩张。 |
+| IR36-20 | [~] | trust/current-authority/role/选择变化安全协调 | config reload、server beginDrain/drainAcceptedWork、future-disable 与 old endpoint turnover 已形成新公共链；旧 P1 证据作废，须独立重审 trust/config/role 各入口安全协调。 |
+| IR36-21 | [~] | 当前安全关闭与Unit37边界 | shutdown RPC、serve drain 与 supervisor 分序已变化；旧 EX36-04/P1 证据作废，须重审 accepted-work 安全点、零强杀和 Unit37 排除边界。 |
 | IR36-22 | [x] | executor上线、认证重连与capability/inventory | online publication 与 capability wake 仍在认证、current owner 与设施 ready 后发生；manifest accepted listener 未发现漏唤醒。无 P0/P1。 |
 | IR36-23 | [x] | 排队任务续驱、唯一认领与原位置通知 | queued job identity、dirty wake、turnOrigin 与原位置通知仍由原 authority 事实消费，未见第二认领或终态分叉。无 P0/P1。 |
-| IR36-24 | [~] | 配对后自动上线完整用户链 | 本轮修改配置提交后自动上线选择的 reconcile 触发终态，旧用户链证据已作废；待独立重审。 |
-| IR36-25 | [~] | 托管公开状态有限联合 | 本轮把 status 固定到 inspect-only loader，旧公开状态证据已作废；待独立重审。 |
-| IR36-26 | [~] | CLI/server同源状态与隐私边界 | 本轮修改 CLI/server 共用 snapshot 的只读上游合同，旧同源与隐私证据已作废；待独立重审。 |
-| IR36-27 | [~] | role/profile/topology生产exact-set | 本轮修改 topology-command 与 S7 exact-set 输入，旧 topology 证据已作废；待独立重审。 |
-| IR36-28 | [~] | 安全、最小权限与数据隔离 | 本轮修改 Windows principal 与 SecretStore 零写边界，旧安全/隔离证据已作废；待独立重审。 |
-| IR36-29 | [~] | 资源、取消、锁序与stop | 本轮改变 definition read-back 与 SecretStore inspect/activation I/O 边界，旧资源与锁序证据已作废；待独立重审。 |
-| IR36-30 | [~] | 六类固定故障矩阵的共同终态 | 本轮修改三项故障终态并新增真实 Windows 反证，旧矩阵证据已作废；待独立重审。 |
-| IR36-31 | [~] | 分层、兼容、上游复用与后继隔离 | 本轮同步架构/规格并修改 S7 与 loader 合同，旧分层及后继隔离证据已作废；待独立重审。 |
-| IR36-32 | [~] | 产品旅程与最小完整价值 | 本轮修改 Windows 托管身份、配置效果和只读状态三条用户旅程，旧产品证据已作废；待独立重审。 |
-| IR36-33 | [~] | launch plan、SecretStore与三平台adapter直接证据 | 本轮新增/修改 production adapter 与真实 SecretStore 直接证据，旧证据已作废；待独立重审。 |
-| IR36-34 | [~] | reconcile、serve、anchor/executor与状态场景证据 | 本轮修改 reconcile、preflight 与状态场景链，旧场景证据已作废；待独立重审。 |
-| IR36-35 | [~] | S7 descriptor、registry与负能力机械门禁 | 本轮修改 S7 descriptor/mutation 与三项负能力门禁，旧机械证据已作废；待独立重审。 |
+| IR36-24 | [~] | 配对后自动上线完整用户链 | Windows numeric running/queued 与 strict identity read-back 改变配对后上线消费事实；旧 P1 证据作废，须独立重审完整用户链。 |
+| IR36-25 | [~] | 托管公开状态有限联合 | snapshot 上游 Windows inspection 事实源已替换；旧 localized 状态/P1 证据作废，须在当前 strict projection 上重审有限联合与换代复验。 |
+| IR36-26 | [x] | CLI/server同源状态与隐私边界 | CLI 与 server 均只消费同一 `ManagedHostStatusSnapshot` 和 mapper，DTO 未泄漏路径、serviceId、deviceId、role 或 raw manager error；上游 Windows 状态真实性问题归入 IR36-25。无独立 P0/P1。 |
+| IR36-27 | [x] | role/profile/topology生产exact-set | descriptor、S7 与生产装配共同冻结 managed/current-anchor 两 profile、selectable executor 两 profile及 surface/empty 排除；未启用角色零 module/listener。无 P0/P1。 |
+| IR36-28 | [~] | 安全、最小权限与数据隔离 | Windows principal/trigger exact-set 与 strict typed collection 已变化；旧任意 SID/extra action P1 证据作废，须重审最小权限、零秘密与错误身份隔离。 |
+| IR36-29 | [~] | 资源、取消、锁序与stop | server 新增有 deadline 的 beginDrain/drainAcceptedWork，serve root 新增 inbound/scheduler/delivery 收束；旧资源/stop 证据作废，须重审取消、等待和 stop 后零新 I/O。 |
+| IR36-30 | [~] | 六类固定故障矩阵的共同终态 | strict Windows query、drain/future-disable/turnover 与 fixture failure paths 均改变故障矩阵输入；旧 P1 证据作废，须重审全部直接窗口和连续恢复。 |
+| IR36-31 | [~] | 分层、兼容、上游复用与后继隔离 | `RuntimeControlAdapter`、adapter/reconnect 合同、权威规格与 S7 均变化；旧模块边界证据作废，须重审无新 framework、无反向依赖及 Unit37～38 隔离。 |
+| IR36-32 | [~] | 产品旅程与最小完整价值 | Windows 自动上线/状态与配置关闭旅程的生产行为已改变；旧 P1 证据作废，须独立重审当前用户体验和范围价值。 |
+| IR36-33 | [~] | launch plan、SecretStore与三平台adapter直接证据 | guest-platform fixture 与 adapter 直接测试已变化，旧 76/78/残留证据作废；须独立判断当前测试是否构成成比例、可重复的直接证据。 |
+| IR36-34 | [~] | reconcile、serve、anchor/executor与状态场景证据 | config/core-host/server/reconciler/adapter 场景与测试均已变化；专项测试通过不得代替独立审查，旧 P1 证据作废，须重审完整场景闭包。 |
+| IR36-35 | [~] | S7 descriptor、registry与负能力机械门禁 | S7 descriptor/test 已增加 strict Windows projection、drain/turnover 顺序并修正 planned-transfer anchor；旧 19/19 证据作废，须独立重审当前机械门禁及负能力边界。 |
 
 ---
 
@@ -536,3 +535,5 @@
 
 | 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 |
 | ---- | -------- | ---------- | ------------ | ---------- | -------- |
+
+> **独立审查结论**：待重审。U36-14～U36-16 已修复并在正式账本标为“已验证”，但修复自证不产生 `[x]`。35 项中 11 项未受影响保持 `[x]`，24 项因生产实现、公共合同、权威来源、直接测试或 S7 输入变化改为 `[~]` 且旧证据作废；两类源问题列表为空。须完整重审 24 项 `[~]` 后再作通过或问题判断。

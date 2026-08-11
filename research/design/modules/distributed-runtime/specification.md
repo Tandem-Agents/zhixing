@@ -2620,6 +2620,8 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 
 Windows final definition bytes 还必须把同一 `ManagedServiceSpec.osUser` 经一次 XML escaping 同时写入 `Principal/UserId` 与当前用户 `LogonTrigger/UserId`，`Actions Context` 只引用该 Principal；writer、definition identity、比较与 `/Create` 不得另造用户事实。真实系统可把 principal 规范化为 SID、把 trigger 规范化为域限定账户并补入默认字段，adapter 只能用冻结 spec 做有限语义 read-back，禁止生产端新增账户解析或接受未知字段漂移。配置写入成功后的 active-turn 边界之后，reload 必须先尝试，launch selection 变化时 reconcile 随后恰一尝试；两项 outcome 独立保留，任一失败不得投影为重启成功，selection 未变零 reconcile。`loadCurrentManagedServiceState` 的调用者必须显式选择 inspect 或 activate：status 唯一用 inspect，无 binding 时不打开 store；reconcile、managed preflight/wait、admission capture/verify 与 trust transition 用 activate，unlock 后重读 binding并只从同一最终快照构造 spec/trust/admission。
 
+Windows 系统读投影只由固定 Task Scheduler COM 查询产生 strict JSON：numeric queued/running 均表示当前执行义务，unknown/越界 fail-closed；principal 与 trigger 的 UserId 只允许 current token SID、current full account name 或冻结 `spec.osUser` 的有限 case-insensitive exact-set，完整 typed trigger/action collection、Action context、command/arguments 与 restart 设置必须全等，禁止本地化展示文本、任意账户翻译和宽松 XML 片段匹配。配置 reload 使用 explicit drain 收束 remote/channel/scheduler/delivery accepted work；非 managed selection 的 future-disable/read-back 必须在 old endpoint turnover 与 successor connect 之前独立完成，旧 turnover 不得形成按 service id 停止后继实例的许可。fake guest-platform 的文件副作用路径必须逐例绑定宿主 temp fixture，真实平台用例才可使用真实 OS 路径。
+
 执行顺序不可重排为会产生中间债务的形态：
 
 - 1–5 是所有后续节点的结构前提；S1 未完成前不得在旧 server/cli 结构上旁挂第二套分布式业务实现。

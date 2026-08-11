@@ -43,7 +43,7 @@ function platformSpec(
   platform: "win32" | "darwin" | "linux",
   directory: string,
 ) {
-  return buildManagedServiceSpec({
+  const spec = buildManagedServiceSpec({
     platform,
     zhixingHome: platform === "win32"
       ? path.win32.join(directory, "home")
@@ -58,6 +58,10 @@ function platformSpec(
     osUser: "test",
     userHome: platform === "win32" ? directory : "/zhixing-unit-36-managed-service/user",
     ...(platform === "win32" ? {} : { uid: 1000 }),
+  });
+  return Object.freeze({
+    ...spec,
+    definitionPath: path.join(directory, `${platform}.definition`),
   });
 }
 
@@ -178,14 +182,11 @@ describe("managed service platform contract", () => {
       const directory = await createTempDir("managed-service-windows-bytes");
       const spec = localSpec(directory);
       let installed = false;
-      const runner: ManagedServiceCommandRunner = async (_command, args) => {
-        if (args.includes("/Query") && args.includes("/XML")) {
+      const runner: ManagedServiceCommandRunner = async (command, args) => {
+        if (command === "powershell.exe") {
           return installed
-            ? { code: 0, stdout: spec.definition, stderr: "" }
+            ? { code: 0, stdout: windowsInspectionJson(spec), stderr: "" }
             : { code: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." };
-        }
-        if (args.includes("/FO")) {
-          return { code: 0, stdout: "Ready", stderr: "" };
         }
         if (args.includes("/Create")) installed = true;
         return { code: 0, stdout: "", stderr: "" };
@@ -242,7 +243,12 @@ describe("managed service platform contract", () => {
       });
       const signal = new AbortController().signal;
       try {
-        await expect(createManagedServiceAdapter({ platform: "win32" }).install(spec, signal))
+        const adapter = createManagedServiceAdapter({ platform: "win32" });
+        await expect(adapter.install(spec, signal)).resolves.toMatchObject({
+          state: "enabled",
+          matches: true,
+        });
+        await expect(adapter.inspect(spec, signal))
           .resolves.toMatchObject({ state: "enabled", matches: true });
 
         const powershell = path.win32.join(
@@ -299,13 +305,10 @@ describe("managed service platform contract", () => {
     const runner: ManagedServiceCommandRunner = async (command, args, { signal }) => {
       if (signal.aborted) throw signal.reason;
       calls.push(`${command} ${args.join(" ")}`);
-      if (args.includes("/Query") && args.includes("/XML")) {
+      if (command === "powershell.exe") {
         return installed
-          ? { code: 0, stdout: enabled ? spec.definition : spec.definition.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>"), stderr: "" }
+          ? { code: 0, stdout: windowsInspectionJson(spec, { enabled, running }), stderr: "" }
           : { code: 1, stdout: "", stderr: "not found" };
-      }
-      if (args.includes("/FO")) {
-        return { code: 0, stdout: running ? "running" : "ready", stderr: "" };
       }
       if (args.includes("is-enabled")) {
         return installed
@@ -353,11 +356,7 @@ describe("managed service platform contract", () => {
     "disables future launch before safely stopping the current %s instance",
     async (platform) => {
       const directory = await createTempDir(`managed-service-${platform}-stop`);
-      const generated = platformSpec(platform, directory);
-      const spec = Object.freeze({
-        ...generated,
-        definitionPath: path.join(directory, `${platform}.definition`),
-      });
+      const spec = platformSpec(platform, directory);
       await mkdir(path.dirname(spec.definitionPath), { recursive: true });
       await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
       let enabled = true;
@@ -365,17 +364,12 @@ describe("managed service platform contract", () => {
       const calls: string[] = [];
       const runner: ManagedServiceCommandRunner = async (command, args) => {
         calls.push(`${command} ${args.join(" ")}`);
-        if (platform === "win32" && args.includes("/XML")) {
+        if (platform === "win32" && command === "powershell.exe") {
           return {
             code: 0,
-            stdout: enabled
-              ? spec.definition
-              : spec.definition.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>"),
+            stdout: windowsInspectionJson(spec, { enabled, running }),
             stderr: "",
           };
-        }
-        if (platform === "win32" && args.includes("/FO")) {
-          return { code: 0, stdout: running ? "running" : "ready", stderr: "" };
         }
         if (platform === "darwin" && args.includes("print-disabled")) {
           return {
@@ -398,6 +392,12 @@ describe("managed service platform contract", () => {
         return { code: 0, stdout: "", stderr: "" };
       };
       const adapter = createManagedServiceAdapter({ platform, commandRunner: runner });
+      await expect(adapter.disableFuture(spec, new AbortController().signal)).resolves.toMatchObject({
+        state: "disabled",
+        running: true,
+      });
+      expect(calls.some((call) => /\/End|bootout|--now/u.test(call))).toBe(false);
+
       await expect(adapter.disable(spec, new AbortController().signal)).resolves.toMatchObject({
         state: "disabled",
         running: false,
@@ -410,6 +410,51 @@ describe("managed service platform contract", () => {
       expect(stopIndex).toBeGreaterThanOrEqual(futureIndex);
     },
   );
+
+  it("strictly projects Windows numeric state, current SID and typed collections", async () => {
+    const directory = await createTempDir("managed-service-windows-inspection");
+    const spec = platformSpec("win32", directory);
+    await mkdir(path.dirname(spec.definitionPath), { recursive: true });
+    await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+    let payload = windowsInspectionJson(spec, { state: 2 });
+    const adapter = createManagedServiceAdapter({
+      platform: "win32",
+      commandRunner: async (command) => {
+        expect(command).toBe("powershell.exe");
+        return { code: 0, stdout: payload, stderr: "" };
+      },
+    });
+    const signal = new AbortController().signal;
+
+    await expect(adapter.inspect(spec, signal)).resolves.toEqual({
+      state: "enabled",
+      running: true,
+      matches: true,
+    });
+
+    payload = windowsInspectionJson(spec, { principalUserId: `MACHINE\\${spec.osUser}` });
+    await expect(adapter.inspect(spec, signal)).resolves.toMatchObject({ matches: true });
+
+    payload = windowsInspectionJson(spec, { principalUserId: "S-1-5-21-9-9-9-999" });
+    await expect(adapter.inspect(spec, signal)).resolves.toMatchObject({ matches: false });
+
+    payload = windowsInspectionJson(spec, { principalUserId: "" });
+    await expect(adapter.inspect(spec, signal)).rejects.toMatchObject({ code: "read-back-failed" });
+
+    payload = windowsInspectionJson(spec, {
+      triggers: [
+        { type: 9, enabled: true, userId: spec.osUser },
+        { type: 8, enabled: true, userId: null },
+      ],
+    });
+    await expect(adapter.inspect(spec, signal)).resolves.toMatchObject({ matches: false });
+
+    payload = windowsInspectionJson(spec, { state: 0 });
+    await expect(adapter.inspect(spec, signal)).rejects.toMatchObject({ code: "read-back-failed" });
+
+    payload = '{"state":3}';
+    await expect(adapter.inspect(spec, signal)).rejects.toMatchObject({ code: "read-back-failed" });
+  });
 
   it("fails closed on definition drift, unsupported platforms and cancellation", async () => {
     const directory = await createTempDir("managed-service-drift");
@@ -572,11 +617,12 @@ function startRunner(
       return outcome;
     }
     if (starts > 0) inspectionsAfterStart += 1;
-    if (platform === "win32" && args.includes("/XML")) {
-      return { code: 0, stdout: spec.definition, stderr: "" };
-    }
-    if (platform === "win32" && args.includes("/FO")) {
-      return { code: 0, stdout: exposeRunning ? "running" : "ready", stderr: "" };
+    if (platform === "win32" && _command === "powershell.exe") {
+      return {
+        code: 0,
+        stdout: windowsInspectionJson(spec, { running: exposeRunning }),
+        stderr: "",
+      };
     }
     if (platform === "darwin" && args.includes("print-disabled")) {
       return { code: 0, stdout: "", stderr: "" };
@@ -599,6 +645,52 @@ function startRunner(
     startCalls: () => starts,
     postInspectCalls: () => inspectionsAfterStart,
   };
+}
+
+function windowsInspectionJson(
+  spec: ReturnType<typeof platformSpec> | ReturnType<typeof localSpec>,
+  options: {
+    readonly enabled?: boolean;
+    readonly running?: boolean;
+    readonly state?: number;
+    readonly principalUserId?: string;
+    readonly triggers?: readonly Record<string, unknown>[];
+    readonly actions?: readonly Record<string, unknown>[];
+  } = {},
+): string {
+  const sid = "S-1-5-21-1-2-3-1001";
+  const trigger = { type: 9, enabled: true, userId: spec.osUser };
+  const action = {
+    type: 0,
+    path: spec.command,
+    arguments: spec.args.map(quoteWindowsTestArgument).join(" "),
+    workingDirectory: "",
+  };
+  return JSON.stringify({
+    taskName: spec.serviceId,
+    taskPath: `\\${spec.serviceId}`,
+    enabled: options.enabled ?? true,
+    state: options.state ?? (options.running ? 4 : 3),
+    currentUser: { sid, name: `MACHINE\\${spec.osUser}` },
+    principal: {
+      id: "CurrentUser",
+      userId: options.principalUserId ?? sid,
+      logonType: 3,
+      runLevel: 0,
+    },
+    triggers: options.triggers ?? [trigger],
+    actions: { context: "CurrentUser", items: options.actions ?? [action] },
+    settings: {
+      enabled: true,
+      multipleInstances: 2,
+      restartInterval: "PT1M",
+      restartCount: 999,
+    },
+  });
+}
+
+function quoteWindowsTestArgument(value: string): string {
+  return `"${value.replace(/(\\*)"/gu, "$1$1\\\"").replace(/(\\+)$/gu, "$1$1")}"`;
 }
 
 function restoreEnvironment(key: string, value: string | undefined): void {

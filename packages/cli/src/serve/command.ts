@@ -1386,6 +1386,17 @@ async function runServerProcess(
           },
         });
       },
+      beginDrain: async () => {
+        managedHostStopping = true;
+        ctx.inboundRouter?.refuseNewMessages();
+        await ctx.channelConnections?.disconnectConfigured();
+        await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+        await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      },
+      drainAcceptedWork: async () => {
+        await ctx.inboundRouter?.drainAcceptedMessages();
+        await ctx.executorJobOwner?.drain();
+      },
       flushDelivery: async () => {
         await ctx.deliveryStack?.flush();
       },
