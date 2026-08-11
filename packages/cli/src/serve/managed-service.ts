@@ -47,6 +47,8 @@ export type ManagedServiceErrorCode =
   | "aborted"
   | "command-timeout"
   | "command-failed"
+  | "permission-required"
+  | "manager-unavailable"
   | "definition-drift"
   | "read-back-failed"
   | "unsupported-platform";
@@ -206,7 +208,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
   async inspect(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection> {
     this.assertSpec(spec);
     throwIfAborted(signal);
-    const stored = await readFile(spec.definitionPath, "utf8").catch((error: unknown) => {
+    const stored = await readFile(spec.definitionPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return undefined;
       throw error;
     });
@@ -218,7 +220,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     }
     return {
       ...manager,
-      matches: stored === spec.definition && manager.matches,
+      matches: stored.equals(managedServiceDefinitionBytes(spec)) && manager.matches,
     };
   }
 
@@ -238,7 +240,11 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
             definitionDigest(spec),
             { obligation: "pre-commit", maxWaitMs: 5_000 },
           ),
-          () => writeDefinition(spec.definitionPath, spec.definition, signal),
+          () => writeDefinition(
+            spec.definitionPath,
+            managedServiceDefinitionBytes(spec),
+            signal,
+          ),
         );
       });
     }
@@ -257,7 +263,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     if (!before.matches) {
       throw new ManagedServiceError("definition-drift", "Existing managed service belongs to another installation");
     }
-    await this.disableManager(spec, signal);
+    await this.disableManager(spec, before, signal);
     const after = await this.inspect(spec, signal);
     if (after.state === "enabled" || after.running) {
       throw new ManagedServiceError("read-back-failed", "Managed service disable could not be verified");
@@ -297,12 +303,18 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
         command: "schtasks.exe",
         args: ["/Query", "/TN", spec.serviceId, "/XML"],
       }, signal);
-      if (query.code !== 0) return { state: "absent", running: false, matches: true };
+      if (query.code !== 0) {
+        this.requireDefiniteAbsence(query);
+        return { state: "absent", running: false, matches: true };
+      }
       const enabled = !/<Enabled>false<\/Enabled>/iu.test(query.stdout);
       const status = await this.command({
         command: "schtasks.exe",
         args: ["/Query", "/TN", spec.serviceId, "/FO", "CSV", "/NH"],
       }, signal);
+      if (status.code !== 0) {
+        this.throwManagerFailure(status);
+      }
       return {
         state: enabled ? "enabled" : "disabled",
         running: status.code === 0 && /running/iu.test(status.stdout),
@@ -315,11 +327,17 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
         command: "/bin/launchctl",
         args: ["print", `${domain}/${spec.serviceId}`],
       }, signal);
-      if (printed.code !== 0) return { state: "absent", running: false, matches: true };
+      if (printed.code !== 0) {
+        this.requireDefiniteAbsence(printed);
+        return { state: "absent", running: false, matches: true };
+      }
       const disabled = await this.command({
         command: "/bin/launchctl",
         args: ["print-disabled", domain],
       }, signal);
+      if (disabled.code !== 0) {
+        this.throwManagerFailure(disabled);
+      }
       const isDisabled = new RegExp(`"${escapeRegExp(spec.serviceId)}"\\s*=>\\s*true`, "u")
         .test(disabled.stdout);
       return {
@@ -333,12 +351,19 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
       args: ["--user", "is-enabled", spec.serviceId],
     }, signal);
     if (enabled.code !== 0 && enabled.stdout.trim() !== "disabled") {
+      this.requireDefiniteAbsence(enabled);
       return { state: "absent", running: false, matches: true };
     }
     const active = await this.command({
       command: "systemctl",
       args: ["--user", "is-active", spec.serviceId],
     }, signal);
+    if (
+      active.code !== 0 &&
+      !/^(?:inactive|failed|deactivating)$/u.test(active.stdout.trim())
+    ) {
+      this.throwManagerFailure(active);
+    }
     return {
       state: enabled.stdout.trim() === "enabled" ? "enabled" : "disabled",
       running: active.code === 0 && active.stdout.trim() === "active",
@@ -382,16 +407,42 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     await this.requireCommand({ command: "systemctl", args: ["--user", "enable", spec.serviceId] }, signal);
   }
 
-  private async disableManager(spec: ManagedServiceSpec, signal: AbortSignal): Promise<void> {
-    const command = this.platform === "win32"
-      ? { command: "schtasks.exe", args: ["/Change", "/TN", spec.serviceId, "/DISABLE"] }
-      : this.platform === "darwin"
-        ? {
-            command: "/bin/launchctl",
-            args: ["disable", `gui/${spec.uid ?? 0}/${spec.serviceId}`],
-          }
-        : { command: "systemctl", args: ["--user", "disable", "--now", spec.serviceId] };
-    await this.requireCommand(command, signal);
+  private async disableManager(
+    spec: ManagedServiceSpec,
+    before: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.platform === "win32") {
+      await this.requireCommand({
+        command: "schtasks.exe",
+        args: ["/Change", "/TN", spec.serviceId, "/DISABLE"],
+      }, signal);
+      if (before.running) {
+        await this.requireStopCommand({
+          command: "schtasks.exe",
+          args: ["/End", "/TN", spec.serviceId],
+        }, signal);
+      }
+      return;
+    }
+    if (this.platform === "darwin") {
+      const service = `gui/${spec.uid ?? 0}/${spec.serviceId}`;
+      await this.requireCommand({
+        command: "/bin/launchctl",
+        args: ["disable", service],
+      }, signal);
+      if (before.running) {
+        await this.requireStopCommand({
+          command: "/bin/launchctl",
+          args: ["bootout", service],
+        }, signal);
+      }
+      return;
+    }
+    await this.requireCommand({
+      command: "systemctl",
+      args: ["--user", "disable", "--now", spec.serviceId],
+    }, signal);
   }
 
   private async requireCommand(
@@ -400,17 +451,92 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
   ): Promise<void> {
     const result = await this.command(request, signal);
     if (result.code !== 0) {
+      this.throwManagerFailure(result, false);
       throw new ManagedServiceError("command-failed", "Managed service manager rejected the operation");
     }
   }
 
-  private command(
+  private async requireStopCommand(
+    request: { readonly command: string; readonly args: readonly string[] },
+    signal: AbortSignal,
+  ): Promise<void> {
+    const result = await this.command(request, signal);
+    if (result.code === 0 || classifyManagerFailure(this.platform, result) === "not-found") return;
+    this.throwManagerFailure(result, false);
+    throw new ManagedServiceError("command-failed", "Managed service could not be stopped safely");
+  }
+
+  private async command(
     request: { readonly command: string; readonly args: readonly string[] },
     signal: AbortSignal,
   ): Promise<ManagedServiceCommandResult> {
     throwIfAborted(signal);
-    return this.run(request.command, request.args, { signal, timeoutMs: this.timeoutMs });
+    try {
+      return await this.run(request.command, request.args, { signal, timeoutMs: this.timeoutMs });
+    } catch (error) {
+      if (error instanceof ManagedServiceError) throw error;
+      if (isNodeError(error, "EACCES") || isNodeError(error, "EPERM")) {
+        throw new ManagedServiceError(
+          "permission-required",
+          "Managed service manager permission is required",
+        );
+      }
+      throw new ManagedServiceError(
+        "manager-unavailable",
+        "Managed service manager is unavailable",
+      );
+    }
   }
+
+  private requireDefiniteAbsence(result: ManagedServiceCommandResult): void {
+    const classification = classifyManagerFailure(this.platform, result);
+    if (classification === "not-found") return;
+    this.throwManagerFailure(result);
+  }
+
+  private throwManagerFailure(
+    result: ManagedServiceCommandResult,
+    includeNotFound = true,
+  ): never | void {
+    const classification = classifyManagerFailure(this.platform, result);
+    if (!includeNotFound && classification === "not-found") return;
+    if (classification === "permission-required") {
+      throw new ManagedServiceError(
+        "permission-required",
+        "Managed service manager permission is required",
+      );
+    }
+    throw new ManagedServiceError(
+      "manager-unavailable",
+      "Managed service manager is unavailable",
+    );
+  }
+}
+
+function classifyManagerFailure(
+  platform: ManagedServicePlatform,
+  result: ManagedServiceCommandResult,
+): "not-found" | "permission-required" | "manager-unavailable" {
+  const output = `${result.stdout}\n${result.stderr}`.trim().toLowerCase();
+  if (
+    /access is denied|permission denied|operation not permitted|not authorized|0x80070005|2147942405/u
+      .test(output)
+  ) {
+    return "permission-required";
+  }
+  if (platform === "win32") {
+    if (/not found|cannot find|0x80070002|2147942402/u.test(output)) return "not-found";
+  } else if (platform === "darwin") {
+    if (result.code === 113 || /could not find service|service .* not found/u.test(output)) {
+      return "not-found";
+    }
+  } else if (
+    result.code === 4 ||
+    /(?:^|\s)not-found(?:\s|$)|unit .* (?:not found|could not be found)/u.test(output)
+  ) {
+    return "not-found";
+  }
+  return "manager-unavailable";
 }
 
 function startCommand(spec: ManagedServiceSpec): { command: string; args: readonly string[] } {
@@ -432,7 +558,7 @@ function renderManagedServiceDefinition(
   if (spec.platform === "win32") {
     const command = [spec.command, ...spec.args].map(quoteWindowsArgument).join(" ");
     return [
-      '<?xml version="1.0" encoding="UTF-16"?>',
+      '<?xml version="1.0" encoding="UTF-8"?>',
       '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
       "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
       "  <Principals><Principal id=\"CurrentUser\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>",
@@ -497,17 +623,17 @@ function isPlatformSecretStoreBackend(value: string): value is PlatformSecretSto
 
 async function writeDefinition(
   filePath: string,
-  definition: string,
+  definition: Buffer,
   signal: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const existing = await readFile(filePath, "utf8").catch((error: unknown) => {
+  const existing = await readFile(filePath).catch((error: unknown) => {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
   });
   if (existing !== undefined) {
-    if (existing !== definition) {
+    if (!existing.equals(definition)) {
       throw new ManagedServiceError("definition-drift", "Existing managed service definition differs");
     }
     return;
@@ -516,7 +642,7 @@ async function writeDefinition(
   try {
     const handle = await open(temporary, "wx", 0o600);
     try {
-      await handle.writeFile(definition, "utf8");
+      await handle.writeFile(definition);
       await handle.sync();
     } finally {
       await handle.close();
@@ -525,6 +651,13 @@ async function writeDefinition(
     throwIfAborted(signal);
     await rename(temporary, filePath);
     await syncDirectory(path.dirname(filePath));
+    const durable = await readFile(filePath);
+    if (!durable.equals(definition)) {
+      throw new ManagedServiceError(
+        "read-back-failed",
+        "Managed service definition bytes could not be verified",
+      );
+    }
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
@@ -574,7 +707,11 @@ async function runManagedServiceCommand(
 }
 
 function definitionDigest(spec: ManagedServiceSpec): string {
-  return createHash("sha256").update(spec.definition, "utf8").digest("hex");
+  return createHash("sha256").update(managedServiceDefinitionBytes(spec)).digest("hex");
+}
+
+export function managedServiceDefinitionBytes(spec: ManagedServiceSpec): Buffer {
+  return Buffer.from(spec.definition, "utf8");
 }
 
 function canonicalAbsolutePath(value: string, platform: NodeJS.Platform): string {

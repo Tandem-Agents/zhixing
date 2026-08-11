@@ -107,7 +107,14 @@ export interface CoreHostConnectionDeps {
   /** 发现已在跑的宿主。 */
   discover: () => Promise<ServerEndpoint>;
   /** 拉起核心宿主，返回是否成功。 */
-  spawn: () => Promise<{ ok: boolean; reason?: string; recoverable?: boolean }>;
+  spawn: () => Promise<{
+    ok: boolean;
+    reason?: string;
+    recoverable?: boolean;
+    mode?: "managed" | "on-demand" | "none";
+  }>;
+  /** 本机无需 host 时，建立到 current anchor 的有限认证 surface client。 */
+  createSurfaceClient?: () => Promise<RpcClient>;
   /** 停止 PID 存活但连接不可用的宿主。默认复用显式停止的优雅/强制清理链。 */
   stopUnresponsiveHost?: (
     endpoint: ServerEndpoint,
@@ -149,10 +156,10 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
         return { ok: false, reason: reconciled.error };
       }
       if (reconciled.plan.mode === "managed") {
-        return { ok: true, recoverable: true };
+        return { ok: true, recoverable: true, mode: "managed" };
       }
       if (reconciled.plan.mode === "none") {
-        return { ok: false, reason: "这台设备不需要后台运行" };
+        return { ok: false, reason: "这台设备不需要后台运行", mode: "none" };
       }
       // 静默 console：spawnDaemon 默认会打印成功横幅 / 失败日志尾部，但 ensure 是后台
       // 按需拉起、不是用户显式 serve，结果应由本层统一封装成友好错误。
@@ -169,6 +176,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
         ok: result.ok,
         reason: result.reason,
         recoverable: result.status === "starting",
+        mode: "on-demand",
       };
     },
     stopUnresponsiveHost: async (endpoint) => {
@@ -189,6 +197,12 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
       return { ok: true };
     },
     createClient: (url) => createRpcClient({ url }),
+    createSurfaceClient: async () => {
+      const { createCurrentAnchorSurfaceRpcClient } = await import(
+        "./surface-core-host-link.js"
+      );
+      return createCurrentAnchorSurfaceRpcClient();
+    },
     clientVersion: ZHIXING_CLI_VERSION,
   };
 }
@@ -294,7 +308,37 @@ export class CoreHostConnection implements CoreHostRpcLink {
     reconnectReason?: "connection-closed",
   ): Promise<RpcClient> {
     const established = await this.establish();
+    if ("surfaceClient" in established) {
+      return this.activateSurfaceClient(established.surfaceClient, epoch, reconnectReason);
+    }
     return this.activateEstablished(established, epoch, reconnectReason);
+  }
+
+  private async activateSurfaceClient(
+    client: RpcClient,
+    epoch: number,
+    reconnectReason?: "connection-closed",
+  ): Promise<RpcClient> {
+    if (this.disposed || epoch !== this.lifecycleEpoch) {
+      await client.close().catch(() => {});
+      throw new Error("CoreHostConnection 在远端接入面建立期间被释放或换代");
+    }
+    this.client = client;
+    this.endpoint = null;
+    this.forwardedMethods = new Set();
+    this.status = {
+      kind: "connected",
+      protocol: PROTOCOL_VERSION,
+      serverVersion: this.clientVersion(),
+      clientVersion: this.clientVersion(),
+      capabilities: ["first-party-current-anchor"],
+      versionState: "current",
+    };
+    for (const method of this.subscriptions.keys()) this.attachForwarder(client, method);
+    if (reconnectReason) {
+      await this.emitNotice({ kind: "reconnected", reason: reconnectReason });
+    }
+    return client;
   }
 
   private async activateEstablished(
@@ -347,8 +391,10 @@ export class CoreHostConnection implements CoreHostRpcLink {
     return client;
   }
 
-  private async establish(): Promise<EstablishedClient> {
-    const endpoint = await this.discoverOrSpawn();
+  private async establish(): Promise<EstablishedClient | { readonly surfaceClient: RpcClient }> {
+    const target = await this.discoverOrSpawn();
+    if ("surfaceClient" in target) return target;
+    const endpoint = target.endpoint;
     const established = await this.connectEndpoint(endpoint, {
       replaceUnresponsive: true,
       replaceVersionMismatch: true,
@@ -657,16 +703,58 @@ export class CoreHostConnection implements CoreHostRpcLink {
     });
   }
 
-  private async discoverOrSpawn(): Promise<ServerEndpoint> {
+  private async discoverOrSpawn(): Promise<
+    | { readonly endpoint: ServerEndpoint }
+    | { readonly surfaceClient: RpcClient }
+  > {
     try {
-      return await this.deps.discover();
+      return { endpoint: await this.deps.discover() };
     } catch (err) {
       if (!(err instanceof ServerNotRunningError)) throw err;
-      return await this.spawnAndDiscoverEndpoint({
+      await this.emitNotice({ kind: "starting" });
+      const spawned = await this.deps.spawn();
+      if (spawned.mode === "none") {
+        if (!this.deps.createSurfaceClient) {
+          throw new CoreHostUnavailableError(spawned.reason ?? "值班设备暂时不可用");
+        }
+        const surfaceClient = await this.deps.createSurfaceClient();
+        await surfaceClient.connect();
+        return { surfaceClient };
+      }
+      const endpoint = await this.discoverAfterSpawn(spawned, {
         unableToStartReason: "知行启动失败，且没有发现可用服务",
         unableToConnectReason: "知行已启动，但暂时无法连接",
       });
+      return { endpoint };
     }
+  }
+
+  private async discoverAfterSpawn(
+    spawned: Awaited<ReturnType<CoreHostConnectionDeps["spawn"]>>,
+    opts: {
+      acceptEndpoint?: (endpoint: ServerEndpoint) => boolean;
+      unableToStartReason: string;
+      unableToConnectReason: string;
+    },
+  ): Promise<ServerEndpoint> {
+    if (!spawned.ok) {
+      const endpoint = spawned.recoverable
+        ? await this.waitForDiscoverableService({
+            timeoutMs: this.deps.startupRecoveryTimeoutMs ?? DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+            pollIntervalMs: this.deps.startupRecoveryPollMs ?? DEFAULT_STARTUP_RECOVERY_POLL_MS,
+            acceptEndpoint: opts.acceptEndpoint,
+          })
+        : await this.tryDiscover(opts.acceptEndpoint);
+      if (endpoint) return endpoint;
+      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason);
+    }
+    const endpoint = await this.waitForDiscoverableService({
+      timeoutMs: this.deps.startupRecoveryTimeoutMs ?? DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+      pollIntervalMs: this.deps.startupRecoveryPollMs ?? DEFAULT_STARTUP_RECOVERY_POLL_MS,
+      acceptEndpoint: opts.acceptEndpoint,
+    });
+    if (endpoint) return endpoint;
+    throw new CoreHostUnavailableError(opts.unableToConnectReason);
   }
 
   private async spawnAndDiscoverEndpoint(opts: {
@@ -675,32 +763,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     unableToConnectReason: string;
   }): Promise<ServerEndpoint> {
     await this.emitNotice({ kind: "starting" });
-    const spawned = await this.deps.spawn();
-    if (!spawned.ok) {
-      const endpoint = spawned.recoverable
-        ? await this.waitForDiscoverableService({
-            timeoutMs: this.deps.startupRecoveryTimeoutMs ??
-              DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
-            pollIntervalMs: this.deps.startupRecoveryPollMs ??
-              DEFAULT_STARTUP_RECOVERY_POLL_MS,
-            acceptEndpoint: opts.acceptEndpoint,
-          })
-        : await this.tryDiscover(opts.acceptEndpoint);
-      if (endpoint) return endpoint;
-      throw new CoreHostUnavailableError(
-        spawned.reason ?? opts.unableToStartReason,
-      );
-    }
-
-    const endpoint = await this.waitForDiscoverableService({
-      timeoutMs: this.deps.startupRecoveryTimeoutMs ??
-        DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
-      pollIntervalMs: this.deps.startupRecoveryPollMs ??
-        DEFAULT_STARTUP_RECOVERY_POLL_MS,
-      acceptEndpoint: opts.acceptEndpoint,
-    });
-    if (endpoint) return endpoint;
-    throw new CoreHostUnavailableError(opts.unableToConnectReason);
+    return this.discoverAfterSpawn(await this.deps.spawn(), opts);
   }
 
   private async tryDiscover(

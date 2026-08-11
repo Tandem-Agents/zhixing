@@ -934,6 +934,7 @@ export function inspectManagedHostAssembly(records) {
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
+  const surfaceLink = byPath.get("packages/cli/src/runtime/surface-core-host-link.ts");
   const secrets = byPath.get("packages/secrets/src/platform-secret-store.ts");
   const status = byPath.get("packages/cli/src/serve/status.ts");
   const publicStatus = byPath.get("packages/server/src/managed-host-status.ts");
@@ -942,7 +943,7 @@ export function inspectManagedHostAssembly(records) {
   const manifest = byPath.get("packages/core/src/protocol/manifest.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !topology || !connection || !secrets || !status || !publicStatus ||
+    !command || !topology || !connection || !surfaceLink || !secrets || !status || !publicStatus ||
     !statusRoute || !scheduler || !manifest
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
@@ -975,7 +976,12 @@ export function inspectManagedHostAssembly(records) {
     count(pairing, 'reconcileAfterPairing(options, "pairing-issuer-committed")') !== 1 ||
     count(pairing, 'reconcileAfterPairing(options, "pairing-joiner-committed")') !== 1 ||
     count(config, 'reconcileCurrentManagedService("local-role-config-committed")') !== 1 ||
+    config.indexOf("const reloadResult = await deps.requestHostReload()") >=
+      config.indexOf('reconcileCurrentManagedService("local-role-config-committed")') ||
     count(serviceRuntime, 'reconcile("current-trust-applied")') !== 1 ||
+    serviceRuntime.indexOf("await deps.requestShutdown()") >=
+      serviceRuntime.indexOf('await reconcile("current-trust-applied")') ||
+    !serviceRuntime.includes('return "stopped";') ||
     count(command, "coordinateManagedHostTrustTransition({") !== 1 ||
     count(topology, 'reconcileCurrentManagedService("managed-preflight")') < 1 ||
     count(connection, 'reconcileCurrentManagedService("host-missing")') !== 1
@@ -983,6 +989,7 @@ export function inspectManagedHostAssembly(records) {
   if (
     count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 1 ||
     !service.includes('"managed-service-reconcile"') ||
+    !service.includes("export function managedServiceDefinitionBytes(") ||
     !service.includes('"--managed-home"') ||
     !service.includes('"--managed-secret-backend"') ||
     !service.includes("applyManagedServiceLaunchContext(") ||
@@ -996,6 +1003,7 @@ export function inspectManagedHostAssembly(records) {
     !bootstrap.includes('"anchor-authority-conflict"') ||
     !bootstrap.includes("A non-current device cannot launch the anchor role") ||
     !secrets.includes('context?: "foreground" | "managed"') ||
+    !secrets.includes("async loadExisting(): Promise<Buffer>") ||
     !secrets.includes('const BACKEND_BINDING_FILE = `${SECRET_STORE_FILE_PREFIX}.backend.json`;')
   ) failures.push("managed host authority plan or SecretStore context drifted");
   if (
@@ -1003,12 +1011,21 @@ export function inspectManagedHostAssembly(records) {
     !status.includes('from "@zhixing/server"') ||
     !status.includes("export { projectManagedHostStatus }") ||
     !status.includes("export async function buildManagedHostPublicStatus(") ||
-    !statusRoute.includes("ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({") ||
-    !command.includes("managedHostPublicStatus: () => projectManagedHostStatus({") ||
+    !status.includes("export async function buildManagedHostStatusSnapshot(") ||
+    !statusRoute.includes("return await ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({") ||
+    !command.includes("managedHostPublicStatus: () => buildManagedHostPublicStatus(") ||
     !scheduler.includes("executorCapabilities.onAccepted(") ||
     !scheduler.includes("this.scheduler.wakeQueuedUserJobs()") ||
     !manifest.includes("onAccepted(listener:")
   ) failures.push("managed host public status or executor queue wake drifted");
+  if (
+    !connection.includes('if (spawned.mode === "none")') ||
+    !connection.includes("const surfaceClient = await this.deps.createSurfaceClient()") ||
+    !surfaceLink.includes("isCurrentAnchorRelayMethod(method)") ||
+    !surfaceLink.includes("canonicalize(trust)") ||
+    !surfaceLink.includes("await this.#remote.close(this.#connection)") ||
+    !surfaceLink.includes("this.bootstrapStore.stopStorageMaintenance()")
+  ) failures.push("managed host finite current-anchor surface relay drifted");
   for (const forbidden of [
     "uninstallManagedService",
     "upgradeManagedService",
@@ -3461,6 +3478,7 @@ const coreHostRpcLinkOwners = new Set([
 ]);
 const rpcClientOwners = new Set([
   "packages/cli/src/runtime/core-host-connection.ts",
+  "packages/cli/src/runtime/surface-core-host-link.ts",
   "packages/cli/src/serve/stop.ts",
 ]);
 const coreHostConnectionOwners = new Set([

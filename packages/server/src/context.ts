@@ -214,7 +214,7 @@ export interface ServerContext {
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
   /** 公开的本机运行状态；只允许稳定产品语言和有限动作。 */
-  managedHostPublicStatus?: () => ManagedHostPublicStatus;
+  managedHostPublicStatus?: () => ManagedHostPublicStatus | Promise<ManagedHostPublicStatus>;
   /** 用户级恢复备份状态；不暴露 root、日志水位或摘要。 */
   recoveryBackupStatus?: () => Promise<{
     state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";

@@ -16,6 +16,7 @@
 
 import chalk from "chalk";
 import http from "node:http";
+import { canonicalize } from "@zhixing/core/protocol";
 import {
   readLock,
   isProcessAlive,
@@ -29,9 +30,14 @@ import {
   type ManagedHostPublicState,
   type ManagedHostPublicStatus,
 } from "@zhixing/server";
-import { createManagedServiceAdapter } from "./managed-service.js";
+import {
+  createManagedServiceAdapter,
+  ManagedServiceError,
+  type ManagedServiceAdapter,
+} from "./managed-service.js";
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
+import type { ManagedServiceCurrentState } from "./managed-service-reconciler.js";
 
 export type ServerLiveStatus = "running" | "running-unhealthy" | "stopped" | "stale";
 
@@ -96,31 +102,104 @@ export async function runStatusCommand(opts: StatusOptions = {}): Promise<Status
 
 export async function buildManagedHostPublicStatus(
   processReport: StatusReport,
+  options: {
+    readonly readiness?: Parameters<typeof projectManagedHostStatus>[0]["readiness"];
+    readonly deps?: ManagedHostStatusSnapshotDeps;
+  } = {},
 ): Promise<ManagedHostPublicStatus> {
-  try {
-    const current = await loadCurrentManagedServiceState();
-    const plan = resolveHostLaunchPlan(current);
-    const service = current.spec
-      ? await createManagedServiceAdapter().inspect(
-          current.spec,
-          new AbortController().signal,
-        )
-      : undefined;
-    return projectManagedHostStatus({
-      desired: plan.mode,
-      ...(service ? { service } : {}),
-      process: processReport.status,
-      readiness: readinessFor(processReport),
-    });
-  } catch (error) {
-    return projectManagedHostStatus({
-      desired: "managed",
-      process: processReport.status,
-      errorCode: error instanceof Error && error.message === "local-credentials-unavailable"
-        ? "credentials-locked"
-        : "configuration-invalid",
-    });
+  return projectManagedHostStatus(await buildManagedHostStatusSnapshot(processReport, options));
+}
+
+export interface ManagedHostStatusSnapshotDeps {
+  readonly loadCurrent?: () => Promise<ManagedServiceCurrentState>;
+  readonly adapter?: Pick<ManagedServiceAdapter, "inspect">;
+}
+
+export async function buildManagedHostStatusSnapshot(
+  processReport: StatusReport,
+  options: {
+    readonly readiness?: Parameters<typeof projectManagedHostStatus>[0]["readiness"];
+    readonly deps?: ManagedHostStatusSnapshotDeps;
+  } = {},
+): Promise<Parameters<typeof projectManagedHostStatus>[0]> {
+  const loadCurrent = options.deps?.loadCurrent ?? (() => loadCurrentManagedServiceState());
+  const adapter = options.deps?.adapter ?? createManagedServiceAdapter();
+  const readiness = options.readiness ?? readinessFor(processReport);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let current: ManagedServiceCurrentState;
+    try {
+      current = await loadCurrent();
+    } catch (error) {
+      return {
+        desired: "managed",
+        process: processReport.status,
+        readiness,
+        errorCode: publicStatusError(error),
+      };
+    }
+    const identity = managedStatusIdentity(current);
+    try {
+      const plan = resolveHostLaunchPlan(current);
+      const service = current.spec
+        ? await adapter.inspect(current.spec, new AbortController().signal)
+        : undefined;
+      const latest = await loadCurrent();
+      if (managedStatusIdentity(latest) !== identity) continue;
+      return {
+        desired: plan.mode,
+        ...(service ? { service } : {}),
+        process: processReport.status,
+        readiness,
+      };
+    } catch (error) {
+      try {
+        const latest = await loadCurrent();
+        if (managedStatusIdentity(latest) !== identity) continue;
+      } catch (reloadError) {
+        return {
+          desired: "managed",
+          process: processReport.status,
+          readiness,
+          errorCode: publicStatusError(reloadError),
+        };
+      }
+      return {
+        desired: safeDesiredMode(current),
+        process: processReport.status,
+        readiness,
+        errorCode: publicStatusError(error),
+      };
+    }
   }
+  return {
+    desired: "managed",
+    process: processReport.status,
+    readiness,
+    errorCode: "configuration-invalid",
+  };
+}
+
+function managedStatusIdentity(current: ManagedServiceCurrentState): string {
+  return canonicalize(current);
+}
+
+function safeDesiredMode(current: ManagedServiceCurrentState): "managed" | "on-demand" | "none" {
+  try {
+    return resolveHostLaunchPlan(current).mode;
+  } catch {
+    return "managed";
+  }
+}
+
+function publicStatusError(error: unknown): ManagedHostActionCode {
+  if (error instanceof Error && error.message === "local-credentials-unavailable") {
+    return "credentials-locked";
+  }
+  if (error instanceof ManagedServiceError) {
+    if (error.code === "permission-required") return "permission-required";
+    if (error.code === "manager-unavailable") return "login-required";
+  }
+  return "configuration-invalid";
 }
 
 async function buildReport(deps: StatusDeps): Promise<StatusReport> {

@@ -35,7 +35,13 @@ export function dispatchRest(
   }
 
   if (method === "GET" && url === "/api/status") {
-    sendJson(res, 200, buildStatus(ctx));
+    void buildStatus(ctx)
+      .then((status) => sendJson(res, 200, status))
+      .catch(() => sendJson(res, 200, projectManagedHostStatus({
+        desired: "managed",
+        process: "running-unhealthy",
+        errorCode: "configuration-invalid",
+      })));
     return true;
   }
 
@@ -58,8 +64,8 @@ function buildHealth(ctx: ServerContext): HealthStatus {
   };
 }
 
-function buildStatus(ctx: ServerContext): ServerStatus {
-  return ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({
+async function buildStatus(ctx: ServerContext): Promise<ServerStatus> {
+  return await ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({
     desired: "on-demand",
     process: "running",
     readiness: "ready",

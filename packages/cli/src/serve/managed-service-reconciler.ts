@@ -1,4 +1,5 @@
 import type { HomeTrustRecord, MeshRoleBootConfig } from "@zhixing/core/contracts";
+import path from "node:path";
 import {
   resolveHostLaunchPlan,
   type HostLaunchPlan,
@@ -44,13 +45,19 @@ export interface ManagedServiceReconcileResult {
   readonly action: "installed-and-started" | "started" | "disabled" | "unchanged";
 }
 
-const inFlight = new Map<string, Promise<ManagedServiceReconcileResult>>();
+interface ReconcileWorker {
+  dirty: boolean;
+  promise: Promise<ManagedServiceReconcileResult>;
+}
+
+const inFlight = new Map<string, ReconcileWorker>();
 
 /**
  * Reconciles one home from current durable inputs. Callers provide a loader,
  * never a precomputed plan, so every trigger crosses the same authority check.
  */
 export async function reconcileManagedService(input: {
+  readonly homeKey: string;
   readonly trigger: ManagedServiceReconcileTrigger;
   readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
   readonly adapter: ManagedServiceAdapter;
@@ -59,16 +66,37 @@ export async function reconcileManagedService(input: {
   if (!MANAGED_SERVICE_RECONCILE_TRIGGERS.includes(input.trigger)) {
     throw new TypeError("Managed service reconcile trigger is invalid");
   }
-  const initial = await input.loadCurrent();
-  const key = initial.spec?.serviceId ?? `unregistered:${initial.localDeviceId}`;
+  const key = path.resolve(input.homeKey);
   const current = inFlight.get(key);
-  if (current) return current;
-  const operation = reconcileCurrent(initial, input);
-  inFlight.set(key, operation);
+  if (current) {
+    current.dirty = true;
+    return current.promise;
+  }
+  const worker = { dirty: true } as ReconcileWorker;
+  worker.promise = runDirtyLoop(key, worker, input);
+  inFlight.set(key, worker);
+  return worker.promise;
+}
+
+async function runDirtyLoop(
+  key: string,
+  worker: ReconcileWorker,
+  input: {
+    readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
+    readonly adapter: ManagedServiceAdapter;
+    readonly signal: AbortSignal;
+  },
+): Promise<ManagedServiceReconcileResult> {
+  let result: ManagedServiceReconcileResult | undefined;
   try {
-    return await operation;
+    while (worker.dirty) {
+      worker.dirty = false;
+      const initial = await input.loadCurrent();
+      result = await reconcileCurrent(initial, input);
+    }
+    return result!;
   } finally {
-    if (inFlight.get(key) === operation) inFlight.delete(key);
+    if (inFlight.get(key) === worker) inFlight.delete(key);
   }
 }
 

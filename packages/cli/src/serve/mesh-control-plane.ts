@@ -109,11 +109,7 @@ export class ProductionMeshControlPlane {
       this.#startRecoveryEvidenceDialers();
     } else if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
-    } else if (
-      this.#roles.has("anchor") ||
-      this.#roles.has("executor") ||
-      this.#roles.has("surface")
-    ) {
+    } else {
       this.#startDialer();
     }
     if (this.options.watchTrust !== false) this.#track(this.#watchTrust());
@@ -228,11 +224,7 @@ export class ProductionMeshControlPlane {
     await this.#closeTransport(new Error("Mesh trust topology changed"));
     if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
-    } else if (
-      this.#roles.has("anchor") ||
-      this.#roles.has("executor") ||
-      this.#roles.has("surface")
-    ) {
+    } else {
       this.#startDialer();
     }
   }

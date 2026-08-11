@@ -58,7 +58,7 @@ describe("HTTP Server (S2.B)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      managedHostPublicStatus: () => ({
+      managedHostPublicStatus: async () => ({
         state: "needs-attention",
         label: "需要处理",
         action: "请解锁本机凭据",

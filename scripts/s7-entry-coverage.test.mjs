@@ -1612,6 +1612,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/topology-command.ts",
     "packages/cli/src/runtime/core-host-connection.ts",
+    "packages/cli/src/runtime/surface-core-host-link.ts",
     "packages/secrets/src/platform-secret-store.ts",
     "packages/cli/src/serve/status.ts",
     "packages/server/src/managed-host-status.ts",
@@ -1643,6 +1644,16 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
+      "packages/cli/src/runtime/config-command.ts",
+      (text) => text.replace(
+        "const reloadResult = await deps.requestHostReload();",
+        'await reconcileCurrentManagedService("local-role-config-committed");\n          const reloadResult = await deps.requestHostReload();',
+      ),
+    )).join("\n"),
+    /production trigger exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
         "coordinateManagedHostTrustTransition({",
@@ -1664,6 +1675,13 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       (text) => text.replace("export function projectManagedHostStatus(", "function projectRawHostStatus("),
     )).join("\n"),
     /public status or executor queue wake drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/runtime/surface-core-host-link.ts",
+      (text) => text.replace("isCurrentAnchorRelayMethod(method)", "true"),
+    )).join("\n"),
+    /finite current-anchor surface relay drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

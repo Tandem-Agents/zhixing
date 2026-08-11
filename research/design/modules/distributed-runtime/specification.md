@@ -2614,6 +2614,8 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 | 37（S10） | 三路径停机、移除与卸载 | 回填并实现临时停机、executor 移除、anchor 永久卸载协议；本地权威先转移或用户确认销毁，账本/outbox/租约/身份依序收束 | 三路径逐阶段崩溃恢复、失控设备诚实告知、未收编本地会话阻断移除、迁移/销毁后清退与 `server.shutdown` 三策略测试通过 |
 | 38（S10） | 升级兼容、发布与最终验收 | 落 schema/protocol 兼容门、升级/回滚纪律、诊断与发布检查；执行全部不变量、故障、安全、双拓扑和四时刻产品旅程，移除所有能力开关与迁移兼容层 | `pnpm lint`、`pnpm test`、`pnpm build` 全绿；18 条不变量与故障/对抗矩阵逐项通过；单机 golden、配对、日常、离线、uncertain、撤销/恢复零认知验收通过 |
 
+**第 36 单元可执行合同**：Windows definition 以声明一致的 canonical UTF-8 bytes 为唯一身份，写入、回读、比较与系统创建消费同一 bytes；三平台 supervisor 只把有文档依据的 not-found 解释为 absent，permission 与 manager unavailable 在 definition 写前 fail-closed。已有 SecretStore backend binding 只允许 existing-only 读取，missing/ambiguous 零写，只有无 binding 且确认全新空 store 的首次 foreground 可创建。launch plan 的 future-enabled 与 current-running 独立回读；降级先关闭 current-owner/role gate，再禁未来拉起，当前实例沿既有 graceful shutdown 到安全点后才由平台 stop 收束，禁止强杀或借机卸载。pairing、config、verified trust、managed preflight 与 host-missing 等触发统一以 canonical home 进入单 worker dirty-loop，每轮重读 current plan/spec，listener/ready 前全等复验，后继 wake 不得丢失。纯 surface/空角色设备在本地 RPC 握手前只装配认证 current-anchor finite relay，设备本地与未知方法零代理，owner generation 换代先关闭旧 relay/poll，离线稳定可行动且不回退。CLI 与 server 只消费同一无副作用 managed-status snapshot 与 mapper；snapshot 绑定同次 plan/spec、真实 inspect/process/readiness 并在结束前复验身份，公开 DTO 不泄漏 service/device/path/role/raw error。直接验收必须覆盖最终 Windows bytes 解析/read-back、三平台双事实 stop、四 backend existing-only、同/异 home 并发 wake、三进程形态 listener 窗口、surface ready/offline/换代/notification、status 两入口 exact projection；第 37 单元卸载与第 38 单元升级/回滚不在此合同内。
+
 执行顺序不可重排为会产生中间债务的形态：
 
 - 1–5 是所有后续节点的结构前提；S1 未完成前不得在旧 server/cli 结构上旁挂第二套分布式业务实现。

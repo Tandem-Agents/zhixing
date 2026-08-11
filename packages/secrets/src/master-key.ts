@@ -4,6 +4,8 @@ export type MasterKeyState = "unlocked" | "locked" | "unavailable";
 
 export interface MasterKeyProvider {
   state(): Promise<MasterKeyState>;
+  /** Opens the already-bound key without creating or replacing any backing fact. */
+  loadExisting(): Promise<Buffer>;
   loadOrCreate(): Promise<Buffer>;
 }
 
@@ -20,6 +22,10 @@ export class MemoryMasterKeyProvider implements MasterKeyProvider {
   }
 
   async loadOrCreate(): Promise<Buffer> {
+    return Buffer.from(this.key);
+  }
+
+  async loadExisting(): Promise<Buffer> {
     return Buffer.from(this.key);
   }
 }

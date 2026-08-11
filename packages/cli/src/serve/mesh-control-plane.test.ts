@@ -26,7 +26,7 @@ describe("production mesh control plane", () => {
     await Promise.all(relayClosers.splice(0).map((close) => close()));
   });
 
-  it("lets only the non-anchor dial and establishes an authenticated direct session", async () => {
+  it("lets an empty-role non-anchor dial without opening a local listener", async () => {
     const [anchor, executor] = await Promise.all([
       createDevice("anchor"),
       createDevice("executor"),
@@ -56,7 +56,7 @@ describe("production mesh control plane", () => {
     const executorControl = new ProductionMeshControlPlane({
       localIdentity: executor.key,
       trust,
-      configuration: { enabledRoles: ["executor"] },
+      configuration: { enabledRoles: [] },
       endpoints: new MeshEndpointDirectory([{
         v: 1,
         deviceId: anchor.identity.deviceId,

@@ -57,7 +57,6 @@ import {
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
   getDefaultLogPath,
-  projectManagedHostStatus,
   type RunningServer,
   type ProcessLockPaths,
 } from "@zhixing/server";
@@ -157,8 +156,12 @@ import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mes
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
 import {
+  captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
+  reconcileCurrentManagedService,
+  verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
+import { buildManagedHostPublicStatus } from "./status.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -197,6 +200,10 @@ async function runServerProcess(
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
   const processMode = resolveHostProcessMode(opts.managed);
+  const initialManagedHostAdmission = await captureManagedHostAdmission(
+    processMode,
+    zhixingHome,
+  );
   const isBackground = processMode !== "foreground";
   const daemonLogPath = isBackground ? getDefaultLogPath() : undefined;
   const serverLogLifecycle = isBackground
@@ -666,12 +673,12 @@ async function runServerProcess(
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
   const managedShutdown = { current: undefined as undefined | (() => void) };
   let assemblyContext: AssemblyContext | undefined;
-  const onTrustApplied = processMode === "managed"
-    ? () => coordinateManagedHostTrustTransition({
-        refuseNewMessages: () => assemblyContext?.inboundRouter?.refuseNewMessages(),
-        requestShutdown: () => managedShutdown.current?.(),
-      }).then(() => undefined)
-    : undefined;
+  const onTrustApplied = () => coordinateManagedHostTrustTransition({
+    processMode,
+    expectedAdmission: initialManagedHostAdmission,
+    refuseNewMessages: () => assemblyContext?.inboundRouter?.refuseNewMessages(),
+    requestShutdown: () => managedShutdown.current?.(),
+  }).then(() => undefined);
 
   const ctx: AssemblyContext = {
     profile,
@@ -711,7 +718,7 @@ async function runServerProcess(
     advancement: advancementController,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
-    ...(onTrustApplied ? { onTrustApplied } : {}),
+    onTrustApplied,
   };
   assemblyContext = ctx;
 
@@ -1210,14 +1217,10 @@ async function runServerProcess(
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
       logPath: daemonLogPath,
     },
-    managedHostPublicStatus: () => projectManagedHostStatus({
-      desired: processMode === "managed" ? "managed" : "on-demand",
-      ...(processMode === "managed"
-        ? { service: { state: "enabled" as const, running: true, matches: true } }
-        : {}),
-      process: "running",
-      readiness: managedHostStopping ? "stopping" : "ready",
-    }),
+    managedHostPublicStatus: () => buildManagedHostPublicStatus(
+      { status: "running", phase: managedHostStopping ? "stopping" : "running" },
+      { readiness: managedHostStopping ? "stopping" : "ready" },
+    ),
     recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
@@ -1419,6 +1422,15 @@ async function runServerProcess(
   registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
 
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
+  if (!await verifyManagedHostAdmission(
+    initialManagedHostAdmission,
+    processMode,
+    zhixingHome,
+  )) {
+    ctx.inboundRouter?.refuseNewMessages();
+    await reconcileCurrentManagedService("managed-preflight");
+    throw new Error("Managed host admission changed during startup");
+  }
   runner = await runServer({
       context: serverCtx,
       registry: serverRegistry,

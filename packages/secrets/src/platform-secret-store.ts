@@ -118,23 +118,40 @@ class BoundPlatformMasterKeyProvider implements MasterKeyProvider {
       const key = await this.loadOrCreate();
       key.fill(0);
       return "unlocked";
-    } catch {
+    } catch (error) {
+      if (error instanceof ExistingMasterKeyUnavailableError) return "locked";
       return "unavailable";
     }
+  }
+
+  async loadExisting(): Promise<Buffer> {
+    if (this.delegate) return this.delegate.loadExisting();
+    const existingBinding = await readBackendBinding(this.options.bindingPath);
+    const existing = await existingStoreFacts(this.options);
+    if (!existingBinding && !existing.hasVault && !existing.hasKey) {
+      throw new ExistingMasterKeyUnavailableError(
+        "SecretStore has no existing backend binding or backing key",
+      );
+    }
+    const backend = existingBinding ?? await inferBackendBinding(this.options, existing);
+    const delegate = createBackendProvider(backend, this.options);
+    const key = await delegate.loadExisting();
+    if (!existingBinding) await writeBackendBinding(this.options.bindingPath, backend);
+    this.delegate = delegate;
+    return key;
   }
 
   async loadOrCreate(): Promise<Buffer> {
     if (this.delegate) return this.delegate.loadOrCreate();
     const existingBinding = await readBackendBinding(this.options.bindingPath);
-    const backend = existingBinding ?? await inferBackendBinding(this.options);
+    const existing = await existingStoreFacts(this.options);
+    const backend = existingBinding ?? await inferBackendBinding(this.options, existing);
     const delegate = createBackendProvider(backend, this.options);
-    const key = await delegate.loadOrCreate();
-    if (!existingBinding) {
-      await writePrivateFile(
-        this.options.bindingPath,
-        Buffer.from(`${JSON.stringify({ v: 1, backend })}\n`, "utf8"),
-      );
-    }
+    const existingOnly = existingBinding !== undefined || existing.hasVault || existing.hasKey;
+    const key = existingOnly
+      ? await delegate.loadExisting()
+      : await delegate.loadOrCreate();
+    if (!existingBinding) await writeBackendBinding(this.options.bindingPath, backend);
     this.delegate = delegate;
     return key;
   }
@@ -142,13 +159,13 @@ class BoundPlatformMasterKeyProvider implements MasterKeyProvider {
 
 async function inferBackendBinding(
   options: BoundPlatformMasterKeyProviderOptions,
+  existing?: { readonly hasVault: boolean; readonly hasKey: boolean },
 ): Promise<PlatformSecretStoreBackend> {
-  const [hasVault, hasKey] = await Promise.all([
-    fileExists(options.vaultPath),
-    fileExists(options.keyPath),
-  ]);
+  const { hasVault, hasKey } = existing ?? await existingStoreFacts(options);
   if (options.context === "managed" && !hasVault && !hasKey) {
-    throw new Error("Managed startup cannot initialize SecretStore backend binding");
+    throw new ExistingMasterKeyUnavailableError(
+      "Managed startup cannot initialize SecretStore backend binding",
+    );
   }
   if (options.platform === "win32") return "windows-dpapi";
   if (options.platform === "darwin") return "macos-keychain";
@@ -156,19 +173,45 @@ async function inferBackendBinding(
     if (hasKey) return "machine-bound";
     if (hasVault) return "linux-secret-service";
     if (options.context === "managed") {
-      throw new Error("Managed startup cannot initialize SecretStore backend binding");
+      throw new ExistingMasterKeyUnavailableError(
+        "Managed startup cannot initialize SecretStore backend binding",
+      );
     }
     return hasDesktopSession(options.env)
       ? "linux-secret-service"
       : "machine-bound";
   }
   if (hasVault && !hasKey) {
-    throw new Error("Existing SecretStore backend cannot be identified on this platform");
+    throw new ExistingMasterKeyUnavailableError(
+      "Existing SecretStore backend cannot be identified on this platform",
+    );
   }
   if (options.context === "managed" && !hasKey) {
-    throw new Error("Managed startup cannot initialize SecretStore backend binding");
+    throw new ExistingMasterKeyUnavailableError(
+      "Managed startup cannot initialize SecretStore backend binding",
+    );
   }
   return "machine-bound";
+}
+
+async function existingStoreFacts(
+  options: Pick<BoundPlatformMasterKeyProviderOptions, "vaultPath" | "keyPath">,
+): Promise<{ readonly hasVault: boolean; readonly hasKey: boolean }> {
+  const [hasVault, hasKey] = await Promise.all([
+    fileExists(options.vaultPath),
+    fileExists(options.keyPath),
+  ]);
+  return { hasVault, hasKey };
+}
+
+async function writeBackendBinding(
+  bindingPath: string,
+  backend: PlatformSecretStoreBackend,
+): Promise<void> {
+  await writePrivateFile(
+    bindingPath,
+    Buffer.from(`${JSON.stringify({ v: 1, backend })}\n`, "utf8"),
+  );
 }
 
 function createBackendProvider(
@@ -214,10 +257,14 @@ async function readBackendBinding(
   try {
     value = JSON.parse(bytes);
   } catch {
-    throw new Error("SecretStore backend binding is invalid");
+    throw new ExistingMasterKeyUnavailableError(
+      "SecretStore backend binding is invalid",
+    );
   }
   if (!isPlainRecord(value) || Object.keys(value).sort().join(",") !== "backend,v" || value.v !== 1) {
-    throw new Error("SecretStore backend binding is invalid");
+    throw new ExistingMasterKeyUnavailableError(
+      "SecretStore backend binding is invalid",
+    );
   }
   if (![
     "windows-dpapi",
@@ -225,7 +272,9 @@ async function readBackendBinding(
     "linux-secret-service",
     "machine-bound",
   ].includes(value.backend as string)) {
-    throw new Error("SecretStore backend binding is invalid");
+    throw new ExistingMasterKeyUnavailableError(
+      "SecretStore backend binding is invalid",
+    );
   }
   return value.backend as PlatformSecretStoreBackend;
 }
@@ -244,23 +293,30 @@ class SerializedMasterKeyProvider implements MasterKeyProvider {
   ) {}
 
   async state(): Promise<MasterKeyState> {
-    try {
-      const key = await this.loadOrCreate();
-      key.fill(0);
-      return "unlocked";
-    } catch {
-      return "unavailable";
-    }
+    if (this.cached) return "unlocked";
+    return this.delegate.state();
   }
 
   async loadOrCreate(): Promise<Buffer> {
+    return this.loadWithLock("create");
+  }
+
+  async loadExisting(): Promise<Buffer> {
+    return this.loadWithLock("existing");
+  }
+
+  private async loadWithLock(mode: "create" | "existing"): Promise<Buffer> {
     if (this.cached) return Buffer.from(this.cached);
     const release = await acquireFileLock(this.lockPath, {
       staleMs: 30_000,
       waitMs: 15_000,
     });
     try {
-      if (!this.cached) this.cached = await this.delegate.loadOrCreate();
+      if (!this.cached) {
+        this.cached = mode === "existing"
+          ? await this.delegate.loadExisting()
+          : await this.delegate.loadOrCreate();
+      }
       return Buffer.from(this.cached);
     } finally {
       await release();
@@ -293,19 +349,7 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
-    if (existing) {
-      const result = await this.runPowerShell("unprotect", existing);
-      if (result.code !== 0) {
-        result.stdout.fill(0);
-        throw new Error("Windows credential protection could not unlock SecretStore");
-      }
-      try {
-        this.cached = decodeKey(result.stdout.toString("utf8").trim());
-      } finally {
-        result.stdout.fill(0);
-      }
-      return Buffer.from(this.cached);
-    }
+    if (existing) return this.unlock(existing);
     const key = randomBytes(KEY_BYTES);
     const encodedKey = Buffer.from(key.toString("base64url"), "utf8");
     try {
@@ -320,6 +364,35 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
       encodedKey.fill(0);
       key.fill(0);
     }
+  }
+
+  async loadExisting(): Promise<Buffer> {
+    if (this.cached) return Buffer.from(this.cached);
+    const existing = await readFile(this.keyPath).catch((error: unknown) => {
+      if (isNodeError(error, "ENOENT")) {
+        throw new ExistingMasterKeyUnavailableError(
+          "Windows SecretStore backing key is missing",
+        );
+      }
+      throw error;
+    });
+    return this.unlock(existing);
+  }
+
+  private async unlock(existing: Uint8Array): Promise<Buffer> {
+    const result = await this.runPowerShell("unprotect", existing);
+    if (result.code !== 0) {
+      result.stdout.fill(0);
+      throw new ExistingMasterKeyUnavailableError(
+        "Windows credential protection could not unlock SecretStore",
+      );
+    }
+    try {
+      this.cached = decodeKey(result.stdout.toString("utf8").trim());
+    } finally {
+      result.stdout.fill(0);
+    }
+    return Buffer.from(this.cached);
   }
 
   private runPowerShell(
@@ -368,19 +441,12 @@ class LinuxSecretServiceMasterKeyProvider implements MasterKeyProvider {
   }
 
   async loadOrCreate(): Promise<Buffer> {
-    if (this.cached) return Buffer.from(this.cached);
-    const lookup = await this.run(LINUX_SECRET_TOOL_COMMAND, ["lookup", "service", KEYRING_SERVICE, "account", this.account]);
-    if (lookup.code === 0 && lookup.stdout.toString("utf8").trim()) {
-      try {
-        this.cached = decodeKey(lookup.stdout.toString("utf8").trim());
-      } finally {
-        lookup.stdout.fill(0);
-      }
-      return Buffer.from(this.cached);
-    }
-    lookup.stdout.fill(0);
+    const existing = await this.lookupExisting();
+    if (existing) return existing;
     if (await fileExists(this.vaultPath)) {
-      throw new Error("Linux Secret Service could not unlock the existing SecretStore");
+      throw new ExistingMasterKeyUnavailableError(
+        "Linux Secret Service could not unlock the existing SecretStore",
+      );
     }
     const key = randomBytes(KEY_BYTES);
     const encoded = Buffer.from(`${key.toString("base64url")}\n`, "utf8");
@@ -396,6 +462,27 @@ class LinuxSecretServiceMasterKeyProvider implements MasterKeyProvider {
     } finally {
       encoded.fill(0);
       key.fill(0);
+    }
+  }
+
+  async loadExisting(): Promise<Buffer> {
+    const existing = await this.lookupExisting();
+    if (existing) return existing;
+    throw new ExistingMasterKeyUnavailableError(
+      "Linux Secret Service backing key is missing or locked",
+    );
+  }
+
+  private async lookupExisting(): Promise<Buffer | undefined> {
+    if (this.cached) return Buffer.from(this.cached);
+    const lookup = await this.run(LINUX_SECRET_TOOL_COMMAND, ["lookup", "service", KEYRING_SERVICE, "account", this.account]);
+    const encoded = lookup.stdout.toString("utf8").trim();
+    try {
+      if (lookup.code !== 0 || !encoded) return undefined;
+      this.cached = decodeKey(encoded);
+      return Buffer.from(this.cached);
+    } finally {
+      lookup.stdout.fill(0);
     }
   }
 }
@@ -419,19 +506,12 @@ class MacKeychainMasterKeyProvider implements MasterKeyProvider {
   }
 
   async loadOrCreate(): Promise<Buffer> {
-    if (this.cached) return Buffer.from(this.cached);
-    const lookup = await this.lookup();
-    if (lookup.code === 0 && lookup.stdout.toString("utf8").trim()) {
-      try {
-        this.cached = decodeKey(lookup.stdout.toString("utf8").trim());
-      } finally {
-        lookup.stdout.fill(0);
-      }
-      return Buffer.from(this.cached);
-    }
-    lookup.stdout.fill(0);
+    const existing = await this.lookupExisting();
+    if (existing) return existing;
     if (await fileExists(this.vaultPath)) {
-      throw new Error("macOS Keychain could not unlock the existing SecretStore");
+      throw new ExistingMasterKeyUnavailableError(
+        "macOS Keychain could not unlock the existing SecretStore",
+      );
     }
     const key = randomBytes(KEY_BYTES);
     try {
@@ -450,6 +530,27 @@ class MacKeychainMasterKeyProvider implements MasterKeyProvider {
       return Buffer.from(this.cached);
     } finally {
       key.fill(0);
+    }
+  }
+
+  async loadExisting(): Promise<Buffer> {
+    const existing = await this.lookupExisting();
+    if (existing) return existing;
+    throw new ExistingMasterKeyUnavailableError(
+      "macOS Keychain backing key is missing or locked",
+    );
+  }
+
+  private async lookupExisting(): Promise<Buffer | undefined> {
+    if (this.cached) return Buffer.from(this.cached);
+    const lookup = await this.lookup();
+    const encoded = lookup.stdout.toString("utf8").trim();
+    try {
+      if (lookup.code !== 0 || !encoded) return undefined;
+      this.cached = decodeKey(encoded);
+      return Buffer.from(this.cached);
+    } finally {
+      lookup.stdout.fill(0);
     }
   }
 
@@ -499,7 +600,31 @@ class MachineBoundMasterKeyProvider implements MasterKeyProvider {
       seed = randomBytes(KEY_BYTES);
       await writePrivateFile(this.seedPath, seed);
     }
-    if (seed.byteLength !== KEY_BYTES) throw new Error("Machine SecretStore seed is invalid");
+    return this.derive(binding, seed);
+  }
+
+  async loadExisting(): Promise<Buffer> {
+    if (this.cached) return Buffer.from(this.cached);
+    const binding = await machineBinding(
+      this.platform,
+      this.configuredMachineIdentity,
+    );
+    const seed = await readFile(this.seedPath).catch((error: unknown) => {
+      if (isNodeError(error, "ENOENT")) {
+        throw new ExistingMasterKeyUnavailableError(
+          "Machine-bound SecretStore backing key is missing",
+        );
+      }
+      throw error;
+    });
+    return this.derive(binding, seed);
+  }
+
+  private derive(binding: string, seed: Buffer): Buffer {
+    if (seed.byteLength !== KEY_BYTES) {
+      seed.fill(0);
+      throw new Error("Machine SecretStore seed is invalid");
+    }
     try {
       this.cached = createHash("sha256")
         .update("zhixing-machine-secret-vault:v1\0")
@@ -511,6 +636,13 @@ class MachineBoundMasterKeyProvider implements MasterKeyProvider {
     } finally {
       seed.fill(0);
     }
+  }
+}
+
+class ExistingMasterKeyUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExistingMasterKeyUnavailableError";
   }
 }
 

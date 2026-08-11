@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
@@ -230,9 +230,70 @@ describe("EncryptedVaultSecretStore", () => {
       context: "managed",
       machineIdentity: "managed-first-open",
     });
-    expect(await store.unlockState()).toBe("unavailable");
+    expect(await store.unlockState()).toBe("locked");
     expect(await readPlatformSecretStoreBackendBinding(directory)).toBeUndefined();
     await expect(readFile(path.join(directory, "secret-vault.key"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("opens an existing machine-bound binding without recreating a missing seed", async () => {
+    const directory = await createTempDir("platform-bound-missing-machine-key");
+    const ref = { kind: "provider" as const, bindingId: "credentials/v1/existing-only" };
+    const initialized = createPlatformSecretStore({
+      homeDir: directory,
+      platform: "linux",
+      env: {},
+      machineIdentity: "existing-only-machine",
+    });
+    await initialized.put(ref, "protected-secret");
+    const keyPath = path.join(directory, "secret-vault.key");
+    await rm(keyPath);
+
+    const reopened = createPlatformSecretStore({
+      homeDir: directory,
+      platform: "linux",
+      env: {},
+      machineIdentity: "existing-only-machine",
+    });
+    await expect(reopened.unlockState()).resolves.toBe("locked");
+    await expect(readFile(keyPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readPlatformSecretStoreBackendBinding(directory)).toBe("machine-bound");
+  });
+
+  it.each([
+    { platform: "darwin" as const, missingCode: 44 },
+    { platform: "linux" as const, missingCode: 1 },
+  ])("does not create a $platform credential after its durable binding exists", async ({
+    platform,
+    missingCode,
+  }) => {
+    const directory = await createTempDir(`platform-bound-missing-${platform}`);
+    const ref = { kind: "channel" as const, bindingId: "credentials/v1/bound-missing" };
+    const backend = fakeCredentialBackend();
+    const initialized = createPlatformSecretStore({
+      homeDir: directory,
+      platform,
+      env: platform === "linux" ? { DISPLAY: ":0" } : {},
+      commandRunner: backend.run,
+    });
+    await initialized.put(ref, "protected-secret");
+    await rm(path.join(directory, "secret-vault.json"));
+
+    let createCalls = 0;
+    const missing: CommandRunner = async (_command, args) => {
+      if (args[0] === "add-generic-password" || args[0] === "store") createCalls += 1;
+      return result(missingCode);
+    };
+    const reopened = createPlatformSecretStore({
+      homeDir: directory,
+      platform,
+      env: platform === "linux" ? { DISPLAY: ":0" } : {},
+      commandRunner: missing,
+    });
+    await expect(reopened.unlockState()).resolves.toBe("locked");
+    expect(createCalls).toBe(0);
+    await expect(readFile(path.join(directory, "secret-vault.json"))).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -250,7 +311,7 @@ describe("EncryptedVaultSecretStore", () => {
       env: {},
       machineIdentity: "invalid-binding",
     });
-    expect(await store.unlockState()).toBe("unavailable");
+    expect(await store.unlockState()).toBe("locked");
   });
 
   it("never replaces a desktop master key when an existing vault cannot be unlocked", async () => {
@@ -277,7 +338,7 @@ describe("EncryptedVaultSecretStore", () => {
       commandRunner: lockedBackend,
     });
 
-    expect(await reopened.unlockState()).toBe("unavailable");
+    expect(await reopened.unlockState()).toBe("locked");
     expect(replacementAttempts).toBe(0);
   });
 

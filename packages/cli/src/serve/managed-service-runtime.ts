@@ -1,5 +1,6 @@
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
+import { canonicalize } from "@zhixing/core/protocol";
 import { getZhixingHome } from "@zhixing/core";
 import { loadConfig } from "@zhixing/providers";
 import {
@@ -27,6 +28,13 @@ export interface ManagedHostTrustTransitionDeps {
   readonly reconcile?: typeof reconcileCurrentManagedService;
   readonly refuseNewMessages: () => void;
   readonly requestShutdown: () => void | Promise<void>;
+  readonly processMode?: "foreground" | "on-demand" | "managed";
+  readonly expectedAdmission?: ManagedHostAdmissionSnapshot;
+}
+
+export interface ManagedHostAdmissionSnapshot {
+  readonly identity: string;
+  readonly admitted: boolean;
 }
 
 export async function loadCurrentManagedServiceState(
@@ -92,6 +100,7 @@ export async function reconcileCurrentManagedService(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
   return reconcileManagedService({
+    homeKey: path.resolve(homeDir),
     trigger,
     loadCurrent: () => loadCurrentManagedServiceState(homeDir),
     adapter: createManagedServiceAdapter({ storageGovernor: capacity.storage }),
@@ -106,17 +115,58 @@ export async function coordinateManagedHostTrustTransition(
   const reconcile = deps.reconcile ?? reconcileCurrentManagedService;
   let shouldStop = false;
   try {
-    shouldStop = resolveHostLaunchPlan(await loadCurrent()).mode !== "managed";
+    const current = await loadCurrent();
+    const mode = resolveHostLaunchPlan(current).mode;
+    const processMode = deps.processMode ?? "managed";
+    const modeRejected = processMode === "managed"
+      ? mode !== "managed"
+      : processMode === "on-demand"
+        ? mode !== "on-demand"
+        : mode === "none";
+    shouldStop = modeRejected || (
+      deps.expectedAdmission !== undefined &&
+      (
+        !deps.expectedAdmission.admitted ||
+        deps.expectedAdmission.identity !== canonicalize(current)
+      )
+    );
   } catch {
     shouldStop = true;
   }
-  if (shouldStop) deps.refuseNewMessages();
-  try {
-    await reconcile("current-trust-applied");
-  } finally {
-    if (shouldStop) await deps.requestShutdown();
+  if (shouldStop) {
+    deps.refuseNewMessages();
+    await deps.requestShutdown();
+    return "stopped";
   }
-  return shouldStop ? "stopped" : "retained";
+  await reconcile("current-trust-applied");
+  return "retained";
+}
+
+export async function captureManagedHostAdmission(
+  processMode: "foreground" | "on-demand" | "managed",
+  homeDir = getZhixingHome(),
+  loadCurrent: typeof loadCurrentManagedServiceState = loadCurrentManagedServiceState,
+): Promise<ManagedHostAdmissionSnapshot> {
+  const current = await loadCurrent(homeDir);
+  const plan = resolveHostLaunchPlan(current);
+  return {
+    identity: canonicalize(current),
+    admitted: processMode === "managed"
+      ? plan.mode === "managed"
+      : processMode === "on-demand"
+        ? plan.mode === "on-demand"
+        : plan.mode !== "none",
+  };
+}
+
+export async function verifyManagedHostAdmission(
+  expected: ManagedHostAdmissionSnapshot,
+  processMode: "foreground" | "on-demand" | "managed",
+  homeDir = getZhixingHome(),
+  loadCurrent: typeof loadCurrentManagedServiceState = loadCurrentManagedServiceState,
+): Promise<boolean> {
+  const current = await captureManagedHostAdmission(processMode, homeDir, loadCurrent);
+  return expected.admitted && current.admitted && current.identity === expected.identity;
 }
 
 function homeDigest(homeDir: string): string {

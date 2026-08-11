@@ -33,12 +33,12 @@ describe("managed service reconciliation", () => {
     };
     const signal = new AbortController().signal;
     const [left, right] = await Promise.all([
-      reconcileManagedService({ trigger: "host-missing", loadCurrent, adapter, signal }),
-      reconcileManagedService({ trigger: "managed-preflight", loadCurrent, adapter, signal }),
+      reconcileManagedService({ homeKey: "home", trigger: "host-missing", loadCurrent, adapter, signal }),
+      reconcileManagedService({ homeKey: "home", trigger: "managed-preflight", loadCurrent, adapter, signal }),
     ]);
     expect(left.plan).toEqual({ mode: "managed", roles: ["anchor", "executor"] });
     expect(right).toEqual(left);
-    expect(adapter.calls).toEqual(["inspect", "install", "start"]);
+    expect(adapter.calls).toEqual(["inspect", "install", "start", "inspect"]);
     expect(loads).toBeGreaterThanOrEqual(2);
   });
 
@@ -46,6 +46,7 @@ describe("managed service reconciliation", () => {
     for (const roles of [["executor"], ["surface"]] as const) {
       const adapter = fakeAdapter({ state: "enabled", running: true, matches: true });
       const result = await reconcileManagedService({
+        homeKey: `home-${roles.join("-")}`,
         trigger: "local-role-config-committed",
         loadCurrent: async () => current({ roles, issuer: "device:anchor", spec }),
         adapter,
@@ -61,6 +62,7 @@ describe("managed service reconciliation", () => {
     const adapter = fakeAdapter();
     let read = 0;
     const result = await reconcileManagedService({
+      homeKey: "home-changing-authority",
       trigger: "managed-preflight",
       loadCurrent: async () => {
         read += 1;
@@ -73,6 +75,48 @@ describe("managed service reconciliation", () => {
     });
     expect(result.plan.mode).toBe("none");
     expect(adapter.calls).toEqual(["inspect", "install", "disable"]);
+  });
+
+  it("keeps one canonical-home worker across binding changes and drains a late wake", async () => {
+    const adapter = fakeAdapter();
+    const first = current({ roles: ["anchor"], issuer: "device:local", spec });
+    const nextSpec = { serviceId: "service:home-after-binding" } as ManagedServiceSpec;
+    const next = current({ roles: ["anchor"], issuer: "device:local", spec: nextSpec });
+    let releaseFirst!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let loads = 0;
+    const loadCurrent = async () => {
+      loads += 1;
+      if (loads === 1) await blocked;
+      return loads === 1 ? first : next;
+    };
+    const signal = new AbortController().signal;
+    const left = reconcileManagedService({
+      homeKey: "same-home",
+      trigger: "pairing-issuer-committed",
+      loadCurrent,
+      adapter,
+      signal,
+    });
+    await Promise.resolve();
+    const right = reconcileManagedService({
+      homeKey: "same-home",
+      trigger: "pairing-joiner-committed",
+      loadCurrent,
+      adapter,
+      signal,
+    });
+    releaseFirst();
+    await expect(Promise.all([left, right])).resolves.toHaveLength(2);
+    expect(loads).toBeGreaterThanOrEqual(4);
+    expect(adapter.calls).toEqual([
+      "inspect",
+      "install",
+      "disable",
+      "inspect",
+      "install",
+      "start",
+    ]);
   });
 });
 

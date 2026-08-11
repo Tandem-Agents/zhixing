@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { projectManagedHostStatus } from "./status.js";
+import {
+  buildManagedHostStatusSnapshot,
+  projectManagedHostStatus,
+} from "./status.js";
 
 describe("managed host public status", () => {
   it.each([
@@ -57,6 +60,54 @@ describe("managed host public status", () => {
       state: "needs-attention",
       label: "需要处理",
       action: "请重新运行配对设置",
+    });
+  });
+
+  it("does not hide definition drift or a running managed instance behind desired none", () => {
+    expect(projectManagedHostStatus({
+      desired: "none",
+      service: { state: "enabled", running: true, matches: true },
+      process: "running",
+      readiness: "ready",
+    })).toEqual({ state: "stopping", label: "正在结束当前工作" });
+    expect(projectManagedHostStatus({
+      desired: "none",
+      service: { state: "disabled", running: false, matches: false },
+      process: "stopped",
+    })).toEqual({
+      state: "needs-attention",
+      label: "需要处理",
+      action: "请重新运行配对设置",
+    });
+  });
+
+  it("retries a changing current snapshot instead of mixing generations", async () => {
+    const first = { localDeviceId: "device-a" };
+    const second = { localDeviceId: "device-b" };
+    const values = [first, second, second, second];
+    const loads: string[] = [];
+    const snapshot = await buildManagedHostStatusSnapshot(
+      { status: "stopped" },
+      {
+        deps: {
+          loadCurrent: async () => {
+            const current = values.shift() ?? second;
+            loads.push(current.localDeviceId);
+            return current;
+          },
+          adapter: {
+            inspect: async () => {
+              throw new Error("no service should be inspected");
+            },
+          },
+        },
+      },
+    );
+    expect(loads).toEqual(["device-a", "device-b", "device-b", "device-b"]);
+    expect(snapshot).toEqual({
+      desired: "on-demand",
+      process: "stopped",
+      readiness: "recovering",
     });
   });
 });

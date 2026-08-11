@@ -98,6 +98,31 @@ describe("CoreHostConnection", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it("uses the finite current-anchor surface client when this home has no local host", async () => {
+    const surface = makeFakeClient();
+    const createLocalClient = vi.fn(() => asClient(makeFakeClient()));
+    const spawn = vi.fn(async () => ({
+      ok: false,
+      mode: "none" as const,
+      reason: "这台设备不需要后台运行",
+    }));
+    const createSurfaceClient = vi.fn(async () => asClient(surface));
+    const conn = new CoreHostConnection({
+      discover: async () => { throw new ServerNotRunningError("not running"); },
+      spawn,
+      createClient: createLocalClient,
+      createSurfaceClient,
+    });
+    await expect(conn.getClient()).resolves.toBe(asClient(surface));
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(createSurfaceClient).toHaveBeenCalledOnce();
+    expect(surface.connect).toHaveBeenCalledOnce();
+    expect(surface.authenticate).not.toHaveBeenCalled();
+    expect(createLocalClient).not.toHaveBeenCalled();
+    await conn.dispose();
+    expect(surface.close).toHaveBeenCalledOnce();
+  });
+
   it("协议不兼容 → 阻断可写连接且不替换宿主", async () => {
     const client = makeFakeClient({
       authenticate: async () => ({

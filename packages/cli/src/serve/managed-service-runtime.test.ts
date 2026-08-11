@@ -1,6 +1,10 @@
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { coordinateManagedHostTrustTransition } from "./managed-service-runtime.js";
+import {
+  captureManagedHostAdmission,
+  coordinateManagedHostTrustTransition,
+  verifyManagedHostAdmission,
+} from "./managed-service-runtime.js";
 
 describe("managed host trust transition", () => {
   it("keeps a current anchor online after reconciling the durable plan", async () => {
@@ -23,7 +27,7 @@ describe("managed host trust transition", () => {
     expect(requestShutdown).not.toHaveBeenCalled();
   });
 
-  it("closes admission before reconciliation and then stops when authority moved", async () => {
+  it("closes admission and enters graceful shutdown before any supervisor stop when authority moved", async () => {
     const order: string[] = [];
     await expect(coordinateManagedHostTrustTransition({
       loadCurrent: async () => current(["anchor"], "device:new-anchor"),
@@ -38,7 +42,85 @@ describe("managed host trust transition", () => {
       refuseNewMessages: () => order.push("refuse"),
       requestShutdown: () => order.push("shutdown"),
     })).resolves.toBe("stopped");
-    expect(order).toEqual(["refuse", "reconcile", "shutdown"]);
+    expect(order).toEqual(["refuse", "shutdown"]);
+  });
+
+  it("restarts the current profile when trust generation changes without changing launch mode", async () => {
+    const before = current(["anchor", "executor"], "device:local");
+    const after = {
+      ...current(["anchor"], "device:local"),
+      trust: {
+        ...current(["anchor"], "device:local").trust,
+        trustEpoch: 2,
+        chainHead: { seq: 2, eventDigest: `sha256:${"2".repeat(64)}` },
+      },
+    };
+    const expectedAdmission = await captureManagedHostAdmission(
+      "managed",
+      "home",
+      async () => before,
+    );
+    const order: string[] = [];
+
+    await expect(coordinateManagedHostTrustTransition({
+      expectedAdmission,
+      loadCurrent: async () => after,
+      reconcile: async () => {
+        order.push("reconcile");
+        return {
+          plan: { mode: "managed", roles: ["anchor"] },
+          service: undefined,
+          action: "unchanged",
+        };
+      },
+      refuseNewMessages: () => order.push("refuse"),
+      requestShutdown: () => order.push("shutdown"),
+    })).resolves.toBe("stopped");
+    expect(order).toEqual(["refuse", "shutdown"]);
+  });
+
+  it.each([
+    ["on-demand", ["anchor"] as const, "device:local", "stopped"],
+    ["foreground", ["anchor"] as const, "device:local", "retained"],
+    ["foreground", ["surface"] as const, "device:new-anchor", "stopped"],
+  ] as const)(
+    "applies the current plan gate to the %s process shape",
+    async (processMode, roles, issuer, expected) => {
+      const refuseNewMessages = vi.fn();
+      const requestShutdown = vi.fn();
+      await expect(coordinateManagedHostTrustTransition({
+        processMode,
+        loadCurrent: async () => current(roles, issuer),
+        reconcile: async () => ({
+          plan: { mode: "managed", roles: ["anchor"] },
+          service: undefined,
+          action: "unchanged",
+        }),
+        refuseNewMessages,
+        requestShutdown,
+      })).resolves.toBe(expected);
+      expect(refuseNewMessages).toHaveBeenCalledTimes(expected === "stopped" ? 1 : 0);
+      expect(requestShutdown).toHaveBeenCalledTimes(expected === "stopped" ? 1 : 0);
+    },
+  );
+
+  it("rejects listener admission when the current plan/spec generation changes", async () => {
+    const first = current(["anchor"], "device:local");
+    const next = {
+      ...first,
+      trust: { ...first.trust, trustEpoch: 2 },
+    };
+    const snapshot = await captureManagedHostAdmission(
+      "managed",
+      "home",
+      async () => first,
+    );
+    await expect(verifyManagedHostAdmission(
+      snapshot,
+      "managed",
+      "home",
+      async () => next,
+    )).resolves.toBe(false);
   });
 });
 
