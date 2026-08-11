@@ -50,27 +50,43 @@ interface ReconcileWorker {
   promise: Promise<ManagedServiceReconcileResult>;
 }
 
+interface ManagedServiceReconcileInput {
+  readonly homeKey: string;
+  readonly trigger: ManagedServiceReconcileTrigger;
+  readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
+  readonly adapter: ManagedServiceAdapter;
+  readonly signal: AbortSignal;
+}
+
 const inFlight = new Map<string, ReconcileWorker>();
 
 /**
  * Reconciles one home from current durable inputs. Callers provide a loader,
  * never a precomputed plan, so every trigger crosses the same authority check.
  */
-export async function reconcileManagedService(input: {
-  readonly homeKey: string;
-  readonly trigger: ManagedServiceReconcileTrigger;
-  readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
-  readonly adapter: ManagedServiceAdapter;
-  readonly signal: AbortSignal;
-}): Promise<ManagedServiceReconcileResult> {
+export async function reconcileManagedService(
+  input: ManagedServiceReconcileInput,
+): Promise<ManagedServiceReconcileResult> {
   if (!MANAGED_SERVICE_RECONCILE_TRIGGERS.includes(input.trigger)) {
     throw new TypeError("Managed service reconcile trigger is invalid");
   }
-  const key = path.resolve(input.homeKey);
+  return reconcileOrJoin(path.resolve(input.homeKey), input, true);
+}
+
+async function reconcileOrJoin(
+  key: string,
+  input: ManagedServiceReconcileInput,
+  allowSuccessor: boolean,
+): Promise<ManagedServiceReconcileResult> {
   const current = inFlight.get(key);
   if (current) {
     current.dirty = true;
-    return current.promise;
+    try {
+      return await current.promise;
+    } catch (error) {
+      if (!allowSuccessor) throw error;
+      return reconcileOrJoin(key, input, false);
+    }
   }
   const worker = { dirty: true } as ReconcileWorker;
   worker.promise = runDirtyLoop(key, worker, input);
@@ -81,11 +97,7 @@ export async function reconcileManagedService(input: {
 async function runDirtyLoop(
   key: string,
   worker: ReconcileWorker,
-  input: {
-    readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
-    readonly adapter: ManagedServiceAdapter;
-    readonly signal: AbortSignal;
-  },
+  input: ManagedServiceReconcileInput,
 ): Promise<ManagedServiceReconcileResult> {
   let result: ManagedServiceReconcileResult | undefined;
   try {
@@ -102,11 +114,7 @@ async function runDirtyLoop(
 
 async function reconcileCurrent(
   initial: ManagedServiceCurrentState,
-  input: {
-    readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
-    readonly adapter: ManagedServiceAdapter;
-    readonly signal: AbortSignal;
-  },
+  input: ManagedServiceReconcileInput,
 ): Promise<ManagedServiceReconcileResult> {
   throwIfAborted(input.signal);
   let plan: HostLaunchPlan;

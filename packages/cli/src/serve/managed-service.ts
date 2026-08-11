@@ -277,10 +277,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     if (before.state !== "enabled" || !before.matches) {
       throw new ManagedServiceError("read-back-failed", "Managed service is not installed and enabled");
     }
-    const result = await this.command(startCommand(spec), signal);
-    if (result.code !== 0) {
-      throw new ManagedServiceError("command-failed", "Managed service could not be started");
-    }
+    await this.requireCommand(startCommand(spec), signal);
     const after = await this.inspect(spec, signal);
     if (!after.running) {
       throw new ManagedServiceError("read-back-failed", "Managed service start could not be verified");

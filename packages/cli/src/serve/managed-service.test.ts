@@ -394,7 +394,133 @@ describe("managed service platform contract", () => {
       await expect(readFile(spec.definitionPath)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
+
+  it.each(["win32", "darwin", "linux"] as const)(
+    "classifies %s start failures through the shared manager boundary and keeps post-inspect independent",
+    async (platform) => {
+      const directory = await createTempDir(`managed-service-${platform}-start-classification`);
+      const spec = platformSpec(platform, directory);
+      await mkdir(path.dirname(spec.definitionPath), { recursive: true });
+      await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+      const cases = [
+        {
+          name: "permission",
+          outcome: { code: 1, stdout: "", stderr: "Access is denied" },
+          code: "permission-required",
+        },
+        {
+          name: "manager unavailable",
+          outcome: { code: 1, stdout: "", stderr: "Manager session is unavailable" },
+          code: "manager-unavailable",
+        },
+        {
+          name: "documented not-found",
+          outcome: documentedNotFound(platform),
+          code: "command-failed",
+        },
+        {
+          name: "other non-zero",
+          outcome: { code: 9, stdout: "", stderr: "Unclassified manager rejection" },
+          code: "manager-unavailable",
+        },
+        {
+          name: "permission spawn",
+          outcome: Object.assign(new Error("spawn denied"), { code: "EACCES" }),
+          code: "permission-required",
+        },
+        {
+          name: "other spawn",
+          outcome: new Error("spawn failed"),
+          code: "manager-unavailable",
+        },
+      ] as const;
+      for (const entry of cases) {
+        const fixture = startRunner(platform, spec, entry.outcome);
+        const adapter = createManagedServiceAdapter({
+          platform,
+          commandRunner: fixture.runner,
+        });
+        const startError = await adapter.start(spec, new AbortController().signal)
+          .then(() => undefined, (error: unknown) => error);
+        expect(fixture.startCalls(), entry.name).toBe(1);
+        expect(startError, entry.name).toMatchObject({ code: entry.code });
+        expect(fixture.postInspectCalls(), entry.name).toBe(0);
+      }
+
+      const unverified = startRunner(platform, spec, { code: 0, stdout: "", stderr: "" }, false);
+      await expect(createManagedServiceAdapter({
+        platform,
+        commandRunner: unverified.runner,
+      }).start(spec, new AbortController().signal)).rejects.toMatchObject({
+        code: "read-back-failed",
+      });
+      expect(unverified.postInspectCalls()).toBeGreaterThan(0);
+
+      const verified = startRunner(platform, spec, { code: 0, stdout: "", stderr: "" }, true);
+      await expect(createManagedServiceAdapter({
+        platform,
+        commandRunner: verified.runner,
+      }).start(spec, new AbortController().signal)).resolves.toMatchObject({ running: true });
+      expect(verified.postInspectCalls()).toBeGreaterThan(0);
+      expect(await readFile(spec.definitionPath)).toEqual(managedServiceDefinitionBytes(spec));
+    },
+  );
 });
+
+function documentedNotFound(platform: "win32" | "darwin" | "linux") {
+  if (platform === "win32") {
+    return { code: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." };
+  }
+  if (platform === "darwin") {
+    return { code: 113, stdout: "", stderr: "Could not find service" };
+  }
+  return { code: 4, stdout: "not-found\n", stderr: "" };
+}
+
+function startRunner(
+  platform: "win32" | "darwin" | "linux",
+  spec: ReturnType<typeof platformSpec>,
+  outcome: { readonly code: number; readonly stdout: string; readonly stderr: string } | Error,
+  exposeRunning = false,
+) {
+  let starts = 0;
+  let inspectionsAfterStart = 0;
+  const runner: ManagedServiceCommandRunner = async (_command, args) => {
+    const isStart = args.includes("/Run") || args.includes("kickstart") || args.includes("start");
+    if (isStart) {
+      starts += 1;
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    }
+    if (starts > 0) inspectionsAfterStart += 1;
+    if (platform === "win32" && args.includes("/XML")) {
+      return { code: 0, stdout: spec.definition, stderr: "" };
+    }
+    if (platform === "win32" && args.includes("/FO")) {
+      return { code: 0, stdout: exposeRunning ? "running" : "ready", stderr: "" };
+    }
+    if (platform === "darwin" && args.includes("print-disabled")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (platform === "darwin" && args.includes("print")) {
+      return { code: 0, stdout: exposeRunning ? "pid = 42" : "state = exited", stderr: "" };
+    }
+    if (platform === "linux" && args.includes("is-enabled")) {
+      return { code: 0, stdout: "enabled\n", stderr: "" };
+    }
+    if (platform === "linux" && args.includes("is-active")) {
+      return exposeRunning
+        ? { code: 0, stdout: "active\n", stderr: "" }
+        : { code: 3, stdout: "inactive\n", stderr: "" };
+    }
+    throw new Error(`Unexpected managed service command: ${args.join(" ")}`);
+  };
+  return {
+    runner,
+    startCalls: () => starts,
+    postInspectCalls: () => inspectionsAfterStart,
+  };
+}
 
 function restoreEnvironment(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];

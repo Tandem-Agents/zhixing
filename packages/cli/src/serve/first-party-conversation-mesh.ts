@@ -1,11 +1,12 @@
 import { canonicalize } from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh";
+import { MeshProtocolError, type MeshServiceClient } from "@zhixing/mesh";
 import type {
   MeshServiceHandler,
   MeshServiceRegistry,
 } from "@zhixing/mesh/service-registry";
 import {
   captureCurrentAnchorRelayMethods,
+  RPC_ERROR_CODES,
   RpcAppError,
   RpcErrors,
   toJsonRpcError,
@@ -13,6 +14,7 @@ import {
   type FirstPartyConversationRpcRouter,
   type RpcConnection,
 } from "@zhixing/server";
+import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 
 export const FIRST_PARTY_CONVERSATION_MESH_SERVICE = "conversation.first-party";
 
@@ -207,7 +209,7 @@ export class CurrentAnchorFirstPartyRpcRouter
 }
 
 export class FirstPartyConversationMeshClient {
-  readonly #active = new Map<number, { readonly abort: AbortController; readonly remove: () => void }>();
+  readonly #active = new Map<number, ActivePoll>();
 
   constructor(
     private readonly client: MeshServiceClient,
@@ -228,9 +230,7 @@ export class FirstPartyConversationMeshClient {
 
   async close(connection: FirstPartyIngressConnection): Promise<void> {
     const active = this.#active.get(connection.id);
-    active?.abort.abort();
-    active?.remove();
-    this.#active.delete(connection.id);
+    if (active) this.#releasePolling(connection.id, active);
     if (!connection.surfacePrincipal || !connection.surfaceGeneration) return;
     await this.#request({
       v: 1,
@@ -242,20 +242,75 @@ export class FirstPartyConversationMeshClient {
   #ensurePolling(surface: SurfaceIdentity, connection: FirstPartyIngressConnection): void {
     if (this.#active.has(connection.id)) return;
     const abort = new AbortController();
-    const remove = connection.onClose(() => void this.close(connection));
-    this.#active.set(connection.id, { abort, remove });
-    void this.#poll(surface, connection, abort.signal).catch((error: unknown) => {
-      if (!abort.signal.aborted) this.onError?.(error instanceof Error ? error : new Error(String(error)));
+    let resolveClosed!: () => void;
+    const connectionClosed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    const active: ActivePoll = {
+      abort,
+      connectionClosed,
+      resolveClosed,
+      remove: () => {},
+    };
+    this.#active.set(connection.id, active);
+    active.remove = connection.onClose(() => {
+      active.resolveClosed();
+      void this.close(connection);
     });
+    if (this.#active.get(connection.id) !== active) return;
+    void this.#poll(surface, connection, active);
   }
 
-  async #poll(surface: SurfaceIdentity, connection: FirstPartyIngressConnection, signal: AbortSignal): Promise<void> {
-    while (!signal.aborted && !connection.closed) {
-      const response = await this.#request({ v: 1, op: "poll", surface }, signal);
-      for (const notification of response.notifications) {
-        if (!connection.closed) connection.notify(notification.method, notification.params);
+  async #poll(
+    surface: SurfaceIdentity,
+    connection: FirstPartyIngressConnection,
+    active: ActivePoll,
+  ): Promise<void> {
+    while (
+      !active.abort.signal.aborted &&
+      !connection.closed &&
+      this.#active.get(connection.id) === active
+    ) {
+      let stableFailure: unknown;
+      let failed = false;
+      let completed = false;
+      await fulfillConnectionLifetimeObligation({
+        connectionClosed: active.connectionClosed,
+        stopSignal: active.abort.signal,
+        attempt: async (signal) => {
+          const response = await this.#request({ v: 1, op: "poll", surface }, signal);
+          for (const notification of response.notifications) {
+            if (!connection.closed) connection.notify(notification.method, notification.params);
+          }
+          completed = true;
+        },
+        shouldRetry: (error) => {
+          if (isRetryablePollFailure(error)) return true;
+          failed = true;
+          stableFailure = error;
+          return false;
+        },
+      });
+      if (
+        active.abort.signal.aborted ||
+        connection.closed ||
+        this.#active.get(connection.id) !== active
+      ) return;
+      if (failed) {
+        this.#releasePolling(connection.id, active);
+        this.onError?.(stableFailure instanceof Error
+          ? stableFailure
+          : new Error(String(stableFailure)));
+        return;
       }
+      if (!completed) return;
     }
+  }
+
+  #releasePolling(connectionId: number, active: ActivePoll): void {
+    if (this.#active.get(connectionId) !== active) return;
+    this.#active.delete(connectionId);
+    active.abort.abort();
+    active.resolveClosed();
+    active.remove();
   }
 
   async #request(command: Command, signal?: AbortSignal): Promise<Extract<Result, { ok: true }>> {
@@ -267,6 +322,27 @@ export class FirstPartyConversationMeshClient {
     if (!result.ok) throw new RpcAppError(result.error.code, result.error.message, result.error.data);
     return result;
   }
+}
+
+interface ActivePoll {
+  readonly abort: AbortController;
+  readonly connectionClosed: Promise<void>;
+  readonly resolveClosed: () => void;
+  remove: () => void;
+}
+
+function isRetryablePollFailure(error: unknown): boolean {
+  return (
+    error instanceof MeshProtocolError &&
+    (
+      error.code === "connection-closed" ||
+      error.code === "service-unavailable" ||
+      error.code === "request-timeout"
+    )
+  ) || (
+    error instanceof RpcAppError &&
+    error.code === RPC_ERROR_CODES.BUSY
+  );
 }
 
 let nextRelayId = 1_000_000;

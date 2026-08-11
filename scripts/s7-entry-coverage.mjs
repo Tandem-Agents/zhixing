@@ -998,6 +998,11 @@ export function inspectManagedHostAssembly(records) {
     !command.includes('processMode !== "managed"')
   ) failures.push("managed host service adapter, preflight or unique composition root drifted");
   if (
+    count(reconciler, "return reconcileOrJoin(key, input, false);") !== 1 ||
+    count(reconciler, "if (!allowSuccessor) throw error;") !== 1 ||
+    count(service, "await this.requireCommand(startCommand(spec), signal);") !== 1
+  ) failures.push("managed host bounded successor or start classifier drifted");
+  if (
     !bootstrap.includes("export function resolveHostLaunchPlan(") ||
     !bootstrap.includes("configuration.executorAutoStart === true") ||
     !bootstrap.includes('"anchor-authority-conflict"') ||
@@ -1729,6 +1734,12 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(firstParty, "const current = this.input.currentAnchorDeviceId()") !== 1 ||
     count(firstParty, "result: await remote.dispatch(input.method, input.params, input.connection)") !== 1 ||
     count(firstParty, "captureCurrentAnchorRelayMethods()") !== 1 ||
+    count(firstParty, "fulfillConnectionLifetimeObligation({") !== 1 ||
+    count(firstParty, 'error.code === "connection-closed"') !== 1 ||
+    count(firstParty, 'error.code === "service-unavailable"') !== 1 ||
+    count(firstParty, 'error.code === "request-timeout"') !== 1 ||
+    count(firstParty, "error.code === RPC_ERROR_CODES.BUSY") !== 1 ||
+    count(firstParty, "this.#active.get(connectionId) !== active") !== 1 ||
     count(registry, ".filter((name) => !local.has(name))") !== 1 ||
     count(localRouter, "export class ExecutorFirstPartyRpcRouter") !== 1 ||
     count(localRouter, "if (LOCAL_METHODS.has(input.method))") !== 1 ||

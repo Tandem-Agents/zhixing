@@ -1330,6 +1330,16 @@ test("planned duty migration stays bound to two production roots and a finite ow
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/first-party-conversation-mesh.ts",
+      (text) => text.replace(
+        "fulfillConnectionLifetimeObligation({",
+        "Promise.resolve({",
+      ),
+    )).join("\n"),
+    /first-party current-owner relay drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/planned-anchor-transfer.ts",
       (text) => text.replace(
         "const candidate = await this.#candidates.claimCandidate(identity);",
@@ -1689,6 +1699,26 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       (text) => text.replace("ctx.managedHostPublicStatus?.()", "undefined"),
     )).join("\n"),
     /public status or executor queue wake drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service-reconciler.ts",
+      (text) => text.replace(
+        "return reconcileOrJoin(key, input, false);",
+        "return reconcileOrJoin(key, input, true);",
+      ),
+    )).join("\n"),
+    /bounded successor or start classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace(
+        "await this.requireCommand(startCommand(spec), signal);",
+        "await this.command(startCommand(spec), signal);",
+      ),
+    )).join("\n"),
+    /bounded successor or start classifier drifted/,
   );
 });
 
