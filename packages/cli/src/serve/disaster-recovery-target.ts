@@ -289,18 +289,41 @@ export class DisasterRecoveryTarget {
       ...(input.signal ? { signal: input.signal } : {}),
       now: this.options.now?.(),
     });
-    await loadOrCreateAnchorIssuerKey(this.options.secretStore, input.prepare.transferId);
-    const verified = await candidate.recordVerified(input.prepare.transferId, {
-      baseline: staged.baseline,
-      baselineEvents: staged.baselineEvents,
-      reachabilityCut: input.trustEvidence.cut,
-      trustEvidence: input.trustEvidence.evidence,
-      trustEvidenceDigest: input.trustEvidence.digest,
-      onsiteVerification: staged.onsiteVerification,
-      authorityRecordsRef: staged.authorityRecordsRef,
-      catalog: staged.catalog,
-      catalogRef: staged.catalogRef,
-    });
+    const issuerKey = await loadOrCreateAnchorIssuerKey(
+      this.options.secretStore,
+      input.prepare.transferId,
+    );
+    let verified: DisasterRecoveryCandidateState;
+    try {
+      await this.#deleteFreshIssuerKeyIfAborted({
+        candidate,
+        prepare: input.prepare,
+        issuerKey,
+      });
+      verified = await candidate.recordVerified(input.prepare.transferId, {
+        baseline: staged.baseline,
+        baselineEvents: staged.baselineEvents,
+        reachabilityCut: input.trustEvidence.cut,
+        trustEvidence: input.trustEvidence.evidence,
+        trustEvidenceDigest: input.trustEvidence.digest,
+        onsiteVerification: staged.onsiteVerification,
+        authorityRecordsRef: staged.authorityRecordsRef,
+        catalog: staged.catalog,
+        catalogRef: staged.catalogRef,
+      });
+      await this.#deleteFreshIssuerKeyIfAborted({
+        candidate,
+        prepare: input.prepare,
+        issuerKey,
+      });
+    } catch (error) {
+      await this.#deleteFreshIssuerKeyIfAborted({
+        candidate,
+        prepare: input.prepare,
+        issuerKey,
+      });
+      throw error;
+    }
     return this.#importVerifiedCandidate({
       prepare: input.prepare,
       candidate: verified,
@@ -702,11 +725,15 @@ export class DisasterRecoveryTarget {
           transferId: input.abort.transferId,
           abort,
         });
-    if (current?.imported) {
+    const transferKey = await loadAnchorIssuerKey(
+      this.options.secretStore,
+      input.abort.transferId,
+    );
+    if (transferKey) {
       await deleteAnchorIssuerKey(
         this.options.secretStore,
         input.abort.transferId,
-        current.imported.readyProof.targetIssuerKeyId,
+        transferKey.deviceId,
       );
     }
     await rm(path.join(this.options.stagingRoot, "transfers", input.abort.transferId), {
@@ -715,6 +742,24 @@ export class DisasterRecoveryTarget {
     });
     await this.options.readiness.release(input.abort.transferId);
     return state;
+  }
+
+  async #deleteFreshIssuerKeyIfAborted(input: {
+    readonly candidate: FileDisasterRecoveryCandidateJournal;
+    readonly prepare: Extract<DisasterRecoveryCommand, { readonly op: "prepare" }>;
+    readonly issuerKey: DeviceKey;
+  }): Promise<void> {
+    const current = await input.candidate.state(input.prepare.transferId);
+    if (current?.terminal !== "aborted") return;
+    if (canonicalize(current.prepare) !== canonicalize(input.prepare)) {
+      throw new Error("Disaster recovery abort belongs to another candidate identity");
+    }
+    await deleteAnchorIssuerKey(
+      this.options.secretStore,
+      input.prepare.transferId,
+      input.issuerKey.deviceId,
+    );
+    throw new Error("Disaster recovery candidate was durably aborted");
   }
 
   async tombstone(input: {

@@ -851,6 +851,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/disaster-recovery-installation.ts",
     "packages/cli/src/serve/disaster-recovery-target.ts",
     "packages/cli/src/serve/disaster-recovery-trust-evidence.ts",
+    "packages/core/src/authority/artifact-retention.ts",
+    "packages/core/src/authority/commit-log.ts",
     "packages/cli/src/serve/recovery-root-lifecycle.ts",
     "packages/cli/src/serve/credential-exposure-authority.ts",
     "packages/cli/src/serve/credential-rotation-publication.ts",
@@ -1104,6 +1106,53 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
       ),
     )).join("\n"),
     /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-candidate.ts",
+      (text) => text.replaceAll("verifiedRef", "verifiedJson"),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/authority/artifact-retention.ts",
+      (text) => text.replaceAll(
+        "DisasterRecoveryInstallDecision",
+        "UnregisteredDisasterDecision",
+      ),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/authority/commit-log.ts",
+      (text) => text.replace(
+        /(projectionId: RETAINED_REFERENCE_PROJECTION_ID,\r?\n\s+reducerVersion: )4,/,
+        (_match, prefix) => `${prefix}3,`,
+      ),
+    )).join("\n"),
+    /verified replay, install decision or target-wide terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace(
+        "const transferKey = await loadAnchorIssuerKey(",
+        "const transferKey = await Promise.resolve(null) || loadAnchorIssuerKey(",
+      ),
+    )).join("\n"),
+    /pre-commit signal or authenticated candidate terminal order drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace(
+        /      await this\.#deleteFreshIssuerKeyIfAborted\(\{\r?\n        candidate,\r?\n        prepare: input\.prepare,\r?\n        issuerKey,\r?\n      \}\);/u,
+        "      void candidate; // omitted creator terminal check",
+      ),
+    )).join("\n"),
+    /pre-commit signal or authenticated candidate terminal order drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(

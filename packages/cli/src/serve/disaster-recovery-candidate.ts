@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type {
   ArtifactRef,
   AuthorityCatalog,
@@ -73,6 +74,14 @@ export interface DisasterRecoveryCandidateState {
   readonly abort?: DisasterRecoveryAbort;
 }
 
+interface StoredDisasterRecoveryCandidateState {
+  readonly prepare: PrepareCommand;
+  readonly verifiedRef?: ArtifactRef;
+  readonly installDecisionRef?: ArtifactRef;
+  readonly terminal?: "committed" | "aborted";
+  readonly abort?: DisasterRecoveryAbort;
+}
+
 type DisasterCandidateRecord =
   | {
       readonly v: 1;
@@ -83,13 +92,13 @@ type DisasterCandidateRecord =
       readonly v: 1;
       readonly t: "disaster-recovery-candidate-verified";
       readonly transferId: string;
-      readonly verifiedJson: string;
+      readonly verifiedRef: ArtifactRef;
     }
   | {
       readonly v: 1;
       readonly t: "disaster-recovery-candidate-install-decided";
       readonly transferId: string;
-      readonly decisionJson: string;
+      readonly decisionRef: ArtifactRef;
     }
   | {
       readonly v: 1;
@@ -106,7 +115,7 @@ type DisasterCandidateRecord =
     };
 
 interface CandidateProjection {
-  readonly candidates: ReadonlyMap<string, DisasterRecoveryCandidateState>;
+  readonly candidates: ReadonlyMap<string, StoredDisasterRecoveryCandidateState>;
   readonly targetWide: ReadonlyMap<string, TargetWideAnchorCandidateState>;
 }
 
@@ -117,17 +126,23 @@ export class FileDisasterRecoveryCandidateJournal {
   ) {}
 
   async state(transferId: string): Promise<DisasterRecoveryCandidateState | undefined> {
-    return (await this.#projection()).candidates.get(transferId);
+    const stored = (await this.#projection()).candidates.get(transferId);
+    return stored ? this.#hydrateCandidate(stored) : undefined;
   }
 
   async states(): Promise<ReadonlyMap<string, DisasterRecoveryCandidateState>> {
-    return (await this.#projection()).candidates;
+    const stored = (await this.#projection()).candidates;
+    const candidates = new Map<string, DisasterRecoveryCandidateState>();
+    for (const [transferId, candidate] of stored) {
+      candidates.set(transferId, await this.#hydrateCandidate(candidate));
+    }
+    return candidates;
   }
 
   async claim(input: PrepareCommand): Promise<DisasterRecoveryCandidateState> {
     const prepare = validatePrepare(input, this.recoveryRootPublicKey);
     const wideIdentity = disasterTargetWideIdentity(prepare);
-    return (await this.#transact((projection) => {
+    const stored = (await this.#transact((projection) => {
       const wide = assertTargetWideAnchorCandidateAvailable(
         projection.targetWide,
         wideIdentity,
@@ -164,22 +179,37 @@ export class FileDisasterRecoveryCandidateJournal {
         value: { prepare },
       };
     })).value;
+    return this.#hydrateCandidate(stored);
   }
 
   async recordVerified(
     transferId: string,
     input: DisasterRecoveryVerifiedCandidate,
   ): Promise<DisasterRecoveryCandidateState> {
-    return (await this.#transact((projection) => {
+    const current = await this.state(transferId);
+    if (!current) throw new Error("Disaster verification has no durable candidate claim");
+    const verified = validateVerifiedCandidate(
+      current.prepare,
+      input,
+      this.recoveryRootPublicKey,
+    );
+    if (current.verified) {
+      if (canonicalize(current.verified) !== canonicalize(verified)) {
+        throw new Error("Disaster candidate verification conflicts with replay");
+      }
+      return current;
+    }
+    if (current.terminal !== undefined) {
+      throw new Error("Terminal disaster candidate cannot gain verification");
+    }
+    const verifiedRef = await this.log.artifactStore.put(
+      Buffer.from(canonicalize(verified), "utf8"),
+    );
+    const stored = (await this.#transact((projection) => {
       const existing = projection.candidates.get(transferId);
       if (!existing) throw new Error("Disaster verification has no durable candidate claim");
-      const verified = validateVerifiedCandidate(
-        existing.prepare,
-        input,
-        this.recoveryRootPublicKey,
-      );
-      if (existing.verified) {
-        if (canonicalize(existing.verified) !== canonicalize(verified)) {
+      if (existing.verifiedRef) {
+        if (canonicalize(existing.verifiedRef) !== canonicalize(verifiedRef)) {
           throw new Error("Disaster candidate verification conflicts with replay");
         }
         return { kind: "return", value: existing };
@@ -195,30 +225,46 @@ export class FileDisasterRecoveryCandidateJournal {
             v: 1,
             t: "disaster-recovery-candidate-verified",
             transferId,
-            verifiedJson: canonicalize(verified),
+            verifiedRef,
           } satisfies DisasterCandidateRecord,
         }],
-        value: { ...existing, verified },
+        value: { ...existing, verifiedRef },
       };
-    })).value;
+    }, [verifiedRef])).value;
+    return this.#hydrateCandidate(stored);
   }
 
   async decideInstall(
     transferId: string,
     input: DisasterRecoveryInstallDecision,
   ): Promise<DisasterRecoveryCandidateState> {
-    return (await this.#transact((projection) => {
+    const current = await this.state(transferId);
+    if (!current) throw new Error("Disaster install decision has no durable candidate claim");
+    if (!current.verified) throw new Error("Disaster install decision has no verified candidate");
+    const installDecision = validateInstallDecision(
+      current.prepare,
+      current.verified,
+      input,
+      this.recoveryRootPublicKey,
+    );
+    if (current.installDecision) {
+      if (canonicalize(current.installDecision) !== canonicalize(installDecision)) {
+        throw new Error("Disaster install decision conflicts with replay");
+      }
+      return current;
+    }
+    if (current.terminal !== undefined) {
+      throw new Error("Terminal disaster candidate cannot gain an install decision");
+    }
+    const decisionRef = await this.log.artifactStore.put(
+      Buffer.from(canonicalize(installDecision), "utf8"),
+    );
+    const stored = (await this.#transact((projection) => {
       const existing = projection.candidates.get(transferId);
       if (!existing) throw new Error("Disaster install decision has no durable candidate claim");
-      if (!existing.verified) throw new Error("Disaster install decision has no verified candidate");
-      const installDecision = validateInstallDecision(
-        existing.prepare,
-        existing.verified,
-        input,
-        this.recoveryRootPublicKey,
-      );
-      if (existing.installDecision) {
-        if (canonicalize(existing.installDecision) !== canonicalize(installDecision)) {
+      if (!existing.verifiedRef) throw new Error("Disaster install decision has no verified candidate");
+      if (existing.installDecisionRef) {
+        if (canonicalize(existing.installDecisionRef) !== canonicalize(decisionRef)) {
           throw new Error("Disaster install decision conflicts with replay");
         }
         return { kind: "return", value: existing };
@@ -234,12 +280,13 @@ export class FileDisasterRecoveryCandidateJournal {
             v: 1,
             t: "disaster-recovery-candidate-install-decided",
             transferId,
-            decisionJson: canonicalize(installDecision),
+            decisionRef,
           } satisfies DisasterCandidateRecord,
         }],
-        value: { ...existing, installDecision },
+        value: { ...existing, installDecisionRef: decisionRef },
       };
-    }, input.candidateReferences)).value;
+    }, [decisionRef, ...installDecision.candidateReferences])).value;
+    return this.#hydrateCandidate(stored);
   }
 
   async terminal(
@@ -247,7 +294,12 @@ export class FileDisasterRecoveryCandidateJournal {
     terminal: "committed" | "aborted",
     abortInput?: DisasterRecoveryAbort,
   ): Promise<DisasterRecoveryCandidateState> {
-    return (await this.#transact((projection) => {
+    const current = await this.state(transferId);
+    if (!current) throw new Error("Disaster terminal has no durable candidate claim");
+    if (terminal === "aborted") {
+      validateCandidateAbort(current.prepare, abortInput, this.recoveryRootPublicKey);
+    }
+    const stored = (await this.#transact((projection) => {
       const existing = projection.candidates.get(transferId);
       if (!existing) throw new Error("Disaster terminal has no durable candidate claim");
       const abort = terminal === "aborted"
@@ -260,10 +312,10 @@ export class FileDisasterRecoveryCandidateJournal {
       if (terminal !== "aborted" && abortInput !== undefined) {
         throw new TypeError("Committed disaster candidate cannot store an abort");
       }
-      if (terminal === "committed" && !existing.installDecision) {
+      if (terminal === "committed" && !existing.installDecisionRef) {
         throw new Error("Committed disaster candidate has no durable install decision");
       }
-      if (terminal === "aborted" && existing.installDecision) {
+      if (terminal === "aborted" && existing.installDecisionRef) {
         throw new Error("Install-decided disaster candidate cannot be aborted");
       }
       if (existing.terminal !== undefined) {
@@ -306,6 +358,7 @@ export class FileDisasterRecoveryCandidateJournal {
           : { ...existing, terminal },
       };
     })).value;
+    return this.#hydrateCandidate(stored);
   }
 
   stopStorageMaintenance(): void {
@@ -322,6 +375,42 @@ export class FileDisasterRecoveryCandidateJournal {
       ),
       { streams: [ANCHOR_CANDIDATE_STREAM, DISASTER_CANDIDATE_STREAM] },
     );
+  }
+
+  async #hydrateCandidate(
+    stored: StoredDisasterRecoveryCandidateState,
+  ): Promise<DisasterRecoveryCandidateState> {
+    const verified = stored.verifiedRef
+      ? parseStoredVerified(
+          decodeCanonicalArtifact(
+            await this.log.artifactStore.get(stored.verifiedRef),
+            "Disaster candidate verification",
+          ),
+          stored.prepare,
+          this.recoveryRootPublicKey,
+        )
+      : undefined;
+    if (stored.installDecisionRef && !verified) {
+      throw new Error("Disaster install decision precedes candidate verification");
+    }
+    const installDecision = stored.installDecisionRef
+      ? parseStoredInstallDecision(
+          decodeCanonicalArtifact(
+            await this.log.artifactStore.get(stored.installDecisionRef),
+            "Disaster install decision",
+          ),
+          stored.prepare,
+          verified!,
+          this.recoveryRootPublicKey,
+        )
+      : undefined;
+    return Object.freeze({
+      prepare: stored.prepare,
+      ...(verified ? { verified } : {}),
+      ...(installDecision ? { installDecision } : {}),
+      ...(stored.terminal ? { terminal: stored.terminal } : {}),
+      ...(stored.abort ? { abort: stored.abort } : {}),
+    });
   }
 
   #transact<Value>(
@@ -389,48 +478,40 @@ function reduceProjection(
   if (!existing) throw new Error("Disaster candidate progress has no durable claim");
   const candidates = new Map(base.candidates);
   if (record.t === "disaster-recovery-candidate-verified") {
-    const verified = parseStoredVerified(
-      record.verifiedJson,
-      existing.prepare,
-      recoveryRootPublicKey,
-    );
     if (existing.terminal !== undefined) {
       throw new Error("Terminal disaster candidate cannot gain verification");
     }
     if (
-      existing.verified &&
-      canonicalize(existing.verified) !== canonicalize(verified)
+      existing.verifiedRef &&
+      canonicalize(existing.verifiedRef) !== canonicalize(record.verifiedRef)
     ) throw new Error("Disaster candidate has conflicting verification facts");
-    candidates.set(record.transferId, { ...existing, verified });
+    candidates.set(record.transferId, { ...existing, verifiedRef: record.verifiedRef });
     return { ...base, candidates };
   }
   if (record.t === "disaster-recovery-candidate-install-decided") {
-    if (!existing.verified) {
+    if (!existing.verifiedRef) {
       throw new Error("Disaster install decision precedes candidate verification");
     }
     if (existing.terminal !== undefined) {
       throw new Error("Terminal disaster candidate cannot gain an install decision");
     }
-    const installDecision = parseStoredInstallDecision(
-      record.decisionJson,
-      existing.prepare,
-      existing.verified,
-      recoveryRootPublicKey,
-    );
     if (
-      existing.installDecision &&
-      canonicalize(existing.installDecision) !== canonicalize(installDecision)
+      existing.installDecisionRef &&
+      canonicalize(existing.installDecisionRef) !== canonicalize(record.decisionRef)
     ) throw new Error("Disaster candidate has conflicting install decisions");
-    candidates.set(record.transferId, { ...existing, installDecision });
+    candidates.set(record.transferId, {
+      ...existing,
+      installDecisionRef: record.decisionRef,
+    });
     return { ...base, candidates };
   }
   if (existing.terminal !== undefined && existing.terminal !== record.terminal) {
     throw new Error("Disaster candidate has conflicting terminal decisions");
   }
-  if (record.terminal === "committed" && !existing.installDecision) {
+  if (record.terminal === "committed" && !existing.installDecisionRef) {
     throw new Error("Disaster committed terminal has no install decision");
   }
-  if (record.terminal === "aborted" && existing.installDecision) {
+  if (record.terminal === "aborted" && existing.installDecisionRef) {
     throw new Error("Disaster abort conflicts with an install decision");
   }
   if (
@@ -458,7 +539,7 @@ function reduceProjection(
 
 function validateRecord(
   input: unknown,
-  candidates: ReadonlyMap<string, DisasterRecoveryCandidateState>,
+  candidates: ReadonlyMap<string, StoredDisasterRecoveryCandidateState>,
   recoveryRootPublicKey: string,
 ): DisasterCandidateRecord {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -482,46 +563,37 @@ function validateRecord(
     };
   }
   if (record.t === "disaster-recovery-candidate-verified") {
-    assertExactKeys(record, ["t", "transferId", "v", "verifiedJson"]);
+    assertExactKeys(record, ["t", "transferId", "v", "verifiedRef"]);
     if (typeof record.transferId !== "string") throw new TypeError("Disaster candidate transfer is invalid");
-    if (typeof record.verifiedJson !== "string") {
-      throw new TypeError("Disaster candidate verification bytes are invalid");
-    }
     const candidate = candidates.get(record.transferId);
     if (!candidate) throw new Error("Disaster verification precedes its durable claim");
     return {
       v: 1,
       t: record.t,
       transferId: record.transferId,
-      verifiedJson: canonicalize(parseStoredVerified(
-        record.verifiedJson,
-        candidate.prepare,
-        recoveryRootPublicKey,
-      )),
+      verifiedRef: strictArtifactRef(
+        record.verifiedRef,
+        "Disaster candidate verification ref",
+      ),
     };
   }
   if (record.t === "disaster-recovery-candidate-install-decided") {
-    assertExactKeys(record, ["decisionJson", "t", "transferId", "v"]);
+    assertExactKeys(record, ["decisionRef", "t", "transferId", "v"]);
     if (typeof record.transferId !== "string") {
       throw new TypeError("Disaster candidate transfer is invalid");
     }
-    if (typeof record.decisionJson !== "string") {
-      throw new TypeError("Disaster install decision bytes are invalid");
-    }
     const candidate = candidates.get(record.transferId);
-    if (!candidate?.verified) {
+    if (!candidate?.verifiedRef) {
       throw new Error("Disaster install decision precedes candidate verification");
     }
     return {
       v: 1,
       t: record.t,
       transferId: record.transferId,
-      decisionJson: canonicalize(parseStoredInstallDecision(
-        record.decisionJson,
-        candidate.prepare,
-        candidate.verified,
-        recoveryRootPublicKey,
-      )),
+      decisionRef: strictArtifactRef(
+        record.decisionRef,
+        "Disaster install decision ref",
+      ),
     };
   }
   if (record.t !== "disaster-recovery-candidate-terminal") {
@@ -566,6 +638,24 @@ function parseStoredPrepare(input: string, recoveryRootPublicKey: string): Prepa
     throw new TypeError("Disaster candidate prepare bytes are not canonical");
   }
   return validatePrepare(raw, recoveryRootPublicKey);
+}
+
+function decodeCanonicalArtifact(bytes: Uint8Array, label: string): string {
+  const snapshot = Buffer.from(bytes);
+  const text = snapshot.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(snapshot)) {
+    throw new TypeError(`${label} bytes are not valid UTF-8`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text) as unknown;
+  } catch {
+    throw new TypeError(`${label} bytes are not JSON`);
+  }
+  if (canonicalize(raw) !== text) {
+    throw new TypeError(`${label} bytes are not canonical`);
+  }
+  return text;
 }
 
 function parseStoredVerified(
@@ -895,6 +985,14 @@ function canonicalReferences(input: readonly unknown[]): readonly ArtifactRef[] 
     throw new TypeError("Disaster candidate references are not a canonical exact-set");
   }
   return Object.freeze(result);
+}
+
+function strictArtifactRef(input: unknown, label: string): ArtifactRef {
+  assertArtifactRef(input);
+  if (canonicalize(Object.keys(input).sort()) !== canonicalize(["bytes", "digest"])) {
+    throw new TypeError(`${label} has incomplete or unknown fields`);
+  }
+  return Object.freeze({ digest: input.digest, bytes: input.bytes });
 }
 
 function validateCandidateAbort(

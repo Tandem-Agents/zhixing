@@ -1295,6 +1295,73 @@ describe("FileAuthorityCommitLog", () => {
       expect(envelopes).toHaveLength(1);
     }
   }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("retains disaster candidate payload roots and their nested artifact closure", async () => {
+    const { artifacts, log } = await createStores();
+    const transferId = "xfer-01KXPWTM80BYB4SH423EJT1CZ1";
+    const verifiedLeaf = await artifacts.put(Buffer.from("verified nested leaf", "utf8"));
+    const decisionLeaf = await artifacts.put(Buffer.from("decision nested leaf", "utf8"));
+    const verifiedRef = await artifacts.put(Buffer.from(canonicalize({
+      catalog: {
+        transferId,
+        retainedArtifacts: [verifiedLeaf],
+      },
+      authorityRecordsRef: decisionLeaf,
+    }), "utf8"));
+    const decisionRef = await artifacts.put(Buffer.from(canonicalize({
+      installation: {
+        transferId,
+        authorityRecords: verifiedLeaf,
+      },
+      candidateReferences: [decisionLeaf],
+    }), "utf8"));
+    const orphan = await artifacts.put(Buffer.from("candidate orphan", "utf8"));
+
+    await log.append([{
+      stream: "transfer:anchor-disaster-candidate",
+      body: {
+        v: 1,
+        t: "disaster-recovery-candidate-verified",
+        transferId,
+        verifiedRef,
+      },
+    }]);
+    await log.append([{
+      stream: "transfer:anchor-disaster-candidate",
+      body: {
+        v: 1,
+        t: "disaster-recovery-candidate-install-decided",
+        transferId,
+        decisionRef,
+      },
+    }]);
+    await log.append([{
+      stream: "transfer:anchor-disaster-candidate",
+      body: {
+        v: 1,
+        t: "disaster-recovery-candidate-terminal",
+        transferId,
+        terminal: "committed",
+      },
+    }]);
+
+    const old = new Date("2020-01-01T00:00:00.000Z");
+    for (const ref of [verifiedLeaf, decisionLeaf, verifiedRef, decisionRef, orphan]) {
+      await utimes(artifacts.pathFor(ref), old, old);
+    }
+    await expect(log.collectGarbage({
+      unreferencedBefore: "2021-01-01T00:00:00.000Z",
+    })).resolves.toEqual({ scanned: 5, retained: 4, deleted: 1 });
+    for (const ref of [verifiedLeaf, decisionLeaf, verifiedRef, decisionRef]) {
+      await expect(artifacts.has(ref)).resolves.toBe(true);
+    }
+    await expect(artifacts.has(orphan)).resolves.toBe(false);
+
+    const reopened = new FileAuthorityCommitLog(log.rootDir, artifacts);
+    await expect(reopened.collectGarbage({
+      unreferencedBefore: "2021-01-01T00:00:00.000Z",
+    })).resolves.toEqual({ scanned: 4, retained: 4, deleted: 0 });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 });
 
 async function corruptFrame(file: string, frameIndex: number): Promise<void> {

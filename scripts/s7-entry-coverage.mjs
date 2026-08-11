@@ -944,6 +944,8 @@ export function inspectRecoveryBackupAssembly(records) {
   const disasterEvidence = byPath.get("packages/cli/src/serve/disaster-recovery-trust-evidence.ts");
   const disasterInstallation = byPath.get("packages/cli/src/serve/disaster-recovery-installation.ts");
   const disasterTarget = byPath.get("packages/cli/src/serve/disaster-recovery-target.ts");
+  const artifactRetention = byPath.get("packages/core/src/authority/artifact-retention.ts");
+  const authorityCommitLog = byPath.get("packages/core/src/authority/commit-log.ts");
   const rootLifecycle = byPath.get("packages/cli/src/serve/recovery-root-lifecycle.ts");
   const exposureAuthority = byPath.get("packages/cli/src/serve/credential-exposure-authority.ts");
   const credentialRotation = byPath.get("packages/cli/src/serve/credential-rotation-publication.ts");
@@ -956,7 +958,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !rootEstablishment ||
     !rootActivation || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
-    !disasterInstallation || !disasterTarget || !rootLifecycle || !exposureAuthority ||
+    !disasterInstallation || !disasterTarget || !artifactRetention || !authorityCommitLog ||
+    !rootLifecycle || !exposureAuthority ||
     !credentialRotation || !startup || !setupDelivery || !checkpointService ||
     !checkpointOwner || !pairedTarget
   ) {
@@ -1242,6 +1245,25 @@ export function inspectRecoveryBackupAssembly(records) {
     'rm(path.join(this.options.stagingRoot, "transfers", input.abort.transferId)',
     abortTerminal,
   );
+  const abortKeyLoad = disasterTarget.indexOf(
+    "const transferKey = await loadAnchorIssuerKey(",
+    abortTerminal,
+  );
+  const freshKey = disasterTarget.indexOf(
+    "const issuerKey = await loadOrCreateAnchorIssuerKey(",
+  );
+  const firstCreatorTerminalCheck = disasterTarget.indexOf(
+    "await this.#deleteFreshIssuerKeyIfAborted({",
+    freshKey,
+  );
+  const freshRecordVerified = disasterTarget.indexOf(
+    "verified = await candidate.recordVerified(",
+    firstCreatorTerminalCheck,
+  );
+  const secondCreatorTerminalCheck = disasterTarget.indexOf(
+    "await this.#deleteFreshIssuerKeyIfAborted({",
+    firstCreatorTerminalCheck + 1,
+  );
   if (
     !disasterCommand.includes("const ownedAbort = options.signal ? undefined : new AbortController()") ||
     !disasterCommand.includes("discoverDisasterRecoveryCandidates({") ||
@@ -1250,7 +1272,12 @@ export function inspectRecoveryBackupAssembly(records) {
     !disasterCommand.includes("selected.target.read(selected.entry.checkpointId, signal)") ||
     !disasterCommand.includes("createSignedDisasterRecoveryAbort({") ||
     !disasterCommand.includes("await target.abort({ abort, recoveryRoot: decoded.root })") ||
-    abortTerminal < 0 || abortCleanup < abortTerminal ||
+    abortTerminal < 0 || abortKeyLoad < abortTerminal || abortCleanup < abortKeyLoad ||
+    freshKey < 0 || firstCreatorTerminalCheck < freshKey ||
+    freshRecordVerified < firstCreatorTerminalCheck ||
+    secondCreatorTerminalCheck < freshRecordVerified ||
+    count(disasterTarget, "await this.#deleteFreshIssuerKeyIfAborted({") !== 3 ||
+    !disasterTarget.includes("input.issuerKey.deviceId") ||
     !disasterCandidate.includes("terminal: record.terminal, abort: record.abort")
   ) {
     failures.push("disaster pre-commit signal or authenticated candidate terminal order drifted");
@@ -1296,6 +1323,12 @@ export function inspectRecoveryBackupAssembly(records) {
     'candidate.terminal(installation.transferId, "committed")',
     startupCompletion,
   );
+  const candidateReducerStart = disasterCandidate.indexOf("function reduceProjection(");
+  const candidateReducerEnd = disasterCandidate.indexOf(
+    "function validateRecord(",
+    candidateReducerStart,
+  );
+  const candidateReducer = disasterCandidate.slice(candidateReducerStart, candidateReducerEnd);
   if (
     verifiedReplay < 0 || freshVerification < 0 || verifiedReplay > freshVerification ||
     !disasterTarget.includes("#importVerifiedCandidate({") ||
@@ -1305,6 +1338,22 @@ export function inspectRecoveryBackupAssembly(records) {
     !disasterCandidate.includes("async decideInstall(") ||
     !disasterCandidate.includes("installationEntries") ||
     !disasterCandidate.includes("candidateReferences") ||
+    !disasterCandidate.includes("readonly verifiedRef?: ArtifactRef") ||
+    !disasterCandidate.includes("readonly installDecisionRef?: ArtifactRef") ||
+    !disasterCandidate.includes("await this.log.artifactStore.get(stored.verifiedRef)") ||
+    !disasterCandidate.includes("await this.log.artifactStore.get(stored.installDecisionRef)") ||
+    !disasterCandidate.includes("decodeCanonicalArtifact(") ||
+    disasterCandidate.includes("verifiedJson") ||
+    disasterCandidate.includes("decisionJson") ||
+    candidateReducer.includes("artifactStore") ||
+    !artifactRetention.includes('schema: "DisasterRecoveryVerifiedCandidate"') ||
+    !artifactRetention.includes('schema: "DisasterRecoveryInstallDecision"') ||
+    !artifactRetention.includes('body.verifiedRef') ||
+    !artifactRetention.includes('body.decisionRef') ||
+    count(artifactRetention, "return unconditionalOnly(envelope)") < 2 ||
+    !/projectionId: RETAINED_REFERENCE_PROJECTION_ID,\r?\n\s+reducerVersion: 4,/.test(
+      authorityCommitLog,
+    ) ||
     !disasterCandidate.includes("Committed disaster candidate has no durable install decision") ||
     !disasterCandidate.includes("Install-decided disaster candidate cannot be aborted") ||
     installDecision < 0 || authorityInstall < installDecision ||

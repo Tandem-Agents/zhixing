@@ -199,7 +199,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     this.#storageMaintenance = options.storageMaintenance;
     this.#retainedReferenceIndex = this.durableProjection({
       projectionId: RETAINED_REFERENCE_PROJECTION_ID,
-      reducerVersion: 3,
+      reducerVersion: 4,
       reduce: (envelope, current) =>
         reduceRetainedReferenceIndex(envelope, current, this.artifactStore),
     });

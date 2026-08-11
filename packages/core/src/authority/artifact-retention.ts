@@ -52,6 +52,16 @@ export type RegisteredArtifactRoot =
       readonly schema: "CheckpointEnvelope";
       readonly ref: ArtifactRef;
       readonly checkpointId: string;
+    }
+  | {
+      readonly schema: "DisasterRecoveryVerifiedCandidate";
+      readonly ref: ArtifactRef;
+      readonly transferId: string;
+    }
+  | {
+      readonly schema: "DisasterRecoveryInstallDecision";
+      readonly ref: ArtifactRef;
+      readonly transferId: string;
     };
 
 export function collectRegisteredArtifactRoots(
@@ -90,6 +100,34 @@ export function collectRegisteredArtifactRoots(
         ref: requiredArtifactRef(body.envelopeRef, "Checkpoint envelope ref"),
         checkpointId: requiredString(body.checkpointId, "Checkpoint id"),
       });
+      continue;
+    }
+    if (record.stream === "transfer:anchor-disaster-candidate") {
+      if (body?.t === "disaster-recovery-candidate-verified") {
+        roots.push({
+          schema: "DisasterRecoveryVerifiedCandidate",
+          ref: requiredArtifactRef(
+            body.verifiedRef,
+            "Disaster recovery verified candidate ref",
+          ),
+          transferId: requiredString(
+            body.transferId,
+            "Disaster recovery verified candidate transferId",
+          ),
+        });
+      } else if (body?.t === "disaster-recovery-candidate-install-decided") {
+        roots.push({
+          schema: "DisasterRecoveryInstallDecision",
+          ref: requiredArtifactRef(
+            body.decisionRef,
+            "Disaster recovery install decision ref",
+          ),
+          transferId: requiredString(
+            body.transferId,
+            "Disaster recovery install decision transferId",
+          ),
+        });
+      }
       continue;
     }
     if (record.stream.startsWith("run:") || record.stream.startsWith("job:")) {
@@ -236,6 +274,20 @@ export function classifyRegisteredArtifactReferences(
           conversationId: checkpointArtifactOwner(root.checkpointId),
         })),
       };
+    }
+    if (root.schema === "DisasterRecoveryVerifiedCandidate") {
+      const catalog = plainRecord(envelope?.catalog);
+      if (catalog?.transferId !== root.transferId) {
+        throw new TypeError("verified candidate does not match its authority record");
+      }
+      return unconditionalOnly(envelope);
+    }
+    if (root.schema === "DisasterRecoveryInstallDecision") {
+      const installation = plainRecord(envelope?.installation);
+      if (installation?.transferId !== root.transferId) {
+        throw new TypeError("install decision does not match its authority record");
+      }
+      return unconditionalOnly(envelope);
     }
     if (root.schema === "ControlEnvelope") {
       const control = validateAdmittedControlEnvelope(value);
