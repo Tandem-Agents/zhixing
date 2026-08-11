@@ -1244,6 +1244,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/planned-anchor-transfer.ts",
     "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
+    "packages/cli/src/serve/connection-lifetime-obligation.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
     "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
     "packages/cli/src/serve/command.ts",
@@ -1314,6 +1315,26 @@ test("planned duty migration stays bound to two production roots and a finite ow
       (text) => text.replace(
         "conversationRpc: new CurrentAnchorFirstPartyRpcRouter({",
         "conversationRpc: undefined,",
+      ),
+    )).join("\n"),
+    /first-party current-owner relay drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/first-party-conversation-mesh.ts",
+      (text) => text.replace(
+        "stopSignal: active.abort.signal,",
+        "connectionClosed: Promise.resolve(),\n        stopSignal: active.abort.signal,",
+      ),
+    )).join("\n"),
+    /first-party current-owner relay drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/connection-lifetime-obligation.ts",
+      (text) => text.replace(
+        "readonly connectionClosed?: Promise<unknown>;",
+        "readonly connectionClosed: Promise<unknown>;",
       ),
     )).join("\n"),
     /first-party current-owner relay drifted/,
@@ -1681,6 +1702,26 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /Windows bytes, strict projection or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace(
+        "projection.enabled !== projection.settings.enabled",
+        "false",
+      ),
+    )).join("\n"),
+    /Windows bytes, strict projection or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service-reconciler.ts",
+      (text) => text.replace(
+        "input.adapter.disableFuture(initial.spec, input.signal)",
+        "input.adapter.disable(initial.spec, input.signal)",
+      ),
+    )).join("\n"),
+    /accepted-work drain or generation-safe turnover order drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

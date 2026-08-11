@@ -241,18 +241,12 @@ export class FirstPartyConversationMeshClient {
 
   #ensurePolling(surface: SurfaceIdentity, connection: FirstPartyIngressConnection): void {
     if (this.#active.has(connection.id)) return;
-    const abort = new AbortController();
-    let resolveClosed!: () => void;
-    const connectionClosed = new Promise<void>((resolve) => { resolveClosed = resolve; });
     const active: ActivePoll = {
-      abort,
-      connectionClosed,
-      resolveClosed,
+      abort: new AbortController(),
       remove: () => {},
     };
     this.#active.set(connection.id, active);
     active.remove = connection.onClose(() => {
-      active.resolveClosed();
       void this.close(connection);
     });
     if (this.#active.get(connection.id) !== active) return;
@@ -273,7 +267,6 @@ export class FirstPartyConversationMeshClient {
       let failed = false;
       let completed = false;
       await fulfillConnectionLifetimeObligation({
-        connectionClosed: active.connectionClosed,
         stopSignal: active.abort.signal,
         attempt: async (signal) => {
           const response = await this.#request({ v: 1, op: "poll", surface }, signal);
@@ -309,7 +302,6 @@ export class FirstPartyConversationMeshClient {
     if (this.#active.get(connectionId) !== active) return;
     this.#active.delete(connectionId);
     active.abort.abort();
-    active.resolveClosed();
     active.remove();
   }
 
@@ -326,8 +318,6 @@ export class FirstPartyConversationMeshClient {
 
 interface ActivePoll {
   readonly abort: AbortController;
-  readonly connectionClosed: Promise<void>;
-  readonly resolveClosed: () => void;
   remove: () => void;
 }
 

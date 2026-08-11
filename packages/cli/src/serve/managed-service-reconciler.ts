@@ -10,6 +10,11 @@ import type {
   ManagedServiceSpec,
 } from "./managed-service.js";
 
+type ManagedServiceReconcileAdapter = Pick<
+  ManagedServiceAdapter,
+  "inspect" | "install" | "disableFuture" | "start"
+>;
+
 export const MANAGED_HOST_ASSEMBLY_DESCRIPTOR = Object.freeze({
   owner: "home-managed-host",
   planModes: Object.freeze(["managed", "on-demand", "none"] as const),
@@ -59,7 +64,7 @@ interface ManagedServiceReconcileInput {
   readonly homeKey: string;
   readonly trigger: ManagedServiceReconcileTrigger;
   readonly loadCurrent: () => Promise<ManagedServiceCurrentState>;
-  readonly adapter: ManagedServiceAdapter;
+  readonly adapter: ManagedServiceReconcileAdapter;
   readonly signal: AbortSignal;
 }
 
@@ -129,11 +134,7 @@ async function reconcileCurrent(
     if (initial.spec) {
       const current = await input.adapter.inspect(initial.spec, input.signal);
       if (current.state !== "absent" && current.matches) {
-        if (input.trigger === "local-role-config-committed") {
-          await input.adapter.disableFuture(initial.spec, input.signal);
-        } else {
-          await input.adapter.disable(initial.spec, input.signal);
-        }
+        await input.adapter.disableFuture(initial.spec, input.signal);
       }
     }
     throw error;
@@ -155,8 +156,8 @@ async function reconcileCurrent(
     const latest = await input.loadCurrent();
     const latestPlan = resolveHostLaunchPlan(latest);
     if (latestPlan.mode !== "managed" || latest.spec?.serviceId !== initial.spec.serviceId) {
-      const disabled = await input.adapter.disable(initial.spec, input.signal);
-      return { plan: latestPlan, service: disabled, action: "disabled" };
+      const disabled = await input.adapter.disableFuture(initial.spec, input.signal);
+      return { plan: latestPlan, service: disabled, action: "future-disabled" };
     }
     if (installed.running) {
       return { plan: latestPlan, service: installed, action: "installed-and-started" };
@@ -171,12 +172,8 @@ async function reconcileCurrent(
   if (before.state === "absent" || (before.state === "disabled" && !before.running)) {
     return { plan, service: before, action: "unchanged" };
   }
-  if (input.trigger === "local-role-config-committed") {
-    const disabled = await input.adapter.disableFuture(initial.spec, input.signal);
-    return { plan, service: disabled, action: "future-disabled" };
-  }
-  const disabled = await input.adapter.disable(initial.spec, input.signal);
-  return { plan, service: disabled, action: "disabled" };
+  const disabled = await input.adapter.disableFuture(initial.spec, input.signal);
+  return { plan, service: disabled, action: "future-disabled" };
 }
 
 function throwIfAborted(signal: AbortSignal): void {

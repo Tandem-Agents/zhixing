@@ -314,10 +314,37 @@ describe("first-party conversation mesh", () => {
       ));
       expect(pollCalls).toBe(6);
       expect(onError).not.toHaveBeenCalled();
+      expect(connection.closeHandlerCount()).toBe(1);
       await client.close(connection);
+      expect(connection.closeHandlerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps one connection owner across an unbounded sequence of successful polls", async () => {
+    let pollCalls = 0;
+    const service: MeshServiceClient = {
+      request: async (_serviceId, payload, signal) => {
+        const command = decode(payload) as { op: string };
+        if (command.op === "dispatch" || command.op === "close") return successResult([]);
+        pollCalls += 1;
+        if (pollCalls <= 128) return successResult([]);
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new MeshProtocolError("request-aborted", "aborted");
+      },
+    };
+    const client = new FirstPartyConversationMeshClient(service, "device-source");
+    const connection = ingressConnection(44);
+
+    await client.dispatch("confirmation.list", {}, connection);
+    await waitUntil(() => pollCalls > 128);
+    expect(connection.closeHandlerCount()).toBe(1);
+
+    await client.close(connection);
+    expect(connection.closeHandlerCount()).toBe(0);
   });
 
   it("removes a fatal poll controller so the same surface can start a fresh one", async () => {
@@ -386,6 +413,7 @@ function ingressConnection(id: number) {
       closeHandlers.add(handler);
       return () => closeHandlers.delete(handler);
     },
+    closeHandlerCount: () => closeHandlers.size,
   };
 }
 

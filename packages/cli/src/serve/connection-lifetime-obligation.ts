@@ -2,7 +2,7 @@ const INITIAL_RETRY_MS = 250;
 const MAX_RETRY_MS = 30_000;
 
 export interface ConnectionLifetimeObligationOptions {
-  readonly connectionClosed: Promise<unknown>;
+  readonly connectionClosed?: Promise<unknown>;
   readonly stopSignal?: AbortSignal;
   readonly attempt: (signal: AbortSignal) => void | Promise<void>;
   readonly shouldRetry: (error: unknown) => boolean;
@@ -17,10 +17,12 @@ export async function fulfillConnectionLifetimeObligation(
   const abortFromStop = () => controller.abort(options.stopSignal?.reason);
   if (options.stopSignal?.aborted) abortFromStop();
   else options.stopSignal?.addEventListener("abort", abortFromStop, { once: true });
-  const abortFromConnection = () => {
-    controller.abort(new Error("Authenticated mesh connection closed"));
-  };
-  void options.connectionClosed.then(abortFromConnection, abortFromConnection);
+  if (options.connectionClosed) {
+    const abortFromConnection = () => {
+      controller.abort(new Error("Authenticated mesh connection closed"));
+    };
+    void options.connectionClosed.then(abortFromConnection, abortFromConnection);
+  }
   let retryDelayMs = INITIAL_RETRY_MS;
   try {
     while (!controller.signal.aborted) {

@@ -87,9 +87,9 @@
 
 后台运行选择必须同时诚实处理“以后是否自动拉起”和“当前实例是否仍在运行”：用户关闭某台设备的后台角色后，新请求先停止准入，已接受工作按现有安全停机链收束，旧实例不能继续冒充可用；公开状态必须从同一次当前配置、真实系统服务与运行就绪事实产生。纯接入面或空角色设备仍保持零本机常驻，但它是完整产品入口：只把受支持的第一方请求经认证链路送到当前值班设备，值班设备换代或离线时不得回退旧设备，也不得在本机偷偷拉起宿主。
 
-后台收敛与纯接入面恢复还必须有清晰上界：同一 home 的后继唤醒若恰好加入一个失败中的收敛任务，只允许在共享失败后再合并出一次后继任务，持续故障不得形成自激重试；纯接入面的当前值班设备轮询在短暂断线或忙碌后应自行恢复，不要求用户再发一条命令，关闭、换代或稳定错误又必须精确停止旧轮询。系统服务 start 的权限、manager/session 不可用、有文档依据的不存在和其他失败必须给出稳定行动含义，并以实际运行回读而不是命令返回值宣称成功。
+后台收敛与纯接入面恢复还必须有清晰上界：同一 home 的后继唤醒若恰好加入一个失败中的收敛任务，只允许在共享失败后再合并出一次后继任务，持续故障不得形成自激重试；纯接入面的当前值班设备轮询在短暂断线或忙碌后应自行恢复，不要求用户再发一条命令，关闭、换代或稳定错误又必须精确停止旧轮询。连接级关闭只由当前轮询 controller 持有，每次 poll attempt 只借用其 signal，任意成功次数下长期 callback/controller 必须保持 O(1)。系统服务 start 的权限、manager/session 不可用、有文档依据的不存在和其他失败必须给出稳定行动含义，并以实际运行回读而不是命令返回值宣称成功。
 
-Windows 后台服务的系统回读不得依赖本地化展示文本或宽松 XML 片段：只接受 numeric task state、当前用户有限身份集合与完整 typed trigger/action exact-set 的严格投影。配置换代要求 explicit drain 先收束既有 accepted work；关闭非 managed 选择时，future launch 必须在等待旧 endpoint turnover 和连接新代之前关闭，而旧 endpoint 的终结事实永远不得授权按 service id 停止后继实例。跨平台 fake-runner 的文件副作用证据必须落在每例唯一的宿主临时目录，禁止把 guest 语义路径当成宿主物理路径。
+Windows 后台服务的系统回读不得依赖本地化展示文本或宽松 XML 片段：只接受 numeric task state、当前用户有限身份集合与完整 typed trigger/action exact-set 的严格投影；`RegisteredTask.Enabled` 与 `Definition.Settings.Enabled` 必须一致，冲突时拒绝投影，一致值只表示动态 future-enabled，不参与 immutable definition identity。配置换代要求 explicit drain 先收束既有 accepted work；关闭非 managed 选择时，future launch 必须在等待旧 endpoint turnover 和连接新代之前关闭，而任一 reconcile 唤醒都不得凭 trigger 或 service id 终止当前实例，current stop 只接受既有 graceful completion 或 exact stale endpoint/lock 事实。跨平台 fake-runner 的文件副作用证据必须落在每例唯一的宿主临时目录，禁止把 guest 语义路径当成宿主物理路径。
 
 ## 八、值班设备迁移的当前产品要求
 

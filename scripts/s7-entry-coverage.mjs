@@ -973,6 +973,7 @@ export function inspectManagedHostAssembly(records) {
   if (
     JSON.stringify(descriptor) !== JSON.stringify(expected) ||
     !reconciler.includes("MANAGED_SERVICE_RECONCILE_TRIGGERS.includes(input.trigger)") ||
+    !reconciler.includes("type ManagedServiceReconcileAdapter = Pick<") ||
     count(reconciler, "resolveHostLaunchPlan(") < 2
   ) failures.push("managed host plan or reconcile trigger descriptor exact-set drifted");
   if (
@@ -1011,6 +1012,8 @@ export function inspectManagedHostAssembly(records) {
     count(service, "hresult === 0x80070005") !== 1 ||
     !service.includes("windowsTaskInspectionCommand(spec.serviceId)") ||
     !service.includes("currentUserIdentities.some((candidate) => windowsIdentityMatches(identity, candidate))") ||
+    !service.includes("projection.enabled !== projection.settings.enabled") ||
+    service.includes("projection.settings.enabled &&") ||
     !service.includes("projection.triggers.length === 1") ||
     !service.includes("projection.actions.items.length === 1")
   ) failures.push("managed host Windows bytes, strict projection or HRESULT classifier drifted");
@@ -1035,7 +1038,8 @@ export function inspectManagedHostAssembly(records) {
   const oldTurnover = connection.indexOf("await this.waitForEndpointTurnover(staleEndpoint, opts);", disableFuture);
   const successor = connection.indexOf("await this.getClientNow();", oldTurnover);
   if (
-    count(reconciler, "input.adapter.disableFuture(initial.spec, input.signal)") !== 2 ||
+    count(reconciler, "input.adapter.disableFuture(initial.spec, input.signal)") !== 3 ||
+    count(reconciler, "input.adapter.disable(initial.spec, input.signal)") !== 0 ||
     !serviceRuntime.includes(".disableFuture(current.spec, signal)") ||
     !config.includes("? { beforeTurnover: input.prepareManagedServiceTurnover }") ||
     !repl.includes('strategy: "drain"') ||
@@ -1683,6 +1687,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const facade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
   const product = byPath.get("packages/cli/src/runtime/duty-migration-command.ts");
   const firstParty = byPath.get("packages/cli/src/serve/first-party-conversation-mesh.ts");
+  const connectionLifetime = byPath.get("packages/cli/src/serve/connection-lifetime-obligation.ts");
   const localRouter = byPath.get("packages/cli/src/serve/local-conversation-rpc.ts");
   const registry = byPath.get("packages/server/src/rpc/methods/index.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
@@ -1697,7 +1702,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const surfaceAssets = byPath.get("packages/core/src/authority/surface-assets.ts");
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
-    !accessRoot || !executorRoot || !setup || !firstParty || !localRouter ||
+    !accessRoot || !executorRoot || !setup || !firstParty || !connectionLifetime || !localRouter ||
     !registry || !bootstrap || !channels || !inboundRouter || !conversationProtocol ||
     !deliveryPipeline || !surfaceAssetAuthority || !surfaceAssets
   ) {
@@ -1781,6 +1786,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(firstParty, "result: await remote.dispatch(input.method, input.params, input.connection)") !== 1 ||
     count(firstParty, "captureCurrentAnchorRelayMethods()") !== 1 ||
     count(firstParty, "fulfillConnectionLifetimeObligation({") !== 1 ||
+    firstParty.includes("connectionClosed") ||
+    count(connectionLifetime, "readonly connectionClosed?: Promise<unknown>;") !== 1 ||
     count(firstParty, 'error.code === "connection-closed"') !== 1 ||
     count(firstParty, 'error.code === "service-unavailable"') !== 1 ||
     count(firstParty, 'error.code === "request-timeout"') !== 1 ||

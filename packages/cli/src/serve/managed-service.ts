@@ -325,6 +325,12 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
         return { state: "absent", running: false, matches: true };
       }
       const projection = decodeWindowsTaskInspection(query.stdout);
+      if (projection.enabled !== projection.settings.enabled) {
+        throw new ManagedServiceError(
+          "read-back-failed",
+          "Windows managed service enabled state is inconsistent",
+        );
+      }
       return {
         state: projection.enabled ? "enabled" : "disabled",
         running: windowsTaskStateIsRunning(projection.state),
@@ -966,7 +972,6 @@ function windowsTaskDefinitionMatches(
     action.path === spec.command &&
     action.arguments === windowsCommandArguments(spec) &&
     (action.workingDirectory === "" || action.workingDirectory === null) &&
-    projection.settings.enabled &&
     projection.settings.multipleInstances === 2 &&
     projection.settings.restartInterval === "PT1M" &&
     projection.settings.restartCount === 999;

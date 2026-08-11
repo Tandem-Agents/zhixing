@@ -411,6 +411,53 @@ describe("managed service platform contract", () => {
     },
   );
 
+  it("replays a lost Windows future-disable response and re-enables the same definition", async () => {
+    const directory = await createTempDir("managed-service-windows-enabled-replay");
+    const spec = platformSpec("win32", directory);
+    await mkdir(path.dirname(spec.definitionPath), { recursive: true });
+    await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+    let enabled = true;
+    let disableCalls = 0;
+    let createCalls = 0;
+    const runner: ManagedServiceCommandRunner = async (command, args) => {
+      if (command === "powershell.exe") {
+        return {
+          code: 0,
+          stdout: windowsInspectionJson(spec, { enabled, running: true }),
+          stderr: "",
+        };
+      }
+      if (args.includes("/DISABLE")) {
+        disableCalls += 1;
+        enabled = false;
+        throw new Error("future-disable response lost");
+      }
+      if (args.includes("/Create")) {
+        createCalls += 1;
+        enabled = true;
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const adapter = createManagedServiceAdapter({ platform: "win32", commandRunner: runner });
+    const signal = new AbortController().signal;
+
+    await expect(adapter.disableFuture(spec, signal)).rejects.toMatchObject({
+      code: "manager-unavailable",
+    });
+    await expect(adapter.disableFuture(spec, signal)).resolves.toMatchObject({
+      state: "disabled",
+      running: true,
+      matches: true,
+    });
+    expect(disableCalls).toBe(1);
+
+    await expect(adapter.install(spec, signal)).resolves.toMatchObject({
+      state: "enabled",
+      matches: true,
+    });
+    expect(createCalls).toBe(1);
+  });
+
   it("strictly projects Windows numeric state, current SID and typed collections", async () => {
     const directory = await createTempDir("managed-service-windows-inspection");
     const spec = platformSpec("win32", directory);
@@ -431,6 +478,19 @@ describe("managed service platform contract", () => {
       running: true,
       matches: true,
     });
+
+    payload = windowsInspectionJson(spec, { enabled: false, state: 4 });
+    await expect(adapter.inspect(spec, signal)).resolves.toEqual({
+      state: "disabled",
+      running: true,
+      matches: true,
+    });
+
+    payload = windowsInspectionJson(spec, { enabled: true, settingsEnabled: false });
+    await expect(adapter.inspect(spec, signal)).rejects.toMatchObject({ code: "read-back-failed" });
+
+    payload = windowsInspectionJson(spec, { enabled: false, settingsEnabled: true });
+    await expect(adapter.inspect(spec, signal)).rejects.toMatchObject({ code: "read-back-failed" });
 
     payload = windowsInspectionJson(spec, { principalUserId: `MACHINE\\${spec.osUser}` });
     await expect(adapter.inspect(spec, signal)).resolves.toMatchObject({ matches: true });
@@ -651,6 +711,7 @@ function windowsInspectionJson(
   spec: ReturnType<typeof platformSpec> | ReturnType<typeof localSpec>,
   options: {
     readonly enabled?: boolean;
+    readonly settingsEnabled?: boolean;
     readonly running?: boolean;
     readonly state?: number;
     readonly principalUserId?: string;
@@ -681,7 +742,7 @@ function windowsInspectionJson(
     triggers: options.triggers ?? [trigger],
     actions: { context: "CurrentUser", items: options.actions ?? [action] },
     settings: {
-      enabled: true,
+      enabled: options.settingsEnabled ?? options.enabled ?? true,
       multipleInstances: 2,
       restartInterval: "PT1M",
       restartCount: 999,

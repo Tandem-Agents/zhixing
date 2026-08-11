@@ -42,41 +42,54 @@ describe("managed service reconciliation", () => {
     expect(loads).toBeGreaterThanOrEqual(2);
   });
 
-  it("disables automatic launch for on-demand and none plans", async () => {
-    for (const roles of [["executor"], ["surface"]] as const) {
-      const adapter = fakeAdapter({ state: "enabled", running: true, matches: true });
-      const result = await reconcileManagedService({
-        homeKey: `home-${roles.join("-")}`,
-        trigger: "local-role-config-committed",
-        loadCurrent: async () => current({ roles, issuer: "device:anchor", spec }),
-        adapter,
-        signal: new AbortController().signal,
+  it.each(MANAGED_SERVICE_RECONCILE_TRIGGERS)(
+    "limits %s reconciliation to future launch across every non-managed boundary",
+    async (trigger) => {
+      const signal = new AbortController().signal;
+      const nonManaged = fakeAdapter({ state: "enabled", running: true, matches: true });
+      await expect(reconcileManagedService({
+        homeKey: `home-${trigger}-non-managed`,
+        trigger,
+        loadCurrent: async () => current({ roles: ["surface"], issuer: "device:anchor", spec }),
+        adapter: nonManaged,
+        signal,
+      })).resolves.toMatchObject({
+        plan: { mode: "none" },
+        action: "future-disabled",
+        service: { state: "disabled", running: true },
       });
-      expect(result.plan.mode).toBe(roles.includes("executor") ? "on-demand" : "none");
-      expect(result.action).toBe("future-disabled");
-      expect(result.service).toMatchObject({ state: "disabled", running: true });
-      expect(adapter.calls).toEqual(["inspect", "disable-future"]);
-    }
-  });
+      expect(nonManaged.calls).toEqual(["inspect", "disable-future"]);
 
-  it("re-reads the plan before start and disables when authority changed", async () => {
-    const adapter = fakeAdapter();
-    let read = 0;
-    const result = await reconcileManagedService({
-      homeKey: "home-changing-authority",
-      trigger: "managed-preflight",
-      loadCurrent: async () => {
-        read += 1;
-        return read === 1
-          ? current({ roles: ["anchor"], issuer: "device:local", spec })
-          : current({ roles: ["surface"], issuer: "device:anchor", spec });
-      },
-      adapter,
-      signal: new AbortController().signal,
-    });
-    expect(result.plan.mode).toBe("none");
-    expect(adapter.calls).toEqual(["inspect", "install", "disable"]);
-  });
+      const invalidPlan = fakeAdapter({ state: "enabled", running: true, matches: true });
+      await expect(reconcileManagedService({
+        homeKey: `home-${trigger}-invalid-plan`,
+        trigger,
+        loadCurrent: async () => current({ roles: ["anchor"], issuer: "device:remote", spec }),
+        adapter: invalidPlan,
+        signal,
+      })).rejects.toMatchObject({ code: "anchor-authority-conflict" });
+      expect(invalidPlan.calls).toEqual(["inspect", "disable-future"]);
+
+      const driftAfterInstall = fakeAdapter();
+      let read = 0;
+      await expect(reconcileManagedService({
+        homeKey: `home-${trigger}-post-install-drift`,
+        trigger,
+        loadCurrent: async () => {
+          read += 1;
+          return read === 1
+            ? current({ roles: ["anchor"], issuer: "device:local", spec })
+            : current({ roles: ["surface"], issuer: "device:anchor", spec });
+        },
+        adapter: driftAfterInstall,
+        signal,
+      })).resolves.toMatchObject({
+        plan: { mode: "none" },
+        action: "future-disabled",
+      });
+      expect(driftAfterInstall.calls).toEqual(["inspect", "install", "disable-future"]);
+    },
+  );
 
   it("keeps one canonical-home worker across binding changes and drains a late wake", async () => {
     const adapter = fakeAdapter();
@@ -113,7 +126,7 @@ describe("managed service reconciliation", () => {
     expect(adapter.calls).toEqual([
       "inspect",
       "install",
-      "disable",
+      "disable-future",
       "inspect",
       "install",
       "start",

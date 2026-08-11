@@ -27,4 +27,21 @@ describe("connection lifetime obligation", () => {
 
     expect(attempt).toHaveBeenCalledOnce();
   });
+
+  it("releases the borrowed stop listener after every successful obligation", async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+
+    for (let index = 0; index < 128; index += 1) {
+      await fulfillConnectionLifetimeObligation({
+        stopSignal: controller.signal,
+        attempt: async () => {},
+        shouldRetry: () => false,
+      });
+    }
+
+    expect(add.mock.calls.filter(([type]) => type === "abort")).toHaveLength(128);
+    expect(remove.mock.calls.filter(([type]) => type === "abort")).toHaveLength(128);
+  });
 });
