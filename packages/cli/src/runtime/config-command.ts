@@ -77,6 +77,41 @@ export interface HostReloadResult {
   channels?: readonly ChannelStatus[];
 }
 
+export type ConfigPostCommitEffect<T> =
+  | { readonly status: "succeeded"; readonly value: T }
+  | { readonly status: "failed"; readonly error: unknown };
+
+export interface ConfigPostCommitEffects {
+  readonly reload: ConfigPostCommitEffect<HostReloadResult | void>;
+  readonly reconcile:
+    | { readonly status: "not-required" }
+    | ConfigPostCommitEffect<void>;
+}
+
+export async function settleConfigPostCommitEffects(input: {
+  readonly launchSelectionChanged: boolean;
+  readonly reload: () => Promise<HostReloadResult | void>;
+  readonly reconcile: () => Promise<unknown>;
+}): Promise<ConfigPostCommitEffects> {
+  const reload = await captureConfigPostCommitEffect(input.reload);
+  const reconcile = input.launchSelectionChanged
+    ? await captureConfigPostCommitEffect(async () => {
+        await input.reconcile();
+      })
+    : { status: "not-required" as const };
+  return { reload, reconcile };
+}
+
+async function captureConfigPostCommitEffect<T>(
+  effect: () => Promise<T>,
+): Promise<ConfigPostCommitEffect<T>> {
+  try {
+    return { status: "succeeded", value: await effect() };
+  } catch (error) {
+    return { status: "failed", error };
+  }
+}
+
 export function formatHostReloadChannelMessages(
   result: HostReloadResult | void,
 ): string[] {
@@ -192,27 +227,35 @@ async function runEditorCommand(
             // turn 自身的错误已在 turn 路径展示，此处吞掉即可
           });
         }
-        try {
-          const reloadResult = await deps.requestHostReload();
-          if (launchSelectionChanged) {
-            await reconcileCurrentManagedService("local-role-config-committed");
-          }
+        const effects = await settleConfigPostCommitEffects({
+          launchSelectionChanged,
+          reload: deps.requestHostReload,
+          reconcile: () => reconcileCurrentManagedService("local-role-config-committed"),
+        });
+        if (
+          effects.reload.status === "succeeded" &&
+          effects.reconcile.status !== "failed"
+        ) {
           writer.line(
             chalk.green(
               `${layout.contentPrefix}✓ 配置已保存,核心宿主已按新配置重启。`,
             ),
           );
-          for (const line of formatHostReloadChannelMessages(reloadResult)) {
-            writer.line(line);
-          }
-        } catch (err) {
+        } else {
+          const failed = [
+            effects.reload.status === "failed" ? "核心宿主重载" : undefined,
+            effects.reconcile.status === "failed" ? "托管服务收敛" : undefined,
+          ].filter((item): item is string => item !== undefined);
           writer.line(
             chalk.yellow(
-              `${layout.contentPrefix}⚠ 配置已保存，但未能确认核心宿主已重载：${
-                err instanceof Error ? err.message : String(err)
-              }。新配置已落盘，下次启动会生效。`,
+              `${layout.contentPrefix}⚠ 配置已保存，但${failed.join("与")}未确认。新配置已落盘，请运行 \`zz status\` 检查当前状态。`,
             ),
           );
+        }
+        if (effects.reload.status === "succeeded") {
+          for (const line of formatHostReloadChannelMessages(effects.reload.value)) {
+            writer.line(line);
+          }
         }
         break;
       }

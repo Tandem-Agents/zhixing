@@ -122,7 +122,7 @@ export async function buildManagedHostStatusSnapshot(
     readonly deps?: ManagedHostStatusSnapshotDeps;
   } = {},
 ): Promise<Parameters<typeof projectManagedHostStatus>[0]> {
-  const loadCurrent = options.deps?.loadCurrent ?? (() => loadCurrentManagedServiceState());
+  const loadCurrent = options.deps?.loadCurrent ?? (() => loadCurrentManagedServiceState("inspect"));
   const adapter = options.deps?.adapter ?? createManagedServiceAdapter();
   const readiness = options.readiness ?? readinessFor(processReport);
   for (let attempt = 0; attempt < 3; attempt += 1) {

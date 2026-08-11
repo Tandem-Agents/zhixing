@@ -42,7 +42,7 @@ export async function runServeCommand(
   const processMode = resolveHostProcessMode(options.managed);
   const output = processMode === "managed" ? SILENT_WRITER : writer;
   if (processMode === "managed") {
-    const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState());
+    const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate"));
     if (plan.mode !== "managed") {
       await reconcileCurrentManagedService("managed-preflight");
       return;
@@ -146,7 +146,7 @@ export async function waitForManagedHostTurn(input: {
     }
   });
   const shouldRemainManaged = input.shouldRemainManaged ?? (async () =>
-    resolveHostLaunchPlan(await loadCurrentManagedServiceState()).mode === "managed");
+    resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate")).mode === "managed");
   const wait = input.wait ?? (() => new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000);
   }));

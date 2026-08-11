@@ -1656,11 +1656,49 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/runtime/config-command.ts",
       (text) => text.replace(
-        "const reloadResult = await deps.requestHostReload();",
-        'await reconcileCurrentManagedService("local-role-config-committed");\n          const reloadResult = await deps.requestHostReload();',
+        "const reconcile = input.launchSelectionChanged",
+        "const reconcile = true",
       ),
     )).join("\n"),
     /production trigger exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace("<UserId>${osUser}</UserId>", "<UserId>other</UserId>"),
+    )).join("\n"),
+    /OS user or current-state intent exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace(
+        'Buffer.from(spec.definition, "utf16le")',
+        'Buffer.from(spec.definition, "utf8")',
+      ),
+    )).join("\n"),
+    /Windows bytes or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace('args: [...args, "/HRESULT"]', "args"),
+    )).join("\n"),
+    /Windows bytes or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service.ts",
+      (text) => text.replace("hresult === 0x80070002", "hresult === 1"),
+    )).join("\n"),
+    /Windows bytes or HRESULT classifier drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/status.ts",
+      (text) => text.replace('loadCurrentManagedServiceState("inspect")', 'loadCurrentManagedServiceState("activate")'),
+    )).join("\n"),
+    /OS user or current-state intent exact-set drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

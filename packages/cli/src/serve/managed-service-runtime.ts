@@ -37,13 +37,23 @@ export interface ManagedHostAdmissionSnapshot {
   readonly admitted: boolean;
 }
 
+export type ManagedServiceStateLoadIntent = "inspect" | "activate";
+
 export async function loadCurrentManagedServiceState(
+  intent: ManagedServiceStateLoadIntent,
   homeDir = getZhixingHome(),
 ): Promise<ManagedServiceCurrentState> {
   const config = loadConfig({ homeDir });
-  const binding = await readPlatformSecretStoreBackendBinding(homeDir);
+  const initialBinding = await readPlatformSecretStoreBackendBinding(homeDir);
   const expectedBackend = managedExpectedBackend();
-  if (expectedBackend !== undefined && binding !== expectedBackend) {
+  if (
+    initialBinding !== undefined &&
+    expectedBackend !== undefined &&
+    initialBinding !== expectedBackend
+  ) {
+    throw new Error("local-credentials-unavailable");
+  }
+  if (intent === "inspect" && initialBinding === undefined) {
     throw new Error("local-credentials-unavailable");
   }
   const secretStore = createPlatformSecretStore({
@@ -53,8 +63,15 @@ export async function loadCurrentManagedServiceState(
   if (await secretStore.unlockState() !== "unlocked") {
     throw new Error("local-credentials-unavailable");
   }
+  const binding = await readPlatformSecretStoreBackendBinding(homeDir);
+  if (
+    binding === undefined ||
+    (initialBinding !== undefined && binding !== initialBinding) ||
+    (expectedBackend !== undefined && binding !== expectedBackend)
+  ) {
+    throw new Error("local-credentials-unavailable");
+  }
   const key = await loadExistingDeviceKey(secretStore);
-  const localDeviceId = key?.deviceId ?? `unregistered:${homeDigest(homeDir)}`;
   let trust;
   if (key) {
     const store = new FileMeshBootstrapStore(homeDir, key);
@@ -64,30 +81,52 @@ export async function loadCurrentManagedServiceState(
       store.stopStorageMaintenance();
     }
   }
-  const member = key && trust?.members.find((candidate) =>
-    candidate.device.deviceId === key.deviceId);
+  if (await readPlatformSecretStoreBackendBinding(homeDir) !== binding) {
+    throw new Error("local-credentials-unavailable");
+  }
+  return createCurrentManagedServiceStateProjector(homeDir)({
+    config,
+    binding,
+    key,
+    trust,
+  });
+}
+
+function createCurrentManagedServiceStateProjector(homeDir: string) {
   const entryScript = process.argv[1]
     ? path.resolve(process.argv[1])
     : path.resolve(import.meta.dirname, "../index.js");
   const account = userInfo();
-  const spec = binding
-    ? buildManagedServiceSpec({
-        platform: process.platform,
-        zhixingHome: homeDir,
-        backend: binding,
-        execPath: process.execPath,
-        entryScript,
-        osUser: account.username,
-        userHome: homedir(),
-        ...(typeof account.uid === "number" ? { uid: account.uid } : {}),
-        headless: member?.device.platform === "headless",
-      })
-    : undefined;
-  return {
-    localDeviceId,
-    ...(config.mesh ? { configuration: config.mesh } : {}),
-    ...(trust ? { trust } : {}),
-    ...(spec ? { spec } : {}),
+  const serviceIdentity = Object.freeze({
+    platform: process.platform,
+    zhixingHome: homeDir,
+    execPath: process.execPath,
+    entryScript,
+    osUser: account.username,
+    userHome: homedir(),
+    ...(typeof account.uid === "number" ? { uid: account.uid } : {}),
+  });
+  return (snapshot: {
+    readonly config: ReturnType<typeof loadConfig>;
+    readonly binding: PlatformSecretStoreBackend;
+    readonly key: Awaited<ReturnType<typeof loadExistingDeviceKey>>;
+    readonly trust: Awaited<ReturnType<FileMeshBootstrapStore["loadTrustRecord"]>>;
+  }): ManagedServiceCurrentState => {
+    const { config, binding, key, trust } = snapshot;
+    const localDeviceId = key?.deviceId ?? `unregistered:${homeDigest(homeDir)}`;
+    const member = key && trust?.members.find((candidate) =>
+      candidate.device.deviceId === key.deviceId);
+    const spec = buildManagedServiceSpec({
+      ...serviceIdentity,
+      backend: binding,
+      headless: member?.device.platform === "headless",
+    });
+    return {
+      localDeviceId,
+      ...(config.mesh ? { configuration: config.mesh } : {}),
+      ...(trust ? { trust } : {}),
+      spec,
+    };
   };
 }
 
@@ -102,7 +141,7 @@ export async function reconcileCurrentManagedService(
   return reconcileManagedService({
     homeKey: path.resolve(homeDir),
     trigger,
-    loadCurrent: () => loadCurrentManagedServiceState(homeDir),
+    loadCurrent: () => loadCurrentManagedServiceState("activate", homeDir),
     adapter: createManagedServiceAdapter({ storageGovernor: capacity.storage }),
     signal,
   });
@@ -115,7 +154,7 @@ export async function coordinateManagedHostTrustTransition(
   const reconcile = deps.reconcile ?? reconcileCurrentManagedService;
   let shouldStop = false;
   try {
-    const current = await loadCurrent();
+    const current = await loadCurrent("activate");
     const mode = resolveHostLaunchPlan(current).mode;
     const processMode = deps.processMode ?? "managed";
     const modeRejected = processMode === "managed"
@@ -147,7 +186,7 @@ export async function captureManagedHostAdmission(
   homeDir = getZhixingHome(),
   loadCurrent: typeof loadCurrentManagedServiceState = loadCurrentManagedServiceState,
 ): Promise<ManagedHostAdmissionSnapshot> {
-  const current = await loadCurrent(homeDir);
+  const current = await loadCurrent("activate", homeDir);
   const plan = resolveHostLaunchPlan(current);
   return {
     identity: canonicalize(current),

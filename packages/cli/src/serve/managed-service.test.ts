@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { createTempDir } from "@zhixing/test-utils";
@@ -68,18 +69,25 @@ describe("managed service platform contract", () => {
       backend: "windows-dpapi",
       execPath: "C:\\Program Files\\nodejs\\node.exe",
       entryScript: "C:\\Program Files\\zhixing\\dist\\index.js",
-      osUser: "A User",
+      osUser: 'DOMAIN\\A & <User> "Admin"',
       userHome: "C:\\Users\\A User",
     });
     expect(windows.startup).toBe("login");
-    expect(windows.definition).toContain('encoding="UTF-8"');
+    expect(windows.definition).toContain('encoding="UTF-16"');
     expect(windows.definition).toContain("<LogonTrigger>");
+    expect(windows.definition.match(
+      /<UserId>DOMAIN\\A &amp; &lt;User&gt; &quot;Admin&quot;<\/UserId>/gu,
+    )).toHaveLength(2);
+    expect(windows.definition).toContain(
+      '<Actions Context="CurrentUser">',
+    );
+    expect(windows.definition).not.toContain("DOMAIN\\A & <User>");
     expect(windows.definition).toContain("--managed");
-    expect(managedServiceDefinitionBytes(windows).toString("utf8")).toBe(
-      windows.definition,
+    expect(managedServiceDefinitionBytes(windows).subarray(0, 2)).toEqual(
+      Buffer.from([0xff, 0xfe]),
     );
     expect(
-      new TextDecoder("utf-8", { fatal: true }).decode(
+      new TextDecoder("utf-16le", { fatal: true }).decode(
         managedServiceDefinitionBytes(windows),
       ),
     ).toBe(windows.definition);
@@ -165,7 +173,7 @@ describe("managed service platform contract", () => {
   });
 
   it.runIf(process.platform === "win32")(
-    "writes canonical UTF-8 bytes accepted by the Windows XML parser",
+    "writes canonical UTF-16LE bytes accepted by the Windows XML parser",
     async () => {
       const directory = await createTempDir("managed-service-windows-bytes");
       const spec = localSpec(directory);
@@ -202,16 +210,83 @@ describe("managed service platform contract", () => {
         "$document=New-Object System.Xml.XmlDocument",
         "$document.PreserveWhitespace=$true",
         `$document.Load('${spec.definitionPath.replace(/'/gu, "''")}')`,
-        "[Console]::Out.Write($document.DocumentElement.LocalName)",
+        "$namespace=New-Object System.Xml.XmlNamespaceManager($document.NameTable)",
+        "$namespace.AddNamespace('t',$document.DocumentElement.NamespaceURI)",
+        "$principal=$document.SelectSingleNode('/t:Task/t:Principals/t:Principal',$namespace)",
+        "$trigger=$document.SelectSingleNode('/t:Task/t:Triggers/t:LogonTrigger',$namespace)",
+        "$actions=$document.SelectSingleNode('/t:Task/t:Actions',$namespace)",
+        "[Console]::Out.Write(($document.DocumentElement.LocalName,$principal.UserId,$trigger.UserId,$principal.LogonType,$actions.Context -join '|'))",
       ].join(";");
       const parsed = await execFileAsync(
         powershell,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         { encoding: "utf8" },
       );
-      expect(parsed.stdout).toBe("Task");
+      expect(parsed.stdout).toBe("Task|test|test|InteractiveToken|CurrentUser");
     },
     15_000,
+  );
+
+  it.runIf(process.platform === "win32")(
+    "registers and reads back the current-user principal through the production Windows adapter",
+    async () => {
+      const directory = await createTempDir("managed-service-windows-system");
+      const spec = buildManagedServiceSpec({
+        platform: "win32",
+        zhixingHome: path.join(directory, "home"),
+        backend: "windows-dpapi",
+        execPath: process.execPath,
+        entryScript: path.resolve("packages/cli/dist/index.js"),
+        osUser: userInfo().username,
+        userHome: directory,
+      });
+      const signal = new AbortController().signal;
+      try {
+        await expect(createManagedServiceAdapter({ platform: "win32" }).install(spec, signal))
+          .resolves.toMatchObject({ state: "enabled", matches: true });
+
+        const powershell = path.win32.join(
+          process.env.SystemRoot ?? "C:\\Windows",
+          "System32",
+          "WindowsPowerShell",
+          "v1.0",
+          "powershell.exe",
+        );
+        const script = [
+          "$service=New-Object -ComObject Schedule.Service",
+          "$service.Connect()",
+          `$registered=$service.GetFolder('\\').GetTask('${spec.serviceId.replace(/'/gu, "''")}')`,
+          "$document=New-Object System.Xml.XmlDocument",
+          "$document.LoadXml($registered.Xml)",
+          "$namespace=New-Object System.Xml.XmlNamespaceManager($document.NameTable)",
+          "$namespace.AddNamespace('t',$document.DocumentElement.NamespaceURI)",
+          "$principal=$document.SelectSingleNode('/t:Task/t:Principals/t:Principal',$namespace)",
+          "$trigger=$document.SelectSingleNode('/t:Task/t:Triggers/t:LogonTrigger',$namespace)",
+          "$actions=$document.SelectSingleNode('/t:Task/t:Actions',$namespace)",
+          "$principalAccount=(New-Object System.Security.Principal.SecurityIdentifier($principal.UserId)).Translate([System.Security.Principal.NTAccount]).Value",
+          "[Console]::Out.Write(($principalAccount,$trigger.UserId,$principal.LogonType,$actions.Context -join '|'))",
+        ].join(";");
+        const readBack = await execFileAsync(
+          powershell,
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+          { encoding: "utf8" },
+        );
+        const [principal, trigger, logonType, actionContext] = readBack.stdout.split("|");
+        expect(principal).toBe(trigger);
+        expect(principal?.toLocaleLowerCase("en-US").split("\\").at(-1)).toBe(
+          userInfo().username.toLocaleLowerCase("en-US"),
+        );
+        expect(logonType).toBe("InteractiveToken");
+        expect(actionContext).toBe("CurrentUser");
+      } finally {
+        await execFileAsync(
+          "schtasks.exe",
+          ["/Delete", "/TN", spec.serviceId, "/F", "/HRESULT"],
+          { encoding: "buffer", windowsHide: true },
+        ).catch(() => undefined);
+      }
+    },
+    30_000,
   );
 
   it("installs, starts and disables through stable platform read-back", async () => {
@@ -259,7 +334,7 @@ describe("managed service platform contract", () => {
       running: false,
       matches: true,
     });
-    expect(await readFile(spec.definitionPath, "utf8")).toBe(spec.definition);
+    expect(await readFile(spec.definitionPath)).toEqual(managedServiceDefinitionBytes(spec));
     await expect(adapter.install(spec, signal)).resolves.toMatchObject({ state: "enabled" });
     await expect(adapter.start(spec, signal)).resolves.toMatchObject({ running: true });
     await expect(adapter.disable(spec, signal)).resolves.toMatchObject({
@@ -268,6 +343,10 @@ describe("managed service platform contract", () => {
     });
     expect(calls.some((call) => /daemon-reload|bootstrap|\/Create/u.test(call))).toBe(true);
     expect(calls.some((call) => /\/End|bootout|disable --now/u.test(call))).toBe(true);
+    if (process.platform === "win32") {
+      expect(calls.filter((call) => call.startsWith("schtasks.exe "))
+        .every((call) => call.includes("/HRESULT"))).toBe(true);
+    }
   });
 
   it.each(["win32", "darwin", "linux"] as const)(
@@ -358,7 +437,7 @@ describe("managed service platform contract", () => {
   });
 
   it.each([
-    ["win32", { code: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." }],
+    ["win32", { code: 0x80070002, stdout: "", stderr: "����: ϵͳ�Ҳ���ָ�����ļ���" }],
     ["darwin", { code: 113, stdout: "", stderr: "Could not find service" }],
     ["linux", { code: 4, stdout: "not-found\n", stderr: "" }],
   ] as const)("accepts only documented %s manager absence", async (platform, result) => {
@@ -469,7 +548,7 @@ describe("managed service platform contract", () => {
 
 function documentedNotFound(platform: "win32" | "darwin" | "linux") {
   if (platform === "win32") {
-    return { code: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." };
+    return { code: 0x80070002, stdout: "", stderr: "����: ϵͳ�Ҳ���ָ�����ļ���" };
   }
   if (platform === "darwin") {
     return { code: 113, stdout: "", stderr: "Could not find service" };

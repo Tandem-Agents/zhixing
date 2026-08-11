@@ -157,6 +157,8 @@ executor = 新包组合（runtime-host + mesh + 执行账本 + 数据面服务�
 
 托管服务的失败重驱保持有限：加入既有 canonical-home worker 的调用方若共享到首轮失败，只能以自己的当前输入竞争一次同 home successor，successor 再失败即终止。纯 surface 的 live poll 只复用既有连接期退避，在当前 owner 与 surface generation 内对 transport transient 和 current-owner busy 重试；协议、认证等稳定错误终止该代 controller，已提交 final/status 的响应丢失仍由既有历史补读。三平台 start 与 inspect/install 共用同一有限 manager 分类，命令成功后仍须独立 inspect，任何失败都不得反向授权 absent、改写 definition 或公开状态。
 
+Windows 托管 definition 的唯一落盘格式是带 BOM、声明为 UTF-16 的 canonical UTF-16LE bytes；principal 与当前用户 LogonTrigger 必须由同一冻结 `osUser` 投影，Action 只引用该 principal。Task Scheduler 命令统一请求 HRESULT，以数值错误码完成有限分类；系统回读允许账户与默认字段的规范化，但必须逐项验真冻结用户、trigger、Action、command、arguments 与 restart 设置。配置耐久提交后的宿主 reload 与 launch-selection reconcile 有序但各自终结，前者失败不得跳过后者。current-state 读取显式区分只读 inspect 与 activation：status 无 binding 时不得打开 SecretStore，已有 binding 只 existing-only；允许的 activation 在 unlock 后重读 binding，再以同一最终 `{config,binding,key,trust}` 代际投影 spec、trust 与 admission。
+
 ### §11 产品体验设计
 
 用户语言只有两个词：**值班设备**（锚点所在）与**干活的电脑**（执行宿主），不暴露锚点 / owner / 宿主术语。四个时刻（各做零认知验收）：**开箱**——单机安装即用，与今天完全一致，零新概念、零恢复概念；**扩展**——第二台设备装同一个包 → `zz pair` 一次手势 → 首次启用网格时同一引导流生成并保存恢复包（回读验证后开放能力）→ 按提示补齐该设备配置（ready）→ 指定值班设备；**日常**——人在电脑前任务就地执行、体感与单机一致，离线任务诚实排队提示 + 完成通知，`/status` 一句话呈现"知行在 NUC 值班；这台电脑在场，任务就地执行"；联系不上值班设备时提供"继续在这台电脑工作"——标明不可用能力与未生效意向，重连后集中复核；**异常**——结果不确定的工作明确呈现（"有一件工作结果待确认"），provisional 与已确认结果可分辨，绝不静默；设备丢失时提供"撤销该设备"引导流，逐项提示在第三方轮换外部账号。手机是未来的接入面 app，只连值班设备。

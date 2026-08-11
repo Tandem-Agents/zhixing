@@ -296,26 +296,26 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     signal: AbortSignal,
   ): Promise<ManagedServiceInspection> {
     if (this.platform === "win32") {
-      const query = await this.command({
-        command: "schtasks.exe",
-        args: ["/Query", "/TN", spec.serviceId, "/XML"],
-      }, signal);
+      const query = await this.command(
+        windowsTaskSchedulerCommand(["/Query", "/TN", spec.serviceId, "/XML"]),
+        signal,
+      );
       if (query.code !== 0) {
         this.requireDefiniteAbsence(query);
         return { state: "absent", running: false, matches: true };
       }
       const enabled = !/<Enabled>false<\/Enabled>/iu.test(query.stdout);
-      const status = await this.command({
-        command: "schtasks.exe",
-        args: ["/Query", "/TN", spec.serviceId, "/FO", "CSV", "/NH"],
-      }, signal);
+      const status = await this.command(
+        windowsTaskSchedulerCommand(["/Query", "/TN", spec.serviceId, "/FO", "CSV", "/NH"]),
+        signal,
+      );
       if (status.code !== 0) {
         this.throwManagerFailure(status);
       }
       return {
         state: enabled ? "enabled" : "disabled",
         running: status.code === 0 && /running/iu.test(status.stdout),
-        matches: normalizeXml(query.stdout) === normalizeXml(spec.definition),
+        matches: windowsTaskDefinitionMatches(spec, query.stdout),
       };
     }
     if (this.platform === "darwin") {
@@ -370,10 +370,17 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
 
   private async installManager(spec: ManagedServiceSpec, signal: AbortSignal): Promise<void> {
     if (this.platform === "win32") {
-      await this.requireCommand({
-        command: "schtasks.exe",
-        args: ["/Create", "/TN", spec.serviceId, "/XML", spec.definitionPath, "/F"],
-      }, signal);
+      await this.requireCommand(
+        windowsTaskSchedulerCommand([
+          "/Create",
+          "/TN",
+          spec.serviceId,
+          "/XML",
+          spec.definitionPath,
+          "/F",
+        ]),
+        signal,
+      );
       return;
     }
     if (this.platform === "darwin") {
@@ -410,15 +417,15 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     signal: AbortSignal,
   ): Promise<void> {
     if (this.platform === "win32") {
-      await this.requireCommand({
-        command: "schtasks.exe",
-        args: ["/Change", "/TN", spec.serviceId, "/DISABLE"],
-      }, signal);
+      await this.requireCommand(
+        windowsTaskSchedulerCommand(["/Change", "/TN", spec.serviceId, "/DISABLE"]),
+        signal,
+      );
       if (before.running) {
-        await this.requireStopCommand({
-          command: "schtasks.exe",
-          args: ["/End", "/TN", spec.serviceId],
-        }, signal);
+        await this.requireStopCommand(
+          windowsTaskSchedulerCommand(["/End", "/TN", spec.serviceId]),
+          signal,
+        );
       }
       return;
     }
@@ -522,6 +529,9 @@ function classifyManagerFailure(
     return "permission-required";
   }
   if (platform === "win32") {
+    const hresult = result.code >>> 0;
+    if (hresult === 0x80070005) return "permission-required";
+    if (hresult === 0x80070002) return "not-found";
     if (/not found|cannot find|0x80070002|2147942402/u.test(output)) return "not-found";
   } else if (platform === "darwin") {
     if (result.code === 113 || /could not find service|service .* not found/u.test(output)) {
@@ -538,7 +548,7 @@ function classifyManagerFailure(
 
 function startCommand(spec: ManagedServiceSpec): { command: string; args: readonly string[] } {
   if (spec.platform === "win32") {
-    return { command: "schtasks.exe", args: ["/Run", "/TN", spec.serviceId] };
+    return windowsTaskSchedulerCommand(["/Run", "/TN", spec.serviceId]);
   }
   if (spec.platform === "darwin") {
     return {
@@ -553,14 +563,14 @@ function renderManagedServiceDefinition(
   spec: Omit<ManagedServiceSpec, "definition">,
 ): string {
   if (spec.platform === "win32") {
-    const command = [spec.command, ...spec.args].map(quoteWindowsArgument).join(" ");
+    const osUser = xmlEscape(spec.osUser);
     return [
-      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<?xml version="1.0" encoding="UTF-16"?>',
       '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
-      "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>",
-      "  <Principals><Principal id=\"CurrentUser\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>",
+      `  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${osUser}</UserId></LogonTrigger></Triggers>`,
+      `  <Principals><Principal id="CurrentUser"><UserId>${osUser}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>`,
       "  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure><Enabled>true</Enabled></Settings>",
-      `  <Actions Context="CurrentUser"><Exec><Command>${xmlEscape(spec.command)}</Command><Arguments>${xmlEscape(command.slice(quoteWindowsArgument(spec.command).length + 1))}</Arguments></Exec></Actions>`,
+      `  <Actions Context="CurrentUser"><Exec><Command>${xmlEscape(spec.command)}</Command><Arguments>${xmlEscape(windowsCommandArguments(spec))}</Arguments></Exec></Actions>`,
       "</Task>",
       "",
     ].join("\n");
@@ -708,7 +718,100 @@ function definitionDigest(spec: ManagedServiceSpec): string {
 }
 
 export function managedServiceDefinitionBytes(spec: ManagedServiceSpec): Buffer {
+  if (spec.platform === "win32") {
+    return Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(spec.definition, "utf16le"),
+    ]);
+  }
   return Buffer.from(spec.definition, "utf8");
+}
+
+function windowsTaskSchedulerCommand(
+  args: readonly string[],
+): { readonly command: string; readonly args: readonly string[] } {
+  return { command: "schtasks.exe", args: [...args, "/HRESULT"] };
+}
+
+function windowsTaskDefinitionMatches(spec: ManagedServiceSpec, xml: string): boolean {
+  const task = singleXmlNode(xml, "Task");
+  const principals = task && singleXmlNode(task.content, "Principals");
+  const principal = principals && singleXmlNode(principals.content, "Principal");
+  const triggers = task && singleXmlNode(task.content, "Triggers");
+  const trigger = triggers && singleXmlNode(triggers.content, "LogonTrigger");
+  const settings = task && singleXmlNode(task.content, "Settings");
+  const actions = task && singleXmlNode(task.content, "Actions");
+  const exec = actions && singleXmlNode(actions.content, "Exec");
+  if (!task || !principal || !trigger || !settings || !actions || !exec) return false;
+
+  const principalUser = singleXmlText(principal.content, "UserId");
+  const triggerUser = singleXmlText(trigger.content, "UserId");
+  const runLevel = optionalXmlText(principal.content, "RunLevel");
+  const triggerEnabled = optionalXmlText(trigger.content, "Enabled");
+  const taskEnabled = optionalXmlText(settings.content, "Enabled");
+  return xmlAttribute(principal.attributes, "id") === "CurrentUser" &&
+    xmlAttribute(actions.attributes, "Context") === "CurrentUser" &&
+    singleXmlText(principal.content, "LogonType") === "InteractiveToken" &&
+    (runLevel === undefined || runLevel === "LeastPrivilege") &&
+    principalUser !== undefined &&
+    (/^S-\d(?:-\d+)+$/u.test(principalUser) || windowsAccountMatches(principalUser, spec.osUser)) &&
+    triggerUser !== undefined &&
+    windowsAccountMatches(triggerUser, spec.osUser) &&
+    (triggerEnabled === undefined || triggerEnabled === "true") &&
+    (taskEnabled === undefined || taskEnabled === "true") &&
+    singleXmlText(settings.content, "MultipleInstancesPolicy") === "IgnoreNew" &&
+    singleXmlText(settings.content, "Interval") === "PT1M" &&
+    singleXmlText(settings.content, "Count") === "999" &&
+    singleXmlText(exec.content, "Command") === spec.command &&
+    singleXmlText(exec.content, "Arguments") === windowsCommandArguments(spec);
+}
+
+function windowsCommandArguments(spec: Pick<ManagedServiceSpec, "args">): string {
+  return spec.args.map(quoteWindowsArgument).join(" ");
+}
+
+function windowsAccountMatches(actual: string, expected: string): boolean {
+  const normalizedActual = actual.toLocaleLowerCase("en-US");
+  const normalizedExpected = expected.toLocaleLowerCase("en-US");
+  return normalizedActual === normalizedExpected ||
+    (!normalizedExpected.includes("\\") && normalizedActual.endsWith(`\\${normalizedExpected}`));
+}
+
+function singleXmlNode(
+  source: string,
+  name: string,
+): { readonly attributes: string; readonly content: string } | undefined {
+  const pattern = new RegExp(`<${name}(?:\\s+([^>]*))?>([\\s\\S]*?)</${name}>`, "gu");
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) return undefined;
+  return { attributes: matches[0]![1] ?? "", content: matches[0]![2] ?? "" };
+}
+
+function singleXmlText(source: string, name: string): string | undefined {
+  const node = singleXmlNode(source, name);
+  if (!node || /[<>]/u.test(node.content)) return undefined;
+  return xmlUnescape(node.content.trim());
+}
+
+function optionalXmlText(source: string, name: string): string | undefined {
+  const pattern = new RegExp(`<${name}(?:\\s+[^>]*)?>`, "gu");
+  if (![...source.matchAll(pattern)].length) return undefined;
+  return singleXmlText(source, name);
+}
+
+function xmlAttribute(attributes: string, name: string): string | undefined {
+  const pattern = new RegExp(`(?:^|\\s)${name}="([^"]*)"(?:\\s|$)`, "u");
+  const match = pattern.exec(attributes);
+  return match ? xmlUnescape(match[1]!) : undefined;
+}
+
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&quot;/gu, '"')
+    .replace(/&apos;/gu, "'")
+    .replace(/&lt;/gu, "<")
+    .replace(/&gt;/gu, ">")
+    .replace(/&amp;/gu, "&");
 }
 
 function canonicalAbsolutePath(value: string, platform: NodeJS.Platform): string {
@@ -734,10 +837,6 @@ function xmlEscape(value: string): string {
     .replace(/>/gu, "&gt;")
     .replace(/"/gu, "&quot;")
     .replace(/'/gu, "&apos;");
-}
-
-function normalizeXml(value: string): string {
-  return value.replace(/\r\n/gu, "\n").trim();
 }
 
 function escapeRegExp(value: string): string {

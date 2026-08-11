@@ -976,8 +976,10 @@ export function inspectManagedHostAssembly(records) {
     count(pairing, 'reconcileAfterPairing(options, "pairing-issuer-committed")') !== 1 ||
     count(pairing, 'reconcileAfterPairing(options, "pairing-joiner-committed")') !== 1 ||
     count(config, 'reconcileCurrentManagedService("local-role-config-committed")') !== 1 ||
-    config.indexOf("const reloadResult = await deps.requestHostReload()") >=
-      config.indexOf('reconcileCurrentManagedService("local-role-config-committed")') ||
+    !config.includes("const reload = await captureConfigPostCommitEffect(input.reload);") ||
+    !config.includes("const reconcile = input.launchSelectionChanged") ||
+    config.indexOf("const reload = await captureConfigPostCommitEffect(input.reload);") >=
+      config.indexOf("const reconcile = input.launchSelectionChanged") ||
     count(serviceRuntime, 'reconcile("current-trust-applied")') !== 1 ||
     serviceRuntime.indexOf("await deps.requestShutdown()") >=
       serviceRuntime.indexOf('await reconcile("current-trust-applied")') ||
@@ -986,6 +988,25 @@ export function inspectManagedHostAssembly(records) {
     count(topology, 'reconcileCurrentManagedService("managed-preflight")') < 1 ||
     count(connection, 'reconcileCurrentManagedService("host-missing")') !== 1
   ) failures.push("managed host production trigger exact-set drifted");
+  if (
+    count(service, "<UserId>${osUser}</UserId>") !== 2 ||
+    !service.includes("const osUser = xmlEscape(spec.osUser);") ||
+    !serviceRuntime.includes('export type ManagedServiceStateLoadIntent = "inspect" | "activate";') ||
+    count(serviceRuntime, 'loadCurrentManagedServiceState("activate", homeDir)') !== 1 ||
+    count(serviceRuntime, 'loadCurrent("activate")') !== 1 ||
+    count(serviceRuntime, 'loadCurrent("activate", homeDir)') !== 1 ||
+    count(topology, 'loadCurrentManagedServiceState("activate")') !== 2 ||
+    count(status, 'loadCurrentManagedServiceState("inspect")') !== 1
+  ) failures.push("managed host OS user or current-state intent exact-set drifted");
+  if (
+    !service.includes('\'<?xml version="1.0" encoding="UTF-16"?>\'') ||
+    !service.includes("Buffer.from([0xff, 0xfe])") ||
+    !service.includes('Buffer.from(spec.definition, "utf16le")') ||
+    count(service, "windowsTaskSchedulerCommand([") !== 6 ||
+    count(service, 'args: [...args, "/HRESULT"]') !== 1 ||
+    count(service, "hresult === 0x80070002") !== 1 ||
+    count(service, "hresult === 0x80070005") !== 1
+  ) failures.push("managed host Windows bytes or HRESULT classifier drifted");
   if (
     count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 1 ||
     !service.includes('"managed-service-reconcile"') ||
