@@ -314,6 +314,7 @@ export interface MeshRuntimeAssemblyOptions {
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
   readonly onError?: (error: Error) => void;
+  readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
 }
 
 /** Production composition for authenticated control services and their durable role owners. */
@@ -756,6 +757,7 @@ export class MeshRuntimeAssembly {
       }),
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
       onTrustReconciled: async (record) => {
+        await options.onTrustApplied?.(record);
         const becameCurrentIssuer =
           this.#observedIssuerDeviceId !== options.authority.deviceId &&
           record.issuer.deviceId === options.authority.deviceId;

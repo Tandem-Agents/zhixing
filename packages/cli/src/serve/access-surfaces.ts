@@ -319,6 +319,7 @@ const meshSurface: AccessSurface = {
       secretStore: ctx.secretStore,
       ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
       onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
+      ...(ctx.onTrustApplied ? { onTrustApplied: ctx.onTrustApplied } : {}),
     });
     const cleanup = ctx.startupRollback.register(
       "meshRuntime.stop",

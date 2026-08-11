@@ -22,7 +22,8 @@ const harness = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@zhixing/core", () => ({
+vi.mock("@zhixing/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@zhixing/core")>(),
   getZhixingHome: () => "test-home",
 }));
 vi.mock("@zhixing/secrets", () => ({
@@ -57,7 +58,10 @@ vi.mock("./role-topology.js", () => ({
   runConfiguredServeTopology: (...args: unknown[]) => harness.runTopology(...args),
 }));
 
-import { runServeCommand } from "./topology-command.js";
+import {
+  runServeCommand,
+  waitForManagedHostTurn,
+} from "./topology-command.js";
 
 describe("serve topology command", () => {
   beforeEach(() => {
@@ -165,5 +169,29 @@ describe("serve topology command", () => {
     } finally {
       exit.mockRestore();
     }
+  });
+});
+
+describe("managed host preflight", () => {
+  it("waits without starting roles until the existing healthy host exits", async () => {
+    const alive = [true, true, false];
+    const wait = vi.fn(async () => undefined);
+    await expect(waitForManagedHostTurn({
+      existingHostAlive: async () => alive.shift() ?? false,
+      shouldRemainManaged: async () => true,
+      wait,
+    })).resolves.toBe(true);
+    expect(wait).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves preflight when the durable launch plan changes", async () => {
+    const reconcileChangedPlan = vi.fn(async () => undefined);
+    await expect(waitForManagedHostTurn({
+      existingHostAlive: async () => true,
+      shouldRemainManaged: async () => false,
+      wait: async () => undefined,
+      reconcileChangedPlan,
+    })).resolves.toBe(false);
+    expect(reconcileChangedPlan).toHaveBeenCalledOnce();
   });
 });

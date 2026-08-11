@@ -6,9 +6,16 @@ import {
   filterDaemonChildEnv,
   UnsupportedSelfExecError,
   DAEMON_CHILD_ENV_VAR,
+  resolveHostProcessMode,
 } from "../self-exec.js";
 
 describe("isDaemonChild", () => {
+  it("resolves foreground, on-demand and managed process modes", () => {
+    expect(resolveHostProcessMode(undefined, {})).toBe("foreground");
+    expect(resolveHostProcessMode(undefined, { [DAEMON_CHILD_ENV_VAR]: "1" })).toBe("on-demand");
+    expect(resolveHostProcessMode(true, { [DAEMON_CHILD_ENV_VAR]: "1" })).toBe("managed");
+  });
+
   it("returns true when env var is '1'", () => {
     expect(isDaemonChild({ [DAEMON_CHILD_ENV_VAR]: "1" })).toBe(true);
   });

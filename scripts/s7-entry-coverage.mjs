@@ -901,6 +901,7 @@ export async function validateS7Structure() {
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectRecoveryBackupAssembly(records));
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
+  failures.push(...inspectManagedHostAssembly(records));
   for (const packageName of [
     "server",
     "executor",
@@ -919,6 +920,107 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+export function inspectManagedHostAssembly(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const reconciler = byPath.get("packages/cli/src/serve/managed-service-reconciler.ts");
+  const service = byPath.get("packages/cli/src/serve/managed-service.ts");
+  const serviceRuntime = byPath.get("packages/cli/src/serve/managed-service-runtime.ts");
+  const bootstrap = byPath.get("packages/mesh/src/bootstrap.ts");
+  const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
+  const config = byPath.get("packages/cli/src/runtime/config-command.ts");
+  const command = byPath.get("packages/cli/src/serve/command.ts");
+  const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
+  const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
+  const secrets = byPath.get("packages/secrets/src/platform-secret-store.ts");
+  const status = byPath.get("packages/cli/src/serve/status.ts");
+  const publicStatus = byPath.get("packages/server/src/managed-host-status.ts");
+  const statusRoute = byPath.get("packages/server/src/routes.ts");
+  const scheduler = byPath.get("packages/cli/src/serve/anchor-scheduler-runtime.ts");
+  const manifest = byPath.get("packages/core/src/protocol/manifest.ts");
+  if (
+    !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
+    !command || !topology || !connection || !secrets || !status || !publicStatus ||
+    !statusRoute || !scheduler || !manifest
+  ) return ["managed host production assembly sources are missing"];
+  const count = (text, token) => text.split(token).length - 1;
+  const descriptor = frozenLiteralDescriptor(
+    "packages/cli/src/serve/managed-service-reconciler.ts",
+    reconciler,
+    "MANAGED_HOST_ASSEMBLY_DESCRIPTOR",
+  );
+  const expected = {
+    owner: "home-managed-host",
+    planModes: ["managed", "on-demand", "none"],
+    triggers: [
+      "pairing-issuer-committed",
+      "pairing-joiner-committed",
+      "local-role-config-committed",
+      "current-trust-applied",
+      "managed-preflight",
+      "host-missing",
+    ],
+    managedProfiles: ["anchor-executor", "anchor-only"],
+    selectableProfiles: ["executor-only", "executor-surface"],
+    excludedProfiles: ["surface-only", "disabled-empty"],
+  };
+  if (
+    JSON.stringify(descriptor) !== JSON.stringify(expected) ||
+    !reconciler.includes("MANAGED_SERVICE_RECONCILE_TRIGGERS.includes(input.trigger)") ||
+    count(reconciler, "resolveHostLaunchPlan(") < 2
+  ) failures.push("managed host plan or reconcile trigger descriptor exact-set drifted");
+  if (
+    count(pairing, 'reconcileAfterPairing(options, "pairing-issuer-committed")') !== 1 ||
+    count(pairing, 'reconcileAfterPairing(options, "pairing-joiner-committed")') !== 1 ||
+    count(config, 'reconcileCurrentManagedService("local-role-config-committed")') !== 1 ||
+    count(serviceRuntime, 'reconcile("current-trust-applied")') !== 1 ||
+    count(command, "coordinateManagedHostTrustTransition({") !== 1 ||
+    count(topology, 'reconcileCurrentManagedService("managed-preflight")') < 1 ||
+    count(connection, 'reconcileCurrentManagedService("host-missing")') !== 1
+  ) failures.push("managed host production trigger exact-set drifted");
+  if (
+    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 1 ||
+    !service.includes('"managed-service-reconcile"') ||
+    !service.includes('"--managed-home"') ||
+    !service.includes('"--managed-secret-backend"') ||
+    !service.includes("applyManagedServiceLaunchContext(") ||
+    !topology.includes("await waitForManagedHostTurn()") ||
+    !topology.includes("await runConfiguredServeTopology(") ||
+    !command.includes('processMode !== "managed"')
+  ) failures.push("managed host service adapter, preflight or unique composition root drifted");
+  if (
+    !bootstrap.includes("export function resolveHostLaunchPlan(") ||
+    !bootstrap.includes("configuration.executorAutoStart === true") ||
+    !bootstrap.includes('"anchor-authority-conflict"') ||
+    !bootstrap.includes("A non-current device cannot launch the anchor role") ||
+    !secrets.includes('context?: "foreground" | "managed"') ||
+    !secrets.includes('const BACKEND_BINDING_FILE = `${SECRET_STORE_FILE_PREFIX}.backend.json`;')
+  ) failures.push("managed host authority plan or SecretStore context drifted");
+  if (
+    !publicStatus.includes("export function projectManagedHostStatus(") ||
+    !status.includes('from "@zhixing/server"') ||
+    !status.includes("export { projectManagedHostStatus }") ||
+    !status.includes("export async function buildManagedHostPublicStatus(") ||
+    !statusRoute.includes("ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({") ||
+    !command.includes("managedHostPublicStatus: () => projectManagedHostStatus({") ||
+    !scheduler.includes("executorCapabilities.onAccepted(") ||
+    !scheduler.includes("this.scheduler.wakeQueuedUserJobs()") ||
+    !manifest.includes("onAccepted(listener:")
+  ) failures.push("managed host public status or executor queue wake drifted");
+  for (const forbidden of [
+    "uninstallManagedService",
+    "upgradeManagedService",
+    "rollbackManagedService",
+    "automaticFailover",
+    "continuousSynchronization",
+  ]) {
+    if ([reconciler, service, serviceRuntime].some((text) => text.includes(forbidden))) {
+      failures.push(`managed host assembly includes downstream capability ${forbidden}`);
+    }
+  }
+  return failures;
 }
 
 export function inspectRecoveryBackupAssembly(records) {

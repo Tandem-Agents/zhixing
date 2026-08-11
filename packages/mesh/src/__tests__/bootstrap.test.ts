@@ -9,6 +9,7 @@ import {
   derivePairwiseRendezvousSecret,
   persistPairwiseRendezvousSecret,
   resolveEffectiveMeshRoles,
+  resolveHostLaunchPlan,
   validateBlindRendezvousHello,
   validateMeshEndpointDescriptor,
   validateMeshRoleBootConfig,
@@ -24,6 +25,95 @@ const AT = "2026-07-22T00:00:00.000Z";
 const LOCAL = "device:local";
 
 describe("production mesh bootstrap contracts", () => {
+  it("resolves the host launch plan from current trust without trimming roles", () => {
+    const anchor = trustRecord(["anchor", "executor"]);
+    expect(resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: anchor,
+      configuration: {
+        enabledRoles: ["anchor", "executor"],
+        executorAutoStart: false,
+        anchorListen: { bind: { host: "127.0.0.1", port: 7443 } },
+      },
+    })).toEqual({ mode: "managed", roles: ["anchor", "executor"] });
+
+    const executor = trustRecordFor({
+      issuerDeviceId: "device:anchor",
+      localRoles: ["executor", "surface"],
+    });
+    expect(resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: executor,
+      configuration: { enabledRoles: ["executor", "surface"] },
+    })).toEqual({ mode: "on-demand", roles: ["executor", "surface"] });
+    expect(resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: executor,
+      configuration: {
+        enabledRoles: ["executor", "surface"],
+        executorAutoStart: true,
+      },
+    })).toEqual({ mode: "managed", roles: ["executor", "surface"] });
+
+    const surface = trustRecordFor({
+      issuerDeviceId: "device:anchor",
+      localRoles: ["surface"],
+    });
+    expect(resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: surface,
+      configuration: { enabledRoles: ["surface"] },
+    })).toEqual({ mode: "none", roles: ["surface"] });
+    expect(resolveHostLaunchPlan({ localDeviceId: LOCAL })).toEqual({
+      mode: "on-demand",
+      roles: ["anchor", "executor"],
+    });
+  });
+
+  it("fails closed on stale anchor, inactive or ambiguous identity and invalid selection", () => {
+    const staleAnchor = trustRecordFor({
+      issuerDeviceId: "device:anchor",
+      localRoles: ["anchor", "executor"],
+    });
+    expect(() => resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: staleAnchor,
+      configuration: {
+        enabledRoles: ["anchor", "executor"],
+        anchorListen: { bind: { host: "127.0.0.1", port: 7443 } },
+      },
+    })).toThrow(/non-current device/);
+    expect(() => resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: staleAnchor,
+      configuration: {
+        enabledRoles: ["executor"],
+        executorAutoStart: "yes",
+      } as never,
+    })).toThrow(/must be a boolean/);
+
+    const inactive = trustRecordFor({
+      issuerDeviceId: "device:anchor",
+      localRoles: ["executor"],
+      localState: "revoked",
+    });
+    expect(() => resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: inactive,
+      configuration: { enabledRoles: ["executor"] },
+    })).toThrow(/not an active member/);
+
+    const duplicate = trustRecordFor({
+      issuerDeviceId: "device:anchor",
+      localRoles: ["executor"],
+    });
+    duplicate.members.push({ ...duplicate.members[0]! });
+    expect(() => resolveHostLaunchPlan({
+      localDeviceId: LOCAL,
+      trust: duplicate,
+      configuration: { enabledRoles: ["executor"] },
+    })).toThrow(/exactly once/);
+  });
   it("keeps the no-genesis path local and validates trusted-home roles fail-closed", () => {
     expect(resolveEffectiveMeshRoles({ localDeviceId: LOCAL })).toEqual({
       mode: "single-machine",
@@ -266,5 +356,21 @@ function trustRecord(roles: HomeTrustRecord["members"][number]["roles"]): HomeTr
       keyId: LOCAL,
       sig: "test",
     },
+  };
+}
+
+function trustRecordFor(input: {
+  readonly issuerDeviceId: string;
+  readonly localRoles: HomeTrustRecord["members"][number]["roles"];
+  readonly localState?: HomeTrustRecord["members"][number]["state"];
+}): HomeTrustRecord {
+  const record = trustRecord(input.localRoles);
+  return {
+    ...record,
+    issuer: { deviceId: input.issuerDeviceId, issuerKeyId: input.issuerDeviceId },
+    members: [{
+      ...record.members[0]!,
+      state: input.localState ?? "active",
+    }],
   };
 }

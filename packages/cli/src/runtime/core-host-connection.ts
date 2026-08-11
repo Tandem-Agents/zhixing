@@ -137,6 +137,23 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
   return {
     discover: () => discoverServer(),
     spawn: async () => {
+      const { reconcileCurrentManagedService } = await import(
+        "../serve/managed-service-runtime.js"
+      );
+      const reconciled = await reconcileCurrentManagedService("host-missing").catch(
+        (error: unknown) => ({
+          error: error instanceof Error ? error.message : "本机自动启动配置不可用",
+        }),
+      );
+      if ("error" in reconciled) {
+        return { ok: false, reason: reconciled.error };
+      }
+      if (reconciled.plan.mode === "managed") {
+        return { ok: true, recoverable: true };
+      }
+      if (reconciled.plan.mode === "none") {
+        return { ok: false, reason: "这台设备不需要后台运行" };
+      }
       // 静默 console：spawnDaemon 默认会打印成功横幅 / 失败日志尾部，但 ensure 是后台
       // 按需拉起、不是用户显式 serve，结果应由本层统一封装成友好错误。
       const silent = { log: () => {}, error: () => {} };

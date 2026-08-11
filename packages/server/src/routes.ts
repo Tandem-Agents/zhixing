@@ -16,6 +16,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ServerContext } from "./context.js";
 import type { HealthStatus, ServerStatus } from "./types.js";
+import { projectManagedHostStatus } from "./managed-host-status.js";
 
 /**
  * 路由分发结果。返回 false 表示当前请求不属于 REST 端点（让上层路由继续匹配，如 WebSocket）。
@@ -58,26 +59,11 @@ function buildHealth(ctx: ServerContext): HealthStatus {
 }
 
 function buildStatus(ctx: ServerContext): ServerStatus {
-  const mem = process.memoryUsage();
-  return {
-    running: true,
-    pid: process.pid,
-    port: ctx.listenAddr?.port ?? ctx.config.port,
-    host: ctx.listenAddr?.host ?? ctx.config.host,
-    uptime: Math.floor((Date.now() - ctx.startedAt) / 1000),
-    version: ctx.version,
-    startedAt: new Date(ctx.startedAt).toISOString(),
-    scheduler: ctx.scheduler
-      ? {
-          taskCount: ctx.scheduler.listTasks().length,
-          activeTaskCount: ctx.scheduler.activeTaskCount ?? 0,
-        }
-      : undefined,
-    memory: {
-      rss: mem.rss,
-      heapUsed: mem.heapUsed,
-    },
-  };
+  return ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({
+    desired: "on-demand",
+    process: "running",
+    readiness: "ready",
+  });
 }
 
 // ─── 工具 ───

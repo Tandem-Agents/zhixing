@@ -13,6 +13,13 @@ const COMMAND_TIMEOUT_MS = 10_000;
 const MACOS_SECURITY_COMMAND = "/usr/bin/security";
 const LINUX_SECRET_TOOL_COMMAND = "/usr/bin/secret-tool";
 const SECRET_STORE_FILE_PREFIX = "secret-vault";
+const BACKEND_BINDING_FILE = `${SECRET_STORE_FILE_PREFIX}.backend.json`;
+
+export type PlatformSecretStoreBackend =
+  | "windows-dpapi"
+  | "macos-keychain"
+  | "linux-secret-service"
+  | "machine-bound";
 
 export interface PlatformSecretStoreOptions {
   readonly homeDir: string;
@@ -21,6 +28,8 @@ export interface PlatformSecretStoreOptions {
   readonly commandRunner?: CommandRunner;
   /** 受管无头宿主提供的稳定机器身份；常规 Linux 主机自动读取 machine-id。 */
   readonly machineIdentity?: string;
+  /** Managed startup may reopen an existing store but must never initialize one. */
+  readonly context?: "foreground" | "managed";
 }
 
 /**
@@ -61,33 +70,169 @@ export function createPlatformSecretStore(
   const run = options.commandRunner ?? runCommand;
   const keyPath = path.join(options.homeDir, `${SECRET_STORE_FILE_PREFIX}.key`);
   const vaultPath = path.join(options.homeDir, `${SECRET_STORE_FILE_PREFIX}.json`);
-  let masterKey: MasterKeyProvider;
-  if (platform === "win32") {
-    masterKey = new WindowsDpapiMasterKeyProvider(keyPath, run);
-  } else if (platform === "darwin") {
-    masterKey = new MacKeychainMasterKeyProvider(
-      keyringAccount(options.homeDir),
-      vaultPath,
-      run,
-    );
-  } else if (platform === "linux" && hasDesktopSession(env)) {
-    masterKey = new LinuxSecretServiceMasterKeyProvider(
-      keyringAccount(options.homeDir),
-      vaultPath,
-      run,
-    );
-  } else {
-    masterKey = new MachineBoundMasterKeyProvider(
-      keyPath,
-      platform,
-      options.machineIdentity,
-    );
-  }
+  const bindingPath = path.join(options.homeDir, BACKEND_BINDING_FILE);
+  let masterKey: MasterKeyProvider = new BoundPlatformMasterKeyProvider({
+    bindingPath,
+    keyPath,
+    vaultPath,
+    platform,
+    env,
+    run,
+    context: options.context ?? "foreground",
+    machineIdentity: options.machineIdentity,
+  });
   masterKey = new SerializedMasterKeyProvider(masterKey, `${keyPath}.init.lock`);
   return new EncryptedVaultSecretStore({
     vaultPath,
     masterKey,
   });
+}
+
+export async function readPlatformSecretStoreBackendBinding(
+  homeDir: string,
+): Promise<PlatformSecretStoreBackend | undefined> {
+  if (!path.isAbsolute(homeDir)) {
+    throw new TypeError("SecretStore home directory must be absolute");
+  }
+  return readBackendBinding(path.join(path.resolve(homeDir), BACKEND_BINDING_FILE));
+}
+
+interface BoundPlatformMasterKeyProviderOptions {
+  readonly bindingPath: string;
+  readonly keyPath: string;
+  readonly vaultPath: string;
+  readonly platform: NodeJS.Platform;
+  readonly env: NodeJS.ProcessEnv;
+  readonly run: CommandRunner;
+  readonly context: "foreground" | "managed";
+  readonly machineIdentity?: string;
+}
+
+class BoundPlatformMasterKeyProvider implements MasterKeyProvider {
+  private delegate?: MasterKeyProvider;
+
+  constructor(private readonly options: BoundPlatformMasterKeyProviderOptions) {}
+
+  async state(): Promise<MasterKeyState> {
+    try {
+      const key = await this.loadOrCreate();
+      key.fill(0);
+      return "unlocked";
+    } catch {
+      return "unavailable";
+    }
+  }
+
+  async loadOrCreate(): Promise<Buffer> {
+    if (this.delegate) return this.delegate.loadOrCreate();
+    const existingBinding = await readBackendBinding(this.options.bindingPath);
+    const backend = existingBinding ?? await inferBackendBinding(this.options);
+    const delegate = createBackendProvider(backend, this.options);
+    const key = await delegate.loadOrCreate();
+    if (!existingBinding) {
+      await writePrivateFile(
+        this.options.bindingPath,
+        Buffer.from(`${JSON.stringify({ v: 1, backend })}\n`, "utf8"),
+      );
+    }
+    this.delegate = delegate;
+    return key;
+  }
+}
+
+async function inferBackendBinding(
+  options: BoundPlatformMasterKeyProviderOptions,
+): Promise<PlatformSecretStoreBackend> {
+  const [hasVault, hasKey] = await Promise.all([
+    fileExists(options.vaultPath),
+    fileExists(options.keyPath),
+  ]);
+  if (options.context === "managed" && !hasVault && !hasKey) {
+    throw new Error("Managed startup cannot initialize SecretStore backend binding");
+  }
+  if (options.platform === "win32") return "windows-dpapi";
+  if (options.platform === "darwin") return "macos-keychain";
+  if (options.platform === "linux") {
+    if (hasKey) return "machine-bound";
+    if (hasVault) return "linux-secret-service";
+    if (options.context === "managed") {
+      throw new Error("Managed startup cannot initialize SecretStore backend binding");
+    }
+    return hasDesktopSession(options.env)
+      ? "linux-secret-service"
+      : "machine-bound";
+  }
+  if (hasVault && !hasKey) {
+    throw new Error("Existing SecretStore backend cannot be identified on this platform");
+  }
+  if (options.context === "managed" && !hasKey) {
+    throw new Error("Managed startup cannot initialize SecretStore backend binding");
+  }
+  return "machine-bound";
+}
+
+function createBackendProvider(
+  backend: PlatformSecretStoreBackend,
+  options: BoundPlatformMasterKeyProviderOptions,
+): MasterKeyProvider {
+  if (backend === "windows-dpapi") {
+    if (options.platform !== "win32") throw new Error("SecretStore backend does not match this platform");
+    return new WindowsDpapiMasterKeyProvider(options.keyPath, options.run);
+  }
+  if (backend === "macos-keychain") {
+    if (options.platform !== "darwin") throw new Error("SecretStore backend does not match this platform");
+    return new MacKeychainMasterKeyProvider(
+      keyringAccount(path.dirname(options.bindingPath)),
+      options.vaultPath,
+      options.run,
+    );
+  }
+  if (backend === "linux-secret-service") {
+    if (options.platform !== "linux") throw new Error("SecretStore backend does not match this platform");
+    return new LinuxSecretServiceMasterKeyProvider(
+      keyringAccount(path.dirname(options.bindingPath)),
+      options.vaultPath,
+      options.run,
+    );
+  }
+  return new MachineBoundMasterKeyProvider(
+    options.keyPath,
+    options.platform,
+    options.machineIdentity,
+  );
+}
+
+async function readBackendBinding(
+  bindingPath: string,
+): Promise<PlatformSecretStoreBackend | undefined> {
+  const bytes = await readFile(bindingPath, "utf8").catch((error: unknown) => {
+    if (isNodeError(error, "ENOENT")) return undefined;
+    throw error;
+  });
+  if (bytes === undefined) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes);
+  } catch {
+    throw new Error("SecretStore backend binding is invalid");
+  }
+  if (!isPlainRecord(value) || Object.keys(value).sort().join(",") !== "backend,v" || value.v !== 1) {
+    throw new Error("SecretStore backend binding is invalid");
+  }
+  if (![
+    "windows-dpapi",
+    "macos-keychain",
+    "linux-secret-service",
+    "machine-bound",
+  ].includes(value.backend as string)) {
+    throw new Error("SecretStore backend binding is invalid");
+  }
+  return value.backend as PlatformSecretStoreBackend;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype;
 }
 
 class SerializedMasterKeyProvider implements MasterKeyProvider {

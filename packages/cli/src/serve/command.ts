@@ -57,6 +57,7 @@ import {
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
   getDefaultLogPath,
+  projectManagedHostStatus,
   type RunningServer,
   type ProcessLockPaths,
 } from "@zhixing/server";
@@ -130,7 +131,7 @@ import {
 } from "./post-adoption-memory.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
-import { isDaemonChild } from "./self-exec.js";
+import { resolveHostProcessMode } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 import { shouldIdleExit } from "./idle-policy.js";
@@ -155,12 +156,16 @@ import { AnchorSchedulerRuntime } from "./anchor-scheduler-runtime.js";
 import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mesh.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
+import {
+  coordinateManagedHostTrustTransition,
+} from "./managed-service-runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
 export interface ServeOptions {
   port?: number;
   host?: string;
+  managed?: boolean;
 }
 
 /**
@@ -191,9 +196,10 @@ async function runServerProcess(
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
-  const isChild = isDaemonChild();
-  const daemonLogPath = isChild ? getDefaultLogPath() : undefined;
-  const serverLogLifecycle = isChild
+  const processMode = resolveHostProcessMode(opts.managed);
+  const isBackground = processMode !== "foreground";
+  const daemonLogPath = isBackground ? getDefaultLogPath() : undefined;
+  const serverLogLifecycle = isBackground
     ? new ServerLogLifecycle({
         logger: {
           info: (msg) => console.log(chalk.dim(`[server-log] ${msg}`)),
@@ -226,7 +232,7 @@ async function runServerProcess(
 
   // 1. token
   const tokenInfo = await loadOrCreateToken();
-  if (tokenInfo.generated) {
+  if (tokenInfo.generated && processMode !== "managed") {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
@@ -645,7 +651,7 @@ async function runServerProcess(
   }
 
   // 4a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
-  const stateFile = isChild ? new ServerStateFile() : undefined;
+  const stateFile = isBackground ? new ServerStateFile() : undefined;
   const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
 
   // lockPaths —— 单一事实源。同时传给 runServer（acquireLock）和 registerTailCleanup（releaseLock），
@@ -658,6 +664,14 @@ async function runServerProcess(
   // ============================================================================
   const startupCleanups: AssemblyContext["startupCleanups"] = {};
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
+  const managedShutdown = { current: undefined as undefined | (() => void) };
+  let assemblyContext: AssemblyContext | undefined;
+  const onTrustApplied = processMode === "managed"
+    ? () => coordinateManagedHostTrustTransition({
+        refuseNewMessages: () => assemblyContext?.inboundRouter?.refuseNewMessages(),
+        requestShutdown: () => managedShutdown.current?.(),
+      }).then(() => undefined)
+    : undefined;
 
   const ctx: AssemblyContext = {
     profile,
@@ -697,7 +711,9 @@ async function runServerProcess(
     advancement: advancementController,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
+    ...(onTrustApplied ? { onTrustApplied } : {}),
   };
+  assemblyContext = ctx;
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
   // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
@@ -1161,6 +1177,7 @@ async function runServerProcess(
   }
 
   const serverRegistry = buildBuiltinRegistry();
+  let managedHostStopping = false;
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
@@ -1193,6 +1210,14 @@ async function runServerProcess(
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
       logPath: daemonLogPath,
     },
+    managedHostPublicStatus: () => projectManagedHostStatus({
+      desired: processMode === "managed" ? "managed" : "on-demand",
+      ...(processMode === "managed"
+        ? { service: { state: "enabled" as const, running: true, matches: true } }
+        : {}),
+      process: "running",
+      readiness: managedHostStopping ? "stopping" : "ready",
+    }),
     recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
@@ -1363,6 +1388,11 @@ async function runServerProcess(
       },
     },
   });
+  managedShutdown.current = () => {
+    managedHostStopping = true;
+    ctx.inboundRouter?.refuseNewMessages();
+    serverCtx.requestShutdown?.("managed-role-changed");
+  };
 
   if (ctx.meshRuntime) {
     ctx.meshRuntime.bindFirstPartyConversationSurface({
@@ -1561,25 +1591,26 @@ async function runServerProcess(
       heartbeatTimerRef.current = hbTimer;
     }
 
-    // 启动横幅
-    console.log();
-    console.log(chalk.green("  知行服务已启动"));
-    console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
-    console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
-    console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
-    if (ctx.channels) {
-      const statuses = ctx.channels.listStatuses();
-      const connected = statuses.filter((s) => s.state === "connected");
-      console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
-      for (const s of statuses) {
-        const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
-        console.log(
-          chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`),
-        );
+    if (processMode !== "managed") {
+      console.log();
+      console.log(chalk.green("  知行服务已启动"));
+      console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
+      console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
+      console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
+      if (ctx.channels) {
+        const statuses = ctx.channels.listStatuses();
+        const connected = statuses.filter((s) => s.state === "connected");
+        console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
+        for (const s of statuses) {
+          const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
+          console.log(
+            chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`),
+          );
+        }
       }
+      console.log(chalk.dim(`  Ctrl+C 停止`));
+      console.log();
     }
-    console.log(chalk.dim(`  Ctrl+C 停止`));
-    console.log();
   } catch (err) {
     // Post-runServer startup 失败 → runner.shutdown 让 registry 跑完（release lock / close server / stop scheduler 等）
     // runner.shutdown 幂等 + 内部吞错，保证资源最大化回收
@@ -1600,7 +1631,7 @@ async function runServerProcess(
   //   宿主永不退。
   // 三者皆无即空闲退出(client 下次操作 ensure 重新拉起)。
   // 退出走正常 shutdown(drain 在跑任务)、不改 idempotent shutdown 契约。
-  if (isChild) {
+  if (processMode === "on-demand") {
     const IDLE_CHECK_MS = 60_000;
     const idleTimer = setInterval(() => {
       const exit = shouldIdleExit({

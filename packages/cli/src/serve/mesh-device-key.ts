@@ -26,3 +26,19 @@ export async function loadOrCreateDeviceKey(
   await persistDeviceKey(store, generated);
   return generated;
 }
+
+/** Reads the single local identity without creating one. */
+export async function loadExistingDeviceKey(
+  store: SecretStorePort,
+): Promise<DeviceKey | undefined> {
+  const refs = await store.list("device-key/device/v1/");
+  if (refs.length > 1) {
+    throw new Error("SecretStore contains multiple local device identities");
+  }
+  const existing = refs[0];
+  if (!existing) return undefined;
+  const deviceId = existing.bindingId.slice("device/v1/".length);
+  const key = await loadDeviceKey(store, deviceId);
+  if (!key) throw new Error("SecretStore device identity disappeared during startup");
+  return key;
+}

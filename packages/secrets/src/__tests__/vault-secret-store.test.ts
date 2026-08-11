@@ -8,6 +8,7 @@ import {
   type CommandRunner,
   createPlatformSecretStore,
   getPlatformSecretStoreProtectedPaths,
+  readPlatformSecretStoreBackendBinding,
 } from "../platform-secret-store.js";
 
 async function fixture() {
@@ -188,6 +189,68 @@ describe("EncryptedVaultSecretStore", () => {
     expect(await readFile(path.join(directory, "secret-vault.json"), "utf8")).not.toContain(
       "headless-secret",
     );
+    expect(await readPlatformSecretStoreBackendBinding(directory)).toBe("machine-bound");
+  });
+
+  it("keeps the desktop backend binding when managed Linux has no display session", async () => {
+    const directory = await createTempDir("platform-linux-bound-desktop");
+    const ref = { kind: "provider" as const, bindingId: "credentials/v1/bound" };
+    const backend = fakeCredentialBackend();
+    const foreground = createPlatformSecretStore({
+      homeDir: directory,
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      commandRunner: backend.run,
+    });
+    await foreground.put(ref, "desktop-bound-secret");
+
+    const managed = createPlatformSecretStore({
+      homeDir: directory,
+      platform: "linux",
+      env: {},
+      context: "managed",
+      machineIdentity: "must-not-be-used",
+      commandRunner: backend.run,
+    });
+    expect(await managed.get(ref)).toBe("desktop-bound-secret");
+    expect(await readPlatformSecretStoreBackendBinding(directory)).toBe(
+      "linux-secret-service",
+    );
+    await expect(readFile(path.join(directory, "secret-vault.key"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("does not initialize a new SecretStore from managed startup", async () => {
+    const directory = await createTempDir("platform-managed-first-open");
+    const store = createPlatformSecretStore({
+      homeDir: directory,
+      platform: "linux",
+      env: {},
+      context: "managed",
+      machineIdentity: "managed-first-open",
+    });
+    expect(await store.unlockState()).toBe("unavailable");
+    expect(await readPlatformSecretStoreBackendBinding(directory)).toBeUndefined();
+    await expect(readFile(path.join(directory, "secret-vault.key"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("fails closed on a malformed backend binding", async () => {
+    const directory = await createTempDir("platform-invalid-binding");
+    await writeFile(
+      path.join(directory, "secret-vault.backend.json"),
+      JSON.stringify({ v: 1, backend: "unknown" }),
+      "utf8",
+    );
+    const store = createPlatformSecretStore({
+      homeDir: directory,
+      platform: "linux",
+      env: {},
+      machineIdentity: "invalid-binding",
+    });
+    expect(await store.unlockState()).toBe("unavailable");
   });
 
   it("never replaces a desktop master key when an existing vault cannot be unlocked", async () => {

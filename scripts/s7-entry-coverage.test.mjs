@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectLocalConversationOwnerIsolation,
+  inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
   inspectRecoveryBackupAssembly,
   parseLandingRowIds,
@@ -1597,6 +1598,79 @@ test("planned duty migration stays bound to two production roots and a finite ow
       (text) => text.replace("值班设备迁移完成", "anchor 迁移完成"),
     )).join("\n"),
     /leaks internal topology terms/,
+  );
+});
+
+test("managed host stays bound to the finite launch plans, triggers and one serve root", async () => {
+  const paths = [
+    "packages/cli/src/serve/managed-service-reconciler.ts",
+    "packages/cli/src/serve/managed-service.ts",
+    "packages/cli/src/serve/managed-service-runtime.ts",
+    "packages/mesh/src/bootstrap.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/topology-command.ts",
+    "packages/cli/src/runtime/core-host-connection.ts",
+    "packages/secrets/src/platform-secret-store.ts",
+    "packages/cli/src/serve/status.ts",
+    "packages/server/src/managed-host-status.ts",
+    "packages/server/src/routes.ts",
+    "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+    "packages/core/src/protocol/manifest.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  assert.deepEqual(inspectManagedHostAssembly(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/managed-service-reconciler.ts",
+      (text) => text.replace('"host-missing",', '"health-read",'),
+    )).join("\n"),
+    /descriptor exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/runtime/core-host-connection.ts",
+      (text) => text.replace('reconcileCurrentManagedService("host-missing")', 'spawnDaemon({})'),
+    )).join("\n"),
+    /production trigger exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "coordinateManagedHostTrustTransition({",
+        "Promise.resolve({",
+      ),
+    )).join("\n"),
+    /production trigger exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/topology-command.ts",
+      (text) => text.replace("await runConfiguredServeTopology(", "await runSecondServeTopology("),
+    )).join("\n"),
+    /unique composition root drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/server/src/managed-host-status.ts",
+      (text) => text.replace("export function projectManagedHostStatus(", "function projectRawHostStatus("),
+    )).join("\n"),
+    /public status or executor queue wake drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/server/src/routes.ts",
+      (text) => text.replace("ctx.managedHostPublicStatus?.()", "undefined"),
+    )).join("\n"),
+    /public status or executor queue wake drifted/,
   );
 });
 

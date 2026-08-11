@@ -21,6 +21,8 @@ export type DeviceRole = "anchor" | "executor" | "surface";
 
 export interface MeshRoleBootConfig {
   enabledRoles: readonly DeviceRole[];
+  /** Whether a non-anchor executor should be brought online by the OS supervisor. */
+  executorAutoStart?: boolean;
   anchorListen?: {
     bind: { host: string; port: number };
     advertised?: ReadonlyArray<{ host: string; port: number }>;

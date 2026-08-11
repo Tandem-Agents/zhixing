@@ -30,6 +30,119 @@ export interface EffectiveMeshRoles {
   readonly roles: readonly DeviceRole[];
 }
 
+export type HostLaunchMode = "managed" | "on-demand" | "none";
+
+export interface HostLaunchPlan {
+  readonly mode: HostLaunchMode;
+  readonly roles: readonly DeviceRole[];
+}
+
+export type HostLaunchPlanErrorCode =
+  | "configuration-invalid"
+  | "identity-ambiguous"
+  | "member-inactive"
+  | "role-unauthorized"
+  | "anchor-authority-conflict";
+
+export class HostLaunchPlanError extends Error {
+  constructor(
+    readonly code: HostLaunchPlanErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HostLaunchPlanError";
+  }
+}
+
+/**
+ * Resolves only how the existing host composition root is launched. The
+ * returned roles are the complete configured role set and are never trimmed.
+ */
+export function resolveHostLaunchPlan(input: {
+  readonly localDeviceId: string;
+  readonly configuration?: MeshRoleBootConfig;
+  readonly trust?: HomeTrustRecord;
+}): HostLaunchPlan {
+  assertDeviceId(input.localDeviceId, "Local mesh device id");
+  if (!input.trust) {
+    if (input.configuration !== undefined) {
+      try {
+        validateMeshRoleBootConfig(input.configuration);
+      } catch (error) {
+        throw new HostLaunchPlanError(
+          "configuration-invalid",
+          error instanceof Error ? error.message : "Mesh role configuration is invalid",
+        );
+      }
+    }
+    return Object.freeze({
+      mode: "on-demand" as const,
+      roles: Object.freeze(["anchor", "executor"] as DeviceRole[]),
+    });
+  }
+
+  let configuration: MeshRoleBootConfig;
+  try {
+    configuration = validateMeshRoleBootConfig(input.configuration);
+  } catch (error) {
+    throw new HostLaunchPlanError(
+      "configuration-invalid",
+      error instanceof Error ? error.message : "Mesh role configuration is invalid",
+    );
+  }
+  const matches = input.trust.members.filter(
+    (candidate) => candidate.device.deviceId === input.localDeviceId,
+  );
+  if (matches.length !== 1) {
+    throw new HostLaunchPlanError(
+      "identity-ambiguous",
+      "Local mesh device identity must occur exactly once in current trust",
+    );
+  }
+  const member = matches[0]!;
+  if (member.state !== "active") {
+    throw new HostLaunchPlanError(
+      "member-inactive",
+      "Local mesh device is not an active member of current trust",
+    );
+  }
+  const authorized = new Set(member.roles);
+  for (const role of configuration.enabledRoles) {
+    if (!authorized.has(role)) {
+      throw new HostLaunchPlanError(
+        "role-unauthorized",
+        `Local mesh role is not authorized by current trust: ${role}`,
+      );
+    }
+  }
+
+  const roles = Object.freeze([...configuration.enabledRoles]);
+  const roleSet = new Set(roles);
+  const isCurrentAnchor = input.trust.issuer.deviceId === input.localDeviceId;
+  if (isCurrentAnchor && !authorized.has("anchor")) {
+    throw new HostLaunchPlanError(
+      "anchor-authority-conflict",
+      "Current mesh issuer is not authorized for the anchor role",
+    );
+  }
+  if (!isCurrentAnchor && roleSet.has("anchor")) {
+    throw new HostLaunchPlanError(
+      "anchor-authority-conflict",
+      "A non-current device cannot launch the anchor role",
+    );
+  }
+  if (isCurrentAnchor && roleSet.has("anchor")) {
+    return Object.freeze({ mode: "managed" as const, roles });
+  }
+  if (roleSet.has("executor")) {
+    return Object.freeze({
+      mode: configuration.executorAutoStart === true ? "managed" as const : "on-demand" as const,
+      roles,
+    });
+  }
+  return Object.freeze({ mode: "none" as const, roles });
+}
+
 export function resolveEffectiveMeshRoles(input: {
   readonly localDeviceId: string;
   readonly configuration?: MeshRoleBootConfig;
@@ -76,7 +189,12 @@ export function validateMeshRoleBootConfig(
   if (!isRecord(value)) {
     throw new TypeError("Trusted-home mesh startup requires role configuration");
   }
-  assertExactKeys(value, ["anchorListen", "enabledRoles", "relayRegistration"]);
+  assertExactKeys(value, [
+    "anchorListen",
+    "enabledRoles",
+    "executorAutoStart",
+    "relayRegistration",
+  ]);
   if (!Array.isArray(value.enabledRoles)) {
     throw new TypeError("Mesh enabledRoles must be an array");
   }
@@ -90,8 +208,14 @@ export function validateMeshRoleBootConfig(
   const relayRegistration = value.relayRegistration === undefined
     ? undefined
     : validateEndpoint(value.relayRegistration, "Mesh relay registration");
+  if (value.executorAutoStart !== undefined && typeof value.executorAutoStart !== "boolean") {
+    throw new TypeError("Mesh executorAutoStart must be a boolean");
+  }
   const configuration = Object.freeze({
     enabledRoles: roles,
+    ...(value.executorAutoStart !== undefined
+      ? { executorAutoStart: value.executorAutoStart }
+      : {}),
     ...(anchorListen ? { anchorListen } : {}),
     ...(relayRegistration ? { relayRegistration } : {}),
   });

@@ -5,6 +5,8 @@ export {
 export {
   createPlatformSecretStore,
   getPlatformSecretStoreProtectedPaths,
+  readPlatformSecretStoreBackendBinding,
+  type PlatformSecretStoreBackend,
   type PlatformSecretStoreOptions,
 } from "./platform-secret-store.js";
 export {

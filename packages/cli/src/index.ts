@@ -266,6 +266,11 @@ program
   .option("--advertise <host:port>", "邀请中公布的直连地址")
   .option("--relay <host:port>", "盲中继会合地址")
   .option("--relay-only", "仅通过盲中继会合")
+  .option(
+    "--executor-auto-start <choice>",
+    "加入设备开机后是否自动上线：yes 或 no",
+    parseYesNo,
+  )
   .action(async (invitation: string | undefined, options: {
     method: "qr" | "short";
     code?: string;
@@ -273,6 +278,7 @@ program
     advertise?: string;
     relay?: string;
     relayOnly?: boolean;
+    executorAutoStart?: boolean;
   }) => {
     try {
       const { runPairCommand } = await import("./serve/mesh-pair-command.js");
@@ -284,6 +290,9 @@ program
         ...(options.advertise ? { advertise: options.advertise } : {}),
         ...(options.relay ? { relay: options.relay } : {}),
         ...(options.relayOnly ? { relayOnly: true } : {}),
+        ...(options.executorAutoStart !== undefined
+          ? { executorAutoStart: options.executorAutoStart }
+          : {}),
       });
       process.exit(0);
     } catch (err) {
@@ -291,6 +300,12 @@ program
       process.exit(1);
     }
   });
+
+function parseYesNo(value: string): boolean {
+  if (value === "yes") return true;
+  if (value === "no") return false;
+  throw new Error("必须填写 yes 或 no");
+}
 
 const dutyCmd = program
   .command("duty")
@@ -674,13 +689,28 @@ workspaceCmd
 const serveCmd = program
   .command("serve", { hidden: true })
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
-  .action(async () => {
+  .option("--managed", "由系统托管的非交互启动")
+  .addOption(new Option("--managed-home <path>").hideHelp())
+  .addOption(new Option("--managed-secret-backend <backend>").hideHelp())
+  .action(async (options: {
+    managed?: boolean;
+    managedHome?: string;
+    managedSecretBackend?: string;
+  }) => {
     try {
+      const { applyManagedServiceLaunchContext } = await import("./serve/managed-service.js");
+      applyManagedServiceLaunchContext({
+        ...(options.managed ? { managed: true } : {}),
+        ...(options.managedHome ? { home: options.managedHome } : {}),
+        ...(options.managedSecretBackend
+          ? { backend: options.managedSecretBackend }
+          : {}),
+      });
       await pruneRuntimeLogs();
       const {
         runServeCommand,
       } = await import("./serve/topology-command.js");
-      await runServeCommand({});
+      await runServeCommand({ ...(options.managed ? { managed: true } : {}) });
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

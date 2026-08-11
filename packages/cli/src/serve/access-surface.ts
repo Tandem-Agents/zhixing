@@ -134,6 +134,7 @@ export interface AssemblyContext {
   readonly advancementCapacity: AgentRuntimeCapacityBinding;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
+  readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;

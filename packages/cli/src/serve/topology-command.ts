@@ -19,6 +19,14 @@ import {
   acquireExecutorLocalWorkspaceOwner,
   defineLocalWorkspaceAssemblyIdentity,
 } from "../runtime/local-workspace-bootstrap.js";
+import { resolveHostProcessMode } from "./self-exec.js";
+import { reconcileCurrentManagedService } from "./managed-service-runtime.js";
+import {
+  discoverServer,
+  ServerNotRunningError,
+} from "@zhixing/server";
+import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -31,14 +39,30 @@ export async function runServeCommand(
   writer: CliWriter = createStdoutWriter(),
 ): Promise<void> {
   const zhixingHome = getZhixingHome();
-  const secretStore = createPlatformSecretStore({ homeDir: zhixingHome });
+  const processMode = resolveHostProcessMode(options.managed);
+  const output = processMode === "managed" ? SILENT_WRITER : writer;
+  if (processMode === "managed") {
+    const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState());
+    if (plan.mode !== "managed") {
+      await reconcileCurrentManagedService("managed-preflight");
+      return;
+    }
+    const retained = await waitForManagedHostTurn();
+    if (!retained) return;
+    const reconciled = await reconcileCurrentManagedService("managed-preflight");
+    if (reconciled.plan.mode !== "managed") return;
+  }
+  const secretStore = createPlatformSecretStore({
+    homeDir: zhixingHome,
+    context: processMode === "managed" ? "managed" : "foreground",
+  });
   const startup = await runStartupCheck({
     homeDir: zhixingHome,
     mode: "host",
     secretStore,
   });
   if (startup.kind !== "ready") {
-    renderStartupFailure(startup, writer);
+    renderStartupFailure(startup, output);
     process.exit(startup.kind === "cancelled" ? 0 : 2);
     return;
   }
@@ -57,7 +81,7 @@ export async function runServeCommand(
       !mesh.trust.recoveryRootPublicKey &&
       !mesh.trust.recoveryBackupPublicKey
     ) {
-      writer.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
+      output.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
       await runRecoveryRootEstablishmentTopology({
         zhixingHome,
         mesh,
@@ -105,6 +129,45 @@ export async function runServeCommand(
     await localWorkspaceOwner?.release();
   }
 }
+
+export async function waitForManagedHostTurn(input: {
+  readonly existingHostAlive?: () => Promise<boolean>;
+  readonly shouldRemainManaged?: () => Promise<boolean>;
+  readonly wait?: () => Promise<void>;
+  readonly reconcileChangedPlan?: () => Promise<void>;
+} = {}): Promise<boolean> {
+  const existingHostAlive = input.existingHostAlive ?? (async () => {
+    try {
+      await discoverServer();
+      return true;
+    } catch (error) {
+      if (error instanceof ServerNotRunningError) return false;
+      throw error;
+    }
+  });
+  const shouldRemainManaged = input.shouldRemainManaged ?? (async () =>
+    resolveHostLaunchPlan(await loadCurrentManagedServiceState()).mode === "managed");
+  const wait = input.wait ?? (() => new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000);
+  }));
+  const reconcileChangedPlan = input.reconcileChangedPlan ?? (() =>
+    reconcileCurrentManagedService("current-trust-applied").then(() => undefined));
+  while (await existingHostAlive()) {
+    if (!await shouldRemainManaged()) {
+      await reconcileChangedPlan();
+      return false;
+    }
+    await wait();
+  }
+  return await shouldRemainManaged();
+}
+
+const SILENT_WRITER: CliWriter = {
+  line: () => undefined,
+  appendInline: () => undefined,
+  notify: () => undefined,
+  ensureSegmentBreak: () => undefined,
+};
 
 function renderStartupFailure(
   result: Exclude<StartupCheckResult, { readonly kind: "ready" }>,

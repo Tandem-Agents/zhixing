@@ -655,4 +655,44 @@ describe("AnchorScheduler authority", () => {
     expect(scheduler.getTask("task-1")).toBeUndefined();
     await scheduler.stop();
   });
+
+  it("immediately retries a durable queued job when executor readiness is published", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-ready",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "ready task",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "continue" },
+        },
+      },
+    };
+    const activate = vi.fn(async ({ occurrence }: { occurrence: JobOccurrence }) => {
+      journal.setState(occurrence.jobRunId, "committed");
+    });
+    const { scheduler } = fixture({
+      journals: new Map([["task-ready", journal]]),
+      activateUserJob: activate as never,
+    });
+    await scheduler.start();
+    journal.runs.push({
+      taskId: "task-ready",
+      jobRunId: "queued-ready",
+      scheduledFor: "2026-08-02T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "queued",
+    });
+    await scheduler.refreshCommittedDefinitions(["task-ready"]);
+    scheduler.wakeQueuedUserJobs();
+    await vi.waitFor(() => expect(activate).toHaveBeenCalledOnce());
+    expect(activate.mock.calls[0]?.[0].occurrence.jobRunId).toBe("queued-ready");
+    await scheduler.stop();
+  });
 });

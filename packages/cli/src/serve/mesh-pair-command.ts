@@ -96,6 +96,7 @@ import {
   CredentialExposureAuthority,
   exposureGuardedSecretStore,
 } from "./credential-exposure-authority.js";
+import { reconcileCurrentManagedService } from "./managed-service-runtime.js";
 
 const PAIRING_TIMEOUT_MS = 120_000;
 const MAX_PAIRING_FRAME_BYTES = 1024 * 1024;
@@ -114,6 +115,11 @@ export interface PairCommandOptions {
   readonly secretStore?: SecretStorePort;
   readonly writeLine?: (line: string) => void;
   readonly confirmRecoveryPackage?: (recoveryPackage: string) => Promise<string>;
+  readonly executorAutoStart?: boolean;
+  readonly promptExecutorAutoStart?: () => Promise<boolean>;
+  readonly reconcileManagedService?: (
+    trigger: "pairing-issuer-committed" | "pairing-joiner-committed",
+  ) => Promise<void>;
 }
 
 interface PairingInvitation {
@@ -220,8 +226,25 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     options.writeLine ?? createStdoutWriter().line;
   const continuation = await continuations.load();
   if (options.invitation || continuation?.side === "joiner") {
+    const currentConfig = loadConfig({ homeDir: zhixingHome });
+    const executorAutoStart = await resolveExecutorAutoStartSelection({
+      explicit: options.executorAutoStart,
+      persisted: currentConfig.mesh?.executorAutoStart,
+      isolated: options.secretStore !== undefined,
+      interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
+      prompt: () => requestExecutorAutoStart(options),
+    });
+    await writeConfig({
+      ...currentConfig,
+      mesh: {
+        ...currentConfig.mesh,
+        enabledRoles: currentConfig.mesh?.enabledRoles ?? [],
+        executorAutoStart,
+      },
+    }, { homeDir: zhixingHome });
     await joinPairing({
       ...options,
+      executorAutoStart,
       ...(options.invitation ? { invitation: options.invitation } : {}),
       zhixingHome,
       secretStore: routedSecretStore,
@@ -231,6 +254,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       storageMaintenance: deviceCapacity.storage,
       writeLine,
     });
+    await reconcileAfterPairing(options, "pairing-joiner-committed");
     return;
   }
   await issuePairing({
@@ -243,6 +267,20 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     storageMaintenance: deviceCapacity.storage,
     writeLine,
   });
+  await reconcileAfterPairing(options, "pairing-issuer-committed");
+}
+
+async function reconcileAfterPairing(
+  options: PairCommandOptions,
+  trigger: "pairing-issuer-committed" | "pairing-joiner-committed",
+): Promise<void> {
+  if (options.reconcileManagedService) {
+    await options.reconcileManagedService(trigger);
+    return;
+  }
+  // A caller-supplied SecretStore denotes an isolated embedding/test composition.
+  // Production CLI pairing always uses the platform store and performs host reconcile.
+  if (!options.secretStore) await reconcileCurrentManagedService(trigger);
 }
 
 export async function activateInitialRecoveryRoot(input: {
@@ -453,6 +491,9 @@ async function issuePairing(input: PairCommandOptions & {
       member.device.deviceId === input.key.deviceId)?.roles ?? ["anchor", "executor"];
     const meshConfiguration = {
       enabledRoles,
+      ...(config.mesh?.executorAutoStart !== undefined
+        ? { executorAutoStart: config.mesh.executorAutoStart }
+        : {}),
       ...(listener && advertised
         ? { anchorListen: { bind: listener.endpoint, advertised: [advertised] } }
         : {}),
@@ -1182,7 +1223,10 @@ async function completeJoinerBootstrap(input: {
   const config = loadConfig({ homeDir: input.input.zhixingHome });
   await writeConfig({
     ...config,
-    mesh: { enabledRoles: local.roles },
+    mesh: {
+      enabledRoles: local.roles,
+      executorAutoStart: input.input.executorAutoStart ?? false,
+    },
   }, { homeDir: input.input.zhixingHome });
   await input.input.store.markBootstrapComplete(
     input.invitation.issuer.deviceId,
@@ -1192,6 +1236,41 @@ async function completeJoinerBootstrap(input: {
   await deletePairingSecret(input.input.secretStore, input.invitation.offer.offerId);
   await input.input.continuations.clear(input.invitation.offer.offerId);
   input.input.writeLine(`Joined home: ${input.committed.trustRecord.homeId}`);
+}
+
+async function requestExecutorAutoStart(
+  options: PairCommandOptions,
+): Promise<boolean> {
+  if (options.promptExecutorAutoStart) return options.promptExecutorAutoStart();
+  const { createInterface } = await import("node:readline/promises");
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const answer = (await prompt.question(
+        "让这台电脑开机后自动上线并继续任务？[y/N] ",
+      )).trim().toLowerCase();
+      if (answer === "" || answer === "n" || answer === "no") return false;
+      if (answer === "y" || answer === "yes") return true;
+    }
+  } finally {
+    prompt.close();
+  }
+}
+
+export async function resolveExecutorAutoStartSelection(input: {
+  readonly explicit?: boolean;
+  readonly persisted?: boolean;
+  readonly isolated: boolean;
+  readonly interactive: boolean;
+  readonly prompt: () => Promise<boolean>;
+}): Promise<boolean> {
+  if (input.explicit !== undefined) return input.explicit;
+  if (input.persisted !== undefined) return input.persisted;
+  if (input.isolated) return false;
+  if (!input.interactive) {
+    throw new Error("Joining an executor non-interactively requires --executor-auto-start yes|no");
+  }
+  return input.prompt();
 }
 
 async function selectInitialPairingBackupTarget(input: {

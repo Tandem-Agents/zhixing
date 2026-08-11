@@ -611,6 +611,33 @@ describe("executor capability snapshot updates", () => {
     expect(directory.snapshotFor("device-a")).toEqual(first);
   });
 
+  it("wakes subscribers only after an accepted durable snapshot is visible", async () => {
+    const directory = await ExecutorCapabilityDirectory.open({
+      verifier,
+      store: memoryDirectoryStore(),
+      isDeviceAuthorized: (keyId) => keyId === "device-a",
+      allowInitialize: true,
+    });
+    const accepted: string[] = [];
+    const unsubscribe = directory.onAccepted((value) => {
+      accepted.push(`${value.descriptor.executorId}:${value.descriptor.revision}`);
+    });
+    const first = { descriptor: descriptor(), inventory: inventory() };
+    await directory.accept(first);
+    await directory.accept({
+      descriptor: createSignedCapabilityDescriptor({
+        ...withoutSignedIdentity(first.descriptor),
+        tools: ["Read"],
+      }, signer),
+      inventory: first.inventory,
+    });
+    await Promise.resolve();
+    expect(accepted).toEqual(["device-a:2"]);
+    unsubscribe();
+    await directory.accept(first);
+    expect(accepted).toEqual(["device-a:2"]);
+  });
+
   it("requires explicit first-bootstrap authority for an empty durable directory", async () => {
     await expect(
       ExecutorCapabilityDirectory.open({

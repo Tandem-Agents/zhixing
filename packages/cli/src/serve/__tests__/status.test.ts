@@ -40,7 +40,7 @@ describe("runStatusCommand", () => {
     expect(r.status).toBe("stopped");
   });
 
-  it("stopped hint uses on-demand host wording, not explicit background startup", async () => {
+  it("prints the public on-demand status without internal process details", async () => {
     const log = vi.fn();
     const deps = mkDeps({
       readLockFn: vi.fn(async () => null),
@@ -48,8 +48,8 @@ describe("runStatusCommand", () => {
     });
     await runStatusCommand({ deps });
     const output = log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(output).toContain("Run `zhixing`");
-    expect(output).not.toContain("--daemon");
+    expect(output).toContain("不需要后台运行");
+    expect(output).not.toMatch(/pid|port|path|daemon|systemd|launchd/iu);
   });
 
   it("reports stale when PID file present but process is dead", async () => {
@@ -60,7 +60,7 @@ describe("runStatusCommand", () => {
     expect(r.reason).toMatch(/not alive/);
   });
 
-  it("stale hint uses on-demand host wording, not explicit background replacement", async () => {
+  it("keeps stale process details off the public surface", async () => {
     const log = vi.fn();
     const deps = mkDeps({
       isProcessAliveFn: vi.fn(() => false),
@@ -68,8 +68,8 @@ describe("runStatusCommand", () => {
     });
     await runStatusCommand({ deps });
     const output = log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(output).toContain("Run `zhixing`");
-    expect(output).not.toContain("--daemon");
+    expect(output).toContain("不需要后台运行");
+    expect(output).not.toMatch(/pid|port|path|daemon|systemd|launchd/iu);
   });
 
   it("reports running when PID alive + health 200 + heartbeat fresh", async () => {

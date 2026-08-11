@@ -122,6 +122,7 @@ export class AnchorSchedulerRuntime {
   readonly #statusDisposers = new Map<string, () => void>();
   readonly #journalLifecycleDisposers = new Map<string, () => void>();
   readonly #schedulerNoticeDisposer: () => void;
+  readonly #capabilityReadyDisposer: () => void;
   readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
   readonly #manualSurfaces: ManualJobSurfaceLifecycle;
   readonly #retirementTasks = new Map<string, Promise<void>>();
@@ -173,6 +174,9 @@ export class AnchorSchedulerRuntime {
       ...(options.now ? { now: options.now } : {}),
       ...(options.onError ? { onError: options.onError } : {}),
     });
+    this.#capabilityReadyDisposer = options.authority.executorCapabilities.onAccepted(
+      () => this.scheduler.wakeQueuedUserJobs(),
+    );
     this.#mutationCoordinator = new GlobalMutationCommitCoordinator({
       log: options.authority.authorityLog,
       artifacts: options.authority.artifacts,
@@ -281,6 +285,7 @@ export class AnchorSchedulerRuntime {
   }
 
   async stop(): Promise<void> {
+    this.#capabilityReadyDisposer();
     let stopFailure: unknown;
     try {
       await this.scheduler.stop();

@@ -119,6 +119,9 @@ export class ExecutorCapabilityDirectory {
   readonly #isDeviceAuthorized: (deviceKeyId: string) => boolean;
   #entries: Map<string, ExecutorCapabilityDirectoryEntry>;
   #generation: number;
+  readonly #acceptedListeners = new Set<(
+    snapshot: ExecutorCapabilitySnapshot,
+  ) => void>();
 
   private constructor(
     options: ExecutorCapabilityDirectoryOptions,
@@ -210,10 +213,12 @@ export class ExecutorCapabilityDirectory {
     const highWaterConflict = validateDirectoryHighWater(current, result.snapshot);
     if (highWaterConflict !== undefined) return highWaterConflict;
     if (result.status === "replayed" && current?.snapshot !== undefined) {
-      return {
+      const replayed = {
         ...result,
         snapshot: snapshot(current.snapshot, "Executor capability snapshot"),
       };
+      this.#publishAccepted(replayed.snapshot);
+      return replayed;
     }
     const nextEntry = directoryEntryFromSnapshot(current, result.snapshot);
     const nextEntries = new Map(this.#entries);
@@ -222,10 +227,30 @@ export class ExecutorCapabilityDirectory {
     if (nextEntry.snapshot === undefined) {
       throw new TypeError("Accepted executor snapshot was not retained");
     }
-    return {
+    const accepted = {
       ...result,
       snapshot: snapshot(nextEntry.snapshot, "Executor capability snapshot"),
     };
+    this.#publishAccepted(accepted.snapshot);
+    return accepted;
+  }
+
+  onAccepted(listener: (snapshot: ExecutorCapabilitySnapshot) => void): () => void {
+    this.#acceptedListeners.add(listener);
+    return () => this.#acceptedListeners.delete(listener);
+  }
+
+  #publishAccepted(accepted: ExecutorCapabilitySnapshot): void {
+    for (const listener of [...this.#acceptedListeners]) {
+      const published = snapshot(accepted, "Executor capability snapshot");
+      queueMicrotask(() => {
+        try {
+          listener(published);
+        } catch {
+          // A projection observer cannot invalidate an already durable acceptance.
+        }
+      });
+    }
   }
 
   snapshotFor(executorId: string): ExecutorCapabilitySnapshot | undefined {

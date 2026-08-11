@@ -32,6 +32,7 @@ import type {
 } from "@zhixing/rpc/session-broadcast";
 import type { SessionAdoptionReviewResult } from "@zhixing/rpc";
 import type { ServerConfig } from "./types.js";
+import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
@@ -212,6 +213,8 @@ export interface ServerContext {
   memory?: MemoryDirectory;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
+  /** 公开的本机运行状态；只允许稳定产品语言和有限动作。 */
+  managedHostPublicStatus?: () => ManagedHostPublicStatus;
   /** 用户级恢复备份状态；不暴露 root、日志水位或摘要。 */
   recoveryBackupStatus?: () => Promise<{
     state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
@@ -322,6 +325,7 @@ export interface CreateContextOptions {
   skills?: SkillDirectory;
   memory?: MemoryDirectory;
   hostInfo?: { workspace?: string; logPath?: string };
+  managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
   dutyMigration?: ServerContext["dutyMigration"];
   mcpStatuses?: ServerContext["mcpStatuses"];
@@ -352,6 +356,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     skills: opts.skills,
     memory: opts.memory,
     hostInfo: opts.hostInfo,
+    managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,
     dutyMigration: opts.dutyMigration,
     mcpStatuses: opts.mcpStatuses,

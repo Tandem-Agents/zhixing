@@ -22,6 +22,7 @@ export * from "./cleanup-registry.js";
 export * from "./lifecycle.js";
 export * from "./client/index.js";
 export * from "./types.js";
+export * from "./managed-host-status.js";
 export * from "./context.js";
 export * from "./server.js";
 export * from "./channels/index.js";

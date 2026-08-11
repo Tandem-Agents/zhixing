@@ -27,6 +27,8 @@ import {
   writeCredentials,
 } from "@zhixing/providers";
 import { createPlatformSecretStore } from "@zhixing/secrets";
+import { canonicalize } from "@zhixing/core/protocol";
+import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
 import {
   BASE_CONFIG_SECTION_IDS,
   extractMcpCandidate,
@@ -177,6 +179,17 @@ async function runEditorCommand(
 
     switch (editorResult.kind) {
       case "completed": {
+        const beforeLaunchSelection = {
+          enabledRoles: config.mesh?.enabledRoles ?? [],
+          executorAutoStart: config.mesh?.executorAutoStart ?? false,
+        };
+        const afterLaunchSelection = {
+          enabledRoles: editorResult.config.mesh?.enabledRoles ?? [],
+          executorAutoStart: editorResult.config.mesh?.executorAutoStart ?? false,
+        };
+        if (canonicalize(beforeLaunchSelection) !== canonicalize(afterLaunchSelection)) {
+          await reconcileCurrentManagedService("local-role-config-committed");
+        }
         // 前置等待 in-flight turn——宿主换代前先到 turn 边界,进行中的回答不被截断
         if (state.activeTurnPromise) {
           await state.activeTurnPromise.catch(() => {

@@ -130,6 +130,7 @@ export class AnchorScheduler {
   #activationRecovery: Promise<void> | undefined;
   readonly #recoveringTaskIds = new Set<string>();
   #tickRunning = false;
+  #queuedWakeRequested = false;
   #missedSummaryPending = false;
 
   constructor(options: AnchorSchedulerOptions) {
@@ -767,7 +768,11 @@ export class AnchorScheduler {
   }
 
   async tick(): Promise<void> {
-    if (!this.#accepting || this.#tickRunning) return;
+    if (!this.#accepting) return;
+    if (this.#tickRunning) {
+      this.#queuedWakeRequested = true;
+      return;
+    }
     this.#tickRunning = true;
     try {
       await this.#resumeQueuedUserJobs();
@@ -793,8 +798,25 @@ export class AnchorScheduler {
       }
     } finally {
       this.#tickRunning = false;
+      const wakeAgain = this.#queuedWakeRequested;
+      this.#queuedWakeRequested = false;
       this.#arm();
+      if (wakeAgain) queueMicrotask(() => void this.tick());
     }
+  }
+
+  wakeQueuedUserJobs(): void {
+    if (!this.#accepting) return;
+    if (this.#tickRunning) {
+      this.#queuedWakeRequested = true;
+      return;
+    }
+    if (this.#queuedWakeRequested) return;
+    this.#queuedWakeRequested = true;
+    queueMicrotask(() => {
+      this.#queuedWakeRequested = false;
+      void this.tick();
+    });
   }
 
   #arm(): void {

@@ -33,20 +33,4 @@ export interface HealthStatus {
 
 // ─── 服务状态 ───
 
-export interface ServerStatus {
-  running: boolean;
-  pid: number;
-  port: number;
-  host: string;
-  uptime: number;
-  version: string;
-  startedAt: string;
-  scheduler?: {
-    taskCount: number;
-    activeTaskCount: number;
-  };
-  memory: {
-    rss: number;
-    heapUsed: number;
-  };
-}
+export type { ManagedHostPublicStatus as ServerStatus } from "./managed-host-status.js";

@@ -42,26 +42,35 @@ describe("HTTP Server (S2.B)", () => {
     expect((body as { uptime: number }).uptime).toBeGreaterThanOrEqual(0);
   });
 
-  it("GET /api/status returns server runtime details", async () => {
+  it("GET /api/status returns only the stable public host projection", async () => {
     const { status, body } = await fetchJson(`http://127.0.0.1:${server.port}/api/status`);
     expect(status).toBe(200);
-    const s = body as Record<string, unknown>;
-    expect(s.running).toBe(true);
-    expect(s.pid).toBe(process.pid);
-    expect(s.port).toBe(server.port);
-    expect(s.version).toBe(TEST_VERSION);
-    expect(typeof s.uptime).toBe("number");
-    expect(typeof s.startedAt).toBe("string");
-    const memory = s.memory as { rss: number; heapUsed: number };
-    expect(memory.rss).toBeGreaterThan(0);
-    expect(memory.heapUsed).toBeGreaterThan(0);
-    // S2.B: scheduler 还未集成
-    expect(s.scheduler).toBeUndefined();
+    expect(body).toEqual({ state: "ready", label: "可以使用" });
+    expect(Object.keys(body as Record<string, unknown>).sort()).toEqual(["label", "state"]);
+    expect(JSON.stringify(body)).not.toMatch(
+      /pid|port|host|version|uptime|memory|scheduler|path|device|role|epoch|secret/iu,
+    );
   });
 
-  it("GET /api/status omits scheduler when not provided", async () => {
+  it("GET /api/status uses the composition root projection without widening keys", async () => {
+    await server.close();
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      managedHostPublicStatus: () => ({
+        state: "needs-attention",
+        label: "需要处理",
+        action: "请解锁本机凭据",
+      }),
+    });
+    server = await startServer({ context: ctx });
     const { body } = await fetchJson(`http://127.0.0.1:${server.port}/api/status`);
-    expect((body as { scheduler?: unknown }).scheduler).toBeUndefined();
+    expect(body).toEqual({
+      state: "needs-attention",
+      label: "需要处理",
+      action: "请解锁本机凭据",
+    });
   });
 
   it("unknown /api/* path returns 404 JSON", async () => {

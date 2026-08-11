@@ -24,7 +24,14 @@ import {
   getDefaultReadyMarkerPath,
   type PidFileContents,
   type ServerStateSnapshot,
+  projectManagedHostStatus,
+  type ManagedHostActionCode,
+  type ManagedHostPublicState,
+  type ManagedHostPublicStatus,
 } from "@zhixing/server";
+import { createManagedServiceAdapter } from "./managed-service.js";
+import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 
 export type ServerLiveStatus = "running" | "running-unhealthy" | "stopped" | "stale";
 
@@ -43,6 +50,7 @@ export interface StatusDeps {
   readStateFn?: () => Promise<ServerStateSnapshot | null>;
   clock?: () => Date;
   console?: Pick<Console, "log" | "error">;
+  publicStatusFn?: (report: StatusReport) => Promise<ManagedHostPublicStatus>;
 }
 
 export interface StatusReport {
@@ -59,6 +67,13 @@ export interface StatusReport {
   reason?: string;
 }
 
+export { projectManagedHostStatus };
+export type {
+  ManagedHostActionCode,
+  ManagedHostPublicState,
+  ManagedHostPublicStatus,
+};
+
 export async function runStatusCommand(opts: StatusOptions = {}): Promise<StatusReport> {
   const deps = opts.deps ?? {};
   const con = deps.console ?? console;
@@ -68,10 +83,44 @@ export async function runStatusCommand(opts: StatusOptions = {}): Promise<Status
   if (opts.json) {
     con.log(JSON.stringify(report, null, 2));
   } else {
-    printReportHuman(report, con);
+    const publicStatus = deps.publicStatusFn
+      ? await deps.publicStatusFn(report)
+      : opts.deps
+        ? projectManagedHostStatus({ desired: "on-demand", process: report.status, readiness: readinessFor(report) })
+        : await buildManagedHostPublicStatus(report);
+    printReportHuman(publicStatus, con);
   }
 
   return report;
+}
+
+export async function buildManagedHostPublicStatus(
+  processReport: StatusReport,
+): Promise<ManagedHostPublicStatus> {
+  try {
+    const current = await loadCurrentManagedServiceState();
+    const plan = resolveHostLaunchPlan(current);
+    const service = current.spec
+      ? await createManagedServiceAdapter().inspect(
+          current.spec,
+          new AbortController().signal,
+        )
+      : undefined;
+    return projectManagedHostStatus({
+      desired: plan.mode,
+      ...(service ? { service } : {}),
+      process: processReport.status,
+      readiness: readinessFor(processReport),
+    });
+  } catch (error) {
+    return projectManagedHostStatus({
+      desired: "managed",
+      process: processReport.status,
+      errorCode: error instanceof Error && error.message === "local-credentials-unavailable"
+        ? "credentials-locked"
+        : "configuration-invalid",
+    });
+  }
 }
 
 async function buildReport(deps: StatusDeps): Promise<StatusReport> {
@@ -180,44 +229,23 @@ function defaultHttpGet(url: string, timeoutMs: number): Promise<number> {
 }
 
 function printReportHuman(
-  report: StatusReport,
+  report: ManagedHostPublicStatus,
   con: Pick<Console, "log">,
 ): void {
-  const dot = chalk.bold(
-    report.status === "running"
-      ? chalk.green("●")
-      : report.status === "running-unhealthy"
-        ? chalk.yellow("●")
-        : report.status === "stale"
-          ? chalk.red("●")
-          : chalk.gray("○"),
-  );
-
-  const label = chalk.bold(report.status);
-  con.log(`  ${dot} ${label}`);
-  if (report.pid !== undefined) con.log(chalk.dim(`    pid:       ${report.pid}`));
-  if (report.port !== undefined) con.log(chalk.dim(`    port:      ${report.port}`));
-  if (report.host !== undefined) con.log(chalk.dim(`    host:      ${report.host}`));
-  if (report.uptimeSec !== undefined) {
-    con.log(chalk.dim(`    uptime:    ${formatUptime(report.uptimeSec)}`));
-  }
-  if (report.phase) con.log(chalk.dim(`    phase:     ${report.phase}`));
-  if (report.logPath) con.log(chalk.dim(`    log:       ${report.logPath}`));
-  if (report.reason) con.log(chalk.yellow(`    reason:    ${report.reason}`));
-
-  if (report.status === "stale") {
-    con.log();
-    con.log(chalk.dim("    Run `zhixing` to replace the background host on demand."));
-  } else if (report.status === "stopped") {
-    con.log();
-    con.log(chalk.dim("    Run `zhixing` to start the background host on demand."));
-  }
+  const dot = report.state === "ready"
+    ? chalk.green("●")
+    : report.state === "needs-attention"
+      ? chalk.yellow("●")
+      : chalk.gray("○");
+  con.log(`  ${chalk.bold(dot)} ${chalk.bold(report.label)}`);
+  if (report.action) con.log(chalk.dim(`    ${report.action}`));
 }
 
-function formatUptime(sec: number): string {
-  if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  return `${h}h ${m}m`;
+function readinessFor(
+  report: StatusReport,
+): "recovering" | "ready" | "degraded" | "stopping" {
+  if (report.phase === "stopping") return "stopping";
+  if (report.status === "running" && report.phase === "running") return "ready";
+  if (report.status === "running-unhealthy") return "degraded";
+  return "recovering";
 }

@@ -32,6 +32,7 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "stream-spool-reclaim",
   "conversation-transfer",
   "authority-checkpoint",
+  "managed-service-reconcile",
 ] as const;
 
 export type StorageMaintenanceKind =
@@ -53,6 +54,7 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "stream-spool-reclaim": "executor-data-plane",
   "conversation-transfer": "conversation-transfer-owner",
   "authority-checkpoint": "authority-checkpoint-owner",
+  "managed-service-reconcile": "managed-service-owner",
 } as const satisfies Readonly<
   Record<StorageMaintenanceKind, string>
 >;
@@ -486,6 +488,8 @@ const STORAGE_STEP_BUDGETS: Readonly<
   "conversation-transfer": budget(16 * MIB, 0, 32 * MIB, 32 * MIB, 256),
   // authority checkpoint = one bounded log/artifact page or one durable target step.
   "authority-checkpoint": budget(16 * MIB, 16 * MIB, 16 * MIB, 16 * MIB, 256),
+  // managed service reconciliation writes one bounded local service definition.
+  "managed-service-reconcile": budget(4 * MIB, 4 * MIB, 4 * MIB, 4 * MIB, 64),
 };
 
 export function storageMaintenanceRequest(

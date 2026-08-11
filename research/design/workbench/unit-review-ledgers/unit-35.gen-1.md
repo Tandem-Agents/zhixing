@@ -11,9 +11,9 @@
 
 ## 当前状态
 
-- **当前状态**:U35-07（P0/中）与 U35-08（P2/小）已在同一冻结指纹上完成生产实现、最小必要验证、专项功能审查与四路冷启动对抗，均为已验证；U35-01～U35-06 的既有已验证结论继续复用，未进入全单元终审或单元提交验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:否（本轮 65 个非工作台功能交付路径已冻结用于 U35-07～U35-08 修复后专项复核，不代表全单元冻结）
+- **当前状态**:第 35 单元已封版。U35-01～U35-08 均为“已验证”，P0/P1 与非阻断问题列表为空；同一全量冻结指纹已完成两轮零新增冻结终审、独立功能审查和单元提交验证
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（第 35 单元完整交付已冻结；任何功能交付物修改都会使终审、独立功能审查与单元提交验证结论失效）
 - **交付物文件集**:以第 34 单元封版代码提交 `972f363e` 为基线，当前 Unit 35 功能交付为 65 个非工作台路径：core 10、mesh 11、CLI 38、providers 1、server golden 1、S7 2、架构 2；工作台文件与同期 Unit 34 历史归档不参与功能指纹
 - **当前交付物指纹**:`a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35`（U35-07～U35-08 修复后专项冻结；65 个非工作台功能路径按 `path<TAB>file-sha256` 排序，以 LF 连接并保留末尾 LF 后再取 SHA-256）
 - **架构来源**:`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md`、`research/design/modules/distributed-runtime/s2-security-supply-chain-review.md`，以及已定稿开发清单 D35-01～D35-09
@@ -22,7 +22,7 @@
 
 - **功能范围**:仅支持值班设备永久丢失后，由另一台 active anchor-role 设备基于用户明确选择的完整 checkpoint 副本和无回显恢复包执行 source-less 恢复；交付恢复候选与现场验证、no-rollback baseline、私有完整导入、root-signed commit/abort、原子 composite authority 安装、旧安全域 fencing、恢复根与凭据生命周期、pending-reenroll/fresh pairing、公开恢复旅程及两生产根 exact-set/必要证据
 - **架构不变量**:恢复包、current verified full checkpoint、signed trust/current-authority evidence、本地 `AuthorityCommitLog`/私有 `FileArtifactStore`、target-wide candidate journal、installed generation/current-owner 与 credential exposure authority 是既有唯一事实源；不可回滚 commit 前必须完成真实 readiness 与 authenticated terminal 排序，commit 后旧 issuer/epoch/route/binding 永久拒绝；秘密、环境事实、workspace 原始路径和设备缓存不得进入恢复 authority
-- **验收条件**:U35-01～U35-06 均达到“已验证”；P0/P1 清零；no-rollback、真实 readiness、pre-commit cancel/stop、live/startup handoff、credential rotation、distinct co-signer 在两生产根、故障恢复与必要 S7/直接证据上闭合
+- **验收条件**:U35-01～U35-08 均达到“已验证”；P0/P1 清零；同一冻结指纹完成两轮冻结终审、独立功能审查与单元提交验证；no-rollback、真实 readiness、candidate/phase 前滚、artifact retention、pre-commit cancel/stop、live/startup handoff、credential rotation、distinct co-signer 与 exact transfer-key cleanup 在两生产根、故障恢复及必要 S7/直接证据上闭合
 - **必要上下游**:上游只消费第 33 单元完整可恢复 checkpoint、恢复根激活与 retention 合同，以及第 34 单元 composite authority、installed-generation/current-owner、target-wide candidate、私有 staging、storage governor 和 post-install closure；下游第 36～38 单元能力不进入本单元
 - **明确不属于本单元**:自动 failover、quorum/witness、自动升主、持续或全局同步、恢复应用、业务数据恢复向导、多目标/云备份、通用 transfer/registry/lifecycle/事务/outbox/事件总线；第 36 单元托管服务与角色自恢复、第 37 单元停机/移除/卸载、第 38 单元升级发布；单设备原地重置、issuer 与恢复包同时丢失后的绕过；监控、诊断、benchmark 与信息采集
 
@@ -48,7 +48,7 @@
 | -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
 | reachable-peer evidence / `RecoveryBaseline` | 本机 signed trust、认证 known-peer inventory 与每个 peer 的 exact signed suffix | candidate verified transaction 冻结 cut/evidence/baseline digest | peer 丢响应、冲突、新成员 suffix、旧 root/issuer/epoch、重启 | evidence mesh service/collector、baseline selector、candidate/import/commit | attempt 内 cut 有限；无持续同步；exact replay 复用同 digest | 通过 |
 | production readiness / `ReadyProof` | production snapshot builder、SecretStore、candidate 私有 issuer key 与 durable reservation | install 前在同一 coordinator 内 exact revalidate | proof expiry、各 revision 漂移、响应丢失、重启 | planned/disaster producer、target reserve/commit、runtime admission | snapshot/revision exact-set 有限；reservation 仅至 install 或 authenticated terminal | 通过 |
-| candidate/phase lifecycle / authenticated terminal | scoped signal、target-wide candidate transaction、per-transfer journal、verified/imported事实、install-decided 与 authority installation | `recordVerified` 冻结验证事实；`install-decided` 与 signed abort 在同 candidate transaction 互斥；authority exact read-back、active key 与 private committed 后才写 target-wide terminal | verified/imported 各 sync 窗口、proof/key 异常、prepare/abort/commit 竞争、安装效果或响应丢失、后继 generation 与连续重启 | command、candidate/per-transfer replay、private store/SecretStore、authority installer、startup completion 与两生产根 | 固定 range buffer/网络零 permit继续成立；verified/imported/decision exact replay；terminal 前 claim 唯一占有，历史 terminal 零 authority 写；超限候选事实与 pre-import key cleanup 尚未闭合 | 有问题:U35-07、U35-08 |
+| candidate/phase lifecycle / authenticated terminal | scoped signal、target-wide candidate transaction、per-transfer journal、artifact-backed verified/imported/install-decided、authority installation 与 exact transfer key | `recordVerified` 冻结验证事实；`install-decided` 与 signed abort 在同 candidate transaction 互斥；authority exact read-back、active key 与 private committed 后才写 target-wide terminal | 32 KiB 边界、嵌套引用 GC、verified/imported 各 sync 窗口、proof/key 异常、creator/abort、prepare/abort/commit 竞争、安装效果或响应丢失、后继 generation 与连续重启 | command、candidate/per-transfer replay、candidate artifact store/retention、private store/SecretStore、authority installer、startup completion 与两生产根 | 固定 range buffer/网络零 permit；payload 与嵌套引用有界 hydration；verified/imported/decision exact replay；terminal 前 claim 唯一占有，abort 后 exact key 收束，历史 terminal 零 authority 写 | 通过 |
 | disaster installation / current generation receipt | target `AuthorityCommitLog` 中 installation 与 `disaster-post-install-completed` receipt | 三组 consumer、六类 pending read-back 全等后同 log 写 receipt | trust watcher 首个 await、participant/consumer 切点、响应丢失、连续重启 | DR target/CLI、bootstrap、两 current-anchor profile、current-owner surface | 固定 participant/pending exact-set；receipt exact replay；失败 gate 保持关闭 | 通过 |
 | credential rotation publication | credential exposure authority transaction 与同一 SecretStore 回读 | service-verified active 新 binding 与旧 compromised→rotated 单 envelope 发布 | provider/channel/MCP 验真、readiness、publish 效果/响应丢失 | editor/save、startup adapters、route guard | 当前 binding exact-set；requestId/revision 幂等；无第三方自动轮换 | 通过 |
 | distinct active reset approval | current signed trust 与唯一既有本机 device key | 只读验签后生成 distinct-active approval；issuer 在 current generation 唯一消费 | issuer/pending/revoked、旧 chain/epoch、错签名、输出丢失 | approve-reset CLI、SecretStore/trust store、reset aggregator | 零 authority 写与零 key 创建；同代际 approval 可替代，无 durable outbox | 通过 |
@@ -63,6 +63,15 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R35-01 | source-less inventory、恢复包、reachable-peer evidence 与 no-rollback baseline | core strict recovery DTO；mesh trust/checkpoint；CLI inventory、trust-evidence、command/authority；directory/paired target；IR35-01～IR35-09 与直接测试 | 65 路径规范化 SHA-256 `a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35` | inventory/package/trust evidence、baseline selector、source-less gate、checkpoint validator 或对应测试变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19独立重造stale local/newer or conflicting peer、cut丢响应、旧root/issuer/epoch、错包和重启，candidate claim前均fail-closed，无回滚。 |
+| R35-02 | candidate artifact root、嵌套 retention、私有导入、CAS 与 composite authority base | core commit-log/artifact-retention/store；CLI candidate/target/private journal/authority installer；IR35-05、IR35-08～IR35-12、IR35-31 与 authority-storage/target测试 | 同上 | candidate payload/ref、registered-root classifier、hydration、private import/promotion、base publication 或测试变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19重造32 KiB边界、put/append窗口、缺错篡改ref、terminal后GC、嵌套ref与publish失败，只产生孤立可GC对象或原决定exact replay。 |
+| R35-03 | production readiness、transfer key、签名身份与单 envelope 安全域发布 | core identity/protocol；mesh ReadyProof/key/trust/exposure；CLI readiness、target commit、installation；IR35-13～IR35-14、IR35-19 | 同上 | ReadyProof revision/reservation、key slot、签名域、installation envelope/exposure 或直接消费者变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19重造proof expiry/revision漂移、SecretStore/key缺失错绑、错签名与安装响应丢失，decision前可abort、decision后仅按冻结输入前滚。 |
+| R35-04 | candidate/per-transfer phase、abort/commit 单飞、exact replay 与 terminal cleanup | CLI candidate、target-wide/per-transfer journal、target/startup completion、SecretStore；IR35-15、IR35-29～IR35-32；target/S7测试 | 同上 | phase/terminal reducer、claim release、creator/abort、cleanup、startup replay 或故障测试变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19从claimed/verified/imported/decision/authority/private/terminal逐状态重造abort/commit与creator两序、错identity和连续重启，认证决定恰一且claim/key均唯一收敛。 |
+| R35-05 | installed generation、post-install consumer、current-owner fencing 与旧设备隔离 | CLI installation/bootstrap/assembly/control/conversation/delivery、AuthorityCatalog 六类 pending；IR35-16～IR35-18 与 installation/assembly/S7测试 | 同上 | installation receipt、participant/consumer exact-set、current-owner router、tombstone、runtime gate 或两生产根变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19重造participant/consumer/六类pending各效果与响应窗口、旧epoch迟到写、live/startup和再次重启，receipt前gate不开放、receipt后只认当前generation。 |
+| R35-06 | credential exposure/rotation、恢复根生命周期、domain reset 与 pending-reenroll | CLI credential authority/publication、backup/root lifecycle、pair/control plane；mesh trust/exposure；providers loader；IR35-20～IR35-21、IR35-25～IR35-28 | 同上 | binding guard/publication、root plan、approval context、trust reducer、reenroll/pairing 或测试变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19重造三类binding验真/回读失败、rotate/invalidate丢响应、issuer/pending/revoked co-signer和旧chain/epoch，失败不发布或绕过且其他binding隔离。 |
+| R35-07 | 资源与物理 I/O、取消/stop、topology、公开恢复旅程与最小权限 | CLI command/context/adapters/public errors、mesh chunk/child bridge/targets、storage governor；IR35-22～IR35-24、IR35-33 | 同上 | signal/permit/chunk、physical identity、owner/receiver exact-set、公开 DTO/错误或产品边界变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19重造容量/磁盘、网络挂起、stop、root替换、TTY/非TTY重名与owner错配，permit/副作用/公开错误均停在有限边界。 |
+| R35-08 | 状态枚举、严格关联、分层/兼容、S7/golden、验收与后继边界 | core/mesh/CLI contracts与exports、server registry golden、S7 runner/test、架构/规格、全部直接证据；IR35-30、IR35-32、IR35-34～IR35-38 | 同上 | wire/枚举行、package/export、registry/S7、交付文件集、权威来源或 Unit36～38 边界变化 | 通过 | 2/2 | V35-18核对完整链；第二轮V35-19逐枚举行重造未知/错关联、S7/registry漂移、导出/依赖倒置与后继能力混入，strict decoder、有限gate及边界对账均拒绝。 |
+| R35-X | 跨项组合：baseline/readiness × candidate/artifact/terminal × install/current-owner × credential/root/资源 | R35-01～R35-08 当前输入与结论，U35-01～U35-08、迟发现教训及上下游边界 | 按 R35-01～R35-08 编号、指纹与结论排序汇总；当前功能指纹同上 | 任一 R35 项边界、输入、状态或结论变化，或出现新生产事实/反证 | 通过 | 2/2 | V35-18核对组合闭环；第二轮V35-19交叉重造peer前进+readiness漂移+超限payload+abort/creator+install丢响应+consumer失败，未形成旧安全域、双owner、悬空claim/key或公开半态。 |
 
 ## 问题列表
 
@@ -307,6 +316,9 @@
 
 | 编号 | 对应问题与先前通过轮次 | 遗漏机制 | 后续必做的检测动作与适用范围 | 应用记录（轮次:证据） |
 | ---- | ---------------------- | -------- | ---------------------------- | --------------------- |
+| L35-01 | U35-03；原 cancel/terminal 专项通过后同根重开 | 只枚举取消分支，没有把正常 verified→imported 与 install decision→authority/private→terminal 的每个耐久写和远端效果切开，因而漏掉重复生产 verified 与过早释放 target-wide claim。 | 对 candidate/phase 状态机逐格列出“本端耐久决定→下一外部效果”切点，检查既有事实是否先被 exact replay、claim 是否只在全部安装回读后释放；适用于全部双端恢复/迁移 reducer。 | 第一轮V35-18逐格核对；第二轮V35-19从每个耐久写重造效果/响应丢失与连续重启，零新增。 |
+| L35-02 | U35-07；U35-03 专项通过后新增 | 把逻辑上无界的 verified/decision payload直接当作有 32 KiB 上限的 authority record，修复设计初期又未同时检查外置 payload 的嵌套 ArtifactRef retention。 | 凡无界逻辑 payload 写入有界日志，必须对账物理上限；外置后从注册 root 穿透 payload 枚举嵌套引用、GC、strict hydration与锁边界。 | 第一轮V35-18核对闭包；第二轮V35-19重造上下界、孤立put、terminal后GC与缺错篡改ref，零新增。 |
+| L35-03 | U35-08；abort cleanup 曾判闭合后新增 | 只检查 terminal owner 的清理动作，未把与 terminal 并发且位于事务外的 key creator 作为对端，漏掉“abort查空后creator晚到”。 | 对 terminal cleanup 枚举 owner×creator 两序及效果/响应丢失；creator必须保留 exact identity、写后复核 terminal并用 compare-delete补偿。适用于事务外资源创建。 | 第一轮V35-18核对两序；第二轮V35-19重造abort查空、creator晚到、slot替换、响应丢失与重启，零新增。 |
 
 ## 验证计划与证据账本
 
@@ -330,13 +342,18 @@
 | V35-14 | candidate/retention/key-cleanup结构门禁与派生资产 | `pnpm s7:lint` | S7 runner/test、retained projection version、两生产根descriptor与registry golden | 派生资产预检 / 低 / 73.2秒 | 18/18与registry golden通过；mutation拒绝inline回退、漏registered root、v4→v3、锁内hydration及creator/abort顺序漂移 | 专项冻结指纹 `a20589ca…c35` | 有效 |
 | V35-15 | 当前源码与跨包导出可构建 | `pnpm build` | 当前workspace源码、package graph与未变lockfile | 开发/修复必要构建 / 高 / 299.7秒 | 17/18 workspace projects scope全部成功；作为当前输入唯一workspace build证据 | 专项冻结指纹 `a20589ca…c35` | 有效 |
 | V35-16 | U35-07/U35-08固定矩阵、四路对抗、反证与范围边界 | 65路径规范化SHA-256 + F35-21～F35-30/C35-C31～C35-C40只读重建 | 全部非工作台功能路径、权威合同、生产调用图与V35-11～V35-15 | 专项功能复核 / 中 | 指纹`a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35`；四路通过，十项反证耐久处置且无Unit36～38扩面 | 同值 | 有效 |
+| V35-17 | 全单元冻结准备：文件集、派生产物、精确验证计划与同输入证据有效性 | 基线 `972f363e`→HEAD 的非工作台路径正反向归类、LF规范化指纹复算、lockfile/schema/S7/build输入核对 | 65个非工作台功能路径；工作台排除 | 冻结准备 / 只读低成本 | 65路径全部归入7组派生闭包；lockfile/schema无变化；指纹复算与专项冻结值全等，V35-01～V35-16按失效闭包继续有效 | `a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35` | 有效 |
+| V35-18 | 第一轮冻结终审：需求、架构、完整功能链、状态与回归 | 四份权威来源→R35-01～R35-08→65路径/38项独立清单双向对账；执行L35-01～L35-03；最后推演R35-X | 同一65路径冻结输入及U35-01～U35-08、直接证据 | 冻结终审第一轮 / 只读深审 | 矩阵完整，0个新增问题；R35-01～R35-X均取得第1次有效独立深审，三条迟发现检测动作无新反证 | `a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35` | 有效 |
+| V35-19 | 第二轮冻结终审：并发、崩溃、安全、资源上界、异常终态与测试盲区 | 不复用第一轮判断，按每个耐久写→外部效果切点重造peer/readiness/ref/GC/phase/key/install/consumer/credential/stop反例，再推演R35-X | 同一65路径冻结输入、第一轮事实与直接证据 | 冻结终审第二轮 / 只读深审 | 矩阵完整，0个新增问题；R35-01～R35-X均达到2/2，三条迟发现检测动作再次执行无反证 | `a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35` | 有效 |
+| V35-20 | 独立功能审查覆盖全部来源、功能链、交付路径、失效机制与范围边界 | `unit-submit-review.md` IR35-01～IR35-38及两类问题表；按IF35-01～IF35-X归并但不复用终审判断 | 同一65路径冻结功能输入；工作台证据不参与功能指纹 | 独立功能审查 / 只读 | 38/38 `[x]`，0 `[ ]/[!]/[~]`；P0/P1、非阻断及已删除待转记录均为空，六个独立风险区全部已覆盖 | `a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35` | 有效 |
+| V35-21 | 单元提交验证：派生资产、必要构建/直接证据复用、差异卫生、交付闭包与指纹一致 | 复用同输入V35-01～V35-16，尤其最终S7 18/18+golden、target 9/9、registered-root 1/1与workspace build；补`git diff --check`、状态门禁、65路径/指纹及功能工作区核对 | 当前非工作台源码、导出/构建配置、直接测试、S7/golden；工作台排除 | 单元提交验证 / 无重复build、包测或模块回归 | 38/38独立项、8/8问题状态、9/9复用项2/2、6/6风险区均全等；功能工作区/暂存区零漂移，diff hygiene、65路径闭包与指纹一致通过 | `a20589ca2d358f80e5f51f47b5d6589a5cb86dc77429ee7c9bf3338039e91c35` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0        | `a20589ca…c35` | 通过；V35-18，R35-01～R35-X均1/2 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0        | `a20589ca…c35` | 通过；V35-19，R35-01～R35-X均2/2 |
 
 ## 独立审查覆盖表
 
@@ -344,5 +361,11 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF35-01 | no-rollback trust evidence、真实 readiness、签名身份与原子安全域安装失效 | IR35-01～IR35-04、IR35-07～IR35-09、IR35-13～IR35-14、IR35-19；真实local/peer trust、ReadyProof/key/SecretStore、authority install；`a20589ca…c35` | 已覆盖 | V35-20：38项独立审查中本机落后/peer前进冲突、revision/expiry漂移、错root/issuer/key及单envelope发布均二元落定，无可达回滚或不可服务提交。 | trust/baseline/readiness/key/签名域、installation envelope或对应生产入口变化。 |
+| IF35-02 | candidate容量表示、artifact/嵌套retention、私有导入与composite base失效 | IR35-05、IR35-08～IR35-12、IR35-31～IR35-32；candidate log/artifactStore、registered-root classifier、private store/CAS/installer；`a20589ca…c35` | 已覆盖 | V35-20：32 KiB上下界、root/嵌套ref、GC、strict hydration、非空retained与发布切点全部有唯一事实与零副作用边界，无问题。 | candidate payload/ref、retention版本/root、hydration、private import/CAS或base consumer变化。 |
+| IF35-03 | candidate/phase竞争、authenticated terminal、exact-key cleanup与连续恢复失效 | IR35-10、IR35-15、IR35-29～IR35-32；candidate/per-transfer/target-wide journal、SecretStore、startup completion与真实故障测试；`a20589ca…c35` | 已覆盖 | V35-20：verified/imported/decision/authority/private/terminal、abort/commit及abort/creator双序均exact replay；claim/key不早释、不误删且连续重启唯一收敛。 | reducer/decision/claim、key creator/delete、cleanup/startup或故障切点变化。 |
+| IF35-04 | installed-generation/current-owner、consumer/pending、credential/root/trust生命周期失效 | IR35-16～IR35-21、IR35-25～IR35-28；两current-anchor profile、三组consumer、六类pending、rotation/root/reset/reenroll；`a20589ca…c35` | 已覆盖 | V35-20：公开gate只在receipt后开放；旧issuer/epoch永久拒绝，三类binding轮换、root rotate/invalidate、distinct co-signer及pending-reenroll均无权限旁路或半态。 | installation receipt/generation、owner router、binding guard/publication、root/trust reducer或pairing变化。 |
+| IF35-05 | 资源/物理路径/stop、安全隔离、用户旅程、装配证据与范围价值失效 | IR35-06、IR35-22～IR35-24、IR35-33～IR35-38；directory/paired target、governor/signal、CLI/server DTO、S7/golden、65路径与上下游边界；`a20589ca…c35` | 已覆盖 | V35-20：容量/磁盘/网络/stop、no-follow身份、owner/receiver exact-set、TTY/非TTY选择、raw ID/path/error隔离与Unit36～38排除均有有限落点，零越界。 | I/O/permit/signal、root handle、topology/DTO/registry/S7、文件集或单元边界变化。 |
+| IF35-X | 跨区组合：stale baseline × late readiness × oversize payload × abort/creator × install/consumer failure | IF35-01～IF35-05当前输入与结论、U35-01～U35-08、L35-01～L35-03；`a20589ca…c35` | 已覆盖 | V35-20：按正常、边界、故障、恢复和对抗路径组合复核，无旧安全域回滚、双candidate/owner、悬空artifact/key、公开半态或后继能力混入。 | 任一独立风险区失效、新生产事实、迟发现教训或问题/范围边界变化。 |
 
 <!-- registration-complete: unit-35.gen-1 -->

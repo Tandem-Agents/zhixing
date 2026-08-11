@@ -23,6 +23,16 @@ import type { SpawnOptions } from "node:child_process";
 /** Child 通过这个 env 变量识别自己——刻意不用 CLI flag 避免 commander 报 unknown option */
 export const DAEMON_CHILD_ENV_VAR = "ZHIXING_DAEMON_CHILD";
 
+export type HostProcessMode = "foreground" | "on-demand" | "managed";
+
+export function resolveHostProcessMode(
+  managed: boolean | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): HostProcessMode {
+  if (managed === true) return "managed";
+  return isDaemonChild(env) ? "on-demand" : "foreground";
+}
+
 /** 父进程试图 daemonize 但环境不支持（bundled binary / REPL / 无标准入口）时抛此错 */
 export class UnsupportedSelfExecError extends Error {
   constructor(message: string) {
