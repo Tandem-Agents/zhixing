@@ -9,6 +9,21 @@ export const DEVICE_LIFECYCLE_STREAM = "device-lifecycle";
 export type DeviceLifecycleKind = "stop" | "executor-removal" | "anchor-uninstall";
 export type StopStrategy = "immediate" | "drain" | "cancel";
 
+export type DeviceLifecyclePeerEffectKind =
+  | "preflight"
+  | "issuer-abort"
+  | "target-aborted"
+  | "target-ready"
+  | "issuer-revoked"
+  | "target-cleanup-ready"
+  | "issuer-terminal";
+
+export interface DeviceLifecyclePeerEffect {
+  readonly kind: DeviceLifecyclePeerEffectKind;
+  readonly digest: string;
+  readonly evidence: readonly DeviceLifecycleEvidenceRef[];
+}
+
 export interface DeviceLifecycleEvidenceRef {
   readonly kind:
     | "accepted-work"
@@ -37,6 +52,22 @@ export interface ExecutorRemovalDecision {
     readonly displayName: string;
     readonly state: "current" | "frozen" | "importing";
   }[];
+  readonly snapshotDigest?: string;
+  readonly ownerItems?: readonly {
+    readonly owner:
+      | "conversation"
+      | "intent"
+      | "final"
+      | "assignment"
+      | "remote"
+      | "channel"
+      | "scheduler"
+      | "delivery"
+      | "lease"
+      | "permit";
+    readonly id: string;
+    readonly revision: string;
+  }[];
   readonly acceptedWork: {
     readonly active: number;
     readonly pendingFinals: number;
@@ -55,12 +86,21 @@ export type StopHostGeneration =
       readonly serviceId: string;
       readonly definitionDigest: string;
       readonly instanceId: string;
+      readonly endpointLock?: StopEndpointLock;
     }
   | {
       readonly kind: "foreground";
       readonly processId: number;
       readonly startedAt: string;
+      readonly endpointLock?: StopEndpointLock;
     };
+
+export interface StopEndpointLock {
+  readonly pid: number;
+  readonly port: number;
+  readonly startTime: number | null;
+  readonly startedAt: string;
+}
 
 export interface StopLifecycleIdentity {
   readonly v: 1;
@@ -155,7 +195,14 @@ export interface UnsignedExecutorRemovalReceipt {
   readonly targetDeviceKeyGeneration: string;
   readonly acceptedIssuerDeviceId: string;
   readonly acceptedTrustHeadDigest: string;
-  readonly phase: "accepted" | "revocation-ready" | "revoked";
+  readonly phase:
+    | "accepted"
+    | "aborted"
+    | "revocation-ready"
+    | "revoked"
+    | "cleanup-ready"
+    | "removed"
+    | "lost";
   readonly evidenceDigest: string;
   readonly at: string;
 }
@@ -189,6 +236,12 @@ export type DeviceLifecycleRecord =
       readonly t: "aborted";
       readonly operationId: string;
       readonly abort: DeviceLifecycleAbort;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "peer-effect";
+      readonly operationId: string;
+      readonly effect: DeviceLifecyclePeerEffect;
     };
 
 export interface DeviceLifecycleOperation {
@@ -197,6 +250,7 @@ export interface DeviceLifecycleOperation {
   readonly phase: DeviceLifecyclePhase;
   readonly evidence: readonly DeviceLifecycleEvidenceRef[];
   readonly recordDigests: Readonly<Record<string, string>>;
+  readonly peerEffects: readonly DeviceLifecyclePeerEffect[];
   readonly abort?: DeviceLifecycleAbort;
 }
 
@@ -351,6 +405,8 @@ export function validateExecutorRemovalDecision(input: unknown): ExecutorRemoval
     "homeId",
     "mode",
     "operationId",
+    ...(value.ownerItems === undefined ? [] : ["ownerItems"]),
+    ...(value.snapshotDigest === undefined ? [] : ["snapshotDigest"]),
     "t",
     "targetDeviceId",
     "v",
@@ -397,11 +453,44 @@ export function validateExecutorRemovalDecision(input: unknown): ExecutorRemoval
   for (const [field, count] of Object.entries(acceptedWork)) {
     nonNegativeInteger(count, `Executor removal accepted work ${field}`);
   }
+  let ownerItems: readonly NonNullable<ExecutorRemovalDecision["ownerItems"]>[number][] | undefined;
+  if (value.ownerItems !== undefined) {
+    if (!Array.isArray(value.ownerItems) || value.ownerItems.length > 50_000) {
+      throw new TypeError("Executor removal owner items must be a bounded array");
+    }
+    const itemIds = new Set<string>();
+    ownerItems = Object.freeze(value.ownerItems.map((inputItem, index) => {
+      const item = cloneObject(inputItem, `Executor removal owner item ${index}`);
+      exact(item, ["id", "owner", "revision"], `Executor removal owner item ${index}`);
+      if (!new Set([
+        "conversation",
+        "intent",
+        "final",
+        "assignment",
+        "remote",
+        "channel",
+        "scheduler",
+        "delivery",
+        "lease",
+        "permit",
+      ]).has(item.owner as string)) {
+        throw new TypeError(`Executor removal owner item ${index} owner is invalid`);
+      }
+      identifier(item.id, `Executor removal owner item ${index} id`);
+      identifier(item.revision, `Executor removal owner item ${index} revision`);
+      const key = `${item.owner}:${item.id}`;
+      if (itemIds.has(key)) throw new TypeError("Executor removal owner items contain a duplicate");
+      itemIds.add(key);
+      return item as unknown as NonNullable<ExecutorRemovalDecision["ownerItems"]>[number];
+    }));
+  }
+  if (value.snapshotDigest !== undefined) digest(value.snapshotDigest, "Executor removal snapshot digest");
   time(value.decidedAt, "Executor removal decision decidedAt");
   return Object.freeze({
     ...value,
     conversations: Object.freeze(conversations),
     acceptedWork: Object.freeze(acceptedWork),
+    ...(ownerItems === undefined ? {} : { ownerItems }),
   }) as unknown as ExecutorRemovalDecision;
 }
 
@@ -448,6 +537,32 @@ export function validateDeviceLifecycleRecord(input: unknown): DeviceLifecycleRe
       abort: cloneObject(value.abort, "Device lifecycle abort") as unknown as DeviceLifecycleAbort,
     };
   }
+  if (value.t === "peer-effect") {
+    exact(value, ["effect", "operationId", "t", "v"], "Peer-effect lifecycle record");
+    identifier(value.operationId, "Peer-effect lifecycle operationId");
+    const effect = cloneObject(value.effect, "Lifecycle peer effect");
+    exact(effect, ["digest", "evidence", "kind"], "Lifecycle peer effect");
+    if (!new Set([
+      "preflight",
+      "issuer-abort",
+      "target-aborted",
+      "target-ready",
+      "issuer-revoked",
+      "target-cleanup-ready",
+      "issuer-terminal",
+    ]).has(effect.kind as string)) throw new TypeError("Lifecycle peer effect kind is invalid");
+    digest(effect.digest, "Lifecycle peer effect digest");
+    return {
+      v: 1,
+      t: "peer-effect",
+      operationId: value.operationId,
+      effect: {
+        kind: effect.kind as DeviceLifecyclePeerEffectKind,
+        digest: effect.digest,
+        evidence: validateEvidence(effect.evidence),
+      },
+    };
+  }
   throw new TypeError("Device lifecycle record type is invalid");
 }
 
@@ -473,11 +588,31 @@ export function reduceDeviceLifecycle(
       phase: "accepted",
       evidence: [],
       recordDigests: Object.freeze({ [key]: digest }),
+      peerEffects: Object.freeze([]),
     });
   }
   if (!current) throw new TypeError("Lifecycle operation must be accepted first");
   if (record.operationId !== current.identity.operationId) {
     throw new TypeError("Lifecycle record changes operation identity");
+  }
+  if (record.t === "peer-effect") {
+    const previous = [...current.peerEffects].reverse().find((item) => item.kind === record.effect.kind);
+    if (previous?.digest === record.effect.digest) return current;
+    if (
+      previous &&
+      !(record.effect.kind === "preflight" && current.phase === "accepted")
+    ) {
+      throw new TypeError(`Lifecycle peer-effect:${record.effect.kind} conflicts with replay`);
+    }
+    return Object.freeze({
+      ...current,
+      evidence: Object.freeze([...current.evidence, ...record.effect.evidence]),
+      peerEffects: Object.freeze([...current.peerEffects, record.effect]),
+      recordDigests: Object.freeze({
+        ...current.recordDigests,
+        [`peer-effect:${record.effect.kind}:${record.effect.digest}`]: digest,
+      }),
+    });
   }
   const key = record.t === "advanced" ? `phase:${record.phase}` : record.t;
   const existing = current.recordDigests[key];
@@ -599,19 +734,40 @@ function validateIdentity(input: unknown): DeviceLifecycleIdentity {
 function validateHost(input: unknown): StopHostGeneration {
   const value = cloneObject(input, "Stop host generation");
   if (value.kind === "managed") {
-    exact(value, ["definitionDigest", "instanceId", "kind", "serviceId"], "Managed stop host generation");
+    exact(value, value.endpointLock === undefined
+      ? ["definitionDigest", "instanceId", "kind", "serviceId"]
+      : ["definitionDigest", "endpointLock", "instanceId", "kind", "serviceId"], "Managed stop host generation");
     identifier(value.serviceId, "Stop serviceId");
     identifier(value.instanceId, "Stop instanceId");
     digest(value.definitionDigest, "Stop definition digest");
-    return value as unknown as StopHostGeneration;
+    return {
+      ...value,
+      ...(value.endpointLock === undefined ? {} : { endpointLock: validateStopEndpointLock(value.endpointLock) }),
+    } as unknown as StopHostGeneration;
   }
   if (value.kind === "foreground") {
-    exact(value, ["kind", "processId", "startedAt"], "Foreground stop host generation");
+    exact(value, value.endpointLock === undefined
+      ? ["kind", "processId", "startedAt"]
+      : ["endpointLock", "kind", "processId", "startedAt"], "Foreground stop host generation");
     positiveInteger(value.processId, "Stop processId");
     time(value.startedAt, "Stop startedAt");
-    return value as unknown as StopHostGeneration;
+    return {
+      ...value,
+      ...(value.endpointLock === undefined ? {} : { endpointLock: validateStopEndpointLock(value.endpointLock) }),
+    } as unknown as StopHostGeneration;
   }
   throw new TypeError("Stop host generation kind is invalid");
+}
+
+function validateStopEndpointLock(input: unknown): StopEndpointLock {
+  const value = cloneObject(input, "Stop endpoint lock");
+  exact(value, ["pid", "port", "startedAt", "startTime"], "Stop endpoint lock");
+  positiveInteger(value.pid, "Stop endpoint lock pid");
+  positiveInteger(value.port, "Stop endpoint lock port");
+  if (value.port > 65_535) throw new TypeError("Stop endpoint lock port is invalid");
+  if (value.startTime !== null) nonNegativeInteger(value.startTime, "Stop endpoint lock startTime");
+  time(value.startedAt, "Stop endpoint lock startedAt");
+  return value as unknown as StopEndpointLock;
 }
 
 function validateUninstallPath(input: unknown): AnchorUninstallPath {
@@ -677,7 +833,15 @@ function validateUnsignedRemovalReceipt(input: UnsignedExecutorRemovalReceipt): 
   ] as const) identifier(value[field], `Executor removal receipt ${field}`);
   digest(value.acceptedTrustHeadDigest, "Executor removal receipt accepted trust head digest");
   digest(value.evidenceDigest, "Executor removal receipt evidence digest");
-  if (!new Set(["accepted", "revocation-ready", "revoked"]).has(value.phase as string)) {
+  if (!new Set([
+    "accepted",
+    "aborted",
+    "revocation-ready",
+    "revoked",
+    "cleanup-ready",
+    "removed",
+    "lost",
+  ]).has(value.phase as string)) {
     throw new TypeError("Executor removal receipt phase is invalid");
   }
   time(value.at, "Executor removal receipt at");

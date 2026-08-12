@@ -350,7 +350,11 @@ describe("full authority recovery checkpoints", () => {
       fixture,
       new MemoryTarget("backup-dir:replacement", "filesystem:replacement"),
     );
-    expect(await changedTarget.status()).toEqual({ state: "not-configured", fullBackupReady: false });
+    expect(await changedTarget.status()).toEqual({
+      state: "not-configured",
+      fullBackupReady: false,
+      targetId: "backup-dir:replacement",
+    });
 
     const chainEvent = createSignedTrustEvent({
       current: fixture.projection,
@@ -364,7 +368,11 @@ describe("full authority recovery checkpoints", () => {
       trust: chainTrust,
       recipient: fixture.root.publicIdentity(),
     });
-    expect(await chainService.status()).toEqual({ state: "not-configured", fullBackupReady: false });
+    expect(await chainService.status()).toEqual({
+      state: "not-configured",
+      fullBackupReady: false,
+      targetId: "backup-dir:independent",
+    });
     const chainCheckpoint = await chainService.createAndReplicate({ request, createdAt: AT });
     expect(chainCheckpoint.envelope.checkpointId).not.toBe(first.envelope.checkpointId);
     await chainService.verify({ checkpointId: chainCheckpoint.envelope.checkpointId, recoveryRoot: fixture.root });
@@ -383,7 +391,11 @@ describe("full authority recovery checkpoints", () => {
       trust: rotatedTrust,
       recipient: rotatedRoot.publicIdentity(),
     });
-    expect(await rotatedService.status()).toEqual({ state: "not-configured", fullBackupReady: false });
+    expect(await rotatedService.status()).toEqual({
+      state: "not-configured",
+      fullBackupReady: false,
+      targetId: "backup-dir:independent",
+    });
     const rotated = await rotatedService.createAndReplicate({ request, createdAt: AT });
     expect(new Set([
       first.envelope.checkpointId,

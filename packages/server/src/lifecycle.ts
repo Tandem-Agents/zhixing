@@ -55,7 +55,10 @@ export interface RunServerOptions extends StartServerOptions {
   /** 进程锁文件路径覆盖 */
   lockPaths?: ProcessLockPaths;
   /** 写入 PID 发现文件的诊断元数据 */
-  processInfo?: Pick<AcquireLockOptions, "argv" | "host" | "kind" | "logPath" | "version">;
+  processInfo?: Pick<
+    AcquireLockOptions,
+    "argv" | "host" | "kind" | "logPath" | "startTime" | "startedAt" | "version"
+  >;
   /** 跳过进程锁（测试用） */
   skipProcessLock?: boolean;
   /** 跳过信号处理器注册（测试用——避免污染 vitest 进程信号处理器） */

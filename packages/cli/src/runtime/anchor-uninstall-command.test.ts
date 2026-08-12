@@ -11,6 +11,9 @@ const nonInteractive: AnchorUninstallIO = {
     throw new Error("unexpected interactive selection");
   },
   confirm: async () => false,
+  readRecoveryPackage: async () => {
+    throw new Error("unexpected recovery package input");
+  },
 };
 
 describe("anchor uninstall command projection", () => {

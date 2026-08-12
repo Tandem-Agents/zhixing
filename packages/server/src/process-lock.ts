@@ -71,6 +71,8 @@ export interface AcquireLockOptions extends ProcessLockPaths {
   argv?: string[];
   /** 启动时间；默认从平台读取（Linux /proc，macOS ps）*/
   startTime?: number | null;
+  /** 本次 host generation 的稳定墙钟身份；省略时才在写入点生成。 */
+  startedAt?: string;
   /** 测试注入 startTime 读取器 */
   resolveStartTimeFn?: (pid: number) => Promise<number | null>;
 }
@@ -106,7 +108,7 @@ export async function acquireLock(
     pid: ownPid,
     port,
     host: opts.host,
-    startedAt: new Date().toISOString(),
+    startedAt: opts.startedAt ?? new Date().toISOString(),
     startTime: ownStartTime,
     argv: opts.argv ?? [...process.argv],
     kind: opts.kind ?? "zhixing-server",

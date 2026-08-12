@@ -870,7 +870,13 @@ async function runManagedServiceCommand(
 }
 
 function definitionDigest(spec: ManagedServiceSpec): string {
-  return createHash("sha256").update(managedServiceDefinitionBytes(spec)).digest("hex");
+  return managedServiceDefinitionDigest(spec).slice("sha256:".length);
+}
+
+export function managedServiceDefinitionDigest(spec: ManagedServiceSpec): string {
+  return `sha256:${createHash("sha256")
+    .update(managedServiceDefinitionBytes(spec))
+    .digest("hex")}`;
 }
 
 export function managedServiceDefinitionBytes(spec: ManagedServiceSpec): Buffer {

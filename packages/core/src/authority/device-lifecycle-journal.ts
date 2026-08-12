@@ -8,6 +8,7 @@ import {
   type DeviceLifecycleEvidenceRef,
   type DeviceLifecycleIdentity,
   type DeviceLifecycleOperation,
+  type DeviceLifecyclePeerEffect,
   type DeviceLifecyclePhase,
   type DeviceLifecycleProjection,
   type DeviceLifecycleRecord,
@@ -60,6 +61,18 @@ export class DeviceLifecycleJournal {
     return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "aborted", operationId, abort }));
   }
 
+  async peerEffect(
+    operationId: string,
+    effect: DeviceLifecyclePeerEffect,
+  ): Promise<DeviceLifecycleOperation> {
+    return this.#append(validateDeviceLifecycleRecord({
+      v: 1,
+      t: "peer-effect",
+      operationId,
+      effect,
+    }));
+  }
+
   async terminal(
     operationId: string,
     outcome: "stopped" | "removed" | "retired",
@@ -98,6 +111,8 @@ export class DeviceLifecycleJournal {
         stream: DEVICE_LIFECYCLE_STREAM,
         candidateReferences: record.t === "advanced" || record.t === "terminal"
           ? record.evidence.flatMap((item) => item.artifact ? [item.artifact] : [])
+          : record.t === "peer-effect"
+            ? record.effect.evidence.flatMap((item) => item.artifact ? [item.artifact] : [])
           : [],
       },
     );

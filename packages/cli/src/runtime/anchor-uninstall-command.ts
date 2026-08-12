@@ -9,6 +9,8 @@ import {
   type AnchorUninstallPreflight,
   type AnchorUninstallState,
 } from "./rpc-management-facade.js";
+import { encodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
+import { readRecoveryPackageFromTty } from "../serve/recovery-package-input.js";
 
 export interface AnchorUninstallIO {
   readonly interactive: boolean;
@@ -17,6 +19,7 @@ export interface AnchorUninstallIO {
     | { readonly path: "recovery-backup" }
   >;
   confirm(message: string): Promise<boolean>;
+  readRecoveryPackage(): Promise<string>;
 }
 
 export async function uninstallCurrentDevice(input: {
@@ -40,6 +43,9 @@ export async function uninstallCurrentDevice(input: {
 
     const operationId = createOpaqueId("uninstall");
     const requestId = createOpaqueId("request");
+    const recoveryPackage = path.path === "recovery-backup"
+      ? await io.readRecoveryPackage()
+      : undefined;
     let state = path.path === "migration"
       ? await management.anchorUninstallBegin({
           path: "migration",
@@ -52,6 +58,7 @@ export async function uninstallCurrentDevice(input: {
           path: "recovery-backup",
           requestId,
           operationId,
+          recoveryPackage: recoveryPackage!,
         });
 
     if (state.phase === "backup-verified") {
@@ -63,6 +70,7 @@ export async function uninstallCurrentDevice(input: {
       state = await management.anchorUninstallContinue({
         operationId,
         confirmBackup: true,
+        recoveryPackage: recoveryPackage!,
       });
     }
     renderUninstallState(state);
@@ -158,6 +166,10 @@ function defaultUninstallIO(): AnchorUninstallIO {
     },
     async confirm(message) {
       return (await question(`${message} 输入“确认”继续：`)) === "确认";
+    },
+    async readRecoveryPackage() {
+      const decoded = await readRecoveryPackageFromTty();
+      return encodeRecoveryPackage(decoded.root);
     },
   };
 }

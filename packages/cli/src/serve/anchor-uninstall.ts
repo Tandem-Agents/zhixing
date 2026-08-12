@@ -21,6 +21,8 @@ import {
 } from "@zhixing/core/protocol";
 import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
 import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
+import type { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import { decodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
@@ -147,21 +149,21 @@ export class AnchorUninstallCoordinator {
   async beginRecoveryBackup(input: {
     readonly requestId: string;
     readonly operationId: string;
+    readonly recoveryPackage: string;
   }): Promise<AnchorUninstallPublicState> {
+    const decoded = decodeRecoveryPackage(input.recoveryPackage);
     await this.preflight();
     const owner = this.options.checkpointOwner;
     if (!owner) throw new Error("No recovery backup target is configured");
     const status = await owner.status();
-    if (
-      status.state !== "recoverable" ||
-      !status.fullBackupReady ||
-      !status.checkpointId ||
-      !status.targetId ||
-      status.upToLsn === undefined
-    ) {
-      throw new Error("A verified recovery backup is required before uninstalling this device");
-    }
+    if (!status.targetId) throw new Error("Recovery backup target identity is unavailable");
     const trust = await this.#assertCurrentAuthority();
+    const rootIdentity = decoded.root.publicIdentity();
+    const anchorEpoch = this.options.anchorEpoch();
+    if (
+      trust.recoveryRootPublicKey !== rootIdentity.rootPublicKey ||
+      trust.recoveryBackupPublicKey !== rootIdentity.backupPublicKey
+    ) throw new Error("Recovery package does not bind the current home recovery root");
     const identity = Object.freeze({
       v: 1,
       kind: "anchor-uninstall",
@@ -169,29 +171,37 @@ export class AnchorUninstallCoordinator {
       operationId: input.operationId,
       homeId: trust.homeId,
       currentDeviceId: this.options.currentDeviceId,
-      anchorEpoch: this.options.anchorEpoch(),
+      anchorEpoch,
       trustHeadDigest: trust.chainHead.eventDigest,
       path: Object.freeze({
         kind: "recovery-backup" as const,
         checkpointTargetId: status.targetId,
         checkpointGeneration: protocolDigest("AnchorUninstallCheckpointGeneration", 1, {
-          checkpointId: status.checkpointId,
+          homeId: trust.homeId,
+          anchorEpoch,
+          trustHeadDigest: trust.chainHead.eventDigest,
           targetId: status.targetId,
-          upToLsn: status.upToLsn,
+          rootKeyId: rootIdentity.rootKeyId,
+          recipientKeyId: rootIdentity.backupKeyId,
         }),
       }),
     }) satisfies AnchorUninstallLifecycleIdentity;
     await this.#journal.accept(identity);
-    return this.#driveRecovery(identity, false);
+    return this.#driveRecovery(identity, false, decoded.root);
   }
 
-  async confirmRecoveryBackup(operationId: string): Promise<AnchorUninstallPublicState> {
+  async confirmRecoveryBackup(
+    operationId: string,
+    recoveryPackage: string,
+  ): Promise<AnchorUninstallPublicState> {
     const operation = await this.#journal.state(operationId);
     if (!operation || operation.identity.kind !== "anchor-uninstall" ||
       operation.identity.path.kind !== "recovery-backup") {
       throw new Error("Recovery-backup uninstall operation is unknown");
     }
-    return this.#driveRecovery(operation.identity, true);
+    const decoded = decodeRecoveryPackage(recoveryPackage);
+    await this.#assertRecoveryRoot(operation.identity, decoded.root);
+    return this.#driveRecovery(operation.identity, true, decoded.root);
   }
 
   async abort(operationId: string): Promise<AnchorUninstallPublicState> {
@@ -224,13 +234,16 @@ export class AnchorUninstallCoordinator {
       if (operation.identity.kind !== "anchor-uninstall") continue;
       if (operation.identity.path.kind === "migration") {
         await this.#driveMigration(operation.identity);
-      } else if (
-        operation.phase !== "checkpoint-verified" &&
-        operation.phase !== "gate-frozen"
-      ) {
-        await this.#driveRecovery(operation.identity, true);
-      } else if (operation.phase === "gate-frozen") {
-        await this.#driveRecovery(operation.identity, false);
+      } else {
+        if (operation.phase === "accepted") {
+          await this.options.closeAdmission();
+          await this.#journal.advance(operation.identity.operationId, "gate-frozen", [{
+            kind: "accepted-work",
+            digest: protocolDigest("AnchorUninstallAdmission", 1, operation.identity),
+          }]);
+        } else if (operation.phase !== "terminal" && operation.phase !== "aborted") {
+          await this.options.closeAdmission();
+        }
       }
     }
   }
@@ -281,6 +294,7 @@ export class AnchorUninstallCoordinator {
   async #driveRecovery(
     identity: AnchorUninstallLifecycleIdentity,
     confirmed: boolean,
+    recoveryRoot: RecoveryRoot,
   ): Promise<AnchorUninstallPublicState> {
     if (identity.path.kind !== "recovery-backup") {
       throw new Error("Anchor uninstall path is not a recovery backup");
@@ -298,19 +312,17 @@ export class AnchorUninstallCoordinator {
     }
     if (operation.phase === "gate-frozen") {
       const checkpoint = await owner.force(`${identity.operationId}:pre-retirement`);
-      await this.#assertCheckpoint(checkpoint, path.checkpointTargetId);
+      const verification = await this.#assertCheckpoint(checkpoint, path.checkpointTargetId, recoveryRoot);
       operation = await this.#journal.advance(identity.operationId, "checkpoint-verified", [{
         kind: "checkpoint",
-        digest: checkpoint.envelope.digest,
+        digest: protocolDigest("RecoveryCheckpointVerification", 1, verification),
       }]);
     }
     if (operation.phase === "checkpoint-verified" && !confirmed) {
       return { phase: "backup-verified", nextAction: "confirm-backup" };
     }
-    let retirementLsn = operation.evidence
-      .filter((item) => item.kind === "credential-exposure")
-      .length > 0
-      ? (await this.options.log.checkpoint()).lsn
+    let retirementLsn = operation.phase === "retirement-decided"
+      ? await this.#retirementDecisionLsn(identity.operationId)
       : undefined;
     if (operation.phase === "checkpoint-verified") {
       retirementLsn = await this.#decideRetirement(identity);
@@ -318,13 +330,13 @@ export class AnchorUninstallCoordinator {
     }
     if (operation.phase === "retirement-decided") {
       const checkpoint = await owner.force(`${identity.operationId}:final-retirement`);
-      await this.#assertCheckpoint(checkpoint, path.checkpointTargetId);
+      const verification = await this.#assertCheckpoint(checkpoint, path.checkpointTargetId, recoveryRoot);
       if (retirementLsn !== undefined && checkpoint.envelope.manifest.upToLsn < retirementLsn) {
         throw new Error("Final recovery backup does not contain the retirement decision");
       }
       operation = await this.#journal.advance(identity.operationId, "final-checkpoint-verified", [{
         kind: "checkpoint",
-        digest: checkpoint.envelope.digest,
+        digest: protocolDigest("RecoveryCheckpointVerification", 1, verification),
       }]);
     }
     if (operation.phase === "final-checkpoint-verified") {
@@ -400,7 +412,7 @@ export class AnchorUninstallCoordinator {
             ...compromised.map((body) => ({ stream: "exposure", body })),
             { stream: "device-lifecycle", body: lifecycle },
           ],
-          value: context.nextLsn,
+          value: context.nextLsn + compromised.length,
         };
       },
       { streams: ["trust", "exposure", "device-lifecycle"] },
@@ -408,17 +420,57 @@ export class AnchorUninstallCoordinator {
     return result.value;
   }
 
-  async #assertCheckpoint(checkpoint: CheckpointPackage, targetId: string): Promise<void> {
-    const status = await this.options.checkpointOwner!.status();
+  async #assertCheckpoint(
+    checkpoint: CheckpointPackage,
+    targetId: string,
+    recoveryRoot: RecoveryRoot,
+  ) {
+    const verification = await this.options.checkpointOwner!.verify(
+      checkpoint.envelope.checkpointId,
+      recoveryRoot,
+    );
     if (
-      status.state !== "recoverable" ||
-      !status.fullBackupReady ||
-      status.targetId !== targetId ||
-      status.checkpointId !== checkpoint.envelope.checkpointId ||
-      status.upToLsn !== checkpoint.envelope.manifest.upToLsn
+      verification.targetId !== targetId ||
+      verification.checkpointId !== checkpoint.envelope.checkpointId ||
+      verification.envelopeDigest !== checkpoint.envelope.digest
     ) {
-      throw new Error("Recovery checkpoint could not be read back from the frozen target");
+      throw new Error("Recovery checkpoint verification does not bind the frozen target");
     }
+    return verification;
+  }
+
+  async #assertRecoveryRoot(
+    identity: AnchorUninstallLifecycleIdentity,
+    recoveryRoot: RecoveryRoot,
+  ): Promise<void> {
+    if (identity.path.kind !== "recovery-backup") throw new Error("Anchor uninstall path is not recovery backup");
+    const trust = await this.#assertCurrentAuthority();
+    const rootIdentity = recoveryRoot.publicIdentity();
+    const generation = protocolDigest("AnchorUninstallCheckpointGeneration", 1, {
+      homeId: trust.homeId,
+      anchorEpoch: identity.anchorEpoch,
+      trustHeadDigest: identity.trustHeadDigest,
+      targetId: identity.path.checkpointTargetId,
+      rootKeyId: rootIdentity.rootKeyId,
+      recipientKeyId: rootIdentity.backupKeyId,
+    });
+    if (
+      generation !== identity.path.checkpointGeneration ||
+      trust.recoveryRootPublicKey !== rootIdentity.rootPublicKey ||
+      trust.recoveryBackupPublicKey !== rootIdentity.backupPublicKey
+    ) throw new Error("Recovery package changes the accepted uninstall generation");
+  }
+
+  async #retirementDecisionLsn(operationId: string): Promise<number> {
+    const records = await this.options.log.readStream<unknown>("device-lifecycle");
+    const decision = records.find((entry) => {
+      const record = validateDeviceLifecycleRecord(entry.body);
+      return record.t === "advanced" &&
+        record.operationId === operationId &&
+        record.phase === "retirement-decided";
+    });
+    if (!decision) throw new Error("Anchor retirement decision LSN is missing");
+    return decision.lsn;
   }
 
   async #assertCurrentAuthority(): Promise<ReturnType<typeof replayTrustChain>> {

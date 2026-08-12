@@ -175,22 +175,22 @@
 #### 目标模式：审查并收敛问题列表
 
 ```
-目标：只收敛第 36 单元正式问题列表中同根重开的 U36-14 一个 P1/小、U36-15 一个 P1/中和 U36-05 一个 P2/小，使三项真正命中 Windows supervisor 动态 enabled 状态与 immutable definition identity 分离、reconciler 全入口 current-stop 的 exact 安全授权，以及 pure-surface poll attempt 与连接生命周期的 O(1) 所有权，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U36-01～U36-04、U36-06～U36-13、U36-16 与 EX36-01～EX36-05 的既有结论直接复用，U36-05 已验证的断线恢复、U36-14 已验证的 locale/numeric state/current SID/typed exact-set、U36-15 已验证的配置主链 drain/future-disable/exact turnover 不得恢复或扩面，价值裁决否定的通用 lifecycle/reconnect、状态 DTO、新 runner 与第 37～38 单元能力不得并入本单元。
+目标：只收敛第 37 单元正式问题列表中的 U37-01～U37-06，使 U37-01/U37-02 两个 P0/大、U37-03/U37-05 两个 P0/中和 U37-04/U37-06 两个 P2/小真正命中 stop accepted-work/exact-host 闭包、removal 跨端 abort/terminal 与历史重放、effect-free frozen decision、backup checkpoint 真解封验证、cleanup key-last/固定批次及公开 facade strict 输入的根因，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；第 30～36 单元已封版 owner/transfer/checkpoint/trust/exposure/supervisor 合同直接复用，价值裁决已删除的“跨根 requestId 必须相同”、已否定的通用 manifest、跨 home secret 误删、泛化 S7/新 runner 主张不得恢复，第 38 单元升级/回滚/发布能力及自动 failover、全局同步、恢复应用不得提前并入本单元。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 36 单元正式文件中的 U36-05、U36-14、U36-15、EX36-04～EX36-05，只依据三项问题最新的事实、价值裁决、方案、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 37 单元正式文件中的 U37-01～U37-06，只依据六项问题最新的事实、价值裁决、方案、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词完成条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 按 `U36-14 → U36-15 → U36-05` 从权威架构、规格和当前生产调用图重建事实链，核准 Windows COM projection 中动态 enabled 与 immutable definition 的唯一事实边界，canonical-home reconciler 六类 trigger、plan-error/drift 与 exact endpoint 安全停止授权，以及 surface active controller、poll attempt、connection close promise 的稳定 identity、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断当前描述命中根因还是局部表象。同根内容必须合并，独立根因不得互相遮蔽；历史修复与价值裁决未被新生产事实触发时不得恢复旧评级、旧方案或扩面。
-2. 穷尽直接变体：U36-14 覆盖 enabled/disabled、`Task.Enabled`/`Settings.Enabled` 一致与冲突、future-disable 效果/响应丢失、none/on-demand→managed、其余 definition drift 与连续重启；U36-15 覆盖六 trigger、plan load/error/drift、同/异 trigger、同 home/跨进程、四类 accepted work、old/new endpoint、future-enabled/current-running 四组合、效果/响应丢失与连续重驱；U36-05 覆盖单次/海量成功 poll、transient→success、fatal、owner 换代、close/dispose、notification drain 与历史补读。每格必须指出稳定 identity、唯一事实、效果排序、资源上界、零副作用边界、消费终态和直接验收；无法解释即继续修正根因。
-3. 以锁定范围内的最优架构审查方案：U36-14 只把 enabled 作为动态 supervisor state，从 immutable matcher 移除 true 常量且不放宽其余 strict exact-set；U36-15 只让 reconciler 全入口对 non-managed/不可判定 plan 执行 future-disable，current-stop 仅复用既有 graceful 或 exact stale endpoint/`expectedLock` 安全事实；U36-05 只让 existing `ActivePoll` controller 成为连接关闭唯一 signal，并收窄 helper 的可选 `connectionClosed` 输入。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增通用 system manager/lifecycle/reconnect、通知协议、公开状态 DTO/mapper、新 runner/test framework、监控、诊断、benchmark 或信息采集。发现缺口时直接修正对应原问题，使执行者无需实现猜测即可一次完成。
-4. 三项看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：Windows dynamic/immutable state 交界、reconciler 全入口 current-stop 权限与 accepted-work、surface poll/controller 资源上界与换代终态、生产体验/范围价值及历史裁决边界。各路必须抛开前轮结论，从当前合同和源码主动构造第 2 步反例，并核查 `U36-14↔U36-15`、`U36-15↔U36-05`、`U36-14↔U36-05` 以及三项与其余 U36、EX36-01～EX36-05、第 33～35 单元既有合同及第 37～38 单元边界的直接交界；发现真实反证则修正原记录并重新执行四路复审。
+1. 按 `U37-01 → U37-02 → U37-03 → U37-05 → U37-04 → U37-06` 从权威架构、规格和当前生产调用图重建事实链，核准 stop journal/work owner/supervisor generation，removal issuer/target receipt/phase/historical terminal，local owner frozen decision/ready，checkpoint force/replicate/verify，cleanup/key及 facade codec 的唯一事实源、稳定 identity、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断当前描述命中根因还是局部表象。同根内容必须合并，独立根因不得互相遮蔽；价值裁决未被新生产事实触发时不得恢复旧评级、旧方案或扩面。
+2. 穷尽直接变体：U37-01 覆盖三策略、三进程形态、F37-04全部适用owner、每phase、timeout/blocker/permit/manager、PID successor与连续重启；U37-02 覆盖两target根、accept/decide/abort/ready/revoke/terminal、在线转离线、lost、响应丢失、revoked后历史查询、迟到旧请求与连续重启；U37-03 覆盖空/非空conversation/intent/outbox/obligation/lease/permit、transfer/destroy、offline unknown、snapshot漂移及首个不可逆边界；U37-05 覆盖首个/final checkpoint、target/generation/decision LSN、复制/解封/verify各窗口、篡改与重启；U37-04覆盖大exact-set、registration/key删除窗口、错slot与批次；U37-06覆盖合法/unknown/缺失/错类型与旧peer。每格必须指出稳定 identity、唯一事实、效果排序、资源上界、零副作用边界、消费终态和直接验收；无法解释即继续修正根因。
+3. 以锁定范围内的最优架构审查方案：U37-01只组合既有owners/governor/supervisor形成exact stop闭包；U37-02只复用两根AuthorityCommitLog和认证mesh增加receipt约束的durable abort/terminal及窄历史只读查询；U37-03只组合既有owner投影并写入现有evidence/decision artifact；U37-05只接通现有checkpoint service与recovery-root真解封verify；U37-04只调整现有cleanup的key-last和固定批次；U37-06只复用现有strict decoder。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增第二journal/事实源、通用manifest/lifecycle/历史mesh/storage/secret框架、S7 registry、runner、监控、诊断、benchmark或信息采集。发现缺口时直接修正对应原问题，使执行者无需实现猜测即可一次完成。
+4. 六项看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：stop accepted-work/exact-host，removal跨端终态与frozen decision/cleanup，backup checkpoint真验证，公开合同/生产体验/范围价值及历史裁决边界。各路必须抛开前轮结论，从当前合同和源码主动构造第2步反例，并核查`U37-01↔U37-03`、`U37-02↔U37-03↔U37-04`、`U37-02↔U37-05`、`U37-04↔U37-06`以及六项与第30～36单元既有合同、第38单元边界的直接交界；发现真实反证则修正原记录并重新执行四路复审。
 
 只有现有架构无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或单元边界时才暂停；其余架构选择按整体最优且不留债务自主收敛。
 
-完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U36-05、U36-14、U36-15 的全部受支持动态 enabled/re-enable、reconciler trigger/current-stop/accepted-work、poll 成功循环/断线/换代/关闭变体均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会恢复已验证边界或扩建通用框架，也不会因逐 trigger、逐状态或逐 poll 切点补丁继续返工。满足后明确回复“U36-05、U36-14、U36-15 的根因与最优方案已闭合”并立即停止。
+完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U37-01～U37-06的全部受支持stop/removal/uninstall/cleanup/codec正常、边界、故障、恢复与对抗变体均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会恢复价值裁决否定的主张或扩建通用框架，也不会因逐入口、逐phase或逐cleanup路径补丁继续返工。满足后明确回复“U37-01～U37-06 的根因与最优方案已闭合”并立即停止。
 
 完成任务之后，根据最新的问题情况，把“目标模式：解决问题并完成多角色对抗收口”提示词内容改成本次的问题，格式、规则不变；
 ```
@@ -236,25 +236,29 @@
 ### 2.9 目标模式：解决问题并完成多角色对抗收口
 
 ```text
-目标：彻底解决第 36 单元同根重开的 U36-14 一个 P1/小、U36-15 一个 P1/中和 U36-05 一个 P2/小，闭合 Windows supervisor 动态 enabled 状态与 immutable definition identity 分离、reconciler 全入口 current-stop 的 exact 安全授权，以及 pure-surface poll attempt 与连接生命周期 O(1) 所有权的全部同根直接变体；不得扩展到其他问题或全单元流程。U36-01～U36-04、U36-06～U36-13、U36-16 与 EX36-01～EX36-05 的既有结论直接复用，U36-05 已验证的断线恢复、U36-14 已验证的 locale/numeric state/current SID/typed exact-set、U36-15 已验证的配置主链 drain/future-disable/exact turnover 不得恢复或扩面；价值裁决否定的通用 lifecycle/reconnect、状态 DTO、新 runner 与第 37～38 单元能力不得实施。
+目标：彻底解决第 37 单元 U37-01～U37-06，使 U37-01/U37-02 两个 P0/大、U37-03/U37-05 两个 P0/中和 U37-04/U37-06 两个 P2/小闭合 stop accepted-work/exact-host、removal 跨端 abort/terminal 与历史重放、effect-free frozen decision、backup checkpoint 真解封验证、cleanup key-last/固定批次及公开 facade strict 输入的全部同根直接变体；不得扩展到其他问题或全单元流程。第 30～36 单元已封版 owner/transfer/checkpoint/trust/exposure/supervisor 合同直接复用，价值裁决已删除的跨根 requestId 同一性、通用 manifest、跨 home secret 误删、泛化 S7/新 runner 主张不得恢复；第 38 单元升级/回滚/发布及自动 failover、全局或持续同步、恢复应用不得实施。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 36 单元正式文件中的 U36-05、U36-14、U36-15、EX36-04～EX36-05，只依据三项问题最新的根因、价值裁决、F36-46～F36-54 固定矩阵、C36-C43～C36-C52 反证账、最优方案执行合同、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 37 单元正式文件中的 U37-01～U37-06，只依据六项问题最新的根因、价值裁决、F37-09～F37-20 固定矩阵、最优方案执行合同、验收条件、反证账和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词结束条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 修复前从权威架构、规格与当前生产调用图重建 F36-46～F36-54 固定矩阵。U36-14覆盖两个enabled位true/false一致与冲突、future-disable/re-enable效果和响应窗口、running+disabled、immutable drift与连续重启；U36-15覆盖六trigger、plan load/error、安装后plan/spec drift、同/异trigger与home/进程、四类accepted work、old/new endpoint、future-enabled/current-running四组合及连续重驱；U36-05覆盖单次/海量成功poll、三个transient mesh code与RPC busy、fatal、owner换代、close/dispose、notification drain与history补读。逐格绑定task/definition、home/plan/endpoint、surface/controller/connection identity，唯一事实、线性化点、资源上界、零副作用终态和直接证据，并持续核对其余U36、EX36-01～EX36-05、第33～35与第37～38单元边界。
-2. 按 `U36-14 → U36-15 → U36-05` 一次完成。先保留现有fixed COM query与strict DTO，在`inspectManager()`唯一动态状态投影点要求`projection.enabled === projection.settings.enabled`，冲突`read-back-failed`；一致值唯一派生state，并从`windowsTaskDefinitionMatches()`删除enabled常量，其他principal/typed trigger/action/command/arguments/restart exact-set不放宽。生产形态测试必须让两个enabled位同源，覆盖disable效果丢响应、false/false exact replay、disabled→`/Create /F` re-enable及immutable drift。
+1. 修复前从权威架构、规格与当前生产调用图重建 F37-09～F37-20 固定矩阵。U37-01覆盖三策略、三进程形态、F37-04全部owner、每phase、timeout/blocker/permit/manager、PID successor与连续重启；U37-02覆盖两target根的accept/abort/ready/revoke/cleanup-ready/terminal、在线转离线、lost、历史查询、响应丢失与连续重启；U37-03覆盖F37-04空/非空、offline unknown、snapshot漂移、transfer/destroy与首个不可逆边界；U37-05覆盖首个/final checkpoint、service generation、decision LSN、真解封verify、篡改与重启；U37-04覆盖大exact-set、固定批次、registration/key窗口与错slot；U37-06覆盖全部公开server/mesh方法的合法/unknown/缺失/错类型/旧peer。逐格绑定operation/host/receipt/snapshot/checkpoint/key/request identity，唯一耐久事实、线性化点、资源上界、零副作用终态和直接证据，并持续核对第30～36与第38单元边界。
+2. 按 `U37-01 → U37-02 → U37-03 → U37-05 → U37-04 → U37-06` 一次完成。先用静态`HostStopAcceptedWorkPorts`把OS signal、CLI/RPC和executor-only统一到现有stop coordinator：gate全量read-back后冻结F37-04稳定id/revision与完整endpoint lock，按策略把同一snapshot逐owner收束，flush authority/intent/final/delivery日志与outbox、拒新permit并等待既有物理步骤，才写`ready-to-stop`；managed driver全等复验lock+definition+manager projection后复用`stopCurrentExact`，lock换代零manager stop。
 
-   再给reconciler注入不含`disable()`的窄adapter view：plan resolution catch、post-install latest plan/spec drift与final non-managed三处分支一律只调用`disableFuture()`并read-back，六trigger只保留wake provenance。managed install/start保持不变；current stop只留在运行host既有refuse-new→drain→shutdown或`CoreHostConnection` exact stale endpoint turnover/`expectedLock`，不向reconciler传递stop permit。参数化直接测试覆盖六trigger×三处分支、异trigger/跨进程、四类accepted work、old/new endpoint与效果丢响应；有限S7冻结六trigger并禁止reconciler调用full-stop。
+   再只扩现有executor-removal reducer的窄`peer-effect`：target journal以完整accepted identity让signed abort与ready恰一胜出，issuer重投冻结命令/回执；target `cleanup-ready`在device key仍在时耐久，issuer terminal先于U37-04 key-last。认证mesh在TLS验真与普通trust admission之间增加固定terminal-only分支，只允许历史receipt/terminal effect；lost只由issuer durable decision产生，已accepted迟到target写保留本地数据的lost-terminal，始终离线不伪造本地事实。
 
-   最后删除`ActivePoll`的`connectionClosed/resolveClosed`第二生命周期事实，以existing exact abort controller作为connection close、owner换代与dispose的唯一signal；已有唯一`connection.onClose` callback只释放同代token并abort。把`fulfillConnectionLifetimeObligation()`的`connectionClosed`输入收窄为可选，pure-surface poll只传`stopSignal`，其他一次性连接调用者不变。用可观测callback/listener集合证明海量成功与transient→success始终O(1)，fatal/close/换代归零且stale completion不误删新代；既有backoff、notification与history协议不变。同步直接相关架构、规格、现有S7有限descriptor与直接测试；同根残留并入原问题，禁止新增通用system manager/lifecycle/reconnect、stop coordinator、通知协议、状态DTO/mapper、新runner/test framework、监控、诊断、benchmark或信息采集。每个实质阶段完成后立即更新正式状态与证据。
-3. 按验证手册运行受影响闭包的最小必要类型检查、Windows dynamic/immutable inspect与disable/re-enable、reconciler六trigger/三分支/accepted-work边界、pure-surface poll资源与换代终态直接合同/场景测试，现有S7 lint与必要派生资产检查；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须穿过production COM decoder/matcher、canonical-home reconciler与三平台adapter、CoreHostConnection exact endpoint、动态MeshConnectionRegistry/relay queue和connection-lifetime helper；直接注入enabled冲突、manager效果丢响应、plan error/drift、四类accepted work、跨进程wake、海量成功poll、transient/BUSY/fatal/换代/close。不得以mock自报identity/safe-stop/O(1)或只验证返回值，不得运行包全测、模块回归、平台配置笛卡尔积或与三项验收无关的验证。失败先归因，实现问题直接修复并回到第2步。
-4. 验证通过后冻结当前交付物指纹，整轮只读逐格重建 U36-05、U36-14、U36-15 事实链；测试通过不得代替功能判断，F36-46～F36-54全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：Windows dynamic/immutable state交界、reconciler全入口current-stop权限与accepted-work、surface poll/controller资源上界与换代终态、生产体验/范围价值及历史裁决边界。各角色须抛开既有结论，主动重造第1步全部适用反例，并核查`U36-14↔U36-15`、`U36-15↔U36-05`、`U36-14↔U36-05`以及三项与其余U36、EX36-01～EX36-05、第33～35单元既有合同及第37～38单元边界的直接交界。
-5. 新发现首次出现即以C36-C53起的稳定编号写入正式问题证据与反证账；收口前对C36-C43～C36-C52、历轮专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案、验收和矩阵，再回到第2步；任何交付物修改都会使冻结指纹与对抗结论失效。
+   随后复用同一F37-04 readers形成removal专用effect-free preflight：accepted后先只读，offline只报unknown；用户决定时关gate并冻结item identity/revision，漂移则释放gate重显且零decision；全等snapshot写现有artifact并由同transaction candidate reference保护，decision/ready只消费该artifact，各owner逐项read-back所选transfer/destroy终态。
 
-结束条件：同一冻结指纹上的 U36-05、U36-14、U36-15 方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；C36-C43～C36-C52及新增同根反证全部有耐久处置，证明Windows两个enabled位冲突fail-closed、一致false保持同一definition identity并可exact replay/re-enable；六trigger及plan error/drift任一入口只收束future launch，current instance只由既有graceful或exact endpoint安全事实终结，accepted work与新代零误停；pure-surface在海量成功、断线、BUSY、fatal、换代与关闭下连接级callback/controller恒O(1)，既有通知与history语义不变。其余U36与EX36-01～EX36-05结论不变，第37～38单元能力未提前实施，三项均已更新为“已验证”。满足后明确报告“U36-05、U36-14、U36-15 三项问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
+   backup卸载只给现有checkpoint owner透传`service.verify`：recovery package在零accepted前strict decode并冻结target/root binding，service generation与首个/final checkpoint identity分离；`force(pre)→真解封verify→retirement decision/LSN→force(final)→同root verify(upToLsn>=decisionLsn)`后才cleanup。root不耐久，重启保持gate并由现有loopback continuation等待同operation重输package，禁止status自报。
+
+   cleanup只遍历现有固定removable roots，每个governor step最多128个dirent；SecretStore稳定排序按128项批次删非device-key并read-back，随后unregister、cleanup-complete、cleanup-ready、issuer terminal、exact key compare-delete、本机terminal，当前lifecycle evidence与独立checkpoint不入删除集合。最后在server与removal mesh各方法分支后立即复用现有exact-key/strict decoder，任何unknown/缺失/错类型/旧peer均在journal/gate前拒绝。同步直接相关架构、规格和直接测试；禁止新增第二journal/事实源、通用manifest/lifecycle/历史mesh/storage/secret框架、S7 registry、新runner、监控、诊断、benchmark或信息采集。每个实质阶段完成后立即更新正式状态与证据。
+3. 按验证手册运行受影响闭包的最小必要类型检查、stop真实owner/exact-host、removal双根/terminal-only/frozen decision、checkpoint真解封、cleanup批次/key-last及facade strict输入直接合同与场景测试，核对必要派生资产；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须穿过production owner/outbox/governor/supervisor/endpoint lock、两根AuthorityCommitLog与认证mesh、真实FileArtifactStore/checkpoint target/recovery root、SecretStore和公开facade，直接注入每phase、双端竞争、效果/响应丢失、PID/slot successor、篡改与连续重启；不得以mock自报settled/terminal/verified/cleanup或只验证返回值，不得运行包全测、模块回归、配置×故障笛卡尔积或与六项验收无关的验证。失败先归因，实现问题直接修复并回到第2步。
+4. 验证通过后冻结当前交付物指纹，整轮只读逐格重建 U37-01～U37-06 事实链；测试通过不得代替功能判断，F37-09～F37-20全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：stop accepted-work/exact-host、removal跨端终态与frozen decision/cleanup、backup checkpoint真验证、公开合同/生产体验/范围价值及历史裁决边界。各角色须抛开既有结论，主动重造第1步全部适用反例，并核查`U37-01↔U37-03`、`U37-02↔U37-03↔U37-04`、`U37-02↔U37-05`、`U37-04↔U37-06`以及六项与第30～36单元既有合同、第38单元边界的直接交界。
+5. 新发现首次出现即以C37-C01起的稳定编号写入正式问题证据与反证账；收口前对专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案、验收和矩阵，再回到第2步；任何交付物修改都会使冻结指纹与对抗结论失效。
+
+结束条件：同一冻结指纹上的 U37-01～U37-06 方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；全部C37反证有耐久处置，证明三策略/三形态stop在F37-04非空、阻塞、PID successor与连续重启下只终结exact host且不丢accepted work；removal的abort/ready/revoke/cleanup-ready/terminal在两根、lost、响应丢失及历史身份下恰一收敛，effect-free snapshot与owner closure不漂移；backup首个/final checkpoint均由同root真解封且final覆盖decision LSN；cleanup固定批次、key-last、错slot零误删，全部公开facade strict拒绝非规范输入。第30～36单元结论不变，第38单元能力未提前实施，六项均已更新为“已验证”。满足后明确报告“U37-01～U37-06 六项问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
 
 完成任务之后，执行“修复后更新独立审查清单状态”：凡受本轮生产实现、公共合同或直接测试变更影响的 `[!]`、`[x]` 节点一律改为 `[~]` 并作废旧证据，未受影响的 `[x]` 保持不变；修复验证、问题“已验证”、专项功能审查或多角色对抗通过均不得直接产生 `[x]`。若本轮修改了生产文件却没有任何受影响节点变为 `[~]`，立即停止并报告状态映射错误。
 ```
@@ -273,7 +277,7 @@
 - **架构空洞判定**：总纲 §10～§15、规格 §1～§12 与 §15 第 37 行/字段级协议、D37-01～D37-09 已唯一确定产品行为、稳定身份、阶段顺序、取消边界、恢复终态、体验和后继隔离；无须以实现假设补齐且会改变产品结果的真实架构空洞。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1；[~] 输入变化须重审。
 
-> **清单状态**：40 项 [ ]、0 项 [x]、0 项 [!]、0 项 [~]；清单已按固定范围矩阵重定稿，尚未执行独立审查。
+> **清单状态**：0 项 [ ]、0 项 [x]、0 项 [!]、40 项 [~]；U37-01～U37-06 修复改变了协议/日志、三条生产链、公共facade、直接测试与规范输入，全部节点须在当前交付物上重新独立审查。
 
 ### 来源覆盖
 
@@ -400,48 +404,50 @@
 
 ### 审查项
 
+> 修复后状态映射：IR37-01～IR37-40 的登记输入均直接包含本轮变更的公共协议、生产链、直接测试或规范来源，故全部置为 `[~]`；下列旧结论仅保留历史定位价值，证据已统一作废，不得代表当前版本通过。
+
 | 编号 | 状态 | 审查对象 | 独立通过条件与可复核证据 |
 | --- | --- | --- | --- |
-| IR37-01 | [ ] | 单元身份与有限边界 | 总纲/规格/D37 双向全等；仅三路径，所有明确排除均无生产入口。 |
-| IR37-02 | [ ] | strict lifecycle DTO/codec | accepted/advanced/terminal/aborted、三类 identity 与子联合严格；canonical bytes、未知字段、坏标识/时间/digest/重复 evidence 全 fail-closed。 |
-| IR37-03 | [ ] | stable identity 与 subject 单飞 | identity 冻结完整；同 home+subject 仅一非终态 operation，同载荷 exact replay，跨 kind/错 identity 副作用前拒绝。 |
-| IR37-04 | [ ] | phase/abort/terminal reducer | 四套 phase 只逐步前滚；abort 仅可逆边界前有效；冲突/跳相/错 outcome/terminal 后追加均拒绝。 |
-| IR37-05 | [ ] | 唯一物理日志与 transaction | 只写 existing AuthorityCommitLog；accept/phase/terminal replay 与坏日志启动 fail-closed，无第二 lifecycle 事实。 |
-| IR37-06 | [ ] | evidence retention/GC | 有限 evidence kind、digest/ref 全等、terminal 重申 candidate refs；必要根跨 terminal/restart/GC 保留，普通孤儿仍回收。 |
-| IR37-07 | [ ] | stop 入口与本机授权 | F37-02的OS signal、CLI与RPC stop只进同一coordinator；auth/loopback/host、requestId/strategy/timeout/generation在效果前验证，单机无trust时仍只允许本机精确实例。 |
-| IR37-08 | [ ] | stop gate | accepted→gate-closed 后拒 conversation/channel/scheduler/delivery/assignment 新准入；失败/重启不重开。 |
-| IR37-09 | [ ] | stop 三策略 accepted-work | 对F37-04 exact-set，immediate推进到下一可重放耐久安全点，drain等待终态，cancel写既有取消事实并等待不可取消步骤；三者均不得丢accepted obligation。 |
-| IR37-10 | [ ] | flush 与资源安全点 | log/pending/outbox 刷稳、permit/physical step 安全后才 ready-to-stop；等待零 permit，失败不强杀。 |
-| IR37-11 | [ ] | exact host stop/future preservation | F37-03 的 exact current service/process generation 独立 read-back stopped 后 terminal；保留 authority/trust/secrets/data/definition/future launch，不误停 successor。 |
-| IR37-12 | [ ] | stop 故障恢复 | 在F37-06中属于stop/flush/supervisor的每个固定切点，timeout/blocker/manager error/restart只补缺失效果；公开状态诚实且terminal不伪造。 |
-| IR37-13 | [ ] | removal effect-free preflight 与名称体验 | 任何accepted/gate/key/staging前只投影active非current-anchor候选及F37-04摘要；TTY名称/序号、非TTY唯一名称，重名/未知稳定拒绝，current anchor不可达/not-ready时transfer不可选且零内部ID。证据限removal command/RPC与preflight测试。 |
-| IR37-14 | [ ] | issuer accepted 与 lifecycle guard | target 效果前在 current authority 同 envelope 耐久 accepted，冻结 member/device-key generation、issuer 与 trust ancestor；selector/fresh dispatch 排除目标，并拒竞争 revoke、current-authority migration/retirement，authenticated abort 才恢复。 |
-| IR37-15 | [ ] | target 两根 accepted/gate | F37-03 两个 target 根均先全等验 issuer receipt、耐久本地 accepted，再关闭 conversation/assignment 准入；startup 在公开准入前恢复同 gate，错 issuer/generation 零副作用。 |
-| IR37-16 | [ ] | local authority/work exact-set 与决策复验 | 只从 owner/transfer journal 冻结 F37-04 exact-set及 current anchor/名称摘要；首个不可逆效果前若投影漂移必须重显并重决策，耐久 decision 同 identity exact replay。 |
-| IR37-17 | [ ] | removal transfer | frozen 每个 conversation 派生稳定 transfer identity并复用 AuthorityTransfer；source fence、private import、commit/tombstone、post-adoption consumer 均完成且本机 owner exact-set 为空后才 settled。 |
-| IR37-18 | [ ] | irreversible destroy | 用户对同一frozen名称/数量明确确认；先收束run/interaction/intent/final/lease，再用既有owner delete/tombstone与ArtifactLifecycleIndex语义处理，不以raw文件或加密导出代替owner删除。 |
-| IR37-19 | [ ] | cancel/irreversible race | authority-settled 前同 identity authenticated abort 恢复 issuer/target 两 gate与selector；首个 transfer/delete 或 revoke 后只前滚，cancel/commit 并发恰一耐久决定。 |
-| IR37-20 | [ ] | target work/resource ready | F37-04 owner/work/resource 全部进入可回读终态后 target 才签 revocation-ready；issuer 只消费该目标签名，不从本端 phase 推导，错 operation/generation/trust 先于效果拒绝。 |
-| IR37-21 | [ ] | revoke/exposure/lifecycle atomicity | accepted trust ancestor仍有效且成员 generation未变时，同 authority envelope 原子写 revoke、signed trust、目标最新 active exposure→compromised 与 lifecycle revoked 引用；无关 trust 前进不改 operation。 |
-| IR37-22 | [ ] | route/capability/secret closure | revoke commit立即使resolver/inventory/capability/fresh dispatch拒目标，断开普通连接并compare-delete exact pairwise rendezvous secret；其他device/key/后继generation不受影响，外部凭据仅在已有可信管理授权且服务支持时复用rotation，否则输出逐项行动。 |
-| IR37-23 | [ ] | narrow historical terminal replay | 仅 accepted receipt 授权的同 operation、历史 device key签名只读查询可在普通 trust admission 前返回 issuer signed terminal；零普通 mesh/写能力，target全等确认后退役，迟到旧请求不复活。 |
-| IR37-24 | [ ] | local cleanup exact-set | 仅在零 owner、F37-04 settled与signed revoke terminal本地耐久后，按F37-05 cleanup exact-set分页清除；保留排除项和最小 terminal/tombstone，governor有界、失败可重放。 |
-| IR37-25 | [ ] | supervisor/key-last/process exit | cleanup 后 exact unregister/read-back absent→其余 secret清除→exact device-key compare-delete→cleanup terminal→D37-02 safe exit；registration删除前后崩溃均可续，错slot/definition不误删误停且不重建旧key。 |
-| IR37-26 | [ ] | reachable/offline lost同一终态 | 初始离线或accepted后转离线均在同operation选择等待或lost，不得新建竞争operation；lost由issuer同authority commit完成远端revoke/route block/exposure行动且不生成target ready/cleanup，本机未证明authority/data保持unknown，迟到设备不恢复active。 |
-| IR37-27 | [ ] | uninstall preflight/local-only | F37-02 uninstall 五入口严格 loopback；preflight零 accepted/零 gate，冻结 current identity并拒未终结 removal；仅用户选定 ready migration target或可写物理独立 backup target才接受。 |
-| IR37-28 | [ ] | migration uninstall | 复用 planned transfer并回读 new owner/trust/installed generation/consumer receipt及旧anchor fence；随后旧设备必须沿同一 removal→cleanup链完成，pending/outbox只归新代；commit前可abort，之后只前滚。 |
-| IR37-29 | [ ] | first recovery checkpoint | backup路先向冻结独立目标force full checkpoint、真解封并验manifest/records/catalog/retained exact-set与generation；回读完成后才展示后果并接受绑定home/device/generation的二次确认。 |
-| IR37-30 | [ ] | retirement/final checkpoint | 确认后同authority transaction写retirement与本设备exposure compromised并关闭fresh写；final full checkpoint必须含该decision LSN及最新authority/trust/catalog/exposure/retained exact-set，真解封全验前禁止cleanup。 |
-| IR37-31 | [ ] | uninstall cleanup/terminal | migration以旧设备removal terminal、backup以final checkpoint作为唯一cleanup授权，复用F37-05与safe stop；失败保留gate/evidence并只前滚，不self-revoke、不应用恢复、不删除外部安装包。 |
-| IR37-32 | [ ] | pre-runtime recovery/non-resurrection | 本机任一zz入口在key create、角色组合、listener前只读两类既有log；existing-only恢复active gate/phase及current-anchor未终结revoke/exposure，removed精确删旧key并仅允许新identity重新配对，retired只允许既有恢复入口，registration删除后仍可续做。 |
-| IR37-33 | [ ] | RPC/CLI/mesh ownership与隐私 | F37-02入口恰一owner：device.* current-anchor，shutdown/uninstall local-only，target/issuer服务仅认证有限operation；strict DTO/facade/registry无动态旁路，响应零operation/device/epoch/digest/path/raw error。 |
-| IR37-34 | [ ] | complete product journeys | stop三策略、reachable transfer/destroy、reachable→lost与offline lost、migration/backup uninstall在TTY/非TTY均有唯一选择、不可逆边界和诚实可行动状态，不暴露拓扑术语。 |
-| IR37-35 | [ ] | production roots/profile exact-set | F37-03每个适用根恰一owner/journal/coordinator，surface/empty/disabled零owner、零lifecycle模块、零listener；无第二server、lifecycle log、trust/exposure事实源、registry或隐藏入口。 |
-| IR37-36 | [ ] | fixed fault/recovery matrix | 逐一执行F37-06切点，验证同载荷只补缺失效果、异载荷零副作用、竞态恰一决定、连续重启唯一收敛且历史terminal不回滚后继owner/endpoint。 |
-| IR37-37 | [ ] | security/secrets/isolation | lifecycle、ready、abort与terminal签名反绑完整identity/current trust；日志/mesh/checkpoint零SecretStore值，exact delete不越slot，local-only不可远程，S2依赖与PAKE隔离不扩张。 |
-| IR37-38 | [ ] | resource/cancel/lock order | F37-04 workload和F37-05 cleanup均经既有governor/arbiter；network/OS等待零permit，锁外等待、固定批次，stop/cancel后拒新I/O，committed cleanup重启重新准入。 |
-| IR37-39 | [ ] | layering/compat/Unit38 boundary | 复用Unit30～36 owner/transfer/checkpoint/trust/supervisor合同且包依赖单向；旧peer在本地gate或远端效果前稳定拒绝；无upgrade/rollback/package replacement/recovery apply或通用框架。 |
-| IR37-40 | [ ] | registry/S7 与证据充分性 | canonical registry、CLI映射、mesh service与S7 descriptor对F37-02～F37-03 exact-set恰一映射，并机械拒第二journal、force-kill、secret migration及Unit38能力；F37-08每组现有直接证据能独立支撑对应功能项，不要求新runner、重复元数据或当次build结果。 |
+| IR37-01 | [~] | 单元身份与有限边界 | 已核对总纲、规格、D37 与生产入口：实现仅落 stop/removal/uninstall 三路径，未发现 upgrade/rollback、恢复应用或通用 lifecycle 扩面。 |
+| IR37-02 | [~] | strict lifecycle DTO/codec | `device-lifecycle.ts` 对 identity、accepted/advanced/terminal/aborted 与 evidence 联合做 strict key/type/canonical 校验；未知字段、坏标识/时间/digest/重复 evidence 均在 decode 前拒绝。 |
+| IR37-03 | [~] | stable identity 与 subject 单飞 | core journal 能按 home+subject 单飞，但 removal target `accept()` 把 issuer 已冻结的 requestId 改写为 `target:${operationId}`，两根不共享完整 accepted identity；错根重放无法在副作用前全等判定。 |
+| IR37-04 | [~] | phase/abort/terminal reducer | `device-lifecycle-journal.ts` 的四类 phase reducer逐相前滚并冻结 outcome；abort 边界、跳相、冲突 terminal 与 terminal 后追加均 fail-closed。 |
+| IR37-05 | [~] | 唯一物理日志与 transaction | authority/executor 两适用根均复用各自既有 `AuthorityCommitLog` 的同一 lifecycle stream；投影启动严格解码，未发现第二 lifecycle journal 或旁路终态。 |
+| IR37-06 | [~] | evidence retention/GC | evidence kind 为 F37-07 有限集，artifact evidence 反绑 digest/ref；当前 terminal producers 重申既有 evidence/candidate refs，直接 retention 测试覆盖 terminal/restart/GC 与孤儿回收。 |
+| IR37-07 | [~] | stop 入口与本机授权 | CLI/RPC stop 进入 `HostStopCoordinator`，但 executor-only `ExecutorRoleRuntime` 仍以独立 signal shutdown 路径等待并退出，未统一进入 durable coordinator；因此 OS signal exact-set 与 generation 终态不成立。 |
+| IR37-08 | [~] | stop gate | 主根只以四个 opaque callback 关闭 inbound/channel/delivery/scheduler，executor-only signal 路径旁路该 gate；F37-04 assignment/remote obligation 等生产准入无法由同一 durable gate 机械证明。 |
+| IR37-09 | [~] | stop 三策略 accepted-work | `HostStopRuntime` 仅 drain inbound/jobs、cancel conversations，未枚举 current/frozen/importing conversation、intent/final/assignment/outbox/remote obligation/lease/permit/managed instance exact-set，三策略会把未证明闭合的 accepted work 推进为 settled。 |
+| IR37-10 | [~] | flush 与资源安全点 | flush 只 checkpoint lifecycle log，physical safety 只执行空 governor step；pending/outbox 持久化、全部 permits 与物理步骤 read-back 未成为 `ready-to-stop` 前置条件，callback 亦未执行 timeout 边界。 |
+| IR37-11 | [~] | exact host stop/future preservation | terminal 判据通过 `instanceId` 内 PID 存活性推断 current host，未独立核验 serviceId、definitionDigest 与 exact process generation；PID 复用/后继实例下可能误判 stopped 或误终结旧 operation。 |
+| IR37-12 | [~] | stop 故障恢复 | 直接测试未穿过真实 accepted-work/outbox/governor/supervisor fixed cuts；opaque settle/flush callback 可无界挂起，manager/效果丢响应后也没有 exact generation read-back，不能证明只补缺失效果或 terminal 诚实。 |
+| IR37-13 | [~] | removal effect-free preflight 与名称体验 | `device.remove` 在 issuer accepted、target accept/freeze 后才询问 transfer/destroy；离线 begin 还固定返回空 conversations/false accepted-work。当前没有 accepted/gate 前的真实本地摘要投影，用户会在副作用后才获得不完整决策信息。 |
+| IR37-14 | [~] | issuer accepted 与 lifecycle guard | issuer 先在 current authority lifecycle stream 耐久 accepted 并冻结 member/device-key generation、issuer/trust ancestor，随后安装 selector/fresh-dispatch guard；竞争 revoke/migration/retirement 与错 replay 在后续效果前拒绝。 |
+| IR37-15 | [~] | target 两根 accepted/gate | 两根均能恢复 gate，但 target receipt 未保留 issuer requestId/trust ancestor 的完整同一 identity；且 `accept()`/`decide()` 在识别已 aborted replay 前先执行 close/freeze/artifact 副作用，迟到重放可重新冻结已恢复准入。 |
+| IR37-16 | [~] | local authority/work exact-set 与决策复验 | frozen snapshot 未覆盖 F37-04 全集；重启后会重算本地 snapshot，却可继续消费旧 decision artifact而不全等比较，首个 transfer/delete 前的 owner/work 漂移不会强制重显与重决策。 |
+| IR37-17 | [~] | removal transfer | 每个 frozen conversation 派生稳定 identity并调用既有 AuthorityTransfer；production path 等待 private import、commit/tombstone及 post-adoption完成，再核对本机 conversation owner 为空后推进 settled。 |
+| IR37-18 | [~] | irreversible destroy | CLI 有 frozen 名称/数量确认且使用 owner delete/tombstone，但 settled 判据未覆盖 DeferredGlobalIntent、final/delivery outbox、remote/channel/scheduler/delivery obligation等F37-04全集，仍可在 accepted work 未收束时进入不可逆删除。 |
+| IR37-19 | [~] | cancel/irreversible race | issuer abort 本地先耐久、远端投递无 durable retry；target exact abort replay再次 release 已释放 freeze会抛错，gate-frozen 重启恢复也不主动向 issuer查询 abort，响应丢失可永久冻结或无法唯一收敛。 |
+| IR37-20 | [~] | target work/resource ready | target ready 只依赖不完整 snapshot/settled检查，遗漏 intent/outbox/remote obligation/managed instance；因此目标签名不能证明 F37-04 owner/work/resource 全部终态，issuer仍会据此 revoke。 |
+| IR37-21 | [~] | revoke/exposure/lifecycle atomicity | issuer 在同一 AuthorityCommitLog transaction 内校验 accepted ancestor/member generation并写 revoke trust event、active exposure→compromised及 lifecycle revoked evidence；无关 trust 前进按 ancestor 规则保留操作身份。 |
+| IR37-22 | [~] | route/capability/secret closure | revoke 后 resolver/inventory/capability/fresh dispatch立即拒目标并断开普通连接；rendezvous以当前home内的exact SecretRef删除并read-back，后继generation受单飞/成员换代guard保护。仅余P37-04的cleanup顺序P2，不改变通过状态。 |
+| IR37-23 | [~] | narrow historical terminal replay | revoked target 会被普通 mesh admission/disconnect先拒绝，生产连接层没有 accepted receipt+历史 key 的 pre-trust terminal-only握手；revoke响应丢失后 target 无法重连取得 issuer terminal并完成本地退役。 |
+| IR37-24 | [~] | local cleanup exact-set | removable paths均经`assertOwnedPath`限制在current home，PlatformSecretStore也由同一homeDir构造；secret删除正是该移除设备本home的冻结范围，workspace/独立checkpoint/最小log不在删除集合。recursive批次粒度仅形成P37-04的P2残留。 |
+| IR37-25 | [~] | supervisor/key-last/process exit | production响应等待`onRemoved`完成key删除与safe shutdown，若在terminal落盘后崩溃，pre-runtime resumer会在key创建/角色/listener前删除旧key并拒绝旧identity；无可达旧key重新准入。terminal日志与key删除的内部先后仍作为P37-04 P2收窄处理。 |
+| IR37-26 | [~] | reachable/offline lost同一终态 | lost path 由 issuer 本端合成 authority-settled/revocation-ready后 revoke，违反“不生成target ready”；issuer只停在 revoked而不写cleanup/terminal，迟到设备又缺历史terminal通道，unknown 数据终态不能唯一收敛。 |
+| IR37-27 | [~] | uninstall preflight/local-only | CLI/RPC五入口均受 loopback guard；preflight只读 lifecycle/removal/checkpoint/target状态，未写 accepted/gate，并冻结 current home/device/generation后才允许用户选择已 ready 的 migration/backup 路径。 |
+| IR37-28 | [~] | migration uninstall | production path复用 planned anchor transfer；commit 等待 target committed/tombstoned、核验新 trust/issuer 并触发既有 installed-generation consumers，再沿旧设备 removal/cleanup 前滚，commit前后 abort边界与Unit34合同一致。 |
+| IR37-29 | [~] | first recovery checkpoint | coordinator 的 `force()` 后立即要求 `status()` 已是 recoverable/fullBackupReady且 checkpointId/LSN全等；真实 `AuthorityCheckpointOwner.force()` 只 createAndReplicate，不执行 recovery-root真解封/verify，故首个 backup checkpoint在生产中不可达通过，测试用fake自报ready掩盖断链。 |
+| IR37-30 | [~] | retirement/final checkpoint | final checkpoint复用同一不可达的 force→status假设，未通过真实 recovery root/manifest/catalog/retained hydration形成可验证证据；因此 retirement decision 后无法取得授权 cleanup 的 final full checkpoint。 |
+| IR37-31 | [~] | uninstall cleanup/terminal | backup路因 checkpoint verification断链无法到 cleanup/terminal；migration路又复用当前 removal cleanup/key顺序缺陷，不能证明仅以旧设备removed terminal或真实final checkpoint授权安全清理。 |
+| IR37-32 | [~] | pre-runtime recovery/non-resurrection | bootstrap能在key/角色/listener前读取两根log并阻止 terminal旧身份复活，但 active removal 的远端abort/历史terminal与 terminal-before-key-delete无法靠本地只读恢复唯一闭合；registration删除后的跨端续做仍会卡在普通mesh admission。 |
+| IR37-33 | [~] | RPC/CLI/mesh ownership与隐私 | ownership/loopback主路径存在，但 server uninstall 与 lifecycle mesh输入只做object/字段读取而未拒绝unknown keys；同时缺少 terminal-only历史认证入口，有限operation与strict DTO exact-set不成立。 |
+| IR37-34 | [~] | complete product journeys | stop三策略缺真实accepted-work闭包，removal在副作用后才展示不完整摘要且lost不终结，backup uninstall生产不可完成；TTY/非TTY虽有命令外壳，核心受支持旅程仍会卡死或报告错误终态。 |
+| IR37-35 | [~] | production roots/profile exact-set | lifecycle owner/journal主要按profile装配，但 executor-only另有不经过durable stop coordinator的signal shutdown路径，且该根 removal admission callbacks部分为空实现；适用根并非恰一完整 coordinator语义。 |
+| IR37-36 | [~] | fixed fault/recovery matrix | 现有直接测试未覆盖F37-06全切点与连续双重启；真实可达的abort响应丢失、revoked后terminal查询、checkpoint verification、terminal/key删除窗口均不能唯一收敛。 |
+| IR37-37 | [~] | security/secrets/isolation | target receipt/abort未反绑完整跨根identity，revoked历史查询缺有限认证；rendezvous/device key缺统一exact compare-delete/read-back，cleanup空前缀会跨home删除SecretStore值，隔离合同被破坏。 |
+| IR37-38 | [~] | resource/cancel/lock order | cleanup以recursive filesystem删除和全量secret枚举代替固定批次，部分步骤用默认未联动stop的signal；stop本身未证明等待零permit/拒新I/O，committed cleanup重启也受历史terminal通道阻断。 |
+| IR37-39 | [~] | layering/compat/Unit38 boundary | 生产实现复用既有owner/transfer/checkpoint/trust/supervisor依赖方向，未加入upgrade/rollback/package replacement/recovery apply或通用框架；旧peer在codec/本地gate前稳定拒绝。 |
+| IR37-40 | [~] | registry/S7 与证据充分性 | S7仅检查stream token、少量源码片段和六个本地RPC名，未冻结F37-02 mesh/current-anchor入口与F37-03 profiles，也未机械拒第二journal/force-kill/secret migration/Unit38；多项测试以fake callback自报closure/checkpoint，不能独立支撑生产合同。 |
 
 ---
 
@@ -464,4 +470,4 @@
 | 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 |
 | --- | --- | --- | --- | --- | --- |
 
-> **独立审查结论**：尚未执行。Unit37 generation 1 清单已按全部适用来源、当前完整交付物和生产装配关系定稿；40 项均为 [ ]，问题列表为空不表示通过。
+> **独立审查结论**：U37-01～U37-06 已在正式问题账本中完成修复验证；两类源问题列表保持为空。由于本轮六项覆盖协议、stop、removal、uninstall、cleanup、facade及规范/测试闭包，40项旧证据均已失效并置为 `[~]`，下一步应执行当前版本的独立复审；修复验证不得直接产生 `[x]`。

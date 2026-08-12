@@ -16,7 +16,7 @@ import type {
   SessionEventProjection,
 } from "@zhixing/core/contracts";
 import { AuthorityStorageError } from "@zhixing/core/authority";
-import type { StreamFrameProducer } from "@zhixing/core/protocol";
+import { protocolDigest, type StreamFrameProducer } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
   ExecutorResourceGovernor,
@@ -56,6 +56,11 @@ export interface JobRunOutcome {
     readonly inputTokens: number;
     readonly outputTokens: number;
   };
+}
+
+export interface JobAcceptedWorkItem {
+  readonly id: string;
+  readonly revision: string;
 }
 
 export interface JobRuntimeRunOptions {
@@ -295,6 +300,31 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       ...this.#running.values(),
       ...this.#interactionRecoveries.values(),
     ]);
+  }
+
+  async acceptedWorkItems(): Promise<readonly JobAcceptedWorkItem[]> {
+    const items: JobAcceptedWorkItem[] = [];
+    let page = await this.options.ledger.recoverableJobObligations({
+      limit: JOB_RECOVERY_PAGE_SIZE,
+    });
+    for (;;) {
+      for (const obligation of page.entries) {
+        items.push(Object.freeze({
+          id: obligation.envelope.assignmentId,
+          revision: protocolDigest("ExecutorJobAcceptedWork", 1, obligation),
+        }));
+      }
+      if (items.length > 50_000) {
+        throw new Error("Executor accepted-work snapshot exceeds its bounded protocol");
+      }
+      if (!page.continuation) break;
+      page = await this.options.ledger.recoverableJobObligations({
+        limit: JOB_RECOVERY_PAGE_SIZE,
+        continuation: page.continuation,
+      });
+    }
+    return Object.freeze(items.sort((left, right) =>
+      left.id.localeCompare(right.id, "en-US")));
   }
 
   stopAccepting(): void {

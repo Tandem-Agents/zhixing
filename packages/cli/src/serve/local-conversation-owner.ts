@@ -23,7 +23,7 @@ import type {
   SessionStatePort,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   ConversationManager,
@@ -178,6 +178,21 @@ export interface LocalConversationRemovalSnapshot {
     readonly leases: number;
     readonly permits: number;
   };
+  readonly ownerItems: readonly {
+    readonly owner:
+      | "conversation"
+      | "intent"
+      | "final"
+      | "assignment"
+      | "remote"
+      | "channel"
+      | "scheduler"
+      | "delivery"
+      | "lease"
+      | "permit";
+    readonly id: string;
+    readonly revision: string;
+  }[];
 }
 
 export interface LocalConversationOwnerAssemblyOptions {
@@ -950,25 +965,113 @@ export class LocalConversationOwnerAssembly {
    * operation. The caller persists the returned snapshot before choosing a
    * transfer or destruction path.
    */
-  async freezeForDeviceRemoval(operationId: string): Promise<LocalConversationRemovalSnapshot> {
+  async preflightForDeviceRemoval(operationId: string): Promise<LocalConversationRemovalSnapshot> {
+    this.#requireReady();
+    await this.#waitForCommandDrain();
+    const candidates = (await this.#port.listConversationAuthorities())
+      .filter(({ authority }) =>
+        authority.state === "current" ||
+        authority.state === "frozen" ||
+        authority.state === "importing")
+      .sort((left, right) => left.conversationId.localeCompare(right.conversationId, "en-US"));
+    const conversations = await Promise.all(candidates.map(async ({ conversationId, authority }) => {
+      const meta = await this.#protocol.sessionState.readSessionMeta(
+        conversationId,
+        hostContext("device-removal-preflight"),
+      );
+      return Object.freeze({
+        conversationId,
+        displayName: meta.name?.trim() || conversationId,
+        state: authority.state as "current" | "frozen" | "importing",
+      });
+    }));
+    const ownerItems: Array<LocalConversationRemovalSnapshot["ownerItems"][number]> = [];
+    let pendingFinals = 0;
+    let pendingAssignments = 0;
+    let leases = 0;
+    let deferredIntents = 0;
+    for (const conversation of conversations) {
+      ownerItems.push(Object.freeze({
+        owner: "conversation",
+        id: conversation.conversationId,
+        revision: protocolDigest("ExecutorRemovalConversation", 1, conversation),
+      }));
+      const closure = await this.#protocol.pendingClosureWork(conversation.conversationId);
+      const intents = await this.#intents.list(
+        conversation.conversationId,
+        hostContext("device-removal-preflight"),
+      );
+      pendingFinals += closure.pendingFinals;
+      pendingAssignments += closure.pendingAssignments;
+      leases += closure.activeLocalLeases;
+      deferredIntents += intents.length;
+      for (const item of closure.items.finals) {
+        ownerItems.push(Object.freeze({ owner: "final", ...item }));
+      }
+      for (const item of closure.items.assignments) {
+        ownerItems.push(Object.freeze({ owner: "assignment", ...item }));
+      }
+      for (const item of closure.items.recovery) {
+        ownerItems.push(Object.freeze({ owner: "intent", ...item }));
+      }
+      for (const intent of intents) {
+        ownerItems.push(Object.freeze({
+          owner: "intent",
+          id: intent.intentId,
+          revision: protocolDigest("ExecutorRemovalIntent", 1, intent),
+        }));
+      }
+      for (const item of closure.items.leases) {
+        ownerItems.push(Object.freeze({ owner: "lease", ...item }));
+        ownerItems.push(Object.freeze({ owner: "permit", ...item }));
+      }
+    }
+    return Object.freeze({
+      operationId,
+      conversations: Object.freeze(conversations),
+      acceptedWork: Object.freeze({
+        active: Number(this.#manager.hasActiveWork()),
+        pendingFinals,
+        pendingAssignments,
+        deferredIntents,
+        outbox: pendingFinals,
+        leases,
+        permits: leases,
+      }),
+      ownerItems: Object.freeze(ownerItems.sort((left, right) =>
+        `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US"))),
+    });
+  }
+
+  async freezeForDeviceRemoval(
+    operationId: string,
+    expectedSnapshotDigest?: string,
+  ): Promise<LocalConversationRemovalSnapshot> {
     if (this.#removalOperationId && this.#removalOperationId !== operationId) {
       throw new Error("Another device-removal operation owns the local conversation gate");
     }
-    if (this.#removalSnapshot?.operationId === operationId) return this.#removalSnapshot;
-    this.#requireReady();
+    if (this.#removalSnapshot?.operationId === operationId) {
+      if (
+        expectedSnapshotDigest !== undefined &&
+        protocolDigest("ExecutorRemovalPreflightSnapshot", 1, this.#removalSnapshot) !== expectedSnapshotDigest
+      ) {
+        throw new Error("Device removal preflight changed before the decision safe point");
+      }
+      return this.#removalSnapshot;
+    }
+    const snapshot = await this.preflightForDeviceRemoval(operationId);
+    if (
+      expectedSnapshotDigest !== undefined &&
+      protocolDigest("ExecutorRemovalPreflightSnapshot", 1, snapshot) !== expectedSnapshotDigest
+    ) {
+      throw new Error("Device removal preflight changed before the decision safe point");
+    }
     this.#removalOperationId = operationId;
     try {
-      await this.#waitForCommandDrain();
-      const candidates = (await this.#port.listConversationAuthorities())
-        .filter(({ authority }) =>
-          authority.state === "current" ||
-          authority.state === "frozen" ||
-          authority.state === "importing")
-        .sort((left, right) => left.conversationId.localeCompare(right.conversationId, "en-US"));
-      for (const { conversationId } of candidates) {
-        this.#transferringConversations.add(conversationId);
+      for (const conversation of snapshot.conversations) {
+        this.#transferringConversations.add(conversation.conversationId);
       }
-      for (const { conversationId } of candidates) {
+      for (const { conversationId } of snapshot.conversations) {
         await this.#manager.abortConversationAndWait(
           conversationId,
           { kind: "external", origin: "device-removal" },
@@ -977,44 +1080,6 @@ export class LocalConversationOwnerAssembly {
         await this.#protocol.recoverConversation(conversationId);
         await this.#recovery.recoverConversation(conversationId);
       }
-      const conversations = await Promise.all(candidates.map(async ({ conversationId, authority }) => {
-        const meta = await this.#protocol.sessionState.readSessionMeta(
-          conversationId,
-          hostContext("device-removal-preflight"),
-        );
-        return Object.freeze({
-          conversationId,
-          displayName: meta.name?.trim() || conversationId,
-          state: authority.state as "current" | "frozen" | "importing",
-        });
-      }));
-      let pendingFinals = 0;
-      let pendingAssignments = 0;
-      let leases = 0;
-      let deferredIntents = 0;
-      for (const { conversationId } of conversations) {
-        const closure = await this.#protocol.pendingClosureWork(conversationId);
-        pendingFinals += closure.pendingFinals;
-        pendingAssignments += closure.pendingAssignments;
-        leases += closure.activeLocalLeases;
-        deferredIntents += (await this.#intents.list(
-          conversationId,
-          hostContext("device-removal-preflight"),
-        )).length;
-      }
-      const snapshot = Object.freeze({
-        operationId,
-        conversations: Object.freeze(conversations),
-        acceptedWork: Object.freeze({
-          active: Number(this.#manager.hasActiveWork()),
-          pendingFinals,
-          pendingAssignments,
-          deferredIntents,
-          outbox: pendingFinals,
-          leases,
-          permits: leases,
-        }),
-      });
       this.#removalSnapshot = snapshot;
       return snapshot;
     } catch (error) {
@@ -1060,7 +1125,7 @@ export class LocalConversationOwnerAssembly {
           },
         );
       }
-      await this.#protocol.recoverConversation(conversationId);
+      await this.#protocol.completeLifecycleProjections(conversationId);
       const after = await this.#protocol.sessionAuthorityState(conversationId);
       if (!after.deleted || after.pendingLifecycleProjections !== 0) {
         throw new Error("Device-removal conversation deletion is not durably projected");

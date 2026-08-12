@@ -9,6 +9,7 @@ import {
 } from "./durable-job-interactions.js";
 import {
   JobAssignmentWorker,
+  type JobAcceptedWorkItem,
   type JobAssignmentWorkerOptions,
 } from "./job-assignment-worker.js";
 
@@ -106,6 +107,10 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     return this.#worker.drain();
   }
 
+  acceptedWorkItems(): Promise<readonly JobAcceptedWorkItem[]> {
+    return this.#worker.acceptedWorkItems();
+  }
+
   async close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.stopAccepting();
@@ -152,6 +157,10 @@ export class ExecutorJobOwnerAssembly {
 
   drain(): Promise<void> {
     return this.owner.drain();
+  }
+
+  acceptedWorkItems(): Promise<readonly JobAcceptedWorkItem[]> {
+    return this.owner.acceptedWorkItems();
   }
 
   close(): Promise<void> {

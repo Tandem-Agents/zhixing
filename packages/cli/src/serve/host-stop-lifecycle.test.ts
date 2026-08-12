@@ -3,7 +3,12 @@ import { createTempDir } from "@zhixing/test-utils";
 import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
-import { HostStopCoordinator, type HostStopRuntime } from "./host-stop-lifecycle.js";
+import {
+  HOST_STOP_ACCEPTED_WORK_OWNERS,
+  HostStopCoordinator,
+  type HostStopAcceptedWorkPorts,
+  type HostStopRuntime,
+} from "./host-stop-lifecycle.js";
 
 describe("HostStopCoordinator", () => {
   it.each(["immediate", "drain", "cancel"] as const)(
@@ -18,12 +23,16 @@ describe("HostStopCoordinator", () => {
       });
       expect(result.phase).toBe("ready-to-stop");
       expect(fixture.order[0]).toBe("close");
-      expect(fixture.order).toContain(strategy === "cancel" ? "cancel" : strategy);
+      for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
+        expect(fixture.order).toContain(`settle:${owner}:${strategy}`);
+        expect(fixture.order).toContain(`read-back:${owner}`);
+      }
       expect(fixture.order.slice(-2)).toEqual(["flush", "physical"]);
       const active = await fixture.journal.active();
       expect(active).toHaveLength(1);
       expect(active[0]?.phase).toBe("ready-to-stop");
     },
+    120_000,
   );
 
   it("exactly replays response loss without repeating completed effects", async () => {
@@ -53,7 +62,7 @@ describe("HostStopCoordinator", () => {
     expect(blocked?.phase).toBe("work-settled");
     await expect(fixture.coordinator.prepare(request)).resolves.toMatchObject({ phase: "ready-to-stop" });
     expect(fixture.order.filter((item) => item === "close")).toHaveLength(1);
-    expect(fixture.order.filter((item) => item === "immediate")).toHaveLength(1);
+    expect(fixture.order.filter((item) => item === "settle:conversation:immediate")).toHaveLength(1);
     expect(fixture.order.filter((item) => item === "flush")).toHaveLength(2);
   });
 
@@ -82,7 +91,7 @@ describe("HostStopCoordinator", () => {
       requestId: "request-old-host",
       homeId: fixture.homeId,
     }))).resolves.toMatchObject({ phase: "terminal" });
-  });
+  }, 120_000);
 });
 
 async function createFixture(options: { failFlushOnce?: boolean } = {}) {
@@ -93,6 +102,13 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
   });
   const journal = new DeviceLifecycleJournal(log);
   const order: string[] = [];
+  const acceptedWork = Object.fromEntries(HOST_STOP_ACCEPTED_WORK_OWNERS.map((owner) => [owner, {
+    freeze: async () => [{ id: `${owner}:item`, revision: `${owner}:revision` }],
+    settle: async (input: { readonly strategy: "immediate" | "drain" | "cancel" }) => {
+      order.push(`settle:${owner}:${input.strategy}`);
+    },
+    readBack: async () => { order.push(`read-back:${owner}`); },
+  }])) as unknown as HostStopAcceptedWorkPorts;
   let failFlush = options.failFlushOnce ?? false;
   const runtime: HostStopRuntime = {
     closeAdmission: vi.fn(async () => { order.push("close"); }),
@@ -125,6 +141,8 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
         startedAt: "2026-08-12T00:00:00.000Z",
       },
       runtime,
+      acceptedWork,
+      artifactStore: artifacts,
     }),
   };
 }

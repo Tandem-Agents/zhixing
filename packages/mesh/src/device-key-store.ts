@@ -63,6 +63,26 @@ export function deviceKeyRef(deviceId: string): SecretRef {
   return { kind: "device-key", bindingId: `${DEVICE_KEY_NAMESPACE}${deviceId}` };
 }
 
+export async function deleteDeviceKeyExact(
+  store: SecretStorePort,
+  expected: DeviceKey,
+): Promise<void> {
+  const ref = deviceKeyRef(expected.deviceId);
+  const current = await store.get(ref);
+  if (current === null) return;
+  const persisted = DeviceKey.import(parseMaterial(current));
+  if (
+    persisted.deviceId !== expected.deviceId ||
+    JSON.stringify(persisted.exportMaterial()) !== JSON.stringify(expected.exportMaterial())
+  ) {
+    throw new Error("Refusing to delete a device-key slot with a different generation");
+  }
+  await store.delete(ref);
+  if (await store.get(ref) !== null) {
+    throw new Error("SecretStore retained the exact deleted device key");
+  }
+}
+
 export async function loadOrCreateAnchorIssuerKey(
   store: SecretStorePort,
   transferId: string,

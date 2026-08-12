@@ -59,6 +59,8 @@ import {
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
   getDefaultLogPath,
+  readLock,
+  resolveProcessStartTime,
   type RunningServer,
   type ProcessLockPaths,
 } from "@zhixing/server";
@@ -165,12 +167,18 @@ import {
   reconcileCurrentManagedService,
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
-import { createManagedServiceAdapter } from "./managed-service.js";
+import {
+  createManagedServiceAdapter,
+  managedServiceDefinitionDigest,
+} from "./managed-service.js";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { buildManagedHostPublicStatus } from "./status.js";
-import { HostStopCoordinator } from "./host-stop-lifecycle.js";
-import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
+import {
+  HostStopCoordinator,
+  type HostStopAcceptedWorkPorts,
+} from "./host-stop-lifecycle.js";
+import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -210,9 +218,15 @@ async function runServerProcess(
   const deviceCapacity = bootstrap.deviceCapacity;
   const processMode = resolveHostProcessMode(opts.managed);
   const processStartedAt = new Date().toISOString();
+  const processStartTime = await resolveProcessStartTime(process.pid);
+  const initialManagedServiceState = await loadCurrentManagedServiceState(
+    "activate",
+    zhixingHome,
+  );
   const initialManagedHostAdmission = await captureManagedHostAdmission(
     processMode,
     zhixingHome,
+    async () => initialManagedServiceState,
   );
   const isBackground = processMode !== "foreground";
   const daemonLogPath = isBackground ? getDefaultLogPath() : undefined;
@@ -1197,33 +1211,200 @@ async function runServerProcess(
   let managedHostStopping = false;
   const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
   const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
-  const stopHost: StopHostGeneration = processMode === "managed"
+  const stopEndpointLock = {
+    pid: process.pid,
+    port,
+    startTime: processStartTime,
+    startedAt: processStartedAt,
+  } as const;
+  const managedStopSpec = processMode === "managed"
+    ? initialManagedServiceState.spec
+    : undefined;
+  if (processMode === "managed" && !managedStopSpec) {
+    throw new Error("Managed host stop identity requires the installed service definition");
+  }
+  const stopHost: StopHostGeneration = processMode === "managed" && managedStopSpec
     ? {
         kind: "managed",
-        serviceId: `zhixing-${lifecycleHomeId.slice(0, 32)}`,
-        definitionDigest: protocolDigest(
-          "ManagedHostAdmission",
-          1,
-          initialManagedHostAdmission,
-        ),
+        serviceId: managedStopSpec.serviceId,
+        definitionDigest: managedServiceDefinitionDigest(managedStopSpec),
         instanceId: `${process.pid}:${processStartedAt}`,
+        endpointLock: stopEndpointLock,
       }
     : {
         kind: "foreground",
         processId: process.pid,
         startedAt: processStartedAt,
+        endpointLock: stopEndpointLock,
       };
+  const stopConversationSnapshots = new Map<string, Promise<Awaited<
+    ReturnType<NonNullable<typeof ctx.localConversationOwner>["preflightForDeviceRemoval"]>
+  >>>();
+  const captureStopAcceptedWork = async (
+    owner: keyof HostStopAcceptedWorkPorts,
+    operationId: string,
+  ) => {
+    const localOwners = new Set(["conversation", "intent", "final", "assignment", "lease", "permit"]);
+    if (localOwners.has(owner) && ctx.localConversationOwner) {
+      let snapshot = stopConversationSnapshots.get(operationId);
+      if (!snapshot) {
+        snapshot = ctx.localConversationOwner.preflightForDeviceRemoval(operationId);
+        stopConversationSnapshots.set(operationId, snapshot);
+      }
+      return (await snapshot).ownerItems
+        .filter((item) => item.owner === owner)
+        .map(({ id, revision }) => ({ id, revision }));
+    }
+    const conversations = (ctx.conversations?.list() ?? [])
+      .map((item) => ({
+        id: item.conversationId,
+        revision: protocolDigest("HostStopConversation", 1, {
+          conversationId: item.conversationId,
+          sessionId: item.sessionId,
+          busy: item.busy,
+          lastActiveAt: item.lastActiveAt,
+        }),
+      }));
+    if (owner === "conversation") return conversations;
+    if (owner === "remote") {
+      const relay = (await ctx.jobRelayObligations?.listOpen() ?? []).map((opening) => ({
+        id: `relay:${opening.assignmentId}`,
+        revision: protocolDigest("HostStopRemoteObligation", 1, opening.assignmentId),
+      }));
+      const local = (await ctx.executorJobOwner?.acceptedWorkItems() ?? []).map((item) => ({
+        id: `local:${item.id}`,
+        revision: item.revision,
+      }));
+      return [...relay, ...local].sort((left, right) =>
+        left.id.localeCompare(right.id, "en-US"));
+    }
+    if (owner === "channel") {
+      return (ctx.channels?.listStatuses() ?? [])
+        .filter((status) => status.state !== "disconnected")
+        .map((status) => ({
+          id: status.channelId,
+          revision: protocolDigest("HostStopChannel", 1, status),
+        }));
+    }
+    if (owner === "scheduler") {
+      return (schedulerRuntime?.scheduler.listTasks() ?? [])
+        .filter((task) => task.enabled)
+        .map((task) => ({
+          id: task.id,
+          revision: protocolDigest("HostStopScheduledTask", 1, task),
+        }));
+    }
+    if (owner === "delivery") {
+      const stats = ctx.deliveryStack?.stats();
+      return stats && Object.values(stats).some((value) => typeof value === "number" && value > 0)
+        ? [{ id: "delivery:authority", revision: protocolDigest("HostStopDelivery", 1, stats) }]
+        : [];
+    }
+    return [];
+  };
+  const assertStopAcceptedWorkSettled = async (owner: keyof HostStopAcceptedWorkPorts) => {
+    if (owner === "conversation") {
+      if ((ctx.conversations?.list() ?? []).some((item) => item.busy)) {
+        throw new Error("Conversation accepted work is still active");
+      }
+      return;
+    }
+    if (["intent", "final", "assignment", "lease", "permit"].includes(owner)) {
+      const closure = await ctx.conversationProtocol?.pendingClosureWork();
+      const remaining = owner === "final"
+        ? closure?.pendingFinals ?? 0
+        : owner === "assignment"
+          ? closure?.pendingAssignments ?? 0
+          : owner === "intent"
+            ? closure?.recoveryBacklog ?? 0
+            : closure?.activeLocalLeases ?? 0;
+      if (remaining !== 0) throw new Error(`${owner} accepted work is not settled`);
+      return;
+    }
+    if (owner === "remote") {
+      if ((await ctx.jobRelayObligations?.listOpen() ?? []).length !== 0) {
+        throw new Error("Remote accepted work is not settled");
+      }
+      if ((await ctx.executorJobOwner?.acceptedWorkItems() ?? []).length !== 0) {
+        throw new Error("Local executor accepted work is not settled");
+      }
+      return;
+    }
+    if (owner === "channel") {
+      if ((ctx.channels?.listStatuses() ?? []).some((status) => status.state !== "disconnected")) {
+        throw new Error("Channel accepted work is not settled");
+      }
+      return;
+    }
+    if (owner === "scheduler") {
+      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      return;
+    }
+    if (owner === "delivery") {
+      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+    }
+  };
+  const stopPort = (
+    owner: keyof HostStopAcceptedWorkPorts,
+    settle: (strategy: "immediate" | "drain" | "cancel", timeoutMs: number) => Promise<void>,
+  ) => ({
+    freeze: (operationId: string) => captureStopAcceptedWork(owner, operationId),
+    settle: async (input: { readonly strategy: "immediate" | "drain" | "cancel"; readonly timeoutMs: number }) => {
+      await settle(input.strategy, input.timeoutMs);
+    },
+    readBack: async () => assertStopAcceptedWorkSettled(owner),
+  });
+  const acceptedWork: HostStopAcceptedWorkPorts = {
+    conversation: stopPort("conversation", async (strategy, timeoutMs) => {
+      if (strategy === "cancel") {
+        await ctx.conversations?.abortAllAndWait(
+          { kind: "external", origin: "server-shutdown" },
+          timeoutMs,
+        );
+      }
+      await ctx.inboundRouter?.drainAcceptedMessages();
+    }),
+    intent: stopPort("intent", async () => {
+      await ctx.executorJobOwner?.drain();
+    }),
+    final: stopPort("final", async () => {
+      await ctx.executorJobOwner?.drain();
+    }),
+    assignment: stopPort("assignment", async () => {
+      await ctx.executorJobOwner?.drain();
+    }),
+    remote: stopPort("remote", async () => {
+      await ctx.inboundRouter?.drainAcceptedMessages();
+      await ctx.executorJobOwner?.drain();
+    }),
+    channel: stopPort("channel", async () => {
+      await ctx.channelConnections?.disconnectConfigured();
+    }),
+    scheduler: stopPort("scheduler", async () => {
+      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      await ctx.executorJobOwner?.drain();
+    }),
+    delivery: stopPort("delivery", async () => {
+      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+    }),
+    lease: stopPort("lease", async () => {
+      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+    }),
+    permit: stopPort("permit", async () => {
+      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+    }),
+  };
   const stopCoordinator = new HostStopCoordinator({
     journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
     homeId: lifecycleHomeId,
     host: stopHost,
+    acceptedWork,
+    artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     runtime: {
       closeAdmission: async () => {
         managedHostStopping = true;
         ctx.inboundRouter?.refuseNewMessages();
-        await ctx.channelConnections?.disconnectConfigured();
-        await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-        await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+        await ctx.conversationProtocol?.stopRecoveryLoop();
       },
       settleImmediate: async () => {
         await ctx.inboundRouter?.drainAcceptedMessages();
@@ -1248,10 +1429,29 @@ async function runServerProcess(
       },
     },
     isHostStopped: async (host) => {
-      const pid = host.kind === "foreground"
-        ? host.processId
-        : Number.parseInt(host.instanceId.split(":", 1)[0] ?? "", 10);
-      return !Number.isSafeInteger(pid) || pid <= 0 || !isProcessAlive(pid);
+      const endpoint = host.endpointLock;
+      const current = await readLock(lockPaths).catch(() => null);
+      if (!endpoint) return false;
+      const endpointStopped = !current || current.pid !== endpoint.pid ||
+        current.port !== endpoint.port ||
+        current.startTime !== endpoint.startTime ||
+        current.startedAt !== endpoint.startedAt;
+      if (!endpointStopped) return false;
+      if (host.kind === "foreground") return !isProcessAlive(host.processId);
+      try {
+        const state = await loadCurrentManagedServiceState("inspect", zhixingHome);
+        if (
+          !state.spec ||
+          state.spec.serviceId !== host.serviceId ||
+          managedServiceDefinitionDigest(state.spec) !== host.definitionDigest
+        ) return false;
+        const inspection = await createManagedServiceAdapter({
+          storageGovernor: deviceCapacity.storage,
+        }).inspect(state.spec, new AbortController().signal);
+        return inspection.matches && !inspection.running;
+      } catch {
+        return false;
+      }
     },
   });
   await stopCoordinator.resumeActive();
@@ -1289,17 +1489,43 @@ async function runServerProcess(
     }
     localRetirementCompletedBeforeServerStart = true;
   };
+  const finishRemovedDevice = async () => {
+    const shutdown = removedShutdown.current;
+    if (shutdown) {
+      await shutdown();
+      return;
+    }
+    localRetirementCompletedBeforeServerStart = true;
+  };
   await ctx.meshRuntime?.bindDeviceRemovalLifecycle({
     closeAdmission: async () => {
       ctx.inboundRouter?.refuseNewMessages();
-      await ctx.channelConnections?.disconnectConfigured();
-      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      await ctx.conversationProtocol?.stopRecoveryLoop();
+    },
+    captureAcceptedWork: async (operationId) => {
+      const items = [] as Array<{
+        owner: "remote" | "channel" | "scheduler" | "delivery";
+        id: string;
+        revision: string;
+      }>;
+      for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+        for (const item of await captureStopAcceptedWork(owner, operationId)) {
+          items.push({ owner, ...item });
+        }
+      }
+      return Object.freeze(items.sort((left, right) =>
+        `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
     },
     settleAcceptedWork: async () => {
       await ctx.inboundRouter?.drainAcceptedMessages();
       await ctx.executorJobOwner?.drain();
+      await ctx.channelConnections?.disconnectConfigured();
+      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+      for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+        await assertStopAcceptedWorkSettled(owner);
+      }
     },
     releaseAdmission: async () => {
       await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
@@ -1309,7 +1535,28 @@ async function runServerProcess(
       await ctx.channelConnections?.connectConfigured();
     },
     cleanup: cleanupLocalDevice,
-    onRemoved: finishLocalRetirement,
+    finalizeDeviceKey: async (operationId, identity) => {
+      const expectedGeneration = protocolDigest("DeviceKeyGeneration", 1, {
+        deviceId: bootstrap.mesh.deviceKey.deviceId,
+        publicKey: bootstrap.mesh.deviceKey.publicKey,
+      });
+      if (
+        identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId ||
+        identity.targetDeviceKeyGeneration !== expectedGeneration
+      ) {
+        throw new Error("Device removal key finalizer does not own the frozen key generation");
+      }
+      await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
+      return [{
+        kind: "cleanup" as const,
+        digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
+          operationId,
+          targetDeviceId: identity.targetDeviceId,
+          targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
+        }),
+      }];
+    },
+    onRemoved: finishRemovedDevice,
   });
   const uninstallIssuerKey = bootstrap.mesh.mode === "trusted-home" &&
     bootstrap.mesh.trust.issuer.deviceId === bootstrap.mesh.deviceKey.deviceId
@@ -1415,8 +1662,14 @@ async function runServerProcess(
             }) => input.path === "recovery-backup"
               ? anchorUninstall.beginRecoveryBackup(input)
               : anchorUninstall.beginMigration(input),
-            continue: (input: { readonly operationId: string; readonly confirmBackup: true }) =>
-              anchorUninstall.confirmRecoveryBackup(input.operationId),
+            continue: (input: {
+              readonly operationId: string;
+              readonly confirmBackup: true;
+              readonly recoveryPackage: string;
+            }) => anchorUninstall.confirmRecoveryBackup(
+              input.operationId,
+              input.recoveryPackage,
+            ),
             cancel: (input: { readonly operationId: string }) =>
               anchorUninstall.abort(input.operationId),
             status: (input: { readonly operationId: string }) =>
@@ -1677,7 +1930,10 @@ async function runServerProcess(
       lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
       processInfo: {
         version: SERVER_VERSION,
+        kind: processMode,
         logPath: daemonLogPath,
+        startTime: processStartTime,
+        startedAt: processStartedAt,
       },
       logger: {
         info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),

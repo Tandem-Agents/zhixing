@@ -444,8 +444,10 @@ export function buildDeviceStatusMethod(): MethodEntry {
 }
 
 export function buildAnchorUninstallPreflightMethod(): MethodEntry {
-  return localAnchorUninstallMethod("server.uninstall.preflight", async (_params, uninstall) =>
-    uninstall.preflight());
+  return localAnchorUninstallMethod("server.uninstall.preflight", async (params, uninstall) => {
+    assertExactRecord(asRecord(params, "server.uninstall.preflight"), [], "server.uninstall.preflight");
+    return uninstall.preflight();
+  });
 }
 
 export function buildAnchorUninstallBeginMethod(): MethodEntry {
@@ -454,6 +456,7 @@ export function buildAnchorUninstallBeginMethod(): MethodEntry {
     const requestId = stableText(value.requestId, "uninstall requestId");
     const operationId = stableText(value.operationId, "uninstall operationId");
     if (value.path === "migration") {
+      assertExactRecord(value, ["operationId", "path", "requestId", "targetName", "transferId"], "server.uninstall.begin migration");
       return uninstall.begin({
         path: "migration",
         requestId,
@@ -463,7 +466,13 @@ export function buildAnchorUninstallBeginMethod(): MethodEntry {
       });
     }
     if (value.path === "recovery-backup") {
-      return uninstall.begin({ path: "recovery-backup", requestId, operationId });
+      assertExactRecord(value, ["operationId", "path", "recoveryPackage", "requestId"], "server.uninstall.begin recovery backup");
+      return uninstall.begin({
+        path: "recovery-backup",
+        requestId,
+        operationId,
+        recoveryPackage: recoveryPackageText(value.recoveryPackage),
+      });
     }
     throw RpcErrors.invalidParams("永久卸载路径必须是 migration 或 recovery-backup");
   });
@@ -472,12 +481,14 @@ export function buildAnchorUninstallBeginMethod(): MethodEntry {
 export function buildAnchorUninstallContinueMethod(): MethodEntry {
   return localAnchorUninstallMethod("server.uninstall.continue", async (params, uninstall) => {
     const value = asRecord(params, "server.uninstall.continue");
+    assertExactRecord(value, ["confirmBackup", "operationId", "recoveryPackage"], "server.uninstall.continue");
     if (value.confirmBackup !== true) {
       throw RpcErrors.invalidParams("恢复备份卸载需要显式确认");
     }
     return uninstall.continue({
       operationId: stableText(value.operationId, "uninstall operationId"),
       confirmBackup: true,
+      recoveryPackage: recoveryPackageText(value.recoveryPackage),
     });
   });
 }
@@ -485,6 +496,7 @@ export function buildAnchorUninstallContinueMethod(): MethodEntry {
 export function buildAnchorUninstallCancelMethod(): MethodEntry {
   return localAnchorUninstallMethod("server.uninstall.cancel", async (params, uninstall) => {
     const value = asRecord(params, "server.uninstall.cancel");
+    assertExactRecord(value, ["operationId"], "server.uninstall.cancel");
     return uninstall.cancel({
       operationId: stableText(value.operationId, "uninstall operationId"),
     });
@@ -494,6 +506,7 @@ export function buildAnchorUninstallCancelMethod(): MethodEntry {
 export function buildAnchorUninstallStatusMethod(): MethodEntry {
   return localAnchorUninstallMethod("server.uninstall.status", async (params, uninstall) => {
     const value = asRecord(params, "server.uninstall.status");
+    assertExactRecord(value, ["operationId"], "server.uninstall.status");
     return {
       state: await uninstall.status({
         operationId: stableText(value.operationId, "uninstall operationId"),
@@ -541,6 +554,7 @@ function parseDeviceRemovalStart(params: unknown): {
   readonly targetName: string;
 } {
   const value = asRecord(params, "device.remove");
+  assertExactRecord(value, ["operationId", "requestId", "targetName"], "device.remove");
   return {
     targetName: stableText(value.targetName, "device name"),
     operationId: stableText(value.operationId, "device removal operationId"),
@@ -552,6 +566,7 @@ function parseDeviceRemovalIdentity(params: unknown): {
   readonly targetName: string;
 } {
   const value = asRecord(params, "device lifecycle");
+  assertExactRecord(value, ["targetName"], "device.status");
   return {
     targetName: stableText(value.targetName, "device name"),
   };
@@ -562,7 +577,8 @@ function parseDeviceRemovalContinue(params: unknown): {
   readonly mode: "transfer" | "destroy" | "lost" | "cancel";
 } {
   const value = asRecord(params, "device.continue");
-  const identity = parseDeviceRemovalIdentity(value);
+  assertExactRecord(value, ["mode", "targetName"], "device.continue");
+  const identity = { targetName: stableText(value.targetName, "device name") };
   if (
     value.mode !== "transfer" && value.mode !== "destroy" &&
     value.mode !== "lost" && value.mode !== "cancel"
@@ -598,11 +614,33 @@ function asRecord(input: unknown, label: string): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
+function assertExactRecord(
+  input: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(input).sort();
+  const required = [...expected].sort();
+  if (
+    actual.length !== required.length ||
+    actual.some((key, index) => key !== required[index])
+  ) {
+    throw RpcErrors.invalidParams(`${label} 参数包含缺失或未知字段`);
+  }
+}
+
 function stableText(input: unknown, label: string): string {
   if (typeof input !== "string" || input.trim().length === 0 || input.length > 480) {
     throw RpcErrors.invalidParams(`${label} 无效`);
   }
   return input.trim();
+}
+
+function recoveryPackageText(input: unknown): string {
+  if (typeof input !== "string" || input.length === 0 || input.length > 16 * 1024 * 1024) {
+    throw RpcErrors.invalidParams("恢复包无效");
+  }
+  return input;
 }
 
 type DutyMigrationOperation = "targets" | "prepare" | "commit" | "cancel";

@@ -2634,6 +2634,12 @@ Windows 系统读投影只由固定 Task Scheduler COM 查询产生 strict JSON�
 
 含 `ArtifactRef` 的阶段证据在后续 terminal 重放中仍须作为同一 transaction 的 candidate reference 声明并受既有 retained-reference 投影保护。executor target 在两种生产装配根都必须先耐久 accepted，再关闭本机会话与 assignment 新准入；重启时在公开准入前恢复同一 operation gate，完成本地权威与既有 accepted work 收束后才可签发 revocation-ready。issuer 不得从自己的中间 phase 推导或伪造 target ready，只能重放 target 签名回执；target 在 revoke 响应丢失后用同一 durable decision 向 current issuer 重取 terminal 并继续 cleanup。`device list/remove/status/continue` 属 current-anchor 管理面，`server.shutdown` 与 `server.uninstall.*` 固定为本机 loopback-only。
 
+stop 的 `gate-closed` evidence 必须包含固定 `conversation/intent/final/assignment/remote/channel/scheduler/delivery/lease/permit` owner exact-set 的 canonical artifact；每项由稳定 id/revision 冻结，按同一 strategy 收束并 read-back，之后才允许 flush、物理步骤与 `ready-to-stop`。所有 OS signal、CLI/RPC 与 executor-only 入口只进入该 coordinator。managed driver 在 RPC 得到 `ready-to-stop` 后仍须全等复验完整 endpoint lock、canonical definition digest 与 manager inspection，再调用既有 `stopCurrentExact`；lock 换代零 manager effect，旧 lock 缺失时只有 manager 独立证明旧 task 不 running 才可补旧 operation terminal。发现 successor 时等待与 marker cleanup 都以完整 lock 而非 PID 判定。
+
+executor removal 的 accepted receipt 反绑 operation、target member/device-key generation、accepted issuer 与 trust ancestor。target journal 的 authenticated abort 与 ready 是唯一 winner，issuer journal 的 peer-effect 只重投冻结命令和回执；revoked target 的 TLS 历史身份只能调用 terminal-only exact-set，取得或提交该 operation 的 abort、cleanup-ready、issuer terminal，普通能力仍拒绝。preflight 在 accepted 后、任何 gate/transfer/delete 效果前读取全部 owner；确认时关闭准入并重读，digest 漂移只更新展示 snapshot、释放 gate且零 decision，全等才把 snapshot artifact 与 decision 同 transaction 反绑。ready 前逐 owner read-back同一 artifact 的 transfer/destroy 终态，禁止以重算 counts 替代。
+
+recovery-backup uninstall 在 accepted 前 strict decode并冻结 recovery package 的 target/root binding。service generation 只绑定 home/authority/trust/target/recipient/root，首个与 final checkpoint 各有独立 id/digest/LSN；两次都调用现有 checkpoint service 从冻结 target 读取并用同一 root 真解封、验证 full binding，final 的 `upToLsn` 必须覆盖 retirement decision 的实际日志 LSN。root 不耐久，重启保持 gate 并等待同 operation 重输。cleanup 对固定 current-home removable roots使用 bottom-up walker，每个 governor step 至多 128 个 dirent；SecretStore 亦以稳定 128 项批次删除非 device-key，随后依次 unregister read-back、cleanup-complete、cleanup-ready、issuer terminal、exact key compare-delete/read-back、本机 terminal。server 与 removal mesh 的每个方法在分派后立即 strict decode exact keys/version，unknown、缺失、错类型和旧 peer 在 journal/gate 前拒绝。
+
 执行顺序不可重排为会产生中间债务的形态：
 
 - 1–5 是所有后续节点的结构前提；S1 未完成前不得在旧 server/cli 结构上旁挂第二套分布式业务实现。

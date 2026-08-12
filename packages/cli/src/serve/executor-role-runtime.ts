@@ -64,7 +64,8 @@ import {
 import { loadOrCreateToken } from "./token.js";
 import { homeToPort } from "./host-port.js";
 import { isDaemonChild } from "./self-exec.js";
-import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
+import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
+import { protocolDigest } from "@zhixing/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { createManagedServiceAdapter } from "./managed-service.js";
@@ -325,8 +326,17 @@ export async function runExecutorRole(
     });
     await mesh.bindDeviceRemovalLifecycle({
       closeAdmission: async () => undefined,
+      captureAcceptedWork: async () => (await jobOwnerAssembly!.acceptedWorkItems())
+        .map((item) => Object.freeze({
+          owner: "remote" as const,
+          id: item.id,
+          revision: item.revision,
+        })),
       settleAcceptedWork: async () => {
         await jobOwnerAssembly!.drain();
+        if ((await jobOwnerAssembly!.acceptedWorkItems()).length > 0) {
+          throw new Error("Executor job accepted work is not durably settled");
+        }
         await authority!.executorResourceGovernor.coordinate(async () => undefined);
       },
       releaseAdmission: async () => undefined,
@@ -353,8 +363,21 @@ export async function runExecutorRole(
           },
         });
       },
+      finalizeDeviceKey: async (operationId, identity) => {
+        if (identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId) {
+          throw new Error("Device removal key finalizer does not match this executor");
+        }
+        await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
+        return [{
+          kind: "cleanup" as const,
+          digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
+            operationId,
+            deviceId: identity.targetDeviceId,
+            generation: identity.targetDeviceKeyGeneration,
+          }),
+        }];
+      },
       onRemoved: async () => {
-        await deleteDeviceKey(bootstrap.secretStore, bootstrap.mesh.deviceKey.deviceId);
         resolveLifecycleShutdown?.();
       },
     });

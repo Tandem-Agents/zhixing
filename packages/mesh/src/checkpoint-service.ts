@@ -159,7 +159,7 @@ export async function projectDurableRecoveryBackupStatus(
         targetId: pending.targetId,
         upToLsn: pending.upToLsn,
       }
-    : { state: "not-configured", fullBackupReady: false };
+    : { state: "not-configured", fullBackupReady: false, targetId: options.targetId };
 }
 
 export interface AuthorityCheckpointServiceOptions {

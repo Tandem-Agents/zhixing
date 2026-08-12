@@ -1,5 +1,6 @@
 import type { CheckpointPackage } from "./checkpoint.js";
-import type { RecoveryCheckpointRequest } from "@zhixing/core/contracts";
+import type { RecoveryCheckpointRequest, RecoveryCheckpointVerification } from "@zhixing/core/contracts";
+import type { RecoveryRoot } from "./recovery-root.js";
 import type {
   AuthorityCheckpointService,
   RecoveryBackupStatus,
@@ -26,6 +27,7 @@ export interface AuthorityCheckpointOwnerPort {
   start(schedule?: boolean): Promise<void>;
   ensureDaily(): Promise<CheckpointPackage>;
   force(requestId: string): Promise<CheckpointPackage>;
+  verify(checkpointId: string, recoveryRoot: RecoveryRoot): Promise<RecoveryCheckpointVerification>;
   status(): Promise<RecoveryBackupStatus>;
   stop(): Promise<void>;
 }
@@ -62,6 +64,10 @@ export class AuthorityCheckpointOwner implements AuthorityCheckpointOwnerPort {
   async force(requestId: string): Promise<CheckpointPackage> {
     if (requestId.length === 0) throw new TypeError("Forced checkpoint request id is required");
     return this.#run({ kind: "forced", requestId });
+  }
+
+  verify(checkpointId: string, recoveryRoot: RecoveryRoot): Promise<RecoveryCheckpointVerification> {
+    return this.options.service.verify({ checkpointId, recoveryRoot });
   }
 
   status(): Promise<RecoveryBackupStatus> {

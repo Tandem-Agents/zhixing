@@ -91,7 +91,10 @@ import {
   EvidenceMeshClient,
   registerEvidenceMeshService,
 } from "./evidence-mesh.js";
-import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
+import type {
+  LocalConversationOwnerAssembly,
+  LocalConversationRemovalSnapshot,
+} from "./local-conversation-owner.js";
 import {
   ConversationTransferMeshClient,
   ConversationTransferRejectedError,
@@ -330,6 +333,7 @@ export interface MeshRuntimeAssemblyOptions {
 /** Production composition for authenticated control services and their durable role owners. */
 export class MeshRuntimeAssembly {
   readonly services = new MeshServiceRegistry();
+  readonly #terminalOnlyServices = new MeshServiceRegistry();
   readonly connections = new MeshConnectionRegistry();
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
@@ -348,7 +352,14 @@ export class MeshRuntimeAssembly {
     operationId: string,
   ) => Promise<readonly import("@zhixing/core/protocol").DeviceLifecycleEvidenceRef[]>;
   #deviceRemovalRemoved?: (operationId: string) => void | Promise<void>;
+  #deviceRemovalFinalizeKey?: (
+    operationId: string,
+    identity: import("@zhixing/core/protocol").ExecutorRemovalLifecycleIdentity,
+  ) => Promise<readonly import("@zhixing/core/protocol").DeviceLifecycleEvidenceRef[]>;
   #deviceRemovalCloseAdmission?: (operationId: string) => Promise<void>;
+  #deviceRemovalCaptureAcceptedWork?: (
+    operationId: string,
+  ) => Promise<LocalConversationRemovalSnapshot["ownerItems"]>;
   #deviceRemovalSettleAcceptedWork?: (operationId: string) => Promise<void>;
   #deviceRemovalReleaseAdmission?: (operationId: string) => Promise<void>;
   #localDeviceRemovalOperation: string | undefined;
@@ -775,6 +786,11 @@ export class MeshRuntimeAssembly {
       secretStore: options.secretStore,
       bootstrapStore: options.bootstrapStore,
       services: this.services,
+      terminalOnly: {
+        services: this.#terminalOnlyServices,
+        authorizePeer: (deviceId) =>
+          this.#deviceRemovalAuthority?.authorizesTarget(deviceId) === true,
+      },
       connections: this.connections,
       credentialRouteGuard: new CredentialExposureAuthority({
         deviceId: options.authority.deviceId,
@@ -785,7 +801,8 @@ export class MeshRuntimeAssembly {
       onTrustReconciled: async (record) => {
         for (const deviceId of this.#deviceRemovalGuards.keys()) {
           if (!record.members.some((member) =>
-            member.device.deviceId === deviceId && member.state === "active")) {
+            member.device.deviceId === deviceId && member.state === "active") &&
+            this.#deviceRemovalAuthority?.authorizesTarget(deviceId) !== true) {
             this.#deviceRemovalGuards.delete(deviceId);
           }
         }
@@ -839,6 +856,14 @@ export class MeshRuntimeAssembly {
               );
               await this.#control.reconcileTrust(reconciled);
             }
+            const pendingRemovalAbort = await this.#deviceRemovalAuthority?.pendingAbortForTarget(
+              connection.peer.deviceId,
+            );
+            if (pendingRemovalAbort) {
+              await new DeviceRemovalTargetMeshClient(
+                this.connections.client(connection.peer.deviceId),
+              ).abort(pendingRemovalAbort.operationId, pendingRemovalAbort.abort);
+            }
             if (connection.peer.deviceId === this.#currentAnchorDeviceId()) {
               await this.#deviceRemovalTarget.resumeWithIssuer(
                 new DeviceRemovalIssuerMeshClient(
@@ -870,6 +895,9 @@ export class MeshRuntimeAssembly {
       ...(options.localConversationOwner
         ? { localOwner: options.localConversationOwner }
         : {}),
+      captureExternalAcceptedWork: (operationId) => this.#deviceRemovalCaptureAcceptedWork
+        ? this.#deviceRemovalCaptureAcceptedWork(operationId)
+        : Promise.reject(new Error("Device removal accepted-work capture is not bound")),
       closeAdmission: async (operationId) => {
         if (
           this.#localDeviceRemovalOperation &&
@@ -904,6 +932,9 @@ export class MeshRuntimeAssembly {
       cleanup: (operationId) => this.#deviceRemovalCleanup
         ? this.#deviceRemovalCleanup(operationId)
         : Promise.reject(new Error("Device removal cleanup is not bound")),
+      finalizeDeviceKey: (operationId, identity) => this.#deviceRemovalFinalizeKey
+        ? this.#deviceRemovalFinalizeKey(operationId, identity)
+        : Promise.reject(new Error("Device removal key finalizer is not bound")),
       onRemoved: (operationId) => this.#deviceRemovalRemoved?.(operationId),
     });
     this.#disposers.push(registerDeviceRemovalTargetMeshService(
@@ -1028,7 +1059,7 @@ export class MeshRuntimeAssembly {
     });
     this.#deviceRemovalAuthority = authority;
     this.#deviceRemovalIssuerKeyId = issuerKey.deviceId;
-    this.#disposeDeviceRemovalIssuer = registerDeviceRemovalIssuerMeshService(
+    const disposeActive = registerDeviceRemovalIssuerMeshService(
       this.services,
       {
         authority,
@@ -1038,14 +1069,33 @@ export class MeshRuntimeAssembly {
             member.state === "active" && member.device.deviceId === deviceId),
       },
     );
+    const disposeTerminal = registerDeviceRemovalIssuerMeshService(
+      this.#terminalOnlyServices,
+      {
+        authority,
+        authorizeTarget: (deviceId) => authority.authorizesTarget(deviceId),
+        terminalOnly: true,
+      },
+    );
+    this.#disposeDeviceRemovalIssuer = () => {
+      disposeTerminal();
+      disposeActive();
+    };
   }
 
   async bindDeviceRemovalLifecycle(input: {
     readonly closeAdmission: (operationId: string) => Promise<void>;
+    readonly captureAcceptedWork: (
+      operationId: string,
+    ) => Promise<LocalConversationRemovalSnapshot["ownerItems"]>;
     readonly settleAcceptedWork: (operationId: string) => Promise<void>;
     readonly releaseAdmission: (operationId: string) => Promise<void>;
     readonly cleanup: (
       operationId: string,
+    ) => Promise<readonly import("@zhixing/core/protocol").DeviceLifecycleEvidenceRef[]>;
+    readonly finalizeDeviceKey: (
+      operationId: string,
+      identity: import("@zhixing/core/protocol").ExecutorRemovalLifecycleIdentity,
     ) => Promise<readonly import("@zhixing/core/protocol").DeviceLifecycleEvidenceRef[]>;
     readonly onRemoved: (operationId: string) => void | Promise<void>;
   }): Promise<void> {
@@ -1053,15 +1103,19 @@ export class MeshRuntimeAssembly {
       this.#deviceRemovalCleanup ||
       this.#deviceRemovalRemoved ||
       this.#deviceRemovalCloseAdmission ||
+      this.#deviceRemovalCaptureAcceptedWork ||
       this.#deviceRemovalSettleAcceptedWork ||
-      this.#deviceRemovalReleaseAdmission
+      this.#deviceRemovalReleaseAdmission ||
+      this.#deviceRemovalFinalizeKey
     ) {
       throw new Error("Device removal lifecycle is already bound");
     }
     this.#deviceRemovalCloseAdmission = input.closeAdmission;
+    this.#deviceRemovalCaptureAcceptedWork = input.captureAcceptedWork;
     this.#deviceRemovalSettleAcceptedWork = input.settleAcceptedWork;
     this.#deviceRemovalReleaseAdmission = input.releaseAdmission;
     this.#deviceRemovalCleanup = input.cleanup;
+    this.#deviceRemovalFinalizeKey = input.finalizeDeviceKey;
     this.#deviceRemovalRemoved = input.onRemoved;
     await this.#deviceRemovalTarget.resumeBeforeAdmission();
   }
@@ -1125,7 +1179,7 @@ export class MeshRuntimeAssembly {
         ).abort(operationId, abort);
       }
       return {
-        phase: "cancelled" as const,
+        phase: "waiting-for-device" as const,
         conversations: [] as readonly string[],
         localData: "known" as const,
         credentialActions: [] as readonly string[],
@@ -1205,13 +1259,19 @@ export class MeshRuntimeAssembly {
       operationId: removalOperationId,
     });
     await this.#deviceRemovalTarget.accept(accepted);
-    const ready = await this.#deviceRemovalTarget.decide({
+    const decision = await this.#deviceRemovalTarget.decide({
       operationId: removalOperationId,
       mode: "transfer",
       currentAnchorDeviceId: issuerDeviceId,
     });
-    const revoked = await client.ready(ready);
-    await this.#deviceRemovalTarget.finish(revoked);
+    if (decision.kind === "preflight-changed") {
+      throw new Error("Accepted work changed; review and retry local retirement");
+    }
+    const cleanupReady = await this.#deviceRemovalTarget.finish(
+      await client.ready(decision.receipt),
+    );
+    if (!cleanupReady) throw new Error("Retiring device did not produce cleanup-ready");
+    await this.#deviceRemovalTarget.finish(await client.cleanupReady(cleanupReady));
   }
 
   async plannedAnchorTargets(): Promise<readonly {
@@ -1330,7 +1390,6 @@ export class MeshRuntimeAssembly {
         deviceId,
         new Error("Paired device access was revoked"),
       );
-      this.#deviceRemovalGuards.delete(deviceId);
     }
   }
 

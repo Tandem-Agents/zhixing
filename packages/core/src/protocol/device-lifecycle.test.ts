@@ -172,6 +172,26 @@ describe("device lifecycle protocol", () => {
     )).toThrow();
   });
 
+  it("makes each cross-end peer effect an exact single durable fact", () => {
+    let state = reduceDeviceLifecycle(undefined, {
+      v: 1,
+      t: "accepted",
+      identity: removalIdentity(),
+    });
+    const effect = {
+      v: 1,
+      t: "peer-effect",
+      operationId: "remove-1",
+      effect: { kind: "target-ready", digest: DIGEST, evidence: [] },
+    } as const;
+    state = reduceDeviceLifecycle(state, effect);
+    expect(reduceDeviceLifecycle(state, effect)).toBe(state);
+    expect(() => reduceDeviceLifecycle(state, {
+      ...effect,
+      effect: { ...effect.effect, digest: OTHER_DIGEST },
+    })).toThrow("conflicts with replay");
+  });
+
   it("rejects corrupt canonical bytes, duplicate evidence and skipped phases", () => {
     const record = { v: 1, t: "accepted", identity: stopIdentity() } as const;
     expect(() => decodeDeviceLifecycleRecord(Buffer.from(JSON.stringify(record), "utf8"))).toThrow("bytes are invalid");

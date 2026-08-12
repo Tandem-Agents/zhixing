@@ -90,6 +90,25 @@ export class DeviceRemovalIssuerMeshClient {
     );
   }
 
+  async cleanupReady(receipt: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt> {
+    const response = await this.client.request(
+      DEVICE_REMOVAL_ISSUER_SERVICE,
+      Buffer.from(canonicalize({ v: 1, op: "cleanup-ready", receipt }), "utf8"),
+    );
+    return validateExecutorRemovalReceipt(
+      decodeExactObject(response, "Device removal issuer response", ["receipt", "v"]).receipt,
+      this.verifier,
+    );
+  }
+
+  async targetAborted(receipt: ExecutorRemovalReceipt): Promise<void> {
+    const response = await this.client.request(
+      DEVICE_REMOVAL_ISSUER_SERVICE,
+      Buffer.from(canonicalize({ v: 1, op: "target-aborted", receipt }), "utf8"),
+    );
+    decodeExactObject(response, "Device removal issuer response", ["accepted", "v"]);
+  }
+
   async terminal(operationId: string): Promise<ExecutorRemovalReceipt | undefined> {
     const response = await this.client.request(
       DEVICE_REMOVAL_ISSUER_SERVICE,
@@ -116,6 +135,7 @@ export function registerDeviceRemovalTargetMeshService(
       const command = decodeObject(payload, "Device removal target command");
       if (command.v !== 1) throw new TypeError("Device removal target command version is invalid");
       if (command.op === "accept") {
+        assertExactCommand(command, ["op", "receipt", "v"], "Device removal target accept");
         const snapshot = await input.target.accept(command.receipt as ExecutorRemovalReceipt);
         return encode({ v: 1,
           conversations: snapshot.conversations.map((item) => item.displayName),
@@ -123,6 +143,11 @@ export function registerDeviceRemovalTargetMeshService(
         });
       }
       if (command.op === "decide") {
+        assertExactCommand(
+          command,
+          ["currentAnchorDeviceId", "mode", "op", "operationId", "v"],
+          "Device removal target decide",
+        );
         const operationId = requiredString(command.operationId, "Removal operationId");
         const mode = command.mode === "transfer" || command.mode === "destroy"
           ? command.mode
@@ -131,22 +156,42 @@ export function registerDeviceRemovalTargetMeshService(
           command.currentAnchorDeviceId,
           "Removal current anchor",
         );
-        const ready = await input.target.decide({ operationId, mode, currentAnchorDeviceId });
-        const terminal = await input.issuerFor(connection.peer.deviceId).ready(ready);
-        await input.target.finish(terminal);
+        const decision = await input.target.decide({ operationId, mode, currentAnchorDeviceId });
+        if (decision.kind === "preflight-changed") {
+          return encode({ v: 1, state: await input.target.state(operationId) });
+        }
+        const issuer = input.issuerFor(connection.peer.deviceId);
+        const cleanupReady = await input.target.finish(await issuer.ready(decision.receipt));
+        if (!cleanupReady) throw new Error("Device removal did not produce cleanup-ready");
+        await input.target.finish(await issuer.cleanupReady(cleanupReady));
         return encode({ v: 1, state: await input.target.state(operationId) });
       }
       if (command.op === "status") {
+        assertExactCommand(command, ["op", "operationId", "v"], "Device removal target status");
         const operationId = requiredString(command.operationId, "Removal operationId");
         return encode({ v: 1, state: await input.target.state(operationId) ?? null });
       }
       if (command.op === "abort") {
+        assertExactCommand(
+          command,
+          ["abort", "op", "operationId", "v"],
+          "Device removal target abort",
+        );
         const operationId = requiredString(command.operationId, "Removal operationId");
         const abort = command.abort as DeviceLifecycleAbort;
         if (abort.authorizedByDeviceId !== connection.peer.deviceId) {
           throw new TypeError("Removal abort peer does not match the issuer device");
         }
-        await input.target.abort(operationId, abort);
+        const receipt = await input.target.abort(operationId, abort);
+        const issuer = input.issuerFor(connection.peer.deviceId);
+        if (receipt.phase === "aborted") {
+          await issuer.targetAborted(receipt);
+        } else if (receipt.phase === "revocation-ready") {
+          const cleanupReady = await input.target.finish(await issuer.ready(receipt));
+          if (cleanupReady) await input.target.finish(await issuer.cleanupReady(cleanupReady));
+        } else {
+          throw new Error("Device removal abort did not return a durable target winner");
+        }
         return encode({ v: 1, state: await input.target.state(operationId) });
       }
       throw new TypeError("Device removal target command operation is invalid");
@@ -159,6 +204,7 @@ export function registerDeviceRemovalIssuerMeshService(
   input: {
     readonly authority: CurrentIssuerDeviceRemovalAuthority;
     readonly authorizeTarget: (deviceId: string) => boolean;
+    readonly terminalOnly?: boolean;
   },
 ): () => void {
   return registry.register(DEVICE_REMOVAL_ISSUER_SERVICE, {
@@ -168,7 +214,21 @@ export function registerDeviceRemovalIssuerMeshService(
     handler: async (payload, connection) => {
       const command = decodeObject(payload, "Device removal issuer command");
       if (command.v !== 1) throw new TypeError("Device removal issuer command version is invalid");
+      if (
+        input.terminalOnly === true &&
+        command.op !== "ready" &&
+        command.op !== "cleanup-ready" &&
+        command.op !== "target-aborted" &&
+        command.op !== "terminal"
+      ) {
+        throw new TypeError("Historical device removal transport only accepts terminal effects");
+      }
       if (command.op === "accept-self") {
+        assertExactCommand(
+          command,
+          ["op", "operationId", "requestId", "v"],
+          "Device removal issuer accept",
+        );
         const requestId = requiredString(command.requestId, "Removal requestId");
         const operationId = requiredString(command.operationId, "Removal operationId");
         const receipt = await input.authority.acceptForDevice({
@@ -179,13 +239,44 @@ export function registerDeviceRemovalIssuerMeshService(
         return encode({ v: 1, receipt });
       }
       if (command.op === "ready") {
+        assertExactCommand(command, ["op", "receipt", "v"], "Device removal issuer ready");
         const receipt = command.receipt as ExecutorRemovalReceipt;
         if (receipt.targetDeviceId !== connection.peer.deviceId) {
           throw new TypeError("Removal ready peer does not match the target device");
         }
         return encode({ v: 1, receipt: await input.authority.commitReady(receipt) });
       }
+      if (command.op === "cleanup-ready") {
+        assertExactCommand(
+          command,
+          ["op", "receipt", "v"],
+          "Device removal issuer cleanup-ready",
+        );
+        const receipt = command.receipt as ExecutorRemovalReceipt;
+        if (receipt.targetDeviceId !== connection.peer.deviceId) {
+          throw new TypeError("Removal cleanup-ready peer does not match the target device");
+        }
+        return encode({ v: 1, receipt: await input.authority.commitCleanupReady(receipt) });
+      }
+      if (command.op === "target-aborted") {
+        assertExactCommand(
+          command,
+          ["op", "receipt", "v"],
+          "Device removal issuer target-aborted",
+        );
+        const receipt = command.receipt as ExecutorRemovalReceipt;
+        if (receipt.targetDeviceId !== connection.peer.deviceId) {
+          throw new TypeError("Removal aborted peer does not match the target device");
+        }
+        await input.authority.acceptTargetAborted(receipt);
+        return encode({ v: 1, accepted: true });
+      }
       if (command.op === "terminal") {
+        assertExactCommand(
+          command,
+          ["op", "operationId", "v"],
+          "Device removal issuer terminal",
+        );
         const operationId = requiredString(command.operationId, "Removal operationId");
         const operation = await input.authority.operation(operationId);
         if (!operation || operation.targetDeviceId !== connection.peer.deviceId) {
@@ -227,6 +318,16 @@ function decodeExactObject(
     throw new TypeError(`${label} shape is invalid`);
   }
   return value;
+}
+
+function assertExactCommand(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): void {
+  if (canonicalize(Object.keys(value).sort()) !== canonicalize([...keys].sort())) {
+    throw new TypeError(`${label} shape is invalid`);
+  }
 }
 
 function requiredString(input: unknown, label: string): string {

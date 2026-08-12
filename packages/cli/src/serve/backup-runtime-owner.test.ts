@@ -113,7 +113,11 @@ describe("public recovery backup status", () => {
       currentTargetId: "backup-device:target",
       bindings: [{ kind: "paired-device", targetId: "backup-device:target", deviceId: "target" }],
     }));
-    await expect(owner!.status()).resolves.toEqual({ state: "not-configured", fullBackupReady: false });
+    await expect(owner!.status()).resolves.toEqual({
+      state: "not-configured",
+      fullBackupReady: false,
+      targetId: "backup-device:target",
+    });
 
     const noRuntimeHome = await createTempDir("recovery-owner-no-runtime");
     await new FileBackupTargetConfiguration(noRuntimeHome).select({

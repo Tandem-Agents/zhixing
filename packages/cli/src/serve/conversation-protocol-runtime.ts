@@ -2287,6 +2287,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return this.recover();
   }
 
+  async completeLifecycleProjections(conversationId: string): Promise<number> {
+    return this.#resumeLifecycleProjections(
+      conversationId,
+      this.#journal(conversationId),
+    );
+  }
+
   async publishPendingFinals(conversationId: string): Promise<number> {
     try {
       const journal = this.#journal(conversationId);
@@ -2322,22 +2329,38 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     readonly pendingAssignments: number;
     readonly recoveryBacklog: number;
     readonly activeLocalLeases: number;
+    readonly items: {
+      readonly finals: readonly { readonly id: string; readonly revision: string }[];
+      readonly assignments: readonly { readonly id: string; readonly revision: string }[];
+      readonly recovery: readonly { readonly id: string; readonly revision: string }[];
+      readonly leases: readonly { readonly id: string; readonly revision: string }[];
+    };
   }> {
-    let pendingFinals = 0;
-    let pendingAssignments = 0;
+    const finals: Array<{ id: string; revision: string }> = [];
+    const assignments: Array<{ id: string; revision: string }> = [];
     const conversations = conversationId === undefined
       ? await this.listSessions()
       : [conversationId];
     for (const currentConversationId of conversations) {
       const journal = this.#journal(currentConversationId);
-      pendingFinals += (await journal.pendingFinalFrames()).length;
-      pendingAssignments += (await journal.assignmentsAwaitingRecovery()).length;
+      for (const final of await journal.pendingFinalFrames()) {
+        finals.push({
+          id: `${final.conversationId}:${final.runId}`,
+          revision: String(final.commitRevision),
+        });
+      }
+      for (const assignment of await journal.assignmentsAwaitingRecovery()) {
+        assignments.push({
+          id: assignment.assignmentId,
+          revision: protocolDigest("PendingAssignmentClosure", 1, assignment),
+        });
+      }
     }
-    let activeLocalLeases = 0;
+    const leases: Array<{ id: string; revision: string }> = [];
     const governor = this.#authority.executorResourceGovernor;
     if (governor) {
       const projection = await governor.snapshot();
-      for (const reservation of projection.reservations.values()) {
+      for (const [reservationId, reservation] of projection.reservations) {
         const scope = reservation.lease.scopeBinding;
         if (
           reservation.state === "active" &&
@@ -2346,22 +2369,38 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           this.#acceptsConversationId(scope.conversationId) &&
           (conversationId === undefined || scope.conversationId === conversationId)
         ) {
-          activeLocalLeases += 1;
+          leases.push({
+            id: reservationId,
+            revision: protocolDigest("ActiveLocalLeaseClosure", 1, reservation),
+          });
         }
       }
     }
+    const recoveryIds = new Set<string>();
+    for (const id of this.#recoveryConversations.keys()) {
+      if (conversationId === undefined || conversationId === id) recoveryIds.add(`queued:${id}`);
+    }
+    for (const id of this.#activeRecoveryClaims.keys()) {
+      if (conversationId === undefined || conversationId === id) recoveryIds.add(`claimed:${id}`);
+    }
+    if (this.#recoveryRunning) recoveryIds.add(`worker:${conversationId ?? "all"}`);
+    const recovery = [...recoveryIds].sort().map((id) => ({
+      id,
+      revision: protocolDigest("ConversationRecoveryClosure", 1, { id }),
+    }));
+    const sortItems = <T extends { readonly id: string }>(items: T[]) =>
+      Object.freeze(items.sort((left, right) => left.id.localeCompare(right.id, "en-US")));
     return {
-      pendingFinals,
-      pendingAssignments,
-      recoveryBacklog:
-        (conversationId === undefined
-          ? this.#recoveryConversations.size
-          : Number(this.#recoveryConversations.has(conversationId))) +
-        (conversationId === undefined
-          ? this.#activeRecoveryClaims.size
-          : Number(this.#activeRecoveryClaims.has(conversationId))) +
-        (this.#recoveryRunning ? 1 : 0),
-      activeLocalLeases,
+      pendingFinals: finals.length,
+      pendingAssignments: assignments.length,
+      recoveryBacklog: recovery.length,
+      activeLocalLeases: leases.length,
+      items: Object.freeze({
+        finals: sortItems(finals),
+        assignments: sortItems(assignments),
+        recovery: sortItems(recovery),
+        leases: sortItems(leases),
+      }),
     };
   }
 

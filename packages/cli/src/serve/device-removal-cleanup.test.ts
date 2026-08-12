@@ -14,6 +14,10 @@ describe("executor device local cleanup", () => {
     const deviceKey = await DeviceKey.generate();
     await persistDeviceKey(secrets, deviceKey);
     await secrets.put({ kind: "provider", bindingId: "provider-a" }, "secret");
+    for (let index = 0; index < 129; index += 1) {
+      await secrets.put({ kind: "provider", bindingId: `bulk-${index.toString().padStart(3, "0")}` }, "secret");
+      await putFile(path.join(home, "runtime", "bulk", `${index}.json`), "remove");
+    }
     await putFile(path.join(home, "runtime", "ephemeral.json"), "remove");
     await putFile(path.join(home, "distributed-runtime", "workspace-bindings", "binding.json"), "remove");
     await putFile(path.join(home, "distributed-runtime", "authority", "authority.keep"), "keep");
@@ -31,6 +35,8 @@ describe("executor device local cleanup", () => {
     expect(unregisterFuture).toHaveBeenCalledTimes(1);
     await expect(readFile(path.join(home, "runtime", "ephemeral.json")))
       .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(path.join(home, "runtime", "bulk", "128.json")))
+      .rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(home, "distributed-runtime", "workspace-bindings", "binding.json")))
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(home, "distributed-runtime", "authority", "authority.keep"), "utf8"))
@@ -40,9 +46,10 @@ describe("executor device local cleanup", () => {
     await expect(readFile(path.join(home, "workspace", "user.keep"), "utf8"))
       .resolves.toBe("keep");
     expect(await secrets.get({ kind: "provider", bindingId: "provider-a" })).toBeNull();
+    expect(await secrets.get({ kind: "provider", bindingId: "bulk-128" })).toBeNull();
     expect((await secrets.list("")).filter((ref) => ref.kind === "device-key")).toHaveLength(1);
     expect(evidence.some((item) => item.kind === "cleanup")).toBe(true);
-  });
+  }, 120_000);
 });
 
 async function putFile(file: string, contents: string): Promise<void> {

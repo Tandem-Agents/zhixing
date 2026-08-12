@@ -73,6 +73,46 @@ describe("executor job owner production surface", () => {
     expect(anchorOnly.executorJobOwner).toBeUndefined();
   });
 
+  it("projects the complete durable job obligation exact-set without starting recovery", async () => {
+    const recoverableJobObligations = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [{
+          envelope: { assignmentId: "assignment-b" },
+          execution: true,
+          cancellation: false,
+          interaction: false,
+        }],
+        continuation: "assignment-b",
+      })
+      .mockResolvedValueOnce({
+        entries: [{
+          envelope: { assignmentId: "assignment-a" },
+          execution: false,
+          cancellation: true,
+          interaction: false,
+        }],
+      });
+    const ctx = ownerContext(
+      ["executor"],
+      { recoverableJobObligations } as ReturnType<typeof recoveryLedger>,
+      new StartupRollback(),
+    );
+    await unit.setup(ctx);
+
+    const items = await ctx.executorJobOwner!.acceptedWorkItems();
+
+    expect(items.map((item) => item.id)).toEqual([
+      "assignment-a",
+      "assignment-b",
+    ]);
+    expect(items.every((item) => /^sha256:[a-f0-9]{64}$/u.test(item.revision))).toBe(true);
+    expect(recoverableJobObligations).toHaveBeenNthCalledWith(1, { limit: 32 });
+    expect(recoverableJobObligations).toHaveBeenNthCalledWith(2, {
+      limit: 32,
+      continuation: "assignment-b",
+    });
+  });
+
   it("registers rollback after transports so the started owner closes first", async () => {
     const order: string[] = [];
     const rollback = new StartupRollback();

@@ -52,6 +52,40 @@ describe("runStopCommand durable safety boundary", () => {
     },
   );
 
+  it("captures the managed projection before RPC and exact-stops it only after ready-to-stop", async () => {
+    const order: string[] = [];
+    let alive = true;
+    const input = deps({
+      readLockFn: vi.fn(async () => ({ ...LOCK, kind: "managed" })),
+      isProcessAliveFn: vi.fn(() => alive),
+      prepareManagedExactStopFn: vi.fn(async () => {
+        order.push("capture");
+        return async () => {
+          order.push("exact-stop");
+          alive = false;
+        };
+      }),
+      rpcShutdownFn: vi.fn(async () => { order.push("ready-to-stop"); }),
+    });
+
+    await expect(runStopCommand({ timeoutMs: 1_000, deps: input }))
+      .resolves.toMatchObject({ status: "stopped" });
+    expect(order).toEqual(["capture", "ready-to-stop", "exact-stop"]);
+  });
+
+  it("treats an exact endpoint successor as the old host exit without cleaning the successor", async () => {
+    const successor = { ...LOCK, pid: LOCK.pid + 1, startTime: 88 };
+    let reads = 0;
+    const input = deps({
+      readLockFn: vi.fn(async () => reads++ === 0 ? LOCK : successor),
+      isProcessAliveFn: vi.fn(() => true),
+    });
+
+    await expect(runStopCommand({ timeoutMs: 1_000, deps: input }))
+      .resolves.toMatchObject({ status: "stopped", pid: LOCK.pid });
+    expect(input.releaseLockFn).not.toHaveBeenCalled();
+  });
+
   it("keeps the exact instance and runtime markers when safe stop times out", async () => {
     const input = deps();
     const result = await runStopCommand({ timeoutMs: 250, pollMs: 100, deps: input });

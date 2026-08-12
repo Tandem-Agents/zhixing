@@ -335,11 +335,12 @@ export class RpcManagementFacade {
         transferId: string;
         targetName: string;
       }
-    | {
-        path: "recovery-backup";
-        requestId: string;
-        operationId: string;
-      }): Promise<AnchorUninstallState> {
+      | {
+          path: "recovery-backup";
+          requestId: string;
+          operationId: string;
+          recoveryPackage: string;
+        }): Promise<AnchorUninstallState> {
     const client = await this.link.getClient();
     return decodeAnchorUninstallState(
       await client.request<unknown>("server.uninstall.begin", input),
@@ -349,6 +350,7 @@ export class RpcManagementFacade {
   async anchorUninstallContinue(input: {
     operationId: string;
     confirmBackup: true;
+    recoveryPackage: string;
   }): Promise<AnchorUninstallState> {
     const client = await this.link.getClient();
     return decodeAnchorUninstallState(

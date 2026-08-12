@@ -1,5 +1,6 @@
 import path from "node:path";
-import { rm } from "node:fs/promises";
+import type { Dir } from "node:fs";
+import { lstat, opendir, rmdir, unlink } from "node:fs/promises";
 import type { SecretStorePort } from "@zhixing/core/contracts";
 import { protocolDigest, type DeviceLifecycleEvidenceRef } from "@zhixing/core/protocol";
 import {
@@ -26,7 +27,6 @@ export async function cleanupExecutorDeviceLocalState(input: {
     path.join(distributed, "capacity"),
     path.join(distributed, "derived"),
     path.join(distributed, "disaster-recovery-staging"),
-    path.join(distributed, "evidence"),
     path.join(distributed, "execution-assets.json"),
     path.join(distributed, "executor-capability-directory.json"),
     path.join(distributed, "executor-snapshot-version.json"),
@@ -47,16 +47,30 @@ export async function cleanupExecutorDeviceLocalState(input: {
     input.signal ?? new AbortController().signal,
     async () => {
     for (const entry of removable) {
-      await runStorageMaintenanceStep(
-        input.storageGovernor,
-        storageMaintenanceRequest(
-          "device-lifecycle-cleanup",
-          entry,
-          protocolDigest("ExecutorRemovalCleanupPath", 1, { home, entry }),
-          { obligation: "pre-commit", maxWaitMs: 5_000 },
-        ),
-        () => rm(entry, { recursive: true, force: true }),
-      );
+      const walker = new BoundedRemovalWalker(entry);
+      let batchIndex = 0;
+      try {
+        while (true) {
+          const result = await runStorageMaintenanceStep(
+            input.storageGovernor,
+            storageMaintenanceRequest(
+              "device-lifecycle-cleanup",
+              entry,
+              protocolDigest("ExecutorRemovalCleanupPathBatch", 1, {
+                home,
+                entry,
+                batchIndex,
+              }),
+              { obligation: "pre-commit", maxWaitMs: 5_000 },
+            ),
+            () => walker.step(128),
+          );
+          if (result.done) break;
+          batchIndex += 1;
+        }
+      } finally {
+        await walker.close();
+      }
     }
     },
   );
@@ -76,6 +90,135 @@ export async function cleanupExecutorDeviceLocalState(input: {
     },
     ...secretEvidence,
   ]);
+}
+
+interface RemovalFrame {
+  readonly path: string;
+  readonly directory: Dir;
+  pendingChild?: string;
+}
+
+class BoundedRemovalWalker {
+  readonly #stack: RemovalFrame[] = [];
+  #initialized = false;
+  #fileRoot = false;
+  #done = false;
+
+  constructor(private readonly root: string) {}
+
+  async step(limit: number): Promise<{ readonly done: boolean }> {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("Removal walker limit must be a positive integer");
+    }
+    if (this.#done) return { done: true };
+    if (!this.#initialized) await this.#initialize();
+    let operations = 0;
+    if (this.#fileRoot) {
+      await unlink(this.root).catch(ignoreMissing);
+      this.#fileRoot = false;
+      this.#done = true;
+      return { done: true };
+    }
+    while (operations < limit && this.#stack.length > 0) {
+      const frame = this.#stack.at(-1)!;
+      if (frame.pendingChild) {
+        const child = frame.pendingChild;
+        frame.pendingChild = undefined;
+        const directory = await openDirectory(child);
+        if (directory) this.#stack.push({ path: child, directory });
+        continue;
+      }
+      const entry = await frame.directory.read();
+      if (entry) {
+        const child = path.join(frame.path, entry.name);
+        operations += 1;
+        if (entry.isDirectory() && !entry.isSymbolicLink()) {
+          if (operations >= limit) frame.pendingChild = child;
+          else {
+            const directory = await openDirectory(child);
+            if (directory) this.#stack.push({ path: child, directory });
+          }
+        } else {
+          await unlink(child).catch(ignoreMissing);
+        }
+        continue;
+      }
+      await frame.directory.close();
+      this.#stack.pop();
+      operations += 1;
+      if (!(await removeDirectory(frame.path))) {
+        const directory = await openDirectory(frame.path);
+        if (directory) this.#stack.push({ path: frame.path, directory });
+      }
+    }
+    this.#done = this.#stack.length === 0;
+    return { done: this.#done };
+  }
+
+  async close(): Promise<void> {
+    while (this.#stack.length > 0) {
+      const frame = this.#stack.pop()!;
+      await frame.directory.close().catch(ignoreClosedDirectory);
+    }
+  }
+
+  async #initialize(): Promise<void> {
+    this.#initialized = true;
+    let stat;
+    try {
+      stat = await lstat(this.root);
+    } catch (error) {
+      ignoreMissing(error);
+      this.#done = true;
+      return;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      this.#fileRoot = true;
+      return;
+    }
+    const directory = await openDirectory(this.root);
+    if (directory) this.#stack.push({ path: this.root, directory });
+    else this.#done = true;
+  }
+}
+
+function ignoreMissing(error: unknown): void {
+  if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+  throw error;
+}
+
+async function openDirectory(directory: string): Promise<Dir | undefined> {
+  try {
+    return await opendir(directory, { bufferSize: 1 });
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+async function removeDirectory(directory: string): Promise<boolean> {
+  try {
+    await rmdir(directory);
+    return true;
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return true;
+    if (hasCode(error, "ENOTEMPTY") || hasCode(error, "EEXIST")) return false;
+    throw error;
+  }
+}
+
+function ignoreClosedDirectory(error: unknown): void {
+  if (
+    hasCode(error, "ERR_DIR_CLOSED") ||
+    hasCode(error, "ENOENT")
+  ) return;
+  throw error;
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code;
 }
 
 function assertOwnedPath(home: string, candidate: string): string {

@@ -9,6 +9,14 @@ import {
   buildDutyMigrationCommitMethod,
   buildDutyMigrationPrepareMethod,
   buildDutyMigrationTargetsMethod,
+  buildDeviceContinueMethod,
+  buildDeviceRemoveMethod,
+  buildDeviceStatusMethod,
+  buildAnchorUninstallBeginMethod,
+  buildAnchorUninstallCancelMethod,
+  buildAnchorUninstallContinueMethod,
+  buildAnchorUninstallPreflightMethod,
+  buildAnchorUninstallStatusMethod,
   buildLlmCompleteMethod,
 } from "../server.js";
 import type { HandlerContext } from "../../handlers.js";
@@ -28,28 +36,87 @@ function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContex
   };
 }
 
+describe("Unit 37 lifecycle facade input", () => {
+  it.each([
+    [buildDeviceRemoveMethod, { requestId: "request-1", operationId: "operation-1", targetName: "设备", extra: true }],
+    [buildDeviceContinueMethod, { targetName: "设备", mode: "destroy", extra: true }],
+    [buildDeviceStatusMethod, { targetName: "设备", extra: true }],
+  ] as const)("rejects unknown device fields before lifecycle effects", async (build, params) => {
+    const lifecycle = { remove: vi.fn(), continue: vi.fn(), status: vi.fn() };
+    const entry = build();
+    await expect(entry.handler(params, mkCtx({ deviceLifecycle: lifecycle as any })))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(lifecycle.remove).not.toHaveBeenCalled();
+    expect(lifecycle.continue).not.toHaveBeenCalled();
+    expect(lifecycle.status).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [buildAnchorUninstallPreflightMethod, { extra: true }],
+    [buildAnchorUninstallBeginMethod, {
+      path: "migration", requestId: "request-1", operationId: "operation-1",
+      transferId: "transfer-1", targetName: "设备", extra: true,
+    }],
+    [buildAnchorUninstallContinueMethod, {
+      operationId: "operation-1", confirmBackup: true, recoveryPackage: "package", extra: true,
+    }],
+    [buildAnchorUninstallCancelMethod, { operationId: "operation-1", extra: true }],
+    [buildAnchorUninstallStatusMethod, { operationId: "operation-1", extra: true }],
+  ] as const)("rejects unknown uninstall fields before lifecycle effects", async (build, params) => {
+    const uninstall = {
+      preflight: vi.fn(), begin: vi.fn(), continue: vi.fn(), cancel: vi.fn(), status: vi.fn(),
+    };
+    const entry = build();
+    const ctx = mkCtx({ anchorUninstall: uninstall as any });
+    ctx.connection.loopback = true;
+    await expect(entry.handler(params, ctx))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    for (const operation of Object.values(uninstall)) expect(operation).not.toHaveBeenCalled();
+  });
+});
+
 describe("server.shutdown", () => {
-  it("calls requestShutdown and returns accepted ack", () => {
+  it("prepares the durable lifecycle before requesting process shutdown", async () => {
     const trigger = vi.fn();
+    const prepare = vi.fn(async (input: ShutdownPrepareInput) => ({
+      requestId: input.requestId,
+      phase: "ready-to-stop" as const,
+      strategy: input.strategy,
+    }));
     const entry = buildServerShutdownMethod();
-    const ctx = mkCtx({ requestShutdown: trigger });
+    const ctx = mkCtx({ requestShutdown: trigger, lifecycleShutdown: { prepare } });
 
-    const result = entry.handler({ reason: "test-cleanup" }, ctx);
-    expect(trigger).toHaveBeenCalledWith("test-cleanup");
-    expect(result).toMatchObject({ accepted: true, phase: "stopping" });
-    expect(typeof (result as any).estimatedCompleteAt).toBe("string");
+    const result = await entry.handler({ requestId: "shutdown-1", reason: "test-cleanup" }, ctx);
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: "shutdown-1",
+      reason: "test-cleanup",
+      strategy: "immediate",
+    }));
+    await Promise.resolve();
+    expect(trigger).toHaveBeenCalledWith("test-cleanup:immediate");
+    expect(result).toMatchObject({
+      accepted: true,
+      requestId: "shutdown-1",
+      phase: "ready-to-stop",
+      strategy: "immediate",
+    });
+    expect(typeof result.estimatedCompleteAt).toBe("string");
   });
 
-  it("uses default reason when params.reason is missing", () => {
+  it("uses the default reason when params.reason is missing", async () => {
     const trigger = vi.fn();
-    const ctx = mkCtx({ requestShutdown: trigger });
-    buildServerShutdownMethod().handler({}, ctx);
-    expect(trigger).toHaveBeenCalledWith(expect.stringMatching(/rpc\.server\.shutdown/));
+    const ctx = mkCtx({
+      requestShutdown: trigger,
+      lifecycleShutdown: lifecycleReady(),
+    });
+    await buildServerShutdownMethod().handler({ requestId: "shutdown-default" }, ctx);
+    await Promise.resolve();
+    expect(trigger).toHaveBeenCalledWith("rpc.server.shutdown:immediate");
   });
 
-  it("throws INTERNAL_ERROR when requestShutdown hook is not wired", () => {
-    const ctx = mkCtx({ requestShutdown: undefined });
-    expect(() => buildServerShutdownMethod().handler({}, ctx)).toThrowError(
+  it("throws INTERNAL_ERROR when shutdown hooks are not wired", async () => {
+    const ctx = mkCtx({ requestShutdown: undefined, lifecycleShutdown: undefined });
+    await expect(buildServerShutdownMethod().handler({ requestId: "shutdown-unwired" }, ctx)).rejects.toEqual(
       expect.objectContaining({
         name: "RpcAppError",
         code: RPC_ERROR_CODES.INTERNAL_ERROR,
@@ -62,91 +129,83 @@ describe("server.shutdown", () => {
     expect(entry.requiresAuth).toBe(true);
   });
 
-  it("does NOT await shutdown (sync-like return)", () => {
-    // handler 必须同步返回 ack（或立即 resolve 的 promise）
+  it("does not await the process shutdown callback after lifecycle readiness", async () => {
     const trigger = vi.fn(() => new Promise(() => {})); // 永不 resolve
-    const ctx = mkCtx({ requestShutdown: trigger });
-    const result = buildServerShutdownMethod().handler({}, ctx);
-    // 如果 handler await 了 trigger 的 promise，这里会 pending——但 result 已返回
-    expect(result).toBeDefined();
-    if (result instanceof Promise) {
-      // 如果是 Promise，应该立即 resolve
-      return expect(result).resolves.toBeDefined();
-    }
+    const ctx = mkCtx({ requestShutdown: trigger, lifecycleShutdown: lifecycleReady() });
+    await expect(buildServerShutdownMethod().handler({ requestId: "shutdown-no-await" }, ctx))
+      .resolves.toMatchObject({ phase: "ready-to-stop" });
+    await Promise.resolve();
+    expect(trigger).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts timeoutMs param in estimatedCompleteAt calculation", () => {
+  it("accepts timeoutMs param in estimatedCompleteAt calculation", async () => {
     const trigger = vi.fn();
-    const ctx = mkCtx({ requestShutdown: trigger });
+    const ctx = mkCtx({ requestShutdown: trigger, lifecycleShutdown: lifecycleReady() });
     const before = Date.now();
-    const result = buildServerShutdownMethod().handler({ timeoutMs: 60_000 }, ctx) as any;
+    const result = await buildServerShutdownMethod().handler({
+      requestId: "shutdown-timeout",
+      timeoutMs: 60_000,
+    }, ctx);
     const eta = Date.parse(result.estimatedCompleteAt);
     expect(eta).toBeGreaterThanOrEqual(before + 60_000);
     expect(eta).toBeLessThanOrEqual(Date.now() + 60_000 + 100);
   });
 
-  it("drain strategy waits for active work before triggering shutdown", async () => {
-    vi.useFakeTimers();
-    try {
-      const trigger = vi.fn();
-      let busy = true;
-      const order: string[] = [];
-      const ctx = mkCtx({
-        requestShutdown: trigger,
-        conversations: {
-          list: () => [{ conversationId: "conv-1", busy, pendingCount: 0 }],
-        } as never,
-        runtimeControl: {
-          beginDrain: vi.fn(async () => { order.push("refuse"); }),
-          drainAcceptedWork: vi.fn(async () => { order.push("accepted"); }),
-          flushDelivery: vi.fn(async () => { order.push("delivery"); }),
-        },
-      });
-
-      const result = buildServerShutdownMethod().handler(
-        { reason: "user-stop", strategy: "drain", timeoutMs: 1_000 },
-        ctx,
-      ) as any;
-
-      expect(result.strategy).toBe("drain");
-      expect(trigger).not.toHaveBeenCalled();
-      busy = false;
-      await vi.advanceTimersByTimeAsync(200);
-      expect(trigger).toHaveBeenCalledWith("user-stop:drain");
-      expect(order).toEqual(["refuse", "accepted", "delivery"]);
-    } finally {
-      vi.useRealTimers();
-    }
+  it("waits for lifecycle readiness before triggering shutdown", async () => {
+    const trigger = vi.fn();
+    let release!: () => void;
+    const prepared = new Promise<void>((resolve) => { release = resolve; });
+    const prepare = vi.fn(async (input: ShutdownPrepareInput) => {
+      await prepared;
+      return { requestId: input.requestId, phase: "ready-to-stop" as const, strategy: input.strategy };
+    });
+    const ctx = mkCtx({ requestShutdown: trigger, lifecycleShutdown: { prepare } });
+    const result = buildServerShutdownMethod().handler({
+      requestId: "shutdown-drain",
+      reason: "user-stop",
+      strategy: "drain",
+      timeoutMs: 1_000,
+    }, ctx);
+    await Promise.resolve();
+    expect(trigger).not.toHaveBeenCalled();
+    release();
+    await expect(result).resolves.toMatchObject({ strategy: "drain", phase: "ready-to-stop" });
+    await Promise.resolve();
+    expect(trigger).toHaveBeenCalledWith("user-stop:drain");
   });
 
-  it("drain timeout keeps the current host alive with admission closed", async () => {
-    vi.useFakeTimers();
-    try {
-      const trigger = vi.fn();
-      const ctx = mkCtx({
-        requestShutdown: trigger,
-        conversations: { list: () => [] } as never,
-        runtimeControl: {
-          beginDrain: vi.fn(async () => {}),
-          drainAcceptedWork: vi.fn(async () => {}),
-          flushDelivery: vi.fn(() => new Promise<void>(() => {})),
-        },
-      });
-
-      const result = buildServerShutdownMethod().handler(
-        { reason: "user-stop", strategy: "drain", timeoutMs: 100 },
-        ctx,
-      ) as any;
-
-      expect(result.strategy).toBe("drain");
-      expect(trigger).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(100);
-      expect(trigger).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("keeps the current host alive when lifecycle preparation fails", async () => {
+    const trigger = vi.fn();
+    const ctx = mkCtx({
+      requestShutdown: trigger,
+      lifecycleShutdown: { prepare: vi.fn(async () => { throw new Error("accepted work blocked"); }) },
+    });
+    await expect(buildServerShutdownMethod().handler({
+      requestId: "shutdown-blocked",
+      reason: "user-stop",
+      strategy: "drain",
+      timeoutMs: 100,
+    }, ctx)).rejects.toThrow("accepted work blocked");
+    expect(trigger).not.toHaveBeenCalled();
   });
 });
+
+type ShutdownPrepareInput = {
+  readonly requestId: string;
+  readonly reason: string;
+  readonly strategy: "immediate" | "drain" | "cancel";
+  readonly timeoutMs: number;
+};
+
+function lifecycleReady() {
+  return {
+    prepare: async (input: ShutdownPrepareInput) => ({
+      requestId: input.requestId,
+      phase: "ready-to-stop" as const,
+      strategy: input.strategy,
+    }),
+  };
+}
 
 describe("dutyMigration.*", () => {
   it("只暴露用户可理解的目标和阶段，并原样绑定稳定请求身份", async () => {

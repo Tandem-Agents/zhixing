@@ -13,6 +13,11 @@ import {
   releaseLock,
   type PidFileContents,
 } from "@zhixing/server";
+import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
+import {
+  createManagedServiceAdapter,
+  managedServiceDefinitionDigest,
+} from "./managed-service.js";
 
 export interface StopOptions {
   timeoutMs?: number;
@@ -43,6 +48,9 @@ export interface StopDeps {
   platform?: NodeJS.Platform;
   statePath?: string;
   readyMarkerPath?: string;
+  prepareManagedExactStopFn?: (
+    expectedLock: PidFileContents,
+  ) => Promise<() => Promise<void>>;
 }
 
 export type StopResult =
@@ -89,9 +97,23 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
       readLockFn,
       statePath: deps.statePath ?? getDefaultStatePath(),
       readyMarkerPath: deps.readyMarkerPath ?? getDefaultReadyMarkerPath(),
-      expectedLock: opts.expectedLock,
+      expectedLock: lock,
     });
     return { status: "nothing-to-stop" };
+  }
+
+  let stopManagedExact: (() => Promise<void>) | undefined;
+  if (lock.kind === "managed") {
+    try {
+      stopManagedExact = await (
+        deps.prepareManagedExactStopFn ??
+        ((expectedLock) => prepareManagedExactStop(expectedLock, readLockFn))
+      )(lock);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (verbose) con.warn(chalk.yellow(`无法确认托管实例的安全停止边界：${reason}`));
+      return { status: "error", pid: lock.pid, reason };
+    }
   }
 
   const clock = deps.clock ?? Date.now;
@@ -104,6 +126,7 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
       opts.rpcTimeoutMs ?? 15_000,
       { respectBlockers: opts.respectBlockers ?? false },
     );
+    await stopManagedExact?.();
   } catch (error) {
     if (error instanceof StopRefusedError) {
       if (verbose) {
@@ -129,6 +152,8 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     clock,
     sleep,
     isAlive,
+    readLockFn,
+    expectedLock: lock,
   });
   if (!exited) {
     const reason = "知行仍在安全收束中；请处理阻塞项后用同一命令继续，系统不会强制结束进程";
@@ -142,7 +167,7 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     readLockFn,
     statePath: deps.statePath ?? getDefaultStatePath(),
     readyMarkerPath: deps.readyMarkerPath ?? getDefaultReadyMarkerPath(),
-    expectedLock: opts.expectedLock,
+    expectedLock: lock,
   });
   if (verbose) con.log(chalk.green(`知行已停止，用时 ${(tookMs / 1000).toFixed(1)}s`));
   return { status: "stopped", pid: lock.pid, tookMs, path: "rpc" };
@@ -189,14 +214,59 @@ interface WaitForExitArgs {
   clock: () => number;
   sleep: (ms: number) => Promise<void>;
   isAlive: (pid: number) => boolean;
+  readLockFn: typeof readLock;
+  expectedLock: PidFileContents;
 }
 
 async function waitForExit(input: WaitForExitArgs): Promise<boolean> {
   while (input.clock() < input.deadline) {
-    if (!input.isAlive(input.pid)) return true;
+    if (await exactHostExited(input)) return true;
     await input.sleep(input.pollMs);
   }
+  return exactHostExited(input);
+}
+
+async function exactHostExited(input: WaitForExitArgs): Promise<boolean> {
+  const current = await input.readLockFn().catch(() => null);
+  if (!current || !isSameLock(current, input.expectedLock)) return true;
   return !input.isAlive(input.pid);
+}
+
+async function prepareManagedExactStop(
+  expectedLock: PidFileContents,
+  readLockFn: typeof readLock,
+): Promise<() => Promise<void>> {
+  const current = await loadCurrentManagedServiceState("inspect");
+  if (!current.spec) throw new Error("托管服务定义不可用");
+  const spec = current.spec;
+  const adapter = createManagedServiceAdapter();
+  const signal = new AbortController().signal;
+  const expected = await adapter.inspect(spec, signal);
+  if (!expected.matches || !expected.running) {
+    throw new Error("托管服务当前实例与运行端点不一致");
+  }
+  const expectedDefinition = managedServiceDefinitionDigest(spec);
+
+  return async () => {
+    const latest = await loadCurrentManagedServiceState("inspect");
+    if (
+      !latest.spec ||
+      latest.spec.serviceId !== spec.serviceId ||
+      managedServiceDefinitionDigest(latest.spec) !== expectedDefinition
+    ) {
+      throw new Error("托管服务定义在安全停止前已换代");
+    }
+    const inspection = await adapter.inspect(spec, signal);
+    if (!inspection.matches || inspection.state !== expected.state) {
+      throw new Error("托管服务投影在安全停止前已换代");
+    }
+    if (!inspection.running) return;
+    const endpoint = await readLockFn().catch(() => null);
+    if (!endpoint || !isSameLock(endpoint, expectedLock)) {
+      throw new Error("运行端点在安全停止前已换代");
+    }
+    await adapter.stopCurrentExact(spec, expected, signal);
+  };
 }
 
 interface CleanupExitedInstanceOptions {

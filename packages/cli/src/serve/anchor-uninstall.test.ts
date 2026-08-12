@@ -1,11 +1,16 @@
-import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
-import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
+import { AuthorityCheckpointOwner } from "@zhixing/mesh/checkpoint-owner";
+import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { decodeRecoveryPackage, encodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
+import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 
 describe("anchor uninstall coordinator", () => {
   it("uses a ready migration target and only reports terminal after transfer verification and local retirement", async () => {
@@ -45,25 +50,53 @@ describe("anchor uninstall coordinator", () => {
 
   it("requires a second confirmation after real backup read-back and includes the retirement decision in the final backup", async () => {
     const fixture = await createFixture();
-    const forced: string[] = [];
-    let checkpoint = checkpointPackage("initial", 20);
-    const checkpointOwner: AuthorityCheckpointOwnerPort = {
-      start: async () => undefined,
-      ensureDaily: async () => checkpoint,
-      force: async (requestId) => {
-        forced.push(requestId);
-        checkpoint = checkpointPackage(`checkpoint-${forced.length}`, 10_000 + forced.length);
-        return checkpoint;
+    let target: FileRecoveryCheckpointTarget | undefined;
+    let recoveryPackage = "";
+    await activateInitialRecoveryRoot({
+      store: fixture.store,
+      issuerKey: fixture.issuerKey,
+      issuerIdentity: fixture.issuerIdentity,
+      current: fixture.initialProjection,
+      targetId: "backup-device:independent",
+      targetIndependenceDomain: "device:independent",
+      createTarget: async () => {
+        target = await FileRecoveryCheckpointTarget.openPaired({
+          targetRoot: path.join(fixture.home, "recovery-target"),
+          targetDeviceId: "independent",
+        });
+        return target;
       },
-      status: async () => ({
-        state: "recoverable",
-        fullBackupReady: true,
-        checkpointId: checkpoint.envelope.checkpointId,
-        targetId: "backup-device:independent",
-        upToLsn: checkpoint.envelope.manifest.upToLsn,
+      writeLine: () => undefined,
+      confirmRecoveryPackage: async (value) => {
+        recoveryPackage = value;
+        return value;
+      },
+    });
+    if (!target || !recoveryPackage) throw new Error("expected activated recovery target");
+    const root = decodeRecoveryPackage(recoveryPackage).root;
+    const trust = await fixture.store.loadTrustRecord();
+    if (!trust) throw new Error("expected current trust");
+    const service = new AuthorityCheckpointService({
+      log: fixture.store.authorityLog(),
+      artifacts: fixture.store.artifactStore(),
+      retention: fixture.store.checkpointRetention(),
+      target,
+      trust,
+      issuer: Object.assign({}, fixture.issuerIdentity, {
+        sign: fixture.issuerKey.sign.bind(fixture.issuerKey),
       }),
-      stop: async () => undefined,
-    };
+      recipient: root.publicIdentity(),
+      currentAnchor: true,
+      storageMaintenance: allowMaintenance(),
+      clock: () => "2026-08-12T00:00:05.000Z",
+    });
+    const verify = vi.spyOn(service, "verify");
+    const checkpointOwner = new AuthorityCheckpointOwner({
+      service,
+      identitySeed: "uninstall-backup",
+      clock: () => new Date("2026-08-12T00:00:05.000Z"),
+    });
+    await checkpointOwner.start(false);
     const cleanupRecovery = vi.fn(async () => [{
       kind: "cleanup" as const,
       digest: `sha256:${"c".repeat(64)}`,
@@ -85,18 +118,18 @@ describe("anchor uninstall coordinator", () => {
     await expect(coordinator.beginRecoveryBackup({
       requestId: "request-backup",
       operationId: "uninstall-backup",
+      recoveryPackage: encodeRecoveryPackage(root),
     })).resolves.toEqual({ phase: "backup-verified", nextAction: "confirm-backup" });
     expect(cleanupRecovery).not.toHaveBeenCalled();
-    await expect(coordinator.confirmRecoveryBackup("uninstall-backup"))
+    await expect(coordinator.confirmRecoveryBackup("uninstall-backup", encodeRecoveryPackage(root)))
       .resolves.toEqual({ phase: "uninstalled" });
-    expect(forced).toEqual([
-      "uninstall-backup:pre-retirement",
-      "uninstall-backup:final-retirement",
-    ]);
+    expect(verify).toHaveBeenCalledTimes(2);
     expect(cleanupRecovery).toHaveBeenCalledTimes(1);
     expect(onRetired).toHaveBeenCalledTimes(1);
     await expect(coordinator.state("uninstall-backup")).resolves.toEqual({ phase: "uninstalled" });
-  });
+    await checkpointOwner.stop();
+    await target.close();
+  }, 120_000);
 });
 
 async function createFixture() {
@@ -108,7 +141,7 @@ async function createFixture() {
     enrolledAt: "2026-08-12T00:00:00.000Z",
   });
   const store = new FileMeshBootstrapStore(home, issuerKey);
-  await store.initializeLocalHome({
+  const initialized = await store.initializeLocalHome({
     key: issuerKey,
     identity: issuer,
     roles: ["anchor", "executor"],
@@ -116,6 +149,11 @@ async function createFixture() {
     at: "2026-08-12T00:00:00.000Z",
   });
   return {
+    home,
+    store,
+    issuerKey,
+    issuerIdentity: issuer,
+    initialProjection: initialized.projection,
     base: {
       log: store.authorityLog(),
       store,
@@ -128,14 +166,23 @@ async function createFixture() {
   };
 }
 
-function checkpointPackage(checkpointId: string, upToLsn: number): CheckpointPackage {
+function allowMaintenance(): StorageMaintenanceGovernorPort {
   return {
-    envelope: {
-      checkpointId,
-      digest: `sha256:${createHash("sha256").update(checkpointId).digest("hex")}`,
-      manifest: { upToLsn },
-    },
-    chunks: [],
-  } as unknown as CheckpointPackage;
+    acquire: async () => ({
+      kind: "granted",
+      permit: {
+        granted: {
+          memoryReservationBytes: 0,
+          temporaryBytes: 0,
+          slots: 0,
+          readBytes: Number.MAX_SAFE_INTEGER,
+          writeBytes: Number.MAX_SAFE_INTEGER,
+          ioOperations: Number.MAX_SAFE_INTEGER,
+        },
+        tryBegin: () => ({ claim: () => undefined, complete: () => undefined }),
+        release: () => undefined,
+      },
+    }),
+    snapshot: () => ({ queued: {}, inFlight: {} }),
+  };
 }
-import { createHash } from "node:crypto";

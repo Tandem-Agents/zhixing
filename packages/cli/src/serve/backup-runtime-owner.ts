@@ -4,6 +4,8 @@ import type { ArtifactCheckpointRetentionPort } from "@zhixing/core/authority";
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { CheckpointPackage, CheckpointSigner } from "@zhixing/mesh/checkpoint";
+import type { RecoveryCheckpointVerification } from "@zhixing/core/contracts";
+import type { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import {
   AuthorityCheckpointOwner,
   type AuthorityCheckpointOwnerPort,
@@ -125,6 +127,13 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
 
   async force(requestId: string): Promise<CheckpointPackage> {
     return (await this.#requireOwner()).force(requestId);
+  }
+
+  async verify(
+    checkpointId: string,
+    recoveryRoot: RecoveryRoot,
+  ): Promise<RecoveryCheckpointVerification> {
+    return (await this.#requireOwner()).verify(checkpointId, recoveryRoot);
   }
 
   async status(): Promise<RecoveryBackupStatus> {

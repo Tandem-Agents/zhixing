@@ -47,6 +47,10 @@ export interface ProductionMeshControlPlaneOptions {
   readonly secretStore: SecretStorePort;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly services: MeshServiceRegistry;
+  readonly terminalOnly?: {
+    readonly services: MeshServiceRegistry;
+    readonly authorizePeer: (deviceId: string) => boolean;
+  };
   readonly connections?: MeshConnectionRegistry;
   readonly localEndpoint?: MeshEndpointDescriptor;
   readonly onConnection?: (
@@ -170,10 +174,12 @@ export class ProductionMeshControlPlane {
       if (!active.has(peerId)) {
         this.#stopPeerTask(peerId, new Error("Mesh peer trust was revoked"));
         await this.connections.disconnect(peerId, new Error("Mesh peer trust was revoked"));
-        await this.options.secretStore.delete({
-          kind: "rendezvous",
-          bindingId: peerId,
-        });
+        if (!this.#isTerminalOnlyPeer(peerId)) {
+          await this.options.secretStore.delete({
+            kind: "rendezvous",
+            bindingId: peerId,
+          });
+        }
       }
     }
     const requiredPeers = record.members.filter((member) =>
@@ -408,12 +414,17 @@ export class ProductionMeshControlPlane {
   }
 
   async #accept(connection: SecureMeshConnection): Promise<void> {
-    if (!this.#isAuthorized(connection.peer.deviceId, this.#compatiblePeerRoles())) {
+    const active = this.#isAuthorized(connection.peer.deviceId, this.#compatiblePeerRoles());
+    const terminalOnly = !active && this.#isTerminalOnlyPeer(connection.peer.deviceId);
+    if (!active && !terminalOnly) {
       await connection.close(new Error("Mesh peer is no longer authorized"));
       return;
     }
-    this.connections.attach(connection, this.options.services);
-    if (this.options.localEndpoint) {
+    this.connections.attach(
+      connection,
+      terminalOnly ? this.options.terminalOnly!.services : this.options.services,
+    );
+    if (active && this.options.localEndpoint) {
       const payload = Buffer.from(canonicalize(this.options.localEndpoint), "utf8");
       this.#track(fulfillConnectionLifetimeObligation({
         connectionClosed: connection.closed,
@@ -429,19 +440,23 @@ export class ProductionMeshControlPlane {
         onError: (error) => this.#report(error),
       }));
     }
-    await this.options.onConnection?.(connection);
+    if (active) await this.options.onConnection?.(connection);
   }
 
   #authorizedPeers(roles: readonly DeviceRole[]): TrustedMeshPeer[] {
-    const authorized = this.#trust.members.filter((member) =>
+    const active = this.#trust.members
+      .filter((member) =>
         member.state === "active" &&
         member.device.deviceId !== this.options.localIdentity.deviceId &&
-        roles.some((role) => member.roles.includes(role)));
-    return authorized.map((member) => {
-      const peer = this.#peers.get(member.device.deviceId);
+        roles.some((role) => member.roles.includes(role)))
+      .map((member) => member.device.deviceId);
+    const historical = [...this.#peers.keys()].filter((deviceId) =>
+      deviceId !== this.options.localIdentity.deviceId && this.#isTerminalOnlyPeer(deviceId));
+    return [...new Set([...active, ...historical])].sort().map((deviceId) => {
+      const peer = this.#peers.get(deviceId);
       if (!peer) {
         throw new Error(
-          `Active compatible peer ${member.device.deviceId} has no authenticated transport identity`,
+          `Authorized mesh peer ${deviceId} has no authenticated transport identity`,
         );
       }
       return peer;
@@ -461,6 +476,10 @@ export class ProductionMeshControlPlane {
     );
   }
 
+  #isTerminalOnlyPeer(deviceId: string): boolean {
+    return this.options.terminalOnly?.authorizePeer(deviceId) === true && this.#peers.has(deviceId);
+  }
+
   #serverSecurity(trustedPeers: readonly TrustedMeshPeer[]) {
     return {
       identity: this.options.localIdentity,
@@ -468,7 +487,8 @@ export class ProductionMeshControlPlane {
       trustedPeers,
       replayWindow: this.#replayWindow,
       authorizePeer: (identity: { deviceId: string }) =>
-        this.#isAuthorized(identity.deviceId, this.#compatiblePeerRoles()),
+        this.#isAuthorized(identity.deviceId, this.#compatiblePeerRoles()) ||
+        this.#isTerminalOnlyPeer(identity.deviceId),
       onHandshakeError: (error: Error) => this.#report(error),
     };
   }

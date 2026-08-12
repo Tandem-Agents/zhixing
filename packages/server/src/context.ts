@@ -288,10 +288,12 @@ export interface ServerContext {
           readonly path: "recovery-backup";
           readonly requestId: string;
           readonly operationId: string;
+          readonly recoveryPackage: string;
         }): Promise<unknown>;
     continue(input: {
       readonly operationId: string;
       readonly confirmBackup: true;
+      readonly recoveryPackage: string;
     }): Promise<unknown>;
     cancel(input: { readonly operationId: string }): Promise<unknown>;
     status(input: { readonly operationId: string }): Promise<unknown>;
