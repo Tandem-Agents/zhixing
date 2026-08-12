@@ -28,15 +28,23 @@ const DIGEST = `sha256:${"0".repeat(64)}`;
 const ARTIFACT_REF = { digest: DIGEST, bytes: 0 } as const;
 
 async function participant(maxAttempts?: number) {
+  return (await participantFixture(maxAttempts)).owner;
+}
+
+async function participantFixture(maxAttempts?: number) {
   const root = await createTempDir("delivery-participant");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
   });
-  return new OwnerDeliveryParticipant({
-    authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
-    ...(maxAttempts ? { maxAttempts } : {}),
-  });
+  const authority = new DeliveryAuthority({ log, anchorEpoch: 3 });
+  return {
+    authority,
+    owner: new OwnerDeliveryParticipant({
+      authority,
+      ...(maxAttempts ? { maxAttempts } : {}),
+    }),
+  };
 }
 
 function deliveryKinds(records: readonly LogicalRecord<unknown>[]) {
@@ -165,6 +173,87 @@ function jobFacts() {
 }
 
 describe("owner delivery participant", () => {
+  it("binds all seven canonical producer paths to the frozen lifecycle source exact-set", async () => {
+    const { authority, owner } = await participantFixture();
+    await authority.installLifecycleAdmission({
+      operationId: "stop-delivery-producers",
+      sources: [
+        { owner: "conversation", id: "conversation-1", revision: "conversation-r1" },
+        { owner: "assignment", id: "assignment-conversation", revision: "assignment-r1" },
+        { owner: "assignment", id: "assignment-job", revision: "assignment-r2" },
+        { owner: "scheduler", id: "job-run-1", revision: "scheduler-r1" },
+      ],
+      deliveries: [],
+    });
+    const conversation = owner.prepareConversationCommit({
+      at: NOW,
+      conversationId: "conversation-1",
+      runId: "run-1",
+      assignmentId: "assignment-conversation",
+      commitRevision: 1,
+      ingress: channelIngress,
+      runRecord,
+      mutationBatch: stagedMutation("assignment-conversation", "turn-origin"),
+    });
+    const conversationStatus = owner.prepareConversationStatuses([{
+      at: NOW,
+      conversationId: "conversation-1",
+      runId: "run-1",
+      state: "uncertain",
+      statusRevision: 2,
+      ingress: channelIngress,
+    }]);
+    const control = owner.prepareConversationControlResponses([{
+      at: NOW,
+      conversationId: "conversation-1",
+      requestId: "cancel:conversation-1",
+      replyTarget: channelIngress.replyTarget,
+      response: "empty-cancel-batch",
+    }]);
+    const facts = jobFacts();
+    const job = owner.prepareJobCommit({
+      at: NOW,
+      ...facts,
+      mutationBatch: stagedMutation("assignment-job", "explicit"),
+    });
+    const jobStatus = owner.prepareJobStatuses([{
+      at: NOW,
+      occurrence: facts.occurrence,
+      definition: facts.definition,
+      state: "failed",
+      statusRevision: 2,
+    }]);
+    const notice = owner.prepareSchedulerNotices([{
+      at: NOW,
+      noticeId: "notice-1",
+      target: channelIngress.replyTarget,
+      text: "notice",
+      lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+    }]);
+    const results = [conversation, conversationStatus, control, job, jobStatus, notice];
+    for (const result of results) {
+      if (!result.accepted) throw new Error("lifecycle producer fixture was rejected");
+    }
+    expect(results.flatMap((result) => deliveryKinds(result.records))).toEqual([
+      "conversation-final-delivery",
+      "staged-delivery",
+      "conversation-status-delivery",
+      "conversation-control-response-delivery",
+      "job-result-delivery",
+      "staged-delivery",
+      "job-status-delivery",
+      "scheduler-user-notice-delivery",
+    ]);
+    expect(() => owner.prepareConversationStatuses([{
+      at: NOW,
+      conversationId: "conversation-successor",
+      runId: "run-successor",
+      state: "failed",
+      statusRevision: 1,
+      ingress: channelIngress,
+    }])).toThrow("not part of the frozen lifecycle operation");
+  });
+
   it("derives conversation final, staged and non-terminal status deliveries", async () => {
     const owner = await participant();
     const committed = owner.prepareConversationCommit({

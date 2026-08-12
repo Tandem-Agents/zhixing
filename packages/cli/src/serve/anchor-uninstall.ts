@@ -27,6 +27,14 @@ import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import {
+  freezeHostStopAcceptedWork,
+  loadHostStopAcceptedWork,
+  settleHostStopAcceptedWork,
+  type HostStopAcceptedWorkPorts,
+  type HostStopAcceptedWorkSnapshot,
+} from "./host-stop-lifecycle.js";
+import type { ArtifactStore } from "@zhixing/core/authority";
 
 interface UninstallProjection {
   readonly trustEvents: readonly HomeTrustEvent[];
@@ -79,6 +87,14 @@ export class AnchorUninstallCoordinator {
     readonly checkpointOwner?: AuthorityCheckpointOwnerPort;
     readonly closeAdmission: () => Promise<void>;
     readonly releaseAdmission: () => void | Promise<void>;
+    readonly recoveryAcceptedWork?: {
+      readonly ports: HostStopAcceptedWorkPorts;
+      readonly artifactStore: ArtifactStore;
+      readonly closeAdmission: (operationId: string) => Promise<void>;
+      readonly onFrozen?: (snapshot: HostStopAcceptedWorkSnapshot) => void | Promise<void>;
+      readonly flushDurableState: () => Promise<readonly DeviceLifecycleEvidenceRef[]>;
+      readonly settlePhysicalSteps: () => Promise<void>;
+    };
     readonly cleanupRecovery: (
       operationId: string,
     ) => Promise<readonly DeviceLifecycleEvidenceRef[]>;
@@ -230,7 +246,7 @@ export class AnchorUninstallCoordinator {
   }
 
   async resumeActive(): Promise<void> {
-    for (const operation of await this.#journal.active()) {
+    for (let operation of await this.#journal.active()) {
       if (operation.identity.kind !== "anchor-uninstall") continue;
       if (operation.identity.path.kind === "migration") {
         await this.#driveMigration(operation.identity);
@@ -243,6 +259,31 @@ export class AnchorUninstallCoordinator {
           }]);
         } else if (operation.phase !== "terminal" && operation.phase !== "aborted") {
           await this.options.closeAdmission();
+          if (recoveryClosureStarted(operation.phase)) {
+            const closure = this.#requireRecoveryAcceptedWork();
+            await closure.closeAdmission(operation.identity.operationId);
+            const snapshot = await loadHostStopAcceptedWork(
+              operation,
+              closure.artifactStore,
+            );
+            await closure.onFrozen?.(snapshot);
+          }
+          if (operation.phase === "final-checkpoint-verified") {
+            const evidence = await this.options.cleanupRecovery(operation.identity.operationId);
+            operation = await this.#journal.advance(
+              operation.identity.operationId,
+              "cleanup-complete",
+              evidence,
+            );
+          }
+          if (operation.phase === "cleanup-complete") {
+            await this.#journal.terminal(
+              operation.identity.operationId,
+              "retired",
+              operation.evidence,
+            );
+            await this.options.onRetired(operation.identity.operationId);
+          }
         }
       }
     }
@@ -321,18 +362,54 @@ export class AnchorUninstallCoordinator {
     if (operation.phase === "checkpoint-verified" && !confirmed) {
       return { phase: "backup-verified", nextAction: "confirm-backup" };
     }
-    let retirementLsn = operation.phase === "retirement-decided"
-      ? await this.#retirementDecisionLsn(identity.operationId)
-      : undefined;
     if (operation.phase === "checkpoint-verified") {
-      retirementLsn = await this.#decideRetirement(identity);
+      const closure = this.#requireRecoveryAcceptedWork();
+      await closure.closeAdmission(identity.operationId);
+      const frozen = await freezeHostStopAcceptedWork(
+        identity.operationId,
+        closure.ports,
+        closure.artifactStore,
+      );
+      await this.#decideRetirement(identity, frozen.evidence);
       operation = await this.#requireOperation(identity.operationId);
     }
     if (operation.phase === "retirement-decided") {
+      const closure = this.#requireRecoveryAcceptedWork();
+      const snapshot = await loadHostStopAcceptedWork(operation, closure.artifactStore);
+      await closure.onFrozen?.(snapshot);
+      operation = await this.#journal.advance(identity.operationId, "gate-closed");
+    }
+    if (operation.phase === "gate-closed") {
+      const closure = this.#requireRecoveryAcceptedWork();
+      const snapshot = await loadHostStopAcceptedWork(operation, closure.artifactStore);
+      await closure.onFrozen?.(snapshot);
+      await settleHostStopAcceptedWork({
+        operationId: identity.operationId,
+        strategy: "immediate",
+        timeoutMs: 30_000,
+        snapshot,
+        ports: closure.ports,
+      });
+      operation = await this.#journal.advance(identity.operationId, "work-settled", [{
+        kind: "accepted-work",
+        digest: protocolDigest("AnchorUninstallAcceptedWorkSettlement", 1, {
+          operationId: identity.operationId,
+          artifactDigest: frozenAcceptedWorkDigest(operation),
+        }),
+      }]);
+    }
+    if (operation.phase === "work-settled") {
+      const closure = this.#requireRecoveryAcceptedWork();
+      const evidence = await closure.flushDurableState();
+      await closure.settlePhysicalSteps();
+      operation = await this.#journal.advance(identity.operationId, "flushed", evidence);
+    }
+    if (operation.phase === "flushed") {
+      const flushedLsn = await this.#phaseLsn(identity.operationId, "flushed");
       const checkpoint = await owner.force(`${identity.operationId}:final-retirement`);
       const verification = await this.#assertCheckpoint(checkpoint, path.checkpointTargetId, recoveryRoot);
-      if (retirementLsn !== undefined && checkpoint.envelope.manifest.upToLsn < retirementLsn) {
-        throw new Error("Final recovery backup does not contain the retirement decision");
+      if (checkpoint.envelope.manifest.upToLsn < flushedLsn) {
+        throw new Error("Final recovery backup does not contain the accepted-work flush");
       }
       operation = await this.#journal.advance(identity.operationId, "final-checkpoint-verified", [{
         kind: "checkpoint",
@@ -350,7 +427,17 @@ export class AnchorUninstallCoordinator {
     return { phase: "uninstalled" };
   }
 
-  async #decideRetirement(identity: AnchorUninstallLifecycleIdentity): Promise<number> {
+  async #decideRetirement(
+    identity: AnchorUninstallLifecycleIdentity,
+    acceptedWork: DeviceLifecycleEvidenceRef,
+  ): Promise<number> {
+    if (
+      acceptedWork.kind !== "accepted-work" ||
+      !acceptedWork.artifact ||
+      acceptedWork.digest !== acceptedWork.artifact.digest
+    ) {
+      throw new Error("Anchor retirement requires its frozen accepted-work artifact");
+    }
     const result = await this.options.log.transactProjection<
       UninstallProjection,
       unknown,
@@ -398,10 +485,13 @@ export class AnchorUninstallCoordinator {
             markedAt: context.at,
             rotationHint: record.rotationHint ?? "Rotate this external account credential",
           }));
-        const evidence = [{
-          kind: "credential-exposure" as const,
-          digest: protocolDigest("AnchorRetirementCredentialExposure", 1, compromised),
-        }];
+        const evidence = [
+          acceptedWork,
+          {
+            kind: "credential-exposure" as const,
+            digest: protocolDigest("AnchorRetirementCredentialExposure", 1, compromised),
+          },
+        ];
         const lifecycle = validateDeviceLifecycleRecord({
           v: 1,
           t: "advanced",
@@ -419,7 +509,10 @@ export class AnchorUninstallCoordinator {
           value: context.nextLsn,
         };
       },
-      { streams: ["trust", "exposure", "device-lifecycle"] },
+      {
+        streams: ["trust", "exposure", "device-lifecycle"],
+        candidateReferences: [acceptedWork.artifact],
+      },
     );
     return result.value ?? this.#retirementDecisionLsn(identity.operationId);
   }
@@ -466,15 +559,28 @@ export class AnchorUninstallCoordinator {
   }
 
   async #retirementDecisionLsn(operationId: string): Promise<number> {
+    return this.#phaseLsn(operationId, "retirement-decided");
+  }
+
+  async #phaseLsn(
+    operationId: string,
+    phase: "retirement-decided" | "flushed",
+  ): Promise<number> {
     const records = await this.options.log.readStream<unknown>("device-lifecycle");
     const decision = records.find((entry) => {
       const record = validateDeviceLifecycleRecord(entry.body);
       return record.t === "advanced" &&
         record.operationId === operationId &&
-        record.phase === "retirement-decided";
+        record.phase === phase;
     });
-    if (!decision) throw new Error("Anchor retirement decision LSN is missing");
+    if (!decision) throw new Error(`Anchor uninstall ${phase} LSN is missing`);
     return decision.lsn;
+  }
+
+  #requireRecoveryAcceptedWork() {
+    const closure = this.options.recoveryAcceptedWork;
+    if (!closure) throw new Error("Recovery-backup uninstall requires accepted-work closure");
+    return closure;
   }
 
   async #assertCurrentAuthority(): Promise<ReturnType<typeof replayTrustChain>> {
@@ -506,12 +612,37 @@ function projectState(operation: DeviceLifecycleOperation): AnchorUninstallPubli
   if (operation.phase === "final-checkpoint-verified" || operation.phase === "cleanup-complete") {
     return { phase: "ready-to-uninstall", nextAction: "continue" };
   }
-  if (operation.phase === "retirement-decided") {
+  if (
+    operation.phase === "retirement-decided" ||
+    operation.phase === "gate-closed" ||
+    operation.phase === "work-settled" ||
+    operation.phase === "flushed"
+  ) {
     return { phase: "retiring-device", nextAction: "continue" };
   }
   return operation.identity.kind === "anchor-uninstall" && operation.identity.path.kind === "migration"
     ? { phase: "moving-duty-device", nextAction: "continue" }
     : { phase: "choose-safe-path", nextAction: "continue" };
+}
+
+function recoveryClosureStarted(phase: DeviceLifecycleOperation["phase"]): boolean {
+  return new Set([
+    "retirement-decided",
+    "gate-closed",
+    "work-settled",
+    "flushed",
+    "final-checkpoint-verified",
+    "cleanup-complete",
+  ]).has(phase);
+}
+
+function frozenAcceptedWorkDigest(operation: DeviceLifecycleOperation): string {
+  const evidence = operation.evidence.filter((item) =>
+    item.kind === "accepted-work" && item.artifact);
+  if (evidence.length !== 1) {
+    throw new Error("Anchor uninstall accepted-work artifact is missing or ambiguous");
+  }
+  return evidence[0]!.digest;
 }
 
 function isTrustRecord(input: unknown): input is

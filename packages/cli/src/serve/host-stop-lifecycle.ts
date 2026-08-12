@@ -39,6 +39,7 @@ export interface HostStopAcceptedWorkPort {
   }): Promise<void>;
   readBack(input: {
     readonly operationId: string;
+    readonly strategy: StopStrategy;
     readonly frozen: readonly HostStopAcceptedWorkItem[];
   }): Promise<void>;
 }
@@ -47,7 +48,7 @@ export type HostStopAcceptedWorkPorts = Readonly<
   Record<HostStopAcceptedWorkOwner, HostStopAcceptedWorkPort>
 >;
 
-interface HostStopAcceptedWorkSnapshot {
+export interface HostStopAcceptedWorkSnapshot {
   readonly v: 1;
   readonly operationId: string;
   readonly owners: Readonly<Record<HostStopAcceptedWorkOwner, readonly HostStopAcceptedWorkItem[]>>;
@@ -69,6 +70,9 @@ export interface HostStopCoordinatorOptions {
   readonly runtime: HostStopRuntime;
   readonly acceptedWork?: HostStopAcceptedWorkPorts;
   readonly artifactStore?: ArtifactStore;
+  readonly onAcceptedWorkFrozen?: (
+    snapshot: HostStopAcceptedWorkSnapshot,
+  ) => void | Promise<void>;
   readonly isHostStopped?: (host: StopHostGeneration) => Promise<boolean>;
 }
 
@@ -147,21 +151,21 @@ export class HostStopCoordinator {
     if (state.phase === "gate-closed") {
       if (state.identity.kind !== "stop") throw new Error("Stop journal identity changed");
       if (this.options.acceptedWork) {
-        const snapshot = await this.#loadAcceptedWork(state);
-        for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
-          const port = this.options.acceptedWork[owner];
-          const frozen = snapshot.owners[owner];
-          await port.settle({
-            operationId: state.identity.operationId,
-            strategy: state.identity.strategy,
-            timeoutMs,
-            frozen,
-          });
-          await port.readBack({
-            operationId: state.identity.operationId,
-            frozen,
-          });
+        if (!this.options.artifactStore) {
+          throw new Error("Accepted-work closure requires the lifecycle artifact store");
         }
+        const snapshot = await loadHostStopAcceptedWork(
+          state,
+          this.options.artifactStore,
+        );
+        await this.options.onAcceptedWorkFrozen?.(snapshot);
+        await settleHostStopAcceptedWork({
+          operationId: state.identity.operationId,
+          strategy: state.identity.strategy,
+          timeoutMs,
+          snapshot,
+          ports: this.options.acceptedWork,
+        });
       } else if (state.identity.strategy === "cancel") {
         await this.options.runtime.cancelAcceptedWork(timeoutMs);
         await this.options.runtime.drainAcceptedWork(timeoutMs);
@@ -194,42 +198,83 @@ export class HostStopCoordinator {
     if (!this.options.acceptedWork || !this.options.artifactStore) {
       throw new Error("Accepted-work closure requires the lifecycle artifact store");
     }
-    const owners = {} as Record<HostStopAcceptedWorkOwner, readonly HostStopAcceptedWorkItem[]>;
-    for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
-      const items = [...await this.options.acceptedWork[owner].freeze(operationId)]
-        .sort((left, right) => left.id.localeCompare(right.id));
-      assertAcceptedWorkItems(owner, items);
-      owners[owner] = Object.freeze(items);
-    }
-    const snapshot: HostStopAcceptedWorkSnapshot = Object.freeze({
-      v: 1,
+    const frozen = await freezeHostStopAcceptedWork(
       operationId,
-      owners: Object.freeze(owners),
-    });
-    const artifact = await this.options.artifactStore.put(
-      Buffer.from(canonicalize(snapshot), "utf8"),
+      this.options.acceptedWork,
+      this.options.artifactStore,
     );
-    return { kind: "accepted-work", digest: artifact.digest, artifact };
+    return frozen.evidence;
   }
+}
 
-  async #loadAcceptedWork(state: DeviceLifecycleOperation): Promise<HostStopAcceptedWorkSnapshot> {
-    if (!this.options.artifactStore) {
-      throw new Error("Accepted-work closure requires the lifecycle artifact store");
-    }
-    const evidence = state.evidence.filter((item) => item.kind === "accepted-work" && item.artifact);
-    if (evidence.length !== 1 || !evidence[0]?.artifact) {
-      throw new Error("Stop operation is missing its frozen accepted-work snapshot");
-    }
-    const bytes = await this.options.artifactStore.get(evidence[0].artifact);
-    let parsed: unknown;
-    try {
-      const text = Buffer.from(bytes).toString("utf8");
-      parsed = JSON.parse(text);
-      if (canonicalize(parsed) !== text) throw new TypeError("snapshot is not canonical");
-    } catch (error) {
-      throw new Error("Stop accepted-work snapshot is corrupt", { cause: error });
-    }
-    return validateAcceptedWorkSnapshot(parsed, state.identity.operationId);
+export async function freezeHostStopAcceptedWork(
+  operationId: string,
+  ports: HostStopAcceptedWorkPorts,
+  artifactStore: ArtifactStore,
+): Promise<{
+  readonly snapshot: HostStopAcceptedWorkSnapshot;
+  readonly evidence: DeviceLifecycleEvidenceRef;
+}> {
+  const owners = {} as Record<HostStopAcceptedWorkOwner, readonly HostStopAcceptedWorkItem[]>;
+  for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
+    const items = [...await ports[owner].freeze(operationId)]
+      .sort((left, right) => left.id.localeCompare(right.id));
+    assertAcceptedWorkItems(owner, items);
+    owners[owner] = Object.freeze(items);
+  }
+  const snapshot: HostStopAcceptedWorkSnapshot = Object.freeze({
+    v: 1,
+    operationId,
+    owners: Object.freeze(owners),
+  });
+  const artifact = await artifactStore.put(Buffer.from(canonicalize(snapshot), "utf8"));
+  return Object.freeze({
+    snapshot,
+    evidence: { kind: "accepted-work", digest: artifact.digest, artifact },
+  });
+}
+
+export async function loadHostStopAcceptedWork(
+  state: DeviceLifecycleOperation,
+  artifactStore: ArtifactStore,
+): Promise<HostStopAcceptedWorkSnapshot> {
+  const evidence = state.evidence.filter((item) => item.kind === "accepted-work" && item.artifact);
+  if (evidence.length !== 1 || !evidence[0]?.artifact) {
+    throw new Error("Stop operation is missing its frozen accepted-work snapshot");
+  }
+  const bytes = await artifactStore.get(evidence[0].artifact);
+  let parsed: unknown;
+  try {
+    const text = Buffer.from(bytes).toString("utf8");
+    parsed = JSON.parse(text);
+    if (canonicalize(parsed) !== text) throw new TypeError("snapshot is not canonical");
+  } catch (error) {
+    throw new Error("Stop accepted-work snapshot is corrupt", { cause: error });
+  }
+  return validateAcceptedWorkSnapshot(parsed, state.identity.operationId);
+}
+
+export async function settleHostStopAcceptedWork(input: {
+  readonly operationId: string;
+  readonly strategy: StopStrategy;
+  readonly timeoutMs: number;
+  readonly snapshot: HostStopAcceptedWorkSnapshot;
+  readonly ports: HostStopAcceptedWorkPorts;
+}): Promise<void> {
+  for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
+    const port = input.ports[owner];
+    const frozen = input.snapshot.owners[owner];
+    await port.settle({
+      operationId: input.operationId,
+      strategy: input.strategy,
+      timeoutMs: input.timeoutMs,
+      frozen,
+    });
+    await port.readBack({
+      operationId: input.operationId,
+      strategy: input.strategy,
+      frozen,
+    });
   }
 }
 

@@ -101,6 +101,10 @@ export interface SchedulerNoticeDeliveryInput {
   readonly noticeId: string;
   readonly target: DeliveryTargetDto;
   readonly text: string;
+  readonly lifecycleSources?: readonly {
+    readonly owner: "assignment" | "scheduler";
+    readonly id: string;
+  }[];
 }
 
 export interface ConversationDeliveryParticipant {
@@ -285,6 +289,7 @@ export class OwnerDeliveryParticipant
           createdAt: input.at,
           maxAttempts: this.#maxAttempts,
         },
+        ...(input.lifecycleSources ? { lifecycleSources: input.lifecycleSources } : {}),
       })),
       requireSingleCommitTime(inputs),
     );
@@ -576,6 +581,7 @@ function conversationCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
+      lifecycleSources: [{ owner: "conversation", id: input.conversationId }],
     });
   }
   for (const record of input.mutationBatch?.records ?? []) {
@@ -608,6 +614,7 @@ function conversationCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
+      lifecycleSources: [{ owner: "assignment", id: input.assignmentId }],
     });
   }
   return result;
@@ -658,6 +665,7 @@ function jobCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
+      lifecycleSources: [{ owner: "scheduler", id: input.occurrence.jobRunId }],
     });
   }
   for (const record of input.mutationBatch?.records ?? []) {
@@ -693,6 +701,7 @@ function jobCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
+      lifecycleSources: [{ owner: "assignment", id: input.bundle.assignmentId }],
     });
   }
   return result;
@@ -725,6 +734,7 @@ function conversationStatusInputs(
         createdAt: input.at,
         maxAttempts,
       },
+      lifecycleSources: [{ owner: "conversation", id: input.conversationId }],
     },
   ];
 }
@@ -748,6 +758,7 @@ function conversationControlResponseInput(
       createdAt: input.at,
       maxAttempts,
     },
+    lifecycleSources: [{ owner: "conversation", id: input.conversationId }],
   };
 }
 
@@ -793,6 +804,7 @@ function jobStatusInputs(
         createdAt: input.at,
         maxAttempts,
       },
+      lifecycleSources: [{ owner: "scheduler", id: input.occurrence.jobRunId }],
     },
   ];
 }

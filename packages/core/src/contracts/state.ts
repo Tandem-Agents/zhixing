@@ -572,6 +572,14 @@ export type DeliveryStreamRecord =
       intentDigest: Digest;
       intent: DeliveryIntentDto;
       statusRevision: number;
+      lifecycleBinding?: {
+        operationId: string;
+        sources: readonly {
+          owner: "conversation" | "assignment" | "scheduler";
+          id: string;
+          revision: string;
+        }[];
+      };
     }
   | {
       t: "attempt-started";

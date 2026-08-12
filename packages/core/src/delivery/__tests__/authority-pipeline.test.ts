@@ -68,6 +68,52 @@ function transport(
 }
 
 describe("AuthorityDeliveryPipeline", () => {
+  it.each(["drain", "cancel"] as const)(
+    "drives already-enqueued delivery to its existing terminal for lifecycle %s",
+    async (strategy) => {
+      const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+      const fixture = await createPipeline(transport(send));
+      const created = await fixture.enqueue();
+      if (!created.accepted) throw new Error("fixture enqueue failed");
+      fixture.pipeline.closeAdmissionForLifecycle();
+
+      await fixture.authority.installLifecycleAdmission({
+        operationId: "lifecycle-1",
+        sources: [],
+        deliveries: fixture.pipeline.acceptedWorkItems(),
+      });
+      await fixture.pipeline.settleAcceptedWorkForLifecycle("lifecycle-1", strategy, 1_000);
+
+      expect(send).toHaveBeenCalledOnce();
+      expect(fixture.pipeline.acceptedWorkItems()).toEqual([]);
+      await fixture.pipeline.stop();
+    },
+  );
+
+  it("keeps immediate delivery durable without fabricating a terminal", async () => {
+    const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+    const fixture = await createPipeline(transport(send));
+    const created = await fixture.enqueue();
+    if (!created.accepted) throw new Error("fixture enqueue failed");
+    fixture.pipeline.closeAdmissionForLifecycle();
+
+    await fixture.authority.installLifecycleAdmission({
+      operationId: "lifecycle-immediate",
+      sources: [],
+      deliveries: fixture.pipeline.acceptedWorkItems(),
+    });
+    await fixture.pipeline.settleAcceptedWorkForLifecycle(
+      "lifecycle-immediate",
+      "immediate",
+      1_000,
+    );
+
+    expect(send).not.toHaveBeenCalled();
+    expect(fixture.pipeline.acceptedWorkItems()).toEqual([
+      expect.objectContaining({ id: created.items[0]!.itemId }),
+    ]);
+    await fixture.pipeline.stop();
+  });
   it("prepares durable work without invoking transport before activation", async () => {
     const fixture = await createDeliveryTestHarness();
     const created = await fixture.enqueue();

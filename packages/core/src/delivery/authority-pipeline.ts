@@ -162,6 +162,46 @@ export class AuthorityDeliveryPipeline {
     await this.#activeFlush?.catch(() => undefined);
   }
 
+  async settleAcceptedWorkForLifecycle(
+    operationId: string,
+    strategy: "immediate" | "drain" | "cancel",
+    timeoutMs: number,
+  ): Promise<void> {
+    assertNonNegativeMs(timeoutMs, "Delivery lifecycle settlement timeout");
+    if (this.#state === "running") this.closeAdmissionForLifecycle();
+    if (this.#state !== "quiesced") {
+      throw new Error(
+        `Pipeline.settleAcceptedWorkForLifecycle: illegal transition from state="${this.#state}"`,
+      );
+    }
+    await this.#activeFlush?.catch(() => undefined);
+    if (strategy === "immediate") return;
+
+    const deadline = Date.now() + timeoutMs;
+    this.#state = "running";
+    try {
+      while (true) {
+        await this.flush();
+        const pending = await this.#authority.lifecycleAcceptedWorkItems(operationId);
+        if (pending.length === 0) return;
+        const uncertain = this.#authority.snapshot().find((item) => item.state === "uncertain");
+        if (uncertain) {
+          throw new Error(
+            `Delivery ${uncertain.id} has an uncertain outcome that requires the existing user decision`,
+          );
+        }
+        if (Date.now() >= deadline) {
+          throw new Error("Delivery accepted work did not reach a durable terminal state before the deadline");
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+      }
+    } finally {
+      this.#state = "quiesced";
+      if (this.#flushTimer) clearInterval(this.#flushTimer);
+      this.#flushTimer = undefined;
+    }
+  }
+
   async resumeAfterAuthorityTransfer(): Promise<void> {
     if (this.#state === "running") return;
     if (this.#state !== "quiesced") {

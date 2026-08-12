@@ -146,6 +146,7 @@ export interface AuthorityDeliveryItem {
   readonly receiptDigest?: string;
   readonly openFact?: DeliveryOpenFact;
   readonly resolution?: DeliveryResolutionFact;
+  readonly lifecycleBinding?: DeliveryLifecycleBinding;
 }
 
 export interface AuthorityDeliveryStats {
@@ -220,6 +221,38 @@ export interface DeliveryEndpointTransport {
 export interface DeliveryEnqueueInput {
   readonly keyBody: DeliveryEnqueueKeyBody;
   readonly intent: DeliveryIntentDto;
+  /**
+   * Identifies the accepted-work owner whose durable source fact is allowed to
+   * create this delivery while a device lifecycle operation owns admission.
+   * It is deliberately not part of the delivery record: the existing source
+   * companion remains the durable source fact.
+   */
+  readonly lifecycleSources?: readonly DeliveryLifecycleSourceRef[];
+}
+
+export type DeliveryLifecycleSourceOwner = "conversation" | "assignment" | "scheduler";
+
+export interface DeliveryLifecycleSourceRef {
+  readonly owner: DeliveryLifecycleSourceOwner;
+  readonly id: string;
+}
+
+export interface DeliveryLifecycleSourcePermit extends DeliveryLifecycleSourceRef {
+  readonly revision: string;
+}
+
+export interface DeliveryLifecycleAdmission {
+  readonly operationId: string;
+  readonly sources: readonly DeliveryLifecycleSourcePermit[];
+  readonly deliveries: readonly {
+    readonly id: string;
+    readonly revision: string;
+  }[];
+}
+
+export interface DeliveryLifecycleBinding {
+  readonly operationId: string;
+  readonly sources: readonly DeliveryLifecycleSourcePermit[];
 }
 
 export type DeliveryEnqueueResult =

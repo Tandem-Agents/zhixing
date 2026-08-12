@@ -112,12 +112,14 @@ export class SchedulerUserNoticeJournal {
       { stream: SCHEDULER_NOTICE_STREAM, body: fact },
     ];
     if (draft.target && draft.channelText) {
+      const lifecycleSources = schedulerNoticeLifecycleSources(draft);
       const prepared = this.#delivery.prepareSchedulerNotices?.([
         {
           at: draft.at,
           noticeId: draft.noticeId,
           target: draft.target,
           text: draft.channelText,
+          ...(lifecycleSources.length > 0 ? { lifecycleSources } : {}),
         } satisfies SchedulerNoticeDeliveryInput,
       ]);
       if (!prepared) {
@@ -475,6 +477,25 @@ function projectNotice(
 
 function missedMemberKey(member: MissedSummaryMember): string {
   return `${member.taskId}\u0000${member.jobRunId}`;
+}
+
+function schedulerNoticeLifecycleSources(
+  draft: SchedulerNoticeDraft,
+): readonly { readonly owner: "assignment" | "scheduler"; readonly id: string }[] {
+  const sources = new Map<string, { readonly owner: "assignment" | "scheduler"; readonly id: string }>();
+  const add = (owner: "assignment" | "scheduler", id: string) => {
+    if (id.length > 0) sources.set(`${owner}\u0000${id}`, Object.freeze({ owner, id }));
+  };
+  for (const member of draft.missedMembers ?? []) {
+    const separator = member.indexOf("\u0000");
+    if (separator >= 0) add("scheduler", member.slice(separator + 1));
+  }
+  if (draft.ref.kind === "capability-gap" || draft.ref.kind === "publish-result") {
+    add("scheduler", draft.ref.jobRunId);
+  }
+  if (draft.ref.kind === "publish-result") add("assignment", draft.ref.assignmentId);
+  return Object.freeze([...sources.values()].sort((left, right) =>
+    `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
 }
 
 function missedSummaryText(members: readonly MissedSummaryMember[]): string {

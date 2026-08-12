@@ -172,6 +172,62 @@ describe("device lifecycle protocol", () => {
     )).toThrow();
   });
 
+  it("requires recovery backup to close and flush accepted work before final verification", () => {
+    let state = reduceDeviceLifecycle(undefined, {
+      v: 1,
+      t: "accepted",
+      identity: uninstallIdentity(),
+    });
+    for (const phase of [
+      "gate-frozen",
+      "checkpoint-verified",
+      "retirement-decided",
+      "gate-closed",
+      "work-settled",
+      "flushed",
+      "final-checkpoint-verified",
+      "cleanup-complete",
+    ] as const) {
+      state = reduceDeviceLifecycle(state, {
+        v: 1,
+        t: "advanced",
+        operationId: "uninstall-1",
+        phase,
+        evidence: [],
+      });
+    }
+    expect(state.phase).toBe("cleanup-complete");
+
+    const beforeFinal = [
+      "gate-frozen",
+      "checkpoint-verified",
+      "retirement-decided",
+      "gate-closed",
+      "work-settled",
+    ] as const;
+    let incomplete = reduceDeviceLifecycle(undefined, {
+      v: 1,
+      t: "accepted",
+      identity: { ...uninstallIdentity(), operationId: "uninstall-incomplete" },
+    });
+    for (const phase of beforeFinal) {
+      incomplete = reduceDeviceLifecycle(incomplete, {
+        v: 1,
+        t: "advanced",
+        operationId: "uninstall-incomplete",
+        phase,
+        evidence: [],
+      });
+    }
+    expect(() => reduceDeviceLifecycle(incomplete, {
+      v: 1,
+      t: "advanced",
+      operationId: "uninstall-incomplete",
+      phase: "final-checkpoint-verified",
+      evidence: [],
+    })).toThrow("cannot advance");
+  });
+
   it("makes each cross-end peer effect an exact single durable fact", () => {
     let state = reduceDeviceLifecycle(undefined, {
       v: 1,

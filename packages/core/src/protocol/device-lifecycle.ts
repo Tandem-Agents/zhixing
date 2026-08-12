@@ -911,6 +911,9 @@ function assertNextPhase(current: DeviceLifecycleOperation, next: DeviceLifecycl
         "gate-frozen",
         "checkpoint-verified",
         "retirement-decided",
+        "gate-closed",
+        "work-settled",
+        "flushed",
         "final-checkpoint-verified",
         "cleanup-complete",
         "terminal",
@@ -952,6 +955,9 @@ function isIrreversible(current: DeviceLifecycleOperation): boolean {
   if (current.identity.kind === "anchor-uninstall") {
     return current.phase === "transfer-committed" ||
       current.phase === "retirement-decided" ||
+      current.phase === "gate-closed" ||
+      current.phase === "work-settled" ||
+      current.phase === "flushed" ||
       current.phase === "final-checkpoint-verified" ||
       current.phase === "cleanup-complete";
   }

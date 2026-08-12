@@ -410,6 +410,17 @@ export interface DeliveryStack {
   stats(): AuthorityDeliveryStats;
   closeAdmissionForLifecycle(): void;
   acceptedWorkItems(): readonly { readonly id: string; readonly revision: string }[];
+  lifecycleAcceptedWorkItems(
+    operationId: string,
+  ): Promise<readonly { readonly id: string; readonly revision: string }[]>;
+  installLifecycleAdmission(input: import("@zhixing/core").DeliveryLifecycleAdmission): Promise<void>;
+  sealLifecycleAdmission(operationId: string): Promise<void>;
+  releaseLifecycleAdmission(operationId: string): Promise<void>;
+  settleAcceptedWorkForLifecycle(
+    operationId: string,
+    strategy: "immediate" | "drain" | "cancel",
+    timeoutMs: number,
+  ): Promise<void>;
   flush(): Promise<void>;
   quiesceForAuthorityTransfer(): Promise<void>;
   resumeAfterAuthorityTransfer(): Promise<void>;
@@ -2513,6 +2524,16 @@ export async function setupDelivery(
       closeAdmissionForLifecycle: () =>
         authorityDelivery!.closeAdmissionForLifecycle(),
       acceptedWorkItems: () => authorityDelivery!.acceptedWorkItems(),
+      installLifecycleAdmission: (input) =>
+        options.authorityRuntime.authority.installLifecycleAdmission(input),
+      sealLifecycleAdmission: (operationId) =>
+        options.authorityRuntime.authority.sealLifecycleAdmission(operationId),
+      releaseLifecycleAdmission: (operationId) =>
+        options.authorityRuntime.authority.releaseLifecycleAdmission(operationId),
+      settleAcceptedWorkForLifecycle: (operationId, strategy, timeoutMs) =>
+        authorityDelivery!.settleAcceptedWorkForLifecycle(operationId, strategy, timeoutMs),
+      lifecycleAcceptedWorkItems: (operationId) =>
+        options.authorityRuntime.authority.lifecycleAcceptedWorkItems(operationId),
       flush: async () => {
         await authorityDelivery!.flush();
       },

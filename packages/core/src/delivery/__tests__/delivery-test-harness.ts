@@ -169,6 +169,24 @@ export function deliverySourceRecords(
           noticeId: key.noticeId,
         },
       }];
+    case "conversation-control-response-delivery":
+      return [{
+        stream: "control",
+        body: {
+          t: "applied",
+          requestId: key.requestId,
+          authorityRevision: 1,
+          result: {
+            v: 1,
+            status: "ok",
+            body: {
+              t: "cancel-batch",
+              conversationId: key.conversationId,
+              runs: [],
+            },
+          },
+        },
+      }];
     case "staged-delivery":
       return [
         {
@@ -206,7 +224,11 @@ export async function createDeliverySourceFixture(
   readonly records: (targetRevision?: number) => LogicalRecord<unknown>[];
   readonly references: readonly ArtifactRef[];
 }> {
-  if (key.kind === "conversation-status-delivery" || key.kind === "job-status-delivery") {
+  if (
+    key.kind === "conversation-status-delivery" ||
+    key.kind === "job-status-delivery" ||
+    key.kind === "conversation-control-response-delivery"
+  ) {
     return {
       records: (targetRevision) =>
         deliverySourceRecords(key, { digest: FIXTURE_DIGEST, bytes: 0 }, targetRevision),

@@ -19,6 +19,7 @@ import {
   decideDeliveryResolution,
   deliveryRecord,
   deliveryItemId,
+  deliveryIntentDigest,
   deliveryOpenFactDigest,
   emptyDeliveryProjection,
   MAX_DELIVERY_IDENTIFIER_LENGTH,
@@ -652,6 +653,149 @@ describe("delivery authority lifecycle", () => {
 });
 
 describe("delivery unique index and replay", () => {
+  it("admits only frozen causal sources and seals fresh canonical enqueue across restart", async () => {
+    const root = await createTempDir("delivery-lifecycle-admission");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => FIRST,
+    });
+    const permit = {
+      owner: "conversation" as const,
+      id: "conversation-1",
+      revision: `sha256:${"a".repeat(64)}`,
+    };
+    const firstInput: DeliveryEnqueueInput = {
+      ...deliveryInput(),
+      lifecycleSources: [{ owner: "conversation", id: "conversation-1" }],
+    };
+    const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
+    await authority.installLifecycleAdmission({
+      operationId: "stop-operation-1",
+      sources: [permit],
+      deliveries: [],
+    });
+    const first = await enqueue(log, artifacts, authority, firstInput);
+    expect(first.accepted).toBe(true);
+    expect(await authority.lifecycleAcceptedWorkItems("stop-operation-1"))
+      .toEqual([expect.objectContaining({ id: first.items[0]!.itemId })]);
+
+    const causalCases: readonly {
+      readonly keyBody: DeliveryEnqueueKeyBody;
+      readonly lifecycleSources: DeliveryEnqueueInput["lifecycleSources"];
+    }[] = [
+      {
+        keyBody: {
+          kind: "conversation-status-delivery",
+          conversationId: "conversation-1",
+          runId: "run-1",
+          statusRevision: 2,
+        },
+        lifecycleSources: [{ owner: "conversation", id: "conversation-1" }],
+      },
+      {
+        keyBody: {
+          kind: "conversation-control-response-delivery",
+          conversationId: "conversation-1",
+          requestId: "request-1",
+        },
+        lifecycleSources: [{ owner: "conversation", id: "conversation-1" }],
+      },
+      {
+        keyBody: { kind: "staged-delivery", assignmentId: "assignment-1", mutationSeq: 1 },
+        lifecycleSources: [{ owner: "assignment", id: "assignment-1" }],
+      },
+      {
+        keyBody: {
+          kind: "job-result-delivery",
+          taskId: "task-1",
+          jobRunId: "job-run-1",
+          planDigest: `sha256:${"b".repeat(64)}`,
+        },
+        lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+      },
+      {
+        keyBody: {
+          kind: "job-status-delivery",
+          taskId: "task-1",
+          jobRunId: "job-run-1",
+          statusRevision: 2,
+        },
+        lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+      },
+      {
+        keyBody: { kind: "scheduler-user-notice-delivery", noticeId: "notice-1" },
+        lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+      },
+    ];
+    await authority.releaseLifecycleAdmission("stop-operation-1");
+    await authority.installLifecycleAdmission({
+      operationId: "stop-operation-1",
+      sources: [
+        permit,
+        { owner: "assignment", id: "assignment-1", revision: `sha256:${"c".repeat(64)}` },
+        { owner: "scheduler", id: "job-run-1", revision: `sha256:${"d".repeat(64)}` },
+      ],
+      deliveries: [{ id: first.items[0]!.itemId, revision: deliveryIntentDigest(firstInput.intent) }],
+    });
+    for (const causal of causalCases) {
+      await expect(enqueue(log, artifacts, authority, {
+        ...deliveryInput(),
+        keyBody: causal.keyBody,
+        lifecycleSources: causal.lifecycleSources,
+      })).resolves.toMatchObject({ accepted: true });
+    }
+    expect(await authority.lifecycleAcceptedWorkItems("stop-operation-1")).toHaveLength(7);
+
+    const beforeFresh = await log.readAll();
+    await expect(enqueue(log, artifacts, authority, {
+      ...deliveryInput(),
+      keyBody: {
+        kind: "conversation-final-delivery",
+        conversationId: "conversation-2",
+        runId: "run-2",
+        commitRevision: 1,
+      },
+      lifecycleSources: [{ owner: "conversation", id: "conversation-2" }],
+    })).rejects.toThrow("not part of the frozen lifecycle operation");
+    expect(await log.readAll()).toEqual(beforeFresh);
+
+    await authority.sealLifecycleAdmission("stop-operation-1");
+    await expect(enqueue(log, artifacts, authority, firstInput)).resolves.toMatchObject({
+      accepted: true,
+    });
+    await expect(enqueue(log, artifacts, authority, {
+      ...firstInput,
+      keyBody: {
+          kind: "conversation-status-delivery",
+          conversationId: "conversation-1",
+          runId: "run-1",
+          statusRevision: 3,
+        },
+      })).rejects.toThrow("admission is sealed");
+
+    const restarted = new DeliveryAuthority({ log, anchorEpoch: 7 });
+    await restarted.installLifecycleAdmission({
+      operationId: "stop-operation-1",
+      sources: [
+        permit,
+        { owner: "assignment", id: "assignment-1", revision: `sha256:${"c".repeat(64)}` },
+        { owner: "scheduler", id: "job-run-1", revision: `sha256:${"d".repeat(64)}` },
+      ],
+      deliveries: [],
+    });
+    expect(await restarted.lifecycleAcceptedWorkItems("stop-operation-1")).toHaveLength(7);
+    await restarted.sealLifecycleAdmission("stop-operation-1");
+    await expect(enqueue(log, artifacts, restarted, firstInput)).resolves.toMatchObject({
+      accepted: true,
+    });
+    await restarted.releaseLifecycleAdmission("stop-operation-1");
+    await restarted.installLifecycleAdmission({
+      operationId: "stop-operation-2",
+      sources: [],
+      deliveries: [],
+    });
+    expect(await restarted.lifecycleAcceptedWorkItems("stop-operation-2")).toHaveLength(7);
+  });
   it("generates the frozen prefixed ULID identity vector and rejects malformed item ids", () => {
     const digest = `sha256:${"a".repeat(64)}`;
     expect(deliveryItemId(digest, FIRST)).toBe("dlv-01KXPWTM80BYB4SH423EJT1CVN");

@@ -12,6 +12,11 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
+import {
+  HOST_STOP_ACCEPTED_WORK_OWNERS,
+  type HostStopAcceptedWorkPorts,
+} from "./host-stop-lifecycle.js";
+import { protocolDigest, validateDeviceLifecycleRecord } from "@zhixing/core/protocol";
 
 describe("anchor uninstall coordinator", () => {
   it("uses a ready migration target and only reports terminal after transfer verification and local retirement", async () => {
@@ -107,10 +112,25 @@ describe("anchor uninstall coordinator", () => {
       clock: () => new Date("2026-08-12T00:00:05.000Z"),
     });
     await checkpointOwner.start(false);
-    const cleanupRecovery = vi.fn(async () => [{
-      kind: "cleanup" as const,
-      digest: `sha256:${"c".repeat(64)}`,
-    }]);
+    const effects: string[] = [];
+    let finalUpToLsn: number | undefined;
+    const forceCheckpoint = checkpointOwner.force.bind(checkpointOwner);
+    vi.spyOn(checkpointOwner, "force").mockImplementation(async (reason) => {
+      effects.push(`force:${reason}`);
+      const checkpoint = await forceCheckpoint(reason);
+      if (reason === "uninstall-backup:final-retirement") {
+        finalUpToLsn = checkpoint.envelope.manifest.upToLsn;
+      }
+      return checkpoint;
+    });
+    const acceptedWork = acceptedWorkPorts(effects);
+    const cleanupRecovery = vi.fn(async () => {
+      effects.push("cleanup");
+      return [{
+        kind: "cleanup" as const,
+        digest: `sha256:${"c".repeat(64)}`,
+      }];
+    });
     const onRetired = vi.fn(async () => undefined);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
@@ -121,6 +141,37 @@ describe("anchor uninstall coordinator", () => {
       checkpointOwner,
       closeAdmission: async () => undefined,
       releaseAdmission: async () => undefined,
+      recoveryAcceptedWork: {
+        ports: acceptedWork,
+        artifactStore: fixture.store.artifactStore(),
+        closeAdmission: async (operationId) => {
+          effects.push(`close:${operationId}`);
+        },
+        onFrozen: async (snapshot) => {
+          effects.push(`frozen:${snapshot.operationId}`);
+        },
+        flushDurableState: async () => {
+          effects.push("flush");
+          await fixture.store.authorityLog().append([{
+            stream: "exposure",
+            body: createCredentialExposureRecord({
+              deviceId: fixture.issuerKey.deviceId,
+              bindingId: "provider:accepted-work-flush",
+              service: "provider",
+              markedAt: "2026-08-12T00:00:06.000Z",
+            }),
+          }]);
+          return [{
+            kind: "accepted-work" as const,
+            digest: protocolDigest("TestAnchorUninstallFlush", 1, {
+              operationId: "uninstall-backup",
+            }),
+          }];
+        },
+        settlePhysicalSteps: async () => {
+          effects.push("physical");
+        },
+      },
       cleanupRecovery,
       onRetired,
     });
@@ -134,6 +185,31 @@ describe("anchor uninstall coordinator", () => {
     await expect(coordinator.confirmRecoveryBackup("uninstall-backup", encodeRecoveryPackage(root)))
       .resolves.toEqual({ phase: "uninstalled" });
     expect(verify).toHaveBeenCalledTimes(2);
+    expect(effects.indexOf("flush")).toBeLessThan(
+      effects.indexOf("force:uninstall-backup:final-retirement"),
+    );
+    expect(effects.indexOf("force:uninstall-backup:final-retirement")).toBeLessThan(
+      effects.indexOf("cleanup"),
+    );
+    expect(effects.filter((item) => item.startsWith("settle:")).length)
+      .toBe(HOST_STOP_ACCEPTED_WORK_OWNERS.length);
+    const lifecycle = await fixture.store.authorityLog().readStream<unknown>("device-lifecycle");
+    const retirement = lifecycle.find((entry) => {
+      const record = validateDeviceLifecycleRecord(entry.body);
+      return record.t === "advanced" && record.phase === "retirement-decided";
+    });
+    const flushed = lifecycle.find((entry) => {
+      const record = validateDeviceLifecycleRecord(entry.body);
+      return record.t === "advanced" && record.phase === "flushed";
+    });
+    expect(retirement).toBeDefined();
+    expect(validateDeviceLifecycleRecord(retirement!.body)).toMatchObject({
+      t: "advanced",
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ kind: "accepted-work", artifact: expect.any(Object) }),
+      ]),
+    });
+    expect(finalUpToLsn).toBeGreaterThanOrEqual(flushed!.lsn);
     expect(cleanupRecovery).toHaveBeenCalledTimes(1);
     expect(onRetired).toHaveBeenCalledTimes(1);
     await expect(coordinator.state("uninstall-backup")).resolves.toEqual({ phase: "uninstalled" });
@@ -195,4 +271,24 @@ function allowMaintenance(): StorageMaintenanceGovernorPort {
     }),
     snapshot: () => ({ queued: {}, inFlight: {} }),
   };
+}
+
+function acceptedWorkPorts(effects: string[]): HostStopAcceptedWorkPorts {
+  return Object.fromEntries(HOST_STOP_ACCEPTED_WORK_OWNERS.map((owner) => [
+    owner,
+    {
+      freeze: async () => owner === "conversation" || owner === "delivery"
+        ? [{ id: `${owner}-1`, revision: `sha256:${"d".repeat(64)}` }]
+        : [],
+      settle: async ({ operationId, strategy }: {
+        readonly operationId: string;
+        readonly strategy: "immediate" | "drain" | "cancel";
+      }) => {
+        effects.push(`settle:${owner}:${operationId}:${strategy}`);
+      },
+      readBack: async () => {
+        effects.push(`read:${owner}`);
+      },
+    },
+  ])) as unknown as HostStopAcceptedWorkPorts;
 }

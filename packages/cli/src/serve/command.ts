@@ -39,6 +39,7 @@ import {
   runRetentionSweep,
   getWorkScenesRoot,
   getWorkSceneConversationsRoot,
+  type DeliveryLifecycleSourcePermit,
 } from "@zhixing/core";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import { protocolDigest, type StopHostGeneration } from "@zhixing/core/protocol";
@@ -178,6 +179,7 @@ import {
   HostStopCoordinator,
   type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkPorts,
+  type HostStopAcceptedWorkSnapshot,
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 
@@ -1290,6 +1292,7 @@ async function runServerProcess(
     owner: keyof HostStopAcceptedWorkPorts,
     operationId: string,
     frozen: readonly HostStopAcceptedWorkItem[],
+    strategy: "immediate" | "drain" | "cancel",
   ) => {
     if (
       ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
@@ -1302,7 +1305,9 @@ async function runServerProcess(
       );
       return;
     }
-    const current = await captureStopAcceptedWork(owner, operationId);
+    const current = owner === "delivery"
+      ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(operationId) ?? []
+      : await captureStopAcceptedWork(owner, operationId);
     assertAcceptedWorkSubset(current, frozen, `host-stop ${owner}`);
     if (owner === "conversation") {
       if ((ctx.conversations?.list() ?? []).some((item) => item.busy)) {
@@ -1336,7 +1341,12 @@ async function runServerProcess(
       if (current.length !== 0) throw new Error("Scheduler accepted work is not settled");
       return;
     }
-    if (owner === "delivery") return;
+    if (owner === "delivery") {
+      if (strategy !== "immediate" && current.length !== 0) {
+        throw new Error("Delivery accepted work is not durably terminal");
+      }
+      return;
+    }
   };
   const stopPort = (
     owner: keyof HostStopAcceptedWorkPorts,
@@ -1349,8 +1359,12 @@ async function runServerProcess(
       readonly timeoutMs: number;
       readonly frozen: readonly HostStopAcceptedWorkItem[];
     }) => {
-      const current = await captureStopAcceptedWork(owner, input.operationId);
-      assertAcceptedWorkSubset(current, input.frozen, `host-stop ${owner} settlement`);
+      const current = owner === "delivery"
+        ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(input.operationId) ?? []
+        : await captureStopAcceptedWork(owner, input.operationId);
+      if (owner !== "delivery") {
+        assertAcceptedWorkSubset(current, input.frozen, `host-stop ${owner} settlement`);
+      }
       if (
         ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
         ctx.localConversationOwner
@@ -1364,8 +1378,16 @@ async function runServerProcess(
       }
       await settle(input.strategy, input.timeoutMs);
     },
-    readBack: (input: { readonly operationId: string; readonly frozen: readonly HostStopAcceptedWorkItem[] }) =>
-      assertStopAcceptedWorkSettled(owner, input.operationId, input.frozen),
+    readBack: (input: {
+      readonly operationId: string;
+      readonly strategy: "immediate" | "drain" | "cancel";
+      readonly frozen: readonly HostStopAcceptedWorkItem[];
+    }) => assertStopAcceptedWorkSettled(
+      owner,
+      input.operationId,
+      input.frozen,
+      input.strategy,
+    ),
   });
   const acceptedWork: HostStopAcceptedWorkPorts = {
     conversation: stopPort("conversation", async (strategy, timeoutMs) => {
@@ -1397,8 +1419,15 @@ async function runServerProcess(
       await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
       await ctx.executorJobOwner?.drain();
     }),
-    delivery: stopPort("delivery", async () => {
-      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+    delivery: stopPort("delivery", async (strategy, timeoutMs) => {
+      const operationId = activeDeliveryLifecycleOperationId;
+      if (!operationId) throw new Error("Delivery settlement is missing its lifecycle operation");
+      await ctx.deliveryStack?.sealLifecycleAdmission(operationId);
+      await ctx.deliveryStack?.settleAcceptedWorkForLifecycle(
+        operationId,
+        strategy,
+        timeoutMs,
+      );
     }),
     lease: stopPort("lease", async () => {
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
@@ -1407,12 +1436,21 @@ async function runServerProcess(
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     }),
   };
+  let activeDeliveryLifecycleOperationId: string | undefined;
   const stopCoordinator = new HostStopCoordinator({
     journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
     homeId: lifecycleHomeId,
     host: stopHost,
     acceptedWork,
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+    onAcceptedWorkFrozen: async (snapshot) => {
+      activeDeliveryLifecycleOperationId = snapshot.operationId;
+      await ctx.deliveryStack?.installLifecycleAdmission({
+        operationId: snapshot.operationId,
+        sources: deliveryLifecycleSources(snapshot),
+        deliveries: snapshot.owners.delivery,
+      });
+    },
     runtime: {
       closeAdmission: async (operationId) => {
         managedHostStopping = true;
@@ -1559,12 +1597,23 @@ async function runServerProcess(
       if (removalAdmissionOperationId !== operationId) {
         throw new Error("Device-removal settlement does not own external admission");
       }
+      await ctx.deliveryStack?.installLifecycleAdmission({
+        operationId,
+        sources: deliveryLifecycleSourcesFromOwnerItems(ownerItems),
+        deliveries: ownerItems
+          .filter((item) => item.owner === "delivery")
+          .map(({ id, revision }) => ({ id, revision })),
+      });
       for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
         const frozen = ownerItems
           .filter((item) => item.owner === owner)
           .map(({ id, revision }) => ({ id, revision }));
-        const current = await captureStopAcceptedWork(owner, operationId);
-        assertAcceptedWorkSubset(current, frozen, `device-removal ${owner} settlement`);
+        const current = owner === "delivery"
+          ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(operationId) ?? []
+          : await captureStopAcceptedWork(owner, operationId);
+        if (owner !== "delivery") {
+          assertAcceptedWorkSubset(current, frozen, `device-removal ${owner} settlement`);
+        }
         if (owner === "remote") {
           await ctx.inboundRouter?.drainAcceptedMessages();
           await ctx.executorJobOwner?.drain();
@@ -1573,11 +1622,20 @@ async function runServerProcess(
         } else if (owner === "scheduler") {
           await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
         } else {
-          await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+          await ctx.deliveryStack?.sealLifecycleAdmission(operationId);
+          await ctx.deliveryStack?.settleAcceptedWorkForLifecycle(
+            operationId,
+            "drain",
+            30_000,
+          );
         }
-        const after = await captureStopAcceptedWork(owner, operationId);
-        assertAcceptedWorkSubset(after, frozen, `device-removal ${owner} read-back`);
-        if (owner !== "delivery" && after.length !== 0) {
+        const after = owner === "delivery"
+          ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(operationId) ?? []
+          : await captureStopAcceptedWork(owner, operationId);
+        if (owner !== "delivery") {
+          assertAcceptedWorkSubset(after, frozen, `device-removal ${owner} read-back`);
+        }
+        if (after.length !== 0) {
           throw new Error(`Device-removal ${owner} accepted work is not settled`);
         }
       }
@@ -1588,6 +1646,7 @@ async function runServerProcess(
       if (removalAdmissionOperationId !== operationId) {
         throw new Error("Device-removal release does not own external admission");
       }
+      await ctx.deliveryStack?.releaseLifecycleAdmission(operationId);
       await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
       schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
       ctx.executorJobOwner?.resumeAccepting();
@@ -1659,11 +1718,56 @@ async function runServerProcess(
           await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
         },
         releaseAdmission: async () => {
+          if (activeDeliveryLifecycleOperationId) {
+            await ctx.deliveryStack?.releaseLifecycleAdmission(
+              activeDeliveryLifecycleOperationId,
+            );
+            activeDeliveryLifecycleOperationId = undefined;
+          }
           await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
           ctx.conversationProtocol?.startRecoveryLoop();
           schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
           ctx.inboundRouter?.resumeNewMessages();
           await ctx.channelConnections?.connectConfigured();
+        },
+        recoveryAcceptedWork: {
+          ports: acceptedWork,
+          artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+          closeAdmission: async (operationId) => {
+            managedHostStopping = true;
+            ctx.inboundRouter?.refuseNewMessages();
+            ctx.executorJobOwner?.pauseAccepting();
+            schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+            ctx.deliveryStack?.closeAdmissionForLifecycle();
+            await Promise.all([
+              ctx.localConversationOwner?.closeHostStopAdmission(operationId),
+              ctx.channelConnections?.suspendConfigured(),
+            ]);
+          },
+          onFrozen: async (snapshot) => {
+            activeDeliveryLifecycleOperationId = snapshot.operationId;
+            await ctx.deliveryStack?.installLifecycleAdmission({
+              operationId: snapshot.operationId,
+              sources: deliveryLifecycleSources(snapshot),
+              deliveries: snapshot.owners.delivery,
+            });
+          },
+          flushDurableState: async () => {
+            const [checkpoint, localOwnerDigest] = await Promise.all([
+              lifecycleAuthorityLog.checkpoint(),
+              ctx.localConversationOwner?.checkpointAcceptedWork(),
+            ]);
+            return [{
+              kind: "accepted-work" as const,
+              digest: protocolDigest("AnchorUninstallDurableFlush", 1, {
+                lifecycle: checkpoint.prefixDigest,
+                localOwner: localOwnerDigest ?? null,
+              }),
+            }];
+          },
+          settlePhysicalSteps: async () => {
+            await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+          },
         },
         cleanupRecovery: cleanupLocalDevice,
         onRetired: finishLocalRetirement,
@@ -2250,4 +2354,47 @@ function assertAcceptedWorkSubset(
       throw new Error(`${label} observed an unowned or successor accepted-work item`);
     }
   }
+}
+
+function deliveryLifecycleSources(
+  snapshot: HostStopAcceptedWorkSnapshot,
+): readonly DeliveryLifecycleSourcePermit[] {
+  return deliveryLifecycleSourcesFromOwnerItems(
+    Object.entries(snapshot.owners).flatMap(([owner, items]) =>
+      items.map((item) => ({ owner, ...item }))),
+  );
+}
+
+function deliveryLifecycleSourcesFromOwnerItems(
+  items: readonly {
+    readonly owner: string;
+    readonly id: string;
+    readonly revision: string;
+  }[],
+): readonly DeliveryLifecycleSourcePermit[] {
+  const sources = new Map<string, DeliveryLifecycleSourcePermit>();
+  for (const item of items) {
+    const source = item.owner === "conversation"
+      ? { owner: "conversation" as const, id: item.id, revision: item.revision }
+      : item.owner === "assignment"
+        ? { owner: "assignment" as const, id: item.id, revision: item.revision }
+        : item.owner === "scheduler"
+          ? { owner: "scheduler" as const, id: item.id, revision: item.revision }
+          : item.owner === "remote" && (item.id.startsWith("relay:") || item.id.startsWith("local:"))
+            ? {
+                owner: "assignment" as const,
+                id: item.id.slice(item.id.indexOf(":") + 1),
+                revision: item.revision,
+              }
+            : undefined;
+    if (!source) continue;
+    const key = `${source.owner}\u0000${source.id}`;
+    const previous = sources.get(key);
+    if (previous && previous.revision !== source.revision) {
+      throw new Error("Lifecycle accepted-work contains conflicting delivery source revisions");
+    }
+    sources.set(key, Object.freeze(source));
+  }
+  return Object.freeze([...sources.values()].sort((left, right) =>
+    `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
 }
