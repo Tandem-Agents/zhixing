@@ -14,6 +14,7 @@ import {
   inspectProductionSource,
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
+  inspectDeviceLifecycleAssembly,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -1820,6 +1821,47 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /bounded successor or start classifier drifted/,
+  );
+});
+
+test("device lifecycle stays on one journal, two production roots and local-only host control", async () => {
+  const paths = [
+    "packages/core/src/protocol/device-lifecycle.ts",
+    "packages/core/src/authority/device-lifecycle-journal.ts",
+    "packages/cli/src/serve/device-removal.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/server/src/rpc/methods/index.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  assert.deepEqual(inspectDeviceLifecycleAssembly(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/core/src/authority/device-lifecycle-journal.ts",
+      (text) => text.replace('record.t === "advanced" || record.t === "terminal"', 'record.t === "advanced"'),
+    )).join("\n"),
+    /retained terminal evidence drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("await mesh.bindDeviceRemovalLifecycle({", "void mesh.bindDeviceRemovalLifecycle({"),
+    )).join("\n"),
+    /two-root recovery binding drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/server/src/rpc/methods/index.ts",
+      (text) => text.replace('"server.uninstall.status",', ""),
+    )).join("\n"),
+    /RPC ownership drifted/,
   );
 });
 

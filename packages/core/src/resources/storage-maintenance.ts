@@ -33,6 +33,7 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "conversation-transfer",
   "authority-checkpoint",
   "managed-service-reconcile",
+  "device-lifecycle-cleanup",
 ] as const;
 
 export type StorageMaintenanceKind =
@@ -55,6 +56,7 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "conversation-transfer": "conversation-transfer-owner",
   "authority-checkpoint": "authority-checkpoint-owner",
   "managed-service-reconcile": "managed-service-owner",
+  "device-lifecycle-cleanup": "device-lifecycle-owner",
 } as const satisfies Readonly<
   Record<StorageMaintenanceKind, string>
 >;
@@ -490,6 +492,7 @@ const STORAGE_STEP_BUDGETS: Readonly<
   "authority-checkpoint": budget(16 * MIB, 16 * MIB, 16 * MIB, 16 * MIB, 256),
   // managed service reconciliation writes one bounded local service definition.
   "managed-service-reconcile": budget(4 * MIB, 4 * MIB, 4 * MIB, 4 * MIB, 64),
+  "device-lifecycle-cleanup": budget(16 * MIB, 16 * MIB, 8 * MIB, 8 * MIB, 128),
 };
 
 export function storageMaintenanceRequest(

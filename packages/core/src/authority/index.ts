@@ -116,3 +116,4 @@ export type {
   ProjectionTransactionResult,
   ProjectionTransactionReducer,
 } from "./interfaces.js";
+export { DeviceLifecycleJournal } from "./device-lifecycle-journal.js";

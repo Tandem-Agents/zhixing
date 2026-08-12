@@ -19,6 +19,22 @@
         "requiresAuth": true
       },
       {
+        "name": "device.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.remove",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.status",
+        "requiresAuth": true
+      },
+      {
         "name": "dutyMigration.cancel",
         "requiresAuth": true
       },
@@ -84,6 +100,26 @@
       },
       {
         "name": "server.shutdown",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.begin",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.preflight",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.status",
         "requiresAuth": true
       },
       {
@@ -241,6 +277,22 @@
         "requiresAuth": true
       },
       {
+        "name": "device.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.remove",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.status",
+        "requiresAuth": true
+      },
+      {
         "name": "dutyMigration.cancel",
         "requiresAuth": true
       },
@@ -306,6 +358,26 @@
       },
       {
         "name": "server.shutdown",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.begin",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.preflight",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.status",
         "requiresAuth": true
       },
       {
@@ -463,6 +535,22 @@
         "requiresAuth": true
       },
       {
+        "name": "device.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.remove",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.status",
+        "requiresAuth": true
+      },
+      {
         "name": "dutyMigration.cancel",
         "requiresAuth": true
       },
@@ -528,6 +616,26 @@
       },
       {
         "name": "server.shutdown",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.begin",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.preflight",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.status",
         "requiresAuth": true
       },
       {
@@ -685,6 +793,22 @@
         "requiresAuth": true
       },
       {
+        "name": "device.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.remove",
+        "requiresAuth": true
+      },
+      {
+        "name": "device.status",
+        "requiresAuth": true
+      },
+      {
         "name": "dutyMigration.cancel",
         "requiresAuth": true
       },
@@ -750,6 +874,26 @@
       },
       {
         "name": "server.shutdown",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.begin",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.cancel",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.continue",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.preflight",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.uninstall.status",
         "requiresAuth": true
       },
       {
@@ -1038,6 +1182,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1048,6 +1197,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1068,6 +1218,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:device.continue",
+          "rpc:device.list",
+          "rpc:device.remove",
+          "rpc:device.status",
           "rpc:dutyMigration.cancel",
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
@@ -1085,6 +1239,11 @@
           "rpc:schedule.update",
           "rpc:server.info",
           "rpc:server.shutdown",
+          "rpc:server.uninstall.begin",
+          "rpc:server.uninstall.cancel",
+          "rpc:server.uninstall.continue",
+          "rpc:server.uninstall.preflight",
+          "rpc:server.uninstall.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1215,6 +1374,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1225,6 +1389,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1245,6 +1410,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:device.continue",
+          "rpc:device.list",
+          "rpc:device.remove",
+          "rpc:device.status",
           "rpc:dutyMigration.cancel",
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
@@ -1262,6 +1431,11 @@
           "rpc:schedule.update",
           "rpc:server.info",
           "rpc:server.shutdown",
+          "rpc:server.uninstall.begin",
+          "rpc:server.uninstall.cancel",
+          "rpc:server.uninstall.continue",
+          "rpc:server.uninstall.preflight",
+          "rpc:server.uninstall.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1384,6 +1558,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1394,6 +1573,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1407,6 +1587,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:device.continue",
+          "rpc:device.list",
+          "rpc:device.remove",
+          "rpc:device.status",
           "rpc:dutyMigration.cancel",
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
@@ -1424,6 +1608,11 @@
           "rpc:schedule.update",
           "rpc:server.info",
           "rpc:server.shutdown",
+          "rpc:server.uninstall.begin",
+          "rpc:server.uninstall.cancel",
+          "rpc:server.uninstall.continue",
+          "rpc:server.uninstall.preflight",
+          "rpc:server.uninstall.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1534,6 +1723,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1544,6 +1738,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1557,6 +1752,10 @@
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
           "rpc:delivery.resolve",
+          "rpc:device.continue",
+          "rpc:device.list",
+          "rpc:device.remove",
+          "rpc:device.status",
           "rpc:dutyMigration.cancel",
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
@@ -1574,6 +1773,11 @@
           "rpc:schedule.update",
           "rpc:server.info",
           "rpc:server.shutdown",
+          "rpc:server.uninstall.begin",
+          "rpc:server.uninstall.cancel",
+          "rpc:server.uninstall.continue",
+          "rpc:server.uninstall.preflight",
+          "rpc:server.uninstall.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1655,6 +1859,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1665,6 +1874,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1742,6 +1952,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1752,6 +1967,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1826,6 +2042,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1836,6 +2057,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1892,6 +2114,11 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing device",
+          "cli:zhixing device continue",
+          "cli:zhixing device list",
+          "cli:zhixing device remove",
+          "cli:zhixing device status",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1902,6 +2129,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
+          "cli:zhixing uninstall",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2432,6 +2660,57 @@
         }
       },
       {
+        "path": "zhixing device",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing device",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing device continue",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing device continue",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "path": "zhixing device list",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing device list",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "path": "zhixing device remove",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing device remove",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "path": "zhixing device status",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing device status",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
         "path": "zhixing duty",
         "hidden": false,
         "hasAction": false,
@@ -2529,6 +2808,16 @@
         "hidden": false,
         "hasAction": true,
         "key": "cli:zhixing stop",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "path": "zhixing uninstall",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing uninstall",
         "category": "cli",
         "target": {
           "rowId": "shutdown"
@@ -2719,6 +3008,42 @@
         }
       },
       {
+        "name": "device.continue",
+        "requiresAuth": true,
+        "key": "rpc:device.continue",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "device.list",
+        "requiresAuth": true,
+        "key": "rpc:device.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "device.remove",
+        "requiresAuth": true,
+        "key": "rpc:device.remove",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "device.status",
+        "requiresAuth": true,
+        "key": "rpc:device.status",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
         "name": "dutyMigration.cancel",
         "requiresAuth": true,
         "key": "rpc:dutyMigration.cancel",
@@ -2867,6 +3192,51 @@
         "name": "server.shutdown",
         "requiresAuth": true,
         "key": "rpc:server.shutdown",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "server.uninstall.begin",
+        "requiresAuth": true,
+        "key": "rpc:server.uninstall.begin",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "server.uninstall.cancel",
+        "requiresAuth": true,
+        "key": "rpc:server.uninstall.cancel",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "server.uninstall.continue",
+        "requiresAuth": true,
+        "key": "rpc:server.uninstall.continue",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "server.uninstall.preflight",
+        "requiresAuth": true,
+        "key": "rpc:server.uninstall.preflight",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "server.uninstall.status",
+        "requiresAuth": true,
+        "key": "rpc:server.uninstall.status",
         "category": "rpc",
         "target": {
           "rowId": "shutdown"

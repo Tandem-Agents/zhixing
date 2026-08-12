@@ -257,6 +257,33 @@ program
   .action(handleStopAction);
 
 program
+  .command("uninstall")
+  .description("安全永久卸载当前值班设备")
+  .option("--device <device-name>", "把值班职责交给名称唯一的已就绪设备")
+  .option("--recovery-backup", "使用已验证的恢复备份作为卸载安全保障")
+  .option("--confirm", "确认永久清退当前设备")
+  .action(async (options: {
+    device?: string;
+    recoveryBackup?: boolean;
+    confirm?: boolean;
+  }) => {
+    try {
+      const { uninstallCurrentDevice } = await import(
+        "./runtime/anchor-uninstall-command.js"
+      );
+      await uninstallCurrentDevice({
+        ...(options.device ? { targetName: options.device } : {}),
+        ...(options.recoveryBackup ? { recoveryBackup: true } : {}),
+        ...(options.confirm ? { confirmed: true } : {}),
+      });
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+program
   .command("pair")
   .description("配对另一台知行设备")
   .argument("[invitation]", "另一台设备显示的配对邀请")
@@ -306,6 +333,95 @@ function parseYesNo(value: string): boolean {
   if (value === "no") return false;
   throw new Error("必须填写 yes 或 no");
 }
+
+function parseDeviceRemovalMode(value: string): "transfer" | "destroy" | "lost" | "cancel" {
+  if (value === "transfer" || value === "destroy" || value === "lost" || value === "cancel") {
+    return value;
+  }
+  throw new Error("设备移除方式必须是 transfer、destroy、lost 或 cancel");
+}
+
+const deviceCmd = program
+  .command("device")
+  .description("管理已配对设备");
+
+deviceCmd
+  .command("list")
+  .description("列出可以移除的已配对设备")
+  .action(async () => {
+    try {
+      const { listRemovableDevices } = await import("./runtime/device-removal-command.js");
+      await listRemovableDevices();
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+deviceCmd
+  .command("remove")
+  .description("安全移除已配对设备")
+  .argument("[device-name]", "设备名称；交互终端可省略后按序号选择")
+  .option("--mode <mode>", "处理方式：transfer、destroy 或 lost", parseDeviceRemovalMode)
+  .option("--confirm", "确认永久删除本地权威，或确认按失控设备撤销")
+  .action(async (deviceName: string | undefined, options: {
+    mode?: "transfer" | "destroy" | "lost" | "cancel";
+    confirm?: boolean;
+  }) => {
+    try {
+      if (options.mode === "cancel") throw new TypeError("新移除操作不能以 cancel 开始");
+      const { removeDevice } = await import("./runtime/device-removal-command.js");
+      await removeDevice({
+        ...(deviceName ? { targetName: deviceName } : {}),
+        ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.confirm ? { confirmed: true } : {}),
+      });
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+deviceCmd
+  .command("continue")
+  .description("继续、取消或按失控设备收束已登记的移除操作")
+  .argument("<device-name>", "设备名称")
+  .requiredOption("--mode <mode>", "处理方式：transfer、destroy、lost 或 cancel", parseDeviceRemovalMode)
+  .option("--confirm", "确认永久删除本地权威，或确认按失控设备撤销")
+  .action(async (targetName: string, options: {
+    mode: "transfer" | "destroy" | "lost" | "cancel";
+    confirm?: boolean;
+  }) => {
+    try {
+      const { continueDeviceRemoval } = await import("./runtime/device-removal-command.js");
+      await continueDeviceRemoval({
+        targetName,
+        mode: options.mode,
+        ...(options.confirm ? { confirmed: true } : {}),
+      });
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+deviceCmd
+  .command("status")
+  .description("查看已登记的设备移除进度")
+  .argument("<device-name>", "设备名称")
+  .action(async (targetName: string) => {
+    try {
+      const { showDeviceRemovalStatus } = await import("./runtime/device-removal-command.js");
+      await showDeviceRemovalStatus(targetName);
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
 
 const dutyCmd = program
   .command("duty")

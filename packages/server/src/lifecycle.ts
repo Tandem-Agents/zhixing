@@ -182,19 +182,38 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     void shutdown(reason);
   };
 
+  const prepareSignalShutdown = async (reason: string): Promise<void> => {
+    const lifecycle = opts.context.lifecycleShutdown;
+    if (lifecycle) {
+      await lifecycle.prepare({
+        requestId: `signal:${opts.context.startedAt}:${reason}`,
+        reason,
+        strategy: "immediate",
+        timeoutMs: 30_000,
+      });
+    }
+    await shutdown(reason);
+  };
+
   // 6. 信号处理器
   if (!opts.skipSignalHandlers) {
     let sigintCount = 0;
     const onSigterm = () => {
-      void shutdown("SIGTERM").then(() => process.exit(0));
+      void prepareSignalShutdown("SIGTERM").then(
+        () => process.exit(0),
+        (error) => logger.error(`SIGTERM shutdown is blocked: ${String(error)}`),
+      );
     };
     const onSigint = () => {
       sigintCount += 1;
       if (sigintCount >= 2) {
-        logger.warn("Received second SIGINT, forcing exit");
-        process.exit(1);
+        logger.warn("Received repeated SIGINT while safe shutdown is still pending");
+        return;
       }
-      void shutdown("SIGINT").then(() => process.exit(0));
+      void prepareSignalShutdown("SIGINT").then(
+        () => process.exit(0),
+        (error) => logger.error(`SIGINT shutdown is blocked: ${String(error)}`),
+      );
     };
 
     process.once("SIGTERM", onSigterm);
@@ -203,7 +222,10 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     // SIGUSR1 — 本 Level 等同 SIGTERM（无 supervisor 不做自动重启）；Windows 跳过
     if (process.platform !== "win32") {
       process.once("SIGUSR1", () => {
-        void shutdown("SIGUSR1 (restart)").then(() => process.exit(0));
+        void prepareSignalShutdown("SIGUSR1-restart").then(
+          () => process.exit(0),
+          (error) => logger.error(`SIGUSR1 shutdown is blocked: ${String(error)}`),
+        );
       });
     }
   }

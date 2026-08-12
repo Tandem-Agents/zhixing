@@ -16,8 +16,11 @@ import { canonicalize } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
+import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
-import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
+import { FileAuthorityCommitLog, DeviceLifecycleJournal } from "@zhixing/core/authority";
+import path from "node:path";
+import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   completePlannedAnchorInstallationBeforeBootstrap,
@@ -68,13 +71,84 @@ export async function prepareMeshRuntimeBootstrap(input: {
   const configuration = input.configuration === undefined
     ? undefined
     : validateMeshRoleBootConfig(input.configuration);
-  const deviceKey = await loadOrCreateDeviceKey(input.secretStore);
   const bootstrapStore = new FileMeshBootstrapStore(
     input.zhixingHome,
-    deviceKey,
+    undefined,
     { storageMaintenance: input.storageMaintenance },
   );
-  const trust = await bootstrapStore.loadTrustRecord();
+  const trustEvents = await bootstrapStore.loadTrustEvents();
+  const preRuntimeTrust = await bootstrapStore.loadTrustRecord();
+  const trustedIdentities = new Map(
+    trustEvents.flatMap((event) => event.body.t === "genesis"
+      ? [event.body.issuer]
+      : event.body.t === "enroll"
+        ? [event.body.device]
+        : [])
+      .map((identity) => [identity.deviceId, identity] as const),
+  );
+  if (preRuntimeTrust?.issuer.issuerPublicKey) {
+    const issuerMember = preRuntimeTrust.members.find((member) =>
+      member.device.deviceId === preRuntimeTrust.issuer.deviceId);
+    if (!issuerMember) throw new Error("Current issuer is missing from the trust projection");
+    trustedIdentities.set(preRuntimeTrust.issuer.issuerKeyId, Object.freeze({
+      ...issuerMember.device,
+      deviceId: preRuntimeTrust.issuer.issuerKeyId,
+      publicKey: preRuntimeTrust.issuer.issuerPublicKey,
+    }));
+  }
+  const verifier = trustEvents.length === 0
+    ? undefined
+    : createTrustedDeviceProtocolVerifier([...trustedIdentities.values()]);
+  const executorLog = new FileAuthorityCommitLog(
+    path.join(path.resolve(input.zhixingHome), "distributed-runtime", "executor-authority"),
+    bootstrapStore.artifactStore(),
+    { storageMaintenance: input.storageMaintenance },
+  );
+  const [authorityOperations, executorOperations, existingDeviceKey] = await Promise.all([
+    new DeviceLifecycleJournal(bootstrapStore.authorityLog(), verifier).operations(),
+    new DeviceLifecycleJournal(executorLog, verifier).operations(),
+    loadExistingDeviceKey(input.secretStore),
+  ]);
+  const relevant = [...authorityOperations, ...executorOperations].filter((operation) => {
+    if (operation.identity.kind === "executor-removal") {
+      return existingDeviceKey
+        ? operation.identity.targetDeviceId === existingDeviceKey.deviceId
+        : true;
+    }
+    if (operation.identity.kind === "anchor-uninstall") {
+      return existingDeviceKey
+        ? operation.identity.currentDeviceId === existingDeviceKey.deviceId
+        : true;
+    }
+    return operation.identity.kind === "stop" && existingDeviceKey !== undefined;
+  });
+  const terminalRetirement = [...relevant].reverse().find((operation) =>
+    operation.phase === "terminal" &&
+    (operation.identity.kind === "executor-removal" ||
+      operation.identity.kind === "anchor-uninstall"));
+  if (terminalRetirement) {
+    if (
+      terminalRetirement.identity.kind !== "executor-removal" &&
+      terminalRetirement.identity.kind !== "anchor-uninstall"
+    ) {
+      throw new Error("Terminal device retirement has the wrong lifecycle kind");
+    }
+    const retiredDeviceId = terminalRetirement.identity.kind === "executor-removal"
+      ? terminalRetirement.identity.targetDeviceId
+      : terminalRetirement.identity.currentDeviceId;
+    await deleteDeviceKey(input.secretStore, retiredDeviceId);
+    throw new Error(terminalRetirement.identity.kind === "executor-removal"
+      ? "This device was removed; pair it again to create a new identity"
+      : "This duty-device home was permanently uninstalled; use the recovery flow to restore it");
+  }
+  const hasActiveLifecycle = relevant.some((operation) =>
+    operation.phase !== "terminal" && operation.phase !== "aborted");
+  if (hasActiveLifecycle && !existingDeviceKey) {
+    throw new Error("Device lifecycle recovery requires the existing local identity");
+  }
+  const deviceKey = existingDeviceKey ?? await loadOrCreateDeviceKey(input.secretStore);
+  bootstrapStore.bindIssuerKey(deviceKey);
+  const trust = preRuntimeTrust;
   const disasterRecoveryPostInstall = trust
     ? await completeDisasterRecoveryInstallationBeforeBootstrap({
         zhixingHome: input.zhixingHome,

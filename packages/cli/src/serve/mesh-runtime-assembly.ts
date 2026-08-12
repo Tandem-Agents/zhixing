@@ -137,6 +137,16 @@ import {
   type DisasterRecoveryPostInstallDescriptor,
 } from "./disaster-recovery-target.js";
 import { registerDisasterRecoveryTrustEvidenceService } from "./disaster-recovery-trust-evidence.js";
+import {
+  CurrentIssuerDeviceRemovalAuthority,
+  ExecutorRemovalTarget,
+} from "./device-removal.js";
+import {
+  DeviceRemovalIssuerMeshClient,
+  DeviceRemovalTargetMeshClient,
+  registerDeviceRemovalIssuerMeshService,
+  registerDeviceRemovalTargetMeshService,
+} from "./device-removal-mesh.js";
 
 type AnchorPostInstallDescriptor =
   | PlannedAnchorPostInstallDescriptor
@@ -329,6 +339,19 @@ export class MeshRuntimeAssembly {
   readonly #transferAbort = new AbortController();
   readonly #plannedTransferRuntime = new PlannedAnchorTransferRuntimeLifecycle();
   readonly #disposers: Array<() => void> = [];
+  readonly #deviceRemovalGuards = new Map<string, string>();
+  #deviceRemovalAuthority: CurrentIssuerDeviceRemovalAuthority | undefined;
+  #disposeDeviceRemovalIssuer: (() => void) | undefined;
+  #deviceRemovalIssuerKeyId: string | undefined;
+  readonly #deviceRemovalTarget: ExecutorRemovalTarget;
+  #deviceRemovalCleanup?: (
+    operationId: string,
+  ) => Promise<readonly import("@zhixing/core/protocol").DeviceLifecycleEvidenceRef[]>;
+  #deviceRemovalRemoved?: (operationId: string) => void | Promise<void>;
+  #deviceRemovalCloseAdmission?: (operationId: string) => Promise<void>;
+  #deviceRemovalSettleAcceptedWork?: (operationId: string) => Promise<void>;
+  #deviceRemovalReleaseAdmission?: (operationId: string) => Promise<void>;
+  #localDeviceRemovalOperation: string | undefined;
   #plannedAnchorOwner: PlannedAnchorTransferOwner | undefined;
   #plannedAnchorTarget: PlannedAnchorTransferTarget | undefined;
   #disposePlannedAnchorTarget: (() => void) | undefined;
@@ -375,6 +398,9 @@ export class MeshRuntimeAssembly {
       ? {
           dispatch: (...args) => {
             const [envelope] = args;
+            if (this.#localDeviceRemovalOperation) {
+              throw new Error("This device is being removed and no longer accepts new work");
+            }
             if (
               envelope.execution === "job" &&
               (!jobOwner || !jobOwner.ready)
@@ -757,11 +783,20 @@ export class MeshRuntimeAssembly {
       }),
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
       onTrustReconciled: async (record) => {
+        for (const deviceId of this.#deviceRemovalGuards.keys()) {
+          if (!record.members.some((member) =>
+            member.device.deviceId === deviceId && member.state === "active")) {
+            this.#deviceRemovalGuards.delete(deviceId);
+          }
+        }
         await options.onTrustApplied?.(record);
         const becameCurrentIssuer =
           this.#observedIssuerDeviceId !== options.authority.deviceId &&
           record.issuer.deviceId === options.authority.deviceId;
         this.#observedIssuerDeviceId = record.issuer.deviceId;
+        if (record.issuer.deviceId !== options.authority.deviceId) {
+          this.#installDeviceRemovalIssuer(record, undefined);
+        }
         if (becameCurrentIssuer && this.#plannedAnchorPostInstall === undefined) {
           this.#postInstallTransitionPending = true;
         }
@@ -804,6 +839,14 @@ export class MeshRuntimeAssembly {
               );
               await this.#control.reconcileTrust(reconciled);
             }
+            if (connection.peer.deviceId === this.#currentAnchorDeviceId()) {
+              await this.#deviceRemovalTarget.resumeWithIssuer(
+                new DeviceRemovalIssuerMeshClient(
+                  this.connections.client(connection.peer.deviceId),
+                  options.authority.verifier,
+                ),
+              );
+            }
             await this.#plannedTransferRuntime.run(async () => {
               await this.#plannedAnchorOwner?.recoverBeforeAdmission();
             });
@@ -818,6 +861,68 @@ export class MeshRuntimeAssembly {
       },
       onConnectionError: (error) => options.onError?.(error),
     });
+
+    this.#deviceRemovalTarget = new ExecutorRemovalTarget({
+      log: options.authority.executorLog,
+      homeId: options.trust.homeId,
+      deviceKey: options.authority.identityKey,
+      verifier: options.authority.verifier,
+      ...(options.localConversationOwner
+        ? { localOwner: options.localConversationOwner }
+        : {}),
+      closeAdmission: async (operationId) => {
+        if (
+          this.#localDeviceRemovalOperation &&
+          this.#localDeviceRemovalOperation !== operationId
+        ) {
+          throw new Error("Another device removal already owns local admission");
+        }
+        if (!this.#deviceRemovalCloseAdmission) {
+          throw new Error("Device removal admission lifecycle is not bound");
+        }
+        this.#localDeviceRemovalOperation = operationId;
+        await this.#deviceRemovalCloseAdmission(operationId);
+      },
+      settleAcceptedWork: (operationId) => this.#deviceRemovalSettleAcceptedWork
+        ? this.#deviceRemovalSettleAcceptedWork(operationId)
+        : Promise.reject(new Error("Device removal accepted-work lifecycle is not bound")),
+      releaseAdmission: async (operationId) => {
+        if (!this.#deviceRemovalReleaseAdmission) {
+          throw new Error("Device removal admission lifecycle is not bound");
+        }
+        await this.#deviceRemovalReleaseAdmission(operationId);
+        if (this.#localDeviceRemovalOperation === operationId) {
+          this.#localDeviceRemovalOperation = undefined;
+        }
+      },
+      transferToAnchor: (operationId, currentAnchorDeviceId, conversationIds) =>
+        this.adoptLocalConversationsForRemoval({
+          operationId,
+          targetDeviceId: currentAnchorDeviceId,
+          conversationIds,
+        }),
+      cleanup: (operationId) => this.#deviceRemovalCleanup
+        ? this.#deviceRemovalCleanup(operationId)
+        : Promise.reject(new Error("Device removal cleanup is not bound")),
+      onRemoved: (operationId) => this.#deviceRemovalRemoved?.(operationId),
+    });
+    this.#disposers.push(registerDeviceRemovalTargetMeshService(
+      this.services,
+      {
+        target: this.#deviceRemovalTarget,
+        issuerFor: (deviceId) => new DeviceRemovalIssuerMeshClient(
+          this.connections.client(deviceId),
+          options.authority.verifier,
+        ),
+        authorizeIssuer: (deviceId) =>
+          deviceId === this.#control.currentTrust().issuer.deviceId,
+      },
+    ));
+    const issuerKey = options.trust.issuer.deviceId === options.authority.deviceId
+      ? options.plannedAnchorIssuerKey ?? options.authority.identityKey
+      : undefined;
+    this.#installDeviceRemovalIssuer(options.trust, issuerKey);
+    this.#disposers.push(() => this.#disposeDeviceRemovalIssuer?.());
 
     if (roles.has("anchor")) {
       this.#installPlannedAnchorRole(options.trust);
@@ -893,6 +998,222 @@ export class MeshRuntimeAssembly {
     );
   }
 
+  #installDeviceRemovalIssuer(record: HomeTrustRecord, issuerKey: DeviceKey | undefined): void {
+    const shouldOwn = record.issuer.deviceId === this.options.authority.deviceId;
+    const expectedPublicKey = record.issuer.issuerPublicKey ?? record.members.find((member) =>
+      member.device.deviceId === record.issuer.deviceId)?.device.publicKey;
+    const keyMatches = issuerKey !== undefined &&
+      issuerKey.deviceId === record.issuer.issuerKeyId &&
+      issuerKey.publicKey === expectedPublicKey;
+    if (!shouldOwn || !keyMatches) {
+      this.#disposeDeviceRemovalIssuer?.();
+      this.#disposeDeviceRemovalIssuer = undefined;
+      this.#deviceRemovalAuthority = undefined;
+      this.#deviceRemovalIssuerKeyId = undefined;
+      return;
+    }
+    if (this.#deviceRemovalAuthority && this.#deviceRemovalIssuerKeyId === issuerKey.deviceId) {
+      return;
+    }
+    this.#disposeDeviceRemovalIssuer?.();
+    const authority = new CurrentIssuerDeviceRemovalAuthority({
+      store: this.options.bootstrapStore,
+      issuerKey,
+      secretStore: this.options.secretStore,
+      verifier: this.options.authority.verifier,
+      isReachable: (deviceId) => this.connections.has(deviceId),
+      onGuardChanged: (deviceId, operationId) =>
+        this.setDeviceRemovalGuard(deviceId, operationId),
+      onTrustCommitted: (next) => this.applyDeviceRemovalTrust(next),
+    });
+    this.#deviceRemovalAuthority = authority;
+    this.#deviceRemovalIssuerKeyId = issuerKey.deviceId;
+    this.#disposeDeviceRemovalIssuer = registerDeviceRemovalIssuerMeshService(
+      this.services,
+      {
+        authority,
+        authorizeTarget: (deviceId) =>
+          authority.authorizesTarget(deviceId) ||
+          this.#control.currentTrust().members.some((member) =>
+            member.state === "active" && member.device.deviceId === deviceId),
+      },
+    );
+  }
+
+  async bindDeviceRemovalLifecycle(input: {
+    readonly closeAdmission: (operationId: string) => Promise<void>;
+    readonly settleAcceptedWork: (operationId: string) => Promise<void>;
+    readonly releaseAdmission: (operationId: string) => Promise<void>;
+    readonly cleanup: (
+      operationId: string,
+    ) => Promise<readonly import("@zhixing/core/protocol").DeviceLifecycleEvidenceRef[]>;
+    readonly onRemoved: (operationId: string) => void | Promise<void>;
+  }): Promise<void> {
+    if (
+      this.#deviceRemovalCleanup ||
+      this.#deviceRemovalRemoved ||
+      this.#deviceRemovalCloseAdmission ||
+      this.#deviceRemovalSettleAcceptedWork ||
+      this.#deviceRemovalReleaseAdmission
+    ) {
+      throw new Error("Device removal lifecycle is already bound");
+    }
+    this.#deviceRemovalCloseAdmission = input.closeAdmission;
+    this.#deviceRemovalSettleAcceptedWork = input.settleAcceptedWork;
+    this.#deviceRemovalReleaseAdmission = input.releaseAdmission;
+    this.#deviceRemovalCleanup = input.cleanup;
+    this.#deviceRemovalRemoved = input.onRemoved;
+    await this.#deviceRemovalTarget.resumeBeforeAdmission();
+  }
+
+  async removableDevices() {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can list removable devices");
+    }
+    return this.#deviceRemovalAuthority.candidates();
+  }
+
+  async beginDeviceRemoval(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly targetName: string;
+  }): Promise<{
+    readonly conversations: readonly string[];
+    readonly hasAcceptedWork: boolean;
+  }> {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can remove a paired device");
+    }
+    const receipt = await this.#deviceRemovalAuthority.accept(input);
+    if (!this.connections.has(receipt.targetDeviceId)) {
+      return { conversations: [], hasAcceptedWork: false };
+    }
+    return new DeviceRemovalTargetMeshClient(
+      this.connections.client(receipt.targetDeviceId),
+    ).accept(receipt);
+  }
+
+  async continueDeviceRemoval(input: {
+    readonly targetName: string;
+    readonly mode: "transfer" | "destroy" | "lost" | "cancel";
+  }) {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can continue device removal");
+    }
+    const trust = this.#control.currentTrust();
+    const named = trust.members.filter((member) => member.device.displayName === input.targetName);
+    if (named.length !== 1) {
+      throw new Error(named.length === 0
+        ? "Paired device name is unknown"
+        : "Paired device name is not unique");
+    }
+    const operation = await this.#deviceRemovalAuthority.operationForTarget(
+      named[0]!.device.deviceId,
+    );
+    if (!operation) throw new Error("Removal operation is unknown");
+    const matches = trust.members.filter((member) =>
+      member.device.deviceId === operation.targetDeviceId &&
+      member.device.displayName === input.targetName);
+    if (matches.length !== 1) throw new Error("Removal target name does not match the accepted device");
+    const targetDeviceId = operation.targetDeviceId;
+    const operationId = operation.operationId;
+    if (input.mode === "cancel") {
+      const abort = await this.#deviceRemovalAuthority.abort(operationId);
+      if (this.connections.has(targetDeviceId)) {
+        return new DeviceRemovalTargetMeshClient(
+          this.connections.client(targetDeviceId),
+        ).abort(operationId, abort);
+      }
+      return {
+        phase: "cancelled" as const,
+        conversations: [] as readonly string[],
+        localData: "known" as const,
+        credentialActions: [] as readonly string[],
+      };
+    }
+    if (input.mode === "lost") {
+      await this.#deviceRemovalAuthority.commitLost(operationId);
+      return {
+        phase: "removed" as const,
+        conversations: [] as readonly string[],
+        localData: "unknown" as const,
+        credentialActions: ["Change credentials for accounts used on this device"],
+      };
+    }
+    if (matches[0]!.state !== "active") {
+      throw new Error("Removal target is no longer an active paired device");
+    }
+    if (!this.connections.has(targetDeviceId)) {
+      throw new Error("The device is offline; choose lost-device revocation or wait for it to reconnect");
+    }
+    return new DeviceRemovalTargetMeshClient(
+      this.connections.client(targetDeviceId),
+    ).decide({
+      operationId,
+      mode: input.mode,
+      currentAnchorDeviceId: this.#currentAnchorDeviceId(),
+    });
+  }
+
+  async deviceRemovalStatus(input: {
+    readonly targetName: string;
+  }) {
+    const trust = this.#control.currentTrust();
+    const named = trust.members.filter((candidate) =>
+      candidate.device.displayName === input.targetName);
+    if (named.length !== 1) {
+      throw new Error(named.length === 0
+        ? "Paired device name is unknown"
+        : "Paired device name is not unique");
+    }
+    const member = named[0]!;
+    const operation = await this.#deviceRemovalAuthority?.operationForTarget(
+      member.device.deviceId,
+    );
+    if (!operation) return undefined;
+    if (this.connections.has(member.device.deviceId)) {
+      return new DeviceRemovalTargetMeshClient(
+        this.connections.client(member.device.deviceId),
+      ).status(operation.operationId);
+    }
+    const terminal = await this.#deviceRemovalAuthority?.terminal(operation.operationId);
+    return terminal ? {
+      phase: "removed" as const,
+      conversations: [] as readonly string[],
+      localData: "unknown" as const,
+      credentialActions: ["Change credentials for accounts used on this device"],
+    } : undefined;
+  }
+
+  async retireLocalDeviceAfterMigration(input: {
+    readonly operationId: string;
+  }): Promise<void> {
+    const issuerDeviceId = this.#currentAnchorDeviceId();
+    if (issuerDeviceId === this.options.authority.deviceId) {
+      throw new Error("Anchor migration has not installed a new current duty device");
+    }
+    if (!this.connections.has(issuerDeviceId)) {
+      throw new Error("The new duty device is offline; uninstall must resume when it reconnects");
+    }
+    const client = new DeviceRemovalIssuerMeshClient(
+      this.connections.client(issuerDeviceId),
+      this.options.authority.verifier,
+    );
+    const removalOperationId = `${input.operationId}:remove-old-anchor`;
+    const accepted = await client.acceptSelf({
+      requestId: `${input.operationId}:retire-request`,
+      operationId: removalOperationId,
+    });
+    await this.#deviceRemovalTarget.accept(accepted);
+    const ready = await this.#deviceRemovalTarget.decide({
+      operationId: removalOperationId,
+      mode: "transfer",
+      currentAnchorDeviceId: issuerDeviceId,
+    });
+    const revoked = await client.ready(ready);
+    await this.#deviceRemovalTarget.finish(revoked);
+  }
+
   async plannedAnchorTargets(): Promise<readonly {
     readonly deviceId: string;
     readonly displayName: string;
@@ -900,6 +1221,7 @@ export class MeshRuntimeAssembly {
     readonly code?: "unavailable";
   }[]> {
     this.#requirePlannedCurrentOwnerReady();
+    this.#requireNoDeviceRemoval();
     if (!this.#plannedAnchorOwner) return [];
     return this.#plannedTransferRuntime.run(async () => {
       const sourceDeviceId = this.#currentAnchorDeviceId();
@@ -941,6 +1263,7 @@ export class MeshRuntimeAssembly {
     readonly targetDeviceId: string;
   }) {
     this.#requirePlannedCurrentOwnerReady();
+    this.#requireNoDeviceRemoval();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(() => owner.prepare(input));
@@ -951,6 +1274,7 @@ export class MeshRuntimeAssembly {
     readonly transferId: string;
   }) {
     this.#requirePlannedCurrentOwnerReady();
+    this.#requireNoDeviceRemoval();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(() => owner.fence(input));
@@ -961,6 +1285,7 @@ export class MeshRuntimeAssembly {
     readonly transferId: string;
   }) {
     this.#requirePlannedCurrentOwnerReady();
+    this.#requireNoDeviceRemoval();
     const owner = this.#plannedAnchorOwner;
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(async () => {
@@ -978,6 +1303,70 @@ export class MeshRuntimeAssembly {
     if (!owner) throw new Error("This device is not the current duty device");
     return this.#plannedTransferRuntime.run(() =>
       owner.abort({ ...input, reason: "operator-cancelled" }));
+  }
+
+  setDeviceRemovalGuard(targetDeviceId: string, operationId: string | undefined): void {
+    const current = this.#deviceRemovalGuards.get(targetDeviceId);
+    if (operationId === undefined) {
+      this.#deviceRemovalGuards.delete(targetDeviceId);
+      return;
+    }
+    if (current && current !== operationId) {
+      throw new Error("A different removal operation already owns this device");
+    }
+    if (targetDeviceId === this.#currentAnchorDeviceId()) {
+      throw new Error("The current duty device cannot enter executor removal");
+    }
+    this.#deviceRemovalGuards.set(targetDeviceId, operationId);
+  }
+
+  async applyDeviceRemovalTrust(record: HomeTrustRecord): Promise<void> {
+    await this.#control.reconcileTrust(record);
+    const revoked = record.members
+      .filter((member) => member.state !== "active")
+      .map((member) => member.device.deviceId);
+    for (const deviceId of revoked) {
+      await this.connections.disconnect(
+        deviceId,
+        new Error("Paired device access was revoked"),
+      );
+      this.#deviceRemovalGuards.delete(deviceId);
+    }
+  }
+
+  async adoptLocalConversationsForRemoval(input: {
+    readonly operationId: string;
+    readonly targetDeviceId: string;
+    readonly conversationIds: readonly string[];
+  }): Promise<void> {
+    const owner = this.options.localConversationOwner;
+    if (!owner) {
+      if (input.conversationIds.length === 0) return;
+      throw new Error("Device removal has no local conversation owner");
+    }
+    const frozen = [...owner.deviceRemovalCandidates(input.operationId)].sort();
+    if (canonicalize(frozen) !== canonicalize([...input.conversationIds].sort())) {
+      throw new Error("Device removal transfer does not match its frozen conversation set");
+    }
+    if (input.targetDeviceId !== this.#currentAnchorDeviceId()) {
+      throw new Error("Device removal transfer target is no longer the current duty device");
+    }
+    if (!this.connections.has(input.targetDeviceId)) {
+      throw new Error("Current duty device is unavailable for conversation transfer");
+    }
+    await this.#adoptLocalConversations(input.targetDeviceId, input.conversationIds);
+    const states = await listConversationTransferStates(
+      this.options.authority.executorLog,
+      this.options.authority.verifier,
+    );
+    for (const conversationId of input.conversationIds) {
+      if (!states.some((state) =>
+        state.identity.conversationId === conversationId &&
+        state.identity.targetDeviceId === input.targetDeviceId &&
+        (state.phase === "committed" || state.phase === "tombstoned"))) {
+        throw new Error("Device removal conversation transfer is not durably complete");
+      }
+    }
   }
 
   async bindPlannedAnchorPostInstallConsumers(
@@ -1002,10 +1391,20 @@ export class MeshRuntimeAssembly {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
+      for (const operationId of await this.#deviceRemovalTarget.restoreLocalAdmissionGate()) {
+        if (
+          this.#localDeviceRemovalOperation &&
+          this.#localDeviceRemovalOperation !== operationId
+        ) {
+          throw new Error("Conflicting local device removal operations cannot share admission");
+        }
+        this.#localDeviceRemovalOperation = operationId;
+      }
       await this.#plannedTransferRuntime.run(async () => {
         await this.#plannedAnchorTarget?.recoverBeforeAdmission();
         await this.#plannedAnchorOwner?.recoverBeforeAdmission();
       });
+      await this.#deviceRemovalAuthority?.resumeActive();
       await this.#restoreCommittedTransfers();
       await this.#worker?.recover();
       this.#started = true;
@@ -1404,6 +1803,7 @@ export class MeshRuntimeAssembly {
         this.#plannedAnchorIssuerKey = issuerKey;
         this.options.bootstrapStore.bindIssuerKey(issuerKey);
         await this.#control.reconcileTrust(record);
+        this.#installDeviceRemovalIssuer(record, issuerKey);
         await this.#completePlannedAnchorPostInstall();
       },
     });
@@ -1525,6 +1925,7 @@ export class MeshRuntimeAssembly {
     }
     this.#plannedAnchorIssuerKey = issuerKey;
     this.options.bootstrapStore.bindIssuerKey(issuerKey);
+    this.#installDeviceRemovalIssuer(record, issuerKey);
     if (!completion.requiresPostInstallCompletion) {
       this.#postInstallTransitionPending = false;
       return;
@@ -1625,7 +2026,10 @@ export class MeshRuntimeAssembly {
     ]);
   }
 
-  async #adoptLocalConversations(peerDeviceId: string): Promise<void> {
+  async #adoptLocalConversations(
+    peerDeviceId: string,
+    exactCandidates?: readonly string[],
+  ): Promise<void> {
     const owner = this.options.localConversationOwner;
     if (
       !owner ||
@@ -1645,7 +2049,7 @@ export class MeshRuntimeAssembly {
       this.options.authority.executorLog,
       this.options.authority.verifier,
     );
-    for (const conversationId of await owner.transferCandidates()) {
+    for (const conversationId of exactCandidates ?? await owner.transferCandidates()) {
       const parsed = parseLocalConversationId(conversationId);
       if (!parsed) continue;
       const prior = states.find((state) =>
@@ -1723,6 +2127,7 @@ export class MeshRuntimeAssembly {
 
 
   #peerHasRole(deviceId: string, role: DeviceRole): boolean {
+    if (this.#deviceRemovalGuards.has(deviceId)) return false;
     return this.#control.currentTrust().members.some((member) =>
       member.device.deviceId === deviceId &&
       member.state === "active" &&
@@ -1732,6 +2137,12 @@ export class MeshRuntimeAssembly {
   #currentAnchorDeviceId(): string {
     return this.#plannedCommittedTargetDeviceId ??
       this.#control.currentTrust().issuer.deviceId;
+  }
+
+  #requireNoDeviceRemoval(): void {
+    if (this.#deviceRemovalGuards.size > 0) {
+      throw new Error("Duty-device migration is unavailable while a paired device is being removed");
+    }
   }
 }
 

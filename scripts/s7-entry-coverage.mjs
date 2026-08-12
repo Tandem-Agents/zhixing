@@ -97,7 +97,25 @@ const coverageGroups = [
   ["channel-inbound", ["channel:router:InboundRouter", "channel:adapter:feishu", "channel:event:feishu:im.message.receive_v1"]],
   ["status-read", ["rpc:server.info", "cli:zhixing status", "slash:status:repl"]],
   ["light-inference", ["rpc:llm.complete"]],
-  ["shutdown", ["rpc:server.shutdown", "cli:zhixing stop", "slash:stop:repl"]],
+  ["shutdown", [
+    "rpc:server.shutdown",
+    "rpc:server.uninstall.preflight",
+    "rpc:server.uninstall.begin",
+    "rpc:server.uninstall.continue",
+    "rpc:server.uninstall.cancel",
+    "rpc:server.uninstall.status",
+    "rpc:device.list",
+    "rpc:device.remove",
+    "rpc:device.status",
+    "rpc:device.continue",
+    "cli:zhixing stop",
+    "cli:zhixing uninstall",
+    "cli:zhixing device list",
+    "cli:zhixing device remove",
+    "cli:zhixing device status",
+    "cli:zhixing device continue",
+    "slash:stop:repl",
+  ]],
   ["runtime-config", ["slash:config:repl", "slash:mcp:repl"]],
   ["device-trust", [
     "cli:zhixing pair",
@@ -133,6 +151,7 @@ const baseMappingTuples = [
   ],
   ["cli:zhixing serve", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing duty", { exclusion: "composition", reason: exclusions.composition }],
+  ["cli:zhixing device", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing backup", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing backup root", { exclusion: "composition", reason: exclusions.composition }],
   [
@@ -902,6 +921,7 @@ export async function validateS7Structure() {
   failures.push(...inspectRecoveryBackupAssembly(records));
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
   failures.push(...inspectManagedHostAssembly(records));
+  failures.push(...inspectDeviceLifecycleAssembly(records));
   for (const packageName of [
     "server",
     "executor",
@@ -920,6 +940,49 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+export function inspectDeviceLifecycleAssembly(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const protocol = byPath.get("packages/core/src/protocol/device-lifecycle.ts");
+  const journal = byPath.get("packages/core/src/authority/device-lifecycle-journal.ts");
+  const removal = byPath.get("packages/cli/src/serve/device-removal.ts");
+  const assembly = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const command = byPath.get("packages/cli/src/serve/command.ts");
+  const executor = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
+  const methods = byPath.get("packages/server/src/rpc/methods/index.ts");
+  if (!protocol || !journal || !removal || !assembly || !command || !executor || !methods) {
+    return ["device lifecycle production assembly sources are missing"];
+  }
+  const count = (text, token) => text.split(token).length - 1;
+  if (
+    count(protocol, 'export const DEVICE_LIFECYCLE_STREAM = "device-lifecycle"') !== 1 ||
+    !journal.includes('stream: DEVICE_LIFECYCLE_STREAM') ||
+    !journal.includes('record.t === "advanced" || record.t === "terminal"')
+  ) failures.push("device lifecycle single journal or retained terminal evidence drifted");
+  if (
+    !removal.includes("await this.options.closeAdmission(identity.operationId)") ||
+    !removal.includes("await this.options.settleAcceptedWork(input.operationId)") ||
+    !removal.includes("async resumeBeforeAdmission(): Promise<void>") ||
+    !assembly.includes("await this.#deviceRemovalTarget.restoreLocalAdmissionGate()") ||
+    !assembly.includes("await this.#deviceRemovalTarget.resumeBeforeAdmission()") ||
+    !command.includes("await ctx.meshRuntime?.bindDeviceRemovalLifecycle({") ||
+    !executor.includes("await mesh.bindDeviceRemovalLifecycle({")
+  ) failures.push("device removal admission, accepted-work or two-root recovery binding drifted");
+  for (const method of [
+    "server.shutdown",
+    "server.uninstall.preflight",
+    "server.uninstall.begin",
+    "server.uninstall.continue",
+    "server.uninstall.cancel",
+    "server.uninstall.status",
+  ]) {
+    if (!methods.includes(`"${method}"`)) {
+      failures.push(`device-local lifecycle RPC ownership drifted: ${method}`);
+    }
+  }
+  return failures;
 }
 
 export function inspectManagedHostAssembly(records) {
@@ -1006,7 +1069,7 @@ export function inspectManagedHostAssembly(records) {
     !service.includes('\'<?xml version="1.0" encoding="UTF-16"?>\'') ||
     !service.includes("Buffer.from([0xff, 0xfe])") ||
     !service.includes('Buffer.from(spec.definition, "utf16le")') ||
-    count(service, "windowsTaskSchedulerCommand([") !== 4 ||
+    count(service, "windowsTaskSchedulerCommand([") !== 6 ||
     count(service, 'args: [...args, "/HRESULT"]') !== 1 ||
     count(service, "hresult === 0x80070002") !== 1 ||
     count(service, "hresult === 0x80070005") !== 1 ||
@@ -1044,10 +1107,11 @@ export function inspectManagedHostAssembly(records) {
     !config.includes("? { beforeTurnover: input.prepareManagedServiceTurnover }") ||
     !repl.includes('strategy: "drain"') ||
     !repl.includes("prepareManagedServiceTurnover: prepareCurrentManagedServiceConfigTurnover") ||
-    !serverContext.includes("beginDrain?: () => Promise<void>") ||
-    !serverContext.includes("drainAcceptedWork?: () => Promise<void>") ||
-    !serverShutdown.includes("await runBeforeDeadline(ctx.server.runtimeControl?.beginDrain, deadline);") ||
-    !serverShutdown.includes("await runBeforeDeadline(ctx.server.runtimeControl?.drainAcceptedWork, deadline);") ||
+    !serverContext.includes("lifecycleShutdown?: LifecycleShutdownAdapter;") ||
+    !serverShutdown.includes("const prepared = await lifecycle.prepare({") ||
+    !serverShutdown.includes("queueMicrotask(() => trigger(`${reason}:${strategy}`));") ||
+    !command.includes("const stopCoordinator = new HostStopCoordinator({") ||
+    !command.includes("lifecycleShutdown: stopCoordinator,") ||
     !command.includes("beginDrain: async () => {") ||
     !command.includes("drainAcceptedWork: async () => {") ||
     closeOldClient < 0 || disableFuture < closeOldClient || oldTurnover < disableFuture || successor < oldTurnover
@@ -1975,7 +2039,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
     disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
     drainAccepted < quiesceDelivery ||
-    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 1 ||
+    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 3 ||
     count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 4 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
@@ -3550,6 +3614,8 @@ const rpcClientOwners = new Set([
 ]);
 const coreHostConnectionOwners = new Set([
   "packages/cli/src/repl.ts",
+  "packages/cli/src/runtime/anchor-uninstall-command.ts",
+  "packages/cli/src/runtime/device-removal-command.ts",
   "packages/cli/src/runtime/duty-migration-command.ts",
   "packages/cli/src/runtime/workspace-command.ts",
 ]);

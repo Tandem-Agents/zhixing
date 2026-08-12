@@ -99,6 +99,42 @@ export interface DutyMigrationTarget {
   code?: "unavailable";
 }
 
+export interface DeviceRemovalCandidate {
+  displayName: string;
+  reachable: boolean;
+}
+
+export interface DeviceRemovalState {
+  phase:
+    | "waiting-for-device"
+    | "needs-conversation-decision"
+    | "moving-conversations"
+    | "revoking-access"
+    | "cleaning-device"
+    | "removed"
+    | "cancelled";
+  conversations: string[];
+  localData: "known" | "removed" | "unknown";
+  credentialActions: string[];
+}
+
+export interface AnchorUninstallPreflight {
+  migrationTargets: Array<{ displayName: string; ready: boolean }>;
+  recoveryBackupReady: boolean;
+}
+
+export interface AnchorUninstallState {
+  phase:
+    | "choose-safe-path"
+    | "moving-duty-device"
+    | "backup-verified"
+    | "retiring-device"
+    | "ready-to-uninstall"
+    | "uninstalled"
+    | "cancelled";
+  nextAction?: "choose-device" | "confirm-backup" | "continue";
+}
+
 export class RpcManagementFacade {
   constructor(private readonly link: CoreHostRpcLink) {}
 
@@ -237,6 +273,96 @@ export class RpcManagementFacade {
     return client.request<{ stage: "cancelled" }>("dutyMigration.cancel", input);
   }
 
+  async deviceList(): Promise<DeviceRemovalCandidate[]> {
+    const client = await this.link.getClient();
+    const result = await client.request<unknown>("device.list");
+    return decodeDeviceRemovalCandidates(result);
+  }
+
+  async deviceRemove(input: {
+    requestId: string;
+    operationId: string;
+    targetName: string;
+  }): Promise<{ conversations: string[]; hasAcceptedWork: boolean }> {
+    const client = await this.link.getClient();
+    const result = await client.request<unknown>("device.remove", input);
+    if (
+      !isPlainRecord(result) ||
+      !hasExactKeys(result, ["conversations", "hasAcceptedWork"]) ||
+      !Array.isArray(result.conversations) ||
+      result.conversations.some((value) => typeof value !== "string") ||
+      typeof result.hasAcceptedWork !== "boolean"
+    ) {
+      throw new TypeError("Device removal preflight response is invalid");
+    }
+    return {
+      conversations: result.conversations as string[],
+      hasAcceptedWork: result.hasAcceptedWork,
+    };
+  }
+
+  async deviceContinue(input: {
+    targetName: string;
+    mode: "transfer" | "destroy" | "lost" | "cancel";
+  }): Promise<DeviceRemovalState> {
+    const client = await this.link.getClient();
+    return decodeDeviceRemovalState(await client.request<unknown>("device.continue", input));
+  }
+
+  async deviceStatus(input: {
+    targetName: string;
+  }): Promise<DeviceRemovalState | null> {
+    const client = await this.link.getClient();
+    const result = await client.request<unknown>("device.status", input);
+    if (!isPlainRecord(result) || !hasExactKeys(result, ["state"])) {
+      throw new TypeError("Device removal status response is invalid");
+    }
+    return result.state === null ? null : decodeDeviceRemovalState(result.state);
+  }
+
+  async anchorUninstallPreflight(): Promise<AnchorUninstallPreflight> {
+    const client = await this.link.getClient();
+    return decodeAnchorUninstallPreflight(
+      await client.request<unknown>("server.uninstall.preflight"),
+    );
+  }
+
+  async anchorUninstallBegin(input:
+    | {
+        path: "migration";
+        requestId: string;
+        operationId: string;
+        transferId: string;
+        targetName: string;
+      }
+    | {
+        path: "recovery-backup";
+        requestId: string;
+        operationId: string;
+      }): Promise<AnchorUninstallState> {
+    const client = await this.link.getClient();
+    return decodeAnchorUninstallState(
+      await client.request<unknown>("server.uninstall.begin", input),
+    );
+  }
+
+  async anchorUninstallContinue(input: {
+    operationId: string;
+    confirmBackup: true;
+  }): Promise<AnchorUninstallState> {
+    const client = await this.link.getClient();
+    return decodeAnchorUninstallState(
+      await client.request<unknown>("server.uninstall.continue", input),
+    );
+  }
+
+  async anchorUninstallCancel(operationId: string): Promise<AnchorUninstallState> {
+    const client = await this.link.getClient();
+    return decodeAnchorUninstallState(
+      await client.request<unknown>("server.uninstall.cancel", { operationId }),
+    );
+  }
+
   /** 请求宿主优雅退出(flush 落盘)——/config 热重载与运行控制共用通道。 */
   async serverShutdown(request?: string | ServerShutdownRequest): Promise<void> {
     const client = await this.link.getClient();
@@ -319,6 +445,115 @@ function decodeDutyMigrationTargets(input: unknown): DutyMigrationTarget[] {
       ...(candidate.code === undefined ? {} : { code: candidate.code }),
     });
   });
+}
+
+function decodeDeviceRemovalCandidates(input: unknown): DeviceRemovalCandidate[] {
+  if (!isPlainRecord(input) || !hasExactKeys(input, ["devices"]) || !Array.isArray(input.devices)) {
+    throw new TypeError("Device list response is invalid");
+  }
+  return input.devices.map((candidate) => {
+    if (
+      !isPlainRecord(candidate) ||
+      !hasExactKeys(candidate, ["displayName", "reachable"]) ||
+      typeof candidate.displayName !== "string" ||
+      typeof candidate.reachable !== "boolean"
+    ) {
+      throw new TypeError("Device list entry is invalid");
+    }
+    return { displayName: candidate.displayName, reachable: candidate.reachable };
+  });
+}
+
+function decodeDeviceRemovalState(input: unknown): DeviceRemovalState {
+  if (!isPlainRecord(input) || !hasExactKeys(input, [
+    "conversations",
+    "credentialActions",
+    "localData",
+    "phase",
+  ])) {
+    throw new TypeError("Device removal state is invalid");
+  }
+  const phases = new Set<DeviceRemovalState["phase"]>([
+    "waiting-for-device",
+    "needs-conversation-decision",
+    "moving-conversations",
+    "revoking-access",
+    "cleaning-device",
+    "removed",
+    "cancelled",
+  ]);
+  if (
+    typeof input.phase !== "string" ||
+    !phases.has(input.phase as DeviceRemovalState["phase"]) ||
+    (input.localData !== "known" && input.localData !== "removed" && input.localData !== "unknown") ||
+    !Array.isArray(input.conversations) ||
+    input.conversations.some((value) => typeof value !== "string") ||
+    !Array.isArray(input.credentialActions) ||
+    input.credentialActions.some((value) => typeof value !== "string")
+  ) {
+    throw new TypeError("Device removal state fields are invalid");
+  }
+  return {
+    phase: input.phase as DeviceRemovalState["phase"],
+    conversations: input.conversations as string[],
+    localData: input.localData,
+    credentialActions: input.credentialActions as string[],
+  };
+}
+
+function decodeAnchorUninstallPreflight(input: unknown): AnchorUninstallPreflight {
+  if (
+    !isPlainRecord(input) ||
+    !hasExactKeys(input, ["migrationTargets", "recoveryBackupReady"]) ||
+    typeof input.recoveryBackupReady !== "boolean" ||
+    !Array.isArray(input.migrationTargets)
+  ) {
+    throw new TypeError("Uninstall preflight response is invalid");
+  }
+  const migrationTargets = input.migrationTargets.map((candidate) => {
+    if (
+      !isPlainRecord(candidate) ||
+      !hasExactKeys(candidate, ["displayName", "ready"]) ||
+      typeof candidate.displayName !== "string" ||
+      typeof candidate.ready !== "boolean"
+    ) {
+      throw new TypeError("Uninstall migration target is invalid");
+    }
+    return { displayName: candidate.displayName, ready: candidate.ready };
+  });
+  return { migrationTargets, recoveryBackupReady: input.recoveryBackupReady };
+}
+
+function decodeAnchorUninstallState(input: unknown): AnchorUninstallState {
+  if (!isPlainRecord(input)) throw new TypeError("Uninstall state is invalid");
+  const keys = input.nextAction === undefined ? ["phase"] : ["nextAction", "phase"];
+  if (!hasExactKeys(input, keys)) throw new TypeError("Uninstall state shape is invalid");
+  const phases = new Set<AnchorUninstallState["phase"]>([
+    "choose-safe-path",
+    "moving-duty-device",
+    "backup-verified",
+    "retiring-device",
+    "ready-to-uninstall",
+    "uninstalled",
+    "cancelled",
+  ]);
+  if (typeof input.phase !== "string" || !phases.has(input.phase as AnchorUninstallState["phase"])) {
+    throw new TypeError("Uninstall phase is invalid");
+  }
+  if (
+    input.nextAction !== undefined &&
+    input.nextAction !== "choose-device" &&
+    input.nextAction !== "confirm-backup" &&
+    input.nextAction !== "continue"
+  ) {
+    throw new TypeError("Uninstall next action is invalid");
+  }
+  return {
+    phase: input.phase as AnchorUninstallState["phase"],
+    ...(input.nextAction === undefined
+      ? {}
+      : { nextAction: input.nextAction as AnchorUninstallState["nextAction"] }),
+  };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

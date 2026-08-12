@@ -411,6 +411,109 @@ describe("managed service platform contract", () => {
     },
   );
 
+  it.each(["win32", "darwin", "linux"] as const)(
+    "stops only the exact current %s instance while preserving future registration",
+    async (platform) => {
+      const directory = await createTempDir(`managed-service-${platform}-exact-stop`);
+      const spec = platformSpec(platform, directory);
+      await mkdir(path.dirname(spec.definitionPath), { recursive: true });
+      await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+      let running = true;
+      const calls: string[] = [];
+      const runner: ManagedServiceCommandRunner = async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (platform === "win32" && command === "powershell.exe") {
+          return { code: 0, stdout: windowsInspectionJson(spec, { enabled: true, running }), stderr: "" };
+        }
+        if (platform === "darwin" && args.includes("print-disabled")) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (platform === "darwin" && args.includes("print")) {
+          return { code: 0, stdout: running ? "pid = 42" : "state = exited", stderr: "" };
+        }
+        if (platform === "linux" && args.includes("is-enabled")) {
+          return { code: 0, stdout: "enabled\n", stderr: "" };
+        }
+        if (platform === "linux" && args.includes("is-active")) {
+          return { code: running ? 0 : 3, stdout: running ? "active\n" : "inactive\n", stderr: "" };
+        }
+        if (args.includes("/End") || args[0] === "bootout" || args.includes("stop")) running = false;
+        return { code: 0, stdout: "", stderr: "" };
+      };
+      const adapter = createManagedServiceAdapter({ platform, commandRunner: runner });
+      const expected = await adapter.inspect(spec, new AbortController().signal);
+      await expect(adapter.stopCurrentExact(spec, expected, new AbortController().signal))
+        .resolves.toEqual({ state: "enabled", running: false, matches: true });
+      expect(calls.some((call) => /\/DISABLE| disable |\/Delete/u.test(call))).toBe(false);
+      await expect(adapter.stopCurrentExact(
+        spec,
+        { ...expected, state: "disabled" },
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: "definition-drift" });
+    },
+  );
+
+  it.each(["win32", "darwin", "linux"] as const)(
+    "unregisters only the exact frozen %s service definition",
+    async (platform) => {
+      const directory = await createTempDir(`managed-service-${platform}-exact-unregister`);
+      const spec = platformSpec(platform, directory);
+      await mkdir(path.dirname(spec.definitionPath), { recursive: true });
+      await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+      let registered = true;
+      const calls: string[] = [];
+      const runner: ManagedServiceCommandRunner = async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (platform === "win32" && command === "powershell.exe") {
+          return registered
+            ? { code: 0, stdout: windowsInspectionJson(spec, { enabled: true, running: true }), stderr: "" }
+            : { code: 0x80070002, stdout: "", stderr: "not found" };
+        }
+        if (platform === "darwin" && args.includes("print-disabled")) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (platform === "darwin" && args.includes("print")) {
+          return registered
+            ? { code: 0, stdout: "pid = 42", stderr: "" }
+            : { code: 113, stdout: "", stderr: "Could not find service" };
+        }
+        if (platform === "linux" && args.includes("is-enabled")) {
+          return registered
+            ? { code: 0, stdout: "enabled\n", stderr: "" }
+            : { code: 4, stdout: "not-found\n", stderr: "" };
+        }
+        if (platform === "linux" && args.includes("is-active")) {
+          return { code: 0, stdout: "active\n", stderr: "" };
+        }
+        if (
+          args.includes("/Delete") ||
+          args[0] === "bootout" ||
+          (platform === "linux" && args.includes("disable"))
+        ) {
+          registered = false;
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      };
+      const adapter = createManagedServiceAdapter({ platform, commandRunner: runner });
+      const expected = await adapter.inspect(spec, new AbortController().signal);
+      await expect(adapter.unregisterFutureExact(
+        spec,
+        expected,
+        new AbortController().signal,
+      )).resolves.toEqual({ state: "absent", running: false, matches: true });
+      await expect(readFile(spec.definitionPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(calls.some((call) => /\/Delete|bootout| disable /u.test(call))).toBe(true);
+
+      const beforeMismatchCalls = calls.length;
+      await expect(adapter.unregisterFutureExact(
+        spec,
+        { state: "enabled", running: true, matches: true },
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: "definition-drift" });
+      expect(calls.length).toBe(beforeMismatchCalls + 1);
+    },
+  );
+
   it("replays a lost Windows future-disable response and re-enables the same definition", async () => {
     const directory = await createTempDir("managed-service-windows-enabled-replay");
     const spec = platformSpec("win32", directory);

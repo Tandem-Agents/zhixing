@@ -2622,6 +2622,18 @@ Windows final definition bytes 还必须把同一 `ManagedServiceSpec.osUser` �
 
 Windows 系统读投影只由固定 Task Scheduler COM 查询产生 strict JSON：numeric queued/running 均表示当前执行义务，unknown/越界 fail-closed；principal 与 trigger 的 UserId 只允许 current token SID、current full account name 或冻结 `spec.osUser` 的有限 case-insensitive exact-set，完整 typed trigger/action collection、Action context、command/arguments 与 restart 设置必须全等，禁止本地化展示文本、任意账户翻译和宽松 XML 片段匹配。配置 reload 使用 explicit drain 收束 remote/channel/scheduler/delivery accepted work；非 managed selection 的 future-disable/read-back 必须在 old endpoint turnover 与 successor connect 之前独立完成，六类 reconcile trigger 只提供 wake provenance，reconciler 的 plan error、post-install drift 与最终 non-managed 分支均无 current-stop 能力；旧 turnover 不得形成按 service id 停止后继实例的许可，current stop 只由既有 graceful completion 或 exact stale endpoint/`expectedLock` 事实授权。fake guest-platform 的文件副作用路径必须逐例绑定宿主 temp fixture，真实平台用例才可使用真实 OS 路径。
 
+**第 37 单元字段级协议**：三条路径共用既有物理 `AuthorityCommitLog` 的 `device-lifecycle` 流，记录只含稳定身份、gate/阶段决定与既有业务终态引用，不复制权威、信任、凭据、检查点或 supervisor 事实。`DeviceLifecycleRecord` 是严格判别联合：`accepted(identity)`、`advanced(operationId,phase,evidence[])`、`terminal(operationId,outcome,evidence[])`、`aborted(operationId,signedAbort)`；未知字段、越级、冲突重放、错误终态和坏日志一律 fail-closed。同一 `homeId+subject` 只允许一个非终态 operation，同载荷 exact replay，terminal 永不回退。
+
+| 路径 | accepted 稳定身份 | 唯一阶段顺序 | 取消与不可逆边界 | 公开终态 |
+| --- | --- | --- | --- | --- |
+| 临时停机 | `requestId/operationId/homeId/strategy` 与 exact managed `serviceId/definitionDigest/instanceId` 或 foreground `processId/startedAt`；单机无需 trust | `accepted→gate-closed→work-settled→flushed→ready-to-stop→terminal(stopped)` | accepted 后只前滚；超时、blocker、flush/permit/manager 失败保持 gate 关闭，不得强杀或伪造 terminal | 正在结束工作／需处理阻塞项／已安全停止 |
+| executor 移除 | 目标 device、member public key、device-key generation、accepted current issuer 与 trust-head ancestor | `accepted→gate-frozen→authority-decided→authority-settled→revocation-ready→revoked→cleanup-complete→terminal(removed)` | `authority-settled` 前可由 current issuer 写 authenticated abort 并恢复双方 gate；任一 transfer/delete、revoke 后只前滚 | 需先处理本机对话／正在移除／已撤销但本机数据不可达／已移除 |
+| anchor 永久卸载 | current device、anchor epoch、trust head 与 migration `targetDeviceId/transferId` 或 recovery-backup `target/generation` | migration：`accepted→gate-frozen→transfer-committed→cleanup-complete→terminal(retired)`；backup：`accepted→gate-frozen→checkpoint-verified→retirement-decided→final-checkpoint-verified→cleanup-complete→terminal(retired)` | `transfer-committed` 或 `retirement-decided` 前可 authenticated abort；之后只前滚。无 ready 迁居目标或独立可写备份目标时零 accepted | 恢复备份已验证／可以卸载／已永久卸载 |
+
+`evidence` 只允许 `accepted-work/authority-transfer/authority-deletion/trust-event/credential-exposure/checkpoint/supervisor/cleanup` 的内容 digest。stop 的 exact host generation、removal 的 target generation/trust ancestor、uninstall 的 current owner/path generation 任一漂移都必须在新副作用前拒绝。公开 API 不返回内部 operation/device/epoch/digest/path/raw error；旧 peer 不支持本协议时在本地 gate 或远端副作用前返回不可用。
+
+含 `ArtifactRef` 的阶段证据在后续 terminal 重放中仍须作为同一 transaction 的 candidate reference 声明并受既有 retained-reference 投影保护。executor target 在两种生产装配根都必须先耐久 accepted，再关闭本机会话与 assignment 新准入；重启时在公开准入前恢复同一 operation gate，完成本地权威与既有 accepted work 收束后才可签发 revocation-ready。issuer 不得从自己的中间 phase 推导或伪造 target ready，只能重放 target 签名回执；target 在 revoke 响应丢失后用同一 durable decision 向 current issuer 重取 terminal 并继续 cleanup。`device list/remove/status/continue` 属 current-anchor 管理面，`server.shutdown` 与 `server.uninstall.*` 固定为本机 loopback-only。
+
 执行顺序不可重排为会产生中间债务的形态：
 
 - 1–5 是所有后续节点的结构前提；S1 未完成前不得在旧 server/cli 结构上旁挂第二套分布式业务实现。

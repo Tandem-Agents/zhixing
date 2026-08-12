@@ -58,6 +58,15 @@ import {
   buildDutyMigrationPrepareMethod,
   buildDutyMigrationCommitMethod,
   buildDutyMigrationCancelMethod,
+  buildDeviceListMethod,
+  buildDeviceRemoveMethod,
+  buildDeviceContinueMethod,
+  buildDeviceStatusMethod,
+  buildAnchorUninstallPreflightMethod,
+  buildAnchorUninstallBeginMethod,
+  buildAnchorUninstallContinueMethod,
+  buildAnchorUninstallCancelMethod,
+  buildAnchorUninstallStatusMethod,
   buildLlmCompleteMethod,
 } from "./server.js";
 import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
@@ -139,6 +148,15 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildDutyMigrationPrepareMethod(),
     buildDutyMigrationCommitMethod(),
     buildDutyMigrationCancelMethod(),
+    buildDeviceListMethod(),
+    buildDeviceRemoveMethod(),
+    buildDeviceContinueMethod(),
+    buildDeviceStatusMethod(),
+    buildAnchorUninstallPreflightMethod(),
+    buildAnchorUninstallBeginMethod(),
+    buildAnchorUninstallContinueMethod(),
+    buildAnchorUninstallCancelMethod(),
+    buildAnchorUninstallStatusMethod(),
     buildLlmCompleteMethod(),
     // trust.*（信任规则管理面）
     buildTrustListMethod(),
@@ -173,6 +191,11 @@ export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
   "auth",
   "health",
   "server.shutdown",
+  "server.uninstall.preflight",
+  "server.uninstall.begin",
+  "server.uninstall.continue",
+  "server.uninstall.cancel",
+  "server.uninstall.status",
 ] as const);
 
 /** Canonical finite authority surface relayed to the current duty device. */

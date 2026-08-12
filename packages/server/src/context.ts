@@ -45,6 +45,19 @@ import type {
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
+export interface LifecycleShutdownAdapter {
+  prepare(input: {
+    readonly requestId: string;
+    readonly reason: string;
+    readonly strategy: ServerShutdownStrategy;
+    readonly timeoutMs: number;
+  }): Promise<{
+    readonly requestId: string;
+    readonly phase: "ready-to-stop";
+    readonly strategy: ServerShutdownStrategy;
+  }>;
+}
+
 /**
  * 第一方权威 RPC 的窄覆盖点。非当前锚点宿主只转发冻结的有限方法集；
  * 方法仍须存在于 canonical RPC registry，认证与 wire 分发仍由 server 拥有。
@@ -235,6 +248,54 @@ export interface ServerContext {
     commit(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "completed" }>;
     cancel(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "cancelled" }>;
   };
+  /** Current-duty-device management surface for a paired executor lifecycle. */
+  deviceLifecycle?: {
+    list(): Promise<readonly {
+      readonly displayName: string;
+      readonly reachable: boolean;
+    }[]>;
+    remove(input: {
+      readonly requestId: string;
+      readonly operationId: string;
+      readonly targetName: string;
+    }): Promise<{
+      readonly conversations: readonly string[];
+      readonly hasAcceptedWork: boolean;
+    }>;
+    continue(input: {
+      readonly targetName: string;
+      readonly mode: "transfer" | "destroy" | "lost" | "cancel";
+    }): Promise<unknown>;
+    status(input: {
+      readonly targetName: string;
+    }): Promise<unknown>;
+  };
+  /** Loopback-only permanent removal of the current duty device. */
+  anchorUninstall?: {
+    preflight(): Promise<{
+      readonly migrationTargets: readonly { readonly displayName: string; readonly ready: boolean }[];
+      readonly recoveryBackupReady: boolean;
+    }>;
+    begin(input:
+      | {
+          readonly path: "migration";
+          readonly requestId: string;
+          readonly operationId: string;
+          readonly transferId: string;
+          readonly targetName: string;
+        }
+      | {
+          readonly path: "recovery-backup";
+          readonly requestId: string;
+          readonly operationId: string;
+        }): Promise<unknown>;
+    continue(input: {
+      readonly operationId: string;
+      readonly confirmBackup: true;
+    }): Promise<unknown>;
+    cancel(input: { readonly operationId: string }): Promise<unknown>;
+    status(input: { readonly operationId: string }): Promise<unknown>;
+  };
   /**
    * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。
    * 结构与 MCP hub 的 serverStatuses 兼容(server 不依赖 mcp 包,结构形声明)。
@@ -282,6 +343,8 @@ export interface ServerContext {
   confirmationHub?: ConfirmationHub;
   /** 运行控制需要的可选事实源与动作钩子，由宿主装配层注入。 */
   runtimeControl?: RuntimeControlAdapter;
+  /** 耐久停机收束点。所有外部停机入口必须先取得 ready-to-stop。 */
+  lifecycleShutdown?: LifecycleShutdownAdapter;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
   /**
@@ -306,7 +369,7 @@ export interface ServerContext {
   sessionActivityBroadcast?: SessionActivityBroadcast;
   /**
    * 优雅停机触发器（runServer 在 startServer resolve 后同一微任务绑定）。
-   * 供 `server.shutdown` RPC handler 使用——handler 不 await，立即 ack 回响应。
+   * 仅在 lifecycleShutdown 已耐久到 ready-to-stop 后触发进程清理。
    * 未绑定（start 失败）时 handler 应抛 RpcErrors.internal。
    */
   requestShutdown?: (reason: string) => void;
@@ -330,6 +393,7 @@ export interface CreateContextOptions {
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
   dutyMigration?: ServerContext["dutyMigration"];
+  deviceLifecycle?: ServerContext["deviceLifecycle"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   taskListUpdate?: ServerContext["taskListUpdate"];
@@ -338,6 +402,7 @@ export interface CreateContextOptions {
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   confirmationHub?: ConfirmationHub;
   runtimeControl?: RuntimeControlAdapter;
+  lifecycleShutdown?: LifecycleShutdownAdapter;
   conversationRpc?: FirstPartyConversationRpcRouter;
 }
 
@@ -361,6 +426,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,
     dutyMigration: opts.dutyMigration,
+    deviceLifecycle: opts.deviceLifecycle,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
     taskListUpdate: opts.taskListUpdate,
@@ -369,6 +435,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     channelHttpRoutes: opts.channelHttpRoutes,
     confirmationHub: opts.confirmationHub,
     runtimeControl: opts.runtimeControl,
+    lifecycleShutdown: opts.lifecycleShutdown,
     conversationRpc: opts.conversationRpc,
   };
 }

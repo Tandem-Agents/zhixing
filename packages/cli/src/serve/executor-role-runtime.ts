@@ -64,6 +64,10 @@ import {
 import { loadOrCreateToken } from "./token.js";
 import { homeToPort } from "./host-port.js";
 import { isDaemonChild } from "./self-exec.js";
+import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
+import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
+import { createManagedServiceAdapter } from "./managed-service.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -107,6 +111,10 @@ export async function runExecutorRole(
   let localConversationServer: RunningServer | undefined;
   let localServerState: ServerStateFile | undefined;
   let localServerHeartbeat: NodeJS.Timeout | undefined;
+  let resolveLifecycleShutdown: (() => void) | undefined;
+  const lifecycleShutdown = new Promise<void>((resolve) => {
+    resolveLifecycleShutdown = resolve;
+  });
   let roleFailure: unknown;
   try {
     const interactions = new DurableConversationInteractionObserver();
@@ -315,6 +323,41 @@ export async function runExecutorRole(
       secretStore: bootstrap.secretStore,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
+    await mesh.bindDeviceRemovalLifecycle({
+      closeAdmission: async () => undefined,
+      settleAcceptedWork: async () => {
+        await jobOwnerAssembly!.drain();
+        await authority!.executorResourceGovernor.coordinate(async () => undefined);
+      },
+      releaseAdmission: async () => undefined,
+      cleanup: async () => {
+        const current = await loadCurrentManagedServiceState("activate", zhixingHome);
+        const adapter = current.spec
+          ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
+          : undefined;
+        const expected = current.spec
+          ? await adapter!.inspect(current.spec, new AbortController().signal)
+          : undefined;
+        return cleanupExecutorDeviceLocalState({
+          zhixingHome,
+          secretStore: bootstrap.secretStore,
+          deviceKey: bootstrap.mesh.deviceKey,
+          storageGovernor: deviceCapacity.storage,
+          unregisterFuture: async () => {
+            if (!current.spec || !adapter || !expected) return;
+            await adapter.unregisterFutureExact(
+              current.spec,
+              expected,
+              new AbortController().signal,
+            );
+          },
+        });
+      },
+      onRemoved: async () => {
+        await deleteDeviceKey(bootstrap.secretStore, bootstrap.mesh.deviceKey.deviceId);
+        resolveLifecycleShutdown?.();
+      },
+    });
     jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(
       jobOwnerAssembly,
       mesh,
@@ -384,7 +427,7 @@ export async function runExecutorRole(
       }, 60_000);
       localServerHeartbeat.unref();
     }
-    await waitForRoleShutdown();
+    await waitForRoleShutdown(lifecycleShutdown);
   } catch (error) {
     roleFailure = error;
   }
@@ -600,7 +643,7 @@ function mapMcpTools(hub: McpHub): ToolDefinition[] {
     mapServerTools(server, tools, hub.callTool));
 }
 
-function waitForRoleShutdown(): Promise<void> {
+function waitForRoleShutdown(lifecycleShutdown: Promise<void>): Promise<void> {
   return new Promise((resolve) => {
     const finish = () => {
       process.off("SIGINT", finish);
@@ -609,5 +652,6 @@ function waitForRoleShutdown(): Promise<void> {
     };
     process.once("SIGINT", finish);
     process.once("SIGTERM", finish);
+    void lifecycleShutdown.then(finish);
   });
 }

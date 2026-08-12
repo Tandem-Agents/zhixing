@@ -74,6 +74,60 @@ async function expectWritesFenced(
 
 describe("local conversation owner lifecycle", () => {
   it(
+    "freezes one exact device-removal operation and restores admission only for its authenticated release",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      await fixture.port.mutateSession(
+        conversationId,
+        { kind: "session-meta", patch: { name: "待处理对话" } },
+        hostContext("name-before-removal"),
+      );
+      const snapshot = await fixture.assembly.freezeForDeviceRemoval("remove-1");
+      expect(snapshot.conversations).toEqual([expect.objectContaining({
+        conversationId,
+        displayName: "待处理对话",
+        state: "current",
+      })]);
+      await expect(fixture.assembly.freezeForDeviceRemoval("remove-1")).resolves.toBe(snapshot);
+      await expect(fixture.assembly.freezeForDeviceRemoval("remove-2"))
+        .rejects.toThrow("Another device-removal operation");
+      await expect(fixture.port.createConversation()).rejects.toThrow(/being removed/);
+      expect(() => fixture.assembly.releaseDeviceRemovalFreeze("remove-2"))
+        .toThrow("identity does not match");
+      fixture.assembly.releaseDeviceRemovalFreeze("remove-1");
+      await expect(fixture.port.createConversation()).resolves.toContain("local-");
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
+    "deletes exactly the frozen local-owner set through the authority mutation path",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });
+      await fixture.assembly.start();
+      const first = await fixture.port.createConversation();
+      const second = await fixture.port.createConversation();
+      const snapshot = await fixture.assembly.freezeForDeviceRemoval("remove-destroy");
+      const ids = snapshot.conversations.map((item) => item.conversationId);
+      expect(ids).toEqual([first, second].sort());
+      await expect(fixture.assembly.destroyFrozenConversations(
+        "remove-destroy",
+        [first],
+      )).rejects.toThrow("does not match the frozen conversation set");
+      await fixture.assembly.destroyFrozenConversations("remove-destroy", ids);
+      await expect(fixture.assembly.assertDeviceRemovalSettled("remove-destroy", ids))
+        .resolves.toBeUndefined();
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
     "fences every port write before start and after close while reads stay available",
     async () => {
       const fixture = await createLocalOwnerAssemblyFixture({

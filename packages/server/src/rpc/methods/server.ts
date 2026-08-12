@@ -6,10 +6,8 @@
  *    必须走应用层 RPC 才能真正优雅）
  * 2. 承载 server.info / server.reload 等控制方法
  *
- * `server.shutdown` 设计要点：
- * - **立即 ack**：handler 不 await 实际 shutdown，避免 RPC 自己被 shutdown 切断应答链
- * - **异步触发**：通过 ctx.server.requestShutdown hook 进入 lifecycle.shutdown()
- * - **防御性 null 检查**：requestShutdown 未绑定时抛 RpcErrors.internal
+ * `server.shutdown` 先耐久 accepted 并完成安全收束，再触发进程清理；
+ * RPC 响应只确认可重放的 ready-to-stop，不会把后台失败吞掉。
  */
 
 import { isInternal } from "@zhixing/core";
@@ -27,6 +25,7 @@ import type { ServerShutdownStrategy } from "../../context.js";
 import { requireRpcSurfacePrincipal } from "../surface-identity.js";
 
 export interface ServerShutdownParams {
+  requestId: string;
   reason?: string;
   timeoutMs?: number;
   strategy?: ServerShutdownStrategy;
@@ -34,7 +33,8 @@ export interface ServerShutdownParams {
 
 export interface ServerShutdownResult {
   accepted: true;
-  phase: "stopping";
+  requestId: string;
+  phase: "ready-to-stop";
   strategy: ServerShutdownStrategy;
   /** ISO timestamp；仅参考，实际完成时机取决于清理链 */
   estimatedCompleteAt: string;
@@ -75,32 +75,34 @@ export function buildServerShutdownMethod(): MethodEntry {
   return {
     name: "server.shutdown",
     requiresAuth: true,
-    handler(params, ctx): ServerShutdownResult {
+    async handler(params, ctx): Promise<ServerShutdownResult> {
       const p = (params ?? {}) as ServerShutdownParams;
+      if (!isProtocolIdentifier(p.requestId)) {
+        throw RpcErrors.invalidParams("server.shutdown requires a stable requestId");
+      }
       const reason = (typeof p.reason === "string" && p.reason.trim()) || "rpc.server.shutdown";
       const timeoutMs = typeof p.timeoutMs === "number" && p.timeoutMs > 0 ? p.timeoutMs : 30_000;
       const strategy = normalizeShutdownStrategy(p.strategy);
 
       const trigger = ctx.server.requestShutdown;
-      if (!trigger) {
+      const lifecycle = ctx.server.lifecycleShutdown;
+      if (!trigger || !lifecycle) {
         // startServer 未正常 resolve 时才可能——等价于 server 没启动成功
         throw RpcErrors.internal("server shutdown not wired yet");
       }
 
-      // 立即返回 ack；shutdown 异步执行，handler 不 await
-      // （await 会导致 RPC 连接自己被 server.close 切断，client 收不到响应）
-      if (strategy === "immediate") {
-        trigger(reason);
-      } else {
-        void runShutdownStrategy(strategy, timeoutMs, ctx).then(
-          () => trigger(`${reason}:${strategy}`),
-          () => undefined,
-        );
-      }
+      const prepared = await lifecycle.prepare({
+        requestId: p.requestId,
+        reason,
+        strategy,
+        timeoutMs,
+      });
+      queueMicrotask(() => trigger(`${reason}:${strategy}`));
 
       return {
         accepted: true,
-        phase: "stopping",
+        requestId: prepared.requestId,
+        phase: prepared.phase,
         strategy,
         estimatedCompleteAt: new Date(Date.now() + timeoutMs).toISOString(),
       };
@@ -387,6 +389,220 @@ export function buildDutyMigrationCancelMethod(): MethodEntry {
       return runDutyMigrationOperation("cancel", () => migration.cancel(input));
     },
   };
+}
+
+export function buildDeviceListMethod(): MethodEntry {
+  return {
+    name: "device.list",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      parseEmptyParams(params, "device.list");
+      const lifecycle = ctx.server.deviceLifecycle;
+      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
+      return { devices: await lifecycle.list() };
+    },
+  };
+}
+
+export function buildDeviceRemoveMethod(): MethodEntry {
+  return {
+    name: "device.remove",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const lifecycle = ctx.server.deviceLifecycle;
+      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
+      const input = parseDeviceRemovalStart(params);
+      return runDeviceLifecycleOperation(() => lifecycle.remove(input));
+    },
+  };
+}
+
+export function buildDeviceContinueMethod(): MethodEntry {
+  return {
+    name: "device.continue",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const lifecycle = ctx.server.deviceLifecycle;
+      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
+      const input = parseDeviceRemovalContinue(params);
+      return runDeviceLifecycleOperation(() => lifecycle.continue(input));
+    },
+  };
+}
+
+export function buildDeviceStatusMethod(): MethodEntry {
+  return {
+    name: "device.status",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const lifecycle = ctx.server.deviceLifecycle;
+      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
+      const input = parseDeviceRemovalIdentity(params);
+      return { state: await lifecycle.status(input) ?? null };
+    },
+  };
+}
+
+export function buildAnchorUninstallPreflightMethod(): MethodEntry {
+  return localAnchorUninstallMethod("server.uninstall.preflight", async (_params, uninstall) =>
+    uninstall.preflight());
+}
+
+export function buildAnchorUninstallBeginMethod(): MethodEntry {
+  return localAnchorUninstallMethod("server.uninstall.begin", async (params, uninstall) => {
+    const value = asRecord(params, "server.uninstall.begin");
+    const requestId = stableText(value.requestId, "uninstall requestId");
+    const operationId = stableText(value.operationId, "uninstall operationId");
+    if (value.path === "migration") {
+      return uninstall.begin({
+        path: "migration",
+        requestId,
+        operationId,
+        transferId: stableText(value.transferId, "uninstall transferId"),
+        targetName: stableText(value.targetName, "duty device name"),
+      });
+    }
+    if (value.path === "recovery-backup") {
+      return uninstall.begin({ path: "recovery-backup", requestId, operationId });
+    }
+    throw RpcErrors.invalidParams("永久卸载路径必须是 migration 或 recovery-backup");
+  });
+}
+
+export function buildAnchorUninstallContinueMethod(): MethodEntry {
+  return localAnchorUninstallMethod("server.uninstall.continue", async (params, uninstall) => {
+    const value = asRecord(params, "server.uninstall.continue");
+    if (value.confirmBackup !== true) {
+      throw RpcErrors.invalidParams("恢复备份卸载需要显式确认");
+    }
+    return uninstall.continue({
+      operationId: stableText(value.operationId, "uninstall operationId"),
+      confirmBackup: true,
+    });
+  });
+}
+
+export function buildAnchorUninstallCancelMethod(): MethodEntry {
+  return localAnchorUninstallMethod("server.uninstall.cancel", async (params, uninstall) => {
+    const value = asRecord(params, "server.uninstall.cancel");
+    return uninstall.cancel({
+      operationId: stableText(value.operationId, "uninstall operationId"),
+    });
+  });
+}
+
+export function buildAnchorUninstallStatusMethod(): MethodEntry {
+  return localAnchorUninstallMethod("server.uninstall.status", async (params, uninstall) => {
+    const value = asRecord(params, "server.uninstall.status");
+    return {
+      state: await uninstall.status({
+        operationId: stableText(value.operationId, "uninstall operationId"),
+      }) ?? null,
+    };
+  });
+}
+
+function localAnchorUninstallMethod(
+  name: string,
+  operation: (
+    params: unknown,
+    uninstall: NonNullable<import("../../context.js").ServerContext["anchorUninstall"]>,
+  ) => Promise<unknown>,
+): MethodEntry {
+  return {
+    name,
+    requiresAuth: true,
+    async handler(params, ctx) {
+      if (!ctx.connection.loopback) {
+        throw RpcErrors.invalidParams("永久卸载只能在当前设备本机执行");
+      }
+      const uninstall = ctx.server.anchorUninstall;
+      if (!uninstall) throw RpcErrors.internal("当前设备不支持永久卸载");
+      try {
+        return await operation(params, uninstall);
+      } catch (error) {
+        if (error instanceof RpcAppError) throw error;
+        const detail = error instanceof Error ? error.message.toLowerCase() : "";
+        if (/confirm|backup|target|ready/u.test(detail)) {
+          throw RpcErrors.internal("请先选择可用的值班设备，或验证恢复备份后再继续");
+        }
+        if (/removal|busy|another/u.test(detail)) {
+          throw RpcErrors.busy("请先完成正在进行的设备移除或卸载操作");
+        }
+        throw RpcErrors.internal("永久卸载尚未完成；安全进度已保留，请使用同一操作继续");
+      }
+    },
+  };
+}
+
+function parseDeviceRemovalStart(params: unknown): {
+  readonly requestId: string;
+  readonly operationId: string;
+  readonly targetName: string;
+} {
+  const value = asRecord(params, "device.remove");
+  return {
+    targetName: stableText(value.targetName, "device name"),
+    operationId: stableText(value.operationId, "device removal operationId"),
+    requestId: stableText(value.requestId, "device removal requestId"),
+  };
+}
+
+function parseDeviceRemovalIdentity(params: unknown): {
+  readonly targetName: string;
+} {
+  const value = asRecord(params, "device lifecycle");
+  return {
+    targetName: stableText(value.targetName, "device name"),
+  };
+}
+
+function parseDeviceRemovalContinue(params: unknown): {
+  readonly targetName: string;
+  readonly mode: "transfer" | "destroy" | "lost" | "cancel";
+} {
+  const value = asRecord(params, "device.continue");
+  const identity = parseDeviceRemovalIdentity(value);
+  if (
+    value.mode !== "transfer" && value.mode !== "destroy" &&
+    value.mode !== "lost" && value.mode !== "cancel"
+  ) {
+    throw RpcErrors.invalidParams("设备移除方式必须是 transfer、destroy、lost 或 cancel");
+  }
+  return { ...identity, mode: value.mode };
+}
+
+async function runDeviceLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof RpcAppError) throw error;
+    const detail = error instanceof Error ? error.message.toLowerCase() : "";
+    if (/another|already|busy|owns/u.test(detail)) {
+      throw RpcErrors.busy("已有设备移除正在进行，请继续或查询原操作");
+    }
+    if (/offline|unavailable|reconnect/u.test(detail)) {
+      throw RpcErrors.internal("目标设备当前离线：可以等待它重新上线，或明确按失控设备撤销");
+    }
+    if (/conversation|authority/u.test(detail)) {
+      throw RpcErrors.internal("目标设备仍有本地对话，需要先选择收编到值班设备或永久删除");
+    }
+    throw RpcErrors.internal("设备移除尚未完成；系统已保留安全进度，请使用同一操作继续");
+  }
+}
+
+function asRecord(input: unknown, label: string): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw RpcErrors.invalidParams(`${label} 参数必须是对象`);
+  }
+  return input as Record<string, unknown>;
+}
+
+function stableText(input: unknown, label: string): string {
+  if (typeof input !== "string" || input.trim().length === 0 || input.length > 480) {
+    throw RpcErrors.invalidParams(`${label} 无效`);
+  }
+  return input.trim();
 }
 
 type DutyMigrationOperation = "targets" | "prepare" | "commit" | "cancel";
@@ -677,85 +893,6 @@ function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {
   throw RpcErrors.invalidParams(
     'server.shutdown strategy must be "immediate", "drain", or "cancel"',
   );
-}
-
-async function runShutdownStrategy(
-  strategy: ServerShutdownStrategy,
-  timeoutMs: number,
-  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  if (strategy === "cancel") {
-    const reason = { kind: "external" as const, origin: "server-shutdown" };
-    await Promise.allSettled([
-      ctx.server.conversations?.abortAllAndWait(reason, timeoutMs),
-      flushDeliveryBeforeDeadline(ctx, deadline),
-    ]);
-    return;
-  }
-  if (strategy === "drain") {
-    await runBeforeDeadline(ctx.server.runtimeControl?.beginDrain, deadline);
-    await runBeforeDeadline(ctx.server.runtimeControl?.drainAcceptedWork, deadline);
-    await waitForActiveWorkToDrain(ctx, deadline);
-    await flushDeliveryBeforeDeadline(ctx, deadline);
-  }
-}
-
-async function waitForActiveWorkToDrain(
-  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
-  deadline: number,
-): Promise<void> {
-  while (Date.now() < deadline) {
-    if (currentCancellableWorkCount(ctx) === 0) return;
-    await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
-  }
-  throw new Error("Server accepted work did not drain before the shutdown deadline");
-}
-
-async function flushDeliveryBeforeDeadline(
-  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
-  deadline: number,
-): Promise<void> {
-  const flushDelivery = ctx.server.runtimeControl?.flushDelivery;
-  if (!flushDelivery) return;
-  await runBeforeDeadline(flushDelivery, deadline);
-}
-
-async function runBeforeDeadline(
-  operation: (() => Promise<void>) | undefined,
-  deadline: number,
-): Promise<void> {
-  if (!operation) return;
-  const remaining = Math.max(0, deadline - Date.now());
-  if (remaining <= 0) throw new Error("Server shutdown deadline elapsed");
-  await Promise.race([
-    operation(),
-    sleep(remaining).then(() => {
-      throw new Error("Server shutdown operation did not finish before the deadline");
-    }),
-  ]);
-}
-
-async function sleep(ms: number): Promise<void> {
-  if (ms <= 0) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
-}
-
-function currentCancellableWorkCount(
-  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
-): number {
-  const conversationWork = (ctx.server.conversations?.list() ?? []).reduce(
-    (sum, conversation) =>
-      sum +
-      (conversation.busy ? 1 : 0) +
-      Math.max(0, Number(conversation.pendingCount ?? 0)),
-    0,
-  );
-  const scheduledWork = ctx.server.scheduler?.activeTaskCount ?? 0;
-  return conversationWork + scheduledWork;
 }
 
 function buildRuntimeControlSnapshot(

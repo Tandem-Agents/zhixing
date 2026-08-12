@@ -41,6 +41,16 @@ export interface ManagedServiceAdapter {
   install(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   disableFuture(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   disable(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
+  stopCurrentExact(
+    spec: ManagedServiceSpec,
+    expected: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection>;
+  unregisterFutureExact(
+    spec: ManagedServiceSpec,
+    expected: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection>;
   start(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
 }
 
@@ -287,6 +297,115 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     const after = await this.inspect(spec, signal);
     if (after.state === "enabled") {
       throw new ManagedServiceError("read-back-failed", "Managed service future disable could not be verified");
+    }
+    return after;
+  }
+
+  async stopCurrentExact(
+    spec: ManagedServiceSpec,
+    expected: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection> {
+    this.assertSpec(spec);
+    const before = await this.inspect(spec, signal);
+    if (
+      before.state !== expected.state ||
+      before.running !== expected.running ||
+      before.matches !== expected.matches ||
+      !before.matches
+    ) {
+      throw new ManagedServiceError(
+        "definition-drift",
+        "Managed service instance changed before exact stop",
+      );
+    }
+    if (!before.running) return before;
+    if (this.platform === "win32") {
+      await this.requireStopCommand(
+        windowsTaskSchedulerCommand(["/End", "/TN", spec.serviceId]),
+        signal,
+      );
+    } else if (this.platform === "darwin") {
+      await this.requireStopCommand({
+        command: "/bin/launchctl",
+        args: ["bootout", `gui/${spec.uid ?? 0}/${spec.serviceId}`],
+      }, signal);
+    } else {
+      await this.requireStopCommand({
+        command: "systemctl",
+        args: ["--user", "stop", spec.serviceId],
+      }, signal);
+    }
+    const after = await this.inspect(spec, signal);
+    if (after.running || !after.matches || after.state !== before.state) {
+      throw new ManagedServiceError(
+        "read-back-failed",
+        "Managed service exact stop could not be verified",
+      );
+    }
+    return after;
+  }
+
+  async unregisterFutureExact(
+    spec: ManagedServiceSpec,
+    expected: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection> {
+    this.assertSpec(spec);
+    const before = await this.inspect(spec, signal);
+    if (before.state === "absent" && expected.state === "absent") return before;
+    if (
+      before.state !== expected.state ||
+      before.running !== expected.running ||
+      before.matches !== expected.matches ||
+      !before.matches
+    ) {
+      throw new ManagedServiceError(
+        "definition-drift",
+        "Managed service registration changed before exact removal",
+      );
+    }
+    if (this.platform === "win32") {
+      await this.requireStopCommand(
+        windowsTaskSchedulerCommand(["/Delete", "/TN", spec.serviceId, "/F"]),
+        signal,
+      );
+    } else if (this.platform === "darwin") {
+      await this.disableFutureManager(spec, signal);
+      await this.requireStopCommand({
+        command: "/bin/launchctl",
+        args: ["bootout", `gui/${spec.uid ?? 0}/${spec.serviceId}`],
+      }, signal);
+    } else {
+      await this.requireCommand({
+        command: "systemctl",
+        args: ["--user", "disable", spec.serviceId],
+      }, signal);
+    }
+    await runWithMaintenanceUrgency(() => "recovery", signal, async () => {
+      await runStorageMaintenanceStep(
+        this.storageGovernor,
+        storageMaintenanceRequest(
+          "managed-service-reconcile",
+          spec.serviceId,
+          definitionDigest(spec),
+          { obligation: "pre-commit", maxWaitMs: 5_000 },
+        ),
+        () => rm(spec.definitionPath, { force: true }),
+      );
+    });
+    if (this.platform === "linux") {
+      await this.requireCommand({
+        command: "systemctl",
+        args: ["--user", "daemon-reload"],
+      }, signal);
+    }
+    const after = await this.inspect(spec, signal);
+    if (after.state !== "absent" || after.running || !after.matches) {
+      throw new ManagedServiceError(
+        "read-back-failed",
+        "Managed service registration removal could not be verified",
+      );
     }
     return after;
   }

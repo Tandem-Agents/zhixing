@@ -40,6 +40,8 @@ import {
   getWorkScenesRoot,
   getWorkSceneConversationsRoot,
 } from "@zhixing/core";
+import { DeviceLifecycleJournal } from "@zhixing/core/authority";
+import { protocolDigest, type StopHostGeneration } from "@zhixing/core/protocol";
 import {
   createServerContext,
   runServer,
@@ -86,6 +88,7 @@ import {
 } from "@zhixing/providers";
 import fsp from "node:fs/promises";
 import chalk from "chalk";
+import { isProcessAlive } from "@zhixing/server";
 import {
   RuntimeHost,
   createBuiltinExtraToolsAssembly,
@@ -158,10 +161,16 @@ import { publishRequiredCredentialRotations } from "./credential-rotation-public
 import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
+  loadCurrentManagedServiceState,
   reconcileCurrentManagedService,
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
+import { createManagedServiceAdapter } from "./managed-service.js";
+import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { buildManagedHostPublicStatus } from "./status.js";
+import { HostStopCoordinator } from "./host-stop-lifecycle.js";
+import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -200,6 +209,7 @@ async function runServerProcess(
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
   const processMode = resolveHostProcessMode(opts.managed);
+  const processStartedAt = new Date().toISOString();
   const initialManagedHostAdmission = await captureManagedHostAdmission(
     processMode,
     zhixingHome,
@@ -1185,6 +1195,176 @@ async function runServerProcess(
 
   const serverRegistry = buildBuiltinRegistry();
   let managedHostStopping = false;
+  const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
+  const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
+  const stopHost: StopHostGeneration = processMode === "managed"
+    ? {
+        kind: "managed",
+        serviceId: `zhixing-${lifecycleHomeId.slice(0, 32)}`,
+        definitionDigest: protocolDigest(
+          "ManagedHostAdmission",
+          1,
+          initialManagedHostAdmission,
+        ),
+        instanceId: `${process.pid}:${processStartedAt}`,
+      }
+    : {
+        kind: "foreground",
+        processId: process.pid,
+        startedAt: processStartedAt,
+      };
+  const stopCoordinator = new HostStopCoordinator({
+    journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
+    homeId: lifecycleHomeId,
+    host: stopHost,
+    runtime: {
+      closeAdmission: async () => {
+        managedHostStopping = true;
+        ctx.inboundRouter?.refuseNewMessages();
+        await ctx.channelConnections?.disconnectConfigured();
+        await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+        await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      },
+      settleImmediate: async () => {
+        await ctx.inboundRouter?.drainAcceptedMessages();
+        await ctx.executorJobOwner?.drain();
+      },
+      drainAcceptedWork: async () => {
+        await ctx.inboundRouter?.drainAcceptedMessages();
+        await ctx.executorJobOwner?.drain();
+      },
+      cancelAcceptedWork: async (timeoutMs) => {
+        await ctx.conversations?.abortAllAndWait(
+          { kind: "external", origin: "server-shutdown" },
+          timeoutMs,
+        );
+      },
+      flushDurableState: async () => {
+        const checkpoint = await lifecycleAuthorityLog.checkpoint();
+        return [{ kind: "accepted-work", digest: checkpoint.prefixDigest }];
+      },
+      settlePhysicalSteps: async () => {
+        await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+      },
+    },
+    isHostStopped: async (host) => {
+      const pid = host.kind === "foreground"
+        ? host.processId
+        : Number.parseInt(host.instanceId.split(":", 1)[0] ?? "", 10);
+      return !Number.isSafeInteger(pid) || pid <= 0 || !isProcessAlive(pid);
+    },
+  });
+  await stopCoordinator.resumeActive();
+  const removedShutdown = { current: undefined as undefined | (() => Promise<void>) };
+  let localRetirementCompletedBeforeServerStart = false;
+  const cleanupLocalDevice = async () => {
+    const current = await loadCurrentManagedServiceState("activate", zhixingHome);
+    const adapter = current.spec
+      ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
+      : undefined;
+    const expected = current.spec
+      ? await adapter!.inspect(current.spec, new AbortController().signal)
+      : undefined;
+    return cleanupExecutorDeviceLocalState({
+      zhixingHome,
+      secretStore: bootstrap.secretStore,
+      deviceKey: bootstrap.mesh.deviceKey,
+      storageGovernor: deviceCapacity.storage,
+      unregisterFuture: async () => {
+        if (!current.spec || !adapter || !expected) return;
+        await adapter.unregisterFutureExact(
+          current.spec,
+          expected,
+          new AbortController().signal,
+        );
+      },
+    });
+  };
+  const finishLocalRetirement = async () => {
+    await deleteDeviceKey(bootstrap.secretStore, bootstrap.mesh.deviceKey.deviceId);
+    const shutdown = removedShutdown.current;
+    if (shutdown) {
+      await shutdown();
+      return;
+    }
+    localRetirementCompletedBeforeServerStart = true;
+  };
+  await ctx.meshRuntime?.bindDeviceRemovalLifecycle({
+    closeAdmission: async () => {
+      ctx.inboundRouter?.refuseNewMessages();
+      await ctx.channelConnections?.disconnectConfigured();
+      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+    },
+    settleAcceptedWork: async () => {
+      await ctx.inboundRouter?.drainAcceptedMessages();
+      await ctx.executorJobOwner?.drain();
+      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+    },
+    releaseAdmission: async () => {
+      await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+      ctx.conversationProtocol?.startRecoveryLoop();
+      schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+      ctx.inboundRouter?.resumeNewMessages();
+      await ctx.channelConnections?.connectConfigured();
+    },
+    cleanup: cleanupLocalDevice,
+    onRemoved: finishLocalRetirement,
+  });
+  const uninstallIssuerKey = bootstrap.mesh.mode === "trusted-home" &&
+    bootstrap.mesh.trust.issuer.deviceId === bootstrap.mesh.deviceKey.deviceId
+    ? bootstrap.mesh.anchorIssuerKey ?? bootstrap.mesh.deviceKey
+    : undefined;
+  const anchorUninstall = ctx.meshRuntime && uninstallIssuerKey
+    ? new AnchorUninstallCoordinator({
+        log: lifecycleAuthorityLog,
+        store: bootstrap.mesh.bootstrapStore,
+        currentDeviceId: bootstrap.mesh.deviceKey.deviceId,
+        issuerKey: uninstallIssuerKey,
+        verifier: ctx.authorityRuntime!.verifier,
+        anchorEpoch: () => ctx.authorityRuntime!.anchorEpoch,
+        migrationTargets: () => ctx.meshRuntime!.plannedAnchorTargets(),
+        commitMigration: async (input) => {
+          await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
+          await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
+        },
+        verifyMigration: async (targetDeviceId) => {
+          const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
+          if (
+            !trust ||
+            trust.issuer.deviceId !== targetDeviceId ||
+            ctx.meshRuntime!.currentAnchorDeviceId() !== targetDeviceId
+          ) {
+            throw new Error("The new duty device installation is not current");
+          }
+        },
+        retireMigratedDevice: (operationId) =>
+          ctx.meshRuntime!.retireLocalDeviceAfterMigration({ operationId }),
+        ...(ctx.authorityCheckpointOwner
+          ? { checkpointOwner: ctx.authorityCheckpointOwner }
+          : {}),
+        closeAdmission: async () => {
+          ctx.inboundRouter?.refuseNewMessages();
+          await ctx.inboundRouter?.drainAcceptedMessages();
+          await ctx.channelConnections?.disconnectConfigured();
+          await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+          await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+        },
+        releaseAdmission: async () => {
+          await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+          ctx.conversationProtocol?.startRecoveryLoop();
+          schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+          ctx.inboundRouter?.resumeNewMessages();
+          await ctx.channelConnections?.connectConfigured();
+        },
+        cleanupRecovery: cleanupLocalDevice,
+        onRetired: finishLocalRetirement,
+      })
+    : undefined;
+  await anchorUninstall?.resumeActive();
+  if (localRetirementCompletedBeforeServerStart) {
+    throw new Error("This device has completed local retirement and cannot start normally");
+  }
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
@@ -1224,6 +1404,26 @@ async function runServerProcess(
     recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
+    ...(anchorUninstall
+      ? {
+          anchorUninstall: {
+            preflight: () => anchorUninstall.preflight(),
+            begin: (input: Parameters<AnchorUninstallCoordinator["beginMigration"]>[0] & {
+              readonly path?: "migration";
+            } | Parameters<AnchorUninstallCoordinator["beginRecoveryBackup"]>[0] & {
+              readonly path: "recovery-backup";
+            }) => input.path === "recovery-backup"
+              ? anchorUninstall.beginRecoveryBackup(input)
+              : anchorUninstall.beginMigration(input),
+            continue: (input: { readonly operationId: string; readonly confirmBackup: true }) =>
+              anchorUninstall.confirmRecoveryBackup(input.operationId),
+            cancel: (input: { readonly operationId: string }) =>
+              anchorUninstall.abort(input.operationId),
+            status: (input: { readonly operationId: string }) =>
+              anchorUninstall.state(input.operationId),
+          },
+        }
+      : {}),
     ...(ctx.meshRuntime
       ? {
           dutyMigration: {
@@ -1244,6 +1444,21 @@ async function runServerProcess(
               await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
               return { stage: "cancelled" as const };
             },
+          },
+          deviceLifecycle: {
+            list: () => ctx.meshRuntime!.removableDevices(),
+            remove: (input: {
+              readonly requestId: string;
+              readonly operationId: string;
+              readonly targetName: string;
+            }) => ctx.meshRuntime!.beginDeviceRemoval(input),
+            continue: (input: {
+              readonly targetName: string;
+              readonly mode: "transfer" | "destroy" | "lost" | "cancel";
+            }) => ctx.meshRuntime!.continueDeviceRemoval(input),
+            status: (input: {
+              readonly targetName: string;
+            }) => ctx.meshRuntime!.deviceRemovalStatus(input),
           },
         }
       : {}),
@@ -1401,11 +1616,22 @@ async function runServerProcess(
         await ctx.deliveryStack?.flush();
       },
     },
+    lifecycleShutdown: stopCoordinator,
   });
   managedShutdown.current = () => {
     managedHostStopping = true;
     ctx.inboundRouter?.refuseNewMessages();
     serverCtx.requestShutdown?.("managed-role-changed");
+  };
+  removedShutdown.current = async () => {
+    managedHostStopping = true;
+    await stopCoordinator.prepare({
+      requestId: `device-removed:${bootstrap.mesh.deviceKey.deviceId}`,
+      reason: "device-removed",
+      strategy: "immediate",
+      timeoutMs: 30_000,
+    });
+    serverCtx.requestShutdown?.("device-removed");
   };
 
   if (ctx.meshRuntime) {

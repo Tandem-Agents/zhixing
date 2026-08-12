@@ -162,6 +162,24 @@ export interface LocalConversationOwnerPort {
   >;
 }
 
+export interface LocalConversationRemovalSnapshot {
+  readonly operationId: string;
+  readonly conversations: readonly {
+    readonly conversationId: string;
+    readonly displayName: string;
+    readonly state: "current" | "frozen" | "importing";
+  }[];
+  readonly acceptedWork: {
+    readonly active: number;
+    readonly pendingFinals: number;
+    readonly pendingAssignments: number;
+    readonly deferredIntents: number;
+    readonly outbox: number;
+    readonly leases: number;
+    readonly permits: number;
+  };
+}
+
 export interface LocalConversationOwnerAssemblyOptions {
   readonly owner: LocalConversationOwnerRuntimeStack;
   /**
@@ -205,6 +223,8 @@ export class LocalConversationOwnerAssembly {
   #resolveCommandDrain: (() => void) | undefined;
   readonly #transferringConversations = new Set<string>();
   readonly #transferAbort = new AbortController();
+  #removalOperationId: string | undefined;
+  #removalSnapshot: LocalConversationRemovalSnapshot | undefined;
 
   private constructor(input: {
     readonly options: LocalConversationOwnerAssemblyOptions;
@@ -909,6 +929,7 @@ export class LocalConversationOwnerAssembly {
   }
 
   async transferCandidates(): Promise<readonly string[]> {
+    if (this.#removalOperationId) return [];
     const candidates: string[] = [];
     for (const { conversationId, authority } of await this.#port.listConversationAuthorities()) {
       if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
@@ -916,6 +937,167 @@ export class LocalConversationOwnerAssembly {
       }
     }
     return candidates;
+  }
+
+  deviceRemovalCandidates(operationId: string): readonly string[] {
+    return this.#requireRemovalSnapshot(operationId).conversations.map(
+      (item) => item.conversationId,
+    );
+  }
+
+  /**
+   * Freezes the complete local-owner set for one authenticated device-removal
+   * operation. The caller persists the returned snapshot before choosing a
+   * transfer or destruction path.
+   */
+  async freezeForDeviceRemoval(operationId: string): Promise<LocalConversationRemovalSnapshot> {
+    if (this.#removalOperationId && this.#removalOperationId !== operationId) {
+      throw new Error("Another device-removal operation owns the local conversation gate");
+    }
+    if (this.#removalSnapshot?.operationId === operationId) return this.#removalSnapshot;
+    this.#requireReady();
+    this.#removalOperationId = operationId;
+    try {
+      await this.#waitForCommandDrain();
+      const candidates = (await this.#port.listConversationAuthorities())
+        .filter(({ authority }) =>
+          authority.state === "current" ||
+          authority.state === "frozen" ||
+          authority.state === "importing")
+        .sort((left, right) => left.conversationId.localeCompare(right.conversationId, "en-US"));
+      for (const { conversationId } of candidates) {
+        this.#transferringConversations.add(conversationId);
+      }
+      for (const { conversationId } of candidates) {
+        await this.#manager.abortConversationAndWait(
+          conversationId,
+          { kind: "external", origin: "device-removal" },
+          this.#closeDrainBudgetMs,
+        );
+        await this.#protocol.recoverConversation(conversationId);
+        await this.#recovery.recoverConversation(conversationId);
+      }
+      const conversations = await Promise.all(candidates.map(async ({ conversationId, authority }) => {
+        const meta = await this.#protocol.sessionState.readSessionMeta(
+          conversationId,
+          hostContext("device-removal-preflight"),
+        );
+        return Object.freeze({
+          conversationId,
+          displayName: meta.name?.trim() || conversationId,
+          state: authority.state as "current" | "frozen" | "importing",
+        });
+      }));
+      let pendingFinals = 0;
+      let pendingAssignments = 0;
+      let leases = 0;
+      let deferredIntents = 0;
+      for (const { conversationId } of conversations) {
+        const closure = await this.#protocol.pendingClosureWork(conversationId);
+        pendingFinals += closure.pendingFinals;
+        pendingAssignments += closure.pendingAssignments;
+        leases += closure.activeLocalLeases;
+        deferredIntents += (await this.#intents.list(
+          conversationId,
+          hostContext("device-removal-preflight"),
+        )).length;
+      }
+      const snapshot = Object.freeze({
+        operationId,
+        conversations: Object.freeze(conversations),
+        acceptedWork: Object.freeze({
+          active: Number(this.#manager.hasActiveWork()),
+          pendingFinals,
+          pendingAssignments,
+          deferredIntents,
+          outbox: pendingFinals,
+          leases,
+          permits: leases,
+        }),
+      });
+      this.#removalSnapshot = snapshot;
+      return snapshot;
+    } catch (error) {
+      this.#removalOperationId = undefined;
+      this.#removalSnapshot = undefined;
+      for (const { conversationId } of await this.#port.listConversationAuthorities()) {
+        this.#transferringConversations.delete(conversationId);
+      }
+      throw error;
+    }
+  }
+
+  releaseDeviceRemovalFreeze(operationId: string): void {
+    if (this.#removalOperationId !== operationId) {
+      throw new Error("Device-removal gate identity does not match");
+    }
+    for (const conversation of this.#removalSnapshot?.conversations ?? []) {
+      this.#transferringConversations.delete(conversation.conversationId);
+    }
+    this.#removalOperationId = undefined;
+    this.#removalSnapshot = undefined;
+  }
+
+  async destroyFrozenConversations(
+    operationId: string,
+    conversationIds: readonly string[],
+  ): Promise<void> {
+    const snapshot = this.#requireRemovalSnapshot(operationId);
+    if (canonicalize([...conversationIds].sort()) !==
+      canonicalize(snapshot.conversations.map((item) => item.conversationId).sort())) {
+      throw new Error("Device-removal deletion does not match the frozen conversation set");
+    }
+    for (const conversationId of conversationIds) {
+      const authority = await this.#protocol.sessionAuthorityState(conversationId);
+      if (!authority.deleted) {
+        await this.#protocol.sessionState.mutate(
+          conversationId,
+          { kind: "conversation-delete" },
+          {
+            ...hostContext("device-removal-delete"),
+            requestId: `device-removal:${operationId}:${conversationId}`,
+            expectedRevision: authority.domainRevision,
+          },
+        );
+      }
+      await this.#protocol.recoverConversation(conversationId);
+      const after = await this.#protocol.sessionAuthorityState(conversationId);
+      if (!after.deleted || after.pendingLifecycleProjections !== 0) {
+        throw new Error("Device-removal conversation deletion is not durably projected");
+      }
+    }
+  }
+
+  async assertDeviceRemovalSettled(
+    operationId: string,
+    conversationIds: readonly string[],
+  ): Promise<void> {
+    this.#requireRemovalSnapshot(operationId);
+    for (const conversationId of conversationIds) {
+      const session = await this.#protocol.sessionAuthorityState(conversationId);
+      if (!session.deleted) {
+        const authority = await this.#currentAuthority(conversationId);
+        if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
+          throw new Error("Device removal still owns a local conversation authority");
+        }
+      }
+      const closure = await this.#protocol.pendingClosureWork(conversationId);
+      if (
+        closure.pendingFinals !== 0 ||
+        closure.pendingAssignments !== 0 ||
+        closure.recoveryBacklog !== 0 ||
+        closure.activeLocalLeases !== 0
+      ) {
+        throw new Error("Device removal still has accepted conversation work");
+      }
+    }
+  }
+
+  #requireRemovalSnapshot(operationId: string): LocalConversationRemovalSnapshot {
+    if (this.#removalOperationId !== operationId || !this.#removalSnapshot) {
+      throw new Error("Device-removal operation does not own the local conversation gate");
+    }
+    return this.#removalSnapshot;
   }
 
   async #assertConversationCurrent(conversationId: string): Promise<void> {
@@ -951,6 +1133,9 @@ export class LocalConversationOwnerAssembly {
 
   #beginCommand(): () => void {
     this.#requireReady();
+    if (this.#removalOperationId) {
+      throw new Error("This device is being removed; local conversation admission is closed");
+    }
     if (this.#activeCommands === 0) {
       this.#commandDrain = new Promise<void>((resolve) => {
         this.#resolveCommandDrain = resolve;
