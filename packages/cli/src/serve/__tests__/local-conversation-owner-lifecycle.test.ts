@@ -119,8 +119,52 @@ describe("local conversation owner lifecycle", () => {
         [first],
       )).rejects.toThrow("does not match the frozen conversation set");
       await fixture.assembly.destroyFrozenConversations("remove-destroy", ids);
-      await expect(fixture.assembly.assertDeviceRemovalSettled("remove-destroy", ids))
+      await expect(fixture.assembly.assertDeviceRemovalSettled(
+        "remove-destroy",
+        "destroy",
+        snapshot.ownerItems,
+      ))
         .resolves.toBeUndefined();
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
+    "settles one frozen host-stop exact-set across all local owner ports",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      await fixture.assembly.closeHostStopAdmission("stop-local-owner");
+      const conversation = fixture.assembly.hostStopAcceptedWorkItems(
+        "stop-local-owner",
+        "conversation",
+      );
+      expect(conversation).toEqual([
+        expect.objectContaining({ id: conversationId }),
+      ]);
+      await fixture.assembly.settleHostStopAcceptedWork(
+        "stop-local-owner",
+        "immediate",
+        10_000,
+      );
+      for (const owner of [
+        "conversation",
+        "intent",
+        "final",
+        "assignment",
+        "lease",
+        "permit",
+      ] as const) {
+        const frozen = fixture.assembly.hostStopAcceptedWorkItems("stop-local-owner", owner);
+        await expect(fixture.assembly.assertHostStopAcceptedWorkSettled(
+          "stop-local-owner",
+          owner,
+          frozen,
+        )).resolves.toBeUndefined();
+      }
       await fixture.assembly.close();
       await fixture.authority.stopStorageMaintenance();
     },

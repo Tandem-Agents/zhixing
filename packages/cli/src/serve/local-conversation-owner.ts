@@ -240,6 +240,10 @@ export class LocalConversationOwnerAssembly {
   readonly #transferAbort = new AbortController();
   #removalOperationId: string | undefined;
   #removalSnapshot: LocalConversationRemovalSnapshot | undefined;
+  #hostStopOperationId: string | undefined;
+  #hostStopSnapshot: LocalConversationRemovalSnapshot | undefined;
+  #hostStopSettlement: Promise<void> | undefined;
+  #hostStopSettledOperationId: string | undefined;
 
   private constructor(input: {
     readonly options: LocalConversationOwnerAssemblyOptions;
@@ -266,7 +270,10 @@ export class LocalConversationOwnerAssembly {
       verifier: this.#owner.verifier,
       acceptsConversationId: (conversationId) =>
         this.#owner.acceptsConversationId(conversationId),
-      accepting: () => this.#state === "ready",
+      accepting: () =>
+        this.#state === "ready" &&
+        this.#removalOperationId === undefined &&
+        this.#hostStopOperationId === undefined,
       isCurrentAnchor: (deviceId) =>
         input.options.currentAnchorDeviceId() === deviceId,
       conversationState: async (conversationId) => {
@@ -944,7 +951,7 @@ export class LocalConversationOwnerAssembly {
   }
 
   async transferCandidates(): Promise<readonly string[]> {
-    if (this.#removalOperationId) return [];
+    if (this.#removalOperationId || this.#hostStopOperationId) return [];
     const candidates: string[] = [];
     for (const { conversationId, authority } of await this.#port.listConversationAuthorities()) {
       if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
@@ -958,6 +965,104 @@ export class LocalConversationOwnerAssembly {
     return this.#requireRemovalSnapshot(operationId).conversations.map(
       (item) => item.conversationId,
     );
+  }
+
+  async closeHostStopAdmission(operationId: string): Promise<void> {
+    this.#requireReady();
+    if (this.#removalOperationId) {
+      throw new Error("Device removal already owns the local conversation gate");
+    }
+    if (this.#hostStopOperationId && this.#hostStopOperationId !== operationId) {
+      throw new Error("Another host-stop operation owns the local conversation gate");
+    }
+    this.#hostStopOperationId = operationId;
+    this.#protocol.beginShutdownDrain();
+    await this.#waitForCommandDrain();
+    this.#hostStopSnapshot ??= await this.preflightForDeviceRemoval(operationId);
+  }
+
+  hostStopAcceptedWorkItems(
+    operationId: string,
+    owner: LocalConversationRemovalSnapshot["ownerItems"][number]["owner"],
+  ): readonly { readonly id: string; readonly revision: string }[] {
+    const snapshot = this.#requireHostStopSnapshot(operationId);
+    return Object.freeze(snapshot.ownerItems
+      .filter((item) => item.owner === owner)
+      .map(({ id, revision }) => Object.freeze({ id, revision })));
+  }
+
+  async settleHostStopAcceptedWork(
+    operationId: string,
+    strategy: "immediate" | "drain" | "cancel",
+    timeoutMs: number,
+  ): Promise<void> {
+    this.#requireHostStopSnapshot(operationId);
+    if (this.#hostStopSettledOperationId === operationId) return;
+    if (this.#hostStopSettlement) return this.#hostStopSettlement;
+    const settlement = (async () => {
+      const deadline = Date.now() + timeoutMs;
+      if (strategy === "cancel") {
+        await this.#manager.abortAllAndWait(
+          { kind: "external", origin: "server-shutdown" },
+          Math.max(1, timeoutMs),
+        );
+      }
+      while (true) {
+        await this.#protocol.recover();
+        await this.#recovery.recoverAllOpenSessions();
+        const closure = await this.#protocol.pendingClosureWork();
+        if (
+          !this.#manager.hasActiveWork() &&
+          closure.pendingFinals === 0 &&
+          closure.pendingAssignments === 0 &&
+          closure.recoveryBacklog === 0 &&
+          closure.activeLocalLeases === 0
+        ) {
+          await this.#protocol.stopRecoveryLoop();
+          this.#hostStopSettledOperationId = operationId;
+          return;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error("Host stop could not settle local accepted work before its deadline");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    })();
+    this.#hostStopSettlement = settlement;
+    try {
+      await settlement;
+    } catch (error) {
+      if (this.#hostStopSettlement === settlement) this.#hostStopSettlement = undefined;
+      throw error;
+    }
+  }
+
+  async assertHostStopAcceptedWorkSettled(
+    operationId: string,
+    owner: LocalConversationRemovalSnapshot["ownerItems"][number]["owner"],
+    frozen: readonly { readonly id: string; readonly revision: string }[],
+  ): Promise<void> {
+    const expected = this.hostStopAcceptedWorkItems(operationId, owner);
+    assertExactAcceptedWork(expected, frozen, `host-stop ${owner} frozen input`);
+    const current = (await this.preflightForDeviceRemoval(operationId)).ownerItems
+      .filter((item) => item.owner === owner)
+      .map(({ id, revision }) => ({ id, revision }));
+    assertCurrentAcceptedWorkBelongsToFrozen(current, frozen, `host-stop ${owner}`);
+    if (owner === "conversation") {
+      assertExactAcceptedWork(current, frozen, "host-stop conversation read-back");
+      if (this.#manager.hasActiveWork()) {
+        throw new Error("Host stop still has active conversation work");
+      }
+      return;
+    }
+    if (owner === "intent") return;
+    if (current.length !== 0) {
+      throw new Error(`Host stop ${owner} accepted work is not settled`);
+    }
+  }
+
+  async checkpointAcceptedWork(): Promise<string> {
+    return (await this.#owner.executorLog.checkpoint()).prefixDigest;
   }
 
   /**
@@ -1093,6 +1198,7 @@ export class LocalConversationOwnerAssembly {
   }
 
   releaseDeviceRemovalFreeze(operationId: string): void {
+    if (this.#removalOperationId === undefined) return;
     if (this.#removalOperationId !== operationId) {
       throw new Error("Device-removal gate identity does not match");
     }
@@ -1135,12 +1241,24 @@ export class LocalConversationOwnerAssembly {
 
   async assertDeviceRemovalSettled(
     operationId: string,
-    conversationIds: readonly string[],
+    mode: "transfer" | "destroy",
+    ownerItems: LocalConversationRemovalSnapshot["ownerItems"],
   ): Promise<void> {
-    this.#requireRemovalSnapshot(operationId);
-    for (const conversationId of conversationIds) {
+    const snapshot = this.#requireRemovalSnapshot(operationId);
+    const localOwners = new Set(["conversation", "intent", "final", "assignment", "lease", "permit"]);
+    const frozen = ownerItems.filter((item) => localOwners.has(item.owner));
+    assertExactAcceptedWork(
+      snapshot.ownerItems.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+      frozen.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+      "device-removal durable ownerItems",
+    );
+    for (const conversationId of snapshot.conversations.map((item) => item.conversationId)) {
       const session = await this.#protocol.sessionAuthorityState(conversationId);
-      if (!session.deleted) {
+      if (mode === "destroy") {
+        if (!session.deleted || session.pendingLifecycleProjections !== 0) {
+          throw new Error("Device removal did not durably delete the frozen conversation");
+        }
+      } else if (!session.deleted) {
         const authority = await this.#currentAuthority(conversationId);
         if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
           throw new Error("Device removal still owns a local conversation authority");
@@ -1156,6 +1274,15 @@ export class LocalConversationOwnerAssembly {
         throw new Error("Device removal still has accepted conversation work");
       }
     }
+    const current = await this.preflightForDeviceRemoval(operationId);
+    if (current.ownerItems.length !== 0) {
+      assertCurrentAcceptedWorkBelongsToFrozen(
+        current.ownerItems.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+        frozen.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+        "device-removal owner read-back",
+      );
+      throw new Error("Device removal still owns frozen accepted work");
+    }
   }
 
   #requireRemovalSnapshot(operationId: string): LocalConversationRemovalSnapshot {
@@ -1163,6 +1290,13 @@ export class LocalConversationOwnerAssembly {
       throw new Error("Device-removal operation does not own the local conversation gate");
     }
     return this.#removalSnapshot;
+  }
+
+  #requireHostStopSnapshot(operationId: string): LocalConversationRemovalSnapshot {
+    if (this.#hostStopOperationId !== operationId || !this.#hostStopSnapshot) {
+      throw new Error("Host-stop operation does not own the local conversation gate");
+    }
+    return this.#hostStopSnapshot;
   }
 
   async #assertConversationCurrent(conversationId: string): Promise<void> {
@@ -1201,6 +1335,9 @@ export class LocalConversationOwnerAssembly {
     if (this.#removalOperationId) {
       throw new Error("This device is being removed; local conversation admission is closed");
     }
+    if (this.#hostStopOperationId) {
+      throw new Error("This host is stopping; local conversation admission is closed");
+    }
     if (this.#activeCommands === 0) {
       this.#commandDrain = new Promise<void>((resolve) => {
         this.#resolveCommandDrain = resolve;
@@ -1231,6 +1368,33 @@ export class LocalConversationOwnerAssembly {
 
   async #waitForCommandDrain(): Promise<void> {
     await this.#commandDrain;
+  }
+}
+
+function assertExactAcceptedWork(
+  actual: readonly { readonly id: string; readonly revision: string }[],
+  expected: readonly { readonly id: string; readonly revision: string }[],
+  label: string,
+): void {
+  const normalize = (items: readonly { readonly id: string; readonly revision: string }[]) =>
+    [...items]
+      .sort((left, right) => left.id.localeCompare(right.id, "en-US"))
+      .map((item) => `${item.id}\u0000${item.revision}`);
+  if (canonicalize(normalize(actual)) !== canonicalize(normalize(expected))) {
+    throw new Error(`${label} does not match the frozen exact-set`);
+  }
+}
+
+function assertCurrentAcceptedWorkBelongsToFrozen(
+  current: readonly { readonly id: string; readonly revision: string }[],
+  frozen: readonly { readonly id: string; readonly revision: string }[],
+  label: string,
+): void {
+  const expected = new Map(frozen.map((item) => [item.id, item.revision]));
+  for (const item of current) {
+    if (expected.get(item.id) !== item.revision) {
+      throw new Error(`${label} observed a successor or unowned accepted-work item`);
+    }
   }
 }
 

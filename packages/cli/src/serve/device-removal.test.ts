@@ -116,7 +116,11 @@ describe("current issuer device removal", () => {
       operationId: "remove-abort-replay",
       targetName: "工作电脑",
     });
-    const targetOptions = createTargetOptions(fixture, "target-abort-replay");
+    const releaseAdmission = vi.fn(async () => undefined);
+    const targetOptions = {
+      ...createTargetOptions(fixture, "target-abort-replay"),
+      releaseAdmission,
+    };
     const target = new ExecutorRemovalTarget(targetOptions);
     await target.accept(accepted);
 
@@ -138,6 +142,17 @@ describe("current issuer device removal", () => {
     expect(aborted.phase).toBe("aborted");
     const restartedTarget = new ExecutorRemovalTarget(targetOptions);
     await expect(restartedTarget.abort(accepted.operationId, abort)).resolves.toEqual(aborted);
+    expect(releaseAdmission).toHaveBeenCalledTimes(2);
+    const conflictingRelease = vi.fn(async () => {
+      throw new Error("Device-removal release does not own external admission");
+    });
+    const conflictingTarget = new ExecutorRemovalTarget({
+      ...targetOptions,
+      releaseAdmission: conflictingRelease,
+    });
+    await expect(conflictingTarget.abort(accepted.operationId, abort))
+      .rejects.toThrow("does not own external admission");
+    expect(conflictingRelease).toHaveBeenCalledWith(accepted.operationId);
     await restartedAuthority.acceptTargetAborted(aborted);
     expect(restartedAuthority.authorizesTarget(fixture.targetKey.deviceId)).toBe(false);
     await expect(restartedAuthority.abort(accepted.operationId)).resolves.toEqual(abort);
@@ -223,6 +238,11 @@ describe("current issuer device removal", () => {
     expect(ready.kind).toBe("ready");
     expect(closeAdmission).toHaveBeenCalledTimes(2);
     expect(settleAcceptedWork).toHaveBeenCalledTimes(1);
+    expect(settleAcceptedWork).toHaveBeenCalledWith({
+      operationId: accepted.operationId,
+      mode: "transfer",
+      ownerItems: [{ owner: "remote", id: "assignment-1", revision }],
+    });
   }, 120_000);
 
   it("carries the durable abort winner through both authenticated mesh facades", async () => {

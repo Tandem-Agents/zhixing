@@ -26,6 +26,14 @@ describe("HostStopCoordinator", () => {
       for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
         expect(fixture.order).toContain(`settle:${owner}:${strategy}`);
         expect(fixture.order).toContain(`read-back:${owner}`);
+        expect(fixture.settled.get(owner)).toEqual({
+          operationId: protocolDigest("HostStopOperation", 1, {
+            requestId: `request-${strategy}`,
+            homeId: fixture.homeId,
+          }),
+          frozen: [{ id: `${owner}:item`, revision: `${owner}:revision` }],
+        });
+        expect(fixture.readBack.get(owner)).toEqual(fixture.settled.get(owner));
       }
       expect(fixture.order.slice(-2)).toEqual(["flush", "physical"]);
       const active = await fixture.journal.active();
@@ -102,12 +110,25 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
   });
   const journal = new DeviceLifecycleJournal(log);
   const order: string[] = [];
+  const settled = new Map<string, unknown>();
+  const readBack = new Map<string, unknown>();
   const acceptedWork = Object.fromEntries(HOST_STOP_ACCEPTED_WORK_OWNERS.map((owner) => [owner, {
     freeze: async () => [{ id: `${owner}:item`, revision: `${owner}:revision` }],
-    settle: async (input: { readonly strategy: "immediate" | "drain" | "cancel" }) => {
+    settle: async (input: {
+      readonly operationId: string;
+      readonly strategy: "immediate" | "drain" | "cancel";
+      readonly frozen: readonly { readonly id: string; readonly revision: string }[];
+    }) => {
       order.push(`settle:${owner}:${input.strategy}`);
+      settled.set(owner, { operationId: input.operationId, frozen: input.frozen });
     },
-    readBack: async () => { order.push(`read-back:${owner}`); },
+    readBack: async (input: {
+      readonly operationId: string;
+      readonly frozen: readonly { readonly id: string; readonly revision: string }[];
+    }) => {
+      order.push(`read-back:${owner}`);
+      readBack.set(owner, { operationId: input.operationId, frozen: input.frozen });
+    },
   }])) as unknown as HostStopAcceptedWorkPorts;
   let failFlush = options.failFlushOnce ?? false;
   const runtime: HostStopRuntime = {
@@ -129,6 +150,8 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
   const homeId = (await log.originCheckpoint()).logId;
   return {
     order,
+    settled,
+    readBack,
     runtime,
     homeId,
     journal,

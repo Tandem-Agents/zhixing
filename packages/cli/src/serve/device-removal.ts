@@ -704,7 +704,11 @@ export class ExecutorRemovalTarget {
       operationId: string,
     ) => Promise<LocalConversationRemovalSnapshot["ownerItems"]>;
     readonly closeAdmission: (operationId: string) => Promise<void>;
-    readonly settleAcceptedWork: (operationId: string) => Promise<void>;
+    readonly settleAcceptedWork: (input: {
+      readonly operationId: string;
+      readonly mode: "transfer" | "destroy";
+      readonly ownerItems: LocalConversationRemovalSnapshot["ownerItems"];
+    }) => Promise<void>;
     readonly releaseAdmission: (operationId: string) => Promise<void>;
     readonly transferToAnchor: (
       operationId: string,
@@ -837,6 +841,10 @@ export class ExecutorRemovalTarget {
       throw new Error("Device removal decision conflicts with its durable replay");
     }
     if (operation.phase === "authority-decided") {
+      const ownerItems = decision.ownerItems;
+      if (!ownerItems) {
+        throw new Error("Device removal decision is missing its frozen owner exact-set");
+      }
       const conversationIds = decision.conversations.map((item) => item.conversationId);
       if (decision.mode === "transfer") {
         if (conversationIds.length > 0) {
@@ -854,9 +862,14 @@ export class ExecutorRemovalTarget {
       }
       await this.options.localOwner?.assertDeviceRemovalSettled(
         input.operationId,
-        conversationIds,
+        decision.mode,
+        ownerItems,
       );
-      await this.options.settleAcceptedWork(input.operationId);
+      await this.options.settleAcceptedWork({
+        operationId: input.operationId,
+        mode: decision.mode,
+        ownerItems,
+      });
       operation = await this.#journal.advance(input.operationId, "authority-settled", [{
         kind: decision.mode === "transfer" ? "authority-transfer" : "authority-deletion",
         digest: protocolDigest("ExecutorRemovalAuthoritySettlement", 1, decision),
@@ -1018,10 +1031,10 @@ export class ExecutorRemovalTarget {
     const requested = validateDeviceLifecycleAbort(abort, this.options.verifier);
     assertAbortIdentity(requested, operation.identity);
     let aborted;
+    let replay: ExecutorRemovalReceipt | undefined;
     if (operation.phase === "aborted") {
       aborted = await this.#journal.abort(operationId, requested);
-      const replay = await this.#receiptFromPeerEffect(aborted, "target-aborted");
-      if (replay) return replay;
+      replay = await this.#receiptFromPeerEffect(aborted, "target-aborted");
     } else if (phaseOrder(operation.phase) >= phaseOrder("authority-decided")) {
       const decision = await this.#decision(operation);
       if (!decision) throw new Error("Irreversible device removal is missing its durable decision");
@@ -1046,6 +1059,7 @@ export class ExecutorRemovalTarget {
     if (!durableAbort) throw new Error("Device removal target abort was not durably projected");
     this.options.localOwner?.releaseDeviceRemovalFreeze(operationId);
     await this.options.releaseAdmission(operationId);
+    if (replay) return replay;
     const identity = operation.identity;
     const receipt = createSignedExecutorRemovalReceipt({
       v: 1,
@@ -1174,6 +1188,10 @@ export class ExecutorRemovalTarget {
       throw new Error("Executor removal peer receipt is corrupt", { cause: error });
     }
     const receipt = validateExecutorRemovalReceipt(parsed, this.options.verifier);
+    if (operation.identity.kind !== "executor-removal") {
+      throw new Error("Executor removal peer receipt has an incompatible operation identity");
+    }
+    assertReceiptIdentity(receipt, operation.identity);
     if (protocolDigest(kind === "target-aborted"
       ? "ExecutorRemovalTargetAbortedReceipt"
       : "ExecutorRemovalCleanupReadyReceipt", 1, receipt) !== effect.digest) {

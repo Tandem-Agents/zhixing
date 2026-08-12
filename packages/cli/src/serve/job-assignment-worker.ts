@@ -331,6 +331,13 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     this.#accepting = false;
   }
 
+  resumeAccepting(): void {
+    if (this.#closed || this.#recoveryStopped) {
+      throw new Error("Job assignment worker cannot resume after close");
+    }
+    this.#accepting = true;
+  }
+
   async close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.stopAccepting();

@@ -360,7 +360,11 @@ export class MeshRuntimeAssembly {
   #deviceRemovalCaptureAcceptedWork?: (
     operationId: string,
   ) => Promise<LocalConversationRemovalSnapshot["ownerItems"]>;
-  #deviceRemovalSettleAcceptedWork?: (operationId: string) => Promise<void>;
+  #deviceRemovalSettleAcceptedWork?: (input: {
+    readonly operationId: string;
+    readonly mode: "transfer" | "destroy";
+    readonly ownerItems: LocalConversationRemovalSnapshot["ownerItems"];
+  }) => Promise<void>;
   #deviceRemovalReleaseAdmission?: (operationId: string) => Promise<void>;
   #localDeviceRemovalOperation: string | undefined;
   #plannedAnchorOwner: PlannedAnchorTransferOwner | undefined;
@@ -911,8 +915,8 @@ export class MeshRuntimeAssembly {
         this.#localDeviceRemovalOperation = operationId;
         await this.#deviceRemovalCloseAdmission(operationId);
       },
-      settleAcceptedWork: (operationId) => this.#deviceRemovalSettleAcceptedWork
-        ? this.#deviceRemovalSettleAcceptedWork(operationId)
+      settleAcceptedWork: (input) => this.#deviceRemovalSettleAcceptedWork
+        ? this.#deviceRemovalSettleAcceptedWork(input)
         : Promise.reject(new Error("Device removal accepted-work lifecycle is not bound")),
       releaseAdmission: async (operationId) => {
         if (!this.#deviceRemovalReleaseAdmission) {
@@ -1088,7 +1092,11 @@ export class MeshRuntimeAssembly {
     readonly captureAcceptedWork: (
       operationId: string,
     ) => Promise<LocalConversationRemovalSnapshot["ownerItems"]>;
-    readonly settleAcceptedWork: (operationId: string) => Promise<void>;
+    readonly settleAcceptedWork: (input: {
+      readonly operationId: string;
+      readonly mode: "transfer" | "destroy";
+      readonly ownerItems: LocalConversationRemovalSnapshot["ownerItems"];
+    }) => Promise<void>;
     readonly releaseAdmission: (operationId: string) => Promise<void>;
     readonly cleanup: (
       operationId: string,

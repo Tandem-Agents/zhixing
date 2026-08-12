@@ -11,6 +11,7 @@ import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
+import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 
 describe("anchor uninstall coordinator", () => {
   it("uses a ready migration target and only reports terminal after transfer verification and local retirement", async () => {
@@ -76,6 +77,15 @@ describe("anchor uninstall coordinator", () => {
     const root = decodeRecoveryPackage(recoveryPackage).root;
     const trust = await fixture.store.loadTrustRecord();
     if (!trust) throw new Error("expected current trust");
+    await fixture.store.authorityLog().append([{
+      stream: "exposure",
+      body: createCredentialExposureRecord({
+        deviceId: fixture.issuerKey.deviceId,
+        bindingId: "provider:retirement-lsn",
+        service: "provider",
+        markedAt: "2026-08-12T00:00:04.000Z",
+      }),
+    }]);
     const service = new AuthorityCheckpointService({
       log: fixture.store.authorityLog(),
       artifacts: fixture.store.artifactStore(),

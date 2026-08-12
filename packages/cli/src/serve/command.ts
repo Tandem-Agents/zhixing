@@ -176,6 +176,7 @@ import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { buildManagedHostPublicStatus } from "./status.js";
 import {
   HostStopCoordinator,
+  type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkPorts,
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
@@ -1237,23 +1238,16 @@ async function runServerProcess(
         startedAt: processStartedAt,
         endpointLock: stopEndpointLock,
       };
-  const stopConversationSnapshots = new Map<string, Promise<Awaited<
-    ReturnType<NonNullable<typeof ctx.localConversationOwner>["preflightForDeviceRemoval"]>
-  >>>();
   const captureStopAcceptedWork = async (
     owner: keyof HostStopAcceptedWorkPorts,
     operationId: string,
   ) => {
     const localOwners = new Set(["conversation", "intent", "final", "assignment", "lease", "permit"]);
     if (localOwners.has(owner) && ctx.localConversationOwner) {
-      let snapshot = stopConversationSnapshots.get(operationId);
-      if (!snapshot) {
-        snapshot = ctx.localConversationOwner.preflightForDeviceRemoval(operationId);
-        stopConversationSnapshots.set(operationId, snapshot);
-      }
-      return (await snapshot).ownerItems
-        .filter((item) => item.owner === owner)
-        .map(({ id, revision }) => ({ id, revision }));
+      return ctx.localConversationOwner.hostStopAcceptedWorkItems(
+        operationId,
+        owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
+      );
     }
     const conversations = (ctx.conversations?.list() ?? [])
       .map((item) => ({
@@ -1261,8 +1255,6 @@ async function runServerProcess(
         revision: protocolDigest("HostStopConversation", 1, {
           conversationId: item.conversationId,
           sessionId: item.sessionId,
-          busy: item.busy,
-          lastActiveAt: item.lastActiveAt,
         }),
       }));
     if (owner === "conversation") return conversations;
@@ -1283,26 +1275,35 @@ async function runServerProcess(
         .filter((status) => status.state !== "disconnected")
         .map((status) => ({
           id: status.channelId,
-          revision: protocolDigest("HostStopChannel", 1, status),
+          revision: protocolDigest("HostStopChannel", 1, { channelId: status.channelId }),
         }));
     }
     if (owner === "scheduler") {
-      return (schedulerRuntime?.scheduler.listTasks() ?? [])
-        .filter((task) => task.enabled)
-        .map((task) => ({
-          id: task.id,
-          revision: protocolDigest("HostStopScheduledTask", 1, task),
-        }));
+      return await schedulerRuntime?.scheduler.acceptedWorkItems() ?? [];
     }
     if (owner === "delivery") {
-      const stats = ctx.deliveryStack?.stats();
-      return stats && Object.values(stats).some((value) => typeof value === "number" && value > 0)
-        ? [{ id: "delivery:authority", revision: protocolDigest("HostStopDelivery", 1, stats) }]
-        : [];
+      return ctx.deliveryStack?.acceptedWorkItems() ?? [];
     }
     return [];
   };
-  const assertStopAcceptedWorkSettled = async (owner: keyof HostStopAcceptedWorkPorts) => {
+  const assertStopAcceptedWorkSettled = async (
+    owner: keyof HostStopAcceptedWorkPorts,
+    operationId: string,
+    frozen: readonly HostStopAcceptedWorkItem[],
+  ) => {
+    if (
+      ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
+      ctx.localConversationOwner
+    ) {
+      await ctx.localConversationOwner.assertHostStopAcceptedWorkSettled(
+        operationId,
+        owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
+        frozen,
+      );
+      return;
+    }
+    const current = await captureStopAcceptedWork(owner, operationId);
+    assertAcceptedWorkSubset(current, frozen, `host-stop ${owner}`);
     if (owner === "conversation") {
       if ((ctx.conversations?.list() ?? []).some((item) => item.busy)) {
         throw new Error("Conversation accepted work is still active");
@@ -1322,12 +1323,7 @@ async function runServerProcess(
       return;
     }
     if (owner === "remote") {
-      if ((await ctx.jobRelayObligations?.listOpen() ?? []).length !== 0) {
-        throw new Error("Remote accepted work is not settled");
-      }
-      if ((await ctx.executorJobOwner?.acceptedWorkItems() ?? []).length !== 0) {
-        throw new Error("Local executor accepted work is not settled");
-      }
+      if (current.length !== 0) throw new Error("Remote accepted work is not settled");
       return;
     }
     if (owner === "channel") {
@@ -1337,22 +1333,39 @@ async function runServerProcess(
       return;
     }
     if (owner === "scheduler") {
-      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      if (current.length !== 0) throw new Error("Scheduler accepted work is not settled");
       return;
     }
-    if (owner === "delivery") {
-      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-    }
+    if (owner === "delivery") return;
   };
   const stopPort = (
     owner: keyof HostStopAcceptedWorkPorts,
     settle: (strategy: "immediate" | "drain" | "cancel", timeoutMs: number) => Promise<void>,
   ) => ({
     freeze: (operationId: string) => captureStopAcceptedWork(owner, operationId),
-    settle: async (input: { readonly strategy: "immediate" | "drain" | "cancel"; readonly timeoutMs: number }) => {
+    settle: async (input: {
+      readonly operationId: string;
+      readonly strategy: "immediate" | "drain" | "cancel";
+      readonly timeoutMs: number;
+      readonly frozen: readonly HostStopAcceptedWorkItem[];
+    }) => {
+      const current = await captureStopAcceptedWork(owner, input.operationId);
+      assertAcceptedWorkSubset(current, input.frozen, `host-stop ${owner} settlement`);
+      if (
+        ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
+        ctx.localConversationOwner
+      ) {
+        await ctx.localConversationOwner.settleHostStopAcceptedWork(
+          input.operationId,
+          input.strategy,
+          input.timeoutMs,
+        );
+        return;
+      }
       await settle(input.strategy, input.timeoutMs);
     },
-    readBack: async () => assertStopAcceptedWorkSettled(owner),
+    readBack: (input: { readonly operationId: string; readonly frozen: readonly HostStopAcceptedWorkItem[] }) =>
+      assertStopAcceptedWorkSettled(owner, input.operationId, input.frozen),
   });
   const acceptedWork: HostStopAcceptedWorkPorts = {
     conversation: stopPort("conversation", async (strategy, timeoutMs) => {
@@ -1401,10 +1414,16 @@ async function runServerProcess(
     acceptedWork,
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     runtime: {
-      closeAdmission: async () => {
+      closeAdmission: async (operationId) => {
         managedHostStopping = true;
         ctx.inboundRouter?.refuseNewMessages();
-        await ctx.conversationProtocol?.stopRecoveryLoop();
+        ctx.executorJobOwner?.pauseAccepting();
+        schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+        ctx.deliveryStack?.closeAdmissionForLifecycle();
+        await Promise.all([
+          ctx.localConversationOwner?.closeHostStopAdmission(operationId),
+          ctx.channelConnections?.suspendConfigured(),
+        ]);
       },
       settleImmediate: async () => {
         await ctx.inboundRouter?.drainAcceptedMessages();
@@ -1421,8 +1440,17 @@ async function runServerProcess(
         );
       },
       flushDurableState: async () => {
-        const checkpoint = await lifecycleAuthorityLog.checkpoint();
-        return [{ kind: "accepted-work", digest: checkpoint.prefixDigest }];
+        const [checkpoint, localOwnerDigest] = await Promise.all([
+          lifecycleAuthorityLog.checkpoint(),
+          ctx.localConversationOwner?.checkpointAcceptedWork(),
+        ]);
+        return [{
+          kind: "accepted-work",
+          digest: protocolDigest("HostStopDurableFlush", 1, {
+            lifecycle: checkpoint.prefixDigest,
+            localOwner: localOwnerDigest ?? null,
+          }),
+        }];
       },
       settlePhysicalSteps: async () => {
         await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
@@ -1497,10 +1525,21 @@ async function runServerProcess(
     }
     localRetirementCompletedBeforeServerStart = true;
   };
+  let removalAdmissionOperationId: string | undefined;
   await ctx.meshRuntime?.bindDeviceRemovalLifecycle({
-    closeAdmission: async () => {
+    closeAdmission: async (operationId) => {
+      if (
+        removalAdmissionOperationId !== undefined &&
+        removalAdmissionOperationId !== operationId
+      ) {
+        throw new Error("Another device-removal operation owns external admission");
+      }
+      removalAdmissionOperationId = operationId;
       ctx.inboundRouter?.refuseNewMessages();
-      await ctx.conversationProtocol?.stopRecoveryLoop();
+      ctx.executorJobOwner?.pauseAccepting();
+      await ctx.channelConnections?.suspendConfigured();
+      schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+      ctx.deliveryStack?.closeAdmissionForLifecycle();
     },
     captureAcceptedWork: async (operationId) => {
       const items = [] as Array<{
@@ -1516,23 +1555,45 @@ async function runServerProcess(
       return Object.freeze(items.sort((left, right) =>
         `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
     },
-    settleAcceptedWork: async () => {
-      await ctx.inboundRouter?.drainAcceptedMessages();
-      await ctx.executorJobOwner?.drain();
-      await ctx.channelConnections?.disconnectConfigured();
-      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
-      await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
-      for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
-        await assertStopAcceptedWorkSettled(owner);
+    settleAcceptedWork: async ({ operationId, ownerItems }) => {
+      if (removalAdmissionOperationId !== operationId) {
+        throw new Error("Device-removal settlement does not own external admission");
       }
+      for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+        const frozen = ownerItems
+          .filter((item) => item.owner === owner)
+          .map(({ id, revision }) => ({ id, revision }));
+        const current = await captureStopAcceptedWork(owner, operationId);
+        assertAcceptedWorkSubset(current, frozen, `device-removal ${owner} settlement`);
+        if (owner === "remote") {
+          await ctx.inboundRouter?.drainAcceptedMessages();
+          await ctx.executorJobOwner?.drain();
+        } else if (owner === "channel") {
+          await ctx.channelConnections?.disconnectConfigured();
+        } else if (owner === "scheduler") {
+          await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+        } else {
+          await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+        }
+        const after = await captureStopAcceptedWork(owner, operationId);
+        assertAcceptedWorkSubset(after, frozen, `device-removal ${owner} read-back`);
+        if (owner !== "delivery" && after.length !== 0) {
+          throw new Error(`Device-removal ${owner} accepted work is not settled`);
+        }
+      }
+      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     },
-    releaseAdmission: async () => {
+    releaseAdmission: async (operationId) => {
+      if (removalAdmissionOperationId === undefined) return;
+      if (removalAdmissionOperationId !== operationId) {
+        throw new Error("Device-removal release does not own external admission");
+      }
       await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
-      ctx.conversationProtocol?.startRecoveryLoop();
       schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+      ctx.executorJobOwner?.resumeAccepting();
       ctx.inboundRouter?.resumeNewMessages();
-      await ctx.channelConnections?.connectConfigured();
+      await ctx.channelConnections?.resumeConfigured();
+      removalAdmissionOperationId = undefined;
     },
     cleanup: cleanupLocalDevice,
     finalizeDeviceKey: async (operationId, identity) => {
@@ -2175,5 +2236,18 @@ async function runServerProcess(
       );
     });
     throw error;
+  }
+}
+
+function assertAcceptedWorkSubset(
+  current: readonly HostStopAcceptedWorkItem[],
+  frozen: readonly HostStopAcceptedWorkItem[],
+  label: string,
+): void {
+  const expected = new Map(frozen.map((item) => [item.id, item.revision]));
+  for (const item of current) {
+    if (expected.get(item.id) !== item.revision) {
+      throw new Error(`${label} observed an unowned or successor accepted-work item`);
+    }
   }
 }

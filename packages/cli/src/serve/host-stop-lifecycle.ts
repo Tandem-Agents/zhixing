@@ -37,7 +37,10 @@ export interface HostStopAcceptedWorkPort {
     readonly timeoutMs: number;
     readonly frozen: readonly HostStopAcceptedWorkItem[];
   }): Promise<void>;
-  readBack(frozen: readonly HostStopAcceptedWorkItem[]): Promise<void>;
+  readBack(input: {
+    readonly operationId: string;
+    readonly frozen: readonly HostStopAcceptedWorkItem[];
+  }): Promise<void>;
 }
 
 export type HostStopAcceptedWorkPorts = Readonly<
@@ -51,7 +54,7 @@ interface HostStopAcceptedWorkSnapshot {
 }
 
 export interface HostStopRuntime {
-  closeAdmission(): Promise<void>;
+  closeAdmission(operationId: string): Promise<void>;
   settleImmediate(timeoutMs: number): Promise<void>;
   drainAcceptedWork(timeoutMs: number): Promise<void>;
   cancelAcceptedWork(timeoutMs: number): Promise<void>;
@@ -135,7 +138,7 @@ export class HostStopCoordinator {
   ): Promise<DeviceLifecycleOperation> {
     let state = initial;
     if (state.phase === "accepted") {
-      await this.options.runtime.closeAdmission();
+      await this.options.runtime.closeAdmission(state.identity.operationId);
       const evidence = this.options.acceptedWork
         ? [await this.#freezeAcceptedWork(state.identity.operationId)]
         : [];
@@ -154,7 +157,10 @@ export class HostStopCoordinator {
             timeoutMs,
             frozen,
           });
-          await port.readBack(frozen);
+          await port.readBack({
+            operationId: state.identity.operationId,
+            frozen,
+          });
         }
       } else if (state.identity.strategy === "cancel") {
         await this.options.runtime.cancelAcceptedWork(timeoutMs);

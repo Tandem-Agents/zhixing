@@ -351,7 +351,11 @@ export class AnchorUninstallCoordinator {
   }
 
   async #decideRetirement(identity: AnchorUninstallLifecycleIdentity): Promise<number> {
-    const result = await this.options.log.transactProjection<UninstallProjection, unknown, number>(
+    const result = await this.options.log.transactProjection<
+      UninstallProjection,
+      unknown,
+      number | undefined
+    >(
       { trustEvents: [], exposures: [], lifecycle: emptyDeviceLifecycleProjection() },
       (state, entry) => {
         if (entry.stream === "trust" && isTrustRecord(entry.body) && entry.body.t === "home-trust-event") {
@@ -374,7 +378,7 @@ export class AnchorUninstallCoordinator {
           throw new Error("Anchor uninstall retirement lost its lifecycle operation");
         }
         if (operation.phase === "retirement-decided") {
-          return { kind: "return", value: context.lastLsn };
+          return { kind: "return", value: undefined };
         }
         if (operation.phase !== "checkpoint-verified") {
           throw new Error("Anchor retirement requires a verified recovery backup");
@@ -412,12 +416,12 @@ export class AnchorUninstallCoordinator {
             ...compromised.map((body) => ({ stream: "exposure", body })),
             { stream: "device-lifecycle", body: lifecycle },
           ],
-          value: context.nextLsn + compromised.length,
+          value: context.nextLsn,
         };
       },
       { streams: ["trust", "exposure", "device-lifecycle"] },
     );
-    return result.value;
+    return result.value ?? this.#retirementDecisionLsn(identity.operationId);
   }
 
   async #assertCheckpoint(

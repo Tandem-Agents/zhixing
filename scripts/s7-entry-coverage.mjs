@@ -963,12 +963,15 @@ export function inspectDeviceLifecycleAssembly(records) {
   ) failures.push("device lifecycle single journal or retained terminal evidence drifted");
   if (
     !removal.includes("await this.options.closeAdmission(identity.operationId)") ||
-    !removal.includes("await this.options.settleAcceptedWork(input.operationId)") ||
+    !removal.includes("await this.options.settleAcceptedWork({") ||
+    !removal.includes("ownerItems,") ||
     !removal.includes("async resumeBeforeAdmission(): Promise<void>") ||
     !assembly.includes("await this.#deviceRemovalTarget.restoreLocalAdmissionGate()") ||
     !assembly.includes("await this.#deviceRemovalTarget.resumeBeforeAdmission()") ||
     !command.includes("await ctx.meshRuntime?.bindDeviceRemovalLifecycle({") ||
-    !executor.includes("await mesh.bindDeviceRemovalLifecycle({")
+    !executor.includes("await mesh.bindDeviceRemovalLifecycle({") ||
+    !executor.includes("const stopCoordinator = new HostStopCoordinator({") ||
+    !executor.includes("lifecycleShutdown: stopCoordinator,")
   ) failures.push("device removal admission, accepted-work or two-root recovery binding drifted");
   for (const method of [
     "server.shutdown",

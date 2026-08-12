@@ -931,6 +931,8 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           ready: result.connectionTask,
           connectConfigured: result.connectConfigured,
           disconnectConfigured: result.disconnectConfigured,
+          suspendConfigured: result.suspendConfigured,
+          resumeConfigured: result.resumeConfigured,
         };
         // 渠道在场后恢复耐久开放义务(job relay 会话按权威日志重建;
         // conversation 义务由协议恢复循环幂等重开)。

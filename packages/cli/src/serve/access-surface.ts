@@ -199,6 +199,8 @@ export interface AssemblyContext {
     readonly ready: Promise<void>;
     connectConfigured(): Promise<void>;
     disconnectConfigured(): Promise<void>;
+    suspendConfigured(): Promise<void>;
+    resumeConfigured(): Promise<void>;
   };
   authorityRuntime?: AuthorityRuntimeStack;
   executorDataPlane?: ExecutorDataPlaneRuntime;

@@ -24,7 +24,7 @@ type JobEnvelope = Extract<DispatchEnvelope, { readonly execution: "job" }>;
  */
 export class ExecutorJobOwner implements JobInteractionAnswerPort {
   readonly #worker: JobAssignmentWorker;
-  #state: "created" | "recovering" | "ready" | "closed" = "created";
+  #state: "created" | "recovering" | "ready" | "paused" | "closed" = "created";
   #starting: Promise<void> | undefined;
   #closing: Promise<void> | undefined;
 
@@ -107,6 +107,28 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     return this.#worker.drain();
   }
 
+  pauseAccepting(): void {
+    if (this.#state === "closed" || this.#state === "paused") return;
+    if (this.#state !== "ready") {
+      throw new JobInteractionRuntimeUnavailableError(
+        "Executor job owner cannot pause before durable recovery",
+      );
+    }
+    this.#state = "paused";
+    this.#worker.stopAccepting();
+  }
+
+  resumeAccepting(): void {
+    if (this.#state === "ready") return;
+    if (this.#state !== "paused") {
+      throw new JobInteractionRuntimeUnavailableError(
+        "Executor job owner cannot resume after close",
+      );
+    }
+    this.#worker.resumeAccepting();
+    this.#state = "ready";
+  }
+
   acceptedWorkItems(): Promise<readonly JobAcceptedWorkItem[]> {
     return this.#worker.acceptedWorkItems();
   }
@@ -153,6 +175,14 @@ export class ExecutorJobOwnerAssembly {
 
   stopAccepting(): void {
     this.owner.stopAccepting();
+  }
+
+  pauseAccepting(): void {
+    this.owner.pauseAccepting();
+  }
+
+  resumeAccepting(): void {
+    this.owner.resumeAccepting();
   }
 
   drain(): Promise<void> {

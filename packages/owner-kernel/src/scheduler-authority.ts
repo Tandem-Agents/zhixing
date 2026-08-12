@@ -287,9 +287,7 @@ export class AnchorScheduler {
   }
 
   async stop(): Promise<void> {
-    this.#accepting = false;
-    if (this.#timer) clearTimeout(this.#timer);
-    this.#timer = undefined;
+    this.closeAdmissionForLifecycle();
     for (const waiters of this.#stateWaiters.values()) {
       for (const waiter of waiters) waiter.resolve(undefined);
     }
@@ -303,12 +301,41 @@ export class AnchorScheduler {
     this.#prepared = false;
   }
 
-  /** Closes fresh triggers while preserving every durable schedule fact for pre-commit rollback. */
-  async pauseForAuthorityTransfer(): Promise<void> {
-    if (!this.#accepting) return;
+  /** Closes fresh scheduler triggers without waiting for already-owned runs. */
+  closeAdmissionForLifecycle(): void {
     this.#accepting = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
+  }
+
+  /** Exact in-process runs that still own physical scheduler completion work. */
+  async acceptedWorkItems(): Promise<readonly { readonly id: string; readonly revision: string }[]> {
+    const items: Array<{ id: string; revision: string }> = [];
+    for (const jobRunId of [...this.#completionTrackers.keys()].sort((left, right) =>
+      left.localeCompare(right, "en-US"),
+    )) {
+      const taskId = this.#taskByRun.get(jobRunId);
+      if (!taskId) continue;
+      const occurrence = (await this.#journal(taskId).occurrences())
+        .find((item) => item.jobRunId === jobRunId);
+      if (!occurrence || TERMINAL_STATES.has(occurrence.state as never)) continue;
+      items.push(Object.freeze({
+        id: jobRunId,
+        revision: protocolDigest("SchedulerAcceptedWork", 1, {
+          taskId: occurrence.taskId,
+          jobRunId: occurrence.jobRunId,
+          scheduledFor: occurrence.scheduledFor,
+          taskRevision: occurrence.taskRevision,
+          deliveryPlan: occurrence.deliveryPlan,
+        }),
+      }));
+    }
+    return Object.freeze(items);
+  }
+
+  /** Closes fresh triggers while preserving every durable schedule fact for pre-commit rollback. */
+  async pauseForAuthorityTransfer(): Promise<void> {
+    if (this.#accepting) this.closeAdmissionForLifecycle();
     await this.#activationRecovery?.catch(() => undefined);
     this.#activationRecovery = undefined;
     await Promise.allSettled(this.#completionTrackers.values());
@@ -916,6 +943,7 @@ export class AnchorScheduler {
     },
     occurrence: JobOccurrence,
   ): Promise<void> {
+    this.#trackCompletion(definition.taskId, occurrence.jobRunId);
     await this.#options.activateUserJob({
       journal: this.#journal(definition.taskId),
       definition,
@@ -926,7 +954,6 @@ export class AnchorScheduler {
       name: definition.definition.spec.name,
       actionKind: definition.definition.spec.action.kind,
     });
-    this.#trackCompletion(definition.taskId, occurrence.jobRunId);
   }
 
   async #resumeQueuedUserJobs(): Promise<void> {

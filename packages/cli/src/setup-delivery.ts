@@ -408,6 +408,8 @@ export interface DeliveryStack {
   /** Enables transport side effects after the RPC server is listening. */
   activate(): void;
   stats(): AuthorityDeliveryStats;
+  closeAdmissionForLifecycle(): void;
+  acceptedWorkItems(): readonly { readonly id: string; readonly revision: string }[];
   flush(): Promise<void>;
   quiesceForAuthorityTransfer(): Promise<void>;
   resumeAfterAuthorityTransfer(): Promise<void>;
@@ -2508,6 +2510,9 @@ export async function setupDelivery(
         activated = true;
       },
       stats: () => authorityDelivery!.stats(),
+      closeAdmissionForLifecycle: () =>
+        authorityDelivery!.closeAdmissionForLifecycle(),
+      acceptedWorkItems: () => authorityDelivery!.acceptedWorkItems(),
       flush: async () => {
         await authorityDelivery!.flush();
       },

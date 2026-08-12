@@ -1858,6 +1858,13 @@ test("device lifecycle stays on one journal, two production roots and local-only
   );
   assert.match(
     inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("const stopCoordinator = new HostStopCoordinator({", "const stopCoordinator = undefined; void ({"),
+    )).join("\n"),
+    /two-root recovery binding drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
       "packages/server/src/rpc/methods/index.ts",
       (text) => text.replace('"server.uninstall.status",', ""),
     )).join("\n"),

@@ -1,5 +1,5 @@
 import { getZhixingHome, type ToolDefinition } from "@zhixing/core";
-import type { ArtifactStore } from "@zhixing/core/authority";
+import { DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
 import path from "node:path";
 import { createMcpHub, mapServerTools, type McpHub } from "@zhixing/mcp";
 import {
@@ -57,18 +57,30 @@ import {
   createServerContext,
   DEFAULT_SERVER_CONFIG,
   getDefaultLogPath,
+  isProcessAlive,
+  resolveProcessStartTime,
   runServer,
   ServerStateFile,
   type RunningServer,
 } from "@zhixing/server";
 import { loadOrCreateToken } from "./token.js";
 import { homeToPort } from "./host-port.js";
-import { isDaemonChild } from "./self-exec.js";
+import { isDaemonChild, resolveHostProcessMode } from "./self-exec.js";
 import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
-import { createManagedServiceAdapter } from "./managed-service.js";
+import {
+  createManagedServiceAdapter,
+  managedServiceDefinitionDigest,
+} from "./managed-service.js";
+import {
+  HostStopCoordinator,
+  type HostStopAcceptedWorkItem,
+  type HostStopAcceptedWorkOwner,
+  type HostStopAcceptedWorkPorts,
+} from "./host-stop-lifecycle.js";
+import type { StopHostGeneration } from "@zhixing/core/protocol";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -97,6 +109,8 @@ export async function runExecutorRole(
   );
   await mcpHub.connectAll();
   const writer = createStdoutWriter();
+  const processStartedAt = new Date().toISOString();
+  const processStartTime = await resolveProcessStartTime(process.pid);
 
   const initialAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
   let mesh: MeshRuntimeAssembly | undefined;
@@ -324,22 +338,52 @@ export async function runExecutorRole(
       secretStore: bootstrap.secretStore,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
+    let removalAdmissionOperationId: string | undefined;
     await mesh.bindDeviceRemovalLifecycle({
-      closeAdmission: async () => undefined,
+      closeAdmission: async (operationId) => {
+        if (
+          removalAdmissionOperationId !== undefined &&
+          removalAdmissionOperationId !== operationId
+        ) {
+          throw new Error("Another device-removal operation owns executor admission");
+        }
+        removalAdmissionOperationId = operationId;
+        jobOwnerAssembly!.pauseAccepting();
+      },
       captureAcceptedWork: async () => (await jobOwnerAssembly!.acceptedWorkItems())
         .map((item) => Object.freeze({
           owner: "remote" as const,
           id: item.id,
           revision: item.revision,
         })),
-      settleAcceptedWork: async () => {
+      settleAcceptedWork: async ({ operationId, ownerItems }) => {
+        if (removalAdmissionOperationId !== operationId) {
+          throw new Error("Device-removal settlement does not own executor admission");
+        }
+        const frozen = ownerItems
+          .filter((item) => item.owner === "remote")
+          .map(({ id, revision }) => ({ id, revision }));
+        assertAcceptedWorkSubset(
+          await jobOwnerAssembly!.acceptedWorkItems(),
+          frozen,
+          "executor device-removal settlement",
+        );
         await jobOwnerAssembly!.drain();
-        if ((await jobOwnerAssembly!.acceptedWorkItems()).length > 0) {
+        const after = await jobOwnerAssembly!.acceptedWorkItems();
+        assertAcceptedWorkSubset(after, frozen, "executor device-removal read-back");
+        if (after.length > 0) {
           throw new Error("Executor job accepted work is not durably settled");
         }
         await authority!.executorResourceGovernor.coordinate(async () => undefined);
       },
-      releaseAdmission: async () => undefined,
+      releaseAdmission: async (operationId) => {
+        if (removalAdmissionOperationId === undefined) return;
+        if (removalAdmissionOperationId !== operationId) {
+          throw new Error("Device-removal release does not own executor admission");
+        }
+        jobOwnerAssembly!.resumeAccepting();
+        removalAdmissionOperationId = undefined;
+      },
       cleanup: async () => {
         const current = await loadCurrentManagedServiceState("activate", zhixingHome);
         const adapter = current.spec
@@ -387,6 +431,160 @@ export async function runExecutorRole(
     );
     await jobOwnerLifecycle.start();
     await localConversationOwner.start();
+    const processMode = resolveHostProcessMode(options.managed);
+    const localServerPort = options.port ?? homeToPort(zhixingHome);
+    const managedState = processMode === "managed"
+      ? await loadCurrentManagedServiceState("activate", zhixingHome)
+      : undefined;
+    if (processMode === "managed" && !managedState?.spec) {
+      throw new Error("Managed executor stop identity requires the installed service definition");
+    }
+    const endpointLock = {
+      pid: process.pid,
+      port: localServerPort,
+      startTime: processStartTime,
+      startedAt: processStartedAt,
+    } as const;
+    const stopHost: StopHostGeneration = processMode === "managed" && managedState?.spec
+      ? {
+          kind: "managed",
+          serviceId: managedState.spec.serviceId,
+          definitionDigest: managedServiceDefinitionDigest(managedState.spec),
+          instanceId: `${process.pid}:${processStartedAt}`,
+          endpointLock,
+        }
+      : {
+          kind: "foreground",
+          processId: process.pid,
+          startedAt: processStartedAt,
+          endpointLock,
+        };
+    const localOwners = new Set<HostStopAcceptedWorkOwner>([
+      "conversation",
+      "intent",
+      "final",
+      "assignment",
+      "lease",
+      "permit",
+    ]);
+    const captureHostStopWork = async (
+      owner: HostStopAcceptedWorkOwner,
+      operationId: string,
+    ): Promise<readonly HostStopAcceptedWorkItem[]> => {
+      if (localOwners.has(owner)) {
+        return localConversationOwner!.hostStopAcceptedWorkItems(
+          operationId,
+          owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
+        );
+      }
+      if (owner === "remote") return jobOwnerAssembly!.acceptedWorkItems();
+      return [];
+    };
+    const stopPort = (owner: HostStopAcceptedWorkOwner) => ({
+      freeze: (operationId: string) => captureHostStopWork(owner, operationId),
+      settle: async (input: {
+        readonly operationId: string;
+        readonly strategy: "immediate" | "drain" | "cancel";
+        readonly timeoutMs: number;
+        readonly frozen: readonly HostStopAcceptedWorkItem[];
+      }) => {
+        assertAcceptedWorkSubset(
+          await captureHostStopWork(owner, input.operationId),
+          input.frozen,
+          `executor host-stop ${owner} settlement`,
+        );
+        if (localOwners.has(owner)) {
+          await localConversationOwner!.settleHostStopAcceptedWork(
+            input.operationId,
+            input.strategy,
+            input.timeoutMs,
+          );
+        } else if (owner === "remote") {
+          await jobOwnerAssembly!.drain();
+        }
+      },
+      readBack: async (input: {
+        readonly operationId: string;
+        readonly frozen: readonly HostStopAcceptedWorkItem[];
+      }) => {
+        if (localOwners.has(owner)) {
+          await localConversationOwner!.assertHostStopAcceptedWorkSettled(
+            input.operationId,
+            owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
+            input.frozen,
+          );
+          return;
+        }
+        const current = await captureHostStopWork(owner, input.operationId);
+        assertAcceptedWorkSubset(current, input.frozen, `executor host-stop ${owner} read-back`);
+        if (current.length > 0) {
+          throw new Error(`Executor host-stop ${owner} accepted work is not settled`);
+        }
+      },
+    });
+    const acceptedWork: HostStopAcceptedWorkPorts = {
+      conversation: stopPort("conversation"),
+      intent: stopPort("intent"),
+      final: stopPort("final"),
+      assignment: stopPort("assignment"),
+      remote: stopPort("remote"),
+      channel: stopPort("channel"),
+      scheduler: stopPort("scheduler"),
+      delivery: stopPort("delivery"),
+      lease: stopPort("lease"),
+      permit: stopPort("permit"),
+    };
+    const lifecycleLog = bootstrap.mesh.bootstrapStore.authorityLog();
+    const stopCoordinator = new HostStopCoordinator({
+      journal: new DeviceLifecycleJournal(lifecycleLog),
+      homeId: (await lifecycleLog.originCheckpoint()).logId,
+      host: stopHost,
+      acceptedWork,
+      artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+      runtime: {
+        closeAdmission: async (operationId) => {
+          jobOwnerAssembly!.pauseAccepting();
+          await localConversationOwner!.closeHostStopAdmission(operationId);
+        },
+        settleImmediate: () => jobOwnerAssembly!.drain(),
+        drainAcceptedWork: () => jobOwnerAssembly!.drain(),
+        cancelAcceptedWork: () => jobOwnerAssembly!.drain(),
+        flushDurableState: async () => {
+          const [checkpoint, ownerDigest] = await Promise.all([
+            lifecycleLog.checkpoint(),
+            localConversationOwner!.checkpointAcceptedWork(),
+          ]);
+          return [{
+            kind: "accepted-work" as const,
+            digest: protocolDigest("ExecutorHostStopDurableFlush", 1, {
+              lifecycle: checkpoint.prefixDigest,
+              localOwner: ownerDigest,
+            }),
+          }];
+        },
+        settlePhysicalSteps: () => authority!.executorResourceGovernor.coordinate(
+          async () => undefined,
+        ),
+      },
+      isHostStopped: async (host) => {
+        if (host.kind === "foreground") return !isProcessAlive(host.processId);
+        try {
+          const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
+          if (
+            !current.spec ||
+            current.spec.serviceId !== host.serviceId ||
+            managedServiceDefinitionDigest(current.spec) !== host.definitionDigest
+          ) return false;
+          const inspection = await createManagedServiceAdapter({
+            storageGovernor: deviceCapacity.storage,
+          }).inspect(current.spec, new AbortController().signal);
+          return inspection.matches && !inspection.running;
+        } catch {
+          return false;
+        }
+      },
+    });
+    await stopCoordinator.resumeActive();
     const token = await loadOrCreateToken();
     const localConversationRpc = new LocalConversationRpcRouter({
       deviceId: authority.deviceId,
@@ -405,12 +603,13 @@ export async function runExecutorRole(
     const serverContext = createServerContext({
       config: {
         ...DEFAULT_SERVER_CONFIG,
-        port: options.port ?? homeToPort(zhixingHome),
+        port: localServerPort,
         host: options.host ?? DEFAULT_SERVER_CONFIG.host,
       },
       version: ZHIXING_CLI_VERSION,
       token: token.token,
       conversationRpc,
+      lifecycleShutdown: stopCoordinator,
       runtimeControl: {
         conversationStatus: (after) =>
           localConversationOwner!.port().statusHistory(after),
@@ -450,7 +649,12 @@ export async function runExecutorRole(
       }, 60_000);
       localServerHeartbeat.unref();
     }
-    await waitForRoleShutdown(lifecycleShutdown);
+    await waitForRoleShutdown(lifecycleShutdown, () => stopCoordinator.prepare({
+      requestId: `executor-signal:${process.pid}:${processStartedAt}`,
+      reason: "executor-signal",
+      strategy: "immediate",
+      timeoutMs: 30_000,
+    }).then(() => undefined));
   } catch (error) {
     roleFailure = error;
   }
@@ -666,15 +870,42 @@ function mapMcpTools(hub: McpHub): ToolDefinition[] {
     mapServerTools(server, tools, hub.callTool));
 }
 
-function waitForRoleShutdown(lifecycleShutdown: Promise<void>): Promise<void> {
-  return new Promise((resolve) => {
+function waitForRoleShutdown(
+  lifecycleShutdown: Promise<void>,
+  prepareSignalStop: () => Promise<void>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let signalStop: Promise<void> | undefined;
+    const cleanup = () => {
+      process.off("SIGINT", stopFromSignal);
+      process.off("SIGTERM", stopFromSignal);
+    };
     const finish = () => {
-      process.off("SIGINT", finish);
-      process.off("SIGTERM", finish);
+      cleanup();
       resolve();
     };
-    process.once("SIGINT", finish);
-    process.once("SIGTERM", finish);
-    void lifecycleShutdown.then(finish);
+    const fail = (error: unknown) => {
+      cleanup();
+      reject(error);
+    };
+    const stopFromSignal = () => {
+      signalStop ??= prepareSignalStop().then(finish, fail);
+    };
+    process.once("SIGINT", stopFromSignal);
+    process.once("SIGTERM", stopFromSignal);
+    void lifecycleShutdown.then(finish, fail);
   });
+}
+
+function assertAcceptedWorkSubset(
+  current: readonly HostStopAcceptedWorkItem[],
+  frozen: readonly HostStopAcceptedWorkItem[],
+  label: string,
+): void {
+  const expected = new Map(frozen.map((item) => [item.id, item.revision]));
+  for (const item of current) {
+    if (expected.get(item.id) !== item.revision) {
+      throw new Error(`${label} observed accepted work outside the frozen generation`);
+    }
+  }
 }

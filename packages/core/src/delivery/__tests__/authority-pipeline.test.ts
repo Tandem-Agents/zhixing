@@ -137,6 +137,9 @@ describe("AuthorityDeliveryPipeline", () => {
 
     const flush = fixture.pipeline.flush();
     await sending;
+    expect(fixture.pipeline.acceptedWorkItems()).toEqual([
+      expect.objectContaining({ id: first.items[0]!.itemId }),
+    ]);
     const quiesced = fixture.pipeline.quiesceForAuthorityTransfer();
     await expect(fixture.pipeline.flush()).rejects.toThrow(/state="quiesced"/);
     release();
@@ -149,6 +152,9 @@ describe("AuthorityDeliveryPipeline", () => {
       commitRevision: 1,
     }));
     if (!second.accepted) throw new Error("fixture second enqueue failed");
+    expect(fixture.pipeline.acceptedWorkItems()).toEqual([
+      expect.objectContaining({ id: second.items[0]!.itemId }),
+    ]);
     await expect(fixture.pipeline.flush()).rejects.toThrow(/state="quiesced"/);
     expect(send).toHaveBeenCalledTimes(1);
 

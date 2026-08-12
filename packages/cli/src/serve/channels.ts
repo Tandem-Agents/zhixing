@@ -117,6 +117,8 @@ export interface SetupChannelsResult {
   connectionTask: Promise<void>;
   connectConfigured(): Promise<void>;
   disconnectConfigured(): Promise<void>;
+  suspendConfigured(): Promise<void>;
+  resumeConfigured(): Promise<void>;
 }
 
 export async function setupChannels(
@@ -231,21 +233,36 @@ export async function setupChannels(
   }
 
   let transition: Promise<void> = Promise.resolve();
+  let suspended = false;
   const serialize = (operation: () => Promise<void>): Promise<void> => {
     const current = transition.then(operation, operation);
     transition = current.catch(() => undefined);
     return current;
   };
-  const connectConfigured = () => serialize(() => connectConfiguredChannels({
+  const connectConfigured = () => serialize(async () => {
+    if (suspended) return;
+    await connectConfiguredChannels({
       registry,
       jobs: connectionJobs,
       logger,
-    }));
+    });
+  });
   const disconnectConfigured = () => serialize(() => disconnectConfiguredChannels({
       registry,
       jobs: connectionJobs,
       logger,
     }));
+  const suspendConfigured = () => serialize(async () => {
+    suspended = true;
+  });
+  const resumeConfigured = () => serialize(async () => {
+    suspended = false;
+    await connectConfiguredChannels({
+      registry,
+      jobs: connectionJobs,
+      logger,
+    });
+  });
   const connectionTask = connectImmediately
     ? connectConfigured()
     : Promise.resolve();
@@ -256,6 +273,8 @@ export async function setupChannels(
     connectionTask,
     connectConfigured,
     disconnectConfigured,
+    suspendConfigured,
+    resumeConfigured,
   };
 }
 

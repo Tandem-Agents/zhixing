@@ -221,6 +221,52 @@ function fixture(input: {
 }
 
 describe("AnchorScheduler authority", () => {
+  it("freezes the exact active scheduler run before lifecycle settlement", async () => {
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-stop",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "stop-aware",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "finish me" },
+        },
+        createdInTurn: "turn-stop",
+      },
+    };
+    const { scheduler } = fixture({
+      journals: new Map([["task-stop", journal]]),
+      activateUserJob: async ({ occurrence }) => {
+        markStarted();
+        await gate;
+        journal.setState(occurrence.jobRunId, "committed");
+      },
+    });
+    await scheduler.start();
+    const run = scheduler.runTask("task-stop", "manual-stop");
+    await started;
+    await expect(scheduler.acceptedWorkItems()).resolves.toEqual([
+      expect.objectContaining({ id: "job:manual-stop" }),
+    ]);
+    scheduler.closeAdmissionForLifecycle();
+    await expect(scheduler.runTask("task-stop", "late-run"))
+      .rejects.toThrow("Scheduler is not accepting commands");
+    release();
+    await scheduler.pauseForAuthorityTransfer();
+    await expect(run).resolves.toMatchObject({ status: "ok" });
+    await expect(scheduler.acceptedWorkItems()).resolves.toEqual([]);
+    await scheduler.stop();
+  });
+
   it("prepares projections without recovery side effects and activates asynchronously", async () => {
     let releaseRecovery!: () => void;
     const recoveryGate = new Promise<void>((resolve) => {

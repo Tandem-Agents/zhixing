@@ -127,6 +127,29 @@ export class AuthorityDeliveryPipeline {
     this.#startFlushTimer();
   }
 
+  /** Closes fresh delivery attempts without waiting for the current drain. */
+  closeAdmissionForLifecycle(): void {
+    if (this.#state === "quiesced") return;
+    if (this.#state !== "running") {
+      throw new Error(`Pipeline.closeAdmissionForLifecycle: illegal transition from state="${this.#state}"`);
+    }
+    this.#state = "quiesced";
+    if (this.#flushTimer) clearInterval(this.#flushTimer);
+    this.#flushTimer = undefined;
+  }
+
+  acceptedWorkItems(): readonly { readonly id: string; readonly revision: string }[] {
+    return Object.freeze(this.#authority.snapshot()
+      .filter((item) =>
+        item.state === "queued" ||
+        item.state === "retry-wait" ||
+        item.state === "attempting" ||
+        item.state === "uncertain",
+      )
+      .map((item) => Object.freeze({ id: item.id, revision: item.intentDigest }))
+      .sort((left, right) => left.id.localeCompare(right.id, "en-US")));
+  }
+
   async quiesceForAuthorityTransfer(): Promise<void> {
     if (this.#state === "quiesced") {
       await this.#activeFlush?.catch(() => undefined);
@@ -135,9 +158,7 @@ export class AuthorityDeliveryPipeline {
     if (this.#state !== "running") {
       throw new Error(`Pipeline.quiesceForAuthorityTransfer: illegal transition from state="${this.#state}"`);
     }
-    this.#state = "quiesced";
-    if (this.#flushTimer) clearInterval(this.#flushTimer);
-    this.#flushTimer = undefined;
+    this.closeAdmissionForLifecycle();
     await this.#activeFlush?.catch(() => undefined);
   }
 
