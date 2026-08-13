@@ -133,6 +133,31 @@ describe("executor role job runtime production assembly", () => {
     expect(transport.stop).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the same closed lifecycle projection to transport and job owner", async () => {
+    const owner = {
+      start: vi.fn(async () => undefined),
+      stopAccepting: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const transport = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+    };
+    const lifecycle = new ExecutorJobOwnerLifecycle(owner as never, transport as never);
+
+    await lifecycle.start({ admissionClosed: true, recoverAcceptedWork: false });
+
+    expect(owner.start).toHaveBeenCalledWith({
+      admissionClosed: true,
+      recoverAcceptedWork: false,
+    });
+    expect(transport.start).toHaveBeenCalledWith({
+      lifecycleAdmissionClosed: true,
+      recoverAcceptedWork: false,
+    });
+    await lifecycle.close();
+  });
+
   it("rolls back both owners when transport startup itself fails", async () => {
     const failure = new Error("transport startup failed");
     const owner = {

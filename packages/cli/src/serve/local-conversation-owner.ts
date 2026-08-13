@@ -809,6 +809,7 @@ export class LocalConversationOwnerAssembly {
       readonly operationId: string;
       readonly kind: "stop" | "executor-removal" | "anchor-uninstall";
       readonly recoverAcceptedWork: boolean;
+      readonly alreadySettled?: boolean;
     };
   } = {}): Promise<void> {
     if (this.#state === "ready") return;
@@ -825,6 +826,9 @@ export class LocalConversationOwnerAssembly {
             this.#removalOperationId = options.lifecycle.operationId;
           } else {
             this.#hostStopOperationId = options.lifecycle.operationId;
+            if (options.lifecycle.alreadySettled) {
+              this.#hostStopSettledOperationId = options.lifecycle.operationId;
+            }
           }
           this.#protocol.beginShutdownDrain();
         }
@@ -1006,6 +1010,72 @@ export class LocalConversationOwnerAssembly {
     this.#protocol.beginShutdownDrain();
     await this.#waitForCommandDrain();
     this.#hostStopSnapshot ??= await this.preflightForDeviceRemoval(operationId);
+  }
+
+  restoreHostStopAcceptedWork(
+    operationId: string,
+    ownerItems: readonly LocalConversationRemovalSnapshot["ownerItems"][number][],
+    alreadySettled = false,
+  ): void {
+    this.#requireReady();
+    if (this.#hostStopOperationId !== operationId) {
+      throw new Error("Host-stop artifact does not own the local conversation gate");
+    }
+    const localOwners = new Set([
+      "conversation",
+      "intent",
+      "final",
+      "assignment",
+      "lease",
+      "permit",
+    ]);
+    const frozen = Object.freeze(ownerItems
+      .filter((item) => localOwners.has(item.owner))
+      .map((item) => Object.freeze({ ...item }))
+      .sort((left, right) =>
+        `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
+    if (this.#hostStopSnapshot) {
+      assertExactAcceptedWork(
+        this.#hostStopSnapshot.ownerItems.map((item) => ({
+          id: `${item.owner}:${item.id}`,
+          revision: item.revision,
+        })),
+        frozen.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+        "host-stop restored artifact",
+      );
+    } else {
+      this.#hostStopSnapshot = Object.freeze({
+        operationId,
+        conversations: Object.freeze([]),
+        acceptedWork: Object.freeze({
+          active: 0,
+          pendingFinals: 0,
+          pendingAssignments: 0,
+          deferredIntents: 0,
+          outbox: 0,
+          leases: 0,
+          permits: 0,
+        }),
+        ownerItems: frozen,
+      });
+    }
+    if (alreadySettled) this.#hostStopSettledOperationId = operationId;
+  }
+
+  async releaseHostStopAdmission(operationId: string): Promise<void> {
+    if (this.#hostStopOperationId === undefined) return;
+    if (this.#hostStopOperationId !== operationId) {
+      throw new Error("Host-stop release does not own the local conversation gate");
+    }
+    this.#protocol.resumeAfterShutdownDrain();
+    this.#hostStopOperationId = undefined;
+    this.#hostStopSnapshot = undefined;
+    this.#hostStopSettlement = undefined;
+    this.#hostStopSettledOperationId = undefined;
+  }
+
+  resumeRecoveryAfterLifecycle(): void {
+    this.#protocol.startRecoveryLoop();
   }
 
   hostStopAcceptedWorkItems(

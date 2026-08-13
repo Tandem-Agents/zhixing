@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { ArtifactStore, DeviceLifecycleJournal } from "@zhixing/core/authority";
+import type { DeliveryLifecycleSourcePermit } from "@zhixing/core/delivery";
 import {
   canonicalize,
   protocolDigest,
@@ -122,19 +123,19 @@ export class HostStopCoordinator {
         resumed.push(await this.#resume(operation, 30_000));
         continue;
       }
-      if (
-        operation.phase === "ready-to-stop" &&
-        await this.options.isHostStopped?.(operation.identity.host)
-      ) {
-        resumed.push(await this.options.journal.terminal(
-          operation.identity.operationId,
-          "stopped",
-          [{
-            kind: "supervisor",
-            digest: protocolDigest("StoppedHostReadBack", 1, operation.identity.host),
-          }],
-        ));
+      if (!await this.options.isHostStopped?.(operation.identity.host)) continue;
+      const ready = await this.#resume(operation, 30_000);
+      if (ready.phase !== "ready-to-stop") {
+        throw new Error("Recovered stop operation did not reach a durable safe point");
       }
+      resumed.push(await this.options.journal.terminal(
+        operation.identity.operationId,
+        "stopped",
+        [{
+          kind: "supervisor",
+          digest: protocolDigest("StoppedHostReadBack", 1, operation.identity.host),
+        }],
+      ));
     }
     return resumed;
   }
@@ -208,6 +209,47 @@ export class HostStopCoordinator {
     );
     return frozen.evidence;
   }
+}
+
+export function hostStopAlreadySettled(
+  phase: DeviceLifecycleOperation["phase"],
+): boolean {
+  return phase === "work-settled" || phase === "flushed" || phase === "ready-to-stop";
+}
+
+export function hostStopDeliveryLifecycleSources(
+  snapshot: HostStopAcceptedWorkSnapshot,
+): readonly DeliveryLifecycleSourcePermit[] {
+  const sources = new Map<string, DeliveryLifecycleSourcePermit>();
+  for (const [owner, items] of Object.entries(snapshot.owners)) {
+    for (const item of items) {
+      const source = owner === "conversation"
+        ? {
+            owner: "conversation" as const,
+            id: item.id,
+            revision: protocolDigest("ConversationDeliveryLifecycleSource", 1, {
+              conversationId: item.id,
+            }),
+          }
+        : owner === "final"
+          ? { owner: "conversation" as const, id: item.id, revision: item.revision }
+          : owner === "assignment" ||
+              (owner === "remote" && (item.id.startsWith("relay:") || item.id.startsWith("local:")))
+            ? { owner: "assignment" as const, id: item.id, revision: item.revision }
+            : owner === "scheduler"
+              ? { owner: "scheduler" as const, id: item.id, revision: item.revision }
+              : undefined;
+      if (!source) continue;
+      const key = `${source.owner}\u0000${source.id}`;
+      const previous = sources.get(key);
+      if (previous && previous.revision !== source.revision) {
+        throw new Error("Lifecycle accepted-work contains conflicting delivery source revisions");
+      }
+      sources.set(key, Object.freeze(source));
+    }
+  }
+  return Object.freeze([...sources.values()].sort((left, right) =>
+    `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
 }
 
 export async function freezeHostStopAcceptedWork(

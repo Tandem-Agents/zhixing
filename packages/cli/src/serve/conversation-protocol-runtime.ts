@@ -598,6 +598,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#shutdownDraining = true;
   }
 
+  /** Reopens recovery scheduling after the exact durable lifecycle owner released its gate. */
+  resumeAfterShutdownDrain(): void {
+    this.#shutdownDraining = false;
+  }
+
   startRecoveryLoop(intervalMs = 5_000): void {
     if (this.#recoveryTimer || this.#recoveryRunning) return;
     this.#recoveryStopped = false;

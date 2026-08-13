@@ -20,8 +20,9 @@ import {
   buildLlmCompleteMethod,
 } from "../server.js";
 import type { HandlerContext } from "../../handlers.js";
-import { RpcAppError } from "../../handlers.js";
+import { HandlerRegistry, RpcAppError } from "../../handlers.js";
 import { RPC_ERROR_CODES } from "../../protocol.js";
+import { RpcDispatcher } from "../../dispatcher.js";
 
 function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContext {
   return {
@@ -213,19 +214,69 @@ describe("server.shutdown", () => {
     expect(trigger).toHaveBeenCalledWith("user-stop:drain");
   });
 
-  it("keeps the current host alive when lifecycle preparation fails", async () => {
+  it("projects unsupported prepare failures as one stable retry action and never triggers", async () => {
     const trigger = vi.fn();
     const ctx = mkCtx({
       requestShutdown: trigger,
-      lifecycleShutdown: { prepare: vi.fn(async () => { throw new Error("accepted work blocked"); }) },
+      lifecycleShutdown: { prepare: vi.fn(async () => {
+        throw new Error("owner /private/home accepted work blocked");
+      }) },
     });
     await expect(buildServerShutdownMethod().handler({
       requestId: "shutdown-blocked",
       reason: "user-stop",
       strategy: "drain",
       timeoutMs: 100,
-    }, ctx)).rejects.toThrow("accepted work blocked");
+    }, ctx)).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "安全停机未完成",
+      data: { action: "retry-same-request" },
+    });
     expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it("preserves existing RpcAppError and emits the stable failure through the real dispatcher", async () => {
+    const existing = new RpcAppError(RPC_ERROR_CODES.BUSY, "已有阻断", { action: "wait" });
+    const existingCtx = mkCtx({
+      requestShutdown: vi.fn(),
+      lifecycleShutdown: { prepare: vi.fn(async () => { throw existing; }) },
+    });
+    await expect(buildServerShutdownMethod().handler({ requestId: "shutdown-existing" }, existingCtx))
+      .rejects.toBe(existing);
+
+    const registry = new HandlerRegistry();
+    registry.register(buildServerShutdownMethod());
+    const sendError = vi.fn();
+    const server = mkCtx({
+      requestShutdown: vi.fn(),
+      lifecycleShutdown: { prepare: vi.fn(async () => {
+        throw new Error("flush operation=device-7 path=C:/secret");
+      }) },
+    }).server;
+    const dispatcher = new RpcDispatcher({ registry, server });
+    await dispatcher.handleMessage({
+      id: 37,
+      authenticated: true,
+      loopback: true,
+      closed: false,
+      clientInfo: { id: "shutdown-test" },
+      sendSuccess: vi.fn(),
+      sendError,
+      notify: vi.fn(),
+      close: vi.fn(),
+      onClose: () => () => undefined,
+    }, JSON.stringify({
+      jsonrpc: "2.0",
+      id: "shutdown-wire",
+      method: "server.shutdown",
+      params: { requestId: "shutdown-wire", strategy: "cancel" },
+    }));
+    expect(sendError).toHaveBeenCalledWith("shutdown-wire", {
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "安全停机未完成",
+      data: { action: "retry-same-request" },
+    });
+    expect(JSON.stringify(sendError.mock.calls)).not.toMatch(/flush|device-7|secret/iu);
   });
 });
 

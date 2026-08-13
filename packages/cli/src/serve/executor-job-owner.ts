@@ -228,7 +228,10 @@ export class ExecutorJobOwnerLifecycle {
       "start" | "stopAccepting" | "close"
     >,
     private readonly transport: {
-      start(): Promise<void>;
+      start(options?: {
+        readonly lifecycleAdmissionClosed?: boolean;
+        readonly recoverAcceptedWork?: boolean;
+      }): Promise<void>;
       stop(): Promise<void>;
     },
   ) {}
@@ -237,14 +240,20 @@ export class ExecutorJobOwnerLifecycle {
     return this.#closed;
   }
 
-  async start(): Promise<void> {
+  async start(options: {
+    readonly admissionClosed?: boolean;
+    readonly recoverAcceptedWork?: boolean;
+  } = {}): Promise<void> {
     if (this.#started || this.#transportAttempted) {
       throw new Error("Executor job owner lifecycle may start only once");
     }
     this.#transportAttempted = true;
     try {
-      await this.transport.start();
-      await this.owner.start();
+      await this.transport.start({
+        lifecycleAdmissionClosed: options.admissionClosed,
+        recoverAcceptedWork: options.recoverAcceptedWork,
+      });
+      await this.owner.start(options);
       this.#started = true;
     } catch (error) {
       try {

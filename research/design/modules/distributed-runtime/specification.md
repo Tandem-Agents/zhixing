@@ -2654,3 +2654,9 @@ recovery-backup uninstall 在 accepted 前 strict decode并冻结 recovery packa
 - 33–35 必须先有可真解封的检查点，才能提交 planned/DR 权威切换；恢复演练未通过前不得把备份存在等同于可恢复。
 - 36–38 只能在 S1–S9 已闭环后处理常驻、卸载与发布；任何移除/卸载不得先撤身份、后发现仍有本地权威。
 - 每个提交至少运行受影响包的定向测试与构建；每个 S 节点最后一个提交运行该节点全量矩阵与 `pnpm build`，S10 最后提交再运行仓库级 `pnpm lint / pnpm test / pnpm build`。
+
+### 第 37 单元 stop successor 与 shutdown 错误补充
+
+stop successor 的可执行恢复只消费既有 operation、accepted-work artifact 与 phase。anchor/executor 两根都以 closed producer 装配；异 host 在任何 frozen owner 恢复或 settlement 前须以完整 endpoint lock、definition 与 manager projection 证明旧 host 已停止或由当前 exact successor 取代。随后 `accepted` 只补 gate/freeze，`gate-closed` 只 hydrate 原 artifact 并按原 strategy settle，`work-settled` 只补 flush，`flushed` 只补物理安全点，`ready-to-stop` 只补旧 host terminal；旧 operation 不得停止 successor。terminal 后才以同 operation exact release 并恰一恢复 advancement、scheduler、assignment、channel、mesh、conversation 与 delivery 的剩余耐久义务；错 operation、stale completion 或证明不足保持所有 gate closed。
+
+`server.shutdown` prepare 抛出的既有 `RpcAppError` 原样进入 wire；其他异常统一为 `INTERNAL_ERROR/安全停机未完成/{action:retry-same-request}`，不得复制 raw message、stack、operation/device/path，失败零 trigger；ready 后仍只排队一次既有 void trigger。

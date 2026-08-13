@@ -798,6 +798,7 @@ describe("ConversationAssignmentWorker", () => {
 
   it("closes admission synchronously before draining active work", async () => {
     const start = vi.fn(async () => ({ started: true }));
+    const onError = vi.fn();
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
       ledger: { start } as unknown as ConversationAssignmentLedger,
@@ -811,14 +812,22 @@ describe("ConversationAssignmentWorker", () => {
       }),
       finalizeUsage: vi.fn(),
       interactions: interactionObserver(),
+      onError,
     });
-    worker.stopAccepting();
-    worker.accept({
+    const envelope = {
       execution: "conversation",
       assignmentId: "asg-after-close",
-    } as unknown as DispatchEnvelope);
+    } as unknown as DispatchEnvelope;
+    worker.stopAccepting();
+    worker.accept(envelope);
     await worker.drain();
     expect(start).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+
+    worker.resumeAccepting();
+    worker.accept(envelope);
+    await worker.drain();
+    expect(onError).toHaveBeenCalledOnce();
   });
 
   it("binds turn origin to every remotely produced stream frame", async () => {

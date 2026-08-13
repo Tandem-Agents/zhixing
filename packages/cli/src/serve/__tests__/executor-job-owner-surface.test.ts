@@ -61,6 +61,8 @@ describe("executor job owner production surface", () => {
     ctx.startupLifecycle = {
       kind: "stop",
       artifactReady: false,
+      recoverAcceptedWork: false,
+      alreadySettled: false,
       delivery: {
         operationId: "stop-startup",
         sources: [],

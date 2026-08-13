@@ -223,6 +223,14 @@ describe("local conversation owner lifecycle", () => {
         .map(({ id, revision }) => ({ id, revision }));
       expect(currentIntent).toEqual(frozenIntent);
 
+      await expect(fixture.assembly.releaseHostStopAdmission("stop-successor"))
+        .rejects.toThrow("does not own");
+      await expect(fixture.assembly.releaseHostStopAdmission("stop-durable-subset"))
+        .resolves.toBeUndefined();
+      await expect(fixture.port.createConversation()).resolves.toEqual(expect.any(String));
+      await expect(fixture.assembly.releaseHostStopAdmission("stop-durable-subset"))
+        .resolves.toBeUndefined();
+
       await fixture.assembly.close();
       await fixture.authority.stopStorageMaintenance();
     },

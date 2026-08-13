@@ -1750,6 +1750,10 @@ export class MeshRuntimeAssembly {
     await this.#worker?.recoverAcceptedWorkForLifecycle();
   }
 
+  resumeAcceptingAfterLifecycle(): void {
+    this.#worker?.resumeAccepting();
+  }
+
   #installPlannedAnchorRole(trust: HomeTrustRecord): void {
     const roleEnabled = this.options.configuration.enabledRoles.includes("anchor");
     const local = trust.members.find((member) =>

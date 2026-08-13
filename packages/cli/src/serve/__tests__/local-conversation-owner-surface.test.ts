@@ -70,6 +70,8 @@ describe("local conversation owner production surface", () => {
     ctx.startupLifecycle = {
       kind: "removal",
       artifactReady: true,
+      recoverAcceptedWork: true,
+      alreadySettled: false,
       delivery: {
         operationId: "removal-startup",
         sources: [],
@@ -85,6 +87,7 @@ describe("local conversation owner production surface", () => {
         operationId: "removal-startup",
         kind: "removal",
         recoverAcceptedWork: true,
+        alreadySettled: false,
       },
     });
     await ctx.startupCleanups.localConversationOwner!.run();

@@ -200,6 +200,13 @@ export class ConversationAssignmentWorker {
     this.#accepting = false;
   }
 
+  resumeAccepting(): void {
+    if (this.#closed) {
+      throw new Error("Conversation assignment worker is closed");
+    }
+    this.#accepting = true;
+  }
+
   async close(): Promise<void> {
     this.stopAccepting();
     this.#closed = true;

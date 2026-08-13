@@ -333,7 +333,7 @@ const meshSurface: AccessSurface = {
     await mesh.start(ctx.startupLifecycle
       ? {
           lifecycleAdmissionClosed: true,
-          recoverAcceptedWork: ctx.startupLifecycle.artifactReady,
+          recoverAcceptedWork: ctx.startupLifecycle.recoverAcceptedWork,
         }
       : {});
     ctx.meshRuntime = mesh;
@@ -748,7 +748,8 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
           lifecycle: {
             operationId: ctx.startupLifecycle.delivery.operationId,
             kind: ctx.startupLifecycle.kind,
-            recoverAcceptedWork: ctx.startupLifecycle.artifactReady,
+            recoverAcceptedWork: ctx.startupLifecycle.recoverAcceptedWork,
+            alreadySettled: ctx.startupLifecycle.alreadySettled,
           },
         }
       : {});
@@ -874,7 +875,7 @@ const executorJobOwnerStartUnit: CoreAssemblyUnit = {
     await assembly.start(ctx.startupLifecycle
       ? {
           admissionClosed: true,
-          recoverAcceptedWork: ctx.startupLifecycle.artifactReady,
+          recoverAcceptedWork: ctx.startupLifecycle.recoverAcceptedWork,
         }
       : {});
   },
@@ -960,7 +961,7 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         };
         // 渠道在场后恢复耐久开放义务(job relay 会话按权威日志重建;
         // conversation 义务由协议恢复循环幂等重开)。
-        if (!ctx.startupLifecycle || ctx.startupLifecycle.artifactReady) {
+        if (!ctx.startupLifecycle || ctx.startupLifecycle.recoverAcceptedWork) {
           await ctx.channelCoordinator?.recover();
         }
         ctx.startupCleanups.channels = ctx.startupRollback.register(

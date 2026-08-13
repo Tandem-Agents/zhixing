@@ -60,7 +60,6 @@ import {
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
   getDefaultLogPath,
-  readLock,
   resolveProcessStartTime,
   type RunningServer,
   type ProcessLockPaths,
@@ -178,6 +177,8 @@ import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { buildManagedHostPublicStatus } from "./status.js";
 import {
   HostStopCoordinator,
+  hostStopAlreadySettled,
+  hostStopDeliveryLifecycleSources,
   loadHostStopAcceptedWork,
   type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkPorts,
@@ -697,7 +698,7 @@ async function runServerProcess(
         startupLifecycleOperation,
         bootstrap.mesh.bootstrapStore.artifactStore(),
       );
-      sources = deliveryLifecycleSources(snapshot);
+      sources = hostStopDeliveryLifecycleSources(snapshot);
       deliveries = snapshot.owners.delivery;
       artifactReady = true;
     } else if (startupLifecycleOperation.identity.kind === "executor-removal") {
@@ -724,6 +725,13 @@ async function runServerProcess(
     startupLifecycle = {
       kind: startupLifecycleOperation.identity.kind,
       artifactReady,
+      // A successor must prove the old host stopped before replaying any frozen owner effect.
+      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop"
+        ? false
+        : artifactReady,
+      alreadySettled: startupLifecycleOperation.identity.kind === "stop"
+        ? hostStopAlreadySettled(phase)
+        : false,
       delivery: {
         operationId: startupLifecycleOperation.identity.operationId,
         sources,
@@ -975,7 +983,7 @@ async function runServerProcess(
   let schedulerRuntime: AnchorSchedulerRuntime | undefined;
   let adoptionReview: PostAdoptionReviewCoordinator | undefined;
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
-  let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.artifactReady ?? true;
+  let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
   const recoverStartupLifecycleAcceptedWork = async (
     sources: readonly DeliveryLifecycleSourcePermit[],
   ): Promise<void> => {
@@ -1142,7 +1150,7 @@ async function runServerProcess(
       await runtime.start();
       if (startupLifecycle) {
         runtime.scheduler.closeAdmissionForLifecycle();
-        if (startupLifecycle.artifactReady) {
+        if (startupLifecycle.recoverAcceptedWork) {
           await runtime.recoverAcceptedWorkForLifecycle(
             startupLifecycle.delivery.sources
               .filter((source) => source.owner === "scheduler")
@@ -1278,10 +1286,8 @@ async function runServerProcess(
       : undefined;
   advancementRecoveryRef.current = advancementRecovery ?? null;
 
-  // Reconcile accepted-but-unreviewed runs and their durable evidence requests
-  // before any control ingress starts listening. Recovery may schedule local
-  // proxy work, but it never requires a connected surface.
-  if (advancementRecovery && !startupLifecycleOperation) {
+  const recoverAdvancementAcceptedWork = async (): Promise<void> => {
+    if (!advancementRecovery) return;
     try {
       const recovered = await advancementRecovery.recoverAllOpenSessions();
       const scheduledCount = recovered.filter(
@@ -1303,6 +1309,13 @@ async function runServerProcess(
         err instanceof Error ? err.message : err,
       );
     }
+  };
+
+  // Reconcile accepted-but-unreviewed runs and their durable evidence requests
+  // before any control ingress starts listening. Recovery may schedule local
+  // proxy work, but it never requires a connected surface.
+  if (advancementRecovery && !startupLifecycleOperation) {
+    await recoverAdvancementAcceptedWork();
   }
 
   const authorityRuntime = authorityRuntimeRef.current;
@@ -1551,7 +1564,15 @@ async function runServerProcess(
     acceptedWork,
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     onAcceptedWorkFrozen: async (snapshot) => {
-      const sources = deliveryLifecycleSources(snapshot);
+      const sources = hostStopDeliveryLifecycleSources(snapshot);
+      ctx.localConversationOwner?.restoreHostStopAcceptedWork(
+        snapshot.operationId,
+        Object.entries(snapshot.owners).flatMap(([owner, items]) =>
+          items.map((item) => ({
+            owner: owner as keyof HostStopAcceptedWorkSnapshot["owners"],
+            ...item,
+          }))),
+      );
       await ctx.deliveryStack?.installLifecycleAdmission({
         operationId: snapshot.operationId,
         sources,
@@ -1604,14 +1625,15 @@ async function runServerProcess(
     },
     isHostStopped: async (host) => {
       const endpoint = host.endpointLock;
-      const current = await readLock(lockPaths).catch(() => null);
       if (!endpoint) return false;
-      const endpointStopped = !current || current.pid !== endpoint.pid ||
-        current.port !== endpoint.port ||
-        current.startTime !== endpoint.startTime ||
-        current.startedAt !== endpoint.startedAt;
-      if (!endpointStopped) return false;
-      if (host.kind === "foreground") return !isProcessAlive(host.processId);
+      if (
+        endpoint.pid === stopEndpointLock.pid &&
+        endpoint.port === stopEndpointLock.port &&
+        endpoint.startTime === stopEndpointLock.startTime &&
+        endpoint.startedAt === stopEndpointLock.startedAt
+      ) return false;
+      if (isProcessAlive(endpoint.pid)) return false;
+      if (host.kind === "foreground") return host.processId === endpoint.pid;
       try {
         const state = await loadCurrentManagedServiceState("inspect", zhixingHome);
         if (
@@ -1622,13 +1644,44 @@ async function runServerProcess(
         const inspection = await createManagedServiceAdapter({
           storageGovernor: deviceCapacity.storage,
         }).inspect(state.spec, new AbortController().signal);
-        return inspection.matches && !inspection.running;
+        const currentSuccessor = stopHost.kind === "managed" &&
+          stopHost.serviceId === host.serviceId &&
+          stopHost.definitionDigest === host.definitionDigest &&
+          stopHost.endpointLock?.pid === process.pid &&
+          isProcessAlive(process.pid);
+        return inspection.matches && (!inspection.running || currentSuccessor);
       } catch {
         return false;
       }
     },
   });
-  await stopCoordinator.resumeActive();
+  const stopResume = await stopCoordinator.resumeActive();
+  if (startupLifecycleOperation?.identity.kind === "stop") {
+    const operationId = startupLifecycleOperation.identity.operationId;
+    const terminal = stopResume.find((operation) =>
+      operation.identity.operationId === operationId && operation.phase === "terminal");
+    if (!terminal) {
+      throw new Error("Durable host-stop recovery did not prove the old host terminal");
+    }
+    await ctx.localConversationOwner?.releaseHostStopAdmission(operationId);
+    await ctx.deliveryStack?.releaseLifecycleAdmission(operationId);
+    await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+    if (!startupLifecycleFrozenRecoveryStarted) {
+      await recoverStartupLifecycleAcceptedWork(
+        startupLifecycle?.delivery.sources ?? [],
+      );
+    }
+    await recoverAdvancementAcceptedWork();
+    schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+    ctx.executorJobOwner?.resumeAccepting();
+    ctx.meshRuntime?.resumeAcceptingAfterLifecycle();
+    ctx.inboundRouter?.resumeNewMessages();
+    await ctx.channelConnections?.resumeConfigured();
+    ctx.localConversationOwner?.resumeRecoveryAfterLifecycle();
+    startupLifecycle = undefined;
+    delete ctx.startupLifecycle;
+    managedHostStopping = false;
+  }
   const removedShutdown = { current: undefined as undefined | (() => Promise<void>) };
   let localRetirementCompletedBeforeServerStart = false;
   const cleanupLocalDevice = async () => {
@@ -1851,7 +1904,7 @@ async function runServerProcess(
             ]);
           },
           onFrozen: async (snapshot) => {
-            const sources = deliveryLifecycleSources(snapshot);
+            const sources = hostStopDeliveryLifecycleSources(snapshot);
             await ctx.deliveryStack?.installLifecycleAdmission({
               operationId: snapshot.operationId,
               sources,
@@ -2463,15 +2516,6 @@ function assertAcceptedWorkSubset(
       throw new Error(`${label} observed an unowned or successor accepted-work item`);
     }
   }
-}
-
-function deliveryLifecycleSources(
-  snapshot: HostStopAcceptedWorkSnapshot,
-): readonly DeliveryLifecycleSourcePermit[] {
-  return deliveryLifecycleSourcesFromOwnerItems(
-    Object.entries(snapshot.owners).flatMap(([owner, items]) =>
-      items.map((item) => ({ owner, ...item }))),
-  );
 }
 
 function deliveryLifecycleSourcesFromOwnerItems(

@@ -1118,7 +1118,7 @@ export function inspectManagedHostAssembly(records) {
     !repl.includes('strategy: "drain"') ||
     !repl.includes("prepareManagedServiceTurnover: prepareCurrentManagedServiceConfigTurnover") ||
     !serverContext.includes("lifecycleShutdown?: LifecycleShutdownAdapter;") ||
-    !serverShutdown.includes("const prepared = await lifecycle.prepare({") ||
+    !serverShutdown.includes("return await lifecycle.prepare({") ||
     !serverShutdown.includes("queueMicrotask(() => trigger(`${reason}:${strategy}`));") ||
     !command.includes("const stopCoordinator = new HostStopCoordinator({") ||
     !command.includes("lifecycleShutdown: stopCoordinator,") ||
@@ -2049,7 +2049,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
     disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
     drainAccepted < quiesceDelivery ||
-    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 3 ||
+    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 4 ||
     count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 4 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||

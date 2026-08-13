@@ -76,6 +76,9 @@ import {
 } from "./managed-service.js";
 import {
   HostStopCoordinator,
+  hostStopAlreadySettled,
+  hostStopDeliveryLifecycleSources,
+  loadHostStopAcceptedWork,
   type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkOwner,
   type HostStopAcceptedWorkPorts,
@@ -107,10 +110,37 @@ export async function runExecutorRole(
     parseServerSpecs(startup.config.mcp, startup.credentials.mcp),
     { networkProxy: startup.config.network?.proxy },
   );
-  await mcpHub.connectAll();
   const writer = createStdoutWriter();
   const processStartedAt = new Date().toISOString();
   const processStartTime = await resolveProcessStartTime(process.pid);
+  const lifecycleLog = bootstrap.mesh.bootstrapStore.authorityLog();
+  const lifecycleHomeId = (await lifecycleLog.originCheckpoint()).logId;
+  const lifecycleJournal = new DeviceLifecycleJournal(lifecycleLog);
+  const startupStopOperations = (await lifecycleJournal.active()).filter((operation) =>
+    operation.identity.kind === "stop" &&
+    operation.identity.homeId === lifecycleHomeId &&
+    operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId);
+  if (startupStopOperations.length > 1) {
+    throw new Error("More than one host-stop operation owns executor startup admission");
+  }
+  const startupStopOperation = startupStopOperations[0];
+  const startupStopSnapshot = startupStopOperation?.evidence.some((item) =>
+    item.kind === "accepted-work" && item.artifact)
+    ? await loadHostStopAcceptedWork(
+        startupStopOperation,
+        bootstrap.mesh.bootstrapStore.artifactStore(),
+      )
+    : undefined;
+  const startupStopSources = startupStopSnapshot
+    ? hostStopDeliveryLifecycleSources(startupStopSnapshot)
+    : [];
+  // Startup stays closed until resumeActive() proves the old host terminal.
+  const startupStopRecoverAcceptedWork = false;
+  const startupStopAlreadySettled = startupStopOperation
+    ? hostStopAlreadySettled(startupStopOperation.phase)
+    : false;
+  let startupStopAcceptedWorkRecovered = startupStopRecoverAcceptedWork;
+  await mcpHub.connectAll();
 
   const initialAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
   let mesh: MeshRuntimeAssembly | undefined;
@@ -170,6 +200,14 @@ export async function runExecutorRole(
       storageMaintenance: deviceCapacity.storage,
       deviceCapacity: deviceCapacity.arbiter,
     });
+    if (startupStopOperation) {
+      await authority.authority.restoreLifecycleAdmission({
+        operationId: startupStopOperation.identity.operationId,
+        sources: startupStopSources,
+        deliveries: startupStopSnapshot?.owners.delivery ?? [],
+        sealed: startupStopAlreadySettled,
+      });
+    }
     if (!authority.workspaceBindingAdmin || !authority.workspaceBindingRecovery) {
       throw new Error("Local workspace management ports are unavailable");
     }
@@ -429,8 +467,22 @@ export async function runExecutorRole(
       jobOwnerAssembly,
       mesh,
     );
-    await jobOwnerLifecycle.start();
-    await localConversationOwner.start();
+    await jobOwnerLifecycle.start(startupStopOperation
+      ? {
+          admissionClosed: true,
+          recoverAcceptedWork: startupStopRecoverAcceptedWork,
+        }
+      : {});
+    await localConversationOwner.start(startupStopOperation
+      ? {
+          lifecycle: {
+            operationId: startupStopOperation.identity.operationId,
+            kind: "stop",
+            recoverAcceptedWork: startupStopRecoverAcceptedWork,
+            alreadySettled: startupStopAlreadySettled,
+          },
+        }
+      : {});
     const processMode = resolveHostProcessMode(options.managed);
     const localServerPort = options.port ?? homeToPort(zhixingHome);
     const managedState = processMode === "managed"
@@ -536,14 +588,32 @@ export async function runExecutorRole(
       lease: stopPort("lease"),
       permit: stopPort("permit"),
     };
-    const lifecycleLog = bootstrap.mesh.bootstrapStore.authorityLog();
     const stopCoordinator = new HostStopCoordinator({
       journal: new DeviceLifecycleJournal(lifecycleLog),
-      homeId: (await lifecycleLog.originCheckpoint()).logId,
+      homeId: lifecycleHomeId,
       localDeviceId: bootstrap.mesh.deviceKey.deviceId,
       host: stopHost,
       acceptedWork,
       artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+      onAcceptedWorkFrozen: async (snapshot) => {
+        const sources = hostStopDeliveryLifecycleSources(snapshot);
+        localConversationOwner!.restoreHostStopAcceptedWork(
+          snapshot.operationId,
+          Object.entries(snapshot.owners).flatMap(([owner, items]) =>
+            items.map((item) => ({ owner: owner as HostStopAcceptedWorkOwner, ...item }))),
+        );
+        await authority!.authority.installLifecycleAdmission({
+          operationId: snapshot.operationId,
+          sources,
+          deliveries: snapshot.owners.delivery,
+        });
+        if (!startupStopAcceptedWorkRecovered) {
+          await localConversationOwner!.recoverAcceptedWorkForLifecycle();
+          await jobOwnerAssembly!.recoverAcceptedWorkForLifecycle();
+          await mesh!.recoverAcceptedWorkForLifecycle();
+          startupStopAcceptedWorkRecovered = true;
+        }
+      },
       runtime: {
         closeAdmission: async (operationId) => {
           jobOwnerAssembly!.pauseAccepting();
@@ -570,7 +640,16 @@ export async function runExecutorRole(
         ),
       },
       isHostStopped: async (host) => {
-        if (host.kind === "foreground") return !isProcessAlive(host.processId);
+        const endpoint = host.endpointLock;
+        if (!endpoint) return false;
+        if (
+          endpoint.pid === endpointLock.pid &&
+          endpoint.port === endpointLock.port &&
+          endpoint.startTime === endpointLock.startTime &&
+          endpoint.startedAt === endpointLock.startedAt
+        ) return false;
+        if (isProcessAlive(endpoint.pid)) return false;
+        if (host.kind === "foreground") return host.processId === endpoint.pid;
         try {
           const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
           if (
@@ -581,13 +660,37 @@ export async function runExecutorRole(
           const inspection = await createManagedServiceAdapter({
             storageGovernor: deviceCapacity.storage,
           }).inspect(current.spec, new AbortController().signal);
-          return inspection.matches && !inspection.running;
+          const currentSuccessor = stopHost.kind === "managed" &&
+            stopHost.serviceId === host.serviceId &&
+            stopHost.definitionDigest === host.definitionDigest &&
+            stopHost.endpointLock?.pid === process.pid &&
+            isProcessAlive(process.pid);
+          return inspection.matches && (!inspection.running || currentSuccessor);
         } catch {
           return false;
         }
       },
     });
-    await stopCoordinator.resumeActive();
+    const stopResume = await stopCoordinator.resumeActive();
+    if (startupStopOperation) {
+      const operationId = startupStopOperation.identity.operationId;
+      const terminal = stopResume.find((operation) =>
+        operation.identity.operationId === operationId && operation.phase === "terminal");
+      if (!terminal) {
+        throw new Error("Durable executor host-stop recovery did not prove the old host terminal");
+      }
+      await localConversationOwner.releaseHostStopAdmission(operationId);
+      await authority.authority.releaseLifecycleAdmission(operationId);
+      if (!startupStopAcceptedWorkRecovered) {
+        await localConversationOwner.recoverAcceptedWorkForLifecycle();
+        await jobOwnerAssembly.recoverAcceptedWorkForLifecycle();
+        await mesh.recoverAcceptedWorkForLifecycle();
+        startupStopAcceptedWorkRecovered = true;
+      }
+      jobOwnerAssembly.resumeAccepting();
+      mesh.resumeAcceptingAfterLifecycle();
+      localConversationOwner.resumeRecoveryAfterLifecycle();
+    }
     const token = await loadOrCreateToken();
     const localConversationRpc = new LocalConversationRpcRouter({
       deviceId: authority.deviceId,

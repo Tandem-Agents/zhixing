@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   HOST_STOP_ACCEPTED_WORK_OWNERS,
   HostStopCoordinator,
+  hostStopAlreadySettled,
   type HostStopAcceptedWorkPorts,
   type HostStopRuntime,
 } from "./host-stop-lifecycle.js";
@@ -101,9 +102,135 @@ describe("HostStopCoordinator", () => {
       homeId: fixture.homeId,
     }))).resolves.toMatchObject({ phase: "terminal" });
   }, 120_000);
+
+  it.each([
+    ["accepted", false],
+    ["gate-closed", false],
+    ["work-settled", true],
+    ["flushed", true],
+    ["ready-to-stop", true],
+  ] as const)(
+    "projects durable %s settlement state",
+    (phase, alreadySettled) => {
+      expect(hostStopAlreadySettled(phase)).toBe(alreadySettled);
+    },
+  );
+
+  it("resumes an old-host gate-closed operation before terminalizing it", async () => {
+    const fixture = await createFixture({ failSettleOnce: true });
+    const request = {
+      requestId: "request-successor-gate-closed",
+      reason: "test",
+      strategy: "immediate" as const,
+      timeoutMs: 2_000,
+    };
+    await expect(fixture.coordinator.prepare(request)).rejects.toThrow("successor boundary");
+    await expect(fixture.journal.active()).resolves.toEqual([
+      expect.objectContaining({ phase: "gate-closed" }),
+    ]);
+
+    const successor = new HostStopCoordinator({
+      localDeviceId: "device-local",
+      journal: fixture.journal,
+      homeId: fixture.homeId,
+      host: {
+        kind: "foreground",
+        processId: 43,
+        startedAt: "2026-08-12T00:01:00.000Z",
+      },
+      runtime: fixture.runtime,
+      acceptedWork: fixture.acceptedWork,
+      artifactStore: fixture.artifacts,
+      isHostStopped: async () => true,
+    });
+    const [result] = await successor.resumeActive();
+    expect(result?.phase).toBe("terminal");
+    expect(fixture.order.filter((item) => item === "close")).toHaveLength(1);
+    expect(fixture.order).toContain("settle:conversation:immediate");
+    expect(fixture.order.slice(-2)).toEqual(["flush", "physical"]);
+  }, 120_000);
+
+  it("keeps every owner effect closed when old-host proof is unavailable", async () => {
+    const fixture = await createFixture({ failSettleOnce: true });
+    const request = {
+      requestId: "request-unproven-old-host",
+      reason: "test",
+      strategy: "drain" as const,
+      timeoutMs: 2_000,
+    };
+    await expect(fixture.coordinator.prepare(request)).rejects.toThrow("successor boundary");
+    const completed = [...fixture.order];
+    const successor = new HostStopCoordinator({
+      localDeviceId: "device-local",
+      journal: fixture.journal,
+      homeId: fixture.homeId,
+      host: {
+        kind: "foreground",
+        processId: 44,
+        startedAt: "2026-08-12T00:02:00.000Z",
+      },
+      runtime: fixture.runtime,
+      acceptedWork: fixture.acceptedWork,
+      artifactStore: fixture.artifacts,
+      isHostStopped: async () => false,
+    });
+    await expect(successor.resumeActive()).resolves.toEqual([]);
+    expect(fixture.order).toEqual(completed);
+    await expect(fixture.journal.state(protocolDigest("HostStopOperation", 1, {
+      requestId: request.requestId,
+      homeId: fixture.homeId,
+    }))).resolves.toMatchObject({ phase: "gate-closed" });
+  }, 120_000);
+
+  it.each([
+    ["work-settled", { failFlushOnce: true }],
+    ["flushed", { failPhysicalOnce: true }],
+  ] as const)(
+    "successor resumes %s without repeating settlement or prior phases",
+    async (phase, options) => {
+      const fixture = await createFixture(options);
+      const request = {
+        requestId: `request-successor-${phase}`,
+        reason: "test",
+        strategy: "immediate" as const,
+        timeoutMs: 2_000,
+      };
+      await expect(fixture.coordinator.prepare(request)).rejects.toThrow();
+      await expect(fixture.journal.active()).resolves.toEqual([
+        expect.objectContaining({ phase }),
+      ]);
+      const settledBefore = fixture.order.filter((item) => item.startsWith("settle:")).length;
+      const successor = new HostStopCoordinator({
+        localDeviceId: "device-local",
+        journal: fixture.journal,
+        homeId: fixture.homeId,
+        host: {
+          kind: "foreground",
+          processId: 45,
+          startedAt: "2026-08-12T00:03:00.000Z",
+        },
+        runtime: fixture.runtime,
+        acceptedWork: fixture.acceptedWork,
+        artifactStore: fixture.artifacts,
+        isHostStopped: async () => true,
+      });
+      await expect(successor.resumeActive()).resolves.toEqual([
+        expect.objectContaining({ phase: "terminal" }),
+      ]);
+      expect(fixture.order.filter((item) => item.startsWith("settle:"))).toHaveLength(
+        settledBefore,
+      );
+      expect(fixture.order.filter((item) => item === "close")).toHaveLength(1);
+    },
+    120_000,
+  );
 });
 
-async function createFixture(options: { failFlushOnce?: boolean } = {}) {
+async function createFixture(options: {
+  failFlushOnce?: boolean;
+  failSettleOnce?: boolean;
+  failPhysicalOnce?: boolean;
+} = {}) {
   const root = await createTempDir("host-stop-lifecycle");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
@@ -113,6 +240,7 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
   const order: string[] = [];
   const settled = new Map<string, unknown>();
   const readBack = new Map<string, unknown>();
+  let failSettle = options.failSettleOnce ?? false;
   const acceptedWork = Object.fromEntries(HOST_STOP_ACCEPTED_WORK_OWNERS.map((owner) => [owner, {
     freeze: async () => [{ id: `${owner}:item`, revision: `${owner}:revision` }],
     settle: async (input: {
@@ -120,6 +248,10 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
       readonly strategy: "immediate" | "drain" | "cancel";
       readonly frozen: readonly { readonly id: string; readonly revision: string }[];
     }) => {
+      if (owner === "conversation" && failSettle) {
+        failSettle = false;
+        throw new Error("successor boundary");
+      }
       order.push(`settle:${owner}:${input.strategy}`);
       settled.set(owner, { operationId: input.operationId, frozen: input.frozen });
     },
@@ -132,6 +264,7 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
     },
   }])) as unknown as HostStopAcceptedWorkPorts;
   let failFlush = options.failFlushOnce ?? false;
+  let failPhysical = options.failPhysicalOnce ?? false;
   const runtime: HostStopRuntime = {
     closeAdmission: vi.fn(async () => { order.push("close"); }),
     settleImmediate: vi.fn(async () => { order.push("immediate"); }),
@@ -146,7 +279,13 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
       const checkpoint = await log.checkpoint();
       return [{ kind: "accepted-work" as const, digest: checkpoint.prefixDigest }];
     }),
-    settlePhysicalSteps: vi.fn(async () => { order.push("physical"); }),
+    settlePhysicalSteps: vi.fn(async () => {
+      order.push("physical");
+      if (failPhysical) {
+        failPhysical = false;
+        throw new Error("physical response lost");
+      }
+    }),
   };
   const homeId = (await log.originCheckpoint()).logId;
   return {
@@ -156,6 +295,8 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
     runtime,
     homeId,
     journal,
+    artifacts,
+    acceptedWork,
     coordinator: new HostStopCoordinator({
       localDeviceId: "device-local",
       journal,

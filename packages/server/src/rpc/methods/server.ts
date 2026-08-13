@@ -96,6 +96,7 @@ export function buildServerShutdownMethod(): MethodEntry {
       if (!isProtocolIdentifier(p.requestId)) {
         throw RpcErrors.invalidParams("server.shutdown requires a stable requestId");
       }
+      const requestId = p.requestId;
       const reason = hasReason ? stableText(p.reason, "server.shutdown reason") : "rpc.server.shutdown";
       const timeoutMs = hasTimeout ? shutdownTimeoutMs(p.timeoutMs) : 30_000;
       const strategy = normalizeShutdownStrategy(p.strategy);
@@ -108,12 +109,23 @@ export function buildServerShutdownMethod(): MethodEntry {
         throw RpcErrors.internal("server shutdown not wired yet");
       }
 
-      const prepared = await lifecycle.prepare({
-        requestId: p.requestId,
-        reason,
-        strategy,
-        timeoutMs,
-      });
+      const prepared = await (async () => {
+        try {
+          return await lifecycle.prepare({
+            requestId,
+            reason,
+            strategy,
+            timeoutMs,
+          });
+        } catch (error) {
+          if (error instanceof RpcAppError) throw error;
+          throw new RpcAppError(
+            RPC_ERROR_CODES.INTERNAL_ERROR,
+            "安全停机未完成",
+            { action: "retry-same-request" },
+          );
+        }
+      })();
       queueMicrotask(() => trigger(`${reason}:${strategy}`));
 
       return {
